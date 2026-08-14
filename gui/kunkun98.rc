@@ -1,0 +1,84 @@
+/* Resources for kunkun98.
+ *
+ * Compiled by windres (gcc build) and wrc (Watcom build). Paths are
+ * relative to the repository root, which is where both builds run from.
+ *
+ * NO string table here. Every user-visible string lives in
+ * gui/localized_strings.c so that one table is the whole surface -
+ * splitting it between a .rc and a .c would mean two places to look and
+ * two places for a translation to go missing, and the .rc half would be
+ * outside tests/test_localized_strings.py entirely.
+ */
+#include "resource.h"
+
+/* The application icon. assets/README.md has the provenance; it carries
+ * 16, 32 and 48 pixel images, which is what Win9x asks for (small icon,
+ * large icon, and the Alt-Tab size on later systems). */
+IDI_APP     ICON    "assets/kunkun98-photo-256.ico"
+
+/* The startup splash: 492x283, 8bpp, and its palette is the Win9x
+ * standard one - the 20 system colours plus the 6x6x6 halftone cube -
+ * because build/watcom/make_splash.py quantised it that way. That is
+ * what lets the code use LoadBitmap and BitBlt with no palette
+ * realisation at all: on a 256-colour desktop every colour it needs is
+ * already in the system palette. A splash quantised to its own optimal
+ * palette would need SelectPalette/RealizePalette and would still flash
+ * when another window took the foreground. */
+IDB_SPLASH  BITMAP  "assets/splash-256.bmp"
+
+/* The sidebar chicken: 48x48 8bpp, quantised to the Win9x standard
+ * palette (build/watcom/make_side_chicken.py) so a 256-colour desktop
+ * needs no palette realisation. It was 112x112 until 2026-08-14, when
+ * it dropped to the ICQ-style avatar size - 112 read as a poster, not
+ * an instant messenger. */
+IDB_CHICKEN BITMAP  "assets/kunkun98-photo-256-side.bmp"
+
+/* The About dialog's logo column: a 68x191 crop of the splash backdrop
+ * (field + ghosted photo, no 3D rooster), dithered to the Win9x 256
+ * palette. Replaces the 48x48 icon placeholder that stood there. */
+IDB_ABOUT_LOGO BITMAP "assets/kunkun98-about-logo-256.bmp"
+
+/* Status-bar lamps, WinZip's twin-lamp idiom: left = model state,
+ * right = activity. 16x16 8bpp, flat four-tone beads in the Win9x
+ * standard palette - see build/watcom/make_lamps.py for why the
+ * reference's glassy gradient does not survive the target. */
+IDB_LAMP_OFF   BITMAP "assets/lamp-off.bmp"
+IDB_LAMP_READY BITMAP "assets/lamp-ready.bmp"
+IDB_LAMP_BUSY  BITMAP "assets/lamp-busy.bmp"
+IDB_LAMP_ERROR BITMAP "assets/lamp-error.bmp"
+
+/* No tool bar bitmap here on purpose. The glyphs come from comctl32 at
+ * run time (TB_ADDBITMAP with HINST_COMMCTRL / IDB_STD_SMALL_COLOR, see
+ * gui/toolbar.h): on Windows 98 those ARE the period icons, because
+ * they come out of the operating system, and nothing has to be stored
+ * or redistributed to get them. */
+
+/* Keyboard accelerators. Win9x programs had these and this one did not,
+ * which together with the missing menu mnemonics meant the front end
+ * could not be driven from the keyboard at all.
+ *
+ * Only commands that APPEAR IN A MENU are listed. An accelerator with no
+ * visible menu entry is a secret, and the menu text (the "\tCtrl+O" tail
+ * in gui/localized_strings.c) is the only place a user finds out it
+ * exists - which is also why the two have to agree, and why
+ * tests/test_gui_menu.py checks that they do.
+ *
+ * About had F1 and does not any more: F1 is Help, and a program with no
+ * help file answering it with a version box is the kind of near-miss
+ * that teaches people not to press it. */
+IDR_ACCEL ACCELERATORS
+BEGIN
+    "^O",  IDM_OPEN_MODEL, ASCII
+    "^S",  IDM_SAVE_CHAT,  ASCII
+    "^C",  IDM_COPY,       ASCII
+    "^A",  IDM_SELECT_ALL, ASCII
+    VK_ESCAPE, IDM_STOP_GEN, VIRTKEY
+    "^N",      IDM_CLEAR,    ASCII
+    "^F",      IDM_FIND,     ASCII
+END
+
+/* Application manifest (gui-draft section 10). Windows 98 has no
+ * side-by-side loader and ignores it; XP and later read it and hand the
+ * common controls their themed versions. That is the whole intent -
+ * "passive theming": the program itself never calls uxtheme. */
+1 24 "gui/kunkun98.manifest"

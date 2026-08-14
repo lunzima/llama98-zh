@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!-- processorArchitecture is "*" and must stay that way. Written as
+     "x86" - correct for the 32-bit deliverable - the development build,
+     which is x86-64, refuses to START: the side-by-side loader rejects
+     the image with STATUS_INVALID_IMAGE_FORMAT (0xC000007B), an error
+     that names neither the manifest nor the architecture. Windows 98
+     has no SxS loader and ignores the whole file either way. -->
+
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity
+      version="0.1.0.0"
+      processorArchitecture="*"
+      name="Lunzima.kunkun98"
+      type="win32"/>
+  <description>kunkun98</description>
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+          type="win32"
+          name="Microsoft.Windows.Common-Controls"
+          version="6.0.0.0"
+          processorArchitecture="*"
+          publicKeyToken="6595b64144ccf1df"
+          language="*"/>
+    </dependentAssembly>
+  </dependency>
+</assembly>

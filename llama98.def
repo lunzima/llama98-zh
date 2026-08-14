@@ -1,0 +1,160 @@
+; llama98.dll export surface (Watcom .def).
+; List only currently-implemented public symbols plus CLI-only exceptions;
+; append when a new API lands.
+LIBRARY llama98
+EXPORTS
+  ; 3.1 model and weights
+  lz_load_config
+  lz_open
+  lz_read_weights
+  lz_free
+  lz_t_row_f32
+  lz_t_free
+  ; 3.2 run state
+  lz_state_alloc
+  lz_state_free
+  lz_state_reset
+  ; Recurrent-state checkpoints (cross-turn conversation-prefix reuse).
+  lz_ckpt_alloc
+  lz_ckpt_free
+  lz_ckpt_save
+  lz_ckpt_restore
+  ; 3.3 tokenizer
+  lz_tokenizer_load
+  lz_tokenizer_free
+  lz_tokenizer_find
+  lz_tokenizer_vocab_size
+  lz_tokenizer_n_special
+  lz_tokenizer_n_merges
+  lz_encode
+  lz_decode
+  lz_decode_into
+  ; 3.4 sampling
+  lz_sample_defaults
+  lz_sample_defaults_think
+  lz_sampler_init
+  lz_sampler_free
+  lz_sampler_reset
+  lz_sampler_observe
+  lz_sample_argmax
+  lz_argmax_p1
+  ; 3.5 generation and chat
+  lz_gen_opts_defaults
+  lz_gen_opts_set_eos
+  lz_generate
+  lz_generate_resume
+  ; Speculative-decode acceptance test. Exported so ctypes gates can
+  ; call it directly.
+  lz_spec_accept
+  ; temp>0 speculative decoding phase 2: the coupled accept/residual-
+  ; resample test, exported so ctypes gates can exercise it standalone.
+  lz_spec_accept_temp
+  ; Speculative decode: MTP draft-head forward + batch verify + one
+  ; draft-verify-rollback round. Exported so ctypes gates can call each
+  ; step alone, as with lz_spec_accept.
+  lz_forward_capture
+  lz_mtp_draft_step
+  lz_forward_verify
+  lz_spec_round
+  ; MTP prompt prefill: populate the MTP block's own KV cache from the
+  ; body's prefill hidden states, before the first round.
+  lz_forward_batch_capture
+  lz_mtp_prefill
+  ; Catch-up decode: re-decode an accepted draft span's MTP rows with
+  ; the target's own verified hidden states. Thin wrapper around
+  ; lz_mtp_prefill - exported so a ctypes gate can call it directly.
+  lz_mtp_catchup
+  ; Cross-turn prefix reuse (checkpoint + token-sequence match).
+  lz_prefix_init
+  lz_prefix_free
+  lz_prefix_reset
+  lz_prefix_prepare
+  lz_prefix_stats
+  lz_chat_buf_init
+  lz_chat_buf_free
+  lz_chat_render
+  lz_chat_gen_prompt_tail
+  lz_chat_norm_history
+  lz_chat_hist_init
+  lz_chat_hist_reset
+  lz_chat_hist_free
+  lz_chat_hist_push
+  ; 3.7 errors and Unicode
+  lz_set_error_lang
+  lz_utf8_decode
+  lz_utf8_encode
+  lz_utf8_nfc
+  lz_uni_is_letter
+  lz_uni_is_mark
+  lz_uni_is_number
+  lz_uni_is_space
+  lz_uni_ccc
+  ; 3.7.1 GBK transcoding (Win9x has no CP_UTF8, so the front end ships
+  ; its own).
+  lz_gbk_from_utf8
+  lz_gbk_to_utf8
+  ; 3.7.2 CPU floor (Socket 7) - the front end asks before creating a
+  ; window.
+  lz_cpu_check
+  lz_cpu_check_bits
+  lz_cpu_features
+  ; CLI-only exceptions
+  lz_forward
+  lz_layer_type_name
+  lz_init_stdout
+  lz_time_ms
+  lz_st_dtype_name
+  ; CLI-referenced selectors that must be exported for the DLL form.
+  lz_prefetch_select
+  lz_read_file
+  ; MTP/speculative-sampling debug probes (defined in forward.c and
+  ; generate.c, referenced by cli_main.c). Must be exported explicitly
+  ; in the DLL form (local: * swallows them). These are data symbols
+  ; (float/long long globals): Watcom 32-bit OMF names data with a
+  ; LEADING underscore (functions with a trailing one), so
+  ; gen_exports.py maps them as export name=_name.
+  lz_debug_mtp_attn_scale   ; data
+  lz_debug_mtp_attn_window  ; data
+  lz_debug_mtp_attn_rows    ; data
+  lz_debug_us_draft         ; data
+  lz_debug_us_verify        ; data
+  lz_debug_us_capture       ; data
+  lz_debug_us_catchup       ; data
+  lz_debug_n_capture        ; data
+  lz_debug_n_catchup        ; data
+  lz_debug_n_ring_rollback  ; data
+  ; Engine knobs and selectors for --kv/--attn/--moe/--prof/--gdn/
+  ; --pair/--kernel. Function symbols are written bare; data symbols
+  ; carry ; data.
+  lz_kv_kfmt               ; data
+  lz_kv_vfmt               ; data
+  lz_kv_rot_enable         ; data
+  lz_attn_sink             ; data
+  lz_attn_window           ; data
+  lz_moe_topk              ; data
+  lz_moe_tau               ; data
+  lz_prof_enable           ; data
+  lz_prof_us               ; data
+  lz_gdn_mode
+  lz_gdn_p2_mode
+  lz_gdn_p2_select
+  lz_gdn_p2_impl
+  lz_gdn_p2_is_auto
+  lz_pair_mode
+  lz_pair_select
+  lz_kernel_select
+  lz_kernel_name
+  lz_kernel_tier
+  lz_build_paths
+  ; Debug probes (chunk/lmhead/kv-rot/attn-skip counts, same family as
+  ; the MTP probes above).
+  lz_debug_n_chunks        ; data
+  lz_debug_n_lmhead        ; data
+  lz_debug_n_kv_rot        ; data
+  lz_debug_attn_skip       ; data
+  ; Error formatting (cli_main.c calls it directly, not only through
+  ; err.h's macros).
+  lz_err_fmt
+  ; The inspector-variant generation entry the LZSession core
+  ; (common/session.c) uses; lz_generate_resume IS _ex(..., NULL).
+  lz_generate_resume_ex

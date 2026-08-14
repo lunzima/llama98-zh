@@ -1,0 +1,18 @@
+diff --git a/src/dos32a/dos32a.asm b/src/dos32a/dos32a.asm
+index 34792f4..eba2187 100644
+--- a/src/dos32a/dos32a.asm
++++ b/src/dos32a/dos32a.asm
+@@ -102,7 +102,12 @@ db	00111111b	; DOS/32A misc. bits:
+ 			;   bit 6: 0=cls on exception off, 1=on		/0=def
+ 			;   bit 7: 0=null-ptr protect off, 1=on		/0=def
+ If EXEC_TYPE eq 0
+-db	00001001b	; DOS/32A Pro second misc. bits
++db	00000001b	; DOS/32A Pro second misc. bits
++			;   (MODIFIED for llama98-zh: bit 3 cleared - the
++			;    startup copyright banner is suppressed. The
++			;    acknowledgment is printed by llama98's own
++			;    --help output instead, satisfying license
++			;    condition 3 "in the software itself".)
+ Else
+ db	10001001b	; DOS/32A Beta second misc. bits
+ Endif
