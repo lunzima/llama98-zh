@@ -211,6 +211,18 @@
 #define LZ_BF_RECT         BF_RECT
 #endif
 
+/* Gradient caption colours - a 4.0-era addition the 3.51 headers do
+ * not name. Constants, which this header may supply (a hidden FUNCTION
+ * prototype is the thing it must not); GetSysColor answers 0 for an
+ * index the running system does not know, which is what callers test. */
+#ifndef COLOR_GRADIENTACTIVECAPTION
+#define LZ_COLOR_GRAD_ACTIVE   27
+#define LZ_COLOR_GRAD_INACTIVE 28
+#else
+#define LZ_COLOR_GRAD_ACTIVE   COLOR_GRADIENTACTIVECAPTION
+#define LZ_COLOR_GRAD_INACTIVE COLOR_GRADIENTINACTIVECAPTION
+#endif
+
 /* ---- run-time capability ---- */
 
 /* Major version of the running system: 3 on NT 3.51, 4 on 95/98/ME/NT4.
@@ -232,6 +244,35 @@ HKL lz_kbd_layout_get(void);
 
 /* 1 when the 4.0 window furniture is available. */
 int lz_os_has_40(void);
+
+/* ---- forced downgrade, for looking at the 3.51 path on a host ----
+ *
+ * Makes every APPEARANCE capability here answer the way NT 3.51 does, on
+ * any system. Off unless turned on; gui/main.c reads kunkun98.ini's
+ * `classic_ui` at startup. The degraded window's appearance cannot be
+ * judged without being looked at, and the floor's hardware is not on the
+ * desk.
+ *
+ * Forces, and nothing else:
+ *   lz_os_has_40()        0
+ *   lz_statusbar_class()  NULL, so the status bar takes its fallback
+ *                         (which also removes the toolbar)
+ *   lz_draw_edge()        draws nothing
+ *   the file dialogs      3.1 style, and lz_pick_folder skips
+ *                         SHBrowseForFolder for its fallback branch
+ *   lz_richedit_class()   riched32 ("RichEdit", 1.0), the floor's own
+ *
+ * The RichEdit class is the one FUNCTIONAL capability forced, because
+ * the transcript is where the floor's differences actually show and
+ * every message this front end sends exists in 1.0 (see that function's
+ * own declaration below). The IME is left alone: it changes behaviour
+ * rather than appearance, and an observation made through a knob that
+ * changed behaviour says nothing about this program.
+ *
+ * Reproduces the ANSWERS, not the system: a 3.51 comdlg32 is still a
+ * different binary, and only the machine settles what it does. */
+void lz_compat_force_classic(int on);
+int  lz_compat_classic(void);
 
 /* DrawEdge, resolved from user32 at run time. Returns 0 and draws
  * nothing when the system does not have it (NT 3.51), which is the
@@ -348,6 +389,18 @@ const char *lz_statusbar_class(void);
  * bits are ignored in practice, but "in practice" is not a thing to
  * build on when the alternative is one AND. */
 DWORD lz_ex_style(DWORD want);
+
+/* The progress-bar class name, or NULL where comctl32 has none (the
+ * 3.51 floor, and any host under classic_ui). Registered by the same
+ * InitCommonControlsEx call the status bar uses, so asking for one
+ * implies the other is available too.
+ * PBM_SETRANGE/PBM_SETPOS are commctrl messages the 3.51 headers hide;
+ * the values are stable and named LZ_* here for the same reason
+ * LZ_SB_SETTEXT is - compat40.c compiles at the 4.0 level where
+ * commctrl.h already defines the real names. */
+const char *lz_progress_class(void);
+#define LZ_PBM_SETRANGE (WM_USER + 1)
+#define LZ_PBM_SETPOS   (WM_USER + 2)
 
 /* Register/locate a rich edit control and return its class name.
  * riched20 ("RichEdit20A") when present, else riched32 ("RichEdit",

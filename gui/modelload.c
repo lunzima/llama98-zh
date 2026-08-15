@@ -10,22 +10,18 @@
 #include <string.h>
 
 #include "err.h"
+#include "lfn.h"
 #include "modelload.h"
 
 int lz_gui_model_dir_ok(const char *dir) {
-    char path[600];
-    FILE *f;
     if (!dir || !dir[0]) return 0;
-    /* Forward slash: src/model.c builds the same path the same way, and
-       Win32 accepts it everywhere a backslash works. Matching that file
-       byte for byte matters more than matching the platform's habits -
-       if the two ever disagree, the pre-check passes and the load
-       fails. */
-    sprintf(path, "%.500s/model.bin", dir);
-    f = fopen(path, "rb");
-    if (!f) return 0;
-    fclose(f);
-    return 1;
+    /* The same resolver lz_open's own probe uses, so the pre-check and
+       the loader agree by construction. Two identical sprintf calls do
+       not: they still disagree the moment the volume cannot store the
+       long name, since "identical" was only ever about the format
+       string. A pre-check that passes where the load fails is the one
+       failure this function exists to prevent. */
+    return lz_lfn_exists(dir, "model.bin");
 }
 
 int lz_gui_state_alloc_fail = 0;
@@ -141,7 +137,10 @@ int lz_gui_model_load_job(void *ud, LZTokenSink sink, LZShouldContinue cont,
     rc = lz_read_weights(&m->model, errbuf, errlen);
     if (rc != 0) { lz_gui_model_unload(m); return rc; }
 
-    sprintf(tokpath, "%.500s/tokenizer.json", m->dir);
+    /* Resolved, not appended - see src/lfn.h. */
+    rc = lz_lfn_path(m->dir, "tokenizer.json", tokpath, (int)sizeof tokpath,
+                     errbuf, errlen);
+    if (rc != 0) { lz_gui_model_unload(m); return rc; }
     rc = lz_tokenizer_load(&m->tok, tokpath, errbuf, errlen);
     if (rc != 0) { lz_gui_model_unload(m); return rc; }
     m->have_tok = 1;

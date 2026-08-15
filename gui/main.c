@@ -111,6 +111,7 @@ enum {
     ID_SIDE_NAME,
     ID_LAMP0,
     ID_LAMP1,
+    ID_PROGRESS,
     /* Inference inspector, part one. ID_ELAMP0 ..
        ID_ELAMP0+15 are the 16 expert lamps, contiguous and not
        individually named - the same shape ID_LAMP0/ID_LAMP1 use for
@@ -161,6 +162,11 @@ enum { LZ_LAMP_OFF = 0, LZ_LAMP_READY, LZ_LAMP_BUSY, LZ_LAMP_ERROR,
  * makes it a control rather than only a tuning value - the selftest
  * drives both settings. */
 #define LZ_TOK_TIMER    2
+/* The debug ramp's own timer. LZ_LAMP_TIMER is started by start_job
+   and killed by finish_job, so it ticks only WHILE a job runs - and the
+   ramp runs only when one does not. */
+#define LZ_DBG_TIMER    3
+#define LZ_DBG_TICK_MS  100
 #define LZ_TOK_MS       100      /* default tick */
 #define LZ_TOK_MS_MAX   2000     /* an ini typo must not freeze the view */
 #define LZ_TOK_BUF      4096
@@ -198,6 +204,8 @@ static struct {
      * flicker. */
     int  input_h;
     HWND lamp[2];
+    HWND progress;          /* prefill indicator, comctl32 only */
+    int  progress_untheme;  /* did SetWindowTheme report success */
     HBITMAP lamp_bmp[LZ_LAMP_KINDS];
     int  lamp_phase;            /* activity lamp: 0 lit, 1 dark */
     /* Inference inspector, part one. elamp[16]: NULL
@@ -649,6 +657,14 @@ static LRESULT CALLBACK sb_bevel_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (dc) {
             RECT pr;
             int i;
+            /* Parts 0 and 1 only. Part 2 is the prefill indicator's
+               segment and the CONTROL sitting in it draws its own well -
+               bevelling the part as well put a second frame around the
+               first. Part 3 holds the lamps and gets none either; the
+               point of its SBT_NOBORDERS is that they are NOT in a well.
+               The simulated strip draws part 2's well itself for the
+               same reason in reverse: there is no control there to do
+               it. */
             for (i = 0; i < 2; i++)
                 if (SendMessage(h, LZ_SB_GETRECT, (WPARAM)i, (LPARAM)&pr))
                     lz_draw_edge(dc, &pr, LZ_BDR_SUNKENOUTER, LZ_BF_RECT);
@@ -669,7 +685,13 @@ static void sb_text(int part, const char *s) {
     HWND h = g.part[LZ_GUI_STATUS];
     if (part < 0 || part > 2) return;
     lstrcpynA(g_sb_cache[part], s ? s : "", (int)sizeof g_sb_cache[part]);
-    if (!h || !g.status_is_sbar) return;
+    if (!h) return;
+    if (!g.status_is_sbar) {
+        /* The fallback strip paints from this cache, so a write to it is
+           what makes the cell change - there is no control to tell. */
+        InvalidateRect(h, NULL, FALSE);
+        return;
+    }
     SendMessage(h, LZ_SB_SETTEXT,
                 (WPARAM)(part | LZ_SBT_NOBORDERS),
                 (LPARAM)g_sb_cache[part]);
@@ -693,10 +715,369 @@ static void sb_reflag(void) {
     HWND h = g.part[LZ_GUI_STATUS];
     int i;
     if (!h || !g.status_is_sbar) return;
-    for (i = 0; i < 3; i++)
+    /* All FOUR parts: SB_SETPARTS clears every part's flags, and a part
+       left unflagged gets the control's own border back beside the
+       hand-drawn bevels. Parts 2 and 3 carry no text of their own - the
+       indicator and the lamps are drawn into them - so they are flagged
+       with an empty string rather than skipped. */
+    for (i = 0; i < 4; i++)
         SendMessage(h, LZ_SB_SETTEXT,
                     (WPARAM)(i | LZ_SBT_NOBORDERS),
-                    (LPARAM)g_sb_cache[i]);
+                    (LPARAM)(i < 3 ? g_sb_cache[i] : ""));
+}
+
+/* ---------------------------------------------- the fallback strip
+ *
+ * What the status bar is where comctl32 is not: NT 3.51, and any host
+ * running with classic_ui (gui/compat40.h). A plain STATIC was the old
+ * answer and it lost the two extra cells, the lamps and the panel
+ * bevels; this draws them.
+ *
+ * The part BOUNDARIES are not computed here. relayout computes them once
+ * for both strips and leaves them in g_sb_p0/g_sb_p1, so the simulated
+ * bar and comctl32's cannot disagree about where a cell begins - which
+ * is also what makes the two comparable pixel for pixel.
+ *
+ * Bevels are drawn by hand rather than through lz_draw_edge: that
+ * degrades to drawing NOTHING on the floor (compat40.h), which is
+ * exactly the system this strip exists for. COLOR_BTNSHADOW and
+ * COLOR_BTNHIGHLIGHT are Win3.x-era and present everywhere. */
+#define LZ_SBCLASS "Kunkun98Status"
+static int g_sb_p0, g_sb_p1;        /* right edge of part 0, of part 1 */
+/* A custom class answers WM_SETFONT/WM_GETFONT itself or it has no font
+   at all: DefWindowProc stores nothing, WM_GETFONT then returns 0, and
+   status_state_w - which measures part 0's text through exactly that
+   message - sizes the cell with the system default instead of the UI
+   font. That put the simulated bar's first boundary 11 pixels off
+   comctl32's, which the strip comparison is what caught. */
+static HFONT g_sb_font;
+/* comctl32's own cell metrics, measured through the strip comparison:
+   the gap before a cell's left edge, and the face rows above the cells. */
+#define LZ_SB_GAP 2
+#define LZ_SB_TOP 2
+/* The prefill indicator's own width. It is a SHORT bar sitting between
+   the context cell and the lamps, not a fill of the whole cell - the
+   context reading stays visible while a prefill runs, and a status bar
+   whose middle turns into one long bar reads as a modal progress dialog
+   rather than as an indicator. */
+/* Sized so the well holds a WHOLE number of chunks and nothing over.
+   A chunk is 8 wide with a 2-wide gap after it, but the last one needs
+   no trailing gap, so an exact fit is 10n - 2 of inner width. Nine
+   chunks is 88, and 88 plus the inset on each side is 94.
+   Picked that way rather than round, because a well two pixels wider
+   than its content leaves a sliver that reads as a rendering fault. */
+#define LZ_PROG_W  94
+/* How far the chunks sit inside the segment. Three, from the v5
+   control's own client area: 14 pixels tall, which is the 20-pixel
+   segment less three a side. The number describes the CHUNKS - what
+   the comctl32 control does inside its own window is its business. */
+#define LZ_PROG_INSET 3
+
+/* Prefill progress: written by the ENGINE on the worker thread through
+   LZGenOpts.on_prefill, read by a timer on the UI thread. Two plain
+   ints, because the handler must not touch a control - worker.h's rule
+   for the token path applies here too - so it records and the tick
+   draws. A tick that catches one field from the previous slice and one
+   from the next is a frame stale, which the tick-based display already
+   accepts everywhere else. */
+static int g_pf_done, g_pf_total;
+
+/* `debug_prefill_ms` in kunkun98.ini: loop a fake prefill of that many
+ * milliseconds, so the indicator can be looked at.
+ *
+ * A real prefill finishes well inside one refresh tick on any prompt
+ * short enough to type, so it is gone before it has been drawn twice.
+ * Front-end only: it drives the same two counters the engine's callback
+ * writes and changes nothing below the GUI, so what it exercises is the
+ * paint path itself and it needs no model. 0 (default) is off. */
+static int   g_dbg_prefill_ms;
+static double g_dbg_prefill_t0;
+
+/* 4.0-era, hidden at the 3.51 floor. Value is fixed by the ABI, same
+   argument gui/captionwnd.c makes for the constants it spells out. */
+#ifndef DT_END_ELLIPSIS
+#define DT_END_ELLIPSIS 0x00008000
+#endif
+
+/* GetSysColorBrush is a 4.0 EXPORT and the floor does not have it - the
+   Watcom build reports it as an implicit int-returning function, which
+   is the shape this project's -we floor exists to catch. GetSysColor and
+   CreateSolidBrush are both Win3.x. Cached for the life of the process,
+   the way the system's own brushes are, so no caller has to track
+   ownership; the set is small and fixed. */
+/* One cached brush per system colour this strip paints with, keyed by
+   INDEX rather than by a chain of comparisons with a default arm - a
+   default arm aliases an unlisted index onto whatever sits in the last
+   slot. An index with no slot gets no brush, so a mistake shows up as
+   nothing drawn rather than as the wrong thing drawn. */
+static const int LZ_SB_COLORS[] = {
+    COLOR_BTNSHADOW, COLOR_BTNHIGHLIGHT, COLOR_BTNFACE, COLOR_HIGHLIGHT
+};
+#define LZ_SB_NCOLORS ((int)(sizeof LZ_SB_COLORS / sizeof LZ_SB_COLORS[0]))
+static HBRUSH g_sb_br[LZ_SB_NCOLORS];
+
+static HBRUSH sb_brush(int idx) {
+    int k;
+    for (k = 0; k < LZ_SB_NCOLORS; k++)
+        if (LZ_SB_COLORS[k] == idx) break;
+    if (k == LZ_SB_NCOLORS) return NULL;
+    if (!g_sb_br[k]) g_sb_br[k] = CreateSolidBrush(GetSysColor(idx));
+    return g_sb_br[k];
+}
+
+/* Drop the cache so the next paint asks the system again.
+ *
+ * The colours were never literals - they come from GetSysColor - but a
+ * brush cached for the life of the process freezes whatever the scheme
+ * was at startup, which is the same thing as hardcoding it one step
+ * later. The strip has to follow a scheme change, and the only moment
+ * it can learn of one is WM_SYSCOLORCHANGE. */
+static void lamps_reload(void);
+
+static void sb_brush_reset(void) {
+    int i;
+    for (i = 0; i < LZ_SB_NCOLORS; i++) {
+        if (g_sb_br[i]) { DeleteObject(g_sb_br[i]); g_sb_br[i] = NULL; }
+    }
+}
+
+/* One sunken cell, BDR_SUNKENOUTER's shape: shadow along the top and
+   left, highlight along the bottom and right. */
+static void sb_sink(HDC dc, int x0, int y0, int x1, int y1) {
+    RECT e;
+    HBRUSH sh = sb_brush(COLOR_BTNSHADOW);
+    HBRUSH hi = sb_brush(COLOR_BTNHIGHLIGHT);
+    if (x1 - x0 < 2 || y1 - y0 < 2) return;
+    e.left = x0; e.top = y0; e.right = x1; e.bottom = y0 + 1;
+    FillRect(dc, &e, sh);
+    e.right = x0 + 1; e.bottom = y1;
+    FillRect(dc, &e, sh);
+    e.left = x0; e.top = y1 - 1; e.right = x1; e.bottom = y1;
+    FillRect(dc, &e, hi);
+    e.left = x1 - 1; e.top = y0;  e.bottom = y1;
+    FillRect(dc, &e, hi);
+}
+
+/* The Win95 sizing grip: three RIDGES running parallel to the corner's
+   anti-diagonal, the one furthest from the corner the longest, each a
+   two-pixel shadow with a one-pixel highlight up-left of it - that pair
+   is what gives a ridge its round rather than reading as a flat line.
+   Ridges that would not fit the strip's height are dropped whole, so a
+   short bar loses a ridge instead of bleeding past its own edge. */
+static void sb_grip(HDC dc, const RECT *rc) {
+    HBRUSH sh = sb_brush(COLOR_BTNSHADOW);
+    HBRUSH hi = sb_brush(COLOR_BTNHIGHLIGHT);
+    int i, j;
+    /* Read off comctl32's own grip rather than guessed: the ridges are
+       FIVE apart, not four; each is one highlight pixel followed by two
+       shadow, in that order left to right; the feet sit two rows up from
+       the bottom; and the whole thing is clipped two columns in from the
+       right, which is why the shortest ridge ends in a bare highlight
+       with its shadow cut off. */
+    int right = rc->right - 2;          /* last column the grip may touch */
+    int base  = rc->bottom - 2;         /* the row the ridge feet stand on */
+    for (i = 0; i < 3; i++) {
+        int d = 3 + i * 5;
+        if (base - d < rc->top) break;
+        for (j = 0; j <= d; j++) {
+            int x = right - d + j;
+            int y = base - j;
+            RECT p;
+            if (x < rc->left || y < rc->top) continue;
+            p.left = x; p.top = y; p.right = x + 1; p.bottom = y + 1;
+            FillRect(dc, &p, hi);
+            p.left  = x + 1;
+            p.right = (x + 3 > right + 1) ? right + 1 : x + 3;
+            if (p.right > p.left) FillRect(dc, &p, sh);
+        }
+    }
+}
+
+/* Where the prefill indicator sits, in the strip's client coordinates.
+ * ONE function, called by the native MoveWindow and by the fallback
+ * paint, for the same reason g_sb_p0/g_sb_p1 are computed once: two
+ * copies of a rectangle drift, and the drift shows up as the simulated
+ * bar sitting a pixel off the real one.
+ * Returns 0 when there is no room for it. */
+static int sb_prog_rect(int strip_h, RECT *out) {
+    int pw = LZ_PROG_W;
+    if (pw > (g_sb_p1 - g_sb_p0) - LZ_SB_GAP * 3)
+        pw = (g_sb_p1 - g_sb_p0) - LZ_SB_GAP * 3;
+    if (pw <= 0 || strip_h <= LZ_SB_TOP + 2) return 0;
+    /* A CELL: the same top inset and flush bottom as the other two. A
+       sunken rectangle nested inside another one reads as a hole
+       punched in the bar rather than as a segment of it. */
+    out->right  = g_sb_p1;
+    out->left   = out->right - pw;
+    out->top    = LZ_SB_TOP;
+    out->bottom = strip_h;
+    return 1;
+}
+
+/* The bar's own area inside that segment. Both paths use it: the
+ * fallback fills chunks into it, the comctl32 build puts the control
+ * there - so the two cannot end up with the bar at different heights.
+ * Returns 0 when the inset leaves nothing. */
+static int sb_prog_inner(const RECT *cell, RECT *out) {
+    out->left   = cell->left + LZ_PROG_INSET;
+    out->right  = cell->right - LZ_PROG_INSET;
+    out->top    = cell->top + LZ_PROG_INSET;
+    out->bottom = cell->bottom - LZ_PROG_INSET;
+    return (out->right - out->left) > 4 && (out->bottom - out->top) > 2;
+}
+
+/* The Win9x progress bar, drawn.
+ *
+ * Measured off comctl32 v5 rather than remembered - the manifest was
+ * temporarily removed to get a v5 control on this host, since v6 draws
+ * one smooth fill and the target has no v6 at all. What that showed:
+ * chunks eight wide, two apart, starting one pixel in, in
+ * COLOR_HIGHLIGHT on COLOR_BTNFACE. Both are asked for by index, so the
+ * target's own navy-on-silver comes out without being written down.
+ * The sunken edge is this bar's own: it sits inside the status strip,
+ * where a flat rectangle would read as a gap rather than as a well. */
+static void sb_prog_paint(HDC dc, const RECT *r, int done, int total) {
+    RECT fill, in;
+    int x, chunks;
+
+    /* The segment: the same sunken treatment parts 0 and 1 get, from
+       the same function, so the three read as three segments. */
+    sb_sink(dc, r->left, r->top, r->right, r->bottom);
+    if (!sb_prog_inner(r, &in)) return;
+    if (total <= 0 || done <= 0) return;
+    if (done > total) done = total;
+
+    /* THE COUNT IS ROUNDED, NOT THE PIXEL SPAN. comctl32 divides the
+       well into whole chunks first and then scales that COUNT - at 40%
+       of a 92-pixel well it draws four, where scaling the span and
+       fitting chunks into it gives three. Measured against the v5
+       control, not reasoned from the geometry. */
+    /* +2 because the final chunk carries no trailing gap - without it
+       the well loses its last chunk and never reads as full. */
+    chunks = (in.right - in.left + 2) / 10;
+    if (chunks <= 0) return;
+    chunks = (int)(((long)chunks * done + total / 2) / total);
+    for (x = in.left; chunks > 0; x += 10, chunks--) {
+        if (x + 8 > in.right) break;
+        fill.left = x; fill.right = x + 8;
+        fill.top = in.top; fill.bottom = in.bottom;
+        FillRect(dc, &fill, sb_brush(COLOR_HIGHLIGHT));
+    }
+}
+
+static void sb_fallback_paint(HWND h, HDC dc) {
+    RECT rc, t;
+    HFONT f = g_sb_font ? g_sb_font : lz_ui_font(), old = NULL;
+    char text0[160];
+    int mid;
+
+    GetClientRect(h, &rc);
+    FillRect(dc, &rc, sb_brush(COLOR_BTNFACE));
+
+    /* Part 0's text is the control's own: set_status writes it with
+       SetWindowTextA on this path, and keeping that the authority means
+       nothing else has to change to feed this strip. Part 1 comes from
+       the cache every part is written through. */
+    text0[0] = '\0';
+    GetWindowTextA(h, text0, (int)sizeof text0);
+
+    /* Cell rects as comctl32 actually lays them out, read off the strip
+       comparison rather than assumed: two rows of face above them,
+       flush with the bottom, and the gap between two cells sits on the
+       RIGHT cell's left edge only - the left cell's highlight stays at
+       the boundary. Each of those three was wrong in an earlier guess
+       and each showed up as a full-width or full-height band in the
+       difference image. */
+    mid = g_sb_p1 > g_sb_p0 ? g_sb_p1 : g_sb_p0;
+    /* Cell 1 ends where the indicator's cell begins - three segments in
+       a row, not two with something laid over the second. */
+    {
+        RECT pcell;
+        if (sb_prog_rect(rc.bottom - rc.top, &pcell) &&
+            pcell.left - LZ_SB_GAP > g_sb_p0 + LZ_SB_GAP)
+            mid = pcell.left - LZ_SB_GAP;
+    }
+    sb_sink(dc, 0, LZ_SB_TOP, g_sb_p0, rc.bottom);
+    sb_sink(dc, g_sb_p0 + LZ_SB_GAP, LZ_SB_TOP, mid, rc.bottom);
+
+    if (f) old = (HFONT)SelectObject(dc, f);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, GetSysColor(COLOR_BTNTEXT));
+    /* Centred in the CELL, not in the strip: comctl32 measures from the
+       cell's own top, so centring on the full height puts the text one
+       pixel high. The left inset is the cell's edge plus two. */
+    t = rc; t.top = LZ_SB_TOP;
+    t.left = LZ_SB_GAP; t.right = g_sb_p0 - LZ_SB_GAP;
+    DrawTextA(dc, text0, -1, &t, DT_SINGLELINE | DT_VCENTER | DT_LEFT |
+                                 DT_NOPREFIX | DT_END_ELLIPSIS);
+    t.left = g_sb_p0 + LZ_SB_GAP * 2; t.right = mid - LZ_SB_GAP;
+    DrawTextA(dc, g_sb_cache[1], -1, &t, DT_SINGLELINE | DT_VCENTER |
+                                         DT_LEFT | DT_NOPREFIX |
+                                         DT_END_ELLIPSIS);
+    if (old) SelectObject(dc, old);
+
+    /* Always drawn, empty when there is nothing to report: a segment
+       that came and went would re-flow the bar underneath the reader. */
+    {
+        RECT pr;
+        if (sb_prog_rect(rc.bottom - rc.top, &pr))
+            sb_prog_paint(dc, &pr,
+                          (g_pf_total > 0 && g_pf_done < g_pf_total)
+                              ? g_pf_done : 0,
+                          g_pf_total > 0 ? g_pf_total : 1);
+    }
+
+    sb_grip(dc, &rc);
+}
+
+static LRESULT CALLBACK sb_fallback_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    if (m == WM_ERASEBKGND) return 1;      /* WM_PAINT covers every pixel */
+    if (m == WM_PAINT) {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(h, &ps);
+        if (dc) sb_fallback_paint(h, dc);
+        EndPaint(h, &ps);
+        return 0;
+    }
+    /* Same reason the comctl32 bar answers it: anything rendering this
+       window into a caller-supplied DC - the pixel comparison included -
+       goes down this path and would otherwise get a blank strip. */
+    if (m == WM_PRINTCLIENT) { sb_fallback_paint(h, (HDC)w); return 0; }
+    if (m == WM_SETTEXT) {
+        LRESULT r = DefWindowProcA(h, m, w, l);
+        InvalidateRect(h, NULL, FALSE);
+        return r;
+    }
+    if (m == WM_SYSCOLORCHANGE) {
+        /* The strip's own colours, and its lamps'. The bitmaps carry
+           the button face baked in by lz_mapped_bitmap, so a scheme
+           change makes them as stale as the brushes - reloading them is
+           the same fix, not an extra one. */
+        sb_brush_reset();
+        lamps_reload();
+        InvalidateRect(h, NULL, TRUE);
+        return 0;
+    }
+    if (m == WM_SETFONT) {
+        g_sb_font = (HFONT)w;
+        if (LOWORD(l)) InvalidateRect(h, NULL, FALSE);
+        return 0;
+    }
+    if (m == WM_GETFONT) return (LRESULT)g_sb_font;
+    return DefWindowProcA(h, m, w, l);
+}
+
+static void sb_register_fallback(void) {
+    static int done;
+    WNDCLASSA wc;
+    if (done) return;
+    done = 1;
+    memset(&wc, 0, sizeof wc);
+    wc.lpfnWndProc   = sb_fallback_proc;
+    wc.hInstance     = g.inst;
+    wc.hCursor       = LoadCursorA(NULL, IDC_ARROW);
+    wc.lpszClassName = LZ_SBCLASS;
+    RegisterClassA(&wc);
 }
 
 static void set_status(const char *display_utf8) {
@@ -714,41 +1095,28 @@ static void set_status(const char *display_utf8) {
                      status_gbk, (int)sizeof status_gbk, NULL);
     const char *shown = status_gbk;
     if (!h) return;
-    if (g.status_is_sbar) {
-        /* While a generate job runs, and after it ends until the next
-           turn, part 0 shows the throughput cell rather than the text
-           passed in. The state line ("generating" / "ready") carries no
-           per-turn information; this cell does. The caller is start_job
-           or the throttled tick, so the display cannot sit stale for
-           the length of a long generation the way it would if only
-           tokens_arrived touched it (a slow turn spends most of its
-           wall time between tokens).
-           `tok_live` alone (not `&& job_kind == JOB_GENERATE`) is the
-           gate: finish_job leaves it set for a successful generation so
-           the FINAL reading stays on the bar until the next turn, and
-           start_job clears it for a load and resets it for the next
-           generate. Errors clear it (finish_job's failure branch) so an
-           error message is never hidden by a stale rate.
-           `shown` follows the cell so the sidebar mirror below paints
-           the SAME text the status bar paints - it mirrors the status
-           line, and when the status line is the throughput cell, the
-           sidebar must not fall back to the resting text behind it. */
-        if (g.tok_live) {
-            lz_common_tokcell(cell, (int)sizeof cell, g.tok_gen,
-                           lz_time_ms() - g.tok_start_ms,
-                           lz_str_utf8(LZ_STR_STATE_TOKCELL));
-            /* `cell` is UTF-8 (lz_str_utf8 inside tokcell); the status
-               bar and its sidebar mirror are ANSI/GBK, so convert once
-               and write the GBK form to both. */
-            lz_gbk_from_utf8(cell, (int)strlen(cell),
-                             status_gbk, (int)sizeof status_gbk, NULL);
-            sb_text(0, status_gbk);
-        } else {
-            sb_text(0, status_gbk);
-        }
-    } else {
-        SetWindowTextA(h, status_gbk);
+    /* The throughput cell, on BOTH strips.
+       While a generate job runs, and after it ends until the next turn,
+       part 0 shows this cell rather than the text passed in: the state
+       line ("generating" / "ready") carries no per-turn information and
+       this does. The caller is start_job or the throttled tick, so it
+       cannot sit stale for the length of a long generation.
+       `tok_live` alone is the gate - finish_job leaves it set for a
+       successful generation so the FINAL reading stays until the next
+       turn, start_job clears it for a load, and errors clear it so an
+       error message is never hidden by a stale rate.
+       status_gbk is rewritten IN PLACE, which is also what keeps
+       `shown` (a pointer into it) following the cell, so the sidebar
+       mirror below paints the same text the strip does. */
+    if (g.tok_live) {
+        lz_common_tokcell(cell, (int)sizeof cell, g.tok_gen,
+                       lz_time_ms() - g.tok_start_ms,
+                       lz_str_utf8(LZ_STR_STATE_TOKCELL));
+        lz_gbk_from_utf8(cell, (int)strlen(cell),
+                         status_gbk, (int)sizeof status_gbk, NULL);
     }
+    if (g.status_is_sbar) sb_text(0, status_gbk);
+    else                  SetWindowTextA(h, status_gbk);
     /* Sidebar mirrors the same state line under the model info.
 
        No blank line when there is no model yet: the missing model line
@@ -1464,6 +1832,36 @@ static void tokens_arrived(const char *utf8, int n) {
     g.tok_n += n;
 }
 
+/* Paint the prefill indicator from whatever the counters say now.
+ * Shared by both timers - see LZ_DBG_TIMER for why there are two. */
+static void prefill_paint_tick(void) {
+    if (!(g_pf_total > 0 && g_pf_done < g_pf_total)) {
+        /* Prefill over: the well EMPTIES, it does not disappear. The
+           segment is part of the strip's layout - a well that came and
+           went would re-flow the bar underneath the reader, and a well
+           left full would read as a job still running. */
+        if (g.progress)
+            SendMessage(g.progress, LZ_PBM_SETPOS, (WPARAM)0, 0);
+        return;
+    }
+    {
+        char pf[96];
+        sprintf(pf, "%s %d/%d", lz_str_utf8(LZ_STR_STATE_PREFILL),
+                g_pf_done, g_pf_total);
+        set_status(pf);
+    }
+    /* Both strips, one condition. The comctl32 bar is a control to
+       drive; the fallback paints itself and only needs to be told the
+       numbers moved. */
+    if (g.progress) {
+        SendMessage(g.progress, LZ_PBM_SETRANGE, 0, MAKELPARAM(0, 100));
+        SendMessage(g.progress, LZ_PBM_SETPOS,
+                    (WPARAM)((g_pf_done * 100) / g_pf_total), 0);
+    } else if (g.part[LZ_GUI_STATUS]) {
+        InvalidateRect(g.part[LZ_GUI_STATUS], NULL, FALSE);
+    }
+}
+
 /* The two lamps, from the state the program is already in rather than
    from a copy of it. Left = the model: dark when none is open, green
    when one is ready, red when the last load failed. Right = activity:
@@ -1472,6 +1870,14 @@ static void tokens_arrived(const char *utf8, int n) {
    flickered for the same reason.
    Safe before the lamps exist and on the STATIC fallback, where they
    never do. */
+
+
+static void gui_prefill_progress(int done, int total, void *ctx) {
+    (void)ctx;
+    g_pf_total = total;
+    g_pf_done  = done;
+}
+
 static void set_lamps(void) {
     int left, right;
     if (!g.lamp[0] || !g.lamp[1]) return;
@@ -1485,6 +1891,24 @@ static void set_lamps(void) {
                 (LPARAM)g.lamp_bmp[left]);
     SendMessage(g.lamp[1], STM_SETIMAGE, IMAGE_BITMAP,
                 (LPARAM)g.lamp_bmp[right]);
+}
+
+/* (Re)load the lamp artwork and repaint the pair.
+ *
+ * One place, because it runs twice: once when the controls are built,
+ * and again on WM_SYSCOLORCHANGE - lz_mapped_bitmap bakes the button
+ * face into the bitmap as it loads, so a scheme change makes the old
+ * handles wrong in exactly the way it makes a cached brush wrong. */
+static void lamps_reload(void) {
+    int i;
+    for (i = 0; i < LZ_LAMP_KINDS; i++) {
+        if (g.lamp_bmp[i]) { DeleteObject(g.lamp_bmp[i]); g.lamp_bmp[i] = NULL; }
+    }
+    g.lamp_bmp[LZ_LAMP_OFF]   = lz_mapped_bitmap(g.inst, IDB_LAMP_OFF);
+    g.lamp_bmp[LZ_LAMP_READY] = lz_mapped_bitmap(g.inst, IDB_LAMP_READY);
+    g.lamp_bmp[LZ_LAMP_BUSY]  = lz_mapped_bitmap(g.inst, IDB_LAMP_BUSY);
+    g.lamp_bmp[LZ_LAMP_ERROR] = lz_mapped_bitmap(g.inst, IDB_LAMP_ERROR);
+    set_lamps();
 }
 
 /* ------------------------------------------------- splitter tracking
@@ -2307,7 +2731,18 @@ static int create_children(HWND hwnd) {
            Only when the bar is comctl32's. The STATIC fallback (3.51
            without comctl32) has no parts to reserve one of, and a lamp
            floating on a plain text strip is worse than no lamp. */
-        if (g.status_is_sbar) {
+        /* The fallback strip is created BEFORE the lamps, because the
+           lamps are children of whichever strip exists and need a parent
+           to be created into. */
+        if (!g.part[LZ_GUI_STATUS]) {
+            sb_register_fallback();
+            g.part[LZ_GUI_STATUS] = CreateWindowExA(
+                0, LZ_SBCLASS,
+                lz_str_display(LZ_STR_STATE_NO_MODEL),
+                WS_CHILD | WS_VISIBLE,
+                0, 0, 0, 0, hwnd, (HMENU)ID_STATUS, g.inst, NULL);
+        }
+        if (g.part[LZ_GUI_STATUS]) {
             int i2;
             for (i2 = 0; i2 < 2; i2++)
                 g.lamp[i2] = CreateWindowExA(
@@ -2315,18 +2750,31 @@ static int create_children(HWND hwnd) {
                     0, 0, LZ_LAMP_PX, LZ_LAMP_PX,
                     g.part[LZ_GUI_STATUS], (HMENU)(LZ_IPTR)(ID_LAMP0 + i2),
                     g.inst, NULL);
-            g.lamp_bmp[LZ_LAMP_OFF]   = lz_mapped_bitmap(g.inst, IDB_LAMP_OFF);
-            g.lamp_bmp[LZ_LAMP_READY] = lz_mapped_bitmap(g.inst, IDB_LAMP_READY);
-            g.lamp_bmp[LZ_LAMP_BUSY]  = lz_mapped_bitmap(g.inst, IDB_LAMP_BUSY);
-            g.lamp_bmp[LZ_LAMP_ERROR] = lz_mapped_bitmap(g.inst, IDB_LAMP_ERROR);
-            set_lamps();
+            lamps_reload();
         }
-        if (!g.part[LZ_GUI_STATUS])
-            g.part[LZ_GUI_STATUS] = CreateWindowExA(
-                lz_ex_style(WS_EX_STATICEDGE), "STATIC",
-                lz_str_display(LZ_STR_STATE_NO_MODEL),
-                WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
-                0, 0, 0, 0, hwnd, (HMENU)ID_STATUS, g.inst, NULL);
+        /* The prefill indicator. comctl32 only - the fallback strip has
+           no control to create and will draw its own; this is the arm
+           the simulation gets measured against. Created hidden: it is
+           shown only while a prefill is running. */
+        {
+            const char *pcls = lz_progress_class();
+            if (pcls && g.part[LZ_GUI_STATUS]) {
+                g.progress = CreateWindowExA(
+                    0, pcls, "", WS_CHILD | WS_VISIBLE,
+                    0, 0, 0, 0, g.part[LZ_GUI_STATUS],
+                    (HMENU)(LZ_IPTR)ID_PROGRESS, g.inst, NULL);
+                /* Untheme it, for the same reason the transcript and the
+                   input box are untheme'd: this program ships a
+                   common-controls 6.0 manifest, so on XP and later
+                   uxtheme repaints the bar as one smooth fill. The
+                   deliverable's look is Win9x, where a progress bar is
+                   a row of separate chunks - and the 3.51 simulation has
+                   to be built against THAT, not against whatever the
+                   host's theme draws. No-op on the target, which has no
+                   uxtheme to turn off. */
+                g.progress_untheme = lz_ui_untheme(g.progress);
+            }
+        }
     }
 
     /* Four parts may be NULL, for three different reasons, and all are
@@ -2407,6 +2855,10 @@ static int create_children(HWND hwnd) {
     lz_stream_init(&g.stream);
     lz_common_settings_init(&g.set);
     lz_gui_session_init(&g.sess, &g.mdl, g.set.think);
+    /* Set once, on the session's own opts - common/session.c takes
+       configuration from s->opts before each job, so nothing has to be
+       threaded through lz_session_job's signature for this. */
+    g.sess.opts.on_prefill = gui_prefill_progress;
     /* Multi-turn prefix reuse, ON by default.
      *
      * The prefix matcher validates the cached prefix BY CONTENT and
@@ -2616,7 +3068,7 @@ static void relayout(HWND hwnd) {
            reserved cell stops short of it. Without this the second lamp
            sat under the grip's diagonal ridges. SM_CXVSCROLL is what a
            status-bar gripper is sized by. */
-        int parts[3], w = rc.right - rc.left;
+        int parts[4], w = rc.right - rc.left;
         int grip = GetSystemMetrics(SM_CXVSCROLL);
         int cell = w - LZ_LAMP_CELL_W - grip;
         /* Sized to its own text, not to a fraction of the bar - see
@@ -2624,9 +3076,27 @@ static void relayout(HWND hwnd) {
            cell instead of pushing the model info off the right end. */
         parts[0] = status_state_w(g.part[LZ_GUI_STATUS]);
         if (parts[0] <= 0 || parts[0] > cell) parts[0] = cell;
-        parts[1] = cell;
-        parts[2] = -1;
-        SendMessage(g.part[LZ_GUI_STATUS], LZ_SB_SETPARTS, 3, (LPARAM)parts);
+        /* The same boundaries the fallback strip paints from, so neither
+           can drift from the other. */
+        g_sb_p0 = parts[0];
+        g_sb_p1 = cell;
+        /* FOUR parts: the prefill indicator is a segment of its own on
+           this path too, so both strips have the same structure. */
+        {
+            RECT sr, pc;
+            int pl = cell;
+            GetClientRect(g.part[LZ_GUI_STATUS], &sr);
+            if (sb_prog_rect(sr.bottom - sr.top, &pc) &&
+                pc.left > parts[0] + LZ_SB_GAP)
+                pl = pc.left;
+            /* Minus the gap: comctl32 starts the next part two pixels
+               past the boundary it is given, so the segment's own left
+               edge would land the part two pixels narrow. */
+            parts[1] = pl - LZ_SB_GAP;
+            parts[2] = cell;        /* the indicator's own segment */
+            parts[3] = -1;          /* lamps, no border */
+        }
+        SendMessage(g.part[LZ_GUI_STATUS], LZ_SB_SETPARTS, 4, (LPARAM)parts);
         /* Every part with no border of the control's own - 0 and 1 get
            the Win95 bevel from sb_bevel_proc instead, and 2 holds the
            lamps and gets none at all. Sent after SB_SETPARTS because the
@@ -2637,15 +3107,37 @@ static void relayout(HWND hwnd) {
         /* The lamps live inside the bar, so their geometry comes off the
            bar and not off the client area - a child of the status bar
            moves with it and is clipped by it. */
-        if (g.lamp[0] && g.lamp[1]) {
-            RECT pr;
-            int y, x;
+    } else if (g.part[LZ_GUI_STATUS]) {
+        /* The fallback strip's own copy of the boundaries above, by the
+           same arithmetic - it has no SB_SETPARTS to be told them. */
+        int w = rc.right - rc.left;
+        int grip = GetSystemMetrics(SM_CXVSCROLL);
+        int cell = w - LZ_LAMP_CELL_W - grip;
+        int p0 = status_state_w(g.part[LZ_GUI_STATUS]);
+        if (p0 <= 0 || p0 > cell) p0 = cell;
+        g_sb_p0 = p0;
+        g_sb_p1 = cell;
+        InvalidateRect(g.part[LZ_GUI_STATUS], NULL, FALSE);
+    }
+    /* The lamps are placed for BOTH strips - they are children of
+       whichever one exists. The comctl32 bar answers SB_GETRECT for its
+       reserved cell; the fallback has no parts to ask about, so the cell
+       is computed the same way SB_SETPARTS was told to reserve it, which
+       keeps one arithmetic rather than two. */
+    if (g.lamp[0] && g.lamp[1] && g.part[LZ_GUI_STATUS]) {
+        RECT pr;
+        int y, x;
+        int w = rc.right - rc.left;
+        int grip = GetSystemMetrics(SM_CXVSCROLL);
+        int cell = w - LZ_LAMP_CELL_W - grip;
+        {
             /* Centred in the PART, not in the client rect. Those are not
                the same rectangle: the bar keeps its top border and each
                part keeps a sunken edge, and a 16-pixel lamp centred on
                the client rect ran over both of them. Asking SB_GETRECT
                is what stops that inset from being guessed. */
-            if (!SendMessage(g.part[LZ_GUI_STATUS], LZ_SB_GETRECT, 2,
+            if (!g.status_is_sbar ||
+                !SendMessage(g.part[LZ_GUI_STATUS], LZ_SB_GETRECT, 3,
                              (LPARAM)&pr)) {
                 GetClientRect(g.part[LZ_GUI_STATUS], &pr);
                 pr.left = cell;
@@ -2656,6 +3148,26 @@ static void relayout(HWND hwnd) {
             MoveWindow(g.lamp[0], x, y, LZ_LAMP_PX, LZ_LAMP_PX, TRUE);
             MoveWindow(g.lamp[1], x + LZ_LAMP_PX + LZ_LAMP_GAP, y,
                        LZ_LAMP_PX, LZ_LAMP_PX, TRUE);
+            /* The indicator fills cell 1, inset by the cell's own sunken
+               edge so it does not sit on the bevel. */
+            if (g.progress) {
+                /* The STRIP's own client height, not the window's - `rc`
+                   up at the top of this function is the main window and
+                   using it made the bar 456 pixels tall inside a
+                   22-pixel strip. */
+                /* The SAME rectangle the fallback paints into - see
+                   sb_prog_rect. */
+                /* The control fills its segment: its own frame is the
+                   well, which is why the strip does not bevel part 2.
+                   The part rect is asked for rather than derived - the
+                   bar keeps its own margins, and a second opinion about
+                   where a part is would drift from the first. */
+                RECT q;
+                if (SendMessage(g.part[LZ_GUI_STATUS], LZ_SB_GETRECT,
+                                (WPARAM)2, (LPARAM)&q))
+                    MoveWindow(g.progress, q.left, q.top,
+                               q.right - q.left, q.bottom - q.top, TRUE);
+            }
         }
     }
 }
@@ -3899,6 +4411,26 @@ static char g_find_buf[128];
  * legitimate hit at the very start, and conflating them is how a
  * search that finds nothing scrolls the user to the top and looks
  * like it worked. */
+/* Byte compare for the RichEdit 1.0 search path.
+   Case folding is ASCII-only and DELIBERATELY not locale-aware: folding
+   through the locale is the very thing that made EM_FINDTEXT's answer
+   depend on the keyboard layout. A byte >= 0x80 is either a GBK lead or
+   a trail and is compared exactly - case has no meaning for it, and a
+   trail byte can land on 'A'..'Z', which is how a locale-aware fold
+   corrupts the pair. */
+static int find_eq(const char *a, const char *b, long n, int match_case) {
+    long i;
+    for (i = 0; i < n; i++) {
+        unsigned char x = (unsigned char)a[i], y = (unsigned char)b[i];
+        if (x == y) continue;
+        if (match_case || x >= 0x80 || y >= 0x80) return 0;
+        if (x >= 'A' && x <= 'Z') x = (unsigned char)(x - 'A' + 'a');
+        if (y >= 'A' && y <= 'Z') y = (unsigned char)(y - 'A' + 'a');
+        if (x != y) return 0;
+    }
+    return 1;
+}
+
 static long transcript_find(const char *needle, long from, int down,
                             int match_case) {
     FINDTEXTA ft;
@@ -3928,12 +4460,48 @@ static long transcript_find(const char *needle, long from, int down,
            ANSI path rather than silently claiming "not found". */
     }
 
-    ft.chrg.cpMin = from;
-    ft.chrg.cpMax = down ? -1 : 0;
-    ft.lpstrText = (LPSTR)needle;
-    hit = (long)SendMessage(g.part[LZ_GUI_TRANSCRIPT], EM_FINDTEXT, flags,
-                            (LPARAM)&ft);
-    return hit;
+    /* THE 1.0 PATH SEARCHES THE TEXT ITSELF rather than asking
+       EM_FINDTEXT.
+       RichEdit 1.0's ANSI find compares through the thread's locale, and
+       the result depends on the active keyboard layout: the same needle
+       in the same buffer is found under a Chinese layout and not found
+       under an English one. That was reproduced directly - the selftest
+       forces 00000409, and GetWindowTextA still shows the needle sitting
+       at the offset the search reports as absent. Adding FR_MATCHCASE
+       does not fix it, so this is not only case folding.
+       For an ANSI control a character position IS a byte offset, so a
+       plain byte search over the control's own text answers the exact
+       question EM_FINDTEXT was being asked, with no locale in it. Find
+       is a user action, not a per-token path, so reading the buffer per
+       search is affordable; the transcript is capped at
+       LZ_TRANSCRIPT_LIMIT and this is heap, not stack. */
+    {
+        long len = (long)SendMessage(g.part[LZ_GUI_TRANSCRIPT],
+                                     WM_GETTEXTLENGTH, 0, 0);
+        long nlen = (long)strlen(needle);
+        char *buf;
+        long i, last;
+
+        (void)ft;
+        if (len <= 0 || nlen <= 0 || nlen > len) return -1;
+        buf = (char *)malloc((size_t)len + 1);
+        if (!buf) return -1;
+        buf[0] = '\0';
+        SendMessage(g.part[LZ_GUI_TRANSCRIPT], WM_GETTEXT,
+                    (WPARAM)(len + 1), (LPARAM)buf);
+        last = (long)strlen(buf) - nlen;
+        hit = -1;
+        if (down) {
+            for (i = (from > 0 ? from : 0); i <= last; i++)
+                if (find_eq(buf + i, needle, nlen, match_case)) { hit = i; break; }
+        } else {
+            long start = (from - 1 < last) ? from - 1 : last;
+            for (i = start; i >= 0; i--)
+                if (find_eq(buf + i, needle, nlen, match_case)) { hit = i; break; }
+        }
+        free(buf);
+        return hit;
+    }
 }
 
 /* Opens the dialog, or - if one is already open - gives it focus
@@ -4220,10 +4788,17 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
            selftest wiring gate below), not IsWindowEnabled or anything
            painted, because DragAcceptFiles changes no visible state. */
         g.drop_on = lz_drop_accept(hwnd, 1);
+        /* The debug ramp's timer, for the whole life of the window -
+           unlike the lamp timer, which start_job owns. Off unless the
+           ini asked for it. */
+        if (g_dbg_prefill_ms > 0)
+            SetTimer(hwnd, LZ_DBG_TIMER, LZ_DBG_TICK_MS, NULL);
         /* Title-bar self-drawing. Attach the subclass after
            create_children so the caption exists before the first repaint,
-           then push the initial three segments. It paints on every
-           host: lz_caption_can_paint is unconditionally true. */
+           then push the initial three segments. The subclass is attached
+           unconditionally; whether it PAINTS is lz_caption_can_paint's
+           answer, which is no on the 3.51 floor - there the system
+           caption is left alone. */
         lz_caption_attach(hwnd);
         push_caption();
         return 0;
@@ -4288,10 +4863,48 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
 
+    case WM_SYSCOLORCHANGE:
+        /* Forwarded: only top-level windows are sent this, and the
+           status strip is a child - without this it keeps painting in
+           the scheme that was in force when the process started. */
+        if (g.part[LZ_GUI_STATUS] && !g.status_is_sbar)
+            SendMessage(g.part[LZ_GUI_STATUS], WM_SYSCOLORCHANGE, 0, 0);
+        else
+            lamps_reload();
+        return 0;
+
     case WM_TIMER:
         if (wp == LZ_LAMP_TIMER) {
             g.lamp_phase = !g.lamp_phase;
             set_lamps();
+            /* From the lamp tick, which runs whether or not tokens are
+               arriving - during prefill they are not, so the token tick
+               has nothing to fire on. */
+            if (g.job_kind == JOB_GENERATE) prefill_paint_tick();
+            return 0;
+        }
+        if (wp == LZ_DBG_TIMER) {
+            /* Only with no real job: a generation owns these counters
+               and the ramp must not overwrite what the engine reports.
+               t0 is zeroed while a job runs so the sweep restarts from
+               empty afterwards rather than resuming mid-way. */
+            if (g.job_kind != JOB_NONE) {
+                g_dbg_prefill_t0 = 0.0;
+            } else {
+                double now = lz_time_ms();
+                double dt;
+                if (g_dbg_prefill_t0 <= 0.0) g_dbg_prefill_t0 = now;
+                dt = now - g_dbg_prefill_t0;
+                if (dt >= (double)g_dbg_prefill_ms) {
+                    g_dbg_prefill_t0 = now;   /* loop, so it can be
+                                                 watched more than once */
+                    dt = 0.0;
+                }
+                g_pf_total = 1000;
+                g_pf_done  = (int)((dt * 1000.0) / (double)g_dbg_prefill_ms);
+                if (g_pf_done >= g_pf_total) g_pf_done = g_pf_total - 1;
+                prefill_paint_tick();
+            }
             return 0;
         }
         if (wp == LZ_TOK_TIMER) {
@@ -9821,6 +10434,141 @@ static int st_about(FILE *f, HINSTANCE inst) {
     return checks;
 }
 
+/* ---- status-strip pixel capture, for comparing the simulated bar
+ * against comctl32's.
+ *
+ * Both strips answer WM_PRINTCLIENT - the comctl32 one through
+ * sb_bevel_proc, the fallback through sb_fallback_proc - so both render
+ * into a caller-supplied DC and are captured the same way.
+ *
+ * TWO RUNS, not one. classic_ui makes the same binary on the same
+ * machine produce the other strip, which already holds the font, the DPI
+ * and the system colours constant; building a second main window inside
+ * one run would complicate the selftest's window lifetime and control
+ * nothing further. Each run writes its own image and, when the
+ * counterpart from the other run is already there, compares.
+ *
+ * PIXEL IDENTITY IS NOT THE CRITERION AND MUST NOT BECOME ONE. The
+ * fallback is a reimplementation, not a copy of comctl32; demanding
+ * identity would mean reimplementing comctl32. Only what must hold is
+ * asserted - the capture worked, the file was written, both strips span
+ * the same width. Height, cell boundaries and the differing-byte count
+ * are REPORTED, because a difference there is a fact to look at rather
+ * than a failure, and the images are written so the appearance can be
+ * judged by looking at it. */
+#ifndef PRF_CLIENT
+#define PRF_CLIENT 0x00000004L
+#endif
+#ifndef PRF_CHILDREN
+#define PRF_CHILDREN 0x00000010L
+#endif
+
+static long sb_stride(int w) { return (long)(((w * 3) + 3) & ~3); }
+
+static unsigned char *sb_capture(HWND strip, int *w, int *h) {
+    RECT rc;
+    HDC wdc, mdc;
+    BITMAPINFO bi;
+    void *bits = NULL;
+    HBITMAP dib, old;
+    unsigned char *copy = NULL;
+    long n;
+
+    GetClientRect(strip, &rc);
+    *w = rc.right - rc.left;
+    *h = rc.bottom - rc.top;
+    if (*w <= 0 || *h <= 0) return NULL;
+    wdc = GetDC(strip);
+    if (!wdc) return NULL;
+    mdc = CreateCompatibleDC(wdc);
+    memset(&bi, 0, sizeof bi);
+    bi.bmiHeader.biSize        = sizeof bi.bmiHeader;
+    bi.bmiHeader.biWidth       = *w;
+    bi.bmiHeader.biHeight      = *h;
+    bi.bmiHeader.biPlanes      = 1;
+    bi.bmiHeader.biBitCount    = 24;
+    bi.bmiHeader.biCompression = BI_RGB;
+    dib = CreateDIBSection(wdc, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+    ReleaseDC(strip, wdc);
+    if (!dib || !bits) { if (dib) DeleteObject(dib); DeleteDC(mdc); return NULL; }
+    old = (HBITMAP)SelectObject(mdc, dib);
+    /* Pre-filled with the button face: a DIB section starts as zeros,
+       i.e. black, and comctl32's status bar leaves its topmost rows
+       unpainted under WM_PRINTCLIENT - those rows would otherwise read
+       as a difference neither strip draws. */
+    {
+        RECT fr;
+        fr.left = 0; fr.top = 0; fr.right = *w; fr.bottom = *h;
+        FillRect(mdc, &fr, sb_brush(COLOR_BTNFACE));
+    }
+    /* PRF_CHILDREN as well as PRF_CLIENT: the lamps are child
+       controls, so a client-only render leaves them out and the
+       comparison would be blind to exactly the cell they sit in. */
+    SendMessage(strip, WM_PRINTCLIENT, (WPARAM)mdc,
+                PRF_CLIENT | PRF_CHILDREN);
+    GdiFlush();
+    n = sb_stride(*w) * (*h);
+    copy = (unsigned char *)malloc((size_t)n);
+    if (copy) memcpy(copy, bits, (size_t)n);
+    SelectObject(mdc, old);
+    DeleteObject(dib);
+    DeleteDC(mdc);
+    return copy;
+}
+
+static int sb_bmp_write(const char *path, const unsigned char *bits,
+                        int w, int h) {
+    BITMAPFILEHEADER fh;
+    BITMAPINFOHEADER ih;
+    long n = sb_stride(w) * h;
+    FILE *o = fopen(path, "wb");
+    int ok;
+    if (!o) return 0;
+    memset(&fh, 0, sizeof fh);
+    memset(&ih, 0, sizeof ih);
+    fh.bfType    = 0x4D42;                       /* "BM" */
+    fh.bfOffBits = sizeof fh + sizeof ih;
+    fh.bfSize    = fh.bfOffBits + (DWORD)n;
+    ih.biSize    = sizeof ih;
+    ih.biWidth   = w;
+    ih.biHeight  = h;
+    ih.biPlanes  = 1;
+    ih.biBitCount = 24;
+    ih.biCompression = BI_RGB;
+    ih.biSizeImage   = (DWORD)n;
+    ok = fwrite(&fh, sizeof fh, 1, o) == 1 &&
+         fwrite(&ih, sizeof ih, 1, o) == 1 &&
+         fwrite(bits, 1, (size_t)n, o) == (size_t)n;
+    fclose(o);
+    return ok;
+}
+
+static unsigned char *sb_bmp_load(const char *path, int *w, int *h) {
+    BITMAPFILEHEADER fh;
+    BITMAPINFOHEADER ih;
+    unsigned char *bits;
+    long n;
+    FILE *i = fopen(path, "rb");
+    if (!i) return NULL;
+    if (fread(&fh, sizeof fh, 1, i) != 1 || fread(&ih, sizeof ih, 1, i) != 1 ||
+        ih.biBitCount != 24 || ih.biWidth <= 0 || ih.biHeight <= 0) {
+        fclose(i); return NULL;
+    }
+    *w = (int)ih.biWidth;
+    *h = (int)ih.biHeight;
+    n = sb_stride(*w) * (*h);
+    bits = (unsigned char *)malloc((size_t)n);
+    if (!bits) { fclose(i); return NULL; }
+    if (fseek(i, (long)fh.bfOffBits, SEEK_SET) != 0 ||
+        fread(bits, 1, (size_t)n, i) != (size_t)n) {
+        free(bits); fclose(i); return NULL;
+    }
+    fclose(i);
+    return bits;
+}
+
+static void sb_compare(FILE *f, const char *path, int *checks);
+
 static int selftest(HINSTANCE inst, const char *path) {
     static const int SIZES[][2] = { { 640, 480 }, { 900, 700 },
                                     { LZ_GUI_MIN_CW, LZ_GUI_MIN_CH } };
@@ -9858,6 +10606,14 @@ static int selftest(HINSTANCE inst, const char *path) {
              g.part[LZ_GUI_SIDE_CAND] == NULL,
              "control exists: no model loaded yet, so the candidate "
              "panel does not exist yet either"); checks++;
+
+    /* The strip is captured HERE, not at the end: this is the one point
+       where the window is in its just-built state at a known size, so
+       the two runs compare like with like. Later the selftest walks the
+       degradation branches deliberately, and what the strip looks like
+       after that is not what either system shows a user. */
+    relayout(hwnd);
+    sb_compare(f, path, &checks);
 
     /* Two invariants about the REAL child list. g.part[] alone is not
        enough: a control created twice leaves the first instance orphaned
@@ -11232,16 +11988,22 @@ static int selftest(HINSTANCE inst, const char *path) {
             DWORD start = 0, end = 0;
             int want = (int)strlen(unique);
             SendMessage(tr, EM_GETSEL, (WPARAM)&start, (LPARAM)&end);
-            /* end == want + 1 is not a bug in the forwarding this check
-               tests: EM_SETSEL(0,-1) - what the command sends - lands
-               one past WM_GETTEXTLENGTH's count on a plain-text RichEdit
-               buffer, a documented RichEdit quirk reproduced by sending
-               that same message directly with no command involved. The
-               tolerance is exactly that one position, not an open-ended
-               "at least this much" that a real over-selection bug could
-               slip through. */
+            /* Two invariants: the control holds what was written into
+               it, and the selection covers all of that. The end may sit
+               past the length by at most one line ending - EM_SETSEL
+               (0,-1) reports the position after the buffer's final
+               break and WM_GETTEXTLENGTH does not count it, which is
+               len+1 on RichEdit 2.0 (a lone CR) and len+2 on 1.0
+               (CRLF). An under-selection still fails, and so does any
+               real over-selection. */
+            int ctrl = (int)SendMessage(tr, WM_GETTEXTLENGTH, 0, 0);
+            fprintf(f, "  selall start=%d end=%d want=%d ctrl=%d\n",
+                    (int)start, (int)end, want, ctrl);
+            st_check(f, ctrl == want,
+                     "edit: the transcript holds the whole conversation");
+            checks++;
             st_check(f, (int)start == 0 &&
-                        ((int)end == want || (int)end == want + 1),
+                        (int)end >= ctrl && (int)end <= ctrl + 2,
                      "edit: Select All selects the whole conversation");
             checks++;
         }
@@ -11443,6 +12205,212 @@ static int selftest(HINSTANCE inst, const char *path) {
     return st_fails ? 1 : 0;
 }
 
+static void sb_compare(FILE *f, const char *path, int *checks) {
+    {
+        HWND strip = g.part[LZ_GUI_STATUS];
+        int cw = 0, ch = 0;
+        unsigned char *shot = strip ? sb_capture(strip, &cw, &ch) : NULL;
+        int classic = lz_compat_classic();
+
+        /* The mapped lamp artwork, dumped so the c0c0c0-to-button-face
+           substitution can be checked rather than assumed. */
+        {
+            HDC ddc = CreateCompatibleDC(NULL);
+            BITMAPINFO lbi;
+            unsigned char *lb;
+            char lpath[MAX_PATH + 40];
+            memset(&lbi, 0, sizeof lbi);
+            lbi.bmiHeader.biSize = sizeof lbi.bmiHeader;
+            lbi.bmiHeader.biWidth = LZ_LAMP_PX;
+            lbi.bmiHeader.biHeight = LZ_LAMP_PX;
+            lbi.bmiHeader.biPlanes = 1;
+            lbi.bmiHeader.biBitCount = 24;
+            lbi.bmiHeader.biCompression = BI_RGB;
+            lb = (unsigned char *)malloc((size_t)(sb_stride(LZ_LAMP_PX) *
+                                                  LZ_LAMP_PX));
+            if (ddc && lb && g.lamp_bmp[LZ_LAMP_OFF]) {
+                if (GetDIBits(ddc, g.lamp_bmp[LZ_LAMP_OFF], 0, LZ_LAMP_PX,
+                              lb, &lbi, DIB_RGB_COLORS)) {
+                    sprintf(lpath, "%.*s.lamp-%s.bmp", MAX_PATH, path,
+                            lz_compat_classic() ? "classic" : "native");
+                    sb_bmp_write(lpath, lb, LZ_LAMP_PX, LZ_LAMP_PX);
+                    fprintf(f, "  lamp image -> %s\n", lpath);
+                }
+            }
+            if (lb) free(lb);
+            if (ddc) DeleteDC(ddc);
+        }
+        /* The native progress bar, driven to a known position and
+           captured on its own. This is the observation the 3.51
+           simulation gets built against - height, border, chunk width
+           and gap all have to come off a real one rather than memory. */
+        /* The SIMULATED bar, rendered on its own so it can be compared
+           with the native one captured just below. Driven to the same
+           40% the native probe uses. */
+        if (!g.progress && g.part[LZ_GUI_STATUS]) {
+            RECT sr, pr;
+            GetClientRect(g.part[LZ_GUI_STATUS], &sr);
+            if (sb_prog_rect(sr.bottom - sr.top, &pr)) {
+                int pw2 = pr.right - pr.left, ph2 = pr.bottom - pr.top;
+                HDC wdc = GetDC(g.part[LZ_GUI_STATUS]);
+                HDC mdc = wdc ? CreateCompatibleDC(wdc) : NULL;
+                BITMAPINFO bi2;
+                void *bits2 = NULL;
+                HBITMAP dib2, old2;
+                memset(&bi2, 0, sizeof bi2);
+                bi2.bmiHeader.biSize = sizeof bi2.bmiHeader;
+                bi2.bmiHeader.biWidth = pw2;
+                bi2.bmiHeader.biHeight = ph2;
+                bi2.bmiHeader.biPlanes = 1;
+                bi2.bmiHeader.biBitCount = 24;
+                bi2.bmiHeader.biCompression = BI_RGB;
+                dib2 = mdc ? CreateDIBSection(wdc, &bi2, DIB_RGB_COLORS,
+                                              &bits2, NULL, 0) : NULL;
+                if (wdc) ReleaseDC(g.part[LZ_GUI_STATUS], wdc);
+                if (dib2 && bits2) {
+                    RECT local;
+                    old2 = (HBITMAP)SelectObject(mdc, dib2);
+                    local.left = 0; local.top = 0;
+                    local.right = pw2; local.bottom = ph2;
+                    /* Pre-filled, because sb_prog_paint does NOT paint
+                       its own background - the strip has already filled
+                       the whole client with the button face by the time
+                       it runs. Without this the DIB's zero fill shows
+                       through as black and the capture reports a
+                       difference the screen does not have. */
+                    FillRect(mdc, &local, sb_brush(COLOR_BTNFACE));
+                    sb_prog_paint(mdc, &local, 40, 100);
+                    GdiFlush();
+                    {
+                        static char qpath[MAX_PATH + 40];
+                        sprintf(qpath, "%.*s.prog-sim.bmp", MAX_PATH, path);
+                        sb_bmp_write(qpath, (unsigned char *)bits2, pw2, ph2);
+                        fprintf(f, "  progress-sim %dx%d at 40%% -> %s\n",
+                                pw2, ph2, qpath);
+                    }
+                    SelectObject(mdc, old2);
+                    DeleteObject(dib2);
+                }
+                if (mdc) DeleteDC(mdc);
+            }
+        }
+        if (g.progress) {
+            RECT pr;
+            int pw, ph;
+            unsigned char *pshot;
+            /* No Show/Hide around this: the control is visible for the
+               life of the window now, and hiding it at the end of a
+               probe would leave the segment empty of its own well for
+               the rest of the run. Only the position is driven, and it
+               is put back afterwards. */
+            SendMessage(g.progress, LZ_PBM_SETRANGE, 0, MAKELPARAM(0, 100));
+            SendMessage(g.progress, LZ_PBM_SETPOS, (WPARAM)40, 0);
+            UpdateWindow(g.progress);
+            GetClientRect(g.progress, &pr);
+            pw = pr.right - pr.left; ph = pr.bottom - pr.top;
+            pshot = sb_capture(g.progress, &pw, &ph);
+            if (pshot) {
+                static char ppath[MAX_PATH + 40];
+                sprintf(ppath, "%.*s.prog-native.bmp", MAX_PATH, path);
+                sb_bmp_write(ppath, pshot, pw, ph);
+                fprintf(f, "  progress %dx%d at 40%% untheme=%d -> %s\n",
+                        pw, ph, g.progress_untheme, ppath);
+                free(pshot);
+            }
+            SendMessage(g.progress, LZ_PBM_SETPOS, (WPARAM)0, 0);
+        }
+        /* Geometry of every segment on both paths, so the simulated
+           rects get aligned to comctl32's own answers rather than to an
+           assumption about them. */
+        {
+            RECT sr, pc, pin;
+            GetClientRect(g.part[LZ_GUI_STATUS], &sr);
+            fprintf(f, "  strip client %dx%d p0=%d p1=%d\n",
+                    (int)(sr.right - sr.left), (int)(sr.bottom - sr.top),
+                    g_sb_p0, g_sb_p1);
+            if (g.status_is_sbar) {
+                int i;
+                for (i = 0; i < 4; i++) {
+                    RECT q;
+                    if (SendMessage(g.part[LZ_GUI_STATUS], LZ_SB_GETRECT,
+                                    (WPARAM)i, (LPARAM)&q))
+                        fprintf(f, "  part%d %d,%d..%d,%d (%dx%d)\n", i,
+                                (int)q.left, (int)q.top, (int)q.right,
+                                (int)q.bottom, (int)(q.right - q.left),
+                                (int)(q.bottom - q.top));
+                }
+                if (g.progress) {
+                    RECT w;
+                    GetWindowRect(g.progress, &w);
+                    MapWindowPoints(NULL, g.part[LZ_GUI_STATUS],
+                                    (POINT *)&w, 2);
+                    fprintf(f, "  ctrl  %d,%d..%d,%d (%dx%d)\n",
+                            (int)w.left, (int)w.top, (int)w.right,
+                            (int)w.bottom, (int)(w.right - w.left),
+                            (int)(w.bottom - w.top));
+                }
+            }
+            if (sb_prog_rect(sr.bottom - sr.top, &pc)) {
+                fprintf(f, "  simseg %d,%d..%d,%d (%dx%d)\n",
+                        (int)pc.left, (int)pc.top, (int)pc.right,
+                        (int)pc.bottom, (int)(pc.right - pc.left),
+                        (int)(pc.bottom - pc.top));
+                if (sb_prog_inner(&pc, &pin))
+                    fprintf(f, "  simbar %d,%d..%d,%d (%dx%d)\n",
+                            (int)pin.left, (int)pin.top, (int)pin.right,
+                            (int)pin.bottom, (int)(pin.right - pin.left),
+                            (int)(pin.bottom - pin.top));
+            }
+        }
+        st_check(f, shot != NULL,
+                 "statusbar: the strip renders into a supplied DC");
+        (*checks)++;
+        if (shot) {
+            static char mine[MAX_PATH + 40], other[MAX_PATH + 40];
+            sprintf(mine,  "%.*s.sb-%s.bmp", MAX_PATH, path,
+                    classic ? "classic" : "native");
+            sprintf(other, "%.*s.sb-%s.bmp", MAX_PATH, path,
+                    classic ? "native" : "classic");
+            st_check(f, sb_bmp_write(mine, shot, cw, ch),
+                     "statusbar: the strip image was written");
+            (*checks)++;
+            fprintf(f, "  strip %s %dx%d cells %d/%d -> %s\n",
+                    classic ? "simulated" : "comctl32", cw, ch,
+                    g_sb_p0, g_sb_p1, mine);
+            {
+                int ow = 0, oh = 0;
+                unsigned char *ref = sb_bmp_load(other, &ow, &oh);
+                if (!ref) {
+                    fprintf(f, "  no counterpart yet: run again with "
+                               "classic_ui=%d to produce %s\n",
+                            classic ? 0 : 1, other);
+                } else {
+                    /* Width must match - both strips span the client
+                       area, and a difference there is a layout fault
+                       rather than a drawing choice. Everything else is
+                       reported. */
+                    st_check(f, ow == cw,
+                             "statusbar: both strips span the same width");
+                    (*checks)++;
+                    if (ow == cw && oh == ch) {
+                        long n = sb_stride(cw) * ch, k, diff = 0;
+                        for (k = 0; k < n; k++)
+                            if (ref[k] != shot[k]) diff++;
+                        fprintf(f, "  pixel bytes differing: %ld / %ld "
+                                   "(%.1f%%)\n", diff, n,
+                                n ? (double)diff * 100.0 / (double)n : 0.0);
+                    } else {
+                        fprintf(f, "  heights differ: %d vs %d - compare "
+                                   "the two images by eye\n", ch, oh);
+                    }
+                    free(ref);
+                }
+            }
+            free(shot);
+        }
+    }
+}
+
 /* ------------------------------------------------------------ entry */
 
 static const char *selftest_path(const char *cmdline) {
@@ -11464,6 +12432,22 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmdline, int show) {
 
     (void)prev;
     g.inst = inst;
+
+    /* `classic_ui=1` forces the NT 3.51 appearance path here; see
+       gui/compat40.h for which answers it forces.
+       FIRST, ahead of the language block and the selftest: everything
+       after this asks compat40 questions, and one answered before the
+       switch is read is answered for the wrong system. Applying to the
+       selftest too is deliberate - that is how the degraded layout gets
+       assertions rather than only a screenshot. */
+    lz_compat_force_classic(lz_ini_get_int("classic_ui", 0));
+    /* Display-only debug aid; see g_dbg_prefill_ms. Clamped rather than
+       trusted: a negative or absurd value would either never advance or
+       divide the ramp into nothing. */
+    g_dbg_prefill_ms = lz_ini_get_int("debug_prefill_ms", 0);
+    if (g_dbg_prefill_ms < 0) g_dbg_prefill_ms = 0;
+    if (g_dbg_prefill_ms > 600000) g_dbg_prefill_ms = 600000;
+
     /* Both tables, one language. src/err.c defaults to ENGLISH, so
        without the second call the buttons would be Chinese while the
        engine's errbuf - which this window shows verbatim in the same

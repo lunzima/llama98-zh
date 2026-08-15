@@ -43,48 +43,74 @@ static HFONT    g_f_brand = NULL, g_f_rest = NULL;
 
 int lz_caption_can_paint(void)
 {
-    /* Always paint: the title bar self-draws on every platform, so a
-       human can see it on the dev box too. */
-    return 1;
+    /* Not on the 3.51 floor. The self-drawn bar is built from 4.0-era
+       metrics and button shapes; where those are absent it still draws,
+       and what it draws is furniture from the wrong era sitting on a
+       3.51 frame. The system caption is right there and is correct for
+       that system, so this hands the whole bar back rather than
+       approximating it.
+       Every self-draw decision in this file goes through here, so a 0
+       falls through to the original wndproc at each of them.
+       lz_os_has_40 also carries the classic_ui switch (compat40.h),
+       which is how this path gets looked at on a host. */
+    return lz_os_has_40();
 }
 
 /* ---- fonts ---- */
 
-/* Brand segment: Arial Bold Italic, height from the system caption font.
-   LZ_CAPTION_FALLBACK_FACE == 1 takes the pre-approved fallback branch -
-   lfFaceName left empty so GDI picks by charset, giving slanted SimSun.
-   Flip this one constant when the Win98 VM result is in. */
-#ifndef LZ_CAPTION_FALLBACK_FACE
-#define LZ_CAPTION_FALLBACK_FACE 0
-#endif
-
+/* Both caption fonts come from ONE LOGFONT.
+ *
+ * The brand segment is the italic one, and italic is the only thing that
+ * differs: face, charset and pitch are inherited from the system caption
+ * font, so the two halves of one title bar cannot be from two families.
+ * A hardcoded face cannot do that - it is either the wrong family beside
+ * the rest, or, if it has no glyphs for the running language, boxes. An
+ * ASCII face with ANSI_CHARSET fails both ways on a Chinese system.
+ *
+ * Synthesised obliques are accepted deliberately: SimSun has no true
+ * italic and GDI slants it. A slanted SimSun beside upright SimSun is
+ * one family; a real italic from another family is not.
+ *
+ * The fallback, when the system will not report a caption font, keeps
+ * that property by asking for nothing: an empty face with
+ * DEFAULT_CHARSET lets GDI pick the locale's own default, which is
+ * SimSun on a Chinese system and is language-correct without this file
+ * having to know the language. */
 static void build_fonts(void)
 {
     LOGFONTA lf;
 
-    if (g_f_brand) { DeleteObject(g_f_brand); g_f_brand = NULL; }
-    if (g_f_rest)  { DeleteObject(g_f_rest);  g_f_rest  = NULL; }
+    /* g_f_brand may ALIAS g_f_rest - see the last-resort at the bottom
+       of this function - so it is only deleted when it is its own
+       object, or the second DeleteObject frees a freed handle. */
+    if (g_f_brand && g_f_brand != g_f_rest) DeleteObject(g_f_brand);
+    g_f_brand = NULL;
+    if (g_f_rest) { DeleteObject(g_f_rest); g_f_rest = NULL; }
 
     if (!lz_caption_logfont(&lf)) {
         memset(&lf, 0, sizeof lf);
-        lf.lfHeight = -12;
+        lf.lfHeight  = -12;
+        lf.lfCharSet = DEFAULT_CHARSET;
     }
     g_f_rest = CreateFontIndirectA(&lf);
+    if (!g_f_rest) {
+        lf.lfFaceName[0] = '\0';
+        lf.lfCharSet = DEFAULT_CHARSET;
+        g_f_rest = CreateFontIndirectA(&lf);
+    }
 
-#if LZ_CAPTION_FALLBACK_FACE
-    lf.lfFaceName[0] = '\0';
-#else
-    lstrcpynA(lf.lfFaceName, "Arial", LF_FACESIZE);
-#endif
-    lf.lfItalic         = 1;
-    lf.lfWeight         = FW_BOLD;
-    lf.lfCharSet        = ANSI_CHARSET;
-    lf.lfPitchAndFamily = VARIABLE_PITCH;
+    lf.lfItalic = 1;
+    lf.lfWeight = FW_BOLD;
     g_f_brand = CreateFontIndirectA(&lf);
-    if (!g_f_brand) {              /* MSO95 has this same retry */
-        lf.lfPitchAndFamily = FIXED_PITCH;
+    if (!g_f_brand) {
+        /* Drop the face before the pitch: a family that cannot be had
+           italic is the likelier failure, and DEFAULT_CHARSET still
+           lands on the locale's font. */
+        lf.lfFaceName[0] = '\0';
+        lf.lfCharSet = DEFAULT_CHARSET;
         g_f_brand = CreateFontIndirectA(&lf);
     }
+    if (!g_f_brand) g_f_brand = g_f_rest ? g_f_rest : NULL;
 }
 
 /* ---- geometry: one copy, feeding both paint and hit-test ---- */
@@ -269,6 +295,17 @@ static void paint(HWND h, int active)
        the buttons, which is the half-way look. MSO95 does the same (draws
        everything, DrawFrameControl IAT 0x506e10ec). */
     {
+        /* The gradient's dark end is a DESIGN value, not a scheme
+           colour: black to the caption colour is Word 95's own title
+           bar, which is what this window imitates (this file's header
+           names the reference). The TEXT is fixed for the same reason -
+           it is the contrast partner of a background this code paints
+           itself, so COLOR_CAPTIONTEXT does not apply; that value is
+           chosen to sit on the SYSTEM's caption and is black on a light
+           scheme.
+           The system IS asked for c1, for the low-colour branch and for
+           the inverted branch - everything whose right answer depends on
+           the running machine rather than on the thing imitated. */
         COLORREF c0 = RGB(0, 0, 0), c1, text;
         int barw = (int)(bar.right - bar.left);
         int hi = lz_caption_hicolor();

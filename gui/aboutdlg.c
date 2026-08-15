@@ -188,8 +188,16 @@ static LRESULT CALLBACK abtproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                Drawn with two explicit pens; lz_draw_edge's etched edge
                does not render a visible line on this host. */
             if (g_div_y > 0) {
-                HPEN top = CreatePen(PS_SOLID, 1, RGB(160,160,160));
-                HPEN bot = CreatePen(PS_SOLID, 1, RGB(255,255,255));
+                /* The scheme's own shadow and highlight, not the two
+                   values they happen to have in the default scheme -
+                   160/160/160 and white are what COLOR_BTNSHADOW and
+                   COLOR_BTNHIGHLIGHT return there, so this reads the
+                   same and follows a changed scheme instead of
+                   contradicting it. */
+                HPEN top = CreatePen(PS_SOLID, 1,
+                                     GetSysColor(COLOR_BTNSHADOW));
+                HPEN bot = CreatePen(PS_SOLID, 1,
+                                     GetSysColor(COLOR_BTNHIGHLIGHT));
                 HPEN old = (HPEN)SelectObject(dc, top);
                 int x0 = LZ_GUI_DLG_MARGIN;
                 int x1 = ABT_W - LZ_GUI_DLG_MARGIN;

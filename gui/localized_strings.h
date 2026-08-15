@@ -108,6 +108,13 @@ typedef enum {
     LZ_STR_STATE_LOADING,
     LZ_STR_STATE_READY,
     LZ_STR_STATE_GENERATING,
+    /* Prefill is NOT generation - no token has been produced yet - and
+       it is NOT "the prompt" either. What gets forwarded depends on the
+       turn: the whole render on the first one, and with prefix reuse
+       only the new suffix on later ones. "Context" is the one word true
+       of all of them; naming the prompt would be wrong from turn two
+       onward, which is most of a conversation. */
+    LZ_STR_STATE_PREFILL,
     LZ_STR_STATE_CTX,                 /* status bar part 1: "context 137/2048" */
     /* The state word IS localised ("generating" in English); what stays
        fixed is the separator and the unit. U+00B7 (MIDDLE DOT) is in

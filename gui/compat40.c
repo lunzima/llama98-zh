@@ -59,6 +59,7 @@
  * shellapi.h's automatic include - so a file that wants Drag* has to
  * ask for it by name, same as commdlg.h and shlobj.h just above. */
 #include <shellapi.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* Resolved once. A GUI asks these questions on every repaint and every
@@ -207,6 +208,15 @@ static void build_font(int english) {
     }
 }
 
+/* Forced downgrade; contract in compat40.h. One flag rather than one per
+ * caller because "what can the running system do" is this file's job, so
+ * simulating a weaker system belongs at the same layer as detecting a
+ * real one. */
+static int g_force_classic;
+
+void lz_compat_force_classic(int on) { g_force_classic = on ? 1 : 0; }
+int  lz_compat_classic(void) { return g_force_classic; }
+
 static void probe(void) {
     DWORD v;
     HMODULE user32;
@@ -287,6 +297,12 @@ HICON lz_ui_icon_16(HINSTANCE inst) {
 const char *lz_statusbar_class(void) {
     typedef BOOL (WINAPI *IcexFn)(const void *);
     IcexFn icex;
+    /* Forced classic answers NULL before anything is cached, so the
+       caller takes the same branch NT 3.51 takes: no comctl32 status
+       bar, therefore the fallback strip. Checked ahead of g_sbar_class
+       so a switch flipped after something else already loaded comctl32
+       still degrades. */
+    if (g_force_classic) return NULL;
     if (g_sbar_class) return g_sbar_class;
     if (g_comctl == NULL)
         g_comctl = LoadLibraryA("comctl32.dll");
@@ -295,14 +311,26 @@ const char *lz_statusbar_class(void) {
     if (!icex) return NULL;
     /* INITCOMMONCONTROLSEX hand-rolled to avoid pulling commctrl.h
        into a file whose only other need for it is this one struct;
-       ICC_BAR_CLASSES = 0x4 (Win95 comctl32 4.0 already knows it). */
+       ICC_BAR_CLASSES = 0x4 and ICC_PROGRESS_CLASS = 0x20, both known to
+       Win95's comctl32 4.0. The progress class is registered in the same
+       breath as the bar: the prefill indicator lives inside the status
+       bar, so a program that has one and not the other has half a status
+       strip. */
     {
         DWORD icc[2];
         icc[0] = 8;                 /* dwSize */
-        icc[1] = 0x4;               /* dwICC = ICC_BAR_CLASSES */
+        icc[1] = 0x4 | 0x20;        /* ICC_BAR_CLASSES | ICC_PROGRESS_CLASS */
         if (icex(icc)) g_sbar_class = "msctls_statusbar32";
     }
     return g_sbar_class;
+}
+
+const char *lz_progress_class(void) {
+    /* Piggybacks on the status bar's own registration - one
+       InitCommonControlsEx call covers both classes (see its dwICC
+       above), so "is there a status bar" and "is there a progress bar"
+       have the same answer, and forced classic answers no to both. */
+    return lz_statusbar_class() ? "msctls_progress32" : NULL;
 }
 
 /* 0 on NT 3.51, where nothing is drawn: the dock groove and the status
@@ -311,6 +339,11 @@ const char *lz_statusbar_class(void) {
    above. */
 int lz_draw_edge(HDC dc, RECT *rc, unsigned edge, unsigned flags) {
     probe();
+    /* Forced classic draws nothing, which is what 3.51 does. This is one
+       of the two reasons the switch exists at all: the fallback's own
+       appearance has to be judged WITHOUT the bevels DrawEdge would
+       otherwise supply, and on a host they are supplied. */
+    if (g_force_classic) return 0;
     if (!p_DrawEdge || !dc || !rc) return 0;
     return p_DrawEdge(dc, rc, (UINT)edge, (UINT)flags) ? 1 : 0;
 }
@@ -421,7 +454,11 @@ int lz_caption_icon(HDC dc, HICON ic, int x, int y, int size)
     return p_DrawIconEx(dc, x, y, ic, size, size, 0, NULL, DI_NORMAL) ? 1 : 0;
 }
 
-int lz_os_has_40(void) { probe(); return g_major >= 4; }
+int lz_os_has_40(void) {
+    probe();
+    if (g_force_classic) return 0;
+    return g_major >= 4;
+}
 
 HFONT lz_ui_font(void) { probe(); return g_font; }
 
@@ -513,6 +550,22 @@ void lz_richedit_use_font(HWND h, HFONT f) {
 const char *lz_richedit_class(void) {
     probe();
     if (g_rich_class) return g_rich_class;
+    /* Forced classic skips 2.0 and takes the floor's control, which is
+       all NT 3.51 ships.
+       This one IS a functional capability, unlike the furniture the
+       switch otherwise forces, and it is included anyway because the
+       messages this front end sends - EM_EXLIMITTEXT, EM_EXSETSEL,
+       EM_SETCHARFORMAT, EM_GETCHARFORMAT, EM_REPLACESEL - all exist in
+       1.0 (compat40.h says so at this function's own declaration). The
+       transcript is where the floor's differences actually show, so a
+       switch that could not reach 1.0 could not answer the question it
+       exists for. riched32 absent falls through to the same NULL a
+       machine without either gets. */
+    if (g_force_classic) {
+        g_riched = LoadLibraryA("riched32.dll");
+        if (g_riched) { g_rich_class = "RichEdit"; return g_rich_class; }
+        return NULL;
+    }
     /* 2.0 first: it is what the deliverable targets, and 1.0 is the
        floor's consolation prize rather than a preference. */
     g_riched = LoadLibraryA("riched20.dll");
@@ -520,6 +573,76 @@ const char *lz_richedit_class(void) {
     g_riched = LoadLibraryA("riched32.dll");
     if (g_riched) { g_rich_class = "RichEdit"; return g_rich_class; }
     return NULL;
+}
+
+/* CreateMappedBitmap's three substitutions, done by hand.
+ *
+ * The fallback strip has lamps, so unmapped artwork is visible there: a
+ * ring of c0c0c0 around each bead on any system whose button face is
+ * something else (Windows 10 and 11 use f0f0f0).
+ *
+ * GetDIBits/SetDIBits rather than anything newer - both are Win3.x and
+ * present on every target. A failure at any step returns the unmapped
+ * bitmap, which is still better than none. */
+static HBITMAP map_bitmap_by_hand(HINSTANCE inst, int id) {
+    HBITMAP bm = LoadBitmapA(inst, MAKEINTRESOURCE(id));
+    BITMAP info;
+    BITMAPINFO bi;
+    HDC dc;
+    unsigned char *bits;
+    long stride, n, i, y;
+    COLORREF face, shadow, hilite;
+
+    if (!bm) return NULL;
+    if (!GetObjectA(bm, (int)sizeof info, &info)) return bm;
+    dc = CreateCompatibleDC(NULL);
+    if (!dc) return bm;
+
+    stride = ((long)info.bmWidth * 3 + 3) & ~3L;
+    n = stride * info.bmHeight;
+    bits = (unsigned char *)malloc((size_t)n);
+    if (!bits) { DeleteDC(dc); return bm; }
+
+    memset(&bi, 0, sizeof bi);
+    bi.bmiHeader.biSize        = sizeof bi.bmiHeader;
+    bi.bmiHeader.biWidth       = info.bmWidth;
+    bi.bmiHeader.biHeight      = info.bmHeight;
+    bi.bmiHeader.biPlanes      = 1;
+    bi.bmiHeader.biBitCount    = 24;
+    bi.bmiHeader.biCompression = BI_RGB;
+    if (!GetDIBits(dc, bm, 0, (UINT)info.bmHeight, bits, &bi, DIB_RGB_COLORS)) {
+        free(bits); DeleteDC(dc); return bm;
+    }
+
+    face   = GetSysColor(COLOR_BTNFACE);
+    shadow = GetSysColor(COLOR_BTNSHADOW);
+    hilite = GetSysColor(COLOR_BTNHIGHLIGHT);
+    /* PER ROW, not straight through the buffer. A 24bpp DIB row is
+       padded to a 4-byte boundary - 14 pixels are 42 bytes in a stride
+       of 44 - so a single i += 3 walk crosses the padding and every row
+       after the first is offset by two bytes. That does not look like a
+       crash; it looks like the artwork picking up channel-swapped
+       colours (f0f0c0, c0c0f0) along one edge, which is exactly how it
+       showed up.
+       The buffer is BGR per pixel; COLORREF is 0x00BBGGRR. */
+    for (y = 0; y < info.bmHeight; y++) {
+        unsigned char *row = bits + (long)y * stride;
+        for (i = 0; i < info.bmWidth; i++) {
+            unsigned char *px = row + i * 3;
+            COLORREF to;
+            if (px[2] == 0xC0 && px[1] == 0xC0 && px[0] == 0xC0)      to = face;
+            else if (px[2] == 0x80 && px[1] == 0x80 && px[0] == 0x80) to = shadow;
+            else if (px[2] == 0xFF && px[1] == 0xFF && px[0] == 0xFF) to = hilite;
+            else continue;
+            px[0] = (unsigned char)((to >> 16) & 0xFF);
+            px[1] = (unsigned char)((to >> 8) & 0xFF);
+            px[2] = (unsigned char)(to & 0xFF);
+        }
+    }
+    SetDIBits(dc, bm, 0, (UINT)info.bmHeight, bits, &bi, DIB_RGB_COLORS);
+    free(bits);
+    DeleteDC(dc);
+    return bm;
 }
 
 HBITMAP lz_mapped_bitmap(HINSTANCE inst, int id) {
@@ -547,7 +670,7 @@ HBITMAP lz_mapped_bitmap(HINSTANCE inst, int id) {
     }
     if (p_CreateMappedBitmap)
         return p_CreateMappedBitmap(inst, (LZ_IPTR_T)id, 0, NULL, 0);
-    return LoadBitmapA(inst, MAKEINTRESOURCE(id));
+    return map_bitmap_by_hand(inst, id);
 }
 
 int lz_ui_untheme(HWND h) {
@@ -667,6 +790,59 @@ int lz_scroll_at_end(HWND h) {
     }
 }
 
+/* ------------------------------------------------- common file dialogs
+ *
+ * The STYLE is asked at run time like every other capability here - the
+ * floor is 3.51, the look is 4.0:
+ *
+ *   4.0 and later  OFN_EXPLORER. Pinning those hosts to the 3.1 box
+ *                  would be a downgrade on every machine but the floor.
+ *   NT 3.51        no OFN_EXPLORER (comdlg32 there predates it), plus
+ *                  OFN_LONGNAMES.
+ *
+ * OFN_LONGNAMES applies to OLD-STYLE dialogs only: it is what makes
+ * that box use long filenames, and without it the 3.1-era dialog falls
+ * back to 8.3 for any name containing a space. Set only on the branch
+ * it means something on - an Explorer-style dialog ignores it, and
+ * passing it there would suggest otherwise.
+ *
+ * Both constants sit behind WINVER >= 0x0400 in commdlg.h, the level
+ * this file alone compiles at. Guarded anyway: headers stopping at 3.51
+ * must degrade to the old behaviour, not fail the build.
+ *
+ * OFN_NOCHANGEDIR is not differentiated - both styles otherwise leave
+ * the PROCESS in whatever directory was browsed to, and a drive-
+ * relative path like "C:" means "the current directory of drive C", so
+ * moving it changes what an already-returned path refers to.
+ * lz_pick_folder's root handling below is the other half of that. */
+#ifdef OFN_LONGNAMES
+#define LZ_OFN_LONG OFN_LONGNAMES
+#else
+#define LZ_OFN_LONG 0
+#endif
+#ifdef OFN_EXPLORER
+#define LZ_OFN_EXPL OFN_EXPLORER
+#else
+#define LZ_OFN_EXPL 0
+#endif
+#define LZ_OFN_COMMON (OFN_HIDEREADONLY | OFN_NOCHANGEDIR)
+
+/* The style bit for the running host. Callers must have run probe()
+ * first, which every one of them does as its first statement. */
+static DWORD ofn_style(void) {
+    return lz_os_has_40() ? (DWORD)LZ_OFN_EXPL : (DWORD)LZ_OFN_LONG;
+}
+
+/* Hand a dialog result to the caller, or fail. A path that does not fit
+ * is NOT truncated in: every caller opens what it gets back, and a
+ * truncated path names either a different file or none. */
+static int out_copy(char *out, int cap, const char *path) {
+    int n = (int)strlen(path);
+    if (n + 1 > cap) return 0;
+    memcpy(out, path, (size_t)n + 1);
+    return 1;
+}
+
 /* Build commdlg's double-NUL-terminated filter pair. */
 static int build_filter(char *buf, int cap, const char *desc,
                         const char *pattern) {
@@ -698,11 +874,10 @@ int lz_pick_save_file(HWND owner, const char *title, const char *filter_desc,
     ofn.nMaxFile = (DWORD)sizeof path;
     ofn.lpstrTitle = title;
     ofn.lpstrDefExt = default_ext;
-    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | LZ_OFN_COMMON |
+                ofn_style();
     if (!GetSaveFileNameA(&ofn)) return 0;
-    strncpy(out, path, (size_t)cap - 1);
-    out[cap - 1] = '\0';
-    return 1;
+    return out_copy(out, cap, path);
 }
 
 int lz_pick_open_file(HWND owner, const char *title, const char *filter_desc,
@@ -723,18 +898,23 @@ int lz_pick_open_file(HWND owner, const char *title, const char *filter_desc,
     ofn.lpstrFile = path;
     ofn.nMaxFile = (DWORD)sizeof path;
     ofn.lpstrTitle = title;
-    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | LZ_OFN_COMMON |
+                ofn_style();
     if (!GetOpenFileNameA(&ofn)) return 0;
-    strncpy(out, path, (size_t)cap - 1);
-    out[cap - 1] = '\0';
-    return 1;
+    return out_copy(out, cap, path);
 }
 
 int lz_pick_folder(HWND owner, const char *title, const char *filter_desc,
                    const char *filter_file, char *out, int cap) {
     probe();
 
-    if (p_SHBrowseForFolder && p_SHGetPathFromIDList) {
+    /* Forced classic skips the shell's folder browser even where it
+       resolved, so the branch below - the one NT 3.51 actually takes,
+       where the model FILE is picked and its directory kept - is
+       reachable on a host. Without this the switch would change the
+       file dialogs' style and leave the folder picker on a code path
+       the target never runs, which is the half most worth looking at. */
+    if (!g_force_classic && p_SHBrowseForFolder && p_SHGetPathFromIDList) {
         BROWSEINFOA bi;
         LPITEMIDLIST idl;
         char path[MAX_PATH];
@@ -755,9 +935,7 @@ int lz_pick_folder(HWND owner, const char *title, const char *filter_desc,
             }
         }
         if (!path[0]) return 0;
-        strncpy(out, path, (size_t)cap - 1);
-        out[cap - 1] = '\0';
-        return 1;
+        return out_copy(out, cap, path);
     }
 
     {
@@ -781,16 +959,27 @@ int lz_pick_folder(HWND owner, const char *title, const char *filter_desc,
         ofn.lpstrFile = path;
         ofn.nMaxFile = (DWORD)sizeof path;
         ofn.lpstrTitle = title;
-        ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
+        ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | LZ_OFN_COMMON |
+                    ofn_style();
         if (!GetOpenFileNameA(&ofn)) return 0;
 
         for (i = 0; path[i]; i++)
             if (path[i] == '\\' || path[i] == '/') cut = i;
-        if (cut <= 0) return 0;
-        path[cut] = '\0';
-        strncpy(out, path, (size_t)cap - 1);
-        out[cap - 1] = '\0';
-        return 1;
+        if (cut < 0) return 0;
+        /* THE SEPARATOR IS KEPT WHEN IT IS THE ROOT'S.
+           "C:\model.bin" cut at the separator leaves "C:", and "C:" is
+           not the root - it is DRIVE-RELATIVE, meaning "the current
+           directory of drive C", which is a different directory the
+           moment anything has moved it. The model then loads, or does
+           not, depending on where the process happened to be standing.
+           "\model.bin" has the same shape without the drive letter.
+           Both keep the trailing separator so the result names the root
+           it was picked from. (OFN_NOCHANGEDIR above stops the dialog
+           itself from being the thing that moves it - the two halves of
+           one hazard.) */
+        if (cut == 0 || (cut == 2 && path[1] == ':')) path[cut + 1] = '\0';
+        else path[cut] = '\0';
+        return out_copy(out, cap, path);
     }
 }
 

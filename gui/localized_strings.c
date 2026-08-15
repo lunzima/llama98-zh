@@ -121,6 +121,7 @@ static const char *const LZ_STR_EN[LZ_STR_COUNT] = {
     [LZ_STR_STATE_LOADING]        = "loading...",
     [LZ_STR_STATE_READY]          = "ready",
     [LZ_STR_STATE_GENERATING]     = "generating",
+    [LZ_STR_STATE_PREFILL]        = "processing context",
     [LZ_STR_STATE_CTX]            = "context",
     [LZ_STR_STATE_TOKCELL]        = "generating %d tok, %.1f tok/s",
 
@@ -282,6 +283,7 @@ static const char *const LZ_STR_ZH[LZ_STR_COUNT] = {
     [LZ_STR_STATE_LOADING]        = "加载中…",
     [LZ_STR_STATE_READY]          = "已加载",
     [LZ_STR_STATE_GENERATING]     = "生成中",
+    [LZ_STR_STATE_PREFILL]        = "处理上下文",
     [LZ_STR_STATE_CTX]            = "上下文",
     /* The ZH table DOES translate this one - the state word is ordinary
        Han and GBK-encodable. The cell uses a comma rather than a `·`
