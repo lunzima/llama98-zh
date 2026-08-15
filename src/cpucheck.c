@@ -239,14 +239,40 @@ static int cpu_brand_raw(char *out, int cap) {
    processor beyond 386/486/Pentium; a modern machine needs its real
    model name, which is exactly what these leaves carry. Returns the
    static buffer, or "" when the CPU has none. */
+/* Printable ASCII, excluding the space. Used only to decide where the
+   brand string's real text begins and ends, so a space counts as
+   trimmable at the edges while the interior keeps its spaces - the name
+   itself has them ("Intel(R) Core(TM) ..."). */
+static int brand_printable(char c) {
+    unsigned char u = (unsigned char)c;
+    return u > ' ' && u < 0x7F;
+}
+
 const char *lz_cpu_brand(void) {
     static char buf[64];
-    int n;
-    if (buf[0]) return buf;
+    static int  done;
+    int lo = 0, hi, n;
+
+    if (done) return buf;
+    done = 1;                    /* a CPU without a brand string caches
+                                    the empty answer too, rather than
+                                    re-running CPUID on every call */
     if (!cpu_brand_raw(buf, (int)sizeof buf)) { buf[0] = '\0'; return buf; }
-    buf[48] = '\0';
-    /* The brand string is right-padded with spaces; trim them. */
+    buf[48] = '\0';              /* cpu_brand_raw fills exactly 48 raw
+                                    bytes and guarantees no terminator */
+
+    /* BOTH ENDS, and every unprintable byte - not just trailing spaces.
+       These 48 bytes come straight out of the CPUID registers with no
+       sanitation of any kind: Intel LEFT-pads the name ("          Intel(R)
+       Core(TM) ..."), so trimming only the right leaves the padding in,
+       and a part that fills the leaves with something other than spaces
+       puts control bytes at either end. Those draw as boxes in the About
+       window, which is where this was noticed. */
     n = (int)strlen(buf);
-    while (n > 0 && buf[n - 1] == ' ') buf[--n] = '\0';
+    while (lo < n && !brand_printable(buf[lo])) lo++;
+    hi = n;
+    while (hi > lo && !brand_printable(buf[hi - 1])) hi--;
+    if (lo > 0) memmove(buf, buf + lo, (size_t)(hi - lo));
+    buf[hi - lo] = '\0';
     return buf;
 }

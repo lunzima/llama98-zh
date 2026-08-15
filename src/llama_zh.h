@@ -26,6 +26,15 @@
 typedef void (*LZTokenSink)(const char *bytes, int len, void *ctx);
 /* return 0 to request stop (used by the GUI's stop button) */
 typedef int  (*LZShouldContinue)(void *ctx);
+/* Prefill progress. Called between prefill slices with how many prompt
+   tokens have been forwarded and how many there are in total.
+   `ctx` is the SAME pointer the sink and cont are given - one context
+   for all three, which is the convention gui/worker.h already records
+   for the first two; a fourth lifetime to keep straight buys nothing.
+   Fires on whichever thread generation runs on, so a GUI handler
+   records the numbers and lets its own timer draw them - it must not
+   touch a control, the same rule the token path follows. */
+typedef void (*LZProgress)(int done, int total, void *ctx);
 
 /* Defined in forward.h: LZRunState, lz_forward.
    Defined in model.h: LZModel, LZModelConfig.
@@ -119,6 +128,19 @@ typedef struct {
        which matters because the defect it exists for (a missed cross-
        token match) was silent from the wire. */
     int    out_stop;
+
+    /* Prefill progress, and the only way to interrupt a prefill.
+       NULL (the default) is off, and off MUST be bit-identical to this
+       same struct that never carried the field - the same contract
+       spec_k = 0 and look_width <= 1 already have.
+
+       It exists because prefill was one batched lz_forward_batch call
+       with no callback of any kind reachable from inside it: cont() is
+       only reached from the per-generated-token path, so a long prompt
+       on a Pentium could report nothing AND could not be stopped. The
+       hook that reports progress is the hook that makes cancelling
+       possible, which is why this is not merely an indicator. */
+    LZProgress on_prefill;
 
     /* Speculative decoding (MTP draft head, generate.c's lz_spec_round).
        0 (default, lz_gen_opts_defaults) = off, and OFF MUST BE BIT-

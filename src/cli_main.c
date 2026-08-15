@@ -21,14 +21,32 @@
 #include "compat.h"
 #include "forward.h"
 #include "chat.h"
+#include "cli_attr.h" /* console attributes for the styles */
+#include "stream.h"   /* LZStream - see console_out */
 #include "session.h"  /* LZSession conversation core (Task 3) */
 #include "llama_zh.h"
 #include "model.h"
 #include "cpucheck.h" /* lz_cpu_check - the Socket 7 floor */
 #include "gbk.h"      /* console code page, see console_out */
 #include "unicode.h"  /* lz_utf8_valid - the console/argv UTF-8 sniff */
+#include "lfn.h"      /* lz_lfn_path - see tok_path_for below */
 #include "ops.h"      /* lz_prefetch_select for --prefetch */
 #include "tokenizer.h"
+
+/* Where this run's tokenizer.json actually lives (src/lfn.h). Shared by
+ * the three call sites below so the rule cannot drift between them.
+ *
+ * Returns NULL with errbuf filled, so the caller reports the resolver's
+ * message - which names the directory and says both forms were tried -
+ * rather than a bare "cannot open file". --tokenizer bypasses this
+ * entirely: second-guessing an explicit path would make the override
+ * useless for pointing at a short name on purpose. */
+static const char *tok_path_for(const char *dir, char *buf, int cap,
+                                char *errbuf, int errlen) {
+    if (lz_lfn_path(dir, "tokenizer.json", buf, cap, errbuf, errlen) != 0)
+        return NULL;
+    return buf;
+}
 
 /* Default context limit: the model supports up to max_position_embeddings
    (262144 on 0.8B), but KV cache is allocated for the actual need, capped
@@ -155,6 +173,8 @@ static void usage(void) {
     "                   prompt + think tag).\n"
     "  -n N             Max new tokens (default 128)\n"
     "  --seed N         RNG seed (default 1; 0 = time)\n"
+    "  --color M        Console attributes for Markdown styles:\n"
+    "                   auto|on|off (default auto = on when a console).\n"
     "  --console C      Console code page: utf8 or gbk (default: gbk on\n"
     "                   DOS, utf8 elsewhere). Display only.\n"
     "  --temp T         Temperature (default 0.6; 0 = greedy)\n"
@@ -485,54 +505,141 @@ static int console_is_tty(void) {
  * static, not stack: iron law six rule 4, and the tail has to survive
  * between calls anyway. Single-threaded by construction - the CLI has
  * one generation at a time. */
-static void console_out(const char *bytes, int len) {
-    static char pend[8];
-    static int  npend;
-    static char in[1024 + 8];
-    static char out[4096];
-    int off = 0;
+/* The display sink LZStream drives. Styles arrive here and are ignored
+   for now; the attribute mapper is what will consume them. */
+/* ------------------------------------------------- table alignment
+ *
+ * LZStream turns a Markdown row's inner pipes into tabs and marks the
+ * run LZ_STYLE_TABLE. A tab on a console advances to the next 8-column
+ * stop, which aligns a table only while every cell is under eight
+ * columns wide - and a Chinese cell is two columns per character, so
+ * that runs out immediately.
+ *
+ * Real alignment needs every column's width, which is not knowable
+ * until the table ends, and the stream is incremental by construction.
+ * So the TABLE runs are BUFFERED here, in the front end, and emitted
+ * when the style bit clears. stream.c is untouched: this is a display
+ * decision and the GUI makes a different one (RichEdit tab stops), which
+ * is exactly the kind of thing that belongs on this side of the sink.
+ *
+ * Width is counted in COLUMNS, not bytes: a GBK lead byte starts a
+ * double-wide character. cli_main.c's own header says the CLI aligns
+ * with fixed-width fields and no CJK width tricks - that holds for the
+ * banner tables it was written about, which are ASCII. A Markdown table
+ * carrying Chinese cannot be aligned without counting them, and getting
+ * it wrong is visible on every row. */
+#define LZ_TBL_BYTES 4096
+#define LZ_TBL_COLS  16
 
-    /* A CONSOLE code page applies to a console. Redirected output
-       stays UTF-8 - the same decision lz_init_stdout makes when it
-       chooses binary mode, and it has to be the same decision or the
-       two disagree about what a redirected stream is. Cached: isatty
-       cannot change under a running process, and this is called once
-       per generated token.
-       Measured while getting this wrong: with the tty test missing,
-       `--prompt` redirected to a file came back GBK, which breaks
-       every gate that reads the CLI's text output. */
-    if (!g_console_gbk || !console_is_tty()) {
-        fwrite(bytes, 1, (size_t)len, stdout);
-        fflush(stdout);
+static char g_tbl[LZ_TBL_BYTES];
+static int  g_tbl_n;
+static int  g_tbl_over;         /* the table outgrew the buffer */
+
+/* Display columns of a GBK byte run. A lead byte (0x81..0xFE) followed
+   by anything is one double-wide character; everything else is one
+   column. Bytes are counted, not characters, so a truncated pair at the
+   end still advances by one rather than looping. */
+static int tbl_cols(const char *p, int n) {
+    int i = 0, w = 0;
+    while (i < n) {
+        unsigned char c = (unsigned char)p[i];
+        if (c >= 0x81 && c <= 0xFE && i + 1 < n) { w += 2; i += 2; }
+        else { w += 1; i += 1; }
+    }
+    return w;
+}
+
+/* Emit the buffered table, padding every cell to its column's width.
+   A row with more cells than the widths array holds simply stops being
+   padded past that point - the text is still all there, which is the
+   right failure for a display aid. */
+static void tbl_flush(void) {
+    int width[LZ_TBL_COLS];
+    int i, c, start, col;
+
+    if (g_tbl_n <= 0) { g_tbl_over = 0; return; }
+    if (g_tbl_over) {          /* too big to align; print it as it came */
+        lz_attr_write(g_tbl, g_tbl_n, LZ_STYLE_TABLE);
+        g_tbl_n = 0; g_tbl_over = 0;
         return;
     }
-    while (off < len || npend) {
-        int take = len - off;
-        int n, used = 0;
-        if (take > (int)sizeof in - npend) take = (int)sizeof in - npend;
-        if (npend) memcpy(in, pend, (size_t)npend);
-        if (take > 0) memcpy(in + npend, bytes + off, (size_t)take);
-        n = npend + take;
-        npend = 0;
-        off += take;
-        {
-            int wrote = lz_gbk_from_utf8(in, n, out, (int)sizeof out, &used);
-            if (wrote > (int)sizeof out - 1) wrote = (int)sizeof out - 1;
-            if (wrote > 0) fwrite(out, 1, (size_t)wrote, stdout);
+    for (i = 0; i < LZ_TBL_COLS; i++) width[i] = 0;
+    /* Pass one: the widest cell in each column. */
+    start = 0; col = 0;
+    for (i = 0; i <= g_tbl_n; i++) {
+        int end = (i == g_tbl_n) || g_tbl[i] == '\t' || g_tbl[i] == '\n';
+        if (!end) continue;
+        if (col < LZ_TBL_COLS) {
+            int w = tbl_cols(g_tbl + start, i - start);
+            if (w > width[col]) width[col] = w;
         }
-        /* Whatever the converter would not consume is an incomplete
-           character. Anything longer than the buffer can hold is not
-           incomplete, it is a converter that made no progress, and
-           dropping it is better than looping forever. */
-        if (used < n) {
-            int rest = n - used;
-            if (rest <= (int)sizeof pend) {
-                memcpy(pend, in + used, (size_t)rest);
-                npend = rest;
-            }
-        }
-        if (take == 0) break;      /* only the tail was left; it stays */
+        col = (i < g_tbl_n && g_tbl[i] == '\n') ? 0 : col + 1;
+        start = i + 1;
     }
+    /* Pass two: write each cell, then pad it out to its column. The
+       separator is two spaces so adjacent columns do not touch. */
+    start = 0; col = 0;
+    for (i = 0; i <= g_tbl_n; i++) {
+        int end = (i == g_tbl_n) || g_tbl[i] == '\t' || g_tbl[i] == '\n';
+        if (!end) continue;
+        lz_attr_write(g_tbl + start, i - start, LZ_STYLE_TABLE);
+        if (i < g_tbl_n && g_tbl[i] == '\t') {
+            int pad = (col < LZ_TBL_COLS ? width[col] : 0)
+                    - tbl_cols(g_tbl + start, i - start);
+            for (c = 0; c < pad + 2; c++) lz_attr_write(" ", 1, LZ_STYLE_TABLE);
+            col++;
+        } else if (i < g_tbl_n) {          /* the row's newline */
+            lz_attr_write("\n", 1, LZ_STYLE_TABLE);
+            col = 0;
+        }
+        start = i + 1;
+    }
+    g_tbl_n = 0;
+}
+
+static void cli_stream_sink(void *ud, const char *gbk, int n, int style) {
+    (void)ud;
+    if (style & LZ_STYLE_TABLE) {
+        if (g_tbl_n + n <= LZ_TBL_BYTES) {
+            memcpy(g_tbl + g_tbl_n, gbk, (size_t)n);
+            g_tbl_n += n;
+        } else {
+            g_tbl_over = 1;                /* flushed unaligned below */
+        }
+        return;
+    }
+    if (g_tbl_n) tbl_flush();
+    lz_attr_write(gbk, n, style);
+}
+
+static void console_out(const char *bytes, int len) {
+    /* One stream for the process. Single-threaded by construction - the
+       CLI runs one generation at a time - and it has to persist between
+       calls anyway, since a <think> tag or a UTF-8 sequence split across
+       two chunks is precisely what it exists to carry. */
+    static LZStream st;
+    static int inited;
+
+    if (!inited) {
+        /* The display encoding is decided once, here, from the same two
+           facts console_out used to branch on directly: the --console
+           setting and whether stdout is still a console. A redirected
+           stream stays UTF-8, the decision lz_init_stdout already makes
+           when it chooses binary mode - the two have to agree or they
+           disagree about what a redirected stream is.
+           Measured while getting this wrong: with the tty test missing,
+           `--prompt` redirected to a file came back GBK, which breaks
+           every gate that reads the CLI's text output. */
+        lz_stream_utf8_out(!g_console_gbk || !console_is_tty());
+        lz_stream_init(&st);
+        inited = 1;
+    }
+    /* BOTH paths go through the stream now. The hand-rolled UTF-8
+       boundary buffer that used to sit here was a second implementation
+       of what LZ_STREAM_PEND already does - and because the redirected
+       path skipped it entirely, a </think> tag reached a piped file
+       verbatim while the console never saw one. */
+    lz_stream_push(&st, bytes, len, cli_stream_sink, NULL);
     fflush(stdout);
 }
 
@@ -734,6 +841,7 @@ int main(int argc, char **argv) {
     double t0, t1;
 
     lz_init_stdout();
+    lz_attr_mode("auto");
 
     /* Before anything else touches the CPU. The floor is Socket 7, and
        the two things that are actually required - CPUID and an FPU -
@@ -817,6 +925,15 @@ int main(int argc, char **argv) {
         /* Consumed here too, so it is not reported as unknown - the
            value was already read by the pre-scan above. */
         if (strcmp(a, "--console") == 0 && i + 1 < argc) i++;
+        else if (strcmp(a, "--color") == 0 && i + 1 < argc) {
+            /* The mode actually in effect is what gets set, not the
+               one asked for: "on" where stdout is not a console
+               degrades to off. */
+            if (!lz_attr_mode(argv[++i])) {
+                printf("--color: unknown mode (auto|on|off)\n");
+                return 2;
+            }
+        }
         else if (strcmp(a, "--check") == 0)   only_check = 1;
         else if (strcmp(a, "--tensors") == 0) list_tensors = 1;
         else if (strcmp(a, "--stats") == 0)   want_stats = 1;
@@ -1436,8 +1553,12 @@ int main(int argc, char **argv) {
         double ms = 0.0;
 
         if (!tok_path) {
-            snprintf(tpath, sizeof(tpath), "%s/tokenizer.json", dir);
-            tok_path = tpath;
+            tok_path = tok_path_for(dir, tpath, (int)sizeof tpath,
+                                    err, sizeof(err));
+            if (!tok_path) {
+                printf("Tokenizer load failed: %s\n", err);
+                goto fail;
+            }
         }
         printf("\nTokenizer      %s\n", tok_path);
         t0 = lz_time_ms();
@@ -1638,8 +1759,12 @@ int main(int argc, char **argv) {
 
         static char tpath[1024];
         if (!tok_path) {
-            snprintf(tpath, sizeof(tpath), "%s/tokenizer.json", dir);
-            tok_path = tpath;
+            tok_path = tok_path_for(dir, tpath, (int)sizeof tpath,
+                                    err, sizeof(err));
+            if (!tok_path) {
+                printf("Tokenizer load failed: %s\n", err);
+                goto fail;
+            }
         }
         if (lz_tokenizer_load(&tok, tok_path, err, sizeof(err)) != 0) {
             printf("Tokenizer load failed: %s\n", err);
@@ -1699,8 +1824,12 @@ int main(int argc, char **argv) {
         int seq;
 
         if (!tok_path) {
-            snprintf(tpath, sizeof(tpath), "%s/tokenizer.json", dir);
-            tok_path = tpath;
+            tok_path = tok_path_for(dir, tpath, (int)sizeof tpath,
+                                    err, sizeof(err));
+            if (!tok_path) {
+                printf("Tokenizer load failed: %s\n", err);
+                goto fail;
+            }
         }
         printf("\nTokenizer      %s\n", tok_path);
         if (lz_tokenizer_load(&tok, tok_path, err, sizeof(err)) != 0) {

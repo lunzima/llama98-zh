@@ -7,6 +7,7 @@
 
 #include "compat.h"
 #include "err.h"
+#include "lfn.h"
 #include "model.h"
 
 static void qerr(char *errbuf, int errlen, LZErr code, ...) {
@@ -890,20 +891,19 @@ int lz_open(LZModel *m, const char *dir, char *errbuf, int errlen) {
     memset(&bc, 0, sizeof(bc));
     if (errbuf && errlen > 0) errbuf[0] = '\0';
 
-    /* mixed-precision bin preferred: if model.bin exists, load everything at once */
-    snprintf(path, sizeof(path), "%s/model.bin", dir);
-    {
-        FILE *probe = fopen(path, "rb");
-        if (probe) {
-            fclose(probe);
-            return lz_open_bin(m, dir, errbuf, errlen);
-        }
-    }
+    /* mixed-precision bin preferred: if model.bin exists, load everything
+       at once. Resolved rather than fopen'd directly (src/lfn.h): this
+       probe decides between the bin and safetensors loaders, so a wrong
+       "no" sends the whole load down the other path. */
+    if (lz_lfn_exists(dir, "model.bin"))
+        return lz_open_bin(m, dir, errbuf, errlen);
 
-    snprintf(path, sizeof(path), "%s/config.json", dir);
+    if (lz_lfn_path(dir, "config.json", path, (int)sizeof path,
+                    errbuf, errlen) != 0) return 1;
     if (lz_load_config(&m->config, path, errbuf, errlen) != 0) return 1;
 
-    snprintf(path, sizeof(path), "%s/model.safetensors", dir);
+    if (lz_lfn_path(dir, "model.safetensors", path, (int)sizeof path,
+                    errbuf, errlen) != 0) return 1;
     if (lz_st_open(&m->st, path, errbuf, errlen) != 0) return 1;
 
     if (detect_prefix(m, errbuf, errlen) != 0) goto fail;
@@ -1183,7 +1183,10 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
     int i;
     long long n_params = 0;
 
-    snprintf(path, sizeof(path), "%s/model.bin", dir);
+    /* lz_open's probe already proved this name opens, so a failure here
+       is a race and keeps LZ_ERR_BIN_OPEN's wording. */
+    if (lz_lfn_path(dir, "model.bin", path, (int)sizeof path,
+                    errbuf, errlen) != 0) return 1;
     m->bin_file = fopen(path, "rb");
     if (!m->bin_file) {
         qerr(errbuf, errlen, LZ_ERR_BIN_OPEN, path);

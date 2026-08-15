@@ -165,6 +165,11 @@ typedef struct {
     int  quote;
 } LZStream;
 
+/* Emit UTF-8 instead of GBK, for a console or a redirected stream that
+   is not GBK. Process-wide and set once at startup - see stream.c for
+   why it is not per-stream. Off (GBK) unless set. */
+void lz_stream_utf8_out(int on);
+
 void lz_stream_init(LZStream *s);
 
 /* Feed UTF-8. Emits zero or more runs through `sink`. Whatever cannot be

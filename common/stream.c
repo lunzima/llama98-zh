@@ -67,10 +67,26 @@ static int seq_len(unsigned char c0) {
     return 1;
 }
 
+/* Display encoding for every stream in this process. GBK by default,
+   which is what the Win9x/DOS display boundary needs.
+   PROCESS-WIDE rather than per-stream, and that is a real limitation
+   stated rather than hidden: emit() is reached from thirty-odd sites
+   that carry the sink but not the stream, and threading a field through
+   all of them to express a choice no front end makes twice would be a
+   large mechanical change for no expressiveness. Each front end here
+   runs one stream and picks its encoding once at startup.
+   NOT a way to convert back: a codepoint GBK cannot represent has
+   already become '?', so UTF-8 out means the bytes never went through
+   GBK at all. */
+static int g_utf8_out;
+
+void lz_stream_utf8_out(int on) { g_utf8_out = on ? 1 : 0; }
+
 static void emit(const char *utf8, int len, int style,
                  LZStreamSink sink, void *ud) {
     int n;
     if (len <= 0 || !sink) return;
+    if (g_utf8_out) { sink(ud, utf8, len, style); return; }
     /* GBK is never longer than the UTF-8 it came from, and the caller
        below caps a run at LZ_STREAM_RUN_MAX input bytes, so the output
        always fits. */

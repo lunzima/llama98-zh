@@ -15,6 +15,7 @@
 
 #include "compat.h"
 #include "http.h"
+#include "lfn.h"
 #include "net.h"
 #include "openai.h"
 
@@ -66,7 +67,11 @@ int main(int argc, char **argv) {
     if (lz_read_weights(&m, err, sizeof(err)) != 0) {
         printf("weights: %s\n", err); lz_free(&m); return 1;
     }
-    snprintf(tokpath, sizeof(tokpath), "%s/tokenizer.json", dir);
+    /* Resolved, not appended - see src/lfn.h. */
+    if (lz_lfn_path(dir, "tokenizer.json", tokpath, (int)sizeof tokpath,
+                    err, sizeof(err)) != 0) {
+        printf("tokenizer: %s\n", err); lz_free(&m); return 1;
+    }
     if (lz_tokenizer_load(&tok, tokpath, err, sizeof(err)) != 0) {
         printf("tokenizer: %s\n", err); lz_free(&m); return 1;
     }

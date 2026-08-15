@@ -107,6 +107,11 @@ EXPORTS
   ; CLI-referenced selectors that must be exported for the DLL form.
   lz_prefetch_select
   lz_read_file
+  ; Long-file-name resolution (src/lfn.h). lz_lfn_path is CLI-referenced
+  ; (cli_main.c's tok_path_for); lz_lfn_exists joins it so a ctypes gate
+  ; can exercise the 8.3 matcher through both forms.
+  lz_lfn_path
+  lz_lfn_exists
   ; MTP/speculative-sampling debug probes (defined in forward.c and
   ; generate.c, referenced by cli_main.c). Must be exported explicitly
   ; in the DLL form (local: * swallows them). These are data symbols

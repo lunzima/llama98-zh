@@ -16,7 +16,7 @@
 # The engine body. net/http/openai are the server and are deliberately
 # NOT here: they are not in the CLI or DOS binary either, and there are
 # no sockets on the target machines.
-ENG := err compat json safetensors model ops forward sampler generate \
+ENG := err compat lfn json safetensors model ops forward sampler generate \
        tokenizer unicode chat gbk cpucheck
 SRV := net http openai
 GUI := main layout localized_strings worker modelload session compat40 \
@@ -63,8 +63,8 @@ serve: kunkun98-serve
 # cli_main.c's -i loop runs on the shared LZSession core (common/session.c),
 # a front-end helper deliberately outside $(ENG) - so this target lists it
 # explicitly with -Icommon, exactly as the Watcom CLI/DOS builds do.
-llama98: $(ENG_SRCS) common/session.c src/cli_main.c
-	$(CC) $(X86_64_CFLAGS) -Icommon -o $@ $(ENG_SRCS) common/session.c src/cli_main.c -lm
+llama98: $(ENG_SRCS) common/session.c common/stream.c src/cli_attr.c src/cli_main.c
+	$(CC) $(X86_64_CFLAGS) -Icommon -o $@ $(ENG_SRCS) common/session.c common/stream.c src/cli_attr.c src/cli_main.c -lm
 
 kunkun98-serve: $(ENG_SRCS) $(SRV_SRCS) src/server_main.c
 	$(CC) $(X86_64_CFLAGS) -o $@ $^ -lm $(HTTP_LIBS)
@@ -188,8 +188,10 @@ watcom-cli:
 	    "$(WCC)" $(CLI_FLAGS) $(INC_CLI) -fo="$(CLI_OBJ)/$$f.obj" "src/$$f.c"; \
 	done
 	@"$(WCC)" $(CLI_FLAGS) $(INC_CLI) -fo="$(CLI_OBJ)/common_session.obj" common/session.c
+	@"$(WCC)" $(CLI_FLAGS) $(INC_CLI) -fo="$(CLI_OBJ)/common_stream.obj" common/stream.c
 	@"$(WCC)" $(CLI_FLAGS) $(INC_CLI) -fo="$(CLI_OBJ)/_main.obj" src/cli_main.c
 	@"$(WCC)" $(CLI_FLAGS) $(INC_CLI) -fo="$(CLI_OBJ)/_argv.obj" src/cli_argv.c
+	@"$(WCC)" $(CLI_FLAGS) $(INC_CLI) -fo="$(CLI_OBJ)/_attr.obj" src/cli_attr.c
 	@{ \
 	    echo "format windows nt"; \
 	    echo "runtime console"; \
@@ -199,8 +201,10 @@ watcom-cli:
 	    echo "libpath $(LIBROOT)"; \
 	    $(foreach f,$(ENG),echo "file $(CLI_OBJ)/$f.obj";) \
 	    echo "file $(CLI_OBJ)/common_session.obj"; \
+	    echo "file $(CLI_OBJ)/common_stream.obj"; \
 	    echo "file $(CLI_OBJ)/_main.obj"; \
 	    echo "file $(CLI_OBJ)/_argv.obj"; \
+	    echo "file $(CLI_OBJ)/_attr.obj"; \
 	    echo "library clib3r, math387r, kernel32, user32, advapi32"; \
 	} > "$(CLI_OBJ)/cli.lnk"
 	"$(WLINK)" @"$(CLI_OBJ)/cli.lnk"
@@ -226,8 +230,10 @@ watcom-dos:
 	    "$(WCC)" $(DOS_FLAGS) $(INC_DOS) -fo="$(DOS_OBJ)/$$f.obj" "src/$$f.c"; \
 	done
 	@"$(WCC)" $(DOS_FLAGS) $(INC_DOS) -fo="$(DOS_OBJ)/common_session.obj" common/session.c
+	@"$(WCC)" $(DOS_FLAGS) $(INC_DOS) -fo="$(DOS_OBJ)/common_stream.obj" common/stream.c
 	@"$(WCC)" $(DOS_FLAGS) $(INC_DOS) -fo="$(DOS_OBJ)/_main.obj" src/cli_main.c
 	@"$(WCC)" $(DOS_FLAGS) $(INC_DOS) -fo="$(DOS_OBJ)/_argv.obj" src/cli_argv.c
+	@"$(WCC)" $(DOS_FLAGS) $(INC_DOS) -fo="$(DOS_OBJ)/_attr.obj" src/cli_attr.c
 	@{ \
 	    echo "format os2 le"; \
 	    echo "option stub=$(BINW)\\$(DOS_STUB)"; \
@@ -238,8 +244,10 @@ watcom-dos:
 	    echo "option stack=262144"; \
 	    $(foreach f,$(ENG),echo "file $(DOS_OBJ)/$f.obj";) \
 	    echo "file $(DOS_OBJ)/common_session.obj"; \
+	    echo "file $(DOS_OBJ)/common_stream.obj"; \
 	    echo "file $(DOS_OBJ)/_main.obj"; \
 	    echo "file $(DOS_OBJ)/_argv.obj"; \
+	    echo "file $(DOS_OBJ)/_attr.obj"; \
 	    echo "library clib3r, math387r"; \
 	} > "$(DOS_OBJ)/clidos.lnk"
 	"$(WLINK)" @"$(DOS_OBJ)/clidos.lnk"

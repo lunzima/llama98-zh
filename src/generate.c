@@ -1344,6 +1344,64 @@ static int gen_emit_token(int next, int sampled,
     return 0;
 }
 
+/* Prefill, in slices, so it can report where it is and be stopped.
+ *
+ * One function rather than the same edit at each of the three prefill
+ * branches - they only differ in what happens to the MTP head
+ * afterwards, and the body-prefill they share has no business being
+ * spelled out three times.
+ *
+ * SLICES ARE A MULTIPLE OF s->nt_cap. lz_forward_batch chunks by that
+ * width internally, so a slice that is not a multiple would make
+ * ceil(n_i/T) sum to more than ceil(n/T) and change lz_debug_n_chunks -
+ * the very counter that exists to prove the batching did what it said.
+ * The RESULT is unaffected at any slicing, which is not an assumption
+ * here but this project's standing "--batch 1..LZ_BATCH_MAX must agree
+ * bit for bit" contract restated: where the prompt is cut cannot matter.
+ *
+ * With both callbacks NULL this runs one slice covering the whole
+ * prompt, i.e. exactly the single call it replaced.
+ *
+ * Returns 1 forwarded, 0 a forward failure, -1 cancelled. */
+static int gen_prefill(const LZModel *m, LZRunState *s,
+                       const int *tok, int n, int start_pos,
+                       const LZGenOpts *opts, LZShouldContinue cont,
+                       void *ctx) {
+    int width, done = 0;
+
+    if (n <= 0) return 1;
+    /* No callbacks means nothing can observe the slicing, so do not pay
+       for it: one call, byte for byte the code path that was here
+       before this function existed. */
+    if (!opts->on_prefill && !cont)
+        return lz_forward_batch(m, s, tok, n, start_pos) ? 1 : 0;
+
+    /* Reported before the first slice as well as after each one: a
+       prompt shorter than one slice would otherwise produce a single
+       callback already saying done == total, and a caller showing an
+       indicator while done < total would never show one. */
+    if (opts->on_prefill) opts->on_prefill(0, n, ctx);
+
+    width = s->nt_cap > 0 ? s->nt_cap : 1;
+    /* Slice at a whole number of batches, and never fewer than one, or
+       a large prompt would report progress a handful of tokens at a
+       time and spend more on callbacks than on the forward. */
+    while (width < 64) width *= 2;
+
+    while (done < n) {
+        int take = n - done;
+        if (take > width) take = width;
+        if (!lz_forward_batch(m, s, tok + done, take, start_pos + done))
+            return 0;
+        done += take;
+        if (opts->on_prefill) opts->on_prefill(done, n, ctx);
+        /* Checked AFTER the slice, so a stop always lands on a whole
+           slice boundary and the run state is never left mid-batch. */
+        if (done < n && cont && !cont(ctx)) return -1;
+    }
+    return 1;
+}
+
 /* Failure exits below use LZ_ERR_SET* (err.h): return code and errbuf
    are set together so an HTTP caller's status can never contradict the
    message it ships alongside it.
@@ -1630,9 +1688,18 @@ int lz_generate_resume_ex(const LZModel *m, LZTokenizer *t, LZRunState *s,
         if (spec_active && opts->spec_debug_skip_prefill) {
             /* Condition A: LZGenOpts.spec_debug_skip_prefill's own
                comment - the draft head starts every round blind. */
-            if (!lz_forward_batch(m, s, prompt_tokens, n_prompt - 1, start_pos)) {
-                LZ_ERR_SET(rc, errbuf, errlen, LZ_ERR_FORWARD);
-                goto done;
+            {
+                int pf = gen_prefill(m, s, prompt_tokens, n_prompt - 1,
+                                     start_pos, opts, cont, ctx);
+                if (pf < 0) {          /* stopped between slices */
+                    finish = LZ_FINISH_CANCELLED;
+                    rc = LZ_ERR_OK;
+                    goto done;
+                }
+                if (!pf) {
+                    LZ_ERR_SET(rc, errbuf, errlen, LZ_ERR_FORWARD);
+                    goto done;
+                }
             }
         } else if (spec_active && opts->spec_debug_prefill_pos_only) {
             /* Condition B: LZGenOpts.spec_debug_prefill_pos_only's own
@@ -1643,9 +1710,18 @@ int lz_generate_resume_ex(const LZModel *m, LZTokenizer *t, LZRunState *s,
                moves but the MTP's KV cache rows for these positions
                are never written (they stay at lz_state_reset's zero
                fill). */
-            if (!lz_forward_batch(m, s, prompt_tokens, n_prompt - 1, start_pos)) {
-                LZ_ERR_SET(rc, errbuf, errlen, LZ_ERR_FORWARD);
-                goto done;
+            {
+                int pf = gen_prefill(m, s, prompt_tokens, n_prompt - 1,
+                                     start_pos, opts, cont, ctx);
+                if (pf < 0) {          /* stopped between slices */
+                    finish = LZ_FINISH_CANCELLED;
+                    rc = LZ_ERR_OK;
+                    goto done;
+                }
+                if (!pf) {
+                    LZ_ERR_SET(rc, errbuf, errlen, LZ_ERR_FORWARD);
+                    goto done;
+                }
             }
             {
                 /* spec_debug_prefill_pos_value's own comment (llama_zh.h):
@@ -1745,9 +1821,18 @@ int lz_generate_resume_ex(const LZModel *m, LZTokenizer *t, LZRunState *s,
             free(h_body_all);
         } else {
             /* !spec_active: plain body-only prefill, no MTP head. */
-            if (!lz_forward_batch(m, s, prompt_tokens, n_prompt - 1, start_pos)) {
-                LZ_ERR_SET(rc, errbuf, errlen, LZ_ERR_FORWARD);
-                goto done;
+            {
+                int pf = gen_prefill(m, s, prompt_tokens, n_prompt - 1,
+                                     start_pos, opts, cont, ctx);
+                if (pf < 0) {          /* stopped between slices */
+                    finish = LZ_FINISH_CANCELLED;
+                    rc = LZ_ERR_OK;
+                    goto done;
+                }
+                if (!pf) {
+                    LZ_ERR_SET(rc, errbuf, errlen, LZ_ERR_FORWARD);
+                    goto done;
+                }
             }
         }
         pos = start_pos + n_prompt - 1;

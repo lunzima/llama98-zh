@@ -31,6 +31,12 @@ typedef enum {
     LZ_ERR_CLAIM_ALLOC,        /* claim table allocation failed */
     LZ_ERR_SEQ_LEN,            /* seq_len must be positive */
 
+    /* long file names (lfn.h). Both carry the WANTED name: reporting
+       "TOKENI~1.JSO was not found" to someone looking for
+       tokenizer.json sends them after the wrong thing. */
+    LZ_ERR_LFN_NOT_FOUND,      /* cannot find %s in %s (long or 8.3) */
+    LZ_ERR_LFN_AMBIGUOUS,      /* %s: %d files share one 8.3 short name */
+
     /* generate */
     LZ_ERR_SAMPLER_INIT,       /* sampler init failed */
     LZ_ERR_PROMPT_BUF,         /* prompt buffer allocation failed */

@@ -17,6 +17,10 @@ static const char *const LZ_ERR_EN[LZ_ERR_COUNT] = {
     [LZ_ERR_LAYERS_ALLOC] = "layer array allocation failed",
     [LZ_ERR_CLAIM_ALLOC] = "claim table allocation failed",
     [LZ_ERR_SEQ_LEN]     = "seq_len must be positive",
+    [LZ_ERR_LFN_NOT_FOUND] = "cannot find %s in %s (neither the long name "
+                             "nor an 8.3 short form)",
+    [LZ_ERR_LFN_AMBIGUOUS] = "%s: %d files here share one 8.3 short name; "
+                             "rename so that only one matches",
     [LZ_ERR_SAMPLER_INIT] = "sampler init failed",
     [LZ_ERR_PROMPT_BUF]  = "prompt buffer allocation failed",
     [LZ_ERR_PROMPT_ENCODE] = "prompt encode failed",
@@ -153,6 +157,11 @@ static const char *const LZ_ERR_ZH[LZ_ERR_COUNT] = {
     [LZ_ERR_LAYERS_ALLOC] = "层数组内存不足",
     [LZ_ERR_CLAIM_ALLOC] = "认领表内存不足",
     [LZ_ERR_SEQ_LEN]     = "seq_len 必须为正",
+    /* (want, dir), as in the English: Watcom's C runtime has no
+       positional %1$s, so the wording takes them in arrival order. */
+    [LZ_ERR_LFN_NOT_FOUND] = "找不到 %s（目录: %s；长名和 8.3 短名都没有）",
+    [LZ_ERR_LFN_AMBIGUOUS] = "%s: 此目录下有 %d 个文件的 8.3 短名相同，"
+                             "请重命名使其唯一",
     [LZ_ERR_SAMPLER_INIT] = "采样器初始化失败",
     [LZ_ERR_PROMPT_BUF]  = "prompt 缓冲分配失败",
     [LZ_ERR_PROMPT_ENCODE] = "prompt 编码失败",
