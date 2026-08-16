@@ -563,16 +563,13 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
     /* latent MoE scratch - see forward.h. Zero-sized when the model has
        no MoE layers (num_experts == 0).
 
-       TWO WIDTHS, and the split is exactly the routing boundary. The
-       router, the latent down/up projections and the shared expert read
-       one weight stream for every token in the chunk, so they run
-       batched and their buffers are nt-wide like every other block in
-       this file. The ROUTED experts cannot: which expert a token wants
-       is a property of that token, so moe_h2 and the per-expert
-       selection stay one token's worth.
-       At LZ_BATCH_MAX=8 and this model's shapes the widening costs
-       ~78 KB of state - measured against the ~13% of prefill the
-       per-token weight re-streaming was costing (see forward_moe). */
+       TWO WIDTHS, split on the routing boundary. The router, the latent
+       down/up projections and the shared expert read one weight stream
+       for every token in the chunk, so they run batched and their
+       buffers are nt-wide like every other block here. The ROUTED
+       experts cannot: which expert a token wants is a property of that
+       token, so moe_h2 and the per-expert selection stay one token's
+       worth. See forward_moe. */
     {
         int moe_scratch_w = c->moe_intermediate_size;
         if (c->moe_shared_width > moe_scratch_w) moe_scratch_w = c->moe_shared_width;
@@ -1859,33 +1856,27 @@ static void forward_kda(const LZModel *m, LZRunState *s,
    the routed experts cannot - two tokens in the same chunk may pick
    different experts entirely, so there is no shared weight stream.
 
-   WHY NOT GROUP THE TOKENS BY EXPERT. That is what llama.cpp's
-   ggml_compute_forward_mul_mat_id does (a plain per-expert row bucket,
-   no padding) and what vLLM/SGLang's CPU kernels do with
-   moe_align_block_size. Their scale is not ours: SGLang's CPU int8 MoE
-   pads each expert's rows to BLOCK_M = 2 * TILE_M = 32 and drops the
-   blocked path entirely below M = 5, and llama.cpp's tuning assumes
-   batches in the thousands. LZ_BATCH_MAX is 8. At 8 tokens, top-2 of
-   16 experts, the expected number of DISTINCT experts in a chunk is
-   16*(1-(15/16)^16) ~ 10.3 of 16 routed pairs, so grouping would save
-   about a third of the expert weight streams - and llama.cpp's own
-   measurement is that prompt-phase routing is flat (decode's is
-   skewed), which is the worst case for it. Measured against the
-   --moe-topk decomposition below, the ceiling was ~9% of prefill, for
-   a change that has to reorder the float accumulation in the kk loop
-   to get it. The batching above was the larger half and costs no
-   reordering at all.
+   WHY NOT GROUP THE TOKENS BY EXPERT, which is what llama.cpp's
+   ggml_compute_forward_mul_mat_id (a per-expert row bucket, no padding)
+   and vLLM/SGLang's moe_align_block_size do: their scale is not ours.
+   SGLang's CPU int8 MoE pads each expert's rows to BLOCK_M = 32 and
+   drops the blocked path below M = 5; llama.cpp's tuning assumes
+   batches in the thousands. LZ_BATCH_MAX is 8, and at 8 tokens over
+   top-2 of 16 experts the expected DISTINCT expert count is
+   16*(1-(15/16)^16) ~ 10.3 of 16 pairs - about a third of the weight
+   streams, ~9% of prefill, in exchange for reordering the float
+   accumulation in the kk loop. llama.cpp's own measurement that
+   prompt-phase routing is flat (decode's is skewed) makes prefill the
+   worst case for it.
 
-   HOW THE SPLIT WAS MEASURED, since a ratio needs a denominator
-   (iron law 3): ffn(topk) is linear in topk, so sweeping --moe-topk
-   1/2/4 separates the two halves by extrapolation. On this machine and
-   an 832-token prompt it fit ffn = 856,505 + 787,201*topk us exactly,
-   i.e. at the trained topk=2 the routed experts are 64.8% of the ffn
-   phase and everything batched here is the other 35.2%.
+   THE SPLIT, measured rather than assumed (iron law 3): ffn(topk) is
+   linear in topk, so sweeping --moe-topk 1/2/4 separates the halves.
+   On an 832-token prompt it fit ffn = 856,505 + 787,201*topk us
+   exactly - at the trained topk=2 the routed experts are 64.8% of the
+   ffn phase and everything batched here is the other 35.2%.
 
-   nt=1 (the generation loop) computes exactly what it did before: the
-   t-loop in lz_matmul_q8_nt degrades to one iteration, which that
-   function's header states as a hard gate.
+   nt=1 (generation) is unchanged: lz_matmul_q8_nt's t-loop degrades to
+   one iteration, which that function's header states as a hard gate.
 
    Bit-identity between batched and per-token MoE prefill:
    verified across E:\LLM\models\kunmoe-v2 (widths

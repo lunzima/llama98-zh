@@ -142,18 +142,12 @@ enum { LZ_LAMP_OFF = 0, LZ_LAMP_READY, LZ_LAMP_BUSY, LZ_LAMP_ERROR,
 #define LZ_LAMP_PAD     3
 #define LZ_LAMP_CELL_W (LZ_LAMP_PAD * 2 + LZ_LAMP_PX * 2 + LZ_LAMP_GAP)
 /* ONE periodic tick for the whole window, and the reason is not
- * tidiness. There used to be three - a lamp timer, a token timer and a
- * debug-ramp timer - and each of them wrote to the status line with its
- * own idea of which phase the job was in. The token timer said
- * "generating" every 100 ms while the lamp timer put the prefill
- * progress back every 400 ms; the debug timer existed only because the
- * lamp timer's lifetime was job-scoped and the ramp had to run when no
- * job did. Three writers, three phase tests, one line - the disagreement
- * was the bug, not a symptom of it.
- * Now: ui_tick decides the phase once and every periodic consumer hangs
- * off it, ui_timer_sync owns the single lifetime. Sub-rates come from
- * the CLOCK, not from counting ticks, so a consumer's interval does not
- * depend on how often this happens to fire. */
+ * tidiness: every timer that writes to the status line brings its own
+ * test for which phase the job is in, and two of those disagreeing is a
+ * display that contradicts itself. ui_tick decides the phase once and
+ * dispatches; ui_timer_sync owns the single lifetime.
+ * Sub-rates are deadlines against the clock, not counted ticks, so a
+ * consumer's interval does not depend on how often this fires. */
 #define LZ_UI_TIMER     1
 /* Selftest-only pump watchdog. Its own id so it cannot collide with
    the display tick above; see st_pump. */
@@ -299,15 +293,12 @@ static struct {
     double tok_start_ms;
     /* When the GENERATION phase began, which is not when the job did.
        The cell is labelled "generating N tok, X tok/s", so its
-       denominator has to be the span that produced those tokens: with
-       the job start as the denominator, a 30 s prefill followed by a
-       20-token reply in 2 s reads 0.6 tok/s for a decode running at 10.
-       cli_main.c faces the same split and answers it by printing BOTH
-       "s turn" and "s gen" - see its own comment on why the whole-turn
-       number is the honest one for the reuse A/B. One cell cannot say
-       two things, so it says the one its label claims.
-       Equal to tok_start_ms until prefill ends, so a turn with no
-       prefill is unchanged. */
+       denominator is the span that produced those tokens: measured from
+       the job's start, a 30 s prefill in front of a 20-token reply reads
+       0.6 tok/s for a decode running at 10. cli_main.c meets the same
+       split and prints BOTH "s turn" and "s gen"; one cell cannot say
+       two things, so it says the one its label claims. Equal to
+       tok_start_ms until prefill ends. */
     double gen_start_ms;
     int   tok_live;
     /* The repetition penalty's WINDOW, in tokens. Ini-only, deliberately
@@ -802,22 +793,20 @@ static HFONT g_sb_font;
    draws. A tick that catches one field from the previous slice and one
    from the next is a frame stale, which the tick-based display already
    accepts everywhere else. */
-/* Prefill progress, ACCUMULATED ACROSS SEGMENTS. One turn can prefill
-   in more than one go: on a prefix-cache miss lz_prefix_prepare
-   forwards the reusable part and reports 0..n1, and then the resume
-   path forwards the generation-prompt tail and reports 0..n2 - two
-   independent ranges through one callback. Reported raw, the bar ran to
-   100% and jumped back to 0%. g_pf_base carries the earlier segments so
-   `done` only ever moves forward; the denominator grows when a new
-   segment appears, because that is the moment the work becomes known -
-   neither end of the chain can know n2 before the tokeniser runs. */
+/* Prefill progress, ACCUMULATED ACROSS SEGMENTS. One turn prefills in
+   more than one go: on a cache miss lz_prefix_prepare reports 0..n1 for
+   the reusable part, then the resume path reports 0..n2 for the
+   generation-prompt tail - two ranges through one callback. g_pf_base
+   carries the earlier segments so `done` only moves forward. The
+   denominator grows when a segment appears, because that is when the
+   work becomes known: neither end of the chain has n2 before the
+   tokeniser runs. */
 static int g_pf_done, g_pf_total, g_pf_base, g_pf_seen;
 
-/* Is a prefill in progress? Three places ask - the fallback strip's
-   paint, the indicator tick, and set_status, which has to know that the
-   throughput cell is not the thing to show yet. One spelling, because
-   three copies of "> 0 && <" drift and the drift is invisible: each
-   site would simply disagree about what phase the job is in. */
+/* Is a prefill in progress? The fallback strip's paint, the indicator
+   tick and set_status all ask. One spelling: three copies of
+   "> 0 && <" drift, and the drift is invisible - the sites just
+   disagree about what phase the job is in. */
 static int prefill_active(void) {
     return g_pf_total > 0 && g_pf_done < g_pf_total;
 }
@@ -1060,9 +1049,14 @@ static void sb_fallback_paint(HWND h, HDC dc) {
        that came and went would re-flow the bar underneath the reader. */
     {
         RECT pr;
+        /* Read once and clamp, for the reason prefill_paint_tick gives:
+           the writer is the worker thread and the pair is not written
+           atomically. */
+        int done = prefill_active() ? g_pf_done : 0;
+        int total = g_pf_total > 0 ? g_pf_total : 1;
+        if (done > total) done = total;
         if (sb_prog_rect(rc.bottom - rc.top, &pr))
-            sb_prog_paint(dc, &pr, prefill_active() ? g_pf_done : 0,
-                          g_pf_total > 0 ? g_pf_total : 1);
+            sb_prog_paint(dc, &pr, done, total);
     }
 
     sb_grip(dc, &rc);
@@ -1147,14 +1141,11 @@ static void set_status(const char *display_utf8) {
        `shown` (a pointer into it) following the cell, so the sidebar
        mirror below paints the same text the strip does.
 
-       NOT DURING PREFILL. tok_live is set by start_job, which runs
-       before the first token exists - so through the whole prefill this
-       cell would answer "0 tok, 0.0 tok/s", and it would do it by
-       silently discarding the text the caller passed. That is what made
-       the indicator move while the strip and the sidebar said nothing
-       about a prefill: the bar is driven by SETPOS, the words come
-       through here. During prefill the caller's text is the informative
-       one and a rate over zero tokens is not. */
+       NOT DURING PREFILL. tok_live is set by start_job, before the
+       first token exists, so through prefill this cell answers
+       "0 tok, 0.0 tok/s" - a rate over no tokens - and discards the
+       caller's text to say it. There the caller's text is the
+       informative one. */
     if (g.tok_live && !prefill_active()) {
         lz_common_tokcell(cell, (int)sizeof cell, g.tok_gen,
                        lz_time_ms() - g.gen_start_ms,
@@ -1203,9 +1194,9 @@ static void set_idle_status(const char *display_utf8) {
        successful-generation path keeps its rate by NOT going through
        here: finish_job's JOB_GENERATE tail calls set_status directly.
        Split from set_idle_text because that retirement is a SIDE
-       EFFECT, and a caller that only re-spells the resting text - a
-       language switch - was silently killing the throughput cell of a
-       job that was still running, for the whole rest of that job. */
+       EFFECT: a caller that only re-spells the resting text - a
+       language switch - has no business ending a running job's rate
+       display. */
     g.tok_live = 0;
     set_idle_text(display_utf8);
 }
@@ -1916,20 +1907,30 @@ static void prefill_paint_tick(void) {
     }
     shown = 1;
     {
+        /* Read ONCE into locals, and clamp. gui_prefill_progress runs on
+           the WORKER thread and writes these one at a time, so this
+           thread can land between two of the writes and see a done that
+           belongs to a different total - which on the segment boundary
+           means done > total and a bar past 100%. A lock for a pair of
+           ints that are only ever displayed would cost more than it is
+           worth; making a torn read benign costs one comparison. */
+        int done = g_pf_done, total = g_pf_total;
         char pf[96];
+        if (total <= 0) return;             /* raced to nothing */
+        if (done > total) done = total;
         sprintf(pf, "%s %d/%d", lz_str_utf8(LZ_STR_STATE_PREFILL),
-                g_pf_done, g_pf_total);
+                done, total);
         set_status(pf);
-    }
-    /* Both strips, one condition. The comctl32 bar is a control to
-       drive; the fallback paints itself and only needs to be told the
-       numbers moved. */
-    if (g.progress) {
-        SendMessage(g.progress, LZ_PBM_SETRANGE, 0, MAKELPARAM(0, 100));
-        SendMessage(g.progress, LZ_PBM_SETPOS,
-                    (WPARAM)((g_pf_done * 100) / g_pf_total), 0);
-    } else if (g.part[LZ_GUI_STATUS]) {
-        InvalidateRect(g.part[LZ_GUI_STATUS], NULL, FALSE);
+        /* Both strips, one condition. The comctl32 bar is a control to
+           drive; the fallback paints itself and only needs to be told
+           the numbers moved. */
+        if (g.progress) {
+            SendMessage(g.progress, LZ_PBM_SETRANGE, 0, MAKELPARAM(0, 100));
+            SendMessage(g.progress, LZ_PBM_SETPOS,
+                        (WPARAM)((done * 100) / total), 0);
+        } else if (g.part[LZ_GUI_STATUS]) {
+            InvalidateRect(g.part[LZ_GUI_STATUS], NULL, FALSE);
+        }
     }
 }
 
@@ -1976,11 +1977,10 @@ static int ui_tick_ms(void) {
     return ms;
 }
 
-/* Arm or disarm the one timer from the state that needs it. Called
-   wherever that state changes - both ends of a job, and once at startup
-   for the demo ramp - so no caller has to remember a matching
-   KillTimer. Re-arms when the period changes, which is what makes
-   stream_ms editable without a restart. */
+/* Arm or disarm the one timer from the state that needs it, so no
+   caller has to remember a matching KillTimer. Re-arms when the period
+   changes, which is what lets stream_ms take effect without a
+   restart. */
 static void ui_timer_sync(HWND hwnd) {
     int want = (g.job_kind != JOB_NONE || g_dbg_prefill_ms > 0)
                ? ui_tick_ms() : 0;
@@ -2303,8 +2303,11 @@ static int start_job(HWND hwnd, LZWorkerJob job, void *ud, int kind) {
     set_lamps();
     /* This job's prefill starts from nothing, whatever the last one
        left. */
-    g_pf_base = 0;
-    g_pf_seen = 0;
+    /* ALL FOUR, not just the accumulator's two: the demo ramp writes
+       done/total while idle, so between here and the engine's first
+       callback a tick would paint its leftover as this job's
+       progress. */
+    g_pf_done = g_pf_total = g_pf_base = g_pf_seen = 0;
     g_ui_last_flush = lz_time_ms();
     /* One timer, armed from the state that needs it. A job running is
        one of the two things that need it - the demo ramp is the other,
@@ -2371,16 +2374,11 @@ static void finish_job(HWND hwnd, int rc) {
        already being correct. The selftest's
        "g.tok_gen == 11" check pins the chain that IS live - worker
        counts, tokens_arrived carries it, the status cell reads it. */
-    /* Retire the prefill counters with the job that produced them.
-       A run that finishes normally ends on done == total and the tick
-       empties the well by itself; a run that was STOPPED part-way ends
-       on done < total, and with the timer gone nothing ever comes back
-       to clear it. The numbers would then sit there - the fallback
-       strip repaints from these globals on any invalidate, and the next
-       job's first tick would show the previous job's percentage over a
-       turn that may have no prefill at all. Cleared through
-       prefill_paint_tick rather than by hand so the emptying stays in
-       the one function that knows how to do it for both strips. */
+    /* Retire the prefill counters with the job that produced them. A
+       normal run ends on done == total and the tick empties the well by
+       itself; one STOPPED part-way ends on done < total, and with the
+       timer gone nothing comes back to clear it. The fallback strip
+       repaints from these globals on any invalidate. */
     g_pf_done = g_pf_total = g_pf_base = g_pf_seen = 0;
     cmd_enable(IDM_STOP_GEN, 0);
     g.done_rc = rc;
@@ -2480,12 +2478,9 @@ static void finish_job(HWND hwnd, int rc) {
         } else {
             /* A FAILED load still changed what the window is: the job
                unloaded whatever was open before it started reading, so
-               lz_gui_model_ready is false now. Both of these were
-               written only on the success path, and both survive the
-               failure - the sidebar kept naming a model that is gone,
-               with its memory figure, directly above a status line
-               saying the load failed, and the title bar kept it too.
-               Cleared here so the two halves of the window agree. */
+               lz_gui_model_ready is false now. Without this the sidebar
+               and the title bar keep naming a model that is gone, with
+               its memory figure, above a line saying the load failed. */
             g.side_model[0] = '\0';
             set_status(g.idle_status);
             push_caption();
@@ -2519,12 +2514,10 @@ static void finish_job(HWND hwnd, int rc) {
             sys_line(LZ_STR_SYS_GEN_STOPPED);
     }
 
-    /* AFTER the branch, not before it. The model lamp's third state is
-       "the last load failed", and g.load_failed is written inside the
-       JOB_LOAD branch above - lighting the lamps first meant a failed
-       load painted them from the PREVIOUS load's verdict, and a lamp is
-       not repainted on a timer, so it stayed wrong until some unrelated
-       event happened to call this again. */
+    /* AFTER the branch: the model lamp's third state is "the last load
+       failed", and g.load_failed is written inside it. Lamps are not
+       repainted on a timer, so one painted from the previous load's
+       verdict stays wrong until something unrelated calls this. */
     set_lamps();
 
     /* The throughput cell is LIVE ONLY while a generate job runs. It
@@ -3635,11 +3628,8 @@ static void apply_language(HWND hwnd, int english) {
        language, which is why this is safe to do mid-job.
        set_idle_TEXT, though: a language switch re-spells what the
        window is, it does not change it. set_idle_status would also
-       retire the throughput cell, and it does not come back until the
-       NEXT job starts - so switching language mid-generation used to
-       cost that job its rate display for good, and with stream_ms=0
-       (no token timer) left the bar reading "ready" while tokens were
-       still arriving. */
+       retire the throughput cell, which nothing restores until the NEXT
+       job starts. */
     set_idle_text(lz_str_utf8(lz_gui_model_ready(&g.mdl)
                                  ? LZ_STR_STATE_READY
                                  : LZ_STR_STATE_NO_MODEL));
@@ -5331,16 +5321,13 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             char prev_sys[LZ_COMMON_SYSTEM_MAX + 1];
             strcpy(prev_sys, g.set.system);
             if (lz_gui_settings_dialog(hwnd, g.inst, &g.set)) {
-                /* Before ANY of the writes below, because every one of
-                   them lands in state a running job is reading:
-                   apply_settings rewrites g.sess.opts, the prefix clear
-                   resets the LZPrefixCache lz_prefix_prepare may be
-                   inside of. ctx_commit drains for exactly this reason
-                   but returns early when the context did not change, so
-                   changing only the system prompt reached the clear
-                   with the worker still running. The dialog is modal
-                   and pumps messages, so the job kept going the whole
-                   time it was open. */
+                /* Before ANY of the writes below: each lands in state
+                   a running job is reading - apply_settings rewrites
+                   g.sess.opts, the prefix clear resets the LZPrefixCache
+                   lz_prefix_prepare may be inside of. The dialog is
+                   modal but pumps messages, so the job runs throughout.
+                   ctx_commit drains for the same hazard, but returns
+                   early when the context did not change. */
                 lz_worker_join_drain(hwnd);
                 apply_settings();
                 ctx_apply(hwnd, prev_ctx);
@@ -6921,14 +6908,11 @@ static int st_worker(FILE *f, HWND hwnd) {
             fprintf(f, "  part 0 reads [%s]\n", cell);
         checks++;
     }
-    /* PREFILL OUTRANKS THE THROUGHPUT CELL, both windows.
-       tok_live is set by start_job - before the first token exists - so
-       without set_status's prefill_active() gate the cell answered
-       "0 tok, 0.0 tok/s" for the whole prefill AND discarded the text
-       the caller passed. The bar moved (it is driven by SETPOS) while
-       neither the strip nor the sidebar said what was happening.
-       Both directions are asserted: without the second one this would
-       also pass on a build that never shows the cell at all. */
+    /* PREFILL OUTRANKS THE THROUGHPUT CELL, on both windows. tok_live is
+       set before the first token exists, so without set_status's gate
+       the cell answers "0 tok, 0.0 tok/s" and discards the caller's text
+       to say it. Both directions are asserted: without the second, this
+       would pass on a build that never shows the cell at all. */
     {
         const char *probe = "kk98-prefill-probe";
         int was_live = g.tok_live, was_done = g_pf_done,
@@ -6973,13 +6957,9 @@ static int st_worker(FILE *f, HWND hwnd) {
         checks++;
 
         /* THE PERIODIC TICK MUST NOT TAKE THE LINE EITHER. It runs for
-           the whole job, so during prefill it used to hand set_status a
-           constant that knows nothing about the phase - the gate inside
-           set_status cannot see that, because the caller supplied the
-           text rather than letting the throughput cell substitute one.
-           ui_tick deciding the phase once is what this asserts.
-           Reddens if that branch goes back to an unconditional
-           set_status(GENERATING). */
+           the whole job, and set_status's own gate cannot catch a caller
+           that supplies the wrong text itself. Reddens if the tick goes
+           back to an unconditional set_status(GENERATING). */
         g.tok_live = 1;
         g.job_kind = JOB_GENERATE;
         g_pf_done = 3;
@@ -6994,9 +6974,8 @@ static int st_worker(FILE *f, HWND hwnd) {
             fprintf(f, "  part 0 reads [%s]\n", cell);
         checks++;
 
-        /* TWO SEGMENTS, ONE BAR. A prefix-cache miss prefills in two
-           goes and each reports its own 0..n through the same callback;
-           taken raw the bar ran to 100% and jumped back to 0%. `done`
+        /* TWO SEGMENTS, ONE BAR. A cache miss prefills in two goes and
+           each reports its own 0..n through the same callback; `done`
            must only ever move forward. Reddens if g_pf_base goes. */
         {
             int seq_ok = 1, prev;

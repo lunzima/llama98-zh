@@ -46,11 +46,10 @@
    TWO TIERS, and mixing them is a measurement error, not a formatting
    one. The first LZ_PROF_TOP entries partition the forward: their
    timers do not overlap, so they may be summed. REC and ACT are timed
-   INSIDE those spans - REC around lz_gdn_step/lz_kda_step, both of
-   which run within LIN's timer, ACT around the SwiGLU loop within
-   FFN's - so adding them to the same total counts that time twice and
-   makes every percentage smaller than it is. It also made the printed
-   TOTAL exceed the run's own wall clock, which is how it was caught. */
+   INSIDE those spans - REC around lz_gdn_step/lz_kda_step within LIN's
+   timer, ACT around the SwiGLU loop within FFN's - so summing all seven
+   counts that time twice, and a total larger than the run's own wall
+   clock is the tell. */
 #define LZ_PROF_ATTN   0
 #define LZ_PROF_LIN    1
 #define LZ_PROF_FFN    2
