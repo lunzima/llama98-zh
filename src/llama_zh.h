@@ -675,7 +675,8 @@ void lz_prefix_reset(LZPrefixCache *pc);
 int  lz_prefix_prepare(LZPrefixCache *pc, const LZModel *m, LZTokenizer *t,
                        LZRunState *s, const char *render, int render_len,
                        int split, int *out_start_pos, int *out_suffix_off,
-                       int *out_reused, char *errbuf, int errlen);
+                       int *out_reused, LZProgress on_prefill, void *ctx,
+                       char *errbuf, int errlen);
 
 /* How many tokens of `pre[0..n_pre)` this cache would reuse. Read-only:
    touches neither the cache nor any state.
@@ -742,6 +743,7 @@ int  lz_pool_prepare(LZSessionPool *p, const LZModel *m, LZTokenizer *t,
                      const char *render, int render_len, int split,
                      LZRunState **out_state, int *out_start_pos,
                      int *out_suffix_off, int *out_reused,
+                     LZProgress on_prefill, void *ctx,
                      char *errbuf, int errlen);
 
 void lz_pool_stats(const LZSessionPool *p, long *calls, long *hits,

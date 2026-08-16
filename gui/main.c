@@ -8375,7 +8375,7 @@ static int st_prefill(FILE *f) {
         int start_pos = 0, suffix_off = 0, reused = 0;
         rc = lz_prefix_prepare(&pc, &fake_model, &fake_tok, &fake_state,
                                "hi", 2, 0, &start_pos, &suffix_off,
-                               &reused, err, (int)sizeof err);
+                               &reused, NULL, NULL, err, (int)sizeof err);
         st_check(f, rc == 0,
                  "prefill: prepare's own no-reuse shortcut still "
                  "reports success"); checks++;
@@ -12396,7 +12396,14 @@ static void sb_compare(FILE *f, const char *path, int *checks) {
                             (int)(pin.bottom - pin.top));
             }
         }
-        st_check(f, shot != NULL,
+            /* The engine's prefill callback has to still be on the
+           session's opts by the time a job runs - anything that
+           re-defaults LZGenOpts after create_children would silently
+           take it off and the indicator would never be fed. */
+        st_check(f, g.sess.opts.on_prefill == gui_prefill_progress,
+                 "prefill: the session still carries the progress callback");
+        (*checks)++;
+    st_check(f, shot != NULL,
                  "statusbar: the strip renders into a supplied DC");
         (*checks)++;
         if (shot) {

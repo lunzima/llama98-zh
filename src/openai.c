@@ -527,12 +527,13 @@ static void completions(LZOpenAICtx *c, const LZHttpReq *req, LZHttpResp *rs) {
                call below and not two. */
             rcp = lz_pool_prepare(c->pool, c->model, c->tok, cb.s, cb.len,
                                   split, &st, &start_pos, &suffix_off,
-                                  &reused, err, sizeof(err));
+                                  &reused, NULL, NULL, err, sizeof(err));
             if (!st) st = c->state;         /* defensive; pool always sets it */
         } else {
             rcp = lz_prefix_prepare(c->prefix, c->model, c->tok, st,
                                     cb.s, cb.len, split, &start_pos,
-                                    &suffix_off, &reused, err, sizeof(err));
+                                    &suffix_off, &reused, NULL, NULL,
+                                    err, sizeof(err));
         }
         if (rcp != LZ_ERR_OK) {
             start_pos = 0;

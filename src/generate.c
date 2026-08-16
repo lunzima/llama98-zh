@@ -1344,6 +1344,31 @@ static int gen_emit_token(int next, int sampled,
     return 0;
 }
 
+/* The slicing itself, with the callback passed directly rather than
+   read off an LZGenOpts - lz_prefix_prepare has no opts to read.
+   Returns 1 forwarded, 0 a forward failure. */
+static int gen_prefill_raw(const LZModel *m, LZRunState *s,
+                           const int *tok, int n, int start_pos,
+                           LZProgress on_prefill, void *ctx) {
+    int width, done = 0;
+
+    if (n <= 0) return 1;
+    if (!on_prefill) return lz_forward_batch(m, s, tok, n, start_pos) ? 1 : 0;
+
+    on_prefill(0, n, ctx);
+    width = s->nt_cap > 0 ? s->nt_cap : 1;
+    while (width < 64) width *= 2;
+    while (done < n) {
+        int take = n - done;
+        if (take > width) take = width;
+        if (!lz_forward_batch(m, s, tok + done, take, start_pos + done))
+            return 0;
+        done += take;
+        on_prefill(done, n, ctx);
+    }
+    return 1;
+}
+
 /* Prefill, in slices, so it can report where it is and be stopped.
  *
  * One function rather than the same edit at each of the three prefill
@@ -2281,7 +2306,8 @@ int lz_prefix_match(const LZPrefixCache *pc, const int *pre, int n_pre) {
 int lz_prefix_prepare(LZPrefixCache *pc, const LZModel *m, LZTokenizer *t,
                       LZRunState *s, const char *render, int render_len,
                       int split, int *out_start_pos, int *out_suffix_off,
-                      int *out_reused, char *errbuf, int errlen) {
+                      int *out_reused, LZProgress on_prefill, void *ctx,
+                      char *errbuf, int errlen) {
     int n_cur, n_pre, n_tail, base = 0;
     int tail_len;
 
@@ -2363,8 +2389,16 @@ int lz_prefix_prepare(LZPrefixCache *pc, const LZModel *m, LZTokenizer *t,
     }
     if (base == 0) lz_state_reset(s, m);
 
+    /* SLICED, and reported, like the prefill in lz_generate_resume_ex.
+       On a cache miss base is 0 and this forwards the WHOLE reusable
+       prefix - which in a prefix-reuse front end is nearly the whole
+       prompt, and is where the wait actually is. Leaving it
+       uninstrumented meant the indicator saw only the generation-prompt
+       tail the resume path forwards afterwards: a handful of tokens,
+       done instantly, so nothing was ever drawn. */
     if (n_pre > base &&
-        !lz_forward_batch(m, s, pc->cur + base, n_pre - base, base)) {
+        !gen_prefill_raw(m, s, pc->cur + base, n_pre - base, base,
+                         on_prefill, ctx)) {
         lz_state_reset(s, m);
         lz_prefix_reset(pc);
         if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_FORWARD);
@@ -2465,6 +2499,7 @@ int lz_pool_prepare(LZSessionPool *p, const LZModel *m, LZTokenizer *t,
                     const char *render, int render_len, int split,
                     LZRunState **out_state, int *out_start_pos,
                     int *out_suffix_off, int *out_reused,
+                    LZProgress on_prefill, void *ctx,
                     char *errbuf, int errlen) {
     int i, best = -1, best_score = 0, n_pre = 0;
 
@@ -2525,7 +2560,8 @@ int lz_pool_prepare(LZSessionPool *p, const LZModel *m, LZTokenizer *t,
     if (out_state) *out_state = &p->slot[best].st;
     return lz_prefix_prepare(&p->slot[best].pc, m, t, &p->slot[best].st,
                              render, render_len, split, out_start_pos,
-                             out_suffix_off, out_reused, errbuf, errlen);
+                             out_suffix_off, out_reused, on_prefill, ctx,
+                             errbuf, errlen);
 }
 
 void lz_pool_stats(const LZSessionPool *p, long *calls, long *hits,
