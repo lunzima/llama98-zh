@@ -1424,6 +1424,50 @@ static int gen_prefill(const LZModel *m, LZRunState *s,
     return gen_prefill_raw(m, s, tok, n, start_pos, &h);
 }
 
+/* The same slicing for the speculative path's body pass, which captures
+ * every position's hidden state as it goes for lz_mtp_prefill to
+ * consume. It was the one prefill in this file that ran as a single
+ * call: no way to report where it was, and the stop button dead for its
+ * whole duration - on a long prompt that is most of the wait.
+ *
+ * lz_forward_batch_capture chunks exactly like lz_forward_batch and
+ * writes each chunk's own slice of hidden_out (forward.h), so cutting
+ * it at the same whole-batch boundaries gen_prefill_raw uses leaves the
+ * chunk sequence, and the result, untouched.
+ *
+ * Returns 1 forwarded, 0 a forward failure, -1 cancelled. */
+static int gen_prefill_capture(const LZModel *m, LZRunState *s,
+                               const int *tok, int n, int start_pos,
+                               float *h_all, int hidden,
+                               const LZPrefillHooks *h) {
+    LZProgress       on_prefill = h ? h->on_prefill : NULL;
+    LZShouldContinue cont       = h ? h->cont       : NULL;
+    void            *ctx        = h ? h->ctx        : NULL;
+    int width, done = 0;
+
+    if (n <= 0) return 1;
+    if (!on_prefill && !cont)
+        return lz_forward_batch_capture(m, s, tok, n, start_pos, h_all)
+               ? 1 : 0;
+
+    if (on_prefill) on_prefill(0, n, ctx);
+    width = s->nt_cap > 0 ? s->nt_cap : 1;
+    while (width < 64) width *= 2;
+
+    while (done < n) {
+        int take = n - done;
+        if (take > width) take = width;
+        if (!lz_forward_batch_capture(m, s, tok + done, take,
+                                      start_pos + done,
+                                      h_all + (size_t)done * (size_t)hidden))
+            return 0;
+        done += take;
+        if (on_prefill) on_prefill(done, n, ctx);
+        if (done < n && cont && !cont(ctx)) return -1;
+    }
+    return 1;
+}
+
 /* Failure exits below use LZ_ERR_SET* (err.h): return code and errbuf
    are set together so an HTTP caller's status can never contradict the
    message it ships alongside it.
@@ -1710,6 +1754,13 @@ int lz_generate_resume_ex(const LZModel *m, LZTokenizer *t, LZRunState *s,
                                                   when pos_only asked
                                                   for one
 
+           BOTH report progress and both can be stopped: C's body pass
+           goes through gen_prefill_capture, which slices the same way
+           gen_prefill_raw does. The MTP pass after it is left whole -
+           one block against the body's every layer, and its
+           coverage/rebase arithmetic is written against the whole
+           range.
+
            SKIP STILL OUTRANKS POS_ONLY. With both knobs set the old
            chain took the skip branch and never jumped; the jump below
            carries that precedence explicitly, because it is the one
@@ -1735,11 +1786,25 @@ int lz_generate_resume_ex(const LZModel *m, LZTokenizer *t, LZRunState *s,
                 LZ_ERR_SET(rc, errbuf, errlen, LZ_ERR_PROMPT_BUF);
                 goto done;
             }
-            if (!lz_forward_batch_capture(m, s, prompt_tokens, n_prompt - 1,
-                                          start_pos, h_body_all)) {
-                free(h_body_all);
-                LZ_ERR_SET(rc, errbuf, errlen, LZ_ERR_FORWARD);
-                goto done;
+            {
+                LZPrefillHooks h;
+                int pf;
+                h.on_prefill = opts->on_prefill;
+                h.cont       = cont;
+                h.ctx        = ctx;
+                pf = gen_prefill_capture(m, s, prompt_tokens, n_prompt - 1,
+                                         start_pos, h_body_all,
+                                         m->config.hidden_size, &h);
+                if (pf <= 0) {
+                    free(h_body_all);
+                    if (pf < 0) {      /* stopped between slices */
+                        finish = LZ_FINISH_CANCELLED;
+                        rc = LZ_ERR_OK;
+                        goto done;
+                    }
+                    LZ_ERR_SET(rc, errbuf, errlen, LZ_ERR_FORWARD);
+                    goto done;
+                }
             }
             /* next_tokens[i] = the actual prompt token that followed
                body position start_pos+i, i.e. prompt_tokens[i+1] - the
