@@ -1945,6 +1945,13 @@ static void prefill_paint_tick(void) {
 
 static void gui_prefill_progress(int done, int total, void *ctx) {
     (void)ctx;
+    /* Total 0 is "start over" - see LZProgress. Everything accumulated
+       so far described a render that has been trimmed away. */
+    if (total <= 0) {
+        g_pf_done = g_pf_total = g_pf_base = g_pf_seen = 0;
+        if (g.main) PostMessage(g.main, WM_APP_PREFILL, 0, 0);
+        return;
+    }
     /* Every segment opens with done == 0 (gen_prefill_raw reports before
        its first slice, on purpose). A second one means the previous
        segment's total is now behind us. */
@@ -1964,6 +1971,12 @@ static void gui_prefill_progress(int done, int total, void *ctx) {
 
 static int    g_ui_timer_ms;      /* 0 = not armed */
 static double g_ui_last_flush;
+/* Whether the last tick saw a prefill. Belongs to the JOB, so start_job
+   clears it with the counters: left over from a previous job it fires
+   the prefill->generation transition on the first tick of a turn that
+   never prefilled, and moves the throughput cell's clock forward for
+   no reason. */
+static int    g_ui_was_prefill;
 
 /* The tick's period: fine enough for the fastest consumer, which is the
    token flush when stream_ms asks for one shorter than a lamp blink.
@@ -2015,6 +2028,16 @@ static void set_lamps(void) {
 static void ui_tick(void) {
     double now = lz_time_ms();
 
+    /* lz_time_ms is GetTickCount on a target without QPC, and that
+       wraps every 49.7 days. Every deadline below is a subtraction, so
+       a wrap would make one look infinitely far away - the token flush
+       would stop until the clock came back round. A clock that moved
+       BACKWARDS is the tell; re-base on it and lose at most one
+       interval. */
+    if (now < g_ui_last_flush)   g_ui_last_flush = now;
+    if (now < g_dbg_prefill_t0)  g_dbg_prefill_t0 = now;
+    if (now < g.gen_start_ms)    g.gen_start_ms = now;
+
     /* 1. Buffered tokens. stream_ms == 0 means the sink pushes straight
           to the control and there is nothing held back to flush. */
     if (g.job_kind == JOB_GENERATE && g.tok_ms > 0 &&
@@ -2058,11 +2081,10 @@ static void ui_tick(void) {
           throughput cell's denominator starts here, not at the job's
           start - see LZGuiState.gen_start_ms. */
     {
-        static int was_prefill;
         int now_prefill = prefill_active();
-        if (was_prefill && !now_prefill && g.job_kind == JOB_GENERATE)
+        if (g_ui_was_prefill && !now_prefill && g.job_kind == JOB_GENERATE)
             g.gen_start_ms = now;
-        was_prefill = now_prefill;
+        g_ui_was_prefill = now_prefill;
     }
 
     /* 5. THE STATUS LINE, one decision, one writer. prefill_paint_tick
@@ -2264,6 +2286,12 @@ static int start_job(HWND hwnd, LZWorkerJob job, void *ud, int kind) {
     g.done_rc = 0;
     g.inspect_seen = 0;
     g.job_kind = kind;
+    /* BEFORE lz_worker_start, because after it the worker exists and
+       gui_prefill_progress writes these from that thread - clearing
+       them afterwards can drop the first report of the job. */
+    g_pf_done = g_pf_total = g_pf_base = g_pf_seen = 0;
+    g_ui_was_prefill = 0;
+    g_ui_last_flush = lz_time_ms();
     /* &g.sess.ins only for JOB_GENERATE - a model load has no
        candidate list to report, and worker.c's own NULL check on ins
        is what makes passing it a genuine no-cost skip there, not a
@@ -2300,12 +2328,6 @@ static int start_job(HWND hwnd, LZWorkerJob job, void *ud, int kind) {
     set_lamps();
     /* This job's prefill starts from nothing, whatever the last one
        left. */
-    /* ALL FOUR, not just the accumulator's two: the demo ramp writes
-       done/total while idle, so between here and the engine's first
-       callback a tick would paint its leftover as this job's
-       progress. */
-    g_pf_done = g_pf_total = g_pf_base = g_pf_seen = 0;
-    g_ui_last_flush = lz_time_ms();
     /* One timer, armed from the state that needs it. A job running is
        one of the two things that need it - the demo ramp is the other,
        and ui_timer_sync is the only place that decides. */
@@ -6995,7 +7017,30 @@ static int st_worker(FILE *f, HWND hwnd) {
             if (!seq_ok)
                 fprintf(f, "  ended at %d/%d\n", g_pf_done, g_pf_total);
             checks++;
-            g_pf_base = g_pf_seen = 0;
+
+            /* TOTAL 0 IS START OVER. lz_session_job sends it after
+               trimming an over-long conversation, because the prefill
+               it already reported was for a render that no longer
+               exists - accumulated instead, the retry's total would
+               include work for a prompt that is gone. */
+            gui_prefill_progress(0, 0, NULL);
+            st_check(f, g_pf_done == 0 && g_pf_total == 0 &&
+                        g_pf_base == 0 && g_pf_seen == 0,
+                     "prefill: total 0 discards what was accumulated");
+            if (g_pf_total != 0)
+                fprintf(f, "  left %d/%d base %d\n",
+                        g_pf_done, g_pf_total, g_pf_base);
+            checks++;
+            /* And the next range starts from nothing, not from the
+               abandoned pass. */
+            gui_prefill_progress(0, 40, NULL);
+            gui_prefill_progress(40, 40, NULL);
+            st_check(f, g_pf_total == 40,
+                     "prefill: the pass after a restart is measured "
+                     "on its own");
+            if (g_pf_total != 40) fprintf(f, "  total %d\n", g_pf_total);
+            checks++;
+            g_pf_done = g_pf_total = g_pf_base = g_pf_seen = 0;
         }
 
         g.tok_live = was_live;

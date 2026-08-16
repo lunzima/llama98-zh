@@ -33,7 +33,16 @@ typedef int  (*LZShouldContinue)(void *ctx);
    for the first two; a fourth lifetime to keep straight buys nothing.
    Fires on whichever thread generation runs on, so a GUI handler
    records the numbers and lets its own timer draw them - it must not
-   touch a control, the same rule the token path follows. */
+   touch a control, the same rule the token path follows.
+
+   TOTAL 0 MEANS START OVER, and a slicer never reports it (a prefill of
+   nothing makes no calls at all), so it is free to use as a signal.
+   One turn can report several ranges - the reusable prefix and the
+   generation-prompt tail are two - and a caller stitching them into one
+   bar needs to know when a range does NOT continue the previous one.
+   lz_session_job sends it after trimming an over-long conversation:
+   the work reported before the trim was for a render that no longer
+   exists. */
 typedef void (*LZProgress)(int done, int total, void *ctx);
 
 /* The two prefill callbacks and the ctx they share, as one argument.

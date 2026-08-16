@@ -439,6 +439,13 @@ int lz_session_job(void *ud, const char *system, LZTokenSink sink,
         if (!lz_session_trim(s)) return rc;
         if (render_conv_core(s, system, 1, &s->prompt, errbuf, errlen) != 0)
             return rc;
+        /* Total 0: the prefill this pass reported is abandoned, start
+           over - see LZProgress. The pass that just failed may already
+           have forwarded most of the old render through
+           lz_prefix_prepare and reported it, and without this a front
+           end accumulating segments would add that work to the retry's
+           and show a total for a prompt that no longer exists. */
+        if (s->opts.on_prefill) s->opts.on_prefill(0, 0, &cb);
     }
 }
 
