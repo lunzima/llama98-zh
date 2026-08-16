@@ -36,6 +36,19 @@ typedef int  (*LZShouldContinue)(void *ctx);
    touch a control, the same rule the token path follows. */
 typedef void (*LZProgress)(int done, int total, void *ctx);
 
+/* The two prefill callbacks and the ctx they share, as one argument.
+   They are never useful apart - a caller that wants progress wants to
+   be able to stop, and both are handed the same ctx - and the prefix
+   entry points already carry more parameters than a reader can hold.
+   A NULL LZPrefillHooks * is the same as all three fields NULL: no
+   reporting, no cancelling, which is what every caller that does not
+   drive a UI passes. */
+typedef struct {
+    LZProgress       on_prefill;   /* NULL = do not report progress */
+    LZShouldContinue cont;         /* NULL = this prefill cannot stop */
+    void            *ctx;          /* passed to both */
+} LZPrefillHooks;
+
 /* Defined in forward.h: LZRunState, lz_forward.
    Defined in model.h: LZModel, LZModelConfig.
    Defined in tokenizer.h: LZTokenizer, lz_encode, lz_decode. */
@@ -659,11 +672,10 @@ void lz_prefix_reset(LZPrefixCache *pc);
    for the Qwen chat template that is
    `render_len - strlen(lz_chat_gen_prompt_tail(enable_thinking))`.
 
-   `on_prefill` (may be NULL) is called as the reusable prefix is
+   `hooks` (may be NULL) is reported to as the reusable prefix is
    forwarded - on a cache MISS that is nearly the whole prompt, so it is
-   where an indicator has to be fed from. `cont` (may be NULL) is asked
-   between slices and stops the forward when it returns 0. `ctx` is
-   shared by both.
+   where an indicator has to be fed from - and asked between slices
+   whether to keep going. See LZPrefillHooks.
 
    THREE outcomes, and they are not interchangeable:
 
@@ -690,8 +702,7 @@ void lz_prefix_reset(LZPrefixCache *pc);
 int  lz_prefix_prepare(LZPrefixCache *pc, const LZModel *m, LZTokenizer *t,
                        LZRunState *s, const char *render, int render_len,
                        int split, int *out_start_pos, int *out_suffix_off,
-                       int *out_reused, LZProgress on_prefill,
-                       LZShouldContinue cont, void *ctx,
+                       int *out_reused, const LZPrefillHooks *hooks,
                        char *errbuf, int errlen);
 
 /* How many tokens of `pre[0..n_pre)` this cache would reuse. Read-only:
@@ -760,8 +771,8 @@ int  lz_pool_prepare(LZSessionPool *p, const LZModel *m, LZTokenizer *t,
                      const char *render, int render_len, int split,
                      LZRunState **out_state, int *out_start_pos,
                      int *out_suffix_off, int *out_reused,
-                     LZProgress on_prefill, LZShouldContinue cont,
-                     void *ctx, char *errbuf, int errlen);
+                     const LZPrefillHooks *hooks,
+                     char *errbuf, int errlen);
 
 void lz_pool_stats(const LZSessionPool *p, long *calls, long *hits,
                    long *cold, long *evict_useful, long *bytes);

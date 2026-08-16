@@ -336,14 +336,18 @@ int lz_session_job(void *ud, const char *system, LZTokenSink sink,
             int split = s->prompt.len -
                         (int)strlen(lz_chat_gen_prompt_tail(s->think));
             int suffix_off = 0;
-            /* The same callback and ctx the generate call below gets:
+            /* The same callbacks and ctx the generate call below gets:
                on a cache miss this forwards nearly the whole prompt, so
                it is where a front end's indicator has to be fed from. */
-            int prc = lz_prefix_prepare(&s->pc, s->model, s->tok, s->state,
-                                        s->prompt.s, s->prompt.len, split,
-                                        &start_pos, &suffix_off, &reused,
-                                        s->opts.on_prefill, session_cont,
-                                        &cb, errbuf, errlen);
+            LZPrefillHooks hooks;
+            int prc;
+            hooks.on_prefill = s->opts.on_prefill;
+            hooks.cont       = session_cont;
+            hooks.ctx        = &cb;
+            prc = lz_prefix_prepare(&s->pc, s->model, s->tok, s->state,
+                                    s->prompt.s, s->prompt.len, split,
+                                    &start_pos, &suffix_off, &reused,
+                                    &hooks, errbuf, errlen);
             if (prc == 0) {
                 /* lz_generate_resume_ex with the job's OPTIONAL
                    inspector: NULL (CLI) IS lz_generate_resume, and the

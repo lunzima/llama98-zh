@@ -1371,8 +1371,12 @@ static int gen_emit_token(int next, int sampled,
  * Returns 1 forwarded, 0 a forward failure, -1 cancelled. */
 static int gen_prefill_raw(const LZModel *m, LZRunState *s,
                            const int *tok, int n, int start_pos,
-                           LZProgress on_prefill, LZShouldContinue cont,
-                           void *ctx) {
+                           const LZPrefillHooks *h) {
+    /* Unpacked once, so the loop below is the same code it was when
+       these were three parameters. */
+    LZProgress       on_prefill = h ? h->on_prefill : NULL;
+    LZShouldContinue cont       = h ? h->cont       : NULL;
+    void            *ctx        = h ? h->ctx        : NULL;
     int width, done = 0;
 
     if (n <= 0) return 1;
@@ -1413,8 +1417,11 @@ static int gen_prefill(const LZModel *m, LZRunState *s,
                        const int *tok, int n, int start_pos,
                        const LZGenOpts *opts, LZShouldContinue cont,
                        void *ctx) {
-    return gen_prefill_raw(m, s, tok, n, start_pos,
-                           opts->on_prefill, cont, ctx);
+    LZPrefillHooks h;
+    h.on_prefill = opts->on_prefill;
+    h.cont       = cont;
+    h.ctx        = ctx;
+    return gen_prefill_raw(m, s, tok, n, start_pos, &h);
 }
 
 /* Failure exits below use LZ_ERR_SET* (err.h): return code and errbuf
@@ -2296,8 +2303,7 @@ int lz_prefix_match(const LZPrefixCache *pc, const int *pre, int n_pre) {
 int lz_prefix_prepare(LZPrefixCache *pc, const LZModel *m, LZTokenizer *t,
                       LZRunState *s, const char *render, int render_len,
                       int split, int *out_start_pos, int *out_suffix_off,
-                      int *out_reused, LZProgress on_prefill,
-                      LZShouldContinue cont, void *ctx,
+                      int *out_reused, const LZPrefillHooks *hooks,
                       char *errbuf, int errlen) {
     int n_cur, n_pre, n_tail, base = 0;
     int tail_len;
@@ -2389,7 +2395,7 @@ int lz_prefix_prepare(LZPrefixCache *pc, const LZModel *m, LZTokenizer *t,
        done instantly, so nothing was ever drawn. */
     if (n_pre > base) {
         int pf = gen_prefill_raw(m, s, pc->cur + base, n_pre - base, base,
-                                 on_prefill, cont, ctx);
+                                 hooks);
         if (pf <= 0) {
             /* Either way the state is half-forwarded and the cache would
                describe a prefix that is not there, so both are torn
@@ -2498,8 +2504,8 @@ int lz_pool_prepare(LZSessionPool *p, const LZModel *m, LZTokenizer *t,
                     const char *render, int render_len, int split,
                     LZRunState **out_state, int *out_start_pos,
                     int *out_suffix_off, int *out_reused,
-                    LZProgress on_prefill, LZShouldContinue cont,
-                    void *ctx, char *errbuf, int errlen) {
+                    const LZPrefillHooks *hooks,
+                    char *errbuf, int errlen) {
     int i, best = -1, best_score = 0, n_pre = 0;
 
     if (out_state) *out_state = NULL;
@@ -2559,8 +2565,8 @@ int lz_pool_prepare(LZSessionPool *p, const LZModel *m, LZTokenizer *t,
     if (out_state) *out_state = &p->slot[best].st;
     return lz_prefix_prepare(&p->slot[best].pc, m, t, &p->slot[best].st,
                              render, render_len, split, out_start_pos,
-                             out_suffix_off, out_reused, on_prefill, cont,
-                             ctx, errbuf, errlen);
+                             out_suffix_off, out_reused, hooks,
+                             errbuf, errlen);
 }
 
 void lz_pool_stats(const LZSessionPool *p, long *calls, long *hits,

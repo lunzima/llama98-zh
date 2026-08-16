@@ -8720,7 +8720,7 @@ static int st_prefill(FILE *f) {
         int start_pos = 0, suffix_off = 0, reused = 0;
         rc = lz_prefix_prepare(&pc, &fake_model, &fake_tok, &fake_state,
                                "hi", 2, 0, &start_pos, &suffix_off,
-                               &reused, NULL, NULL, NULL, err,
+                               &reused, NULL, err,
                                (int)sizeof err);
         st_check(f, rc == 0,
                  "prefill: prepare's own no-reuse shortcut still "
