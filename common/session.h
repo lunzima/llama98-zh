@@ -189,12 +189,16 @@ const char *lz_session_reply(const LZSession *s, int *len);
 int lz_session_turns(const LZSession *s);
 const char *lz_session_prompt(const LZSession *s, int *len);
 
-/* How many tokens the CURRENT history renders to, without the generation
- * prompt. Exact, not an estimate: lz_encode runs the whole BPE pass and
- * counts with out=NULL. Returns < 0 when there is no model to tokenise
- * with, or on a render failure. `system` is the custom system prompt in
- * force, or NULL - it is part of the conversation for the purpose of the
- * window count (it occupies context every turn). */
+/* How many tokens the NEXT turn will occupy: the current history plus
+ * the generation prompt every turn re-appends. That is the quantity the
+ * engine compares against seq_len before it refuses a prompt as too
+ * long, so a caller showing it beside that limit is showing the number
+ * the limit actually applies to.
+ * Exact, not an estimate: lz_encode runs the whole BPE pass and counts
+ * with out=NULL. Returns < 0 when there is no model to tokenise with, or
+ * on a render failure. `system` is the custom system prompt in force, or
+ * NULL - it is part of the conversation for the purpose of the window
+ * count (it occupies context every turn). */
 int lz_session_token_count(LZSession *s, const char *system,
                            char *errbuf, int errlen);
 

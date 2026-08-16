@@ -504,14 +504,22 @@ int lz_session_token_count(LZSession *s, const char *system,
     if (!s || !(s->model && s->tok && s->state)) return -1;
     if (s->hist.n == 0) return 0;
     lz_chat_buf_init(&b);
-    /* add_generation_prompt = 0: the question is how much of the window
-       the CONVERSATION occupies, and the generation prompt is not part of
-       it - it is re-appended for every turn and would make the number jump
-       by four for no reason the user can see. */
-    /* render_conv_core, not lz_chat_render: a custom system prompt is
+    /* add_generation_prompt = 1, which is the SAME render lz_session_job
+       hands to the engine - so this returns the quantity the engine
+       compares against seq_len (start_pos + n_prompt, generate.c), not a
+       number that merely resembles it.
+       It was 0 once, on the reasoning that the generation prompt is not
+       part of the conversation. It is not, but it is part of what every
+       turn must fit: measured on this tokenizer the tail is 7 tokens
+       with thinking on and 10 with it off, so a window shown as full at
+       2048 dropped the oldest exchange at 2041. A headroom number that
+       runs out before it reads empty is the shape iron law four names.
+       Not a jump either - the tail is appended every turn, so it is a
+       constant offset, not a fluctuation.
+       render_conv_core, not lz_chat_render: a custom system prompt is
        part of the CONVERSATION for the purpose of the window count - it
        occupies context every turn. */
-    if (render_conv_core(s, system, 0, &b, errbuf, errlen) != 0) {
+    if (render_conv_core(s, system, 1, &b, errbuf, errlen) != 0) {
         lz_chat_buf_free(&b);
         return -1;
     }
