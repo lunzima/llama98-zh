@@ -141,7 +141,23 @@ enum { LZ_LAMP_OFF = 0, LZ_LAMP_READY, LZ_LAMP_BUSY, LZ_LAMP_ERROR,
 #define LZ_LAMP_GAP     3
 #define LZ_LAMP_PAD     3
 #define LZ_LAMP_CELL_W (LZ_LAMP_PAD * 2 + LZ_LAMP_PX * 2 + LZ_LAMP_GAP)
-#define LZ_LAMP_TIMER   1
+/* ONE periodic tick for the whole window, and the reason is not
+ * tidiness. There used to be three - a lamp timer, a token timer and a
+ * debug-ramp timer - and each of them wrote to the status line with its
+ * own idea of which phase the job was in. The token timer said
+ * "generating" every 100 ms while the lamp timer put the prefill
+ * progress back every 400 ms; the debug timer existed only because the
+ * lamp timer's lifetime was job-scoped and the ramp had to run when no
+ * job did. Three writers, three phase tests, one line - the disagreement
+ * was the bug, not a symptom of it.
+ * Now: ui_tick decides the phase once and every periodic consumer hangs
+ * off it, ui_timer_sync owns the single lifetime. Sub-rates come from
+ * the CLOCK, not from counting ticks, so a consumer's interval does not
+ * depend on how often this happens to fire. */
+#define LZ_UI_TIMER     1
+/* Selftest-only pump watchdog. Its own id so it cannot collide with
+   the display tick above; see st_pump. */
+#define LZ_ST_PUMP_TIMER 99
 #define LZ_LAMP_BLINK 400        /* ms; WinZip's activity lamp flickered */
 
 /* The display is refreshed on a TIMER, not once per token (user
@@ -161,12 +177,6 @@ enum { LZ_LAMP_OFF = 0, LZ_LAMP_READY, LZ_LAMP_BUSY, LZ_LAMP_ERROR,
  * ZERO restores the old push-per-token behaviour exactly, which is what
  * makes it a control rather than only a tuning value - the selftest
  * drives both settings. */
-#define LZ_TOK_TIMER    2
-/* The debug ramp's own timer. LZ_LAMP_TIMER is started by start_job
-   and killed by finish_job, so it ticks only WHILE a job runs - and the
-   ramp runs only when one does not. */
-#define LZ_DBG_TIMER    3
-#define LZ_DBG_TICK_MS  100
 #define LZ_TOK_MS       100      /* default tick */
 #define LZ_TOK_MS_MAX   2000     /* an ini typo must not freeze the view */
 #define LZ_TOK_BUF      4096
@@ -287,6 +297,18 @@ static struct {
        fresh while a long turn is in flight. */
     int   tok_gen;
     double tok_start_ms;
+    /* When the GENERATION phase began, which is not when the job did.
+       The cell is labelled "generating N tok, X tok/s", so its
+       denominator has to be the span that produced those tokens: with
+       the job start as the denominator, a 30 s prefill followed by a
+       20-token reply in 2 s reads 0.6 tok/s for a decode running at 10.
+       cli_main.c faces the same split and answers it by printing BOTH
+       "s turn" and "s gen" - see its own comment on why the whole-turn
+       number is the honest one for the reuse A/B. One cell cannot say
+       two things, so it says the one its label claims.
+       Equal to tok_start_ms until prefill ends, so a turn with no
+       prefill is unchanged. */
+    double gen_start_ms;
     int   tok_live;
     /* The repetition penalty's WINDOW, in tokens. Ini-only, deliberately
      * not in LZGuiSettings and not in the settings dialog: it and the
@@ -780,7 +802,16 @@ static HFONT g_sb_font;
    draws. A tick that catches one field from the previous slice and one
    from the next is a frame stale, which the tick-based display already
    accepts everywhere else. */
-static int g_pf_done, g_pf_total;
+/* Prefill progress, ACCUMULATED ACROSS SEGMENTS. One turn can prefill
+   in more than one go: on a prefix-cache miss lz_prefix_prepare
+   forwards the reusable part and reports 0..n1, and then the resume
+   path forwards the generation-prompt tail and reports 0..n2 - two
+   independent ranges through one callback. Reported raw, the bar ran to
+   100% and jumped back to 0%. g_pf_base carries the earlier segments so
+   `done` only ever moves forward; the denominator grows when a new
+   segment appears, because that is the moment the work becomes known -
+   neither end of the chain can know n2 before the tokeniser runs. */
+static int g_pf_done, g_pf_total, g_pf_base, g_pf_seen;
 
 /* Is a prefill in progress? Three places ask - the fallback strip's
    paint, the indicator tick, and set_status, which has to know that the
@@ -1126,7 +1157,7 @@ static void set_status(const char *display_utf8) {
        one and a rate over zero tokens is not. */
     if (g.tok_live && !prefill_active()) {
         lz_common_tokcell(cell, (int)sizeof cell, g.tok_gen,
-                       lz_time_ms() - g.tok_start_ms,
+                       lz_time_ms() - g.gen_start_ms,
                        lz_str_utf8(LZ_STR_STATE_TOKCELL));
         lz_gbk_from_utf8(cell, (int)strlen(cell),
                          status_gbk, (int)sizeof status_gbk, NULL);
@@ -1859,7 +1890,9 @@ static void tokens_arrived(const char *utf8, int n) {
 }
 
 /* Paint the prefill indicator from whatever the counters say now.
- * Shared by both timers - see LZ_DBG_TIMER for why there are two. */
+ * Called from ui_tick and from WM_APP_PREFILL - the tick for the
+ * regular refresh, the message so the first update lands as prefill
+ * STARTS rather than up to one tick later. */
 static void prefill_paint_tick(void) {
     /* Whether the well was last painted with something in it. Only the
        fallback strip needs it: emptying that one means invalidating it,
@@ -1912,14 +1945,49 @@ static void prefill_paint_tick(void) {
 
 static void gui_prefill_progress(int done, int total, void *ctx) {
     (void)ctx;
-    g_pf_total = total;
-    g_pf_done  = done;
+    /* Every segment opens with done == 0 (gen_prefill_raw reports before
+       its first slice, on purpose). A second one means the previous
+       segment's total is now behind us. */
+    if (done == 0 && g_pf_seen) g_pf_base = g_pf_total;
+    g_pf_seen  = 1;
+    g_pf_total = g_pf_base + total;
+    g_pf_done  = g_pf_base + done;
     /* Posted, not drawn: this runs on the WORKER thread. The UI thread
        redraws when it handles the message, which is what makes the
        indicator appear as prefill STARTS rather than at the next 400 ms
        tick - on a fast machine the whole prefill fits inside one tick,
        so the tick alone never showed it. */
     if (g.main) PostMessage(g.main, WM_APP_PREFILL, 0, 0);
+}
+
+/* ---- the window's single periodic tick (see LZ_UI_TIMER) ---- */
+
+static int    g_ui_timer_ms;      /* 0 = not armed */
+static double g_ui_last_flush;
+
+/* The tick's period: fine enough for the fastest consumer, which is the
+   token flush when stream_ms asks for one shorter than a lamp blink.
+   Everything slower is gated on the clock inside ui_tick, so a long
+   stream_ms does not slow the lamps down and a short one does not make
+   them blink faster. */
+static int ui_tick_ms(void) {
+    int ms = LZ_LAMP_BLINK;
+    if (g.tok_ms > 0 && g.tok_ms < ms) ms = g.tok_ms;
+    return ms;
+}
+
+/* Arm or disarm the one timer from the state that needs it. Called
+   wherever that state changes - both ends of a job, and once at startup
+   for the demo ramp - so no caller has to remember a matching
+   KillTimer. Re-arms when the period changes, which is what makes
+   stream_ms editable without a restart. */
+static void ui_timer_sync(HWND hwnd) {
+    int want = (g.job_kind != JOB_NONE || g_dbg_prefill_ms > 0)
+               ? ui_tick_ms() : 0;
+    if (want == g_ui_timer_ms) return;
+    if (g_ui_timer_ms) KillTimer(hwnd, LZ_UI_TIMER);
+    if (want) SetTimer(hwnd, LZ_UI_TIMER, (UINT)want, NULL);
+    g_ui_timer_ms = want;
 }
 
 static void set_lamps(void) {
@@ -1935,6 +2003,75 @@ static void set_lamps(void) {
                 (LPARAM)g.lamp_bmp[left]);
     SendMessage(g.lamp[1], STM_SETIMAGE, IMAGE_BITMAP,
                 (LPARAM)g.lamp_bmp[right]);
+}
+
+/* Everything this window does on a clock, in the order it has to happen
+ * and with the phase decided ONCE - see LZ_UI_TIMER.
+ *
+ * Every sub-rate is a deadline against lz_time_ms, not a count of
+ * ticks: the tick's period follows stream_ms (ui_tick_ms), so counting
+ * would make the lamp rate depend on a setting that has nothing to do
+ * with it. On the target that clock moves in ~55 ms steps, which is
+ * finer than any deadline here. */
+static void ui_tick(void) {
+    double now = lz_time_ms();
+
+    /* 1. Buffered tokens. stream_ms == 0 means the sink pushes straight
+          to the control and there is nothing held back to flush. */
+    if (g.job_kind == JOB_GENERATE && g.tok_ms > 0 &&
+        now - g_ui_last_flush >= (double)g.tok_ms) {
+        tokens_flush();
+        g_ui_last_flush = now;
+    }
+
+    /* 2. The activity lamp. Phase off the wall clock so it blinks at
+          LZ_LAMP_BLINK whatever the tick period is. */
+    {
+        int ph = g.job_kind != JOB_NONE
+                 ? (int)(((long)(now / LZ_LAMP_BLINK)) & 1) : 0;
+        if (ph != g.lamp_phase) { g.lamp_phase = ph; set_lamps(); }
+    }
+
+    /* 3. The demo ramp, and only with no real job: a generation owns
+          these counters and the ramp must not overwrite what the engine
+          reports. t0 is zeroed while a job runs so the sweep restarts
+          from empty afterwards rather than resuming mid-way. */
+    if (g_dbg_prefill_ms > 0) {
+        if (g.job_kind != JOB_NONE) {
+            g_dbg_prefill_t0 = 0.0;
+        } else {
+            double dt;
+            if (g_dbg_prefill_t0 <= 0.0) g_dbg_prefill_t0 = now;
+            dt = now - g_dbg_prefill_t0;
+            if (dt >= (double)g_dbg_prefill_ms) {
+                g_dbg_prefill_t0 = now;   /* loop, so it can be watched
+                                             more than once */
+                dt = 0.0;
+            }
+            g_pf_base  = 0;
+            g_pf_total = 1000;
+            g_pf_done  = (int)((dt * 1000.0) / (double)g_dbg_prefill_ms);
+            if (g_pf_done >= g_pf_total) g_pf_done = g_pf_total - 1;
+        }
+    }
+
+    /* 4. The prefill -> generation transition, seen once. The
+          throughput cell's denominator starts here, not at the job's
+          start - see LZGuiState.gen_start_ms. */
+    {
+        static int was_prefill;
+        int now_prefill = prefill_active();
+        if (was_prefill && !now_prefill && g.job_kind == JOB_GENERATE)
+            g.gen_start_ms = now;
+        was_prefill = now_prefill;
+    }
+
+    /* 5. THE STATUS LINE, one decision, one writer. prefill_paint_tick
+          empties the well by itself when there is no prefill, so the
+          resting/idle case needs no branch here. */
+    prefill_paint_tick();
+    if (g.job_kind == JOB_GENERATE && !prefill_active())
+        set_status(lz_str_utf8(LZ_STR_STATE_GENERATING));
 }
 
 /* (Re)load the lamp artwork and repaint the pair.
@@ -2149,7 +2286,7 @@ static int start_job(HWND hwnd, LZWorkerJob job, void *ud, int kind) {
     g.tok_live = (kind == JOB_GENERATE);
     if (kind == JOB_GENERATE) {
         g.tok_gen = 0;
-        g.tok_start_ms = lz_time_ms();
+        g.tok_start_ms = g.gen_start_ms = lz_time_ms();
     }
     set_status(lz_str_utf8(kind == JOB_LOAD ? LZ_STR_STATE_LOADING
                                                : LZ_STR_STATE_GENERATING));
@@ -2164,12 +2301,15 @@ static int start_job(HWND hwnd, LZWorkerJob job, void *ud, int kind) {
     rollback_sync();
     g.lamp_phase = 0;
     set_lamps();
-    SetTimer(hwnd, LZ_LAMP_TIMER, LZ_LAMP_BLINK, NULL);
-    /* Only a generate job produces tokens; a load has nothing to
-       refresh, and a timer running with nothing to flush is a wakeup
-       the target does not need. */
-    if (kind == JOB_GENERATE && g.tok_ms > 0)
-        SetTimer(hwnd, LZ_TOK_TIMER, (UINT)g.tok_ms, NULL);
+    /* This job's prefill starts from nothing, whatever the last one
+       left. */
+    g_pf_base = 0;
+    g_pf_seen = 0;
+    g_ui_last_flush = lz_time_ms();
+    /* One timer, armed from the state that needs it. A job running is
+       one of the two things that need it - the demo ramp is the other,
+       and ui_timer_sync is the only place that decides. */
+    ui_timer_sync(hwnd);
     return 0;
 }
 
@@ -2215,7 +2355,6 @@ static void finish_job(HWND hwnd, int rc) {
        few bytes of the reply - which would come out unstyled, after the
        reset, or not at all. */
     tokens_flush();
-    KillTimer(hwnd, LZ_TOK_TIMER);
     /* The stream may still be holding a partial tag; without this a
        reply that ends mid-tag is never shown at all. */
     transcript_end();
@@ -2232,7 +2371,6 @@ static void finish_job(HWND hwnd, int rc) {
        already being correct. The selftest's
        "g.tok_gen == 11" check pins the chain that IS live - worker
        counts, tokens_arrived carries it, the status cell reads it. */
-    KillTimer(hwnd, LZ_LAMP_TIMER);
     /* Retire the prefill counters with the job that produced them.
        A run that finishes normally ends on done == total and the tick
        empties the well by itself; a run that was STOPPED part-way ends
@@ -2243,12 +2381,16 @@ static void finish_job(HWND hwnd, int rc) {
        turn that may have no prefill at all. Cleared through
        prefill_paint_tick rather than by hand so the emptying stays in
        the one function that knows how to do it for both strips. */
-    g_pf_done = g_pf_total = 0;
-    prefill_paint_tick();
+    g_pf_done = g_pf_total = g_pf_base = g_pf_seen = 0;
     cmd_enable(IDM_STOP_GEN, 0);
     g.done_rc = rc;
     g.done_seen = 1;
     g.job_kind = JOB_NONE;
+    /* AFTER job_kind, which is half of what ui_timer_sync reads - the
+       tick stops here unless the demo ramp still wants it. Then the
+       repaint, so nothing can put the retired counters back. */
+    ui_timer_sync(hwnd);
+    prefill_paint_tick();
 
     if (kind == JOB_LOAD) {
         /* What the window IS has changed either way: a failed load
@@ -4870,11 +5012,10 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
            selftest wiring gate below), not IsWindowEnabled or anything
            painted, because DragAcceptFiles changes no visible state. */
         g.drop_on = lz_drop_accept(hwnd, 1);
-        /* The debug ramp's timer, for the whole life of the window -
-           unlike the lamp timer, which start_job owns. Off unless the
-           ini asked for it. */
-        if (g_dbg_prefill_ms > 0)
-            SetTimer(hwnd, LZ_DBG_TIMER, LZ_DBG_TICK_MS, NULL);
+        /* The demo ramp is the other thing that wants the tick when no
+           job is running; ui_timer_sync reads both and is the only
+           place that arms it. Off unless the ini asked for it. */
+        ui_timer_sync(hwnd);
         /* Title-bar self-drawing. Attach the subclass after
            create_children so the caption exists before the first repaint,
            then push the initial three segments. The subclass is attached
@@ -4964,64 +5105,12 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
 
     case WM_TIMER:
-        if (wp == LZ_LAMP_TIMER) {
-            g.lamp_phase = !g.lamp_phase;
-            set_lamps();
-            /* From the lamp tick, which runs whether or not tokens are
-               arriving - during prefill they are not, so the token tick
-               has nothing to fire on. */
-            if (g.job_kind == JOB_GENERATE) prefill_paint_tick();
-            return 0;
-        }
-        if (wp == LZ_DBG_TIMER) {
-            /* Only with no real job: a generation owns these counters
-               and the ramp must not overwrite what the engine reports.
-               t0 is zeroed while a job runs so the sweep restarts from
-               empty afterwards rather than resuming mid-way. */
-            if (g.job_kind != JOB_NONE) {
-                g_dbg_prefill_t0 = 0.0;
-            } else {
-                double now = lz_time_ms();
-                double dt;
-                if (g_dbg_prefill_t0 <= 0.0) g_dbg_prefill_t0 = now;
-                dt = now - g_dbg_prefill_t0;
-                if (dt >= (double)g_dbg_prefill_ms) {
-                    g_dbg_prefill_t0 = now;   /* loop, so it can be
-                                                 watched more than once */
-                    dt = 0.0;
-                }
-                g_pf_total = 1000;
-                g_pf_done  = (int)((dt * 1000.0) / (double)g_dbg_prefill_ms);
-                if (g_pf_done >= g_pf_total) g_pf_done = g_pf_total - 1;
-                prefill_paint_tick();
-            }
-            return 0;
-        }
-        if (wp == LZ_TOK_TIMER) {
-            tokens_flush();
-            /* Spec 3.1: the throttled tick also refreshes the throughput
-               cell, so it cannot sit stale for the length of a long
-               generation the way it would if only start_job touched it
-               (a slow turn spends most of its wall time between tokens).
-               set_status's tok_live branch re-reads lz_time_ms() and
-               recomputes the rate, so this is the display catching up to
-               the elapsed time, not a copy of an old number.
-
-               NOT DURING PREFILL, and this tick is the reason the gate
-               inside set_status was not enough on its own: that gate
-               stops the throughput CELL from replacing the caller's
-               text, but this caller was handing it a constant that
-               knows nothing about the phase. start_job arms this timer
-               for the whole job, so during prefill it overwrote the
-               progress line every 100 ms while the 400 ms lamp tick put
-               it back - the indicator moved and the words said
-               "generating". Feeding the same tick to the indicator
-               instead makes it refresh four times as often, which is
-               the opposite of what it was doing. */
-            if (prefill_active()) prefill_paint_tick();
-            else set_status(lz_str_utf8(LZ_STR_STATE_GENERATING));
-            return 0;
-        }
+        /* One tick, one handler. Every periodic consumer - the token
+           flush, the activity lamp, the demo ramp, the status line -
+           hangs off ui_tick, which decides the phase once. Three timers
+           each deciding it separately is what put "generating" over the
+           prefill progress; see LZ_UI_TIMER. */
+        if (wp == LZ_UI_TIMER) { ui_tick(); return 0; }
         break;
 
     /* ---- splitter ---- */
@@ -6708,17 +6797,21 @@ static int st_job_load_ok(void *ud, LZTokenSink sink, LZShouldContinue cont,
    the stop button lives. */
 static int st_pump(HWND hwnd, int stop_at_first) {
     MSG msg;
-    SetTimer(hwnd, 99, 20000, NULL);
+    /* Named, and deliberately NOT the window's display tick: this one
+       is a watchdog whose message the loop below eats itself, so it
+       never reaches the window procedure and drives nothing. Reusing
+       LZ_UI_TIMER's id here would cancel the real tick. */
+    SetTimer(hwnd, LZ_ST_PUMP_TIMER, 20000, NULL);
     while (!g.done_seen && GetMessage(&msg, NULL, 0, 0) > 0) {
         if (msg.message == WM_APP_TOKENS && stop_at_first) {
             lz_worker_request_stop();
             stop_at_first = 0;
         }
-        if (msg.message == WM_TIMER && msg.wParam == 99) break;
+        if (msg.message == WM_TIMER && msg.wParam == LZ_ST_PUMP_TIMER) break;
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
-    KillTimer(hwnd, 99);
+    KillTimer(hwnd, LZ_ST_PUMP_TIMER);
     return g.done_seen;
 }
 
@@ -6879,19 +6972,20 @@ static int st_worker(FILE *f, HWND hwnd) {
             fprintf(f, "  part 0 reads [%s]\n", cell);
         checks++;
 
-        /* THE 100 ms TOKEN TICK MUST NOT TAKE THE LINE EITHER. It is
-           armed by start_job for the whole job, so during prefill it
-           fired four times for every lamp tick and handed set_status a
+        /* THE PERIODIC TICK MUST NOT TAKE THE LINE EITHER. It runs for
+           the whole job, so during prefill it used to hand set_status a
            constant that knows nothing about the phase - the gate inside
            set_status cannot see that, because the caller supplied the
            text rather than letting the throughput cell substitute one.
-           Feeding it to the indicator instead is what this asserts.
+           ui_tick deciding the phase once is what this asserts.
            Reddens if that branch goes back to an unconditional
            set_status(GENERATING). */
         g.tok_live = 1;
+        g.job_kind = JOB_GENERATE;
         g_pf_done = 3;
         g_pf_total = 10;
-        SendMessage(hwnd, WM_TIMER, (WPARAM)LZ_TOK_TIMER, 0);
+        SendMessage(hwnd, WM_TIMER, (WPARAM)LZ_UI_TIMER, 0);
+        g.job_kind = JOB_NONE;
         st_status_text(cell, (int)sizeof cell);
         st_check(f, strstr(cell, "3/10") != NULL,
                  "prefill: the token tick refreshes the progress line "
@@ -6899,6 +6993,34 @@ static int st_worker(FILE *f, HWND hwnd) {
         if (strstr(cell, "3/10") == NULL)
             fprintf(f, "  part 0 reads [%s]\n", cell);
         checks++;
+
+        /* TWO SEGMENTS, ONE BAR. A prefix-cache miss prefills in two
+           goes and each reports its own 0..n through the same callback;
+           taken raw the bar ran to 100% and jumped back to 0%. `done`
+           must only ever move forward. Reddens if g_pf_base goes. */
+        {
+            int seq_ok = 1, prev;
+            g_pf_base = g_pf_seen = g_pf_done = g_pf_total = 0;
+            gui_prefill_progress(0, 100, NULL);
+            gui_prefill_progress(60, 100, NULL);
+            prev = g_pf_done;
+            gui_prefill_progress(100, 100, NULL);
+            if (g_pf_done < prev) seq_ok = 0;
+            prev = g_pf_done;
+            gui_prefill_progress(0, 5, NULL);      /* second segment */
+            if (g_pf_done < prev) seq_ok = 0;
+            if (g_pf_total != 105) seq_ok = 0;
+            prev = g_pf_done;
+            gui_prefill_progress(5, 5, NULL);
+            if (g_pf_done < prev || g_pf_done != 105) seq_ok = 0;
+            st_check(f, seq_ok,
+                     "prefill: a second segment continues the bar "
+                     "instead of restarting it");
+            if (!seq_ok)
+                fprintf(f, "  ended at %d/%d\n", g_pf_done, g_pf_total);
+            checks++;
+            g_pf_base = g_pf_seen = 0;
+        }
 
         g.tok_live = was_live;
         g_pf_done = was_done;

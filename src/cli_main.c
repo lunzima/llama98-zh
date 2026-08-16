@@ -1378,9 +1378,22 @@ int main(int argc, char **argv) {
         goto fail;
     }
     t1 = lz_time_ms();
-    printf("Done           %.2f GB / %.1f s = %.0f MB/s\n",
-           (double)m.bytes_alloc / 1e9, (t1 - t0) / 1000.0,
-           (double)m.bytes_alloc / 1e6 / ((t1 - t0) / 1000.0));
+    {
+        /* A rate needs a denominator that exists. lz_time_ms moves in
+           ~55 ms steps on both DOS (18.2 Hz) and a Win9x box without
+           QueryPerformanceCounter - see compat.c - so a small or
+           already-cached model can finish inside one tick and make
+           t1 - t0 exactly zero. Printing "inf MB/s" for that is the
+           trap CLAUDE.md names; saying the clock could not resolve it
+           is the honest answer, and lz_common_tokcell guards the same
+           way. */
+        double secs = (t1 - t0) / 1000.0;
+        printf("Done           %.2f GB / %.1f s", (double)m.bytes_alloc / 1e9,
+               secs);
+        if (secs > 0.0) printf(" = %.0f MB/s\n",
+                               (double)m.bytes_alloc / 1e6 / secs);
+        else            printf(" (below the clock's resolution)\n");
+    }
 
     if (want_stats) {
         printf("\nTensor statistics (for parity with Python):\n");
