@@ -1344,37 +1344,13 @@ static int gen_emit_token(int next, int sampled,
     return 0;
 }
 
-/* The slicing itself, with the callback passed directly rather than
-   read off an LZGenOpts - lz_prefix_prepare has no opts to read.
-   Returns 1 forwarded, 0 a forward failure. */
-static int gen_prefill_raw(const LZModel *m, LZRunState *s,
-                           const int *tok, int n, int start_pos,
-                           LZProgress on_prefill, void *ctx) {
-    int width, done = 0;
-
-    if (n <= 0) return 1;
-    if (!on_prefill) return lz_forward_batch(m, s, tok, n, start_pos) ? 1 : 0;
-
-    on_prefill(0, n, ctx);
-    width = s->nt_cap > 0 ? s->nt_cap : 1;
-    while (width < 64) width *= 2;
-    while (done < n) {
-        int take = n - done;
-        if (take > width) take = width;
-        if (!lz_forward_batch(m, s, tok + done, take, start_pos + done))
-            return 0;
-        done += take;
-        on_prefill(done, n, ctx);
-    }
-    return 1;
-}
-
 /* Prefill, in slices, so it can report where it is and be stopped.
  *
- * One function rather than the same edit at each of the three prefill
- * branches - they only differ in what happens to the MTP head
- * afterwards, and the body-prefill they share has no business being
- * spelled out three times.
+ * ONE implementation, taking the callback directly: lz_prefix_prepare
+ * has no LZGenOpts to read one off, lz_generate_resume_ex does, and
+ * that is the whole of the difference between them - see gen_prefill
+ * below. Two copies of this loop drifted apart the moment the second
+ * knob (cancellation) was added to only one of them.
  *
  * SLICES ARE A MULTIPLE OF s->nt_cap. lz_forward_batch chunks by that
  * width internally, so a slice that is not a multiple would make
@@ -1383,29 +1359,32 @@ static int gen_prefill_raw(const LZModel *m, LZRunState *s,
  * The RESULT is unaffected at any slicing, which is not an assumption
  * here but this project's standing "--batch 1..LZ_BATCH_MAX must agree
  * bit for bit" contract restated: where the prompt is cut cannot matter.
+ * That contract, not the bypass below, is what makes the slicing safe.
  *
- * With both callbacks NULL this runs one slice covering the whole
- * prompt, i.e. exactly the single call it replaced.
+ * The both-NULL bypass is an optimisation, not the bit-identity
+ * argument, and it is reachable from fewer places than it looks:
+ * anything routed through common/session.c hands down a non-NULL
+ * session_cont whether or not the front end set one, so only a caller
+ * that passes NULL itself (openai.c's lz_prefix_prepare calls) takes
+ * it.
  *
  * Returns 1 forwarded, 0 a forward failure, -1 cancelled. */
-static int gen_prefill(const LZModel *m, LZRunState *s,
-                       const int *tok, int n, int start_pos,
-                       const LZGenOpts *opts, LZShouldContinue cont,
-                       void *ctx) {
+static int gen_prefill_raw(const LZModel *m, LZRunState *s,
+                           const int *tok, int n, int start_pos,
+                           LZProgress on_prefill, LZShouldContinue cont,
+                           void *ctx) {
     int width, done = 0;
 
     if (n <= 0) return 1;
-    /* No callbacks means nothing can observe the slicing, so do not pay
-       for it: one call, byte for byte the code path that was here
-       before this function existed. */
-    if (!opts->on_prefill && !cont)
+    /* Nothing can observe the slicing, so do not pay for it. */
+    if (!on_prefill && !cont)
         return lz_forward_batch(m, s, tok, n, start_pos) ? 1 : 0;
 
     /* Reported before the first slice as well as after each one: a
        prompt shorter than one slice would otherwise produce a single
        callback already saying done == total, and a caller showing an
        indicator while done < total would never show one. */
-    if (opts->on_prefill) opts->on_prefill(0, n, ctx);
+    if (on_prefill) on_prefill(0, n, ctx);
 
     width = s->nt_cap > 0 ? s->nt_cap : 1;
     /* Slice at a whole number of batches, and never fewer than one, or
@@ -1419,12 +1398,23 @@ static int gen_prefill(const LZModel *m, LZRunState *s,
         if (!lz_forward_batch(m, s, tok + done, take, start_pos + done))
             return 0;
         done += take;
-        if (opts->on_prefill) opts->on_prefill(done, n, ctx);
+        if (on_prefill) on_prefill(done, n, ctx);
         /* Checked AFTER the slice, so a stop always lands on a whole
            slice boundary and the run state is never left mid-batch. */
         if (done < n && cont && !cont(ctx)) return -1;
     }
     return 1;
+}
+
+/* The same thing for callers that hold an LZGenOpts. opts is non-NULL
+   by the time any call site here runs - lz_generate_resume_ex rejects a
+   NULL one at its entry. */
+static int gen_prefill(const LZModel *m, LZRunState *s,
+                       const int *tok, int n, int start_pos,
+                       const LZGenOpts *opts, LZShouldContinue cont,
+                       void *ctx) {
+    return gen_prefill_raw(m, s, tok, n, start_pos,
+                           opts->on_prefill, cont, ctx);
 }
 
 /* Failure exits below use LZ_ERR_SET* (err.h): return code and errbuf
@@ -2306,7 +2296,8 @@ int lz_prefix_match(const LZPrefixCache *pc, const int *pre, int n_pre) {
 int lz_prefix_prepare(LZPrefixCache *pc, const LZModel *m, LZTokenizer *t,
                       LZRunState *s, const char *render, int render_len,
                       int split, int *out_start_pos, int *out_suffix_off,
-                      int *out_reused, LZProgress on_prefill, void *ctx,
+                      int *out_reused, LZProgress on_prefill,
+                      LZShouldContinue cont, void *ctx,
                       char *errbuf, int errlen) {
     int n_cur, n_pre, n_tail, base = 0;
     int tail_len;
@@ -2396,13 +2387,21 @@ int lz_prefix_prepare(LZPrefixCache *pc, const LZModel *m, LZTokenizer *t,
        uninstrumented meant the indicator saw only the generation-prompt
        tail the resume path forwards afterwards: a handful of tokens,
        done instantly, so nothing was ever drawn. */
-    if (n_pre > base &&
-        !gen_prefill_raw(m, s, pc->cur + base, n_pre - base, base,
-                         on_prefill, ctx)) {
-        lz_state_reset(s, m);
-        lz_prefix_reset(pc);
-        if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_FORWARD);
-        return LZ_ERR_FORWARD;
+    if (n_pre > base) {
+        int pf = gen_prefill_raw(m, s, pc->cur + base, n_pre - base, base,
+                                 on_prefill, cont, ctx);
+        if (pf <= 0) {
+            /* Either way the state is half-forwarded and the cache would
+               describe a prefix that is not there, so both are torn
+               down. The CODES differ because the caller's next move
+               does: a forward failure falls back to the full path, a
+               cancellation ends the turn. */
+            lz_state_reset(s, m);
+            lz_prefix_reset(pc);
+            if (pf < 0) return LZ_ERR_CANCELLED;
+            if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_FORWARD);
+            return LZ_ERR_FORWARD;
+        }
     }
 
     /* Cache this render's prefix for the next turn. A failed save is not
@@ -2499,8 +2498,8 @@ int lz_pool_prepare(LZSessionPool *p, const LZModel *m, LZTokenizer *t,
                     const char *render, int render_len, int split,
                     LZRunState **out_state, int *out_start_pos,
                     int *out_suffix_off, int *out_reused,
-                    LZProgress on_prefill, void *ctx,
-                    char *errbuf, int errlen) {
+                    LZProgress on_prefill, LZShouldContinue cont,
+                    void *ctx, char *errbuf, int errlen) {
     int i, best = -1, best_score = 0, n_pre = 0;
 
     if (out_state) *out_state = NULL;
@@ -2560,8 +2559,8 @@ int lz_pool_prepare(LZSessionPool *p, const LZModel *m, LZTokenizer *t,
     if (out_state) *out_state = &p->slot[best].st;
     return lz_prefix_prepare(&p->slot[best].pc, m, t, &p->slot[best].st,
                              render, render_len, split, out_start_pos,
-                             out_suffix_off, out_reused, on_prefill, ctx,
-                             errbuf, errlen);
+                             out_suffix_off, out_reused, on_prefill, cont,
+                             ctx, errbuf, errlen);
 }
 
 void lz_pool_stats(const LZSessionPool *p, long *calls, long *hits,

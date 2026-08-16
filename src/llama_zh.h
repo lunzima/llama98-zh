@@ -659,23 +659,39 @@ void lz_prefix_reset(LZPrefixCache *pc);
    for the Qwen chat template that is
    `render_len - strlen(lz_chat_gen_prompt_tail(enable_thinking))`.
 
-   On return the caller ALWAYS does exactly this, reuse or not:
+   `on_prefill` (may be NULL) is called as the reusable prefix is
+   forwarded - on a cache MISS that is nearly the whole prompt, so it is
+   where an indicator has to be fed from. `cont` (may be NULL) is asked
+   between slices and stops the forward when it returns 0. `ctx` is
+   shared by both.
+
+   THREE outcomes, and they are not interchangeable:
+
+   0 - success. Generate with exactly this, reuse or not:
 
        lz_generate_resume(m, t, s, *out_start_pos,
                           render + *out_suffix_off,
                           render_len - *out_suffix_off, ...)
 
-   because the fallback path returns start_pos = 0 and suffix_off = 0,
-   and lz_generate_resume(0, whole render) is lz_generate. There is no
-   second code path in the caller to get wrong.
+       because a miss returns start_pos = 0 and suffix_off = 0, and
+       lz_generate_resume(0, whole render) is lz_generate.
 
-   *out_reused receives how many tokens were skipped (0 = none).
-   Returns 0 on success; a non-zero LZErr means the state is untouched
-   and the caller should fall back to lz_generate itself. */
+   LZ_ERR_CANCELLED - `cont` asked to stop part-way. The run state and
+       the cache have BOTH been reset, and the caller must end the turn:
+       falling back to lz_generate here would re-forward the whole
+       prompt, which is precisely the work the stop was meant to avoid.
+
+   any other non-zero LZErr - the cache could not be used. The state is
+       not left describing a prefix that is not there, so the caller may
+       fall back to lz_generate itself; it starts by resetting the state
+       anyway.
+
+   *out_reused receives how many tokens were skipped (0 = none). */
 int  lz_prefix_prepare(LZPrefixCache *pc, const LZModel *m, LZTokenizer *t,
                        LZRunState *s, const char *render, int render_len,
                        int split, int *out_start_pos, int *out_suffix_off,
-                       int *out_reused, LZProgress on_prefill, void *ctx,
+                       int *out_reused, LZProgress on_prefill,
+                       LZShouldContinue cont, void *ctx,
                        char *errbuf, int errlen);
 
 /* How many tokens of `pre[0..n_pre)` this cache would reuse. Read-only:
@@ -737,14 +753,15 @@ void lz_pool_free(LZSessionPool *p);
                           render + *out_suffix_off,
                           render_len - *out_suffix_off, ...)
 
-   which is the identical shape to the single-state path, so there is no
-   second call site to get wrong. */
+   which is the identical shape to the single-state path. The three
+   outcomes are lz_prefix_prepare's, unchanged - including
+   LZ_ERR_CANCELLED, which ends the turn rather than falling back. */
 int  lz_pool_prepare(LZSessionPool *p, const LZModel *m, LZTokenizer *t,
                      const char *render, int render_len, int split,
                      LZRunState **out_state, int *out_start_pos,
                      int *out_suffix_off, int *out_reused,
-                     LZProgress on_prefill, void *ctx,
-                     char *errbuf, int errlen);
+                     LZProgress on_prefill, LZShouldContinue cont,
+                     void *ctx, char *errbuf, int errlen);
 
 void lz_pool_stats(const LZSessionPool *p, long *calls, long *hits,
                    long *cold, long *evict_useful, long *bytes);

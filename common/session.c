@@ -286,27 +286,16 @@ int lz_session_regen(LZSession *s, const char *system,
     return render_conv_core(s, system, 1, &s->prompt, errbuf, errlen);
 }
 
-/* Which of the job's two paths must run for this prefill request: the
-   full path when the caller asked for FULL, OR when it asked for PREFIX
-   but no cache is ready (lz_prefix_init / lz_session_prefix_arm failed) -
-   in that second case the prefix branch could not run and the full path
-   is the only correct fallback.
-
-   Extracted as a pure function of (prefill, pc_ready) so this decision
-   can be pinned down with no model in the room. The guard prevents a
-   PREFIX request with
-   pc_ready == 0 from falling through BOTH branches into an uninitialized
-   `rc`. */
-static int session_full_path(int prefill, int pc_ready) {
-    return prefill == LZ_PREFILL_FULL || !pc_ready;
-}
-
 int lz_session_job(void *ud, const char *system, LZTokenSink sink,
                    LZShouldContinue cont, void *cb_ctx,
                    char *errbuf, int errlen, LZInspect *ins) {
     LZSession *s = (LZSession *)ud;
     SessionCallbacks cb;
-    int n_out = 0, rc;
+    /* rc defaults the way lz_generate_resume_ex's own does: every path
+       below assigns it, and a default that is an error rather than
+       garbage is what keeps a future one that forgets from returning
+       success. `ran` says whether this pass has already generated. */
+    int n_out = 0, rc = LZ_ERR_INTERNAL, ran;
     int start_pos = 0, reused = 0;
     double ms = 0.0;
 
@@ -334,6 +323,7 @@ int lz_session_job(void *ud, const char *system, LZTokenSink sink,
            into the statistics. */
         start_pos = 0;
         reused = 0;
+        ran = 0;
         /* Two paths, re-decided every pass through this loop (not just
            once) - a trim-and-retry re-renders s->prompt, and the prefix
            path has to be offered that fresh render too, not forced onto
@@ -352,8 +342,8 @@ int lz_session_job(void *ud, const char *system, LZTokenSink sink,
             int prc = lz_prefix_prepare(&s->pc, s->model, s->tok, s->state,
                                         s->prompt.s, s->prompt.len, split,
                                         &start_pos, &suffix_off, &reused,
-                                        s->opts.on_prefill, &cb,
-                                        errbuf, errlen);
+                                        s->opts.on_prefill, session_cont,
+                                        &cb, errbuf, errlen);
             if (prc == 0) {
                 /* lz_generate_resume_ex with the job's OPTIONAL
                    inspector: NULL (CLI) IS lz_generate_resume, and the
@@ -365,11 +355,33 @@ int lz_session_job(void *ud, const char *system, LZTokenSink sink,
                                            &s->opts, session_sink, session_cont,
                                            &cb, &n_out, &ms, errbuf, errlen,
                                            ins);
+                ran = 1;
+            } else if (prc == LZ_ERR_CANCELLED) {
+                /* Stopped during the prefix forward. Reported as a normal
+                   empty turn, not an error: a stop pressed here and one
+                   pressed after the first token are the same user action,
+                   and a front end that had to tell them apart would be
+                   deciding a thing the engine already knows. */
+                s->n_out = 0;
+                s->reused = reused;
+                s->ms = 0;
+                s->n_prompt_tok = 0;
+                /* The SAME field lz_generate_resume_ex writes on its own
+                   cancel path, and the one the GUI reads to decide
+                   whether to say "stopped" - without this it keeps the
+                   previous turn's value, so a stop pressed here would
+                   silently produce no notice at all. Returning LZ_ERR_OK
+                   without setting it is what makes the two stops look
+                   alike to the caller; the reason has to travel with
+                   it. */
+                s->opts.out_finish = LZ_FINISH_CANCELLED;
+                return LZ_ERR_OK;
             } else {
-                /* prepare failed: the state is untouched, so the full path
-                   below is still correct. Falling through rather than
-                   returning is deliberate - a cache problem must not
-                   become a failed turn. Persists for the REST of this
+                /* prepare failed. The full path below resets the state
+                   itself, so falling through is correct whatever prepare
+                   left behind - and falling through rather than returning
+                   is deliberate: a cache problem must not become a failed
+                   turn. Persists for the REST of this
                    session (prefill stays FULL from here on, not just for
                    this one pass) - once the cache has proven unreliable
                    for this conversation, retrying it every turn would just
@@ -377,11 +389,19 @@ int lz_session_job(void *ud, const char *system, LZTokenSink sink,
                 s->prefill = LZ_PREFILL_FULL;
             }
         }
-        /* A PREFIX request whose cache never became ready (pc_ready == 0,
-           e.g. lz_prefix_init / lz_session_prefix_arm failed) must degrade
-           to the full path, not fall through both branches into an
-           uninitialized return code - see session_full_path above. */
-        if (session_full_path(s->prefill, s->pc_ready)) {
+        /* Anything the prefix branch did not already generate lands
+           here: a FULL request, a PREFIX request whose cache never
+           became ready (lz_prefix_init / lz_session_prefix_arm failed),
+           and a prefix attempt that gave up and switched to FULL above.
+           Asking "did this pass generate yet" rather than re-deriving it
+           from (prefill, pc_ready) is what keeps that list from having
+           to be right: the old test re-read state the branch above had
+           just mutated, so its correctness depended on a side effect
+           three lines up, and a future branch that exits the block
+           without generating would have fallen through BOTH and returned
+           an uninitialized rc. `ran` cannot fail that way - the fallback
+           is re-forwarding, which is slow and correct. */
+        if (!ran) {
             /* Full mode: the prompt already contains every turn, so the
                state must start empty or the prefix would be forwarded
                twice. */

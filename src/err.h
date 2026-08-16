@@ -31,6 +31,12 @@ typedef enum {
     LZ_ERR_CLAIM_ALLOC,        /* claim table allocation failed */
     LZ_ERR_SEQ_LEN,            /* seq_len must be positive */
 
+    /* The caller's cont() asked to stop DURING prefill. Its own code
+       because the two things a caller does with it are opposite: a
+       failure means fall back and try the other path, a cancellation
+       means the turn is over. */
+    LZ_ERR_CANCELLED,          /* stopped at the caller's request */
+
     /* long file names (lfn.h). Both carry the WANTED name: reporting
        "TOKENI~1.JSO was not found" to someone looking for
        tokenizer.json sends them after the wrong thing. */
