@@ -1694,15 +1694,27 @@ int main(int argc, char **argv) {
                 static const char *pn[LZ_PROF_N] = {"attn", "linear", "ffn",
                                                     "lm_head", "norm",
                                                     "  \\_recur", "  \\_swiglu"};
+                /* Only the top tier is summed - see LZ_PROF_TOP.
+                   recur and swiglu are timed inside linear and ffn, so
+                   a total that included them would double-count, and
+                   did: it printed more microseconds than the run took.
+                   They are reported against their PARENT, which is the
+                   only denominator that makes a nested span mean
+                   anything. */
                 double tot = 0.0;
                 int pi;
-                for (pi = 0; pi < LZ_PROF_N; pi++) tot += lz_prof_us[pi];
-                printf("[profile: us, %% of instrumented time]\n");
-                for (pi = 0; pi < LZ_PROF_N; pi++)
-                    if (lz_prof_us[pi] > 0.0)
-                        printf("  %-8s %12.0f  %5.1f%%\n", pn[pi],
-                               lz_prof_us[pi],
-                               tot > 0.0 ? 100.0 * lz_prof_us[pi] / tot : 0.0);
+                for (pi = 0; pi < LZ_PROF_TOP; pi++) tot += lz_prof_us[pi];
+                printf("[profile: us; top tier %% of instrumented time, "
+                       "nested %% of its parent]\n");
+                for (pi = 0; pi < LZ_PROF_N; pi++) {
+                    double den = tot;
+                    if (lz_prof_us[pi] <= 0.0) continue;
+                    if (pi == LZ_PROF_REC) den = lz_prof_us[LZ_PROF_LIN];
+                    if (pi == LZ_PROF_ACT) den = lz_prof_us[LZ_PROF_FFN];
+                    printf("  %-8s %12.0f  %5.1f%%\n", pn[pi],
+                           lz_prof_us[pi],
+                           den > 0.0 ? 100.0 * lz_prof_us[pi] / den : 0.0);
+                }
                 printf("  %-8s %12.0f\n", "TOTAL", tot);
             }
             printf("[kv-rot: %s, k=%d v=%d, %lld head rotations]\n",

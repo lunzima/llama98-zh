@@ -1155,18 +1155,28 @@ static void set_status(const char *display_utf8) {
  * IS - a model loaded, a model closed - calls this.
  * Stores UTF-8 (set_status converts to GBK for the windows), matching
  * the caller contract set_status now documents. */
-static void set_idle_status(const char *display_utf8) {
+/* Store the resting text and show it. Nothing else - see
+   set_idle_status for the other half, and why they are two functions. */
+static void set_idle_text(const char *display_utf8) {
     strncpy(g.idle_status, display_utf8 ? display_utf8 : "",
             sizeof g.idle_status - 1);
     g.idle_status[sizeof g.idle_status - 1] = '\0';
+    set_status(g.idle_status);
+}
+
+static void set_idle_status(const char *display_utf8) {
     /* A new RESTING text also retires the previous generate's
        throughput cell. set_idle_status means "what the window IS has
        changed" - a model loaded or closed, the conversation cleared -
        and a rate from the last turn has no business covering that. The
        successful-generation path keeps its rate by NOT going through
-       here: finish_job's JOB_GENERATE tail calls set_status directly. */
+       here: finish_job's JOB_GENERATE tail calls set_status directly.
+       Split from set_idle_text because that retirement is a SIDE
+       EFFECT, and a caller that only re-spells the resting text - a
+       language switch - was silently killing the throughput cell of a
+       job that was still running, for the whole rest of that job. */
     g.tok_live = 0;
-    set_status(g.idle_status);
+    set_idle_text(display_utf8);
 }
 
 /* Status bar part 1 - the cell SB_SETPARTS reserves and nothing else
@@ -2239,7 +2249,6 @@ static void finish_job(HWND hwnd, int rc) {
     g.done_rc = rc;
     g.done_seen = 1;
     g.job_kind = JOB_NONE;
-    set_lamps();
 
     if (kind == JOB_LOAD) {
         /* What the window IS has changed either way: a failed load
@@ -2315,7 +2324,7 @@ static void finish_job(HWND hwnd, int rc) {
                with a Chinese character. Convert back to GBK here, the
                mirror of the gbk_to_utf8 above - the two-forms trap in
                localized_strings.h, met twice in the wild. */
-            sprintf(g.side_model, "%s (KV %dMB)", nameu,
+            sprintf(g.side_model, lz_str_utf8(LZ_STR_SIDE_MODEL), nameu,
                     (int)(g.mdl.state.bytes_alloc / (1024 * 1024)));
             {
                 char side_gbk[sizeof g.side_model];
@@ -2325,6 +2334,18 @@ static void finish_job(HWND hwnd, int rc) {
             }
             set_status(g.idle_status);   /* repaint the sidebar too */
             /* The model segment of the title bar changed with the load. */
+            push_caption();
+        } else {
+            /* A FAILED load still changed what the window is: the job
+               unloaded whatever was open before it started reading, so
+               lz_gui_model_ready is false now. Both of these were
+               written only on the success path, and both survive the
+               failure - the sidebar kept naming a model that is gone,
+               with its memory figure, directly above a status line
+               saying the load failed, and the title bar kept it too.
+               Cleared here so the two halves of the window agree. */
+            g.side_model[0] = '\0';
+            set_status(g.idle_status);
             push_caption();
         }
     } else if (kind == JOB_GENERATE) {
@@ -2355,6 +2376,14 @@ static void finish_job(HWND hwnd, int rc) {
         if (g.sess.opts.out_finish == LZ_FINISH_CANCELLED)
             sys_line(LZ_STR_SYS_GEN_STOPPED);
     }
+
+    /* AFTER the branch, not before it. The model lamp's third state is
+       "the last load failed", and g.load_failed is written inside the
+       JOB_LOAD branch above - lighting the lamps first meant a failed
+       load painted them from the PREVIOUS load's verdict, and a lamp is
+       not repainted on a timer, so it stayed wrong until some unrelated
+       event happened to call this again. */
+    set_lamps();
 
     /* The throughput cell is LIVE ONLY while a generate job runs. It
        retires the moment the job ends and the resting text comes back:
@@ -3461,10 +3490,17 @@ static void apply_language(HWND hwnd, int english) {
        be transcoded where it lies - it is re-derived from the state it
        was describing. A job in flight has written a transient over it;
        that one is restored from idle_status by finish_job, in the new
-       language, which is why this is safe to do mid-job. */
-    set_idle_status(lz_str_utf8(lz_gui_model_ready(&g.mdl)
-                                   ? LZ_STR_STATE_READY
-                                   : LZ_STR_STATE_NO_MODEL));
+       language, which is why this is safe to do mid-job.
+       set_idle_TEXT, though: a language switch re-spells what the
+       window is, it does not change it. set_idle_status would also
+       retire the throughput cell, and it does not come back until the
+       NEXT job starts - so switching language mid-generation used to
+       cost that job its rate display for good, and with stream_ms=0
+       (no token timer) left the bar reading "ready" while tokens were
+       still arriving. */
+    set_idle_text(lz_str_utf8(lz_gui_model_ready(&g.mdl)
+                                 ? LZ_STR_STATE_READY
+                                 : LZ_STR_STATE_NO_MODEL));
     relayout(hwnd);
 }
 
@@ -4969,8 +5005,21 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                (a slow turn spends most of its wall time between tokens).
                set_status's tok_live branch re-reads lz_time_ms() and
                recomputes the rate, so this is the display catching up to
-               the elapsed time, not a copy of an old number. */
-            set_status(lz_str_utf8(LZ_STR_STATE_GENERATING));
+               the elapsed time, not a copy of an old number.
+
+               NOT DURING PREFILL, and this tick is the reason the gate
+               inside set_status was not enough on its own: that gate
+               stops the throughput CELL from replacing the caller's
+               text, but this caller was handing it a constant that
+               knows nothing about the phase. start_job arms this timer
+               for the whole job, so during prefill it overwrote the
+               progress line every 100 ms while the 400 ms lamp tick put
+               it back - the indicator moved and the words said
+               "generating". Feeding the same tick to the indicator
+               instead makes it refresh four times as often, which is
+               the opposite of what it was doing. */
+            if (prefill_active()) prefill_paint_tick();
+            else set_status(lz_str_utf8(LZ_STR_STATE_GENERATING));
             return 0;
         }
         break;
@@ -5193,6 +5242,17 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             char prev_sys[LZ_COMMON_SYSTEM_MAX + 1];
             strcpy(prev_sys, g.set.system);
             if (lz_gui_settings_dialog(hwnd, g.inst, &g.set)) {
+                /* Before ANY of the writes below, because every one of
+                   them lands in state a running job is reading:
+                   apply_settings rewrites g.sess.opts, the prefix clear
+                   resets the LZPrefixCache lz_prefix_prepare may be
+                   inside of. ctx_commit drains for exactly this reason
+                   but returns early when the context did not change, so
+                   changing only the system prompt reached the clear
+                   with the worker still running. The dialog is modal
+                   and pumps messages, so the job kept going the whole
+                   time it was open. */
+                lz_worker_join_drain(hwnd);
                 apply_settings();
                 ctx_apply(hwnd, prev_ctx);
                 /* The system prompt changed but the context did not, so
@@ -6816,6 +6876,27 @@ static int st_worker(FILE *f, HWND hwnd) {
                  "prefill: once it ends the throughput cell takes the "
                  "line back");
         if (strstr(cell, "tok/s") == NULL)
+            fprintf(f, "  part 0 reads [%s]\n", cell);
+        checks++;
+
+        /* THE 100 ms TOKEN TICK MUST NOT TAKE THE LINE EITHER. It is
+           armed by start_job for the whole job, so during prefill it
+           fired four times for every lamp tick and handed set_status a
+           constant that knows nothing about the phase - the gate inside
+           set_status cannot see that, because the caller supplied the
+           text rather than letting the throughput cell substitute one.
+           Feeding it to the indicator instead is what this asserts.
+           Reddens if that branch goes back to an unconditional
+           set_status(GENERATING). */
+        g.tok_live = 1;
+        g_pf_done = 3;
+        g_pf_total = 10;
+        SendMessage(hwnd, WM_TIMER, (WPARAM)LZ_TOK_TIMER, 0);
+        st_status_text(cell, (int)sizeof cell);
+        st_check(f, strstr(cell, "3/10") != NULL,
+                 "prefill: the token tick refreshes the progress line "
+                 "instead of overwriting it");
+        if (strstr(cell, "3/10") == NULL)
             fprintf(f, "  part 0 reads [%s]\n", cell);
         checks++;
 
@@ -12121,6 +12202,24 @@ static int selftest(HINSTANCE inst, const char *path) {
                     strcmp(g.idle_status, zh_status) == 0,
                  "language: switching back restores the original text");
         checks++;
+
+        /* A language switch RE-SPELLS what the window is; it does not
+           change it. Going through set_idle_status would also clear
+           tok_live, and nothing sets that again until the NEXT job
+           starts - so switching language mid-generation cost that job
+           its throughput cell for good. Reddens if apply_language goes
+           back to set_idle_status. */
+        {
+            int was = g.tok_live;
+            g.tok_live = 1;
+            apply_language(hwnd, 1);
+            st_check(f, g.tok_live == 1,
+                     "language: switching mid-job leaves the throughput "
+                     "cell live");
+            apply_language(hwnd, 0);
+            g.tok_live = was;
+            checks++;
+        }
     }
 
     /* Edit menu: IDM_COPY and IDM_SELECT_ALL both forward to

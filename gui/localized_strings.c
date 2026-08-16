@@ -129,7 +129,8 @@ static const char *const LZ_STR_EN[LZ_STR_COUNT] = {
 
     [LZ_STR_SPEAKER_USER]         = "You",
     [LZ_STR_SPEAKER_ASSISTANT]    = "Kunkun98",
-    [LZ_STR_SYS_MODEL_LOADED]     = "model loaded: %s (KV %dMB)",
+    [LZ_STR_SYS_MODEL_LOADED]     = "model loaded: %s (state %dMB)",
+    [LZ_STR_SIDE_MODEL]           = "%s (state %dMB)",
     [LZ_STR_SYS_CTX_TRIMMED]      = "context trimmed",
     [LZ_STR_SYS_GEN_STOPPED]      = "generation stopped",
     [LZ_STR_SYS_TEMP_SET]         = "temperature set to %s",
@@ -300,7 +301,8 @@ static const char *const LZ_STR_ZH[LZ_STR_COUNT] = {
 
     [LZ_STR_SPEAKER_USER]         = "你",
     [LZ_STR_SPEAKER_ASSISTANT]    = "昆昆98",
-    [LZ_STR_SYS_MODEL_LOADED]     = "模型已加载: %s (KV %dMB)",
+    [LZ_STR_SYS_MODEL_LOADED]     = "模型已加载: %s (运行状态 %dMB)",
+    [LZ_STR_SIDE_MODEL]           = "%s (运行状态 %dMB)",
     [LZ_STR_SYS_CTX_TRIMMED]      = "上下文已裁剪",
     [LZ_STR_SYS_GEN_STOPPED]      = "已停止生成",
     [LZ_STR_SYS_TEMP_SET]         = "温度已设为 %s",

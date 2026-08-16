@@ -41,14 +41,24 @@
 #define LZ_ATTN_WIN_FLOOR 1024
 
 /* --profile phases. Coarse on purpose: the question a profile has to
-   answer first is "which of the four big blocks", not "which line". */
+   answer first is "which of the four big blocks", not "which line".
+
+   TWO TIERS, and mixing them is a measurement error, not a formatting
+   one. The first LZ_PROF_TOP entries partition the forward: their
+   timers do not overlap, so they may be summed. REC and ACT are timed
+   INSIDE those spans - REC around lz_gdn_step/lz_kda_step, both of
+   which run within LIN's timer, ACT around the SwiGLU loop within
+   FFN's - so adding them to the same total counts that time twice and
+   makes every percentage smaller than it is. It also made the printed
+   TOTAL exceed the run's own wall clock, which is how it was caught. */
 #define LZ_PROF_ATTN   0
 #define LZ_PROF_LIN    1
 #define LZ_PROF_FFN    2
 #define LZ_PROF_HEAD   3
 #define LZ_PROF_NORM   4
-#define LZ_PROF_REC    5
-#define LZ_PROF_ACT    6
+#define LZ_PROF_TOP    5   /* [0,LZ_PROF_TOP) partition; sum only these */
+#define LZ_PROF_REC    5   /* within LIN  */
+#define LZ_PROF_ACT    6   /* within FFN  */
 #define LZ_PROF_N      7
 
 /* Single-step forward and runtime state for Qwen3.5 (M4.5).

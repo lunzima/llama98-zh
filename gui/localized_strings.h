@@ -137,7 +137,14 @@ typedef enum {
     /* --- transcript --- */
     LZ_STR_SPEAKER_USER,
     LZ_STR_SPEAKER_ASSISTANT,
-    LZ_STR_SYS_MODEL_LOADED,          /* %s = model name */
+    /* Both carry %s = model name and %d = LZRunState.bytes_alloc in MB.
+       That field is the WHOLE runtime state - activation scratch, the
+       quantization buffers, the MoE and MTP working set, the KV planes
+       among them - so it is named for what it is. It was labelled "KV"
+       here and nowhere else; cli_main.c has always called the same
+       number "Runtime state". */
+    LZ_STR_SYS_MODEL_LOADED,          /* %s = model name, %d = state MB */
+    LZ_STR_SIDE_MODEL,                /* %s = model name, %d = state MB */
     LZ_STR_SYS_CTX_TRIMMED,
     LZ_STR_SYS_GEN_STOPPED,
     LZ_STR_SYS_TEMP_SET,              /* %s = the number, already formatted */
