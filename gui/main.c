@@ -282,23 +282,22 @@ static struct {
     char tok_buf[LZ_TOK_BUF];
     int  tok_n;
     int  tok_ms;
-    /* Spec 3.1: how many tokens THIS turn's generation has produced, and
-       the wall-clock time at which the job started. Accumulated in
-       tokens_arrived (every emitted token reaches it once), so it is
-       authoritative over the running time even when the display lags
-       behind by a throttle. `tok_live` says a generate job is currently
-       running - it is what lets the throttled tick keep the rate cell
-       fresh while a long turn is in flight. */
+    /* Spec 3.1: how many tokens THIS turn's generation has produced.
+       Accumulated in tokens_arrived (every emitted token reaches it
+       once), so it is authoritative over the running time even when the
+       display lags behind by a throttle. `tok_live` says a generate job
+       is currently running - it is what lets the throttled tick keep the
+       rate cell fresh while a long turn is in flight. */
     int   tok_gen;
-    double tok_start_ms;
     /* When the GENERATION phase began, which is not when the job did.
        The cell is labelled "generating N tok, X tok/s", so its
        denominator is the span that produced those tokens: measured from
        the job's start, a 30 s prefill in front of a 20-token reply reads
        0.6 tok/s for a decode running at 10. cli_main.c meets the same
        split and prints BOTH "s turn" and "s gen"; one cell cannot say
-       two things, so it says the one its label claims. Equal to
-       tok_start_ms until prefill ends. */
+       two things, so it says the one its label claims. Set at the job's
+       start and moved forward when prefill ends, so a turn without
+       prefill is measured from the start. */
     double gen_start_ms;
     int   tok_live;
     /* The repetition penalty's WINDOW, in tokens. Ini-only, deliberately
@@ -2274,19 +2273,17 @@ static int start_job(HWND hwnd, LZWorkerJob job, void *ud, int kind) {
         g.job_kind = JOB_NONE;
         return 1;
     }
-    /* A generate job's throughput cell starts counting from
-       the moment the job STARTS, not from the first token - a slow
-       prompt or a cold cache spends time before any token, and that time
-       is part of the answer. For a LOAD there is no such cell, and
-       tok_live is cleared so set_status falls through to the passed
-       text - a load starting must also retire the PREVIOUS generate's
-       final reading, or the rate from the last turn would keep covering
-       the bar across a model swap. Recorded before the set_status
-       below, which now reads tok_live. */
+    /* The throughput cell's clock starts here and ui_tick moves it
+       forward when prefill ends - see gen_start_ms. For a LOAD there is
+       no such cell, and tok_live is cleared so set_status falls through
+       to the passed text: a load starting must also retire the PREVIOUS
+       generate's final reading, or the rate from the last turn would
+       keep covering the bar across a model swap. Recorded before the
+       set_status below, which reads tok_live. */
     g.tok_live = (kind == JOB_GENERATE);
     if (kind == JOB_GENERATE) {
         g.tok_gen = 0;
-        g.tok_start_ms = g.gen_start_ms = lz_time_ms();
+        g.gen_start_ms = lz_time_ms();
     }
     set_status(lz_str_utf8(kind == JOB_LOAD ? LZ_STR_STATE_LOADING
                                                : LZ_STR_STATE_GENERATING));
