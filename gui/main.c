@@ -1835,6 +1835,14 @@ static void tokens_arrived(const char *utf8, int n) {
 /* Paint the prefill indicator from whatever the counters say now.
  * Shared by both timers - see LZ_DBG_TIMER for why there are two. */
 static void prefill_paint_tick(void) {
+    /* Whether the well was last painted with something in it. Only the
+       fallback strip needs it: emptying that one means invalidating it,
+       and this runs on every tick of the whole job, so without the
+       transition test a generate with no prefill would repaint the
+       strip every LZ_LAMP_BLINK for nothing. The comctl32 control takes
+       a redundant SETPOS without repainting. */
+    static int shown;
+
     if (!(g_pf_total > 0 && g_pf_done < g_pf_total)) {
         /* Prefill over: the well EMPTIES, it does not disappear. The
            segment is part of the strip's layout - a well that came and
@@ -1842,8 +1850,12 @@ static void prefill_paint_tick(void) {
            left full would read as a job still running. */
         if (g.progress)
             SendMessage(g.progress, LZ_PBM_SETPOS, (WPARAM)0, 0);
+        else if (shown && g.part[LZ_GUI_STATUS])
+            InvalidateRect(g.part[LZ_GUI_STATUS], NULL, FALSE);
+        shown = 0;
         return;
     }
+    shown = 1;
     {
         char pf[96];
         sprintf(pf, "%s %d/%d", lz_str_utf8(LZ_STR_STATE_PREFILL),
@@ -2195,6 +2207,18 @@ static void finish_job(HWND hwnd, int rc) {
        "g.tok_gen == 11" check pins the chain that IS live - worker
        counts, tokens_arrived carries it, the status cell reads it. */
     KillTimer(hwnd, LZ_LAMP_TIMER);
+    /* Retire the prefill counters with the job that produced them.
+       A run that finishes normally ends on done == total and the tick
+       empties the well by itself; a run that was STOPPED part-way ends
+       on done < total, and with the timer gone nothing ever comes back
+       to clear it. The numbers would then sit there - the fallback
+       strip repaints from these globals on any invalidate, and the next
+       job's first tick would show the previous job's percentage over a
+       turn that may have no prefill at all. Cleared through
+       prefill_paint_tick rather than by hand so the emptying stays in
+       the one function that knows how to do it for both strips. */
+    g_pf_done = g_pf_total = 0;
+    prefill_paint_tick();
     cmd_enable(IDM_STOP_GEN, 0);
     g.done_rc = rc;
     g.done_seen = 1;
@@ -5340,10 +5364,67 @@ static HWND create_main(HINSTANCE inst, int cw, int ch) {
 /* ---------------------------------------------------------- selftest */
 
 static int st_fails;
+static int st_skips;
 
 static void st_check(FILE *f, int ok, const char *what) {
     fprintf(f, "%s %s\n", ok ? "PASS" : "FAIL", what);
     if (!ok) st_fails++;
+}
+
+/* A check that could not be RUN, which is not the same thing as one
+   that ran and failed. Kept out of `checks` so checks+skips stays
+   constant and a report diff shows a check going missing; kept out of
+   `fails` so a system resource another process happened to be holding
+   cannot fail the build. The reason is written into the report because
+   a silent skip is exactly how a check that quietly stopped running
+   for good goes unnoticed. */
+static void st_skip(FILE *f, const char *what, const char *why) {
+    fprintf(f, "SKIP %s: %s\n", what, why);
+    st_skips++;
+}
+
+/* The clipboard is ONE object shared by every process on the desktop,
+   and any of them - a clipboard viewer, a remote-desktop channel, the
+   shell - may hold it open at the instant we ask. A single
+   OpenClipboard therefore measures the rest of the desktop rather than
+   this program, which is what made the Copy check flap.
+   ~200 ms total: long enough to outlast another process's own open/
+   read/close round trip, short enough that a desktop where the
+   clipboard is genuinely wedged does not stall the selftest. */
+#define LZ_CLIP_TRIES 20
+#define LZ_CLIP_WAIT  10
+static int st_clip_open(HWND hwnd) {
+    int i;
+    for (i = 0; i < LZ_CLIP_TRIES; i++) {
+        if (OpenClipboard(hwnd)) return 1;
+        Sleep(LZ_CLIP_WAIT);
+    }
+    return 0;
+}
+
+/* True when `path` was last written no earlier than this executable.
+   The strip comparison is only meaningful between two images the SAME
+   binary produced, and the counterpart is an ordinary file sitting next
+   to the report from whenever the other run happened - possibly a build
+   ago. A stale one still loads, still has the right dimensions, and
+   still yields a percentage: iron law four's shape exactly, a number
+   that is self-consistent and means nothing.
+   Timestamps rather than a build stamp because the executable's own
+   mtime IS the fact being asked about, and baking __DATE__ into the
+   binary to answer it would trade a reproducible build for it.
+   FindFirstFile rather than GetFileAttributesEx: the latter is 4.0. */
+static int st_newer_than_exe(const char *path) {
+    char exe[MAX_PATH];
+    WIN32_FIND_DATAA me, other;
+    HANDLE h;
+    if (!GetModuleFileNameA(NULL, exe, (DWORD)sizeof exe)) return 0;
+    h = FindFirstFileA(exe, &me);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    FindClose(h);
+    h = FindFirstFileA(path, &other);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    FindClose(h);
+    return CompareFileTime(&other.ftLastWriteTime, &me.ftLastWriteTime) >= 0;
 }
 
 /* The mnemonic letter in a menu label, uppercased, or 0 if there is
@@ -8375,7 +8456,8 @@ static int st_prefill(FILE *f) {
         int start_pos = 0, suffix_off = 0, reused = 0;
         rc = lz_prefix_prepare(&pc, &fake_model, &fake_tok, &fake_state,
                                "hi", 2, 0, &start_pos, &suffix_off,
-                               &reused, NULL, NULL, err, (int)sizeof err);
+                               &reused, NULL, NULL, NULL, err,
+                               (int)sizeof err);
         st_check(f, rc == 0,
                  "prefill: prepare's own no-reuse shortcut still "
                  "reports success"); checks++;
@@ -11966,47 +12048,80 @@ static int selftest(HINSTANCE inst, const char *path) {
        leftover content nobody put there this run, so the FIRST check
        below proves the instrument is connected - a cleared clipboard
        really does read back empty - before either command is trusted to
-       have put anything into it. The probe string is stamped with
-       GetTickCount() so it cannot collide with something already
-       sitting on the clipboard from outside this process either. */
+       have put anything into it.
+
+       Everything here goes through st_clip_open and can end in st_skip:
+       the clipboard belongs to the desktop, not to this process, and a
+       contended shared resource must not be reported as a broken Copy
+       command. */
     {
         HWND tr = g.part[LZ_GUI_TRANSCRIPT];
+        /* GetTickCount alone is not unique enough to stamp with: it
+           moves in 15.6 ms steps here (iron law three's note at
+           lz_time_ms), and the classic_ui harness runs this twice.
+           The counter makes the string differ even inside one tick. */
+        static int probe_no;
         char unique[64];
-        int empty_ok;
+        const char *busy = "another process held the clipboard for the "
+                           "whole retry window";
+        const char *what_empty = "edit: the clipboard instrument reads back "
+                                 "empty right after EmptyClipboard";
+        const char *what_copy = "edit: Copy reaches the control that has "
+                                "focus";
 
-        sprintf(unique, "kk98-clip-probe-%lu", (unsigned long)GetTickCount());
+        sprintf(unique, "kk98-clip-probe-%lu-%d",
+                (unsigned long)GetTickCount(), ++probe_no);
 
-        OpenClipboard(hwnd);
-        EmptyClipboard();
-        CloseClipboard();
-        empty_ok = 0;
-        if (OpenClipboard(hwnd)) {
+        if (!st_clip_open(hwnd)) {
+            st_skip(f, what_empty, busy);
+        } else {
+            /* Emptied and read back inside ONE open. Closing in between
+               leaves a window for another process to put something on
+               the clipboard, and then this check would be reporting on
+               that process. */
+            int empty_ok;
+            EmptyClipboard();
             empty_ok = GetClipboardData(CF_TEXT) == NULL;
             CloseClipboard();
+            st_check(f, empty_ok, what_empty);
+            checks++;
         }
-        st_check(f, empty_ok, "edit: the clipboard instrument reads back "
-                 "empty right after EmptyClipboard");
-        checks++;
 
         transcript_clear();
         transcript_push(unique, (int)strlen(unique));
         transcript_end();
         SendMessage(tr, EM_SETSEL, 0, (LPARAM)-1);
         SetFocus(tr);
-        SendMessage(hwnd, WM_COMMAND, MAKEWPARAM(IDM_COPY, 0), 0);
         {
-            int ok = 0;
-            if (OpenClipboard(hwnd)) {
-                HANDLE hg = GetClipboardData(CF_TEXT);
-                if (hg) {
-                    char *p = (char *)GlobalLock(hg);
-                    if (p) ok = strstr(p, unique) != NULL;
-                    GlobalUnlock(hg);
+            int ok = 0, opened = 0, attempt;
+            /* The Copy and the readback retry AS A PAIR: a clipboard
+               viewer taking ownership in between would wipe what was
+               just written, and re-reading alone would then never
+               recover. This does not weaken the assertion - an
+               IDM_COPY that does not reach the focused control fails
+               all four attempts just as it failed one. */
+            for (attempt = 0; attempt < 4 && !ok; attempt++) {
+                SendMessage(hwnd, WM_COMMAND, MAKEWPARAM(IDM_COPY, 0), 0);
+                if (!st_clip_open(hwnd)) continue;
+                opened = 1;
+                {
+                    HANDLE hg = GetClipboardData(CF_TEXT);
+                    if (hg) {
+                        char *p = (char *)GlobalLock(hg);
+                        if (p) ok = strstr(p, unique) != NULL;
+                        GlobalUnlock(hg);
+                    }
                 }
                 CloseClipboard();
             }
-            st_check(f, ok, "edit: Copy reaches the control that has focus");
-            checks++;
+            /* Never opened it at all -> nothing was measured. Opened it
+               and did not find the probe -> Copy really is broken. */
+            if (!ok && !opened) {
+                st_skip(f, what_copy, busy);
+            } else {
+                st_check(f, ok, what_copy);
+                checks++;
+            }
         }
 
         /* Collapsed first, so the check below is proof SELECT_ALL did
@@ -12233,7 +12348,7 @@ static int selftest(HINSTANCE inst, const char *path) {
         if (w2) DestroyWindow(w2);
     }
 
-    fprintf(f, "checks %d\nfails %d\n", checks, st_fails);
+    fprintf(f, "checks %d\nfails %d\nskips %d\n", checks, st_fails, st_skips);
     fclose(f);
     DestroyWindow(hwnd);
     return st_fails ? 1 : 0;
@@ -12421,10 +12536,28 @@ static void sb_compare(FILE *f, const char *path, int *checks) {
             {
                 int ow = 0, oh = 0;
                 unsigned char *ref = sb_bmp_load(other, &ow, &oh);
+                int stale = ref && !st_newer_than_exe(other);
+                static char why[MAX_PATH + 80];
+                if (stale) {
+                    free(ref);
+                    ref = NULL;
+                }
                 if (!ref) {
-                    fprintf(f, "  no counterpart yet: run again with "
-                               "classic_ui=%d to produce %s\n",
-                            classic ? 0 : 1, other);
+                    /* Skipped, not silently dropped: without this the
+                       report's check count moved between runs depending
+                       on what happened to be lying next to it, which is
+                       the one thing a report meant to be diffed must
+                       not do. Missing and stale get different words -
+                       they need different actions from whoever reads
+                       this, and one is a leftover that has to go. */
+                    sprintf(why, stale
+                            ? "the counterpart predates this build; run "
+                              "again with classic_ui=%d to replace %.*s"
+                            : "no counterpart yet; run again with "
+                              "classic_ui=%d to produce %.*s",
+                            classic ? 0 : 1, MAX_PATH, other);
+                    st_skip(f, "statusbar: both strips span the same width",
+                            why);
                 } else {
                     /* Width must match - both strips span the client
                        area, and a difference there is a layout fault
@@ -12434,12 +12567,43 @@ static void sb_compare(FILE *f, const char *path, int *checks) {
                              "statusbar: both strips span the same width");
                     (*checks)++;
                     if (ow == cw && oh == ch) {
-                        long n = sb_stride(cw) * ch, k, diff = 0;
-                        for (k = 0; k < n; k++)
-                            if (ref[k] != shot[k]) diff++;
+                        /* Split at the progress cell, because a
+                           difference there is NOT the same fact as a
+                           difference anywhere else. Everything on the
+                           strip is drawn by this program on both
+                           paths; the progress cell is not - the
+                           comctl32 build puts a real control there,
+                           and on a host with comctl32 v6 that control
+                           keeps drawing its flat accent-coloured self
+                           whether or not SetWindowTheme succeeded.
+                           There is no v6 on the target, so that part
+                           of the count says something about this
+                           machine and nothing about the port; folding
+                           it into one number makes the number
+                           unreadable, and dropping it would hide a
+                           real difference on a host where the
+                           untheming does work. Report both. */
+                        long n = sb_stride(cw) * ch, k, diff = 0, inprog = 0;
+                        RECT pc2;
+                        int have_pc = sb_prog_rect(ch, &pc2);
+                        for (k = 0; k < n; k++) {
+                            if (ref[k] == shot[k]) continue;
+                            diff++;
+                            if (have_pc) {
+                                long row = k / sb_stride(cw);
+                                long x   = (k % sb_stride(cw)) / 3;
+                                /* Rows run bottom-up in a DIB. */
+                                long y   = ch - 1 - row;
+                                if (x >= pc2.left && x < pc2.right &&
+                                    y >= pc2.top  && y < pc2.bottom) inprog++;
+                            }
+                        }
                         fprintf(f, "  pixel bytes differing: %ld / %ld "
                                    "(%.1f%%)\n", diff, n,
                                 n ? (double)diff * 100.0 / (double)n : 0.0);
+                        fprintf(f, "  of those, inside the progress cell: "
+                                   "%ld; drawn by this program: %ld\n",
+                                inprog, diff - inprog);
                     } else {
                         fprintf(f, "  heights differ: %d vs %d - compare "
                                    "the two images by eye\n", ch, oh);

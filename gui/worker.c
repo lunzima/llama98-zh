@@ -189,7 +189,7 @@ int lz_worker_drain(HWND notify) {
        immediately when there is nothing of ours queued, and it must
        never remove a message that belongs to the rest of the UI.
        Upper bound is WM_APP_PREFILL, not WM_APP_GEN_DONE: the four
-       IDs are contiguous (WM_APP+1..+3), and leaving
+       IDs are contiguous (WM_APP+1..+4), and leaving
        WM_APP_INSPECT out of this range would mean a caller that
        synchronously drains before touching shared state - which is the
        entire reason this function exists - could still leave a stray
