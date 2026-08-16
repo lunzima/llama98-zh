@@ -1108,6 +1108,34 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
         }
         m->bytes_alloc += (long long)n / 2 + (long long)n / 4 +
                           2 * (long long)(n / gs) * sizeof(float);
+    } else if (dtype == LZ_FMT_T2) {
+        /* ternary: n/4 bytes of 2-bit codes + n/gs scales. NO mins -
+           ternary is symmetric, and `zero` staying NULL is what the
+           kernels branch on to use -scale as the hoisted coefficient
+           instead of a stored min (see model.h). */
+        field->dtype = LZ_FMT_T2;
+        field->f = NULL;
+        if (fread(&gs, 4, 1, f) != 1 || gs == 0 || (gs % 32) != 0 ||
+            (n % gs) != 0) {
+            qerr(errbuf, errlen, LZ_ERR_TENSOR_GS, t->name);
+            return 1;
+        }
+        field->gs = (int)gs;
+        field->q = (int8_t *)malloc((size_t)n / 4);
+        field->scale = (float *)malloc((size_t)(n / gs) * sizeof(float));
+        if (!field->q || !field->scale) {
+            qerr(errbuf, errlen, LZ_ERR_TENSOR_ALLOC, t->name);
+            lz_t_free(field);
+            return 1;
+        }
+        if (fread(field->q, 1, (size_t)n / 4, f) != (size_t)n / 4 ||
+            fread(field->scale, sizeof(float), n / gs, f) != (size_t)(n / gs)) {
+            qerr(errbuf, errlen, LZ_ERR_TENSOR_READ, t->name);
+            lz_t_free(field);
+            return 1;
+        }
+        m->bytes_alloc += (long long)n / 4 +
+                          (long long)(n / gs) * sizeof(float);
     } else if (dtype == LZ_FMT_Q4_1) {
         /* nibbles: n/2 bytes of data + n/gs scales + n/gs mins.
            gs must be a multiple of 32 - nibble sub-blocks are fixed at

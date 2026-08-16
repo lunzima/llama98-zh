@@ -53,6 +53,7 @@
 #define LZ_FMT_Q4_1  2      /* gs 4-bit nibbles + 1 f32 scale + 1 f32 min (asymmetric) */
 #define LZ_FMT_Q6_1  3      /* gs 6-bit (4-bit plane + 2-bit plane) + scale + min */
 #define LZ_FMT_Q16_0 4      /* gs int16s + 1 f32 scale (symmetric) */
+#define LZ_FMT_T2    5      /* ternary {-1,0,+1} as 2-bit codes + 1 f32 scale */
 
 /* Weight tensor. Row-major (out, in); quantization groups are
    contiguous within a row.
@@ -92,6 +93,41 @@ typedef struct {
    product splits exactly: dot(q,x) = dot(lo,x) + 16·dot(hi,x), two
    int32 accumulators merged afterwards, no precision loss (the hi term
    is 3·127·32 = 12k, far from the int32 limit). */
+
+/* LZ_FMT_T2: ternary {-1,0,+1}, BIT-LAYOUT IDENTICAL TO Q6_1's 2-bit
+   plane above - every 32 elements take 8 bytes, byte j's bits 0-1 are
+   element j, bits 2-3 are j+8, bits 4-5 are j+16, bits 6-7 are j+24.
+   Reusing that layout is the point: `pand 0x03` / `psrlw 2/4/6` and the
+   32-element sub-block framing are already written and already
+   bit-identical across the kernels and both compilers.
+
+   Encoding follows llama.cpp's TQ2_0 (ggml-common.h block_tq2_0,
+   quantize_row_tq2_0_ref): CODE = VALUE + 1, so {-1,0,+1} store as
+   {0,1,2} and 3 never occurs. Read unsigned; the kernel needs no sign
+   extension, exactly as for Q4_1's nibbles.
+
+   `scale` holds one f32 per group; `zero` is NULL. Ternary is
+   symmetric, so there is no min to carry - but the dot product still
+   splits into two terms the way Q4_1's does, and for the same reason:
+
+       Σ w·x = d·Σ(code-1)·x = d·[ Σ code·x  -  Σ x ]
+
+   The second term depends only on activations, so it is hoisted out of
+   the row loop into xgref[] and shared by every output row. That is the
+   same structure llama.cpp's AVX2 TQ2_0 kernel uses (arch/x86/quants.c:
+   `_mm256_sub_epi16(sumi0, ysum)` against the pre-computed y->bsums),
+   arrived at independently on both sides.
+
+   WHAT IS NOT COPIED, and why: llama.cpp also ships TQ1_0 at 1.6875
+   bpw, packing 5 elements per byte in base 3 (3^5 = 243 < 256). It is
+   the denser format and it is unusable on the ARM926EJ-S target -
+   unpacking needs division by 3 and that core has NO hardware divide.
+   TQ2_0's 2 bits per element cost 0.375 bpw more and unpack with a
+   shift and a mask.
+
+   ALSO NOT COPIED: llama.cpp packs 128 elements per 32 bytes (stride
+   32); this is stride 8, per the Q6_1 layout. The kernel STRUCTURE
+   transfers between the two, the byte offsets do not. */
 
 /* Get an f32 view: LZ_FMT_F32 returns the internal pointer directly;
    quantized formats dequantize into a scratch buffer (returned; the

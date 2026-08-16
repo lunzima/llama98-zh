@@ -1549,6 +1549,24 @@ float *lz_t_f32(const LZTensor *t, float *scratch) {
         }
         return scratch;
     }
+    if (t->dtype == LZ_FMT_T2) {
+        /* One 2-bit plane, Q6_1's addressing. code-1 in {-1,0,+1}; no
+           min term, so a code of 1 dequantizes to exactly 0.0f for
+           every group regardless of scale - which is the property the
+           format exists for. */
+        const unsigned char *p2 = (const unsigned char *)t->q;
+        for (g = 0; g < t->n / t->gs; g++) {
+            float d = t->scale[g];
+            int base;
+            for (base = g * t->gs; base < (g + 1) * t->gs; base += 32) {
+                const unsigned char *b2 = p2 + base / 4;
+                for (k = 0; k < 32; k++)
+                    scratch[base + k] =
+                        (float)(((b2[k & 7] >> (2 * (k >> 3))) & 3) - 1) * d;
+            }
+        }
+        return scratch;
+    }
     if (t->dtype == LZ_FMT_Q16_0) {
         const int16_t *p = (const int16_t *)(const void *)t->q;
         for (g = 0; g < t->n / t->gs; g++) {
@@ -1606,6 +1624,18 @@ void lz_t_row_f32(const LZTensor *t, int row, int dim, float *out) {
             int k;
             for (k = 0; k < 32; k++)
                 out[i + k] = (float)lz_q61_get(b4, b2, k) * d + m;
+        }
+        return;
+    }
+    if (t->dtype == LZ_FMT_T2) {
+        const unsigned char *p2 = (const unsigned char *)t->q + base / 4;
+        for (i = 0; i < dim; i += 32) {
+            int g = g0 + i / t->gs, k;
+            float d = t->scale[g];
+            const unsigned char *b2 = p2 + i / 4;
+            for (k = 0; k < 32; k++)
+                out[i + k] =
+                    (float)(((b2[k & 7] >> (2 * (k >> 3))) & 3) - 1) * d;
         }
         return;
     }
@@ -1667,7 +1697,12 @@ static void matmul_scalar_ref_one(float *o, const int8_t *xq, const float *xqs,
                                   const LZTensor *w, int in_dim, int out_dim) {
     int i, g, s, k;
     int gs = w->gs, r, ng, nsb;
-    int q4 = (w->dtype == LZ_FMT_Q4_1 || w->dtype == LZ_FMT_Q6_1);
+    int t2 = (w->dtype == LZ_FMT_T2);
+    /* T2 rides the q4 flag for the ACTIVATION-SUM hoist, which is the
+       same computation for both (xgref[g] = Σ xqs·Σ xq). What differs
+       is the coefficient it is multiplied by at the end: Q4_1/Q6_1 use
+       the per-group min, T2 uses -scale. See model.h's T2 note. */
+    int q4 = (w->dtype == LZ_FMT_Q4_1 || w->dtype == LZ_FMT_Q6_1 || t2);
     int q6 = (w->dtype == LZ_FMT_Q6_1);
     int q16 = (w->dtype == LZ_FMT_Q16_0);
     /* static not stack: Win98's stack is tight; see the xw/acc32 note in this file. */
@@ -1723,7 +1758,7 @@ static void matmul_scalar_ref_one(float *o, const int8_t *xq, const float *xqs,
         const int16_t *w16 = (const int16_t *)(const void *)w->q +
                              (size_t)i * in_dim;
         const float *ws = w->scale + (size_t)i * ng;
-        const float *wz = q4 ? w->zero + (size_t)i * ng : NULL;
+        const float *wz = (q4 && !t2) ? w->zero + (size_t)i * ng : NULL;
 
         /* Step 1: the row's int32 sub-block sums. On the SIMD side
            this segment is the MMX/SSE2 kernel. */
@@ -1747,6 +1782,16 @@ static void matmul_scalar_ref_one(float *o, const int8_t *xq, const float *xqs,
                     ahi += (int32_t)((b2[k & 7] >> (2 * (k >> 3))) & 3) *
                            (int32_t)xq[base + k];
                 acc = alo + (ahi << 4);
+            } else if (t2) {
+                /* Same addressing as Q6_1's 2-bit plane, but it is the
+                   ONLY plane: 8 bytes per 32 elements. Codes are 0..2
+                   read unsigned; the -1 lives in the hoisted term. */
+                const unsigned char *b2 = (const unsigned char *)w->q +
+                                          (size_t)i * in_dim / 4 +
+                                          (size_t)base / 4;
+                for (k = 0; k < 32; k++)
+                    acc += (int32_t)((b2[k & 7] >> (2 * (k >> 3))) & 3) *
+                           (int32_t)xq[base + k];
             } else if (q4) {
                 const unsigned char *p = wn + (size_t)base / 2;
                 for (k = 0; k < 16; k++) {
@@ -1771,7 +1816,12 @@ static void matmul_scalar_ref_one(float *o, const int8_t *xq, const float *xqs,
                 for (s = 0; s < r; s++)
                     dot += lz_i32f(accref[g * r + s]) * xqs[g * r + s];
                 dotsum += dot * ws[g];
-                zsum += xgref[g] * wz[g];
+                /* T2's zero coefficient is -scale, not a stored min:
+                   Σ w·x = d·[Σ code·x - Σ x]. Written as a negated
+                   multiply rather than folded into the dot term so the
+                   two accumulators stay separate, matching the SIMD
+                   epilogue's merge order. */
+                zsum += xgref[g] * (t2 ? -ws[g] : wz[g]);
             }
             o[i] = dotsum + zsum;
         } else if (r > 1) {
