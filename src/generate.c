@@ -1424,6 +1424,53 @@ static int gen_prefill(const LZModel *m, LZRunState *s,
     return gen_prefill_raw(m, s, tok, n, start_pos, &h);
 }
 
+/* The MTP head's own pass over the prompt, sliced for the same two
+ * reasons and on the same boundaries. lz_mtp_prefill is a plain
+ * while(done < n) chunked by the same clamped nt_cap, carrying nothing
+ * across a chunk but the KV rows forward_attn writes at absolute
+ * positions - so calling it for successive sub-ranges issues exactly
+ * the chunk sequence one call would.
+ *
+ * *out_done is how many positions were actually prefilled, which the
+ * caller needs even on a cancel: s->mtp_pos has to describe the rows
+ * that exist, not the ones that were going to.
+ *
+ * Returns 1 forwarded, 0 a forward failure, -1 cancelled. */
+static int gen_mtp_prefill(const LZModel *m, LZRunState *s,
+                           const float *h_all, const int *next_tok,
+                           int n, int pos0, int hidden,
+                           const LZPrefillHooks *h, int *out_done) {
+    LZProgress       on_prefill = h ? h->on_prefill : NULL;
+    LZShouldContinue cont       = h ? h->cont       : NULL;
+    void            *ctx        = h ? h->ctx        : NULL;
+    int width, done = 0;
+
+    *out_done = 0;
+    if (n <= 0) return 1;
+    if (!on_prefill && !cont) {
+        if (lz_mtp_prefill(m, s, h_all, next_tok, n, pos0) != 0) return 0;
+        *out_done = n;
+        return 1;
+    }
+
+    if (on_prefill) on_prefill(0, n, ctx);
+    width = s->nt_cap > 0 ? s->nt_cap : 1;
+    while (width < 64) width *= 2;
+
+    while (done < n) {
+        int take = n - done;
+        if (take > width) take = width;
+        if (lz_mtp_prefill(m, s, h_all + (size_t)done * (size_t)hidden,
+                           next_tok + done, take, pos0 + done) != 0)
+            return 0;
+        done += take;
+        *out_done = done;
+        if (on_prefill) on_prefill(done, n, ctx);
+        if (done < n && cont && !cont(ctx)) return -1;
+    }
+    return 1;
+}
+
 /* The same slicing for the speculative path's body pass, which captures
  * every position's hidden state as it goes for lz_mtp_prefill to
  * consume. It was the one prefill in this file that ran as a single
@@ -1754,12 +1801,11 @@ int lz_generate_resume_ex(const LZModel *m, LZTokenizer *t, LZRunState *s,
                                                   when pos_only asked
                                                   for one
 
-           BOTH report progress and both can be stopped: C's body pass
-           goes through gen_prefill_capture, which slices the same way
-           gen_prefill_raw does. The MTP pass after it is left whole -
-           one block against the body's every layer, and its
-           coverage/rebase arithmetic is written against the whole
-           range.
+           EVERY pass here reports progress and can be stopped. C runs
+           two of them - the body's, through gen_prefill_capture, and
+           the head's, through gen_mtp_prefill - so a front end
+           accumulating segments sees a range twice as long, which is
+           what C actually costs.
 
            SKIP STILL OUTRANKS POS_ONLY. With both knobs set the old
            chain took the skip branch and never jumped; the jump below
@@ -1853,15 +1899,35 @@ int lz_generate_resume_ex(const LZModel *m, LZTokenizer *t, LZRunState *s,
                    so a resumed multi-turn session's ordinary (cov==0)
                    behavior is untouched. */
                 int pos0 = partial ? 0 : s->mtp_pos + skip;
-                if (lz_mtp_prefill(m, s,
-                                   h_body_all + (size_t)skip * m->config.hidden_size,
-                                   prompt_tokens + 1 + skip,
-                                   tail_n, pos0) != 0) {
+                LZPrefillHooks h;
+                int did = 0, pf;
+                h.on_prefill = opts->on_prefill;
+                h.cont       = cont;
+                h.ctx        = ctx;
+                pf = gen_mtp_prefill(m, s,
+                                     h_body_all + (size_t)skip * m->config.hidden_size,
+                                     prompt_tokens + 1 + skip,
+                                     tail_n, pos0, m->config.hidden_size,
+                                     &h, &did);
+                /* pos0 + did, in both directions and on every exit: the
+                   counter has to describe the rows that EXIST. On the
+                   full pass it is the old assignment - partial rebases
+                   to 0 so it lands on tail_n, and the default has
+                   skip == 0 so it lands on the previous value plus
+                   n_prompt-1. On a stop part-way it is the only value
+                   that leaves the head's numbering matching its
+                   cache. */
+                s->mtp_pos = pos0 + did;
+                if (pf <= 0) {
                     free(h_body_all);
+                    if (pf < 0) {      /* stopped between slices */
+                        finish = LZ_FINISH_CANCELLED;
+                        rc = LZ_ERR_OK;
+                        goto done;
+                    }
                     LZ_ERR_SET(rc, errbuf, errlen, LZ_ERR_FORWARD);
                     goto done;
                 }
-                s->mtp_pos = partial ? tail_n : s->mtp_pos + n_prompt - 1;
             }
             free(h_body_all);
         } else {
