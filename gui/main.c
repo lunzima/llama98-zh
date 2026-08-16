@@ -8824,6 +8824,26 @@ static int st_settings_dialog(FILE *f, HINSTANCE inst) {
     if (strcmp(out.system, in.system) != 0)
         fprintf(f, "  got [%s]\n", out.system);
     checks++;
+    /* THE THINK TOGGLE MUST NOT TOUCH THE SYSTEM PROMPT. Its handler
+       reads every control and writes them all back, so the prompt makes
+       a full round trip through the box on a click that has nothing to
+       do with it - and the box is ANSI while the settings are UTF-8, so
+       a missing conversion on the way back shows up as mojibake rather
+       than as a lost setting. Driven through the real WM_COMMAND, not
+       by calling the handler, so the wiring is covered too. */
+    SendMessage(dlg, WM_COMMAND,
+                MAKEWPARAM(3001 /* ID_THINK */, BN_CLICKED),
+                (LPARAM)GetDlgItem(dlg, 3001));
+    st_check(f, lz_gui_settings_dialog_read(dlg, &in, &out) == 0 &&
+                strcmp(out.system, in.system) == 0,
+             "settings: toggling think leaves the system prompt intact");
+    if (strcmp(out.system, in.system) != 0)
+        fprintf(f, "  got [%s] want [%s]\n", out.system, in.system);
+    checks++;
+    /* Back, so the checks below see the state they were written for. */
+    SendMessage(dlg, WM_COMMAND,
+                MAKEWPARAM(3001, BN_CLICKED), (LPARAM)GetDlgItem(dlg, 3001));
+
     /* Empty in, empty out - the box carries the USER's text and empty
        is the state that means "built-in identity". A box that shows
        the built-in constant instead would make "restore defaults"

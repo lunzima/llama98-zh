@@ -277,6 +277,30 @@ static void row_sync_from_edit(HWND h, const LZSliderRow *r) {
     }
 }
 
+/* The system prompt into its box.
+ *
+ * The box is an ANSI control and speaks the DISPLAY code page;
+ * LZGuiSettings.system is UTF-8. Writing the UTF-8 bytes straight in
+ * makes the reader hand back the trailing byte of each character -
+ * mojibake in the box and mojibake into the settings on OK.
+ *
+ * ONE function, because the box is written from two places - once at
+ * creation and again by dlg_show, which "restore defaults" and the
+ * think toggle both go through. Two copies of the conversion is how one
+ * of them ends up not converting. */
+static void sys_set_box(HWND box, const char *utf8)
+{
+    static char gbk[2 * LZ_COMMON_SYSTEM_MAX + 8];
+    const char *shown = "";
+    if (!box) return;
+    if (utf8 && utf8[0]) {
+        int n = lz_gbk_from_utf8(utf8, (int)strlen(utf8), gbk,
+                                 (int)sizeof gbk, NULL);
+        if (n > 0 && n < (int)sizeof gbk) shown = gbk;
+    }
+    SetWindowTextA(box, shown);
+}
+
 /* Every control, from a settings struct. The one place that knows how
    to paint the whole dialog, so "restore defaults" and the think toggle
    cannot each forget a different row. */
@@ -311,8 +335,7 @@ static void dlg_show(HWND h, const LZGuiSettings *s) {
        empty, which is the box being cleared rather than showing the
        constant - settings.h says why the constant is never copied into
        the settings. */
-    c = GetDlgItem(h, ID_SYS);
-    if (c) SetWindowTextA(c, s->system);
+    sys_set_box(GetDlgItem(h, ID_SYS), s->system);
     c = GetDlgItem(h, ID_THINK);
     if (c) SendMessage(c, BM_SETCHECK,
                        s->think ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -810,25 +833,16 @@ HWND lz_gui_settings_dialog_create(HWND owner, HINSTANCE inst,
            of label, and the dialog grew for it (see DLG_H). */
         int sh = 3 * ROW_H;
         /* GBK INTO THE BOX, UTF-8 OUT OF IT (the two-forms trap in
-           localized_strings.h): a window is ANSI, so SetWindowTextA
-           and GetWindowTextA talk the DISPLAY code page, while
-           LZGuiSettings.system is UTF-8. Writing the UTF-8 bytes
-           straight into the box makes the reader hand back
-           你是测试助手�? - the trailing byte of each character, mojibake.
-           lz_str_display gives the DISPLAY form, which is the code the
-           window speaks. */
-        static char sysgbk[2 * LZ_COMMON_SYSTEM_MAX + 8];
-        const char *shown = set->system[0] ? set->system : "";
-        if (set->system[0]) {
-            int nn = lz_gbk_from_utf8(set->system, (int)strlen(set->system),
-                                      sysgbk, (int)sizeof sysgbk, NULL);
-            if (nn < (int)sizeof sysgbk && nn > 0) shown = sysgbk;
-        }
-        ctl = child_ex(h, lz_ex_style(WS_EX_CLIENTEDGE), "EDIT", shown,
+           localized_strings.h): a window is ANSI, so SetWindowTextA and
+           GetWindowTextA talk the DISPLAY code page, while
+           LZGuiSettings.system is UTF-8. sys_set_box does the one
+           direction; lz_gui_settings_dialog_read does the other. */
+        ctl = child_ex(h, lz_ex_style(WS_EX_CLIENTEDGE), "EDIT", "",
                        WS_TABSTOP | ES_MULTILINE | ES_AUTOVSCROLL |
                        ES_WANTRETURN,
                        PAD + label_w, y, DLG_W - PAD - (PAD + label_w),
                        sh, ID_SYS, inst);
+        sys_set_box(ctl, set->system);
         lz_edit_use_font_margins(ctl);
         /* Cap what can be typed: the reader copies into
            LZGuiSettings.system (LZ_COMMON_SYSTEM_MAX+1 bytes) and is
