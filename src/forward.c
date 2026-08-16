@@ -560,12 +560,23 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
     s->kda_gate     = (float *)xcalloc((size_t)nt * c->lin_n_v_heads * c->lin_k_head_dim,
                                        sizeof(float), &ok, &s->bytes_alloc);
 
-    /* latent MoE scratch, one token at a time - see forward.h. Zero-sized
-       when the model has no MoE layers (num_experts == 0). */
+    /* latent MoE scratch - see forward.h. Zero-sized when the model has
+       no MoE layers (num_experts == 0).
+
+       TWO WIDTHS, and the split is exactly the routing boundary. The
+       router, the latent down/up projections and the shared expert read
+       one weight stream for every token in the chunk, so they run
+       batched and their buffers are nt-wide like every other block in
+       this file. The ROUTED experts cannot: which expert a token wants
+       is a property of that token, so moe_h2 and the per-expert
+       selection stay one token's worth.
+       At LZ_BATCH_MAX=8 and this model's shapes the widening costs
+       ~78 KB of state - measured against the ~13% of prefill the
+       per-token weight re-streaming was costing (see forward_moe). */
     {
         int moe_scratch_w = c->moe_intermediate_size;
         if (c->moe_shared_width > moe_scratch_w) moe_scratch_w = c->moe_shared_width;
-        s->moe_router_logits = (float *)xcalloc((size_t)c->num_experts, sizeof(float), &ok, &s->bytes_alloc);
+        s->moe_router_logits = (float *)xcalloc((size_t)nt * c->num_experts, sizeof(float), &ok, &s->bytes_alloc);
         /* Sized to the EXPERT COUNT, not to num_experts_per_token, so
            --moe-topk can go up as well as down. At 16 experts that is
            128 bytes total - cheaper than the clamp it removes, and a
@@ -573,12 +584,14 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
            of knob that produces a one-sided sweep. */
         s->moe_sel_idx = (int *)xcalloc((size_t)c->num_experts, sizeof(int), &ok, &s->bytes_alloc);
         s->moe_sel_w   = (float *)xcalloc((size_t)c->num_experts, sizeof(float), &ok, &s->bytes_alloc);
-        s->moe_lat_x = (float *)xcalloc((size_t)c->moe_latent_dim, sizeof(float), &ok, &s->bytes_alloc);
-        s->moe_lat_y = (float *)xcalloc((size_t)c->moe_latent_dim, sizeof(float), &ok, &s->bytes_alloc);
-        s->moe_h1 = (float *)xcalloc((size_t)moe_scratch_w, sizeof(float), &ok, &s->bytes_alloc);
-        s->moe_h3 = (float *)xcalloc((size_t)moe_scratch_w, sizeof(float), &ok, &s->bytes_alloc);
+        s->moe_lat_x = (float *)xcalloc((size_t)nt * c->moe_latent_dim, sizeof(float), &ok, &s->bytes_alloc);
+        s->moe_lat_y = (float *)xcalloc((size_t)nt * c->moe_latent_dim, sizeof(float), &ok, &s->bytes_alloc);
+        s->moe_h1 = (float *)xcalloc((size_t)nt * moe_scratch_w, sizeof(float), &ok, &s->bytes_alloc);
+        s->moe_h3 = (float *)xcalloc((size_t)nt * moe_scratch_w, sizeof(float), &ok, &s->bytes_alloc);
+        /* One token's worth: this is the routed loop's own temporary,
+           written and consumed inside one (token, expert) step. */
         s->moe_h2 = (float *)xcalloc((size_t)c->moe_latent_dim, sizeof(float), &ok, &s->bytes_alloc);
-        s->moe_shared_out = (float *)xcalloc((size_t)c->hidden_size, sizeof(float), &ok, &s->bytes_alloc);
+        s->moe_shared_out = (float *)xcalloc((size_t)nt * c->hidden_size, sizeof(float), &ok, &s->bytes_alloc);
     }
     /* MTP draft head scratch - only when a head is bound (see forward.h).
        mtp_x/mtp_concat/mtp_emb_raw are nt_cap-wide: the chained
@@ -1837,21 +1850,42 @@ static void forward_kda(const LZModel *m, LZRunState *s,
 
 /* Latent MoE (LatentMoE / KunMoEGate),
    replacing the dense gate/up/down_proj FFN for layers >=
-   config.first_k_dense_replace (LZLayer.ffn_moe). Processes ONE TOKEN AT
-   A TIME, unlike every other block in this file: expert SELECTION is
-   per-token (top-k of the router's output), so the routed part cannot
-   share one weight stream across nt tokens the way lz_matmul_q8_nt's
-   batching assumes - two tokens in the same batch may pick different
-   experts entirely. The router, latent down-projection and shared
-   expert (all read the same hidden-space input, independent of routing)
-   are still quantized once per token rather than once per weight - the
-   usual trick, just not carried across tokens.
+   config.first_k_dense_replace (LZLayer.ffn_moe).
 
-   Real gap, not a correctness one: MoE layers do not get
-   lz_forward_batch's arithmetic-intensity benefit (LZ_BATCH_MAX in
-   ops.h) - the per-token loop below re-quantizes xt on every tk instead
-   of once per weight. nt=1 (the generation loop) is unaffected either
-   way.
+   FOUR PHASES, split on the one thing that is per-token: expert
+   SELECTION. The router, the latent down/up projections and the shared
+   expert all read one weight matrix for every token in the chunk, so
+   they batch through lz_matmul_q8_nt exactly like dense_ffn_step. Only
+   the routed experts cannot - two tokens in the same chunk may pick
+   different experts entirely, so there is no shared weight stream.
+
+   WHY NOT GROUP THE TOKENS BY EXPERT. That is what llama.cpp's
+   ggml_compute_forward_mul_mat_id does (a plain per-expert row bucket,
+   no padding) and what vLLM/SGLang's CPU kernels do with
+   moe_align_block_size. Their scale is not ours: SGLang's CPU int8 MoE
+   pads each expert's rows to BLOCK_M = 2 * TILE_M = 32 and drops the
+   blocked path entirely below M = 5, and llama.cpp's tuning assumes
+   batches in the thousands. LZ_BATCH_MAX is 8. At 8 tokens, top-2 of
+   16 experts, the expected number of DISTINCT experts in a chunk is
+   16*(1-(15/16)^16) ~ 10.3 of 16 routed pairs, so grouping would save
+   about a third of the expert weight streams - and llama.cpp's own
+   measurement is that prompt-phase routing is flat (decode's is
+   skewed), which is the worst case for it. Measured against the
+   --moe-topk decomposition below, the ceiling was ~9% of prefill, for
+   a change that has to reorder the float accumulation in the kk loop
+   to get it. The batching above was the larger half and costs no
+   reordering at all.
+
+   HOW THE SPLIT WAS MEASURED, since a ratio needs a denominator
+   (iron law 3): ffn(topk) is linear in topk, so sweeping --moe-topk
+   1/2/4 separates the two halves by extrapolation. On this machine and
+   an 832-token prompt it fit ffn = 856,505 + 787,201*topk us exactly,
+   i.e. at the trained topk=2 the routed experts are 64.8% of the ffn
+   phase and everything batched here is the other 35.2%.
+
+   nt=1 (the generation loop) computes exactly what it did before: the
+   t-loop in lz_matmul_q8_nt degrades to one iteration, which that
+   function's header states as a hard gate.
 
    Bit-identity between batched and per-token MoE prefill:
    verified across E:\LLM\models\kunmoe-v2 (widths
@@ -1881,28 +1915,41 @@ static void forward_moe(const LZModel *m, LZRunState *s,
     if (lz_moe_topk > 0 && lz_moe_topk <= ne)
         topk = lz_moe_topk;
     int gsh = lz_act_gs(&L->moe_down_proj, hdim);
-    int tk, kk, vv;
+    int nsh = (gsh > 0) ? hdim / gsh : 0;
+    int tk, kk, vv, i;
     (void)layer;   /* only used inside LZ_TAP, which is a no-op in a normal build */
 
+    /* PHASE 1 - everything that reads xt and does not depend on routing.
+       The router and the latent down-projection are ordinary matmuls:
+       one weight matrix serves every token in the chunk, so they run
+       batched like every other block in this file, instead of streaming
+       the same weights nt times.
+       They also share one activation quantization, the same reasoning
+       forward_attn's q/k/v_proj comment gives. */
+    for (tk = 0; tk < nt; tk++)
+        lz_quantize_q8(s->xb + (size_t)tk * hdim, hdim, gsh,
+                       s->xq + (size_t)tk * hdim,
+                       s->xqs + (size_t)tk * nsh);
+    lz_matmul_q8_nt(s->moe_router_logits, s->xb, s->xq, s->xqs,
+                    &L->moe_gate_w, hdim, ne, nt);
+    lz_matmul_q8_nt(s->moe_lat_x, s->xb, s->xq, s->xqs,
+                    &L->moe_down_proj, hdim, latent, nt);
+    /* Slot 0 is token 0's, so these tap what the per-token version
+       taped under `if (tk == 0)`. */
+    LZ_TAP("mrt", layer, s->moe_router_logits, ne);
+    LZ_TAP("mlat", layer, s->moe_lat_x, latent);
+
+    /* PHASE 2 - the routed experts, and the ONE part that stays per
+       token: which expert a token wants is a property of that token, so
+       there is no shared weight stream to batch over. Grouping the
+       tokens by expert instead was measured and rejected - see the
+       block comment above this function. */
     for (tk = 0; tk < nt; tk++) {
-        const float *xt = s->xb + (size_t)tk * hdim;
-        float *out = s->xb2 + (size_t)tk * hdim;
+        float *lat_x = s->moe_lat_x + (size_t)tk * latent;
+        float *lat_y = s->moe_lat_y + (size_t)tk * latent;
 
-        /* router, latent down-projection and the shared expert's
-           gate/up all read xt directly with in_dim == hidden_size, so
-           they share one activation quantization - same reasoning
-           forward_attn's q/k/v_proj comment gives. */
-        lz_quantize_q8(xt, hdim, gsh, s->xq, s->xqs);
-        lz_matmul_q8(s->moe_router_logits, xt, s->xq, s->xqs, &L->moe_gate_w,
-                    hdim, ne);
-        lz_matmul_q8(s->moe_lat_x, xt, s->xq, s->xqs, &L->moe_down_proj,
-                    hdim, latent);
-        if (tk == 0) {
-            LZ_TAP("mrt", layer, s->moe_router_logits, ne);
-            LZ_TAP("mlat", layer, s->moe_lat_x, latent);
-        }
-
-        lz_moe_route(s->moe_router_logits, lz_t_f32(&L->moe_gate_bias, s->wscr),
+        lz_moe_route(s->moe_router_logits + (size_t)tk * ne,
+                    lz_t_f32(&L->moe_gate_bias, s->wscr),
                     ne, topk, c->moe_router_sigmoid, c->moe_renormalize,
                     lz_moe_tau, s->moe_sel_idx, s->moe_sel_w);
 
@@ -1913,14 +1960,14 @@ static void forward_moe(const LZModel *m, LZRunState *s,
             lz_moe_hits_add(s->ins->expert_hits, LZ_INSPECT_EXPERT_MAX,
                             s->moe_sel_idx, topk);
 
-        memset(s->moe_lat_y, 0, (size_t)latent * sizeof(float));
+        memset(lat_y, 0, (size_t)latent * sizeof(float));
         for (kk = 0; kk < topk; kk++) {
             int ei = s->moe_sel_idx[kk];
             float ww = s->moe_sel_w[kk];
             if (ei < 0) continue;               /* topk > n_experts padding */
             /* KdaExpert.forward: w2(act(w1(x)) * w3(x)) - w1 is the gate,
                w3 the up projection, w2 the down projection back to latent. */
-            /* w1 and w3 both read moe_lat_x with the same in_dim (latent),
+            /* w1 and w3 both read lat_x with the same in_dim (latent),
                so quantize it ONCE and share, instead of letting each
                lz_matmul_w re-quantize the identical vector. This must be
                INSIDE the kk loop, not hoisted out: the w2 matmul just
@@ -1929,52 +1976,78 @@ static void forward_moe(const LZModel *m, LZRunState *s,
                expert's w1/w3 read it (a real, silent corruption). The
                day w1/w3 carry different weight gs this also keeps them
                reading the SAME quantization, the mixed-precision hazard
-               forward_attn's q/k/v comment names. */
+               forward_attn's q/k/v comment names.
+               Slot 0 of the (now nt-wide) scratch throughout: this whole
+               loop is one token's work and phases 1 and 3 are done with
+               their copies by the time it runs. */
             {
                 int gsl = lz_act_gs(&L->moe_expert_w1[ei], latent);
-                lz_quantize_q8(s->moe_lat_x, latent, gsl, s->xq, s->xqs);
+                lz_quantize_q8(lat_x, latent, gsl, s->xq, s->xqs);
             }
-            lz_matmul_q8(s->moe_h1, s->moe_lat_x, s->xq, s->xqs,
+            lz_matmul_q8(s->moe_h1, lat_x, s->xq, s->xqs,
                         &L->moe_expert_w1[ei], latent, inter);
-            lz_matmul_q8(s->moe_h3, s->moe_lat_x, s->xq, s->xqs,
+            lz_matmul_q8(s->moe_h3, lat_x, s->xq, s->xqs,
                         &L->moe_expert_w3[ei], latent, inter);
             for (vv = 0; vv < inter; vv++)
                 s->moe_h1[vv] = lz_silu(s->moe_h1[vv]) * s->moe_h3[vv];
             lz_matmul_w(s->moe_h2, s->moe_h1, &L->moe_expert_w2[ei],
                        inter, latent, s->xq, s->xqs);
             for (vv = 0; vv < latent; vv++)
-                s->moe_lat_y[vv] += ww * s->moe_h2[vv];
+                lat_y[vv] += ww * s->moe_h2[vv];
         }
         if (c->moe_latent_use_norm)
-            lz_rmsnorm(s->moe_lat_y, s->moe_lat_y,
+            lz_rmsnorm(lat_y, lat_y,
                       lz_t_f32(&L->moe_latent_norm, s->wscr), latent,
                       c->rms_norm_eps);
-        if (tk == 0) LZ_TAP("mrou", layer, s->moe_lat_y, latent);
+    }
+    LZ_TAP("mrou", layer, s->moe_lat_y, latent);
 
-        lz_matmul_w(out, s->moe_lat_y, &L->moe_up_proj, latent, hdim,
-                   s->xq, s->xqs);
+    /* PHASE 3 - back out of the latent space. Routing-independent
+       again, so batched. */
+    {
+        int gsu = lz_act_gs(&L->moe_up_proj, latent);
+        int nsu = (gsu > 0) ? latent / gsu : 0;
+        for (tk = 0; tk < nt; tk++)
+            lz_quantize_q8(s->moe_lat_y + (size_t)tk * latent, latent, gsu,
+                           s->xq + (size_t)tk * latent,
+                           s->xqs + (size_t)tk * nsu);
+        lz_matmul_q8_nt(s->xb2, s->moe_lat_y, s->xq, s->xqs,
+                        &L->moe_up_proj, latent, hdim, nt);
+    }
 
-        if (shared_w > 0) {
-            /* _shared in kunmoe_modeling.py: same SwiGLU shape as the
-               dense FFN this block replaces, just at shared_w width and
-               reading hidden-space x directly (no latent). gate and up
-               both read xt with in_dim == hidden_size, so quantize ONCE
-               and share - the same fix, and the same hazard, as the
-               routed experts' w1/w3 above. */
-            {
-                int gss = lz_act_gs(&L->moe_shared_gate, hdim);
-                lz_quantize_q8(xt, hdim, gss, s->xq, s->xqs);
-            }
-            lz_matmul_q8(s->moe_h1, xt, s->xq, s->xqs,
-                        &L->moe_shared_gate, hdim, shared_w);
-            lz_matmul_q8(s->moe_h3, xt, s->xq, s->xqs,
-                        &L->moe_shared_up, hdim, shared_w);
-            for (vv = 0; vv < shared_w; vv++)
-                s->moe_h1[vv] = lz_silu(s->moe_h1[vv]) * s->moe_h3[vv];
-            lz_matmul_w(s->moe_shared_out, s->moe_h1, &L->moe_shared_down,
-                       shared_w, hdim, s->xq, s->xqs);
-            for (vv = 0; vv < hdim; vv++) out[vv] += s->moe_shared_out[vv];
-        }
+    /* PHASE 4 - the shared expert. _shared in kunmoe_modeling.py: same
+       SwiGLU shape as the dense FFN this block replaces, just at
+       shared_w width and reading hidden-space x directly (no latent).
+       Every token goes through it, so all three of its matmuls batch -
+       this is dense_ffn_step's shape, and it is written the same way. */
+    if (shared_w > 0) {
+        int gss = lz_act_gs(&L->moe_shared_gate, hdim);
+        int nss = (gss > 0) ? hdim / gss : 0;
+        int gsd = lz_act_gs(&L->moe_shared_down, shared_w);
+        int nsd = (gsd > 0) ? shared_w / gsd : 0;
+
+        /* gate and up both read xt with in_dim == hidden_size, so
+           quantize ONCE and share - the same fix, and the same hazard,
+           as the routed experts' w1/w3 above. Re-quantized rather than
+           reusing phase 1's: the shared gate may carry a different
+           activation group size than the down-projection did. */
+        for (tk = 0; tk < nt; tk++)
+            lz_quantize_q8(s->xb + (size_t)tk * hdim, hdim, gss,
+                           s->xq + (size_t)tk * hdim,
+                           s->xqs + (size_t)tk * nss);
+        lz_matmul_q8_nt(s->moe_h1, s->xb, s->xq, s->xqs,
+                        &L->moe_shared_gate, hdim, shared_w, nt);
+        lz_matmul_q8_nt(s->moe_h3, s->xb, s->xq, s->xqs,
+                        &L->moe_shared_up, hdim, shared_w, nt);
+        for (i = 0; i < nt * shared_w; i++)
+            s->moe_h1[i] = lz_silu(s->moe_h1[i]) * s->moe_h3[i];
+        for (tk = 0; tk < nt; tk++)
+            lz_quantize_q8(s->moe_h1 + (size_t)tk * shared_w, shared_w, gsd,
+                           s->xq + (size_t)tk * shared_w,
+                           s->xqs + (size_t)tk * nsd);
+        lz_matmul_q8_nt(s->moe_shared_out, s->moe_h1, s->xq, s->xqs,
+                        &L->moe_shared_down, shared_w, hdim, nt);
+        for (i = 0; i < nt * hdim; i++) s->xb2[i] += s->moe_shared_out[i];
     }
     /* No tap for the combined routed+shared output here: forward_chunk's
        unconditional LZ_TAP("ffn", l, s->xb2, dim) right after this

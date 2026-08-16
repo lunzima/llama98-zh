@@ -249,19 +249,24 @@ typedef struct {
                                       ALREADY EXPONENTIATED (gt = exp(g), same
                                       convention lz_gdn_step's scalar gt uses) */
 
-    /* latent MoE scratch (LZLayer.ffn_moe layers only). Sized for ONE
-       token, not nt_cap: forward_moe processes tokens one at a time
-       because expert SELECTION varies per token, which breaks
-       lz_matmul_q8_nt's one-weight-load-serves-nt-tokens batching for
-       the routed part - see forward_moe's docstring in forward.c. */
-    float *moe_router_logits;    /* (num_experts) */
+    /* latent MoE scratch (LZLayer.ffn_moe layers only). TWO WIDTHS, and
+       the split is the routing boundary: what one weight matrix serves
+       for every token in the chunk is nt_cap-wide and runs batched,
+       what depends on WHICH expert a token picked is one token's worth.
+       Only the routed experts are in the second group -
+       lz_matmul_q8_nt's one-weight-load-serves-nt-tokens batching has
+       nothing to hold onto when two tokens in a chunk want different
+       experts. See forward_moe's docstring in forward.c, which also
+       records why grouping the tokens by expert was measured and
+       rejected. */
+    float *moe_router_logits;    /* (nt_cap * num_experts) */
     int   *moe_sel_idx;           /* (num_experts_per_token) */
     float *moe_sel_w;              /* (num_experts_per_token) */
-    float *moe_lat_x;              /* (moe_latent_dim) routed_expert_down_proj output */
-    float *moe_lat_y;              /* (moe_latent_dim) routed experts' weighted sum */
-    float *moe_h1, *moe_h3;       /* (max(moe_intermediate_size, moe_shared_width)) */
+    float *moe_lat_x;              /* (nt_cap * moe_latent_dim) routed_expert_down_proj output */
+    float *moe_lat_y;              /* (nt_cap * moe_latent_dim) routed experts' weighted sum */
+    float *moe_h1, *moe_h3;       /* (nt_cap * max(moe_intermediate_size, moe_shared_width)) */
     float *moe_h2;                 /* (moe_latent_dim) one expert's w2 output before scaling */
-    float *moe_shared_out;        /* (hidden_size) shared expert's down_proj output */
+    float *moe_shared_out;        /* (nt_cap * hidden_size) shared expert's down_proj output */
 
     /* MTP draft head scratch (LZ_SPEC_K > 0 at runtime; allocated only
        when m->mtp != NULL - see lz_state_alloc). The KV cache the MTP
