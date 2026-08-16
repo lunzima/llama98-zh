@@ -44,6 +44,13 @@
  * WM_APP_TOKENS payload - see lz_worker_free_tokens's own comment,
  * which is not token-specific. */
 #define WM_APP_INSPECT  (WM_APP + 3)
+/* Prefill advanced. No payload and nothing to free - it only asks the UI
+ * thread to redraw the indicator from the counters the engine's callback
+ * has already written. It exists because the refresh tick is 400 ms and
+ * a prefill can finish inside one of them: waiting for the tick means
+ * the indicator is never drawn at all on a fast machine, which is the
+ * opposite of what it is for. */
+#define WM_APP_PREFILL  (WM_APP + 4)
 
 /* The job the worker runs.
  *

@@ -1876,6 +1876,12 @@ static void gui_prefill_progress(int done, int total, void *ctx) {
     (void)ctx;
     g_pf_total = total;
     g_pf_done  = done;
+    /* Posted, not drawn: this runs on the WORKER thread. The UI thread
+       redraws when it handles the message, which is what makes the
+       indicator appear as prefill STARTS rather than at the next 400 ms
+       tick - on a fast machine the whole prefill fits inside one tick,
+       so the tick alone never showed it. */
+    if (g.main) PostMessage(g.main, WM_APP_PREFILL, 0, 0);
 }
 
 static void set_lamps(void) {
@@ -4871,6 +4877,14 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             SendMessage(g.part[LZ_GUI_STATUS], WM_SYSCOLORCHANGE, 0, 0);
         else
             lamps_reload();
+        return 0;
+
+    case WM_APP_PREFILL:
+        /* Redraw the indicator now rather than at the next tick - see
+           WM_APP_PREFILL in worker.h. Only while a job runs: a message
+           that outlived its job would repaint from counters the next
+           turn has not written yet. */
+        if (g.job_kind == JOB_GENERATE) prefill_paint_tick();
         return 0;
 
     case WM_TIMER:

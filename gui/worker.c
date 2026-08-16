@@ -188,7 +188,7 @@ int lz_worker_drain(HWND notify) {
     /* Range-filtered PeekMessage, not GetMessage: this must return
        immediately when there is nothing of ours queued, and it must
        never remove a message that belongs to the rest of the UI.
-       Upper bound is WM_APP_INSPECT, not WM_APP_GEN_DONE: the three
+       Upper bound is WM_APP_PREFILL, not WM_APP_GEN_DONE: the four
        IDs are contiguous (WM_APP+1..+3), and leaving
        WM_APP_INSPECT out of this range would mean a caller that
        synchronously drains before touching shared state - which is the
@@ -198,7 +198,7 @@ int lz_worker_drain(HWND notify) {
        has since changed. The loop below still only ever treats
        WM_APP_GEN_DONE as the terminal message; see thread_main's own
        comment for why a WM_APP_INSPECT can never be posted after it. */
-    while (PeekMessage(&msg, notify, WM_APP_TOKENS, WM_APP_INSPECT,
+    while (PeekMessage(&msg, notify, WM_APP_TOKENS, WM_APP_PREFILL,
                        PM_REMOVE)) {
         DispatchMessage(&msg);
         if (msg.message == WM_APP_GEN_DONE) { drained_done = 1; break; }
