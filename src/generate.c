@@ -1697,68 +1697,26 @@ int lz_generate_resume_ex(const LZModel *m, LZTokenizer *t, LZRunState *s,
 
     pos = start_pos;
     if (n_prompt > 1) {
-        /* Four mutually exclusive branches, checked in this exact
-           priority order. The conditions are independent and total:
-           exactly one of these four branches runs for any
-           (spec_active, skip_prefill, prefill_pos_only) combination.
+        /* TWO branches, on the one question that changes what is
+           forwarded: does the MTP head get a real prompt prefill?
+           Only spec_active with neither debug knob set does. Every
+           other case - spec off, or either knob on - forwards the body
+           exactly the same way and differs only in what happens to the
+           MTP counter afterwards, so it shares one call.
 
-             skip_prefill        -> A: no MTP prefill of any kind
-             prefill_pos_only    -> B: counter jump only, KV stays zero
-             spec_active (else)  -> C: full prefill (lz_mtp_prefill)
-             none of the above   -> plain body-only prefill (no MTP head
-                                    bound, or spec_k == 0) */
-        if (spec_active && opts->spec_debug_skip_prefill) {
-            /* Condition A: LZGenOpts.spec_debug_skip_prefill's own
-               comment - the draft head starts every round blind. */
-            {
-                int pf = gen_prefill(m, s, prompt_tokens, n_prompt - 1,
-                                     start_pos, opts, cont, ctx);
-                if (pf < 0) {          /* stopped between slices */
-                    finish = LZ_FINISH_CANCELLED;
-                    rc = LZ_ERR_OK;
-                    goto done;
-                }
-                if (!pf) {
-                    LZ_ERR_SET(rc, errbuf, errlen, LZ_ERR_FORWARD);
-                    goto done;
-                }
-            }
-        } else if (spec_active && opts->spec_debug_prefill_pos_only) {
-            /* Condition B: LZGenOpts.spec_debug_prefill_pos_only's own
-               comment - advance the MTP's own position counter to
-               exactly where a full prefill would leave it (or to
-               spec_debug_prefill_pos_value's override, if set),
-               WITHOUT ever calling lz_mtp_prefill - so the counter
-               moves but the MTP's KV cache rows for these positions
-               are never written (they stay at lz_state_reset's zero
-               fill). */
-            {
-                int pf = gen_prefill(m, s, prompt_tokens, n_prompt - 1,
-                                     start_pos, opts, cont, ctx);
-                if (pf < 0) {          /* stopped between slices */
-                    finish = LZ_FINISH_CANCELLED;
-                    rc = LZ_ERR_OK;
-                    goto done;
-                }
-                if (!pf) {
-                    LZ_ERR_SET(rc, errbuf, errlen, LZ_ERR_FORWARD);
-                    goto done;
-                }
-            }
-            {
-                /* spec_debug_prefill_pos_value's own comment (llama_zh.h):
-                   0 (default) keeps the original n_prompt-1 jump; a
-                   positive override lets the investigation test a
-                   starting position LARGER than the prompt would ever
-                   produce on its own, still with a zero-filled KV cache
-                   (lz_debug_mtp_attn_rows, forward.c, is how the ALU
-                   cost of doing so gets reported honestly). */
-                int jump = (opts->spec_debug_prefill_pos_value > 0)
-                          ? opts->spec_debug_prefill_pos_value
-                          : n_prompt - 1;
-                s->mtp_pos += jump;
-            }
-        } else if (spec_active) {
+             spec_active && !skip && !pos_only -> C: lz_mtp_prefill
+             everything else                   -> body-only prefill,
+                                                  plus the counter jump
+                                                  when pos_only asked
+                                                  for one
+
+           SKIP STILL OUTRANKS POS_ONLY. With both knobs set the old
+           chain took the skip branch and never jumped; the jump below
+           carries that precedence explicitly, because it is the one
+           thing an if/else-if chain expressed for free and a shared
+           call does not. */
+        if (spec_active && !opts->spec_debug_skip_prefill &&
+            !opts->spec_debug_prefill_pos_only) {
             /* Condition C: MTP prompt prefill (filling the gap against
                llama.cpp's speculative.cpp - see forward.h's s->mtp_pos
                comment): run the MTP block over the same
@@ -1842,19 +1800,35 @@ int lz_generate_resume_ex(const LZModel *m, LZTokenizer *t, LZRunState *s,
             }
             free(h_body_all);
         } else {
-            /* !spec_active: plain body-only prefill, no MTP head. */
-            {
-                int pf = gen_prefill(m, s, prompt_tokens, n_prompt - 1,
-                                     start_pos, opts, cont, ctx);
-                if (pf < 0) {          /* stopped between slices */
-                    finish = LZ_FINISH_CANCELLED;
-                    rc = LZ_ERR_OK;
-                    goto done;
-                }
-                if (!pf) {
-                    LZ_ERR_SET(rc, errbuf, errlen, LZ_ERR_FORWARD);
-                    goto done;
-                }
+            int pf = gen_prefill(m, s, prompt_tokens, n_prompt - 1,
+                                 start_pos, opts, cont, ctx);
+            if (pf < 0) {              /* stopped between slices */
+                finish = LZ_FINISH_CANCELLED;
+                rc = LZ_ERR_OK;
+                goto done;
+            }
+            if (!pf) {
+                LZ_ERR_SET(rc, errbuf, errlen, LZ_ERR_FORWARD);
+                goto done;
+            }
+            /* spec_debug_prefill_pos_only: advance the MTP's own
+               position counter to where a full prefill would leave it
+               (or to spec_debug_prefill_pos_value's override) WITHOUT
+               calling lz_mtp_prefill, so the counter moves but the
+               MTP's KV rows for these positions stay at
+               lz_state_reset's zero fill.
+               spec_debug_prefill_pos_value's own comment (llama_zh.h):
+               0 keeps the n_prompt-1 jump; a positive override tests a
+               starting position LARGER than the prompt would ever
+               produce, still against a zero-filled cache
+               (lz_debug_mtp_attn_rows reports the ALU cost of that
+               honestly). */
+            if (spec_active && !opts->spec_debug_skip_prefill &&
+                opts->spec_debug_prefill_pos_only) {
+                int jump = (opts->spec_debug_prefill_pos_value > 0)
+                          ? opts->spec_debug_prefill_pos_value
+                          : n_prompt - 1;
+                s->mtp_pos += jump;
             }
         }
         pos = start_pos + n_prompt - 1;
