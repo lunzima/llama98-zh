@@ -782,6 +782,15 @@ static HFONT g_sb_font;
    accepts everywhere else. */
 static int g_pf_done, g_pf_total;
 
+/* Is a prefill in progress? Three places ask - the fallback strip's
+   paint, the indicator tick, and set_status, which has to know that the
+   throughput cell is not the thing to show yet. One spelling, because
+   three copies of "> 0 && <" drift and the drift is invisible: each
+   site would simply disagree about what phase the job is in. */
+static int prefill_active(void) {
+    return g_pf_total > 0 && g_pf_done < g_pf_total;
+}
+
 /* `debug_prefill_ms` in kunkun98.ini: loop a fake prefill of that many
  * milliseconds, so the indicator can be looked at.
  *
@@ -1021,9 +1030,7 @@ static void sb_fallback_paint(HWND h, HDC dc) {
     {
         RECT pr;
         if (sb_prog_rect(rc.bottom - rc.top, &pr))
-            sb_prog_paint(dc, &pr,
-                          (g_pf_total > 0 && g_pf_done < g_pf_total)
-                              ? g_pf_done : 0,
+            sb_prog_paint(dc, &pr, prefill_active() ? g_pf_done : 0,
                           g_pf_total > 0 ? g_pf_total : 1);
     }
 
@@ -1107,8 +1114,17 @@ static void set_status(const char *display_utf8) {
        error message is never hidden by a stale rate.
        status_gbk is rewritten IN PLACE, which is also what keeps
        `shown` (a pointer into it) following the cell, so the sidebar
-       mirror below paints the same text the strip does. */
-    if (g.tok_live) {
+       mirror below paints the same text the strip does.
+
+       NOT DURING PREFILL. tok_live is set by start_job, which runs
+       before the first token exists - so through the whole prefill this
+       cell would answer "0 tok, 0.0 tok/s", and it would do it by
+       silently discarding the text the caller passed. That is what made
+       the indicator move while the strip and the sidebar said nothing
+       about a prefill: the bar is driven by SETPOS, the words come
+       through here. During prefill the caller's text is the informative
+       one and a rate over zero tokens is not. */
+    if (g.tok_live && !prefill_active()) {
         lz_common_tokcell(cell, (int)sizeof cell, g.tok_gen,
                        lz_time_ms() - g.tok_start_ms,
                        lz_str_utf8(LZ_STR_STATE_TOKCELL));
@@ -1843,7 +1859,7 @@ static void prefill_paint_tick(void) {
        a redundant SETPOS without repainting. */
     static int shown;
 
-    if (!(g_pf_total > 0 && g_pf_done < g_pf_total)) {
+    if (!prefill_active()) {
         /* Prefill over: the well EMPTIES, it does not disappear. The
            segment is part of the strip's layout - a well that came and
            went would re-flow the bar underneath the reader, and a well
@@ -5427,6 +5443,16 @@ static int st_newer_than_exe(const char *path) {
     return CompareFileTime(&other.ftLastWriteTime, &me.ftLastWriteTime) >= 0;
 }
 
+/* Whatever the status line is showing, from whichever control is
+   carrying it - set_status's own split, read back. */
+static void st_status_text(char *out, int cap) {
+    HWND h = g.part[LZ_GUI_STATUS];
+    out[0] = '\0';
+    if (!h) return;
+    if (g.status_is_sbar) SendMessage(h, LZ_SB_GETTEXT, 0, (LPARAM)out);
+    else                  GetWindowTextA(h, out, cap);
+}
+
 /* The mnemonic letter in a menu label, uppercased, or 0 if there is
    none. "&&" is a literal ampersand and is not one. */
 static int st_mnemonic(const char *s) {
@@ -6741,6 +6767,65 @@ static int st_worker(FILE *f, HWND hwnd) {
         if (strstr(cell, "tok/s") != NULL)
             fprintf(f, "  part 0 reads [%s]\n", cell);
         checks++;
+    }
+    /* PREFILL OUTRANKS THE THROUGHPUT CELL, both windows.
+       tok_live is set by start_job - before the first token exists - so
+       without set_status's prefill_active() gate the cell answered
+       "0 tok, 0.0 tok/s" for the whole prefill AND discarded the text
+       the caller passed. The bar moved (it is driven by SETPOS) while
+       neither the strip nor the sidebar said what was happening.
+       Both directions are asserted: without the second one this would
+       also pass on a build that never shows the cell at all. */
+    {
+        const char *probe = "kk98-prefill-probe";
+        int was_live = g.tok_live, was_done = g_pf_done,
+            was_total = g_pf_total;
+        char cell[80], side[512];
+
+        g.tok_live = 1;
+        g_pf_done = 3;
+        g_pf_total = 10;
+        set_status(probe);
+        /* BOTH strips, read the way each one stores text: comctl32 has
+           parts, the fallback is an ordinary window set_status writes
+           with SetWindowTextA. Reading only the first would leave this
+           untested on exactly the path the degraded front end uses. */
+        st_status_text(cell, (int)sizeof cell);
+        st_check(f, strstr(cell, probe) != NULL &&
+                    strstr(cell, "tok/s") == NULL,
+                 "prefill: the progress text holds the status line "
+                 "against the throughput cell");
+        if (strstr(cell, probe) == NULL)
+            fprintf(f, "  part 0 reads [%s]\n", cell);
+        checks++;
+
+        if (g.part[LZ_GUI_SIDE_INFO]) {
+            side[0] = '\0';
+            GetWindowTextA(g.part[LZ_GUI_SIDE_INFO], side, (int)sizeof side);
+            st_check(f, strstr(side, probe) != NULL,
+                     "prefill: the sidebar mirror shows it too");
+            if (strstr(side, probe) == NULL)
+                fprintf(f, "  sidebar reads [%s]\n", side);
+            checks++;
+        }
+
+        g_pf_done = g_pf_total = 0;
+        set_status(probe);
+        st_status_text(cell, (int)sizeof cell);
+        st_check(f, strstr(cell, "tok/s") != NULL,
+                 "prefill: once it ends the throughput cell takes the "
+                 "line back");
+        if (strstr(cell, "tok/s") == NULL)
+            fprintf(f, "  part 0 reads [%s]\n", cell);
+        checks++;
+
+        g.tok_live = was_live;
+        g_pf_done = was_done;
+        g_pf_total = was_total;
+        /* set_status, not set_idle_status: the latter would strncpy
+           g.idle_status onto itself. Same visible result - tok_live is
+           back to what finish_job left it. */
+        set_status(g.idle_status);
     }
     st_check(f, !lz_worker_busy(), "worker: not busy after the job ends");
     checks++;
