@@ -1,6 +1,11 @@
 #include <stddef.h>   /* size_t: used a lot here for pointer offsets; math.h does not guarantee it */
 #include <float.h>    /* FLT_MAX: overflow guard for quant reciprocal */
 #include <math.h>
+#include <stdlib.h>   /* malloc/free: the epilogue's derived scale plane
+                         is the only allocation in this file. Watcom
+                         reports W131 without it and -we makes that an
+                         error; gcc picked the prototypes up from
+                         elsewhere and said nothing. */
 #include <string.h>   /* memcpy: unaligned loads in the MMX/SSE2 kernels */
 
 #include "ops.h"
@@ -884,6 +889,118 @@ const char *lz_attn_select(const char *name) {
     }
 }
 
+/* ---- fixed-point dequant epilogue ------------------------------------
+
+   Derived bound, and the reason a shape test exists: per group the
+   product is |acc| * |xw*ww| <= 2^27 * 2^30, so ng of them stay inside
+   int64 while ng <= 64. in_dim beyond 2048 keeps the float path. */
+#define LZ_EPI_MAX_NG 64
+
+static int g_epi = -1;
+
+int lz_epi_mode(void) {
+    return (g_epi < 0) ? (q8r_have_simd() == 0) : g_epi;
+}
+
+int lz_epi_is_auto(void) { return g_epi < 0; }
+
+const char *lz_epi_select(const char *name) {
+    if (!name) return NULL;
+    if (strcmp(name, "float") == 0) g_epi = 0;
+    else if (strcmp(name, "fixed") == 0) g_epi = 1;
+    else if (strcmp(name, "auto") == 0) g_epi = -1;
+    else return NULL;
+    return lz_epi_mode() ? "fixed" : "float";
+}
+
+int lz_epi_ready(const LZTensor *w) { return w && w->sq && w->sexp; }
+
+/* Only for the half-built case below; lz_t_free owns the normal path. */
+static void epi_drop(LZTensor *w) {
+    free(w->sq);   w->sq = NULL;
+    free(w->sexp); w->sexp = NULL;
+}
+
+/* One shared exponent per ROW, not per tensor: .prof/wepirange.c
+   measured the per-row spread of the weight scales at 99.6% within 8x,
+   while across rows it is far wider. A per-tensor exponent would spend
+   that whole range on every row. */
+void lz_epi_prep(LZTensor *w, int in_dim) {
+    int ngw, rows, row, g;
+    if (!w || !w->scale || w->gs <= 0 || in_dim <= 0) return;
+    if (w->sq) return;                       /* idempotent */
+    if (in_dim % w->gs) return;
+    ngw = in_dim / w->gs;
+    if (in_dim / 32 > LZ_EPI_MAX_NG) return; /* outside the derived bound */
+    rows = w->n / in_dim;
+    if (rows <= 0) return;
+    w->sq   = (int16_t *)malloc((size_t)ngw * (size_t)rows * sizeof(int16_t));
+    w->sexp = (signed char *)malloc((size_t)rows);
+    if (!w->sq || !w->sexp) { epi_drop(w); return; }
+    for (row = 0; row < rows; row++) {
+        const float *ws = w->scale + (size_t)row * ngw;
+        int16_t *out = w->sq + (size_t)row * ngw;
+        float amax = 0.0f;
+        int e = 0;
+        for (g = 0; g < ngw; g++) {
+            float a = ws[g] < 0.0f ? -ws[g] : ws[g];
+            if (a > amax) amax = a;
+        }
+        if (amax <= 0.0f) {
+            for (g = 0; g < ngw; g++) out[g] = 0;
+            w->sexp[row] = 0;
+            continue;
+        }
+        while (e < 100 && amax * (float)ldexp(1.0, e + 1) < 32767.0f) e++;
+        for (g = 0; g < ngw; g++) {
+            float t = ws[g] * (float)ldexp(1.0, e);
+            int q = (int)(t < 0.0f ? t - 0.5f : t + 0.5f);
+            if (q >  32767) q =  32767;
+            if (q < -32767) q = -32767;
+            out[g] = (int16_t)q;
+        }
+        w->sexp[row] = (signed char)e;
+    }
+}
+
+/* int32 x int32 -> int64, which C cannot ask for: `(long long)a *
+   (long long)b` is 64x64 by the standard and Watcom emits `call __I8M`,
+   2.75x the cost of the one `imul r/m32` x86 has had since the 386. */
+#if defined(__WATCOMC__)
+long long lz_epi_mac(const int32_t *a, const int32_t *m, int n);
+/* ebp is pushed and popped rather than declared modified - it is the
+   frame pointer, and iron law two's third clause is that modify tells
+   the truth. imul owns edx:eax, so the two accumulator halves are ebx
+   and ebp. */
+#pragma aux lz_epi_mac =                \
+    "push ebp"                          \
+    "xor ebx,ebx"                       \
+    "xor ebp,ebp"                       \
+    "L1:"                               \
+    "mov eax,[esi]"                     \
+    "mov edx,[edi]"                     \
+    "imul edx"                          \
+    "add ebx,eax"                       \
+    "adc ebp,edx"                       \
+    "add esi,4"                         \
+    "add edi,4"                         \
+    "dec ecx"                           \
+    "jnz L1"                            \
+    "mov eax,ebx"                       \
+    "mov edx,ebp"                       \
+    "pop ebp"                           \
+    parm [esi] [edi] [ecx]              \
+    value [edx eax]                     \
+    modify [eax ebx ecx edx esi edi 8087];
+#else
+static long long lz_epi_mac(const int32_t *a, const int32_t *m, int n) {
+    long long s = 0;
+    int g;
+    for (g = 0; g < n; g++) s += (long long)a[g] * (long long)m[g];
+    return s;
+}
+#endif
+
 const char *lz_pair_select(const char *name) {
     if (!name) return NULL;
     if (strcmp(name, "on") == 0 || strcmp(name, "auto") == 0) g_pair = 1;
@@ -1344,6 +1461,72 @@ static lz_rowfn lz_row_pick(const lz_rowfn *tab) {
    is exact, and `x * 1.0f` is bit-identical to `x` - which is what lets
    Q16_0 share this instead of carrying a second copy differing in one
    multiply. Both call sites pass a literal, so it folds away. */
+/* The fixed counterpart. Same signature plus the tensor's int16 plane
+   and the row, because the shared exponent is per row.
+
+   xq16/mprod are static rather than stack (rule 6 item 4) and sized by
+   the same bound lz_epi_prep enforces, so a shape it refused cannot
+   reach here. */
+static int16_t g_epi_xq[LZ_BATCH_MAX][LZ_EPI_MAX_NG];
+static int     g_epi_xe[LZ_BATCH_MAX];
+static int32_t g_epi_m[LZ_EPI_MAX_NG];
+
+/* All tokens packed up front, because the row loop is OUTER and the
+   token loop inner - packing inside would run once per (row, token) and
+   cost exactly what the epilogue it replaces costs. That mistake is
+   what made the first measured candidate 1.88x instead of 32x. */
+static void epi_pack_act(const float *xqs, int nb, int nt) {
+    int tk, g;
+    /* One multiply per group plus the amax scan, per token. Counted so
+       the census cannot report the fixed tier as free - the work moved,
+       it did not vanish, and a site that bills nothing is how the old
+       hand-made table lost the two heaviest ones. */
+    LZ_FC(LZ_FC_EPI, (long)nt * nb);
+    for (tk = 0; tk < nt; tk++) {
+        const float *xsb = xqs + (size_t)tk * nb;
+        float amax = 0.0f;
+        int e = 0;
+        for (g = 0; g < nb; g++) {
+            float a = xsb[g] < 0.0f ? -xsb[g] : xsb[g];
+            if (a > amax) amax = a;
+        }
+        if (amax <= 0.0f) {
+            for (g = 0; g < nb; g++) g_epi_xq[tk][g] = 0;
+            g_epi_xe[tk] = 0;
+            continue;
+        }
+        while (e < 100 && amax * (float)ldexp(1.0, e + 1) < 32767.0f) e++;
+        for (g = 0; g < nb; g++) {
+            float t = xsb[g] * (float)ldexp(1.0, e);
+            int q = (int)(t < 0.0f ? t - 0.5f : t + 0.5f);
+            if (q >  32767) q =  32767;
+            if (q < -32767) q = -32767;
+            g_epi_xq[tk][g] = (int16_t)q;
+        }
+        g_epi_xe[tk] = e;
+    }
+}
+
+static float epi_fixed(const int32_t *accb, const LZTensor *w, int row,
+                       int tk, int ng, int r, float post) {
+    const int16_t *ww = w->sq + (size_t)row * (ng / r);
+    union { float f; int32_t i; } p2;
+    long long s;
+    int g, e;
+    for (g = 0; g < ng; g++)
+        g_epi_m[g] = (int32_t)g_epi_xq[tk][g] * (int32_t)ww[g / r];
+    s = lz_epi_mac(accb, g_epi_m, ng);
+    /* 2^-e built from the exponent field, not ldexp: the exponent is per
+       ROW, so a libm call here would run once per output element and cost
+       more than the epilogue it replaces. Same construction lz_exp uses. */
+    e = -g_epi_xe[tk] - (int)w->sexp[row];
+    if (e < -126 || e > 127) return 0.0f;      /* scales this extreme mean
+                                                  an all-zero group */
+    p2.i = (e + 127) << 23;
+    LZ_FC(LZ_FC_EPI, 3);                       /* convert, two multiplies */
+    return (float)s * p2.f * post;
+}
+
 static float epi_q8(const int32_t *accb, const float *xsb, const float *ws,
                     int ng, int r, float post) {
     int g;
@@ -1606,8 +1789,24 @@ static void matmul_q8_impl(float *o, const int8_t *xq, const float *xqs,
     int nb = in_dim / 32;   /* 32-sub-block count */
     const int8_t *wend = w->q + (size_t)w->n;   /* prefetch upper bound */
     lz_rowfn row;
+    /* The tier is decided once per call, and it is ANDed with whether
+       this tensor actually has its int16 plane - lz_epi_prep declines
+       shapes outside the derived bound, so a tensor it refused keeps the
+       float epilogue without the selector knowing about in_dim. */
+    int fixed_epi;
+
+    /* Built here rather than in the loader, which does not know each
+       tensor's in_dim - every call site does. Idempotent and one-time,
+       so the cost lands on the first token and nowhere after. The cast
+       is the price of that: the plane is derived state, not the weights,
+       and making every matmul signature non-const to say so would be a
+       larger lie than this one. */
+    if (lz_epi_mode() && !lz_epi_ready(w)) lz_epi_prep((LZTensor *)w, in_dim);
+    fixed_epi = lz_epi_mode() && lz_epi_ready(w) && nb <= LZ_EPI_MAX_NG
+                && nt <= LZ_BATCH_MAX;
 
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
+    if (fixed_epi) epi_pack_act(xqs, nb, nt);
     row = lz_row_pick(LZ_ROW_Q8);
 
     /* Two ways to have no row kernel, and both must land on the scalar
@@ -1640,9 +1839,11 @@ static void matmul_q8_impl(float *o, const int8_t *xq, const float *xqs,
         row(g_acc32, wr, NULL, g_xw, nb, nt, in_dim, wend, NULL);
         _mm_empty();
         for (tk = 0; tk < nt; tk++)
-            o[(size_t)tk * out_dim + i] =
-                epi_q8(g_acc32 + (size_t)tk * nb, xqs + (size_t)tk * nb,
-                       ws, nb, r, 1.0f / 256.0f);
+            o[(size_t)tk * out_dim + i] = fixed_epi
+                ? epi_fixed(g_acc32 + (size_t)tk * nb, w, i, tk, nb, r,
+                            1.0f / 256.0f)
+                : epi_q8(g_acc32 + (size_t)tk * nb, xqs + (size_t)tk * nb,
+                         ws, nb, r, 1.0f / 256.0f);
     }
 }
 

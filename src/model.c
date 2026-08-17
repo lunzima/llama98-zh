@@ -1404,10 +1404,16 @@ void lz_t_free(LZTensor *t) {
     free(t->q);
     free(t->scale);
     free(t->zero);
+    /* Freed here, not through ops.c: this file owns the struct's memory,
+       and model.c does not include ops.h. */
+    free(t->sq);
+    free(t->sexp);
     t->f = NULL;
     t->q = NULL;
     t->scale = NULL;
     t->zero = NULL;
+    t->sq = NULL;
+    t->sexp = NULL;
 }
 
 int lz_read_weights(LZModel *m, char *errbuf, int errlen) {

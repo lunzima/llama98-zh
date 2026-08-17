@@ -326,6 +326,36 @@ int lz_conv_is_auto(void);
 int lz_conv_accum_bound(int k);
 int lz_conv_norm_pow2(const float *v, int n, short *out, int bound);
 
+/* Dequant epilogue tier: "float" | "fixed" | "auto".
+
+   The epilogue is 66.4% of the f32 operations per token once the fixed
+   attention tier is on. The fixed form quantizes both scale planes to
+   int16 - weights at load time, activations once per token - and
+   accumulates acc[g]*(xw[g]*ww[g]) in int64, leaving one convert and one
+   multiply per row instead of four per group.
+
+   The bound is DERIVED, not observed: ng * 2^27 * 2^30 = 2.27e18 against
+   int64's 9.22e18, holding while ng <= 64, i.e. in_dim <= 2048. Wider
+   rows keep the float path rather than silently overflowing. Measured
+   max relative error 1.5e-4 against a Q8 noise floor of 3.9e-3.
+
+   BOTH TIERS SHIP. On this host the fixed one is 1.65x SLOWER (Watcom,
+   22.35 vs 13.52 ns per row) - and this host decides nothing: per group
+   it is one imul against one fild, two fmul and one fadd, and a P6
+   issues three uops a cycle against fmul's one-per-two. Which wins is a
+   target-machine question, so it is a knob, per iron law nine.
+
+   AUTO asks the same CPUID SSE question the conv and pass-2 tiers ask. */
+const char *lz_epi_select(const char *name);
+int lz_epi_mode(void);
+int lz_epi_is_auto(void);
+
+/* Build a tensor's int16 scale plane. Idempotent, and a no-op when the
+   shape is outside the derived bound - callers do not have to know the
+   limit, they check lz_epi_ready() afterwards. */
+void lz_epi_prep(LZTensor *w, int in_dim);
+int  lz_epi_ready(const LZTensor *w);
+
 const char *lz_pair_select(const char *name);
 int lz_pair_mode(void);
 

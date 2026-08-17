@@ -78,6 +78,14 @@ typedef struct {
                                Q16_0: n int16s (reinterpret as int16_t) */
     float *scale;           /* quantized: one scale per group, n/gs */
     float *zero;            /* Q4_1/Q6_1: one min per group, n/gs; NULL otherwise */
+    /* Derived plane for the fixed-point dequant epilogue: `scale`
+       requantized to int16 with one shared exponent per output row.
+       Built once by lz_epi_prep(), NULL when the float epilogue runs.
+       It has to be load-time work - quantizing per row inside the
+       forward costs as much float arithmetic as the epilogue it
+       replaces, which is what the first candidate measured. */
+    int16_t     *sq;        /* n/gs int16 */
+    signed char *sexp;      /* one exponent per row */
 } LZTensor;
 
 /* Q6_1's 2-bit plane layout: every 32 elements take 8 bytes; byte j's

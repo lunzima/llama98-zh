@@ -230,6 +230,8 @@ static void usage(void) {
     "                   skips the float re-quantize; auto resolves from\n"
     "                   hardware (fixed only where no SIMD write-back\n"
     "                   quantize exists).\n"
+    "  --epi-write TIER    auto|float|fixed (default auto). Dequant\n"
+    "                   epilogue in int64 fixed point.\n"
     "  --attn-write TIER   auto|float|scoring|wsum|fixed (default auto).\n"
     "                   Attention scoring / weighted sum in fixed point.\n"
     "  --conv-write TIER   auto|float|fixed (default auto). Causal conv1d\n"
@@ -1206,6 +1208,17 @@ int main(int argc, char **argv) {
                 return 2;
             }
         }
+        else if (strcmp(a, "--epi-write") == 0 && i + 1 < argc) {
+            /* Dequant epilogue. Both tiers ship because this host cannot
+               decide between them: the fixed one is 1.65x slower here
+               and does 32x less f32 work, and which matters depends on
+               the target's float-to-integer cost ratio. */
+            const char *got = lz_epi_select(argv[++i]);
+            if (!got) {
+                printf("--epi-write: unknown tier (auto|float|fixed)\n");
+                return 2;
+            }
+        }
         else if (strcmp(a, "--attn-write") == 0 && i + 1 < argc) {
             /* Attention scoring and weighted sum, split because they
                quantize at different granularity (int8 q vs int16
@@ -1390,6 +1403,9 @@ int main(int argc, char **argv) {
            lz_gdn_p2_impl(),
            lz_conv_mode() ? (lz_conv_is_auto() ? "fixed(auto)" : "fixed")
                           : (lz_conv_is_auto() ? "float(auto)" : "float"));
+    printf("Epilogue       %s%s\n",
+           lz_epi_mode() ? "fixed" : "float",
+           lz_epi_is_auto() ? "(auto)" : "");
     printf("Attn write     %s%s\n",
            lz_attn_mode() == 3 ? "fixed" :
            lz_attn_mode() == 1 ? "scoring" :
