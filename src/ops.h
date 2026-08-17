@@ -658,24 +658,24 @@ void lz_kv4_quantize(const float *x, int n, unsigned char *out, float *scale);
    measurement below existed, and a compile-time-only tier cannot be
    compared against itself on one machine.
 
-   BOTH KERNELS INDEX THE CACHE BY ABSOLUTE POSITION. kv_slot() and the
-   eviction mask do not exist for them, so forward.c refuses them
-   whenever the sliding window's ring is live - which, with the AUTO
-   window, is every sequence past about 1032 tokens. Without that
-   refusal `scoring` writes NaN into the last layer's attention output
-   from the first evicted position on (one KV head's worth of query
-   heads) and never recovers, and `wsum` degrades without NaN.
+   Both kernels take kv_slot()'s sink and ring and walk the mapping
+   themselves. Getting that wrong is silent - the read lands on a real
+   row belonging to another position - and it cost a full diagnosis
+   once: `scoring` wrote NaN into the last layer's attention output from
+   the first evicted position on, and short measurements could not see it
+   because the AUTO window does not open until about 1032 tokens.
 
-   That limit is the tier's real shape: it runs where attention is
-   cheapest and stands down where it would pay most. Teaching the
-   kernels kv_slot() is the work that would change it.
+   Quality: on 363 tokens all three arms sit within +-0.52 paired t of
+   float with top-5 unchanged, against a bit-identical null arm; at 1440
+   tokens, within 0.8 t, argmax agreement 99.8%.
 
-   Quality where it does run: on 363 tokens all three arms sit within
-   +-0.52 paired t of float with top-5 unchanged, against a bit-identical
-   null arm. Speed, x86 with a vectorized float path: 0.974x at 180
-   tokens (quantizing q does not pay for itself) and 1.061x at 720. The
-   3.7x figure for the O(ctx) term was taken at 1440 tokens, where the
-   kernels were reading the wrong cache rows, and does not stand.
+   Speed on x86, where the float path is SSE2-vectorized, best of 5:
+   1.021x at 180 tokens, 1.081x at 720, 1.136x at 1440 - measured
+   ratios, not a fitted O(ctx) coefficient. A quadratic fitted through
+   three timings turns three percent of noise into a factor of two, and
+   did: the same procedure produced 3.7x and 1.54x on the same code.
+   The x87 targets are where this tier is meant to pay; x86 only bounds
+   it from below.
 
    lz_attn_wsum_q8's cbuf/cq are caller-owned scratch of seq_len entries
    each; its int32 accumulator only holds 516 rows, so it chunks at 512
