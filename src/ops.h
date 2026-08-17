@@ -658,24 +658,24 @@ void lz_kv4_quantize(const float *x, int n, unsigned char *out, float *scale);
    measurement below existed, and a compile-time-only tier cannot be
    compared against itself on one machine.
 
-   DEFECTIVE PAST ~1000 POSITIONS - do not enable it. `scoring` writes
-   NaN into the last layer's attention output from token ~1048 on (512
-   of 1024 elements, one KV head's worth of query heads) and never
-   recovers; `wsum` degrades without NaN; top-5 freezes on one constant
-   set and NLL pins at 16.5. .prof/attn_fixed_matrix.py reproduces it on
-   three vehicles and two unrelated texts. It is the tier and not the
-   model: `--kv q4` is a far coarser perturbation and moves 7 positions
-   where this moves 392. Shifting the text by 10 tokens leaves the break
-   at the same position, so it is positional, not content. Ruled out:
-   the seq_len buffers (the break does not follow them), the recurrent
-   state representation (-DLZ_GDN_STATE_2PLANE=0 breaks earlier), and
-   the KV low plane (-DLZ_KV_2PLANE=0 breaks identically).
+   BOTH KERNELS INDEX THE CACHE BY ABSOLUTE POSITION. kv_slot() and the
+   eviction mask do not exist for them, so forward.c refuses them
+   whenever the sliding window's ring is live - which, with the AUTO
+   window, is every sequence past about 1032 tokens. Without that
+   refusal `scoring` writes NaN into the last layer's attention output
+   from the first evicted position on (one KV head's worth of query
+   heads) and never recovers, and `wsum` degrades without NaN.
 
-   Short sequences say the opposite, which is why the knob got this far:
-   on 363 tokens all three arms sit within +-0.52 paired t of float with
-   top-5 unchanged, against a bit-identical null arm. The payoff is real
-   too - the O(ctx) attention term shrinks 3.7x even on x86 with an SSE2
-   float path, though the tier is ~2.6% SLOWER below ~200 tokens.
+   That limit is the tier's real shape: it runs where attention is
+   cheapest and stands down where it would pay most. Teaching the
+   kernels kv_slot() is the work that would change it.
+
+   Quality where it does run: on 363 tokens all three arms sit within
+   +-0.52 paired t of float with top-5 unchanged, against a bit-identical
+   null arm. Speed, x86 with a vectorized float path: 0.974x at 180
+   tokens (quantizing q does not pay for itself) and 1.061x at 720. The
+   3.7x figure for the O(ctx) term was taken at 1440 tokens, where the
+   kernels were reading the wrong cache rows, and does not stand.
 
    lz_attn_wsum_q8's cbuf/cq are caller-owned scratch of seq_len entries
    each; its int32 accumulator only holds 516 rows, so it chunks at 512
@@ -689,14 +689,13 @@ void lz_kv4_quantize(const float *x, int n, unsigned char *out, float *scale);
    returns the same bitmask LZ_ATTN_FIXED uses, masked by what was
    actually compiled, so a build with the kernels out cannot select them.
 
-   AUTO resolves to float everywhere while the defect above stands. The
-   predicate it WILL use is the one the conv and pass-2 tiers use - CPUID
-   SSE, never MMX - and that is exactly why it cannot be turned on yet:
-   it would send Socket 7 parts, the machines this engine exists for,
-   onto the broken path. Context length is not part of the predicate even
-   though the crossover is context-dependent; the buffers are sized once,
-   and a tier that changes underneath a running sequence is a worse
-   bargain than one chosen once.
+   AUTO asks the same hardware question as the conv and pass-2 tiers -
+   CPUID SSE, never MMX - so a Socket 7 part lands on fixed and an SSE
+   machine keeps the float path it has always had. It answers only "is
+   this machine slow at float"; whether the kernels may run on this
+   cache is a separate per-call test in forward.c. Context length is not
+   part of either: the buffers are sized once, and a tier that changes
+   underneath a running sequence is a worse bargain than one chosen once.
 
    NOT numerics-neutral, so switching tiers needs a tolerance gate. */
 const char *lz_attn_select(const char *name);

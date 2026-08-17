@@ -1374,6 +1374,13 @@ static void forward_attn(const LZModel *m, LZRunState *s,
             }
         }
 #define LZ_ATTN_DEAD(t) ((t) >= dead0 && (t) < dead1)
+/* The fixed kernels take a cache pointer and a position count, not the
+   state, so they cannot consult kv_slot() or the mask. Rather than widen
+   their signatures for a tier that is off by default, the caller refuses
+   them whenever either mechanism is live. Both are zero on the default
+   path until the AUTO window opens, which is why every measurement under
+   ~1040 tokens looked clean. */
+#define LZ_ATTN_NORING (s->kv_ring == 0 && s->attn_win == 0 && win_t0 == 0)
 
         for (h = 0; h < nh; h++) {
             const float *qhh = qht + (size_t)h * hd;
@@ -1420,8 +1427,13 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                float loops rather than being silently truncated. The
                shape test is ANDed with the runtime tier, so a model the
                kernel cannot take falls back without the selector having
-               to know about head_dim. */
-            if ((lz_attn_mode() & 1) &&
+               to know about head_dim.
+               LZ_ATTN_NORING is the third condition and the expensive one
+               to have learned: both fixed kernels index the cache by
+               ABSOLUTE t, so they read the wrong row the moment kv_slot()
+               stops being the identity, and they score positions the
+               eviction mask has dropped. */
+            if ((lz_attn_mode() & 1) && LZ_ATTN_NORING &&
                 hd > 0 && (hd % 32) == 0 && hd <= LZ_ATTN_MAX_HD) {
                 lz_attn_score_q8(s->att, qhh, hd,
                                  kc + (size_t)kvh * hd,
@@ -1462,7 +1474,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
             {
                 int tt;
 #if (LZ_ATTN_FIXED & 1)
-                if ((lz_attn_mode() & 1) &&
+                if ((lz_attn_mode() & 1) && LZ_ATTN_NORING &&
                     hd > 0 && (hd % 32) == 0 && hd <= LZ_ATTN_MAX_HD) {
                     lz_attn_score_q8(s->att_lo, qhh, hd,
                                      kc_lo + (size_t)kvh * hd,
@@ -1554,7 +1566,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                may call lz_attn_select after the state exists, and the
                allocation above cannot see that. Reading the buffer the
                kernel needs is the only test that cannot drift from it. */
-            if ((lz_attn_mode() & 2) && s->wsum_cbuf &&
+            if ((lz_attn_mode() & 2) && s->wsum_cbuf && LZ_ATTN_NORING &&
                 hd > 0 && (hd % 32) == 0 && hd <= LZ_ATTN_MAX_HD) {
                 lz_attn_wsum_q8(out, s->att, hd,
                                 vc + (size_t)kvh * hd,
@@ -1581,7 +1593,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                linear in v. */
             {
 #if (LZ_ATTN_FIXED & 2)
-                if ((lz_attn_mode() & 2) && s->wsum_cbuf &&
+                if ((lz_attn_mode() & 2) && s->wsum_cbuf && LZ_ATTN_NORING &&
                     hd > 0 && (hd % 32) == 0 && hd <= LZ_ATTN_MAX_HD) {
                     lz_attn_wsum_q8(s->wsum_lo, s->att, hd,
                                     vc_lo + (size_t)kvh * hd,
