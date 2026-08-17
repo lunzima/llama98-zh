@@ -570,17 +570,80 @@ static float lz_i32f(int32_t v);
    Everything here is character-for-character what both copies had, in
    the same order, so this is a pure refactor and the bit-hash baseline
    must not move. */
-static int q8_group_scale(const float *grp, int gs, float *sg, float *inv) {
+/* The selected kernel tier, 0 = not yet selected. Defined here rather
+   than beside lz_kernel_select because q8_amax below reads it too, and
+   both the row kernels and the amax scan must answer to ONE selector -
+   two would let `--kernel mmx` move one of them and not the other. */
+static int g_kernel = 0;
+
+#include "ops_kernel_amax.h"
+
+/* The amax scan, dispatched. Bit-identical across every tier by
+   construction rather than by tolerance - max is exact and associative,
+   so lane order cannot change the answer. That is what makes this one
+   of the few reductions here that may be vectorized at all.
+
+   The tail is scalar: a group is 32 elements in every shipping recipe,
+   so the tail is empty in practice, and a tail loop that never runs is
+   cheaper than a kernel that has to handle every length. */
+static uint32_t q8_amax(const float *grp, int gs) {
     union { float f; uint32_t u; } bit;
     uint32_t am = 0;
-    float amax;
-    int k, fast;
-    for (k = 0; k < gs; k++) {
+    int k = 0;
+    /* Keyed to the SAME selector the row kernels use, not to a private
+       CPUID test. Two reasons, and the second is the load-bearing one:
+       `--kernel mmx` then actually reaches this MMX tier, and the
+       existing four-tier bit-identity gate covers these kernels without
+       a line of new harness. A private predicate would have left the MMX
+       cell unreachable on every development machine, which is how a tier
+       comes to be written and never run. */
+    if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
+#if defined(LZ_HAVE_AMAX_SSE2)
+    if (g_kernel == LZ_KERNEL_SSE2 && gs >= 4) {
+#if defined(__WATCOMC__)
+        am = lz_amax32_sse2_asm(grp, gs);
+#else
+        am = lz_amax32_sse2(grp, gs);
+#endif
+        k = gs & ~3;
+    } else
+#endif
+#if defined(LZ_HAVE_AMAX_MMX)
+    if (g_kernel == LZ_KERNEL_MMX && gs >= 2) {
+#if defined(__WATCOMC__)
+        am = lz_amax32_mmx_asm(grp, gs);
+#else
+        am = lz_amax32_mmx(grp, gs);
+#endif
+        /* Per group, not once per call, and the caller cannot do it:
+           q8_group_scale does x87 float arithmetic on this result
+           immediately. Rule 6 item 6 says kernels do not emit and
+           callers do - but the caller here is two lines below, inside
+           the same function.
+
+           Invisible on gcc, where x86-64 scalar float goes through SSE
+           and dirty MMX state costs nothing. Watcom differed on
+           --kernel mmx and nothing else, which is exactly the shape the
+           rounding tier's own emms comment records twenty lines down. */
+        _mm_empty();
+        k = gs & ~1;
+    } else
+#endif
+    { k = 0; }
+    for (; k < gs; k++) {
         uint32_t a;
         bit.f = grp[k];
         a = bit.u & 0x7FFFFFFFu;
         if (a > am) am = a;
     }
+    return am;
+}
+
+static int q8_group_scale(const float *grp, int gs, float *sg, float *inv) {
+    union { float f; uint32_t u; } bit;
+    uint32_t am = q8_amax(grp, gs);
+    float amax;
+    int fast;
     bit.u = am;
     amax = bit.f;
     if (amax > 0.0f) {
@@ -673,7 +736,7 @@ void lz_quantize_q8(const float *x, int n, int gs, int8_t *q, float *s) {
    after which the 32-element kernel inside the row loop is a DIRECT call.
    Dispatching deeper would pay one indirect call per 32 MACs — exactly
    what this kernel design exists to avoid. */
-static int g_kernel = 0;                    /* 0 = not yet selected */
+/* Defined near the top of the file, above q8_amax, which also reads it. */
 
 #if defined(__WATCOMC__)
 /* CPUID leaf 1 EDX: bit 23 = MMX, bit 25 = SSE, bit 26 = SSE2. One
