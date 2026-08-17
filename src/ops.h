@@ -217,8 +217,23 @@ int lz_gdn_mode(void);
 
    AUTO ASKS THE HARDWARE QUESTION - does this machine have a SIMD tier
    for the write-back quantize? - and answers "fixed" only where it does
-   not, i.e. a Pentium II or K6-2. Two earlier assumptions behind that
-   reasoning have been re-measured:
+   not. The test is q8r_have_simd(), i.e. CPUID leaf 1 EDX bit 25, SSE.
+
+   THE PREDICATE IS SSE AND MUST STAY SSE, NOT MMX. This comment used to
+   read "i.e. a Pentium II or K6-2", which names two machines out of a
+   set the rule actually covers in full: every pre-SSE part. The rest of
+   that set is the whole Socket 7 generation - Cyrix 6x86MX/MII and IDT
+   WinChip C6/2 alongside the K6 - and it is exactly the part that must
+   not be lost, because those have MMX and an x87 WEAKER than the K6's
+   (see iron law 3's machine table, which grew those two rows on
+   2026-08-17). Rewriting this test in terms of MMX would push the three
+   machines with the worst x87 in the family back onto the float path,
+   and no gate would see it: the two tiers are required to be bit
+   identical, so a wrong tier choice is invisible to every consistency
+   check we have. Enumerating machines in a comment is how that edit
+   gets rationalised; the predicate is the contract.
+
+   Two earlier assumptions behind that reasoning have been re-measured:
 
      - "off pending an end-to-end measurement": that measurement was
        made. Paired per-position NLL, fixed minus float, mean -9.94e-04,
@@ -247,6 +262,32 @@ int lz_gdn_p2_is_auto(void);
    bodies are required to be bit identical, so nothing in the output can
    tell you one of them stopped being compiled in. */
 const char *lz_gdn_p2_impl(void);
+
+/* Causal conv1d fixed tier, in the HEADER rather than in ops.c because
+   forward.c guards its own buffers on it. LZ_GDN_FIXED's comment records
+   what happens otherwise: `#if` on an undefined macro is a silent 0, so
+   the guarded code simply is not compiled and the knob looks inert
+   instead of absent. That is the shape this exact define hit on its
+   first attempt here. */
+#ifndef LZ_CONV_FIXED
+#define LZ_CONV_FIXED 1
+#endif
+
+/* Causal conv1d tier: "float" | "fixed" | "auto". AUTO asks the same
+   hardware question as lz_gdn_p2_select - CPUID SSE, never MMX - so a
+   Socket 7 part lands on fixed. Returns the resolved name, or NULL on an
+   unknown one.
+   NOT numerics-neutral: the fixed tier drifts ~4.8e-5 from float
+   (.prof/wconv.c), so switching tiers needs a tolerance gate, not cmp. */
+const char *lz_conv_select(const char *name);
+int lz_conv_mode(void);
+int lz_conv_is_auto(void);
+
+/* Fixed-tier helpers, exposed because forward.c builds the quantized
+   weight and history buffers with them. See their definitions for why
+   the bound is derived and why the scale must be a power of two. */
+int lz_conv_accum_bound(int k);
+int lz_conv_norm_pow2(const float *v, int n, short *out, int bound);
 
 const char *lz_pair_select(const char *name);
 int lz_pair_mode(void);
@@ -309,11 +350,25 @@ int lz_act_gs(const LZTensor *w, int in_dim);
 void lz_matmul_w(float *o, const float *x, const LZTensor *w,
                  int in_dim, int out_dim, int8_t *xq, float *xqs);
 
-/* Q8 matmul consuming ALREADY-QUANTIZED activations: the forward hot
-   path reuses one quantization for q/k/v/gate/up sharing xb's xq/xqs,
-   avoiding repeated activation scans. dtype=0 (f32 weights) uses x in
-   f32 - one call site serves both weight representations. */
-void lz_matmul_q8(float *o, const float *x, const int8_t *xq,
+/* Matmul consuming ALREADY-QUANTIZED activations: the forward hot path
+   reuses one quantization for q/k/v/gate/up sharing xb's xq/xqs,
+   avoiding repeated activation scans.
+
+   THE SUFFIX NAMES THE ACTIVATION SIDE, NOT THE WEIGHTS. `xq` is the
+   parameter it takes; the WEIGHT format is whatever w->dtype says, and
+   this one entry point dispatches every one of them - F32, Q8_0, Q4_1,
+   Q6_1, Q16_0, T2. It was called lz_matmul_q8 until 2026-08-17 and that
+   name was read as "the Q8 weight path" more than once, including in a
+   review that concluded the tied lm_head was pinned to Q8 and therefore
+   could not go ternary. It never was: forward.c's lm_head call sites
+   have always dispatched on dtype like every other call site.
+
+   The three members of this family differ ONLY in who quantizes the
+   activations and how many tokens are done at once:
+     lz_matmul_w      f32 activations, quantizes internally
+     lz_matmul_xq     caller pre-quantized, 1 token
+     lz_matmul_xq_nt  caller pre-quantized, nt tokens */
+void lz_matmul_xq(float *o, const float *x, const int8_t *xq,
                   const float *xqs, const LZTensor *w,
                   int in_dim, int out_dim);
 
@@ -402,7 +457,7 @@ void lz_matmul_q8(float *o, const float *x, const int8_t *xq,
 #error "LZ_BATCH_DEFAULT exceeds LZ_BATCH_MAX"
 #endif
 
-/* Batched lz_matmul_q8: one weight stream serves nt tokens.
+/* Batched lz_matmul_xq: one weight stream serves nt tokens.
 
    All three buffers are token-major with hardcoded strides, no extra
    params:
@@ -411,11 +466,11 @@ void lz_matmul_q8(float *o, const float *x, const int8_t *xq,
      xq [t * in_dim  + k]
      xqs[t * (in_dim / lz_act_gs(w, in_dim)) + g]
 
-   **nt=1 is bit-identical to lz_matmul_q8** - not "numerically close",
+   **nt=1 is bit-identical to lz_matmul_xq** - not "numerically close",
    the t-loop in the same code degrades to one iteration and the
    reduction structure is untouched byte for byte. This is a hard
    gate: batching changes weight-load count, not what is computed. */
-void lz_matmul_q8_nt(float *o, const float *x, const int8_t *xq,
+void lz_matmul_xq_nt(float *o, const float *x, const int8_t *xq,
                      const float *xqs, const LZTensor *w,
                      int in_dim, int out_dim, int nt);
 
@@ -561,16 +616,42 @@ void lz_kv4_quantize(const float *x, int n, unsigned char *out, float *scale);
    measured NOT to be a bottleneck. Splitting the knob makes that testable
    instead of assumed.
 
-   Default off: whether it is worth enabling has to be decided by
-   argmax/top-5 agreement against an exact reference, not by comparing
-   error magnitudes - the logit-difference metric saturates.
+   This macro says which kernels are COMPILED; which one runs is
+   lz_attn_mode(), a runtime selector. They were the same knob until the
+   measurement below existed, and a compile-time-only tier cannot be
+   compared against itself on one machine.
+
+   Quality, measured with argmax/top-5 agreement and paired NLL rather
+   than error magnitude (the logit-difference metric saturates):
+   .prof/attn_fixed_quality.py puts all three arms within +-0.52 paired t
+   of the float path on 363 tokens, top-5 unchanged, against a null arm
+   that is bit-identical. Cost: the O(ctx) attention term shrinks 3.7x
+   even on x86 with an SSE2 float path, but the fixed tier is ~2.6%
+   SLOWER below ~200 tokens, where quantizing q does not pay for itself.
 
    lz_attn_wsum_q8's cbuf/cq are caller-owned scratch of seq_len entries
    each; its int32 accumulator only holds 516 rows, so it chunks at 512
    and converts each chunk through lz_i32f(). */
 #ifndef LZ_ATTN_FIXED
-#define LZ_ATTN_FIXED 0
+#define LZ_ATTN_FIXED 3
 #endif
+
+/* Attention tier: "float" | "scoring" | "wsum" | "fixed" | "auto".
+   Returns the resolved name, NULL on an unknown one. lz_attn_mode()
+   returns the same bitmask LZ_ATTN_FIXED uses, masked by what was
+   actually compiled, so a build with the kernels out cannot select them.
+
+   AUTO asks the same hardware question as the conv and pass-2 tiers -
+   CPUID SSE, never MMX - so a Socket 7 part lands on fixed and an SSE
+   machine keeps the float path it has always had. Context length is NOT
+   part of the predicate even though the crossover is context-dependent:
+   the buffers are sized once, and a tier that changes underneath a
+   running sequence is a worse bargain than one that is chosen once.
+
+   NOT numerics-neutral, so switching tiers needs a tolerance gate. */
+const char *lz_attn_select(const char *name);
+int lz_attn_mode(void);
+int lz_attn_is_auto(void);
 
 #if LZ_ATTN_FIXED
 #define LZ_ATTN_MAX_HD 256
@@ -754,8 +835,14 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
    both sides. Against activations of order 1, discarding magnitudes
    below 1e-30 is not an approximation anyone can measure.
 
-   Both are #ifndef so a probe can build with the floor disabled
+   It is #ifndef so a probe can build with the floor disabled
    (-DLZ_Q8_MIN_SCALE=0.0f) and check that the divergence comes back.
+   ("Both" until 2026-08-17: a leftover plural from the edit that turned
+   two enforcement points into one when the chunked recurrence path was
+   deleted. A pronoun that outlives what it referred to sends the reader
+   looking for a second mechanism that is not there - which is exactly
+   what happened, and it cost a wrong "the guarantee is only half
+   implemented" report before the code was read.)
    The first attempt at that control used a plain #define here, so the
    command-line value was silently overridden and the control reported
    "identical without the floor" - a control that proves the probe is
@@ -990,6 +1077,24 @@ void lz_kda_step(float *out, const int8_t *sq_in, int8_t *sq_out,
 void lz_causal_conv1d_step(float *o, const float *x,
                                const float *state_in, float *state_out,
                                const float *w, int n_ch, int k);
+
+/* Fixed tier of the same operator, selected by lz_conv_mode(). History
+   and taps are int16 at power-of-two exponents `es` and `ew[c]`, both
+   produced by lz_conv_norm_pow2 against lz_conv_accum_bound(k). Aliasing
+   sh_in == sh_out is safe on the same forward-order argument the float
+   path documents. Drifts ~4.8e-5 from the float path - a tolerance
+   gate, not cmp. */
+void lz_causal_conv1d_step_fixed(float *o, const float *x,
+                                 const short *sh_in, short *sh_out,
+                                 const short *mw, const float *oscale,
+                                 float in_scale, int bound,
+                                 int n_ch, int k);
+
+/* Precompute the scales the fixed kernel multiplies by, once per model
+   rather than per token. Built with ldexp: `1 << (ew+es)` overflows,
+   the exponents reach 43 together. */
+void lz_conv_build_scales(float *oscale, float *in_scale,
+                          const signed char *ew, int es, int n_ch);
 
 /* Latent MoE router (KunMoEGate). `logits` is the caller-computed
    x @ gate_w^T (n_experts elements, matmul done by lz_matmul_w - this

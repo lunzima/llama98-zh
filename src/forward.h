@@ -242,7 +242,7 @@ typedef struct {
                                    the serial recurrence uses row 0 only */
 
     /* LZ_LT_KDA scratch. Separate q/k/v buffers rather than GDN's one
-       fused in_proj_qkv: lz_matmul_q8_nt writes o[t*out_dim+i] with a
+       fused in_proj_qkv: lz_matmul_xq_nt writes o[t*out_dim+i] with a
        FIXED stride, so three independently-shaped projections cannot
        share one nt-major buffer at different offsets without breaking
        that contract (see forward.c's forward_kda). conv_state IS still
@@ -263,7 +263,7 @@ typedef struct {
        for every token in the chunk is nt_cap-wide and runs batched,
        what depends on WHICH expert a token picked is one token's worth.
        Only the routed experts are in the second group -
-       lz_matmul_q8_nt's one-weight-load-serves-nt-tokens batching has
+       lz_matmul_xq_nt's one-weight-load-serves-nt-tokens batching has
        nothing to hold onto when two tokens in a chunk want different
        experts. See forward_moe's docstring in forward.c, which also
        records why grouping the tokens by expert was measured and
@@ -425,6 +425,21 @@ typedef struct {
 #endif
     float  *ssm_state_s;
     float *conv_state;          /* (n_linear, lin_conv_dim, conv_kernel-1) */
+
+    /* Fixed conv tier (lz_conv_mode()). Allocated only when it is live,
+       and `conv_fixed` says so - a NULL check alone would not, because
+       the tier can be compiled out. Same shape and ring layout as
+       conv_state, int16 instead of float.
+         conv_mw        (n_linear, lin_conv_dim, conv_kernel) taps
+         conv_oscale    (n_linear, lin_conv_dim) 2^-(ew+es) per channel
+       Both are derived from the model and never change; they live here
+       rather than on LZModel only to keep the loader untouched. */
+    short *conv_state_q;
+    short *conv_mw;
+    float *conv_oscale;
+    float  conv_in_scale;
+    int    conv_bound;
+    int    conv_fixed;
     /* Which ring slot currently holds the CONFIRMED recurrent state.
        Ordinary decode and prefill NEVER advance this (forward_ssm/
        forward_kda pass the same slot as both read and write source,
@@ -594,6 +609,10 @@ typedef struct {
 #endif
     float  *ssm_s;
     float  *conv;
+    /* int16 twin of `conv`, filled instead of it when the fixed conv
+       tier is live. Additive: LZStateCkpt never leaves memory, so there
+       is no stored layout to stay compatible with. */
+    short  *conv_q;
     size_t  n_ssm_q8, n_ssm_s, n_conv;   /* element counts, for a shape check */
     int     pos;                         /* tokens forwarded when taken; -1 = empty */
     unsigned epoch;                      /* the state's epoch at save time */

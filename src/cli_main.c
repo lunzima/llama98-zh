@@ -228,6 +228,12 @@ static void usage(void) {
     "                   skips the float re-quantize; auto resolves from\n"
     "                   hardware (fixed only where no SIMD write-back\n"
     "                   quantize exists).\n"
+    "  --attn-write TIER   auto|float|scoring|wsum|fixed (default auto).\n"
+    "                   Attention scoring / weighted sum in fixed point.\n"
+    "  --conv-write TIER   auto|float|fixed (default auto). Causal conv1d\n"
+    "                   tier: fixed keeps the history in int16 so the\n"
+    "                   conversion is per sample, not per tap. Drifts ~3e-5\n"
+    "                   from float (noise floor 3.9e-3) - not bit-identical.\n"
     "  --pair MODE      auto|on|off (default on). Share one weight unpack\n"
     "                   across two tokens (needs --batch >= 2).\n"
     "  --prefetch MODE  auto|none|load|nta|3dnow (default auto).\n"
@@ -1182,6 +1188,32 @@ int main(int argc, char **argv) {
                 return 2;
             }
         }
+        else if (strcmp(a, "--conv-write") == 0 && i + 1 < argc) {
+            /* Causal conv1d tier. `fixed` keeps the history in int16 so
+               the conversion is paid once per sample instead of once per
+               tap; `auto` resolves from hardware, the same CPUID SSE
+               question --recur-write asks. NOT numerics-neutral: ~3e-5
+               against a 3.9e-3 noise floor. */
+            const char *got = lz_conv_select(argv[++i]);
+            if (!got) {
+                printf("--conv-write: unknown tier (auto|float|fixed)\n");
+                return 2;
+            }
+        }
+        else if (strcmp(a, "--attn-write") == 0 && i + 1 < argc) {
+            /* Attention scoring and weighted sum, split because they
+               quantize at different granularity (int8 q vs int16
+               coefficients). `auto` asks the same CPUID SSE question the
+               other two tiers ask. NOT numerics-neutral, and it is the
+               one tier whose cost is context-dependent: measured ~2.6%
+               slower below 200 tokens, 3.7x less O(ctx) work above. */
+            const char *got = lz_attn_select(argv[++i]);
+            if (!got) {
+                printf("--attn-write: unknown tier "
+                       "(auto|float|scoring|wsum|fixed)\n");
+                return 2;
+            }
+        }
         else if (strcmp(a, "--pair") == 0 && i + 1 < argc) {
             /* Which 32-element kernel the row loops call, not which ISA.
                Exists because pairing and the 128-element group kernel
@@ -1345,11 +1377,18 @@ int main(int argc, char **argv) {
        rather than substituted so the existing parsers - this file's
        gates match on "write <tier>" -
        keep matching. */
-    printf("Pairing        %s, recurrence write %s[%s]\n",
+    printf("Pairing        %s, recurrence write %s[%s], conv write %s\n",
            lz_pair_mode() ? "on" : "off",
            lz_gdn_p2_mode() ? (lz_gdn_p2_is_auto() ? "fixed(auto)" : "fixed")
                             : (lz_gdn_p2_is_auto() ? "float(auto)" : "float"),
-           lz_gdn_p2_impl());
+           lz_gdn_p2_impl(),
+           lz_conv_mode() ? (lz_conv_is_auto() ? "fixed(auto)" : "fixed")
+                          : (lz_conv_is_auto() ? "float(auto)" : "float"));
+    printf("Attn write     %s%s\n",
+           lz_attn_mode() == 3 ? "fixed" :
+           lz_attn_mode() == 1 ? "scoring" :
+           lz_attn_mode() == 2 ? "wsum" : "float",
+           lz_attn_is_auto() ? "(auto)" : "");
     printf("Kernels        %s built-in, %s selected -> tier %s\n",
            lz_build_paths(), lz_kernel_name(), lz_kernel_tier());
     printf("Structure OK   %.0f ms\n", t1 - t0);

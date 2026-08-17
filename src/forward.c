@@ -365,6 +365,84 @@ static void *xcalloc(size_t n, size_t sz, int *ok, long long *acc) {
     return p;
 }
 
+/* History exponent for the fixed conv tier.
+ *
+ * MEASURED, not chosen (.prof/wconvrange.c, recover_r20, 64 tokens,
+ * 1.18M samples of the real conv inputs): max |x| = 22.3, the top 0.1%
+ * sits at 2^3, and the highest non-empty bucket is 2^4 - one bucket of
+ * outlier headroom, so this is not a long tail that a constant exponent
+ * has to waste range on. The first and second halves of the sequence
+ * agree on the 0.1% bucket, which is the property that matters here:
+ * the history carries values from earlier steps at the same scale, so a
+ * drifting range would need the scale to travel with the state the way
+ * ssm_state_s does for the recurrence.
+ *
+ * 22.3 * 2^9 = 11423, inside the 16384 bound with a bucket to spare.
+ * A value past 32 clips; the probe saw none, and the clamp is silent, so
+ * re-run it on any model whose conv inputs might be scaled differently. */
+#ifndef LZ_CONV_ES
+#define LZ_CONV_ES 9
+#endif
+
+#if LZ_CONV_FIXED
+/* Quantize the conv taps once, laying them out per channel in the same
+   order forward_kda/forward_ssm index the history.
+ *
+ * THE OFFSETS ARE DUPLICATED from those two functions, which is a drift
+ * surface, so the loop asserts that the channels it covered add up to
+ * lin_conv_dim. A layout change then fails here instead of quantizing
+ * the wrong tensor into the right slot. */
+static int conv_fixed_build(LZRunState *s, const LZModel *m) {
+    const LZModelConfig *c = &m->config;
+    int layer, t, covered_ok = 1, built = 0;
+    for (layer = 0; layer < c->n_layers; layer++) {
+        const LZLayer *L;
+        int li;
+        size_t base;
+        if (c->layer_types[layer] == LZ_LT_FULL) continue;
+        L = &m->layers[layer];
+        li = s->cache_idx[layer];
+        base = (size_t)li * c->lin_conv_dim;
+        built++;
+        {
+        size_t ch = 0;
+        const LZTensor *tv[3];
+        int cnt[3], ntv;
+        if (L->kda_q_conv1d.q || L->kda_q_conv1d.f) {
+            tv[0] = &L->kda_q_conv1d; cnt[0] = c->lin_key_dim;
+            tv[1] = &L->kda_k_conv1d; cnt[1] = c->lin_key_dim;
+            tv[2] = &L->kda_v_conv1d; cnt[2] = c->lin_value_dim;
+            ntv = 3;
+        } else {
+            tv[0] = &L->conv1d; cnt[0] = c->lin_conv_dim; ntv = 1;
+        }
+        for (t = 0; t < ntv; t++) {
+            const float *w = lz_t_f32(tv[t], s->wscr);
+            int i;
+            if (!w) return -1;
+            for (i = 0; i < cnt[t]; i++) {
+                signed char e = (signed char)lz_conv_norm_pow2(
+                    w + (size_t)i * c->conv_kernel, c->conv_kernel,
+                    s->conv_mw + (base + ch + i) * c->conv_kernel,
+                    s->conv_bound);
+                s->conv_oscale[base + ch + i] =
+                    (float)ldexp(1.0, -((int)e + LZ_CONV_ES));
+            }
+            ch += (size_t)cnt[t];
+        }
+        if (ch != (size_t)c->lin_conv_dim) covered_ok = 0;
+        }
+    }
+    /* Two coverage checks, not one: `covered_ok` catches a layer whose
+       tensors do not add up to lin_conv_dim, `built` catches the case
+       where the loop matched no layer at all - which would leave every
+       tap zero and report success. */
+    if (!covered_ok || built != c->n_linear_layers) return -1;
+    s->conv_in_scale = (float)ldexp(1.0, LZ_CONV_ES);
+    return 0;
+}
+#endif
+
 int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
                        int spec_k_max, char *errbuf, int errlen) {
     const LZModelConfig *c = &m->config;
@@ -414,6 +492,10 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
     s->qh       = (float *)xcalloc((size_t)nt * c->attn_q_dim, sizeof(float), &ok, &s->bytes_alloc);
     s->att      = (float *)xcalloc((size_t)seq_len, sizeof(float), &ok, &s->bytes_alloc);
 #if (LZ_ATTN_FIXED & 2)
+    /* Allocated whenever the kernel is compiled, not when the tier is
+       selected: lz_attn_select can run after this point, and 6 bytes per
+       context slot (196 KB at ctx 32768, counted in bytes_alloc) is a
+       cheaper bargain than a buffer that appears only on some paths. */
     s->wsum_cbuf = (float *)xcalloc((size_t)seq_len, sizeof(float), &ok, &s->bytes_alloc);
     s->wsum_cq   = (int16_t *)xcalloc((size_t)seq_len, sizeof(int16_t), &ok, &s->bytes_alloc);
 #endif
@@ -653,6 +735,53 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
     s->conv_state = (float *)xcalloc(
         (size_t)s->ssm_ring_depth * c->n_linear_layers * c->lin_conv_dim *
         (c->conv_kernel - 1), sizeof(float), &ok, &s->bytes_alloc);
+
+    /* Fixed conv tier. Decided ONCE, here, and recorded in s->conv_fixed
+       rather than re-read per token: lz_conv_mode() can be moved by a
+       flag, and a state whose buffers were not allocated must not start
+       taking the fixed branch halfway through a run.
+     *
+     * NOT YET REACHED BY forward_kda / forward_ssm - the buffers are
+     * allocated and the kernel exists (lz_causal_conv1d_step_fixed,
+     * validated by .prof/wconv2.c), but one parameter is still open and
+     * guessing it would be worse than leaving the branch unwired:
+     *
+     *   THE HISTORY EXPONENT. The probe derived `es` by normalizing a
+     *   state it was handed. Here the history starts at zero, so there
+     *   is nothing to derive it from, and it would have to be a constant
+     *   chosen a priori. Activations entering the conv are O(1) but not
+     *   bounded, so a constant either clips the tail or wastes range,
+     *   and clipping is silent.
+     *
+     *   The recurrence solved the same problem and its answer is in
+     *   ssm_state_s: the scale TRAVELS WITH THE STATE and is recomputed
+     *   every step (p2_group_scale writes rs_out). The conv has no
+     *   counterpart, and giving it one means a renormalization pass over
+     *   the history whenever the range moves - which is exactly the cost
+     *   the fixed tier exists to avoid, so it has to be measured before
+     *   it is written, not after.
+     *
+     * Until that is settled, allocating is harmless (the buffers are
+     * small and nothing reads them) and keeps the tier's shape visible.
+     * What must NOT happen is a call site taking the fixed branch with a
+     * fabricated es. */
+    s->conv_fixed = lz_conv_mode();
+    if (s->conv_fixed) {
+        size_t nch = (size_t)c->n_linear_layers * c->lin_conv_dim;
+        s->conv_bound = lz_conv_accum_bound(c->conv_kernel);
+        s->conv_state_q = (short *)xcalloc(
+            (size_t)s->ssm_ring_depth * nch * (c->conv_kernel - 1),
+            sizeof(short), &ok, &s->bytes_alloc);
+        s->conv_mw = (short *)xcalloc(nch * c->conv_kernel,
+                                      sizeof(short), &ok, &s->bytes_alloc);
+        s->conv_oscale = (float *)xcalloc(nch, sizeof(float), &ok,
+                                          &s->bytes_alloc);
+        if (!ok) s->conv_fixed = 0;
+        /* conv_fixed_build runs LATER, after cache_idx is filled - it
+           needs the layer -> linear-index map and that is populated
+           further down. Building here would read an all-zero map and
+           quantize every layer's taps into slot 0. */
+    }
     /* s->ssm_slot starts at 0 from this function's own memset(s,0,...)
        above - explicit here only as documentation, matching mtp_pos's
        own "reset to 0" comment; lz_state_reset (below) is the one that
@@ -746,6 +875,11 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
     for (l = 0; l < c->n_layers; l++)
         s->cache_idx[l] = (c->layer_types[l] == LZ_LT_FULL) ? nf++ : nl++;
 
+#if LZ_CONV_FIXED
+    /* After cache_idx, which conv_fixed_build reads. */
+    if (s->conv_fixed && conv_fixed_build(s, m) != 0) s->conv_fixed = 0;
+#endif
+
     return 0;
 }
 
@@ -782,6 +916,7 @@ void lz_state_free(LZRunState *s) {
     free(s->ssm_state_q8_lo);
 #endif
     free(s->conv_state);
+    free(s->conv_state_q); free(s->conv_mw); free(s->conv_oscale);
     free(s->xq); free(s->xqs); free(s->wscr);
     free(s->rope_cs);
     free(s->cache_idx);
@@ -840,6 +975,12 @@ void lz_state_reset(LZRunState *s, const LZModel *m) {
     memset(s->ssm_state_s, 0, (size_t)s->ssm_ring_depth * c->n_linear_layers *
            c->lin_n_v_heads * c->lin_k_head_dim * c->lin_v_head_dim / 32 *
            sizeof(float));
+#if LZ_CONV_FIXED
+    if (s->conv_state_q)
+        memset(s->conv_state_q, 0,
+               (size_t)s->ssm_ring_depth * c->n_linear_layers *
+               c->lin_conv_dim * (c->conv_kernel - 1) * sizeof(short));
+#endif
     memset(s->conv_state, 0, (size_t)s->ssm_ring_depth * c->n_linear_layers *
            c->lin_conv_dim * (c->conv_kernel - 1) * sizeof(float));
     /* The ring's own "which slot is confirmed" index - see forward.h's
@@ -885,6 +1026,14 @@ int lz_ckpt_alloc(LZStateCkpt *ck, const LZModel *m, char *errbuf, int errlen) {
 #endif
     ck->ssm_s = (float *)malloc(n_s * sizeof(float));
     ck->conv  = (float *)malloc(n_conv * sizeof(float));
+#if LZ_CONV_FIXED
+    /* Allocated unconditionally, not on lz_conv_mode(): a checkpoint
+       outlives the flag that was set when it was made, and half the
+       size of the float one is not worth a conditional that can be
+       wrong. */
+    ck->conv_q = (short *)malloc(n_conv * sizeof(short));
+    if (!ck->conv_q) { lz_ckpt_free(ck); if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_OOM); return LZ_ERR_OOM; }
+#endif
     if (!ck->ssm_q8 || !ck->ssm_s || !ck->conv
 #if LZ_GDN_STATE_2PLANE
         || !ck->ssm_q8_lo
@@ -910,6 +1059,7 @@ void lz_ckpt_free(LZStateCkpt *ck) {
 #endif
     free(ck->ssm_s);
     free(ck->conv);
+    free(ck->conv_q);
     memset(ck, 0, sizeof(*ck));
 }
 
@@ -945,6 +1095,14 @@ int lz_ckpt_save(LZStateCkpt *ck, const LZRunState *s, const LZModel *m,
     memcpy(ck->ssm_q8_lo, s->ssm_state_q8_lo + o_q8, n_q8);
 #endif
     memcpy(ck->ssm_s, s->ssm_state_s + o_s, n_s * sizeof(float));
+#if LZ_CONV_FIXED
+    /* Whichever history is live. Saving the float one while the fixed
+       tier runs would restore a zero history and read as a subtle
+       quality drift rather than as a broken checkpoint. */
+    if (s->conv_fixed)
+        memcpy(ck->conv_q, s->conv_state_q + o_conv, n_conv * sizeof(short));
+    else
+#endif
     memcpy(ck->conv, s->conv_state + o_conv, n_conv * sizeof(float));
     ck->pos   = pos;
     ck->epoch = s->epoch;
@@ -995,6 +1153,11 @@ int lz_ckpt_restore(const LZStateCkpt *ck, LZRunState *s, const LZModel *m,
     memcpy(s->ssm_state_q8_lo, ck->ssm_q8_lo, n_q8);
 #endif
     memcpy(s->ssm_state_s, ck->ssm_s, n_s * sizeof(float));
+#if LZ_CONV_FIXED
+    if (s->conv_fixed)
+        memcpy(s->conv_state_q, ck->conv_q, n_conv * sizeof(short));
+    else
+#endif
     memcpy(s->conv_state, ck->conv, n_conv * sizeof(float));
     s->ssm_slot = 0;
     if (out_pos) *out_pos = ck->pos;
@@ -1075,9 +1238,9 @@ static void forward_attn(const LZModel *m, LZRunState *s,
     for (tk = 0; tk < nt; tk++)
         lz_quantize_q8(s->xb + (size_t)tk * hdim, hdim, gsa,
                        s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
-    lz_matmul_q8_nt(s->qg, s->xb, s->xq, s->xqs, &L->q_proj, hdim, qgd, nt);
-    lz_matmul_q8_nt(s->ktmp, s->xb, s->xq, s->xqs, &L->k_proj, hdim, kvd, nt);
-    lz_matmul_q8_nt(s->vtmp, s->xb, s->xq, s->xqs, &L->v_proj, hdim, kvd, nt);
+    lz_matmul_xq_nt(s->qg, s->xb, s->xq, s->xqs, &L->q_proj, hdim, qgd, nt);
+    lz_matmul_xq_nt(s->ktmp, s->xb, s->xq, s->xqs, &L->k_proj, hdim, kvd, nt);
+    lz_matmul_xq_nt(s->vtmp, s->xb, s->xq, s->xqs, &L->v_proj, hdim, kvd, nt);
 
     /* QK-Norm + RoPE + write KV cache. **All cache rows of the batch
        must be written before scoring**: token t in the batch must see
@@ -1254,11 +1417,12 @@ static void forward_attn(const LZModel *m, LZRunState *s,
 #if (LZ_ATTN_FIXED & 1)
             /* The fixed path needs head_dim to be a multiple of 32 and
                within its static per-head buffers; anything else keeps the
-               float loops rather than being silently truncated. Note both
-               halves take the SAME branch - scoring and weighted sum are
-               independent kernels, but splitting them here would mean two
-               tiers to verify instead of one. */
-            if (hd > 0 && (hd % 32) == 0 && hd <= LZ_ATTN_MAX_HD) {
+               float loops rather than being silently truncated. The
+               shape test is ANDed with the runtime tier, so a model the
+               kernel cannot take falls back without the selector having
+               to know about head_dim. */
+            if ((lz_attn_mode() & 1) &&
+                hd > 0 && (hd % 32) == 0 && hd <= LZ_ATTN_MAX_HD) {
                 lz_attn_score_q8(s->att, qhh, hd,
                                  kc + (size_t)kvh * hd,
                                  ks + (size_t)(kvh * hd) / 32,
@@ -1295,7 +1459,8 @@ static void forward_attn(const LZModel *m, LZRunState *s,
             {
                 int tt;
 #if (LZ_ATTN_FIXED & 1)
-                if (hd > 0 && (hd % 32) == 0 && hd <= LZ_ATTN_MAX_HD) {
+                if ((lz_attn_mode() & 1) &&
+                    hd > 0 && (hd % 32) == 0 && hd <= LZ_ATTN_MAX_HD) {
                     lz_attn_score_q8(s->att_lo, qhh, hd,
                                      kc_lo + (size_t)kvh * hd,
                                      ks + (size_t)(kvh * hd) / 32,
@@ -1380,7 +1545,12 @@ static void forward_attn(const LZModel *m, LZRunState *s,
             } else
             {
 #if (LZ_ATTN_FIXED & 2)
-            if (hd > 0 && (hd % 32) == 0 && hd <= LZ_ATTN_MAX_HD) {
+            /* s->wsum_cbuf is in the condition, not asserted: an embedder
+               may call lz_attn_select after the state exists, and the
+               allocation above cannot see that. Reading the buffer the
+               kernel needs is the only test that cannot drift from it. */
+            if ((lz_attn_mode() & 2) && s->wsum_cbuf &&
+                hd > 0 && (hd % 32) == 0 && hd <= LZ_ATTN_MAX_HD) {
                 lz_attn_wsum_q8(out, s->att, hd,
                                 vc + (size_t)kvh * hd,
                                 vs + (size_t)(kvh * hd) / 32,
@@ -1404,7 +1574,8 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                linear in v. */
             {
 #if (LZ_ATTN_FIXED & 2)
-                if (hd > 0 && (hd % 32) == 0 && hd <= LZ_ATTN_MAX_HD) {
+                if ((lz_attn_mode() & 2) && s->wsum_cbuf &&
+                    hd > 0 && (hd % 32) == 0 && hd <= LZ_ATTN_MAX_HD) {
                     lz_attn_wsum_q8(s->wsum_lo, s->att, hd,
                                     vc_lo + (size_t)kvh * hd,
                                     vs + (size_t)(kvh * hd) / 32,
@@ -1459,7 +1630,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
         for (tk = 0; tk < nt; tk++)
             lz_quantize_q8(s->attn_out + (size_t)tk * qd, qd, gso,
                            s->xq + (size_t)tk * qd, s->xqs + (size_t)tk * nso);
-        lz_matmul_q8_nt(s->xb2, s->attn_out, s->xq, s->xqs, &L->o_proj, qd,
+        lz_matmul_xq_nt(s->xb2, s->attn_out, s->xq, s->xqs, &L->o_proj, qd,
                         hdim, nt);
     }
 }
@@ -1502,12 +1673,12 @@ static void forward_ssm(const LZModel *m, LZRunState *s,
     for (tk = 0; tk < nt; tk++)
         lz_quantize_q8(s->xb + (size_t)tk * hdim, hdim, gsa,
                        s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
-    lz_matmul_q8_nt(s->qkv, s->xb, s->xq, s->xqs, &L->in_proj_qkv, hdim,
+    lz_matmul_xq_nt(s->qkv, s->xb, s->xq, s->xqs, &L->in_proj_qkv, hdim,
                     cdim, nt);
-    lz_matmul_q8_nt(s->zbuf, s->xb, s->xq, s->xqs, &L->in_proj_z, hdim,
+    lz_matmul_xq_nt(s->zbuf, s->xb, s->xq, s->xqs, &L->in_proj_z, hdim,
                     vdim, nt);
-    lz_matmul_q8_nt(s->avec, s->xb, s->xq, s->xqs, &L->in_proj_a, hdim, nv, nt);
-    lz_matmul_q8_nt(s->bvec, s->xb, s->xq, s->xqs, &L->in_proj_b, hdim, nv, nt);
+    lz_matmul_xq_nt(s->avec, s->xb, s->xq, s->xqs, &L->in_proj_a, hdim, nv, nt);
+    lz_matmul_xq_nt(s->bvec, s->xb, s->xq, s->xqs, &L->in_proj_b, hdim, nv, nt);
 
     /* depthwise causal convolution, SiLU activation */
     LZ_TAP("sqkv", layer, s->qkv, cdim);
@@ -1523,6 +1694,22 @@ static void forward_ssm(const LZModel *m, LZRunState *s,
     for (tk = 0; tk < nt; tk++) {
         int slot_in  = advance_ring ? (ring_base + tk) % ring_depth : ring_base;
         int slot_out = advance_ring ? (ring_base + tk + 1) % ring_depth : ring_base;
+#if LZ_CONV_FIXED
+        if (s->conv_fixed) {
+            /* One block here, unlike KDA's three: this path's conv
+               covers lin_conv_dim in a single tensor. Wiring only KDA
+               would leave a model with SSM layers half on each tier,
+               which no banner line would show. */
+            size_t cb = (size_t)li * c->lin_conv_dim;
+            lz_causal_conv1d_step_fixed(
+                s->qkv_c + (size_t)tk * cdim, s->qkv + (size_t)tk * cdim,
+                s->conv_state_q + (size_t)slot_in * conv_slot_stride + li_off_conv,
+                s->conv_state_q + (size_t)slot_out * conv_slot_stride + li_off_conv,
+                s->conv_mw + cb * c->conv_kernel, s->conv_oscale + cb,
+                s->conv_in_scale, s->conv_bound, cdim, c->conv_kernel);
+            continue;
+        }
+#endif
         lz_causal_conv1d_step(s->qkv_c + (size_t)tk * cdim,
                               s->qkv + (size_t)tk * cdim,
                               s->conv_state + (size_t)slot_in * conv_slot_stride + li_off_conv,
@@ -1614,7 +1801,7 @@ static void forward_ssm(const LZModel *m, LZRunState *s,
         for (tk = 0; tk < nt; tk++)
             lz_quantize_q8(s->ssm_out + (size_t)tk * vdim, vdim, gso,
                            s->xq + (size_t)tk * vdim, s->xqs + (size_t)tk * nso);
-        lz_matmul_q8_nt(s->xb2, s->ssm_out, s->xq, s->xqs, &L->out_proj, vdim,
+        lz_matmul_xq_nt(s->xb2, s->ssm_out, s->xq, s->xqs, &L->out_proj, vdim,
                         hdim, nt);
     }
 }
@@ -1680,13 +1867,13 @@ static void forward_kda(const LZModel *m, LZRunState *s,
     for (tk = 0; tk < nt; tk++)
         lz_quantize_q8(s->xb + (size_t)tk * hdim, hdim, gsa,
                        s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
-    lz_matmul_q8_nt(s->kda_q, s->xb, s->xq, s->xqs, &L->kda_q_proj, hdim, kdim, nt);
-    lz_matmul_q8_nt(s->kda_k, s->xb, s->xq, s->xqs, &L->kda_k_proj, hdim, kdim, nt);
-    lz_matmul_q8_nt(s->kda_v, s->xb, s->xq, s->xqs, &L->kda_v_proj, hdim, vdim, nt);
-    lz_matmul_q8_nt(s->kda_gate_lat, s->xb, s->xq, s->xqs, &L->kda_f_a_proj,
+    lz_matmul_xq_nt(s->kda_q, s->xb, s->xq, s->xqs, &L->kda_q_proj, hdim, kdim, nt);
+    lz_matmul_xq_nt(s->kda_k, s->xb, s->xq, s->xqs, &L->kda_k_proj, hdim, kdim, nt);
+    lz_matmul_xq_nt(s->kda_v, s->xb, s->xq, s->xqs, &L->kda_v_proj, hdim, vdim, nt);
+    lz_matmul_xq_nt(s->kda_gate_lat, s->xb, s->xq, s->xqs, &L->kda_f_a_proj,
                     hdim, gate_rank, nt);
-    lz_matmul_q8_nt(s->bvec, s->xb, s->xq, s->xqs, &L->kda_b_proj, hdim, nv, nt);
-    lz_matmul_q8_nt(s->zbuf, s->xb, s->xq, s->xqs, &L->kda_g_proj, hdim, vdim, nt);
+    lz_matmul_xq_nt(s->bvec, s->xb, s->xq, s->xqs, &L->kda_b_proj, hdim, nv, nt);
+    lz_matmul_xq_nt(s->zbuf, s->xb, s->xq, s->xqs, &L->kda_g_proj, hdim, vdim, nt);
     LZ_TAP("kq", layer, s->kda_q, kdim);
     LZ_TAP("kk", layer, s->kda_k, kdim);
     LZ_TAP("kv", layer, s->kda_v, vdim);
@@ -1702,6 +1889,39 @@ static void forward_kda(const LZModel *m, LZRunState *s,
     for (tk = 0; tk < nt; tk++) {
         int slot_in  = advance_ring ? (ring_base + tk) % ring_depth : ring_base;
         int slot_out = advance_ring ? (ring_base + tk + 1) % ring_depth : ring_base;
+#if LZ_CONV_FIXED
+        if (s->conv_fixed) {
+            /* Same three disjoint ranges, int16 history. The channel
+               base is the history offset divided by hist - the two index
+               different things (elements vs channels) and mixing them
+               silently reads a neighbouring channel's taps. */
+            size_t cb = (size_t)li * c->lin_conv_dim;
+            short *qi = s->conv_state_q + (size_t)slot_in  * conv_slot_stride + li_off_conv;
+            short *qo = s->conv_state_q + (size_t)slot_out * conv_slot_stride + li_off_conv;
+            size_t q_ch = 0, k_ch = (size_t)c->lin_key_dim;
+            size_t v_ch = (size_t)2 * c->lin_key_dim;
+            lz_causal_conv1d_step_fixed(
+                s->kda_qc + (size_t)tk * kdim, s->kda_q + (size_t)tk * kdim,
+                qi + q_off, qo + q_off,
+                s->conv_mw + (cb + q_ch) * c->conv_kernel,
+                s->conv_oscale + cb + q_ch,
+                s->conv_in_scale, s->conv_bound, kdim, c->conv_kernel);
+            lz_causal_conv1d_step_fixed(
+                s->kda_kc + (size_t)tk * kdim, s->kda_k + (size_t)tk * kdim,
+                qi + k_off, qo + k_off,
+                s->conv_mw + (cb + k_ch) * c->conv_kernel,
+                s->conv_oscale + cb + k_ch,
+                s->conv_in_scale, s->conv_bound, kdim, c->conv_kernel);
+            lz_causal_conv1d_step_fixed(
+                s->kda_vc + (size_t)tk * vdim, s->kda_v + (size_t)tk * vdim,
+                qi + v_off, qo + v_off,
+                s->conv_mw + (cb + v_ch) * c->conv_kernel,
+                s->conv_oscale + cb + v_ch,
+                s->conv_in_scale, s->conv_bound, vdim, c->conv_kernel);
+            continue;
+        }
+#endif
+        {
         float *base_in  = s->conv_state + (size_t)slot_in  * conv_slot_stride + li_off_conv;
         float *base_out = s->conv_state + (size_t)slot_out * conv_slot_stride + li_off_conv;
         lz_causal_conv1d_step(s->kda_qc + (size_t)tk * kdim,
@@ -1719,6 +1939,7 @@ static void forward_kda(const LZModel *m, LZRunState *s,
                               base_in + v_off, base_out + v_off,
                               lz_t_f32(&L->kda_v_conv1d, s->wscr), vdim,
                               c->conv_kernel);
+        }
     }
     LZ_TAP("kqc", layer, s->kda_qc, kdim);
     LZ_TAP("kkc", layer, s->kda_kc, kdim);
@@ -1838,7 +2059,7 @@ static void forward_kda(const LZModel *m, LZRunState *s,
         for (tk = 0; tk < nt; tk++)
             lz_quantize_q8(s->ssm_out + (size_t)tk * vdim, vdim, gso,
                            s->xq + (size_t)tk * vdim, s->xqs + (size_t)tk * nso);
-        lz_matmul_q8_nt(s->xb2, s->ssm_out, s->xq, s->xqs, &L->kda_o_proj, vdim,
+        lz_matmul_xq_nt(s->xb2, s->ssm_out, s->xq, s->xqs, &L->kda_o_proj, vdim,
                         hdim, nt);
     }
 }
@@ -1852,7 +2073,7 @@ static void forward_kda(const LZModel *m, LZRunState *s,
    FOUR PHASES, split on the one thing that is per-token: expert
    SELECTION. The router, the latent down/up projections and the shared
    expert all read one weight matrix for every token in the chunk, so
-   they batch through lz_matmul_q8_nt exactly like dense_ffn_step. Only
+   they batch through lz_matmul_xq_nt exactly like dense_ffn_step. Only
    the routed experts cannot - two tokens in the same chunk may pick
    different experts entirely, so there is no shared weight stream.
 
@@ -1875,7 +2096,7 @@ static void forward_kda(const LZModel *m, LZRunState *s,
    exactly - at the trained topk=2 the routed experts are 64.8% of the
    ffn phase and everything batched here is the other 35.2%.
 
-   nt=1 (generation) is unchanged: lz_matmul_q8_nt's t-loop degrades to
+   nt=1 (generation) is unchanged: lz_matmul_xq_nt's t-loop degrades to
    one iteration, which that function's header states as a hard gate.
 
    Bit-identity between batched and per-token MoE prefill:
@@ -1921,9 +2142,9 @@ static void forward_moe(const LZModel *m, LZRunState *s,
         lz_quantize_q8(s->xb + (size_t)tk * hdim, hdim, gsh,
                        s->xq + (size_t)tk * hdim,
                        s->xqs + (size_t)tk * nsh);
-    lz_matmul_q8_nt(s->moe_router_logits, s->xb, s->xq, s->xqs,
+    lz_matmul_xq_nt(s->moe_router_logits, s->xb, s->xq, s->xqs,
                     &L->moe_gate_w, hdim, ne, nt);
-    lz_matmul_q8_nt(s->moe_lat_x, s->xb, s->xq, s->xqs,
+    lz_matmul_xq_nt(s->moe_lat_x, s->xb, s->xq, s->xqs,
                     &L->moe_down_proj, hdim, latent, nt);
     /* Slot 0 is token 0's, so these tap what the per-token version
        taped under `if (tk == 0)`. */
@@ -1975,9 +2196,9 @@ static void forward_moe(const LZModel *m, LZRunState *s,
                 int gsl = lz_act_gs(&L->moe_expert_w1[ei], latent);
                 lz_quantize_q8(lat_x, latent, gsl, s->xq, s->xqs);
             }
-            lz_matmul_q8(s->moe_h1, lat_x, s->xq, s->xqs,
+            lz_matmul_xq(s->moe_h1, lat_x, s->xq, s->xqs,
                         &L->moe_expert_w1[ei], latent, inter);
-            lz_matmul_q8(s->moe_h3, lat_x, s->xq, s->xqs,
+            lz_matmul_xq(s->moe_h3, lat_x, s->xq, s->xqs,
                         &L->moe_expert_w3[ei], latent, inter);
             for (vv = 0; vv < inter; vv++)
                 s->moe_h1[vv] = lz_silu(s->moe_h1[vv]) * s->moe_h3[vv];
@@ -2002,7 +2223,7 @@ static void forward_moe(const LZModel *m, LZRunState *s,
             lz_quantize_q8(s->moe_lat_y + (size_t)tk * latent, latent, gsu,
                            s->xq + (size_t)tk * latent,
                            s->xqs + (size_t)tk * nsu);
-        lz_matmul_q8_nt(s->xb2, s->moe_lat_y, s->xq, s->xqs,
+        lz_matmul_xq_nt(s->xb2, s->moe_lat_y, s->xq, s->xqs,
                         &L->moe_up_proj, latent, hdim, nt);
     }
 
@@ -2026,9 +2247,9 @@ static void forward_moe(const LZModel *m, LZRunState *s,
             lz_quantize_q8(s->xb + (size_t)tk * hdim, hdim, gss,
                            s->xq + (size_t)tk * hdim,
                            s->xqs + (size_t)tk * nss);
-        lz_matmul_q8_nt(s->moe_h1, s->xb, s->xq, s->xqs,
+        lz_matmul_xq_nt(s->moe_h1, s->xb, s->xq, s->xqs,
                         &L->moe_shared_gate, hdim, shared_w, nt);
-        lz_matmul_q8_nt(s->moe_h3, s->xb, s->xq, s->xqs,
+        lz_matmul_xq_nt(s->moe_h3, s->xb, s->xq, s->xqs,
                         &L->moe_shared_up, hdim, shared_w, nt);
         for (i = 0; i < nt * shared_w; i++)
             s->moe_h1[i] = lz_silu(s->moe_h1[i]) * s->moe_h3[i];
@@ -2036,7 +2257,7 @@ static void forward_moe(const LZModel *m, LZRunState *s,
             lz_quantize_q8(s->moe_h1 + (size_t)tk * shared_w, shared_w, gsd,
                            s->xq + (size_t)tk * shared_w,
                            s->xqs + (size_t)tk * nsd);
-        lz_matmul_q8_nt(s->moe_shared_out, s->moe_h1, s->xq, s->xqs,
+        lz_matmul_xq_nt(s->moe_shared_out, s->moe_h1, s->xq, s->xqs,
                         &L->moe_shared_down, shared_w, hdim, nt);
         for (i = 0; i < nt * hdim; i++) s->xb2[i] += s->moe_shared_out[i];
     }
@@ -2081,9 +2302,9 @@ static void dense_ffn_step(const LZModel *m, LZRunState *s,
     for (tk = 0; tk < nt; tk++)
         lz_quantize_q8(s->xb + (size_t)tk * dim, dim, gsg,
                        s->xq + (size_t)tk * dim, s->xqs + (size_t)tk * nsg);
-    lz_matmul_q8_nt(s->hb, s->xb, s->xq, s->xqs, &L->gate_proj, dim,
+    lz_matmul_xq_nt(s->hb, s->xb, s->xq, s->xqs, &L->gate_proj, dim,
                     idim, nt);
-    lz_matmul_q8_nt(s->hb2, s->xb, s->xq, s->xqs, &L->up_proj, dim,
+    lz_matmul_xq_nt(s->hb2, s->xb, s->xq, s->xqs, &L->up_proj, dim,
                     idim, nt);
     {
         /* SwiGLU: one lz_exp per element, scalar. NOT vectorized, and
@@ -2110,7 +2331,7 @@ static void dense_ffn_step(const LZModel *m, LZRunState *s,
     for (tk = 0; tk < nt; tk++)
         lz_quantize_q8(s->hb + (size_t)tk * idim, idim, gsd,
                        s->xq + (size_t)tk * idim, s->xqs + (size_t)tk * nsd);
-    lz_matmul_q8_nt(s->xb2, s->hb, s->xq, s->xqs, &L->down_proj, idim,
+    lz_matmul_xq_nt(s->xb2, s->hb, s->xq, s->xqs, &L->down_proj, idim,
                     dim, nt);
 }
 
@@ -2180,7 +2401,7 @@ float *lz_mtp_draft_step(const LZModel *m, LZRunState *s, int next_token, int po
        forward_chunk's own lm_head step uses. */
     lz_quantize_q8(s->mtp_chain, dim, lz_act_gs(&m->embed_tokens, dim),
                   s->xq, s->xqs);
-    lz_matmul_q8(s->mtp_draft_logits, s->mtp_chain, s->xq, s->xqs,
+    lz_matmul_xq(s->mtp_draft_logits, s->mtp_chain, s->xq, s->xqs,
                 &m->embed_tokens, dim, c->vocab_size);
 
     lz_fpu_float_end(fpu);
@@ -2402,7 +2623,7 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
             lz_quantize_q8(xt, dim, gse, s->xq + (size_t)tk * dim,
                           s->xqs + (size_t)tk * nse);
         }
-        lz_matmul_q8_nt(logits_out, s->x, s->xq, s->xqs, &m->embed_tokens,
+        lz_matmul_xq_nt(logits_out, s->x, s->xq, s->xqs, &m->embed_tokens,
                        dim, c->vocab_size, nt);
         lz_fpu_float_end(fpu);
         return logits_out;
@@ -2445,7 +2666,7 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
         lz_quantize_q8(xl, dim, lz_act_gs(&m->embed_tokens, dim),
                        s->xq, s->xqs);
         LZ_PROF_BEG(_th);
-        lz_matmul_q8(s->logits, xl, s->xq, s->xqs, &m->embed_tokens, dim,
+        lz_matmul_xq(s->logits, xl, s->xq, s->xqs, &m->embed_tokens, dim,
                      c->vocab_size);
         LZ_PROF_END(_th, LZ_PROF_HEAD);
     }

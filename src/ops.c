@@ -6,6 +6,9 @@
 #include "ops.h"
 #include "err.h"
 #include "cpucheck.h"   /* LZ_CPUID1_EDX_AUX - shared CPUID leaf 1 EDX asm */
+#include "mmx_compat.h" /* _mm_empty(): called from the architecture-neutral
+                           dispatch paths too, so it must be declared on
+                           targets that have no MMX at all - see the header */
 
 /* GDN pass-1 tier default, hoisted here from where the kernels live
    (~line 3250) because lz_gdn_mode() sits far above them and `#if
@@ -18,6 +21,49 @@
 #ifndef LZ_GDN_FIXED
 #define LZ_GDN_FIXED 1
 #endif
+
+/* Accumulator bound for the fixed conv tier, derived not chosen.
+   k products of two values bounded by B reach k*B^2, which must stay
+   inside int32: B <= sqrt((2^31-1)/k). For k=4 that is 23170, so the
+   largest usable power of two is 2^14. Probe (.prof/wconv.c) measures a
+   peak of 9.09e8 against the 1.07e9 bound - tight, never crossed, 2.36x
+   inside int32.
+
+   int64 accumulation is not the escape: ARMv5TE has SMLAL, but MMX's
+   pmaddwd yields int32 pairs that wrap the same way, so the x86 side
+   would need a carry chain per tap. One bound for both is cheaper. */
+int lz_conv_accum_bound(int k) {
+    int b = 1;
+    while ((double)k * (double)(b * 2) * (double)(b * 2) <= 2147483647.0)
+        b *= 2;
+    return b;
+}
+
+/* Normalize n floats into int16 by a POWER OF TWO, clamped to +-bound.
+   Returns e, so v[i] ~ out[i] * 2^-e. Power of two only: the scale is
+   exact in binary, so this adds no rounding of its own and cannot
+   differ between x87 and SSE. */
+int lz_conv_norm_pow2(const float *v, int n, short *out, int bound) {
+    float amax = 0.0f;
+    int i, e = 0;
+    for (i = 0; i < n; i++) {
+        float a = v[i] < 0.0f ? -v[i] : v[i];
+        if (a > amax) amax = a;
+    }
+    if (amax == 0.0f) {
+        for (i = 0; i < n; i++) out[i] = 0;
+        return 0;
+    }
+    while (e < 30 && amax * (float)(1 << (e + 1)) < (float)bound) e++;
+    for (i = 0; i < n; i++) {
+        float t = v[i] * (float)(1 << e);
+        int q = (int)(t < 0.0f ? t - 0.5f : t + 0.5f);
+        if (q > bound) q = bound;
+        if (q < -bound) q = -bound;
+        out[i] = (short)q;
+    }
+    return e;
+}
 
 void lz_rmsnorm(float *o, const float *x, const float *w, int n, float eps) {
     float ss = 0.0f;
@@ -347,8 +393,16 @@ float lz_exp(float x) {
 #include "ops_kernel_q8round.h"
 
 /* The dispatch section is below in this file; only forward decls here.
-   Returns 0 = scalar / 1 = SSE1 (writes MMX, needs emms) / 2 = SSE2. */
+   Returns 0 = scalar / 1 = SSE1 (writes MMX, needs emms) / 2 = SSE2.
+
+   GUARDED TO MATCH ITS CALLERS, both of which sit under this same
+   predicate. Without the guard the definition compiles on a target with
+   no q8round SIMD at all - ARMv5TE is the first such target - where
+   nothing calls it. See the note above dot32_ref in
+   ops_kernel_q8round.h's sibling, ops_kernel_dot.h. */
+#if defined(LZ_HAVE_Q8R_SIMD) || defined(LZ_HAVE_Q8R_SSE)
 static int lz_q8r_tier(void);
+#endif
 static int q8r_have_simd(void);
 
 /* int32 -> float. **Every int32-to-float conversion in the engine goes
@@ -709,6 +763,70 @@ const char *lz_gdn_p2_select(const char *name) {
     return lz_gdn_p2_mode() ? "fixed" : "float";
 }
 
+/* Causal conv1d tier. Same three states and the same AUTO predicate as
+   the pass-2 selector above, deliberately: the question is identical -
+   does this machine have a SIMD tier for the float side - and the
+   predicate must stay `q8r_have_simd()` (CPUID SSE), never MMX. Every
+   Socket 7 part has MMX and no SSE, and those are exactly the machines
+   whose x87 is weakest, so an MMX-keyed test would push them onto the
+   float path (iron law 3's machine table).
+
+   Unlike the kernel tiers this one is NOT bit-identical to float: the
+   probe measures 4.8e-5 max drift, so the gate is a tolerance, not a
+   cmp. That is the same shape pass-1 and pass-2 ship with (1.5e-5 and
+   1.2e-5) against a Q8 activation noise floor of 3.9e-3. */
+#define LZ_CONV_FLOAT 0
+#define LZ_CONV_FIXEDT 1
+#define LZ_CONV_AUTO  2
+static int g_conv = LZ_CONV_AUTO;
+
+int lz_conv_mode(void) {
+#if LZ_CONV_FIXED
+    if (g_conv == LZ_CONV_AUTO) return q8r_have_simd() == 0;
+    return g_conv;
+#else
+    return 0;
+#endif
+}
+
+int lz_conv_is_auto(void) { return g_conv == LZ_CONV_AUTO; }
+
+const char *lz_conv_select(const char *name) {
+    if (!name) return NULL;
+    if (strcmp(name, "float") == 0) g_conv = LZ_CONV_FLOAT;
+    else if (strcmp(name, "fixed") == 0) g_conv = LZ_CONV_FIXEDT;
+    else if (strcmp(name, "auto") == 0) g_conv = LZ_CONV_AUTO;
+    else return NULL;
+    return lz_conv_mode() ? "fixed" : "float";
+}
+
+/* -1 is AUTO; anything else is a literal bitmask, so "float" is 0 and
+   has to be distinguishable from "not chosen yet". */
+static int g_attn = -1;
+
+int lz_attn_mode(void) {
+    int m = (g_attn < 0) ? (q8r_have_simd() == 0 ? 3 : 0) : g_attn;
+    return m & LZ_ATTN_FIXED;
+}
+
+int lz_attn_is_auto(void) { return g_attn < 0; }
+
+const char *lz_attn_select(const char *name) {
+    if (!name) return NULL;
+    if (strcmp(name, "float") == 0) g_attn = 0;
+    else if (strcmp(name, "scoring") == 0) g_attn = 1;
+    else if (strcmp(name, "wsum") == 0) g_attn = 2;
+    else if (strcmp(name, "fixed") == 0) g_attn = 3;
+    else if (strcmp(name, "auto") == 0) g_attn = -1;
+    else return NULL;
+    switch (lz_attn_mode()) {
+        case 1:  return "scoring";
+        case 2:  return "wsum";
+        case 3:  return "fixed";
+        default: return "float";
+    }
+}
+
 const char *lz_pair_select(const char *name) {
     if (!name) return NULL;
     if (strcmp(name, "on") == 0 || strcmp(name, "auto") == 0) g_pair = 1;
@@ -849,6 +967,7 @@ static int q8r_have_simd(void) {
 #endif
 }
 
+#if defined(LZ_HAVE_Q8R_SIMD) || defined(LZ_HAVE_Q8R_SSE)
 static int lz_q8r_tier(void) {
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
     if (g_kernel == LZ_KERNEL_REF) return 0;
@@ -871,6 +990,7 @@ static int lz_q8r_tier(void) {
 #endif
     return 0;
 }
+#endif /* LZ_HAVE_Q8R_SIMD || LZ_HAVE_Q8R_SSE */
 
 const char *lz_kernel_name(void) {
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
@@ -1091,7 +1211,7 @@ static void matmul_scalar_ref(float *o, const int8_t *xq, const float *xqs,
 /* The seven variants of iron law 8, as table slots. A build fills at
    most three of them (gcc cannot compile #pragma aux; Watcom's _m_*
    intrinsics are 6x slower than its own x87 scalar), and REF is not
-   here at all - lz_matmul_q8_nt intercepts that tier before reaching
+   here at all - lz_matmul_xq_nt intercepts that tier before reaching
    any impl, so that the scalar reference stays a real oracle.
 
    An unfilled slot is NULL and the pick falls back, loudly rather than
@@ -1892,6 +2012,13 @@ static void matmul_scalar_ref(float *o, const int8_t *xq, const float *xqs,
    256 cancel happens on dotsum, AFTER which zsum is added. The SSE2
    fold has the same shape - a 4-lane multiply and a
    ((q0+q1)+q2)+q3 fold; term for term that is this loop. */
+/* `wm` is the per-group ZERO coefficient, and T2 shares this epilogue by
+   passing a negated scale rather than a stored min - ternary carries no
+   min, and Sum w*x = d*[Sum code*x - Sum x] makes the coefficient -d.
+   One function rather than a near-copy on purpose: the reduction ORDER
+   is what the bit-identity contract is about, and two copies of it drift
+   the moment one is touched. Callers hand in whichever array is theirs;
+   matmul_t2_impl builds the negated one once per row. */
 static float epi_q41(const int32_t *accb, const float *xsb, const float *xgb,
                      const float *wd, const float *wm, int ng, int r) {
     float dotsum = 0.0f, zsum = 0.0f;
@@ -2143,6 +2270,105 @@ static void matmul_q41_impl(float *o, const int8_t *xq, const float *xqs,
     }
 }
 
+/* ---- T2 row kernels, one per (ISA x impl) -----------------------------
+   The single 2-bit plane arrives in `w4`; `w2v` and both prefetch bounds
+   are unused - 8 bytes per 32 elements is a quarter of Q4_1's weight
+   traffic, too few cache lines for a prefetch distance to mean anything
+   unmeasured.
+
+   No pairing yet. Not a decision - unmeasured. `--pair` does nothing for
+   this format today. */
+
+#if defined(__MMX__) && !defined(__WATCOMC__)
+static void row_t2_mmx_intrin(int32_t *acc32, const void *w4, const void *w2v,
+                              const int16_t *xw, int nb, int nt, int in_dim,
+                              const void *pf_end, const void *pf_end2) {
+    const unsigned char *p2 = (const unsigned char *)w4;
+    int tk, s;
+    (void)w2v; (void)pf_end; (void)pf_end2;
+    for (tk = 0; tk < nt; tk++) {
+        const int16_t *xwt = xw + (size_t)tk * in_dim;
+        int32_t *acc = acc32 + (size_t)tk * nb;
+        for (s = 0; s < nb; s++)
+            acc[s] = dot32_t2_mmx(p2 + (size_t)s * 8, xwt + (size_t)s * 32);
+    }
+}
+#endif
+
+#if defined(__SSE2__) && !defined(__WATCOMC__)
+static void row_t2_sse2_intrin(int32_t *acc32, const void *w4, const void *w2v,
+                               const int16_t *xw, int nb, int nt, int in_dim,
+                               const void *pf_end, const void *pf_end2) {
+    const unsigned char *p2 = (const unsigned char *)w4;
+    int tk, s;
+    (void)w2v; (void)pf_end; (void)pf_end2;
+    for (tk = 0; tk < nt; tk++) {
+        const int16_t *xwt = xw + (size_t)tk * in_dim;
+        int32_t *acc = acc32 + (size_t)tk * nb;
+        for (s = 0; s < nb; s++) {
+            __m128i p = part32_t2(p2 + (size_t)s * 8, xwt + (size_t)s * 32);
+            p = _mm_add_epi32(p, _mm_srli_si128(p, 8));
+            p = _mm_add_epi32(p, _mm_srli_si128(p, 4));
+            acc[s] = _mm_cvtsi128_si32(p);
+        }
+    }
+}
+#endif
+
+#if defined(__MMX__) && defined(__WATCOMC__)
+static void row_t2_mmx_asm(int32_t *acc32, const void *w4, const void *w2v,
+                           const int16_t *xw, int nb, int nt, int in_dim,
+                           const void *pf_end, const void *pf_end2) {
+    const unsigned char *p2 = (const unsigned char *)w4;
+    int tk, s;
+    (void)w2v; (void)pf_end; (void)pf_end2;
+    for (tk = 0; tk < nt; tk++) {
+        const int16_t *xwt = xw + (size_t)tk * in_dim;
+        int32_t *acc = acc32 + (size_t)tk * nb;
+        for (s = 0; s < nb; s++)
+            acc[s] = lz_dot32_t2_asm(p2 + (size_t)s * 8, xwt + (size_t)s * 32);
+    }
+}
+
+static void row_t2_sse2_asm(int32_t *acc32, const void *w4, const void *w2v,
+                            const int16_t *xw, int nb, int nt, int in_dim,
+                            const void *pf_end, const void *pf_end2) {
+    const unsigned char *p2 = (const unsigned char *)w4;
+    int tk, s;
+    (void)w2v; (void)pf_end; (void)pf_end2;
+    for (tk = 0; tk < nt; tk++) {
+        const int16_t *xwt = xw + (size_t)tk * in_dim;
+        int32_t *acc = acc32 + (size_t)tk * nb;
+        for (s = 0; s < nb; s++)
+            acc[s] = lz_dot32_t2_sse2_asm(p2 + (size_t)s * 8,
+                                          xwt + (size_t)s * 32);
+    }
+}
+#endif
+
+/* SSE1 slots NULL: T2's unpack is `pand 0x03` + three `psrlw`, and SSE1
+   adds no integer instruction that replaces any of them. */
+static const lz_rowfn LZ_ROW_T2[LZ_ROW_N] = {
+#if defined(__MMX__) && !defined(__WATCOMC__)
+    row_t2_mmx_intrin,
+#else
+    NULL,
+#endif
+    NULL,        /* sse-intrin: no SSE1 op applies */
+#if defined(__SSE2__) && !defined(__WATCOMC__)
+    row_t2_sse2_intrin,
+#else
+    NULL,
+#endif
+#if defined(__MMX__) && defined(__WATCOMC__)
+    row_t2_mmx_asm,
+    NULL,        /* sse-asm: ditto */
+    row_t2_sse2_asm
+#else
+    NULL, NULL, NULL
+#endif
+};
+
 /* ---- Q6_1 row kernels, one per (ISA x impl) ---------------------------
    The only format that uses BOTH plane pointers and BOTH prefetch
    bounds. The 2-bit plane needs its own: `pf_end` stops exactly at the
@@ -2337,6 +2563,55 @@ static const lz_rowfn LZ_ROW_Q61[LZ_ROW_N] = {
     NULL, NULL, NULL
 #endif
 };
+
+/* T2 matmul. Same shape as matmul_q61_impl minus the second plane, with
+   one addition: the zero coefficient is -scale, so the negated array is
+   built per row into g_t2neg and handed to epi_q41 as its `wm`. */
+static void matmul_t2_impl(float *o, const int8_t *xq, const float *xqs,
+                           const LZTensor *w, int in_dim, int out_dim, int nt) {
+    int i, g, s, t, tk;
+    int gs = w->gs, r = gs / 32, ng = in_dim / gs;
+    int nb = in_dim / 32;
+    const unsigned char *p2b = (const unsigned char *)w->q;
+    static float g_t2neg[LZ_MM_WIDEN_MAX / 32];
+    lz_rowfn row;
+
+    if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
+    row = lz_row_pick(LZ_ROW_T2);
+    if (!row || in_dim > LZ_MM_WIDEN_MAX || ng > LZ_MM_WIDEN_MAX / 32) {
+        matmul_scalar_ref(o, xq, xqs, w, in_dim, out_dim, nt);
+        return;
+    }
+
+    for (t = 0; t < nt * in_dim; t++) g_xw[t] = (int16_t)xq[t];
+    for (t = 0; t < nt; t++) {
+        const int8_t *xqt = xq + (size_t)t * in_dim;
+        const float *xst = xqs + (size_t)t * nb;
+        float *xgt = g_xg + (size_t)t * ng;
+        for (g = 0; g < ng; g++) {
+            float a = 0.0f;
+            for (s = 0; s < r; s++) {
+                int sb = g * r + s, k;
+                int32_t sx = 0;
+                for (k = 0; k < 32; k++) sx += xqt[sb * 32 + k];
+                a += lz_i32f(sx) * xst[sb];
+            }
+            xgt[g] = a;
+        }
+    }
+
+    for (i = 0; i < out_dim; i++) {
+        const unsigned char *w2 = p2b + (size_t)i * in_dim / 4;
+        const float *wd = w->scale + (size_t)i * ng;
+        for (g = 0; g < ng; g++) g_t2neg[g] = -wd[g];
+        row(g_acc32, w2, NULL, g_xw, nb, nt, in_dim, NULL, NULL);
+        _mm_empty();
+        for (tk = 0; tk < nt; tk++)
+            o[(size_t)tk * out_dim + i] =
+                epi_q41(g_acc32 + (size_t)tk * nb, xqs + (size_t)tk * nb,
+                        g_xg + (size_t)tk * ng, wd, g_t2neg, ng, r);
+    }
+}
 
 static void matmul_q61_impl(float *o, const int8_t *xq, const float *xqs,
                             const LZTensor *w, int in_dim, int out_dim, int nt) {
@@ -2575,13 +2850,13 @@ static void matmul_q16_impl(float *o, const int8_t *xq, const float *xqs,
    xq/xqs quantized by the caller at lz_act_gs()'s group (one activation
    may be reused by several matmuls). f32 weights fall back to f32 -
    one call site serves all weight representations. */
-void lz_matmul_q8(float *o, const float *x, const int8_t *xq,
+void lz_matmul_xq(float *o, const float *x, const int8_t *xq,
                   const float *xqs, const LZTensor *w,
                   int in_dim, int out_dim) {
-    lz_matmul_q8_nt(o, x, xq, xqs, w, in_dim, out_dim, 1);
+    lz_matmul_xq_nt(o, x, xq, xqs, w, in_dim, out_dim, 1);
 }
 
-void lz_matmul_q8_nt(float *o, const float *x, const int8_t *xq,
+void lz_matmul_xq_nt(float *o, const float *x, const int8_t *xq,
                      const float *xqs, const LZTensor *w,
                      int in_dim, int out_dim, int nt) {
     int i;
@@ -2654,6 +2929,13 @@ void lz_matmul_q8_nt(float *o, const float *x, const int8_t *xq,
         matmul_q61_impl(o, xq, xqs, w, in_dim, out_dim, nt);
         return;
     }
+    /* No `w->zero` in the guard: ternary carries no min, and a T2 tensor
+       that HAS one was mis-loaded. */
+    if (w->dtype == LZ_FMT_T2 && w->gs >= 32 && (w->gs % 32) == 0 &&
+        (in_dim % w->gs) == 0 && in_dim <= LZ_MM_WIDEN_MAX && !w->zero) {
+        matmul_t2_impl(o, xq, xqs, w, in_dim, out_dim, nt);
+        return;
+    }
 #if defined(__MMX__)
     /* Q16_0 has no non-widened fallback: unlike Q8_0 it always needs the
        activation expanded to int16, so in_dim past the buffer cap goes to
@@ -2694,7 +2976,7 @@ void lz_matmul_w(float *o, const float *x, const LZTensor *w,
     /* Activation groups follow lz_act_gs, not w->gs - weights may be
        coarse to gs=128 while activations stay 32. */
     lz_quantize_q8(x, in_dim, lz_act_gs(w, in_dim), xq, xqs);
-    lz_matmul_q8(o, x, xq, xqs, w, in_dim, out_dim);
+    lz_matmul_xq(o, x, xq, xqs, w, in_dim, out_dim);
 }
 
 void lz_matmul(float *o, const float *x, const float *w,
@@ -2914,7 +3196,8 @@ void lz_rope(float *v, int n_heads, int head_dim, int rotary_dim,
 
 #if (LZ_ATTN_FIXED & 2)
 #if defined(__WATCOMC__)
-/* Generated code; do not hand-edit.
+/* Originally generated; hand-editing is allowed (rule lifted
+   2026-08-16) - if you regenerate, diff first.
    acc32[d] += rowA[d]*coef[0] + rowB[d]*coef[1] for d in [0,32).
    coef is [ckA,ckB,ckA,ckB] so one pmaddwd covers a 2-int32 lane pair.
    Reads [eax]/[edx]/[ecx], writes only [ebx] and MMX - every offset is a
@@ -3347,7 +3630,8 @@ void lz_attn_wsum_q8(float *out, const float *att, int hd,
 
 #if defined(LZ_GDN_HAVE_MMX)
 #if defined(__WATCOMC__)
-/* Generated code; do not hand-edit.
+/* Originally generated; hand-editing is allowed (rule lifted
+   2026-08-16) - if you regenerate, diff first.
    Verified over 200000 random + extreme groups (state +/-127,
    coefficients +/-32767, kd 2..66 even) against the scalar reference
    with zero mismatches; the kpairs=0 boundary was tested separately.
@@ -3911,12 +4195,19 @@ typedef char lz_p2_needs_lo_scale_256[
    alignment has to be real rather than hoped for.
 
    One buffer for the whole engine: the two kernels are called back to
-   back inside one group and nothing re-enters between them. */
+   back inside one group and nothing re-enters between them.
+
+   GUARDED ON THE SAME PREDICATE THAT DEFINES LZ_HAVE_P2_MMX just below,
+   because the sole caller is under `#ifdef LZ_HAVE_P2_MMX`. Spelled out
+   rather than written as LZ_HAVE_P2_MMX for the obvious reason: that
+   macro does not exist yet at this point in the file. */
+#if defined(LZ_HAVE_P2_MMX_ASM) || defined(__MMX__)
 static lz_p2_blk *p2_blk(void) {
     static char raw[sizeof(lz_p2_blk) + 15];
     size_t off = (size_t)((uintptr_t)(void *)raw & 15u);
     return (lz_p2_blk *)(void *)(raw + ((16u - off) & 15u));
 }
+#endif
 
 #if defined(LZ_HAVE_P2_MMX_ASM)
 #define LZ_HAVE_P2_MMX 1
@@ -5006,6 +5297,68 @@ void lz_causal_conv1d_step(float *o, const float *x,
         if (hist > 0) st_out[hist - 1] = x[c];
     }
 }
+
+#if LZ_CONV_FIXED
+/* Fixed tier. The float path above is untouched and stays the control
+   arm; this is a separate body, selected by lz_conv_mode().
+ *
+ * Where the win comes from, and it is not the multiply-adds: keeping the
+ * HISTORY in fixed point means one conversion per new sample instead of
+ * one per tap. Probe (.prof/wconv.c): 8 f32 operations per channel-step
+ * down to 3, drift 4.8e-5 against a 3.9e-3 noise floor. The same shape
+ * pass-2's fixed tier uses - its own comment says it does not accelerate
+ * the write-back quantize, it deletes it.
+ *
+ * `sh_in`/`sh_out` are int16 history at exponent `es`, `mw` the int16
+ * taps at per-channel exponent `ew`. Both were normalized by
+ * lz_conv_norm_pow2 against lz_conv_accum_bound(k), which is what keeps
+ * `acc` inside int32 - see that function for the derivation.
+ *
+ * The x87/SSE agreement argument is the same as the float path's: the
+ * only float arithmetic left is one multiply in and one multiply out,
+ * both by an exact power of two, so neither rounds. */
+void lz_causal_conv1d_step_fixed(float *o, const float *x,
+                                 const short *sh_in, short *sh_out,
+                                 const short *mw, const float *oscale,
+                                 float in_scale, int bound,
+                                 int n_ch, int k) {
+    int hist = k - 1;
+    int c, j;
+    for (c = 0; c < n_ch; c++) {
+        const short *si = sh_in + (size_t)c * hist;
+        short *so = sh_out + (size_t)c * hist;
+        const short *wr = mw + (size_t)c * k;
+        int acc = 0, q;
+        float t = x[c] * in_scale;
+        q = (int)(t < 0.0f ? t - 0.5f : t + 0.5f);
+        if (q > bound) q = bound;
+        if (q < -bound) q = -bound;
+        for (j = 0; j < hist; j++) acc += (int)wr[j] * (int)si[j];
+        acc += (int)wr[hist] * q;
+        o[c] = lz_silu(lz_i32f(acc) * oscale[c]);
+        for (j = 0; j + 1 < hist; j++) so[j] = si[j + 1];
+        if (hist > 0) so[hist - 1] = (short)q;
+    }
+}
+
+/* Build the per-channel output scale 2^-(ew[c]+es) and the input scale
+   2^es, once, so the hot loop has no shift in it.
+ *
+ * NOT `1 << (ew + es)`: lz_conv_norm_pow2 caps its exponent at 30, so
+ * the sum reaches 43 and that shift is undefined on a 32-bit int. The
+ * first version of the kernel did exactly this and produced max drift
+ * 4.2e8 on a uniform state while looking correct on a decayed one -
+ * caught only because .prof/wconv2.c drives the shipped function rather
+ * than a copy of it. ldexp walks the exponent field instead, and runs
+ * once per channel at setup rather than per token. */
+void lz_conv_build_scales(float *oscale, float *in_scale,
+                          const signed char *ew, int es, int n_ch) {
+    int c;
+    *in_scale = (float)ldexp(1.0, es);
+    for (c = 0; c < n_ch; c++)
+        oscale[c] = (float)ldexp(1.0, -((int)ew[c] + es));
+}
+#endif /* LZ_CONV_FIXED */
 
 void lz_moe_route(const float *logits, const float *bias, int n_experts,
                   int top_k, int sigmoid, int renormalize, float tau,
