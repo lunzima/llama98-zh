@@ -12,25 +12,27 @@
      nowiden                              #else  mmx-intrin
 */
 
-/* THE GUARD MUST MATCH THE USE SITE. matmul_q8_impl's scalar `#else` -
-   the only caller - is reached when neither (LZ_USE_MMX && __MMX__) nor
-   __SSE2__ holds, so this guard tests the same predicate
-   (`!__SSE2__ && !__MMX__`): when `LZ_USE_MMX` is defined without
-   -D__MMX__, the CALLER and the DEFINITION must both be compiled, or the
-   build fails to link (`dot32_ref_ is an undefined reference`). That is
-   a plausible thing to type - wcc386 predefines NEITHER __MMX__ nor
-   __SSE2__, so LZ_USE_MMX alone looks like the way to ask for the MMX
-   path. The mismatch is one symbol with two guards and only shows up in
-   a configuration nobody happens to build. */
-#if !defined(__SSE2__) && !defined(__MMX__)
-/* 32-element int8 dot product: scalar version (ref, cross-platform correctness baseline) */
-static int32_t dot32_ref(const int8_t *a, const int8_t *b) {
-    int32_t acc = 0;
-    int k;
-    for (k = 0; k < 32; k++) acc += (int32_t)a[k] * (int32_t)b[k];
-    return acc;
-}
-#endif
+/* THE GUARD MUST MATCH THE USE SITE. A symbol whose definition is
+   compiled under a wider predicate than its caller is either an
+   undefined reference in one configuration or dead code in another, and
+   both only show up in a build nobody happens to run.
+ *
+ * `dot32_ref` used to live here as the scalar 32-element dot product,
+ * guarded `!__SSE2__ && !__MMX__` to match matmul_q8_impl's scalar
+ * `#else`. That `#else` is gone - c395eba replaced the dispatch with the
+ * tier table, and the scalar path became matmul_scalar_ref, which is
+ * also what iron law 2 calls the contract. The function stayed, with a
+ * comment describing a caller that no longer existed, and nothing
+ * noticed until an ARMv5TE cross-build - where neither __SSE2__ nor
+ * __MMX__ is defined and it is the only configuration that compiles it -
+ * reported it unused. Removed 2026-08-16; `.prof/ann.txt` in the
+ * training tree still carries a profile of it being called, which is
+ * how the history was reconstructed.
+ *
+ * The rule in the first paragraph is the reason this note is longer than
+ * the function was. Two more symbols in ops.c had the same drift in the
+ * other direction - defined wider than used - and the same ARM build
+ * found both. */
 
 #if defined(__SSE2__) && !defined(__WATCOMC__)
 #include <emmintrin.h>
@@ -156,6 +158,47 @@ static __m128i part32_q61(const unsigned char *w4, const unsigned char *w2,
     return _mm_add_epi32(s0, s1);
 }
 
+/* T2 (ternary) SSE2: part32_q61 with the 4-bit plane deleted.
+ *
+ * That is the whole derivation, and it is why this format got a kernel
+ * for the price of reading one. LZ_FMT_T2 was given Q6_1's 2-bit plane
+ * layout precisely so that this would be true - 8 bytes per 32
+ * elements, groups {0-7}{8-15}{16-23}{24-31} at shifts 0/2/4/6 - so the
+ * unpack here is the same six instructions, minus the `m0f` masking,
+ * the `slli 4` and the two `or`s that merged the planes.
+ *
+ * Codes are 0..2 and read UNSIGNED, so `unpacklo_epi8(z, code)` needs no
+ * sign extension and lands the byte in the high half of each int16 -
+ * the x256 fold, cancelled once by epi_q41's `1/256`, exactly as for
+ * Q4_1. The -1 that turns a code into a value is NOT here: it is the
+ * hoisted `- Sum x` term, computed per group from activations alone.
+ *
+ * Bit-identical to matmul_scalar_ref's T2 branch by construction: int32
+ * accumulation is exact and order-independent, and 256 is a power of two
+ * so the fold changes no rounding at any step. */
+static __m128i part32_t2(const unsigned char *w2, const int16_t *x) {
+    const __m128i m03 = _mm_set1_epi8(0x03);
+    __m128i z  = _mm_setzero_si128();
+    __m128i t  = _mm_loadl_epi64((const __m128i *)(const void *)w2);
+    __m128i g0 = _mm_and_si128(t, m03);
+    __m128i g1 = _mm_and_si128(_mm_srli_epi16(t, 2), m03);
+    __m128i g2 = _mm_and_si128(_mm_srli_epi16(t, 4), m03);
+    __m128i g3 = _mm_and_si128(_mm_srli_epi16(t, 6), m03);
+    __m128i lo = _mm_unpacklo_epi64(g0, g1);     /* codes  0..15 */
+    __m128i hi = _mm_unpacklo_epi64(g2, g3);     /* codes 16..31 */
+    __m128i l0 = _mm_unpacklo_epi8(z, lo);
+    __m128i l1 = _mm_unpackhi_epi8(z, lo);
+    __m128i h0 = _mm_unpacklo_epi8(z, hi);
+    __m128i h1 = _mm_unpackhi_epi8(z, hi);
+    __m128i x0 = _mm_loadu_si128((const __m128i *)(const void *)x);
+    __m128i x1 = _mm_loadu_si128((const __m128i *)(const void *)(x + 8));
+    __m128i x2 = _mm_loadu_si128((const __m128i *)(const void *)(x + 16));
+    __m128i x3 = _mm_loadu_si128((const __m128i *)(const void *)(x + 24));
+    __m128i s0 = _mm_add_epi32(_mm_madd_epi16(l0, x0), _mm_madd_epi16(l1, x1));
+    __m128i s1 = _mm_add_epi32(_mm_madd_epi16(h0, x2), _mm_madd_epi16(h1, x3));
+    return _mm_add_epi32(s0, s1);
+}
+
 /* Q16_0: 32 int16 weights against 32 int16 activations, 4-way partial
    sum, no horizontal reduction - same contract as part32_x16, so
    fold4_sse2 folds four of these the same way.
@@ -218,7 +261,8 @@ static __m128i part32_q16(const int16_t *w, const int16_t *x) {
    random/extreme groups. eax=w, edx=x, returns eax;
    contains an emms (the caller's row-level EMMS is idempotent, no
    harm). */
-/* Generated code; do not hand-edit.
+/* Originally generated; hand-editing is allowed (rule lifted
+   2026-08-16) - if you regenerate, diff first.
    Kernels do NOT emit emms: the loop body is all integer and MMX; x87
    is only used in the whole-row reduction, and the caller already does
    one _mm_empty() after the loop. One emms per 32 elements would be
@@ -867,7 +911,8 @@ static int32_t dot32_q16_mmx(const int16_t *w, const int16_t *x) {
    Verified: bit-matches the scalar over 200K random + all-15 x
    all-±127 extreme groups; measured 3.75 ns/32MAC vs x87
    scalar 23.50 ns (6.3x). */
-/* Generated code; do not hand-edit.
+/* Originally generated; hand-editing is allowed (rule lifted
+   2026-08-16) - if you regenerate, diff first.
    Differential-checked over 200K groups (random + extremes,
    bit-identical to the scalar reference).
    Counts (µop, P6 accounting): Q8_0 52, Q4_1 63, Q6_1 86. */
@@ -1170,9 +1215,205 @@ static int32_t dot32_q41_mmx(const unsigned char *w, const int16_t *x) {
 }
 #endif /* Q4_1 __WATCOMC__ branch end */
 
+/* ---- T2 (ternary, one 2-bit plane) ------------------------------------ */
+
+/* Originally emitted by tools/kernelgen/gen_t2.py IN THE TRAINING TREE -
+   the engine repository carries no tools (iron law zero), so the
+   generator lives there and only its output is pasted here.
+   HAND-EDITING IS ALLOWED (rule lifted 2026-08-16); the generator is
+   scaffolding, not the source of truth. If you regenerate, diff against
+   what is here first - anything hand-tuned since will be silently
+   reverted otherwise.
+
+   MMX 70 instructions / 9 loads; SSE2 47 / 5. For scale, Q6_1 is 86 uop
+   / 11 loads and 59 / 6 - T2 is the same kernel with the 4-bit plane
+   deleted, which is exactly why it was given Q6_1'''s 2-bit layout.
+
+   VERIFIED BEFORE BEING MOVED HERE, as iron law 2 requires: 
+   tools/kernelgen/wt2.c compares both against the scalar reference over
+   a 32-position sweep (one nonzero weight at a time, both signs - a
+   uniform block hides a wrong shift), six extreme patterns, and 200,000
+   random trials. All three agree exactly; int32 accumulation is exact
+   so there is no tolerance to argue about. */
+
+#if defined(__WATCOMC__)
+extern int32_t lz_dot32_t2_asm(const unsigned char *w2,
+                               const int16_t *x);
+#pragma aux lz_dot32_t2_asm = \
+    ".586" \
+    "pxor      mm6, mm6" \
+    "movq      mm4, [edx]" \
+    "movq      mm0, [ecx]" \
+    "pxor      mm2, mm2" \
+    "punpcklbw mm2, mm4" \
+    "psllw     mm2, 6" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm6, mm2" \
+    "movq      mm0, [ecx+8]" \
+    "pxor      mm2, mm2" \
+    "punpckhbw mm2, mm4" \
+    "psllw     mm2, 6" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm6, mm2" \
+    "movq      mm0, [ecx+16]" \
+    "pxor      mm2, mm2" \
+    "punpcklbw mm2, mm4" \
+    "psllw     mm2, 4" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm6, mm2" \
+    "movq      mm0, [ecx+24]" \
+    "pxor      mm2, mm2" \
+    "punpckhbw mm2, mm4" \
+    "psllw     mm2, 4" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm6, mm2" \
+    "movq      mm0, [ecx+32]" \
+    "pxor      mm2, mm2" \
+    "punpcklbw mm2, mm4" \
+    "psllw     mm2, 2" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm6, mm2" \
+    "movq      mm0, [ecx+40]" \
+    "pxor      mm2, mm2" \
+    "punpckhbw mm2, mm4" \
+    "psllw     mm2, 2" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm6, mm2" \
+    "movq      mm0, [ecx+48]" \
+    "pxor      mm2, mm2" \
+    "punpcklbw mm2, mm4" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm6, mm2" \
+    "movq      mm0, [ecx+56]" \
+    "pxor      mm2, mm2" \
+    "punpckhbw mm2, mm4" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm6, mm2" \
+    "movq      mm0, mm6" \
+    "psrlq     mm0, 32" \
+    "paddd     mm6, mm0" \
+    "movd      eax, mm6" \
+    "emms" \
+    __parm [__edx] [__ecx] \
+    __value [__eax] \
+    __modify [8087]
+
+extern int32_t lz_dot32_t2_sse2_asm(const unsigned char *w2,
+                                    const int16_t *x);
+#pragma aux lz_dot32_t2_sse2_asm = \
+    ".686" \
+    "pxor      xmm4, xmm4" \
+    "pxor      xmm5, xmm5" \
+    "pcmpeqb   xmm7, xmm7" \
+    "psrlw     xmm7, 14" \
+    "packuswb  xmm7, xmm7" \
+    "movq      xmm3, [edx]" \
+    "movdqa    xmm0, xmm3" \
+    "pand      xmm0, xmm7" \
+    "movdqa    xmm1, xmm3" \
+    "psrlw     xmm1, 2" \
+    "pand      xmm1, xmm7" \
+    "punpcklqdq xmm0, xmm1" \
+    "movdqa    xmm1, xmm3" \
+    "psrlw     xmm1, 4" \
+    "pand      xmm1, xmm7" \
+    "movdqa    xmm2, xmm3" \
+    "psrlw     xmm2, 6" \
+    "pand      xmm2, xmm7" \
+    "punpcklqdq xmm1, xmm2" \
+    "movdqa    xmm2, xmm4" \
+    "punpcklbw xmm2, xmm0" \
+    "movdqu    xmm6, [ecx+0]" \
+    "pmaddwd   xmm2, xmm6" \
+    "paddd     xmm5, xmm2" \
+    "movdqa    xmm2, xmm4" \
+    "punpckhbw xmm2, xmm0" \
+    "movdqu    xmm6, [ecx+16]" \
+    "pmaddwd   xmm2, xmm6" \
+    "paddd     xmm5, xmm2" \
+    "movdqa    xmm2, xmm4" \
+    "punpcklbw xmm2, xmm1" \
+    "movdqu    xmm6, [ecx+32]" \
+    "pmaddwd   xmm2, xmm6" \
+    "paddd     xmm5, xmm2" \
+    "movdqa    xmm2, xmm4" \
+    "punpckhbw xmm2, xmm1" \
+    "movdqu    xmm6, [ecx+48]" \
+    "pmaddwd   xmm2, xmm6" \
+    "paddd     xmm5, xmm2" \
+    "movdqa    xmm0, xmm5" \
+    "psrldq    xmm0, 8" \
+    "paddd     xmm5, xmm0" \
+    "movdqa    xmm0, xmm5" \
+    "psrldq    xmm0, 4" \
+    "paddd     xmm5, xmm0" \
+    "movd      eax, xmm5" \
+    __parm [__edx] [__ecx] \
+    __value [__eax] \
+    __modify [8087]
+
+#elif defined(__MMX__)
+/* The gcc half of iron law 8's MMX cell for T2. Instruction for
+   instruction the same kernel as the assembly above - one 8-byte load of
+   the plane, eight groups of (punpck against zero, align the 2-bit field
+   to the top of the lane, drop the rest, put it back with the x256
+   fold, pmaddwd, accumulate), then a horizontal fold of two int32 lanes.
+   Only the notation differs, and the two are never in the same binary.
+
+   THE SHIFT ORDER IS THE PART THAT IS EASY TO GET WRONG, so it is spelled
+   out: after punpcklbw(0, byte) a lane holds byte<<8, so the 2-bit field
+   at bit `sh` sits at lane bit 8+sh, and pmaddwd consumes the entire
+   16-bit lane. Aligning it with one right shift leaves the low byte's
+   contents in the lane. Push to the top, clear below, restore:
+       psllw (6-sh) ; psrlw 14 ; psllw 8                              */
+static int32_t dot32_t2_mmx(const unsigned char *w2, const int16_t *x) {
+    __m64 acc = _mm_setzero_si64();
+    __m64 pl  = *(const __m64 *)(const void *)w2;
+    int gi;
+    /* (activation offset in int16s, use the high half of the plane byte
+       group, 2-bit right shift) - the same eight rows the generator
+       emits, in the same order. */
+    static const struct { int xoff, hi, sh; } G[8] = {
+        {  0, 0, 0 }, {  4, 1, 0 },
+        {  8, 0, 2 }, { 12, 1, 2 },
+        { 16, 0, 4 }, { 20, 1, 4 },
+        { 24, 0, 6 }, { 28, 1, 6 }
+    };
+    for (gi = 0; gi < 8; gi++) {
+        __m64 xv = *(const __m64 *)(const void *)(x + G[gi].xoff);
+        __m64 z  = _mm_setzero_si64();
+        __m64 t  = G[gi].hi ? _mm_unpackhi_pi8(z, pl)
+                            : _mm_unpacklo_pi8(z, pl);
+        if (6 - G[gi].sh) t = _mm_slli_pi16(t, 6 - G[gi].sh);
+        t = _mm_srli_pi16(t, 14);
+        t = _mm_slli_pi16(t, 8);
+        acc = _mm_add_pi32(acc, _mm_madd_pi16(t, xv));
+    }
+    acc = _mm_add_pi32(acc, _mm_srli_si64(acc, 32));
+    return _mm_cvtsi64_si32(acc);
+}
+#endif  /* __WATCOMC__ / __MMX__ */
+
 /* ---- Q6_1 (6.5 bits: 4-bit + 2-bit dual planes) ------------------------ */
 #if defined(__WATCOMC__)
-/* Generated code; do not hand-edit. 86 µop / 11 loads
+/* Originally generated; hand-editing is allowed (rule lifted
+   2026-08-16) - if you regenerate, diff first. 86 µop / 11 loads
    (P6 accounting). Only 6 of the 8 MMX registers are used,
    but activations MUST go through pmaddwd's memory operand - once the
    2-bit plane joins, all 8 registers are occupied; none is free to
@@ -1269,7 +1510,8 @@ static int32_t dot32_q61_mmx(const unsigned char *w4, const unsigned char *w2,
     return lz_dot32_q61_asm(w4, w2, x);
 }
 
-/* Generated code; do not hand-edit. 59 instructions / 6 loads.
+/* Originally generated; hand-editing is allowed (rule lifted
+   2026-08-16) - if you regenerate, diff first. 59 instructions / 6 loads.
 
    **Which is faster than the MMX version cannot be decided statically.**
    SSE2 is 59 instructions / ~116 µop; MMX is 78 / 86 µop - +35% µop,

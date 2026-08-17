@@ -1,0 +1,293 @@
+# 引擎侧缺失设施清单
+
+2026-08-17 清点。**每一条都是查证过的，不是推测**；查证方式写在条目里。
+
+排序按「不补会让别的工作建在沙上」的程度，不按工作量。
+
+---
+
+## 状态（2026-08-17 当日收工）
+
+| | 条目 | 状态 |
+|---|---|---|
+| A | 探针滞留废弃树 | **进行中**——已裁定搬进 `.prof/`（仍 gitignore），61 个 `.c` + 23 个 `.py` 落盘（自 79/175 筛出），README 与承重探针实跑未完 |
+| A2 | 数值铁律写在引擎树之外 | 未动。探针落地后引擎树 Verify 节需要一条入口 |
+| B | T2 从未端到端跑过 | 未动（依赖 A 与一个 QAT 检查点）|
+| C | 出货配方没有闸门 | 未动 |
+| D | 静默降级无报告 | **已完成**：`export_q8.check_no_silent_downgrade`，21 个用例，三桶 + 两条正交轴，`--allow-downgrade` 逃生 |
+| E | ARM 只有运行器 | **一半完成**：`build/arm/parity_gate.sh` 已建并钉死 `--kernel ref` / `--recur-write fixed`（实测证实不钉死则对拍从第一天就是假的）。**ARM 侧本机跑不了**——无 `arm-linux-gnueabi-gcc`、无 `qemu-arm-static`，脚本对三者显式 SKIP。真实逐位比较待有工具链的机器 |
+| F | 铁律二 (c) 只兑现一半 | **撤回**——是我读错了树，保证完整。见下 |
+| G | 没有 CI | **已完成**：`build/ci.sh`，实跑 `pass=5 fail=0 skip=1`，判据自测三项 |
+| H | 算子缺汇编 | 未动。H4（铁律八补 ARM 行）是纯文本、无依赖，是这批里最便宜的 |
+
+### 当日新增的一条，不在原清单里
+
+**`.gitignore` 把闸门本身吃掉了。** `/build/*` 只有 `!/build/watcom/` 一个例外，于是
+`build/arm/*.sh`（含原有的 `build_engine.sh`/`run_qemu.sh`）与新建的 `build/ci.sh`
+**全部被忽略**——`git clean` 一下就没，克隆看不到。**活不过 clone 的闸门不是闸门。**
+已加 `!/build/arm/` + `!/build/ci.sh`，双向验过（脚本可提交、`.obj` 与 `.prof/` 仍忽略）。
+
+对照：`build/watcom/{cli,clidos,dll,gui}` 用 `file` 确认是**目标文件目录**，忽略正确；
+Watcom 的构建配方在 Makefile 里，不是那几个目录。
+
+### 一条并发风险，已观测到一次
+
+`make -B native` 读到过**旧版 Makefile**（`-march=native`、少三个源文件），
+链接仍 exit 0，几秒后自愈。症状是「用错误源码状态编出来、却成功退出的二进制」
+——`[[dirty-baseline]]` 那一类，但发生在**共享目录**而非单文件。
+若落在正式 CI 跑里会静默。**共享树上做对照构建应当用 worktree 隔离，
+不要原地 stash/checkout**（待用户裁定是否设为硬规矩）。
+
+---
+
+## A. 铁律的闸门跑在被宣告删除的代码上
+
+**证据**：`.prof/` 里有 **79 个 `.c` 探针**，全部在 `E:\LLM\llama98-zh`
+（废弃树），且 `#include` 的是**那棵树的 `src/`**。引擎树 `E:\llama98-zh`
+里一个都没有：
+
+```
+wdump.c wfwd.c wchunk.c wfma.c wrecip2.c wbench.c wmmxp2bench.c   全部 缺
+```
+
+而铁律二把它们点名当作自己的闸门：跨编译器 120 探针对拍（`wdump.c`）、
+subnormal 200484 组（`wchunk.c`）、FMA 30 万组（`wfma.c`）、
+乘倒数 1 ULP（`wrecip2.c`）、生产路径对拍（`wfwd.c`）。铁律八同理。
+
+**后果**：废弃树的 `src/` 一旦按铁律零删除，**这些闸门要么一起死，要么
+必须重新指向新树**，而没有任何地方记录怎么重指。已知的临时做法是「把
+测试临时编到新树的 src/ 上跑」，但那是口头约定，不是设施。
+
+**已裁定（用户，2026-08-17）**：**整理后搬到新树 `E:\llama98-zh\.prof\`，
+但仍然 gitignore。** 边界因此定为：它们物理上住在引擎源码旁边、编译引擎
+树的 `src/`，但不进仓库——所以铁律零「新树不放 testsuite」在**提交**的
+意义上仍然成立。
+
+搬家的实质工作是**改 include 指向新树的 `src/`**，而两棵树的 `src/` 已经
+分叉（新树有 `LZ_FMT_T2`、`lz_matmul_xq*` 改名等），所以有些探针会编不过
+——那正是要发现的东西。整理时要分「承重 / 仍有价值 / 已作废」三类，
+**没搬的也要列名和理由**，否则下一个人会以为它们丢了。
+
+> **一条相反的按语在案，一并记下**：`tools/kernelgen/gen_t2.py` 的 header
+> 写着「十二个生成器坐在 `.prof/` 而 .gitignore 把它排除为构建产物，
+> **它们是源码**，这不是有意的」。gitignore 意味着不进 remote、克隆看不到
+> ——闸门不随克隆复制。用户已裁定，此处只记录后果，不改裁定。
+
+### A2. 数值铁律本身也在废弃侧
+
+**顺带查出**：引擎树的 `CLAUDE.md` 只有 245 行（Iron law zero + Build /
+Verify / Architecture / Conventions），**九条数值铁律（2/3/6/8/9）全在训练树
+那份 819 行的 `CLAUDE.md` 里**，七个探针的引用也在那里。
+
+训练树本身不会被删（只删它的 `src/`/`common/`/`gui/`/`build/`），所以铁律
+文本不会丢。但结果是**引擎的数值契约写在引擎树之外**，而引擎树自己的
+Verify 节只覆盖「出货二进制 + 换旋钮」这条一致性路径，不含 subnormal 扫描、
+FMA 分歧、跨编译器探针那类取证。**探针搬过去之后，引擎树的 Verify 节需要
+一条指向它们的入口**，否则搬了也没人知道。
+
+---
+
+## B. `LZ_FMT_T2` 从未端到端跑过
+
+**证据**：`quant_recipe.py` 的 recipe of record 里没有 t2 条目，磁盘上不存在
+任何 t2 模型。内核对标量参考验过 20 万组随机 + 极值（`tools/kernelgen/wt2.c`），
+但**加载器、两条反量化路径（`lz_t_f32` / `lz_t_row_f32`）、派发守卫
+（`!w->zero`）从没见过真文件**。
+
+**缺的闸门**：`--kernel ref/mmx/sse2` × 两个编译器的四档逐位对拍，在 T2 上
+一次都没跑过。这正是 [[gate-that-cannot-run-on-the-artifact]] 那一类，
+而且连「一致可能是巧合」都还没到——是根本没测。
+
+**结构性障碍**（铁律零已写明，不是缺陷）：新格式必然一半在引擎树（内核 +
+加载器）、一半在训练树（导出器），**在任何单个仓库里都无法端到端对拍**。
+所以这条要补的是**跨树的联合验证流程**，不是某个文件。
+
+---
+
+## C. 出货配方没有闸门
+
+**证据**：`tests/test_compare_layers.py:690-740` 按架构分支——GDN 走
+`python -m tools.quant_recipe --recipe`（记录配方），**KDA/MoE 走一条硬编码
+的临时串** `*=q8_0:32,o_proj=q6_1:64,q_proj=q16_0:32,shared_experts=q4_1:32`。
+
+所以 **`kunmoe_patterns()`——真正出货的那个——从来没有被任何闸门执行过**。
+新加的 `ce_patterns()` 同样，而且在 QAT 检查点存在前也无法执行。
+
+---
+
+## D. 「规则匹配了」不等于「格式生效了」，而没有报告
+
+**证据**：`export_q8.effective_format` 在 `gs` 不整除行宽时折半，在
+`ind % 32 != 0` 时把 Q4_1/Q6_1/**Q16_0** 降到 Q8_0——**全部静默**。
+本次实测撞到三次：`f_b_proj` 要 q16_0:64 拿到 q8_0:16；改成 gs=16 仍是
+q8_0（Q16_0 同时查 `gs % 32`）；CE 第一版整条衰减路径因此丢掉 Q16_0，
+而总字节数看起来完全合理。
+
+**已有半个**：`.prof/budget/ce_budget.py` 里写了降级闸门（逐张量比对
+「规则要的」与「plan_one 给的」）。**它不在导出器里**，所以真导出时没人查。
+
+**补什么**：把那段搬进 `export_q8`，与 `check_all_rules_matched` 并列——
+后者查「规则匹配了没有」，前者查「匹配之后生效了没有」，两个问题不同。
+
+---
+
+## E. ARM 只有运行器，没有闸门
+
+**证据**：`build/arm/` 只有 `build_engine.sh` 与 `run_qemu.sh`。
+`run_qemu.sh` 跑二进制，**不做任何对拍**——本次那条 x86↔ARM 131072 字节
+逐位一致是手工跑出来的，没有固化。
+
+**同时**：ARM 侧**零个优化内核**（唯一适配是 `mmx_compat.h` 让
+`_mm_empty()` 变空操作），而铁律八的七格表是 **MMX/SSE/SSE2 × intrinsics/asm**
+纯 x86 口径——**ARM 那一行根本不存在**，所以铁律形式上没覆盖昆昆CE 的目标机。
+
+**补什么**：(1) `run_qemu.sh` 加一条 `--dump-logits` 对拍并返回退出码；
+(2) 铁律八增补 ARM 行，把「ARMv5TE 没有 SIMD，所以只有标量 C + DSP 手写
+汇编两格」这件事按它自己的举证标准写下来。
+
+---
+
+## F. ~~铁律二 (c) 的保证只兑现了一半~~ —— 撤回，保证是完整的
+
+**这一条是我读错了树，2026-08-17 取证后撤回。** 留在这里不删，因为犯错
+的方式比结论有用。
+
+**实情**：`LZ_CHUNK_FTZ` 与整个分块递推路径（`ops_kernel_chunk.h`、
+`chunk_axpy`/`chunk_deq_row`、`--gdn-chunk` 选择器）**是被一次提交
+（训练树 `d1d58b0`）连同 `isoquant.c/h` 一起删除的**，同一次提交里把
+`ops.h` 的说明从「Two places enforce it」手工改成「One place enforces
+it」——**文档没有滞后，是我看错了文档**。
+
+保证仍然成立，机制比「pass-1 变 always fixed 所以冗余」更硬：**需要第二处
+强制的那条路径本身不存在了**。分块路径一次处理最多 8 个 token、中途不重新
+量化状态，纯浮点的衰减连乘能压穿 floor——所以它当年需要逐值钳制。现在唯一
+剩下的浮点递推回退是**逐 token** 的，每一步算完立刻喂
+`lz_gdn_quantize_2p`/`lz_quantize_q8` 重新量化，而 `LZ_Q8_MIN_SCALE` 正是
+在那里生效。攻击面随路径一起消失。
+
+**我错在哪**：拿**训练树** `CLAUDE.md:141-162` 的散文，去断言**引擎树**
+代码的性质。引擎树 `src/ops.h:757-793` 就是修正后的权威版本，写着
+「One place enforces it, and nothing downstream can reach it」——
+**活的代码就在手边，我用了另一棵树的散文**。这正是取证顺序那条
+（活的消费者 > 磁盘产物 > 登记表 > 散文）要防的事，而我这一轮已经引用过
+那条顺序两次。
+
+**真正遗留的三件小事**：
+
+1. **训练树 `CLAUDE.md:141-162` 是过期文本**，最后一次改动早于删除它所
+   描述机制的 `d1d58b0`。它已经骗过一次（本清单的上一版）。改不改由用户定
+   ——那是 CLAUDE.md，不因同僚建议而改。
+2. **`src/ops.h:786` 写着「Both are #ifndef」**，而只剩一个宏了。是当年
+   「两处→一处」那次编辑漏掉的代词。
+3. **训练树 `.prof/wchunk.c` 是孤儿**：`#include "ops_kernel_chunk.h"`，
+   而该头文件已随 `d1d58b0` 删除，所以它在训练树 HEAD 上就编译不过。
+   它此前被我列进「承重探针」，已更正为「已作废」。
+
+---
+
+## H. 算子缺汇编实现（铁律八的覆盖断言本身也缺）
+
+铁律八要求每个算子七种实现（标量 C + MMX/SSE/SSE2 × intrinsics/asm），
+并要求一条**覆盖断言**：两个构建各自报告的档位取并集必须恰好覆盖
+「格式 × 七种」，缺的格子要带原因。**那条断言不存在**，所以下面这张表是
+手工数出来的，而不是任何东西自动报出来的——这本身就是缺失的设施之一。
+
+### H1. 32 元素内核：T2 缺 gcc SSE2 intrinsics 之外全齐
+
+| | q4_1 | q6_1 | q16_0 | **t2** | q8_0 |
+|---|---|---|---|---|---|
+| gcc MMX intrin | 有 | 有 | 有 | 有 | 有 |
+| gcc SSE2 intrin | 有 | 有 | 有 | 有* | 有 |
+| Watcom MMX asm | 有 | 有 | 有 | 有 | 有 |
+| Watcom SSE2 asm | 有 | 有 | 有 | 有 | 有 |
+| SSE1 两格 | NULL | NULL | NULL | NULL | NULL |
+
+\* T2 的 SSE2 intrinsics 走 `row_t2_sse2_intrin` 内联 `part32_t2`，
+没有独立的 `dot32_t2_sse2a` 符号，所以按符号名检索会误判为缺。
+
+SSE1 那两格是**已核对的空**（铁律八 2026-08-10 逐条列过 SSE1 在 MMX
+寄存器上新增指令的全集，没有一条能替代 `punpck`/`pmaddwd` 中任何一步）。
+
+### H2. 128 元素组内核：T2 一格都没有
+
+| | q4_1 | q6_1 | q16_0 | **t2** | q8_0 |
+|---|---|---|---|---|---|
+| Watcom MMX asm-128 | 有 | 有 | 有 | **缺** | 有 |
+| Watcom SSE2 asm-128 | 有 | 有 | 有 | **缺** | 有 |
+| gcc MMX-128 | 有 | 有 | **缺** | **缺** | 有 |
+| gcc asm-128 | 有 | 有 | **缺** | **缺** | 有 |
+
+**T2 四格全缺、Q16_0 缺两格。** 后果：`--pair` / 128 元素组那条路径在 T2
+上落回 32 元素内核。这不是「值不值」的问题——铁律八已经作废了那套框架，
+缺格必须带原因，而这几格现在只是空着。
+
+### H3. 五个算子零个实现
+
+| 算子 | 七格里有几格 | 备注 |
+|---|---|---|
+| `lz_causal_conv1d_step` | **0** | 纯标量 f32，4 抽头 MAC，数学上最简单的一个 |
+| `lz_rmsnorm` / `lz_rmsnorm_gated` | **0** | |
+| `lz_softmax` | **0** | |
+| `lz_silu` / `lz_sigmoid` | **0** | |
+| `lz_quantize_q8` | 主体 0 | 其舍入子步骤 `lz_q8round32` 另有 SSE 档（`ops_kernel_q8round.h`），主体没有 |
+
+这五个正是 `docs/softfloat-reduction-plan.md` §3 排出来的软浮点前四名所在。
+**它们不只缺汇编，是缺全部七格。**
+
+### H4. ARM 一格都没有，而且表里没有 ARM 行
+
+铁律八的七格表是 **MMX/SSE/SSE2 × intrinsics/asm**——纯 x86 口径。
+ARMv5TE 没有任何 SIMD，所以那张表对它**结构上不适用**，而没有人写下
+替代的形状（合理形状大概是「标量 C + DSP 手写汇编」两格，用 SMLAxy /
+QADD / LDRD / PLD）。
+
+**后果**：昆昆CE 的目标机不在铁律八的覆盖范围内，于是「缺格要带原因」
+这条对它无从谈起——连格子都没有。
+
+---
+
+## G. 没有 CI
+
+**证据**：仓库根目录无 `.github/` / `.gitlab-ci.yml` / 任何 workflow。
+
+所有验证靠手工跑。本次会话里「gcc 编过 ≠ Watcom 编过」「HEAD 能不能编要
+真编」这两条已经各自付过代价（见 [[verify-head-compiles-not-grep-symbols]]、
+[[avoiding-conflict-by-skipping-the-build]]）。
+
+**最小可用形态**：一条脚本，`make native` + `make watcom-cli` + `--check`
+三个模型 + GUI `--selftest`，逐项看警告计数行而不是裸 grep `error`
+（`0 errors` 会被命中——[[build-failed-you-ran-the-old-binary]]）。
+
+---
+
+## 已经有的，别重复造
+
+| 设施 | 位置 |
+|---|---|
+| 结构校验 | `llama98 <dir> --check` |
+| 张量/统计转储 | `--tensors` `--stats` `--layer N` |
+| 数值取证 | `--dump-logits` `--dump-nll` `--dump-all-logits` `--dump-prompt-tokens` |
+| 档位选择（全部可切、要求逐位不变） | `--kernel` `--recur-write` `--pair` `--prefetch` `--kv` `--batch` `--spec` |
+| GUI 自检 | `kunkun98-gui --selftest report.txt` |
+| 服务端压测 | `kunkun98-serve --requests N` |
+| ARM 交叉编译 + QEMU | `build/arm/` |
+| 三个工具链 | `make native` / `make watcom-cli` / `make watcom-dos` |
+| 精确字节度量 | `.prof/budget/exact_size.py`（训练树，已对两次真导出验到 ±0） |
+
+---
+
+## 建议次序
+
+1. **D**（降级闸门搬进导出器）——最小，且本次已写好一半，不补下一次还会中同一个坑
+2. **F**（查清 subnormal 保证）——它挡着 f24 提案，且是铁律文本与代码不符
+3. **H4 + E**（铁律八补 ARM 行；ARM 对拍固化）——补 ARM 行是纯文本，但它决定 CE 的内核工作有没有验收标准
+4. **G**（最小 CI）
+5. **H3**（五个零实现算子）——从 `conv1d` 起，它是唯一「无 SIMD、无定点、4 抽头 MAC」的一个，且 GDN 定点档已证明模式与收益量级
+6. **A**（探针归位）——最严重，但要用户先裁定「铁律引用的取证工具算不算 testsuite」
+7. **H2**（T2 的 128 组内核）——依赖 B 有可跑的 t2 模型才谈得上验收
+8. **B/C**（出货配方与 T2 的端到端）——依赖 A 与一个 QAT 检查点
+
+**次序里有一条约束不是工作量**：H1/H2/H3 的任何一格都不许在没有闸门时
+落地。铁律二要求新汇编先在探针里对标量跑十万量级随机+极值，过了再搬进
+`src/`——而那些探针正是 **A** 卡着的东西。所以 **A 是 H 的前置**，
+虽然它排在后面（等裁定）。
