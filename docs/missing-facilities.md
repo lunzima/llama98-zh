@@ -251,8 +251,9 @@ SSE1 那两格是**已核对的空**（铁律八 2026-08-10 逐条列过 SSE1 �
 | 算子 | 七格里有几格 | 备注 |
 |---|---|---|
 | `lz_quantize_q8` amax 扫描 | **5/7**（2026-08-18） | 标量 C + MMX/SSE2 各两侧；**SSE1 那格结构性为空**，理由已写下 |
+| `lz_rmsnorm` 输出循环 | **3/7**（2026-08-18） | 标量 C + SSE/SSE2 两侧共用一份（`mulps`/`addps` 是 SSE1，SSE2 加的东西这里用不上）；**MMX 那格结构性为空**——MMX 是纯整数指令集。平方和那半仍是标量 |
 | `lz_causal_conv1d_step` | 0 | 4 抽头 MAC 是**浮点求和**，向量化必然改结合顺序 |
-| `lz_rmsnorm` / `lz_rmsnorm_gated` | 0 | 平方和同上；但**输出循环是逐元素的**，那一半可以逐位一致 |
+| `lz_rmsnorm_gated` | 0 | 输出循环逐元素调 `lz_silu`，向量化不了 |
 | `lz_softmax` | 0 | 求和同上；max 扫描可以（与 amax 同理） |
 | `lz_silu` / `lz_sigmoid` | 0 | Q15 查表，MMX/SSE2 没有 gather |
 

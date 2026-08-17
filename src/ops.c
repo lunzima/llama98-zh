@@ -99,6 +99,15 @@ void lz_f32_count_reset(void) {
 #endif
 }
 
+/* The selected kernel tier, 0 = not yet selected. Defined here, near the
+   top, because both the row kernels and the SIMD tiers below read it,
+   and they must answer to ONE selector - two would let `--kernel mmx`
+   move some of them and not the others. */
+static int g_kernel = 0;
+
+#include "ops_kernel_amax.h"
+#include "ops_kernel_norm.h"
+
 /* 2^e by integer manipulation of the exponent field. Deliberately not
    ldexp/ldexpf: those are libm doubles, and iron law 2 wants every
    transcendental inside the engine so the two builds cannot disagree
@@ -128,7 +137,26 @@ void lz_rmsnorm(float *o, const float *x, const float *w, int n, float eps) {
     for (i = 0; i < n; i++) ss += x[i] * x[i];
     inv = lz_rsqrt(ss / (float)n + eps);
     /* (1 + w), not w: see the header */
-    for (i = 0; i < n; i++) o[i] = x[i] * inv * (1.0f + w[i]);
+    i = 0;
+#if defined(LZ_HAVE_NORM_SSE)
+    /* Gated on the same selector as everything else, so --kernel ref
+       reaches the scalar loop and the four-tier comparison covers this.
+       SSE2 and SSE run the same code here - mulps and addps are SSE1 -
+       so both tiers take the branch. */
+    if (g_kernel == LZ_KERNEL_SSE2 && n >= 4) {
+        int n4 = n >> 2;
+#if defined(__WATCOMC__)
+        float k2[2];
+        k2[0] = inv;
+        k2[1] = 1.0f;
+        lz_rmsnorm_out_sse_asm(o, x, w, n4, k2);
+#else
+        lz_rmsnorm_out_sse(o, x, w, n4, inv);
+#endif
+        i = n4 << 2;
+    }
+#endif
+    for (; i < n; i++) o[i] = x[i] * inv * (1.0f + w[i]);
 }
 
 void lz_rmsnorm_gated(float *o, const float *x, const float *g,
@@ -570,13 +598,6 @@ static float lz_i32f(int32_t v);
    Everything here is character-for-character what both copies had, in
    the same order, so this is a pure refactor and the bit-hash baseline
    must not move. */
-/* The selected kernel tier, 0 = not yet selected. Defined here rather
-   than beside lz_kernel_select because q8_amax below reads it too, and
-   both the row kernels and the amax scan must answer to ONE selector -
-   two would let `--kernel mmx` move one of them and not the other. */
-static int g_kernel = 0;
-
-#include "ops_kernel_amax.h"
 
 /* The amax scan, dispatched. Bit-identical across every tier by
    construction rather than by tolerance - max is exact and associative,
