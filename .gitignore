@@ -54,12 +54,21 @@ gui/kunkun98.res
 # kunkun98-w.ini) - machine-local, and carries the classic_ui test switch
 kunkun98*.ini
 
-# Claude Code / AI assistant local config (machine-specific, not source)
+# Claude Code / AI assistant local config (machine-specific, not source).
+#
+# CLAUDE.md is NOT in this list, and the name is why it nearly was: this
+# repository's copy is project documentation - iron law zero, the build
+# and verify sections, the layering rule - and excluding it meant a fresh
+# clone got none of them. The one document whose job is to stop someone
+# working in the wrong tree was the one that did not survive a clone,
+# which is the same defect /build/* had with the ARM gates. The training
+# tree tracks its own CLAUDE.md for the same reason.
+#
+# CLAUDE.local.md stays excluded: that name is the per-machine one.
 .claude/
 .claude.json
 .claude.json.backup
 .mcp.json
-CLAUDE.md
 CLAUDE.local.md
 .aider*
 .cursor/
