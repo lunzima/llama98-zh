@@ -19,6 +19,43 @@
       in this model), paired as (i, i + rotary_dim/2) half-rotation,
       not interleaved adjacent elements. */
 
+/* Per-site f32 operation counts. Off unless -DLZ_F32COUNT=1, where it
+   costs one add per site execution and is not meant to ship.
+
+   It exists because the census it feeds was hand-computed and could not
+   be reconstructed: rows in different units (operations for some sites,
+   CALL counts for the transcendental ones, and one lz_exp is 13 f32
+   operations), taps counted without their adds, and the two heaviest
+   sites - attention scoring and the weighted sum - absent altogether,
+   which put the roadmap's ordering 100x wrong.
+
+   TWO RULES, both of which that table broke:
+
+   - The op count per execution is written AT the loop it describes, not
+     in a table somewhere else. It cannot drift from code it sits in.
+   - Every site counts its OWN arithmetic only. lz_softmax does not
+     count the lz_exp it calls; lz_silu does not count lz_sigmoid. So
+     the rows sum to the total exactly once, and a site's row means the
+     same thing as every other site's.
+
+   A divide counts as one, which understates it on every target this
+   engine cares about. Convert (int->float) counts as one, because on a
+   soft-float target it is a call like any other. */
+enum {
+    LZ_FC_EPI, LZ_FC_ATTN_SCORE, LZ_FC_ATTN_WSUM, LZ_FC_SOFTMAX,
+    LZ_FC_EXP, LZ_FC_SIGMOID, LZ_FC_CONV, LZ_FC_NORM, LZ_FC_RSQRT,
+    LZ_FC_N
+};
+#if LZ_F32COUNT
+extern double lz_f32_count[LZ_FC_N];
+#define LZ_FC(site, ops) (lz_f32_count[site] += (double)(ops))
+#else
+#define LZ_FC(site, ops) ((void)0)
+#endif
+const char *lz_f32_count_name(int site);
+double lz_f32_count_get(int site);
+void lz_f32_count_reset(void);
+
 /* o = x * rsqrt(mean(x^2) + eps) * (1 + w)   - Qwen3_5RMSNorm */
 void lz_rmsnorm(float *o, const float *x, const float *w, int n, float eps);
 

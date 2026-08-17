@@ -1550,6 +1550,26 @@ int main(int argc, char **argv) {
         t1 = lz_time_ms();
         printf("Time           %.2f s, %.3f s/token\n",
                (t1 - t0) / 1000.0, (t1 - t0) / 1000.0 / n_tokens);
+        /* The f32 census, in a build that can answer it (-DLZ_F32COUNT=1).
+           Printed here rather than behind a flag: a counting build exists
+           only to produce this, and a number that needs asking for is a
+           number nobody has. Per token, because the sites scale
+           differently with context and the totals hide that. */
+        if (lz_f32_count_get(0) >= 0.0) {
+            double tot = 0.0;
+            int site;
+            for (site = 0; site < LZ_FC_N; site++)
+                tot += lz_f32_count_get(site);
+            printf("f32 operations per token (%d tokens, ctx reached %d):\n",
+                   n_tokens, n_tokens);
+            for (site = 0; site < LZ_FC_N; site++) {
+                double v = lz_f32_count_get(site);
+                if (v <= 0.0) continue;
+                printf("  %-20s %14.0f  %5.1f%%\n", lz_f32_count_name(site),
+                       v / n_tokens, tot > 0.0 ? 100.0 * v / tot : 0.0);
+            }
+            printf("  %-20s %14.0f\n", "total", tot / n_tokens);
+        }
         printf("Top %d logits:\n", topk);
         print_topk(logits, cfg->vocab_size, topk);
         {

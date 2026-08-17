@@ -65,10 +65,42 @@ int lz_conv_norm_pow2(const float *v, int n, short *out, int bound) {
     return e;
 }
 
+#if LZ_F32COUNT
+double lz_f32_count[LZ_FC_N];
+#endif
+
+static const char *const LZ_FC_NAMES[LZ_FC_N] = {
+    "dequant epilogue", "attention scoring", "attention wsum",
+    "softmax", "exp", "sigmoid", "conv1d", "norms", "rsqrt"
+};
+
+const char *lz_f32_count_name(int site) {
+    return (site >= 0 && site < LZ_FC_N) ? LZ_FC_NAMES[site] : "?";
+}
+
+double lz_f32_count_get(int site) {
+#if LZ_F32COUNT
+    return (site >= 0 && site < LZ_FC_N) ? lz_f32_count[site] : 0.0;
+#else
+    (void)site;
+    return -1.0;   /* not "zero work": the build cannot answer */
+#endif
+}
+
+void lz_f32_count_reset(void) {
+#if LZ_F32COUNT
+    int i;
+    for (i = 0; i < LZ_FC_N; i++) lz_f32_count[i] = 0.0;
+#endif
+}
+
 void lz_rmsnorm(float *o, const float *x, const float *w, int n, float eps) {
     float ss = 0.0f;
     float inv;
     int i;
+    /* 2n accumulating ss, 2 for the divide and the eps add, 3n in the
+       output loop (two multiplies and the 1+w add). rsqrt bills itself. */
+    LZ_FC(LZ_FC_NORM, 5 * n + 2);
     for (i = 0; i < n; i++) ss += x[i] * x[i];
     inv = lz_rsqrt(ss / (float)n + eps);
     /* (1 + w), not w: see the header */
@@ -80,6 +112,9 @@ void lz_rmsnorm_gated(float *o, const float *x, const float *g,
     float ss = 0.0f;
     float inv;
     int i;
+    /* One more multiply per element than lz_rmsnorm: the gate. silu
+       bills itself. */
+    LZ_FC(LZ_FC_NORM, 6 * n + 2);
     for (i = 0; i < n; i++) ss += x[i] * x[i];
     inv = lz_rsqrt(ss / (float)n + eps);
     /* plain w here, and the gate applies last */
@@ -90,6 +125,7 @@ void lz_l2norm(float *o, const float *x, int n, float eps) {
     float ss = 0.0f;
     float inv;
     int i;
+    LZ_FC(LZ_FC_NORM, 4 * n + 1);
     for (i = 0; i < n; i++) ss += x[i] * x[i];
     inv = lz_rsqrt(ss + eps);          /* sum, not mean */
     for (i = 0; i < n; i++) o[i] = x[i] * inv;
@@ -98,6 +134,11 @@ void lz_l2norm(float *o, const float *x, int n, float eps) {
 void lz_softmax(float *x, int n) {
     float mx = x[0], sum = 0.0f;
     int i;
+    /* Per element: the subtract feeding exp, the sum add, the final
+       scale multiply. Plus one divide. The max scan is comparisons.
+       exp bills itself - this row is the softmax around it, and reading
+       the two as one number is what put the old census 13x low here. */
+    LZ_FC(LZ_FC_SOFTMAX, 3 * n + 1);
     for (i = 1; i < n; i++) if (x[i] > mx) mx = x[i];
     for (i = 0; i < n; i++) {
         x[i] = lz_exp(x[i] - mx);
@@ -117,6 +158,7 @@ float lz_sigmoid(float x) {
        args <= 0, landing exactly in lz_exp's approximation contract.
        This is the absolute hot spot for exp: silu goes through it,
        conv1d needs 55K per token. */
+    LZ_FC(LZ_FC_SIGMOID, 3);       /* negate, add, divide */
     if (x >= 0.0f) {
         float z = lz_exp(-x);
         return 1.0f / (1.0f + z);
@@ -127,6 +169,7 @@ float lz_sigmoid(float x) {
 }
 
 float lz_silu(float x) {
+    LZ_FC(LZ_FC_SIGMOID, 1);
     return x * lz_sigmoid(x);
 }
 
@@ -243,6 +286,7 @@ float lz_rsqrt(float x) {
 #else
     union { float f; uint32_t u; } t;
     float h = 0.5f * x, y;
+    LZ_FC(LZ_FC_RSQRT, 9);         /* the halving plus 2 x (3 mul, 1 sub) */
     t.f = x;
     t.u = 0x5f375a86u - (t.u >> 1);
     y = t.f;
@@ -306,6 +350,10 @@ float lz_exp(float x) {
     union { float f; int32_t i; } u, p2n;
     float y32, r, w, c;
     int32_t t, n, idx;
+
+    /* 1 scale, 2 for the magic add, 1 convert + 1 subtract for the
+       residue, 2 for w, 4 for the quadratic, 2 to reassemble. */
+    LZ_FC(LZ_FC_EXP, 13);
 
     /* Overflow/underflow guard: beyond this range the constructed bit
        pattern is meaningless */
@@ -1290,6 +1338,12 @@ static lz_rowfn lz_row_pick(const lz_rowfn *tab) {
 static float epi_q8(const int32_t *accb, const float *xsb, const float *ws,
                     int ng, int r, float post) {
     int g;
+    /* r>1: per group a convert, a multiply and an add, then per r-run one
+       multiply and one add, then the post scale. r==1: convert plus two
+       multiplies plus an add per group, and 4 to fold the accumulators.
+       This is the row the old census put at 1,995,552 by a rule nobody
+       could reconstruct. */
+    LZ_FC(LZ_FC_EPI, r > 1 ? 3 * ng + 2 * (ng / r) + 1 : 4 * ng + 4);
     if (r > 1) {
         float sum = 0.0f;
         int g128;
@@ -3443,6 +3497,13 @@ void lz_attn_score_q8(float *att, const float *qhh, int hd,
     static int16_t qw[LZ_ATTN_MAX_HD];
     int ng = hd / 32, g, t, i;
 
+    /* Once per head: the q quantization (a multiply per element, a
+       reciprocal per group). Then per t: a convert, the qs*kts product
+       and a multiply-add per group, plus 3 adds and 2 multiplies to
+       fold. This is the term that makes the fixed tier LOSE below ~200
+       tokens - it does not shrink with context, and the per-t term it
+       replaces is 2*hd. */
+    LZ_FC(LZ_FC_ATTN_SCORE, hd + ng + (long)(pos + 1) * (4 * ng + 5));
     lz_quantize_q8(qhh, hd, 32, qq, qs);
     for (i = 0; i < hd; i++) qw[i] = (int16_t)qq[i];
 
@@ -3487,6 +3548,13 @@ void lz_attn_wsum_q8(float *out, const float *att, int hd,
                      int pos, float *cbuf, int16_t *cq) {
     int ng = hd / 32, g, T = pos + 1;
 
+    /* Per group: T to build the coefficients, 1 divide plus 2T to
+       quantize them, 64 per int32 chunk to drain the accumulator, and 33
+       to scale the 32 outputs. The chunk term is why the count is not a
+       clean multiple of T. */
+    LZ_FC(LZ_FC_ATTN_WSUM,
+          (long)ng * (3L * T + 64L * ((T + LZ_WSUM_CHUNK - 1) / LZ_WSUM_CHUNK)
+                      + 34L));
     for (g = 0; g < ng; g++) {
         int32_t acc32[32];
         float accf[32];
@@ -5279,6 +5347,11 @@ void lz_causal_conv1d_step(float *o, const float *x,
                                const float *w, int n_ch, int k) {
     int hist = k - 1;
     int c, j;
+    /* k multiplies and k adds per channel - the first add is against the
+       0.0f initializer, which -ffp-contract=off without -ffast-math
+       cannot fold away. The old census counted the taps and not the
+       adds. silu bills itself. */
+    LZ_FC(LZ_FC_CONV, (long)n_ch * 2 * k);
     for (c = 0; c < n_ch; c++) {
         const float *st_in = state_in + (size_t)c * hist;
         float *st_out = state_out + (size_t)c * hist;
@@ -5324,6 +5397,9 @@ void lz_causal_conv1d_step_fixed(float *o, const float *x,
                                  int n_ch, int k) {
     int hist = k - 1;
     int c, j;
+    /* One multiply in, one convert and one multiply out, whatever k is.
+       That independence from k is the whole point of the tier. */
+    LZ_FC(LZ_FC_CONV, (long)n_ch * 3);
     for (c = 0; c < n_ch; c++) {
         const short *si = sh_in + (size_t)c * hist;
         short *so = sh_out + (size_t)c * hist;
