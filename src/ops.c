@@ -853,7 +853,18 @@ const char *lz_conv_select(const char *name) {
 static int g_attn = -1;
 
 int lz_attn_mode(void) {
-    int m = (g_attn < 0) ? (q8r_have_simd() == 0 ? 3 : 0) : g_attn;
+    /* AUTO resolves to float on EVERY machine, including the ones the
+       hardware predicate would send to fixed. The tier is defective past
+       roughly a thousand positions: `scoring` puts NaN into the last
+       layer's attention output (one KV head's worth of query heads) from
+       token ~1048 on and never recovers; `wsum` degrades without NaN.
+       Measured on three vehicles and two unrelated texts, positional
+       rather than content-dependent, and NOT the model going fragile at
+       length - `--kv q4`, a far coarser perturbation, moves 7 positions
+       on the same run where the tier destroys 392.
+       Restore `q8r_have_simd() == 0` here once that is found; the knob
+       stays selectable meanwhile because it is what the work needs. */
+    int m = (g_attn < 0) ? 0 : g_attn;
     return m & LZ_ATTN_FIXED;
 }
 

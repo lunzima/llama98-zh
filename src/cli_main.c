@@ -159,6 +159,8 @@ static void usage(void) {
     "  --dump-all-logits F  Write every position's logits ((n_tokens-1) x\n"
     "                   vocab f32). Measurement only - the argmax/top-5\n"
     "                   agreement criterion (quantization-precision.md 6.2).\n"
+    "  --dump-top5 F    The same criterion at 20 bytes a position instead\n"
+    "                   of 131 KB: top-5 ids ((n_tokens-1) x 5 int32).\n"
     "  --dump-prompt-tokens F  Write the encoded prompt's token ids instead\n"
     "                   of generating (cross-build argv/encoding probe).\n"
     "  --tokens-file F  Read --tokens list from a file (long sequences)\n"
@@ -817,8 +819,10 @@ int main(int argc, char **argv) {
     const char *nll_path = NULL;
     const char *all_path = NULL;
     const char *prompt_tok_path = NULL;
+    const char *top5_path = NULL;
     float *nll = NULL;
     FILE *af = NULL;    /* --dump-all-logits stream, fclosed after the loop */
+    FILE *tf = NULL;    /* --dump-top5 stream, same lifetime as af */
     int only_check = 0, list_tensors = 0, want_stats = 0, only_layer = -1;
     int *tokens = NULL, n_tokens = 0, topk = 5;
     int n_gen = 0;                  /* -n new tokens for generation */
@@ -956,6 +960,8 @@ int main(int argc, char **argv) {
             nll_path = argv[++i];
         else if (strcmp(a, "--dump-all-logits") == 0 && i + 1 < argc)
             all_path = argv[++i];
+        else if (strcmp(a, "--dump-top5") == 0 && i + 1 < argc)
+            top5_path = argv[++i];
         else if (strcmp(a, "--dump-prompt-tokens") == 0 && i + 1 < argc)
             prompt_tok_path = argv[++i];
         else if (strcmp(a, "--tokens-file") == 0 && i + 1 < argc) {
@@ -1521,6 +1527,31 @@ int main(int argc, char **argv) {
                 if (af)
                     fwrite(logits, sizeof(float), (size_t)cfg->vocab_size, af);
             }
+            if (top5_path && i + 1 < n_tokens) {
+                /* The top-5 ids only: 20 bytes a position against
+                   --dump-all-logits' 131 KB, which is the difference
+                   between measuring agreement over a whole sequence and
+                   measuring it at the last token. Same position range as
+                   --dump-all-logits and --dump-nll on purpose - three
+                   dumps that align let one script read them together. */
+                int32_t best[5];
+                int r, v;
+                if (!tf) {
+                    tf = fopen(top5_path, "wb");
+                    if (!tf) printf("Cannot write %s\n", top5_path);
+                }
+                for (r = 0; r < 5; r++) {
+                    int bi = -1;
+                    for (v = 0; v < cfg->vocab_size; v++) {
+                        int seen = 0, u;
+                        for (u = 0; u < r; u++) if (best[u] == v) seen = 1;
+                        if (seen) continue;
+                        if (bi < 0 || logits[v] > logits[bi]) bi = v;
+                    }
+                    best[r] = bi;
+                }
+                if (tf) fwrite(best, sizeof(int32_t), 5, tf);
+            }
             if (nll_path && i + 1 < n_tokens) {
                 /* -log softmax(logits)[next]. Accumulated in double on
                    purpose: this is a MEASUREMENT path, not a shipped
@@ -1606,6 +1637,7 @@ int main(int argc, char **argv) {
             }
         }
         if (af) { fclose(af); af = NULL; }
+        if (tf) { fclose(tf); tf = NULL; }
         free(nll);
         nll = NULL;
         lz_state_free(&st);

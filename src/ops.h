@@ -658,13 +658,24 @@ void lz_kv4_quantize(const float *x, int n, unsigned char *out, float *scale);
    measurement below existed, and a compile-time-only tier cannot be
    compared against itself on one machine.
 
-   Quality, measured with argmax/top-5 agreement and paired NLL rather
-   than error magnitude (the logit-difference metric saturates):
-   .prof/attn_fixed_quality.py puts all three arms within +-0.52 paired t
-   of the float path on 363 tokens, top-5 unchanged, against a null arm
-   that is bit-identical. Cost: the O(ctx) attention term shrinks 3.7x
-   even on x86 with an SSE2 float path, but the fixed tier is ~2.6%
-   SLOWER below ~200 tokens, where quantizing q does not pay for itself.
+   DEFECTIVE PAST ~1000 POSITIONS - do not enable it. `scoring` writes
+   NaN into the last layer's attention output from token ~1048 on (512
+   of 1024 elements, one KV head's worth of query heads) and never
+   recovers; `wsum` degrades without NaN; top-5 freezes on one constant
+   set and NLL pins at 16.5. .prof/attn_fixed_matrix.py reproduces it on
+   three vehicles and two unrelated texts. It is the tier and not the
+   model: `--kv q4` is a far coarser perturbation and moves 7 positions
+   where this moves 392. Shifting the text by 10 tokens leaves the break
+   at the same position, so it is positional, not content. Ruled out:
+   the seq_len buffers (the break does not follow them), the recurrent
+   state representation (-DLZ_GDN_STATE_2PLANE=0 breaks earlier), and
+   the KV low plane (-DLZ_KV_2PLANE=0 breaks identically).
+
+   Short sequences say the opposite, which is why the knob got this far:
+   on 363 tokens all three arms sit within +-0.52 paired t of float with
+   top-5 unchanged, against a bit-identical null arm. The payoff is real
+   too - the O(ctx) attention term shrinks 3.7x even on x86 with an SSE2
+   float path, though the tier is ~2.6% SLOWER below ~200 tokens.
 
    lz_attn_wsum_q8's cbuf/cq are caller-owned scratch of seq_len entries
    each; its int32 accumulator only holds 516 rows, so it chunks at 512
@@ -678,12 +689,14 @@ void lz_kv4_quantize(const float *x, int n, unsigned char *out, float *scale);
    returns the same bitmask LZ_ATTN_FIXED uses, masked by what was
    actually compiled, so a build with the kernels out cannot select them.
 
-   AUTO asks the same hardware question as the conv and pass-2 tiers -
-   CPUID SSE, never MMX - so a Socket 7 part lands on fixed and an SSE
-   machine keeps the float path it has always had. Context length is NOT
-   part of the predicate even though the crossover is context-dependent:
-   the buffers are sized once, and a tier that changes underneath a
-   running sequence is a worse bargain than one that is chosen once.
+   AUTO resolves to float everywhere while the defect above stands. The
+   predicate it WILL use is the one the conv and pass-2 tiers use - CPUID
+   SSE, never MMX - and that is exactly why it cannot be turned on yet:
+   it would send Socket 7 parts, the machines this engine exists for,
+   onto the broken path. Context length is not part of the predicate even
+   though the crossover is context-dependent; the buffers are sized once,
+   and a tier that changes underneath a running sequence is a worse
+   bargain than one chosen once.
 
    NOT numerics-neutral, so switching tiers needs a tolerance gate. */
 const char *lz_attn_select(const char *name);
