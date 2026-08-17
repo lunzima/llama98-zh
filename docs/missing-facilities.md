@@ -254,7 +254,7 @@ SSE1 那两格是**已核对的空**（铁律八 2026-08-10 逐条列过 SSE1 �
 | `lz_rmsnorm` 输出循环 | **3/7**（2026-08-18） | 标量 C + SSE/SSE2 两侧共用一份（`mulps`/`addps` 是 SSE1，SSE2 加的东西这里用不上）；**MMX 那格结构性为空**——MMX 是纯整数指令集。平方和那半仍是标量 |
 | `lz_causal_conv1d_step` | 0 | 4 抽头 MAC 是**浮点求和**，向量化必然改结合顺序 |
 | `lz_rmsnorm_gated` | 0 | 输出循环逐元素调 `lz_silu`，向量化不了 |
-| `lz_softmax` | 0 | 求和同上；max 扫描可以（与 amax 同理） |
+| `lz_softmax` max 扫描 + 归一化 | **3/7**（2026-08-18） | 两处都是 SSE1（`maxps` / `mulps`），MMX 那格结构性为空。**求和那半仍是标量** |
 | `lz_silu` / `lz_sigmoid` | 0 | Q15 查表，MMX/SSE2 没有 gather |
 
 **这里有一条把剩下四个卡住的结构性事实，值得单独写下**：铁律二要求七格之间

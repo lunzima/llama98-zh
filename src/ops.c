@@ -191,7 +191,22 @@ void lz_softmax(float *x, int n) {
        exp bills itself - this row is the softmax around it, and reading
        the two as one number is what put the old census 13x low here. */
     LZ_FC(LZ_FC_SOFTMAX, 3 * n + 1);
-    for (i = 1; i < n; i++) if (x[i] > mx) mx = x[i];
+    i = 1;
+#if defined(LZ_HAVE_NORM_SSE)
+    /* The maximum is exact, so lane order cannot change it and this owes
+       the scalar loop bit-identity rather than a tolerance. The sum
+       below is NOT vectorized for the opposite reason. */
+    if (g_kernel == LZ_KERNEL_SSE2 && n >= 8) {
+        int n4 = (n - 1) >> 2;
+#if defined(__WATCOMC__)
+        lz_vmax_sse_asm(x + 1, n4, &mx);
+#else
+        mx = lz_vmax_sse(x + 1, n4, mx);
+#endif
+        i = 1 + (n4 << 2);
+    }
+#endif
+    for (; i < n; i++) if (x[i] > mx) mx = x[i];
     for (i = 0; i < n; i++) {
         x[i] = lz_exp(x[i] - mx);
         sum += x[i];
@@ -201,7 +216,19 @@ void lz_softmax(float *x, int n) {
        attention scoring. Hardware-independent win, not an approximation. */
     {
         float inv = (sum > 0.0f) ? 1.0f / sum : 0.0f;
-        for (i = 0; i < n; i++) x[i] *= inv;
+        i = 0;
+#if defined(LZ_HAVE_NORM_SSE)
+        if (g_kernel == LZ_KERNEL_SSE2 && n >= 4) {
+            int n4 = n >> 2;
+#if defined(__WATCOMC__)
+            lz_vscale_sse_asm(x, n4, &inv);
+#else
+            lz_vscale_sse(x, n4, inv);
+#endif
+            i = n4 << 2;
+        }
+#endif
+        for (; i < n; i++) x[i] *= inv;
     }
 }
 

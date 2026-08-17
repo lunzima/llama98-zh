@@ -1,5 +1,12 @@
-/* RMSNorm's output loop, vectorized. Included once by ops.c, like the
+/* The element-wise float helpers: RMSNorm's output loop, and softmax's
+   maximum scan and normalize loop. Included once by ops.c, like the
    other ops_kernel_*.h files, for the same codegen reason.
+
+   All three are here because they share one property - each output
+   element depends only on its own input, or the reduction is exact - so
+   four lanes give the same bits as one. The reductions that are NOT
+   exact (RMSNorm's sum of squares, softmax's sum) stay scalar in ops.c
+   and are not in this file.
 
    WHICH HALF THIS IS, AND WHY ONLY THIS HALF. lz_rmsnorm is a float sum
    followed by an element-wise scale:
@@ -65,6 +72,60 @@ extern void lz_rmsnorm_out_sse_asm(float *o, const float *x, const float *w,
     "N2:"                               \
     parm [eax] [edx] [ebx] [ecx] [esi]  \
     modify [eax ebx ecx edx esi];
+
+extern void lz_vmax_sse_asm(const float *x, int n4, float *pmax);
+/* Softmax's maximum scan. maxps is exact and, with no NaN present, its
+   order does not matter - so this produces the same float the scalar
+   `if (x[i] > mx) mx = x[i]` loop would. NaN would break that (maxps
+   returns its second operand when unordered, the scalar compare keeps
+   the first); the engine's masked-out positions are -1e30f rather than
+   NaN precisely so the arithmetic stays ordered.
+ *
+ * IN AND OUT THROUGH pmax, rather than a float return. `value [8087]`
+ * means the result is on the x87 stack, and this routine's result is in
+ * xmm0 - declaring one and producing the other returns whatever was on
+ * the stack. It cost a cross-compiler DIFFER on --kernel sse2 and
+ * nothing else, which is the only place that mistake is visible. */
+#pragma aux lz_vmax_sse_asm =           \
+    ".686"                              \
+    "movss    xmm0, [ebx]"              \
+    "shufps   xmm0, xmm0, 0"            \
+    "test     edx, edx"                 \
+    "jz       M2"                       \
+    "M1:"                               \
+    "movups   xmm1, [eax]"              \
+    "maxps    xmm0, xmm1"               \
+    "add      eax, 16"                  \
+    "dec      edx"                      \
+    "jnz      M1"                       \
+    "M2:"                               \
+    "movhlps  xmm1, xmm0"               \
+    "maxps    xmm0, xmm1"               \
+    "movaps   xmm1, xmm0"               \
+    "shufps   xmm1, xmm1, 1"            \
+    "maxps    xmm0, xmm1"               \
+    "movss    [ebx], xmm0"              \
+    parm [eax] [edx] [ebx]              \
+    modify [eax edx];
+
+extern void lz_vscale_sse_asm(float *x, int n4, const float *pk);
+/* Softmax's normalize loop: x[i] *= inv, element-wise. */
+#pragma aux lz_vscale_sse_asm =         \
+    ".686"                              \
+    "movss    xmm7, [ebx]"              \
+    "shufps   xmm7, xmm7, 0"            \
+    "test     edx, edx"                 \
+    "jz       V2"                       \
+    "V1:"                               \
+    "movups   xmm0, [eax]"              \
+    "mulps    xmm0, xmm7"               \
+    "movups   [eax], xmm0"              \
+    "add      eax, 16"                  \
+    "dec      edx"                      \
+    "jnz      V1"                       \
+    "V2:"                               \
+    parm [eax] [edx] [ebx]              \
+    modify [eax edx];
 #define LZ_HAVE_NORM_SSE 1
 
 #else   /* gcc: intrinsics */
@@ -82,6 +143,27 @@ static void lz_rmsnorm_out_sse(float *o, const float *x, const float *w,
         _mm_storeu_ps(o + b * 4,
                       _mm_mul_ps(_mm_mul_ps(vx, vi), _mm_add_ps(one, vw)));
     }
+}
+
+static float lz_vmax_sse(const float *x, int n4, float seed) {
+    __m128 acc = _mm_set1_ps(seed);
+    union { __m128 m; float f[4]; } o;
+    int b;
+    for (b = 0; b < n4; b++)
+        acc = _mm_max_ps(acc, _mm_loadu_ps(x + b * 4));
+    o.m = acc;
+    {
+        float a = o.f[0] > o.f[1] ? o.f[0] : o.f[1];
+        float c = o.f[2] > o.f[3] ? o.f[2] : o.f[3];
+        return a > c ? a : c;
+    }
+}
+
+static void lz_vscale_sse(float *x, int n4, float k) {
+    __m128 vk = _mm_set1_ps(k);
+    int b;
+    for (b = 0; b < n4; b++)
+        _mm_storeu_ps(x + b * 4, _mm_mul_ps(_mm_loadu_ps(x + b * 4), vk));
 }
 #define LZ_HAVE_NORM_SSE 1
 #endif
