@@ -151,6 +151,9 @@ static void usage(void) {
     "Validation:\n"
     "  --check          Validate structure only (fast)\n"
     "  --tensors        List all tensors\n"
+    "  --kernel-matrix  Which row kernels this build carries, per weight\n"
+    "                   format. Six slots then the 128-group column; the\n"
+    "                   answer is the UNION of a gcc and a Watcom build.\n"
     "  --stats          Print tensor statistics\n"
     "  --layer N        Stats for layer N only\n"
     "  --tokens a,b,c   Forward on token ids\n"
@@ -950,6 +953,14 @@ int main(int argc, char **argv) {
         }
         else if (strcmp(a, "--check") == 0)   only_check = 1;
         else if (strcmp(a, "--tensors") == 0) list_tensors = 1;
+        else if (strcmp(a, "--kernel-matrix") == 0) {
+            /* Before the model is opened: this is a property of the
+               binary, and requiring a model would make it unaskable on a
+               machine that has none. */
+            printf("format mmxI sseI sse2I mmxA sseA sse2A  g128\n%s",
+                   lz_kernel_matrix());
+            return 0;
+        }
         else if (strcmp(a, "--stats") == 0)   want_stats = 1;
         else if (strcmp(a, "--layer") == 0 && i + 1 < argc)
             only_layer = atoi(argv[++i]);

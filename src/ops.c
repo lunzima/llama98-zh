@@ -3283,6 +3283,64 @@ static const lz_rowfn LZ_ROW_Q16[LZ_ROW_N] = {
 #endif
 };
 
+/* The 128-group column, declared rather than detected. A row kernel's
+   use of a group-of-four kernel is a compile-time fact inside a static
+   function, invisible from outside, so it is recorded here beside the
+   tables it describes and the gate compares this against the source.
+   Both halves have to be edited together or the gate fails, which is
+   the point - the previous version of this map lived in a document and
+   drifted. */
+#if defined(__WATCOMC__)
+#define LZ_G128_Q8  1
+#define LZ_G128_Q41 1
+#define LZ_G128_Q61 1
+#define LZ_G128_Q16 1
+#else
+/* No gcc row kernel calls a group-of-four kernel, for ANY format. The
+   assembly ones hoist mask construction across four sub-blocks by hand;
+   the intrinsics ones leave that to the compiler, which is what a
+   compiler does with a loop-invariant. Whether a hand-written gcc
+   version would differ has NOT been measured, so this is 'not written',
+   not 'nothing to offer'. */
+#define LZ_G128_Q8  0
+#define LZ_G128_Q41 0
+#define LZ_G128_Q61 0
+#define LZ_G128_Q16 0
+#endif
+/* T2 on both compilers. Derived by comparing against q6_1, which unpacks
+   a 2-bit plane the same way and DOES have one: q6_1's group kernel
+   hoists two mask constants (0x0F and 0x03) plus a zero register across
+   its four sub-blocks. T2 has no such constant - its unpack is a zero
+   register and three immediate shifts, and hoisting the zero turns
+   `pxor mm2,mm2` into `movq mm2,mm7`, one instruction for one. Each
+   sub-block carries its own 2-bit plane, its own accumulator and its own
+   fold. So a T2 group kernel would emit the same instruction sequence as
+   four separate calls. */
+#define LZ_G128_T2  0
+
+const char *lz_kernel_matrix(void) {
+    static char buf[512];
+    static const struct { const char *name; const lz_rowfn *tab; int g128; }
+    rows[] = {
+        { "q8_0",  LZ_ROW_Q8,  LZ_G128_Q8  },
+        { "q4_1",  LZ_ROW_Q41, LZ_G128_Q41 },
+        { "q6_1",  LZ_ROW_Q61, LZ_G128_Q61 },
+        { "q16_0", LZ_ROW_Q16, LZ_G128_Q16 },
+        { "t2",    LZ_ROW_T2,  LZ_G128_T2  }
+    };
+    int i, j, p = 0;
+    for (i = 0; i < 5; i++) {
+        p += sprintf(buf + p, "%-6s", rows[i].name);
+        for (j = 0; j < LZ_ROW_N; j++)
+            buf[p++] = rows[i].tab[j] ? 'x' : '.';
+        buf[p++] = ' ';
+        buf[p++] = rows[i].g128 ? 'G' : '.';
+        buf[p++] = '\n';
+    }
+    buf[p] = '\0';
+    return buf;
+}
+
 static void matmul_q16_impl(float *o, const int8_t *xq, const float *xqs,
                             const LZTensor *w, int in_dim, int out_dim, int nt) {
     int i, tk;

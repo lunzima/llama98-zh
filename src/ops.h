@@ -346,6 +346,21 @@ int lz_conv_norm_pow2(const float *v, int n, short *out, int bound);
    BOTH TIERS SHIP, per iron law nine: which is faster depends on the
    target's float-to-integer cost ratio, and this host answers for
    itself only. */
+/* The kernel coverage matrix: one line per weight format, six characters
+   for the six row-kernel slots (mmx-intrin, sse-intrin, sse2-intrin,
+   mmx-asm, sse-asm, sse2-asm) and one for whether that format has a
+   128-element group kernel in this build.
+
+   It exists because the hand-maintained version of this table was wrong.
+   docs/missing-facilities.md claimed three formats had gcc 128-group
+   kernels; none of them does, and no gate could see the difference -
+   the tier-union assertion checks that every TIER NAME appears
+   somewhere, which a format missing a kernel does not change.
+
+   Two builds are needed to read it: gcc carries the intrinsics columns,
+   Watcom the assembly ones, and only their union is the answer. */
+const char *lz_kernel_matrix(void);
+
 const char *lz_sig_select(const char *name);
 int lz_sig_mode(void);
 int lz_sig_is_auto(void);
