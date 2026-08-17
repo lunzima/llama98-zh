@@ -326,6 +326,30 @@ int lz_conv_is_auto(void);
 int lz_conv_accum_bound(int k);
 int lz_conv_norm_pow2(const float *v, int n, short *out, int bound);
 
+/* Sigmoid/SiLU tier: "float" | "fixed" | "auto".
+
+   These two are 36% of the f32 operations per token once the epilogue
+   and attention tiers are on, and they are the cheapest 36% to take:
+   sigmoid tabulates directly, so no chain changes and no new formats.
+
+   lz_exp costs 13 f32 operations at 2.38e-7 relative error against a
+   3.9e-3 noise floor - four orders nobody uses. The fixed form is a Q15
+   table over [-8, 8] with linear interpolation; beyond that sigmoid is
+   within 3.4e-4 of 0 or 1, under the floor, so it clamps.
+
+   NOT the KDA decay, which also goes through lz_exp and must not: its
+   gt multiplies the recurrent state every step, so a relative offset
+   compounds N-fold. Measured at 1.64e-01 over 512 steps against the
+   floor's 3.9e-3 - forty-two times over. The tier is named for its two
+   callers for that reason.
+
+   BOTH TIERS SHIP, per iron law nine: which is faster depends on the
+   target's float-to-integer cost ratio, and this host answers for
+   itself only. */
+const char *lz_sig_select(const char *name);
+int lz_sig_mode(void);
+int lz_sig_is_auto(void);
+
 /* Dequant epilogue tier: "float" | "fixed" | "auto".
 
    The epilogue is 66.4% of the f32 operations per token once the fixed

@@ -230,6 +230,8 @@ static void usage(void) {
     "                   skips the float re-quantize; auto resolves from\n"
     "                   hardware (fixed only where no SIMD write-back\n"
     "                   quantize exists).\n"
+    "  --sig-write TIER    auto|float|fixed (default auto). sigmoid and\n"
+    "                   SiLU from a Q15 table (NOT the KDA decay).\n"
     "  --epi-write TIER    auto|float|fixed (default auto). Dequant\n"
     "                   epilogue in int64 fixed point.\n"
     "  --attn-write TIER   auto|float|scoring|wsum|fixed (default auto).\n"
@@ -1208,6 +1210,17 @@ int main(int argc, char **argv) {
                 return 2;
             }
         }
+        else if (strcmp(a, "--sig-write") == 0 && i + 1 < argc) {
+            /* sigmoid and SiLU only. The KDA decay goes through the same
+               lz_exp and must not follow: its error compounds over the
+               recurrence, measured 42x over the noise floor at 512
+               steps. */
+            const char *got = lz_sig_select(argv[++i]);
+            if (!got) {
+                printf("--sig-write: unknown tier (auto|float|fixed)\n");
+                return 2;
+            }
+        }
         else if (strcmp(a, "--epi-write") == 0 && i + 1 < argc) {
             /* Dequant epilogue. Both tiers ship because this host cannot
                decide between them: the fixed one is 1.65x slower here
@@ -1403,6 +1416,9 @@ int main(int argc, char **argv) {
            lz_gdn_p2_impl(),
            lz_conv_mode() ? (lz_conv_is_auto() ? "fixed(auto)" : "fixed")
                           : (lz_conv_is_auto() ? "float(auto)" : "float"));
+    printf("Sigmoid/SiLU   %s%s\n",
+           lz_sig_mode() ? "fixed" : "float",
+           lz_sig_is_auto() ? "(auto)" : "");
     printf("Epilogue       %s%s\n",
            lz_epi_mode() ? "fixed" : "float",
            lz_epi_is_auto() ? "(auto)" : "");

@@ -158,11 +158,78 @@ void lz_softmax(float *x, int n) {
     }
 }
 
+/* ---- fixed-point sigmoid ---------------------------------------------
+
+   384 intervals over [-12, 12] in Q15, linearly interpolated. The step
+   is 1/16 and sigmoid's second derivative peaks at 0.0962, so the
+   interpolation error is bounded by h^2/8 * 0.0962 = 4.7e-5. The entries
+   are themselves rounded to Q15, another 3.05e-5, and the two add: 7.7e-5
+   derived against 8.1e-5 measured. Quoting only the interpolation term
+   understates it by 1.7x, which is how a bound comes to be believed and
+   then exceeded.
+
+   The RANGE is set by the clamp, not by the interpolation. Past the ends
+   the table returns the limit, and the error there is sigmoid at the
+   edge: 3.4e-4 at 8, which is larger than the interpolation bound and
+   was what the gate caught. At 12 it is 6.1e-6, below it. Widening
+   costs 512 bytes and changes nothing else, since the step is unchanged.
+
+   Built on first use rather than written out as 385 constants: a table
+   this size transcribed by hand is a table whose gate tests the
+   transcription. It costs 385 lz_exp calls, once. */
+#define LZ_SIG_N    384
+#define LZ_SIG_LO   (-12.0f)
+#define LZ_SIG_STEP 16.0f          /* intervals per unit x */
+
+static int32_t g_sigtab[LZ_SIG_N + 1];
+static int     g_sigtab_ready;
+/* The selector lives with the other tiers further down, where
+   q8r_have_simd() is already declared; only the table is here, beside
+   the function that reads it. */
+static int     g_sig = -1;
+
+static void sig_build(void) {
+    int i;
+    for (i = 0; i <= LZ_SIG_N; i++) {
+        float x = LZ_SIG_LO + (float)i / LZ_SIG_STEP;
+        float z = lz_exp(x >= 0.0f ? -x : x);
+        float s = (x >= 0.0f) ? 1.0f / (1.0f + z) : z / (1.0f + z);
+        g_sigtab[i] = (int32_t)(s * 32768.0f + 0.5f);
+    }
+    g_sigtab_ready = 1;
+}
+
+/* Q15 sigmoid. Outside the table sigmoid is within 3.4e-4 of its limit,
+   which is under the noise floor, so it clamps rather than widening the
+   table for values the model does not reach. */
+static int32_t sigmoid_q15(float x) {
+    float t;
+    int idx;
+    int32_t frac, a, b;
+    if (!g_sigtab_ready) sig_build();
+    if (x <= LZ_SIG_LO) return 0;
+    if (x >= -LZ_SIG_LO) return 32768;
+    t = (x - LZ_SIG_LO) * LZ_SIG_STEP;
+    idx = (int)t;
+    if (idx >= LZ_SIG_N) return g_sigtab[LZ_SIG_N];
+    frac = (int32_t)((t - (float)idx) * 32768.0f);
+    a = g_sigtab[idx];
+    b = g_sigtab[idx + 1];
+    return a + (((b - a) * frac) >> 15);
+}
+
 float lz_sigmoid(float x) {
     /* Branching avoids exp overflow at large |x|. Both branches take
        args <= 0, landing exactly in lz_exp's approximation contract.
        This is the absolute hot spot for exp: silu goes through it,
        conv1d needs 55K per token. */
+    if (lz_sig_mode()) {
+        /* Two multiplies and a subtract to reach the table, one convert
+           and one multiply to come back - against 13 in lz_exp plus
+           these three. */
+        LZ_FC(LZ_FC_SIGMOID, 5);
+        return (float)sigmoid_q15(x) * (1.0f / 32768.0f);
+    }
     LZ_FC(LZ_FC_SIGMOID, 3);       /* negate, add, divide */
     if (x >= 0.0f) {
         float z = lz_exp(-x);
@@ -895,6 +962,21 @@ const char *lz_attn_select(const char *name) {
    product is |acc| * |xw*ww| <= 2^27 * 2^30, so ng of them stay inside
    int64 while ng <= 64. in_dim beyond 2048 keeps the float path. */
 #define LZ_EPI_MAX_NG 64
+
+int lz_sig_mode(void) {
+    return (g_sig < 0) ? (q8r_have_simd() == 0) : g_sig;
+}
+
+int lz_sig_is_auto(void) { return g_sig < 0; }
+
+const char *lz_sig_select(const char *name) {
+    if (!name) return NULL;
+    if (strcmp(name, "float") == 0) g_sig = 0;
+    else if (strcmp(name, "fixed") == 0) g_sig = 1;
+    else if (strcmp(name, "auto") == 0) g_sig = -1;
+    else return NULL;
+    return lz_sig_mode() ? "fixed" : "float";
+}
 
 static int g_epi = -1;
 
