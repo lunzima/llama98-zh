@@ -705,14 +705,20 @@ int lz_attn_is_auto(void);
 #if LZ_ATTN_FIXED
 #define LZ_ATTN_MAX_HD 256
 #if (LZ_ATTN_FIXED & 1)
+/* sink/ring are forward.c's kv_slot() parameters, passed rather than
+   looked up: these kernels get a cache pointer, not the state. ring 0
+   means the cache is addressed by absolute position. Getting this wrong
+   is silent - the read lands on a real row belonging to some other
+   position - so the row walk is incremental and its wrap is asserted
+   against the same formula in the gate. */
 void lz_attn_score_q8(float *att, const float *qhh, int hd,
                       const int8_t *kc, const float *ks, int kvd,
-                      int pos, float scale);
+                      int pos, float scale, int sink, int ring);
 #endif
 #if (LZ_ATTN_FIXED & 2)
 void lz_attn_wsum_q8(float *out, const float *att, int hd,
                      const int8_t *vc, const float *vs, int kvd,
-                     int pos, float *cbuf, int16_t *cq);
+                     int pos, float *cbuf, int16_t *cq, int sink, int ring);
 #endif
 #endif
 

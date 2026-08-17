@@ -3257,6 +3257,22 @@ void lz_rope(float *v, int n_heads, int head_dim, int rotary_dim,
 #define LZ_ATTN_MAX_HD 256
 #define LZ_WSUM_CHUNK  512
 
+/* forward.c's kv_slot(), walked instead of computed: t only ever
+   increases in these kernels, so the slot advances by one and wraps at
+   sink+ring rather than costing a division per row. A division is 39
+   cycles on the x87 machines this tier exists for, against one compare.
+   The closed form stays as the gate's reference.
+
+   An expression, not a do/while: it has to sit in a for loop's third
+   clause, and it is used as a statement elsewhere, which an expression
+   also does.
+
+   Outside both bit guards because BOTH kernels need it - it sat under
+   `& 1` first and the -DLZ_ATTN_FIXED=2 build would not compile. */
+#define LZ_SLOT_NEXT(slot, sink, ring)                          \
+    ((slot) = (ring) && (slot) + 1 >= (sink) + (ring)           \
+              ? (sink) : (slot) + 1)
+
 #if (LZ_ATTN_FIXED & 2)
 #if defined(__WATCOMC__)
 /* Originally generated; hand-editing is allowed (rule lifted
@@ -3499,12 +3515,12 @@ static int32_t dot32_x16_attn_ref(const int8_t *w, const int16_t *x) {
 
 void lz_attn_score_q8(float *att, const float *qhh, int hd,
                       const int8_t *kc, const float *ks, int kvd,
-                      int pos, float scale) {
+                      int pos, float scale, int sink, int ring) {
     /* static, not stack (rule 6 item 4) */
     static int8_t  qq[LZ_ATTN_MAX_HD];
     static float   qs[LZ_ATTN_MAX_HD / 32];
     static int16_t qw[LZ_ATTN_MAX_HD];
-    int ng = hd / 32, g, t, i;
+    int ng = hd / 32, g, t, i, slot = 0;
 
     /* Once per head: the q quantization (a multiply per element, a
        reciprocal per group). Then per t: a convert, the qs*kts product
@@ -3516,9 +3532,9 @@ void lz_attn_score_q8(float *att, const float *qhh, int hd,
     lz_quantize_q8(qhh, hd, 32, qq, qs);
     for (i = 0; i < hd; i++) qw[i] = (int16_t)qq[i];
 
-    for (t = 0; t <= pos; t++) {
-        const int8_t *kt = kc + (size_t)t * kvd;
-        const float *kts = ks + (size_t)t * (kvd / 32);
+    for (t = 0; t <= pos; t++, LZ_SLOT_NEXT(slot, sink, ring)) {
+        const int8_t *kt = kc + (size_t)slot * kvd;
+        const float *kts = ks + (size_t)slot * (kvd / 32);
         int32_t rr[LZ_ATTN_MAX_HD / 32];
         float a0 = 0.0f, a1 = 0.0f, a2 = 0.0f, a3 = 0.0f;
 
@@ -3554,8 +3570,13 @@ void lz_attn_score_q8(float *att, const float *qhh, int hd,
    cannot be a fixed static array. */
 void lz_attn_wsum_q8(float *out, const float *att, int hd,
                      const int8_t *vc, const float *vs, int kvd,
-                     int pos, float *cbuf, int16_t *cq) {
+                     int pos, float *cbuf, int16_t *cq, int sink, int ring) {
     int ng = hd / 32, g, T = pos + 1;
+    /* Two independent walkers rather than one slot array: both passes
+       below visit t in ascending order from 0, so each can carry its own
+       running slot. An array would need a fixed cap, and a cap that a
+       long context silently exceeds is the same class of defect this
+       whole change exists to fix. */
 
     /* Per group: T to build the coefficients, 1 divide plus 2T to
        quantize them, 64 per int32 chunk to drain the accumulator, and 33
@@ -3570,8 +3591,9 @@ void lz_attn_wsum_q8(float *out, const float *att, int hd,
         float cmax = 0.0f, inv;
         int t, d, t0;
 
-        for (t = 0; t < T; t++) {
-            float c = att[t] * vs[(size_t)t * (kvd / 32) + g];
+        int slot = 0;
+        for (t = 0; t < T; t++, LZ_SLOT_NEXT(slot, sink, ring)) {
+            float c = att[t] * vs[(size_t)slot * (kvd / 32) + g];
             float ac = (c < 0.0f) ? -c : c;
             cbuf[t] = c;
             if (ac > cmax) cmax = ac;
@@ -3600,6 +3622,7 @@ void lz_attn_wsum_q8(float *out, const float *att, int hd,
         }
 
         for (d = 0; d < 32; d++) accf[d] = 0.0f;
+        slot = 0;                       /* second walk, same t order */
         for (t0 = 0; t0 < T; t0 += LZ_WSUM_CHUNK) {
             int tn = T - t0;
             int tp;
@@ -3607,18 +3630,23 @@ void lz_attn_wsum_q8(float *out, const float *att, int hd,
             memset(acc32, 0, sizeof(acc32));
             for (tp = t0; tp + 1 < t0 + tn; tp += 2) {
                 int16_t coef[4];
-                const int8_t *rowA = vc + (size_t)tp * kvd + (size_t)g * 32;
-                const int8_t *rowB = vc + (size_t)(tp + 1) * kvd + (size_t)g * 32;
+                const int8_t *rowA, *rowB;
+                int slotA = slot;
+                LZ_SLOT_NEXT(slot, sink, ring);
+                rowA = vc + (size_t)slotA * kvd + (size_t)g * 32;
+                rowB = vc + (size_t)slot  * kvd + (size_t)g * 32;
+                LZ_SLOT_NEXT(slot, sink, ring);
                 coef[0] = cq[tp];     coef[1] = cq[tp + 1];
                 coef[2] = cq[tp];     coef[3] = cq[tp + 1];
                 LZ_WSUM_PAIR(rowA, rowB, coef, acc32);
             }
             if (tp < t0 + tn) {            /* odd leftover row in this chunk */
                 int16_t coef[4];
-                const int8_t *rowA = vc + (size_t)tp * kvd + (size_t)g * 32;
+                const int8_t *rowA = vc + (size_t)slot * kvd + (size_t)g * 32;
                 coef[0] = cq[tp]; coef[1] = 0;
                 coef[2] = cq[tp]; coef[3] = 0;
                 LZ_WSUM_PAIR(rowA, rowA, coef, acc32);
+                LZ_SLOT_NEXT(slot, sink, ring);
             }
 #if defined(__MMX__)
             _mm_empty();      /* no x87 inside the row-pair loop above */

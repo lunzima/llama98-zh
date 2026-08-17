@@ -1374,13 +1374,13 @@ static void forward_attn(const LZModel *m, LZRunState *s,
             }
         }
 #define LZ_ATTN_DEAD(t) ((t) >= dead0 && (t) < dead1)
-/* The fixed kernels take a cache pointer and a position count, not the
-   state, so they cannot consult kv_slot() or the mask. Rather than widen
-   their signatures for a tier that is off by default, the caller refuses
-   them whenever either mechanism is live. Both are zero on the default
-   path until the AUTO window opens, which is why every measurement under
-   ~1040 tokens looked clean. */
-#define LZ_ATTN_NORING (s->kv_ring == 0 && s->attn_win == 0 && win_t0 == 0)
+/* The kernels take kv_slot()'s two parameters and walk the ring
+   themselves; what they still cannot express is win_t0, the
+   investigative override that leaves att[0..win_t0-1] unscored. Rows the
+   eviction MASK drops need no guard: the mask runs after scoring and
+   overwrites whatever the kernel put there, and after softmax their
+   weight is exactly zero. */
+#define LZ_ATTN_NORING (win_t0 == 0)
 
         for (h = 0; h < nh; h++) {
             const float *qhh = qht + (size_t)h * hd;
@@ -1438,7 +1438,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                 lz_attn_score_q8(s->att, qhh, hd,
                                  kc + (size_t)kvh * hd,
                                  ks + (size_t)(kvh * hd) / 32,
-                                 kvd, pos, scale);
+                                 kvd, pos, scale, s->attn_sink, s->kv_ring);
             } else
 #endif
             for (t = win_t0; t <= pos; t++) {
@@ -1479,7 +1479,8 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                     lz_attn_score_q8(s->att_lo, qhh, hd,
                                      kc_lo + (size_t)kvh * hd,
                                      ks + (size_t)(kvh * hd) / 32,
-                                     kvd, pos, scale);
+                                     kvd, pos, scale,
+                                     s->attn_sink, s->kv_ring);
                 } else
 #endif
                 for (tt = 0; tt <= pos; tt++) {
@@ -1571,7 +1572,8 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                 lz_attn_wsum_q8(out, s->att, hd,
                                 vc + (size_t)kvh * hd,
                                 vs + (size_t)(kvh * hd) / 32,
-                                kvd, pos, s->wsum_cbuf, s->wsum_cq);
+                                kvd, pos, s->wsum_cbuf, s->wsum_cq,
+                                s->attn_sink, s->kv_ring);
             } else {
 #endif
             memset(out, 0, (size_t)hd * sizeof(float));
@@ -1598,7 +1600,8 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                     lz_attn_wsum_q8(s->wsum_lo, s->att, hd,
                                     vc_lo + (size_t)kvh * hd,
                                     vs + (size_t)(kvh * hd) / 32,
-                                    kvd, pos, s->wsum_cbuf, s->wsum_cq);
+                                    kvd, pos, s->wsum_cbuf, s->wsum_cq,
+                                    s->attn_sink, s->kv_ring);
                 } else {
 #endif
                 memset(s->wsum_lo, 0, (size_t)hd * sizeof(float));
