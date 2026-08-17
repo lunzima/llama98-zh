@@ -99,6 +99,25 @@ void lz_f32_count_reset(void) {
 #endif
 }
 
+/* 2^e by integer manipulation of the exponent field. Deliberately not
+   ldexp/ldexpf: those are libm doubles, and iron law 2 wants every
+   transcendental inside the engine so the two builds cannot disagree
+   through somebody else's rounding - while iron law 6 clause 3 bars
+   double from the PC=24 region outright, which is where every caller of
+   this runs. It does no rounding at all, it writes an exponent, so the
+   two compilers agree by construction rather than by measurement.
+
+   One definition for the whole file: the fixed conv, epilogue and GDN
+   paths all need it, and three ways to build a power of two is three
+   chances for one of them to differ. */
+static float pow2f(int e) {
+    union { float f; uint32_t u; } b;
+    if (e < -126) return 0.0f;
+    if (e >  127) e = 127;
+    b.u = (uint32_t)(e + 127) << 23;
+    return b.f;
+}
+
 void lz_rmsnorm(float *o, const float *x, const float *w, int n, float eps) {
     float ss = 0.0f;
     float inv;
@@ -1033,9 +1052,9 @@ void lz_epi_prep(LZTensor *w, int in_dim) {
             w->sexp[row] = 0;
             continue;
         }
-        while (e < 100 && amax * (float)ldexp(1.0, e + 1) < 32767.0f) e++;
+        while (e < 100 && amax * pow2f(e + 1) < 32767.0f) e++;
         for (g = 0; g < ngw; g++) {
-            float t = ws[g] * (float)ldexp(1.0, e);
+            float t = ws[g] * pow2f(e);
             int q = (int)(t < 0.0f ? t - 0.5f : t + 0.5f);
             if (q >  32767) q =  32767;
             if (q < -32767) q = -32767;
@@ -1577,9 +1596,9 @@ static void epi_pack_act(const float *xqs, int nb, int nt) {
             g_epi_xe[tk] = 0;
             continue;
         }
-        while (e < 100 && amax * (float)ldexp(1.0, e + 1) < 32767.0f) e++;
+        while (e < 100 && amax * pow2f(e + 1) < 32767.0f) e++;
         for (g = 0; g < nb; g++) {
-            float t = xsb[g] * (float)ldexp(1.0, e);
+            float t = xsb[g] * pow2f(e);
             int q = (int)(t < 0.0f ? t - 0.5f : t + 0.5f);
             if (q >  32767) q =  32767;
             if (q < -32767) q = -32767;
@@ -1592,21 +1611,16 @@ static void epi_pack_act(const float *xqs, int nb, int nt) {
 static float epi_fixed(const int32_t *accb, const LZTensor *w, int row,
                        int tk, int ng, int r, float post) {
     const int16_t *ww = w->sq + (size_t)row * (ng / r);
-    union { float f; int32_t i; } p2;
     long long s;
     int g, e;
     for (g = 0; g < ng; g++)
         g_epi_m[g] = (int32_t)g_epi_xq[tk][g] * (int32_t)ww[g / r];
     s = lz_epi_mac(accb, g_epi_m, ng);
-    /* 2^-e built from the exponent field, not ldexp: the exponent is per
-       ROW, so a libm call here would run once per output element and cost
-       more than the epilogue it replaces. Same construction lz_exp uses. */
+    /* The exponent is per ROW, so a libm call here would run once per
+       output element and cost more than the epilogue it replaces. */
     e = -g_epi_xe[tk] - (int)w->sexp[row];
-    if (e < -126 || e > 127) return 0.0f;      /* scales this extreme mean
-                                                  an all-zero group */
-    p2.i = (e + 127) << 23;
     LZ_FC(LZ_FC_EPI, 3);                       /* convert, two multiplies */
-    return (float)s * p2.f * post;
+    return (float)s * pow2f(e) * post;
 }
 
 static float epi_q8(const int32_t *accb, const float *xsb, const float *ws,
@@ -4540,22 +4554,6 @@ static float *gdn_shadow(const int8_t *sq, int n) {
    a multiply by its reciprocal; the one real division has a variable
    divisor, which both compilers emit as a true divide). */
 #if LZ_GDN_FIXED
-/* 2^e and floor(log2|x|), both by integer manipulation of the exponent
-   field. Deliberately not ldexpf/frexpf: those are libm, and iron law 2
-   wants every transcendental in the engine so the two builds cannot
-   disagree via somebody else's rounding. These two do no rounding at
-   all - they read and write an exponent - so they are identical on both
-   sides by construction, which is the whole reason the normalization
-   below uses them. `x` must be normal; the caller guarantees it with
-   the LZ_Q8_MIN_SCALE guard. */
-static float pow2f(int e) {
-    union { float f; uint32_t u; } b;
-    if (e < -126) return 0.0f;
-    if (e >  127) e = 127;
-    b.u = (uint32_t)(e + 127) << 23;
-    return b.f;
-}
-
 static int expof(float x) {
     union { float f; uint32_t u; } b;
     b.f = x;
@@ -5750,9 +5748,9 @@ void lz_causal_conv1d_step_fixed(float *o, const float *x,
 void lz_conv_build_scales(float *oscale, float *in_scale,
                           const signed char *ew, int es, int n_ch) {
     int c;
-    *in_scale = (float)ldexp(1.0, es);
+    *in_scale = pow2f(es);
     for (c = 0; c < n_ch; c++)
-        oscale[c] = (float)ldexp(1.0, -((int)ew[c] + es));
+        oscale[c] = pow2f(-((int)ew[c] + es));
 }
 #endif /* LZ_CONV_FIXED */
 
