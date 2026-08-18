@@ -424,6 +424,19 @@ def check_function(name, insns, extra_float_fns, addr_to_name=None, is64=False):
             if unk_call:
                 unresolved.append((insn.addr, insn.raw.strip()))
             depth += delta
+            # The hardware has eight slots. A push past the eighth raises
+            # a masked stack overflow and delivers real indefinite
+            # (0xFFC00000) instead of a value - which is a NaN nothing
+            # downstream distinguishes from a computed one. Balance alone
+            # does not catch this: the pushes and pops still pair, the
+            # peak simply does not fit. This is a separate finding kind
+            # from a join mismatch and must not be folded into one.
+            if depth > 8:
+                findings.append({
+                    'kind': 'depth-overflow', 'func': name,
+                    'addr': insn.addr, 'depth': depth,
+                    'text': '%s: depth %d exceeds the 8 physical '
+                            'registers' % (insn.raw.strip(), depth)})
         succs, indirect = successors(block, blocks)
         if indirect:
             unresolved.append((block[-1].addr, block[-1].raw.strip()))
@@ -483,6 +496,10 @@ def format_findings(findings):
                 f"BAD RET DEPTH  {f['func']}  ret at 0x{f['addr']:x}: "
                 f"stack depth {f['got']}, expected {f['expect']}  "
                 f"[{f['insn']}]")
+        elif f['kind'] == 'depth-overflow':
+            lines.append(
+                f"DEPTH OVERFLOW {f['func']}  0x{f['addr']:x}: "
+                f"{f['text']}")
         elif f['kind'] == 'unresolved':
             for addr, raw in f['sites']:
                 lines.append(
