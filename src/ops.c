@@ -183,14 +183,34 @@ static float pow2f(int e) {
     return b.f;
 }
 
+/* Defined after expof, near the end of the file - see the comment on
+   its definition for why. */
+static float norm_ss_fixed(const float *x, int n);
+
 void lz_rmsnorm(float *o, const float *x, const float *w, int n, float eps) {
     float ss = 0.0f;
     float inv;
+    float ssf;
     int i;
+    if (lz_norm_mode()) {
+        ssf = norm_ss_fixed(x, n);
+        if (ssf >= 0.0f) {
+            /* norm_ss_fixed itself is mul + q8_round per element (2n,
+               the same two float ops the loop below spends) plus a
+               convert and a mul once at the end to bring the int64
+               accumulator back to float (2) - it has no site of its
+               own, so its cost is folded in here. Untouched: the 3n
+               output loop and the divide+eps (2). */
+            LZ_FC(LZ_FC_NORM, 5 * n + 4);
+            ss = ssf;
+            goto have_ss;
+        }
+    }
     /* 2n accumulating ss, 2 for the divide and the eps add, 3n in the
        output loop (two multiplies and the 1+w add). rsqrt bills itself. */
     LZ_FC(LZ_FC_NORM, 5 * n + 2);
     for (i = 0; i < n; i++) ss += x[i] * x[i];
+have_ss:
     inv = lz_rsqrt(ss / (float)n + eps);
     /* (1 + w), not w: see the header */
     i = 0;
@@ -212,11 +232,25 @@ void lz_rmsnorm_gated(float *o, const float *x, const float *g,
                           const float *w, int n, float eps) {
     float ss = 0.0f;
     float inv;
+    float ssf;
     int i;
+    if (lz_norm_mode()) {
+        ssf = norm_ss_fixed(x, n);
+        if (ssf >= 0.0f) {
+            /* Same replacement as lz_rmsnorm: norm_ss_fixed's own 2n+2
+               in place of the 2n float ss loop. Untouched: the 3n
+               output loop (one more multiply than lz_rmsnorm's, the
+               gate) and the divide+eps (2). */
+            LZ_FC(LZ_FC_NORM, 6 * n + 4);
+            ss = ssf;
+            goto have_ss_gated;
+        }
+    }
     /* One more multiply per element than lz_rmsnorm: the gate. silu
        bills itself. */
     LZ_FC(LZ_FC_NORM, 6 * n + 2);
     for (i = 0; i < n; i++) ss += x[i] * x[i];
+have_ss_gated:
     inv = lz_rsqrt(ss / (float)n + eps);
     /* plain w here, and the gate applies last */
     for (i = 0; i < n; i++) o[i] = x[i] * inv * w[i] * lz_silu(g[i]);
@@ -225,9 +259,23 @@ void lz_rmsnorm_gated(float *o, const float *x, const float *g,
 void lz_l2norm(float *o, const float *x, int n, float eps) {
     float ss = 0.0f;
     float inv;
+    float ssf;
     int i;
+    if (lz_norm_mode()) {
+        ssf = norm_ss_fixed(x, n);
+        if (ssf >= 0.0f) {
+            /* Same replacement again: norm_ss_fixed's 2n+2 in place of
+               the 2n float ss loop. Untouched: the 1n output loop (a
+               single multiply, no weight) and the eps add (1, no
+               divide - l2norm normalizes by the sum, not the mean). */
+            LZ_FC(LZ_FC_NORM, 4 * n + 3);
+            ss = ssf;
+            goto have_ss_l2;
+        }
+    }
     LZ_FC(LZ_FC_NORM, 4 * n + 1);
     for (i = 0; i < n; i++) ss += x[i] * x[i];
+have_ss_l2:
     inv = lz_rsqrt(ss + eps);          /* sum, not mean */
     for (i = 0; i < n; i++) o[i] = x[i] * inv;
 }
@@ -1141,6 +1189,13 @@ const char *lz_attn_select(const char *name) {
    product is |acc| * |xw*ww| <= 2^27 * 2^30, so ng of them stay inside
    int64 while ng <= 64. in_dim beyond 2048 keeps the float path. */
 #define LZ_EPI_MAX_NG 64
+
+/* The widest norm this engine sees is one hidden vector. The shipping
+   config is 512; 4096 covers every target config with room. Above it
+   the tier declines and the float path runs, which is why
+   norm_ss_fixed returns a sentinel rather than truncating. A static
+   buffer because the target's stack is small. */
+#define LZ_NORM_MAX_N 4096
 
 int lz_sig_mode(void) {
     return (g_sig < 0) ? lz_soft_float_target() : g_sig;
@@ -4766,6 +4821,64 @@ static int expof(float x) {
     return (int)((b.u >> 23) & 0xFFu) - 127;
 }
 
+/* Sum of squares for the norms fixed tier, with the accumulation done
+   as a per-element multiply-add in the INTEGER domain rather than
+   float. Getting each element there still costs two float operations -
+   the scale and q8_round's rounding add - which is exactly what the
+   float loop this replaces spends on its own multiply-add, so this
+   matches that cost rather than beating it. What it buys is an integer
+   entry point: fused onto an epilogue that already emits integers, the
+   two float operations disappear into work already being done there.
+
+   The scale is a power of two, so it is exact in binary, adds no
+   rounding of its own, and cannot differ between x87 and SSE.
+
+   Declines by returning -1 rather than truncating, so an oversized n
+   runs the float path instead of being silently wrong. */
+static float norm_ss_fixed(const float *x, int n) {
+    /* static, not stack: the target's stack is small. Single-threaded
+       forward pass, the same assumption lz_gdn_quantize_2p's res[]
+       already makes. */
+    static short q[LZ_NORM_MAX_N];
+    union { float f; uint32_t u; } bit;
+    long long acc = 0;
+    float sc;
+    int i, e;
+
+    if (n > LZ_NORM_MAX_N || n <= 0) return -1.0f;
+    /* Dispatched through the amax kernel table, so it moves with
+       --kernel, and it compares sign-cleared BIT PATTERNS as unsigned
+       integers - no float operation in the scan at all. The float
+       compare a naive scan would use costs more than this whole
+       function's remaining float work. */
+    bit.u = q8_amax(x, n);
+    if (bit.u == 0) return 0.0f;               /* all zero, exactly */
+    /* Exponent straight out of the bit pattern; expof and pow2f are
+       both pure bit manipulation. 14, not 15: the squares must stay
+       inside int32 and 32767^2 already does, but leaving a bit of
+       headroom keeps the clamp below unreachable in practice. */
+    e = 14 - expof(bit.f);
+    sc = pow2f(e);
+    for (i = 0; i < n; i++) {
+        int v = q8_round(x[i] * sc);           /* one mul, one magic add */
+        if (v >  32767) v =  32767;
+        if (v < -32767) v = -32767;
+        q[i] = (short)v;
+        acc += (long long)(v * v);
+    }
+    return (float)acc * pow2f(-2 * e);
+}
+#else
+/* No fixed GDN in this build, so no expof to derive the scale from.
+   Declining sends every caller down the float path, which is the
+   correct behaviour for a build with no fixed arithmetic at all. */
+static float norm_ss_fixed(const float *x, int n) {
+    (void)x; (void)n;
+    return -1.0f;
+}
+#endif
+
+#if LZ_GDN_FIXED
 /* THE SPLIT IS A SHIFT, AND THE SHIFT IS 8 BECAUSE L IS 256. Every
    `>> 8`, `<< 8` and `* 256` in the fixed pass 2 is that one constant
    written three ways; ops.h's LZ_GDN_LO_SCALE is the same number a
