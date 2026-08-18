@@ -261,10 +261,18 @@ is correct. Comparing the two disassemblies at the same call answers it:
 | | live x87 depth at the call to `p2_group_norm` |
 |---|---|
 | Open Watcom | **0** |
-| gcc `-m32 -march=i686 -mfpmath=387 -O2` | **7** (hardware tag word `0xe015`) |
+| gcc 13.3 `-m32 -march=i686 -mfpmath=387 -O2` | **7** (tag word `0xe015`) |
+| gcc 14.2, same flags | **7** (tag word `0xe005`) |
+| gcc 16.1 (mingw), same flags | peak **7** in the same function (static count; not run - no 32-bit libs) |
 
-The x87 stack is one fixed eight-slot resource and nothing in the ABI
-reserves any of it for a callee. `p2_group_norm` pushes on top of those
+**Not a version regression.** Three gcc releases spanning 13.3 to 16.1
+put the same peak in the same function, and 13.3 and 14.2 both produce
+all-NaN output and are both repaired by the same flag. Upgrading the
+toolchain is not a route out.
+
+The x87 stack is one fixed eight-slot resource. Nothing reserves any of
+it for a callee - see "What rule is broken, stated carefully" below for
+what the ABI does and does not say about this. `p2_group_norm` pushes on top of those
 seven, the push past the eighth raises a masked stack overflow, and the
 hardware delivers real indefinite (`0xFFC00000`) instead of a value.
 Every NaN downstream is that one, propagated by ordinary IEEE contagion.
@@ -290,10 +298,38 @@ disables the pass that hoists loop-invariant values, and `-fno-inline`
 helps only because changing inlining changes what is loop-invariant.
 
 **There is therefore no source-level fix, and `noinline` is not one.**
-The rule being broken is the i386 ABI's requirement that the x87 stack
-be empty across a call, which is an obligation on the code generator.
 No annotation in C says "do not keep values in x87 registers across this
 call" - that is what the register allocator is for.
+
+**What rule is broken, stated carefully.** An earlier version of this
+document claimed the i386 ABI requires the x87 stack to be empty across
+a call. **That claim is not supported by the specification.** The
+Intel386 psABI (1.0, 2015) Table 2.3 says only:
+
+| register | usage | preserved across calls |
+|---|---|---|
+| `%st0` | scratch; also returns float/double/long double | No |
+| `%st1`-`%st7` | scratch | No |
+
+"Scratch, not preserved" binds the *callee's* freedom to clobber. It
+does not require an empty stack at entry, and no such sentence appears
+in that document. `p2_group_norm` is also `static`, so gcc sees every
+call site and is entitled to use a non-standard convention for it; the
+psABI does not govern that call at all.
+
+The defect does not need an ABI to be a defect. **There are eight
+physical registers and gcc arranged for more than eight values to be
+live at one point.** The callee pushes onto a stack that already holds
+seven, the ninth push raises a masked overflow, and the hardware returns
+real indefinite. That is a resource over-allocation - a miscompilation
+on its own terms, whatever the calling convention says.
+
+The one ABI rule verified as relevant here is the MMX one, and it is
+not the mechanism: "The CPU shall be in x87 mode upon entry to a
+function. Therefore, every function that uses the MMX registers is
+required to issue an emms or femms instruction after using MMX
+registers, before returning or calling another function." That was
+ruled out separately by the tag-word classification.
 
 This is a register-allocation defect, not a source defect: the same C is
 correct under two other toolchains, and the allocator's obligation is to
