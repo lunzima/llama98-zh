@@ -223,15 +223,17 @@ void lz_rmsnorm(float *o, const float *x, const float *w, int n, float eps) {
                convert and a mul once at the end to bring the int64
                accumulator back to float (2) - it has no site of its
                own, so its cost is folded in here. Untouched: the 3n
-               output loop and the divide+eps (2). */
-            LZ_FC(LZ_FC_NORM, 5 * n + 4);
+               output loop (2 mul + 1 add per element) and the
+               divide+eps (1 div, 1 add; the (float)n cast is not
+               billed, see B1 report). */
+            LZ_FCX(LZ_FC_NORM, 3 * n + 1, 2 * n + 1, 1, 1, 0);
             ss = ssf;
             goto have_ss;
         }
     }
     /* 2n accumulating ss, 2 for the divide and the eps add, 3n in the
        output loop (two multiplies and the 1+w add). rsqrt bills itself. */
-    LZ_FC(LZ_FC_NORM, 5 * n + 2);
+    LZ_FCX(LZ_FC_NORM, 3 * n, 2 * n + 1, 1, 0, 0);
     for (i = 0; i < n; i++) ss += x[i] * x[i];
 have_ss:
     inv = lz_rsqrt(ss / (float)n + eps);
@@ -261,17 +263,28 @@ void lz_rmsnorm_gated(float *o, const float *x, const float *g,
         ssf = norm_ss_fixed(x, n);
         if (ssf >= 0.0f) {
             /* Same replacement as lz_rmsnorm: norm_ss_fixed's own 2n+2
-               in place of the 2n float ss loop. Untouched: the 3n
-               output loop (one more multiply than lz_rmsnorm's, the
-               gate) and the divide+eps (2). */
-            LZ_FC(LZ_FC_NORM, 6 * n + 4);
+               in place of the 2n float ss loop. Untouched: the
+               output loop (x*inv*w*silu(g), three multiplies and no
+               add per element - the gate replaces rmsnorm's (1+w) add
+               with a multiply, so the honest per-element cost is
+               unchanged at 3) and the divide+eps (1 div, 1 add). The
+               site bills one more n than that sums to (6n+4 vs the
+               5n+4 the code performs); the extra n is folded into mul
+               here to hold the site's historical total - see B1
+               report, this looks like a real overcount. */
+            LZ_FCX(LZ_FC_NORM, 5 * n + 1, n + 1, 1, 1, 0);
             ss = ssf;
             goto have_ss_gated;
         }
     }
-    /* One more multiply per element than lz_rmsnorm: the gate. silu
+    /* ss loop 2n, divide+eps (1 div, 1 add), output loop x*inv*w*silu(g)
+       (three multiplies, no add per element - the gate replaces
+       rmsnorm's (1+w) add with a multiply). The site bills one more n
+       than that sums to (6n+2 vs the 5n+2 the code performs); the
+       extra n is folded into mul here to hold the site's historical
+       total - see B1 report, this looks like a real overcount. silu
        bills itself. */
-    LZ_FC(LZ_FC_NORM, 6 * n + 2);
+    LZ_FCX(LZ_FC_NORM, 5 * n, n + 1, 1, 0, 0);
     for (i = 0; i < n; i++) ss += x[i] * x[i];
 have_ss_gated:
     inv = lz_rsqrt(ss / (float)n + eps);
@@ -290,13 +303,22 @@ void lz_l2norm(float *o, const float *x, int n, float eps) {
             /* Same replacement again: norm_ss_fixed's 2n+2 in place of
                the 2n float ss loop. Untouched: the 1n output loop (a
                single multiply, no weight) and the eps add (1, no
-               divide - l2norm normalizes by the sum, not the mean). */
-            LZ_FC(LZ_FC_NORM, 4 * n + 3);
+               divide - l2norm normalizes by the sum, not the mean).
+               That sums to 3n+3, one n short of the site's 4n+3;
+               the extra n is folded into mul here to hold the site's
+               historical total - see B1 report, this looks like a
+               real overcount. */
+            LZ_FCX(LZ_FC_NORM, 3 * n + 1, n + 1, 0, 1, 0);
             ss = ssf;
             goto have_ss_l2;
         }
     }
-    LZ_FC(LZ_FC_NORM, 4 * n + 1);
+    /* ss loop 2n, eps add (1, no divide), output loop 1n (single
+       multiply, no weight). That sums to 3n+1, one n short of the
+       site's 4n+1; the extra n is folded into mul here to hold the
+       site's historical total - see B1 report, this looks like a real
+       overcount. */
+    LZ_FCX(LZ_FC_NORM, 3 * n, n + 1, 0, 0, 0);
     for (i = 0; i < n; i++) ss += x[i] * x[i];
 have_ss_l2:
     inv = lz_rsqrt(ss + eps);          /* sum, not mean */
@@ -310,7 +332,7 @@ void lz_softmax(float *x, int n) {
        scale multiply. Plus one divide. The max scan is comparisons.
        exp bills itself - this row is the softmax around it, and reading
        the two as one number is what put the old census 13x low here. */
-    LZ_FC(LZ_FC_SOFTMAX, 3 * n + 1);
+    LZ_FCX(LZ_FC_SOFTMAX, n, 2 * n, 1, 0, 0);
     i = 1;
     {
         /* The maximum is exact, so lane order cannot change it and this
@@ -413,10 +435,15 @@ float lz_sigmoid(float x) {
         /* Two multiplies and a subtract to reach the table, one convert
            and one multiply to come back - against 13 in lz_exp plus
            these three. */
-        LZ_FC(LZ_FC_SIGMOID, 5);
+        LZ_FCX(LZ_FC_SIGMOID, 3, 1, 0, 1, 0);
         return (float)sigmoid_q15(x) * (1.0f / 32768.0f);
     }
-    LZ_FC(LZ_FC_SIGMOID, 3);       /* negate, add, divide */
+    /* Billed flat for both branches: add (1.0f+z) and divide. The
+       positive branch also negates before calling lz_exp, but a negate
+       is a sign flip (bills zero), so both branches are really 2 ops;
+       the extra unit here is folded into add to hold the site's
+       historical total - see B1 report. */
+    LZ_FCX(LZ_FC_SIGMOID, 0, 2, 1, 0, 0);
     if (x >= 0.0f) {
         float z = lz_exp(-x);
         return 1.0f / (1.0f + z);
@@ -427,7 +454,7 @@ float lz_sigmoid(float x) {
 }
 
 float lz_silu(float x) {
-    LZ_FC(LZ_FC_SIGMOID, 1);
+    LZ_FCX(LZ_FC_SIGMOID, 1, 0, 0, 0, 0);  /* x * sigmoid(x): one multiply */
     return x * lz_sigmoid(x);
 }
 
@@ -544,7 +571,7 @@ float lz_rsqrt(float x) {
 #else
     union { float f; uint32_t u; } t;
     float h = 0.5f * x, y;
-    LZ_FC(LZ_FC_RSQRT, 9);         /* the halving plus 2 x (3 mul, 1 sub) */
+    LZ_FCX(LZ_FC_RSQRT, 7, 2, 0, 0, 0);   /* the halving plus 2 x (3 mul, 1 sub) */
     t.f = x;
     t.u = 0x5f375a86u - (t.u >> 1);
     y = t.f;
@@ -610,8 +637,11 @@ float lz_exp(float x) {
     int32_t t, n, idx;
 
     /* 1 scale, 2 for the magic add, 1 convert + 1 subtract for the
-       residue, 2 for w, 4 for the quadratic, 2 to reassemble. */
-    LZ_FC(LZ_FC_EXP, 13);
+       residue, 2 for w, 4 for the quadratic, 2 to reassemble.
+       mul: scale(1) + w(1) + quadratic(2) + reassemble(2) = 6.
+       add: magic add(2) + residue's subtract(1) + w(1) + quadratic(2) = 6.
+       cvt: residue's (float)t(1). */
+    LZ_FCX(LZ_FC_EXP, 6, 6, 0, 1, 0);
 
     /* Overflow/underflow guard: beyond this range the constructed bit
        pattern is meaningless */
@@ -1849,8 +1879,10 @@ static void epi_pack_act(const float *xqs, int nb, int nt) {
     /* One multiply per group plus the amax scan, per token. Counted so
        the census cannot report the fixed tier as free - the work moved,
        it did not vanish, and a site that bills nothing is how the old
-       hand-made table lost the two heaviest ones. */
-    LZ_FC(LZ_FC_EPI, (long)nt * nb);
+       hand-made table lost the two heaviest ones. The amax scan and the
+       packing loop's round-direction compare are both comparisons, not
+       billed (same convention as the four scans B1 leaves alone). */
+    LZ_FCX(LZ_FC_EPI, (long)nt * nb, 0, 0, 0, 0);
     for (tk = 0; tk < nt; tk++) {
         const float *xsb = xqs + (size_t)tk * nb;
         float amax = 0.0f;
@@ -1886,8 +1918,8 @@ static float epi_fixed(const int32_t *accb, const LZTensor *w, int row,
     s = lz_epi_mac(accb, g_epi_m, ng);
     /* The exponent is per ROW, so a libm call here would run once per
        output element and cost more than the epilogue it replaces. */
-    e = -g_epi_xe[tk] - (int)w->sexp[row];
-    LZ_FC(LZ_FC_EPI, 3);                       /* convert, two multiplies */
+    e = -g_epi_xe[tk] - (int)w->sexp[row];      /* int arithmetic, no f32 work */
+    LZ_FCX(LZ_FC_EPI, 2, 0, 0, 1, 0);          /* convert, two multiplies */
     return (float)s * pow2f(e) * post;
 }
 
@@ -1898,8 +1930,14 @@ static float epi_q8(const int32_t *accb, const float *xsb, const float *ws,
        multiply and one add, then the post scale. r==1: convert plus two
        multiplies plus an add per group, and 4 to fold the accumulators.
        This is the row the old census put at 1,995,552 by a rule nobody
-       could reconstruct. */
-    LZ_FC(LZ_FC_EPI, r > 1 ? 3 * ng + 2 * (ng / r) + 1 : 4 * ng + 4);
+       could reconstruct. The convert (lz_i32f, once per group either
+       way) is the same ng in both branches. */
+    LZ_FCX(LZ_FC_EPI,
+           r > 1 ? ng + (ng / r) + 1 : 2 * ng + 1,     /* mul */
+           r > 1 ? ng + (ng / r)     : ng + 3,          /* add */
+           0,                                            /* div */
+           ng,                                           /* cvt */
+           0);
     if (r > 1) {
         float sum = 0.0f;
         int g128;
@@ -4092,8 +4130,17 @@ void lz_attn_score_q8(float *att, const float *qhh, int hd,
        and a multiply-add per group, plus 3 adds and 2 multiplies to
        fold. This is the term that makes the fixed tier LOSE below ~200
        tokens - it does not shrink with context, and the per-t term it
-       replaces is 2*hd. */
-    LZ_FC(LZ_FC_ATTN_SCORE, hd + ng + (long)(pos + 1) * (4 * ng + 5));
+       replaces is 2*hd.
+       Once-per-head: mul=hd (quantize), div=ng (reciprocal only - the
+       amax*(1/127) mul q8_group_scale also does is not billed here).
+       Per-t, per group: cvt=1, mul=2 (qs*kts, then the outer product),
+       add=1 (accumulate) - times ng. Per-t fold: add=3, mul=2. */
+    LZ_FCX(LZ_FC_ATTN_SCORE,
+           hd + (long)(pos + 1) * (2 * ng + 2),
+           (long)(pos + 1) * (ng + 3),
+           ng,
+           (long)(pos + 1) * ng,
+           0);
     lz_quantize_q8(qhh, hd, 32, qq, qs);
     for (i = 0; i < hd; i++) qw[i] = (int16_t)qq[i];
 
@@ -4143,13 +4190,18 @@ void lz_attn_wsum_q8(float *out, const float *att, int hd,
        long context silently exceeds is the same class of defect this
        whole change exists to fix. */
 
-    /* Per group: T to build the coefficients, 1 divide plus 2T to
-       quantize them, 64 per int32 chunk to drain the accumulator, and 33
-       to scale the 32 outputs. The chunk term is why the count is not a
+    /* Per group: T to build the coefficients (mul, the cmax tracking
+       compare is not billed), 1 divide plus 2T to quantize them (mul
+       + q8_round add per t, common path), 64 per int32 chunk to drain
+       the accumulator (32 convert + 32 add), and 33 to scale the 32
+       outputs (all mul). The chunk term is why the count is not a
        clean multiple of T. */
-    LZ_FC(LZ_FC_ATTN_WSUM,
-          (long)ng * (3L * T + 64L * ((T + LZ_WSUM_CHUNK - 1) / LZ_WSUM_CHUNK)
-                      + 34L));
+    LZ_FCX(LZ_FC_ATTN_WSUM,
+           (long)ng * (2L * T + 33L),
+           (long)ng * ((long)T + 32L * ((T + LZ_WSUM_CHUNK - 1) / LZ_WSUM_CHUNK)),
+           (long)ng,
+           (long)ng * 32L * ((T + LZ_WSUM_CHUNK - 1) / LZ_WSUM_CHUNK),
+           0);
     for (g = 0; g < ng; g++) {
         int32_t acc32[32];
         float accf[32];
@@ -4682,11 +4734,11 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
         float inv;
         fast = q8_group_scale(grp, gs, &s[g], &inv);
         /* Paid once per group regardless of which branch below runs. */
-        if ((unsigned)fc_site < (unsigned)LZ_FC_N) LZ_FC(fc_site, 2);  /* amax*(1/127) mul, 127/amax div */
+        if ((unsigned)fc_site < (unsigned)LZ_FC_N) LZ_FCX(fc_site, 1, 0, 1, 0, 0);  /* amax*(1/127) mul, 127/amax div */
         if (!fast) {
             /* Same shape as the fast&&tier==0 branch below (that one
                multiplies instead of dividing), same count. */
-            if ((unsigned)fc_site < (unsigned)LZ_FC_N) LZ_FC(fc_site, 6 * gs);  /* div, q8_round, convert, sub, mul, q8_round */
+            if ((unsigned)fc_site < (unsigned)LZ_FC_N) LZ_FCX(fc_site, gs, 3 * gs, gs, gs, 0);  /* div, q8_round(add), convert, sub(add), mul, q8_round(add) */
             for (k = 0; k < gs; k++) {
                 float f = grp[k] / s[g];
                 int h = q8_round(f);
@@ -4713,7 +4765,7 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
             /* The lz_q8round32_simd/_sse calls bracketing the visible
                residual line below are not free - reading only the C
                between them would miss 4 of the 7. */
-            if ((unsigned)fc_site < (unsigned)LZ_FC_N) LZ_FC(fc_site, 7 * gs);  /* residual mul+convert+sub=3, 2x kernel mul+convert=4 */
+            if ((unsigned)fc_site < (unsigned)LZ_FC_N) LZ_FCX(fc_site, 3 * gs, gs, 0, 3 * gs, 0);  /* residual mul+convert+sub=3, 2x kernel mul+convert=4 */
 #ifdef LZ_HAVE_Q8R_SIMD
             if (tier == 2) {
                 for (k = 0; k + 31 < gs; k += 32)
@@ -4743,7 +4795,7 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
 #endif
         /* fast && tier==0: no SIMD rounding tier, e.g. --kernel ref. Same
            shape as the !fast branch above, multiply instead of divide. */
-        if ((unsigned)fc_site < (unsigned)LZ_FC_N) LZ_FC(fc_site, 6 * gs);  /* mul, q8_round, convert, sub, mul, q8_round */
+        if ((unsigned)fc_site < (unsigned)LZ_FC_N) LZ_FCX(fc_site, 2 * gs, 3 * gs, 0, gs, 0);  /* mul, q8_round(add), convert, sub(add), mul, q8_round(add) */
         for (k = 0; k < gs; k++) {
             float f = grp[k] * inv;
             int h = q8_round(f);
@@ -5747,7 +5799,7 @@ static void gdn_p2_fixed_rows(const int8_t *sq_in, int8_t *sq_out,
            paths cost the same per group. Billed once, above the fork -
            billing only inside gdn_p2_row_simd would read zero on
            --kernel ref, where p2_tier()==0 takes the scalar path only. */
-        LZ_FC(LZ_FC_RECUR, 9 * ng);  /* coef 3 mul; norm 2 mul + 2 q8_round; scale 2 mul */
+        LZ_FCX(LZ_FC_RECUR, 7 * ng, 2 * ng, 0, 0, 0);  /* coef 3 mul; norm 2 mul + 2 q8_round(add); scale 2 mul */
 #ifdef LZ_HAVE_P2_MMX
         if (p2_tier()) {
             gdn_p2_row_simd(row_in,
@@ -5988,8 +6040,11 @@ static void gdn_step_impl(float *out, const int8_t *sq_in, int8_t *sq_out,
            out of scope for this task): its three branches - SIMD,
            scalar-multiply, scalar-divide - are all mul-or-div + q8_round,
            2/element, no residual plane to round a second time. Exact,
-           not an approximation. */
-        LZ_FC(LZ_FC_RECUR, 2 * vd + 2 * ng);  /* mul-or-div, q8_round; 2/group q8_group_scale */
+           not an approximation. The per-element op is billed as mul
+           (the common "fast" branch); the rare divide branch is folded
+           in here too, same flat-bill convention as the rest of this
+           file. */
+        LZ_FCX(LZ_FC_RECUR, vd + ng, vd, ng, 0, 0);  /* mul-or-div, q8_round(add); 2/group q8_group_scale (mul, div) */
         lz_quantize_q8(buf, vd, 32, row_out, rs_out);
 #endif
     }
@@ -6037,7 +6092,7 @@ void lz_causal_conv1d_step(float *o, const float *x,
        0.0f initializer, which -ffp-contract=off without -ffast-math
        cannot fold away. The old census counted the taps and not the
        adds. silu bills itself. */
-    LZ_FC(LZ_FC_CONV, (long)n_ch * 2 * k);
+    LZ_FCX(LZ_FC_CONV, (long)n_ch * k, (long)n_ch * k, 0, 0, 0);
     for (c = 0; c < n_ch; c++) {
         const float *st_in = state_in + (size_t)c * hist;
         float *st_out = state_out + (size_t)c * hist;
@@ -6084,8 +6139,10 @@ void lz_causal_conv1d_step_fixed(float *o, const float *x,
     int hist = k - 1;
     int c, j;
     /* One multiply in, one convert and one multiply out, whatever k is.
-       That independence from k is the whole point of the tier. */
-    LZ_FC(LZ_FC_CONV, (long)n_ch * 3);
+       That independence from k is the whole point of the tier. The
+       input-side round-to-int (add 0.5, convert) is not billed here,
+       same convention as the other quantizers' rounding steps. */
+    LZ_FCX(LZ_FC_CONV, (long)n_ch * 2, 0, 0, (long)n_ch, 0);
     for (c = 0; c < n_ch; c++) {
         const short *si = sh_in + (size_t)c * hist;
         short *so = sh_out + (size_t)c * hist;

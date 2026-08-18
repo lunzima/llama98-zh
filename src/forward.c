@@ -1458,7 +1458,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                 float sum = 0.0f;
                 /* A convert, a multiply and an add per element; a
                    multiply and an add per group; one output scale. */
-                LZ_FC(LZ_FC_ATTN_SCORE, 3 * hd + 2 * (hd / 32) + 1);
+                LZ_FCX(LZ_FC_ATTN_SCORE, hd + (hd / 32) + 1, hd + (hd / 32), 0, hd, 0);
                 for (d = 0; d < hd; d += 32) {
                     float acc = 0.0f;
                     int e;
@@ -1491,7 +1491,10 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                     const float *kts = ks + (size_t)kv_slot(s, tt) * kvd / 32 +
                                        (size_t)(kvh * hd) / 32;
                     float sum = 0.0f;
-                    LZ_FC(LZ_FC_ATTN_SCORE, 3 * hd + 2 * (hd / 32) + 1);
+                    /* Same shape as the scoring loop above: convert +
+                       multiply + add per element, multiply + add per
+                       group, one output scale. */
+                    LZ_FCX(LZ_FC_ATTN_SCORE, hd + (hd / 32) + 1, hd + (hd / 32), 0, hd, 0);
                     for (d = 0; d < hd; d += 32) {
                         float acc = 0.0f;
                         int e;
@@ -1560,7 +1563,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                     if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
                     const float *vt = vf + (size_t)kv_slot(s, t) * kvd + (size_t)kvh * hd;
                     float a = s->att[t];
-                    LZ_FC(LZ_FC_ATTN_WSUM, 2 * hd);   /* f32 V: no convert */
+                    LZ_FCX(LZ_FC_ATTN_WSUM, hd, hd, 0, 0, 0);   /* f32 V: no convert */
                     for (d = 0; d < hd; d++) out[d] += a * vt[d];
                 }
             } else
@@ -1587,7 +1590,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                                    (size_t)(kvh * hd) / 32;
                 float a = s->att[t];
                 /* Convert, two multiplies and an add per element. */
-                LZ_FC(LZ_FC_ATTN_WSUM, 4 * hd);
+                LZ_FCX(LZ_FC_ATTN_WSUM, 2 * hd, hd, 0, hd, 0);
                 for (d = 0; d < hd; d++) out[d] += a * (float)vt[d] * vts[d / 32];
             }
 #if (LZ_ATTN_FIXED & 2)
@@ -1614,7 +1617,9 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                     const float *vts = vs + (size_t)kv_slot(s, t) * kvd / 32 +
                                        (size_t)(kvh * hd) / 32;
                     float a = s->att[t];
-                    LZ_FC(LZ_FC_ATTN_WSUM, 4 * hd);
+                    /* Same shape as the wsum loop above: convert, two
+                       multiplies and an add per element. */
+                    LZ_FCX(LZ_FC_ATTN_WSUM, 2 * hd, hd, 0, hd, 0);
                     for (d = 0; d < hd; d++)
                         s->wsum_lo[d] += a * (float)vt[d] * vts[d / 32];
                 }
