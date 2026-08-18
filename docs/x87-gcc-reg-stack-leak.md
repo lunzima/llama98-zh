@@ -1,21 +1,49 @@
 # x87 stack leak in gcc -O2 -m32 -mfpmath=387, reproduced in llama98
 
-Status: **root-caused to a containing function; exact leaking instruction
-not identified**. Worked around with a build flag
-(`-fno-rerun-cse-after-loop`, see `build/x87/build_engine.sh`); not fixed
-in source, because the trigger condition could not be reproduced in
-isolation (see "Why this is hard to reduce further" below).
+Status: **ROOT CAUSE UNKNOWN. PROVISIONAL WORKAROUND ONLY.** Worked
+around with a build flag (`-fno-rerun-cse-after-loop`, see
+`build/x87/build_engine.sh`); not fixed in source, because the trigger
+condition could not be reproduced in isolation (see "Why this is hard to
+reduce further" below).
 
-## One-sentence mechanism
+An earlier version of this document, and of the build script's own
+comment, stated the mechanism below as an established fact - "leaves
+the x87 stack non-empty on return from a function reachable from
+`gdn_p2_fixed_rows`'s per-row/per-group loop." **That claim is wrong**,
+disproven by the static verifier described in "Static verification: the
+depth-imbalance theory is dead" below, and left here struck through
+rather than deleted because the evidence chain that built it (the tag
+word walk, the ruled-out candidates, the probe-sensitivity finding) is
+still real and still the best evidence available - it just does not
+prove what it was believed to prove. Read the whole document; do not
+stop at the first mechanism paragraph.
 
-`gcc -m32 -march=i686 -mmmx -mfpmath=387 -O2` leaves the x87 floating-point
-register stack non-empty on return from a function reachable from
-`gdn_p2_fixed_rows`'s per-row/per-group loop (`src/ops.c`), and this
-residue survives long enough that an unrelated, later `fld` elsewhere in
-the same forward pass (`lz_rope`'s scalar rotation, also in `src/ops.c`)
-overflows the 8-deep physical stack, producing the hardware's masked
-"real indefinite" QNaN (`0xFFC00000`) silently, which then propagates
-through ordinary IEEE-754 NaN contagion into the whole output.
+## One-sentence mechanism (SUPERSEDED - see below)
+
+~~`gcc -m32 -march=i686 -mmmx -mfpmath=387 -O2` leaves the x87
+floating-point register stack non-empty on return from a function
+reachable from `gdn_p2_fixed_rows`'s per-row/per-group loop
+(`src/ops.c`), and this residue survives long enough that an unrelated,
+later `fld` elsewhere in the same forward pass (`lz_rope`'s scalar
+rotation, also in `src/ops.c`) overflows the 8-deep physical stack,
+producing the hardware's masked "real indefinite" QNaN (`0xFFC00000`)
+silently, which then propagates through ordinary IEEE-754 NaN contagion
+into the whole output.~~
+
+What is still true: the symptom is exactly this (a QNaN from an
+overflowing push, propagating through NaN contagion). What is now known
+false: that it is a **push/pop count imbalance**, and that
+`gdn_p2_fixed_rows` is where it happens. A static verifier
+(`build/x87/x87_stack_check.py`) that reads the compiled instructions
+directly - no execution, no probe, cannot be perturbed by its own
+presence - finds every join balanced and every return at ABI depth,
+**everywhere in the binary**, including `gdn_p2_fixed_rows`'s fully-
+inlined body. The three tail calls and the other unresolved control-flow
+edges the verifier could not follow by itself have since been resolved
+by hand (see below); none of them hide a discrepancy either. The
+contradiction between that result and a real, reproducible `gdb`
+observation (three x87 registers occupied at a specific program point)
+is the actual open question - see "Static verification" below.
 
 ## Environment
 
@@ -135,10 +163,21 @@ head 1, entry (next head, top of per-head loop) tag=0xffd5  dirty: 3 registers o
 Everything up to and including entry to `gdn_p2_fixed_rows`'s row loop is
 provably balanced. The state is clean on entry to every sampled head's
 row loop, yet dirty (`0xffd5`) by the time the *next* head's own
-processing begins. The leak is inside `gdn_p2_fixed_rows`'s per-row/
-per-group loop body (`p2_group_coef`, `gdn_p2_group_fixed`,
-`p2_group_norm`, `p2_shift_of`, `p2_group_scale`), not before it and not
-in the code that consumes its results afterward.
+processing begins.
+
+**Superseded conclusion, kept for the record:** this session originally
+concluded from this table alone that "the leak is inside
+`gdn_p2_fixed_rows`'s per-row/per-group loop body... not before it and
+not in the code that consumes its results afterward." The static
+verifier (below) finds that entire loop body, fully inlined into
+`gdn_step_impl`, depth-balanced with no exceptions. The `gdb` table
+above is not wrong as a set of measurements - the tag word really does
+read `0xffff` entering the row loop and `0xffd5` at the next head's
+entry - but the INFERENCE that the code between those two points must
+be where a push/pop count goes wrong is what the static check disproves.
+Something about the runtime state changes between those two
+observations; a static, count-only analysis of the code that runs
+between them says the count is not it.
 
 Two plausible-looking candidates were disassembled and ruled out
 directly rather than by inference:
@@ -191,18 +230,140 @@ writes) diagnostic probes inside `gdn_p2_fixed_rows`'s loop - intended
 purely as instrumentation - was itself enough to change gcc's register
 allocation for the surrounding code and make the NaN stop reproducing
 entirely (12 samples, all clean, where the uninstrumented binary reliably
-fails). Static disassembly of `p2_group_norm` shows a plausible
-mechanism: six-plus branches implementing a min/max/clamp chain, at
-least one exit path that manually drains two `fstp %st(0)` before
-returning where the "normal" exit needs none - the kind of asymmetric,
-hand-balanced stack accounting across multiple control-flow paths that a
-compiler's register-stack allocator can get wrong on exactly one path
-without it showing up anywhere else. The exact path and the exact
-instruction were not identified, because every tool tried to look closer
-(inline probes, `gdb` `stepi` single-stepping through the pristine
-binary) either changed the outcome or ran out of a reliable way to
-correlate a specific loop iteration (`kk`/`gg`) with a specific tag-word
-reading in this optimized build.
+fails). Static disassembly of `p2_group_norm` was read, at the time,
+as showing a plausible mechanism: six-plus branches implementing a
+min/max/clamp chain, at least one exit path that manually drains two
+`fstp %st(0)` before returning where the "normal" exit needs none - the
+kind of asymmetric, hand-balanced stack accounting across multiple
+control-flow paths that a compiler's register-stack allocator can get
+wrong on exactly one path. **The static verifier below checked this
+directly and found `p2_group_norm` depth-balanced on every path, so
+this specific candidate is now ruled out, not just unconfirmed** - kept
+here because the probe-sensitivity lesson above is still the reason
+nothing further was learned by looking harder at any one function by
+hand, and because the fragility class it demonstrates
+(exactly this kind of asymmetric multi-exit branch code) may still be
+where the real, non-depth mechanism lives even though this particular
+manifestation of it was not the one.
+
+## Static verification: the depth-imbalance theory is dead
+
+Every runtime probe attempted above changed gcc's register allocation
+enough to stop the bug reproducing (the previous section). The fix is
+an instrument that cannot be perturbed by its own presence: read the
+already-compiled bytes instead of running or re-running anything.
+`build/x87/x87_stack_check.py` does this - objdump text in, basic
+blocks and a per-mnemonic x87 stack-depth delta, propagated over the
+CFG, reporting any join point whose predecessors disagree and any
+`ret` reached at the wrong ABI depth.
+
+**Result on the actual failing binary: zero depth violations, anywhere.**
+`gdn_step_impl` (which contains `gdn_p2_fixed_rows`, `gdn_p2_group_fixed`
+and `p2_group_coef` fully inlined - none of the three exist as separate
+symbols on this build), `p2_group_norm` itself (not inlined, called),
+and `lz_rope` all report clean individually. Across the whole binary:
+82 functions contain x87 instructions, all 82 checked, only 8 findings,
+and every one of the 8 is `UNRESOLVED` (an indirect call or a tail-call
+jump the checker cannot statically follow) rather than an actual
+violation.
+
+**Getting a trustworthy "clean" required finding and fixing five real
+bugs in the checker itself**, all caught by the x86-64/Watcom control
+runs the tool was required to also report nothing on:
+
+1. GCC clone suffixes (`lz_exp.part.0`) not recognized as sharing the
+   original function's signature, scoring a real float-returning call
+   as void and cascading into phantom joins through `lz_sigmoid`.
+2. Bare `nop` misclassified as an x87 instruction, making `has_x87()`
+   fire on almost any function (nop is padding, everywhere) and running
+   full CFG analysis - not hardened for large non-numeric control flow -
+   on functions with no real x87 content. Produced 236 phantom findings
+   on the x86-64 control alone.
+3. `float *lz_mtp_draft_step(...)` (pointer return, EAX) included in the
+   float-returning table from an unchecked grep hit instead of the real
+   header declaration.
+4. Watcom's PE disassembly prints `0x`-prefixed branch targets; the
+   parser only handled bare hex, so every branch on the Watcom control
+   looked indirect.
+5. Watcom appends a trailing underscore to every exported symbol
+   (`lz_sigmoid_`), and x86-64's ABI returns float/double through
+   `%xmm0` rather than `%st(0)` at all - two independent naming/ABI
+   gaps, both caught by the same control requirement.
+
+Every one of these was an OVER-report (a phantom finding), never a
+false "clean" - the tool has been wrong five times and every time in
+the direction of crying wolf, not staying silent. That asymmetry is the
+actual argument for trusting the final negative result, not the result
+by itself.
+
+### The 8 unresolved sites, resolved by hand
+
+The checker cannot statically follow an indirect call or a tail-call
+jump, so those 8 sites were the one place a real leak could still be
+hiding despite the "clean" verdict - `lz_gdn_step`'s tail call into
+`gdn_step_impl` was the likeliest, since that is exactly the call this
+whole investigation is about. Resolved one at a time:
+
+- **`lz_gdn_step` -> `gdn_step_impl`** (tail call, `jmp`): the function's
+  entire x87 content is `flds 0x58(%esp); flds 0x5c(%esp); fstps
+  0x54(%esp); fstps 0x50(%esp)` - two pushes marshaling `gt`/`beta`
+  into `gdn_step_impl`'s different argument frame (it takes an extra
+  `gvec=NULL` `lz_gdn_step` doesn't), two pops consuming them right back
+  out. Net zero. Depth is exactly 0 at the `jmp`, matching
+  `gdn_step_impl`'s own (separately verified) depth-0 entry.
+- **`lz_kda_step` -> `gdn_step_impl`** (tail call): one `flds`/one
+  `fstps` (only `beta` needs marshaling; `gt=1.0f` is a compile-time
+  constant for this family). Net zero, same conclusion.
+- **`lz_matmul_xq_nt` -> `matmul_scalar_ref`** (tail call): traced with
+  the checker's own CFG machinery rather than by eye (the function is
+  too large to read reliably) - depth is 0 at every path reaching the
+  jump instruction, 20 predecessor paths sampled, all agreeing.
+- **`q8_amax`, `lz_rmsnorm`, `lz_softmax` (x2)** (indirect calls through
+  a dispatch-table function pointer, e.g. `lz_amax_pick(...)`): depth is
+  0 immediately before each call, on every path reaching it. Separately,
+  under `--kernel ref` (the failing configuration), `LZ_DEFINE_PICK`
+  returns `NULL` for every one of these tables, so the indirect call is
+  behind an `if (f) f(...)` that is never taken at runtime on this
+  configuration at all - moot for this specific bug regardless of the
+  static depth result.
+
+**All 8 resolve cleanly. None hides a depth discrepancy.** The
+tail-call hypothesis - the most promising remaining place for a
+count-mismatch to be hiding from the checker - is disproven.
+
+### The open contradiction
+
+Two measurements, both individually trustworthy, disagree:
+
+- `gdb` on the pristine, unmodified binary: tag word `0xffd5` (three
+  registers occupied) at a reproducible program point (entry to a
+  head's own per-head setup, right after the previous head's full GDN
+  processing completes).
+- The static checker, cross-validated three ways (self-test, x86-64
+  control, Watcom control) and with all 8 of its own blind spots
+  resolved by hand: no push/pop count is ever unbalanced anywhere in
+  the compiled code that runs between one observation and the next.
+
+One piece of evidence about which side of this to trust for the FIX,
+not the diagnosis: `emms` inserted before `lz_rope`'s call produces the
+EXACT correct answer (`rms=1.4744957526166522`, bit-identical to the
+`-O0` build), not merely a different one. If the actual mechanism were
+gcc reading the wrong `%st(i)` - a real value sitting in the wrong slot -
+clearing the tag word would not fix that; it would still compute from
+whatever garbage now occupies the slot `emms` didn't change the
+identity of, just its emptiness. That the answer becomes exactly right
+argues the register INDICES gcc's code uses are correct, and only the
+incoming TAG STATE is wrong - which is a depth/occupancy question, not
+an identity one, and pushes the open question back to where those three
+occupied slots come from if not from a compiled-code count mismatch.
+
+Not yet pursued, because if the mechanism above is right the answer
+would not need it: whether the `Edge A->B: correcting stack to [...]`
+lines in gcc's own `-fdump-rtl-all` `326r.stack` pass output are
+reconciliation-pass overrides of an earlier per-block estimate (routine)
+or a genuine internal disagreement (informative) was left an open
+question rather than guessed at - see the RTL dump note below if this
+document's next step is to resolve it after all.
 
 ## What fixes it, and what was tried and rejected
 
@@ -216,33 +377,66 @@ reading in this optimized build.
 
 ## What is NOT yet known
 
-- The exact instruction or control-flow path inside
-  `p2_group_coef`/`gdn_p2_group_fixed`/`p2_group_norm`/`p2_shift_of`/
-  `p2_group_scale` that leaves the stack non-empty.
-- Whether this is a gcc `reg-stack` pass bug specifically, or a more
-  general x87-extended-precision register-allocation issue that happens
-  to manifest as a stack-depth leak in this instance (the sibling issue
-  `p2_group_norm`'s own comment documents was a *value* divergence, not
-  a stack-depth leak - the two may or may not share a root cause inside
-  gcc).
+- **The actual mechanism.** Depth/count imbalance is ruled out by static
+  analysis of the real binary, cross-validated three ways, with all 8
+  of the checker's own blind spots (indirect calls, tail calls) since
+  resolved by hand and none of them hiding a discrepancy either. What
+  is left is a real, reproducible runtime observation (`gdb`: 3 x87
+  registers occupied at a specific point) that a push/pop-count reading
+  of the compiled code cannot explain. See "The open contradiction"
+  above for the one piece of evidence bearing on which side to trust
+  for a fix (the `emms` result argues register INDICES are correct and
+  only occupancy/depth is wrong at runtime - which is odd, since that is
+  exactly what the static checker also says is fine. This tension is
+  itself unresolved.)
+- The leading open hypothesis - a "right count, wrong `%st(i)` index"
+  bug invisible to a depth-only checker - is now in tension with the
+  `emms`-produces-the-exact-right-answer evidence, which argues INDICES
+  are fine and only depth/occupancy is wrong. Neither hypothesis is
+  currently fully consistent with all the evidence; this is the actual
+  state of the investigation, not a gap to be embarrassed about hiding.
+- Whether this is a gcc bug at all, as opposed to something in how the
+  compiled program's runtime FPU state evolves that a static reading of
+  the instructions - correct as far as it goes - cannot see (interrupt/
+  signal handling, CRT startup state, something outside the reg-stack
+  pass's own accounting).
 - Whether other gcc versions reproduce this (only 13.3.0 was available
   in this environment).
 
 ## Suggested next steps for whoever picks this up
 
-1. Try other gcc major versions (12, 14, trunk) on the same reproduction
+1. **Build a symbolic slot-identity tracker** on top of
+   `build/x87/x87_stack_check.py`'s existing CFG machinery - track which
+   pseudo-value, not just how many, occupies each physical slot, and
+   flag a join point where predecessors agree on depth but disagree on
+   identity. This is the most direct way to test the "wrong index" idea,
+   despite the `emms` tension noted above - it would either confirm an
+   index bug the depth checker cannot see, or rule that out too and
+   narrow the remaining space further.
+2. Reconcile why `gdb`'s tag-word reading and a from-source static count
+   disagree at all, given the static analysis is now trusted. One
+   concrete angle not yet tried: read the tag word with `gdb` at the
+   EXACT same program counter the static checker computes a depth for,
+   rather than at a nearby source-line breakpoint - the two might not
+   currently be looking at the literal same instruction.
+3. Try other gcc major versions (12, 14, trunk) on the same reproduction
    command to bound whether this is version-specific.
-2. `-fdump-rtl-all` (or specifically the `reg-stack`/`stack` pass dump)
-   on `src/ops.c` at `-O2 -m32 -mfpmath=387`, to see the allocator's own
-   accounting for `p2_group_norm` rather than inferring it from
-   disassembly and runtime probes.
-3. A non-perturbing trace (Bochs with x87 state logging, or a QEMU TCG
+4. A non-perturbing trace (Bochs with x87 state logging, or a QEMU TCG
    plugin that reads FPU state without recompiling the guest binary)
    would sidestep the probe-sensitivity that blocked `gdb stepi` and
-   inline instrumentation this session.
-4. If reduced to a small standalone reproducer, file upstream at
+   inline instrumentation this session, and could settle the
+   contradiction directly rather than through more inference.
+5. Resolve the `Edge A->B: correcting stack to [...]` semantics in the
+   `-fdump-rtl-all` `326r.stack` dump (see "The open contradiction"
+   above) - deliberately not spent effort on this while the UNRESOLVED
+   sites were still open; now that they are closed and clean, this is a
+   reasonable next thing to spend the effort on rather than defer again.
+6. If reduced to a small standalone reproducer, file upstream at
    <https://gcc.gnu.org/bugzilla/> - this document is written to make
    that filing possible without re-deriving the evidence chain, but a
    minimal reproducer was not constructed this session (every attempt to
    isolate the failing function in a smaller test file changed its
-   compiled shape enough to stop reproducing).
+   compiled shape enough to stop reproducing), and given the depth
+   theory is now dead, a reproducer would need to target whatever
+   mechanism step 1 or step 2 above actually finds, not the original
+   leaked-push theory.

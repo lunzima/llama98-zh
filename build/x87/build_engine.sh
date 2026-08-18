@@ -25,30 +25,34 @@
 #                            as every other build here (see the ARM
 #                            script's header).
 #
-#   -fno-rerun-cse-after-loop   WORKS AROUND A GCC CODE-GENERATION BUG,
-#                            not a style preference. Root-caused this
-#                            session: at -O2, gcc's x87 register-stack
-#                            allocator leaves the physical FP stack
-#                            non-empty on return from at least one
-#                            function reachable from GDN pass 2's fixed
-#                            write-back path (localized to
-#                            gdn_p2_fixed_rows's per-row/per-group loop
-#                            in ops.c; the exact leaking instruction was
-#                            NOT identified - every additional probe
-#                            changed gcc's register allocation enough to
-#                            make the bug stop reproducing, which is
-#                            itself documented behaviour for a sibling
-#                            issue in the same function, see
-#                            p2_group_norm's own comment on the
-#                            LZ_Q8_MIN_SCALE guard). The residue then
-#                            causes an unrelated later x87 push (traced
-#                            to lz_rope's scalar rotation) to overflow
-#                            the 8-deep stack, producing the hardware's
-#                            masked "real indefinite" QNaN
-#                            (0xFFC00000) silently - `--kernel ref
-#                            --attn-write float --tokens 1` on this
-#                            target reproduces it as all 32768 logits
-#                            NaN from the first token.
+#   -fno-rerun-cse-after-loop   WORKS AROUND A BUG WHOSE ROOT CAUSE IS
+#                            NOT KNOWN. This is a provisional flag, not
+#                            a diagnosis - do not read its presence as
+#                            "fixed". Full evidence and current status:
+#                            docs/x87-gcc-reg-stack-leak.md.
+#
+#                            An earlier pass through this investigation
+#                            localized the fault to GDN pass 2's fixed
+#                            write-back path (gdn_p2_fixed_rows's
+#                            per-row/per-group loop in ops.c) from a
+#                            gdb tag-word walk alone. THAT LOCALIZATION
+#                            IS WRONG: a static verifier
+#                            (build/x87/x87_stack_check.py) that reads
+#                            the compiled instructions directly - no
+#                            execution, cannot be perturbed by its own
+#                            presence - finds every x87 push/pop count
+#                            balanced everywhere in the binary,
+#                            including that entire loop, fully inlined.
+#                            The symptom is real and unchanged: an
+#                            unrelated x87 push (traced to lz_rope's
+#                            scalar rotation) overflows the 8-deep
+#                            stack, producing the hardware's masked
+#                            "real indefinite" QNaN (0xFFC00000)
+#                            silently - `--kernel ref --attn-write
+#                            float --tokens 1` on this target reproduces
+#                            it as all 32768 logits NaN from the first
+#                            token. What produces the wrong occupancy
+#                            in the first place is open.
 #
 #                            This flag disables ONE optimization pass
 #                            and the symptom is gone (verified: 500-token
