@@ -396,7 +396,42 @@ def float_return_expected(func_name, extra, is64=False):
     return in_float_returning(func_name, extra)
 
 
-def check_function(name, insns, extra_float_fns, addr_to_name=None, is64=False):
+def call_target_name(insn, addr_to_name=None):
+    """The callee's symbol for a direct call, else None."""
+    if insn.mnem != 'call':
+        return None
+    name = insn.target_name()
+    if name is None and addr_to_name:
+        t = insn.target_addr()
+        if t is not None:
+            name = addr_to_name.get(t)
+    return name
+
+
+def function_peak(insns, extra_float_fns, addr_to_name=None, is64=False):
+    """Highest depth this function reaches, walked straight through.
+
+    Straight-line rather than CFG-aware, so it over-counts a branchy
+    function by summing alternative paths. That direction is the safe
+    one for the caller check below: it can report a call site that is
+    actually fine, never miss one that is not.
+    """
+    depth = 0
+    peak = 0
+    for insn in insns:
+        delta, is_reset, _unk, _ = depth_delta(
+            insn, extra_float_fns, addr_to_name, is64)
+        if is_reset:
+            depth = 0
+            continue
+        depth += delta
+        if depth > peak:
+            peak = depth
+    return peak
+
+
+def check_function(name, insns, extra_float_fns, addr_to_name=None, is64=False,
+                   peaks=None):
     """-> list of finding dicts."""
     findings = []
     blocks, order = build_blocks(insns)
@@ -437,6 +472,23 @@ def check_function(name, insns, extra_float_fns, addr_to_name=None, is64=False):
                     'addr': insn.addr, 'depth': depth,
                     'text': '%s: depth %d exceeds the 8 physical '
                             'registers' % (insn.raw.strip(), depth)})
+            # The callee's own peak rides on top of whatever the caller
+            # is still holding. Both can be individually balanced and
+            # individually under eight and still overflow together - the
+            # x87 stack is one fixed eight-slot resource shared across
+            # the call, and nothing in the ABI reserves any of it. A
+            # per-function check that assumes entry depth zero cannot
+            # see this, which is why it was missed here.
+            if peaks is not None:
+                callee = call_target_name(insn, addr_to_name)
+                if callee and callee in peaks and depth + peaks[callee] > 8:
+                    findings.append({
+                        'kind': 'call-overflow', 'func': name,
+                        'addr': insn.addr, 'callee': callee,
+                        'depth': depth, 'peak': peaks[callee],
+                        'text': '%s: %d live across the call, %s needs up '
+                                'to %d more' % (insn.raw.strip(), depth,
+                                                callee, peaks[callee])})
         succs, indirect = successors(block, blocks)
         if indirect:
             unresolved.append((block[-1].addr, block[-1].raw.strip()))
@@ -499,6 +551,10 @@ def format_findings(findings):
         elif f['kind'] == 'depth-overflow':
             lines.append(
                 f"DEPTH OVERFLOW {f['func']}  0x{f['addr']:x}: "
+                f"{f['text']}")
+        elif f['kind'] == 'call-overflow':
+            lines.append(
+                f"CALL OVERFLOW  {f['func']}  0x{f['addr']:x}: "
                 f"{f['text']}")
         elif f['kind'] == 'unresolved':
             for addr, raw in f['sites']:
@@ -608,13 +664,19 @@ def main():
     total_findings = 0
     x87_funcs = 0
     checked = 0
+    # Every function's peak, needed before any of them can be checked:
+    # a call site's safety depends on the callee's high-water mark, not
+    # on its net effect.
+    peaks = {nm: function_peak(ins, extra, addr_to_name, is64)
+             for nm, ins in funcs.items() if ins}
     for name, insns in funcs.items():
         if args.function and name != args.function:
             continue
         if not has_x87(insns):
             continue
         x87_funcs += 1
-        findings = check_function(name, insns, extra, addr_to_name, is64)
+        findings = check_function(name, insns, extra, addr_to_name, is64,
+                                  peaks)
         checked += 1
         if findings:
             total_findings += len(findings)
