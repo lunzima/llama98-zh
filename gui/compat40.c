@@ -151,8 +151,8 @@ static SysParamFn       p_SystemParametersInfo;
 static DrawFrameCtlFn   p_DrawFrameControl;
 static DrawIconExFn     p_DrawIconEx;
 /* SimSun's face name in GBK - CB CE CC E5 - written as bytes so this
-   file stays ASCII (iron law seven) and so the exact bytes are
-   visible. It has to be the Chinese name: the "SimSun" alias is a
+   file stays ASCII and so the exact bytes are visible. It has to be
+   the Chinese name: the "SimSun" alias is a
    later addition and is not what a Chinese Windows 98 keys its font
    table on. */
 static const char FACE_SONGTI[] = "\xCB\xCE\xCC\xE5";

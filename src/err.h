@@ -244,7 +244,7 @@ int  lz_err_fmt_v(char *buf, int len, LZErr code, va_list ap);
  *
  * Three arities instead of one variadic macro: there is no portable way
  * to spell an EMPTY __VA_ARGS__, and `, ##__VA_ARGS__` is a GNU extension
- * Watcom does not have (iron law two - the Watcom build is not optional).
+ * Watcom does not have, and the Watcom build is not optional.
  */
 #define LZ_ERR_SET(rcvar, buf, len, code) \
     do { (rcvar) = (code); \

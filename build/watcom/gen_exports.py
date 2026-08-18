@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
-"""从 llama98.def（PE 标准格式）生成两种导出清单——单一事实来源：
+"""Generate both export manifests from llama98.def (standard PE format),
+which is the single source of truth for what the DLL exports:
 
-1. wlink export 段（默认）：`export <external>=<internal>`（Watcom 内部
-   符号带尾下划线，PE 导出名不带——这里做映射）。
-2. gcc 版本脚本（--map）：`<name>;` 列表 + `local: *;`。
-
-llama98.def 是唯一事实来源（docs/dll-cli-gui-spec.md §3.8）。
+1. wlink export section (default): `export <external>=<internal>`.
+   Watcom's internal symbols carry a trailing underscore and the PE
+   export names do not, so this maps between them.
+2. gcc version script (--map): a `<name>;` list plus `local: *;`.
 """
 import io
 import sys

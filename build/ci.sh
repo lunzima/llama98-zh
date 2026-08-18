@@ -1,7 +1,6 @@
 #!/bin/bash
-# Minimal CI. No .github/ workflow exists yet (docs/missing-facilities.md
-# item G) - this is the script such a workflow would call, and it also
-# runs by hand:
+# Minimal CI. No .github/ workflow exists yet - this is the script such
+# a workflow would call, and it also runs by hand:
 #
 #   build/ci.sh
 #
@@ -146,8 +145,8 @@ echo
 echo "==== [3/4] model --check sweep ===="
 MODELS_ROOT=${MODELS_ROOT:-/e/LLM/models}
 # Curated, not a blind sweep of every directory under MODELS_ROOT:
-# docs/missing-facilities.md's own "minimal usable form" (item G) asks
-# for a handful of representative checkpoints, and E:/LLM/models/ also
+# a usable sweep is a handful of representative checkpoints, and
+# E:/LLM/models/ also
 # holds Qwen-family reference / abliteration / rotation-study checkpoints
 # (heretic, Qwopus3.5-*, rot-a05, qwen3.5-0.8b-mtp, router-bert, the raw
 # Qwen3.5-0.8B dumps) that were never meant to load through this engine -

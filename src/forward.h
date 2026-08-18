@@ -123,7 +123,7 @@ typedef struct {
        how much Q8 was losing in the first place: if Q8 already costs
        nothing, no rotation can win, and the comparison was never about
        the rotation. This repo has made exactly that mistake before with a
-       bandwidth ratio whose denominator was unmeasurable (iron law 3).
+       bandwidth ratio whose denominator was unmeasurable.
 
        NULL unless --kv f32; the Q8 path is untouched and stays the
        default, bit for bit. */
@@ -215,8 +215,8 @@ typedef struct {
 
     /* The QJL key sketch and its q4r2 residual form are deliberately
        absent; forward.c's own comment above lz_kv_rot_enable carries the
-       measurement that retired them and the reason iron law nine does
-       not protect them.
+       measurement that retired them, and the reason the keep-both-tiers
+       rule does not protect them.
 
        ONE OPEN QUESTION SURVIVES THE FORMAT: whether the residual
        Chinese gap lived in the VALUE reconstruction rather than in key
@@ -501,8 +501,8 @@ typedef struct {
        engine.
 
        These are sizes, not booleans, because the rotation block width is
-       exactly the kind of knob iron law 3 says must be sweepable rather
-       than baked in: it trades mixing quality against nothing on this
+       exactly the kind of knob that has to stay sweepable rather than
+       baked in: it trades mixing quality against nothing on this
        machine (lz_fwht is n*log2(n) adds either way), but that balance is
        a property of the target, not of the algorithm.
 

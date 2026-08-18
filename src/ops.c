@@ -151,9 +151,9 @@ static int g_kernel = 0;
 #include "ops_kernel_norm.h"
 
 /* 2^e by integer manipulation of the exponent field. Deliberately not
-   ldexp/ldexpf: those are libm doubles, and iron law 2 wants every
+   ldexp/ldexpf: those are libm doubles, and every
    transcendental inside the engine so the two builds cannot disagree
-   through somebody else's rounding - while iron law 6 clause 3 bars
+   through somebody else's rounding - while the rules bar
    double from the PC=24 region outright, which is where every caller of
    this runs. It does no rounding at all, it writes an exponent, so the
    two compilers agree by construction rather than by measurement.
@@ -619,7 +619,7 @@ float lz_exp(float x) {
    GUARDED TO MATCH ITS CALLERS, both of which sit under this same
    predicate. Without the guard the definition compiles on a target with
    no q8round SIMD at all - ARMv5TE is the first such target - where
-   nothing calls it. See the note above dot32_ref in
+   nothing calls it. See the guard note at the top of
    ops_kernel_q8round.h's sibling, ops_kernel_dot.h. */
 #if defined(LZ_HAVE_Q8R_SIMD) || defined(LZ_HAVE_Q8R_SSE)
 static int lz_q8r_tier(void);
@@ -923,8 +923,8 @@ int lz_prefetch_mode(void) {
    target: pairing removes the weight unpack for the second token (the
    memory side), while the 128-element group kernel amortizes fixed
    prologue overhead from once per 32 elements to once per 128 (the
-   instruction side). Iron law 9 says a disputed choice becomes a
-   switch, and iron law 3 says the answer is per machine anyway.
+   instruction side). A disputed choice becomes a
+   switch, and the answer is per machine anyway.
 
    Pairing needs nt >= 2, so `on` is a request, not a guarantee; at
    nt == 1 both settings run the same code.
@@ -939,7 +939,7 @@ int lz_pair_mode(void) { return g_pair; }
 /* GDN pass-1 tier: fixed-point coefficient plane, or the original float
    pass. UNLIKE --kernel, --prefetch and --pair, this one CHANGES THE
    NUMBERS - that is its whole point, it trades a little precision for
-   integer arithmetic (iron law 8's "a little precision may be spent").
+   integer arithmetic - a little precision may be spent for it.
    So its gate cannot be "bit identical across settings"; it is
    "bit identical WITHIN a setting across builds".
 
@@ -979,7 +979,7 @@ int lz_gdn_mode(void) {
    lz_q8round32 structurally cannot have an MMX tier, MMX has no
    float-to-int conversion) has nothing else to trade.
 
-   So AUTO is not caution, it is iron law 3's per-machine rule applied to
+   So AUTO is not caution, it is the per-machine rule applied to
    a knob whose sign flips inside the target family.
 
    Quality licence for turning it on where it helps: end-to-end paired
@@ -1002,6 +1002,28 @@ int lz_gdn_mode(void) {
    on a PII rests on q8r_have_simd's CPUID check, which is the same
    check lz_q8r_tier uses to pick the scalar rounding tier there - so
    it is not new untested logic, just a second reader of it. */
+/* THE question every fixed-point tier's AUTO asks, in one place.
+ *
+ * It was written out five times - pass 2, conv, attention, epilogue,
+ * sigmoid - each with its own copy of the reasoning. Five copies of a
+ * predicate are five things to edit when the answer changes, and the
+ * answer is expected to change: it is provisional until the WinChip
+ * bench exists.
+ *
+ * CPUID SSE, never MMX. Every Socket 7 part - K6, Cyrix 6x86MX, IDT
+ * WinChip - has MMX and no SSE, and those are exactly the machines whose
+ * x87 is weakest, so an MMX-keyed test would push the parts that need
+ * fixed point hardest back onto float.
+ *
+ * Not lz_q8r_tier(), which also answers 0 for `--kernel ref`: that would
+ * let a debugging override change the numbers, and --kernel is
+ * documented numerics-neutral.
+ *
+ * What it means, said plainly: "is this machine's float slow relative to
+ * its integer". It is a proxy - the real question is a ratio nobody can
+ * read from CPUID - and the proxy is one bit. */
+static int lz_soft_float_target(void) { return q8r_have_simd() == 0; }
+
 #define LZ_P2_FLOAT 0
 #define LZ_P2_FIXED 1
 #define LZ_P2_AUTO  2
@@ -1009,7 +1031,7 @@ static int g_gdn_p2 = LZ_P2_AUTO;
 
 int lz_gdn_p2_mode(void) {
 #if LZ_GDN_FIXED
-    if (g_gdn_p2 == LZ_P2_AUTO) return q8r_have_simd() == 0;
+    if (g_gdn_p2 == LZ_P2_AUTO) return lz_soft_float_target();
     return g_gdn_p2;
 #else
     return 0;                    /* not compiled in; never claim otherwise */
@@ -1032,7 +1054,7 @@ const char *lz_gdn_p2_select(const char *name) {
    predicate must stay `q8r_have_simd()` (CPUID SSE), never MMX. Every
    Socket 7 part has MMX and no SSE, and those are exactly the machines
    whose x87 is weakest, so an MMX-keyed test would push them onto the
-   float path (iron law 3's machine table).
+   float path.
 
    Unlike the kernel tiers this one is NOT bit-identical to float: the
    probe measures 4.8e-5 max drift, so the gate is a tolerance, not a
@@ -1045,7 +1067,7 @@ static int g_conv = LZ_CONV_AUTO;
 
 int lz_conv_mode(void) {
 #if LZ_CONV_FIXED
-    if (g_conv == LZ_CONV_AUTO) return q8r_have_simd() == 0;
+    if (g_conv == LZ_CONV_AUTO) return lz_soft_float_target();
     return g_conv;
 #else
     return 0;
@@ -1077,7 +1099,7 @@ int lz_attn_mode(void) {
        would make one predicate answer "is this machine slow at float"
        and "can this kernel address this cache", and the second one is
        the one that was missed. */
-    int m = (g_attn < 0) ? (q8r_have_simd() == 0 ? 3 : 0) : g_attn;
+    int m = (g_attn < 0) ? (lz_soft_float_target() ? 3 : 0) : g_attn;
     return m & LZ_ATTN_FIXED;
 }
 
@@ -1107,7 +1129,7 @@ const char *lz_attn_select(const char *name) {
 #define LZ_EPI_MAX_NG 64
 
 int lz_sig_mode(void) {
-    return (g_sig < 0) ? (q8r_have_simd() == 0) : g_sig;
+    return (g_sig < 0) ? lz_soft_float_target() : g_sig;
 }
 
 int lz_sig_is_auto(void) { return g_sig < 0; }
@@ -1124,7 +1146,7 @@ const char *lz_sig_select(const char *name) {
 static int g_epi = -1;
 
 int lz_epi_mode(void) {
-    return (g_epi < 0) ? (q8r_have_simd() == 0) : g_epi;
+    return (g_epi < 0) ? lz_soft_float_target() : g_epi;
 }
 
 int lz_epi_is_auto(void) { return g_epi < 0; }
@@ -1194,7 +1216,7 @@ void lz_epi_prep(LZTensor *w, int in_dim) {
 #if defined(__WATCOMC__)
 long long lz_epi_mac(const int32_t *a, const int32_t *m, int n);
 /* ebp is pushed and popped rather than declared modified - it is the
-   frame pointer, and iron law two's third clause is that modify tells
+   frame pointer, and the rule is that modify tells
    the truth. imul owns edx:eax, so the two accumulator halves are ebx
    and ebp. */
 #pragma aux lz_epi_mac =                \
@@ -1226,13 +1248,25 @@ static long long lz_epi_mac(const int32_t *a, const int32_t *m, int n) {
 }
 #endif
 
+/* `auto` here is an ALIAS FOR `on`, not a hardware question, and saying
+   so is the point. Pairing trades weight-unpack bandwidth against ALU
+   work; which side wins is the same target-machine question the fixed
+   tiers face, and no CPUID bit answers it. Accepting the word while
+   resolving it to a constant made the CLI vocabulary claim a resolution
+   that does not exist - the banner printed "on" with no marker, so the
+   difference between "chosen" and "defaulted" was invisible. */
+static int g_pair_auto = 1;
+
 const char *lz_pair_select(const char *name) {
     if (!name) return NULL;
-    if (strcmp(name, "on") == 0 || strcmp(name, "auto") == 0) g_pair = 1;
-    else if (strcmp(name, "off") == 0) g_pair = 0;
+    if (strcmp(name, "auto") == 0)      { g_pair = 1; g_pair_auto = 1; }
+    else if (strcmp(name, "on") == 0)   { g_pair = 1; g_pair_auto = 0; }
+    else if (strcmp(name, "off") == 0)  { g_pair = 0; g_pair_auto = 0; }
     else return NULL;
     return g_pair ? "on" : "off";
 }
+
+int lz_pair_is_auto(void) { return g_pair_auto; }
 
 const char *lz_prefetch_select(const char *name) {
     int have = pf_detect();
@@ -1418,7 +1452,7 @@ const char *lz_build_paths(void) {
 }
 
 /* WHICH ONE OF THE SEVEN OPERATOR VARIANTS ACTUALLY RAN.
-   Iron law 8: scalar C, plus MMX/SSE/SSE2 as intrinsics, plus
+   Seven variants: scalar C, plus MMX/SSE/SSE2 as intrinsics, plus
    MMX/SSE/SSE2 as hand-written asm.
 
    Neither half alone identifies it. lz_kernel_name() answers only the
@@ -1426,7 +1460,7 @@ const char *lz_build_paths(void) {
    alike, because they share one enum value. lz_build_paths() answers
    only the compile-time impl, for the whole binary. It is the JOIN that
    names a variant, and the join is exact because no build carries both
-   impls of one ISA: gcc cannot compile #pragma aux at all (iron law 2
+   impls of one ISA: gcc cannot compile #pragma aux at all (the
    clause 1) and Watcom's _m_* intrinsics run 6x slower than its own x87
    scalar, so they are not compiled either (clause 4).
 
@@ -1607,7 +1641,7 @@ static void matmul_scalar_ref(float *o, const int8_t *xq, const float *xqs,
                               const LZTensor *w, int in_dim, int out_dim,
                               int nt);
 
-/* The seven variants of iron law 8, as table slots. A build fills at
+/* The seven variants, as table slots. A build fills at
    most three of them (gcc cannot compile #pragma aux; Watcom's _m_*
    intrinsics are 6x slower than its own x87 scalar), and REF is not
    here at all - lz_matmul_xq_nt intercepts that tier before reaching
@@ -1672,7 +1706,7 @@ static lz_rowfn lz_row_pick(const lz_rowfn *tab) {
        horizontal fold, not the natural ((a0+a1)+(a2+a3)).
    A 1e-6 difference here is not cosmetic: SSM state requantization
    amplifies it token by token, and eight tokens are enough to fork the
-   generated text. Iron law 2, and iron law 4's note that |logit diff|
+   generated text - and note that |logit diff|
    saturates and cannot rank such changes.
 
    `post` cancels the kernel's own scaling: 1/256 for Q8_0 (part32_x16
@@ -1853,7 +1887,7 @@ static void row_q8_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
            NOT MEASURED ON TARGET. The op-count argument is 12 + 24*NT
            against 36*NT; whether it beats the group kernel's amortized
            prologue on a real PII is a wall-clock question, and the
-           machine for it is not here. Iron law 3: this is a knob-shaped
+           machine for it is not here. This is a knob-shaped
            decision recorded as such, not a measured result. */
         if (nt - tk >= 2 && g_pair) {
             const int16_t *xw2 = xwt + in_dim;
@@ -2035,7 +2069,7 @@ static void matmul_q8_impl(float *o, const int8_t *xq, const float *xqs,
        unreachable - the largest in_dim in any current model is 3584
        against a 4096 cap. Dead code in three association orders is
        worse than dead code in one, and matmul_scalar_ref is the
-       contract (iron law 2). */
+       contract. */
     if (!row || in_dim > LZ_MM_WIDEN_MAX) {
         matmul_scalar_ref(o, xq, xqs, w, in_dim, out_dim, nt);
         return;
@@ -2978,7 +3012,7 @@ static void row_q61_mmx_intrin(int32_t *acc32, const void *w4, const void *w2v,
            where the dispatch would not pick it has nothing left to do,
            since one gcc build carries both tiers and `--kernel sse2`
            selects row_q61_sse2_intrin for real. A knob that duplicates
-           a knob is worse than no knob - iron law 9 asks for a switch
+           a knob is worse than no knob - the rule asks for a switch
            plus a gate proving it changes something, and this one would
            change nothing. */
         if (tk + 1 < nt && g_pair) {
@@ -3376,7 +3410,7 @@ void lz_matmul_xq_nt(float *o, const float *x, const int8_t *xq,
        slow.
 
        This is not a question of "whether asm is worth it" decided by
-       measurement. The iron law requires every operator to have C /
+       measurement. The rule requires every operator to have C /
        MMX / SSE / SSE2 paths, because the bottleneck is a seesaw -
        relieve the bytes and it moves to the ALU, relieve the ALU and it
        moves back, so "measure which side binds today, then optimise
@@ -3562,7 +3596,7 @@ void lz_kv4_quantize(const float *x, int n, unsigned char *out, float *scale) {
     n2 = (float)sqrt((double)n2);
     /* sqrt(n) is exact for the power-of-two head dims this path serves;
        the divide has a runtime divisor, so both compilers emit a real
-       FDIV rather than one strength-reducing it (iron law 6). */
+       FDIV rather than one strength-reducing it. */
     s = n2 / (float)sqrt((double)n);
     if (scale) *scale = s;
     inv = (s > 1e-20f) ? (1.0f / s) : 0.0f;
@@ -3584,7 +3618,7 @@ void lz_fwht(float *v, int n) {
        add and one sub, so the whole transform is exact in binary float
        up to the additions themselves - no constants enter, which is why
        this is bit-identical between wcc386 and gcc without any of the
-       care iron law 6 demands of the multiply-by-reciprocal paths. */
+       care the multiply-by-reciprocal paths demand. */
     int len, i, j;
     for (len = 1; len < n; len <<= 1) {
         for (i = 0; i < n; i += (len << 1)) {
@@ -3691,8 +3725,8 @@ void lz_rope(float *v, int n_heads, int head_dim, int rotary_dim,
 
 #if (LZ_ATTN_FIXED & 2)
 #if defined(__WATCOMC__)
-/* Originally generated; hand-editing is allowed (rule lifted
-   2026-08-16) - if you regenerate, diff first.
+/* Originally generated, hand-edited since - if you regenerate, diff
+   the generator's output against what is here first.
    acc32[d] += rowA[d]*coef[0] + rowB[d]*coef[1] for d in [0,32).
    coef is [ckA,ckB,ckA,ckB] so one pmaddwd covers a 2-int32 lane pair.
    Reads [eax]/[edx]/[ecx], writes only [ebx] and MMX - every offset is a
@@ -4151,8 +4185,8 @@ void lz_attn_wsum_q8(float *out, const float *att, int hd,
 
 #if defined(LZ_GDN_HAVE_MMX)
 #if defined(__WATCOMC__)
-/* Originally generated; hand-editing is allowed (rule lifted
-   2026-08-16) - if you regenerate, diff first.
+/* Originally generated, hand-edited since - if you regenerate, diff
+   the generator's output against what is here first.
    Verified over 200000 random + extreme groups (state +/-127,
    coefficients +/-32767, kd 2..66 even) against the scalar reference
    with zero mismatches; the kpairs=0 boundary was tested separately.
@@ -4512,7 +4546,7 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
        Exists because "the dispatch condition looks right" is not an
        answer to "which one ran" - the same distinction that let a whole
        tier of hand-written assembly stay out of the Watcom build for
-       months (iron law 8's closing note). */
+       months. */
     extern long lz_q8r_hits[3];
     lz_q8r_hits[tier < 0 ? 0 : (tier > 2 ? 2 : tier)]++;
 #endif
@@ -4725,7 +4759,7 @@ static lz_p2_blk *p2_blk(void) {
 
 #elif defined(__MMX__)
 #define LZ_HAVE_P2_MMX 1
-/* The gcc half of iron law 8's MMX cell. Instruction for instruction the
+/* The gcc half of the MMX cell. Instruction for instruction the
    same kernel as the assembly in ops_kernel_p2.h - that file carries the
    reasoning (why pmaddwd contracts H and dq in one go, why the absmax
    costs five instructions per two lanes, why the lo clamp is a
@@ -4964,7 +4998,7 @@ static void lz_p2_split32_sse2(const lz_p2_blk *blk, int8_t *oh, int8_t *ol) {
    q8 rounding, where a PIII has 64-bit integer SIMD but 128-bit float
    SSE and the two axes come apart.
 
-   MMX is the floor of the whole target family (iron law 3's table has a
+   MMX is the floor of the whole target family (the machine table has a
    check in the MMX column on every row), so a machine that lands on
    scalar here is one where kernel_detect already said LZ_KERNEL_REF.
    No FORCE knob: unlike the SSE1 tiers, both of these are selected by
@@ -5217,7 +5251,7 @@ static void gdn_p2_group_fixed(const int8_t *ph,
 
 /* --- the SIMD twin, one whole ROW rather than one group ---------------
 
-   Iron law 8's MMX cell for this operator. Bit-identical to the scalar
+   The MMX cell for this operator. Bit-identical to the scalar
    above by construction, not by tolerance: every step is the same
    integer operation on the same integers, verified at 100k scale.
 
@@ -5227,7 +5261,7 @@ static void gdn_p2_group_fixed(const int8_t *ph,
    new scale. So the row is PHASE-SPLIT instead - all the float work of
    the row first, then all the MMX work, then one emms, then the float
    epilogue. One emms per row instead of one per 32 elements, which is
-   the ratio iron law 6 costs out at 16% of the matmul compute budget on
+   the ratio that costs 16% of the matmul compute budget on
    a P6 and worse on a P4.
 
    The price is three loops over ng and three small static arrays, and
@@ -6070,6 +6104,62 @@ const char *lz_kernel_matrix(void) {
         buf[p++] = rows[i].g128 ? 'G' : '.';
         buf[p++] = '\n';
     }
+    buf[p] = '\0';
+    return buf;
+}
+
+/* ---- the AUTO-resolved tiers, in one list ----------------------------
+
+   Every knob whose default is resolved at runtime rather than fixed.
+   The list exists because its absence cost a false PASS: the ARM
+   parity gate pinned --kernel and --recur-write by hand, four more
+   AUTO knobs were added later with the same predicate, and the two
+   sides silently ran different arithmetic until the gate finally ran
+   and reported 94505 of 131072 bytes differing.
+
+   Any cross-target or cross-build comparison must pin ALL of these -
+   an unpinned AUTO makes the comparison compare nothing - so the pin
+   string is produced here instead of transcribed into each script.
+   Adding a knob to this table is what updates every caller.
+
+   The pinned VALUES are the float/reference side throughout. A
+   cross-target comparison should fail on a cross-target difference,
+   not on a tier's own drift, and the fixed tiers are the ones under
+   development. Comparing them pinned fixed is a separate, also useful
+   run - and not what those gates are for. */
+const char *lz_tier_pins(void) {
+    return "--kernel ref --recur-write fixed --conv-write float "
+           "--attn-write float --epi-write float --sig-write float "
+           "--pair off --prefetch none";
+}
+
+/* The same list, as a report: name, resolved value, and whether the
+   value was chosen or defaulted. The banner prints this rather than
+   eight hand-written printf lines that drift apart one at a time. */
+const char *lz_tier_report(void) {
+    static char buf[512];
+    int p = 0;
+    p += sprintf(buf + p, "  recurrence   %s%s\n",
+                 lz_gdn_p2_mode() ? "fixed" : "float",
+                 lz_gdn_p2_is_auto() ? " (auto)" : "");
+    p += sprintf(buf + p, "  conv1d       %s%s\n",
+                 lz_conv_mode() ? "fixed" : "float",
+                 lz_conv_is_auto() ? " (auto)" : "");
+    p += sprintf(buf + p, "  attention    %s%s\n",
+                 lz_attn_mode() == 3 ? "fixed" :
+                 lz_attn_mode() == 1 ? "scoring" :
+                 lz_attn_mode() == 2 ? "wsum" : "float",
+                 lz_attn_is_auto() ? " (auto)" : "");
+    p += sprintf(buf + p, "  epilogue     %s%s\n",
+                 lz_epi_mode() ? "fixed" : "float",
+                 lz_epi_is_auto() ? " (auto)" : "");
+    p += sprintf(buf + p, "  sigmoid/silu %s%s\n",
+                 lz_sig_mode() ? "fixed" : "float",
+                 lz_sig_is_auto() ? " (auto)" : "");
+    p += sprintf(buf + p, "  pairing      %s%s\n",
+                 lz_pair_mode() ? "on" : "off",
+                 lz_pair_is_auto() ? " (auto = on; no hardware question)"
+                                   : "");
     buf[p] = '\0';
     return buf;
 }

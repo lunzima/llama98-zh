@@ -40,8 +40,8 @@ ifeq ($(origin CC),default)
 CC := gcc
 endif
 
-# -ffp-contract=off is a hard requirement for cross-compiler bit-identity
-# (iron law two): gcc folds `acc += w*x` into a single-rounding FMA while
+# -ffp-contract=off is a hard requirement for cross-compiler
+# bit-identity: gcc folds `acc += w*x` into a single-rounding FMA while
 # Watcom's x87 does two-rounding multiply-then-add, and the two diverge on
 # a measurable fraction of inputs. Cost is noise-level here (the hot path
 # is hand-written intrinsics the contraction never touches).
@@ -210,7 +210,7 @@ watcom-cli:
 	"$(WLINK)" @"$(CLI_OBJ)/cli.lnk"
 	@echo "== done: $(CLI_EXE)"
 
-# WHICH DOS EXTENDER (iron law nine: a contested choice is a knob).
+# WHICH DOS EXTENDER - a contested choice, so it is a knob.
 #   dos4gw  wstub.exe   loads DOS4GW.EXE at run time - the period default.
 #   dos32a  stub32a.exe loads DOS32A.EXE at run time - faster, no DOS4GW
 #                       licensing history. A drop-in otherwise.

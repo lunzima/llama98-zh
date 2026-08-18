@@ -431,7 +431,8 @@ typedef struct {
        agree, and that draft-verify-rollback reproduces a manual
        sequential replay - both are self-consistency checks on RANDOM
        weights, not correctness checks against a trained model's real
-       output; iron law four's distinction between the two). Reads as a
+       output; a consistency check and a correctness check are not the
+       same claim). Reads as a
        weakness list, not a to-do list yet: no real MTP weights exist to
        validate against. */
     LZMtp *mtp;

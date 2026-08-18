@@ -50,13 +50,13 @@
  * is truncated on the way in, not overflowed - see lz_chatfile_decode.
  * 128 KiB is comfortably above anything LZ_CHAT_HIST_MAX turns of
  * ordinary chat produce; it exists so the decode buffer can be static
- * (iron law six: no large buffer on the stack) rather than unbounded. */
+ * (no large buffer on the target's stack) rather than unbounded. */
 #define LZ_CHATFILE_BODY (1024 * 128)
 
 /* snprintf semantics: returns the length the whole result needs, writes
  * at most `cap` bytes including the terminator. Never returns a bound
- * it did not compute - see iron law four, note 10, on why a function
- * that writes into the caller's buffer takes its size. */
+ * it did not compute; a function that writes into the caller's buffer
+ * takes its size. */
 int lz_chatfile_encode(const LZChatMsg *msgs, int n, char *out, int cap);
 
 /* Decode into an already-initialised history. On success the history

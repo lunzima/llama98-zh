@@ -18,7 +18,7 @@
  * model left with no identity agrees it is Qwen, DeepSeek, Claude and
  * Doubao in turn).
  *
- * This string is UTF-8 with the Chinese hex-escaped, per iron law seven.
+ * UTF-8 with the Chinese hex-escaped, so the source file stays ASCII.
  * Byte-for-byte: render injects it raw, and the jinja template's
  * `{%- else %}` branch carries the same bytes.
  *

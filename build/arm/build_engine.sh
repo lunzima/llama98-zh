@@ -20,7 +20,7 @@
 #                    soft-float (it names the FP FORMAT, not the unit),
 #                    while the emitted code contains zero VFP
 #                    instructions and calls __aeabi_fmul.
-#   -ffp-contract=off  iron law 2(d): no multiply-add contraction, or
+#   -ffp-contract=off  no multiply-add contraction, or
 #                    this build stops being bit-identical to the others.
 #
 # Run under emulation with:
@@ -29,8 +29,8 @@
 # QEMU GIVES CORRECTNESS, NOT CYCLES. It translates instructions and
 # models no cache, no bus and no memory latency, so a wall-clock number
 # from it means nothing for the AK7802. What IS transferable is the
-# static instruction count - which is what iron law 3 says to compare
-# anyway - and qemu can produce that with a TCG plugin.
+# static instruction count - the only quantity that carries across
+# machines anyway - and qemu can produce that with a TCG plugin.
 set -u
 
 CC=${CC:-arm-linux-gnueabi-gcc}

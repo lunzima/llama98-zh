@@ -477,7 +477,7 @@ int lz_spec_accept_temp(const float *p, const float *q, int x, int vocab,
    bit-identical to the non-speculative path's own first prediction.
 
    window[] must have room for samp->cap entries (a static buffer at the
-   call site - iron law six's "no large arrays on the Win98 stack";
+   call site - no large arrays on the Win98 stack;
    samp->cap can be LZ_PENALTY_MAX_WINDOW=4096 at repeat_last_n=-1).
    Returns the window length actually written, always <= samp->cap:
    when nv < cap, tail_count (below) is bounded by cap-nv, so tail_count
@@ -506,14 +506,12 @@ static int build_assumed_window(const LZSampler *samp, const int *draft,
 /* Applies the assumed-window penalties to one verify row's logits IN
    PLACE, if the caller's own penalties are not at their identity
    values - samp must be non-NULL (callers check first; see verify_row_
-   argmax below and lz_spec_round_temp). Factored out (temp>0 phase 2)
-   from verify_row_argmax's own body - PURE extraction, same
-   condition/window-build/apply sequence - so that lz_spec_round_temp's
-   own target-distribution builder can apply the identical penalty step
-   without a second, independently-drifting copy of "when is the window
-   even worth building" (iron law two). verify_row_argmax's own visible
-   behavior is unaffected by this extraction - the greedy bit-identity
-   gate re-covers this exact code path and is the actual proof, not this
+   argmax below and lz_spec_round_temp). Shared with verify_row_argmax,
+   which runs the same condition/window-build/apply sequence, so that
+   lz_spec_round_temp's own target-distribution builder applies the
+   identical penalty step without a second, independently-drifting copy
+   of "when is the window even worth building". The greedy bit-identity
+   gate covers this code path and is the actual proof, not this
    comment. */
 static void apply_row_penalties_assumed(const LZSampler *samp, const int *draft,
                                         int nv, float *row) {
@@ -521,8 +519,8 @@ static void apply_row_penalties_assumed(const LZSampler *samp, const int *draft,
     int has_add = (samp->p.presence_penalty != 0.0f ||
                    samp->p.frequency_penalty != 0.0f);
     if (samp->p.repeat_last_n != 0 && (has_rep || has_add)) {
-        /* static: up to LZ_PENALTY_MAX_WINDOW (4096) ints - iron
-           law six's "no large buffers on the Win98 stack". */
+        /* static: up to LZ_PENALTY_MAX_WINDOW (4096) ints, which is
+           not something to put on the Win98 stack. */
         static int window[LZ_PENALTY_MAX_WINDOW];
         int wl = build_assumed_window(samp, draft, nv, window);
         apply_penalties_assumed(&samp->p, row, window, wl);
@@ -535,7 +533,8 @@ static void apply_row_penalties_assumed(const LZSampler *samp, const int *draft,
    vector, and a 32K-wide float array per lookahead step is exactly the
    allocation that comment refuses. Runs OUTSIDE the PC=24 region
    (lz_fpu_float_end already ran in forward_chunk), so double is safe
-   here - iron law six's third clause. */
+   here; inside that region a double would read back at 24-bit
+   precision. */
 static double lz_look_lse(const float *l, int n) {
     double mx = (double)l[0], sum = 0.0;
     int i;
@@ -590,9 +589,9 @@ static int lz_look_is_eos(const LZGenOpts *o, int tok) {
    cache already carries) plus one save and W restores per emitted
    token. Against W*D forward passes - each of which moves 41.65 MB of
    weights - the copies are about a tenth of the added time, not the
-   dominant term. Stated rather than implied, per iron law three: this
-   is an arithmetic estimate from the measured per-token weight traffic,
-   NOT a measurement on a target machine.
+   dominant term. Said plainly rather than implied: this is an
+   arithmetic estimate from the measured per-token weight traffic, NOT a
+   measurement on a target machine.
 
    The KV cache is deliberately not saved: it is append-only and indexed
    by absolute position, so every branch overwrites entries at >= pos+1
@@ -681,8 +680,8 @@ int lz_spec_round(const LZModel *m, LZRunState *s,
                          function's own module comment on the ring. */
 
     /* LZ_ERR_SET*(rc, errbuf, errlen, LZ_ERR_XXX) rather than a bare
-       lz_err_fmt(errbuf, errlen, rc) call - iron law one requires the
-       THIRD ARGUMENT to be a literal LZ_ERR_* enum at the call site,
+       lz_err_fmt(errbuf, errlen, rc) call - the error convention wants
+       the THIRD ARGUMENT to be a literal LZ_ERR_* enum at the call site,
        not a variable that merely happens to hold one; tools_check_
        err_full.py / test_err_localization.py enforce this so a future
        `snprintf(errbuf, len, some_int)`-shaped mistake cannot hide
@@ -875,10 +874,10 @@ int lz_spec_round(const LZModel *m, LZRunState *s,
        a side effect, so removing it also removes ~0.9 token/round of
        output on top of its 1.00x cost. The trade only nets positive
        once verify's own batch amortizes well, which this machine's
-       un-SIMD'd verify path (iron law two) does not. This is a
-       deliberate consistency-with-llama.cpp change, not a performance
-       one, and iron law three means the ratio can (and on the Win98
-       target family, likely does) flip. */
+       un-SIMD'd verify path does not. Consistency with llama.cpp is
+       the reason, not performance, and one host does not decide the
+       family: the ratio can (and on the Win98 target family, likely
+       does) flip. */
     {
         int dim = m->config.hidden_size;
         memcpy(s->mtp_chain, s->mtp_verify_hidden + (size_t)n_accept * dim,
@@ -1264,9 +1263,8 @@ void lz_gen_opts_set_eos(LZGenOpts *o, LZTokenizer *t) {
    conversion), so the tracker is a self-contained <think>/</think> tag
    scanner answering the same "inside a think block" question stream.c's
    lz_stream_in_think answers for the display side - both must use the
-   same complete-tag rule, and each is pinned by its own tests (iron law
-   two's drift warning applies to any second copy of "the same" tag
-   logic). */
+   same complete-tag rule, and each is pinned by its own tests - two
+   copies of "the same" tag logic drift otherwise. */
 void lz_think_track_feed(LZThinkTrack *tr, const char *bytes, int len) {
     int i;
     if (!tr || !bytes) return;
@@ -1641,8 +1639,8 @@ int lz_generate_resume_ex(const LZModel *m, LZTokenizer *t, LZRunState *s,
             rc = LZ_ERR_ALLOC; goto done;
         }
         /* Heap, not a static array: vocab_size is a runtime value, and
-           iron law six's "no large buffers on the stack" rules out the
-           other option. Paid for only when the knob is on. */
+           a 32K-wide float array is not going on the target's stack.
+           Paid for only when the knob is on. */
         look_scr = (float *)malloc((size_t)m->config.vocab_size * sizeof(float));
         if (!look_scr) { LZ_ERR_SET(rc, errbuf, errlen, LZ_ERR_ALLOC); goto done; }
     }
@@ -1780,7 +1778,7 @@ int lz_generate_resume_ex(const LZModel *m, LZTokenizer *t, LZRunState *s,
        call's memory in them.
        Measured on s1v3, same prompt, same seed, temperature 0: the two
        runs diverge at the FIRST generated token and share no prefix
-       (non-ASCII output elided - this file is engine layer, iron law 7):
+       (the divergent output is elided - this file stays ASCII):
        silently wrong output with no diagnostic. This call is what keeps
        the interactive CLI, which reuses one state across turns at
        start_pos 0, correct. */
@@ -1820,10 +1818,10 @@ int lz_generate_resume_ex(const LZModel *m, LZTokenizer *t, LZRunState *s,
                n_prompt-1 positions the body prefill below covers, using
                the body's OWN hidden state at each one, purely to
                populate the MTP's KV cache before the first round.
-               Without this, every generation started the MTP block
-               blind (empty KV cache, no prompt history) even though the
+               Without this the MTP block starts every generation blind
+               (empty KV cache, no prompt history) even though the
                body's own cache is full of it.
-               h_body_all is heap, not stack (iron law six) - n_prompt
+               h_body_all is heap, not stack - n_prompt
                is caller/prompt-controlled and can be arbitrarily large,
                unlike the fixed-size scratch in LZRunState. */
             float *h_body_all = (float *)malloc(sizeof(float) *
@@ -2078,7 +2076,7 @@ int lz_generate_resume_ex(const LZModel *m, LZTokenizer *t, LZRunState *s,
                verify distributions agree with the per-token path on the
                same effective temperature. With dynamic temperature off,
                eff_temp IS sampler.p.temperature and the swap is a
-               same-value no-op (iron law two). */
+               same-value no-op. */
             {
                 float eff_temp = lz_sample_eff_temp(&sampler.p,
                                                     tr.in_think);

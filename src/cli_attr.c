@@ -11,14 +11,13 @@
    lib386/dos/graph.lib does not link against this build at all: its
    objects pull in _Extender, _ExtenderRealModeSelector and _STACKLOW,
    a runtime this DOS-extender target does not have. (Its symbols are
-   also undecorated where __watcall would want a trailing underscore,
-   which is what the first attempt tripped over - but the runtime
-   mismatch is the one that settles it.)
-   int386 is in the ordinary C library and always links.
-   The per-character interrupt was rejected on cost earlier and that was
-   wrong for THIS workload: generation puts out a few tokens a second,
-   so this path sees tens of characters a second, not a screen refresh.
-   The cost is unmeasurable next to one forward pass. */
+   also undecorated where __watcall would want a trailing underscore -
+   the first thing you hit, but the runtime mismatch is what settles
+   it.) int386 is in the ordinary C library and always links.
+   The per-character interrupt is cheap for THIS workload: generation
+   puts out a few tokens a second, so this path sees tens of characters
+   a second, not a screen refresh. The cost is unmeasurable next to one
+   forward pass. */
 #elif defined(_WIN32)
 #include <windows.h>
 #endif
@@ -176,9 +175,9 @@ const char *lz_attr_mode(const char *mode) {
     else if (strcmp(mode, "auto") == 0) g_on = stdout_is_console();
     else return NULL;
     g_cur = -1;
-    /* "on" that could not be honoured reports itself as off. A run
-       labelled with what it asked for rather than what it got is the
-       shape iron law four keeps catching. */
+    /* "on" that could not be honoured reports itself as off: a run
+       labelled with what it asked for rather than what it got reads as
+       evidence for something that never happened. */
     return g_on ? "on" : "off";
 }
 
@@ -212,8 +211,8 @@ void lz_attr_write(const char *bytes, int n, int style) {
        screen, which is worse than not having it at all.
        _outtext wants a NUL-terminated string and the caller's bytes are
        a slice, so they are copied out in bounded chunks rather than
-       terminated in place. Static, not stack: iron law six, and this is
-       the single-threaded CLI. */
+       terminated in place. Static, not stack - the target's stack is
+       small, and this is the single-threaded CLI. */
     {
         int i;
         for (i = 0; i < n; i++) dos_putc(bytes[i]);

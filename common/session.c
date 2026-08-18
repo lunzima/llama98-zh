@@ -461,8 +461,8 @@ int lz_session_end(LZSession *s, char *errbuf, int errlen) {
        DROPS bytes (reasoning, stray '\r') - see lz_chat_norm_history's
        own comment - so its output is always <= reply_len and this
        allocation can never truncate. Not static or stack: reply_len is
-       unbounded here and iron law six rule 4 is about the target's
-       small stack. */
+       unbounded here, and the rule against large automatic buffers is
+       about the target's small stack. */
     norm = (char *)malloc((size_t)s->reply_len + 1);
     if (!norm) return LZ_ERR_ALLOC;
     n = lz_chat_norm_history(s->reply, s->reply_len, norm, s->reply_len + 1,
@@ -508,12 +508,12 @@ int lz_session_token_count(LZSession *s, const char *system,
        hands to the engine - so this returns the quantity the engine
        compares against seq_len (start_pos + n_prompt, generate.c), not a
        number that merely resembles it.
-       It was 0 once, on the reasoning that the generation prompt is not
-       part of the conversation. It is not, but it is part of what every
-       turn must fit: measured on this tokenizer the tail is 7 tokens
-       with thinking on and 10 with it off, so a window shown as full at
-       2048 dropped the oldest exchange at 2041. A headroom number that
-       runs out before it reads empty is the shape iron law four names.
+       The generation prompt tail counts, even though it is not part of
+       the conversation: it is part of what every turn must fit.
+       Measured on this tokenizer the tail is 7 tokens with thinking on
+       and 10 with it off, so counting it out shows a window as full at
+       2048 while it drops the oldest exchange at 2041 - a headroom
+       number that runs out before it reads empty never reports itself.
        Not a jump either - the tail is appended every turn, so it is a
        constant offset, not a fluctuation.
        render_conv_core, not lz_chat_render: a custom system prompt is

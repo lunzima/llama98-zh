@@ -38,12 +38,12 @@ double lz_time_ms(void);
  * is coarser than the gap between two runs, those runs can still
  * collide. It exists to make the WEAK entropy the clock does provide
  * spread across the seed instead of concentrating in a few bits, and
- * to give every seed site one shared algorithm instead of the three
- * ad-hoc `lz_time_ms() * 1000` spellings that had drifted apart.
+ * to give every seed site one shared algorithm rather than a private
+ * `lz_time_ms() * 1000` spelling each.
  *
  * Pure integer arithmetic, no float, no OS entropy API: identical on
- * DOS, NT 3.51 and Win95, and not part of the forward pass so iron law
- * six's bit-exactness rules do not bind it. */
+ * DOS, NT 3.51 and Win95, and not part of the forward pass, so the
+ * cross-compiler bit-exactness rules do not bind it. */
 unsigned long long lz_seed_mix(unsigned long long x);
 
 /* Seconds since the Unix epoch, for OpenAI's `created` field.

@@ -14,11 +14,11 @@
 # TIMING. QEMU user-mode translates instructions and models no cache, no
 # bus, no memory latency and no pipeline. A wall-clock number from it is
 # a number about this x86 host, not about a 248 MHz ARM926 with 16-bit
-# DDR. Iron law 3 already says host nanoseconds do not transfer; here
+# DDR. Host nanoseconds do not transfer to another machine anyway; here
 # they are not even host nanoseconds of the right work.
 #
-# What DOES transfer is the static instruction count, which is what iron
-# law 3 asks to compare in the first place. `-d in_asm` or a TCG plugin
+# What DOES transfer is the static instruction count, which is the
+# quantity to compare in the first place. `-d in_asm` or a TCG plugin
 # gives it. The one number that matters most for kunkun-CE - the real
 # cost of a ternary kernel on this core - needs either hardware or a
 # cycle-accurate simulator, and neither is this.

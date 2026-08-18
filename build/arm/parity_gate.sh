@@ -5,15 +5,16 @@
 #
 # Cross-builds the ARM binary (build_engine.sh), runs the SAME model
 # through it under QEMU and through an already-built native x86 binary,
-# with --kernel and --recur-write PINNED EXPLICITLY on both sides, then
-# cmp's the --dump-logits output byte for byte.
+# with EVERY AUTO-resolved tier PINNED EXPLICITLY on both sides (the
+# list comes from --pin-tiers, see below), then cmp's the --dump-logits
+# output byte for byte.
 #
 # Exit codes:
 #   0  PASS - bit-identical
 #   1  FAIL - a build/run step failed, or the two dumps differ
 #   2  SKIP - ARM toolchain / QEMU / sysroot / x86 binary not available
 #
-# WHY --kernel ref --recur-write fixed, not auto/auto - BOTH KNOBS BITE:
+# WHY THE TWO OLDEST PINS BITE, as a worked example of the rest:
 #
 #   build_engine.sh does not define __MMX__ (that macro is x86-only, and
 #   nothing here asks the ARM cross compiler to fake it), so the ARM
@@ -117,21 +118,24 @@ trap 'rm -rf "$WORK"' EXIT
 X86_DUMP="$WORK/x86.logits"
 ARM_DUMP="$WORK/arm.logits"
 
-# EVERY knob whose AUTO predicate is q8r_have_simd(), pinned. That test
-# is false on ARM and true on x86, so each of these silently resolves to
-# a DIFFERENT arithmetic on the two sides and the comparison compares
-# nothing. --recur-write was pinned for exactly this reason from the
-# start; conv, attention, epilogue and sigmoid arrived later with the
-# same predicate and were not added here, and the first real run of this
-# gate reported 94505 of 131072 bytes differing because of it.
+# ASKED FOR, not transcribed. Every AUTO-resolved tier must be pinned:
+# each resolves from hardware, the predicate answers differently on ARM
+# than on x86, and an unpinned one makes this comparison compare nothing.
 #
-# Pinned to the FLOAT side of each, not the fixed one: the fixed tiers
-# are the ones under development, and a cross-target comparison should
-# fail on a cross-target difference rather than on a tier's own drift.
-# A second run with them all pinned fixed is a separate, also useful
-# comparison, and is not what this gate is for.
-PINS="--kernel ref --recur-write fixed --conv-write float \
-      --attn-write float --epi-write float --sig-write float"
+# The list is NOT a literal here, because a literal goes stale silently:
+# one that pinned only --kernel and --recur-write, against four more AUTO
+# knobs sharing the same predicate, made this gate report 94505 of 131072
+# bytes differing for that reason alone. lz_tier_pins() in ops.c is the
+# single home, so adding a knob updates this script with no edit here.
+PINS=$("$X86_BIN" --pin-tiers) || {
+    echo "FAIL: could not read --pin-tiers from $X86_BIN" >&2
+    exit 1
+}
+if [ -z "$PINS" ]; then
+    echo "FAIL: --pin-tiers returned nothing; refusing to compare with " \
+         "unpinned AUTO tiers" >&2
+    exit 1
+fi
 
 echo "-- x86 native: $X86_BIN --"
 if ! "$X86_BIN" "$MODEL" $PINS \

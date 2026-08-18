@@ -163,7 +163,8 @@ void     lz_fpu_float_end(unsigned save);
 
    SSE also has 128-bit mulps/addps, which could make the float
    epilogue 4-wide. Do NOT: that changes the association order of a
-   float reduction, which iron law two forbids (see the "no 4-way
+   float reduction, and the tiers owe each other bit-identity
+   (see the "no 4-way
    float accumulator across groups" note in the r>1 path). A
    vectorized epilogue can only ever be a separate tier that is bit
    identical to itself.
@@ -174,7 +175,7 @@ void     lz_fpu_float_end(unsigned save);
    two micro-ops and therefore has the SAME nominal throughput as
    64-bit MMX. Width is not the only variable - XMM has 16 registers
    against MMX's 8, SSE2 does not alias the x87 stack (so the emms
-   accounting in iron law six clause 6 goes to zero), and one 128-bit
+   accounting for who owes an emms goes to zero), and one 128-bit
    instruction occupies one decode slot where two 64-bit ones occupy
    two.
 
@@ -262,8 +263,7 @@ int lz_gdn_mode(void);
    that set is the whole Socket 7 generation - Cyrix 6x86MX/MII and IDT
    WinChip C6/2 alongside the K6 - and it is exactly the part that must
    not be lost, because those have MMX and an x87 WEAKER than the K6's
-   (see iron law 3's machine table, which grew those two rows on
-   2026-08-17). Rewriting this test in terms of MMX would push the three
+   Rewriting this test in terms of MMX would push the three
    machines with the worst x87 in the family back onto the float path,
    and no gate would see it: the two tiers are required to be bit
    identical, so a wrong tier choice is invisible to every consistency
@@ -284,7 +284,7 @@ int lz_gdn_mode(void);
        write-back quantize, it DELETES it - the state never becomes
        float - and that quantize was 83% of this operator.
 
-   One host row cannot decide a family (iron law 3), so the default is
+   One host cannot decide a family of targets, so the default is
    unchanged pending a PII/PIII measurement. The knob is the decision
    point, not this comment. */
 const char *lz_gdn_p2_select(const char *name);
@@ -343,7 +343,8 @@ int lz_conv_norm_pow2(const float *v, int n, short *out, int bound);
    floor's 3.9e-3 - forty-two times over. The tier is named for its two
    callers for that reason.
 
-   BOTH TIERS SHIP, per iron law nine: which is faster depends on the
+   BOTH TIERS SHIP - a contested choice is a knob: which is faster
+   depends on the
    target's float-to-integer cost ratio, and this host answers for
    itself only. */
 /* The kernel coverage matrix: one line per weight format, six characters
@@ -351,15 +352,31 @@ int lz_conv_norm_pow2(const float *v, int n, short *out, int bound);
    mmx-asm, sse-asm, sse2-asm) and one for whether that format has a
    128-element group kernel in this build.
 
-   It exists because the hand-maintained version of this table was wrong.
-   docs/missing-facilities.md claimed three formats had gcc 128-group
-   kernels; none of them does, and no gate could see the difference -
+   It exists because a hand-maintained version of this table said three
+   formats had gcc 128-group kernels when none does, and no gate could
+   see the difference -
    the tier-union assertion checks that every TIER NAME appears
    somewhere, which a format missing a kernel does not change.
 
    Two builds are needed to read it: gcc carries the intrinsics columns,
    Watcom the assembly ones, and only their union is the answer. */
 const char *lz_kernel_matrix(void);
+
+/* Every AUTO-resolved tier, in one list.
+ *
+ * lz_tier_pins() is the CLI string that pins all of them. Any comparison
+ * across targets or builds must use it: an unpinned AUTO resolves from
+ * hardware and the two sides then run different arithmetic, which makes
+ * the comparison compare nothing. That is not hypothetical - the ARM
+ * parity gate pinned two knobs by hand, four more were added later with
+ * the same predicate, and the first real run reported 94505 of 131072
+ * bytes differing for that reason alone.
+ *
+ * lz_tier_report() is the same list resolved, for the banner, so
+ * "chosen" and "defaulted" are distinguishable at a glance. */
+const char *lz_tier_pins(void);
+const char *lz_tier_report(void);
+int lz_pair_is_auto(void);
 
 const char *lz_sig_select(const char *name);
 int lz_sig_mode(void);
@@ -382,7 +399,7 @@ int lz_sig_is_auto(void);
    22.35 vs 13.52 ns per row) - and this host decides nothing: per group
    it is one imul against one fild, two fmul and one fadd, and a P6
    issues three uops a cycle against fmul's one-per-two. Which wins is a
-   target-machine question, so it is a knob, per iron law nine.
+   target-machine question, so it is a knob.
 
    AUTO asks the same CPUID SSE question the conv and pass-2 tiers ask. */
 const char *lz_epi_select(const char *name);
@@ -463,8 +480,8 @@ void lz_matmul_w(float *o, const float *x, const LZTensor *w,
    THE SUFFIX NAMES THE ACTIVATION SIDE, NOT THE WEIGHTS. `xq` is the
    parameter it takes; the WEIGHT format is whatever w->dtype says, and
    this one entry point dispatches every one of them - F32, Q8_0, Q4_1,
-   Q6_1, Q16_0, T2. It was called lz_matmul_q8 until 2026-08-17 and that
-   name was read as "the Q8 weight path" more than once, including in a
+   Q6_1, Q16_0, T2. A name that mentions one format gets read as "the
+   path for that format", which happened here more than once, including in a
    review that concluded the tied lm_head was pinned to Q8 and therefore
    could not go ternary. It never was: forward.c's lm_head call sites
    have always dispatched on dtype like every other call site.
@@ -524,7 +541,7 @@ void lz_matmul_xq(float *o, const float *x, const int8_t *xq,
    Both numbers are op counts, not measurements.
 
    Note what this does NOT decide: whether to write the kernel. The
-   iron law puts C / MMX / SSE / SSE2 paths on every operator
+   rule is C / MMX / SSE / SSE2 paths on every operator
    unconditionally, because the bottleneck is a seesaw and "optimise
    whichever side binds today" leaves both undone.
 
@@ -535,7 +552,7 @@ void lz_matmul_xq(float *o, const float *x, const int8_t *xq,
    **4 IS SETTLED (user decision after testing). Do not
    reopen it on the strength of the dev-box number.** T=8 is faster
    here - kunkun98-pilot 512-token prefill 3.591 s vs 4.051 s - and that
-   is exactly the kind of number iron law 3 says not to promote into a
+   is exactly the kind of number that must not be promoted into a
    target default. The mechanism for it to reverse is concrete: g_xw is
    T x in_dim x 2 bytes, so on kunkun98 (in_dim 1024) T=8 is 16 KB of
    activations, exactly a PII's whole L1, which would evict the weight
@@ -599,9 +616,9 @@ void lz_rope(float *v, int n_heads, int head_dim, int rotary_dim,
    n * v.
 
    Why unnormalized. The orthonormal form needs a 1/sqrt(n) factor, which
-   is not a power of two for odd log2(n) (n=128: 1/sqrt(128)), and iron
-   law 6 forbids dividing by a float constant that the two compilers
-   strength-reduce differently. Leaving the sqrt(n) in and folding the
+   is not a power of two for odd log2(n) (n=128: 1/sqrt(128)), and
+   dividing by a float constant is barred: the two compilers
+   strength-reduce it differently. Leaving the sqrt(n) in and folding the
    resulting factor n into a scale the caller already owns keeps every
    step exact: n is a power of two, so 1/n is exact in binary float and
    both compilers emit the same thing.
@@ -615,7 +632,7 @@ void lz_rope(float *v, int n_heads, int head_dim, int rotary_dim,
    reason to prefer a Hadamard over a general rotation on a P6, where
    FMUL throughput is one per two cycles and FADD is one per cycle.
 
-   Scalar only, deliberately (iron law 2: a new transform lands as a
+   Scalar only, deliberately (a new transform lands as a
    scalar reference first). It runs once per token per head, not once per
    cached row, so it is not on the hot path that would justify two
    hand-written kernels. */
@@ -654,7 +671,7 @@ void lz_kv4_quantize(const float *x, int n, unsigned char *out, float *scale);
 
 /* QJL (1-bit quantized JL sketch for KEY scores, arXiv:2406.03482)
    is NOT in the build. It is kept out rather than left
-   compiled-but-unreachable because iron law eight is explicit that a
+   compiled-but-unreachable because the rule is explicit that a
    path nothing can select does not exist.
 
    Both of its forms were built and measured, and both lost. As a
@@ -934,7 +951,7 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
    than a per-operator constant, because two operators that disagree
    about where zero starts would disagree about results.
 
-   Iron law 2 lists three preconditions for Watcom-vs-gcc bit-identity;
+   Three preconditions are on record for Watcom-vs-gcc bit-identity;
    the third is "no subnormal operands or results", and unlike the other
    two it cannot be met by writing the source differently. x87's PC=24
    fixes the MANTISSA at 24 bits but leaves the EXPONENT range extended,
@@ -959,20 +976,13 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
    both sides. Against activations of order 1, discarding magnitudes
    below 1e-30 is not an approximation anyone can measure.
 
-   It is #ifndef so a probe can build with the floor disabled
-   (-DLZ_Q8_MIN_SCALE=0.0f) and check that the divergence comes back.
-   ("Both" until 2026-08-17: a leftover plural from the edit that turned
-   two enforcement points into one when the chunked recurrence path was
-   deleted. A pronoun that outlives what it referred to sends the reader
-   looking for a second mechanism that is not there - which is exactly
-   what happened, and it cost a wrong "the guarantee is only half
-   implemented" report before the code was read.)
-   The first attempt at that control used a plain #define here, so the
-   command-line value was silently overridden and the control reported
-   "identical without the floor" - a control that proves the probe is
-   blind, reading exactly like a control that proves the probe is
-   unnecessary. The compiler said so ("1 warnings", macro redefinition)
-   and the line scrolled past. */
+   It is #ifndef, not a plain #define, so a probe can build with the
+   floor disabled (-DLZ_Q8_MIN_SCALE=0.0f) and check that the divergence
+   comes back. A plain #define silently overrides the command-line value
+   and the control then reports "identical without the floor" - a
+   control proving the probe is blind reads exactly like a control
+   proving the probe is unnecessary. The only warning is one line of
+   "macro redefinition". */
 #ifndef LZ_Q8_MIN_SCALE
 #define LZ_Q8_MIN_SCALE 1.0e-30f
 #endif
@@ -989,7 +999,7 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
    softmax and a small logit error has more chances to flip which
    position dominates. Measuring at depth <=73 and reporting "small" is
    the same defect as comparing a recurrence at sequence length 1
-   (iron law 4).
+   (a criterion has to be shown sensitive before it is trusted).
 
    Re-measured on cpt100m-frozen (a 100M-token CPT product,
    frozen copy - never the live training dir), one plane vs two, ten
@@ -1051,7 +1061,7 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
    Implementation note: no new kernel. Scoring and the weighted sum are
    both linear in the cached value, so the low plane is a SECOND PASS
    over the existing kernels, combined at 1/254 - the same trick the SSM
-   state uses. That keeps iron law 2 satisfied without writing two more
+   state uses. That keeps bit-identity without writing two more
    assembly kernels. */
 #ifndef LZ_KV_2PLANE
 #define LZ_KV_2PLANE 0
@@ -1066,7 +1076,7 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
    memory-bound headroom a machine has, and that ratio FLIPS inside the
    target family. The plan's own sweep put the best k at 1, 2 or 4
    depending on tier, draft vocabulary and acceptance rate. Writing any
-   one of them into the source is iron law three's "one machine's answer
+   one of them into the source is the "one machine's answer
    taken for the family's".
 
    THE COST, in the three currencies, because counting only one is how
@@ -1249,11 +1259,11 @@ void lz_conv_build_scales(float *oscale, float *in_scale,
    (16384 tokens of cci3-hq, paired per-token NLL.) So --moe-topk without
    --moe-tau could only
    ever select a losing arm, which is why this parameter exists: a knob
-   whose winning setting is unreachable is not a knob. See iron law 9.
+   whose winning setting is unreachable is not a knob.
 
    NOT the default, and the reason is bandwidth, not quality: k=4 reads
    twice the expert weight bytes per token, and that is the dominant cost
-   on every machine in iron law 3's table, for -2.07% ppl. The measured
+   on every machine in the target family, for -2.07% ppl. The measured
    optimum for the DEPLOYED point stays (k=2, tau=1) - both directions on
    the tau axis are worse there, which is itself a measurement rather
    than an assumption (see moe_tau_flat.py's flattening half). */

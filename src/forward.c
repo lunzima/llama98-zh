@@ -62,8 +62,8 @@ int lz_debug_mtp_attn_window = 0;
    reminder: a wider MTP attention window is zero extra
    BYTES/weight loads, but NOT zero ALU - the score and weighted-sum
    loops both scale with however many rows get attended to, same
-   "count bytes but not compute" trap CLAUDE.md's own MTP section
-   already reversed on once). Running total of MTP-only score-loop rows
+   "count bytes but not compute" trap that has reversed a conclusion
+   here before). Running total of MTP-only score-loop rows
    actually scanned (summed as `pos - win_t0 + 1`, once per head, every
    time forward_attn runs with `layer < 0`); body layers never touch
    this. Read directly rather than estimated, so an alpha gain from a
@@ -91,8 +91,8 @@ long long lz_debug_mtp_attn_rows = 0;
    only thing left worth chasing, and it will not be found by dividing
    more totals.
 
-   Integer microseconds, not float seconds: iron law six clause 3 bans
-   %f inside the PC=24 region, and these are read by cli_main.c which
+   Integer microseconds, not float seconds: %f is barred inside the
+   PC=24 region, and these are read by cli_main.c which
    may print them; a long long crosses that boundary safely. Zero cost
    when nothing reads them, and body-only forwards never touch the two
    MTP ones. */
@@ -298,7 +298,7 @@ float lz_moe_tau = 1.0f;
    excludes - so `--spec K` output stays bit-identical to `--spec 0`,
    which is a gate this engine already has and would otherwise break. */
 /* --profile: microseconds per phase of forward_chunk. Accumulators only;
-   cli_main prints them (iron law 1 forbids console output below it).
+   cli_main prints them; nothing below it writes to the console.
 
    Off by default because lz_time_ms() is a syscall-grade clock read and
    the inner phases here run 24 times per token - the measurement would
@@ -340,8 +340,8 @@ static int kv_slot(const LZRunState *s, int t) {
 
    q4r2 buys 0.1 MB for a significant quality loss (paired t = 3.5
    against q8): DOMINATED on both axes, not a trade-off with a regime
-   where it wins. Iron law nine keeps contested knobs because the target
-   MACHINE family flips them; a KV format's quality-per-byte is a
+   where it wins. A contested choice stays a knob because the target
+   MACHINE family flips it; a KV format's quality-per-byte is a
    property of the MODEL and does not flip between a Pentium II and a
    K6-2, so that rule does not reach this case. A dominated option is
    not a knob, it is a trap for whoever reads the list next. */
@@ -1217,7 +1217,8 @@ static void forward_attn(const LZModel *m, LZRunState *s,
        unnormalized Hadamard (see its comment in ops.h). Fold that factor
        out here rather than normalizing the transform: kv_rot_k is a power
        of two, so this division is exact and identical on both compilers,
-       whereas a 1/sqrt(n) constant would trip iron law 6. */
+       whereas dividing by a float constant makes the two compilers
+       disagree - one strength-reduces it to a reciprocal multiply. */
     float scale = s->attn_scale;
     int hdim = c->hidden_size, kvd = c->attn_kv_dim, qd = c->attn_q_dim;
     int qgd = c->attn_qgate_dim;
@@ -1468,7 +1469,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
             /* Scoring is linear in k, so score(hi + lo/254) = score(hi)
                + score(lo)/254. This is a SECOND PASS over the same
                kernels - no new kernel and no second pair of assembly
-               implementations to keep bit-identical (iron law 2).
+               implementations to keep bit-identical.
                Folded BEFORE softmax: the low plane corrects the logit,
                not the probability. */
             {
@@ -2113,7 +2114,7 @@ static void forward_kda(const LZModel *m, LZRunState *s,
    prompt-phase routing is flat (decode's is skewed) makes prefill the
    worst case for it.
 
-   THE SPLIT, measured rather than assumed (iron law 3): ffn(topk) is
+   THE SPLIT, measured rather than assumed: ffn(topk) is
    linear in topk, so sweeping --moe-topk 1/2/4 separates the halves.
    On an 832-token prompt it fit ffn = 856,505 + 787,201*topk us
    exactly - at the trained topk=2 the routed experts are 64.8% of the
@@ -2144,8 +2145,8 @@ static void forward_moe(const LZModel *m, LZRunState *s,
        k. So this is a knob, not a rewrite.
        What it is NOT is free: the model was TRAINED at its config value,
        and running off that value is off-distribution. It exists so the
-       question can be measured (iron law 3 wants this kind of parameter
-       swept, not baked), and the scratch buffers are sized from the
+       question can be measured - a parameter whose best value differs by
+       machine gets swept, not baked - and the scratch buffers are sized from the
        config, so the override is clamped to them. */
     if (lz_moe_topk > 0 && lz_moe_topk <= ne)
         topk = lz_moe_topk;

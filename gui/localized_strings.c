@@ -1,4 +1,4 @@
-/* User-visible string table for the front end (iron law 7), bilingual.
+/* Every user-visible string the front end draws, bilingual.
  *
  * Laid out like src/err.c: enum-indexed parallel arrays, designated
  * initialisers so a reordered enum cannot silently shift the text.
@@ -371,8 +371,8 @@ static const char *const LZ_STR_ZH[LZ_STR_COUNT] = {
     [LZ_STR_CAPTION_UNTITLED]     = "未命名对话",
 };
 
-/* Static, not stack: iron law six, and the target's default stack is
- * small enough that a 4 KB local would matter. */
+/* Static, not stack: the target's default stack is small enough that a
+ * 4 KB local would matter. */
 static char g_arena[LZ_STR_ARENA];
 static char g_check[LZ_STR_ARENA];
 static const char *g_display[LZ_STR_COUNT];

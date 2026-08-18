@@ -93,7 +93,7 @@ int lz_chatfile_decode(const char *bytes, int len, LZChatHist *h,
                        const char *path, char *errbuf, int errlen) {
     LZChatHist tmp;
     int i, rc = 0, cur = -1, mlen = (int)strlen(LZ_CHATFILE_MAGIC);
-    static char body[LZ_CHATFILE_BODY];    /* iron law six: not on the stack */
+    static char body[LZ_CHATFILE_BODY];    /* 128 KiB: not on the stack */
     int blen = 0, k;
 
     if (!bytes || !h) { LZ_ERR_SET(rc, errbuf, errlen, LZ_ERR_NULL_ARG);

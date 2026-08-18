@@ -14,8 +14,8 @@ void lz_sample_defaults(LZSampleParams *p) {
     /* Dynamic temperature: the value kept at the spec's suggested
        number, but the ENABLE FLAG is 0 - the feature is off unless a
        caller explicitly turns it on (CLI: --think-temp). This is what
-       keeps a defaults-built struct on the plain temperature path (iron
-       law two). */
+       keeps a defaults-built struct on the plain temperature path, bit
+       for bit. */
     p->temp_think         = 0.3f;
     p->think_temp_enabled = 0;
     p->topp               = 0.8f;
@@ -193,11 +193,10 @@ static unsigned int random_u32(unsigned long long *state) {
    lz_spec_accept_temp both need to draw from this SAME PRNG - a
    xorshift64* generator has no state to "share" other than the u64
    itself, so exporting the draw function is simpler and safer than
-   duplicating xorshift64*'s five-line body a second time (this
-   project's own iron law two exists precisely because two independent
-   copies of "the same" arithmetic drift). random_u32 above stays
-   static/private - nothing outside this file needs the raw 32-bit
-   draw, only the [0,1) float lz_sample itself has always used. */
+   duplicating xorshift64*'s five-line body a second time - two
+   independent copies of "the same" arithmetic drift. random_u32 above
+   stays static/private: nothing outside this file needs the raw 32-bit
+   draw, only the [0,1) float lz_sample itself uses. */
 float lz_random_f32(unsigned long long *state) {
     return (float)(random_u32(state) >> 8) / 16777216.0f;
 }
@@ -453,16 +452,15 @@ static int select_candidates(const LZSampleParams *pr, const float *logits,
            changes temperature; one pow() against a 32K softmax.
            Sampling runs OUTSIDE the PC=24 region (lz_fpu_float_end
            already ran in forward_chunk), so libm double is safe here -
-           inside it, pow would return wrong values (iron law 6). */
+           inside it, pow would return wrong values. */
         float m_eff = pr->minp;
         float thresh;
         int m = n0;
         /* `temperature` is the EFFECTIVE temperature for this sample (the
            base value when dynamic temperature is off) - the
            conversion must track the number that actually divided the
-           logits, which is what the comment below already claimed and the
-           pre-feature code got from pr->temperature. Both are the same
-           float when no override is active (iron law two). */
+           logits, not pr->temperature: the two are the same float only
+           when no override is active. */
         if (pr->minp_llamacpp && temperature > 0.0f)
             m_eff = (float)pow((double)pr->minp,
                                1.0 / (double)temperature);
@@ -638,10 +636,10 @@ static void inspect_fill_from_buf(LZInspect *ins, const LZProbIndex *buf,
 float lz_sample_eff_temp(const LZSampleParams *p, int in_think) {
     /* Pure number selection, no arithmetic - the "which float divides the
        logits" decision, shared by lz_sample_ex's per-token path and
-       generate.c's round-level speculative override (one rule, iron law
-       two). With the enable flag clear the function returns `temperature`
-       itself, bit for bit, which is what makes dynamic temperature a
-       no-op by default (iron law two). */
+       generate.c's round-level speculative override - one rule, not two
+       copies. With the enable flag clear the function returns
+       `temperature` itself, bit for bit, which is what makes dynamic
+       temperature a no-op by default. */
     if (p->think_temp_enabled && in_think) return p->temp_think;
     return p->temperature;
 }

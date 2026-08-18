@@ -50,9 +50,9 @@
                           a pessimization since the split reads it back
                           immediately. So the SSE1 cell is empty for
                           THIS kernel by enumeration, not by size.
-                    SSE  for the split: one instruction of content, and
-                          iron law 8 does not allow "one instruction" as
-                          a reason to skip a cell. pmaxsw does the low
+                    SSE  for the split: one instruction of content, which
+                          is not a reason to leave the cell empty
+                          either. pmaxsw does the low
                           plane's clamp to -127 directly, replacing the
                           psubsw/paddsw pair - 8 instructions saved per
                           32 elements out of ~400, so ~2%, on the PIII,
@@ -70,14 +70,15 @@
    write-back was measured at 83% + 11% of lz_gdn_step at the all-scalar
    tier, and MMX is the one SIMD the PII has.
 
-   NO emms HERE - rule 6 item 6, and its precondition is met by
-   CONSTRUCTION rather than by inspection: the caller (gdn_p2_row_simd)
+   NO emms HERE - the caller emits one after the row loop, and the
+   precondition is met by CONSTRUCTION rather than by inspection: the
+   caller (gdn_p2_row_simd)
    is phase-split so that every float computation of the row happens
    before the MMX phase or after it, never between two groups. The
    integer part in between - the group's absmax fold and p2_shift_of -
    touches no x87. Putting the emms back per group would be one per 32
-   elements, the exact ratio iron law 6 costs out at 16% of the compute
-   budget for the matmul sub-blocks. */
+   elements, the exact ratio that costs 16% of the compute budget for
+   the matmul sub-blocks. */
 
 /* The scratch block every tier of this operator reads and writes. It
    exists because Watcom's #pragma aux passes at most a handful of
@@ -630,7 +631,7 @@ extern void lz_p2_split32_mmx_asm(const void *blk, signed char *hi_out,
    pmaxsw is an SSE1 addition that operates on MMX REGISTERS, so this is
    still a 64-bit kernel and still leaves MMX state behind - the caller's
    emms rule is unchanged. What it needs is a machine with SSE1, which
-   in iron law 3's table means a PIII, a K7 Palomino or an Athlon XP; a
+   in the target family means a PIII, a K7 Palomino or an Athlon XP; a
    PII and a K6-2 have MMX only and take the kernel above.
 
    Naming: the tier is called "sse" because SSE1 is what a machine must
@@ -639,9 +640,8 @@ extern void lz_p2_split32_mmx_asm(const void *blk, signed char *hi_out,
    since that half has no SSE1 content at all.
 
    Two instructions saved per 8 elements, 8 per 32, ~2% of the operator.
-   Iron law 8 forbids "too small" as a reason to leave a cell empty, and
-   this is what that rule costs and buys, stated so the next reader can
-   see both. */
+   "Too small" is not a reason to leave a cell empty; this is what the
+   cell costs and buys, stated so the next reader can see both. */
 extern void lz_p2_split32_sse_asm(const void *blk, signed char *hi_out,
                                   signed char *lo_out);
 #pragma aux lz_p2_split32_sse_asm = \
@@ -788,8 +788,8 @@ extern void lz_p2_split32_sse_asm(const void *blk, signed char *hi_out,
    Instruction for instruction the MMX pair above, on xmm: SSE2 has every
    one of pmaddwd, psrad, packssdw, packsswb, pcmpgtd, pand/pandn/por and
    the saturating pair. Half the instructions per element, and the
-   machines it is for are the P4 Northwood and the Pentium M (iron law
-   3's table: the only two rows with a check in the SSE2 column).
+   machines it is for are the P4 Northwood and the Pentium M - the only
+   two members of the target family with SSE2.
 
    STILL NO pmaxsd - that is SSE4.1, which none of the target machines
    have. So the int32 absmax remains four instructions plus a copy, the

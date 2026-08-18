@@ -1,7 +1,7 @@
 #ifndef LZ_LOCALIZED_STRINGS_H
 #define LZ_LOCALIZED_STRINGS_H
 
-/* Every user-visible string the front end draws (iron law 7).
+/* Every user-visible string the front end draws.
  *
  * Bilingual, and laid out exactly like src/err.c: an enum, two parallel
  * arrays indexed by it, one switch. Same shape on purpose - the front
@@ -212,8 +212,8 @@ typedef enum {
     LZ_STR_ABOUT_LICENSE,
 
     /* --- title bar: the "untitled" chat name ---
-       Shown when the current conversation has no file. The caption module
-       invents no user-visible text (iron law seven); it receives three GBK
+       Shown when the current conversation has no file. The caption
+       module invents no user-visible text; it receives three GBK
        segments, and this is the chat segment when there is no file. */
     LZ_STR_CAPTION_UNTITLED,
 

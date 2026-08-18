@@ -138,14 +138,14 @@ typedef struct {
     /* Dynamic temperature: per-region temperature override, OFF by
        default. A struct that never sets the enable flag keeps the
        sampler on plain `temperature`, byte-identical to the non-dynamic
-       path (iron law two) - the flag is what a CLI switch turns on, and
+       path - the flag is what a CLI switch turns on, and
        without it the sampler never looks past `temperature`.
 
          temp_think  used INSIDE a <think> block, when think_temp_enabled.
 
        The override only ever substitutes the NUMBER that divides logits
        at step 2 - it never changes how that division happens, which is
-       what keeps the bit-identity contract (iron law two) intact. */
+       what keeps the bit-identity contract intact. */
     float temp_think;
     int   think_temp_enabled;
     float topp;
@@ -292,8 +292,7 @@ int  lz_sample(LZSampler *s, float *logits);
  * logits" selector; lz_sample_eff_temp below turns it into the effective
  * temperature, and the rest of the pipeline is unchanged. Pass 0 for "no
  * dynamic temperature": the effective temperature is then `temperature`
- * itself, so the call reduces to the plain temperature path (iron law
- * two). */
+ * itself, so the call reduces to the plain temperature path. */
 int  lz_sample_ex(LZSampler *s, float *logits, LZInspect *ins,
                   int in_think);
 
@@ -301,9 +300,8 @@ int  lz_sample_ex(LZSampler *s, float *logits, LZInspect *ins,
    lz_sample_ex's own step 2 divides logits by, after the think-block
    override (see LZSampleParams above). Exported because generate.c's
    speculative round needs the SAME rule for its round-level temperature
-   as the per-token path uses - one rule, not a second copy (iron law
-   two). With the enable flag clear this returns `temperature` itself, bit
-   for bit. */
+   as the per-token path uses - one rule, not a second copy. With the
+   enable flag clear this returns `temperature` itself, bit for bit. */
 float lz_sample_eff_temp(const LZSampleParams *p, int in_think);
 
 /* Plain argmax itself, no penalties/temperature/top_k/top_p/min_p - the
@@ -312,8 +310,8 @@ float lz_sample_eff_temp(const LZSampleParams *p, int in_think);
    draft/verify path (generate.c's lz_spec_round): both the draft head's
    own argmax and the verify pass's per-position argmax need exactly this
    rule, not a second implementation of it, to keep --spec 0 and --spec K
-   bit-identical at temperature 0 (iron law two's tie-breaking concern -
-   a different rule here would silently diverge from lz_sample's).
+   bit-identical at temperature 0 - a different tie-breaking rule here
+   would silently diverge from lz_sample's.
 
    Penalties are in scope for the verify path (the assumed penalty
    window - see apply_penalties_assumed below and lz_spec_round's own
@@ -368,7 +366,7 @@ int  lz_argmax_p1(const float *logits, int n, float *out_p);
    own residual resample) shares one PRNG implementation instead of a
    second hand-copied one - see lz_random_f32's own comment in
    sampler.c for why that specific duplication is the one this project
-   least wants (iron law two). state is caller-owned, advanced in
+   least wants. state is caller-owned, advanced in
    place; typically an LZSampler's own rng_state, but any u64 works. */
 float lz_random_f32(unsigned long long *state);
 

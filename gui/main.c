@@ -165,12 +165,11 @@ enum { LZ_LAMP_OFF = 0, LZ_LAMP_READY, LZ_LAMP_BUSY, LZ_LAMP_ERROR,
  * where the repaint can cost more than the token did.
  *
  * IT IS A KNOB, not a constant: how long a tick should be depends
- * entirely on the machine, and this project's own iron law nine says a
- * value that is arguable across the target family becomes an option
- * rather than a decision made here. `stream_ms` in kunkun98.ini.
- * ZERO restores the old push-per-token behaviour exactly, which is what
- * makes it a control rather than only a tuning value - the selftest
- * drives both settings. */
+ * entirely on the machine, and a value that is arguable across the
+ * target family becomes an option rather than a decision made here.
+ * `stream_ms` in kunkun98.ini. ZERO restores push-per-token exactly,
+ * which is what makes it a control rather than only a tuning value -
+ * the selftest drives both settings. */
 #define LZ_TOK_MS       100      /* default tick */
 #define LZ_TOK_MS_MAX   2000     /* an ini typo must not freeze the view */
 #define LZ_TOK_BUF      4096
@@ -1780,7 +1779,7 @@ static void append_colored_line(const char *utf8, int len, COLORREF color) {
  *
  * `with_time` off is for load_chat_from's replay path: LZChatMsg
  * (src/chat.h) carries no timestamp - the engine layer has no display
- * concerns to begin with (iron law one) - and a message loaded back
+ * concerns to begin with - and a message loaded back
  * from a file was not sent "now", so inventing a clock reading for it
  * would put a fact on screen that is simply not true. A live turn
  * (do_send) always passes 1: GetLocalTime is read fresh, right here,
@@ -3166,10 +3165,10 @@ static int create_children(HWND hwnd) {
            rules and an ini a user edited by hand is untrusted input. A
            refused value leaves the mode default in place.
            milli / 1000.0f is FRONT-END code, not inside
-           lz_fpu_float_begin/end and not in src/, so iron law six's
-           rule 1 (never divide by a float constant) does not apply
-           here - that rule protects the engine's cross-compiler
-           bit-exactness, which these lines have no part in.
+           lz_fpu_float_begin/end and not in src/, so the ban on
+           dividing by a float constant does not apply here - it
+           protects the engine's cross-compiler bit-exactness, which
+           these lines have no part in.
 
            THOUSANDTHS because the profile API has no float form
            (gui/inifile.h) and parsing one back would go through the C
@@ -4304,7 +4303,8 @@ static void do_regen(HWND hwnd) {
 
 static void do_edit_last(HWND hwnd) {
     /* Sized off do_send's own input buffer: whatever fits going in has
-       to fit coming back out. static, not stack - iron law six. */
+       to fit coming back out. static, not stack - 144 KB of locals is
+       not something the target's stack holds. */
     static char gbk[49152];
     static char crlf[2 * 49152 + 8];
     const LZChatMsg *m = last_user_msg();
@@ -4865,8 +4865,9 @@ static void repaint_lamps(const LZInspect *ins) {
 
 /* Repaint the candidate LISTBOX from one WM_APP_INSPECT frame.
  *
- * Numbers only came across the wire (LZInspect's own design, iron law
- * one) - turning cand_id[i] into text needs the tokenizer, which is
+ * Numbers only came across the wire (LZInspect's own design: the
+ * engine carries no user-facing text) - turning cand_id[i] into text
+ * needs the tokenizer, which is
  * why this lives here and not in gui/worker.c or src/. lz_decode_into
  * is the thread-safe form (its own header comment): the worker thread
  * is running concurrently, sampling and posting the NEXT frame while
@@ -5578,8 +5579,8 @@ static int st_clip_open(HWND hwnd) {
    binary produced, and the counterpart is an ordinary file sitting next
    to the report from whenever the other run happened - possibly a build
    ago. A stale one still loads, still has the right dimensions, and
-   still yields a percentage: iron law four's shape exactly, a number
-   that is self-consistent and means nothing.
+   still yields a percentage - a number that is self-consistent and
+   means nothing.
    Timestamps rather than a build stamp because the executable's own
    mtime IS the fact being asked about, and baking __DATE__ into the
    binary to answer it would trade a reproducible build for it.
@@ -6027,8 +6028,8 @@ static int st_transcript(FILE *f) {
              "prefill: startup left the live session on prefix reuse");
     checks++;
     {
-        /* The throttle, and BOTH settings of it - iron law nine's "one
-           option plus one gate proving it really changes something".
+        /* The throttle, and BOTH settings of it: one option plus one
+           check proving it really changes something.
            The knob is worth nothing if the only thing checked is that
            the text eventually arrives, which it does either way.
 
@@ -7863,8 +7864,7 @@ static int st_worker(FILE *f, HWND hwnd) {
            The check does NOT re-walk the string with the same lead-
            byte logic truncate_gbk_to_width itself uses - that would
            only prove the function agrees with itself, not that it
-           avoided a split (see this project's own iron law four on
-           exactly that trap). Instead it uses a fact independent of
+           avoided a split. Instead it uses a fact independent of
            the algorithm: every one of the 8 source characters is
            EXACTLY 2 bytes, all identical, so a CORRECT truncation's
            prefix (everything before the appended "...") can only ever
@@ -9205,8 +9205,8 @@ static int st_settings_dialog(FILE *f, HINSTANCE inst) {
     lz_common_settings_set_topp(&in, 0.35f);
     lz_common_settings_set_rep(&in, 1.25f);
     lz_common_settings_set_max_new(&in, 256, in.ctx);
-    /* A CUSTOM system prompt, in UTF-8 with Chinese (hex-escaped per
-       iron law seven). The value is NOT the default (empty), so a
+    /* A CUSTOM system prompt, in UTF-8 with the Chinese hex-escaped so
+       this file stays ASCII. The value is NOT the default (empty), so a
        reader that ignores the box entirely would pass. The
        distinguishing pair: non-empty carries this, empty means the
        built-in. */
@@ -11197,8 +11197,8 @@ static int selftest(HINSTANCE inst, const char *path) {
        assertion of "raw_n == 15" would then fail on a machine where the
        control genuinely holds the CRLF text this check exists to set
        up, for a reason that has nothing to do with what is being
-       tested - worse than an insensitive check, per iron law four: a
-       check that goes red for the wrong reason. What this step actually
+       tested - worse than an insensitive check: one that goes red for
+       the wrong reason. What this step actually
        needs to prove is only that the control holds MORE than what the
        CR-stripped conversion below produces - "some bytes were still in
        there to strip" - and raw_n > un says exactly that without
@@ -12370,8 +12370,8 @@ static int selftest(HINSTANCE inst, const char *path) {
        actually moved onto the control under test rather than left to
        whatever the default happens to be.
 
-       Iron law four's second note applies to the clipboard itself: a
-       readback that matches what was just written could just as well be
+       The clipboard needs its own positive control: a readback that
+       matches what was just written could just as well be
        leftover content nobody put there this run, so the FIRST check
        below proves the instrument is connected - a cleared clipboard
        really does read back empty - before either command is trusted to
@@ -12384,8 +12384,8 @@ static int selftest(HINSTANCE inst, const char *path) {
     {
         HWND tr = g.part[LZ_GUI_TRANSCRIPT];
         /* GetTickCount alone is not unique enough to stamp with: it
-           moves in 15.6 ms steps here (iron law three's note at
-           lz_time_ms), and the classic_ui harness runs this twice.
+           moves in 15.6 ms steps here (see lz_time_ms), and the
+           classic_ui harness runs this twice.
            The counter makes the string differ even inside one tick. */
         static int probe_no;
         char unique[64];

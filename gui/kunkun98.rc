@@ -28,14 +28,13 @@ IDB_SPLASH  BITMAP  "assets/splash-256.bmp"
 
 /* The sidebar chicken: 48x48 8bpp, quantised to the Win9x standard
  * palette (build/watcom/make_side_chicken.py) so a 256-colour desktop
- * needs no palette realisation. It was 112x112 until 2026-08-14, when
- * it dropped to the ICQ-style avatar size - 112 read as a poster, not
- * an instant messenger. */
+ * needs no palette realisation. 48 is the ICQ-style avatar size; at
+ * 112 it read as a poster rather than an instant messenger. */
 IDB_CHICKEN BITMAP  "assets/kunkun98-photo-256-side.bmp"
 
 /* The About dialog's logo column: a 68x191 crop of the splash backdrop
  * (field + ghosted photo, no 3D rooster), dithered to the Win9x 256
- * palette. Replaces the 48x48 icon placeholder that stood there. */
+ * palette. */
 IDB_ABOUT_LOGO BITMAP "assets/kunkun98-about-logo-256.bmp"
 
 /* Status-bar lamps, WinZip's twin-lamp idiom: left = model state,

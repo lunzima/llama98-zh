@@ -6,7 +6,6 @@
    Contents, in file order (grouped by FORMAT with the ISA branches
    nested inside, which is what makes the guards hard to follow):
 
-     dot32_ref                      scalar C
      part32_* / fold4_sse2          sse2-intrin  (gcc, !LZ_USE_MMX)
      x16 / q16 / q41 / q61          each: #ifdef __WATCOMC__ asm
      nowiden                              #else  mmx-intrin
@@ -16,23 +15,13 @@
    compiled under a wider predicate than its caller is either an
    undefined reference in one configuration or dead code in another, and
    both only show up in a build nobody happens to run.
- *
- * `dot32_ref` used to live here as the scalar 32-element dot product,
- * guarded `!__SSE2__ && !__MMX__` to match matmul_q8_impl's scalar
- * `#else`. That `#else` is gone - c395eba replaced the dispatch with the
- * tier table, and the scalar path became matmul_scalar_ref, which is
- * also what iron law 2 calls the contract. The function stayed, with a
- * comment describing a caller that no longer existed, and nothing
- * noticed until an ARMv5TE cross-build - where neither __SSE2__ nor
- * __MMX__ is defined and it is the only configuration that compiles it -
- * reported it unused. Removed 2026-08-16; `.prof/ann.txt` in the
- * training tree still carries a profile of it being called, which is
- * how the history was reconstructed.
- *
- * The rule in the first paragraph is the reason this note is longer than
- * the function was. Two more symbols in ops.c had the same drift in the
- * other direction - defined wider than used - and the same ARM build
- * found both. */
+
+   The scalar reference for a 32-element dot product is
+   matmul_scalar_ref in ops.c, not a private copy here: it is the path
+   every SIMD tier is judged bit-identical against. Three symbols in
+   this file and ops.c had drifted wider than their callers, and the
+   ARMv5TE cross-build - where neither __SSE2__ nor __MMX__ is defined -
+   is the configuration that reports them. */
 
 #if defined(__SSE2__) && !defined(__WATCOMC__)
 #include <emmintrin.h>
@@ -261,8 +250,8 @@ static __m128i part32_q16(const int16_t *w, const int16_t *x) {
    random/extreme groups. eax=w, edx=x, returns eax;
    contains an emms (the caller's row-level EMMS is idempotent, no
    harm). */
-/* Originally generated; hand-editing is allowed (rule lifted
-   2026-08-16) - if you regenerate, diff first.
+/* Originally generated, hand-edited since - if you regenerate, diff
+   the generator's output against what is here first.
    Kernels do NOT emit emms: the loop body is all integer and MMX; x87
    is only used in the whole-row reduction, and the caller already does
    one _mm_empty() after the loop. One emms per 32 elements would be
@@ -334,7 +323,7 @@ extern int32_t lz_dot32_x16_asm(const int8_t *w, const int16_t *x);
 
    No emms here, by rule 6.6: the caller emits one after the row loop.
 
-   VERIFIED (iron law 2): 200000 random plus 8 extreme trials against
+   VERIFIED BIT-IDENTICAL: 200000 random plus 8 extreme trials against
    the scalar reference, 0 mismatches - and the
    differential's own sensitivity checked by mutating one operand offset
    ([ebx+8] -> [ebx+16]), which turned it into 200000 mismatches. */
@@ -911,8 +900,8 @@ static int32_t dot32_q16_mmx(const int16_t *w, const int16_t *x) {
    Verified: bit-matches the scalar over 200K random + all-15 x
    all-±127 extreme groups; measured 3.75 ns/32MAC vs x87
    scalar 23.50 ns (6.3x). */
-/* Originally generated; hand-editing is allowed (rule lifted
-   2026-08-16) - if you regenerate, diff first.
+/* Originally generated, hand-edited since - if you regenerate, diff
+   the generator's output against what is here first.
    Differential-checked over 200K groups (random + extremes,
    bit-identical to the scalar reference).
    Counts (µop, P6 accounting): Q8_0 52, Q4_1 63, Q6_1 86. */
@@ -1034,7 +1023,7 @@ extern int32_t lz_dot32_q41_sse2_asm(const unsigned char *w, const int16_t *x);
 
    No emms here (rule 6.6: the caller emits one after the row loop).
 
-   VERIFIED (iron law 2): 200000 random plus 8 extreme trials against
+   VERIFIED BIT-IDENTICAL: 200000 random plus 8 extreme trials against
    a scalar reference, 0 mismatches; the differential's
    own sensitivity checked by mutating one operand offset ([edx+32] ->
    [edx+48]), which turned it into 199998 mismatches. */
@@ -1218,18 +1207,17 @@ static int32_t dot32_q41_mmx(const unsigned char *w, const int16_t *x) {
 /* ---- T2 (ternary, one 2-bit plane) ------------------------------------ */
 
 /* Originally emitted by tools/kernelgen/gen_t2.py IN THE TRAINING TREE -
-   the engine repository carries no tools (iron law zero), so the
-   generator lives there and only its output is pasted here.
-   HAND-EDITING IS ALLOWED (rule lifted 2026-08-16); the generator is
-   scaffolding, not the source of truth. If you regenerate, diff against
-   what is here first - anything hand-tuned since will be silently
-   reverted otherwise.
+   the engine repository carries no tools, so the generator lives there
+   and only its output is pasted here. The generator is scaffolding, not
+   the source of truth: hand-editing is fine, but if you regenerate,
+   diff against what is here first - anything hand-tuned since will be
+   silently reverted otherwise.
 
    MMX 70 instructions / 9 loads; SSE2 47 / 5. For scale, Q6_1 is 86 uop
    / 11 loads and 59 / 6 - T2 is the same kernel with the 4-bit plane
    deleted, which is exactly why it was given Q6_1'''s 2-bit layout.
 
-   VERIFIED BEFORE BEING MOVED HERE, as iron law 2 requires: 
+   VERIFIED BIT-IDENTICAL BEFORE BEING MOVED HERE:
    tools/kernelgen/wt2.c compares both against the scalar reference over
    a 32-position sweep (one nonzero weight at a time, both signs - a
    uniform block hides a wrong shift), six extreme patterns, and 200,000
@@ -1369,7 +1357,7 @@ extern int32_t lz_dot32_t2_sse2_asm(const unsigned char *w2,
     __modify [8087]
 
 #elif defined(__MMX__)
-/* The gcc half of iron law 8's MMX cell for T2. Instruction for
+/* The gcc half of the MMX cell for T2. Instruction for
    instruction the same kernel as the assembly above - one 8-byte load of
    the plane, eight groups of (punpck against zero, align the 2-bit field
    to the top of the lane, drop the rest, put it back with the x256
@@ -1412,8 +1400,8 @@ static int32_t dot32_t2_mmx(const unsigned char *w2, const int16_t *x) {
 
 /* ---- Q6_1 (6.5 bits: 4-bit + 2-bit dual planes) ------------------------ */
 #if defined(__WATCOMC__)
-/* Originally generated; hand-editing is allowed (rule lifted
-   2026-08-16) - if you regenerate, diff first. 86 µop / 11 loads
+/* Originally generated, hand-edited since - if you regenerate, diff
+   the generator's output against what is here first. 86 µop / 11 loads
    (P6 accounting). Only 6 of the 8 MMX registers are used,
    but activations MUST go through pmaddwd's memory operand - once the
    2-bit plane joins, all 8 registers are occupied; none is free to
@@ -1510,8 +1498,8 @@ static int32_t dot32_q61_mmx(const unsigned char *w4, const unsigned char *w2,
     return lz_dot32_q61_asm(w4, w2, x);
 }
 
-/* Originally generated; hand-editing is allowed (rule lifted
-   2026-08-16) - if you regenerate, diff first. 59 instructions / 6 loads.
+/* Originally generated, hand-edited since - if you regenerate, diff
+   the generator's output against what is here first. 59 instructions / 6 loads.
 
    **Which is faster than the MMX version cannot be decided statically.**
    SSE2 is 59 instructions / ~116 µop; MMX is 78 / 86 µop - +35% µop,
@@ -1897,7 +1885,7 @@ extern void lz_dot128_q41_sse2_asm(const unsigned char *w,
 
    No emms here (rule 6.6: the caller emits one after the row loop).
 
-   VERIFIED (iron law 2): 200000 random plus 8 extreme trials against
+   VERIFIED BIT-IDENTICAL: 200000 random plus 8 extreme trials against
    a scalar reference, 0 mismatches; sensitivity checked
    by mutating one 2-bit plane shift (psrlw 6 -> psrlw 5), which turned
    it into 199997 mismatches. */

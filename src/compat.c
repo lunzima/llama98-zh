@@ -147,14 +147,14 @@ double lz_time_ms(void) {
        THE RESOLUTION IS THE 18.2 Hz BIOS TICK, about 54.9 ms, whatever
        CLOCKS_PER_SEC says: the macro is the UNIT the value is reported
        in, not the rate the counter advances at. Anyone timing on this
-       target must read iron law three's note on exactly this trap - the
-       same one bit the Windows build, where clock()'s quantum is the
+       target has to know this trap - the same one bit the Windows
+       build, where clock()'s quantum is the
        15.6 ms scheduler tick and a 100 ms benchmark round reported
        2.02x and 3.41x for the same binary. Rounds have to be seconds
        long here, and "all the readings are integer multiples of one
        number" is how you recognise that they were not.
 
-       Dividing by a constant is iron law six's rule 1, and this is the
+       Dividing by a float constant is barred, and this is the
        exemption that rule already carries: it protects the forward
        pass's cross-compiler bit-exactness, and a wall clock is not in
        the forward pass and is never compared bit for bit. Same

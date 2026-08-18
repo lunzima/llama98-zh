@@ -461,13 +461,14 @@ static int utf8_enc_len(uint32_t cp) {
    longest segment, rather than declared inside the segment loop with a
    fixed LZ_TK_MAX_WORD extent. As stack arrays they came to 49,376 bytes
    per call (gcc -fstack-usage), on the generation request path, against
-   iron law six clause 4 - and a Win98 stack overflow is not catchable:
-   the process dies at whatever call depth was deepest, which is rarely
-   the frame at fault. The sizing pass is O(codepoints) and disappears
-   next to bpe_word, which is O(n log n) in the segment length.
+   a stack the target does not have - and a Win98 stack overflow is not
+   catchable: the process dies at whatever call depth was deepest, which
+   is rarely the frame at fault. The sizing pass is O(codepoints) and
+   disappears next to bpe_word, which is O(n log n) in the segment
+   length.
 
-   LZ_TK_MAX_WORD still caps one segment, but it now bounds MEMORY
-   rather than time - see its comment in tokenizer.h, which has been
+   LZ_TK_MAX_WORD still caps one segment, but it bounds MEMORY rather
+   than time - see its comment in tokenizer.h, which has been
    wrong about this twice. */
 static int encode_segment(LZTokenizer *t, const unsigned char *bytes, int len,
                           int *out, int out_cap) {
@@ -738,8 +739,8 @@ static int word_from_json(LZTokenizer *t, int id, const char *text, int len) {
     if (id < 0 || id >= t->total) return 0;
 
     /* Decoded IN PLACE rather than through a uint32_t cps[LZ_TK_MAX_WORD]
-       staging array. Such an array would be 16,384 bytes of stack (iron
-       law 6 clause 4: Win98 stacks are small) and pure staging - every
+       staging array. Such an array would be 16,384 bytes of stack -
+       Win98 stacks are small - and pure staging: every
        codepoint consumed once, immediately, by the loop below. It would
        also cap a token at LZ_TK_MAX_WORD codepoints for no reason of its
        own; that cap belongs to bpe_word's cost guard, not to vocabulary

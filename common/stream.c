@@ -28,8 +28,8 @@ static char g_out[LZ_STREAM_RUN_MAX + 16];
 
 /* What "---" turns into: a short run of box-drawing characters, "a
  * string that fits the width without wrapping and without overfilling
- * the line" (the user's own wording, in Chinese, translated here -
- * iron law seven).
+ * the line" (the user's own wording, translated - source comments are
+ * English).
  *
  * U+2500 BOX DRAWINGS LIGHT HORIZONTAL, written in UTF-8 and converted
  * by lz_gbk_from_utf8 like every other substitution here, so the

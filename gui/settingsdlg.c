@@ -123,8 +123,8 @@ void lz_gui_format_temp(float t, char *out, int cap) {
        Unreachable today - lz_common_settings_set_temp rejects an
        out-of-range value before either call site is reached - but a
        function that takes a capacity and does not use it is a trap
-       primed for the next caller, and the guard lives in another file
-       (iron law four, note 10). */
+       primed for the next caller, and the guard that would stop it
+       lives in another file. */
     char tmp[64];
     int n;
     if (!out || cap <= 0) return;
@@ -132,7 +132,7 @@ void lz_gui_format_temp(float t, char *out, int cap) {
        decimal, so two is one more than anyone needs and still short
        enough to read. sprintf of a float is fine here - the x87 control
        word is only narrowed inside the engine's forward pass, on the
-       worker thread (iron law six, third point). */
+       worker thread. */
     sprintf(tmp, "%.2f", (double)t);
     n = (int)strlen(tmp);
     if (n > cap - 1) n = cap - 1;

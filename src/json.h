@@ -77,8 +77,8 @@ int lz_json_str_eq(const LZJsonNode *n, const char *s);
 
    NO FLOAT OUTPUT, on purpose. Nothing in an OpenAI chat completion
    needs one (`created` is an integer and logprobs are unsupported), and
-   iron law six clause 3 forbids printf-ing floats anywhere the x87 sits
-   in its PC=24 region. Not offering the function is cheaper than
+   printf-ing a float is barred anywhere the x87 sits in its PC=24
+   region. Not offering the function is cheaper than
    remembering where calling it would be safe. */
 typedef struct {
     char *s;

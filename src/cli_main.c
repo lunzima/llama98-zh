@@ -64,7 +64,7 @@ extern float lz_debug_mtp_attn_scale;
 extern int lz_debug_mtp_attn_window;
 extern long long lz_debug_mtp_attn_rows;
 /* Part 4: microseconds inside each piece of a speculative
-   round. Printed here rather than in the engine because iron law one
+   round. Printed here rather than in the engine because nothing there
    forbids console output below cli_main.c - the engine only ever
    accumulates. */
 extern long long lz_debug_us_verify;
@@ -151,6 +151,8 @@ static void usage(void) {
     "Validation:\n"
     "  --check          Validate structure only (fast)\n"
     "  --tensors        List all tensors\n"
+    "  --pin-tiers      Print the flags that pin every AUTO-resolved tier.\n"
+    "                   Any cross-target comparison must pass all of them.\n"
     "  --kernel-matrix  Which row kernels this build carries, per weight\n"
     "                   format. Six slots then the 128-group column; the\n"
     "                   answer is the UNION of a gcc and a Watcom build.\n"
@@ -161,7 +163,7 @@ static void usage(void) {
     "  --dump-nll F     Write per-target NLL (f32, n_tokens-1 values)\n"
     "  --dump-all-logits F  Write every position's logits ((n_tokens-1) x\n"
     "                   vocab f32). Measurement only - the argmax/top-5\n"
-    "                   agreement criterion (quantization-precision.md 6.2).\n"
+    "                   agreement criterion.\n"
     "  --dump-top5 F    The same criterion at 20 bytes a position instead\n"
     "                   of 131 KB: top-5 ids ((n_tokens-1) x 5 int32).\n"
     "  --dump-prompt-tokens F  Write the encoded prompt's token ids instead\n"
@@ -477,13 +479,13 @@ static void tensor_stats_t(const char *name, const LZTensor *t) {
  * input mis-decoded as UTF-8 into replacement characters and shown on a
  * GBK screen. Both directions are wrong, so both are converted here.
  *
- * Not in the engine: iron law one keeps console I/O out of the other
+ * Not in the engine: console I/O stays out of the other
  * src files and allows it only here. This is a DISPLAY layer - a code
  * point GBK cannot represent becomes '?', and that must never be
  * written back into history or the next render diverges from the KV
  * cache. Everything upstream of these two functions stays UTF-8.
  *
- * A knob, defaulted per platform rather than hardcoded (iron law nine).
+ * A knob, defaulted per platform rather than hardcoded.
  * DOS defaults on because that is the only target whose console is not
  * UTF-8-capable; anyone piping a DOS build's output into a file wants
  * --console utf8 and now has it. */
@@ -517,7 +519,8 @@ static int console_is_tty(void) {
  * to the next chunk. Converting it immediately would emit '?' for a
  * character that is perfectly fine, one call later.
  *
- * static, not stack: iron law six rule 4, and the tail has to survive
+ * static, not stack - the target has a small stack - and the tail
+ * has to survive
  * between calls anyway. Single-threaded by construction - the CLI has
  * one generation at a time. */
 /* The display sink LZStream drives. Styles arrive here and are ignored
@@ -649,11 +652,11 @@ static void console_out(const char *bytes, int len) {
         lz_stream_init(&st);
         inited = 1;
     }
-    /* BOTH paths go through the stream now. The hand-rolled UTF-8
-       boundary buffer that used to sit here was a second implementation
-       of what LZ_STREAM_PEND already does - and because the redirected
-       path skipped it entirely, a </think> tag reached a piped file
-       verbatim while the console never saw one. */
+    /* BOTH paths go through the stream. A hand-rolled UTF-8 boundary
+       buffer here would be a second implementation of what
+       LZ_STREAM_PEND already does, and one the redirected path skips:
+       that is how a </think> tag reaches a piped file verbatim while
+       the console never sees one. */
     lz_stream_push(&st, bytes, len, cli_stream_sink, NULL);
     fflush(stdout);
 }
@@ -815,7 +818,7 @@ int main(int argc, char **argv) {
        shared tail suffices for every error point. */
     memset(&m, 0, sizeof m);
     memset(&tok, 0, sizeof tok);
-    /* static, not stack: iron law six, rule 4. The target is Win98 and
+    /* static, not stack: the target is Win98 and
        this frame is the base of the CLI stack. Single-threaded, written
        by the callee before it is read, so one instance is enough. */
     static char err[1024];
@@ -953,6 +956,14 @@ int main(int argc, char **argv) {
         }
         else if (strcmp(a, "--check") == 0)   only_check = 1;
         else if (strcmp(a, "--tensors") == 0) list_tensors = 1;
+        else if (strcmp(a, "--pin-tiers") == 0) {
+            /* For scripts. Every cross-target or cross-build comparison
+               needs all AUTO tiers pinned, and transcribing the list
+               into each script is how the ARM gate came to pin two of
+               six. Printed by the binary so the list has one home. */
+            printf("%s\n", lz_tier_pins());
+            return 0;
+        }
         else if (strcmp(a, "--kernel-matrix") == 0) {
             /* Before the model is opened: this is a property of the
                binary, and requiring a model would make it unaskable on a
@@ -1166,7 +1177,7 @@ int main(int argc, char **argv) {
             if (ctx_limit < 16) ctx_limit = 16;
         }
         else if (strcmp(a, "--kernel") == 0 && i + 1 < argc) {
-            /* Iron law 8 puts C / MMX / SSE / SSE2 paths on every
+            /* The rule puts C / MMX / SSE / SSE2 paths on every
                operator, and the gate for that is a four-way bit-identity
                comparison. A path the CLI cannot select cannot be
                compared, so it might as well not exist - the same
@@ -1261,7 +1272,7 @@ int main(int argc, char **argv) {
             /* Which 32-element kernel the row loops call, not which ISA.
                Exists because pairing and the 128-element group kernel
                optimize different resources and the winner is per
-               machine (iron law 3 / 9). Numerics-neutral by contract. */
+               machine, so it is a knob. Numerics-neutral by contract. */
             const char *got = lz_pair_select(argv[++i]);
             if (!got) {
                 printf("--pair: unknown mode (auto|on|off)\n");
@@ -1309,7 +1320,7 @@ int main(int argc, char **argv) {
             /* Refused rather than clamped, and the range is in the usage
                text: a silently clamped temperature would report a number
                in the banner that is not the one that ran, which is the
-               shape iron law 4 keeps catching. */
+               shape that keeps catching people out. */
             float t = (float)atof(argv[++i]);
             if (!(t >= LZ_MOE_TAU_MIN && t <= LZ_MOE_TAU_MAX)) {
                 usage();
@@ -1420,24 +1431,12 @@ int main(int argc, char **argv) {
        rather than substituted so the existing parsers - this file's
        gates match on "write <tier>" -
        keep matching. */
-    printf("Pairing        %s, recurrence write %s[%s], conv write %s\n",
-           lz_pair_mode() ? "on" : "off",
-           lz_gdn_p2_mode() ? (lz_gdn_p2_is_auto() ? "fixed(auto)" : "fixed")
-                            : (lz_gdn_p2_is_auto() ? "float(auto)" : "float"),
-           lz_gdn_p2_impl(),
-           lz_conv_mode() ? (lz_conv_is_auto() ? "fixed(auto)" : "fixed")
-                          : (lz_conv_is_auto() ? "float(auto)" : "float"));
-    printf("Sigmoid/SiLU   %s%s\n",
-           lz_sig_mode() ? "fixed" : "float",
-           lz_sig_is_auto() ? "(auto)" : "");
-    printf("Epilogue       %s%s\n",
-           lz_epi_mode() ? "fixed" : "float",
-           lz_epi_is_auto() ? "(auto)" : "");
-    printf("Attn write     %s%s\n",
-           lz_attn_mode() == 3 ? "fixed" :
-           lz_attn_mode() == 1 ? "scoring" :
-           lz_attn_mode() == 2 ? "wsum" : "float",
-           lz_attn_is_auto() ? "(auto)" : "");
+    /* One list, produced by ops.c, so a new tier appears here the day it
+       exists rather than the day someone remembers this function. The
+       previous version was four printf calls that had already drifted
+       into three different ways of writing "(auto)". */
+    printf("Tiers          [recurrence impl %s]\n%s",
+           lz_gdn_p2_impl(), lz_tier_report());
     printf("Kernels        %s built-in, %s selected -> tier %s\n",
            lz_build_paths(), lz_kernel_name(), lz_kernel_tier());
     printf("Structure OK   %.0f ms\n", t1 - t0);
@@ -1472,7 +1471,7 @@ int main(int argc, char **argv) {
            QueryPerformanceCounter - see compat.c - so a small or
            already-cached model can finish inside one tick and make
            t1 - t0 exactly zero. Printing "inf MB/s" for that is the
-           trap CLAUDE.md names; saying the clock could not resolve it
+           trap on record; saying the clock could not resolve it
            is the honest answer, and lz_common_tokcell guards the same
            way. */
         double secs = (t1 - t0) / 1000.0;
@@ -1601,7 +1600,7 @@ int main(int argc, char **argv) {
                    one, and a 32k-term exp sum in float loses digits
                    exactly where the rare-token buckets live. It never
                    runs inside the PC=24 region (that closes with
-                   lz_forward), so double is honest here - see iron law
+                   lz_forward), so double is honest here - see the
                    six clause 3 for why that has to be checked. */
                 float mx = logits[0];
                 double sum = 0.0;
@@ -1973,7 +1972,7 @@ int main(int argc, char **argv) {
         LZRunState st;
         LZSession sess;
         static char tpath[1024];       /* same grounds as `line` below */
-        /* static, not stack: iron law six clause 4. main() is one frame
+        /* static, not stack: the target has a small stack. main() is one frame
            at the base of a Win98 stack and already the largest in the
            tree; 8 KB of it was this. Safe as static here in a way it
            would not be in the engine - cli_main is the single-threaded
