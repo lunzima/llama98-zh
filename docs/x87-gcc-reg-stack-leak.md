@@ -275,19 +275,25 @@ stack. Three rounds of investigation examined it because that is where
 the NaN first becomes visible; the defect is at the call site, in what
 the caller is still holding.
 
-**Inlining is what builds the pressure**, which is why `-fno-inline`
-also makes the symptom go away. `nm` on the two builds:
+**What builds the pressure is loop-invariant hoisting, not inlining.**
+An earlier version of this section blamed inlining, on the strength of
+`-fno-inline` also hiding the symptom and of Watcom keeping the two
+helpers as real functions. Direct test refutes it: marking either
+`gdn_p2_group_fixed` or `gdn_p2_fixed_rows` `__attribute__((noinline))`
+leaves the tag word at `0xe015` - seven occupied - at the call, and the
+output still all-NaN. The seven live values are held inside
+`gdn_p2_fixed_rows` itself across its own call, whether or not it is
+inlined into its caller.
 
-| | Watcom | gcc |
-|---|---|---|
-| `gdn_p2_fixed_rows` | own symbol | inlined away |
-| `gdn_p2_group_fixed` | own symbol, and it is the caller | inlined away |
-| `p2_group_norm` | own symbol | own symbol, still a real call |
+That is consistent with which flag works: `-fno-rerun-cse-after-loop`
+disables the pass that hoists loop-invariant values, and `-fno-inline`
+helps only because changing inlining changes what is loop-invariant.
 
-Watcom calls `p2_group_norm` from `gdn_p2_group_fixed` with nothing
-live. gcc merges both callers into `gdn_step_impl`, which merges their
-float live ranges, and then calls the one function it did *not* inline
-while holding seven.
+**There is therefore no source-level fix, and `noinline` is not one.**
+The rule being broken is the i386 ABI's requirement that the x87 stack
+be empty across a call, which is an obligation on the code generator.
+No annotation in C says "do not keep values in x87 registers across this
+call" - that is what the register allocator is for.
 
 This is a register-allocation defect, not a source defect: the same C is
 correct under two other toolchains, and the allocator's obligation is to
