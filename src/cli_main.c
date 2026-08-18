@@ -230,6 +230,12 @@ static void usage(void) {
     "  --kernel TIER    auto|ref|mmx|sse2 (default auto, by CPUID).\n"
     "                   All tiers must be bit-identical; an uncompiled tier\n"
     "                   falls back loudly.\n"
+    "  --fixed MODE        auto|off|all (default auto). Sets every write\n"
+    "                   tier at once - recurrence, conv1d, attention,\n"
+    "                   epilogue, sigmoid, norms. The per-tier flags\n"
+    "                   below still work and WIN over this one, whatever\n"
+    "                   order they appear in; they are what the ARM\n"
+    "                   parity gate pins and what a bisect needs.\n"
     "  --recur-write TIER  auto|fixed (default auto). The recurrence state\n"
     "                   write-back tier: fixed keeps the integer result and\n"
     "                   skips the float re-quantize; auto resolves from\n"
@@ -832,6 +838,7 @@ int main(int argc, char **argv) {
     const char *all_path = NULL;
     const char *prompt_tok_path = NULL;
     const char *top5_path = NULL;
+    const char *group_fixed = NULL;   /* --fixed's value, applied after the loop */
     float *nll = NULL;
     FILE *af = NULL;    /* --dump-all-logits stream, fclosed after the loop */
     FILE *tf = NULL;    /* --dump-top5 stream, same lifetime as af */
@@ -1211,6 +1218,19 @@ int main(int argc, char **argv) {
                        "running %s]\n", argv[i], lz_build_paths(),
                        lz_kernel_tier());
         }
+        else if (strcmp(a, "--fixed") == 0 && i + 1 < argc) {
+            /* A group setter, recorded and applied after the loop, so a
+               per-tier flag appearing before it is not silently
+               overwritten. Argument order is not a thing a reader
+               should have to know. */
+            const char *v = argv[++i];
+            if (strcmp(v, "auto") != 0 && strcmp(v, "off") != 0
+                && strcmp(v, "all") != 0) {
+                printf("--fixed: unknown mode (auto|off|all)\n");
+                return 2;
+            }
+            group_fixed = v;
+        }
         else if (strcmp(a, "--recur-write") == 0 && i + 1 < argc) {
             /* State write-back tier. `fixed` keeps the recurrence's own
                integer result and skips the float re-quantize; `auto`
@@ -1379,6 +1399,39 @@ int main(int argc, char **argv) {
             usage();
             return 2;
         } else dir = a;
+    }
+    /* Applied after the loop so command-line order does not decide the
+       result: a per-tier flag wins whether it came before or after
+       --fixed. lz_*_is_auto() is the record of "nobody set this", which
+       is exactly the question here. */
+    if (group_fixed) {
+        const char *t = (strcmp(group_fixed, "all") == 0) ? "fixed"
+                       : (strcmp(group_fixed, "off") == 0) ? "float"
+                       : "auto";
+        int skipped = 0;
+        /* The recurrence selector takes only auto|fixed - there is no
+           explicit float. So `--fixed off` leaves it on auto and SAYS
+           SO, rather than passing a name that returns NULL into a call
+           whose result nobody checks. */
+        if (lz_gdn_p2_is_auto() && strcmp(t, "float") != 0)
+            skipped += (lz_gdn_p2_select(t) == NULL);
+        else if (lz_gdn_p2_is_auto())
+            printf("--fixed off: the recurrence tier has no float "
+                   "setting (auto|fixed only); left on auto\n");
+        if (lz_conv_is_auto()) skipped += (lz_conv_select(t) == NULL);
+        if (lz_attn_is_auto()) skipped += (lz_attn_select(t) == NULL);
+        if (lz_epi_is_auto())  skipped += (lz_epi_select(t) == NULL);
+        if (lz_sig_is_auto())  skipped += (lz_sig_select(t) == NULL);
+        if (lz_norm_is_auto()) skipped += (lz_norm_select(t) == NULL);
+        /* A selector that does not take this name returns NULL and
+           changes nothing, which is indistinguishable from success at
+           the call site - and the result is a group setter that reached
+           a subset while reading as though it reached everything. */
+        if (skipped) {
+            printf("--fixed %s: %d tier(s) do not take that setting and "
+                   "were left alone\n", group_fixed, skipped);
+            return 2;
+        }
     }
     if (!dir) {
         usage();
