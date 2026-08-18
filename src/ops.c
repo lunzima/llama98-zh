@@ -105,6 +105,48 @@ void lz_f32_count_reset(void) {
    move some of them and not the others. */
 static int g_kernel = 0;
 
+/* Slot order for EVERY dispatch table in this file, operators included.
+   Repeated here because the row tables' copy sits 1500 lines down and
+   the tables below are read before it. */
+#define LZ_ROW_MMX_I   0
+#define LZ_ROW_SSE_I   1
+#define LZ_ROW_SSE2_I  2
+#define LZ_ROW_MMX_A   3
+#define LZ_ROW_SSE_A   4
+#define LZ_ROW_SSE2_A  5
+#define LZ_ROW_N       6
+
+/* ONE dispatch rule, generated per function-pointer type.
+ *
+ * Every operator's kernels go through a table and a pick; none is called
+ * directly from the operator body. Two things follow, and the second is
+ * why this is a rule rather than a preference:
+ *
+ *   - `--kernel` moves ALL of them together. An inline
+ *     `if (g_kernel == LZ_KERNEL_SSE2)` inside one operator works until
+ *     someone writes the next one and picks a different predicate.
+ *   - a slot is visible. T2's SSE2 intrinsics were inlined into their
+ *     row function with no separate symbol, an audit searched for the
+ *     symbol, found nothing, and recorded the cell as missing for
+ *     months. A NULL in a table is legible; an inlined call is not.
+ *
+ * Empty slots are NULL and carry their reason at the table, so a build
+ * with no SIMD at all - the ARM cross-build - gets NULL from every pick
+ * and runs the scalar path without a single #if at the call site. */
+#define LZ_DEFINE_PICK(NAME, TYPE)                                        \
+    static TYPE NAME(const TYPE *tab) {                                   \
+        int want_sse2 = (g_kernel == LZ_KERNEL_SSE2);                     \
+        TYPE f;                                                           \
+        if (!g_kernel) return (TYPE)0;   /* not selected yet: caller      \
+                                            selects, then asks again */   \
+        if (g_kernel == LZ_KERNEL_REF) return (TYPE)0;                    \
+        f = tab[want_sse2 ? LZ_ROW_SSE2_A : LZ_ROW_MMX_A];                \
+        if (f) return f;                                                  \
+        f = tab[want_sse2 ? LZ_ROW_SSE2_I : LZ_ROW_MMX_I];                \
+        if (f) return f;                                                  \
+        return tab[LZ_ROW_MMX_I];                                         \
+    }
+
 #include "ops_kernel_amax.h"
 #include "ops_kernel_norm.h"
 
@@ -138,24 +180,17 @@ void lz_rmsnorm(float *o, const float *x, const float *w, int n, float eps) {
     inv = lz_rsqrt(ss / (float)n + eps);
     /* (1 + w), not w: see the header */
     i = 0;
-#if defined(LZ_HAVE_NORM_SSE)
-    /* Gated on the same selector as everything else, so --kernel ref
-       reaches the scalar loop and the four-tier comparison covers this.
-       SSE2 and SSE run the same code here - mulps and addps are SSE1 -
-       so both tiers take the branch. */
-    if (g_kernel == LZ_KERNEL_SSE2 && n >= 4) {
-        int n4 = n >> 2;
-#if defined(__WATCOMC__)
-        float k2[2];
-        k2[0] = inv;
-        k2[1] = 1.0f;
-        lz_rmsnorm_out_sse_asm(o, x, w, n4, k2);
-#else
-        lz_rmsnorm_out_sse(o, x, w, n4, inv);
-#endif
-        i = n4 << 2;
+    {
+        lz_normoutfn f = lz_normout_pick(LZ_NORMOUT_TAB);
+        if (f && n >= 4) {
+            float k2[2];
+            int n4 = n >> 2;
+            k2[0] = inv;
+            k2[1] = 1.0f;
+            f(o, x, w, n4, k2);
+            i = n4 << 2;
+        }
     }
-#endif
     for (; i < n; i++) o[i] = x[i] * inv * (1.0f + w[i]);
 }
 
@@ -192,20 +227,17 @@ void lz_softmax(float *x, int n) {
        the two as one number is what put the old census 13x low here. */
     LZ_FC(LZ_FC_SOFTMAX, 3 * n + 1);
     i = 1;
-#if defined(LZ_HAVE_NORM_SSE)
-    /* The maximum is exact, so lane order cannot change it and this owes
-       the scalar loop bit-identity rather than a tolerance. The sum
-       below is NOT vectorized for the opposite reason. */
-    if (g_kernel == LZ_KERNEL_SSE2 && n >= 8) {
-        int n4 = (n - 1) >> 2;
-#if defined(__WATCOMC__)
-        lz_vmax_sse_asm(x + 1, n4, &mx);
-#else
-        mx = lz_vmax_sse(x + 1, n4, mx);
-#endif
-        i = 1 + (n4 << 2);
+    {
+        /* The maximum is exact, so lane order cannot change it and this
+           owes the scalar loop bit-identity rather than a tolerance. The
+           sum below is NOT vectorized, for the opposite reason. */
+        lz_vmaxfn f = lz_vmax_pick(LZ_VMAX_TAB);
+        if (f && n >= 8) {
+            int n4 = (n - 1) >> 2;
+            f(x + 1, n4, &mx);
+            i = 1 + (n4 << 2);
+        }
     }
-#endif
     for (; i < n; i++) if (x[i] > mx) mx = x[i];
     for (i = 0; i < n; i++) {
         x[i] = lz_exp(x[i] - mx);
@@ -216,18 +248,13 @@ void lz_softmax(float *x, int n) {
        attention scoring. Hardware-independent win, not an approximation. */
     {
         float inv = (sum > 0.0f) ? 1.0f / sum : 0.0f;
+        lz_vscalefn f = lz_vscale_pick(LZ_VSCALE_TAB);
         i = 0;
-#if defined(LZ_HAVE_NORM_SSE)
-        if (g_kernel == LZ_KERNEL_SSE2 && n >= 4) {
+        if (f && n >= 4) {
             int n4 = n >> 2;
-#if defined(__WATCOMC__)
-            lz_vscale_sse_asm(x, n4, &inv);
-#else
-            lz_vscale_sse(x, n4, inv);
-#endif
+            f(x, n4, &inv);
             i = n4 << 2;
         }
-#endif
         for (; i < n; i++) x[i] *= inv;
     }
 }
@@ -638,46 +665,32 @@ static uint32_t q8_amax(const float *grp, int gs) {
     union { float f; uint32_t u; } bit;
     uint32_t am = 0;
     int k = 0;
-    /* Keyed to the SAME selector the row kernels use, not to a private
-       CPUID test. Two reasons, and the second is the load-bearing one:
-       `--kernel mmx` then actually reaches this MMX tier, and the
-       existing four-tier bit-identity gate covers these kernels without
-       a line of new harness. A private predicate would have left the MMX
-       cell unreachable on every development machine, which is how a tier
-       comes to be written and never run. */
-    if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
-#if defined(LZ_HAVE_AMAX_SSE2)
-    if (g_kernel == LZ_KERNEL_SSE2 && gs >= 4) {
-#if defined(__WATCOMC__)
-        am = lz_amax32_sse2_asm(grp, gs);
-#else
-        am = lz_amax32_sse2(grp, gs);
-#endif
-        k = gs & ~3;
-    } else
-#endif
-#if defined(LZ_HAVE_AMAX_MMX)
-    if (g_kernel == LZ_KERNEL_MMX && gs >= 2) {
-#if defined(__WATCOMC__)
-        am = lz_amax32_mmx_asm(grp, gs);
-#else
-        am = lz_amax32_mmx(grp, gs);
-#endif
-        /* Per group, not once per call, and the caller cannot do it:
-           q8_group_scale does x87 float arithmetic on this result
-           immediately. Rule 6 item 6 says kernels do not emit and
-           callers do - but the caller here is two lines below, inside
-           the same function.
+    lz_amaxfn f;
+    int lanes;
 
-           Invisible on gcc, where x86-64 scalar float goes through SSE
-           and dirty MMX state costs nothing. Watcom differed on
-           --kernel mmx and nothing else, which is exactly the shape the
-           rounding tier's own emms comment records twenty lines down. */
-        _mm_empty();
-        k = gs & ~1;
-    } else
-#endif
-    { k = 0; }
+    /* One table, one pick, no #if at the call site - so `--kernel` moves
+       this operator with all the others, and a build with no SIMD gets
+       NULL and falls through to the scalar loop below. */
+    if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
+    f = lz_amax_pick(LZ_AMAX_TAB);
+    lanes = lz_amax_lanes(f);
+    if (f && gs >= lanes) {
+        am = f(grp, gs);
+        k = gs & ~(lanes - 1);
+        if (lz_amax_is_mmx(f)) {
+            /* Per group, not once per call, and the caller cannot do it:
+               q8_group_scale does x87 float arithmetic on this result
+               immediately. Rule 6 item 6 says kernels do not emit and
+               callers do - but the caller here is two lines below,
+               inside the same function.
+
+               Invisible on gcc, where x86-64 scalar float goes through
+               SSE and dirty MMX state costs nothing. Watcom differed on
+               --kernel mmx and nothing else, exactly the shape the
+               rounding tier's own emms comment records further down. */
+            _mm_empty();
+        }
+    }
     for (; k < gs; k++) {
         uint32_t a;
         bit.f = grp[k];
@@ -1604,13 +1617,8 @@ static void matmul_scalar_ref(float *o, const int8_t *xq, const float *xqs,
    silently: a tier that cannot be reached must not report itself as
    the tier that ran. That confusion is the whole reason this file is
    being restructured. */
-#define LZ_ROW_MMX_I   0
-#define LZ_ROW_SSE_I   1
-#define LZ_ROW_SSE2_I  2
-#define LZ_ROW_MMX_A   3
-#define LZ_ROW_SSE_A   4
-#define LZ_ROW_SSE2_A  5
-#define LZ_ROW_N       6
+/* The slot constants are defined near the top of the file, beside
+   LZ_DEFINE_PICK, because the operator tables there are read first. */
 
 /* ISA from the runtime tier, impl from the build - the same join
    lz_kernel_tier() reports, in one place instead of four #if mazes.
@@ -3282,64 +3290,6 @@ static const lz_rowfn LZ_ROW_Q16[LZ_ROW_N] = {
     NULL, NULL, NULL
 #endif
 };
-
-/* The 128-group column, declared rather than detected. A row kernel's
-   use of a group-of-four kernel is a compile-time fact inside a static
-   function, invisible from outside, so it is recorded here beside the
-   tables it describes and the gate compares this against the source.
-   Both halves have to be edited together or the gate fails, which is
-   the point - the previous version of this map lived in a document and
-   drifted. */
-#if defined(__WATCOMC__)
-#define LZ_G128_Q8  1
-#define LZ_G128_Q41 1
-#define LZ_G128_Q61 1
-#define LZ_G128_Q16 1
-#else
-/* No gcc row kernel calls a group-of-four kernel, for ANY format. The
-   assembly ones hoist mask construction across four sub-blocks by hand;
-   the intrinsics ones leave that to the compiler, which is what a
-   compiler does with a loop-invariant. Whether a hand-written gcc
-   version would differ has NOT been measured, so this is 'not written',
-   not 'nothing to offer'. */
-#define LZ_G128_Q8  0
-#define LZ_G128_Q41 0
-#define LZ_G128_Q61 0
-#define LZ_G128_Q16 0
-#endif
-/* T2 on both compilers. Derived by comparing against q6_1, which unpacks
-   a 2-bit plane the same way and DOES have one: q6_1's group kernel
-   hoists two mask constants (0x0F and 0x03) plus a zero register across
-   its four sub-blocks. T2 has no such constant - its unpack is a zero
-   register and three immediate shifts, and hoisting the zero turns
-   `pxor mm2,mm2` into `movq mm2,mm7`, one instruction for one. Each
-   sub-block carries its own 2-bit plane, its own accumulator and its own
-   fold. So a T2 group kernel would emit the same instruction sequence as
-   four separate calls. */
-#define LZ_G128_T2  0
-
-const char *lz_kernel_matrix(void) {
-    static char buf[512];
-    static const struct { const char *name; const lz_rowfn *tab; int g128; }
-    rows[] = {
-        { "q8_0",  LZ_ROW_Q8,  LZ_G128_Q8  },
-        { "q4_1",  LZ_ROW_Q41, LZ_G128_Q41 },
-        { "q6_1",  LZ_ROW_Q61, LZ_G128_Q61 },
-        { "q16_0", LZ_ROW_Q16, LZ_G128_Q16 },
-        { "t2",    LZ_ROW_T2,  LZ_G128_T2  }
-    };
-    int i, j, p = 0;
-    for (i = 0; i < 5; i++) {
-        p += sprintf(buf + p, "%-6s", rows[i].name);
-        for (j = 0; j < LZ_ROW_N; j++)
-            buf[p++] = rows[i].tab[j] ? 'x' : '.';
-        buf[p++] = ' ';
-        buf[p++] = rows[i].g128 ? 'G' : '.';
-        buf[p++] = '\n';
-    }
-    buf[p] = '\0';
-    return buf;
-}
 
 static void matmul_q16_impl(float *o, const int8_t *xq, const float *xqs,
                             const LZTensor *w, int in_dim, int out_dim, int nt) {
@@ -6051,4 +6001,75 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
         if (idx[t] < 0 || idx[t] >= cap) continue;
         if (hits[idx[t]] < 255) hits[idx[t]]++;
     }
+}
+
+/* ---- kernel coverage matrix ------------------------------------------
+
+   At the end of the file and outside every #if, because it must exist on
+   EVERY target: cli_main.c calls it unconditionally, and the first
+   version sat inside `#if defined(__MMX__)` and broke the ARM
+   cross-build at link. That build is the one nobody runs, which is
+   exactly why it found this.
+
+   The 128-group column is DECLARED, not detected: whether a row kernel
+   calls a group-of-four kernel is a compile-time fact inside a static
+   function and cannot be read from outside. Both halves have to be
+   edited together, and tests/test_kernel_matrix.py compares this against
+   the source - the previous version of this map lived in a document and
+   drifted for months. */
+#if defined(__WATCOMC__)
+#define LZ_G128_Q8  1
+#define LZ_G128_Q41 1
+#define LZ_G128_Q61 1
+#define LZ_G128_Q16 1
+#else
+/* No gcc row kernel calls a group-of-four kernel, for ANY format. The
+   assembly ones hoist mask construction across four sub-blocks by hand;
+   the intrinsics ones leave that to the compiler, which is what a
+   compiler does with a loop-invariant. Whether a hand-written gcc
+   version would differ has NOT been measured, so this is "not written",
+   not "nothing to offer". */
+#define LZ_G128_Q8  0
+#define LZ_G128_Q41 0
+#define LZ_G128_Q61 0
+#define LZ_G128_Q16 0
+#endif
+/* T2 on both compilers, and this one IS "nothing to offer". Derived by
+   comparing against q6_1, which unpacks a 2-bit plane the same way and
+   does have one: q6_1's group kernel hoists two mask constants (0x0F and
+   0x03) plus a zero register across its four sub-blocks. T2's unpack is
+   a zero register and three immediate shifts, and hoisting the zero
+   turns `pxor mm2,mm2` into `movq mm2,mm7`, one instruction for one.
+   Each sub-block carries its own 2-bit plane, its own accumulator and
+   its own fold, so a T2 group kernel would emit the same instruction
+   sequence as four separate calls. */
+#define LZ_G128_T2  0
+
+const char *lz_kernel_matrix(void) {
+    static char buf[512];
+    /* Q16's table is the one row inside the MMX block; the other four
+       are unguarded and come out all-NULL on a target with no SIMD,
+       which is the honest answer there. */
+#if defined(__MMX__)
+    const lz_rowfn *q16 = LZ_ROW_Q16;
+#else
+    const lz_rowfn *q16 = 0;
+#endif
+    struct { const char *name; const lz_rowfn *tab; int g128; } rows[5];
+    int i, j, p = 0;
+    rows[0].name = "q8_0";  rows[0].tab = LZ_ROW_Q8;  rows[0].g128 = LZ_G128_Q8;
+    rows[1].name = "q4_1";  rows[1].tab = LZ_ROW_Q41; rows[1].g128 = LZ_G128_Q41;
+    rows[2].name = "q6_1";  rows[2].tab = LZ_ROW_Q61; rows[2].g128 = LZ_G128_Q61;
+    rows[3].name = "q16_0"; rows[3].tab = q16;        rows[3].g128 = LZ_G128_Q16;
+    rows[4].name = "t2";    rows[4].tab = LZ_ROW_T2;  rows[4].g128 = LZ_G128_T2;
+    for (i = 0; i < 5; i++) {
+        p += sprintf(buf + p, "%-6s", rows[i].name);
+        for (j = 0; j < LZ_ROW_N; j++)
+            buf[p++] = (rows[i].tab && rows[i].tab[j]) ? 'x' : '.';
+        buf[p++] = ' ';
+        buf[p++] = rows[i].g128 ? 'G' : '.';
+        buf[p++] = '\n';
+    }
+    buf[p] = '\0';
+    return buf;
 }

@@ -78,7 +78,16 @@ if [ ! -d "$SYSROOT" ]; then
     exit 2
 fi
 if [ -z "$X86_BIN" ]; then
-    for cand in "$ROOT/llama98.exe" "$ROOT/llama98"; do
+    # Host-native FIRST. Under WSL both names are executable - .exe runs
+    # through interop - but a Windows binary handed a /mnt/e/... path
+    # cannot resolve it, so preferring .exe there fails with "cannot find
+    # config.json" on a directory that plainly exists. Picking a binary
+    # this host cannot actually drive is worse than finding none.
+    case "$(uname -s)" in
+        Linux*)  order="$ROOT/llama98 $ROOT/llama98.exe" ;;
+        *)       order="$ROOT/llama98.exe $ROOT/llama98" ;;
+    esac
+    for cand in $order; do
         [ -x "$cand" ] && X86_BIN=$cand && break
     done
 fi
@@ -108,8 +117,24 @@ trap 'rm -rf "$WORK"' EXIT
 X86_DUMP="$WORK/x86.logits"
 ARM_DUMP="$WORK/arm.logits"
 
+# EVERY knob whose AUTO predicate is q8r_have_simd(), pinned. That test
+# is false on ARM and true on x86, so each of these silently resolves to
+# a DIFFERENT arithmetic on the two sides and the comparison compares
+# nothing. --recur-write was pinned for exactly this reason from the
+# start; conv, attention, epilogue and sigmoid arrived later with the
+# same predicate and were not added here, and the first real run of this
+# gate reported 94505 of 131072 bytes differing because of it.
+#
+# Pinned to the FLOAT side of each, not the fixed one: the fixed tiers
+# are the ones under development, and a cross-target comparison should
+# fail on a cross-target difference rather than on a tier's own drift.
+# A second run with them all pinned fixed is a separate, also useful
+# comparison, and is not what this gate is for.
+PINS="--kernel ref --recur-write fixed --conv-write float \
+      --attn-write float --epi-write float --sig-write float"
+
 echo "-- x86 native: $X86_BIN --"
-if ! "$X86_BIN" "$MODEL" --kernel ref --recur-write fixed \
+if ! "$X86_BIN" "$MODEL" $PINS \
         --tokens "$TOKENS" --dump-logits "$X86_DUMP" \
         >"$WORK/x86.log" 2>&1; then
     echo "FAIL: x86 run failed:" >&2
@@ -119,7 +144,7 @@ fi
 
 echo "-- ARM under QEMU (arm926): $ARM_BIN --"
 if ! BIN="$ARM_BIN" SYSROOT="$SYSROOT" "$HERE/run_qemu.sh" "$MODEL" \
-        --kernel ref --recur-write fixed \
+        $PINS \
         --tokens "$TOKENS" --dump-logits "$ARM_DUMP" \
         >"$WORK/arm.log" 2>&1; then
     echo "FAIL: ARM/QEMU run failed:" >&2

@@ -128,14 +128,34 @@ extern void lz_vscale_sse_asm(float *x, int n4, const float *pk);
     modify [eax edx];
 #define LZ_HAVE_NORM_SSE 1
 
+/* Wrappers, for the same reason ops_kernel_amax.h gives: a #pragma aux
+   body is emitted at the call site and has no address to put in a
+   table. */
+static void lz_rmsnorm_out_sse_w(float *o, const float *x, const float *w,
+                                 int n4, const float *k2) {
+    lz_rmsnorm_out_sse_asm(o, x, w, n4, k2);
+}
+static void lz_vmax_sse_w(const float *x, int n4, float *pmax) {
+    lz_vmax_sse_asm(x, n4, pmax);
+}
+static void lz_vscale_sse_w(float *x, int n4, const float *pk) {
+    lz_vscale_sse_asm(x, n4, pk);
+}
+
 #else   /* gcc: intrinsics */
 
 #if defined(__SSE__) || defined(__SSE2__)
 #include <xmmintrin.h>
+/* Signatures match the asm side exactly - constants through a pointer,
+   results through a pointer - so ONE table holds either build's kernel
+   and the operator body has no #if in it. The pointer costs a load the
+   compiler would have done anyway; the alternative is two tables and two
+   call sites per operator, which is where the dispatch stops being
+   uniform. */
 static void lz_rmsnorm_out_sse(float *o, const float *x, const float *w,
-                               int n4, float inv) {
-    __m128 vi = _mm_set1_ps(inv);
-    __m128 one = _mm_set1_ps(1.0f);
+                               int n4, const float *k2) {
+    __m128 vi = _mm_set1_ps(k2[0]);
+    __m128 one = _mm_set1_ps(k2[1]);
     int b;
     for (b = 0; b < n4; b++) {
         __m128 vx = _mm_loadu_ps(x + b * 4);
@@ -145,8 +165,8 @@ static void lz_rmsnorm_out_sse(float *o, const float *x, const float *w,
     }
 }
 
-static float lz_vmax_sse(const float *x, int n4, float seed) {
-    __m128 acc = _mm_set1_ps(seed);
+static void lz_vmax_sse(const float *x, int n4, float *pmax) {
+    __m128 acc = _mm_set1_ps(*pmax);
     union { __m128 m; float f[4]; } o;
     int b;
     for (b = 0; b < n4; b++)
@@ -155,12 +175,12 @@ static float lz_vmax_sse(const float *x, int n4, float seed) {
     {
         float a = o.f[0] > o.f[1] ? o.f[0] : o.f[1];
         float c = o.f[2] > o.f[3] ? o.f[2] : o.f[3];
-        return a > c ? a : c;
+        *pmax = a > c ? a : c;
     }
 }
 
-static void lz_vscale_sse(float *x, int n4, float k) {
-    __m128 vk = _mm_set1_ps(k);
+static void lz_vscale_sse(float *x, int n4, const float *pk) {
+    __m128 vk = _mm_set1_ps(*pk);
     int b;
     for (b = 0; b < n4; b++)
         _mm_storeu_ps(x + b * 4, _mm_mul_ps(_mm_loadu_ps(x + b * 4), vk));
@@ -169,3 +189,42 @@ static void lz_vscale_sse(float *x, int n4, float k) {
 #endif
 
 #endif  /* __WATCOMC__ */
+
+/* Dispatch tables, one per helper, same six slots and same pick rule as
+   every other operator here. The gcc and Watcom sides were given the
+   SAME signatures - constants arrive through a pointer on both - so one
+   table can hold either.
+ *
+ * MMX IS EMPTY BY INSTRUCTION SET for all three: MMX has no
+ * floating-point operations at all. That is the same reason
+ * lz_q8round32 has no MMX tier, and it is why these three are the only
+ * operators in this file whose empty cell is the MMX one rather than the
+ * SSE one.
+ *
+ * SSE AND SSE2 HOLD THE SAME FUNCTION, deliberately. mulps, addps and
+ * maxps are SSE1; SSE2 adds double and integer width that none of these
+ * loops uses. Filling both slots with one implementation says "these
+ * cannot differ", which an empty SSE2 slot would not. */
+typedef void  (*lz_normoutfn)(float *o, const float *x, const float *w,
+                              int n4, const float *k2);
+typedef void  (*lz_vmaxfn)(const float *x, int n4, float *pmax);
+typedef void  (*lz_vscalefn)(float *x, int n4, const float *pk);
+
+#if defined(LZ_HAVE_NORM_SSE) && defined(__WATCOMC__)
+#define LZ_NORM_SLOTS(F) NULL, F##_w, F##_w, NULL, F##_w, F##_w
+#elif defined(LZ_HAVE_NORM_SSE)
+#define LZ_NORM_SLOTS(F) NULL, F, F, NULL, NULL, NULL
+#else
+#define LZ_NORM_SLOTS(F) NULL, NULL, NULL, NULL, NULL, NULL
+#endif
+
+static const lz_normoutfn LZ_NORMOUT_TAB[LZ_ROW_N] =
+    { LZ_NORM_SLOTS(lz_rmsnorm_out_sse) };
+static const lz_vmaxfn LZ_VMAX_TAB[LZ_ROW_N] =
+    { LZ_NORM_SLOTS(lz_vmax_sse) };
+static const lz_vscalefn LZ_VSCALE_TAB[LZ_ROW_N] =
+    { LZ_NORM_SLOTS(lz_vscale_sse) };
+
+LZ_DEFINE_PICK(lz_normout_pick, lz_normoutfn)
+LZ_DEFINE_PICK(lz_vmax_pick,    lz_vmaxfn)
+LZ_DEFINE_PICK(lz_vscale_pick,  lz_vscalefn)

@@ -8,8 +8,14 @@
 
 ## 状态（2026-08-18）
 
-**九条里八条已完成或收尾**，唯一还被外部挡住的是 **E**——ARM 对拍要
-`arm-linux-gnueabi-gcc` 与 `qemu-arm-static`，本机装不了。
+**九条全部完成或收尾。** 只剩 H1/H2/H3 里那些**带着理由的空格子**，
+没有一格是「空着且没人说为什么」。
+
+**E 曾被判为「本机装不了工具链」，那是查错了环境**——`arm-linux-gnueabi-gcc`
+与 `qemu-arm-static` 一直装在 WSL 里，我在 Git Bash 侧查完就下了结论。
+第一次真跑就红（131072 字节里 94505 不同），原因是本轮新加的四个档位
+AUTO 判据都是 `q8r_have_simd()`，在两侧解析成不同的算术，而脚本只钉了
+`--kernel` 与 `--recur-write`。补钉之后 PASS。
 
 **H 已从「一大团待办」变成一张机器产出的表**：`llama98 --kernel-matrix`
 两个构建取并集，`tests/test_kernel_matrix.py` 双向盯着（空格要有理由，
@@ -28,7 +34,7 @@ H3 的三个算子从零起步且剩下每格带理由。**没有一格是「空
 | B | T2 从未端到端跑过 | **已完成**：2026-08-18 第一次把 T2 写进文件（12 个张量），加载器/两条反量化路径/派发守卫首次见到真文件；`--kernel ref/mmx/sse2` 三档与 gcc↔Watcom 全部逐位相同，四个定点档全开时也相同。**不依赖 QAT 检查点**——那是模型质量的前提，不是代码路径的前提 |
 | C | 出货配方没有闸门 | **已完成**：`tests/test_shipping_recipe.py`（训练树）拿真的 `kunmoe_patterns()` 对 kunmoe-v2 的张量清单跑 export_q8 自己的四个检查器；变异矩阵 `.prof/mut_shipping_recipe.py` 三个变异各只红自己那条 |
 | D | 静默降级无报告 | **已完成**：`export_q8.check_no_silent_downgrade`，21 个用例，三桶 + 两条正交轴，`--allow-downgrade` 逃生 |
-| E | ARM 只有运行器 | **一半完成**：`build/arm/parity_gate.sh` 已建并钉死 `--kernel ref` / `--recur-write fixed`（实测证实不钉死则对拍从第一天就是假的）。**ARM 侧本机跑不了**——无 `arm-linux-gnueabi-gcc`、无 `qemu-arm-static`，脚本对三者显式 SKIP。真实逐位比较待有工具链的机器 |
+| E | ARM 只有运行器 | **已完成（2026-08-18）**：`PASS: x86 and ARM --dump-logits are bit-identical (131072 bytes)`。**工具链一直都在——在 WSL 里**（`arm-linux-gnueabi-gcc` + `qemu-arm-static` 已装）；此前判「本机装不了」是在 Git Bash 侧查的，**查错了环境**。跑法：`wsl -e bash -lc 'cd /mnt/e/llama98-zh && make llama98 && bash build/arm/parity_gate.sh <model>'` |
 | F | 铁律二 (c) 只兑现一半 | **撤回**——是我读错了树，保证完整。见下 |
 | G | 没有 CI | **已完成**：`build/ci.sh`，实跑 `pass=5 fail=0 skip=1`，判据自测三项 |
 | H | 算子缺汇编 | **H1 / H4 完成**。**H2**：表改由 `--kernel-matrix` 机器产出（手工那份高估了覆盖：它说三个格式有 gcc 128 组内核，实际一个都没有），T2 的空缺已证明是结构性的，gcc 侧记为「没写」并说明为何不许写成结构性。**H3 三个算子从零起步**（amax 5/7、RMSNorm 输出循环 3/7、softmax max+归一化 3/7），剩下的每一格都带理由 |

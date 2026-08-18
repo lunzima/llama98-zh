@@ -111,12 +111,29 @@ extern unsigned lz_amax32_sse2_asm(const float *x, int n);
     modify [eax edx];
 #define LZ_HAVE_AMAX_SSE2 1
 
+/* Thin wrappers so the dispatch table can hold these.
+ *
+ * A #pragma aux body is emitted at each CALL SITE; there is no function
+ * to point at, and taking its address is an undefined reference at link
+ * - which is exactly what happened the first time these went into a
+ * table. Every row_*_asm in ops.c has the same shape for the same
+ * reason. The wrapper is the only caller, so the asm is still inlined
+ * once and the indirect call is one per operator invocation, not one per
+ * element. */
+static unsigned lz_amax32_mmx_w(const float *x, int n) {
+    return lz_amax32_mmx_asm(x, n);
+}
+static unsigned lz_amax32_sse2_w(const float *x, int n) {
+    return lz_amax32_sse2_asm(x, n);
+}
+
 #else   /* gcc: intrinsics */
 
 #if defined(__MMX__)
 #include <mmintrin.h>
 #include "mmx_compat.h"
-/* Leaves MMX state dirty; the caller emits emms once after the loop. */
+/* Same signature as the asm side, so one table holds both. Leaves MMX
+   state dirty; the caller emits emms once after the loop. */
 static unsigned lz_amax32_mmx(const float *x, int n) {
     __m64 acc = _mm_setzero_si64();
     __m64 msk = _mm_set1_pi32(0x7FFFFFFF);
@@ -160,3 +177,62 @@ static unsigned lz_amax32_sse2(const float *x, int n) {
 #endif
 
 #endif  /* __WATCOMC__ */
+
+/* The dispatch table. Six slots in the LZ_ROW_* order; NULL is a claim
+   with a reason attached, not an omission.
+
+   SSE1 IS EMPTY BY INSTRUCTION SET. Its additions to the MMX integer
+   set are pshufw, pinsrw, pextrw, pmovmskb, pmulhuw, pavgb, pavgw,
+   pmaxsw, pminsw, pmaxub, pminub, psadbw, maskmovq and movntq. The only
+   maxima there are 16-bit signed and 8-bit unsigned; a 32-bit magnitude
+   cannot be split across two 16-bit lanes without carrying the
+   comparison between them, which none of those do. So a Pentium III
+   runs the MMX kernel, and asking for SSE lands there through the pick
+   rather than through an #if.
+
+   Every slot is NULL on a target with no SIMD - the ARM cross-build -
+   and the pick returns NULL, so the operator takes its scalar path with
+   no conditional compilation at the call site. */
+typedef unsigned (*lz_amaxfn)(const float *x, int n);
+static const lz_amaxfn LZ_AMAX_TAB[LZ_ROW_N] = {
+#if defined(LZ_HAVE_AMAX_MMX) && !defined(__WATCOMC__)
+    lz_amax32_mmx,
+#else
+    NULL,
+#endif
+    NULL,                       /* sse-intrin: see the note above */
+#if defined(LZ_HAVE_AMAX_SSE2) && !defined(__WATCOMC__)
+    lz_amax32_sse2,
+#else
+    NULL,
+#endif
+#if defined(LZ_HAVE_AMAX_MMX) && defined(__WATCOMC__)
+    lz_amax32_mmx_w,
+#else
+    NULL,
+#endif
+    NULL,                       /* sse-asm: same instruction-set reason */
+#if defined(LZ_HAVE_AMAX_SSE2) && defined(__WATCOMC__)
+    lz_amax32_sse2_w
+#else
+    NULL
+#endif
+};
+LZ_DEFINE_PICK(lz_amax_pick, lz_amaxfn)
+
+/* Whether the picked kernel writes MMX registers, which decides who owes
+   an emms. Derived from the slot rather than from the tier name: those
+   two agreed until the day a table had a hole in it. */
+static int lz_amax_is_mmx(lz_amaxfn f) {
+    return f != 0 && (f == LZ_AMAX_TAB[LZ_ROW_MMX_I] ||
+                      f == LZ_AMAX_TAB[LZ_ROW_MMX_A]);
+}
+
+/* How many elements the picked kernel consumes per step: two lanes for
+   MMX, four for SSE2. The operator needs it to know where its scalar
+   tail begins, and asking the table beats a second copy of the tier
+   test at the call site. */
+static int lz_amax_lanes(lz_amaxfn f) {
+    if (!f) return 0;
+    return lz_amax_is_mmx(f) ? 2 : 4;
+}
