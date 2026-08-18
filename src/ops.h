@@ -53,12 +53,29 @@ enum {
 };
 #if LZ_F32COUNT
 extern double lz_f32_count[LZ_FC_N];
-#define LZ_FC(site, ops) (lz_f32_count[site] += (double)(ops))
+extern int lz_f32_reached[LZ_FC_N];
+/* The comma operator, so the macro stays a single expression and keeps
+   working in the `if (c) LZ_FC(...);` positions it already sits in. A
+   braced block would need every one of those visited. `site` is now
+   evaluated twice - every call site passes a constant or a plain
+   variable, never an expression with a side effect, and must keep
+   doing so. */
+#define LZ_FC(site, ops) (lz_f32_reached[site] = 1, \
+                          lz_f32_count[site] += (double)(ops))
 #else
 #define LZ_FC(site, ops) ((void)0)
 #endif
 const char *lz_f32_count_name(int site);
 double lz_f32_count_get(int site);
+/* 1 once a site has been billed at least once in this process, else 0.
+   Separate from the count because a site that ran and did no work and a
+   site that never ran print identically otherwise, and the second one
+   means the measurement is of a different code path than intended.
+   Without -DLZ_F32COUNT=1 this always returns 0, which reads as "not
+   reached" - a confidently wrong answer, unlike lz_f32_count_get's
+   -1.0 for "this build cannot answer". Callers must gate on
+   lz_f32_count_get(0) >= 0.0 first, same as for the count itself. */
+int lz_f32_count_reached(int site);
 void lz_f32_count_reset(void);
 
 /* o = x * rsqrt(mean(x^2) + eps) * (1 + w)   - Qwen3_5RMSNorm */

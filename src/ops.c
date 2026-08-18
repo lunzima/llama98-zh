@@ -72,6 +72,7 @@ int lz_conv_norm_pow2(const float *v, int n, short *out, int bound) {
 
 #if LZ_F32COUNT
 double lz_f32_count[LZ_FC_N];
+int lz_f32_reached[LZ_FC_N];
 #endif
 
 static const char *const LZ_FC_NAMES[LZ_FC_N] = {
@@ -93,10 +94,22 @@ double lz_f32_count_get(int site) {
 #endif
 }
 
+int lz_f32_count_reached(int site) {
+#if LZ_F32COUNT
+    return (site >= 0 && site < LZ_FC_N) ? lz_f32_reached[site] : 0;
+#else
+    (void)site;
+    return 0;
+#endif
+}
+
 void lz_f32_count_reset(void) {
 #if LZ_F32COUNT
     int i;
-    for (i = 0; i < LZ_FC_N; i++) lz_f32_count[i] = 0.0;
+    for (i = 0; i < LZ_FC_N; i++) {
+        lz_f32_count[i] = 0.0;
+        lz_f32_reached[i] = 0;
+    }
 #endif
 }
 

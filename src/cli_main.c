@@ -1637,9 +1637,16 @@ int main(int argc, char **argv) {
                    n_tokens, n_tokens);
             for (site = 0; site < LZ_FC_N; site++) {
                 double v = lz_f32_count_get(site);
-                if (v <= 0.0) continue;
-                printf("  %-20s %14.0f  %5.1f%%\n", lz_f32_count_name(site),
-                       v / n_tokens, tot > 0.0 ? 100.0 * v / tot : 0.0);
+                if (v > 0.0 || lz_f32_count_reached(site)) {
+                    printf("  %-20s %14.0f  %5.1f%%\n",
+                           lz_f32_count_name(site), v / n_tokens,
+                           tot > 0.0 ? 100.0 * v / tot : 0.0);
+                } else {
+                    /* e.g. bf16 safetensors never reaches the dequant
+                       epilogue - the artifact that produces this row. */
+                    printf("  %-20s %14s\n", lz_f32_count_name(site),
+                           "- (not run)");
+                }
             }
             printf("  %-20s %14.0f\n", "total", tot / n_tokens);
         }
