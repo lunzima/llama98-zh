@@ -1013,7 +1013,9 @@ int lz_pair_mode(void) { return g_pair; }
    float arm is the baseline the fixed tier is judged against, not a
    deployment choice. Removing the SELECTOR does not remove the float
    body, which stays reachable as a capacity fallback, not dead code. */
+#if LZ_GDN_FIXED
 static int g_gdn_fixed = 1;
+#endif
 
 int lz_gdn_mode(void) {
 #if LZ_GDN_FIXED
@@ -5587,6 +5589,7 @@ const char *lz_gdn_p2_impl(void) {
 #endif
 }
 
+#if LZ_GDN_FIXED
 /* The fixed pass 1 for one head, shared by both families - the twin of
    gdn_p2_fixed_rows below, and just as easy to forget to wire into a
    new family.
@@ -5752,6 +5755,12 @@ static void gdn_p2_fixed_rows(const int8_t *sq_in, int8_t *sq_out,
         }
     }
 }
+/* Both of the above read the coefficient table, the pass-1 kernel and
+   the per-group helpers, all of which live inside LZ_GDN_FIXED. Their
+   only call sites are already guarded the same way, so guarding the
+   definitions costs nothing and keeps the capacity-fallback build
+   compilable. */
+#endif /* LZ_GDN_FIXED */
 
 /* ONE recurrence, two families. lz_gdn_step and lz_kda_step are now
    both thin wrappers over this.
