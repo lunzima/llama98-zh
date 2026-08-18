@@ -1286,13 +1286,15 @@ static void forward_attn(const LZModel *m, LZRunState *s,
 #if LZ_KV_2PLANE
         /* hi and the scale come out byte-identical to lz_quantize_q8's -
            that is lz_gdn_quantize_2p's documented contract - so enabling
-           the low plane cannot perturb the high one. */
+           the low plane cannot perturb the high one. fc_site -1: this is
+           the KV cache write, not the recurrence write-back, and has no
+           census site of its own yet. */
         if (kc) lz_gdn_quantize_2p(ktt, kvd, 32, kc + (size_t)kv_slot(s, pos) * kvd,
                                    kc_lo + (size_t)kv_slot(s, pos) * kvd,
-                                   ks + (size_t)kv_slot(s, pos) * kvd / 32);
+                                   ks + (size_t)kv_slot(s, pos) * kvd / 32, -1);
         if (vc) lz_gdn_quantize_2p(vtt, kvd, 32, vc + (size_t)kv_slot(s, pos) * kvd,
                                    vc_lo + (size_t)kv_slot(s, pos) * kvd,
-                                   vs + (size_t)kv_slot(s, pos) * kvd / 32);
+                                   vs + (size_t)kv_slot(s, pos) * kvd / 32, -1);
 #else
         if (kc) lz_quantize_q8(ktt, kvd, 32, kc + (size_t)kv_slot(s, pos) * kvd,
                                ks + (size_t)kv_slot(s, pos) * kvd / 32);

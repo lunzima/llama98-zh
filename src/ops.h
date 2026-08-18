@@ -44,6 +44,11 @@
 enum {
     LZ_FC_EPI, LZ_FC_ATTN_SCORE, LZ_FC_ATTN_WSUM, LZ_FC_SOFTMAX,
     LZ_FC_EXP, LZ_FC_SIGMOID, LZ_FC_CONV, LZ_FC_NORM, LZ_FC_RSQRT,
+    /* The recurrence state write-back, i.e. what --recur-write selects.
+       Without a site the tier moves the logits and moves the census by
+       zero, so the measurement cannot see one of the tiers it is used
+       to compare. */
+    LZ_FC_RECUR,
     LZ_FC_N
 };
 #if LZ_F32COUNT
@@ -874,9 +879,9 @@ void lz_attn_wsum_q8(float *out, const float *att, int hd,
    residual at 1/254 weight. Exposed because the scalar reference has
    to write the same representation the implementation reads - the same
    reason it already calls
-   lz_quantize_q8. */
+   lz_quantize_q8. `fc_site`: LZ_FC_* site to bill, or -1 for none. */
 void lz_gdn_quantize_2p(const float *x, int n, int gs,
-                        int8_t *hi, int8_t *lo, float *s);
+                        int8_t *hi, int8_t *lo, float *s, int fc_site);
 #endif
 
 /* Dequant weight of a low plane: value ~= (hi + lo/254) * s.

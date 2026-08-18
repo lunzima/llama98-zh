@@ -76,7 +76,8 @@ double lz_f32_count[LZ_FC_N];
 
 static const char *const LZ_FC_NAMES[LZ_FC_N] = {
     "dequant epilogue", "attention scoring", "attention wsum",
-    "softmax", "exp", "sigmoid", "conv1d", "norms", "rsqrt"
+    "softmax", "exp", "sigmoid", "conv1d", "norms", "rsqrt",
+    "recurrence write"
 };
 
 const char *lz_f32_count_name(int site) {
@@ -4534,9 +4535,15 @@ static void gdn_pass1_fixed(const int8_t *sq,
    tier is ~25x the scalar magic-number path, so dropping to scalar
    there would swamp everything the two planes buy. What is left scalar
    is only the residual itself (one multiply, one int8->float, one
-   subtract per element). */
+   subtract per element).
+
+   `fc_site`: which census site to bill this call's f32 work to, or -1
+   to bill nothing. Billed here, not at the call site: the per-element
+   cost depends on q8_group_scale's `fast` flag and on lz_q8r_tier(),
+   both internal to this loop, and duplicating that dispatch at a caller
+   is a second copy of it that will drift. */
 void lz_gdn_quantize_2p(const float *x, int n, int gs,
-                        int8_t *hi, int8_t *lo, float *s) {
+                        int8_t *hi, int8_t *lo, float *s, int fc_site) {
     int g, k, ng = n / gs, fast;
 #if defined(LZ_HAVE_Q8R_SIMD) || defined(LZ_HAVE_Q8R_SSE)
     int tier = ((gs & 31) == 0) ? lz_q8r_tier() : 0;
@@ -4560,7 +4567,12 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
         int8_t *lw = lo + (size_t)g * gs;
         float inv;
         fast = q8_group_scale(grp, gs, &s[g], &inv);
+        /* Paid once per group regardless of which branch below runs. */
+        if ((unsigned)fc_site < (unsigned)LZ_FC_N) LZ_FC(fc_site, 2);  /* amax*(1/127) mul, 127/amax div */
         if (!fast) {
+            /* Same shape as the fast&&tier==0 branch below (that one
+               multiplies instead of dividing), same count. */
+            if ((unsigned)fc_site < (unsigned)LZ_FC_N) LZ_FC(fc_site, 6 * gs);  /* div, q8_round, convert, sub, mul, q8_round */
             for (k = 0; k < gs; k++) {
                 float f = grp[k] / s[g];
                 int h = q8_round(f);
@@ -4584,6 +4596,10 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
         }
 #if defined(LZ_HAVE_Q8R_SIMD) || defined(LZ_HAVE_Q8R_SSE)
         if (tier) {
+            /* The lz_q8round32_simd/_sse calls bracketing the visible
+               residual line below are not free - reading only the C
+               between them would miss 4 of the 7. */
+            if ((unsigned)fc_site < (unsigned)LZ_FC_N) LZ_FC(fc_site, 7 * gs);  /* residual mul+convert+sub=3, 2x kernel mul+convert=4 */
 #ifdef LZ_HAVE_Q8R_SIMD
             if (tier == 2) {
                 for (k = 0; k + 31 < gs; k += 32)
@@ -4611,6 +4627,9 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
             continue;
         }
 #endif
+        /* fast && tier==0: no SIMD rounding tier, e.g. --kernel ref. Same
+           shape as the !fast branch above, multiply instead of divide. */
+        if ((unsigned)fc_site < (unsigned)LZ_FC_N) LZ_FC(fc_site, 6 * gs);  /* mul, q8_round, convert, sub, mul, q8_round */
         for (k = 0; k < gs; k++) {
             float f = grp[k] * inv;
             int h = q8_round(f);
@@ -5296,6 +5315,9 @@ static void gdn_p2_row_simd(const int8_t *ph_row,
 #endif
     int gg, j;
 
+    /* Not billed here - gdn_p2_fixed_rows bills this row's cost once,
+       above its call to this function. */
+
     /* PHASE 1 - float only. */
     for (gg = 0; gg < ng; gg++) {
         float c1, c2;
@@ -5548,6 +5570,11 @@ static void gdn_p2_fixed_rows(const int8_t *sq_in, int8_t *sq_out,
         const int8_t *row_lo_in = sq2_in + (size_t)kk * vd;
         int8_t *row_lo_out = sq2_out + (size_t)kk * vd;
 #endif
+        /* Both SIMD (gdn_p2_row_simd) and scalar (gg loop below) row
+           paths cost the same per group. Billed once, above the fork -
+           billing only inside gdn_p2_row_simd would read zero on
+           --kernel ref, where p2_tier()==0 takes the scalar path only. */
+        LZ_FC(LZ_FC_RECUR, 9 * ng);  /* coef 3 mul; norm 2 mul + 2 q8_round; scale 2 mul */
 #ifdef LZ_HAVE_P2_MMX
         if (p2_tier()) {
             gdn_p2_row_simd(row_in,
@@ -5773,8 +5800,17 @@ static void gdn_step_impl(float *out, const int8_t *sq_in, int8_t *sq_out,
 #endif
         }
 #if LZ_GDN_STATE_2PLANE
-        lz_gdn_quantize_2p(buf, vd, 32, row_out, row_lo_out, rs_out);
+        /* Reads zero when --recur-write is fixed: the work moved to
+           gdn_p2_fixed_rows, it did not vanish. */
+        lz_gdn_quantize_2p(buf, vd, 32, row_out, row_lo_out, rs_out,
+                           LZ_FC_RECUR);
 #else
+        /* Billed here, not inside lz_quantize_q8 (many other callers,
+           out of scope for this task): its three branches - SIMD,
+           scalar-multiply, scalar-divide - are all mul-or-div + q8_round,
+           2/element, no residual plane to round a second time. Exact,
+           not an approximation. */
+        LZ_FC(LZ_FC_RECUR, 2 * vd + 2 * ng);  /* mul-or-div, q8_round; 2/group q8_group_scale */
         lz_quantize_q8(buf, vd, 32, row_out, rs_out);
 #endif
     }
