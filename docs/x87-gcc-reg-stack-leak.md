@@ -1,6 +1,6 @@
 # x87 stack leak in gcc -O2 -m32 -mfpmath=387, reproduced in llama98
 
-Status: **ROOT CAUSE UNKNOWN. PROVISIONAL WORKAROUND ONLY.** Worked
+Status: **ROOT CAUSE: gcc holds seven x87 values live across a call into an eight-slot stack. See "The mechanism, named". The workaround remains a workaround - no source fix is possible, the C is correct.** Worked
 around with a build flag (`-fno-rerun-cse-after-loop`, see
 `build/x87/build_engine.sh`); not fixed in source, because the trigger
 condition could not be reproduced in isolation (see "Why this is hard to
@@ -18,7 +18,14 @@ still real and still the best evidence available - it just does not
 prove what it was believed to prove. Read the whole document; do not
 stop at the first mechanism paragraph.
 
-## One-sentence mechanism (SUPERSEDED - see below)
+## One-sentence mechanism (SUPERSEDED by "The mechanism, named")
+
+The paragraph below was the first attempt and it is wrong in its
+attribution, not in its symptom. The confirmed mechanism is that gcc
+holds seven x87 values live across a call into an eight-slot stack; see
+that section. The struck-through text stays because the evidence that
+built it is still real.
+
 
 ~~`gcc -m32 -march=i686 -mmmx -mfpmath=387 -O2` leaves the x87
 floating-point register stack non-empty on return from a function
@@ -245,6 +252,46 @@ hand, and because the fragility class it demonstrates
 (exactly this kind of asymmetric multi-exit branch code) may still be
 where the real, non-depth mechanism lives even though this particular
 manifestation of it was not the one.
+
+## The mechanism, named: seven values live across a call into eight slots
+
+Open Watcom compiles this same source for the same 32-bit x87 target and
+is correct. Comparing the two disassemblies at the same call answers it:
+
+| | live x87 depth at the call to `p2_group_norm` |
+|---|---|
+| Open Watcom | **0** |
+| gcc `-m32 -march=i686 -mfpmath=387 -O2` | **7** (hardware tag word `0xe015`) |
+
+The x87 stack is one fixed eight-slot resource and nothing in the ABI
+reserves any of it for a callee. `p2_group_norm` pushes on top of those
+seven, the push past the eighth raises a masked stack overflow, and the
+hardware delivers real indefinite (`0xFFC00000`) instead of a value.
+Every NaN downstream is that one, propagated by ordinary IEEE contagion.
+
+**`p2_group_norm` is not at fault.** It is balanced, its own peak is
+small, and it computes correctly whenever it is entered on an empty
+stack. Three rounds of investigation examined it because that is where
+the NaN first becomes visible; the defect is at the call site, in what
+the caller is still holding.
+
+**Inlining is what builds the pressure**, which is why `-fno-inline`
+also makes the symptom go away. `nm` on the two builds:
+
+| | Watcom | gcc |
+|---|---|---|
+| `gdn_p2_fixed_rows` | own symbol | inlined away |
+| `gdn_p2_group_fixed` | own symbol, and it is the caller | inlined away |
+| `p2_group_norm` | own symbol | own symbol, still a real call |
+
+Watcom calls `p2_group_norm` from `gdn_p2_group_fixed` with nothing
+live. gcc merges both callers into `gdn_step_impl`, which merges their
+float live ranges, and then calls the one function it did *not* inline
+while holding seven.
+
+This is a register-allocation defect, not a source defect: the same C is
+correct under two other toolchains, and the allocator's obligation is to
+spill before a call it cannot fit.
 
 ## Static verification: the depth-imbalance theory is dead
 
