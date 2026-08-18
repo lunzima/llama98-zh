@@ -7,8 +7,9 @@
 # live in the Makefile). gen_exports.py is the one real source file in
 # there, a DLL build-time dependency.
 #
-# build/arm/*.sh and build/ci.sh are SOURCE: the ARM cross-build, the
-# QEMU runner, the x86-vs-ARM bit-identity gate and the CI entry point.
+# build/arm/*.sh, build/x87/*.sh and build/ci.sh are SOURCE: the ARM
+# cross-build, the QEMU runner, the x86-vs-ARM bit-identity gate, the
+# 32-bit x87 gcc build (AOSC OS / Afterglow) and the CI entry point.
 # A blanket exclude that swallows them means `git clean` deletes the
 # gates and a fresh clone never sees them, and gates that do not survive
 # a clone are not gates. Re-include the DIRECTORY before its contents:
@@ -20,6 +21,7 @@
 /build/watcom/*
 !/build/watcom/gen_exports.py
 !/build/arm/
+!/build/x87/
 !/build/ci.sh
 
 # Stray compiler/linker intermediates (gcc, Open Watcom), plus the raw
