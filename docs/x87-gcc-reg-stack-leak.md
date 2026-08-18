@@ -272,7 +272,30 @@ toolchain is not a route out.
 
 The x87 stack is one fixed eight-slot resource. Nothing reserves any of
 it for a callee - see "What rule is broken, stated carefully" below for
-what the ABI does and does not say about this. `p2_group_norm` pushes on top of those
+what the ABI does and does not say about this.
+
+**The hardware says which fault it is, and it is underflow.** At the
+breakpoint the status word reads `0x0061`: `IE` (invalid operation),
+`PE`, and `SF` (stack fault) set, with **`C1` clear**. `C1` is what
+separates the two: set means overflow, a push onto a full stack; clear
+means **underflow, a read from a register the tag word marks empty**.
+So the code is not pushing a ninth value - it is reading a slot it never
+wrote. An earlier version of this document said overflow; that was an
+inference, this is the flag.
+
+The register file at that point names the hoisted values outright:
+
+```
+st3  1.0000000000000000e-30          LZ_Q8_MIN_SCALE
+st5  12582912                        q8_round's magic constant, 1.5 * 2^23
+st6  0xffff0000000000000000          never written
+st7  0xffffc000000000000000          real indefinite
+ftag 0xe015                          seven occupied
+```
+
+Two loop-invariant float *constants* are sitting in x87 registers.
+That is exactly what a hoisting pass does, and it is why
+`-fno-rerun-cse-after-loop` is the flag that helps. `p2_group_norm` pushes on top of those
 seven, the push past the eighth raises a masked stack overflow, and the
 hardware delivers real indefinite (`0xFFC00000`) instead of a value.
 Every NaN downstream is that one, propagated by ordinary IEEE contagion.
@@ -296,6 +319,22 @@ inlined into its caller.
 That is consistent with which flag works: `-fno-rerun-cse-after-loop`
 disables the pass that hoists loop-invariant values, and `-fno-inline`
 helps only because changing inlining changes what is loop-invariant.
+
+**Five source-level fixes were tried and measured. All five fail.**
+
+| attempted fix | result |
+|---|---|
+| `__attribute__((noinline))` on `gdn_p2_group_fixed` | still all-NaN, tag word unchanged at `0xe015` |
+| `__attribute__((noinline))` on `gdn_p2_fixed_rows` | still all-NaN, tag word unchanged |
+| `__attribute__((always_inline))` on `p2_group_norm` (remove the call boundary entirely) | still all-NaN |
+| `volatile` on `c1`/`c2`, forcing the coefficients through memory | still all-NaN |
+| the `LZ_Q8_MIN_SCALE` comparison rewritten in the integer domain, so that constant never needs a register | still all-NaN |
+
+The pattern is the point: **displace one value and the allocator hoists
+another into the slot.** Each of these removes a real live value and the
+stack still fills. A source fix that works would have to reduce the
+peak below what the allocator wants, not move one item out of it, and
+nothing in C expresses that.
 
 **There is therefore no source-level fix, and `noinline` is not one.**
 No annotation in C says "do not keep values in x87 registers across this
