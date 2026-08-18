@@ -18,7 +18,17 @@
 #define _mm_setzero_si64()     _m_from_int(0)
 #define _mm_cvtsi64_si32(s)    _m_to_int(s)
 #define _mm_empty()            _m_empty()
-#elif defined(__i386__) || defined(__x86_64__) || defined(_M_IX86)
+/* Gated on __MMX__, not on the architecture. A translation unit built
+   without -mmmx must not pull this header in: <mmintrin.h> refuses to
+   compile there, and more importantly a unit that never sees an MMX
+   intrinsic is one the compiler will not hand MMX instructions of its
+   own. On a 32-bit x87 target gcc and clang both use MMX for 8-byte
+   block stores when -mmmx is on, and neither issues emms before the
+   x87 code that follows - which fills the tag word and makes the next
+   fld overflow to real indefinite. Only the MMX kernels' own unit gets
+   -mmmx, and it owes the emms. */
+#elif defined(__MMX__) && (defined(__i386__) || defined(__x86_64__) \
+      || defined(_M_IX86))
 #include <mmintrin.h>
 #else
 /* Not an x86 target at all - ARMv5TE is the first one (the kunkun-CE
