@@ -51,22 +51,62 @@ enum {
     LZ_FC_RECUR,
     LZ_FC_N
 };
+
+/* What kind of f32 operation a site's count is made of. A scalar count
+   cannot be reweighted for a target: a divide costs 4.6x an add on
+   soft-float ARM and 19.5x on a Pentium, and a compare costs 1.4x and
+   19.2x while a plain count bills it nothing. LZ_FCC_OTHER is the
+   unclassified bucket every site starts in, so a half-migrated tree
+   still reports a correct total - that is what lets sites move here
+   one at a time instead of needing a flag day.
+
+   Outside the #if below, like LZ_FC_N above it: cli_main.c's census
+   table loops over both enums at compile time regardless of
+   LZ_F32COUNT, dispatching on the runtime -1.0 sentinel instead. Only
+   the storage and the billing macros need the flag. */
+enum { LZ_FCC_MUL, LZ_FCC_ADD, LZ_FCC_DIV, LZ_FCC_CVT, LZ_FCC_CMP,
+       LZ_FCC_OTHER, LZ_FCC_N };
+
 #if LZ_F32COUNT
 extern double lz_f32_count[LZ_FC_N];
 extern int lz_f32_reached[LZ_FC_N];
-/* The comma operator, so the macro stays a single expression and keeps
-   working in the `if (c) LZ_FC(...);` positions it already sits in. A
+extern double lz_f32_class[LZ_FC_N][LZ_FCC_N];
+
+/* The comma operator, so both macros stay single expressions and keep
+   working in the `if (c) LZ_FC(...);` positions they already sit in. A
    braced block would need every one of those visited. `site` is now
-   evaluated twice - every call site passes a constant or a plain
-   variable, never an expression with a side effect, and must keep
-   doing so. */
+   evaluated twice in LZ_FC and six times in LZ_FCX - every call site
+   passes a constant or the plain variable `fc_site`, never an
+   expression with a side effect, and must keep doing so.
+
+   LZ_FC is the unclassified form: it bills the whole count to
+   LZ_FCC_OTHER, and is what every existing site uses.
+
+   LZ_FCX bills mul/add/div/cvt/cmp by name. All five arguments are
+   written even when zero - an omitted class is how a divide goes
+   missing - and must sum to what LZ_FC would have billed for the same
+   code, since lz_f32_count_get() reports their sum. */
 #define LZ_FC(site, ops) (lz_f32_reached[site] = 1, \
-                          lz_f32_count[site] += (double)(ops))
+                          lz_f32_class[site][LZ_FCC_OTHER] += (double)(ops))
+#define LZ_FCX(site, mul, add, div, cvt, cmp) (lz_f32_reached[site] = 1, \
+    lz_f32_class[site][LZ_FCC_MUL] += (double)(mul), \
+    lz_f32_class[site][LZ_FCC_ADD] += (double)(add), \
+    lz_f32_class[site][LZ_FCC_DIV] += (double)(div), \
+    lz_f32_class[site][LZ_FCC_CVT] += (double)(cvt), \
+    lz_f32_class[site][LZ_FCC_CMP] += (double)(cmp))
 #else
 #define LZ_FC(site, ops) ((void)0)
+#define LZ_FCX(site, mul, add, div, cvt, cmp) ((void)0)
 #endif
 const char *lz_f32_count_name(int site);
 double lz_f32_count_get(int site);
+/* Per-class read behind lz_f32_count_get's sum. Bounds-checked at both
+   ends for site and cls, same as the accessor above; -1.0 in a
+   non-counting build ("this build cannot answer"), 0.0 out of range in
+   one that counts. */
+double lz_f32_class_get(int site, int cls);
+/* "mul"/"add"/"div"/"cvt"/"cmp"/"other", or "?" out of range. */
+const char *lz_f32_class_name(int cls);
 /* 1 once a site has been billed at least once in this process, else 0.
    Separate from the count because a site that ran and did no work and a
    site that never ran print identically otherwise, and the second one

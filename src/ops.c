@@ -71,7 +71,7 @@ int lz_conv_norm_pow2(const float *v, int n, short *out, int bound) {
 }
 
 #if LZ_F32COUNT
-double lz_f32_count[LZ_FC_N];
+double lz_f32_class[LZ_FC_N][LZ_FCC_N];
 int lz_f32_reached[LZ_FC_N];
 #endif
 
@@ -81,17 +81,40 @@ static const char *const LZ_FC_NAMES[LZ_FC_N] = {
     "recurrence write"
 };
 
+static const char *const LZ_FCC_NAMES[LZ_FCC_N] = {
+    "mul", "add", "div", "cvt", "cmp", "other"
+};
+
 const char *lz_f32_count_name(int site) {
     return (site >= 0 && site < LZ_FC_N) ? LZ_FC_NAMES[site] : "?";
 }
 
 double lz_f32_count_get(int site) {
 #if LZ_F32COUNT
-    return (site >= 0 && site < LZ_FC_N) ? lz_f32_count[site] : 0.0;
+    int c;
+    double tot;
+    if (site < 0 || site >= LZ_FC_N) return 0.0;
+    tot = 0.0;
+    for (c = 0; c < LZ_FCC_N; c++) tot += lz_f32_class[site][c];
+    return tot;
 #else
     (void)site;
     return -1.0;   /* not "zero work": the build cannot answer */
 #endif
+}
+
+double lz_f32_class_get(int site, int cls) {
+#if LZ_F32COUNT
+    if (site < 0 || site >= LZ_FC_N || cls < 0 || cls >= LZ_FCC_N) return 0.0;
+    return lz_f32_class[site][cls];
+#else
+    (void)site; (void)cls;
+    return -1.0;   /* not "zero work": the build cannot answer */
+#endif
+}
+
+const char *lz_f32_class_name(int cls) {
+    return (cls >= 0 && cls < LZ_FCC_N) ? LZ_FCC_NAMES[cls] : "?";
 }
 
 int lz_f32_count_reached(int site) {
@@ -105,9 +128,9 @@ int lz_f32_count_reached(int site) {
 
 void lz_f32_count_reset(void) {
 #if LZ_F32COUNT
-    int i;
+    int i, c;
     for (i = 0; i < LZ_FC_N; i++) {
-        lz_f32_count[i] = 0.0;
+        for (c = 0; c < LZ_FCC_N; c++) lz_f32_class[i][c] = 0.0;
         lz_f32_reached[i] = 0;
     }
 #endif

@@ -1700,9 +1700,24 @@ int main(int argc, char **argv) {
             for (site = 0; site < LZ_FC_N; site++) {
                 double v = lz_f32_count_get(site);
                 if (v > 0.0 || lz_f32_count_reached(site)) {
+                    int cls, printed = 0;
                     printf("  %-20s %14.0f  %5.1f%%\n",
                            lz_f32_count_name(site), v / n_tokens,
                            tot > 0.0 ? 100.0 * v / tot : 0.0);
+                    /* Per-class split, zero classes omitted so an
+                       unmigrated site prints one word ("other") instead
+                       of six columns of zeros - that word doubles as the
+                       migration progress indicator. */
+                    for (cls = 0; cls < LZ_FCC_N; cls++) {
+                        double cv = lz_f32_class_get(site, cls);
+                        if (cv <= 0.0) continue;
+                        if (printed) printf(" ");
+                        else printf("%39s", "");
+                        printf("%s %.0f", lz_f32_class_name(cls),
+                               cv / n_tokens);
+                        printed = 1;
+                    }
+                    if (printed) printf("\n");
                 } else {
                     /* e.g. bf16 safetensors never reaches the dequant
                        epilogue - the artifact that produces this row. */
