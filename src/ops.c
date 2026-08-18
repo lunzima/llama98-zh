@@ -5998,6 +5998,11 @@ static void gdn_step_impl(float *out, const int8_t *sq_in, int8_t *sq_out,
                           sq2_in, sq2_out,
 #endif
                           ss_in, ss_out, u, k, gvec, gt, kd, vd);
+        /* docs/x87-gcc-reg-stack-leak.md: the row/group loop inside
+           gdn_p2_fixed_rows is where the leak was bisected to. This is
+           the finer of the two checkpoints; forward.c's per-layer one
+           is the coarser one that first surfaced it. */
+        LZ_X87_STACK_CHECK("gdn-p2-fixed-rows-return");
         return;
     }
 #endif
@@ -6438,3 +6443,50 @@ const char *lz_tier_report(void) {
     buf[p] = '\0';
     return buf;
 }
+
+/* ---- x87 stack-empty gate (debug only) --------------------------------
+
+   See the header comment on LZ_X87_STACK_CHECK (ops.h) for what this is
+   and its own limits. Record-only: the first dirty call site wins and
+   stays latched for the run, same convention as lz_debug_attn_skip and
+   friends - a counter that resets per call could not distinguish "never
+   dirty" from "dirty once, then this call site happened to be clean".
+
+   Real implementation only where fnstenv means what this file needs it
+   to mean: gcc-family (not Watcom, whose inline asm is a different
+   syntax entirely and whose 32-bit x87 output is already known correct
+   - this gate exists for gcc's -O2 -mfpmath=387 bug specifically) on an
+   x86 target (not the ARM cross-build, which has no x87 unit at all).
+   Everywhere else the gate compiles to a stub that never reports dirty -
+   stated here rather than left to be discovered, because a silent no-op
+   gate is indistinguishable from a passing one otherwise. */
+#if defined(LZ_X87_STACK_GATE)
+#if !defined(__WATCOMC__) && (defined(__i386__) || defined(__x86_64__))
+static const char *g_x87_dirty_where = NULL;
+static unsigned g_x87_dirty_tag = 0;
+
+void lz_x87_stack_check(const char *where) {
+    unsigned short env[14];
+    __asm__ volatile ("fnstenv %0" : "=m" (env));
+    if (env[4] != 0xFFFFu && !g_x87_dirty_where) {
+        g_x87_dirty_where = where;
+        g_x87_dirty_tag = (unsigned)env[4];
+    }
+}
+
+int lz_x87_stack_dirty(const char **where, unsigned *tag) {
+    if (!g_x87_dirty_where) return 0;
+    if (where) *where = g_x87_dirty_where;
+    if (tag) *tag = g_x87_dirty_tag;
+    return 1;
+}
+#else
+/* Stub: LZ_X87_STACK_GATE was requested on a target this check does not
+   cover. Compiles and links, always reports clean - NOT because the
+   target is known clean, but because there is nothing here to ask. */
+void lz_x87_stack_check(const char *where) { (void)where; }
+int  lz_x87_stack_dirty(const char **where, unsigned *tag) {
+    (void)where; (void)tag; return 0;
+}
+#endif
+#endif /* LZ_X87_STACK_GATE */

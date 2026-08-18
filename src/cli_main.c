@@ -2230,6 +2230,23 @@ int main(int argc, char **argv) {
 fail:
     rc = 1;
 cleanup:
+#if defined(LZ_X87_STACK_GATE)
+    /* docs/x87-gcc-reg-stack-leak.md. The check-and-record half lives in
+       src/ (ops.h's LZ_X87_STACK_CHECK, called from forward.c/ops.c);
+       this is the report-and-abort half, kept here because src/'s
+       console-output ban excepts only this file. Checked once at exit
+       rather than per call site: the recorder latches the FIRST dirty
+       site for the run, so one check here sees everything it saw. */
+    {
+        const char *where;
+        unsigned tag;
+        if (lz_x87_stack_dirty(&where, &tag)) {
+            fprintf(stderr, "x87 stack not empty at %s: tag=%04x\n",
+                    where, tag);
+            abort();
+        }
+    }
+#endif
     lz_tokenizer_free(&tok);
     lz_free(&m);
     free(tokens);

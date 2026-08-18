@@ -2549,6 +2549,11 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
     for (l = 0; l < c->n_layers; l++) {
         const LZLayer *L = &m->layers[l];
 
+        /* docs/x87-gcc-reg-stack-leak.md: this is the checkpoint that
+           first showed the x87 stack going dirty and staying dirty
+           across layer boundaries. No-op unless LZ_X87_STACK_GATE. */
+        LZ_X87_STACK_CHECK("layer-entry");
+
         for (tk = 0; tk < nt; tk++)
             lz_rmsnorm(s->xb + (size_t)tk * dim, s->x + (size_t)tk * dim,
                        lz_t_f32(&L->input_layernorm, s->wscr), dim,

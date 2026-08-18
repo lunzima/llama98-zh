@@ -1386,4 +1386,45 @@ void lz_moe_route(const float *logits, const float *bias, int n_experts,
    expert every layer used as one no layer used. */
 void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k);
 
+/* ---- x87 stack-empty gate (debug only) --------------------------------
+
+   Root-caused this session (docs/x87-gcc-reg-stack-leak.md): gcc
+   -m32 -mfpmath=387 -O2 can leave the x87 register stack non-empty on
+   return from a function, and the residue survives to fault an
+   unrelated LATER push elsewhere in the same forward pass. This checks
+   the x87 tag word is all-empty (0xFFFF) at a call site and, if not,
+   records where and what - it does NOT print or abort here. The
+   console-output ban applies to this file same as any other in src/;
+   cli_main.c is where a caught failure gets reported.
+
+   Deliberately architected as "record, don't report" rather than one
+   function that does both: the useful call sites (forward.c's per-layer
+   loop) are deep inside the forward pass, with no access to stderr's
+   caller-appropriateness the way cli_main.c has, and a debug facility
+   that could only ever be called from one file would not have caught
+   this bug at the layer boundary where it was actually found.
+
+   CAVEAT, and it belongs here rather than only in the doc: this gate is
+   itself a probe. Section "Why this is hard to reduce further" in
+   docs/x87-gcc-reg-stack-leak.md found that even a pure-read fnstenv
+   probe changes gcc's register allocation for nearby code enough to
+   make the bug it was checking for stop reproducing. This gate can
+   therefore be silent at one call site while its own presence in the
+   binary is why a DIFFERENT, unchecked function nearby never leaked in
+   the first place. A clean run under LZ_X87_STACK_GATE is evidence this
+   gate did not observe a leak AT ITS OWN CALL SITES - it is not
+   evidence the file has none.
+
+   Mutation test: .prof/x87_gate_mutation.c (not built by anything, run
+   by hand) proves the gate reddens on a deliberately unmatched `fld`
+   and stays quiet on ordinary balanced code - see that file's own
+   header for the exact command. */
+#if defined(LZ_X87_STACK_GATE)
+void lz_x87_stack_check(const char *where);
+int  lz_x87_stack_dirty(const char **where, unsigned *tag);
+#define LZ_X87_STACK_CHECK(where) lz_x87_stack_check(where)
+#else
+#define LZ_X87_STACK_CHECK(where) ((void)0)
+#endif
+
 #endif
