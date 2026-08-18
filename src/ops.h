@@ -404,6 +404,14 @@ const char *lz_sig_select(const char *name);
 int lz_sig_mode(void);
 int lz_sig_is_auto(void);
 
+/* The RMS/L2 norm tier. fixed accumulates the sum of squares in int64
+   from the int16 image of x rather than in f32, so the per-element
+   multiply-add leaves the float domain; the reciprocal square root and
+   the output scale stay float. */
+int lz_norm_mode(void);
+int lz_norm_is_auto(void);
+const char *lz_norm_select(const char *name);
+
 /* Dequant epilogue tier: "float" | "fixed" | "auto".
 
    The epilogue is 66.4% of the f32 operations per token once the fixed

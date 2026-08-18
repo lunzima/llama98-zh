@@ -1157,6 +1157,27 @@ const char *lz_sig_select(const char *name) {
     return lz_sig_mode() ? "fixed" : "float";
 }
 
+static int g_norm = -1;
+
+/* AUTO asks the one question every other write tier asks:
+   lz_soft_float_target(), which is CPUID SSE bit 25 and never MMX -
+   every Socket 7 part has MMX and no SSE and the weakest x87, so it
+   must land on fixed. */
+int lz_norm_mode(void) {
+    return (g_norm < 0) ? lz_soft_float_target() : g_norm;
+}
+
+int lz_norm_is_auto(void) { return g_norm < 0; }
+
+const char *lz_norm_select(const char *name) {
+    if (!name) return NULL;
+    if (strcmp(name, "float") == 0) g_norm = 0;
+    else if (strcmp(name, "fixed") == 0) g_norm = 1;
+    else if (strcmp(name, "auto") == 0) g_norm = -1;
+    else return NULL;
+    return lz_norm_mode() ? "fixed" : "float";
+}
+
 static int g_epi = -1;
 
 int lz_epi_mode(void) {
@@ -6179,7 +6200,7 @@ const char *lz_kernel_matrix(void) {
 const char *lz_tier_pins(void) {
     return "--kernel ref --recur-write fixed --conv-write float "
            "--attn-write float --epi-write float --sig-write float "
-           "--pair off --prefetch none";
+           "--norm-write float --pair off --prefetch none";
 }
 
 /* The same list, as a report: name, resolved value, and whether the
@@ -6205,6 +6226,9 @@ const char *lz_tier_report(void) {
     p += sprintf(buf + p, "  sigmoid/silu %s%s\n",
                  lz_sig_mode() ? "fixed" : "float",
                  lz_sig_is_auto() ? " (auto)" : "");
+    p += sprintf(buf + p, "  norms        %s%s\n",
+                 lz_norm_mode() ? "fixed" : "float",
+                 lz_norm_is_auto() ? " (auto)" : "");
     p += sprintf(buf + p, "  pairing      %s%s\n",
                  lz_pair_mode() ? "on" : "off",
                  lz_pair_is_auto() ? " (auto = on; no hardware question)"

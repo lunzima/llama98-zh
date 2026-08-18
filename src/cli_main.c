@@ -237,6 +237,8 @@ static void usage(void) {
     "                   quantize exists).\n"
     "  --sig-write TIER    auto|float|fixed (default auto). sigmoid and\n"
     "                   SiLU from a Q15 table (NOT the KDA decay).\n"
+    "  --norm-write TIER   auto|float|fixed (default auto). RMS/L2 norm\n"
+    "                   sum-of-squares in int64 fixed point.\n"
     "  --epi-write TIER    auto|float|fixed (default auto). Dequant\n"
     "                   epilogue in int64 fixed point.\n"
     "  --attn-write TIER   auto|float|scoring|wsum|fixed (default auto).\n"
@@ -1240,6 +1242,13 @@ int main(int argc, char **argv) {
             const char *got = lz_sig_select(argv[++i]);
             if (!got) {
                 printf("--sig-write: unknown tier (auto|float|fixed)\n");
+                return 2;
+            }
+        }
+        else if (strcmp(a, "--norm-write") == 0 && i + 1 < argc) {
+            const char *got = lz_norm_select(argv[++i]);
+            if (!got) {
+                printf("--norm-write: unknown tier (auto|float|fixed)\n");
                 return 2;
             }
         }
