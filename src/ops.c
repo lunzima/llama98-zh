@@ -4327,60 +4327,19 @@ void lz_attn_wsum_q8(float *out, const float *att, int hd,
 
 #if defined(LZ_GDN_HAVE_MMX)
 #if defined(__WATCOMC__)
-/* Originally generated, hand-edited since - if you regenerate, diff
-   the generator's output against what is here first.
-   Verified over 200000 random + extreme groups (state +/-127,
-   coefficients +/-32767, kd 2..66 even) against the scalar reference
-   with zero mismatches; the kpairs=0 boundary was tested separately.
-   Emits no emms - the caller does, after this gg's 8 sub-window calls,
-   because building the next gg's table uses x87. */
-extern void lz_gdn1_x4_asm(const int8_t *rowA, int32_t vd,
-                           const int16_t *ctab, int32_t kpairs,
-                           int32_t *out8);
-#pragma aux lz_gdn1_x4_asm = \
-    ".586" \
-    "pxor      mm4, mm4" \
-    "pxor      mm5, mm5" \
-    "pxor      mm6, mm6" \
-    "pxor      mm7, mm7" \
-    "test      ecx, ecx" \
-    "jz        LZ_GDN1_DONE" \
-    "LZ_GDN1_LOOP:" \
-    "movd      mm0, [eax]" \
-    "punpcklbw mm0, mm0" \
-    "psraw     mm0, 8" \
-    "movd      mm1, [eax+edx]" \
-    "punpcklbw mm1, mm1" \
-    "psraw     mm1, 8" \
-    "movq      mm2, mm0" \
-    "punpcklwd mm2, mm1" \
-    "punpckhwd mm0, mm1" \
-    "movq      mm3, mm2" \
-    "pmaddwd   mm3, [ebx]" \
-    "paddd     mm4, mm3" \
-    "pmaddwd   mm2, [ebx+8]" \
-    "paddd     mm6, mm2" \
-    "movq      mm3, mm0" \
-    "pmaddwd   mm3, [ebx]" \
-    "paddd     mm5, mm3" \
-    "pmaddwd   mm0, [ebx+8]" \
-    "paddd     mm7, mm0" \
-    "lea       eax, [eax+edx*2]" \
-    "add       ebx, 16" \
-    "dec       ecx" \
-    "jnz       LZ_GDN1_LOOP" \
-    "LZ_GDN1_DONE:" \
-    "movq      [esi], mm4" \
-    "movq      [esi+8], mm5" \
-    "movq      [esi+16], mm6" \
-    "movq      [esi+24], mm7" \
-    __parm [__eax] [__edx] [__ebx] [__ecx] [__esi] \
-    __modify [__eax __ebx __ecx 8087]
+/* lz_gdn1_x4_asm's Watcom body, and the whole of gdn_sum_gg's MMX
+   branch that calls it 8 times per group, moved to src/ops_mmx.c as
+   lz_gdn_sum_gg_mmx (task #30) - it writes %mm registers, and wcc386's
+   -Nr/-Ns ceiling cannot be raised per-function the way a #pragma aux
+   ".586" directive implies (task #28's finding), so it needs its own
+   translation unit now that ops.c targets the lower floor. Declared in
+   src/ops_mmx.h, already visible here. gdn_sum_gg's Watcom branch below
+   calls it once per group - the same call count ops.c always had to
+   this function, since it was already the real call boundary before
+   this split (a static function, not inlined into its own caller). */
 #else
-/* lz_gdn1_x4_asm's gcc body lives in src/ops_mmx.c now - it writes %mm
-   registers. Same name as the Watcom #pragma aux declaration above: the
-   two are never compiled into the same binary, so one external symbol
-   serves both. Declared in src/ops_mmx.h, already visible here. */
+/* lz_gdn1_x4_asm's gcc body lives in src/ops_mmx.c - it writes %mm
+   registers. Declared in src/ops_mmx.h, already visible here. */
 #endif /* __WATCOMC__ */
 #endif /* LZ_GDN_HAVE_MMX */
 
@@ -4528,6 +4487,16 @@ static void gdn_sum_gg(const int8_t *sq_gg, int kd, int vd,
         }
     }
     gdn_tail_row(sq_gg, kd, vd, tcu, tcw, au_gg, aw_gg);
+}
+#elif defined(__WATCOMC__)
+/* Watcom: one call to src/ops_mmx.c's lz_gdn_sum_gg_mmx, which does the
+   eight sub-window lz_gdn1_x4_asm calls internally with the pragma
+   genuinely inline (task #30) - the same call count this function
+   always had from ITS OWN caller, just crossing a TU boundary now. */
+static void gdn_sum_gg(const int8_t *sq_gg, int kd, int vd,
+                       const int16_t (*tab)[8], int32_t tcu, int32_t tcw,
+                       int32_t *au_gg, int32_t *aw_gg) {
+    lz_gdn_sum_gg_mmx(sq_gg, kd, vd, tab, tcu, tcw, au_gg, aw_gg);
 }
 #else
 /* Eight 4-lane sub-windows cover this gg's 32 vv lanes.

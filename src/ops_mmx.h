@@ -35,12 +35,25 @@
    declarations below are gcc-and-MMX-tier-specific. */
 #include "ops_p2_blk.h"
 
-#if defined(LZ_MMX_TU) && !defined(__WATCOMC__)
+#if defined(LZ_MMX_TU)
 
+/* GDN1_MMX_EXTERN is unconditional (task #30 moved it first, verified
+   safe on both compilers) - see ops.c's own `#if defined(__WATCOMC__)
+   #elif defined(LZ_GDN1_MMX_EXTERN)` guard, checked in that order so
+   Watcom's branch always wins regardless of this macro's value on that
+   side. The other four stay gcc-only (!__WATCOMC__) until their own
+   kernels move: ops_kernel_dot.h's dispatch table in particular does
+   NOT have the same `&& !defined(__WATCOMC__)` defense
+   ops_kernel_amax.h's does, so making LZ_DOT_MMX_EXTERN unconditional
+   before that file's Watcom content actually moves makes Watcom's
+   table silently reach for gcc-only row_*_mmx_intrin symbols - caught
+   by a real compile error, not by luck, while wiring this. */
+#define LZ_GDN1_MMX_EXTERN 1
+
+#if !defined(__WATCOMC__)
 #define LZ_WSUM_MMX_EXTERN 1
 #define LZ_P2_MMX_EXTERN   1
 #define LZ_DOT_MMX_EXTERN  1
-#define LZ_GDN1_MMX_EXTERN 1
 /* Kept under their existing names (predates this split) rather than
    renamed to match the *_MMX_EXTERN pattern above: renaming a macro
    already tested at several call sites risks missing one, for a
@@ -48,12 +61,34 @@
 #define LZ_HAVE_AMAX_MMX   1
 #define LZ_HAVE_Q8R_SSE    1
 
+/* p2_blk() stays gcc-only until ops_kernel_p2.h's Watcom content
+   actually moves here - ops.c still has its own static p2_blk() for
+   Watcom for now, and declaring this one unconditionally collides
+   with it ("Extern function redeclared as static" - caught at
+   compile time, not assumed away). */
+lz_p2_blk *p2_blk(void);
+#endif
+
+#if defined(__WATCOMC__)
+/* Task #30: Watcom's own kernels now live in src/ops_mmx.c too (they
+   did not before - this file used to be gcc-only). Grouped by their
+   call-site shape, not by kernel, because that shape is the point:
+   every one of these was called through a #pragma aux inline expansion
+   before the split, so the function actually exported here is the
+   widest-granularity real boundary that introduces no MORE call
+   overhead than ops.c already had (see each site in ops.c for the
+   specific "why this granularity" note). */
+void lz_gdn_sum_gg_mmx(const int8_t *sq_gg, int kd, int vd,
+                       const int16_t (*tab)[8], int32_t tcu, int32_t tcw,
+                       int32_t *au_gg, int32_t *aw_gg);
+
+#else /* gcc: intrinsics, existing declarations */
+
 /* ---- wsum: src/ops.c's LZ_WSUM_PAIR, attention scoring's dot ---------- */
 void lz_wsum_pair_mmx(const int8_t *rowA, const int8_t *rowB,
                       const int16_t *coef, int32_t *acc32);
 
 /* ---- GDN/KDA fixed-point pass 2 --------------------------------------- */
-lz_p2_blk *p2_blk(void);
 void lz_p2_mul32_mmx(const int8_t *hi, const int8_t *lo,
                      const int16_t *dq, lz_p2_blk *blk);
 void lz_p2_split32_mmx(const lz_p2_blk *blk, int8_t *oh, int8_t *ol);
@@ -94,6 +129,8 @@ unsigned lz_amax32_mmx(const float *x, int n);
 /* ---- Q8 activation rounding, SSE1 tier (writes %mm via cvtps2pi) ------ */
 void lz_q8round32_sse(const float *x, int8_t *o, const float *pinv);
 
-#endif /* LZ_MMX_TU && !__WATCOMC__ */
+#endif /* __WATCOMC__ */
+
+#endif /* LZ_MMX_TU */
 
 #endif /* LZ_OPS_MMX_H */

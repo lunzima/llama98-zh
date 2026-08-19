@@ -1,19 +1,25 @@
-/* Every gcc/clang function that writes a %mm register - the MMX
-   register file, which aliases the x87 stack. The ONLY translation
-   unit built with -mmmx (and -msse, for the SSE1-on-%mm cell), and it
-   must stay that way: on a 32-bit x87 target, gcc and clang both use
-   MMX for an 8-byte block store when -mmmx is on even with no MMX
-   intrinsic anywhere nearby in the source, and neither issues emms
-   before the x87 code that follows - which leaves the tag word full and
-   makes the next fld overflow to real indefinite (0xFFC00000). Moving
-   every %mm-touching function out of ops.c is what makes "ops.c is
-   never built with -mmmx" a safe thing to do; see src/ops_mmx.h for the
-   macro that tells ops.c's dispatch code these kernels still exist.
+/* Every function that writes a %mm register - the MMX register file,
+   which aliases the x87 stack. The ONLY translation unit built with
+   -mmmx (and -msse, for the SSE1-on-%mm cell) on EITHER toolchain (task
+   #30): on a 32-bit x87 target, gcc and clang both use MMX for an
+   8-byte block store when -mmmx is on even with no MMX intrinsic
+   anywhere nearby in the source, and neither issues emms before the x87
+   code that follows - which leaves the tag word full and makes the next
+   fld overflow to real indefinite (0xFFC00000). Moving every
+   %mm-touching function out of ops.c is what makes "ops.c is never
+   built with -mmmx" a safe thing to do; see src/ops_mmx.h for the macro
+   that tells ops.c's dispatch code these kernels still exist.
 
-   Watcom is unaffected and untouched: it never compiles this file (not
-   in $(ENG), not in any watcom-* target's source list) and keeps
-   compiling its own #pragma aux MMX/SSE1 kernels straight out of ops.c
-   and the ops_kernel_*.h headers, exactly as before this split.
+   Watcom NOW compiles this file too (it did not before task #30) -
+   $(ENG_MMX_GCC) in the Makefile is misnamed as of this split; see its
+   own comment. Watcom's #pragma aux bodies moved here from ops.c and
+   the ops_kernel_*.h headers because -Nr/-Ns is a hard ceiling wcc386's
+   own per-function ".586"/".686" directives cannot exceed (task #28's
+   finding, on this project's own cpucheck.c) - ops.c staying at the new
+   i486/i386 floor and this file's hand-written kernels needing a higher
+   one are incompatible unless the kernels live in a separate TU with
+   its own ceiling. The ARM cross-build must still never see this file:
+   it has no MMX register file at all.
 
    Kernels do NOT emit emms themselves (rule 6 item 6) - the caller
    emits one after its loop. That contract does not change here; only
@@ -24,7 +30,108 @@
 
 #include "ops_mmx.h"
 
-#if defined(LZ_MMX_TU) && !defined(__WATCOMC__)
+#if defined(LZ_MMX_TU)
+
+#if defined(__WATCOMC__)
+#include "mmx_compat.h"
+
+/* ---- GDN/KDA pass 1, 4-lane table contraction - moved here whole from
+   ops.c's gdn_sum_gg (task #30). This function was ALREADY the real
+   call boundary: a static function called once per 32-lane group from
+   its own caller, doing 8 sub-window lz_gdn1_x4_asm calls internally.
+   Moving the whole body here adds NO new call site - ops.c's call
+   count to it is unchanged, only the destination TU is. gdn_tail_row
+   is duplicated rather than shared across a TU boundary: 13 lines,
+   pure integer, touches neither x87 nor MMX (ops.c's own comment on
+   it), so sharing it via extern linkage would cost a real call for
+   something this small and stateless, and duplication cannot drift
+   since it has no state to drift out of. */
+static void gdn_tail_row_mmx(const int8_t *sq_gg, int kd, int vd,
+                             int32_t cu, int32_t cw,
+                             int32_t *au_gg, int32_t *aw_gg) {
+    if (!(kd & 1)) return;
+    {
+        const int8_t *row = sq_gg + (size_t)(kd - 1) * vd;
+        int j;
+        for (j = 0; j < 32; j++) {
+            au_gg[j] += (int32_t)row[j] * cu;
+            aw_gg[j] += (int32_t)row[j] * cw;
+        }
+    }
+}
+
+/* Eight 4-lane sub-windows cover this gg's 32 vv lanes.
+
+   The emms belongs HERE, once per gg - not per sub-window, and not after
+   the whole loop. Rule 6 item 6 permits hoisting the emms out only when
+   the loop body has no x87, and that precondition fails one level up: the
+   next gg's gdn_build_table runs q8_round and 32767/amax on x87 right
+   after this returns. Hoisting it would reopen the trap that broke the
+   mmx tier. */
+extern void lz_gdn1_x4_asm(const int8_t *rowA, int32_t vd,
+                           const int16_t *ctab, int32_t kpairs,
+                           int32_t *out8);
+#pragma aux lz_gdn1_x4_asm = \
+    ".586" \
+    "pxor      mm4, mm4" \
+    "pxor      mm5, mm5" \
+    "pxor      mm6, mm6" \
+    "pxor      mm7, mm7" \
+    "test      ecx, ecx" \
+    "jz        LZ_GDN1_DONE" \
+    "LZ_GDN1_LOOP:" \
+    "movd      mm0, [eax]" \
+    "punpcklbw mm0, mm0" \
+    "psraw     mm0, 8" \
+    "movd      mm1, [eax+edx]" \
+    "punpcklbw mm1, mm1" \
+    "psraw     mm1, 8" \
+    "movq      mm2, mm0" \
+    "punpcklwd mm2, mm1" \
+    "punpckhwd mm0, mm1" \
+    "movq      mm3, mm2" \
+    "pmaddwd   mm3, [ebx]" \
+    "paddd     mm4, mm3" \
+    "pmaddwd   mm2, [ebx+8]" \
+    "paddd     mm6, mm2" \
+    "movq      mm3, mm0" \
+    "pmaddwd   mm3, [ebx]" \
+    "paddd     mm5, mm3" \
+    "pmaddwd   mm0, [ebx+8]" \
+    "paddd     mm7, mm0" \
+    "lea       eax, [eax+edx*2]" \
+    "add       ebx, 16" \
+    "dec       ecx" \
+    "jnz       LZ_GDN1_LOOP" \
+    "LZ_GDN1_DONE:" \
+    "movq      [esi], mm4" \
+    "movq      [esi+8], mm5" \
+    "movq      [esi+16], mm6" \
+    "movq      [esi+24], mm7" \
+    __parm [__eax] [__edx] [__ebx] [__ecx] [__esi] \
+    __modify [__eax __ebx __ecx 8087]
+
+/* gdn_sum_gg's MMX branch, unchanged from ops.c except for the name
+   (ops.c's non-MMX branch keeps the bare name; this is the one that
+   used to sit behind #ifdef LZ_GDN_HAVE_MMX in the same function). */
+void lz_gdn_sum_gg_mmx(const int8_t *sq_gg, int kd, int vd,
+                       const int16_t (*tab)[8], int32_t tcu, int32_t tcw,
+                       int32_t *au_gg, int32_t *aw_gg) {
+    int kpairs = kd / 2, vb;
+    for (vb = 0; vb < 8; vb++) {
+        int v = vb * 4;
+        int32_t out8[8];
+        lz_gdn1_x4_asm(sq_gg + v, vd, &tab[0][0], kpairs, out8);
+        au_gg[v + 0] = out8[0]; au_gg[v + 1] = out8[1];
+        au_gg[v + 2] = out8[2]; au_gg[v + 3] = out8[3];
+        aw_gg[v + 0] = out8[4]; aw_gg[v + 1] = out8[5];
+        aw_gg[v + 2] = out8[6]; aw_gg[v + 3] = out8[7];
+    }
+    gdn_tail_row_mmx(sq_gg, kd, vd, tcu, tcw, au_gg, aw_gg);
+    _mm_empty();
+}
+
+#else /* gcc: intrinsics */
 
 #include "mmx_compat.h"
 #include <mmintrin.h>
@@ -239,4 +346,6 @@ unsigned lz_amax32_mmx(const float *x, int n) {
 
 #include "ops_kernel_dot_mmx.h"
 
-#endif /* LZ_MMX_TU && !__WATCOMC__ */
+#endif /* __WATCOMC__ */
+
+#endif /* LZ_MMX_TU */
