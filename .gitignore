@@ -29,6 +29,7 @@
 !/build/ci.sh
 !/build/dedupe_gate.sh
 !/build/mm_alias_gate.sh
+!/build/isa_floor_watcom_gate.sh
 
 # Stray compiler/linker intermediates (gcc, Open Watcom), plus the raw
 # dumps probes drop at the repo root when run without a -o path.

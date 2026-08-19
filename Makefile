@@ -483,7 +483,7 @@ watcom-gui:
 # compiles its own throwaway ops_sse2.c objects (both toolchains, both
 # LZ_SSE2_GROUP settings) rather than depending on watcom-cli having
 # already produced one, so it does not need to come after it.
-check: dedupe-gate mm-alias-gate watcom-cli watcom-gui watcom-dll
+check: dedupe-gate mm-alias-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate
 
 .PHONY: dedupe-gate
 dedupe-gate:
@@ -492,6 +492,12 @@ dedupe-gate:
 .PHONY: mm-alias-gate
 mm-alias-gate:
 	@bash build/mm_alias_gate.sh
+
+# Symmetric ISA-floor gate, Watcom side - reads watcom-cli's objects, so
+# it must run after that target (it does: check lists it last).
+.PHONY: isa-floor-watcom-gate
+isa-floor-watcom-gate:
+	@bash build/isa_floor_watcom_gate.sh
 
 # Optional single-file DOS packaging (D9). SB.EXE is 16-bit and cannot run
 # on 64-bit Windows; the bind step must run inside DOSBox-X.
