@@ -26,18 +26,24 @@ Watcom 的手写汇编做了，gcc 的 intrinsics 版本这次也做了（`z`/`m
 四个子块存活）。**逐位一致已验**（`chk=` 与逐 32 路径、与 Watcom 构建全等），
 但**收益未量**——铁律三：目标机实测，本机数字不作数。
 
-## 线 2：x87 减负（未定点化的标量浮点算子）
+## 线 2：x87 减负（已定点化，`--scalar-fixed` 旋钮）
 
 float 档 census 里，六个定点档覆盖的算子之外，还剩两个 x87 标量：
 
 | site | float 档 | fixed 档 | 说明 |
 |---|---|---|---|
-| exp | 624780（11.5%） | 8905（1.2%） | fixed 档下 sigmoid 的 exp 被 Q15 表替代，剩 softmax 的 exp 还是查表 x87 |
-| rsqrt | 4248（0.1%） | 4248（0.6%） | lz_rsqrt 魔数+Newton，两档都未定点化 |
+| exp | 624780（11.5%） | 8905（1.2%） | 已定点化：Q20 表 + 残差二阶泰勒（f32 操作 13→7） |
+| rsqrt | 4248（0.1%） | 4248（0.6%） | 已定点化：Q23 种子表 + 整数牛顿（f32 操作 9→2~3） |
 
-**修复方向**：exp 和 rsqrt 的定点化。exp 已有 Q15 表的先例（`sig_build`），
-可推广到 softmax 的 exp；rsqrt 可用整数牛顿迭代。目标机（Cyrix 6x86MX /
-IDT WinChip 的 x87 弱）上收益最大。
+**已修复（2026-08-20，`113fa90`）**：旋钮 `--scalar-fixed auto|float|fixed`，默认 auto
+（开发机落 float=默认关；无 SIMD 弱 x87 目标落 fixed=达成 offload）。逐位一致在
+结构上不可达（float 路径的舍入序列整数域复现不了），所以是 Outcome 2（旋钮），
+非 bit-identical。census：exp 5213→3269、rsqrt 4248→1606（`--fixed all` 下）。
+
+**关键发现**：q8 模型上 `--scalar-fixed fixed` 单独把 logits rms 动 0.87%，看似远超
+算子 ~1e-6 的误差——这是量化管线的边界翻转放大。量过六个档单开的影响：conv 3.37%、
+norm 0.92%、attn 0.44%、sig 0.29%、recur 0.36%、epi 0.18%，scalar 在族内不是异常。
+「先比同量级再下结论」。
 
 ## 线 3：int→float 去重（定点档位联动的重复量化）
 
@@ -64,9 +70,8 @@ IDT WinChip 的 x87 弱）上收益最大。
 | 线 | 发现 | 优先级 |
 |---|---|---|
 | 1 | gcc 的 g128 缺格（not written，hoist mask 减负）→ **已补写（2026-08-20）**，`chk=` 逐位一致；收益未量 | 中（需目标机实测 gcc 是否更快） |
-| 2 | exp / rsqrt 未定点化（x87 标量） | 中（目标机弱 x87 上收益大） |
-| 3 | sigmoid fixed 的解量化重复（37.6% f32 可去重） | **高**（去重能再砍 fixed 档最大块） |
+| 2 | exp / rsqrt 已定点化（`--scalar-fixed` 旋钮，Outcome 2） | 中（目标机弱 x87 上收益大） |
+| 3 | sigmoid fixed 的解量化重复 → **已去重（bit-identical，`fb26f31`）** | 高 |
 
-三线都是「排查产出」，修复是后续（各自需独立设计 + 矩阵构建验证）。
-线 1 的补写见本文件开头「线 1」一节；收益与旋钮（`LZ_G128_GCC`）见
+三线均已修复。线 1 见本文件开头「线 1」一节；收益与旋钮（`LZ_G128_GCC`）见
 `src/ops_kernel_shared.h` 的注释。
