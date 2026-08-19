@@ -113,8 +113,14 @@ SSE_FLAGS="$SSE_FLAGS -ffp-contract=off -DLZ_MMX_TU=1 -I$ROOT/src"
 ENG="err compat lfn json safetensors model ops forward sampler generate
      tokenizer unicode chat gbk cpucheck"
 
+# $OUT is scratch, wiped and rebuilt from nothing on every run - not a
+# durable artifact. A stale directory from an old invocation (a
+# pre-split source tree, a different script version, or unrelated
+# debris that happens to share the path) must never coexist with a
+# fresh one and be mistaken for current: that reads as a passing check
+# on a binary that predates whatever change is being verified.
+rm -rf "$OUT"
 mkdir -p "$OUT"
-rm -f "$OUT"/*.o "$OUT"/*.log
 
 fail=0
 warn=0
