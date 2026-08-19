@@ -128,6 +128,35 @@ void lz_p2_rows_sse(const int8_t *ph_row, const int8_t *pl_row,
                     const int16_t (*mul)[4], int8_t *oh_row,
                     int8_t *ol_row, int ol_stride, int *shv, int ng);
 
+/* task #30 (4/N): Q8 group-scale amax, MMX tier. lz_amax32_mmx_w is the
+   thin wrapper LZ_AMAX_TAB (src/ops_kernel_amax.h) needs a real address
+   for - a #pragma aux body cannot be taken by pointer. */
+unsigned lz_amax32_mmx_w(const float *x, int n);
+
+/* task #30 (4/N): RMSNorm's output loop / softmax's max scan and
+   normalize loop, SSE1 tier. Bodies in src/ops_mmx_sse.c (genuine
+   SSE1-on-xmm, no MMX register touched), declared here alongside their
+   MMX-tier siblings - same "this header is the ops_mmx.c/ops_mmx_sse.c
+   pair's declarations" precedent as lz_p2_rows_sse above. */
+void lz_rmsnorm_out_sse_w(float *o, const float *x, const float *w,
+                          int n4, const float *k2);
+void lz_vmax_sse_w(const float *x, int n4, float *pmax);
+void lz_vscale_sse_w(float *x, int n4, const float *pk);
+
+/* task #30 (4/N): Q8 activation rounding, SSE1+MMX tier, GROUP
+   granularity - the whole gs/32-chunk loop (lz_q8round_group_sse) or
+   two-plane loop pair plus the residual arithmetic between them
+   (lz_q8round_2p_group_sse), for ops.c's lz_quantize_q8 /
+   lz_gdn_quantize_2p respectively. Bodies in src/ops_mmx_sse.c
+   (cvtps2pi writes %mm registers, needs genuine SSE1 for the float
+   side - same file as lz_p2_split32_sse). res is caller-owned scratch
+   (ops.c's static float res[LZ_GDN_MAX_VD]), sized once there. */
+void lz_q8round_group_sse(const float *grp, int8_t *out, int gs,
+                          const float *pinv);
+void lz_q8round_2p_group_sse(const float *grp, int8_t *ho, int8_t *lw,
+                             int gs, const float *pinv,
+                             const float *plo_mul, float *res);
+
 #else /* gcc: intrinsics, existing declarations */
 
 /* ---- wsum: src/ops.c's LZ_WSUM_PAIR, attention scoring's dot ---------- */

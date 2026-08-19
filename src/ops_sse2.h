@@ -52,6 +52,20 @@ void lz_p2_rows_sse2(const int8_t *ph_row, const int8_t *pl_row,
                      const int16_t (*mul)[4], int8_t *oh_row,
                      int8_t *ol_row, int ol_stride, int *shv, int ng);
 
+/* task #30 (4/N): Q8 group-scale amax, SSE2 tier. lz_amax32_sse2_w is
+   the thin wrapper LZ_AMAX_TAB (src/ops_kernel_amax.h) needs a real
+   address for - a #pragma aux body cannot be taken by pointer. */
+unsigned lz_amax32_sse2_w(const float *x, int n);
+
+/* task #30 (4/N): Q8 activation rounding, SSE2 tier, GROUP granularity
+   - same shape as src/ops_mmx.h's SSE1+MMX-tier twins, no emms needed
+   here (pure xmm, no %mm register touched). */
+void lz_q8round_group_sse2(const float *grp, int8_t *out, int gs,
+                           const float *pinv);
+void lz_q8round_2p_group_sse2(const float *grp, int8_t *ho, int8_t *lw,
+                              int gs, const float *pinv,
+                              const float *plo_mul, float *res);
+
 #else /* gcc: intrinsics */
 
 /* ---- matmul row kernels, one per quantized weight format -------------

@@ -344,6 +344,138 @@ void lz_p2_rows_sse2(const int8_t *ph_row, const int8_t *pl_row,
     }
 }
 
+/* ---- Q8 group-scale amax, SSE2 tier - moved here from
+   src/ops_kernel_amax.h (task #30, 4/N). Same zero-call-shape-change
+   reasoning as src/ops_mmx.c's lz_amax32_mmx_w: the wrapper already sat
+   between the pragma and LZ_AMAX_TAB before the move. */
+
+/* Four lanes. The horizontal fold is two shuffle-and-compare rounds -
+   pshufd is SSE2, so no MMX register is touched and no emms is owed. */
+extern unsigned lz_amax32_sse2_asm(const float *x, int n);
+#pragma aux lz_amax32_sse2_asm =        \
+    ".686"                              \
+    "pxor     xmm0, xmm0"               \
+    "pcmpeqd  xmm3, xmm3"               \
+    "psrld    xmm3, 1"                  \
+    "shr      edx, 2"                   \
+    "jz       S2"                       \
+    "S1:"                               \
+    "movups   xmm1, [eax]"              \
+    "pand     xmm1, xmm3"               \
+    "movdqa   xmm2, xmm1"               \
+    "pcmpgtd  xmm2, xmm0"               \
+    "pand     xmm1, xmm2"               \
+    "pandn    xmm2, xmm0"               \
+    "por      xmm1, xmm2"               \
+    "movdqa   xmm0, xmm1"               \
+    "add      eax, 16"                  \
+    "dec      edx"                      \
+    "jnz      S1"                       \
+    "S2:"                               \
+    "pshufd   xmm1, xmm0, 0x4E"         \
+    "movdqa   xmm2, xmm0"               \
+    "pcmpgtd  xmm2, xmm1"               \
+    "pand     xmm0, xmm2"               \
+    "pandn    xmm2, xmm1"               \
+    "por      xmm0, xmm2"               \
+    "pshufd   xmm1, xmm0, 0xB1"         \
+    "movdqa   xmm2, xmm0"               \
+    "pcmpgtd  xmm2, xmm1"               \
+    "pand     xmm0, xmm2"               \
+    "pandn    xmm2, xmm1"               \
+    "por      xmm0, xmm2"               \
+    "movd     eax, xmm0"                \
+    parm [eax] [edx]                    \
+    value [eax]                         \
+    modify [eax edx];
+
+/* Thin wrapper so LZ_AMAX_TAB can hold this. */
+unsigned lz_amax32_sse2_w(const float *x, int n) {
+    return lz_amax32_sse2_asm(x, n);
+}
+
+/* ---- Q8 activation rounding, SSE2 tier - moved here from
+   src/ops_kernel_q8round.h (task #30, 4/N). cvtps2dq converts 4 floats
+   at once - no MMX register touched, unlike the SSE1+MMX tier's
+   cvtps2pi (src/ops_mmx_sse.c), so no emms is owed anywhere in this
+   cell. */
+extern void lz_q8round32_sse2_asm(const float *x, int8_t *o, const float *inv);
+#pragma aux lz_q8round32_sse2_asm = \
+    ".686" \
+    "movss    xmm4, [ecx]" \
+    "shufps   xmm4, xmm4, 0" \
+    "pcmpeqw  xmm5, xmm5" \
+    "psrlw    xmm5, 9" \
+    "pxor     xmm6, xmm6" \
+    "psubw    xmm6, xmm5" \
+    "movups   xmm0, [eax]" \
+    "movups   xmm1, [eax+16]" \
+    "movups   xmm2, [eax+32]" \
+    "movups   xmm3, [eax+48]" \
+    "mulps    xmm0, xmm4" \
+    "mulps    xmm1, xmm4" \
+    "mulps    xmm2, xmm4" \
+    "mulps    xmm3, xmm4" \
+    "cvtps2dq xmm0, xmm0" \
+    "cvtps2dq xmm1, xmm1" \
+    "cvtps2dq xmm2, xmm2" \
+    "cvtps2dq xmm3, xmm3" \
+    "packssdw xmm0, xmm1" \
+    "packssdw xmm2, xmm3" \
+    "pminsw   xmm0, xmm5" \
+    "pmaxsw   xmm0, xmm6" \
+    "pminsw   xmm2, xmm5" \
+    "pmaxsw   xmm2, xmm6" \
+    "packsswb xmm0, xmm2" \
+    "movdqu   [edx], xmm0" \
+    "movups   xmm0, [eax+64]" \
+    "movups   xmm1, [eax+80]" \
+    "movups   xmm2, [eax+96]" \
+    "movups   xmm3, [eax+112]" \
+    "mulps    xmm0, xmm4" \
+    "mulps    xmm1, xmm4" \
+    "mulps    xmm2, xmm4" \
+    "mulps    xmm3, xmm4" \
+    "cvtps2dq xmm0, xmm0" \
+    "cvtps2dq xmm1, xmm1" \
+    "cvtps2dq xmm2, xmm2" \
+    "cvtps2dq xmm3, xmm3" \
+    "packssdw xmm0, xmm1" \
+    "packssdw xmm2, xmm3" \
+    "pminsw   xmm0, xmm5" \
+    "pmaxsw   xmm0, xmm6" \
+    "pminsw   xmm2, xmm5" \
+    "pmaxsw   xmm2, xmm6" \
+    "packsswb xmm0, xmm2" \
+    "movdqu   [edx+16], xmm0" \
+    __parm [__eax] [__edx] [__ecx] \
+    __modify [8087]
+
+/* lz_q8round_group_sse2(): the whole gs/32-chunk loop for one group -
+   see src/ops_mmx_sse.c's lz_q8round_group_sse for the accounting.
+   No emms: this tier touches no %mm register. */
+void lz_q8round_group_sse2(const float *grp, int8_t *out, int gs,
+                           const float *pinv) {
+    int k;
+    for (k = 0; k + 31 < gs; k += 32)
+        lz_q8round32_sse2_asm(grp + k, out + k, pinv);
+}
+
+/* lz_q8round_2p_group_sse2(): the whole two-plane round for one group -
+   see src/ops_mmx_sse.c's lz_q8round_2p_group_sse for the accounting.
+   No emms anywhere in this tier's version either. */
+void lz_q8round_2p_group_sse2(const float *grp, int8_t *ho, int8_t *lw,
+                              int gs, const float *pinv,
+                              const float *plo_mul, float *res) {
+    int k;
+    for (k = 0; k + 31 < gs; k += 32)
+        lz_q8round32_sse2_asm(grp + k, ho + k, pinv);
+    for (k = 0; k < gs; k++)
+        res[k] = grp[k] * (*pinv) - (float)ho[k];
+    for (k = 0; k + 31 < gs; k += 32)
+        lz_q8round32_sse2_asm(res + k, lw + k, plo_mul);
+}
+
 #else /* gcc: intrinsics */
 
 #include <emmintrin.h>

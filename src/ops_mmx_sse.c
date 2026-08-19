@@ -249,6 +249,250 @@ void lz_p2_rows_sse(const int8_t *ph_row, const int8_t *pl_row,
     }
 }
 
+/* ---- RMSNorm's output loop / softmax's max scan and normalize loop,
+   SSE1 tier - moved here from src/ops_kernel_norm.h (task #30, 4/N).
+   All three are genuine SSE1-on-xmm with no MMX register touched (no
+   `8087` in any __modify list below), the same reason lz_p2_split32_sse
+   above lives in this file rather than src/ops_mmx.c. Zero call-shape
+   change: each _w wrapper already sat between its pragma and its
+   dispatch table (src/ops_kernel_norm.h's LZ_NORMOUT_TAB/LZ_VMAX_TAB/
+   LZ_VSCALE_TAB) before the move. */
+
+extern void lz_rmsnorm_out_sse_asm(float *o, const float *x, const float *w,
+                                   int n4, const float *k2);
+/* n4 is the number of 4-float blocks, not elements: the caller owns the
+   tail. Unaligned loads throughout - o, x and w come from xcalloc and
+   from tensor slices, and 16-byte alignment is not something this engine
+   can promise for any of them.
+ *
+ * k2 is {inv, 1.0f}. The constant is PASSED rather than materialized in
+ * register, because every register recipe for 1.0f (pcmpeqd then a shift
+ * pair) needs an SSE2 integer instruction on XMM, and this routine is
+ * meant to be SSE1. Two loads at entry is the price of the cell being
+ * genuinely SSE1 rather than SSE2 wearing its name.
+ *
+ * esi, not ebp: ebp is the frame pointer and Watcom rejects it outright
+ * with "Illegal register modified". */
+#pragma aux lz_rmsnorm_out_sse_asm =    \
+    ".686"                              \
+    "movss    xmm7, [esi]"              \
+    "shufps   xmm7, xmm7, 0"            \
+    "movss    xmm6, [esi+4]"            \
+    "shufps   xmm6, xmm6, 0"            \
+    "test     ecx, ecx"                 \
+    "jz       N2"                       \
+    "N1:"                               \
+    "movups   xmm0, [edx]"              \
+    "mulps    xmm0, xmm7"               \
+    "movups   xmm1, [ebx]"              \
+    "addps    xmm1, xmm6"               \
+    "mulps    xmm0, xmm1"               \
+    "movups   [eax], xmm0"              \
+    "add      eax, 16"                  \
+    "add      edx, 16"                  \
+    "add      ebx, 16"                  \
+    "dec      ecx"                      \
+    "jnz      N1"                       \
+    "N2:"                               \
+    parm [eax] [edx] [ebx] [ecx] [esi]  \
+    modify [eax ebx ecx edx esi];
+
+extern void lz_vmax_sse_asm(const float *x, int n4, float *pmax);
+/* Softmax's maximum scan. maxps is exact and, with no NaN present, its
+   order does not matter - so this produces the same float the scalar
+   `if (x[i] > mx) mx = x[i]` loop would. NaN would break that (maxps
+   returns its second operand when unordered, the scalar compare keeps
+   the first); the engine's masked-out positions are -1e30f rather than
+   NaN precisely so the arithmetic stays ordered.
+ *
+ * IN AND OUT THROUGH pmax, rather than a float return. `value [8087]`
+ * means the result is on the x87 stack, and this routine's result is in
+ * xmm0 - declaring one and producing the other returns whatever was on
+ * the stack. It cost a cross-compiler DIFFER on --kernel sse2 and
+ * nothing else, which is the only place that mistake is visible. */
+#pragma aux lz_vmax_sse_asm =           \
+    ".686"                              \
+    "movss    xmm0, [ebx]"              \
+    "shufps   xmm0, xmm0, 0"            \
+    "test     edx, edx"                 \
+    "jz       M2"                       \
+    "M1:"                               \
+    "movups   xmm1, [eax]"              \
+    "maxps    xmm0, xmm1"               \
+    "add      eax, 16"                  \
+    "dec      edx"                      \
+    "jnz      M1"                       \
+    "M2:"                               \
+    "movhlps  xmm1, xmm0"               \
+    "maxps    xmm0, xmm1"               \
+    "movaps   xmm1, xmm0"               \
+    "shufps   xmm1, xmm1, 1"            \
+    "maxps    xmm0, xmm1"               \
+    "movss    [ebx], xmm0"              \
+    parm [eax] [edx] [ebx]              \
+    modify [eax edx];
+
+extern void lz_vscale_sse_asm(float *x, int n4, const float *pk);
+/* Softmax's normalize loop: x[i] *= inv, element-wise. */
+#pragma aux lz_vscale_sse_asm =         \
+    ".686"                              \
+    "movss    xmm7, [ebx]"              \
+    "shufps   xmm7, xmm7, 0"            \
+    "test     edx, edx"                 \
+    "jz       V2"                       \
+    "V1:"                               \
+    "movups   xmm0, [eax]"              \
+    "mulps    xmm0, xmm7"               \
+    "movups   [eax], xmm0"              \
+    "add      eax, 16"                  \
+    "dec      edx"                      \
+    "jnz      V1"                       \
+    "V2:"                               \
+    parm [eax] [edx] [ebx]              \
+    modify [eax edx];
+
+/* Wrappers, for the same reason src/ops_mmx.c's amax ones give: a
+   #pragma aux body is emitted at the call site and has no address to
+   put in a table. */
+void lz_rmsnorm_out_sse_w(float *o, const float *x, const float *w,
+                          int n4, const float *k2) {
+    lz_rmsnorm_out_sse_asm(o, x, w, n4, k2);
+}
+void lz_vmax_sse_w(const float *x, int n4, float *pmax) {
+    lz_vmax_sse_asm(x, n4, pmax);
+}
+void lz_vscale_sse_w(float *x, int n4, const float *pk) {
+    lz_vscale_sse_asm(x, n4, pk);
+}
+
+/* ---- Q8 activation rounding, SSE1+MMX tier - moved here from
+   src/ops_kernel_q8round.h (task #30, 4/N). No cvtps2dq, only cvtps2pi
+   - converting 2 floats at a time into MMX registers, which is why this
+   cell needs genuine SSE1 (the multiply) AND touches %mm (the convert/
+   pack/clamp), the same combination lz_p2_split32_sse_asm above has. */
+extern void lz_q8round32_sse_asm(const float *x, int8_t *o, const float *inv);
+#pragma aux lz_q8round32_sse_asm = \
+    ".686" \
+    "movss    xmm7, [ecx]" \
+    "shufps   xmm7, xmm7, 0" \
+    "pcmpeqw  mm5, mm5" \
+    "psrlw    mm5, 9" \
+    "pxor     mm6, mm6" \
+    "psubw    mm6, mm5" \
+    "movups   xmm0, [eax]" \
+    "mulps    xmm0, xmm7" \
+    "movups   xmm1, [eax+16]" \
+    "mulps    xmm1, xmm7" \
+    "cvtps2pi mm0, xmm0" \
+    "movhlps  xmm2, xmm0" \
+    "cvtps2pi mm1, xmm2" \
+    "cvtps2pi mm2, xmm1" \
+    "movhlps  xmm3, xmm1" \
+    "cvtps2pi mm3, xmm3" \
+    "packssdw mm0, mm1" \
+    "packssdw mm2, mm3" \
+    "pminsw   mm0, mm5" \
+    "pmaxsw   mm0, mm6" \
+    "pminsw   mm2, mm5" \
+    "pmaxsw   mm2, mm6" \
+    "packsswb mm0, mm2" \
+    "movq     [edx], mm0" \
+    "movups   xmm0, [eax+32]" \
+    "mulps    xmm0, xmm7" \
+    "movups   xmm1, [eax+48]" \
+    "mulps    xmm1, xmm7" \
+    "cvtps2pi mm0, xmm0" \
+    "movhlps  xmm2, xmm0" \
+    "cvtps2pi mm1, xmm2" \
+    "cvtps2pi mm2, xmm1" \
+    "movhlps  xmm3, xmm1" \
+    "cvtps2pi mm3, xmm3" \
+    "packssdw mm0, mm1" \
+    "packssdw mm2, mm3" \
+    "pminsw   mm0, mm5" \
+    "pmaxsw   mm0, mm6" \
+    "pminsw   mm2, mm5" \
+    "pmaxsw   mm2, mm6" \
+    "packsswb mm0, mm2" \
+    "movq     [edx+8], mm0" \
+    "movups   xmm0, [eax+64]" \
+    "mulps    xmm0, xmm7" \
+    "movups   xmm1, [eax+80]" \
+    "mulps    xmm1, xmm7" \
+    "cvtps2pi mm0, xmm0" \
+    "movhlps  xmm2, xmm0" \
+    "cvtps2pi mm1, xmm2" \
+    "cvtps2pi mm2, xmm1" \
+    "movhlps  xmm3, xmm1" \
+    "cvtps2pi mm3, xmm3" \
+    "packssdw mm0, mm1" \
+    "packssdw mm2, mm3" \
+    "pminsw   mm0, mm5" \
+    "pmaxsw   mm0, mm6" \
+    "pminsw   mm2, mm5" \
+    "pmaxsw   mm2, mm6" \
+    "packsswb mm0, mm2" \
+    "movq     [edx+16], mm0" \
+    "movups   xmm0, [eax+96]" \
+    "mulps    xmm0, xmm7" \
+    "movups   xmm1, [eax+112]" \
+    "mulps    xmm1, xmm7" \
+    "cvtps2pi mm0, xmm0" \
+    "movhlps  xmm2, xmm0" \
+    "cvtps2pi mm1, xmm2" \
+    "cvtps2pi mm2, xmm1" \
+    "movhlps  xmm3, xmm1" \
+    "cvtps2pi mm3, xmm3" \
+    "packssdw mm0, mm1" \
+    "packssdw mm2, mm3" \
+    "pminsw   mm0, mm5" \
+    "pmaxsw   mm0, mm6" \
+    "pminsw   mm2, mm5" \
+    "pmaxsw   mm2, mm6" \
+    "packsswb mm0, mm2" \
+    "movq     [edx+24], mm0" \
+    __parm [__eax] [__edx] [__ecx] \
+    __modify [8087]
+
+/* lz_q8round_group_sse(): the whole gs/32-chunk loop for one group of
+   src/ops.c's lz_quantize_q8, byte-for-byte the loop body that used to
+   sit at that call site, now behind ONE call per group instead of the
+   gs/32 real calls a naive per-sub-chunk wrap would have cost. The
+   emms is the SAME one lz_quantize_q8's own comment placed here -
+   moved with the loop, not removed: rule 6.6's "kernels don't emit"
+   still does not hold, the next group's x87 amax/inv still follows
+   immediately in ops.c. */
+void lz_q8round_group_sse(const float *grp, int8_t *out, int gs,
+                          const float *pinv) {
+    int k;
+    for (k = 0; k + 31 < gs; k += 32)
+        lz_q8round32_sse_asm(grp + k, out + k, pinv);
+    _mm_empty();
+}
+
+/* lz_q8round_2p_group_sse(): the whole two-plane round for one group of
+   src/ops.c's lz_gdn_quantize_2p - both kernel loops AND the residual
+   float arithmetic between them, byte-for-byte what used to sit at
+   that call site. The residual computation is plain C float
+   arithmetic; putting it in this TU is safe for Watcom the way it
+   would not be for gcc under -mmmx (src/ops_mmx.c's header explains
+   the difference - Watcom never emits MMX except where a #pragma aux
+   says so, so mixing float C and #pragma aux kernels in one TU here
+   is exactly as safe as ops.c doing the same always was). */
+void lz_q8round_2p_group_sse(const float *grp, int8_t *ho, int8_t *lw,
+                             int gs, const float *pinv,
+                             const float *plo_mul, float *res) {
+    int k;
+    for (k = 0; k + 31 < gs; k += 32)
+        lz_q8round32_sse_asm(grp + k, ho + k, pinv);
+    _mm_empty();
+    for (k = 0; k < gs; k++)
+        res[k] = grp[k] * (*pinv) - (float)ho[k];
+    for (k = 0; k + 31 < gs; k += 32)
+        lz_q8round32_sse_asm(res + k, lw + k, plo_mul);
+    _mm_empty();
+}
+
 #else /* gcc: intrinsics */
 
 #include "mmx_compat.h"

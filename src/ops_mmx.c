@@ -931,6 +931,58 @@ void lz_p2_rows_mmx(const int8_t *ph_row, const int8_t *pl_row,
     }
 }
 
+/* ---- Q8 group-scale amax, MMX tier - moved here from
+   src/ops_kernel_amax.h (task #30, 4/N: the mechanical low-risk sweep).
+   Zero call-shape change: lz_amax32_mmx_w already sat between the
+   pragma and LZ_AMAX_TAB (src/ops_kernel_amax.h) before the move - a
+   #pragma aux body cannot have its address taken, so the table always
+   needed a real function to point at - and that indirect call happens
+   once per operator invocation regardless of which TU the wrapper's
+   body lives in. */
+
+/* Two lanes of uint32 in one MMX register. The mask is built in-register
+   (pcmpeqd then psrld 1) rather than loaded, so the routine touches no
+   memory but its input. Leaves MMX state dirty - the caller emits one
+   emms after the group loop, never the kernel (rule 6 item 6). */
+extern unsigned lz_amax32_mmx_asm(const float *x, int n);
+#pragma aux lz_amax32_mmx_asm =         \
+    "pxor     mm0, mm0"                 \
+    "pcmpeqd  mm3, mm3"                 \
+    "psrld    mm3, 1"                   \
+    "shr      edx, 1"                   \
+    "jz       L2"                       \
+    "L1:"                               \
+    "movq     mm1, [eax]"               \
+    "pand     mm1, mm3"                 \
+    "movq     mm2, mm1"                 \
+    "pcmpgtd  mm2, mm0"                 \
+    "pand     mm1, mm2"                 \
+    "pandn    mm2, mm0"                 \
+    "por      mm1, mm2"                 \
+    "movq     mm0, mm1"                 \
+    "add      eax, 8"                   \
+    "dec      edx"                      \
+    "jnz      L1"                       \
+    "L2:"                               \
+    "movq     mm1, mm0"                 \
+    "psrlq    mm1, 32"                  \
+    "movq     mm2, mm0"                 \
+    "pcmpgtd  mm2, mm1"                 \
+    "pand     mm0, mm2"                 \
+    "pandn    mm2, mm1"                 \
+    "por      mm0, mm2"                 \
+    "movd     eax, mm0"                 \
+    parm [eax] [edx]                    \
+    value [eax]                         \
+    modify [eax edx 8087];
+
+/* Thin wrapper so LZ_AMAX_TAB can hold this. The wrapper is the only
+   caller, so the asm is still inlined once and the indirect call is
+   one per operator invocation, not one per element. */
+unsigned lz_amax32_mmx_w(const float *x, int n) {
+    return lz_amax32_mmx_asm(x, n);
+}
+
 #else /* gcc: intrinsics */
 
 #include "mmx_compat.h"

@@ -971,6 +971,22 @@ void lz_quantize_q8(const float *x, int n, int gs, int8_t *q, float *s) {
                step is worth far more on a PII than on this machine. */
 #if defined(LZ_HAVE_Q8R_SIMD) || defined(LZ_HAVE_Q8R_SSE)
             if ((gs & 31) == 0 && tier) {
+#if defined(__WATCOMC__)
+                /* task #30 (4/N): one call per GROUP, not per 32-element
+                   sub-chunk - the #pragma aux bodies used to expand
+                   inline at these call sites, once per sub-chunk, with
+                   zero real call overhead. lz_q8round_group_sse2/_sse do
+                   the WHOLE gs/32-chunk loop for this group (including,
+                   for the SSE1+MMX tier, the emms the comment below
+                   used to place right here - moved with the loop, same
+                   position relative to the next group's x87 work). */
+#ifdef LZ_HAVE_Q8R_SIMD
+                if (tier == 2)
+                    lz_q8round_group_sse2(grp, out, gs, &inv);
+                else
+#endif
+                    lz_q8round_group_sse(grp, out, gs, &inv);
+#else
 #ifdef LZ_HAVE_Q8R_SIMD
                 if (tier == 2) {
                     for (k = 0; k + 31 < gs; k += 32)
@@ -997,6 +1013,7 @@ void lz_quantize_q8(const float *x, int n, int gs, int8_t *q, float *s) {
                        2 is not formalism. */
                     _mm_empty();
                 }
+#endif /* __WATCOMC__ */
             } else
 #endif
             for (k = 0; k < gs; k++) {
@@ -4540,6 +4557,23 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
                residual line below are not free - reading only the C
                between them would miss 4 of the 7. */
             if ((unsigned)fc_site < (unsigned)LZ_FC_N) LZ_FCX(fc_site, 3 * gs, gs, 0, 3 * gs, 0);  /* residual mul+convert+sub=3, 2x kernel mul+convert=4 */
+#if defined(__WATCOMC__)
+            /* task #30 (4/N): one call per GROUP for the WHOLE two-plane
+               round (both kernel loops and the residual arithmetic
+               between them), not one per 32-element sub-chunk - same
+               reasoning as lz_quantize_q8 above. lz_q8round_2p_group_
+               sse2/_sse own the residual computation too (plain float
+               arithmetic, safe in a Watcom #pragma-aux TU the way it is
+               not in a gcc -mmmx one - see src/ops_mmx.c's header for
+               why that split is toolchain-specific), so the hand-off is
+               still one call, not "kernel, kernel, residual" three. */
+#ifdef LZ_HAVE_Q8R_SIMD
+            if (tier == 2)
+                lz_q8round_2p_group_sse2(grp, ho, lw, gs, &inv, &lo_mul, res);
+            else
+#endif
+                lz_q8round_2p_group_sse(grp, ho, lw, gs, &inv, &lo_mul, res);
+#else
 #ifdef LZ_HAVE_Q8R_SIMD
             if (tier == 2) {
                 for (k = 0; k + 31 < gs; k += 32)
@@ -4564,6 +4598,7 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
                     lz_q8round32_sse(res + k, lw + k, &lo_mul);
                 _mm_empty();
             }
+#endif /* __WATCOMC__ */
             continue;
         }
 #endif

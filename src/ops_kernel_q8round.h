@@ -13,158 +13,35 @@
    The .h extension is a lie of convenience: there are no include guards
    because this is included exactly once, and including it twice would
    redefine every static. */
+/* lz_q8round32_sse_asm / lz_q8round32_sse2_asm's #pragma aux bodies,
+   and the group-level loops that used to call them (once per 32-element
+   sub-chunk, in ops.c's lz_quantize_q8 and lz_gdn_quantize_2p), moved
+   to src/ops_mmx_sse.c (SSE1+MMX tier, cvtps2pi writes %mm registers)
+   and src/ops_sse2.c (pure SSE2 tier) in task #30 (4/N) - see those two
+   call sites (search "one call per GROUP") for why the group, not the
+   sub-chunk, is the granularity: gs can be much larger than 32, and
+   this family's pragmas were called once per sub-chunk directly, unlike
+   ops_kernel_amax.h's/ops_kernel_norm.h's, which were already behind a
+   table-dispatched wrapper with no per-call-site change.
+
+   No lz_q8round32_sse/lz_q8round32_simd bare-name aliases here anymore:
+   they would reference names no longer declared in this TU, and
+   nothing under __WATCOMC__ needs them - both call sites reach
+   lz_q8round_group_sse/_sse2 and lz_q8round_2p_group_sse/_sse2
+   directly now, the same cleanup task #30 (2/N) and (3/N) did for the
+   p2 and wsum aliases. */
 #if defined(__WATCOMC__)
-#include "mmx_compat.h"          /* _mm_empty(): the SSE1 lane wrote MMX registers */
-extern void lz_q8round32_sse_asm(const float *x, int8_t *o, const float *inv);
-#pragma aux lz_q8round32_sse_asm = \
-    ".686" \
-    "movss    xmm7, [ecx]" \
-    "shufps   xmm7, xmm7, 0" \
-    "pcmpeqw  mm5, mm5" \
-    "psrlw    mm5, 9" \
-    "pxor     mm6, mm6" \
-    "psubw    mm6, mm5" \
-    "movups   xmm0, [eax]" \
-    "mulps    xmm0, xmm7" \
-    "movups   xmm1, [eax+16]" \
-    "mulps    xmm1, xmm7" \
-    "cvtps2pi mm0, xmm0" \
-    "movhlps  xmm2, xmm0" \
-    "cvtps2pi mm1, xmm2" \
-    "cvtps2pi mm2, xmm1" \
-    "movhlps  xmm3, xmm1" \
-    "cvtps2pi mm3, xmm3" \
-    "packssdw mm0, mm1" \
-    "packssdw mm2, mm3" \
-    "pminsw   mm0, mm5" \
-    "pmaxsw   mm0, mm6" \
-    "pminsw   mm2, mm5" \
-    "pmaxsw   mm2, mm6" \
-    "packsswb mm0, mm2" \
-    "movq     [edx], mm0" \
-    "movups   xmm0, [eax+32]" \
-    "mulps    xmm0, xmm7" \
-    "movups   xmm1, [eax+48]" \
-    "mulps    xmm1, xmm7" \
-    "cvtps2pi mm0, xmm0" \
-    "movhlps  xmm2, xmm0" \
-    "cvtps2pi mm1, xmm2" \
-    "cvtps2pi mm2, xmm1" \
-    "movhlps  xmm3, xmm1" \
-    "cvtps2pi mm3, xmm3" \
-    "packssdw mm0, mm1" \
-    "packssdw mm2, mm3" \
-    "pminsw   mm0, mm5" \
-    "pmaxsw   mm0, mm6" \
-    "pminsw   mm2, mm5" \
-    "pmaxsw   mm2, mm6" \
-    "packsswb mm0, mm2" \
-    "movq     [edx+8], mm0" \
-    "movups   xmm0, [eax+64]" \
-    "mulps    xmm0, xmm7" \
-    "movups   xmm1, [eax+80]" \
-    "mulps    xmm1, xmm7" \
-    "cvtps2pi mm0, xmm0" \
-    "movhlps  xmm2, xmm0" \
-    "cvtps2pi mm1, xmm2" \
-    "cvtps2pi mm2, xmm1" \
-    "movhlps  xmm3, xmm1" \
-    "cvtps2pi mm3, xmm3" \
-    "packssdw mm0, mm1" \
-    "packssdw mm2, mm3" \
-    "pminsw   mm0, mm5" \
-    "pmaxsw   mm0, mm6" \
-    "pminsw   mm2, mm5" \
-    "pmaxsw   mm2, mm6" \
-    "packsswb mm0, mm2" \
-    "movq     [edx+16], mm0" \
-    "movups   xmm0, [eax+96]" \
-    "mulps    xmm0, xmm7" \
-    "movups   xmm1, [eax+112]" \
-    "mulps    xmm1, xmm7" \
-    "cvtps2pi mm0, xmm0" \
-    "movhlps  xmm2, xmm0" \
-    "cvtps2pi mm1, xmm2" \
-    "cvtps2pi mm2, xmm1" \
-    "movhlps  xmm3, xmm1" \
-    "cvtps2pi mm3, xmm3" \
-    "packssdw mm0, mm1" \
-    "packssdw mm2, mm3" \
-    "pminsw   mm0, mm5" \
-    "pmaxsw   mm0, mm6" \
-    "pminsw   mm2, mm5" \
-    "pmaxsw   mm2, mm6" \
-    "packsswb mm0, mm2" \
-    "movq     [edx+24], mm0" \
-    __parm [__eax] [__edx] [__ecx] \
-    __modify [8087]
-
-#define LZ_HAVE_Q8R_SSE 1
-extern void lz_q8round32_sse2_asm(const float *x, int8_t *o, const float *inv);
-#pragma aux lz_q8round32_sse2_asm = \
-    ".686" \
-    "movss    xmm4, [ecx]" \
-    "shufps   xmm4, xmm4, 0" \
-    "pcmpeqw  xmm5, xmm5" \
-    "psrlw    xmm5, 9" \
-    "pxor     xmm6, xmm6" \
-    "psubw    xmm6, xmm5" \
-    "movups   xmm0, [eax]" \
-    "movups   xmm1, [eax+16]" \
-    "movups   xmm2, [eax+32]" \
-    "movups   xmm3, [eax+48]" \
-    "mulps    xmm0, xmm4" \
-    "mulps    xmm1, xmm4" \
-    "mulps    xmm2, xmm4" \
-    "mulps    xmm3, xmm4" \
-    "cvtps2dq xmm0, xmm0" \
-    "cvtps2dq xmm1, xmm1" \
-    "cvtps2dq xmm2, xmm2" \
-    "cvtps2dq xmm3, xmm3" \
-    "packssdw xmm0, xmm1" \
-    "packssdw xmm2, xmm3" \
-    "pminsw   xmm0, xmm5" \
-    "pmaxsw   xmm0, xmm6" \
-    "pminsw   xmm2, xmm5" \
-    "pmaxsw   xmm2, xmm6" \
-    "packsswb xmm0, xmm2" \
-    "movdqu   [edx], xmm0" \
-    "movups   xmm0, [eax+64]" \
-    "movups   xmm1, [eax+80]" \
-    "movups   xmm2, [eax+96]" \
-    "movups   xmm3, [eax+112]" \
-    "mulps    xmm0, xmm4" \
-    "mulps    xmm1, xmm4" \
-    "mulps    xmm2, xmm4" \
-    "mulps    xmm3, xmm4" \
-    "cvtps2dq xmm0, xmm0" \
-    "cvtps2dq xmm1, xmm1" \
-    "cvtps2dq xmm2, xmm2" \
-    "cvtps2dq xmm3, xmm3" \
-    "packssdw xmm0, xmm1" \
-    "packssdw xmm2, xmm3" \
-    "pminsw   xmm0, xmm5" \
-    "pmaxsw   xmm0, xmm6" \
-    "pminsw   xmm2, xmm5" \
-    "pmaxsw   xmm2, xmm6" \
-    "packsswb xmm0, xmm2" \
-    "movdqu   [edx+16], xmm0" \
-    __parm [__eax] [__edx] [__ecx] \
-    __modify [8087]
-
+#define LZ_HAVE_Q8R_SSE  1
 #define LZ_HAVE_Q8R_SIMD 1
-#define lz_q8round32_simd lz_q8round32_sse2_asm
-/* The gcc SSE1-tier branch that used to sit here (lz_q8round32_sse,
-   LZ_HAVE_Q8R_SSE) moved to src/ops_mmx.c / src/ops_mmx.h: cvtps2pi
+#else
+/* lz_q8round32_sse's body and the LZ_HAVE_Q8R_SSE definition for this
+   branch live in src/ops_mmx_sse.c / src/ops_mmx.h: cvtps2pi
    writes %mm registers, so it belongs in the one translation unit built
    with -mmmx. ops_mmx.h is included near the top of ops.c and defines
-   LZ_HAVE_Q8R_SSE there when the MMX tier is in this build. */
-#endif
-/* lz_q8round32_simd's SSE2 body and the LZ_HAVE_Q8R_SIMD definition for
-   this branch now live in src/ops_sse2.c / src/ops_sse2.h: it writes
+   LZ_HAVE_Q8R_SSE there when the MMX tier is in this build.
+
+   lz_q8round32_simd's SSE2 body and the LZ_HAVE_Q8R_SIMD definition for
+   this branch live in src/ops_sse2.c / src/ops_sse2.h: it writes
    %xmm registers, so it belongs in the translation unit built with
    -msse2. ops_sse2.h is included near the top of ops.c. */
-
-#if defined(__WATCOMC__)
-#define lz_q8round32_sse lz_q8round32_sse_asm
 #endif

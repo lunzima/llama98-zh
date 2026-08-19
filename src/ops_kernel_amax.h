@@ -31,102 +31,24 @@
    comparison between them, which none of these do. SSE1 therefore offers
    nothing over MMX for this operator and gets no tier. */
 
+/* lz_amax32_mmx_asm's #pragma aux body and its lz_amax32_mmx_w wrapper
+   (task #30, 4/N: the mechanical low-risk sweep) moved to
+   src/ops_mmx.c - same -Nr/-Ns ceiling reason as every kernel this
+   task has already moved. Zero call-shape change either way: the
+   wrapper already sat between the pragma and the dispatch table below
+   (a #pragma aux body cannot have its address taken, so a table entry
+   needs a real function to point at), and that indirect call happens
+   once per operator invocation regardless of which TU the wrapper's
+   body lives in - the reason this whole family was classified low-risk
+   from the start. LZ_HAVE_AMAX_MMX stays defined here: it is Watcom's
+   own "MMX exists in this build" flag, unconditional the same way
+   -D__MMX__=1 always is.
+
+   lz_amax32_sse2_asm / lz_amax32_sse2_w: same story, moved to
+   src/ops_sse2.c. LZ_HAVE_AMAX_SSE2 stays defined here too. */
 #if defined(__WATCOMC__)
-
-extern unsigned lz_amax32_mmx_asm(const float *x, int n);
-/* Two lanes of uint32 in one MMX register. The mask is built in-register
-   (pcmpeqd then psrld 1) rather than loaded, so the routine touches no
-   memory but its input. Leaves MMX state dirty - the caller emits one
-   emms after the group loop, never the kernel (rule 6 item 6). */
-#pragma aux lz_amax32_mmx_asm =         \
-    "pxor     mm0, mm0"                 \
-    "pcmpeqd  mm3, mm3"                 \
-    "psrld    mm3, 1"                   \
-    "shr      edx, 1"                   \
-    "jz       L2"                       \
-    "L1:"                               \
-    "movq     mm1, [eax]"               \
-    "pand     mm1, mm3"                 \
-    "movq     mm2, mm1"                 \
-    "pcmpgtd  mm2, mm0"                 \
-    "pand     mm1, mm2"                 \
-    "pandn    mm2, mm0"                 \
-    "por      mm1, mm2"                 \
-    "movq     mm0, mm1"                 \
-    "add      eax, 8"                   \
-    "dec      edx"                      \
-    "jnz      L1"                       \
-    "L2:"                               \
-    "movq     mm1, mm0"                 \
-    "psrlq    mm1, 32"                  \
-    "movq     mm2, mm0"                 \
-    "pcmpgtd  mm2, mm1"                 \
-    "pand     mm0, mm2"                 \
-    "pandn    mm2, mm1"                 \
-    "por      mm0, mm2"                 \
-    "movd     eax, mm0"                 \
-    parm [eax] [edx]                    \
-    value [eax]                         \
-    modify [eax edx 8087];
-#define LZ_HAVE_AMAX_MMX 1
-
-extern unsigned lz_amax32_sse2_asm(const float *x, int n);
-/* Four lanes. The horizontal fold is two shuffle-and-compare rounds -
-   pshufd is SSE2, so no MMX register is touched and no emms is owed. */
-#pragma aux lz_amax32_sse2_asm =        \
-    ".686"                              \
-    "pxor     xmm0, xmm0"               \
-    "pcmpeqd  xmm3, xmm3"               \
-    "psrld    xmm3, 1"                  \
-    "shr      edx, 2"                   \
-    "jz       S2"                       \
-    "S1:"                               \
-    "movups   xmm1, [eax]"              \
-    "pand     xmm1, xmm3"               \
-    "movdqa   xmm2, xmm1"               \
-    "pcmpgtd  xmm2, xmm0"               \
-    "pand     xmm1, xmm2"               \
-    "pandn    xmm2, xmm0"               \
-    "por      xmm1, xmm2"               \
-    "movdqa   xmm0, xmm1"               \
-    "add      eax, 16"                  \
-    "dec      edx"                      \
-    "jnz      S1"                       \
-    "S2:"                               \
-    "pshufd   xmm1, xmm0, 0x4E"         \
-    "movdqa   xmm2, xmm0"               \
-    "pcmpgtd  xmm2, xmm1"               \
-    "pand     xmm0, xmm2"               \
-    "pandn    xmm2, xmm1"               \
-    "por      xmm0, xmm2"               \
-    "pshufd   xmm1, xmm0, 0xB1"         \
-    "movdqa   xmm2, xmm0"               \
-    "pcmpgtd  xmm2, xmm1"               \
-    "pand     xmm0, xmm2"               \
-    "pandn    xmm2, xmm1"               \
-    "por      xmm0, xmm2"               \
-    "movd     eax, xmm0"                \
-    parm [eax] [edx]                    \
-    value [eax]                         \
-    modify [eax edx];
+#define LZ_HAVE_AMAX_MMX  1
 #define LZ_HAVE_AMAX_SSE2 1
-
-/* Thin wrappers so the dispatch table can hold these.
- *
- * A #pragma aux body is emitted at each CALL SITE; there is no function
- * to point at, and taking its address is an undefined reference at link
- * - which is exactly what happened the first time these went into a
- * table. Every row_*_asm in ops.c has the same shape for the same
- * reason. The wrapper is the only caller, so the asm is still inlined
- * once and the indirect call is one per operator invocation, not one per
- * element. */
-static unsigned lz_amax32_mmx_w(const float *x, int n) {
-    return lz_amax32_mmx_asm(x, n);
-}
-static unsigned lz_amax32_sse2_w(const float *x, int n) {
-    return lz_amax32_sse2_asm(x, n);
-}
-
 #else   /* gcc: intrinsics */
 
 /* lz_amax32_mmx's body and the LZ_HAVE_AMAX_MMX definition for this

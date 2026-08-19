@@ -32,116 +32,17 @@
    unexplained empty cell and a cell that cannot differ look identical
    from outside. */
 
+/* lz_rmsnorm_out_sse_asm / lz_vmax_sse_asm / lz_vscale_sse_asm's
+   #pragma aux bodies and their _w wrappers (task #30, 4/N: the
+   mechanical low-risk sweep) moved to src/ops_mmx_sse.c - genuine SSE1
+   on xmm, no MMX register touched by any of the three (no `8087` in
+   any __modify list), so they belong with the other true-SSE1 cell
+   (lz_p2_split32_sse_asm), not with the MMX file's -march=i586 floor.
+   Zero call-shape change: the _w wrappers already sat between the
+   pragmas and these three dispatch tables before the move, for the
+   same reason ops_kernel_amax.h's did. */
 #if defined(__WATCOMC__)
-
-extern void lz_rmsnorm_out_sse_asm(float *o, const float *x, const float *w,
-                                   int n4, const float *k2);
-/* n4 is the number of 4-float blocks, not elements: the caller owns the
-   tail. Unaligned loads throughout - o, x and w come from xcalloc and
-   from tensor slices, and 16-byte alignment is not something this engine
-   can promise for any of them.
- *
- * k2 is {inv, 1.0f}. The constant is PASSED rather than materialized in
- * register, because every register recipe for 1.0f (pcmpeqd then a shift
- * pair) needs an SSE2 integer instruction on XMM, and this routine is
- * meant to be SSE1. Two loads at entry is the price of the cell being
- * genuinely SSE1 rather than SSE2 wearing its name.
- *
- * esi, not ebp: ebp is the frame pointer and Watcom rejects it outright
- * with "Illegal register modified". */
-#pragma aux lz_rmsnorm_out_sse_asm =    \
-    ".686"                              \
-    "movss    xmm7, [esi]"              \
-    "shufps   xmm7, xmm7, 0"            \
-    "movss    xmm6, [esi+4]"            \
-    "shufps   xmm6, xmm6, 0"            \
-    "test     ecx, ecx"                 \
-    "jz       N2"                       \
-    "N1:"                               \
-    "movups   xmm0, [edx]"              \
-    "mulps    xmm0, xmm7"               \
-    "movups   xmm1, [ebx]"              \
-    "addps    xmm1, xmm6"               \
-    "mulps    xmm0, xmm1"               \
-    "movups   [eax], xmm0"              \
-    "add      eax, 16"                  \
-    "add      edx, 16"                  \
-    "add      ebx, 16"                  \
-    "dec      ecx"                      \
-    "jnz      N1"                       \
-    "N2:"                               \
-    parm [eax] [edx] [ebx] [ecx] [esi]  \
-    modify [eax ebx ecx edx esi];
-
-extern void lz_vmax_sse_asm(const float *x, int n4, float *pmax);
-/* Softmax's maximum scan. maxps is exact and, with no NaN present, its
-   order does not matter - so this produces the same float the scalar
-   `if (x[i] > mx) mx = x[i]` loop would. NaN would break that (maxps
-   returns its second operand when unordered, the scalar compare keeps
-   the first); the engine's masked-out positions are -1e30f rather than
-   NaN precisely so the arithmetic stays ordered.
- *
- * IN AND OUT THROUGH pmax, rather than a float return. `value [8087]`
- * means the result is on the x87 stack, and this routine's result is in
- * xmm0 - declaring one and producing the other returns whatever was on
- * the stack. It cost a cross-compiler DIFFER on --kernel sse2 and
- * nothing else, which is the only place that mistake is visible. */
-#pragma aux lz_vmax_sse_asm =           \
-    ".686"                              \
-    "movss    xmm0, [ebx]"              \
-    "shufps   xmm0, xmm0, 0"            \
-    "test     edx, edx"                 \
-    "jz       M2"                       \
-    "M1:"                               \
-    "movups   xmm1, [eax]"              \
-    "maxps    xmm0, xmm1"               \
-    "add      eax, 16"                  \
-    "dec      edx"                      \
-    "jnz      M1"                       \
-    "M2:"                               \
-    "movhlps  xmm1, xmm0"               \
-    "maxps    xmm0, xmm1"               \
-    "movaps   xmm1, xmm0"               \
-    "shufps   xmm1, xmm1, 1"            \
-    "maxps    xmm0, xmm1"               \
-    "movss    [ebx], xmm0"              \
-    parm [eax] [edx] [ebx]              \
-    modify [eax edx];
-
-extern void lz_vscale_sse_asm(float *x, int n4, const float *pk);
-/* Softmax's normalize loop: x[i] *= inv, element-wise. */
-#pragma aux lz_vscale_sse_asm =         \
-    ".686"                              \
-    "movss    xmm7, [ebx]"              \
-    "shufps   xmm7, xmm7, 0"            \
-    "test     edx, edx"                 \
-    "jz       V2"                       \
-    "V1:"                               \
-    "movups   xmm0, [eax]"              \
-    "mulps    xmm0, xmm7"               \
-    "movups   [eax], xmm0"              \
-    "add      eax, 16"                  \
-    "dec      edx"                      \
-    "jnz      V1"                       \
-    "V2:"                               \
-    parm [eax] [edx] [ebx]              \
-    modify [eax edx];
 #define LZ_HAVE_NORM_SSE 1
-
-/* Wrappers, for the same reason ops_kernel_amax.h gives: a #pragma aux
-   body is emitted at the call site and has no address to put in a
-   table. */
-static void lz_rmsnorm_out_sse_w(float *o, const float *x, const float *w,
-                                 int n4, const float *k2) {
-    lz_rmsnorm_out_sse_asm(o, x, w, n4, k2);
-}
-static void lz_vmax_sse_w(const float *x, int n4, float *pmax) {
-    lz_vmax_sse_asm(x, n4, pmax);
-}
-static void lz_vscale_sse_w(float *x, int n4, const float *pk) {
-    lz_vscale_sse_asm(x, n4, pk);
-}
-
 #else   /* gcc: intrinsics */
 
 #if defined(__SSE__) || defined(__SSE2__)
