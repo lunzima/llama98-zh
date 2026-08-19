@@ -688,7 +688,7 @@ int lz_sample_ex(LZSampler *s, float *logits, LZInspect *ins,
      * endpoint rejects them with a 400, but the DLL and CLI are callers
      * as well and this is the one place all three pass through.
      */
-    if (!(temp > LZ_TEMP_FLOOR)) {
+    if (!(temp > LZ_TEMP_FLOOR_F)) {
         int idx = sample_argmax(logits, n);
         if (ins) inspect_fill_single(ins, idx);
         return idx;

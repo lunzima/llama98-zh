@@ -2080,7 +2080,7 @@ int lz_generate_resume_ex(const LZModel *m, LZTokenizer *t, LZRunState *s,
             {
                 float eff_temp = lz_sample_eff_temp(&sampler.p,
                                                     tr.in_think);
-                if (eff_temp > LZ_TEMP_FLOOR) {
+                if (eff_temp > LZ_TEMP_FLOOR_F) {
                     float saved = sampler.p.temperature;
                     sampler.p.temperature = eff_temp;
                     n_emit = lz_spec_round_temp(m, s, anchor, anchor_pos, round_k,

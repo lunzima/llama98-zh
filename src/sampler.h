@@ -127,6 +127,14 @@
    below the smallest temperature anyone configures and one below vLLM's
    own clamp (_MAX_TEMP = 1e-2, sampling_params.py). */
 #define LZ_TEMP_FLOOR 1e-3f
+/* 1e-3f is not exactly representable in float32, so an inline
+   `> LZ_TEMP_FLOOR` comparison lets gcc's x87 excess-precision folding
+   carry the constant at extended precision (fldt) independently in
+   every TU that compares against it - see ops.c's LZ_EXP_LOG2E32
+   comment for the mechanism. Each includer gets its own private
+   (internal-linkage) `static const float` copy, which forces the round
+   to true float32 once per TU instead. */
+static const float LZ_TEMP_FLOOR_F = LZ_TEMP_FLOOR;
 
 typedef struct {
     float prob;

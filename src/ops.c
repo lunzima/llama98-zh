@@ -621,7 +621,16 @@ static int q8_round(float qv) {
 
    The speed gain is small (~470 calls per token, saving ~2 us); the
    real reason is unification: once the engine carries all
-   transcendental functions, the gcc and Watcom builds are bit-identical. */
+   transcendental functions, the gcc and Watcom builds are bit-identical
+   for THIS function - measured (task #25), 0/2592 across a swept
+   exponent x mantissa-prefix grid. It holds here because every constant
+   this function touches (0.5f, 1.5f, the hex integer 0x5f375a86u) is
+   exactly representable in float32, so gcc's x87 excess-precision
+   constant folding (see lz_exp's LZ_EXP_LOG2E32 below) has nothing to
+   round differently in the first place. It does NOT hold for lz_exp:
+   1.44269504f is not exactly representable, gcc keeps the extra bits,
+   and the two builds' multiplies disagree - see lz_exp's own comment
+   and tests/test_excess_precision.py. */
 float lz_rsqrt(float x) {
 #if defined(LZ_EXACT_MATH)
     return 1.0f / (float)sqrt((double)x);
@@ -666,6 +675,25 @@ float lz_exp(float x) {
         1.834008086f, 1.874167634f, 1.915206561f, 1.957144124f,
     };
 
+    /* `static const float`, not inline literals: under -std=c99 on x87,
+       gcc folds an inline float-literal expression and keeps it at
+       extended (~64-bit significand) precision in .rodata, loaded via
+       fldt - carrying ~40 more significand bits than the `f` suffix
+       promised. A `static const float` object's storage type forces
+       gcc to round the initializer to true float32 (flds/fmuls, the
+       same instruction shape Watcom already uses), because the object
+       itself must be representable in 4 bytes. Measured: eliminates
+       fldt for both constants below; tests/test_excess_precision.py
+       is the gate. */
+    static const float LZ_EXP_LOG2E32 = 1.44269504f * 32.0f;  /* log2(e)*32 */
+    static const float LZ_EXP_C2 = 0.242844437f;
+    static const float LZ_EXP_C1 = 0.207425515f;
+    static const float LZ_EXP_C0 = 0.549730133f;
+    /* -87.3f is not exactly representable in float32, so it needs the
+       same treatment as the constants above; 88.0f is an exact integer
+       and needs none (gcc emits a direct memory compare for it either
+       way). */
+    static const float LZ_EXP_LO = -87.3f;
 
     /* Schraudolph-style: add x·log2e·2^23 directly into the float's
        exponent field; one construction yields "2^n x linearly
@@ -701,9 +729,9 @@ float lz_exp(float x) {
     LZ_FCX(LZ_FC_EXP, 6, 6, 0, 1, 0);
 
     /* Overflow/underflow guard: beyond this range the constructed bit
-       pattern is meaningless */
-    if (x > 88.0f)   return FLT_MAX;
-    if (x < -87.3f)  return 0.0f;
+       pattern is meaningless. */
+    if (x > 88.0f)     return FLT_MAX;
+    if (x < LZ_EXP_LO) return 0.0f;
 
     /* ALL FLOAT, NO DOUBLE. A double magic (1.5x2^52) cannot be used:
        it would stuff x·log2e·2^23 in one shot, extracting exponent,
@@ -720,7 +748,7 @@ float lz_exp(float x) {
        float magic's 2^22 limit. The two extra int->float conversions
        are fild, not float->int; they do not trigger control-word
        rewrites. */
-    y32 = x * (1.44269504f * 32.0f);          /* log2(e)·32 */
+    y32 = x * LZ_EXP_LOG2E32;
     u.f = y32 - 0.5f + 12582912.0f;           /* 1.5*2^23; the -0.5 turns round-half-away into floor */
     t = (u.i & 0x007FFFFF) - 0x00400000;      /* floor(y·32) */
     n = t >> 5;                               /* arithmetic shift = floor(t/32) */
@@ -732,7 +760,7 @@ float lz_exp(float x) {
        wide; 2nd order reaches 5e-6 - 57x better than a
        "4th-order over the whole [1,2)" fit at 2.85e-4, and 5% faster
        (Watcom measured 9.63 vs 10.15 ns). */
-    c = (0.242844437f * w + 0.207425515f) * w + 0.549730133f;
+    c = (LZ_EXP_C2 * w + LZ_EXP_C1) * w + LZ_EXP_C0;
     return p2n.f * (LZ_EXP_TAB32[idx] * c);
 #else
     return (float)exp((double)x);
@@ -872,6 +900,28 @@ static uint32_t q8_amax(const float *grp, int gs) {
     return am;
 }
 
+/* LZ_Q8_MIN_SCALE (ops.h) stays a `#define` - the A/B control ops.h
+   documents (-DLZ_Q8_MIN_SCALE=0.0f) needs it to be one. This object is
+   what every use site in this file reads instead of the bare macro:
+   1.0e-30f is not exactly representable in float32, so gcc's x87
+   excess-precision folding would otherwise carry it at extended
+   precision (fldt) independently at each of the four sites below - see
+   LZ_EXP_LOG2E32's comment in lz_exp (this file) for the mechanism.
+   A `static const float` forces the round once, here. */
+static const float LZ_Q8_MIN_SCALE_F = LZ_Q8_MIN_SCALE;
+
+/* 1/127 is not exactly representable in float32 either - same
+   excess-precision risk as LZ_Q8_MIN_SCALE_F above, and this is the
+   constant rule 6 item 1's bit-exact contract is about
+   (tests/test_ops.c: scale must equal absmax*(1/127) bit-for-bit). */
+static const float LZ_Q8_INV127 = 1.0f / 127.0f;
+
+/* 1/32767 (the Q15 int16 reciprocal), same treatment, used across
+   lz_attn_wsum_q8, gdn_build_table and gdn_p2_fixed_rows further down -
+   file scope rather than per-function so all three share the one
+   rounded constant instead of each re-folding its own inline copy. */
+static const float LZ_Q15_INV = 1.0f / 32767.0f;
+
 static int q8_group_scale(const float *grp, int gs, float *sg, float *inv) {
     union { float f; uint32_t u; } bit;
     uint32_t am = q8_amax(grp, gs);
@@ -880,10 +930,10 @@ static int q8_group_scale(const float *grp, int gs, float *sg, float *inv) {
     bit.u = am;
     amax = bit.f;
     if (amax > 0.0f) {
-        *sg = amax * (1.0f / 127.0f);
+        *sg = amax * LZ_Q8_INV127;
         *inv = 127.0f / amax;
         fast = (*inv <= FLT_MAX);
-        if (*sg < LZ_Q8_MIN_SCALE) {
+        if (*sg < LZ_Q8_MIN_SCALE_F) {
             *sg = 1.0f;
             *inv = 0.0f;
             fast = 1;
@@ -3694,6 +3744,10 @@ static const float kv4_mid[15] = {
 };
 
 void lz_kv4_quantize(const float *x, int n, unsigned char *out, float *scale) {
+    /* Not exactly representable in float32 - see LZ_EXP_LOG2E32's
+       comment in lz_exp for why an inline literal here would risk
+       gcc's x87 excess-precision folding (fldt). */
+    static const float LZ_KV4_EPS = 1e-20f;
     float n2 = 0.0f, s, inv;
     int i;
 
@@ -3704,7 +3758,7 @@ void lz_kv4_quantize(const float *x, int n, unsigned char *out, float *scale) {
        FDIV rather than one strength-reducing it. */
     s = n2 / (float)sqrt((double)n);
     if (scale) *scale = s;
-    inv = (s > 1e-20f) ? (1.0f / s) : 0.0f;
+    inv = (s > LZ_KV4_EPS) ? (1.0f / s) : 0.0f;
 
     for (i = 0; i < n; i += 2) {
         float z0 = x[i] * inv, z1 = x[i + 1] * inv;
@@ -4135,7 +4189,7 @@ void lz_attn_wsum_q8(float *out, const float *att, int hd,
                 /* cmax subnormal: 32767/cmax overflows to inf and (int)inf
                    is undefined behavior. Same guard lz_quantize_q8 carries. */
                 for (t = 0; t < T; t++) {
-                    int qi = q8_round(cbuf[t] / (cmax * (1.0f / 32767.0f)));
+                    int qi = q8_round(cbuf[t] / (cmax * LZ_Q15_INV));
                     if (qi >  32767) qi =  32767;
                     if (qi < -32767) qi = -32767;
                     cq[t] = (int16_t)qi;
@@ -4185,7 +4239,7 @@ void lz_attn_wsum_q8(float *out, const float *att, int hd,
             for (d = 0; d < 32; d++) accf[d] += lz_i32f(acc32[d]);
         }
         {
-            float sscale = cmax * (1.0f / 32767.0f);
+            float sscale = cmax * LZ_Q15_INV;
             for (d = 0; d < 32; d++) out[g * 32 + d] = accf[d] * sscale;
         }
     }
@@ -4364,14 +4418,14 @@ static void gdn_build_table(const float *ss, const float *q, const float *k,
        by Watcom and left as a divide by gcc - 1 ULP apart. Write the
        multiply explicitly. ik/iq are constant-over-variable, a real
        division on both sides, so they are fine as written. */
-    tb->su = (amk > 0.0f) ? amk * (1.0f / 32767.0f) : (1.0f / 32767.0f);
-    tb->sw = (amq > 0.0f) ? amq * (1.0f / 32767.0f) : (1.0f / 32767.0f);
+    tb->su = (amk > 0.0f) ? amk * LZ_Q15_INV : LZ_Q15_INV;
+    tb->sw = (amq > 0.0f) ? amq * LZ_Q15_INV : LZ_Q15_INV;
     ik = (amk > 0.0f) ? 32767.0f / amk : 0.0f;
     iq = (amq > 0.0f) ? 32767.0f / amq : 0.0f;
     tb->tail_cu = 0; tb->tail_cw = 0;
 #if LZ_GDN_FIXED >= 2
-    tb->su2 = tb->su * (1.0f / 32767.0f);
-    tb->sw2 = tb->sw * (1.0f / 32767.0f);
+    tb->su2 = tb->su * LZ_Q15_INV;
+    tb->sw2 = tb->sw * LZ_Q15_INV;
     tb->tail2_cu = 0; tb->tail2_cw = 0;
 #endif
 
@@ -5057,7 +5111,7 @@ static int p2_group_norm(float c1, float c2, int16_t *mul4, float *sacc) {
        operators disagreeing about where zero starts would disagree about
        results. A group with cmax below 1e-30 contributes |term| <=
        3e-26 next to activations of order 1. */
-    if (!(cmax >= LZ_Q8_MIN_SCALE)) {
+    if (!(cmax >= LZ_Q8_MIN_SCALE_F)) {
         mul4[0] = mul4[1] = mul4[2] = mul4[3] = 0;
         *sacc = 0.0f;
         return 0;
@@ -5107,7 +5161,7 @@ static int p2_group_scale(float sacc, int sh, float *os) {
     float s_new;
     if (!(sacc > 0.0f)) { *os = 1.0f; return 0; }
     s_new = sacc * pow2f(sh) * LZ_GDN_LO_SCALE;
-    if (!(s_new >= LZ_Q8_MIN_SCALE)) { *os = 1.0f; return 0; }
+    if (!(s_new >= LZ_Q8_MIN_SCALE_F)) { *os = 1.0f; return 0; }
     *os = s_new;
     return 1;
 }
@@ -5492,12 +5546,12 @@ static void gdn_p2_fixed_rows(const int8_t *sq_in, int8_t *sq_out,
            numerically zero, and letting its scale reach the subnormal
            range is how x87 and SSE stop agreeing (ops.h's
            LZ_Q8_MIN_SCALE has the mechanism). */
-        if (!(amd * (1.0f / 32767.0f) >= LZ_Q8_MIN_SCALE)) {
+        if (!(amd * LZ_Q15_INV >= LZ_Q8_MIN_SCALE_F)) {
             s_dg[gg] = 1.0f;
             for (vv = gg * 32; vv < gg * 32 + 32; vv++) dq[vv] = 0;
             continue;
         }
-        s_dg[gg] = amd * (1.0f / 32767.0f);
+        s_dg[gg] = amd * LZ_Q15_INV;
         inv_d = 32767.0f / amd;
         for (vv = gg * 32; vv < gg * 32 + 32; vv++) {
             int t = q8_round(delta[vv] * inv_d);
@@ -5916,6 +5970,13 @@ void lz_moe_route(const float *logits, const float *bias, int n_experts,
     static float score[LZ_MAX_EXPERTS];
     static float tscore[LZ_MAX_EXPERTS];
     static float key[LZ_MAX_EXPERTS];
+    /* Sentinel for "already selected" in the top-k scan below - far
+       enough from any real score/bias that excess precision could not
+       change which elements it excludes, but not exactly representable
+       in float32 either, so it still gets the same treatment as every
+       other constant on this file's list (LZ_EXP_LOG2E32's comment in
+       lz_exp has the mechanism). */
+    static const float LZ_MOE_SENTINEL = -1e30f;
     int i, t;
     int tempered = (tau != 1.0f);
     float wsum = 0.0f;
@@ -5991,14 +6052,14 @@ void lz_moe_route(const float *logits, const float *bias, int n_experts,
         int best = -1;
         float bk = 0.0f;
         for (i = 0; i < n_experts; i++) {
-            if (key[i] <= -1e30f) continue;      /* already selected */
+            if (key[i] <= LZ_MOE_SENTINEL) continue;      /* already selected */
             if (best < 0 || key[i] > bk) { best = i; bk = key[i]; }
         }
         if (best < 0) break;
         idx_out[t] = best;
         w_out[t] = tempered ? tscore[best] : score[best];
         wsum += w_out[t];
-        key[best] = -1e30f;                      /* remove from further rounds */
+        key[best] = LZ_MOE_SENTINEL;              /* remove from further rounds */
     }
     /* Every selected weight underflowed to zero - lz_exp's clamp, not a
        gradual loss of precision. Only reachable in the tempered sigmoid

@@ -306,6 +306,13 @@ float lz_moe_tau = 1.0f;
 int lz_prof_enable = 0;
 double lz_prof_us[LZ_PROF_N];
 
+/* 1000.0 (ms -> us) is exact in any float width, so this cannot change
+   what these debug counters measure - but `static const double`, not an
+   inline literal, keeps every site below on the same footing as
+   ops.c's LZ_EXP_LOG2E32 (that comment has the mechanism) rather than
+   leaving an unexplained exception in tests/test_excess_precision.py. */
+static const double LZ_US_SCALE = 1000.0;
+
 /* The start time is a LOCAL, not a file-static. A file-static would be
    shared across nested phases: the recurrence timer - which nests inside
    the linear one - would overwrite the outer start, so `linear` would
@@ -314,7 +321,7 @@ double lz_prof_us[LZ_PROF_N];
    the inner one also listed on its own. */
 #define LZ_PROF_BEG(v) double v = lz_prof_enable ? lz_time_ms() : 0.0
 #define LZ_PROF_END(v, slot) do { if (lz_prof_enable) \
-    lz_prof_us[slot] += (lz_time_ms() - (v)) * 1000.0; } while (0)
+    lz_prof_us[slot] += (lz_time_ms() - (v)) * LZ_US_SCALE; } while (0)
 
 static int kv_slot(const LZRunState *s, int t) {
     if (!s->kv_ring) return t;
@@ -2378,7 +2385,7 @@ float *lz_mtp_draft_step(const LZModel *m, LZRunState *s, int next_token, int po
     if (next_token < 0 || next_token >= c->vocab_size) return NULL;
     if (pos < 0 || pos >= s->seq_len) return NULL;
 
-    t_us0 = lz_time_ms() * 1000.0;
+    t_us0 = lz_time_ms() * LZ_US_SCALE;
     fpu = lz_fpu_float_begin();
 
     /* fc input: concat(pre_fc_norm_embedding(next_token's embedding),
@@ -2436,7 +2443,7 @@ float *lz_mtp_draft_step(const LZModel *m, LZRunState *s, int next_token, int po
                 &m->embed_tokens, dim, c->vocab_size);
 
     lz_fpu_float_end(fpu);
-    lz_debug_us_draft += (long long)(lz_time_ms() * 1000.0 - t_us0);
+    lz_debug_us_draft += (long long)(lz_time_ms() * LZ_US_SCALE - t_us0);
     return s->mtp_draft_logits;
 }
 
@@ -2718,10 +2725,10 @@ float *lz_forward_capture(const LZModel *m, LZRunState *s, int token, int pos) {
     /* s->mtp_chain is unallocated (NULL) when m->mtp is NULL - guard
        rather than let forward_chunk memcpy into it, matching this
        function's own contract ("a no-op ... when m->mtp is NULL"). */
-    double t_us0 = lz_time_ms() * 1000.0;      /* debug probe, see part 4 */
+    double t_us0 = lz_time_ms() * LZ_US_SCALE;  /* debug probe, see part 4 */
     float *r = forward_chunk(m, s, &token, 1, pos,
                              m->mtp ? s->mtp_chain : NULL, 0, NULL, 0);
-    lz_debug_us_capture += (long long)(lz_time_ms() * 1000.0 - t_us0);
+    lz_debug_us_capture += (long long)(lz_time_ms() * LZ_US_SCALE - t_us0);
     lz_debug_n_capture++;
     return r;
 }
@@ -2754,7 +2761,7 @@ int lz_forward_verify(const LZModel *m, LZRunState *s,
                       const int *tokens, int n, int pos0) {
     const LZModelConfig *c = &m->config;
     int cap, done = 0;
-    double t_us0 = lz_time_ms() * 1000.0;      /* debug probe, see part 4 */
+    double t_us0 = lz_time_ms() * LZ_US_SCALE;  /* debug probe, see part 4 */
 
     if (!tokens || n < 1 || !m->mtp) return 1;
     cap = s->nt_cap;
@@ -2782,7 +2789,7 @@ int lz_forward_verify(const LZModel *m, LZRunState *s,
             return 1;
         done += k;
     }
-    lz_debug_us_verify += (long long)(lz_time_ms() * 1000.0 - t_us0);
+    lz_debug_us_verify += (long long)(lz_time_ms() * LZ_US_SCALE - t_us0);
     return 0;
 }
 
@@ -2906,9 +2913,9 @@ int lz_mtp_prefill(const LZModel *m, LZRunState *s, const float *h_body_all,
    distinction lz_debug_n_catchup exists to preserve. */
 int lz_mtp_catchup(const LZModel *m, LZRunState *s, const float *h_body_all,
                    const int *next_tokens, int n, int pos0) {
-    double t_us0 = lz_time_ms() * 1000.0;
+    double t_us0 = lz_time_ms() * LZ_US_SCALE;
     int r = lz_mtp_prefill(m, s, h_body_all, next_tokens, n, pos0);
-    lz_debug_us_catchup += (long long)(lz_time_ms() * 1000.0 - t_us0);
+    lz_debug_us_catchup += (long long)(lz_time_ms() * LZ_US_SCALE - t_us0);
     lz_debug_n_catchup++;
     return r;
 }
