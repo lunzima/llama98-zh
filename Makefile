@@ -476,12 +476,20 @@ watcom-gui:
 # vanish. DOS is left out of `check` because it needs the extender stub
 # and is a separate delivery decision; run `make watcom-dos` explicitly.
 # dedupe-gate (task #31) runs first and needs no build: a source-text
-# invariant caught before either compiler spends time on it.
-check: dedupe-gate watcom-cli watcom-gui watcom-dll
+# invariant caught before either compiler spends time on it. mm-alias-
+# gate (task #30/#32) runs second, before the real link targets: it
+# compiles its own throwaway ops_sse2.c objects (both toolchains, both
+# LZ_SSE2_GROUP settings) rather than depending on watcom-cli having
+# already produced one, so it does not need to come after it.
+check: dedupe-gate mm-alias-gate watcom-cli watcom-gui watcom-dll
 
 .PHONY: dedupe-gate
 dedupe-gate:
 	@bash build/dedupe_gate.sh
+
+.PHONY: mm-alias-gate
+mm-alias-gate:
+	@bash build/mm_alias_gate.sh
 
 # Optional single-file DOS packaging (D9). SB.EXE is 16-bit and cannot run
 # on 64-bit Windows; the bind step must run inside DOSBox-X.
