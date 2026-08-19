@@ -20,11 +20,25 @@ when built by Open Watcom for the same 32-bit x87 target, and correct
 when built by the same gcc at `-m64` (SSE2 scalar float); those two agree
 with each other bit-for-bit.
 
-The x87 status word at the fault has **SF (stack fault) set and C1
-clear** — the hardware's encoding for a **stack underflow**, i.e. a read
-from a register the tag word marks empty. Seven of the eight registers
-are occupied at that moment, two of them holding loop-invariant float
-*constants* that the compiler has hoisted there.
+The x87 status word at the fault has SF (stack fault) set and C1 clear.
+**This document's earlier reading of that as "underflow" is retracted**:
+SF is sticky, so a status-word read taken after the fault cannot
+establish which fault set it first. The instruction trace in §4 shows
+the actual first fault directly - an `flds` executing while the tag
+word already reads all eight registers occupied - which is an
+**overflow**, a push onto a full stack, not a read from an empty one.
+Seven of the eight registers are occupied at that moment, two of them
+holding loop-invariant float *constants* that the compiler has hoisted
+there; the eighth fills and faults on the next push.
+
+**The root cause is now known and is outside the scope this document
+investigated**: it is `gcc`'s own use of the MMX register file (`%mm0`-
+`%mm7`, which alias the x87 stack) for an unrelated 8-byte block store
+when `-mmmx` is on, with no compensating `emms` - not a register-stack
+over-allocation by the reg-stack pass. See `src/ops_mmx.h` in the
+engine tree. Everything below this point is the original investigation,
+kept for its evidence chain, with the specific claims it superseded
+retracted in place.
 
 Reproduced on gcc 13.3.0 and 14.2.0. gcc 16.1 produces the same peak
 register pressure in the same function by static count (not run — no
@@ -86,10 +100,14 @@ fstat 0x0061                      <- IE, PE, SF set; C1 clear
 ftag  0xe015                      <- seven registers occupied, one empty
 ```
 
-**`SF` set with `C1` clear is underflow**, not overflow: the code read a
-register the tag word marks empty, rather than pushing a ninth value onto
-a full stack. This distinction was measured, not inferred; an earlier
-reading of this bug assumed overflow and was wrong.
+**Retracted: `SF` set with `C1` clear does not establish underflow here.**
+`SF` is sticky - a status-word snapshot taken after the fault reflects
+whatever fault last set it, not necessarily the first one, so this
+reading alone cannot distinguish overflow from underflow. The
+instruction-level trace is what settles it: the first fault is an
+`flds` executing while the tag word already reads all eight registers
+occupied (`0xa015`, "group loop" in the walk below) - a push onto a
+full stack. That is overflow, not underflow.
 
 `st3` and `st5` are the two things that make this look like a
 register-allocation decision rather than a stray push: they are
@@ -172,13 +190,19 @@ makes that computation produce the correct answer every time, and the
 whole run comes out numerically right. Given a clean stack the code is
 correct; something about which physical register gets read is wrong.
 
-**Not MMX residue.** This build does contain MMX kernels, and one of them
-runs unconditionally. But an MMX write sets the corresponding x87 tag to
-`00` (Valid) regardless of the bit pattern — the FPU's own value
-classification, which produces `01` (Zero) / `10` (Special) / `11`
-(Empty), is performed only by genuine x87 instructions. The observed tag
-words carry Zero and Special and **no Valid at all**. Separately, the tag
-word is bit-identical before and after the MMX kernel runs.
+**Retracted: "Not MMX residue."** It is MMX - the compiler's own, not
+the engine's kernels. The argument that follows was stronger than its
+evidence: it excluded raw MMX residue sitting in a register (an MMX
+write always sets tag `00`/Valid, and the observed tag words carry only
+Zero/Special, never Valid), and it excluded the one MMX kernel that
+runs unconditionally in this build (its own tag word is bit-identical
+before and after). Neither of those excludes MMX *starting* the fault
+and ordinary x87 instructions *reclassifying* the tag afterward - which
+is the actual mechanism: `gcc`, with `-mmmx` on, uses an MMX write for
+an 8-byte block store with no source-level MMX intrinsic anywhere near
+it, and issues no `emms`; the x87 instructions that run next reclassify
+that occupied-but-uninitialized slot's tag as Zero or Special as they
+touch it. See `src/ops_mmx.h` in the engine tree.
 
 **Not a push/pop count imbalance.** A static verifier was written that
 reads the emitted instructions directly — `objdump` text in, basic
@@ -237,35 +261,30 @@ The pattern is itself evidence: **displace one live value and the
 allocator hoists another into the slot.** Each attempt removes a real
 live value and the stack still fills.
 
-## 9. The question
+## 9. Retracted: "the question"
 
-Is a compiler entitled to keep seven x87 values — two of them
-loop-invariant constants — live across a call, on a target where the
-stack is eight deep and the callee needs some of it?
+This section asked whether a compiler is entitled to keep seven x87
+values live across a call, on the premise that the reg-stack pass was
+over-allocating a fixed hardware resource. **There is no reg-stack
+defect, and the question does not arise.** The seven live values (§4)
+are real, but the fault they precede is a push corrupted by an
+unrelated MMX write (§6), not a ninth value the reg-stack pass itself
+scheduled past capacity. The concrete question this document closed
+with - "which instruction reads the empty register, and which pass
+decided that register would be live there" - is answered: no
+instruction reads an empty register (§4's retraction), and no pass
+over-schedules the stack; an MMX write elsewhere in the same
+translation unit corrupts the tag word before the next x87 instruction
+touches it.
 
-If yes, then something in this source is doing something the compiler is
-permitted to interpret this way, and identifying it is the ask.
+## 10. What answered it
 
-If no, then the reg-stack pass is over-allocating a fixed hardware
-resource, and the diagnosis wanted is which decision does it and why the
-same pass gets the `-O0`/`-O1` and x86-64 cases right.
-
-Either way the concrete unanswered question is narrow: **which
-instruction reads the empty register, and which pass decided that
-register would be live there?**
-
-## 10. What would help
-
-- A way to see the reg-stack pass's decisions that does not perturb them.
-  `-fdump-rtl-all` does not change `.text` (verified by comparing the
-  extracted section with and without it), and its `*.stack` dump covers
-  the functions involved, but the dump prints both a per-block
-  `Input stack:`/`Output stack:` listing and a later
-  `Edge A->B: correcting stack to [...]` summary, and for one edge those
-  two disagree textually. Whether the edge correction overrides the
-  earlier per-block estimate (working as intended) or records a genuine
-  internal disagreement could not be settled from the dump alone.
-- An emulator or tracing approach that records x87 tag-word transitions
-  instruction by instruction without recompiling.
-- Confirmation or refutation from a fourth toolchain on the same target
-  shape: 32-bit, x87-only, no SSE.
+Not the directions this section originally proposed (a non-perturbing
+reg-stack pass tracer, a slot-identity tracker, a fourth toolchain) -
+the actual resolution came from outside this investigation entirely:
+splitting every gcc translation unit that touches the MMX register file
+out of the file that also runs this x87 code (`src/ops_mmx.c` in the
+engine tree; see `src/ops_mmx.h`) and confirming the symptom is gone.
+That the split alone fixes it, with no change to this function or its
+neighbors, is itself the evidence that the defect was never in the
+reg-stack pass's handling of this code.

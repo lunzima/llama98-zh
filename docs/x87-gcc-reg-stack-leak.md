@@ -1,10 +1,22 @@
 # x87 stack leak in gcc -O2 -m32 -mfpmath=387, reproduced in llama98
 
-Status: **ROOT CAUSE: gcc holds seven x87 values live across a call into an eight-slot stack. See "The mechanism, named". The workaround remains a workaround - no source fix is possible, the C is correct.** Worked
-around with a build flag (`-fno-rerun-cse-after-loop`, see
-`build/x87/build_engine.sh`); not fixed in source, because the trigger
-condition could not be reproduced in isolation (see "Why this is hard to
-reduce further" below).
+Status: **RETRACTED AND SUPERSEDED. The actual root cause is outside
+this document's scope: gcc's own use of the MMX register file (which
+aliases the x87 stack) for an unrelated 8-byte block store when `-mmmx`
+is on, with no compensating `emms` - not a register-allocation defect
+in the x87 reg-stack pass.** Fixed by moving every gcc translation unit
+that touches `%mm0`-`%mm7` out of the files that also run x87 code
+(`src/ops_mmx.c` in the engine tree, see `src/ops_mmx.h`); the
+`-fno-rerun-cse-after-loop` workaround this document previously
+recommended has been removed from `build/x87/build_engine.sh` and is
+confirmed unnecessary (the split alone produces correct output with the
+flag absent, both gcc and clang). "The mechanism, named" below is
+**superseded in its central claim** - there is no seven-values-live-
+across-a-call register-allocation defect - and is kept, like the
+struck-through section before it, because the evidence chain it
+documents is real even though the conclusion it drew from that evidence
+was wrong. Read the retraction notes inline; do not take any un-struck
+paragraph below as still-current without checking it against them.
 
 An earlier version of this document, and of the build script's own
 comment, stated the mechanism below as an established fact - "leaves
@@ -111,18 +123,23 @@ fails on the very first token.
   time (`c1 = 0.0`, matching the true zero SSM state at `t=0`). The
   arithmetic is right; something about which physical register gets read
   is wrong.
-- The corrupted register's x87 tag word entries are `Zero` (`01`) and,
-  once corrupted, `Special` (`10`, hardware NaN/Inf/denormal
-  classification) - never `Valid` (`00`). MMX writes to an MM register
-  unconditionally set the corresponding tag to `00` regardless of the
-  64-bit pattern being written; the FPU's own value classification
-  (which produces `01`/`10`/`11`) is only performed by genuine x87
-  instructions. This rules out "an MMX kernel forgot to call `emms`" as
-  the mechanism, even though this build does have at least one MMX
-  kernel (`lz_gdn1_x4_asm`, GDN pass 1) that runs unconditionally
-  regardless of `--kernel ref` - traced separately, confirmed to leave
-  the tag word byte-identical before and after it runs (`0x3fff` both
-  times, on the failing binary), so it is not the source.
+- **RETRACTED: this bullet's conclusion ("rules out ... as the
+  mechanism") was stronger than its evidence, and the mechanism it
+  ruled out is the actual one.** The tag-word argument (MMX writes set
+  `00`/Valid unconditionally; the FPU's own Zero/Special/Empty
+  classification is only performed by genuine x87 instructions; the
+  observed tags carry no Valid at all) is correct as far as it goes,
+  and the separate finding that `lz_gdn1_x4_asm`'s own tag word is
+  unchanged before and after it runs is also correct. But both only
+  exclude an ENGINE MMX kernel leaving raw residue sitting in a
+  register. Neither excludes MMX *starting* the fault and ordinary x87
+  instructions *reclassifying* the tag afterward, which is what
+  actually happens: gcc, with `-mmmx` on, uses an MMX write for an
+  unrelated 8-byte block store with no source-level MMX intrinsic
+  anywhere near it, issues no `emms`, and the x87 instructions that run
+  next reclassify that occupied-but-uninitialized slot's tag as it is
+  touched - which is exactly why it reads Zero/Special and never Valid.
+  See `src/ops_mmx.h` in the engine tree.
 
 ## Evidence chain
 
@@ -255,6 +272,21 @@ manifestation of it was not the one.
 
 ## The mechanism, named: seven values live across a call into eight slots
 
+**RETRACTED IN ITS CONCLUSION, kept for its measurements.** This
+section's title and closing claim ("a register-allocation defect, not a
+source defect... there is therefore no source-level fix") are wrong:
+there is no reg-stack over-allocation. What is still true and still
+useful: the disassembly comparison against Open Watcom, the seven-live-
+values register dump, and the five failed source-level fixes below are
+real measurements of a real, reproducible state - they show what the
+x87 stack looks like at the moment of the fault, correctly. What they do
+not show, and what this section wrongly inferred from them, is that
+gcc's reg-stack pass put those seven values there in a way that then
+over-committed the stack on its own. The actual mechanism is `src/ops_mmx.h`'s: an MMX write elsewhere in the same
+translation unit, with no compensating `emms`, corrupts a slot before
+one of these seven legitimate values gets pushed into what the tag word
+still (wrongly) reports as available room.
+
 Open Watcom compiles this same source for the same 32-bit x87 target and
 is correct. Comparing the two disassemblies at the same call answers it:
 
@@ -274,14 +306,19 @@ The x87 stack is one fixed eight-slot resource. Nothing reserves any of
 it for a callee - see "What rule is broken, stated carefully" below for
 what the ABI does and does not say about this.
 
-**The hardware says which fault it is, and it is underflow.** At the
-breakpoint the status word reads `0x0061`: `IE` (invalid operation),
-`PE`, and `SF` (stack fault) set, with **`C1` clear**. `C1` is what
-separates the two: set means overflow, a push onto a full stack; clear
-means **underflow, a read from a register the tag word marks empty**.
-So the code is not pushing a ninth value - it is reading a slot it never
-wrote. An earlier version of this document said overflow; that was an
-inference, this is the flag.
+**RETRACTED: the `C1`-clear reading below does not establish underflow,
+and the fault is overflow.** At the breakpoint the status word reads
+`0x0061`: `IE`, `PE`, and `SF` (stack fault) set, `C1` clear - `C1` is
+documented as separating overflow (set) from underflow (clear) at the
+point a fault is raised, but `SF`/`C1` are read from the status word
+AFTER the fault, and `SF` is sticky: a snapshot taken later cannot
+establish which fault set it first if anything ran in between. The
+instruction-level trace is what actually settles it (see the tag-word
+walk above): the first fault is an `flds` executing while the tag word
+already shows all eight registers occupied (`0xa015`) - a push onto a
+full stack. That is overflow. The push overwrites/corrupts a slot
+rather than reading an empty one, which is also why the corrupted
+register's tag reads Zero/Special rather than simply Empty.
 
 The register file at that point names the hoisted values outright:
 
@@ -330,15 +367,16 @@ helps only because changing inlining changes what is loop-invariant.
 | `volatile` on `c1`/`c2`, forcing the coefficients through memory | still all-NaN |
 | the `LZ_Q8_MIN_SCALE` comparison rewritten in the integer domain, so that constant never needs a register | still all-NaN |
 
-The pattern is the point: **displace one value and the allocator hoists
-another into the slot.** Each of these removes a real live value and the
-stack still fills. A source fix that works would have to reduce the
-peak below what the allocator wants, not move one item out of it, and
-nothing in C expresses that.
-
-**There is therefore no source-level fix, and `noinline` is not one.**
-No annotation in C says "do not keep values in x87 registers across this
-call" - that is what the register allocator is for.
+The pattern held because all five fixes targeted the wrong location:
+they change local register pressure inside `gdn_p2_fixed_rows` and
+`p2_group_norm`, which was never where the defect was. **RETRACTED:
+"there is therefore no source-level fix" - there is one, and it is not
+any annotation on these two functions.** `src/ops_mmx.c` is the
+source-level fix: move every gcc translation unit that touches
+`%mm0`-`%mm7` out of the files that also run x87 code, so gcc has
+nothing to reach for an MMX register with in the first place. No
+per-function annotation could have found that, because the defect was
+never local to the function these five attempts kept aiming at.
 
 **What rule is broken, stated carefully.** An earlier version of this
 document claimed the i386 ABI requires the x87 stack to be empty across
@@ -356,23 +394,36 @@ in that document. `p2_group_norm` is also `static`, so gcc sees every
 call site and is entitled to use a non-standard convention for it; the
 psABI does not govern that call at all.
 
-The defect does not need an ABI to be a defect. **There are eight
-physical registers and gcc arranged for more than eight values to be
-live at one point.** The callee pushes onto a stack that already holds
-seven, the ninth push raises a masked overflow, and the hardware returns
-real indefinite. That is a resource over-allocation - a miscompilation
-on its own terms, whatever the calling convention says.
+**RETRACTED.** There are indeed eight physical registers and seven
+legitimate values live at this point, but gcc did not arrange for a
+ninth *legitimate* value to be live too - the eighth "value" the tag
+word shows is the corrupted remnant of an MMX write from elsewhere in
+the same translation unit. The push that faults is a real, correct
+push; the stack looks full because a slot was marked occupied by
+something that was never a scheduled x87 value in the first place.
 
-The one ABI rule verified as relevant here is the MMX one, and it is
-not the mechanism: "The CPU shall be in x87 mode upon entry to a
-function. Therefore, every function that uses the MMX registers is
-required to issue an emms or femms instruction after using MMX
-registers, before returning or calling another function." That was
-ruled out separately by the tag-word classification.
+**RETRACTED: the MMX ABI rule was not ruled out; it is exactly the rule
+being broken, by the compiler rather than by engine source.** "Every
+function that uses the MMX registers is required to issue an emms ...
+before returning or calling another function" - true, and gcc's own
+codegen for an 8-byte block store under `-mmmx` uses an MMX write and
+issues no `emms`, in a function with no MMX intrinsic in its source at
+all. The tag-word classification in "Why this is not the engine's
+arithmetic" ruled out an ENGINE kernel leaving residue; it did not and
+could not rule out the compiler doing the same thing to its own
+generated code, because that classification only distinguishes MMX
+writes from x87 writes, not "which function's MMX write."
 
-This is a register-allocation defect, not a source defect: the same C is
-correct under two other toolchains, and the allocator's obligation is to
-spill before a call it cannot fit.
+**RETRACTED: this is not a register-allocation defect, and the same C
+is not what makes two other toolchains correct.** Watcom and gcc `-m64`
+are correct because neither ever emits an MMX instruction into this
+translation unit at all - Watcom's own MMX kernels are hand-written
+`#pragma aux` blocks the compiler treats as opaque, and x86-64 has no
+x87 float path to corrupt in the first place. gcc `-m32 -mmmx` is the
+only configuration where the compiler's own codegen can alias the x87
+stack, and it does. The fix is `src/ops_mmx.c`: move every function that
+touches `%mm0`-`%mm7` out of any translation unit that also runs x87
+code, so gcc has no reason to reach for an MMX register there at all.
 
 ## Static verification: the depth-imbalance theory is dead
 
@@ -459,7 +510,24 @@ whole investigation is about. Resolved one at a time:
 tail-call hypothesis - the most promising remaining place for a
 count-mismatch to be hiding from the checker - is disproven.
 
-### The open contradiction
+### The open contradiction (RESOLVED)
+
+**Both measurements were right, and they were never actually in
+conflict once MMX is in the picture.** The static checker only reads
+x87 mnemonics and their push/pop effect on stack depth; an MMX write
+is invisible to it by construction, not by a gap in its coverage.
+`gdb`'s tag word shows real occupied slots because an MMX write really
+did mark them Valid; the static checker correctly finds zero x87
+push/pop imbalance because there isn't one - nothing pushed a ninth
+x87 value. The two tools were answering different questions and both
+answered theirs correctly. The `emms`-fixes-it evidence below also
+stops being a tension once this is known: `emms` clears exactly the
+kind of stray occupancy an MMX write leaves, which is why forcing it
+before the call produces the exact right answer rather than a
+different wrong one.
+
+Kept below as it was written, for the record of how the diagnosis
+proceeded before this was known:
 
 Two measurements, both individually trustworthy, disagree:
 
@@ -498,73 +566,44 @@ document's next step is to resolve it after all.
 | flag | fixes it | notes |
 |---|---|---|
 | `-ffloat-store` | **no** | tried first, by analogy with the fix pattern in `p2_group_norm`'s own comment (force intermediates to memory). Does not reproduce that fix here - reported so nobody retries it expecting the same result. |
-| `-fno-rerun-cse-after-loop` | **yes** | disables exactly one optimization pass. Chosen fix - see `build/x87/build_engine.sh`. Measured cost: no regression (500-token prefill, best of 3: 0.044-0.045 s/token without, 0.040-0.042 s/token with - the flagged build was measured faster, within noise, not a claimed speedup). |
+| `-fno-rerun-cse-after-loop` | **yes, but retracted as the fix** | disabling this one optimization pass happened to also change whether the trigger code shape was hoisted into the corrupted range, so it masked the symptom - but the defect it appeared to work around was the MMX/x87 aliasing bug the split (`src/ops_mmx.c`) actually fixes. Removed from `build/x87/build_engine.sh`; confirmed unnecessary with the split in place, both gcc and clang, flag absent. |
 | `-fno-inline` | yes | disables all inlining project-wide; strictly more invasive than the above for the same fix. Not used. |
 | `-fno-strict-aliasing` | no | rules out aliasing UB as an alternative explanation. |
 | `-fno-tree-vectorize`, `-fno-schedule-insns[2]`, `-fno-reorder-blocks`, `-fno-gcse`, `-fno-caller-saves`, `-fno-ipa-ra`, `-fno-lra-remat`, `-fno-crossjumping`, `-fno-code-hoisting`, `-fno-hoist-adjacent-loads`, `-fno-tree-pre`, `-fno-tree-vrp`, `-fno-unroll-loops`, `-fno-cse-follow-jumps` | no | full diff of `-O1`-vs-`-O2`-enabled passes, tested individually. |
 
-## What is NOT yet known
+## What is now known (this section originally listed it as unknown)
 
-- **The actual mechanism.** Depth/count imbalance is ruled out by static
-  analysis of the real binary, cross-validated three ways, with all 8
-  of the checker's own blind spots (indirect calls, tail calls) since
-  resolved by hand and none of them hiding a discrepancy either. What
-  is left is a real, reproducible runtime observation (`gdb`: 3 x87
-  registers occupied at a specific point) that a push/pop-count reading
-  of the compiled code cannot explain. See "The open contradiction"
-  above for the one piece of evidence bearing on which side to trust
-  for a fix (the `emms` result argues register INDICES are correct and
-  only occupancy/depth is wrong at runtime - which is odd, since that is
-  exactly what the static checker also says is fine. This tension is
-  itself unresolved.)
-- The leading open hypothesis - a "right count, wrong `%st(i)` index"
-  bug invisible to a depth-only checker - is now in tension with the
-  `emms`-produces-the-exact-right-answer evidence, which argues INDICES
-  are fine and only depth/occupancy is wrong. Neither hypothesis is
-  currently fully consistent with all the evidence; this is the actual
-  state of the investigation, not a gap to be embarrassed about hiding.
-- Whether this is a gcc bug at all, as opposed to something in how the
-  compiled program's runtime FPU state evolves that a static reading of
-  the instructions - correct as far as it goes - cannot see (interrupt/
-  signal handling, CRT startup state, something outside the reg-stack
-  pass's own accounting).
-- Whether other gcc versions reproduce this (only 13.3.0 was available
-  in this environment).
+- **The actual mechanism**: gcc's own MMX write for an unrelated 8-byte
+  block store, under `-mmmx`, with no compensating `emms`, in a
+  translation unit that also runs x87 code. Not a depth/count
+  imbalance (the static checker was right that there is none) and not
+  a "right count, wrong index" bug (the leading hypothesis this section
+  used to end on) - see "The open contradiction (RESOLVED)" above for
+  why both prior measurements were correct and pointed at this once MMX
+  is in the picture.
+- This is a real gcc (and clang) behavior, not specific to gcc 13.3 -
+  see `src/ops_mmx.h` in the engine tree and the version note in "The
+  mechanism, named" above (13.3 through 16.1 all show the same
+  underlying pressure; the split fixes all of them by construction,
+  since it removes the `-mmmx` flag from this translation unit
+  entirely rather than working around a specific version's behavior).
+- Whether the compiler ought to be entitled to do this - i.e. whether
+  it is a reportable gcc/clang defect versus a documented consequence
+  of `-mmmx` that this project simply had not accounted for - was not
+  settled and is not this document's question to settle; the fix does
+  not depend on the answer.
 
 ## Suggested next steps for whoever picks this up
 
-1. **Build a symbolic slot-identity tracker** on top of
-   `build/x87/x87_stack_check.py`'s existing CFG machinery - track which
-   pseudo-value, not just how many, occupies each physical slot, and
-   flag a join point where predecessors agree on depth but disagree on
-   identity. This is the most direct way to test the "wrong index" idea,
-   despite the `emms` tension noted above - it would either confirm an
-   index bug the depth checker cannot see, or rule that out too and
-   narrow the remaining space further.
-2. Reconcile why `gdb`'s tag-word reading and a from-source static count
-   disagree at all, given the static analysis is now trusted. One
-   concrete angle not yet tried: read the tag word with `gdb` at the
-   EXACT same program counter the static checker computes a depth for,
-   rather than at a nearby source-line breakpoint - the two might not
-   currently be looking at the literal same instruction.
-3. Try other gcc major versions (12, 14, trunk) on the same reproduction
-   command to bound whether this is version-specific.
-4. A non-perturbing trace (Bochs with x87 state logging, or a QEMU TCG
-   plugin that reads FPU state without recompiling the guest binary)
-   would sidestep the probe-sensitivity that blocked `gdb stepi` and
-   inline instrumentation this session, and could settle the
-   contradiction directly rather than through more inference.
-5. Resolve the `Edge A->B: correcting stack to [...]` semantics in the
-   `-fdump-rtl-all` `326r.stack` dump (see "The open contradiction"
-   above) - deliberately not spent effort on this while the UNRESOLVED
-   sites were still open; now that they are closed and clean, this is a
-   reasonable next thing to spend the effort on rather than defer again.
-6. If reduced to a small standalone reproducer, file upstream at
-   <https://gcc.gnu.org/bugzilla/> - this document is written to make
-   that filing possible without re-deriving the evidence chain, but a
-   minimal reproducer was not constructed this session (every attempt to
-   isolate the failing function in a smaller test file changed its
-   compiled shape enough to stop reproducing), and given the depth
-   theory is now dead, a reproducer would need to target whatever
-   mechanism step 1 or step 2 above actually finds, not the original
-   leaked-push theory.
+Superseded - the mechanism this section's six numbered steps were
+proposed to find is known (see above), and none of the tooling they
+describe (a symbolic slot-identity tracker, a non-perturbing emulator
+trace, further gcc version bisection) is needed to explain it. The one
+piece of unfinished business from this list that is still real and
+still open, because it belongs to a different question: whether the
+`Edge A->B: correcting stack to [...]` lines in gcc's own
+`-fdump-rtl-all` `326r.stack` output are routine reconciliation-pass
+overrides or a genuine internal disagreement was never resolved, and
+resolving it would still only speak to gcc's *legitimate* x87 register
+allocation (the seven real values in "The mechanism, named"), not to
+this bug.
