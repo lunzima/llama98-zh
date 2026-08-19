@@ -482,11 +482,44 @@ float lz_silu(float x) {
 
    The scope is deliberately narrowed to one lz_forward pass: loading,
    RoPE table building, tokenizing and sampling all sit outside the
-   region and are unaffected; two fldcw per token is negligible. */
+   region and are unaffected; two fldcw per token is negligible.
+
+   LZ_X87_FLOAT_CW gates the gcc/clang half of this: 32-bit x86 built
+   WITHOUT SSE scalar float (the build/x87/build_engine.sh target -
+   Socket-7-class, x87 the only float unit) has the exact same 80-bit-
+   intermediate problem Watcom does, and __SSE_MATH__/__SSE2_MATH__
+   being undefined is precisely how gcc says "this TU's scalar float
+   goes through x87, not SSE" - the compiler defines them only when
+   -mfpmath=sse is in effect, independent of whether -msse/-msse2 merely
+   enable the instruction set. x86-64 (always __SSE2_MATH__) and any
+   32-bit build that opts into SSE scalar float correctly skip this and
+   fall to the same "already has float semantics" no-op Watcom's
+   comment describes for gcc in general. */
+#if defined(__i386__) && !defined(__SSE_MATH__) && !defined(__SSE2_MATH__)
+#define LZ_X87_FLOAT_CW 1
+/* fnstcw/fldcw directly, not a libc wrapper: this project's other 32-bit
+   x86 targets (DOS, Win9x) have no libc guaranteed to carry one, and
+   the instructions need no library at all. PC is control-word bits
+   9:8 - 00 selects 24-bit (single) precision, 11 (the power-on default)
+   selects 64-bit (extended). */
+static unsigned short lz_x87_cw_get(void) {
+    unsigned short cw;
+    __asm__ __volatile__("fnstcw %0" : "=m"(cw));
+    return cw;
+}
+static void lz_x87_cw_set(unsigned short cw) {
+    __asm__ __volatile__("fldcw %0" : : "m"(cw));
+}
+#endif
+
 unsigned lz_fpu_float_begin(void) {
 #if defined(__WATCOMC__)
     unsigned save = _control87(0, 0);
     _control87(_PC_24, _MCW_PC);
+    return save;
+#elif defined(LZ_X87_FLOAT_CW)
+    unsigned short save = lz_x87_cw_get();
+    lz_x87_cw_set((unsigned short)(save & ~0x0300u));   /* PC=24 */
     return save;
 #else
     return 0;   /* gcc/SSE already has float semantics */
@@ -496,6 +529,8 @@ unsigned lz_fpu_float_begin(void) {
 void lz_fpu_float_end(unsigned save) {
 #if defined(__WATCOMC__)
     _control87(save, _MCW_PC);
+#elif defined(LZ_X87_FLOAT_CW)
+    lz_x87_cw_set((unsigned short)save);
 #else
     (void)save;
 #endif
@@ -517,6 +552,19 @@ float lz_softplus(float x) {
         _control87(_PC_64, _MCW_PC);
         r = (float)log1p(exp((double)x));
         _control87(save, _MCW_PC);
+        return r;
+    }
+#elif defined(LZ_X87_FLOAT_CW)
+    {
+        /* Same reason as the Watcom branch above: PC=24 is in effect
+           for the whole lz_forward pass on this target too now, and
+           glibc's double log1p/exp read wrong under it exactly like
+           Watcom's do. */
+        unsigned short save = lz_x87_cw_get();
+        float r;
+        lz_x87_cw_set((unsigned short)(save | 0x0300u));   /* PC=64 */
+        r = (float)log1p(exp((double)x));
+        lz_x87_cw_set(save);
         return r;
     }
 #else

@@ -162,8 +162,12 @@ float lz_softplus(float x);
 /* x87 precision control: set the control word to 24 bits (single
    precision) so x87 float semantics become isomorphic to SSE - the
    prerequisite for bit-identical Watcom and gcc builds. Returns the
-   original control word; lz_fpu_float_end restores it. No-op on
-   non-Watcom builds.
+   original control word; lz_fpu_float_end restores it. No-op wherever
+   scalar float already goes through SSE (x86-64, or any 32-bit build
+   that opts into SSE scalar float) - real on Watcom and on 32-bit x86
+   gcc/clang built without SSE scalar float (build/x87/build_engine.sh's
+   target), both of which actually run float arithmetic on the x87
+   stack and need this to agree with SSE bit for bit.
 
    No double inside the region (incl. libm double routines): PC=24
    compresses double to 24 bits too. lz_exp is all-float now;
