@@ -65,13 +65,18 @@ lz_p2_blk *p2_blk(void);
 #define LZ_WSUM_MMX_EXTERN 1
 #define LZ_P2_MMX_EXTERN   1
 #define LZ_DOT_MMX_EXTERN  1
-/* Kept under their existing names (predates this split) rather than
-   renamed to match the *_MMX_EXTERN pattern above: renaming a macro
-   already tested at several call sites risks missing one, for a
-   cosmetic gain the rest of the file does not need. */
+#endif
+
+/* The two LZ_HAVE_* flags are defined for BOTH toolchains, not just gcc
+   like the _EXTERN trio above: the amax MMX and q8round SSE1 bodies live
+   in src/ops_mmx.c / src/ops_mmx_sse.c on Watcom too, so "this kernel
+   is in the build" is the same LZ_MMX_TU fact for either compiler.
+   Kept under their existing names (predate this split) rather than
+   renamed to match the *_MMX_EXTERN pattern: code far from here reads
+   them (q8r_have_simd/lz_q8r_tier, LZ_AMAX_TAB), and a rename risks
+   missing one of those call sites. */
 #define LZ_HAVE_AMAX_MMX   1
 #define LZ_HAVE_Q8R_SSE    1
-#endif
 
 #if defined(__WATCOMC__)
 /* Task #30: Watcom's own kernels now live in src/ops_mmx.c too (they

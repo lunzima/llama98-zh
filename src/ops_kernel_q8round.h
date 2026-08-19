@@ -30,18 +30,10 @@
    lz_q8round_group_sse/_sse2 and lz_q8round_2p_group_sse/_sse2
    directly now, the same cleanup task #30 (2/N) and (3/N) did for the
    p2 and wsum aliases. */
-#if defined(__WATCOMC__)
-#define LZ_HAVE_Q8R_SSE  1
-#define LZ_HAVE_Q8R_SIMD 1
-#else
-/* lz_q8round32_sse's body and the LZ_HAVE_Q8R_SSE definition for this
-   branch live in src/ops_mmx_sse.c / src/ops_mmx.h: cvtps2pi
-   writes %mm registers, so it belongs in the one translation unit built
-   with -mmmx. ops_mmx.h is included near the top of ops.c and defines
-   LZ_HAVE_Q8R_SSE there when the MMX tier is in this build.
-
-   lz_q8round32_simd's SSE2 body and the LZ_HAVE_Q8R_SIMD definition for
-   this branch live in src/ops_sse2.c / src/ops_sse2.h: it writes
-   %xmm registers, so it belongs in the translation unit built with
-   -msse2. ops_sse2.h is included near the top of ops.c. */
-#endif
+/* The q8round kernel bodies - lz_q8round32_sse_asm / lz_q8round32_sse2_asm's
+   #pragma aux pairs and their group-level loops on Watcom,
+   lz_q8round32_sse / lz_q8round32_simd intrinsics on gcc - live in
+   src/ops_mmx_sse.c / src/ops_sse2.c. The LZ_HAVE_Q8R_SSE /
+   LZ_HAVE_Q8R_SIMD flags that say "this tier is in the build" are
+   defined in src/ops_mmx.h / src/ops_sse2.h under LZ_MMX_TU /
+   LZ_SSE2_TU, both included near the top of ops.c before this file. */

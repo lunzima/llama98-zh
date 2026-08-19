@@ -1734,18 +1734,13 @@ int lz_kernel_select(int which) {
    invariant for test convenience. */
 static int q8r_have_simd(void) {
 #if defined(LZ_HAVE_Q8R_SIMD) || defined(LZ_HAVE_Q8R_SSE)
-#if defined(__WATCOMC__)
-    return lz_cpu_has_sse();       /* CPUID leaf 1 EDX 25 = SSE, cached */
-#else
     /* REAL CPUID, not "the build carries the tier" (task #22's fix,
        same reason as kernel_detect() and p2_tier()): true unconditionally
        on x86-64 (ABI-guaranteed), a real question on the 32-bit x87
        target, where this docstring's own "asks the hardware question"
-       contract requires it. lz_cpu_has_sse() is cached (widened above
-       from Watcom-only), so this costs one cpuid total, not one per
-       call. */
+       contract requires it. lz_cpu_has_sse() is cached (widened from
+       Watcom-only), so this costs one cpuid total, not one per call. */
     return lz_cpu_has_sse();
-#endif
 #else
     return 0;
 #endif
@@ -1764,20 +1759,14 @@ static int lz_q8r_tier(void) {
     if (g_kernel == LZ_KERNEL_SSE2) return 2;
 #endif
 #if defined(LZ_HAVE_Q8R_SSE)
-#if defined(__WATCOMC__)
-    /* CPUID leaf 1 EDX bit 25 = SSE, CACHED - this sits in an inner loop
-       and cpuid serializes the pipeline. PII/K6-2 lack it; stay scalar. */
+    /* REAL CPUID, not "the build carries the tier" - the same fix as
+       q8r_have_simd() just above and kernel_detect()/p2_tier() (task
+       #22): true unconditionally on x86-64, a real question on the
+       32-bit x87 target. This sits in the SAME hot inner loop (once per
+       32-element quantize group) the big comment above lz_cpu_has_sse()
+       measured 6.4x on, so it uses that cached function rather than a
+       fresh cpuid per call. */
     if (lz_cpu_has_sse()) return 1;
-#else
-    /* REAL CPUID, same fix as q8r_have_simd() just above and
-       kernel_detect()/p2_tier() (task #22): true unconditionally on
-       x86-64, a real question on the 32-bit x87 target - and this
-       function sits in the SAME hot inner loop (once per 32-element
-       quantize group) the big comment above lz_cpu_has_sse() measured
-       6.4x on, so it uses that cached function rather than a fresh
-       cpuid per call. */
-    if (lz_cpu_has_sse()) return 1;
-#endif
 #endif
     return 0;
 }
@@ -4406,18 +4395,16 @@ typedef char lz_p2_needs_lo_scale_256[
    FAULT on a misaligned address, which is why p2_blk() aligns by hand.
    The caller's state planes get movdqu/movq, since their alignment is
    not ours to assume. */
-#if defined(LZ_HAVE_P2_SSE2_ASM)
+#if defined(LZ_HAVE_P2_SSE2_ASM) || defined(LZ_P2_SSE2_EXTERN)
 #define LZ_HAVE_P2_SSE2 1
-/* No lz_p2_mul32_sse2/lz_p2_split32_sse2 bare-name aliases here anymore
-   (task #30, 2/N) - same reasoning as the MMX and SSE1 tiers above.
+/* One flag, two triggers: LZ_HAVE_P2_SSE2_ASM means Watcom's #pragma
+   aux SSE2 pair is in the build, LZ_P2_SSE2_EXTERN means gcc's
+   extern-linked intrinsics are - different code for the same operator
+   on different compilers, both bodies in src/ops_sse2.c. No bare-name
+   aliases here anymore (same reasoning as the MMX and SSE1 tiers above):
    Watcom's Phase 2 reaches this tier only through lz_p2_rows_sse2,
-   declared in src/ops_sse2.h alongside the gcc-only per-group names. */
-
-#elif defined(LZ_P2_SSE2_EXTERN)
-/* lz_p2_mul32_sse2 / lz_p2_split32_sse2 bodies live in src/ops_sse2.c:
-   they write %xmm registers, so they belong in the translation unit
-   built with -msse2. Declared in src/ops_sse2.h, already visible here. */
-#define LZ_HAVE_P2_SSE2 1
+   declared in src/ops_sse2.h alongside the gcc-only per-group names,
+   which the intrinsics' declarations share. */
 #endif
 
 #if defined(LZ_HAVE_P2_SSE2) && !defined(LZ_HAVE_P2_MMX)
@@ -4455,21 +4442,17 @@ static int p2_tier(void) {
        which is every machine that can run this test suite, and a path
        that cannot be selected is a path that cannot be validated. */
 #if defined(LZ_HAVE_P2_SSE) && !defined(LZ_P2_FORCE_MMX)
-#if defined(__WATCOMC__)
-    if (lz_cpu_has_sse()) return 2;   /* CPUID leaf 1 EDX 25, cached */
-#else
     /* REAL CPUID, not "the build carries the tier" - the same fix
        kernel_detect() needed (task #22): LZ_HAVE_P2_SSE being defined
-       means src/ops_mmx.c's lz_p2_split32_sse is linked in, which is
-       true on every gcc build including the 32-bit x87 target, where it
-       is not the same fact as "this machine has SSE1" (Pentium
+       means src/ops_mmx_sse.c's lz_p2_split32_sse is linked in, which
+       is true on every gcc build including the 32-bit x87 target, where
+       it is not the same fact as "this machine has SSE1" (Pentium
        MMX/K6/Cyrix 6x86 in the Socket 7 family do not). True on x86-64
        unconditionally (SSE1 is ABI-guaranteed there), so nothing changes
        for that build. This function is the other hot-loop caller the
        big comment above lz_cpu_has_sse() names (once per state row), so
        it uses the cached function too, not a fresh cpuid per call. */
     if (lz_cpu_has_sse()) return 2;
-#endif
 #endif
     return 1;
 }

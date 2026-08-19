@@ -31,13 +31,18 @@
 #define LZ_ROW_SSE2_EXTERN  1
 #define LZ_P2_SSE2_EXTERN   1
 #define LZ_ROPE_SSE2_EXTERN 1
-/* Kept under their existing names (predate this split, and are read by
-   code far from here - q8r_have_simd/lz_q8r_tier, LZ_AMAX_TAB) rather
-   than renamed to match the *_SSE2_EXTERN pattern above, same reason
-   ops_mmx.h keeps LZ_HAVE_AMAX_MMX/LZ_HAVE_Q8R_SSE under their names. */
+#endif
+
+/* The two LZ_HAVE_* flags are defined for BOTH toolchains, not just gcc
+   like the _EXTERN trio above: the amax SSE2 and q8round SSE2 bodies
+   live in src/ops_sse2.c on Watcom too, so "this kernel is in the
+   build" is the same LZ_SSE2_TU fact for either compiler. Kept under
+   their existing names (predate this split) rather than renamed to
+   match the *_SSE2_EXTERN pattern: code far from here reads them
+   (q8r_have_simd/lz_q8r_tier, LZ_AMAX_TAB), same reason ops_mmx.h keeps
+   LZ_HAVE_AMAX_MMX/LZ_HAVE_Q8R_SSE under their names. */
 #define LZ_HAVE_AMAX_SSE2  1
 #define LZ_HAVE_Q8R_SIMD   1
-#endif
 
 #if defined(__WATCOMC__)
 /* task #30 (2/N): GDN/KDA fixed-point pass 2, SSE2 tier, row

@@ -31,39 +31,16 @@
    comparison between them, which none of these do. SSE1 therefore offers
    nothing over MMX for this operator and gets no tier. */
 
-/* lz_amax32_mmx_asm's #pragma aux body and its lz_amax32_mmx_w wrapper
-   (task #30, 4/N: the mechanical low-risk sweep) moved to
-   src/ops_mmx.c - same -Nr/-Ns ceiling reason as every kernel this
-   task has already moved. Zero call-shape change either way: the
-   wrapper already sat between the pragma and the dispatch table below
-   (a #pragma aux body cannot have its address taken, so a table entry
-   needs a real function to point at), and that indirect call happens
-   once per operator invocation regardless of which TU the wrapper's
-   body lives in - the reason this whole family was classified low-risk
-   from the start. LZ_HAVE_AMAX_MMX stays defined here: it is Watcom's
-   own "MMX exists in this build" flag, unconditional the same way
-   -D__MMX__=1 always is.
-
-   lz_amax32_sse2_asm / lz_amax32_sse2_w: same story, moved to
-   src/ops_sse2.c. LZ_HAVE_AMAX_SSE2 stays defined here too. */
-#if defined(__WATCOMC__)
-#define LZ_HAVE_AMAX_MMX  1
-#define LZ_HAVE_AMAX_SSE2 1
-#else   /* gcc: intrinsics */
-
-/* lz_amax32_mmx's body and the LZ_HAVE_AMAX_MMX definition for this
-   branch now live in src/ops_mmx.c / src/ops_mmx.h: it writes %mm
-   registers, so it belongs in the one translation unit built with
-   -mmmx. ops_mmx.h is included near the top of ops.c, so the
-   declaration and the macro are already visible here.
-
-   lz_amax32_sse2's body and the LZ_HAVE_AMAX_SSE2 definition for this
-   branch now live in src/ops_sse2.c / src/ops_sse2.h, same reasoning
-   one ISA tier up: it writes %xmm registers, so it belongs in the
-   translation unit built with -msse2. ops_sse2.h is included near the
-   top of ops.c. */
-
-#endif  /* __WATCOMC__ */
+/* The amax kernel bodies - lz_amax32_mmx_asm / lz_amax32_sse2_asm's
+   #pragma aux pairs and their _w wrappers on Watcom, lz_amax32_mmx /
+   lz_amax32_sse2 intrinsics on gcc - live in src/ops_mmx.c /
+   src/ops_sse2.c. The LZ_HAVE_AMAX_MMX / LZ_HAVE_AMAX_SSE2 flags that
+   say "this kernel is in the build" are defined in src/ops_mmx.h /
+   src/ops_sse2.h under LZ_MMX_TU / LZ_SSE2_TU, both included near the
+   top of ops.c before this file, so they are already visible here.
+   The _w wrappers exist because a #pragma aux body cannot have its
+   address taken, so the dispatch table below needs a real function to
+   point at. */
 
 /* The dispatch table. Six slots in the LZ_ROW_* order; NULL is a claim
    with a reason attached, not an omission.
