@@ -357,13 +357,16 @@ watcom-cli:
 	@echo "== done: $(CLI_EXE)"
 
 # WHICH DOS EXTENDER - a contested choice, so it is a knob.
-#   dos4gw  wstub.exe   loads DOS4GW.EXE at run time - the period default.
+#   dos4gw  wstub.exe   loads DOS4GW.EXE at run time - the period default,
+#                       but DOS/4GW OOMs loading a real model (measured
+#                       2026-08-12), so it is no longer the default.
 #   dos32a  stub32a.exe loads DOS32A.EXE at run time - faster, no DOS4GW
-#                       licensing history. A drop-in otherwise.
+#                       licensing history, and loads the model fine. A
+#                       drop-in otherwise; this is the default now.
 # Both are LINK-TIME choices (`option stub=`) over the same 32-bit LE
 # image. Neither is self-contained; SB.EXE (16-bit, DOSBox-X only) is what
 # binds the extender IN - see watcom-dos-single.
-LZ_DOS_EXTENDER ?= dos4gw
+LZ_DOS_EXTENDER ?= dos32a
 ifeq ($(LZ_DOS_EXTENDER),dos32a)
   DOS_STUB := stub32a.exe
 else
