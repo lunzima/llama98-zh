@@ -2661,100 +2661,18 @@ static float epi_q41(const int32_t *accb, const float *xsb, const float *xgb,
 /* ---- Q4_1 row kernels, one per (ISA x impl) --------------------------- */
 
 #if defined(__WATCOMC__) || defined(LZ_DOT_MMX_EXTERN)
-
-#define LZ_Q41_ACC(DOT32, PF)                                          \
-    for (s = 0; s < nb; s++) {                                         \
-        const unsigned char *pf_ = wn + (size_t)(s + LZ_PF_DIST) * 16; \
-        if (pf_ < wend) PF(pf_);                                       \
-        acc[s] = DOT32(wn + (size_t)s * 16, xwt + (size_t)s * 32);     \
-    }
-
-#define LZ_Q41_PFSEL(DOT32)                                              \
-    do {                                                                 \
-        int pf_m_ = lz_prefetch_mode();                                  \
-        if (pf_m_ == LZ_PF_AMD)       { LZ_Q41_ACC(DOT32, LZ_PFI_AMD); }  \
-        else if (pf_m_ == LZ_PF_LOAD) { LZ_Q41_ACC(DOT32, LZ_PFI_LOAD); } \
-        else if (pf_m_ == LZ_PF_NONE) { LZ_Q41_ACC(DOT32, LZ_PFI_NONE); } \
-        else                          { LZ_Q41_ACC(DOT32, LZ_PFI_NTA); }  \
-    } while (0)
+#include "ops_kernel_dot_shared.h" /* LZ_Q41_ACC, LZ_Q41_PFSEL, LZ_Q41_GROUP4 */
 
 #ifdef __WATCOMC__
-/* Same 128-element step as Q8_0: fixed overhead amortized from once per
-   32 elements to once per 128, integer results bit-identical. */
-#define LZ_Q41_GROUP4(DOT128)                                              \
-    do {                                                                   \
-        for (s = 0; s < nb; s += 4) {                                      \
-            const unsigned char *pf_ = wn + (size_t)(s + LZ_PF_DIST) * 16; \
-            if (pf_ < wend) {                                              \
-                int pf_m_ = lz_prefetch_mode();                            \
-                if (pf_m_ == LZ_PF_AMD)       LZ_PFI_AMD(pf_);             \
-                else if (pf_m_ == LZ_PF_LOAD) LZ_PFI_LOAD(pf_);            \
-                else if (pf_m_ == LZ_PF_NONE) LZ_PFI_NONE(pf_);            \
-                else                          LZ_PFI_NTA(pf_);             \
-            }                                                              \
-            DOT128(wn + (size_t)s * 16, xwt + (size_t)s * 32, acc + s);    \
-        }                                                                  \
-    } while (0)
-
-static void row_q41_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
-                            const int16_t *xw, int nb, int nt, int in_dim,
-                            const void *pf_end,
-                         const void *pf_end2) {
-    const unsigned char *wn = (const unsigned char *)w4;
-    const unsigned char *wend = (const unsigned char *)pf_end;
-    int tk, s;
-    (void)w2; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
-        /* Pair whenever a second token exists - same trade as Q8 and
-           worth more here (weight side 16 of 40 ops against Q8's 12 of
-           36). Not measured on target; see row_q8_mmx_asm. */
-        if (nt - tk >= 2 && g_pair) {
-            const int16_t *xw2 = xwt + in_dim;
-            int32_t *accb = acc + nb;
-            int s2;
-            for (s2 = 0; s2 < nb; s2++) {
-                const unsigned char *pf_ = wn + (size_t)(s2 + LZ_PF_DIST) * 16;
-                if (pf_ < wend) {
-                    int pf_m_ = lz_prefetch_mode();
-                    if (pf_m_ == LZ_PF_AMD)       LZ_PFI_AMD(pf_);
-                    else if (pf_m_ == LZ_PF_LOAD) LZ_PFI_LOAD(pf_);
-                    else if (pf_m_ == LZ_PF_NONE) LZ_PFI_NONE(pf_);
-                    else                          LZ_PFI_NTA(pf_);
-                }
-                lz_dot32_q41_asm_2(wn + (size_t)s2 * 16,
-                                   xwt + (size_t)s2 * 32,
-                                   xw2 + (size_t)s2 * 32,
-                                   acc + s2, accb + s2);
-            }
-            tk++;
-            continue;
-        }
-        if ((nb & 3) == 0) LZ_Q41_GROUP4(lz_dot128_q41_asm);
-        else               LZ_Q41_PFSEL(dot32_q41_mmx);
-    }
-}
-
-static void row_q41_sse2_asm(int32_t *acc32, const void *w4, const void *w2,
-                             const int16_t *xw, int nb, int nt, int in_dim,
-                             const void *pf_end,
-                         const void *pf_end2) {
-    const unsigned char *wn = (const unsigned char *)w4;
-    const unsigned char *wend = (const unsigned char *)pf_end;
-    int tk, s;
-    (void)w2; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
-#if LZ_SSE2_GROUP
-        if ((nb & 3) == 0) LZ_Q41_GROUP4(lz_dot128_q41_sse2_asm);
-#else
-        if ((nb & 3) == 0) LZ_Q41_GROUP4(lz_dot128_q41_asm);
-#endif
-        else               LZ_Q41_PFSEL(dot32_q41_sse2a);
-    }
-}
+/* row_q41_mmx_asm / row_q41_sse2_asm moved to src/ops_mmx.c /
+   src/ops_sse2.c (task #30, 6/N) - same reasoning as Q8_0 (piece 5/N):
+   each is already the real call boundary from LZ_ROW_Q41 below, so
+   moving the whole function together with the leaf kernels it calls
+   direct-by-name adds no new call sites. Declared in src/ops_mmx.h /
+   src/ops_sse2.h. row_q41_sse2_asm's -DLZ_SSE2_GROUP=0 branch calls
+   lz_dot128_q41_mmx_w, src/ops_mmx.c's real wrapper around the MMX
+   #pragma aux group kernel - same cross-TU need as Q8_0's
+   lz_dot128_x16_mmx_w (task #32). */
 
 #else  /* gcc: intrinsics */
 

@@ -708,6 +708,225 @@ void row_q8_sse2_asm(int32_t *acc32, const void *w4, const void *w2,
     }
 }
 
+/* ---- Q4_1 32/128-element dot products and row kernel, SSE2 tier -
+   moved here from src/ops_kernel_dot.h / src/ops.c (task #30, 6/N). */
+
+/* T42-tier Q4_1 (same: 128-bit, no EMMS needed, same name + signature
+   reused). */
+extern int32_t lz_dot32_q41_sse2_asm(const unsigned char *w, const int16_t *x);
+#pragma aux lz_dot32_q41_sse2_asm = \
+    ".686"                          \
+    "pxor      xmm7, xmm7"          \
+    "pcmpeqb   xmm3, xmm3"          \
+    "psrlw     xmm3, 12"            \
+    "packuswb  xmm3, xmm3"          \
+    "movdqu    xmm0, [eax]"         \
+    "movdqa    xmm4, xmm0"          \
+    "pand      xmm0, xmm3"          \
+    "psrlw     xmm4, 4"             \
+    "pand      xmm4, xmm3"          \
+    "movdqa    xmm1, xmm7"          \
+    "punpcklbw xmm1, xmm0"          \
+    "movdqu    xmm2, [edx]"         \
+    "pmaddwd   xmm1, xmm2"          \
+    "movdqa    xmm6, xmm1"          \
+    "movdqa    xmm1, xmm7"          \
+    "punpckhbw xmm1, xmm0"          \
+    "movdqu    xmm2, [edx+16]"      \
+    "pmaddwd   xmm1, xmm2"          \
+    "paddd     xmm6, xmm1"          \
+    "movdqa    xmm1, xmm7"          \
+    "punpcklbw xmm1, xmm4"          \
+    "movdqu    xmm2, [edx+32]"      \
+    "pmaddwd   xmm1, xmm2"          \
+    "paddd     xmm6, xmm1"          \
+    "movdqa    xmm1, xmm7"          \
+    "punpckhbw xmm1, xmm4"          \
+    "movdqu    xmm2, [edx+48]"      \
+    "pmaddwd   xmm1, xmm2"          \
+    "paddd     xmm6, xmm1"          \
+    "movdqa    xmm2, xmm6"          \
+    "psrldq    xmm2, 8"             \
+    "paddd     xmm6, xmm2"          \
+    "movdqa    xmm2, xmm6"          \
+    "psrldq    xmm2, 4"             \
+    "paddd     xmm6, xmm2"          \
+    "movd      eax, xmm6"           \
+    __parm [__eax] [__edx]          \
+    __value [__eax]                 \
+    __modify [8087]
+
+static int32_t dot32_q41_sse2a(const unsigned char *w, const int16_t *x) {
+    return lz_dot32_q41_sse2_asm(w, x);
+}
+
+extern void lz_dot128_q41_sse2_asm(const unsigned char *w,
+                const int16_t *x, int32_t *out4);
+#pragma aux lz_dot128_q41_sse2_asm = \
+    ".686" \
+    "pxor      xmm7, xmm7" \
+    "pcmpeqb   xmm3, xmm3" \
+    "psrlw     xmm3, 12" \
+    "packuswb  xmm3, xmm3" \
+    "movdqu    xmm0, [eax]" \
+    "movdqa    xmm4, xmm0" \
+    "pand      xmm0, xmm3" \
+    "psrlw     xmm4, 4" \
+    "pand      xmm4, xmm3" \
+    "pxor      xmm6, xmm6" \
+    "movdqa    xmm1, xmm7" \
+    "punpcklbw xmm1, xmm0" \
+    "movdqu    xmm2, [ecx]" \
+    "pmaddwd   xmm1, xmm2" \
+    "paddd     xmm6, xmm1" \
+    "movdqa    xmm1, xmm7" \
+    "punpckhbw xmm1, xmm0" \
+    "movdqu    xmm2, [ecx+16]" \
+    "pmaddwd   xmm1, xmm2" \
+    "paddd     xmm6, xmm1" \
+    "movdqa    xmm1, xmm7" \
+    "punpcklbw xmm1, xmm4" \
+    "movdqu    xmm2, [ecx+32]" \
+    "pmaddwd   xmm1, xmm2" \
+    "paddd     xmm6, xmm1" \
+    "movdqa    xmm1, xmm7" \
+    "punpckhbw xmm1, xmm4" \
+    "movdqu    xmm2, [ecx+48]" \
+    "pmaddwd   xmm1, xmm2" \
+    "paddd     xmm6, xmm1" \
+    "movdqa    xmm2, xmm6" \
+    "psrldq    xmm2, 8" \
+    "paddd     xmm6, xmm2" \
+    "movdqa    xmm2, xmm6" \
+    "psrldq    xmm2, 4" \
+    "paddd     xmm6, xmm2" \
+    "movd      [ebx], xmm6" \
+    "movdqu    xmm0, [eax+16]" \
+    "movdqa    xmm4, xmm0" \
+    "pand      xmm0, xmm3" \
+    "psrlw     xmm4, 4" \
+    "pand      xmm4, xmm3" \
+    "pxor      xmm6, xmm6" \
+    "movdqa    xmm1, xmm7" \
+    "punpcklbw xmm1, xmm0" \
+    "movdqu    xmm2, [ecx+64]" \
+    "pmaddwd   xmm1, xmm2" \
+    "paddd     xmm6, xmm1" \
+    "movdqa    xmm1, xmm7" \
+    "punpckhbw xmm1, xmm0" \
+    "movdqu    xmm2, [ecx+80]" \
+    "pmaddwd   xmm1, xmm2" \
+    "paddd     xmm6, xmm1" \
+    "movdqa    xmm1, xmm7" \
+    "punpcklbw xmm1, xmm4" \
+    "movdqu    xmm2, [ecx+96]" \
+    "pmaddwd   xmm1, xmm2" \
+    "paddd     xmm6, xmm1" \
+    "movdqa    xmm1, xmm7" \
+    "punpckhbw xmm1, xmm4" \
+    "movdqu    xmm2, [ecx+112]" \
+    "pmaddwd   xmm1, xmm2" \
+    "paddd     xmm6, xmm1" \
+    "movdqa    xmm2, xmm6" \
+    "psrldq    xmm2, 8" \
+    "paddd     xmm6, xmm2" \
+    "movdqa    xmm2, xmm6" \
+    "psrldq    xmm2, 4" \
+    "paddd     xmm6, xmm2" \
+    "movd      [ebx+4], xmm6" \
+    "movdqu    xmm0, [eax+32]" \
+    "movdqa    xmm4, xmm0" \
+    "pand      xmm0, xmm3" \
+    "psrlw     xmm4, 4" \
+    "pand      xmm4, xmm3" \
+    "pxor      xmm6, xmm6" \
+    "movdqa    xmm1, xmm7" \
+    "punpcklbw xmm1, xmm0" \
+    "movdqu    xmm2, [ecx+128]" \
+    "pmaddwd   xmm1, xmm2" \
+    "paddd     xmm6, xmm1" \
+    "movdqa    xmm1, xmm7" \
+    "punpckhbw xmm1, xmm0" \
+    "movdqu    xmm2, [ecx+144]" \
+    "pmaddwd   xmm1, xmm2" \
+    "paddd     xmm6, xmm1" \
+    "movdqa    xmm1, xmm7" \
+    "punpcklbw xmm1, xmm4" \
+    "movdqu    xmm2, [ecx+160]" \
+    "pmaddwd   xmm1, xmm2" \
+    "paddd     xmm6, xmm1" \
+    "movdqa    xmm1, xmm7" \
+    "punpckhbw xmm1, xmm4" \
+    "movdqu    xmm2, [ecx+176]" \
+    "pmaddwd   xmm1, xmm2" \
+    "paddd     xmm6, xmm1" \
+    "movdqa    xmm2, xmm6" \
+    "psrldq    xmm2, 8" \
+    "paddd     xmm6, xmm2" \
+    "movdqa    xmm2, xmm6" \
+    "psrldq    xmm2, 4" \
+    "paddd     xmm6, xmm2" \
+    "movd      [ebx+8], xmm6" \
+    "movdqu    xmm0, [eax+48]" \
+    "movdqa    xmm4, xmm0" \
+    "pand      xmm0, xmm3" \
+    "psrlw     xmm4, 4" \
+    "pand      xmm4, xmm3" \
+    "pxor      xmm6, xmm6" \
+    "movdqa    xmm1, xmm7" \
+    "punpcklbw xmm1, xmm0" \
+    "movdqu    xmm2, [ecx+192]" \
+    "pmaddwd   xmm1, xmm2" \
+    "paddd     xmm6, xmm1" \
+    "movdqa    xmm1, xmm7" \
+    "punpckhbw xmm1, xmm0" \
+    "movdqu    xmm2, [ecx+208]" \
+    "pmaddwd   xmm1, xmm2" \
+    "paddd     xmm6, xmm1" \
+    "movdqa    xmm1, xmm7" \
+    "punpcklbw xmm1, xmm4" \
+    "movdqu    xmm2, [ecx+224]" \
+    "pmaddwd   xmm1, xmm2" \
+    "paddd     xmm6, xmm1" \
+    "movdqa    xmm1, xmm7" \
+    "punpckhbw xmm1, xmm4" \
+    "movdqu    xmm2, [ecx+240]" \
+    "pmaddwd   xmm1, xmm2" \
+    "paddd     xmm6, xmm1" \
+    "movdqa    xmm2, xmm6" \
+    "psrldq    xmm2, 8" \
+    "paddd     xmm6, xmm2" \
+    "movdqa    xmm2, xmm6" \
+    "psrldq    xmm2, 4" \
+    "paddd     xmm6, xmm2" \
+    "movd      [ebx+12], xmm6" \
+    __parm [__eax] [__ecx] [__ebx] \
+    __modify [8087]
+
+/* row_q41_sse2_asm: ALREADY the real call boundary from its own caller
+   (matmul_q41_impl, src/ops.c, dispatched once per matmul via
+   LZ_ROW_Q41). No pairing logic, same as Q8_0's SSE2 row function. */
+void row_q41_sse2_asm(int32_t *acc32, const void *w4, const void *w2,
+                      const int16_t *xw, int nb, int nt, int in_dim,
+                      const void *pf_end, const void *pf_end2) {
+    const unsigned char *wn = (const unsigned char *)w4;
+    const unsigned char *wend = (const unsigned char *)pf_end;
+    int tk, s;
+    (void)w2; (void)pf_end2;
+    for (tk = 0; tk < nt; tk++) {
+        const int16_t *xwt = xw + (size_t)tk * in_dim;
+        int32_t *acc = acc32 + (size_t)tk * nb;
+#if LZ_SSE2_GROUP
+        if ((nb & 3) == 0) LZ_Q41_GROUP4(lz_dot128_q41_sse2_asm);
+#else
+        /* lz_dot128_q41_mmx_w is src/ops_mmx.c's real wrapper around
+           the MMX #pragma aux group kernel - task #32. */
+        if ((nb & 3) == 0) LZ_Q41_GROUP4(lz_dot128_q41_mmx_w);
+#endif
+        else               LZ_Q41_PFSEL(dot32_q41_sse2a);
+    }
+}
+
 #else /* gcc: intrinsics */
 
 #include <emmintrin.h>

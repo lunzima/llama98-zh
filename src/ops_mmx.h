@@ -171,6 +171,16 @@ void row_q8_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
 int32_t dot32_x16_mmx(const int8_t *w, const int16_t *x);
 void lz_dot128_x16_mmx_w(const int8_t *w, const int16_t *x, int32_t *out4);
 
+/* task #30 (6/N): Q4_1 matmul, MMX tier. row_q41_mmx_asm is ALREADY the
+   real call boundary (LZ_ROW_Q41, src/ops.c). dot32_q41_mmx stays
+   static (no LZ_ATTN_DOT32-style cross-TU caller for this format).
+   lz_dot128_q41_mmx_w exists only for src/ops_sse2.c's
+   -DLZ_SSE2_GROUP=0 A/B control build (task #32). */
+void row_q41_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
+                     const int16_t *xw, int nb, int nt, int in_dim,
+                     const void *pf_end, const void *pf_end2);
+void lz_dot128_q41_mmx_w(const unsigned char *w, const int16_t *x, int32_t *out4);
+
 #else /* gcc: intrinsics, existing declarations */
 
 /* ---- wsum: src/ops.c's LZ_WSUM_PAIR, attention scoring's dot ---------- */

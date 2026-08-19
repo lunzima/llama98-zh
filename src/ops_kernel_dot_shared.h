@@ -78,4 +78,44 @@
 
 #endif /* __WATCOMC__ || LZ_DOT_MMX_EXTERN */
 
+/* ---- Q4_1 -------------------------------------------------------------- */
+#if defined(__WATCOMC__) || defined(LZ_DOT_MMX_EXTERN)
+
+#define LZ_Q41_ACC(DOT32, PF)                                          \
+    for (s = 0; s < nb; s++) {                                         \
+        const unsigned char *pf_ = wn + (size_t)(s + LZ_PF_DIST) * 16; \
+        if (pf_ < wend) PF(pf_);                                       \
+        acc[s] = DOT32(wn + (size_t)s * 16, xwt + (size_t)s * 32);     \
+    }
+
+#define LZ_Q41_PFSEL(DOT32)                                              \
+    do {                                                                 \
+        int pf_m_ = lz_prefetch_mode();                                  \
+        if (pf_m_ == LZ_PF_AMD)       { LZ_Q41_ACC(DOT32, LZ_PFI_AMD); }  \
+        else if (pf_m_ == LZ_PF_LOAD) { LZ_Q41_ACC(DOT32, LZ_PFI_LOAD); } \
+        else if (pf_m_ == LZ_PF_NONE) { LZ_Q41_ACC(DOT32, LZ_PFI_NONE); } \
+        else                          { LZ_Q41_ACC(DOT32, LZ_PFI_NTA); }  \
+    } while (0)
+
+#ifdef __WATCOMC__
+/* Same 128-element step as Q8_0: fixed overhead amortized from once per
+   32 elements to once per 128, integer results bit-identical. */
+#define LZ_Q41_GROUP4(DOT128)                                              \
+    do {                                                                   \
+        for (s = 0; s < nb; s += 4) {                                      \
+            const unsigned char *pf_ = wn + (size_t)(s + LZ_PF_DIST) * 16; \
+            if (pf_ < wend) {                                              \
+                int pf_m_ = lz_prefetch_mode();                            \
+                if (pf_m_ == LZ_PF_AMD)       LZ_PFI_AMD(pf_);             \
+                else if (pf_m_ == LZ_PF_LOAD) LZ_PFI_LOAD(pf_);            \
+                else if (pf_m_ == LZ_PF_NONE) LZ_PFI_NONE(pf_);            \
+                else                          LZ_PFI_NTA(pf_);             \
+            }                                                              \
+            DOT128(wn + (size_t)s * 16, xwt + (size_t)s * 32, acc + s);    \
+        }                                                                  \
+    } while (0)
+#endif /* __WATCOMC__ */
+
+#endif /* __WATCOMC__ || LZ_DOT_MMX_EXTERN */
+
 #endif /* LZ_OPS_KERNEL_DOT_SHARED_H */
