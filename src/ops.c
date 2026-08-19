@@ -224,6 +224,13 @@ static float pow2f(int e) {
    its definition for why. */
 static float norm_ss_fixed(const float *x, int n);
 
+/* Same home and reason: the fixed output loop of lz_rmsnorm_gated, defined
+   beside norm_ss_fixed where sigmoid_q15's table and the Q15 helpers
+   live. */
+static void lz_rmsnorm_gated_out_fixed(float *o, const float *x,
+                                       const float *g, const float *w,
+                                       float inv, int n);
+
 void lz_rmsnorm(float *o, const float *x, const float *w, int n, float eps) {
     float ss = 0.0f;
     float inv;
@@ -273,21 +280,22 @@ void lz_rmsnorm_gated(float *o, const float *x, const float *g,
     float inv;
     float ssf;
     int i;
+    int fixed_ss = 0;
     if (lz_norm_mode()) {
         ssf = norm_ss_fixed(x, n);
         if (ssf >= 0.0f) {
             /* Same replacement as lz_rmsnorm: norm_ss_fixed's own 2n+2
-               in place of the 2n float ss loop. Untouched: the
-               output loop (x*inv*w*silu(g), three multiplies and no
-               add per element - the gate replaces rmsnorm's (1+w) add
-               with a multiply, so the honest per-element cost is
-               unchanged at 3) and the divide+eps (1 div, 1 add). The
-               site bills one more n than that sums to (6n+4 vs the
-               5n+4 the code performs); the extra n is folded into mul
-               here to hold the site's historical total - see B1
-               report, this looks like a real overcount. */
-            LZ_FCX(LZ_FC_NORM, 5 * n + 1, n + 1, 1, 1, 0);
+               in place of the 2n float ss loop. The output loop below
+               branches on fixed_ss: the fixed tier's own loop consumes
+               the Q15 sigmoid table directly (sigmoid_q15), so the
+               sigmoid work it does is billed here rather than at the
+               sigmoid site. Per element: sigmoid_q15 (2 mul, 2 cvt, 2
+               sub) + the silu/output expression (5 mul, 1 cvt); plus
+               norm_ss_fixed (n mul, n add, 1 mul, 1 cvt) and the
+               divide+eps (1 div, 1 add). */
+            LZ_FCX(LZ_FC_NORM, 8 * n + 1, 3 * n + 1, 1, 3 * n + 1, 0);
             ss = ssf;
+            fixed_ss = 1;
             goto have_ss_gated;
         }
     }
@@ -303,7 +311,10 @@ void lz_rmsnorm_gated(float *o, const float *x, const float *g,
 have_ss_gated:
     inv = lz_rsqrt(ss / (float)n + eps);
     /* plain w here, and the gate applies last */
-    for (i = 0; i < n; i++) o[i] = x[i] * inv * w[i] * lz_silu(g[i]);
+    if (fixed_ss)
+        lz_rmsnorm_gated_out_fixed(o, x, g, w, inv, n);
+    else
+        for (i = 0; i < n; i++) o[i] = x[i] * inv * w[i] * lz_silu(g[i]);
 }
 
 void lz_l2norm(float *o, const float *x, int n, float eps) {
@@ -4325,6 +4336,37 @@ static float norm_ss_fixed(const float *x, int n) {
 static float norm_ss_fixed(const float *x, int n) {
     (void)x; (void)n;
     return -1.0f;
+}
+#endif
+
+#if LZ_GDN_FIXED
+/* Fixed output loop of lz_rmsnorm_gated, defined here (beside
+   norm_ss_fixed) because it needs sigmoid_q15's table, which is set up
+   above this line. The gate's sigmoid is consumed straight from the Q15
+   table (sigmoid_q15) instead of through lz_silu/lz_sigmoid, so this
+   loop owns its sigmoid work and the sigmoid site stops billing it.
+
+   The VALUE is the float tier's own, bit for bit: the 1/32768 scale is
+   a power of two, so the last multiply by it is exact and the
+   reordering (silu multiply, then scale) is bit-neutral - verified
+   against the lz_silu chain over random values, zero mismatches. A
+   fixed-point product instead would change the fixed tier's output,
+   which is barred. */
+static void lz_rmsnorm_gated_out_fixed(float *o, const float *x,
+                                       const float *g, const float *w,
+                                       float inv, int n) {
+    int i;
+    for (i = 0; i < n; i++) {
+        int32_t sig = sigmoid_q15(g[i]);
+        o[i] = (x[i] * inv * w[i]) * (g[i] * (float)sig) *
+               (1.0f / 32768.0f);
+    }
+}
+#else
+static void lz_rmsnorm_gated_out_fixed(float *o, const float *x,
+                                       const float *g, const float *w,
+                                       float inv, int n) {
+    (void)o; (void)x; (void)g; (void)w; (void)inv; (void)n;
 }
 #endif
 
