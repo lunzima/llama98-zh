@@ -53,13 +53,14 @@
         else                          { LZ_Q8_ACC(DOT32, LZ_PFI_NTA); }  \
     } while (0)
 
-#ifdef __WATCOMC__
+#if defined(__WATCOMC__) || (defined(LZ_G128_GCC) && LZ_G128_GCC)
 /* One group (128 elements) at a time when nb is a multiple of 4: the
    fixed overhead - mask construction, prologue/epilogue - is amortized
    from once per 32 elements to once per 128. Integer results are
    bit-identical to the per-32 version. All current tensors have in_dim
-   a multiple of 128 (512/768/1024/3072). Watcom-only: gcc has no
-   128-wide group kernels for any format. */
+   a multiple of 128 (512/768/1024/3072). Watcom always carries the
+   kernels; gcc carries them behind the LZ_G128_GCC knob
+   (ops_kernel_shared.h), which defaults on to match Watcom's shape. */
 #define LZ_Q8_GROUP4(DOT128)                                            \
     do {                                                                \
         for (g = 0; g < nb; g += 4) {                                   \
@@ -74,7 +75,7 @@
             DOT128(wr + (size_t)g * 32, xwt + (size_t)g * 32, acc + g); \
         }                                                               \
     } while (0)
-#endif /* __WATCOMC__ */
+#endif /* __WATCOMC__ || LZ_G128_GCC */
 
 #endif /* __WATCOMC__ || LZ_DOT_MMX_EXTERN */
 
@@ -97,7 +98,7 @@
         else                          { LZ_Q41_ACC(DOT32, LZ_PFI_NTA); }  \
     } while (0)
 
-#ifdef __WATCOMC__
+#if defined(__WATCOMC__) || (defined(LZ_G128_GCC) && LZ_G128_GCC)
 /* Same 128-element step as Q8_0: fixed overhead amortized from once per
    32 elements to once per 128, integer results bit-identical. */
 #define LZ_Q41_GROUP4(DOT128)                                              \
@@ -114,7 +115,7 @@
             DOT128(wn + (size_t)s * 16, xwt + (size_t)s * 32, acc + s);    \
         }                                                                  \
     } while (0)
-#endif /* __WATCOMC__ */
+#endif /* __WATCOMC__ || LZ_G128_GCC */
 
 #endif /* __WATCOMC__ || LZ_DOT_MMX_EXTERN */
 
@@ -151,7 +152,7 @@
                        xwt + (size_t)s * 32);                           \
     }
 
-#ifdef __WATCOMC__
+#if defined(__WATCOMC__) || (defined(LZ_G128_GCC) && LZ_G128_GCC)
 #define LZ_Q61_GROUP4(DOT128)                                           \
     do {                                                                \
         for (s = 0; s < nb; s += 4) {                                   \
@@ -160,7 +161,7 @@
                    xwt + (size_t)s * 32, acc + s);                      \
         }                                                               \
     } while (0)
-#endif /* __WATCOMC__ */
+#endif /* __WATCOMC__ || LZ_G128_GCC */
 
 #endif /* __WATCOMC__ || LZ_DOT_MMX_EXTERN */
 
@@ -189,7 +190,7 @@
         acc[g] = DOT32(wr + (size_t)g * 32, xwt + (size_t)g * 32);        \
     }
 
-#ifdef __WATCOMC__
+#if defined(__WATCOMC__) || (defined(LZ_G128_GCC) && LZ_G128_GCC)
 #define LZ_Q16_GROUP4(DOT128)                                             \
     do {                                                                  \
         for (g = 0; g < nb; g += 4) {                                     \
@@ -197,7 +198,7 @@
             DOT128(wr + (size_t)g * 32, xwt + (size_t)g * 32, acc + g);   \
         }                                                                 \
     } while (0)
-#endif /* __WATCOMC__ */
+#endif /* __WATCOMC__ || LZ_G128_GCC */
 
 #endif /* __WATCOMC__ || LZ_DOT_MMX_EXTERN */
 

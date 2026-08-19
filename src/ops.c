@@ -2266,7 +2266,17 @@ static void row_q8_mmx_intrin(int32_t *acc32, const void *w4, const void *w2,
             }
             tk++;
         } else {
+#if defined(LZ_G128_GCC) && LZ_G128_GCC
+            /* Group-of-four path behind the LZ_G128_GCC knob (default on,
+               ops_kernel_shared.h): one call per 128 elements with the
+               mask construction hoisted, mirroring the Watcom row. The
+               per-32 fallback stays LZ_Q8_ACC/NTA exactly as before, so
+               toggling the knob changes only the group path. */
+            if ((nb & 3) == 0) LZ_Q8_GROUP4(dot128_x16_mmx);
+            else               LZ_Q8_ACC(dot32_x16_mmx, LZ_PFI_NTA);
+#else
             LZ_Q8_ACC(dot32_x16_mmx, LZ_PFI_NTA);
+#endif
         }
     }
 }
@@ -2839,7 +2849,12 @@ static void row_q41_mmx_intrin(int32_t *acc32, const void *w4, const void *w2,
             }
             tk++;
         } else {
+#if defined(LZ_G128_GCC) && LZ_G128_GCC
+            if ((nb & 3) == 0) LZ_Q41_GROUP4(dot128_q41_mmx);
+            else               LZ_Q41_ACC(dot32_q41_mmx, LZ_PFI_NTA);
+#else
             LZ_Q41_ACC(dot32_q41_mmx, LZ_PFI_NTA);
+#endif
         }
     }
 }
@@ -3040,7 +3055,12 @@ static void row_q61_mmx_intrin(int32_t *acc32, const void *w4, const void *w2v,
             tk++;
             continue;
         }
+#if defined(LZ_G128_GCC) && LZ_G128_GCC
+        if ((nb & 3) == 0) LZ_Q61_GROUP4(dot128_q61_mmx);
+        else               LZ_Q61_ACC(dot32_q61_mmx);
+#else
         LZ_Q61_ACC(dot32_q61_mmx);
+#endif
     }
 }
 
@@ -3215,7 +3235,12 @@ static void row_q16_mmx_intrin(int32_t *acc32, const void *w4, const void *w2,
     for (tk = 0; tk < nt; tk++) {
         const int16_t *xwt = xw + (size_t)tk * in_dim;
         int32_t *acc = acc32 + (size_t)tk * nb;
+#if defined(LZ_G128_GCC) && LZ_G128_GCC
+        if ((nb & 3) == 0) LZ_Q16_GROUP4(dot128_q16_mmx);
+        else               LZ_Q16_ACC(dot32_q16_mmx);
+#else
         LZ_Q16_ACC(dot32_q16_mmx);
+#endif
     }
 }
 
@@ -5704,16 +5729,16 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
 #define LZ_G128_Q61 1
 #define LZ_G128_Q16 1
 #else
-/* No gcc row kernel calls a group-of-four kernel, for ANY format. The
-   assembly ones hoist mask construction across four sub-blocks by hand;
-   the intrinsics ones leave that to the compiler, which is what a
-   compiler does with a loop-invariant. Whether a hand-written gcc
-   version would differ has NOT been measured, so this is "not written",
-   not "nothing to offer". */
-#define LZ_G128_Q8  0
-#define LZ_G128_Q41 0
-#define LZ_G128_Q61 0
-#define LZ_G128_Q16 0
+/* The gcc group kernels (dot128_*_mmx) exist and are wired into the row
+   functions behind the LZ_G128_GCC knob (default 1, ops_kernel_shared.h)
+   - see that knob's comment for the A/B rationale. This column tracks
+   the wiring: LZ_G128_GCC=0 reverts it to '.' and the row functions to
+   the per-32 path. The claim is "wired in", not "measured faster" -
+   whether the group path wins on any machine is unmeasured. */
+#define LZ_G128_Q8  LZ_G128_GCC
+#define LZ_G128_Q41 LZ_G128_GCC
+#define LZ_G128_Q61 LZ_G128_GCC
+#define LZ_G128_Q16 LZ_G128_GCC
 #endif
 /* T2 on both compilers, and this one IS "nothing to offer". Derived by
    comparing against q6_1, which unpacks a 2-bit plane the same way and

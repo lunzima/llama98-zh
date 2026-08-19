@@ -13,16 +13,18 @@
 |---|---|---|---|
 | mmx / sse2 | x | x | 有 |
 | sse | . | . | 指令集不可能（#30 逐条核对过） |
-| g128（Q8/Q41/Q61/Q16） | . | G | **not written（gcc 缺）** |
+| g128（Q8/Q41/Q61/Q16） | G | G | **已补写（2026-08-20，任务 #12）**，见 `dot128_*_mmx` |
 | g128（T2） | . | . | nothing to offer（核对过：发出同四条分开调用一样的序列） |
 
-`ops.c:5568` 的注释自己写明了：*"Whether a hand-written gcc version would
-differ has NOT been measured, so this is 'not written', not 'nothing to offer'"*。
+`ops.c` 原注释所说 *"Whether a hand-written gcc version would differ has NOT
+been measured, so this is 'not written', not 'nothing to offer'"* 已经兑现：
+gcc 的 128 组内核（`dot128_*_mmx`，`src/ops_kernel_dot_mmx.h`）现已写并入编，
+默认走组路径（`LZ_G128_GCC` 旋钮，默认 1 与 Watcom 同形；置 0 退回逐 32 路径）。
 
 g128 的减负机制是「把掩码构造（0x0F/0x03 + 零寄存器）提升到四个子块之外」，
-Watcom 的手写汇编做了，gcc 的 intrinsics 交给编译器去 hoist。**这是「能实现
-却没实现」的明确候选**，修复方向是手写 gcc 的 128 组内核并实测（铁律三：目标机
-实测，本机数字不作数）。
+Watcom 的手写汇编做了，gcc 的 intrinsics 版本这次也做了（`z`/`m0f`/`m03` 横跨
+四个子块存活）。**逐位一致已验**（`chk=` 与逐 32 路径、与 Watcom 构建全等），
+但**收益未量**——铁律三：目标机实测，本机数字不作数。
 
 ## 线 2：x87 减负（未定点化的标量浮点算子）
 
@@ -61,8 +63,10 @@ IDT WinChip 的 x87 弱）上收益最大。
 
 | 线 | 发现 | 优先级 |
 |---|---|---|
-| 1 | gcc 的 g128 缺格（not written，hoist mask 减负） | 中（需实测手写 gcc 是否更快） |
+| 1 | gcc 的 g128 缺格（not written，hoist mask 减负）→ **已补写（2026-08-20）**，`chk=` 逐位一致；收益未量 | 中（需目标机实测 gcc 是否更快） |
 | 2 | exp / rsqrt 未定点化（x87 标量） | 中（目标机弱 x87 上收益大） |
 | 3 | sigmoid fixed 的解量化重复（37.6% f32 可去重） | **高**（去重能再砍 fixed 档最大块） |
 
 三线都是「排查产出」，修复是后续（各自需独立设计 + 矩阵构建验证）。
+线 1 的补写见本文件开头「线 1」一节；收益与旋钮（`LZ_G128_GCC`）见
+`src/ops_kernel_shared.h` 的注释。

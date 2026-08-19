@@ -208,6 +208,25 @@ extern void lz_pf_amd(const void *p);
 #define LZ_SSE2_GROUP 1
 #endif
 
+/* gcc's 128-element MMX group kernels (task #12). Watcom ships its group
+   kernels always-on (its LZ_G128_* are 1). gcc's were "not written, not
+   nothing-to-offer": the mask construction the Watcom assembly hoists
+   across its four sub-blocks (0x0F/0x03 and a zero register left live in
+   %mm) is exactly what a compiler does with a loop-invariant, and whether
+   a hand-written gcc intrinsics version would emit a different shape than
+   four separate 32-element calls was never measured. The kernels are
+   written now (dot128_*_mmx, src/ops_kernel_dot_mmx.h), bit-identical by
+   construction: each sub-block's int32 dot folds and stores separately,
+   so the four accumulators are the same four ints the per-32 path writes.
+
+   Whether the group path WINS on any given machine is a separate,
+   unmeasured question (iron law 3: the dev machine is not the target),
+   so it is a knob. Default 1 matches Watcom's shipped shape; build with
+   -DLZ_G128_GCC=0 to run the per-32 path on the dev machine. */
+#ifndef LZ_G128_GCC
+#define LZ_G128_GCC 1
+#endif
+
 /* No prefetch at all. Not a platform fallback - a deliberately
    reachable mode, because the LATENCY TIER is a thing we need to
    measure and could not.

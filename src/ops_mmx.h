@@ -254,6 +254,19 @@ void dot32_q61_mmx_2(const unsigned char *w4, const unsigned char *w2,
 int32_t dot32_t2_mmx(const unsigned char *w2, const int16_t *x);
 int32_t dot32_q16_mmx(const int16_t *w, const int16_t *x);
 
+/* ---- 128-element group kernels (task #12) -----------------------------
+   One call per 128 elements instead of four dot32 calls, with the mask
+   constants (0x0F/0x03 and the zero register) hoisted across the four
+   sub-blocks exactly as the Watcom #pragma aux twins in src/ops_mmx.c
+   do. Bodies in src/ops_kernel_dot_mmx.h; bit-identical by construction
+   (each sub-block's int32 dot folds and stores separately). Wired into
+   the gcc row functions behind LZ_G128_GCC (ops_kernel_shared.h). */
+void dot128_x16_mmx(const int8_t *w, const int16_t *x, int32_t *out4);
+void dot128_q16_mmx(const int16_t *w, const int16_t *x, int32_t *out4);
+void dot128_q41_mmx(const unsigned char *w, const int16_t *x, int32_t *out4);
+void dot128_q61_mmx(const unsigned char *w4, const unsigned char *w2,
+                    const int16_t *x, int32_t *out4);
+
 /* ---- Q8 group-scale amax --------------------------------------------- */
 unsigned lz_amax32_mmx(const float *x, int n);
 

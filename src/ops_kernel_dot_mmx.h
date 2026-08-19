@@ -81,6 +81,46 @@ void dot32_x16_mmx_2(const int8_t *w, const int16_t *xa, const int16_t *xb,
     *ob = _mm_cvtsi64_si32(sb);
 }
 
+/* One 128-element group, four 32-element sub-blocks, ONE zero-register
+   setup instead of four - the Watcom twin (lz_dot128_x16_asm,
+   src/ops_mmx.c) hoists its pxor mm7,mm7 across all four sub-blocks by
+   hand, and this does the same with a single `z` whose liveness spans the
+   whole function, so the compiler is free to keep it resident instead of
+   reconstructing it per sub-block. Each sub-block accumulates into its
+   own `s`, folds and stores separately: out4[] holds the same four ints
+   four dot32_x16_mmx calls would write, in the same order - bit-identical
+   by construction, and the per-sub-block pmaddwd sequence matches the
+   32-element kernel step for step. */
+void dot128_x16_mmx(const int8_t *w, const int16_t *x, int32_t *out4) {
+    __m64 z = _mm_setzero_si64();
+    int sb;
+    for (sb = 0; sb < 4; sb++) {
+        __m64 s = _mm_setzero_si64();
+        __m64 w0, w1, w2, w3, x0, t;
+        memcpy(&w0, w + (size_t)sb * 32, 8);
+        memcpy(&w1, w + (size_t)sb * 32 + 8, 8);
+        memcpy(&w2, w + (size_t)sb * 32 + 16, 8);
+        memcpy(&w3, w + (size_t)sb * 32 + 24, 8);
+#define MMX_MAC128(WREG, XOFF)                                          \
+        memcpy(&x0, x + (size_t)sb * 32 + (XOFF), 8);                   \
+        t = _mm_unpacklo_pi8(z, WREG);                                  \
+        t = _mm_madd_pi16(t, x0);                                       \
+        s = _mm_add_pi32(s, t);                                         \
+        memcpy(&x0, x + (size_t)sb * 32 + (XOFF) + 4, 8);               \
+        t = _mm_unpackhi_pi8(z, WREG);                                  \
+        t = _mm_madd_pi16(t, x0);                                       \
+        s = _mm_add_pi32(s, t)
+        MMX_MAC128(w0, 0);
+        MMX_MAC128(w1, 8);
+        MMX_MAC128(w2, 16);
+        MMX_MAC128(w3, 24);
+#undef MMX_MAC128
+        t = _mm_srli_si64(s, 32);
+        s = _mm_add_pi32(s, t);
+        out4[sb] = (int32_t)_mm_cvtsi64_si32(s);
+    }
+}
+
 /* ---- Q16_0: dot32_q16_mmx ----------------------------------------------
    Watcom twin: lz_dot32_q16_asm, src/ops_kernel_dot.h ~563-597.
    Dev-build twin (rule 2): mirrors the asm step for step, eight pmaddwd
@@ -99,6 +139,28 @@ int32_t dot32_q16_mmx(const int16_t *w, const int16_t *x) {
     t = _mm_srli_si64(s, 32);
     s = _mm_add_pi32(s, t);
     return (int32_t)_mm_cvtsi64_si32(s);
+}
+
+/* The 128-element Q16 group kernel: int16 weights need no unpack, so
+   there is no mask to hoist - what the Watcom twin (lz_dot128_q16_asm)
+   amortizes is the per-32 call and its prologue, by processing four
+   sub-blocks in one function. Same shape: eight pmaddwd into one
+   accumulator per sub-block, fold, store separately. */
+void dot128_q16_mmx(const int16_t *w, const int16_t *x, int32_t *out4) {
+    int sb;
+    for (sb = 0; sb < 4; sb++) {
+        __m64 s = _mm_setzero_si64(), w0, x0, t;
+        int k;
+        for (k = 0; k < 32; k += 4) {
+            memcpy(&w0, w + (size_t)sb * 32 + k, 8);
+            memcpy(&x0, x + (size_t)sb * 32 + k, 8);
+            t = _mm_madd_pi16(w0, x0);
+            s = _mm_add_pi32(s, t);
+        }
+        t = _mm_srli_si64(s, 32);
+        s = _mm_add_pi32(s, t);
+        out4[sb] = (int32_t)_mm_cvtsi64_si32(s);
+    }
 }
 
 /* ---- Q4_1: dot32_q41_mmx / dot32_q41_mmx_2 -----------------------------
@@ -171,6 +233,48 @@ void dot32_q41_mmx_2(const unsigned char *w, const int16_t *xa,
     b = _mm_srli_si64(sb, 32);
     sb = _mm_add_pi32(sb, b);
     *ob = (int32_t)_mm_cvtsi64_si32(sb);
+}
+
+/* One 128-element group, four 32-element sub-blocks, ONE nibble unpack
+   setup - the Watcom twin (lz_dot128_q41_asm) hoists its zero register
+   AND its 0x0F mask across all four sub-blocks; this hoists the same
+   two (`z`, `m0f`), leaving them live for the whole function instead of
+   reconstructing them per sub-block. Per sub-block the sequence matches
+   dot32_q41_mmx: the low-nibble byte pair (bytes 0..7, 8..15) feeds
+   activation offsets +0/+8 and the high-nibble pair feeds +16/+24, each
+   unpacked low and high, pmaddwd, accumulate into that sub-block's own
+   `s`, fold, store. out4[] is the same four ints four dot32_q41_mmx
+   calls would write. */
+void dot128_q41_mmx(const unsigned char *w, const int16_t *x, int32_t *out4) {
+    const __m64 m0f = (__m64)0x0F0F0F0F0F0F0F0FULL;
+    __m64 z = _mm_setzero_si64();
+    int sb;
+    for (sb = 0; sb < 4; sb++) {
+        __m64 s = _mm_setzero_si64();
+        __m64 b, lo, hi, x0, t;
+#define MMX_Q41_128(BOFF, XOFF)                                         \
+        memcpy(&b, w + (size_t)sb * 16 + (BOFF), 8);                    \
+        lo = _mm_and_si64(b, m0f);                                      \
+        hi = _mm_and_si64(_mm_srli_pi16(b, 4), m0f);                    \
+        memcpy(&x0, x + (size_t)sb * 32 + (XOFF), 8);                   \
+        t = _mm_madd_pi16(_mm_unpacklo_pi8(z, lo), x0);                 \
+        s = _mm_add_pi32(s, t);                                         \
+        memcpy(&x0, x + (size_t)sb * 32 + (XOFF) + 4, 8);               \
+        t = _mm_madd_pi16(_mm_unpackhi_pi8(z, lo), x0);                 \
+        s = _mm_add_pi32(s, t);                                         \
+        memcpy(&x0, x + (size_t)sb * 32 + (XOFF) + 16, 8);              \
+        t = _mm_madd_pi16(_mm_unpacklo_pi8(z, hi), x0);                 \
+        s = _mm_add_pi32(s, t);                                         \
+        memcpy(&x0, x + (size_t)sb * 32 + (XOFF) + 20, 8);              \
+        t = _mm_madd_pi16(_mm_unpackhi_pi8(z, hi), x0);                 \
+        s = _mm_add_pi32(s, t)
+        MMX_Q41_128(0, 0);
+        MMX_Q41_128(8, 8);
+#undef MMX_Q41_128
+        t = _mm_srli_si64(s, 32);
+        s = _mm_add_pi32(s, t);
+        out4[sb] = (int32_t)_mm_cvtsi64_si32(s);
+    }
 }
 
 /* ---- T2: dot32_t2_mmx ---------------------------------------------------
@@ -288,4 +392,41 @@ void dot32_q61_mmx_2(const unsigned char *w4, const unsigned char *w2,
     *oa = (int32_t)_mm_cvtsi64_si32(sa);
     sb = _mm_add_pi32(sb, _mm_srli_si64(sb, 32));
     *ob = (int32_t)_mm_cvtsi64_si32(sb);
+}
+
+/* One 128-element group, four 32-element sub-blocks, ONE two-plane
+   merge setup - the Watcom twin (lz_dot128_q61_asm) hoists its zero
+   register, its 0x0F mask and its 0x03 mask across all four sub-blocks;
+   this hoists the same three (`z`, `m0f`, `m03`). Per sub-block the
+   sequence matches dot32_q61_mmx: the four (4-bit plane half, 2-bit
+   shift) pairs against activation offsets 0/16/8/24, each unpacked low
+   and high, pmaddwd, accumulate into that sub-block's own `s`, fold,
+   store. out4[] is the same four ints four dot32_q61_mmx calls write. */
+void dot128_q61_mmx(const unsigned char *w4, const unsigned char *w2,
+                    const int16_t *x, int32_t *out4) {
+    const __m64 m0f = (__m64)0x0F0F0F0F0F0F0F0FULL;
+    const __m64 m03 = (__m64)0x0303030303030303ULL;
+    __m64 z = _mm_setzero_si64();
+    int sb;
+    for (sb = 0; sb < 4; sb++) {
+        __m64 s = _mm_setzero_si64();
+        __m64 two, blk, q, u, x0;
+        int i;
+        memcpy(&two, w2 + (size_t)sb * 8, 8);
+        for (i = 0; i < 4; i++) {
+            static const int SH[4] = { 0, 4, 2, 6 };
+            static const int XO[4] = { 0, 16, 8, 24 };
+            memcpy(&blk, w4 + (size_t)sb * 16 + ((i == 0 || i == 1) ? 0 : 8), 8);
+            q = (i == 1 || i == 3) ? _mm_srli_pi16(blk, 4) : blk;
+            q = _mm_and_si64(q, m0f);
+            u = _mm_and_si64(_mm_srli_pi16(two, SH[i]), m03);
+            q = _mm_or_si64(q, _mm_slli_pi16(u, 4));
+            memcpy(&x0, x + (size_t)sb * 32 + XO[i], 8);
+            s = _mm_add_pi32(s, _mm_madd_pi16(_mm_unpacklo_pi8(z, q), x0));
+            memcpy(&x0, x + (size_t)sb * 32 + XO[i] + 4, 8);
+            s = _mm_add_pi32(s, _mm_madd_pi16(_mm_unpackhi_pi8(z, q), x0));
+        }
+        s = _mm_add_pi32(s, _mm_srli_si64(s, 32));
+        out4[sb] = (int32_t)_mm_cvtsi64_si32(s);
+    }
 }
