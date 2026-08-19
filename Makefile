@@ -486,7 +486,13 @@ watcom-gui:
 # compiles its own throwaway ops_sse2.c objects (both toolchains, both
 # LZ_SSE2_GROUP settings) rather than depending on watcom-cli having
 # already produced one, so it does not need to come after it.
-check: dedupe-gate mm-alias-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate
+check: dead-ifndef-gate dedupe-gate mm-alias-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate
+
+# A "#ifndef X" whose X is already defined upstream (a header, or a
+# second #ifndef in the same file) is dead code that lies about the default.
+.PHONY: dead-ifndef-gate
+dead-ifndef-gate:
+	@bash build/dead_ifndef_gate.sh
 
 .PHONY: dedupe-gate
 dedupe-gate:
