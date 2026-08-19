@@ -118,4 +118,50 @@
 
 #endif /* __WATCOMC__ || LZ_DOT_MMX_EXTERN */
 
+/* ---- Q6_1 --------------------------------------------------------------
+   Two weight streams (4-bit plane wn, 2-bit plane w2), so its own
+   prefetch macro covers both bounds - see the original comment at this
+   macro's old home in src/ops.c: the 2-bit plane is a real, narrower
+   hot stream, not belt-and-braces. */
+#if defined(__WATCOMC__) || defined(LZ_DOT_MMX_EXTERN)
+
+#define LZ_Q61_PF(S)                                                    \
+    do {                                                                \
+        const unsigned char *pf_ = wn + (size_t)((S) + LZ_PF_DIST) * 16; \
+        const unsigned char *pf2_ = w2 + (size_t)((S) + LZ_PF_DIST) * 8; \
+        int pf_m_ = lz_prefetch_mode();                                 \
+        if (pf_ < wend) {                                               \
+            if (pf_m_ == LZ_PF_AMD)       LZ_PFI_AMD(pf_);              \
+            else if (pf_m_ == LZ_PF_LOAD) LZ_PFI_LOAD(pf_);             \
+            else if (pf_m_ == LZ_PF_NONE) LZ_PFI_NONE(pf_);             \
+            else                          LZ_PFI_NTA(pf_);              \
+        }                                                               \
+        if (pf2_ < wend2) {                                             \
+            if (pf_m_ == LZ_PF_AMD)       LZ_PFI_AMD(pf2_);             \
+            else if (pf_m_ == LZ_PF_LOAD) LZ_PFI_LOAD(pf2_);            \
+            else if (pf_m_ == LZ_PF_NONE) LZ_PFI_NONE(pf2_);            \
+            else                          LZ_PFI_NTA(pf2_);             \
+        }                                                               \
+    } while (0)
+
+#define LZ_Q61_ACC(DOT32)                                               \
+    for (s = 0; s < nb; s++) {                                          \
+        LZ_Q61_PF(s);                                                   \
+        acc[s] = DOT32(wn + (size_t)s * 16, w2 + (size_t)s * 8,         \
+                       xwt + (size_t)s * 32);                           \
+    }
+
+#ifdef __WATCOMC__
+#define LZ_Q61_GROUP4(DOT128)                                           \
+    do {                                                                \
+        for (s = 0; s < nb; s += 4) {                                   \
+            LZ_Q61_PF(s);                                               \
+            DOT128(wn + (size_t)s * 16, w2 + (size_t)s * 8,             \
+                   xwt + (size_t)s * 32, acc + s);                      \
+        }                                                               \
+    } while (0)
+#endif /* __WATCOMC__ */
+
+#endif /* __WATCOMC__ || LZ_DOT_MMX_EXTERN */
+
 #endif /* LZ_OPS_KERNEL_DOT_SHARED_H */

@@ -85,6 +85,12 @@ void row_t2_sse2_asm(int32_t *acc32, const void *w4, const void *w2v,
                      const int16_t *xw, int nb, int nt, int in_dim,
                      const void *pf_end, const void *pf_end2);
 
+/* task #30 (8/N): Q6_1 matmul, SSE2 tier. row_q61_sse2_asm is ALREADY
+   the real call boundary (LZ_ROW_Q61, src/ops.c). */
+void row_q61_sse2_asm(int32_t *acc32, const void *w4, const void *w2v,
+                      const int16_t *xw, int nb, int nt, int in_dim,
+                      const void *pf_end, const void *pf_end2);
+
 #else /* gcc: intrinsics */
 
 /* ---- matmul row kernels, one per quantized weight format -------------
