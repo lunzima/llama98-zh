@@ -173,8 +173,7 @@ extern void lz_pf_load(const void *p);
 
 extern void lz_pf_nta(const void *p);
 #pragma aux lz_pf_nta =             \
-    ".686"                          \
-    "prefetchnta [eax]"             \
+    "db 0x0F, 0x18, 0x00"           \
     __parm [__eax] __modify []
 extern void lz_pf_amd(const void *p);
 #pragma aux lz_pf_amd =                 ".686"                              "db 0x0F, 0x0D, 0x00"               __parm [__eax] __modify []

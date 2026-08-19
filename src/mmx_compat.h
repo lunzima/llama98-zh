@@ -8,6 +8,9 @@
 #define LZ_MMX_COMPAT_H
 
 #ifdef __WATCOMC__
+#if defined(__MMX__)
+/* Kernel TU: -D__MMX__ is given only to the ISA-suffixed units, so this
+   branch pulls the full intrinsics set. */
 #include <mmintrin.h>
 #define _mm_unpacklo_pi8(a, b) _m_punpcklbw(a, b)
 #define _mm_unpackhi_pi8(a, b) _m_punpckhbw(a, b)
@@ -18,6 +21,17 @@
 #define _mm_setzero_si64()     _m_from_int(0)
 #define _mm_cvtsi64_si32(s)    _m_to_int(s)
 #define _mm_empty()            _m_empty()
+#else
+/* Non-kernel TU, low ISA floor: <mmintrin.h> will not compile here (its
+   _m_* intrinsics are .586-class), but this unit still owes a real emms
+   after calling into the suffixed TUs' MMX kernels. Emit the opcode as
+   raw bytes - emms is 0F 77 - so the assembler never sees the mnemonic
+   and the -4r/-3r ceiling cannot reject it. Same trick lz_pf_amd uses
+   for prefetchw. No .586 directive: db needs none. */
+extern void lz_mmx_empty_local(void);
+#pragma aux lz_mmx_empty_local = "db 0x0F, 0x77" __parm [] __modify __exact []
+#define _mm_empty()            lz_mmx_empty_local()
+#endif
 /* Gated on __MMX__, not on the architecture. A translation unit built
    without -mmmx must not pull this header in: <mmintrin.h> refuses to
    compile there, and more importantly a unit that never sees an MMX
