@@ -5,10 +5,17 @@
 #   build/ci.sh
 #
 # Stages, each independently PASS / FAIL / SKIP, none silent:
-#   1. make native      (gcc)
-#   2. make watcom-cli   (Open Watcom, the target compiler)
+#   1. make native             (gcc)
+#   2. make watcom-cli          (Open Watcom, the target compiler)
 #   3. llama98 <dir> --check on a curated set of KunMoe checkpoints
 #   4. build/arm/parity_gate.sh (x86 <-> ARMv5TE bit-identity)
+#   5. build/switch_matrix_gate.sh - every control switch's non-default
+#      value compiled on gcc + Watcom, so a "configuration nobody
+#      happens to build" fails here instead of silently diverging
+#   6. make watcom-gui / watcom-dll / watcom-dos (the remaining Watcom
+#      targets; DOS is left out of `make check` by design)
+#   7. build/x87/build_engine.sh under WSL (32-bit x87 gcc, the fourth
+#      toolchain shape)
 #
 # Judging discipline (this repo has paid for getting this wrong before):
 #   - Never grep bare 'error' - "0 errors" contains the substring.
@@ -51,7 +58,7 @@ freshness_sentinel() {
 # ---------------------------------------------------------------------
 # Stage 1: make native (gcc)
 # ---------------------------------------------------------------------
-echo "==== [1/4] make native ===="
+echo "==== [1/7] make native ===="
 NATIVE_EXE="$ROOT/llama98.exe"
 [ -e "$NATIVE_EXE" ] || NATIVE_EXE="$ROOT/llama98"
 LOG=build/ci-native.log
@@ -90,7 +97,7 @@ rm -f "$SENTINEL"
 # Stage 2: make watcom-cli (Open Watcom, the target compiler)
 # ---------------------------------------------------------------------
 echo
-echo "==== [2/4] make watcom-cli ===="
+echo "==== [2/7] make watcom-cli ===="
 WATCOM_EXE="$ROOT/llama98-w.exe"
 WATCOM_OBJDIR="$ROOT/build/watcom/cli"
 LOG=build/ci-watcom-cli.log
@@ -142,7 +149,7 @@ rm -f "$SENTINEL"
 # Stage 3: llama98 <dir> --check on a curated set of KunMoe checkpoints
 # ---------------------------------------------------------------------
 echo
-echo "==== [3/4] model --check sweep ===="
+echo "==== [3/7] model --check sweep ===="
 MODELS_ROOT=${MODELS_ROOT:-/e/LLM/models}
 # Curated, not a blind sweep of every directory under MODELS_ROOT:
 # a usable sweep is a handful of representative checkpoints, and
@@ -189,7 +196,7 @@ fi
 # Stage 4: x86 <-> ARMv5TE parity gate
 # ---------------------------------------------------------------------
 echo
-echo "==== [4/4] ARM parity gate ===="
+echo "==== [4/7] ARM parity gate ===="
 ARM_MODEL="$MODELS_ROOT/kunkun98-pilot-20260806"
 LOG=build/ci-arm.log
 if [ "$native_ok" -ne 1 ]; then
@@ -218,6 +225,113 @@ else
             FAIL=$((FAIL + 1))
             ;;
     esac
+fi
+
+# ---------------------------------------------------------------------
+# Stage 5: control-switch matrix (every non-default value, gcc + Watcom)
+# ---------------------------------------------------------------------
+echo
+echo "==== [5/7] control-switch matrix ===="
+LOG=build/ci-switch-matrix.log
+build/switch_matrix_gate.sh >"$LOG" 2>&1
+MATRIX_RC=$?
+cat "$LOG"
+case $MATRIX_RC in
+    0)
+        echo "PASS: control-switch matrix"
+        note "PASS  control-switch matrix"
+        PASS=$((PASS + 1))
+        ;;
+    2)
+        REASON=$(grep -m1 '^switch_matrix_gate: ERROR' "$LOG")
+        echo "SKIP: control-switch matrix ($REASON)"
+        note "SKIP  control-switch matrix ($REASON)"
+        SKIP=$((SKIP + 1))
+        ;;
+    *)
+        echo "FAIL: control-switch matrix"
+        note "FAIL  control-switch matrix"
+        FAIL=$((FAIL + 1))
+        ;;
+esac
+
+# ---------------------------------------------------------------------
+# Stage 6: the remaining Watcom targets. `make check` builds gui and dll
+# but deliberately leaves out dos (it needs the extender stub and is a
+# separate delivery decision); none of the three is in ci.sh's stage 2.
+# ---------------------------------------------------------------------
+echo
+echo "==== [6/7] watcom gui/dll/dos targets ===="
+for t in watcom-gui watcom-dll watcom-dos; do
+    case $t in
+        watcom-gui) EXE="$ROOT/kunkun98-w.exe" ;;
+        watcom-dll) EXE="$ROOT/llama98.dll" ;;
+        watcom-dos) EXE="$ROOT/llama98-dos.exe" ;;
+    esac
+    LOG="build/ci-$t.log"
+    SENTINEL=$(freshness_sentinel)
+    if ! make -B "$t" >"$LOG" 2>&1; then
+        echo "FAIL: make $t (see $LOG)"
+        tail -n 25 "$LOG"
+        note "FAIL  make $t"
+        FAIL=$((FAIL + 1))
+    elif [ ! -e "$EXE" ]; then
+        echo "FAIL: make $t exited 0 but $EXE does not exist"
+        note "FAIL  make $t (binary missing)"
+        FAIL=$((FAIL + 1))
+    elif [ ! "$EXE" -nt "$SENTINEL" ]; then
+        echo "FAIL: make $t exited 0 but $EXE was NOT rebuilt (stale artifact)"
+        note "FAIL  make $t (stale artifact)"
+        FAIL=$((FAIL + 1))
+    else
+        SZ=$(wc -c < "$EXE")
+        echo "PASS: make $t ($EXE, $SZ bytes)"
+        note "PASS  make $t"
+        PASS=$((PASS + 1))
+    fi
+    rm -f "$SENTINEL"
+done
+
+# ---------------------------------------------------------------------
+# Stage 7: 32-bit x87 gcc build under WSL (Windows gcc has no 32-bit
+# libs). The fourth toolchain shape - a Socket-7-class target with x87
+# as its only float unit. SKIP when WSL is not usable, never PASS.
+# ---------------------------------------------------------------------
+echo
+echo "==== [7/7] 32-bit x87 gcc build (WSL) ===="
+LOG=build/ci-x87.log
+if ! command -v wsl >/dev/null 2>&1; then
+    echo "SKIP: 32-bit x87 build (wsl not installed)"
+    note "SKIP  32-bit x87 build (wsl not installed)"
+    SKIP=$((SKIP + 1))
+elif ! wsl bash -lc 'printf "int main(void){return 0;}\n" >/tmp/_m32t.c && gcc -m32 /tmp/_m32t.c -o /tmp/_m32t 2>/dev/null' >/dev/null 2>&1; then
+    echo "SKIP: 32-bit x87 build (WSL present but no gcc -m32 multilib)"
+    note "SKIP  32-bit x87 build (no -m32 multilib in WSL)"
+    SKIP=$((SKIP + 1))
+else
+    # $ROOT is Git Bash shaped (/e/llama98-zh); the WSL cd needs the
+    # /mnt/e/... shape. The build script finds the repo root itself.
+    WSL_ROOT=$ROOT
+    case "$ROOT" in
+        /[a-z]/*) WSL_ROOT="/mnt/$(echo "$ROOT" | cut -c2)/$(echo "$ROOT" | cut -c4-)" ;;
+    esac
+    if wsl bash -lc "cd '$WSL_ROOT' && bash build/x87/build_engine.sh" >"$LOG" 2>&1; then
+        if grep -q '^linked:' "$LOG"; then
+            echo "PASS: 32-bit x87 build (WSL)"
+            note "PASS  32-bit x87 build (WSL)"
+            PASS=$((PASS + 1))
+        else
+            echo "FAIL: 32-bit x87 build exited 0 but no 'linked:' line in $LOG"
+            tail -n 10 "$LOG"
+            note "FAIL  32-bit x87 build (no linked binary)"
+            FAIL=$((FAIL + 1))
+        fi
+    else
+        echo "FAIL: 32-bit x87 build (WSL) - see $LOG"
+        tail -n 15 "$LOG"
+        note "FAIL  32-bit x87 build (WSL)"
+        FAIL=$((FAIL + 1))
+    fi
 fi
 
 # ---------------------------------------------------------------------
