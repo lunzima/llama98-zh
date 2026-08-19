@@ -24,25 +24,28 @@ GUI := main layout localized_strings worker modelload session compat40 \
 COM := stream settings command savechat mru chatfile session
 
 # src/ops_mmx.c, src/ops_mmx_sse.c and src/ops_sse2.c are deliberately
-# NOT in $(ENG): Watcom and the ARM cross-build must never compile them
-# (they carry their own kernels inline - #pragma aux for Watcom, nothing
-# at all for ARM). All three gcc TUs built with -mmmx -msse -msse2;
-# every other gcc file gets none of the three, plus LZ_MMX_TU/LZ_SSE2_TU
-# so its dispatch code knows their symbols are still part of the link.
-# See src/ops_mmx.h and src/ops_sse2.h. Split by ISA tier, not one file,
-# for a reason specific to the 32-bit x87 target
-# (build/x87/build_engine.sh, not this Makefile): gcc treats -msse (and
-# -msse2) as license to assume CMOV is available for the WHOLE
-# translation unit it is passed to, not just the SSE-touching functions
-# in it, so the plain-MMX functions (ops_mmx.c), the genuinely-SSE1 ones
-# (ops_mmx_sse.c) and the genuinely-SSE2 ones (ops_sse2.c) need to be
-# compiled with different -march there. x86-64 has no such distinction
-# (CMOV is baseline), so this Makefile compiles all three the same way
-# regardless - -msse2 costs nothing extra here since the x86-64 ABI
-# already requires it as a baseline on every target this Makefile builds
-# for.
-ENG_MMX_GCC := ops_mmx ops_mmx_sse ops_sse2
-ENG_MMX_GCC_SRCS := $(addprefix src/,$(addsuffix .c,$(ENG_MMX_GCC)))
+# NOT in $(ENG) on EITHER toolchain, but for two different reasons as of
+# task #30. gcc: they carry their own -mmmx/-msse/-msse2 flags, and gcc
+# treats -msse (and -msse2) as license to assume CMOV is available for
+# the WHOLE translation unit it is passed to, not just the SSE-touching
+# functions in it - so the plain-MMX functions (ops_mmx.c), the
+# genuinely-SSE1 ones (ops_mmx_sse.c) and the genuinely-SSE2 ones
+# (ops_sse2.c) need different -march there (see
+# build/x87/build_engine.sh, not this Makefile, for where that actually
+# bites - x86-64 has no such distinction, CMOV is baseline, so this
+# Makefile compiles all three the same way regardless). Watcom: they
+# carry #pragma aux bodies needing .586/.686 codegen, and -Nr/-Ns is a
+# ceiling its own per-function directives cannot exceed (task #28's
+# finding) - see HIGH_CPU_FLAGS below, which now applies to these three
+# files too, on every Watcom target. The ARM cross-build must still
+# never compile them: it has no MMX/SSE register file of any kind.
+#
+# Every gcc ENG file gets LZ_MMX_TU/LZ_SSE2_TU (but not -mmmx/-msse/
+# -msse2 themselves) so its dispatch code knows these three files'
+# symbols are still part of the link, even though its own object has
+# none of the instructions. See src/ops_mmx.h and src/ops_sse2.h.
+ENG_MMX := ops_mmx ops_mmx_sse ops_sse2
+ENG_MMX_GCC_SRCS := $(addprefix src/,$(addsuffix .c,$(ENG_MMX)))
 
 # gcc-side full paths.
 ENG_SRCS := $(addprefix src/,$(addsuffix .c,$(ENG)))
@@ -71,7 +74,7 @@ FP_STRICT := -ffp-contract=off
 # ops.c - amax.h, dot.h and q8round.h's dispatch tables are #included
 # into it and read the same macros. src/ops_mmx.c, src/ops_mmx_sse.c and
 # src/ops_sse2.c are compiled with these flags PLUS -mmmx -msse -msse2,
-# never with them removed - see the $(ENG_MMX_GCC) rules.
+# never with them removed - see the $(ENG_MMX) rules.
 MMX_TU_DEFINE := -DLZ_MMX_TU=1
 SSE2_TU_DEFINE := -DLZ_SSE2_TU=1
 CFLAGS  ?= -O2 -std=c99 -Wall -Wextra -Isrc $(FP_STRICT) $(MMX_TU_DEFINE) $(SSE2_TU_DEFINE)
@@ -88,15 +91,15 @@ native: llama98
 gui: kunkun98-gui
 serve: kunkun98-serve
 
-# One .o per $(ENG_MMX_GCC) file per gcc flavor below (native/serve
+# One .o per $(ENG_MMX) file per gcc flavor below (native/serve
 # share X86_64_CFLAGS, gui uses CFLAGS) - not shared across flavors, the
 # same way each Watcom target below keeps its own object dir, so a flag
 # change to one flavor cannot link in an object built with another's.
 # Pattern rules, not one rule per file: `-c -o x.o a.c b.c` is invalid
 # gcc (multiple sources cannot share one -c output), so each of
-# $(ENG_MMX_GCC)'s files needs its own compile, and there are now two.
-ENG_MMX_GCC_NATIVE_OBJS := $(addprefix build/native/,$(addsuffix .o,$(ENG_MMX_GCC)))
-ENG_MMX_GCC_GUI_OBJS    := $(addprefix build/gui/,$(addsuffix .o,$(ENG_MMX_GCC)))
+# $(ENG_MMX)'s files needs its own compile, and there are now two.
+ENG_MMX_GCC_NATIVE_OBJS := $(addprefix build/native/,$(addsuffix .o,$(ENG_MMX)))
+ENG_MMX_GCC_GUI_OBJS    := $(addprefix build/gui/,$(addsuffix .o,$(ENG_MMX)))
 
 build/native/%.o: src/%.c
 	@mkdir -p build/native
@@ -194,7 +197,16 @@ WINVER_FLAGS := -we -DWIN32_LEAN_AND_MEAN -DWINVER=$(LZ_WINVER) -D_WIN32_WINNT=$
 # inside `#if defined(__MMX__)`, so the whole block vanishes and matmul
 # falls back to the scalar reference - while staying bit-identical, which
 # is exactly why no consistency gate sees the loss.
-WATCOM_BASE := -za99 -otexan -zp4 -D__MMX__=1
+#
+# -DLZ_MMX_TU=1 -DLZ_SSE2_TU=1 (task #30): the gcc precedent's own two
+# macros, now also needed by Watcom - src/ops.c's dispatch reaches
+# src/ops_mmx.c's/ops_mmx_sse.c's/ops_sse2.c's row-granularity functions
+# (lz_p2_rows_mmx et al) through src/ops_mmx.h/ops_sse2.h declarations
+# gated on these, exactly the way gcc's LZ_P2_MMX_EXTERN-style
+# declarations always were. Harmless on every other ENG file: nothing
+# outside ops.c/ops_mmx.c/ops_mmx_sse.c/ops_sse2.c even #includes the two
+# headers that test them.
+WATCOM_BASE := -za99 -otexan -zp4 -D__MMX__=1 -DLZ_MMX_TU=1 -DLZ_SSE2_TU=1
 
 # CPU-GENERATION FLOOR (task #28). -Nr/-Ns select codegen AND calling
 # convention together; both targets below use -Nr (register convention -
@@ -214,7 +226,7 @@ WATCOM_BASE := -za99 -otexan -zp4 -D__MMX__=1
 # is what makes probing for anything above that floor at runtime safe
 # on hardware that does not have it.
 #
-# TWO FILES CANNOT USE THAT FLOOR YET: src/ops.c and src/cpucheck.c.
+# TWO FILES STILL CANNOT USE THAT FLOOR: src/ops.c and src/cpucheck.c.
 # Measured (not assumed): -Nr/-Ns is a HARD CEILING, not merely a
 # codegen preference - Watcom's own per-function ".586"/".686"
 # assembler directives (used throughout mmintrin.h and this project's
@@ -224,14 +236,18 @@ WATCOM_BASE := -za99 -otexan -zp4 -D__MMX__=1
 # Invalid instruction with current CPU setting", even though that call
 # already carries its own ".586" directive right there in the source -
 # the directive cannot override the file-level ceiling wcc386 was given.
-# ops.c needs -6r (its #include'd ops_kernel_amax.h carries ".686" for
-# a hand-written SSE kernel); cpucheck.c needs -5r. Both get -6r here
-# for one shared tier rather than three. This is a real, structural gap
-# left over from tasks #18/#22, which split gcc's translation units
-# (ops_mmx.c/ops_sse2.c) but never gave Watcom's kernels - which live
-# inline in ops.c via #include, never their own TU - the same
-# treatment; closing that gap is task #29's kernel-extraction, not this
-# one's.
+# ops.c needs -6r (its #include'd ops_kernel_amax.h/dot.h/norm.h/
+# q8round.h still carry .586/.686 hand-written kernels); cpucheck.c
+# needs -5r. Both get -6r here for one shared tier rather than two. This
+# was a real, structural gap left over from tasks #18/#22, which split
+# gcc's translation units (ops_mmx.c/ops_sse2.c) but never gave
+# Watcom's kernels - which lived inline in ops.c via #include, never
+# their own TU - the same treatment; task #30 is closing it, one kernel
+# family (and one commit) at a time. src/ops_mmx.c/ops_mmx_sse.c/
+# ops_sse2.c above already carry the GDN/KDA pass-1 and pass-2 families,
+# moved out of ops.c/ops_kernel_p2.h in task #30's first two pieces -
+# ops.c/cpucheck.c stay pinned here until amax.h/dot.h/norm.h/q8round.h
+# follow them out too.
 #
 # Checked before relying on this split being SAFE, not just necessary:
 # does wcc386, like gcc before #18/#22, autonomously reach for an
@@ -311,6 +327,9 @@ watcom-cli:
 	    if [ "$$hi" = 1 ]; then flags='$(CLI_FLAGS_HIGH)'; else flags='$(CLI_FLAGS)'; fi; \
 	    "$(WCC)" $$flags $(INC_CLI) -fo="$(CLI_OBJ)/$$f.obj" "src/$$f.c"; \
 	done
+	@set -e; for f in $(ENG_MMX); do \
+	    "$(WCC)" $(CLI_FLAGS_HIGH) $(INC_CLI) -fo="$(CLI_OBJ)/$$f.obj" "src/$$f.c"; \
+	done
 	@"$(WCC)" $(CLI_FLAGS) $(INC_CLI) -fo="$(CLI_OBJ)/common_session.obj" common/session.c
 	@"$(WCC)" $(CLI_FLAGS) $(INC_CLI) -fo="$(CLI_OBJ)/common_stream.obj" common/stream.c
 	@"$(WCC)" $(CLI_FLAGS) $(INC_CLI) -fo="$(CLI_OBJ)/_main.obj" src/cli_main.c
@@ -324,6 +343,7 @@ watcom-cli:
 	    echo "libpath $(LIBROOT)/nt"; \
 	    echo "libpath $(LIBROOT)"; \
 	    $(foreach f,$(ENG),echo "file $(CLI_OBJ)/$f.obj";) \
+	    $(foreach f,$(ENG_MMX),echo "file $(CLI_OBJ)/$f.obj";) \
 	    echo "file $(CLI_OBJ)/common_session.obj"; \
 	    echo "file $(CLI_OBJ)/common_stream.obj"; \
 	    echo "file $(CLI_OBJ)/_main.obj"; \
@@ -355,6 +375,9 @@ watcom-dos:
 	    if [ "$$hi" = 1 ]; then flags='$(DOS_FLAGS_HIGH)'; else flags='$(DOS_FLAGS)'; fi; \
 	    "$(WCC)" $$flags $(INC_DOS) -fo="$(DOS_OBJ)/$$f.obj" "src/$$f.c"; \
 	done
+	@set -e; for f in $(ENG_MMX); do \
+	    "$(WCC)" $(DOS_FLAGS_HIGH) $(INC_DOS) -fo="$(DOS_OBJ)/$$f.obj" "src/$$f.c"; \
+	done
 	@"$(WCC)" $(DOS_FLAGS) $(INC_DOS) -fo="$(DOS_OBJ)/common_session.obj" common/session.c
 	@"$(WCC)" $(DOS_FLAGS) $(INC_DOS) -fo="$(DOS_OBJ)/common_stream.obj" common/stream.c
 	@"$(WCC)" $(DOS_FLAGS) $(INC_DOS) -fo="$(DOS_OBJ)/_main.obj" src/cli_main.c
@@ -369,6 +392,7 @@ watcom-dos:
 	    echo "libpath $(LIBROOT)"; \
 	    echo "option stack=262144"; \
 	    $(foreach f,$(ENG),echo "file $(DOS_OBJ)/$f.obj";) \
+	    $(foreach f,$(ENG_MMX),echo "file $(DOS_OBJ)/$f.obj";) \
 	    echo "file $(DOS_OBJ)/common_session.obj"; \
 	    echo "file $(DOS_OBJ)/common_stream.obj"; \
 	    echo "file $(DOS_OBJ)/_main.obj"; \
@@ -393,6 +417,9 @@ watcom-dll: $(DLL_OBJ)/exports.lnk
 	    if [ "$$hi" = 1 ]; then flags='$(DLL_FLAGS_HIGH)'; else flags='$(DLL_FLAGS)'; fi; \
 	    "$(WCC)" $$flags $(INC_ENG) -fo="$(DLL_OBJ)/$$f.obj" "src/$$f.c"; \
 	done
+	@set -e; for f in $(ENG_MMX); do \
+	    "$(WCC)" $(DLL_FLAGS_HIGH) $(INC_ENG) -fo="$(DLL_OBJ)/$$f.obj" "src/$$f.c"; \
+	done
 	@{ \
 	    echo "format windows nt dll"; \
 	    echo "option map=$(DLL_OBJ)/llama98.map"; \
@@ -400,6 +427,7 @@ watcom-dll: $(DLL_OBJ)/exports.lnk
 	    echo "libpath $(LIBROOT)/nt"; \
 	    echo "libpath $(LIBROOT)"; \
 	    $(foreach f,$(ENG),echo "file $(DLL_OBJ)/$f.obj";) \
+	    $(foreach f,$(ENG_MMX),echo "file $(DLL_OBJ)/$f.obj";) \
 	    echo "library clib3r, math387r, kernel32, user32, advapi32"; \
 	} > "$(DLL_OBJ)/dll.lnk"
 	@cat "$(DLL_OBJ)/exports.lnk" >> "$(DLL_OBJ)/dll.lnk"
@@ -422,6 +450,9 @@ watcom-gui:
 	    if [ "$$hi" = 1 ]; then flags='$(GUI_FLAGS_HIGH)'; else flags='$(GUI_FLAGS)'; fi; \
 	    "$(WCC)" $$flags $(INC_GUI) -fo="$(GUI_OBJ)/$$f.obj" "src/$$f.c"; \
 	done
+	@set -e; for f in $(ENG_MMX); do \
+	    "$(WCC)" $(GUI_FLAGS_HIGH) $(INC_GUI) -fo="$(GUI_OBJ)/$$f.obj" "src/$$f.c"; \
+	done
 	@{ \
 	    echo "system nt_win"; \
 	    echo "option quiet"; \
@@ -431,6 +462,7 @@ watcom-gui:
 	    $(foreach f,$(GUI),echo "file $(GUI_OBJ)/$f.obj";) \
 	    $(foreach f,$(COM),echo "file $(GUI_OBJ)/$(call common_obj,$f).obj";) \
 	    $(foreach f,$(ENG),echo "file $(GUI_OBJ)/$f.obj";) \
+	    $(foreach f,$(ENG_MMX),echo "file $(GUI_OBJ)/$f.obj";) \
 	    echo "library clib3r, math387r, kernel32, user32, gdi32, comdlg32"; \
 	    echo "name $(GUI_EXE)"; \
 	} > "$(GUI_OBJ)/gui.lnk"

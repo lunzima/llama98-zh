@@ -50,6 +50,17 @@
    by a real compile error, not by luck, while wiring this. */
 #define LZ_GDN1_MMX_EXTERN 1
 
+/* task #30 (2/N): unconditional now too (both compilers) - Watcom's
+   lz_p2_rows_mmx (this file's TU, ops_mmx.c) and lz_p2_rows_sse
+   (ops_mmx_sse.c) need the SAME 16-byte-aligned scratch buffer this
+   returns: the split step reads what the mul32 step wrote into it, and
+   moving that hand-off across a TU boundary means passing the pointer
+   explicitly rather than relying on file-local storage. Was gcc-only
+   until ops_kernel_p2.h's Watcom content actually moved here - see the
+   removed "collides with ops.c's own static p2_blk()" comment this
+   replaced, in git history; ops.c's own copy is gone now (moved here). */
+lz_p2_blk *p2_blk(void);
+
 #if !defined(__WATCOMC__)
 #define LZ_WSUM_MMX_EXTERN 1
 #define LZ_P2_MMX_EXTERN   1
@@ -60,13 +71,6 @@
    cosmetic gain the rest of the file does not need. */
 #define LZ_HAVE_AMAX_MMX   1
 #define LZ_HAVE_Q8R_SSE    1
-
-/* p2_blk() stays gcc-only until ops_kernel_p2.h's Watcom content
-   actually moves here - ops.c still has its own static p2_blk() for
-   Watcom for now, and declaring this one unconditionally collides
-   with it ("Extern function redeclared as static" - caught at
-   compile time, not assumed away). */
-lz_p2_blk *p2_blk(void);
 #endif
 
 #if defined(__WATCOMC__)
@@ -81,6 +85,40 @@ lz_p2_blk *p2_blk(void);
 void lz_gdn_sum_gg_mmx(const int8_t *sq_gg, int kd, int vd,
                        const int16_t (*tab)[8], int32_t tcu, int32_t tcw,
                        int32_t *au_gg, int32_t *aw_gg);
+
+/* task #30 (2/N): GDN/KDA fixed-point pass 2, row granularity - one
+   call per row from ops.c's gdn_p2_row_simd, in place of the zero real
+   calls the pre-split #pragma-aux-inline loop had (see that function's
+   Watcom branch for the accounting). pl_stride/ol_stride let the
+   single-plane build pass the same fixed zero/sink buffer at every
+   group (stride 0) without teaching this file about
+   LZ_GDN_STATE_2PLANE - the 2-plane build passes stride 32 and a real
+   per-group offset instead. */
+void lz_p2_rows_mmx(const int8_t *ph_row, const int8_t *pl_row,
+                    int pl_stride, const int16_t *dq,
+                    const int16_t (*mul)[4], int8_t *oh_row,
+                    int8_t *ol_row, int ol_stride, int *shv, int ng);
+
+/* Real, addressable twin of the #pragma aux lz_p2_mul32_mmx_asm
+   (ops_mmx.c) - needed cross-TU by ops_mmx_sse.c's lz_p2_rows_sse,
+   which has no mul32 kernel of its own (SSE1 adds nothing to this
+   half of the operator - see ops_kernel_p2.h's ISA inventory).
+   lz_p2_rows_mmx above never calls through this: it inlines the
+   pragma directly, so this wrapper adds no overhead to the tier that
+   does not already need it. */
+void lz_p2_mul32_mmx(const int8_t *hi, const int8_t *lo,
+                     const int16_t *dq, lz_p2_blk *blk);
+
+/* Body in src/ops_mmx_sse.c, declared here alongside its MMX-tier
+   sibling rather than in a header of its own - this file already
+   declares gcc's lz_p2_split32_sse below despite ITS body living in
+   ops_mmx_sse.c too, so there is precedent for "the ops_mmx.c/
+   ops_mmx_sse.c pair's declarations" rather than "ops_mmx.c's
+   declarations" being what this header actually is. */
+void lz_p2_rows_sse(const int8_t *ph_row, const int8_t *pl_row,
+                    int pl_stride, const int16_t *dq,
+                    const int16_t (*mul)[4], int8_t *oh_row,
+                    int8_t *ol_row, int ol_stride, int *shv, int ng);
 
 #else /* gcc: intrinsics, existing declarations */
 

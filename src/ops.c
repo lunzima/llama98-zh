@@ -4878,51 +4878,24 @@ typedef char lz_p2_needs_lo_scale_256[
 #include "ops_kernel_p2.h"        /* the MMX pair; defines lz_p2_blk and,
                                      on Watcom, LZ_HAVE_P2_MMX_ASM */
 
-/* 16-BYTE-ALIGNED STORAGE FOR THE BLOCK, by hand, because neither
-   compiler can be asked for it here. Watcom is built with -zp4, which
-   caps member alignment at 4 - a union with a double would not even
-   guarantee 8 - and C89/C99 have no alignment specifier. The MMX
-   kernels survived that (an unaligned movq is legal, merely slower);
-   SSE2's movdqa and its m128 shift-count operand FAULT, so the
-   alignment has to be real rather than hoped for.
+/* p2_blk() moved to src/ops_mmx.c in task #30 (2/N), declared
+   unconditionally in src/ops_mmx.h - both Watcom's lz_p2_rows_mmx/
+   lz_p2_rows_sse (this task) and gcc's LZ_P2_MMX_EXTERN case (predates
+   it) need the SAME 16-byte-aligned scratch buffer, and now cross a TU
+   boundary to reach the code that fills it, so it has to be one real
+   exported function rather than a static one this file's Watcom
+   #pragma aux bodies used to reach for free. */
 
-   One buffer for the whole engine: the two kernels are called back to
-   back inside one group and nothing re-enters between them.
-
-   GUARDED ON THE SAME PREDICATE THAT DEFINES LZ_HAVE_P2_MMX just below,
-   because the sole caller is under `#ifdef LZ_HAVE_P2_MMX`. Spelled out
-   rather than written as LZ_HAVE_P2_MMX for the obvious reason: that
-   macro does not exist yet at this point in the file. */
-/* p2_blk's Watcom body stays here (a plain function, no #pragma aux
-   involved). Its gcc-and-MMX-tier counterpart is the same function, now
-   defined in src/ops_mmx.c and declared in src/ops_mmx.h - one
-   declaration correctly covers both, so there is nothing to compile for
-   the LZ_P2_MMX_EXTERN case here. */
-#if defined(LZ_HAVE_P2_MMX_ASM)
-static lz_p2_blk *p2_blk(void) {
-    static char raw[sizeof(lz_p2_blk) + 15];
-    size_t off = (size_t)((uintptr_t)(void *)raw & 15u);
-    return (lz_p2_blk *)(void *)(raw + ((16u - off) & 15u));
-}
-#endif
-
-#if defined(LZ_HAVE_P2_MMX_ASM)
+#if defined(LZ_HAVE_P2_MMX_ASM) || defined(LZ_P2_MMX_EXTERN)
 #define LZ_HAVE_P2_MMX 1
-/* Plain aliases, not wrappers: a #pragma aux routine is expanded inline
-   at its call site, and a static wrapper around it would put a real call
-   back in front of that. The types line up exactly - int8_t is signed
-   char and int16_t is short on both targets. */
-#define lz_p2_mul32_mmx    lz_p2_mul32_mmx_asm
-#define lz_p2_split32_mmx  lz_p2_split32_mmx_asm
-
-#elif defined(LZ_P2_MMX_EXTERN)
-#define LZ_HAVE_P2_MMX 1
-/* lz_p2_mul32_mmx and lz_p2_split32_mmx's bodies live in src/ops_mmx.c
-   now - they write %mm registers. Declared in src/ops_mmx.h, already
-   visible here. Algorithm description (why pmaddwd contracts H and dq
-   in one go, why the absmax costs five instructions per two lanes, why
-   the lo clamp is a saturating subtract) lives with the Watcom twin in
-   src/ops_kernel_p2.h, unaffected by this split. */
+/* No lz_p2_mul32_mmx/lz_p2_split32_mmx bare-name aliases here anymore
+   (task #30, 2/N): those existed only so the #pragma aux bodies, once
+   textually inline in THIS file, could be called by a name that also
+   worked for gcc's real functions of the same name. Now that the
+   bodies live in src/ops_mmx.c (declared in src/ops_mmx.h for both
+   toolchains), Watcom's Phase 2 below calls lz_p2_rows_mmx/_sse/_sse2
+   directly instead - the bare per-group names stay gcc's alone, used
+   only by the gcc branch of gdn_p2_row_simd's Phase 2. */
 #endif
 
 /* ---- the SSE1 tier: one instruction of content, and it is the split ---
@@ -4931,17 +4904,16 @@ static lz_p2_blk *p2_blk(void) {
    this kernel needs), so this tier is the MMX mul32 paired with a split
    whose low-plane clamp is a single pmaxsw. Named for the ISA a machine
    must HAVE to run it, which is what dispatch turns on. */
-#if defined(LZ_HAVE_P2_SSE_ASM)
+#if defined(LZ_HAVE_P2_SSE_ASM) || defined(LZ_P2_MMX_EXTERN)
 #define LZ_HAVE_P2_SSE 1
-#define lz_p2_split32_sse  lz_p2_split32_sse_asm
-
-#elif defined(LZ_P2_MMX_EXTERN)
-#define LZ_HAVE_P2_SSE 1
-/* lz_p2_split32_sse's body lives in src/ops_mmx.c now - named "sse" for
-   the ISA a machine must HAVE to run it, it still operates on %mm
-   (SSE1's whole addition to the integer side of the MMX register file
-   is used here exactly once: pmaxsw does the low plane's clamp to -127
-   directly). Declared in src/ops_mmx.h, already visible here. */
+/* No lz_p2_split32_sse bare-name alias here anymore (task #30, 2/N) -
+   its body lives in src/ops_mmx_sse.c now for BOTH toolchains, named
+   "sse" for the ISA a machine must HAVE to run it even though it still
+   operates on %mm (SSE1's whole addition to the integer side of the
+   MMX register file is used here exactly once: pmaxsw does the low
+   plane's clamp to -127 directly). Watcom's Phase 2 reaches it only
+   through lz_p2_rows_sse, declared in src/ops_mmx.h; gcc's per-group
+   loop still calls it by its real name, also declared there. */
 #endif
 
 /* ---- the 128-bit tier -------------------------------------------------
@@ -4962,8 +4934,10 @@ static lz_p2_blk *p2_blk(void) {
    not ours to assume. */
 #if defined(LZ_HAVE_P2_SSE2_ASM)
 #define LZ_HAVE_P2_SSE2 1
-#define lz_p2_mul32_sse2    lz_p2_mul32_sse2_asm
-#define lz_p2_split32_sse2  lz_p2_split32_sse2_asm
+/* No lz_p2_mul32_sse2/lz_p2_split32_sse2 bare-name aliases here anymore
+   (task #30, 2/N) - same reasoning as the MMX and SSE1 tiers above.
+   Watcom's Phase 2 reaches this tier only through lz_p2_rows_sse2,
+   declared in src/ops_sse2.h alongside the gcc-only per-group names. */
 
 #elif defined(LZ_P2_SSE2_EXTERN)
 /* lz_p2_mul32_sse2 / lz_p2_split32_sse2 bodies live in src/ops_sse2.c:
@@ -5277,7 +5251,12 @@ static void gdn_p2_row_simd(const int8_t *ph_row,
                             int8_t *ol_row,
 #endif
                             float *rs_out, int ng, int tier) {
-    lz_p2_blk *blk = p2_blk();
+#if !defined(__WATCOMC__)
+    lz_p2_blk *blk = p2_blk();     /* Watcom's row functions get their
+                                       own via their own p2_blk() call -
+                                       see the Watcom Phase 2 branch
+                                       below (task #30, 2/N). */
+#endif
     static float sacc[LZ_GDN_MAX_VD / 32];
     static int   shv[LZ_GDN_MAX_VD / 32];
     static int16_t mul[LZ_GDN_MAX_VD / 32][4];
@@ -5303,6 +5282,45 @@ static void gdn_p2_row_simd(const int8_t *ph_row,
 
     /* PHASE 2 - integer and MMX only, NO x87 anywhere in this loop.
        Changing that is what would make the single emms below wrong. */
+#if defined(__WATCOMC__)
+    /* Watcom (task #30, 2/N): one call per row, not per group. Before
+       this split every kernel below was a #pragma aux body expanded
+       inline right here, so the per-group loop cost zero real calls;
+       after it, the #pragma aux bodies are inline inside whichever row
+       function `tier` selects (src/ops_mmx.c's lz_p2_rows_mmx,
+       src/ops_mmx_sse.c's lz_p2_rows_sse, src/ops_sse2.c's
+       lz_p2_rows_sse2), so the only new call this split adds is the one
+       below - one per row, in place of the zero the old loop had, not
+       one per group the way wrapping this loop's body unchanged would
+       have cost. pl_stride/ol_stride carry the single-plane fallback
+       (the same fixed zero/sink buffer at every group) across the TU
+       boundary without teaching those files about LZ_GDN_STATE_2PLANE. */
+    {
+        const int8_t *plg0;
+        int8_t *olg0;
+        int pstride;
+#if LZ_GDN_STATE_2PLANE
+        plg0 = pl_row; olg0 = ol_row; pstride = 32;
+#else
+        plg0 = zero_lo; olg0 = sink_lo; pstride = 0;
+#endif
+#ifdef LZ_HAVE_P2_SSE2
+        if (tier >= 3)
+            lz_p2_rows_sse2(ph_row, plg0, pstride, dq, mul,
+                            oh_row, olg0, pstride, shv, ng);
+        else
+#endif
+#ifdef LZ_HAVE_P2_SSE
+        if (tier >= 2)
+            lz_p2_rows_sse(ph_row, plg0, pstride, dq, mul,
+                           oh_row, olg0, pstride, shv, ng);
+        else
+#endif
+        lz_p2_rows_mmx(ph_row, plg0, pstride, dq, mul,
+                       oh_row, olg0, pstride, shv, ng);
+    }
+#else /* gcc: unchanged per-group loop, extern calls into ops_mmx.c/
+         ops_mmx_sse.c/ops_sse2.c exactly as before this task. */
     for (gg = 0; gg < ng; gg++) {
         int32_t amax;
         int sh;
@@ -5357,6 +5375,7 @@ static void gdn_p2_row_simd(const int8_t *ph_row,
             lz_p2_split32_mmx(blk, oh_row + gg * 32, olg);
         }
     }
+#endif /* __WATCOMC__ */
     /* Only the 64-bit tiers leave MMX state behind, and the SSE1 one is
        a 64-bit tier: pmaxsw is an SSE1 instruction operating on an MMX
        REGISTER, so tier 2 needs the emms exactly as tier 1 does. Tier 3

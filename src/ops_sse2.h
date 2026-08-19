@@ -1,10 +1,13 @@
-/* Declarations for the gcc/clang SSE2-intrinsics kernels that live in
-   src/ops_sse2.c - the translation unit built with -msse2 (and -march=
-   i686, since real SSE2 hardware in the target family, P4 Northwood and
-   Pentium M, is i686+ - see that file's header). This split is code
-   structure, not a correctness fix the way src/ops_mmx.c's was: %xmm
-   does not alias the x87 stack, so nothing here is implicated in the
-   MMX/x87 register-file aliasing bug. See src/ops_mmx.h for that half.
+/* Declarations for the SSE2 kernels that live in src/ops_sse2.c - the
+   translation unit built with -msse2 (and -march=i686, since real SSE2
+   hardware in the target family, P4 Northwood and Pentium M, is i686+
+   - see that file's header). For gcc this split is code structure, not
+   a correctness fix the way src/ops_mmx.c's was: %xmm does not alias
+   the x87 stack, so nothing here is implicated in the MMX/x87
+   register-file aliasing bug. For Watcom (task #30, 2/N) it IS the same
+   reason as ops_mmx.c/ops_mmx_sse.c: -Nr/-Ns is a hard ceiling its own
+   .686 directives cannot exceed. See src/ops_mmx.h for the MMX/SSE1
+   half.
 
    Independent of src/ops_mmx.h on purpose - neither includes the other.
    The one type they share, lz_p2_blk, lives in src/ops_p2_blk.h instead.
@@ -22,8 +25,9 @@
 
 #include "ops_p2_blk.h"
 
-#if defined(LZ_SSE2_TU) && !defined(__WATCOMC__)
+#if defined(LZ_SSE2_TU)
 
+#if !defined(__WATCOMC__)
 #define LZ_ROW_SSE2_EXTERN  1
 #define LZ_P2_SSE2_EXTERN   1
 #define LZ_ROPE_SSE2_EXTERN 1
@@ -33,6 +37,22 @@
    ops_mmx.h keeps LZ_HAVE_AMAX_MMX/LZ_HAVE_Q8R_SSE under their names. */
 #define LZ_HAVE_AMAX_SSE2  1
 #define LZ_HAVE_Q8R_SIMD   1
+#endif
+
+#if defined(__WATCOMC__)
+/* task #30 (2/N): GDN/KDA fixed-point pass 2, SSE2 tier, row
+   granularity. Self-contained unlike lz_p2_rows_sse (ops_mmx_sse.c):
+   SSE2 has full content for BOTH mul32 and split32 (see
+   ops_kernel_p2.h's ISA inventory), so this tier needs no cross-TU call
+   at all - one call per row from ops.c's gdn_p2_row_simd, in place of
+   the zero real calls the pre-split #pragma-aux-inline loop had, and
+   nothing more. */
+void lz_p2_rows_sse2(const int8_t *ph_row, const int8_t *pl_row,
+                     int pl_stride, const int16_t *dq,
+                     const int16_t (*mul)[4], int8_t *oh_row,
+                     int8_t *ol_row, int ol_stride, int *shv, int ng);
+
+#else /* gcc: intrinsics */
 
 /* ---- matmul row kernels, one per quantized weight format -------------
    Each of these, not a leaf dot32_* helper, is what the split moves:
@@ -72,6 +92,8 @@ unsigned lz_amax32_sse2(const float *x, int n);
 /* ---- Q8 activation rounding, SSE2 tier -------------------------------- */
 void lz_q8round32_simd(const float *x, int8_t *o, const float *pinv);
 
-#endif /* LZ_SSE2_TU && !__WATCOMC__ */
+#endif /* __WATCOMC__ */
+
+#endif /* LZ_SSE2_TU */
 
 #endif /* LZ_OPS_SSE2_H */

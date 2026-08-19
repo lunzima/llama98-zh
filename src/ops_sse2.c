@@ -23,15 +23,328 @@
    enabling CMOV in src/ops_mmx.c, done again for this flag set on its
    own object.
 
-   Watcom is unaffected and never compiles this file: its own #pragma
-   aux SSE2 kernels live in ops.c's included headers exactly as
-   before. */
+   Watcom NOW compiles this file too (task #30, 2/N) - same reason as
+   src/ops_mmx.c: -Nr/-Ns is a hard ceiling its own .686 directives
+   cannot exceed, so a #pragma aux body needing .686 codegen cannot sit
+   in a TU pinned at the new, lower i486/i386 floor. */
 #include <stdint.h>
 #include <string.h>
 
 #include "ops_sse2.h"
 
-#if defined(LZ_SSE2_TU) && !defined(__WATCOMC__)
+#if defined(LZ_SSE2_TU)
+
+#if defined(__WATCOMC__)
+#include "ops_p2_blk.h"
+
+/* ---- GDN/KDA fixed-point pass 2, SSE2 tier - moved here from
+   src/ops_kernel_p2.h (task #30, 2/N). Algorithm documentation stays
+   there, unaffected by the code's move. Self-contained unlike the MMX/
+   SSE1 tiers' cross-TU hand-off (src/ops_mmx.c <-> src/ops_mmx_sse.c):
+   SSE2 has full content for both mul32 and split32, so this tier's own
+   p2_blk() never needs to be seen outside this file. */
+
+/* 16-byte-aligned scratch, by hand - same reasoning as src/ops_mmx.c's
+   p2_blk(), a private copy rather than a shared one: nothing outside
+   this file's own lz_p2_rows_sse2 ever needs this tier's buffer. */
+static lz_p2_blk *p2_blk_sse2(void) {
+    static char raw[sizeof(lz_p2_blk) + 15];
+    size_t off = (size_t)((uintptr_t)(void *)raw & 15u);
+    return (lz_p2_blk *)(void *)(raw + ((16u - off) & 15u));
+}
+
+/* Duplicated from ops.c's own p2_shift_of / src/ops_mmx.c's copy, same
+   precedent as src/ops_mmx.c's gdn_tail_row_mmx: five lines, pure
+   integer, cheaper to keep in step by comment than to cost a real call
+   for. */
+static int p2_shift_of(int32_t amax) {
+    int sh = 0;
+    while ((amax >> sh) > 32512) sh++;
+    return sh;
+}
+
+/* Instruction for instruction the MMX pair in src/ops_mmx.c, on xmm -
+   see that pair's comments for the algorithm; this is the same
+   operations twice as wide, not a different one. Alignment is
+   load-bearing here (movdqa, and the shift-count operand FAULTS on a
+   misaligned address) - p2_blk_sse2() above provides it by hand since
+   Watcom's -zp4 caps what the type system can promise. */
+extern void lz_p2_mul32_sse2_asm(const signed char *hi, const signed char *lo,
+                                 const short *dq, void *blk);
+#pragma aux lz_p2_mul32_sse2_asm = \
+    ".686" \
+    "pxor      xmm7, xmm7" \
+    "pxor      xmm5, xmm5" \
+    "pxor      xmm4, xmm4" \
+    "movdqa    xmm6, [ecx]" \
+    \
+    "movq      xmm0, [eax]" \
+    "movq      xmm1, [edx]" \
+    "movdqa    xmm2, xmm7" \
+    "punpcklbw xmm2, xmm0" \
+    "punpcklbw xmm1, xmm1" \
+    "psraw     xmm1, 8" \
+    "paddw     xmm2, xmm1" \
+    "movdqu    xmm3, [ebx]" \
+    "movdqa    xmm0, xmm2" \
+    "punpcklwd xmm0, xmm3" \
+    "punpckhwd xmm2, xmm3" \
+    "pmaddwd   xmm0, xmm6" \
+    "pmaddwd   xmm2, xmm6" \
+    "movdqa    [ecx+96], xmm0" \
+    "movdqa    [ecx+112], xmm2" \
+    "movdqa    xmm1, xmm0" \
+    "psrad     xmm1, 31" \
+    "pxor      xmm0, xmm1" \
+    "psubd     xmm0, xmm1" \
+    "movdqa    xmm3, xmm2" \
+    "psrad     xmm3, 31" \
+    "pxor      xmm2, xmm3" \
+    "psubd     xmm2, xmm3" \
+    "movdqa    xmm1, xmm5" \
+    "pcmpgtd   xmm1, xmm0" \
+    "pand      xmm5, xmm1" \
+    "pandn     xmm1, xmm0" \
+    "por       xmm5, xmm1" \
+    "movdqa    xmm3, xmm4" \
+    "pcmpgtd   xmm3, xmm2" \
+    "pand      xmm4, xmm3" \
+    "pandn     xmm3, xmm2" \
+    "por       xmm4, xmm3" \
+    \
+    "movq      xmm0, [eax+8]" \
+    "movq      xmm1, [edx+8]" \
+    "movdqa    xmm2, xmm7" \
+    "punpcklbw xmm2, xmm0" \
+    "punpcklbw xmm1, xmm1" \
+    "psraw     xmm1, 8" \
+    "paddw     xmm2, xmm1" \
+    "movdqu    xmm3, [ebx+16]" \
+    "movdqa    xmm0, xmm2" \
+    "punpcklwd xmm0, xmm3" \
+    "punpckhwd xmm2, xmm3" \
+    "pmaddwd   xmm0, xmm6" \
+    "pmaddwd   xmm2, xmm6" \
+    "movdqa    [ecx+128], xmm0" \
+    "movdqa    [ecx+144], xmm2" \
+    "movdqa    xmm1, xmm0" \
+    "psrad     xmm1, 31" \
+    "pxor      xmm0, xmm1" \
+    "psubd     xmm0, xmm1" \
+    "movdqa    xmm3, xmm2" \
+    "psrad     xmm3, 31" \
+    "pxor      xmm2, xmm3" \
+    "psubd     xmm2, xmm3" \
+    "movdqa    xmm1, xmm5" \
+    "pcmpgtd   xmm1, xmm0" \
+    "pand      xmm5, xmm1" \
+    "pandn     xmm1, xmm0" \
+    "por       xmm5, xmm1" \
+    "movdqa    xmm3, xmm4" \
+    "pcmpgtd   xmm3, xmm2" \
+    "pand      xmm4, xmm3" \
+    "pandn     xmm3, xmm2" \
+    "por       xmm4, xmm3" \
+    \
+    "movq      xmm0, [eax+16]" \
+    "movq      xmm1, [edx+16]" \
+    "movdqa    xmm2, xmm7" \
+    "punpcklbw xmm2, xmm0" \
+    "punpcklbw xmm1, xmm1" \
+    "psraw     xmm1, 8" \
+    "paddw     xmm2, xmm1" \
+    "movdqu    xmm3, [ebx+32]" \
+    "movdqa    xmm0, xmm2" \
+    "punpcklwd xmm0, xmm3" \
+    "punpckhwd xmm2, xmm3" \
+    "pmaddwd   xmm0, xmm6" \
+    "pmaddwd   xmm2, xmm6" \
+    "movdqa    [ecx+160], xmm0" \
+    "movdqa    [ecx+176], xmm2" \
+    "movdqa    xmm1, xmm0" \
+    "psrad     xmm1, 31" \
+    "pxor      xmm0, xmm1" \
+    "psubd     xmm0, xmm1" \
+    "movdqa    xmm3, xmm2" \
+    "psrad     xmm3, 31" \
+    "pxor      xmm2, xmm3" \
+    "psubd     xmm2, xmm3" \
+    "movdqa    xmm1, xmm5" \
+    "pcmpgtd   xmm1, xmm0" \
+    "pand      xmm5, xmm1" \
+    "pandn     xmm1, xmm0" \
+    "por       xmm5, xmm1" \
+    "movdqa    xmm3, xmm4" \
+    "pcmpgtd   xmm3, xmm2" \
+    "pand      xmm4, xmm3" \
+    "pandn     xmm3, xmm2" \
+    "por       xmm4, xmm3" \
+    \
+    "movq      xmm0, [eax+24]" \
+    "movq      xmm1, [edx+24]" \
+    "movdqa    xmm2, xmm7" \
+    "punpcklbw xmm2, xmm0" \
+    "punpcklbw xmm1, xmm1" \
+    "psraw     xmm1, 8" \
+    "paddw     xmm2, xmm1" \
+    "movdqu    xmm3, [ebx+48]" \
+    "movdqa    xmm0, xmm2" \
+    "punpcklwd xmm0, xmm3" \
+    "punpckhwd xmm2, xmm3" \
+    "pmaddwd   xmm0, xmm6" \
+    "pmaddwd   xmm2, xmm6" \
+    "movdqa    [ecx+192], xmm0" \
+    "movdqa    [ecx+208], xmm2" \
+    "movdqa    xmm1, xmm0" \
+    "psrad     xmm1, 31" \
+    "pxor      xmm0, xmm1" \
+    "psubd     xmm0, xmm1" \
+    "movdqa    xmm3, xmm2" \
+    "psrad     xmm3, 31" \
+    "pxor      xmm2, xmm3" \
+    "psubd     xmm2, xmm3" \
+    "movdqa    xmm1, xmm5" \
+    "pcmpgtd   xmm1, xmm0" \
+    "pand      xmm5, xmm1" \
+    "pandn     xmm1, xmm0" \
+    "por       xmm5, xmm1" \
+    "movdqa    xmm3, xmm4" \
+    "pcmpgtd   xmm3, xmm2" \
+    "pand      xmm4, xmm3" \
+    "pandn     xmm3, xmm2" \
+    "por       xmm4, xmm3" \
+    \
+    "movdqa    xmm1, xmm5" \
+    "pcmpgtd   xmm1, xmm4" \
+    "pand      xmm5, xmm1" \
+    "pandn     xmm1, xmm4" \
+    "por       xmm5, xmm1" \
+    "movdqa    [ecx+16], xmm5" \
+    __parm [__eax] [__edx] [__ebx] [__ecx] \
+    __modify [8087]
+
+/* The 128-bit split. Every constant stays in memory - all four are
+   16-byte aligned m128 operands, which frees all eight registers for the
+   sixteen elements in flight and is why this needs no register budget
+   note the way the MMX one does. */
+extern void lz_p2_split32_sse2_asm(const void *blk, signed char *hi_out,
+                                   signed char *lo_out);
+#pragma aux lz_p2_split32_sse2_asm = \
+    ".686" \
+    "movdqa   xmm0, [eax+96]" \
+    "movdqa   xmm1, [eax+112]" \
+    "movdqa   xmm2, [eax+128]" \
+    "movdqa   xmm3, [eax+144]" \
+    "paddd    xmm0, [eax+32]" \
+    "paddd    xmm1, [eax+32]" \
+    "paddd    xmm2, [eax+32]" \
+    "paddd    xmm3, [eax+32]" \
+    "psrad    xmm0, [eax+48]" \
+    "psrad    xmm1, [eax+48]" \
+    "psrad    xmm2, [eax+48]" \
+    "psrad    xmm3, [eax+48]" \
+    "packssdw xmm0, xmm1" \
+    "packssdw xmm2, xmm3" \
+    "movdqa   xmm1, xmm0" \
+    "paddw    xmm1, [eax+64]" \
+    "psraw    xmm1, 8" \
+    "movdqa   xmm3, xmm2" \
+    "paddw    xmm3, [eax+64]" \
+    "psraw    xmm3, 8" \
+    "movdqa   xmm4, xmm1" \
+    "psllw    xmm4, 8" \
+    "psubw    xmm0, xmm4" \
+    "movdqa   xmm5, xmm3" \
+    "psllw    xmm5, 8" \
+    "psubw    xmm2, xmm5" \
+    "psubsw   xmm0, [eax+80]" \
+    "paddsw   xmm0, [eax+80]" \
+    "psubsw   xmm2, [eax+80]" \
+    "paddsw   xmm2, [eax+80]" \
+    "packsswb xmm1, xmm3" \
+    "movdqu   [edx], xmm1" \
+    "packsswb xmm0, xmm2" \
+    "movdqu   [ebx], xmm0" \
+    \
+    "movdqa   xmm0, [eax+160]" \
+    "movdqa   xmm1, [eax+176]" \
+    "movdqa   xmm2, [eax+192]" \
+    "movdqa   xmm3, [eax+208]" \
+    "paddd    xmm0, [eax+32]" \
+    "paddd    xmm1, [eax+32]" \
+    "paddd    xmm2, [eax+32]" \
+    "paddd    xmm3, [eax+32]" \
+    "psrad    xmm0, [eax+48]" \
+    "psrad    xmm1, [eax+48]" \
+    "psrad    xmm2, [eax+48]" \
+    "psrad    xmm3, [eax+48]" \
+    "packssdw xmm0, xmm1" \
+    "packssdw xmm2, xmm3" \
+    "movdqa   xmm1, xmm0" \
+    "paddw    xmm1, [eax+64]" \
+    "psraw    xmm1, 8" \
+    "movdqa   xmm3, xmm2" \
+    "paddw    xmm3, [eax+64]" \
+    "psraw    xmm3, 8" \
+    "movdqa   xmm4, xmm1" \
+    "psllw    xmm4, 8" \
+    "psubw    xmm0, xmm4" \
+    "movdqa   xmm5, xmm3" \
+    "psllw    xmm5, 8" \
+    "psubw    xmm2, xmm5" \
+    "psubsw   xmm0, [eax+80]" \
+    "paddsw   xmm0, [eax+80]" \
+    "psubsw   xmm2, [eax+80]" \
+    "paddsw   xmm2, [eax+80]" \
+    "packsswb xmm1, xmm3" \
+    "movdqu   [edx+16], xmm1" \
+    "packsswb xmm0, xmm2" \
+    "movdqu   [ebx+16], xmm0" \
+    __parm [__eax] [__edx] [__ebx] \
+    __modify [8087]
+
+/* lz_p2_rows_sse2(): all of a row's groups, tier 3. One call per row
+   from ops.c's gdn_p2_row_simd (task #30, 2/N) - fully self-contained,
+   unlike lz_p2_rows_sse (src/ops_mmx_sse.c): SSE2 has real content for
+   BOTH mul32 and split32, so neither kernel here needs a cross-TU call,
+   only the row boundary itself does, in place of the zero real calls
+   the pre-split #pragma-aux-inline loop had. */
+void lz_p2_rows_sse2(const int8_t *ph_row, const int8_t *pl_row,
+                     int pl_stride, const int16_t *dq,
+                     const int16_t (*mul)[4], int8_t *oh_row,
+                     int8_t *ol_row, int ol_stride, int *shv, int ng) {
+    lz_p2_blk *blk = p2_blk_sse2();
+    int gg, j;
+    for (gg = 0; gg < ng; gg++) {
+        int32_t amax;
+        int sh;
+        const int8_t *plg = pl_row + (size_t)gg * pl_stride;
+        int8_t *olg = ol_row + (size_t)gg * ol_stride;
+        for (j = 0; j < 8; j += 2) {
+            blk->mul[j]     = mul[gg][0];
+            blk->mul[j + 1] = mul[gg][1];
+        }
+        lz_p2_mul32_sse2_asm((const signed char *)(ph_row + gg * 32),
+                             (const signed char *)plg,
+                             (const short *)(dq + gg * 32), blk);
+        amax = blk->amax[0];
+        for (j = 1; j < 4; j++) if (blk->amax[j] > amax) amax = blk->amax[j];
+        sh = p2_shift_of(amax);
+        shv[gg] = sh;
+        for (j = 0; j < 4; j++) {
+            blk->rnd[j] = (sh > 0) ? (int32_t)(1 << (sh - 1)) : 0;
+            blk->cnt[j] = (j == 0) ? (int32_t)sh : 0;
+        }
+        for (j = 0; j < 8; j++) {
+            blk->k128[j] = 128;
+            blk->kclp[j] = 32641;   /* MMX/SSE2: psubsw then paddsw */
+            blk->kmin[j] = -127;    /* SSE1: one pmaxsw does the same */
+        }
+        lz_p2_split32_sse2_asm(blk, oh_row + gg * 32, olg);
+    }
+}
+
+#else /* gcc: intrinsics */
 
 #include <emmintrin.h>
 
@@ -327,4 +640,6 @@ void lz_q8round32_simd(const float *x, int8_t *o, const float *pinv) {
     }
 }
 
-#endif /* LZ_SSE2_TU && !__WATCOMC__ */
+#endif /* __WATCOMC__ */
+
+#endif /* LZ_SSE2_TU */
