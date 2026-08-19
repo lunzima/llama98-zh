@@ -86,6 +86,14 @@ void lz_gdn_sum_gg_mmx(const int8_t *sq_gg, int kd, int vd,
                        const int16_t (*tab)[8], int32_t tcu, int32_t tcw,
                        int32_t *au_gg, int32_t *aw_gg);
 
+/* task #30 (3/N): attention scoring's weighted sum, GROUP granularity -
+   see ops.c's lz_attn_wsum_q8 (search "one call per GROUP") for why
+   this is the whole multi-chunk second walk for one group, not a
+   per-pair or per-chunk wrapper: T (context length) is unbounded, so
+   either of those would scale calls with T instead of with ng. */
+void lz_wsum_group_mmx(const int8_t *vc, int kvd, int g, int sink, int ring,
+                       const int16_t *cq, int T, float *accf);
+
 /* task #30 (2/N): GDN/KDA fixed-point pass 2, row granularity - one
    call per row from ops.c's gdn_p2_row_simd, in place of the zero real
    calls the pre-split #pragma-aux-inline loop had (see that function's

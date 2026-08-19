@@ -131,6 +131,236 @@ void lz_gdn_sum_gg_mmx(const int8_t *sq_gg, int kd, int vd,
     _mm_empty();
 }
 
+/* ---- attention scoring's weighted-sum dot, GROUP granularity - moved
+   here from src/ops.c (task #30, 3/N). LZ_ATTN_FIXED defaults to 3
+   (ops.h) so this is a live, always-compiled path, not a reservation -
+   AUTO just does not select it on an SSE-capable host, the same way
+   the GDN pass-2 fixed tier is compiled everywhere but AUTO-selected
+   only where float is slow.
+
+   Duplicated rather than shared, same precedent as gdn_tail_row_mmx/
+   p2_shift_of above: LZ_WSUM_CHUNK is one integer literal, LZ_SLOT_NEXT
+   is a five-line ring-buffer walk with no state of its own, and
+   lz_i32f is the one-line int32->float split ops.c's own comment
+   requires EVERY conversion in the engine to go through (not a bare
+   `(float)v`) - copying its body here is "keep in step by comment",
+   the same word-for-word text as its ops.c twin, not a policy
+   exception. */
+#define LZ_WSUM_CHUNK 512
+
+#define LZ_SLOT_NEXT(slot, sink, ring)                          \
+    ((slot) = (ring) && (slot) + 1 >= (sink) + (ring)           \
+              ? (sink) : (slot) + 1)
+
+static float lz_i32f_wsum(int32_t v) {
+    return (float)(v >> 12) * 4096.0f + (float)(v & 0xFFF);
+}
+
+/* Originally generated, hand-edited since - if you regenerate, diff
+   the generator's output against what is here first.
+   acc32[d] += rowA[d]*coef[0] + rowB[d]*coef[1] for d in [0,32).
+   coef is [ckA,ckB,ckA,ckB] so one pmaddwd covers a 2-int32 lane pair.
+   Reads [eax]/[edx]/[ecx], writes only [ebx] and MMX - every offset is a
+   literal, no GP register is modified, so `__modify [8087]` is the truth
+   and not an `__exact []`-style lie (rule 2 item 3).
+   Emits no emms; the driver does one per chunk. */
+extern void lz_wsum_pair_asm(const int8_t *rowA, const int8_t *rowB,
+                const int16_t *coef, int32_t *acc32);
+#pragma aux lz_wsum_pair_asm = \
+    ".586" \
+    "movq      mm7, [ecx]" \
+    "movq      mm0, [eax]" \
+    "movq      mm1, [edx]" \
+    "movq      mm2, mm0" \
+    "punpcklbw mm2, mm2" \
+    "psraw     mm2, 8" \
+    "movq      mm3, mm1" \
+    "punpcklbw mm3, mm3" \
+    "psraw     mm3, 8" \
+    "movq      mm4, mm2" \
+    "punpcklwd mm4, mm3" \
+    "punpckhwd mm2, mm3" \
+    "pmaddwd   mm4, mm7" \
+    "pmaddwd   mm2, mm7" \
+    "movq      mm5, [ebx]" \
+    "paddd     mm5, mm4" \
+    "movq      [ebx], mm5" \
+    "movq      mm5, [ebx+8]" \
+    "paddd     mm5, mm2" \
+    "movq      [ebx+8], mm5" \
+    "movq      mm2, mm0" \
+    "punpckhbw mm2, mm2" \
+    "psraw     mm2, 8" \
+    "movq      mm3, mm1" \
+    "punpckhbw mm3, mm3" \
+    "psraw     mm3, 8" \
+    "movq      mm4, mm2" \
+    "punpcklwd mm4, mm3" \
+    "punpckhwd mm2, mm3" \
+    "pmaddwd   mm4, mm7" \
+    "pmaddwd   mm2, mm7" \
+    "movq      mm5, [ebx+16]" \
+    "paddd     mm5, mm4" \
+    "movq      [ebx+16], mm5" \
+    "movq      mm5, [ebx+24]" \
+    "paddd     mm5, mm2" \
+    "movq      [ebx+24], mm5" \
+    "movq      mm0, [eax+8]" \
+    "movq      mm1, [edx+8]" \
+    "movq      mm2, mm0" \
+    "punpcklbw mm2, mm2" \
+    "psraw     mm2, 8" \
+    "movq      mm3, mm1" \
+    "punpcklbw mm3, mm3" \
+    "psraw     mm3, 8" \
+    "movq      mm4, mm2" \
+    "punpcklwd mm4, mm3" \
+    "punpckhwd mm2, mm3" \
+    "pmaddwd   mm4, mm7" \
+    "pmaddwd   mm2, mm7" \
+    "movq      mm5, [ebx+32]" \
+    "paddd     mm5, mm4" \
+    "movq      [ebx+32], mm5" \
+    "movq      mm5, [ebx+40]" \
+    "paddd     mm5, mm2" \
+    "movq      [ebx+40], mm5" \
+    "movq      mm2, mm0" \
+    "punpckhbw mm2, mm2" \
+    "psraw     mm2, 8" \
+    "movq      mm3, mm1" \
+    "punpckhbw mm3, mm3" \
+    "psraw     mm3, 8" \
+    "movq      mm4, mm2" \
+    "punpcklwd mm4, mm3" \
+    "punpckhwd mm2, mm3" \
+    "pmaddwd   mm4, mm7" \
+    "pmaddwd   mm2, mm7" \
+    "movq      mm5, [ebx+48]" \
+    "paddd     mm5, mm4" \
+    "movq      [ebx+48], mm5" \
+    "movq      mm5, [ebx+56]" \
+    "paddd     mm5, mm2" \
+    "movq      [ebx+56], mm5" \
+    "movq      mm0, [eax+16]" \
+    "movq      mm1, [edx+16]" \
+    "movq      mm2, mm0" \
+    "punpcklbw mm2, mm2" \
+    "psraw     mm2, 8" \
+    "movq      mm3, mm1" \
+    "punpcklbw mm3, mm3" \
+    "psraw     mm3, 8" \
+    "movq      mm4, mm2" \
+    "punpcklwd mm4, mm3" \
+    "punpckhwd mm2, mm3" \
+    "pmaddwd   mm4, mm7" \
+    "pmaddwd   mm2, mm7" \
+    "movq      mm5, [ebx+64]" \
+    "paddd     mm5, mm4" \
+    "movq      [ebx+64], mm5" \
+    "movq      mm5, [ebx+72]" \
+    "paddd     mm5, mm2" \
+    "movq      [ebx+72], mm5" \
+    "movq      mm2, mm0" \
+    "punpckhbw mm2, mm2" \
+    "psraw     mm2, 8" \
+    "movq      mm3, mm1" \
+    "punpckhbw mm3, mm3" \
+    "psraw     mm3, 8" \
+    "movq      mm4, mm2" \
+    "punpcklwd mm4, mm3" \
+    "punpckhwd mm2, mm3" \
+    "pmaddwd   mm4, mm7" \
+    "pmaddwd   mm2, mm7" \
+    "movq      mm5, [ebx+80]" \
+    "paddd     mm5, mm4" \
+    "movq      [ebx+80], mm5" \
+    "movq      mm5, [ebx+88]" \
+    "paddd     mm5, mm2" \
+    "movq      [ebx+88], mm5" \
+    "movq      mm0, [eax+24]" \
+    "movq      mm1, [edx+24]" \
+    "movq      mm2, mm0" \
+    "punpcklbw mm2, mm2" \
+    "psraw     mm2, 8" \
+    "movq      mm3, mm1" \
+    "punpcklbw mm3, mm3" \
+    "psraw     mm3, 8" \
+    "movq      mm4, mm2" \
+    "punpcklwd mm4, mm3" \
+    "punpckhwd mm2, mm3" \
+    "pmaddwd   mm4, mm7" \
+    "pmaddwd   mm2, mm7" \
+    "movq      mm5, [ebx+96]" \
+    "paddd     mm5, mm4" \
+    "movq      [ebx+96], mm5" \
+    "movq      mm5, [ebx+104]" \
+    "paddd     mm5, mm2" \
+    "movq      [ebx+104], mm5" \
+    "movq      mm2, mm0" \
+    "punpckhbw mm2, mm2" \
+    "psraw     mm2, 8" \
+    "movq      mm3, mm1" \
+    "punpckhbw mm3, mm3" \
+    "psraw     mm3, 8" \
+    "movq      mm4, mm2" \
+    "punpcklwd mm4, mm3" \
+    "punpckhwd mm2, mm3" \
+    "pmaddwd   mm4, mm7" \
+    "pmaddwd   mm2, mm7" \
+    "movq      mm5, [ebx+112]" \
+    "paddd     mm5, mm4" \
+    "movq      [ebx+112], mm5" \
+    "movq      mm5, [ebx+120]" \
+    "paddd     mm5, mm2" \
+    "movq      [ebx+120], mm5" \
+    __parm [__eax] [__edx] [__ecx] [__ebx] \
+    __modify [8087]
+
+/* lz_wsum_group_mmx(): the ENTIRE multi-chunk second walk for one
+   group - all of LZ_WSUM_CHUNK's chunks, all pairs, the ring-buffer
+   slot walk, the per-chunk emms and lz_i32f fold - byte-for-byte the
+   loop body that used to live in src/ops.c's lz_attn_wsum_q8, now
+   behind ONE call per group instead of the zero real calls the
+   pre-split #pragma-aux-inline loop had. T is context-length-dependent
+   and unbounded (up to 262144 on this model), so amortizing at group
+   granularity rather than per-pair or per-chunk is what keeps the
+   added call count O(ng) instead of O(T). */
+void lz_wsum_group_mmx(const int8_t *vc, int kvd, int g, int sink, int ring,
+                       const int16_t *cq, int T, float *accf) {
+    int32_t acc32[32];
+    int d, t0, slot = 0;
+
+    for (d = 0; d < 32; d++) accf[d] = 0.0f;
+    for (t0 = 0; t0 < T; t0 += LZ_WSUM_CHUNK) {
+        int tn = T - t0;
+        int tp;
+        if (tn > LZ_WSUM_CHUNK) tn = LZ_WSUM_CHUNK;
+        memset(acc32, 0, sizeof(acc32));
+        for (tp = t0; tp + 1 < t0 + tn; tp += 2) {
+            int16_t coef[4];
+            const int8_t *rowA, *rowB;
+            int slotA = slot;
+            LZ_SLOT_NEXT(slot, sink, ring);
+            rowA = vc + (size_t)slotA * kvd + (size_t)g * 32;
+            rowB = vc + (size_t)slot  * kvd + (size_t)g * 32;
+            LZ_SLOT_NEXT(slot, sink, ring);
+            coef[0] = cq[tp];     coef[1] = cq[tp + 1];
+            coef[2] = cq[tp];     coef[3] = cq[tp + 1];
+            lz_wsum_pair_asm(rowA, rowB, coef, acc32);
+        }
+        if (tp < t0 + tn) {            /* odd leftover row in this chunk */
+            int16_t coef[4];
+            const int8_t *rowA = vc + (size_t)slot * kvd + (size_t)g * 32;
+            coef[0] = cq[tp]; coef[1] = 0;
+            coef[2] = cq[tp]; coef[3] = 0;
+            lz_wsum_pair_asm(rowA, rowA, coef, acc32);
+            LZ_SLOT_NEXT(slot, sink, ring);
+        }
+        _mm_empty();      /* no x87 inside the row-pair loop above */
+        for (d = 0; d < 32; d++) accf[d] += lz_i32f_wsum(acc32[d]);
+    }
+}
+
 /* ---- GDN/KDA fixed-point pass 2, MMX tier - moved here from
    src/ops_kernel_p2.h (task #30, 2/N). Algorithm documentation (WHAT
    THE OPERATOR IS, ISA INVENTORY, why the lo clamp is a saturating

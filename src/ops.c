@@ -3892,166 +3892,15 @@ void lz_rope(float *v, int n_heads, int head_dim, int rotary_dim,
 
 #if (LZ_ATTN_FIXED & 2)
 #if defined(__WATCOMC__)
-/* Originally generated, hand-edited since - if you regenerate, diff
-   the generator's output against what is here first.
-   acc32[d] += rowA[d]*coef[0] + rowB[d]*coef[1] for d in [0,32).
-   coef is [ckA,ckB,ckA,ckB] so one pmaddwd covers a 2-int32 lane pair.
-   Reads [eax]/[edx]/[ecx], writes only [ebx] and MMX - every offset is a
-   literal, no GP register is modified, so `__modify [8087]` is the truth
-   and not an `__exact []`-style lie (rule 2 item 3).
-   Emits no emms; the driver does one per chunk. */
-extern void lz_wsum_pair_asm(const int8_t *rowA, const int8_t *rowB,
-                const int16_t *coef, int32_t *acc32);
-#pragma aux lz_wsum_pair_asm = \
-    ".586" \
-    "movq      mm7, [ecx]" \
-    "movq      mm0, [eax]" \
-    "movq      mm1, [edx]" \
-    "movq      mm2, mm0" \
-    "punpcklbw mm2, mm2" \
-    "psraw     mm2, 8" \
-    "movq      mm3, mm1" \
-    "punpcklbw mm3, mm3" \
-    "psraw     mm3, 8" \
-    "movq      mm4, mm2" \
-    "punpcklwd mm4, mm3" \
-    "punpckhwd mm2, mm3" \
-    "pmaddwd   mm4, mm7" \
-    "pmaddwd   mm2, mm7" \
-    "movq      mm5, [ebx]" \
-    "paddd     mm5, mm4" \
-    "movq      [ebx], mm5" \
-    "movq      mm5, [ebx+8]" \
-    "paddd     mm5, mm2" \
-    "movq      [ebx+8], mm5" \
-    "movq      mm2, mm0" \
-    "punpckhbw mm2, mm2" \
-    "psraw     mm2, 8" \
-    "movq      mm3, mm1" \
-    "punpckhbw mm3, mm3" \
-    "psraw     mm3, 8" \
-    "movq      mm4, mm2" \
-    "punpcklwd mm4, mm3" \
-    "punpckhwd mm2, mm3" \
-    "pmaddwd   mm4, mm7" \
-    "pmaddwd   mm2, mm7" \
-    "movq      mm5, [ebx+16]" \
-    "paddd     mm5, mm4" \
-    "movq      [ebx+16], mm5" \
-    "movq      mm5, [ebx+24]" \
-    "paddd     mm5, mm2" \
-    "movq      [ebx+24], mm5" \
-    "movq      mm0, [eax+8]" \
-    "movq      mm1, [edx+8]" \
-    "movq      mm2, mm0" \
-    "punpcklbw mm2, mm2" \
-    "psraw     mm2, 8" \
-    "movq      mm3, mm1" \
-    "punpcklbw mm3, mm3" \
-    "psraw     mm3, 8" \
-    "movq      mm4, mm2" \
-    "punpcklwd mm4, mm3" \
-    "punpckhwd mm2, mm3" \
-    "pmaddwd   mm4, mm7" \
-    "pmaddwd   mm2, mm7" \
-    "movq      mm5, [ebx+32]" \
-    "paddd     mm5, mm4" \
-    "movq      [ebx+32], mm5" \
-    "movq      mm5, [ebx+40]" \
-    "paddd     mm5, mm2" \
-    "movq      [ebx+40], mm5" \
-    "movq      mm2, mm0" \
-    "punpckhbw mm2, mm2" \
-    "psraw     mm2, 8" \
-    "movq      mm3, mm1" \
-    "punpckhbw mm3, mm3" \
-    "psraw     mm3, 8" \
-    "movq      mm4, mm2" \
-    "punpcklwd mm4, mm3" \
-    "punpckhwd mm2, mm3" \
-    "pmaddwd   mm4, mm7" \
-    "pmaddwd   mm2, mm7" \
-    "movq      mm5, [ebx+48]" \
-    "paddd     mm5, mm4" \
-    "movq      [ebx+48], mm5" \
-    "movq      mm5, [ebx+56]" \
-    "paddd     mm5, mm2" \
-    "movq      [ebx+56], mm5" \
-    "movq      mm0, [eax+16]" \
-    "movq      mm1, [edx+16]" \
-    "movq      mm2, mm0" \
-    "punpcklbw mm2, mm2" \
-    "psraw     mm2, 8" \
-    "movq      mm3, mm1" \
-    "punpcklbw mm3, mm3" \
-    "psraw     mm3, 8" \
-    "movq      mm4, mm2" \
-    "punpcklwd mm4, mm3" \
-    "punpckhwd mm2, mm3" \
-    "pmaddwd   mm4, mm7" \
-    "pmaddwd   mm2, mm7" \
-    "movq      mm5, [ebx+64]" \
-    "paddd     mm5, mm4" \
-    "movq      [ebx+64], mm5" \
-    "movq      mm5, [ebx+72]" \
-    "paddd     mm5, mm2" \
-    "movq      [ebx+72], mm5" \
-    "movq      mm2, mm0" \
-    "punpckhbw mm2, mm2" \
-    "psraw     mm2, 8" \
-    "movq      mm3, mm1" \
-    "punpckhbw mm3, mm3" \
-    "psraw     mm3, 8" \
-    "movq      mm4, mm2" \
-    "punpcklwd mm4, mm3" \
-    "punpckhwd mm2, mm3" \
-    "pmaddwd   mm4, mm7" \
-    "pmaddwd   mm2, mm7" \
-    "movq      mm5, [ebx+80]" \
-    "paddd     mm5, mm4" \
-    "movq      [ebx+80], mm5" \
-    "movq      mm5, [ebx+88]" \
-    "paddd     mm5, mm2" \
-    "movq      [ebx+88], mm5" \
-    "movq      mm0, [eax+24]" \
-    "movq      mm1, [edx+24]" \
-    "movq      mm2, mm0" \
-    "punpcklbw mm2, mm2" \
-    "psraw     mm2, 8" \
-    "movq      mm3, mm1" \
-    "punpcklbw mm3, mm3" \
-    "psraw     mm3, 8" \
-    "movq      mm4, mm2" \
-    "punpcklwd mm4, mm3" \
-    "punpckhwd mm2, mm3" \
-    "pmaddwd   mm4, mm7" \
-    "pmaddwd   mm2, mm7" \
-    "movq      mm5, [ebx+96]" \
-    "paddd     mm5, mm4" \
-    "movq      [ebx+96], mm5" \
-    "movq      mm5, [ebx+104]" \
-    "paddd     mm5, mm2" \
-    "movq      [ebx+104], mm5" \
-    "movq      mm2, mm0" \
-    "punpckhbw mm2, mm2" \
-    "psraw     mm2, 8" \
-    "movq      mm3, mm1" \
-    "punpckhbw mm3, mm3" \
-    "psraw     mm3, 8" \
-    "movq      mm4, mm2" \
-    "punpcklwd mm4, mm3" \
-    "punpckhwd mm2, mm3" \
-    "pmaddwd   mm4, mm7" \
-    "pmaddwd   mm2, mm7" \
-    "movq      mm5, [ebx+112]" \
-    "paddd     mm5, mm4" \
-    "movq      [ebx+112], mm5" \
-    "movq      mm5, [ebx+120]" \
-    "paddd     mm5, mm2" \
-    "movq      [ebx+120], mm5" \
-    __parm [__eax] [__edx] [__ecx] [__ebx] \
-    __modify [8087]
-#define LZ_WSUM_PAIR(ra, rb, co, ac) lz_wsum_pair_asm(ra, rb, co, ac)
+/* lz_wsum_pair_asm's #pragma aux body, and the per-pair loop that used
+   to call it, both moved to src/ops_mmx.c's lz_wsum_group_mmx in task
+   #30 (3/N) - see that function and ops.c's lz_attn_wsum_q8 (search
+   "one call per GROUP") for why: T is context-length-dependent and
+   unbounded, so a per-pair or even per-chunk call here would scale the
+   wrong way. No LZ_WSUM_PAIR macro here anymore: it would alias a name
+   no longer declared in this TU, and nothing under __WATCOMC__ needs
+   it - lz_attn_wsum_q8's Watcom branch calls lz_wsum_group_mmx
+   directly, the same way task #30 (2/N) retired the p2 aliases. */
 
 #elif defined(LZ_WSUM_MMX_EXTERN)
 /* lz_wsum_pair_mmx's body lives in src/ops_mmx.c now - it writes %mm
@@ -4213,6 +4062,20 @@ void lz_attn_wsum_q8(float *out, const float *att, int hd,
             for (t = 0; t < T; t++) cq[t] = 0;
         }
 
+#if defined(__WATCOMC__)
+        /* Watcom (task #30, 3/N): one call per GROUP, not per pair. The
+           #pragma aux body used to expand inline at LZ_WSUM_PAIR's call
+           site, once per pair, with zero real call overhead; moving it
+           to src/ops_mmx.c means the pair loop itself has to move too,
+           or every pair would pay a cross-TU call - up to T/2 of them,
+           T being context-length-dependent and unbounded (262144 on
+           this model). lz_wsum_group_mmx does the ENTIRE multi-chunk
+           second walk (all of LZ_WSUM_CHUNK's chunks, all pairs, the
+           ring-buffer slot walk, the per-chunk emms and lz_i32f fold)
+           for this one group, so ops.c's call count per group goes from
+           zero to exactly one, not to T/2. */
+        lz_wsum_group_mmx(vc, kvd, g, sink, ring, cq, T, accf);
+#else
         for (d = 0; d < 32; d++) accf[d] = 0.0f;
         slot = 0;                       /* second walk, same t order */
         for (t0 = 0; t0 < T; t0 += LZ_WSUM_CHUNK) {
@@ -4240,11 +4103,12 @@ void lz_attn_wsum_q8(float *out, const float *att, int hd,
                 LZ_WSUM_PAIR(rowA, rowA, coef, acc32);
                 LZ_SLOT_NEXT(slot, sink, ring);
             }
-#if defined(__WATCOMC__) || defined(LZ_WSUM_MMX_EXTERN)
+#if defined(LZ_WSUM_MMX_EXTERN)
             _mm_empty();      /* no x87 inside the row-pair loop above */
 #endif
             for (d = 0; d < 32; d++) accf[d] += lz_i32f(acc32[d]);
         }
+#endif /* __WATCOMC__ */
         {
             float sscale = cmax * LZ_Q15_INV;
             for (d = 0; d < 32; d++) out[g * 32 + d] = accf[d] * sscale;
