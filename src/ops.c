@@ -226,10 +226,14 @@ static float norm_ss_fixed(const float *x, int n);
 
 /* Same home and reason: the fixed output loop of lz_rmsnorm_gated, defined
    beside norm_ss_fixed where sigmoid_q15's table and the Q15 helpers
-   live. */
+   live. Writes the PRE-silu product p[i] = x[i]*inv*w[i] into o and the
+   Q15 sigmoid of g[i] into sig: lz_quantize_q8_silu reconstructs the
+   silu value from them, so the Q15 -> float -> int round-trip is gone
+   while the value stays bit-identical (the 2^-15 dequantization is a
+   power of two). */
 static void lz_rmsnorm_gated_out_fixed(float *o, const float *x,
                                        const float *g, const float *w,
-                                       float inv, int n);
+                                       float inv, int n, int32_t *sig);
 
 void lz_rmsnorm(float *o, const float *x, const float *w, int n, float eps) {
     float ss = 0.0f;
@@ -275,7 +279,7 @@ have_ss:
 }
 
 void lz_rmsnorm_gated(float *o, const float *x, const float *g,
-                          const float *w, int n, float eps) {
+                          const float *w, int n, float eps, int32_t *sig) {
     float ss = 0.0f;
     float inv;
     float ssf;
@@ -286,14 +290,16 @@ void lz_rmsnorm_gated(float *o, const float *x, const float *g,
         if (ssf >= 0.0f) {
             /* Same replacement as lz_rmsnorm: norm_ss_fixed's own 2n+2
                in place of the 2n float ss loop. The output loop below
-               branches on fixed_ss: the fixed tier's own loop consumes
-               the Q15 sigmoid table directly (sigmoid_q15), so the
-               sigmoid work it does is billed here rather than at the
-               sigmoid site. Per element: sigmoid_q15 (2 mul, 2 cvt, 2
-               sub) + the silu/output expression (5 mul, 1 cvt); plus
-               norm_ss_fixed (n mul, n add, 1 mul, 1 cvt) and the
-               divide+eps (1 div, 1 add). */
-            LZ_FCX(LZ_FC_NORM, 8 * n + 1, 3 * n + 1, 1, 3 * n + 1, 0);
+               branches on fixed_ss: the fixed tier's own loop writes the
+               pre-silu product and the Q15 sigmoid (lz_quantize_q8_silu
+               reconstructs the silu value), so the sigmoid work it does
+               is billed here rather than at the sigmoid site. Per
+               element: sigmoid_q15 (2 mul, 2 cvt, 2 sub) + the pre-silu
+               product (2 mul); the silu reconstruction + quantize (3
+               mul, 1 cvt) is billed by lz_quantize_q8_silu at this same
+               site. Plus norm_ss_fixed (n mul, n add, 1 mul, 1 cvt) and
+               the divide+eps (1 div, 1 add). */
+            LZ_FCX(LZ_FC_NORM, 5 * n + 1, 3 * n + 1, 1, 2 * n + 1, 0);
             ss = ssf;
             fixed_ss = 1;
             goto have_ss_gated;
@@ -312,7 +318,7 @@ have_ss_gated:
     inv = lz_rsqrt(ss / (float)n + eps);
     /* plain w here, and the gate applies last */
     if (fixed_ss)
-        lz_rmsnorm_gated_out_fixed(o, x, g, w, inv, n);
+        lz_rmsnorm_gated_out_fixed(o, x, g, w, inv, n, sig);
     else
         for (i = 0; i < n; i++) o[i] = x[i] * inv * w[i] * lz_silu(g[i]);
 }
@@ -1054,6 +1060,89 @@ void lz_quantize_q8(const float *x, int n, int gs, int8_t *q, float *s) {
     }
 }
 
+/* Fused fixed-tier gated-RMSNorm quantize (see ops.h). The norm wrote
+   the pre-silu product into p (ssm_out) and the Q15 sigmoid into sig;
+   this reconstructs the silu value and quantizes it, so the Q15 ->
+   float -> int round-trip the plain lz_quantize_q8 used to re-quantize
+   is gone while the value stays bit-identical.
+
+   Why the 2^-15 folds into the SCALE and not the element loop: amax
+   runs on the pre-scale product u[i] = p[i]*(g[i]*(float)sig[i]), and
+   amax*2^-15 == max|u*2^-15| exactly because 2^-15 is a power of two.
+   The stored s[] and the round then match lz_quantize_q8's bit for bit
+   (u*(127/amax) == (u*2^-15)*(127/(amax*2^-15)) - both round the same
+   exact product once). o doubles as the amax-pass scratch and receives
+   the reconstructed float. */
+void lz_quantize_q8_silu(const float *p, const float *g, const int32_t *sig,
+                         int n, int gs, int8_t *q, float *s, float *o) {
+    int grp, k;
+    LZ_FCX(LZ_FC_NORM, 3 * n, 0, 0, n, 0);
+    if (gs <= 0 || n < gs || (n % gs) != 0) {
+        /* f32-weight downstream: no quantization; reconstruct the silu
+           value into o only (the f32 matmul fallback reads it). */
+        if (o) {
+            for (k = 0; k < n; k++)
+                o[k] = (p[k] * (g[k] * (float)sig[k])) * (1.0f / 32768.0f);
+        }
+        return;
+    }
+    for (grp = 0; grp < n / gs; grp++) {
+        const float *pg = p + (size_t)grp * gs;
+        const float *gg = g + (size_t)grp * gs;
+        const int32_t *sg = sig + (size_t)grp * gs;
+        int8_t *out = q + (size_t)grp * gs;
+        float *og = o + (size_t)grp * gs;   /* u[] scratch, then o[] */
+        union { float f; uint32_t u; } bit;
+        uint32_t am;
+        float amax, amax_o, inv;
+        int fast;
+        /* amax pass: the pre-scale product, in-place over p (element i
+           depends only on p[i], read before the write). The 2^-15 is
+           not applied here - it folds into the scale below. */
+        for (k = 0; k < gs; k++)
+            og[k] = pg[k] * (gg[k] * (float)sg[k]);
+        am = q8_amax(og, gs);
+        bit.u = am;
+        amax = bit.f;
+        if (amax > 0.0f) {
+            /* amax_o = amax*2^-15 exactly; s[] is the same stored scale
+               lz_quantize_q8 would write for the float silu output. */
+            amax_o = amax * (1.0f / 32768.0f);
+            s[grp] = amax_o * LZ_Q8_INV127;
+            /* Round-scale: u*inv == o*inv_o (see the header comment). */
+            inv = 127.0f / amax;
+            fast = (127.0f / amax_o <= FLT_MAX);
+            if (s[grp] < LZ_Q8_MIN_SCALE_F) {
+                s[grp] = 1.0f;
+                inv = 0.0f;
+                fast = 1;
+            }
+        } else {
+            s[grp] = 1.0f;
+            inv = 0.0f;
+            fast = 1;
+        }
+        if (fast) {
+            for (k = 0; k < gs; k++) {
+                int qi = q8_round(og[k] * inv);
+                qi = (qi > 127) ? 127 : qi;
+                out[k] = (int8_t)((qi < -127) ? -127 : qi);
+            }
+        } else {
+            for (k = 0; k < gs; k++) {
+                int qi = q8_round((og[k] * (1.0f / 32768.0f)) / s[grp]);
+                qi = (qi > 127) ? 127 : qi;
+                out[k] = (int8_t)((qi < -127) ? -127 : qi);
+            }
+        }
+        /* Reconstructed silu value, for the f32 matmul fallback and the
+           sgdn tap. The 2^-15 multiply is exact, so this is the same
+           float the norm's own output loop used to write. */
+        for (k = 0; k < gs; k++)
+            og[k] = og[k] * (1.0f / 32768.0f);
+    }
+}
+
 #include "ops_kernel_dot.h"
 
 /* ---------------------------------------------- runtime kernel dispatch
@@ -1477,6 +1566,20 @@ const char *lz_norm_select(const char *name) {
     else if (strcmp(name, "auto") == 0) g_norm = -1;
     else return NULL;
     return lz_norm_mode() ? "fixed" : "float";
+}
+
+int lz_norm_can_fixed(int n) {
+#if LZ_GDN_FIXED
+    /* norm_ss_fixed's own decline condition (n > LZ_NORM_MAX_N) plus the
+       mode; in a LZ_GDN_FIXED=0 build the fixed body is compiled out and
+       norm_ss_fixed returns the decline sentinel. Callers that route the
+       fused quantizer gate on this, so the float tier keeps the plain
+       lz_rmsnorm_gated + lz_quantize_q8 path. */
+    return lz_norm_mode() && n > 0 && n <= LZ_NORM_MAX_N;
+#else
+    (void)n;
+    return 0;
+#endif
 }
 
 static int g_epi = -1;
@@ -4346,27 +4449,30 @@ static float norm_ss_fixed(const float *x, int n) {
    table (sigmoid_q15) instead of through lz_silu/lz_sigmoid, so this
    loop owns its sigmoid work and the sigmoid site stops billing it.
 
-   The VALUE is the float tier's own, bit for bit: the 1/32768 scale is
-   a power of two, so the last multiply by it is exact and the
-   reordering (silu multiply, then scale) is bit-neutral - verified
-   against the lz_silu chain over random values, zero mismatches. A
-   fixed-point product instead would change the fixed tier's output,
-   which is barred. */
+   The loop writes the PRE-silu product p[i] = (x[i]*inv)*w[i] into o
+   and the Q15 sigmoid into sig; lz_quantize_q8_silu reconstructs the
+   silu value o[i] = p[i]*(g[i]*(float)sig[i])*2^-15 from them. The
+   VALUE is the float tier's own, bit for bit: the 1/32768 scale is a
+   power of two, so folding it into the quantizer's scale is exact and
+   the reordered (silu multiply, then scale) expression rounds the same
+   way - verified against the lz_silu chain over random values, zero
+   mismatches. A fixed-point product instead would change the fixed
+   tier's output, which is barred. */
 static void lz_rmsnorm_gated_out_fixed(float *o, const float *x,
                                        const float *g, const float *w,
-                                       float inv, int n) {
+                                       float inv, int n, int32_t *sig) {
     int i;
     for (i = 0; i < n; i++) {
-        int32_t sig = sigmoid_q15(g[i]);
-        o[i] = (x[i] * inv * w[i]) * (g[i] * (float)sig) *
-               (1.0f / 32768.0f);
+        int32_t s = sigmoid_q15(g[i]);
+        sig[i] = s;
+        o[i] = (x[i] * inv) * w[i];
     }
 }
 #else
 static void lz_rmsnorm_gated_out_fixed(float *o, const float *x,
                                        const float *g, const float *w,
-                                       float inv, int n) {
-    (void)o; (void)x; (void)g; (void)w; (void)inv; (void)n;
+                                       float inv, int n, int32_t *sig) {
+    (void)o; (void)x; (void)g; (void)w; (void)inv; (void)n; (void)sig;
 }
 #endif
 

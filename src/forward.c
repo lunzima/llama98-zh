@@ -628,6 +628,7 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
     s->avec   = (float *)xcalloc((size_t)nt * c->lin_n_v_heads, sizeof(float), &ok, &s->bytes_alloc);
     s->bvec   = (float *)xcalloc((size_t)nt * c->lin_n_v_heads, sizeof(float), &ok, &s->bytes_alloc);
     s->ssm_out= (float *)xcalloc((size_t)nt * c->lin_value_dim, sizeof(float), &ok, &s->bytes_alloc);
+    s->ssm_sig = (int32_t *)xcalloc((size_t)nt * c->lin_value_dim, sizeof(int32_t), &ok, &s->bytes_alloc);
     /* nt-wide, not one head-dim wide - allocated to match the other
        batched buffers; the serial recurrence only ever touches row 0.
        `nt` here is LZ_BATCH_MAX (line 407), the cap, not the current
@@ -906,7 +907,7 @@ void lz_state_free(LZRunState *s) {
     free(s->kq8_lo); free(s->vq8_lo); free(s->att_lo); free(s->wsum_lo);
 #endif
     free(s->qkv); free(s->qkv_c); free(s->zbuf); free(s->avec); free(s->bvec);
-    free(s->ssm_out); free(s->qn); free(s->kn);
+    free(s->ssm_out); free(s->ssm_sig); free(s->qn); free(s->kn);
     free(s->kda_q); free(s->kda_k); free(s->kda_v);
     free(s->kda_qc); free(s->kda_kc); free(s->kda_vc);
     free(s->kda_gate_lat); free(s->kda_gate);
@@ -1823,22 +1824,44 @@ static void forward_ssm(const LZModel *m, LZRunState *s,
     }
 
     /* This is the plain-weight gated RMSNorm, not the (1+w) kind used
-       by the outer layers */
-    for (tk = 0; tk < nt; tk++)
-        for (h = 0; h < nv; h++)
-            lz_rmsnorm_gated(s->ssm_out + (size_t)tk * vdim + (size_t)h * vd,
-                             s->ssm_out + (size_t)tk * vdim + (size_t)h * vd,
-                             s->zbuf + (size_t)tk * vdim + (size_t)h * vd,
-                             lz_t_f32(&L->ssm_norm, s->wscr), vd,
-                             c->rms_norm_eps);
-
-    LZ_TAP("sgdn", layer, s->ssm_out, vdim);
+       by the outer layers. In the fixed tier the norm writes the
+       pre-silu product and the Q15 sigmoid, and lz_quantize_q8_silu
+       reconstructs the silu value from them - the Q15 -> float -> int
+       round-trip is gone while the value is bit-identical. The float
+       tier keeps the plain norm + quantize path. */
     {
         int gso = lz_act_gs(&L->out_proj, vdim);
         int nso = (gso > 0) ? vdim / gso : 0;
-        for (tk = 0; tk < nt; tk++)
-            lz_quantize_q8(s->ssm_out + (size_t)tk * vdim, vdim, gso,
-                           s->xq + (size_t)tk * vdim, s->xqs + (size_t)tk * nso);
+        if (lz_norm_can_fixed(vd)) {
+            for (tk = 0; tk < nt; tk++)
+                for (h = 0; h < nv; h++)
+                    lz_rmsnorm_gated(s->ssm_out + (size_t)tk * vdim + (size_t)h * vd,
+                                     s->ssm_out + (size_t)tk * vdim + (size_t)h * vd,
+                                     s->zbuf + (size_t)tk * vdim + (size_t)h * vd,
+                                     lz_t_f32(&L->ssm_norm, s->wscr), vd,
+                                     c->rms_norm_eps,
+                                     s->ssm_sig + (size_t)tk * vdim + (size_t)h * vd);
+            for (tk = 0; tk < nt; tk++)
+                lz_quantize_q8_silu(s->ssm_out + (size_t)tk * vdim,
+                                    s->zbuf + (size_t)tk * vdim,
+                                    s->ssm_sig + (size_t)tk * vdim,
+                                    vdim, gso,
+                                    s->xq + (size_t)tk * vdim,
+                                    s->xqs + (size_t)tk * nso,
+                                    s->ssm_out + (size_t)tk * vdim);
+        } else {
+            for (tk = 0; tk < nt; tk++)
+                for (h = 0; h < nv; h++)
+                    lz_rmsnorm_gated(s->ssm_out + (size_t)tk * vdim + (size_t)h * vd,
+                                     s->ssm_out + (size_t)tk * vdim + (size_t)h * vd,
+                                     s->zbuf + (size_t)tk * vdim + (size_t)h * vd,
+                                     lz_t_f32(&L->ssm_norm, s->wscr), vd,
+                                     c->rms_norm_eps, NULL);
+            for (tk = 0; tk < nt; tk++)
+                lz_quantize_q8(s->ssm_out + (size_t)tk * vdim, vdim, gso,
+                               s->xq + (size_t)tk * vdim, s->xqs + (size_t)tk * nso);
+        }
+        LZ_TAP("sgdn", layer, s->ssm_out, vdim);
         lz_matmul_xq_nt(s->xb2, s->ssm_out, s->xq, s->xqs, &L->out_proj, vdim,
                         hdim, nt);
     }
@@ -2082,21 +2105,42 @@ static void forward_kda(const LZModel *m, LZRunState *s,
     LZ_TAP("kraw", layer, s->ssm_out, vdim);
     /* Same gated RMSNorm as GDN (plain-weight, silu gate) - see
        kda_o_norm's field comment in model.h for why the activation must
-       stay silu on this engine. */
-    for (tk = 0; tk < nt; tk++)
-        for (h = 0; h < nv; h++)
-            lz_rmsnorm_gated(s->ssm_out + (size_t)tk * vdim + (size_t)h * vd,
-                             s->ssm_out + (size_t)tk * vdim + (size_t)h * vd,
-                             s->zbuf + (size_t)tk * vdim + (size_t)h * vd,
-                             lz_t_f32(&L->kda_o_norm, s->wscr), vd,
-                             c->rms_norm_eps);
-    LZ_TAP("sgdn", layer, s->ssm_out, vdim);
+       stay silu on this engine. Fixed tier fuses the silu into the
+       quantizer exactly as GDN does (lz_quantize_q8_silu); float tier
+       keeps the plain norm + quantize path. */
     {
         int gso = lz_act_gs(&L->kda_o_proj, vdim);
         int nso = (gso > 0) ? vdim / gso : 0;
-        for (tk = 0; tk < nt; tk++)
-            lz_quantize_q8(s->ssm_out + (size_t)tk * vdim, vdim, gso,
-                           s->xq + (size_t)tk * vdim, s->xqs + (size_t)tk * nso);
+        if (lz_norm_can_fixed(vd)) {
+            for (tk = 0; tk < nt; tk++)
+                for (h = 0; h < nv; h++)
+                    lz_rmsnorm_gated(s->ssm_out + (size_t)tk * vdim + (size_t)h * vd,
+                                     s->ssm_out + (size_t)tk * vdim + (size_t)h * vd,
+                                     s->zbuf + (size_t)tk * vdim + (size_t)h * vd,
+                                     lz_t_f32(&L->kda_o_norm, s->wscr), vd,
+                                     c->rms_norm_eps,
+                                     s->ssm_sig + (size_t)tk * vdim + (size_t)h * vd);
+            for (tk = 0; tk < nt; tk++)
+                lz_quantize_q8_silu(s->ssm_out + (size_t)tk * vdim,
+                                    s->zbuf + (size_t)tk * vdim,
+                                    s->ssm_sig + (size_t)tk * vdim,
+                                    vdim, gso,
+                                    s->xq + (size_t)tk * vdim,
+                                    s->xqs + (size_t)tk * nso,
+                                    s->ssm_out + (size_t)tk * vdim);
+        } else {
+            for (tk = 0; tk < nt; tk++)
+                for (h = 0; h < nv; h++)
+                    lz_rmsnorm_gated(s->ssm_out + (size_t)tk * vdim + (size_t)h * vd,
+                                     s->ssm_out + (size_t)tk * vdim + (size_t)h * vd,
+                                     s->zbuf + (size_t)tk * vdim + (size_t)h * vd,
+                                     lz_t_f32(&L->kda_o_norm, s->wscr), vd,
+                                     c->rms_norm_eps, NULL);
+            for (tk = 0; tk < nt; tk++)
+                lz_quantize_q8(s->ssm_out + (size_t)tk * vdim, vdim, gso,
+                               s->xq + (size_t)tk * vdim, s->xqs + (size_t)tk * nso);
+        }
+        LZ_TAP("sgdn", layer, s->ssm_out, vdim);
         lz_matmul_xq_nt(s->xb2, s->ssm_out, s->xq, s->xqs, &L->kda_o_proj, vdim,
                         hdim, nt);
     }

@@ -238,6 +238,11 @@ typedef struct {
     float *zbuf;                /* (lin_value_dim) - also KDA's g_proj output */
     float *avec, *bvec;         /* (lin_n_v_heads) - bvec also KDA's b_proj output */
     float *ssm_out;             /* (lin_value_dim) - shared by GDN and KDA */
+    int32_t *ssm_sig;           /* (lin_value_dim) Q15 sigmoid of the gated
+                                   norm, written beside the pre-silu product
+                                   in the fixed tier (lz_quantize_q8_silu
+                                   consumes it). int32, not int16: the Q15
+                                   range reaches 32768 at the clamp. */
     float *qn, *kn;             /* (nt_cap, lin_k_head_dim) L2-norm scratch;
                                    the serial recurrence uses row 0 only */
 

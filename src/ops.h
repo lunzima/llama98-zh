@@ -122,9 +122,17 @@ void lz_f32_count_reset(void);
 void lz_rmsnorm(float *o, const float *x, const float *w, int n, float eps);
 
 /* o = x * rsqrt(mean(x^2) + eps) * w * silu(g)  - Qwen3_5RMSNormGated
-   Order matters: normalize and multiply by weight first, gate last. */
+   Order matters: normalize and multiply by weight first, gate last.
+
+   In the fixed tier o holds the PRE-silu product x*inv*w and sig the Q15
+   sigmoid of g (the float tier ignores sig and o holds the silu'd
+   value); lz_quantize_q8_silu reconstructs the silu value from them, so
+   the Q15 -> float -> int round-trip the downstream quantizer used to
+   re-quantize is gone while the value stays bit-identical (the 2^-15
+   dequantization is a power of two). Callers gate the fused quantizer
+   on lz_norm_can_fixed(). */
 void lz_rmsnorm_gated(float *o, const float *x, const float *g,
-                          const float *w, int n, float eps);
+                          const float *w, int n, float eps, int32_t *sig);
 
 /* o = x * rsqrt(sum(x^2) + eps)  - note sum, not mean */
 void lz_l2norm(float *o, const float *x, int n, float eps);
@@ -455,6 +463,13 @@ int lz_sig_is_auto(void);
 int lz_norm_mode(void);
 int lz_norm_is_auto(void);
 const char *lz_norm_select(const char *name);
+/* Whether lz_rmsnorm_gated will take the fixed tier for an n-element
+   norm: false in a LZ_GDN_FIXED=0 build, where the fixed body is
+   compiled out and norm_ss_fixed declines. The fixed-tier call sites
+   that hand the pre-silu product and the Q15 sigmoid to
+   lz_quantize_q8_silu gate on this, so the float tier keeps the plain
+   lz_rmsnorm_gated + lz_quantize_q8 path. */
+int lz_norm_can_fixed(int n);
 
 /* Dequant epilogue tier: "float" | "fixed" | "auto".
 
@@ -526,6 +541,19 @@ const char *lz_kernel_tier(void);
    being the group's absmax/127 (all-zero group scale=1.0). q needs n
    bytes, s n/gs f32s. */
 void lz_quantize_q8(const float *x, int n, int gs, int8_t *q, float *s);
+
+/* Fused fixed-tier gated-RMSNorm quantize. p is the pre-silu product
+   and sig the Q15 sigmoid that lz_rmsnorm_gated wrote in its fixed tier
+   (g is the gate); the silu value
+   o[i] = p[i]*(g[i]*(float)sig[i])*2^-15 is reconstructed and quantized
+   to q/s. Bit-identical to lz_quantize_q8 on the float silu output: the
+   2^-15 is a power of two, so amax over the pre-scale product scales
+   exactly and the products round identically. o receives the
+   reconstructed float (the f32-weight matmul fallback and the sgdn tap
+   read it) and doubles as the amax-pass scratch. gs <= 0 (f32 weights)
+   reconstructs into o and returns without quantizing. */
+void lz_quantize_q8_silu(const float *p, const float *g, const int32_t *sig,
+                         int n, int gs, int8_t *q, float *s, float *o);
 
 /* Which group size this weight tensor requires for quantizing activations.
 
