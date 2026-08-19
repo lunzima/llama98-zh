@@ -956,6 +956,444 @@ unsigned lz_amax32_mmx_w(const float *x, int n) {
     return lz_amax32_mmx_asm(x, n);
 }
 
+/* ---- Q8_0 32/128-element dot products and row kernel, MMX tier -
+   moved here from src/ops_kernel_dot.h / src/ops.c (task #30, 5/N).
+   Algorithm documentation (why the weight side is widened via
+   punpcklbw(zero,w), the register-budget accounting for the paired
+   kernel, the emms placement rule) is unchanged from the original site
+   - not reproduced here a second time. */
+#include "ops.h"           /* lz_prefetch_mode/lz_pair_mode - row_q8_mmx_asm
+                              needs both, and neither is static, so a
+                              real declaration is all that is needed. */
+#include "ops_kernel_dot_shared.h" /* LZ_Q8_ACC, LZ_Q8_PFSEL, LZ_Q8_GROUP4 */
+
+/* __modify must be truthful; never write __exact [].
+   `__exact []` means "this code touches no register" - a lie: the
+   asm writes eax (the return value), MMX/XMM, and MMX also moves the
+   x87 stack. -oe (inline expansion) or -ol (loop optimization) alone
+   are fine; together (-otel, -ox, -otexan) it blows up: after inlining,
+   the loop optimizer keeps loop variables in eax across the asm
+   because it believes nothing changed.
+   The symptom is deeply misleading - end-to-end logits become
+   nondeterministic garbage (three runs of the same exe give rms
+   5418/5415/5412, drifting each time), while kernel-level differential
+   tests of 200K groups all pass, because that call shape is simple and
+   the optimizer has nothing to move.
+   Writing [8087] makes Watcom treat it conservatively as "modified FP
+   stack + default volatile registers". */
+/* Watcom hand-written MMX dot product: 32 elements (int8 weights x
+   int16 activations), pure asm pipeline. Same algorithm as the gcc
+   version below (w expanded via punpcklbw(zero,w) = w<<8, cancelled by
+   the caller's 1/256 at the row end). Written as a single pragma aux
+   function to avoid Watcom's __m64 struct-return stack round trip
+   (measured: the intrinsics version was 6x slower than x87; this one
+   40x faster than it). Correctness: bit-matches the scalar over 100K
+   random/extreme groups. eax=w, edx=x, returns eax;
+   contains an emms (the caller's row-level EMMS is idempotent, no
+   harm). */
+/* Originally generated, hand-edited since - if you regenerate, diff
+   the generator's output against what is here first.
+   Kernels do NOT emit emms: the loop body is all integer and MMX; x87
+   is only used in the whole-row reduction, and the caller already does
+   one _mm_empty() after the loop. One emms per 32 elements would be
+   pure redundancy - ~1.8M sub-block calls per token, at 6 cycles on a
+   P6 that is 36 ms / 16% of the compute budget, worse on P4.
+   Changing this REQUIRES proving the caller's loop body has no x87.
+   Differential-checked over 200K groups (random + extremes,
+   bit-identical to the scalar reference).
+   Counts (µop, P6 accounting): Q8_0 52, Q4_1 63, Q6_1 86. */
+extern int32_t lz_dot32_x16_asm(const int8_t *w, const int16_t *x);
+#pragma aux lz_dot32_x16_asm = \
+    ".586" \
+    "pxor      mm7, mm7" \
+    "pxor      mm6, mm6" \
+    "movq      mm1, [eax]" \
+    "movq      mm2, mm7" \
+    "punpcklbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx]" \
+    "paddd     mm6, mm2" \
+    "movq      mm2, mm7" \
+    "punpckhbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx+8]" \
+    "paddd     mm6, mm2" \
+    "movq      mm1, [eax+8]" \
+    "movq      mm2, mm7" \
+    "punpcklbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx+16]" \
+    "paddd     mm6, mm2" \
+    "movq      mm2, mm7" \
+    "punpckhbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx+24]" \
+    "paddd     mm6, mm2" \
+    "movq      mm1, [eax+16]" \
+    "movq      mm2, mm7" \
+    "punpcklbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx+32]" \
+    "paddd     mm6, mm2" \
+    "movq      mm2, mm7" \
+    "punpckhbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx+40]" \
+    "paddd     mm6, mm2" \
+    "movq      mm1, [eax+24]" \
+    "movq      mm2, mm7" \
+    "punpcklbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx+48]" \
+    "paddd     mm6, mm2" \
+    "movq      mm2, mm7" \
+    "punpckhbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx+56]" \
+    "paddd     mm6, mm2" \
+    "movq      mm1, mm6" \
+    "psrlq     mm1, 32" \
+    "paddd     mm6, mm1" \
+    "movd      eax, mm6" \
+    __parm [__eax] [__ecx] \
+    __value [__eax] \
+    __modify [8087]
+
+/* PAIRED twin of the above: two tokens, ONE weight unpack.
+   The gcc side is dot32_x16_mmx_2; this is the Watcom half, i.e. the
+   half that runs on the target. Q8's weight side is 12 of 36 ops per
+   32 MACs, so sharing it across NT tokens costs 12 + 24*NT instead of
+   36*NT - ceiling 1.50x, 1.20x at NT=2.
+
+   Register budget is why NT is 2 and not more: mm7 zero, mm6/mm5 the
+   two accumulators, mm1 the raw weight octet, mm2 the widened half,
+   mm3 its copy for the second token - six of eight, with none to spare
+   for a third token's accumulator plus its activation.
+
+   No emms here, by rule 6.6: the caller emits one after the row loop.
+
+   VERIFIED BIT-IDENTICAL: 200000 random plus 8 extreme trials against
+   the scalar reference, 0 mismatches - and the
+   differential's own sensitivity checked by mutating one operand offset
+   ([ebx+8] -> [ebx+16]), which turned it into 200000 mismatches. */
+extern void lz_dot32_x16_asm_2(const int8_t *w, const int16_t *xa,
+                               const int16_t *xb, int32_t *oa, int32_t *ob);
+#pragma aux lz_dot32_x16_asm_2 = \
+    ".586" \
+    "pxor      mm7, mm7" \
+    "pxor      mm6, mm6" \
+    "pxor      mm5, mm5" \
+    "movq      mm1, [eax]" \
+    "movq      mm2, mm7" \
+    "punpcklbw mm2, mm1" \
+    "movq      mm3, mm2" \
+    "pmaddwd   mm2, [edx]" \
+    "paddd     mm6, mm2" \
+    "pmaddwd   mm3, [ebx]" \
+    "paddd     mm5, mm3" \
+    "movq      mm2, mm7" \
+    "punpckhbw mm2, mm1" \
+    "movq      mm3, mm2" \
+    "pmaddwd   mm2, [edx+8]" \
+    "paddd     mm6, mm2" \
+    "pmaddwd   mm3, [ebx+8]" \
+    "paddd     mm5, mm3" \
+    "movq      mm1, [eax+8]" \
+    "movq      mm2, mm7" \
+    "punpcklbw mm2, mm1" \
+    "movq      mm3, mm2" \
+    "pmaddwd   mm2, [edx+16]" \
+    "paddd     mm6, mm2" \
+    "pmaddwd   mm3, [ebx+16]" \
+    "paddd     mm5, mm3" \
+    "movq      mm2, mm7" \
+    "punpckhbw mm2, mm1" \
+    "movq      mm3, mm2" \
+    "pmaddwd   mm2, [edx+24]" \
+    "paddd     mm6, mm2" \
+    "pmaddwd   mm3, [ebx+24]" \
+    "paddd     mm5, mm3" \
+    "movq      mm1, [eax+16]" \
+    "movq      mm2, mm7" \
+    "punpcklbw mm2, mm1" \
+    "movq      mm3, mm2" \
+    "pmaddwd   mm2, [edx+32]" \
+    "paddd     mm6, mm2" \
+    "pmaddwd   mm3, [ebx+32]" \
+    "paddd     mm5, mm3" \
+    "movq      mm2, mm7" \
+    "punpckhbw mm2, mm1" \
+    "movq      mm3, mm2" \
+    "pmaddwd   mm2, [edx+40]" \
+    "paddd     mm6, mm2" \
+    "pmaddwd   mm3, [ebx+40]" \
+    "paddd     mm5, mm3" \
+    "movq      mm1, [eax+24]" \
+    "movq      mm2, mm7" \
+    "punpcklbw mm2, mm1" \
+    "movq      mm3, mm2" \
+    "pmaddwd   mm2, [edx+48]" \
+    "paddd     mm6, mm2" \
+    "pmaddwd   mm3, [ebx+48]" \
+    "paddd     mm5, mm3" \
+    "movq      mm2, mm7" \
+    "punpckhbw mm2, mm1" \
+    "movq      mm3, mm2" \
+    "pmaddwd   mm2, [edx+56]" \
+    "paddd     mm6, mm2" \
+    "pmaddwd   mm3, [ebx+56]" \
+    "paddd     mm5, mm3" \
+    "movq      mm1, mm6" \
+    "psrlq     mm1, 32" \
+    "paddd     mm6, mm1" \
+    "movd      [ecx], mm6" \
+    "movq      mm1, mm5" \
+    "psrlq     mm1, 32" \
+    "paddd     mm5, mm1" \
+    "movd      [esi], mm5" \
+    __parm [__eax] [__edx] [__ebx] [__ecx] [__esi] \
+    __modify [8087]
+
+/* Both are compiled in; the runtime picks by CPUID (see
+   lz_kernel_select). One binary must run on both PII (MMX only) and
+   T42 (SSE2). Non-static now: src/ops.c's LZ_ATTN_DOT32 macro
+   (attention scoring's dot, lz_attn_score_q8) calls this by name
+   across the TU boundary - it always did, even before this move, just
+   within one TU; declared in src/ops_mmx.h. */
+int32_t dot32_x16_mmx(const int8_t *w, const int16_t *x) {
+    return lz_dot32_x16_asm(w, x);
+}
+
+/* Gate: 100K groups x 4 sub-blocks, MMX and SSE2 both bit-identical to
+   the scalar reference. */
+extern void lz_dot128_x16_asm(const int8_t *w,
+                const int16_t *x, int32_t *out4);
+#pragma aux lz_dot128_x16_asm = \
+    ".586" \
+    "pxor      mm7, mm7" \
+    "pxor      mm6, mm6" \
+    "movq      mm1, [eax]" \
+    "movq      mm2, mm7" \
+    "punpcklbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx]" \
+    "paddd     mm6, mm2" \
+    "movq      mm2, mm7" \
+    "punpckhbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx+8]" \
+    "paddd     mm6, mm2" \
+    "movq      mm1, [eax+8]" \
+    "movq      mm2, mm7" \
+    "punpcklbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx+16]" \
+    "paddd     mm6, mm2" \
+    "movq      mm2, mm7" \
+    "punpckhbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx+24]" \
+    "paddd     mm6, mm2" \
+    "movq      mm1, [eax+16]" \
+    "movq      mm2, mm7" \
+    "punpcklbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx+32]" \
+    "paddd     mm6, mm2" \
+    "movq      mm2, mm7" \
+    "punpckhbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx+40]" \
+    "paddd     mm6, mm2" \
+    "movq      mm1, [eax+24]" \
+    "movq      mm2, mm7" \
+    "punpcklbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx+48]" \
+    "paddd     mm6, mm2" \
+    "movq      mm2, mm7" \
+    "punpckhbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx+56]" \
+    "paddd     mm6, mm2" \
+    "movd      [ebx], mm6" \
+    "movq      mm6, mm7" \
+    "movq      mm1, [eax+32]" \
+    "movq      mm2, mm7" \
+    "punpcklbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx+64]" \
+    "paddd     mm6, mm2" \
+    "movq      mm2, mm7" \
+    "punpckhbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx+72]" \
+    "paddd     mm6, mm2" \
+    "movq      mm1, [eax+40]" \
+    "movq      mm2, mm7" \
+    "punpcklbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx+80]" \
+    "paddd     mm6, mm2" \
+    "movq      mm2, mm7" \
+    "punpckhbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx+88]" \
+    "paddd     mm6, mm2" \
+    "movq      mm1, [eax+48]" \
+    "movq      mm2, mm7" \
+    "punpcklbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx+96]" \
+    "paddd     mm6, mm2" \
+    "movq      mm2, mm7" \
+    "punpckhbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx+104]" \
+    "paddd     mm6, mm2" \
+    "movq      mm1, [eax+56]" \
+    "movq      mm2, mm7" \
+    "punpcklbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx+112]" \
+    "paddd     mm6, mm2" \
+    "movq      mm2, mm7" \
+    "punpckhbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx+120]" \
+    "paddd     mm6, mm2" \
+    "movd      [ebx+4], mm6" \
+    "movq      mm6, mm7" \
+    "movq      mm1, [eax+64]" \
+    "movq      mm2, mm7" \
+    "punpcklbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx+128]" \
+    "paddd     mm6, mm2" \
+    "movq      mm2, mm7" \
+    "punpckhbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx+136]" \
+    "paddd     mm6, mm2" \
+    "movq      mm1, [eax+72]" \
+    "movq      mm2, mm7" \
+    "punpcklbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx+144]" \
+    "paddd     mm6, mm2" \
+    "movq      mm2, mm7" \
+    "punpckhbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx+152]" \
+    "paddd     mm6, mm2" \
+    "movq      mm1, [eax+80]" \
+    "movq      mm2, mm7" \
+    "punpcklbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx+160]" \
+    "paddd     mm6, mm2" \
+    "movq      mm2, mm7" \
+    "punpckhbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx+168]" \
+    "paddd     mm6, mm2" \
+    "movq      mm1, [eax+88]" \
+    "movq      mm2, mm7" \
+    "punpcklbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx+176]" \
+    "paddd     mm6, mm2" \
+    "movq      mm2, mm7" \
+    "punpckhbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx+184]" \
+    "paddd     mm6, mm2" \
+    "movd      [ebx+8], mm6" \
+    "movq      mm6, mm7" \
+    "movq      mm1, [eax+96]" \
+    "movq      mm2, mm7" \
+    "punpcklbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx+192]" \
+    "paddd     mm6, mm2" \
+    "movq      mm2, mm7" \
+    "punpckhbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx+200]" \
+    "paddd     mm6, mm2" \
+    "movq      mm1, [eax+104]" \
+    "movq      mm2, mm7" \
+    "punpcklbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx+208]" \
+    "paddd     mm6, mm2" \
+    "movq      mm2, mm7" \
+    "punpckhbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx+216]" \
+    "paddd     mm6, mm2" \
+    "movq      mm1, [eax+112]" \
+    "movq      mm2, mm7" \
+    "punpcklbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx+224]" \
+    "paddd     mm6, mm2" \
+    "movq      mm2, mm7" \
+    "punpckhbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx+232]" \
+    "paddd     mm6, mm2" \
+    "movq      mm1, [eax+120]" \
+    "movq      mm2, mm7" \
+    "punpcklbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx+240]" \
+    "paddd     mm6, mm2" \
+    "movq      mm2, mm7" \
+    "punpckhbw mm2, mm1" \
+    "pmaddwd   mm2, [ecx+248]" \
+    "paddd     mm6, mm2" \
+    "movq      mm1, mm6" \
+    "psrlq     mm1, 32" \
+    "paddd     mm6, mm1" \
+    "movd      [ebx+12], mm6" \
+    "emms" \
+    __parm [__eax] [__ecx] [__ebx] \
+    __modify [8087]
+
+/* Real, addressable twin of lz_dot128_x16_asm - needed cross-TU by
+   src/ops_sse2.c's row_q8_sse2_asm, ONLY in the -DLZ_SSE2_GROUP=0 A/B
+   control build (an explicit measurement knob, not the default: see
+   ops.c's own comment on it): that build point asks an SSE2-tier row
+   to fall back to the MMX group kernel. LZ_Q8_GROUP4 calls its DOT128
+   argument by name, and a #pragma aux body cannot have its address
+   taken, so this wrapper is what makes that call legal across the TU
+   boundary. row_q8_mmx_asm above never calls through this: it inlines
+   the pragma directly. */
+void lz_dot128_x16_mmx_w(const int8_t *w, const int16_t *x, int32_t *out4) {
+    lz_dot128_x16_asm(w, x, out4);
+}
+
+/* row_q8_mmx_asm: ALREADY the real call boundary from its own caller
+   (matmul_q8_impl, src/ops.c, dispatched once per matmul via
+   lz_row_pick's LZ_ROW_Q8 table) - moving the whole function here,
+   together with the leaf kernels it calls direct-by-name inside its
+   own loop, adds NO new call sites (the gdn1_x4 argument, piece 1/N).
+   g_pair became lz_pair_mode() - the row function can no longer see
+   ops.c's static global directly, so it goes through the same
+   accessor lz_prefetch_mode() already used one line below. */
+void row_q8_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
+                    const int16_t *xw, int nb, int nt, int in_dim,
+                    const void *pf_end, const void *pf_end2) {
+    const int8_t *wr = (const int8_t *)w4;
+    const int8_t *wend = (const int8_t *)pf_end;
+    int tk, g;
+    (void)w2; (void)pf_end2;
+    for (tk = 0; tk < nt; tk++) {
+        const int16_t *xwt = xw + (size_t)tk * in_dim;
+        int32_t *acc = acc32 + (size_t)tk * nb;
+        /* Pairing beats the 128-element group kernel whenever there is
+           a second token: the group kernel amortizes FIXED overhead
+           (mask setup, prologue) from once per 32 elements to once per
+           128, while pairing removes the weight unpack itself for the
+           second token - and on the target the weight side is the
+           memory side. Same choice the gcc twin makes, which also keeps
+           the two impls' shapes comparable when they are diffed.
+           At nt == 1 there is nothing to pair, so the group kernel
+           keeps that path unchanged.
+
+           NOT MEASURED ON TARGET. The op-count argument is 12 + 24*NT
+           against 36*NT; whether it beats the group kernel's amortized
+           prologue on a real PII is a wall-clock question, and the
+           machine for it is not here. This is a knob-shaped
+           decision recorded as such, not a measured result. */
+        if (nt - tk >= 2 && lz_pair_mode()) {
+            const int16_t *xw2 = xwt + in_dim;
+            int32_t *accb = acc + nb;
+            int g2;
+            for (g2 = 0; g2 < nb; g2++) {
+                const int8_t *pf_ = wr + (size_t)(g2 + LZ_PF_DIST) * 32;
+                if (pf_ < wend) {
+                    int pf_m_ = lz_prefetch_mode();
+                    if (pf_m_ == LZ_PF_AMD)       LZ_PFI_AMD(pf_);
+                    else if (pf_m_ == LZ_PF_LOAD) LZ_PFI_LOAD(pf_);
+                    else if (pf_m_ == LZ_PF_NONE) LZ_PFI_NONE(pf_);
+                    else                          LZ_PFI_NTA(pf_);
+                }
+                lz_dot32_x16_asm_2(wr + (size_t)g2 * 32,
+                                   xwt + (size_t)g2 * 32,
+                                   xw2 + (size_t)g2 * 32,
+                                   acc + g2, accb + g2);
+            }
+            tk++;
+            continue;
+        }
+        if ((nb & 3) == 0) LZ_Q8_GROUP4(lz_dot128_x16_asm);
+        else               LZ_Q8_PFSEL(dot32_x16_mmx);
+    }
+}
+
 #else /* gcc: intrinsics */
 
 #include "mmx_compat.h"

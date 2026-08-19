@@ -38,6 +38,9 @@
 #include "ops_kernel_shared.h" /* p2_shift_of - shared with ops.c and
                            the other suffixed TUs (task #31). gcc's
                            branch below needs none of it. */
+#include "ops_mmx.h"       /* lz_dot128_x16_mmx_w - row_q8_sse2_asm's
+                           -DLZ_SSE2_GROUP=0 A/B control build needs the
+                           MMX-tier group kernel cross-TU (task #30, 5/N). */
 #include "ops_p2_blk.h"
 
 /* ---- GDN/KDA fixed-point pass 2, SSE2 tier - moved here from
@@ -470,6 +473,239 @@ void lz_q8round_2p_group_sse2(const float *grp, int8_t *ho, int8_t *lw,
         res[k] = grp[k] * (*pinv) - (float)ho[k];
     for (k = 0; k + 31 < gs; k += 32)
         lz_q8round32_sse2_asm(res + k, lw + k, plo_mul);
+}
+
+/* ---- Q8_0 32/128-element dot products and row kernel, SSE2 tier -
+   moved here from src/ops_kernel_dot.h / src/ops.c (task #30, 5/N).
+   Algorithm documentation unchanged, just relocated with the code -
+   see src/ops_mmx.c's MMX-tier twin for the shared background (weight
+   widening, why the paired kernel exists) and this file's own
+   pre-existing SSE2 kernels above for why no emms is owed anywhere
+   here. */
+#include "ops.h"           /* lz_prefetch_mode - row_q8_sse2_asm needs it,
+                              real extern linkage, unaffected by this move. */
+#include "ops_kernel_dot_shared.h" /* LZ_Q8_PFSEL, LZ_Q8_GROUP4 */
+
+/* T42 (Pentium M) tier: hand-written SSE2. Pentium M has SSE2; integer
+   SIMD goes from 64-bit to 128-bit, each pmaddwd eats 8 int16s instead
+   of 4 - SIMD instruction count per 32 MACs drops from ~50 to ~26.
+   Open Watcom has no emmintrin.h (only mmintrin.h), so this must also
+   be hand-written; its inline asm accepts SSE2 mnemonics (probe-verified).
+   One bonus: SSE2 does not share a register file with x87, so EMMS
+   becomes unnecessary.
+   Call structure identical to the MMX version (returns the x256 int32),
+   so the same function name is reused and the upper matmul needs zero
+   changes.
+   Verified: bit-matches the scalar over 200K random + full-range
+   groups. */
+extern int32_t lz_dot32_x16_sse2_asm(const int8_t *w, const int16_t *x);
+#pragma aux lz_dot32_x16_sse2_asm = \
+    ".686"                          \
+    "pxor      xmm7, xmm7"          \
+    "movdqu    xmm0, [eax]"         \
+    "movdqa    xmm1, xmm7"          \
+    "punpcklbw xmm1, xmm0"          \
+    "movdqu    xmm2, [edx]"         \
+    "pmaddwd   xmm1, xmm2"          \
+    "movdqa    xmm6, xmm1"          \
+    "movdqa    xmm1, xmm7"          \
+    "punpckhbw xmm1, xmm0"          \
+    "movdqu    xmm2, [edx+16]"      \
+    "pmaddwd   xmm1, xmm2"          \
+    "paddd     xmm6, xmm1"          \
+    "movdqu    xmm0, [eax+16]"      \
+    "movdqa    xmm1, xmm7"          \
+    "punpcklbw xmm1, xmm0"          \
+    "movdqu    xmm2, [edx+32]"      \
+    "pmaddwd   xmm1, xmm2"          \
+    "paddd     xmm6, xmm1"          \
+    "movdqa    xmm1, xmm7"          \
+    "punpckhbw xmm1, xmm0"          \
+    "movdqu    xmm2, [edx+48]"      \
+    "pmaddwd   xmm1, xmm2"          \
+    "paddd     xmm6, xmm1"          \
+    "movdqa    xmm2, xmm6"          \
+    "psrldq    xmm2, 8"             \
+    "paddd     xmm6, xmm2"          \
+    "movdqa    xmm2, xmm6"          \
+    "psrldq    xmm2, 4"             \
+    "paddd     xmm6, xmm2"          \
+    "movd      eax, xmm6"           \
+    __parm [__eax] [__edx]          \
+    __value [__eax]                 \
+    __modify [8087]
+
+/* Compiled in alongside the MMX tier; the runtime picks by CPUID (see
+   lz_kernel_select). One binary must run on both PII (MMX only) and
+   T42 (SSE2). */
+static int32_t dot32_x16_sse2a(const int8_t *w, const int16_t *x) {
+    return lz_dot32_x16_sse2_asm(w, x);
+}
+
+/* SSE2 one-group-at-a-time kernel (128 elements). Verified
+   bit-identical to the scalar reference over 800032 sub-blocks on both
+   compilers. Wired in because a real Pentium M measured SSE2 at least
+   20-30% faster than MMX at the kernel level. */
+extern void lz_dot128_x16_sse2_asm(const int8_t *w,
+                const int16_t *x, int32_t *out4);
+#pragma aux lz_dot128_x16_sse2_asm = \
+    ".686" \
+    "pxor      xmm7, xmm7" \
+    "pxor      xmm6, xmm6" \
+    "movdqu    xmm0, [eax]" \
+    "movdqa    xmm1, xmm7" \
+    "punpcklbw xmm1, xmm0" \
+    "movdqu    xmm2, [ecx]" \
+    "pmaddwd   xmm1, xmm2" \
+    "paddd     xmm6, xmm1" \
+    "movdqa    xmm1, xmm7" \
+    "punpckhbw xmm1, xmm0" \
+    "movdqu    xmm2, [ecx+16]" \
+    "pmaddwd   xmm1, xmm2" \
+    "paddd     xmm6, xmm1" \
+    "movdqu    xmm0, [eax+16]" \
+    "movdqa    xmm1, xmm7" \
+    "punpcklbw xmm1, xmm0" \
+    "movdqu    xmm2, [ecx+32]" \
+    "pmaddwd   xmm1, xmm2" \
+    "paddd     xmm6, xmm1" \
+    "movdqa    xmm1, xmm7" \
+    "punpckhbw xmm1, xmm0" \
+    "movdqu    xmm2, [ecx+48]" \
+    "pmaddwd   xmm1, xmm2" \
+    "paddd     xmm6, xmm1" \
+    "movdqa    xmm2, xmm6" \
+    "psrldq    xmm2, 8" \
+    "paddd     xmm6, xmm2" \
+    "movdqa    xmm2, xmm6" \
+    "psrldq    xmm2, 4" \
+    "paddd     xmm6, xmm2" \
+    "movd      [ebx], xmm6" \
+    "pxor      xmm6, xmm6" \
+    "movdqu    xmm0, [eax+32]" \
+    "movdqa    xmm1, xmm7" \
+    "punpcklbw xmm1, xmm0" \
+    "movdqu    xmm2, [ecx+64]" \
+    "pmaddwd   xmm1, xmm2" \
+    "paddd     xmm6, xmm1" \
+    "movdqa    xmm1, xmm7" \
+    "punpckhbw xmm1, xmm0" \
+    "movdqu    xmm2, [ecx+80]" \
+    "pmaddwd   xmm1, xmm2" \
+    "paddd     xmm6, xmm1" \
+    "movdqu    xmm0, [eax+48]" \
+    "movdqa    xmm1, xmm7" \
+    "punpcklbw xmm1, xmm0" \
+    "movdqu    xmm2, [ecx+96]" \
+    "pmaddwd   xmm1, xmm2" \
+    "paddd     xmm6, xmm1" \
+    "movdqa    xmm1, xmm7" \
+    "punpckhbw xmm1, xmm0" \
+    "movdqu    xmm2, [ecx+112]" \
+    "pmaddwd   xmm1, xmm2" \
+    "paddd     xmm6, xmm1" \
+    "movdqa    xmm2, xmm6" \
+    "psrldq    xmm2, 8" \
+    "paddd     xmm6, xmm2" \
+    "movdqa    xmm2, xmm6" \
+    "psrldq    xmm2, 4" \
+    "paddd     xmm6, xmm2" \
+    "movd      [ebx+4], xmm6" \
+    "pxor      xmm6, xmm6" \
+    "movdqu    xmm0, [eax+64]" \
+    "movdqa    xmm1, xmm7" \
+    "punpcklbw xmm1, xmm0" \
+    "movdqu    xmm2, [ecx+128]" \
+    "pmaddwd   xmm1, xmm2" \
+    "paddd     xmm6, xmm1" \
+    "movdqa    xmm1, xmm7" \
+    "punpckhbw xmm1, xmm0" \
+    "movdqu    xmm2, [ecx+144]" \
+    "pmaddwd   xmm1, xmm2" \
+    "paddd     xmm6, xmm1" \
+    "movdqu    xmm0, [eax+80]" \
+    "movdqa    xmm1, xmm7" \
+    "punpcklbw xmm1, xmm0" \
+    "movdqu    xmm2, [ecx+160]" \
+    "pmaddwd   xmm1, xmm2" \
+    "paddd     xmm6, xmm1" \
+    "movdqa    xmm1, xmm7" \
+    "punpckhbw xmm1, xmm0" \
+    "movdqu    xmm2, [ecx+176]" \
+    "pmaddwd   xmm1, xmm2" \
+    "paddd     xmm6, xmm1" \
+    "movdqa    xmm2, xmm6" \
+    "psrldq    xmm2, 8" \
+    "paddd     xmm6, xmm2" \
+    "movdqa    xmm2, xmm6" \
+    "psrldq    xmm2, 4" \
+    "paddd     xmm6, xmm2" \
+    "movd      [ebx+8], xmm6" \
+    "pxor      xmm6, xmm6" \
+    "movdqu    xmm0, [eax+96]" \
+    "movdqa    xmm1, xmm7" \
+    "punpcklbw xmm1, xmm0" \
+    "movdqu    xmm2, [ecx+192]" \
+    "pmaddwd   xmm1, xmm2" \
+    "paddd     xmm6, xmm1" \
+    "movdqa    xmm1, xmm7" \
+    "punpckhbw xmm1, xmm0" \
+    "movdqu    xmm2, [ecx+208]" \
+    "pmaddwd   xmm1, xmm2" \
+    "paddd     xmm6, xmm1" \
+    "movdqu    xmm0, [eax+112]" \
+    "movdqa    xmm1, xmm7" \
+    "punpcklbw xmm1, xmm0" \
+    "movdqu    xmm2, [ecx+224]" \
+    "pmaddwd   xmm1, xmm2" \
+    "paddd     xmm6, xmm1" \
+    "movdqa    xmm1, xmm7" \
+    "punpckhbw xmm1, xmm0" \
+    "movdqu    xmm2, [ecx+240]" \
+    "pmaddwd   xmm1, xmm2" \
+    "paddd     xmm6, xmm1" \
+    "movdqa    xmm2, xmm6" \
+    "psrldq    xmm2, 8" \
+    "paddd     xmm6, xmm2" \
+    "movdqa    xmm2, xmm6" \
+    "psrldq    xmm2, 4" \
+    "paddd     xmm6, xmm2" \
+    "movd      [ebx+12], xmm6" \
+    __parm [__eax] [__ecx] [__ebx] \
+    __modify [8087]
+
+/* row_q8_sse2_asm: ALREADY the real call boundary from its own caller
+   (matmul_q8_impl, src/ops.c, dispatched once per matmul via
+   lz_row_pick's LZ_ROW_Q8 table) - moving the whole function here,
+   together with the leaf kernels it calls direct-by-name inside its
+   own loop, adds NO new call sites (the gdn1_x4 argument, piece 1/N).
+   No pairing logic here (unlike the MMX row function): SSE2's group
+   kernel is already the fast path, and pairing was never wired in for
+   this tier. */
+void row_q8_sse2_asm(int32_t *acc32, const void *w4, const void *w2,
+                     const int16_t *xw, int nb, int nt, int in_dim,
+                     const void *pf_end, const void *pf_end2) {
+    const int8_t *wr = (const int8_t *)w4;
+    const int8_t *wend = (const int8_t *)pf_end;
+    int tk, g;
+    (void)w2; (void)pf_end2;
+    for (tk = 0; tk < nt; tk++) {
+        const int16_t *xwt = xw + (size_t)tk * in_dim;
+        int32_t *acc = acc32 + (size_t)tk * nb;
+#if LZ_SSE2_GROUP
+        if ((nb & 3) == 0) LZ_Q8_GROUP4(lz_dot128_x16_sse2_asm);
+#else
+        /* LZ_SSE2_GROUP=0 keeps the 128-element step on the MMX kernel;
+           the knob exists so an SSE2 CPU can be measured on either.
+           lz_dot128_x16_mmx_w is src/ops_mmx.c's real, addressable
+           twin of the #pragma aux lz_dot128_x16_asm - needed cross-TU
+           here for exactly this A/B control build, since a #pragma aux
+           body cannot have its address taken and this file does not
+           carry the MMX pragma itself. */
+        if ((nb & 3) == 0) LZ_Q8_GROUP4(lz_dot128_x16_mmx_w);
+#endif
+        else               LZ_Q8_PFSEL(dot32_x16_sse2a);
+    }
 }
 
 #else /* gcc: intrinsics */

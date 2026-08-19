@@ -66,6 +66,13 @@ void lz_q8round_2p_group_sse2(const float *grp, int8_t *ho, int8_t *lw,
                               int gs, const float *pinv,
                               const float *plo_mul, float *res);
 
+/* task #30 (5/N): Q8_0 matmul, SSE2 tier. row_q8_sse2_asm is ALREADY
+   the real call boundary (LZ_ROW_Q8, src/ops.c) - see that table's own
+   comment. */
+void row_q8_sse2_asm(int32_t *acc32, const void *w4, const void *w2,
+                     const int16_t *xw, int nb, int nt, int in_dim,
+                     const void *pf_end, const void *pf_end2);
+
 #else /* gcc: intrinsics */
 
 /* ---- matmul row kernels, one per quantized weight format -------------

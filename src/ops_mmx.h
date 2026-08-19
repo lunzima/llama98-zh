@@ -157,6 +157,20 @@ void lz_q8round_2p_group_sse(const float *grp, int8_t *ho, int8_t *lw,
                              int gs, const float *pinv,
                              const float *plo_mul, float *res);
 
+/* task #30 (5/N): Q8_0 matmul, MMX tier. row_q8_mmx_asm is ALREADY the
+   real call boundary (LZ_ROW_Q8, src/ops.c) - see that table's own
+   comment. dot32_x16_mmx also needs to be visible here: src/ops.c's
+   LZ_ATTN_DOT32 macro (attention scoring, live by default -
+   LZ_ATTN_FIXED is 3 in ops.h) calls it directly, across the TU
+   boundary this move introduces. lz_dot128_x16_mmx_w exists only for
+   src/ops_sse2.c's -DLZ_SSE2_GROUP=0 A/B control build - see that
+   file's row_q8_sse2_asm. */
+void row_q8_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
+                    const int16_t *xw, int nb, int nt, int in_dim,
+                    const void *pf_end, const void *pf_end2);
+int32_t dot32_x16_mmx(const int8_t *w, const int16_t *x);
+void lz_dot128_x16_mmx_w(const int8_t *w, const int16_t *x, int32_t *out4);
+
 #else /* gcc: intrinsics, existing declarations */
 
 /* ---- wsum: src/ops.c's LZ_WSUM_PAIR, attention scoring's dot ---------- */

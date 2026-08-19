@@ -112,4 +112,116 @@ static int p2_shift_of(int32_t amax) {
     return sh;
 }
 
+/* ---- matmul row-kernel prefetch (task #30, 5/N) -----------------------
+   Every format's Watcom row function (row_q8_mmx_asm etc., moving into
+   src/ops_mmx.c/ops_sse2.c one format at a time) issues one of these
+   per 32 (or 128) elements, so - like LZ_WSUM_CHUNK/LZ_SLOT_NEXT above -
+   this is infrastructure the row functions need wherever they end up,
+   not something specific to any one format. NOT one of task #31's five
+   names (this piece predates that fix and was never duplicated the same
+   way), but the identical principle: one text, included by every TU
+   that needs it, rather than a copy that can drift.
+
+   P6 has only 4 fill buffers and a 40-entry ROB. The matmul inner loop
+   executes ~50 instructions per 32 weight bytes; to keep 4 misses in
+   flight you must look ~128 bytes ahead = ~200 instructions - far
+   beyond the ROB. So a PII most likely serializes per 32 bytes at one
+   full memory latency: 32 B / ~180 ns ~ 178 MB/s, not the 300-400 MB/s
+   the bus could deliver.
+
+   Three tiers:
+     PII        no PREFETCH instruction (that is SSE); only a dummy
+                load - occupies one register and one ROB slot, but
+                feeds the fill buffers.
+     PIII/PM    `prefetchnta`. The nta variant fits this workload:
+                weights are used once per token and must never enter L2
+                (Coppermine's L2 is only 256KB and would be flushed by
+                weights, evicting SSM state and activations along the
+                way).
+     ref        none.
+
+   **Prefetch changes no numbers** - the gate is "all three tiers'
+   logits are byte-identical to ref". If they differ, the prefetch is a
+   real access or out of bounds.
+
+   The distance is machine-dependent, kept as a compile-time constant
+   to sweep 0/2/4/8 on target hardware. */
+#ifndef LZ_PF_DIST
+#define LZ_PF_DIST 4                    /* look ahead this many 32-byte cache lines */
+#endif
+
+/* The four prefetch-tier values lz_prefetch_mode() (src/ops.c, real
+   extern linkage - unaffected by this move) returns. Kernel tier picks
+   instruction-set width; this picks the memory hint - orthogonal, per
+   ops.c's own note beside g_pf/pf_detect(): K6-2/K7 have MMX only but
+   DO have 3DNow! prefetch, which beats the PII's dummy load. */
+#define LZ_PF_NONE 0
+#define LZ_PF_LOAD 1     /* PII: no prefetch instruction, dummy load only */
+#define LZ_PF_NTA  2     /* PIII onward: prefetchnta (weights used once per token) */
+#define LZ_PF_AMD  3     /* K6-2 / K7: 3DNow! prefetch */
+
+#if defined(__WATCOMC__)
+/* Watcom side has two: dummy load (PII) and prefetchnta (PIII+).
+   __modify declared truthfully - rule 2.3. Each including TU gets its
+   own inlined instance (no address of these is ever taken, so there is
+   no linkable symbol to collide across TUs - the same #pragma aux
+   semantics every other kernel in this project relies on). */
+extern void lz_pf_load(const void *p);
+#pragma aux lz_pf_load =            \
+    "mov eax, [eax]"                \
+    __parm [__eax] __modify [__eax]
+
+extern void lz_pf_nta(const void *p);
+#pragma aux lz_pf_nta =             \
+    ".686"                          \
+    "prefetchnta [eax]"             \
+    __parm [__eax] __modify []
+extern void lz_pf_amd(const void *p);
+#pragma aux lz_pf_amd =                 ".686"                              "db 0x0F, 0x0D, 0x00"               __parm [__eax] __modify []
+#define LZ_PFI_LOAD(p) lz_pf_load(p)
+#define LZ_PFI_NTA(p)  lz_pf_nta(p)
+#define LZ_PFI_AMD(p)  lz_pf_amd(p)
+#elif defined(__GNUC__)
+#define LZ_PFI_LOAD(p) __builtin_prefetch((p), 0, 0)
+#define LZ_PFI_NTA(p)  __builtin_prefetch((p), 0, 0)
+#define LZ_PFI_AMD(p)  __builtin_prefetch((p), 0, 0)
+#else
+#define LZ_PFI_LOAD(p) ((void)0)
+#define LZ_PFI_NTA(p)  ((void)0)
+#define LZ_PFI_AMD(p)  ((void)0)
+#endif
+
+/* Compile-time A/B control for the 128-element SSE2 group kernels that
+   sit alongside the 32-element MMX ones (Q8_0 first, task #30, 5/N -
+   the other formats' group kernels follow the same knob as they move).
+
+   `-DLZ_SSE2_GROUP=0` makes an SSE2 CPU take the MMX group path
+   instead, i.e. the MMX group kernels alone. Two binaries from one
+   source tree, so the "did this change any number" question is
+   answered by `cmp` on --dump-logits rather than by swapping source
+   trees and hoping the rest matched. Same reason LZ_BATCH_MAX and
+   LZ_Q8R_FORCE_SSE exist.
+
+   Only the Watcom build has these kernels at all - the gcc translation
+   unit does not contain them (they live inside `#if defined(__WATCOMC__)`),
+   so the gcc side is unaffected by this switch by construction. */
+#ifndef LZ_SSE2_GROUP
+#define LZ_SSE2_GROUP 1
+#endif
+
+/* No prefetch at all. Not a platform fallback - a deliberately
+   reachable mode, because the LATENCY TIER is a thing we need to
+   measure and could not.
+
+   The performance model has two tiers per machine: latency (no
+   prefetch, assumed 178 MB/s on PIII) and bandwidth (prefetchnta,
+   assumed 440). Every performance conclusion that matters - J's payoff,
+   whether MTP has headroom to trade into - is a ratio between those two
+   numbers. The dispatch otherwise has no way to reach "no prefetch":
+   pf_detect() returns LOAD/NTA/AMD and the selection's else-branch
+   falls to NTA, so a run on real hardware would only ever measure the
+   bandwidth tier. This mode is the instrument for the latency half of
+   every one of those questions. */
+#define LZ_PFI_NONE(p) ((void)(p))
+
 #endif /* LZ_OPS_KERNEL_SHARED_H */

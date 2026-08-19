@@ -1065,11 +1065,13 @@ void lz_quantize_q8(const float *x, int n, int gs, int8_t *q, float *s) {
    and tying them into one enum would miss a whole family of machines:
    K6-2 / K7 have MMX only (no SSE) but DO have 3DNow!'s prefetch, which
    beats the PII's dummy load. Tying prefetch to "has SSE" would leave
-   them with the dummy load. */
-#define LZ_PF_NONE 0
-#define LZ_PF_LOAD 1     /* PII: no prefetch instruction, dummy load only */
-#define LZ_PF_NTA  2     /* PIII onward: prefetchnta (weights used once per token) */
-#define LZ_PF_AMD  3     /* K6-2 / K7: 3DNow! prefetch */
+   them with the dummy load.
+
+   LZ_PF_NONE/LOAD/NTA/AMD moved to src/ops_kernel_shared.h (task #30,
+   5/N): the row functions this file's static g_pf/pf_detect() feed
+   need to compare lz_prefetch_mode()'s return value against these same
+   four constants wherever they end up living - same reasoning as
+   LZ_PF_DIST/LZ_PFI_* just above. */
 static int g_pf = -1;
 
 #if defined(__WATCOMC__)
@@ -1848,93 +1850,19 @@ static float   g_xg[LZ_BATCH_MAX * (LZ_MM_WIDEN_MAX / 32)];
 static int32_t g_acc32[LZ_BATCH_MAX * (LZ_MM_WIDEN_MAX / 32)];
 
 /* ---- prefetch (lever J) ------------------------------------------------
-   P6 has only 4 fill buffers and a 40-entry ROB. The matmul inner loop
-   executes ~50 instructions per 32 weight bytes; to keep 4 misses in
-   flight you must look ~128 bytes ahead = ~200 instructions - far
-   beyond the ROB. So a PII most likely serializes per 32 bytes at one
-   full memory latency: 32 B / ~180 ns ~ 178 MB/s, not the 300-400 MB/s
-   the bus could deliver.
+   LZ_PF_DIST, LZ_PFI_LOAD/NTA/AMD/NONE and the lz_pf_load/lz_pf_nta/
+   lz_pf_amd pragmas moved to src/ops_kernel_shared.h (task #30, 5/N):
+   every format's row function needs them, wherever it ends up living,
+   the same reasoning LZ_WSUM_CHUNK/LZ_SLOT_NEXT already established.
+   Full rationale (why three tiers, why the distance is a knob, why
+   "no prefetch" is a real mode and not a fallback) lives there now. */
 
-   Three tiers:
-     PII        no PREFETCH instruction (that is SSE); only a dummy
-                load - occupies one register and one ROB slot, but
-                feeds the fill buffers.
-     PIII/PM    `prefetchnta`. The nta variant fits this workload:
-                weights are used once per token and must never enter L2
-                (Coppermine's L2 is only 256KB and would be flushed by
-                weights, evicting SSM state and activations along the
-                way).
-     ref        none.
-
-   **Prefetch changes no numbers** - the gate is "all three tiers'
-   logits are byte-identical to ref". If they differ, the prefetch is a
-   real access or out of bounds.
-
-   The distance is machine-dependent, kept as a compile-time constant
-   to sweep 0/2/4/8 on target hardware. */
-#ifndef LZ_PF_DIST
-#define LZ_PF_DIST 4                    /* look ahead this many 32-byte cache lines */
-#endif
-
-/* Compile-time A/B control for the SSE2 group kernels (128 elements per
-   call) that sit alongside the 32-element MMX ones.
-
-   `-DLZ_SSE2_GROUP=0` makes an SSE2 CPU take the MMX group path instead,
-   i.e. the MMX group kernels alone. Two binaries from one source tree,
-   so the "did this change any number"
-   question is answered by `cmp` on --dump-logits rather than by swapping
-   source trees and hoping the rest matched. Same reason LZ_BATCH_MAX and
-   LZ_Q8R_FORCE_SSE exist.
-
-   Only the Watcom build has these kernels at all - the gcc translation
-   unit does not contain them (they live inside `#if defined(__WATCOMC__)`),
-   so the gcc side is unaffected by this switch by construction. */
-#ifndef LZ_SSE2_GROUP
-#define LZ_SSE2_GROUP 1
-#endif
-
-#if defined(__WATCOMC__)
-/* Watcom side has two: dummy load (PII) and prefetchnta (PIII+).
-   __modify declared truthfully - rule 2.3. */
-extern void lz_pf_load(const void *p);
-#pragma aux lz_pf_load =            \
-    "mov eax, [eax]"                \
-    __parm [__eax] __modify [__eax]
-
-extern void lz_pf_nta(const void *p);
-#pragma aux lz_pf_nta =             \
-    ".686"                          \
-    "prefetchnta [eax]"             \
-    __parm [__eax] __modify []
-extern void lz_pf_amd(const void *p);
-#pragma aux lz_pf_amd =                 ".686"                              "db 0x0F, 0x0D, 0x00"               __parm [__eax] __modify []
-#define LZ_PFI_LOAD(p) lz_pf_load(p)
-#define LZ_PFI_NTA(p)  lz_pf_nta(p)
-#define LZ_PFI_AMD(p)  lz_pf_amd(p)
-#elif defined(__GNUC__)
-#define LZ_PFI_LOAD(p) __builtin_prefetch((p), 0, 0)
-#define LZ_PFI_NTA(p)  __builtin_prefetch((p), 0, 0)
-#define LZ_PFI_AMD(p)  __builtin_prefetch((p), 0, 0)
-#else
-#define LZ_PFI_LOAD(p) ((void)0)
-#define LZ_PFI_NTA(p)  ((void)0)
-#define LZ_PFI_AMD(p)  ((void)0)
-#endif
-
-/* No prefetch at all. Not a platform fallback - a deliberately
-   reachable mode, because the LATENCY TIER is a thing we need to
-   measure and could not.
-
-   The performance model has two tiers per machine: latency (no
-   prefetch, assumed 178 MB/s on PIII) and bandwidth (prefetchnta,
-   assumed 440). Every performance conclusion that matters - J's payoff,
-   whether MTP has headroom to trade into - is a ratio between those two
-   numbers. The dispatch otherwise has no way to reach "no prefetch":
-   pf_detect() returns LOAD/NTA/AMD and the selection's else-branch
-   falls to NTA, so a run on real hardware would only ever measure the
-   bandwidth tier. This mode is the instrument for the latency half of
-   every one of those questions. */
-#define LZ_PFI_NONE(p) ((void)(p))
+/* LZ_SSE2_GROUP (the -DLZ_SSE2_GROUP=0 A/B control for the 128-element
+   SSE2 group kernels) moved to src/ops_kernel_shared.h (task #30,
+   5/N): the row functions that test it are migrating out to
+   src/ops_mmx.c/src/ops_sse2.c one format at a time, and this needs to
+   be visible wherever each one ends up, same reasoning as LZ_PF_DIST,
+   the LZ_PFI_ family and LZ_PF_NONE above. */
 
 /* ---- row-kernel tier tables (stage 3) ---------------------------------
 
@@ -2145,126 +2073,29 @@ static float epi_q8(const int32_t *accb, const float *xsb, const float *ws,
    and its use cannot drift apart - the drift that caused link breaks. */
 
 #if defined(__WATCOMC__) || defined(LZ_DOT_MMX_EXTERN)
-
-/* Prefetch distance clamped by a pointer upper bound once: PIII's
-   prefetchnta is harmless out of bounds (pure hint, no fault), but
-   PII's dummy load is a REAL access - reading an unmapped page
-   segfaults. One compare buys safety for the whole path; the branch is
-   highly predictable. */
-#define LZ_Q8_ACC(DOT32, PF)                                        \
-    for (g = 0; g < nb; g++) {                                      \
-        const int8_t *pf_ = wr + (size_t)(g + LZ_PF_DIST) * 32;     \
-        if (pf_ < wend) PF(pf_);                                    \
-        acc[g] = DOT32(wr + (size_t)g * 32, xwt + (size_t)g * 32);  \
-    }
-
-/* Kernel choice sits at the ROW level; the inner 32-element kernel
-   stays a direct call. Prefetch tier is orthogonal and resolved here
-   too, which is why this expands the loop body four times rather than
-   testing per sub-block. */
-#define LZ_Q8_PFSEL(DOT32)                                              \
-    do {                                                                \
-        int pf_m_ = lz_prefetch_mode();                                 \
-        if (pf_m_ == LZ_PF_AMD)       { LZ_Q8_ACC(DOT32, LZ_PFI_AMD); }  \
-        else if (pf_m_ == LZ_PF_LOAD) { LZ_Q8_ACC(DOT32, LZ_PFI_LOAD); } \
-        else if (pf_m_ == LZ_PF_NONE) { LZ_Q8_ACC(DOT32, LZ_PFI_NONE); } \
-        else                          { LZ_Q8_ACC(DOT32, LZ_PFI_NTA); }  \
-    } while (0)
+#include "ops_kernel_dot_shared.h" /* LZ_Q8_ACC, LZ_Q8_PFSEL, LZ_Q8_GROUP4 -
+                           needed here (gcc's row_q8_mmx_intrin below)
+                           AND by src/ops_mmx.c's/ops_sse2.c's
+                           row_q8_mmx_asm/row_q8_sse2_asm (task #30,
+                           5/N) - shared rather than duplicated across
+                           that TU boundary, task #31's exact lesson
+                           applied before the duplication happened this
+                           time instead of after. */
 
 #ifdef __WATCOMC__
-/* One group (128 elements) at a time when nb is a multiple of 4: the
-   fixed overhead - mask construction, prologue/epilogue - is amortized
-   from once per 32 elements to once per 128. Integer results are
-   bit-identical to the per-32 version. All current tensors have in_dim
-   a multiple of 128 (512/768/1024/3072). */
-#define LZ_Q8_GROUP4(DOT128)                                            \
-    do {                                                                \
-        for (g = 0; g < nb; g += 4) {                                   \
-            const int8_t *pf_ = wr + (size_t)(g + LZ_PF_DIST) * 32;     \
-            if (pf_ < wend) {                                           \
-                int pf_m_ = lz_prefetch_mode();                         \
-                if (pf_m_ == LZ_PF_AMD)       LZ_PFI_AMD(pf_);          \
-                else if (pf_m_ == LZ_PF_LOAD) LZ_PFI_LOAD(pf_);         \
-                else if (pf_m_ == LZ_PF_NONE) LZ_PFI_NONE(pf_);         \
-                else                          LZ_PFI_NTA(pf_);          \
-            }                                                           \
-            DOT128(wr + (size_t)g * 32, xwt + (size_t)g * 32, acc + g); \
-        }                                                               \
-    } while (0)
-
-static void row_q8_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
-                           const int16_t *xw, int nb, int nt, int in_dim,
-                           const void *pf_end,
-                         const void *pf_end2) {
-    const int8_t *wr = (const int8_t *)w4;
-    const int8_t *wend = (const int8_t *)pf_end;
-    int tk, g;
-    (void)w2; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
-        /* Pairing beats the 128-element group kernel whenever there is
-           a second token: the group kernel amortizes FIXED overhead
-           (mask setup, prologue) from once per 32 elements to once per
-           128, while pairing removes the weight unpack itself for the
-           second token - and on the target the weight side is the
-           memory side. Same choice the gcc twin makes, which also keeps
-           the two impls' shapes comparable when they are diffed.
-           At nt == 1 there is nothing to pair, so the group kernel
-           keeps that path unchanged.
-
-           NOT MEASURED ON TARGET. The op-count argument is 12 + 24*NT
-           against 36*NT; whether it beats the group kernel's amortized
-           prologue on a real PII is a wall-clock question, and the
-           machine for it is not here. This is a knob-shaped
-           decision recorded as such, not a measured result. */
-        if (nt - tk >= 2 && g_pair) {
-            const int16_t *xw2 = xwt + in_dim;
-            int32_t *accb = acc + nb;
-            int g2;
-            for (g2 = 0; g2 < nb; g2++) {
-                const int8_t *pf_ = wr + (size_t)(g2 + LZ_PF_DIST) * 32;
-                if (pf_ < wend) {
-                    int pf_m_ = lz_prefetch_mode();
-                    if (pf_m_ == LZ_PF_AMD)       LZ_PFI_AMD(pf_);
-                    else if (pf_m_ == LZ_PF_LOAD) LZ_PFI_LOAD(pf_);
-                    else if (pf_m_ == LZ_PF_NONE) LZ_PFI_NONE(pf_);
-                    else                          LZ_PFI_NTA(pf_);
-                }
-                lz_dot32_x16_asm_2(wr + (size_t)g2 * 32,
-                                   xwt + (size_t)g2 * 32,
-                                   xw2 + (size_t)g2 * 32,
-                                   acc + g2, accb + g2);
-            }
-            tk++;
-            continue;
-        }
-        if ((nb & 3) == 0) LZ_Q8_GROUP4(lz_dot128_x16_asm);
-        else               LZ_Q8_PFSEL(dot32_x16_mmx);
-    }
-}
-
-static void row_q8_sse2_asm(int32_t *acc32, const void *w4, const void *w2,
-                            const int16_t *xw, int nb, int nt, int in_dim,
-                            const void *pf_end,
-                         const void *pf_end2) {
-    const int8_t *wr = (const int8_t *)w4;
-    const int8_t *wend = (const int8_t *)pf_end;
-    int tk, g;
-    (void)w2; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
-#if LZ_SSE2_GROUP
-        if ((nb & 3) == 0) LZ_Q8_GROUP4(lz_dot128_x16_sse2_asm);
-#else
-        /* LZ_SSE2_GROUP=0 keeps the 128-element step on the MMX kernel;
-           the knob exists so an SSE2 CPU can be measured on either. */
-        if ((nb & 3) == 0) LZ_Q8_GROUP4(lz_dot128_x16_asm);
-#endif
-        else               LZ_Q8_PFSEL(dot32_x16_sse2a);
-    }
-}
+/* row_q8_mmx_asm / row_q8_sse2_asm moved to src/ops_mmx.c / src/ops_sse2.c
+   (task #30, 5/N): each is ALREADY the real call boundary from its own
+   caller (dispatched once per matmul via lz_row_pick's function-pointer
+   table in LZ_ROW_Q8 below - never once per 32-element group), so
+   moving the whole function - together with the leaf kernels it calls
+   direct-by-name inside its own loop (lz_dot32_x16_asm, the pragma
+   inlines into THIS function; lz_dot32_x16_asm_2, lz_dot128_x16_asm,
+   dot32_x16_mmx/_sse2a) - adds NO new call sites, the same gdn1_x4
+   argument from piece 1/N. Splitting the leaf kernels out alone and
+   leaving the row function here would have cost up to nb (32-groups
+   per row, up to 112 on this project's largest in_dim) real cross-TU
+   calls per matmul row instead. Declared in src/ops_mmx.h/
+   src/ops_sse2.h, already visible in this translation unit. */
 
 #else  /* gcc: intrinsics */
 
