@@ -129,28 +129,11 @@ static unsigned lz_amax32_sse2_w(const float *x, int n) {
 
 #else   /* gcc: intrinsics */
 
-#if defined(__MMX__)
-#include <mmintrin.h>
-#include "mmx_compat.h"
-/* Same signature as the asm side, so one table holds both. Leaves MMX
-   state dirty; the caller emits emms once after the loop. */
-static unsigned lz_amax32_mmx(const float *x, int n) {
-    __m64 acc = _mm_setzero_si64();
-    __m64 msk = _mm_set1_pi32(0x7FFFFFFF);
-    int k;
-    for (k = 0; k + 1 < n; k += 2) {
-        __m64 v = _mm_and_si64(*(const __m64 *)(const void *)(x + k), msk);
-        __m64 gt = _mm_cmpgt_pi32(v, acc);
-        acc = _mm_or_si64(_mm_and_si64(v, gt), _mm_andnot_si64(gt, acc));
-    }
-    {
-        union { __m64 m; unsigned u[2]; } o;
-        o.m = acc;
-        return o.u[0] > o.u[1] ? o.u[0] : o.u[1];
-    }
-}
-#define LZ_HAVE_AMAX_MMX 1
-#endif
+/* lz_amax32_mmx's body and the LZ_HAVE_AMAX_MMX definition for this
+   branch now live in src/ops_mmx.c / src/ops_mmx.h: it writes %mm
+   registers, so it belongs in the one translation unit built with
+   -mmmx. ops_mmx.h is included near the top of ops.c, so the
+   declaration and the macro are already visible here. */
 
 #if defined(__SSE2__)
 #include <emmintrin.h>

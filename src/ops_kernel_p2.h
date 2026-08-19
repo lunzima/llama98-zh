@@ -3,6 +3,12 @@
    writable. NOT a standalone translation unit, ops.c #includes it once
    at the point the code sits, no include guards.
 
+   The gcc intrinsics twins of the MMX/SSE1 kernels below (lz_p2_mul32_mmx,
+   lz_p2_split32_mmx, lz_p2_split32_sse) live in src/ops_mmx.c, not here -
+   they write %mm registers, so they belong in the one translation unit
+   built with -mmmx (see src/ops_mmx.h). This file's own content is
+   Watcom-only from here down and is unaffected by that split.
+
    WHAT THE OPERATOR IS. Per (row, 32-group), with the float prologue
    already reduced to two int16 multipliers (p2_group_norm in ops.c):
 
@@ -103,16 +109,12 @@
    movq to an unaligned address is legal, just slower); movdqa would not
    have, and finding that out at runtime is a fault, not a wrong
    number. */
-typedef struct {
-    int16_t mul[8];      /*   0  in   m1,m2 repeated 4x (pmaddwd operand) */
-    int32_t amax[4];     /*  16  out  |A| accumulator lanes, caller folds */
-    int32_t rnd[4];      /*  32  in   1 << (sh-1), or 0 when sh = 0       */
-    int32_t cnt[4];      /*  48  in   sh; the shift count is the low 64   */
-    int16_t k128[8];     /*  64  in   128, the split's rounding addend    */
-    int16_t kclp[8];     /*  80  in   32641, the lo clamp for MMX/SSE2    */
-    int32_t a[32];       /*  96  mid  A, written by one kernel, read by   */
-    int16_t kmin[8];     /* 224  in   -127, the same clamp for SSE1       */
-} lz_p2_blk;             /*           240 bytes total                     */
+/* The lz_p2_blk type lives in src/ops_mmx.h, not here: both this file
+   (via ops.c, Watcom only) and src/ops_mmx.c (gcc intrinsics) need it,
+   and ops_mmx.h is the one of the two with a real include guard - the
+   guard-less "included exactly once" contract above is ops.c's, about
+   THIS file, and does not extend to a struct shared with another one. */
+#include "ops_mmx.h"
 
 /* The assembly below addresses those fields as literal byte offsets, so
    a field that moves is a wrong answer rather than a compile error.

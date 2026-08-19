@@ -11,10 +11,21 @@
 #
 #   -m32 -march=i686        the ISA floor for this target family; no
 #                            assumption of anything past Pentium Pro.
-#   -mmmx                   the target has MMX (every machine this
-#                            build ships to does); enables the engine's
-#                            MMX-intrinsic kernels the same way the
-#                            Watcom Socket-7 build does.
+#   -mno-mmx -mno-sse       the target has MMX (every machine this build
+#   -mno-sse2               ships to does), but this flag set is for
+#                            every file EXCEPT src/ops_mmx.c, which
+#                            builds separately below with -mmmx -msse.
+#                            That split (not this script's business to
+#                            explain further - see src/ops_mmx.h) is
+#                            what src/ops.c:5788's rms=-nan bug and this
+#                            script's origin both trace back to: the
+#                            engine's MMX-intrinsic kernels still exist
+#                            and are still linked in via ops_mmx.o.
+#   -DLZ_MMX_TU=1            tells every file compiled with the negatives
+#                            above that src/ops_mmx.c's kernels are part
+#                            of this link, so their dispatch tables and
+#                            tier reports stay correct despite this TU
+#                            never seeing __MMX__ itself.
 #   -mfpmath=387             NOT the default for -m32 on a modern gcc,
 #                            which would pick SSE2 scalar float even at
 #                            -m32 if the target supports it. This flag
@@ -105,12 +116,34 @@ CC=${CC:-gcc}
 OUT=${OUT:-/tmp/x87build}
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 
+# -mmmx is NOT on this line and that is the fix, not an oversight: gcc
+# and clang both use MMX for an 8-byte block store when -mmmx is on,
+# even with no MMX intrinsic anywhere nearby in the source, and neither
+# issues emms before the x87 code that follows - which is exactly the
+# "real indefinite" (0xFFC00000) this script exists to reproduce.
+# -mno-mmx/-mno-sse/-mno-sse2 make the emission impossible at compile
+# time rather than merely absent; src/ops_mmx.c (below) is the one
+# translation unit that still gets -mmmx, and LZ_MMX_TU tells every
+# other one that it exists and is linkable - see src/ops_mmx.h.
 FLAGS="-O2 -std=c99 -Wall -Wextra"
-FLAGS="$FLAGS -m32 -march=i686 -mmmx -mfpmath=387"
-FLAGS="$FLAGS -ffp-contract=off -fno-rerun-cse-after-loop -I$ROOT/src"
+FLAGS="$FLAGS -m32 -march=i686 -mno-mmx -mno-sse -mno-sse2 -mfpmath=387"
+FLAGS="$FLAGS -ffp-contract=off -fno-rerun-cse-after-loop -DLZ_MMX_TU=1 -I$ROOT/src"
+
+# src/ops_mmx.c's own flags: the negatives above reversed, no
+# -mfpmath=387 (that file has no ordinary scalar float arithmetic for it
+# to affect, and clang rejects the combination with -msse), no
+# -fno-rerun-cse-after-loop (unrelated bug, gcc-only flag - clang does
+# not accept it, and this file's kernels do not touch the code path it
+# works around).
+MMX_FLAGS="-O2 -std=c99 -Wall -Wextra"
+MMX_FLAGS="$MMX_FLAGS -m32 -march=i686 -mmmx -msse"
+MMX_FLAGS="$MMX_FLAGS -ffp-contract=off -DLZ_MMX_TU=1 -I$ROOT/src"
 
 # Same list as the Makefile's ENG, and it has to stay the same list -
 # see the Makefile note about source lists living in exactly one place.
+# ops_mmx is NOT in ENG (Watcom and the ARM cross-build must not see
+# it - see the Makefile's own ENG_MMX_GCC variable) so it is built
+# separately, right after this loop.
 ENG="err compat lfn json safetensors model ops forward sampler generate
      tokenizer unicode chat gbk cpucheck"
 
@@ -130,6 +163,16 @@ for f in $ENG; do
         fail=$((fail + 1))
     fi
 done
+
+if $CC $MMX_FLAGS -c "$ROOT/src/ops_mmx.c" -o "$OUT/ops_mmx.o" 2>"$OUT/ops_mmx.log"; then
+    n=$(grep -c 'warning:' "$OUT/ops_mmx.log" || true)
+    warn=$((warn + n))
+    printf '  %-14s ok    %s warnings\n' "ops_mmx" "$n"
+else
+    printf '  %-14s FAIL\n' "ops_mmx"
+    grep -E 'error:' "$OUT/ops_mmx.log" | head -4 | sed 's/^/      /'
+    fail=$((fail + 1))
+fi
 
 echo
 echo "objects: $(ls -1 "$OUT"/*.o 2>/dev/null | wc -l)  failed: $fail  warnings: $warn"

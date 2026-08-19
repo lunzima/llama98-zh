@@ -154,39 +154,11 @@ extern void lz_q8round32_sse2_asm(const float *x, int8_t *o, const float *inv);
 
 #define LZ_HAVE_Q8R_SIMD 1
 #define lz_q8round32_simd lz_q8round32_sse2_asm
-#elif defined(__SSE__) || defined(__SSE2__)
-#include <xmmintrin.h>
-#include "mmx_compat.h"
-#define LZ_HAVE_Q8R_SSE 1
-/* SSE1 tier (PIII / K7 / Athlon XP): no cvtps2dq, only cvtps2pi -
-   converting 2 floats at a time into MMX registers. Multiply in xmm,
-   convert and pack in mm, using movhlps to slide the high 2 floats
-   down. Rounding is likewise MXCSR round-half-even, consistent across
-   cvtps2dq, cvtps2pi and the magic add.
-
-   **Writes MMX registers**, so the caller must emit one emms after the
-   group loop (rule 6.6: kernels don't emit, callers do once). */
-static void lz_q8round32_sse(const float *x, int8_t *o, const float *pinv) {
-    __m128 vi = _mm_set1_ps(*pinv);
-    __m64 p127 = _mm_set1_pi16(127), m127 = _mm_set1_pi16(-127);
-    int b;
-    for (b = 0; b < 4; b++) {
-        const float *sp = x + b * 8;
-        __m128 f0 = _mm_mul_ps(_mm_loadu_ps(sp), vi);
-        __m128 f1 = _mm_mul_ps(_mm_loadu_ps(sp + 4), vi);
-        __m64 a0 = _mm_cvtps_pi32(f0);
-        __m64 a1 = _mm_cvtps_pi32(_mm_movehl_ps(f0, f0));
-        __m64 a2 = _mm_cvtps_pi32(f1);
-        __m64 a3 = _mm_cvtps_pi32(_mm_movehl_ps(f1, f1));
-        __m64 l = _mm_packs_pi32(a0, a1);
-        __m64 h = _mm_packs_pi32(a2, a3);
-        __m64 r;
-        l = _mm_max_pi16(_mm_min_pi16(l, p127), m127);
-        h = _mm_max_pi16(_mm_min_pi16(h, p127), m127);
-        r = _mm_packs_pi16(l, h);
-        memcpy(o + b * 8, &r, 8);
-    }
-}
+/* The gcc SSE1-tier branch that used to sit here (lz_q8round32_sse,
+   LZ_HAVE_Q8R_SSE) moved to src/ops_mmx.c / src/ops_mmx.h: cvtps2pi
+   writes %mm registers, so it belongs in the one translation unit built
+   with -mmmx. ops_mmx.h is included near the top of ops.c and defines
+   LZ_HAVE_Q8R_SSE there when the MMX tier is in this build. */
 #endif
 #if defined(__SSE2__) && !defined(__WATCOMC__)
 #include <emmintrin.h>

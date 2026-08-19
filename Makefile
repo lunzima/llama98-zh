@@ -23,6 +23,15 @@ GUI := main layout localized_strings worker modelload session compat40 \
        settingsdlg aboutdlg splash toolbar inifile caption captionwnd
 COM := stream settings command savechat mru chatfile session
 
+# src/ops_mmx.c is deliberately NOT in $(ENG): Watcom and the ARM
+# cross-build must never compile it (they carry their own MMX kernels
+# inline - #pragma aux for Watcom, nothing at all for ARM). It is the
+# ONE gcc translation unit built with -mmmx -msse; every other gcc file
+# gets neither, plus LZ_MMX_TU so its dispatch code knows ops_mmx.o is
+# still part of the link. See src/ops_mmx.h.
+ENG_MMX_GCC := ops_mmx
+ENG_MMX_GCC_SRCS := $(addprefix src/,$(addsuffix .c,$(ENG_MMX_GCC)))
+
 # gcc-side full paths.
 ENG_SRCS := $(addprefix src/,$(addsuffix .c,$(ENG)))
 SRV_SRCS := $(addprefix src/,$(addsuffix .c,$(SRV)))
@@ -46,12 +55,17 @@ endif
 # a measurable fraction of inputs. Cost is noise-level here (the hot path
 # is hand-written intrinsics the contraction never touches).
 FP_STRICT := -ffp-contract=off
-CFLAGS  ?= -O2 -std=c99 -Wall -Wextra -Isrc $(FP_STRICT)
+# LZ_MMX_TU=1: every gcc TU needs to see this, not just ops.c - amax.h,
+# dot.h and q8round.h's dispatch tables are #included into it and read
+# the same macro. src/ops_mmx.c is compiled with these flags PLUS
+# -mmmx -msse, never with them removed - see the $(ENG_MMX_GCC) rules.
+MMX_TU_DEFINE := -DLZ_MMX_TU=1
+CFLAGS  ?= -O2 -std=c99 -Wall -Wextra -Isrc $(FP_STRICT) $(MMX_TU_DEFINE)
 # Release builds are portable x86-64 (SSE2 baseline), NOT -march=native:
 # a native build runs only on the machine that compiled it. The engine
 # hot path is hand-written intrinsics anyway, so the portability cost is
 # negligible.
-X86_64_CFLAGS := -O3 -march=x86-64 -std=c99 -Wall -Wextra -Isrc $(FP_STRICT)
+X86_64_CFLAGS := -O3 -march=x86-64 -std=c99 -Wall -Wextra -Isrc $(FP_STRICT) $(MMX_TU_DEFINE)
 
 HTTP_LIBS := $(if $(filter Windows_NT,$(OS)),-lwsock32,)
 
@@ -60,14 +74,26 @@ native: llama98
 gui: kunkun98-gui
 serve: kunkun98-serve
 
+# ops_mmx.o, one per gcc flavor below (native/serve share X86_64_CFLAGS,
+# gui uses CFLAGS) - not shared across them, the same way each Watcom
+# target below keeps its own object dir, so a flag change to one flavor
+# cannot link in an object built with another's.
+build/native/ops_mmx.o: $(ENG_MMX_GCC_SRCS)
+	@mkdir -p build/native
+	$(CC) $(X86_64_CFLAGS) -mmmx -msse -c -o $@ $(ENG_MMX_GCC_SRCS)
+
+build/gui/ops_mmx.o: $(ENG_MMX_GCC_SRCS)
+	@mkdir -p build/gui
+	$(CC) $(CFLAGS) -mmmx -msse -c -o $@ $(ENG_MMX_GCC_SRCS)
+
 # cli_main.c's -i loop runs on the shared LZSession core (common/session.c),
 # a front-end helper deliberately outside $(ENG) - so this target lists it
 # explicitly with -Icommon, exactly as the Watcom CLI/DOS builds do.
-llama98: $(ENG_SRCS) common/session.c common/stream.c src/cli_attr.c src/cli_main.c
-	$(CC) $(X86_64_CFLAGS) -Icommon -o $@ $(ENG_SRCS) common/session.c common/stream.c src/cli_attr.c src/cli_main.c -lm
+llama98: $(ENG_SRCS) common/session.c common/stream.c src/cli_attr.c src/cli_main.c build/native/ops_mmx.o
+	$(CC) $(X86_64_CFLAGS) -Icommon -o $@ $(ENG_SRCS) common/session.c common/stream.c src/cli_attr.c src/cli_main.c build/native/ops_mmx.o -lm
 
-kunkun98-serve: $(ENG_SRCS) $(SRV_SRCS) src/server_main.c
-	$(CC) $(X86_64_CFLAGS) -o $@ $^ -lm $(HTTP_LIBS)
+kunkun98-serve: $(ENG_SRCS) $(SRV_SRCS) src/server_main.c build/native/ops_mmx.o
+	$(CC) $(X86_64_CFLAGS) -o $@ $(ENG_SRCS) $(SRV_SRCS) src/server_main.c build/native/ops_mmx.o -lm $(HTTP_LIBS)
 
 # Resources (icon / splash / about logo / lamps). windres for gcc; the
 # Watcom build runs wrc instead (see watcom-gui). Both run from the repo
@@ -81,8 +107,8 @@ $(GUI_RES): gui/kunkun98.rc gui/resource.h gui/kunkun98.manifest \
 	@mkdir -p build/gui
 	windres -I. gui/kunkun98.rc -O coff -o $@
 
-kunkun98-gui: $(GUI_SRCS) $(COM_SRCS) $(ENG_SRCS) gui/layout.h gui/localized_strings.h $(GUI_RES)
-	$(CC) $(CFLAGS) -Igui -Icommon -mwindows -o $@ $(GUI_SRCS) $(COM_SRCS) $(ENG_SRCS) $(GUI_RES) \
+kunkun98-gui: $(GUI_SRCS) $(COM_SRCS) $(ENG_SRCS) gui/layout.h gui/localized_strings.h $(GUI_RES) build/gui/ops_mmx.o
+	$(CC) $(CFLAGS) -Igui -Icommon -mwindows -o $@ $(GUI_SRCS) $(COM_SRCS) $(ENG_SRCS) $(GUI_RES) build/gui/ops_mmx.o \
 	    -lgdi32 -luser32 -lcomdlg32 -lm -Wl,--stack=524288
 
 # ----------------------------------------------------------------------

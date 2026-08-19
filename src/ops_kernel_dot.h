@@ -217,15 +217,18 @@ static __m128i part32_q16(const int16_t *w, const int16_t *x) {
 
 #endif
 
-#if defined(__MMX__)
-#include "mmx_compat.h"
-
 /* MMX dot product with activations pre-expanded to int16, same
    algorithm as SSE2's part32_x16: weights via punpcklbw(0, w) (value
    x256, skips psraw), activations loaded directly as int16. SIMD
    instruction count per 32 elements drops from ~57 to ~35. Products
-   scale 256x, cancelled once at the row end by the caller. */
+   scale 256x, cancelled once at the row end by the caller.
+
+   dot32_x16_mmx / dot32_x16_mmx_2's gcc bodies live in
+   src/ops_kernel_dot_mmx.h now (included only by src/ops_mmx.c - both
+   write %mm registers); this #ifdef's Watcom half is unaffected and
+   unchanged. */
 #ifdef __WATCOMC__
+#include "mmx_compat.h"
 /* __modify must be truthful; never write __exact [].
    `__exact []` means "this code touches no register" - a lie: the
    asm writes eax (the return value), MMX/XMM, and MMX also moves the
@@ -463,88 +466,12 @@ static int32_t dot32_x16_sse2a(const int8_t *w, const int16_t *x) {
 static int32_t dot32_x16_mmx(const int8_t *w, const int16_t *x) {
     return lz_dot32_x16_asm(w, x);
 }
-#else /* __WATCOMC__ */
-/* Two tokens, ONE weight unpack.
-
-   The single-token kernel below spends 36 ops per 32 MACs and only 8 of
-   them are pmaddwd: 4 weight loads and 8 punpck are weight-side work,
-   redone for every token in the batch even though the batched caller
-   already holds the weight row in L1. Sharing them across NT tokens
-   makes the cost 12 + 24*NT instead of 36*NT, so the ceiling as NT grows
-   is 36/24 = 1.5x - and NT=1 (decode) has no share to take, which is why
-   this helps prefill only.
-
-   NT=2 rather than 4 because MMX has eight registers and each token
-   needs its own accumulator live across the block loop: z, the loaded
-   weight, its two widened halves and two accumulators is six. At NT=4
-   the accumulators alone take four and the temporaries spill, which
-   costs back what the sharing buys. 60 ops per 32 MACs for two tokens
-   = 30/token against 36, i.e. 1.20x.
-
-   BIT-IDENTICAL BY CONSTRUCTION, and that is not a hope: everything
-   here is int32 accumulation, which is exact regardless of order, and
-   the float epilogue is untouched. Reassociating the FLOAT reduction
-   would not be safe - see the r>1 branch's own comment. */
-static void dot32_x16_mmx_2(const int8_t *w, const int16_t *xa,
-                            const int16_t *xb, int32_t *oa, int32_t *ob) {
-    __m64 z = _mm_setzero_si64();
-    __m64 sa = _mm_setzero_si64(), sb = _mm_setzero_si64();
-    __m64 wb, lo, hi, xv, t;
-    int blk;
-    for (blk = 0; blk < 32; blk += 8) {
-        memcpy(&wb, w + blk, 8);
-        /* Same (z, w) operand order as the single-token kernel: the byte
-           lands in the HIGH half of each int16, i.e. the product carries
-           a factor of 256 that the caller's scale already accounts for.
-           Swapping the operands here would be a silent 256x. */
-        lo = _mm_unpacklo_pi8(z, wb);
-        hi = _mm_unpackhi_pi8(z, wb);
-        memcpy(&xv, xa + blk, 8);
-        t = _mm_madd_pi16(lo, xv);
-        sa = _mm_add_pi32(sa, t);
-        memcpy(&xv, xa + blk + 4, 8);
-        t = _mm_madd_pi16(hi, xv);
-        sa = _mm_add_pi32(sa, t);
-        memcpy(&xv, xb + blk, 8);
-        t = _mm_madd_pi16(lo, xv);
-        sb = _mm_add_pi32(sb, t);
-        memcpy(&xv, xb + blk + 4, 8);
-        t = _mm_madd_pi16(hi, xv);
-        sb = _mm_add_pi32(sb, t);
-    }
-    t = _mm_srli_si64(sa, 32);
-    sa = _mm_add_pi32(sa, t);
-    *oa = _mm_cvtsi64_si32(sa);
-    t = _mm_srli_si64(sb, 32);
-    sb = _mm_add_pi32(sb, t);
-    *ob = _mm_cvtsi64_si32(sb);
-}
-
-static int32_t dot32_x16_mmx(const int8_t *w, const int16_t *x) {
-    __m64 z = _mm_setzero_si64();
-    __m64 w0, w1, w2, w3, x0, s, t;
-    memcpy(&w0, w, 8);      memcpy(&w1, w + 8, 8);
-    memcpy(&w2, w + 16, 8); memcpy(&w3, w + 24, 8);
-    s = _mm_setzero_si64();
-#define MMX_MAC(WREG, XOFF)                                             \
-    memcpy(&x0, x + (XOFF), 8);                                         \
-    t = _mm_unpacklo_pi8(z, WREG);                                      \
-    t = _mm_madd_pi16(t, x0);                                           \
-    s = _mm_add_pi32(s, t);                                             \
-    memcpy(&x0, x + (XOFF) + 4, 8);                                     \
-    t = _mm_unpackhi_pi8(z, WREG);                                      \
-    t = _mm_madd_pi16(t, x0);                                           \
-    s = _mm_add_pi32(s, t)
-    MMX_MAC(w0, 0);
-    MMX_MAC(w1, 8);
-    MMX_MAC(w2, 16);
-    MMX_MAC(w3, 24);
-#undef MMX_MAC
-    t = _mm_srli_si64(s, 32);
-    s = _mm_add_pi32(s, t);
-    return (int32_t)_mm_cvtsi64_si32(s);
-}
-#endif /* __WATCOMC__ branch end */
+#elif defined(LZ_DOT_MMX_EXTERN)
+/* dot32_x16_mmx (single token) and dot32_x16_mmx_2 (two tokens, ONE
+   weight unpack - 36/24 ceiling, NT=2 register budget) live in
+   src/ops_kernel_dot_mmx.h, included only by src/ops_mmx.c. Declared in
+   src/ops_mmx.h, already visible in this translation unit. */
+#endif
 
 /* ---- Q16_0 32/128-element kernels -------------------------------------
    Q16_0 stores int16 weights, so unlike Q8_0 there is no int8->int16
@@ -862,25 +789,10 @@ static int32_t dot32_q16_mmx(const int16_t *w, const int16_t *x) {
 static int32_t dot32_q16_sse2a(const int16_t *w, const int16_t *x) {
     return lz_dot32_q16_sse2_asm(w, x);
 }
-#elif defined(__MMX__)
-/* Dev-build twin (rule 2). Its only job is to be the oracle the Watcom
-   asm is diffed against, so it mirrors the asm step for step: eight
-   pmaddwd into one accumulator, then fold the high dword into the low
-   one. No reassociation - the integer sums are exact, but keeping the
-   shape identical is what makes "same numbers" mean "same kernel". */
-static int32_t dot32_q16_mmx(const int16_t *w, const int16_t *x) {
-    __m64 s = _mm_setzero_si64(), w0, x0, t;
-    int k;
-    for (k = 0; k < 32; k += 4) {
-        memcpy(&w0, w + k, 8);
-        memcpy(&x0, x + k, 8);
-        t = _mm_madd_pi16(w0, x0);
-        s = _mm_add_pi32(s, t);
-    }
-    t = _mm_srli_si64(s, 32);
-    s = _mm_add_pi32(s, t);
-    return (int32_t)_mm_cvtsi64_si32(s);
-}
+#elif defined(LZ_DOT_MMX_EXTERN)
+/* dot32_q16_mmx's body lives in src/ops_kernel_dot_mmx.h, included only
+   by src/ops_mmx.c - it writes %mm registers. Declared in
+   src/ops_mmx.h, already visible in this translation unit. */
 #endif /* Q16_0 kernels */
 
 /* Q4_1 32-element dot product (MMX). Same algorithm as SSE2's
@@ -1120,88 +1032,11 @@ static int32_t dot32_q41_sse2a(const unsigned char *w, const int16_t *x) {
 static int32_t dot32_q41_mmx(const unsigned char *w, const int16_t *x) {
     return lz_dot32_q41_asm(w, x);
 }
-#else /* __WATCOMC__ */
-/* Two tokens, ONE nibble unpack. Same idea as dot32_x16_mmx_2 and worth
-   more here: Q4_1's weight-side work is 16 of the 40 ops per 32 MACs
-   (2 loads + 6 mask/shift + 8 punpck) against Q8's 12 of 36, because a
-   nibble has to be split before it can be widened. Sharing it across NT
-   tokens costs 16 + 24*NT instead of 40*NT - ceiling 40/24 = 1.67x,
-   1.25x at NT=2.
-
-   NT=2 is what eight MMX registers allow: m0f, z, lo, hi, the widened
-   half, one activation temp and two accumulators is exactly eight, with
-   the raw 8-byte load reusing the temp's slot.
-
-   This is the kernel that matters: most of the model runs on this path
-   (63 Q4_1 tensors), so the debt that is cheap to carry on Q8 is not
-   cheap here.
-
-   Bit-identical by construction - int32 accumulation, exact regardless
-   of order, and the float epilogue is untouched. */
-static void dot32_q41_mmx_2(const unsigned char *w, const int16_t *xa,
-                            const int16_t *xb, int32_t *oa, int32_t *ob) {
-    const __m64 m0f = (__m64)0x0F0F0F0F0F0F0F0FULL;
-    __m64 z = _mm_setzero_si64();
-    __m64 sa = _mm_setzero_si64(), sb = _mm_setzero_si64();
-    __m64 b, lo, hi, wv, xv;
-    int blk;
-    for (blk = 0; blk < 16; blk += 8) {
-        int xo = blk;                    /* elements blk..blk+7 and blk+16.. */
-        memcpy(&b, (const char *)w + blk, 8);
-        lo = _mm_and_si64(b, m0f);
-        hi = _mm_and_si64(_mm_srli_pi16(b, 4), m0f);
-        /* Four widened halves per block, in the SAME order the
-           single-token kernel emits them (lo-lo, lo-hi, hi-lo, hi-hi)
-           against activation offsets +0, +4, +16, +20. */
-#define Q41_2_HALF(WH, XOFF)                                            \
-        wv = (WH);                                                      \
-        memcpy(&xv, xa + xo + (XOFF), 8);                               \
-        sa = _mm_add_pi32(sa, _mm_madd_pi16(wv, xv));                   \
-        memcpy(&xv, xb + xo + (XOFF), 8);                               \
-        sb = _mm_add_pi32(sb, _mm_madd_pi16(wv, xv))
-        Q41_2_HALF(_mm_unpacklo_pi8(z, lo), 0);
-        Q41_2_HALF(_mm_unpackhi_pi8(z, lo), 4);
-        Q41_2_HALF(_mm_unpacklo_pi8(z, hi), 16);
-        Q41_2_HALF(_mm_unpackhi_pi8(z, hi), 20);
-#undef Q41_2_HALF
-    }
-    b = _mm_srli_si64(sa, 32);
-    sa = _mm_add_pi32(sa, b);
-    *oa = (int32_t)_mm_cvtsi64_si32(sa);
-    b = _mm_srli_si64(sb, 32);
-    sb = _mm_add_pi32(sb, b);
-    *ob = (int32_t)_mm_cvtsi64_si32(sb);
-}
-
-static int32_t dot32_q41_mmx(const unsigned char *w, const int16_t *x) {
-    const __m64 m0f = (__m64)0x0F0F0F0F0F0F0F0FULL;
-    __m64 z = _mm_setzero_si64();
-    __m64 b, lo, hi, x0, s, t;
-    s = _mm_setzero_si64();
-#define MMX_Q41(BOFF, XOFF)                                             \
-    memcpy(&b, (const char *)w + (BOFF), 8);                            \
-    lo = _mm_and_si64(b, m0f);                                          \
-    hi = _mm_and_si64(_mm_srli_pi16(b, 4), m0f);                        \
-    memcpy(&x0, x + (XOFF), 8);                                         \
-    t = _mm_madd_pi16(_mm_unpacklo_pi8(z, lo), x0);                     \
-    s = _mm_add_pi32(s, t);                                             \
-    memcpy(&x0, x + (XOFF) + 4, 8);                                     \
-    t = _mm_madd_pi16(_mm_unpackhi_pi8(z, lo), x0);                     \
-    s = _mm_add_pi32(s, t);                                             \
-    memcpy(&x0, x + (XOFF) + 16, 8);                                    \
-    t = _mm_madd_pi16(_mm_unpacklo_pi8(z, hi), x0);                     \
-    s = _mm_add_pi32(s, t);                                             \
-    memcpy(&x0, x + (XOFF) + 20, 8);                                    \
-    t = _mm_madd_pi16(_mm_unpackhi_pi8(z, hi), x0);                     \
-    s = _mm_add_pi32(s, t)
-    /* bytes 0..7  -> elements 0..7 and 16..23; bytes 8..15 -> elements 8..15 and 24..31 */
-    MMX_Q41(0, 0);
-    MMX_Q41(8, 8);
-#undef MMX_Q41
-    t = _mm_srli_si64(s, 32);
-    s = _mm_add_pi32(s, t);
-    return (int32_t)_mm_cvtsi64_si32(s);
-}
+#elif defined(LZ_DOT_MMX_EXTERN)
+/* dot32_q41_mmx (single token) and dot32_q41_mmx_2 (two tokens, ONE
+   nibble unpack - the kernel that matters most, see the Watcom twin's
+   comment) live in src/ops_kernel_dot_mmx.h, included only by
+   src/ops_mmx.c. Declared in src/ops_mmx.h, already visible here. */
 #endif /* Q4_1 __WATCOMC__ branch end */
 
 /* ---- T2 (ternary, one 2-bit plane) ------------------------------------ */
@@ -1356,46 +1191,10 @@ extern int32_t lz_dot32_t2_sse2_asm(const unsigned char *w2,
     __value [__eax] \
     __modify [8087]
 
-#elif defined(__MMX__)
-/* The gcc half of the MMX cell for T2. Instruction for
-   instruction the same kernel as the assembly above - one 8-byte load of
-   the plane, eight groups of (punpck against zero, align the 2-bit field
-   to the top of the lane, drop the rest, put it back with the x256
-   fold, pmaddwd, accumulate), then a horizontal fold of two int32 lanes.
-   Only the notation differs, and the two are never in the same binary.
-
-   THE SHIFT ORDER IS THE PART THAT IS EASY TO GET WRONG, so it is spelled
-   out: after punpcklbw(0, byte) a lane holds byte<<8, so the 2-bit field
-   at bit `sh` sits at lane bit 8+sh, and pmaddwd consumes the entire
-   16-bit lane. Aligning it with one right shift leaves the low byte's
-   contents in the lane. Push to the top, clear below, restore:
-       psllw (6-sh) ; psrlw 14 ; psllw 8                              */
-static int32_t dot32_t2_mmx(const unsigned char *w2, const int16_t *x) {
-    __m64 acc = _mm_setzero_si64();
-    __m64 pl  = *(const __m64 *)(const void *)w2;
-    int gi;
-    /* (activation offset in int16s, use the high half of the plane byte
-       group, 2-bit right shift) - the same eight rows the generator
-       emits, in the same order. */
-    static const struct { int xoff, hi, sh; } G[8] = {
-        {  0, 0, 0 }, {  4, 1, 0 },
-        {  8, 0, 2 }, { 12, 1, 2 },
-        { 16, 0, 4 }, { 20, 1, 4 },
-        { 24, 0, 6 }, { 28, 1, 6 }
-    };
-    for (gi = 0; gi < 8; gi++) {
-        __m64 xv = *(const __m64 *)(const void *)(x + G[gi].xoff);
-        __m64 z  = _mm_setzero_si64();
-        __m64 t  = G[gi].hi ? _mm_unpackhi_pi8(z, pl)
-                            : _mm_unpacklo_pi8(z, pl);
-        if (6 - G[gi].sh) t = _mm_slli_pi16(t, 6 - G[gi].sh);
-        t = _mm_srli_pi16(t, 14);
-        t = _mm_slli_pi16(t, 8);
-        acc = _mm_add_pi32(acc, _mm_madd_pi16(t, xv));
-    }
-    acc = _mm_add_pi32(acc, _mm_srli_si64(acc, 32));
-    return _mm_cvtsi64_si32(acc);
-}
+#elif defined(LZ_DOT_MMX_EXTERN)
+/* dot32_t2_mmx's body lives in src/ops_kernel_dot_mmx.h, included only
+   by src/ops_mmx.c - it writes %mm registers. Declared in
+   src/ops_mmx.h, already visible in this translation unit. */
 #endif  /* __WATCOMC__ / __MMX__ */
 
 /* ---- Q6_1 (6.5 bits: 4-bit + 2-bit dual planes) ------------------------ */
@@ -2915,97 +2714,10 @@ extern void lz_dot128_q61_sse2_asm(const unsigned char *w4, const unsigned char 
     "movd      [ebx+12], xmm4" \
     __parm [__eax] [__edx] [__ecx] [__ebx] \
     __modify [8087]
-#elif defined(__MMX__)
-/* gcc MMX intrinsics version (local MMX verification; target machines
-   use the hand-written asm above). Structure maps 1:1 to the asm:
-   rebuild in the byte domain -> unpack once -> pmaddwd. */
-/* Two tokens, ONE two-plane merge. The best of the three shared-unpack
-   kernels, and on the recipe of record it is also the one that matters:
-   Q6_1 carries embed_tokens, in_proj_qkv, in_proj_z, down_proj and
-   q/k/v_proj - 37 of the exported tensors against Q4_1's 30, and the
-   larger ones.
-
-   Q6_1's weight side is 37 of the 61 ops per 32 MACs (61%), against
-   Q4_1's 40% and Q8's 33%, because a 6-bit value has to be assembled
-   from a 4-bit plane and a 2-bit plane before it can be widened: per
-   sub-block that is a load, a conditional shift, two masks, a shift and
-   an or, then two punpck. Sharing it across NT tokens costs
-   37 + 24*NT instead of 61*NT - ceiling 61/24 = 2.54x, 1.51x at NT=2.
-
-   One widened half is built at a time and immediately consumed by both
-   tokens, rather than building both halves first: that keeps m0f, m03,
-   z, `two`, the half, one activation temp and two accumulators live -
-   exactly the eight MMX registers. Building both halves first needs
-   nine and spills.
-
-   Sub-block order 0,2,1,3 and the SH/XO tables are copied from the
-   single-token kernel unchanged. Integer accumulation is exact so the
-   order does not affect the result, but keeping it identical removes
-   the question. */
-static void dot32_q61_mmx_2(const unsigned char *w4, const unsigned char *w2,
-                            const int16_t *xa, const int16_t *xb,
-                            int32_t *oa, int32_t *ob) {
-    const __m64 m0f = (__m64)0x0F0F0F0F0F0F0F0FULL;
-    const __m64 m03 = (__m64)0x0303030303030303ULL;
-    __m64 z = _mm_setzero_si64();
-    __m64 blk, two, q, u, xv, sa, sb;
-    int i;
-    sa = _mm_setzero_si64();
-    sb = _mm_setzero_si64();
-    memcpy(&two, w2, 8);
-    for (i = 0; i < 4; i++) {
-        static const int SH[4] = { 0, 4, 2, 6 };
-        static const int XO[4] = { 0, 16, 8, 24 };
-        memcpy(&blk, w4 + ((i == 0 || i == 1) ? 0 : 8), 8);
-        q = (i == 1 || i == 3) ? _mm_srli_pi16(blk, 4) : blk;
-        q = _mm_and_si64(q, m0f);
-        u = _mm_and_si64(_mm_srli_pi16(two, SH[i]), m03);
-        q = _mm_or_si64(q, _mm_slli_pi16(u, 4));
-        /* low half, both tokens */
-        u = _mm_unpacklo_pi8(z, q);
-        memcpy(&xv, xa + XO[i], 8);
-        sa = _mm_add_pi32(sa, _mm_madd_pi16(u, xv));
-        memcpy(&xv, xb + XO[i], 8);
-        sb = _mm_add_pi32(sb, _mm_madd_pi16(u, xv));
-        /* high half, both tokens */
-        u = _mm_unpackhi_pi8(z, q);
-        memcpy(&xv, xa + XO[i] + 4, 8);
-        sa = _mm_add_pi32(sa, _mm_madd_pi16(u, xv));
-        memcpy(&xv, xb + XO[i] + 4, 8);
-        sb = _mm_add_pi32(sb, _mm_madd_pi16(u, xv));
-    }
-    sa = _mm_add_pi32(sa, _mm_srli_si64(sa, 32));
-    *oa = (int32_t)_mm_cvtsi64_si32(sa);
-    sb = _mm_add_pi32(sb, _mm_srli_si64(sb, 32));
-    *ob = (int32_t)_mm_cvtsi64_si32(sb);
-}
-
-static int32_t dot32_q61_mmx(const unsigned char *w4, const unsigned char *w2,
-                             const int16_t *x) {
-    const __m64 m0f = (__m64)0x0F0F0F0F0F0F0F0FULL;
-    const __m64 m03 = (__m64)0x0303030303030303ULL;
-    __m64 z = _mm_setzero_si64();
-    __m64 blk, two, q, u, x0, s;
-    int i;
-    s = _mm_setzero_si64();
-    memcpy(&two, w2, 8);
-    /* sub-block order 0,2,1,3: A low / A high / B low / B high, matching the asm version */
-    for (i = 0; i < 4; i++) {
-        static const int SH[4] = { 0, 4, 2, 6 };
-        static const int XO[4] = { 0, 16, 8, 24 };
-        memcpy(&blk, w4 + ((i == 0 || i == 1) ? 0 : 8), 8);
-        q = (i == 1 || i == 3) ? _mm_srli_pi16(blk, 4) : blk;
-        q = _mm_and_si64(q, m0f);
-        u = _mm_and_si64(_mm_srli_pi16(two, SH[i]), m03);
-        q = _mm_or_si64(q, _mm_slli_pi16(u, 4));
-        memcpy(&x0, x + XO[i], 8);
-        s = _mm_add_pi32(s, _mm_madd_pi16(_mm_unpacklo_pi8(z, q), x0));
-        memcpy(&x0, x + XO[i] + 4, 8);
-        s = _mm_add_pi32(s, _mm_madd_pi16(_mm_unpackhi_pi8(z, q), x0));
-    }
-    s = _mm_add_pi32(s, _mm_srli_si64(s, 32));
-    return (int32_t)_mm_cvtsi64_si32(s);
-}
+#elif defined(LZ_DOT_MMX_EXTERN)
+/* dot32_q61_mmx (single token) and dot32_q61_mmx_2 (two tokens, ONE
+   two-plane merge - the kernel that matters most on the recipe of
+   record, see the Watcom twin's comment) live in
+   src/ops_kernel_dot_mmx.h, included only by src/ops_mmx.c. Declared in
+   src/ops_mmx.h, already visible here. */
 #endif
-
-#endif /* end __MMX__ branch */

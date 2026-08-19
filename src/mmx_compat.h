@@ -30,6 +30,17 @@
 #elif defined(__MMX__) && (defined(__i386__) || defined(__x86_64__) \
       || defined(_M_IX86))
 #include <mmintrin.h>
+#elif defined(__i386__) || defined(__x86_64__) || defined(_M_IX86)
+/* x86, but THIS translation unit was not built with -mmmx - see
+   src/ops_mmx.h. <mmintrin.h> refuses to compile without -mmmx, so
+   there is no _mm_empty() to pull in here, yet this TU still needs a
+   real emms: it calls into src/ops_mmx.c's kernels, which leave the MMX
+   register file dirty (rule 6 item 6 - kernels don't emit, callers do),
+   and this caller's -mmmx-free compilation is exactly why it must not
+   rely on the intrinsic. GAS accepts the mnemonic regardless of the
+   compiler's own -mmmx/-msse target flags - inline asm text is opaque
+   to gcc's codegen choices, only real intrinsics are gated by them. */
+#define _mm_empty()            __asm__ __volatile__("emms" ::: "memory")
 #else
 /* Not an x86 target at all - ARMv5TE is the first one (the kunkun-CE
    device). There is no <mmintrin.h> to include, and nothing here needs

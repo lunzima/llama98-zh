@@ -14,6 +14,12 @@
 #include "mmx_compat.h" /* _mm_empty(): called from the architecture-neutral
                            dispatch paths too, so it must be declared on
                            targets that have no MMX at all - see the header */
+#include "ops_mmx.h"    /* declarations for src/ops_mmx.c's functions - the
+                           %mm-touching kernels this file no longer defines.
+                           Unconditional: the macros and declarations inside
+                           are themselves guarded on LZ_MMX_TU, a build flag
+                           (-D, from the Makefile) rather than on __MMX__,
+                           which this file must never be compiled with. */
 
 /* GDN pass-1 tier default, hoisted here from where the kernels live
    (~line 3250) because lz_gdn_mode() sits far above them and `#if
@@ -1472,7 +1478,7 @@ static int kernel_detect(void) {
        tier stays selectable through --kernel, which is the whole point
        of compiling both in. */
     return LZ_KERNEL_SSE2;
-#elif defined(__MMX__)
+#elif defined(LZ_DOT_MMX_EXTERN)
     return LZ_KERNEL_MMX;
 #else
     return LZ_KERNEL_REF;
@@ -1491,7 +1497,7 @@ int lz_kernel_select(int which) {
            and a benchmark that faults is not a slower benchmark). */
         g_kernel = (which == LZ_KERNEL_SSE2 && have != LZ_KERNEL_SSE2)
                    ? have : which;
-#elif defined(__MMX__) && defined(__SSE2__)
+#elif defined(LZ_DOT_MMX_EXTERN) && defined(__SSE2__)
         /* ONE gcc build carries both intrinsics tiers, so both are
            honestly selectable - `--kernel mmx` on an x86-64 build really
            selects the MMX tier, and the tier report matches it. */
@@ -1585,9 +1591,9 @@ const char *lz_kernel_name(void) {
 const char *lz_build_paths(void) {
 #if defined(__WATCOMC__) && defined(__MMX__)
     return "mmx-asm+sse2-asm";
-#elif defined(__MMX__) && defined(__SSE2__)
+#elif defined(LZ_DOT_MMX_EXTERN) && defined(__SSE2__)
     return "mmx-intrin+sse2-intrin";
-#elif defined(__MMX__)
+#elif defined(LZ_DOT_MMX_EXTERN)
     return "mmx-intrin";
 #elif defined(__SSE2__)
     return "sse2-intrin";
@@ -1624,7 +1630,7 @@ const char *lz_build_paths(void) {
 const char *lz_kernel_tier(void) {
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
     if (g_kernel == LZ_KERNEL_REF) return "ref";   /* scalar C: no impl axis */
-#if defined(__MMX__)
+#if defined(__WATCOMC__) || defined(LZ_DOT_MMX_EXTERN)
 #  ifdef __WATCOMC__
     return (g_kernel == LZ_KERNEL_SSE2) ? "sse2-asm" : "mmx-asm";
 #  else
@@ -1968,7 +1974,7 @@ static float epi_q8(const int32_t *accb, const float *xsb, const float *ws,
    Each lives next to its table entry under ONE guard, so a definition
    and its use cannot drift apart - the drift that caused link breaks. */
 
-#if defined(__MMX__)
+#if defined(__WATCOMC__) || defined(LZ_DOT_MMX_EXTERN)
 
 /* Prefetch distance clamped by a pointer upper bound once: PIII's
    prefetchnta is harmless out of bounds (pure hint, no fault), but
@@ -2161,7 +2167,7 @@ static void row_q8_sse2_intrin(int32_t *acc32, const void *w4, const void *w2,
 /* The table. A NULL slot is a tier this build does not carry; the two
    SSE slots stay NULL because no SSE row kernel exists for this format. */
 static const lz_rowfn LZ_ROW_Q8[LZ_ROW_N] = {
-#if defined(__MMX__) && !defined(__WATCOMC__)
+#if defined(LZ_DOT_MMX_EXTERN)
     row_q8_mmx_intrin,
 #else
     NULL,
@@ -2703,7 +2709,7 @@ static float epi_q41(const int32_t *accb, const float *xsb, const float *xgb,
 
 /* ---- Q4_1 row kernels, one per (ISA x impl) --------------------------- */
 
-#if defined(__MMX__)
+#if defined(__WATCOMC__) || defined(LZ_DOT_MMX_EXTERN)
 
 #define LZ_Q41_ACC(DOT32, PF)                                          \
     for (s = 0; s < nb; s++) {                                         \
@@ -2864,7 +2870,7 @@ static void row_q41_sse2_intrin(int32_t *acc32, const void *w4, const void *w2,
 #endif
 
 static const lz_rowfn LZ_ROW_Q41[LZ_ROW_N] = {
-#if defined(__MMX__) && !defined(__WATCOMC__)
+#if defined(LZ_DOT_MMX_EXTERN)
     row_q41_mmx_intrin,
 #else
     NULL,
@@ -2945,7 +2951,7 @@ static void matmul_q41_impl(float *o, const int8_t *xq, const float *xqs,
    No pairing yet. Not a decision - unmeasured. `--pair` does nothing for
    this format today. */
 
-#if defined(__MMX__) && !defined(__WATCOMC__)
+#if defined(LZ_DOT_MMX_EXTERN)
 static void row_t2_mmx_intrin(int32_t *acc32, const void *w4, const void *w2v,
                               const int16_t *xw, int nb, int nt, int in_dim,
                               const void *pf_end, const void *pf_end2) {
@@ -3015,7 +3021,7 @@ static void row_t2_sse2_asm(int32_t *acc32, const void *w4, const void *w2v,
 /* SSE1 slots NULL: T2's unpack is `pand 0x03` + three `psrlw`, and SSE1
    adds no integer instruction that replaces any of them. */
 static const lz_rowfn LZ_ROW_T2[LZ_ROW_N] = {
-#if defined(__MMX__) && !defined(__WATCOMC__)
+#if defined(LZ_DOT_MMX_EXTERN)
     row_t2_mmx_intrin,
 #else
     NULL,
@@ -3044,7 +3050,7 @@ static const lz_rowfn LZ_ROW_T2[LZ_ROW_N] = {
    not belt-and-braces: LZ_PF_LOAD is a REAL dummy load on PII and
    faults past the end of the tensor. */
 
-#if defined(__MMX__)
+#if defined(__WATCOMC__) || defined(LZ_DOT_MMX_EXTERN)
 
 /* Both planes' prefetch, one tier lookup. */
 #define LZ_Q61_PF(S)                                                    \
@@ -3210,7 +3216,7 @@ static void row_q61_sse2_intrin(int32_t *acc32, const void *w4, const void *w2v,
 #endif
 
 static const lz_rowfn LZ_ROW_Q61[LZ_ROW_N] = {
-#if defined(__MMX__) && !defined(__WATCOMC__)
+#if defined(LZ_DOT_MMX_EXTERN)
     row_q61_mmx_intrin,
 #else
     NULL,
@@ -3328,7 +3334,7 @@ static void matmul_q61_impl(float *o, const int8_t *xq, const float *xqs,
     }
 }
 
-#if defined(__MMX__)
+#if defined(__WATCOMC__) || defined(LZ_DOT_MMX_EXTERN)
 /* Q16_0 SIMD matmul. Same shape as matmul_q8_impl - weight row loads
    once, nt tokens' int32 sub-block sums computed under MMX, ONE emms,
    then the x87 float epilogue - with two differences that both come
@@ -3602,14 +3608,14 @@ void lz_matmul_xq_nt(float *o, const float *x, const int8_t *xq,
         matmul_t2_impl(o, xq, xqs, w, in_dim, out_dim, nt);
         return;
     }
-#if defined(__MMX__)
+#if defined(__WATCOMC__) || defined(LZ_DOT_MMX_EXTERN)
     /* Q16_0 has no non-widened fallback: unlike Q8_0 it always needs the
        activation expanded to int16, so in_dim past the buffer cap goes to
        the scalar reference. The gcc/SSE2-only dev build has no Q16_0 SIMD
        kernel either and lands there too - that is deliberate, not an
-       oversight. The differential oracle rule 2 asks for is the gcc build
-       WITH -DLZ_USE_MMX=1 -D__MMX__, which compiles the intrinsics twin
-       and exercises this same path. */
+       oversight. The differential oracle rule 2 asks for is a gcc build
+       with LZ_MMX_TU set (src/ops_mmx.c linked in), which compiles the
+       intrinsics twin and exercises this same path. */
     if (w->dtype == LZ_FMT_Q16_0 && w->gs >= 32 && (w->gs % 32) == 0 &&
         (in_dim % w->gs) == 0 && in_dim <= LZ_MM_WIDEN_MAX) {
         matmul_q16_impl(o, xq, xqs, w, in_dim, out_dim, nt);
@@ -4039,48 +4045,9 @@ extern void lz_wsum_pair_asm(const int8_t *rowA, const int8_t *rowB,
     __modify [8087]
 #define LZ_WSUM_PAIR(ra, rb, co, ac) lz_wsum_pair_asm(ra, rb, co, ac)
 
-#elif defined(__MMX__)
-/* Dev-build twin (rule 2), step for step the same as the assembly above:
-   sign-extend two int8 rows to int16, interleave so one pmaddwd covers a
-   (rowA,rowB) pair against (ckA,ckB), accumulate into acc32 in place.
-   Emits no emms; the driver does one per chunk, and that chunk's
-   row-pair loop contains no x87 (rule 6 item 6). */
-static void lz_wsum_pair_mmx(const int8_t *rowA, const int8_t *rowB,
-                             const int16_t *coef, int32_t *acc32) {
-    __m64 c, ra, rb, a0, b0, p, q, acc;
-    int off;
-    memcpy(&c, coef, 8);
-    for (off = 0; off < 32; off += 8) {
-        memcpy(&ra, rowA + off, 8);
-        memcpy(&rb, rowB + off, 8);
-
-        a0 = _mm_srai_pi16(_mm_unpacklo_pi8(ra, ra), 8);
-        b0 = _mm_srai_pi16(_mm_unpacklo_pi8(rb, rb), 8);
-        p = _mm_unpacklo_pi16(a0, b0);        /* [a0,b0,a1,b1] */
-        q = _mm_unpackhi_pi16(a0, b0);        /* [a2,b2,a3,b3] */
-        p = _mm_madd_pi16(p, c);
-        q = _mm_madd_pi16(q, c);
-        memcpy(&acc, acc32 + off, 8);
-        acc = _mm_add_pi32(acc, p);
-        memcpy(acc32 + off, &acc, 8);
-        memcpy(&acc, acc32 + off + 2, 8);
-        acc = _mm_add_pi32(acc, q);
-        memcpy(acc32 + off + 2, &acc, 8);
-
-        a0 = _mm_srai_pi16(_mm_unpackhi_pi8(ra, ra), 8);
-        b0 = _mm_srai_pi16(_mm_unpackhi_pi8(rb, rb), 8);
-        p = _mm_unpacklo_pi16(a0, b0);
-        q = _mm_unpackhi_pi16(a0, b0);
-        p = _mm_madd_pi16(p, c);
-        q = _mm_madd_pi16(q, c);
-        memcpy(&acc, acc32 + off + 4, 8);
-        acc = _mm_add_pi32(acc, p);
-        memcpy(acc32 + off + 4, &acc, 8);
-        memcpy(&acc, acc32 + off + 6, 8);
-        acc = _mm_add_pi32(acc, q);
-        memcpy(acc32 + off + 6, &acc, 8);
-    }
-}
+#elif defined(LZ_WSUM_MMX_EXTERN)
+/* lz_wsum_pair_mmx's body lives in src/ops_mmx.c now - it writes %mm
+   registers. Declared in src/ops_mmx.h, already visible here. */
 #define LZ_WSUM_PAIR(ra, rb, co, ac) lz_wsum_pair_mmx(ra, rb, co, ac)
 
 #else
@@ -4101,7 +4068,7 @@ static void lz_wsum_pair_ref(const int8_t *rowA, const int8_t *rowB,
 #endif /* LZ_ATTN_FIXED & 2 */
 
 #if (LZ_ATTN_FIXED & 1)
-#if !defined(__WATCOMC__) && !(defined(__MMX__))
+#if !defined(__WATCOMC__) && !defined(LZ_DOT_MMX_EXTERN)
 /* Same story for the scoring dot. Mirrors dot32_x16_mmx INCLUDING its
    x256 product scaling, so the caller's single 1/256 is correct either
    way. */
@@ -4157,7 +4124,7 @@ void lz_attn_score_q8(float *att, const float *qhh, int hd,
            longer one, on the Watcom build only. */
         for (g = 0; g < ng; g++)
             rr[g] = LZ_ATTN_DOT32(kt + (size_t)g * 32, qw + g * 32);
-#if defined(__MMX__)
+#if defined(__WATCOMC__) || defined(LZ_DOT_MMX_EXTERN)
         _mm_empty();
 #endif
         /* Phase 2, x87 only. Raw magnitude reaches 256*127*127*32 =
@@ -4265,7 +4232,7 @@ void lz_attn_wsum_q8(float *out, const float *att, int hd,
                 LZ_WSUM_PAIR(rowA, rowA, coef, acc32);
                 LZ_SLOT_NEXT(slot, sink, ring);
             }
-#if defined(__MMX__)
+#if defined(__WATCOMC__) || defined(LZ_WSUM_MMX_EXTERN)
             _mm_empty();      /* no x87 inside the row-pair loop above */
 #endif
             for (d = 0; d < 32; d++) accf[d] += lz_i32f(acc32[d]);
@@ -4346,7 +4313,7 @@ void lz_attn_wsum_q8(float *out, const float *att, int hd,
    takes the float pass 1 rather than truncating silently. */
 #define LZ_GDN_MAX_KD 256
 
-#if defined(__MMX__)
+#if defined(__WATCOMC__) || defined(LZ_GDN1_MMX_EXTERN)
 #define LZ_GDN_HAVE_MMX 1
 #endif
 
@@ -4402,44 +4369,10 @@ extern void lz_gdn1_x4_asm(const int8_t *rowA, int32_t vd,
     __parm [__eax] [__edx] [__ebx] [__ecx] [__esi] \
     __modify [__eax __ebx __ecx 8087]
 #else
-/* Dev-build twin (rule 2), step for step the same as the assembly above:
-   sign-extend two int8 rows to int16, interleave so one pmaddwd consumes a
-   (rowA,rowB) pair against a (cA,cB) coefficient pair, four accumulators
-   for u/w x the low/high halves of the 4-lane window. */
-static void lz_gdn1_x4_asm(const int8_t *rowA, int32_t vd,
-                           const int16_t *ctab, int32_t kpairs,
-                           int32_t *out8) {
-    __m64 accU0 = _mm_setzero_si64(), accU1 = _mm_setzero_si64();
-    __m64 accW0 = _mm_setzero_si64(), accW1 = _mm_setzero_si64();
-    const int8_t *rA = rowA;
-    int32_t kp;
-    for (kp = 0; kp < kpairs; kp++) {
-        __m64 a, b, pl, ph, t, cu, cw;
-        int32_t a32, b32;
-        memcpy(&a32, rA, 4);
-        memcpy(&b32, rA + vd, 4);
-        a = _mm_cvtsi32_si64(a32);
-        b = _mm_cvtsi32_si64(b32);
-        a = _mm_unpacklo_pi8(a, a);
-        a = _mm_srai_pi16(a, 8);           /* 4 int16, sign-extended */
-        b = _mm_unpacklo_pi8(b, b);
-        b = _mm_srai_pi16(b, 8);
-        pl = _mm_unpacklo_pi16(a, b);      /* [a0,b0,a1,b1] */
-        ph = _mm_unpackhi_pi16(a, b);      /* [a2,b2,a3,b3] */
-        memcpy(&cu, ctab + (size_t)kp * 8,     8);
-        memcpy(&cw, ctab + (size_t)kp * 8 + 4, 8);
-        t = _mm_madd_pi16(pl, cu); accU0 = _mm_add_pi32(accU0, t);
-        t = _mm_madd_pi16(pl, cw); accW0 = _mm_add_pi32(accW0, t);
-        t = _mm_madd_pi16(ph, cu); accU1 = _mm_add_pi32(accU1, t);
-        t = _mm_madd_pi16(ph, cw); accW1 = _mm_add_pi32(accW1, t);
-        rA += (size_t)vd * 2;
-    }
-    memcpy(out8 + 0, &accU0, 8);
-    memcpy(out8 + 2, &accU1, 8);
-    memcpy(out8 + 4, &accW0, 8);
-    memcpy(out8 + 6, &accW1, 8);
-    _mm_empty();
-}
+/* lz_gdn1_x4_asm's gcc body lives in src/ops_mmx.c now - it writes %mm
+   registers. Same name as the Watcom #pragma aux declaration above: the
+   two are never compiled into the same binary, so one external symbol
+   serves both. Declared in src/ops_mmx.h, already visible here. */
 #endif /* __WATCOMC__ */
 #endif /* LZ_GDN_HAVE_MMX */
 
@@ -4983,7 +4916,12 @@ typedef char lz_p2_needs_lo_scale_256[
    because the sole caller is under `#ifdef LZ_HAVE_P2_MMX`. Spelled out
    rather than written as LZ_HAVE_P2_MMX for the obvious reason: that
    macro does not exist yet at this point in the file. */
-#if defined(LZ_HAVE_P2_MMX_ASM) || defined(__MMX__)
+/* p2_blk's Watcom body stays here (a plain function, no #pragma aux
+   involved). Its gcc-and-MMX-tier counterpart is the same function, now
+   defined in src/ops_mmx.c and declared in src/ops_mmx.h - one
+   declaration correctly covers both, so there is nothing to compile for
+   the LZ_P2_MMX_EXTERN case here. */
+#if defined(LZ_HAVE_P2_MMX_ASM)
 static lz_p2_blk *p2_blk(void) {
     static char raw[sizeof(lz_p2_blk) + 15];
     size_t off = (size_t)((uintptr_t)(void *)raw & 15u);
@@ -5000,90 +4938,14 @@ static lz_p2_blk *p2_blk(void) {
 #define lz_p2_mul32_mmx    lz_p2_mul32_mmx_asm
 #define lz_p2_split32_mmx  lz_p2_split32_mmx_asm
 
-#elif defined(__MMX__)
+#elif defined(LZ_P2_MMX_EXTERN)
 #define LZ_HAVE_P2_MMX 1
-/* The gcc half of the MMX cell. Instruction for instruction the
-   same kernel as the assembly in ops_kernel_p2.h - that file carries the
-   reasoning (why pmaddwd contracts H and dq in one go, why the absmax
-   costs five instructions per two lanes, why the lo clamp is a
-   saturating subtract). Only the notation differs, and the two are never
-   in the same binary.
-
-   memcpy for every load and store, not a cast to __m64*: ops.c takes
-   that route everywhere its kernels touch caller memory (see the note on
-   the string.h include at the top), because the state planes belong to
-   the caller and nothing here may assume their alignment. */
-static void lz_p2_mul32_mmx(const int8_t *hi, const int8_t *lo,
-                            const int16_t *dq, lz_p2_blk *blk) {
-    __m64 zero = _mm_setzero_si64();
-    __m64 acc1 = _mm_setzero_si64();
-    __m64 acc2 = _mm_setzero_si64();
-    __m64 mul;
-    int q;
-
-    memcpy(&mul, blk->mul, 8);
-    for (q = 0; q < 8; q++) {
-        __m64 hw, lw, H, d, p0, p1, s0, s1, a0, a1, m;
-        int32_t hv, lv;
-
-        memcpy(&hv, hi + q * 4, 4);
-        memcpy(&lv, lo + q * 4, 4);
-        hw = _mm_unpacklo_pi8(zero, _mm_cvtsi32_si64(hv));   /* hi * 256 */
-        lw = _mm_cvtsi32_si64(lv);
-        lw = _mm_unpacklo_pi8(lw, lw);
-        lw = _mm_srai_pi16(lw, 8);                           /* lo, signed */
-        H  = _mm_add_pi16(hw, lw);
-        memcpy(&d, dq + q * 4, 8);
-        p0 = _mm_madd_pi16(_mm_unpacklo_pi16(H, d), mul);
-        p1 = _mm_madd_pi16(_mm_unpackhi_pi16(H, d), mul);
-        memcpy(blk->a + q * 4,     &p0, 8);
-        memcpy(blk->a + q * 4 + 2, &p1, 8);
-        s0 = _mm_srai_pi32(p0, 31);
-        a0 = _mm_sub_pi32(_mm_xor_si64(p0, s0), s0);         /* |A| */
-        s1 = _mm_srai_pi32(p1, 31);
-        a1 = _mm_sub_pi32(_mm_xor_si64(p1, s1), s1);
-        m    = _mm_cmpgt_pi32(acc1, a0);
-        acc1 = _mm_or_si64(_mm_and_si64(acc1, m), _mm_andnot_si64(m, a0));
-        m    = _mm_cmpgt_pi32(acc2, a1);
-        acc2 = _mm_or_si64(_mm_and_si64(acc2, m), _mm_andnot_si64(m, a1));
-    }
-    memcpy(blk->amax,     &acc1, 8);
-    memcpy(blk->amax + 2, &acc2, 8);
-}
-
-static void lz_p2_split32_mmx(const lz_p2_blk *blk, int8_t *oh, int8_t *ol) {
-    __m64 rnd, cnt, k128, kclp;
-    int o;
-
-    memcpy(&rnd,  blk->rnd,  8);
-    memcpy(&cnt,  blk->cnt,  8);
-    memcpy(&k128, blk->k128, 8);
-    memcpy(&kclp, blk->kclp, 8);
-    for (o = 0; o < 4; o++) {
-        __m64 a0, a1, a2, a3, hn0, hn1, h0, h1, l0, l1, t;
-
-        memcpy(&a0, blk->a + o * 8,     8);
-        memcpy(&a1, blk->a + o * 8 + 2, 8);
-        memcpy(&a2, blk->a + o * 8 + 4, 8);
-        memcpy(&a3, blk->a + o * 8 + 6, 8);
-        a0 = _mm_sra_pi32(_mm_add_pi32(a0, rnd), cnt);
-        a1 = _mm_sra_pi32(_mm_add_pi32(a1, rnd), cnt);
-        a2 = _mm_sra_pi32(_mm_add_pi32(a2, rnd), cnt);
-        a3 = _mm_sra_pi32(_mm_add_pi32(a3, rnd), cnt);
-        hn0 = _mm_packs_pi32(a0, a1);
-        hn1 = _mm_packs_pi32(a2, a3);
-        h0 = _mm_srai_pi16(_mm_add_pi16(hn0, k128), 8);
-        h1 = _mm_srai_pi16(_mm_add_pi16(hn1, k128), 8);
-        l0 = _mm_sub_pi16(hn0, _mm_slli_pi16(h0, 8));
-        l1 = _mm_sub_pi16(hn1, _mm_slli_pi16(h1, 8));
-        l0 = _mm_adds_pi16(_mm_subs_pi16(l0, kclp), kclp);   /* max(l, -127) */
-        l1 = _mm_adds_pi16(_mm_subs_pi16(l1, kclp), kclp);
-        t = _mm_packs_pi16(h0, h1);
-        memcpy(oh + o * 8, &t, 8);
-        t = _mm_packs_pi16(l0, l1);
-        memcpy(ol + o * 8, &t, 8);
-    }
-}
+/* lz_p2_mul32_mmx and lz_p2_split32_mmx's bodies live in src/ops_mmx.c
+   now - they write %mm registers. Declared in src/ops_mmx.h, already
+   visible here. Algorithm description (why pmaddwd contracts H and dq
+   in one go, why the absmax costs five instructions per two lanes, why
+   the lo clamp is a saturating subtract) lives with the Watcom twin in
+   src/ops_kernel_p2.h, unaffected by this split. */
 #endif
 
 /* ---- the SSE1 tier: one instruction of content, and it is the split ---
@@ -5096,42 +4958,13 @@ static void lz_p2_split32_mmx(const lz_p2_blk *blk, int8_t *oh, int8_t *ol) {
 #define LZ_HAVE_P2_SSE 1
 #define lz_p2_split32_sse  lz_p2_split32_sse_asm
 
-#elif defined(__SSE__) && defined(__MMX__) && !defined(__WATCOMC__)
+#elif defined(LZ_P2_MMX_EXTERN)
 #define LZ_HAVE_P2_SSE 1
-#include <xmmintrin.h>
-static void lz_p2_split32_sse(const lz_p2_blk *blk, int8_t *oh, int8_t *ol) {
-    __m64 rnd, cnt, k128, kmin;
-    int o;
-
-    memcpy(&rnd,  blk->rnd,  8);
-    memcpy(&cnt,  blk->cnt,  8);
-    memcpy(&k128, blk->k128, 8);
-    memcpy(&kmin, blk->kmin, 8);
-    for (o = 0; o < 4; o++) {
-        __m64 a0, a1, a2, a3, hn0, hn1, h0, h1, l0, l1, t;
-
-        memcpy(&a0, blk->a + o * 8,     8);
-        memcpy(&a1, blk->a + o * 8 + 2, 8);
-        memcpy(&a2, blk->a + o * 8 + 4, 8);
-        memcpy(&a3, blk->a + o * 8 + 6, 8);
-        a0 = _mm_sra_pi32(_mm_add_pi32(a0, rnd), cnt);
-        a1 = _mm_sra_pi32(_mm_add_pi32(a1, rnd), cnt);
-        a2 = _mm_sra_pi32(_mm_add_pi32(a2, rnd), cnt);
-        a3 = _mm_sra_pi32(_mm_add_pi32(a3, rnd), cnt);
-        hn0 = _mm_packs_pi32(a0, a1);
-        hn1 = _mm_packs_pi32(a2, a3);
-        h0 = _mm_srai_pi16(_mm_add_pi16(hn0, k128), 8);
-        h1 = _mm_srai_pi16(_mm_add_pi16(hn1, k128), 8);
-        l0 = _mm_sub_pi16(hn0, _mm_slli_pi16(h0, 8));
-        l1 = _mm_sub_pi16(hn1, _mm_slli_pi16(h1, 8));
-        l0 = _mm_max_pi16(l0, kmin);      /* the whole SSE1 tier, twice */
-        l1 = _mm_max_pi16(l1, kmin);
-        t = _mm_packs_pi16(h0, h1);
-        memcpy(oh + o * 8, &t, 8);
-        t = _mm_packs_pi16(l0, l1);
-        memcpy(ol + o * 8, &t, 8);
-    }
-}
+/* lz_p2_split32_sse's body lives in src/ops_mmx.c now - named "sse" for
+   the ISA a machine must HAVE to run it, it still operates on %mm
+   (SSE1's whole addition to the integer side of the MMX register file
+   is used here exactly once: pmaxsw does the low plane's clamp to -127
+   directly). Declared in src/ops_mmx.h, already visible here. */
 #endif
 
 /* ---- the 128-bit tier -------------------------------------------------
@@ -6361,7 +6194,7 @@ const char *lz_kernel_matrix(void) {
     /* Q16's table is the one row inside the MMX block; the other four
        are unguarded and come out all-NULL on a target with no SIMD,
        which is the honest answer there. */
-#if defined(__MMX__)
+#if defined(__WATCOMC__) || defined(LZ_DOT_MMX_EXTERN)
     const lz_rowfn *q16 = LZ_ROW_Q16;
 #else
     const lz_rowfn *q16 = 0;
