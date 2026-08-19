@@ -7,14 +7,18 @@
 # live in the Makefile). gen_exports.py is the one real source file in
 # there, a DLL build-time dependency.
 #
-# build/arm/*.sh, build/x87/*.sh and build/ci.sh are SOURCE: the ARM
-# cross-build, the QEMU runner, the x86-vs-ARM bit-identity gate, the
-# 32-bit x87 gcc build (AOSC OS / Afterglow) and the CI entry point.
+# build/arm/*.sh, build/x87/*.sh, build/ci.sh and build/dedupe_gate.sh
+# are SOURCE: the ARM cross-build, the QEMU runner, the x86-vs-ARM
+# bit-identity gate, the 32-bit x87 gcc build (AOSC OS / Afterglow), the
+# CI entry point and the shared-helper dedupe gate (task #31).
 # A blanket exclude that swallows them means `git clean` deletes the
 # gates and a fresh clone never sees them, and gates that do not survive
 # a clone are not gates. Re-include the DIRECTORY before its contents:
 # git does not descend into an excluded directory, so `!/build/arm/*.sh`
-# alone does not work.
+# alone does not work. dedupe_gate.sh learned this the hard way: it sat
+# in a `git add -A` and a commit with no error, invisible until the
+# next clone (task #31's own commit message wrongly reported it landed -
+# see the follow-up commit that actually adds it).
 
 /build/*
 !/build/watcom/
@@ -23,6 +27,7 @@
 !/build/arm/
 !/build/x87/
 !/build/ci.sh
+!/build/dedupe_gate.sh
 
 # Stray compiler/linker intermediates (gcc, Open Watcom), plus the raw
 # dumps probes drop at the repo root when run without a -o path.
