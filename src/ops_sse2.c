@@ -927,6 +927,82 @@ void row_q41_sse2_asm(int32_t *acc32, const void *w4, const void *w2,
     }
 }
 
+/* ---- T2 (ternary) dot product and row kernel, SSE2 tier - moved here
+   from src/ops_kernel_dot.h / src/ops.c (task #30, 7/N). No 128-wide
+   group kernel exists for this format, so no LZ_SSE2_GROUP=0 routing
+   is needed here (task #32 does not apply to T2). */
+extern int32_t lz_dot32_t2_sse2_asm(const unsigned char *w2,
+                                    const int16_t *x);
+#pragma aux lz_dot32_t2_sse2_asm = \
+    ".686" \
+    "pxor      xmm4, xmm4" \
+    "pxor      xmm5, xmm5" \
+    "pcmpeqb   xmm7, xmm7" \
+    "psrlw     xmm7, 14" \
+    "packuswb  xmm7, xmm7" \
+    "movq      xmm3, [edx]" \
+    "movdqa    xmm0, xmm3" \
+    "pand      xmm0, xmm7" \
+    "movdqa    xmm1, xmm3" \
+    "psrlw     xmm1, 2" \
+    "pand      xmm1, xmm7" \
+    "punpcklqdq xmm0, xmm1" \
+    "movdqa    xmm1, xmm3" \
+    "psrlw     xmm1, 4" \
+    "pand      xmm1, xmm7" \
+    "movdqa    xmm2, xmm3" \
+    "psrlw     xmm2, 6" \
+    "pand      xmm2, xmm7" \
+    "punpcklqdq xmm1, xmm2" \
+    "movdqa    xmm2, xmm4" \
+    "punpcklbw xmm2, xmm0" \
+    "movdqu    xmm6, [ecx+0]" \
+    "pmaddwd   xmm2, xmm6" \
+    "paddd     xmm5, xmm2" \
+    "movdqa    xmm2, xmm4" \
+    "punpckhbw xmm2, xmm0" \
+    "movdqu    xmm6, [ecx+16]" \
+    "pmaddwd   xmm2, xmm6" \
+    "paddd     xmm5, xmm2" \
+    "movdqa    xmm2, xmm4" \
+    "punpcklbw xmm2, xmm1" \
+    "movdqu    xmm6, [ecx+32]" \
+    "pmaddwd   xmm2, xmm6" \
+    "paddd     xmm5, xmm2" \
+    "movdqa    xmm2, xmm4" \
+    "punpckhbw xmm2, xmm1" \
+    "movdqu    xmm6, [ecx+48]" \
+    "pmaddwd   xmm2, xmm6" \
+    "paddd     xmm5, xmm2" \
+    "movdqa    xmm0, xmm5" \
+    "psrldq    xmm0, 8" \
+    "paddd     xmm5, xmm0" \
+    "movdqa    xmm0, xmm5" \
+    "psrldq    xmm0, 4" \
+    "paddd     xmm5, xmm0" \
+    "movd      eax, xmm5" \
+    __parm [__edx] [__ecx] \
+    __value [__eax] \
+    __modify [8087]
+
+/* row_t2_sse2_asm: ALREADY the real call boundary (matmul_t2_impl,
+   src/ops.c, dispatched once per matmul via LZ_ROW_T2). Moving the
+   whole function here adds NO new call sites. */
+void row_t2_sse2_asm(int32_t *acc32, const void *w4, const void *w2v,
+                     const int16_t *xw, int nb, int nt, int in_dim,
+                     const void *pf_end, const void *pf_end2) {
+    const unsigned char *p2 = (const unsigned char *)w4;
+    int tk, s;
+    (void)w2v; (void)pf_end; (void)pf_end2;
+    for (tk = 0; tk < nt; tk++) {
+        const int16_t *xwt = xw + (size_t)tk * in_dim;
+        int32_t *acc = acc32 + (size_t)tk * nb;
+        for (s = 0; s < nb; s++)
+            acc[s] = lz_dot32_t2_sse2_asm(p2 + (size_t)s * 8,
+                                          xwt + (size_t)s * 32);
+    }
+}
+
 #else /* gcc: intrinsics */
 
 #include <emmintrin.h>

@@ -181,6 +181,14 @@ void row_q41_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
                      const void *pf_end, const void *pf_end2);
 void lz_dot128_q41_mmx_w(const unsigned char *w, const int16_t *x, int32_t *out4);
 
+/* task #30 (7/N): T2 matmul, MMX tier. row_t2_mmx_asm is ALREADY the
+   real call boundary (LZ_ROW_T2, src/ops.c). No 128-wide kernel for
+   this format, so no *_mmx_w wrapper is needed (task #32 does not
+   apply). */
+void row_t2_mmx_asm(int32_t *acc32, const void *w4, const void *w2v,
+                    const int16_t *xw, int nb, int nt, int in_dim,
+                    const void *pf_end, const void *pf_end2);
+
 #else /* gcc: intrinsics, existing declarations */
 
 /* ---- wsum: src/ops.c's LZ_WSUM_PAIR, attention scoring's dot ---------- */

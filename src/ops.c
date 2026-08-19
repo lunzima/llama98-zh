@@ -2813,36 +2813,10 @@ static void row_t2_mmx_intrin(int32_t *acc32, const void *w4, const void *w2v,
 /* row_t2_sse2_intrin's body lives in src/ops_sse2.c, same reason as
    row_q8_sse2_intrin above. Declared in src/ops_sse2.h. */
 
-#if defined(__MMX__) && defined(__WATCOMC__)
-static void row_t2_mmx_asm(int32_t *acc32, const void *w4, const void *w2v,
-                           const int16_t *xw, int nb, int nt, int in_dim,
-                           const void *pf_end, const void *pf_end2) {
-    const unsigned char *p2 = (const unsigned char *)w4;
-    int tk, s;
-    (void)w2v; (void)pf_end; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
-        for (s = 0; s < nb; s++)
-            acc[s] = lz_dot32_t2_asm(p2 + (size_t)s * 8, xwt + (size_t)s * 32);
-    }
-}
-
-static void row_t2_sse2_asm(int32_t *acc32, const void *w4, const void *w2v,
-                            const int16_t *xw, int nb, int nt, int in_dim,
-                            const void *pf_end, const void *pf_end2) {
-    const unsigned char *p2 = (const unsigned char *)w4;
-    int tk, s;
-    (void)w2v; (void)pf_end; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
-        for (s = 0; s < nb; s++)
-            acc[s] = lz_dot32_t2_sse2_asm(p2 + (size_t)s * 8,
-                                          xwt + (size_t)s * 32);
-    }
-}
-#endif
+/* row_t2_mmx_asm / row_t2_sse2_asm moved to src/ops_mmx.c /
+   src/ops_sse2.c (task #30, 7/N), alongside their leaf kernels
+   (lz_dot32_t2_asm / lz_dot32_t2_sse2_asm) which they call
+   direct-by-name, same-TU. Declared in src/ops_mmx.h / src/ops_sse2.h. */
 
 /* SSE1 slots NULL: T2's unpack is `pand 0x03` + three `psrlw`, and SSE1
    adds no integer instruction that replaces any of them. */

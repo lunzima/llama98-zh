@@ -1855,6 +1855,107 @@ void row_q41_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
     }
 }
 
+/* ---- T2 (ternary) dot product and row kernel, MMX tier - moved here
+   from src/ops_kernel_dot.h / src/ops.c (task #30, 7/N). No 128-wide
+   group kernel exists for this format (task #32's LZ_SSE2_GROUP=0
+   concern does not apply here), so row_t2_mmx_asm calls
+   lz_dot32_t2_asm direct-by-name, same-TU, no wrapper needed. */
+extern int32_t lz_dot32_t2_asm(const unsigned char *w2,
+                               const int16_t *x);
+#pragma aux lz_dot32_t2_asm = \
+    ".586" \
+    "pxor      mm6, mm6" \
+    "movq      mm4, [edx]" \
+    "movq      mm0, [ecx]" \
+    "pxor      mm2, mm2" \
+    "punpcklbw mm2, mm4" \
+    "psllw     mm2, 6" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm6, mm2" \
+    "movq      mm0, [ecx+8]" \
+    "pxor      mm2, mm2" \
+    "punpckhbw mm2, mm4" \
+    "psllw     mm2, 6" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm6, mm2" \
+    "movq      mm0, [ecx+16]" \
+    "pxor      mm2, mm2" \
+    "punpcklbw mm2, mm4" \
+    "psllw     mm2, 4" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm6, mm2" \
+    "movq      mm0, [ecx+24]" \
+    "pxor      mm2, mm2" \
+    "punpckhbw mm2, mm4" \
+    "psllw     mm2, 4" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm6, mm2" \
+    "movq      mm0, [ecx+32]" \
+    "pxor      mm2, mm2" \
+    "punpcklbw mm2, mm4" \
+    "psllw     mm2, 2" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm6, mm2" \
+    "movq      mm0, [ecx+40]" \
+    "pxor      mm2, mm2" \
+    "punpckhbw mm2, mm4" \
+    "psllw     mm2, 2" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm6, mm2" \
+    "movq      mm0, [ecx+48]" \
+    "pxor      mm2, mm2" \
+    "punpcklbw mm2, mm4" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm6, mm2" \
+    "movq      mm0, [ecx+56]" \
+    "pxor      mm2, mm2" \
+    "punpckhbw mm2, mm4" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm6, mm2" \
+    "movq      mm0, mm6" \
+    "psrlq     mm0, 32" \
+    "paddd     mm6, mm0" \
+    "movd      eax, mm6" \
+    "emms" \
+    __parm [__edx] [__ecx] \
+    __value [__eax] \
+    __modify [8087]
+
+/* row_t2_mmx_asm: ALREADY the real call boundary (matmul_t2_impl,
+   src/ops.c, dispatched once per matmul via LZ_ROW_T2). Moving the
+   whole function here adds NO new call sites - same argument as
+   row_q8_mmx_asm/row_q41_mmx_asm. No pairing (unmeasured, per the
+   original comment at this function's old home in ops.c). */
+void row_t2_mmx_asm(int32_t *acc32, const void *w4, const void *w2v,
+                    const int16_t *xw, int nb, int nt, int in_dim,
+                    const void *pf_end, const void *pf_end2) {
+    const unsigned char *p2 = (const unsigned char *)w4;
+    int tk, s;
+    (void)w2v; (void)pf_end; (void)pf_end2;
+    for (tk = 0; tk < nt; tk++) {
+        const int16_t *xwt = xw + (size_t)tk * in_dim;
+        int32_t *acc = acc32 + (size_t)tk * nb;
+        for (s = 0; s < nb; s++)
+            acc[s] = lz_dot32_t2_asm(p2 + (size_t)s * 8, xwt + (size_t)s * 32);
+    }
+}
+
 #else /* gcc: intrinsics */
 
 #include "mmx_compat.h"
