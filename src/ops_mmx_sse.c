@@ -29,17 +29,10 @@
 
 #if defined(__WATCOMC__)
 #include "mmx_compat.h"
+#include "ops_kernel_shared.h" /* p2_shift_of - shared with ops.c and
+                           the other suffixed TUs (task #31). gcc's
+                           branch below needs none of it. */
 #include "ops_p2_blk.h"
-
-/* Duplicated from ops.c's own p2_shift_of / src/ops_mmx.c's copy, same
-   precedent as src/ops_mmx.c's gdn_tail_row_mmx: five lines, pure
-   integer, cheaper to keep in step by comment than to cost a real call
-   for. */
-static int p2_shift_of(int32_t amax) {
-    int sh = 0;
-    while ((amax >> sh) > 32512) sh++;
-    return sh;
-}
 
 /* Real, addressable twin of src/ops_mmx.c's #pragma aux
    lz_p2_mul32_mmx_asm, needed cross-TU here because SSE1 adds nothing

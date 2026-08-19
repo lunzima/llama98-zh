@@ -35,6 +35,9 @@
 #if defined(LZ_SSE2_TU)
 
 #if defined(__WATCOMC__)
+#include "ops_kernel_shared.h" /* p2_shift_of - shared with ops.c and
+                           the other suffixed TUs (task #31). gcc's
+                           branch below needs none of it. */
 #include "ops_p2_blk.h"
 
 /* ---- GDN/KDA fixed-point pass 2, SSE2 tier - moved here from
@@ -46,21 +49,14 @@
 
 /* 16-byte-aligned scratch, by hand - same reasoning as src/ops_mmx.c's
    p2_blk(), a private copy rather than a shared one: nothing outside
-   this file's own lz_p2_rows_sse2 ever needs this tier's buffer. */
+   this file's own lz_p2_rows_sse2 ever needs this tier's buffer. NOT
+   one of task #31's five shared names: unlike p2_shift_of, this one is
+   genuinely tier-private by design (see the comment above), not a
+   duplicate of the same logical thing. */
 static lz_p2_blk *p2_blk_sse2(void) {
     static char raw[sizeof(lz_p2_blk) + 15];
     size_t off = (size_t)((uintptr_t)(void *)raw & 15u);
     return (lz_p2_blk *)(void *)(raw + ((16u - off) & 15u));
-}
-
-/* Duplicated from ops.c's own p2_shift_of / src/ops_mmx.c's copy, same
-   precedent as src/ops_mmx.c's gdn_tail_row_mmx: five lines, pure
-   integer, cheaper to keep in step by comment than to cost a real call
-   for. */
-static int p2_shift_of(int32_t amax) {
-    int sh = 0;
-    while ((amax >> sh) > 32512) sh++;
-    return sh;
 }
 
 /* Instruction for instruction the MMX pair in src/ops_mmx.c, on xmm -

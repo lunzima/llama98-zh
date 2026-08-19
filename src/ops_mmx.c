@@ -34,6 +34,15 @@
 
 #if defined(__WATCOMC__)
 #include "mmx_compat.h"
+#include "ops_kernel_shared.h" /* lz_i32f, LZ_WSUM_CHUNK, LZ_SLOT_NEXT,
+                           gdn_tail_row, p2_shift_of - shared with
+                           ops.c and the other suffixed TUs (task #31),
+                           one definition each rather than a per-TU
+                           copy under a per-TU name. gcc's branch below
+                           needs none of these five - see ops.c's
+                           unmoved gdn_sum_gg/lz_attn_wsum_q8 gcc
+                           branches, which own the equivalent work
+                           there instead. */
 
 /* ---- GDN/KDA pass 1, 4-lane table contraction - moved here whole from
    ops.c's gdn_sum_gg (task #30). This function was ALREADY the real
@@ -41,24 +50,7 @@
    its own caller, doing 8 sub-window lz_gdn1_x4_asm calls internally.
    Moving the whole body here adds NO new call site - ops.c's call
    count to it is unchanged, only the destination TU is. gdn_tail_row
-   is duplicated rather than shared across a TU boundary: 13 lines,
-   pure integer, touches neither x87 nor MMX (ops.c's own comment on
-   it), so sharing it via extern linkage would cost a real call for
-   something this small and stateless, and duplication cannot drift
-   since it has no state to drift out of. */
-static void gdn_tail_row_mmx(const int8_t *sq_gg, int kd, int vd,
-                             int32_t cu, int32_t cw,
-                             int32_t *au_gg, int32_t *aw_gg) {
-    if (!(kd & 1)) return;
-    {
-        const int8_t *row = sq_gg + (size_t)(kd - 1) * vd;
-        int j;
-        for (j = 0; j < 32; j++) {
-            au_gg[j] += (int32_t)row[j] * cu;
-            aw_gg[j] += (int32_t)row[j] * cw;
-        }
-    }
-}
+   itself comes from src/ops_kernel_shared.h now (task #31). */
 
 /* Eight 4-lane sub-windows cover this gg's 32 vv lanes.
 
@@ -127,7 +119,7 @@ void lz_gdn_sum_gg_mmx(const int8_t *sq_gg, int kd, int vd,
         aw_gg[v + 0] = out8[4]; aw_gg[v + 1] = out8[5];
         aw_gg[v + 2] = out8[6]; aw_gg[v + 3] = out8[7];
     }
-    gdn_tail_row_mmx(sq_gg, kd, vd, tcu, tcw, au_gg, aw_gg);
+    gdn_tail_row(sq_gg, kd, vd, tcu, tcw, au_gg, aw_gg);
     _mm_empty();
 }
 
@@ -138,23 +130,11 @@ void lz_gdn_sum_gg_mmx(const int8_t *sq_gg, int kd, int vd,
    the GDN pass-2 fixed tier is compiled everywhere but AUTO-selected
    only where float is slow.
 
-   Duplicated rather than shared, same precedent as gdn_tail_row_mmx/
-   p2_shift_of above: LZ_WSUM_CHUNK is one integer literal, LZ_SLOT_NEXT
-   is a five-line ring-buffer walk with no state of its own, and
-   lz_i32f is the one-line int32->float split ops.c's own comment
-   requires EVERY conversion in the engine to go through (not a bare
-   `(float)v`) - copying its body here is "keep in step by comment",
-   the same word-for-word text as its ops.c twin, not a policy
-   exception. */
-#define LZ_WSUM_CHUNK 512
-
-#define LZ_SLOT_NEXT(slot, sink, ring)                          \
-    ((slot) = (ring) && (slot) + 1 >= (sink) + (ring)           \
-              ? (sink) : (slot) + 1)
-
-static float lz_i32f_wsum(int32_t v) {
-    return (float)(v >> 12) * 4096.0f + (float)(v & 0xFFF);
-}
+   LZ_WSUM_CHUNK, LZ_SLOT_NEXT and lz_i32f all come from
+   src/ops_kernel_shared.h now (task #31) - LZ_WSUM_CHUNK/LZ_SLOT_NEXT
+   in particular drive a ring-buffer walk that MUST stay in lock-step
+   with ops.c's own copy of the same walk, which a duplicated literal
+   cannot guarantee the way a single #define can. */
 
 /* Originally generated, hand-edited since - if you regenerate, diff
    the generator's output against what is here first.
@@ -357,7 +337,7 @@ void lz_wsum_group_mmx(const int8_t *vc, int kvd, int g, int sink, int ring,
             LZ_SLOT_NEXT(slot, sink, ring);
         }
         _mm_empty();      /* no x87 inside the row-pair loop above */
-        for (d = 0; d < 32; d++) accf[d] += lz_i32f_wsum(acc32[d]);
+        for (d = 0; d < 32; d++) accf[d] += lz_i32f(acc32[d]);
     }
 }
 
@@ -383,14 +363,7 @@ lz_p2_blk *p2_blk(void) {
     return (lz_p2_blk *)(void *)(raw + ((16u - off) & 15u));
 }
 
-/* Duplicated from ops.c's own p2_shift_of, same precedent as
-   gdn_tail_row_mmx above: five lines, pure integer, cheaper to keep in
-   step by comment than to cost a real call for. */
-static int p2_shift_of(int32_t amax) {
-    int sh = 0;
-    while ((amax >> sh) > 32512) sh++;
-    return sh;
-}
+/* p2_shift_of: src/ops_kernel_shared.h now (task #31). */
 
 /* PASS A: blk->a[0..31] = m1*H + m2*dq, and blk->amax[0..3] = four
    partial maxima of |A| (the caller folds the four; doing it in MMX

@@ -23,6 +23,11 @@
 #include "ops_sse2.h"   /* declarations for src/ops_sse2.c's functions - the
                            %xmm-touching kernels this file no longer defines.
                            Same LZ_SSE2_TU/__SSE2__ contract, one ISA tier up. */
+#include "ops_kernel_shared.h" /* lz_i32f, LZ_WSUM_CHUNK, LZ_SLOT_NEXT,
+                           gdn_tail_row, p2_shift_of - shared with the
+                           suffixed TUs (task #31); included this early
+                           because lz_i32f's first use is well before
+                           any of the ops_kernel_*.h #includes below. */
 
 /* GDN pass-1 tier default, hoisted here from where the kernels live
    (~line 3250) because lz_gdn_mode() sits far above them and `#if
@@ -833,18 +838,19 @@ static int lz_q8r_tier(void);
 #endif
 static int q8r_have_simd(void);
 
-/* int32 -> float. **Every int32-to-float conversion in the engine goes
-   through this**, not a bare `(float)v` - unified by construction rather
-   than policed case by case. Definition and rationale further down.
+/* lz_i32f: **every int32-to-float conversion in the engine goes
+   through this**, not a bare `(float)v` - unified by construction
+   rather than policed case by case. Deciding per call site "this
+   accumulator stays under 2^24" is what left Q8_0 using a bare cast
+   with a 1.32e8 bound while its own scalar reference used lz_i32f - a
+   cross-compiler divergence waiting for the right weights. Margin
+   arguments rot; a uniform rule does not.
 
-   Why unify instead of gating: `lz_i32f(v)` is BIT-IDENTICAL to `(float)v`
-   whenever |v| < 2^24 (the split is exact, x4096 is a power of two, and
-   the sum is exactly representable), so there is nothing to lose. Deciding
-   per call site "this accumulator stays under 2^24" is what left Q8_0
-   using a bare cast with a 1.32e8 bound while its own scalar reference
-   used lz_i32f - a cross-compiler divergence waiting for the right
-   weights. Margin arguments rot; a uniform rule does not. */
-static float lz_i32f(int32_t v);
+   Definition and full derivation in src/ops_kernel_shared.h (task
+   #31): src/ops_mmx.c's lz_wsum_group_mmx needs the exact same
+   function, and a second copy under a different name is precisely the
+   kind of thing this rule exists to prevent - see that header's own
+   comment. */
 
 /* The group scale, shared by lz_quantize_q8 and lz_gdn_quantize_2p.
    Writes *sg and *inv, returns the `fast` flag.
@@ -2397,31 +2403,6 @@ static void matmul_q8_impl(float *o, const int8_t *xq, const float *xqs,
 /* Get the f32 view. In ops.c rather than model.c: this is a FORMAT
    matter, sharing the same layout knowledge as the matmul dispatch
    below - adding a format only touches this one file. */
-/* int32 -> float, a form that is bit-identical across both compilers.
-
-   `(float)v` is exact for |v| < 2^24 on both sides; BEYOND 2^24 there
-   is rounding, and the rounding timing differs between compilers:
-   x87's `fild` loads exactly into an 80-bit register and can `fmul`
-   directly (rounding the product once), while SSE's `cvtsi2ss` must
-   first round the integer to 24 bits, then multiply (rounding twice).
-   PC=24 cannot govern this - precision control applies to arithmetic
-   results, not to loads.
-
-   Q8_0's sub-block accumulator bound is 127·127·32 = 5.2e5 and Q4_1's
-   6.1e4, both within 2^24, so this road ran a long time untouched.
-   **Q16_0 is the first format that can exceed it** (32767·127·32 =
-   1.33e8); measured: some sub-block sum of 19834503 in out_proj line
-   160 flipped 1 ULP, amplified by the reduction to 4 ULP, max
-   end-to-end logits difference 1.4e-5.
-
-   Split into two parts: |v>>12| < 2^19 and |v & 0xFFF| < 2^12, both
-   exact as float; multiplying by 4096 (a power of two) is exact; only
-   the final addition rounds - and addition is arithmetic, which PC=24
-   governs. In two's complement (v>>12)*4096 + (v & 0xFFF) == v always
-   holds (`>>` is arithmetic shift). */
-static float lz_i32f(int32_t v) {
-    return (float)(v >> 12) * 4096.0f + (float)(v & 0xFFF);
-}
 
 /* Q6_1 single-element read: 4-bit plane b4 (16 bytes) + 2-bit plane
    b2 (8 bytes), both pointing at the start of the SAME 32-element
@@ -3889,23 +3870,13 @@ void lz_rope(float *v, int n_heads, int head_dim, int rotary_dim,
 /* Largest head_dim served by this path. 256 covers the 0.8B; anything
    larger falls back to the float loops rather than truncating. */
 #define LZ_ATTN_MAX_HD 256
-#define LZ_WSUM_CHUNK  512
-
-/* forward.c's kv_slot(), walked instead of computed: t only ever
-   increases in these kernels, so the slot advances by one and wraps at
-   sink+ring rather than costing a division per row. A division is 39
-   cycles on the x87 machines this tier exists for, against one compare.
-   The closed form stays as the gate's reference.
-
-   An expression, not a do/while: it has to sit in a for loop's third
-   clause, and it is used as a statement elsewhere, which an expression
-   also does.
-
-   Outside both bit guards because BOTH kernels need it - it sat under
-   `& 1` first and the -DLZ_ATTN_FIXED=2 build would not compile. */
-#define LZ_SLOT_NEXT(slot, sink, ring)                          \
-    ((slot) = (ring) && (slot) + 1 >= (sink) + (ring)           \
-              ? (sink) : (slot) + 1)
+/* LZ_WSUM_CHUNK, LZ_SLOT_NEXT: src/ops_kernel_shared.h (task #31) -
+   src/ops_mmx.c's lz_wsum_group_mmx walks the exact same ring buffer
+   in the exact same chunks, and a constant duplicated across that TU
+   boundary is the failure mode task #31 exists to close off. Outside
+   both `& 1`/`& 2` bit guards because BOTH kernels need LZ_SLOT_NEXT -
+   it sat under `& 1` first and the -DLZ_ATTN_FIXED=2 build would not
+   compile. */
 
 #if (LZ_ATTN_FIXED & 2)
 #if defined(__WATCOMC__)
@@ -4331,21 +4302,8 @@ static void gdn_build_table(const float *ss, const float *q, const float *k,
     }
 }
 
-/* Odd tail row: pure integer, touches neither x87 nor MMX, so it is safe
-   on either side of an emms. */
-static void gdn_tail_row(const int8_t *sq_gg, int kd, int vd,
-                         int32_t cu, int32_t cw,
-                         int32_t *au_gg, int32_t *aw_gg) {
-    if (!(kd & 1)) return;
-    {
-        const int8_t *row = sq_gg + (size_t)(kd - 1) * vd;
-        int j;
-        for (j = 0; j < 32; j++) {
-            au_gg[j] += (int32_t)row[j] * cu;
-            aw_gg[j] += (int32_t)row[j] * cw;
-        }
-    }
-}
+/* gdn_tail_row: src/ops_kernel_shared.h (task #31) - src/ops_mmx.c's
+   MMX branch needs the exact same odd-tail-row fixup. */
 
 #if !defined(LZ_GDN_HAVE_MMX)
 /* Non-MMX builds. Same table, same integer arithmetic, different summation
@@ -4983,23 +4941,10 @@ static int p2_group_norm(float c1, float c2, int16_t *mul4, float *sacc) {
     return 1;
 }
 
-/* SHIFT, NOT DIVIDE. A divide would land amax exactly on 32512
-   (hn = A*32512/amax) at one integer divide per element; MMX has no
-   divide, so that alone keeps an MMX twin out of reach.
-
-   Shifting instead maps amax somewhere into [16256, 32512] rather than
-   onto 32512, which gives up to one bit of code range. PREDICTED to cost
-   accuracy; MEASURED to improve it (4.27e-05 -> 2.98e-05)
-   because the divide's own rounding was worth more than the lost bit.
-
-   32512 rather than 32767 is what makes |hn| <= 32513 and therefore
-   |hi| <= 127 after the split - the two saturating packs in the MMX twin
-   depend on that bound and must never fire. */
-static int p2_shift_of(int32_t amax) {
-    int sh = 0;
-    while ((amax >> sh) > 32512) sh++;
-    return sh;
-}
+/* p2_shift_of: src/ops_kernel_shared.h (task #31) - the "shift not
+   divide" rationale lives there now, alongside the two SIMD tiers
+   (src/ops_mmx.c, src/ops_mmx_sse.c, src/ops_sse2.c) that need the
+   exact same rescale shift. */
 
 /* The float epilogue. s_new stays exact: sacc is already a power of two
    from the normalization, so multiplying by 2^sh and by L introduces no

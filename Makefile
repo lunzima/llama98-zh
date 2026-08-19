@@ -475,7 +475,13 @@ watcom-gui:
 # -D__MMX__=1 is baked in so the hand-written assembly cannot silently
 # vanish. DOS is left out of `check` because it needs the extender stub
 # and is a separate delivery decision; run `make watcom-dos` explicitly.
-check: watcom-cli watcom-gui watcom-dll
+# dedupe-gate (task #31) runs first and needs no build: a source-text
+# invariant caught before either compiler spends time on it.
+check: dedupe-gate watcom-cli watcom-gui watcom-dll
+
+.PHONY: dedupe-gate
+dedupe-gate:
+	@bash build/dedupe_gate.sh
 
 # Optional single-file DOS packaging (D9). SB.EXE is 16-bit and cannot run
 # on 64-bit Windows; the bind step must run inside DOSBox-X.
