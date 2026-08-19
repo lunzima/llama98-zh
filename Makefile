@@ -23,20 +23,25 @@ GUI := main layout localized_strings worker modelload session compat40 \
        settingsdlg aboutdlg splash toolbar inifile caption captionwnd
 COM := stream settings command savechat mru chatfile session
 
-# src/ops_mmx.c and src/ops_mmx_sse.c are deliberately NOT in $(ENG):
-# Watcom and the ARM cross-build must never compile them (they carry
-# their own MMX kernels inline - #pragma aux for Watcom, nothing at all
-# for ARM). Both gcc TUs built with -mmmx -msse; every other gcc file
-# gets neither, plus LZ_MMX_TU so its dispatch code knows their symbols
-# are still part of the link. See src/ops_mmx.h. Two files, not one, for
-# a reason specific to the 32-bit x87 target (build/x87/build_engine.sh,
-# not this Makefile): gcc treats -msse as license to assume CMOV is
-# available for the WHOLE translation unit it is passed to, not just the
-# SSE-touching functions in it, so the plain-MMX functions (ops_mmx.c)
-# and the genuinely-SSE1 ones (ops_mmx_sse.c) need to be compiled with
-# different -march there. x86-64 has no such distinction (CMOV is
-# baseline), so this Makefile compiles both the same way regardless.
-ENG_MMX_GCC := ops_mmx ops_mmx_sse
+# src/ops_mmx.c, src/ops_mmx_sse.c and src/ops_sse2.c are deliberately
+# NOT in $(ENG): Watcom and the ARM cross-build must never compile them
+# (they carry their own kernels inline - #pragma aux for Watcom, nothing
+# at all for ARM). All three gcc TUs built with -mmmx -msse -msse2;
+# every other gcc file gets none of the three, plus LZ_MMX_TU/LZ_SSE2_TU
+# so its dispatch code knows their symbols are still part of the link.
+# See src/ops_mmx.h and src/ops_sse2.h. Split by ISA tier, not one file,
+# for a reason specific to the 32-bit x87 target
+# (build/x87/build_engine.sh, not this Makefile): gcc treats -msse (and
+# -msse2) as license to assume CMOV is available for the WHOLE
+# translation unit it is passed to, not just the SSE-touching functions
+# in it, so the plain-MMX functions (ops_mmx.c), the genuinely-SSE1 ones
+# (ops_mmx_sse.c) and the genuinely-SSE2 ones (ops_sse2.c) need to be
+# compiled with different -march there. x86-64 has no such distinction
+# (CMOV is baseline), so this Makefile compiles all three the same way
+# regardless - -msse2 costs nothing extra here since the x86-64 ABI
+# already requires it as a baseline on every target this Makefile builds
+# for.
+ENG_MMX_GCC := ops_mmx ops_mmx_sse ops_sse2
 ENG_MMX_GCC_SRCS := $(addprefix src/,$(addsuffix .c,$(ENG_MMX_GCC)))
 
 # gcc-side full paths.
@@ -62,17 +67,19 @@ endif
 # a measurable fraction of inputs. Cost is noise-level here (the hot path
 # is hand-written intrinsics the contraction never touches).
 FP_STRICT := -ffp-contract=off
-# LZ_MMX_TU=1: every gcc TU needs to see this, not just ops.c - amax.h,
-# dot.h and q8round.h's dispatch tables are #included into it and read
-# the same macro. src/ops_mmx.c is compiled with these flags PLUS
-# -mmmx -msse, never with them removed - see the $(ENG_MMX_GCC) rules.
+# LZ_MMX_TU=1/LZ_SSE2_TU=1: every gcc TU needs to see these, not just
+# ops.c - amax.h, dot.h and q8round.h's dispatch tables are #included
+# into it and read the same macros. src/ops_mmx.c, src/ops_mmx_sse.c and
+# src/ops_sse2.c are compiled with these flags PLUS -mmmx -msse -msse2,
+# never with them removed - see the $(ENG_MMX_GCC) rules.
 MMX_TU_DEFINE := -DLZ_MMX_TU=1
-CFLAGS  ?= -O2 -std=c99 -Wall -Wextra -Isrc $(FP_STRICT) $(MMX_TU_DEFINE)
+SSE2_TU_DEFINE := -DLZ_SSE2_TU=1
+CFLAGS  ?= -O2 -std=c99 -Wall -Wextra -Isrc $(FP_STRICT) $(MMX_TU_DEFINE) $(SSE2_TU_DEFINE)
 # Release builds are portable x86-64 (SSE2 baseline), NOT -march=native:
 # a native build runs only on the machine that compiled it. The engine
 # hot path is hand-written intrinsics anyway, so the portability cost is
 # negligible.
-X86_64_CFLAGS := -O3 -march=x86-64 -std=c99 -Wall -Wextra -Isrc $(FP_STRICT) $(MMX_TU_DEFINE)
+X86_64_CFLAGS := -O3 -march=x86-64 -std=c99 -Wall -Wextra -Isrc $(FP_STRICT) $(MMX_TU_DEFINE) $(SSE2_TU_DEFINE)
 
 HTTP_LIBS := $(if $(filter Windows_NT,$(OS)),-lwsock32,)
 
@@ -93,11 +100,11 @@ ENG_MMX_GCC_GUI_OBJS    := $(addprefix build/gui/,$(addsuffix .o,$(ENG_MMX_GCC))
 
 build/native/%.o: src/%.c
 	@mkdir -p build/native
-	$(CC) $(X86_64_CFLAGS) -mmmx -msse -c -o $@ $<
+	$(CC) $(X86_64_CFLAGS) -mmmx -msse -msse2 -c -o $@ $<
 
 build/gui/%.o: src/%.c
 	@mkdir -p build/gui
-	$(CC) $(CFLAGS) -mmmx -msse -c -o $@ $<
+	$(CC) $(CFLAGS) -mmmx -msse -msse2 -c -o $@ $<
 
 # cli_main.c's -i loop runs on the shared LZSession core (common/session.c),
 # a front-end helper deliberately outside $(ENG) - so this target lists it

@@ -133,31 +133,13 @@ static unsigned lz_amax32_sse2_w(const float *x, int n) {
    branch now live in src/ops_mmx.c / src/ops_mmx.h: it writes %mm
    registers, so it belongs in the one translation unit built with
    -mmmx. ops_mmx.h is included near the top of ops.c, so the
-   declaration and the macro are already visible here. */
+   declaration and the macro are already visible here.
 
-#if defined(__SSE2__)
-#include <emmintrin.h>
-static unsigned lz_amax32_sse2(const float *x, int n) {
-    __m128i acc = _mm_setzero_si128();
-    __m128i msk = _mm_set1_epi32(0x7FFFFFFF);
-    int k;
-    for (k = 0; k + 3 < n; k += 4) {
-        __m128i v = _mm_and_si128(
-            _mm_loadu_si128((const __m128i *)(const void *)(x + k)), msk);
-        __m128i gt = _mm_cmpgt_epi32(v, acc);
-        acc = _mm_or_si128(_mm_and_si128(v, gt), _mm_andnot_si128(gt, acc));
-    }
-    {
-        union { __m128i m; unsigned u[4]; } o;
-        unsigned a, b;
-        o.m = acc;
-        a = o.u[0] > o.u[1] ? o.u[0] : o.u[1];
-        b = o.u[2] > o.u[3] ? o.u[2] : o.u[3];
-        return a > b ? a : b;
-    }
-}
-#define LZ_HAVE_AMAX_SSE2 1
-#endif
+   lz_amax32_sse2's body and the LZ_HAVE_AMAX_SSE2 definition for this
+   branch now live in src/ops_sse2.c / src/ops_sse2.h, same reasoning
+   one ISA tier up: it writes %xmm registers, so it belongs in the
+   translation unit built with -msse2. ops_sse2.h is included near the
+   top of ops.c. */
 
 #endif  /* __WATCOMC__ */
 

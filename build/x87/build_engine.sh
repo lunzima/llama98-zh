@@ -24,22 +24,31 @@
 #   -m32 -march=i586        see above.
 #   -mno-mmx -mno-sse       the target has MMX (every machine this build
 #   -mno-sse2               ships to does), but this flag set is for
-#                            every file EXCEPT src/ops_mmx.c, which
-#                            builds separately below with -mmmx -msse.
-#                            That split (see src/ops_mmx.h) is the fix
-#                            for src/ops.c:5788's rms=-nan bug: gcc and
+#                            every file EXCEPT src/ops_mmx.c (-mmmx),
+#                            src/ops_mmx_sse.c (-mmmx -msse) and
+#                            src/ops_sse2.c (-mmmx -msse -msse2), which
+#                            each build separately below. The MMX/SSE1
+#                            split (see src/ops_mmx.h) is the fix for
+#                            src/ops.c:5788's rms=-nan bug: gcc and
 #                            clang both use MMX for an 8-byte block
 #                            store when -mmmx is on, with no emms before
 #                            the x87 code that follows, corrupting the
-#                            x87 tag word. The engine's MMX-intrinsic
-#                            kernels still exist and are still linked in
-#                            via ops_mmx.o - only the TU that compiles
-#                            them keeps the flag.
+#                            x87 tag word. The SSE2 split (src/ops_sse2.h)
+#                            is code structure, not a correctness fix -
+#                            %xmm does not alias x87 - but gains the
+#                            32-bit x87 target a real SSE2 tier for the
+#                            first time (P4 Northwood, Pentium M), and
+#                            gives the ISA-floor gate the same clean
+#                            per-file boundary as the other two splits.
+#                            Every kernel still exists and is still
+#                            linked in via the three .o files - only the
+#                            TU that compiles each keeps its own flags.
 #   -DLZ_MMX_TU=1            tells every file compiled with the negatives
-#                            above that src/ops_mmx.c's kernels are part
-#                            of this link, so their dispatch tables and
-#                            tier reports stay correct despite this TU
-#                            never seeing __MMX__ itself.
+#   -DLZ_SSE2_TU=1           above that src/ops_mmx.c's and
+#                            src/ops_sse2.c's kernels are part of this
+#                            link, so their dispatch tables and tier
+#                            reports stay correct despite this TU never
+#                            seeing __MMX__/__SSE2__ itself.
 #   -mfpmath=387             NOT the default for -m32 on a modern gcc,
 #                            which would pick SSE2 scalar float even at
 #                            -m32 if the target supports it. This flag
@@ -74,12 +83,13 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 # issues emms before the x87 code that follows - which is exactly the
 # "real indefinite" (0xFFC00000) this script exists to reproduce.
 # -mno-mmx/-mno-sse/-mno-sse2 make the emission impossible at compile
-# time rather than merely absent; src/ops_mmx.c (below) is the one
-# translation unit that still gets -mmmx, and LZ_MMX_TU tells every
-# other one that it exists and is linkable - see src/ops_mmx.h.
+# time rather than merely absent; src/ops_mmx.c and src/ops_sse2.c
+# (below) are the two translation units that still get -mmmx/-msse2,
+# and LZ_MMX_TU/LZ_SSE2_TU tell every other one that they exist and are
+# linkable - see src/ops_mmx.h and src/ops_sse2.h.
 FLAGS="-O2 -std=c99 -Wall -Wextra"
 FLAGS="$FLAGS -m32 -march=i586 -mno-mmx -mno-sse -mno-sse2 -mfpmath=387"
-FLAGS="$FLAGS -ffp-contract=off -DLZ_MMX_TU=1 -I$ROOT/src"
+FLAGS="$FLAGS -ffp-contract=off -DLZ_MMX_TU=1 -DLZ_SSE2_TU=1 -I$ROOT/src"
 
 # src/ops_mmx.c's own flags: the negatives above reversed, no
 # -mfpmath=387 (that file has no ordinary scalar float arithmetic for it
@@ -105,11 +115,29 @@ SSE_FLAGS="-O2 -std=c99 -Wall -Wextra"
 SSE_FLAGS="$SSE_FLAGS -m32 -march=i686 -mmmx -msse"
 SSE_FLAGS="$SSE_FLAGS -ffp-contract=off -DLZ_MMX_TU=1 -I$ROOT/src"
 
+# src/ops_sse2.c: every gcc SSE2 kernel (task #22 - code structure, not a
+# correctness fix; %xmm does not alias x87). -march=i686 for the same
+# reason as SSE_FLAGS above: real SSE2 hardware in the target family (P4
+# Northwood, Pentium M) is i686+ (SSE2 debuted with NetBurst, after
+# Pentium Pro), so this floor costs nothing - checked (same empirical
+# habit that caught -msse enabling CMOV in src/ops_mmx.c): this file
+# does contain 4 cmov instructions (lz_rope_sse2's ordinary scalar loop
+# bounds), but unlike src/ops_mmx.c's case that is not a leak onto code
+# that needs to run on plain-i586 hardware - this whole file only runs
+# behind a REAL CPUID check now (src/ops.c's kernel_detect(), which
+# task #22 also had to fix - see its LZ_ROW_SSE2_EXTERN branch and
+# src/cpucheck.c's gcc-side lz_cpuid1_edx()), so a machine that reaches
+# any function in this file already has CMOV too. No LZ_MMX_TU: this
+# file does not include src/ops_mmx.h.
+SSE2_FLAGS="-O2 -std=c99 -Wall -Wextra"
+SSE2_FLAGS="$SSE2_FLAGS -m32 -march=i686 -mmmx -msse -msse2"
+SSE2_FLAGS="$SSE2_FLAGS -ffp-contract=off -DLZ_SSE2_TU=1 -I$ROOT/src"
+
 # Same list as the Makefile's ENG, and it has to stay the same list -
 # see the Makefile note about source lists living in exactly one place.
-# ops_mmx/ops_mmx_sse are NOT in ENG (Watcom and the ARM cross-build
-# must not see them - see the Makefile's own ENG_MMX_GCC variable) so
-# they are built separately, right after this loop.
+# ops_mmx/ops_mmx_sse/ops_sse2 are NOT in ENG (Watcom and the ARM
+# cross-build must not see them - see the Makefile's own ENG_MMX_GCC
+# variable) so they are built separately, right after this loop.
 ENG="err compat lfn json safetensors model ops forward sampler generate
      tokenizer unicode chat gbk cpucheck"
 
@@ -153,6 +181,16 @@ if $CC $SSE_FLAGS -c "$ROOT/src/ops_mmx_sse.c" -o "$OUT/ops_mmx_sse.o" 2>"$OUT/o
 else
     printf '  %-14s FAIL\n' "ops_mmx_sse"
     grep -E 'error:' "$OUT/ops_mmx_sse.log" | head -4 | sed 's/^/      /'
+    fail=$((fail + 1))
+fi
+
+if $CC $SSE2_FLAGS -c "$ROOT/src/ops_sse2.c" -o "$OUT/ops_sse2.o" 2>"$OUT/ops_sse2.log"; then
+    n=$(grep -c 'warning:' "$OUT/ops_sse2.log" || true)
+    warn=$((warn + n))
+    printf '  %-14s ok    %s warnings\n' "ops_sse2" "$n"
+else
+    printf '  %-14s FAIL\n' "ops_sse2"
+    grep -E 'error:' "$OUT/ops_sse2.log" | head -4 | sed 's/^/      /'
     fail=$((fail + 1))
 fi
 

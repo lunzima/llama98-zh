@@ -87,18 +87,25 @@ static int probe(unsigned *edx1) {
 
 #elif defined(__i386__) || defined(__x86_64__)
 
-static int probe(unsigned *edx1) {
+unsigned lz_cpuid1_edx(void) {
+    /* Unconditional cpuid, no EFLAGS.ID toggle test first - safe at the
+       current i586 floor (every Socket 7 part has CPUID), unsafe below
+       it (task #27: the floor drops to i486/i386, and CPUID itself
+       becomes optional). x86-64 always has CPUID regardless. */
     unsigned a, b, c, d;
-    /* x86-64 always has CPUID and always has an FPU; on 32-bit gcc the
-       __get_cpuid path below still answers honestly. Either way this is
-       the development build, where the interesting case cannot occur -
-       which is exactly why lz_cpu_check_bits is separate. */
     a = b = c = d = 0;
     __asm__ __volatile__("cpuid"
                          : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
                          : "a"(1));
     (void)a; (void)b; (void)c;
-    *edx1 = d;
+    return d;
+}
+
+static int probe(unsigned *edx1) {
+    /* x86-64 always has CPUID and always has an FPU; on 32-bit gcc this
+       still answers honestly, at the current i586 floor (see
+       lz_cpuid1_edx's comment). */
+    *edx1 = lz_cpuid1_edx();
     return 1;
 }
 

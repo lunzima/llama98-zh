@@ -20,6 +20,9 @@
                            are themselves guarded on LZ_MMX_TU, a build flag
                            (-D, from the Makefile) rather than on __MMX__,
                            which this file must never be compiled with. */
+#include "ops_sse2.h"   /* declarations for src/ops_sse2.c's functions - the
+                           %xmm-touching kernels this file no longer defines.
+                           Same LZ_SSE2_TU/__SSE2__ contract, one ISA tier up. */
 
 /* GDN pass-1 tier default, hoisted here from where the kernels live
    (~line 3250) because lz_gdn_mode() sits far above them and `#if
@@ -1048,7 +1051,13 @@ extern unsigned lz_cpuid_ext_edx(void);
    configuration nobody happens to build. Matching the caller (as this
    does) also removes the gcc warning, since gcc never sees the function
    at all. */
-#if defined(__WATCOMC__)
+/* Widened from __WATCOMC__-only (task #22): the same cpuid-per-call
+   trap this comment block documents for Watcom is just as real for gcc
+   on the 32-bit x87 target now that q8r_have_simd()/lz_q8r_tier()/
+   p2_tier() have a genuine CPUID question to ask there instead of an
+   ABI-guaranteed constant - one shared cached function, one place that
+   knows the cost, instead of a second uncached copy on the gcc side. */
+#if defined(__WATCOMC__) || defined(__i386__) || defined(__x86_64__)
 static int g_has_sse = -1;
 
 static int lz_cpu_has_sse(void) {
@@ -1518,14 +1527,26 @@ static int kernel_detect(void) {
     if (edx & (1u << 26)) return LZ_KERNEL_SSE2;      /* Pentium M / P4 */
     if (edx & (1u << 23)) return LZ_KERNEL_MMX;
     return LZ_KERNEL_REF;
-#elif defined(__SSE2__)
-    /* SSE2 BEFORE MMX, and the order is load-bearing. This build carries
-       BOTH intrinsics tiers, so falling through to the MMX branch would
-       silently demote every x86-64 run to 64-bit kernels. No CPUID here:
-       __SSE2__ means the compiler was told the target has it. The MMX
-       tier stays selectable through --kernel, which is the whole point
-       of compiling both in. */
-    return LZ_KERNEL_SSE2;
+#elif defined(LZ_ROW_SSE2_EXTERN)
+    /* REAL CPUID, not "the build carries the tier": LZ_ROW_SSE2_EXTERN
+       means src/ops_sse2.c's kernels are LINKED IN (see src/ops_sse2.h),
+       which is a build-time fact, not a statement about the machine this
+       binary is actually running on. On x86-64 that distinction is moot
+       (SSE2 is ABI-guaranteed, so the check below always finds it), but
+       on the 32-bit x87 target it is not: Socket 7 is a family, and only
+       WinChip 2 has SSE2 in it (Pentium MMX/K6/Cyrix 6x86/WinChip C6 do
+       not, rule 3's machine table). Skipping this check would return
+       LZ_KERNEL_SSE2 unconditionally and #UD the first SSE2 instruction
+       on any of those - a real gap task #22 opened by giving that target
+       a genuinely linked-in SSE2 tier for the first time. lz_cpuid1_edx
+       is unconditional cpuid (no EFLAGS.ID test), safe at the current
+       i586 floor - see cpucheck.c. */
+    if (lz_cpuid1_edx() & (1u << 26)) return LZ_KERNEL_SSE2;
+#if defined(LZ_DOT_MMX_EXTERN)
+    return LZ_KERNEL_MMX;
+#else
+    return LZ_KERNEL_REF;
+#endif
 #elif defined(LZ_DOT_MMX_EXTERN)
     return LZ_KERNEL_MMX;
 #else
@@ -1545,11 +1566,18 @@ int lz_kernel_select(int which) {
            and a benchmark that faults is not a slower benchmark). */
         g_kernel = (which == LZ_KERNEL_SSE2 && have != LZ_KERNEL_SSE2)
                    ? have : which;
-#elif defined(LZ_DOT_MMX_EXTERN) && defined(__SSE2__)
-        /* ONE gcc build carries both intrinsics tiers, so both are
-           honestly selectable - `--kernel mmx` on an x86-64 build really
-           selects the MMX tier, and the tier report matches it. */
-        g_kernel = which;
+#elif defined(LZ_DOT_MMX_EXTERN) && defined(LZ_ROW_SSE2_EXTERN)
+        /* Same clamp as the Watcom branch above, and for the same
+           reason: `have` is what kernel_detect() actually found on THIS
+           machine (real CPUID on the 32-bit x87 target now - see
+           kernel_detect()'s LZ_ROW_SSE2_EXTERN branch), so forcing SSE2
+           past that would #UD on Socket 7 hardware without it. MMX needs
+           no clamp - the whole family has it (rule 3's machine table).
+           On x86-64 this clamp never fires (`have` is always SSE2,
+           ABI-guaranteed), so `--kernel mmx` on that build still really
+           selects the MMX tier and the tier report matches it. */
+        g_kernel = (which == LZ_KERNEL_SSE2 && have != LZ_KERNEL_SSE2)
+                   ? have : which;
 #else
         g_kernel = (which == LZ_KERNEL_REF) ? LZ_KERNEL_REF : have;
 #endif
@@ -1592,7 +1620,14 @@ static int q8r_have_simd(void) {
 #if defined(__WATCOMC__) && defined(__MMX__)
     return lz_cpu_has_sse();       /* CPUID leaf 1 EDX 25 = SSE, cached */
 #else
-    return 1;                       /* gcc build: SSE guaranteed at compile time */
+    /* REAL CPUID, not "the build carries the tier" (task #22's fix,
+       same reason as kernel_detect() and p2_tier()): true unconditionally
+       on x86-64 (ABI-guaranteed), a real question on the 32-bit x87
+       target, where this docstring's own "asks the hardware question"
+       contract requires it. lz_cpu_has_sse() is cached (widened above
+       from Watcom-only), so this costs one cpuid total, not one per
+       call. */
+    return lz_cpu_has_sse();
 #endif
 #else
     return 0;
@@ -1617,7 +1652,14 @@ static int lz_q8r_tier(void) {
        and cpuid serializes the pipeline. PII/K6-2 lack it; stay scalar. */
     if (lz_cpu_has_sse()) return 1;
 #else
-    return 1;                       /* local gcc build: SSE guaranteed at compile time */
+    /* REAL CPUID, same fix as q8r_have_simd() just above and
+       kernel_detect()/p2_tier() (task #22): true unconditionally on
+       x86-64, a real question on the 32-bit x87 target - and this
+       function sits in the SAME hot inner loop (once per 32-element
+       quantize group) the big comment above lz_cpu_has_sse() measured
+       6.4x on, so it uses that cached function rather than a fresh
+       cpuid per call. */
+    if (lz_cpu_has_sse()) return 1;
 #endif
 #endif
     return 0;
@@ -1639,11 +1681,11 @@ const char *lz_kernel_name(void) {
 const char *lz_build_paths(void) {
 #if defined(__WATCOMC__) && defined(__MMX__)
     return "mmx-asm+sse2-asm";
-#elif defined(LZ_DOT_MMX_EXTERN) && defined(__SSE2__)
+#elif defined(LZ_DOT_MMX_EXTERN) && defined(LZ_ROW_SSE2_EXTERN)
     return "mmx-intrin+sse2-intrin";
 #elif defined(LZ_DOT_MMX_EXTERN)
     return "mmx-intrin";
-#elif defined(__SSE2__)
+#elif defined(LZ_ROW_SSE2_EXTERN)
     return "sse2-intrin";
 #else
     return "scalar";
@@ -1684,7 +1726,7 @@ const char *lz_kernel_tier(void) {
 #  else
     return (g_kernel == LZ_KERNEL_SSE2) ? "sse2-intrin" : "mmx-intrin";
 #  endif
-#elif defined(__SSE2__)
+#elif defined(LZ_ROW_SSE2_EXTERN)
     /* Only SSE2 and REF are selectable here (lz_kernel_select clamps a
        non-REF request to what kernel_detect found, and that is SSE2),
        and REF returned above. If that clamp ever changes, this line
@@ -2183,34 +2225,9 @@ static void row_q8_mmx_intrin(int32_t *acc32, const void *w4, const void *w2,
 #endif /* __WATCOMC__ */
 #endif /* __MMX__ */
 
-#if defined(__SSE2__) && !defined(__WATCOMC__)
-static void row_q8_sse2_intrin(int32_t *acc32, const void *w4, const void *w2,
-                               const int16_t *xw, int nb, int nt, int in_dim,
-                               const void *pf_end,
-                         const void *pf_end2) {
-    const int8_t *wr = (const int8_t *)w4;
-    int tk, g;
-    (void)w2; (void)pf_end; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
-        for (g = 0; g + 3 < nb; g += 4) {
-            _mm_storeu_si128((__m128i *)(void *)(acc + g),
-                fold4_sse2(
-                part32_x16(wr + (size_t)(g + 0) * 32, xwt + (size_t)(g + 0) * 32),
-                part32_x16(wr + (size_t)(g + 1) * 32, xwt + (size_t)(g + 1) * 32),
-                part32_x16(wr + (size_t)(g + 2) * 32, xwt + (size_t)(g + 2) * 32),
-                part32_x16(wr + (size_t)(g + 3) * 32, xwt + (size_t)(g + 3) * 32)));
-        }
-        for (; g < nb; g++) {           /* tail when nb % 4 != 0 */
-            __m128i p = part32_x16(wr + (size_t)g * 32, xwt + (size_t)g * 32);
-            p = _mm_add_epi32(p, _mm_srli_si128(p, 8));
-            p = _mm_add_epi32(p, _mm_srli_si128(p, 4));
-            acc[g] = _mm_cvtsi128_si32(p);
-        }
-    }
-}
-#endif
+/* row_q8_sse2_intrin's body lives in src/ops_sse2.c: it writes %xmm
+   registers, so it belongs in the translation unit built with -msse2.
+   Declared in src/ops_sse2.h, already visible in this translation unit. */
 
 /* The table. A NULL slot is a tier this build does not carry; the two
    SSE slots stay NULL because no SSE row kernel exists for this format. */
@@ -2221,7 +2238,7 @@ static const lz_rowfn LZ_ROW_Q8[LZ_ROW_N] = {
     NULL,
 #endif
     NULL,        /* sse-intrin: no SSE1 op applies, see lz_row_pick */
-#if defined(__SSE2__) && !defined(__WATCOMC__)
+#if defined(LZ_ROW_SSE2_EXTERN)
     row_q8_sse2_intrin,
 #else
     NULL,
@@ -2888,34 +2905,8 @@ static void row_q41_mmx_intrin(int32_t *acc32, const void *w4, const void *w2,
 #endif /* __WATCOMC__ */
 #endif /* __MMX__ */
 
-#if defined(__SSE2__) && !defined(__WATCOMC__)
-static void row_q41_sse2_intrin(int32_t *acc32, const void *w4, const void *w2,
-                                const int16_t *xw, int nb, int nt, int in_dim,
-                                const void *pf_end,
-                         const void *pf_end2) {
-    const unsigned char *wn = (const unsigned char *)w4;
-    int tk, s;
-    (void)w2; (void)pf_end; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
-        for (s = 0; s + 3 < nb; s += 4) {
-            _mm_storeu_si128((__m128i *)(void *)(acc + s),
-                fold4_sse2(
-                part32_q41(wn + (size_t)(s + 0) * 16, xwt + (size_t)(s + 0) * 32),
-                part32_q41(wn + (size_t)(s + 1) * 16, xwt + (size_t)(s + 1) * 32),
-                part32_q41(wn + (size_t)(s + 2) * 16, xwt + (size_t)(s + 2) * 32),
-                part32_q41(wn + (size_t)(s + 3) * 16, xwt + (size_t)(s + 3) * 32)));
-        }
-        for (; s < nb; s++) {
-            __m128i p = part32_q41(wn + (size_t)s * 16, xwt + (size_t)s * 32);
-            p = _mm_add_epi32(p, _mm_srli_si128(p, 8));
-            p = _mm_add_epi32(p, _mm_srli_si128(p, 4));
-            acc[s] = _mm_cvtsi128_si32(p);
-        }
-    }
-}
-#endif
+/* row_q41_sse2_intrin's body lives in src/ops_sse2.c, same reason as
+   row_q8_sse2_intrin above. Declared in src/ops_sse2.h. */
 
 static const lz_rowfn LZ_ROW_Q41[LZ_ROW_N] = {
 #if defined(LZ_DOT_MMX_EXTERN)
@@ -2924,7 +2915,7 @@ static const lz_rowfn LZ_ROW_Q41[LZ_ROW_N] = {
     NULL,
 #endif
     NULL,        /* sse-intrin: no SSE1 op applies, see lz_row_pick */
-#if defined(__SSE2__) && !defined(__WATCOMC__)
+#if defined(LZ_ROW_SSE2_EXTERN)
     row_q41_sse2_intrin,
 #else
     NULL,
@@ -3015,25 +3006,8 @@ static void row_t2_mmx_intrin(int32_t *acc32, const void *w4, const void *w2v,
 }
 #endif
 
-#if defined(__SSE2__) && !defined(__WATCOMC__)
-static void row_t2_sse2_intrin(int32_t *acc32, const void *w4, const void *w2v,
-                               const int16_t *xw, int nb, int nt, int in_dim,
-                               const void *pf_end, const void *pf_end2) {
-    const unsigned char *p2 = (const unsigned char *)w4;
-    int tk, s;
-    (void)w2v; (void)pf_end; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
-        for (s = 0; s < nb; s++) {
-            __m128i p = part32_t2(p2 + (size_t)s * 8, xwt + (size_t)s * 32);
-            p = _mm_add_epi32(p, _mm_srli_si128(p, 8));
-            p = _mm_add_epi32(p, _mm_srli_si128(p, 4));
-            acc[s] = _mm_cvtsi128_si32(p);
-        }
-    }
-}
-#endif
+/* row_t2_sse2_intrin's body lives in src/ops_sse2.c, same reason as
+   row_q8_sse2_intrin above. Declared in src/ops_sse2.h. */
 
 #if defined(__MMX__) && defined(__WATCOMC__)
 static void row_t2_mmx_asm(int32_t *acc32, const void *w4, const void *w2v,
@@ -3075,7 +3049,7 @@ static const lz_rowfn LZ_ROW_T2[LZ_ROW_N] = {
     NULL,
 #endif
     NULL,        /* sse-intrin: no SSE1 op applies */
-#if defined(__SSE2__) && !defined(__WATCOMC__)
+#if defined(LZ_ROW_SSE2_EXTERN)
     row_t2_sse2_intrin,
 #else
     NULL,
@@ -3241,27 +3215,8 @@ static void row_q61_mmx_intrin(int32_t *acc32, const void *w4, const void *w2v,
 #endif /* __WATCOMC__ */
 #endif /* __MMX__ */
 
-#if defined(__SSE2__) && !defined(__WATCOMC__)
-static void row_q61_sse2_intrin(int32_t *acc32, const void *w4, const void *w2v,
-                                const int16_t *xw, int nb, int nt, int in_dim,
-                                const void *pf_end, const void *pf_end2) {
-    const unsigned char *wn = (const unsigned char *)w4;
-    const unsigned char *w2 = (const unsigned char *)w2v;
-    int tk, s;
-    (void)pf_end; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
-        for (s = 0; s < nb; s++) {
-            __m128i p = part32_q61(wn + (size_t)s * 16, w2 + (size_t)s * 8,
-                                   xwt + (size_t)s * 32);
-            p = _mm_add_epi32(p, _mm_srli_si128(p, 8));
-            p = _mm_add_epi32(p, _mm_srli_si128(p, 4));
-            acc[s] = _mm_cvtsi128_si32(p);
-        }
-    }
-}
-#endif
+/* row_q61_sse2_intrin's body lives in src/ops_sse2.c, same reason as
+   row_q8_sse2_intrin above. Declared in src/ops_sse2.h. */
 
 static const lz_rowfn LZ_ROW_Q61[LZ_ROW_N] = {
 #if defined(LZ_DOT_MMX_EXTERN)
@@ -3270,7 +3225,7 @@ static const lz_rowfn LZ_ROW_Q61[LZ_ROW_N] = {
     NULL,
 #endif
     NULL,        /* sse-intrin: no SSE1 op applies, see lz_row_pick */
-#if defined(__SSE2__) && !defined(__WATCOMC__)
+#if defined(LZ_ROW_SSE2_EXTERN)
     row_q61_sse2_intrin,
 #else
     NULL,
@@ -3483,33 +3438,8 @@ static void row_q16_mmx_intrin(int32_t *acc32, const void *w4, const void *w2,
 
 #endif /* __WATCOMC__ */
 
-#if defined(__SSE2__) && !defined(__WATCOMC__)
-static void row_q16_sse2_intrin(int32_t *acc32, const void *w4, const void *w2,
-                                const int16_t *xw, int nb, int nt, int in_dim,
-                                const void *pf_end, const void *pf_end2) {
-    const int16_t *wr = (const int16_t *)w4;
-    int tk, g;
-    (void)w2; (void)pf_end; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
-        for (g = 0; g + 3 < nb; g += 4) {
-            _mm_storeu_si128((__m128i *)(void *)(acc + g),
-                fold4_sse2(
-                part32_q16(wr + (size_t)(g + 0) * 32, xwt + (size_t)(g + 0) * 32),
-                part32_q16(wr + (size_t)(g + 1) * 32, xwt + (size_t)(g + 1) * 32),
-                part32_q16(wr + (size_t)(g + 2) * 32, xwt + (size_t)(g + 2) * 32),
-                part32_q16(wr + (size_t)(g + 3) * 32, xwt + (size_t)(g + 3) * 32)));
-        }
-        for (; g < nb; g++) {           /* tail when nb % 4 != 0 */
-            __m128i p = part32_q16(wr + (size_t)g * 32, xwt + (size_t)g * 32);
-            p = _mm_add_epi32(p, _mm_srli_si128(p, 8));
-            p = _mm_add_epi32(p, _mm_srli_si128(p, 4));
-            acc[g] = _mm_cvtsi128_si32(p);
-        }
-    }
-}
-#endif
+/* row_q16_sse2_intrin's body lives in src/ops_sse2.c, same reason as
+   row_q8_sse2_intrin above. Declared in src/ops_sse2.h. */
 
 static const lz_rowfn LZ_ROW_Q16[LZ_ROW_N] = {
 #ifndef __WATCOMC__
@@ -3518,7 +3448,7 @@ static const lz_rowfn LZ_ROW_Q16[LZ_ROW_N] = {
     NULL,
 #endif
     NULL,        /* sse-intrin: no SSE1 op applies, see lz_row_pick */
-#if defined(__SSE2__) && !defined(__WATCOMC__)
+#if defined(LZ_ROW_SSE2_EXTERN)
     row_q16_sse2_intrin,
 #else
     NULL,
@@ -3738,41 +3668,9 @@ void lz_matmul(float *o, const float *x, const float *w,
     }
 }
 
-#if defined(__SSE2__) && !defined(__WATCOMC__)
-/* 4-wide float RoPE. Each (i, h) pair is an independent IEEE mul/add,
-   so per-element results are bit-identical to the scalar path; only the
-   loop order changes (head outer, i inner) to stream one head's two
-   rotated halves contiguously. The cos/sin row is interleaved
-   [c0,s0,c1,s1,...], so one 8-float load + two shuffles give the c and
-   s vectors. half % 4 tail falls back to scalar. */
-static void lz_rope_sse2(float *v, int n_heads, int head_dim,
-                         int rotary_dim, int pos, const float *cs) {
-    int half = rotary_dim / 2;
-    int h, i;
-    const float *row = cs + (size_t)pos * half * 2;
-    for (h = 0; h < n_heads; h++) {
-        float *base = v + (size_t)h * head_dim;
-        for (i = 0; i + 4 <= half; i += 4) {
-            __m128 lo = _mm_loadu_ps(row + i * 2);
-            __m128 hi = _mm_loadu_ps(row + i * 2 + 4);
-            __m128 c = _mm_shuffle_ps(lo, hi, 0x88); /* [c0,c1,c2,c3] */
-            __m128 s = _mm_shuffle_ps(lo, hi, 0xDD); /* [s0,s1,s2,s3] */
-            __m128 x0 = _mm_loadu_ps(base + i);
-            __m128 x1 = _mm_loadu_ps(base + i + half);
-            __m128 n0 = _mm_sub_ps(_mm_mul_ps(x0, c), _mm_mul_ps(x1, s));
-            __m128 n1 = _mm_add_ps(_mm_mul_ps(x1, c), _mm_mul_ps(x0, s));
-            _mm_storeu_ps(base + i, n0);
-            _mm_storeu_ps(base + i + half, n1);
-        }
-        for (; i < half; i++) {
-            float c0 = row[i * 2], s0 = row[i * 2 + 1];
-            float x0 = base[i], x1 = base[i + half];
-            base[i]        = x0 * c0 - x1 * s0;
-            base[i + half] = x1 * c0 + x0 * s0;
-        }
-    }
-}
-#endif
+/* lz_rope_sse2's body lives in src/ops_sse2.c: it writes %xmm
+   registers, so it belongs in the translation unit built with -msse2.
+   Declared in src/ops_sse2.h, guarded there by LZ_ROPE_SSE2_EXTERN. */
 
 
 
@@ -3847,13 +3745,14 @@ void lz_rope(float *v, int n_heads, int head_dim, int rotary_dim,
        RoPE would have to quantize (x Q8 / cos-sin Q14), which breaks
        bit-exactness; RoPE is not a PII bottleneck (~2-3us/token), so
        correctness wins and MMX builds fall through to scalar. */
-    /* The guard must match lz_rope_sse2's DEFINITION guard exactly: the
-       definition is `__SSE2__ && !LZ_USE_MMX`. Guarding this call by
-       `__SSE2__` alone breaks `make llama98-mmx` (-DLZ_USE_MMX=1): the
-       definition compiles out, the call stays, and an implicit
-       declaration fails the whole MMX target - the Makefile's PII main
-       path. Two guards for one symbol is how that happens. */
-#if defined(__SSE2__) && !defined(__WATCOMC__)
+    /* LZ_ROPE_SSE2_EXTERN is defined (in src/ops_sse2.h) exactly when
+       src/ops_sse2.c's lz_rope_sse2 is part of this link - the single
+       source of truth for both this call site and the extern
+       declaration, so the two cannot drift the way two independent
+       `#if defined(__SSE2__) && !defined(__WATCOMC__)` copies once
+       could (one compiling the definition out while the call stayed,
+       failing the build with an implicit-declaration error). */
+#if defined(LZ_ROPE_SSE2_EXTERN)
     lz_rope_sse2(v, n_heads, head_dim, rotary_dim, pos, cs);
 #else
     int half = rotary_dim / 2;
@@ -5036,79 +4935,11 @@ static lz_p2_blk *p2_blk(void) {
 #define lz_p2_mul32_sse2    lz_p2_mul32_sse2_asm
 #define lz_p2_split32_sse2  lz_p2_split32_sse2_asm
 
-#elif defined(__SSE2__) && !defined(__WATCOMC__)
+#elif defined(LZ_P2_SSE2_EXTERN)
+/* lz_p2_mul32_sse2 / lz_p2_split32_sse2 bodies live in src/ops_sse2.c:
+   they write %xmm registers, so they belong in the translation unit
+   built with -msse2. Declared in src/ops_sse2.h, already visible here. */
 #define LZ_HAVE_P2_SSE2 1
-static void lz_p2_mul32_sse2(const int8_t *hi, const int8_t *lo,
-                             const int16_t *dq, lz_p2_blk *blk) {
-    __m128i zero = _mm_setzero_si128();
-    __m128i acc1 = zero, acc2 = zero;
-    __m128i mul  = _mm_load_si128((const __m128i *)(const void *)blk->mul);
-    __m128i m;
-    int q;
-
-    for (q = 0; q < 4; q++) {
-        __m128i hw, lw, H, d, p0, p1, s0, s1, a0, a1;
-
-        hw = _mm_loadl_epi64((const __m128i *)(const void *)(hi + q * 8));
-        hw = _mm_unpacklo_epi8(zero, hw);                    /* hi * 256 */
-        lw = _mm_loadl_epi64((const __m128i *)(const void *)(lo + q * 8));
-        lw = _mm_unpacklo_epi8(lw, lw);
-        lw = _mm_srai_epi16(lw, 8);                          /* lo, signed */
-        H  = _mm_add_epi16(hw, lw);
-        d  = _mm_loadu_si128((const __m128i *)(const void *)(dq + q * 8));
-        p0 = _mm_madd_epi16(_mm_unpacklo_epi16(H, d), mul);
-        p1 = _mm_madd_epi16(_mm_unpackhi_epi16(H, d), mul);
-        _mm_store_si128((__m128i *)(void *)(blk->a + q * 8),     p0);
-        _mm_store_si128((__m128i *)(void *)(blk->a + q * 8 + 4), p1);
-        s0 = _mm_srai_epi32(p0, 31);
-        a0 = _mm_sub_epi32(_mm_xor_si128(p0, s0), s0);       /* |A| */
-        s1 = _mm_srai_epi32(p1, 31);
-        a1 = _mm_sub_epi32(_mm_xor_si128(p1, s1), s1);
-        m    = _mm_cmpgt_epi32(acc1, a0);
-        acc1 = _mm_or_si128(_mm_and_si128(acc1, m), _mm_andnot_si128(m, a0));
-        m    = _mm_cmpgt_epi32(acc2, a1);
-        acc2 = _mm_or_si128(_mm_and_si128(acc2, m), _mm_andnot_si128(m, a1));
-    }
-    /* Fold to the four lanes the caller reads. MMX leaves two 2-lane
-       accumulators there and SSE2 one 4-lane one; either way the caller
-       folds four int32, so the two tiers hand back the same shape. */
-    m    = _mm_cmpgt_epi32(acc1, acc2);
-    acc1 = _mm_or_si128(_mm_and_si128(acc1, m), _mm_andnot_si128(m, acc2));
-    _mm_store_si128((__m128i *)(void *)blk->amax, acc1);
-}
-
-static void lz_p2_split32_sse2(const lz_p2_blk *blk, int8_t *oh, int8_t *ol) {
-    __m128i rnd  = _mm_load_si128((const __m128i *)(const void *)blk->rnd);
-    __m128i cnt  = _mm_load_si128((const __m128i *)(const void *)blk->cnt);
-    __m128i k128 = _mm_load_si128((const __m128i *)(const void *)blk->k128);
-    __m128i kclp = _mm_load_si128((const __m128i *)(const void *)blk->kclp);
-    int o;
-
-    for (o = 0; o < 2; o++) {
-        __m128i a0, a1, a2, a3, hn0, hn1, h0, h1, l0, l1, t;
-
-        a0 = _mm_load_si128((const __m128i *)(const void *)(blk->a + o * 16));
-        a1 = _mm_load_si128((const __m128i *)(const void *)(blk->a + o * 16 + 4));
-        a2 = _mm_load_si128((const __m128i *)(const void *)(blk->a + o * 16 + 8));
-        a3 = _mm_load_si128((const __m128i *)(const void *)(blk->a + o * 16 + 12));
-        a0 = _mm_sra_epi32(_mm_add_epi32(a0, rnd), cnt);
-        a1 = _mm_sra_epi32(_mm_add_epi32(a1, rnd), cnt);
-        a2 = _mm_sra_epi32(_mm_add_epi32(a2, rnd), cnt);
-        a3 = _mm_sra_epi32(_mm_add_epi32(a3, rnd), cnt);
-        hn0 = _mm_packs_epi32(a0, a1);
-        hn1 = _mm_packs_epi32(a2, a3);
-        h0 = _mm_srai_epi16(_mm_add_epi16(hn0, k128), 8);
-        h1 = _mm_srai_epi16(_mm_add_epi16(hn1, k128), 8);
-        l0 = _mm_sub_epi16(hn0, _mm_slli_epi16(h0, 8));
-        l1 = _mm_sub_epi16(hn1, _mm_slli_epi16(h1, 8));
-        l0 = _mm_adds_epi16(_mm_subs_epi16(l0, kclp), kclp); /* max(l, -127) */
-        l1 = _mm_adds_epi16(_mm_subs_epi16(l1, kclp), kclp);
-        t = _mm_packs_epi16(h0, h1);
-        _mm_storeu_si128((__m128i *)(void *)(oh + o * 16), t);
-        t = _mm_packs_epi16(l0, l1);
-        _mm_storeu_si128((__m128i *)(void *)(ol + o * 16), t);
-    }
-}
 #endif
 
 #if defined(LZ_HAVE_P2_SSE2) && !defined(LZ_HAVE_P2_MMX)
@@ -5149,7 +4980,17 @@ static int p2_tier(void) {
 #if defined(__WATCOMC__)
     if (lz_cpu_has_sse()) return 2;   /* CPUID leaf 1 EDX 25, cached */
 #else
-    return 2;                    /* gcc build: SSE at compile time */
+    /* REAL CPUID, not "the build carries the tier" - the same fix
+       kernel_detect() needed (task #22): LZ_HAVE_P2_SSE being defined
+       means src/ops_mmx.c's lz_p2_split32_sse is linked in, which is
+       true on every gcc build including the 32-bit x87 target, where it
+       is not the same fact as "this machine has SSE1" (Pentium
+       MMX/K6/Cyrix 6x86 in the Socket 7 family do not). True on x86-64
+       unconditionally (SSE1 is ABI-guaranteed there), so nothing changes
+       for that build. This function is the other hot-loop caller the
+       big comment above lz_cpu_has_sse() names (once per state row), so
+       it uses the cached function too, not a fresh cpuid per call. */
+    if (lz_cpu_has_sse()) return 2;
 #endif
 #endif
     return 1;

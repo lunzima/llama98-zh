@@ -109,12 +109,13 @@
    movq to an unaligned address is legal, just slower); movdqa would not
    have, and finding that out at runtime is a fault, not a wrong
    number. */
-/* The lz_p2_blk type lives in src/ops_mmx.h, not here: both this file
-   (via ops.c, Watcom only) and src/ops_mmx.c (gcc intrinsics) need it,
-   and ops_mmx.h is the one of the two with a real include guard - the
+/* The lz_p2_blk type lives in src/ops_p2_blk.h, not here: this file
+   (via ops.c, Watcom only), src/ops_mmx.c and src/ops_sse2.c all need
+   it, and ops_p2_blk.h is the one with a real include guard - the
    guard-less "included exactly once" contract above is ops.c's, about
-   THIS file, and does not extend to a struct shared with another one. */
-#include "ops_mmx.h"
+   THIS file, and does not extend to a struct shared with several
+   other translation units. */
+#include "ops_p2_blk.h"
 
 /* The assembly below addresses those fields as literal byte offsets, so
    a field that moves is a wrong answer rather than a compile error.

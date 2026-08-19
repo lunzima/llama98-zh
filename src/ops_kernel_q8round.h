@@ -160,27 +160,10 @@ extern void lz_q8round32_sse2_asm(const float *x, int8_t *o, const float *inv);
    with -mmmx. ops_mmx.h is included near the top of ops.c and defines
    LZ_HAVE_Q8R_SSE there when the MMX tier is in this build. */
 #endif
-#if defined(__SSE2__) && !defined(__WATCOMC__)
-#include <emmintrin.h>
-#define LZ_HAVE_Q8R_SIMD 1
-static void lz_q8round32_simd(const float *x, int8_t *o, const float *pinv) {
-    __m128 vi = _mm_set1_ps(*pinv);
-    __m128i p127 = _mm_set1_epi16(127), m127 = _mm_set1_epi16(-127);
-    int b;
-    for (b = 0; b < 2; b++) {
-        const float *s = x + b * 16;
-        __m128i a0 = _mm_cvtps_epi32(_mm_mul_ps(_mm_loadu_ps(s), vi));
-        __m128i a1 = _mm_cvtps_epi32(_mm_mul_ps(_mm_loadu_ps(s + 4), vi));
-        __m128i a2 = _mm_cvtps_epi32(_mm_mul_ps(_mm_loadu_ps(s + 8), vi));
-        __m128i a3 = _mm_cvtps_epi32(_mm_mul_ps(_mm_loadu_ps(s + 12), vi));
-        __m128i l = _mm_packs_epi32(a0, a1);
-        __m128i h = _mm_packs_epi32(a2, a3);
-        l = _mm_max_epi16(_mm_min_epi16(l, p127), m127);
-        h = _mm_max_epi16(_mm_min_epi16(h, p127), m127);
-        _mm_storeu_si128((__m128i *)(void *)(o + b * 16), _mm_packs_epi16(l, h));
-    }
-}
-#endif
+/* lz_q8round32_simd's SSE2 body and the LZ_HAVE_Q8R_SIMD definition for
+   this branch now live in src/ops_sse2.c / src/ops_sse2.h: it writes
+   %xmm registers, so it belongs in the translation unit built with
+   -msse2. ops_sse2.h is included near the top of ops.c. */
 
 #if defined(__WATCOMC__)
 #define lz_q8round32_sse lz_q8round32_sse_asm
