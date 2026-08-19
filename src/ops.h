@@ -471,6 +471,25 @@ const char *lz_norm_select(const char *name);
    lz_rmsnorm_gated + lz_quantize_q8 path. */
 int lz_norm_can_fixed(int n);
 
+/* Scalar transcendental tier (lz_exp and lz_rsqrt together):
+   "float" | "fixed" | "auto".
+
+   The last two scalar x87 operators the fixed tiers leave on float:
+   softmax's exp and the norms' rsqrt. Both fixed bodies are
+   integer-domain - a Q20 table + Taylor correction for exp, a Q23
+   seed table + 2 integer Newtons for rsqrt - and CHANGE the value vs
+   the float path by design (measured, not promised: ~1e-6 relative
+   for exp, ~1e-7 for rsqrt, both far under the Q8 floor). So this
+   tier is a documented value-changing knob, like the conv/attn/epi
+   tiers.
+
+   AUTO asks the same CPUID SSE question every other tier asks, so a
+   no-SIMD (weak-x87) target lands on fixed. The float path stays the
+   default anywhere x87 is not the bottleneck. */
+int lz_scalar_mode(void);
+int lz_scalar_is_auto(void);
+const char *lz_scalar_select(const char *name);
+
 /* Dequant epilogue tier: "float" | "fixed" | "auto".
 
    The epilogue is 66.4% of the f32 operations per token once the fixed

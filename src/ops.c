@@ -224,6 +224,14 @@ static float pow2f(int e) {
    its definition for why. */
 static float norm_ss_fixed(const float *x, int n);
 
+/* Float-only exp/rsqrt bodies, extracted from lz_exp/lz_rsqrt so the
+   fixed tiers' seed tables can build from the same verified arithmetic
+   (bit-identical across compilers) without recursing through the mode
+   dispatch, and so the sigmoid table never depends on the scalar tier's
+   setting. Defined beside their public functions below. */
+static float lz_exp_float_body(float x);
+static float lz_rsqrt_float_body(float x);
+
 /* Same home and reason: the fixed output loop of lz_rmsnorm_gated, defined
    beside norm_ss_fixed where sigmoid_q15's table and the Q15 helpers
    live. Writes the PRE-silu product p[i] = x[i]*inv*w[i] into o and the
@@ -431,7 +439,9 @@ static void sig_build(void) {
     int i;
     for (i = 0; i <= LZ_SIG_N; i++) {
         float x = LZ_SIG_LO + (float)i / LZ_SIG_STEP;
-        float z = lz_exp(x >= 0.0f ? -x : x);
+        /* The float body, not lz_exp: the sigmoid table must not move
+           with the scalar tier's setting. */
+        float z = lz_exp_float_body(x >= 0.0f ? -x : x);
         float s = (x >= 0.0f) ? 1.0f / (1.0f + z) : z / (1.0f + z);
         g_sigtab[i] = (int32_t)(s * 32768.0f + 0.5f);
     }
@@ -660,92 +670,163 @@ static int q8_round(float qv) {
    same function, under a nearby cast's register pressure. The source
    idiom is a nudge; tests/test_excess_precision.py is the actual
    enforcement - do not trust the source shape alone. */
-float lz_rsqrt(float x) {
-#if defined(LZ_EXACT_MATH)
-    return 1.0f / (float)sqrt((double)x);
-#else
+static float lz_rsqrt_float_body(float x) {
     union { float f; uint32_t u; } t;
     float h = 0.5f * x, y;
-    LZ_FCX(LZ_FC_RSQRT, 7, 2, 0, 0, 0);   /* the halving plus 2 x (3 mul, 1 sub) */
     t.f = x;
     t.u = 0x5f375a86u - (t.u >> 1);
     y = t.f;
     y = y * (1.5f - h * y * y);
     y = y * (1.5f - h * y * y);
     return y;
+}
+
+/* Fixed 1/sqrt(x): Q23 seed table + 2 integer Newton iterations.
+
+   m = x's normalized mantissa in [1,2) is read straight from the float
+   bits, so the core never enters the float domain; the exponent splits
+   off as a power-of-two scale on the way out. Q23 is the mantissa's own
+   scale, so the assembly is one fild and one multiply by an exact power
+   of two - the result's mantissa is already in place.
+
+   A 256-entry seed table holds Newton's error at ~0.1%, so two iterations
+   land ~1e-12, under Q23's own 2^-23 quantum; the result is accordingly
+   a correctly-rounded 1/sqrt, which differs from the float body's
+   (~4.7e-6, its two float Newtons' residue) by design - this tier is
+   documented value-changing.
+
+   Every arithmetic step is integer and exact, so gcc and Watcom agree by
+   construction. Subnormal/inf/nan x falls back to the float body. */
+#define LZ_RSQRT_TAB_N 256
+static int32_t g_rsqrttab[LZ_RSQRT_TAB_N];
+static int g_rsqrttab_ready;
+
+static void rsqrt_tab_build(void) {
+    int i;
+    for (i = 0; i < LZ_RSQRT_TAB_N; i++) {
+        float m = 1.0f + ((float)i + 0.5f) / (float)LZ_RSQRT_TAB_N;
+        g_rsqrttab[i] =
+            (int32_t)(lz_rsqrt_float_body(m) * 8388608.0f + 0.5f); /* Q23 */
+    }
+    g_rsqrttab_ready = 1;
+}
+
+static float lz_rsqrt_fixed(float x) {
+    static const float LZ_RSQRT_SQRT2 = 0.7071067811865476f;
+    union { float f; uint32_t u; } b;
+    int32_t m23, y23;
+    int64_t p, t, fac;
+    int e, idx, odd;
+    if (!g_rsqrttab_ready) rsqrt_tab_build();
+    b.f = x;
+    e = (int)((b.u >> 23) & 0xFFu) - 127;
+    if (e < -126 || e > 126) return lz_rsqrt_float_body(x);
+    m23 = (int32_t)((b.u & 0x007FFFFFu) | 0x00800000u);
+    idx = (int)((b.u >> 15) & 0xFFu);
+    y23 = g_rsqrttab[idx];
+    /* Two Newton steps y = y*(3 - m*y^2)/2, all Q23. The shifts round
+       half-up - truncation would bias a whole-vector scale. */
+    p = (((int64_t)y23 * y23) + (1 << 22)) >> 23;
+    t = (((int64_t)m23 * p) + (1 << 22)) >> 23;
+    fac = (3 * (int64_t)(1 << 23) - t + 1) >> 1;
+    y23 = (int32_t)((((int64_t)y23 * fac) + (1 << 22)) >> 23);
+    p = (((int64_t)y23 * y23) + (1 << 22)) >> 23;
+    t = (((int64_t)m23 * p) + (1 << 22)) >> 23;
+    fac = (3 * (int64_t)(1 << 23) - t + 1) >> 1;
+    y23 = (int32_t)((((int64_t)y23 * fac) + (1 << 22)) >> 23);
+    odd = e & 1;
+    /* fild + one/two pow2 multiplies: the odd-e case adds the SQRT2. */
+    LZ_FCX(LZ_FC_RSQRT, odd ? 3 : 2, 0, 0, 1, 0);
+    if (odd)
+        return (float)y23 * pow2f(-(e >> 1) - 23) * LZ_RSQRT_SQRT2;
+    return (float)y23 * pow2f(-(e >> 1) - 23);
+}
+
+float lz_rsqrt(float x) {
+#if defined(LZ_EXACT_MATH)
+    return 1.0f / (float)sqrt((double)x);
+#else
+    if (lz_scalar_mode())
+        return lz_rsqrt_fixed(x);
+    LZ_FCX(LZ_FC_RSQRT, 7, 2, 0, 0, 0);   /* the halving plus 2 x (3 mul, 1 sub) */
+    return lz_rsqrt_float_body(x);
 #endif
 }
 
-float lz_exp(float x) {
-#if !defined(LZ_EXACT_MATH)
-    /* 2^(k/32), k=0..31. 128 bytes, no pressure on L1.
+/* 2^(k/32), k=0..31. 128 bytes, no pressure on L1.
 
-       Apache Commons Math's FastMath.exp is the same idea (table
-       absorbs the high fractional bits, polynomial only the residue),
-       but for double <0.5 ULP it uses ~40KB of tables (24KB int +
-       16KB frac). On a PII with only 16KB L1 that would evict the
-       weights being streamed, and our noise floor is Q8's 3.9e-3 - that
-       precision is not needed.
+   Apache Commons Math's FastMath.exp is the same idea (table
+   absorbs the high fractional bits, polynomial only the residue),
+   but for double <0.5 ULP it uses ~40KB of tables (24KB int +
+   16KB frac). On a PII with only 16KB L1 that would evict the
+   weights being streamed, and our noise floor is Q8's 3.9e-3 - that
+   precision is not needed.
 
-       Growing the table to 128 entries squeezes the residual
-       polynomial's fit error from 8.5e-8 to 1.3e-9, but the measured
-       total error near zero only drops from 3.20e-7 to 2.38e-7 - the
-       dominant terms are the table entries themselves and two float
-       multiply roundings, not the polynomial. Going further would
-       require storing the table as double, and the size is back to KBs. */
-    static const float LZ_EXP_TAB32[32] = {
-        1.000000000f, 1.021897149f, 1.044273782f, 1.067140401f,
-        1.090507733f, 1.114386743f, 1.138788635f, 1.163724859f,
-        1.189207115f, 1.215247360f, 1.241857812f, 1.269050957f,
-        1.296839555f, 1.325236643f, 1.354255547f, 1.383909882f,
-        1.414213562f, 1.445180807f, 1.476826146f, 1.509164428f,
-        1.542210825f, 1.575980845f, 1.610490332f, 1.645755478f,
-        1.681792831f, 1.718619298f, 1.756252160f, 1.794709075f,
-        1.834008086f, 1.874167634f, 1.915206561f, 1.957144124f,
-    };
+   Growing the table to 128 entries squeezes the residual
+   polynomial's fit error from 8.5e-8 to 1.3e-9, but the measured
+   total error near zero only drops from 3.20e-7 to 2.38e-7 - the
+   dominant terms are the table entries themselves and two float
+   multiply roundings, not the polynomial. Going further would
+   require storing the table as double, and the size is back to KBs.
 
-    /* `static const float`, not inline literals: under -std=c99 on x87,
-       gcc folds an inline float-literal expression and keeps it at
-       extended (~64-bit significand) precision in .rodata, loaded via
-       fldt - carrying ~40 more significand bits than the `f` suffix
-       promised. A `static const float` object's storage type forces
-       gcc to round the initializer to true float32 (flds/fmuls, the
-       same instruction shape Watcom already uses), because the object
-       itself must be representable in 4 bytes. Measured: eliminates
-       fldt for both constants below; tests/test_excess_precision.py
-       is the gate. */
-    static const float LZ_EXP_LOG2E32 = 1.44269504f * 32.0f;  /* log2(e)*32 */
+   File scope: the fixed tier quantizes the same entries to Q20
+   instead of carrying a second copy that could drift. */
+static const float LZ_EXP_TAB32[32] = {
+    1.000000000f, 1.021897149f, 1.044273782f, 1.067140401f,
+    1.090507733f, 1.114386743f, 1.138788635f, 1.163724859f,
+    1.189207115f, 1.215247360f, 1.241857812f, 1.269050957f,
+    1.296839555f, 1.325236643f, 1.354255547f, 1.383909882f,
+    1.414213562f, 1.445180807f, 1.476826146f, 1.509164428f,
+    1.542210825f, 1.575980845f, 1.610490332f, 1.645755478f,
+    1.681792831f, 1.718619298f, 1.756252160f, 1.794709075f,
+    1.834008086f, 1.874167634f, 1.915206561f, 1.957144124f,
+};
+
+/* `static const float`, not inline literals: under -std=c99 on x87,
+   gcc folds an inline float-literal expression and keeps it at
+   extended (~64-bit significand) precision in .rodata, loaded via
+   fldt - carrying ~40 more significand bits than the `f` suffix
+   promised. A `static const float` object's storage type forces
+   gcc to round the initializer to true float32 (flds/fmuls, the
+   same instruction shape Watcom already uses), because the object
+   itself must be representable in 4 bytes. Measured: eliminates
+   fldt for both constants below; tests/test_excess_precision.py
+   is the gate. File scope for the same reason as LZ_EXP_TAB32: the
+   fixed tier reads the same log2e scale and the same floor bound.
+
+   -87.3f is not exactly representable in float32, so it needs the
+   same treatment as the constants above; 88.0f is an exact integer
+   and needs none (gcc emits a direct memory compare for it either
+   way). */
+static const float LZ_EXP_LOG2E32 = 1.44269504f * 32.0f;  /* log2(e)*32 */
+static const float LZ_EXP_LO = -87.3f;
+
+/* Schraudolph-style: add x·log2e·2^23 directly into the float's
+   exponent field; one construction yields "2^n x linearly
+   interpolated mantissa"; a 4th-order polynomial fixes the ratio
+   of the interpolation to the true 2^f.
+
+   Key point: the correction factor's argument needs NO recompute -
+   the low 23 bits of the constructed integer ARE the fractional
+   part; reassembling them into a float with exponent 127 gives
+   u = 1+f in [1,2), all bit ops, skipping the "take int part ->
+   back to float -> subtract" round trip.
+
+   Measured on Open Watcom / x87 (300 rounds x 200K): this form
+   8.8 ns/call, libm exp 11.5 ns, the alternative "f = y - (float)n
+   + 5th-order Taylor" 13.6 ns. Raising the correction polynomial from
+   2nd to 4th order costs nothing extra (7.3 -> 8.8 ns while error
+   drops 0.644% -> 0.0258%), so take 4th order directly.
+
+   The rounding must be DOWN (the low 23 bits only work as a
+   positive fraction), hence subtract 0.5 before the magic number;
+   the integer magnitude reaches 1e9, beyond the float magic's 2^22
+   range, so use double's 1.5x2^52. Relies on little-endian reads
+   of double's low 32 bits - the target platforms are x86 only. */
+static float lz_exp_float_body(float x) {
     static const float LZ_EXP_C2 = 0.242844437f;
     static const float LZ_EXP_C1 = 0.207425515f;
     static const float LZ_EXP_C0 = 0.549730133f;
-    /* -87.3f is not exactly representable in float32, so it needs the
-       same treatment as the constants above; 88.0f is an exact integer
-       and needs none (gcc emits a direct memory compare for it either
-       way). */
-    static const float LZ_EXP_LO = -87.3f;
-
-    /* Schraudolph-style: add x·log2e·2^23 directly into the float's
-       exponent field; one construction yields "2^n x linearly
-       interpolated mantissa"; a 4th-order polynomial fixes the ratio
-       of the interpolation to the true 2^f.
-
-       Key point: the correction factor's argument needs NO recompute -
-       the low 23 bits of the constructed integer ARE the fractional
-       part; reassembling them into a float with exponent 127 gives
-       u = 1+f in [1,2), all bit ops, skipping the "take int part ->
-       back to float -> subtract" round trip.
-
-       Measured on Open Watcom / x87 (300 rounds x 200K): this form
-       8.8 ns/call, libm exp 11.5 ns, the alternative "f = y - (float)n
-       + 5th-order Taylor" 13.6 ns. Raising the correction polynomial from
-       2nd to 4th order costs nothing extra (7.3 -> 8.8 ns while error
-       drops 0.644% -> 0.0258%), so take 4th order directly.
-
-       The rounding must be DOWN (the low 23 bits only work as a
-       positive fraction), hence subtract 0.5 before the magic number;
-       the integer magnitude reaches 1e9, beyond the float magic's 2^22
-       range, so use double's 1.5x2^52. Relies on little-endian reads
-       of double's low 32 bits - the target platforms are x86 only. */
     union { float f; int32_t i; } u, p2n;
     float y32, r, w, c;
     int32_t t, n, idx;
@@ -791,6 +872,71 @@ float lz_exp(float x) {
        (Watcom measured 9.63 vs 10.15 ns). */
     c = (LZ_EXP_C2 * w + LZ_EXP_C1) * w + LZ_EXP_C0;
     return p2n.f * (LZ_EXP_TAB32[idx] * c);
+}
+
+/* Fixed exp, in Q20: the same floor and table index as the float body
+   (the n/idx split is bit-identical - same y32, same magic), with the
+   correction 2^(r/32) moved to the integer domain as a 2nd-order Taylor
+   on s = r/32 in [0,1/32): 1 + ln2*s + (ln2)^2/2*s^2, bounded by
+   (ln2)^3/6 * (1/32)^3 = 2.8e-7. The table is the float entries
+   quantized to Q20 (2^-21), so the total drift from the float path is
+   ~1e-6 relative - value-changing by design, and this tier is a knob.
+
+   Underflow note: for x below -110*log2e the exponent n is so negative
+   that pow2f clamps to zero where the float body emits a subnormal.
+   The gap is below any quantization floor; documented rather than
+   handled. */
+#define LZ_EXP_Q 20
+#define LZ_EXP_QSCALE (1 << LZ_EXP_Q)
+static int32_t g_exptab[32];
+static int g_exptab_ready;
+static const int32_t LZ_EXP2_LN2 = 726817;   /* round(ln 2 * 2^20) */
+static const int32_t LZ_EXP2_LN2SQ = 251906; /* round((ln 2)^2 / 2 * 2^20) */
+
+static void exp_tab_build(void) {
+    int i;
+    for (i = 0; i < 32; i++)
+        g_exptab[i] = (int32_t)(LZ_EXP_TAB32[i] * (float)LZ_EXP_QSCALE + 0.5f);
+    g_exptab_ready = 1;
+}
+
+static float lz_exp_fixed(float x) {
+    union { float f; int32_t i; } u;
+    float y32, r;
+    int32_t t, n, idx, rq, s, cq, prod;
+    if (!g_exptab_ready) exp_tab_build();
+    /* Same guards as the float body, so the two paths agree on where
+       the approximation contract ends. */
+    if (x > 88.0f)     return FLT_MAX;
+    if (x < LZ_EXP_LO) return 0.0f;
+    /* 1 scale, 1 magic add, 1 subtract + 1 scale + 1 magic add for the
+       residual, fild + 1 pow2 multiply out: 3 mul, 3 add, 1 cvt. */
+    LZ_FCX(LZ_FC_EXP, 3, 3, 0, 1, 0);
+    y32 = x * LZ_EXP_LOG2E32;
+    u.f = y32 - 0.5f + 12582912.0f;           /* same floor as the float body */
+    t = (u.i & 0x007FFFFF) - 0x00400000;
+    n = t >> 5;
+    idx = t & 31;
+    r = y32 - (float)t;                       /* [0,1) */
+    rq = q8_round(r * (float)LZ_EXP_QSCALE);  /* residual, Q20 */
+    /* s = r/32 = rq/2^25, so the Q20 Taylor terms are (ln2_q*s)>>20 and
+       (ln2sq_q*s*s)>>40; both shifts round half-up. */
+    s = rq >> 5;
+    cq = LZ_EXP_QSCALE
+       + (int32_t)((((int64_t)LZ_EXP2_LN2 * s)
+                    + (1 << (LZ_EXP_Q - 1))) >> LZ_EXP_Q)
+       + (int32_t)((((int64_t)LZ_EXP2_LN2SQ * s * s)
+                    + (1LL << (2 * LZ_EXP_Q - 1))) >> (2 * LZ_EXP_Q));
+    prod = (int32_t)((((int64_t)g_exptab[idx] * cq)
+                      + (1 << (LZ_EXP_Q - 1))) >> LZ_EXP_Q);
+    return (float)prod * pow2f(n - LZ_EXP_Q);
+}
+
+float lz_exp(float x) {
+#if !defined(LZ_EXACT_MATH)
+    if (lz_scalar_mode())
+        return lz_exp_fixed(x);
+    return lz_exp_float_body(x);
 #else
     return (float)exp((double)x);
 #endif
@@ -1545,6 +1691,32 @@ const char *lz_sig_select(const char *name) {
     else if (strcmp(name, "auto") == 0) g_sig = -1;
     else return NULL;
     return lz_sig_mode() ? "fixed" : "float";
+}
+
+static int g_scalar = -1;
+
+/* Scalar transcendental tier: lz_exp and lz_rsqrt together - the last
+   two scalar x87 operators the fixed tiers leave on float (softmax's
+   exp, the norms' rsqrt). Both fixed bodies are integer-domain and
+   CHANGE the value vs the float path by design, so this tier is a
+   documented value-changing knob like the conv/attn/epi tiers.
+
+   AUTO asks the same CPUID SSE question every other tier asks (fixed
+   on a no-SIMD part - the weak-x87 targets this exists to offload),
+   never MMX: every Socket 7 part has MMX and no SSE. */
+int lz_scalar_mode(void) {
+    return (g_scalar < 0) ? lz_soft_float_target() : g_scalar;
+}
+
+int lz_scalar_is_auto(void) { return g_scalar < 0; }
+
+const char *lz_scalar_select(const char *name) {
+    if (!name) return NULL;
+    if (strcmp(name, "float") == 0) g_scalar = 0;
+    else if (strcmp(name, "fixed") == 0) g_scalar = 1;
+    else if (strcmp(name, "auto") == 0) g_scalar = -1;
+    else return NULL;
+    return lz_scalar_mode() ? "fixed" : "float";
 }
 
 static int g_norm = -1;
@@ -5802,7 +5974,8 @@ const char *lz_kernel_matrix(void) {
 const char *lz_tier_pins(void) {
     return "--kernel ref --recur-write fixed --conv-write float "
            "--attn-write float --epi-write float --sig-write float "
-           "--norm-write float --pair off --prefetch none";
+           "--norm-write float --scalar-fixed float --pair off "
+           "--prefetch none";
 }
 
 /* The same list, as a report: name, resolved value, and whether the
@@ -5831,6 +6004,9 @@ const char *lz_tier_report(void) {
     p += sprintf(buf + p, "  norms        %s%s\n",
                  lz_norm_mode() ? "fixed" : "float",
                  lz_norm_is_auto() ? " (auto)" : "");
+    p += sprintf(buf + p, "  scalar       %s%s\n",
+                 lz_scalar_mode() ? "fixed" : "float",
+                 lz_scalar_is_auto() ? " (auto)" : "");
     p += sprintf(buf + p, "  pairing      %s%s\n",
                  lz_pair_mode() ? "on" : "off",
                  lz_pair_is_auto() ? " (auto = on; no hardware question)"

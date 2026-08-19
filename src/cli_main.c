@@ -232,10 +232,10 @@ static void usage(void) {
     "                   falls back loudly.\n"
     "  --fixed MODE        auto|off|all (default auto). Sets every write\n"
     "                   tier at once - recurrence, conv1d, attention,\n"
-    "                   epilogue, sigmoid, norms. The per-tier flags\n"
-    "                   below still work and WIN over this one, whatever\n"
-    "                   order they appear in; they are what the ARM\n"
-    "                   parity gate pins and what a bisect needs.\n"
+    "                   epilogue, sigmoid, norms, scalar. The per-tier\n"
+    "                   flags below still work and WIN over this one,\n"
+    "                   whatever order they appear in; they are what the\n"
+    "                   ARM parity gate pins and what a bisect needs.\n"
     "  --recur-write TIER  auto|fixed (default auto). The recurrence state\n"
     "                   write-back tier: fixed keeps the integer result and\n"
     "                   skips the float re-quantize; auto resolves from\n"
@@ -245,6 +245,10 @@ static void usage(void) {
     "                   SiLU from a Q15 table (NOT the KDA decay).\n"
     "  --norm-write TIER   auto|float|fixed (default auto). RMS/L2 norm\n"
     "                   sum-of-squares in int64 fixed point.\n"
+    "  --scalar-fixed TIER auto|float|fixed (default auto). lz_exp and\n"
+    "                   lz_rsqrt together - the last two scalar x87 ops\n"
+    "                   the fixed tiers leave on float. Value-changing by\n"
+    "                   design (~1e-6 rel); the KDA decay follows lz_exp.\n"
     "  --epi-write TIER    auto|float|fixed (default auto). Dequant\n"
     "                   epilogue in int64 fixed point.\n"
     "  --attn-write TIER   auto|float|scoring|wsum|fixed (default auto).\n"
@@ -1272,6 +1276,20 @@ int main(int argc, char **argv) {
                 return 2;
             }
         }
+        else if (strcmp(a, "--scalar-fixed") == 0 && i + 1 < argc) {
+            /* lz_exp and lz_rsqrt together - the last two scalar x87
+               operators the fixed tiers leave on float. Both fixed
+               bodies are integer-domain and CHANGE the value vs float
+               (measured ~1e-6 relative for exp, ~1e-7 for rsqrt, both
+               under the Q8 floor), so this tier is a documented
+               value-changing knob. The KDA decay and the sampler route
+               through lz_exp too and follow this knob. */
+            const char *got = lz_scalar_select(argv[++i]);
+            if (!got) {
+                printf("--scalar-fixed: unknown tier (auto|float|fixed)\n");
+                return 2;
+            }
+        }
         else if (strcmp(a, "--epi-write") == 0 && i + 1 < argc) {
             /* Dequant epilogue. Both tiers ship because this host cannot
                decide between them: the fixed one is 1.65x slower here
@@ -1423,6 +1441,7 @@ int main(int argc, char **argv) {
         if (lz_epi_is_auto())  skipped += (lz_epi_select(t) == NULL);
         if (lz_sig_is_auto())  skipped += (lz_sig_select(t) == NULL);
         if (lz_norm_is_auto()) skipped += (lz_norm_select(t) == NULL);
+        if (lz_scalar_is_auto()) skipped += (lz_scalar_select(t) == NULL);
         /* A selector that does not take this name returns NULL and
            changes nothing, which is indistinguishable from success at
            the call site - and the result is a group setter that reached
