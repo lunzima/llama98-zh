@@ -630,7 +630,14 @@ static int q8_round(float qv) {
    round differently in the first place. It does NOT hold for lz_exp:
    1.44269504f is not exactly representable, gcc keeps the extra bits,
    and the two builds' multiplies disagree - see lz_exp's own comment
-   and tests/test_excess_precision.py. */
+   and tests/test_excess_precision.py.
+
+   `static const float` (lz_exp's fix) is a strong default, not a
+   guarantee at every call site: the same named constant has been
+   measured loading via flds at one use and fldt at another in the
+   same function, under a nearby cast's register pressure. The source
+   idiom is a nudge; tests/test_excess_precision.py is the actual
+   enforcement - do not trust the source shape alone. */
 float lz_rsqrt(float x) {
 #if defined(LZ_EXACT_MATH)
     return 1.0f / (float)sqrt((double)x);
