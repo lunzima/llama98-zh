@@ -3474,15 +3474,11 @@ void lz_rope(float *v, int n_heads, int head_dim, int rotary_dim,
    drives a worst-case input through an unchunked variant and asserts
    the result IS corrupted.
 
-   -DLZ_ATTN_FIXED=1 enables it; default off pending the agreement
-   measurement. Note the
-   error-magnitude argument that would normally settle this is NOT usable
-   here: the logit-difference metric saturates, so "this error is 200x
-   that one" says nothing about which output is better (section 6.1). */
-#ifndef LZ_ATTN_FIXED
-#define LZ_ATTN_FIXED 0
-#endif
-
+   The default lives in ops.h (LZ_ATTN_FIXED), not here - a second
+   #ifndef with a different default would be a lie. The error-magnitude
+   argument that would normally settle this is NOT usable here: the
+   logit-difference metric saturates, so "this error is 200x that one"
+   says nothing about which output is better (section 6.1). */
 #if LZ_ATTN_FIXED
 /* Largest head_dim served by this path. 256 covers the 0.8B; anything
    larger falls back to the float loops rather than truncating. */
@@ -3781,10 +3777,6 @@ void lz_attn_wsum_q8(float *out, const float *att, int hd,
    anything. So the non-MMX path gets a scalar fixed-point summation that
    shares the coefficient table; integer sums are exact under
    reassociation, so the two are bit-identical to each other. */
-#ifndef LZ_GDN_FIXED
-#define LZ_GDN_FIXED 1
-#endif
-
 #if LZ_GDN_FIXED
 /* Table is int16_t[LZ_GDN_MAX_KD/2][8]; bump both together. A kd past this
    takes the float pass 1 rather than truncating silently. */
