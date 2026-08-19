@@ -195,13 +195,89 @@ WINVER_FLAGS := -we -DWIN32_LEAN_AND_MEAN -DWINVER=$(LZ_WINVER) -D_WIN32_WINNT=$
 # falls back to the scalar reference - while staying bit-identical, which
 # is exactly why no consistency gate sees the loss.
 WATCOM_BASE := -za99 -otexan -zp4 -D__MMX__=1
-CLI_FLAGS := $(WATCOM_BASE) -bt=nt $(WINVER_FLAGS)
+
+# CPU-GENERATION FLOOR (task #28). -Nr/-Ns select codegen AND calling
+# convention together; both targets below use -Nr (register convention -
+# args in eax/edx/ebx/ecx), never -Ns, because switching the letter
+# would break every hand-written #pragma aux kernel's ABI assumptions,
+# not just lower the CPU floor. Verified (not assumed): -3r and -4r
+# produce IDENTICAL calling-convention codegen for ordinary C (checked
+# via wdis on a two-function probe - only alignment padding differs
+# between generations), and wcc386's own undocumented default with no
+# -N flag at all was already exactly -4r, byte-for-byte - this project
+# has always shipped at the i486 floor for Windows-NT targets, just
+# without ever writing that down.
+#
+# NT_CPU_FLAGS=-4r: Watcom-Windows floor is i486. DOS_CPU_FLAGS=-3r:
+# MS-DOS/DOS32A floor is i386, one generation lower - DOS32A's own
+# extender has no 486-specific requirement, and #27's EFLAGS.ID guard
+# is what makes probing for anything above that floor at runtime safe
+# on hardware that does not have it.
+#
+# TWO FILES CANNOT USE THAT FLOOR YET: src/ops.c and src/cpucheck.c.
+# Measured (not assumed): -Nr/-Ns is a HARD CEILING, not merely a
+# codegen preference - Watcom's own per-function ".586"/".686"
+# assembler directives (used throughout mmintrin.h and this project's
+# #pragma aux kernels, e.g. cpucheck.c's own lz_cpuid_ext_edx, task #27's
+# guarded CPUID call) cannot exceed it. Explicit -4r fails to compile
+# cpucheck.c's EXISTING, already-guarded cpuid call with "Error! E1156:
+# Invalid instruction with current CPU setting", even though that call
+# already carries its own ".586" directive right there in the source -
+# the directive cannot override the file-level ceiling wcc386 was given.
+# ops.c needs -6r (its #include'd ops_kernel_amax.h carries ".686" for
+# a hand-written SSE kernel); cpucheck.c needs -5r. Both get -6r here
+# for one shared tier rather than three. This is a real, structural gap
+# left over from tasks #18/#22, which split gcc's translation units
+# (ops_mmx.c/ops_sse2.c) but never gave Watcom's kernels - which live
+# inline in ops.c via #include, never their own TU - the same
+# treatment; closing that gap is task #29's kernel-extraction, not this
+# one's.
+#
+# Checked before relying on this split being SAFE, not just necessary:
+# does wcc386, like gcc before #18/#22, autonomously reach for an
+# instruction above the floor in ORDINARY C once the ceiling merely
+# PERMITS it? No - measured zero cmov/fcmov/fcomi anywhere in ops.c at
+# -6r outside the hand-written #pragma aux bodies that explicitly ask
+# for them. The ceiling gates what wcc386 is ALLOWED to emit; it never
+# changes what wcc386 CHOOSES to emit for code that does not ask for it.
+#
+# EVERY LOWERED TARGET ASSUMES A 387 IS PRESENT (386+387 or 486DX) -
+# this is not incidental, it is the floor: no target here is a no-387
+# build. The user's decision (2026-08-19) is that no-387 support waits
+# until the ARM branch is finished; until then this is a RESERVATION,
+# not a shipped configuration - tracked as isa_floor.py's `x87` class
+# (task #26), which stays a reservation rather than an enforced floor
+# for exactly this reason. Do not infer soft-float coverage from the
+# existing fixed-point tiers (--recur-write fixed etc.) - those are
+# tested for cross-compiler bit-identity, never against a target with
+# no FPU at all, and presenting them as such would be a claim this
+# project has not measured.
+NT_CPU_FLAGS := -4r
+DOS_CPU_FLAGS := -3r
+# ops.c/cpucheck.c only, both targets - see the comment block above.
+HIGH_CPU_FLAGS := -6r
+
+# ops.c and cpucheck.c need HIGH_CPU_FLAGS; every other ENG file uses
+# the target's ordinary floor. A shell `case`, not a Make function: the
+# loop variable ($$f below) is only known when the recipe's shell runs,
+# not at Make's own macro-expansion time, so the per-file choice has to
+# be made inside the loop. One case arm, reused by all four `for f in
+# $(ENG)` loops below, so the exception lives in exactly one place per
+# invocation site instead of drifting across CLI/GUI/DLL/DOS.
+ENG_CPU_CASE = case "$$f" in ops|cpucheck) hi=1 ;; *) hi=0 ;; esac
+
+CLI_FLAGS := $(WATCOM_BASE) $(NT_CPU_FLAGS) -bt=nt $(WINVER_FLAGS)
+CLI_FLAGS_HIGH := $(WATCOM_BASE) $(HIGH_CPU_FLAGS) -bt=nt $(WINVER_FLAGS)
 DLL_FLAGS := $(CLI_FLAGS)
+DLL_FLAGS_HIGH := $(CLI_FLAGS_HIGH)
 # -bm: multithreaded runtime. gui/worker.c calls _beginthreadex.
-GUI_FLAGS := $(WATCOM_BASE) -bt=nt -bm $(WINVER_FLAGS)
-# DOS drops the floor: there is no Windows API to floor, and -we would
-# turn every W131 into the first error and hide the real one.
-DOS_FLAGS := $(WATCOM_BASE) -bt=dos
+GUI_FLAGS := $(WATCOM_BASE) $(NT_CPU_FLAGS) -bt=nt -bm $(WINVER_FLAGS)
+GUI_FLAGS_HIGH := $(WATCOM_BASE) $(HIGH_CPU_FLAGS) -bt=nt -bm $(WINVER_FLAGS)
+# DOS drops the Windows-API floor: there is no Windows API to floor, and
+# -we would turn every W131 into the first error and hide the real one.
+# The CPU floor still applies - see DOS_CPU_FLAGS above.
+DOS_FLAGS := $(WATCOM_BASE) $(DOS_CPU_FLAGS) -bt=dos
+DOS_FLAGS_HIGH := $(WATCOM_BASE) $(HIGH_CPU_FLAGS) -bt=dos
 
 INC_ENG := -I$(WATCOM_ROOT)/h -I$(WATCOM_ROOT)/h/nt -Isrc
 INC_CLI := $(INC_ENG) -Icommon
@@ -231,7 +307,9 @@ DLL_EXE := llama98.dll
 watcom-cli:
 	@mkdir -p $(CLI_OBJ)
 	@set -e; for f in $(ENG); do \
-	    "$(WCC)" $(CLI_FLAGS) $(INC_CLI) -fo="$(CLI_OBJ)/$$f.obj" "src/$$f.c"; \
+	    $(ENG_CPU_CASE); \
+	    if [ "$$hi" = 1 ]; then flags='$(CLI_FLAGS_HIGH)'; else flags='$(CLI_FLAGS)'; fi; \
+	    "$(WCC)" $$flags $(INC_CLI) -fo="$(CLI_OBJ)/$$f.obj" "src/$$f.c"; \
 	done
 	@"$(WCC)" $(CLI_FLAGS) $(INC_CLI) -fo="$(CLI_OBJ)/common_session.obj" common/session.c
 	@"$(WCC)" $(CLI_FLAGS) $(INC_CLI) -fo="$(CLI_OBJ)/common_stream.obj" common/stream.c
@@ -273,7 +351,9 @@ endif
 watcom-dos:
 	@mkdir -p $(DOS_OBJ)
 	@set -e; for f in $(ENG); do \
-	    "$(WCC)" $(DOS_FLAGS) $(INC_DOS) -fo="$(DOS_OBJ)/$$f.obj" "src/$$f.c"; \
+	    $(ENG_CPU_CASE); \
+	    if [ "$$hi" = 1 ]; then flags='$(DOS_FLAGS_HIGH)'; else flags='$(DOS_FLAGS)'; fi; \
+	    "$(WCC)" $$flags $(INC_DOS) -fo="$(DOS_OBJ)/$$f.obj" "src/$$f.c"; \
 	done
 	@"$(WCC)" $(DOS_FLAGS) $(INC_DOS) -fo="$(DOS_OBJ)/common_session.obj" common/session.c
 	@"$(WCC)" $(DOS_FLAGS) $(INC_DOS) -fo="$(DOS_OBJ)/common_stream.obj" common/stream.c
@@ -309,7 +389,9 @@ $(DLL_OBJ)/exports.lnk: llama98.def build/watcom/gen_exports.py
 watcom-dll: $(DLL_OBJ)/exports.lnk
 	@mkdir -p $(DLL_OBJ)
 	@set -e; for f in $(ENG); do \
-	    "$(WCC)" $(DLL_FLAGS) $(INC_ENG) -fo="$(DLL_OBJ)/$$f.obj" "src/$$f.c"; \
+	    $(ENG_CPU_CASE); \
+	    if [ "$$hi" = 1 ]; then flags='$(DLL_FLAGS_HIGH)'; else flags='$(DLL_FLAGS)'; fi; \
+	    "$(WCC)" $$flags $(INC_ENG) -fo="$(DLL_OBJ)/$$f.obj" "src/$$f.c"; \
 	done
 	@{ \
 	    echo "format windows nt dll"; \
@@ -336,7 +418,9 @@ watcom-gui:
 	    "$(WCC)" $(GUI_FLAGS) $(INC_GUI) -fo="$(GUI_OBJ)/$$o.obj" "common/$$f.c"; \
 	done
 	@set -e; for f in $(ENG); do \
-	    "$(WCC)" $(GUI_FLAGS) $(INC_GUI) -fo="$(GUI_OBJ)/$$f.obj" "src/$$f.c"; \
+	    $(ENG_CPU_CASE); \
+	    if [ "$$hi" = 1 ]; then flags='$(GUI_FLAGS_HIGH)'; else flags='$(GUI_FLAGS)'; fi; \
+	    "$(WCC)" $$flags $(INC_GUI) -fo="$(GUI_OBJ)/$$f.obj" "src/$$f.c"; \
 	done
 	@{ \
 	    echo "system nt_win"; \

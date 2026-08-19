@@ -8,6 +8,19 @@
 # exactly what makes it able to reproduce a bug neither of the others
 # can.
 #
+# THIS BUILD, LIKE EVERY LOWERED-FLOOR TARGET IN THIS PROJECT (task #28:
+# Watcom-Windows i486, MS-DOS DOS32A i386), ASSUMES A 387 IS PRESENT
+# (386+387, 486DX, or - here - anything Socket-7-class, which always has
+# one). No target in this project is a no-387/soft-float build. That is
+# a decision, not an omission: the user deferred no-387 support until
+# the ARM branch is finished (2026-08-19), so it is a RESERVATION for
+# now - tracked as isa_floor.py's `x87` class (task #26), which stays a
+# reservation rather than an enforced floor for exactly this reason.
+# Do not infer soft-float coverage from the fixed-point tiers this
+# engine already has (--recur-write fixed etc.) - those exist for
+# cross-compiler bit-identity and have never been measured against a
+# target with no FPU at all.
+#
 # THE FLOOR IS -march=i586, MATCHING THAT FAMILY. Socket 7 is P5;
 # CMOV/FCOMI/FCMOV are i686 (Pentium Pro) additions, and none of Pentium
 # MMX/K6/Cyrix 6x86/WinChip have them - #UD on every machine this build
