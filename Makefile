@@ -206,7 +206,7 @@ WINVER_FLAGS := -we -DWIN32_LEAN_AND_MEAN -DWINVER=$(LZ_WINVER) -D_WIN32_WINNT=$
 # declarations always were. Harmless on every other ENG file: nothing
 # outside ops.c/ops_mmx.c/ops_mmx_sse.c/ops_sse2.c even #includes the two
 # headers that test them.
-WATCOM_BASE := -za99 -otexan -zp4 -D__MMX__=1 -DLZ_MMX_TU=1 -DLZ_SSE2_TU=1
+WATCOM_BASE := -za99 -otexan -zp4 -DLZ_MMX_TU=1 -DLZ_SSE2_TU=1
 
 # CPU-GENERATION FLOOR (task #28). -Nr/-Ns select codegen AND calling
 # convention together; both targets below use -Nr (register convention -
@@ -226,7 +226,7 @@ WATCOM_BASE := -za99 -otexan -zp4 -D__MMX__=1 -DLZ_MMX_TU=1 -DLZ_SSE2_TU=1
 # is what makes probing for anything above that floor at runtime safe
 # on hardware that does not have it.
 #
-# TWO FILES STILL CANNOT USE THAT FLOOR: src/ops.c and src/cpucheck.c.
+# ONE FILE STILL CANNOT USE THAT FLOOR: src/cpucheck.c.
 # Measured (not assumed): -Nr/-Ns is a HARD CEILING, not merely a
 # codegen preference - Watcom's own per-function ".586"/".686"
 # assembler directives (used throughout mmintrin.h and this project's
@@ -236,18 +236,15 @@ WATCOM_BASE := -za99 -otexan -zp4 -D__MMX__=1 -DLZ_MMX_TU=1 -DLZ_SSE2_TU=1
 # Invalid instruction with current CPU setting", even though that call
 # already carries its own ".586" directive right there in the source -
 # the directive cannot override the file-level ceiling wcc386 was given.
-# ops.c needs -6r (its #include'd ops_kernel_amax.h/dot.h/norm.h/
-# q8round.h still carry .586/.686 hand-written kernels); cpucheck.c
-# needs -5r. Both get -6r here for one shared tier rather than two. This
-# was a real, structural gap left over from tasks #18/#22, which split
-# gcc's translation units (ops_mmx.c/ops_sse2.c) but never gave
-# Watcom's kernels - which lived inline in ops.c via #include, never
-# their own TU - the same treatment; task #30 is closing it, one kernel
-# family (and one commit) at a time. src/ops_mmx.c/ops_mmx_sse.c/
-# ops_sse2.c above already carry the GDN/KDA pass-1 and pass-2 families,
-# moved out of ops.c/ops_kernel_p2.h in task #30's first two pieces -
-# ops.c/cpucheck.c stay pinned here until amax.h/dot.h/norm.h/q8round.h
-# follow them out too.
+# cpucheck.c needs -5r for its CPUID probe (a .586-class instruction),
+# and takes -6r here for one shared tier rather than pinning it exactly.
+# ops.c moved to the ordinary floor in task #30: its kernels (amax/dot/
+# norm/q8round/p2/gdn1/wsum) now live in ops_mmx.c/ops_mmx_sse.c/ops_sse2.c,
+# and its remaining emms sites emit the opcode as raw bytes (mmx_compat.h)
+# so they need no .586 ceiling either. The gap this paragraph used to
+# describe - Watcom's kernels living inline in ops.c via #include instead
+# of their own TU, left over from tasks #18/#22 splitting only gcc - is
+# closed.
 #
 # Checked before relying on this split being SAFE, not just necessary:
 # does wcc386, like gcc before #18/#22, autonomously reach for an
@@ -271,7 +268,12 @@ WATCOM_BASE := -za99 -otexan -zp4 -D__MMX__=1 -DLZ_MMX_TU=1 -DLZ_SSE2_TU=1
 NT_CPU_FLAGS := -4r
 DOS_CPU_FLAGS := -3r
 # ops.c/cpucheck.c only, both targets - see the comment block above.
-HIGH_CPU_FLAGS := -6r
+# __MMX__ lives here (not WATCOM_BASE) because only the units that may
+# emit MMX should define it: mmx_compat.h's Watcom branch gates the full
+# <mmintrin.h> intrinsics on it, and a non-kernel TU that defined __MMX__
+# would pull that header and fail below the -4r/-3r floor. The ENG_MMX
+# units below reuse this same flag set, so they carry __MMX__ too.
+HIGH_CPU_FLAGS := -6r -D__MMX__=1
 
 # ops.c and cpucheck.c need HIGH_CPU_FLAGS; every other ENG file uses
 # the target's ordinary floor. A shell `case`, not a Make function: the
@@ -280,7 +282,7 @@ HIGH_CPU_FLAGS := -6r
 # be made inside the loop. One case arm, reused by all four `for f in
 # $(ENG)` loops below, so the exception lives in exactly one place per
 # invocation site instead of drifting across CLI/GUI/DLL/DOS.
-ENG_CPU_CASE = case "$$f" in ops|cpucheck) hi=1 ;; *) hi=0 ;; esac
+ENG_CPU_CASE = case "$$f" in cpucheck) hi=1 ;; *) hi=0 ;; esac
 
 CLI_FLAGS := $(WATCOM_BASE) $(NT_CPU_FLAGS) -bt=nt $(WINVER_FLAGS)
 CLI_FLAGS_HIGH := $(WATCOM_BASE) $(HIGH_CPU_FLAGS) -bt=nt $(WINVER_FLAGS)

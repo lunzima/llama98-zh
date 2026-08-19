@@ -1158,7 +1158,7 @@ static int lz_cpu_has_sse(void) {
 #endif
 
 static int pf_detect(void) {
-#if defined(__WATCOMC__) && defined(__MMX__)
+#if defined(__WATCOMC__)
     unsigned edx = lz_cpuid1_edx();
     if (edx & (1u << 25)) return LZ_PF_NTA;        /* SSE onwards has prefetchnta */
     if (lz_cpuid_ext_edx() & (1u << 31)) return LZ_PF_AMD;   /* 3DNow! */
@@ -1604,7 +1604,7 @@ const char *lz_prefetch_name(void) {
 }
 
 static int kernel_detect(void) {
-#if defined(__WATCOMC__) && defined(__MMX__)
+#if defined(__WATCOMC__)
     unsigned edx = lz_cpuid1_edx();
     if (edx & (1u << 26)) return LZ_KERNEL_SSE2;      /* Pentium M / P4 */
     if (edx & (1u << 23)) return LZ_KERNEL_MMX;
@@ -1641,7 +1641,7 @@ int lz_kernel_select(int which) {
     if (which == LZ_KERNEL_AUTO) {
         g_kernel = have;
     } else {
-#if defined(__WATCOMC__) && defined(__MMX__)
+#if defined(__WATCOMC__)
         /* Both asm tiers are compiled in, so any of them can be asked
            for - but not a tier the local CPU lacks (SSE2 needs CPUID
            bit 26; asking for it on a PII would be an invalid opcode,
@@ -1699,7 +1699,7 @@ int lz_kernel_select(int which) {
    invariant for test convenience. */
 static int q8r_have_simd(void) {
 #if defined(LZ_HAVE_Q8R_SIMD) || defined(LZ_HAVE_Q8R_SSE)
-#if defined(__WATCOMC__) && defined(__MMX__)
+#if defined(__WATCOMC__)
     return lz_cpu_has_sse();       /* CPUID leaf 1 EDX 25 = SSE, cached */
 #else
     /* REAL CPUID, not "the build carries the tier" (task #22's fix,
@@ -1729,7 +1729,7 @@ static int lz_q8r_tier(void) {
     if (g_kernel == LZ_KERNEL_SSE2) return 2;
 #endif
 #if defined(LZ_HAVE_Q8R_SSE)
-#if defined(__WATCOMC__) && defined(__MMX__)
+#if defined(__WATCOMC__)
     /* CPUID leaf 1 EDX bit 25 = SSE, CACHED - this sits in an inner loop
        and cpuid serializes the pipeline. PII/K6-2 lack it; stay scalar. */
     if (lz_cpu_has_sse()) return 1;
@@ -1761,7 +1761,7 @@ const char *lz_kernel_name(void) {
    a report of what those functions did and becomes an opinion about
    what they should have done. */
 const char *lz_build_paths(void) {
-#if defined(__WATCOMC__) && defined(__MMX__)
+#if defined(__WATCOMC__)
     return "mmx-asm+sse2-asm";
 #elif defined(LZ_DOT_MMX_EXTERN) && defined(LZ_ROW_SSE2_EXTERN)
     return "mmx-intrin+sse2-intrin";
@@ -2154,7 +2154,7 @@ static const lz_rowfn LZ_ROW_Q8[LZ_ROW_N] = {
 #else
     NULL,
 #endif
-#if defined(__MMX__) && defined(__WATCOMC__)
+#if defined(__WATCOMC__)
     row_q8_mmx_asm,
     NULL,        /* sse-asm: ditto */
     row_q8_sse2_asm
@@ -2724,7 +2724,7 @@ static const lz_rowfn LZ_ROW_Q41[LZ_ROW_N] = {
 #else
     NULL,
 #endif
-#if defined(__MMX__) && defined(__WATCOMC__)
+#if defined(__WATCOMC__)
     row_q41_mmx_asm,
     NULL,        /* sse-asm: ditto */
     row_q41_sse2_asm
@@ -2832,7 +2832,7 @@ static const lz_rowfn LZ_ROW_T2[LZ_ROW_N] = {
 #else
     NULL,
 #endif
-#if defined(__MMX__) && defined(__WATCOMC__)
+#if defined(__WATCOMC__)
     row_t2_mmx_asm,
     NULL,        /* sse-asm: ditto */
     row_t2_sse2_asm
@@ -2924,7 +2924,7 @@ static const lz_rowfn LZ_ROW_Q61[LZ_ROW_N] = {
 #else
     NULL,
 #endif
-#if defined(__MMX__) && defined(__WATCOMC__)
+#if defined(__WATCOMC__)
     row_q61_mmx_asm,
     NULL,        /* sse-asm: ditto */
     row_q61_sse2_asm
