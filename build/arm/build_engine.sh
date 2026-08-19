@@ -20,6 +20,10 @@
 #                    soft-float (it names the FP FORMAT, not the unit),
 #                    while the emitted code contains zero VFP
 #                    instructions and calls __aeabi_fmul.
+#   -DLZ_NO_FPU=1     same fact, told to the engine: lz_soft_float_target()
+#                    then resolves every --*-write auto to fixed without a
+#                    runtime CPUID, so the slow __aeabi_* soft-float path is
+#                    avoided on the operators that have a fixed tier.
 #   -ffp-contract=off  no multiply-add contraction, or
 #                    this build stops being bit-identical to the others.
 #
@@ -38,7 +42,7 @@ OUT=${OUT:-/tmp/armbuild}
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 
 FLAGS="-O2 -std=c99 -Wall -Wextra"
-FLAGS="$FLAGS -march=armv5te -mtune=arm926ej-s -mfloat-abi=soft"
+FLAGS="$FLAGS -march=armv5te -mtune=arm926ej-s -mfloat-abi=soft -DLZ_NO_FPU=1"
 FLAGS="$FLAGS -ffp-contract=off -I$ROOT/src"
 
 # Same list as the Makefile's ENG, and it has to stay the same list -

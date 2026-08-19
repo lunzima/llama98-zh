@@ -1311,7 +1311,15 @@ int lz_gdn_mode(void) {
  * What it means, said plainly: "is this machine's float slow relative to
  * its integer". It is a proxy - the real question is a ratio nobody can
  * read from CPUID - and the proxy is one bit. */
-static int lz_soft_float_target(void) { return q8r_have_simd() == 0; }
+static int lz_soft_float_target(void) {
+#ifdef LZ_NO_FPU
+    /* No FPU at all (x86 no-387, or a soft-float-only target): fixed is
+       the only option, whatever the runtime CPU reports. */
+    return 1;
+#else
+    return q8r_have_simd() == 0;
+#endif
+}
 
 #define LZ_P2_FLOAT 0
 #define LZ_P2_FIXED 1

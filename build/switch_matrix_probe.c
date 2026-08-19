@@ -75,6 +75,13 @@ typedef char lz_q8min_check[1 - 2 * (int)!(LZ_Q8_MIN_SCALE == 0.0f)];
 #error "LZ_CPUID_NOCACHE != 1"
 #endif
 
+#ifndef LZ_NO_FPU
+#error "LZ_NO_FPU not defined (expected 1)"
+#endif
+#if LZ_NO_FPU != 1
+#error "LZ_NO_FPU != 1"
+#endif
+
 #ifndef LZ_KV_2PLANE
 #error "LZ_KV_2PLANE not defined (expected 1)"
 #endif
