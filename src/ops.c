@@ -837,6 +837,12 @@ float lz_exp(float x) {
 static int lz_q8r_tier(void);
 #endif
 static int q8r_have_simd(void);
+/* Cached CPUID MMX bit, forward-declared because the _mm_empty() call
+   sites in lz_quantize_q8 (above) use it before its definition below.
+   Declared UNconditionally: _mm_empty() compiles on ARM too (as a no-op),
+   and the call sites test lz_cpu_has_mmx() there, so the name must exist
+   on every target - it just returns 0 where there is no MMX to have. */
+static int lz_cpu_has_mmx(void);
 
 /* lz_i32f: **every int32-to-float conversion in the engine goes
    through this**, not a bare `(float)v` - unified by construction
@@ -901,7 +907,7 @@ static uint32_t q8_amax(const float *grp, int gs) {
                SSE and dirty MMX state costs nothing. Watcom differed on
                --kernel mmx and nothing else, exactly the shape the
                rounding tier's own emms comment records further down. */
-            _mm_empty();
+            if (lz_cpu_has_mmx()) _mm_empty();
         }
     }
     for (; k < gs; k++) {
@@ -1017,7 +1023,7 @@ void lz_quantize_q8(const float *x, int n, int gs, int8_t *q, float *s) {
                        dirty MMX state has no effect); only Watcom/x87
                        end-to-end differential testing catches it. Rule
                        2 is not formalism. */
-                    _mm_empty();
+                    if (lz_cpu_has_mmx()) _mm_empty();
                 }
 #endif /* __WATCOMC__ */
             } else
@@ -1155,6 +1161,27 @@ static int lz_cpu_has_sse(void) {
     return g_has_sse;
 #endif
 }
+
+#endif
+
+/* CPUID leaf 1 EDX bit 23 = MMX. Cached for the same reason g_has_sse is:
+   the _mm_empty() call sites sit in row/group loops and would turn into a
+   serializing cpuid per row otherwise. Bit 23, NOT bit 25: Pentium MMX
+   has MMX without SSE, and a machine that has MMX is exactly the machine
+   where an unconditional emms is a legal (if redundant) instruction. On a
+   machine WITHOUT MMX (486DX, early Pentium) this is false and every
+   unconditional emms that followed a scalar row is skipped - the fix for
+   "emms is an MMX instruction, so it is #UD on an MMX-less CPU". Defined
+   on every target (not just x86): the call sites test it on ARM too, where
+   _mm_empty() is a no-op and this returns 0 so the test compiles away. */
+#if defined(__WATCOMC__) || defined(__i386__) || defined(__x86_64__)
+static int g_has_mmx = -1;
+static int lz_cpu_has_mmx(void) {
+    if (g_has_mmx < 0) g_has_mmx = (lz_cpuid1_edx() & (1u << 23)) != 0;
+    return g_has_mmx;
+}
+#else
+static int lz_cpu_has_mmx(void) { return 0; }
 #endif
 
 static int pf_detect(void) {
@@ -2221,7 +2248,7 @@ static void matmul_q8_impl(float *o, const int8_t *xq, const float *xqs,
            EMMS per row, not per token - MMX and x87 share a register
            file and the epilogue below is x87 on the Watcom build. */
         row(g_acc32, wr, NULL, g_xw, nb, nt, in_dim, wend, NULL);
-        _mm_empty();
+        if (lz_cpu_has_mmx()) _mm_empty();
         for (tk = 0; tk < nt; tk++)
             o[(size_t)tk * out_dim + i] = fixed_epi
                 ? epi_fixed(g_acc32 + (size_t)tk * nb, w, i, tk, nb, r,
@@ -2777,7 +2804,7 @@ static void matmul_q41_impl(float *o, const int8_t *xq, const float *xqs,
         /* Weight row loads once and serves all nt tokens; one EMMS per
            row, not per token - the epilogue below is x87 on Watcom. */
         row(g_acc32, wn, NULL, g_xw, nb, nt, in_dim, wend, NULL);
-        _mm_empty();
+        if (lz_cpu_has_mmx()) _mm_empty();
         for (tk = 0; tk < nt; tk++)
             o[(size_t)tk * out_dim + i] =
                 epi_q41(g_acc32 + (size_t)tk * nb, xqs + (size_t)tk * nb,
@@ -2974,7 +3001,7 @@ static void matmul_t2_impl(float *o, const int8_t *xq, const float *xqs,
         const float *wd = w->scale + (size_t)i * ng;
         for (g = 0; g < ng; g++) g_t2neg[g] = -wd[g];
         row(g_acc32, w2, NULL, g_xw, nb, nt, in_dim, NULL, NULL);
-        _mm_empty();
+        if (lz_cpu_has_mmx()) _mm_empty();
         for (tk = 0; tk < nt; tk++)
             o[(size_t)tk * out_dim + i] =
                 epi_q41(g_acc32 + (size_t)tk * nb, xqs + (size_t)tk * nb,
@@ -3023,7 +3050,7 @@ static void matmul_q61_impl(float *o, const int8_t *xq, const float *xqs,
         row(g_acc32, wn, w2, g_xw, nb, nt, in_dim,
             p2b,                        /* 4-bit plane ends where 2-bit starts */
             p2b + (size_t)w->n / 4);    /* 2-bit plane's own bound */
-        _mm_empty();
+        if (lz_cpu_has_mmx()) _mm_empty();
         for (tk = 0; tk < nt; tk++)
             o[(size_t)tk * out_dim + i] =
                 epi_q41(g_acc32 + (size_t)tk * nb, xqs + (size_t)tk * nb,
@@ -3129,7 +3156,7 @@ static void matmul_q16_impl(float *o, const int8_t *xq, const float *xqs,
         const int16_t *wr = wbase + (size_t)i * in_dim;
         const float *ws = w->scale + (size_t)(i * in_dim) / w->gs;
         row(g_acc32, wr, NULL, g_xw, ng, nt, in_dim, wend, NULL);
-        _mm_empty();                    /* exit MMX state before x87 */
+        if (lz_cpu_has_mmx()) _mm_empty();                    /* exit MMX state before x87 */
         /* post = 1.0: the Q16_0 kernels do not scale by 256 the way the
            Q8_0 ones do. Otherwise term for term the same epilogue. */
         for (tk = 0; tk < nt; tk++)
@@ -3560,7 +3587,7 @@ void lz_attn_score_q8(float *att, const float *qhh, int hd,
         for (g = 0; g < ng; g++)
             rr[g] = LZ_ATTN_DOT32(kt + (size_t)g * 32, qw + g * 32);
 #if defined(__WATCOMC__) || defined(LZ_DOT_MMX_EXTERN)
-        _mm_empty();
+        if (lz_cpu_has_mmx()) _mm_empty();
 #endif
         /* Phase 2, x87 only. Raw magnitude reaches 256*127*127*32 =
            1.33e8 > 2^24, so lz_i32f() is mandatory here (rule 6 item 7),
@@ -3682,7 +3709,7 @@ void lz_attn_wsum_q8(float *out, const float *att, int hd,
                 LZ_SLOT_NEXT(slot, sink, ring);
             }
 #if defined(LZ_WSUM_MMX_EXTERN)
-            _mm_empty();      /* no x87 inside the row-pair loop above */
+            if (lz_cpu_has_mmx()) _mm_empty();      /* no x87 inside the row-pair loop above */
 #endif
             for (d = 0; d < 32; d++) accf[d] += lz_i32f(acc32[d]);
         }
@@ -3950,7 +3977,7 @@ static void gdn_sum_gg(const int8_t *sq_gg, int kd, int vd,
         aw_gg[v + 2] = out8[6]; aw_gg[v + 3] = out8[7];
     }
     gdn_tail_row(sq_gg, kd, vd, tcu, tcw, au_gg, aw_gg);
-    _mm_empty();
+    if (lz_cpu_has_mmx()) _mm_empty();
 }
 #endif /* LZ_GDN_HAVE_MMX */
 
@@ -4139,12 +4166,12 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
                    again before the next group's amax/inv - same reason as
                    the identical placement in lz_quantize_q8 (rule 6 item
                    6's precondition does not hold here). */
-                _mm_empty();
+                if (lz_cpu_has_mmx()) _mm_empty();
                 for (k = 0; k < gs; k++)
                     res[k] = grp[k] * inv - (float)ho[k];
                 for (k = 0; k + 31 < gs; k += 32)
                     lz_q8round32_sse(res + k, lw + k, &lo_mul);
-                _mm_empty();
+                if (lz_cpu_has_mmx()) _mm_empty();
             }
 #endif /* __WATCOMC__ */
             continue;
