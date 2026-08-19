@@ -87,11 +87,31 @@ static int probe(unsigned *edx1) {
 
 #elif defined(__i386__) || defined(__x86_64__)
 
+/* EFLAGS bit 21 (ID) is writable exactly when CPUID exists - the same
+   architecturally defined test as the Watcom branch's
+   lz_eflags_id_toggles() above, ported to gcc inline asm. size_t, not
+   unsigned long: it must match pushf/popf's operand width in whichever
+   mode this TU is compiled for (4 bytes at -m32, 8 at -m64/x86-64) -
+   unsigned long is only 4 bytes in both modes under this project's
+   Windows/MinGW target (LLP64), which would push a 32-bit slot against
+   a 64-bit pushf and corrupt the stack under -m64. */
+static int lz_eflags_id_toggles(void) {
+    size_t f0, f1;
+    __asm__ __volatile__("pushf\n\tpop %0" : "=r"(f0) :: "cc");
+    __asm__ __volatile__(
+        "push %1\n\tpopf\n\tpushf\n\tpop %0"
+        : "=r"(f1) : "r"(f0 ^ (size_t)0x200000) : "cc");
+    __asm__ __volatile__("push %0\n\tpopf" :: "r"(f0) : "cc");
+    return (int)(((f0 ^ f1) >> 21) & 1u);
+}
+
 unsigned lz_cpuid1_edx(void) {
-    /* Unconditional cpuid, no EFLAGS.ID toggle test first - safe at the
-       current i586 floor (every Socket 7 part has CPUID), unsafe below
-       it (task #27: the floor drops to i486/i386, and CPUID itself
-       becomes optional). x86-64 always has CPUID regardless. */
+    /* No EFLAGS.ID test here - by design, matching the Watcom half's
+       shape (lz_cpuid1_edx_asm above is equally raw): the guard belongs
+       to the one caller that decides whether it is safe to use, probe()
+       below, not to this primitive. A second, independent caller that
+       skipped the guard would be the actual bug; task #27's gate
+       exists to catch exactly that, not to duplicate the check here. */
     unsigned a, b, c, d;
     a = b = c = d = 0;
     __asm__ __volatile__("cpuid"
@@ -102,9 +122,14 @@ unsigned lz_cpuid1_edx(void) {
 }
 
 static int probe(unsigned *edx1) {
-    /* x86-64 always has CPUID and always has an FPU; on 32-bit gcc this
-       still answers honestly, at the current i586 floor (see
-       lz_cpuid1_edx's comment). */
+    /* Was unconditional (task #27): "this is the development build,
+       where the interesting case cannot occur" stopped being true the
+       moment build/x87/build_engine.sh became a shipping gcc
+       configuration for real Socket-7 hardware. Harmless at today's
+       i586 floor (every Socket 7 part has CPUID) but an illegal
+       instruction the moment the floor drops to i486/i386 (task #28) -
+       same guard the Watcom branch above already had. */
+    if (!lz_eflags_id_toggles()) { *edx1 = 0; return 0; }
     *edx1 = lz_cpuid1_edx();
     return 1;
 }
