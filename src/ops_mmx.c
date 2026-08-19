@@ -2498,6 +2498,198 @@ void row_q61_mmx_asm(int32_t *acc32, const void *w4, const void *w2v,
     }
 }
 
+/* ---- Q16_0 32/128-element dot products and row kernel, MMX tier -
+   moved here from src/ops_kernel_dot.h / src/ops.c (task #30, 9/N).
+   No pairing (Q16_0 never had it - matches T2's shape, not Q8/Q41/Q61's). */
+extern int32_t lz_dot32_q16_asm(const int16_t *w, const int16_t *x);
+#pragma aux lz_dot32_q16_asm = \
+    ".586" \
+    "pxor      mm6, mm6" \
+    "movq      mm1, [eax]" \
+    "pmaddwd   mm1, [ecx]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, [eax+8]" \
+    "pmaddwd   mm1, [ecx+8]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, [eax+16]" \
+    "pmaddwd   mm1, [ecx+16]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, [eax+24]" \
+    "pmaddwd   mm1, [ecx+24]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, [eax+32]" \
+    "pmaddwd   mm1, [ecx+32]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, [eax+40]" \
+    "pmaddwd   mm1, [ecx+40]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, [eax+48]" \
+    "pmaddwd   mm1, [ecx+48]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, [eax+56]" \
+    "pmaddwd   mm1, [ecx+56]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, mm6" \
+    "psrlq     mm1, 32" \
+    "paddd     mm6, mm1" \
+    "movd      eax, mm6" \
+    __parm [__eax] [__ecx] \
+    __value [__eax] \
+    __modify [8087]
+
+static int32_t dot32_q16_mmx(const int16_t *w, const int16_t *x) {
+    return lz_dot32_q16_asm(w, x);
+}
+
+extern void lz_dot128_q16_asm(const int16_t *w, const int16_t *x, int32_t *out4);
+#pragma aux lz_dot128_q16_asm = \
+    ".586" \
+    "pxor      mm6, mm6" \
+    "movq      mm1, [eax]" \
+    "pmaddwd   mm1, [ecx]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, [eax+8]" \
+    "pmaddwd   mm1, [ecx+8]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, [eax+16]" \
+    "pmaddwd   mm1, [ecx+16]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, [eax+24]" \
+    "pmaddwd   mm1, [ecx+24]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, [eax+32]" \
+    "pmaddwd   mm1, [ecx+32]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, [eax+40]" \
+    "pmaddwd   mm1, [ecx+40]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, [eax+48]" \
+    "pmaddwd   mm1, [ecx+48]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, [eax+56]" \
+    "pmaddwd   mm1, [ecx+56]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, mm6" \
+    "psrlq     mm1, 32" \
+    "paddd     mm6, mm1" \
+    "movd      [ebx], mm6" \
+    "pxor      mm6, mm6" \
+    "movq      mm1, [eax+64]" \
+    "pmaddwd   mm1, [ecx+64]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, [eax+72]" \
+    "pmaddwd   mm1, [ecx+72]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, [eax+80]" \
+    "pmaddwd   mm1, [ecx+80]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, [eax+88]" \
+    "pmaddwd   mm1, [ecx+88]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, [eax+96]" \
+    "pmaddwd   mm1, [ecx+96]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, [eax+104]" \
+    "pmaddwd   mm1, [ecx+104]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, [eax+112]" \
+    "pmaddwd   mm1, [ecx+112]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, [eax+120]" \
+    "pmaddwd   mm1, [ecx+120]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, mm6" \
+    "psrlq     mm1, 32" \
+    "paddd     mm6, mm1" \
+    "movd      [ebx+4], mm6" \
+    "pxor      mm6, mm6" \
+    "movq      mm1, [eax+128]" \
+    "pmaddwd   mm1, [ecx+128]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, [eax+136]" \
+    "pmaddwd   mm1, [ecx+136]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, [eax+144]" \
+    "pmaddwd   mm1, [ecx+144]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, [eax+152]" \
+    "pmaddwd   mm1, [ecx+152]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, [eax+160]" \
+    "pmaddwd   mm1, [ecx+160]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, [eax+168]" \
+    "pmaddwd   mm1, [ecx+168]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, [eax+176]" \
+    "pmaddwd   mm1, [ecx+176]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, [eax+184]" \
+    "pmaddwd   mm1, [ecx+184]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, mm6" \
+    "psrlq     mm1, 32" \
+    "paddd     mm6, mm1" \
+    "movd      [ebx+8], mm6" \
+    "pxor      mm6, mm6" \
+    "movq      mm1, [eax+192]" \
+    "pmaddwd   mm1, [ecx+192]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, [eax+200]" \
+    "pmaddwd   mm1, [ecx+200]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, [eax+208]" \
+    "pmaddwd   mm1, [ecx+208]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, [eax+216]" \
+    "pmaddwd   mm1, [ecx+216]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, [eax+224]" \
+    "pmaddwd   mm1, [ecx+224]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, [eax+232]" \
+    "pmaddwd   mm1, [ecx+232]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, [eax+240]" \
+    "pmaddwd   mm1, [ecx+240]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, [eax+248]" \
+    "pmaddwd   mm1, [ecx+248]" \
+    "paddd     mm6, mm1" \
+    "movq      mm1, mm6" \
+    "psrlq     mm1, 32" \
+    "paddd     mm6, mm1" \
+    "movd      [ebx+12], mm6" \
+    "emms" \
+    __parm [__eax] [__ecx] [__ebx] \
+    __modify [8087]
+
+/* Real, addressable twin of lz_dot128_q16_asm - needed cross-TU by
+   src/ops_sse2.c's row_q16_sse2_asm, ONLY in the -DLZ_SSE2_GROUP=0 A/B
+   control build (task #32). Same reasoning as the other three formats'
+   *_mmx_w wrappers. */
+void lz_dot128_q16_mmx_w(const int16_t *w, const int16_t *x, int32_t *out4) {
+    lz_dot128_q16_asm(w, x, out4);
+}
+
+/* row_q16_mmx_asm: ALREADY the real call boundary (matmul_q16-adjacent
+   dispatch, src/ops.c, via LZ_ROW_Q16). Moving the whole function here
+   adds NO new call sites. */
+void row_q16_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
+                     const int16_t *xw, int nb, int nt, int in_dim,
+                     const void *pf_end, const void *pf_end2) {
+    const int16_t *wr = (const int16_t *)w4;
+    const int16_t *wend = (const int16_t *)pf_end;
+    int tk, g;
+    (void)w2; (void)pf_end2;
+    for (tk = 0; tk < nt; tk++) {
+        const int16_t *xwt = xw + (size_t)tk * in_dim;
+        int32_t *acc = acc32 + (size_t)tk * nb;
+        if ((nb & 3) == 0) LZ_Q16_GROUP4(lz_dot128_q16_asm);
+        else               LZ_Q16_ACC(dot32_q16_mmx);
+    }
+}
+
 #else /* gcc: intrinsics */
 
 #include "mmx_compat.h"

@@ -199,6 +199,15 @@ void row_q61_mmx_asm(int32_t *acc32, const void *w4, const void *w2v,
 void lz_dot128_q61_mmx_w(const unsigned char *w4, const unsigned char *w2,
                          const int16_t *x, int32_t *out4);
 
+/* task #30 (9/N): Q16_0 matmul, MMX tier. row_q16_mmx_asm is ALREADY
+   the real call boundary (LZ_ROW_Q16, src/ops.c).
+   lz_dot128_q16_mmx_w exists only for src/ops_sse2.c's
+   -DLZ_SSE2_GROUP=0 A/B control build (task #32). */
+void row_q16_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
+                     const int16_t *xw, int nb, int nt, int in_dim,
+                     const void *pf_end, const void *pf_end2);
+void lz_dot128_q16_mmx_w(const int16_t *w, const int16_t *x, int32_t *out4);
+
 #else /* gcc: intrinsics, existing declarations */
 
 /* ---- wsum: src/ops.c's LZ_WSUM_PAIR, attention scoring's dot ---------- */

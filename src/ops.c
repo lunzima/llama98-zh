@@ -3053,66 +3053,17 @@ static void matmul_q61_impl(float *o, const int8_t *xq, const float *xqs,
    the kernels return the raw int32 dot and the epilogue's `post` is 1.0.
    No sse2-intrin slot yet: part32_q16 does not exist. */
 
-#define LZ_Q16_PF(G)                                                      \
-    do {                                                                  \
-        const int16_t *pf_ = wr + (size_t)((G) + LZ_PF_DIST) * 32;        \
-        if (pf_ < wend) {                                                 \
-            int pf_m_ = lz_prefetch_mode();                               \
-            if (pf_m_ == LZ_PF_AMD)       LZ_PFI_AMD(pf_);                \
-            else if (pf_m_ == LZ_PF_LOAD) LZ_PFI_LOAD(pf_);               \
-            else if (pf_m_ == LZ_PF_NONE) LZ_PFI_NONE(pf_);               \
-            else                          LZ_PFI_NTA(pf_);                \
-        }                                                                 \
-    } while (0)
-
-#define LZ_Q16_ACC(DOT32)                                                 \
-    for (g = 0; g < nb; g++) {                                            \
-        LZ_Q16_PF(g);                                                     \
-        acc[g] = DOT32(wr + (size_t)g * 32, xwt + (size_t)g * 32);        \
-    }
+/* LZ_Q16_PF / LZ_Q16_ACC / LZ_Q16_GROUP4 moved to
+   src/ops_kernel_dot_shared.h (task #30, 9/N) - shared with gcc's
+   row_q16_mmx_intrin below via the same guard. */
 
 #ifdef __WATCOMC__
-#define LZ_Q16_GROUP4(DOT128)                                             \
-    do {                                                                  \
-        for (g = 0; g < nb; g += 4) {                                     \
-            LZ_Q16_PF(g);                                                 \
-            DOT128(wr + (size_t)g * 32, xwt + (size_t)g * 32, acc + g);   \
-        }                                                                 \
-    } while (0)
-
-static void row_q16_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
-                            const int16_t *xw, int nb, int nt, int in_dim,
-                            const void *pf_end, const void *pf_end2) {
-    const int16_t *wr = (const int16_t *)w4;
-    const int16_t *wend = (const int16_t *)pf_end;
-    int tk, g;
-    (void)w2; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
-        if ((nb & 3) == 0) LZ_Q16_GROUP4(lz_dot128_q16_asm);
-        else               LZ_Q16_ACC(dot32_q16_mmx);
-    }
-}
-
-static void row_q16_sse2_asm(int32_t *acc32, const void *w4, const void *w2,
-                             const int16_t *xw, int nb, int nt, int in_dim,
-                             const void *pf_end, const void *pf_end2) {
-    const int16_t *wr = (const int16_t *)w4;
-    const int16_t *wend = (const int16_t *)pf_end;
-    int tk, g;
-    (void)w2; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
-#if LZ_SSE2_GROUP
-        if ((nb & 3) == 0) LZ_Q16_GROUP4(lz_dot128_q16_sse2_asm);
-#else
-        if ((nb & 3) == 0) LZ_Q16_GROUP4(lz_dot128_q16_asm);
-#endif
-        else               LZ_Q16_ACC(dot32_q16_sse2a);
-    }
-}
+/* row_q16_mmx_asm / row_q16_sse2_asm moved to src/ops_mmx.c /
+   src/ops_sse2.c (task #30, 9/N), alongside their leaf kernels which
+   they call direct-by-name. Declared in src/ops_mmx.h / src/ops_sse2.h.
+   row_q16_sse2_asm's -DLZ_SSE2_GROUP=0 branch calls
+   lz_dot128_q16_mmx_w, src/ops_mmx.c's real wrapper around the MMX
+   #pragma aux group kernel (task #32). */
 
 #else  /* gcc: intrinsics */
 

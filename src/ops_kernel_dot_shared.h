@@ -164,4 +164,41 @@
 
 #endif /* __WATCOMC__ || LZ_DOT_MMX_EXTERN */
 
+/* ---- Q16_0 --------------------------------------------------------------
+   int16 weights: a 32-element sub-block is 64 bytes (two cache lines),
+   twice Q8_0's, so the prefetch distance lands twice as far ahead in
+   bytes for the same sub-block count - see the original comment at
+   this macro's old home in src/ops.c. */
+#if defined(__WATCOMC__) || defined(LZ_DOT_MMX_EXTERN)
+
+#define LZ_Q16_PF(G)                                                      \
+    do {                                                                  \
+        const int16_t *pf_ = wr + (size_t)((G) + LZ_PF_DIST) * 32;        \
+        if (pf_ < wend) {                                                 \
+            int pf_m_ = lz_prefetch_mode();                               \
+            if (pf_m_ == LZ_PF_AMD)       LZ_PFI_AMD(pf_);                \
+            else if (pf_m_ == LZ_PF_LOAD) LZ_PFI_LOAD(pf_);               \
+            else if (pf_m_ == LZ_PF_NONE) LZ_PFI_NONE(pf_);               \
+            else                          LZ_PFI_NTA(pf_);                \
+        }                                                                 \
+    } while (0)
+
+#define LZ_Q16_ACC(DOT32)                                                 \
+    for (g = 0; g < nb; g++) {                                            \
+        LZ_Q16_PF(g);                                                     \
+        acc[g] = DOT32(wr + (size_t)g * 32, xwt + (size_t)g * 32);        \
+    }
+
+#ifdef __WATCOMC__
+#define LZ_Q16_GROUP4(DOT128)                                             \
+    do {                                                                  \
+        for (g = 0; g < nb; g += 4) {                                     \
+            LZ_Q16_PF(g);                                                 \
+            DOT128(wr + (size_t)g * 32, xwt + (size_t)g * 32, acc + g);   \
+        }                                                                 \
+    } while (0)
+#endif /* __WATCOMC__ */
+
+#endif /* __WATCOMC__ || LZ_DOT_MMX_EXTERN */
+
 #endif /* LZ_OPS_KERNEL_DOT_SHARED_H */
