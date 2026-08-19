@@ -28,7 +28,6 @@
 
 #include "mmx_compat.h"
 #include <mmintrin.h>
-#include <xmmintrin.h>
 
 /* ---- wsum: attention scoring's weighted-sum dot, LZ_WSUM_PAIR's gcc
    twin. Watcom twin: lz_wsum_pair_asm, src/ops.c ~3960-4041.
@@ -167,43 +166,12 @@ void lz_p2_split32_mmx(const lz_p2_blk *blk, int8_t *oh, int8_t *ol) {
     }
 }
 
-/* Named "sse" for the ISA a machine must HAVE to run it - it still
-   operates on %mm (SSE1's whole addition to the integer side of the
-   MMX register file is used here exactly once: pmaxsw does the low
-   plane's clamp to -127 directly, replacing the psubsw/paddsw pair). */
-void lz_p2_split32_sse(const lz_p2_blk *blk, int8_t *oh, int8_t *ol) {
-    __m64 rnd, cnt, k128, kmin;
-    int o;
-
-    memcpy(&rnd,  blk->rnd,  8);
-    memcpy(&cnt,  blk->cnt,  8);
-    memcpy(&k128, blk->k128, 8);
-    memcpy(&kmin, blk->kmin, 8);
-    for (o = 0; o < 4; o++) {
-        __m64 a0, a1, a2, a3, hn0, hn1, h0, h1, l0, l1, t;
-
-        memcpy(&a0, blk->a + o * 8,     8);
-        memcpy(&a1, blk->a + o * 8 + 2, 8);
-        memcpy(&a2, blk->a + o * 8 + 4, 8);
-        memcpy(&a3, blk->a + o * 8 + 6, 8);
-        a0 = _mm_sra_pi32(_mm_add_pi32(a0, rnd), cnt);
-        a1 = _mm_sra_pi32(_mm_add_pi32(a1, rnd), cnt);
-        a2 = _mm_sra_pi32(_mm_add_pi32(a2, rnd), cnt);
-        a3 = _mm_sra_pi32(_mm_add_pi32(a3, rnd), cnt);
-        hn0 = _mm_packs_pi32(a0, a1);
-        hn1 = _mm_packs_pi32(a2, a3);
-        h0 = _mm_srai_pi16(_mm_add_pi16(hn0, k128), 8);
-        h1 = _mm_srai_pi16(_mm_add_pi16(hn1, k128), 8);
-        l0 = _mm_sub_pi16(hn0, _mm_slli_pi16(h0, 8));
-        l1 = _mm_sub_pi16(hn1, _mm_slli_pi16(h1, 8));
-        l0 = _mm_max_pi16(l0, kmin);      /* the whole SSE1 tier, twice */
-        l1 = _mm_max_pi16(l1, kmin);
-        t = _mm_packs_pi16(h0, h1);
-        memcpy(oh + o * 8, &t, 8);
-        t = _mm_packs_pi16(l0, l1);
-        memcpy(ol + o * 8, &t, 8);
-    }
-}
+/* lz_p2_split32_sse moved to src/ops_mmx_sse.c: it needs genuine SSE1,
+   and gcc treats -msse as license to assume i686 (CMOV included) for
+   the WHOLE translation unit, not just the SSE-touching functions in
+   it - measured, see that file's header comment. This file stays
+   MMX-only (-march=i586 -mmmx, no -msse) so its plain-MMX functions,
+   reachable on Socket-7 parts with no CMOV, cannot pick one up. */
 
 /* ---- GDN/KDA pass 1, 4-lane table contraction. Watcom twin:
    the #pragma aux declaration of this same name in src/ops.c (search
@@ -266,33 +234,8 @@ unsigned lz_amax32_mmx(const float *x, int n) {
     }
 }
 
-/* ---- Q8 activation rounding, SSE1 tier. Watcom twin:
-   lz_q8round32_sse_asm, src/ops_kernel_q8round.h. No cvtps2dq, only
-   cvtps2pi - converting 2 floats at a time into MMX registers. Multiply
-   in xmm, convert and pack in mm, using movhlps to slide the high 2
-   floats down. Writes MMX registers, so the caller must emit one emms
-   after the group loop (rule 6.6). */
-void lz_q8round32_sse(const float *x, int8_t *o, const float *pinv) {
-    __m128 vi = _mm_set1_ps(*pinv);
-    __m64 p127 = _mm_set1_pi16(127), m127 = _mm_set1_pi16(-127);
-    int b;
-    for (b = 0; b < 4; b++) {
-        const float *sp = x + b * 8;
-        __m128 f0 = _mm_mul_ps(_mm_loadu_ps(sp), vi);
-        __m128 f1 = _mm_mul_ps(_mm_loadu_ps(sp + 4), vi);
-        __m64 a0 = _mm_cvtps_pi32(f0);
-        __m64 a1 = _mm_cvtps_pi32(_mm_movehl_ps(f0, f0));
-        __m64 a2 = _mm_cvtps_pi32(f1);
-        __m64 a3 = _mm_cvtps_pi32(_mm_movehl_ps(f1, f1));
-        __m64 l = _mm_packs_pi32(a0, a1);
-        __m64 h = _mm_packs_pi32(a2, a3);
-        __m64 r;
-        l = _mm_max_pi16(_mm_min_pi16(l, p127), m127);
-        h = _mm_max_pi16(_mm_min_pi16(h, p127), m127);
-        r = _mm_packs_pi16(l, h);
-        memcpy(o + b * 8, &r, 8);
-    }
-}
+/* lz_q8round32_sse moved to src/ops_mmx_sse.c, same reason as
+   lz_p2_split32_sse above. */
 
 #include "ops_kernel_dot_mmx.h"
 

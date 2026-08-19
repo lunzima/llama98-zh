@@ -8,16 +8,20 @@
 # exactly what makes it able to reproduce a bug neither of the others
 # can.
 #
-# THE FLOOR TODAY IS -march=i686, ABOVE THAT FAMILY, NOT AT IT. Socket 7
-# is P5; i686 (Pentium Pro) is where CMOV/FCOMI/FCMOV start, and none of
-# Pentium MMX/K6/Cyrix 6x86/WinChip have them. Dropping to -march=i586
-# is tracked separately (see the project's task list) and gated on
-# measuring how many i686-only instructions the compiler currently
-# emits; this script's flags are not that measurement.
+# THE FLOOR IS -march=i586, MATCHING THAT FAMILY. Socket 7 is P5;
+# CMOV/FCOMI/FCMOV are i686 (Pentium Pro) additions, and none of Pentium
+# MMX/K6/Cyrix 6x86/WinChip have them - #UD on every machine this build
+# ships to. Measured before dropping the floor (tests/test_ops_isa_floor.py's
+# informational i686 census, before this change: 197 cmov + 156 fcomi +
+# 28 fcmov across $(ENG)): i586 compiles every file clean, zero cmov/
+# fcomi/fcmov anywhere, and the linked binary's output is bit-identical
+# to the i686 build's (--kernel ref and --kernel mmx both checked) - gcc
+# falls back to branches on its own once the target does not support
+# the instruction, no source change needed.
 #
 # WHY EVERY FLAG IS THERE:
 #
-#   -m32 -march=i686        see above - today's floor, not the family's.
+#   -m32 -march=i586        see above.
 #   -mno-mmx -mno-sse       the target has MMX (every machine this build
 #   -mno-sse2               ships to does), but this flag set is for
 #                            every file EXCEPT src/ops_mmx.c, which
@@ -74,21 +78,38 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 # translation unit that still gets -mmmx, and LZ_MMX_TU tells every
 # other one that it exists and is linkable - see src/ops_mmx.h.
 FLAGS="-O2 -std=c99 -Wall -Wextra"
-FLAGS="$FLAGS -m32 -march=i686 -mno-mmx -mno-sse -mno-sse2 -mfpmath=387"
+FLAGS="$FLAGS -m32 -march=i586 -mno-mmx -mno-sse -mno-sse2 -mfpmath=387"
 FLAGS="$FLAGS -ffp-contract=off -DLZ_MMX_TU=1 -I$ROOT/src"
 
 # src/ops_mmx.c's own flags: the negatives above reversed, no
 # -mfpmath=387 (that file has no ordinary scalar float arithmetic for it
-# to affect, and clang rejects the combination with -msse).
+# to affect, and clang rejects the combination with -msse). -march=i586,
+# NOT i686, and no -msse here - measured: gcc treats -msse as license to
+# assume CMOV is available for the WHOLE translation unit it is passed
+# to, not just the SSE-touching functions in it (lz_amax32_mmx, which
+# has nothing to do with SSE, picked up a cmov the moment -msse joined
+# -march=i586 on this file's command line - #UD on every machine this
+# script's ENG loop above targets). That is why the SSE1-only functions
+# live in a separate file now - see src/ops_mmx_sse.c's header.
 MMX_FLAGS="-O2 -std=c99 -Wall -Wextra"
-MMX_FLAGS="$MMX_FLAGS -m32 -march=i686 -mmmx -msse"
+MMX_FLAGS="$MMX_FLAGS -m32 -march=i586 -mmmx"
 MMX_FLAGS="$MMX_FLAGS -ffp-contract=off -DLZ_MMX_TU=1 -I$ROOT/src"
+
+# src/ops_mmx_sse.c: the two functions that need genuine SSE1. -march=i686
+# here is honest, not a compromise - real SSE1 hardware is i686+ anyway
+# (SSE starts at Pentium III; no Socket-7 part has it), so a machine
+# that can even reach these two functions (gated behind a runtime SSE
+# CPUID check, see src/ops.c's LZ_HAVE_P2_SSE/LZ_HAVE_Q8R_SSE dispatch)
+# already has CMOV too.
+SSE_FLAGS="-O2 -std=c99 -Wall -Wextra"
+SSE_FLAGS="$SSE_FLAGS -m32 -march=i686 -mmmx -msse"
+SSE_FLAGS="$SSE_FLAGS -ffp-contract=off -DLZ_MMX_TU=1 -I$ROOT/src"
 
 # Same list as the Makefile's ENG, and it has to stay the same list -
 # see the Makefile note about source lists living in exactly one place.
-# ops_mmx is NOT in ENG (Watcom and the ARM cross-build must not see
-# it - see the Makefile's own ENG_MMX_GCC variable) so it is built
-# separately, right after this loop.
+# ops_mmx/ops_mmx_sse are NOT in ENG (Watcom and the ARM cross-build
+# must not see them - see the Makefile's own ENG_MMX_GCC variable) so
+# they are built separately, right after this loop.
 ENG="err compat lfn json safetensors model ops forward sampler generate
      tokenizer unicode chat gbk cpucheck"
 
@@ -116,6 +137,16 @@ if $CC $MMX_FLAGS -c "$ROOT/src/ops_mmx.c" -o "$OUT/ops_mmx.o" 2>"$OUT/ops_mmx.l
 else
     printf '  %-14s FAIL\n' "ops_mmx"
     grep -E 'error:' "$OUT/ops_mmx.log" | head -4 | sed 's/^/      /'
+    fail=$((fail + 1))
+fi
+
+if $CC $SSE_FLAGS -c "$ROOT/src/ops_mmx_sse.c" -o "$OUT/ops_mmx_sse.o" 2>"$OUT/ops_mmx_sse.log"; then
+    n=$(grep -c 'warning:' "$OUT/ops_mmx_sse.log" || true)
+    warn=$((warn + n))
+    printf '  %-14s ok    %s warnings\n' "ops_mmx_sse" "$n"
+else
+    printf '  %-14s FAIL\n' "ops_mmx_sse"
+    grep -E 'error:' "$OUT/ops_mmx_sse.log" | head -4 | sed 's/^/      /'
     fail=$((fail + 1))
 fi
 

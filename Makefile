@@ -23,13 +23,20 @@ GUI := main layout localized_strings worker modelload session compat40 \
        settingsdlg aboutdlg splash toolbar inifile caption captionwnd
 COM := stream settings command savechat mru chatfile session
 
-# src/ops_mmx.c is deliberately NOT in $(ENG): Watcom and the ARM
-# cross-build must never compile it (they carry their own MMX kernels
-# inline - #pragma aux for Watcom, nothing at all for ARM). It is the
-# ONE gcc translation unit built with -mmmx -msse; every other gcc file
-# gets neither, plus LZ_MMX_TU so its dispatch code knows ops_mmx.o is
-# still part of the link. See src/ops_mmx.h.
-ENG_MMX_GCC := ops_mmx
+# src/ops_mmx.c and src/ops_mmx_sse.c are deliberately NOT in $(ENG):
+# Watcom and the ARM cross-build must never compile them (they carry
+# their own MMX kernels inline - #pragma aux for Watcom, nothing at all
+# for ARM). Both gcc TUs built with -mmmx -msse; every other gcc file
+# gets neither, plus LZ_MMX_TU so its dispatch code knows their symbols
+# are still part of the link. See src/ops_mmx.h. Two files, not one, for
+# a reason specific to the 32-bit x87 target (build/x87/build_engine.sh,
+# not this Makefile): gcc treats -msse as license to assume CMOV is
+# available for the WHOLE translation unit it is passed to, not just the
+# SSE-touching functions in it, so the plain-MMX functions (ops_mmx.c)
+# and the genuinely-SSE1 ones (ops_mmx_sse.c) need to be compiled with
+# different -march there. x86-64 has no such distinction (CMOV is
+# baseline), so this Makefile compiles both the same way regardless.
+ENG_MMX_GCC := ops_mmx ops_mmx_sse
 ENG_MMX_GCC_SRCS := $(addprefix src/,$(addsuffix .c,$(ENG_MMX_GCC)))
 
 # gcc-side full paths.
@@ -74,26 +81,32 @@ native: llama98
 gui: kunkun98-gui
 serve: kunkun98-serve
 
-# ops_mmx.o, one per gcc flavor below (native/serve share X86_64_CFLAGS,
-# gui uses CFLAGS) - not shared across them, the same way each Watcom
-# target below keeps its own object dir, so a flag change to one flavor
-# cannot link in an object built with another's.
-build/native/ops_mmx.o: $(ENG_MMX_GCC_SRCS)
-	@mkdir -p build/native
-	$(CC) $(X86_64_CFLAGS) -mmmx -msse -c -o $@ $(ENG_MMX_GCC_SRCS)
+# One .o per $(ENG_MMX_GCC) file per gcc flavor below (native/serve
+# share X86_64_CFLAGS, gui uses CFLAGS) - not shared across flavors, the
+# same way each Watcom target below keeps its own object dir, so a flag
+# change to one flavor cannot link in an object built with another's.
+# Pattern rules, not one rule per file: `-c -o x.o a.c b.c` is invalid
+# gcc (multiple sources cannot share one -c output), so each of
+# $(ENG_MMX_GCC)'s files needs its own compile, and there are now two.
+ENG_MMX_GCC_NATIVE_OBJS := $(addprefix build/native/,$(addsuffix .o,$(ENG_MMX_GCC)))
+ENG_MMX_GCC_GUI_OBJS    := $(addprefix build/gui/,$(addsuffix .o,$(ENG_MMX_GCC)))
 
-build/gui/ops_mmx.o: $(ENG_MMX_GCC_SRCS)
+build/native/%.o: src/%.c
+	@mkdir -p build/native
+	$(CC) $(X86_64_CFLAGS) -mmmx -msse -c -o $@ $<
+
+build/gui/%.o: src/%.c
 	@mkdir -p build/gui
-	$(CC) $(CFLAGS) -mmmx -msse -c -o $@ $(ENG_MMX_GCC_SRCS)
+	$(CC) $(CFLAGS) -mmmx -msse -c -o $@ $<
 
 # cli_main.c's -i loop runs on the shared LZSession core (common/session.c),
 # a front-end helper deliberately outside $(ENG) - so this target lists it
 # explicitly with -Icommon, exactly as the Watcom CLI/DOS builds do.
-llama98: $(ENG_SRCS) common/session.c common/stream.c src/cli_attr.c src/cli_main.c build/native/ops_mmx.o
-	$(CC) $(X86_64_CFLAGS) -Icommon -o $@ $(ENG_SRCS) common/session.c common/stream.c src/cli_attr.c src/cli_main.c build/native/ops_mmx.o -lm
+llama98: $(ENG_SRCS) common/session.c common/stream.c src/cli_attr.c src/cli_main.c $(ENG_MMX_GCC_NATIVE_OBJS)
+	$(CC) $(X86_64_CFLAGS) -Icommon -o $@ $(ENG_SRCS) common/session.c common/stream.c src/cli_attr.c src/cli_main.c $(ENG_MMX_GCC_NATIVE_OBJS) -lm
 
-kunkun98-serve: $(ENG_SRCS) $(SRV_SRCS) src/server_main.c build/native/ops_mmx.o
-	$(CC) $(X86_64_CFLAGS) -o $@ $(ENG_SRCS) $(SRV_SRCS) src/server_main.c build/native/ops_mmx.o -lm $(HTTP_LIBS)
+kunkun98-serve: $(ENG_SRCS) $(SRV_SRCS) src/server_main.c $(ENG_MMX_GCC_NATIVE_OBJS)
+	$(CC) $(X86_64_CFLAGS) -o $@ $(ENG_SRCS) $(SRV_SRCS) src/server_main.c $(ENG_MMX_GCC_NATIVE_OBJS) -lm $(HTTP_LIBS)
 
 # Resources (icon / splash / about logo / lamps). windres for gcc; the
 # Watcom build runs wrc instead (see watcom-gui). Both run from the repo
@@ -107,8 +120,8 @@ $(GUI_RES): gui/kunkun98.rc gui/resource.h gui/kunkun98.manifest \
 	@mkdir -p build/gui
 	windres -I. gui/kunkun98.rc -O coff -o $@
 
-kunkun98-gui: $(GUI_SRCS) $(COM_SRCS) $(ENG_SRCS) gui/layout.h gui/localized_strings.h $(GUI_RES) build/gui/ops_mmx.o
-	$(CC) $(CFLAGS) -Igui -Icommon -mwindows -o $@ $(GUI_SRCS) $(COM_SRCS) $(ENG_SRCS) $(GUI_RES) build/gui/ops_mmx.o \
+kunkun98-gui: $(GUI_SRCS) $(COM_SRCS) $(ENG_SRCS) gui/layout.h gui/localized_strings.h $(GUI_RES) $(ENG_MMX_GCC_GUI_OBJS)
+	$(CC) $(CFLAGS) -Igui -Icommon -mwindows -o $@ $(GUI_SRCS) $(COM_SRCS) $(ENG_SRCS) $(GUI_RES) $(ENG_MMX_GCC_GUI_OBJS) \
 	    -lgdi32 -luser32 -lcomdlg32 -lm -Wl,--stack=524288
 
 # ----------------------------------------------------------------------
