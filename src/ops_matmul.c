@@ -174,6 +174,24 @@ const lz_rowfn LZ_ROW_Q8[LZ_ROW_N] = {
 /* int8 matmul kernel for gs==32, dispatched by target platform
    (LZ_USE_MMX forces MMX for local verification; SSE2 is the x86-64
    default; ref is the fallback). */
+
+/* Fixed-epi predicate shared by the float and int-output Q8 impls, so
+   the two cannot disagree on when the int output applies. The tier is
+   decided once per call, ANDed with whether this tensor actually has
+   its int16 plane - lz_epi_prep declines shapes outside the derived
+   bound, so a tensor it refused keeps the float epilogue without the
+   selector knowing about in_dim. The plane is built here rather than
+   in the loader, which does not know each tensor's in_dim - every call
+   site does. Idempotent and one-time, so the cost lands on the first
+   token and nowhere after. The cast is the price of that: the plane is
+   derived state, not the weights, and making every matmul signature
+   non-const to say so would be a larger lie than this one. */
+static int q8_fixed_epi(const LZTensor *w, int in_dim, int nb, int nt) {
+    if (lz_epi_mode() && !lz_epi_ready(w)) lz_epi_prep((LZTensor *)w, in_dim);
+    return lz_epi_mode() && lz_epi_ready(w) && nb <= LZ_EPI_MAX_NG
+           && nt <= LZ_BATCH_MAX;
+}
+
 void matmul_q8_impl(float *o, const int8_t *xq, const float *xqs,
                            const LZTensor *w, int in_dim, int out_dim, int nt) {
     int i, tk, t;
@@ -181,21 +199,8 @@ void matmul_q8_impl(float *o, const int8_t *xq, const float *xqs,
     int nb = in_dim / 32;   /* 32-sub-block count */
     const int8_t *wend = w->q + (size_t)w->n;   /* prefetch upper bound */
     lz_rowfn row;
-    /* The tier is decided once per call, and it is ANDed with whether
-       this tensor actually has its int16 plane - lz_epi_prep declines
-       shapes outside the derived bound, so a tensor it refused keeps the
-       float epilogue without the selector knowing about in_dim. */
-    int fixed_epi;
-
-    /* Built here rather than in the loader, which does not know each
-       tensor's in_dim - every call site does. Idempotent and one-time,
-       so the cost lands on the first token and nowhere after. The cast
-       is the price of that: the plane is derived state, not the weights,
-       and making every matmul signature non-const to say so would be a
-       larger lie than this one. */
-    if (lz_epi_mode() && !lz_epi_ready(w)) lz_epi_prep((LZTensor *)w, in_dim);
-    fixed_epi = lz_epi_mode() && lz_epi_ready(w) && nb <= LZ_EPI_MAX_NG
-                && nt <= LZ_BATCH_MAX;
+    /* Same predicate as the float epilogue - see q8_fixed_epi. */
+    int fixed_epi = q8_fixed_epi(w, in_dim, nb, nt);
 
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
     if (fixed_epi) epi_pack_act(xqs, nb, nt);
@@ -237,6 +242,116 @@ void matmul_q8_impl(float *o, const int8_t *xq, const float *xqs,
                 : epi_q8(g_acc32 + (size_t)tk * nb, xqs + (size_t)tk * nb,
                          ws, nb, r, 1.0f / 256.0f);
     }
+}
+
+/* ---- int-accumulator output path (Q8_0) -------------------------------
+   Hands out what epi_q8 consumes - the per-32-input-group int32
+   accumulator and the two per-group scale factors (activation xsb,
+   weight ws) - so a caller can quantize in the int domain without the
+   float dequant round-trip. The accumulator is exact: int8 x int8
+   products summed in int32 have no rounding; the only float rounding in
+   the whole chain is epi_q8's sum order. o_acc carries the kernels'
+   256-scaled sub-block sum (the same value epi_q8's post=1/256
+   cancels), so a caller reproducing the float output from it must apply
+   that 1/256 post exactly like epi_q8 does - the 256 is a kernel
+   convention, not part of the scale factors. Both functions return 1
+   when the int output was written, 0 when the tensor is on the fixed-epi
+   tier (the float path would dequantize via epi_fixed, not epi_q8, so
+   the reconstruct-to-epi_q8 contract would not hold - keep the float
+   path instead). matmul_q8_int_scalar_ref is the contract; the impl
+   routes to it under --kernel ref and on shapes its row kernels
+   decline. Layouts (token-major, the same strides lz_matmul_xq_nt
+   documents for o):
+     o_acc[tk * (out_dim*nb) + i*nb + g]   nb = in_dim/32
+     o_xsb[tk * nb + g]
+     o_ws[i * (in_dim/w->gs) + g128] */
+
+int matmul_q8_int_scalar_ref(int32_t *o_acc, float *o_xsb, float *o_ws,
+                             const int8_t *xq, const float *xqs,
+                             const LZTensor *w, int in_dim, int out_dim,
+                             int nt) {
+    int i, g, k, tk;
+    int ng = in_dim / w->gs;   /* weight-group count */
+    int nb = in_dim / 32;      /* 32-sub-block count */
+
+    if (nt < 1) return 0;
+    if (!w || w->dtype != LZ_FMT_Q8_0 || !xq || !xqs || !o_acc || !o_xsb ||
+        !o_ws || w->gs < 32 || (w->gs % 32) != 0 || (in_dim % w->gs) != 0)
+        return 0;
+    if (q8_fixed_epi(w, in_dim, nb, nt)) return 0;
+
+    for (tk = 0; tk < nt; tk++) {
+        const int8_t *xqt = xq + (size_t)tk * in_dim;
+        memcpy(o_xsb + (size_t)tk * nb, xqs + (size_t)tk * nb,
+               (size_t)nb * sizeof(float));
+        for (i = 0; i < out_dim; i++) {
+            const int8_t *wr = w->q + (size_t)i * in_dim;
+            const float *ws = w->scale + (size_t)i * ng;
+            int32_t *acc = o_acc + ((size_t)tk * out_dim + i) * nb;
+            for (g = 0; g < nb; g++) {
+                const int8_t *wq = wr + (size_t)g * 32;
+                const int8_t *xr = xqt + (size_t)g * 32;
+                int32_t s = 0;
+                for (k = 0; k < 32; k++)
+                    s += (int32_t)wq[k] * (int32_t)xr[k];
+                acc[g] = s * 256; /* kernels hand out the dot scaled
+                                     x256; keep that contract exact */
+            }
+            if (tk == 0) /* ws is per row, shared by all tokens */
+                memcpy(o_ws + (size_t)i * ng, ws, (size_t)ng * sizeof(float));
+        }
+    }
+    return 1;
+}
+
+int matmul_q8_int_impl(int32_t *o_acc, float *o_xsb, float *o_ws,
+                       const int8_t *xq, const float *xqs,
+                       const LZTensor *w, int in_dim, int out_dim, int nt) {
+    int i, tk, t;
+    int ng, nb;
+    const int8_t *wend;
+    lz_rowfn row;
+
+    if (nt < 1) return 0;
+    if (nt > LZ_BATCH_MAX) nt = LZ_BATCH_MAX;
+    if (!w || w->dtype != LZ_FMT_Q8_0 || !xq || !xqs || !o_acc || !o_xsb ||
+        !o_ws || w->gs < 32 || (w->gs % 32) != 0 || (in_dim % w->gs) != 0)
+        return 0;
+    ng = in_dim / w->gs; /* weight-group count */
+    nb = in_dim / 32;    /* 32-sub-block count */
+    if (q8_fixed_epi(w, in_dim, nb, nt)) return 0;
+
+    if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
+    if (g_kernel == LZ_KERNEL_REF)
+        return matmul_q8_int_scalar_ref(o_acc, o_xsb, o_ws, xq, xqs, w,
+                                        in_dim, out_dim, nt);
+
+    row = lz_row_pick(LZ_ROW_Q8);
+    if (!row || in_dim > LZ_MM_WIDEN_MAX)
+        return matmul_q8_int_scalar_ref(o_acc, o_xsb, o_ws, xq, xqs, w,
+                                        in_dim, out_dim, nt);
+
+    /* Same widening as the float impl; row kernels and the acc32
+       scratch are shared. */
+    wend = w->q + (size_t)w->n;
+    for (t = 0; t < nt * in_dim; t++) g_xw[t] = (int16_t)xq[t];
+    /* xsb is per token, shared by all output rows - copied once, before
+       the row loop. */
+    for (tk = 0; tk < nt; tk++)
+        memcpy(o_xsb + (size_t)tk * nb, xqs + (size_t)tk * nb,
+               (size_t)nb * sizeof(float));
+
+    for (i = 0; i < out_dim; i++) {
+        const int8_t *wr = w->q + (size_t)i * in_dim;
+        const float *ws = w->scale + (size_t)i * ng;
+        row(g_acc32, wr, NULL, g_xw, nb, nt, in_dim, wend, NULL);
+        if (lz_cpu_has_mmx()) _mm_empty();
+        memcpy(o_ws + (size_t)i * ng, ws, (size_t)ng * sizeof(float));
+        for (tk = 0; tk < nt; tk++)
+            memcpy(o_acc + ((size_t)tk * out_dim + i) * nb,
+                   g_acc32 + (size_t)tk * nb, (size_t)nb * sizeof(int32_t));
+    }
+    return 1;
 }
 
 /* ---- matmul_scalar_ref_one + matmul_scalar_ref ---- */

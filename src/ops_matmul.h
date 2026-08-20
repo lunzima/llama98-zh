@@ -34,6 +34,25 @@ void matmul_t2_impl(float *o, const int8_t *xq, const float *xqs,
 void matmul_q16_impl(float *o, const int8_t *xq, const float *xqs,
                      const LZTensor *w, int in_dim, int out_dim, int nt);
 
+/* Int-accumulator output path for the Q8_0 matmul: hands out the raw
+   per-32-input-group int32 accumulator and the two per-group scale
+   factors (activation xsb, weight ws) that epi_q8 combines, so a
+   caller can quantize in the int domain without the float dequant
+   round-trip. o_acc is [tk * (out_dim*nb) + i*nb + g] (nb = in_dim/32)
+   and carries the kernels' 256-scaled sub-block sum - the same value
+   epi_q8's post=1/256 cancels, so a caller reproducing the float output
+   must apply that post exactly like epi_q8 does. o_xsb is [tk*nb + g];
+   o_ws is [i*(in_dim/w->gs) + g128]. Both return 1 when written, 0 when
+   the tensor is on the fixed-epi tier (use the float path instead). The
+   scalar-ref is the contract; the impl routes to it under --kernel ref. */
+int matmul_q8_int_impl(int32_t *o_acc, float *o_xsb, float *o_ws,
+                       const int8_t *xq, const float *xqs,
+                       const LZTensor *w, int in_dim, int out_dim, int nt);
+int matmul_q8_int_scalar_ref(int32_t *o_acc, float *o_xsb, float *o_ws,
+                             const int8_t *xq, const float *xqs,
+                             const LZTensor *w, int in_dim, int out_dim,
+                             int nt);
+
 /* Scalar reference (the contract every SIMD tier is judged against). */
 void matmul_scalar_ref(float *o, const int8_t *xq, const float *xqs,
                        const LZTensor *w, int in_dim, int out_dim, int nt);
