@@ -273,7 +273,24 @@ git commit -m "feat(ce): ARMv5TE 三值内积（标量 C 版，QEMU 对拍；纯
 
 ---
 
-### Task 4: SubLN 前向改造（删 layernorm，每投影加 RMSNorm）
+### Task 4: SubLN 前向改造（删 layernorm，每投影加 RMSNorm）— 已完成
+
+**验收状态**：引擎侧 SubLN 路径（含定点 Hadamard 与 per-token 激活量化）
+对训练侧参照 **1-cos 1.87e-4、argmax 5/5**；`use_subn=0` 逐字节不变
+（pilot 与 kunmoe-v2）；三目标编译（native gcc / ARM 交叉 / Watcom `-we`）。
+
+> 提交 `b97bfcc` 的信息把 Hadamard 记成「数值待修」，**那条结论是错的**，
+> 来自一份无效参照：它经 `from_pretrained` 生成，而 transformers v5 在 meta
+> 设备上建模型后不会重建 `persistent=False` 的 buffer，Hadamard 矩阵加载回来
+> 是非正交垃圾（`|H·Hᵀ−I|max = 1.0`）。缺陷在训练侧，已修（训练树 `7c1cee2`，
+> 改为按需构造 + 闸门 `test_hadamard_survives_from_pretrained`）。
+> 判据方法：参照要用**独立验证过**的路径重新生成，再排 2×2——每个引擎变体
+> 只匹配自己那份参照（对角线 1.9e-4 / 1.8e-4，非对角 1.1）。
+
+**剩余接口缺口**：导出的 bin **不记录该不该做 Hadamard**，引擎按
+`use_subn` + 维度是否 2 的幂无条件做。Hadamard 是在线变换不融进权重，所以
+两个 `hadamard_dim` 配置不同的模型导出后**逐字节相同**，引擎无法区分。
+真实 CE 配方两者一致故当前无害，但配方一旦分化就会静默错。
 
 **接口定案（A↔C 契约，已分析）**：
 
