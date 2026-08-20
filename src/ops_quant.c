@@ -563,13 +563,17 @@ int expof(float x) {
    The scale is a power of two, so it is exact in binary, adds no
    rounding of its own, and cannot differ between x87 and SSE.
 
+   qout/eout expose the Q15 image and its exponent instead of
+   discarding them: a caller building its own int output chain from x
+   (lz_rmsnorm_out_fixed_int) can reuse this scan rather than quantizing
+   x a second time. No static buffer of its own - a caller that does
+   not need the image passes NULL and nothing is written beyond the
+   accumulator, so a plain sum-of-squares call costs exactly what it did
+   before this parameter existed.
+
    Declines by returning -1 rather than truncating, so an oversized n
    runs the float path instead of being silently wrong. */
-float norm_ss_fixed(const float *x, int n) {
-    /* static, not stack: the target's stack is small. Single-threaded
-       forward pass, the same assumption lz_gdn_quantize_2p's res[]
-       already makes. */
-    static short q[LZ_NORM_MAX_N];
+float norm_ss_fixed(const float *x, int n, short *qout, int *eout) {
     union { float f; uint32_t u; } bit;
     long long acc = 0;
     float sc;
@@ -577,24 +581,29 @@ float norm_ss_fixed(const float *x, int n) {
 
     if (n > LZ_NORM_MAX_N || n <= 0) return -1.0f;
     bit.u = q8_amax(x, n);
-    if (bit.u == 0) return 0.0f;               /* all zero, exactly */
+    if (bit.u == 0) {                          /* all zero, exactly */
+        if (qout) for (i = 0; i < n; i++) qout[i] = 0;
+        if (eout) *eout = 0;
+        return 0.0f;
+    }
     e = 14 - expof(bit.f);
     sc = pow2f(e);
     for (i = 0; i < n; i++) {
         int v = q8_round(x[i] * sc);           /* one mul, one magic add */
         if (v >  32767) v =  32767;
         if (v < -32767) v = -32767;
-        q[i] = (short)v;
+        if (qout) qout[i] = (short)v;
         acc += (long long)(v * v);
     }
+    if (eout) *eout = e;
     return (float)acc * pow2f(-2 * e);
 }
 #else
 /* No fixed GDN in this build, so no expof to derive the scale from.
    Declining sends every caller down the float path, which is the
    correct behaviour for a build with no fixed arithmetic at all. */
-float norm_ss_fixed(const float *x, int n) {
-    (void)x; (void)n;
+float norm_ss_fixed(const float *x, int n, short *qout, int *eout) {
+    (void)x; (void)n; (void)qout; (void)eout;
     return -1.0f;
 }
 #endif /* LZ_GDN_FIXED */

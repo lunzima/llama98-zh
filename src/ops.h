@@ -139,6 +139,18 @@ void lz_rmsnorm_gated(float *o, const float *x, const float *g,
 void lz_rmsnorm_gated_int(int32_t *t, const float *x, const float *g,
                           const float *w, int n, float eps, float *deq);
 
+/* Same idea for the PLAIN norm's fixed tier: t receives a Q15
+   int-multiply result and *deq its power-of-two scale, for
+   lz_quantize_q8_tok_int. UNLIKE lz_rmsnorm_gated_int, this is NOT
+   bit-identical to lz_rmsnorm(fixed) + lz_quantize_q8_tok - the plain
+   norm's fixed tier has no existing Q15-chain-then-dequant sibling to
+   match (its float output loop multiplies x*inv*(1+w) directly, never
+   quantizing w or inv), so this int chain is a genuinely different,
+   value-changing computation, same footing as the scalar/conv/attn
+   fixed tiers. Callers gate on lz_norm_can_fixed(n). */
+void lz_rmsnorm_int(int32_t *t, const float *x, const float *w, int n,
+                    float eps, float *deq);
+
 /* o = x * rsqrt(sum(x^2) + eps)  - note sum, not mean */
 void lz_l2norm(float *o, const float *x, int n, float eps);
 
@@ -596,6 +608,21 @@ void lz_quantize_q8(const float *x, int n, int gs, int8_t *q, float *s);
    with lz_act_gs. q/s semantics match lz_quantize_q8: round-half-even,
    clamp [-127,127], all-zero row scale 1.0. n must be a multiple of 32. */
 void lz_quantize_q8_tok(const float *x, int n, int8_t *q, float *s);
+
+/* Int-domain twin of lz_quantize_q8_tok, for the fixed-tier plain
+   norm's int output (lz_rmsnorm_int): t holds the Q15-ish result the
+   norm wrote as int and deq its power-of-two scale. ONE scale over the
+   whole n-wide row, replicated into every n/32 xqs slot, same layout as
+   lz_quantize_q8_tok; same deq-folds-into-the-stored-scale fold as
+   lz_quantize_q8_int (see its comment) - the element loop rounds
+   t*127/t_amax and deq enters the scale only. Unlike the gated norm's
+   t, this t is NOT bounded to Q15 magnitude (lz_rmsnorm_out_fixed_int's
+   chain has one fewer shift), so (float)t can round values above 2^24
+   to 24-bit mantissa - the same ~1e-7 relative error
+   lz_quantize_q8_int64 already accepts for its wider accumulator,
+   negligible next to Q8's own granularity. n must be a multiple of 32. */
+void lz_quantize_q8_tok_int(const int32_t *t, int n, float deq,
+                            int8_t *q, float *s);
 
 /* Int-domain variant for the fixed-tier gated norm: the norm wrote its
    Q15 result t[] as int and handed the dequant scale deq (a power of

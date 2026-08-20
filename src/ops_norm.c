@@ -10,6 +10,10 @@
 #define LZ_GDN_FIXED 1
 #endif /* LZ_GDN_FIXED */
 
+#ifndef LZ_NORM_MAX_N
+#define LZ_NORM_MAX_N 4096
+#endif /* LZ_NORM_MAX_N */
+
 #include "ops.h"
 #include "err.h"
 #include "mmx_compat.h"
@@ -139,7 +143,7 @@ void lz_rmsnorm_gated_int(int32_t *t, const float *x, const float *g,
     float ssf;
     int i;
     if (lz_norm_mode()) {
-        ssf = norm_ss_fixed(x, n);
+        ssf = norm_ss_fixed(x, n, NULL, NULL);
         if (ssf >= 0.0f) {
             /* Same replacement as lz_rmsnorm_gated's fixed branch, minus
                the per-element dequant (1 cvt + 1 mul) the float output
@@ -159,13 +163,106 @@ have_ss_gated_int:
     lz_rmsnorm_gated_out_fixed_int(t, x, g, w, inv, n, NULL, deq);
 }
 
+#if LZ_GDN_FIXED
+/* Int output loop for lz_rmsnorm's fixed tier: o[i] = x[i]*inv*(1+w[i])
+   as a Q15 int-multiply, mirroring lz_rmsnorm_gated_out_fixed_int's
+   shape for a 2-factor (not 4-factor) chain. qx/ex are norm_ss_fixed's
+   own Q15 image of x and its exponent, reused here instead of
+   requantizing x a second time - the whole reason norm_ss_fixed exposes
+   them. (1+w[i]), not w[i] alone, gets quantized: w on its own can sit
+   far from 1 in magnitude (small norm weights are common), so a scale
+   sized for w could put the literal 1.0 far outside strong 15-bit range
+   once added in; quantizing the sum directly sidesteps that.
+
+   Only two factors beyond x (wp, inv), so only ONE >>15 shift - the
+   first pairing (qx*qwp) accumulates unshifted, the second
+   (*qinv) consumes the one shift, unlike the gated chain's three
+   shifts for its four factors. t receives the Q15 product, *deq the
+   power-of-two scale lz_quantize_q8_tok_int folds into the row scale. */
+void lz_rmsnorm_out_fixed_int(int32_t *t, const short *qx, int ex,
+                              const float *w, float inv, int n,
+                              float *deq) {
+    /* static, not stack: same single-threaded-forward-pass assumption
+       norm_ss_fixed's own scratch used to make (see its history). */
+    static float wp[LZ_NORM_MAX_N];
+    union { float f; uint32_t u; } bit;
+    float sw;
+    int ew, ei;
+    int32_t qinv;
+    int i;
+
+    for (i = 0; i < n; i++) wp[i] = 1.0f + w[i];
+    bit.u = q8_amax(wp, n); ew = 14 - expof(bit.f); sw = pow2f(ew);
+    bit.u = q8_amax(&inv, 1); ei = 14 - expof(bit.f);
+    qinv = q8_round(inv * pow2f(ei));
+    if (qinv > 32767) qinv = 32767;
+    if (qinv < -32767) qinv = -32767;
+    for (i = 0; i < n; i++) {
+        int qw = q8_round(wp[i] * sw);
+        int64_t t64;
+        if (qw > 32767) qw = 32767; else if (qw < -32767) qw = -32767;
+        t64 = (int64_t)qx[i] * qw;      /* x*(1+w), unshifted */
+        t64 = (t64 * qinv) >> 15;        /* x*(1+w)*inv */
+        t[i] = (int32_t)t64;
+    }
+    *deq = pow2f(15 - ex - ew - ei);
+}
+#else
+void lz_rmsnorm_out_fixed_int(int32_t *t, const short *qx, int ex,
+                              const float *w, float inv, int n,
+                              float *deq) {
+    (void)t; (void)qx; (void)ex; (void)w; (void)inv; (void)n;
+    *deq = 0.0f;
+}
+#endif /* LZ_GDN_FIXED */
+
+/* lz_rmsnorm fixed-tier wrapper for the int output: same sum-of-squares
+   as lz_rmsnorm, then the Q15 int-multiply output loop writing int
+   instead of dequantizing to float and quantizing that. qx/ex come
+   straight from norm_ss_fixed's own scan of x - reused by
+   lz_rmsnorm_out_fixed_int rather than requantized. Only valid when
+   lz_norm_can_fixed(n); callers gate on it. */
+void lz_rmsnorm_int(int32_t *t, const float *x, const float *w, int n,
+                    float eps, float *deq) {
+    static short qx[LZ_NORM_MAX_N];
+    float ss = 0.0f;
+    float inv;
+    float ssf;
+    int ex = 0;
+    int i;
+    if (lz_norm_mode()) {
+        ssf = norm_ss_fixed(x, n, qx, &ex);
+        if (ssf >= 0.0f) {
+            /* norm_ss_fixed's own n+1 mul, n add, 1 cvt (see
+               lz_rmsnorm's comment) are unchanged - qx/ex are its own
+               scan, reused rather than requantized. The int output loop
+               replaces the float output loop's 2n mul + n add with:
+               wp=1+w (n add), q8_round per wp element (n mul, n add),
+               and qinv's own q8_round (1 mul, 1 add) - net n+1 mul,
+               2n+1 add, no cvt (t stays int, no per-element dequant).
+               Plus the divide+eps (1 div, 1 add). */
+            LZ_FCX(LZ_FC_NORM, 2 * n + 2, 3 * n + 2, 1, 1, 0);
+            ss = ssf;
+            goto have_ss_int;
+        }
+    }
+    /* float ss fallback - same billing as lz_rmsnorm's float row (the
+       output loop runs unconditionally below regardless of which ss
+       branch fired, same as lz_rmsnorm_gated_int's fallback). */
+    LZ_FCX(LZ_FC_NORM, 3 * n, 2 * n + 1, 1, 0, 0);
+    for (i = 0; i < n; i++) ss += x[i] * x[i];
+have_ss_int:
+    inv = lz_rsqrt(ss / (float)n + eps);
+    lz_rmsnorm_out_fixed_int(t, qx, ex, w, inv, n, deq);
+}
+
 void lz_rmsnorm(float *o, const float *x, const float *w, int n, float eps) {
     float ss = 0.0f;
     float inv;
     float ssf;
     int i;
     if (lz_norm_mode()) {
-        ssf = norm_ss_fixed(x, n);
+        ssf = norm_ss_fixed(x, n, NULL, NULL);
         if (ssf >= 0.0f) {
             /* norm_ss_fixed itself is mul + q8_round per element (2n,
                the same two float ops the loop below spends) plus a
@@ -210,7 +307,7 @@ void lz_rmsnorm_gated(float *o, const float *x, const float *g,
     int i;
     int fixed_ss = 0;
     if (lz_norm_mode()) {
-        ssf = norm_ss_fixed(x, n);
+        ssf = norm_ss_fixed(x, n, NULL, NULL);
         if (ssf >= 0.0f) {
             /* Same replacement as lz_rmsnorm: norm_ss_fixed's own 2n+2
                in place of the 2n float ss loop. The fixed output loop
@@ -253,7 +350,7 @@ void lz_l2norm(float *o, const float *x, int n, float eps) {
     float ssf;
     int i;
     if (lz_norm_mode()) {
-        ssf = norm_ss_fixed(x, n);
+        ssf = norm_ss_fixed(x, n, NULL, NULL);
         if (ssf >= 0.0f) {
             /* Same replacement again: norm_ss_fixed's 2n+2 in place of
                the 2n float ss loop. Untouched: the 1n output loop (a

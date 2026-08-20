@@ -858,6 +858,10 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
         /* SubLN Hadamard scratch: two n-wide int32 halves, n <= qcap. */
         s->fwht_scratch = (int32_t *)xcalloc((size_t)2 * qcap, sizeof(int32_t),
                                              &ok, &s->bytes_alloc);
+        /* SubLN plain-norm int output scratch: one n-wide int32 row,
+           n <= qcap - see forward.h's field comment. */
+        s->subn_norm_int = (int32_t *)xcalloc((size_t)qcap, sizeof(int32_t),
+                                              &ok, &s->bytes_alloc);
     }
     if (!ok) {
         if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_STATE_ALLOC);
@@ -957,6 +961,7 @@ void lz_state_free(LZRunState *s) {
     free(s->conv_state_q); free(s->conv_mw);
     free(s->conv_sig_k1); free(s->conv_sig_oscale2);
     free(s->xq); free(s->xqs); free(s->wscr); free(s->fwht_scratch);
+    free(s->subn_norm_int);
     free(s->rope_cs);
     free(s->cache_idx);
     memset(s, 0, sizeof(*s));
@@ -2145,39 +2150,97 @@ static void forward_kda(const LZModel *m, LZRunState *s,
            for Q8 weights the matmul reads the quantized xq/xqs, not the
            float scratch. f_a/b_proj stay on raw s->xb - no SubLN norm
            field exists for the low-rank decay-gate projections. */
-        for (tk = 0; tk < nt; tk++)
-            lz_rmsnorm(s->xb2 + (size_t)tk * hdim, s->xb + (size_t)tk * hdim,
-                       lz_t_f32(&L->kda_q_norm, s->wscr), hdim, c->rms_norm_eps);
-        for (tk = 0; tk < nt; tk++)
-            lz_quantize_q8_tok(s->xb2 + (size_t)tk * hdim, hdim,
-                               s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
+        /* --norm-write int: fixed-tier norm writes a Q15 int product
+           straight into subn_norm_int (single-token scratch, not
+           nt-wide - see forward.h), the immediate tok-int quantize
+           reads it, and s->xb2 is never touched. Falls back to the
+           float norm + lz_quantize_q8_tok pair when the tier is off or
+           hdim is out of norm_ss_fixed's range. */
+        if (lz_norm_int() && lz_norm_can_fixed(hdim) &&
+            gsa > 0 && (hdim % gsa) == 0) {
+            for (tk = 0; tk < nt; tk++) {
+                float deq;
+                lz_rmsnorm_int(s->subn_norm_int, s->xb + (size_t)tk * hdim,
+                               lz_t_f32(&L->kda_q_norm, s->wscr), hdim,
+                               c->rms_norm_eps, &deq);
+                lz_quantize_q8_tok_int(s->subn_norm_int, hdim, deq,
+                                       s->xq + (size_t)tk * hdim,
+                                       s->xqs + (size_t)tk * nsa);
+            }
+        } else {
+            for (tk = 0; tk < nt; tk++)
+                lz_rmsnorm(s->xb2 + (size_t)tk * hdim, s->xb + (size_t)tk * hdim,
+                           lz_t_f32(&L->kda_q_norm, s->wscr), hdim, c->rms_norm_eps);
+            for (tk = 0; tk < nt; tk++)
+                lz_quantize_q8_tok(s->xb2 + (size_t)tk * hdim, hdim,
+                                   s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
+        }
         lz_matmul_xq_nt(s->kda_q, s->xb2, s->xq, s->xqs, &L->kda_q_proj,
                         hdim, kdim, nt);
 
-        for (tk = 0; tk < nt; tk++)
-            lz_rmsnorm(s->xb2 + (size_t)tk * hdim, s->xb + (size_t)tk * hdim,
-                       lz_t_f32(&L->kda_k_norm, s->wscr), hdim, c->rms_norm_eps);
-        for (tk = 0; tk < nt; tk++)
-            lz_quantize_q8_tok(s->xb2 + (size_t)tk * hdim, hdim,
-                               s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
+        if (lz_norm_int() && lz_norm_can_fixed(hdim) &&
+            gsa > 0 && (hdim % gsa) == 0) {
+            for (tk = 0; tk < nt; tk++) {
+                float deq;
+                lz_rmsnorm_int(s->subn_norm_int, s->xb + (size_t)tk * hdim,
+                               lz_t_f32(&L->kda_k_norm, s->wscr), hdim,
+                               c->rms_norm_eps, &deq);
+                lz_quantize_q8_tok_int(s->subn_norm_int, hdim, deq,
+                                       s->xq + (size_t)tk * hdim,
+                                       s->xqs + (size_t)tk * nsa);
+            }
+        } else {
+            for (tk = 0; tk < nt; tk++)
+                lz_rmsnorm(s->xb2 + (size_t)tk * hdim, s->xb + (size_t)tk * hdim,
+                           lz_t_f32(&L->kda_k_norm, s->wscr), hdim, c->rms_norm_eps);
+            for (tk = 0; tk < nt; tk++)
+                lz_quantize_q8_tok(s->xb2 + (size_t)tk * hdim, hdim,
+                                   s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
+        }
         lz_matmul_xq_nt(s->kda_k, s->xb2, s->xq, s->xqs, &L->kda_k_proj,
                         hdim, kdim, nt);
 
-        for (tk = 0; tk < nt; tk++)
-            lz_rmsnorm(s->xb2 + (size_t)tk * hdim, s->xb + (size_t)tk * hdim,
-                       lz_t_f32(&L->kda_v_norm, s->wscr), hdim, c->rms_norm_eps);
-        for (tk = 0; tk < nt; tk++)
-            lz_quantize_q8_tok(s->xb2 + (size_t)tk * hdim, hdim,
-                               s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
+        if (lz_norm_int() && lz_norm_can_fixed(hdim) &&
+            gsa > 0 && (hdim % gsa) == 0) {
+            for (tk = 0; tk < nt; tk++) {
+                float deq;
+                lz_rmsnorm_int(s->subn_norm_int, s->xb + (size_t)tk * hdim,
+                               lz_t_f32(&L->kda_v_norm, s->wscr), hdim,
+                               c->rms_norm_eps, &deq);
+                lz_quantize_q8_tok_int(s->subn_norm_int, hdim, deq,
+                                       s->xq + (size_t)tk * hdim,
+                                       s->xqs + (size_t)tk * nsa);
+            }
+        } else {
+            for (tk = 0; tk < nt; tk++)
+                lz_rmsnorm(s->xb2 + (size_t)tk * hdim, s->xb + (size_t)tk * hdim,
+                           lz_t_f32(&L->kda_v_norm, s->wscr), hdim, c->rms_norm_eps);
+            for (tk = 0; tk < nt; tk++)
+                lz_quantize_q8_tok(s->xb2 + (size_t)tk * hdim, hdim,
+                                   s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
+        }
         lz_matmul_xq_nt(s->kda_v, s->xb2, s->xq, s->xqs, &L->kda_v_proj,
                         hdim, vdim, nt);
 
-        for (tk = 0; tk < nt; tk++)
-            lz_rmsnorm(s->xb2 + (size_t)tk * hdim, s->xb + (size_t)tk * hdim,
-                       lz_t_f32(&L->kda_g_norm, s->wscr), hdim, c->rms_norm_eps);
-        for (tk = 0; tk < nt; tk++)
-            lz_quantize_q8_tok(s->xb2 + (size_t)tk * hdim, hdim,
-                               s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
+        if (lz_norm_int() && lz_norm_can_fixed(hdim) &&
+            gsa > 0 && (hdim % gsa) == 0) {
+            for (tk = 0; tk < nt; tk++) {
+                float deq;
+                lz_rmsnorm_int(s->subn_norm_int, s->xb + (size_t)tk * hdim,
+                               lz_t_f32(&L->kda_g_norm, s->wscr), hdim,
+                               c->rms_norm_eps, &deq);
+                lz_quantize_q8_tok_int(s->subn_norm_int, hdim, deq,
+                                       s->xq + (size_t)tk * hdim,
+                                       s->xqs + (size_t)tk * nsa);
+            }
+        } else {
+            for (tk = 0; tk < nt; tk++)
+                lz_rmsnorm(s->xb2 + (size_t)tk * hdim, s->xb + (size_t)tk * hdim,
+                           lz_t_f32(&L->kda_g_norm, s->wscr), hdim, c->rms_norm_eps);
+            for (tk = 0; tk < nt; tk++)
+                lz_quantize_q8_tok(s->xb2 + (size_t)tk * hdim, hdim,
+                                   s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
+        }
         lz_matmul_xq_nt(s->zbuf, s->xb2, s->xq, s->xqs, &L->kda_g_proj,
                         hdim, vdim, nt);
 
@@ -2707,21 +2770,49 @@ static void dense_ffn_step(const LZModel *m, LZRunState *s,
            the down_proj matmul below), down normalizes the intermediate
            activation with down_norm (s->hb2 as scratch, dead after the
            SwiGLU loop). */
-        for (tk = 0; tk < nt; tk++)
-            lz_rmsnorm(s->xb2 + (size_t)tk * dim, s->xb + (size_t)tk * dim,
-                       lz_t_f32(&L->gate_norm, s->wscr), dim, c->rms_norm_eps);
-        for (tk = 0; tk < nt; tk++)
-            lz_quantize_q8_tok(s->xb2 + (size_t)tk * dim, dim,
-                               s->xq + (size_t)tk * dim, s->xqs + (size_t)tk * nsg);
+        /* --norm-write int: see forward_kda's matching comment - same
+           subn_norm_int scratch, same fallback conditions. */
+        if (lz_norm_int() && lz_norm_can_fixed(dim) &&
+            gsg > 0 && (dim % gsg) == 0) {
+            for (tk = 0; tk < nt; tk++) {
+                float deq;
+                lz_rmsnorm_int(s->subn_norm_int, s->xb + (size_t)tk * dim,
+                               lz_t_f32(&L->gate_norm, s->wscr), dim,
+                               c->rms_norm_eps, &deq);
+                lz_quantize_q8_tok_int(s->subn_norm_int, dim, deq,
+                                       s->xq + (size_t)tk * dim,
+                                       s->xqs + (size_t)tk * nsg);
+            }
+        } else {
+            for (tk = 0; tk < nt; tk++)
+                lz_rmsnorm(s->xb2 + (size_t)tk * dim, s->xb + (size_t)tk * dim,
+                           lz_t_f32(&L->gate_norm, s->wscr), dim, c->rms_norm_eps);
+            for (tk = 0; tk < nt; tk++)
+                lz_quantize_q8_tok(s->xb2 + (size_t)tk * dim, dim,
+                                   s->xq + (size_t)tk * dim, s->xqs + (size_t)tk * nsg);
+        }
         lz_matmul_xq_nt(s->hb, s->xb2, s->xq, s->xqs, &L->gate_proj, dim,
                         idim, nt);
 
-        for (tk = 0; tk < nt; tk++)
-            lz_rmsnorm(s->xb2 + (size_t)tk * dim, s->xb + (size_t)tk * dim,
-                       lz_t_f32(&L->up_norm, s->wscr), dim, c->rms_norm_eps);
-        for (tk = 0; tk < nt; tk++)
-            lz_quantize_q8_tok(s->xb2 + (size_t)tk * dim, dim,
-                               s->xq + (size_t)tk * dim, s->xqs + (size_t)tk * nsg);
+        if (lz_norm_int() && lz_norm_can_fixed(dim) &&
+            gsg > 0 && (dim % gsg) == 0) {
+            for (tk = 0; tk < nt; tk++) {
+                float deq;
+                lz_rmsnorm_int(s->subn_norm_int, s->xb + (size_t)tk * dim,
+                               lz_t_f32(&L->up_norm, s->wscr), dim,
+                               c->rms_norm_eps, &deq);
+                lz_quantize_q8_tok_int(s->subn_norm_int, dim, deq,
+                                       s->xq + (size_t)tk * dim,
+                                       s->xqs + (size_t)tk * nsg);
+            }
+        } else {
+            for (tk = 0; tk < nt; tk++)
+                lz_rmsnorm(s->xb2 + (size_t)tk * dim, s->xb + (size_t)tk * dim,
+                           lz_t_f32(&L->up_norm, s->wscr), dim, c->rms_norm_eps);
+            for (tk = 0; tk < nt; tk++)
+                lz_quantize_q8_tok(s->xb2 + (size_t)tk * dim, dim,
+                                   s->xq + (size_t)tk * dim, s->xqs + (size_t)tk * nsg);
+        }
         lz_matmul_xq_nt(s->hb2, s->xb2, s->xq, s->xqs, &L->up_proj, dim,
                         idim, nt);
     } else {
@@ -2757,19 +2848,37 @@ static void dense_ffn_step(const LZModel *m, LZRunState *s,
            (model.c resolve_hadamard). 0 = no Hadamard. */
         {
             int dblk = c->hadamard_down;
-            for (tk = 0; tk < nt; tk++)
-                lz_rmsnorm(s->hb2 + (size_t)tk * idim, s->hb + (size_t)tk * idim,
-                           lz_t_f32(&L->down_norm, s->wscr), idim, c->rms_norm_eps);
-            if (dblk > 1) {
-                for (tk = 0; tk < nt; tk++)
-                    subn_fwht_quant(s->hb2 + (size_t)tk * idim, idim, dblk,
-                                    s->xq + (size_t)tk * idim,
-                                    s->xqs + (size_t)tk * nsd, s->fwht_scratch);
+            /* --norm-write int only applies when dblk<=1: the dblk>1
+               branch feeds subn_fwht_quant, which needs the FLOAT row to
+               run the Hadamard transform before it quantizes - there is
+               no int-input twin of it, so that branch stays exactly as
+               before regardless of the tier. */
+            if (dblk <= 1 && lz_norm_int() && lz_norm_can_fixed(idim) &&
+                gsd > 0 && (idim % gsd) == 0) {
+                for (tk = 0; tk < nt; tk++) {
+                    float deq;
+                    lz_rmsnorm_int(s->subn_norm_int, s->hb + (size_t)tk * idim,
+                                   lz_t_f32(&L->down_norm, s->wscr), idim,
+                                   c->rms_norm_eps, &deq);
+                    lz_quantize_q8_tok_int(s->subn_norm_int, idim, deq,
+                                           s->xq + (size_t)tk * idim,
+                                           s->xqs + (size_t)tk * nsd);
+                }
             } else {
                 for (tk = 0; tk < nt; tk++)
-                    lz_quantize_q8_tok(s->hb2 + (size_t)tk * idim, idim,
-                                       s->xq + (size_t)tk * idim,
-                                       s->xqs + (size_t)tk * nsd);
+                    lz_rmsnorm(s->hb2 + (size_t)tk * idim, s->hb + (size_t)tk * idim,
+                               lz_t_f32(&L->down_norm, s->wscr), idim, c->rms_norm_eps);
+                if (dblk > 1) {
+                    for (tk = 0; tk < nt; tk++)
+                        subn_fwht_quant(s->hb2 + (size_t)tk * idim, idim, dblk,
+                                        s->xq + (size_t)tk * idim,
+                                        s->xqs + (size_t)tk * nsd, s->fwht_scratch);
+                } else {
+                    for (tk = 0; tk < nt; tk++)
+                        lz_quantize_q8_tok(s->hb2 + (size_t)tk * idim, idim,
+                                           s->xq + (size_t)tk * idim,
+                                           s->xqs + (size_t)tk * nsd);
+                }
             }
         }
         lz_matmul_xq_nt(s->xb2, s->hb2, s->xq, s->xqs, &L->down_proj, idim,

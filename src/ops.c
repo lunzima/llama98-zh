@@ -486,6 +486,54 @@ void lz_quantize_q8_tok(const float *x, int n, int8_t *q, float *s) {
     }
 }
 
+/* Int-domain twin of lz_quantize_q8_tok (see ops.h). t/deq are
+   lz_rmsnorm_out_fixed_int's own output; the amax scan, the fast/else
+   split and the element rounding all mirror lz_quantize_q8_int's fold
+   (see its comment), just grouped by the whole row instead of gs. */
+void lz_quantize_q8_tok_int(const int32_t *t, int n, float deq,
+                            int8_t *q, float *s) {
+    int ns = n / 32;
+    int k;
+    int32_t tam = 0;
+    float amax, inv, sg;
+    int fast;
+    if (ns < 1) return;                 /* defense: n not a multiple of 32 */
+    for (k = 0; k < n; k++) {
+        int32_t a = t[k] < 0 ? (int32_t)(0u - (uint32_t)t[k]) : t[k];
+        if (a > tam) tam = a;
+    }
+    amax = (float)tam * deq;
+    if (amax > 0.0f) {
+        sg = amax * LZ_Q8_INV127;
+        inv = 127.0f / amax;
+        fast = (inv <= FLT_MAX);
+        if (sg < LZ_Q8_MIN_SCALE_F) {
+            sg = 1.0f;
+            inv = 0.0f;
+            fast = 1;
+        }
+    } else {
+        sg = 1.0f;
+        inv = 0.0f;
+        fast = 1;
+    }
+    for (k = 0; k < ns; k++) s[k] = sg;
+    if (fast) {
+        float inv_elem = (inv == 0.0f) ? 0.0f : 127.0f / (float)tam;
+        for (k = 0; k < n; k++) {
+            int qi = q8_round((float)t[k] * inv_elem);
+            qi = (qi > 127) ? 127 : qi;
+            q[k] = (int8_t)((qi < -127) ? -127 : qi);
+        }
+    } else {
+        for (k = 0; k < n; k++) {
+            int qi = q8_round(((float)t[k] * deq) / sg);
+            qi = (qi > 127) ? 127 : qi;
+            q[k] = (int8_t)((qi < -127) ? -127 : qi);
+        }
+    }
+}
+
 /* Int-domain Q8 quantize for the fixed-tier gated norm. t holds the Q15
    result the norm wrote as int (no per-element dequant) and deq its
    power-of-two scale. The group's float amax would be t_amax*deq, so

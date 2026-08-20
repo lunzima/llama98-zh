@@ -37,8 +37,13 @@ float lz_sig_q15_t_offset(void);
 void lz_sig_q15_fold(float oscale, float *k1, float *oscale2);
 
 /* Sum-of-squares in integer domain (fixed-tier norms). Returns -1 to
-   decline (caller runs the float path). */
-float norm_ss_fixed(const float *x, int n);
+   decline (caller runs the float path). qout, if non-NULL, receives
+   the Q15 image of x the scan already computed (n shorts); eout, if
+   non-NULL, receives its exponent (sc = pow2f(*eout)). Both NULL is a
+   pure sum-of-squares call, same cost as before - callers that only
+   want ss (l2norm, the gated norms) pass NULL,NULL and nothing is
+   written past the accumulator. On decline, qout/eout are untouched. */
+float norm_ss_fixed(const float *x, int n, short *qout, int *eout);
 
 /* x87 precision control (Watcom / 32-bit x87 only). */
 #if defined(__WATCOMC__) || defined(LZ_X87_FLOAT_CW)
