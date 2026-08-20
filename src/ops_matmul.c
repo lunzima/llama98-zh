@@ -40,7 +40,19 @@
    would alias.
 
    token-major: g_xw[t*in_dim + k], g_acc32[t*nsb + s], g_xg[t*ng + g]. */
-static int16_t g_xw[LZ_BATCH_MAX * LZ_MM_WIDEN_MAX];
+
+/* lz_dot32_t2_arm_asm reads g_xw with LDM, which faults on ARM below a
+   word boundary. int16_t promises 2 bytes, so the alignment gcc happens
+   to give a 64KB array is not the contract - this is. The offsets stay
+   aligned on their own: every block pointer is g_xw plus a multiple of
+   64 bytes, in_dim being a multiple of 32 by the T2 dispatch guard.
+   Empty off ARM; Watcom never sees __arm__ and has no __attribute__. */
+#if defined(LZ_T2_ARM_ASM_EXTERN)
+#define LZ_XW_ALIGN __attribute__((aligned(4)))
+#else
+#define LZ_XW_ALIGN
+#endif /* LZ_T2_ARM_ASM_EXTERN */
+static int16_t g_xw[LZ_BATCH_MAX * LZ_MM_WIDEN_MAX] LZ_XW_ALIGN;
 static float   g_xg[LZ_BATCH_MAX * (LZ_MM_WIDEN_MAX / 32)];
 /* Unguarded: the SSE2-intrinsics path writes here too now that it fills
    acc32 instead of fusing the float work into the integer loop. Costs
@@ -1029,6 +1041,27 @@ static void row_t2_arm(int32_t *acc32, const void *w4, const void *w2v,
             acc[s] = lz_dot32_t2_arm(p2 + (size_t)s * 8, xwt + (size_t)s * 32);
     }
 }
+
+#if defined(LZ_T2_ARM_ASM_EXTERN)
+/* Same row, hand-written leaf. A separate row function rather than a
+   function pointer inside one: the leaf is called nb times per row, and
+   an indirect call there would cost more than the kernel it dispatches
+   to (dispatch is once per matmul, the same rule lz_row_pick follows). */
+static void row_t2_arm_asm(int32_t *acc32, const void *w4, const void *w2v,
+                           const int16_t *xw, int nb, int nt, int in_dim,
+                           const void *pf_end, const void *pf_end2) {
+    const unsigned char *p2 = (const unsigned char *)w4;
+    int tk, s;
+    (void)w2v; (void)pf_end; (void)pf_end2;
+    for (tk = 0; tk < nt; tk++) {
+        const int16_t *xwt = xw + (size_t)tk * in_dim;
+        int32_t *acc = acc32 + (size_t)tk * nb;
+        for (s = 0; s < nb; s++)
+            acc[s] = lz_dot32_t2_arm_asm(p2 + (size_t)s * 8,
+                                         xwt + (size_t)s * 32);
+    }
+}
+#endif /* LZ_T2_ARM_ASM_EXTERN */
 #endif /* __arm__ */
 
 /* ---- LZ_ROW_T2 ---- */
@@ -1153,9 +1186,16 @@ void matmul_t2_impl(float *o, const int8_t *xq, const float *xqs,
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
     row = lz_row_pick(LZ_ROW_T2);
 #if defined(__arm__)
-    /* All LZ_ROW_T2 slots are x86 SIMD and NULL on the ARM build; the
-       unrolled scalar-C kernel (src/ops_t2_arm.c) is the ARM tier. */
+    /* All LZ_ROW_T2 slots are x86 SIMD and NULL on the ARM build, so the
+       ARM column is picked here instead of from the table. Two cells,
+       one enum value each (rule 8): the unrolled C and the hand-written
+       asm, both in src/ops_t2_arm.c. LZ_KERNEL_REF never reaches this
+       function - lz_matmul_xq sends it to matmul_scalar_ref first. */
+#if defined(LZ_T2_ARM_ASM_EXTERN)
+    row = (g_kernel == LZ_KERNEL_ARM_ASM) ? row_t2_arm_asm : row_t2_arm;
+#else
     row = row_t2_arm;
+#endif /* LZ_T2_ARM_ASM_EXTERN */
 #endif /* __arm__ */
     if (!row || in_dim > LZ_MM_WIDEN_MAX || ng > LZ_MM_WIDEN_MAX / 32) {
         matmul_scalar_ref(o, xq, xqs, w, in_dim, out_dim, nt);

@@ -16,6 +16,8 @@
 #include "ops_kernel_shared.h"
 #include "ops_quant.h"  /* lz_cpu_has_mmx (non-static, from module 1) */
 #include "ops_sched.h"
+#include "ops_t2_arm.h" /* LZ_T2_ARM_ASM_EXTERN: one home for "this build
+                           carries the ARM asm tier" */
 
 #ifndef LZ_GDN_FIXED
 #define LZ_GDN_FIXED 1
@@ -395,7 +397,12 @@ const char *lz_prefetch_name(void) {
 /* ---- kernel detection and dispatch ----------------------------------- */
 
 static int kernel_detect(void) {
-#if defined(__WATCOMC__)
+#if defined(LZ_T2_ARM_ASM_EXTERN)
+    /* No CPUID question on this target: -march=armv5te is a build-time
+       floor (build/arm/build_engine.sh), and the asm tier needs exactly
+       that and nothing later. */
+    return LZ_KERNEL_ARM_ASM;
+#elif defined(__WATCOMC__)
     unsigned edx = lz_cpuid1_edx();
     if (edx & (1u << 26)) return LZ_KERNEL_SSE2;
     if (edx & (1u << 23)) return LZ_KERNEL_MMX;
@@ -416,10 +423,27 @@ static int kernel_detect(void) {
 
 int lz_kernel_select(int which) {
     int have = kernel_detect();
+    /* The ARM values are not "a tier this x86 machine happens to lack",
+       they are a different instruction set: accepting one here would set
+       g_kernel to a value no x86 dispatch tests for, and every
+       `g_kernel == LZ_KERNEL_REF` site would quietly answer no. Clamped
+       first, before the per-build clamps below, so exactly one of the
+       two mistakes is possible - falling back - and never the other. */
+#if !defined(LZ_T2_ARM_ASM_EXTERN)
+    if (which == LZ_KERNEL_ARM || which == LZ_KERNEL_ARM_ASM)
+        which = LZ_KERNEL_AUTO;
+#endif /* !LZ_T2_ARM_ASM_EXTERN */
     if (which == LZ_KERNEL_AUTO) {
         g_kernel = have;
     } else {
-#if defined(__WATCOMC__)
+#if defined(LZ_T2_ARM_ASM_EXTERN)
+        /* Three tiers really run here and all three must be selectable,
+           or the bit-identity comparison between them is unavailable:
+           ref (the shared scalar), arm-c, arm-asm. Anything else is an
+           x86 tier and clamps. */
+        g_kernel = (which == LZ_KERNEL_REF || which == LZ_KERNEL_ARM ||
+                    which == LZ_KERNEL_ARM_ASM) ? which : have;
+#elif defined(__WATCOMC__)
         g_kernel = (which == LZ_KERNEL_SSE2 && have != LZ_KERNEL_SSE2)
                    ? have : which;
 #elif defined(LZ_DOT_MMX_EXTERN) && defined(LZ_ROW_SSE2_EXTERN)
@@ -436,11 +460,15 @@ const char *lz_kernel_name(void) {
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
     if (g_kernel == LZ_KERNEL_SSE2) return "sse2";
     if (g_kernel == LZ_KERNEL_MMX) return "mmx";
+    if (g_kernel == LZ_KERNEL_ARM_ASM) return "arm-asm";
+    if (g_kernel == LZ_KERNEL_ARM) return "arm-c";
     return "ref";
 }
 
 const char *lz_build_paths(void) {
-#if defined(__WATCOMC__)
+#if defined(LZ_T2_ARM_ASM_EXTERN)
+    return "arm-c+arm-asm";
+#elif defined(__WATCOMC__)
     return "mmx-asm+sse2-asm";
 #elif defined(LZ_DOT_MMX_EXTERN) && defined(LZ_ROW_SSE2_EXTERN)
     return "mmx-intrin+sse2-intrin";
@@ -456,7 +484,9 @@ const char *lz_build_paths(void) {
 const char *lz_kernel_tier(void) {
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
     if (g_kernel == LZ_KERNEL_REF) return "ref";
-#if defined(__WATCOMC__) || defined(LZ_DOT_MMX_EXTERN)
+#if defined(LZ_T2_ARM_ASM_EXTERN)
+    return (g_kernel == LZ_KERNEL_ARM_ASM) ? "arm-asm" : "arm-c";
+#elif defined(__WATCOMC__) || defined(LZ_DOT_MMX_EXTERN)
 #  ifdef __WATCOMC__
     return (g_kernel == LZ_KERNEL_SSE2) ? "sse2-asm" : "mmx-asm";
 #  else

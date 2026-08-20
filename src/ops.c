@@ -48,6 +48,7 @@
                            LZ_Q8_MIN_SCALE_F, LZ_Q8_INV127, LZ_Q15_INV */
 #include "ops_sched.h"   /* lz_q8r_tier, q8r_have_simd */
 #include "ops_matmul.h"  /* matmul impls, LZ_ROW_* tables, epilogue fns */
+#include "ops_t2_arm.h"  /* LZ_T2_ARM_ASM_EXTERN */
 
 /* Accumulator bound for the fixed conv tier, derived not chosen.
    k products of two values bounded by B reach k*B^2, which must stay
@@ -1400,6 +1401,19 @@ void lz_matmul_xq_nt(float *o, const float *x, const int8_t *xq,
         matmul_scalar_ref(o, xq, xqs, w, in_dim, out_dim, nt);
         return;
     }
+#if defined(LZ_T2_ARM_ASM_EXTERN)
+    /* The ARM tiers carry exactly one kernel, ternary. Every other
+       format has to reach the scalar reference by the SAME route
+       `--kernel ref` takes, or the tiers would differ by which fallback
+       they fell through (matmul_q8_impl's epi_pack_act runs before its
+       own NULL-row check, for one) rather than by the kernel under
+       test, and the three-way bit-identity gate would be comparing
+       something else. */
+    if (w->dtype != LZ_FMT_T2) {
+        matmul_scalar_ref(o, xq, xqs, w, in_dim, out_dim, nt);
+        return;
+    }
+#endif /* LZ_T2_ARM_ASM_EXTERN */
     /* The SIMD fast path currently covers only (Q8_0, gs=32). Other
        formats/groups go through the scalar reference - correct but
        slow.
@@ -1944,17 +1958,35 @@ const char *lz_kernel_matrix(void) {
 #else
     const lz_rowfn *q16 = 0;
 #endif /* __WATCOMC__ || LZ_DOT_MMX_EXTERN */
-    struct { const char *name; const lz_rowfn *tab; int g128; } rows[5];
+    /* The ARM column is not in LZ_ROW_T2 - those six slots are x86 slots
+       and the ARM row functions are picked in matmul_t2_impl instead.
+       Reported anyway, and only on the build that has them, because a
+       matrix of six dots is what "this build has no ternary kernel"
+       looks like, and on the ARM cross-build that would be false. */
+    struct { const char *name; const lz_rowfn *tab; int g128; int arm; } rows[5];
     int i, j, p = 0;
+    for (i = 0; i < 5; i++) rows[i].arm = 0;
     rows[0].name = "q8_0";  rows[0].tab = LZ_ROW_Q8;  rows[0].g128 = LZ_G128_Q8;
     rows[1].name = "q4_1";  rows[1].tab = LZ_ROW_Q41; rows[1].g128 = LZ_G128_Q41;
     rows[2].name = "q6_1";  rows[2].tab = LZ_ROW_Q61; rows[2].g128 = LZ_G128_Q61;
     rows[3].name = "q16_0"; rows[3].tab = q16;        rows[3].g128 = LZ_G128_Q16;
     rows[4].name = "t2";    rows[4].tab = LZ_ROW_T2;  rows[4].g128 = LZ_G128_T2;
+#if defined(__arm__)
+    rows[4].arm = 1;
+#endif /* __arm__ */
     for (i = 0; i < 5; i++) {
         p += sprintf(buf + p, "%-6s", rows[i].name);
         for (j = 0; j < LZ_ROW_N; j++)
             buf[p++] = (rows[i].tab && rows[i].tab[j]) ? 'x' : '.';
+#if defined(__arm__)
+        buf[p++] = ' ';
+        buf[p++] = rows[i].arm ? 'x' : '.';
+#if defined(LZ_T2_ARM_ASM_EXTERN)
+        buf[p++] = rows[i].arm ? 'x' : '.';
+#else
+        buf[p++] = '.';
+#endif /* LZ_T2_ARM_ASM_EXTERN */
+#endif /* __arm__ */
         buf[p++] = ' ';
         buf[p++] = rows[i].g128 ? 'G' : '.';
         buf[p++] = '\n';

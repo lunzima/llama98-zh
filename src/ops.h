@@ -265,6 +265,22 @@ void     lz_fpu_float_end(unsigned save);
 #define LZ_KERNEL_REF  1
 #define LZ_KERNEL_MMX  2
 #define LZ_KERNEL_SSE2 3
+
+/* The ARM column. Two values because the ARM side is two cells, C and
+   hand-written asm, and WRONG 1 above is precisely about not letting one
+   enum value stand for two code bodies - `--kernel arm-c` and
+   `--kernel arm-asm` name them apart and lz_kernel_name() reports which
+   one ran. Only the ARM cross-build ever selects either: kernel_detect
+   returns them under __arm__ and lz_kernel_select clamps them to the
+   local tier everywhere else, the same way `sse2` clamps on a PII.
+
+   These are NOT a full ISA tier the way MMX/SSE2 are. Ternary is the
+   only operator with an ARM kernel today, so lz_matmul_xq sends every
+   other format to the scalar reference by the same route `--kernel ref`
+   takes - otherwise the two tiers would differ by which fallback they
+   picked instead of by the kernel under test. */
+#define LZ_KERNEL_ARM     4
+#define LZ_KERNEL_ARM_ASM 5
 int lz_kernel_select(int which);
 
 /* Prefetch tier, ORTHOGONAL to the kernel tier - the kernel picks

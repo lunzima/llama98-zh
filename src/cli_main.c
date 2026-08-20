@@ -227,9 +227,11 @@ static void usage(void) {
     "                   Alone it can only pick a losing arm; pair --moe-tau.\n"
     "  --moe-tau F      Router temperature, 0.1..10.0 (default 1.0 = off).\n"
     "                   Scales mixing weights; selection stays untempered.\n"
-    "  --kernel TIER    auto|ref|mmx|sse2 (default auto, by CPUID).\n"
-    "                   All tiers must be bit-identical; an uncompiled tier\n"
-    "                   falls back loudly.\n"
+    "  --kernel TIER    auto|ref|mmx|sse2|arm-c|arm-asm (default auto).\n"
+    "                   x86 picks by CPUID; arm-c and arm-asm are the two\n"
+    "                   cells of the ARMv5TE column and only that build\n"
+    "                   selects them. All tiers must be bit-identical; an\n"
+    "                   uncompiled tier falls back loudly.\n"
     "  --fixed MODE        auto|off|all (default auto). Sets every write\n"
     "                   tier at once - recurrence, conv1d, attention,\n"
     "                   epilogue, sigmoid, norms, scalar. The per-tier\n"
@@ -987,8 +989,16 @@ int main(int argc, char **argv) {
             /* Before the model is opened: this is a property of the
                binary, and requiring a model would make it unaskable on a
                machine that has none. */
+            /* The ARM pair is appended by lz_kernel_matrix only on the
+               build that has it, so the header follows the same #if -
+               one column name per column, or the table reads wrong. */
+#if defined(__arm__)
+            printf("format mmxI sseI sse2I mmxA sseA sse2A armC armA  g128\n%s",
+                   lz_kernel_matrix());
+#else
             printf("format mmxI sseI sse2I mmxA sseA sse2A  g128\n%s",
                    lz_kernel_matrix());
+#endif /* __arm__ */
             return 0;
         }
         else if (strcmp(a, "--stats") == 0)   want_stats = 1;
@@ -1205,12 +1215,20 @@ int main(int argc, char **argv) {
                it has (lz_kernel_select), so this never lies about what
                ran: --kernel-name reports the tier in effect. */
             const char *k = argv[++i];
-            int want = strcmp(k, "ref") == 0  ? LZ_KERNEL_REF
-                     : strcmp(k, "mmx") == 0  ? LZ_KERNEL_MMX
-                     : strcmp(k, "sse2") == 0 ? LZ_KERNEL_SSE2
-                     : strcmp(k, "auto") == 0 ? LZ_KERNEL_AUTO : -1;
+            /* arm-c / arm-asm are accepted on EVERY build, not only the
+               ARM one. The names are the tier's, not the host's, and a
+               binary that rejected them outright would answer "unknown
+               tier" where the honest answer is the fallback line below -
+               which is also what `sse2` gets on a PII. */
+            int want = strcmp(k, "ref") == 0     ? LZ_KERNEL_REF
+                     : strcmp(k, "mmx") == 0     ? LZ_KERNEL_MMX
+                     : strcmp(k, "sse2") == 0    ? LZ_KERNEL_SSE2
+                     : strcmp(k, "arm-c") == 0   ? LZ_KERNEL_ARM
+                     : strcmp(k, "arm-asm") == 0 ? LZ_KERNEL_ARM_ASM
+                     : strcmp(k, "auto") == 0    ? LZ_KERNEL_AUTO : -1;
             if (want < 0) {
-                printf("--kernel: unknown tier (auto|ref|mmx|sse2)\n");
+                printf("--kernel: unknown tier "
+                       "(auto|ref|mmx|sse2|arm-c|arm-asm)\n");
                 return 2;
             }
             lz_kernel_select(want);

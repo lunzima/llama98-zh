@@ -18,14 +18,21 @@
 #
 #   build_engine.sh does not define __MMX__ (that macro is x86-only, and
 #   nothing here asks the ARM cross compiler to fake it), so the ARM
-#   binary compiles in exactly one kernel tier: ref. Asking it for
-#   anything else silently clamps to ref - cli_main.c's --kernel handler
-#   only prints the "requested X, running Y" warning when the CLI arg
-#   and the tier actually run disagree, and on an unpinned "auto" run
-#   there is no CLI arg to disagree with, so nothing gets printed. ref
-#   is also always compiled on x86 (it is the pure C reference every
-#   other tier is checked against), so it is the one tier BOTH sides can
-#   literally execute - not merely "closest".
+#   binary carries none of the x86 tiers. It has three of its own -
+#   ref, arm-c and arm-asm, the last two being the ternary column's C
+#   and hand-written cells - and `auto` now resolves to arm-asm, so an
+#   UNPINNED run compares a hand-written ARM kernel against an x86 one
+#   and calls a real divergence "expected". ref is the tier both sides
+#   literally execute: it is always compiled on x86 (the pure C
+#   reference every other tier is checked against) and it is a real
+#   code path on ARM, not a name. The three ARM tiers owe each other
+#   bit-identity, which is checked by running this binary three times
+#   with --kernel ref / arm-c / arm-asm, not by this script.
+#
+#   Asking for a tier the build lacks clamps, and cli_main.c's --kernel
+#   handler only prints "requested X, running Y" when the CLI arg and
+#   the tier actually run disagree; on an unpinned "auto" run there is
+#   no CLI arg to disagree with, so nothing gets printed.
 #
 #   --recur-write only accepts auto|fixed on the CLI - there is no
 #   explicit "float" string (see lz_gdn_p2_select in src/ops.c). "auto"
@@ -170,12 +177,46 @@ if [ "$X86_SZ" != "$ARM_SZ" ]; then
     exit 1
 fi
 
-if cmp -s "$X86_DUMP" "$ARM_DUMP"; then
-    echo "PASS: x86 and ARM --dump-logits are bit-identical ($X86_SZ bytes)"
-    exit 0
-else
+if ! cmp -s "$X86_DUMP" "$ARM_DUMP"; then
     NDIFF=$(cmp -l "$X86_DUMP" "$ARM_DUMP" | wc -l)
     echo "FAIL: x86/ARM logits differ - $NDIFF of $X86_SZ bytes differ" >&2
     cmp "$X86_DUMP" "$ARM_DUMP" >&2
     exit 1
 fi
+echo "PASS: x86 and ARM --dump-logits are bit-identical ($X86_SZ bytes)"
+
+# ---- the ARM column's own tiers ------------------------------------------
+# The pins force --kernel ref because that is the one tier BOTH sides can
+# run, which means the comparison above never executes an ARM ternary
+# kernel at all. Rule 8's gate is bit-identity ACROSS tiers, so the other
+# two run here against the SAME binary's ref dump ($ARM_DUMP, produced
+# with the pins as-is). Without this a hand-written kernel could rot
+# untouched behind a passing gate.
+#
+# The clamp check is not decoration: lz_kernel_select silently falls back
+# to a tier the build has, so a tier that vanished would come back as a
+# green comparison of ref against ref. cli_main prints the "[kernel:
+# requested" line exactly when that happened.
+for K in arm-c arm-asm; do
+    TDUMP="$WORK/arm.$K.logits"
+    if ! BIN="$ARM_BIN" SYSROOT="$SYSROOT" "$HERE/run_qemu.sh" "$MODEL" \
+            $PINS --kernel "$K" \
+            --tokens "$TOKENS" --dump-logits "$TDUMP" \
+            >"$WORK/arm.$K.log" 2>&1; then
+        echo "FAIL: ARM --kernel $K run failed:" >&2
+        cat "$WORK/arm.$K.log" >&2
+        exit 1
+    fi
+    if grep -q '\[kernel: requested' "$WORK/arm.$K.log"; then
+        echo "FAIL: --kernel $K was not honoured by $ARM_BIN:" >&2
+        grep '\[kernel: requested' "$WORK/arm.$K.log" >&2
+        exit 1
+    fi
+    if ! cmp -s "$ARM_DUMP" "$TDUMP"; then
+        NDIFF=$(cmp -l "$ARM_DUMP" "$TDUMP" | wc -l)
+        echo "FAIL: ARM tier $K differs from ref - $NDIFF of $ARM_SZ bytes" >&2
+        exit 1
+    fi
+    echo "PASS: ARM tier $K is bit-identical to ref ($ARM_SZ bytes)"
+done
+exit 0
