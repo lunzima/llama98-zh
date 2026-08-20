@@ -131,28 +131,31 @@ git commit -m "feat(ce): 定点 FWHT（int32 未归一化，scale 折进下游�
 #include <assert.h>
 #include "ops.h"   /* LZ_FMT_T2 相关，或直接用本地类型 */
 
-/* 2-bit 码值 = 数值 + 1（-1->0, 0->1, +1->2），stride 8 打包 */
-static int decode_t2(uint8_t packed, int nibble_idx) {
-    return ((packed >> (2 * nibble_idx)) & 3) - 1;
+/* 2-bit 码值 = 数值 + 1（-1->0, 0->1, +1->2），stride-8 打包：
+   weight[k]（块内 0..31）的码在 byte k&7 的 nibble k>>3 —— 与引擎
+   src/ops.c:1104 的 ((b2[k & 7] >> (2 * (k >> 3))) & 3) - 1 逐位一致，
+   也和 dot32_t2_mmx 的 8-byte plane 布局一致。 */
+static int decode_t2(const uint8_t *b2, int k) {
+    return ((b2[k & 7] >> (2 * (k >> 3))) & 3) - 1;
 }
 
-/* 标量三值内积：sum w_i * x_i，w_i ∈ {-1,0,1} */
-static int32_t dot_t2_ref(const uint8_t *w2, const int16_t *x, int k) {
+/* 标量三值内积：sum w_i * x_i，w_i ∈ {-1,0,1}，32 元素单 plane。 */
+static int32_t dot_t2_ref(const uint8_t *w2, const int16_t *x) {
     int32_t acc = 0;
-    for (int i = 0; i < k; i++) {
-        int w = decode_t2(w2[i / 4], i % 4);
-        acc += w * (int32_t)x[i];
+    for (int i = 0; i < 32; i++) {
+        int w = decode_t2(w2, i);
+        if (w > 0) acc += x[i];
+        else if (w < 0) acc -= x[i];
     }
     return acc;
 }
 
 static void test_dot_t2_matches_ref(void) {
-    const int k = 32;
     uint8_t w2[8] = {0xE4, 0x1B, 0x00, 0xFF, 0x55, 0xAA, 0x3C, 0x96};
     int16_t x[32];
-    for (int i = 0; i < k; i++) x[i] = (int16_t)((i * 91) % 400 - 200);
-    int32_t ref = dot_t2_ref(w2, x, k);
-    int32_t got = lz_dot32_t2_scalar(w2, x, k);
+    for (int i = 0; i < 32; i++) x[i] = (int16_t)((i * 91) % 400 - 200);
+    int32_t ref = dot_t2_ref(w2, x);
+    int32_t got = lz_dot32_t2_scalar(w2, x);
     assert(ref == got);
 }
 
@@ -170,21 +173,20 @@ Expected: FAIL（`lz_dot32_t2_scalar` 未定义）
 /* src/ops_t2_scalar.c */
 #include <stdint.h>
 
-/* Scalar ternary dot product: weights {-1,0,1} packed 2-bit (code=value+1),
-   stride-8 layout. No multiply - add where w=+1, subtract where w=-1. */
+/* Scalar ternary dot product, one 32-wide block (one 8-byte plane).
+   Weights {-1,0,1} packed 2-bit, code=value+1, STRIDE-8 layout:
+   weight[k] (k in 0..31) lives in byte k&7, nibble k>>3 - the same
+   layout src/ops.c:1104 and dot32_t2_mmx use, so this is the exact
+   scalar reference both SIMD paths must reproduce bit-for-bit (铁律二).
+   No multiply: add where w=+1, subtract where w=-1, skip where w=0. */
 int32_t lz_dot32_t2_scalar(const uint8_t *restrict w2,
-                           const int16_t *restrict x, int k) {
+                           const int16_t *restrict x) {
     int32_t acc = 0;
     int i;
-    for (i = 0; i + 3 < k; i += 4) {
-        uint8_t p = w2[i / 4];
-        int c0 = (p & 3) - 1, c1 = ((p >> 2) & 3) - 1,
-            c2 = ((p >> 4) & 3) - 1, c3 = ((p >> 6) & 3) - 1;
-        acc += c0 * x[i] + c1 * x[i+1] + c2 * x[i+2] + c3 * x[i+3];
-    }
-    for (; i < k; i++) {
-        int c = ((w2[i / 4] >> (2 * (i % 4))) & 3) - 1;
-        acc += c * x[i];
+    for (i = 0; i < 32; i++) {
+        int c = ((w2[i & 7] >> (2 * (i >> 3))) & 3) - 1;
+        if (c > 0) acc += x[i];
+        else if (c < 0) acc -= x[i];
     }
     return acc;
 }
@@ -217,12 +219,11 @@ git commit -m "feat(ce): 三值内积标量参考（解包 2-bit → 条件加�
 /* tests/test_t2.c 追加 */
 #ifdef __arm__
 static void test_dot_t2_arm_matches_scalar(void) {
-    const int k = 32;
     uint8_t w2[8] = {0xE4, 0x1B, 0x00, 0xFF, 0x55, 0xAA, 0x3C, 0x96};
     int16_t x[32];
-    for (int i = 0; i < k; i++) x[i] = (int16_t)((i * 91) % 400 - 200);
-    int32_t ref = lz_dot32_t2_scalar(w2, x, k);
-    int32_t got = lz_dot32_t2_arm(w2, x, k);
+    for (int i = 0; i < 32; i++) x[i] = (int16_t)((i * 91) % 400 - 200);
+    int32_t ref = lz_dot32_t2_scalar(w2, x);
+    int32_t got = lz_dot32_t2_arm(w2, x);
     assert(ref == got);
 }
 #endif
@@ -239,25 +240,19 @@ Expected: FAIL（`lz_dot32_t2_arm` 未定义，ARM 构建缺符号）
 /* src/ops_t2_arm.c —— 用 __asm__ 内联，避免独立 .S 的符号导出差异 */
 #include <stdint.h>
 
-/* ARMv5TE: 三值内积 = 条件加减。每个 2-bit 码 (c ∈ {-1,0,1}) 决定
-   acc += c*x。码值 c=+1 -> add, c=-1 -> sub, c=0 -> nop。
-   ARM926 有 barrel shifter，解包用 ldrb + and/lsr 即可，无乘法。 */
-int32_t lz_dot32_t2_arm(const uint8_t *w2, const int16_t *x, int k) {
+/* ARMv5TE: 三值内积，32 元素单 plane（stride-8，同标量参考）。
+   与 lz_dot32_t2_scalar 逐位一致：返回 256*sum(code*x)，code 读
+   无符号 0..3（不是 value=code-1）——-1 和 1/256 都在共享 epilogue
+   epi_q41 里处理，内核不碰。先落标量 C 的 ARM 编译版（铁律三：
+   先量，不凭空写汇编），QEMU 实测后再决定要不要手写 __asm__ 汇编。 */
+int32_t lz_dot32_t2_arm(const uint8_t *w2, const int16_t *x) {
     int32_t acc = 0;
     int i;
-    for (i = 0; i + 3 < k; i += 4) {
-        uint8_t p = w2[i / 4];
-        for (int j = 0; j < 4; j++) {
-            int c = ((p >> (2 * j)) & 3) - 1;
-            /* 条件加减：c 只有 -1/0/1 */
-            acc += c * x[i + j];
-        }
+    for (i = 0; i < 32; i++) {
+        int c = (w2[i & 7] >> (2 * (i >> 3))) & 3;   /* code = weight+1, 0..3 */
+        acc += c * (int32_t)x[i];
     }
-    for (; i < k; i++) {
-        int c = ((w2[i / 4] >> (2 * (i % 4))) & 3) - 1;
-        acc += c * x[i];
-    }
-    return acc;
+    return acc << 8;   /* the SIMD kernels' x256 fold */
 }
 ```
 
@@ -371,5 +366,5 @@ git commit -m "feat(ce): --mhc 旋钮（档位 1 静态 4 流均匀混合，档�
 
 - **Spec 覆盖**：§6.1 ARM 三值内核 → Task 2/3；§6.2 定点 FWHT → Task 1；§6.3 SubLN 前向 → Task 4；§6.4 mHC 旋钮 → Task 5。
 - **占位符**：Task 3/4 的「先标量 C 再实测决定纯汇编」「norm 权重是否可学待 Plan A 定案」是**有意的分阶段决策**（铁律三：先量不凭空写汇编；接口对齐），不是占位符——每个 task 都有可运行的交付物。
-- **类型一致**：`lz_fwht_i32(y, x, n)`、`lz_dot32_t2_scalar(w2, x, k)`、`lz_dot32_t2_arm(w2, x, k)` 全 plan 一致。
+- **类型一致**：`lz_fwht_i32(y, x, n)`、`lz_dot32_t2_scalar(w2, x)`、`lz_dot32_t2_arm(w2, x)` 全 plan 一致（leaf 内积固定 32 元素单 8-byte plane，与引擎 `dot32_t2_mmx(w2, x)` 同契约）。
 - **重要提示**：本 plan 的 Task 3 ARM 汇编、Task 4 SubLN norm 权重，**依赖 Plan A 的导出定案**（norm 权重是否可学、三值导出格式）。两者需在 Plan A 落地后回头核对接口。
