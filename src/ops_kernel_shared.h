@@ -242,4 +242,38 @@ extern void lz_pf_amd(const void *p);
    every one of those questions. */
 #define LZ_PFI_NONE(p) ((void)(p))
 
+/* ---- dispatch infrastructure (moved from ops.c, per-TU) ---------------
+
+   Slot order for EVERY dispatch table in this file and others.
+   g_kernel is the runtime-selected ISA tier (defined in ops.c,
+   moves to ops_sched.c). LZ_DEFINE_PICK generates a static picker
+   for each function-pointer type; it reads g_kernel to decide MMX
+   vs SSE2.
+
+   These were file-local to ops.c; moved here so ops_kernel_amax.h,
+   ops_kernel_norm.h and ops_kernel_q8round.h compile in every TU
+   that includes this header. */
+#define LZ_ROW_MMX_I   0
+#define LZ_ROW_SSE_I   1
+#define LZ_ROW_SSE2_I  2
+#define LZ_ROW_MMX_A   3
+#define LZ_ROW_SSE_A   4
+#define LZ_ROW_SSE2_A  5
+#define LZ_ROW_N       6
+
+extern int g_kernel;
+
+#define LZ_DEFINE_PICK(NAME, TYPE)                                        \
+    static TYPE NAME(const TYPE *tab) {                                   \
+        int want_sse2 = (g_kernel == LZ_KERNEL_SSE2);                     \
+        TYPE f;                                                           \
+        if (!g_kernel) return (TYPE)0;                                    \
+        if (g_kernel == LZ_KERNEL_REF) return (TYPE)0;                    \
+        f = tab[want_sse2 ? LZ_ROW_SSE2_A : LZ_ROW_MMX_A];              \
+        if (f) return f;                                                  \
+        f = tab[want_sse2 ? LZ_ROW_SSE2_I : LZ_ROW_MMX_I];              \
+        if (f) return f;                                                  \
+        return tab[LZ_ROW_MMX_I];                                         \
+    }
+
 #endif /* LZ_OPS_KERNEL_SHARED_H */
