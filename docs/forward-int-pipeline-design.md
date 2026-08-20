@@ -71,12 +71,23 @@ q[i] = round(t*2^k * 127/(t_amax*2^k)) = round(t * 127/t_amax)
   value-changing**。
 - 验证：precision-correct（gcc==Watcom 对齐 + 容差对噪声底）。
 
-### 步 3：逐层贯通
+### 步 3：逐层贯通 —— 审计结论（2026-08-20）：定点档已覆盖，浮点 matmul 超出范围
 
-- 23 个 `lz_quantize_q8` 调用点（原设计文档写「12」，已过时——见下），逐个
-  把 float 上游换 int。
-- Q15 精度（15 位）< float（24 位），逐层累积误差。
-- 每步旋钮隔离，precision-correct。
+- 23 个 `lz_quantize_q8` 调用点逐个审计上游后，真正属于「定点档 int→float→int
+  重复」的已全部覆盖，无需额外 int 化：
+  - norm 定点 → 步 1（`--norm-int`）。
+  - attention 定点 → 步 2（`--attn-int`）。
+  - recur 定点 → 既有 `lz_gdn_quantize_2p`（`LZ_GDN_STATE_2PLANE` 默认开）
+    已是两平面定点量化，不经 float。
+  - conv 定点 → 既有 `lz_conv_norm_pow2` 已定点。
+- 剩余 ~15 个调用点（xb/kv/moe/lat_x/hb/mtp/xt/xl/qhh）的上游是**浮点 matmul
+  输出**（如 `lat_x` 来自 `lz_matmul_xq_nt`，xb/kv 是投影输出），不是定点档
+  ——它们的 int 化需要「matmul 定点化」这个新的大工程，不属于「选项 A 定点档
+  联动」范围。
+- 残留（低优先级）：`--recur-write fixed` 且 `LZ_GDN_STATE_2PLANE=0` 时
+  `ops_gdn.c:1883` 的 recur 输出仍 dequant float 再量化；但 2PLANE 是默认，
+  该路径是显式回退。
+- 结论：步 3 无需额外工作。「浮点 matmul int 化」若要做，单独立项。
 
 ## 风险与顺序
 
