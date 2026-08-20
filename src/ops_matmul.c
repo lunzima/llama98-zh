@@ -19,6 +19,7 @@
 #include "ops_quant.h"
 #include "ops_sched.h"
 #include "ops_matmul.h"
+#include "ops_t2_arm.h"
 
 #ifndef LZ_GDN_FIXED
 #define LZ_GDN_FIXED 1
@@ -672,6 +673,29 @@ static void row_t2_mmx_intrin(int32_t *acc32, const void *w4, const void *w2v,
 }
 #endif /* LZ_DOT_MMX_EXTERN */
 
+#if defined(__arm__)
+/* ARMv5TE row kernel for the ternary tier. All six LZ_ROW_T2 slots are
+   x86 SIMD (MMX/SSE2 or Watcom #pragma aux) and compile to NULL on the
+   ARM cross-build, so without this override the tier would fall back to
+   matmul_scalar_ref on every call. leaf = lz_dot32_t2_arm (src/ops_t2_arm.c),
+   same 256*sum(code*x) contract as lz_dot32_t2_scalar; the w4 pointer is
+   the 2-bit plane (8 bytes per 32-wide block), matching the w4 slot that
+   row_t2_mmx_intrin reads on x86. */
+static void row_t2_arm(int32_t *acc32, const void *w4, const void *w2v,
+                       const int16_t *xw, int nb, int nt, int in_dim,
+                       const void *pf_end, const void *pf_end2) {
+    const unsigned char *p2 = (const unsigned char *)w4;
+    int tk, s;
+    (void)w2v; (void)pf_end; (void)pf_end2;
+    for (tk = 0; tk < nt; tk++) {
+        const int16_t *xwt = xw + (size_t)tk * in_dim;
+        int32_t *acc = acc32 + (size_t)tk * nb;
+        for (s = 0; s < nb; s++)
+            acc[s] = lz_dot32_t2_arm(p2 + (size_t)s * 8, xwt + (size_t)s * 32);
+    }
+}
+#endif /* __arm__ */
+
 /* ---- LZ_ROW_T2 ---- */
 const lz_rowfn LZ_ROW_T2[LZ_ROW_N] = {
 #if defined(LZ_DOT_MMX_EXTERN)
@@ -793,6 +817,11 @@ void matmul_t2_impl(float *o, const int8_t *xq, const float *xqs,
 
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
     row = lz_row_pick(LZ_ROW_T2);
+#if defined(__arm__)
+    /* All LZ_ROW_T2 slots are x86 SIMD and NULL on the ARM build; the
+       unrolled scalar-C kernel (src/ops_t2_arm.c) is the ARM tier. */
+    row = row_t2_arm;
+#endif /* __arm__ */
     if (!row || in_dim > LZ_MM_WIDEN_MAX || ng > LZ_MM_WIDEN_MAX / 32) {
         matmul_scalar_ref(o, xq, xqs, w, in_dim, out_dim, nt);
         return;
