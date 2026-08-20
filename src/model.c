@@ -100,6 +100,7 @@ int lz_load_config(LZModelConfig *c, const char *path,
         const LZJsonNode *n = lz_json_get(&j, tc, "attn_output_gate");
         c->attn_output_gate = (n && n->type == LZ_JSON_BOOL && n->num != 0.0);
     }
+    c->use_subn = lz_json_get_int(&j, tc, "use_subn", 0);
 
     /* KDA gate (only meaningful when is_kunmoe; harmless zero otherwise).
        kda_gate_rank mirrors KunMoeConfig's "field or head_k_dim" default -
@@ -352,6 +353,7 @@ typedef struct {
 
 static int present_moe_shared(const LZModelConfig *c) { return c->moe_shared_width > 0; }
 static int present_moe_latent_norm(const LZModelConfig *c) { return c->moe_latent_use_norm; }
+static int present_subn(const LZModelConfig *c) { return c->use_subn; }
 
 static const LZLayerSpec LAYER_SPECS[] = {
     /* shared by every layer kind and every FFN kind */
@@ -367,6 +369,14 @@ static const LZLayerSpec LAYER_SPECS[] = {
       { DK_INTER, DK_HIDDEN, DK_END }, NULL },
     { "mlp.down_proj.weight",            -1, 0, LOFF(down_proj),
       { DK_HIDDEN, DK_INTER, DK_END }, NULL },
+
+    /* SubLN (use_subn=1 only): dense-FFN per-projection input RMSNorms. */
+    { "mlp.gate_proj.norm.weight",       -1, 0, LOFF(gate_norm),
+      { DK_HIDDEN, DK_END, DK_END }, present_subn },
+    { "mlp.up_proj.norm.weight",         -1, 0, LOFF(up_norm),
+      { DK_HIDDEN, DK_END, DK_END }, present_subn },
+    { "mlp.down_proj.norm.weight",       -1, 0, LOFF(down_norm),
+      { DK_INTER, DK_END, DK_END }, present_subn },
 
     /* full_attention only. q_proj is 2x wide; the second half is the gate */
     { "self_attn.q_proj.weight", LZ_LT_FULL, -1, LOFF(q_proj),
@@ -432,6 +442,20 @@ static const LZLayerSpec LAYER_SPECS[] = {
       { DK_VHEADDIM, DK_END, DK_END }, NULL },
     { "linear_attn.o_proj.weight",   LZ_LT_KDA, -1, LOFF(kda_o_proj),
       { DK_HIDDEN, DK_VALUE, DK_END }, NULL },
+
+    /* SubLN (use_subn=1 only): KDA per-projection input RMSNorms.
+       kda_o_subn_norm is o_proj's OWN input norm over lin_value_dim - NOT
+       kda_o_norm above (the per-head gated-silu norm). */
+    { "linear_attn.q_proj.norm.weight", LZ_LT_KDA, -1, LOFF(kda_q_norm),
+      { DK_HIDDEN, DK_END, DK_END }, present_subn },
+    { "linear_attn.k_proj.norm.weight", LZ_LT_KDA, -1, LOFF(kda_k_norm),
+      { DK_HIDDEN, DK_END, DK_END }, present_subn },
+    { "linear_attn.v_proj.norm.weight", LZ_LT_KDA, -1, LOFF(kda_v_norm),
+      { DK_HIDDEN, DK_END, DK_END }, present_subn },
+    { "linear_attn.g_proj.norm.weight", LZ_LT_KDA, -1, LOFF(kda_g_norm),
+      { DK_HIDDEN, DK_END, DK_END }, present_subn },
+    { "linear_attn.o_proj.norm.weight", LZ_LT_KDA, -1, LOFF(kda_o_subn_norm),
+      { DK_VALUE, DK_END, DK_END }, present_subn },
 
     /* latent MoE FFN only (ffn_kind 1). Per-expert w1/w2/w3 are walked
        separately in model_walk - their count is a runtime config value,
@@ -1245,7 +1269,7 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
        know the shape of (RD would then desync into tensor data and fail
        some unrelated way downstream, which is not a diagnosis). */
     if (ver != 1 && ver != 2 && ver != 3 && ver != 4 && ver != 5 &&
-        ver != 6) {
+        ver != 6 && ver != 7) {
         qerr(errbuf, errlen, LZ_ERR_BIN_VERSION, ver);
         goto fail;
     }
@@ -1328,6 +1352,15 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
             qerr(errbuf, errlen, LZ_ERR_BIN_CFG);
             goto fail;
         }
+    }
+    /* v7 header tail: use_subn (SubLN). Absent (ver < 7) leaves it at 0
+       from lz_open's memset(m, 0, ...) before this function is reached -
+       the same "ordinary pre-layer norms" default lz_load_config uses for
+       a config.json without a use_subn key, so the two loading paths
+       cannot disagree. The exporter bumps to v7 only when a checkpoint
+       actually sets use_subn, so legacy bins stay v6 byte for byte. */
+    if (ver >= 7) {
+        RD(&c->use_subn, 4);
     }
 #undef RD
 

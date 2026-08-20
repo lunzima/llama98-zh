@@ -215,6 +215,11 @@ typedef struct {
     int tie_word_embeddings;
     int attn_output_gate;           /* whether q_proj carries the gate (true in this model) */
     int full_attention_interval;    /* every Nth layer is a full_attention */
+    /* SubLN (BitNet b1.58): delete the two pre-layer norms and give each
+       ternary projection its own input RMSNorm (see the kda_*_norm /
+       gate_norm / up_norm / down_norm fields on LZLayer). Mirrors the
+       training side's config.use_subn. 0 = ordinary pre-layer norms. */
+    int use_subn;
     /* config.json "mtp_num_hidden_layers"; 0 when the key is absent,
        which is every model this project has produced except upstream
        Qwen/Qwen3.5-0.8B itself (1, 15 mtp.* tensors, 20,452,864
@@ -283,6 +288,15 @@ typedef struct {
     LZTensor up_proj;                /* (inter, hidden) Q8 */
     LZTensor down_proj;              /* (hidden, inter) Q8 */
 
+    /* SubLN (use_subn=1 only; bound when config.use_subn is set):
+       per-projection input RMSNorm for the classic dense FFN's ternary
+       projections. Each norm is applied to that projection's OWN input in
+       the forward (gate/up_proj: the hidden state; down_proj: the
+       intermediate activation), replacing the two pre-layer norms. */
+    LZTensor gate_norm;              /* (hidden) f32 - gate_proj input RMSNorm */
+    LZTensor up_norm;                /* (hidden) f32 - up_proj input RMSNorm */
+    LZTensor down_norm;              /* (intermediate) f32 - down_proj input RMSNorm */
+
     /* full_attention only */
     LZTensor q_proj;                 /* (attn_qgate_dim, hidden) Q8 */
     LZTensor k_proj;                 /* (attn_kv_dim, hidden) Q8 */
@@ -323,6 +337,19 @@ typedef struct {
     LZTensor kda_g_proj;             /* (lin_value_dim, hidden) Q8 - same role as in_proj_z */
     LZTensor kda_o_norm;             /* (lin_v_head_dim) f32 - same role as ssm_norm, silu gate */
     LZTensor kda_o_proj;             /* (hidden, lin_value_dim) Q8 - same role as out_proj */
+
+    /* SubLN (use_subn=1 only; bound when config.use_subn is set):
+       per-projection input RMSNorm for the ternary KDA projections. Each
+       norm is applied to that projection's OWN input in the forward
+       (q/k/v/g: the hidden state; o_proj: the value output, lin_value_dim
+       wide). kda_o_subn_norm is DISTINCT from kda_o_norm above - that one
+       is the gated-silu norm over one value head, this one is o_proj's
+       plain input RMSNorm over the whole lin_value_dim span. */
+    LZTensor kda_q_norm;             /* (hidden) f32 - q_proj input RMSNorm */
+    LZTensor kda_k_norm;             /* (hidden) f32 - k_proj input RMSNorm */
+    LZTensor kda_v_norm;             /* (hidden) f32 - v_proj input RMSNorm */
+    LZTensor kda_g_norm;             /* (hidden) f32 - g_proj input RMSNorm */
+    LZTensor kda_o_subn_norm;        /* (lin_value_dim) f32 - o_proj input RMSNorm */
 
     /* FFN routing. 0 (default) = classic dense gate/up/down_proj above;
        1 = latent MoE below. Resolved once at load time from
