@@ -60,6 +60,11 @@
 #      #error rejects it against the default LZ_GDN_STATE_2PLANE=1. The
 #      pair is the legal build, verified to compile on both toolchains.
 #
+# Plus a CROSS list (below): multi-switch combinations where an #error
+# only fires when two non-default values interact. Same check_one, same
+# macro-assertion - the point is the combination compiles, not just each
+# member alone.
+#
 # Two entries are contradictory AS GIVEN and the gate builds the legal
 # pair instead of the lone flag:
 #   LZ_BATCH_MAX=1       ops.h's guard "#if LZ_BATCH_DEFAULT >
@@ -232,6 +237,39 @@ done
 check_one "LZ_GDN_FIXED=2(+LZ_GDN_STATE_2PLANE=0)" \
     "-DLZ_GDN_FIXED=2 -DLZ_GDN_STATE_2PLANE=0" \
     "LZ_GDN_FIXED=2 LZ_GDN_STATE_2PLANE=0" 0
+
+# Cross combinations: multiple non-default switches that must hold
+# TOGETHER. A single-switch build proves each alone; a combination can
+# still contradict (an #error that only fires when two flags interact),
+# so each cross is compiled and macro-asserted as a unit - the same
+# check_one the singles use, which also proves every flag took effect.
+# A cross naming LZ_SSE2_GROUP compiles ops_sse2.c as well (its guarded
+# code lives there), matching the single-switch handling.
+CROSS="LZ_SSE2_GROUP=0,LZ_GDN_FIXED=2,LZ_GDN_STATE_2PLANE=0
+LZ_NO_FPU=1,LZ_GDN_FIXED=0
+LZ_GDN_STATE_2PLANE=0,LZ_GDN_FIXED=0"
+
+while IFS= read -r cross; do
+    [ -z "$cross" ] && continue
+    flags=""
+    proves=""
+    label=""
+    IFS=, read -r -a xs <<< "$cross"
+    for x in "${xs[@]}"; do
+        flags="$flags -D$x"
+        proves="$proves $x"
+        [ -n "$label" ] && label="$label+"
+        label="$label$x"
+    done
+    case "$cross" in
+        *LZ_SSE2_GROUP=0*)
+            check_one "$label" "$flags" "$proves" 1
+            ;;
+        *)
+            check_one "$label" "$flags" "$proves" 0
+            ;;
+    esac
+done <<< "$CROSS"
 
 # --- all-at-once probe: the independent record of the expected values ---
 # Compiled with every switch's primary non-default value. #error-asserts

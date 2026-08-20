@@ -14,7 +14,7 @@
 
 #if defined(__i386__) || defined(__x86_64__)
 #include <cpuid.h>   /* __get_cpuid - the brand-string leaves */
-#endif
+#endif /* __i386__ || __x86_64__ */
 
 /* CPUID leaf 1, EDX. Only the bits this file names. */
 #define LZ_CPUID1_FPU  (1u << 0)
@@ -110,8 +110,8 @@ unsigned lz_cpuid1_edx(void) {
        shape (lz_cpuid1_edx_asm above is equally raw): the guard belongs
        to the one caller that decides whether it is safe to use, probe()
        below, not to this primitive. A second, independent caller that
-       skipped the guard would be the actual bug; task #27's gate
-       exists to catch exactly that, not to duplicate the check here. */
+       skipped the guard would be the actual bug; the gate exists to
+       catch exactly that, not to duplicate the check here. */
     unsigned a, b, c, d;
     a = b = c = d = 0;
     __asm__ __volatile__("cpuid"
@@ -122,13 +122,10 @@ unsigned lz_cpuid1_edx(void) {
 }
 
 static int probe(unsigned *edx1) {
-    /* Was unconditional (task #27): "this is the development build,
-       where the interesting case cannot occur" stopped being true the
-       moment build/x87/build_engine.sh became a shipping gcc
-       configuration for real Socket-7 hardware. Harmless at today's
-       i586 floor (every Socket 7 part has CPUID) but an illegal
-       instruction the moment the floor drops to i486/i386 (task #28) -
-       same guard the Watcom branch above already had. */
+    /* Guarded: on i486/i386 there is no CPUID instruction and this
+       would fault, and the x87 build targets real Socket-7 hardware.
+       Harmless at today's i586 floor (every Socket 7 part has CPUID) -
+       same guard the Watcom branch above already has. */
     if (!lz_eflags_id_toggles()) { *edx1 = 0; return 0; }
     *edx1 = lz_cpuid1_edx();
     return 1;
@@ -144,7 +141,7 @@ static int probe(unsigned *edx1) {
     return 1;
 }
 
-#endif
+#endif /* __WATCOMC__ || __i386__ || __x86_64__ */
 
 int lz_cpu_check(char *errbuf, int errlen) {
     unsigned edx1 = 0;
@@ -265,7 +262,7 @@ static int cpu_brand_raw(char *out, int cap) {
     return 0;
 }
 
-#endif
+#endif /* __WATCOMC__ || __i386__ || __x86_64__ */
 
 /* The brand string, trimmed. Word 95's System Info had no way to name a
    processor beyond 386/486/Pentium; a modern machine needs its real

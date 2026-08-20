@@ -1,9 +1,9 @@
 /* ops_matmul.c - Matmul kernels: scalar reference, per-format row
    kernels, dispatch tables, and the tiered matmul impls.
 
-   Moved from ops.c to lower #if guard density. Every function here
-   was static in ops.c; linkage changed to extern only where called
-   from ops.c (matmul_q*_impl, LZ_ROW_* tables, matmul_scalar_ref).
+   A separate TU from ops.c to keep #if guard density low. Linkage is
+   extern only where a function is called from ops.c (matmul_q*_impl,
+   LZ_ROW_* tables, matmul_scalar_ref).
    lz_row_pick reads the tier through lz_kernel_sel() instead of the
    raw g_kernel, breaking the sched<->matmul cycle. */
 #include <stddef.h>
@@ -26,7 +26,7 @@
 
 #ifndef LZ_EPI_MAX_NG
 #define LZ_EPI_MAX_NG 64
-#endif
+#endif /* LZ_EPI_MAX_NG */
 
 /* ---- LZ_MM_WIDEN_MAX + scratch ---- */
 #define LZ_MM_WIDEN_MAX 4096
@@ -76,26 +76,23 @@ static lz_rowfn lz_row_pick(const lz_rowfn *tab) {
 #include "ops_kernel_dot_shared.h" /* LZ_Q8_ACC, LZ_Q8_PFSEL, LZ_Q8_GROUP4 -
                            needed here (gcc's row_q8_mmx_intrin below)
                            AND by src/ops_mmx.c's/ops_sse2.c's
-                           row_q8_mmx_asm/row_q8_sse2_asm (task #30,
-                           5/N) - shared rather than duplicated across
-                           that TU boundary, task #31's exact lesson
-                           applied before the duplication happened this
-                           time instead of after. */
+                           row_q8_mmx_asm/row_q8_sse2_asm - shared
+                           rather than duplicated across that TU
+                           boundary. */
 
 #ifdef __WATCOMC__
-/* row_q8_mmx_asm / row_q8_sse2_asm moved to src/ops_mmx.c / src/ops_sse2.c
-   (task #30, 5/N): each is ALREADY the real call boundary from its own
-   caller (dispatched once per matmul via lz_row_pick's function-pointer
-   table in LZ_ROW_Q8 below - never once per 32-element group), so
-   moving the whole function - together with the leaf kernels it calls
+/* row_q8_mmx_asm / row_q8_sse2_asm live in src/ops_mmx.c / src/ops_sse2.c.
+   Each is ALREADY the real call boundary from its own caller (dispatched
+   once per matmul via lz_row_pick's function-pointer table in LZ_ROW_Q8
+   below - never once per 32-element group), and calls its leaf kernels
    direct-by-name inside its own loop (lz_dot32_x16_asm, the pragma
    inlines into THIS function; lz_dot32_x16_asm_2, lz_dot128_x16_asm,
-   dot32_x16_mmx/_sse2a) - adds NO new call sites, the same gdn1_x4
-   argument from piece 1/N. Splitting the leaf kernels out alone and
-   leaving the row function here would have cost up to nb (32-groups
-   per row, up to 112 on this project's largest in_dim) real cross-TU
-   calls per matmul row instead. Declared in src/ops_mmx.h/
-   src/ops_sse2.h, already visible in this translation unit. */
+   dot32_x16_mmx/_sse2a) - so the split adds no new call sites. Splitting
+   the leaf kernels out alone and leaving the row function here would
+   have cost up to nb (32-groups per row, up to 112 on this project's
+   largest in_dim) real cross-TU calls per matmul row instead. Declared
+   in src/ops_mmx.h/ src/ops_sse2.h, already visible in this translation
+   unit. */
 
 #else  /* gcc: intrinsics */
 
@@ -417,15 +414,14 @@ void matmul_scalar_ref(float *o, const int8_t *xq, const float *xqs,
 #include "ops_kernel_dot_shared.h" /* LZ_Q41_ACC, LZ_Q41_PFSEL, LZ_Q41_GROUP4 */
 
 #ifdef __WATCOMC__
-/* row_q41_mmx_asm / row_q41_sse2_asm moved to src/ops_mmx.c /
-   src/ops_sse2.c (task #30, 6/N) - same reasoning as Q8_0 (piece 5/N):
-   each is already the real call boundary from LZ_ROW_Q41 below, so
-   moving the whole function together with the leaf kernels it calls
-   direct-by-name adds no new call sites. Declared in src/ops_mmx.h /
-   src/ops_sse2.h. row_q41_sse2_asm's -DLZ_SSE2_GROUP=0 branch calls
-   lz_dot128_q41_mmx_w, src/ops_mmx.c's real wrapper around the MMX
-   #pragma aux group kernel - same cross-TU need as Q8_0's
-   lz_dot128_x16_mmx_w (task #32). */
+/* row_q41_mmx_asm / row_q41_sse2_asm live in src/ops_mmx.c /
+   src/ops_sse2.c - same reasoning as Q8_0 above: each is already the
+   real call boundary from LZ_ROW_Q41 below, so the whole function plus
+   the leaf kernels it calls direct-by-name adds no new call sites.
+   Declared in src/ops_mmx.h / src/ops_sse2.h. row_q41_sse2_asm's
+   -DLZ_SSE2_GROUP=0 branch calls lz_dot128_q41_mmx_w, src/ops_mmx.c's
+   real wrapper around the MMX #pragma aux group kernel - same cross-TU
+   need as Q8_0's lz_dot128_x16_mmx_w. */
 
 #else  /* gcc: intrinsics */
 
@@ -586,17 +582,17 @@ const lz_rowfn LZ_ROW_T2[LZ_ROW_N] = {
 /* ---- Q61 guard block ---- */
 #if defined(__WATCOMC__) || defined(LZ_DOT_MMX_EXTERN)
 
-/* LZ_Q61_PF / LZ_Q61_ACC / LZ_Q61_GROUP4 moved to
-   src/ops_kernel_dot_shared.h (task #30, 8/N) - shared with gcc's
-   row_q61_mmx_intrin below via the same guard. */
+/* LZ_Q61_PF / LZ_Q61_ACC / LZ_Q61_GROUP4 are in
+   src/ops_kernel_dot_shared.h - shared with gcc's row_q61_mmx_intrin
+   below via the same guard. */
 
 #ifdef __WATCOMC__
-/* row_q61_mmx_asm / row_q61_sse2_asm moved to src/ops_mmx.c /
-   src/ops_sse2.c (task #30, 8/N), alongside their leaf kernels which
-   they call direct-by-name. Declared in src/ops_mmx.h / src/ops_sse2.h.
+/* row_q61_mmx_asm / row_q61_sse2_asm live in src/ops_mmx.c /
+   src/ops_sse2.c, alongside their leaf kernels which they call
+   direct-by-name. Declared in src/ops_mmx.h / src/ops_sse2.h.
    row_q61_sse2_asm's -DLZ_SSE2_GROUP=0 branch calls
    lz_dot128_q61_mmx_w, src/ops_mmx.c's real wrapper around the MMX
-   #pragma aux group kernel (task #32). */
+   #pragma aux group kernel. */
 
 #else  /* gcc: intrinsics */
 
@@ -789,17 +785,17 @@ void matmul_q61_impl(float *o, const int8_t *xq, const float *xqs,
    the kernels return the raw int32 dot and the epilogue's `post` is 1.0.
    No sse2-intrin slot yet: part32_q16 does not exist. */
 
-/* LZ_Q16_PF / LZ_Q16_ACC / LZ_Q16_GROUP4 moved to
-   src/ops_kernel_dot_shared.h (task #30, 9/N) - shared with gcc's
-   row_q16_mmx_intrin below via the same guard. */
+/* LZ_Q16_PF / LZ_Q16_ACC / LZ_Q16_GROUP4 are in
+   src/ops_kernel_dot_shared.h - shared with gcc's row_q16_mmx_intrin
+   below via the same guard. */
 
 #ifdef __WATCOMC__
-/* row_q16_mmx_asm / row_q16_sse2_asm moved to src/ops_mmx.c /
-   src/ops_sse2.c (task #30, 9/N), alongside their leaf kernels which
-   they call direct-by-name. Declared in src/ops_mmx.h / src/ops_sse2.h.
+/* row_q16_mmx_asm / row_q16_sse2_asm live in src/ops_mmx.c /
+   src/ops_sse2.c, alongside their leaf kernels which they call
+   direct-by-name. Declared in src/ops_mmx.h / src/ops_sse2.h.
    row_q16_sse2_asm's -DLZ_SSE2_GROUP=0 branch calls
    lz_dot128_q16_mmx_w, src/ops_mmx.c's real wrapper around the MMX
-   #pragma aux group kernel (task #32). */
+   #pragma aux group kernel. */
 
 #else  /* gcc: intrinsics */
 

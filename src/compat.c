@@ -14,7 +14,7 @@
    is no such clock". */
 #if !defined(_WIN32) && !defined(__DOS__) && !defined(_POSIX_C_SOURCE)
 #define _POSIX_C_SOURCE 200809L
-#endif
+#endif /* !_WIN32 && !__DOS__ && !_POSIX_C_SOURCE */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,18 +31,18 @@
    the two properties it means. */
 #if defined(_WIN32) || defined(__DOS__)
 #define LZ_HAVE_SETMODE 1
-#endif
+#endif /* _WIN32 || __DOS__ */
 
 #ifdef _WIN32
 #include <windows.h>
-#endif
+#endif /* _WIN32 */
 #ifdef LZ_HAVE_SETMODE
 #include <fcntl.h>          /* O_BINARY */
 #include <io.h>             /* setmode, fileno */
-#endif
+#endif /* LZ_HAVE_SETMODE */
 #if !defined(_WIN32)
 #include <time.h>
-#endif
+#endif /* !_WIN32 */
 
 void *lz_read_file(const char *path, size_t *out_size,
                    char *errbuf, int errlen) {
@@ -100,7 +100,7 @@ int lz_fseek64(FILE *f, unsigned long long off) {
        wrong tensor, and the symptom is extremely hard to locate. */
     if (off > 0x7FFFFFFFULL) return 1;
     return fseek(f, (long)off, SEEK_SET) == 0 ? 0 : 1;
-#endif
+#endif /* _WIN32 && !__WATCOMC__ || _LARGEFILE_SOURCE || __USE_LARGEFILE64 || (__unix__ && !__WATCOMC__) */
 }
 
 long long lz_fsize(const char *path) {
@@ -120,7 +120,7 @@ long long lz_fsize(const char *path) {
     n = ftell(f);
     fclose(f);
     return (long long)n;
-#endif
+#endif /* _WIN32 && !__WATCOMC__ */
 }
 
 double lz_time_ms(void) {
@@ -164,7 +164,7 @@ double lz_time_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
-#endif
+#endif /* _WIN32 || __DOS__ */
 }
 
 /* time() rather than a platform branch: it is ANSI C, Open Watcom has it,
@@ -202,8 +202,8 @@ void lz_init_stdout(void) {
         setmode(fileno(stdout), O_BINARY);
 #else
     setmode(fileno(stdout), O_BINARY);
-#endif
-#endif
+#endif /* __DOS__ */
+#endif /* LZ_HAVE_SETMODE */
     setvbuf(stdout, NULL, _IONBF, 0);
 }
 
@@ -216,7 +216,7 @@ void lz_init_stdin(void) {
        runtime does it too. Guarded on LZ_HAVE_SETMODE rather than
        _WIN32 for exactly that reason. */
     setmode(fileno(stdin), O_BINARY);
-#endif
+#endif /* LZ_HAVE_SETMODE */
 }
 
 unsigned long long lz_seed_mix(unsigned long long x) {

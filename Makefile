@@ -480,13 +480,20 @@ watcom-gui:
 # -D__MMX__=1 is baked in so the hand-written assembly cannot silently
 # vanish. DOS is left out of `check` because it needs the extender stub
 # and is a separate delivery decision; run `make watcom-dos` explicitly.
-# dedupe-gate (task #31) runs first and needs no build: a source-text
-# invariant caught before either compiler spends time on it. mm-alias-
+# bare-endif-gate runs first and needs no build: a source-text invariant
+# caught before either compiler spends time on it. dedupe-gate (task #31)
+# and dead-ifndef-gate run next, also build-free. mm-alias-
 # gate (task #30/#32) runs second, before the real link targets: it
 # compiles its own throwaway ops_sse2.c objects (both toolchains, both
 # LZ_SSE2_GROUP settings) rather than depending on watcom-cli having
 # already produced one, so it does not need to come after it.
-check: dead-ifndef-gate dedupe-gate mm-alias-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate
+check: bare-endif-gate dead-ifndef-gate dedupe-gate mm-alias-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate
+
+# A bare "#endif" (no trailing comment) is a regression the split ops
+# commits already made once - every #endif must say what it closes.
+.PHONY: bare-endif-gate
+bare-endif-gate:
+	@bash build/bare_endif_gate.sh
 
 # A "#ifndef X" whose X is already defined upstream (a header, or a
 # second #ifndef in the same file) is dead code that lies about the default.

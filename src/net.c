@@ -20,7 +20,7 @@
 #  define LZ_EWOULDBLOCK  EAGAIN
 #  define LZ_EINTR        EINTR
 #  define closesocket     close
-#endif
+#endif /* _WIN32 */
 
 int lz_net_init(char *errbuf, int errlen) {
 #ifdef _WIN32
@@ -41,14 +41,14 @@ int lz_net_init(char *errbuf, int errlen) {
        omission rather than by spelling. */
     signal(SIGPIPE, SIG_IGN);
     (void)errbuf; (void)errlen;
-#endif
+#endif /* _WIN32 */
     return LZ_ERR_OK;
 }
 
 void lz_net_shutdown(void) {
 #ifdef _WIN32
     WSACleanup();
-#endif
+#endif /* _WIN32 */
 }
 
 lz_sock lz_net_listen(int port, int backlog, char *errbuf, int errlen) {
@@ -76,7 +76,7 @@ lz_sock lz_net_listen(int port, int backlog, char *errbuf, int errlen) {
         setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char *)&one,
                    sizeof(one));
     }
-#endif
+#endif /* !_WIN32 */
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons((unsigned short)port);

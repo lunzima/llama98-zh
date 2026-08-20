@@ -20,7 +20,7 @@
    forward pass. */
 #elif defined(_WIN32)
 #include <windows.h>
-#endif
+#endif /* __DOS__ || _WIN32 */
 
 #include "cli_attr.h"
 #include "stream.h"
@@ -46,7 +46,7 @@ static unsigned char g_dos_attr = 0x07;
  * the attribute in BL. Neither alone does the job, so this is 09h to
  * place the coloured cell followed by an explicit cursor advance -
  * which is also where the newline, the wrap and the scroll have to be
- * handled, since nothing else is doing it any more.
+ * handled, since nothing else does it.
  *
  * Page 0 throughout: this program never switches video pages, and
  * asking BIOS for the active one per character would double the
@@ -95,7 +95,7 @@ static void dos_probe(void) {
  * the attribute in BL. Neither alone does the job, so this is 09h to
  * place the coloured cell followed by an explicit cursor advance -
  * which is also where the newline, the wrap and the scroll have to be
- * handled, since nothing else is doing it any more. */
+ * handled, since nothing else does it. */
 static void dos_putc(char ch) {
     union REGS r;
     int row, col;
@@ -136,7 +136,7 @@ static void dos_putc(char ch) {
     r.h.dh = (unsigned char)row; r.h.dl = (unsigned char)col;
     int386(0x10, &r, &r);
 }
-#endif
+#endif /* __DOS__ */
 static int g_cur = -1;          /* attribute currently set, -1 = unknown */
 
 static int attr_for(int style) {
@@ -165,7 +165,7 @@ static int stdout_is_console(void) {
     return GetConsoleMode(h, &mode) ? 1 : 0;
 #else
     return 0;
-#endif
+#endif /* __DOS__ || _WIN32 */
 }
 
 const char *lz_attr_mode(const char *mode) {
@@ -195,7 +195,7 @@ static void attr_apply(int style) {
     }
 #else
     (void)a;
-#endif
+#endif /* __DOS__ || _WIN32 */
 }
 
 void lz_attr_write(const char *bytes, int n, int style) {
@@ -219,7 +219,7 @@ void lz_attr_write(const char *bytes, int n, int style) {
     }
 #else
     fwrite(bytes, 1, (size_t)n, stdout);
-#endif
+#endif /* __DOS__ */
 }
 
 void lz_attr_reset(void) {

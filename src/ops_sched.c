@@ -1,9 +1,9 @@
 /* ops_sched.c - Tier globals, CPU detection, kernel dispatch, and all
    mode selectors (--kernel, --pair, --gdn, --conv, --attn, etc.).
 
-   Moved from ops.c to lower #if guard density and make the tier
-   dispatch structure legible. Every function here was in ops.c;
-   only linkage changed (static -> extern for public API). */
+   A separate TU from ops.c to keep #if guard density low and make the
+   tier dispatch structure legible. Only the public API is extern; the
+   rest is static to this TU. */
 #include <stddef.h>
 #include <string.h>    /* strcmp: tier selectors */
 
@@ -288,7 +288,7 @@ const char *lz_norm_select(const char *name) {
 
 #ifndef LZ_NORM_MAX_N
 #define LZ_NORM_MAX_N 4096
-#endif
+#endif /* LZ_NORM_MAX_N */
 
 int lz_norm_can_fixed(int n) {
 #if LZ_GDN_FIXED

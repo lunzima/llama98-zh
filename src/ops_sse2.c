@@ -1,16 +1,13 @@
-/* Every gcc/clang SSE2-intrinsics kernel, pulled out of src/ops.c and
-   its included headers into the one translation unit built with
-   -msse2. Code structure, not a correctness fix (task #22, per the
-   user: "SSE2 next stage should also be separated for code clarity") -
-   %xmm does not alias the x87 stack the way %mm does, so nothing here
-   is implicated in the bug src/ops_mmx.c's split exists to prevent. It
-   still gets its own TU: the ISA-floor gate needs a clean per-file
-   boundary the same way src/ops_mmx.c/src/ops_mmx_sse.c do, and the
-   32-bit x87 target gains a real SSE2 tier from it (see
-   build/x87/build_engine.sh's header) - before this split, ops.c's own
-   -mno-sse2 meant the SSE2 row kernels were only ever reachable on the
-   x86-64 dev build, where ops.c happened to be compiled with -msse2
-   itself.
+/* Every gcc/clang SSE2-intrinsics kernel, in the one translation unit
+   built with -msse2 - separated from ops.c and its included headers
+   for code clarity. %xmm does not alias the x87 stack the way %mm
+   does, so nothing here is implicated in the bug src/ops_mmx.c's split
+   exists to prevent. It still gets its own TU: the ISA-floor gate
+   needs a clean per-file boundary the same way src/ops_mmx.c/
+   src/ops_mmx_sse.c do, and the 32-bit x87 target gains a real SSE2
+   tier from it (see build/x87/build_engine.sh's header) - with ops.c
+   compiled with -mno-sse2, the SSE2 row kernels are only reachable on
+   the x86-64 dev build, where ops.c is compiled with -msse2 itself.
 
    -march=i686, not i586: real SSE2 hardware in the target family (P4
    Northwood, Pentium M) is i686+ - SSE2 debuted with NetBurst, after
@@ -23,10 +20,10 @@
    enabling CMOV in src/ops_mmx.c, done again for this flag set on its
    own object.
 
-   Watcom NOW compiles this file too (task #30, 2/N) - same reason as
-   src/ops_mmx.c: -Nr/-Ns is a hard ceiling its own .686 directives
-   cannot exceed, so a #pragma aux body needing .686 codegen cannot sit
-   in a TU pinned at the new, lower i486/i386 floor. */
+   Watcom compiles this file too - same reason as src/ops_mmx.c:
+   -Nr/-Ns is a hard ceiling its own .686 directives cannot exceed, so
+   a #pragma aux body needing .686 codegen cannot sit in a TU pinned
+   at the lower i486/i386 floor. */
 #include <stdint.h>
 #include <string.h>
 
@@ -36,26 +33,26 @@
 
 #if defined(__WATCOMC__)
 #include "ops_kernel_shared.h" /* p2_shift_of - shared with ops.c and
-                           the other suffixed TUs (task #31). gcc's
-                           branch below needs none of it. */
+                           the other suffixed TUs. gcc's branch below
+                           needs none of it. */
 #include "ops_mmx.h"       /* lz_dot128_x16_mmx_w - row_q8_sse2_asm's
                            -DLZ_SSE2_GROUP=0 A/B control build needs the
-                           MMX-tier group kernel cross-TU (task #30, 5/N). */
+                           MMX-tier group kernel cross-TU. */
 #include "ops_p2_blk.h"
 
-/* ---- GDN/KDA fixed-point pass 2, SSE2 tier - moved here from
-   src/ops_kernel_p2.h (task #30, 2/N). Algorithm documentation stays
-   there, unaffected by the code's move. Self-contained unlike the MMX/
-   SSE1 tiers' cross-TU hand-off (src/ops_mmx.c <-> src/ops_mmx_sse.c):
-   SSE2 has full content for both mul32 and split32, so this tier's own
-   p2_blk() never needs to be seen outside this file. */
+/* ---- GDN/KDA fixed-point pass 2, SSE2 tier - in this TU; algorithm
+   documentation is in src/ops_kernel_p2.h, unaffected by the code's
+   location. Self-contained unlike the MMX/SSE1 tiers' cross-TU hand-off
+   (src/ops_mmx.c <-> src/ops_mmx_sse.c): SSE2 has full content for both
+   mul32 and split32, so this tier's own p2_blk() never needs to be seen
+   outside this file. */
 
 /* 16-byte-aligned scratch, by hand - same reasoning as src/ops_mmx.c's
    p2_blk(), a private copy rather than a shared one: nothing outside
-   this file's own lz_p2_rows_sse2 ever needs this tier's buffer. NOT
-   one of task #31's five shared names: unlike p2_shift_of, this one is
-   genuinely tier-private by design (see the comment above), not a
-   duplicate of the same logical thing. */
+   this file's own lz_p2_rows_sse2 ever needs this tier's buffer. Not
+   one of the five names shared via ops_kernel_shared.h: unlike
+   p2_shift_of, this one is genuinely tier-private by design (see the
+   comment above), not a duplicate of the same logical thing. */
 static lz_p2_blk *p2_blk_sse2(void) {
     static char raw[sizeof(lz_p2_blk) + 15];
     size_t off = (size_t)((uintptr_t)(void *)raw & 15u);
@@ -303,11 +300,10 @@ extern void lz_p2_split32_sse2_asm(const void *blk, signed char *hi_out,
     __modify [8087]
 
 /* lz_p2_rows_sse2(): all of a row's groups, tier 3. One call per row
-   from ops.c's gdn_p2_row_simd (task #30, 2/N) - fully self-contained,
-   unlike lz_p2_rows_sse (src/ops_mmx_sse.c): SSE2 has real content for
-   BOTH mul32 and split32, so neither kernel here needs a cross-TU call,
-   only the row boundary itself does, in place of the zero real calls
-   the pre-split #pragma-aux-inline loop had. */
+   from ops.c's gdn_p2_row_simd - fully self-contained, unlike
+   lz_p2_rows_sse (src/ops_mmx_sse.c): SSE2 has real content for BOTH
+   mul32 and split32, so neither kernel here needs a cross-TU call,
+   only the row boundary itself does. */
 void lz_p2_rows_sse2(const int8_t *ph_row, const int8_t *pl_row,
                      int pl_stride, const int16_t *dq,
                      const int16_t (*mul)[4], int8_t *oh_row,
@@ -343,10 +339,9 @@ void lz_p2_rows_sse2(const int8_t *ph_row, const int8_t *pl_row,
     }
 }
 
-/* ---- Q8 group-scale amax, SSE2 tier - moved here from
-   src/ops_kernel_amax.h (task #30, 4/N). Same zero-call-shape-change
-   reasoning as src/ops_mmx.c's lz_amax32_mmx_w: the wrapper already sat
-   between the pragma and LZ_AMAX_TAB before the move. */
+/* ---- Q8 group-scale amax, SSE2 tier - in this TU. Same
+   zero-call-shape-change reasoning as src/ops_mmx.c's lz_amax32_mmx_w:
+   the wrapper sits between the pragma and LZ_AMAX_TAB. */
 
 /* Four lanes. The horizontal fold is two shuffle-and-compare rounds -
    pshufd is SSE2, so no MMX register is touched and no emms is owed. */
@@ -393,9 +388,9 @@ unsigned lz_amax32_sse2_w(const float *x, int n) {
     return lz_amax32_sse2_asm(x, n);
 }
 
-/* ---- Q8 activation rounding, SSE2 tier - moved here from
-   src/ops_kernel_q8round.h (task #30, 4/N). cvtps2dq converts 4 floats
-   at once - no MMX register touched, unlike the SSE1+MMX tier's
+/* ---- Q8 activation rounding, SSE2 tier - in this TU; the algorithm
+   documentation is in src/ops_kernel_q8round.h. cvtps2dq converts 4
+   floats at once - no MMX register touched, unlike the SSE1+MMX tier's
    cvtps2pi (src/ops_mmx_sse.c), so no emms is owed anywhere in this
    cell. */
 extern void lz_q8round32_sse2_asm(const float *x, int8_t *o, const float *inv);
@@ -476,12 +471,10 @@ void lz_q8round_2p_group_sse2(const float *grp, int8_t *ho, int8_t *lw,
 }
 
 /* ---- Q8_0 32/128-element dot products and row kernel, SSE2 tier -
-   moved here from src/ops_kernel_dot.h / src/ops.c (task #30, 5/N).
-   Algorithm documentation unchanged, just relocated with the code -
+   in this TU. Algorithm documentation is in src/ops_kernel_dot.h -
    see src/ops_mmx.c's MMX-tier twin for the shared background (weight
-   widening, why the paired kernel exists) and this file's own
-   pre-existing SSE2 kernels above for why no emms is owed anywhere
-   here. */
+   widening, why the paired kernel exists) and this file's own SSE2
+   kernels above for why no emms is owed anywhere here. */
 #include "ops.h"           /* lz_prefetch_mode - row_q8_sse2_asm needs it,
                               real extern linkage, unaffected by this move. */
 #include "ops_kernel_dot_shared.h" /* LZ_Q8_PFSEL, LZ_Q8_GROUP4 */
@@ -674,14 +667,13 @@ extern void lz_dot128_x16_sse2_asm(const int8_t *w,
     __parm [__eax] [__ecx] [__ebx] \
     __modify [8087]
 
-/* row_q8_sse2_asm: ALREADY the real call boundary from its own caller
+/* row_q8_sse2_asm: the real call boundary from its own caller
    (matmul_q8_impl, src/ops.c, dispatched once per matmul via
-   lz_row_pick's LZ_ROW_Q8 table) - moving the whole function here,
-   together with the leaf kernels it calls direct-by-name inside its
-   own loop, adds NO new call sites (the gdn1_x4 argument, piece 1/N).
-   No pairing logic here (unlike the MMX row function): SSE2's group
-   kernel is already the fast path, and pairing was never wired in for
-   this tier. */
+   lz_row_pick's LZ_ROW_Q8 table). The whole function, together with
+   the leaf kernels it calls direct-by-name inside its own loop, adds
+   no new call sites. No pairing logic here (unlike the MMX row
+   function): SSE2's group kernel is already the fast path, and pairing
+   is not wired in for this tier. */
 void row_q8_sse2_asm(int32_t *acc32, const void *w4, const void *w2,
                      const int16_t *xw, int nb, int nt, int in_dim,
                      const void *pf_end, const void *pf_end2) {
@@ -703,13 +695,13 @@ void row_q8_sse2_asm(int32_t *acc32, const void *w4, const void *w2,
            body cannot have its address taken and this file does not
            carry the MMX pragma itself. */
         if ((nb & 3) == 0) LZ_Q8_GROUP4(lz_dot128_x16_mmx_w);
-#endif
+#endif /* LZ_SSE2_GROUP */
         else               LZ_Q8_PFSEL(dot32_x16_sse2a);
     }
 }
 
 /* ---- Q4_1 32/128-element dot products and row kernel, SSE2 tier -
-   moved here from src/ops_kernel_dot.h / src/ops.c (task #30, 6/N). */
+   in this TU. */
 
 /* T42-tier Q4_1 (same: 128-bit, no EMMS needed, same name + signature
    reused). */
@@ -920,17 +912,16 @@ void row_q41_sse2_asm(int32_t *acc32, const void *w4, const void *w2,
         if ((nb & 3) == 0) LZ_Q41_GROUP4(lz_dot128_q41_sse2_asm);
 #else
         /* lz_dot128_q41_mmx_w is src/ops_mmx.c's real wrapper around
-           the MMX #pragma aux group kernel - task #32. */
+           the MMX #pragma aux group kernel. */
         if ((nb & 3) == 0) LZ_Q41_GROUP4(lz_dot128_q41_mmx_w);
-#endif
+#endif /* LZ_SSE2_GROUP */
         else               LZ_Q41_PFSEL(dot32_q41_sse2a);
     }
 }
 
-/* ---- T2 (ternary) dot product and row kernel, SSE2 tier - moved here
-   from src/ops_kernel_dot.h / src/ops.c (task #30, 7/N). No 128-wide
-   group kernel exists for this format, so no LZ_SSE2_GROUP=0 routing
-   is needed here (task #32 does not apply to T2). */
+/* ---- T2 (ternary) dot product and row kernel, SSE2 tier - in this
+   TU. No 128-wide group kernel exists for this format, so no
+   LZ_SSE2_GROUP=0 routing is needed here. */
 extern int32_t lz_dot32_t2_sse2_asm(const unsigned char *w2,
                                     const int16_t *x);
 #pragma aux lz_dot32_t2_sse2_asm = \
@@ -1004,11 +995,8 @@ void row_t2_sse2_asm(int32_t *acc32, const void *w4, const void *w2v,
 }
 
 /* ---- Q6_1 32/128-element dot products and row kernel, SSE2 tier -
-   moved here from src/ops_kernel_dot.h / src/ops.c (task #30, 8/N).
-   Both this format's SSE2 kernels are genuine %xmm-only implementations
-   (not an MMX reuse - the "F3's remaining work" comment that used to
-   sit above the MMX 32-element kernel in src/ops_kernel_dot.h was
-   stale, the hand-written SSE2 asm already existed there). */
+   in this TU. Both this format's SSE2 kernels are genuine %xmm-only
+   implementations, not an MMX reuse. */
 extern int32_t lz_dot32_q61_sse2_asm(const unsigned char *w4, const unsigned char *w2, const int16_t *x);
 #pragma aux lz_dot32_q61_sse2_asm = \
     ".686" \
@@ -1319,9 +1307,9 @@ void row_q61_sse2_asm(int32_t *acc32, const void *w4, const void *w2v,
         if ((nb & 3) == 0) LZ_Q61_GROUP4(lz_dot128_q61_sse2_asm);
 #else
         /* lz_dot128_q61_mmx_w is src/ops_mmx.c's real wrapper around
-           the MMX #pragma aux group kernel - task #32. */
+           the MMX #pragma aux group kernel. */
         if ((nb & 3) == 0) LZ_Q61_GROUP4(lz_dot128_q61_mmx_w);
-#endif
+#endif /* LZ_SSE2_GROUP */
         /* MEASURED ON TARGET: on a real Pentium M the SSE2 kernel is
            20-30% faster at kernel level and no worse end-to-end. Uop
            counts compare only WITHIN one instruction set; a 128-bit uop
@@ -1332,7 +1320,7 @@ void row_q61_sse2_asm(int32_t *acc32, const void *w4, const void *w2v,
 }
 
 /* ---- Q16_0 32/128-element dot products and row kernel, SSE2 tier -
-   moved here from src/ops_kernel_dot.h / src/ops.c (task #30, 9/N). */
+   in this TU. */
 extern int32_t lz_dot32_q16_sse2_asm(const int16_t *w, const int16_t *x);
 #pragma aux lz_dot32_q16_sse2_asm = \
     ".686" \
@@ -1486,9 +1474,9 @@ void row_q16_sse2_asm(int32_t *acc32, const void *w4, const void *w2,
         if ((nb & 3) == 0) LZ_Q16_GROUP4(lz_dot128_q16_sse2_asm);
 #else
         /* lz_dot128_q16_mmx_w is src/ops_mmx.c's real wrapper around
-           the MMX #pragma aux group kernel - task #32. */
+           the MMX #pragma aux group kernel. */
         if ((nb & 3) == 0) LZ_Q16_GROUP4(lz_dot128_q16_mmx_w);
-#endif
+#endif /* LZ_SSE2_GROUP */
         else               LZ_Q16_ACC(dot32_q16_sse2a);
     }
 }

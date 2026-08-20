@@ -26,7 +26,7 @@
    makes that fail instead. */
 #ifndef LZ_TAP
 #define LZ_TAP(tag, li, ptr, n) ((void)0)
-#endif
+#endif /* LZ_TAP */
 
 /* Debug-only investigative probe for the team-lead's dilution-vs-position
    question on the MTP prefill A/B/C study. Scales the MTP block's own
@@ -389,7 +389,7 @@ static void *xcalloc(size_t n, size_t sz, int *ok, long long *acc) {
  * re-run it on any model whose conv inputs might be scaled differently. */
 #ifndef LZ_CONV_ES
 #define LZ_CONV_ES 9
-#endif
+#endif /* LZ_CONV_ES */
 
 #if LZ_CONV_FIXED
 /* Quantize the conv taps once, laying them out per channel in the same
@@ -448,7 +448,7 @@ static int conv_fixed_build(LZRunState *s, const LZModel *m) {
     s->conv_in_scale = (float)ldexp(1.0, LZ_CONV_ES);
     return 0;
 }
-#endif
+#endif /* LZ_CONV_FIXED */
 
 int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
                        int spec_k_max, char *errbuf, int errlen) {
@@ -505,7 +505,7 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
        cheaper bargain than a buffer that appears only on some paths. */
     s->wsum_cbuf = (float *)xcalloc((size_t)seq_len, sizeof(float), &ok, &s->bytes_alloc);
     s->wsum_cq   = (int16_t *)xcalloc((size_t)seq_len, sizeof(int16_t), &ok, &s->bytes_alloc);
-#endif
+#endif /* LZ_ATTN_FIXED & 2 */
     s->attn_out = (float *)xcalloc((size_t)nt * c->attn_q_dim, sizeof(float), &ok, &s->bytes_alloc);
     s->ktmp     = (float *)xcalloc((size_t)nt * c->attn_kv_dim, sizeof(float), &ok, &s->bytes_alloc);
     s->vtmp     = (float *)xcalloc((size_t)nt * c->attn_kv_dim, sizeof(float), &ok, &s->bytes_alloc);
@@ -589,7 +589,7 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
                                           &ok, &s->bytes_alloc);
 #if LZ_KV_2PLANE
                 s->kq8_lo = (int8_t *)xcalloc(nrow, 1, &ok, &s->bytes_alloc);
-#endif
+#endif /* LZ_KV_2PLANE */
             } else if (s->kfmt == LZ_KVF_F32) {
                 s->kf32 = (float *)xcalloc(nrow, sizeof(float),
                                            &ok, &s->bytes_alloc);
@@ -605,7 +605,7 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
                                           &ok, &s->bytes_alloc);
 #if LZ_KV_2PLANE
                 s->vq8_lo = (int8_t *)xcalloc(nrow, 1, &ok, &s->bytes_alloc);
-#endif
+#endif /* LZ_KV_2PLANE */
             } else if (s->vfmt == LZ_KVF_F32) {
                 s->vf32 = (float *)xcalloc(nrow, sizeof(float),
                                            &ok, &s->bytes_alloc);
@@ -620,7 +620,7 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
 #if LZ_KV_2PLANE
     s->att_lo  = (float *)xcalloc((size_t)seq_len, sizeof(float), &ok, &s->bytes_alloc);
     s->wsum_lo = (float *)xcalloc((size_t)c->head_dim, sizeof(float), &ok, &s->bytes_alloc);
-#endif
+#endif /* LZ_KV_2PLANE */
 
     s->qkv    = (float *)xcalloc((size_t)nt * c->lin_conv_dim, sizeof(float), &ok, &s->bytes_alloc);
     s->qkv_c  = (float *)xcalloc((size_t)nt * c->lin_conv_dim, sizeof(float), &ok, &s->bytes_alloc);
@@ -735,7 +735,7 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
     s->ssm_state_q8_lo = (int8_t *)xcalloc(
         (size_t)s->ssm_ring_depth * c->n_linear_layers * c->lin_n_v_heads *
         c->lin_k_head_dim * c->lin_v_head_dim, 1, &ok, &s->bytes_alloc);
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
     s->ssm_state_s = (float *)xcalloc(
         (size_t)s->ssm_ring_depth * c->n_linear_layers * c->lin_n_v_heads *
         c->lin_k_head_dim * c->lin_v_head_dim / 32,
@@ -886,7 +886,7 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
 #if LZ_CONV_FIXED
     /* After cache_idx, which conv_fixed_build reads. */
     if (s->conv_fixed && conv_fixed_build(s, m) != 0) s->conv_fixed = 0;
-#endif
+#endif /* LZ_CONV_FIXED */
 
     return 0;
 }
@@ -898,14 +898,14 @@ void lz_state_free(LZRunState *s) {
     free(s->qg); free(s->qh); free(s->att); free(s->attn_out);
 #if (LZ_ATTN_FIXED & 2)
     free(s->wsum_cbuf); free(s->wsum_cq);
-#endif
+#endif /* LZ_ATTN_FIXED & 2 */
     free(s->ktmp); free(s->vtmp);
     free(s->kq8); free(s->vq8); free(s->ksq); free(s->vsq);
     free(s->kf32); free(s->vf32);
     free(s->k4); free(s->v4); free(s->ks4); free(s->vs4);
 #if LZ_KV_2PLANE
     free(s->kq8_lo); free(s->vq8_lo); free(s->att_lo); free(s->wsum_lo);
-#endif
+#endif /* LZ_KV_2PLANE */
     free(s->qkv); free(s->qkv_c); free(s->zbuf); free(s->avec); free(s->bvec);
     free(s->ssm_out); free(s->ssm_sig); free(s->qn); free(s->kn);
     free(s->kda_q); free(s->kda_k); free(s->kda_v);
@@ -922,7 +922,7 @@ void lz_state_free(LZRunState *s) {
     free(s->ssm_state_q8); free(s->ssm_state_s);
 #if LZ_GDN_STATE_2PLANE
     free(s->ssm_state_q8_lo);
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
     free(s->conv_state);
     free(s->conv_state_q); free(s->conv_mw); free(s->conv_oscale);
     free(s->xq); free(s->xqs); free(s->wscr);
@@ -957,7 +957,7 @@ void lz_state_reset(LZRunState *s, const LZModel *m) {
                           c->attn_kv_dim);
     if (s->vq8_lo) memset(s->vq8_lo, 0, (size_t)kv_layers * s->kv_slots *
                           c->attn_kv_dim);
-#endif
+#endif /* LZ_KV_2PLANE */
     if (s->kf32) memset(s->kf32, 0, (size_t)kv_layers * s->kv_slots *
                         c->attn_kv_dim * sizeof(float));
     if (s->vf32) memset(s->vf32, 0, (size_t)kv_layers * s->kv_slots *
@@ -979,7 +979,7 @@ void lz_state_reset(LZRunState *s, const LZModel *m) {
 #if LZ_GDN_STATE_2PLANE
     memset(s->ssm_state_q8_lo, 0, (size_t)s->ssm_ring_depth * c->n_linear_layers *
            c->lin_n_v_heads * c->lin_k_head_dim * c->lin_v_head_dim);
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
     memset(s->ssm_state_s, 0, (size_t)s->ssm_ring_depth * c->n_linear_layers *
            c->lin_n_v_heads * c->lin_k_head_dim * c->lin_v_head_dim / 32 *
            sizeof(float));
@@ -988,7 +988,7 @@ void lz_state_reset(LZRunState *s, const LZModel *m) {
         memset(s->conv_state_q, 0,
                (size_t)s->ssm_ring_depth * c->n_linear_layers *
                c->lin_conv_dim * (c->conv_kernel - 1) * sizeof(short));
-#endif
+#endif /* LZ_CONV_FIXED */
     memset(s->conv_state, 0, (size_t)s->ssm_ring_depth * c->n_linear_layers *
            c->lin_conv_dim * (c->conv_kernel - 1) * sizeof(float));
     /* The ring's own "which slot is confirmed" index - see forward.h's
@@ -1031,7 +1031,7 @@ int lz_ckpt_alloc(LZStateCkpt *ck, const LZModel *m, char *errbuf, int errlen) {
     ck->ssm_q8 = (int8_t *)malloc(n_q8);
 #if LZ_GDN_STATE_2PLANE
     ck->ssm_q8_lo = (int8_t *)malloc(n_q8);
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
     ck->ssm_s = (float *)malloc(n_s * sizeof(float));
     ck->conv  = (float *)malloc(n_conv * sizeof(float));
 #if LZ_CONV_FIXED
@@ -1041,11 +1041,11 @@ int lz_ckpt_alloc(LZStateCkpt *ck, const LZModel *m, char *errbuf, int errlen) {
        wrong. */
     ck->conv_q = (short *)malloc(n_conv * sizeof(short));
     if (!ck->conv_q) { lz_ckpt_free(ck); if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_OOM); return LZ_ERR_OOM; }
-#endif
+#endif /* LZ_CONV_FIXED */
     if (!ck->ssm_q8 || !ck->ssm_s || !ck->conv
 #if LZ_GDN_STATE_2PLANE
         || !ck->ssm_q8_lo
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
         ) {
         lz_ckpt_free(ck);
         if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_STATE_ALLOC);
@@ -1064,7 +1064,7 @@ void lz_ckpt_free(LZStateCkpt *ck) {
     free(ck->ssm_q8);
 #if LZ_GDN_STATE_2PLANE
     free(ck->ssm_q8_lo);
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
     free(ck->ssm_s);
     free(ck->conv);
     free(ck->conv_q);
@@ -1101,7 +1101,7 @@ int lz_ckpt_save(LZStateCkpt *ck, const LZRunState *s, const LZModel *m,
     memcpy(ck->ssm_q8, s->ssm_state_q8 + o_q8, n_q8);
 #if LZ_GDN_STATE_2PLANE
     memcpy(ck->ssm_q8_lo, s->ssm_state_q8_lo + o_q8, n_q8);
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
     memcpy(ck->ssm_s, s->ssm_state_s + o_s, n_s * sizeof(float));
 #if LZ_CONV_FIXED
     /* Whichever history is live. Saving the float one while the fixed
@@ -1110,7 +1110,7 @@ int lz_ckpt_save(LZStateCkpt *ck, const LZRunState *s, const LZModel *m,
     if (s->conv_fixed)
         memcpy(ck->conv_q, s->conv_state_q + o_conv, n_conv * sizeof(short));
     else
-#endif
+#endif /* LZ_CONV_FIXED */
     memcpy(ck->conv, s->conv_state + o_conv, n_conv * sizeof(float));
     ck->pos   = pos;
     ck->epoch = s->epoch;
@@ -1159,13 +1159,13 @@ int lz_ckpt_restore(const LZStateCkpt *ck, LZRunState *s, const LZModel *m,
     memcpy(s->ssm_state_q8, ck->ssm_q8, n_q8);
 #if LZ_GDN_STATE_2PLANE
     memcpy(s->ssm_state_q8_lo, ck->ssm_q8_lo, n_q8);
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
     memcpy(s->ssm_state_s, ck->ssm_s, n_s * sizeof(float));
 #if LZ_CONV_FIXED
     if (s->conv_fixed)
         memcpy(s->conv_state_q, ck->conv_q, n_conv * sizeof(short));
     else
-#endif
+#endif /* LZ_CONV_FIXED */
     memcpy(s->conv_state, ck->conv, n_conv * sizeof(float));
     s->ssm_slot = 0;
     if (out_pos) *out_pos = ck->pos;
@@ -1220,7 +1220,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
 #if LZ_KV_2PLANE
     int8_t *kc_lo = s->kq8_lo ? s->kq8_lo + loff : NULL;
     int8_t *vc_lo = s->vq8_lo ? s->vq8_lo + loff : NULL;
-#endif
+#endif /* LZ_KV_2PLANE */
     /* (H q) . (H k) = kv_rot_k * (q . k) because lz_fwht is the
        unnormalized Hadamard (see its comment in ops.h). Fold that factor
        out here rather than normalizing the transform: kv_rot_k is a power
@@ -1308,7 +1308,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                                ks + (size_t)kv_slot(s, pos) * kvd / 32);
         if (vc) lz_quantize_q8(vtt, kvd, 32, vc + (size_t)kv_slot(s, pos) * kvd,
                                vs + (size_t)kv_slot(s, pos) * kvd / 32);
-#endif
+#endif /* LZ_KV_2PLANE */
         /* Reference arm: the same post-QK-norm, post-RoPE (and, when
            enabled, post-Hadamard) vectors the Q8 path just quantized,
            kept exactly. Written alongside rather than instead of the Q8
@@ -1451,7 +1451,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                                  ks + (size_t)(kvh * hd) / 32,
                                  kvd, pos, scale, s->attn_sink, s->kv_ring);
             } else
-#endif
+#endif /* LZ_ATTN_FIXED & 1 */
             for (t = win_t0; t <= pos; t++) {
                 if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
                 /* scoring: q (f32) × k (Q8). float accumulation within
@@ -1493,7 +1493,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                                      kvd, pos, scale,
                                      s->attn_sink, s->kv_ring);
                 } else
-#endif
+#endif /* LZ_ATTN_FIXED & 1 */
                 for (tt = 0; tt <= pos; tt++) {
                     const int8_t *kt = kc_lo + (size_t)kv_slot(s, tt) * kvd + (size_t)kvh * hd;
                     const float *kts = ks + (size_t)kv_slot(s, tt) * kvd / 32 +
@@ -1515,7 +1515,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                 for (tt = 0; tt <= pos; tt++)
                     s->att[tt] += s->att_lo[tt] * (1.0f / LZ_GDN_LO_SCALE);
             }
-#endif
+#endif /* LZ_KV_2PLANE */
             }
             /* win_t0>0 means s->att[0..win_t0-1] were never scored this
                call (investigative window override) - softmax only the
@@ -1589,7 +1589,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                                 kvd, pos, s->wsum_cbuf, s->wsum_cq,
                                 s->attn_sink, s->kv_ring);
             } else {
-#endif
+#endif /* LZ_ATTN_FIXED & 2 */
             memset(out, 0, (size_t)hd * sizeof(float));
             for (t = win_t0; t <= pos; t++) {
                 if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
@@ -1603,7 +1603,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
             }
 #if (LZ_ATTN_FIXED & 2)
             }
-#endif
+#endif /* LZ_ATTN_FIXED & 2 */
 #if LZ_KV_2PLANE
             /* Same argument as the scoring pass: the weighted sum is
                linear in v. */
@@ -1617,7 +1617,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                                     kvd, pos, s->wsum_cbuf, s->wsum_cq,
                                     s->attn_sink, s->kv_ring);
                 } else {
-#endif
+#endif /* LZ_ATTN_FIXED & 2 */
                 memset(s->wsum_lo, 0, (size_t)hd * sizeof(float));
                 for (t = 0; t <= pos; t++) {
                     if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
@@ -1633,11 +1633,11 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                 }
 #if (LZ_ATTN_FIXED & 2)
                 }
-#endif
+#endif /* LZ_ATTN_FIXED & 2 */
                 for (d = 0; d < hd; d++)
                     out[d] += s->wsum_lo[d] * (1.0f / LZ_GDN_LO_SCALE);
             }
-#endif
+#endif /* LZ_KV_2PLANE */
             }
             /* Rotate the attention output back. It is a linear combination
                of rotated V rows, so H applied once more undoes the
@@ -1748,7 +1748,7 @@ static void forward_ssm(const LZModel *m, LZRunState *s,
                 s->conv_in_scale, s->conv_bound, cdim, c->conv_kernel);
             continue;
         }
-#endif
+#endif /* LZ_CONV_FIXED */
         lz_causal_conv1d_step(s->qkv_c + (size_t)tk * cdim,
                               s->qkv + (size_t)tk * cdim,
                               s->conv_state + (size_t)slot_in * conv_slot_stride + li_off_conv,
@@ -1784,7 +1784,7 @@ static void forward_ssm(const LZModel *m, LZRunState *s,
 #if LZ_GDN_STATE_2PLANE
             const int8_t *sq2_in  = s->ssm_state_q8_lo + (size_t)slot_in  * q8_slot_stride + h_off_q8;
             int8_t       *sq2_out = s->ssm_state_q8_lo + (size_t)slot_out * q8_slot_stride + h_off_q8;
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
             const float *ss_in  = s->ssm_state_s + (size_t)slot_in  * s_slot_stride + h_off_s;
             float       *ss_out = s->ssm_state_s + (size_t)slot_out * s_slot_stride + h_off_s;
             const float *qp = s->qkv_c + (size_t)tk * cdim;
@@ -1817,7 +1817,7 @@ static void forward_ssm(const LZModel *m, LZRunState *s,
             lz_gdn_step(out, sq_in, sq_out,
 #if LZ_GDN_STATE_2PLANE
                         sq2_in, sq2_out,
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
                         ss_in, ss_out, s->qn, s->kn, v_t, gt, beta, kd, vd);
             LZ_PROF_END(_tr, LZ_PROF_REC);
         }
@@ -1975,7 +1975,7 @@ static void forward_kda(const LZModel *m, LZRunState *s,
                 s->conv_in_scale, s->conv_bound, vdim, c->conv_kernel);
             continue;
         }
-#endif
+#endif /* LZ_CONV_FIXED */
         {
         float *base_in  = s->conv_state + (size_t)slot_in  * conv_slot_stride + li_off_conv;
         float *base_out = s->conv_state + (size_t)slot_out * conv_slot_stride + li_off_conv;
@@ -2066,7 +2066,7 @@ static void forward_kda(const LZModel *m, LZRunState *s,
 #if LZ_GDN_STATE_2PLANE
             const int8_t *sq2_in  = s->ssm_state_q8_lo + (size_t)slot_in  * q8_slot_stride + h_off_q8;
             int8_t       *sq2_out = s->ssm_state_q8_lo + (size_t)slot_out * q8_slot_stride + h_off_q8;
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
             const float *ss_in  = s->ssm_state_s + (size_t)slot_in  * s_slot_stride + h_off_s;
             float       *ss_out = s->ssm_state_s + (size_t)slot_out * s_slot_stride + h_off_s;
             const float *qp = s->kda_qc + (size_t)tk * kdim + (size_t)kh * kd;
@@ -2085,7 +2085,7 @@ static void forward_kda(const LZModel *m, LZRunState *s,
             lz_kda_step(out, sq_in, sq_out,
 #if LZ_GDN_STATE_2PLANE
                         sq2_in, sq2_out,
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
                         ss_in, ss_out, s->qn, s->kn, vp, gv, beta, kd, vd);
             LZ_PROF_END(_tr, LZ_PROF_REC);
         }

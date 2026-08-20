@@ -16,7 +16,7 @@
 #include <string.h>
 #ifdef __DOS__
 #include <io.h>       /* isatty, fileno - see console_is_tty */
-#endif
+#endif /* __DOS__ */
 
 #include "compat.h"
 #include "forward.h"
@@ -272,7 +272,7 @@ static void usage(void) {
 #ifdef __DOS__
     "This build uses DOS/32 Advanced DOS Extender technology.\n"
     "DOS/32A - Copyright (C) 1996-2006 by Narech K.\n"
-#endif
+#endif /* __DOS__ */
     );
 }
 
@@ -505,7 +505,7 @@ static void tensor_stats_t(const char *name, const LZTensor *t) {
 #define LZ_CONSOLE_GBK_DEFAULT 1
 #else
 #define LZ_CONSOLE_GBK_DEFAULT 0
-#endif
+#endif /* __DOS__ */
 static int g_console_gbk = LZ_CONSOLE_GBK_DEFAULT;
 
 /* Is stdout a console? Only DOS asks, and only DOS has the header for
@@ -518,7 +518,7 @@ static int console_is_tty(void) {
     return known;
 #else
     return 1;
-#endif
+#endif /* __DOS__ */
 }
 
 /* UTF-8 in, whatever the console wants out.
@@ -651,12 +651,11 @@ static void console_out(const char *bytes, int len) {
     static int inited;
 
     if (!inited) {
-        /* The display encoding is decided once, here, from the same two
-           facts console_out used to branch on directly: the --console
-           setting and whether stdout is still a console. A redirected
-           stream stays UTF-8, the decision lz_init_stdout already makes
-           when it chooses binary mode - the two have to agree or they
-           disagree about what a redirected stream is.
+        /* The display encoding is decided once, here, from two facts:
+           the --console setting and whether stdout is still a console.
+           A redirected stream stays UTF-8, the decision lz_init_stdout
+           already makes when it chooses binary mode - the two have to
+           agree or they disagree about what a redirected stream is.
            Measured while getting this wrong: with the tty test missing,
            `--prompt` redirected to a file came back GBK, which breaks
            every gate that reads the CLI's text output. */
@@ -818,7 +817,7 @@ static char **utf8_argv(int *argc) {
    pure GBK-to-UTF-8 pass over argv with no Win32 in it, and DOS wants
    exactly the same thing for exactly the same reason. */
 #include "cli_argv.h"
-#endif
+#endif /* _WIN32 || __DOS__ */
 
 int main(int argc, char **argv) {
     LZModel m;
@@ -951,7 +950,7 @@ int main(int argc, char **argv) {
             if (conv) argv = conv;
         }
     }
-#endif
+#endif /* _WIN32 || __DOS__ */
 
     for (i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -1058,7 +1057,7 @@ int main(int argc, char **argv) {
             manual |= LZ_MANUAL_TEMP;
         }
         else if (strcmp(a, "--think-temp") == 0 && i + 1 < argc) {
-            /* Dynamic temperature, task #19: the VALUE and the ENABLE flag
+            /* Dynamic temperature: the VALUE and the ENABLE flag
                travel together under one manual bit, so the --think preset
                copy-back cannot overwrite half of a user's explicit choice
                (the value without the enable, or vice versa). */
@@ -1505,12 +1504,12 @@ int main(int argc, char **argv) {
        gate can accumulate across builds: neither "which impl was
        compiled" nor "which ISA the CPU picked" names an operator
        variant on its own. */
-    /* "recurrence write", not "GDN pass2": the tier now covers the KDA
-       write-back too (task #23), and "pass2" leaked the two-pass internal
+    /* "recurrence write", not "GDN pass2": the tier covers the KDA
+       write-back too, and "pass2" leaks the two-pass internal
        structure. The [impl] suffix names WHICH of the bit-identical
-       bodies ran (task #27's MMX kernel, or the scalar one). Appended
-       rather than substituted so the existing parsers - this file's
-       gates match on "write <tier>" -
+       bodies ran (the MMX kernel, or the scalar one). Appended rather
+       than substituted so the existing parsers - this file's gates
+       match on "write <tier>" -
        keep matching. */
     /* One list, produced by ops.c, so a new tier appears here the day it
        exists rather than the day someone remembers this function. The
@@ -2265,7 +2264,7 @@ cleanup:
             abort();
         }
     }
-#endif
+#endif /* LZ_X87_STACK_GATE */
     lz_tokenizer_free(&tok);
     lz_free(&m);
     free(tokens);

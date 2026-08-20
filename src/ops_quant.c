@@ -1,9 +1,7 @@
 /* ops_quant.c - Quantization primitives and fixed-point transcendental
-   helpers. Moved from ops.c to lower the #if guard density in that TU.
+   helpers. A separate TU from ops.c to keep its #if guard density low.
 
-   Every function here was `static` in ops.c and is now externally
-   visible via ops_quant.h. Bit-identity is preserved: these are the
-   exact same implementations with only the linkage changed. */
+   Every function here is extern, declared in ops_quant.h. */
 #include <stddef.h>
 #include <float.h>
 #include <math.h>
@@ -28,7 +26,7 @@
 
 #ifndef LZ_NORM_MAX_N
 #define LZ_NORM_MAX_N 4096
-#endif
+#endif /* LZ_NORM_MAX_N */
 
 /* ---- x87 precision control ------------------------------------------- */
 
@@ -121,8 +119,8 @@ int q8_round(float qv) {
    The speed gain is small (~470 calls per token, saving ~2 us); the
    real reason is unification: once the engine carries all
    transcendental functions, the gcc and Watcom builds are bit-identical
-   for THIS function - measured (task #25), 0/2592 across a swept
-   exponent x mantissa-prefix grid. It holds here because every constant
+   for THIS function - measured, 0/2592 across a swept exponent x
+   mantissa-prefix grid. It holds here because every constant
    this function touches (0.5f, 1.5f, the hex integer 0x5f375a86u) is
    exactly representable in float32, so gcc's x87 excess-precision
    constant folding (see lz_exp's LZ_EXP_LOG2E32 below) has nothing to
