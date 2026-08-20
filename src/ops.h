@@ -49,6 +49,13 @@ enum {
        zero, so the measurement cannot see one of the tiers it is used
        to compare. */
     LZ_FC_RECUR,
+    /* lz_quantize_q8 and its int/int64/silu twins: the amax*(1/127) mul,
+       127/amax div and the per-element round, at every one of their many
+       call sites. Before this site existed only a couple of callers
+       billed an approximation of this work to their OWN site (ops_gdn.c's
+       attention score and recurrence write-back); everywhere else a
+       quantize that moved or disappeared was invisible to the census. */
+    LZ_FC_QUANT,
     LZ_FC_N
 };
 

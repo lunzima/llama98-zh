@@ -129,20 +129,20 @@ void lz_attn_score_q8(float *att, const float *qhh, int hd,
     static int16_t qw[LZ_ATTN_MAX_HD];
     int ng = hd / 32, g, t, i, slot = 0;
 
-    /* Once per head: the q quantization (a multiply per element, a
-       reciprocal per group). Then per t: a convert, the qs*kts product
+    /* Once per head: the q quantization - now billed by lz_quantize_q8
+       itself under LZ_FC_QUANT (it used to be invisible to the census,
+       so this site approximated it with mul=hd, div=ng; that approximation
+       is gone, not doubled). Then per t: a convert, the qs*kts product
        and a multiply-add per group, plus 3 adds and 2 multiplies to
        fold. This is the term that makes the fixed tier LOSE below ~200
        tokens - it does not shrink with context, and the per-t term it
        replaces is 2*hd.
-       Once-per-head: mul=hd (quantize), div=ng (reciprocal only - the
-       amax*(1/127) mul q8_group_scale also does is not billed here).
        Per-t, per group: cvt=1, mul=2 (qs*kts, then the outer product),
        add=1 (accumulate) - times ng. Per-t fold: add=3, mul=2. */
     LZ_FCX(LZ_FC_ATTN_SCORE,
-           hd + (long)(pos + 1) * (2 * ng + 2),
+           (long)(pos + 1) * (2 * ng + 2),
            (long)(pos + 1) * (ng + 3),
-           ng,
+           0,
            (long)(pos + 1) * ng,
            0);
     lz_quantize_q8(qhh, hd, 32, qq, qs);
@@ -1871,15 +1871,11 @@ static void gdn_step_impl(float *out, const int8_t *sq_in, int8_t *sq_out,
         lz_gdn_quantize_2p(buf, vd, 32, row_out, row_lo_out, rs_out,
                            LZ_FC_RECUR);
 #else
-        /* Billed here, not inside lz_quantize_q8 (it has many other
-           callers): its three branches - SIMD,
-           scalar-multiply, scalar-divide - are all mul-or-div + q8_round,
-           2/element, no residual plane to round a second time. Exact,
-           not an approximation. The per-element op is billed as mul
-           (the common "fast" branch); the rare divide branch is folded
-           in here too, same flat-bill convention as the rest of this
-           file. */
-        LZ_FCX(LZ_FC_RECUR, vd + ng, vd, ng, 0, 0);  /* mul-or-div, q8_round(add); 2/group q8_group_scale (mul, div) */
+        /* lz_quantize_q8 now bills its own three branches - SIMD,
+           scalar-multiply, scalar-divide - under LZ_FC_QUANT (see its
+           own comment in ops.c). Used to be billed here as an
+           approximation (LZ_FC_RECUR, since lz_quantize_q8 had no site
+           of its own); removed, not doubled, now that it does. */
         lz_quantize_q8(buf, vd, 32, row_out, rs_out);
 #endif /* LZ_GDN_STATE_2PLANE */
     }

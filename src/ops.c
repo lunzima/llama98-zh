@@ -101,7 +101,7 @@ int lz_f32_reached[LZ_FC_N];
 static const char *const LZ_FC_NAMES[LZ_FC_N] = {
     "dequant epilogue", "attention scoring", "attention wsum",
     "softmax", "exp", "sigmoid", "conv1d", "norms", "rsqrt",
-    "recurrence write"
+    "recurrence write", "quantize"
 };
 
 static const char *const LZ_FCC_NAMES[LZ_FCC_N] = {
@@ -392,12 +392,22 @@ void lz_quantize_q8(const float *x, int n, int gs, int8_t *q, float *s) {
         int8_t *out = q + (size_t)g * gs;
         float inv;
         int fast = q8_group_scale(grp, gs, &s[g], &inv);
+        /* Paid once per group regardless of which branch below runs -
+           same convention as lz_gdn_quantize_2p's identical bill. */
+        LZ_FCX(LZ_FC_QUANT, 1, 0, 1, 0, 0);  /* amax*(1/127) mul, 127/amax div */
         if (fast) {
             /* One division per group (the reciprocal); everything inside
                is multiplies. x87's FDIV is 39 cycles vs FMUL's 5 - this
                step is worth far more on a PII than on this machine. */
 #if defined(LZ_HAVE_Q8R_SIMD) || defined(LZ_HAVE_Q8R_SSE)
             if ((gs & 31) == 0 && tier) {
+                /* SIMD tiers round via a hardware convert (cvtps2pi or
+                   equivalent inside the kernel calls below), not q8_round's
+                   magic-number add - billed as mul+cvt, not mul+add, same
+                   split lz_gdn_quantize_2p's kernel branches use. Same
+                   count whichever of the two sub-tiers (SSE1+MMX vs SSE2)
+                   or toolchain path below actually runs. */
+                LZ_FCX(LZ_FC_QUANT, gs, 0, 0, gs, 0);
 #if defined(__WATCOMC__)
                 /* One call per GROUP, not per 32-element sub-chunk:
                    the #pragma aux bodies expand inline at the call
@@ -442,12 +452,16 @@ void lz_quantize_q8(const float *x, int n, int gs, int8_t *q, float *s) {
 #endif /* __WATCOMC__ */
             } else
 #endif /* LZ_HAVE_Q8R_SIMD || LZ_HAVE_Q8R_SSE */
-            for (k = 0; k < gs; k++) {
-                int qi = q8_round(grp[k] * inv);
-                qi = (qi > 127) ? 127 : qi;
-                out[k] = (int8_t)((qi < -127) ? -127 : qi);
+            {
+                LZ_FCX(LZ_FC_QUANT, gs, gs, 0, 0, 0);  /* mul, q8_round(add) */
+                for (k = 0; k < gs; k++) {
+                    int qi = q8_round(grp[k] * inv);
+                    qi = (qi > 127) ? 127 : qi;
+                    out[k] = (int8_t)((qi < -127) ? -127 : qi);
+                }
             }
         } else {
+            LZ_FCX(LZ_FC_QUANT, 0, gs, gs, 0, 0);  /* div, q8_round(add) */
             for (k = 0; k < gs; k++) {
                 int qi = q8_round(grp[k] / s[g]);
                 qi = (qi > 127) ? 127 : qi;
@@ -470,14 +484,17 @@ void lz_quantize_q8_tok(const float *x, int n, int8_t *q, float *s) {
     int fast;
     if (ns < 1) return;                 /* defense: n not a multiple of 32 */
     fast = q8_group_scale(x, n, &sg, &inv);
+    LZ_FCX(LZ_FC_QUANT, 1, 0, 1, 0, 0);  /* amax*(1/127) mul, 127/amax div */
     for (k = 0; k < ns; k++) s[k] = sg;
     if (fast) {
+        LZ_FCX(LZ_FC_QUANT, n, n, 0, 0, 0);  /* mul, q8_round(add) */
         for (k = 0; k < n; k++) {
             int qi = q8_round(x[k] * inv);
             qi = (qi > 127) ? 127 : qi;
             q[k] = (int8_t)((qi < -127) ? -127 : qi);
         }
     } else {
+        LZ_FCX(LZ_FC_QUANT, 0, n, n, 0, 0);  /* div, q8_round(add) */
         for (k = 0; k < n; k++) {
             int qi = q8_round(x[k] / sg);
             qi = (qi > 127) ? 127 : qi;
@@ -566,9 +583,11 @@ void lz_quantize_q8_int(const int32_t *t, int n, int gs, float deq,
             if (a > tam) tam = a;
         }
         amax = (float)tam * deq;
+        LZ_FCX(LZ_FC_QUANT, 1, 0, 0, 1, 0);  /* deq mul, tam->float cvt */
         if (amax > 0.0f) {
             s[g] = amax * LZ_Q8_INV127;
             inv = 127.0f / amax;
+            LZ_FCX(LZ_FC_QUANT, 1, 0, 1, 0, 0);  /* amax*(1/127) mul, 127/amax div */
             fast = (inv <= FLT_MAX);
             if (s[g] < LZ_Q8_MIN_SCALE_F) {
                 s[g] = 1.0f;
@@ -587,12 +606,19 @@ void lz_quantize_q8_int(const int32_t *t, int n, int gs, float deq,
                multiplies by 0 - mirror it (the stored scale is 1.0 and
                every q is 0). */
             float inv_elem = (inv == 0.0f) ? 0.0f : 127.0f / (float)tam;
+            /* Common case (inv != 0): inv_elem's own div+cvt, once per
+               group, plus per element a cvt (grp[k] to float), a mul
+               and q8_round's add. The rare inv==0 path skips inv_elem's
+               div+cvt - billed as if it always ran, same flat-bill
+               convention the MIN_SCALE branch gets everywhere else. */
+            LZ_FCX(LZ_FC_QUANT, gs, gs, 1, gs + 1, 0);
             for (k = 0; k < gs; k++) {
                 int qi = q8_round((float)grp[k] * inv_elem);
                 qi = (qi > 127) ? 127 : qi;
                 out[k] = (int8_t)((qi < -127) ? -127 : qi);
             }
         } else {
+            LZ_FCX(LZ_FC_QUANT, gs, gs, gs, gs, 0);  /* cvt, mul, div, q8_round(add) */
             for (k = 0; k < gs; k++) {
                 int qi = q8_round(((float)grp[k] * deq) / s[g]);
                 qi = (qi > 127) ? 127 : qi;
@@ -632,9 +658,11 @@ void lz_quantize_q8_int64(const int64_t *t, int n, int gs, float deq,
            volatile forces the float32 store, breaking the fusion on both. */
         volatile float tamf = (float)tam;
         amax = tamf * deq;
+        LZ_FCX(LZ_FC_QUANT, 1, 0, 0, 1, 0);  /* deq mul, tam->float cvt */
         if (amax > 0.0f) {
             s[g] = amax * LZ_Q8_INV127;
             inv = 127.0f / amax;
+            LZ_FCX(LZ_FC_QUANT, 1, 0, 1, 0, 0);  /* amax*(1/127) mul, 127/amax div */
             fast = (inv <= FLT_MAX);
             if (s[g] < LZ_Q8_MIN_SCALE_F) {
                 s[g] = 1.0f;
@@ -648,6 +676,11 @@ void lz_quantize_q8_int64(const int64_t *t, int n, int gs, float deq,
         }
         if (fast) {
             float inv_elem = (inv == 0.0f) ? 0.0f : 127.0f / tamf;
+            /* inv_elem reuses tamf (no extra cast, unlike the int32
+               twin's repeated (float)tam); per element a cvt (grp[k],
+               int64->float), a mul and q8_round's add. Same flat-bill
+               convention for the rare inv==0 path as the int32 twin. */
+            LZ_FCX(LZ_FC_QUANT, gs, gs, 1, gs, 0);
             for (k = 0; k < gs; k++) {
                 float g32 = (float)grp[k];
                 int qi = q8_round(g32 * inv_elem);
@@ -655,6 +688,7 @@ void lz_quantize_q8_int64(const int64_t *t, int n, int gs, float deq,
                 out[k] = (int8_t)((qi < -127) ? -127 : qi);
             }
         } else {
+            LZ_FCX(LZ_FC_QUANT, gs, gs, gs, gs, 0);  /* cvt, mul, div, q8_round(add) */
             for (k = 0; k < gs; k++) {
                 float g32 = (float)grp[k];
                 int qi = q8_round((g32 * deq) / s[g]);
@@ -681,7 +715,12 @@ void lz_quantize_q8_int64(const int64_t *t, int n, int gs, float deq,
 void lz_quantize_q8_silu(const float *p, const float *g, const int32_t *sig,
                          int n, int gs, int8_t *q, float *s, float *o) {
     int grp, k;
-    LZ_FCX(LZ_FC_NORM, 3 * n, 0, 0, n, 0);
+    /* Moved from LZ_FC_NORM: this is lz_quantize_q8_silu's OWN
+       arithmetic (the amax-pass reconstruction and the final
+       2^-15 rescale below), not the norm function's - rule 2 says a
+       site counts its own arithmetic only, and this function is the
+       quantize wrapper, not the norm itself. */
+    LZ_FCX(LZ_FC_QUANT, 3 * n, 0, 0, n, 0);
     if (gs <= 0 || n < gs || (n % gs) != 0) {
         /* f32-weight downstream: no quantization; reconstruct the silu
            value into o only (the f32 matmul fallback reads it). */
@@ -717,6 +756,10 @@ void lz_quantize_q8_silu(const float *p, const float *g, const int32_t *sig,
             /* Round-scale: u*inv == o*inv_o (see the header comment). */
             inv = 127.0f / amax;
             fast = (127.0f / amax_o <= FLT_MAX);
+            /* 2 mul (amax_o, s[grp]), 2 div (inv, and the fast check's
+               own 127/amax_o - a genuinely separate division, not a
+               reuse of inv: amax_o != amax). */
+            LZ_FCX(LZ_FC_QUANT, 2, 0, 2, 0, 0);
             if (s[grp] < LZ_Q8_MIN_SCALE_F) {
                 s[grp] = 1.0f;
                 inv = 0.0f;
@@ -728,12 +771,14 @@ void lz_quantize_q8_silu(const float *p, const float *g, const int32_t *sig,
             fast = 1;
         }
         if (fast) {
+            LZ_FCX(LZ_FC_QUANT, gs, gs, 0, 0, 0);  /* mul, q8_round(add) */
             for (k = 0; k < gs; k++) {
                 int qi = q8_round(og[k] * inv);
                 qi = (qi > 127) ? 127 : qi;
                 out[k] = (int8_t)((qi < -127) ? -127 : qi);
             }
         } else {
+            LZ_FCX(LZ_FC_QUANT, gs, gs, gs, 0, 0);  /* mul, div, q8_round(add) */
             for (k = 0; k < gs; k++) {
                 int qi = q8_round((og[k] * (1.0f / 32768.0f)) / s[grp]);
                 qi = (qi > 127) ? 127 : qi;
