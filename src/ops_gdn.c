@@ -1,5 +1,6 @@
 /* ops_gdn.c - SSM recurrence (GDN/KDA), fixed-point attention, and
-   pass-2 write-back. Moved from ops.c to lower #if guard density.
+   pass-2 write-back. A separate TU from ops.c to keep each file's #if
+   guard density low.
 
    Contains the full recurrence: pass 1 (coefficient table +
    gdn_sum_gg), pass 2 (p2_group_* + gdn_p2_row_simd), the attention
@@ -63,25 +64,23 @@
 /* Largest head_dim served by this path. 256 covers the 0.8B; anything
    larger falls back to the float loops rather than truncating. */
 #define LZ_ATTN_MAX_HD 256
-/* LZ_WSUM_CHUNK, LZ_SLOT_NEXT: src/ops_kernel_shared.h (task #31) -
+/* LZ_WSUM_CHUNK, LZ_SLOT_NEXT: defined in src/ops_kernel_shared.h.
    src/ops_mmx.c's lz_wsum_group_mmx walks the exact same ring buffer
    in the exact same chunks, and a constant duplicated across that TU
-   boundary is the failure mode task #31 exists to close off. Outside
-   both `& 1`/`& 2` bit guards because BOTH kernels need LZ_SLOT_NEXT -
-   it sat under `& 1` first and the -DLZ_ATTN_FIXED=2 build would not
-   compile. */
+   boundary is a failure mode. Defined outside both `& 1`/`& 2` bit
+   guards because BOTH kernels need LZ_SLOT_NEXT - under `& 1` only,
+   the -DLZ_ATTN_FIXED=2 build would not compile. */
 
 #if (LZ_ATTN_FIXED & 2)
 #if defined(__WATCOMC__)
-/* lz_wsum_pair_asm's #pragma aux body, and the per-pair loop that used
-   to call it, both moved to src/ops_mmx.c's lz_wsum_group_mmx in task
-   #30 (3/N) - see that function and ops.c's lz_attn_wsum_q8 (search
-   "one call per GROUP") for why: T is context-length-dependent and
-   unbounded, so a per-pair or even per-chunk call here would scale the
-   wrong way. No LZ_WSUM_PAIR macro here anymore: it would alias a name
-   no longer declared in this TU, and nothing under __WATCOMC__ needs
-   it - lz_attn_wsum_q8's Watcom branch calls lz_wsum_group_mmx
-   directly, the same way task #30 (2/N) retired the p2 aliases. */
+/* lz_wsum_pair_asm's #pragma aux body, and the per-pair loop, live in
+   src/ops_mmx.c's lz_wsum_group_mmx - see that function and ops.c's
+   lz_attn_wsum_q8 (search "one call per GROUP") for why: T is
+   context-length-dependent and unbounded, so a per-pair or even
+   per-chunk call here would scale the wrong way. No LZ_WSUM_PAIR macro
+   in this TU: it would alias a name not declared here, and nothing
+   under __WATCOMC__ needs it - lz_attn_wsum_q8's Watcom branch calls
+   lz_wsum_group_mmx directly. */
 
 #elif defined(LZ_WSUM_MMX_EXTERN)
 /* lz_wsum_pair_mmx's body lives in src/ops_mmx.c now - it writes %mm
@@ -244,17 +243,17 @@ void lz_attn_wsum_q8(float *out, const float *att, int hd,
         }
 
 #if defined(__WATCOMC__)
-        /* Watcom (task #30, 3/N): one call per GROUP, not per pair. The
-           #pragma aux body used to expand inline at LZ_WSUM_PAIR's call
-           site, once per pair, with zero real call overhead; moving it
-           to src/ops_mmx.c means the pair loop itself has to move too,
-           or every pair would pay a cross-TU call - up to T/2 of them,
-           T being context-length-dependent and unbounded (262144 on
-           this model). lz_wsum_group_mmx does the ENTIRE multi-chunk
+        /* Watcom: one call per GROUP, not per pair. The #pragma aux
+           body expands inline at the call site, once per pair, with
+           zero real call overhead; because the body lives in
+           src/ops_mmx.c, the pair loop is there too - a per-pair
+           cross-TU call would cost up to T/2 of them, T being
+           context-length-dependent and unbounded (262144 on this
+           model). lz_wsum_group_mmx does the ENTIRE multi-chunk
            second walk (all of LZ_WSUM_CHUNK's chunks, all pairs, the
            ring-buffer slot walk, the per-chunk emms and lz_i32f fold)
-           for this one group, so ops.c's call count per group goes from
-           zero to exactly one, not to T/2. */
+           for this one group, so ops.c's call count per group is
+           exactly one, not T/2. */
         lz_wsum_group_mmx(vc, kvd, g, sink, ring, cq, T, accf);
 #else
         for (d = 0; d < 32; d++) accf[d] = 0.0f;
@@ -369,15 +368,14 @@ void lz_attn_wsum_q8(float *out, const float *att, int hd,
 #if defined(LZ_GDN_HAVE_MMX)
 #if defined(__WATCOMC__)
 /* lz_gdn1_x4_asm's Watcom body, and the whole of gdn_sum_gg's MMX
-   branch that calls it 8 times per group, moved to src/ops_mmx.c as
-   lz_gdn_sum_gg_mmx (task #30) - it writes %mm registers, and wcc386's
+   branch that calls it 8 times per group, live in src/ops_mmx.c as
+   lz_gdn_sum_gg_mmx - it writes %mm registers, and wcc386's
    -Nr/-Ns ceiling cannot be raised per-function the way a #pragma aux
-   ".586" directive implies (task #28's finding), so it needs its own
-   translation unit now that ops.c targets the lower floor. Declared in
-   src/ops_mmx.h, already visible here. gdn_sum_gg's Watcom branch below
-   calls it once per group - the same call count ops.c always had to
-   this function, since it was already the real call boundary before
-   this split (a static function, not inlined into its own caller). */
+   ".586" directive implies, so it needs its own translation unit now
+   that ops.c targets the lower floor. Declared in src/ops_mmx.h,
+   already visible here. gdn_sum_gg's Watcom branch below calls it once
+   per group - the same call count this function has from its own
+   caller, just crossing a TU boundary now. */
 #else
 /* lz_gdn1_x4_asm's gcc body lives in src/ops_mmx.c - it writes %mm
    registers. Declared in src/ops_mmx.h, already visible here. */
@@ -491,7 +489,7 @@ static void gdn_build_table(const float *ss, const float *q, const float *k,
     }
 }
 
-/* gdn_tail_row: src/ops_kernel_shared.h (task #31) - src/ops_mmx.c's
+/* gdn_tail_row: defined in src/ops_kernel_shared.h - src/ops_mmx.c's
    MMX branch needs the exact same odd-tail-row fixup. */
 
 #if !defined(LZ_GDN_HAVE_MMX)
@@ -519,8 +517,8 @@ static void gdn_sum_gg(const int8_t *sq_gg, int kd, int vd,
 #elif defined(__WATCOMC__)
 /* Watcom: one call to src/ops_mmx.c's lz_gdn_sum_gg_mmx, which does the
    eight sub-window lz_gdn1_x4_asm calls internally with the pragma
-   genuinely inline (task #30) - the same call count this function
-   always had from ITS OWN caller, just crossing a TU boundary now. */
+   genuinely inline - the same call count this function has from its
+   own caller, just crossing a TU boundary. */
 static void gdn_sum_gg(const int8_t *sq_gg, int kd, int vd,
                        const int16_t (*tab)[8], int32_t tcu, int32_t tcw,
                        int32_t *au_gg, int32_t *aw_gg) {
@@ -705,15 +703,15 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
                between them would miss 4 of the 7. */
             if ((unsigned)fc_site < (unsigned)LZ_FC_N) LZ_FCX(fc_site, 3 * gs, gs, 0, 3 * gs, 0);  /* residual mul+convert+sub=3, 2x kernel mul+convert=4 */
 #if defined(__WATCOMC__)
-            /* task #30 (4/N): one call per GROUP for the WHOLE two-plane
-               round (both kernel loops and the residual arithmetic
-               between them), not one per 32-element sub-chunk - same
-               reasoning as lz_quantize_q8 above. lz_q8round_2p_group_
-               sse2/_sse own the residual computation too (plain float
-               arithmetic, safe in a Watcom #pragma-aux TU the way it is
-               not in a gcc -mmmx one - see src/ops_mmx.c's header for
-               why that split is toolchain-specific), so the hand-off is
-               still one call, not "kernel, kernel, residual" three. */
+            /* One call per GROUP for the WHOLE two-plane round (both
+               kernel loops and the residual arithmetic between them),
+               not one per 32-element sub-chunk - same reasoning as
+               lz_quantize_q8 above. lz_q8round_2p_group_sse2/_sse own
+               the residual computation too (plain float arithmetic,
+               safe in a Watcom #pragma-aux TU the way it is not in a
+               gcc -mmmx one - see src/ops_mmx.c's header for why that
+               split is toolchain-specific), so the hand-off is still
+               one call, not "kernel, kernel, residual" three. */
 #ifdef LZ_HAVE_Q8R_SIMD
             if (tier == 2)
                 lz_q8round_2p_group_sse2(grp, ho, lw, gs, &inv, &lo_mul, res);
@@ -850,8 +848,6 @@ static float *gdn_shadow(const int8_t *sq, int n) {
 
 /* expof and norm_ss_fixed are in ops_quant.c. */
 
-/* lz_rmsnorm_gated_out_fixed (real + stub) moved to ops_norm.c. */
-
 #if LZ_GDN_FIXED
 /* THE SPLIT IS A SHIFT, AND THE SHIFT IS 8 BECAUSE L IS 256. Every
    `>> 8`, `<< 8` and `* 256` in the fixed pass 2 is that one constant
@@ -865,24 +861,21 @@ typedef char lz_p2_needs_lo_scale_256[
 #include "ops_kernel_p2.h"        /* the MMX pair; defines lz_p2_blk and,
                                      on Watcom, LZ_HAVE_P2_MMX_ASM */
 
-/* p2_blk() moved to src/ops_mmx.c in task #30 (2/N), declared
-   unconditionally in src/ops_mmx.h - both Watcom's lz_p2_rows_mmx/
-   lz_p2_rows_sse (this task) and gcc's LZ_P2_MMX_EXTERN case (predates
-   it) need the SAME 16-byte-aligned scratch buffer, and now cross a TU
-   boundary to reach the code that fills it, so it has to be one real
-   exported function rather than a static one this file's Watcom
-   #pragma aux bodies used to reach for free. */
+/* p2_blk() is in src/ops_mmx.c, declared unconditionally in
+   src/ops_mmx.h - both Watcom's lz_p2_rows_mmx/lz_p2_rows_sse and
+   gcc's LZ_P2_MMX_EXTERN case need the SAME 16-byte-aligned scratch
+   buffer and reach across a TU boundary to the code that fills it, so
+   it has to be one real exported function rather than a static one the
+   #pragma aux bodies could reach for free. */
 
 #if defined(LZ_HAVE_P2_MMX_ASM) || defined(LZ_P2_MMX_EXTERN)
 #define LZ_HAVE_P2_MMX 1
-/* No lz_p2_mul32_mmx/lz_p2_split32_mmx bare-name aliases here anymore
-   (task #30, 2/N): those existed only so the #pragma aux bodies, once
-   textually inline in THIS file, could be called by a name that also
-   worked for gcc's real functions of the same name. Now that the
-   bodies live in src/ops_mmx.c (declared in src/ops_mmx.h for both
-   toolchains), Watcom's Phase 2 below calls lz_p2_rows_mmx/_sse/_sse2
-   directly instead - the bare per-group names stay gcc's alone, used
-   only by the gcc branch of gdn_p2_row_simd's Phase 2. */
+/* No lz_p2_mul32_mmx/lz_p2_split32_mmx bare-name aliases in this file:
+   the #pragma aux bodies live in src/ops_mmx.c (declared in
+   src/ops_mmx.h for both toolchains), and Watcom's Phase 2 below calls
+   lz_p2_rows_mmx/_sse/_sse2 directly. The bare per-group names are
+   gcc's alone, used only by the gcc branch of gdn_p2_row_simd's
+   Phase 2. */
 #endif /* LZ_HAVE_P2_MMX_ASM || LZ_P2_MMX_EXTERN */
 
 /* ---- the SSE1 tier: one instruction of content, and it is the split ---
@@ -893,14 +886,14 @@ typedef char lz_p2_needs_lo_scale_256[
    must HAVE to run it, which is what dispatch turns on. */
 #if defined(LZ_HAVE_P2_SSE_ASM) || defined(LZ_P2_MMX_EXTERN)
 #define LZ_HAVE_P2_SSE 1
-/* No lz_p2_split32_sse bare-name alias here anymore (task #30, 2/N) -
-   its body lives in src/ops_mmx_sse.c now for BOTH toolchains, named
-   "sse" for the ISA a machine must HAVE to run it even though it still
-   operates on %mm (SSE1's whole addition to the integer side of the
-   MMX register file is used here exactly once: pmaxsw does the low
-   plane's clamp to -127 directly). Watcom's Phase 2 reaches it only
-   through lz_p2_rows_sse, declared in src/ops_mmx.h; gcc's per-group
-   loop still calls it by its real name, also declared there. */
+/* No lz_p2_split32_sse bare-name alias in this file - its body lives
+   in src/ops_mmx_sse.c for BOTH toolchains, named "sse" for the ISA a
+   machine must HAVE to run it even though it still operates on %mm
+   (SSE1's whole addition to the integer side of the MMX register file
+   is used here exactly once: pmaxsw does the low plane's clamp to -127
+   directly). Watcom's Phase 2 reaches it only through lz_p2_rows_sse,
+   declared in src/ops_mmx.h; gcc's per-group loop calls it by its real
+   name, also declared there. */
 #endif /* LZ_HAVE_P2_SSE_ASM || LZ_P2_MMX_EXTERN */
 
 /* ---- the 128-bit tier -------------------------------------------------
@@ -925,7 +918,7 @@ typedef char lz_p2_needs_lo_scale_256[
    aux SSE2 pair is in the build, LZ_P2_SSE2_EXTERN means gcc's
    extern-linked intrinsics are - different code for the same operator
    on different compilers, both bodies in src/ops_sse2.c. No bare-name
-   aliases here anymore (same reasoning as the MMX and SSE1 tiers above):
+   aliases here (same reasoning as the MMX and SSE1 tiers above):
    Watcom's Phase 2 reaches this tier only through lz_p2_rows_sse2,
    declared in src/ops_sse2.h alongside the gcc-only per-group names,
    which the intrinsics' declarations share. */
@@ -967,7 +960,7 @@ static int p2_tier(void) {
        that cannot be selected is a path that cannot be validated. */
 #if defined(LZ_HAVE_P2_SSE) && !defined(LZ_P2_FORCE_MMX)
     /* REAL CPUID, not "the build carries the tier" - the same fix
-       kernel_detect() needed (task #22): LZ_HAVE_P2_SSE being defined
+       kernel_detect() needed: LZ_HAVE_P2_SSE being defined
        means src/ops_mmx_sse.c's lz_p2_split32_sse is linked in, which
        is true on every gcc build including the 32-bit x87 target, where
        it is not the same fact as "this machine has SSE1" (Pentium
@@ -1065,8 +1058,8 @@ static int p2_group_norm(float c1, float c2, int16_t *mul4, float *sacc) {
     return 1;
 }
 
-/* p2_shift_of: src/ops_kernel_shared.h (task #31) - the "shift not
-   divide" rationale lives there now, alongside the two SIMD tiers
+/* p2_shift_of: defined in src/ops_kernel_shared.h - the "shift not
+   divide" rationale lives there, alongside the SIMD tiers
    (src/ops_mmx.c, src/ops_mmx_sse.c, src/ops_sse2.c) that need the
    exact same rescale shift. */
 
@@ -1223,7 +1216,7 @@ static void gdn_p2_row_simd(const int8_t *ph_row,
     lz_p2_blk *blk = p2_blk();     /* Watcom's row functions get their
                                        own via their own p2_blk() call -
                                        see the Watcom Phase 2 branch
-                                       below (task #30, 2/N). */
+                                       below. */
 #endif /* !__WATCOMC__ */
     static float sacc[LZ_GDN_MAX_VD / 32];
     static int   shv[LZ_GDN_MAX_VD / 32];
@@ -1251,18 +1244,15 @@ static void gdn_p2_row_simd(const int8_t *ph_row,
     /* PHASE 2 - integer and MMX only, NO x87 anywhere in this loop.
        Changing that is what would make the single emms below wrong. */
 #if defined(__WATCOMC__)
-    /* Watcom (task #30, 2/N): one call per row, not per group. Before
-       this split every kernel below was a #pragma aux body expanded
-       inline right here, so the per-group loop cost zero real calls;
-       after it, the #pragma aux bodies are inline inside whichever row
-       function `tier` selects (src/ops_mmx.c's lz_p2_rows_mmx,
-       src/ops_mmx_sse.c's lz_p2_rows_sse, src/ops_sse2.c's
-       lz_p2_rows_sse2), so the only new call this split adds is the one
-       below - one per row, in place of the zero the old loop had, not
-       one per group the way wrapping this loop's body unchanged would
-       have cost. pl_stride/ol_stride carry the single-plane fallback
-       (the same fixed zero/sink buffer at every group) across the TU
-       boundary without teaching those files about LZ_GDN_STATE_2PLANE. */
+    /* Watcom: one call per row, not per group. The #pragma aux bodies
+       are inline inside whichever row function `tier` selects
+       (src/ops_mmx.c's lz_p2_rows_mmx, src/ops_mmx_sse.c's
+       lz_p2_rows_sse, src/ops_sse2.c's lz_p2_rows_sse2); this loop
+       calls it once per row, in place of the one call per group that
+       wrapping the group loop unchanged would cost.
+       pl_stride/ol_stride carry the single-plane fallback (the same
+       fixed zero/sink buffer at every group) across the TU boundary
+       without teaching those files about LZ_GDN_STATE_2PLANE. */
     {
         const int8_t *plg0;
         int8_t *olg0;
@@ -1775,13 +1765,13 @@ static void gdn_step_impl(float *out, const int8_t *sq_in, int8_t *sq_out,
 #endif /* LZ_GDN_STATE_2PLANE */
         }
 #if LZ_GDN_STATE_2PLANE
-        /* Reads zero when --recur-write is fixed: the work moved to
-           gdn_p2_fixed_rows, it did not vanish. */
+        /* Reads zero when --recur-write is fixed: the work is billed
+           through gdn_p2_fixed_rows, not here - it did not vanish. */
         lz_gdn_quantize_2p(buf, vd, 32, row_out, row_lo_out, rs_out,
                            LZ_FC_RECUR);
 #else
-        /* Billed here, not inside lz_quantize_q8 (many other callers,
-           out of scope for this task): its three branches - SIMD,
+        /* Billed here, not inside lz_quantize_q8 (it has many other
+           callers): its three branches - SIMD,
            scalar-multiply, scalar-divide - are all mul-or-div + q8_round,
            2/element, no residual plane to round a second time. Exact,
            not an approximation. The per-element op is billed as mul

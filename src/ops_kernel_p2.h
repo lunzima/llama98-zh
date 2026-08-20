@@ -1,21 +1,20 @@
 /* Algorithm documentation and the shared scratch-block layout check for
-   the fixed-point pass 2 of the GDN/KDA recurrence - the kernel task
-   #25 spent its whole length making writable. NOT a standalone
+   the fixed-point pass 2 of the GDN/KDA recurrence. NOT a standalone
    translation unit, ops.c #includes it once at the point the code
    sits, no include guards.
 
-   The Watcom #pragma aux bodies this file used to carry moved to
-   src/ops_mmx.c / src/ops_mmx_sse.c / src/ops_sse2.c in task #30
-   (2/N) - see this file's tail for why (the same -Nr/-Ns ceiling
-   argument task #28 found on cpucheck.c). This file stays the
-   authority on the algorithm itself; only the code left.
+   The Watcom #pragma aux bodies live in src/ops_mmx.c /
+   src/ops_mmx_sse.c / src/ops_sse2.c - see this file's tail for why
+   (the same -Nr/-Ns ceiling argument found on cpucheck.c). This file
+   stays the authority on the algorithm itself; only the code is
+   elsewhere.
 
    The gcc intrinsics twins of the MMX/SSE1 kernels (lz_p2_mul32_mmx,
    lz_p2_split32_mmx, lz_p2_split32_sse) live in src/ops_mmx.c too -
    they write %mm registers, so they belong in the one translation unit
-   built with -mmmx (see src/ops_mmx.h). Both toolchains' bodies now
-   live in the same file, for different reasons (register-file aliasing
-   for gcc, the CPU-generation ceiling for Watcom).
+   built with -mmmx (see src/ops_mmx.h). Both toolchains' bodies live
+   in the same file, for different reasons (register-file aliasing for
+   gcc, the CPU-generation ceiling for Watcom).
 
    WHAT THE OPERATOR IS. Per (row, 32-group), with the float prologue
    already reduced to two int16 multipliers (p2_group_norm in ops.c):
@@ -113,7 +112,7 @@
    The alignment cannot come from the type. Watcom is built here with
    -zp4, which caps member alignment at 4, so even a union with a double
    would not guarantee 8 - let alone 16. p2_blk() (src/ops_mmx.c, both
-   toolchains as of task #30) does it by hand on a static buffer. The
+   toolchains) does it by hand on a static buffer. The
    MMX kernels tolerated the misalignment (x86 movq to an unaligned
    address is legal, just slower); movdqa would not have, and finding
    that out at runtime is a fault, not a wrong number. */
@@ -137,40 +136,37 @@ typedef char lz_p2_blk_layout_check[
      offsetof(lz_p2_blk, a)    == 96 &&
      /* kmin is APPENDED, after the 128-byte a[], rather than slotted in
         beside the other constants. Tidier grouping would have shifted
-        a[] and every one of the 32 literal offsets in the assembly
-        that used to sit here - offsets that a 10-million-element
-        differential has already signed off on. Ugly layout beats
-        re-verifying working assembly for the sake of field order. */
+        a[] and every one of the 32 literal offsets in the assembly -
+        offsets that a 10-million-element differential has already
+        signed off on. Ugly layout beats re-verifying working assembly
+        for the sake of field order. */
      offsetof(lz_p2_blk, kmin) == 224 &&
      sizeof(lz_p2_blk)         == 240) ? 1 : -1];
 
 #if defined(__WATCOMC__) && defined(__MMX__)
-/* The #pragma aux bodies that used to fill the rest of this file
-   (lz_p2_mul32_mmx_asm, lz_p2_split32_mmx_asm, lz_p2_split32_sse_asm,
-   lz_p2_mul32_sse2_asm, lz_p2_split32_sse2_asm) moved to src/ops_mmx.c
-   (MMX tier and the SSE1-split's mul32 half), src/ops_mmx_sse.c (the
-   SSE1 split itself) and src/ops_sse2.c (the SSE2 pair) in task #30
-   (2/N). Reason: Watcom's -Nr/-Ns CPU-generation flag is a hard
-   ceiling its own per-function .586/.686 directives cannot exceed
-   (task #28's finding, on this project's own cpucheck.c), so ops.c
-   sitting at the new i486/i386 floor and these kernels needing .586/
-   .686 codegen are only compatible if the kernels live in a translation
-   unit with its own, higher ceiling. The algorithm documentation above
-   (WHAT THE OPERATOR IS, ISA INVENTORY) is unmoved and stays the
+/* The #pragma aux bodies (lz_p2_mul32_mmx_asm, lz_p2_split32_mmx_asm,
+   lz_p2_split32_sse_asm, lz_p2_mul32_sse2_asm, lz_p2_split32_sse2_asm)
+   live in src/ops_mmx.c (MMX tier and the SSE1-split's mul32 half),
+   src/ops_mmx_sse.c (the SSE1 split itself) and src/ops_sse2.c (the
+   SSE2 pair). Reason: Watcom's -Nr/-Ns CPU-generation flag is a hard
+   ceiling its own per-function .586/.686 directives cannot exceed, so
+   ops.c sitting at the i486/i386 floor and these kernels needing
+   .586/.686 codegen are only compatible if the kernels live in a
+   translation unit with its own, higher ceiling. The algorithm
+   documentation above (WHAT THE OPERATOR IS, ISA INVENTORY) stays the
    authority every one of those files' comments points back to.
 
-   These three flags keep meaning exactly what they always meant -
-   "Watcom has a genuine #pragma aux implementation of this tier",
-   which src/ops.c's own cascade (search LZ_HAVE_P2_MMX_ASM) and
-   lz_gdn_p2_impl()'s asm-vs-intrin diagnostic both still need to tell
-   apart from LZ_P2_MMX_EXTERN/LZ_P2_SSE2_EXTERN's "a real extern
-   function elsewhere has it" - true for gcc always, and now ALSO true
-   for Watcom's row-granularity functions (lz_p2_rows_mmx/_sse/_sse2),
-   which call the pragmas by their real names from another TU rather
-   than aliasing a bare name to them the way this file's cascade used
-   to. Nothing downstream needed to change for that: the diagnostic and
-   the LZ_HAVE_P2_MMX/SSE/SSE2 defines only ever tested "is Watcom" via
-   these three flags, never "is the code still physically here". */
+   These three flags mean "Watcom has a genuine #pragma aux
+   implementation of this tier", which src/ops.c's own cascade (search
+   LZ_HAVE_P2_MMX_ASM) and lz_gdn_p2_impl()'s asm-vs-intrin diagnostic
+   both need to tell apart from LZ_P2_MMX_EXTERN/LZ_P2_SSE2_EXTERN's
+   "a real extern function elsewhere has it" - true for gcc always, and
+   also true for Watcom's row-granularity functions (lz_p2_rows_mmx/
+   _sse/_sse2), which call the pragmas by their real names from another
+   TU rather than aliasing a bare name to them. Nothing downstream
+   depends on that: the diagnostic and the LZ_HAVE_P2_MMX/SSE/SSE2
+   defines only ever test "is Watcom" via these three flags, never "is
+   the code still physically here". */
 #define LZ_HAVE_P2_MMX_ASM  1
 #define LZ_HAVE_P2_SSE_ASM  1
 #define LZ_HAVE_P2_SSE2_ASM 1

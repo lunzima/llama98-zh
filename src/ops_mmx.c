@@ -1,30 +1,28 @@
 /* Every function that writes a %mm register - the MMX register file,
    which aliases the x87 stack. The ONLY translation unit built with
-   -mmmx (and -msse, for the SSE1-on-%mm cell) on EITHER toolchain (task
-   #30): on a 32-bit x87 target, gcc and clang both use MMX for an
-   8-byte block store when -mmmx is on even with no MMX intrinsic
-   anywhere nearby in the source, and neither issues emms before the x87
-   code that follows - which leaves the tag word full and makes the next
-   fld overflow to real indefinite (0xFFC00000). Moving every
-   %mm-touching function out of ops.c is what makes "ops.c is never
-   built with -mmmx" a safe thing to do; see src/ops_mmx.h for the macro
-   that tells ops.c's dispatch code these kernels still exist.
+   -mmmx (and -msse, for the SSE1-on-%mm cell) on EITHER toolchain: on
+   a 32-bit x87 target, gcc and clang both use MMX for an 8-byte block
+   store when -mmmx is on even with no MMX intrinsic anywhere nearby in
+   the source, and neither issues emms before the x87 code that follows
+   - which leaves the tag word full and makes the next fld overflow to
+   real indefinite (0xFFC00000). Keeping every %mm-touching function
+   out of ops.c is what makes "ops.c is never built with -mmmx" safe;
+   see src/ops_mmx.h for the macro that tells ops.c's dispatch code
+   these kernels still exist.
 
-   Watcom NOW compiles this file too (it did not before task #30) -
-   $(ENG_MMX_GCC) in the Makefile is misnamed as of this split; see its
-   own comment. Watcom's #pragma aux bodies moved here from ops.c and
-   the ops_kernel_*.h headers because -Nr/-Ns is a hard ceiling wcc386's
-   own per-function ".586"/".686" directives cannot exceed (task #28's
-   finding, on this project's own cpucheck.c) - ops.c staying at the new
-   i486/i386 floor and this file's hand-written kernels needing a higher
-   one are incompatible unless the kernels live in a separate TU with
-   its own ceiling. The ARM cross-build must still never see this file:
-   it has no MMX register file at all.
+   Watcom compiles this file too - $(ENG_MMX_GCC) in the Makefile is
+   misnamed; see its own comment. Watcom's #pragma aux bodies live here,
+   not in ops.c or the ops_kernel_*.h headers, because -Nr/-Ns is a hard
+   ceiling wcc386's own per-function ".586"/".686" directives cannot
+   exceed - ops.c staying at the i486/i386 floor and this file's
+   hand-written kernels needing a higher one are incompatible unless the
+   kernels live in a separate TU with its own ceiling. The ARM
+   cross-build must still never see this file: it has no MMX register
+   file at all.
 
    Kernels do NOT emit emms themselves (rule 6 item 6) - the caller
-   emits one after its loop. That contract does not change here; only
-   which translation unit the code compiling to %mm instructions lives
-   in changes. */
+   emits one after its loop. That contract is the same in every TU that
+   compiles %mm instructions; only the translation unit differs. */
 #include <stdint.h>
 #include <string.h>
 
@@ -36,21 +34,20 @@
 #include "mmx_compat.h"
 #include "ops_kernel_shared.h" /* lz_i32f, LZ_WSUM_CHUNK, LZ_SLOT_NEXT,
                            gdn_tail_row, p2_shift_of - shared with
-                           ops.c and the other suffixed TUs (task #31),
-                           one definition each rather than a per-TU
-                           copy under a per-TU name. gcc's branch below
-                           needs none of these five - see ops.c's
-                           unmoved gdn_sum_gg/lz_attn_wsum_q8 gcc
-                           branches, which own the equivalent work
-                           there instead. */
+                           ops.c and the other suffixed TUs, one
+                           definition each rather than a per-TU copy
+                           under a per-TU name. gcc's branch below needs
+                           none of these five - see ops.c's unmoved
+                           gdn_sum_gg/lz_attn_wsum_q8 gcc branches,
+                           which own the equivalent work there instead. */
 
-/* ---- GDN/KDA pass 1, 4-lane table contraction - moved here whole from
-   ops.c's gdn_sum_gg (task #30). This function was ALREADY the real
-   call boundary: a static function called once per 32-lane group from
-   its own caller, doing 8 sub-window lz_gdn1_x4_asm calls internally.
-   Moving the whole body here adds NO new call site - ops.c's call
-   count to it is unchanged, only the destination TU is. gdn_tail_row
-   itself comes from src/ops_kernel_shared.h now (task #31). */
+/* ---- GDN/KDA pass 1, 4-lane table contraction - whole in this TU,
+   called from ops.c's gdn_sum_gg. It is the real call boundary: a
+   function called once per 32-lane group from its own caller, doing 8
+   sub-window lz_gdn1_x4_asm calls internally. The whole body here adds
+   no new call site - ops.c's call count to it is unchanged, only the
+   destination TU differs. gdn_tail_row comes from
+   src/ops_kernel_shared.h. */
 
 /* Eight 4-lane sub-windows cover this gg's 32 vv lanes.
 
@@ -103,9 +100,9 @@ extern void lz_gdn1_x4_asm(const int8_t *rowA, int32_t vd,
     __parm [__eax] [__edx] [__ebx] [__ecx] [__esi] \
     __modify [__eax __ebx __ecx 8087]
 
-/* gdn_sum_gg's MMX branch, unchanged from ops.c except for the name
-   (ops.c's non-MMX branch keeps the bare name; this is the one that
-   used to sit behind #ifdef LZ_GDN_HAVE_MMX in the same function). */
+/* gdn_sum_gg's MMX branch, named lz_gdn_sum_gg_mmx here - ops.c's
+   non-MMX branch keeps the bare name; this is the branch behind
+   #ifdef LZ_GDN_HAVE_MMX in gdn_sum_gg. */
 void lz_gdn_sum_gg_mmx(const int8_t *sq_gg, int kd, int vd,
                        const int16_t (*tab)[8], int32_t tcu, int32_t tcw,
                        int32_t *au_gg, int32_t *aw_gg) {
@@ -123,18 +120,18 @@ void lz_gdn_sum_gg_mmx(const int8_t *sq_gg, int kd, int vd,
     _mm_empty();
 }
 
-/* ---- attention scoring's weighted-sum dot, GROUP granularity - moved
-   here from src/ops.c (task #30, 3/N). LZ_ATTN_FIXED defaults to 3
-   (ops.h) so this is a live, always-compiled path, not a reservation -
-   AUTO just does not select it on an SSE-capable host, the same way
-   the GDN pass-2 fixed tier is compiled everywhere but AUTO-selected
-   only where float is slow.
+/* ---- attention scoring's weighted-sum dot, GROUP granularity - in
+   this TU, called from ops.c's lz_attn_wsum_q8. LZ_ATTN_FIXED defaults
+   to 3 (ops.h) so this is a live, always-compiled path, not a
+   reservation - AUTO just does not select it on an SSE-capable host,
+   the same way the GDN pass-2 fixed tier is compiled everywhere but
+   AUTO-selected only where float is slow.
 
    LZ_WSUM_CHUNK, LZ_SLOT_NEXT and lz_i32f all come from
-   src/ops_kernel_shared.h now (task #31) - LZ_WSUM_CHUNK/LZ_SLOT_NEXT
-   in particular drive a ring-buffer walk that MUST stay in lock-step
-   with ops.c's own copy of the same walk, which a duplicated literal
-   cannot guarantee the way a single #define can. */
+   src/ops_kernel_shared.h - LZ_WSUM_CHUNK/LZ_SLOT_NEXT in particular
+   drive a ring-buffer walk that MUST stay in lock-step with ops.c's
+   own copy of the same walk, which a duplicated literal cannot
+   guarantee the way a single #define can. */
 
 /* Originally generated, hand-edited since - if you regenerate, diff
    the generator's output against what is here first.
@@ -298,13 +295,11 @@ extern void lz_wsum_pair_asm(const int8_t *rowA, const int8_t *rowB,
 
 /* lz_wsum_group_mmx(): the ENTIRE multi-chunk second walk for one
    group - all of LZ_WSUM_CHUNK's chunks, all pairs, the ring-buffer
-   slot walk, the per-chunk emms and lz_i32f fold - byte-for-byte the
-   loop body that used to live in src/ops.c's lz_attn_wsum_q8, now
-   behind ONE call per group instead of the zero real calls the
-   pre-split #pragma-aux-inline loop had. T is context-length-dependent
-   and unbounded (up to 262144 on this model), so amortizing at group
-   granularity rather than per-pair or per-chunk is what keeps the
-   added call count O(ng) instead of O(T). */
+   slot walk, the per-chunk emms and lz_i32f fold - behind ONE call
+   per group from ops.c's lz_attn_wsum_q8. T is context-length-
+   dependent and unbounded (up to 262144 on this model), so amortizing
+   at group granularity rather than per-pair or per-chunk is what
+   keeps the call count O(ng) instead of O(T). */
 void lz_wsum_group_mmx(const int8_t *vc, int kvd, int g, int sink, int ring,
                        const int16_t *cq, int T, float *accf) {
     int32_t acc32[32];
@@ -341,10 +336,10 @@ void lz_wsum_group_mmx(const int8_t *vc, int kvd, int g, int sink, int ring,
     }
 }
 
-/* ---- GDN/KDA fixed-point pass 2, MMX tier - moved here from
-   src/ops_kernel_p2.h (task #30, 2/N). Algorithm documentation (WHAT
-   THE OPERATOR IS, ISA INVENTORY, why the lo clamp is a saturating
-   subtract) stays there, unaffected by the code's move. */
+/* ---- GDN/KDA fixed-point pass 2, MMX tier - in this TU, not
+   src/ops_kernel_p2.h. Algorithm documentation (WHAT THE OPERATOR IS,
+   ISA INVENTORY, why the lo clamp is a saturating subtract) is in
+   that header, unaffected by the code's location. */
 
 #include "ops_p2_blk.h"
 
@@ -352,18 +347,17 @@ void lz_wsum_group_mmx(const int8_t *vc, int kvd, int g, int sink, int ring,
    it here (Watcom is built with -zp4, capping member alignment at 4;
    C89/C99 have no alignment specifier), and SSE2's movdqa faults on a
    misaligned address. ONE buffer for the whole engine, shared with
-   src/ops_mmx_sse.c's lz_p2_rows_sse across the TU boundary (task #30,
-   2/N: this used to be ops.c's own static function) - the split step
-   there reads what the mul32 step here wrote, so both need the SAME
-   pointer, not merely the same layout. Nothing re-enters between the
-   two calls a row makes. */
+   src/ops_mmx_sse.c's lz_p2_rows_sse across the TU boundary - the
+   split step there reads what the mul32 step here wrote, so both need
+   the SAME pointer, not merely the same layout. Nothing re-enters
+   between the two calls a row makes. */
 lz_p2_blk *p2_blk(void) {
     static char raw[sizeof(lz_p2_blk) + 15];
     size_t off = (size_t)((uintptr_t)(void *)raw & 15u);
     return (lz_p2_blk *)(void *)(raw + ((16u - off) & 15u));
 }
 
-/* p2_shift_of: src/ops_kernel_shared.h now (task #31). */
+/* p2_shift_of: defined in src/ops_kernel_shared.h. */
 
 /* PASS A: blk->a[0..31] = m1*H + m2*dq, and blk->amax[0..3] = four
    partial maxima of |A| (the caller folds the four; doing it in MMX
@@ -863,12 +857,10 @@ extern void lz_p2_split32_mmx_asm(const void *blk, signed char *hi_out,
     __modify [8087]
 
 /* lz_p2_rows_mmx(): all of a row's groups, tier 1. One call per row
-   from ops.c's gdn_p2_row_simd (task #30, 2/N), replacing the zero real
-   calls the pre-split #pragma-aux-inline loop had - see that function's
-   Watcom branch for the full accounting. Both pragma-aux kernels above
-   are textually visible in THIS translation unit, so this loop is
-   exactly as inline as the one it replaces; the row boundary is the
-   only new call. */
+   from ops.c's gdn_p2_row_simd - see that function's Watcom branch
+   for the full accounting. Both pragma-aux kernels above are
+   textually visible in THIS translation unit, so this loop is fully
+   inline; the row boundary is the only call. */
 void lz_p2_rows_mmx(const int8_t *ph_row, const int8_t *pl_row,
                     int pl_stride, const int16_t *dq,
                     const int16_t (*mul)[4], int8_t *oh_row,
@@ -904,14 +896,12 @@ void lz_p2_rows_mmx(const int8_t *ph_row, const int8_t *pl_row,
     }
 }
 
-/* ---- Q8 group-scale amax, MMX tier - moved here from
-   src/ops_kernel_amax.h (task #30, 4/N: the mechanical low-risk sweep).
-   Zero call-shape change: lz_amax32_mmx_w already sat between the
-   pragma and LZ_AMAX_TAB (src/ops_kernel_amax.h) before the move - a
-   #pragma aux body cannot have its address taken, so the table always
-   needed a real function to point at - and that indirect call happens
-   once per operator invocation regardless of which TU the wrapper's
-   body lives in. */
+/* ---- Q8 group-scale amax, MMX tier - in this TU; the wrapper
+   lz_amax32_mmx_w sits between the pragma and LZ_AMAX_TAB
+   (src/ops_kernel_amax.h). A #pragma aux body cannot have its address
+   taken, so the table always needs a real function to point at, and
+   that indirect call happens once per operator invocation regardless
+   of which TU the wrapper's body lives in. */
 
 /* Two lanes of uint32 in one MMX register. The mask is built in-register
    (pcmpeqd then psrld 1) rather than loaded, so the routine touches no
@@ -957,11 +947,10 @@ unsigned lz_amax32_mmx_w(const float *x, int n) {
 }
 
 /* ---- Q8_0 32/128-element dot products and row kernel, MMX tier -
-   moved here from src/ops_kernel_dot.h / src/ops.c (task #30, 5/N).
-   Algorithm documentation (why the weight side is widened via
-   punpcklbw(zero,w), the register-budget accounting for the paired
-   kernel, the emms placement rule) is unchanged from the original site
-   - not reproduced here a second time. */
+   in this TU. Algorithm documentation (why the weight side is widened
+   via punpcklbw(zero,w), the register-budget accounting for the paired
+   kernel, the emms placement rule) is in src/ops_kernel_dot.h, not
+   reproduced here a second time. */
 #include "ops.h"           /* lz_prefetch_mode/lz_pair_mode - row_q8_mmx_asm
                               needs both, and neither is static, so a
                               real declaration is all that is needed. */
@@ -1344,14 +1333,14 @@ void lz_dot128_x16_mmx_w(const int8_t *w, const int16_t *x, int32_t *out4) {
     lz_dot128_x16_asm(w, x, out4);
 }
 
-/* row_q8_mmx_asm: ALREADY the real call boundary from its own caller
+/* row_q8_mmx_asm: the real call boundary from its own caller
    (matmul_q8_impl, src/ops.c, dispatched once per matmul via
-   lz_row_pick's LZ_ROW_Q8 table) - moving the whole function here,
-   together with the leaf kernels it calls direct-by-name inside its
-   own loop, adds NO new call sites (the gdn1_x4 argument, piece 1/N).
-   g_pair became lz_pair_mode() - the row function can no longer see
-   ops.c's static global directly, so it goes through the same
-   accessor lz_prefetch_mode() already used one line below. */
+   lz_row_pick's LZ_ROW_Q8 table). The whole function, together with
+   the leaf kernels it calls direct-by-name inside its own loop, adds
+   no new call sites. g_pair is accessed via lz_pair_mode() - the row
+   function cannot see ops.c's static global directly, so it goes
+   through the same accessor lz_prefetch_mode() already used one line
+   below. */
 void row_q8_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
                     const int16_t *xw, int nb, int nt, int in_dim,
                     const void *pf_end, const void *pf_end2) {
@@ -1404,8 +1393,8 @@ void row_q8_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
 }
 
 /* ---- Q4_1 32/128-element dot products and row kernel, MMX tier -
-   moved here from src/ops_kernel_dot.h / src/ops.c (task #30, 6/N).
-   Algorithm documentation unchanged, just relocated with the code. */
+   in this TU. Algorithm documentation is in src/ops_kernel_dot.h,
+   unchanged by the code's location. */
 
 /* Q4_1 32-element dot product (MMX). Same algorithm as SSE2's
    part32_q41: pand(b,0x0F) grabs elements 0..15,
@@ -1805,17 +1794,16 @@ extern void lz_dot128_q41_asm(const unsigned char *w,
 
 /* Real, addressable twin of lz_dot128_q41_asm - needed cross-TU by
    src/ops_sse2.c's row_q41_sse2_asm, ONLY in the -DLZ_SSE2_GROUP=0 A/B
-   control build (task #32). Same reasoning as
-   lz_dot128_x16_mmx_w (Q8_0, piece 5/N). */
+   control build. Same reasoning as lz_dot128_x16_mmx_w (Q8_0). */
 void lz_dot128_q41_mmx_w(const unsigned char *w, const int16_t *x, int32_t *out4) {
     lz_dot128_q41_asm(w, x, out4);
 }
 
-/* row_q41_mmx_asm: ALREADY the real call boundary from its own caller
+/* row_q41_mmx_asm: the real call boundary from its own caller
    (matmul_q41_impl, src/ops.c, dispatched once per matmul via
-   LZ_ROW_Q41). Moving the whole function here adds NO new call sites -
-   same argument as row_q8_mmx_asm. g_pair -> lz_pair_mode(), same fix
-   as Q8_0's row function. */
+   LZ_ROW_Q41). The whole function adds no new call sites - same
+   argument as row_q8_mmx_asm. g_pair is accessed via lz_pair_mode(),
+   same as Q8_0's row function. */
 void row_q41_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
                      const int16_t *xw, int nb, int nt, int in_dim,
                      const void *pf_end, const void *pf_end2) {
@@ -1855,11 +1843,11 @@ void row_q41_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
     }
 }
 
-/* ---- T2 (ternary) dot product and row kernel, MMX tier - moved here
-   from src/ops_kernel_dot.h / src/ops.c (task #30, 7/N). No 128-wide
-   group kernel exists for this format (task #32's LZ_SSE2_GROUP=0
-   concern does not apply here), so row_t2_mmx_asm calls
-   lz_dot32_t2_asm direct-by-name, same-TU, no wrapper needed. */
+/* ---- T2 (ternary) dot product and row kernel, MMX tier - in this TU.
+   No 128-wide group kernel exists for this format (the
+   -DLZ_SSE2_GROUP=0 A/B control concern does not apply here), so
+   row_t2_mmx_asm calls lz_dot32_t2_asm direct-by-name, same-TU, no
+   wrapper needed. */
 extern int32_t lz_dot32_t2_asm(const unsigned char *w2,
                                const int16_t *x);
 #pragma aux lz_dot32_t2_asm = \
@@ -1957,8 +1945,8 @@ void row_t2_mmx_asm(int32_t *acc32, const void *w4, const void *w2v,
 }
 
 /* ---- Q6_1 32/128-element dot products and row kernel, MMX tier -
-   moved here from src/ops_kernel_dot.h / src/ops.c (task #30, 8/N).
-   Algorithm documentation unchanged, just relocated with the code. */
+   in this TU. Algorithm documentation is in src/ops_kernel_dot.h,
+   unchanged by the code's location. */
 extern int32_t lz_dot32_q61_asm(const unsigned char *w4, const unsigned char *w2, const int16_t *x);
 #pragma aux lz_dot32_q61_asm = \
     ".586" \
@@ -2452,18 +2440,18 @@ extern void lz_dot128_q61_asm(const unsigned char *w4, const unsigned char *w2,
 
 /* Real, addressable twin of lz_dot128_q61_asm - needed cross-TU by
    src/ops_sse2.c's row_q61_sse2_asm, ONLY in the -DLZ_SSE2_GROUP=0 A/B
-   control build (task #32). Same reasoning as lz_dot128_x16_mmx_w
-   (Q8_0, piece 5/N) and lz_dot128_q41_mmx_w (Q4_1, piece 6/N). */
+   control build. Same reasoning as lz_dot128_x16_mmx_w (Q8_0) and
+   lz_dot128_q41_mmx_w (Q4_1). */
 void lz_dot128_q61_mmx_w(const unsigned char *w4, const unsigned char *w2,
                          const int16_t *x, int32_t *out4) {
     lz_dot128_q61_asm(w4, w2, x, out4);
 }
 
-/* row_q61_mmx_asm: ALREADY the real call boundary from its own caller
+/* row_q61_mmx_asm: the real call boundary from its own caller
    (matmul_q61_impl, src/ops.c, dispatched once per matmul via
-   LZ_ROW_Q61). Moving the whole function here adds NO new call sites -
-   same argument as row_q8_mmx_asm/row_q41_mmx_asm. g_pair ->
-   lz_pair_mode(), same fix as the other two formats' row functions. */
+   LZ_ROW_Q61). The whole function adds no new call sites - same
+   argument as row_q8_mmx_asm/row_q41_mmx_asm. g_pair is accessed via
+   lz_pair_mode(), same as the other two formats' row functions. */
 void row_q61_mmx_asm(int32_t *acc32, const void *w4, const void *w2v,
                      const int16_t *xw, int nb, int nt, int in_dim,
                      const void *pf_end, const void *pf_end2) {
@@ -2499,8 +2487,8 @@ void row_q61_mmx_asm(int32_t *acc32, const void *w4, const void *w2v,
 }
 
 /* ---- Q16_0 32/128-element dot products and row kernel, MMX tier -
-   moved here from src/ops_kernel_dot.h / src/ops.c (task #30, 9/N).
-   No pairing (Q16_0 never had it - matches T2's shape, not Q8/Q41/Q61's). */
+   in this TU. No pairing (Q16_0 never had it - matches T2's shape,
+   not Q8/Q41/Q61's). */
 extern int32_t lz_dot32_q16_asm(const int16_t *w, const int16_t *x);
 #pragma aux lz_dot32_q16_asm = \
     ".586" \
@@ -2666,15 +2654,15 @@ extern void lz_dot128_q16_asm(const int16_t *w, const int16_t *x, int32_t *out4)
 
 /* Real, addressable twin of lz_dot128_q16_asm - needed cross-TU by
    src/ops_sse2.c's row_q16_sse2_asm, ONLY in the -DLZ_SSE2_GROUP=0 A/B
-   control build (task #32). Same reasoning as the other three formats'
-   *_mmx_w wrappers. */
+   control build. Same reasoning as the other three formats' *_mmx_w
+   wrappers. */
 void lz_dot128_q16_mmx_w(const int16_t *w, const int16_t *x, int32_t *out4) {
     lz_dot128_q16_asm(w, x, out4);
 }
 
-/* row_q16_mmx_asm: ALREADY the real call boundary (matmul_q16-adjacent
-   dispatch, src/ops.c, via LZ_ROW_Q16). Moving the whole function here
-   adds NO new call sites. */
+/* row_q16_mmx_asm: the real call boundary (matmul_q16-adjacent
+   dispatch, src/ops.c, via LZ_ROW_Q16). The whole function adds no
+   new call sites. */
 void row_q16_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
                      const int16_t *xw, int nb, int nt, int in_dim,
                      const void *pf_end, const void *pf_end2) {
@@ -2742,8 +2730,8 @@ void lz_wsum_pair_mmx(const int8_t *rowA, const int8_t *rowB,
    lz_p2_mul32_mmx_asm / lz_p2_split32_mmx_asm / lz_p2_split32_sse_asm,
    src/ops_kernel_p2.h. Full algorithm description (what each field of
    lz_p2_blk means, the ISA inventory, why SSE1 has exactly one
-   instruction of content here) lives with that file - it is unaffected
-   by this split and stays the authority on the "what" and "why". */
+   instruction of content here) lives with that file - it is the
+   authority on the "what" and "why". */
 
 /* 16-byte-aligned scratch, by hand: neither compiler can be asked for
    it here (Watcom is built with -zp4, capping member alignment at 4;
@@ -2832,7 +2820,7 @@ void lz_p2_split32_mmx(const lz_p2_blk *blk, int8_t *oh, int8_t *ol) {
     }
 }
 
-/* lz_p2_split32_sse moved to src/ops_mmx_sse.c: it needs genuine SSE1,
+/* lz_p2_split32_sse is in src/ops_mmx_sse.c: it needs genuine SSE1,
    and gcc treats -msse as license to assume i686 (CMOV included) for
    the WHOLE translation unit, not just the SSE-touching functions in
    it - measured, see that file's header comment. This file stays
@@ -2900,7 +2888,7 @@ unsigned lz_amax32_mmx(const float *x, int n) {
     }
 }
 
-/* lz_q8round32_sse moved to src/ops_mmx_sse.c, same reason as
+/* lz_q8round32_sse is in src/ops_mmx_sse.c, same reason as
    lz_p2_split32_sse above. */
 
 #include "ops_kernel_dot_mmx.h"

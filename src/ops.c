@@ -15,28 +15,27 @@
                            dispatch paths too, so it must be declared on
                            targets that have no MMX at all - see the header */
 #include "ops_mmx.h"    /* declarations for src/ops_mmx.c's functions - the
-                           %mm-touching kernels this file no longer defines.
-                           Unconditional: the macros and declarations inside
-                           are themselves guarded on LZ_MMX_TU, a build flag
-                           (-D, from the Makefile) rather than on __MMX__,
-                           which this file must never be compiled with. */
+                           %mm-touching kernels are defined there. Unconditional:
+                           the macros and declarations inside are themselves
+                           guarded on LZ_MMX_TU, a build flag (-D, from the
+                           Makefile) rather than on __MMX__, which this file
+                           must never be compiled with. */
 #include "ops_sse2.h"   /* declarations for src/ops_sse2.c's functions - the
-                           %xmm-touching kernels this file no longer defines.
-                           Same LZ_SSE2_TU/__SSE2__ contract, one ISA tier up. */
+                           %xmm-touching kernels are defined there. Same
+                           LZ_SSE2_TU/__SSE2__ contract, one ISA tier up. */
 #include "ops_kernel_shared.h" /* lz_i32f, LZ_WSUM_CHUNK, LZ_SLOT_NEXT,
                            gdn_tail_row, p2_shift_of - shared with the
-                           suffixed TUs (task #31); included this early
-                           because lz_i32f's first use is well before
-                           any of the ops_kernel_*.h #includes below. */
+                           suffixed TUs; included this early because lz_i32f's
+                           first use is well before any of the ops_kernel_*.h
+                           #includes below. */
 
-/* GDN pass-1 tier default, hoisted here from where the kernels live
-   (~line 3250) because lz_gdn_mode() sits far above them and `#if
-   LZ_GDN_FIXED` on an UNDEFINED macro is silently 0 - which made the
-   accessor return "float" always AND, through it, disabled the fixed
-   path outright. The knob's two settings then produced identical
-   logits, i.e. it looked numerics-neutral instead of broken. Caught by
-   printing the tier in the banner; a knob whose effect is not
-   observable is indistinguishable from a knob that does nothing. */
+/* GDN pass-1 tier default. Defined here, not next to the kernels,
+   because lz_gdn_mode() sits far above them and `#if LZ_GDN_FIXED` on
+   an UNDEFINED macro is silently 0 - which made the accessor return
+   "float" always AND, through it, disabled the fixed path outright.
+   The knob's two settings then produced identical logits, i.e. it
+   looked numerics-neutral instead of broken. A knob whose effect is
+   not observable is indistinguishable from a knob that does nothing. */
 #ifndef LZ_GDN_FIXED
 #define LZ_GDN_FIXED 1
 #endif /* LZ_GDN_FIXED */
@@ -160,10 +159,6 @@ void lz_f32_count_reset(void) {
 
 /* g_kernel defined in ops_sched.c; extern in ops_kernel_shared.h. */
 
-
-/* fwd decl lz_rmsnorm_gated_out_fixed moved to ops_norm.c. */
-
-/* lz_rmsnorm, lz_rmsnorm_gated, lz_l2norm, lz_softmax moved to ops_norm.c. */
 
 /* g_sig and the sigmoid tier selectors are in ops_sched.c. */
 
@@ -402,13 +397,12 @@ void lz_quantize_q8(const float *x, int n, int gs, int8_t *q, float *s) {
 #if defined(LZ_HAVE_Q8R_SIMD) || defined(LZ_HAVE_Q8R_SSE)
             if ((gs & 31) == 0 && tier) {
 #if defined(__WATCOMC__)
-                /* task #30 (4/N): one call per GROUP, not per 32-element
-                   sub-chunk - the #pragma aux bodies used to expand
-                   inline at these call sites, once per sub-chunk, with
-                   zero real call overhead. lz_q8round_group_sse2/_sse do
-                   the WHOLE gs/32-chunk loop for this group (including,
-                   for the SSE1+MMX tier, the emms the comment below
-                   used to place right here - moved with the loop, same
+                /* One call per GROUP, not per 32-element sub-chunk:
+                   the #pragma aux bodies expand inline at the call
+                   site, so a per-sub-chunk call would multiply that
+                   inline code. lz_q8round_group_sse2/_sse do the WHOLE
+                   gs/32-chunk loop for this group (including, for the
+                   SSE1+MMX tier, the emms this function emits - same
                    position relative to the next group's x87 work). */
 #ifdef LZ_HAVE_Q8R_SIMD
                 if (tier == 2)
@@ -426,8 +420,8 @@ void lz_quantize_q8(const float *x, int n, int gs, int8_t *q, float *s) {
                 {
                     for (k = 0; k + 31 < gs; k += 32)
                         lz_q8round32_sse(grp + k, out + k, &inv);
-                    /* **This emms must be INSIDE the group loop**, not
-                       moved to the function tail. Rule 6.6's "kernels
+                    /* **This emms must be INSIDE the group loop**, NOT
+                       at the function tail. Rule 6.6's "kernels
                        don't emit; the caller emits once after its loop"
                        assumes no x87 in the loop body; that does not
                        hold here - the next group's
@@ -464,8 +458,8 @@ void lz_quantize_q8(const float *x, int n, int gs, int8_t *q, float *s) {
 /* Fused fixed-tier gated-RMSNorm quantize (see ops.h). The norm wrote
    the pre-silu product into p (ssm_out) and the Q15 sigmoid into sig;
    this reconstructs the silu value and quantizes it, so the Q15 ->
-   float -> int round-trip the plain lz_quantize_q8 used to re-quantize
-   is gone while the value stays bit-identical.
+   float -> int round-trip is avoided while the value stays bit-identical
+   to a plain lz_quantize_q8.
 
    Why the 2^-15 folds into the SCALE and not the element loop: amax
    runs on the pre-scale product u[i] = p[i]*(g[i]*(float)sig[i]), and
@@ -538,7 +532,7 @@ void lz_quantize_q8_silu(const float *p, const float *g, const int32_t *sig,
         }
         /* Reconstructed silu value, for the f32 matmul fallback and the
            sgdn tap. The 2^-15 multiply is exact, so this is the same
-           float the norm's own output loop used to write. */
+           float the norm's own output loop writes. */
         for (k = 0; k < gs; k++)
             og[k] = og[k] * (1.0f / 32768.0f);
     }
@@ -566,9 +560,6 @@ void lz_quantize_q8_silu(const float *p, const float *g, const int32_t *sig,
    a body across files). */
 #endif /* __WATCOMC__ */
 
-/* g_pf, lz_cpuid_ext_edx, CPUID caching, g_has_sse, lz_cpu_has_sse:
-   moved to ops_sched.c. */
-
 /* CPUID leaf 1 EDX bit 23 = MMX. Cached for the same reason g_has_sse is:
    the _mm_empty() call sites sit in row/group loops and would turn into a
    serializing cpuid per row otherwise. Bit 23, NOT bit 25: Pentium MMX
@@ -590,9 +581,6 @@ int lz_cpu_has_mmx(void) { return 0; }
 #endif /* __WATCOMC__ || __i386__ || __x86_64__ */
 
 /* pf_detect, lz_prefetch_mode, g_pair, lz_pair_mode: in ops_sched.c. */
-
-/* All tier globals, selectors, CPU detection, kernel dispatch:
-   moved to ops_sched.c. lz_epi_ready stays here. */
 
 /* Derived bound for the fixed epilogue: per group the product is
    |acc| * |xw*ww| <= 2^27 * 2^30, so ng of them stay inside
@@ -701,27 +689,25 @@ static long long lz_epi_mac(const int32_t *a, const int32_t *m, int n) {
    default stack is even tighter than NT's; relying on compiler flags
    is not safe. The engine is single-threaded and non-recursive, so
    static is safe. */
-/* LZ_MM_WIDEN_MAX + scratch moved to ops_matmul.c. */
 
 /* Cap for the activation pre-expansion buffers (element count).
-   Defined here (moved with the scratch buffers to ops_matmul.c; kept
-   here too because lz_matmul_xq_nt checks it). */
+   Defined here as well as in ops_matmul.c, because lz_matmul_xq_nt
+   checks it. */
 #define LZ_MM_WIDEN_MAX 4096
 
 /* ---- prefetch (lever J) ------------------------------------------------
    LZ_PF_DIST, LZ_PFI_LOAD/NTA/AMD/NONE and the lz_pf_load/lz_pf_nta/
-   lz_pf_amd pragmas moved to src/ops_kernel_shared.h (task #30, 5/N):
-   every format's row function needs them, wherever it ends up living,
-   the same reasoning LZ_WSUM_CHUNK/LZ_SLOT_NEXT already established.
-   Full rationale (why three tiers, why the distance is a knob, why
-   "no prefetch" is a real mode and not a fallback) lives there now. */
+   lz_pf_amd pragmas live in src/ops_kernel_shared.h: every format's row
+   function needs them, wherever it lives, the same reasoning
+   LZ_WSUM_CHUNK/LZ_SLOT_NEXT established. Full rationale (why three
+   tiers, why the distance is a knob, why "no prefetch" is a real mode
+   and not a fallback) lives there. */
 
 /* LZ_SSE2_GROUP (the -DLZ_SSE2_GROUP=0 A/B control for the 128-element
-   SSE2 group kernels) moved to src/ops_kernel_shared.h (task #30,
-   5/N): the row functions that test it are migrating out to
-   src/ops_mmx.c/src/ops_sse2.c one format at a time, and this needs to
-   be visible wherever each one ends up, same reasoning as LZ_PF_DIST,
-   the LZ_PFI_ family and LZ_PF_NONE above. */
+   SSE2 group kernels) is in src/ops_kernel_shared.h: the row functions
+   that test it live in src/ops_mmx.c/src/ops_sse2.c, and it must be
+   visible wherever one of them references it, same reasoning as
+   LZ_PF_DIST, the LZ_PFI_ family and LZ_PF_NONE above. */
 
 /* ---- row-kernel tier tables (stage 3) ---------------------------------
 
@@ -738,7 +724,6 @@ static long long lz_epi_mac(const int32_t *a, const int32_t *m, int n) {
    THE DISPATCH IS AT ROW LEVEL, never inside. At in_dim=1024 that is
    one indirect call per 32 kernel calls; one per 32 MACs would be the
    disaster the file's opening comment warns about. */
-/* lz_rowfn typedef + fwd decl moved to ops_matmul.c. */
 
 /* The seven variants, as table slots. A build fills at
    most three of them (gcc cannot compile #pragma aux; Watcom's _m_*
@@ -775,7 +760,6 @@ static long long lz_epi_mac(const int32_t *a, const int32_t *m, int n) {
    readable line with the reasoning attached, rather than an accident of
    #if nesting. Prefetch - the one thing SSE really does add here - is
    orthogonal and lives in --prefetch. */
-/* lz_row_pick moved to ops_matmul.c. */
 
 /* THE Q8 FLOAT EPILOGUE - one copy, shared by every kernel tier.
    accb[g] holds the g-th 32-element sub-block's integer sum SCALED BY
@@ -911,10 +895,6 @@ float epi_q8(const int32_t *accb, const float *xsb, const float *ws,
 /* ---- Q8_0 row kernels, one per (ISA x impl) ---------------------------
    Each lives next to its table entry under ONE guard, so a definition
    and its use cannot drift apart - the drift that caused link breaks. */
-
-/* Q8 guard block moved to ops_matmul.c. */
-
-/* LZ_ROW_Q8 + matmul_q8_impl moved to ops_matmul.c. */
 
 /* Get the f32 view. In ops.c rather than model.c: this is a FORMAT
    matter, sharing the same layout knowledge as the matmul dispatch
@@ -1121,7 +1101,6 @@ int lz_act_gs(const LZTensor *w, int in_dim) {
    The x256 fold exists on the SIMD side but not here: 256 is a power
    of two, scaling changes no rounding at any step, so the two sides
    remain bit-identical. */
-/* matmul_scalar_ref_one + matmul_scalar_ref moved to ops_matmul.c. */
 
 /* Q4_1 matmul kernel.
 
@@ -1178,10 +1157,6 @@ float epi_q41(const int32_t *accb, const float *xsb, const float *xgb,
 
 /* ---- Q4_1 row kernels, one per (ISA x impl) --------------------------- */
 
-/* Q41 guard block moved to ops_matmul.c. */
-
-/* LZ_ROW_Q41 + matmul_q41_impl moved to ops_matmul.c. */
-
 /* ---- T2 row kernels, one per (ISA x impl) -----------------------------
    The single 2-bit plane arrives in `w4`; `w2v` and both prefetch bounds
    are unused - 8 bytes per 32 elements is a quarter of Q4_1's weight
@@ -1191,19 +1166,16 @@ float epi_q41(const int32_t *accb, const float *xsb, const float *xgb,
    No pairing yet. Not a decision - unmeasured. `--pair` does nothing for
    this format today. */
 
-/* T2 guard block moved to ops_matmul.c. */
-
 /* row_t2_sse2_intrin's body lives in src/ops_sse2.c, same reason as
    row_q8_sse2_intrin above. Declared in src/ops_sse2.h. */
 
-/* row_t2_mmx_asm / row_t2_sse2_asm moved to src/ops_mmx.c /
-   src/ops_sse2.c (task #30, 7/N), alongside their leaf kernels
-   (lz_dot32_t2_asm / lz_dot32_t2_sse2_asm) which they call
-   direct-by-name, same-TU. Declared in src/ops_mmx.h / src/ops_sse2.h. */
+/* row_t2_mmx_asm / row_t2_sse2_asm live in src/ops_mmx.c /
+   src/ops_sse2.c, alongside their leaf kernels (lz_dot32_t2_asm /
+   lz_dot32_t2_sse2_asm) which they call direct-by-name, same-TU.
+   Declared in src/ops_mmx.h / src/ops_sse2.h. */
 
 /* SSE1 slots NULL: T2's unpack is `pand 0x03` + three `psrlw`, and SSE1
    adds no integer instruction that replaces any of them. */
-/* LZ_ROW_T2 moved to ops_matmul.c. */
 
 /* ---- Q6_1 row kernels, one per (ISA x impl) ---------------------------
    The only format that uses BOTH plane pointers and BOTH prefetch
@@ -1214,19 +1186,12 @@ float epi_q41(const int32_t *accb, const float *xsb, const float *xgb,
    not belt-and-braces: LZ_PF_LOAD is a REAL dummy load on PII and
    faults past the end of the tensor. */
 
-/* Q61 guard block moved to ops_matmul.c. */
-
 /* row_q61_sse2_intrin's body lives in src/ops_sse2.c, same reason as
    row_q8_sse2_intrin above. Declared in src/ops_sse2.h. */
-
-/* LZ_ROW_Q61 moved to ops_matmul.c. */
 
 /* T2 matmul. Same shape as matmul_q61_impl minus the second plane, with
    one addition: the zero coefficient is -scale, so the negated array is
    built per row into g_t2neg and handed to epi_q41 as its `wm`. */
-/* matmul_t2_impl + matmul_q61_impl moved to ops_matmul.c. */
-
-/* Q16 block moved to ops_matmul.c. */
 
 /* Matmul consuming already-quantized activations: the forward hot path.
    xq/xqs quantized by the caller at lz_act_gs()'s group (one activation
@@ -1510,7 +1475,7 @@ void lz_rope(float *v, int n_heads, int head_dim, int rotary_dim,
 }
 
 /* Attention scoring/wsum, SSM recurrence (GDN/KDA), pass-2 fixed
-   write-back: moved to ops_gdn.c. */
+   write-back are in ops_gdn.c. */
 
 void lz_causal_conv1d_step(float *o, const float *x,
                                const float *state_in, float *state_out,

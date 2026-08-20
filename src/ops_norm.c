@@ -1,7 +1,7 @@
 /* ops_norm.c - Normalization: RMSNorm, L2Norm, softmax, and the
-   fixed-tier gated output loop. Moved from ops.c to lower #if guard
-   density. These call norm_ss_fixed/expof/q8_amax from ops_quant.c
-   and the LZ_NORMOUT/VMAX/VSCALE dispatch tables from
+   fixed-tier gated output loop. A separate TU from ops.c to keep #if
+   guard density low. These call norm_ss_fixed/expof/q8_amax from
+   ops_quant.c and the LZ_NORMOUT/VMAX/VSCALE dispatch tables from
    ops_kernel_norm.h. */
 #include <stddef.h>
 #include <stdint.h>

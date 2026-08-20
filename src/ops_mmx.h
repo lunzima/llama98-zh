@@ -17,11 +17,10 @@
    unit was told to emit MMX, and on the 32-bit x87 target ops.c answers
    that "no" while ops_mmx.o still exists and is still callable.
 
-   Every dispatch site that used to test __MMX__ to mean "is the MMX
-   tier available in this build" now tests one of the macros below
-   instead. Guards that decide something Watcom-specific (asm vs
-   intrinsics) are untouched - this header only replaces the gcc half of
-   those tests. */
+   Every dispatch site that tests "is the MMX tier available in this
+   build" tests one of the macros below instead of __MMX__. Guards that
+   decide something Watcom-specific (asm vs intrinsics) are untouched -
+   this header only replaces the gcc half of those tests. */
 #ifndef LZ_OPS_MMX_H
 #define LZ_OPS_MMX_H
 
@@ -37,28 +36,24 @@
 
 #if defined(LZ_MMX_TU)
 
-/* GDN1_MMX_EXTERN is unconditional (task #30 moved it first, verified
-   safe on both compilers) - see ops.c's own `#if defined(__WATCOMC__)
-   #elif defined(LZ_GDN1_MMX_EXTERN)` guard, checked in that order so
-   Watcom's branch always wins regardless of this macro's value on that
-   side. The other four stay gcc-only (!__WATCOMC__) until their own
-   kernels move: ops_kernel_dot.h's dispatch table in particular does
-   NOT have the same `&& !defined(__WATCOMC__)` defense
+/* GDN1_MMX_EXTERN is unconditional, verified safe on both compilers -
+   see ops.c's own `#if defined(__WATCOMC__) #elif defined(LZ_GDN1_MMX_EXTERN)`
+   guard, checked in that order so Watcom's branch always wins
+   regardless of this macro's value on that side. The other four stay
+   gcc-only (!__WATCOMC__): ops_kernel_dot.h's dispatch table in
+   particular does NOT have the same `&& !defined(__WATCOMC__)` defense
    ops_kernel_amax.h's does, so making LZ_DOT_MMX_EXTERN unconditional
-   before that file's Watcom content actually moves makes Watcom's
-   table silently reach for gcc-only row_*_mmx_intrin symbols - caught
-   by a real compile error, not by luck, while wiring this. */
+   would make Watcom's table silently reach for gcc-only row_*_mmx_intrin
+   symbols - caught by a real compile error, not by luck, while wiring
+   this. */
 #define LZ_GDN1_MMX_EXTERN 1
 
-/* task #30 (2/N): unconditional now too (both compilers) - Watcom's
-   lz_p2_rows_mmx (this file's TU, ops_mmx.c) and lz_p2_rows_sse
-   (ops_mmx_sse.c) need the SAME 16-byte-aligned scratch buffer this
-   returns: the split step reads what the mul32 step wrote into it, and
-   moving that hand-off across a TU boundary means passing the pointer
-   explicitly rather than relying on file-local storage. Was gcc-only
-   until ops_kernel_p2.h's Watcom content actually moved here - see the
-   removed "collides with ops.c's own static p2_blk()" comment this
-   replaced, in git history; ops.c's own copy is gone now (moved here). */
+/* Unconditional (both compilers): Watcom's lz_p2_rows_mmx (this file's
+   TU, ops_mmx.c) and lz_p2_rows_sse (ops_mmx_sse.c) need the SAME
+   16-byte-aligned scratch buffer this returns: the split step reads
+   what the mul32 step wrote into it, so the pointer is passed across
+   the TU boundary explicitly rather than relying on file-local storage.
+   ops.c's own static copy is gone. */
 lz_p2_blk *p2_blk(void);
 
 #if !defined(__WATCOMC__)
@@ -71,7 +66,7 @@ lz_p2_blk *p2_blk(void);
    like the _EXTERN trio above: the amax MMX and q8round SSE1 bodies live
    in src/ops_mmx.c / src/ops_mmx_sse.c on Watcom too, so "this kernel
    is in the build" is the same LZ_MMX_TU fact for either compiler.
-   Kept under their existing names (predate this split) rather than
+   Kept under their existing names rather than
    renamed to match the *_MMX_EXTERN pattern: code far from here reads
    them (q8r_have_simd/lz_q8r_tier, LZ_AMAX_TAB), and a rename risks
    missing one of those call sites. */
@@ -79,34 +74,31 @@ lz_p2_blk *p2_blk(void);
 #define LZ_HAVE_Q8R_SSE    1
 
 #if defined(__WATCOMC__)
-/* Task #30: Watcom's own kernels now live in src/ops_mmx.c too (they
-   did not before - this file used to be gcc-only). Grouped by their
+/* Watcom's kernels live in src/ops_mmx.c too. Grouped by their
    call-site shape, not by kernel, because that shape is the point:
-   every one of these was called through a #pragma aux inline expansion
-   before the split, so the function actually exported here is the
-   widest-granularity real boundary that introduces no MORE call
-   overhead than ops.c already had (see each site in ops.c for the
-   specific "why this granularity" note). */
+   every one of these is called through a #pragma aux inline expansion,
+   so the function actually exported here is the widest-granularity
+   real boundary that introduces no MORE call overhead than ops.c
+   already had (see each site in ops.c for the specific "why this
+   granularity" note). */
 void lz_gdn_sum_gg_mmx(const int8_t *sq_gg, int kd, int vd,
                        const int16_t (*tab)[8], int32_t tcu, int32_t tcw,
                        int32_t *au_gg, int32_t *aw_gg);
 
-/* task #30 (3/N): attention scoring's weighted sum, GROUP granularity -
-   see ops.c's lz_attn_wsum_q8 (search "one call per GROUP") for why
-   this is the whole multi-chunk second walk for one group, not a
-   per-pair or per-chunk wrapper: T (context length) is unbounded, so
-   either of those would scale calls with T instead of with ng. */
+/* Attention scoring's weighted sum, GROUP granularity - see ops.c's
+   lz_attn_wsum_q8 (search "one call per GROUP") for why this is the
+   whole multi-chunk second walk for one group, not a per-pair or
+   per-chunk wrapper: T (context length) is unbounded, so either of
+   those would scale calls with T instead of with ng. */
 void lz_wsum_group_mmx(const int8_t *vc, int kvd, int g, int sink, int ring,
                        const int16_t *cq, int T, float *accf);
 
-/* task #30 (2/N): GDN/KDA fixed-point pass 2, row granularity - one
-   call per row from ops.c's gdn_p2_row_simd, in place of the zero real
-   calls the pre-split #pragma-aux-inline loop had (see that function's
-   Watcom branch for the accounting). pl_stride/ol_stride let the
-   single-plane build pass the same fixed zero/sink buffer at every
-   group (stride 0) without teaching this file about
-   LZ_GDN_STATE_2PLANE - the 2-plane build passes stride 32 and a real
-   per-group offset instead. */
+/* GDN/KDA fixed-point pass 2, row granularity - one call per row from
+   ops.c's gdn_p2_row_simd (see that function's Watcom branch for the
+   accounting). pl_stride/ol_stride let the single-plane build pass the
+   same fixed zero/sink buffer at every group (stride 0) without
+   teaching this file about LZ_GDN_STATE_2PLANE - the 2-plane build
+   passes stride 32 and a real per-group offset instead. */
 void lz_p2_rows_mmx(const int8_t *ph_row, const int8_t *pl_row,
                     int pl_stride, const int16_t *dq,
                     const int16_t (*mul)[4], int8_t *oh_row,
@@ -133,81 +125,77 @@ void lz_p2_rows_sse(const int8_t *ph_row, const int8_t *pl_row,
                     const int16_t (*mul)[4], int8_t *oh_row,
                     int8_t *ol_row, int ol_stride, int *shv, int ng);
 
-/* task #30 (4/N): Q8 group-scale amax, MMX tier. lz_amax32_mmx_w is the
-   thin wrapper LZ_AMAX_TAB (src/ops_kernel_amax.h) needs a real address
-   for - a #pragma aux body cannot be taken by pointer. */
+/* Q8 group-scale amax, MMX tier. lz_amax32_mmx_w is the thin wrapper
+   LZ_AMAX_TAB (src/ops_kernel_amax.h) needs a real address for - a
+   #pragma aux body cannot be taken by pointer. */
 unsigned lz_amax32_mmx_w(const float *x, int n);
 
-/* task #30 (4/N): RMSNorm's output loop / softmax's max scan and
-   normalize loop, SSE1 tier. Bodies in src/ops_mmx_sse.c (genuine
-   SSE1-on-xmm, no MMX register touched), declared here alongside their
-   MMX-tier siblings - same "this header is the ops_mmx.c/ops_mmx_sse.c
-   pair's declarations" precedent as lz_p2_rows_sse above. */
+/* RMSNorm's output loop / softmax's max scan and normalize loop, SSE1
+   tier. Bodies in src/ops_mmx_sse.c (genuine SSE1-on-xmm, no MMX
+   register touched), declared here alongside their MMX-tier siblings -
+   same "this header is the ops_mmx.c/ops_mmx_sse.c pair's
+   declarations" precedent as lz_p2_rows_sse above. */
 void lz_rmsnorm_out_sse_w(float *o, const float *x, const float *w,
                           int n4, const float *k2);
 void lz_vmax_sse_w(const float *x, int n4, float *pmax);
 void lz_vscale_sse_w(float *x, int n4, const float *pk);
 
-/* task #30 (4/N): Q8 activation rounding, SSE1+MMX tier, GROUP
-   granularity - the whole gs/32-chunk loop (lz_q8round_group_sse) or
-   two-plane loop pair plus the residual arithmetic between them
-   (lz_q8round_2p_group_sse), for ops.c's lz_quantize_q8 /
-   lz_gdn_quantize_2p respectively. Bodies in src/ops_mmx_sse.c
-   (cvtps2pi writes %mm registers, needs genuine SSE1 for the float
-   side - same file as lz_p2_split32_sse). res is caller-owned scratch
-   (ops.c's static float res[LZ_GDN_MAX_VD]), sized once there. */
+/* Q8 activation rounding, SSE1+MMX tier, GROUP granularity - the whole
+   gs/32-chunk loop (lz_q8round_group_sse) or two-plane loop pair plus
+   the residual arithmetic between them (lz_q8round_2p_group_sse), for
+   ops.c's lz_quantize_q8 / lz_gdn_quantize_2p respectively. Bodies in
+   src/ops_mmx_sse.c (cvtps2pi writes %mm registers, needs genuine SSE1
+   for the float side - same file as lz_p2_split32_sse). res is
+   caller-owned scratch (ops.c's static float res[LZ_GDN_MAX_VD]), sized
+   once there. */
 void lz_q8round_group_sse(const float *grp, int8_t *out, int gs,
                           const float *pinv);
 void lz_q8round_2p_group_sse(const float *grp, int8_t *ho, int8_t *lw,
                              int gs, const float *pinv,
                              const float *plo_mul, float *res);
 
-/* task #30 (5/N): Q8_0 matmul, MMX tier. row_q8_mmx_asm is ALREADY the
-   real call boundary (LZ_ROW_Q8, src/ops.c) - see that table's own
-   comment. dot32_x16_mmx also needs to be visible here: src/ops.c's
-   LZ_ATTN_DOT32 macro (attention scoring, live by default -
-   LZ_ATTN_FIXED is 3 in ops.h) calls it directly, across the TU
-   boundary this move introduces. lz_dot128_x16_mmx_w exists only for
-   src/ops_sse2.c's -DLZ_SSE2_GROUP=0 A/B control build - see that
-   file's row_q8_sse2_asm. */
+/* Q8_0 matmul, MMX tier. row_q8_mmx_asm is the real call boundary
+   (LZ_ROW_Q8, src/ops.c) - see that table's own comment. dot32_x16_mmx
+   also needs to be visible here: src/ops.c's LZ_ATTN_DOT32 macro
+   (attention scoring, live by default - LZ_ATTN_FIXED is 3 in ops.h)
+   calls it directly across the TU boundary. lz_dot128_x16_mmx_w exists
+   only for src/ops_sse2.c's -DLZ_SSE2_GROUP=0 A/B control build - see
+   that file's row_q8_sse2_asm. */
 void row_q8_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
                     const int16_t *xw, int nb, int nt, int in_dim,
                     const void *pf_end, const void *pf_end2);
 int32_t dot32_x16_mmx(const int8_t *w, const int16_t *x);
 void lz_dot128_x16_mmx_w(const int8_t *w, const int16_t *x, int32_t *out4);
 
-/* task #30 (6/N): Q4_1 matmul, MMX tier. row_q41_mmx_asm is ALREADY the
-   real call boundary (LZ_ROW_Q41, src/ops.c). dot32_q41_mmx stays
-   static (no LZ_ATTN_DOT32-style cross-TU caller for this format).
+/* Q4_1 matmul, MMX tier. row_q41_mmx_asm is the real call boundary
+   (LZ_ROW_Q41, src/ops.c). dot32_q41_mmx stays static (no
+   LZ_ATTN_DOT32-style cross-TU caller for this format).
    lz_dot128_q41_mmx_w exists only for src/ops_sse2.c's
-   -DLZ_SSE2_GROUP=0 A/B control build (task #32). */
+   -DLZ_SSE2_GROUP=0 A/B control build. */
 void row_q41_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
                      const int16_t *xw, int nb, int nt, int in_dim,
                      const void *pf_end, const void *pf_end2);
 void lz_dot128_q41_mmx_w(const unsigned char *w, const int16_t *x, int32_t *out4);
 
-/* task #30 (7/N): T2 matmul, MMX tier. row_t2_mmx_asm is ALREADY the
-   real call boundary (LZ_ROW_T2, src/ops.c). No 128-wide kernel for
-   this format, so no *_mmx_w wrapper is needed (task #32 does not
-   apply). */
+/* T2 matmul, MMX tier. row_t2_mmx_asm is the real call boundary
+   (LZ_ROW_T2, src/ops.c). No 128-wide kernel for this format, so no
+   *_mmx_w wrapper is needed. */
 void row_t2_mmx_asm(int32_t *acc32, const void *w4, const void *w2v,
                     const int16_t *xw, int nb, int nt, int in_dim,
                     const void *pf_end, const void *pf_end2);
 
-/* task #30 (8/N): Q6_1 matmul, MMX tier. row_q61_mmx_asm is ALREADY
-   the real call boundary (LZ_ROW_Q61, src/ops.c).
-   lz_dot128_q61_mmx_w exists only for src/ops_sse2.c's
-   -DLZ_SSE2_GROUP=0 A/B control build (task #32). */
+/* Q6_1 matmul, MMX tier. row_q61_mmx_asm is the real call boundary
+   (LZ_ROW_Q61, src/ops.c). lz_dot128_q61_mmx_w exists only for
+   src/ops_sse2.c's -DLZ_SSE2_GROUP=0 A/B control build. */
 void row_q61_mmx_asm(int32_t *acc32, const void *w4, const void *w2v,
                      const int16_t *xw, int nb, int nt, int in_dim,
                      const void *pf_end, const void *pf_end2);
 void lz_dot128_q61_mmx_w(const unsigned char *w4, const unsigned char *w2,
                          const int16_t *x, int32_t *out4);
 
-/* task #30 (9/N): Q16_0 matmul, MMX tier. row_q16_mmx_asm is ALREADY
-   the real call boundary (LZ_ROW_Q16, src/ops.c).
-   lz_dot128_q16_mmx_w exists only for src/ops_sse2.c's
-   -DLZ_SSE2_GROUP=0 A/B control build (task #32). */
+/* Q16_0 matmul, MMX tier. row_q16_mmx_asm is the real call boundary
+   (LZ_ROW_Q16, src/ops.c). lz_dot128_q16_mmx_w exists only for
+   src/ops_sse2.c's -DLZ_SSE2_GROUP=0 A/B control build. */
 void row_q16_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
                      const int16_t *xw, int nb, int nt, int in_dim,
                      const void *pf_end, const void *pf_end2);
@@ -254,7 +242,7 @@ void dot32_q61_mmx_2(const unsigned char *w4, const unsigned char *w2,
 int32_t dot32_t2_mmx(const unsigned char *w2, const int16_t *x);
 int32_t dot32_q16_mmx(const int16_t *w, const int16_t *x);
 
-/* ---- 128-element group kernels (task #12) -----------------------------
+/* ---- 128-element group kernels ----------------------------------------
    One call per 128 elements instead of four dot32 calls, with the mask
    constants (0x0F/0x03 and the zero register) hoisted across the four
    sub-blocks exactly as the Watcom #pragma aux twins in src/ops_mmx.c

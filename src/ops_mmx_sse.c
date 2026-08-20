@@ -3,23 +3,23 @@
    CMOV" the moment -msse is also on the command line (measured: gcc
    treats -msse as license to assume at least Pentium III / i686, and
    will use cmov even in an unrelated plain-C comparison elsewhere in
-   the same translation unit - lz_amax32_mmx in ops_mmx.c had one until
-   this split, with nothing to do with SSE). Real SSE1 hardware is
+   the same translation unit - lz_amax32_mmx in ops_mmx.c picked one up
+   that way, with nothing to do with SSE). Real SSE1 hardware is
    i686+ regardless (SSE starts at Pentium III; no Socket-7 part has
    it), so -march=i686 here is honest, not a compromise - it is
    ops_mmx.c that must stay at -march=i586 so its purely-MMX functions
    (reachable on Pentium MMX/K6/Cyrix 6x86/WinChip, none of which have
    CMOV) do not pick up a stray one.
 
-   Watcom NOW compiles this file too (task #30, 2/N) - same reason as
-   src/ops_mmx.c: -Nr/-Ns is a hard ceiling its own .586/.686 directives
-   cannot exceed, so a #pragma aux body that needs .686 codegen (SSE1)
-   cannot sit in a TU pinned at the new, lower i486/i386 floor. Watcom
-   has no CMOV-leakage concern of gcc's kind (a #pragma aux body emits
-   exactly the instructions it lists, nothing implied by a command-line
-   flag), so this split serves a different purpose per toolchain, same
-   as src/ops_mmx.c's own header explains for the register-file-alias
-   vs. CPU-generation-ceiling split. */
+   Watcom compiles this file too - same reason as src/ops_mmx.c:
+   -Nr/-Ns is a hard ceiling its own .586/.686 directives cannot
+   exceed, so a #pragma aux body that needs .686 codegen (SSE1) cannot
+   sit in a TU pinned at the lower i486/i386 floor. Watcom has no
+   CMOV-leakage concern of gcc's kind (a #pragma aux body emits exactly
+   the instructions it lists, nothing implied by a command-line flag),
+   so this split serves a different purpose per toolchain, same as
+   src/ops_mmx.c's own header explains for the register-file-alias vs.
+   CPU-generation-ceiling split. */
 #include <stdint.h>
 #include <string.h>
 
@@ -30,8 +30,8 @@
 #if defined(__WATCOMC__)
 #include "mmx_compat.h"
 #include "ops_kernel_shared.h" /* p2_shift_of - shared with ops.c and
-                           the other suffixed TUs (task #31). gcc's
-                           branch below needs none of it. */
+                           the other suffixed TUs. gcc's branch below
+                           needs none of it. */
 #include "ops_p2_blk.h"
 
 /* Real, addressable twin of src/ops_mmx.c's #pragma aux
@@ -243,13 +243,13 @@ void lz_p2_rows_sse(const int8_t *ph_row, const int8_t *pl_row,
 }
 
 /* ---- RMSNorm's output loop / softmax's max scan and normalize loop,
-   SSE1 tier - moved here from src/ops_kernel_norm.h (task #30, 4/N).
-   All three are genuine SSE1-on-xmm with no MMX register touched (no
-   `8087` in any __modify list below), the same reason lz_p2_split32_sse
-   above lives in this file rather than src/ops_mmx.c. Zero call-shape
-   change: each _w wrapper already sat between its pragma and its
-   dispatch table (src/ops_kernel_norm.h's LZ_NORMOUT_TAB/LZ_VMAX_TAB/
-   LZ_VSCALE_TAB) before the move. */
+   SSE1 tier - in this TU; the dispatch tables are in
+   src/ops_kernel_norm.h. All three are genuine SSE1-on-xmm with no MMX
+   register touched (no `8087` in any __modify list below), the same
+   reason lz_p2_split32_sse above lives in this file rather than
+   src/ops_mmx.c. Zero call-shape change: each _w wrapper sits between
+   its pragma and its dispatch table (src/ops_kernel_norm.h's
+   LZ_NORMOUT_TAB/LZ_VMAX_TAB/LZ_VSCALE_TAB). */
 
 extern void lz_rmsnorm_out_sse_asm(float *o, const float *x, const float *w,
                                    int n4, const float *k2);
@@ -358,11 +358,12 @@ void lz_vscale_sse_w(float *x, int n4, const float *pk) {
     lz_vscale_sse_asm(x, n4, pk);
 }
 
-/* ---- Q8 activation rounding, SSE1+MMX tier - moved here from
-   src/ops_kernel_q8round.h (task #30, 4/N). No cvtps2dq, only cvtps2pi
-   - converting 2 floats at a time into MMX registers, which is why this
-   cell needs genuine SSE1 (the multiply) AND touches %mm (the convert/
-   pack/clamp), the same combination lz_p2_split32_sse_asm above has. */
+/* ---- Q8 activation rounding, SSE1+MMX tier - in this TU; the
+   algorithm documentation is in src/ops_kernel_q8round.h. No cvtps2dq,
+   only cvtps2pi - converting 2 floats at a time into MMX registers,
+   which is why this cell needs genuine SSE1 (the multiply) AND touches
+   %mm (the convert/pack/clamp), the same combination
+   lz_p2_split32_sse_asm above has. */
 extern void lz_q8round32_sse_asm(const float *x, int8_t *o, const float *inv);
 #pragma aux lz_q8round32_sse_asm = \
     ".686" \
@@ -448,12 +449,10 @@ extern void lz_q8round32_sse_asm(const float *x, int8_t *o, const float *inv);
     __modify [8087]
 
 /* lz_q8round_group_sse(): the whole gs/32-chunk loop for one group of
-   src/ops.c's lz_quantize_q8, byte-for-byte the loop body that used to
-   sit at that call site, now behind ONE call per group instead of the
-   gs/32 real calls a naive per-sub-chunk wrap would have cost. The
-   emms is the SAME one lz_quantize_q8's own comment placed here -
-   moved with the loop, not removed: rule 6.6's "kernels don't emit"
-   still does not hold, the next group's x87 amax/inv still follows
+   src/ops.c's lz_quantize_q8 - one call per group instead of gs/32
+   calls a per-sub-chunk wrap would cost. The emms is emitted here,
+   inside the group function: rule 6.6's "kernels don't emit" does not
+   hold for this loop, the next group's x87 amax/inv still follows
    immediately in ops.c. */
 void lz_q8round_group_sse(const float *grp, int8_t *out, int gs,
                           const float *pinv) {
@@ -463,15 +462,14 @@ void lz_q8round_group_sse(const float *grp, int8_t *out, int gs,
     _mm_empty();
 }
 
-/* lz_q8round_2p_group_sse(): the whole two-plane round for one group of
-   src/ops.c's lz_gdn_quantize_2p - both kernel loops AND the residual
-   float arithmetic between them, byte-for-byte what used to sit at
-   that call site. The residual computation is plain C float
-   arithmetic; putting it in this TU is safe for Watcom the way it
-   would not be for gcc under -mmmx (src/ops_mmx.c's header explains
-   the difference - Watcom never emits MMX except where a #pragma aux
-   says so, so mixing float C and #pragma aux kernels in one TU here
-   is exactly as safe as ops.c doing the same always was). */
+/* lz_q8round_2p_group_sse(): the whole two-plane round for one group
+   of src/ops.c's lz_gdn_quantize_2p - both kernel loops AND the
+   residual float arithmetic between them. The residual computation is
+   plain C float arithmetic; putting it in this TU is safe for Watcom
+   the way it would not be for gcc under -mmmx (src/ops_mmx.c's header
+   explains the difference - Watcom never emits MMX except where a
+   #pragma aux says so, so mixing float C and #pragma aux kernels in
+   one TU here is exactly as safe as ops.c doing the same). */
 void lz_q8round_2p_group_sse(const float *grp, int8_t *ho, int8_t *lw,
                              int gs, const float *pinv,
                              const float *plo_mul, float *res) {

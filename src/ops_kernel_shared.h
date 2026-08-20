@@ -1,24 +1,23 @@
 /* Helpers used from BOTH src/ops.c and one or more of the suffixed
    MMX/SSE1/SSE2 translation units (src/ops_mmx.c, src/ops_mmx_sse.c,
-   src/ops_sse2.c). Task #30's kernel extraction kept re-duplicating
-   these under per-TU names (lz_i32f_wsum, gdn_tail_row_mmx) or as bare
+   src/ops_sse2.c). Shared helpers live here once, not duplicated under
+   per-TU names (lz_i32f_wsum, gdn_tail_row_mmx) or as bare
    textually-identical copies (LZ_WSUM_CHUNK, LZ_SLOT_NEXT,
-   p2_shift_of) - flagged as a real defect (task #31), not tidiness:
-   lz_i32f carries a project-wide invariant ("every int32->float
-   conversion goes through this, never a bare cast") that a rename
-   makes ungreppable, and LZ_WSUM_CHUNK/LZ_SLOT_NEXT drive a ring-buffer
-   walk that must stay in lock-step across whichever TU boundary a
-   caller and its row/group function sit on - this codebase has that
-   exact failure mode on record already (LZ_GDN_LO_SCALE, 254 vs 256,
-   silently wrong because nothing compared the two copies).
+   p2_shift_of): lz_i32f carries a project-wide invariant ("every
+   int32->float conversion goes through this, never a bare cast") that
+   a rename makes ungreppable, and LZ_WSUM_CHUNK/LZ_SLOT_NEXT drive a
+   ring-buffer walk that must stay in lock-step across whichever TU
+   boundary a caller and its row/group function sit on - this codebase
+   has that exact failure mode on record already (LZ_GDN_LO_SCALE, 254
+   vs 256, silently wrong because nothing compared the two copies).
 
    ONE definition each, here, included by every TU that needs it -
    `static` for the functions (each TU gets its own internal-linkage
    copy of the CODE, but there is only one COPY OF THE TEXT to keep in
-   step, which is the actual property task #31 asked for) and #define
-   for the macros. Every name keeps the name it had at its original
-   (ops.c) site - no _mmx/_wsum/_sse2 suffix - so a grep for the name
-   that matters finds every use.
+   step, which is the property that matters) and #define for the
+   macros. Every name keeps the name it had at its original (ops.c)
+   site - no _mmx/_wsum/_sse2 suffix - so a grep for the name that
+   matters finds every use.
 
    Needs its own include guard, unlike ops_kernel_amax.h/norm.h/
    q8round.h/p2.h/dot.h: those are included exactly once (by ops.c) and
@@ -112,15 +111,15 @@ static int p2_shift_of(int32_t amax) {
     return sh;
 }
 
-/* ---- matmul row-kernel prefetch (task #30, 5/N) -----------------------
-   Every format's Watcom row function (row_q8_mmx_asm etc., moving into
-   src/ops_mmx.c/ops_sse2.c one format at a time) issues one of these
-   per 32 (or 128) elements, so - like LZ_WSUM_CHUNK/LZ_SLOT_NEXT above -
-   this is infrastructure the row functions need wherever they end up,
-   not something specific to any one format. NOT one of task #31's five
-   names (this piece predates that fix and was never duplicated the same
-   way), but the identical principle: one text, included by every TU
-   that needs it, rather than a copy that can drift.
+/* ---- matmul row-kernel prefetch ---------------------------------------
+   Every format's Watcom row function (row_q8_mmx_asm etc., in
+   src/ops_mmx.c/ops_sse2.c) issues one of these per 32 (or 128)
+   elements, so - like LZ_WSUM_CHUNK/LZ_SLOT_NEXT above - this is
+   infrastructure the row functions need wherever they end up, not
+   something specific to any one format. Not one of the five names
+   shared via this header, but the identical principle: one text,
+   included by every TU that needs it, rather than a copy that can
+   drift.
 
    P6 has only 4 fill buffers and a 40-entry ROB. The matmul inner loop
    executes ~50 instructions per 32 weight bytes; to keep 4 misses in
@@ -191,8 +190,8 @@ extern void lz_pf_amd(const void *p);
 #endif
 
 /* Compile-time A/B control for the 128-element SSE2 group kernels that
-   sit alongside the 32-element MMX ones (Q8_0 first, task #30, 5/N -
-   the other formats' group kernels follow the same knob as they move).
+   sit alongside the 32-element MMX ones - every format uses the same
+   knob.
 
    `-DLZ_SSE2_GROUP=0` makes an SSE2 CPU take the MMX group path
    instead, i.e. the MMX group kernels alone. Two binaries from one
@@ -208,16 +207,17 @@ extern void lz_pf_amd(const void *p);
 #define LZ_SSE2_GROUP 1
 #endif
 
-/* gcc's 128-element MMX group kernels (task #12). Watcom ships its group
-   kernels always-on (its LZ_G128_* are 1). gcc's were "not written, not
+/* gcc's 128-element MMX group kernels. Watcom ships its group kernels
+   always-on (its LZ_G128_* are 1). gcc's were "not written, not
    nothing-to-offer": the mask construction the Watcom assembly hoists
-   across its four sub-blocks (0x0F/0x03 and a zero register left live in
-   %mm) is exactly what a compiler does with a loop-invariant, and whether
-   a hand-written gcc intrinsics version would emit a different shape than
-   four separate 32-element calls was never measured. The kernels are
-   written now (dot128_*_mmx, src/ops_kernel_dot_mmx.h), bit-identical by
-   construction: each sub-block's int32 dot folds and stores separately,
-   so the four accumulators are the same four ints the per-32 path writes.
+   across its four sub-blocks (0x0F/0x03 and a zero register left live
+   in %mm) is exactly what a compiler does with a loop-invariant, and
+   whether a hand-written gcc intrinsics version would emit a different
+   shape than four separate 32-element calls was never measured. The
+   kernels exist (dot128_*_mmx, src/ops_kernel_dot_mmx.h), bit-identical
+   by construction: each sub-block's int32 dot folds and stores
+   separately, so the four accumulators are the same four ints the
+   per-32 path writes.
 
    Whether the group path WINS on any given machine is a separate,
    unmeasured question (iron law 3: the dev machine is not the target),
@@ -242,17 +242,15 @@ extern void lz_pf_amd(const void *p);
    every one of those questions. */
 #define LZ_PFI_NONE(p) ((void)(p))
 
-/* ---- dispatch infrastructure (moved from ops.c, per-TU) ---------------
+/* ---- dispatch infrastructure (per-TU) ----------------------------------
 
    Slot order for EVERY dispatch table in this file and others.
-   g_kernel is the runtime-selected ISA tier (defined in ops.c,
-   moves to ops_sched.c). LZ_DEFINE_PICK generates a static picker
-   for each function-pointer type; it reads g_kernel to decide MMX
-   vs SSE2.
+   g_kernel is the runtime-selected ISA tier (defined in ops_sched.c).
+   LZ_DEFINE_PICK generates a static picker for each function-pointer
+   type; it reads g_kernel to decide MMX vs SSE2.
 
-   These were file-local to ops.c; moved here so ops_kernel_amax.h,
-   ops_kernel_norm.h and ops_kernel_q8round.h compile in every TU
-   that includes this header. */
+   Here so ops_kernel_amax.h, ops_kernel_norm.h and ops_kernel_q8round.h
+   compile in every TU that includes this header. */
 #define LZ_ROW_MMX_I   0
 #define LZ_ROW_SSE_I   1
 #define LZ_ROW_SSE2_I  2

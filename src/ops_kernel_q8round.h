@@ -14,22 +14,20 @@
    because this is included exactly once, and including it twice would
    redefine every static. */
 /* lz_q8round32_sse_asm / lz_q8round32_sse2_asm's #pragma aux bodies,
-   and the group-level loops that used to call them (once per 32-element
-   sub-chunk, in ops.c's lz_quantize_q8 and lz_gdn_quantize_2p), moved
-   to src/ops_mmx_sse.c (SSE1+MMX tier, cvtps2pi writes %mm registers)
-   and src/ops_sse2.c (pure SSE2 tier) in task #30 (4/N) - see those two
-   call sites (search "one call per GROUP") for why the group, not the
-   sub-chunk, is the granularity: gs can be much larger than 32, and
-   this family's pragmas were called once per sub-chunk directly, unlike
-   ops_kernel_amax.h's/ops_kernel_norm.h's, which were already behind a
-   table-dispatched wrapper with no per-call-site change.
+   and the group-level loops that call them, live in src/ops_mmx_sse.c
+   (SSE1+MMX tier, cvtps2pi writes %mm registers) and src/ops_sse2.c
+   (pure SSE2 tier) - see those two call sites (search "one call per
+   GROUP") for why the group, not the sub-chunk, is the granularity: gs
+   can be much larger than 32, and this family's pragmas are called once
+   per sub-chunk directly, unlike ops_kernel_amax.h's/ops_kernel_norm.h's,
+   which sit behind a table-dispatched wrapper with no per-call-site
+   change.
 
-   No lz_q8round32_sse/lz_q8round32_simd bare-name aliases here anymore:
-   they would reference names no longer declared in this TU, and
-   nothing under __WATCOMC__ needs them - both call sites reach
+   No lz_q8round32_sse/lz_q8round32_simd bare-name aliases in this file:
+   they would reference names not declared in this TU, and nothing
+   under __WATCOMC__ needs them - both call sites reach
    lz_q8round_group_sse/_sse2 and lz_q8round_2p_group_sse/_sse2
-   directly now, the same cleanup task #30 (2/N) and (3/N) did for the
-   p2 and wsum aliases. */
+   directly, the same way the p2 and wsum aliases were retired. */
 /* The q8round kernel bodies - lz_q8round32_sse_asm / lz_q8round32_sse2_asm's
    #pragma aux pairs and their group-level loops on Watcom,
    lz_q8round32_sse / lz_q8round32_simd intrinsics on gcc - live in

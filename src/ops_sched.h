@@ -2,8 +2,8 @@
    called from other TUs (ops.c, ops_quant.c, forward.c).
 
    The tier selectors (lz_gdn_mode, lz_conv_mode, etc.) are already
-   declared in ops.h. This header covers functions that were static
-   in ops.c and need cross-TU visibility after the split. */
+   declared in ops.h. This header covers functions that need cross-TU
+   visibility. */
 #ifndef OPS_SCHED_H
 #define OPS_SCHED_H
 

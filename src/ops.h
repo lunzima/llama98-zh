@@ -327,12 +327,11 @@ int lz_gdn_mode(void);
    for the write-back quantize? - and answers "fixed" only where it does
    not. The test is q8r_have_simd(), i.e. CPUID leaf 1 EDX bit 25, SSE.
 
-   THE PREDICATE IS SSE AND MUST STAY SSE, NOT MMX. This comment used to
-   read "i.e. a Pentium II or K6-2", which names two machines out of a
-   set the rule actually covers in full: every pre-SSE part. The rest of
-   that set is the whole Socket 7 generation - Cyrix 6x86MX/MII and IDT
-   WinChip C6/2 alongside the K6 - and it is exactly the part that must
-   not be lost, because those have MMX and an x87 WEAKER than the K6's
+   THE PREDICATE IS SSE AND MUST STAY SSE, NOT MMX. It covers every
+   pre-SSE part, not just "a Pentium II or K6-2": the rest of that set
+   is the whole Socket 7 generation - Cyrix 6x86MX/MII and IDT WinChip
+   C6/2 alongside the K6 - and it is exactly the part that must not be
+   lost, because those have MMX and an x87 WEAKER than the K6's
    Rewriting this test in terms of MMX would push the three
    machines with the worst x87 in the family back onto the float path,
    and no gate would see it: the two tiers are required to be bit

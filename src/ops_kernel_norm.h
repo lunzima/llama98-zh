@@ -33,14 +33,13 @@
    from outside. */
 
 /* lz_rmsnorm_out_sse_asm / lz_vmax_sse_asm / lz_vscale_sse_asm's
-   #pragma aux bodies and their _w wrappers (task #30, 4/N: the
-   mechanical low-risk sweep) moved to src/ops_mmx_sse.c - genuine SSE1
-   on xmm, no MMX register touched by any of the three (no `8087` in
-   any __modify list), so they belong with the other true-SSE1 cell
-   (lz_p2_split32_sse_asm), not with the MMX file's -march=i586 floor.
-   Zero call-shape change: the _w wrappers already sat between the
-   pragmas and these three dispatch tables before the move, for the
-   same reason ops_kernel_amax.h's did. */
+   #pragma aux bodies and their _w wrappers live in src/ops_mmx_sse.c -
+   genuine SSE1 on xmm, no MMX register touched by any of the three (no
+   `8087` in any __modify list), so they belong with the other true-SSE1
+   cell (lz_p2_split32_sse_asm), not with the MMX file's -march=i586
+   floor. Zero call-shape change: the _w wrappers sit between the
+   pragmas and these three dispatch tables, for the same reason
+   ops_kernel_amax.h's do. */
 #if defined(__WATCOMC__)
 #define LZ_HAVE_NORM_SSE 1
 #else   /* gcc: intrinsics */

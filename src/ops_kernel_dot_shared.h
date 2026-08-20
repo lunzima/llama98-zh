@@ -1,12 +1,12 @@
 /* Per-format row-loop macros for the matmul kernels, shared between
    src/ops.c (gcc's row_*_intrin functions, which never move) and
    whichever of src/ops_mmx.c/src/ops_sse2.c hosts that format's Watcom
-   row_*_asm function (task #30, 5/N onward, one format at a time).
+   row_*_asm function.
    Each format has its OWN macro family under its own LZ_<FORMAT>_*
    name (LZ_Q8_ACC vs LZ_Q41_ACC etc. - a pre-existing pattern, not
-   something this task introduced) because the row loop's shape - which
-   pointer arithmetic, which stride - differs per format; nothing here
-   is generic across formats the way LZ_WSUM_CHUNK/LZ_SLOT_NEXT are.
+   something new) because the row loop's shape - which pointer
+   arithmetic, which stride - differs per format; nothing here is
+   generic across formats the way LZ_WSUM_CHUNK/LZ_SLOT_NEXT are.
 
    Needs its own include guard, unlike ops_kernel_amax.h/norm.h/
    q8round.h/p2.h/dot.h: those are included exactly once (by ops.c) and

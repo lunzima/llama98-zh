@@ -40,9 +40,9 @@ int lz_cpu_check(char *errbuf, int errlen);
 /* CPUID leaf 1's EDX, as raw feature bits (bit 23 MMX, bit 25 SSE,
    bit 26 SSE2). One implementation per compiler (Watcom's #pragma aux,
    gcc's __asm__), same symbol name, so a caller needing the leaf in more
-   than one file - ops.c's kernel_detect(), for the SSE2 tier task #22
-   made a genuine runtime question on the 32-bit x87 target - does not
-   care which one it links against.
+   than one file - ops.c's kernel_detect(), for which the SSE2 tier is
+   a genuine runtime question on the 32-bit x87 target - does not care
+   which one it links against.
 
    Watcom: a real FUNCTION with a __asm block, not #pragma aux.
    #pragma aux is the inline-code-generation syntax and emits no

@@ -23,7 +23,7 @@
    ARMv5TE cross-build - where neither __SSE2__ nor __MMX__ is defined -
    is the configuration that reports them. */
 
-/* fold4_sse2 and the five part32_* kernels (x16/q41/q61/t2/q16) moved to
+/* fold4_sse2 and the five part32_* kernels (x16/q41/q61/t2/q16) are in
    src/ops_kernel_dot_sse2.h, included only by src/ops_sse2.c - they
    write %xmm registers. Declared (as the row_*_sse2_intrin functions
    that call them) in src/ops_sse2.h, visible in ops.c. */
@@ -35,19 +35,19 @@
    scale 256x, cancelled once at the row end by the caller.
 
    dot32_x16_mmx / dot32_x16_mmx_2's gcc bodies live in
-   src/ops_kernel_dot_mmx.h now (included only by src/ops_mmx.c - both
+   src/ops_kernel_dot_mmx.h (included only by src/ops_mmx.c - both
    write %mm registers); this #ifdef's Watcom half is unaffected and
    unchanged. */
 #ifdef __WATCOMC__
 /* lz_dot32_x16_asm / lz_dot32_x16_asm_2 (MMX) and lz_dot32_x16_sse2_asm
-   (SSE2), plus their dot32_x16_mmx/dot32_x16_sse2a wrappers, moved to
-   src/ops_mmx.c and src/ops_sse2.c respectively (task #30, 5/N) -
-   together with row_q8_mmx_asm/row_q8_sse2_asm, which call them
-   direct-by-name and therefore had to move to the SAME TU to keep that
-   call inline (see ops.c's own Q8 row-kernel section for the
-   accounting). Algorithm documentation (weight-side widening via
-   punpcklbw(zero,w), the paired kernel's register budget, why SSE2
-   needs no emms) is unchanged, just relocated with the code. */
+   (SSE2), plus their dot32_x16_mmx/dot32_x16_sse2a wrappers, live in
+   src/ops_mmx.c and src/ops_sse2.c respectively - together with
+   row_q8_mmx_asm/row_q8_sse2_asm, which call them direct-by-name and
+   therefore sit in the SAME TU to keep that call inline (see ops.c's
+   own Q8 row-kernel section for the accounting). Algorithm
+   documentation (weight-side widening via punpcklbw(zero,w), the
+   paired kernel's register budget, why SSE2 needs no emms) is at the
+   kernels' new site. */
 #elif defined(LZ_DOT_MMX_EXTERN)
 /* dot32_x16_mmx (single token) and dot32_x16_mmx_2 (two tokens, ONE
    weight unpack - 36/24 ceiling, NT=2 register budget) live in
@@ -68,24 +68,23 @@
    See rule 7 for why the divergence is in the load, not the arithmetic,
    and why PC=24 does not cover it. */
 #if defined(__WATCOMC__)
-/* lz_dot32_q16_asm / lz_dot32_q16_sse2_asm moved to src/ops_mmx.c /
-   src/ops_sse2.c (task #30, 9/N), alongside row_q16_mmx_asm /
-   row_q16_sse2_asm which call them direct-by-name. */
+/* lz_dot32_q16_asm / lz_dot32_q16_sse2_asm live in src/ops_mmx.c /
+   src/ops_sse2.c, alongside row_q16_mmx_asm / row_q16_sse2_asm which
+   call them direct-by-name. */
 
 /* Group-at-once (128 elements, 4 subblocks) version: same shape as
    lz_dot128_x16_asm. The 4 subblock sums are written out separately
    (each has its own xqs, so the float reduction cannot add them up
    inside the kernel). */
-/* lz_dot128_q16_asm moved to src/ops_mmx.c (task #30, 9/N), alongside
-   row_q16_mmx_asm which calls it direct-by-name. Also declared (as
-   lz_dot128_q16_mmx_w's twin) for -DLZ_SSE2_GROUP=0. */
+/* lz_dot128_q16_asm lives in src/ops_mmx.c, alongside row_q16_mmx_asm
+   which calls it direct-by-name. Also declared (as lz_dot128_q16_mmx_w's
+   twin) for -DLZ_SSE2_GROUP=0. */
 
-/* lz_dot128_q16_sse2_asm moved to src/ops_sse2.c (task #30, 9/N),
-   alongside row_q16_sse2_asm which calls it direct-by-name. */
+/* lz_dot128_q16_sse2_asm lives in src/ops_sse2.c, alongside
+   row_q16_sse2_asm which calls it direct-by-name. */
 
-/* dot32_q16_mmx / dot32_q16_sse2a moved to src/ops_mmx.c /
-   src/ops_sse2.c (task #30, 9/N), alongside row_q16_mmx_asm /
-   row_q16_sse2_asm. */
+/* dot32_q16_mmx / dot32_q16_sse2a live in src/ops_mmx.c /
+   src/ops_sse2.c, alongside row_q16_mmx_asm / row_q16_sse2_asm. */
 #elif defined(LZ_DOT_MMX_EXTERN)
 /* dot32_q16_mmx's body lives in src/ops_kernel_dot_mmx.h, included only
    by src/ops_mmx.c - it writes %mm registers. Declared in
@@ -99,11 +98,11 @@
    the caller cancels once at the row end. */
 #ifdef __WATCOMC__
 /* lz_dot32_q41_asm / lz_dot32_q41_asm_2 (MMX) and lz_dot32_q41_sse2_asm
-   (SSE2), plus their dot32_q41_mmx/dot32_q41_sse2a wrappers, moved to
-   src/ops_mmx.c and src/ops_sse2.c respectively (task #30, 6/N) -
-   together with row_q41_mmx_asm/row_q41_sse2_asm, which call them
-   direct-by-name and therefore had to move to the SAME TU. Algorithm
-   documentation unchanged, just relocated with the code. */
+   (SSE2), plus their dot32_q41_mmx/dot32_q41_sse2a wrappers, live in
+   src/ops_mmx.c and src/ops_sse2.c respectively - together with
+   row_q41_mmx_asm/row_q41_sse2_asm, which call them direct-by-name and
+   therefore sit in the SAME TU. Algorithm documentation travels with
+   the code. */
 #elif defined(LZ_DOT_MMX_EXTERN)
 /* dot32_q41_mmx (single token) and dot32_q41_mmx_2 (two tokens, ONE
    nibble unpack - the kernel that matters most, see the Watcom twin's
@@ -124,7 +123,7 @@
    / 11 loads and 59 / 6 - T2 is the same kernel with the 4-bit plane
    deleted, which is exactly why it was given Q6_1'''s 2-bit layout.
 
-   VERIFIED BIT-IDENTICAL BEFORE BEING MOVED HERE:
+   VERIFIED BIT-IDENTICAL:
    tools/kernelgen/wt2.c compares both against the scalar reference over
    a 32-position sweep (one nonzero weight at a time, both signs - a
    uniform block hides a wrong shift), six extreme patterns, and 200,000
@@ -132,11 +131,10 @@
    so there is no tolerance to argue about. */
 
 #if defined(__WATCOMC__)
-/* lz_dot32_t2_asm / lz_dot32_t2_sse2_asm moved to src/ops_mmx.c /
-   src/ops_sse2.c (task #30, 7/N), alongside row_t2_mmx_asm /
-   row_t2_sse2_asm which call them direct-by-name. No 128-wide group
-   kernel exists for this format, so no -DLZ_SSE2_GROUP=0 wrapper is
-   needed (task #32 does not apply to T2). */
+/* lz_dot32_t2_asm / lz_dot32_t2_sse2_asm live in src/ops_mmx.c /
+   src/ops_sse2.c, alongside row_t2_mmx_asm / row_t2_sse2_asm which
+   call them direct-by-name. No 128-wide group kernel exists for this
+   format, so no -DLZ_SSE2_GROUP=0 wrapper is needed. */
 #elif defined(LZ_DOT_MMX_EXTERN)
 /* dot32_t2_mmx's body lives in src/ops_kernel_dot_mmx.h, included only
    by src/ops_mmx.c - it writes %mm registers. Declared in
@@ -145,13 +143,10 @@
 
 /* ---- Q6_1 (6.5 bits: 4-bit + 2-bit dual planes) ------------------------ */
 #if defined(__WATCOMC__)
-/* lz_dot32_q61_asm / dot32_q61_mmx moved to src/ops_mmx.c (task #30,
-   8/N), alongside row_q61_mmx_asm which calls them direct-by-name.
-   Both this format's SSE2 kernels are genuine %xmm-only implementations
-   (not an MMX reuse - a stale "Q6_1 hand-written SSE2 asm is F3's
-   remaining work" comment used to sit here; the hand-written SSE2 asm
-   already existed further down in this file when that comment was
-   written). */
+/* lz_dot32_q61_asm / dot32_q61_mmx live in src/ops_mmx.c, alongside
+   row_q61_mmx_asm which calls them direct-by-name. Both this format's
+   SSE2 kernels are genuine %xmm-only implementations, not an MMX
+   reuse. */
 
 /* Originally generated, hand-edited since - if you regenerate, diff
    the generator's output against what is here first. 59 instructions / 6 loads.
@@ -178,17 +173,17 @@
      saves via memory operands cannot be saved here.
    - 32-bit mode has only 8 xmms; the zero register becomes an in-place
      `pxor xmm2,xmm2` to fit. */
-/* lz_dot32_q61_sse2_asm moved to src/ops_sse2.c (task #30, 8/N),
-   alongside row_q61_sse2_asm and dot32_q61_sse2a. */
+/* lz_dot32_q61_sse2_asm lives in src/ops_sse2.c, alongside
+   row_q61_sse2_asm and dot32_q61_sse2a. */
 
-/* lz_dot128_x16_sse2_asm (Q8_0's 128-wide SSE2 group kernel) moved to
-   src/ops_sse2.c (task #30, 5/N), alongside row_q8_sse2_asm which
-   calls it direct-by-name. */
+/* lz_dot128_x16_sse2_asm (Q8_0's 128-wide SSE2 group kernel) lives in
+   src/ops_sse2.c, alongside row_q8_sse2_asm which calls it
+   direct-by-name. */
 
-/* lz_dot128_q41_sse2_asm (Q4_1's 128-wide SSE2 group kernel) moved to
-   src/ops_sse2.c (task #30, 6/N), alongside row_q41_sse2_asm which
-   calls it direct-by-name. Also declared (as lz_dot128_q41_mmx_w's
-   twin, see that wrapper's own comment) for -DLZ_SSE2_GROUP=0. */
+/* lz_dot128_q41_sse2_asm (Q4_1's 128-wide SSE2 group kernel) lives in
+   src/ops_sse2.c, alongside row_q41_sse2_asm which calls it
+   direct-by-name. Also declared (as lz_dot128_q41_mmx_w's twin, see
+   that wrapper's own comment) for -DLZ_SSE2_GROUP=0. */
 
 /* PAIRED twin: two tokens, ONE two-plane merge. Q6_1 gains the most of
    the three formats - the weight side is 61% of the kernel's ops, and
@@ -213,27 +208,27 @@
    by mutating one 2-bit plane shift (psrlw 6 -> psrlw 5), which turned
    it into 199997 mismatches. */
 /* lz_dot32_q61_asm_2 (PAIRED twin, MMX only - the SSE2 row function
-   does not pair) moved to src/ops_mmx.c (task #30, 8/N). dot32_q61_sse2a
-   moved to src/ops_sse2.c alongside lz_dot32_q61_sse2_asm above. */
+   does not pair) lives in src/ops_mmx.c. dot32_q61_sse2a lives in
+   src/ops_sse2.c alongside lz_dot32_q61_sse2_asm above. */
 
 /* lz_dot128_x16_asm (Q8_0's 128-wide MMX group kernel - "one group at
    a time", amortizing the fixed mask/prologue overhead from once per
-   32 elements to once per 128) moved to src/ops_mmx.c (task #30, 5/N),
-   alongside row_q8_mmx_asm which calls it direct-by-name. Also
-   declared (as lz_dot128_x16_mmx_w's twin, see that wrapper's own
-   comment) for src/ops_sse2.c's -DLZ_SSE2_GROUP=0 A/B control build. */
+   32 elements to once per 128) lives in src/ops_mmx.c, alongside
+   row_q8_mmx_asm which calls it direct-by-name. Also declared (as
+   lz_dot128_x16_mmx_w's twin, see that wrapper's own comment) for
+   src/ops_sse2.c's -DLZ_SSE2_GROUP=0 A/B control build. */
 
-/* lz_dot128_q41_asm (Q4_1's 128-wide MMX group kernel) moved to
-   src/ops_mmx.c (task #30, 6/N), alongside row_q41_mmx_asm which calls
-   it direct-by-name. Also declared (as lz_dot128_q41_mmx_w's twin, see
+/* lz_dot128_q41_asm (Q4_1's 128-wide MMX group kernel) lives in
+   src/ops_mmx.c, alongside row_q41_mmx_asm which calls it
+   direct-by-name. Also declared (as lz_dot128_q41_mmx_w's twin, see
    that wrapper's own comment) for src/ops_sse2.c's -DLZ_SSE2_GROUP=0
    A/B control build. */
 
-/* lz_dot128_q61_asm moved to src/ops_mmx.c (task #30, 8/N), alongside
-   row_q61_mmx_asm which calls it direct-by-name. Also declared (as
-   lz_dot128_q61_mmx_w's twin) for -DLZ_SSE2_GROUP=0. */
-/* lz_dot128_q61_sse2_asm moved to src/ops_sse2.c (task #30, 8/N),
-   alongside row_q61_sse2_asm which calls it direct-by-name. */
+/* lz_dot128_q61_asm lives in src/ops_mmx.c, alongside row_q61_mmx_asm
+   which calls it direct-by-name. Also declared (as lz_dot128_q61_mmx_w's
+   twin) for -DLZ_SSE2_GROUP=0. */
+/* lz_dot128_q61_sse2_asm lives in src/ops_sse2.c, alongside
+   row_q61_sse2_asm which calls it direct-by-name. */
 #elif defined(LZ_DOT_MMX_EXTERN)
 /* dot32_q61_mmx (single token) and dot32_q61_mmx_2 (two tokens, ONE
    two-plane merge - the kernel that matters most on the recipe of
