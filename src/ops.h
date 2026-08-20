@@ -477,10 +477,11 @@ int lz_norm_can_fixed(int n);
 
 /* Whether the sgdn norm's fixed tier writes its Q15 result as int
    (consumed by lz_quantize_q8_int) instead of dequantizing to float
-   and re-quantizing. Default off; the two paths are bit-identical, so
-   the knob is a perf switch, not a numerics one. */
+   and re-quantizing. The two paths are bit-identical, so this is a perf
+   switch, not a numerics one. Selected as `--norm-write int` - the
+   third value on that tier's axis, not a separate flag, because it
+   only exists on top of the fixed tier. */
 int lz_norm_int(void);
-const char *lz_norm_int_select(const char *name);
 
 /* Scalar transcendental tier (lz_exp and lz_rsqrt together):
    "float" | "fixed" | "auto".
@@ -954,20 +955,19 @@ int lz_attn_is_auto(void);
    re-quantizing (default off). Value-changing: the exact int64 sum
    replaces the float per-chunk drain, which rounds each 512-row chunk
    to 24-bit float, and the per-32-group dequant scale (cmax*LZ_Q15_INV)
-   is not a power of two, so the stored group scales shift too. Only
-   active when the wsum fixed tier is already selected. */
+   is not a power of two, so the stored group scales shift too. Rides on
+   the wsum fixed tier, so it is selected as `--attn-write int` - the
+   fourth value on that axis, not a separate flag. */
 int lz_attn_int(void);
-const char *lz_attn_int_select(const char *name);
 
 /* Whether the Q8_0 matmul takes the int-accumulator output path and
    int-domain downstream consumption for the o_proj call site
-   (docs/matmul-int-output-design.md). Default off; the off path is the
-   plain matmul byte-for-byte. Value-changing by design: this is the
-   format-refactor step that removes the float dequant (scheme A's
-   per-input-group reconstruct validated the granularity at 1.21% max;
-   the Q16 int-domain carry is ~1.5e-5 vs the float reference). */
+   (docs/matmul-int-output-design.md). Build-time -DLZ_MATMUL_INT=1, not
+   a CLI flag: it is inert on the shipping configuration, since both
+   entry points decline once the fixed epilogue is on and lz_epi_mode's
+   auto turns that on for exactly the machines it was meant to help.
+   Value-changing where it does run (~1.5e-5 vs the float reference). */
 int lz_matmul_int(void);
-const char *lz_matmul_int_select(const char *name);
 
 #if LZ_ATTN_FIXED
 #define LZ_ATTN_MAX_HD 256

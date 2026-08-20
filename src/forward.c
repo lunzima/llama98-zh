@@ -1432,11 +1432,18 @@ static void forward_attn(const LZModel *m, LZRunState *s,
            one 32-wide wsum group with ONE sscale; kv_rot_v==0 keeps the
            float un-rotate out (the int path has no Hadamard); v4/vf and
            the 2-plane low term are float-only consumers of `out`. */
+#if (LZ_ATTN_FIXED & 2)
+        /* wsum_cbuf and LZ_ATTN_MAX_HD only exist when the fixed wsum is
+           compiled in, and the int path rides on it - so the predicate
+           is compiled out with it rather than merely evaluating false. */
         attn_int[tk] = lz_attn_int() && (lz_attn_mode() & 2) &&
                        s->wsum_cbuf && LZ_ATTN_NORING &&
                        hd > 0 && (hd % 32) == 0 && hd <= LZ_ATTN_MAX_HD &&
                        s->kv_rot_v == 0 && gso == 32 && !v4 && !vf &&
                        !LZ_KV_2PLANE;
+#else
+        attn_int[tk] = 0;
+#endif /* LZ_ATTN_FIXED & 2 */
 
         for (h = 0; h < nh; h++) {
             const float *qhh = qht + (size_t)h * hd;

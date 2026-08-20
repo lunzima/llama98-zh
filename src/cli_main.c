@@ -243,30 +243,23 @@ static void usage(void) {
     "                   quantize exists).\n"
     "  --sig-write TIER    auto|float|fixed (default auto). sigmoid and\n"
     "                   SiLU from a Q15 table (NOT the KDA decay).\n"
-    "  --norm-write TIER   auto|float|fixed (default auto). RMS/L2 norm\n"
-    "                   sum-of-squares in int64 fixed point.\n"
-    "  --norm-int MODE     on|off (default off). The fixed-tier gated\n"
-    "                   norm writes its Q15 result as int for\n"
-    "                   lz_quantize_q8_int instead of dequantizing to\n"
-    "                   float and re-quantizing. Bit-identical.\n"
+    "  --norm-write TIER   auto|float|fixed|int (default auto). RMS/L2 norm\n"
+    "                   sum-of-squares in int64 fixed point. int adds the\n"
+    "                   gated norm writing its Q15 result as int for\n"
+    "                   lz_quantize_q8_int instead of dequantizing to float\n"
+    "                   and re-quantizing (bit-identical); it implies fixed.\n"
     "  --scalar-fixed TIER auto|float|fixed (default fixed). lz_exp and\n"
     "                   lz_rsqrt together - the last two scalar x87 ops\n"
     "                   the fixed tiers leave on float. Value-changing by\n"
     "                   design (~1e-6 rel); the KDA decay follows lz_exp.\n"
     "  --epi-write TIER    auto|float|fixed (default auto). Dequant\n"
     "                   epilogue in int64 fixed point.\n"
-    "  --attn-write TIER   auto|float|scoring|wsum|fixed (default auto).\n"
-    "                   Attention scoring / weighted sum in fixed point.\n"
-    "  --attn-int MODE     on|off (default off). The fixed-tier attention\n"
-    "                   weighted sum keeps its exact int64 accumulator for\n"
-    "                   lz_quantize_q8_int64 instead of dequantizing to\n"
-    "                   float and re-quantizing. Value-changing.\n"
-    "  --matmul-int MODE   on|off (default off). The Q8_0 matmul takes its\n"
-    "                   int-accumulator output path and int-domain downstream\n"
-    "                   consumption at the o_proj call site, in place of the\n"
-    "                   float epilogue. The Q16 int-domain carry removes the\n"
-    "                   float dequant (~1.5e-5 vs float, vs scheme A's 1.21%%).\n"
-    "                   Value-changing; the format refactor's scalar step.\n"
+    "  --attn-write TIER   auto|float|scoring|wsum|fixed|int (default auto).\n"
+    "                   Attention scoring / weighted sum in fixed point. int\n"
+    "                   adds the weighted sum keeping its exact int64\n"
+    "                   accumulator for lz_quantize_q8_int64 instead of\n"
+    "                   dequantizing and re-quantizing (value-changing); it\n"
+    "                   implies fixed.\n"
     "  --conv-write TIER   auto|float|fixed (default auto). Causal conv1d\n"
     "                   tier: fixed keeps the history in int16 so the\n"
     "                   conversion is per sample, not per tap. Drifts ~3e-5\n"
@@ -1289,13 +1282,6 @@ int main(int argc, char **argv) {
                 return 2;
             }
         }
-        else if (strcmp(a, "--norm-int") == 0 && i + 1 < argc) {
-            const char *got = lz_norm_int_select(argv[++i]);
-            if (!got) {
-                printf("--norm-int: unknown mode (on|off)\n");
-                return 2;
-            }
-        }
         else if (strcmp(a, "--scalar-fixed") == 0 && i + 1 < argc) {
             /* lz_exp and lz_rsqrt together - the last two scalar x87
                operators the fixed tiers leave on float. Both fixed
@@ -1331,21 +1317,7 @@ int main(int argc, char **argv) {
             const char *got = lz_attn_select(argv[++i]);
             if (!got) {
                 printf("--attn-write: unknown tier "
-                       "(auto|float|scoring|wsum|fixed)\n");
-                return 2;
-            }
-        }
-        else if (strcmp(a, "--attn-int") == 0 && i + 1 < argc) {
-            const char *got = lz_attn_int_select(argv[++i]);
-            if (!got) {
-                printf("--attn-int: unknown mode (on|off)\n");
-                return 2;
-            }
-        }
-        else if (strcmp(a, "--matmul-int") == 0 && i + 1 < argc) {
-            const char *got = lz_matmul_int_select(argv[++i]);
-            if (!got) {
-                printf("--matmul-int: unknown mode (on|off)\n");
+                       "(auto|float|scoring|wsum|fixed|int)\n");
                 return 2;
             }
         }

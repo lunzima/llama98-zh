@@ -137,3 +137,10 @@ typedef char lz_q8min_check[1 - 2 * (int)!(LZ_Q8_MIN_SCALE == 0.0f)];
 #if LZ_P2_FORCE_MMX != 1
 #error "LZ_P2_FORCE_MMX != 1"
 #endif
+
+#ifndef LZ_MATMUL_INT
+#error "LZ_MATMUL_INT not defined (expected 1)"
+#endif
+#if LZ_MATMUL_INT != 1
+#error "LZ_MATMUL_INT != 1"
+#endif

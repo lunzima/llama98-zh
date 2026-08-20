@@ -204,30 +204,24 @@ const char *lz_conv_select(const char *name) {
 
 /* ---- attention tier -------------------------------------------------- */
 
+/* The three low bits are the scoring/wsum bitmask; LZ_ATTN_TIER_INT sits
+   above them as a fourth VALUE on the same axis rather than a separate
+   boolean. The int output rides on the fixed wsum, so selecting it
+   selects that too - and "float + int", which used to be spellable and
+   silently inert, no longer is. */
+#define LZ_ATTN_TIER_INT 4
+
 static int g_attn = -1;
 
 int lz_attn_mode(void) {
-    int m = (g_attn < 0) ? (lz_soft_float_target() ? 3 : 0) : g_attn;
+    int m = (g_attn < 0) ? (lz_soft_float_target() ? 3 : 0)
+                         : ((g_attn == LZ_ATTN_TIER_INT) ? 3 : g_attn);
     return m & LZ_ATTN_FIXED;
 }
 
 int lz_attn_is_auto(void) { return g_attn < 0; }
 
-/* ---- attention int output knob ---------------------------------------- */
-
-static int g_attn_int = 0;
-
-int lz_attn_int(void) {
-    return g_attn_int != 0;
-}
-
-const char *lz_attn_int_select(const char *name) {
-    if (!name) return NULL;
-    if (strcmp(name, "on") == 0 || strcmp(name, "1") == 0) g_attn_int = 1;
-    else if (strcmp(name, "off") == 0 || strcmp(name, "0") == 0) g_attn_int = 0;
-    else return NULL;
-    return lz_attn_int() ? "on" : "off";
-}
+int lz_attn_int(void) { return g_attn == LZ_ATTN_TIER_INT; }
 
 const char *lz_attn_select(const char *name) {
     if (!name) return NULL;
@@ -235,8 +229,10 @@ const char *lz_attn_select(const char *name) {
     else if (strcmp(name, "scoring") == 0) g_attn = 1;
     else if (strcmp(name, "wsum") == 0) g_attn = 2;
     else if (strcmp(name, "fixed") == 0) g_attn = 3;
+    else if (strcmp(name, "int") == 0) g_attn = LZ_ATTN_TIER_INT;
     else if (strcmp(name, "auto") == 0) g_attn = -1;
     else return NULL;
+    if (lz_attn_int()) return "int";
     switch (lz_attn_mode()) {
         case 1:  return "scoring";
         case 2:  return "wsum";
@@ -285,20 +281,35 @@ const char *lz_scalar_select(const char *name) {
 
 /* ---- norm tier ------------------------------------------------------- */
 
+/* ONE ordered axis, not a tier plus an independent boolean: the int
+   output only exists on top of the fixed tier, so "int" is its third
+   value. As two flags the pair (float, int) was representable and
+   silently did nothing - a combination that cannot be spelled cannot be
+   mis-set. */
+#define LZ_NORM_FLOAT 0
+#define LZ_NORM_FIXED 1
+#define LZ_NORM_INT   2
+
 static int g_norm = -1;
 
 int lz_norm_mode(void) {
-    return (g_norm < 0) ? lz_soft_float_target() : g_norm;
+    /* int implies fixed - every caller asking "is this tier fixed" must
+       see yes, so the int value folds down here rather than at each site. */
+    return (g_norm < 0) ? lz_soft_float_target() : (g_norm != LZ_NORM_FLOAT);
 }
 
 int lz_norm_is_auto(void) { return g_norm < 0; }
 
+int lz_norm_int(void) { return g_norm == LZ_NORM_INT; }
+
 const char *lz_norm_select(const char *name) {
     if (!name) return NULL;
-    if (strcmp(name, "float") == 0) g_norm = 0;
-    else if (strcmp(name, "fixed") == 0) g_norm = 1;
+    if (strcmp(name, "float") == 0) g_norm = LZ_NORM_FLOAT;
+    else if (strcmp(name, "fixed") == 0) g_norm = LZ_NORM_FIXED;
+    else if (strcmp(name, "int") == 0) g_norm = LZ_NORM_INT;
     else if (strcmp(name, "auto") == 0) g_norm = -1;
     else return NULL;
+    if (lz_norm_int()) return "int";
     return lz_norm_mode() ? "fixed" : "float";
 }
 
@@ -315,37 +326,18 @@ int lz_norm_can_fixed(int n) {
 #endif /* LZ_GDN_FIXED */
 }
 
-/* ---- norm int output knob -------------------------------------------- */
+/* ---- matmul int output ------------------------------------------------
+   A build macro, not a CLI flag: it is measurably inert on the shipping
+   configuration. matmul_q8_int_impl/_consume both decline once the fixed
+   epilogue is on, and lz_epi_mode's auto turns that on for exactly the
+   machines this was meant to help (see docs/matmul-int-output-design.md).
+   What remains is a developer A/B, and those belong at build time -
+   a runtime knob that cannot change a shipped run is noise in --help. */
+#ifndef LZ_MATMUL_INT
+#define LZ_MATMUL_INT 0
+#endif /* LZ_MATMUL_INT */
 
-static int g_norm_int = 0;
-
-int lz_norm_int(void) {
-    return g_norm_int != 0;
-}
-
-const char *lz_norm_int_select(const char *name) {
-    if (!name) return NULL;
-    if (strcmp(name, "on") == 0 || strcmp(name, "1") == 0) g_norm_int = 1;
-    else if (strcmp(name, "off") == 0 || strcmp(name, "0") == 0) g_norm_int = 0;
-    else return NULL;
-    return lz_norm_int() ? "on" : "off";
-}
-
-/* ---- matmul int-output knob (scheme A validation) -------------------- */
-
-static int g_mmi = 0;
-
-int lz_matmul_int(void) {
-    return g_mmi != 0;
-}
-
-const char *lz_matmul_int_select(const char *name) {
-    if (!name) return NULL;
-    if (strcmp(name, "on") == 0 || strcmp(name, "1") == 0) g_mmi = 1;
-    else if (strcmp(name, "off") == 0 || strcmp(name, "0") == 0) g_mmi = 0;
-    else return NULL;
-    return lz_matmul_int() ? "on" : "off";
-}
+int lz_matmul_int(void) { return LZ_MATMUL_INT != 0; }
 
 /* ---- epilogue tier --------------------------------------------------- */
 
