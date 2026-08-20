@@ -1826,12 +1826,38 @@ static void forward_ssm(const LZModel *m, LZRunState *s,
     /* This is the plain-weight gated RMSNorm, not the (1+w) kind used
        by the outer layers. The fixed tier computes the full silu value
        in Q15 int-multiply (value-changing) and writes it into o;
-       lz_quantize_q8 quantizes it. The float tier keeps the plain norm
-       + lz_quantize_q8 path. */
+       lz_quantize_q8 quantizes it. With --norm-int the fixed tier
+       writes the Q15 value as int into ssm_sig instead and hands the
+       power-of-two scale out-of-band, so lz_quantize_q8_int folds it
+       into the stored group scale and the dequant round-trip is gone
+       (bit-identical - see lz_quantize_q8_int). The float tier keeps
+       the plain norm + lz_quantize_q8 path. */
     {
         int gso = lz_act_gs(&L->out_proj, vdim);
         int nso = (gso > 0) ? vdim / gso : 0;
-        if (lz_norm_can_fixed(vd)) {
+        if (lz_norm_int() && lz_norm_can_fixed(vd) &&
+            gso > 0 && (vd % gso) == 0) {
+            /* Per-head quantize, not one whole-vdim call: the norm runs
+               per head and each head carries its own deq, so a Q8 group
+               must not straddle two heads' different scales. gso divides
+               vd, so the group boundaries and the s->xqs layout are
+               identical to the whole-vdim call below. ssm_sig is
+               otherwise unused in this path (the sig argument is NULL)
+               and is allocated nt*vdim int32, the same span as ssm_out. */
+            for (tk = 0; tk < nt; tk++)
+                for (h = 0; h < nv; h++) {
+                    float deq;
+                    lz_rmsnorm_gated_int(s->ssm_sig + (size_t)tk * vdim + (size_t)h * vd,
+                                         s->ssm_out + (size_t)tk * vdim + (size_t)h * vd,
+                                         s->zbuf + (size_t)tk * vdim + (size_t)h * vd,
+                                         lz_t_f32(&L->ssm_norm, s->wscr), vd,
+                                         c->rms_norm_eps, &deq);
+                    lz_quantize_q8_int(s->ssm_sig + (size_t)tk * vdim + (size_t)h * vd,
+                                       vd, gso, deq,
+                                       s->xq + (size_t)tk * vdim + (size_t)h * vd,
+                                       s->xqs + (size_t)tk * nso + (size_t)h * (vd / gso));
+                }
+        } else if (lz_norm_can_fixed(vd)) {
             for (tk = 0; tk < nt; tk++)
                 for (h = 0; h < nv; h++)
                     lz_rmsnorm_gated(s->ssm_out + (size_t)tk * vdim + (size_t)h * vd,
@@ -2101,11 +2127,27 @@ static void forward_kda(const LZModel *m, LZRunState *s,
        kda_o_norm's field comment in model.h for why the activation must
        stay silu on this engine. Fixed tier computes the full silu value
        in Q15 int-multiply (value-changing); float tier keeps the plain
-       norm + quantize path. */
+       norm + quantize path. --norm-int takes the same int-output route
+       as forward_ssm's sgdn block above (bit-identical, same guard). */
     {
         int gso = lz_act_gs(&L->kda_o_proj, vdim);
         int nso = (gso > 0) ? vdim / gso : 0;
-        if (lz_norm_can_fixed(vd)) {
+        if (lz_norm_int() && lz_norm_can_fixed(vd) &&
+            gso > 0 && (vd % gso) == 0) {
+            for (tk = 0; tk < nt; tk++)
+                for (h = 0; h < nv; h++) {
+                    float deq;
+                    lz_rmsnorm_gated_int(s->ssm_sig + (size_t)tk * vdim + (size_t)h * vd,
+                                         s->ssm_out + (size_t)tk * vdim + (size_t)h * vd,
+                                         s->zbuf + (size_t)tk * vdim + (size_t)h * vd,
+                                         lz_t_f32(&L->kda_o_norm, s->wscr), vd,
+                                         c->rms_norm_eps, &deq);
+                    lz_quantize_q8_int(s->ssm_sig + (size_t)tk * vdim + (size_t)h * vd,
+                                       vd, gso, deq,
+                                       s->xq + (size_t)tk * vdim + (size_t)h * vd,
+                                       s->xqs + (size_t)tk * nso + (size_t)h * (vd / gso));
+                }
+        } else if (lz_norm_can_fixed(vd)) {
             for (tk = 0; tk < nt; tk++)
                 for (h = 0; h < nv; h++)
                     lz_rmsnorm_gated(s->ssm_out + (size_t)tk * vdim + (size_t)h * vd,

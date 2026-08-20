@@ -130,6 +130,15 @@ void lz_rmsnorm(float *o, const float *x, const float *w, int n, float eps);
 void lz_rmsnorm_gated(float *o, const float *x, const float *g,
                           const float *w, int n, float eps, int32_t *sig);
 
+/* Same operator's fixed tier with INT output: t receives the Q15
+   result (no per-element dequant) and *deq the power-of-two scale that
+   the float path would have multiplied by, so lz_quantize_q8_int can
+   fold it into the stored group scale. Bit-identical to
+   lz_rmsnorm_gated(fixed) + lz_quantize_q8. Callers gate on
+   lz_norm_can_fixed(n). */
+void lz_rmsnorm_gated_int(int32_t *t, const float *x, const float *g,
+                          const float *w, int n, float eps, float *deq);
+
 /* o = x * rsqrt(sum(x^2) + eps)  - note sum, not mean */
 void lz_l2norm(float *o, const float *x, int n, float eps);
 
@@ -466,6 +475,13 @@ const char *lz_norm_select(const char *name);
    lz_rmsnorm_gated + lz_quantize_q8 path. */
 int lz_norm_can_fixed(int n);
 
+/* Whether the sgdn norm's fixed tier writes its Q15 result as int
+   (consumed by lz_quantize_q8_int) instead of dequantizing to float
+   and re-quantizing. Default off; the two paths are bit-identical, so
+   the knob is a perf switch, not a numerics one. */
+int lz_norm_int(void);
+const char *lz_norm_int_select(const char *name);
+
 /* Scalar transcendental tier (lz_exp and lz_rsqrt together):
    "float" | "fixed" | "auto".
 
@@ -555,6 +571,19 @@ const char *lz_kernel_tier(void);
    being the group's absmax/127 (all-zero group scale=1.0). q needs n
    bytes, s n/gs f32s. */
 void lz_quantize_q8(const float *x, int n, int gs, int8_t *q, float *s);
+
+/* Int-domain variant for the fixed-tier gated norm: the norm wrote its
+   Q15 result t[] as int and handed the dequant scale deq (a power of
+   two) out separately. The stored group scale is t_amax*deq/127,
+   matching lz_quantize_q8 on the float input (float)t[i]*deq bit for
+   bit, while the element loop rounds t*127/t_amax - deq enters the
+   scale only, never the element loop (the same fold lz_quantize_q8_silu
+   applies to 2^-15). Holds because |t*127| < 2^22 (Q15 t, 32767*127
+   4,161,409 < 2^22). deq is a non-negative power of two; a zero deq
+   collapses every group to all-zero q with scale 1.0, same as the float
+   path's zero output. */
+void lz_quantize_q8_int(const int32_t *t, int n, int gs, float deq,
+                        int8_t *q, float *s);
 
 /* Fused fixed-tier gated-RMSNorm quantize. p is the pre-silu product
    and sig the Q15 sigmoid that lz_rmsnorm_gated wrote in its fixed tier

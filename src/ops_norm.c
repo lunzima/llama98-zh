@@ -75,6 +75,90 @@ void lz_rmsnorm_gated_out_fixed(float *o, const float *x,
 }
 #endif /* LZ_GDN_FIXED */
 
+#if LZ_GDN_FIXED
+/* Int output variant of lz_rmsnorm_gated_out_fixed: identical Q15
+   int-multiply, but instead of dequantizing to float per element the
+   Q15 result is written as int and the single power-of-two scale
+   deq = 2^(30-ex-ew-eg-ei) is returned out-of-band. lz_quantize_q8_int
+   then folds deq into the stored group scale only, so the Q15 -> float
+   -> int8 double conversion disappears while staying bit-identical to
+   the float chain (the cancellation proof lives at lz_quantize_q8_int). */
+void lz_rmsnorm_gated_out_fixed_int(int32_t *t, const float *x,
+                                    const float *g, const float *w,
+                                    float inv, int n, int32_t *sig,
+                                    float *deq) {
+    union { float f; uint32_t u; } bit;
+    float sx, sw, sg;
+    int ex, ew, eg, ei;
+    int32_t qinv;
+    int i;
+    (void)sig;
+
+    bit.u = q8_amax(x, n); ex = 14 - expof(bit.f); sx = pow2f(ex);
+    bit.u = q8_amax(w, n); ew = 14 - expof(bit.f); sw = pow2f(ew);
+    bit.u = q8_amax(g, n); eg = 14 - expof(bit.f); sg = pow2f(eg);
+    bit.u = q8_amax(&inv, 1); ei = 14 - expof(bit.f);
+    qinv = q8_round(inv * pow2f(ei));
+    if (qinv > 32767) qinv = 32767;
+    if (qinv < -32767) qinv = -32767;
+    for (i = 0; i < n; i++) {
+        int qx = q8_round(x[i] * sx);
+        int qw = q8_round(w[i] * sw);
+        int qg = q8_round(g[i] * sg);
+        int32_t sigv = sigmoid_q15(g[i]);
+        int64_t t64;
+        if (qx > 32767) qx = 32767; else if (qx < -32767) qx = -32767;
+        if (qw > 32767) qw = 32767; else if (qw < -32767) qw = -32767;
+        if (qg > 32767) qg = 32767; else if (qg < -32767) qg = -32767;
+        t64 = (int64_t)qx * qw;
+        t64 = (t64 * qg) >> 15;
+        t64 = (t64 * qinv) >> 15;
+        t64 = (t64 * sigv) >> 15;
+        t[i] = (int32_t)t64;
+    }
+    *deq = pow2f(30 - ex - ew - eg - ei);
+}
+#else
+void lz_rmsnorm_gated_out_fixed_int(int32_t *t, const float *x,
+                                    const float *g, const float *w,
+                                    float inv, int n, int32_t *sig,
+                                    float *deq) {
+    (void)t; (void)x; (void)g; (void)w; (void)inv; (void)n; (void)sig;
+    *deq = 0.0f;
+}
+#endif /* LZ_GDN_FIXED */
+
+/* lz_rmsnorm_gated fixed-tier wrapper for the int output: same
+   sum-of-squares and rsqrt as lz_rmsnorm_gated, then the Q15
+   int-multiply loop writing int instead of dequantizing. Only valid
+   when lz_norm_can_fixed(n); callers gate on it. */
+void lz_rmsnorm_gated_int(int32_t *t, const float *x, const float *g,
+                          const float *w, int n, float eps, float *deq) {
+    float ss = 0.0f;
+    float inv;
+    float ssf;
+    int i;
+    if (lz_norm_mode()) {
+        ssf = norm_ss_fixed(x, n);
+        if (ssf >= 0.0f) {
+            /* Same replacement as lz_rmsnorm_gated's fixed branch, minus
+               the per-element dequant (1 cvt + 1 mul) the float output
+               loop spent; the Q15 value stays int and deq is one scalar
+               per call. */
+            LZ_FCX(LZ_FC_NORM, 4 * n + 1, 3 * n + 1, 1, n + 1, 0);
+            ss = ssf;
+            goto have_ss_gated_int;
+        }
+    }
+    /* float ss fallback - same billing as lz_rmsnorm_gated's float row
+       (the output loop is skipped entirely here). */
+    LZ_FCX(LZ_FC_NORM, 5 * n, n + 1, 1, 0, 0);
+    for (i = 0; i < n; i++) ss += x[i] * x[i];
+have_ss_gated_int:
+    inv = lz_rsqrt(ss / (float)n + eps);
+    lz_rmsnorm_gated_out_fixed_int(t, x, g, w, inv, n, NULL, deq);
+}
+
 void lz_rmsnorm(float *o, const float *x, const float *w, int n, float eps) {
     float ss = 0.0f;
     float inv;

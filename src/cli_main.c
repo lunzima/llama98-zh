@@ -245,6 +245,10 @@ static void usage(void) {
     "                   SiLU from a Q15 table (NOT the KDA decay).\n"
     "  --norm-write TIER   auto|float|fixed (default auto). RMS/L2 norm\n"
     "                   sum-of-squares in int64 fixed point.\n"
+    "  --norm-int MODE     on|off (default off). The fixed-tier gated\n"
+    "                   norm writes its Q15 result as int for\n"
+    "                   lz_quantize_q8_int instead of dequantizing to\n"
+    "                   float and re-quantizing. Bit-identical.\n"
     "  --scalar-fixed TIER auto|float|fixed (default fixed). lz_exp and\n"
     "                   lz_rsqrt together - the last two scalar x87 ops\n"
     "                   the fixed tiers leave on float. Value-changing by\n"
@@ -1272,6 +1276,13 @@ int main(int argc, char **argv) {
             const char *got = lz_norm_select(argv[++i]);
             if (!got) {
                 printf("--norm-write: unknown tier (auto|float|fixed)\n");
+                return 2;
+            }
+        }
+        else if (strcmp(a, "--norm-int") == 0 && i + 1 < argc) {
+            const char *got = lz_norm_int_select(argv[++i]);
+            if (!got) {
+                printf("--norm-int: unknown mode (on|off)\n");
                 return 2;
             }
         }

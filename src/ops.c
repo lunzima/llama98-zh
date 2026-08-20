@@ -455,6 +455,74 @@ void lz_quantize_q8(const float *x, int n, int gs, int8_t *q, float *s) {
     }
 }
 
+/* Int-domain Q8 quantize for the fixed-tier gated norm. t holds the Q15
+   result the norm wrote as int (no per-element dequant) and deq its
+   power-of-two scale. The group's float amax would be t_amax*deq, so
+   the stored scale matches lz_quantize_q8 on the float input
+   (float)t[i]*deq bit for bit. deq cancels in the round:
+     round((t*deq) * 127/(t_amax*deq)) == round(t * 127/t_amax),
+   so the element loop uses 127/t_amax and deq enters the stored scale
+   only (one multiply per group). inv (127/amax) keeps the fast/else
+   decision and the MIN_SCALE zeroing identical to q8_group_scale; the
+   else branch (unreachable with the default LZ_Q8_MIN_SCALE floor - a
+   tiny amax hits MIN_SCALE first) keeps deq in the numerator to match
+   the float path's own else exactly. */
+void lz_quantize_q8_int(const int32_t *t, int n, int gs, float deq,
+                        int8_t *q, float *s) {
+    int g, k;
+    if (gs <= 0 || n < gs || (n % gs) != 0) return;   /* defense: f32 weights have gs=0 etc. */
+    for (g = 0; g < n / gs; g++) {
+        const int32_t *grp = t + (size_t)g * gs;
+        int8_t *out = q + (size_t)g * gs;
+        int32_t tam = 0;
+        float amax, inv;
+        int fast;
+        /* int-domain absmax over t: |t| is monotone in the float image,
+           so this is the same maximum q8_amax would find over
+           (float)t[i]*deq (deq >= 0). Two's-complement negation is
+           UB-free; Q15 output never reaches INT32_MIN anyway. */
+        for (k = 0; k < gs; k++) {
+            int32_t a = grp[k] < 0 ? (int32_t)(0u - (uint32_t)grp[k])
+                                   : grp[k];
+            if (a > tam) tam = a;
+        }
+        amax = (float)tam * deq;
+        if (amax > 0.0f) {
+            s[g] = amax * LZ_Q8_INV127;
+            inv = 127.0f / amax;
+            fast = (inv <= FLT_MAX);
+            if (s[g] < LZ_Q8_MIN_SCALE_F) {
+                s[g] = 1.0f;
+                inv = 0.0f;
+                fast = 1;
+            }
+        } else {
+            s[g] = 1.0f;
+            inv = 0.0f;
+            fast = 1;
+        }
+        if (fast) {
+            /* The float path multiplies (t[i]*deq) by 127/(tam*deq); in
+               the int domain the same round is t[i] * (127/tam). inv==0
+               is the MIN_SCALE/zero-amax path, where the float path
+               multiplies by 0 - mirror it (the stored scale is 1.0 and
+               every q is 0). */
+            float inv_elem = (inv == 0.0f) ? 0.0f : 127.0f / (float)tam;
+            for (k = 0; k < gs; k++) {
+                int qi = q8_round((float)grp[k] * inv_elem);
+                qi = (qi > 127) ? 127 : qi;
+                out[k] = (int8_t)((qi < -127) ? -127 : qi);
+            }
+        } else {
+            for (k = 0; k < gs; k++) {
+                int qi = q8_round(((float)grp[k] * deq) / s[g]);
+                qi = (qi > 127) ? 127 : qi;
+                out[k] = (int8_t)((qi < -127) ? -127 : qi);
+            }
+        }
+    }
+}
+
 /* Fused fixed-tier gated-RMSNorm quantize (see ops.h). The norm wrote
    the pre-silu product into p (ssm_out) and the Q15 sigmoid into sig;
    this reconstructs the silu value and quantizes it, so the Q15 ->

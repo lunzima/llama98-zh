@@ -299,6 +299,22 @@ int lz_norm_can_fixed(int n) {
 #endif /* LZ_GDN_FIXED */
 }
 
+/* ---- norm int output knob -------------------------------------------- */
+
+static int g_norm_int = 0;
+
+int lz_norm_int(void) {
+    return g_norm_int != 0;
+}
+
+const char *lz_norm_int_select(const char *name) {
+    if (!name) return NULL;
+    if (strcmp(name, "on") == 0 || strcmp(name, "1") == 0) g_norm_int = 1;
+    else if (strcmp(name, "off") == 0 || strcmp(name, "0") == 0) g_norm_int = 0;
+    else return NULL;
+    return lz_norm_int() ? "on" : "off";
+}
+
 /* ---- epilogue tier --------------------------------------------------- */
 
 static int g_epi = -1;
