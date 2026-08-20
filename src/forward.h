@@ -515,6 +515,23 @@ typedef struct {
        pair for one tk completes before the next tk starts. */
     int32_t *subn_norm_int;
 
+    /* Trunk (use_subn==0) plain-norm int output scratch, --norm-write
+       int: nt_cap x hidden_size int32, one deq scalar per token. UNLIKE
+       subn_norm_int this must be nt-WIDE: the norm (forward_chunk's
+       "an"/"pn" sites) and its quantize consumer(s) are in DIFFERENT
+       functions across a whole block's worth of code (forward_attn/
+       _ssm/_kda, or forward_moe/dense_ffn_step), and forward_moe reads
+       the post-attention-norm row TWICE (phase 1's router/down-proj
+       quantize and phase 4's shared-expert quantize, different group
+       sizes) - so the batch's image must survive until every consumer
+       of THIS norm has run. The float s->xb write is never skipped
+       alongside it: q/k/v (or gate/up, or router/shared) can carry
+       different weight formats sharing one norm, and an F32 one reads
+       s->xb directly - see forward_chunk's own comment at the call
+       site. */
+    int32_t *trunk_norm_int;    /* (nt_cap * hidden_size) */
+    float   *trunk_norm_deq;    /* (nt_cap) */
+
     /* Precomputed RoPE table: (seq_len x rotary_dim/2) {cos, sin} pairs.
        Shared by all layers/heads under the same theta, avoiding a per-token
        per-layer pow/cos/sin (expensive on PII's x87). */
