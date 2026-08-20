@@ -1824,11 +1824,10 @@ static void forward_ssm(const LZModel *m, LZRunState *s,
     }
 
     /* This is the plain-weight gated RMSNorm, not the (1+w) kind used
-       by the outer layers. In the fixed tier the norm writes the
-       pre-silu product and the Q15 sigmoid, and lz_quantize_q8_silu
-       reconstructs the silu value from them - the Q15 -> float -> int
-       round-trip is gone while the value is bit-identical. The float
-       tier keeps the plain norm + quantize path. */
+       by the outer layers. The fixed tier computes the full silu value
+       in Q15 int-multiply (value-changing) and writes it into o;
+       lz_quantize_q8 quantizes it. The float tier keeps the plain norm
+       + lz_quantize_q8 path. */
     {
         int gso = lz_act_gs(&L->out_proj, vdim);
         int nso = (gso > 0) ? vdim / gso : 0;
@@ -1840,15 +1839,10 @@ static void forward_ssm(const LZModel *m, LZRunState *s,
                                      s->zbuf + (size_t)tk * vdim + (size_t)h * vd,
                                      lz_t_f32(&L->ssm_norm, s->wscr), vd,
                                      c->rms_norm_eps,
-                                     s->ssm_sig + (size_t)tk * vdim + (size_t)h * vd);
+                                     NULL);
             for (tk = 0; tk < nt; tk++)
-                lz_quantize_q8_silu(s->ssm_out + (size_t)tk * vdim,
-                                    s->zbuf + (size_t)tk * vdim,
-                                    s->ssm_sig + (size_t)tk * vdim,
-                                    vdim, gso,
-                                    s->xq + (size_t)tk * vdim,
-                                    s->xqs + (size_t)tk * nso,
-                                    s->ssm_out + (size_t)tk * vdim);
+                lz_quantize_q8(s->ssm_out + (size_t)tk * vdim, vdim, gso,
+                               s->xq + (size_t)tk * vdim, s->xqs + (size_t)tk * nso);
         } else {
             for (tk = 0; tk < nt; tk++)
                 for (h = 0; h < nv; h++)
@@ -2105,9 +2099,9 @@ static void forward_kda(const LZModel *m, LZRunState *s,
     LZ_TAP("kraw", layer, s->ssm_out, vdim);
     /* Same gated RMSNorm as GDN (plain-weight, silu gate) - see
        kda_o_norm's field comment in model.h for why the activation must
-       stay silu on this engine. Fixed tier fuses the silu into the
-       quantizer exactly as GDN does (lz_quantize_q8_silu); float tier
-       keeps the plain norm + quantize path. */
+       stay silu on this engine. Fixed tier computes the full silu value
+       in Q15 int-multiply (value-changing); float tier keeps the plain
+       norm + quantize path. */
     {
         int gso = lz_act_gs(&L->kda_o_proj, vdim);
         int nso = (gso > 0) ? vdim / gso : 0;
@@ -2119,15 +2113,10 @@ static void forward_kda(const LZModel *m, LZRunState *s,
                                      s->zbuf + (size_t)tk * vdim + (size_t)h * vd,
                                      lz_t_f32(&L->kda_o_norm, s->wscr), vd,
                                      c->rms_norm_eps,
-                                     s->ssm_sig + (size_t)tk * vdim + (size_t)h * vd);
+                                     NULL);
             for (tk = 0; tk < nt; tk++)
-                lz_quantize_q8_silu(s->ssm_out + (size_t)tk * vdim,
-                                    s->zbuf + (size_t)tk * vdim,
-                                    s->ssm_sig + (size_t)tk * vdim,
-                                    vdim, gso,
-                                    s->xq + (size_t)tk * vdim,
-                                    s->xqs + (size_t)tk * nso,
-                                    s->ssm_out + (size_t)tk * vdim);
+                lz_quantize_q8(s->ssm_out + (size_t)tk * vdim, vdim, gso,
+                               s->xq + (size_t)tk * vdim, s->xqs + (size_t)tk * nso);
         } else {
             for (tk = 0; tk < nt; tk++)
                 for (h = 0; h < nv; h++)

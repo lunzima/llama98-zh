@@ -124,13 +124,9 @@ void lz_rmsnorm(float *o, const float *x, const float *w, int n, float eps);
 /* o = x * rsqrt(mean(x^2) + eps) * w * silu(g)  - Qwen3_5RMSNormGated
    Order matters: normalize and multiply by weight first, gate last.
 
-   In the fixed tier o holds the PRE-silu product x*inv*w and sig the Q15
-   sigmoid of g (the float tier ignores sig and o holds the silu'd
-   value); lz_quantize_q8_silu reconstructs the silu value from them, so
-   the Q15 -> float -> int round-trip the downstream quantizer used to
-   re-quantize is gone while the value stays bit-identical (the 2^-15
-   dequantization is a power of two). Callers gate the fused quantizer
-   on lz_norm_can_fixed(). */
+   In the fixed tier, o holds the FINAL silu value (Q15 int-multiply,
+   value-changing vs the float chain). sig is unused (API stability);
+   callers pass NULL. Callers gate on lz_norm_can_fixed(). */
 void lz_rmsnorm_gated(float *o, const float *x, const float *g,
                           const float *w, int n, float eps, int32_t *sig);
 

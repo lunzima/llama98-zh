@@ -234,11 +234,8 @@ static float lz_rsqrt_float_body(float x);
 
 /* Same home and reason: the fixed output loop of lz_rmsnorm_gated, defined
    beside norm_ss_fixed where sigmoid_q15's table and the Q15 helpers
-   live. Writes the PRE-silu product p[i] = x[i]*inv*w[i] into o and the
-   Q15 sigmoid of g[i] into sig: lz_quantize_q8_silu reconstructs the
-   silu value from them, so the Q15 -> float -> int round-trip is gone
-   while the value stays bit-identical (the 2^-15 dequantization is a
-   power of two). */
+   live. Writes the final silu value into o (Q15 int-multiply, value-
+   changing). sig is unused (API stability). */
 static void lz_rmsnorm_gated_out_fixed(float *o, const float *x,
                                        const float *g, const float *w,
                                        float inv, int n, int32_t *sig);
@@ -297,16 +294,14 @@ void lz_rmsnorm_gated(float *o, const float *x, const float *g,
         ssf = norm_ss_fixed(x, n);
         if (ssf >= 0.0f) {
             /* Same replacement as lz_rmsnorm: norm_ss_fixed's own 2n+2
-               in place of the 2n float ss loop. The output loop below
-               branches on fixed_ss: the fixed tier's own loop writes the
-               pre-silu product and the Q15 sigmoid (lz_quantize_q8_silu
-               reconstructs the silu value), so the sigmoid work it does
-               is billed here rather than at the sigmoid site. Per
-               element: sigmoid_q15 (2 mul, 2 cvt, 2 sub) + the pre-silu
-               product (2 mul); the silu reconstruction + quantize (3
-               mul, 1 cvt) is billed by lz_quantize_q8_silu at this same
-               site. Plus norm_ss_fixed (n mul, n add, 1 mul, 1 cvt) and
-               the divide+eps (1 div, 1 add). */
+               in place of the 2n float ss loop. The fixed output loop
+               (lz_rmsnorm_gated_out_fixed) computes the full Q15
+               int-multiply (x*inv*w*silu) so the sigmoid site stops
+               billing it. Per element: sigmoid_q15 (2 mul, 2 cvt, 2
+               sub), q8_round per factor (3 mul, 3 add), int64 product
+               (3 mul, 3 shift), dequant (1 cvt, 1 mul); plus
+               norm_ss_fixed (n mul, n add, 1 mul, 1 cvt) and the
+               divide+eps (1 div, 1 add). */
             LZ_FCX(LZ_FC_NORM, 5 * n + 1, 3 * n + 1, 1, 2 * n + 1, 0);
             ss = ssf;
             fixed_ss = 1;
@@ -324,7 +319,9 @@ void lz_rmsnorm_gated(float *o, const float *x, const float *g,
     for (i = 0; i < n; i++) ss += x[i] * x[i];
 have_ss_gated:
     inv = lz_rsqrt(ss / (float)n + eps);
-    /* plain w here, and the gate applies last */
+    /* plain w here, and the gate applies last. The fixed path computes
+       the full silu value in Q15 int-multiply (value-changing); the
+       float path is untouched. */
     if (fixed_ss)
         lz_rmsnorm_gated_out_fixed(o, x, g, w, inv, n, sig);
     else
@@ -4640,29 +4637,48 @@ static float norm_ss_fixed(const float *x, int n) {
 #endif
 
 #if LZ_GDN_FIXED
-/* Fixed output loop of lz_rmsnorm_gated, defined here (beside
-   norm_ss_fixed) because it needs sigmoid_q15's table, which is set up
-   above this line. The gate's sigmoid is consumed straight from the Q15
-   table (sigmoid_q15) instead of through lz_silu/lz_sigmoid, so this
-   loop owns its sigmoid work and the sigmoid site stops billing it.
-
-   The loop writes the PRE-silu product p[i] = (x[i]*inv)*w[i] into o
-   and the Q15 sigmoid into sig; lz_quantize_q8_silu reconstructs the
-   silu value o[i] = p[i]*(g[i]*(float)sig[i])*2^-15 from them. The
-   VALUE is the float tier's own, bit for bit: the 1/32768 scale is a
-   power of two, so folding it into the quantizer's scale is exact and
-   the reordered (silu multiply, then scale) expression rounds the same
-   way - verified against the lz_silu chain over random values, zero
-   mismatches. A fixed-point product instead would change the fixed
-   tier's output, which is barred. */
+/* Fixed output loop of lz_rmsnorm_gated. The full Q15 int-multiply:
+   x, w, g each get their own power-of-two Q15 scale (q8_amax +
+   pow2f(14-expof)), inv is scaled likewise, sigmoid comes straight from
+   the Q15 table, and the product runs in int64 with three >>15 steps.
+   One dequantize at the end. The sig parameter is unused (kept in the
+   signature for API stability). This is value-changing, not bit-identical
+   to the float chain (the float chain's 5 per-step roundings cannot be
+   reproduced by one final rounding), but it offloads the sigmoid work
+   from the sigmoid census site entirely. forward.c uses lz_quantize_q8
+   (not lz_quantize_q8_silu) since the output already holds the final
+   silu value. */
 static void lz_rmsnorm_gated_out_fixed(float *o, const float *x,
                                        const float *g, const float *w,
                                        float inv, int n, int32_t *sig) {
+    union { float f; uint32_t u; } bit;
+    float sx, sw, sg;
+    int ex, ew, eg, ei;
+    int32_t qinv;
     int i;
+    (void)sig;
+
+    bit.u = q8_amax(x, n); ex = 14 - expof(bit.f); sx = pow2f(ex);
+    bit.u = q8_amax(w, n); ew = 14 - expof(bit.f); sw = pow2f(ew);
+    bit.u = q8_amax(g, n); eg = 14 - expof(bit.f); sg = pow2f(eg);
+    bit.u = q8_amax(&inv, 1); ei = 14 - expof(bit.f);
+    qinv = q8_round(inv * pow2f(ei));
+    if (qinv > 32767) qinv = 32767;
+    if (qinv < -32767) qinv = -32767;
     for (i = 0; i < n; i++) {
-        int32_t s = sigmoid_q15(g[i]);
-        sig[i] = s;
-        o[i] = (x[i] * inv) * w[i];
+        int qx = q8_round(x[i] * sx);
+        int qw = q8_round(w[i] * sw);
+        int qg = q8_round(g[i] * sg);
+        int32_t sigv = sigmoid_q15(g[i]);
+        int64_t t;
+        if (qx > 32767) qx = 32767; else if (qx < -32767) qx = -32767;
+        if (qw > 32767) qw = 32767; else if (qw < -32767) qw = -32767;
+        if (qg > 32767) qg = 32767; else if (qg < -32767) qg = -32767;
+        t = (int64_t)qx * qw;
+        t = (t * qg) >> 15;
+        t = (t * qinv) >> 15;
+        t = (t * sigv) >> 15;
+        o[i] = (float)t * pow2f(30 - ex - ew - eg - ei);
     }
 }
 #else
