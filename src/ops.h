@@ -951,6 +951,15 @@ int lz_attn_is_auto(void);
 int lz_attn_int(void);
 const char *lz_attn_int_select(const char *name);
 
+/* Whether the Q8_0 matmul takes the int-accumulator output path and
+   scheme-A (per-input-group) dequant for the o_proj call site
+   (docs/matmul-int-output-design.md). Default off; the off path is the
+   plain matmul byte-for-byte. Value-changing by design: this validates
+   whether the 1.21% single-layer error is acceptable before committing
+   to the format refactor. */
+int lz_matmul_int(void);
+const char *lz_matmul_int_select(const char *name);
+
 #if LZ_ATTN_FIXED
 #define LZ_ATTN_MAX_HD 256
 #if (LZ_ATTN_FIXED & 1)

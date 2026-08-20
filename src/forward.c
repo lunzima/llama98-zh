@@ -7,6 +7,8 @@
 #include "compat.h"    /* lz_time_ms, for the debug probes below only */
 #include "err.h"
 #include "ops.h"
+#include "ops_kernel_shared.h"   /* LZ_ROW_N, before ops_matmul.h */
+#include "ops_matmul.h"   /* matmul_q8_int_impl + scheme A dequant */
 
 /* The reference implementation hardcodes l2norm's eps to 1e-6, which
    is semantically different from config's rms_norm_eps - they only
@@ -513,6 +515,17 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
        wsum_cbuf/wsum_cq: the selector can run after this point. */
     s->attn_acc = (int64_t *)xcalloc((size_t)nt * c->attn_q_dim, sizeof(int64_t), &ok, &s->bytes_alloc);
     s->attn_ss  = (float *)xcalloc((size_t)nt * (c->attn_q_dim / 32), sizeof(float), &ok, &s->bytes_alloc);
+    /* --matmul-int scratch: o_proj shape (attn_q_dim -> hidden_size).
+       mmi_ws worst-case ng == attn_q_dim/32 (weight gs == 32); the
+       scheme-A path is gated on w->gs >= 32 so it never writes more. */
+    s->mmi_acc = (int32_t *)xcalloc((size_t)nt * c->hidden_size *
+                                    (c->attn_q_dim / 32), sizeof(int32_t),
+                                    &ok, &s->bytes_alloc);
+    s->mmi_xsb = (float *)xcalloc((size_t)nt * (c->attn_q_dim / 32),
+                                  sizeof(float), &ok, &s->bytes_alloc);
+    s->mmi_ws  = (float *)xcalloc((size_t)c->hidden_size *
+                                  (c->attn_q_dim / 32), sizeof(float),
+                                  &ok, &s->bytes_alloc);
     s->ktmp     = (float *)xcalloc((size_t)nt * c->attn_kv_dim, sizeof(float), &ok, &s->bytes_alloc);
     s->vtmp     = (float *)xcalloc((size_t)nt * c->attn_kv_dim, sizeof(float), &ok, &s->bytes_alloc);
     /* KV cache Q8 (group 32, contiguous within a row). +1 layer slot when
@@ -903,6 +916,7 @@ void lz_state_free(LZRunState *s) {
     free(s->logits);
     free(s->qg); free(s->qh); free(s->att); free(s->attn_out);
     free(s->attn_acc); free(s->attn_ss);
+    free(s->mmi_acc); free(s->mmi_xsb); free(s->mmi_ws);
 #if (LZ_ATTN_FIXED & 2)
     free(s->wsum_cbuf); free(s->wsum_cq);
 #endif /* LZ_ATTN_FIXED & 2 */
@@ -1731,8 +1745,21 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                            s->xq + (size_t)tk * qd, s->xqs + (size_t)tk * nso);
         }
     }
-    lz_matmul_xq_nt(s->xb2, s->attn_out, s->xq, s->xqs, &L->o_proj, qd,
-                    hdim, nt);
+    /* --matmul-int (scheme A validation): run the Q8_0 matmul's
+       int-accumulator path and scheme A dequant instead of the float
+       epilogue. Gates: body layers only (the MTP sentinel layer stays
+       float), activations quantized per-32-group (gso==32, the layout
+       matmul_q8_int_impl hands out), and the impl itself accepting
+       (Q8_0, fixed-epi tier off). Off is the plain matmul byte-for-byte. */
+    if (lz_matmul_int() && layer >= 0 && gso == 32 &&
+        matmul_q8_int_impl(s->mmi_acc, s->mmi_xsb, s->mmi_ws,
+                           s->xq, s->xqs, &L->o_proj, qd, hdim, nt)) {
+        matmul_q8_int_dequant_q8(s->xb2, s->mmi_acc, s->mmi_xsb,
+                                 s->mmi_ws, &L->o_proj, qd, hdim, nt);
+    } else {
+        lz_matmul_xq_nt(s->xb2, s->attn_out, s->xq, s->xqs, &L->o_proj, qd,
+                        hdim, nt);
+    }
 }
 
 /* ------------------------------------------------ linear_attention block */

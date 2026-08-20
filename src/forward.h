@@ -93,6 +93,18 @@ typedef struct {
                                    (fixed-tier attention int path, --attn-int) */
     float *attn_ss;             /* (attn_q_dim/32) per-32-group dequant scale for
                                    the same path (sscale = cmax * LZ_Q15_INV) */
+    /* --matmul-int scratch (scheme A validation, ops_matmul.c). Holds
+       matmul_q8_int_impl's o_acc/o_xsb/o_ws for the o_proj matmul (the
+       only wired call site), then matmul_q8_int_dequant_q8 consumes
+       them in place of the float epilogue. Shapes are the o_proj shape:
+       mmi_acc [nt, hidden, attn_q_dim/32] int32, mmi_xsb [nt,
+       attn_q_dim/32], mmi_ws [hidden, attn_q_dim/32] (worst-case ng,
+       one weight scale per 32 sub-blocks). Allocated always - the
+       selector can run after lz_state_alloc, same reasoning as
+       attn_acc/attn_ss. */
+    int32_t *mmi_acc;
+    float   *mmi_xsb;
+    float   *mmi_ws;
     float *ktmp;                /* (attn_kv_dim) k before it enters the cache (post-rotation, quantized) */
     float *vtmp;                /* (attn_kv_dim) same for v */
     /* KV cache Q8: kq8/vq8 hold the rotated k/v (group 32), dequantized at score time.

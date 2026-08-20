@@ -331,6 +331,22 @@ const char *lz_norm_int_select(const char *name) {
     return lz_norm_int() ? "on" : "off";
 }
 
+/* ---- matmul int-output knob (scheme A validation) -------------------- */
+
+static int g_mmi = 0;
+
+int lz_matmul_int(void) {
+    return g_mmi != 0;
+}
+
+const char *lz_matmul_int_select(const char *name) {
+    if (!name) return NULL;
+    if (strcmp(name, "on") == 0 || strcmp(name, "1") == 0) g_mmi = 1;
+    else if (strcmp(name, "off") == 0 || strcmp(name, "0") == 0) g_mmi = 0;
+    else return NULL;
+    return lz_matmul_int() ? "on" : "off";
+}
+
 /* ---- epilogue tier --------------------------------------------------- */
 
 static int g_epi = -1;

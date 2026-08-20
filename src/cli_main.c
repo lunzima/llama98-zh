@@ -261,6 +261,12 @@ static void usage(void) {
     "                   weighted sum keeps its exact int64 accumulator for\n"
     "                   lz_quantize_q8_int64 instead of dequantizing to\n"
     "                   float and re-quantizing. Value-changing.\n"
+    "  --matmul-int MODE   on|off (default off). The Q8_0 matmul takes its\n"
+    "                   int-accumulator output path and scheme A (per-input-\n"
+    "                   group) dequant at the o_proj call site, in place of\n"
+    "                   the float epilogue. Value-changing by design: this\n"
+    "                   validates scheme A's precision before the format\n"
+    "                   refactor, not a deployment mode.\n"
     "  --conv-write TIER   auto|float|fixed (default auto). Causal conv1d\n"
     "                   tier: fixed keeps the history in int16 so the\n"
     "                   conversion is per sample, not per tap. Drifts ~3e-5\n"
@@ -1333,6 +1339,13 @@ int main(int argc, char **argv) {
             const char *got = lz_attn_int_select(argv[++i]);
             if (!got) {
                 printf("--attn-int: unknown mode (on|off)\n");
+                return 2;
+            }
+        }
+        else if (strcmp(a, "--matmul-int") == 0 && i + 1 < argc) {
+            const char *got = lz_matmul_int_select(argv[++i]);
+            if (!got) {
+                printf("--matmul-int: unknown mode (on|off)\n");
                 return 2;
             }
         }

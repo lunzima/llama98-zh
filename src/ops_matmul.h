@@ -53,6 +53,23 @@ int matmul_q8_int_scalar_ref(int32_t *o_acc, float *o_xsb, float *o_ws,
                              const LZTensor *w, int in_dim, int out_dim,
                              int nt);
 
+/* Scheme A dequant for the int-accumulator output (task 2 of
+   matmul-int-output, docs/matmul-int-output-design.md). Given
+   matmul_q8_int_impl's o_acc/o_xsb/o_ws, quantize each 32-input-group
+   of o_acc in the int domain and reconstruct the float output
+     o'[i] = sum_g q[i][g] * s[i][g]
+     q[i][g] = round(o_acc[i][g] * 127 / amax_g),  amax_g = max_i |o_acc[i][g]|
+     s[i][g] = amax_g * o_xsb[g] * o_ws[i][g/r] / (256*127),  r = w->gs/32
+   r is the weight-scale stride (one ws per r sub-blocks, the same
+   stride epi_q8 walks). Zero amax -> nothing to add for that group.
+   Value-changing by design: this validates the per-input-group
+   quantization granularity, not a dequant-equivalent. Writes
+   o[tk*out_dim+i]; same shapes the int impl fills. */
+void matmul_q8_int_dequant_q8(float *o, const int32_t *o_acc,
+                              const float *o_xsb, const float *o_ws,
+                              const LZTensor *w, int in_dim, int out_dim,
+                              int nt);
+
 /* Scalar reference (the contract every SIMD tier is judged against). */
 void matmul_scalar_ref(float *o, const int8_t *xq, const float *xqs,
                        const LZTensor *w, int in_dim, int out_dim, int nt);

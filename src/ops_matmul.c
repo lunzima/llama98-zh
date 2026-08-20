@@ -355,6 +355,59 @@ int matmul_q8_int_impl(int32_t *o_acc, float *o_xsb, float *o_ws,
     return 1;
 }
 
+/* ---- scheme A dequant (per-input-group quantize + reconstruct) -------- */
+
+/* matmul_q8_int_dequant_q8 - see ops_matmul.h. Runs under the caller's
+   lz_fpu_float_begin/end (the forward's PC=24 region on Watcom), so the
+   float association below is identical on gcc/SSE and Watcom/x87. */
+void matmul_q8_int_dequant_q8(float *o, const int32_t *o_acc,
+                              const float *o_xsb, const float *o_ws,
+                              const LZTensor *w, int in_dim, int out_dim,
+                              int nt) {
+    /* (1/256)*(1/127) as float32 - the accumulator's built-in 256 scale
+       and the Q8 127 scale, in one constant so the fold is explicit
+       (ops_quant.c's excess-precision note). */
+    static const float LZ_MMQ8_INV = 3.075787390116602e-05f;
+    int nb = in_dim / 32;      /* 32-sub-block count */
+    int i, g, tk;
+    int ng, r;
+
+    if (!o || !o_acc || !o_xsb || !o_ws || !w || nt < 1 || nb < 1)
+        return;
+    ng = in_dim / w->gs;   /* weight-group count */
+    r  = w->gs / 32;       /* sub-blocks per weight group */
+    if (r < 1) return;
+
+    for (tk = 0; tk < nt; tk++) {
+        const int32_t *acc = o_acc + (size_t)tk * out_dim * nb;
+        const float *xsb = o_xsb + (size_t)tk * nb;
+        float *ot = o + (size_t)tk * out_dim;
+
+        for (i = 0; i < out_dim; i++) ot[i] = 0.0f;
+        for (g = 0; g < nb; g++) {
+            /* amax over output rows for this input group, int-domain. */
+            int amax = 0;
+            for (i = 0; i < out_dim; i++) {
+                int a = acc[(size_t)i * nb + g];
+                if (a < 0) a = -a;
+                if (a > amax) amax = a;
+            }
+            if (amax <= 0) continue;   /* all-zero group: nothing to add */
+            {
+                float inv = 127.0f / (float)amax;
+                /* Per-group scale before the row-varying weight scale. */
+                float sg = (float)amax * xsb[g] * LZ_MMQ8_INV;
+                for (i = 0; i < out_dim; i++) {
+                    int qi = q8_round((float)acc[(size_t)i * nb + g] * inv);
+                    if (qi > 127) qi = 127;
+                    if (qi < -127) qi = -127;
+                    ot[i] += (float)qi * sg * o_ws[(size_t)i * ng + g / r];
+                }
+            }
+        }
+    }
+}
+
 /* ---- matmul_scalar_ref_one + matmul_scalar_ref ---- */
 void matmul_scalar_ref_one(float *o, const int8_t *xq, const float *xqs,
                                   const LZTensor *w, int in_dim, int out_dim) {
