@@ -572,6 +572,14 @@ const char *lz_kernel_tier(void);
    bytes, s n/gs f32s. */
 void lz_quantize_q8(const float *x, int n, int gs, int8_t *q, float *s);
 
+/* Per-token absmax INT8 activation quantize (SubLN path). ONE scale for
+   the whole n-wide row - the training side's activation_quant_absmax
+   (gamma = max|x| over the token, dequant scale = gamma/127) - stored in
+   every n/32 xqs slot so the matmul's per-32 xqs read stays consistent
+   with lz_act_gs. q/s semantics match lz_quantize_q8: round-half-even,
+   clamp [-127,127], all-zero row scale 1.0. n must be a multiple of 32. */
+void lz_quantize_q8_tok(const float *x, int n, int8_t *q, float *s);
+
 /* Int-domain variant for the fixed-tier gated norm: the norm wrote its
    Q15 result t[] as int and handed the dequant scale deq (a power of
    two) out separately. The stored group scale is t_amax*deq/127,

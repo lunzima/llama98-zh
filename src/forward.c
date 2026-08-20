@@ -7,6 +7,8 @@
 #include "compat.h"    /* lz_time_ms, for the debug probes below only */
 #include "err.h"
 #include "ops.h"
+#include "ops_quant.h"   /* q8_round/q8_amax/pow2f/LZ_Q8_*, lz_rsqrt_float_body */
+#include "fwht.h"        /* lz_fwht_i32, the SubLN Hadamard kernel */
 #include "ops_kernel_shared.h"   /* LZ_ROW_N, before ops_matmul.h */
 #include "ops_matmul.h"   /* matmul_q8_int_impl + scheme A dequant */
 
@@ -849,6 +851,9 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
         /* xqs sized for the worst case (in-row gs falling back to 1) */
         s->xqs = (float *)xcalloc((size_t)nt * qcap, sizeof(float), &ok, &s->bytes_alloc);
         s->wscr = (float *)xcalloc((size_t)qcap, sizeof(float), &ok, &s->bytes_alloc);
+        /* SubLN Hadamard scratch: two n-wide int32 halves, n <= qcap. */
+        s->fwht_scratch = (int32_t *)xcalloc((size_t)2 * qcap, sizeof(int32_t),
+                                             &ok, &s->bytes_alloc);
     }
     if (!ok) {
         if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_STATE_ALLOC);
@@ -946,7 +951,7 @@ void lz_state_free(LZRunState *s) {
 #endif /* LZ_GDN_STATE_2PLANE */
     free(s->conv_state);
     free(s->conv_state_q); free(s->conv_mw); free(s->conv_oscale);
-    free(s->xq); free(s->xqs); free(s->wscr);
+    free(s->xq); free(s->xqs); free(s->wscr); free(s->fwht_scratch);
     free(s->rope_cs);
     free(s->cache_idx);
     memset(s, 0, sizeof(*s));
@@ -1987,6 +1992,72 @@ static void forward_ssm(const LZModel *m, LZRunState *s,
 
 /* ------------------------------------------------------ KDA (LZ_LT_KDA) block */
 
+/* SubLN block-diagonal Hadamard + per-token absmax INT8 quantize for the
+   o_proj / down_proj input (BitNet v2 H-BitLinear, minus the INT4 stage).
+   x is the post-RMSNorm float activation row, n its width, blk the
+   Hadamard block (a power of two dividing n; the training side caps it at
+   512 for down_proj and uses value_dim for o_proj), fscr 2*n int32
+   scratch.
+
+   The transform is the fixed-point FWHT (lz_fwht_i32): the row is moved
+   to int32 at a per-row power-of-two scale (row max ~2^14, so the
+   unnormalized output's worst case blk*2^14 stays inside 2^24 and every
+   int32->float is exact), then each blk-wide block butterflies in pure
+   add/sub. The unnormalized transform grows RMS by sqrt(blk); 1/sqrt(blk)
+   is folded into the STORED scale (the H.264 pattern), so the kernels
+   stay integer and the dequant matches the training side's orthonormal
+   _block_hadamard within quantization tolerance. The per-token scale is
+   the post-Hadamard absmax, replicated into every n/32 xqs slot for the
+   matmul's per-32 read. q/s semantics match lz_quantize_q8 (round-half-
+   even, clamp [-127,127], all-zero row scale 1.0). */
+static void subn_fwht_quant(const float *x, int n, int blk,
+                            int8_t *q, float *s, int32_t *fscr) {
+    union { float f; uint32_t u; } b;
+    float amax, S, inv_S, inv_q, scale;
+    int32_t tam = 0;
+    int e, i, b_i;
+    b.u = q8_amax(x, n);
+    amax = b.f;
+    if (amax <= 0.0f) {          /* all-zero row: q all 0, scale 1.0 */
+        for (i = 0; i < n; i++) q[i] = 0;
+        for (i = 0; i < n / 32; i++) s[i] = 1.0f;
+        return;
+    }
+    /* Power-of-two fixed-point scale: row max lands in [2^14, 2^15), so
+       the worst-case unnormalized FWHT output is blk*2^15 <= 2^24. */
+    e = (int)((b.u >> 23) & 0xFFu) - 127;
+    S = pow2f(14 - e);
+    inv_S = 1.0f / S;            /* exact: S is a power of two */
+    for (i = 0; i < n; i++) fscr[i] = q8_round(x[i] * S);
+    for (b_i = 0; b_i < n; b_i += blk)          /* block-diagonal Sylvester */
+        lz_fwht_i32(fscr + n + b_i, fscr + b_i, blk);
+    for (i = 0; i < n; i++) {
+        int32_t a = fscr[n + i] < 0 ? (int32_t)(0u - (uint32_t)fscr[n + i])
+                                    : fscr[n + i];
+        if (a > tam) tam = a;
+    }
+    if (tam == 0) {              /* fixed-point row collapsed to zero */
+        for (i = 0; i < n; i++) q[i] = 0;
+        for (i = 0; i < n / 32; i++) s[i] = 1.0f;
+        return;
+    }
+    /* Dequant scale = post-Hadamard amax / sqrt(blk) / 127. The element
+       loop rounds t*127/tam, identical to lz_quantize_q8_int's fold. */
+    scale = (float)tam * inv_S * lz_rsqrt_float_body((float)blk) * LZ_Q8_INV127;
+    if (scale < LZ_Q8_MIN_SCALE_F) {
+        scale = 1.0f;
+        inv_q = 0.0f;
+    } else {
+        inv_q = 127.0f / (float)tam;
+    }
+    for (i = 0; i < n; i++) {
+        int qv = q8_round((float)fscr[n + i] * inv_q);
+        qv = (qv > 127) ? 127 : qv;
+        q[i] = (int8_t)((qv < -127) ? -127 : qv);
+    }
+    for (i = 0; i < n / 32; i++) s[i] = scale;
+}
+
 /* Kimi Delta Attention: same role as forward_ssm's GatedDeltaNet block,
    generalized to a per-channel decay gate and three independent q/k/v
    projections (KdaAttention). See ops.h's
@@ -2055,8 +2126,8 @@ static void forward_kda(const LZModel *m, LZRunState *s,
             lz_rmsnorm(s->xb2 + (size_t)tk * hdim, s->xb + (size_t)tk * hdim,
                        lz_t_f32(&L->kda_q_norm, s->wscr), hdim, c->rms_norm_eps);
         for (tk = 0; tk < nt; tk++)
-            lz_quantize_q8(s->xb2 + (size_t)tk * hdim, hdim, gsa,
-                           s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
+            lz_quantize_q8_tok(s->xb2 + (size_t)tk * hdim, hdim,
+                               s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
         lz_matmul_xq_nt(s->kda_q, s->xb2, s->xq, s->xqs, &L->kda_q_proj,
                         hdim, kdim, nt);
 
@@ -2064,8 +2135,8 @@ static void forward_kda(const LZModel *m, LZRunState *s,
             lz_rmsnorm(s->xb2 + (size_t)tk * hdim, s->xb + (size_t)tk * hdim,
                        lz_t_f32(&L->kda_k_norm, s->wscr), hdim, c->rms_norm_eps);
         for (tk = 0; tk < nt; tk++)
-            lz_quantize_q8(s->xb2 + (size_t)tk * hdim, hdim, gsa,
-                           s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
+            lz_quantize_q8_tok(s->xb2 + (size_t)tk * hdim, hdim,
+                               s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
         lz_matmul_xq_nt(s->kda_k, s->xb2, s->xq, s->xqs, &L->kda_k_proj,
                         hdim, kdim, nt);
 
@@ -2073,8 +2144,8 @@ static void forward_kda(const LZModel *m, LZRunState *s,
             lz_rmsnorm(s->xb2 + (size_t)tk * hdim, s->xb + (size_t)tk * hdim,
                        lz_t_f32(&L->kda_v_norm, s->wscr), hdim, c->rms_norm_eps);
         for (tk = 0; tk < nt; tk++)
-            lz_quantize_q8(s->xb2 + (size_t)tk * hdim, hdim, gsa,
-                           s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
+            lz_quantize_q8_tok(s->xb2 + (size_t)tk * hdim, hdim,
+                               s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
         lz_matmul_xq_nt(s->kda_v, s->xb2, s->xq, s->xqs, &L->kda_v_proj,
                         hdim, vdim, nt);
 
@@ -2082,8 +2153,8 @@ static void forward_kda(const LZModel *m, LZRunState *s,
             lz_rmsnorm(s->xb2 + (size_t)tk * hdim, s->xb + (size_t)tk * hdim,
                        lz_t_f32(&L->kda_g_norm, s->wscr), hdim, c->rms_norm_eps);
         for (tk = 0; tk < nt; tk++)
-            lz_quantize_q8(s->xb2 + (size_t)tk * hdim, hdim, gsa,
-                           s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
+            lz_quantize_q8_tok(s->xb2 + (size_t)tk * hdim, hdim,
+                               s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
         lz_matmul_xq_nt(s->zbuf, s->xb2, s->xq, s->xqs, &L->kda_g_proj,
                         hdim, vdim, nt);
 
@@ -2091,8 +2162,8 @@ static void forward_kda(const LZModel *m, LZRunState *s,
            shared-activation-quantization trick still applies to these
            two). */
         for (tk = 0; tk < nt; tk++)
-            lz_quantize_q8(s->xb + (size_t)tk * hdim, hdim, gsa,
-                           s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
+            lz_quantize_q8_tok(s->xb + (size_t)tk * hdim, hdim,
+                               s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
         lz_matmul_xq_nt(s->kda_gate_lat, s->xb, s->xq, s->xqs, &L->kda_f_a_proj,
                         hdim, gate_rank, nt);
         lz_matmul_xq_nt(s->bvec, s->xb, s->xq, s->xqs, &L->kda_b_proj, hdim, nv, nt);
@@ -2307,9 +2378,23 @@ static void forward_kda(const LZModel *m, LZRunState *s,
                            s->ssm_out + (size_t)tk * vdim,
                            lz_t_f32(&L->kda_o_subn_norm, s->wscr), vdim,
                            c->rms_norm_eps);
-            for (tk = 0; tk < nt; tk++)
-                lz_quantize_q8(s->ssm_out + (size_t)tk * vdim, vdim, gso,
-                               s->xq + (size_t)tk * vdim, s->xqs + (size_t)tk * nso);
+            /* SubLN Hadamard: o_proj's block is value_dim (the training
+               side's hadamard_dim = self.value_dim, a power of two). */
+            {
+                int oblk = vdim;
+                if (oblk < 2 || (oblk & (oblk - 1))) oblk = 0;
+                if (oblk > 1) {
+                    for (tk = 0; tk < nt; tk++)
+                        subn_fwht_quant(s->ssm_out + (size_t)tk * vdim, vdim,
+                                        oblk, s->xq + (size_t)tk * vdim,
+                                        s->xqs + (size_t)tk * nso, s->fwht_scratch);
+                } else {
+                    for (tk = 0; tk < nt; tk++)
+                        lz_quantize_q8_tok(s->ssm_out + (size_t)tk * vdim, vdim,
+                                           s->xq + (size_t)tk * vdim,
+                                           s->xqs + (size_t)tk * nso);
+                }
+            }
         } else if (lz_norm_int() && lz_norm_can_fixed(vd) &&
             gso > 0 && (vd % gso) == 0) {
             for (tk = 0; tk < nt; tk++)
@@ -2601,8 +2686,8 @@ static void dense_ffn_step(const LZModel *m, LZRunState *s,
             lz_rmsnorm(s->xb2 + (size_t)tk * dim, s->xb + (size_t)tk * dim,
                        lz_t_f32(&L->gate_norm, s->wscr), dim, c->rms_norm_eps);
         for (tk = 0; tk < nt; tk++)
-            lz_quantize_q8(s->xb2 + (size_t)tk * dim, dim, gsg,
-                           s->xq + (size_t)tk * dim, s->xqs + (size_t)tk * nsg);
+            lz_quantize_q8_tok(s->xb2 + (size_t)tk * dim, dim,
+                               s->xq + (size_t)tk * dim, s->xqs + (size_t)tk * nsg);
         lz_matmul_xq_nt(s->hb, s->xb2, s->xq, s->xqs, &L->gate_proj, dim,
                         idim, nt);
 
@@ -2610,8 +2695,8 @@ static void dense_ffn_step(const LZModel *m, LZRunState *s,
             lz_rmsnorm(s->xb2 + (size_t)tk * dim, s->xb + (size_t)tk * dim,
                        lz_t_f32(&L->up_norm, s->wscr), dim, c->rms_norm_eps);
         for (tk = 0; tk < nt; tk++)
-            lz_quantize_q8(s->xb2 + (size_t)tk * dim, dim, gsg,
-                           s->xq + (size_t)tk * dim, s->xqs + (size_t)tk * nsg);
+            lz_quantize_q8_tok(s->xb2 + (size_t)tk * dim, dim,
+                               s->xq + (size_t)tk * dim, s->xqs + (size_t)tk * nsg);
         lz_matmul_xq_nt(s->hb2, s->xb2, s->xq, s->xqs, &L->up_proj, dim,
                         idim, nt);
     } else {
@@ -2642,13 +2727,28 @@ static void dense_ffn_step(const LZModel *m, LZRunState *s,
     }
     LZ_TAP("fh", layer, s->hb, idim);
     if (c->use_subn) {
-        /* down_proj input = RMSNorm_{down_norm}(SwiGLU output). */
-        for (tk = 0; tk < nt; tk++)
-            lz_rmsnorm(s->hb2 + (size_t)tk * idim, s->hb + (size_t)tk * idim,
-                       lz_t_f32(&L->down_norm, s->wscr), idim, c->rms_norm_eps);
-        for (tk = 0; tk < nt; tk++)
-            lz_quantize_q8(s->hb2 + (size_t)tk * idim, idim, gsd,
-                           s->xq + (size_t)tk * idim, s->xqs + (size_t)tk * nsd);
+        /* down_proj input = RMSNorm_{down_norm}(SwiGLU output), then the
+           SubLN block Hadamard (training caps the block at 512, stepping
+           down to the largest power of two that divides idim). */
+        {
+            int dblk = 512;
+            while (dblk > 1 && idim % dblk) dblk >>= 1;
+            if (dblk == 1) dblk = 0;
+            for (tk = 0; tk < nt; tk++)
+                lz_rmsnorm(s->hb2 + (size_t)tk * idim, s->hb + (size_t)tk * idim,
+                           lz_t_f32(&L->down_norm, s->wscr), idim, c->rms_norm_eps);
+            if (dblk > 1) {
+                for (tk = 0; tk < nt; tk++)
+                    subn_fwht_quant(s->hb2 + (size_t)tk * idim, idim, dblk,
+                                    s->xq + (size_t)tk * idim,
+                                    s->xqs + (size_t)tk * nsd, s->fwht_scratch);
+            } else {
+                for (tk = 0; tk < nt; tk++)
+                    lz_quantize_q8_tok(s->hb2 + (size_t)tk * idim, idim,
+                                       s->xq + (size_t)tk * idim,
+                                       s->xqs + (size_t)tk * nsd);
+            }
+        }
         lz_matmul_xq_nt(s->xb2, s->hb2, s->xq, s->xqs, &L->down_proj, idim,
                         dim, nt);
     } else {

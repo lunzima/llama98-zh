@@ -495,6 +495,12 @@ typedef struct {
     float  *wscr;               /* weight dequantization scratch (norm/embed rows) */
     int     qcap;               /* xq capacity */
 
+    /* SubLN Hadamard fixed-point scratch (use_subn only): 2*qcap int32.
+       Source half holds the row converted to fixed point, destination
+       half the unnormalized lz_fwht_i32 output (restrict forbids one
+       buffer for both). */
+    int32_t *fwht_scratch;
+
     /* Precomputed RoPE table: (seq_len x rotary_dim/2) {cos, sin} pairs.
        Shared by all layers/heads under the same theta, avoiding a per-token
        per-layer pow/cos/sin (expensive on PII's x87). */

@@ -455,6 +455,35 @@ void lz_quantize_q8(const float *x, int n, int gs, int8_t *q, float *s) {
     }
 }
 
+/* Per-token absmax INT8 quantize (see ops.h). One scale per n-wide row;
+   the matmul reads xqs per 32 elements, so the per-token scale is
+   replicated into every n/32 slot - the layout the caller's xqs stride
+   (n/32) already provides. Uses q8_group_scale over the WHOLE row, so
+   the fast/else decision, the MIN_SCALE floor and the stored scale all
+   match lz_quantize_q8 bit for bit; only the grouping changes. */
+void lz_quantize_q8_tok(const float *x, int n, int8_t *q, float *s) {
+    int ns = n / 32;
+    int k;
+    float inv, sg;
+    int fast;
+    if (ns < 1) return;                 /* defense: n not a multiple of 32 */
+    fast = q8_group_scale(x, n, &sg, &inv);
+    for (k = 0; k < ns; k++) s[k] = sg;
+    if (fast) {
+        for (k = 0; k < n; k++) {
+            int qi = q8_round(x[k] * inv);
+            qi = (qi > 127) ? 127 : qi;
+            q[k] = (int8_t)((qi < -127) ? -127 : qi);
+        }
+    } else {
+        for (k = 0; k < n; k++) {
+            int qi = q8_round(x[k] / sg);
+            qi = (qi > 127) ? 127 : qi;
+            q[k] = (int8_t)((qi < -127) ? -127 : qi);
+        }
+    }
+}
+
 /* Int-domain Q8 quantize for the fixed-tier gated norm. t holds the Q15
    result the norm wrote as int (no per-element dequant) and deq its
    power-of-two scale. The group's float amax would be t_amax*deq, so
