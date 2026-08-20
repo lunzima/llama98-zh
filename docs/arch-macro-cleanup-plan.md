@@ -121,11 +121,30 @@ static int lz_soft_float_target(void) {
 - 扫 `__WATCOMC__` 120 处，分类「编译器身份 vs 架构代理」。
 - 「架构代理」的改成 `__i386__ && !__SSE_MATH__`（或正确的轴）。
 - 每处修完，矩阵构建 + 逐位对拍验证。
+- **已完成（2026-08-20，`c4d497a`）**：实扫 153 处，真正的「编译器
+  冒充架构」误用只有 3 处——`lz_cpuid1_edx` 声明（`cpucheck.h:53`）、
+  `lz_cpu_has_sse`（`ops_sched.c:35`）、`lz_cpu_has_mmx`（`ops.c:573`），
+  三处都把 `__WATCOMC__` 当 x86 架构宏，正确宏是 `_M_IX86`（Watcom 的
+  x86 宏，`mmx_compat.h` 已有先例）。其余 150 处全是合法编译器身份
+  （`#pragma aux`、intrinsic 拼写、C89 怪癖、CPUID 的编译器分派）。
 
-**阶段 3 —— 命名统一（LZ_HAVE_* → LZ_*_EXTERN）**
-- 逐个迁 `LZ_HAVE_*`（11 个，`LZ_HAVE_SETMODE` 不是内核，另议）。
-- 注意 `LZ_HAVE_*_ASM`（Watcom 手写汇编）与 `LZ_*_EXTERN`（gcc extern）
-  语义不同，不能机械替换——先理清每个的 gcc/Watcom 对应关系。
+**阶段 3 —— 命名统一：已重新评估，撤销（2026-08-20）。**
+本方案的「`LZ_HAVE_*` 是 #18 前遗留、逐个迁走」前提被代码证伪。
+`LZ_HAVE_*` 是**跨编译器派生宏**，不是遗留——三层语义各有所指：
+
+- `LZ_HAVE_*`（如 `LZ_HAVE_P2_MMX`）=「该内核在构建里，无论编译器」，
+  由 `LZ_HAVE_*_ASM || LZ_*_EXTERN` 推导（`ops_gdn.c:871`）。
+- `LZ_*_EXTERN`（如 `LZ_P2_MMX_EXTERN`）=「gcc 的 extern intrinsics 版
+  本在构建里」，仅 gcc。
+- `LZ_HAVE_*_ASM`（如 `LZ_HAVE_P2_MMX_ASM`）=「Watcom 的 #pragma aux
+  版本在构建里」，仅 Watcom。
+
+合并成 `LZ_*_EXTERN` 会把「跨编译器派生」和「gcc 专用」两个语义压成一
+个。代码注释已明确不改名的理由（`ops_mmx.h:66`、`ops_sse2.h:37`）：
+`LZ_HAVE_AMAX_MMX`/`LZ_HAVE_Q8R_SSE` 等在 gcc 和 Watcom 两侧都被定义，
+改名会漏掉远处调用点（`q8r_have_simd`/`lz_q8r_tier`/`LZ_AMAX_TAB`），
+风险大于收益。唯一真不一致是 `LZ_HAVE_Q8R_SSE`（SSE1 档）与
+`LZ_HAVE_Q8R_SIMD`（SSE2 档）两个档位名不对齐，同样是有意保留。
 
 **阶段 4 —— dead #ifndef 清扫（已部分完成）**
 - `bbc554d` 删两个、`d848ce1` 加闸门。矩阵构建会扫出剩余。
