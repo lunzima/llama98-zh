@@ -16,7 +16,7 @@
 # The engine body. net/http/openai are the server and are deliberately
 # NOT here: they are not in the CLI or DOS binary either, and there are
 # no sockets on the target machines.
-ENG := err compat lfn json safetensors model ops ops_quant ops_sched ops_matmul ops_norm forward sampler generate \
+ENG := err compat lfn json safetensors model ops ops_quant ops_sched ops_matmul ops_norm ops_gdn forward sampler generate \
        tokenizer unicode chat gbk cpucheck
 SRV := net http openai
 GUI := main layout localized_strings worker modelload session compat40 \
