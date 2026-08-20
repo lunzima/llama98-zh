@@ -296,6 +296,10 @@ typedef struct {
     float *moe_lat_x;              /* (nt_cap * moe_latent_dim) routed_expert_down_proj output */
     float *moe_lat_y;              /* (nt_cap * moe_latent_dim) routed experts' weighted sum */
     float *moe_h1, *moe_h3;       /* (nt_cap * max(moe_intermediate_size, moe_shared_width)) */
+    int32_t *moe_sig;              /* (nt_cap * max(moe_intermediate_size, moe_shared_width))
+                                       Q15 sigmoid of moe_h1, fed to lz_quantize_q8_silu.
+                                       Same width as moe_h1/moe_h3, NOT s->ssm_sig (that one
+                                       belongs to the GDN/KDA gated norm, a different consumer). */
     float *moe_h2;                 /* (moe_latent_dim) one expert's w2 output before scaling */
     float *moe_shared_out;        /* (nt_cap * hidden_size) shared expert's down_proj output */
 
