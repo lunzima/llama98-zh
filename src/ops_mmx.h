@@ -92,6 +92,8 @@ void lz_gdn_sum_gg_mmx(const int8_t *sq_gg, int kd, int vd,
    those would scale calls with T instead of with ng. */
 void lz_wsum_group_mmx(const int8_t *vc, int kvd, int g, int sink, int ring,
                        const int16_t *cq, int T, float *accf);
+void lz_wsum_group_mmx_int(const int8_t *vc, int kvd, int g, int sink, int ring,
+                           const int16_t *cq, int T, int64_t *acc64);
 
 /* GDN/KDA fixed-point pass 2, row granularity - one call per row from
    ops.c's gdn_p2_row_simd (see that function's Watcom branch for the

@@ -257,6 +257,10 @@ static void usage(void) {
     "                   epilogue in int64 fixed point.\n"
     "  --attn-write TIER   auto|float|scoring|wsum|fixed (default auto).\n"
     "                   Attention scoring / weighted sum in fixed point.\n"
+    "  --attn-int MODE     on|off (default off). The fixed-tier attention\n"
+    "                   weighted sum keeps its exact int64 accumulator for\n"
+    "                   lz_quantize_q8_int64 instead of dequantizing to\n"
+    "                   float and re-quantizing. Value-changing.\n"
     "  --conv-write TIER   auto|float|fixed (default auto). Causal conv1d\n"
     "                   tier: fixed keeps the history in int16 so the\n"
     "                   conversion is per sample, not per tap. Drifts ~3e-5\n"
@@ -1322,6 +1326,13 @@ int main(int argc, char **argv) {
             if (!got) {
                 printf("--attn-write: unknown tier "
                        "(auto|float|scoring|wsum|fixed)\n");
+                return 2;
+            }
+        }
+        else if (strcmp(a, "--attn-int") == 0 && i + 1 < argc) {
+            const char *got = lz_attn_int_select(argv[++i]);
+            if (!got) {
+                printf("--attn-int: unknown mode (on|off)\n");
                 return 2;
             }
         }

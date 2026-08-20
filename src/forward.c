@@ -507,6 +507,12 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
     s->wsum_cq   = (int16_t *)xcalloc((size_t)seq_len, sizeof(int16_t), &ok, &s->bytes_alloc);
 #endif /* LZ_ATTN_FIXED & 2 */
     s->attn_out = (float *)xcalloc((size_t)nt * c->attn_q_dim, sizeof(float), &ok, &s->bytes_alloc);
+    /* Fixed-tier attention int path (--attn-int): attn_acc holds the exact
+       int64 weighted sum and post-gate values, attn_ss the per-32-group
+       dequant scale. Sized even when the knob is off, same reasoning as
+       wsum_cbuf/wsum_cq: the selector can run after this point. */
+    s->attn_acc = (int64_t *)xcalloc((size_t)nt * c->attn_q_dim, sizeof(int64_t), &ok, &s->bytes_alloc);
+    s->attn_ss  = (float *)xcalloc((size_t)nt * (c->attn_q_dim / 32), sizeof(float), &ok, &s->bytes_alloc);
     s->ktmp     = (float *)xcalloc((size_t)nt * c->attn_kv_dim, sizeof(float), &ok, &s->bytes_alloc);
     s->vtmp     = (float *)xcalloc((size_t)nt * c->attn_kv_dim, sizeof(float), &ok, &s->bytes_alloc);
     /* KV cache Q8 (group 32, contiguous within a row). +1 layer slot when
@@ -896,6 +902,7 @@ void lz_state_free(LZRunState *s) {
     free(s->x); free(s->xb); free(s->xb2); free(s->hb); free(s->hb2);
     free(s->logits);
     free(s->qg); free(s->qh); free(s->att); free(s->attn_out);
+    free(s->attn_acc); free(s->attn_ss);
 #if (LZ_ATTN_FIXED & 2)
     free(s->wsum_cbuf); free(s->wsum_cq);
 #endif /* LZ_ATTN_FIXED & 2 */
@@ -1232,6 +1239,12 @@ static void forward_attn(const LZModel *m, LZRunState *s,
     int qgd = c->attn_qgate_dim;
     int gsa = lz_act_gs(&L->q_proj, hdim);
     int nsa = (gsa > 0) ? hdim / gsa : 0;
+    int gso = lz_act_gs(&L->o_proj, qd);
+    int nso = (gso > 0) ? qd / gso : 0;
+    /* Per-token flag for the fixed-tier attention int path (--attn-int).
+       The quantize step after the tk loop must know which tokens took the
+       int wsum; only the MTP window override can split a batch. */
+    int attn_int[LZ_BATCH_MAX];
     int h, d, t, tk;
 
     if (s->kv_rot_k) scale /= (float)s->kv_rot_k;
@@ -1392,6 +1405,19 @@ static void forward_attn(const LZModel *m, LZRunState *s,
    overwrites whatever the kernel put there, and after softmax their
    weight is exactly zero. */
 #define LZ_ATTN_NORING (win_t0 == 0)
+
+        /* --attn-int: the int wsum keeps the exact int64 accumulator for
+           lz_quantize_q8_int64 instead of the float dequant + re-quantize.
+           Active only where the float chain would otherwise be the wsum's
+           fixed tier: o_proj must quantize at gs==32 so each Q8 group is
+           one 32-wide wsum group with ONE sscale; kv_rot_v==0 keeps the
+           float un-rotate out (the int path has no Hadamard); v4/vf and
+           the 2-plane low term are float-only consumers of `out`. */
+        attn_int[tk] = lz_attn_int() && (lz_attn_mode() & 2) &&
+                       s->wsum_cbuf && LZ_ATTN_NORING &&
+                       hd > 0 && (hd % 32) == 0 && hd <= LZ_ATTN_MAX_HD &&
+                       s->kv_rot_v == 0 && gso == 32 && !v4 && !vf &&
+                       !LZ_KV_2PLANE;
 
         for (h = 0; h < nh; h++) {
             const float *qhh = qht + (size_t)h * hd;
@@ -1581,6 +1607,15 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                may call lz_attn_select after the state exists, and the
                allocation above cannot see that. Reading the buffer the
                kernel needs is the only test that cannot drift from it. */
+            if (attn_int[tk]) {
+                lz_attn_wsum_q8_int(s->attn_acc + (size_t)tk * qd + (size_t)h * hd,
+                                    s->attn_ss + (size_t)tk * (qd / 32) + (size_t)h * (hd / 32),
+                                    s->att, hd,
+                                    vc + (size_t)kvh * hd,
+                                    vs + (size_t)(kvh * hd) / 32,
+                                    kvd, pos, s->wsum_cbuf, s->wsum_cq,
+                                    s->attn_sink, s->kv_ring);
+            } else
             if ((lz_attn_mode() & 2) && s->wsum_cbuf && LZ_ATTN_NORING &&
                 hd > 0 && (hd % 32) == 0 && hd <= LZ_ATTN_MAX_HD) {
                 lz_attn_wsum_q8(out, s->att, hd,
@@ -1652,26 +1687,52 @@ static void forward_attn(const LZModel *m, LZRunState *s,
             }
         }
 
-        /* output gate: same source as q, take the second half of each head */
-        for (h = 0; h < nh; h++) {
-            const float *gate = qgt + (size_t)h * 2 * hd + hd;
-            float *out = aot + (size_t)h * hd;
-            for (d = 0; d < hd; d++) out[d] *= lz_sigmoid(gate[d]);
+        /* output gate: same source as q, take the second half of each head.
+           The int path gates in the int domain - acc * Q15(sigmoid) >> 15
+           keeps the same sscale. The Q15 sigmoid is the FLOAT path's own
+           sigmoid (lz_sigmoid, whatever tier) rounded to 32768-scale, so
+           the gate semantics match the float chain exactly; only the
+           integer-domain accumulator and the >> 15 divide change. */
+        if (attn_int[tk]) {
+            for (h = 0; h < nh; h++) {
+                const float *gate = qgt + (size_t)h * 2 * hd + hd;
+                int64_t *ac = s->attn_acc + (size_t)tk * qd + (size_t)h * hd;
+                for (d = 0; d < hd; d++) {
+                    int32_t s15 = (int32_t)(lz_sigmoid(gate[d]) * 32768.0f);
+                    ac[d] = (ac[d] * (int64_t)s15) >> 15;
+                }
+            }
+        } else {
+            for (h = 0; h < nh; h++) {
+                const float *gate = qgt + (size_t)h * 2 * hd + hd;
+                float *out = aot + (size_t)h * hd;
+                for (d = 0; d < hd; d++) out[d] *= lz_sigmoid(gate[d]);
+            }
         }
     }
 #undef LZ_ATTN_DEAD
     LZ_TAP("ax", layer, s->attn_out, qd);
 
-    /* o_proj input is the attention output (attn_q_dim); quantize once more */
-    {
-        int gso = lz_act_gs(&L->o_proj, qd);
-        int nso = (gso > 0) ? qd / gso : 0;
-        for (tk = 0; tk < nt; tk++)
+    /* o_proj input is the attention output (attn_q_dim); quantize once more.
+       The int path quantizes each 32-group from attn_acc with its own
+       sscale: attn_int requires gso==32, so one Q8 group == one wsum group
+       and the xq/xqs layout is identical to the float call below. */
+    for (tk = 0; tk < nt; tk++) {
+        if (attn_int[tk]) {
+            int g;
+            for (g = 0; g < qd / 32; g++)
+                lz_quantize_q8_int64(s->attn_acc + (size_t)tk * qd + g * 32,
+                                     32, 32,
+                                     s->attn_ss[(size_t)tk * (qd / 32) + g],
+                                     s->xq + (size_t)tk * qd + g * 32,
+                                     s->xqs + (size_t)tk * nso + g);
+        } else {
             lz_quantize_q8(s->attn_out + (size_t)tk * qd, qd, gso,
                            s->xq + (size_t)tk * qd, s->xqs + (size_t)tk * nso);
-        lz_matmul_xq_nt(s->xb2, s->attn_out, s->xq, s->xqs, &L->o_proj, qd,
-                        hdim, nt);
+        }
     }
+    lz_matmul_xq_nt(s->xb2, s->attn_out, s->xq, s->xqs, &L->o_proj, qd,
+                    hdim, nt);
 }
 
 /* ------------------------------------------------ linear_attention block */

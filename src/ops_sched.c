@@ -213,6 +213,22 @@ int lz_attn_mode(void) {
 
 int lz_attn_is_auto(void) { return g_attn < 0; }
 
+/* ---- attention int output knob ---------------------------------------- */
+
+static int g_attn_int = 0;
+
+int lz_attn_int(void) {
+    return g_attn_int != 0;
+}
+
+const char *lz_attn_int_select(const char *name) {
+    if (!name) return NULL;
+    if (strcmp(name, "on") == 0 || strcmp(name, "1") == 0) g_attn_int = 1;
+    else if (strcmp(name, "off") == 0 || strcmp(name, "0") == 0) g_attn_int = 0;
+    else return NULL;
+    return lz_attn_int() ? "on" : "off";
+}
+
 const char *lz_attn_select(const char *name) {
     if (!name) return NULL;
     if (strcmp(name, "float") == 0) g_attn = 0;

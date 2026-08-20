@@ -523,6 +523,69 @@ void lz_quantize_q8_int(const int32_t *t, int n, int gs, float deq,
     }
 }
 
+/* int64-input twin of lz_quantize_q8_int (see its comment for the deq
+   folding). The attention weighted sum is exact only at int64 width, so
+   this is what the fixed-tier attention int path consumes. (float)grp
+   rounds values above 2^24 to 24-bit mantissa, but that relative error
+   is ~1e-7 - under the q8_round decision granularity except at measure-
+   zero .5 boundaries, so the quantized result is effectively the exact
+   integer-domain round. */
+void lz_quantize_q8_int64(const int64_t *t, int n, int gs, float deq,
+                          int8_t *q, float *s) {
+    int g, k;
+    if (gs <= 0 || n < gs || (n % gs) != 0) return;   /* defense: f32 weights have gs=0 etc. */
+    for (g = 0; g < n / gs; g++) {
+        const int64_t *grp = t + (size_t)g * gs;
+        int8_t *out = q + (size_t)g * gs;
+        int64_t tam = 0;
+        float amax, inv;
+        int fast;
+        for (k = 0; k < gs; k++) {
+            int64_t a = grp[k] < 0 ? (int64_t)(0ull - (uint64_t)grp[k])
+                                   : grp[k];
+            if (a > tam) tam = a;
+        }
+        /* Force the int64->float32 conversion out of the multiply: gcc
+           rounds tam to float32 before the product, while an x87 build
+           can fuse (float)tam * deq into one fild+fmul that rounds only
+           the product - and deq here is NOT a power of two (unlike the
+           int32 twin's deq), so the two roundings differ by 1 ULP.
+           volatile forces the float32 store, breaking the fusion on both. */
+        volatile float tamf = (float)tam;
+        amax = tamf * deq;
+        if (amax > 0.0f) {
+            s[g] = amax * LZ_Q8_INV127;
+            inv = 127.0f / amax;
+            fast = (inv <= FLT_MAX);
+            if (s[g] < LZ_Q8_MIN_SCALE_F) {
+                s[g] = 1.0f;
+                inv = 0.0f;
+                fast = 1;
+            }
+        } else {
+            s[g] = 1.0f;
+            inv = 0.0f;
+            fast = 1;
+        }
+        if (fast) {
+            float inv_elem = (inv == 0.0f) ? 0.0f : 127.0f / tamf;
+            for (k = 0; k < gs; k++) {
+                float g32 = (float)grp[k];
+                int qi = q8_round(g32 * inv_elem);
+                qi = (qi > 127) ? 127 : qi;
+                out[k] = (int8_t)((qi < -127) ? -127 : qi);
+            }
+        } else {
+            for (k = 0; k < gs; k++) {
+                float g32 = (float)grp[k];
+                int qi = q8_round((g32 * deq) / s[g]);
+                qi = (qi > 127) ? 127 : qi;
+                out[k] = (int8_t)((qi < -127) ? -127 : qi);
+            }
+        }
+    }
+}
+
 /* Fused fixed-tier gated-RMSNorm quantize (see ops.h). The norm wrote
    the pre-silu product into p (ssm_out) and the Q15 sigmoid into sig;
    this reconstructs the silu value and quantizes it, so the Q15 ->

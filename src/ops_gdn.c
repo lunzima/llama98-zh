@@ -295,6 +295,107 @@ void lz_attn_wsum_q8(float *out, const float *att, int hd,
         }
     }
 }
+
+/* int-output twin of lz_attn_wsum_q8: same coefficient pass, but the
+   second walk accumulates the full-context sum in int64 (each 512-row
+   int32 chunk fits by the bound above; their sum does not - T*4,161,409
+   passes INT32_MAX at T=516) and hands out that exact sum plus the
+   per-32-group dequant scale, so the caller can carry the weighted sum
+   through the output gate and lz_quantize_q8_int64 without the
+   int32->float->int8 double conversion. Integer sums are exact under
+   reassociation, so every chunk order is bit-identical. */
+void lz_attn_wsum_q8_int(int64_t *acc, float *sscale, const float *att,
+                         int hd, const int8_t *vc, const float *vs,
+                         int kvd, int pos, float *cbuf, int16_t *cq,
+                         int sink, int ring) {
+    int ng = hd / 32, g, T = pos + 1;
+    LZ_FCX(LZ_FC_ATTN_WSUM,
+           (long)ng * (2L * T + 33L),
+           (long)ng * ((long)T + 32L * ((T + LZ_WSUM_CHUNK - 1) / LZ_WSUM_CHUNK)),
+           (long)ng,
+           (long)ng * 32L * ((T + LZ_WSUM_CHUNK - 1) / LZ_WSUM_CHUNK),
+           0);
+    for (g = 0; g < ng; g++) {
+        int64_t acc64[32];
+        float cmax = 0.0f, inv;
+        int t, d, t0;
+
+        int slot = 0;
+        for (t = 0; t < T; t++, LZ_SLOT_NEXT(slot, sink, ring)) {
+            float c = att[t] * vs[(size_t)slot * (kvd / 32) + g];
+            float ac = (c < 0.0f) ? -c : c;
+            cbuf[t] = c;
+            if (ac > cmax) cmax = ac;
+        }
+        if (cmax > 0.0f) {
+            inv = 32767.0f / cmax;
+            if (!(inv <= FLT_MAX)) {
+                /* cmax subnormal: 32767/cmax overflows to inf and (int)inf
+                   is undefined behavior. Same guard lz_quantize_q8 carries. */
+                for (t = 0; t < T; t++) {
+                    int qi = q8_round(cbuf[t] / (cmax * LZ_Q15_INV));
+                    if (qi >  32767) qi =  32767;
+                    if (qi < -32767) qi = -32767;
+                    cq[t] = (int16_t)qi;
+                }
+            } else {
+                for (t = 0; t < T; t++) {
+                    int qi = q8_round(cbuf[t] * inv);
+                    if (qi >  32767) qi =  32767;
+                    if (qi < -32767) qi = -32767;
+                    cq[t] = (int16_t)qi;
+                }
+            }
+        } else {
+            for (t = 0; t < T; t++) cq[t] = 0;
+        }
+
+#if defined(__WATCOMC__)
+        /* Same one-call-per-GROUP shape as lz_attn_wsum_q8's Watcom
+           branch: lz_wsum_group_mmx_int does the entire multi-chunk
+           second walk and the int64 fold behind one cross-TU call. */
+        lz_wsum_group_mmx_int(vc, kvd, g, sink, ring, cq, T, acc64);
+#else
+        {
+        int32_t acc32[32];
+        for (d = 0; d < 32; d++) acc64[d] = 0;
+        slot = 0;                       /* second walk, same t order */
+        for (t0 = 0; t0 < T; t0 += LZ_WSUM_CHUNK) {
+            int tn = T - t0;
+            int tp;
+            if (tn > LZ_WSUM_CHUNK) tn = LZ_WSUM_CHUNK;
+            memset(acc32, 0, sizeof(acc32));
+            for (tp = t0; tp + 1 < t0 + tn; tp += 2) {
+                int16_t coef[4];
+                const int8_t *rowA, *rowB;
+                int slotA = slot;
+                LZ_SLOT_NEXT(slot, sink, ring);
+                rowA = vc + (size_t)slotA * kvd + (size_t)g * 32;
+                rowB = vc + (size_t)slot  * kvd + (size_t)g * 32;
+                LZ_SLOT_NEXT(slot, sink, ring);
+                coef[0] = cq[tp];     coef[1] = cq[tp + 1];
+                coef[2] = cq[tp];     coef[3] = cq[tp + 1];
+                LZ_WSUM_PAIR(rowA, rowB, coef, acc32);
+            }
+            if (tp < t0 + tn) {            /* odd leftover row in this chunk */
+                int16_t coef[4];
+                const int8_t *rowA = vc + (size_t)slot * kvd + (size_t)g * 32;
+                coef[0] = cq[tp]; coef[1] = 0;
+                coef[2] = cq[tp]; coef[3] = 0;
+                LZ_WSUM_PAIR(rowA, rowA, coef, acc32);
+                LZ_SLOT_NEXT(slot, sink, ring);
+            }
+#if defined(LZ_WSUM_MMX_EXTERN)
+            if (lz_cpu_has_mmx()) _mm_empty();      /* no x87 inside the row-pair loop above */
+#endif /* LZ_WSUM_MMX_EXTERN */
+            for (d = 0; d < 32; d++) acc64[d] += acc32[d];
+        }
+        }
+#endif /* __WATCOMC__ */
+        sscale[g] = cmax * LZ_Q15_INV;
+        for (d = 0; d < 32; d++) acc[g * 32 + d] = acc64[d];
+    }
+}
 #endif /* LZ_ATTN_FIXED & 2 */
 #endif /* LZ_ATTN_FIXED */
 

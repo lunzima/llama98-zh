@@ -336,6 +336,50 @@ void lz_wsum_group_mmx(const int8_t *vc, int kvd, int g, int sink, int ring,
     }
 }
 
+/* int-output twin of lz_wsum_group_mmx: the same whole multi-chunk
+   second walk, but the per-chunk int32 sums fold into an int64
+   accumulator instead of a float one, so the caller gets the exact
+   full-context integer weighted sum (the float fold rounds each chunk
+   at 24 bits - the precision loss the attention int path exists to
+   remove). Integer addition is exact under reassociation, so this is
+   bit-identical to the scalar twin lz_attn_wsum_q8_int uses on non-Watcom
+   builds. */
+void lz_wsum_group_mmx_int(const int8_t *vc, int kvd, int g, int sink, int ring,
+                           const int16_t *cq, int T, int64_t *acc64) {
+    int32_t acc32[32];
+    int d, t0, slot = 0;
+
+    for (d = 0; d < 32; d++) acc64[d] = 0;
+    for (t0 = 0; t0 < T; t0 += LZ_WSUM_CHUNK) {
+        int tn = T - t0;
+        int tp;
+        if (tn > LZ_WSUM_CHUNK) tn = LZ_WSUM_CHUNK;
+        memset(acc32, 0, sizeof(acc32));
+        for (tp = t0; tp + 1 < t0 + tn; tp += 2) {
+            int16_t coef[4];
+            const int8_t *rowA, *rowB;
+            int slotA = slot;
+            LZ_SLOT_NEXT(slot, sink, ring);
+            rowA = vc + (size_t)slotA * kvd + (size_t)g * 32;
+            rowB = vc + (size_t)slot  * kvd + (size_t)g * 32;
+            LZ_SLOT_NEXT(slot, sink, ring);
+            coef[0] = cq[tp];     coef[1] = cq[tp + 1];
+            coef[2] = cq[tp];     coef[3] = cq[tp + 1];
+            lz_wsum_pair_asm(rowA, rowB, coef, acc32);
+        }
+        if (tp < t0 + tn) {            /* odd leftover row in this chunk */
+            int16_t coef[4];
+            const int8_t *rowA = vc + (size_t)slot * kvd + (size_t)g * 32;
+            coef[0] = cq[tp]; coef[1] = 0;
+            coef[2] = cq[tp]; coef[3] = 0;
+            lz_wsum_pair_asm(rowA, rowA, coef, acc32);
+            LZ_SLOT_NEXT(slot, sink, ring);
+        }
+        _mm_empty();      /* no x87 inside the row-pair loop above */
+        for (d = 0; d < 32; d++) acc64[d] += acc32[d];
+    }
+}
+
 /* ---- GDN/KDA fixed-point pass 2, MMX tier - in this TU, not
    src/ops_kernel_p2.h. Algorithm documentation (WHAT THE OPERATOR IS,
    ISA INVENTORY, why the lo clamp is a saturating subtract) is in

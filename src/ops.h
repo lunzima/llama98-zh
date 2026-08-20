@@ -585,6 +585,14 @@ void lz_quantize_q8(const float *x, int n, int gs, int8_t *q, float *s);
 void lz_quantize_q8_int(const int32_t *t, int n, int gs, float deq,
                         int8_t *q, float *s);
 
+/* int64-input twin of lz_quantize_q8_int, for the fixed-tier attention
+   weighted sum. The attention accumulator is exact only at int64 width:
+   each 512-row int32 chunk fits, but their full-context SUM does not
+   (T*32767*127 exceeds INT32_MAX past T=516), so the gated values come
+   at int64. Same deq-folds-into-scale mechanism, same MIN_SCALE floor. */
+void lz_quantize_q8_int64(const int64_t *t, int n, int gs, float deq,
+                          int8_t *q, float *s);
+
 /* Fused fixed-tier gated-RMSNorm quantize. p is the pre-silu product
    and sig the Q15 sigmoid that lz_rmsnorm_gated wrote in its fixed tier
    (g is the gate); the silu value
@@ -933,6 +941,16 @@ const char *lz_attn_select(const char *name);
 int lz_attn_mode(void);
 int lz_attn_is_auto(void);
 
+/* Whether the fixed attention weighted sum keeps its int accumulator
+   for lz_quantize_q8_int64 instead of dequantizing to float and
+   re-quantizing (default off). Value-changing: the exact int64 sum
+   replaces the float per-chunk drain, which rounds each 512-row chunk
+   to 24-bit float, and the per-32-group dequant scale (cmax*LZ_Q15_INV)
+   is not a power of two, so the stored group scales shift too. Only
+   active when the wsum fixed tier is already selected. */
+int lz_attn_int(void);
+const char *lz_attn_int_select(const char *name);
+
 #if LZ_ATTN_FIXED
 #define LZ_ATTN_MAX_HD 256
 #if (LZ_ATTN_FIXED & 1)
@@ -950,6 +968,10 @@ void lz_attn_score_q8(float *att, const float *qhh, int hd,
 void lz_attn_wsum_q8(float *out, const float *att, int hd,
                      const int8_t *vc, const float *vs, int kvd,
                      int pos, float *cbuf, int16_t *cq, int sink, int ring);
+void lz_attn_wsum_q8_int(int64_t *acc, float *sscale, const float *att,
+                         int hd, const int8_t *vc, const float *vs,
+                         int kvd, int pos, float *cbuf, int16_t *cq,
+                         int sink, int ring);
 #endif
 #endif
 

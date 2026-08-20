@@ -89,6 +89,10 @@ typedef struct {
     int16_t *wsum_cq;           /* (seq_len)     the same, quantized to int16 */
 #endif
     float *attn_out;            /* (attn_q_dim) */
+    int64_t *attn_acc;          /* (attn_q_dim) int-domain weighted sum + output gate
+                                   (fixed-tier attention int path, --attn-int) */
+    float *attn_ss;             /* (attn_q_dim/32) per-32-group dequant scale for
+                                   the same path (sscale = cmax * LZ_Q15_INV) */
     float *ktmp;                /* (attn_kv_dim) k before it enters the cache (post-rotation, quantized) */
     float *vtmp;                /* (attn_kv_dim) same for v */
     /* KV cache Q8: kq8/vq8 hold the rotated k/v (group 32), dequantized at score time.
