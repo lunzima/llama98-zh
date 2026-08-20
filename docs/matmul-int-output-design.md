@@ -90,6 +90,37 @@ int 路径花 1 cvt + 1 mul + 1 add（量化）对 `epi_q8` 的 1 cvt + 1 mul +
 `.prof` 探针验过数值正确，但**没有接线**，因为本模型的 o_proj 输出进的是
 残差加，不是 matmul。
 
+## 找 `w2!=NULL` 对：kmr20 上一个都接不了（2026-08-20 实测）
+
+int 贯通要求「producer matmul → consumer matmul，中间无非线性」。整个
+kmr20（8 层，LLLALLLA）只有**两个**这样的对，dtype 由 `.prof/dtype_probe.c`
+实测（不是读配方散文——散文说 expert 是 q6_1，实际 KDA 层是 q4_1）：
+
+| 对 | producer | consumer | 中间非线性 |
+|---|---|---|---|
+| `moe_down_proj` → `moe_expert_w1/w3` | q8_0 gs=512 | **q4_1** gs=128（L 层）/ **q6_1** gs=256（A 层） | 无 |
+| `kda_f_a_proj` → `kda_f_b_proj` | **q16_0** gs=512 | **q16_0** gs=64 | 无 |
+| `kda_o_proj` / `o_proj` → 残差加 | q8_0 gs=1024 | 无 matmul | — |
+| `moe_up_proj` → 残差加 | q8_0 gs=256 | 无 matmul | — |
+
+**`matmul_q8_int_consume` 的 `w2->dtype == LZ_FMT_Q8_0` 闸门把两个都排除了。**
+这不是接线疏忽，是架构事实：transformer 里 matmul 的输出几乎总是进残差加
+或穿过非线性；直接 matmul→matmul 只出现在**低秩分解**处，而这个模型的两处
+低秩恰好都不是 q8_0。
+
+所以「接一个真实的 `w2!=NULL` 对」**不是纯接线工作**，前提是先支持一种
+非 Q8_0 的 consumer：
+
+- **q16_0 consumer**（`f_a`→`f_b`）最干净：两端同格式、对称（只有 scale，
+  无 min/zero），int 域数学与 Q8_0 同形；树里已有 `matmul_q16_impl`。
+- **q4_1 / q6_1 consumer**（latent→expert）是非对称的（scale + min），
+  int 域累加要额外处理零点项，复杂得多。
+
+**但收益也要先看清**：`f_a`→`f_b` 是 512→64→1024，producer 的 epi_q8 只有
+64 行 × 16 组，6 个 KDA 层合计**约占每 token f32 的 0.4%**（解析估算，未实测）。
+而真正大的 q8_0 位点（`kda_o_proj`，1024 行 × 32 组）全都进残差加，
+在那里 int 路径实测是 +0.14% 的净亏。
+
 ## 风险
 
 - **高**：格式级重构 + 5 dtype + ~28 调用点 + 铁律二。
