@@ -446,14 +446,17 @@ int matmul_q8_int_consume(float *o, const int32_t *o_acc,
        matmul_q8_int_dequant_q8 uses, so the two paths agree). Exact
        powers of two are kept as float32 statics per the excess-precision
        note (ops_quant.c). */
-    static const float LZ_MMQ8_INV   = 3.075787390116602e-05f;
     static const float LZ_MMQ8_Q16   = 65536.0f;
+    /* 1/256, the accumulator's own scale, alone: with the power-of-two
+       amax the shift IS the Q8 scale, so the 1/127 the float scale
+       carried has no counterpart here. */
+    static const float LZ_MMQ8_POST  = 0.00390625f;
     /* Scratch: per-group amax / 127-amax / A / A-int, plus the
        downstream per-(row, weight-group) int64 accumulator. Static (the
        engine's matmul scratch convention, ops_matmul.c's g_* block);
        single-threaded, never re-entered. */
     static int32_t amaxb[LZ_MM_WIDEN_MAX / 32];
-    static float   invb[LZ_MM_WIDEN_MAX / 32];
+    static int     shb[LZ_MM_WIDEN_MAX / 32];
     static float   Ab[LZ_MM_WIDEN_MAX / 32];
     static int32_t Aib[LZ_MM_WIDEN_MAX / 32];
     static int32_t sib[LZ_MM_WIDEN_MAX / 32];
@@ -532,13 +535,32 @@ int matmul_q8_int_consume(float *o, const int32_t *o_acc,
                 }
                 amaxb[g] = amax;
                 if (amax > 0) {
-                    float A = (float)amax * xsb[g] * LZ_MMQ8_INV;
-                    invb[g] = 127.0f / (float)amax;
+                    /* Round the group's amax UP to a power of two: the
+                       smallest sh with amax >> sh <= 127. The quantize
+                       below is then a shift, not a float multiply and a
+                       round, so the whole per-(row, group) reduction
+                       leaves the f32 domain. The cost is up to one bit
+                       of the eight (the largest element lands in
+                       [64,127] instead of on 127), which is why this is
+                       value-changing rather than a re-association.
+
+                       Same trade as ops_kernel_shared.h's p2_shift_of
+                       (the pass-2 plane split), which bounds at 32512
+                       for its Q15 output rather than 127 for int8 -
+                       and where the lost bit MEASURED as a net accuracy
+                       gain, the divide's own rounding having cost more
+                       than the range. */
+                    int sh = 0;
+                    float A;
+                    while ((amax >> sh) > 127) sh++;
+                    shb[g] = sh;
+                    /* The shift is the scale: 2^sh, not amax/127. */
+                    A = pow2f(sh) * xsb[g] * LZ_MMQ8_POST;
                     Ab[g] = A;
                     if (A < 0.0f) A = -A;
                     if (A > A_max) A_max = A;
                 } else {
-                    invb[g] = 0.0f;
+                    shb[g] = 0;
                     Ab[g] = 0.0f;
                 }
             }
@@ -565,12 +587,12 @@ int matmul_q8_int_consume(float *o, const int32_t *o_acc,
         dscale_exp = A_exp + W_exp - 32;
 
         /* Pass 1's own f32 work, billed to the site whose epilogue this
-           replaces so the census compares like with like: per group a
-           convert and a divide for invb, a convert and two multiplies
-           for A, and the Q16 fold's multiply plus its q8_round add.
+           replaces so the census compares like with like: per group two
+           multiplies for A and the Q16 fold's multiply plus its
+           q8_round add. The amax scan and the shift search are integer.
            Without this the census reads the int path as free and
            reports a saving that is only epi_q8 no longer billing. */
-        LZ_FCX(LZ_FC_EPI, 3L * nb, (long)nb, (long)nb, 2L * nb, 0);
+        LZ_FCX(LZ_FC_EPI, 3L * nb, (long)nb, 0, 0, 0);
 
         if (w2 == NULL) {
             /* Producer output at a non-matmul boundary (the o_proj ->
@@ -591,22 +613,28 @@ int matmul_q8_int_consume(float *o, const int32_t *o_acc,
                 for (gg = 0; gg < ng1; gg++)
                     sib[gg] = mmq8_scale_round(wr[gg] * W_scale);
                 for (g = 0; g < nb; g++) {
-                    int qi;
+                    int sh, qi;
                     if (amaxb[g] <= 0) continue;
-                    qi = q8_round((float)acc[(size_t)i * nb + g] * invb[g]);
+                    sh = shb[g];
+                    /* Shift, not a float multiply: the rounding bias is
+                       half an output step, so this is round-half-up on
+                       an arithmetic shift. acc is a single 32-wide dot
+                       times 256 (|acc| < 2^28), so the bias cannot
+                       overflow int32. */
+                    qi = sh ? (int)((acc[(size_t)i * nb + g] + (1 << (sh - 1))) >> sh)
+                            : acc[(size_t)i * nb + g];
                     if (qi > 127) qi = 127;
                     if (qi < -127) qi = -127;
                     qw += (int64_t)qi * (int64_t)Aib[g] * sib[g / r1];
                 }
                 ot[i] = (float)qw * pow2f(dscale_exp);
             }
-            /* Per row: nb quantize steps (convert, multiply, q8_round
-               add), ng1 scale folds (multiply, round add), and the
-               dequant's convert and multiply. The int64 products are
-               integer work and carry no f32 bill. */
-            LZ_FCX(LZ_FC_EPI, (long)out_dim * (nb + ng1 + 1),
-                   (long)out_dim * (nb + ng1), 0,
-                   (long)out_dim * (nb + 1), 0);
+            /* Per row: ng1 scale folds (multiply, round add) and the
+               dequant's convert and multiply. The quantize is a shift
+               and the products are int64 - integer work, no f32 bill,
+               which is the point of the power-of-two amax. */
+            LZ_FCX(LZ_FC_EPI, (long)out_dim * (ng1 + 1),
+                   (long)out_dim * ng1, 0, (long)out_dim, 0);
         } else {
             /* Downstream int matmul: q_weighted x w2_q accumulates per
                (output row, weight-group) in int64; the dequant applies
@@ -624,9 +652,11 @@ int matmul_q8_int_consume(float *o, const int32_t *o_acc,
                 for (gg = 0; gg < ng1; gg++)
                     sib[gg] = mmq8_scale_round(wr[gg] * W_scale);
                 for (g = 0; g < nb; g++) {
-                    int qi;
+                    int sh, qi;
                     if (amaxb[g] <= 0) continue;
-                    qi = q8_round((float)acc[(size_t)i * nb + g] * invb[g]);
+                    sh = shb[g];      /* same shift quantize as the w2 == NULL arm */
+                    qi = sh ? (int)((acc[(size_t)i * nb + g] + (1 << (sh - 1))) >> sh)
+                            : acc[(size_t)i * nb + g];
                     if (qi > 127) qi = 127;
                     if (qi < -127) qi = -127;
                     qw += (int64_t)qi * (int64_t)Aib[g] * sib[g / r1];
@@ -647,14 +677,14 @@ int matmul_q8_int_consume(float *o, const int32_t *o_acc,
                     ot[j] = sum * pow2f(dscale_exp);
                 }
             }
-            /* The activation side (quantize + scale fold, as in the
-               w2 == NULL arm) plus this arm's own epilogue: per output
-               column ng2 converts, multiplies and adds, then the
+            /* The activation side is ng1 scale folds per row (the
+               quantize is a shift) plus this arm's own epilogue: per
+               output column ng2 converts, multiplies and adds, then the
                dequant multiply. The int64 matmul itself is integer. */
             LZ_FCX(LZ_FC_EPI,
-                   (long)out_dim * (nb + ng1) + (long)out2 * (ng2 + 1),
-                   (long)out_dim * (nb + ng1) + (long)out2 * ng2, 0,
-                   (long)out_dim * nb + (long)out2 * ng2, 0);
+                   (long)out_dim * ng1 + (long)out2 * (ng2 + 1),
+                   (long)out_dim * ng1 + (long)out2 * ng2, 0,
+                   (long)out2 * ng2, 0);
         }
     }
     return 1;
