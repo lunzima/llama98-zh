@@ -952,11 +952,12 @@ int lz_attn_int(void);
 const char *lz_attn_int_select(const char *name);
 
 /* Whether the Q8_0 matmul takes the int-accumulator output path and
-   scheme-A (per-input-group) dequant for the o_proj call site
+   int-domain downstream consumption for the o_proj call site
    (docs/matmul-int-output-design.md). Default off; the off path is the
-   plain matmul byte-for-byte. Value-changing by design: this validates
-   whether the 1.21% single-layer error is acceptable before committing
-   to the format refactor. */
+   plain matmul byte-for-byte. Value-changing by design: this is the
+   format-refactor step that removes the float dequant (scheme A's
+   per-input-group reconstruct validated the granularity at 1.21% max;
+   the Q16 int-domain carry is ~1.5e-5 vs the float reference). */
 int lz_matmul_int(void);
 const char *lz_matmul_int_select(const char *name);
 

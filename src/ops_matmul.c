@@ -408,6 +408,225 @@ void matmul_q8_int_dequant_q8(float *o, const int32_t *o_acc,
     }
 }
 
+/* ---- int-domain downstream consumption (task 3 of matmul-int-output) -- */
+
+/* Round-half-away-from-zero, the same pattern ops.c's Q8 quantize uses:
+   the (int) cast truncates toward zero on both compilers, so the +-0.5f
+   is the whole story. Used for the Q16 scale fold, which is NOT bounded
+   like q8_round's +/-2^22 input - S*2^16 can be large when amax is
+   large, so q8_round's magic add is out of range. */
+static int32_t mmq8_scale_round(float v) {
+    return (int32_t)(v < 0.0f ? v - 0.5f : v + 0.5f);
+}
+
+/* matmul_q8_int_consume - see ops_matmul.h. Runs under the caller's
+   lz_fpu_float_begin/end (the forward's PC=24 region on Watcom), so the
+   float association below is identical on gcc/SSE and Watcom/x87.
+
+   The Q16 scale fold is BLOCK-normalized, not fixed-point against 1:
+   A[g] = amax*xsb/(256*127) is ~1e-3 and ws1 ~ 1e-2, so a fixed Q16
+   would carry a ~1e-2/1e-3 ABSOLUTE rounding (0.5*2^-16) that is ~1% of
+   a small scale. Normalizing each by a POWER-OF-TWO ceiling of its
+   max (2^A_exp >= A_max, 2^W_exp >= W_max) turns the rounding into a
+   uniform ~2^-16 RELATIVE error, which is the bound the task's math
+   claims (measured ~1.5e-5 on the o_proj pair, vs 0.6% for the fixed
+   fold). The power-of-two normalizer is deliberate: a division by the
+   raw max is a float/float divide that x87 (PC=24 double-rounding) can
+   answer 1 ULP differently from SSE, and a 1-ULP scale difference flips
+   whole integers at the round boundary - the byte-identity gate caught
+   exactly that. A multiply by 2^(16-A_exp) is exact (exponent-only), so
+   the int fold is deterministic on both compilers. The dequant applies
+   2^(A_exp + W_exp - 32). */
+int matmul_q8_int_consume(float *o, const int32_t *o_acc,
+                          const float *o_xsb, const float *o_ws,
+                          const LZTensor *w1, const LZTensor *w2,
+                          int in_dim, int out_dim, int out2, int nt) {
+    /* (1/256)*(1/127) - the accumulator's built-in 256 scale and the Q8
+       127 scale, as one float32 constant (the same fold
+       matmul_q8_int_dequant_q8 uses, so the two paths agree). Exact
+       powers of two are kept as float32 statics per the excess-precision
+       note (ops_quant.c). */
+    static const float LZ_MMQ8_INV   = 3.075787390116602e-05f;
+    static const float LZ_MMQ8_Q16   = 65536.0f;
+    /* Scratch: per-group amax / 127-amax / A / A-int, plus the
+       downstream per-(row, weight-group) int64 accumulator. Static (the
+       engine's matmul scratch convention, ops_matmul.c's g_* block);
+       single-threaded, never re-entered. */
+    static int32_t amaxb[LZ_MM_WIDEN_MAX / 32];
+    static float   invb[LZ_MM_WIDEN_MAX / 32];
+    static float   Ab[LZ_MM_WIDEN_MAX / 32];
+    static int32_t Aib[LZ_MM_WIDEN_MAX / 32];
+    static int64_t acc2[LZ_MM_WIDEN_MAX];
+    int nb  = in_dim / 32;      /* producer 32-sub-block count */
+    int ng1 = in_dim / w1->gs;  /* producer weight-group count */
+    int r1  = w1->gs / 32;      /* producer sub-blocks per weight group */
+    float W_scale;
+    int W_exp;
+    int tk, i, g, j;
+
+    if (nt < 1 || !o || !o_acc || !o_xsb || !o_ws || !w1 || nb < 1)
+        return 0;
+    if (w1->dtype != LZ_FMT_Q8_0 || w1->gs < 32 || (w1->gs % 32) != 0 ||
+        (in_dim % w1->gs) != 0)
+        return 0;
+    if (q8_fixed_epi(w1, in_dim, nb, nt)) return 0;
+    if (w2 == NULL) {
+        if (out_dim < 1) return 0;
+    } else {
+        int ng2 = out_dim / w2->gs;
+        if (w2->dtype != LZ_FMT_Q8_0 || w2->gs < 32 || (w2->gs % 32) != 0 ||
+            (out_dim % w2->gs) != 0 || out2 < 1 ||
+            w2->n != (size_t)out2 * (size_t)out_dim)
+            return 0;
+        if (q8_fixed_epi(w2, out_dim, out_dim / 32, nt)) return 0;
+        if ((size_t)out2 * (size_t)ng2 > LZ_MM_WIDEN_MAX) return 0;
+        /* int64 headroom: the worst q_weighted is nb*127*(2^16)^2, so
+           acc2 is bounded by out_dim*nb*127*(2^16)^2*127. Keep it under
+           2^62; the gate is on the shape, not the data. */
+        if ((int64_t)out_dim * (int64_t)nb > 65536) return 0;
+    }
+
+    /* Producer weight-scale power-of-two ceiling (static across tokens).
+       W_scale = 2^(16-W_exp), built from the exponent bits so there is
+       no float/float divide anywhere in the fold. */
+    {
+        float wmx = 0.0f;
+        for (i = 0; i < out_dim; i++)
+            for (g = 0; g < ng1; g++) {
+                float v = o_ws[(size_t)i * ng1 + g];
+                if (v < 0.0f) v = -v;
+                if (v > wmx) wmx = v;
+            }
+        if (wmx > 0.0f) {
+            uint32_t wb;
+            memcpy(&wb, &wmx, 4);
+            W_exp = (int)((wb >> 23) & 0xFF) - 127;
+            if (W_exp < -100) W_exp = -100;  /* denormal clamp: a sub-2^-100
+                                                scale means the fold underflows
+                                                to zero anyway */
+            {
+                uint32_t s = (uint32_t)(127 + 16 - W_exp) << 23;
+                memcpy(&W_scale, &s, 4);
+            }
+        } else {
+            W_exp = 0;
+            W_scale = LZ_MMQ8_Q16;   /* all ws1 zero -> q_weighted zero */
+        }
+    }
+
+    for (tk = 0; tk < nt; tk++) {
+        const int32_t *acc = o_acc + (size_t)tk * out_dim * nb;
+        const float *xsb = o_xsb + (size_t)tk * nb;
+        int A_exp, dscale_exp;
+        /* Pass 1: per-group amax over output rows (int-domain exact,
+           scheme A) and the per-group A scale; track the token's A_max. */
+        {
+            float A_max = 0.0f;
+            for (g = 0; g < nb; g++) {
+                int amax = 0;
+                for (i = 0; i < out_dim; i++) {
+                    int a = acc[(size_t)i * nb + g];
+                    if (a < 0) a = -a;
+                    if (a > amax) amax = a;
+                }
+                amaxb[g] = amax;
+                if (amax > 0) {
+                    float A = (float)amax * xsb[g] * LZ_MMQ8_INV;
+                    invb[g] = 127.0f / (float)amax;
+                    Ab[g] = A;
+                    if (A < 0.0f) A = -A;
+                    if (A > A_max) A_max = A;
+                } else {
+                    invb[g] = 0.0f;
+                    Ab[g] = 0.0f;
+                }
+            }
+            if (A_max > 0.0f) {
+                uint32_t ab;
+                float A_scale;
+                memcpy(&ab, &A_max, 4);
+                A_exp = (int)((ab >> 23) & 0xFF) - 127;
+                if (A_exp < -100) A_exp = -100;  /* denormal clamp (see W_exp) */
+                {
+                    uint32_t s = (uint32_t)(127 + 16 - A_exp) << 23;
+                    memcpy(&A_scale, &s, 4);
+                }
+                for (g = 0; g < nb; g++)
+                    Aib[g] = (amaxb[g] > 0)
+                        ? mmq8_scale_round(Ab[g] * A_scale) : 0;
+            } else {
+                A_exp = 0;
+                for (g = 0; g < nb; g++) Aib[g] = 0;
+            }
+        }
+        /* Dequant scale exponent: A_exp (per token) + W_exp - 32. The
+           value 2^dscale_exp is a power of two, exact. */
+        dscale_exp = A_exp + W_exp - 32;
+
+        if (w2 == NULL) {
+            /* Producer output at a non-matmul boundary (the o_proj ->
+               residual site): q_weighted folded to Q16, then ONE int64->
+               float conversion per element. The per-group float dequant
+               (lz_i32f + fmul + fadd per group, the epi_q8 epilogue) is
+               replaced by the int64 accumulate. */
+            float *ot = o + (size_t)tk * out_dim;
+            for (i = 0; i < out_dim; i++) {
+                const float *wr = o_ws + (size_t)i * ng1;
+                int64_t qw = 0;
+                for (g = 0; g < nb; g++) {
+                    int qi, si;
+                    if (amaxb[g] <= 0) continue;
+                    qi = q8_round((float)acc[(size_t)i * nb + g] * invb[g]);
+                    if (qi > 127) qi = 127;
+                    if (qi < -127) qi = -127;
+                    si = mmq8_scale_round(wr[g / r1] * W_scale);
+                    qw += (int64_t)qi * (int64_t)Aib[g] * si;
+                }
+                ot[i] = (float)qw * pow2f(dscale_exp);
+            }
+        } else {
+            /* Downstream int matmul: q_weighted x w2_q accumulates per
+               (output row, weight-group) in int64; the dequant applies
+               2^(A_exp+W_exp-32) (the power-of-two block-normalized Q16
+               fold) and w2's own per-group weight scale - epi_q8's
+               structure with a uniform activation scale. */
+            int ng2 = out_dim / w2->gs;
+            for (j = 0; j < out2; j++)
+                for (g = 0; g < ng2; g++) acc2[(size_t)j * ng2 + g] = 0;
+            for (i = 0; i < out_dim; i++) {
+                const float *wr = o_ws + (size_t)i * ng1;
+                int64_t qw = 0;
+                int k;
+                for (g = 0; g < nb; g++) {
+                    int qi, si;
+                    if (amaxb[g] <= 0) continue;
+                    qi = q8_round((float)acc[(size_t)i * nb + g] * invb[g]);
+                    if (qi > 127) qi = 127;
+                    if (qi < -127) qi = -127;
+                    si = mmq8_scale_round(wr[g / r1] * W_scale);
+                    qw += (int64_t)qi * (int64_t)Aib[g] * si;
+                }
+                if (qw == 0) continue;
+                for (j = 0; j < out2; j++) {
+                    int wq = w2->q[(size_t)j * out_dim + i];
+                    acc2[(size_t)j * ng2 + i / w2->gs] += qw * (int64_t)wq;
+                }
+            }
+            {
+                float *ot = o + (size_t)tk * out2;
+                for (j = 0; j < out2; j++) {
+                    const float *ws2 = w2->scale + (size_t)j * ng2;
+                    float sum = 0.0f;
+                    for (g = 0; g < ng2; g++)
+                        sum += (float)acc2[(size_t)j * ng2 + g] * ws2[g];
+                    ot[j] = sum * pow2f(dscale_exp);
+                }
+            }
+        }
+    }
+    return 1;
+}
+
 /* ---- matmul_scalar_ref_one + matmul_scalar_ref ---- */
 void matmul_scalar_ref_one(float *o, const int8_t *xq, const float *xqs,
                                   const LZTensor *w, int in_dim, int out_dim) {

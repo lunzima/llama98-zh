@@ -93,10 +93,11 @@ typedef struct {
                                    (fixed-tier attention int path, --attn-int) */
     float *attn_ss;             /* (attn_q_dim/32) per-32-group dequant scale for
                                    the same path (sscale = cmax * LZ_Q15_INV) */
-    /* --matmul-int scratch (scheme A validation, ops_matmul.c). Holds
+    /* --matmul-int scratch (int-domain downstream, ops_matmul.c). Holds
        matmul_q8_int_impl's o_acc/o_xsb/o_ws for the o_proj matmul (the
-       only wired call site), then matmul_q8_int_dequant_q8 consumes
-       them in place of the float epilogue. Shapes are the o_proj shape:
+       only wired call site), then matmul_q8_int_consume consumes them
+       in the int domain (w2 == NULL: the int-domain dequant to float)
+       in place of the float epilogue. Shapes are the o_proj shape:
        mmi_acc [nt, hidden, attn_q_dim/32] int32, mmi_xsb [nt,
        attn_q_dim/32], mmi_ws [hidden, attn_q_dim/32] (worst-case ng,
        one weight scale per 32 sub-blocks). Allocated always - the

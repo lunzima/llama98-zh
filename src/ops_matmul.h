@@ -70,6 +70,44 @@ void matmul_q8_int_dequant_q8(float *o, const int32_t *o_acc,
                               const LZTensor *w, int in_dim, int out_dim,
                               int nt);
 
+/* Int-domain downstream consumption (task 3 of matmul-int-output,
+   docs/matmul-int-output-design.md). Given matmul_q8_int_impl's
+   o_acc/o_xsb/o_ws for the producer w1 (Q8_0, in_dim -> out_dim),
+   quantize each 32-input-group in the int domain (scheme A), fold the
+   per-(row, group) scale S[i][g] = amax_g * xsb[g] * ws1[i][g/r1] /
+   (256*127) to Q16, and carry the int-domain weighted activation
+   q_weighted[i] = sum_g q[i][g] * A_int[g] * ws1_int[i][g/r1] (int64).
+   The fold is BLOCK-normalized (A by the token's max_g |A[g]|, ws1 by
+   the tensor's max |ws1|) so the 2^-16 rounding is a uniform ~1.5e-5
+   RELATIVE error - a fixed Q16 against 1 would make it ~1% on the
+   small scales the o_proj actually has. The per-group float dequant
+   (lz_i32f + fmul + fadd per group) is gone; the downstream matmul runs
+   on q_weighted in the int domain:
+     acc2[j][k] = sum_{i in w2-group k} q_weighted[i] * w2_q[i][j]
+     o2[j] = 2^(A_exp+W_exp-32) * sum_k acc2[j][k] * ws2[j][k]
+             (w2 Q8_0, out_dim -> out2)
+   where 2^A_exp and 2^W_exp are power-of-two ceilings of the token's
+   max|A[g]| and the tensor's max|ws1| - a power-of-two normalizer, not a
+   float/float divide, so the fold is byte-identical on x87 and SSE (a
+   raw divide double-rounds on PC=24 and flips whole integers at the
+   round boundary). Mirroring epi_q8's per-weight-group scale structure
+   with a UNIFORM activation scale - the activation quantization is
+   eliminated, not re-applied. The producer weight scale ws1 rides inside
+   the Q16 fold, exactly as the probe report's note 2 requires (s must
+   still be multiplied by ws[i][g/r] at the consumer side).
+   w2 == NULL: the producer's own output instead - o[tk*out_dim+i] =
+   q_weighted[tk][i] * 2^(A_exp+W_exp-32) - for the boundary where the
+   producer feeds a residual add rather than a matmul (the o_proj call
+   site today). Same fold; one int64->float conversion per element.
+   Returns 1 when o was written, 0 when declined (producer or w2 not a
+   Q8_0 the int path serves - fixed-epi tier or shape rejected, or the
+   int64 accumulator shape overflows - keep the float path). Scalar
+   reference only; the SIMD tier is a later iron-law-2 step. */
+int matmul_q8_int_consume(float *o, const int32_t *o_acc,
+                          const float *o_xsb, const float *o_ws,
+                          const LZTensor *w1, const LZTensor *w2,
+                          int in_dim, int out_dim, int out2, int nt);
+
 /* Scalar reference (the contract every SIMD tier is judged against). */
 void matmul_scalar_ref(float *o, const int8_t *xq, const float *xqs,
                        const LZTensor *w, int in_dim, int out_dim, int nt);

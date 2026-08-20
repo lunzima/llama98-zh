@@ -1745,17 +1745,27 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                            s->xq + (size_t)tk * qd, s->xqs + (size_t)tk * nso);
         }
     }
-    /* --matmul-int (scheme A validation): run the Q8_0 matmul's
-       int-accumulator path and scheme A dequant instead of the float
-       epilogue. Gates: body layers only (the MTP sentinel layer stays
-       float), activations quantized per-32-group (gso==32, the layout
-       matmul_q8_int_impl hands out), and the impl itself accepting
-       (Q8_0, fixed-epi tier off). Off is the plain matmul byte-for-byte. */
+    /* --matmul-int (int-domain downstream): run the Q8_0 matmul's
+       int-accumulator path and consume it in the int domain instead of
+       the float epilogue. w2 == NULL here: the o_proj output feeds a
+       residual add (forward_chunk's x += xb2), not another matmul, so
+       this is the int-domain dequant (q_weighted folded to Q16, one
+       int64->float conversion per element) - the per-group float
+       dequant and the int32->float->int8 round-trip are gone. The full
+       downstream-matmul consume (w2 != NULL) is exercised by the .prof
+       probe; the model's next matmul sits behind residual+norm and
+       cannot take q_weighted directly. Gates: body layers only (the MTP
+       sentinel layer stays float), activations quantized per-32-group
+       (gso==32, the layout matmul_q8_int_impl hands out), and the impl
+       accepting (Q8_0, fixed-epi tier off). Off is the plain matmul
+       byte-for-byte; matmul_q8_int_dequant_q8 stays as the
+       float-reconstruct precision reference. */
     if (lz_matmul_int() && layer >= 0 && gso == 32 &&
         matmul_q8_int_impl(s->mmi_acc, s->mmi_xsb, s->mmi_ws,
-                           s->xq, s->xqs, &L->o_proj, qd, hdim, nt)) {
-        matmul_q8_int_dequant_q8(s->xb2, s->mmi_acc, s->mmi_xsb,
-                                 s->mmi_ws, &L->o_proj, qd, hdim, nt);
+                           s->xq, s->xqs, &L->o_proj, qd, hdim, nt) &&
+        matmul_q8_int_consume(s->xb2, s->mmi_acc, s->mmi_xsb, s->mmi_ws,
+                              &L->o_proj, NULL, qd, hdim, 0, nt)) {
+        /* int-domain downstream path wrote s->xb2 */
     } else {
         lz_matmul_xq_nt(s->xb2, s->attn_out, s->xq, s->xqs, &L->o_proj, qd,
                         hdim, nt);
