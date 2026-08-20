@@ -275,41 +275,90 @@ git commit -m "feat(ce): ARMv5TE 三值内积（标量 C 版，QEMU 对拍；纯
 
 ### Task 4: SubLN 前向改造（删 layernorm，每投影加 RMSNorm）
 
+**接口定案（A↔C 契约，已分析）**：
+
+CE 层结构 = 8 层 `LLLALLLA`（6 KDA + 2 全注意力，docs/kunkun-ce-params.md §1）。
+三值化投影 = KDA q/k/v/g/o（6 层）+ dense FFN gate/up/down（8 层）；普通
+attention 层投影不三值化、无 SubLN norm。SubLN 语义：删所有层的
+input_layernorm/post_attention_layernorm，每个三值化投影自带 RMSNorm
+（作用在投影自己的输入上，训练侧 BitLinear.use_norm=True，norm 是
+Qwen3_5RMSNorm **可学 affine**）。
+
+**8 个新 SubLN norm 字段**（model.h LZLayer + LAYER_SPECS 映射）：
+
+| 训练侧 safetensors 键名 | 引擎字段 | 维度 | 作用在 |
+|---|---|---|---|
+| linear_attn.q_proj.norm.weight | kda_q_norm | hidden | s->xb |
+| linear_attn.k_proj.norm.weight | kda_k_norm | hidden | s->xb |
+| linear_attn.v_proj.norm.weight | kda_v_norm | hidden | s->xb |
+| linear_attn.g_proj.norm.weight | kda_g_norm | hidden | s->xb |
+| linear_attn.o_proj.norm.weight | kda_o_subn_norm | value_dim | s->ssm_out |
+| mlp.gate_proj.norm.weight | gate_norm | hidden | s->xb |
+| mlp.up_proj.norm.weight | up_norm | hidden | s->xb |
+| mlp.down_proj.norm.weight | down_norm | inter | s->hb |
+
+⚠️ 陷阱：`linear_attn.o_norm.weight`（现有 kda_o_norm，Qwen3_5RMSNormGated
+gated silu，head_v_dim）与 `linear_attn.o_proj.norm.weight`（新
+kda_o_subn_norm，普通 RMSNorm，value_dim）是**两个不同权重**，不能复用。
+
+**config.use_subn**：LZModelConfig 加 `use_subn`（对应训练侧 config.use_subn），
+forward.c 据此分支「SubLN（删层 norm + 每投影 norm）」vs「普通（层 norm）」。
+默认 0（旧模型不受影响）。
+
 **Files:**
-- Modify: `E:/llama98-zh/src/forward.c:2598,2612`（两个 layernorm 调用点）
-- Modify: 投影 matmul 前加 RMSNorm 调用（q/k/v/o/gate/up/down）
+- Modify: `E:/llama98-zh/src/model.h`（8 字段 + config.use_subn）
+- Modify: `E:/llama98-zh/src/model.c`（LAYER_SPECS 8 映射 + config.use_subn 加载）
+- Modify: `E:/llama98-zh/src/forward.c`（删 2 层 norm + 8 投影 RMSNorm，use_subn 分支）
+- Modify: `E:/LLM/llama98-zh/tools/export_q8.py`（导出 8 norm + config.use_subn）
 
-- [ ] **Step 1: 读现有 forward 结构，写改造对照**
+- [ ] **Step 1: 引擎 model.h 加 8 个 norm 字段 + config.use_subn**
 
-先读 `forward.c:2570-2700` 的完整前向循环，确认：
-- `input_layernorm`（2598 行）归一化残差流 → 喂给 KDA/attention 的 q/k/v/g
-- `post_attention_layernorm`（2612 行）归一化 → 喂给 FFN 的 gate/up/down
+LZLayer 结构（model.h:279-324 附近）加 8 个 LZTensor f32 字段：
+kda_q_norm/kda_k_norm/kda_v_norm/kda_g_norm/kda_o_subn_norm（KDA，hidden×4
++ value_dim×1）+ gate_norm/up_norm（hidden）+ down_norm（inter）。
+LZModelConfig 加 `int use_subn;`。
 
-SubLN 改造 = 删这两个（残差流直接喂投影），在每个投影 matmul 前加 `lz_rmsnorm`。这与训练侧 `nn.Identity()` 替换 layernorm + BitLinear 自带 norm **逐位对应**。
+- [ ] **Step 2: 引擎 model.c 加 8 个 LAYER_SPECS 映射 + config 加载**
 
-- [ ] **Step 2: 写失败测试（投影前归一化生效）**
+LAYER_SPECS 表（model.c:356-434）加 8 行（suffix 用上表键名，layer_type
+LZ_LT_KDA / ffn_kind 0，field 用 LOFF 新字段，dims 用对应维度）。
+config 加载加 use_subn。
 
-在现有 `tests/test_compare_layers.py` 或新增 `tests/test_subln_forward.py` 里，加一条：用已 SubLN 改造的训练侧 checkpoint 导出，引擎 `--dump-logits` 与 transformers 参照逐位一致（复用铁律二的对拍闸门）。
+- [ ] **Step 3: 引擎 forward.c 删 2 层 norm + 8 投影 RMSNorm**
 
-- [ ] **Step 3: 改 forward.c**
+主循环（forward.c:2701/2715）：删 input_layernorm（2701-2702）与
+post_attention_layernorm（2715-2716），改为 `if (!c->use_subn)` 包住原调用
+（保留普通路径）。use_subn 分支下：
+1. KDA 层（forward.c:2002-2018 附近）：kda_q/k/v/g_proj matmul 前各自
+   `lz_rmsnorm(tmp, s->xb, lz_t_f32(&L->kda_*_norm, s->wscr), dim, eps)`；
+   kda_o_proj（2236 附近）前用 kda_o_subn_norm 归一化 s->ssm_out（vdim）。
+2. dense FFN（forward.c:2479-2508 附近）：gate/up_proj 前用 gate_norm/up_norm
+   归一化 s->xb；down_proj 前用 down_norm 归一化 s->hb（idim）。
 
-具体改动依赖读到的 forward 结构。核心是：
-1. 删掉/绕过 `input_layernorm` 和 `post_attention_layernorm` 两个 `lz_rmsnorm` 调用。
-2. 在每个投影的输入 `x` 上先 `lz_rmsnorm(tmp, x, NULL, dim)`（用投影自身 norm 权重，或 NULL 用单位 norm——取决于训练侧 BitLinear 的 norm 是否可学）。
+> 注意：RMSNorm 权重维度要对齐（kda_q/k/v/g/gate/up 是 hidden，kda_o_subn
+> 是 value_dim，down 是 inter）。每投影独立归一化缓冲，不共享（SubLN 语义）。
 
-> ⚠️ 关键：训练侧 BitLinear 的 RMSNorm 是**每个投影独立的可学权重**（Qwen3_5RMSNorm），引擎侧对应要有每投影的 norm 权重张量，且导出器 `export_q8.py` 要导出这些 norm 权重。这是 A↔C 接口的一部分，需和 Plan A 的导出对齐。本 task 先落「norm 权重为 NULL = 纯 RMSNorm 无 affine」，等 Plan A 定案 norm 权重是否可学再补 affine。
+- [ ] **Step 4: 训练侧 export_q8.py 导出 8 norm + config.use_subn**
 
-- [ ] **Step 4: 运行对拍确认**
+export_q8.py 的 expect() 与写出加 8 个 norm（键名见上表），config 写出加
+use_subn。注意 expect 的维度断言与训练侧 config.use_subn 传入。
 
-Run: `cd /e/llama98-zh && make test 2>&1 | tail -30`
-Expected: PASS（或明确列出对拍失败点，逐项修到通过）
+- [ ] **Step 5: 单元对拍（最小 SubLN 模型）**
 
-- [ ] **Step 5: Commit**
+训练侧构造最小 SubLN 三值模型（use_subn=True，几层 KDA + dense），导出 bin，
+引擎加载 + --dump-logits 与 transformers 参照逐位一致。端到端（真实 CE 模型）
+对拍等 Plan B 训出。
+
+- [ ] **Step 6: Commit（两端各一次）**
 
 ```bash
-cd /e/llama98-zh
-git add src/forward.c tests/
-git commit -m "feat(ce): SubLN 前向——删 pre-LN，投影前 RMSNorm（与训练侧对拍）"
+cd /e/llama98-zh   # 引擎树
+git add src/model.h src/model.c src/forward.c
+git commit -m "feat(ce): SubLN 前向——use_subn 分支，删层 norm，8 投影自带 RMSNorm"
+
+cd /e/LLM/llama98-zh  # 训练树
+git add tools/export_q8.py
+git commit -m "feat(ce): export_q8 导出 8 投影 SubLN norm + use_subn"
 ```
 
 ---
