@@ -153,3 +153,26 @@ kmr20（8 层，LLLALLLA）只有**两个**这样的对，dtype 由 `.prof/dtype
 - 精度：value-changing，且量化粒度改变（方案 A）的影响需实测。
 - 收益：census 里「dequant epilogue」占 11.0%（136000 计数），int 化省
   的是 `lz_i32f`（int32→float）+ float 乘 + float→int8 量化。
+
+## 退场（2026-08-21）
+
+方案 A（`matmul_q8_int_impl` / `matmul_q8_int_scalar_ref` /
+`matmul_q8_int_dequant_q8` / `matmul_q8_int_consume`、`lz_matmul_int()`、
+`LZ_MATMUL_INT` 构建宏、`LZRunState` 的 `mmi_acc`/`mmi_xsb`/`mmi_ws`）
+已整体移除。三条理由，全部已在上面记录：
+
+1. 方向反了——`q8_fixed_epi(...)` 一开就 bail，而 `lz_epi_mode()` 的
+   auto 恰好在需要它的无 SSE 机器上打开定点 epilogue；`--fixed all`
+   下开关 on/off 逐位相同，含 top logit。
+2. 与 `epi_fixed`（ops.c）重复而更弱：`epi_fixed` 已经在 int 域算这一
+   步，携带纯整数指数 `e = -g_epi_xe[tk] - w->sexp[row]`，只有收尾一次
+   浮点；方案 A 是第二套更弱的设计，多花一遍 pass-1 折叠。
+3. 没有接线点能付得起——kmr20 上唯一的两个 producer→consumer 无非线性
+   matmul 对是 q4_1/q6_1 和 q16_0 consumer，都被 `matmul_q8_int_consume`
+   的 Q8_0-only 闸门排除；o_proj/moe_up_proj 的输出进的是残差加。
+
+未来若重拾这条线，应该接的是 `epi_fixed` 的 `(s, e)` 结果对，不是方案
+A 的原始累加器：`e` 是 2 的幂指数，下游一个 `lz_quantize_q8_int`
+风格的折叠对它是精确的。真正的阻塞点是一组输出行会跨越多个不同的
+`w->sexp[row]`，下游折叠前需要先做指数对齐——这是留下的未解问题，不
+是计划。

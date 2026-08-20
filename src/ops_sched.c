@@ -328,19 +328,6 @@ int lz_norm_can_fixed(int n) {
 #endif /* LZ_GDN_FIXED */
 }
 
-/* ---- matmul int output ------------------------------------------------
-   A build macro, not a CLI flag: it is measurably inert on the shipping
-   configuration. matmul_q8_int_impl/_consume both decline once the fixed
-   epilogue is on, and lz_epi_mode's auto turns that on for exactly the
-   machines this was meant to help (see docs/matmul-int-output-design.md).
-   What remains is a developer A/B, and those belong at build time -
-   a runtime knob that cannot change a shipped run is noise in --help. */
-#ifndef LZ_MATMUL_INT
-#define LZ_MATMUL_INT 0
-#endif /* LZ_MATMUL_INT */
-
-int lz_matmul_int(void) { return LZ_MATMUL_INT != 0; }
-
 /* ---- epilogue tier --------------------------------------------------- */
 
 static int g_epi = -1;

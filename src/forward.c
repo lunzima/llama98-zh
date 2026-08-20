@@ -9,8 +9,6 @@
 #include "ops.h"
 #include "ops_quant.h"   /* q8_round/q8_amax/pow2f/LZ_Q8_*, lz_rsqrt_float_body */
 #include "fwht.h"        /* lz_fwht_i32, the SubLN Hadamard kernel */
-#include "ops_kernel_shared.h"   /* LZ_ROW_N, before ops_matmul.h */
-#include "ops_matmul.h"   /* matmul_q8_int_impl + scheme A dequant */
 
 /* The reference implementation hardcodes l2norm's eps to 1e-6, which
    is semantically different from config's rms_norm_eps - they only
@@ -518,17 +516,6 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
        wsum_cbuf/wsum_cq: the selector can run after this point. */
     s->attn_acc = (int64_t *)xcalloc((size_t)nt * c->attn_q_dim, sizeof(int64_t), &ok, &s->bytes_alloc);
     s->attn_ss  = (float *)xcalloc((size_t)nt * (c->attn_q_dim / 32), sizeof(float), &ok, &s->bytes_alloc);
-    /* --matmul-int scratch: o_proj shape (attn_q_dim -> hidden_size).
-       mmi_ws worst-case ng == attn_q_dim/32 (weight gs == 32); the
-       scheme-A path is gated on w->gs >= 32 so it never writes more. */
-    s->mmi_acc = (int32_t *)xcalloc((size_t)nt * c->hidden_size *
-                                    (c->attn_q_dim / 32), sizeof(int32_t),
-                                    &ok, &s->bytes_alloc);
-    s->mmi_xsb = (float *)xcalloc((size_t)nt * (c->attn_q_dim / 32),
-                                  sizeof(float), &ok, &s->bytes_alloc);
-    s->mmi_ws  = (float *)xcalloc((size_t)c->hidden_size *
-                                  (c->attn_q_dim / 32), sizeof(float),
-                                  &ok, &s->bytes_alloc);
     s->ktmp     = (float *)xcalloc((size_t)nt * c->attn_kv_dim, sizeof(float), &ok, &s->bytes_alloc);
     s->vtmp     = (float *)xcalloc((size_t)nt * c->attn_kv_dim, sizeof(float), &ok, &s->bytes_alloc);
     /* KV cache Q8 (group 32, contiguous within a row). +1 layer slot when
@@ -929,7 +916,6 @@ void lz_state_free(LZRunState *s) {
     free(s->logits);
     free(s->qg); free(s->qh); free(s->att); free(s->attn_out);
     free(s->attn_acc); free(s->attn_ss);
-    free(s->mmi_acc); free(s->mmi_xsb); free(s->mmi_ws);
 #if (LZ_ATTN_FIXED & 2)
     free(s->wsum_cbuf); free(s->wsum_cq);
 #endif /* LZ_ATTN_FIXED & 2 */
@@ -1777,31 +1763,8 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                            s->xq + (size_t)tk * qd, s->xqs + (size_t)tk * nso);
         }
     }
-    /* --matmul-int (int-domain downstream): run the Q8_0 matmul's
-       int-accumulator path and consume it in the int domain instead of
-       the float epilogue. w2 == NULL here: the o_proj output feeds a
-       residual add (forward_chunk's x += xb2), not another matmul, so
-       this is the int-domain dequant (q_weighted folded to Q16, one
-       int64->float conversion per element) - the per-group float
-       dequant and the int32->float->int8 round-trip are gone. The full
-       downstream-matmul consume (w2 != NULL) is exercised by the .prof
-       probe; the model's next matmul sits behind residual+norm and
-       cannot take q_weighted directly. Gates: body layers only (the MTP
-       sentinel layer stays float), activations quantized per-32-group
-       (gso==32, the layout matmul_q8_int_impl hands out), and the impl
-       accepting (Q8_0, fixed-epi tier off). Off is the plain matmul
-       byte-for-byte; matmul_q8_int_dequant_q8 stays as the
-       float-reconstruct precision reference. */
-    if (lz_matmul_int() && layer >= 0 && gso == 32 &&
-        matmul_q8_int_impl(s->mmi_acc, s->mmi_xsb, s->mmi_ws,
-                           s->xq, s->xqs, &L->o_proj, qd, hdim, nt) &&
-        matmul_q8_int_consume(s->xb2, s->mmi_acc, s->mmi_xsb, s->mmi_ws,
-                              &L->o_proj, NULL, qd, hdim, 0, nt)) {
-        /* int-domain downstream path wrote s->xb2 */
-    } else {
-        lz_matmul_xq_nt(s->xb2, s->attn_out, s->xq, s->xqs, &L->o_proj, qd,
-                        hdim, nt);
-    }
+    lz_matmul_xq_nt(s->xb2, s->attn_out, s->xq, s->xqs, &L->o_proj, qd,
+                    hdim, nt);
 }
 
 /* ------------------------------------------------ linear_attention block */

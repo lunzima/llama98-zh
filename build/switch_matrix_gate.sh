@@ -52,11 +52,6 @@
 #   LZ_PF_DIST          0        #ifndef default 4 - prefetch lookahead sweep
 #   LZ_Q8R_FORCE_SSE    1        defined-style - force SSE1 q8r tier
 #   LZ_P2_FORCE_MMX     1        defined-style - force pure-MMX p2 tier
-#   LZ_MATMUL_INT       1        #ifndef default 0 - the matmul int
-#      output path. A build macro rather than a CLI flag because it is
-#      inert on the shipping configuration (it declines once the fixed
-#      epilogue is on), so it is a developer A/B - exactly the kind of
-#      control that otherwise never gets built.
 #
 # Plus one PAIR that is not a switch's single off value:
 #
@@ -217,7 +212,7 @@ check_one() {
 
 # name=value pairs, whitespace-separated. The two pair-entries are
 # handled in the loop below.
-SWITCHES="LZ_GDN_FIXED=0 LZ_GDN_STATE_2PLANE=0 LZ_ATTN_FIXED=0 LZ_CONV_FIXED=0 LZ_SSE2_GROUP=0 LZ_Q8_MIN_SCALE=0.0f LZ_EXACT_MATH=1 LZ_CPUID_NOCACHE=1 LZ_NO_FPU=1 LZ_KV_2PLANE=1 LZ_GDN_STATE_F32=1 LZ_BATCH_MAX=1 LZ_SPEC_K=1 LZ_PF_DIST=0 LZ_Q8R_FORCE_SSE=1 LZ_P2_FORCE_MMX=1 LZ_MATMUL_INT=1"
+SWITCHES="LZ_GDN_FIXED=0 LZ_GDN_STATE_2PLANE=0 LZ_ATTN_FIXED=0 LZ_CONV_FIXED=0 LZ_SSE2_GROUP=0 LZ_Q8_MIN_SCALE=0.0f LZ_EXACT_MATH=1 LZ_CPUID_NOCACHE=1 LZ_NO_FPU=1 LZ_KV_2PLANE=1 LZ_GDN_STATE_F32=1 LZ_BATCH_MAX=1 LZ_SPEC_K=1 LZ_PF_DIST=0 LZ_Q8R_FORCE_SSE=1 LZ_P2_FORCE_MMX=1"
 
 for entry in $SWITCHES; do
     name="${entry%%=*}"

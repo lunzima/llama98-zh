@@ -1010,15 +1010,6 @@ int lz_attn_is_auto(void);
    fourth value on that axis, not a separate flag. */
 int lz_attn_int(void);
 
-/* Whether the Q8_0 matmul takes the int-accumulator output path and
-   int-domain downstream consumption for the o_proj call site
-   (docs/matmul-int-output-design.md). Build-time -DLZ_MATMUL_INT=1, not
-   a CLI flag: it is inert on the shipping configuration, since both
-   entry points decline once the fixed epilogue is on and lz_epi_mode's
-   auto turns that on for exactly the machines it was meant to help.
-   Value-changing where it does run (~1.5e-5 vs the float reference). */
-int lz_matmul_int(void);
-
 #if LZ_ATTN_FIXED
 #define LZ_ATTN_MAX_HD 256
 #if (LZ_ATTN_FIXED & 1)
