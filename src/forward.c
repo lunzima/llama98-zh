@@ -436,8 +436,9 @@ static int conv_fixed_build(LZRunState *s, const LZModel *m) {
                     w + (size_t)i * c->conv_kernel, c->conv_kernel,
                     s->conv_mw + (base + ch + i) * c->conv_kernel,
                     s->conv_bound);
-                s->conv_oscale[base + ch + i] =
-                    (float)ldexp(1.0, -((int)e + LZ_CONV_ES));
+                float oscale = (float)ldexp(1.0, -((int)e + LZ_CONV_ES));
+                lz_sig_q15_fold(oscale, &s->conv_sig_k1[base + ch + i],
+                                &s->conv_sig_oscale2[base + ch + i]);
             }
             ch += (size_t)cnt[t];
         }
@@ -803,8 +804,11 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
             sizeof(short), &ok, &s->bytes_alloc);
         s->conv_mw = (short *)xcalloc(nch * c->conv_kernel,
                                       sizeof(short), &ok, &s->bytes_alloc);
-        s->conv_oscale = (float *)xcalloc(nch, sizeof(float), &ok,
+        s->conv_sig_k1 = (float *)xcalloc(nch, sizeof(float), &ok,
                                           &s->bytes_alloc);
+        s->conv_sig_oscale2 = (float *)xcalloc(nch, sizeof(float), &ok,
+                                               &s->bytes_alloc);
+        s->conv_sig_k2 = lz_sig_q15_t_offset();
         if (!ok) s->conv_fixed = 0;
         /* conv_fixed_build runs LATER, after cache_idx is filled - it
            needs the layer -> linear-index map and that is populated
@@ -950,7 +954,8 @@ void lz_state_free(LZRunState *s) {
     free(s->ssm_state_q8_lo);
 #endif /* LZ_GDN_STATE_2PLANE */
     free(s->conv_state);
-    free(s->conv_state_q); free(s->conv_mw); free(s->conv_oscale);
+    free(s->conv_state_q); free(s->conv_mw);
+    free(s->conv_sig_k1); free(s->conv_sig_oscale2);
     free(s->xq); free(s->xqs); free(s->wscr); free(s->fwht_scratch);
     free(s->rope_cs);
     free(s->cache_idx);
@@ -1718,13 +1723,23 @@ static void forward_attn(const LZModel *m, LZRunState *s,
            keeps the same sscale. The Q15 sigmoid is the FLOAT path's own
            sigmoid (lz_sigmoid, whatever tier) rounded to 32768-scale, so
            the gate semantics match the float chain exactly; only the
-           integer-domain accumulator and the >> 15 divide change. */
+           integer-domain accumulator and the >> 15 divide change.
+
+           Fixed tier: lz_sigmoid(g) is (float)sigmoid_q15(g) * 2^-15, so
+           `... * 32768.0f` below just undoes that scaling - both factors
+           are exact powers of two (sigmoid_q15's range is [0, 32768], well
+           inside float's 24-bit mantissa), so the round trip is exact and
+           sigmoid_q15(g) can be called directly, dropping the cvt+2mul.
+           Float tier keeps the original expression: lz_sigmoid there is
+           exp-based, a different value from sigmoid_q15's table. */
         if (attn_int[tk]) {
+            int sig_fixed = lz_sig_mode();
             for (h = 0; h < nh; h++) {
                 const float *gate = qgt + (size_t)h * 2 * hd + hd;
                 int64_t *ac = s->attn_acc + (size_t)tk * qd + (size_t)h * hd;
                 for (d = 0; d < hd; d++) {
-                    int32_t s15 = (int32_t)(lz_sigmoid(gate[d]) * 32768.0f);
+                    int32_t s15 = sig_fixed ? sigmoid_q15(gate[d])
+                                 : (int32_t)(lz_sigmoid(gate[d]) * 32768.0f);
                     ac[d] = (ac[d] * (int64_t)s15) >> 15;
                 }
             }
@@ -1854,7 +1869,8 @@ static void forward_ssm(const LZModel *m, LZRunState *s,
                 s->qkv_c + (size_t)tk * cdim, s->qkv + (size_t)tk * cdim,
                 s->conv_state_q + (size_t)slot_in * conv_slot_stride + li_off_conv,
                 s->conv_state_q + (size_t)slot_out * conv_slot_stride + li_off_conv,
-                s->conv_mw + cb * c->conv_kernel, s->conv_oscale + cb,
+                s->conv_mw + cb * c->conv_kernel,
+                s->conv_sig_k1 + cb, s->conv_sig_oscale2 + cb, s->conv_sig_k2,
                 s->conv_in_scale, s->conv_bound, cdim, c->conv_kernel);
             continue;
         }
@@ -2219,19 +2235,22 @@ static void forward_kda(const LZModel *m, LZRunState *s,
                 s->kda_qc + (size_t)tk * kdim, s->kda_q + (size_t)tk * kdim,
                 qi + q_off, qo + q_off,
                 s->conv_mw + (cb + q_ch) * c->conv_kernel,
-                s->conv_oscale + cb + q_ch,
+                s->conv_sig_k1 + cb + q_ch, s->conv_sig_oscale2 + cb + q_ch,
+                s->conv_sig_k2,
                 s->conv_in_scale, s->conv_bound, kdim, c->conv_kernel);
             lz_causal_conv1d_step_fixed(
                 s->kda_kc + (size_t)tk * kdim, s->kda_k + (size_t)tk * kdim,
                 qi + k_off, qo + k_off,
                 s->conv_mw + (cb + k_ch) * c->conv_kernel,
-                s->conv_oscale + cb + k_ch,
+                s->conv_sig_k1 + cb + k_ch, s->conv_sig_oscale2 + cb + k_ch,
+                s->conv_sig_k2,
                 s->conv_in_scale, s->conv_bound, kdim, c->conv_kernel);
             lz_causal_conv1d_step_fixed(
                 s->kda_vc + (size_t)tk * vdim, s->kda_v + (size_t)tk * vdim,
                 qi + v_off, qo + v_off,
                 s->conv_mw + (cb + v_ch) * c->conv_kernel,
-                s->conv_oscale + cb + v_ch,
+                s->conv_sig_k1 + cb + v_ch, s->conv_sig_oscale2 + cb + v_ch,
+                s->conv_sig_k2,
                 s->conv_in_scale, s->conv_bound, vdim, c->conv_kernel);
             continue;
         }

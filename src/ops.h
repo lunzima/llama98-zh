@@ -1405,7 +1405,8 @@ void lz_causal_conv1d_step(float *o, const float *x,
    gate, not cmp. */
 void lz_causal_conv1d_step_fixed(float *o, const float *x,
                                  const short *sh_in, short *sh_out,
-                                 const short *mw, const float *oscale,
+                                 const short *mw, const float *sig_k1,
+                                 const float *sig_oscale2, float sig_k2,
                                  float in_scale, int bound,
                                  int n_ch, int k);
 

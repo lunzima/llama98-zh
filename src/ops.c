@@ -41,10 +41,11 @@
 #endif /* LZ_GDN_FIXED */
 
 #include "ops_quant.h"   /* pow2f, q8_round, q8_amax, sigmoid_q15,
-                           norm_ss_fixed, lz_exp_float_body,
-                           lz_rsqrt_float_body, lz_exp_fixed,
-                           lz_rsqrt_fixed, LZ_Q8_MIN_SCALE_F,
-                           LZ_Q8_INV127, LZ_Q15_INV */
+                           sigmoid_q15_t, lz_sig_q15_fold,
+                           lz_sig_q15_t_offset, norm_ss_fixed,
+                           lz_exp_float_body, lz_rsqrt_float_body,
+                           lz_exp_fixed, lz_rsqrt_fixed,
+                           LZ_Q8_MIN_SCALE_F, LZ_Q8_INV127, LZ_Q15_INV */
 #include "ops_sched.h"   /* lz_q8r_tier, q8r_have_simd */
 #include "ops_matmul.h"  /* matmul impls, LZ_ROW_* tables, epilogue fns */
 
@@ -1682,21 +1683,38 @@ void lz_causal_conv1d_step(float *o, const float *x,
  * lz_conv_norm_pow2 against lz_conv_accum_bound(k), which is what keeps
  * `acc` inside int32 - see that function for the derivation.
  *
- * The x87/SSE agreement argument is the same as the float path's: the
- * only float arithmetic left is one multiply in and one multiply out,
- * both by an exact power of two, so neither rounds. */
+ * The x87/SSE agreement argument is the same as the float path's: every
+ * float multiply here (input, sig_k1, sig_oscale2) is by an exact power
+ * of two, so none of them round.
+ *
+ * Activation calls sigmoid_q15_t directly instead of going through
+ * lz_silu/lz_sigmoid: the old shape computed v = acc_f*oscale once and
+ * reused it for both the sigmoid input and the output multiply, but
+ * each side then had to scale v again on top (entry by LZ_SIG_STEP,
+ * exit by 1/32768) - v was never actually shared work. sig_k1/
+ * sig_oscale2 (lz_sig_q15_fold) are oscale pre-multiplied by those two
+ * factors, so acc_f is scaled by each ONCE, and v itself is never
+ * materialized. Bit-identical to the old lz_silu(lz_i32f(acc)*oscale[c])
+ * chain - verified over the accumulator's realistic range,
+ * .prof/verify_conv_fold3.c, 0 mismatches - and one multiply per
+ * channel cheaper. */
 void lz_causal_conv1d_step_fixed(float *o, const float *x,
                                  const short *sh_in, short *sh_out,
-                                 const short *mw, const float *oscale,
+                                 const short *mw, const float *sig_k1,
+                                 const float *sig_oscale2, float sig_k2,
                                  float in_scale, int bound,
                                  int n_ch, int k) {
     int hist = k - 1;
     int c, j;
-    /* One multiply in, one convert and one multiply out, whatever k is.
-       That independence from k is the whole point of the tier. The
-       input-side round-to-int (add 0.5, convert) is not billed here,
-       same convention as the other quantizers' rounding steps. */
-    LZ_FCX(LZ_FC_CONV, (long)n_ch * 2, 0, 0, (long)n_ch, 0);
+    /* Per channel: input multiply (1), lz_i32f (1 cvt), sig_k1 multiply
+       + sig_k2 add (the folded entry, 1 mul + 1 add), sigmoid_q15_t's
+       own frac-interpolation multiply (1, not itemized here, same
+       convention lz_sigmoid's flat bill already used for it), the exit
+       cast (1 cvt) and sig_oscale2 multiply (1), and the final product
+       (1) = 5 mul, 1 add, 2 cvt. Was 2 mul + 1 cvt here plus 4 mul + 1
+       add + 1 cvt at the sigmoid site through lz_silu (9 total); the
+       sigmoid site no longer sees this call at all. */
+    LZ_FCX(LZ_FC_CONV, (long)n_ch * 5, (long)n_ch, 0, (long)n_ch * 2, 0);
     for (c = 0; c < n_ch; c++) {
         const short *si = sh_in + (size_t)c * hist;
         short *so = sh_out + (size_t)c * hist;
@@ -1708,7 +1726,11 @@ void lz_causal_conv1d_step_fixed(float *o, const float *x,
         if (q < -bound) q = -bound;
         for (j = 0; j < hist; j++) acc += (int)wr[j] * (int)si[j];
         acc += (int)wr[hist] * q;
-        o[c] = lz_silu(lz_i32f(acc) * oscale[c]);
+        {
+            float acc_f = lz_i32f(acc);
+            int32_t s15 = sigmoid_q15_t(acc_f * sig_k1[c] + sig_k2);
+            o[c] = (acc_f * sig_oscale2[c]) * (float)s15;
+        }
         for (j = 0; j + 1 < hist; j++) so[j] = si[j + 1];
         if (hist > 0) so[hist - 1] = (short)q;
     }

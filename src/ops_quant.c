@@ -429,6 +429,50 @@ int32_t sigmoid_q15(float x) {
     return a + (((b - a) * frac) >> 15);
 }
 
+/* Table-only sigmoid_q15: takes the pre-scaled coordinate t = (x -
+   LZ_SIG_LO) * LZ_SIG_STEP directly instead of computing it from x, for
+   callers that fold LZ_SIG_STEP into their own per-call scale (see
+   lz_sig_q15_fold/lz_sig_q15_t_offset). Clamp thresholds are t's own
+   domain, derived from sigmoid_q15's (t is monotonic increasing in x):
+   t <= 0 is x <= LZ_SIG_LO, t >= LZ_SIG_N is x >= -LZ_SIG_LO. Both
+   clamps run before any cast, unlike a naive port of the x-domain
+   checks, since a caller's folded t can be far outside int32 range for
+   an out-of-scale accumulator. */
+int32_t sigmoid_q15_t(float t) {
+    int idx;
+    int32_t frac, a, b;
+    if (!g_sigtab_ready) sig_build();
+    if (t <= 0.0f) return 0;
+    if (t >= (float)LZ_SIG_N) return g_sigtab[LZ_SIG_N];
+    idx = (int)t;
+    frac = (int32_t)((t - (float)idx) * 32768.0f);
+    a = g_sigtab[idx];
+    b = g_sigtab[idx + 1];
+    return a + (((b - a) * frac) >> 15);
+}
+
+/* The additive half of sigmoid_q15_t's folded entry: t = acc*k1 + this,
+   where k1 = oscale*LZ_SIG_STEP (lz_sig_q15_fold) reproduces (x -
+   LZ_SIG_LO)*LZ_SIG_STEP for x = acc*oscale bit-for-bit, since both
+   LZ_SIG_STEP and the offset below are exact powers of two applied to
+   an already-computed value - multiplying by an exact power of two only
+   shifts the exponent, so it introduces no rounding of its own and
+   commutes exactly with the surrounding add/multiply chain. Verified
+   over the accumulator's realistic range (.prof/verify_conv_fold3.c),
+   0 mismatches against the unfolded x = acc*oscale path. A getter, not
+   a header #define, so LZ_SIG_LO/STEP stay private to this file. */
+float lz_sig_q15_t_offset(void) { return -LZ_SIG_LO * LZ_SIG_STEP; }
+
+/* Per-channel factors for the fold above: k1 feeds sigmoid_q15_t's
+   entry, oscale2 folds the exit's 1/32768 descale into the same
+   dequant this channel already applies, so the caller never has to
+   materialize x = acc*oscale as an intermediate - see
+   lz_causal_conv1d_step_fixed for the shape this exists for. */
+void lz_sig_q15_fold(float oscale, float *k1, float *oscale2) {
+    *k1 = oscale * LZ_SIG_STEP;
+    *oscale2 = oscale * (1.0f / 32768.0f);
+}
+
 /* ---- Q8 quantization helpers ----------------------------------------- */
 
 /* The amax scan, dispatched. Bit-identical across every tier by

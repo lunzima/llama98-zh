@@ -30,6 +30,12 @@ float lz_rsqrt_fixed(float x);
 /* Q15 sigmoid (interpolated table). */
 int32_t sigmoid_q15(float x);
 
+/* Table-only sigmoid_q15 taking the pre-scaled coordinate directly, and
+   the two helpers that build it from a caller's own dequant scale. */
+int32_t sigmoid_q15_t(float t);
+float lz_sig_q15_t_offset(void);
+void lz_sig_q15_fold(float oscale, float *k1, float *oscale2);
+
 /* Sum-of-squares in integer domain (fixed-tier norms). Returns -1 to
    decline (caller runs the float path). */
 float norm_ss_fixed(const float *x, int n);

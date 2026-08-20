@@ -452,13 +452,20 @@ typedef struct {
        and `conv_fixed` says so - a NULL check alone would not, because
        the tier can be compiled out. Same shape and ring layout as
        conv_state, int16 instead of float.
-         conv_mw        (n_linear, lin_conv_dim, conv_kernel) taps
-         conv_oscale    (n_linear, lin_conv_dim) 2^-(ew+es) per channel
-       Both are derived from the model and never change; they live here
+         conv_mw          (n_linear, lin_conv_dim, conv_kernel) taps
+         conv_sig_k1      (n_linear, lin_conv_dim) sigmoid_q15_t's folded
+                           entry factor: oscale * LZ_SIG_STEP
+         conv_sig_oscale2 (n_linear, lin_conv_dim) folded exit factor:
+                           oscale / 32768 (oscale is 2^-(ew+es); neither
+                           array stores oscale itself - it has no other
+                           consumer, see lz_sig_q15_fold)
+       All are derived from the model and never change; they live here
        rather than on LZModel only to keep the loader untouched. */
     short *conv_state_q;
     short *conv_mw;
-    float *conv_oscale;
+    float *conv_sig_k1;
+    float *conv_sig_oscale2;
+    float  conv_sig_k2;         /* lz_sig_q15_t_offset(), same for every channel */
     float  conv_in_scale;
     int    conv_bound;
     int    conv_fixed;
