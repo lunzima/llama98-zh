@@ -92,6 +92,7 @@ typedef enum {
     LZ_ERR_CFG_ROPE_SCALING,   /* unsupported rope_scaling type: %s */
     LZ_ERR_CFG_KDA_ACT,        /* kda_gate_activation must be silu, got %s */
     LZ_ERR_CFG_MOE_FIELDS,     /* invalid MoE fields: num_experts=%d top_k=%d first_k_dense_replace=%d */
+    LZ_ERR_CFG_HADAMARD,       /* %s=%d is not a power of two dividing %s=%d */
 
     /* model tensors */
     LZ_ERR_TENSOR_MISSING,     /* missing tensor %s */

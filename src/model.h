@@ -220,6 +220,18 @@ typedef struct {
        gate_norm / up_norm / down_norm fields on LZLayer). Mirrors the
        training side's config.use_subn. 0 = ordinary pre-layer norms. */
     int use_subn;
+    /* Block-diagonal Hadamard (online, applied to the SubLN activation
+       just before quantization - never folded into a weight, so nothing
+       in the tensor data records whether it was done). hadamard_o is
+       kda_o_proj's block, hadamard_down is the dense FFN down_proj's.
+       0 = no Hadamard; a positive value is the block size (a power of
+       two dividing that projection's input dim). -1 on the wire means
+       "derive" and exists only for products that predate these fields
+       (bin < v8, config.json without the keys); load time resolves it
+       into a concrete 0-or-block-size, so the forward pass only ever
+       sees the two settled values. */
+    int hadamard_o;
+    int hadamard_down;
     /* config.json "mtp_num_hidden_layers"; 0 when the key is absent,
        which is every model this project has produced except upstream
        Qwen/Qwen3.5-0.8B itself (1, 15 mtp.* tensors, 20,452,864

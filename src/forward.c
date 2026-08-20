@@ -2385,11 +2385,10 @@ static void forward_kda(const LZModel *m, LZRunState *s,
                            s->ssm_out + (size_t)tk * vdim,
                            lz_t_f32(&L->kda_o_subn_norm, s->wscr), vdim,
                            c->rms_norm_eps);
-            /* SubLN Hadamard: o_proj's block is value_dim (the training
-               side's hadamard_dim = self.value_dim, a power of two). */
+            /* SubLN Hadamard: o_proj's block, settled at load time
+               (model.c resolve_hadamard). 0 = no Hadamard. */
             {
-                int oblk = vdim;
-                if (oblk < 2 || (oblk & (oblk - 1))) oblk = 0;
+                int oblk = c->hadamard_o;
                 if (oblk > 1) {
                     for (tk = 0; tk < nt; tk++)
                         subn_fwht_quant(s->ssm_out + (size_t)tk * vdim, vdim,
@@ -2735,12 +2734,10 @@ static void dense_ffn_step(const LZModel *m, LZRunState *s,
     LZ_TAP("fh", layer, s->hb, idim);
     if (c->use_subn) {
         /* down_proj input = RMSNorm_{down_norm}(SwiGLU output), then the
-           SubLN block Hadamard (training caps the block at 512, stepping
-           down to the largest power of two that divides idim). */
+           SubLN block Hadamard, whose block is settled at load time
+           (model.c resolve_hadamard). 0 = no Hadamard. */
         {
-            int dblk = 512;
-            while (dblk > 1 && idim % dblk) dblk >>= 1;
-            if (dblk == 1) dblk = 0;
+            int dblk = c->hadamard_down;
             for (tk = 0; tk < nt; tk++)
                 lz_rmsnorm(s->hb2 + (size_t)tk * idim, s->hb + (size_t)tk * idim,
                            lz_t_f32(&L->down_norm, s->wscr), idim, c->rms_norm_eps);

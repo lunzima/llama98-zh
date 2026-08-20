@@ -26,6 +26,66 @@ const char *lz_layer_type_name(int t) {
 
 /* ---------------------------------------------------------------- config */
 
+/* Settle hadamard_o / hadamard_down into concrete values and refuse the
+   illegal ones. Called by BOTH loaders (config.json and model.bin) once
+   lin_value_dim / intermediate_size are known, so the forward pass reads
+   one already-resolved number and never re-derives.
+
+   -1 means the product predates the fields; the two derivations below
+   reproduce what the forward pass used to compute inline, so a legacy
+   model keeps its exact previous behaviour.
+
+   An explicit block size that is not a power of two, or does not divide
+   the projection's input dim, is a refusal rather than a fallback to 0:
+   quietly dropping the transform would let a mis-exported model produce
+   numbers that look reasonable and are not. Block size 1 IS legal and
+   means off - a 1x1 Hadamard is the identity, so the forward pass's
+   `blk > 1` guard is exact, not an approximation. */
+static int hadamard_ok(int blk, int dim) {
+    if (blk == 0) return 1;                    /* off */
+    if (blk < 0) return 0;                     /* -1 is handled by the caller */
+    if (blk & (blk - 1)) return 0;             /* not a power of two */
+    return dim > 0 && dim % blk == 0;
+}
+
+static int resolve_hadamard(LZModelConfig *c, char *errbuf, int errlen) {
+    int vdim = c->lin_value_dim;
+    int idim = c->intermediate_size;
+    if (c->hadamard_o == -1) {
+        int oblk = vdim;
+        if (oblk < 2 || (oblk & (oblk - 1))) oblk = 0;
+        c->hadamard_o = oblk;
+    } else if (!hadamard_ok(c->hadamard_o, vdim)) {
+        qerr(errbuf, errlen, LZ_ERR_CFG_HADAMARD,
+             "hadamard_o", c->hadamard_o, "lin_value_dim", vdim);
+        return 1;
+    }
+    if (c->hadamard_down == -1) {
+        int dblk = 512;
+        while (dblk > 1 && idim % dblk) dblk >>= 1;
+        if (dblk == 1) dblk = 0;
+        c->hadamard_down = dblk;
+    } else if (!hadamard_ok(c->hadamard_down, idim)) {
+        qerr(errbuf, errlen, LZ_ERR_CFG_HADAMARD,
+             "hadamard_down", c->hadamard_down, "intermediate_size", idim);
+        return 1;
+    }
+    /* One hadamard_down serves two consumers: the body's dense FFN and
+       the MTP block's, whose width is its own field. The block MUST
+       divide both - forward.c's block loop steps b_i += blk to n and
+       would write past the row otherwise. Equal widths (every product so
+       far, and the default when the key is absent) make this vacuous. */
+    if (c->use_subn && c->mtp_n_layers > 0 && c->hadamard_down > 1 &&
+        (c->mtp_intermediate_size <= 0 ||
+         c->mtp_intermediate_size % c->hadamard_down)) {
+        qerr(errbuf, errlen, LZ_ERR_CFG_HADAMARD,
+             "hadamard_down", c->hadamard_down,
+             "mtp_intermediate_size", c->mtp_intermediate_size);
+        return 1;
+    }
+    return 0;
+}
+
 int lz_load_config(LZModelConfig *c, const char *path,
                        char *errbuf, int errlen) {
     char *buf;
@@ -101,6 +161,11 @@ int lz_load_config(LZModelConfig *c, const char *path,
         c->attn_output_gate = (n && n->type == LZ_JSON_BOOL && n->num != 0.0);
     }
     c->use_subn = lz_json_get_int(&j, tc, "use_subn", 0);
+    /* Block-diagonal Hadamard block sizes. -1 = "derive" (resolved by
+       resolve_hadamard below), which is what a config.json written
+       before these keys existed gets. */
+    c->hadamard_o    = lz_json_get_int(&j, tc, "hadamard_o", -1);
+    c->hadamard_down = lz_json_get_int(&j, tc, "hadamard_down", -1);
 
     /* KDA gate (only meaningful when is_kunmoe; harmless zero otherwise).
        kda_gate_rank mirrors KunMoeConfig's "field or head_k_dim" default -
@@ -306,6 +371,8 @@ int lz_load_config(LZModelConfig *c, const char *path,
              c->rotary_dim, c->head_dim, (double)c->partial_rotary_factor);
         return 1;
     }
+    /* After lin_value_dim, which the derivations read. */
+    if (resolve_hadamard(c, errbuf, errlen) != 0) return 1;
     return 0;
 }
 
@@ -1269,7 +1336,7 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
        know the shape of (RD would then desync into tensor data and fail
        some unrelated way downstream, which is not a diagnosis). */
     if (ver != 1 && ver != 2 && ver != 3 && ver != 4 && ver != 5 &&
-        ver != 6 && ver != 7) {
+        ver != 6 && ver != 7 && ver != 8) {
         qerr(errbuf, errlen, LZ_ERR_BIN_VERSION, ver);
         goto fail;
     }
@@ -1362,6 +1429,19 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
     if (ver >= 7) {
         RD(&c->use_subn, 4);
     }
+    /* v8 header tail: the two block-diagonal Hadamard block sizes. Unlike
+       every tail above, absent (ver < 8) must NOT keep lz_open's
+       memset(m, 0, ...) value: 0 is the legal, meaningful "no Hadamard"
+       setting, and a v7 SubLN product DOES apply one. Set the sentinel
+       explicitly so resolve_hadamard derives what those products were
+       built with. */
+    if (ver >= 8) {
+        RD(&c->hadamard_o, 4);
+        RD(&c->hadamard_down, 4);
+    } else {
+        c->hadamard_o = -1;
+        c->hadamard_down = -1;
+    }
 #undef RD
 
     /* Defense: derived quantities and key fields self-consistent (same checks as lz_load_config) */
@@ -1375,6 +1455,7 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
         qerr(errbuf, errlen, LZ_ERR_BIN_CFG);
         goto fail;
     }
+    if (resolve_hadamard(c, errbuf, errlen) != 0) goto fail;
 
     m->layers = (LZLayer *)calloc((size_t)c->n_layers, sizeof(LZLayer));
     if (!m->layers) {
