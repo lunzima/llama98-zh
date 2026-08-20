@@ -2030,6 +2030,63 @@ static void forward_kda(const LZModel *m, LZRunState *s,
     int nsa = (gsa > 0) ? hdim / gsa : 0;
     int h, i, tk;
 
+    if (c->use_subn) {
+        /* SubLN per-projection input RMSNorms for the four hidden-space
+           ternary projections (q/k/v/g): each normalizes the
+           UN-normalized residual with its own norm weight before its
+           matmul (the two pre-layer norms are deleted - see the layer
+           loop in forward_chunk). They share s->xb2 as scratch, free
+           until the o_proj matmul below overwrites it: each norm result
+           is consumed by its own matmul before the next norm runs, and
+           for Q8 weights the matmul reads the quantized xq/xqs, not the
+           float scratch. f_a/b_proj stay on raw s->xb - no SubLN norm
+           field exists for the low-rank decay-gate projections. */
+        for (tk = 0; tk < nt; tk++)
+            lz_rmsnorm(s->xb2 + (size_t)tk * hdim, s->xb + (size_t)tk * hdim,
+                       lz_t_f32(&L->kda_q_norm, s->wscr), hdim, c->rms_norm_eps);
+        for (tk = 0; tk < nt; tk++)
+            lz_quantize_q8(s->xb2 + (size_t)tk * hdim, hdim, gsa,
+                           s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
+        lz_matmul_xq_nt(s->kda_q, s->xb2, s->xq, s->xqs, &L->kda_q_proj,
+                        hdim, kdim, nt);
+
+        for (tk = 0; tk < nt; tk++)
+            lz_rmsnorm(s->xb2 + (size_t)tk * hdim, s->xb + (size_t)tk * hdim,
+                       lz_t_f32(&L->kda_k_norm, s->wscr), hdim, c->rms_norm_eps);
+        for (tk = 0; tk < nt; tk++)
+            lz_quantize_q8(s->xb2 + (size_t)tk * hdim, hdim, gsa,
+                           s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
+        lz_matmul_xq_nt(s->kda_k, s->xb2, s->xq, s->xqs, &L->kda_k_proj,
+                        hdim, kdim, nt);
+
+        for (tk = 0; tk < nt; tk++)
+            lz_rmsnorm(s->xb2 + (size_t)tk * hdim, s->xb + (size_t)tk * hdim,
+                       lz_t_f32(&L->kda_v_norm, s->wscr), hdim, c->rms_norm_eps);
+        for (tk = 0; tk < nt; tk++)
+            lz_quantize_q8(s->xb2 + (size_t)tk * hdim, hdim, gsa,
+                           s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
+        lz_matmul_xq_nt(s->kda_v, s->xb2, s->xq, s->xqs, &L->kda_v_proj,
+                        hdim, vdim, nt);
+
+        for (tk = 0; tk < nt; tk++)
+            lz_rmsnorm(s->xb2 + (size_t)tk * hdim, s->xb + (size_t)tk * hdim,
+                       lz_t_f32(&L->kda_g_norm, s->wscr), hdim, c->rms_norm_eps);
+        for (tk = 0; tk < nt; tk++)
+            lz_quantize_q8(s->xb2 + (size_t)tk * hdim, hdim, gsa,
+                           s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
+        lz_matmul_xq_nt(s->zbuf, s->xb2, s->xq, s->xqs, &L->kda_g_proj,
+                        hdim, vdim, nt);
+
+        /* f_a/b_proj: no SubLN norm field - quantize raw s->xb (the
+           shared-activation-quantization trick still applies to these
+           two). */
+        for (tk = 0; tk < nt; tk++)
+            lz_quantize_q8(s->xb + (size_t)tk * hdim, hdim, gsa,
+                           s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
+        lz_matmul_xq_nt(s->kda_gate_lat, s->xb, s->xq, s->xqs, &L->kda_f_a_proj,
+                        hdim, gate_rank, nt);
+        lz_matmul_xq_nt(s->bvec, s->xb, s->xq, s->xqs, &L->kda_b_proj, hdim, nv, nt);
+    } else {
     /* Six hidden-space projections share one activation quantization,
        the same trick forward_ssm uses for its four (all have
        in_dim == hidden_size, so lz_act_gs agrees regardless of format). */
@@ -2043,6 +2100,7 @@ static void forward_kda(const LZModel *m, LZRunState *s,
                     hdim, gate_rank, nt);
     lz_matmul_xq_nt(s->bvec, s->xb, s->xq, s->xqs, &L->kda_b_proj, hdim, nv, nt);
     lz_matmul_xq_nt(s->zbuf, s->xb, s->xq, s->xqs, &L->kda_g_proj, hdim, vdim, nt);
+    }
     LZ_TAP("kq", layer, s->kda_q, kdim);
     LZ_TAP("kk", layer, s->kda_k, kdim);
     LZ_TAP("kv", layer, s->kda_v, vdim);
@@ -2220,7 +2278,29 @@ static void forward_kda(const LZModel *m, LZRunState *s,
     {
         int gso = lz_act_gs(&L->kda_o_proj, vdim);
         int nso = (gso > 0) ? vdim / gso : 0;
-        if (lz_norm_int() && lz_norm_can_fixed(vd) &&
+        if (c->use_subn) {
+            /* SubLN: o_proj's OWN input RMSNorm (kda_o_subn_norm) over
+               the whole lin_value_dim span, applied AFTER the per-head
+               gated silu norm (kda_o_norm). Computed in float regardless
+               of the fixed/int tiers: the Q15 int-output shortcut
+               materializes the gated result only as an int scale that
+               cannot feed a second per-element weight multiply. */
+            for (tk = 0; tk < nt; tk++)
+                for (h = 0; h < nv; h++)
+                    lz_rmsnorm_gated(s->ssm_out + (size_t)tk * vdim + (size_t)h * vd,
+                                     s->ssm_out + (size_t)tk * vdim + (size_t)h * vd,
+                                     s->zbuf + (size_t)tk * vdim + (size_t)h * vd,
+                                     lz_t_f32(&L->kda_o_norm, s->wscr), vd,
+                                     c->rms_norm_eps, NULL);
+            for (tk = 0; tk < nt; tk++)
+                lz_rmsnorm(s->ssm_out + (size_t)tk * vdim,
+                           s->ssm_out + (size_t)tk * vdim,
+                           lz_t_f32(&L->kda_o_subn_norm, s->wscr), vdim,
+                           c->rms_norm_eps);
+            for (tk = 0; tk < nt; tk++)
+                lz_quantize_q8(s->ssm_out + (size_t)tk * vdim, vdim, gso,
+                               s->xq + (size_t)tk * vdim, s->xqs + (size_t)tk * nso);
+        } else if (lz_norm_int() && lz_norm_can_fixed(vd) &&
             gso > 0 && (vd % gso) == 0) {
             for (tk = 0; tk < nt; tk++)
                 for (h = 0; h < nv; h++) {
@@ -2500,6 +2580,31 @@ static void dense_ffn_step(const LZModel *m, LZRunState *s,
     int i, tk;
     (void)layer;   /* only used inside LZ_TAP, which is a no-op in a normal build */
 
+    if (c->use_subn) {
+        /* SubLN per-projection input RMSNorms for the dense FFN: gate
+           and up each normalize the UN-normalized residual with their own
+           norm weight before their matmul (s->xb2 as scratch, free until
+           the down_proj matmul below), down normalizes the intermediate
+           activation with down_norm (s->hb2 as scratch, dead after the
+           SwiGLU loop). */
+        for (tk = 0; tk < nt; tk++)
+            lz_rmsnorm(s->xb2 + (size_t)tk * dim, s->xb + (size_t)tk * dim,
+                       lz_t_f32(&L->gate_norm, s->wscr), dim, c->rms_norm_eps);
+        for (tk = 0; tk < nt; tk++)
+            lz_quantize_q8(s->xb2 + (size_t)tk * dim, dim, gsg,
+                           s->xq + (size_t)tk * dim, s->xqs + (size_t)tk * nsg);
+        lz_matmul_xq_nt(s->hb, s->xb2, s->xq, s->xqs, &L->gate_proj, dim,
+                        idim, nt);
+
+        for (tk = 0; tk < nt; tk++)
+            lz_rmsnorm(s->xb2 + (size_t)tk * dim, s->xb + (size_t)tk * dim,
+                       lz_t_f32(&L->up_norm, s->wscr), dim, c->rms_norm_eps);
+        for (tk = 0; tk < nt; tk++)
+            lz_quantize_q8(s->xb2 + (size_t)tk * dim, dim, gsg,
+                           s->xq + (size_t)tk * dim, s->xqs + (size_t)tk * nsg);
+        lz_matmul_xq_nt(s->hb2, s->xb2, s->xq, s->xqs, &L->up_proj, dim,
+                        idim, nt);
+    } else {
     for (tk = 0; tk < nt; tk++)
         lz_quantize_q8(s->xb + (size_t)tk * dim, dim, gsg,
                        s->xq + (size_t)tk * dim, s->xqs + (size_t)tk * nsg);
@@ -2507,6 +2612,7 @@ static void dense_ffn_step(const LZModel *m, LZRunState *s,
                     idim, nt);
     lz_matmul_xq_nt(s->hb2, s->xb, s->xq, s->xqs, &L->up_proj, dim,
                     idim, nt);
+    }
     {
         /* SwiGLU: one lz_exp per element, scalar. NOT vectorized, and
            not worth vectorizing - measured at 0.7%% of decode
@@ -2525,6 +2631,17 @@ static void dense_ffn_step(const LZModel *m, LZRunState *s,
         LZ_PROF_END(_ta, LZ_PROF_ACT);
     }
     LZ_TAP("fh", layer, s->hb, idim);
+    if (c->use_subn) {
+        /* down_proj input = RMSNorm_{down_norm}(SwiGLU output). */
+        for (tk = 0; tk < nt; tk++)
+            lz_rmsnorm(s->hb2 + (size_t)tk * idim, s->hb + (size_t)tk * idim,
+                       lz_t_f32(&L->down_norm, s->wscr), idim, c->rms_norm_eps);
+        for (tk = 0; tk < nt; tk++)
+            lz_quantize_q8(s->hb2 + (size_t)tk * idim, idim, gsd,
+                           s->xq + (size_t)tk * idim, s->xqs + (size_t)tk * nsd);
+        lz_matmul_xq_nt(s->xb2, s->hb2, s->xq, s->xqs, &L->down_proj, idim,
+                        dim, nt);
+    } else {
     /* Quantization groups must match the target weight gs: when the
        intermediate dim is not a multiple of 32 (e.g. 1021) the weight's
        in-row gs falls back, and xqs tail entries must be filled with
@@ -2534,6 +2651,7 @@ static void dense_ffn_step(const LZModel *m, LZRunState *s,
                        s->xq + (size_t)tk * idim, s->xqs + (size_t)tk * nsd);
     lz_matmul_xq_nt(s->xb2, s->hb, s->xq, s->xqs, &L->down_proj, idim,
                     dim, nt);
+    }
 }
 
 /* --------------------------------------------------------- MTP draft step */
@@ -2724,10 +2842,19 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
            across layer boundaries. No-op unless LZ_X87_STACK_GATE. */
         LZ_X87_STACK_CHECK("layer-entry");
 
-        for (tk = 0; tk < nt; tk++)
-            lz_rmsnorm(s->xb + (size_t)tk * dim, s->x + (size_t)tk * dim,
-                       lz_t_f32(&L->input_layernorm, s->wscr), dim,
-                       c->rms_norm_eps);
+        /* SubLN (config.use_subn): the two pre-layer RMSNorms are
+           deleted and each ternary projection normalizes its own input
+           instead (forward_kda / dense_ffn_step). Ordinary models keep
+           the original norms, bit for bit. The SubLN copy is elementwise
+           so downstream readers of s->xb keep working unchanged. */
+        if (c->use_subn) {
+            for (i = 0; i < nt * dim; i++) s->xb[i] = s->x[i];
+        } else {
+            for (tk = 0; tk < nt; tk++)
+                lz_rmsnorm(s->xb + (size_t)tk * dim, s->x + (size_t)tk * dim,
+                           lz_t_f32(&L->input_layernorm, s->wscr), dim,
+                           c->rms_norm_eps);
+        }
         LZ_TAP("an", l, s->xb, dim);
         LZ_PROF_BEG(_tp);
         if (L->type == LZ_LT_FULL)      forward_attn(m, s, L, l, pos0, nt);
@@ -2738,10 +2865,14 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
         for (i = 0; i < nt * dim; i++) s->x[i] += s->xb2[i];
         LZ_TAP("res", l, s->x, dim);
 
-        for (tk = 0; tk < nt; tk++)
-            lz_rmsnorm(s->xb + (size_t)tk * dim, s->x + (size_t)tk * dim,
-                       lz_t_f32(&L->post_attention_layernorm, s->wscr), dim,
-                       c->rms_norm_eps);
+        if (c->use_subn) {
+            for (i = 0; i < nt * dim; i++) s->xb[i] = s->x[i];
+        } else {
+            for (tk = 0; tk < nt; tk++)
+                lz_rmsnorm(s->xb + (size_t)tk * dim, s->x + (size_t)tk * dim,
+                           lz_t_f32(&L->post_attention_layernorm, s->wscr), dim,
+                           c->rms_norm_eps);
+        }
         LZ_TAP("pn", l, s->xb, dim);
         LZ_PROF_BEG(_tf);
         if (L->ffn_moe) {
