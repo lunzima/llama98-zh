@@ -39,7 +39,7 @@
    observable is indistinguishable from a knob that does nothing. */
 #ifndef LZ_GDN_FIXED
 #define LZ_GDN_FIXED 1
-#endif
+#endif /* LZ_GDN_FIXED */
 
 /* Accumulator bound for the fixed conv tier, derived not chosen.
    k products of two values bounded by B reach k*B^2, which must stay
@@ -87,7 +87,7 @@ int lz_conv_norm_pow2(const float *v, int n, short *out, int bound) {
 #if LZ_F32COUNT
 double lz_f32_class[LZ_FC_N][LZ_FCC_N];
 int lz_f32_reached[LZ_FC_N];
-#endif
+#endif /* LZ_F32COUNT */
 
 static const char *const LZ_FC_NAMES[LZ_FC_N] = {
     "dequant epilogue", "attention scoring", "attention wsum",
@@ -114,7 +114,7 @@ double lz_f32_count_get(int site) {
 #else
     (void)site;
     return -1.0;   /* not "zero work": the build cannot answer */
-#endif
+#endif /* LZ_F32COUNT */
 }
 
 double lz_f32_class_get(int site, int cls) {
@@ -124,7 +124,7 @@ double lz_f32_class_get(int site, int cls) {
 #else
     (void)site; (void)cls;
     return -1.0;   /* not "zero work": the build cannot answer */
-#endif
+#endif /* LZ_F32COUNT */
 }
 
 const char *lz_f32_class_name(int cls) {
@@ -137,7 +137,7 @@ int lz_f32_count_reached(int site) {
 #else
     (void)site;
     return 0;
-#endif
+#endif /* LZ_F32COUNT */
 }
 
 void lz_f32_count_reset(void) {
@@ -147,7 +147,7 @@ void lz_f32_count_reset(void) {
         for (c = 0; c < LZ_FCC_N; c++) lz_f32_class[i][c] = 0.0;
         lz_f32_reached[i] = 0;
     }
-#endif
+#endif /* LZ_F32COUNT */
 }
 
 /* The selected kernel tier, 0 = not yet selected. Defined here, near the
@@ -542,7 +542,7 @@ static unsigned short lz_x87_cw_get(void) {
 static void lz_x87_cw_set(unsigned short cw) {
     __asm__ __volatile__("fldcw %0" : : "m"(cw));
 }
-#endif
+#endif /* __i386__ && !__SSE_MATH__ && !__SSE2_MATH__ */
 
 unsigned lz_fpu_float_begin(void) {
 #if defined(__WATCOMC__)
@@ -555,7 +555,7 @@ unsigned lz_fpu_float_begin(void) {
     return save;
 #else
     return 0;   /* gcc/SSE already has float semantics */
-#endif
+#endif /* __WATCOMC__ */
 }
 
 void lz_fpu_float_end(unsigned save) {
@@ -565,7 +565,7 @@ void lz_fpu_float_end(unsigned save) {
     lz_x87_cw_set((unsigned short)save);
 #else
     (void)save;
-#endif
+#endif /* __WATCOMC__ */
 }
 
 float lz_softplus(float x) {
@@ -601,7 +601,7 @@ float lz_softplus(float x) {
     }
 #else
     return (float)log1p(exp((double)x));
-#endif
+#endif /* __WATCOMC__ */
 }
 
 /* Round-to-nearest (IEEE default round-half-to-even) via a magic-number
@@ -747,7 +747,7 @@ float lz_rsqrt(float x) {
         return lz_rsqrt_fixed(x);
     LZ_FCX(LZ_FC_RSQRT, 7, 2, 0, 0, 0);   /* the halving plus 2 x (3 mul, 1 sub) */
     return lz_rsqrt_float_body(x);
-#endif
+#endif /* LZ_EXACT_MATH */
 }
 
 /* 2^(k/32), k=0..31. 128 bytes, no pressure on L1.
@@ -936,7 +936,7 @@ float lz_exp(float x) {
     return lz_exp_float_body(x);
 #else
     return (float)exp((double)x);
-#endif
+#endif /* LZ_EXACT_MATH */
 }
 
 /* ---- Q8 quantization per-element rounding: SSE2 version (32 at a time) ----
@@ -995,7 +995,7 @@ float lz_exp(float x) {
    ops_kernel_q8round.h's sibling, ops_kernel_dot.h. */
 #if defined(LZ_HAVE_Q8R_SIMD) || defined(LZ_HAVE_Q8R_SSE)
 static int lz_q8r_tier(void);
-#endif
+#endif /* LZ_HAVE_Q8R_SIMD || LZ_HAVE_Q8R_SSE */
 static int q8r_have_simd(void);
 /* Cached CPUID MMX bit, forward-declared because the _mm_empty() call
    sites in lz_quantize_q8 (above) use it before its definition below.
@@ -1130,7 +1130,7 @@ void lz_quantize_q8(const float *x, int n, int gs, int8_t *q, float *s) {
 #if defined(LZ_HAVE_Q8R_SIMD) || defined(LZ_HAVE_Q8R_SSE)
     /* The rounding tier is selected once for the whole call, not per group */
     int tier = ((gs & 31) == 0) ? lz_q8r_tier() : 0;
-#endif
+#endif /* LZ_HAVE_Q8R_SIMD || LZ_HAVE_Q8R_SSE */
     if (gs <= 0 || n < gs || (n % gs) != 0) return;   /* defense: f32 weights have gs=0 etc. */
     for (g = 0; g < n / gs; g++) {
         const float *grp = x + (size_t)g * gs;
@@ -1156,7 +1156,7 @@ void lz_quantize_q8(const float *x, int n, int gs, int8_t *q, float *s) {
                 if (tier == 2)
                     lz_q8round_group_sse2(grp, out, gs, &inv);
                 else
-#endif
+#endif /* LZ_HAVE_Q8R_SIMD */
                     lz_q8round_group_sse(grp, out, gs, &inv);
 #else
 #ifdef LZ_HAVE_Q8R_SIMD
@@ -1164,7 +1164,7 @@ void lz_quantize_q8(const float *x, int n, int gs, int8_t *q, float *s) {
                     for (k = 0; k + 31 < gs; k += 32)
                         lz_q8round32_simd(grp + k, out + k, &inv);
                 } else
-#endif
+#endif /* LZ_HAVE_Q8R_SIMD */
                 {
                     for (k = 0; k + 31 < gs; k += 32)
                         lz_q8round32_sse(grp + k, out + k, &inv);
@@ -1187,7 +1187,7 @@ void lz_quantize_q8(const float *x, int n, int gs, int8_t *q, float *s) {
                 }
 #endif /* __WATCOMC__ */
             } else
-#endif
+#endif /* LZ_HAVE_Q8R_SIMD || LZ_HAVE_Q8R_SSE */
             for (k = 0; k < gs; k++) {
                 int qi = q8_round(grp[k] * inv);
                 qi = (qi > 127) ? 127 : qi;
@@ -1306,7 +1306,7 @@ void lz_quantize_q8_silu(const float *p, const float *g, const int32_t *sig,
    the cpucheck.h declaration. A real __asm-block function, not a
    duplicated #pragma aux (see cpucheck.h for why those two cannot share
    a body across files). */
-#endif
+#endif /* __WATCOMC__ */
 
 /* ---- prefetch tier: ORTHOGONAL to the kernel tier -----------------------
    The kernel tier picks instruction-set width (MMX vs SSE2 integer);
@@ -1329,7 +1329,7 @@ static int g_pf = -1;
    else old CPUs return leaf 1's content. */
 extern unsigned lz_cpuid_ext_edx(void);
 #pragma aux lz_cpuid_ext_edx =      ".586"                          "push ebx"                      "mov  eax, 80000000h"           "cpuid"                         "cmp  eax, 80000001h"           "jb   short no_ext"             "mov  eax, 80000001h"           "cpuid"                         "mov  eax, edx"                 "jmp  short done_ext"           "no_ext:"                       "xor  eax, eax"                 "done_ext:"                     "pop  ebx"                      __value [__eax]                 __modify [__eax __ecx __edx]
-#endif
+#endif /* __WATCOMC__ */
 
 /* CPUID ONCE, NOT PER CALL, and this is a fix rather than a tidy-up.
    lz_cpuid1_edx expands to a raw `cpuid`, which is a SERIALIZING
@@ -1402,10 +1402,10 @@ static int lz_cpu_has_sse(void) {
 #else
     if (g_has_sse < 0) g_has_sse = (lz_cpuid1_edx() & (1u << 25)) != 0;
     return g_has_sse;
-#endif
+#endif /* LZ_CPUID_NOCACHE */
 }
 
-#endif
+#endif /* __WATCOMC__ || __i386__ || __x86_64__ */
 
 /* CPUID leaf 1 EDX bit 23 = MMX. Cached for the same reason g_has_sse is:
    the _mm_empty() call sites sit in row/group loops and would turn into a
@@ -1425,7 +1425,7 @@ static int lz_cpu_has_mmx(void) {
 }
 #else
 static int lz_cpu_has_mmx(void) { return 0; }
-#endif
+#endif /* __WATCOMC__ || __i386__ || __x86_64__ */
 
 static int pf_detect(void) {
 #if defined(__WATCOMC__)
@@ -1436,7 +1436,7 @@ static int pf_detect(void) {
     return LZ_PF_NONE;
 #else
     return LZ_PF_NTA;                              /* local gcc: __builtin_prefetch */
-#endif
+#endif /* __WATCOMC__ */
 }
 
 int lz_prefetch_mode(void) {
@@ -1483,14 +1483,14 @@ int lz_pair_mode(void) { return g_pair; }
    body, which stays reachable as a capacity fallback, not dead code. */
 #if LZ_GDN_FIXED
 static int g_gdn_fixed = 1;
-#endif
+#endif /* LZ_GDN_FIXED */
 
 int lz_gdn_mode(void) {
 #if LZ_GDN_FIXED
     return g_gdn_fixed;
 #else
     return 0;                    /* not compiled in; never claim otherwise */
-#endif
+#endif /* LZ_GDN_FIXED */
 }
 
 /* Pass-2 tier, separate from the pass-1 one on purpose: they are two
@@ -1561,7 +1561,7 @@ static int lz_soft_float_target(void) {
     return 1;
 #else
     return q8r_have_simd() == 0;
-#endif
+#endif /* LZ_NO_FPU */
 }
 
 #define LZ_P2_FLOAT 0
@@ -1575,7 +1575,7 @@ int lz_gdn_p2_mode(void) {
     return g_gdn_p2;
 #else
     return 0;                    /* not compiled in; never claim otherwise */
-#endif
+#endif /* LZ_GDN_FIXED */
 }
 
 int lz_gdn_p2_is_auto(void) { return g_gdn_p2 == LZ_P2_AUTO; }
@@ -1611,7 +1611,7 @@ int lz_conv_mode(void) {
     return g_conv;
 #else
     return 0;
-#endif
+#endif /* LZ_CONV_FIXED */
 }
 
 int lz_conv_is_auto(void) { return g_conv == LZ_CONV_AUTO; }
@@ -1702,7 +1702,10 @@ static int g_scalar = -1;
    on a no-SIMD part - the weak-x87 targets this exists to offload),
    never MMX: every Socket 7 part has MMX and no SSE. */
 int lz_scalar_mode(void) {
-    return (g_scalar < 0) ? lz_soft_float_target() : g_scalar;
+    /* Default fixed; under option A the x87 operators are value-changing
+       by design and the fixed path is the offloaded path. Use
+       --scalar-fixed float to recover the old bit-identical float result. */
+    return (g_scalar < 0) ? 1 : g_scalar;
 }
 
 int lz_scalar_is_auto(void) { return g_scalar < 0; }
@@ -1748,7 +1751,7 @@ int lz_norm_can_fixed(int n) {
 #else
     (void)n;
     return 0;
-#endif
+#endif /* LZ_GDN_FIXED */
 }
 
 static int g_epi = -1;
@@ -1854,7 +1857,7 @@ static long long lz_epi_mac(const int32_t *a, const int32_t *m, int n) {
     for (g = 0; g < n; g++) s += (long long)a[g] * (long long)m[g];
     return s;
 }
-#endif
+#endif /* __WATCOMC__ */
 
 /* `auto` here is an ALIAS FOR `on`, not a hardware question, and saying
    so is the point. Pairing trades weight-unpack bandwidth against ALU
@@ -1946,12 +1949,12 @@ static int kernel_detect(void) {
     return LZ_KERNEL_MMX;
 #else
     return LZ_KERNEL_REF;
-#endif
+#endif /* LZ_DOT_MMX_EXTERN */
 #elif defined(LZ_DOT_MMX_EXTERN)
     return LZ_KERNEL_MMX;
 #else
     return LZ_KERNEL_REF;
-#endif
+#endif /* __WATCOMC__ */
 }
 
 int lz_kernel_select(int which) {
@@ -1980,7 +1983,7 @@ int lz_kernel_select(int which) {
                    ? have : which;
 #else
         g_kernel = (which == LZ_KERNEL_REF) ? LZ_KERNEL_REF : have;
-#endif
+#endif /* __WATCOMC__ */
     }
     return g_kernel;
 }
@@ -2026,7 +2029,7 @@ static int q8r_have_simd(void) {
     return lz_cpu_has_sse();
 #else
     return 0;
-#endif
+#endif /* LZ_HAVE_Q8R_SIMD || LZ_HAVE_Q8R_SSE */
 }
 
 #if defined(LZ_HAVE_Q8R_SIMD) || defined(LZ_HAVE_Q8R_SSE)
@@ -2036,11 +2039,11 @@ static int lz_q8r_tier(void) {
 #if defined(LZ_HAVE_Q8R_SSE)
 #ifdef LZ_Q8R_FORCE_SSE
     return 1;
-#endif
-#endif
+#endif /* LZ_Q8R_FORCE_SSE */
+#endif /* LZ_HAVE_Q8R_SSE */
 #if defined(LZ_HAVE_Q8R_SIMD)
     if (g_kernel == LZ_KERNEL_SSE2) return 2;
-#endif
+#endif /* LZ_HAVE_Q8R_SIMD */
 #if defined(LZ_HAVE_Q8R_SSE)
     /* REAL CPUID, not "the build carries the tier" - the same fix as
        q8r_have_simd() just above and kernel_detect()/p2_tier() (task
@@ -2050,7 +2053,7 @@ static int lz_q8r_tier(void) {
        measured 6.4x on, so it uses that cached function rather than a
        fresh cpuid per call. */
     if (lz_cpu_has_sse()) return 1;
-#endif
+#endif /* LZ_HAVE_Q8R_SSE */
     return 0;
 }
 #endif /* LZ_HAVE_Q8R_SIMD || LZ_HAVE_Q8R_SSE */
@@ -2078,7 +2081,7 @@ const char *lz_build_paths(void) {
     return "sse2-intrin";
 #else
     return "scalar";
-#endif
+#endif /* __WATCOMC__ */
 }
 
 /* WHICH ONE OF THE SEVEN OPERATOR VARIANTS ACTUALLY RAN.
@@ -2123,7 +2126,7 @@ const char *lz_kernel_tier(void) {
     return "sse2-intrin";
 #else
     return "ref";                                  /* unreachable: detect gives REF */
-#endif
+#endif /* __WATCOMC__ || LZ_DOT_MMX_EXTERN */
 }
 
 /* Cap for the activation pre-expansion buffers (element count). Above
@@ -2241,7 +2244,7 @@ static lz_rowfn lz_row_pick(const lz_rowfn *tab) {
     lz_rowfn f = tab[want_sse2 ? LZ_ROW_SSE2_I : LZ_ROW_MMX_I];
     if (f) return f;
     return tab[LZ_ROW_SSE2_I] ? tab[LZ_ROW_SSE2_I] : tab[LZ_ROW_MMX_I];
-#endif
+#endif /* __WATCOMC__ */
 }
 
 /* THE Q8 FLOAT EPILOGUE - one copy, shared by every kernel tier.
@@ -2445,7 +2448,7 @@ static void row_q8_mmx_intrin(int32_t *acc32, const void *w4, const void *w2,
             else               LZ_Q8_ACC(dot32_x16_mmx, LZ_PFI_NTA);
 #else
             LZ_Q8_ACC(dot32_x16_mmx, LZ_PFI_NTA);
-#endif
+#endif /* LZ_G128_GCC */
         }
     }
 }
@@ -2464,20 +2467,20 @@ static const lz_rowfn LZ_ROW_Q8[LZ_ROW_N] = {
     row_q8_mmx_intrin,
 #else
     NULL,
-#endif
+#endif /* LZ_DOT_MMX_EXTERN */
     NULL,        /* sse-intrin: no SSE1 op applies, see lz_row_pick */
 #if defined(LZ_ROW_SSE2_EXTERN)
     row_q8_sse2_intrin,
 #else
     NULL,
-#endif
+#endif /* LZ_ROW_SSE2_EXTERN */
 #if defined(__WATCOMC__)
     row_q8_mmx_asm,
     NULL,        /* sse-asm: ditto */
     row_q8_sse2_asm
 #else
     NULL, NULL, NULL
-#endif
+#endif /* __WATCOMC__ */
 };
 
 /* int8 matmul kernel for gs==32, dispatched by target platform
@@ -3023,7 +3026,7 @@ static void row_q41_mmx_intrin(int32_t *acc32, const void *w4, const void *w2,
             else               LZ_Q41_ACC(dot32_q41_mmx, LZ_PFI_NTA);
 #else
             LZ_Q41_ACC(dot32_q41_mmx, LZ_PFI_NTA);
-#endif
+#endif /* LZ_G128_GCC */
         }
     }
 }
@@ -3039,20 +3042,20 @@ static const lz_rowfn LZ_ROW_Q41[LZ_ROW_N] = {
     row_q41_mmx_intrin,
 #else
     NULL,
-#endif
+#endif /* LZ_DOT_MMX_EXTERN */
     NULL,        /* sse-intrin: no SSE1 op applies, see lz_row_pick */
 #if defined(LZ_ROW_SSE2_EXTERN)
     row_q41_sse2_intrin,
 #else
     NULL,
-#endif
+#endif /* LZ_ROW_SSE2_EXTERN */
 #if defined(__WATCOMC__)
     row_q41_mmx_asm,
     NULL,        /* sse-asm: ditto */
     row_q41_sse2_asm
 #else
     NULL, NULL, NULL
-#endif
+#endif /* __WATCOMC__ */
 };
 
 static void matmul_q41_impl(float *o, const int8_t *xq, const float *xqs,
@@ -3130,7 +3133,7 @@ static void row_t2_mmx_intrin(int32_t *acc32, const void *w4, const void *w2v,
             acc[s] = dot32_t2_mmx(p2 + (size_t)s * 8, xwt + (size_t)s * 32);
     }
 }
-#endif
+#endif /* LZ_DOT_MMX_EXTERN */
 
 /* row_t2_sse2_intrin's body lives in src/ops_sse2.c, same reason as
    row_q8_sse2_intrin above. Declared in src/ops_sse2.h. */
@@ -3147,20 +3150,20 @@ static const lz_rowfn LZ_ROW_T2[LZ_ROW_N] = {
     row_t2_mmx_intrin,
 #else
     NULL,
-#endif
+#endif /* LZ_DOT_MMX_EXTERN */
     NULL,        /* sse-intrin: no SSE1 op applies */
 #if defined(LZ_ROW_SSE2_EXTERN)
     row_t2_sse2_intrin,
 #else
     NULL,
-#endif
+#endif /* LZ_ROW_SSE2_EXTERN */
 #if defined(__WATCOMC__)
     row_t2_mmx_asm,
     NULL,        /* sse-asm: ditto */
     row_t2_sse2_asm
 #else
     NULL, NULL, NULL
-#endif
+#endif /* __WATCOMC__ */
 };
 
 /* ---- Q6_1 row kernels, one per (ISA x impl) ---------------------------
@@ -3229,7 +3232,7 @@ static void row_q61_mmx_intrin(int32_t *acc32, const void *w4, const void *w2v,
         else               LZ_Q61_ACC(dot32_q61_mmx);
 #else
         LZ_Q61_ACC(dot32_q61_mmx);
-#endif
+#endif /* LZ_G128_GCC */
     }
 }
 
@@ -3244,20 +3247,20 @@ static const lz_rowfn LZ_ROW_Q61[LZ_ROW_N] = {
     row_q61_mmx_intrin,
 #else
     NULL,
-#endif
+#endif /* LZ_DOT_MMX_EXTERN */
     NULL,        /* sse-intrin: no SSE1 op applies, see lz_row_pick */
 #if defined(LZ_ROW_SSE2_EXTERN)
     row_q61_sse2_intrin,
 #else
     NULL,
-#endif
+#endif /* LZ_ROW_SSE2_EXTERN */
 #if defined(__WATCOMC__)
     row_q61_mmx_asm,
     NULL,        /* sse-asm: ditto */
     row_q61_sse2_asm
 #else
     NULL, NULL, NULL
-#endif
+#endif /* __WATCOMC__ */
 };
 
 /* T2 matmul. Same shape as matmul_q61_impl minus the second plane, with
@@ -3409,7 +3412,7 @@ static void row_q16_mmx_intrin(int32_t *acc32, const void *w4, const void *w2,
         else               LZ_Q16_ACC(dot32_q16_mmx);
 #else
         LZ_Q16_ACC(dot32_q16_mmx);
-#endif
+#endif /* LZ_G128_GCC */
     }
 }
 
@@ -3423,20 +3426,20 @@ static const lz_rowfn LZ_ROW_Q16[LZ_ROW_N] = {
     row_q16_mmx_intrin,
 #else
     NULL,
-#endif
+#endif /* __WATCOMC__ */
     NULL,        /* sse-intrin: no SSE1 op applies, see lz_row_pick */
 #if defined(LZ_ROW_SSE2_EXTERN)
     row_q16_sse2_intrin,
 #else
     NULL,
-#endif
+#endif /* LZ_ROW_SSE2_EXTERN */
 #ifdef __WATCOMC__
     row_q16_mmx_asm,
     NULL,        /* sse-asm: ditto */
     row_q16_sse2_asm
 #else
     NULL, NULL, NULL
-#endif
+#endif /* __WATCOMC__ */
 };
 
 static void matmul_q16_impl(float *o, const int8_t *xq, const float *xqs,
@@ -3576,7 +3579,7 @@ void lz_matmul_xq_nt(float *o, const float *x, const int8_t *xq,
         matmul_q16_impl(o, xq, xqs, w, in_dim, out_dim, nt);
         return;
     }
-#endif
+#endif /* __WATCOMC__ || LZ_DOT_MMX_EXTERN */
     matmul_scalar_ref(o, xq, xqs, w, in_dim, out_dim, nt);
 }
 
@@ -3751,7 +3754,7 @@ void lz_rope(float *v, int n_heads, int head_dim, int rotary_dim,
         }
     }
     /* components beyond rotary_dim stay as-is; they do not rotate */
-#endif
+#endif /* LZ_ROPE_SSE2_EXTERN */
 }
 
 /* ---- fixed-point attention -------------------------------------------
@@ -3827,7 +3830,7 @@ static void lz_wsum_pair_ref(const int8_t *rowA, const int8_t *rowB,
         acc32[d] += (int32_t)rowA[d] * ckA + (int32_t)rowB[d] * ckB;
 }
 #define LZ_WSUM_PAIR(ra, rb, co, ac) lz_wsum_pair_ref(ra, rb, co, ac)
-#endif
+#endif /* __WATCOMC__ */
 #endif /* LZ_ATTN_FIXED & 2 */
 
 #if (LZ_ATTN_FIXED & 1)
@@ -3844,7 +3847,7 @@ static int32_t dot32_x16_attn_ref(const int8_t *w, const int16_t *x) {
 #define LZ_ATTN_DOT32(w, x) dot32_x16_attn_ref(w, x)
 #else
 #define LZ_ATTN_DOT32(w, x) dot32_x16_mmx(w, x)
-#endif
+#endif /* !__WATCOMC__ && !LZ_DOT_MMX_EXTERN */
 
 void lz_attn_score_q8(float *att, const float *qhh, int hd,
                       const int8_t *kc, const float *ks, int kvd,
@@ -3889,7 +3892,7 @@ void lz_attn_score_q8(float *att, const float *qhh, int hd,
             rr[g] = LZ_ATTN_DOT32(kt + (size_t)g * 32, qw + g * 32);
 #if defined(__WATCOMC__) || defined(LZ_DOT_MMX_EXTERN)
         if (lz_cpu_has_mmx()) _mm_empty();
-#endif
+#endif /* __WATCOMC__ || LZ_DOT_MMX_EXTERN */
         /* Phase 2, x87 only. Raw magnitude reaches 256*127*127*32 =
            1.33e8 > 2^24, so lz_i32f() is mandatory here (rule 6 item 7),
            not a stylistic choice. */
@@ -4011,7 +4014,7 @@ void lz_attn_wsum_q8(float *out, const float *att, int hd,
             }
 #if defined(LZ_WSUM_MMX_EXTERN)
             if (lz_cpu_has_mmx()) _mm_empty();      /* no x87 inside the row-pair loop above */
-#endif
+#endif /* LZ_WSUM_MMX_EXTERN */
             for (d = 0; d < 32; d++) accf[d] += lz_i32f(acc32[d]);
         }
 #endif /* __WATCOMC__ */
@@ -4089,7 +4092,7 @@ void lz_attn_wsum_q8(float *out, const float *att, int hd,
 
 #if defined(__WATCOMC__) || defined(LZ_GDN1_MMX_EXTERN)
 #define LZ_GDN_HAVE_MMX 1
-#endif
+#endif /* __WATCOMC__ || LZ_GDN1_MMX_EXTERN */
 
 #if defined(LZ_GDN_HAVE_MMX)
 #if defined(__WATCOMC__)
@@ -4130,7 +4133,7 @@ typedef struct {
     int16_t t2[LZ_GDN_MAX_KD / 2][8];
     int16_t tail2_cu, tail2_cw;
     float su2, sw2;       /* = su/32767, sw/32767 */
-#endif
+#endif /* LZ_GDN_FIXED >= 2 */
 } LZGdnTable;
 
 static void gdn_build_table(const float *ss, const float *q, const float *k,
@@ -4159,7 +4162,7 @@ static void gdn_build_table(const float *ss, const float *q, const float *k,
     tb->su2 = tb->su * LZ_Q15_INV;
     tb->sw2 = tb->sw * LZ_Q15_INV;
     tb->tail2_cu = 0; tb->tail2_cw = 0;
-#endif
+#endif /* LZ_GDN_FIXED >= 2 */
 
     for (kk = 0; kk < kd; kk++) {
         float fa = ss[(size_t)kk * ng + gg] * k[kk] * ik;
@@ -4212,7 +4215,7 @@ static void gdn_build_table(const float *ss, const float *q, const float *k,
                 }
             }
         }
-#endif
+#endif /* LZ_GDN_FIXED >= 2 */
     }
 }
 
@@ -4284,7 +4287,7 @@ static void gdn_sum_gg(const int8_t *sq_gg, int kd, int vd,
 static void gdn_pass1_fixed(const int8_t *sq,
 #if LZ_GDN_STATE_2PLANE
                             const int8_t *sq_lo, int32_t *aul, int32_t *awl,
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
                             const float *ss,
                             const float *q, const float *k, int kd, int vd,
                             int32_t *au, int32_t *aw, float *su, float *sw,
@@ -4294,7 +4297,7 @@ static void gdn_pass1_fixed(const int8_t *sq,
     static LZGdnTable tb;
 #if LZ_GDN_FIXED < 2
     (void)au2; (void)aw2; (void)su2; (void)sw2;
-#endif
+#endif /* LZ_GDN_FIXED < 2 */
     for (gg = 0; gg < ng; gg++) {
         const int8_t *sg = sq + (size_t)gg * 32;
         gdn_build_table(ss, q, k, kd, vd, gg, &tb);
@@ -4307,7 +4310,7 @@ static void gdn_pass1_fixed(const int8_t *sq,
            the high plane, so no second scale array is needed. */
         gdn_sum_gg(sq_lo + (size_t)gg * 32, kd, vd, tb.t, tb.tail_cu, tb.tail_cw,
                    aul + gg * 32, awl + gg * 32);
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
 #if LZ_GDN_FIXED >= 2
         /* Second plane, same kernel, second table. The MMX gdn_sum_gg emits
            its own emms, so this runs a redundant one - kept rather than
@@ -4317,7 +4320,7 @@ static void gdn_pass1_fixed(const int8_t *sq,
         gdn_sum_gg(sg, kd, vd, tb.t2, tb.tail2_cu, tb.tail2_cw,
                    au2 + gg * 32, aw2 + gg * 32);
         su2[gg] = tb.su2; sw2[gg] = tb.sw2;
-#endif
+#endif /* LZ_GDN_FIXED >= 2 */
     }
 }
 #endif /* LZ_GDN_FIXED */
@@ -4337,12 +4340,12 @@ static void gdn_pass1_fixed(const int8_t *sq,
    sizes. */
 #ifndef LZ_GDN_STATE_F32
 #define LZ_GDN_STATE_F32 0
-#endif
+#endif /* LZ_GDN_STATE_F32 */
 
 #if LZ_GDN_STATE_2PLANE
 #if LZ_GDN_FIXED >= 2
 #error "LZ_GDN_STATE_2PLANE with LZ_GDN_FIXED=2 is not implemented: it would be four kernel passes, and the coefficient plane was measured not to be the bottleneck. Use LZ_GDN_FIXED=0 or 1."
-#endif
+#endif /* LZ_GDN_FIXED >= 2 */
 
 /* LZ_GDN_LO_SCALE now lives in ops.h - forward.c's KV path needs the same
    constant (LZ_KV_2PLANE), and two copies of a dequant weight is exactly
@@ -4385,11 +4388,11 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
        months. */
     extern long lz_q8r_hits[3];
     lz_q8r_hits[tier < 0 ? 0 : (tier > 2 ? 2 : tier)]++;
-#endif
+#endif /* LZ_Q8R_COUNT */
     static const float lo_mul = LZ_GDN_LO_SCALE;
     /* static, not stack (rule 6 item 4); one row's residual at most. */
     static float res[LZ_GDN_MAX_VD];
-#endif
+#endif /* LZ_HAVE_Q8R_SIMD || LZ_HAVE_Q8R_SSE */
     for (g = 0; g < ng; g++) {
         const float *grp = x + (size_t)g * gs;
         int8_t *ho = hi + (size_t)g * gs;
@@ -4443,7 +4446,7 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
             if (tier == 2)
                 lz_q8round_2p_group_sse2(grp, ho, lw, gs, &inv, &lo_mul, res);
             else
-#endif
+#endif /* LZ_HAVE_Q8R_SIMD */
                 lz_q8round_2p_group_sse(grp, ho, lw, gs, &inv, &lo_mul, res);
 #else
 #ifdef LZ_HAVE_Q8R_SIMD
@@ -4455,7 +4458,7 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
                 for (k = 0; k + 31 < gs; k += 32)
                     lz_q8round32_simd(res + k, lw + k, &lo_mul);
             } else
-#endif
+#endif /* LZ_HAVE_Q8R_SIMD */
             {
                 for (k = 0; k + 31 < gs; k += 32)
                     lz_q8round32_sse(grp + k, ho + k, &inv);
@@ -4473,7 +4476,7 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
 #endif /* __WATCOMC__ */
             continue;
         }
-#endif
+#endif /* LZ_HAVE_Q8R_SIMD || LZ_HAVE_Q8R_SSE */
         /* fast && tier==0: no SIMD rounding tier, e.g. --kernel ref. Same
            shape as the !fast branch above, multiply instead of divide. */
         if ((unsigned)fc_site < (unsigned)LZ_FC_N) LZ_FCX(fc_site, 2 * gs, 3 * gs, 0, gs, 0);  /* mul, q8_round(add), convert, sub(add), mul, q8_round(add) */
@@ -4507,7 +4510,7 @@ static float *gdn_shadow(const int8_t *sq, int n) {
     g_shk[g_shn] = sq;
     return g_shv[g_shn++];
 }
-#endif
+#endif /* LZ_GDN_STATE_F32 */
 
 /* ---- SSM recurrence pass 2, fixed point --------------------------------
 
@@ -4634,7 +4637,7 @@ static float norm_ss_fixed(const float *x, int n) {
     (void)x; (void)n;
     return -1.0f;
 }
-#endif
+#endif /* LZ_GDN_FIXED */
 
 #if LZ_GDN_FIXED
 /* Fixed output loop of lz_rmsnorm_gated. The full Q15 int-multiply:
@@ -4687,7 +4690,7 @@ static void lz_rmsnorm_gated_out_fixed(float *o, const float *x,
                                        float inv, int n, int32_t *sig) {
     (void)o; (void)x; (void)g; (void)w; (void)inv; (void)n; (void)sig;
 }
-#endif
+#endif /* LZ_GDN_FIXED */
 
 #if LZ_GDN_FIXED
 /* THE SPLIT IS A SHIFT, AND THE SHIFT IS 8 BECAUSE L IS 256. Every
@@ -4720,7 +4723,7 @@ typedef char lz_p2_needs_lo_scale_256[
    toolchains), Watcom's Phase 2 below calls lz_p2_rows_mmx/_sse/_sse2
    directly instead - the bare per-group names stay gcc's alone, used
    only by the gcc branch of gdn_p2_row_simd's Phase 2. */
-#endif
+#endif /* LZ_HAVE_P2_MMX_ASM || LZ_P2_MMX_EXTERN */
 
 /* ---- the SSE1 tier: one instruction of content, and it is the split ---
    The A term and the absmax have no SSE1 form at all (ops_kernel_p2.h
@@ -4738,7 +4741,7 @@ typedef char lz_p2_needs_lo_scale_256[
    plane's clamp to -127 directly). Watcom's Phase 2 reaches it only
    through lz_p2_rows_sse, declared in src/ops_mmx.h; gcc's per-group
    loop still calls it by its real name, also declared there. */
-#endif
+#endif /* LZ_HAVE_P2_SSE_ASM || LZ_P2_MMX_EXTERN */
 
 /* ---- the 128-bit tier -------------------------------------------------
    Every instruction of the MMX pair exists on xmm in SSE2 - pmaddwd,
@@ -4766,11 +4769,11 @@ typedef char lz_p2_needs_lo_scale_256[
    Watcom's Phase 2 reaches this tier only through lz_p2_rows_sse2,
    declared in src/ops_sse2.h alongside the gcc-only per-group names,
    which the intrinsics' declarations share. */
-#endif
+#endif /* LZ_HAVE_P2_SSE2_ASM || LZ_P2_SSE2_EXTERN */
 
 #if defined(LZ_HAVE_P2_SSE2) && !defined(LZ_HAVE_P2_MMX)
 #error "SSE2 pass 2 without the MMX one: gdn_p2_row_simd is gated on MMX"
-#endif
+#endif /* LZ_HAVE_P2_SSE2 && !LZ_HAVE_P2_MMX */
 
 #ifdef LZ_HAVE_P2_MMX
 /* 0 scalar, 1 MMX, 2 SSE2. Simpler than lz_q8r_tier for
@@ -4790,7 +4793,7 @@ static int p2_tier(void) {
     if (g_kernel == LZ_KERNEL_REF) return 0;
 #ifdef LZ_HAVE_P2_SSE2
     if (g_kernel == LZ_KERNEL_SSE2) return 3;
-#endif
+#endif /* LZ_HAVE_P2_SSE2 */
     /* SSE1 is read from CPUID rather than from g_kernel, the same way
        lz_q8r_tier does it and for the same reason: there is no
        LZ_KERNEL_SSE, and on a PIII g_kernel is LZ_KERNEL_MMX while the
@@ -4814,10 +4817,10 @@ static int p2_tier(void) {
        big comment above lz_cpu_has_sse() names (once per state row), so
        it uses the cached function too, not a fresh cpuid per call. */
     if (lz_cpu_has_sse()) return 2;
-#endif
+#endif /* LZ_HAVE_P2_SSE && !LZ_P2_FORCE_MMX */
     return 1;
 }
-#endif
+#endif /* LZ_HAVE_P2_MMX */
 
 /* --- the per-group float and integer work, shared by both tiers -------
 
@@ -4938,7 +4941,7 @@ static int p2_group_scale(float sacc, int sh, float *os) {
 static void gdn_p2_fixed_rows(const int8_t *sq_in, int8_t *sq_out,
 #if LZ_GDN_STATE_2PLANE
                               const int8_t *sq2_in, int8_t *sq2_out,
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
                               const float *ss_in, float *ss_out,
                               const float *delta, const float *k,
                               const float *gvec, float gt,
@@ -4947,12 +4950,12 @@ static void gdn_p2_fixed_rows(const int8_t *sq_in, int8_t *sq_out,
 static void gdn_p2_group_fixed(const int8_t *ph,
 #if LZ_GDN_STATE_2PLANE
                                const int8_t *pl,
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
                                float c1, const int16_t *dq, float c2,
                                int8_t *oh,
 #if LZ_GDN_STATE_2PLANE
                                int8_t *ol,
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
                                float *os) {
     int32_t A[32];
     int16_t mul4[4];

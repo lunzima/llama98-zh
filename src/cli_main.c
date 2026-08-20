@@ -245,7 +245,7 @@ static void usage(void) {
     "                   SiLU from a Q15 table (NOT the KDA decay).\n"
     "  --norm-write TIER   auto|float|fixed (default auto). RMS/L2 norm\n"
     "                   sum-of-squares in int64 fixed point.\n"
-    "  --scalar-fixed TIER auto|float|fixed (default auto). lz_exp and\n"
+    "  --scalar-fixed TIER auto|float|fixed (default fixed). lz_exp and\n"
     "                   lz_rsqrt together - the last two scalar x87 ops\n"
     "                   the fixed tiers leave on float. Value-changing by\n"
     "                   design (~1e-6 rel); the KDA decay follows lz_exp.\n"
