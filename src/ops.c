@@ -4977,7 +4977,7 @@ static void gdn_p2_group_fixed(const int8_t *ph,
                Caught by writing the MMX twin, which has to state what H
                is. */
             int32_t H = (int32_t)ph[j] << 8;
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
             A[j] = m1 * H + m2 * (int32_t)dq[j];
             if (A[j] > amax) amax = A[j];
             if (-A[j] > amax) amax = -A[j];
@@ -5013,7 +5013,7 @@ static void gdn_p2_group_fixed(const int8_t *ph,
                 if (l < -127) l = -127;
                 ol[j] = (int8_t)l;
             }
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
         }
     }
     if (!p2_group_scale(sacc, sh, os)) {
@@ -5021,7 +5021,7 @@ static void gdn_p2_group_fixed(const int8_t *ph,
             oh[j] = 0;
 #if LZ_GDN_STATE_2PLANE
             ol[j] = 0;
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
         }
     }
 }
@@ -5051,20 +5051,20 @@ static void gdn_p2_group_fixed(const int8_t *ph,
 static void gdn_p2_row_simd(const int8_t *ph_row,
 #if LZ_GDN_STATE_2PLANE
                             const int8_t *pl_row,
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
                             const float *rs_in, float dec,
                             const int16_t *dq, const float *s_dg, float kv,
                             int8_t *oh_row,
 #if LZ_GDN_STATE_2PLANE
                             int8_t *ol_row,
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
                             float *rs_out, int ng, int tier) {
 #if !defined(__WATCOMC__)
     lz_p2_blk *blk = p2_blk();     /* Watcom's row functions get their
                                        own via their own p2_blk() call -
                                        see the Watcom Phase 2 branch
                                        below (task #30, 2/N). */
-#endif
+#endif /* !__WATCOMC__ */
     static float sacc[LZ_GDN_MAX_VD / 32];
     static int   shv[LZ_GDN_MAX_VD / 32];
     static int16_t mul[LZ_GDN_MAX_VD / 32][4];
@@ -5075,7 +5075,7 @@ static void gdn_p2_row_simd(const int8_t *ph_row,
        exactly the single-plane H. */
     static const int8_t zero_lo[32];
     static int8_t sink_lo[32];
-#endif
+#endif /* !LZ_GDN_STATE_2PLANE */
     int gg, j;
 
     /* Not billed here - gdn_p2_fixed_rows bills this row's cost once,
@@ -5111,19 +5111,19 @@ static void gdn_p2_row_simd(const int8_t *ph_row,
         plg0 = pl_row; olg0 = ol_row; pstride = 32;
 #else
         plg0 = zero_lo; olg0 = sink_lo; pstride = 0;
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
 #ifdef LZ_HAVE_P2_SSE2
         if (tier >= 3)
             lz_p2_rows_sse2(ph_row, plg0, pstride, dq, mul,
                             oh_row, olg0, pstride, shv, ng);
         else
-#endif
+#endif /* LZ_HAVE_P2_SSE2 */
 #ifdef LZ_HAVE_P2_SSE
         if (tier >= 2)
             lz_p2_rows_sse(ph_row, plg0, pstride, dq, mul,
                            oh_row, olg0, pstride, shv, ng);
         else
-#endif
+#endif /* LZ_HAVE_P2_SSE */
         lz_p2_rows_mmx(ph_row, plg0, pstride, dq, mul,
                        oh_row, olg0, pstride, shv, ng);
     }
@@ -5144,11 +5144,11 @@ static void gdn_p2_row_simd(const int8_t *ph_row,
             pl_row + gg * 32;
 #else
             zero_lo;
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
 #ifdef LZ_HAVE_P2_SSE2
         if (tier >= 3) lz_p2_mul32_sse2(ph_row + gg * 32, plg, dq + gg * 32, blk);
         else
-#endif
+#endif /* LZ_HAVE_P2_SSE2 */
         /* No SSE1 arm here on purpose: this half has no SSE1 content,
            so tier 2 runs the MMX mul32 unchanged. */
         lz_p2_mul32_mmx(ph_row + gg * 32, plg, dq + gg * 32, blk);
@@ -5171,15 +5171,15 @@ static void gdn_p2_row_simd(const int8_t *ph_row,
                 ol_row + gg * 32;
 #else
                 sink_lo;
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
 #ifdef LZ_HAVE_P2_SSE2
             if (tier >= 3) lz_p2_split32_sse2(blk, oh_row + gg * 32, olg);
             else
-#endif
+#endif /* LZ_HAVE_P2_SSE2 */
 #ifdef LZ_HAVE_P2_SSE
             if (tier >= 2) lz_p2_split32_sse(blk, oh_row + gg * 32, olg);
             else
-#endif
+#endif /* LZ_HAVE_P2_SSE */
             lz_p2_split32_mmx(blk, oh_row + gg * 32, olg);
         }
     }
@@ -5203,7 +5203,7 @@ static void gdn_p2_row_simd(const int8_t *ph_row,
                 oh_row[gg * 32 + j] = 0;
 #if LZ_GDN_STATE_2PLANE
                 ol_row[gg * 32 + j] = 0;
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
             }
 }
 #endif /* LZ_HAVE_P2_MMX */
@@ -5226,21 +5226,21 @@ const char *lz_gdn_p2_impl(void) {
     if (p2_tier() >= 3) return "sse2-asm";
 #elif defined(LZ_HAVE_P2_SSE2)
     if (p2_tier() >= 3) return "sse2-intrin";
-#endif
+#endif /* LZ_HAVE_P2_SSE2_ASM */
 #if defined(LZ_HAVE_P2_SSE_ASM)
     if (p2_tier() >= 2) return "sse-asm";
 #elif defined(LZ_HAVE_P2_SSE)
     if (p2_tier() >= 2) return "sse-intrin";
-#endif
+#endif /* LZ_HAVE_P2_SSE_ASM */
 #if defined(LZ_HAVE_P2_MMX_ASM)
     if (p2_tier()) return "mmx-asm";
 #elif defined(LZ_HAVE_P2_MMX)
     if (p2_tier()) return "mmx-intrin";
-#endif
+#endif /* LZ_HAVE_P2_MMX_ASM */
     return "ref";
 #else
     return "-";
-#endif
+#endif /* LZ_GDN_FIXED */
 }
 
 #if LZ_GDN_FIXED
@@ -5259,7 +5259,7 @@ const char *lz_gdn_p2_impl(void) {
 static float gdn_pass1_fixed_head(const int8_t *sq_in,
 #if LZ_GDN_STATE_2PLANE
                                   const int8_t *sq2_in,
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
                                   const float *ss_in,
                                   const float *q, const float *k,
                                   const float *gvec, int kd, int vd,
@@ -5271,7 +5271,7 @@ static float gdn_pass1_fixed_head(const int8_t *sq_in,
     static float   kg[LZ_GDN_MAX_KD], qg[LZ_GDN_MAX_KD];
 #if LZ_GDN_STATE_2PLANE
     static int32_t aul[LZ_GDN_MAX_VD], awl[LZ_GDN_MAX_VD];
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
     const float *qq = q, *kk_ = k;
     float kq = 0.0f;
     int ng = vd / 32, kk, gg, j;
@@ -5294,7 +5294,7 @@ static float gdn_pass1_fixed_head(const int8_t *sq_in,
 #else
     gdn_pass1_fixed(sq_in, ss_in, qq, kk_, kd, vd,
                     au, aw, su, sw, au2, aw2, su2, sw2);
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
     for (gg = 0; gg < ng; gg++)
         for (j = 0; j < 32; j++) {
             int vi = gg * 32 + j;
@@ -5309,7 +5309,7 @@ static float gdn_pass1_fixed_head(const int8_t *sq_in,
 #else
             u[vi] = lz_i32f(au[vi]) * su[gg];
             w[vi] = lz_i32f(aw[vi]) * sw[gg];
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
         }
     return kq;
 }
@@ -5317,7 +5317,7 @@ static float gdn_pass1_fixed_head(const int8_t *sq_in,
 static void gdn_p2_fixed_rows(const int8_t *sq_in, int8_t *sq_out,
 #if LZ_GDN_STATE_2PLANE
                               const int8_t *sq2_in, int8_t *sq2_out,
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
                               const float *ss_in, float *ss_out,
                               const float *delta, const float *k,
                               const float *gvec, float gt,
@@ -5373,7 +5373,7 @@ static void gdn_p2_fixed_rows(const int8_t *sq_in, int8_t *sq_out,
 #if LZ_GDN_STATE_2PLANE
         const int8_t *row_lo_in = sq2_in + (size_t)kk * vd;
         int8_t *row_lo_out = sq2_out + (size_t)kk * vd;
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
         /* Both SIMD (gdn_p2_row_simd) and scalar (gg loop below) row
            paths cost the same per group. Billed once, above the fork -
            billing only inside gdn_p2_row_simd would read zero on
@@ -5384,27 +5384,27 @@ static void gdn_p2_fixed_rows(const int8_t *sq_in, int8_t *sq_out,
             gdn_p2_row_simd(row_in,
 #if LZ_GDN_STATE_2PLANE
                             row_lo_in,
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
                             rs_in, dec, dq, s_dg, k[kk], row_out,
 #if LZ_GDN_STATE_2PLANE
                             row_lo_out,
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
                             rs_out, ng, p2_tier());
             continue;
         }
-#endif
+#endif /* LZ_HAVE_P2_MMX */
         for (gg = 0; gg < ng; gg++) {
             float c1, c2;
             p2_group_coef(dec, rs_in[gg], k[kk], s_dg[gg], &c1, &c2);
             gdn_p2_group_fixed(row_in + gg * 32,
 #if LZ_GDN_STATE_2PLANE
                                row_lo_in + gg * 32,
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
                                c1, dq + gg * 32, c2,
                                row_out + gg * 32,
 #if LZ_GDN_STATE_2PLANE
                                row_lo_out + gg * 32,
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
                                rs_out + gg);
         }
     }
@@ -5442,7 +5442,7 @@ static void gdn_p2_fixed_rows(const int8_t *sq_in, int8_t *sq_out,
 static void gdn_step_impl(float *out, const int8_t *sq_in, int8_t *sq_out,
 #if LZ_GDN_STATE_2PLANE
                  const int8_t *sq2_in, int8_t *sq2_out,
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
                  const float *ss_in, float *ss_out,
                  const float *q, const float *k, const float *v,
                  const float *gvec, float gt, float beta, int kd, int vd) {
@@ -5496,7 +5496,7 @@ static void gdn_step_impl(float *out, const int8_t *sq_in, int8_t *sq_out,
             return;
         }
     }
-#endif
+#endif /* LZ_GDN_STATE_F32 */
 
     /* Pass 1: state read once, gathering both contractions. Always reads
        sq_in/sq2_in/ss_in - the "_in" side, whether or not it aliases
@@ -5511,10 +5511,10 @@ static void gdn_step_impl(float *out, const int8_t *sq_in, int8_t *sq_out,
         kq = gdn_pass1_fixed_head(sq_in,
 #if LZ_GDN_STATE_2PLANE
                                   sq2_in,
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
                                   ss_in, q, k, gvec, kd, vd, u, w);
     } else
-#endif
+#endif /* LZ_GDN_FIXED */
     {
     /* Float fallback: only 2 mul + 2 add per element - scale and k/q
        components are pre-multiplied. */
@@ -5536,13 +5536,13 @@ static void gdn_step_impl(float *out, const int8_t *sq_in, int8_t *sq_out,
             float sck = rs[gg] * kcw, scq = rs[gg] * qcw;
 #if LZ_GDN_STATE_2PLANE
             const int8_t *pl = sq2_in + (size_t)kk * vd + gg * 32;
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
             for (j = 0; j < 32; j++) {
 #if LZ_GDN_STATE_2PLANE
                 float e = (float)p[j] + (float)pl[j] * (1.0f / LZ_GDN_LO_SCALE);
 #else
                 float e = (float)p[j];
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
                 uu[j] += e * sck;
                 ww[j] += e * scq;
             }
@@ -5575,7 +5575,7 @@ static void gdn_step_impl(float *out, const int8_t *sq_in, int8_t *sq_out,
         gdn_p2_fixed_rows(sq_in, sq_out,
 #if LZ_GDN_STATE_2PLANE
                           sq2_in, sq2_out,
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
                           ss_in, ss_out, u, k, gvec, gt, kd, vd);
         /* docs/x87-gcc-reg-stack-leak.md: the row/group loop inside
            gdn_p2_fixed_rows is where the leak was bisected to. This is
@@ -5584,7 +5584,7 @@ static void gdn_step_impl(float *out, const int8_t *sq_in, int8_t *sq_out,
         LZ_X87_STACK_CHECK("gdn-p2-fixed-rows-return");
         return;
     }
-#endif
+#endif /* LZ_GDN_FIXED */
 
     for (kk = 0; kk < kd; kk++) {
         float buf[LZ_GDN_MAX_VD];
@@ -5597,7 +5597,7 @@ static void gdn_step_impl(float *out, const int8_t *sq_in, int8_t *sq_out,
 #if LZ_GDN_STATE_2PLANE
         const int8_t *row_lo_in = sq2_in + (size_t)kk * vd;
         int8_t *row_lo_out = sq2_out + (size_t)kk * vd;
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
         for (gg = 0; gg < ng; gg++) {
             const int8_t *p = row_in + gg * 32;
             const float *dd = u + gg * 32;
@@ -5612,7 +5612,7 @@ static void gdn_step_impl(float *out, const int8_t *sq_in, int8_t *sq_out,
 #else
             for (j = 0; j < 32; j++)
                 bb[j] = (float)p[j] * scg + kc * dd[j];
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
         }
 #if LZ_GDN_STATE_2PLANE
         /* Reads zero when --recur-write is fixed: the work moved to
@@ -5630,21 +5630,21 @@ static void gdn_step_impl(float *out, const int8_t *sq_in, int8_t *sq_out,
            file. */
         LZ_FCX(LZ_FC_RECUR, vd + ng, vd, ng, 0, 0);  /* mul-or-div, q8_round(add); 2/group q8_group_scale (mul, div) */
         lz_quantize_q8(buf, vd, 32, row_out, rs_out);
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
     }
 }
 
 void lz_gdn_step(float *out, const int8_t *sq_in, int8_t *sq_out,
 #if LZ_GDN_STATE_2PLANE
                  const int8_t *sq2_in, int8_t *sq2_out,
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
                  const float *ss_in, float *ss_out,
                  const float *q, const float *k, const float *v,
                  float gt, float beta, int kd, int vd) {
     gdn_step_impl(out, sq_in, sq_out,
 #if LZ_GDN_STATE_2PLANE
                   sq2_in, sq2_out,
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
                   ss_in, ss_out, q, k, v, NULL, gt, beta, kd, vd);
 }
 
@@ -5656,14 +5656,14 @@ void lz_gdn_step(float *out, const int8_t *sq_in, int8_t *sq_out,
 void lz_kda_step(float *out, const int8_t *sq_in, int8_t *sq_out,
 #if LZ_GDN_STATE_2PLANE
                  const int8_t *sq2_in, int8_t *sq2_out,
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
                  const float *ss_in, float *ss_out,
                  const float *q, const float *k, const float *v,
                  const float *gvec, float beta, int kd, int vd) {
     gdn_step_impl(out, sq_in, sq_out,
 #if LZ_GDN_STATE_2PLANE
                   sq2_in, sq2_out,
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
                   ss_in, ss_out, q, k, v, gvec, 1.0f, beta, kd, vd);
 }
 
@@ -5930,7 +5930,7 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
 #define LZ_G128_Q41 LZ_G128_GCC
 #define LZ_G128_Q61 LZ_G128_GCC
 #define LZ_G128_Q16 LZ_G128_GCC
-#endif
+#endif /* __WATCOMC__ */
 /* T2 on both compilers, and this one IS "nothing to offer". Derived by
    comparing against q6_1, which unpacks a 2-bit plane the same way and
    does have one: q6_1's group kernel hoists two mask constants (0x0F and
@@ -5951,7 +5951,7 @@ const char *lz_kernel_matrix(void) {
     const lz_rowfn *q16 = LZ_ROW_Q16;
 #else
     const lz_rowfn *q16 = 0;
-#endif
+#endif /* __WATCOMC__ || LZ_DOT_MMX_EXTERN */
     struct { const char *name; const lz_rowfn *tab; int g128; } rows[5];
     int i, j, p = 0;
     rows[0].name = "q8_0";  rows[0].tab = LZ_ROW_Q8;  rows[0].g128 = LZ_G128_Q8;
@@ -6078,5 +6078,5 @@ void lz_x87_stack_check(const char *where) { (void)where; }
 int  lz_x87_stack_dirty(const char **where, unsigned *tag) {
     (void)where; (void)tag; return 0;
 }
-#endif
+#endif /* !__WATCOMC__ && (__i386__ || __x86_64__) */
 #endif /* LZ_X87_STACK_GATE */
