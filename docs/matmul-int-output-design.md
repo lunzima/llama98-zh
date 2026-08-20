@@ -65,6 +65,31 @@ int 输出方案都会改变「量化粒度」（per-output-group → 别的东�
 3. 后续 dtype（q41/q61/t2/q16）。
 4. 铁律二：每个新内核 gcc intrinsics + Watcom `#pragma aux` 两份 bit-identical。
 
+## 实测（2026-08-20）：接线位点上 int 路径不省 f32
+
+`-DLZ_F32COUNT=1` 构建，kmr20 16 token，`--matmul-int off` vs `on`：
+
+| | dequant epilogue（每 token） |
+|---|---|
+| off | 1,020,192 |
+| on | **1,021,664**（+0.14%） |
+
+**第一次量出的「-9.9%」是仪器假象**：`matmul_q8_int_consume` 当时零记账，
+而 `epi_q8` 记 10 处，于是开关只是让那个位点停止记账。逐位验算证实差值
+（mul 34,816 / add 33,792 / cvt 32,768，除以 1024 得 34/33/32）恰好是
+`epi_q8` 在 ng=32、ng/r=1 时的记账公式。补上记账后数字翻转。
+
+**结论：`w2==NULL` 位点（o_proj → 残差加）结构上不可能赢。** 每组
+int 路径花 1 cvt + 1 mul + 1 add（量化）对 `epi_q8` 的 1 cvt + 1 mul +
+1 add（反量化），而 int 路径还多出 pass 1 的 per-group amax/invb/A 折叠
+（3 mul + 1 add + 1 div + 2 cvt）。省下的浮点乘加被量化本身吃掉——
+**量化到 int8 只有在下游真有 int8×int8 matmul 消费它时才划算**。
+
+真正的收益只存在于 `w2!=NULL`（真实的 producer→consumer matmul 对），
+那里同时省掉 producer 的浮点反量化和 consumer 的浮点再量化。该路径已由
+`.prof` 探针验过数值正确，但**没有接线**，因为本模型的 o_proj 输出进的是
+残差加，不是 matmul。
+
 ## 风险
 
 - **高**：格式级重构 + 5 dtype + ~28 调用点 + 铁律二。

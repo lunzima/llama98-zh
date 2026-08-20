@@ -456,6 +456,7 @@ int matmul_q8_int_consume(float *o, const int32_t *o_acc,
     static float   invb[LZ_MM_WIDEN_MAX / 32];
     static float   Ab[LZ_MM_WIDEN_MAX / 32];
     static int32_t Aib[LZ_MM_WIDEN_MAX / 32];
+    static int32_t sib[LZ_MM_WIDEN_MAX / 32];
     static int64_t acc2[LZ_MM_WIDEN_MAX];
     int nb  = in_dim / 32;      /* producer 32-sub-block count */
     int ng1 = in_dim / w1->gs;  /* producer weight-group count */
@@ -563,6 +564,14 @@ int matmul_q8_int_consume(float *o, const int32_t *o_acc,
            value 2^dscale_exp is a power of two, exact. */
         dscale_exp = A_exp + W_exp - 32;
 
+        /* Pass 1's own f32 work, billed to the site whose epilogue this
+           replaces so the census compares like with like: per group a
+           convert and a divide for invb, a convert and two multiplies
+           for A, and the Q16 fold's multiply plus its q8_round add.
+           Without this the census reads the int path as free and
+           reports a saving that is only epi_q8 no longer billing. */
+        LZ_FCX(LZ_FC_EPI, 3L * nb, (long)nb, (long)nb, 2L * nb, 0);
+
         if (w2 == NULL) {
             /* Producer output at a non-matmul boundary (the o_proj ->
                residual site): q_weighted folded to Q16, then ONE int64->
@@ -573,17 +582,31 @@ int matmul_q8_int_consume(float *o, const int32_t *o_acc,
             for (i = 0; i < out_dim; i++) {
                 const float *wr = o_ws + (size_t)i * ng1;
                 int64_t qw = 0;
+                int gg;
+                /* si depends only on the weight group g/r1, so it is
+                   built once per weight group instead of once per
+                   sub-block - r1 is 32 on this model's o_proj, so the
+                   inner loop was folding the same scale 32 times. Same
+                   inputs, same mmq8_scale_round: bit-identical. */
+                for (gg = 0; gg < ng1; gg++)
+                    sib[gg] = mmq8_scale_round(wr[gg] * W_scale);
                 for (g = 0; g < nb; g++) {
-                    int qi, si;
+                    int qi;
                     if (amaxb[g] <= 0) continue;
                     qi = q8_round((float)acc[(size_t)i * nb + g] * invb[g]);
                     if (qi > 127) qi = 127;
                     if (qi < -127) qi = -127;
-                    si = mmq8_scale_round(wr[g / r1] * W_scale);
-                    qw += (int64_t)qi * (int64_t)Aib[g] * si;
+                    qw += (int64_t)qi * (int64_t)Aib[g] * sib[g / r1];
                 }
                 ot[i] = (float)qw * pow2f(dscale_exp);
             }
+            /* Per row: nb quantize steps (convert, multiply, q8_round
+               add), ng1 scale folds (multiply, round add), and the
+               dequant's convert and multiply. The int64 products are
+               integer work and carry no f32 bill. */
+            LZ_FCX(LZ_FC_EPI, (long)out_dim * (nb + ng1 + 1),
+                   (long)out_dim * (nb + ng1), 0,
+                   (long)out_dim * (nb + 1), 0);
         } else {
             /* Downstream int matmul: q_weighted x w2_q accumulates per
                (output row, weight-group) in int64; the dequant applies
@@ -596,15 +619,17 @@ int matmul_q8_int_consume(float *o, const int32_t *o_acc,
             for (i = 0; i < out_dim; i++) {
                 const float *wr = o_ws + (size_t)i * ng1;
                 int64_t qw = 0;
-                int k;
+                int gg;
+                /* Same per-weight-group hoist as the w2 == NULL arm. */
+                for (gg = 0; gg < ng1; gg++)
+                    sib[gg] = mmq8_scale_round(wr[gg] * W_scale);
                 for (g = 0; g < nb; g++) {
-                    int qi, si;
+                    int qi;
                     if (amaxb[g] <= 0) continue;
                     qi = q8_round((float)acc[(size_t)i * nb + g] * invb[g]);
                     if (qi > 127) qi = 127;
                     if (qi < -127) qi = -127;
-                    si = mmq8_scale_round(wr[g / r1] * W_scale);
-                    qw += (int64_t)qi * (int64_t)Aib[g] * si;
+                    qw += (int64_t)qi * (int64_t)Aib[g] * sib[g / r1];
                 }
                 if (qw == 0) continue;
                 for (j = 0; j < out2; j++) {
@@ -622,6 +647,14 @@ int matmul_q8_int_consume(float *o, const int32_t *o_acc,
                     ot[j] = sum * pow2f(dscale_exp);
                 }
             }
+            /* The activation side (quantize + scale fold, as in the
+               w2 == NULL arm) plus this arm's own epilogue: per output
+               column ng2 converts, multiplies and adds, then the
+               dequant multiply. The int64 matmul itself is integer. */
+            LZ_FCX(LZ_FC_EPI,
+                   (long)out_dim * (nb + ng1) + (long)out2 * (ng2 + 1),
+                   (long)out_dim * (nb + ng1) + (long)out2 * ng2, 0,
+                   (long)out_dim * nb + (long)out2 * ng2, 0);
         }
     }
     return 1;
