@@ -697,7 +697,6 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
         s->moe_lat_y = (float *)xcalloc((size_t)nt * c->moe_latent_dim, sizeof(float), &ok, &s->bytes_alloc);
         s->moe_h1 = (float *)xcalloc((size_t)nt * moe_scratch_w, sizeof(float), &ok, &s->bytes_alloc);
         s->moe_h3 = (float *)xcalloc((size_t)nt * moe_scratch_w, sizeof(float), &ok, &s->bytes_alloc);
-        s->moe_sig = (int32_t *)xcalloc((size_t)nt * moe_scratch_w, sizeof(int32_t), &ok, &s->bytes_alloc);
         /* One token's worth: this is the routed loop's own temporary,
            written and consumed inside one (token, expert) step. */
         s->moe_h2 = (float *)xcalloc((size_t)c->moe_latent_dim, sizeof(float), &ok, &s->bytes_alloc);
@@ -948,7 +947,7 @@ void lz_state_free(LZRunState *s) {
     free(s->kda_gate_lat); free(s->kda_gate);
     free(s->moe_router_logits); free(s->moe_sel_idx); free(s->moe_sel_w);
     free(s->moe_lat_x); free(s->moe_lat_y);
-    free(s->moe_h1); free(s->moe_h3); free(s->moe_sig); free(s->moe_h2); free(s->moe_shared_out);
+    free(s->moe_h1); free(s->moe_h3); free(s->moe_h2); free(s->moe_shared_out);
     free(s->mtp_x); free(s->mtp_concat); free(s->mtp_emb_raw);
     free(s->mtp_chain); free(s->mtp_draft_logits); free(s->mtp_logits);
     free(s->mtp_verify_hidden);
@@ -2665,40 +2664,10 @@ static void forward_moe(const LZModel *m, LZRunState *s,
                         &L->moe_expert_w1[ei], latent, inter);
             lz_matmul_xq(s->moe_h3, lat_x, s->xq, s->xqs,
                         &L->moe_expert_w3[ei], latent, inter);
-            {
-                /* SwiGLU + quantize fusion (lz_quantize_q8_silu, ops.h):
-                   skip materializing the float SwiGLU output and
-                   quantize straight off the pre-silu product, folding
-                   the 2^-15 sigmoid scale into the group scale instead
-                   of an element-wise multiply. p is moe_h3 (the plain
-                   multiplier) and g is moe_h1 (the gated value the
-                   sigmoid is taken of) - NOT the other way round: the
-                   float SwiGLU rounds silu(h1)=h1*sig FIRST and *h3
-                   LAST, so p*(g*sig) must put h1 in g to reproduce that
-                   order (float multiply is commutative but not
-                   associative, so h1*(h3*sig) is a different rounding
-                   than (h1*sig)*h3). */
-                int gsw2 = lz_act_gs(&L->moe_expert_w2[ei], inter);
-                if (lz_sig_mode() && gsw2 > 0 && (inter % gsw2) == 0) {
-                    for (vv = 0; vv < inter; vv++)
-                        s->moe_sig[vv] = sigmoid_q15(s->moe_h1[vv]);
-                    /* sigmoid_q15's own arithmetic (2 mul, 2 cvt, 2 sub
-                       per element - same figure lz_rmsnorm_gated's
-                       fixed-tier comment gives); lz_quantize_q8_silu
-                       bills its own amax/round/rescale work under
-                       LZ_FC_QUANT already. */
-                    LZ_FCX(LZ_FC_SIGMOID, 2 * inter, 2 * inter, 0, 2 * inter, 0);
-                    lz_quantize_q8_silu(s->moe_h3, s->moe_h1, s->moe_sig, inter,
-                                        gsw2, s->xq, s->xqs, s->moe_h1);
-                    lz_matmul_xq(s->moe_h2, s->moe_h1, s->xq, s->xqs,
-                                &L->moe_expert_w2[ei], inter, latent);
-                } else {
-                    for (vv = 0; vv < inter; vv++)
-                        s->moe_h1[vv] = lz_silu(s->moe_h1[vv]) * s->moe_h3[vv];
-                    lz_matmul_w(s->moe_h2, s->moe_h1, &L->moe_expert_w2[ei],
-                               inter, latent, s->xq, s->xqs);
-                }
-            }
+            for (vv = 0; vv < inter; vv++)
+                s->moe_h1[vv] = lz_silu(s->moe_h1[vv]) * s->moe_h3[vv];
+            lz_matmul_w(s->moe_h2, s->moe_h1, &L->moe_expert_w2[ei],
+                       inter, latent, s->xq, s->xqs);
             for (vv = 0; vv < latent; vv++)
                 lat_y[vv] += ww * s->moe_h2[vv];
         }
@@ -2746,31 +2715,14 @@ static void forward_moe(const LZModel *m, LZRunState *s,
                         &L->moe_shared_gate, hdim, shared_w, nt);
         lz_matmul_xq_nt(s->moe_h3, s->xb, s->xq, s->xqs,
                         &L->moe_shared_up, hdim, shared_w, nt);
-        /* SwiGLU + quantize fusion, same shape and p/g mapping as the
-           routed experts above (see that comment). One call over the
-           whole nt*shared_w span instead of per-token: group boundaries
-           at multiples of gsd already coincide with token boundaries
-           (shared_w % gsd == 0, checked below), so this produces the
-           same groups the per-token loop did. */
-        if (lz_sig_mode() && gsd > 0 && (shared_w % gsd) == 0) {
-            int nsig = nt * shared_w;
-            for (i = 0; i < nsig; i++)
-                s->moe_sig[i] = sigmoid_q15(s->moe_h1[i]);
-            LZ_FCX(LZ_FC_SIGMOID, 2 * nsig, 2 * nsig, 0, 2 * nsig, 0);
-            lz_quantize_q8_silu(s->moe_h3, s->moe_h1, s->moe_sig, nsig,
-                                gsd, s->xq, s->xqs, s->moe_h1);
-            lz_matmul_xq_nt(s->moe_shared_out, s->moe_h1, s->xq, s->xqs,
-                            &L->moe_shared_down, shared_w, hdim, nt);
-        } else {
-            for (i = 0; i < nt * shared_w; i++)
-                s->moe_h1[i] = lz_silu(s->moe_h1[i]) * s->moe_h3[i];
-            for (tk = 0; tk < nt; tk++)
-                lz_quantize_q8(s->moe_h1 + (size_t)tk * shared_w, shared_w, gsd,
-                               s->xq + (size_t)tk * shared_w,
-                               s->xqs + (size_t)tk * nsd);
-            lz_matmul_xq_nt(s->moe_shared_out, s->moe_h1, s->xq, s->xqs,
-                            &L->moe_shared_down, shared_w, hdim, nt);
-        }
+        for (i = 0; i < nt * shared_w; i++)
+            s->moe_h1[i] = lz_silu(s->moe_h1[i]) * s->moe_h3[i];
+        for (tk = 0; tk < nt; tk++)
+            lz_quantize_q8(s->moe_h1 + (size_t)tk * shared_w, shared_w, gsd,
+                           s->xq + (size_t)tk * shared_w,
+                           s->xqs + (size_t)tk * nsd);
+        lz_matmul_xq_nt(s->moe_shared_out, s->moe_h1, s->xq, s->xqs,
+                        &L->moe_shared_down, shared_w, hdim, nt);
         for (i = 0; i < nt * hdim; i++) s->xb2[i] += s->moe_shared_out[i];
     }
     /* No tap for the combined routed+shared output here: forward_chunk's
