@@ -32,7 +32,7 @@ int lz_kernel_sel(void) { return g_kernel; }
 
 /* ---- CPUID caching (SSE bit, for hot-path dispatch) ------------------- */
 
-#if defined(__WATCOMC__) || defined(__i386__) || defined(__x86_64__)
+#if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86)
 static int g_has_sse = -1;
 
 int lz_cpu_has_sse(void) {
@@ -44,7 +44,7 @@ int lz_cpu_has_sse(void) {
 #endif /* LZ_CPUID_NOCACHE */
 }
 
-#endif /* __WATCOMC__ || __i386__ || __x86_64__ */
+#endif /* __i386__ || __x86_64__ || _M_IX86 */
 
 /* lz_cpu_has_mmx: non-static, defined in ops.c, declared in ops_quant.h.
    g_has_mmx stays in ops.c (its cache variable). */

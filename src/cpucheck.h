@@ -50,7 +50,7 @@ int lz_cpu_check(char *errbuf, int errlen);
    duplicated. This is a normal symbol ops.c calls, and the __asm
    block's own prologue saves/restores ebx (CPUID clobbers it), which a
    #pragma aux body has to do by hand. */
-#if defined(__WATCOMC__) || defined(__i386__) || defined(__x86_64__)
+#if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86)
 unsigned lz_cpuid1_edx(void);
 #endif
 

@@ -570,7 +570,7 @@ void lz_quantize_q8_silu(const float *p, const float *g, const int32_t *sig,
    "emms is an MMX instruction, so it is #UD on an MMX-less CPU". Defined
    on every target (not just x86): the call sites test it on ARM too, where
    _mm_empty() is a no-op and this returns 0 so the test compiles away. */
-#if defined(__WATCOMC__) || defined(__i386__) || defined(__x86_64__)
+#if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86)
 static int g_has_mmx = -1;
 int lz_cpu_has_mmx(void) {
     if (g_has_mmx < 0) g_has_mmx = (lz_cpuid1_edx() & (1u << 23)) != 0;
@@ -578,7 +578,7 @@ int lz_cpu_has_mmx(void) {
 }
 #else
 int lz_cpu_has_mmx(void) { return 0; }
-#endif /* __WATCOMC__ || __i386__ || __x86_64__ */
+#endif /* __i386__ || __x86_64__ || _M_IX86 */
 
 /* pf_detect, lz_prefetch_mode, g_pair, lz_pair_mode: in ops_sched.c. */
 
