@@ -486,10 +486,6 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
     s->x       = (float *)xcalloc((size_t)nt * c->hidden_size, sizeof(float), &ok, &s->bytes_alloc);
     s->xb      = (float *)xcalloc((size_t)nt * c->hidden_size, sizeof(float), &ok, &s->bytes_alloc);
     s->xb2     = (float *)xcalloc((size_t)nt * c->hidden_size, sizeof(float), &ok, &s->bytes_alloc);
-    /* Trunk --norm-write int scratch - see forward.h's field comment. */
-    s->trunk_norm_int = (int32_t *)xcalloc((size_t)nt * c->hidden_size,
-                                           sizeof(int32_t), &ok, &s->bytes_alloc);
-    s->trunk_norm_deq = (float *)xcalloc((size_t)nt, sizeof(float), &ok, &s->bytes_alloc);
     /* Sized for the LARGER of the body's dense-FFN width and the MTP
        block's own (dense_ffn_step's shared scratch, forward.c) - the
        two are independent fields (model.h's mtp_intermediate_size
@@ -966,7 +962,6 @@ void lz_state_free(LZRunState *s) {
     free(s->conv_sig_k1); free(s->conv_sig_oscale2);
     free(s->xq); free(s->xqs); free(s->wscr); free(s->fwht_scratch);
     free(s->subn_norm_int);
-    free(s->trunk_norm_int); free(s->trunk_norm_deq);
     free(s->rope_cs);
     free(s->cache_idx);
     memset(s, 0, sizeof(*s));
@@ -1291,21 +1286,9 @@ static void forward_attn(const LZModel *m, LZRunState *s,
        lz_act_gs only looks at whether in_dim is a multiple of 32, and
        all three share the same in_dim, so the answer is identical.
        Asking q_proj once suffices. */
-    /* --norm-write int: the trunk norm above may have also written a Q15
-       int image (s->trunk_norm_int/deq) of this same row; consume it
-       when gsa (this projection's own group size) allows, else the
-       plain float quantize - same fallback shape 1c4efad's SubLN sites
-       use. */
-    for (tk = 0; tk < nt; tk++) {
-        if (lz_norm_int() && lz_norm_can_fixed(hdim) &&
-            gsa > 0 && (hdim % gsa) == 0)
-            lz_quantize_q8_int(s->trunk_norm_int + (size_t)tk * hdim, hdim, gsa,
-                               s->trunk_norm_deq[tk],
-                               s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
-        else
-            lz_quantize_q8(s->xb + (size_t)tk * hdim, hdim, gsa,
-                           s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
-    }
+    for (tk = 0; tk < nt; tk++)
+        lz_quantize_q8(s->xb + (size_t)tk * hdim, hdim, gsa,
+                       s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
     lz_matmul_xq_nt(s->qg, s->xb, s->xq, s->xqs, &L->q_proj, hdim, qgd, nt);
     lz_matmul_xq_nt(s->ktmp, s->xb, s->xq, s->xqs, &L->k_proj, hdim, kvd, nt);
     lz_matmul_xq_nt(s->vtmp, s->xb, s->xq, s->xqs, &L->v_proj, hdim, kvd, nt);
@@ -1856,21 +1839,9 @@ static void forward_ssm(const LZModel *m, LZRunState *s,
     int h, i, tk;
 
     /* quantize xb once; the four input projections share it (all in_dim = hidden) */
-    /* --norm-write int: the trunk norm above may have also written a Q15
-       int image (s->trunk_norm_int/deq) of this same row; consume it
-       when gsa (this projection's own group size) allows, else the
-       plain float quantize - same fallback shape 1c4efad's SubLN sites
-       use. */
-    for (tk = 0; tk < nt; tk++) {
-        if (lz_norm_int() && lz_norm_can_fixed(hdim) &&
-            gsa > 0 && (hdim % gsa) == 0)
-            lz_quantize_q8_int(s->trunk_norm_int + (size_t)tk * hdim, hdim, gsa,
-                               s->trunk_norm_deq[tk],
-                               s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
-        else
-            lz_quantize_q8(s->xb + (size_t)tk * hdim, hdim, gsa,
-                           s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
-    }
+    for (tk = 0; tk < nt; tk++)
+        lz_quantize_q8(s->xb + (size_t)tk * hdim, hdim, gsa,
+                       s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
     lz_matmul_xq_nt(s->qkv, s->xb, s->xq, s->xqs, &L->in_proj_qkv, hdim,
                     cdim, nt);
     lz_matmul_xq_nt(s->zbuf, s->xb, s->xq, s->xqs, &L->in_proj_z, hdim,
@@ -2286,21 +2257,9 @@ static void forward_kda(const LZModel *m, LZRunState *s,
     /* Six hidden-space projections share one activation quantization,
        the same trick forward_ssm uses for its four (all have
        in_dim == hidden_size, so lz_act_gs agrees regardless of format). */
-    /* --norm-write int: the trunk norm above may have also written a Q15
-       int image (s->trunk_norm_int/deq) of this same row; consume it
-       when gsa (this projection's own group size) allows, else the
-       plain float quantize - same fallback shape 1c4efad's SubLN sites
-       use. */
-    for (tk = 0; tk < nt; tk++) {
-        if (lz_norm_int() && lz_norm_can_fixed(hdim) &&
-            gsa > 0 && (hdim % gsa) == 0)
-            lz_quantize_q8_int(s->trunk_norm_int + (size_t)tk * hdim, hdim, gsa,
-                               s->trunk_norm_deq[tk],
-                               s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
-        else
-            lz_quantize_q8(s->xb + (size_t)tk * hdim, hdim, gsa,
-                           s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
-    }
+    for (tk = 0; tk < nt; tk++)
+        lz_quantize_q8(s->xb + (size_t)tk * hdim, hdim, gsa,
+                       s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
     lz_matmul_xq_nt(s->kda_q, s->xb, s->xq, s->xqs, &L->kda_q_proj, hdim, kdim, nt);
     lz_matmul_xq_nt(s->kda_k, s->xb, s->xq, s->xqs, &L->kda_k_proj, hdim, kdim, nt);
     lz_matmul_xq_nt(s->kda_v, s->xb, s->xq, s->xqs, &L->kda_v_proj, hdim, vdim, nt);
@@ -2643,19 +2602,10 @@ static void forward_moe(const LZModel *m, LZRunState *s,
        the same weights nt times.
        They also share one activation quantization, the same reasoning
        forward_attn's q/k/v_proj comment gives. */
-    /* --norm-write int: see forward_attn's matching comment. */
-    for (tk = 0; tk < nt; tk++) {
-        if (lz_norm_int() && lz_norm_can_fixed(hdim) &&
-            gsh > 0 && (hdim % gsh) == 0)
-            lz_quantize_q8_int(s->trunk_norm_int + (size_t)tk * hdim, hdim, gsh,
-                               s->trunk_norm_deq[tk],
-                               s->xq + (size_t)tk * hdim,
-                               s->xqs + (size_t)tk * nsh);
-        else
-            lz_quantize_q8(s->xb + (size_t)tk * hdim, hdim, gsh,
-                           s->xq + (size_t)tk * hdim,
-                           s->xqs + (size_t)tk * nsh);
-    }
+    for (tk = 0; tk < nt; tk++)
+        lz_quantize_q8(s->xb + (size_t)tk * hdim, hdim, gsh,
+                       s->xq + (size_t)tk * hdim,
+                       s->xqs + (size_t)tk * nsh);
     lz_matmul_xq_nt(s->moe_router_logits, s->xb, s->xq, s->xqs,
                     &L->moe_gate_w, hdim, ne, nt);
     lz_matmul_xq_nt(s->moe_lat_x, s->xb, s->xq, s->xqs,
@@ -2757,23 +2707,10 @@ static void forward_moe(const LZModel *m, LZRunState *s,
            as the routed experts' w1/w3 above. Re-quantized rather than
            reusing phase 1's: the shared gate may carry a different
            activation group size than the down-projection did. */
-        /* --norm-write int: see forward_attn's matching comment. Same
-           trunk_norm_int/deq image phase 1 above may already have
-           consumed at its own (different) group size gsh - reading it
-           again here at gss is the whole reason the scratch is nt-wide
-           rather than single-token. */
-        for (tk = 0; tk < nt; tk++) {
-            if (lz_norm_int() && lz_norm_can_fixed(hdim) &&
-                gss > 0 && (hdim % gss) == 0)
-                lz_quantize_q8_int(s->trunk_norm_int + (size_t)tk * hdim, hdim, gss,
-                                   s->trunk_norm_deq[tk],
-                                   s->xq + (size_t)tk * hdim,
-                                   s->xqs + (size_t)tk * nss);
-            else
-                lz_quantize_q8(s->xb + (size_t)tk * hdim, hdim, gss,
-                               s->xq + (size_t)tk * hdim,
-                               s->xqs + (size_t)tk * nss);
-        }
+        for (tk = 0; tk < nt; tk++)
+            lz_quantize_q8(s->xb + (size_t)tk * hdim, hdim, gss,
+                           s->xq + (size_t)tk * hdim,
+                           s->xqs + (size_t)tk * nss);
         lz_matmul_xq_nt(s->moe_h1, s->xb, s->xq, s->xqs,
                         &L->moe_shared_gate, hdim, shared_w, nt);
         lz_matmul_xq_nt(s->moe_h3, s->xb, s->xq, s->xqs,
@@ -2879,17 +2816,9 @@ static void dense_ffn_step(const LZModel *m, LZRunState *s,
         lz_matmul_xq_nt(s->hb2, s->xb2, s->xq, s->xqs, &L->up_proj, dim,
                         idim, nt);
     } else {
-    /* --norm-write int: see forward_attn's matching comment. */
-    for (tk = 0; tk < nt; tk++) {
-        if (lz_norm_int() && lz_norm_can_fixed(dim) &&
-            gsg > 0 && (dim % gsg) == 0)
-            lz_quantize_q8_int(s->trunk_norm_int + (size_t)tk * dim, dim, gsg,
-                               s->trunk_norm_deq[tk],
-                               s->xq + (size_t)tk * dim, s->xqs + (size_t)tk * nsg);
-        else
-            lz_quantize_q8(s->xb + (size_t)tk * dim, dim, gsg,
-                           s->xq + (size_t)tk * dim, s->xqs + (size_t)tk * nsg);
-    }
+    for (tk = 0; tk < nt; tk++)
+        lz_quantize_q8(s->xb + (size_t)tk * dim, dim, gsg,
+                       s->xq + (size_t)tk * dim, s->xqs + (size_t)tk * nsg);
     lz_matmul_xq_nt(s->hb, s->xb, s->xq, s->xqs, &L->gate_proj, dim,
                     idim, nt);
     lz_matmul_xq_nt(s->hb2, s->xb, s->xq, s->xqs, &L->up_proj, dim,
@@ -3167,22 +3096,6 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
                 lz_rmsnorm(s->xb + (size_t)tk * dim, s->x + (size_t)tk * dim,
                            lz_t_f32(&L->input_layernorm, s->wscr), dim,
                            c->rms_norm_eps);
-            /* --norm-write int: an ADDITIONAL Q15 int image of the same
-               row, alongside (not instead of) the float one above. This
-               norm's output feeds more than one downstream quantize
-               (forward_attn's q/k/v_proj comment: they can even carry
-               different weight formats sharing one norm), and an
-               F32-weight consumer reads s->xb directly - so the float
-               write can never be skipped here the way SubLN's per-
-               projection norms skip it. Consumed at each block
-               function's own quantize site, gated the same way again
-               there. */
-            if (lz_norm_int() && lz_norm_can_fixed(dim))
-                for (tk = 0; tk < nt; tk++)
-                    lz_rmsnorm_int(s->trunk_norm_int + (size_t)tk * dim,
-                                   s->x + (size_t)tk * dim,
-                                   lz_t_f32(&L->input_layernorm, s->wscr), dim,
-                                   c->rms_norm_eps, &s->trunk_norm_deq[tk]);
         }
         LZ_TAP("an", l, s->xb, dim);
         LZ_PROF_BEG(_tp);
@@ -3201,17 +3114,6 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
                 lz_rmsnorm(s->xb + (size_t)tk * dim, s->x + (size_t)tk * dim,
                            lz_t_f32(&L->post_attention_layernorm, s->wscr), dim,
                            c->rms_norm_eps);
-            /* --norm-write int: same additional-image shape as the "an"
-               norm above - forward_moe reads this row TWICE (phase 1
-               and phase 4, different group sizes), which is exactly why
-               the image has to survive as nt-wide scratch rather than
-               being consumed in place. */
-            if (lz_norm_int() && lz_norm_can_fixed(dim))
-                for (tk = 0; tk < nt; tk++)
-                    lz_rmsnorm_int(s->trunk_norm_int + (size_t)tk * dim,
-                                   s->x + (size_t)tk * dim,
-                                   lz_t_f32(&L->post_attention_layernorm, s->wscr), dim,
-                                   c->rms_norm_eps, &s->trunk_norm_deq[tk]);
         }
         LZ_TAP("pn", l, s->xb, dim);
         LZ_PROF_BEG(_tf);
