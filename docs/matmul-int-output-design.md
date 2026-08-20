@@ -121,6 +121,32 @@ kmr20（8 层，LLLALLLA）只有**两个**这样的对，dtype 由 `.prof/dtype
 而真正大的 q8_0 位点（`kda_o_proj`，1024 行 × 32 组）全都进残差加，
 在那里 int 路径实测是 +0.14% 的净亏。
 
+## 出货配置上这条线整个不运行（2026-08-20 实测，结论性）
+
+前面所有 census 都量在**浮点档**上，而那不是弱机的出货配置。补量出货配置
+（`--fixed all`，153 token）：
+
+| `--epi-write` | dequant epilogue | `--matmul-int` 的效果 |
+|---|---|---|
+| `float`（本机 auto，有 SSE） | 1,020,192 | 923,168（−9.5%） |
+| `fixed`（弱机 auto，无 SSE） | **136,000（−86.7%）** | **完全无效果** |
+
+`--fixed all` 下开关 on/off 的总数逐位相同（839,377），连 top logit 都一样。
+原因在代码里：`matmul_q8_int_impl` 与 `matmul_q8_int_consume` 开头都有
+`if (q8_fixed_epi(...)) return 0;`——**定点 epilogue 一开，int 路径就整个 bail。**
+
+而 `lz_epi_mode()` 的 auto 就是 `lz_soft_float_target()`：
+
+- 无 SSE 的 Socket-7 → fixed epilogue → **int 路径关闭**
+- 有 SSE 的开发机 → float epilogue → int 路径开启
+
+**方向是反的：这条线只在不需要它的机器上生效。** 而且即使在那里，它的
+−9.5% 也远不如已有的定点 epilogue 档的 −86.7%——两者互斥，后者好 6.8 倍。
+
+**因此这条线（任务 1、scheme A、int 域消费、2 的幂 amax）的正确定位是：
+一个数值上正确、已验证、但没有出货收益的旋钮**，默认 off 是对的。要让它
+有意义，前提是回答「为什么它和定点 epilogue 互斥」——那是比本文档大的题目。
+
 ## 风险
 
 - **高**：格式级重构 + 5 dtype + ~28 调用点 + 铁律二。
