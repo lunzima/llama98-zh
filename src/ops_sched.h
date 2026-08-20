@@ -22,4 +22,8 @@ int lz_cpu_has_sse(void);
 /* Token pairing flag. Non-static: the row kernels in ops.c read it. */
 extern int g_pair;
 
+/* Accessor for g_kernel (the selected ISA tier). lz_row_pick reads the
+   tier through this rather than the raw global. */
+int lz_kernel_sel(void);
+
 #endif /* OPS_SCHED_H */

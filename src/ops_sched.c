@@ -25,6 +25,11 @@
    Defined here (was in ops.c). Declared extern in ops_kernel_shared.h. */
 int g_kernel = 0;
 
+/* Accessor for g_kernel. lz_row_pick (ops_matmul.c) reads the tier
+   through this rather than the raw global, so the matmul module never
+   needs direct access to the sched global. */
+int lz_kernel_sel(void) { return g_kernel; }
+
 /* ---- CPUID caching (SSE bit, for hot-path dispatch) ------------------- */
 
 #if defined(__WATCOMC__) || defined(__i386__) || defined(__x86_64__)
