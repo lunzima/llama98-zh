@@ -12,9 +12,14 @@
 #   5. build/switch_matrix_gate.sh - every control switch's non-default
 #      value compiled on gcc + Watcom, so a "configuration nobody
 #      happens to build" fails here instead of silently diverging
-#   6. make watcom-gui / watcom-dll / watcom-dos (the remaining Watcom
+#   6. build/norm_int_xcompiler_gate.sh - gcc/Watcom bit-identity of
+#      --norm-write int / --attn-write int over hundreds of tokens of
+#      real text, the case the fixed tier's original 8/16-token
+#      verification could not see (lz_quantize_q8_int's double-rounding
+#      hazard, see that script's own header)
+#   7. make watcom-gui / watcom-dll / watcom-dos (the remaining Watcom
 #      targets; DOS is left out of `make check` by design)
-#   7. build/x87/build_engine.sh under WSL (32-bit x87 gcc, the fourth
+#   8. build/x87/build_engine.sh under WSL (32-bit x87 gcc, the fourth
 #      toolchain shape)
 #
 # Judging discipline (this repo has paid for getting this wrong before):
@@ -58,7 +63,7 @@ freshness_sentinel() {
 # ---------------------------------------------------------------------
 # Stage 1: make native (gcc)
 # ---------------------------------------------------------------------
-echo "==== [1/7] make native ===="
+echo "==== [1/8] make native ===="
 NATIVE_EXE="$ROOT/llama98.exe"
 [ -e "$NATIVE_EXE" ] || NATIVE_EXE="$ROOT/llama98"
 LOG=build/ci-native.log
@@ -97,7 +102,7 @@ rm -f "$SENTINEL"
 # Stage 2: make watcom-cli (Open Watcom, the target compiler)
 # ---------------------------------------------------------------------
 echo
-echo "==== [2/7] make watcom-cli ===="
+echo "==== [2/8] make watcom-cli ===="
 WATCOM_EXE="$ROOT/llama98-w.exe"
 WATCOM_OBJDIR="$ROOT/build/watcom/cli"
 LOG=build/ci-watcom-cli.log
@@ -149,7 +154,7 @@ rm -f "$SENTINEL"
 # Stage 3: llama98 <dir> --check on a curated set of KunMoe checkpoints
 # ---------------------------------------------------------------------
 echo
-echo "==== [3/7] model --check sweep ===="
+echo "==== [3/8] model --check sweep ===="
 MODELS_ROOT=${MODELS_ROOT:-/e/LLM/models}
 # Curated, not a blind sweep of every directory under MODELS_ROOT:
 # a usable sweep is a handful of representative checkpoints, and
@@ -196,7 +201,7 @@ fi
 # Stage 4: x86 <-> ARMv5TE parity gate
 # ---------------------------------------------------------------------
 echo
-echo "==== [4/7] ARM parity gate ===="
+echo "==== [4/8] ARM parity gate ===="
 ARM_MODEL="$MODELS_ROOT/kunkun98-pilot-20260806"
 LOG=build/ci-arm.log
 if [ "$native_ok" -ne 1 ]; then
@@ -231,7 +236,7 @@ fi
 # Stage 5: control-switch matrix (every non-default value, gcc + Watcom)
 # ---------------------------------------------------------------------
 echo
-echo "==== [5/7] control-switch matrix ===="
+echo "==== [5/8] control-switch matrix ===="
 LOG=build/ci-switch-matrix.log
 build/switch_matrix_gate.sh >"$LOG" 2>&1
 MATRIX_RC=$?
@@ -256,12 +261,40 @@ case $MATRIX_RC in
 esac
 
 # ---------------------------------------------------------------------
-# Stage 6: the remaining Watcom targets. `make check` builds gui and dll
+# Stage 6: --norm-write int / --attn-write int gcc<->Watcom bit-identity
+# ---------------------------------------------------------------------
+echo
+echo "==== [6/8] norm/attn int cross-compiler gate ===="
+LOG=build/ci-norm-int-xcompiler.log
+build/norm_int_xcompiler_gate.sh >"$LOG" 2>&1
+NIX_RC=$?
+cat "$LOG"
+case $NIX_RC in
+    0)
+        echo "PASS: norm/attn int cross-compiler gate"
+        note "PASS  norm/attn int cross-compiler gate"
+        PASS=$((PASS + 1))
+        ;;
+    2)
+        REASON=$(grep -m1 '^norm_int_xcompiler_gate: SKIP' "$LOG")
+        echo "SKIP: norm/attn int cross-compiler gate ($REASON)"
+        note "SKIP  norm/attn int cross-compiler gate ($REASON)"
+        SKIP=$((SKIP + 1))
+        ;;
+    *)
+        echo "FAIL: norm/attn int cross-compiler gate"
+        note "FAIL  norm/attn int cross-compiler gate"
+        FAIL=$((FAIL + 1))
+        ;;
+esac
+
+# ---------------------------------------------------------------------
+# Stage 7: the remaining Watcom targets. `make check` builds gui and dll
 # but deliberately leaves out dos (it needs the extender stub and is a
 # separate delivery decision); none of the three is in ci.sh's stage 2.
 # ---------------------------------------------------------------------
 echo
-echo "==== [6/7] watcom gui/dll/dos targets ===="
+echo "==== [7/8] watcom gui/dll/dos targets ===="
 for t in watcom-gui watcom-dll watcom-dos; do
     case $t in
         watcom-gui) EXE="$ROOT/kunkun98-w.exe" ;;
@@ -293,12 +326,12 @@ for t in watcom-gui watcom-dll watcom-dos; do
 done
 
 # ---------------------------------------------------------------------
-# Stage 7: 32-bit x87 gcc build under WSL (Windows gcc has no 32-bit
+# Stage 8: 32-bit x87 gcc build under WSL (Windows gcc has no 32-bit
 # libs). The fourth toolchain shape - a Socket-7-class target with x87
 # as its only float unit. SKIP when WSL is not usable, never PASS.
 # ---------------------------------------------------------------------
 echo
-echo "==== [7/7] 32-bit x87 gcc build (WSL) ===="
+echo "==== [8/8] 32-bit x87 gcc build (WSL) ===="
 LOG=build/ci-x87.log
 if ! command -v wsl >/dev/null 2>&1; then
     echo "SKIP: 32-bit x87 build (wsl not installed)"
