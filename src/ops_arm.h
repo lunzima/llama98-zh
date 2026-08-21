@@ -88,6 +88,36 @@ int32_t lz_dot32_q61_arm_asm(const unsigned char *b4, const unsigned char *b2,
    pointers. */
 void lz_wsum_pair_arm_asm(const int8_t *rowA, const int8_t *rowB,
                           const int16_t *coef, int32_t *acc32);
+
+/* norm_ss_fixed's element loop (docs/arm-asm-audit.md B1): for each
+   x[i], q8_round(x[i] * 2^k), clamp to +-32767, optionally write the
+   Q15 image, and accumulate the square into a 64-bit sum.
+
+   THIS ONE HAS NO DECLINE, so the preconditions are the caller's and
+   they are not decoration - the loop reads the exponent field and
+   shifts by 150 - k - exponent, which is only the right shift count
+   inside a stated band. norm_ss_fixed enforces all of them from the
+   amax it already computed, in O(1), which is the point: the four
+   tests that would otherwise cost two instructions per element are one
+   test per ROW.
+
+     amax finite and non-zero    every |x[i]| <= amax is then finite,
+                                 so the shift count cannot go negative
+     k >= -105                   shift count stays under 256, which is
+                                 what ARM's register-specified shifts
+                                 read
+     k <= 125                    a SUBNORMAL x[i] then shifts out
+                                 entirely, so the implicit bit this
+                                 loop ORs in unconditionally cannot
+                                 reach the result
+
+   qout may be NULL, and there are two loop bodies rather than a store
+   to a scratch: three of norm_ss_fixed's four call sites pass NULL.
+
+   4-byte alignment on x and acc, 2-byte on qout - all three are what
+   their C types already promise. */
+void lz_norm_ss_fixed_arm_asm(const float *x, int n, int k, short *qout,
+                              long long *acc);
 #endif /* __arm__ && __GNUC__ */
 
 #ifdef __cplusplus

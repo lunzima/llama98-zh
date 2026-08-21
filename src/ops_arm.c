@@ -412,3 +412,96 @@ void lz_wsum_pair_arm_asm(const int8_t *rowA, const int8_t *rowB,
         : "r5", "r6", "r7", "r8", "r9", "r10", "r11", "cc", "memory");
 }
 #endif /* LZ_ARM_ASM_EXTERN */
+
+/* ---- norm_ss_fixed's element loop ------------------------------------ */
+
+#if defined(LZ_ARM_ASM_EXTERN)
+/* THREE THINGS C CANNOT REACH HERE, and one thing the SHAPE buys that
+   no single instruction does:
+
+   1. THE SCALE IS AN EXPONENT READ, NOT A MULTIPLY. sc is pow2f's
+      return value, an exact power of two, so q8_round(x[i] * sc) is
+      q8_round with k added to the exponent it was going to read
+      anyway - the same number, minus one `bl __aeabi_fmul` (28
+      instructions). The C says `float * float` and gcc has to honour
+      that.
+   2. THE MAGIC ADD IS A SHIFT AND A ROUNDING DECISION. Same mechanism
+      as lz_q8_round_pow2_arm_asm in src/ops_arm_prim.h - CLZ is not
+      even needed, because the shift count comes out of the exponent
+      field directly - against a full `bl __aeabi_fadd` (48).
+   3. SMLALBB IS THE ACCUMULATE. `acc += (long long)(v * v)` is a 32x32
+      `mul` plus `adds`/`adc` from gcc, because the C says int. After
+      the clamp |v| <= 32767, so it is a 16x16 multiply into a 64-bit
+      accumulator: ONE instruction, and on ARM9E the halfword multiply
+      issues in a single cycle where the 32x32 does not.
+
+   And the shape: THE CLAMP RUNS BEFORE THE SIGN, not after. The C
+   clamps v to [-32767, 32767] with two compares and two moves; that
+   window is symmetric, so clamping the MAGNITUDE and then negating is
+   the same number in half the instructions. Which is only true because
+   the sign has not been applied yet - the rounding above works on the
+   magnitude and defers the negate, exactly as q8_round's primitive
+   does.
+
+   Bit-identity is by construction and by precondition, both stated in
+   src/ops_arm.h: the same integer rounding decision, the same clamp
+   window, the same products summed in the same order.
+
+   Register map: r4/r5 the 64-bit accumulator, r6 the float word, r7
+   the shift count then the dropped bits, r8 the mantissa, r9 the
+   rounded value, r10 = 150 - k, r11 = 32767. */
+#define LZ_NORMSS_ARM_BODY(STORE)                             \
+    "ldr    r6, [%[xp]], #4\n\t"                              \
+    "mov    r7, r6, lsl #1\n\t"                               \
+    "mov    r7, r7, lsr #24\n\t"                              \
+    "sub    r7, r10, r7\n\t"                                  \
+    "bic    r8, r6, #0xFF000000\n\t"                          \
+    "orr    r8, r8, #0x800000\n\t"                            \
+    "mov    r9, r8, lsr r7\n\t"                               \
+    "rsb    r7, r7, #32\n\t"                                  \
+    "mov    r7, r8, lsl r7\n\t"                               \
+    "cmp    r7, #0x80000000\n\t"                              \
+    "addhi  r9, r9, #1\n\t"                                   \
+    "andeq  r7, r9, #1\n\t"                                   \
+    "addeq  r9, r9, r7\n\t"                                   \
+    "cmp    r9, r11\n\t"                                      \
+    "movgt  r9, r11\n\t"                                      \
+    "cmp    r6, #0\n\t"                                       \
+    "rsbmi  r9, r9, #0\n\t"                                   \
+    STORE                                                     \
+    "smlalbb r4, r5, r9, r9\n\t"                              \
+    "subs   %[cnt], %[cnt], #1\n\t"
+
+void lz_norm_ss_fixed_arm_asm(const float *x, int n, int k, short *qout,
+                              long long *acc) {
+    const float *xp = x;
+    short *qp = qout;
+    int cnt = n;
+    /* __volatile__, for lz_wsum_pair_arm_asm's reason: this returns
+       nothing, its outputs are the stores through qout and acc, and a
+       plain __asm__ whose outputs are dead is DELETED. An accumulator
+       loop is the worst case for that - there is no returned value to
+       keep it alive at all. */
+    __asm__ __volatile__(
+        "mov    r4, #0\n\t"
+        "mov    r5, #0\n\t"
+        "rsb    r10, %[k], #150\n\t"
+        "mov    r11, #0x7F00\n\t"
+        "orr    r11, r11, #0xFF\n\t"
+        "cmp    %[qp], #0\n\t"
+        "beq    2f\n\t"
+        "1:\n\t"
+        LZ_NORMSS_ARM_BODY("strh   r9, [%[qp]], #2\n\t")
+        "bne    1b\n\t"
+        "b      3f\n\t"
+        "2:\n\t"
+        LZ_NORMSS_ARM_BODY("")
+        "bne    2b\n\t"
+        "3:\n\t"
+        "stmia  %[ac], {r4, r5}\n\t"
+        : [xp] "+r"(xp), [qp] "+r"(qp), [cnt] "+r"(cnt)
+        : [k] "r"(k), [ac] "r"(acc)
+        : "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "cc",
+          "memory");
+}
+#endif /* LZ_ARM_ASM_EXTERN */

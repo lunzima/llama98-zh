@@ -2201,7 +2201,7 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
 #define LZ_KM_ROW 0
 #define LZ_KM_OP  1
 
-#define LZ_KM_NUNIT 11
+#define LZ_KM_NUNIT 12
 #define LZ_KM_NCOL 10
 /* The one unit with ARM kernels, by index - km_tab and km_present both
    need it, and a named constant is what stops a reorder of km_unit from
@@ -2223,6 +2223,7 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
 #define LZ_KM_UNIT_ATDOT 8
 #define LZ_KM_UNIT_WSUMP 9
 #define LZ_KM_UNIT_SIGQ  10
+#define LZ_KM_UNIT_NRMSS 11
 /* Column 0 is ref and columns 7..9 are armC/armA/g128; columns 1..6 are
    the six LZ_ROW_* slots in slot order, so column c reads tab[c - 1]. */
 #define LZ_KM_COL_ROW0 1
@@ -2236,7 +2237,7 @@ km_unit[LZ_KM_NUNIT] = {
     { "q16_0", LZ_KM_ROW }, { "t2",   LZ_KM_ROW },
     { "i32f",  LZ_KM_OP  }, { "q8rnd", LZ_KM_OP },
     { "expfx", LZ_KM_OP  }, { "atdot", LZ_KM_OP }, { "wsump", LZ_KM_OP },
-    { "sigq",  LZ_KM_OP  }
+    { "sigq",  LZ_KM_OP  }, { "nrmss", LZ_KM_OP }
 };
 static const char *const km_col[LZ_KM_NCOL] = {
     "ref", "mmxI", "sseI", "sse2I", "mmxA", "sseA", "sse2A",
@@ -2265,6 +2266,24 @@ static const char km_why_attn_g128[] =
     "this column is the 128-ELEMENT group; attention's group runs over "
     "context length, which is unbounded, and lz_wsum_group_mmx already "
     "covers it - a different axis, not this cell";
+/* norm_ss_fixed walks a whole norm row (up to LZ_NORM_MAX_N), not a
+   quantization group, so the 128-element column is not its axis. The
+   one group-shaped thing it does - the amax scan - is q8_amax's, and
+   q8_amax has its own kernels; billing them here would count them
+   twice. */
+/* nrmss is the one operator unit that is NOT a one-value leaf, so it
+   does not get km_why_op_x86's reason: it is an element loop of the
+   same shape lz_quantize_q8 already vectorizes, and whether an x86
+   kernel belongs here is a real open question rather than a category
+   error. The ARM-only audit cannot answer it either way. */
+static const char km_why_nrmss_x86[] =
+    "not audited: an element loop of lz_quantize_q8's shape, so unlike "
+    "the scalar leaves here an x86 kernel is not ruled out - the only "
+    "audit that has opened it (docs/arm-asm-audit.md) is ARM-only";
+static const char km_why_nrmss_g128[] =
+    "this column is the 128-ELEMENT quantization group; norm_ss_fixed's "
+    "loop runs over a whole norm row, and the group-shaped part of it "
+    "is q8_amax, which carries its own kernels";
 static const char km_why_op_sse2[] =
     "not written: both call sites reach dot32_x16_mmx / lz_wsum_pair_mmx "
     "unconditionally, so no SSE2 twin was ever selected - unaudited, not "
@@ -2302,7 +2321,8 @@ static const LZKmReg km_reg[LZ_KM_NUNIT][LZ_KM_NCOL] = {
    (docs/arm-asm-audit.md section 6); wsump's is its own. */
 /* atdot*/{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_T(km_why_op_sse2), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_T(km_why_op_sse2), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_attn_g128) },
 /* wsump*/{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_T(km_why_op_sse2), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_T(km_why_op_sse2), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_attn_g128) },
-/* sigq */{ KM_H(KM_ALL), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128) }
+/* sigq */{ KM_H(KM_ALL), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128) },
+/* nrmss*/{ KM_H(KM_ALL), KM_T(km_why_nrmss_x86), KM_T(km_why_nrmss_x86), KM_T(km_why_nrmss_x86), KM_T(km_why_nrmss_x86), KM_T(km_why_nrmss_x86), KM_T(km_why_nrmss_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_nrmss_g128) }
 };
 
 #if defined(__WATCOMC__)
@@ -2368,8 +2388,11 @@ static int km_arm_asm(int f) {
 #endif /* LZ_ARM_PRIM_ASM */
 #if defined(LZ_ARM_ASM_EXTERN)
     /* Both attention MACs, and atdot's cell IS q8_0's leaf - the reuse
-       section 6 of the audit asked for, not a second copy. */
-    if (f == LZ_KM_UNIT_ATDOT || f == LZ_KM_UNIT_WSUMP) return 1;
+       section 6 of the audit asked for, not a second copy. nrmss is a
+       loop, so it is a leaf function in src/ops_arm.c rather than an
+       inline block: its per-call setup amortizes over a whole row. */
+    if (f == LZ_KM_UNIT_ATDOT || f == LZ_KM_UNIT_WSUMP ||
+        f == LZ_KM_UNIT_NRMSS) return 1;
 #endif /* LZ_ARM_ASM_EXTERN */
     (void)f;
     return 0;

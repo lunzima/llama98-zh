@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "ops.h"
+#include "ops_arm.h"     /* LZ_ARM_ASM_EXTERN, lz_norm_ss_fixed_arm_asm */
 #include "err.h"
 #include "cpucheck.h"
 #include "mmx_compat.h"
@@ -691,6 +692,20 @@ float norm_ss_fixed(const float *x, int n, short *qout, int *eout) {
         return 0.0f;
     }
     e = 14 - expof(bit.f);
+#if defined(LZ_ARM_ASM_EXTERN)
+    /* The hand-written loop's preconditions, all three answered from
+       the amax scan that just ran - see src/ops_arm.h. They are a
+       property of the ROW, so testing them here costs O(1) where the
+       equivalent per-element guards would cost two instructions each.
+       Anything outside the band runs the C loop below. */
+    if (g_kernel == LZ_KERNEL_ARM_ASM && bit.u < 0x7F800000u &&
+        e >= -105 && e <= 125) {
+        long long facc;
+        lz_norm_ss_fixed_arm_asm(x, n, e, qout, &facc);
+        if (eout) *eout = e;
+        return (float)facc * pow2f(-2 * e);
+    }
+#endif /* LZ_ARM_ASM_EXTERN */
     sc = pow2f(e);
     for (i = 0; i < n; i++) {
         int v = q8_round(x[i] * sc);           /* one mul, one magic add */
