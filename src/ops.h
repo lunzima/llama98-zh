@@ -465,15 +465,75 @@ int lz_conv_norm_pow2(const float *v, int n, short *out, int bound);
    mmx-asm, sse-asm, sse2-asm) and one for whether that format has a
    128-element group kernel in this build.
 
-   It exists because a hand-maintained version of this table said three
-   formats had gcc 128-group kernels when none does, and no gate could
-   see the difference -
-   the tier-union assertion checks that every TIER NAME appears
-   somewhere, which a format missing a kernel does not change.
+   It exists because a hand-maintained version of this table claimed
+   gcc 128-group kernels for three formats that had none at the time,
+   and no gate could see the difference - the tier-union assertion
+   checks that every TIER NAME appears somewhere, which a format
+   missing a kernel does not change. (Those kernels exist today; the
+   drift is the point, not the value.)
 
    Two builds are needed to read it: gcc carries the intrinsics columns,
-   Watcom the assembly ones, and only their union is the answer. */
+   Watcom the assembly ones, and only their union is the answer.
+   build/kernel_matrix_gate.sh is what forms that union.
+
+   Empty cells no longer print '.': see lz_kernel_cell below for the
+   letters and what each one asserts. */
 const char *lz_kernel_matrix(void);
+
+/* Build classes. The registry says which of them each cell belongs to,
+   so "absent from this binary" and "absent from every binary" stop
+   being the same character. */
+#define LZ_KMB_GCC 1
+#define LZ_KMB_WAT 2
+#define LZ_KMB_ARM 4
+
+/* Row-axis kinds. A UNIT is one dispatchable kernel family. Every unit
+ * today is a matmul row kernel named for its weight format (LZ_KM_ROW,
+ * printed in the grid), but the axis is deliberately not "weight
+ * format": --kernel arm-c/arm-asm has exactly one consumer right now,
+ * and when a second operator gets an ARM tier the global enum stops
+ * being able to say which one has the assembly. Such an operator joins
+ * as LZ_KM_OP - registry only, because the grid's six characters are
+ * the six LZ_ROW_* slots. src/ops.c's km_unit is the table. */
+#define LZ_KM_ROW 0
+#define LZ_KM_OP  1
+
+/* One cell of the coverage matrix: unit x tier.
+ *
+ * status, for THIS build:
+ *   'x'  present, and the registry expects it here
+ *   'o'  absent here; another build class carries it (`have` says which)
+ *   'i'  absent everywhere, structurally impossible - `why` is the audit
+ *   't'  absent everywhere, not written yet - `why` names what is missing
+ *   '!'  the registry expects it HERE and it is gone     -> gate failure
+ *   '?'  absent with no registry entry at all            -> gate failure
+ *   '+'  present but the registry does not expect it here -> gate failure
+ *
+ * '!' is the 2026-08-09 shape: the Watcom assembly vanished from the
+ * build and every numeric gate stayed green, because a kernel that
+ * falls back to the scalar reference is bit-identical to one that does
+ * not. '?' is the other direction - a cell nobody registered reads as
+ * an intentional blank.
+ *
+ * Iterate to exhaustion; the count lives in one place, src/ops.c:
+ *     for (i = 0; lz_kernel_cell(i, &c); i++) ...
+ * Returns 0 when i is past the last cell. */
+typedef struct {
+    const char *unit;   /* unit name, e.g. "q8_0" */
+    const char *tier;   /* column name, e.g. "mmxA" */
+    const char *why;    /* why no build has it; NULL when some build does */
+    unsigned    have;   /* LZ_KMB_* mask: build classes expected to carry it */
+    char        status; /* this build - see above */
+    unsigned char kind; /* LZ_KM_ROW or LZ_KM_OP */
+} LZKmCell;
+
+int lz_kernel_cell(int i, LZKmCell *out);
+
+/* Which LZ_KMB_* class this binary is. Exactly one bit. The union check
+   needs a binary per class and has to know which one it is holding;
+   deriving it from the cells would be guessing, and re-deriving it from
+   __WATCOMC__/__arm__ in the front end would be a second authority. */
+unsigned lz_kernel_build_class(void);
 
 /* Every AUTO-resolved tier, in one list.
  *

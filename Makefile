@@ -487,7 +487,12 @@ watcom-gui:
 # compiles its own throwaway ops_sse2.c objects (both toolchains, both
 # LZ_SSE2_GROUP settings) rather than depending on watcom-cli having
 # already produced one, so it does not need to come after it.
-check: bare-endif-gate dead-ifndef-gate dedupe-gate mm-alias-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate
+# kernel-matrix-gate is last because it is the slowest (it builds the gcc
+# CLI, the Watcom CLI and, when the cross toolchain is there, the ARM one
+# - the union of three binaries is the whole point, one binary cannot
+# show it). LZ_KM_SKIP_ARM=1 drops the ARM arm for a faster loop; the
+# gate then says which columns went unchecked.
+check: bare-endif-gate dead-ifndef-gate dedupe-gate mm-alias-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate kernel-matrix-gate
 
 # A bare "#endif" (no trailing comment) is a regression the split ops
 # commits already made once - every #endif must say what it closes.
@@ -514,6 +519,16 @@ mm-alias-gate:
 .PHONY: isa-floor-watcom-gate
 isa-floor-watcom-gate:
 	@bash build/isa_floor_watcom_gate.sh
+
+# Iron law 8's coverage assertion, made into a gate: every (format x
+# tier) cell is either implemented or registered with a reason, and the
+# union across build classes covers everything the registry claims. This
+# is the only check that can see a whole kernel path disappear - the
+# numeric gates cannot, because falling back to the scalar reference is
+# bit-identical.
+.PHONY: kernel-matrix-gate
+kernel-matrix-gate:
+	@bash build/kernel_matrix_gate.sh
 
 # Optional single-file DOS packaging (D9). SB.EXE is 16-bit and cannot run
 # on 64-bit Windows; the bind step must run inside DOSBox-X.

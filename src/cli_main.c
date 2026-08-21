@@ -154,8 +154,9 @@ static void usage(void) {
     "  --pin-tiers      Print the flags that pin every AUTO-resolved tier.\n"
     "                   Any cross-target comparison must pass all of them.\n"
     "  --kernel-matrix  Which row kernels this build carries, per weight\n"
-    "                   format. Six slots then the 128-group column; the\n"
+    "                   format, plus why every empty cell is empty. The\n"
     "                   answer is the UNION of a gcc and a Watcom build.\n"
+    "                   Exit 1 if a cell is missing here or unregistered.\n"
     "  --stats          Print tensor statistics\n"
     "  --layer N        Stats for layer N only\n"
     "  --tokens a,b,c   Forward on token ids\n"
@@ -988,10 +989,25 @@ int main(int argc, char **argv) {
         else if (strcmp(a, "--kernel-matrix") == 0) {
             /* Before the model is opened: this is a property of the
                binary, and requiring a model would make it unaskable on a
-               machine that has none. */
-            /* The ARM pair is appended by lz_kernel_matrix only on the
-               build that has it, so the header follows the same #if -
-               one column name per column, or the table reads wrong. */
+               machine that has none.
+
+               Three blocks. The grid is the human view and keeps its
+               shape (format, six slots, the 128-group column - the ARM
+               pair only on the build that has it, so the header follows
+               the same #if or the table reads wrong). The `cell` lines
+               are the whole registry, every format x tier including the
+               columns this build does not print, because the ARM cells
+               have to be readable from an x86 binary or they go
+               unchecked wherever there is no cross toolchain. The
+               `cells` line is the count.
+
+               Exit code is the gate: '!' (registered here, gone), '?'
+               (no registry entry) and '+' (present, unregistered) each
+               make this non-zero. Iron law 1 - the engine returns the
+               cells, this file prints them and decides. */
+            LZKmCell kc;
+            int n = 0, here = 0, other = 0, imp = 0, todo = 0, bad = 0;
+            char hs[4];
 #if defined(__arm__)
             printf("format mmxI sseI sse2I mmxA sseA sse2A armC armA  g128\n%s",
                    lz_kernel_matrix());
@@ -999,6 +1015,48 @@ int main(int argc, char **argv) {
             printf("format mmxI sseI sse2I mmxA sseA sse2A  g128\n%s",
                    lz_kernel_matrix());
 #endif /* __arm__ */
+            printf("legend x=here o=other-build i=impossible t=todo "
+                   "!=MISSING-HERE ?=UNREGISTERED +=UNDECLARED\n");
+            for (n = 0; lz_kernel_cell(n, &kc); n++) {
+                hs[0] = (kc.have & LZ_KMB_GCC) ? 'G' : '-';
+                hs[1] = (kc.have & LZ_KMB_WAT) ? 'W' : '-';
+                hs[2] = (kc.have & LZ_KMB_ARM) ? 'A' : '-';
+                hs[3] = '\0';
+                printf("cell %-5s %-5s %c %s %s %s\n", kc.unit, kc.tier,
+                       kc.status, hs,
+                       (kc.kind == LZ_KM_ROW) ? "row" : "op",
+                       kc.why ? kc.why : "-");
+                switch (kc.status) {
+                case 'x': here++;  break;
+                case 'o': other++; break;
+                case 'i': imp++;   break;
+                case 't': todo++;  break;
+                default:   bad++;  break;
+                }
+            }
+            printf("cells %d class %c here %d elsewhere %d impossible %d "
+                   "todo %d bad %d\n", n,
+                   (lz_kernel_build_class() & LZ_KMB_GCC) ? 'G' :
+                   (lz_kernel_build_class() & LZ_KMB_WAT) ? 'W' : 'A',
+                   here, other, imp, todo, bad);
+            if (bad) {
+                for (n = 0; lz_kernel_cell(n, &kc); n++) {
+                    const char *msg;
+                    if (kc.status == '!')
+                        msg = "registered for this build and ABSENT - a "
+                              "row kernel vanished from the table";
+                    else if (kc.status == '?')
+                        msg = "empty with NO registry entry - register it "
+                              "impossible/todo, or write it";
+                    else if (kc.status == '+')
+                        msg = "present but not registered for this build "
+                              "class - the union moved under someone";
+                    else continue;
+                    printf("kernel-matrix: FAIL %s/%s %s\n",
+                           kc.unit, kc.tier, msg);
+                }
+                return 1;
+            }
             return 0;
         }
         else if (strcmp(a, "--stats") == 0)   want_stats = 1;

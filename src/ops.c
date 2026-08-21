@@ -2025,25 +2025,40 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
    The 128-group column is DECLARED, not detected: whether a row kernel
    calls a group-of-four kernel is a compile-time fact inside a static
    function and cannot be read from outside. Both halves have to be
-   edited together, and tests/test_kernel_matrix.py compares this against
-   the source - the previous version of this map lived in a document and
-   drifted for months. */
+   edited together; the TRAINING tree's tests/test_kernel_matrix.py
+   (E:\LLM\llama98-zh, pointed at this tree by LZ_ENGINE - there is no
+   tests/ here, iron law zero) compares this against the source, and
+   build/kernel_matrix_gate.sh checks the registry below out of the
+   shipped binaries. The previous version of this map lived in a
+   document and drifted for months. */
 #if defined(__WATCOMC__)
 #define LZ_G128_Q8  1
 #define LZ_G128_Q41 1
 #define LZ_G128_Q61 1
 #define LZ_G128_Q16 1
-#else
+#elif defined(LZ_DOT_MMX_EXTERN)
 /* The gcc group kernels (dot128_*_mmx) exist and are wired into the row
    functions behind the LZ_G128_GCC knob (default 1, ops_kernel_shared.h)
    - see that knob's comment for the A/B rationale. This column tracks
-   the wiring: LZ_G128_GCC=0 reverts it to '.' and the row functions to
+   the wiring: LZ_G128_GCC=0 reverts it to 'o' and the row functions to
    the per-32 path. The claim is "wired in", not "measured faster" -
    whether the group path wins on any machine is unmeasured. */
 #define LZ_G128_Q8  LZ_G128_GCC
 #define LZ_G128_Q41 LZ_G128_GCC
 #define LZ_G128_Q61 LZ_G128_GCC
 #define LZ_G128_Q16 LZ_G128_GCC
+#else
+/* Neither compiler's group kernels are in this build: dot128_*_mmx sit
+   behind LZ_DOT_MMX_EXTERN in src/ops_mmx.c, the #pragma aux twins
+   behind __WATCOMC__. The ARM cross-build is the case - it has no row
+   kernel for these four formats either, so there is nothing that could
+   call a group kernel. This branch used to be absent and the ARM binary
+   printed 'G' for all four: a column that is lit on a target with an
+   empty row is the exact shape of signal this map exists to refuse. */
+#define LZ_G128_Q8  0
+#define LZ_G128_Q41 0
+#define LZ_G128_Q61 0
+#define LZ_G128_Q16 0
 #endif /* __WATCOMC__ */
 /* T2 on both compilers, and this one IS "nothing to offer". Derived by
    comparing against q6_1, which unpacks a 2-bit plane the same way and
@@ -2056,51 +2071,286 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
    sequence as four separate calls. */
 #define LZ_G128_T2  0
 
+/* ---- the reason registry ---------------------------------------------
+
+   Iron law 8: a missing cell must carry a reason, and "still empty"
+   must be distinguishable from "impossible". Three classes, one letter
+   each in the matrix (ops.h's LZKmCell documents the full alphabet):
+
+     have != 0   some build class carries it. Absent HERE is 'o' (another
+                 build has it) and absent THERE is '!' - a gate failure,
+                 because that is what a path silently vanishing looks
+                 like from inside the binary it vanished from.
+     IMPOSSIBLE  no build will ever have it; the audit is below.
+     TODO        nobody has written it. Not a defect - a registration.
+                 An unregistered cell is '?', which IS a defect.
+
+   Filling in IMPOSSIBLE where TODO belongs is the expensive mistake:
+   it retires the cell permanently and the next person reads it as
+   settled. TODO only waits.
+
+   ---- IMPOSSIBLE, cell by cell -----------------------------------------
+
+   sseI, sseA (all five formats). Audited instruction by instruction,
+   not by impression:
+
+   What a row kernel executes, every format (src/ops_kernel_dot_mmx.h,
+   Watcom twins in src/ops_kernel_dot.h): movq loads; the unpack -
+   punpcklbw/punpckhbw for q8_0 and q16_0, pand plus psrlw/psrld/psllw
+   plus pxor/por for the 4-bit, 6-bit and 2-bit planes; pmaddwd; paddd;
+   then psrlq + paddd + movd to fold the pair. Every one is MMX.
+
+   What SSE1 adds on top of MMX, complete list: pavgb, pavgw, pextrw,
+   pinsrw, pmaxsw, pmaxub, pminsw, pminub, pmovmskb, pmulhuw, psadbw,
+   pshufw, maskmovq, movntq, prefetchnta/t0/t1/t2, sfence - plus the
+   %xmm file, which under SSE1 holds packed float32 ONLY. Integer %xmm
+   arrives with SSE2, and that is the sse2I/sse2A column.
+
+   Against the sequence above: none of them is a signed 16x16->32
+   multiply-add, so pmaddwd stands; pshufw permutes words and cannot
+   zero-extend bytes, so the punpck pair stands; psadbw sums |a-b| over
+   UNSIGNED bytes and produces no products; pmulhuw is unsigned and
+   throws away the low half a dot product needs; pavg/pmax/pmin/pextrw/
+   pinsrw/pmovmskb have no role in a dot product at all. The two that DO
+   help are prefetchnta and movntq - and they are ALREADY in the MMX
+   kernels (LZ_PFI_NTA, src/ops_kernel_shared.h, emitted as the raw
+   bytes 0F 18 00 on Watcom). They are a memory hint, selected by
+   --prefetch, which is orthogonal to --kernel by construction.
+
+   Structural half, and it is independent of the ISA argument:
+   lz_row_pick (src/ops_matmul.c) never indexes LZ_ROW_SSE_I or
+   LZ_ROW_SSE_A, and ops.h has no LZ_KERNEL_SSE value, so `--kernel sse`
+   cannot be spelled. Iron law 8: a path the CLI cannot select cannot be
+   compared, so a kernel written into those two slots would be dead on
+   arrival.
+
+   t2/g128. The argument is at LZ_G128_T2 above: q6_1 unpacks the same
+   2-bit plane and does have a group kernel because it hoists two mask
+   constants across four sub-blocks; t2's unpack is a zero register and
+   three immediate shifts, so hoisting trades pxor for movq one for one
+   and the group kernel would emit what four separate calls emit.
+
+   ---- TODO -------------------------------------------------------------
+
+   armC, armA on q8_0, q4_1, q6_1 and q16_0. The ARM build carries
+   exactly one row kernel, ternary (row_t2_arm / row_t2_arm_asm,
+   src/ops_matmul.c), and lz_matmul_xq_nt sends every other dtype
+   straight to matmul_scalar_ref there. Nothing about ARMv5TE refuses
+   the others: smlaxy is a 16x16+32 MAC and the byte/nibble unpacks are
+   ordinary shifts and masks. They are not written. */
+#define LZ_KM_IMPOSSIBLE 1
+#define LZ_KM_TODO       2
+
+/* g128's gcc expectation follows the knob rather than being hand-
+   declared: -DLZ_G128_GCC=0 is the documented A/B control arm, the row
+   functions really do revert to the per-32 path, and a control build
+   that trips the gate is a control build nobody runs (iron law 4's
+   companion - an A/B arm with no gate rots). Watcom's group kernels
+   have no knob and are always expected. */
+#if defined(LZ_G128_GCC) && LZ_G128_GCC
+#define LZ_KMB_G128 (LZ_KMB_GCC | LZ_KMB_WAT)
+#else
+#define LZ_KMB_G128 LZ_KMB_WAT
+#endif /* LZ_G128_GCC */
+
+/* A UNIT is one dispatchable kernel family - the row axis. Every unit
+   today is a matmul row kernel and is named for its weight format, so
+   the grid prints one line per unit and the two look like the same
+   thing. They are not, and the ARM columns are why: `--kernel arm-c` /
+   `arm-asm` has exactly ONE consumer (matmul_t2_impl's ternary row,
+   src/ops_matmul.c). The moment a second operator gets an ARM tier -
+   docs/arm-asm-audit.md ranks the candidates by calls per token - a
+   single global enum value can no longer say WHICH operator has the
+   assembly, which is the x86 mistake this project already made once
+   (one LZ_KERNEL_MMX covering Watcom assembly and gcc intrinsics, so
+   lz_kernel_name could not answer what ran). The registry therefore
+   keys on the unit, not on the build.
+
+   LZ_KM_ROW units print in the grid. LZ_KM_OP units are registry-only:
+   the grid's six characters ARE the six LZ_ROW_* slots, and an operator
+   whose dispatch table has a different shape does not belong in them.
+
+   Adding a unit is one line in km_unit, one row in km_reg and one arm
+   in km_present. Nothing in build/kernel_matrix_gate.sh changes. */
+#define LZ_KM_ROW 0
+#define LZ_KM_OP  1
+
+#define LZ_KM_NUNIT 5
+#define LZ_KM_NCOL 10
+/* The one unit with ARM kernels, by index - km_tab and km_present both
+   need it, and a named constant is what stops a reorder of km_unit from
+   silently moving them onto another format. */
+#define LZ_KM_UNIT_T2 4
+/* Column 0 is ref and columns 7..9 are armC/armA/g128; columns 1..6 are
+   the six LZ_ROW_* slots in slot order, so column c reads tab[c - 1]. */
+#define LZ_KM_COL_ROW0 1
+#define LZ_KM_COL_ARMC 7
+#define LZ_KM_COL_ARMA 8
+#define LZ_KM_COL_G128 9
+
+static const struct { const char *name; unsigned char kind; }
+km_unit[LZ_KM_NUNIT] = {
+    { "q8_0",  LZ_KM_ROW }, { "q4_1", LZ_KM_ROW }, { "q6_1", LZ_KM_ROW },
+    { "q16_0", LZ_KM_ROW }, { "t2",   LZ_KM_ROW }
+};
+static const char *const km_col[LZ_KM_NCOL] = {
+    "ref", "mmxI", "sseI", "sse2I", "mmxA", "sseA", "sse2A",
+    "armC", "armA", "g128"
+};
+
+/* Printed, so one line each; the audit above is the long form. */
+static const char km_why_sse1[] =
+    "SSE1 adds no signed 16x16->32 MAC and no integer %xmm; its two "
+    "useful additions (prefetchnta, movntq) are already in the MMX "
+    "kernels and belong to --prefetch; instruction-by-instruction audit "
+    "above km_reg in src/ops.c";
+static const char km_why_t2g128[] =
+    "nothing to hoist across the four sub-blocks - see LZ_G128_T2 in "
+    "src/ops.c";
+static const char km_why_arm[] =
+    "not written: the ARM build has one row kernel, ternary, and "
+    "lz_matmul_xq_nt sends every other dtype to matmul_scalar_ref";
+
+typedef struct { unsigned char have; unsigned char why; const char *text; } LZKmReg;
+#define KM_H(mask) { (unsigned char)(mask), 0, (const char *)0 }
+#define KM_I(text) { 0, LZ_KM_IMPOSSIBLE, (text) }
+#define KM_T(text) { 0, LZ_KM_TODO, (text) }
+#define KM_ALL (LZ_KMB_GCC | LZ_KMB_WAT | LZ_KMB_ARM)
+
+/* ref is the one DECLARED-present column with no per-format variation:
+   lz_matmul_xq_nt routes LZ_KERNEL_REF to matmul_scalar_ref before any
+   dtype dispatch, and matmul_scalar_ref_one branches on all five. It
+   cannot go empty for one format only, so it is KM_ALL by construction
+   and carries no signal of its own - it is here because iron law 8
+   counts C as a tier and a column left out of the table is a column
+   nobody can miss. */
+static const LZKmReg km_reg[LZ_KM_NUNIT][LZ_KM_NCOL] = {
+/*          ref          mmxI              sseI                sse2I             mmxA              sseA                sse2A             armC                 armA                 g128            */
+/* q8_0 */{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_T(km_why_arm),    KM_T(km_why_arm),    KM_H(LZ_KMB_G128) },
+/* q4_1 */{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_T(km_why_arm),    KM_T(km_why_arm),    KM_H(LZ_KMB_G128) },
+/* q6_1 */{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_T(km_why_arm),    KM_T(km_why_arm),    KM_H(LZ_KMB_G128) },
+/* q16_0*/{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_T(km_why_arm),    KM_T(km_why_arm),    KM_H(LZ_KMB_G128) },
+/* t2   */{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_I(km_why_t2g128) }
+};
+
+#if defined(__WATCOMC__)
+#define LZ_KMB_THIS LZ_KMB_WAT
+#elif defined(__arm__)
+#define LZ_KMB_THIS LZ_KMB_ARM
+#else
+#define LZ_KMB_THIS LZ_KMB_GCC
+#endif /* __WATCOMC__ */
+
+/* Q16's table is the one row inside the MMX block; the other four are
+   unguarded and come out all-NULL on a target with no SIMD, which is
+   the honest answer there. */
+static const lz_rowfn *km_tab(int f) {
+    switch (f) {
+    case 0: return LZ_ROW_Q8;
+    case 1: return LZ_ROW_Q41;
+    case 2: return LZ_ROW_Q61;
+#if defined(__WATCOMC__) || defined(LZ_DOT_MMX_EXTERN)
+    case 3: return LZ_ROW_Q16;
+#else
+    case 3: return (const lz_rowfn *)0;
+#endif /* __WATCOMC__ || LZ_DOT_MMX_EXTERN */
+    case LZ_KM_UNIT_T2: return LZ_ROW_T2;
+    /* An operator unit has its own table with its own shape; it gets an
+       arm here when it gets a row in km_reg, not a share of this one. */
+    default: return (const lz_rowfn *)0;
+    }
+}
+
+static int km_g128(int f) {
+    switch (f) {
+    case 0:  return LZ_G128_Q8;
+    case 1:  return LZ_G128_Q41;
+    case 2:  return LZ_G128_Q61;
+    case 3:  return LZ_G128_Q16;
+    default: return LZ_G128_T2;
+    }
+}
+
+/* Is the cell in THIS binary? Columns 1..6 are read out of the real
+   dispatch tables, so deleting a kernel is visible here; ref, armC,
+   armA and g128 are declared, for the reasons noted at their columns. */
+static int km_present(int f, int c) {
+    const lz_rowfn *tab;
+    if (c == 0) return 1;
+    if (c >= LZ_KM_COL_ROW0 && c < LZ_KM_COL_ROW0 + LZ_ROW_N) {
+        tab = km_tab(f);
+        return tab && tab[c - LZ_KM_COL_ROW0] != 0;
+    }
+    if (c == LZ_KM_COL_G128) return km_g128(f);
+#if defined(__arm__)
+    /* The ARM row functions are picked in matmul_t2_impl, not from
+       LZ_ROW_T2 - those six slots are x86 slots. Ternary only, and it
+       is the only consumer of --kernel arm-c/arm-asm in the tree. */
+    if (c == LZ_KM_COL_ARMC) return f == LZ_KM_UNIT_T2;
+#if defined(LZ_T2_ARM_ASM_EXTERN)
+    if (c == LZ_KM_COL_ARMA) return f == LZ_KM_UNIT_T2;
+#endif /* LZ_T2_ARM_ASM_EXTERN */
+#else
+    (void)f;
+#endif /* __arm__ */
+    return 0;
+}
+
+static char km_status(int f, int c) {
+    unsigned have = km_reg[f][c].have;
+    int here = (have & (unsigned)LZ_KMB_THIS) != 0;
+    if (km_present(f, c)) return here ? 'x' : '+';
+    if (here) return '!';
+    if (have) return 'o';
+    if (km_reg[f][c].why == LZ_KM_IMPOSSIBLE) return 'i';
+    if (km_reg[f][c].why == LZ_KM_TODO) return 't';
+    return '?';
+}
+
 const char *lz_kernel_matrix(void) {
     static char buf[512];
-    /* Q16's table is the one row inside the MMX block; the other four
-       are unguarded and come out all-NULL on a target with no SIMD,
-       which is the honest answer there. */
-#if defined(__WATCOMC__) || defined(LZ_DOT_MMX_EXTERN)
-    const lz_rowfn *q16 = LZ_ROW_Q16;
-#else
-    const lz_rowfn *q16 = 0;
-#endif /* __WATCOMC__ || LZ_DOT_MMX_EXTERN */
-    /* The ARM column is not in LZ_ROW_T2 - those six slots are x86 slots
-       and the ARM row functions are picked in matmul_t2_impl instead.
-       Reported anyway, and only on the build that has them, because a
-       matrix of six dots is what "this build has no ternary kernel"
-       looks like, and on the ARM cross-build that would be false. */
-    struct { const char *name; const lz_rowfn *tab; int g128; int arm; } rows[5];
     int i, j, p = 0;
-    for (i = 0; i < 5; i++) rows[i].arm = 0;
-    rows[0].name = "q8_0";  rows[0].tab = LZ_ROW_Q8;  rows[0].g128 = LZ_G128_Q8;
-    rows[1].name = "q4_1";  rows[1].tab = LZ_ROW_Q41; rows[1].g128 = LZ_G128_Q41;
-    rows[2].name = "q6_1";  rows[2].tab = LZ_ROW_Q61; rows[2].g128 = LZ_G128_Q61;
-    rows[3].name = "q16_0"; rows[3].tab = q16;        rows[3].g128 = LZ_G128_Q16;
-    rows[4].name = "t2";    rows[4].tab = LZ_ROW_T2;  rows[4].g128 = LZ_G128_T2;
-#if defined(__arm__)
-    rows[4].arm = 1;
-#endif /* __arm__ */
-    for (i = 0; i < 5; i++) {
-        p += sprintf(buf + p, "%-6s", rows[i].name);
+    for (i = 0; i < LZ_KM_NUNIT; i++) {
+        /* Row-kernel units only: the six characters below ARE the six
+           LZ_ROW_* slots. An operator unit prints in the registry. */
+        if (km_unit[i].kind != LZ_KM_ROW) continue;
+        p += sprintf(buf + p, "%-6s", km_unit[i].name);
         for (j = 0; j < LZ_ROW_N; j++)
-            buf[p++] = (rows[i].tab && rows[i].tab[j]) ? 'x' : '.';
+            buf[p++] = km_status(i, LZ_KM_COL_ROW0 + j);
 #if defined(__arm__)
+        /* Printed only on the build that has them: a matrix of six dots
+           is what "this build has no ternary kernel" looks like, and on
+           the ARM cross-build that would be false. */
         buf[p++] = ' ';
-        buf[p++] = rows[i].arm ? 'x' : '.';
-#if defined(LZ_T2_ARM_ASM_EXTERN)
-        buf[p++] = rows[i].arm ? 'x' : '.';
-#else
-        buf[p++] = '.';
-#endif /* LZ_T2_ARM_ASM_EXTERN */
+        buf[p++] = km_status(i, LZ_KM_COL_ARMC);
+        buf[p++] = km_status(i, LZ_KM_COL_ARMA);
 #endif /* __arm__ */
         buf[p++] = ' ';
-        buf[p++] = rows[i].g128 ? 'G' : '.';
+        /* 'G' rather than 'x' when present: the column is a declaration,
+           not a tier, and the two should not read alike. */
+        buf[p] = km_status(i, LZ_KM_COL_G128);
+        if (buf[p] == 'x') buf[p] = 'G';
+        p++;
         buf[p++] = '\n';
     }
     buf[p] = '\0';
     return buf;
+}
+
+unsigned lz_kernel_build_class(void) { return (unsigned)LZ_KMB_THIS; }
+
+int lz_kernel_cell(int i, LZKmCell *out) {
+    int f, c;
+    if (!out || i < 0 || i >= LZ_KM_NUNIT * LZ_KM_NCOL) return 0;
+    f = i / LZ_KM_NCOL;
+    c = i % LZ_KM_NCOL;
+    out->unit   = km_unit[f].name;
+    out->tier   = km_col[c];
+    out->why    = km_reg[f][c].text;
+    out->have   = km_reg[f][c].have;
+    out->status = km_status(f, c);
+    out->kind   = km_unit[f].kind;
+    return 1;
 }
 
 /* lz_tier_pins and lz_tier_report are in ops_sched.c. */
