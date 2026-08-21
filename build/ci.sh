@@ -12,11 +12,14 @@
 #   5. build/switch_matrix_gate.sh - every control switch's non-default
 #      value compiled on gcc + Watcom, so a "configuration nobody
 #      happens to build" fails here instead of silently diverging
-#   6. build/norm_int_xcompiler_gate.sh - gcc/Watcom bit-identity of
-#      --norm-write int / --attn-write int over hundreds of tokens of
-#      real text, the case the fixed tier's original 8/16-token
-#      verification could not see (lz_quantize_q8_int's double-rounding
-#      hazard, see that script's own header)
+#   6. build/fixed_tier_xcompiler_gate.sh - gcc/Watcom bit-identity of
+#      EVERY fixed-point write tier (all 12 --*-write values plus
+#      --fixed all, plus the float baseline as a control) over hundreds
+#      of tokens of real text, the case the --norm-write int tier's
+#      original 8/16-token verification could not see
+#      (lz_quantize_q8_int's double-rounding hazard, see that script's
+#      own header) and that a later audit's 153/211-token re-check of
+#      the other ten tiers could not see either, for the same reason
 #   7. make watcom-gui / watcom-dll / watcom-dos (the remaining Watcom
 #      targets; DOS is left out of `make check` by design)
 #   8. build/x87/build_engine.sh under WSL (32-bit x87 gcc, the fourth
@@ -261,29 +264,29 @@ case $MATRIX_RC in
 esac
 
 # ---------------------------------------------------------------------
-# Stage 6: --norm-write int / --attn-write int gcc<->Watcom bit-identity
+# Stage 6: every fixed-point write tier's gcc<->Watcom bit-identity
 # ---------------------------------------------------------------------
 echo
-echo "==== [6/8] norm/attn int cross-compiler gate ===="
-LOG=build/ci-norm-int-xcompiler.log
-build/norm_int_xcompiler_gate.sh >"$LOG" 2>&1
+echo "==== [6/8] fixed-tier cross-compiler gate ===="
+LOG=build/ci-fixed-tier-xcompiler.log
+build/fixed_tier_xcompiler_gate.sh >"$LOG" 2>&1
 NIX_RC=$?
 cat "$LOG"
 case $NIX_RC in
     0)
-        echo "PASS: norm/attn int cross-compiler gate"
-        note "PASS  norm/attn int cross-compiler gate"
+        echo "PASS: fixed-tier cross-compiler gate"
+        note "PASS  fixed-tier cross-compiler gate"
         PASS=$((PASS + 1))
         ;;
     2)
-        REASON=$(grep -m1 '^norm_int_xcompiler_gate: SKIP' "$LOG")
-        echo "SKIP: norm/attn int cross-compiler gate ($REASON)"
-        note "SKIP  norm/attn int cross-compiler gate ($REASON)"
+        REASON=$(grep -m1 '^fixed_tier_xcompiler_gate: SKIP' "$LOG")
+        echo "SKIP: fixed-tier cross-compiler gate ($REASON)"
+        note "SKIP  fixed-tier cross-compiler gate ($REASON)"
         SKIP=$((SKIP + 1))
         ;;
     *)
-        echo "FAIL: norm/attn int cross-compiler gate"
-        note "FAIL  norm/attn int cross-compiler gate"
+        echo "FAIL: fixed-tier cross-compiler gate"
+        note "FAIL  fixed-tier cross-compiler gate"
         FAIL=$((FAIL + 1))
         ;;
 esac
