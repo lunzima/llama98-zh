@@ -112,10 +112,19 @@ build/gui/%.o: src/%.c
 # cli_main.c's -i loop runs on the shared LZSession core (common/session.c),
 # a front-end helper deliberately outside $(ENG) - so this target lists it
 # explicitly with -Icommon, exactly as the Watcom CLI/DOS builds do.
+#
+# native_obj_gate.sh runs before the link: a Linux/WSL gcc invocation
+# that writes into build/native/ leaves ELF .o files there, and MinGW's
+# ld links them into a malformed PE with no error of its own. The gate
+# checks the file type of whatever is in build/native/*.o right now, so
+# a stale ELF object is a build failure here instead of a bad binary
+# discovered only when someone tries to run it.
 llama98: $(ENG_SRCS) common/session.c common/stream.c src/cli_attr.c src/cli_main.c $(ENG_MMX_GCC_NATIVE_OBJS)
+	@bash build/native_obj_gate.sh
 	$(CC) $(X86_64_CFLAGS) -Icommon -o $@ $(ENG_SRCS) common/session.c common/stream.c src/cli_attr.c src/cli_main.c $(ENG_MMX_GCC_NATIVE_OBJS) -lm
 
 kunkun98-serve: $(ENG_SRCS) $(SRV_SRCS) src/server_main.c $(ENG_MMX_GCC_NATIVE_OBJS)
+	@bash build/native_obj_gate.sh
 	$(CC) $(X86_64_CFLAGS) -o $@ $(ENG_SRCS) $(SRV_SRCS) src/server_main.c $(ENG_MMX_GCC_NATIVE_OBJS) -lm $(HTTP_LIBS)
 
 # Resources (icon / splash / about logo / lamps). windres for gcc; the

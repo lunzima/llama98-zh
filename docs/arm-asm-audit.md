@@ -116,7 +116,7 @@ matmul 本体（`lz_matmul*`、`lz_dot32_*`、`dot32_x16`、`epi_q8` / `epi_q41`
 | `--kernel`（`lz_kernel_select`） | `arm-asm` | 目前只接 T2 matmul 行内核 |
 | GDN pass 1（`lz_gdn_mode`） | fixed（编译期 `LZ_GDN_FIXED=1`） | `gdn_sum_gg` 标量分支 |
 
-三个必须写下来的细节，搞错任何一个整节结论都会反：
+四个必须写下来的细节，搞错任何一个整节结论都会反：
 
 - **`--norm-write auto` 到不了 `int`。** `lz_norm_mode()` 只回答「是不是定点」，
   而 `lz_norm_int()` 要求 `g_norm == LZ_NORM_INT`，`auto`（-1）永远不是。
@@ -129,6 +129,17 @@ matmul 本体（`lz_matmul*`、`lz_dot32_*`、`dot32_x16`、`epi_q8` / `epi_q41`
   `(g_scalar < 0) ? 1 : g_scalar`，`cli_main.c:253` 的帮助文本写的也是
   `default fixed`）。`ops.h` 该函数上方注释说它「问和别的档一样的 CPUID 问题」，
   与代码不符；以代码与 CLI 帮助为准。
+- **`--epi-write` 只对 Q8_0 有效，且要先过 dtype 路由才落地。**
+  `epi_fixed`（fixed 分支）只被 `matmul_q8_impl` 调用（`ops_matmul.c`）；
+  `matmul_q41_impl` / `matmul_q61_impl` / T2 路径一律用 `epi_q41`，不读
+  `lz_epi_mode()`。Q8_0 要落到 `matmul_q8_impl`，还要先过
+  `lz_matmul_xq_nt`（`ops.c`）按 `km_reg` 的 dtype 路由——没有 ARM 行
+  内核的格式转去 `matmul_scalar_ref`，那里没有 fixed epilogue，
+  `--epi-write` 对它是空转。当前 `km_reg` 里 Q8_0 已有 armC/armA 两格
+  （`src/ops_arm.c`），所以 ARM 上 Q8_0 matmul 走 `matmul_q8_impl`，
+  `--epi-write` 的 auto→fixed 在这里生效。`a665bff` 之前的 ARM Q8_0
+  `--epi-write` dump 与现在不可比（那时 Q8_0 在 ARM 上没有行内核，只走
+  `matmul_scalar_ref`，`--epi-write` 对它是空转）。
 
 编译期开关：`LZ_GDN_STATE_2PLANE` 默认 **1**（递推状态两平面，pass 1 与 pass 2
 的每元素工作量翻倍），`LZ_KV_2PLANE` 默认 **0**，`--kv-rot` 默认 **off**。
