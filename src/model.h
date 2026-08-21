@@ -86,6 +86,13 @@ typedef struct {
        replaces, which is what the first candidate measured. */
     int16_t     *sq;        /* n/gs int16 */
     signed char *sexp;      /* one exponent per row */
+    /* The same decomposition of the `zero` plane, built by
+       lz_epi_prep_zero(). Q4_1/Q6_1 only: T2 has no stored min - its
+       zero coefficient is -scale, which `sq`/`sexp` above already
+       carry - and Q8_0/Q16_0 have no zero term at all, so both leave
+       these NULL. */
+    int16_t     *zq;        /* n/gs int16 */
+    signed char *zexp;      /* one exponent per row */
 } LZTensor;
 
 /* Q6_1's 2-bit plane layout: every 32 elements take 8 bytes; byte j's

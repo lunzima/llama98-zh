@@ -1522,12 +1522,16 @@ void lz_t_free(LZTensor *t) {
        and model.c does not include ops.h. */
     free(t->sq);
     free(t->sexp);
+    free(t->zq);
+    free(t->zexp);
     t->f = NULL;
     t->q = NULL;
     t->scale = NULL;
     t->zero = NULL;
     t->sq = NULL;
     t->sexp = NULL;
+    t->zq = NULL;
+    t->zexp = NULL;
 }
 
 int lz_read_weights(LZModel *m, char *errbuf, int errlen) {

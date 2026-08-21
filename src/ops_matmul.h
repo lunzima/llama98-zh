@@ -45,16 +45,22 @@ float epi_q41(const int32_t *accb, const float *xsb, const float *xgb,
               const float *wd, const float *wm, int ng, int r);
 float epi_fixed(const int32_t *accb, const LZTensor *w, int row,
                 int tk, int ng, int r, float post);
-/* int-pipeline milestone 1 (docs/int-pipeline-project.md #2.1): epi_q41's
-   dot/scale term via the shared epi_fixed exit, zsum unchanged in float.
-   `ng`/`r` are epi_q41's own convention (ng = weight-group count, r =
-   32-sub-blocks per group), matching epi_q41 exactly - NOT epi_fixed's
-   (sub-block-count, r) convention, which this function converts to
-   internally. */
+/* int-pipeline milestone 2 (docs/int-pipeline-project.md #2.1): both of
+   epi_q41's terms joined in the integer domain, one float materialized
+   per output element. `ng`/`r` are epi_q41's own convention (ng =
+   weight-group count, r = 32-sub-blocks per group), matching epi_q41
+   exactly - NOT epi_fixed's (sub-block-count, r) convention, which this
+   function converts to internally. `zneg` selects T2's zero coefficient
+   (-scale, read from the sq/sexp plane) over Q4_1/Q6_1's stored min
+   (the zq/zexp plane). Takes no float array at all: the activation half
+   of the zero term arrives through epi_zero_act_int below. */
 float epi_q41_fixed(const int32_t *accb, const LZTensor *w, int row,
-                    int tk, const float *xgb, const float *wm,
-                    int ng, int r);
+                    int tk, int ng, int r, int zneg);
+/* Both run once per token, before the row loop, on the fixed path only.
+   epi_zero_act_int is the integer replacement for ops_matmul.c's float
+   epi_zero_act, not an addition to it - exactly one of the two runs. */
 void epi_pack_act(const float *xqs, int nb, int nt);
+void epi_zero_act_int(const int8_t *xq, int in_dim, int ng, int r, int nt);
 /* Exponent alignment primitive (docs/int-pipeline-project.md batch 1
    #1) - epi_align_i16's epilogue-shaped wrapper. Not called from any
    forward.c site yet; see ops.c's own comment on why. */

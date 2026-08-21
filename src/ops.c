@@ -865,32 +865,47 @@ int lz_cpu_has_mmx(void) { return 0; }
 #define LZ_EPI_MAX_NG 64
 
 int lz_epi_ready(const LZTensor *w) { return w && w->sq && w->sexp; }
+int lz_epi_zero_ready(const LZTensor *w) { return w && w->zq && w->zexp; }
 
-/* Only for the half-built case below; lz_t_free owns the normal path. */
+/* Only for the half-built cases below; lz_t_free owns the normal path. */
 static void epi_drop(LZTensor *w) {
     free(w->sq);   w->sq = NULL;
     free(w->sexp); w->sexp = NULL;
 }
 
-/* One shared exponent per ROW, not per tensor: .prof/wepirange.c
-   measured the per-row spread of the weight scales at 99.6% within 8x,
-   while across rows it is far wider. A per-tensor exponent would spend
-   that whole range on every row. */
-void lz_epi_prep(LZTensor *w, int in_dim) {
-    int ngw, rows, row, g;
-    if (!w || !w->scale || w->gs <= 0 || in_dim <= 0) return;
-    if (w->sq) return;                       /* idempotent */
-    if (in_dim % w->gs) return;
-    ngw = in_dim / w->gs;
-    if (in_dim / 32 > LZ_EPI_MAX_NG) return; /* outside the derived bound */
-    rows = w->n / in_dim;
-    if (rows <= 0) return;
-    w->sq   = (int16_t *)malloc((size_t)ngw * (size_t)rows * sizeof(int16_t));
-    w->sexp = (signed char *)malloc((size_t)rows);
-    if (!w->sq || !w->sexp) { epi_drop(w); return; }
+static void epi_drop_zero(LZTensor *w) {
+    free(w->zq);   w->zq = NULL;
+    free(w->zexp); w->zexp = NULL;
+}
+
+/* The exponent search in epi_prep_plane only ever raises e from 0, so a
+   plane already reaching 32767 cannot be represented and would clamp
+   every group in that row to +-32767 in silence. Asked over the WHOLE
+   plane before anything is allocated, so a tensor that fails simply
+   never gets a plane, keeps the float epilogue, and does not re-attempt
+   the build on every later call. Not reachable on either plane of a
+   real checkpoint (measured on kmr20: max |scale| 0.0198, max |zero|
+   0.512), which is exactly why it has to be a check and not a comment. */
+static int epi_plane_fits(const float *src, size_t n) {
+    size_t i;
+    for (i = 0; i < n; i++) {
+        float a = src[i] < 0.0f ? -src[i] : src[i];
+        if (a >= 32767.0f) return 0;
+    }
+    return 1;
+}
+
+/* One row-plane of `ngw` floats -> int16 mantissas plus one shared
+   integer exponent for the row. The scale plane (lz_epi_prep) and the
+   zero plane (lz_epi_prep_zero) are the same decomposition applied to
+   two different tensor fields, so they share this loop rather than
+   carrying two conventions that can drift apart. */
+static void epi_prep_plane(const float *src, int16_t *out, signed char *ex,
+                           int ngw, int rows) {
+    int row, g;
     for (row = 0; row < rows; row++) {
-        const float *ws = w->scale + (size_t)row * ngw;
-        int16_t *out = w->sq + (size_t)row * ngw;
+        const float *ws = src + (size_t)row * ngw;
+        int16_t *o = out + (size_t)row * ngw;
         float amax = 0.0f;
         int e = 0;
         for (g = 0; g < ngw; g++) {
@@ -898,8 +913,8 @@ void lz_epi_prep(LZTensor *w, int in_dim) {
             if (a > amax) amax = a;
         }
         if (amax <= 0.0f) {
-            for (g = 0; g < ngw; g++) out[g] = 0;
-            w->sexp[row] = 0;
+            for (g = 0; g < ngw; g++) o[g] = 0;
+            ex[row] = 0;
             continue;
         }
         while (e < 100 && amax * pow2f(e + 1) < 32767.0f) e++;
@@ -908,10 +923,51 @@ void lz_epi_prep(LZTensor *w, int in_dim) {
             int q = q8_round(t);
             if (q >  32767) q =  32767;
             if (q < -32767) q = -32767;
-            out[g] = (int16_t)q;
+            o[g] = (int16_t)q;
         }
-        w->sexp[row] = (signed char)e;
+        ex[row] = (signed char)e;
     }
+}
+
+/* One shared exponent per ROW, not per tensor: .prof/wepirange.c
+   measured the per-row spread of the weight scales at 99.6% within 8x,
+   while across rows it is far wider. A per-tensor exponent would spend
+   that whole range on every row. */
+void lz_epi_prep(LZTensor *w, int in_dim) {
+    int ngw, rows;
+    if (!w || !w->scale || w->gs <= 0 || in_dim <= 0) return;
+    if (w->sq) return;                       /* idempotent */
+    if (in_dim % w->gs) return;
+    ngw = in_dim / w->gs;
+    if (in_dim / 32 > LZ_EPI_MAX_NG) return; /* outside the derived bound */
+    rows = w->n / in_dim;
+    if (rows <= 0) return;
+    if (!epi_plane_fits(w->scale, (size_t)ngw * (size_t)rows)) return;
+    w->sq   = (int16_t *)malloc((size_t)ngw * (size_t)rows * sizeof(int16_t));
+    w->sexp = (signed char *)malloc((size_t)rows);
+    if (!w->sq || !w->sexp) { epi_drop(w); return; }
+    epi_prep_plane(w->scale, w->sq, w->sexp, ngw, rows);
+}
+
+/* The zero plane's counterpart, same shape and the same shared loop.
+   Only Q4_1/Q6_1 reach it: T2 carries no `zero` field (its coefficient
+   is -scale, already in sq/sexp) and Q8_0/Q16_0 have no zero term, so
+   both leave here immediately and lz_epi_zero_ready stays false for
+   them. */
+void lz_epi_prep_zero(LZTensor *w, int in_dim) {
+    int ngw, rows;
+    if (!w || !w->zero || w->gs <= 0 || in_dim <= 0) return;
+    if (w->zq) return;                       /* idempotent */
+    if (in_dim % w->gs) return;
+    ngw = in_dim / w->gs;
+    if (in_dim / 32 > LZ_EPI_MAX_NG) return; /* outside the derived bound */
+    rows = w->n / in_dim;
+    if (rows <= 0) return;
+    if (!epi_plane_fits(w->zero, (size_t)ngw * (size_t)rows)) return;
+    w->zq   = (int16_t *)malloc((size_t)ngw * (size_t)rows * sizeof(int16_t));
+    w->zexp = (signed char *)malloc((size_t)rows);
+    if (!w->zq || !w->zexp) { epi_drop_zero(w); return; }
+    epi_prep_plane(w->zero, w->zq, w->zexp, ngw, rows);
 }
 
 /* int32 x int32 -> int64, which C cannot ask for: `(long long)a *
@@ -1074,6 +1130,11 @@ static long long lz_epi_mac(const int32_t *a, const int32_t *m, int n) {
 static int16_t g_epi_xq[LZ_BATCH_MAX][LZ_EPI_MAX_NG];
 static int     g_epi_xe[LZ_BATCH_MAX];
 static int32_t g_epi_m[LZ_EPI_MAX_NG];
+/* The zero term's activation half in integer form (epi_zero_act_int) and
+   the widened weight half epi_q41_fixed pairs it with. Same reason as
+   the three above for being static rather than stack. */
+static int32_t g_epi_zg[LZ_BATCH_MAX][LZ_EPI_MAX_NG];
+static int32_t g_epi_zm[LZ_EPI_MAX_NG];
 
 /* All tokens packed up front, because the row loop is OUTER and the
    token loop inner - packing inside would run once per (row, token) and
@@ -1111,6 +1172,45 @@ void epi_pack_act(const float *xqs, int nb, int nt) {
             g_epi_xq[tk][g] = (int16_t)q;
         }
         g_epi_xe[tk] = e;
+    }
+}
+
+/* The zero term's ACTIVATION half in the integer domain - the fixed
+   path's replacement for ops_matmul.c's epi_zero_act, not an addition
+   to it: where that one folds `lz_i32f(Sum_k xq) * xqs[sb]` in float,
+   this pairs the same 32-wide integer sums with the int16 sub-block
+   scales epi_pack_act has already produced, so the whole function is
+   integer and bills nothing. Runs once per token like its float twin,
+   and like epi_pack_act must run BEFORE the row loop for the same
+   reason (a per-row rebuild would cost what it saves).
+
+   Its output means xgb[g] == g_epi_zg[tk][g] * 2^-g_epi_xe[tk], the
+   integer counterpart of epi_zero_act's float xgb.
+
+   BOUND, derived: lz_quantize_q8 clamps to +-127 on every tier (the
+   scalar loop and the SSE1/SSE2 kernels alike, src/ops_sse2.c's
+   _mm_max_epi16/_mm_min_epi16 pair), so |Sum_{k<32} xq| <= 32*127 =
+   4064; epi_pack_act clamps to +-32767; one product is therefore at
+   most 133,165,088 < 2^27, and r of them stay inside int32 while
+   r * 133,165,088 <= 2^31-1, i.e. r <= 16 - which is LZ_EPI_MAX_R,
+   enforced by the caller's predicate. MEASURED on kmr20 over both gate
+   corpora: max |Sum_{k<32} xq| = 1502 of the 4064 allowed, max |zg| =
+   76,280,004, 3.6% of the int32 ceiling. */
+void epi_zero_act_int(const int8_t *xq, int in_dim, int ng, int r, int nt) {
+    int t, g, s, k;
+    for (t = 0; t < nt; t++) {
+        const int8_t *xqt = xq + (size_t)t * in_dim;
+        const int16_t *xqi = g_epi_xq[t];
+        for (g = 0; g < ng; g++) {
+            int32_t a = 0;
+            for (s = 0; s < r; s++) {
+                int sb = g * r + s;
+                int32_t sx = 0;
+                for (k = 0; k < 32; k++) sx += xqt[(size_t)sb * 32 + k];
+                a += sx * (int32_t)xqi[sb];
+            }
+            g_epi_zg[t][g] = a;
+        }
     }
 }
 
@@ -1226,6 +1326,36 @@ float epi_fixed(const int32_t *accb, const LZTensor *w, int row,
  * with) over a sweep spanning the full domain this function accepts,
  * including the LLONG_MIN/shift==-64 corner above -
  * .prof/verify_epi_align.c, 1,647,376 cases, 0 mismatches. */
+/* The narrowing half of the above, in the MAGNITUDE domain, factored out
+   because epi_q41_fixed's exponent join needs the same shift with an
+   int64 rather than a bounded int16 exit. Both of the corners the
+   verification probe covers live here - the +half bias added in unsigned
+   64-bit (umag <= 2^63, half <= 2^62, so the sum cannot wrap) and the
+   closed form for rs >= 64, where `>>rs` and `1ULL<<(rs-1)` are
+   themselves undefined: umag * 2^-rs <= 0.5 there, with equality (and so
+   a half-away-from-zero result of 1) only at rs == 64, umag == 2^63. */
+static unsigned long long epi_shr_half_u(unsigned long long umag, int rs) {
+    if (rs <= 0) return umag;
+    if (rs >= 64)
+        return (rs == 64 && umag == ((unsigned long long)1 << 63)) ? 1 : 0;
+    return (umag + ((unsigned long long)1 << (rs - 1))) >> rs;
+}
+
+/* Signed wrapper. The magnitude is taken by converting to unsigned FIRST
+   for the LLONG_MIN reason epi_align_i16's header gives; the result is
+   below 2^63 for every rs >= 1 (widest is rs == 1, where
+   (2^63 + 2^62) >> 1 < 2^63), so negating it back is representable. */
+static long long epi_shr_half(long long s, int rs) {
+    unsigned long long umag;
+    int neg;
+    if (rs <= 0 || s == 0) return s;
+    neg = (s < 0);
+    umag = neg ? (unsigned long long)0 - (unsigned long long)s
+               : (unsigned long long)s;
+    umag = epi_shr_half_u(umag, rs);
+    return neg ? -(long long)umag : (long long)umag;
+}
+
 static int32_t epi_align_i16(long long s, int e, int target_e, int bound) {
     unsigned long long umag;
     long long r;
@@ -1236,9 +1366,7 @@ static int32_t epi_align_i16(long long s, int e, int target_e, int bound) {
                : (unsigned long long)s;
     shift = e - 8 + target_e;
     if (shift > 32) shift = 32;    /* umag<<32 already dwarfs any real bound */
-    if (shift <= -64) {
-        r = (shift == -64 && umag == ((unsigned long long)1 << 63)) ? 1 : 0;
-    } else if (shift >= 0) {
+    if (shift >= 0) {
         unsigned long long capped = (unsigned long long)bound >> shift; /* shift<=32: safe */
         if (umag > capped + 1)
             r = (long long)bound + 1;          /* clamps below regardless */
@@ -1247,11 +1375,7 @@ static int32_t epi_align_i16(long long s, int e, int target_e, int bound) {
                                                    bound+2^32: far inside
                                                    unsigned 64 bits */
     } else {
-        int rs = -shift;                                     /* 1..63 */
-        unsigned long long half = (unsigned long long)1 << (rs - 1);
-        r = (long long)((umag + half) >> rs);  /* unsigned add: no UB, and
-                                                   provably < 2^64 (umag
-                                                   <= 2^63, half <= 2^62) */
+        r = (long long)epi_shr_half_u(umag, -shift);
     }
     if (r > bound) r = bound;
     return (int32_t)(neg ? -r : r);
@@ -1588,36 +1712,88 @@ float epi_q41(const int32_t *accb, const float *xsb, const float *xgb,
     return dotsum * (1.0f / 256.0f) + zsum;
 }
 
-/* int-pipeline milestone 1 (docs/int-pipeline-project.md #2.1): epi_q41's
-   dot/scale term routed through the shared epi_fixed exit instead of its
-   own float accumulation - epi_fixed_raw's integer MAC replaces the
-   ng*(r+1) mul/add + ng*r cvt the float loop above still costs (see
-   epi_q41's own accounting comment), leaving only epi_fixed's own O(1)
-   exponent fold. zsum (the zero-point term) is untouched, in float,
-   exactly the loop epi_q41 already runs - milestone 2's separate design
-   (see the project doc: wm[g] is an additive offset, not a multiplicative
-   scale, so the exponent-alignment trick this borrows does not apply to
-   it).
+/* int-pipeline milestone 2 (docs/int-pipeline-project.md #2.1): BOTH of
+   epi_q41's terms in one integer domain, joined by an integer shift, so
+   exactly one float is materialized per output element and the float
+   cost is O(1) instead of O(ng).
+
+   Milestone 1 left the zero term in float and gave the dot term its own
+   float exit, which costs 2 cvt + 2 mul + 1 add against epi_q41's
+   2*ng+3 - nothing at all where ng == 1, and ng == 1 is 81.8% of the
+   calls on this checkpoint (measured, kmr20, both gate corpora:
+   ng=1/r=16 67.68%, ng=1/r=8 14.14%, ng=2/r=4 14.14%, ng=4/r=4 4.04%).
+   The join below is what makes the saving independent of ng.
+
+   The two halves, each `mantissa * 2^exponent` with an integer exponent
+   the row and the token fix between them:
+
+     dot  == s_dot  * 2^(e_dot)    e_dot  = -g_epi_xe[tk] - w->sexp[row]
+     zero == s_zero * 2^(e_zero)   e_zero = -g_epi_xe[tk] - w->zexp[row]
+
+   Both carry the same -g_epi_xe[tk], so their difference is a per-ROW
+   integer decided entirely on the weight side; the token only moves
+   both together.
+
+   THE x256 IS TAKEN OFF THE DOT SUM FIRST, and that is load-bearing
+   twice over. The row kernels return acc = 256 * (integer dot), which
+   epi_fixed cancels with a 1/256 post-multiply; here it is an exact
+   integer shift instead (measured: 953,024,512 acc32 entries over the
+   English corpus, 0 of them not a multiple of 256), and doing it before
+   the join leaves 8 bits of headroom under lz_epi_mac's own worst case
+   so the addition that follows provably cannot overflow int64:
+   |s_dot| <= 2^63 by LZ_EPI_MAX_NG's derivation, hence |s_dot>>8| <=
+   2^55, while |s_zero| <= 64 * 2^31 * 2^15 = 2^52.
+
+   WHICH SIDE GETS SHIFTED is not a free choice: shifting up would have
+   to fit inside the 3 bits of int64 headroom |s_dot| already leaves, so
+   the join always aligns DOWN, to the coarser of the two exponents.
+   Measured on kmr20, e_zero is coarser on 100% of calls, by 0 to 6 bits
+   (the raw sexp+8-zexp spread is 8..14 and the leading 8 are the exact
+   x256 shift above) - the zero plane's mantissas are the group MINs,
+   which run about 16x the group SCALES, so its exponent sits about four
+   below. Six bits off a sum whose measured magnitude is 2^54.8 leaves
+   ~49 significant bits against float32's 24, and the rounding it costs
+   is 2^20 times smaller than the int16 quantization of w->zero that the
+   zero term already carries. The `target` below is still the general
+   max() rather than a hardcoded direction: the opposite ordering is one
+   comparison to handle correctly and a silent wrong answer to assume
+   away.
 
    `ng`/`r` are epi_q41's own convention (ng weight groups, r 32-wide
-   sub-blocks per group); epi_fixed's own `ng` parameter means "sub-block
-   count" (its Q8_0 call site passes nb directly) - ng*r converts between
-   the two without changing what either function already does. */
+   sub-blocks per group); epi_fixed_raw's own `ng` parameter means
+   "sub-block count" - ng*r converts between the two.
+
+   `zneg` is T2, which stores no min: its zero coefficient is -scale, so
+   it reuses the sq/sexp plane lz_epi_prep already built and negates the
+   accumulated int64 (|s_zero| <= 2^52, nowhere near the LLONG_MIN
+   corner that makes negation UB). Q4_1/Q6_1 pass 0 and read the zq/zexp
+   plane. */
 float epi_q41_fixed(const int32_t *accb, const LZTensor *w, int row,
-                    int tk, const float *xgb, const float *wm,
-                    int ng, int r) {
-    float dotsum = epi_fixed(accb, w, row, tk, ng * r, r, 1.0f / 256.0f);
-    float zsum = 0.0f;
-    int g;
-    /* Same zsum loop epi_q41 runs (ng mul + ng add), plus the one add
-       that combines it with dotsum - re-derived against epi_q41's own
-       LZ_FC_EPI formula: replacing its ng*(r+1) mul/add + ng*r cvt
-       dot/scale cost with epi_fixed's own O(1) billing (which epi_fixed
-       bills itself, on its own call above) is exactly the (r+1)/(r+2)
-       share the project doc's milestone-1 estimate is built on. */
-    LZ_FCX(LZ_FC_EPI, ng, ng + 1, 0, 0, 0);
-    for (g = 0; g < ng; g++) zsum += xgb[g] * wm[g];
-    return dotsum + zsum;
+                    int tk, int ng, int r, int zneg) {
+    int e_dot, e_zero, target, g;
+    long long s_dot, s_zero, comb;
+    const int16_t *zp = zneg ? w->sq : w->zq;
+    s_dot = epi_fixed_raw(accb, w, row, tk, ng * r, r, &e_dot);
+    s_dot = epi_shr_half(s_dot, 8);        /* exact: acc32 is the x256 */
+    e_zero = -g_epi_xe[tk] - (int)(zneg ? w->sexp[row] : w->zexp[row]);
+    for (g = 0; g < ng; g++) g_epi_zm[g] = (int32_t)zp[(size_t)row * ng + g];
+    s_zero = lz_epi_mac(g_epi_zg[tk], g_epi_zm, ng);
+    if (zneg) s_zero = -s_zero;
+    target = e_dot > e_zero ? e_dot : e_zero;
+    comb = epi_shr_half(s_dot, target - e_dot)
+         + epi_shr_half(s_zero, target - e_zero);
+    /* pow2f returns 0 below 2^-126 rather than a denormal, and |comb|
+       reaches 2^55, so at a deep enough target a single multiply would
+       zero a result that is still an ordinary normal float. e_dot and
+       e_zero are each two exponents capped at 100 by their packing
+       loops, so target can reach -200 - the same floor epi_fixed's own
+       fold guards, reachable here by a wider margin. */
+    if (target < -126) {
+        LZ_FCX(LZ_FC_EPI, 2, 0, 0, 1, 0);  /* convert, two multiplies */
+        return (float)comb * pow2f(-126) * pow2f(target + 126);
+    }
+    LZ_FCX(LZ_FC_EPI, 1, 0, 0, 1, 0);      /* convert, one multiply */
+    return (float)comb * pow2f(target);
 }
 
 /* ---- Q4_1 row kernels, one per (ISA x impl) --------------------------- */

@@ -627,6 +627,24 @@ int lz_epi_is_auto(void);
 void lz_epi_prep(LZTensor *w, int in_dim);
 int  lz_epi_ready(const LZTensor *w);
 
+/* The same for the `zero` plane (Q4_1/Q6_1 group minimums), which the
+   Q4_1/Q6_1/T2 epilogue needs to fold its zero term into the integer
+   domain. A no-op with lz_epi_zero_ready() staying false wherever
+   w->zero is NULL, which is every other format including T2 - T2's zero
+   coefficient is -scale and rides the plane above. */
+void lz_epi_prep_zero(LZTensor *w, int in_dim);
+int  lz_epi_zero_ready(const LZTensor *w);
+
+/* Sub-blocks per weight group (gs/32) that the zero term's integer
+   activation fold can take. DERIVED, like LZ_EPI_MAX_NG above it, and
+   from the same kind of worst case: |Sum_{k<32} xq| <= 32*127 = 4064
+   and |packed sub-block scale| <= 32767 put one product at 133,165,088,
+   and r of them stay inside int32 only while r <= 16. Shapes past it
+   keep the float epilogue rather than silently wrapping. See
+   epi_zero_act_int (src/ops.c) for the full derivation and the measured
+   margin. */
+#define LZ_EPI_MAX_R 16
+
 const char *lz_pair_select(const char *name);
 int lz_pair_mode(void);
 

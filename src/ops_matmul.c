@@ -608,10 +608,23 @@ const lz_rowfn LZ_ROW_Q41[LZ_ROW_N] = {
    model too: .prof/ probe against kmr20, max |acc32| observed across
    Q4_1/Q6_1/T2 was 16,977,664, ~2^24, comfortably under both), the two
    predicates must not be coupled by sharing one function - a future
-   change to either tier's gating must not silently move the other. */
-static int q41_fixed_epi(const LZTensor *w, int in_dim, int nb, int nt) {
-    if (lz_epi_mode() && !lz_epi_ready(w)) lz_epi_prep((LZTensor *)w, in_dim);
-    return lz_epi_mode() && lz_epi_ready(w) && nb <= LZ_EPI_MAX_NG
+   change to either tier's gating must not silently move the other.
+
+   `zneg` is T2, which needs no zero plane at all: its zero coefficient
+   is -scale, already quantized into sq/sexp, so demanding zq/zexp there
+   would refuse a tier that is in fact ready. `r` carries LZ_EPI_MAX_R,
+   the zero term's own int32 bound (src/ops.h) - a second shape limit
+   beside LZ_EPI_MAX_NG, checked here for the same reason that one is:
+   past it the integer fold would wrap silently, so the tensor keeps the
+   float epilogue instead. No tensor on kmr20 is excluded by it
+   (measured over both gate corpora: r is 4, 8 or 16 on 100% of calls). */
+static int q41_fixed_epi(const LZTensor *w, int in_dim, int nb, int nt,
+                         int r, int zneg) {
+    if (!lz_epi_mode()) return 0;
+    if (!lz_epi_ready(w)) lz_epi_prep((LZTensor *)w, in_dim);
+    if (!zneg && !lz_epi_zero_ready(w)) lz_epi_prep_zero((LZTensor *)w, in_dim);
+    return lz_epi_ready(w) && (zneg || lz_epi_zero_ready(w))
+           && nb <= LZ_EPI_MAX_NG && r <= LZ_EPI_MAX_R
            && nt <= LZ_BATCH_MAX;
 }
 
@@ -626,8 +639,9 @@ static int q41_fixed_epi(const LZTensor *w, int in_dim, int nb, int nt) {
    ORDER is part of the same bit-identity contract epi_q41's own comment
    describes, and three copies of it drift the moment one is touched.
 
-   It runs on EVERY call, fixed_epi or not - the zero term is still
-   float on the fixed path. The inner 32-wide sum is integer and bills
+   The FLOAT path's copy only: the fixed path folds the same quantity in
+   integers (epi_zero_act_int, src/ops.c) and the two are exclusive, one
+   or the other per call. The inner 32-wide sum is integer and bills
    nothing, per the census convention; the r-long fold is nt*ng*r
    converts, multiplies and adds of real x87 work that this site failed
    to declare until it was given a name. */
@@ -662,7 +676,7 @@ void matmul_q41_impl(float *o, const int8_t *xq, const float *xqs,
     int nb = in_dim / 32;             /* 32-sub-block count */
     /* Same predicate as the Q8_0 float epilogue, own copy - see
        q41_fixed_epi's comment. */
-    int fixed_epi = q41_fixed_epi(w, in_dim, nb, nt);
+    int fixed_epi = q41_fixed_epi(w, in_dim, nb, nt, r, 0);
     lz_rowfn row;
 
     row = lz_row_pick(LZ_ROW_Q41);
@@ -679,8 +693,12 @@ void matmul_q41_impl(float *o, const int8_t *xq, const float *xqs,
     }
 
     for (t = 0; t < nt * in_dim; t++) g_xw[t] = (int16_t)xq[t];
-    if (fixed_epi) epi_pack_act(xqs, nb, nt);
-    epi_zero_act(xq, xqs, in_dim, ng, r, nb, nt);
+    if (fixed_epi) {
+        epi_pack_act(xqs, nb, nt);
+        epi_zero_act_int(xq, in_dim, ng, r, nt);
+    } else {
+        epi_zero_act(xq, xqs, in_dim, ng, r, nb, nt);
+    }
 
     for (i = 0; i < out_dim; i++) {
         const unsigned char *wn =
@@ -695,8 +713,7 @@ void matmul_q41_impl(float *o, const int8_t *xq, const float *xqs,
         if (lz_cpu_has_mmx()) _mm_empty();
         for (tk = 0; tk < nt; tk++)
             o[(size_t)tk * out_dim + i] = fixed_epi
-                ? epi_q41_fixed(g_acc32 + (size_t)tk * nb, w, i, tk,
-                                g_xg + (size_t)tk * ng, wm, ng, r)
+                ? epi_q41_fixed(g_acc32 + (size_t)tk * nb, w, i, tk, ng, r, 0)
                 : epi_q41(g_acc32 + (size_t)tk * nb, xqs + (size_t)tk * nb,
                           g_xg + (size_t)tk * ng, wd, wm, ng, r);
     }
@@ -925,8 +942,10 @@ void matmul_t2_impl(float *o, const int8_t *xq, const float *xqs,
     /* Same predicate as matmul_q41_impl - T2 shares epi_q41/epi_q41_fixed
        and reads the same w->scale field the dot/scale term quantizes
        (T2's zero coefficient is a negated COPY of it, g_t2neg below, not
-       a different tensor field). */
-    int fixed_epi = q41_fixed_epi(w, in_dim, nb, nt);
+       a different tensor field). Hence the zneg argument: the fixed path
+       negates the sq/sexp plane in place of a zero plane it does not
+       have, so the predicate must not require one. */
+    int fixed_epi = q41_fixed_epi(w, in_dim, nb, nt, r, 1);
     lz_rowfn row;
 
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
@@ -949,19 +968,24 @@ void matmul_t2_impl(float *o, const int8_t *xq, const float *xqs,
     }
 
     for (t = 0; t < nt * in_dim; t++) g_xw[t] = (int16_t)xq[t];
-    if (fixed_epi) epi_pack_act(xqs, nb, nt);
-    epi_zero_act(xq, xqs, in_dim, ng, r, nb, nt);
+    if (fixed_epi) {
+        epi_pack_act(xqs, nb, nt);
+        epi_zero_act_int(xq, in_dim, ng, r, nt);
+    } else {
+        epi_zero_act(xq, xqs, in_dim, ng, r, nb, nt);
+    }
 
     for (i = 0; i < out_dim; i++) {
         const unsigned char *w2 = p2b + (size_t)i * in_dim / 4;
         const float *wd = w->scale + (size_t)i * ng;
-        for (g = 0; g < ng; g++) g_t2neg[g] = -wd[g];
+        /* Only the float epilogue reads it - the fixed one negates the
+           int16 plane instead. */
+        if (!fixed_epi) for (g = 0; g < ng; g++) g_t2neg[g] = -wd[g];
         row(g_acc32, w2, NULL, g_xw, nb, nt, in_dim, NULL, NULL);
         if (lz_cpu_has_mmx()) _mm_empty();
         for (tk = 0; tk < nt; tk++)
             o[(size_t)tk * out_dim + i] = fixed_epi
-                ? epi_q41_fixed(g_acc32 + (size_t)tk * nb, w, i, tk,
-                                g_xg + (size_t)tk * ng, g_t2neg, ng, r)
+                ? epi_q41_fixed(g_acc32 + (size_t)tk * nb, w, i, tk, ng, r, 1)
                 : epi_q41(g_acc32 + (size_t)tk * nb, xqs + (size_t)tk * nb,
                           g_xg + (size_t)tk * ng, wd, g_t2neg, ng, r);
     }
@@ -975,7 +999,7 @@ void matmul_q61_impl(float *o, const int8_t *xq, const float *xqs,
     const unsigned char *p4b = (const unsigned char *)w->q;
     const unsigned char *p2b = p4b + (size_t)w->n / 2;
     /* Same predicate as matmul_q41_impl - see q41_fixed_epi's comment. */
-    int fixed_epi = q41_fixed_epi(w, in_dim, nb, nt);
+    int fixed_epi = q41_fixed_epi(w, in_dim, nb, nt, r, 0);
     lz_rowfn row;
 
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
@@ -993,8 +1017,12 @@ void matmul_q61_impl(float *o, const int8_t *xq, const float *xqs,
     }
 
     for (t = 0; t < nt * in_dim; t++) g_xw[t] = (int16_t)xq[t];
-    if (fixed_epi) epi_pack_act(xqs, nb, nt);
-    epi_zero_act(xq, xqs, in_dim, ng, r, nb, nt);
+    if (fixed_epi) {
+        epi_pack_act(xqs, nb, nt);
+        epi_zero_act_int(xq, in_dim, ng, r, nt);
+    } else {
+        epi_zero_act(xq, xqs, in_dim, ng, r, nb, nt);
+    }
 
     for (i = 0; i < out_dim; i++) {
         const unsigned char *wn = p4b + (size_t)i * in_dim / 2;
@@ -1007,8 +1035,7 @@ void matmul_q61_impl(float *o, const int8_t *xq, const float *xqs,
         if (lz_cpu_has_mmx()) _mm_empty();
         for (tk = 0; tk < nt; tk++)
             o[(size_t)tk * out_dim + i] = fixed_epi
-                ? epi_q41_fixed(g_acc32 + (size_t)tk * nb, w, i, tk,
-                                g_xg + (size_t)tk * ng, wm, ng, r)
+                ? epi_q41_fixed(g_acc32 + (size_t)tk * nb, w, i, tk, ng, r, 0)
                 : epi_q41(g_acc32 + (size_t)tk * nb, xqs + (size_t)tk * nb,
                           g_xg + (size_t)tk * ng, wd, wm, ng, r);
     }

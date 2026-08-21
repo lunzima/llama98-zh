@@ -27,7 +27,28 @@
 #include <stdint.h>
 #include <math.h>
 
-/* ---- verbatim copy of the function under test (src/ops.c) ------------ */
+/* ---- verbatim copy of the functions under test (src/ops.c) -----------
+   epi_shr_half_u is the narrowing half, shared with the Q4_1/Q6_1/T2
+   epilogue's exponent join (epi_q41_fixed), so the sweep below covers
+   that consumer's arithmetic too - the two callers differ only in what
+   they do with the magnitude afterwards. */
+static unsigned long long epi_shr_half_u(unsigned long long umag, int rs) {
+    if (rs <= 0) return umag;
+    if (rs >= 64)
+        /* value = umag * 2^-rs <= 2^63 * 2^-rs <= 0.5 (umag's own
+           ceiling, LLONG_MIN's magnitude, is 2^63), with equality only
+           at rs == 64 AND umag == 2^63 - the single input where
+           round-half-away-from-zero rounds an exact 0.5 up to 1 instead
+           of down to 0. rs >= 64 cannot go through the shift below at
+           all: `>>rs`/`1ULL<<(rs-1)` on a 64-bit type is undefined once
+           rs reaches 64, so this case is a closed form rather than a
+           widened integer type. */
+        return (rs == 64 && umag == ((unsigned long long)1 << 63)) ? 1 : 0;
+    return (umag + ((unsigned long long)1 << (rs - 1))) >> rs;
+    /* unsigned add: no UB, and provably < 2^64 (umag <= 2^63,
+       half <= 2^62) */
+}
+
 static int32_t epi_align_i16(long long s, int e, int target_e, int bound) {
     unsigned long long umag;
     long long r;
@@ -46,17 +67,7 @@ static int32_t epi_align_i16(long long s, int e, int target_e, int bound) {
                : (unsigned long long)s;
     shift = e - 8 + target_e;
     if (shift > 32) shift = 32;    /* umag<<32 already dwarfs any real bound */
-    if (shift <= -64) {
-        /* value = umag * 2^shift <= 2^63 * 2^shift <= 0.5 (umag's own
-           ceiling, LLONG_MIN's magnitude, is 2^63), with equality only
-           at shift == -64 AND umag == 2^63 - the single input where
-           round-half-away-from-zero rounds an exact 0.5 up to 1 instead
-           of down to 0. rs = -shift >= 64 cannot go through the shift
-           branch below at all: `>>rs`/`<<(rs-1)` on a 64-bit type is
-           undefined once rs reaches 64, so this case is handled by the
-           closed form above rather than by widening the integer type. */
-        r = (shift == -64 && umag == ((unsigned long long)1 << 63)) ? 1 : 0;
-    } else if (shift >= 0) {
+    if (shift >= 0) {
         unsigned long long capped = (unsigned long long)bound >> shift; /* shift<=32: safe */
         if (umag > capped + 1)
             r = (long long)bound + 1;          /* clamps below regardless */
@@ -65,11 +76,7 @@ static int32_t epi_align_i16(long long s, int e, int target_e, int bound) {
                                                    bound+2^32: far inside
                                                    unsigned 64 bits */
     } else {
-        int rs = -shift;                                     /* 1..63 */
-        unsigned long long half = (unsigned long long)1 << (rs - 1);
-        r = (long long)((umag + half) >> rs);  /* unsigned add: no UB, and
-                                                   provably < 2^64 (umag
-                                                   <= 2^63, half <= 2^62) */
+        r = (long long)epi_shr_half_u(umag, -shift);
     }
     if (r > bound) r = bound;
     return (int32_t)(neg ? -r : r);
