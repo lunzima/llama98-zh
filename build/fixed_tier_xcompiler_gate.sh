@@ -136,6 +136,17 @@ fi
 # as those. LZ_NORM_INT_GATE_MODEL overrides the path directly (kept
 # under its original name - the two tiers it was named for are still in
 # here, and nothing outside this script needs to know it grew).
+# COVERAGE GAP - kmr20 carries no T2 tensor (.prof/dtype_probe.c: q8_0
+# 7.1%, q4_1 33.0%, q6_1 59.4%, q16_0 0.5%), so every row below leaves
+# the T2 half of the Q4_1/Q6_1/T2 epilogue family untested. That half is
+# not a copy of the others: T2 has no stored zero plane and reaches the
+# fixed epilogue through its own `zneg` branch, reusing the NEGATED
+# scale plane. Cover it with a second run against a checkpoint that has
+# T2 tensors, e.g.
+#   LZ_NORM_INT_GATE_MODEL=/e/LLM/models/kunmoe-v2-t2-probe bash "$0"
+# (8 T2 tensors, 2.8% of elements - enough that the whole logits dump
+# moves, the rest being q8_0). Not the default because that checkpoint
+# lives outside the repo like kmr20 and one of the two has to be picked.
 MODELS_ROOT=${MODELS_ROOT:-/e/LLM/models}
 MODEL=${LZ_NORM_INT_GATE_MODEL:-$MODELS_ROOT/kmr20}
 if [ ! -d "$MODEL" ]; then
