@@ -235,36 +235,40 @@ static void usage(void) {
     "                   uncompiled tier falls back loudly.\n"
     "  --fixed MODE        auto|off|all (default auto). Sets every write\n"
     "                   tier at once - recurrence, conv1d, attention,\n"
-    "                   epilogue, sigmoid, norms, scalar. The per-tier\n"
-    "                   flags below still work and WIN over this one,\n"
-    "                   whatever order they appear in; they are what the\n"
-    "                   ARM parity gate pins and what a bisect needs.\n"
-    "  --recur-write TIER  auto|fixed (default auto). The recurrence state\n"
-    "                   write-back tier: fixed keeps the integer result and\n"
-    "                   skips the float re-quantize; auto resolves from\n"
-    "                   hardware (fixed only where no SIMD write-back\n"
-    "                   quantize exists).\n"
-    "  --sig-write TIER    auto|float|fixed (default auto). sigmoid and\n"
-    "                   SiLU from a Q15 table (NOT the KDA decay).\n"
-    "  --norm-write TIER   auto|float|fixed|int (default auto). RMS/L2 norm\n"
-    "                   sum-of-squares in int64 fixed point. int adds the\n"
-    "                   gated norm writing its Q15 result as int for\n"
+    "                   epilogue, sigmoid, norms, scalar. auto and all are\n"
+    "                   the same shipping default (every tier fixed,\n"
+    "                   unconditionally - not a hardware question); off is\n"
+    "                   the float correctness oracle every tolerance in\n"
+    "                   CLAUDE.md and every cross-compiler gate is measured\n"
+    "                   against - use it to get a clean float baseline. The\n"
+    "                   per-tier flags below still work and WIN over this\n"
+    "                   one, whatever order they appear in; they are what\n"
+    "                   the ARM parity gate pins and what a bisect needs.\n"
+    "  --recur-write TIER  auto|float|fixed (default auto = fixed). The\n"
+    "                   recurrence state write-back tier: fixed keeps the\n"
+    "                   integer result and skips the float re-quantize.\n"
+    "  --sig-write TIER    auto|float|fixed (default auto = fixed). sigmoid\n"
+    "                   and SiLU from a Q15 table (NOT the KDA decay).\n"
+    "  --norm-write TIER   auto|float|fixed|int (default auto = fixed).\n"
+    "                   RMS/L2 norm sum-of-squares in int64 fixed point. int\n"
+    "                   adds the gated norm writing its Q15 result as int for\n"
     "                   lz_quantize_q8_int instead of dequantizing to float\n"
     "                   and re-quantizing (bit-identical); it implies fixed.\n"
-    "  --scalar-fixed TIER auto|float|fixed (default fixed). lz_exp and\n"
-    "                   lz_rsqrt together - the last two scalar x87 ops\n"
-    "                   the fixed tiers leave on float. Value-changing by\n"
-    "                   design (~1e-6 rel); the KDA decay follows lz_exp.\n"
-    "  --epi-write TIER    auto|float|fixed (default auto). Dequant\n"
+    "  --scalar-fixed TIER auto|float|fixed (default auto = fixed, same as\n"
+    "                   the other six). lz_exp and lz_rsqrt together - the\n"
+    "                   last two scalar x87 ops the fixed tiers leave on\n"
+    "                   float. Value-changing by design (~1e-6 rel); the\n"
+    "                   KDA decay follows lz_exp.\n"
+    "  --epi-write TIER    auto|float|fixed (default auto = fixed). Dequant\n"
     "                   epilogue in int64 fixed point.\n"
-    "  --attn-write TIER   auto|float|scoring|wsum|fixed|int (default auto).\n"
-    "                   Attention scoring / weighted sum in fixed point. int\n"
-    "                   adds the weighted sum keeping its exact int64\n"
-    "                   accumulator for lz_quantize_q8_int64 instead of\n"
+    "  --attn-write TIER   auto|float|scoring|wsum|fixed|int (default auto\n"
+    "                   = fixed). Attention scoring / weighted sum in fixed\n"
+    "                   point. int adds the weighted sum keeping its exact\n"
+    "                   int64 accumulator for lz_quantize_q8_int64 instead of\n"
     "                   dequantizing and re-quantizing (value-changing); it\n"
     "                   implies fixed.\n"
-    "  --conv-write TIER   auto|float|fixed (default auto). Causal conv1d\n"
-    "                   tier: fixed keeps the history in int16 so the\n"
+    "  --conv-write TIER   auto|float|fixed (default auto = fixed). Causal\n"
+    "                   conv1d tier: fixed keeps the history in int16 so the\n"
     "                   conversion is per sample, not per tap. Drifts ~3e-5\n"
     "                   from float (noise floor 3.9e-3) - not bit-identical.\n"
     "  --pair MODE      auto|on|off (default on). Share one weight unpack\n"
@@ -1319,21 +1323,24 @@ int main(int argc, char **argv) {
         }
         else if (strcmp(a, "--recur-write") == 0 && i + 1 < argc) {
             /* State write-back tier. `fixed` keeps the recurrence's own
-               integer result and skips the float re-quantize; `auto`
-               resolves from hardware (fixed on a machine with no SIMD
-               write-back quantize, float where the SIMD path exists). */
+               integer result and skips the float re-quantize; `auto` is
+               the shipping default, unconditionally fixed - it does not
+               ask hardware (see ops_sched.c's retirement note on
+               lz_soft_float_target). `float` is the measurement/
+               correctness-oracle value, same shape the other six now
+               have. */
             const char *got = lz_gdn_p2_select(argv[++i]);
             if (!got) {
-                printf("--recur-write: unknown tier (auto|fixed)\n");
+                printf("--recur-write: unknown tier (auto|float|fixed)\n");
                 return 2;
             }
         }
         else if (strcmp(a, "--conv-write") == 0 && i + 1 < argc) {
             /* Causal conv1d tier. `fixed` keeps the history in int16 so
                the conversion is paid once per sample instead of once per
-               tap; `auto` resolves from hardware, the same CPUID SSE
-               question --recur-write asks. NOT numerics-neutral: ~3e-5
-               against a 3.9e-3 noise floor. */
+               tap; `auto` is the shipping default, unconditionally fixed
+               (see --recur-write's comment above). NOT numerics-neutral:
+               ~3e-5 against a 3.9e-3 noise floor. */
             const char *got = lz_conv_select(argv[++i]);
             if (!got) {
                 printf("--conv-write: unknown tier (auto|float|fixed)\n");
@@ -1386,10 +1393,11 @@ int main(int argc, char **argv) {
         else if (strcmp(a, "--attn-write") == 0 && i + 1 < argc) {
             /* Attention scoring and weighted sum, split because they
                quantize at different granularity (int8 q vs int16
-               coefficients). `auto` asks the same CPUID SSE question the
-               other two tiers ask. NOT numerics-neutral, and it is the
-               one tier whose cost is context-dependent: measured ~2.6%
-               slower below 200 tokens, 3.7x less O(ctx) work above. */
+               coefficients). `auto` is the shipping default,
+               unconditionally fixed (--recur-write's comment above).
+               NOT numerics-neutral, and it is the one tier whose cost is
+               context-dependent: measured ~2.6% slower below 200 tokens,
+               3.7x less O(ctx) work above. */
             const char *got = lz_attn_select(argv[++i]);
             if (!got) {
                 printf("--attn-write: unknown tier "
@@ -1508,24 +1516,23 @@ int main(int argc, char **argv) {
         const char *t = (strcmp(group_fixed, "all") == 0) ? "fixed"
                        : (strcmp(group_fixed, "off") == 0) ? "float"
                        : "auto";
-        /* Six of the seven write tiers resolve their own `auto` from the
-           exact same hardware question (lz_soft_float_target, its own
-           comment in ops_sched.c names all six call sites) - one
-           decision, not six. Table-driven here so --fixed's group-apply
-           is that single fact made structural: an eighth axis lands in
-           one array entry, not as a seventh copy-pasted is_auto/select
-           pair that this loop and ops_sched.c's own comment could drift
-           out of step with independently. Recurrence (lz_gdn_p2_*) stays
-           out of the table: its select() has no "float" value, so
-           `--fixed off` needs the distinct message below instead of a
-           silent no-op skip; scalar (lz_scalar_*) IS in the table - its
-           auto does not ask hardware (see ops_sched.c), but --fixed
-           still overrides it with an explicit value like every other
-           axis, which is unaffected by that distinction. */
+        /* All seven write tiers now share one shape: `auto` is the
+           shipping default, unconditionally fixed, not a hardware
+           question (ops_sched.c's retirement note on
+           lz_soft_float_target). Table-driven so --fixed's group-apply
+           is a single array instead of seven near-identical
+           is_auto/select pairs that could drift out of step with each
+           other as axes are added. Recurrence (lz_gdn_p2_*) used to sit
+           outside this table because its select() had no "float" value
+           - it does now (same reason every other axis needed one: float
+           has to stay reachable as the measurement/correctness-oracle
+           path even though nothing defaults to it anymore), so it folds
+           in like the rest and `--fixed off` needs no special case. */
         static const struct {
             int (*is_auto)(void);
             const char *(*select)(const char *);
         } axes[] = {
+            { lz_gdn_p2_is_auto, lz_gdn_p2_select },
             { lz_conv_is_auto,   lz_conv_select },
             { lz_attn_is_auto,   lz_attn_select },
             { lz_epi_is_auto,    lz_epi_select },
@@ -1535,15 +1542,6 @@ int main(int argc, char **argv) {
         };
         int skipped = 0;
         int gi;
-        /* The recurrence selector takes only auto|fixed - there is no
-           explicit float. So `--fixed off` leaves it on auto and SAYS
-           SO, rather than passing a name that returns NULL into a call
-           whose result nobody checks. */
-        if (lz_gdn_p2_is_auto() && strcmp(t, "float") != 0)
-            skipped += (lz_gdn_p2_select(t) == NULL);
-        else if (lz_gdn_p2_is_auto())
-            printf("--fixed off: the recurrence tier has no float "
-                   "setting (auto|fixed only); left on auto\n");
         for (gi = 0; gi < (int)(sizeof(axes) / sizeof(axes[0])); gi++)
             if (axes[gi].is_auto())
                 skipped += (axes[gi].select(t) == NULL);
