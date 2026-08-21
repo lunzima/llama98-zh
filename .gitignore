@@ -39,6 +39,7 @@
 !/build/norm_int_gate_tokens_zh.txt
 !/build/norm_int_gate_tokens_en.txt
 !/build/native_obj_gate.sh
+!/build/f32count_billing_gate.sh
 
 # Stray compiler/linker intermediates (gcc, Open Watcom), plus the raw
 # dumps probes drop at the repo root when run without a -o path.

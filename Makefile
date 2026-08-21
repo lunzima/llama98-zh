@@ -501,7 +501,7 @@ watcom-gui:
 # - the union of three binaries is the whole point, one binary cannot
 # show it). LZ_KM_SKIP_ARM=1 drops the ARM arm for a faster loop; the
 # gate then says which columns went unchecked.
-check: bare-endif-gate dead-ifndef-gate dedupe-gate mm-alias-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate kernel-matrix-gate
+check: bare-endif-gate dead-ifndef-gate f32count-billing-gate dedupe-gate mm-alias-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate kernel-matrix-gate
 
 # A bare "#endif" (no trailing comment) is a regression the split ops
 # commits already made once - every #endif must say what it closes.
@@ -514,6 +514,14 @@ bare-endif-gate:
 .PHONY: dead-ifndef-gate
 dead-ifndef-gate:
 	@bash build/dead_ifndef_gate.sh
+
+# A `float` function reading an int32_t*/int64_t* accumulator (the
+# dequant-epilogue family's own shape) that never calls LZ_FCX/LZ_FC is
+# invisible to the f32 census - epi_q41's own history. Needs no build,
+# runs in milliseconds, so it sits with the other static gates.
+.PHONY: f32count-billing-gate
+f32count-billing-gate:
+	@bash build/f32count_billing_gate.sh
 
 .PHONY: dedupe-gate
 dedupe-gate:
