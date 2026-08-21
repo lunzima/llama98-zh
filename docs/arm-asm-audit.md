@@ -118,16 +118,32 @@ CE 出货几何（`E:/LLM/llama98-zh/docs/kunkun-ce-params.md` §1 定案 +
 `docs/kunkun-ce-bitnet-engine.md` Task 4 的 SubLN）：
 
 ```
-hidden 512  layers 8 = LLLALLLA（6 KDA + 2 全注意力）  inter 1536  vocab 6144
+hidden 512  layers 6 = LLALLA（4 KDA + 2 全注意力，interval 3）  inter 2048  vocab 6144
 KDA        16 头 × (kd=vd=32) → kdim=vdim=512，gate_rank=32，conv k=4，conv_dim=1536
 全注意力    8 q 头 / 2 kv 头 / head_dim 64 → qd=512, kvd=128, rotary_dim=64
-SubLN 开，hadamard_o=512，hadamard_down=512（1536 % 512 == 0）
+SubLN 开，hadamard_o=512，hadamard_down=512（2048 % 512 == 0 → 每层 4 块）
+first_k_dense_replace 6 = n_layers → 六层全是 dense SwiGLU，无 MoE
 ```
 
-> 盘上的 `E:/LLM/models/kunkun-ce` 是**先导/消融**检查点，不是这份配方：
-> 它是 6 层 / `intermediate_size` 2048 / `use_subn:false` / `kda_gate_lower_bound:null`。
-> 前两项只按比例改 §5 的数、不改名次；后两项改结构，各自在
-> §3 的 G1（`lz_fwht_i32` 的敏感性一段）与 C6（`lz_softplus`）里单独写了。
+> **深度换宽度在 FFN 上是守恒的，在别处不是**，这是 §5 里几处名次变动的
+> 唯一来源。`n_layers × intermediate_size = 6 × 2048 = 12,288` —— 凡是只按
+> 「层数 × inter」走的量（SwiGLU 的 `lz_silu` 次数、`hadamard_down` 的
+> FWHT 蝶形数、down_proj 侧的 norm 与量化元素数）**一个数都不变**；
+> 而按「层数」单独走的量（每层固定开销的 norm、量化、以及全部 KDA 递推）
+> 按 4/6 或 6/8 缩。两个方向不同，所以不能等比缩放。
+>
+> 盘上的 `E:/LLM/models/kunkun-ce` 在几何上与定案一致
+> （`num_hidden_layers:6`、`intermediate_size:2048`、
+> `layer_types:[L,L,A,L,L,A]`、`first_k_dense_replace:6`），但仍有两处不同：
+> `use_subn:false`（定案是 True）与 `kda_gate_lower_bound:null`（定案未给这个字段）。
+> 这两处各自在 §3 的 G1（`lz_fwht_i32` 的敏感性一段）与 C6（`lz_softplus`）里
+> 单独写了，并在 §5 末尾的敏感性清单里给了数。
+>
+> `.prof/budget/ce_sizing.py` 的数**不能直接引用**：它少算 28,672
+> （正好是 SubLN 每投影 norm，mlp `6×3072` + KDA `4×2560`），
+> 且它第三个位置参数是**注意力 `head_dim`(64)** 而不是 KDA 头宽(32)，
+> 传错不报错。本文档的所有计数都不经它，直接从几何与 `forward.c`
+> 的循环结构数出来。
 
 ---
 
@@ -514,14 +530,27 @@ subnormal 消掉了，`ops.h` 该宏上方注释是权威文本）。于是内�
 #### C6 `lz_softplus`（`ops.c`）
 
 1. **操作序列**：`x > 20.0f` 早退；否则 `(float)log1p(exp((double)x))`
-   —— ARM 上是 `__aeabi_f2d` + libm `exp`（double）+ libm `log1p`（double）
-   + `__aeabi_d2f`。`__aeabi_dmul` 155 条、`__adddf3` 171 条，而 libm 的
-   `exp`/`log1p` 本身各是几百条 double 运算。
+   —— ARM 上是 `__aeabi_f2d` + glibc `exp`（double）+ glibc `log1p`（double）
+   + `__aeabi_d2f`。这两个 libm 本体的静态量，从目标 sysroot 的
+   `libm.a` 里数出来（`ar x /usr/arm-linux-gnueabi/lib/libm.a e_exp.o s_log1p.o`）：
+
+   | 本体 | 本体指令 | 对 `__aeabi_d*` 的调用 |
+   |---|---|---|
+   | `__exp` | 327 | 37（16 `dmul` / 17 `dadd` / 4 `dsub`）+ 2 `dcmp` |
+   | `__log1p` | 459 | 57（27 `dmul` / 16 `dadd` / 14 `dsub`）+ 4 `ddiv` + 3 `i2d` |
+
+   被调的那些各自是 `__aeabi_dmul` 155 条、`__adddf3` 171 条、
+   `__aeabi_ddiv` 129 条。这是**整体静态数，取用路径是它的子集**；
+   即便只有四分之一的调用落在取用路径上，一次 `lz_softplus` 也是
+   **10³ 量级指令**，比 `sigmoid_q15` 的 250 高一个数量级。
+   要把它钉死需要执行指令计数（QEMU 的 TCG 插件），本文档不给这个数。
+
    **它在 CE 上跑不跑取决于一个 config 字段**：`kda_has_gate_lower_bound`
-   为假时，KDA 衰减门每个通道调用一次（CE 定案几何下是每层每 token 512 次）；
+   为假时，KDA 衰减门每个通道调用一次 —— 定案几何下是
+   `nv·kd × 4 个 KDA 层 = 512 × 4 = 2,048 次/token`；
    为真时改走 `lz_sigmoid`，一次都不调用。盘上的 `kunkun-ce` 检查点是
    `"kda_gate_lower_bound": null`，即**走 softplus**；
-   `docs/kunkun-ce-params.md` §1 没有为这个字段定案。
+   `docs/kunkun-ce-params.md` §1 的定案表里仍然没有这个字段。
 2. **可用指令核对**：把 double libm 换成手写 ARM 汇编不是「填一个 ISA 格」，
    是重写 libm——那超出本条铁律的范围。ARMv5TE 在这个序列上能作用的只有
    `x > 20.0f` 那一次比较（M2）与 f2d/d2f 两次转换（`CLZ` + 移位）。
@@ -568,8 +597,8 @@ subnormal 消掉了，`ops.h` 该宏上方注释是权威文本）。于是内�
    ldr / add / str                       (aw 累加)   cmp / bne
    ```
 
-   即 **4 条指令换 1 次 MAC**。CE 上每 token 393,216 次 MAC（16 头 ×
-   16 kk 对 × 32 车道 × 4 MAC × 2 个状态平面 × 6 层）。
+   即 **4 条指令换 1 次 MAC**。CE 上每 token 262,144 次 MAC（16 头 ×
+   16 kk 对 × 32 车道 × 4 MAC × 2 个状态平面 × 4 个 KDA 层）。
 3. **可用指令核对**：
    - **重复载入**：`rowA[j]`/`rowB[j]` 被各载入两次（一次给 au、一次给 aw），
      这是寄存器分配失手，汇编格直接消掉——**减 4 条中的 2 条**。
@@ -599,7 +628,7 @@ subnormal 消掉了，`ops.h` 该宏上方注释是权威文本）。于是内�
    `u[vi] = (lz_i32f(au) + lz_i32f(aul) * (1/256)) * su[gg]`，w 同理。
    即每 vv **4 次 `lz_i32f`**（每次 4 库调用，见 A6）+ 2 次
    `* (1/256)` + 2 次 `* su[gg]` + 2 次 fadd。CE 上每 token
-   12,288 次 `lz_i32f`。
+   8,192 次 `lz_i32f`（32 vv × 4 × 16 头 × 4 个 KDA 层）。
 2. **可用指令核对**：`1.0f / LZ_GDN_LO_SCALE` = 2^-8，**2 的幂** → M1。
    `su[gg]`/`sw[gg]` 在 32 个车道上循环不变 → M5（解包一次）。
    四次 `lz_i32f` → A6（每次 105 条 → 12 条）。
@@ -615,7 +644,7 @@ subnormal 消掉了，`ops.h` 该宏上方注释是权威文本）。于是内�
    → `A[j] = m1*H + m2*dq[j]` → 追踪 `amax`（两次比较+取反）。
    第二趟：带舍入右移 `(A[j] + (1<<(sh-1))) >> sh` → `h = (hn+128)>>8` →
    钳位 ±127 → `l = hn - (h<<8)` → 钳位 ±127 → 两次 `strb`。
-   CE 上每 token 98,304 个车道更新（16 头 × 32 行 × 32 车道 × 6 层），
+   CE 上每 token 65,536 个车道更新（16 头 × 32 行 × 32 车道 × 4 个 KDA 层），
    每个约 12 条整数指令。
 2. **可用指令核对**：
    - `ph[j]`/`pl[j]` 是 int8 → **`LDM` 一条取 4 车道**（M3），gcc 发 `ldrsb`。
@@ -640,7 +669,7 @@ subnormal 消掉了，`ops.h` 该宏上方注释是权威文本）。于是内�
 
 #### D5 `p2_group_coef` / `p2_group_norm` / `p2_group_scale`（`ops_gdn.c`）
 
-1. **操作序列**（每（行，组）一次，CE 上每 token 3,072 次）：
+1. **操作序列**（每（行，组）一次，CE 上每 token 2,048 次 = 32 行 × 16 头 × 4 层）：
    `coef` 3 次 fmul；`norm` 两次浮点取绝对值 + 两次比较 + `expof` +
    两次 `pow2f` + 3 次 fmul + 2 次 `q8_round` + 4 次钳位；
    `scale` 一次比较 + `pow2f` + 2 次 fmul。
@@ -656,7 +685,7 @@ subnormal 消掉了，`ops.h` 该宏上方注释是权威文本）。于是内�
 1. **操作序列**：每 vv `u[vv] = (v[vv] - gt*u[vv]) * beta`；
    `out[vv] = gt*w[vv] + u[vv]*kq`。4 次 fmul + 2 次 fadd/fsub，
    `gt`/`beta`/`kq` 三个乘数全部循环不变。CE 上每 token
-   16 头 × 32 vv × 6 层 = 3,072 个 vv。
+   16 头 × 32 vv × 4 个 KDA 层 = 2,048 个 vv。
 2. **可用指令核对**：三个循环不变乘数 → M5（各解包一次；`gt` 在 KDA
    家族恒为 `1.0f`，`gt*u` 与 `gt*w` 因此是恒等——**但删掉它会改哪一位
    都不改**，因为乘 1.0f 精确，这是 `lz_kda_step` 注释自己写的论据，
@@ -679,7 +708,7 @@ subnormal 消掉了，`ops.h` 该宏上方注释是权威文本）。于是内�
 
 1. **操作序列**（gcc 的 `.L649`，5 条/抽头）：
    `ldrh ip,[r1,#2]!` / `ldrh r2,[r0,#2]!` / `cmp` / `smlabb r7,ip,r2,r7` / `bne`。
-   CE 上每 token 6,144 个抽头（1536 通道 × k=4 × 6 层）。
+   CE 上每 token 24,576 个抽头（1536 通道 × k=4 × 4 个 KDA 层）。
 2. **可用指令核对**：
    - **打包载入（M3）**：`mw`（int16 抽头）与 `sh_in`（int16 历史）都是
      连续 int16，一条 `ldr` 取两个；`LDRD`/`LDM` 取四个。
@@ -700,7 +729,8 @@ subnormal 消掉了，`ops.h` 该宏上方注释是权威文本）。于是内�
    `bl __aeabi_fadd`（`+sig_k2`）→ `bl sigmoid_q15_t` → `bl __aeabi_fmul`
    （`*sig_oscale2[c]`）→ `bl __aeabi_i2f`（`(float)s15`）→
    `bl __aeabi_fmul`。**每通道 10 次库调用**；再加入口的
-   `x[c]*in_scale` + 比较 + `f2iz`。CE 上每 token 9,216 个通道。
+   `x[c]*in_scale` + 比较 + `f2iz`。CE 上每 token 6,144 个通道
+   （1536 × 4 个 KDA 层）。
 2. **可用指令核对**：`lz_i32f` → A6（105 条 → 12 条）。
    `in_scale = pow2f(es)` 是 **2 的幂** → M1。
    `(float)s15`（`s15 ∈ [0, 32768]`）→ A6，量程小到可以只用移位。
@@ -799,9 +829,13 @@ subnormal 消掉了，`ops.h` 该宏上方注释是权威文本）。于是内�
    str ip,[r1]       str r3,[r2],#4   cmp r2,lr   bne .L4
    ```
 
-   外加入口一次 `bl memcpy`。CE 上每 token **138,240 次蝶形**
-   （KDA o_proj：6 层 × 512·log2(512) = 27,648；dense down_proj：
-   8 层 × 3 块 × 512·9 = 110,592）。
+   外加入口一次 `bl memcpy`。CE 上每 token **129,024 次蝶形**
+   （KDA o_proj：4 层 × 512·log2(512) = 18,432；dense down_proj：
+   6 层 × 4 块 × 512·9 = 110,592）。
+   **down_proj 那 110,592 与 8 层 / inter 1536 的几何完全相同**——
+   蝶形数是 `n_layers × inter × log2(blk)`，而 `n_layers × inter` 守恒
+   （`6×2048 == 8×1536 == 12,288`）。这是本表里收缩最少的一行，
+   也是它在 §5 里往上挪的原因。
 2. **可用指令核对**：
    - **`LDM`/`STM`（M3）**：`tmp[i+j .. i+j+3]` 连续，`tmp[i+j+len .. +3]`
      也连续，缓冲区是 `int32_t*`（`forward.c` 的 `fwht_scratch`，来自
@@ -861,7 +895,7 @@ subnormal 消掉了，`ops.h` 该宏上方注释是权威文本）。于是内�
 
 | 算子 | 为什么跑不到 | 确认方式 |
 |---|---|---|
-| `lz_gdn_step` | CE 是 6 KDA + 2 全注意力，0 个 `LZ_LT_LINEAR` 层 | `kunkun-ce-params.md` §1 的 `LLLALLLA`；`forward_chunk` 按 `L->type` 派发，`LZ_LT_KDA` 走 `forward_kda` |
+| `lz_gdn_step` | CE 是 4 KDA + 2 全注意力，0 个 `LZ_LT_LINEAR` 层 | `kunkun-ce-params.md` §1 的 `LLALLA`；`forward_chunk` 按 `L->type` 派发，`LZ_LT_KDA` 走 `forward_kda` |
 | `lz_moe_route` / `lz_moe_hits_add` | `num_experts=0` + `first_k_dense_replace = n_layers` → 每层 `ffn_moe=0` | `kunkun-ce-params.md` §1；`forward_chunk` 的 `if (L->ffn_moe)` |
 | `lz_fwht`（浮点） | `--kv-rot` 默认 off → `s->kv_rot_k = s->kv_rot_v = 0` | `forward.c:891`；`cli_main.c:224` `default OFF` |
 | `lz_kv4_quantize` | 只有 `--kv q4` 分配 `k4`/`v4` 平面 | `forward.c:1351/1360` 的 `if (v4)` / `if (k4)` |
@@ -947,7 +981,7 @@ C 那一格与硬件之间隔着一整个软浮点库」。
 每 token 计数的推导（`T` = 上下文长度，nt=1 解码）：
 
 ```
-KDA 层 ×6，每层：
+KDA 层 ×4，每层：
   SubLN 输入 norm      4 × lz_rmsnorm(512)              → 2048 元素
   激活量化             5 × lz_quantize_q8_tok(512)      → 2560 元素
   conv                 3 × step_fixed(n_ch=512, k=4)    → 1536 通道 / 6144 抽头
@@ -971,82 +1005,149 @@ KDA 层 ×6，每层：
   wsum                 8 头 × 2 组 × 32 × T = 512·T MAC，16·T 次 q8_round
   输出门 + o_proj 量化 512 sigmoid + 512 元素量化
 
-dense FFN ×8，每层：
+dense FFN ×6（每层都有，first_k_dense_replace = n_layers）：
   gate/up norm+量化    2×rmsnorm(512) + 2×q8_tok(512)   → 各 1024 元素
-  SwiGLU               1536 × lz_silu                   → 1536 sigmoid
-  down_norm            lz_rmsnorm(1536)
-  subn_fwht_quant      3 块 × 512·9 = 13,824 蝶形 + 3072 次 q8_round
+  SwiGLU               2048 × lz_silu                   → 2048 sigmoid
+  down_norm            lz_rmsnorm(2048)
+  subn_fwht_quant      4 块 × 512·9 = 18,432 蝶形 + 4096 次 q8_round
 
 末端：lz_rmsnorm(512) + lz_quantize_q8(512)
 ```
 
-汇总（常数项 + `T` 项）：
+`q8_round` 的总计要单独列，因为它散在十处：
 
-| 排名 | 算子 / 叶子 | 每 token 次数 | 每次指令数（`.s`） | 每 token 指令数 |
+```
+q8_tok(KDA)  4×5×512 = 10,240      norm_ss_fixed          36,608
+q8_tok(FFN)  6×2×512 =  6,144      gated_out_fixed         6,208
+quantize_q8（注意力 3,584 + 末端 512 + f_b 128） = 4,224
+subn_fwht_quant  4×1024 + 6×4096 = 28,672
+gdn_build_table  4×16×64 = 4,096   pass 2  4×16×96 = 6,144
+lz_exp_fixed 2,112 + 16·T          wsum 系数量化 32·T
+                                   ------------------------------
+                                   合计 104,448 + 48·T
+```
+
+汇总。两列 `T`，因为**名次本身随上下文变**：`T=0` 是纯常数项，
+`T=1536` 是 CE 的实训上下文（`max_position 8192`，实训 1536 + 5120）。
+
+| 算子 / 叶子 | 每 token 次数 | 每次指令（`.s`） | 常数项 | @`T`=1536 |
 |---|---|---|---|---|
-| 1 | `sigmoid_q15` / `_t`（C1） | 28,768 | 250 / 180 | ≈ 6.5 M |
-| 2 | `q8_round`（A1，被下面几乎所有条目内含） | 133,248 + 48·T | 48 | ≈ 6.4 M + 2.3k·T |
-| 3 | `lz_rmsnorm` 的浮点输出环（B2） | 37,632 元素 | ~100 | ≈ 3.8 M |
-| 4 | `lz_causal_conv1d_step_fixed` 尾声（E2） | 9,216 通道 | ~350 | ≈ 3.2 M |
-| 5 | `norm_ss_fixed` 的元素环（B1，`q8_round` 已计入第 2 行，此处只算其余） | 46,848 元素 | ~40 | ≈ 1.9 M |
-| 5b | `lz_rmsnorm_gated_out_fixed` 的元素环（B3，`q8_round`/`sigmoid_q15` 已分别计入第 2、1 行） | 3,072 元素 | ~180 | ≈ 0.55 M |
-| 5c | `lz_l2norm` 的输出环（B4） | 6,144 元素 | ~32 | ≈ 0.2 M |
-| 6 | `gdn_sum_gg` pass 1（D2） | 98,304 车道对 | 16 | ≈ 1.6 M |
-| 7 | `gdn_p2_group_fixed`（D4） | 98,304 车道 | ~12 | ≈ 1.2 M |
-| 8 | `lz_fwht_i32`（G1） | 138,240 蝶形 | 8 | ≈ 1.1 M |
-| 9 | 量化元素环的 `__aeabi_fmul`（A7/A8，`q8_round` 已计入第 2 行） | 27,648 元素 | 32 | ≈ 0.9 M |
-| 10 | `lz_i32f`（A6，散落在 4/6/F1/F2 里） | 36,864 + 32·T | 105 | ≈ 3.9 M + 3.4k·T ※ |
-| 11 | **注意力打分 + wsum 的 MAC（F1/F2）** | 1024·T | 4.5 | **4.6k·T** |
-| 12 | `lz_exp_fixed`（C2） | 3,168 + 16·T | ~200 | ≈ 0.6 M + 3.2k·T |
-| 13 | `lz_softmax` 的浮点部分（B6） | 16·T 元素 | ~100 | 1.6k·T |
-| 14 | conv 抽头环（E1） | 6,144 抽头 | 5 | ≈ 0.03 M |
-| 15 | `lz_rope`（G3） | 640 次旋转 | ~200 | ≈ 0.13 M |
-| 16 | `lz_rsqrt_fixed`（C4） | 363 | ~250 | ≈ 0.09 M |
-| 17 | `q8_amax`（A2） | ≈100k 元素（norm 46,848 + 量化 27,648 + gated 9,312 + fwht 15,360） | 4 | ≈ 0.4 M |
-| — | conv 装载期三函数（E4） | 每模型 1 次 | — | 0 |
+| `q8_round`（A1）※ | 104,448 + 48·T | 48 | 5.01 M | **8.55 M** |
+| `lz_i32f`（A6）※ | 28,672 + 32·T | 105 | 3.01 M | **8.17 M** |
+| **注意力打分+wsum 的 MAC（F1/F2）** | 1024·T | 4.5 | 0 | **7.08 M** |
+| `sigmoid_q15` / `_t`（C1） | 23,616（其中 6,144 是 `_t`） | 250 / 180 | **5.47 M** | 5.47 M |
+| `lz_exp_fixed`（C2） | 2,112 + 16·T | ~200 | 0.42 M | 5.34 M |
+| `lz_rmsnorm` 的浮点输出环（B2） | 30,464 元素 | ~100 | 3.05 M | 3.05 M |
+| `lz_softmax` 的浮点部分（B6） | 16·T 元素 | ~100 | 0 | 2.46 M |
+| `lz_causal_conv1d_step_fixed` 尾声（E2） | 6,144 通道 | ~350 | 2.15 M | 2.15 M |
+| `norm_ss_fixed` 元素环（B1，除 `q8_round` 外） | 36,608 元素 | ~40 | 1.46 M | 1.46 M |
+| `gdn_sum_gg` pass 1（D2） | 65,536 车道对 | 16 | 1.05 M | 1.05 M |
+| **`lz_fwht_i32`（G1）** | 129,024 蝶形 | 8 | **1.03 M** | 1.03 M |
+| `gdn_p2_group_fixed`（D4） | 65,536 车道 | ~12 | 0.79 M | 0.79 M |
+| 量化元素环的 `__aeabi_fmul`（A7/A8） | 20,608 元素 | 32 | 0.66 M | 0.66 M |
+| `lz_rmsnorm_gated_out_fixed` 元素环（B3） | 2,048 元素 | ~180 | 0.37 M | 0.37 M |
+| `q8_amax`（A2） | 77,760 元素（norm 36,608 + 量化 20,608 + gated 6,208 + fwht 14,336） | 4 | 0.31 M | 0.31 M |
+| `lz_rope`（G3） | 640 次旋转 | ~200 | 0.13 M | 0.13 M |
+| `lz_l2norm` 输出环（B4） | 4,096 元素 | ~32 | 0.13 M | 0.13 M |
+| conv 抽头环（E1） | 24,576 抽头 | 5 | 0.12 M | 0.12 M |
+| `lz_rsqrt_fixed`（C4） | 251 | ~250 | 0.06 M | 0.06 M |
+| conv 装载期三函数（E4） | 每模型 1 次 | — | 0 | 0 |
 
-※ 第 10 行与第 4、6、11 行有重叠（`lz_i32f` 的调用点就在那几个算子里）。
-它单列，是因为**一份汇编实现同时服务所有调用点**，所以它在队列里是
-一个条目而不是四个。同理，第 2 行的 `q8_round` 被第 3、5、7、8 行内含。
+※ 这两行与它们下面的算子行**重叠**：`q8_round` 被 `norm_ss_fixed` /
+`gdn_p2` / `subn_fwht_quant` / 量化环内含，`lz_i32f` 被 conv 尾声 /
+pass-1 尾声 / `subn_fwht_quant` / 注意力内含。它们单列是因为
+**一份汇编实现同时服务所有调用点**，在队列里算一个条目而不是四个。
+表里的数不能相加。
 
-**排队结果（去掉重叠、按「写一份能收多少指令」排）：**
+**排队结果**（按「写一份能收多少指令」，取 `T`=1536 那一列）：
 
-1. **`q8_round` + `lz_i32f` + `pow2f` 乘法这三个叶子**（A1 + A6 + M1 的
-   通用实现）。它们不是算子而是被到处内含的原语，一份实现同时压掉
-   表里第 2、3、4、5、10、12 行的很大一块。先写它们，后面每个算子的
-   收益都要按修正后的基线重算。
-2. **`sigmoid_q15` / `sigmoid_q15_t`**（C1）。单点最大，且两个乘数是
-   2 的幂、两次比较可整数化，收得最干净。
-3. **`gdn_sum_gg`**（D2）与 **`gdn_p2_group_fixed`**（D4）。两个递推内核，
-   合计 2.8 M，且是纯整数、逐位一致最容易证。
-4. **`lz_fwht_i32`**（G1）。1.1 M，`LDM`/`STM` 是教科书用法，
-   而且它已经有一份可对拍的 C 参考。
-5. **注意力 `lz_attn_score_q8` / `lz_attn_wsum_q8`**（F1/F2）。
-   常数项小但**随上下文线性增长**：`T = 512` 时 2.4 M，
-   `T = 2048` 时 9.4 M——在部署上下文上它排到第一。
-   排在这里而不是更前，是因为它的内积体与 matmul 行内核同形，
-   应该等 matmul 那一格的实现出来后共享（§6）。
-6. **`lz_rmsnorm` 的浮点输出环**（B2）与 **`lz_l2norm`**（B4）。
-7. **`lz_causal_conv1d_step_fixed` 的抽头环**（E1）与尾声（E2 的
-   剩余部分——它的大头已经被第 1 项的 `lz_i32f` 收掉）。
-8. **`lz_rope`**（G3）、**`lz_softmax` 的比较扫描**（B6）、
-   **`q8_amax`**（A2）、**`gdn_build_table`**（D1）、
-   **`p2_group_*`**（D5）、**`gdn_step_impl` 尾声**（D6）。
-9. **`lz_exp_fixed`**（C2）、**`lz_rsqrt_fixed` 的尾巴**（C4）、
-   两个 float body（C3/C5）。
+1. **`q8_round` + `lz_i32f` + 「乘 2 的幂」这三个原语**（A1 + A6 + §2 M1）。
+   前两项在表里单列，合计 16.7 M @`T`=1536；第三项散在几乎每一行里，
+   没有单独的行可数。一份实现同时压掉下面每一行的一部分，所以
+   先写它们，后面每个算子的收益都要按修正后的基线重算。
+2. **注意力 `lz_attn_score_q8` / `lz_attn_wsum_q8`**（F1/F2）。7.08 M
+   @`T`=1536，而且**常数项是 0——全部收益都长在上下文上**，
+   所以它是唯一一条「上下文越长排得越前」的算子行。交叉点：它超过最大的常数项行
+   （`sigmoid_q15` 的 5.47 M）在 `T ≈ 1190`，而 CE 实训上下文是 1536、
+   `max_position` 是 8192 —— **在任何真实部署长度上它都是第一**。
+   唯一的排序保留是它的内积体与 matmul 行内核同形，应等 matmul
+   那一格出来后共享（§6），否则会写出两份一样的东西。
+3. **`sigmoid_q15` / `sigmoid_q15_t`**（C1）。5.47 M，两个乘数是 2 的幂、
+   两次比较可整数化，是常数项里收得最干净的一条。
+4. **`lz_exp_fixed`**（C2）。5.34 M @`T`=1536，其中 92% 来自 softmax
+   的 16·T 项——它跟着注意力一起长，所以应当与第 2 项同批写。
+5. **`lz_rmsnorm` 的浮点输出环**（B2，3.05 M）与
+   **`lz_softmax` 的比较扫描**（B6，2.46 M @`T`=1536）。
+6. **`lz_causal_conv1d_step_fixed` 尾声**（E2，2.15 M 中扣掉已被第 1 项
+   收走的 `lz_i32f`）与 **`norm_ss_fixed` 元素环**（B1，1.46 M）。
+7. **`gdn_sum_gg`**（D2，1.05 M）、**`lz_fwht_i32`**（G1，1.03 M）、
+   **`gdn_p2_group_fixed`**（D4，0.79 M）。三者现在是同一档，
+   见下面「与旧排序的差」第 1 条。
+8. 量化元素环的 fmul（A7/A8）、`gated_out_fixed`（B3）、`q8_amax`（A2）、
+   `lz_rope`（G3）、`lz_l2norm`（B4）、conv 抽头环（E1）、
+   `gdn_build_table`（D1）、`p2_group_*`（D5）、`gdn_step_impl` 尾声（D6）。
+9. `lz_rsqrt_fixed` 的尾巴（C4）、两个 float body（C3/C5）。
 10. CE 路径外的那批（§3.H）与装载期三函数（E4）。
+
+**与 8 层 / inter 1536 那份几何相比，哪几行换位、为什么**：
+
+| 行 | 旧（8L/1536） | 新（6L/2048） | 比 | 机制 |
+|---|---|---|---|---|
+| 注意力 MAC | 4.6k·T | 4.6k·T | **1.00** | 全注意力层两种几何都是 2 个 |
+| `lz_rope` | 0.13 M | 0.13 M | 1.00 | 同上 |
+| `lz_fwht_i32` | 1.11 M | 1.03 M | **0.93** | FFN 那 110,592 蝶形**完全不变**（`n_layers × inter` 守恒），只有 KDA 半边按 4/6 缩 |
+| `sigmoid_q15` | 6.55 M | 5.47 M | 0.82 | SwiGLU 的 12,288 次**完全不变**（同守恒），缩的只有 KDA 侧的 conv / 衰减门 / o_norm |
+| `lz_rmsnorm` 输出环 | 3.76 M | 3.05 M | 0.81 | FFN 侧 18,432 不变，KDA 侧 ×4/6 |
+| `q8_round` | 6.40 M | 5.01 M | 0.78 | 同上，两半混合 |
+| `lz_i32f` | 3.87 M | 3.01 M | 0.78 | 同上 |
+| `norm_ss_fixed` | 1.87 M | 1.46 M | 0.78 | 同上 |
+| conv 尾声 / 抽头 | 3.23 M | 2.15 M | **0.67** | 纯 KDA，4/6 |
+| `gdn_sum_gg` | 1.57 M | 1.05 M | **0.67** | 纯 KDA |
+| `gdn_p2_group_fixed` | 1.18 M | 0.79 M | **0.67** | 纯 KDA |
+
+三处真换位：
+
+1. **`lz_fwht_i32` 越过 `gdn_p2_group_fixed`，并追平 `gdn_sum_gg`。**
+   旧几何下递推那对是 1.57 / 1.18，FWHT 是 1.11，差距 42%；
+   新几何下是 1.05 / 0.79 对 1.03 —— **`gdn_sum_gg` 与 `lz_fwht_i32`
+   差 2%**。原因是 FWHT 的大头（`hadamard_down`）挂在守恒的
+   `n_layers × inter` 上，而递推纯按 KDA 层数缩。**「先写递推、
+   FWHT 排后面」这个旧结论不再成立**，三者是同一批。
+2. **注意力的交叉点前移**：它超过最大常数项行的 `T` 从 ≈1424 降到 ≈1190
+   （最大常数项行从 6.55 M 变 5.47 M，而注意力那一行分毫未动）。
+   旧排序把 F1/F2 放在第 5 位并注了「部署上下文上它排第一」；
+   新几何下这句更强，所以它直接排到第 2。
+3. **`lz_exp_fixed` 从第 12 升到第 4**。它的常数项微不足道（0.42 M），
+   但 `16·T` 项在 `T`=1536 上是 4.92 M。旧表把它按常数项排在末段，
+   那是旧表**只按常数项排序**造成的失真，不是几何变化造成的——
+   这一条是排序方法的修正，不是配方的后果。
 
 **这个排序对哪些假设敏感，各自的方向：**
 
-- `use_subn`：为 0 时第 4 项（`lz_fwht_i32`）掉到 0，且 KDA/FFN 的
-  SubLN norm 少掉 6 个 → 第 1、3、6 项的常数项按比例缩。
-- `kda_gate_lower_bound`：为 null 时每 token 多 3,072 次 `lz_softplus`
-  （double libm），会挤进前三——但正确动作是把配方定下来，不是写内核。
-- `T`：第 5 项随 `T` 线性增长，其余不随。表里所有 `T` 项都单列了，
-  换一个部署上下文重排只需要改一个数。
-- 层数 / `intermediate_size`：盘上先导检查点是 6 层 / 2048，定案是
-  8 层 / 1536。这只按比例改常数项，**不改名次**（逐项算过：
-  FFN 相关行 ×(8·1536)/(6·2048) = 1.0，KDA 相关行 ×6/4 = 1.5）。
+- **`T`（上下文）**：三行随 `T` 长（注意力 MAC 4.6k·T、`lz_i32f` 的
+  3.4k·T、`q8_round` 的 2.3k·T、`lz_exp_fixed` 的 3.2k·T、
+  `lz_softmax` 的 1.6k·T），其余不随。表给了 `T`=0 与 `T`=1536 两列，
+  换别的部署长度只需重算这五个系数。
+- **`use_subn`**：定案是 `True`，但盘上的 `kunkun-ce` 检查点是 `false`。
+  为 0 时 `subn_fwht_quant` 不被调用 → `lz_fwht_i32` 掉到 **0**
+  （整条从队列消失），KDA 的 4 个投影 norm 与 FFN 的 3 个投影 norm 换成
+  每层 2 个 pre-LN → `lz_rmsnorm` 输出环从 30,464 元素降到约 8,700，
+  `q8_round` 降约 3 万。**这是本表里最大的单一不确定性**，
+  比几何本身的影响大。
+- **`kda_gate_lower_bound`**（定案表里仍无此字段）：为 null 时衰减门的
+  2,048 次 `sigmoid_q15` 换成 2,048 次 `lz_softplus`。于是
+  `sigmoid_q15` 从 5.47 M 降到 4.96 M，同时多出一行 `lz_softplus`：
+
+  | 每次 `lz_softplus` 取值 | 每 token | `T`=0 名次 | `T`=1536 名次 |
+  |---|---|---|---|
+  | 2,000 条（保守下界） | 4.10 M | 第 3 | 第 6 |
+  | 5,000 条（接近静态上界） | 10.2 M | **第 1** | **第 1** |
+
+  即：**`T`=0 时它在整个合理区间内都还在前三；`T`=1536 时保守端已经
+  掉到第 6。** 旧几何下同一区间是「第 1–第 2」，始终在前三。
+  区间横跨了前三的边界，说明这个数已经不能再靠上下界搪塞——
+  要么用 QEMU 的执行指令计数把它钉死，要么把 `kda_gate_lower_bound`
+  定下来让这一行整个消失。**后者是正确动作**：它是配方问题，不是内核问题。
 
 ---
 
