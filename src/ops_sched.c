@@ -122,33 +122,32 @@ int q8r_have_simd(void) {
 #endif /* LZ_HAVE_Q8R_SIMD || LZ_HAVE_Q8R_SSE */
 }
 
-/* lz_soft_float_target: "is this machine's float slow relative to its
-   integer". One-bit CPUID proxy.
+/* lz_soft_float_target ("is this machine's float slow relative to its
+   integer" - a one-bit CPUID proxy) USED to be what all seven write
+   tiers' `auto` resolved from, six of them directly and lz_scalar_mode
+   deliberately not (commit 508e015 already made scalar fixed
+   unconditionally, ignoring this question, before this file did).
 
-   THE SINGLE PREDICATE SIX WRITE TIERS' AUTO RESOLVES FROM: lz_gdn_p2_mode,
-   lz_conv_mode, lz_attn_mode, lz_sig_mode, lz_norm_mode and lz_epi_mode
-   each call this function directly in their own `auto` branch below -
-   six call sites, one decision. Under auto they therefore cannot diverge;
-   they only do when a CLI flag pins one of them apart from the rest
-   (docs/fixed-tier-pipeline-breakpoints.md maps where those pinned
-   combinations are structurally needed - cross-compiler parity gates,
-   single-axis A/B measurement - and finds none of the pipeline's data
-   boundaries actually require a mismatched pair, so `--fixed auto|off|all`
-   (cli_main.c) is a safe, lossless way to move all six at once; the
-   per-tier flags stay reachable for the cases that are not deployment).
-
-   lz_scalar_mode is deliberately NOT wired to this predicate - its auto
-   resolves to fixed unconditionally (commit 508e015, a settled,
-   value-changing user decision to offload x87 even where SSE is
-   present), not to "does this machine have SSE". Folding it into the
-   six above would silently reverse that decision. */
-static int lz_soft_float_target(void) {
-#ifdef LZ_NO_FPU
-    return 1;
-#else
-    return q8r_have_simd() == 0;
-#endif /* LZ_NO_FPU */
-}
+   REMOVED (this commit): the user settled the question these tiers
+   existed to keep open. The shipping build is fixed-point
+   unconditionally, on every host, regardless of what this predicate
+   would have answered there - so nothing asks it anymore, and every one
+   of the seven tiers now has the same shape lz_scalar_mode already did.
+   Float is not gone; it is reachable exactly like every other explicit
+   tier value (--recur-write float et al.) and in one command for all
+   seven at once (--fixed off, cli_main.c) - the correctness oracle every
+   tolerance in CLAUDE.md and every cross-compiler gate is measured
+   against, not an auto outcome. See
+   docs/fixed-tier-pipeline-breakpoints.md for which of the resulting
+   float-to-fixed conversions are removable now that fixed is
+   unconditional (most - they existed only because a stage's neighbor
+   might have been float) and which are forced by data regardless (a
+   short list: the residual stream's cross-layer dynamic range, and
+   the SubLN Hadamard transform's float-only kernel). q8r_have_simd
+   (this predicate's own building block) still has its
+   LZ_HAVE_Q8R_SIMD/LZ_HAVE_Q8R_SSE-guarded caller below, untouched -
+   that is a different axis (the Q8 row-kernel tier), not a write tier,
+   and out of scope here. */
 
 #if defined(LZ_HAVE_Q8R_SIMD) || defined(LZ_HAVE_Q8R_SSE)
 int lz_q8r_tier(void) {
@@ -178,7 +177,7 @@ static int g_gdn_p2 = LZ_P2_AUTO;
 
 int lz_gdn_p2_mode(void) {
 #if LZ_GDN_FIXED
-    if (g_gdn_p2 == LZ_P2_AUTO) return lz_soft_float_target();
+    if (g_gdn_p2 == LZ_P2_AUTO) return LZ_P2_FIXED;
     return g_gdn_p2;
 #else
     return 0;
@@ -189,7 +188,14 @@ int lz_gdn_p2_is_auto(void) { return g_gdn_p2 == LZ_P2_AUTO; }
 
 const char *lz_gdn_p2_select(const char *name) {
     if (!name) return NULL;
-    if (strcmp(name, "fixed") == 0) g_gdn_p2 = LZ_P2_FIXED;
+    /* float used to have no explicit spelling here - auto asked
+       hardware and an SSE machine landed on float that way, so a caller
+       who wanted float explicitly had nothing to type. Auto no longer
+       asks hardware (see lz_soft_float_target's retirement note above),
+       so this value is what makes float reachable at all now - the
+       measurement/correctness-oracle path, not a deployment choice. */
+    if (strcmp(name, "float") == 0) g_gdn_p2 = LZ_P2_FLOAT;
+    else if (strcmp(name, "fixed") == 0) g_gdn_p2 = LZ_P2_FIXED;
     else if (strcmp(name, "auto") == 0) g_gdn_p2 = LZ_P2_AUTO;
     else return NULL;
     return lz_gdn_p2_mode() ? "fixed" : "float";
@@ -204,7 +210,7 @@ static int g_conv = LZ_CONV_AUTO;
 
 int lz_conv_mode(void) {
 #if LZ_CONV_FIXED
-    if (g_conv == LZ_CONV_AUTO) return lz_soft_float_target();
+    if (g_conv == LZ_CONV_AUTO) return LZ_CONV_FIXEDT;
     return g_conv;
 #else
     return 0;
@@ -234,8 +240,7 @@ const char *lz_conv_select(const char *name) {
 static int g_attn = -1;
 
 int lz_attn_mode(void) {
-    int m = (g_attn < 0) ? (lz_soft_float_target() ? 3 : 0)
-                         : ((g_attn == LZ_ATTN_TIER_INT) ? 3 : g_attn);
+    int m = (g_attn < 0) ? 3 : ((g_attn == LZ_ATTN_TIER_INT) ? 3 : g_attn);
     return m & LZ_ATTN_FIXED;
 }
 
@@ -266,7 +271,7 @@ const char *lz_attn_select(const char *name) {
 static int g_sig = -1;
 
 int lz_sig_mode(void) {
-    return (g_sig < 0) ? lz_soft_float_target() : g_sig;
+    return (g_sig < 0) ? 1 : g_sig;
 }
 
 int lz_sig_is_auto(void) { return g_sig < 0; }
@@ -282,6 +287,15 @@ const char *lz_sig_select(const char *name) {
 
 /* ---- scalar tier ----------------------------------------------------- */
 
+/* Used to be the one axis whose auto ignored hardware (commit 508e015)
+   while the other six asked lz_soft_float_target - an odd one out, and
+   worth a warning at the CLI (cli_main.c's own note that "pass no flags"
+   was not a float baseline). That asymmetry is gone: lz_soft_float_target
+   is retired and every one of the seven tiers now has exactly this
+   shape, `(g_X < 0) ? 1 : g_X`. Kept as its own section rather than
+   folded into a shared helper - it is one line, and a helper would only
+   hide that this was already the answer six other places needed to
+   copy, not the other way round. */
 static int g_scalar = -1;
 
 int lz_scalar_mode(void) {
@@ -315,7 +329,7 @@ static int g_norm = -1;
 int lz_norm_mode(void) {
     /* int implies fixed - every caller asking "is this tier fixed" must
        see yes, so the int value folds down here rather than at each site. */
-    return (g_norm < 0) ? lz_soft_float_target() : (g_norm != LZ_NORM_FLOAT);
+    return (g_norm < 0) ? 1 : (g_norm != LZ_NORM_FLOAT);
 }
 
 int lz_norm_is_auto(void) { return g_norm < 0; }
@@ -351,7 +365,7 @@ int lz_norm_can_fixed(int n) {
 static int g_epi = -1;
 
 int lz_epi_mode(void) {
-    return (g_epi < 0) ? lz_soft_float_target() : g_epi;
+    return (g_epi < 0) ? 1 : g_epi;
 }
 
 int lz_epi_is_auto(void) { return g_epi < 0; }
@@ -506,6 +520,19 @@ const char *lz_kernel_tier(void) {
 
 /* ---- tier report and pin string -------------------------------------- */
 
+/* CROSS-PLATFORM pins: the value each knob takes that BOTH an x86 and a
+   soft-float ARM build can actually select, so build/arm/parity_gate.sh
+   compares one code path instead of two. A fixed string, not a report of
+   what is running - it is deliberately NOT the auto resolution.
+
+   NOT USABLE AS A SINGLE-PLATFORM REGRESSION PIN. On ARM,
+   lz_soft_float_target() resolves several of these knobs to fixed under
+   auto; pinning from here forces them back to float and switches OFF the
+   very tiers a change may have touched. A regression run pinned from
+   this string compared two builds with both new fixed kernels disabled
+   and looked clean. Regress on `auto`, or pin the knob under test
+   explicitly; use this string only for the x86<->ARM comparison it
+   exists for. lz_tier_report() below is the one that reads live state. */
 const char *lz_tier_pins(void) {
     return "--kernel ref --recur-write fixed --conv-write float "
            "--attn-write float --epi-write float --sig-write float "

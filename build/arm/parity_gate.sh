@@ -27,8 +27,18 @@
 #   literally execute: it is always compiled on x86 (the pure C
 #   reference every other tier is checked against) and it is a real
 #   code path on ARM, not a name. The three ARM tiers owe each other
-#   bit-identity, which is checked by running this binary three times
-#   with --kernel ref / arm-c / arm-asm, not by this script.
+#   bit-identity UNDER THESE PINS, which is what the loop below checks
+#   by running this binary three times with --kernel ref / arm-c /
+#   arm-asm.
+#
+#   They do NOT owe it on an unpinned auto run, and that is not a
+#   defect: ref routes Q8_0 to matmul_scalar_ref, which has no fixed
+#   epilogue, while arm-c/arm-asm reach matmul_q8_impl where
+#   --epi-write's auto->fixed (a soft-float target) actually selects
+#   epi_fixed. Measured on _armgate2: ref differs from arm-c on auto
+#   and matches once --epi-write float is pinned. --epi-write is
+#   Q8_0-only on every platform, so a model without Q8_0 tensors shows
+#   no such split. See docs/arm-asm-audit.md section 1.
 #
 #   Asking for a tier the build lacks clamps, and cli_main.c's --kernel
 #   handler only prints "requested X, running Y" when the CLI arg and
