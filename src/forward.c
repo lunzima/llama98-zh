@@ -2270,21 +2270,31 @@ static void kda_conv_proj(LZRunState *s, int *use_int, float *of, short *oi,
 /* The same shape for the projections whose consumer is not the conv
    (int-pipeline milestone 5): one projection, one int16 exit at the
    consumer's own exponent, and the SAME all-or-nothing flag discipline
-   kda_conv_proj documents at length - a refusal clears the flag so the
-   consumer reads the float buffer that was just written, rather than a
-   stale int one. `*use_int` was decided by lz_matmul_xq_i16_ok before
-   any of these ran, so a refusal here cannot actually happen; it exists
-   so that a future divergence degrades instead of reading garbage. */
-static void kda_i16_proj(LZRunState *s, int *use_int, float *of, short *oi,
+   kda_conv_proj documents at length.
+
+   The capability comes IN as a value (`may_int`, from
+   lz_matmul_xq_i16_ok); `*wrote_int` goes OUT and means one thing only:
+   this call put its result in `oi`. Two separate objects on purpose. A
+   single in/out flag reads as the capability everywhere it is set and
+   as "the int buffer holds the output" everywhere it is consumed, so a
+   branch that writes `of` WITHOUT coming through here leaves a
+   capability behind for the consumer to read as a promise, and the
+   consumer takes a stale int buffer. Splitting them makes that
+   unrepresentable: `*wrote_int` starts at 0, nothing but this function
+   ever raises it, and adding such a branch is now a compile error at
+   the call rather than a silent wrong read at the consumer. */
+static void kda_i16_proj(LZRunState *s, int may_int, int *wrote_int,
+                         float *of, short *oi,
                          const float *x, const LZTensor *w,
                          int in_dim, int out_dim, int nt,
                          int target_e, int bound) {
-    if (*use_int) {
-        if (lz_matmul_xq_nt_i16(oi, s->xq, s->xqs, w, in_dim, out_dim, nt,
-                                target_e, bound))
-            return;
-        *use_int = 0;
+    if (may_int &&
+        lz_matmul_xq_nt_i16(oi, s->xq, s->xqs, w, in_dim, out_dim, nt,
+                            target_e, bound)) {
+        *wrote_int = 1;
+        return;
     }
+    *wrote_int = 0;
     lz_matmul_xq_nt(of, x, s->xq, s->xqs, w, in_dim, out_dim, nt);
 }
 
@@ -2353,13 +2363,17 @@ static void forward_kda(const LZModel *m, LZRunState *s,
        shape as "the fixed conv tier is the consumer, so its absence
        answers this on its own". --sig-write float therefore turns both
        off at runtime, which is what makes it a control. */
+    /* *_may is the capability, *_int is "the int buffer holds it" and is
+       raised only by kda_i16_proj - see its header for why they are two
+       objects. */
     int bvec_int = 0, lat_int = 0, gate_int = 0;
+    int bvec_may = 0, lat_may = 0;
 #if LZ_BVEC_I16
-    bvec_int = lz_sig_mode() && s->bvec_i16 &&
+    bvec_may = lz_sig_mode() && s->bvec_i16 &&
                lz_matmul_xq_i16_ok(&L->kda_b_proj, hdim, nt);
 #endif /* LZ_BVEC_I16 */
 #if LZ_KLAT_I16
-    lat_int = s->kda_lat_i16 && s->kda_lat_i32 && gate_rank > 0 &&
+    lat_may = s->kda_lat_i16 && s->kda_lat_i32 && gate_rank > 0 &&
               lz_matmul_xq_i16_ok(&L->kda_f_a_proj, hdim, nt);
 #endif /* LZ_KLAT_I16 */
 #if LZ_KGATE_I16
@@ -2490,11 +2504,11 @@ static void forward_kda(const LZModel *m, LZRunState *s,
         for (tk = 0; tk < nt; tk++)
             lz_quantize_q8_tok(s->xb + (size_t)tk * hdim, hdim,
                                s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
-        kda_i16_proj(s, &lat_int, s->kda_gate_lat, s->kda_lat_i16, s->xb,
-                     &L->kda_f_a_proj, hdim, gate_rank, nt,
+        kda_i16_proj(s, lat_may, &lat_int, s->kda_gate_lat, s->kda_lat_i16,
+                     s->xb, &L->kda_f_a_proj, hdim, gate_rank, nt,
                      LZ_KLAT_ES, 32767);
-        kda_i16_proj(s, &bvec_int, s->bvec, s->bvec_i16, s->xb,
-                     &L->kda_b_proj, hdim, nv, nt,
+        kda_i16_proj(s, bvec_may, &bvec_int, s->bvec, s->bvec_i16,
+                     s->xb, &L->kda_b_proj, hdim, nv, nt,
                      LZ_BVEC_ES, lz_sig_q15_domain(LZ_BVEC_ES));
     } else {
     /* Six hidden-space projections share one activation quantization,
@@ -2509,10 +2523,11 @@ static void forward_kda(const LZModel *m, LZRunState *s,
                   &L->kda_k_proj, hdim, kdim, nt);
     kda_conv_proj(s, &conv_int, s->kda_v, s->kda_v_i16, s->xb,
                   &L->kda_v_proj, hdim, vdim, nt);
-    kda_i16_proj(s, &lat_int, s->kda_gate_lat, s->kda_lat_i16, s->xb,
-                 &L->kda_f_a_proj, hdim, gate_rank, nt, LZ_KLAT_ES, 32767);
-    kda_i16_proj(s, &bvec_int, s->bvec, s->bvec_i16, s->xb,
-                 &L->kda_b_proj, hdim, nv, nt,
+    kda_i16_proj(s, lat_may, &lat_int, s->kda_gate_lat, s->kda_lat_i16,
+                 s->xb, &L->kda_f_a_proj, hdim, gate_rank, nt,
+                 LZ_KLAT_ES, 32767);
+    kda_i16_proj(s, bvec_may, &bvec_int, s->bvec, s->bvec_i16,
+                 s->xb, &L->kda_b_proj, hdim, nv, nt,
                  LZ_BVEC_ES, lz_sig_q15_domain(LZ_BVEC_ES));
     lz_matmul_xq_nt(s->zbuf, s->xb, s->xq, s->xqs, &L->kda_g_proj, hdim, vdim, nt);
     }
@@ -2964,9 +2979,9 @@ static void forward_moe(const LZModel *m, LZRunState *s,
        has no integer entry (lz_exp has no int-in form), so it would
        rebuild the float the epilogue declined to build - the same
        operation count, for a value that has moved. Refuse instead. */
-    int mrt_int = 0;
+    int mrt_int = 0, mrt_may = 0;
 #if LZ_MOEGATE_I16
-    mrt_int = lz_sig_mode() && s->moe_logits_i16 && c->moe_router_sigmoid &&
+    mrt_may = lz_sig_mode() && s->moe_logits_i16 && c->moe_router_sigmoid &&
               lz_matmul_xq_i16_ok(&L->moe_gate_w, hdim, nt);
 #endif /* LZ_MOEGATE_I16 */
     (void)layer;   /* only used inside LZ_TAP, which is a no-op in a normal build */
@@ -2982,7 +2997,8 @@ static void forward_moe(const LZModel *m, LZRunState *s,
         lz_quantize_q8(s->xb + (size_t)tk * hdim, hdim, gsh,
                        s->xq + (size_t)tk * hdim,
                        s->xqs + (size_t)tk * nsh);
-    kda_i16_proj(s, &mrt_int, s->moe_router_logits, s->moe_logits_i16,
+    kda_i16_proj(s, mrt_may, &mrt_int, s->moe_router_logits,
+                 s->moe_logits_i16,
                  s->xb, &L->moe_gate_w, hdim, ne, nt,
                  LZ_MOEGATE_ES, lz_sig_q15_domain(LZ_MOEGATE_ES));
     lz_matmul_xq_nt(s->moe_lat_x, s->xb, s->xq, s->xqs,
