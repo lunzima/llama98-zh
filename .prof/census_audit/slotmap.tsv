@@ -1,0 +1,28 @@
+# raw counter slot -> file, line (line numbers are 0283fa0's, i.e. the
+# _censusaudit checkout; the raw-counter tree's own numbering is shifted
+# by the counter declarations added to it).
+0	ops.c	937
+1	ops.c	1183
+2	ops.c	86
+3	ops_norm.c	377
+4	forward.c	2779
+5	forward.c	3488
+6	forward.c	3508
+7	forward.c	3107
+8	ops_gdn.c	336
+9	ops_gdn.c	341
+10	forward.c	1900
+11	forward.c	3049
+12	forward.c	2727
+13	ops_quant.c	553
+14	ops.c	1866
+15	ops_sse2.c	1719
+16	ops_quant.c	113
+19	forward.c	1680
+20	forward.c	1818
+21	ops.c	2251
+22	ops_norm.c	283
+23	ops_norm.c	335
+24	ops_norm.c	344
+25	ops_norm.c	374
+26	ops_norm.c	299

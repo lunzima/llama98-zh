@@ -1,0 +1,110 @@
+# f32 census audit: what the LZ_FCX sites miss, measured
+
+The census (`-DLZ_F32COUNT=1`) is a set of hand-written formulas at
+`LZ_FCX` call sites. This directory holds an instrument that counts the
+same quantity **without** formulas, so the two can be compared, and the
+result of running it on kmr20.
+
+## Method
+
+One run of one binary produces both numbers.
+
+1. `covbuild.sh` compiles every engine TU `-O0 -g --coverage` (the three
+   intrinsic TUs keep `-mmmx -msse -msse2`) and links `llama98_covall.exe`
+   with `-DLZ_F32COUNT=1` still on.
+2. `measure.sh` reads that run back:
+   - `objdump -dlr --inlines` gives, per source line, how many float
+     instructions the compiler emitted there. `-O0` means one source
+     operation is one instruction, which is the census's own unit.
+     `--inlines` charges an always_inline intrinsic body to the `.c` line
+     that called it, not to `xmmintrin.h`.
+   - `gcov -a` gives how many times each line ran.
+   - `dis2lines.awk` + `joinall.awk` multiply them, per
+     (TU, file, line, function, mnemonic), and also record every call
+     site so an unbilled leaf helper can be charged to its caller.
+3. `classify.awk` splits the result into the census's convention: `f32`
+   is mul/add/sub/div plus int<->float converts; `cmp` (compares, sign
+   masks) and `f64` (doubles, including the census counters' own
+   accumulation) are counted separately and excluded. A packed op counts
+   as 4 (`ps`) or 2 (`pd`) element operations.
+4. `rollup.awk` maps functions to census sites (`sitemap.tsv`,
+   `linemap.tsv` for the files that hold work belonging to several
+   sites) and charges leaf helpers to their call sites.
+5. `compare.sh` prints census vs measured per site.
+
+## Two things the instrument had to get right
+
+**gcov's printed line count is not an execution count.** It is the sum
+of the counts of every basic block starting on that line, so a line
+holding three inlined intrinsics prints 3x, and a `for (...) body;` line
+prints the loop-condition block's count. `joinall.awk` therefore reads
+the `-a` block detail and uses the common value when all blocks agree,
+flagging the line `UNEQUAL` when they do not.
+
+**The flagged lines are resolved by counting, not by reasoning.**
+`rawcounters.diff` patches a throwaway checkout with `lz_rawc[]`, one
+slot per flagged line plus seven controls on lines gcov reports
+unambiguously. `genrawfix.sh` turns that run's output into the override
+table. The controls all agreed with gcov exactly; the flagged lines did
+not, and neither the min nor the max block count was right in general
+(`for (e = 0; e < 32; e++)` has blocks C, 32C, 33C and the answer is the
+middle one).
+
+## Validation
+
+- The counting build is **bit-identical** to the shipping build: same
+  logits, same census, in both tier arms and both fixture corpora.
+- The raw-counter build is bit-identical too.
+- In the float arm (`--fixed off`), five sites reproduce the census's own
+  number exactly - conv1d 147,456 (delta 0), attention wsum 2,473,984
+  (delta 0), rsqrt 2,925 (delta 0), attention scoring (delta 4), softmax
+  (delta 16), exp (delta -174). Where the census formulas describe a
+  plain float loop, an independent measurement lands on the same digit;
+  the disagreement is concentrated in the int/fixed paths.
+- Leaf per-call costs come out as whole numbers that match the source:
+  `q8_round` 1.000, `lz_i32f` 4.000, `lz_q8round32_simd` 64.000,
+  `pow2f` 0.000 (it is a bit trick, and bills nothing correctly).
+
+## Result (kmr20, `build/norm_int_gate_tokens_zh.txt`, 603 tokens)
+
+Shipping default. Per token.
+
+| site | census | measured | ratio |
+|---|---|---|---|
+| recurrence write | 110,592 | 419,122 | 3.79x |
+| sigmoid | 158,144 | 265,980 | 1.68x |
+| conv1d | 129,024 | 259,781 | 2.01x |
+| dequant epilogue | 201,020 | 236,076 | 1.17x |
+| norms | 168,020 | 198,808 | 1.18x |
+| attention scoring | 101,472 | 159,460 | 1.57x |
+| quantize | 101,532 | 102,684 | 1.01x |
+| exp | 77,512 | 99,654 | 1.29x |
+| attention wsum | 64,874 | 71,942 | 1.11x |
+| (no site) | 0 | 50,611 | - |
+| softmax | 14,512 | 14,528 | 1.00x |
+| rsqrt | 1,112 | 794 | 0.71x |
+| **total** | **1,127,814** | **1,879,329** | **1.67x** |
+
+The English fixture gives the same ratios (1.66x total). The float arm
+(`--fixed off`) is 14,678,287 billed against 23,018,697 measured, 1.57x.
+
+Three mechanisms account for nearly all of the gap:
+
+- `lz_i32f` is billed as one convert and costs four operations
+  (`(float)(v>>12) * 4096.0f + (float)(v & 0xFFF)`). 65,077 calls/token,
+  so 195,231 ops/token are invisible, spread over conv1d, the
+  recurrence, and both attention sites.
+- `sigmoid_q15` (6.94 ops/call) and `sigmoid_q15_t` (4.99) are leaves
+  whose callers bill a smaller constant than they cost.
+- `forward.c`'s own element-wise loops have no site at all: the MoE
+  SwiGLU multiply and expert combine, the two residual adds, the
+  q-scale loop, the attention output gate, RoPE, `lz_t_row_f32`.
+
+## Not covered
+
+- libm calls the engine still makes on this path (`ldexp` in the fixed
+  conv build, `pow`/`sin`/`cos` in the RoPE table) - under 80 calls per
+  token, their internals are not counted.
+- The front end (`cli_main.c`), which is not part of the forward pass.
+- Compares and absolute values, 715,658/token measured here, excluded by
+  the census's stated convention rather than by oversight.

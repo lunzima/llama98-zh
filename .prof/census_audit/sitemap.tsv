@@ -1,0 +1,69 @@
+# function -> census site, for the roll-up of measured f32 work.
+# LEAF means "charge to whoever called it": an unbilled helper whose cost
+# the census expects the calling site's formula to cover.
+# Lines starting with # are comments; blank fields are errors.
+q8_round	LEAF
+lz_i32f	LEAF
+sigmoid_q15	LEAF
+sigmoid_q15_t	LEAF
+lz_q8round32_simd	LEAF
+pow2f	LEAF
+q8_amax	LEAF
+epi_q41_fixed	EPI
+epi_fixed	EPI
+epi_prep_plane	EPI
+epi_pack_act	EPI
+epi_zero_act	EPI
+epi_q41	EPI
+epi_q8	EPI
+lz_causal_conv1d_step	CONV
+lz_conv_build_scales	CONV
+lz_gdn_quantize_2p	RECUR
+lz_moe_route	EPI
+lz_causal_conv1d_step_fixed	CONV
+lz_conv_norm_pow2	CONV
+lz_sigmoid	SIGMOID
+lz_silu	SIGMOID
+lz_sigmoid_i	SIGMOID
+sigmoid_q15_i	SIGMOID
+lz_sig_q15_fold	SIGMOID
+lz_exp_fixed	EXP
+lz_exp_float_body	EXP
+lz_exp	EXP
+lz_rsqrt_fixed	RSQRT
+lz_rsqrt_float_body	RSQRT
+rsqrt_tab_build	RSQRT
+sig_build	SIGMOID
+lz_attn_score_q8	ATTN_SCORE
+lz_attn_wsum_q8	ATTN_WSUM
+gdn_build_table	RECUR
+gdn_pass1_fixed_head	RECUR
+gdn_step_impl	RECUR
+gdn_p2_fixed_rows	RECUR
+p2_group_coef	RECUR
+p2_group_scale	RECUR
+p2_group_norm	RECUR
+lz_rmsnorm	NORM
+lz_rmsnorm_gated	NORM
+lz_rmsnorm_out_sse	NORM
+lz_rmsnorm_gated_out_fixed	NORM
+# lz_vscale/lz_vmax are reached only through lz_softmax's function-pointer
+# pick (measured: 16 calls/token each, all from ops_norm.c:393 and :410).
+lz_vscale_sse	SOFTMAX
+lz_vmax_sse	SOFTMAX
+lz_l2norm	NORM
+norm_ss_fixed	NORM
+lz_softmax	SOFTMAX
+lz_quantize_q8	QUANT
+lz_quantize_q8_int	QUANT
+lz_quantize_q8_int64	QUANT
+lz_quantize_q8_silu	QUANT
+q8_group_scale	QUANT
+lz_t_row_f32	NOSITE-dequant
+lz_rope_sse2	NOSITE-rope
+lz_rope	NOSITE-rope
+forward_moe	NOSITE-moe
+forward_chunk	NOSITE-residual
+kda_gate_build	NOSITE-kdagate
+forward_attn	NOSITE-attn-gate
+forward_kda	SIGMOID

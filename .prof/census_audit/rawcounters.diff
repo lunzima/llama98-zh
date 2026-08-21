@@ -1,0 +1,295 @@
+--- pristine/src/ops.h	2026-08-22 02:58:29.000000000 +0800
++++ /e/LLM/_censusraw/src/ops.h	2026-08-22 05:26:49.251709300 +0800
+@@ -79,6 +79,11 @@
+ extern int lz_f32_reached[LZ_FC_N];
+ extern double lz_f32_class[LZ_FC_N][LZ_FCC_N];
+ 
++/* Raw per-execution counters for the census audit: one slot per float
++   operation whose execution count gcov cannot report unambiguously
++   (several basic blocks share the source line). Instrument only. */
++extern double lz_rawc[32];
++
+ /* The comma operator, so both macros stay single expressions and keep
+    working in the `if (c) LZ_FC(...);` positions they already sit in. A
+    braced block would need every one of those visited. `site` is now
+--- pristine/src/ops.c	2026-08-22 02:58:29.000000000 +0800
++++ /e/LLM/_censusraw/src/ops.c	2026-08-22 05:40:44.061754900 +0800
+@@ -83,7 +83,7 @@
+         for (i = 0; i < n; i++) out[i] = 0;
+         return 0;
+     }
+-    while (e < 30 && amax * (float)(1 << (e + 1)) < (float)bound) e++;
++    while (e < 30 && (lz_rawc[2]++, amax * (float)(1 << (e + 1))) < (float)bound) e++;
+     for (i = 0; i < n; i++) {
+         float t = v[i] * (float)(1 << e);
+         int q = q8_round(t);
+@@ -99,6 +99,8 @@
+ int lz_f32_reached[LZ_FC_N];
+ #endif /* LZ_F32COUNT */
+ 
++double lz_rawc[32];
++
+ static const char *const LZ_FC_NAMES[LZ_FC_N] = {
+     "dequant epilogue", "attention scoring", "attention wsum",
+     "softmax", "exp", "sigmoid", "conv1d", "norms", "rsqrt",
+@@ -934,7 +936,7 @@
+             ex[row] = 0;
+             continue;
+         }
+-        while (e < 100 && amax * pow2f(e + 1) < 32767.0f) e++;
++        while (e < 100 && (lz_rawc[0]++, amax * pow2f(e + 1)) < 32767.0f) e++;
+         for (g = 0; g < ngw; g++) {
+             float t = ws[g] * pow2f(e);
+             int q = q8_round(t);
+@@ -1180,7 +1182,7 @@
+             g_epi_xe[tk] = 0;
+             continue;
+         }
+-        while (e < 100 && amax * pow2f(e + 1) < 32767.0f) e++;
++        while (e < 100 && (lz_rawc[1]++, amax * pow2f(e + 1)) < 32767.0f) e++;
+         for (g = 0; g < nb; g++) {
+             float t = xsb[g] * pow2f(e);
+             int q = q8_round(t);
+@@ -1863,6 +1865,7 @@
+         return (float)comb * pow2f(-126) * pow2f(target + 126);
+     }
+     LZ_FCX(LZ_FC_EPI, 1, 0, 0, 1, 0);      /* convert, one multiply */
++    lz_rawc[14]++;
+     return (float)comb * pow2f(target);
+ }
+ 
+@@ -2248,7 +2251,7 @@
+         float *st_out = state_out + (size_t)c * hist;
+         const float *wr = w + (size_t)c * k;
+         float sum = 0.0f;
+-        for (j = 0; j < hist; j++) sum += wr[j] * st_in[j];
++        for (j = 0; j < hist; j++) (lz_rawc[21]++, sum += wr[j] * st_in[j]);
+         sum += wr[hist] * x[c];
+         o[c] = lz_silu(sum);
+         /* shift left by one (reading the OLD history from st_in),
+--- pristine/src/ops_norm.c	2026-08-22 02:58:29.000000000 +0800
++++ /e/LLM/_censusraw/src/ops_norm.c	2026-08-22 05:40:59.249484300 +0800
+@@ -280,7 +280,7 @@
+     /* 2n accumulating ss, 2 for the divide and the eps add, 3n in the
+        output loop (two multiplies and the 1+w add). rsqrt bills itself. */
+     LZ_FCX(LZ_FC_NORM, 3 * n, 2 * n + 1, 1, 0, 0);
+-    for (i = 0; i < n; i++) ss += x[i] * x[i];
++    for (i = 0; i < n; i++) (lz_rawc[22]++, ss += x[i] * x[i]);
+ have_ss:
+     inv = lz_rsqrt(ss / (float)n + eps);
+     /* (1 + w), not w: see the header */
+@@ -296,7 +296,7 @@
+             i = n4 << 2;
+         }
+     }
+-    for (; i < n; i++) o[i] = x[i] * inv * (1.0f + w[i]);
++    for (; i < n; i++) (lz_rawc[26]++, o[i] = x[i] * inv * (1.0f + w[i]));
+ }
+ 
+ void lz_rmsnorm_gated(float *o, const float *x, const float *g,
+@@ -332,7 +332,7 @@
+        total - see B1 report, this looks like a real overcount. silu
+        bills itself. */
+     LZ_FCX(LZ_FC_NORM, 5 * n, n + 1, 1, 0, 0);
+-    for (i = 0; i < n; i++) ss += x[i] * x[i];
++    for (i = 0; i < n; i++) (lz_rawc[23]++, ss += x[i] * x[i]);
+ have_ss_gated:
+     inv = lz_rsqrt(ss / (float)n + eps);
+     /* plain w here, and the gate applies last. The fixed path computes
+@@ -341,7 +341,7 @@
+     if (fixed_ss)
+         lz_rmsnorm_gated_out_fixed(o, x, g, w, inv, n, sig);
+     else
+-        for (i = 0; i < n; i++) o[i] = x[i] * inv * w[i] * lz_silu(g[i]);
++        for (i = 0; i < n; i++) (lz_rawc[24]++, o[i] = x[i] * inv * w[i] * lz_silu(g[i]));
+ }
+ 
+ void lz_l2norm(float *o, const float *x, int n, float eps) {
+@@ -371,10 +371,10 @@
+        site's historical total - see B1 report, this looks like a real
+        overcount. */
+     LZ_FCX(LZ_FC_NORM, 3 * n, n + 1, 0, 0, 0);
+-    for (i = 0; i < n; i++) ss += x[i] * x[i];
++    for (i = 0; i < n; i++) (lz_rawc[25]++, ss += x[i] * x[i]);
+ have_ss_l2:
+     inv = lz_rsqrt(ss + eps);          /* sum, not mean */
+-    for (i = 0; i < n; i++) o[i] = x[i] * inv;
++    for (i = 0; i < n; i++) (lz_rawc[3]++, o[i] = x[i] * inv);
+ }
+ 
+ void lz_softmax(float *x, int n) {
+--- pristine/src/ops_gdn.c	2026-08-22 02:58:29.000000000 +0800
++++ /e/LLM/_censusraw/src/ops_gdn.c	2026-08-22 05:27:46.706548100 +0800
+@@ -333,12 +333,12 @@
+ #if defined(LZ_WSUM_MMX_EXTERN)
+             if (lz_cpu_has_mmx()) _mm_empty();      /* no x87 inside the row-pair loop above */
+ #endif /* LZ_WSUM_MMX_EXTERN */
+-            for (d = 0; d < 32; d++) accf[d] += lz_i32f(acc32[d]);
++            for (d = 0; d < 32; d++) (lz_rawc[8]++, accf[d] += lz_i32f(acc32[d]));
+         }
+ #endif /* __WATCOMC__ */
+         {
+             float sscale = cmax * LZ_Q15_INV;
+-            for (d = 0; d < 32; d++) out[g * 32 + d] = accf[d] * sscale;
++            for (d = 0; d < 32; d++) (lz_rawc[9]++, out[g * 32 + d] = accf[d] * sscale);
+         }
+     }
+ }
+--- pristine/src/ops_quant.c	2026-08-22 02:58:29.000000000 +0800
++++ /e/LLM/_censusraw/src/ops_quant.c	2026-08-22 05:28:30.513527800 +0800
+@@ -110,6 +110,7 @@
+         if (lz_q8_round_pow2_arm_asm(t.u, 0, &r)) return (int)r;
+     }
+ #endif /* LZ_ARM_PRIM_ASM */
++    lz_rawc[16]++;
+     t.f = qv + 12582912.0f;                 /* 1.5 * 2^23 */
+     return (int)(t.u & 0x007FFFFFu) - 0x00400000;
+ }
+@@ -550,6 +551,7 @@
+     if (t <= 0.0f) return 0;
+     if (t >= (float)LZ_SIG_N) return g_sigtab[LZ_SIG_N];
+     idx = (int)t;
++    lz_rawc[13]++;
+     frac = (int32_t)((t - (float)idx) * 32768.0f);
+     a = g_sigtab[idx];
+     b = g_sigtab[idx + 1];
+--- pristine/src/ops_sse2.c	2026-08-22 02:58:29.000000000 +0800
++++ /e/LLM/_censusraw/src/ops_sse2.c	2026-08-22 05:29:14.512640200 +0800
+@@ -28,6 +28,7 @@
+ #include <string.h>
+ 
+ #include "ops_sse2.h"
++extern double lz_rawc[32];   /* census audit instrument */
+ 
+ #if defined(LZ_SSE2_TU)
+ 
+@@ -1716,7 +1717,7 @@
+             __m128 s = _mm_shuffle_ps(lo, hi, 0xDD); /* [s0,s1,s2,s3] */
+             __m128 x0 = _mm_loadu_ps(base + i);
+             __m128 x1 = _mm_loadu_ps(base + i + half);
+-            __m128 n0 = _mm_sub_ps(_mm_mul_ps(x0, c), _mm_mul_ps(x1, s));
++            __m128 n0 = (lz_rawc[15]++, _mm_sub_ps(_mm_mul_ps(x0, c), _mm_mul_ps(x1, s)));
+             __m128 n1 = _mm_add_ps(_mm_mul_ps(x1, c), _mm_mul_ps(x0, s));
+             _mm_storeu_ps(base + i, n0);
+             _mm_storeu_ps(base + i + half, n1);
+@@ -1763,6 +1764,7 @@
+     __m128 vi = _mm_set1_ps(*pinv);
+     __m128i p127 = _mm_set1_epi16(127), m127 = _mm_set1_epi16(-127);
+     int b;
++    lz_rawc[18]++;
+     for (b = 0; b < 2; b++) {
+         const float *s = x + b * 16;
+         __m128i a0 = _mm_cvtps_epi32(_mm_mul_ps(_mm_loadu_ps(s), vi));
+--- pristine/src/ops_kernel_shared.h	2026-08-22 02:58:29.000000000 +0800
++++ /e/LLM/_censusraw/src/ops_kernel_shared.h	2026-08-22 05:28:51.652858200 +0800
+@@ -71,6 +71,7 @@
+ #if defined(LZ_ARM_PRIM_ASM)
+     if (g_kernel == LZ_KERNEL_ARM_ASM) return lz_i32f_arm_asm(v);
+ #endif /* LZ_ARM_PRIM_ASM */
++    lz_rawc[17]++;
+     return (float)(v >> 12) * 4096.0f + (float)(v & 0xFFF);
+ }
+ 
+--- pristine/src/forward.c	2026-08-22 02:58:29.000000000 +0800
++++ /e/LLM/_censusraw/src/forward.c	2026-08-22 05:40:40.404394200 +0800
+@@ -1677,7 +1677,7 @@
+                 for (d = 0; d < hd; d += 32) {
+                     float acc = 0.0f;
+                     int e;
+-                    for (e = 0; e < 32; e++) acc += qhh[d + e] * (float)kt[d + e];
++                    for (e = 0; e < 32; e++) (lz_rawc[19]++, acc += qhh[d + e] * (float)kt[d + e]);
+                     sum += acc * kts[d / 32];
+                 }
+                 s->att[t] = sum * scale;
+@@ -1815,7 +1815,7 @@
+                 float a = s->att[t];
+                 /* Convert, two multiplies and an add per element. */
+                 LZ_FCX(LZ_FC_ATTN_WSUM, 2 * hd, hd, 0, hd, 0);
+-                for (d = 0; d < hd; d++) out[d] += a * (float)vt[d] * vts[d / 32];
++                for (d = 0; d < hd; d++) (lz_rawc[20]++, out[d] += a * (float)vt[d] * vts[d / 32]);
+             }
+ #if (LZ_ATTN_FIXED & 2)
+             }
+@@ -1897,7 +1897,7 @@
+             for (h = 0; h < nh; h++) {
+                 const float *gate = qgt + (size_t)h * 2 * hd + hd;
+                 float *out = aot + (size_t)h * hd;
+-                for (d = 0; d < hd; d++) out[d] *= lz_sigmoid(gate[d]);
++                for (d = 0; d < hd; d++) (lz_rawc[10]++, out[d] *= lz_sigmoid(gate[d]));
+             }
+         }
+     }
+@@ -2724,7 +2724,7 @@
+                            the conversion both compilers round the
+                            multiply once and the add once (PC=24). */
+                         int32_t pre = (int32_t)gi[idx] + (int32_t)dtb[idx];
+-                        int32_t s15 = sigmoid_q15_t((float)pre * k1 + t_off);
++                        int32_t s15 = (lz_rawc[12]++, sigmoid_q15_t((float)pre * k1 + t_off));
+                         gt[idx] = lz_exp((float)s15 * lbq);
+                     }
+                 }
+@@ -2776,7 +2776,7 @@
+ 
+             lz_l2norm(s->qn, qp, kd, LZ_L2NORM_EPS);
+             lz_l2norm(s->kn, kp, kd, LZ_L2NORM_EPS);
+-            for (i = 0; i < kd; i++) s->qn[i] *= scale;
++            for (i = 0; i < kd; i++) (lz_rawc[4]++, s->qn[i] *= scale);
+ 
+             /* bvec's only consumer, and with `bvec_int` it never became
+                a float: the projection exited int16 at LZ_BVEC_ES and
+@@ -3046,7 +3046,7 @@
+             lz_matmul_xq(s->moe_h3, lat_x, s->xq, s->xqs,
+                         &L->moe_expert_w3[ei], latent, inter);
+             for (vv = 0; vv < inter; vv++)
+-                s->moe_h1[vv] = lz_silu(s->moe_h1[vv]) * s->moe_h3[vv];
++                (lz_rawc[11]++, s->moe_h1[vv] = lz_silu(s->moe_h1[vv]) * s->moe_h3[vv]);
+             lz_matmul_w(s->moe_h2, s->moe_h1, &L->moe_expert_w2[ei],
+                        inter, latent, s->xq, s->xqs);
+             for (vv = 0; vv < latent; vv++)
+@@ -3104,7 +3104,7 @@
+                            s->xqs + (size_t)tk * nsd);
+         lz_matmul_xq_nt(s->moe_shared_out, s->moe_h1, s->xq, s->xqs,
+                         &L->moe_shared_down, shared_w, hdim, nt);
+-        for (i = 0; i < nt * hdim; i++) s->xb2[i] += s->moe_shared_out[i];
++        for (i = 0; i < nt * hdim; i++) (lz_rawc[7]++, s->xb2[i] += s->moe_shared_out[i]);
+     }
+     /* No tap for the combined routed+shared output here: forward_chunk's
+        unconditional LZ_TAP("ffn", l, s->xb2, dim) right after this
+@@ -3485,7 +3485,7 @@
+         else                             forward_ssm(m, s, L, l, nt, all_logits, ring_base);
+         LZ_PROF_END(_tp, L->type == LZ_LT_FULL ? LZ_PROF_ATTN : LZ_PROF_LIN);
+         LZ_TAP("blk", l, s->xb2, dim);
+-        for (i = 0; i < nt * dim; i++) s->x[i] += s->xb2[i];
++        for (i = 0; i < nt * dim; i++) (lz_rawc[5]++, s->x[i] += s->xb2[i]);
+         LZ_TAP("res", l, s->x, dim);
+ 
+         if (c->use_subn) {
+@@ -3505,7 +3505,7 @@
+         }
+         LZ_PROF_END(_tf, LZ_PROF_FFN);
+         LZ_TAP("ffn", l, s->xb2, dim);
+-        for (i = 0; i < nt * dim; i++) s->x[i] += s->xb2[i];
++        for (i = 0; i < nt * dim; i++) (lz_rawc[6]++, s->x[i] += s->xb2[i]);
+         LZ_TAP("out", l, s->x, dim);
+     }
+     /* Advance the ring ONCE for this whole chunk, after every layer has
+--- pristine/src/cli_main.c	2026-08-22 02:58:29.000000000 +0800
++++ /e/LLM/_censusraw/src/cli_main.c	2026-08-22 05:28:59.586887700 +0800
+@@ -1849,6 +1849,17 @@
+             }
+             printf("  %-20s %14.0f\n", "total", tot / n_tokens);
+         }
++        {
++            /* Raw per-execution counters, the independent check on the
++               gcov-derived counts: one slot per float operation whose
++               source line holds several basic blocks. */
++            int rc;
++            printf("raw counters (total, per token):\n");
++            for (rc = 0; rc < 32; rc++)
++                if (lz_rawc[rc] != 0.0)
++                    printf("  rawc[%d] %18.0f  %14.1f\n", rc, lz_rawc[rc],
++                           lz_rawc[rc] / n_tokens);
++        }
+         printf("Top %d logits:\n", topk);
+         print_topk(logits, cfg->vocab_size, topk);
+         {

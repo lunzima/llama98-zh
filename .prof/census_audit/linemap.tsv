@@ -1,0 +1,39 @@
+# file<TAB>line<TAB>site - overrides sitemap.tsv where one function holds
+# work belonging to different sites (forward.c does, all six of its
+# billing points sit in one of three functions).
+forward.c	2703	SIGMOID
+forward.c	2711	SIGMOID
+forward.c	2727	SIGMOID
+forward.c	2728	SIGMOID
+forward.c	2779	NOSITE-qn-scale
+forward.c	1900	NOSITE-attn-gate
+forward.c	1424	ATTN_SCORE
+forward.c	3049	NOSITE-moe
+forward.c	3053	NOSITE-moe
+forward.c	3100	NOSITE-moe
+forward.c	3107	NOSITE-moe
+forward.c	3488	NOSITE-residual
+forward.c	3508	NOSITE-residual
+forward.c	1680	ATTN_SCORE
+forward.c	1681	ATTN_SCORE
+forward.c	1683	ATTN_SCORE
+forward.c	1622	ATTN_SCORE
+forward.c	1623	ATTN_SCORE
+forward.c	1625	ATTN_SCORE
+forward.c	1637	ATTN_SCORE
+forward.c	1638	ATTN_SCORE
+forward.c	1767	ATTN_WSUM
+forward.c	1770	ATTN_WSUM
+forward.c	1771	ATTN_WSUM
+forward.c	1782	ATTN_WSUM
+forward.c	1818	ATTN_WSUM
+forward.c	1865	ATTN_WSUM
+forward.c	1867	ATTN_WSUM
+forward.c	1891	SIGMOID
+forward.c	1892	SIGMOID
+forward.c	2738	SIGMOID
+forward.c	2741	SIGMOID
+forward.c	2743	SIGMOID
+forward.c	506	NOSITE-kdagate
+forward.c	563	NOSITE-kdagate
+forward.c	564	NOSITE-kdagate
