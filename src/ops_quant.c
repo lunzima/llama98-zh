@@ -371,25 +371,87 @@ static void exp_tab_build(void) {
     g_exptab_ready = 1;
 }
 
+#if defined(LZ_ARM_PRIM_ASM)
+/* Bit pattern of a compile-time float constant. gcc folds this away at
+   -O2, so the guard windows below cost nothing to derive and cannot
+   drift from the constants they are derived FROM - which hand-written
+   hex would. */
+static __inline__ uint32_t lz_f2u(float f) {
+    union { float f; uint32_t u; } b;
+    b.f = f;
+    return b.u;
+}
+#endif /* LZ_ARM_PRIM_ASM */
+
+/* The hand-written ARM tier (--kernel arm-asm) lives inline in the body
+   below rather than in a twin function, because only four steps of it
+   change and a twin would be a second copy of the Taylor core.
+   docs/arm-asm-audit.md C2 named the content and section 7 measures it:
+   the two guards become bit-pattern range tests, the floor and the
+   residue become integer work on the mantissa (killing an fsub, an
+   fadd, an i2f, a second fsub, an fmul and q8_round's own magic add),
+   and the exit's power-of-two multiply becomes an exponent add.
+
+   WHAT STAYS A LIBRARY CALL, and why. `x * LZ_EXP_LOG2E32` is a genuine
+   float multiply by a constant that is not a power of two - inlining it
+   means writing a soft-float multiplier and proving its rounding
+   identical, which is a libgcc rewrite, not an ISA cell. The floor and
+   residue steps DECLINE (and the C below runs) wherever their integer
+   identity is not provable; see the two primitives' comments. */
 float lz_exp_fixed(float x) {
     union { float f; int32_t i; } u;
     float y32, r;
     int32_t t, n, idx, rq, s, cq, prod;
+#if defined(LZ_ARM_PRIM_ASM)
+    const int asm_tier = (g_kernel == LZ_KERNEL_ARM_ASM);
+    int32_t ms = 0, sh = 0;
+    int have_floor = 0;
+#endif /* LZ_ARM_PRIM_ASM */
     if (!g_exptab_ready) exp_tab_build();
     /* Same guards as the float body, so the two paths agree on where
-       the approximation contract ends. */
-    if (x > 88.0f)     return FLT_MAX;
-    if (x < LZ_EXP_LO) return 0.0f;
+       the approximation contract ends. The windows are closed at
+       +-inf's bit pattern, which is what leaves NaN outside both and
+       makes the integer test answer exactly what the float one does. */
+#if defined(LZ_ARM_PRIM_ASM)
+    if (asm_tier) {
+        uint32_t ux = lz_f2u(x);
+        if (lz_uwin_arm_asm(ux, lz_f2u(88.0f) + 1u,
+                            0x7F800000u - lz_f2u(88.0f) - 1u))
+            return FLT_MAX;
+        if (lz_uwin_arm_asm(ux, lz_f2u(LZ_EXP_LO) + 1u,
+                            0xFF800000u - lz_f2u(LZ_EXP_LO) - 1u))
+            return 0.0f;
+    } else
+#endif /* LZ_ARM_PRIM_ASM */
+    {
+        if (x > 88.0f)     return FLT_MAX;
+        if (x < LZ_EXP_LO) return 0.0f;
+    }
     /* 1 scale, 1 magic add, 1 subtract + 1 scale + 1 magic add for the
        residual, fild + 1 pow2 multiply out: 3 mul, 3 add, 1 cvt. */
     LZ_FCX(LZ_FC_EXP, 3, 3, 0, 1, 0);
     y32 = x * LZ_EXP_LOG2E32;
-    u.f = y32 - 0.5f + 12582912.0f;           /* same floor as the float body */
-    t = (u.i & 0x007FFFFF) - 0x00400000;
-    n = t >> 5;
-    idx = t & 31;
-    r = y32 - (float)t;                       /* [0,1) */
-    rq = q8_round(r * (float)LZ_EXP_QSCALE);  /* residual, Q20 */
+#if defined(LZ_ARM_PRIM_ASM)
+    if (asm_tier) {
+        union { float f; uint32_t u; } b;
+        b.f = y32;
+        if (lz_exp_floor_arm_asm(b.u, &t, &ms, &sh)) {
+            n = t >> 5;
+            idx = t & 31;
+            rq = lz_exp_resid_arm_asm(ms, t, sh);
+            have_floor = 1;
+        }
+    }
+    if (!have_floor)
+#endif /* LZ_ARM_PRIM_ASM */
+    {
+        u.f = y32 - 0.5f + 12582912.0f;       /* same floor as the float body */
+        t = (u.i & 0x007FFFFF) - 0x00400000;
+        n = t >> 5;
+        idx = t & 31;
+        r = y32 - (float)t;                   /* [0,1) */
+        rq = q8_round(r * (float)LZ_EXP_QSCALE);  /* residual, Q20 */
+    }
     /* s = r/32 = rq/2^25, so the Q20 Taylor terms are (ln2_q*s)>>20 and
        (ln2sq_q*s*s)>>40; both shifts round half-up. */
     s = rq >> 5;
@@ -400,6 +462,16 @@ float lz_exp_fixed(float x) {
                     + (1LL << (2 * LZ_EXP_Q - 1))) >> (2 * LZ_EXP_Q));
     prod = (int32_t)((((int64_t)g_exptab[idx] * cq)
                       + (1 << (LZ_EXP_Q - 1))) >> LZ_EXP_Q);
+#if defined(LZ_ARM_PRIM_ASM)
+    if (asm_tier) {
+        int32_t k = n - LZ_EXP_Q;
+        if (k >= -126 && k <= 127) {
+            union { float f; uint32_t u; } pb;
+            pb.f = lz_i32f_arm_asm(prod);     /* == (float)prod, exact here */
+            if (lz_scale2_arm_asm(pb.u, k, &pb.u)) return pb.f;
+        }
+    }
+#endif /* LZ_ARM_PRIM_ASM */
     return (float)prod * pow2f(n - LZ_EXP_Q);
 }
 

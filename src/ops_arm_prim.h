@@ -132,6 +132,148 @@ static __inline__ int lz_q8_round_pow2_arm_asm(uint32_t u, int32_t k,
     return (int)ok;
 }
 
+/* Is `u` (a float's bit pattern) inside the unsigned window
+   [lo, lo+span]? Floats compare in sign-magnitude order, so a range
+   test on the bit pattern IS the float comparison - one subtract and
+   one compare against the `bl __aeabi_fcmpXX` plus `bl __cmpsf2` gcc
+   spends, about 30 instructions. The CALLER picks the window, and picks
+   it so NaN (exponent 255, non-zero mantissa) falls outside: that is
+   what keeps the answer identical rather than merely close. */
+static __inline__ int lz_uwin_arm_asm(uint32_t u, uint32_t lo,
+                                      uint32_t span) {
+    uint32_t r;
+    __asm__(
+        "sub    %[r], %[u], %[lo]\n\t"
+        "cmp    %[r], %[sp]\n\t"
+        "movls  %[r], #1\n\t"
+        "movhi  %[r], #0\n\t"
+        : [r] "=&r"(r)
+        : [u] "r"(u), [lo] "r"(lo), [sp] "r"(span)
+        : "cc");
+    return (int)r;
+}
+
+/* a * 2^k for a normal float a and a normal result: the exponent-field
+   add __aeabi_fmul spends 28 instructions arriving at. Declines
+   (returns 0) on a zero/subnormal/inf/nan operand and on any k that
+   would leave the normal range - every case where the multiply is not
+   simply an exponent add - so the fast path is exact by construction,
+   multiplying by a power of two being exact in IEEE. */
+static __inline__ int lz_scale2_arm_asm(uint32_t ua, int32_t k,
+                                        uint32_t *out) {
+    uint32_t ok, e, r;
+    __asm__(
+        "mov    %[o], #0\n\t"
+        "mov    %[e], %[a], lsr #23\n\t"
+        "ands   %[e], %[e], #255\n\t"
+        "beq    1f\n\t"                  /* zero or subnormal */
+        "cmp    %[e], #255\n\t"
+        "beq    1f\n\t"                  /* inf or nan */
+        "adds   %[e], %[e], %[k]\n\t"
+        "ble    1f\n\t"                  /* result subnormal or zero */
+        "cmp    %[e], #255\n\t"
+        "bge    1f\n\t"                  /* result inf */
+        "add    %[r], %[a], %[k], lsl #23\n\t"
+        "mov    %[o], #1\n\t"
+        "1:\n\t"
+        : [o] "=&r"(ok), [e] "=&r"(e), [r] "=&r"(r)
+        : [a] "r"(ua), [k] "r"(k)
+        : "cc");
+    *out = r;
+    return (int)ok;
+}
+
+/* lz_exp_fixed's floor step. The C spends two soft-float calls on it -
+   `y32 - 0.5f`, then the 1.5*2^23 magic add - to arrive at
+   t = round-half-to-even(y32 - 0.5). Also hands back the signed
+   mantissa and the shift, so the float is unpacked once for this and
+   for the residue step below.
+
+   THE DECLINE IS WHAT MAKES IT IDENTICAL. `y32 - 0.5f` is an exact
+   float32 subtraction only while N = +-mantissa - 2^(sh-1) fits in 24
+   bits; past that the subtraction rounds first and the magic add rounds
+   again, and reproducing that double rounding is a float adder, not an
+   ISA cell. The fast path is therefore the exponent range where sh is
+   meaningful at all (|y32| in [1, 4096), i.e. |x| >= 0.0217) AND the
+   explicit |N| <= 2^24 test; everything else, inf and NaN included,
+   runs the C. */
+static __inline__ int lz_exp_floor_arm_asm(uint32_t uy, int32_t *tout,
+                                           int32_t *msout, int32_t *shout) {
+    uint32_t ok, sh, t1, t2;
+    int32_t ms, t;
+    __asm__(
+        "mov    %[t1], %[u], lsr #23\n\t"
+        "and    %[t1], %[t1], #255\n\t"
+        "sub    %[t1], %[t1], #127\n\t"
+        "mov    %[o], #0\n\t"
+        "cmp    %[t1], #11\n\t"
+        "bhi    1f\n\t"                  /* |y32| < 1 or >= 4096, inf, nan */
+        "rsb    %[sh], %[t1], #23\n\t"   /* 150 - biased exponent, 12..23 */
+        "bic    %[m], %[u], #0xFF000000\n\t"
+        "orr    %[m], %[m], #0x800000\n\t"
+        "cmp    %[u], #0\n\t"
+        "rsbmi  %[m], %[m], #0\n\t"      /* signed mantissa */
+        "sub    %[t1], %[sh], #1\n\t"
+        "mov    %[t2], #1\n\t"
+        "mov    %[t2], %[t2], lsl %[t1]\n\t"        /* 2^(sh-1) */
+        "sub    %[t], %[m], %[t2]\n\t"              /* N */
+        "add    %[t1], %[t], #0x1000000\n\t"
+        "cmp    %[t1], #0x2000000\n\t"
+        "bhi    1f\n\t"                  /* |N| > 2^24: the subtract rounds */
+        "mov    %[o], #1\n\t"
+        "mov    %[t1], %[t], asr %[sh]\n\t"
+        "sub    %[t], %[t], %[t1], lsl %[sh]\n\t"   /* remainder, >= 0 */
+        "cmp    %[t], %[t2]\n\t"
+        "addhi  %[t1], %[t1], #1\n\t"
+        "andeq  %[t], %[t1], #1\n\t"
+        "addeq  %[t1], %[t1], %[t]\n\t"
+        "mov    %[t], %[t1]\n\t"
+        "1:\n\t"
+        : [o] "=&r"(ok), [sh] "=&r"(sh), [m] "=&r"(ms), [t] "=&r"(t),
+          [t1] "=&r"(t1), [t2] "=&r"(t2)
+        : [u] "r"(uy)
+        : "cc");
+    *tout = t;
+    *msout = ms;
+    *shout = (int32_t)sh;
+    return (int)ok;
+}
+
+/* lz_exp_fixed's residue step: rq = q8_round((y32 - (float)t) * 2^20),
+   which the C spends an __aeabi_i2f, an __aeabi_fsub, an __aeabi_fmul
+   and q8_round's own magic add on - four calls for a quantity already
+   sitting in the mantissa lz_exp_floor_arm_asm unpacked.
+
+   y32 - (float)t is EXACT (both are multiples of 2^-sh and the result
+   is at most 1 in magnitude), and so is the 2^20 that follows, so the
+   only rounding left is the one to integer - done here on P, the
+   residue in units of 2^-sh. P is formed modulo 2^32 because t << sh
+   overflows int32 while P itself is in [0, 2^sh]. */
+static __inline__ int32_t lz_exp_resid_arm_asm(int32_t ms, int32_t t,
+                                               int32_t sh) {
+    int32_t rq;
+    uint32_t p, t1, t2;
+    __asm__(
+        "sub    %[p], %[m], %[t], lsl %[sh]\n\t"
+        "rsbs   %[t1], %[sh], #20\n\t"
+        "movpl  %[q], %[p], lsl %[t1]\n\t"
+        "bpl    1f\n\t"
+        "rsb    %[t1], %[t1], #0\n\t"    /* sh - 20, 1..3 */
+        "mov    %[q], %[p], lsr %[t1]\n\t"
+        "mov    %[t2], #1\n\t"
+        "mov    %[t2], %[t2], lsl %[t1]\n\t"
+        "sub    %[p], %[p], %[q], lsl %[t1]\n\t"    /* remainder */
+        "cmp    %[t2], %[p], lsl #1\n\t"
+        "addcc  %[q], %[q], #1\n\t"
+        "andeq  %[p], %[q], #1\n\t"
+        "addeq  %[q], %[q], %[p]\n\t"
+        "1:\n\t"
+        : [q] "=&r"(rq), [p] "=&r"(p), [t1] "=&r"(t1), [t2] "=&r"(t2)
+        : [m] "r"(ms), [t] "r"(t), [sh] "r"(sh)
+        : "cc");
+    return rq;
+}
+
 #endif /* __arm__ && __GNUC__ */
 
 #endif /* LZ_OPS_ARM_PRIM_H */

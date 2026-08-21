@@ -2201,7 +2201,7 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
 #define LZ_KM_ROW 0
 #define LZ_KM_OP  1
 
-#define LZ_KM_NUNIT 7
+#define LZ_KM_NUNIT 8
 #define LZ_KM_NCOL 10
 /* The one unit with ARM kernels, by index - km_tab and km_present both
    need it, and a named constant is what stops a reorder of km_unit from
@@ -2219,6 +2219,7 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
    filled cell onto an operator that has no assembly. */
 #define LZ_KM_UNIT_I32F  5
 #define LZ_KM_UNIT_Q8RND 6
+#define LZ_KM_UNIT_EXPFX 7
 /* Column 0 is ref and columns 7..9 are armC/armA/g128; columns 1..6 are
    the six LZ_ROW_* slots in slot order, so column c reads tab[c - 1]. */
 #define LZ_KM_COL_ROW0 1
@@ -2230,7 +2231,8 @@ static const struct { const char *name; unsigned char kind; }
 km_unit[LZ_KM_NUNIT] = {
     { "q8_0",  LZ_KM_ROW }, { "q4_1", LZ_KM_ROW }, { "q6_1", LZ_KM_ROW },
     { "q16_0", LZ_KM_ROW }, { "t2",   LZ_KM_ROW },
-    { "i32f",  LZ_KM_OP  }, { "q8rnd", LZ_KM_OP }
+    { "i32f",  LZ_KM_OP  }, { "q8rnd", LZ_KM_OP },
+    { "expfx", LZ_KM_OP  }
 };
 static const char *const km_col[LZ_KM_NCOL] = {
     "ref", "mmxI", "sseI", "sse2I", "mmxA", "sseA", "sse2A",
@@ -2280,7 +2282,8 @@ static const LZKmReg km_reg[LZ_KM_NUNIT][LZ_KM_NCOL] = {
    shared C body, which is also what --kernel arm-c runs - so armC is
    present on ARM for the same reason ref is present everywhere. */
 /* i32f */{ KM_H(KM_ALL), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128) },
-/* q8rnd*/{ KM_H(KM_ALL), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128) }
+/* q8rnd*/{ KM_H(KM_ALL), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128) },
+/* expfx*/{ KM_H(KM_ALL), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128) }
 };
 
 #if defined(__WATCOMC__)
@@ -2337,7 +2340,8 @@ static int km_arm_asm(int f) {
         f == LZ_KM_UNIT_Q41 || f == LZ_KM_UNIT_Q61) return 1;
 #endif /* LZ_ARM_ASM_EXTERN */
 #if defined(LZ_ARM_PRIM_ASM)
-    if (f == LZ_KM_UNIT_I32F || f == LZ_KM_UNIT_Q8RND) return 1;
+    if (f == LZ_KM_UNIT_I32F || f == LZ_KM_UNIT_Q8RND ||
+        f == LZ_KM_UNIT_EXPFX) return 1;
 #endif /* LZ_ARM_PRIM_ASM */
     (void)f;
     return 0;
