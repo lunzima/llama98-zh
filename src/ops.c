@@ -1514,22 +1514,14 @@ void lz_matmul_xq_nt(float *o, const float *x, const int8_t *xq,
         matmul_scalar_ref(o, xq, xqs, w, in_dim, out_dim, nt);
         return;
     }
-#if defined(__arm__)
-    /* Formats with NO ARM row kernel yet have to reach the scalar
-       reference by the SAME route `--kernel ref` takes, or the tiers
-       would differ by which fallback they fell through
-       (matmul_q8_impl's epi_pack_act runs before its own NULL-row
-       check, for one) rather than by the kernel under test, and the
-       three-way bit-identity gate would be comparing something else.
-       The list SHRINKS as cells get filled - src/ops.c's km_reg is the
-       registry of which, and this line is what makes a filled cell
-       actually run. */
-    if (w->dtype != LZ_FMT_T2 && w->dtype != LZ_FMT_Q16_0 &&
-        w->dtype != LZ_FMT_Q8_0 && w->dtype != LZ_FMT_Q4_1) {
-        matmul_scalar_ref(o, xq, xqs, w, in_dim, out_dim, nt);
-        return;
-    }
-#endif /* __arm__ */
+    /* There used to be an ARM interception here, sending every dtype
+       without an ARM row kernel to matmul_scalar_ref so that the tiers
+       differed by the kernel under test and not by which fallback they
+       fell through. All five formats now have their armC/armA pair
+       (src/ops_arm.c, plus ternary in src/ops_t2_arm.c), so the list is
+       empty and the dispatch below is the whole story on ARM too. A new
+       format lands here as a `t` in km_reg and needs the interception
+       back, for one dtype, until its pair is written. */
     /* The SIMD fast path currently covers only (Q8_0, gs=32). Other
        formats/groups go through the scalar reference - correct but
        slow.
@@ -2140,11 +2132,21 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
 
    ---- TODO -------------------------------------------------------------
 
-   armC, armA on q6_1. lz_matmul_xq_nt still sends that dtype straight
-   to matmul_scalar_ref on ARM. Nothing about ARMv5TE refuses it - it
-   is q4_1's nibble plane plus t2's 2-bit plane and both of those
-   already have their pair in src/ops_arm.c / src/ops_t2_arm.c. It is
-   not written. */
+   None. Every row unit carries both ARM cells: the C tier and the
+   hand-written one, for all five formats (src/ops_arm.c, plus ternary
+   in src/ops_t2_arm.c). The eleven remaining empty cells are the sseI
+   and sseA columns and t2/g128, all IMPOSSIBLE and all audited above.
+
+   A NEW FORMAT ARRIVES WITH TWO EMPTY ARM CELLS, and filling them is
+   two edits, not one: the kernel, and the line in lz_matmul_xq_nt that
+   lets its dtype past. That function used to intercept every dtype
+   without an ARM kernel and send it to matmul_scalar_ref; the
+   interception is gone because the list emptied, so a new format
+   reaches its impl with an all-NULL row table and falls back from
+   inside it instead. Register the cells as TODO and restore the
+   interception for that one dtype until the pair exists - otherwise
+   the two tiers differ by which fallback they fell through rather
+   than by the kernel under test. */
 #define LZ_KM_IMPOSSIBLE 1
 #define LZ_KM_TODO       2
 
@@ -2194,6 +2196,7 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
 #define LZ_KM_UNIT_Q16 3
 #define LZ_KM_UNIT_Q8  0
 #define LZ_KM_UNIT_Q41 1
+#define LZ_KM_UNIT_Q61 2
 /* Column 0 is ref and columns 7..9 are armC/armA/g128; columns 1..6 are
    the six LZ_ROW_* slots in slot order, so column c reads tab[c - 1]. */
 #define LZ_KM_COL_ROW0 1
@@ -2220,9 +2223,6 @@ static const char km_why_sse1[] =
 static const char km_why_t2g128[] =
     "nothing to hoist across the four sub-blocks - see LZ_G128_T2 in "
     "src/ops.c";
-static const char km_why_arm[] =
-    "not written: lz_matmul_xq_nt still sends this dtype to "
-    "matmul_scalar_ref on ARM; see q16_0's pair in src/ops_arm.c";
 
 typedef struct { unsigned char have; unsigned char why; const char *text; } LZKmReg;
 #define KM_H(mask) { (unsigned char)(mask), 0, (const char *)0 }
@@ -2241,7 +2241,7 @@ static const LZKmReg km_reg[LZ_KM_NUNIT][LZ_KM_NCOL] = {
 /*          ref          mmxI              sseI                sse2I             mmxA              sseA                sse2A             armC                 armA                 g128            */
 /* q8_0 */{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128) },
 /* q4_1 */{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128) },
-/* q6_1 */{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_T(km_why_arm),    KM_T(km_why_arm),    KM_H(LZ_KMB_G128) },
+/* q6_1 */{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128) },
 /* q16_0*/{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128) },
 /* t2   */{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_I(km_why_t2g128) }
 };
@@ -2280,8 +2280,8 @@ static const lz_rowfn *km_tab(int f) {
    line is what makes a filled cell actually run, and the two going out
    of step is a cell that reports present and never executes. */
 static int km_arm_row(int f) {
-    return f == LZ_KM_UNIT_T2 || f == LZ_KM_UNIT_Q16 ||
-           f == LZ_KM_UNIT_Q8 || f == LZ_KM_UNIT_Q41;
+    (void)f;
+    return 1;   /* all five row units, since q6_1 landed */
 }
 
 /* The asm column is answered per unit, not per build: each format's
@@ -2294,7 +2294,7 @@ static int km_arm_asm(int f) {
 #endif /* LZ_T2_ARM_ASM_EXTERN */
 #if defined(LZ_ARM_ASM_EXTERN)
     if (f == LZ_KM_UNIT_Q16 || f == LZ_KM_UNIT_Q8 ||
-        f == LZ_KM_UNIT_Q41) return 1;
+        f == LZ_KM_UNIT_Q41 || f == LZ_KM_UNIT_Q61) return 1;
 #endif /* LZ_ARM_ASM_EXTERN */
     (void)f;
     return 0;

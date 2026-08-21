@@ -800,6 +800,48 @@ static void row_q61_mmx_intrin(int32_t *acc32, const void *w4, const void *w2v,
 #endif /* __MMX__ */
 
 /* ---- LZ_ROW_Q61 ---- */
+#if defined(__arm__)
+/* The two ARM tiers, picked in matmul_q61_impl rather than from the
+   table below. Leaves in src/ops_arm.c. The only format that uses
+   BOTH plane pointers: w4 is the 4-bit plane (16 bytes per 32-wide
+   block), w2v the 2-bit one (8 bytes), exactly as row_q61_mmx_intrin
+   reads them. */
+static void row_q61_arm(int32_t *acc32, const void *w4, const void *w2v,
+                        const int16_t *xw, int nb, int nt, int in_dim,
+                        const void *pf_end, const void *pf_end2) {
+    const unsigned char *wn = (const unsigned char *)w4;
+    const unsigned char *w2 = (const unsigned char *)w2v;
+    int tk, s;
+    (void)pf_end; (void)pf_end2;
+    for (tk = 0; tk < nt; tk++) {
+        const int16_t *xwt = xw + (size_t)tk * in_dim;
+        int32_t *acc = acc32 + (size_t)tk * nb;
+        for (s = 0; s < nb; s++)
+            acc[s] = lz_dot32_q61_arm(wn + (size_t)s * 16, w2 + (size_t)s * 8,
+                                      xwt + (size_t)s * 32);
+    }
+}
+
+#if defined(LZ_ARM_ASM_EXTERN)
+static void row_q61_arm_asm(int32_t *acc32, const void *w4, const void *w2v,
+                            const int16_t *xw, int nb, int nt, int in_dim,
+                            const void *pf_end, const void *pf_end2) {
+    const unsigned char *wn = (const unsigned char *)w4;
+    const unsigned char *w2 = (const unsigned char *)w2v;
+    int tk, s;
+    (void)pf_end; (void)pf_end2;
+    for (tk = 0; tk < nt; tk++) {
+        const int16_t *xwt = xw + (size_t)tk * in_dim;
+        int32_t *acc = acc32 + (size_t)tk * nb;
+        for (s = 0; s < nb; s++)
+            acc[s] = lz_dot32_q61_arm_asm(wn + (size_t)s * 16,
+                                          w2 + (size_t)s * 8,
+                                          xwt + (size_t)s * 32);
+    }
+}
+#endif /* LZ_ARM_ASM_EXTERN */
+#endif /* __arm__ */
+
 const lz_rowfn LZ_ROW_Q61[LZ_ROW_N] = {
 #if defined(LZ_DOT_MMX_EXTERN)
     row_q61_mmx_intrin,
@@ -891,6 +933,13 @@ void matmul_q61_impl(float *o, const int8_t *xq, const float *xqs,
 
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
     row = lz_row_pick(LZ_ROW_Q61);
+#if defined(__arm__)
+#if defined(LZ_ARM_ASM_EXTERN)
+    row = (g_kernel == LZ_KERNEL_ARM_ASM) ? row_q61_arm_asm : row_q61_arm;
+#else
+    row = row_q61_arm;
+#endif /* LZ_ARM_ASM_EXTERN */
+#endif /* __arm__ */
     if (!row || in_dim > LZ_MM_WIDEN_MAX) {
         matmul_scalar_ref(o, xq, xqs, w, in_dim, out_dim, nt);
         return;
