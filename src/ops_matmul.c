@@ -615,10 +615,48 @@ static int q41_fixed_epi(const LZTensor *w, int in_dim, int nb, int nt) {
            && nt <= LZ_BATCH_MAX;
 }
 
+/* The zero term's ACTIVATION half, shared by Q4_1/Q6_1/T2:
+   g_xg[t*ng + g] = Sum_{s in g} (Sum_k xq[k]) * xqs[s], computed once
+   per token and reused by every output row. The weight half (the
+   per-group min, or -scale for T2) meets it later inside epi_q41 /
+   epi_q41_fixed.
+
+   One function rather than the three identical copies matmul_q41_impl,
+   matmul_t2_impl and matmul_q61_impl each carried: the accumulation
+   ORDER is part of the same bit-identity contract epi_q41's own comment
+   describes, and three copies of it drift the moment one is touched.
+
+   It runs on EVERY call, fixed_epi or not - the zero term is still
+   float on the fixed path. The inner 32-wide sum is integer and bills
+   nothing, per the census convention; the r-long fold is nt*ng*r
+   converts, multiplies and adds of real x87 work that this site failed
+   to declare until it was given a name. */
+static void epi_zero_act(const int8_t *xq, const float *xqs, int in_dim,
+                         int ng, int r, int nb, int nt) {
+    int t, g, s, k;
+    LZ_FCX(LZ_FC_EPI, (long)nt * ng * r, (long)nt * ng * r, 0,
+           (long)nt * ng * r, 0);
+    for (t = 0; t < nt; t++) {
+        const int8_t *xqt = xq + (size_t)t * in_dim;
+        const float *xst = xqs + (size_t)t * nb;
+        float *xgt = g_xg + (size_t)t * ng;
+        for (g = 0; g < ng; g++) {
+            float a = 0.0f;
+            for (s = 0; s < r; s++) {
+                int sb = g * r + s;
+                int32_t sx = 0;
+                for (k = 0; k < 32; k++) sx += xqt[sb * 32 + k];
+                a += lz_i32f(sx) * xst[sb];
+            }
+            xgt[g] = a;
+        }
+    }
+}
+
 void matmul_q41_impl(float *o, const int8_t *xq, const float *xqs,
                             const LZTensor *w, int in_dim, int out_dim, int nt) {
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
-    int i, g, s, t, tk;
+    int i, t, tk;
     int r  = w->gs / 32;              /* 32 sub-blocks per weight group */
     int ng = in_dim / w->gs;          /* weight-group count */
     int nb = in_dim / 32;             /* 32-sub-block count */
@@ -642,25 +680,7 @@ void matmul_q41_impl(float *o, const int8_t *xq, const float *xqs,
 
     for (t = 0; t < nt * in_dim; t++) g_xw[t] = (int16_t)xq[t];
     if (fixed_epi) epi_pack_act(xqs, nb, nt);
-    /* The zero term depends only on activations; computed per token,
-       shared by all of that token's output rows - zsum still needs it
-       even on the fixed_epi path (epi_q41_fixed's zero term is
-       unconverted, see milestone 1's scope). */
-    for (t = 0; t < nt; t++) {
-        const int8_t *xqt = xq + (size_t)t * in_dim;
-        const float *xst = xqs + (size_t)t * nb;
-        float *xgt = g_xg + (size_t)t * ng;
-        for (g = 0; g < ng; g++) {
-            float a = 0.0f;
-            for (s = 0; s < r; s++) {
-                int sb = g * r + s, k;
-                int32_t sx = 0;
-                for (k = 0; k < 32; k++) sx += xqt[sb * 32 + k];
-                a += lz_i32f(sx) * xst[sb];
-            }
-            xgt[g] = a;
-        }
-    }
+    epi_zero_act(xq, xqs, in_dim, ng, r, nb, nt);
 
     for (i = 0; i < out_dim; i++) {
         const unsigned char *wn =
@@ -897,7 +917,7 @@ const lz_rowfn LZ_ROW_Q61[LZ_ROW_N] = {
 /* ---- matmul_t2_impl + matmul_q61_impl ---- */
 void matmul_t2_impl(float *o, const int8_t *xq, const float *xqs,
                            const LZTensor *w, int in_dim, int out_dim, int nt) {
-    int i, g, s, t, tk;
+    int i, g, t, tk;
     int gs = w->gs, r = gs / 32, ng = in_dim / gs;
     int nb = in_dim / 32;
     const unsigned char *p2b = (const unsigned char *)w->q;
@@ -930,21 +950,7 @@ void matmul_t2_impl(float *o, const int8_t *xq, const float *xqs,
 
     for (t = 0; t < nt * in_dim; t++) g_xw[t] = (int16_t)xq[t];
     if (fixed_epi) epi_pack_act(xqs, nb, nt);
-    for (t = 0; t < nt; t++) {
-        const int8_t *xqt = xq + (size_t)t * in_dim;
-        const float *xst = xqs + (size_t)t * nb;
-        float *xgt = g_xg + (size_t)t * ng;
-        for (g = 0; g < ng; g++) {
-            float a = 0.0f;
-            for (s = 0; s < r; s++) {
-                int sb = g * r + s, k;
-                int32_t sx = 0;
-                for (k = 0; k < 32; k++) sx += xqt[sb * 32 + k];
-                a += lz_i32f(sx) * xst[sb];
-            }
-            xgt[g] = a;
-        }
-    }
+    epi_zero_act(xq, xqs, in_dim, ng, r, nb, nt);
 
     for (i = 0; i < out_dim; i++) {
         const unsigned char *w2 = p2b + (size_t)i * in_dim / 4;
@@ -963,7 +969,7 @@ void matmul_t2_impl(float *o, const int8_t *xq, const float *xqs,
 
 void matmul_q61_impl(float *o, const int8_t *xq, const float *xqs,
                             const LZTensor *w, int in_dim, int out_dim, int nt) {
-    int i, g, s, t, tk;
+    int i, t, tk;
     int gs = w->gs, r = gs / 32, ng = in_dim / gs;
     int nb = in_dim / 32;
     const unsigned char *p4b = (const unsigned char *)w->q;
@@ -988,21 +994,7 @@ void matmul_q61_impl(float *o, const int8_t *xq, const float *xqs,
 
     for (t = 0; t < nt * in_dim; t++) g_xw[t] = (int16_t)xq[t];
     if (fixed_epi) epi_pack_act(xqs, nb, nt);
-    for (t = 0; t < nt; t++) {
-        const int8_t *xqt = xq + (size_t)t * in_dim;
-        const float *xst = xqs + (size_t)t * nb;
-        float *xgt = g_xg + (size_t)t * ng;
-        for (g = 0; g < ng; g++) {
-            float a = 0.0f;
-            for (s = 0; s < r; s++) {
-                int sb = g * r + s, k;
-                int32_t sx = 0;
-                for (k = 0; k < 32; k++) sx += xqt[sb * 32 + k];
-                a += lz_i32f(sx) * xst[sb];
-            }
-            xgt[g] = a;
-        }
-    }
+    epi_zero_act(xq, xqs, in_dim, ng, r, nb, nt);
 
     for (i = 0; i < out_dim; i++) {
         const unsigned char *wn = p4b + (size_t)i * in_dim / 2;

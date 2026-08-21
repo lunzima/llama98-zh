@@ -41,6 +41,24 @@
 # instead, as epi_fixed_raw's `long long` and epi_align_i16's `int32_t`
 # already do).
 #
+# LIMITATION - this gate does NOT cover the whole defect class, and a
+# PASS must not be read as "every float path is billed". It keys on the
+# RETURN TYPE, so an unbilled float loop inside a `void` function is
+# invisible to it. One was found by hand after this gate was written and
+# passing: the Q4_1/Q6_1/T2 zero term's activation half, three identical
+# copies inlined in matmul_q41_impl/matmul_t2_impl/matmul_q61_impl,
+# nt*ng*r converts+multiplies+adds each, unbilled since they were
+# written (now epi_zero_act in src/ops_matmul.c, billed).
+#
+# The rule that WOULD have caught it keys on the operation instead of the
+# signature: lz_i32f() is this tree's int->float convert and is a
+# billable `cvt` by definition, so "a function that calls lz_i32f and
+# neither LZ_FCX nor LZ_FC is unbilled" covers both shapes. Not
+# implemented here because the 40 current call sites have not been
+# audited for the legitimate exception (a leaf kernel whose CALLER bills
+# on its behalf, e.g. src/ops_mmx.c), and a gate with an unaudited
+# exception list is worse than a narrow one that says so.
+#
 # Exit codes: 0 PASS, 1 FAIL
 set -u
 cd "$(dirname "$0")/.." || exit 1
