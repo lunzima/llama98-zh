@@ -1564,6 +1564,18 @@ float epi_q41(const int32_t *accb, const float *xsb, const float *xgb,
                      const float *wd, const float *wm, int ng, int r) {
     float dotsum = 0.0f, zsum = 0.0f;
     int g, s;
+    /* Per group: r sub-blocks each a convert (lz_i32f) plus a multiply
+       plus an add (the dot accumulation), then two multiplies and two
+       adds closing the group (dotsum += dot*wd[g], zsum += xgb[g]*wm[g]).
+       Plus one closing multiply and add for the 1/256 fold and the zero
+       term. Verified against an independent raw-counter re-derivation
+       (sum of ng, ng*r and call count taken separately from this
+       formula): both agree to the op, 5,089,280 f32 ops/token on kmr20
+       / .prof/tz.bin / --fixed all - this site's entire prior invisible
+       share (LZ_FC_EPI moved 119,616 -> 5,208,896/token, i.e. from
+       13.2% to 86.9% of the whole census). */
+    LZ_FCX(LZ_FC_EPI, (long)ng * (r + 2) + 1, (long)ng * (r + 2) + 1,
+           0, (long)ng * r, 0);
     for (g = 0; g < ng; g++) {
         float dot = 0.0f;
         for (s = 0; s < r; s++) {
