@@ -27,6 +27,14 @@
 
 #include <stdint.h>
 
+#include "ops_arm_prim.h"   /* LZ_ARM_PRIM_ASM, lz_i32f_arm_asm */
+
+/* The runtime-selected ISA tier, defined in ops_sched.c. Declared here
+   rather than beside LZ_DEFINE_PICK below because lz_i32f reads it too.
+   Every TU that includes this header has already included ops.h, which
+   is where LZ_KERNEL_* come from. */
+extern int g_kernel;
+
 /* int32 -> float. **Every int32-to-float conversion in the engine goes
    through this**, not a bare `(float)v` - unified by construction rather
    than policed case by case.
@@ -50,8 +58,19 @@
    exact as float; multiplying by 4096 (a power of two) is exact; only
    the final addition rounds - and addition is arithmetic, which PC=24
    governs. In two's complement (v>>12)*4096 + (v & 0xFFF) == v always
-   holds (`>>` is arithmetic shift). */
+   holds (`>>` is arithmetic shift).
+
+   ARM's hand-written tier (--kernel arm-asm) computes the same
+   correctly-rounded conversion with CLZ and a shift instead of the four
+   __aeabi_* calls the split costs on a machine with no FPU. Selected
+   per call rather than per matmul because this has no dispatch point to
+   hoist to - three instructions against the 112.8 the C tier measures
+   (docs/arm-asm-audit.md). Compiled out entirely off ARM, so no x86
+   build gains a branch. */
 static float lz_i32f(int32_t v) {
+#if defined(LZ_ARM_PRIM_ASM)
+    if (g_kernel == LZ_KERNEL_ARM_ASM) return lz_i32f_arm_asm(v);
+#endif /* LZ_ARM_PRIM_ASM */
     return (float)(v >> 12) * 4096.0f + (float)(v & 0xFFF);
 }
 
@@ -245,9 +264,9 @@ extern void lz_pf_amd(const void *p);
 /* ---- dispatch infrastructure (per-TU) ----------------------------------
 
    Slot order for EVERY dispatch table in this file and others.
-   g_kernel is the runtime-selected ISA tier (defined in ops_sched.c).
-   LZ_DEFINE_PICK generates a static picker for each function-pointer
-   type; it reads g_kernel to decide MMX vs SSE2.
+   g_kernel (declared at the top of this header) is the runtime-selected
+   ISA tier. LZ_DEFINE_PICK generates a static picker for each
+   function-pointer type; it reads g_kernel to decide MMX vs SSE2.
 
    Here so ops_kernel_amax.h, ops_kernel_norm.h and ops_kernel_q8round.h
    compile in every TU that includes this header. */
@@ -259,9 +278,7 @@ extern void lz_pf_amd(const void *p);
 #define LZ_ROW_SSE2_A  5
 #define LZ_ROW_N       6
 
-extern int g_kernel;
-
-#define LZ_DEFINE_PICK(NAME, TYPE)                                        \
+#define LZ_DEFINE_PICK(NAME, TYPE)                                   \
     static TYPE NAME(const TYPE *tab) {                                   \
         int want_sse2 = (g_kernel == LZ_KERNEL_SSE2);                     \
         TYPE f;                                                           \

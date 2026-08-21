@@ -91,9 +91,24 @@ float pow2f(int e) {
    half-to-even. Only inputs exactly on a half-integer differ, and
    quantization noise is 254x larger; the exporter uses `np.rint`, in
    sync with this, unifying the project on IEEE defaults - no more two
-   coexisting rules. */
+   coexisting rules.
+
+   ARM turns the trick upside down. There is no FPU and no control word
+   to rewrite, so the magic add is a full __aeabi_fadd - 48 instructions
+   measured for what is a shift and a rounding decision on the bit
+   pattern. --kernel arm-asm takes that path (src/ops_arm_prim.h);
+   outside |qv| < 2^22, the domain stated above, the primitive declines
+   and the magic add below runs, so the two tiers agree everywhere and
+   not just where the contract holds. */
 int q8_round(float qv) {
     union { float f; uint32_t u; } t;
+#if defined(LZ_ARM_PRIM_ASM)
+    if (g_kernel == LZ_KERNEL_ARM_ASM) {
+        int32_t r;
+        t.f = qv;
+        if (lz_q8_round_pow2_arm_asm(t.u, 0, &r)) return (int)r;
+    }
+#endif /* LZ_ARM_PRIM_ASM */
     t.f = qv + 12582912.0f;                 /* 1.5 * 2^23 */
     return (int)(t.u & 0x007FFFFFu) - 0x00400000;
 }

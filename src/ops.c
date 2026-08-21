@@ -2201,7 +2201,7 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
 #define LZ_KM_ROW 0
 #define LZ_KM_OP  1
 
-#define LZ_KM_NUNIT 5
+#define LZ_KM_NUNIT 7
 #define LZ_KM_NCOL 10
 /* The one unit with ARM kernels, by index - km_tab and km_present both
    need it, and a named constant is what stops a reorder of km_unit from
@@ -2214,6 +2214,11 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
 #define LZ_KM_UNIT_Q8  0
 #define LZ_KM_UNIT_Q41 1
 #define LZ_KM_UNIT_Q61 2
+/* The operator units. Registry-only (LZ_KM_OP), same reason as above:
+   km_arm_asm reads them by name, so a reorder of km_unit cannot move a
+   filled cell onto an operator that has no assembly. */
+#define LZ_KM_UNIT_I32F  5
+#define LZ_KM_UNIT_Q8RND 6
 /* Column 0 is ref and columns 7..9 are armC/armA/g128; columns 1..6 are
    the six LZ_ROW_* slots in slot order, so column c reads tab[c - 1]. */
 #define LZ_KM_COL_ROW0 1
@@ -2224,7 +2229,8 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
 static const struct { const char *name; unsigned char kind; }
 km_unit[LZ_KM_NUNIT] = {
     { "q8_0",  LZ_KM_ROW }, { "q4_1", LZ_KM_ROW }, { "q6_1", LZ_KM_ROW },
-    { "q16_0", LZ_KM_ROW }, { "t2",   LZ_KM_ROW }
+    { "q16_0", LZ_KM_ROW }, { "t2",   LZ_KM_ROW },
+    { "i32f",  LZ_KM_OP  }, { "q8rnd", LZ_KM_OP }
 };
 static const char *const km_col[LZ_KM_NCOL] = {
     "ref", "mmxI", "sseI", "sse2I", "mmxA", "sseA", "sse2A",
@@ -2240,6 +2246,15 @@ static const char km_why_sse1[] =
 static const char km_why_t2g128[] =
     "nothing to hoist across the four sub-blocks - see LZ_G128_T2 in "
     "src/ops.c";
+/* The operator units' x86 and group columns. docs/arm-asm-audit.md is
+   an ARM-only audit, so it cannot answer for an x86 tier here and this
+   says so rather than guessing 'impossible'. */
+static const char km_why_op_x86[] =
+    "not audited: these are one-value scalar leaves and the only audit "
+    "that has opened them (docs/arm-asm-audit.md) is ARM-only";
+static const char km_why_op_g128[] =
+    "no 128-element group form exists - a scalar leaf has no group to "
+    "hoist across";
 
 typedef struct { unsigned char have; unsigned char why; const char *text; } LZKmReg;
 #define KM_H(mask) { (unsigned char)(mask), 0, (const char *)0 }
@@ -2260,7 +2275,12 @@ static const LZKmReg km_reg[LZ_KM_NUNIT][LZ_KM_NCOL] = {
 /* q4_1 */{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128) },
 /* q6_1 */{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128) },
 /* q16_0*/{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128) },
-/* t2   */{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_I(km_why_t2g128) }
+/* t2   */{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_I(km_why_t2g128) },
+/* operator units (LZ_KM_OP): registry only, no grid line. ref is the
+   shared C body, which is also what --kernel arm-c runs - so armC is
+   present on ARM for the same reason ref is present everywhere. */
+/* i32f */{ KM_H(KM_ALL), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128) },
+/* q8rnd*/{ KM_H(KM_ALL), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128) }
 };
 
 #if defined(__WATCOMC__)
@@ -2298,7 +2318,10 @@ static const lz_rowfn *km_tab(int f) {
    of step is a cell that reports present and never executes. */
 static int km_arm_row(int f) {
     (void)f;
-    return 1;   /* all five row units, since q6_1 landed */
+    /* All five row units since q6_1 landed, and both operator units by
+       construction: their C tier is the shared body every build has, so
+       `--kernel arm-c` is the same code `--kernel ref` runs. */
+    return 1;
 }
 
 /* The asm column is answered per unit, not per build: each format's
@@ -2313,6 +2336,9 @@ static int km_arm_asm(int f) {
     if (f == LZ_KM_UNIT_Q16 || f == LZ_KM_UNIT_Q8 ||
         f == LZ_KM_UNIT_Q41 || f == LZ_KM_UNIT_Q61) return 1;
 #endif /* LZ_ARM_ASM_EXTERN */
+#if defined(LZ_ARM_PRIM_ASM)
+    if (f == LZ_KM_UNIT_I32F || f == LZ_KM_UNIT_Q8RND) return 1;
+#endif /* LZ_ARM_PRIM_ASM */
     (void)f;
     return 0;
 }
@@ -2324,7 +2350,10 @@ static int km_g128(int f) {
     case 1:  return LZ_G128_Q41;
     case 2:  return LZ_G128_Q61;
     case 3:  return LZ_G128_Q16;
-    default: return LZ_G128_T2;
+    case LZ_KM_UNIT_T2: return LZ_G128_T2;
+    /* Operator units have no group kernel; the registry says so and
+       this must agree, or the cell reports present-and-unregistered. */
+    default: return 0;
     }
 }
 
