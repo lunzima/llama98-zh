@@ -614,6 +614,16 @@ void lz_quantize_q8_int(const int32_t *t, int n, int gs, float deq,
                convention the MIN_SCALE branch gets everywhere else. */
             LZ_FCX(LZ_FC_QUANT, gs, gs, 1, gs + 1, 0);
             for (k = 0; k < gs; k++) {
+                /* lz_i32f, never a bare (float) cast: grp[k] passes 2^24
+                   and inv_elem is not a power of two, so SSE rounds the
+                   integer and then the product while x87 fuses fild+fmul
+                   and rounds only the product - 1 ULP apart, and a .5 tie
+                   turns that into a different int8, which quantization
+                   chaos then spreads across every later token. lz_i32f's
+                   split-and-add forces a float32 rounding neither can
+                   fuse away. build/norm_int_xcompiler_gate.sh is the
+                   gate; it needs long inputs from more than one corpus,
+                   since the tie is data-specific. */
                 int qi = q8_round(lz_i32f(grp[k]) * inv_elem);
                 qi = (qi > 127) ? 127 : qi;
                 out[k] = (int8_t)((qi < -127) ? -127 : qi);
