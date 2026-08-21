@@ -149,8 +149,18 @@ check_one() {
 
     # gcc -dM proof: every asserted macro appears with its non-default
     # value under the flags, and not with that value without them.
-    dm_with=$(gcc $GCC_BASE $defines -E -dM src/ops.c 2>/dev/null)
-    dm_without=$(gcc $GCC_BASE -E -dM src/ops.c 2>/dev/null)
+    #
+    # Both translation units, unioned: a switch's #ifndef site can live in
+    # either. The int-pipeline exits (LZ_*_I16) are defined in forward.c
+    # and appear nowhere in ops.c's preprocessed output, so an ops.c-only
+    # proof would have failed them for the wrong reason. The union is the
+    # right shape for the "with" side (proven anywhere counts) and for the
+    # "without" side too (a default that already equals the asserted value
+    # in EITHER unit means the switch proves nothing there).
+    dm_with=$(gcc $GCC_BASE $defines -E -dM src/ops.c 2>/dev/null
+              gcc $GCC_BASE $defines -E -dM src/forward.c 2>/dev/null)
+    dm_without=$(gcc $GCC_BASE -E -dM src/ops.c 2>/dev/null
+                 gcc $GCC_BASE -E -dM src/forward.c 2>/dev/null)
     for p in $proves; do
         pname="${p%%=*}"
         pval="${p#*=}"
@@ -212,7 +222,11 @@ check_one() {
 
 # name=value pairs, whitespace-separated. The two pair-entries are
 # handled in the loop below.
-SWITCHES="LZ_GDN_FIXED=0 LZ_GDN_STATE_2PLANE=0 LZ_ATTN_FIXED=0 LZ_CONV_FIXED=0 LZ_SSE2_GROUP=0 LZ_Q8_MIN_SCALE=0.0f LZ_EXACT_MATH=1 LZ_CPUID_NOCACHE=1 LZ_NO_FPU=1 LZ_KV_2PLANE=1 LZ_GDN_STATE_F32=1 LZ_BATCH_MAX=1 LZ_SPEC_K=1 LZ_PF_DIST=0 LZ_Q8R_FORCE_SSE=1 LZ_P2_FORCE_MMX=1"
+# LZ_BVEC_I16 / LZ_MOEGATE_I16 / LZ_KLAT_I16 / LZ_KGATE_I16 are the four
+# q16_0 int16 exits (forward.c). Each defaults to 1 and each =0 build is
+# the control arm its measurement was taken against, which is exactly the
+# kind of build nobody runs again unless a gate does.
+SWITCHES="LZ_GDN_FIXED=0 LZ_GDN_STATE_2PLANE=0 LZ_ATTN_FIXED=0 LZ_CONV_FIXED=0 LZ_SSE2_GROUP=0 LZ_Q8_MIN_SCALE=0.0f LZ_EXACT_MATH=1 LZ_CPUID_NOCACHE=1 LZ_NO_FPU=1 LZ_KV_2PLANE=1 LZ_GDN_STATE_F32=1 LZ_BATCH_MAX=1 LZ_SPEC_K=1 LZ_PF_DIST=0 LZ_Q8R_FORCE_SSE=1 LZ_P2_FORCE_MMX=1 LZ_BVEC_I16=0 LZ_MOEGATE_I16=0 LZ_KLAT_I16=0 LZ_KGATE_I16=0"
 
 for entry in $SWITCHES; do
     name="${entry%%=*}"
