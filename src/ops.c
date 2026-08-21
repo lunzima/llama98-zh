@@ -1114,17 +1114,29 @@ void epi_pack_act(const float *xqs, int nb, int nt) {
     }
 }
 
-float epi_fixed(const int32_t *accb, const LZTensor *w, int row,
-                       int tk, int ng, int r, float post) {
+/* Shared by epi_fixed (float exit) and epi_fixed_align_i16 (aligned-
+   int16 exit, below): the row's raw int64 dot product against the
+   packed activation and its integer exponent, without committing to
+   either exit's conversion. Splitting this out is what makes the
+   int16 exit "build on top of epi_fixed" rather than a second,
+   independent accumulator - both exits share the exact MAC epi_fixed
+   has always used, not a reimplementation of it. */
+static long long epi_fixed_raw(const int32_t *accb, const LZTensor *w,
+                               int row, int tk, int ng, int r, int *e_out) {
     const int16_t *ww = w->sq + (size_t)row * (ng / r);
-    long long s;
-    int g, e;
+    int g;
     for (g = 0; g < ng; g++)
         g_epi_m[g] = (int32_t)g_epi_xq[tk][g] * (int32_t)ww[g / r];
-    s = lz_epi_mac(accb, g_epi_m, ng);
     /* The exponent is per ROW, so a libm call here would run once per
        output element and cost more than the epilogue it replaces. */
-    e = -g_epi_xe[tk] - (int)w->sexp[row];      /* int arithmetic, no f32 work */
+    *e_out = -g_epi_xe[tk] - (int)w->sexp[row];  /* int arithmetic, no f32 work */
+    return lz_epi_mac(accb, g_epi_m, ng);
+}
+
+float epi_fixed(const int32_t *accb, const LZTensor *w, int row,
+                       int tk, int ng, int r, float post) {
+    int e;
+    long long s = epi_fixed_raw(accb, w, row, tk, ng, r, &e);
     /* post is a power of two at the one call site (ops_matmul.c passes
        1.0f/256.0f = 2^-8), so pow2f(e) * post is pow2f(e - 8) and folding
        it into the exponent drops a multiply. That fold is exact wherever
@@ -1141,6 +1153,123 @@ float epi_fixed(const int32_t *accb, const LZTensor *w, int row,
     }
     LZ_FCX(LZ_FC_EPI, 1, 0, 0, 1, 0);          /* convert, one multiply */
     return (float)s * pow2f(e - 8);
+}
+
+/* ---- exponent alignment primitive (int pipeline project, batch 1 #1) --
+ *
+ * epi_fixed's (s, e) pair means "value == s * 2^(e-8)" (see epi_fixed_raw
+ * and epi_fixed above), and e is per OUTPUT ROW (w->sexp is malloc'd per
+ * row - lz_epi_prep's own comment: weight scale spread is 99.6% within
+ * 8x WITHIN a row but far wider ACROSS rows, which is why there is no
+ * single tensor-wide exponent to begin with). A consumer that wants a
+ * whole output vector as one int16 array at ONE shared exponent - e.g.
+ * lz_causal_conv1d_step_fixed, whose `x[c] * in_scale` step already
+ * assumes a single scalar in_scale for the whole call - needs those
+ * per-row exponents folded down to that one target before it can take
+ * epi_fixed's int64 output directly, instead of the float epi_fixed
+ * would otherwise have to materialize.
+ *
+ * `target_e`/`bound` are NOT invented here: for the conv family they are
+ * the consumer's own already-established constants (LZ_CONV_ES,
+ * lz_conv_accum_bound(k), forward.c) - a fixed power-of-two exponent
+ * measured once from the real conv input distribution, not a fresh
+ * per-token statistic computed from this vector's own row spread. That
+ * sidesteps option (a) in docs/int-pipeline-project.md #2.1 (take
+ * min(e[row]), a new probe) in favour of reusing a budget the consumer
+ * already pays for - this function's job is purely the shift+round+
+ * clamp arithmetic, not choosing target_e.
+ *
+ * shift = e - 8 + target_e is the number of bits the stored mantissa
+ * moves to land at target_e: value * 2^target_e == s * 2^shift. Pure
+ * integer end to end - unlike every other int-to-float conversion this
+ * project has had to guard (lz_i32f, the volatile intermediate in
+ * lz_quantize_q8_int64), there is no float step here for gcc/SSE and
+ * Watcom/x87 to round differently around, so this primitive is
+ * cross-compiler-safe by construction rather than by verification.
+ *
+ * Two overflow hazards, both avoided rather than checked-after-the-fact
+ * because s can be as large as +-2^63 (lz_epi_mac's own derivation:
+ * ng * 2^27 * 2^30 stays inside int64 only up to ng==64==LZ_EPI_MAX_NG,
+ * i.e. right at the boundary, and the magnitude of LLONG_MIN itself is
+ * exactly 2^63):
+ *   - widening (shift >= 0): `umag << shift` is only ever computed once
+ *     the caller-independent bound check below has already established
+ *     it cannot exceed roughly bound + 2^32, nowhere near overflow -
+ *     everything past that check saturates through the ordinary clamp.
+ *   - narrowing (shift < 0, down to -63): the +half rounding bias is
+ *     added in unsigned 64-bit (umag <= 2^63, half <= 2^62, sum < 2^64:
+ *     no wraparound, and unsigned wraparound is well-defined even where
+ *     it did occur, unlike signed overflow).
+ *   - narrowing past -64: `>>rs`/`1ULL<<(rs-1)` are themselves undefined
+ *     once rs reaches 64, so shift<=-64 is handled by a closed form
+ *     instead of widening the shift: umag*2^shift <= 2^63*2^-64 == 0.5,
+ *     with equality (rounds to +-1 under half-away-from-zero) only at
+ *     shift==-64 and umag==2^63 (s==LLONG_MIN exactly) - every other
+ *     input in that range rounds to 0.
+ * The magnitude itself is taken by converting to unsigned FIRST (well-
+ * defined: the two's-complement bit pattern reinterpreted) rather than
+ * negating the signed value: `-s` when s==LLONG_MIN is not representable
+ * in a 64-bit signed type and is undefined behaviour - caught by this
+ * primitive's own verification probe before this comment was written.
+ *
+ * Rounding is half-away-from-zero (add half the LSB in magnitude space,
+ * then shift), matching C99 round()/roundl() - NOT q8_round's half-to-
+ * even, because q8_round's magic-add trick is a float-domain optimization
+ * for x87's slow (int) cast (ops_quant.c's own comment) and has nothing
+ * to reuse in a pure-integer shift. The two conventions only disagree on
+ * exact tie inputs, which quantization noise already dominates (q8_round's
+ * own comment: 254x).
+ *
+ * Verified against an independent long-double reference (long double's
+ * 64-bit mantissa on x87 holds any int64 exactly, so `(long double)s *
+ * powl(2, shift)` is exact with no rounding of its own to disagree
+ * with) over a sweep spanning the full domain this function accepts,
+ * including the LLONG_MIN/shift==-64 corner above -
+ * .prof/verify_epi_align.c, 1,647,376 cases, 0 mismatches. */
+static int32_t epi_align_i16(long long s, int e, int target_e, int bound) {
+    unsigned long long umag;
+    long long r;
+    int neg, shift;
+    if (s == 0) return 0;
+    neg = (s < 0);
+    umag = neg ? (unsigned long long)0 - (unsigned long long)s
+               : (unsigned long long)s;
+    shift = e - 8 + target_e;
+    if (shift > 32) shift = 32;    /* umag<<32 already dwarfs any real bound */
+    if (shift <= -64) {
+        r = (shift == -64 && umag == ((unsigned long long)1 << 63)) ? 1 : 0;
+    } else if (shift >= 0) {
+        unsigned long long capped = (unsigned long long)bound >> shift; /* shift<=32: safe */
+        if (umag > capped + 1)
+            r = (long long)bound + 1;          /* clamps below regardless */
+        else
+            r = (long long)(umag << shift);    /* <= (capped+1)<<shift <=
+                                                   bound+2^32: far inside
+                                                   unsigned 64 bits */
+    } else {
+        int rs = -shift;                                     /* 1..63 */
+        unsigned long long half = (unsigned long long)1 << (rs - 1);
+        r = (long long)((umag + half) >> rs);  /* unsigned add: no UB, and
+                                                   provably < 2^64 (umag
+                                                   <= 2^63, half <= 2^62) */
+    }
+    if (r > bound) r = bound;
+    return (int32_t)(neg ? -r : r);
+}
+
+/* Epilogue-shaped wrapper: same call signature as epi_fixed (drop-in at
+   a matmul row loop's call site) but exits through epi_align_i16 instead
+   of a float. Not wired to any forward.c call site yet - see
+   docs/int-pipeline-project.md's batch-1 status for why (the candidate
+   producers this was meant to prove out are not Q8_0-formatted on the
+   checkpoint used to measure this project, so epi_fixed itself never
+   runs for them; this function is proven standalone pending a producer
+   it can actually be dropped onto). */
+int32_t epi_fixed_align_i16(const int32_t *accb, const LZTensor *w, int row,
+                             int tk, int ng, int r, int target_e, int bound) {
+    int e;
+    long long s = epi_fixed_raw(accb, w, row, tk, ng, r, &e);
+    return epi_align_i16(s, e, target_e, bound);
 }
 
 float epi_q8(const int32_t *accb, const float *xsb, const float *ws,

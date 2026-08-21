@@ -46,5 +46,10 @@ float epi_q41(const int32_t *accb, const float *xsb, const float *xgb,
 float epi_fixed(const int32_t *accb, const LZTensor *w, int row,
                 int tk, int ng, int r, float post);
 void epi_pack_act(const float *xqs, int nb, int nt);
+/* Exponent alignment primitive (docs/int-pipeline-project.md batch 1
+   #1) - epi_align_i16's epilogue-shaped wrapper. Not called from any
+   forward.c site yet; see ops.c's own comment on why. */
+int32_t epi_fixed_align_i16(const int32_t *accb, const LZTensor *w, int row,
+                             int tk, int ng, int r, int target_e, int bound);
 
 #endif /* OPS_MATMUL_H */
