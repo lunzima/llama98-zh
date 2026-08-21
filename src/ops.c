@@ -1102,8 +1102,22 @@ float epi_fixed(const int32_t *accb, const LZTensor *w, int row,
     /* The exponent is per ROW, so a libm call here would run once per
        output element and cost more than the epilogue it replaces. */
     e = -g_epi_xe[tk] - (int)w->sexp[row];      /* int arithmetic, no f32 work */
-    LZ_FCX(LZ_FC_EPI, 2, 0, 0, 1, 0);          /* convert, two multiplies */
-    return (float)s * pow2f(e) * post;
+    /* post is a power of two at the one call site (ops_matmul.c passes
+       1.0f/256.0f = 2^-8), so pow2f(e) * post is pow2f(e - 8) and folding
+       it into the exponent drops a multiply. That fold is exact wherever
+       pow2f itself is exact; the exception is where pow2f(e) is still a
+       normal float but pow2f(e - 8) undershoots pow2f's -126 floor and
+       returns zero outright instead of the gradual-underflow denormal the
+       two-step form produces. g_epi_xe (epi_pack_act) and w->sexp
+       (lz_epi_prep) are each capped at 100 by their own packing loops, so
+       e can run all the way to -200 and cross that 8-wide band - fall
+       back to the two-step form there. */
+    if (e >= -126 && e - 8 < -126) {
+        LZ_FCX(LZ_FC_EPI, 2, 0, 0, 1, 0);      /* convert, two multiplies */
+        return (float)s * pow2f(e) * post;
+    }
+    LZ_FCX(LZ_FC_EPI, 1, 0, 0, 1, 0);          /* convert, one multiply */
+    return (float)s * pow2f(e - 8);
 }
 
 float epi_q8(const int32_t *accb, const float *xsb, const float *ws,
