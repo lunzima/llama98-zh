@@ -135,9 +135,9 @@ first_k_dense_replace 6 = n_layers → 六层全是 dense SwiGLU，无 MoE
 > 盘上的 `E:/LLM/models/kunkun-ce` 在几何上与定案一致
 > （`num_hidden_layers:6`、`intermediate_size:2048`、
 > `layer_types:[L,L,A,L,L,A]`、`first_k_dense_replace:6`），但仍有两处不同：
-> `use_subn:false`（定案是 True）与 `kda_gate_lower_bound:null`（定案未给这个字段）。
-> 这两处各自在 §3 的 G1（`lz_fwht_i32` 的敏感性一段）与 C6（`lz_softplus`）里
-> 单独写了，并在 §5 末尾的敏感性清单里给了数。
+> `kda_gate_lower_bound:null`（`docs/kunkun-ce-params.md` §1 未给这个字段定案）。
+> 它在 §3 的 C6（`lz_softplus`）里单独写了，并在 §5 末尾的敏感性清单里给了数。
+> `use_subn` 曾经也是一处不同，现已一致：检查点与定案都是 `True`。
 >
 > `.prof/budget/ce_sizing.py` 的数**不能直接引用**：它少算 28,672
 > （正好是 SubLN 每投影 norm，mlp `6×3072` + KDA `4×2560`），
@@ -858,8 +858,8 @@ subnormal 消掉了，`ops.h` 该宏上方注释是权威文本）。于是内�
 3. **判定**：**有独立内容（该写）**。8 条/蝶形 → 3.5 条/蝶形，外加
    省掉入口那趟 `memcpy`。
    **敏感性**：这一条整个建立在 `use_subn=1` 上；`use_subn=0` 时
-   `subn_fwht_quant` 不被调用，本算子每 token 0 次（盘上的
-   `kunkun-ce` 检查点正是 `use_subn:false`）。
+   `subn_fwht_quant` 不被调用，本算子每 token 0 次。CE 定案与盘上的
+   `kunkun-ce` 检查点都是 `use_subn:True`，所以这条计数按 1 取。
 
 #### G2 `lz_fwht`（浮点，`ops.c`）
 
@@ -1128,7 +1128,8 @@ pass-1 尾声 / `subn_fwht_quant` / 注意力内含。它们单列是因为
   3.4k·T、`q8_round` 的 2.3k·T、`lz_exp_fixed` 的 3.2k·T、
   `lz_softmax` 的 1.6k·T），其余不随。表给了 `T`=0 与 `T`=1536 两列，
   换别的部署长度只需重算这五个系数。
-- **`use_subn`**：定案是 `True`，但盘上的 `kunkun-ce` 检查点是 `false`。
+- **`use_subn`**：定案与盘上检查点现在都是 `True`，本表按 1 取，所以它不再是
+  一处不确定性——留在这里是因为它的杠杆大，关掉会重排整张表。
   为 0 时 `subn_fwht_quant` 不被调用 → `lz_fwht_i32` 掉到 **0**
   （整条从队列消失），KDA 的 4 个投影 norm 与 FFN 的 3 个投影 norm 换成
   每层 2 个 pre-LN → `lz_rmsnorm` 输出环从 30,464 元素降到约 8,700，
