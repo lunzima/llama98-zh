@@ -274,7 +274,7 @@ const lz_rowfn LZ_ROW_Q8[LZ_ROW_N] = {
 static int q8_fixed_epi(const LZTensor *w, int in_dim, int nb, int nt) {
     if (lz_epi_mode() && !lz_epi_ready(w)) lz_epi_prep((LZTensor *)w, in_dim);
     return lz_epi_mode() && lz_epi_ready(w) && nb <= LZ_EPI_MAX_NG
-           && nt <= LZ_BATCH_MAX;
+           && nt <= LZ_BATCH_MAX && lz_epi_post_e(w) != LZ_EPI_POST_NA;
 }
 
 void matmul_q8_impl(float *o, const int8_t *xq, const float *xqs,
@@ -286,6 +286,9 @@ void matmul_q8_impl(float *o, const int8_t *xq, const float *xqs,
     lz_rowfn row;
     /* Same predicate as the float epilogue - see q8_fixed_epi. */
     int fixed_epi = q8_fixed_epi(w, in_dim, nb, nt);
+    /* 2^-8, the kernels' x256 undone - taken from the same place the
+       fixed epilogue takes its exponent fold, not spelled out again. */
+    float post = pow2f(lz_epi_post_e(w));
 
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
     if (fixed_epi) epi_pack_act(xqs, nb, nt);
@@ -329,10 +332,9 @@ void matmul_q8_impl(float *o, const int8_t *xq, const float *xqs,
         if (lz_cpu_has_mmx()) _mm_empty();
         for (tk = 0; tk < nt; tk++)
             o[(size_t)tk * out_dim + i] = fixed_epi
-                ? epi_fixed(g_acc32 + (size_t)tk * nb, w, i, tk, nb, r,
-                            1.0f / 256.0f)
+                ? epi_fixed(g_acc32 + (size_t)tk * nb, w, i, tk, nb, r)
                 : epi_q8(g_acc32 + (size_t)tk * nb, xqs + (size_t)tk * nb,
-                         ws, nb, r, 1.0f / 256.0f);
+                         ws, nb, r, post);
     }
 }
 
@@ -1271,6 +1273,37 @@ const lz_rowfn LZ_ROW_Q16[LZ_ROW_N] = {
 #endif /* __WATCOMC__ */
 };
 
+/* Fixed-epi predicate for Q16_0. Its own function rather than a call to
+   q8_fixed_epi, for the reason q41_fixed_epi's comment gives at length:
+   the bound behind LZ_EPI_MAX_NG is derived per format, and coupling two
+   tiers through one predicate lets a change to either move the other in
+   silence. Q16_0 needs no zero plane - it is symmetric, like Q8_0 - so
+   lz_epi_ready alone is the readiness question.
+
+   BOUND, derived against epi_fixed_raw's own MAC rather than restated
+   from Q8_0's: lz_epi_mac sums ng products of an int32 accumulator by an
+   int16 x int16 mantissa product, and LZ_EPI_MAX_NG = 64 is exactly
+   where 64 * 2^27 * 2^30 fills int64. The Q16_0 kernels return an
+   UNSCALED dot of int16 weights against int8 activations, so
+   |acc| <= 32767 * 127 * 32 = 133,151,488 < 2^27 - the same place
+   Q8_0's 127*127*32*256 = 132,111,616 lands, because the int16 weights
+   are 256x larger in magnitude exactly where Q8_0 has its 256x fold.
+   The other factor is unchanged: epi_pack_act and epi_prep_plane both
+   clamp to +-32767, so |xq_i16 * sq| <= 2^30 whatever the format. So
+   nothing in lz_epi_mac's derivation moves and LZ_EPI_MAX_NG carries
+   over as-is.
+
+   MEASURED on kmr20, both gate corpora, instrumented build: max |acc32|
+   27,083,396 (zh) / 23,290,399 (en) against the 133,151,488 ceiling -
+   4.9x of headroom - over three shapes (512x64 gs=512, 512x16 gs=512,
+   64x1024 gs=64). The weight plane does reach the full +-32767, so the
+   derivation above is not vacuous on this checkpoint. */
+static int q16_fixed_epi(const LZTensor *w, int in_dim, int nb, int nt) {
+    if (lz_epi_mode() && !lz_epi_ready(w)) lz_epi_prep((LZTensor *)w, in_dim);
+    return lz_epi_mode() && lz_epi_ready(w) && nb <= LZ_EPI_MAX_NG
+           && nt <= LZ_BATCH_MAX && lz_epi_post_e(w) != LZ_EPI_POST_NA;
+}
+
 void matmul_q16_impl(float *o, const int8_t *xq, const float *xqs,
                             const LZTensor *w, int in_dim, int out_dim, int nt) {
     int i, tk;
@@ -1280,6 +1313,11 @@ void matmul_q16_impl(float *o, const int8_t *xq, const float *xqs,
     const int16_t *wend = wbase + (size_t)w->n;   /* prefetch upper bound */
     int t;
     lz_rowfn row;
+    int fixed_epi = q16_fixed_epi(w, in_dim, ng, nt);
+    /* 1.0: the Q16_0 kernels do not scale by 256 the way the Q8_0 ones
+       do. Read from lz_epi_post_e, not written here, so the float exit
+       and the fixed one cannot end up on different scalings. */
+    float post = pow2f(lz_epi_post_e(w));
 
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
     row = lz_row_pick(LZ_ROW_Q16);
@@ -1298,18 +1336,23 @@ void matmul_q16_impl(float *o, const int8_t *xq, const float *xqs,
         return;
     }
     for (t = 0; t < nt * in_dim; t++) g_xw[t] = (int16_t)xq[t];
+    /* Once per token, before the row loop: a per-row rebuild would cost
+       what it saves. Same call the Q8_0 path makes. */
+    if (fixed_epi) epi_pack_act(xqs, ng, nt);
 
     for (i = 0; i < out_dim; i++) {
         const int16_t *wr = wbase + (size_t)i * in_dim;
         const float *ws = w->scale + (size_t)(i * in_dim) / w->gs;
         row(g_acc32, wr, NULL, g_xw, ng, nt, in_dim, wend, NULL);
         if (lz_cpu_has_mmx()) _mm_empty();                    /* exit MMX state before x87 */
-        /* post = 1.0: the Q16_0 kernels do not scale by 256 the way the
-           Q8_0 ones do. Otherwise term for term the same epilogue. */
+        /* Term for term the same epilogue as Q8_0's, fixed branch
+           included: Q16_0 is symmetric, so it belongs to the
+           lz_epi_prep / epi_fixed_raw family and not to epi_q41's. */
         for (tk = 0; tk < nt; tk++)
-            o[(size_t)tk * out_dim + i] =
-                epi_q8(g_acc32 + (size_t)tk * ng, xqs + (size_t)tk * ng,
-                       ws, ng, r, 1.0f);
+            o[(size_t)tk * out_dim + i] = fixed_epi
+                ? epi_fixed(g_acc32 + (size_t)tk * ng, w, i, tk, ng, r)
+                : epi_q8(g_acc32 + (size_t)tk * ng, xqs + (size_t)tk * ng,
+                         ws, ng, r, post);
     }
 }
 

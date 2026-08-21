@@ -61,12 +61,22 @@ void matmul_scalar_ref(float *o, const int8_t *xq, const float *xqs,
                        const LZTensor *w, int in_dim, int out_dim, int nt);
 
 /* ---- epilogue functions (defined in ops.c, called from here) --------- */
+/* The row kernels' product scaling for the format `w` carries, as a
+   power of two: -8 for Q8_0 (its kernels return 256x the true product),
+   0 for Q16_0 (int16 weights, nothing folded in). Both epilogues take
+   their factor from here - the float one as pow2f() of it, the fixed
+   one folded into its exponent on both exits - so the two cannot
+   disagree and a scaling the kernels do not produce cannot be written
+   down. LZ_EPI_POST_NA for any other format; the fixed-epi predicates
+   check for it and keep the float epilogue instead. */
+#define LZ_EPI_POST_NA 64
+int lz_epi_post_e(const LZTensor *w);
 float epi_q8(const int32_t *accb, const float *xsb, const float *ws,
              int ng, int r, float post);
 float epi_q41(const int32_t *accb, const float *xsb, const float *xgb,
               const float *wd, const float *wm, int ng, int r);
 float epi_fixed(const int32_t *accb, const LZTensor *w, int row,
-                int tk, int ng, int r, float post);
+                int tk, int ng, int r);
 /* int-pipeline milestone 2 (docs/int-pipeline-project.md #2.1): both of
    epi_q41's terms joined in the integer domain, one float materialized
    per output element. `ng`/`r` are epi_q41's own convention (ng =

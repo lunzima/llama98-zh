@@ -1233,26 +1233,50 @@ static long long epi_fixed_raw(const int32_t *accb, const LZTensor *w,
     return lz_epi_mac(accb, g_epi_m, ng);
 }
 
+/* How much the row kernels feeding this epilogue family scale their
+   products, as a power of two. Q8_0's kernels widen int8 to int16 and
+   return 256x the true product; Q16_0's weights are already int16 and
+   theirs return it unscaled.
+
+   One source for both epilogues - the float one's `post` factor and the
+   fixed one's exponent fold - and an EXPONENT rather than a float
+   factor. That is what makes a wrong scaling inexpressible instead of
+   merely unused: epi_fixed has no `post` parameter to be handed a value
+   it then ignores on one of its two exits, only this integer, which
+   both exits fold into the same pow2f argument. LZ_EPI_POST_NA for a
+   format with no entry here; the fixed-epi predicates refuse those
+   rather than inventing an exponent, and pow2f(e + LZ_EPI_POST_NA)
+   saturates high enough to be unmissable if one ever slips past. */
+int lz_epi_post_e(const LZTensor *w) {
+    if (!w) return LZ_EPI_POST_NA;
+    switch (w->dtype) {
+        case LZ_FMT_Q8_0:  return -8;
+        case LZ_FMT_Q16_0: return 0;
+        default:           return LZ_EPI_POST_NA;
+    }
+}
+
 float epi_fixed(const int32_t *accb, const LZTensor *w, int row,
-                       int tk, int ng, int r, float post) {
-    int e;
+                       int tk, int ng, int r) {
+    int e, pe = lz_epi_post_e(w);
     long long s = epi_fixed_raw(accb, w, row, tk, ng, r, &e);
-    /* post is a power of two at the one call site (ops_matmul.c passes
-       1.0f/256.0f = 2^-8), so pow2f(e) * post is pow2f(e - 8) and folding
-       it into the exponent drops a multiply. That fold is exact wherever
-       pow2f itself is exact; the exception is where pow2f(e) is still a
-       normal float but pow2f(e - 8) undershoots pow2f's -126 floor and
-       returns zero outright instead of the gradual-underflow denormal the
-       two-step form produces. g_epi_xe (epi_pack_act) and w->sexp
-       (lz_epi_prep) are each capped at 100 by their own packing loops, so
-       e can run all the way to -200 and cross that 8-wide band - fall
-       back to the two-step form there. */
-    if (e >= -126 && e - 8 < -126) {
+    /* The kernels' scaling is a power of two, so pow2f(e) * 2^pe is
+       pow2f(e + pe) and folding it into the exponent drops a multiply.
+       That fold is exact wherever pow2f itself is exact; the exception
+       is where pow2f(e) is still a normal float but pow2f(e + pe)
+       undershoots pow2f's -126 floor and returns zero outright instead
+       of the gradual-underflow denormal the two-step form produces.
+       g_epi_xe (epi_pack_act) and w->sexp (lz_epi_prep) are each capped
+       at 100 by their own packing loops, so e can run all the way to
+       -200 and cross that band - fall back to the two-step form there.
+       Both exits read the same pe, so neither can carry a scaling the
+       other does not. */
+    if (e >= -126 && e + pe < -126) {
         LZ_FCX(LZ_FC_EPI, 2, 0, 0, 1, 0);      /* convert, two multiplies */
-        return (float)s * pow2f(e) * post;
+        return (float)s * pow2f(e) * pow2f(pe);
     }
     LZ_FCX(LZ_FC_EPI, 1, 0, 0, 1, 0);          /* convert, one multiply */
-    return (float)s * pow2f(e - 8);
+    return (float)s * pow2f(e + pe);
 }
 
 /* ---- exponent alignment primitive (int pipeline project, batch 1 #1) --
@@ -1392,12 +1416,21 @@ static int32_t epi_align_i16(long long s, int e, int target_e, int bound) {
    producers it was meant to prove out (kda_q/k/v_proj) are q6_1 on the
    checkpoint this project measures, so epi_fixed never runs for them and
    they reach epi_align_i16 through epi_q41_align_i16 instead. This one
-   waits for a Q8_0 producer feeding an int16 consumer. */
+   waits for a Q8_0 or Q16_0 producer feeding an int16 consumer.
+
+   epi_align_i16 reads its (s, e) pair as `s * 2^(e-8)`, the convention
+   from when Q8_0 was the only format that could reach it and its x256
+   was still uncancelled. The value here is `s * 2^(e + pe)`, so the
+   pair handed over is (s, e + pe + 8) - not a fudge factor, the same
+   quantity written in the primitive's units, exactly as
+   epi_q41_align_i16's `target + 8` is. Taking pe from lz_epi_post_e
+   rather than assuming Q8_0's is what keeps this exit from acquiring
+   the 256x error epi_fixed's `post` parameter used to make possible. */
 int32_t epi_fixed_align_i16(const int32_t *accb, const LZTensor *w, int row,
                              int tk, int ng, int r, int target_e, int bound) {
     int e;
     long long s = epi_fixed_raw(accb, w, row, tk, ng, r, &e);
-    return epi_align_i16(s, e, target_e, bound);
+    return epi_align_i16(s, e + lz_epi_post_e(w) + 8, target_e, bound);
 }
 
 float epi_q8(const int32_t *accb, const float *xsb, const float *ws,
