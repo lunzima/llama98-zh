@@ -49,11 +49,14 @@
 #
 # TIER LIST (docs/fixed-tier-precision-audit.md's cross-check of
 # cli_main.c's --help text against ops_sched.c's lz_*_select functions -
-# 7 independent axes, 12 non-auto values, plus --fixed all as an
-# 8th/group axis; nothing missing):
+# 7 independent axes, plus --fixed all as an 8th/group axis, plus the
+# shipping default itself (zero flags) as a distinct invocation shape;
+# nothing missing):
 #
 #   (float baseline, control - see below)
 #   --recur-write fixed
+#   --recur-write float        (the newly-reachable inverse isolation -
+#                               see ISOLATION below)
 #   --conv-write fixed
 #   --attn-write scoring
 #   --attn-write wsum
@@ -65,30 +68,41 @@
 #   --norm-write int       (the original RCA's tier)
 #   --scalar-fixed fixed
 #   --fixed all
+#   (shipping default, zero flags)
 #
-# BASELINE: --scalar-fixed defaults to "fixed" even under auto -
-# lz_scalar_mode() ignores hardware and returns 1 unless told "float"
-# explicitly (every other axis's auto asks lz_soft_float_target(), which
-# resolves to float on any SSE-capable host, but scalar's auto does not
-# ask). So "pass no flags" is NOT a float baseline; the baseline row
-# below passes --scalar-fixed float explicitly, same as every other row
-# does to isolate its own tier (see ISOLATION below). It runs FIRST and
-# is reported as a distinct FAIL if it ever diverges: every other row's
-# meaning depends on gcc and Watcom agreeing on the float path they both
-# fall back to, so a baseline divergence makes the rest of the run
-# uninterpretable and the gate stops there instead of printing 24 more
-# lines that cannot be trusted either way.
+# BASELINE: the shipping build is fixed-point unconditionally now - none
+# of the seven tiers' `auto` asks hardware any more (ops_sched.c's
+# retirement note on lz_soft_float_target; --scalar-fixed's auto was
+# already this way, commit 508e015, before the other six followed it
+# here). So "pass no flags" is NOT a float baseline for ANY axis, let
+# alone just scalar - the baseline row below passes --fixed off, which
+# forces all seven explicitly (recurrence included: --recur-write gained
+# an explicit `float` value in the same change that retired the
+# hardware predicate, so it no longer needs the special-casing this
+# script used to carry for it). It runs FIRST and is reported as a
+# distinct FAIL if it ever diverges: every other row's meaning depends
+# on gcc and Watcom agreeing on the float path they both fall back to,
+# so a baseline divergence makes the rest of the run uninterpretable and
+# the gate stops there instead of printing more lines that cannot be
+# trusted either way.
 #
-# ISOLATION: every non-baseline, non-group tier row also passes
-# --scalar-fixed float alongside its own tier flag. Every OTHER axis's
-# auto already resolves to float on this host (see above), so this is
-# only needed for scalar - but it is added uniformly so the isolation
-# rule does not depend on which host runs the gate. --scalar-fixed fixed
-# and --fixed all are the two exceptions: they do not get the extra
-# flag because scalar being fixed (or everything being fixed) IS what
-# they are testing, and a per-tier flag WINS over --fixed regardless of
-# argument order, so appending --scalar-fixed float to a --fixed all row
-# would silently re-float scalar and make that row test only six axes.
+# ISOLATION: every non-baseline, non-group, non-default tier row also
+# passes --fixed off alongside its own tier flag, forcing every OTHER
+# axis to float so only the row's own tier is under test - true for all
+# seven now, not just scalar (a per-tier flag WINS over --fixed
+# regardless of argument order, so "$tier --fixed off" leaves $tier at
+# its own explicit value and floats everything else). --recur-write
+# float gets the INVERSE isolation instead (--fixed all, not --fixed
+# off): it is the one row testing an axis's float path in isolation
+# rather than its fixed path, so the other six need to be FIXED around
+# it, not float - the mirror image of every other row, and the
+# combination "one axis float, six fixed" was never reachable before
+# --recur-write gained an explicit float value (previously every SSE
+# host's auto put all seven on float together, so one-float-among-
+# six-fixed was untested). --fixed all and the shipping default are the
+# two configurations that get no isolation flag at all, because "every
+# axis fixed" (however it is spelled - explicitly or via the new
+# unconditional auto) IS what they are testing.
 #
 # --dump-nll is unusable for cross-compiler comparison: its exp()/log()
 # are MinGW libm vs Watcom libm and differ even when the engine's raw
@@ -215,7 +229,7 @@ run_one() {
 # ---- baseline first, and its failure reported distinctly: every other
 # row below assumes gcc and Watcom already agree on the float path they
 # both fall back to for the axes the row under test does not touch. ----
-BASELINE="--scalar-fixed float"
+BASELINE="--fixed off"
 echo "-- baseline (float control) --"
 run_one "$BASELINE" zh "$TOK_ZH"
 BASE_ZH=$?
@@ -227,9 +241,10 @@ if [ "$BASE_ZH" -ne 0 ] || [ "$BASE_EN" -ne 0 ]; then
     exit 1
 fi
 
-# Isolated: tested tier plus --scalar-fixed float so scalar (the one
-# axis whose auto is not a float-resolving auto) cannot also move and
-# blur attribution. Order matches --help / the audit's table.
+# Isolated: tested tier plus --fixed off so every OTHER axis is forced
+# to float and cannot also move and blur attribution - true uniformly
+# now (--fixed off reaches all seven, recurrence included). Order
+# matches --help / the audit's table.
 TIERS_ISOLATED=(
     "--recur-write fixed"
     "--conv-write fixed"
@@ -241,19 +256,32 @@ TIERS_ISOLATED=(
     "--sig-write fixed"
     "--norm-write fixed"
     "--norm-write int"
+    "--scalar-fixed fixed"
 )
 for tier in "${TIERS_ISOLATED[@]}"; do
-    run_one "$tier --scalar-fixed float" zh "$TOK_ZH"
-    run_one "$tier --scalar-fixed float" en "$TOK_EN"
+    run_one "$tier --fixed off" zh "$TOK_ZH"
+    run_one "$tier --fixed off" en "$TOK_EN"
 done
 
-# Group/scalar-self tiers: NOT isolated with an extra --scalar-fixed
-# float - that would win over --fixed all's own group setting (per-tier
-# flags win regardless of order) and silently test six axes instead of
-# seven, or make --scalar-fixed fixed test nothing at all.
+# Inverse isolation: --recur-write float is the one row testing an
+# axis's FLOAT path standing alone among six FIXED siblings, so it needs
+# --fixed all around it instead of --fixed off - the combination "one
+# axis float, the rest fixed" that only became reachable once
+# --recur-write gained an explicit float value (see this script's own
+# header comment).
+run_one "--recur-write float --fixed all" zh "$TOK_ZH"
+run_one "--recur-write float --fixed all" en "$TOK_EN"
+
+# --fixed all and the shipping default: NOT isolated with any extra
+# flag. "Every axis fixed" (spelled explicitly, or reached by the
+# unconditional auto every axis now has) IS what these two rows test,
+# and either isolation flag would just restate the row itself. Run as
+# two entries so a divergence names which invocation shape broke,
+# though both are expected to resolve identically (verified elsewhere:
+# --dump-all-logits byte-identical between the two on both toolchains).
 TIERS_ASIS=(
-    "--scalar-fixed fixed"
     "--fixed all"
+    ""
 )
 for tier in "${TIERS_ASIS[@]}"; do
     run_one "$tier" zh "$TOK_ZH"
