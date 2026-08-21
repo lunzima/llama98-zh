@@ -74,7 +74,9 @@ epi_q41              5,089,280 ops      101,376 次   (Q4_1 + Q6_1 + T2，
   判真时才跑，覆盖的权重面上限是 7.1%，而它的实际 f32 占比（0.55%，见
   §0）比这个上限还低一个数量级——因为 kmr20 上大多数 Q8_0 张量走的是
   `epi_q8`（对称，但从不进 `epi_fixed` 的整数分支），真正落进 `epi_fixed`
-  的调用点更少。
+  的调用点更少。（这是立项时的快照。milestone 4 之后 `epi_fixed` 也服务
+  q16_0，见 §2.6；本节表格与 §1.1 的分类列都保留立项时的读数，各档的
+  变化写在对应的 milestone 段里。）
 - 用扩展过的 `.prof/dtype_probe_kda.c`（新增 `kda_f_a/f_b/b_proj`、
   `gate_proj`/`up_proj`/`down_proj`、全部 MoE 张量的打印行，改动只在
   `.prof/` 下，gitignore 覆盖，不进仓库）逐层打印，确认了旧版 §1 表里
@@ -132,10 +134,10 @@ src/forward.c`，48 处调用点合并 `use_subn` if/else 后是 33 条链路。
 | 9 | kda_k_proj | `s->kda_k` | 1：`lz_causal_conv1d_step`(`forward.c:2341`) | 同上 |
 | 10 | kda_v_proj | `s->kda_v` | 1：`lz_causal_conv1d_step`(`forward.c:2346`) | 同上 |
 | 11 | kda_g_proj | `s->zbuf` | 1：门控输入，同 #4 | producer 实测 **q8_0**（会进 `epi_fixed`）——本节推迟项里触发条件最松的一条，见 §9.1/§2.5 |
-| 12 | kda_f_a_proj | `s->kda_gate_lat` | 1：`lz_matmul_w` 内部的量化(`forward.c:2362`，喂 kda_f_b_proj) | **已退出优先级**——两端实测 `q16_0`，走 `epi_q8` 不走 `epi_fixed`，见 §2.3 |
-| 13 | kda_b_proj | `s->bvec` | 1：`lz_sigmoid`，同 #6 | producer 实测 **q16_0**（不是 model.h 暗示的 Q8）；消费者仍是二阶依赖——推迟，见 §9.1 |
+| 12 | kda_f_a_proj | `s->kda_gate_lat` | 1：`lz_matmul_w` 内部的量化(`forward.c:2362`，喂 kda_f_b_proj) | 两端实测 `q16_0`；milestone 4 之后 producer 侧走 `epi_fixed` 的定点分支，但消费者是 `lz_quantize_q8` 的 SIMD round 路径（§5 第 3 条），int 出口仍未接，见 §2.6 |
+| 13 | kda_b_proj | `s->bvec` | 1：`lz_sigmoid`，同 #6 | producer 实测 **q16_0**（不是 model.h 暗示的 Q8），milestone 4 之后走 `epi_fixed`；消费者仍是二阶依赖（`sigmoid_q15` 的入参是 float）——推迟，见 §9.1/§2.6 |
 | 14 | kda_o_proj | `s->xb2` | 1：残差加 | 结构性 float；producer 实测 q8_0，但终点在残差加——不在范围 |
-| 15 | moe_gate_w | `s->moe_router_logits` | 1：`lz_moe_route`(`forward.c:2674`，softmax+top-k) | producer 实测 **q16_0**，走 `epi_q8`——推迟，见 §9.2 |
+| 15 | moe_gate_w | `s->moe_router_logits` | 1：`lz_moe_route`(`forward.c:2674`，softmax+top-k) | producer 实测 **q16_0**，milestone 4 之后走 `epi_fixed` 的定点分支——§9.2 的成本路已满足，风险路仍未测，见 §9.2/§2.6 |
 | 16 | moe_down_proj | `s->moe_lat_x` | 1（每 token 一次，w1/w3 共享同一次量化结果）：`lz_quantize_q8`(`forward.c:2708`) | producer 实测 q8_0，consumer q4_1/q6_1，非对称——推迟，见 §9.3 |
 | 17 | moe_expert_w1[ei] | `s->moe_h1` | 1：SiLU 组合 `s->moe_h1[vv]=lz_silu(...)*s->moe_h3[vv]`(`forward.c:2714`) | **候选**（SwiGLU，routed）——producer 实测 q4_1，见 §2.4 |
 | 18 | moe_expert_w3[ei] | `s->moe_h3` | 1：同上 SiLU 组合 | 同上 |
@@ -398,6 +400,66 @@ matmul 链路（#16）、z 门控/avec/bvec 家族（#4/#5/#6/#11/#13）、route
 int-in 入口（§9.1 已经分析过这部分独立于哪个 producer）。这是"再评估
 触发条件"的一处具体化，不改变 §9 的整体结论（仍然是推迟，不是否决）。
 
+### 2.6 q16_0 的定点 epilogue（milestone 4）
+
+**状态：已交付（`c1a9ade`）。** q16_0 是最后一个完全没有定点出口的权重
+格式——`matmul_q16_impl` 无条件调 `epi_q8`，既没有 `fixed_epi` 判据也没有
+定点分支。它是对称格式（`gs` 个 int16 + 1 个 f32 scale，无零点项，
+`model.h:55`/`:92`），所以属于 `lz_epi_prep`/`epi_fixed_raw`/
+`epi_align_i16` 这一族，不是 milestone 2/3 重建的 `epi_q41` 那一族；
+`lz_epi_prep` 本来就不看 dtype（§2.1 已经指出它是被调用点锁窄的，不是被
+实现锁窄的），所以这一档没有新写任何设施。
+
+**先要拆掉的陷阱**：`epi_fixed` 的 `float post` 参数只有一个出口读它。
+快路径把 `-8` 硬编进指数（`pow2f(e - 8)`），只有 denormal 回退才乘
+`post`。两者一致仅仅因为当时唯一的调用点传的就是 `2^-8`。q16_0 的 row
+kernel 不像 Q8_0 那样把乘积放大 256 倍，必须传 `1.0`——在快路径上会静静
+地差 256 倍，在慢路径上反而是对的。修法不是"把两个分支都改对"，而是让
+错的 post 写不出来：新的 `lz_epi_post_e(w)` 按格式返回一个整数指数
+（Q8_0 → -8，Q16_0 → 0，其余 → `LZ_EPI_POST_NA`），`epi_fixed` 不再有
+post 参数，两个出口折的是同一个整数；两个 matmul 调用点喂给浮点 epilogue
+的 `post` 也改成 `pow2f(lz_epi_post_e(w))`，于是浮点档和定点档也不可能落
+在不同的缩放上。`epi_fixed_align_i16` 的 int16 出口原本把 Q8_0 的 `-8`
+硬编在 `epi_align_i16` 的约定里，同样改成从这里取。
+
+**累加器的界，按 `epi_fixed_raw` 自己的 MAC 重推**：q16_0 的 kernel 返回
+未放大的 int16×int8 点积，`|acc| <= 32767*127*32 = 133,151,488 < 2^27`，
+和 Q8_0 的 `127*127*32*256 = 132,111,616` 落在同一处——int16 权重大 256
+倍的位置，正是 Q8_0 折进 256 倍的位置；另一个因子（`epi_pack_act` 与
+`epi_prep_plane` 都钳到 ±32767，`|xq_i16 * sq| <= 2^30`）与格式无关。所以
+`lz_epi_mac` 的推导一行不动，`LZ_EPI_MAX_NG = 64` 原样成立。**实测**
+（kmr20，两条闸门语料，插桩隔离构建）：max `|acc32|` 27,083,396（zh）/
+23,290,399（en），对 133,151,488 有 4.9 倍余量，三种形状（512×64 gs=512、
+512×16 gs=512、64×1024 gs=64）全覆盖，权重面确实取到满量程 ±32767，所以
+上面的推导不是空的；进浮点转换的 `|int64 s|` 最大 6.50e16 = 2^55.9，对
+int64 的 2^63。
+
+**实测收益**（kmr20，出货默认配置）：总量 1,207,894 → 1,135,426
+（**−72,468，−6.00%**），dequant epilogue 286,992 → 214,524，差值全部落在
+这一行；en 语料 1,228,151 → 1,155,683，同一个 −72,468。**q16_0 只占权重面
+的 0.5%，收益却占 census 的 6%**——因为 epilogue 是按**输出元素**记账的，
+而 `kda_f_b_proj` 是 64×1024：它每 token 6,144 次 epilogue 调用，和它的
+权重字节数完全不成比例。权重面份额不是 epilogue 成本份额的代理量。
+
+独立重推导（数调用次数，不看 LZ_FCX 参数）：插桩计数器给出每 token 6,752
+次 q16_0 epilogue 元素调用（4,071,456 / 603），按形状拆成 384 + 224 +
+6,144；`epi_q8` 在 ng=16/r=16 上是 51 个 f32 op、在 ng=2/r=2 上是 9 个，
+`epi_fixed` 都是 2 个；`epi_pack_act` 新增每次 matmul 调用 `nt*nb` 次乘法，
+合计每 token 332。`608*49 + 6144*7 − 332 = 72,468`，与 census 差值逐位
+相同。
+
+**int16 出口没有接，理由是消费者而不是取舍**：四个 q16_0 角色的下游全是
+浮点超越函数或一次重量化。`s->bvec`（#13）和 `s->kda_gate` 的终点都是
+`lz_sigmoid`，而树里两个定点 sigmoid 入口（`sigmoid_q15`、`sigmoid_q15_t`，
+`ops_quant.c:504`/`:538`）**参数都是 float**——§9.1 说的"只缺一个 int-in
+入口"到今天仍然字面成立，而那个入口是它自己的设计任务；`s->kda_gate` 还
+要先和 F32 的 `dt_bias` 逐通道相加。`s->kda_gate_lat`（#12）的消费者是
+`lz_matmul_w` 内部的 `lz_quantize_q8`，§5 第 3 条明确禁止用新写的标量整数
+循环替换现成的 SIMD round 路径。`s->moe_router_logits`（#15）属于 §9.2，
+它的风险路（量化噪声会不会翻转 top-k）没有人量过。形状上今天就能接的两条
+一共只有每 token 480 个元素、0.08% 的 census。接一个没有消费者的出口就是
+`f49da09`（§5 第 2 条）。
+
 ## 3. 排序（重排后）
 
 1. **`epi_q41` milestone 1**（§2.1）——新的头号目标。理由：它覆盖的
@@ -412,10 +474,15 @@ int-in 入口（§9.1 已经分析过这部分独立于哪个 producer）。这�
 3. **`epi_q41` milestone 2/3**（§2.1）——**两档都已交付**（见 §2.1 的两
    段状态）：milestone 2 是浮点出口下的整数合并，milestone 3 是 int16
    出口加上第一个真实消费者（#8/#9/#10 的那条复活路径）。
-4. **#16（`moe_down_proj → expert`）**——不变：需要 milestone 2 级别的
+4. **q16_0 的定点 epilogue（milestone 4）**（§2.6）——**已交付**。排在
+   这里而不是更前面，是因为它当初看起来只值 0.5% 的权重面；实测是
+   census 的 6%，因为 epilogue 按输出元素而不是按权重字节记账。它同时
+   拆掉了 `epi_fixed` 那个只有一个分支读的 `post` 参数，并让 §9.2 的成本
+   路成立。
+5. **#16（`moe_down_proj → expert`）**——不变：需要 milestone 2 级别的
    零点项设计（这里是 producer 侧对称的 q8_0，consumer 侧非对称，和
    `epi_q41` 自己的非对称问题是同构但不同的两个零点设计,不能指望共用）。
-5. **#4/#5/#6/#11/#13、#15、#12**——推迟，触发条件见 §9（§2.5 补充了
+6. **#4/#5/#6/#11/#13、#15、#12**——推迟，触发条件见 §9（§2.5 补充了
    #11 的一处细化）。#3/#8/#9/#10 单独列出：#3 仍然没有触发条件，而且
    现在的理由比"checkpoint 特征"更硬——`in_proj_qkv` 在这棵树的所有
    checkpoint 上要么 n=0 要么 f32，两种都到不了 `epi_q41`（§2.1
@@ -461,6 +528,21 @@ int-in 入口（§9.1 已经分析过这部分独立于哪个 producer）。这�
 - no-go 会是什么样：三个 producer 里只有一部分能走 int（那样得整体退回
   float，代码里 `conv_int` 这个全或无的标志就是为此），或者 int16 在
   `LZ_CONV_ES` 下发生钳位（实测 0 次，max 13,824 / 界 16,384）。
+
+**q16_0 的定点 epilogue（milestone 4）**
+- go：`LZ_EPI_MAX_NG` 的界按 `epi_fixed_raw` 自己的 MAC 对 q16_0 重新
+  推导**并**在真实 checkpoint 上实测（两者缺一不可——推导说界在哪，实测
+  说数据离界多远）；30 行 `fixed_tier_xcompiler_gate.sh` 在 kmr20 和
+  kunmoe-v2-t2-probe 上全 PASS，在 `git archive` 的隔离检出上跑；census
+  降幅由独立计数器重推导；配对 NLL/argmax/top-5 通过；有一个能区分"跑了
+  而且一致"和"根本没跑"的正对照。
+- 这一档的正对照形状值得抄：把新判据强制为假重编一次，如果结果与改动前
+  的出货默认**逐位相同、census 也逐位相同**，那么全部差异都归于这次接线，
+  没有一点属于前置的重构。这比只看"默认配置动了"强，因为它同时钉死了
+  重构那一半没有偷偷改数。
+- no-go：界对某个真实 q16_0 张量不成立；或者 census 降幅与独立推导对不
+  上；或者 `--epi-write float`/`--fixed off`/`--kernel ref` 里任何一个不
+  再与改动前逐位相同（那说明改动漏到了定点档之外）。
 
 其余（#3/#8/#9/#10 旧分析、SwiGLU、#16、#12）的 go/no-go 判据与旧版相同，
 §2.3/§2.4/§2.5 已经标出了各自现在依赖的前置条件，此处不重复。
@@ -605,6 +687,12 @@ int-in 入口（§9.1 已经分析过这部分独立于哪个 producer）。这�
   （§2.1），不是原来设想的 #3。理由不变：`sigmoid_q15`/`sigmoid_q15_t`
   已经是树里现成的、被两处真实调用的 Q15 定点 sigmoid 实现
   （`forward.c:1771`、`ops.c:1870`），缺的只是一个 int-in 入口。
+  **milestone 3/4 之后的状态**：这个触发条件的前半（原语在真实消费者上
+  接线并验证）已经由 milestone 3 满足，#13 的 producer `kda_b_proj` 也
+  已经在 `epi_fixed` 的定点分支上（milestone 4，§2.6）。剩下的确实只有
+  那个 int-in 入口，而它不是接线：`sigmoid_q15`/`sigmoid_q15_t` 的入参
+  都是 `float`（`ops_quant.c:504`/`:538`），要接的是一个取 `(int16,
+  target_e)` 的新入口，含它自己的坐标推导与判据。
 - **`lz_rmsnorm_gated` 的 z 门控侧（#4/#11）**：**本次重排细化**——#11
   （`kda_g_proj → zbuf`）的 producer 实测是 **q8_0**，本来就会经过
   `epi_fixed`（不需要等 `epi_q41`）；#4（`in_proj_z → zbuf`）的 producer
@@ -627,7 +715,11 @@ producer `moe_gate_w` 实测是 **q16_0**（§1），走 `epi_q8` 不走
 
 - **成本路**：给 `epi_q8`（q16_0 的唯一出口）设计一个定点/int 分支——
   这本身没有在 §2.1/§2.2 的范围内（`epi_q8` 和 `epi_fixed`/`epi_q41`
-  是三个不同的函数），是一个平行的小项目，不是免费搭车。
+  是三个不同的函数），是一个平行的小项目，不是免费搭车。**已满足
+  （milestone 4，§2.6）**，而且比这里设想的便宜：不需要给 `epi_q8` 新写
+  分支，q16_0 是对称格式，直接接进现成的 `epi_fixed` 就行。所以 §9.2 已
+  够格重新排期。**但重新排期不等于可以接 int16 出口**：接出口要的是消费
+  者，而 `lz_moe_route` 的 top-k 仍然只有风险路能回答（下条）。
 - **风险路**：有人专门测过量化噪声是否会翻转 top-k 选择，证明"不翻转"
   或"翻转的频率不影响下游质量"——这条独立于成本路。
 
