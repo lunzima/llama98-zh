@@ -78,6 +78,16 @@ int32_t lz_dot32_q8_arm_asm(const int8_t *w, const int16_t *x);
 int32_t lz_dot32_q41_arm_asm(const unsigned char *p, const int16_t *x);
 int32_t lz_dot32_q61_arm_asm(const unsigned char *b4, const unsigned char *b2,
                              const int16_t *x);
+
+/* Attention's weighted-sum row pair (docs/arm-asm-audit.md F2), the one
+   leaf here that is not a matmul row: acc32[d] += rowA[d]*coef[0] +
+   rowB[d]*coef[1] over 32 lanes, in place. Owes lz_wsum_pair_ref
+   (src/ops_gdn.c) identity, not a tolerance - see the body's note on
+   SMLAW<y>. 145 instructions against gcc's 297 for the same 64
+   products. Same 4-byte precondition as the row kernels, on all three
+   pointers. */
+void lz_wsum_pair_arm_asm(const int8_t *rowA, const int8_t *rowB,
+                          const int16_t *coef, int32_t *acc32);
 #endif /* __arm__ && __GNUC__ */
 
 #ifdef __cplusplus

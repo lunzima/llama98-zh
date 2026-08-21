@@ -337,3 +337,78 @@ int32_t lz_dot32_q61_arm_asm(const unsigned char *b4, const unsigned char *b2,
     return a0;
 }
 #endif /* LZ_ARM_ASM_EXTERN */
+
+/* ---- attention weighted-sum row pair --------------------------------- */
+
+/* Not a row kernel: it accumulates a pair of int8 rows into a live
+   32-lane int32 accumulator, which is the SSM recurrence's shape rather
+   than matmul's (docs/arm-asm-audit.md F2). It sits here because the
+   byte-into-the-top-of-a-halfword trick below is the same one q8_0's
+   leaf uses, and two files would be two copies of it.
+
+   THE ONE THING C CANNOT REACH. q8_0's leaf can afford bytes scaled by
+   256 because its caller cancels the fold; this accumulator cannot -
+   its bound (512 rows x 4,161,409) already fills int32. ARMv5TE has no
+   SXTB, so gcc emits one ldrsb per element and one 32x32 mul. SMLAW<y>
+   closes the gap: it takes the TOP 32 bits of a 32x16 product, i.e. the
+   product shifted right by 16, so feeding it a coefficient pre-scaled
+   by 256 and a byte sitting at bit 8 of a halfword yields
+   (ck*256 * b*256) >> 16 = ck*b EXACTLY - the two 256s cancel in the
+   shift, and the byte needed no sign extension because bit 15 of the
+   halfword IS bit 7 of the byte. Two `and`s therefore unpack four
+   weights and four SMLAW instructions consume them: 17 instructions per
+   8 products against the 9 per 2 gcc emits.
+
+   Bit-identity is by construction: the same integer products land in
+   the same lanes, only the instruction forming them differs.
+
+   EXTRA PRECONDITION, as for the row kernels: rowA, rowB and acc32 must
+   be 4-byte aligned. The rows are the V cache plus a multiple of 32
+   (attn_kv_dim is a multiple of 32 - forward.c sizes the scale plane as
+   attn_kv_dim/32) and acc32 is an int32_t array.
+
+   Register map: r5 the 0xff00ff00 mask, r6/r7 the unpacked weight
+   pairs, r8-r11 four live accumulators. coef[0..1] arrive pre-shifted
+   from C: two instructions per PAIR against 64 products. */
+#if defined(LZ_ARM_ASM_EXTERN)
+#define LZ_WSUM_ARM_BLK                                       \
+    "ldmia  %[ac], {r8, r9, r10, r11}\n\t"                    \
+    "ldr    r6, [%[pa]], #4\n\t"                              \
+    "and    r7, r5, r6, lsl #8\n\t"                           \
+    "and    r6, r5, r6\n\t"                                   \
+    "smlawb r8,  %[ka], r7, r8\n\t"                           \
+    "smlawb r9,  %[ka], r6, r9\n\t"                           \
+    "smlawt r10, %[ka], r7, r10\n\t"                          \
+    "smlawt r11, %[ka], r6, r11\n\t"                          \
+    "ldr    r6, [%[pb]], #4\n\t"                              \
+    "and    r7, r5, r6, lsl #8\n\t"                           \
+    "and    r6, r5, r6\n\t"                                   \
+    "smlawb r8,  %[kb], r7, r8\n\t"                           \
+    "smlawb r9,  %[kb], r6, r9\n\t"                           \
+    "smlawt r10, %[kb], r7, r10\n\t"                          \
+    "smlawt r11, %[kb], r6, r11\n\t"                          \
+    "stmia  %[ac]!, {r8, r9, r10, r11}\n\t"
+
+void lz_wsum_pair_arm_asm(const int8_t *rowA, const int8_t *rowB,
+                          const int16_t *coef, int32_t *acc32) {
+    const int8_t *pa = rowA;
+    const int8_t *pb = rowB;
+    int32_t *ac = acc32;
+    int32_t ka = (int32_t)coef[0] << 8;
+    int32_t kb = (int32_t)coef[1] << 8;
+    /* __volatile__, unlike the four row leaves above. They return a
+       value the caller uses, which keeps them alive; this one's only
+       effect is the store through acc32, and a plain __asm__ whose
+       outputs are dead is DELETED - gcc emitted a bare `bx lr` for this
+       function until the leaf gate caught it. The memory clobber alone
+       does not stop that. */
+    __asm__ __volatile__(
+        "mov    r5, #0xff00\n\t"
+        "orr    r5, r5, r5, lsl #16\n\t"
+        LZ_WSUM_ARM_BLK LZ_WSUM_ARM_BLK LZ_WSUM_ARM_BLK LZ_WSUM_ARM_BLK
+        LZ_WSUM_ARM_BLK LZ_WSUM_ARM_BLK LZ_WSUM_ARM_BLK LZ_WSUM_ARM_BLK
+        : [pa] "+r"(pa), [pb] "+r"(pb), [ac] "+r"(ac)
+        : [ka] "r"(ka), [kb] "r"(kb)
+        : "r5", "r6", "r7", "r8", "r9", "r10", "r11", "cc", "memory");
+}
+#endif /* LZ_ARM_ASM_EXTERN */

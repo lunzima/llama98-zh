@@ -27,6 +27,8 @@
 #include "ops_sched.h"
 #include "ops_kernel_shared.h"
 #include "ops_matmul.h"
+#include "ops_arm.h"     /* LZ_ARM_ASM_EXTERN, lz_dot32_q8_arm_asm,
+                            lz_wsum_pair_arm_asm */
 #include "ops_gdn.h"
 
 
@@ -100,7 +102,25 @@ static void lz_wsum_pair_ref(const int8_t *rowA, const int8_t *rowB,
     for (d = 0; d < 32; d++)
         acc32[d] += (int32_t)rowA[d] * ckA + (int32_t)rowB[d] * ckB;
 }
+#if defined(LZ_ARM_ASM_EXTERN)
+/* The ARM tier split. Picked here rather than by a function pointer for
+   the reason matmul gives at row_q16_arm_asm: this is called T/2 times
+   per group and an indirect call would be paid every time, while the
+   test below folds into the branch gcc already has. --kernel arm-c runs
+   the shared C above, which is also what ref runs - the two are the
+   same code, and the assembly is what the comparison is against. */
+static void lz_wsum_pair_arm(const int8_t *rowA, const int8_t *rowB,
+                             const int16_t *coef, int32_t *acc32) {
+    if (g_kernel == LZ_KERNEL_ARM_ASM) {
+        lz_wsum_pair_arm_asm(rowA, rowB, coef, acc32);
+        return;
+    }
+    lz_wsum_pair_ref(rowA, rowB, coef, acc32);
+}
+#define LZ_WSUM_PAIR(ra, rb, co, ac) lz_wsum_pair_arm(ra, rb, co, ac)
+#else
 #define LZ_WSUM_PAIR(ra, rb, co, ac) lz_wsum_pair_ref(ra, rb, co, ac)
+#endif /* LZ_ARM_ASM_EXTERN */
 #endif /* __WATCOMC__ */
 #endif /* LZ_ATTN_FIXED & 2 */
 
@@ -115,18 +135,45 @@ static int32_t dot32_x16_attn_ref(const int8_t *w, const int16_t *x) {
     for (k = 0; k < 32; k++) acc += (int32_t)w[k] * 256 * (int32_t)x[k];
     return acc;
 }
+#if defined(LZ_ARM_ASM_EXTERN)
+/* NO NEW KERNEL ON ARM EITHER. This dot is int8 weights x int16
+   activations with the x256 fold, which is exactly what q8_0's row leaf
+   computes, so --kernel arm-asm calls that one rather than growing a
+   second copy of the same LDM + halfword-selection body
+   (docs/arm-asm-audit.md section 6 asked for this explicitly).
+   256*sum(w*x) and sum(256*w*x) are the same value in int32 - two's
+   complement multiplication distributes over addition even where the
+   sum wraps - so the reuse owes identity, not a tolerance. */
+static int32_t dot32_x16_attn_arm(const int8_t *w, const int16_t *x) {
+    if (g_kernel == LZ_KERNEL_ARM_ASM) return lz_dot32_q8_arm_asm(w, x);
+    return dot32_x16_attn_ref(w, x);
+}
+#define LZ_ATTN_DOT32(w, x) dot32_x16_attn_arm(w, x)
+#else
 #define LZ_ATTN_DOT32(w, x) dot32_x16_attn_ref(w, x)
+#endif /* LZ_ARM_ASM_EXTERN */
 #else
 #define LZ_ATTN_DOT32(w, x) dot32_x16_mmx(w, x)
 #endif /* !__WATCOMC__ && !LZ_DOT_MMX_EXTERN */
 
+/* Empty everywhere but the ARM cross-build: Watcom never sees __arm__
+   and has no __attribute__, same shape as matmul's LZ_XW_ALIGN. */
+#if defined(LZ_ARM_ASM_EXTERN)
+#define LZ_ATTN_QW_ALIGN __attribute__((aligned(4)))
+#else
+#define LZ_ATTN_QW_ALIGN
+#endif /* LZ_ARM_ASM_EXTERN */
+
 void lz_attn_score_q8(float *att, const float *qhh, int hd,
                       const int8_t *kc, const float *ks, int kvd,
                       int pos, float scale, int sink, int ring) {
-    /* static, not stack (rule 6 item 4) */
+    /* static, not stack (rule 6 item 4). qw carries the same aligned(4)
+       as matmul's g_xw and for the same reason: the hand-written leaf
+       reads it with LDM, and int16_t promises two bytes, so whatever
+       alignment gcc happens to give the array is not the contract. */
     static int8_t  qq[LZ_ATTN_MAX_HD];
     static float   qs[LZ_ATTN_MAX_HD / 32];
-    static int16_t qw[LZ_ATTN_MAX_HD];
+    static int16_t qw[LZ_ATTN_MAX_HD] LZ_ATTN_QW_ALIGN;
     int ng = hd / 32, g, t, i, slot = 0;
 
     /* Once per head: the q quantization - now billed by lz_quantize_q8

@@ -2201,7 +2201,7 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
 #define LZ_KM_ROW 0
 #define LZ_KM_OP  1
 
-#define LZ_KM_NUNIT 8
+#define LZ_KM_NUNIT 10
 #define LZ_KM_NCOL 10
 /* The one unit with ARM kernels, by index - km_tab and km_present both
    need it, and a named constant is what stops a reorder of km_unit from
@@ -2220,6 +2220,8 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
 #define LZ_KM_UNIT_I32F  5
 #define LZ_KM_UNIT_Q8RND 6
 #define LZ_KM_UNIT_EXPFX 7
+#define LZ_KM_UNIT_ATDOT 8
+#define LZ_KM_UNIT_WSUMP 9
 /* Column 0 is ref and columns 7..9 are armC/armA/g128; columns 1..6 are
    the six LZ_ROW_* slots in slot order, so column c reads tab[c - 1]. */
 #define LZ_KM_COL_ROW0 1
@@ -2232,7 +2234,7 @@ km_unit[LZ_KM_NUNIT] = {
     { "q8_0",  LZ_KM_ROW }, { "q4_1", LZ_KM_ROW }, { "q6_1", LZ_KM_ROW },
     { "q16_0", LZ_KM_ROW }, { "t2",   LZ_KM_ROW },
     { "i32f",  LZ_KM_OP  }, { "q8rnd", LZ_KM_OP },
-    { "expfx", LZ_KM_OP  }
+    { "expfx", LZ_KM_OP  }, { "atdot", LZ_KM_OP }, { "wsump", LZ_KM_OP }
 };
 static const char *const km_col[LZ_KM_NCOL] = {
     "ref", "mmxI", "sseI", "sse2I", "mmxA", "sseA", "sse2A",
@@ -2257,6 +2259,14 @@ static const char km_why_op_x86[] =
 static const char km_why_op_g128[] =
     "no 128-element group form exists - a scalar leaf has no group to "
     "hoist across";
+static const char km_why_attn_g128[] =
+    "this column is the 128-ELEMENT group; attention's group runs over "
+    "context length, which is unbounded, and lz_wsum_group_mmx already "
+    "covers it - a different axis, not this cell";
+static const char km_why_op_sse2[] =
+    "not written: both call sites reach dot32_x16_mmx / lz_wsum_pair_mmx "
+    "unconditionally, so no SSE2 twin was ever selected - unaudited, not "
+    "impossible";
 
 typedef struct { unsigned char have; unsigned char why; const char *text; } LZKmReg;
 #define KM_H(mask) { (unsigned char)(mask), 0, (const char *)0 }
@@ -2283,7 +2293,13 @@ static const LZKmReg km_reg[LZ_KM_NUNIT][LZ_KM_NCOL] = {
    present on ARM for the same reason ref is present everywhere. */
 /* i32f */{ KM_H(KM_ALL), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128) },
 /* q8rnd*/{ KM_H(KM_ALL), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128) },
-/* expfx*/{ KM_H(KM_ALL), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128) }
+/* expfx*/{ KM_H(KM_ALL), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128) },
+/* The two attention MAC units DO have x86 kernels, and they are
+   macro-selected rather than table-selected, so km_op_present answers
+   for them. atdot's assembly is q8_0's leaf, reused rather than copied
+   (docs/arm-asm-audit.md section 6); wsump's is its own. */
+/* atdot*/{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_T(km_why_op_sse2), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_T(km_why_op_sse2), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_attn_g128) },
+/* wsump*/{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_T(km_why_op_sse2), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_T(km_why_op_sse2), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_attn_g128) }
 };
 
 #if defined(__WATCOMC__)
@@ -2343,6 +2359,11 @@ static int km_arm_asm(int f) {
     if (f == LZ_KM_UNIT_I32F || f == LZ_KM_UNIT_Q8RND ||
         f == LZ_KM_UNIT_EXPFX) return 1;
 #endif /* LZ_ARM_PRIM_ASM */
+#if defined(LZ_ARM_ASM_EXTERN)
+    /* Both attention MACs, and atdot's cell IS q8_0's leaf - the reuse
+       section 6 of the audit asked for, not a second copy. */
+    if (f == LZ_KM_UNIT_ATDOT || f == LZ_KM_UNIT_WSUMP) return 1;
+#endif /* LZ_ARM_ASM_EXTERN */
     (void)f;
     return 0;
 }
@@ -2361,6 +2382,24 @@ static int km_g128(int f) {
     }
 }
 
+/* The x86 tiers of the two attention MAC units. They have no dispatch
+   table - both call sites pick their kernel with a #if, so the presence
+   answer has to come from the same macros the #if reads, and it does. */
+static int km_op_present(int f, int c) {
+    if (f != LZ_KM_UNIT_ATDOT && f != LZ_KM_UNIT_WSUMP) return 0;
+#if defined(__WATCOMC__)
+    if (c == LZ_KM_COL_ROW0 + LZ_ROW_MMX_A) return 1;
+#endif /* __WATCOMC__ */
+#if defined(LZ_DOT_MMX_EXTERN)
+    if (f == LZ_KM_UNIT_ATDOT && c == LZ_KM_COL_ROW0 + LZ_ROW_MMX_I) return 1;
+#endif /* LZ_DOT_MMX_EXTERN */
+#if defined(LZ_WSUM_MMX_EXTERN)
+    if (f == LZ_KM_UNIT_WSUMP && c == LZ_KM_COL_ROW0 + LZ_ROW_MMX_I) return 1;
+#endif /* LZ_WSUM_MMX_EXTERN */
+    (void)c;
+    return 0;
+}
+
 /* Is the cell in THIS binary? Columns 1..6 are read out of the real
    dispatch tables, so deleting a kernel is visible here; ref, armC,
    armA and g128 are declared, for the reasons noted at their columns. */
@@ -2369,7 +2408,8 @@ static int km_present(int f, int c) {
     if (c == 0) return 1;
     if (c >= LZ_KM_COL_ROW0 && c < LZ_KM_COL_ROW0 + LZ_ROW_N) {
         tab = km_tab(f);
-        return tab && tab[c - LZ_KM_COL_ROW0] != 0;
+        if (!tab) return km_op_present(f, c);
+        return tab[c - LZ_KM_COL_ROW0] != 0;
     }
     if (c == LZ_KM_COL_G128) return km_g128(f);
 #if defined(__arm__)
