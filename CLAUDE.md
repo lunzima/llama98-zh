@@ -133,10 +133,21 @@ the KV ring engages: identical bytes in all cases. The tiers therefore use
 by iron law six clause 3, and three ways to build a power of two would be three
 chances to disagree.
 
-`|logits diff|` is NOT the criterion for any of them: it saturates, measured at
-1.89e-2 for the smallest possible perturbation and 1.30e-1 for a larger one on
-the same model. Use paired NLL, argmax and top-5 agreement (`--dump-nll`,
-`--dump-top5`).
+`|logits diff|` is NOT the criterion for any of them: it saturates. Two
+measurements at different scales, both reported because the number means
+nothing without its convention:
+
+- **Per perturbation, one position**: 1.89e-2 for the smallest possible
+  perturbation and 1.30e-1 for a larger one, on the same model. A change a
+  thousand times bigger moves this by less than a decade.
+- **Worst over a whole sequence**: 1.55 to 1.66 across the tier configurations,
+  taken as the maximum over all 152 positions of a zh fixture on kmr20. Two
+  orders of magnitude above the per-perturbation figures, from the same
+  arithmetic — the maximum over many positions is a different quantity, not a
+  contradiction.
+
+Neither ranks tiers, which is the point. Use paired NLL, argmax and top-5
+agreement (`--dump-nll`, `--dump-top5`).
 
 ### Where the numeric probes live
 
