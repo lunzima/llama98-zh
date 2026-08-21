@@ -458,6 +458,23 @@ typedef struct {
        rest of the fixed conv tier and NULL without it. */
     short *kda_q_i16, *kda_k_i16;
     short *kda_v_i16;
+    /* q16_0's four int16 exits (int-pipeline milestone 5), same
+       one-of-the-two contract as the three above and the same NULL
+       meaning. Each sits at its chain's LZ_*_ES exponent:
+         bvec_i16        s->bvec        -> lz_sigmoid_i
+         moe_logits_i16  s->moe_router_logits -> lz_moe_route
+         kda_lat_i16     s->kda_gate_lat -> f_b_proj's activation quantize
+         kda_gate_i16    s->kda_gate    -> the decay gate
+       kda_lat_i32 is the widening scratch lz_quantize_q8_int's int32
+       input needs (one token wide); kda_dtb_i16 is dt_bias in
+       kda_gate_i16's own domain, built once by kda_gate_build, and is
+       the field whose NULL says "the gate exit was refused". */
+    short *bvec_i16;
+    short *moe_logits_i16;
+    short *kda_lat_i16;
+    int32_t *kda_lat_i32;
+    short *kda_gate_i16;
+    short *kda_dtb_i16;
     float *conv_sig_k1;
     float *conv_sig_oscale2;
     float  conv_sig_k2;         /* lz_sig_q15_t_offset(), same for every channel */

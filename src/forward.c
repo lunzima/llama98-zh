@@ -393,6 +393,75 @@ static void *xcalloc(size_t n, size_t sz, int *ok, long long *acc) {
 #define LZ_CONV_ES 9
 #endif /* LZ_CONV_ES */
 
+/* ---- q16_0's four int16 exits (int-pipeline milestone 5) -------------
+ *
+ * Every q16_0 role on this checkpoint - kda_b_proj, moe_gate_w,
+ * kda_f_a_proj, kda_f_b_proj - now leaves lz_matmul_xq_nt_i16 as an
+ * int16 at a fixed exponent instead of a float the consumer immediately
+ * takes apart again. Each pair below is one chain: _I16 turns it off for
+ * a control build, _ES is the exponent, i.e. the number of FRACTIONAL
+ * bits (value == q * 2^-ES), the convention epi_align_i16's target_e
+ * uses.
+ *
+ * THE EXPONENTS ARE MEASURED, not chosen, exactly like LZ_CONV_ES above
+ * (.prof/m5range.c on kmr20, both gate corpora, 603/661 tokens). Each is
+ * the LARGEST that clamps nothing, since the clamp is silent:
+ *
+ * Measured max |q| at the shipping ES, from an instrumented build's
+ * pre-clamp counter, 0 clamps everywhere on both corpora. It aggregates
+ * by weight SHAPE, so bvec and the router share a row - they are both
+ * 512x16 gs=512 - and the max in it is the router's (its |x| runs to
+ * 10.2 against bvec's 6.7, .prof/m5range.c):
+ *
+ *   shape             ES     bound     max |q| zh / en    headroom
+ *   512x16  (bvec,
+ *            moe gate) 11    24,576     21,013 / 20,904     1.17x
+ *   512x64  gate_lat   10    32,767     21,288 / 17,963     1.54x
+ *   64x1024 kda_gate    9    32,767     15,624 / 14,295     2.10x
+ *
+ * bvec and the router are the two whose consumer is lz_sigmoid, and
+ * their bound is NOT int16's edge but the sigmoid table's own
+ * (lz_sig_q15_domain, |x| = 12): past it sigmoid_q15 already returns a
+ * constant, so clamping there adds no behaviour rather than adding a
+ * silent one. Their headroom figure is therefore informational; the
+ * other two clamp at a plain int16 edge and theirs is not.
+ *
+ * kda_gate is at 9 rather than the 10 that would have been the largest
+ * non-clamping value, and that is a measurement: ES = 10 leaves 1.05x
+ * of headroom against a SILENT clamp, and paired NLL cannot tell the two
+ * apart (zh t +0.417 at 10 vs -0.131 at 9, en +1.396 vs +0.763, both
+ * arms against the same float control, n = 602/660). Given a tie on
+ * quality, the exponent with twice the headroom is the one to ship.
+ * Re-run .prof/m5range.c on any checkpoint whose gate projection might
+ * be scaled differently. */
+#ifndef LZ_BVEC_I16
+#define LZ_BVEC_I16 1
+#endif /* LZ_BVEC_I16 */
+#ifndef LZ_BVEC_ES
+#define LZ_BVEC_ES 11
+#endif /* LZ_BVEC_ES */
+
+#ifndef LZ_MOEGATE_I16
+#define LZ_MOEGATE_I16 1
+#endif /* LZ_MOEGATE_I16 */
+#ifndef LZ_MOEGATE_ES
+#define LZ_MOEGATE_ES 11
+#endif /* LZ_MOEGATE_ES */
+
+#ifndef LZ_KLAT_I16
+#define LZ_KLAT_I16 1
+#endif /* LZ_KLAT_I16 */
+#ifndef LZ_KLAT_ES
+#define LZ_KLAT_ES 10
+#endif /* LZ_KLAT_ES */
+
+#ifndef LZ_KGATE_I16
+#define LZ_KGATE_I16 1
+#endif /* LZ_KGATE_I16 */
+#ifndef LZ_KGATE_ES
+#define LZ_KGATE_ES 9
+#endif /* LZ_KGATE_ES */
+
 #if LZ_CONV_FIXED
 /* Quantize the conv taps once, laying them out per channel in the same
    order forward_kda/forward_ssm index the history.
@@ -452,6 +521,55 @@ static int conv_fixed_build(LZRunState *s, const LZModel *m) {
     return 0;
 }
 #endif /* LZ_CONV_FIXED */
+
+#if LZ_KGATE_I16
+/* dt_bias in kda_gate's own integer domain, laid out per linear layer.
+ *
+ * This is what makes the decay gate's `gt[i] + dt_bias[i]` an INTEGER
+ * add once kda_gate arrives as int16: with both terms at 2^-LZ_KGATE_ES
+ * the sum is one too, and the only float work left per channel is the
+ * one multiply and one add that reach sigmoid_q15_t's coordinate. Built
+ * once here rather than per token for the same reason conv_mw is - it
+ * is a function of the weights alone.
+ *
+ * REFUSES rather than clamps. A channel whose |dt_bias| * 2^ES does not
+ * fit int16 gets the whole table rejected and every KDA layer keeps its
+ * float exit; clamping instead would move the decay gate on a checkpoint
+ * nobody measured, silently, which is exactly what LZ_CONV_ES's comment
+ * warns about one tier over. MEASURED on kmr20: max |dt_bias| 13.062,
+ * i.e. 6,688 of 32,767 at ES = 9, 4.9x of headroom.
+ *
+ * Returns 1 on success. A GDN linear layer has no kda_dt_bias at all, so
+ * a model mixing the two refuses here as well - it has no kda_gate to
+ * feed either. */
+static int kda_gate_build(LZRunState *s, const LZModel *m) {
+    const LZModelConfig *c = &m->config;
+    int layer, built = 0;
+    int nvk = c->lin_n_v_heads * c->lin_k_head_dim;
+    float sc = (float)ldexp(1.0, LZ_KGATE_ES);
+    if (!s->kda_dtb_i16 || nvk <= 0) return 0;
+    for (layer = 0; layer < c->n_layers; layer++) {
+        const LZLayer *L = &m->layers[layer];
+        const float *db;
+        int li, i;
+        if (c->layer_types[layer] == LZ_LT_FULL) continue;
+        if (L->kda_dt_bias.n == 0) return 0;
+        li = s->cache_idx[layer];
+        db = lz_t_f32(&L->kda_dt_bias, s->wscr);
+        if (!db) return 0;
+        for (i = 0; i < nvk; i++) {
+            /* Half-away-from-zero, the convention epi_align_i16 rounds
+               the other addend with - one domain, one rounding rule. */
+            float v = db[i] * sc;
+            long q = (long)(v >= 0.0f ? v + 0.5f : v - 0.5f);
+            if (q > 32767 || q < -32767) return 0;
+            s->kda_dtb_i16[(size_t)li * nvk + i] = (short)q;
+        }
+        built++;
+    }
+    return built == c->n_linear_layers;
+}
+#endif /* LZ_KGATE_I16 */
 
 int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
                        int spec_k_max, char *errbuf, int errlen) {
@@ -846,6 +964,36 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
            n <= qcap - see forward.h's field comment. */
         s->subn_norm_int = (int32_t *)xcalloc((size_t)qcap, sizeof(int32_t),
                                               &ok, &s->bytes_alloc);
+        /* ---- q16_0's int16 exits (int-pipeline milestone 5) ----------
+           One buffer per chain, each the int16 twin of the float one it
+           replaces for a token - exactly one of the two is written per
+           call, the shape milestone 3's kda_q_i16 established. All are
+           zero-sized (so NULL) on a model without the producing tensor,
+           and every predicate below reads NULL as "no int path". */
+#if LZ_BVEC_I16
+        s->bvec_i16 = (short *)xcalloc((size_t)nt * c->lin_n_v_heads,
+                                       sizeof(short), &ok, &s->bytes_alloc);
+#endif /* LZ_BVEC_I16 */
+#if LZ_MOEGATE_I16
+        s->moe_logits_i16 = (short *)xcalloc((size_t)nt * c->num_experts,
+                                             sizeof(short), &ok, &s->bytes_alloc);
+#endif /* LZ_MOEGATE_I16 */
+#if LZ_KLAT_I16
+        s->kda_lat_i16 = (short *)xcalloc((size_t)nt * c->kda_gate_rank,
+                                          sizeof(short), &ok, &s->bytes_alloc);
+        /* The widening scratch lz_quantize_q8_int's int32 input needs -
+           one token's worth, since f_b_proj is a per-token matmul. An
+           int-to-int copy, so it bills nothing and adds no rounding. */
+        s->kda_lat_i32 = (int32_t *)xcalloc((size_t)c->kda_gate_rank,
+                                            sizeof(int32_t), &ok, &s->bytes_alloc);
+#endif /* LZ_KLAT_I16 */
+#if LZ_KGATE_I16
+        s->kda_gate_i16 = (short *)xcalloc((size_t)nt * nvk, sizeof(short),
+                                           &ok, &s->bytes_alloc);
+        s->kda_dtb_i16 = (short *)xcalloc(
+            (size_t)c->n_linear_layers * nvk, sizeof(short), &ok,
+            &s->bytes_alloc);
+#endif /* LZ_KGATE_I16 */
     }
     if (!ok) {
         if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_STATE_ALLOC);
@@ -903,6 +1051,16 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
     /* After cache_idx, which conv_fixed_build reads. */
     if (s->conv_fixed && conv_fixed_build(s, m) != 0) s->conv_fixed = 0;
 #endif /* LZ_CONV_FIXED */
+#if LZ_KGATE_I16
+    /* Same ordering reason as conv_fixed_build's: the table is indexed
+       by linear-layer number. A refusal drops the buffer, and
+       forward_kda's predicate reads that NULL as "no int path" - one
+       place decides, one place asks. */
+    if (!kda_gate_build(s, m)) {
+        free(s->kda_dtb_i16);  s->kda_dtb_i16 = NULL;
+        free(s->kda_gate_i16); s->kda_gate_i16 = NULL;
+    }
+#endif /* LZ_KGATE_I16 */
 
     return 0;
 }
@@ -943,6 +1101,9 @@ void lz_state_free(LZRunState *s) {
     free(s->conv_state);
     free(s->conv_state_q); free(s->conv_mw);
     free(s->kda_q_i16); free(s->kda_k_i16); free(s->kda_v_i16);
+    free(s->bvec_i16); free(s->moe_logits_i16);
+    free(s->kda_lat_i16); free(s->kda_lat_i32);
+    free(s->kda_gate_i16); free(s->kda_dtb_i16);
     free(s->conv_sig_k1); free(s->conv_sig_oscale2);
     free(s->xq); free(s->xqs); free(s->wscr); free(s->fwht_scratch);
     free(s->subn_norm_int);
@@ -2106,6 +2267,27 @@ static void kda_conv_proj(LZRunState *s, int *use_int, float *of, short *oi,
     lz_matmul_xq_nt(of, x, s->xq, s->xqs, w, in_dim, out_dim, nt);
 }
 
+/* The same shape for the projections whose consumer is not the conv
+   (int-pipeline milestone 5): one projection, one int16 exit at the
+   consumer's own exponent, and the SAME all-or-nothing flag discipline
+   kda_conv_proj documents at length - a refusal clears the flag so the
+   consumer reads the float buffer that was just written, rather than a
+   stale int one. `*use_int` was decided by lz_matmul_xq_i16_ok before
+   any of these ran, so a refusal here cannot actually happen; it exists
+   so that a future divergence degrades instead of reading garbage. */
+static void kda_i16_proj(LZRunState *s, int *use_int, float *of, short *oi,
+                         const float *x, const LZTensor *w,
+                         int in_dim, int out_dim, int nt,
+                         int target_e, int bound) {
+    if (*use_int) {
+        if (lz_matmul_xq_nt_i16(oi, s->xq, s->xqs, w, in_dim, out_dim, nt,
+                                target_e, bound))
+            return;
+        *use_int = 0;
+    }
+    lz_matmul_xq_nt(of, x, s->xq, s->xqs, w, in_dim, out_dim, nt);
+}
+
 /* advance_ring/ring_base: same contract as forward_ssm's own (see its
    header comment above) - reused verbatim, not re-derived, since both
    functions share the SAME ring buffers (ssm_state_q8/_lo/_s,
@@ -2161,6 +2343,41 @@ static void forward_kda(const LZModel *m, LZRunState *s,
         conv_int = okq && okk && okv;
     }
 #endif /* LZ_CONV_FIXED */
+    /* int-pipeline milestone 5, decided here for the same reason
+       conv_int is: the producing matmul has to know before it runs, and
+       the consumer reads the answer far below.
+
+       lz_sig_mode() gates bvec and the gate because the FLOAT sigmoid
+       tier is not this table at all (lz_exp-based, a different value),
+       so there is no integer entry to hand an integer to - the same
+       shape as "the fixed conv tier is the consumer, so its absence
+       answers this on its own". --sig-write float therefore turns both
+       off at runtime, which is what makes it a control. */
+    int bvec_int = 0, lat_int = 0, gate_int = 0;
+#if LZ_BVEC_I16
+    bvec_int = lz_sig_mode() && s->bvec_i16 &&
+               lz_matmul_xq_i16_ok(&L->kda_b_proj, hdim, nt);
+#endif /* LZ_BVEC_I16 */
+#if LZ_KLAT_I16
+    lat_int = s->kda_lat_i16 && s->kda_lat_i32 && gate_rank > 0 &&
+              lz_matmul_xq_i16_ok(&L->kda_f_a_proj, hdim, nt);
+#endif /* LZ_KLAT_I16 */
+#if LZ_KGATE_I16
+    /* nt == 1 is not a restriction of the exit, it is what f_b_proj's
+       call site is: this projection streams one token at a time (its
+       in_dim is not hidden, so it cannot share the batched
+       quantization), so the exit is asked for one token too.
+
+       kda_has_gate_lower_bound is a CONSUMER question, not a taste one.
+       With the lower bound the gate's transcendental is the sigmoid,
+       which has an integer entry; without it the gate is
+       lz_softplus(pre), and this tree has no fixed-point softplus at
+       all, so that branch would have to rebuild the float the epilogue
+       just declined to build - the work moved, not removed. */
+    gate_int = lz_sig_mode() && s->kda_gate_i16 && s->kda_dtb_i16 &&
+               c->kda_has_gate_lower_bound &&
+               lz_matmul_xq_i16_ok(&L->kda_f_b_proj, gate_rank, 1);
+#endif /* LZ_KGATE_I16 */
 
     if (c->use_subn) {
         /* SubLN per-projection input RMSNorms for the four hidden-space
@@ -2273,9 +2490,12 @@ static void forward_kda(const LZModel *m, LZRunState *s,
         for (tk = 0; tk < nt; tk++)
             lz_quantize_q8_tok(s->xb + (size_t)tk * hdim, hdim,
                                s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
-        lz_matmul_xq_nt(s->kda_gate_lat, s->xb, s->xq, s->xqs, &L->kda_f_a_proj,
-                        hdim, gate_rank, nt);
-        lz_matmul_xq_nt(s->bvec, s->xb, s->xq, s->xqs, &L->kda_b_proj, hdim, nv, nt);
+        kda_i16_proj(s, &lat_int, s->kda_gate_lat, s->kda_lat_i16, s->xb,
+                     &L->kda_f_a_proj, hdim, gate_rank, nt,
+                     LZ_KLAT_ES, 32767);
+        kda_i16_proj(s, &bvec_int, s->bvec, s->bvec_i16, s->xb,
+                     &L->kda_b_proj, hdim, nv, nt,
+                     LZ_BVEC_ES, lz_sig_q15_domain(LZ_BVEC_ES));
     } else {
     /* Six hidden-space projections share one activation quantization,
        the same trick forward_ssm uses for its four (all have
@@ -2289,14 +2509,17 @@ static void forward_kda(const LZModel *m, LZRunState *s,
                   &L->kda_k_proj, hdim, kdim, nt);
     kda_conv_proj(s, &conv_int, s->kda_v, s->kda_v_i16, s->xb,
                   &L->kda_v_proj, hdim, vdim, nt);
-    lz_matmul_xq_nt(s->kda_gate_lat, s->xb, s->xq, s->xqs, &L->kda_f_a_proj,
-                    hdim, gate_rank, nt);
-    lz_matmul_xq_nt(s->bvec, s->xb, s->xq, s->xqs, &L->kda_b_proj, hdim, nv, nt);
+    kda_i16_proj(s, &lat_int, s->kda_gate_lat, s->kda_lat_i16, s->xb,
+                 &L->kda_f_a_proj, hdim, gate_rank, nt, LZ_KLAT_ES, 32767);
+    kda_i16_proj(s, &bvec_int, s->bvec, s->bvec_i16, s->xb,
+                 &L->kda_b_proj, hdim, nv, nt,
+                 LZ_BVEC_ES, lz_sig_q15_domain(LZ_BVEC_ES));
     lz_matmul_xq_nt(s->zbuf, s->xb, s->xq, s->xqs, &L->kda_g_proj, hdim, vdim, nt);
     }
-    /* These three read the FLOAT projection buffers, which hold nothing
-       when conv_int took the int16 exit - a tap build wanting q/k/v
-       there has to dump kda_q_i16/kda_k_i16/kda_v_i16 instead. */
+    /* These read the FLOAT projection buffers, which hold nothing when
+       the matching flag took the int16 exit - a tap build wanting
+       q/k/v/f_a/b there has to dump kda_q_i16/kda_k_i16/kda_v_i16
+       (conv_int), kda_lat_i16 (lat_int) or bvec_i16 (bvec_int). */
     LZ_TAP("kq", layer, s->kda_q, kdim);
     LZ_TAP("kk", layer, s->kda_k, kdim);
     LZ_TAP("kv", layer, s->kda_v, vdim);
@@ -2381,11 +2604,62 @@ static void forward_kda(const LZModel *m, LZRunState *s,
     /* f_b_proj: kda_gate_rank -> nvk, a DIFFERENT in_dim than hidden, so
        it needs its own quantization - lz_matmul_w does that internally,
        one token at a time (same reasoning forward_moe's per-expert
-       matmuls use). */
-    for (tk = 0; tk < nt; tk++)
-        lz_matmul_w(s->kda_gate + (size_t)tk * nvk,
-                   s->kda_gate_lat + (size_t)tk * gate_rank,
-                   &L->kda_f_b_proj, gate_rank, nvk, s->xq, s->xqs);
+       matmuls use).
+
+       Both of this matmul's sides are int-pipeline milestone 5 exits and
+       they are INDEPENDENT: `lat_int` is its input (kda_gate_lat, from
+       f_a_proj) and `gate_int` is its output (kda_gate, read by the decay
+       gate below). The float body is lz_matmul_w spelled out - that
+       function IS lz_quantize_q8 followed by lz_matmul_xq, and
+       lz_matmul_xq is lz_matmul_xq_nt at nt == 1 - so that either side
+       can be replaced without the other. */
+    {
+        int gsb = lz_act_gs(&L->kda_f_b_proj, gate_rank);
+        int retry = 1;
+        while (retry) {
+            retry = 0;
+            for (tk = 0; tk < nt; tk++) {
+                if (lat_int) {
+                    /* Widening, not requantizing: lz_quantize_q8_int
+                       already takes exactly this - an integer vector plus
+                       the power-of-two scale that turns it back into the
+                       float the group scale must match - and it is the
+                       entry the norm-int tier already uses at eight other
+                       call sites. Only its int32 input width differs from
+                       the exit's int16, and an int-to-int copy costs no
+                       float op and introduces no rounding. */
+                    int k;
+                    const short *li = s->kda_lat_i16 + (size_t)tk * gate_rank;
+                    for (k = 0; k < gate_rank; k++) s->kda_lat_i32[k] = li[k];
+                    lz_quantize_q8_int(s->kda_lat_i32, gate_rank, gsb,
+                                       pow2f(-LZ_KLAT_ES), s->xq, s->xqs);
+                } else {
+                    lz_quantize_q8(s->kda_gate_lat + (size_t)tk * gate_rank,
+                                   gate_rank, gsb, s->xq, s->xqs);
+                }
+                if (gate_int) {
+                    if (lz_matmul_xq_nt_i16(
+                            s->kda_gate_i16 + (size_t)tk * nvk,
+                            s->xq, s->xqs, &L->kda_f_b_proj,
+                            gate_rank, nvk, 1, LZ_KGATE_ES, 32767))
+                        continue;
+                    /* Not reachable - the predicate above IS this entry
+                       point's own, on the same (w, in_dim, nt). Handled
+                       anyway, and handled by starting the chunk OVER on
+                       the float exit: falling back for this token alone
+                       would strand the earlier tokens' int buffers, the
+                       mid-triple hazard kda_conv_proj names. */
+                    gate_int = 0;
+                    retry = 1;
+                    break;
+                }
+                lz_matmul_xq_nt(s->kda_gate + (size_t)tk * nvk,
+                                s->kda_gate_lat + (size_t)tk * gate_rank,
+                                s->xq, s->xqs, &L->kda_f_b_proj,
+                                gate_rank, nvk, 1);
+            }
+        }
+    }
 
     /* Turn the pre-activation into the actual per-channel decay factor
        gt = exp(g). Without a lower bound, g = -exp(A_log[h]) *
@@ -2410,6 +2684,52 @@ static void forward_kda(const LZModel *m, LZRunState *s,
     {
         float *decay_base = s->wscr;
         for (h = 0; h < nv; h++) decay_base[h] = lz_exp(a_log_arr[h]);
+        /* The int-pipeline form of the SAME function, not a second one
+           (int-pipeline milestone 5). With kda_gate arriving as int16 at
+           2^-LZ_KGATE_ES and dt_bias pre-quantized into that same domain
+           (kda_gate_build), `pre` is an INTEGER add, and the sigmoid is
+           reached through sigmoid_q15_t's folded coordinate the way the
+           fixed conv reaches it:
+             t = pre_i * (decay_base[h] * 2^(4-ES)) + 192
+           reproduces (decay_base[h]*pre - LZ_SIG_LO) * LZ_SIG_STEP with
+           one multiply and one add, because both LZ_SIG_STEP and the
+           offset are exact powers of two applied to an already-computed
+           value (lz_sig_q15_t_offset's own argument). The exit folds the
+           lower bound and the Q15 descale into one constant.
+           Per channel: 3 mul, 1 add, 2 cvt, against the float form's
+           add + multiply here and lz_sigmoid's 3 mul, 1 add, 1 cvt plus
+           the epilogue's convert and multiply. */
+        if (gate_int) {
+            float lbq = c->kda_gate_lower_bound * (1.0f / 32768.0f);
+            float gk = pow2f(4 - LZ_KGATE_ES);
+            float t_off = lz_sig_q15_t_offset();
+            const short *dtb = s->kda_dtb_i16 + (size_t)li * nvk;
+            for (tk = 0; tk < nt; tk++) {
+                const short *gi = s->kda_gate_i16 + (size_t)tk * nvk;
+                float *gt = s->kda_gate + (size_t)tk * nvk;
+                for (h = 0; h < nv; h++) {
+                    float k1 = decay_base[h] * gk;
+                    LZ_FCX(LZ_FC_SIGMOID, 3 * (long)kd, (long)kd, 0,
+                           2 * (long)kd, 0);
+                    for (i = 0; i < kd; i++) {
+                        int idx = h * kd + i;
+                        /* A BARE cast, and the bound is why: both addends
+                           are int16, so |pre| <= 65534, far inside the
+                           2^24 where an int32->float conversion is exact
+                           on x87 and SSE alike. lz_i32f exists for the
+                           conversions that are NOT exact - it costs two
+                           converts, a multiply and an add of its own, so
+                           using it where the hazard cannot occur would
+                           spend four float ops to avoid nothing. Past
+                           the conversion both compilers round the
+                           multiply once and the add once (PC=24). */
+                        int32_t pre = (int32_t)gi[idx] + (int32_t)dtb[idx];
+                        int32_t s15 = sigmoid_q15_t((float)pre * k1 + t_off);
+                        gt[idx] = lz_exp((float)s15 * lbq);
+                    }
+                }
+            }
+        } else
         for (tk = 0; tk < nt; tk++) {
             float *gt = s->kda_gate + (size_t)tk * nvk;
             for (h = 0; h < nv; h++) {
@@ -2458,7 +2778,12 @@ static void forward_kda(const LZModel *m, LZRunState *s,
             lz_l2norm(s->kn, kp, kd, LZ_L2NORM_EPS);
             for (i = 0; i < kd; i++) s->qn[i] *= scale;
 
-            beta = lz_sigmoid(s->bvec[(size_t)tk * nv + h]);
+            /* bvec's only consumer, and with `bvec_int` it never became
+               a float: the projection exited int16 at LZ_BVEC_ES and
+               lz_sigmoid_i reaches the same table from there. */
+            beta = bvec_int
+                 ? lz_sigmoid_i(s->bvec_i16[(size_t)tk * nv + h], LZ_BVEC_ES)
+                 : lz_sigmoid(s->bvec[(size_t)tk * nv + h]);
             LZ_PROF_BEG(_tr);
             lz_kda_step(out, sq_in, sq_out,
 #if LZ_GDN_STATE_2PLANE
@@ -2629,6 +2954,21 @@ static void forward_moe(const LZModel *m, LZRunState *s,
     int gsh = lz_act_gs(&L->moe_down_proj, hdim);
     int nsh = (gsh > 0) ? hdim / gsh : 0;
     int tk, kk, vv, i;
+    /* int-pipeline milestone 5: the router logits' only consumer is
+       lz_moe_route, and the exit is the same one bvec takes - int16 at
+       LZ_MOEGATE_ES, bounded by the sigmoid table's own domain rather
+       than int16's edge. Decided before the matmul, like every other
+       exit in this file, and lz_sig_mode() answers it for the same
+       reason.
+       moe_router_sigmoid is a consumer question too: the softmax scorer
+       has no integer entry (lz_exp has no int-in form), so it would
+       rebuild the float the epilogue declined to build - the same
+       operation count, for a value that has moved. Refuse instead. */
+    int mrt_int = 0;
+#if LZ_MOEGATE_I16
+    mrt_int = lz_sig_mode() && s->moe_logits_i16 && c->moe_router_sigmoid &&
+              lz_matmul_xq_i16_ok(&L->moe_gate_w, hdim, nt);
+#endif /* LZ_MOEGATE_I16 */
     (void)layer;   /* only used inside LZ_TAP, which is a no-op in a normal build */
 
     /* PHASE 1 - everything that reads xt and does not depend on routing.
@@ -2642,12 +2982,15 @@ static void forward_moe(const LZModel *m, LZRunState *s,
         lz_quantize_q8(s->xb + (size_t)tk * hdim, hdim, gsh,
                        s->xq + (size_t)tk * hdim,
                        s->xqs + (size_t)tk * nsh);
-    lz_matmul_xq_nt(s->moe_router_logits, s->xb, s->xq, s->xqs,
-                    &L->moe_gate_w, hdim, ne, nt);
+    kda_i16_proj(s, &mrt_int, s->moe_router_logits, s->moe_logits_i16,
+                 s->xb, &L->moe_gate_w, hdim, ne, nt,
+                 LZ_MOEGATE_ES, lz_sig_q15_domain(LZ_MOEGATE_ES));
     lz_matmul_xq_nt(s->moe_lat_x, s->xb, s->xq, s->xqs,
                     &L->moe_down_proj, hdim, latent, nt);
     /* Slot 0 is token 0's, so these tap what the per-token version
-       taped under `if (tk == 0)`. */
+       taped under `if (tk == 0)`. "mrt" reads the FLOAT buffer, which
+       holds nothing when mrt_int took the int16 exit - dump
+       moe_logits_i16 instead, same as the KDA taps above. */
     LZ_TAP("mrt", layer, s->moe_router_logits, ne);
     LZ_TAP("mlat", layer, s->moe_lat_x, latent);
 
@@ -2661,6 +3004,8 @@ static void forward_moe(const LZModel *m, LZRunState *s,
         float *lat_y = s->moe_lat_y + (size_t)tk * latent;
 
         lz_moe_route(s->moe_router_logits + (size_t)tk * ne,
+                    mrt_int ? s->moe_logits_i16 + (size_t)tk * ne : NULL,
+                    LZ_MOEGATE_ES,
                     lz_t_f32(&L->moe_gate_bias, s->wscr),
                     ne, topk, c->moe_router_sigmoid, c->moe_renormalize,
                     lz_moe_tau, s->moe_sel_idx, s->moe_sel_w);

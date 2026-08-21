@@ -36,6 +36,21 @@ int32_t sigmoid_q15_t(float t);
 float lz_sig_q15_t_offset(void);
 void lz_sig_q15_fold(float oscale, float *k1, float *oscale2);
 
+/* Integer-input twin of sigmoid_q15: x == v * 2^-e, and the whole
+   coordinate derivation is a shift and a mask instead of a subtract,
+   two multiplies and two converts. Same table, same lerp, same Q15
+   result - see ops_quant.c for why it is EXACT against sigmoid_q15 and
+   not merely close. e is the number of fractional bits, 0 <= e <= 27. */
+int32_t sigmoid_q15_i(int32_t v, int e);
+
+/* The magnitude at which the table above saturates, in sigmoid_q15_i's
+   input domain: |v| >= this is exactly where sigmoid_q15 clamps. A
+   producer clamping its int16 exit here is therefore not adding a clamp,
+   only moving the table's own one earlier. A getter rather than a
+   header #define so LZ_SIG_LO stays private to ops_quant.c, the same
+   reason lz_sig_q15_t_offset is one. */
+int32_t lz_sig_q15_domain(int e);
+
 /* Sum-of-squares in integer domain (fixed-tier norms). Returns -1 to
    decline (caller runs the float path). qout, if non-NULL, receives
    the Q15 image of x the scan already computed (n shorts); eout, if

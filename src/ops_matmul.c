@@ -98,7 +98,7 @@ static lz_rowfn lz_row_pick(const lz_rowfn *tab) {
    `wd`/`wm` are read by the epi_q41 arm only. The int16 result is
    already clamped to +-`out->bound` inside epi_align_i16, so the
    narrowing cast cannot lose a bit. */
-static void epi_q41_row(const LZQ41Out *out, int i, int out_dim, int nt,
+static void epi_q41_row(const LZMatOut *out, int i, int out_dim, int nt,
                         const LZTensor *w, int ng, int r, int nb, int zneg,
                         int fixed_epi, const float *xqs,
                         const float *wd, const float *wm) {
@@ -703,7 +703,7 @@ static void epi_zero_act(const int8_t *xq, const float *xqs, int in_dim,
     }
 }
 
-void matmul_q41_impl(LZQ41Out *out, const int8_t *xq, const float *xqs,
+void matmul_q41_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
                             const LZTensor *w, int in_dim, int out_dim, int nt) {
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
     int i, t;
@@ -972,7 +972,7 @@ const lz_rowfn LZ_ROW_Q61[LZ_ROW_N] = {
 };
 
 /* ---- matmul_t2_impl + matmul_q61_impl ---- */
-void matmul_t2_impl(LZQ41Out *out, const int8_t *xq, const float *xqs,
+void matmul_t2_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
                            const LZTensor *w, int in_dim, int out_dim, int nt) {
     int i, g, t;
     int gs = w->gs, r = gs / 32, ng = in_dim / gs;
@@ -1003,7 +1003,7 @@ void matmul_t2_impl(LZQ41Out *out, const int8_t *xq, const float *xqs,
     row = row_t2_arm;
 #endif /* LZ_T2_ARM_ASM_EXTERN */
 #endif /* __arm__ */
-    /* Same all-or-nothing refusal as matmul_q41_impl - see LZQ41Out. */
+    /* Same all-or-nothing refusal as matmul_q41_impl - see LZMatOut. */
     if (want_i16 && (!fixed_epi || !row || in_dim > LZ_MM_WIDEN_MAX
                      || ng > LZ_MM_WIDEN_MAX / 32)) return;
     if (!row || in_dim > LZ_MM_WIDEN_MAX || ng > LZ_MM_WIDEN_MAX / 32) {
@@ -1034,7 +1034,7 @@ void matmul_t2_impl(LZQ41Out *out, const int8_t *xq, const float *xqs,
     }
 }
 
-void matmul_q61_impl(LZQ41Out *out, const int8_t *xq, const float *xqs,
+void matmul_q61_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
                             const LZTensor *w, int in_dim, int out_dim, int nt) {
     int i, t;
     int gs = w->gs, r = gs / 32, ng = in_dim / gs;
@@ -1055,7 +1055,7 @@ void matmul_q61_impl(LZQ41Out *out, const int8_t *xq, const float *xqs,
     row = row_q61_arm;
 #endif /* LZ_ARM_ASM_EXTERN */
 #endif /* __arm__ */
-    /* Same all-or-nothing refusal as matmul_q41_impl - see LZQ41Out. */
+    /* Same all-or-nothing refusal as matmul_q41_impl - see LZMatOut. */
     if (want_i16 && (!fixed_epi || !row || in_dim > LZ_MM_WIDEN_MAX)) return;
     if (!row || in_dim > LZ_MM_WIDEN_MAX) {
         matmul_scalar_ref(out->o, xq, xqs, w, in_dim, out_dim, nt);
@@ -1091,15 +1091,22 @@ void matmul_q61_impl(LZQ41Out *out, const int8_t *xq, const float *xqs,
    is not written twice. The shape guards here are only the ones the
    impls do NOT make themselves; everything else (the fixed-epilogue
    predicate, the row-kernel pick, LZ_MM_WIDEN_MAX) is decided inside
-   the impl and reported back through LZQ41Out.ok.
+   the impl and reported back through LZMatOut.ok.
 
    LZ_KERNEL_REF is refused rather than served: it means matmul_scalar_ref,
    whose float epilogue is its own code and has no int16 exit. That is
    not a new asymmetry - --kernel ref already computes different logits
    from the SIMD tiers whenever the fixed epilogue is live, for the same
-   reason. */
-static int q41_dispatch(LZQ41Out *out, const int8_t *xq, const float *xqs,
-                        const LZTensor *w, int in_dim, int out_dim, int nt) {
+   reason.
+
+   Q16_0 sits behind the same build guard its impl and its float
+   dispatch in lz_matmul_xq_nt already sit behind, not a new one: where
+   matmul_q16_impl is not compiled, q16_0 reaches matmul_scalar_ref for
+   the float exit too, and there is no int16 exit for that path to
+   refuse into. A build without it answers 0 here and every caller
+   falls back, which is the same answer it gives for f32 weights. */
+static int mm_i16_dispatch(LZMatOut *out, const int8_t *xq, const float *xqs,
+                           const LZTensor *w, int in_dim, int out_dim, int nt) {
     if (!w || w->gs < 32 || (w->gs % 32) != 0 || (in_dim % w->gs) != 0)
         return 0;
     if (nt < 1 || nt > LZ_BATCH_MAX) return 0;
@@ -1120,29 +1127,37 @@ static int q41_dispatch(LZQ41Out *out, const int8_t *xq, const float *xqs,
             if (w->zero) return 0;
             matmul_t2_impl(out, xq, xqs, w, in_dim, out_dim, nt);
             return 1;
+#if defined(__WATCOMC__) || defined(LZ_DOT_MMX_EXTERN) || defined(__arm__)
+        case LZ_FMT_Q16_0:
+            /* Symmetric like Q8_0 - no zero plane to require, and the
+               widen cap is the impl's own bail. */
+            if (in_dim > LZ_MM_WIDEN_MAX) return 0;
+            matmul_q16_impl(out, xq, xqs, w, in_dim, out_dim, nt);
+            return 1;
+#endif /* Q16_0 SIMD matmul */
         default:
             return 0;
     }
 }
 
 int lz_matmul_xq_i16_ok(const LZTensor *w, int in_dim, int nt) {
-    LZQ41Out ex;
+    LZMatOut ex;
     memset(&ex, 0, sizeof(ex));
     ex.probe = 1;
-    if (!q41_dispatch(&ex, NULL, NULL, w, in_dim, 0, nt)) return 0;
+    if (!mm_i16_dispatch(&ex, NULL, NULL, w, in_dim, 0, nt)) return 0;
     return ex.ok;
 }
 
 int lz_matmul_xq_nt_i16(short *o, const int8_t *xq, const float *xqs,
                         const LZTensor *w, int in_dim, int out_dim, int nt,
                         int target_e, int bound) {
-    LZQ41Out ex;
+    LZMatOut ex;
     if (!o || !xq || !xqs) return 0;
     memset(&ex, 0, sizeof(ex));
     ex.oi = o;
     ex.target_e = target_e;
     ex.bound = bound;
-    if (!q41_dispatch(&ex, xq, xqs, w, in_dim, out_dim, nt)) return 0;
+    if (!mm_i16_dispatch(&ex, xq, xqs, w, in_dim, out_dim, nt)) return 0;
     return ex.ok;
 }
 
@@ -1307,7 +1322,7 @@ static int q16_fixed_epi(const LZTensor *w, int in_dim, int nb, int nt) {
            && nt <= LZ_BATCH_MAX;
 }
 
-void matmul_q16_impl(float *o, const int8_t *xq, const float *xqs,
+void matmul_q16_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
                             const LZTensor *w, int in_dim, int out_dim, int nt) {
     int i, tk;
     int r = w->gs / 32;
@@ -1317,6 +1332,7 @@ void matmul_q16_impl(float *o, const int8_t *xq, const float *xqs,
     int t;
     lz_rowfn row;
     int fixed_epi = q16_fixed_epi(w, in_dim, ng, nt);
+    int want_i16 = (out->oi != NULL) || out->probe;
     /* 1.0: the Q16_0 kernels do not scale by 256 the way the Q8_0 ones
        do. Read from lz_epi_post_e, not written here, so the float exit
        and the fixed one cannot end up on different scalings. */
@@ -1335,14 +1351,23 @@ void matmul_q16_impl(float *o, const int8_t *xq, const float *xqs,
     row = row_q16_arm;
 #endif /* LZ_ARM_ASM_EXTERN */
 #endif /* __arm__ */
+    /* Same all-or-nothing refusal as matmul_q41_impl - see LZMatOut. The
+       int16 exit is the FIXED epilogue's exit (epi_fixed_align_i16 is
+       epi_fixed_raw plus epi_align_i16), so !fixed_epi refuses here even
+       though the float exit would have been happy to run without it. */
+    if (want_i16 && (!fixed_epi || !row || in_dim > LZ_MM_WIDEN_MAX
+                     || post_e == LZ_EPI_POST_NA)) return;
     /* Third bail alongside the two kernel ones, same reasoning as
        matmul_q8_impl's: a format with no lz_epi_post_e entry has no
        scaling for either epilogue below, and matmul_scalar_ref is the
        one path here that needs none. */
     if (!row || in_dim > LZ_MM_WIDEN_MAX || post_e == LZ_EPI_POST_NA) {
-        matmul_scalar_ref(o, xq, xqs, w, in_dim, out_dim, nt);
+        matmul_scalar_ref(out->o, xq, xqs, w, in_dim, out_dim, nt);
         return;
     }
+    out->ok = 1;
+    if (out->probe) return;
+
     for (t = 0; t < nt * in_dim; t++) g_xw[t] = (int16_t)xq[t];
     /* Once per token, before the row loop: a per-row rebuild would cost
        what it saves. Same call the Q8_0 path makes. */
@@ -1355,9 +1380,19 @@ void matmul_q16_impl(float *o, const int8_t *xq, const float *xqs,
         if (lz_cpu_has_mmx()) _mm_empty();                    /* exit MMX state before x87 */
         /* Term for term the same epilogue as Q8_0's, fixed branch
            included: Q16_0 is symmetric, so it belongs to the
-           lz_epi_prep / epi_fixed_raw family and not to epi_q41's. */
+           lz_epi_prep / epi_fixed_raw family and not to epi_q41's - and
+           so its int16 exit is epi_fixed_align_i16, not the q41 one.
+           The clamp inside epi_align_i16 has already brought the result
+           within +-out->bound, so the narrowing cast cannot lose a bit. */
+        if (out->oi) {
+            for (tk = 0; tk < nt; tk++)
+                out->oi[(size_t)tk * out_dim + i] = (short)epi_fixed_align_i16(
+                    g_acc32 + (size_t)tk * ng, w, i, tk, ng, r,
+                    out->target_e, out->bound);
+            continue;
+        }
         for (tk = 0; tk < nt; tk++)
-            o[(size_t)tk * out_dim + i] = fixed_epi
+            out->o[(size_t)tk * out_dim + i] = fixed_epi
                 ? epi_fixed(g_acc32 + (size_t)tk * ng, w, i, tk, ng, r)
                 : epi_q8(g_acc32 + (size_t)tk * ng, xqs + (size_t)tk * ng,
                          ws, ng, r, post);

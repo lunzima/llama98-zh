@@ -22,11 +22,17 @@ extern const lz_rowfn LZ_ROW_T2[LZ_ROW_N];
 extern const lz_rowfn LZ_ROW_Q61[LZ_ROW_N];
 extern const lz_rowfn LZ_ROW_Q16[LZ_ROW_N];
 
-/* ---- q41-family exit descriptor -------------------------------------
-   Where matmul_q41_impl / matmul_t2_impl / matmul_q61_impl put their
-   epilogue results. Exactly one of `o` (float, what every
-   lz_matmul_xq_nt caller wants) and `oi` (int16 at `target_e`, clamped
-   to +-`bound` - int-pipeline milestone 3, lz_matmul_xq_nt_i16) is set.
+/* ---- matmul exit descriptor -----------------------------------------
+   Where matmul_q41_impl / matmul_t2_impl / matmul_q61_impl /
+   matmul_q16_impl put their epilogue results. Exactly one of `o`
+   (float, what every lz_matmul_xq_nt caller wants) and `oi` (int16 at
+   `target_e`, clamped to +-`bound` - lz_matmul_xq_nt_i16) is set.
+
+   NOT per format, even though the two epilogue families behind it are:
+   the Q4_1/Q6_1/T2 impls reach the int16 exit through epi_q41_align_i16
+   and Q16_0 reaches it through epi_fixed_align_i16, but what a CALLER
+   asks for is the same question either way. A second, identical struct
+   per family is the shape this project has twice watched drift.
 
    `probe`/`ok` exist so that "can this tensor take the int16 exit?" has
    ONE answer computed in ONE place. That place is the impl's own
@@ -42,18 +48,18 @@ typedef struct {
     int    bound;
     int    probe;               /* in:  decide only, compute nothing */
     int    ok;                  /* out: 1 if the requested exit is available */
-} LZQ41Out;
+} LZMatOut;
 
 /* ---- matmul impls (defined in ops_matmul.c) -------------------------- */
 void matmul_q8_impl(float *o, const int8_t *xq, const float *xqs,
                     const LZTensor *w, int in_dim, int out_dim, int nt);
-void matmul_q41_impl(LZQ41Out *out, const int8_t *xq, const float *xqs,
+void matmul_q41_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
                      const LZTensor *w, int in_dim, int out_dim, int nt);
-void matmul_q61_impl(LZQ41Out *out, const int8_t *xq, const float *xqs,
+void matmul_q61_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
                      const LZTensor *w, int in_dim, int out_dim, int nt);
-void matmul_t2_impl(LZQ41Out *out, const int8_t *xq, const float *xqs,
+void matmul_t2_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
                     const LZTensor *w, int in_dim, int out_dim, int nt);
-void matmul_q16_impl(float *o, const int8_t *xq, const float *xqs,
+void matmul_q16_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
                      const LZTensor *w, int in_dim, int out_dim, int nt);
 
 /* Scalar reference (the contract every SIMD tier is judged against). */
@@ -102,9 +108,9 @@ int32_t epi_q41_align_i16(const int32_t *accb, const LZTensor *w, int row,
 void epi_pack_act(const float *xqs, int nb, int nt);
 void epi_zero_act_int(const int8_t *xq, int in_dim, int ng, int r, int nt);
 /* Exponent alignment primitive (docs/int-pipeline-project.md batch 1
-   #1) - epi_align_i16's Q8_0-shaped wrapper. Still called from no
-   forward.c site; the live consumer of the primitive is
-   epi_q41_align_i16 above. See ops.c's own comment on why. */
+   #1) - epi_align_i16's wrapper for the symmetric formats, i.e. the
+   epi_fixed / lz_epi_prep family. matmul_q16_impl's int16 exit is its
+   live caller (int-pipeline milestone 5); Q8_0 still has none. */
 int32_t epi_fixed_align_i16(const int32_t *accb, const LZTensor *w, int row,
                              int tk, int ng, int r, int target_e, int bound);
 

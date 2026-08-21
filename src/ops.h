@@ -188,6 +188,11 @@ float lz_rsqrt(float x);
 
 void  lz_softmax(float *x, int n);
 float lz_sigmoid(float x);
+/* Same value with the argument already in integers (x == v * 2^-e) -
+   the int-pipeline entry, for producers that exit int16 at a known
+   exponent. Only the fixed sigmoid tier has an integer table to reach,
+   so callers ask lz_sig_mode() before choosing the int exit at all. */
+float lz_sigmoid_i(int32_t v, int e);
 float lz_silu(float x);
 float lz_softplus(float x);
 
@@ -1602,7 +1607,16 @@ void lz_conv_build_scales(float *oscale, float *in_scale,
    optimum for the DEPLOYED point stays (k=2, tau=1) - both directions on
    the tau axis are worse there, which is itself a measurement rather
    than an assumption (see moe_tau_flat.py's flattening half). */
-void lz_moe_route(const float *logits, const float *bias, int n_experts,
+/* `li`/`li_e` are the int-pipeline milestone 5 entry: non-NULL takes the
+   router logits already int16 at exponent li_e (logits[i] == li[i] *
+   2^-li_e, lz_matmul_xq_nt_i16's exit) and `logits` goes unread. Only
+   the sigmoid scorer consumes them as integers - it has lz_sigmoid_i -
+   and the softmax scorer and the tempered weight both rebuild the float
+   vector first, since neither lz_exp nor a divide by a runtime tau has
+   an integer entry to reach. NULL keeps the float input this function
+   was written with. */
+void lz_moe_route(const float *logits, const short *li, int li_e,
+                  const float *bias, int n_experts,
                   int top_k, int sigmoid, int renormalize, float tau,
                   int *idx_out, float *w_out);
 

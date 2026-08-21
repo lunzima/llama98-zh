@@ -556,6 +556,66 @@ int32_t sigmoid_q15_t(float t) {
     return a + (((b - a) * frac) >> 15);
 }
 
+/* Integer-input entry, int-pipeline milestone 5: x == v * 2^-e.
+ *
+ * EXACT against sigmoid_q15((float)v * 2^-e), not an approximation of
+ * it, and the argument is that every step of sigmoid_q15's coordinate
+ * derivation is exact in float over this domain, so reproducing it in
+ * integers cannot disagree:
+ *
+ *   t = (x - LZ_SIG_LO) * LZ_SIG_STEP, and both constants are exact
+ *   powers of two in disguise: -LZ_SIG_LO * LZ_SIG_STEP == 192 exactly
+ *   and LZ_SIG_STEP == 2^4. So with u = v + 12*2^e (an integer, and
+ *   POSITIVE inside the clamps below), t == u * 2^(4-e) exactly.
+ *   - the add x + 12 is exact while e + 5 <= 24, i.e. e <= 19: x has e
+ *     fractional bits and x + 12 < 24 needs 5 integer ones.
+ *   - the multiply by 2^4 only moves the exponent field.
+ *   - t - (float)idx is exact: idx is t's integer part, and the
+ *     difference needs only t's own fractional bits.
+ *   - * 32768.0f is another exponent-field move, and the (int) cast
+ *     truncates a non-negative value, which is floor.
+ *   So frac == floor((t - idx) * 32768), and that is what the shifts
+ *   below compute: for sh <= 15 exactly, and for sh > 15 the extra
+ *   right shift is the same floor.
+ * Beyond e = 19 the float path's `x + 12` starts rounding and this
+ * entry is the more accurate of the two rather than the equal one -
+ * which is why the range is capped here instead of silently drifting.
+ * Verified exhaustively over the full int16 input domain at the
+ * exponents the engine uses, .prof/m5sig.c, 0 mismatches.
+ *
+ * u is formed before any shift so that the arithmetic runs on a
+ * non-negative value: a right shift of a negative int is only
+ * implementation-defined in C, and this entry must not depend on it.
+ *
+ * No ARM primitive hook, unlike the two float entries above: those exist
+ * to do the coordinate derivation the ARM way, and here there is no
+ * float coordinate to derive. */
+int32_t sigmoid_q15_i(int32_t v, int e) {
+    int32_t lim, u, frac, a, b;
+    int idx, sh;
+    if (!g_sigtab_ready) sig_build();
+    if (e < 0 || e > 27) return sigmoid_q15((float)v * pow2f(-e));
+    lim = (int32_t)(-(int)LZ_SIG_LO) << e;      /* x == +-12, the table edge */
+    if (v <= -lim) return 0;
+    if (v >= lim) return 32768;
+    u = v + lim;                                /* 0 < u < 24 * 2^e */
+    sh = e - 4;                                 /* t == u * 2^-sh */
+    if (sh <= 0) { idx = (int)(u << -sh); frac = 0; }
+    else {
+        idx = (int)(u >> sh);
+        frac = u & (((int32_t)1 << sh) - 1);
+        frac = (sh <= 15) ? (frac << (15 - sh)) : (frac >> (sh - 15));
+    }
+    a = g_sigtab[idx];
+    b = g_sigtab[idx + 1];
+    return a + (((b - a) * frac) >> 15);
+}
+
+int32_t lz_sig_q15_domain(int e) {
+    if (e < 0 || e > 27) return 0;
+    return (int32_t)(-(int)LZ_SIG_LO) << e;
+}
+
 /* The additive half of sigmoid_q15_t's folded entry: t = acc*k1 + this,
    where k1 = oscale*LZ_SIG_STEP (lz_sig_q15_fold) reproduces (x -
    LZ_SIG_LO)*LZ_SIG_STEP for x = acc*oscale bit-for-bit, since both

@@ -192,6 +192,23 @@ float lz_sigmoid(float x) {
     }
 }
 
+/* Integer-input lz_sigmoid: x == v * 2^-e (int-pipeline milestone 5).
+   One convert and one multiply, against the three multiplies, add and
+   convert the float entry needs to reach the same table - the producer
+   has already delivered the coordinate in integers, so the derivation
+   sigmoid_q15 does per call is not repeated, it is gone.
+
+   The float tier is not this function's table at all (lz_exp-based, a
+   different value), so it cannot be served in integers; callers gate on
+   lz_sig_mode() and never reach here with the tier off. Reconstructing
+   is what that unreachable case does anyway rather than returning a
+   value from the wrong tier. */
+float lz_sigmoid_i(int32_t v, int e) {
+    if (!lz_sig_mode()) return lz_sigmoid((float)v * pow2f(-e));
+    LZ_FCX(LZ_FC_SIGMOID, 1, 0, 0, 1, 0);
+    return (float)sigmoid_q15_i(v, e) * (1.0f / 32768.0f);
+}
+
 float lz_silu(float x) {
     LZ_FCX(LZ_FC_SIGMOID, 1, 0, 0, 0, 0);  /* x * sigmoid(x): one multiply */
     return x * lz_sigmoid(x);
@@ -1912,10 +1929,10 @@ int32_t epi_q41_align_i16(const int32_t *accb, const LZTensor *w, int row,
    one addition: the zero coefficient is -scale, so the negated array is
    built per row into g_t2neg and handed to epi_q41 as its `wm`. */
 
-/* The float exit of the Q4_1/Q6_1/T2 impls, which is what every
+/* The float exit of the impls that take an LZMatOut, which is what every
    lz_matmul_xq_nt caller wants; the int16 one is reached through
    lz_matmul_xq_nt_i16 instead. */
-static void q41_out_f32(LZQ41Out *x, float *o) {
+static void mat_out_f32(LZMatOut *x, float *o) {
     memset(x, 0, sizeof(*x));
     x->o = o;
 }
@@ -2003,13 +2020,13 @@ void lz_matmul_xq_nt(float *o, const float *x, const int8_t *xq,
        in_dim is 1024, the 0.8B's 3584 - both within 4096. */
     if (w->dtype == LZ_FMT_Q4_1 && w->gs >= 32 && (w->gs % 32) == 0 &&
         (in_dim % w->gs) == 0 && in_dim <= LZ_MM_WIDEN_MAX && w->zero) {
-        LZQ41Out ex; q41_out_f32(&ex, o);
+        LZMatOut ex; mat_out_f32(&ex, o);
         matmul_q41_impl(&ex, xq, xqs, w, in_dim, out_dim, nt);
         return;
     }
     if (w->dtype == LZ_FMT_Q6_1 && w->gs >= 32 && (w->gs % 32) == 0 &&
         (in_dim % w->gs) == 0 && in_dim <= LZ_MM_WIDEN_MAX && w->zero) {
-        LZQ41Out ex; q41_out_f32(&ex, o);
+        LZMatOut ex; mat_out_f32(&ex, o);
         matmul_q61_impl(&ex, xq, xqs, w, in_dim, out_dim, nt);
         return;
     }
@@ -2017,7 +2034,7 @@ void lz_matmul_xq_nt(float *o, const float *x, const int8_t *xq,
        that HAS one was mis-loaded. */
     if (w->dtype == LZ_FMT_T2 && w->gs >= 32 && (w->gs % 32) == 0 &&
         (in_dim % w->gs) == 0 && in_dim <= LZ_MM_WIDEN_MAX && !w->zero) {
-        LZQ41Out ex; q41_out_f32(&ex, o);
+        LZMatOut ex; mat_out_f32(&ex, o);
         matmul_t2_impl(&ex, xq, xqs, w, in_dim, out_dim, nt);
         return;
     }
@@ -2031,7 +2048,8 @@ void lz_matmul_xq_nt(float *o, const float *x, const int8_t *xq,
        intrinsics twin and exercises this same path. */
     if (w->dtype == LZ_FMT_Q16_0 && w->gs >= 32 && (w->gs % 32) == 0 &&
         (in_dim % w->gs) == 0 && in_dim <= LZ_MM_WIDEN_MAX) {
-        matmul_q16_impl(o, xq, xqs, w, in_dim, out_dim, nt);
+        LZMatOut ex; mat_out_f32(&ex, o);
+        matmul_q16_impl(&ex, xq, xqs, w, in_dim, out_dim, nt);
         return;
     }
 #endif /* __WATCOMC__ || LZ_DOT_MMX_EXTERN */
@@ -2350,7 +2368,8 @@ void lz_conv_build_scales(float *oscale, float *in_scale,
 }
 #endif /* LZ_CONV_FIXED */
 
-void lz_moe_route(const float *logits, const float *bias, int n_experts,
+void lz_moe_route(const float *logits, const short *li, int li_e,
+                  const float *bias, int n_experts,
                   int top_k, int sigmoid, int renormalize, float tau,
                   int *idx_out, float *w_out) {
     /* static, not stack: LZ_MAX_EXPERTS is 128, and rule six clause 4
@@ -2360,6 +2379,10 @@ void lz_moe_route(const float *logits, const float *bias, int n_experts,
     static float score[LZ_MAX_EXPERTS];
     static float tscore[LZ_MAX_EXPERTS];
     static float key[LZ_MAX_EXPERTS];
+    /* Where an int16 input is rebuilt as floats for the readers that
+       have no integer entry - see the `li` half of this function's
+       header. Static for the same reason the three above are. */
+    static float flog[LZ_MAX_EXPERTS];
     /* Sentinel for "already selected" in the top-k scan below - far
        enough from any real score/bias that excess precision could not
        change which elements it excludes, but not exactly representable
@@ -2375,8 +2398,21 @@ void lz_moe_route(const float *logits, const float *bias, int n_experts,
     if (n_experts <= 0 || n_experts > LZ_MAX_EXPERTS || top_k <= 0) return;
     if (!(tau > 0.0f)) tempered = 0;   /* also catches NaN, which compares false */
 
+    /* The int input only reaches the sigmoid scorer as integers. Every
+       other reader below wants a float vector, so build it once here -
+       that is the producer's declined convert and multiply arriving
+       after all, which is why it bills at the epilogue's site rather
+       than at this function's. */
+    if (li && (!sigmoid || tempered)) {
+        float deq = pow2f(-li_e);
+        for (i = 0; i < n_experts; i++) flog[i] = lz_i32f(li[i]) * deq;
+        LZ_FCX(LZ_FC_EPI, n_experts, 0, 0, n_experts, 0);
+        logits = flog;
+    }
+
     if (sigmoid) {
-        for (i = 0; i < n_experts; i++) score[i] = lz_sigmoid(logits[i]);
+        if (li) for (i = 0; i < n_experts; i++) score[i] = lz_sigmoid_i(li[i], li_e);
+        else    for (i = 0; i < n_experts; i++) score[i] = lz_sigmoid(logits[i]);
     } else {
         /* softmax: max-subtracted for stability, sum via lz_exp for the
            same cross-platform determinism the rest of the engine uses -
