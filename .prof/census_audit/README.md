@@ -5,6 +5,26 @@ The census (`-DLZ_F32COUNT=1`) is a set of hand-written formulas at
 same quantity **without** formulas, so the two can be compared, and the
 result of running it on kmr20.
 
+## Before re-running: two things that make it lie
+
+**`covbuild.sh`, `measure.sh` and `genrawfix.sh` do not run from this
+directory.** Each does `cd "$(dirname "$0")"` and then uses repo-root
+relative paths (`src/$tu.c`, `build/cov`), so from `.prof/census_audit/`
+the first dies with `cc1: fatal error: src/err.c: No such file or
+directory`. Copy them to the root of a throwaway `git archive` checkout
+and run them there. Not fixed in place because validating the fix means
+re-running the whole measurement.
+
+**`linemap.tsv` keys 36 rows to `src/forward.c` LINE NUMBERS**, so any
+edit to that file moves work between sites without failing. It has
+happened: a commit landing between the measurement and the publication
+shifted `forward.c` and moved 6,240 ops/token out of the NOSITE rows
+into SIGMOID. `compare.sh` now refuses when `src/forward.c` is not the
+blob the map was built against, warns when it cannot tell, and takes
+`CENSUS_AUDIT_SKIP_BLOBCHECK=1` for the regenerate-then-rerun case. The
+recorded blob is `f81eb6db` (`0283fa0`'s); **the map is stale for
+anything later and needs regenerating, not shifting by hand.**
+
 ## Method
 
 One run of one binary produces both numbers.

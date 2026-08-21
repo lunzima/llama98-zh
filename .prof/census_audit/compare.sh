@@ -7,6 +7,38 @@ set -u
 cd "$(dirname "$0")"
 CEN=$1; MEAS=$2; RAWFIX=$3; TOK=$4
 
+# linemap.tsv keys 36 rows to src/forward.c LINE NUMBERS, so any edit to
+# that file silently moves work between sites - not a crash, a wrong
+# table. It has already happened once: a commit between the measurement
+# and the publication shifted forward.c and moved 6,240 ops/token out of
+# the NOSITE rows into SIGMOID.
+#
+# Refuse instead of reporting. Regenerating the map is the fix; this
+# only makes the staleness loud. Overridable for the "I know, I am
+# regenerating" case.
+# Refuse only on a POSITIVE mismatch. An archive checkout has no .git,
+# and a check that also fires when it cannot tell would be red
+# everywhere and therefore carry nothing.
+LINEMAP_FORWARD_BLOB=f81eb6dba04953c413b3cd9cb2ebd533c17ea23f
+if [ "${CENSUS_AUDIT_SKIP_BLOBCHECK:-0}" != "1" ]; then
+    cur=$(cd .. && cd .. && git rev-parse HEAD:src/forward.c 2>/dev/null) || cur=
+    if [ -z "$cur" ]; then
+        cur=$(git hash-object ../../src/forward.c 2>/dev/null) || cur=
+    fi
+    if [ -z "$cur" ]; then
+        echo "compare.sh: WARNING - cannot identify src/forward.c;" >&2
+        echo "  linemap.tsv's 36 line keys are unverified for this tree." >&2
+    elif [ "$cur" != "$LINEMAP_FORWARD_BLOB" ]; then
+        echo "compare.sh: REFUSING - linemap.tsv was generated against" >&2
+        echo "  src/forward.c blob $LINEMAP_FORWARD_BLOB" >&2
+        echo "  this tree has       $cur" >&2
+        echo "  Its 36 forward.c line keys are stale; the table would be" >&2
+        echo "  wrong in a way that looks right. Regenerate linemap.tsv," >&2
+        echo "  or set CENSUS_AUDIT_SKIP_BLOBCHECK=1 if you just did." >&2
+        exit 2
+    fi
+fi
+
 sed -n '/f32 operations per token/,/^  total/p' "$CEN" |
 awk '{
     line = $0
