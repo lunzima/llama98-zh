@@ -887,6 +887,31 @@ void lz_matmul_xq_nt(float *o, const float *x, const int8_t *xq,
                      const float *xqs, const LZTensor *w,
                      int in_dim, int out_dim, int nt);
 
+/* Same matmul, int16 exit (int-pipeline milestone 3). The row kernel
+   and the int32 accumulators are the same ones lz_matmul_xq_nt uses -
+   only the epilogue differs, exiting through epi_q41_align_i16 instead
+   of materializing a float. `o` is token-major [t * out_dim + i] like
+   lz_matmul_xq_nt's, in int16 at exponent `target_e`, clamped to
+   +-bound; there is no f32-weight fallback because there is no int16
+   exit for one.
+
+   Serves the Q4_1/Q6_1/T2 family only, and only where the fixed
+   epilogue is live. Returns 1 if it ran and 0 if it refused, having
+   written nothing - ask lz_matmul_xq_i16_ok FIRST if the caller needs
+   to choose between tiers for a GROUP of tensors, which is the normal
+   case: one consumer fed half in int and half in float is worse than
+   either. */
+int lz_matmul_xq_nt_i16(short *o, const int8_t *xq, const float *xqs,
+                        const LZTensor *w, int in_dim, int out_dim, int nt,
+                        int target_e, int bound);
+
+/* Whether lz_matmul_xq_nt_i16 would run for this tensor. Same answer
+   for the same arguments, and it is the predicate the entry point
+   itself asks, so a caller that gets 1 here cannot then be refused.
+   Idempotent side effect: it may build the tensor's fixed-epilogue
+   planes (lz_epi_prep), exactly as the float dispatch does. */
+int lz_matmul_xq_i16_ok(const LZTensor *w, int in_dim, int nt);
+
 /* Pure f32 matmul (for differential/debug use; semantics same as
    lz_matmul_w's dtype=0 branch) */
 void lz_matmul(float *o, const float *x, const float *w,
@@ -1521,8 +1546,13 @@ void lz_causal_conv1d_step(float *o, const float *x,
    produced by lz_conv_norm_pow2 against lz_conv_accum_bound(k). Aliasing
    sh_in == sh_out is safe on the same forward-order argument the float
    path documents. Drifts ~4.8e-5 from the float path - a tolerance
-   gate, not cmp. */
-void lz_causal_conv1d_step_fixed(float *o, const float *x,
+   gate, not cmp.
+
+   `xi` non-NULL takes the input already quantized at `es` and clamped
+   to +-bound (lz_matmul_xq_nt_i16's exit), and `x`/`in_scale` go
+   unread: the int pipeline's producer-consumer join, one float
+   multiply and one q8_round per channel deleted rather than moved. */
+void lz_causal_conv1d_step_fixed(float *o, const float *x, const short *xi,
                                  const short *sh_in, short *sh_out,
                                  const short *mw, const float *sig_k1,
                                  const float *sig_oscale2, float sig_k2,

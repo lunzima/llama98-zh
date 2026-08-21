@@ -450,6 +450,14 @@ typedef struct {
        rather than on LZModel only to keep the loader untouched. */
     short *conv_state_q;
     short *conv_mw;
+    /* KDA's q/k/v projections in int16 at LZ_CONV_ES, when the whole
+       triple can take lz_matmul_xq_nt_i16's exit (int-pipeline
+       milestone 3). Same shapes as kda_q/kda_k/kda_v, which stay
+       allocated and carry the same vectors whenever it cannot -
+       exactly one of the two is written per call. Allocated with the
+       rest of the fixed conv tier and NULL without it. */
+    short *kda_q_i16, *kda_k_i16;
+    short *kda_v_i16;
     float *conv_sig_k1;
     float *conv_sig_oscale2;
     float  conv_sig_k2;         /* lz_sig_q15_t_offset(), same for every channel */

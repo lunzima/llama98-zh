@@ -758,30 +758,18 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
        flag, and a state whose buffers were not allocated must not start
        taking the fixed branch halfway through a run.
      *
-     * NOT YET REACHED BY forward_kda / forward_ssm - the buffers are
-     * allocated and the kernel exists (lz_causal_conv1d_step_fixed,
-     * validated by .prof/wconv2.c), but one parameter is still open and
-     * guessing it would be worse than leaving the branch unwired:
-     *
-     *   THE HISTORY EXPONENT. The probe derived `es` by normalizing a
-     *   state it was handed. Here the history starts at zero, so there
-     *   is nothing to derive it from, and it would have to be a constant
-     *   chosen a priori. Activations entering the conv are O(1) but not
-     *   bounded, so a constant either clips the tail or wastes range,
-     *   and clipping is silent.
-     *
-     *   The recurrence solved the same problem and its answer is in
-     *   ssm_state_s: the scale TRAVELS WITH THE STATE and is recomputed
-     *   every step (p2_group_scale writes rs_out). The conv has no
-     *   counterpart, and giving it one means a renormalization pass over
-     *   the history whenever the range moves - which is exactly the cost
-     *   the fixed tier exists to avoid, so it has to be measured before
-     *   it is written, not after.
-     *
-     * Until that is settled, allocating is harmless (the buffers are
-     * small and nothing reads them) and keeps the tier's shape visible.
-     * What must NOT happen is a call site taking the fixed branch with a
-     * fabricated es. */
+     * THE HISTORY EXPONENT was the one parameter that kept this tier
+     * unwired for a while, and the answer it eventually got is
+     * LZ_CONV_ES: a CONSTANT power of two, measured once from the real
+     * conv input distribution rather than derived per token, because the
+     * history starts at zero and has nothing to derive one from. The
+     * recurrence's answer (a scale that TRAVELS WITH THE STATE,
+     * ssm_state_s / p2_group_scale) would cost a renormalization pass
+     * over the history every time the range moved, which is the cost
+     * this tier exists to avoid. See LZ_CONV_ES for the distribution it
+     * was measured against and for the fact that a value past 32 clips
+     * SILENTLY - re-run that probe on any model whose conv inputs might
+     * be scaled differently. */
     s->conv_fixed = lz_conv_mode();
     if (s->conv_fixed) {
         size_t nch = (size_t)c->n_linear_layers * c->lin_conv_dim;
@@ -791,6 +779,15 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
             sizeof(short), &ok, &s->bytes_alloc);
         s->conv_mw = (short *)xcalloc(nch * c->conv_kernel,
                                       sizeof(short), &ok, &s->bytes_alloc);
+        /* Sized like kda_q/kda_k/kda_v above, in int16. Zero-sized (and
+           so NULL) on a model with no KDA layers, which forward_kda's
+           own predicate then reads as "no int path". */
+        s->kda_q_i16 = (short *)xcalloc((size_t)nt * c->lin_key_dim,
+                                        sizeof(short), &ok, &s->bytes_alloc);
+        s->kda_k_i16 = (short *)xcalloc((size_t)nt * c->lin_key_dim,
+                                        sizeof(short), &ok, &s->bytes_alloc);
+        s->kda_v_i16 = (short *)xcalloc((size_t)nt * c->lin_value_dim,
+                                        sizeof(short), &ok, &s->bytes_alloc);
         s->conv_sig_k1 = (float *)xcalloc(nch, sizeof(float), &ok,
                                           &s->bytes_alloc);
         s->conv_sig_oscale2 = (float *)xcalloc(nch, sizeof(float), &ok,
@@ -945,6 +942,7 @@ void lz_state_free(LZRunState *s) {
 #endif /* LZ_GDN_STATE_2PLANE */
     free(s->conv_state);
     free(s->conv_state_q); free(s->conv_mw);
+    free(s->kda_q_i16); free(s->kda_k_i16); free(s->kda_v_i16);
     free(s->conv_sig_k1); free(s->conv_sig_oscale2);
     free(s->xq); free(s->xqs); free(s->wscr); free(s->fwht_scratch);
     free(s->subn_norm_int);
@@ -1833,8 +1831,19 @@ static void forward_ssm(const LZModel *m, LZRunState *s,
                would leave a model with SSM layers half on each tier,
                which no banner line would show. */
             size_t cb = (size_t)li * c->lin_conv_dim;
+            /* No int16 input here (int-pipeline milestone 3 wired only
+               KDA's three): the producer is in_proj_qkv, and on every
+               checkpoint in this tree that tensor is EITHER absent
+               (kmr20/kunmoe-v2: n=0, so this whole function never runs)
+               OR f32 (s1v3, kunkun98-pilot, kunmoe-v2-dense: n=1572864,
+               dtype f32). f32 leaves lz_matmul_xq_nt at its first branch
+               and never reaches the Q4_1/Q6_1/T2 epilogue that has the
+               int16 exit, so there is nothing to wire and no gate could
+               exercise it. Not a tier split of the kind the comment
+               below warns about: this conv stays wholly on the float
+               input, all lin_conv_dim channels of it. */
             lz_causal_conv1d_step_fixed(
-                s->qkv_c + (size_t)tk * cdim, s->qkv + (size_t)tk * cdim,
+                s->qkv_c + (size_t)tk * cdim, s->qkv + (size_t)tk * cdim, NULL,
                 s->conv_state_q + (size_t)slot_in * conv_slot_stride + li_off_conv,
                 s->conv_state_q + (size_t)slot_out * conv_slot_stride + li_off_conv,
                 s->conv_mw + cb * c->conv_kernel,
@@ -2062,6 +2071,41 @@ static void subn_fwht_quant(const float *x, int n, int blk,
    because its input (kda_gate_lat) is a different width than hidden and
    needs its own quantization per token, the conv because it is
    inherently serial in t (same reasoning as forward_ssm's conv). */
+/* One q/k/v projection feeding the fixed conv, int-pipeline milestone 3.
+   With `*use_int` the matmul exits as int16 already at LZ_CONV_ES and
+   clamped to s->conv_bound, and the conv takes it as-is: the producer's
+   `(float)comb * pow2f(target)` and the consumer's `x[c] * in_scale` +
+   q8_round both stop existing rather than moving somewhere else.
+
+   ALL THREE OR NONE, and the flag is what enforces it. A refusal here
+   cannot be recovered from per-projection: under SubLN each projection
+   re-quantizes s->xq/s->xqs from its own norm, so an earlier one's float
+   buffer can no longer be recomputed by the time a later one refuses.
+   It also cannot happen - lz_matmul_xq_i16_ok is asked for q, k and v
+   together before the first norm runs, and it IS the predicate the entry
+   point asks, whose answer depends only on (dtype, in_dim, nt), the same
+   three for all of q/k/v. Clearing the flag on the way to the float
+   matmul is therefore correct for the only reachable case (the FIRST
+   projection refusing, which sends the whole triple to float) and is
+   here so that a future divergence degrades instead of reading a stale
+   buffer. Same argument the fixed conv tier's own GDN comment makes
+   about not splitting one SSM block across two tiers. */
+static void kda_conv_proj(LZRunState *s, int *use_int, float *of, short *oi,
+                          const float *x, const LZTensor *w,
+                          int in_dim, int out_dim, int nt) {
+#if LZ_CONV_FIXED
+    if (*use_int) {
+        if (lz_matmul_xq_nt_i16(oi, s->xq, s->xqs, w, in_dim, out_dim, nt,
+                                LZ_CONV_ES, s->conv_bound))
+            return;
+        *use_int = 0;
+    }
+#else
+    (void)use_int; (void)oi;
+#endif /* LZ_CONV_FIXED */
+    lz_matmul_xq_nt(of, x, s->xq, s->xqs, w, in_dim, out_dim, nt);
+}
+
 /* advance_ring/ring_base: same contract as forward_ssm's own (see its
    header comment above) - reused verbatim, not re-derived, since both
    functions share the SAME ring buffers (ssm_state_q8/_lo/_s,
@@ -2101,6 +2145,22 @@ static void forward_kda(const LZModel *m, LZRunState *s,
     int gsa = lz_act_gs(&L->kda_q_proj, hdim);
     int nsa = (gsa > 0) ? hdim / gsa : 0;
     int h, i, tk;
+    /* int-pipeline milestone 3: does the whole q/k/v triple qualify for
+       the int16 matmul exit the fixed conv can consume directly? Decided
+       ONCE, here, before any projection runs - see kda_conv_proj. The
+       fixed conv tier is the consumer, so its absence answers this on its
+       own; the three tensor questions are asked in full (no short-circuit
+       reasoning from "they are the same dtype") because a checkpoint may
+       quantize them differently. */
+    int conv_int = 0;
+#if LZ_CONV_FIXED
+    if (s->conv_fixed && s->kda_q_i16 && s->kda_k_i16 && s->kda_v_i16) {
+        int okq = lz_matmul_xq_i16_ok(&L->kda_q_proj, hdim, nt);
+        int okk = lz_matmul_xq_i16_ok(&L->kda_k_proj, hdim, nt);
+        int okv = lz_matmul_xq_i16_ok(&L->kda_v_proj, hdim, nt);
+        conv_int = okq && okk && okv;
+    }
+#endif /* LZ_CONV_FIXED */
 
     if (c->use_subn) {
         /* SubLN per-projection input RMSNorms for the four hidden-space
@@ -2138,8 +2198,8 @@ static void forward_kda(const LZModel *m, LZRunState *s,
                 lz_quantize_q8_tok(s->xb2 + (size_t)tk * hdim, hdim,
                                    s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
         }
-        lz_matmul_xq_nt(s->kda_q, s->xb2, s->xq, s->xqs, &L->kda_q_proj,
-                        hdim, kdim, nt);
+        kda_conv_proj(s, &conv_int, s->kda_q, s->kda_q_i16, s->xb2,
+                      &L->kda_q_proj, hdim, kdim, nt);
 
         if (lz_norm_int() && lz_norm_can_fixed(hdim) &&
             gsa > 0 && (hdim % gsa) == 0) {
@@ -2160,8 +2220,8 @@ static void forward_kda(const LZModel *m, LZRunState *s,
                 lz_quantize_q8_tok(s->xb2 + (size_t)tk * hdim, hdim,
                                    s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
         }
-        lz_matmul_xq_nt(s->kda_k, s->xb2, s->xq, s->xqs, &L->kda_k_proj,
-                        hdim, kdim, nt);
+        kda_conv_proj(s, &conv_int, s->kda_k, s->kda_k_i16, s->xb2,
+                      &L->kda_k_proj, hdim, kdim, nt);
 
         if (lz_norm_int() && lz_norm_can_fixed(hdim) &&
             gsa > 0 && (hdim % gsa) == 0) {
@@ -2182,8 +2242,8 @@ static void forward_kda(const LZModel *m, LZRunState *s,
                 lz_quantize_q8_tok(s->xb2 + (size_t)tk * hdim, hdim,
                                    s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
         }
-        lz_matmul_xq_nt(s->kda_v, s->xb2, s->xq, s->xqs, &L->kda_v_proj,
-                        hdim, vdim, nt);
+        kda_conv_proj(s, &conv_int, s->kda_v, s->kda_v_i16, s->xb2,
+                      &L->kda_v_proj, hdim, vdim, nt);
 
         if (lz_norm_int() && lz_norm_can_fixed(hdim) &&
             gsa > 0 && (hdim % gsa) == 0) {
@@ -2223,14 +2283,20 @@ static void forward_kda(const LZModel *m, LZRunState *s,
     for (tk = 0; tk < nt; tk++)
         lz_quantize_q8(s->xb + (size_t)tk * hdim, hdim, gsa,
                        s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
-    lz_matmul_xq_nt(s->kda_q, s->xb, s->xq, s->xqs, &L->kda_q_proj, hdim, kdim, nt);
-    lz_matmul_xq_nt(s->kda_k, s->xb, s->xq, s->xqs, &L->kda_k_proj, hdim, kdim, nt);
-    lz_matmul_xq_nt(s->kda_v, s->xb, s->xq, s->xqs, &L->kda_v_proj, hdim, vdim, nt);
+    kda_conv_proj(s, &conv_int, s->kda_q, s->kda_q_i16, s->xb,
+                  &L->kda_q_proj, hdim, kdim, nt);
+    kda_conv_proj(s, &conv_int, s->kda_k, s->kda_k_i16, s->xb,
+                  &L->kda_k_proj, hdim, kdim, nt);
+    kda_conv_proj(s, &conv_int, s->kda_v, s->kda_v_i16, s->xb,
+                  &L->kda_v_proj, hdim, vdim, nt);
     lz_matmul_xq_nt(s->kda_gate_lat, s->xb, s->xq, s->xqs, &L->kda_f_a_proj,
                     hdim, gate_rank, nt);
     lz_matmul_xq_nt(s->bvec, s->xb, s->xq, s->xqs, &L->kda_b_proj, hdim, nv, nt);
     lz_matmul_xq_nt(s->zbuf, s->xb, s->xq, s->xqs, &L->kda_g_proj, hdim, vdim, nt);
     }
+    /* These three read the FLOAT projection buffers, which hold nothing
+       when conv_int took the int16 exit - a tap build wanting q/k/v
+       there has to dump kda_q_i16/kda_k_i16/kda_v_i16 instead. */
     LZ_TAP("kq", layer, s->kda_q, kdim);
     LZ_TAP("kk", layer, s->kda_k, kdim);
     LZ_TAP("kv", layer, s->kda_v, vdim);
@@ -2257,23 +2323,30 @@ static void forward_kda(const LZModel *m, LZRunState *s,
             short *qo = s->conv_state_q + (size_t)slot_out * conv_slot_stride + li_off_conv;
             size_t q_ch = 0, k_ch = (size_t)c->lin_key_dim;
             size_t v_ch = (size_t)2 * c->lin_key_dim;
+            /* `conv_int` says the projections above exited as int16 at
+               LZ_CONV_ES already, so these read that and the float
+               buffers hold nothing for this token. NULL is the float
+               input the tier was written with. */
+            const short *qxi = conv_int ? s->kda_q_i16 + (size_t)tk * kdim : NULL;
+            const short *kxi = conv_int ? s->kda_k_i16 + (size_t)tk * kdim : NULL;
+            const short *vxi = conv_int ? s->kda_v_i16 + (size_t)tk * vdim : NULL;
             lz_causal_conv1d_step_fixed(
                 s->kda_qc + (size_t)tk * kdim, s->kda_q + (size_t)tk * kdim,
-                qi + q_off, qo + q_off,
+                qxi, qi + q_off, qo + q_off,
                 s->conv_mw + (cb + q_ch) * c->conv_kernel,
                 s->conv_sig_k1 + cb + q_ch, s->conv_sig_oscale2 + cb + q_ch,
                 s->conv_sig_k2,
                 s->conv_in_scale, s->conv_bound, kdim, c->conv_kernel);
             lz_causal_conv1d_step_fixed(
                 s->kda_kc + (size_t)tk * kdim, s->kda_k + (size_t)tk * kdim,
-                qi + k_off, qo + k_off,
+                kxi, qi + k_off, qo + k_off,
                 s->conv_mw + (cb + k_ch) * c->conv_kernel,
                 s->conv_sig_k1 + cb + k_ch, s->conv_sig_oscale2 + cb + k_ch,
                 s->conv_sig_k2,
                 s->conv_in_scale, s->conv_bound, kdim, c->conv_kernel);
             lz_causal_conv1d_step_fixed(
                 s->kda_vc + (size_t)tk * vdim, s->kda_v + (size_t)tk * vdim,
-                qi + v_off, qo + v_off,
+                vxi, qi + v_off, qo + v_off,
                 s->conv_mw + (cb + v_ch) * c->conv_kernel,
                 s->conv_sig_k1 + cb + v_ch, s->conv_sig_oscale2 + cb + v_ch,
                 s->conv_sig_k2,

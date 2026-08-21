@@ -22,14 +22,36 @@ extern const lz_rowfn LZ_ROW_T2[LZ_ROW_N];
 extern const lz_rowfn LZ_ROW_Q61[LZ_ROW_N];
 extern const lz_rowfn LZ_ROW_Q16[LZ_ROW_N];
 
+/* ---- q41-family exit descriptor -------------------------------------
+   Where matmul_q41_impl / matmul_t2_impl / matmul_q61_impl put their
+   epilogue results. Exactly one of `o` (float, what every
+   lz_matmul_xq_nt caller wants) and `oi` (int16 at `target_e`, clamped
+   to +-`bound` - int-pipeline milestone 3, lz_matmul_xq_nt_i16) is set.
+
+   `probe`/`ok` exist so that "can this tensor take the int16 exit?" has
+   ONE answer computed in ONE place. That place is the impl's own
+   fixed-epilogue and row-kernel guard; lz_matmul_xq_i16_ok reaches it
+   by running the impl with `probe` set, which returns the moment the
+   guard has been evaluated and before any activation is read. A
+   separately written predicate would be a second copy of that guard,
+   and it would drift the first time either side is touched. */
+typedef struct {
+    float *o;
+    short *oi;
+    int    target_e;
+    int    bound;
+    int    probe;               /* in:  decide only, compute nothing */
+    int    ok;                  /* out: 1 if the requested exit is available */
+} LZQ41Out;
+
 /* ---- matmul impls (defined in ops_matmul.c) -------------------------- */
 void matmul_q8_impl(float *o, const int8_t *xq, const float *xqs,
                     const LZTensor *w, int in_dim, int out_dim, int nt);
-void matmul_q41_impl(float *o, const int8_t *xq, const float *xqs,
+void matmul_q41_impl(LZQ41Out *out, const int8_t *xq, const float *xqs,
                      const LZTensor *w, int in_dim, int out_dim, int nt);
-void matmul_q61_impl(float *o, const int8_t *xq, const float *xqs,
+void matmul_q61_impl(LZQ41Out *out, const int8_t *xq, const float *xqs,
                      const LZTensor *w, int in_dim, int out_dim, int nt);
-void matmul_t2_impl(float *o, const int8_t *xq, const float *xqs,
+void matmul_t2_impl(LZQ41Out *out, const int8_t *xq, const float *xqs,
                     const LZTensor *w, int in_dim, int out_dim, int nt);
 void matmul_q16_impl(float *o, const int8_t *xq, const float *xqs,
                      const LZTensor *w, int in_dim, int out_dim, int nt);
@@ -56,14 +78,22 @@ float epi_fixed(const int32_t *accb, const LZTensor *w, int row,
    of the zero term arrives through epi_zero_act_int below. */
 float epi_q41_fixed(const int32_t *accb, const LZTensor *w, int row,
                     int tk, int ng, int r, int zneg);
+/* int-pipeline milestone 3: the same integer join (epi_q41_join, shared
+   with epi_q41_fixed so the reduction order cannot fork), exited as an
+   int16 already folded to the consumer's `target_e` and clamped to
+   +-`bound`. No float is materialized, so nothing is billed. */
+int32_t epi_q41_align_i16(const int32_t *accb, const LZTensor *w, int row,
+                          int tk, int ng, int r, int zneg,
+                          int target_e, int bound);
 /* Both run once per token, before the row loop, on the fixed path only.
    epi_zero_act_int is the integer replacement for ops_matmul.c's float
    epi_zero_act, not an addition to it - exactly one of the two runs. */
 void epi_pack_act(const float *xqs, int nb, int nt);
 void epi_zero_act_int(const int8_t *xq, int in_dim, int ng, int r, int nt);
 /* Exponent alignment primitive (docs/int-pipeline-project.md batch 1
-   #1) - epi_align_i16's epilogue-shaped wrapper. Not called from any
-   forward.c site yet; see ops.c's own comment on why. */
+   #1) - epi_align_i16's Q8_0-shaped wrapper. Still called from no
+   forward.c site; the live consumer of the primitive is
+   epi_q41_align_i16 above. See ops.c's own comment on why. */
 int32_t epi_fixed_align_i16(const int32_t *accb, const LZTensor *w, int row,
                              int tk, int ng, int r, int target_e, int bound);
 

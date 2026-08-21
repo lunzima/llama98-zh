@@ -86,6 +86,37 @@ static lz_rowfn lz_row_pick(const lz_rowfn *tab) {
 #endif /* __WATCOMC__ */
 }
 
+/* ---- q41-family epilogue exit ----------------------------------------
+   The per-row epilogue loop of matmul_q41_impl / matmul_t2_impl /
+   matmul_q61_impl, in one place because the choice it makes is the same
+   in all three: epi_q41 (no fixed epilogue), epi_q41_fixed (integer
+   join, float exit) or epi_q41_align_i16 (same join, int16 exit, no
+   float materialized at all - int-pipeline milestone 3). The row kernel
+   above it and the int32 accumulators below it do not know which exit
+   ran; that is the whole point of putting the exit here.
+
+   `wd`/`wm` are read by the epi_q41 arm only. The int16 result is
+   already clamped to +-`out->bound` inside epi_align_i16, so the
+   narrowing cast cannot lose a bit. */
+static void epi_q41_row(const LZQ41Out *out, int i, int out_dim, int nt,
+                        const LZTensor *w, int ng, int r, int nb, int zneg,
+                        int fixed_epi, const float *xqs,
+                        const float *wd, const float *wm) {
+    int tk;
+    if (out->oi) {
+        for (tk = 0; tk < nt; tk++)
+            out->oi[(size_t)tk * out_dim + i] = (short)epi_q41_align_i16(
+                g_acc32 + (size_t)tk * nb, w, i, tk, ng, r, zneg,
+                out->target_e, out->bound);
+        return;
+    }
+    for (tk = 0; tk < nt; tk++)
+        out->o[(size_t)tk * out_dim + i] = fixed_epi
+            ? epi_q41_fixed(g_acc32 + (size_t)tk * nb, w, i, tk, ng, r, zneg)
+            : epi_q41(g_acc32 + (size_t)tk * nb, xqs + (size_t)tk * nb,
+                      g_xg + (size_t)tk * ng, wd, wm, ng, r);
+}
+
 /* ---- Q8 guard block ---- */
 #if defined(__WATCOMC__) || defined(LZ_DOT_MMX_EXTERN)
 #include "ops_kernel_dot_shared.h" /* LZ_Q8_ACC, LZ_Q8_PFSEL, LZ_Q8_GROUP4 -
@@ -667,16 +698,17 @@ static void epi_zero_act(const int8_t *xq, const float *xqs, int in_dim,
     }
 }
 
-void matmul_q41_impl(float *o, const int8_t *xq, const float *xqs,
+void matmul_q41_impl(LZQ41Out *out, const int8_t *xq, const float *xqs,
                             const LZTensor *w, int in_dim, int out_dim, int nt) {
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
-    int i, t, tk;
+    int i, t;
     int r  = w->gs / 32;              /* 32 sub-blocks per weight group */
     int ng = in_dim / w->gs;          /* weight-group count */
     int nb = in_dim / 32;             /* 32-sub-block count */
     /* Same predicate as the Q8_0 float epilogue, own copy - see
        q41_fixed_epi's comment. */
     int fixed_epi = q41_fixed_epi(w, in_dim, nb, nt, r, 0);
+    int want_i16 = (out->oi != NULL) || out->probe;
     lz_rowfn row;
 
     row = lz_row_pick(LZ_ROW_Q41);
@@ -687,10 +719,16 @@ void matmul_q41_impl(float *o, const int8_t *xq, const float *xqs,
     row = row_q41_arm;
 #endif /* LZ_ARM_ASM_EXTERN */
 #endif /* __arm__ */
+    /* The int16 exit is the fixed epilogue's exit, and matmul_scalar_ref
+       has no counterpart for it. Both refusals leave `ok` at 0 and write
+       nothing rather than silently handing back the other domain. */
+    if (want_i16 && (!fixed_epi || !row || in_dim > LZ_MM_WIDEN_MAX)) return;
     if (!row || in_dim > LZ_MM_WIDEN_MAX) {
-        matmul_scalar_ref(o, xq, xqs, w, in_dim, out_dim, nt);
+        matmul_scalar_ref(out->o, xq, xqs, w, in_dim, out_dim, nt);
         return;
     }
+    out->ok = 1;
+    if (out->probe) return;
 
     for (t = 0; t < nt * in_dim; t++) g_xw[t] = (int16_t)xq[t];
     if (fixed_epi) {
@@ -711,11 +749,8 @@ void matmul_q41_impl(float *o, const int8_t *xq, const float *xqs,
            row, not per token - the epilogue below is x87 on Watcom. */
         row(g_acc32, wn, NULL, g_xw, nb, nt, in_dim, wend, NULL);
         if (lz_cpu_has_mmx()) _mm_empty();
-        for (tk = 0; tk < nt; tk++)
-            o[(size_t)tk * out_dim + i] = fixed_epi
-                ? epi_q41_fixed(g_acc32 + (size_t)tk * nb, w, i, tk, ng, r, 0)
-                : epi_q41(g_acc32 + (size_t)tk * nb, xqs + (size_t)tk * nb,
-                          g_xg + (size_t)tk * ng, wd, wm, ng, r);
+        epi_q41_row(out, i, out_dim, nt, w, ng, r, nb, 0, fixed_epi,
+                    xqs, wd, wm);
     }
 }
 
@@ -932,9 +967,9 @@ const lz_rowfn LZ_ROW_Q61[LZ_ROW_N] = {
 };
 
 /* ---- matmul_t2_impl + matmul_q61_impl ---- */
-void matmul_t2_impl(float *o, const int8_t *xq, const float *xqs,
+void matmul_t2_impl(LZQ41Out *out, const int8_t *xq, const float *xqs,
                            const LZTensor *w, int in_dim, int out_dim, int nt) {
-    int i, g, t, tk;
+    int i, g, t;
     int gs = w->gs, r = gs / 32, ng = in_dim / gs;
     int nb = in_dim / 32;
     const unsigned char *p2b = (const unsigned char *)w->q;
@@ -946,6 +981,7 @@ void matmul_t2_impl(float *o, const int8_t *xq, const float *xqs,
        negates the sq/sexp plane in place of a zero plane it does not
        have, so the predicate must not require one. */
     int fixed_epi = q41_fixed_epi(w, in_dim, nb, nt, r, 1);
+    int want_i16 = (out->oi != NULL) || out->probe;
     lz_rowfn row;
 
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
@@ -962,10 +998,15 @@ void matmul_t2_impl(float *o, const int8_t *xq, const float *xqs,
     row = row_t2_arm;
 #endif /* LZ_T2_ARM_ASM_EXTERN */
 #endif /* __arm__ */
+    /* Same all-or-nothing refusal as matmul_q41_impl - see LZQ41Out. */
+    if (want_i16 && (!fixed_epi || !row || in_dim > LZ_MM_WIDEN_MAX
+                     || ng > LZ_MM_WIDEN_MAX / 32)) return;
     if (!row || in_dim > LZ_MM_WIDEN_MAX || ng > LZ_MM_WIDEN_MAX / 32) {
-        matmul_scalar_ref(o, xq, xqs, w, in_dim, out_dim, nt);
+        matmul_scalar_ref(out->o, xq, xqs, w, in_dim, out_dim, nt);
         return;
     }
+    out->ok = 1;
+    if (out->probe) return;
 
     for (t = 0; t < nt * in_dim; t++) g_xw[t] = (int16_t)xq[t];
     if (fixed_epi) {
@@ -983,23 +1024,21 @@ void matmul_t2_impl(float *o, const int8_t *xq, const float *xqs,
         if (!fixed_epi) for (g = 0; g < ng; g++) g_t2neg[g] = -wd[g];
         row(g_acc32, w2, NULL, g_xw, nb, nt, in_dim, NULL, NULL);
         if (lz_cpu_has_mmx()) _mm_empty();
-        for (tk = 0; tk < nt; tk++)
-            o[(size_t)tk * out_dim + i] = fixed_epi
-                ? epi_q41_fixed(g_acc32 + (size_t)tk * nb, w, i, tk, ng, r, 1)
-                : epi_q41(g_acc32 + (size_t)tk * nb, xqs + (size_t)tk * nb,
-                          g_xg + (size_t)tk * ng, wd, g_t2neg, ng, r);
+        epi_q41_row(out, i, out_dim, nt, w, ng, r, nb, 1, fixed_epi,
+                    xqs, wd, g_t2neg);
     }
 }
 
-void matmul_q61_impl(float *o, const int8_t *xq, const float *xqs,
+void matmul_q61_impl(LZQ41Out *out, const int8_t *xq, const float *xqs,
                             const LZTensor *w, int in_dim, int out_dim, int nt) {
-    int i, t, tk;
+    int i, t;
     int gs = w->gs, r = gs / 32, ng = in_dim / gs;
     int nb = in_dim / 32;
     const unsigned char *p4b = (const unsigned char *)w->q;
     const unsigned char *p2b = p4b + (size_t)w->n / 2;
     /* Same predicate as matmul_q41_impl - see q41_fixed_epi's comment. */
     int fixed_epi = q41_fixed_epi(w, in_dim, nb, nt, r, 0);
+    int want_i16 = (out->oi != NULL) || out->probe;
     lz_rowfn row;
 
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
@@ -1011,10 +1050,14 @@ void matmul_q61_impl(float *o, const int8_t *xq, const float *xqs,
     row = row_q61_arm;
 #endif /* LZ_ARM_ASM_EXTERN */
 #endif /* __arm__ */
+    /* Same all-or-nothing refusal as matmul_q41_impl - see LZQ41Out. */
+    if (want_i16 && (!fixed_epi || !row || in_dim > LZ_MM_WIDEN_MAX)) return;
     if (!row || in_dim > LZ_MM_WIDEN_MAX) {
-        matmul_scalar_ref(o, xq, xqs, w, in_dim, out_dim, nt);
+        matmul_scalar_ref(out->o, xq, xqs, w, in_dim, out_dim, nt);
         return;
     }
+    out->ok = 1;
+    if (out->probe) return;
 
     for (t = 0; t < nt * in_dim; t++) g_xw[t] = (int16_t)xq[t];
     if (fixed_epi) {
@@ -1033,12 +1076,69 @@ void matmul_q61_impl(float *o, const int8_t *xq, const float *xqs,
             p2b,                        /* 4-bit plane ends where 2-bit starts */
             p2b + (size_t)w->n / 4);    /* 2-bit plane's own bound */
         if (lz_cpu_has_mmx()) _mm_empty();
-        for (tk = 0; tk < nt; tk++)
-            o[(size_t)tk * out_dim + i] = fixed_epi
-                ? epi_q41_fixed(g_acc32 + (size_t)tk * nb, w, i, tk, ng, r, 0)
-                : epi_q41(g_acc32 + (size_t)tk * nb, xqs + (size_t)tk * nb,
-                          g_xg + (size_t)tk * ng, wd, wm, ng, r);
+        epi_q41_row(out, i, out_dim, nt, w, ng, r, nb, 0, fixed_epi,
+                    xqs, wd, wm);
     }
+}
+
+/* ---- int16 exit: entry point and its predicate -----------------------
+   One dtype switch, shared by both, so "which impl serves this tensor"
+   is not written twice. The shape guards here are only the ones the
+   impls do NOT make themselves; everything else (the fixed-epilogue
+   predicate, the row-kernel pick, LZ_MM_WIDEN_MAX) is decided inside
+   the impl and reported back through LZQ41Out.ok.
+
+   LZ_KERNEL_REF is refused rather than served: it means matmul_scalar_ref,
+   whose float epilogue is its own code and has no int16 exit. That is
+   not a new asymmetry - --kernel ref already computes different logits
+   from the SIMD tiers whenever the fixed epilogue is live, for the same
+   reason. */
+static int q41_dispatch(LZQ41Out *out, const int8_t *xq, const float *xqs,
+                        const LZTensor *w, int in_dim, int out_dim, int nt) {
+    if (!w || w->gs < 32 || (w->gs % 32) != 0 || (in_dim % w->gs) != 0)
+        return 0;
+    if (nt < 1 || nt > LZ_BATCH_MAX) return 0;
+    if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
+    if (g_kernel == LZ_KERNEL_REF) return 0;
+    switch (w->dtype) {
+        case LZ_FMT_Q4_1:
+            if (!w->zero) return 0;
+            matmul_q41_impl(out, xq, xqs, w, in_dim, out_dim, nt);
+            return 1;
+        case LZ_FMT_Q6_1:
+            if (!w->zero) return 0;
+            matmul_q61_impl(out, xq, xqs, w, in_dim, out_dim, nt);
+            return 1;
+        case LZ_FMT_T2:
+            /* Ternary carries no min; a T2 tensor that HAS one was
+               mis-loaded (lz_matmul_xq_nt's own guard). */
+            if (w->zero) return 0;
+            matmul_t2_impl(out, xq, xqs, w, in_dim, out_dim, nt);
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+int lz_matmul_xq_i16_ok(const LZTensor *w, int in_dim, int nt) {
+    LZQ41Out ex;
+    memset(&ex, 0, sizeof(ex));
+    ex.probe = 1;
+    if (!q41_dispatch(&ex, NULL, NULL, w, in_dim, 0, nt)) return 0;
+    return ex.ok;
+}
+
+int lz_matmul_xq_nt_i16(short *o, const int8_t *xq, const float *xqs,
+                        const LZTensor *w, int in_dim, int out_dim, int nt,
+                        int target_e, int bound) {
+    LZQ41Out ex;
+    if (!o || !xq || !xqs) return 0;
+    memset(&ex, 0, sizeof(ex));
+    ex.oi = o;
+    ex.target_e = target_e;
+    ex.bound = bound;
+    if (!q41_dispatch(&ex, xq, xqs, w, in_dim, out_dim, nt)) return 0;
+    return ex.ok;
 }
 
 /* ---- Q16 block ---- */

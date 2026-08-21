@@ -1262,12 +1262,17 @@ float epi_fixed(const int32_t *accb, const LZTensor *w, int row,
  * row - lz_epi_prep's own comment: weight scale spread is 99.6% within
  * 8x WITHIN a row but far wider ACROSS rows, which is why there is no
  * single tensor-wide exponent to begin with). A consumer that wants a
- * whole output vector as one int16 array at ONE shared exponent - e.g.
+ * whole output vector as one int16 array at ONE shared exponent - namely
  * lz_causal_conv1d_step_fixed, whose `x[c] * in_scale` step already
  * assumes a single scalar in_scale for the whole call - needs those
  * per-row exponents folded down to that one target before it can take
- * epi_fixed's int64 output directly, instead of the float epi_fixed
- * would otherwise have to materialize.
+ * the int64 output directly, instead of the float the epilogue would
+ * otherwise have to materialize.
+ *
+ * That consumer is live: epi_q41_align_i16 (below) reaches it from the
+ * Q4_1/Q6_1/T2 epilogue, which is what KDA's q/k/v projections actually
+ * use. epi_fixed_align_i16, the Q8_0-shaped wrapper this was written
+ * for first, is still unwired - see its own comment.
  *
  * `target_e`/`bound` are NOT invented here: for the conv family they are
  * the consumer's own already-established constants (LZ_CONV_ES,
@@ -1383,12 +1388,11 @@ static int32_t epi_align_i16(long long s, int e, int target_e, int bound) {
 
 /* Epilogue-shaped wrapper: same call signature as epi_fixed (drop-in at
    a matmul row loop's call site) but exits through epi_align_i16 instead
-   of a float. Not wired to any forward.c call site yet - see
-   docs/int-pipeline-project.md's batch-1 status for why (the candidate
-   producers this was meant to prove out are not Q8_0-formatted on the
-   checkpoint used to measure this project, so epi_fixed itself never
-   runs for them; this function is proven standalone pending a producer
-   it can actually be dropped onto). */
+   of a float. Still wired to no forward.c call site: the candidate
+   producers it was meant to prove out (kda_q/k/v_proj) are q6_1 on the
+   checkpoint this project measures, so epi_fixed never runs for them and
+   they reach epi_align_i16 through epi_q41_align_i16 instead. This one
+   waits for a Q8_0 producer feeding an int16 consumer. */
 int32_t epi_fixed_align_i16(const int32_t *accb, const LZTensor *w, int row,
                              int tk, int ng, int r, int target_e, int bound) {
     int e;
@@ -1768,10 +1772,16 @@ float epi_q41(const int32_t *accb, const float *xsb, const float *xgb,
    accumulated int64 (|s_zero| <= 2^52, nowhere near the LLONG_MIN
    corner that makes negation UB). Q4_1/Q6_1 pass 0 and read the zq/zexp
    plane. */
-float epi_q41_fixed(const int32_t *accb, const LZTensor *w, int row,
-                    int tk, int ng, int r, int zneg) {
+/* The join itself, with no exit committed: `comb * 2^*e_out`, both
+   halves already in one integer domain. Split out for the same reason
+   epi_q41's own comment gives for being one function - the reduction
+   ORDER is the bit-identity contract, and the float exit
+   (epi_q41_fixed) and the aligned-int16 exit (epi_q41_align_i16) must
+   share this arithmetic rather than each carry a copy of it. */
+static long long epi_q41_join(const int32_t *accb, const LZTensor *w, int row,
+                              int tk, int ng, int r, int zneg, int *e_out) {
     int e_dot, e_zero, target, g;
-    long long s_dot, s_zero, comb;
+    long long s_dot, s_zero;
     const int16_t *zp = zneg ? w->sq : w->zq;
     s_dot = epi_fixed_raw(accb, w, row, tk, ng * r, r, &e_dot);
     s_dot = epi_shr_half(s_dot, 8);        /* exact: acc32 is the x256 */
@@ -1780,8 +1790,15 @@ float epi_q41_fixed(const int32_t *accb, const LZTensor *w, int row,
     s_zero = lz_epi_mac(g_epi_zg[tk], g_epi_zm, ng);
     if (zneg) s_zero = -s_zero;
     target = e_dot > e_zero ? e_dot : e_zero;
-    comb = epi_shr_half(s_dot, target - e_dot)
+    *e_out = target;
+    return epi_shr_half(s_dot, target - e_dot)
          + epi_shr_half(s_zero, target - e_zero);
+}
+
+float epi_q41_fixed(const int32_t *accb, const LZTensor *w, int row,
+                    int tk, int ng, int r, int zneg) {
+    int target;
+    long long comb = epi_q41_join(accb, w, row, tk, ng, r, zneg, &target);
     /* pow2f returns 0 below 2^-126 rather than a denormal, and |comb|
        reaches 2^55, so at a deep enough target a single multiply would
        zero a result that is still an ordinary normal float. e_dot and
@@ -1794,6 +1811,31 @@ float epi_q41_fixed(const int32_t *accb, const LZTensor *w, int row,
     }
     LZ_FCX(LZ_FC_EPI, 1, 0, 0, 1, 0);      /* convert, one multiply */
     return (float)comb * pow2f(target);
+}
+
+/* int-pipeline milestone 3: the same join, exited as an int16 already
+   aligned to the CONSUMER's exponent, so no float is materialized at
+   this boundary at all. Bills nothing because there is nothing to bill -
+   epi_q41_join is integer end to end and epi_align_i16 is a shift.
+ *
+ * `epi_align_i16` reads its `(s, e)` pair as `s * 2^(e-8)` (epi_fixed's
+ * convention, where the -8 is the row kernel's x256 still uncancelled).
+ * The join has already taken that shift off exactly, so this exit's
+ * value is `comb * 2^target` and the pair handed over is (comb,
+ * target + 8) - not a fudge factor, the same quantity written in the
+ * primitive's units.
+ *
+ * `target_e`/`bound` belong to the consumer (LZ_CONV_ES,
+ * lz_conv_accum_bound(k) for the conv family) - see epi_align_i16's
+ * header for why they are taken rather than derived here. The clamp to
+ * +-bound happens inside it, so the consumer needs no clamp of its
+ * own. */
+int32_t epi_q41_align_i16(const int32_t *accb, const LZTensor *w, int row,
+                          int tk, int ng, int r, int zneg,
+                          int target_e, int bound) {
+    int target;
+    long long comb = epi_q41_join(accb, w, row, tk, ng, r, zneg, &target);
+    return epi_align_i16(comb, target + 8, target_e, bound);
 }
 
 /* ---- Q4_1 row kernels, one per (ISA x impl) --------------------------- */
@@ -1833,6 +1875,14 @@ float epi_q41_fixed(const int32_t *accb, const LZTensor *w, int row,
 /* T2 matmul. Same shape as matmul_q61_impl minus the second plane, with
    one addition: the zero coefficient is -scale, so the negated array is
    built per row into g_t2neg and handed to epi_q41 as its `wm`. */
+
+/* The float exit of the Q4_1/Q6_1/T2 impls, which is what every
+   lz_matmul_xq_nt caller wants; the int16 one is reached through
+   lz_matmul_xq_nt_i16 instead. */
+static void q41_out_f32(LZQ41Out *x, float *o) {
+    memset(x, 0, sizeof(*x));
+    x->o = o;
+}
 
 /* Matmul consuming already-quantized activations: the forward hot path.
    xq/xqs quantized by the caller at lz_act_gs()'s group (one activation
@@ -1917,19 +1967,22 @@ void lz_matmul_xq_nt(float *o, const float *x, const int8_t *xq,
        in_dim is 1024, the 0.8B's 3584 - both within 4096. */
     if (w->dtype == LZ_FMT_Q4_1 && w->gs >= 32 && (w->gs % 32) == 0 &&
         (in_dim % w->gs) == 0 && in_dim <= LZ_MM_WIDEN_MAX && w->zero) {
-        matmul_q41_impl(o, xq, xqs, w, in_dim, out_dim, nt);
+        LZQ41Out ex; q41_out_f32(&ex, o);
+        matmul_q41_impl(&ex, xq, xqs, w, in_dim, out_dim, nt);
         return;
     }
     if (w->dtype == LZ_FMT_Q6_1 && w->gs >= 32 && (w->gs % 32) == 0 &&
         (in_dim % w->gs) == 0 && in_dim <= LZ_MM_WIDEN_MAX && w->zero) {
-        matmul_q61_impl(o, xq, xqs, w, in_dim, out_dim, nt);
+        LZQ41Out ex; q41_out_f32(&ex, o);
+        matmul_q61_impl(&ex, xq, xqs, w, in_dim, out_dim, nt);
         return;
     }
     /* No `w->zero` in the guard: ternary carries no min, and a T2 tensor
        that HAS one was mis-loaded. */
     if (w->dtype == LZ_FMT_T2 && w->gs >= 32 && (w->gs % 32) == 0 &&
         (in_dim % w->gs) == 0 && in_dim <= LZ_MM_WIDEN_MAX && !w->zero) {
-        matmul_t2_impl(o, xq, xqs, w, in_dim, out_dim, nt);
+        LZQ41Out ex; q41_out_f32(&ex, o);
+        matmul_t2_impl(&ex, xq, xqs, w, in_dim, out_dim, nt);
         return;
     }
 #if defined(__WATCOMC__) || defined(LZ_DOT_MMX_EXTERN) || defined(__arm__)
@@ -2185,8 +2238,18 @@ void lz_causal_conv1d_step(float *o, const float *x,
  * materialized. Bit-identical to the old lz_silu(lz_i32f(acc)*oscale[c])
  * chain - verified over the accumulator's realistic range,
  * .prof/verify_conv_fold3.c, 0 mismatches - and one multiply per
- * channel cheaper. */
-void lz_causal_conv1d_step_fixed(float *o, const float *x,
+ * channel cheaper.
+ *
+ * `xi` is int-pipeline milestone 3: the producer (an int16-exit matmul,
+ * lz_matmul_xq_nt_i16) has already delivered this vector at exponent
+ * `es` and clamped to +-bound, so `x`/`in_scale` are not read and the
+ * float multiply plus q8_round at the top of the channel loop are not
+ * run. NULL keeps the float input this tier was written with. Not a
+ * second body: the tap loop, the history shift and the activation are
+ * the same code either way - only the source of `q` differs, and it is
+ * the caller's job (forward.c) to make sure the two ways of obtaining
+ * it are not mixed within one model's conv block. */
+void lz_causal_conv1d_step_fixed(float *o, const float *x, const short *xi,
                                  const short *sh_in, short *sh_out,
                                  const short *mw, const float *sig_k1,
                                  const float *sig_oscale2, float sig_k2,
@@ -2201,17 +2264,25 @@ void lz_causal_conv1d_step_fixed(float *o, const float *x,
        cast (1 cvt) and sig_oscale2 multiply (1), and the final product
        (1) = 5 mul, 1 add, 2 cvt. Was 2 mul + 1 cvt here plus 4 mul + 1
        add + 1 cvt at the sigmoid site through lz_silu (9 total); the
-       sigmoid site no longer sees this call at all. */
-    LZ_FCX(LZ_FC_CONV, (long)n_ch * 5, (long)n_ch, 0, (long)n_ch * 2, 0);
+       sigmoid site no longer sees this call at all. The int16 input
+       drops the first of those five multiplies; q8_round bills nothing
+       of its own (its magic add is not counted at any of its call
+       sites), so 4 is the whole difference. */
+    LZ_FCX(LZ_FC_CONV, (long)n_ch * (xi ? 4 : 5), (long)n_ch, 0,
+           (long)n_ch * 2, 0);
     for (c = 0; c < n_ch; c++) {
         const short *si = sh_in + (size_t)c * hist;
         short *so = sh_out + (size_t)c * hist;
         const short *wr = mw + (size_t)c * k;
         int acc = 0, q;
-        float t = x[c] * in_scale;
-        q = q8_round(t);
-        if (q > bound) q = bound;
-        if (q < -bound) q = -bound;
+        if (xi) {
+            q = xi[c];
+        } else {
+            float t = x[c] * in_scale;
+            q = q8_round(t);
+            if (q > bound) q = bound;
+            if (q < -bound) q = -bound;
+        }
         for (j = 0; j < hist; j++) acc += (int)wr[j] * (int)si[j];
         acc += (int)wr[hist] * q;
         {
