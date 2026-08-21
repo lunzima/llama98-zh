@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 在引擎树 `E:/llama98-zh`（**注意不是** `E:/LLM/llama98-zh`，引擎唯一维护在 `E:/llama98-zh`）补上 ARMv5TE 三值内核、定点 FWHT、SubLN 前向改造、mHC 旋钮档。
+**Goal:** 在引擎树 `E:/llama98-zh`（**注意不是** `E:/LLM/llama98-zh`，引擎唯一维护在 `E:/llama98-zh`）补上 ARMv5TE 三值内核、定点 FWHT、SubLN 前向改造。mHC 旋钮档已由训练侧消融否掉，见 Task 5。
 
 **Architecture:** 三值内积退化为「解包 2-bit 权重 → 条件加减」，ARMv5TE 上纯整数无乘法；Hadamard 用定点 FWHT（int32 累加 + scale 折进量化）；SubLN 删 `input_layernorm`/`post_attention_layernorm`、每投影加 RMSNorm（与训练侧逐位对拍）。
 
@@ -390,57 +390,23 @@ git commit -m "feat(ce): export_q8 导出 8 投影 SubLN norm + use_subn"
 
 ---
 
-### Task 5: mHC 旋钮档（档位 1 静态均匀混合）
+### Task 5: mHC 旋钮档 —— 不做
 
-**Files:**
-- Modify: `E:/llama98-zh/src/forward.c`（残差路径加可选的 4 流分支）
-- Test: `tests/test_mhc_forward.py`
+**不做。** 训练侧消融已跑完（spec §5，2026-08-21），条件不触发：
 
-- [ ] **Step 1: 写失败测试（mhc=1 时残差 4 流，mhc=0 时单流不变）**
+- 3 seed × 2 臂 × 8M token 配对对照，mHC **3/3 更差**，效应 +0.0419 bit/char，
+  而同臂 seed 间噪声底 0.0376 —— 效应/噪声比 1.12，没站到噪声之上。
+- 训练侧吞吐代价 **−13.5%**，引擎侧还要多维护 4× 残差状态。
 
-```python
-# tests/test_mhc_forward.py
-import subprocess, sys
-
-def run(args):
-    return subprocess.run(args, capture_output=True, text=True)
-
-def test_mhc_off_defaults_to_single_stream():
-    r = run(["./llama98", "--check", "--mhc", "0"])
-    assert r.returncode == 0
-
-def test_mhc_static_flag_parses():
-    r = run(["./llama98", "--mhc", "1", "--check"])
-    assert r.returncode == 0  # 档位 1 能跑（残差 4 流 + 均匀混合）
-```
-
-- [ ] **Step 2: 运行确认失败**
-
-Run: `cd /e/llama98-zh && python3 -m pytest tests/test_mhc_forward.py -q`
-Expected: FAIL（`--mhc` 参数不存在）
-
-- [ ] **Step 3: 加 `--mhc` 旋钮 + 残差分支**
-
-`cli_argv.c` 加 `--mhc` 参数（0/1），forward.c 的残差路径加分支：mhc=1 时残差状态 `[B,S,4,D]`，comb=(1/4) 全 1（`comb^T @ residual` = 每条输出流 = 4 条输入流平均，纯加 + >>2）。mhc=0 时走现有单流路径。
-
-- [ ] **Step 4: 运行确认通过**
-
-Run: `cd /e/llama98-zh && python3 -m pytest tests/test_mhc_forward.py -q`
-Expected: PASS
-
-- [ ] **Step 5: Commit**
-
-```bash
-cd /e/llama98-zh
-git add src/cli_argv.c src/forward.c tests/test_mhc_forward.py
-git commit -m "feat(ce): --mhc 旋钮（档位 1 静态 4 流均匀混合，档位 0 单流）"
-```
+引擎不加 4 流残差、不加 `--mhc`，`export_q8.py` 也不导出 `mhc`。CE 出货配方 `mhc=0`，
+该路径与未接线前逐位相同。要在别的深度/规模上复测，先在训练侧改一个 config 字段重跑
+消融，赢了再回来做这一格。
 
 ---
 
 ## Self-Review
 
-- **Spec 覆盖**：§6.1 ARM 三值内核 → Task 2/3；§6.2 定点 FWHT → Task 1；§6.3 SubLN 前向 → Task 4；§6.4 mHC 旋钮 → Task 5。
+- **Spec 覆盖**：§6.1 ARM 三值内核 → Task 2/3；§6.2 定点 FWHT → Task 1；§6.3 SubLN 前向 → Task 4；§6.4 mHC 旋钮 → Task 5（消融否掉，不做）。
 - **占位符**：Task 3/4 的「先标量 C 再实测决定纯汇编」「norm 权重是否可学待 Plan A 定案」是**有意的分阶段决策**（铁律三：先量不凭空写汇编；接口对齐），不是占位符——每个 task 都有可运行的交付物。
 - **类型一致**：`lz_fwht_i32(y, x, n)`、`lz_dot32_t2_scalar(w2, x)`、`lz_dot32_t2_arm(w2, x)` 全 plan 一致（leaf 内积固定 32 元素单 8-byte plane，与引擎 `dot32_t2_mmx(w2, x)` 同契约）。
 - **重要提示**：本 plan 的 Task 3 ARM 汇编、Task 4 SubLN norm 权重，**依赖 Plan A 的导出定案**（norm 权重是否可学、三值导出格式）。两者需在 Plan A 落地后回头核对接口。
