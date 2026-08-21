@@ -1244,9 +1244,12 @@ static long long epi_fixed_raw(const int32_t *accb, const LZTensor *w,
    merely unused: epi_fixed has no `post` parameter to be handed a value
    it then ignores on one of its two exits, only this integer, which
    both exits fold into the same pow2f argument. LZ_EPI_POST_NA for a
-   format with no entry here; the fixed-epi predicates refuse those
-   rather than inventing an exponent, and pow2f(e + LZ_EPI_POST_NA)
-   saturates high enough to be unmissable if one ever slips past. */
+   format with no entry here: both matmul call sites then hand the whole
+   call to matmul_scalar_ref, which computes from w->scale directly and
+   has no `post` to get wrong. Refusing at the FUNCTION and not at the
+   fixed-epi predicate is the point - a predicate that only steers away
+   from the fixed branch would leave the float one running on a scaling
+   nobody derived, which is the same defect one door down. */
 int lz_epi_post_e(const LZTensor *w) {
     if (!w) return LZ_EPI_POST_NA;
     switch (w->dtype) {

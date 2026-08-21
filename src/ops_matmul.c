@@ -274,7 +274,7 @@ const lz_rowfn LZ_ROW_Q8[LZ_ROW_N] = {
 static int q8_fixed_epi(const LZTensor *w, int in_dim, int nb, int nt) {
     if (lz_epi_mode() && !lz_epi_ready(w)) lz_epi_prep((LZTensor *)w, in_dim);
     return lz_epi_mode() && lz_epi_ready(w) && nb <= LZ_EPI_MAX_NG
-           && nt <= LZ_BATCH_MAX && lz_epi_post_e(w) != LZ_EPI_POST_NA;
+           && nt <= LZ_BATCH_MAX;
 }
 
 void matmul_q8_impl(float *o, const int8_t *xq, const float *xqs,
@@ -288,7 +288,8 @@ void matmul_q8_impl(float *o, const int8_t *xq, const float *xqs,
     int fixed_epi = q8_fixed_epi(w, in_dim, nb, nt);
     /* 2^-8, the kernels' x256 undone - taken from the same place the
        fixed epilogue takes its exponent fold, not spelled out again. */
-    float post = pow2f(lz_epi_post_e(w));
+    int post_e = lz_epi_post_e(w);
+    float post = pow2f(post_e);
 
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
     if (fixed_epi) epi_pack_act(xqs, nb, nt);
@@ -301,19 +302,21 @@ void matmul_q8_impl(float *o, const int8_t *xq, const float *xqs,
 #endif /* LZ_ARM_ASM_EXTERN */
 #endif /* __arm__ */
 
-    /* Two ways to have no row kernel, and both must land on the scalar
-       reference rather than on a second inline implementation:
-       - this build carries none for the selected ISA (all-NULL table);
-       - in_dim exceeds the pre-expansion buffer.
-       Both land on the scalar reference rather than on a second inline
-       implementation. Inline fallbacks (an MMX dot32_nowiden loop, an
-       SSE2 part32_sse2 loop, the ref branch) would be three DIFFERENT
-       code paths, none of them bit-identical to the others, all of them
-       unreachable - the largest in_dim in any current model is 3584
-       against a 4096 cap. Dead code in three association orders is
-       worse than dead code in one, and matmul_scalar_ref is the
-       contract. */
-    if (!row || in_dim > LZ_MM_WIDEN_MAX) {
+    /* Three ways this function cannot serve the call, and all of them
+       must land on the scalar reference rather than on a second inline
+       implementation:
+       - this build carries no row kernel for the selected ISA (all-NULL
+         table);
+       - in_dim exceeds the pre-expansion buffer;
+       - the format has no entry in lz_epi_post_e, so neither epilogue
+         below has a scaling anyone derived for it.
+       Inline fallbacks (an MMX dot32_nowiden loop, an SSE2 part32_sse2
+       loop, the ref branch) would be three DIFFERENT code paths, none of
+       them bit-identical to the others, all of them unreachable - the
+       largest in_dim in any current model is 3584 against a 4096 cap.
+       Dead code in three association orders is worse than dead code in
+       one, and matmul_scalar_ref is the contract. */
+    if (!row || in_dim > LZ_MM_WIDEN_MAX || post_e == LZ_EPI_POST_NA) {
         matmul_scalar_ref(o, xq, xqs, w, in_dim, out_dim, nt);
         return;
     }
@@ -1301,7 +1304,7 @@ const lz_rowfn LZ_ROW_Q16[LZ_ROW_N] = {
 static int q16_fixed_epi(const LZTensor *w, int in_dim, int nb, int nt) {
     if (lz_epi_mode() && !lz_epi_ready(w)) lz_epi_prep((LZTensor *)w, in_dim);
     return lz_epi_mode() && lz_epi_ready(w) && nb <= LZ_EPI_MAX_NG
-           && nt <= LZ_BATCH_MAX && lz_epi_post_e(w) != LZ_EPI_POST_NA;
+           && nt <= LZ_BATCH_MAX;
 }
 
 void matmul_q16_impl(float *o, const int8_t *xq, const float *xqs,
@@ -1317,7 +1320,8 @@ void matmul_q16_impl(float *o, const int8_t *xq, const float *xqs,
     /* 1.0: the Q16_0 kernels do not scale by 256 the way the Q8_0 ones
        do. Read from lz_epi_post_e, not written here, so the float exit
        and the fixed one cannot end up on different scalings. */
-    float post = pow2f(lz_epi_post_e(w));
+    int post_e = lz_epi_post_e(w);
+    float post = pow2f(post_e);
 
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
     row = lz_row_pick(LZ_ROW_Q16);
@@ -1331,7 +1335,11 @@ void matmul_q16_impl(float *o, const int8_t *xq, const float *xqs,
     row = row_q16_arm;
 #endif /* LZ_ARM_ASM_EXTERN */
 #endif /* __arm__ */
-    if (!row || in_dim > LZ_MM_WIDEN_MAX) {
+    /* Third bail alongside the two kernel ones, same reasoning as
+       matmul_q8_impl's: a format with no lz_epi_post_e entry has no
+       scaling for either epilogue below, and matmul_scalar_ref is the
+       one path here that needs none. */
+    if (!row || in_dim > LZ_MM_WIDEN_MAX || post_e == LZ_EPI_POST_NA) {
         matmul_scalar_ref(o, xq, xqs, w, in_dim, out_dim, nt);
         return;
     }

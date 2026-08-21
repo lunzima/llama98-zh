@@ -67,8 +67,9 @@ void matmul_scalar_ref(float *o, const int8_t *xq, const float *xqs,
    their factor from here - the float one as pow2f() of it, the fixed
    one folded into its exponent on both exits - so the two cannot
    disagree and a scaling the kernels do not produce cannot be written
-   down. LZ_EPI_POST_NA for any other format; the fixed-epi predicates
-   check for it and keep the float epilogue instead. */
+   down. LZ_EPI_POST_NA for any other format, which sends the whole
+   matmul to matmul_scalar_ref - the contract, and the only path here
+   with no `post` concept at all. */
 #define LZ_EPI_POST_NA 64
 int lz_epi_post_e(const LZTensor *w);
 float epi_q8(const int32_t *accb, const float *xsb, const float *ws,
