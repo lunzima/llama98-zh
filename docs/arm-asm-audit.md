@@ -100,11 +100,17 @@ matmul 本体（`lz_matmul*`、`lz_dot32_*`、`dot32_x16`、`epi_q8` / `epi_q41`
 
 ## 1. CE 上实际会走到的是哪一档
 
-判定必须按 ARM 上真正执行的那一档，不是按 x86 上执行的那一档。
-`build/arm/build_engine.sh` 传 `-DLZ_NO_FPU=1`，`ops_sched.c:127` 的
-`lz_soft_float_target()` 因此恒为 1，于是所有 `auto` 档解析为定点：
+判定必须按真正执行的那一档，不是按读起来像默认的那一档。**七个写档位的
+`auto` 一律解析为定点，在每台机器上都是**——出货构建无条件走定点，`auto`
+不问硬件（`src/ops_sched.c` 里那段说明取代了原先按平台的判据）。float 仍
+可达，但要显式给值（`--recur-write float` 等，或 `--fixed off` 一次全给），
+它是容差与跨编译器闸门对着量的**正确性参照**，不是一个 auto 结果。
 
-| 旋钮 | ARM(auto) 的解析结果 | 走到的代码 |
+对 CE 而言这一节的结论不变（ARM 本来就落在定点侧），变的是**它不再是 ARM
+独有的**：同一份 auto 在 x86 上解析到同样的档位，所以下面这张表读作「auto
+的解析结果」，不是「ARM 的解析结果」。
+
+| 旋钮 | auto 的解析结果（每台机器） | 走到的代码 |
 |---|---|---|
 | `--recur-write`（`lz_gdn_p2_mode`） | fixed | `gdn_p2_fixed_rows` / `gdn_p2_group_fixed` |
 | `--conv-write`（`lz_conv_mode`） | fixed | `lz_causal_conv1d_step_fixed` |
@@ -125,10 +131,11 @@ matmul 本体（`lz_matmul*`、`lz_dot32_*`、`dot32_x16`、`epi_q8` / `epi_q41`
   定点档换掉的只有平方和（`norm_ss_fixed`），**输出环仍是浮点**。
 - **`--attn-write auto` 到不了 `int`** 同理（`lz_attn_int()` 要 `g_attn == 4`），
   所以 `lz_attn_wsum_q8_int` 与 `lz_quantize_q8_int64` 也不跑。
-- **`--scalar-fixed` 的 auto 是 fixed，不问 CPU**（`lz_scalar_mode()` 是
-  `(g_scalar < 0) ? 1 : g_scalar`，`cli_main.c:253` 的帮助文本写的也是
-  `default fixed`）。`ops.h` 该函数上方注释说它「问和别的档一样的 CPUID 问题」，
-  与代码不符；以代码与 CLI 帮助为准。
+- **`ops.h` 里 `lz_scalar_mode()` 上方的注释说它「问和别的档一样的 CPUID
+  问题」，与代码不符**：实现是 `(g_scalar < 0) ? 1 : g_scalar`，从不问；
+  `cli_main.c:253` 的帮助文本写的也是 `default fixed`。以代码与 CLI 帮助为准。
+  （这一条原本记的是「只有它不问 CPU」，那个独特性已经没有了——七档现在
+  都不问；留下的是那句注释本身仍然错。）
 - **`--epi-write` 只对 Q8_0 有效，且要先过 dtype 路由才落地。**
   `epi_fixed`（fixed 分支）只被 `matmul_q8_impl` 调用（`ops_matmul.c`）；
   `matmul_q41_impl` / `matmul_q61_impl` / T2 路径一律用 `epi_q41`，不读
