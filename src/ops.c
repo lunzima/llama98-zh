@@ -635,11 +635,14 @@ void lz_quantize_q8_int(const int32_t *t, int n, int gs, float deq,
 
 /* int64-input twin of lz_quantize_q8_int (see its comment for the deq
    folding). The attention weighted sum is exact only at int64 width, so
-   this is what the fixed-tier attention int path consumes. (float)grp
-   rounds values above 2^24 to 24-bit mantissa, but that relative error
-   is ~1e-7 - under the q8_round decision granularity except at measure-
-   zero .5 boundaries, so the quantized result is effectively the exact
-   integer-domain round. */
+   this is what the fixed-tier attention int path consumes. The element
+   loop's (float)grp[k] has the SAME fusion hazard tamf is already
+   guarded against below - NOT measure-zero, that was the int32 twin's
+   own comment before the RCA that found a real occurrence in 153
+   tokens. A synthetic sweep over grp[k] near q8_round's .5-tie
+   boundaries (.prof/probe_int64_fuse.c, T in {16777217, 50000000,
+   102808064, 134217728, 2000000000}) found real gcc/Watcom mismatches
+   without the volatile below - fixed the same way as tamf. */
 void lz_quantize_q8_int64(const int64_t *t, int n, int gs, float deq,
                           int8_t *q, float *s) {
     int g, k;
@@ -687,15 +690,19 @@ void lz_quantize_q8_int64(const int64_t *t, int n, int gs, float deq,
                convention for the rare inv==0 path as the int32 twin. */
             LZ_FCX(LZ_FC_QUANT, gs, gs, 1, gs, 0);
             for (k = 0; k < gs; k++) {
-                float g32 = (float)grp[k];
+                /* volatile: same fusion hazard as tamf above, see this
+                   function's own comment. */
+                volatile float g32 = (float)grp[k];
                 int qi = q8_round(g32 * inv_elem);
                 qi = (qi > 127) ? 127 : qi;
                 out[k] = (int8_t)((qi < -127) ? -127 : qi);
             }
         } else {
+            /* Unreachable under the default LZ_Q8_MIN_SCALE floor, same
+               as the int32 twin's else branch - fixed anyway. */
             LZ_FCX(LZ_FC_QUANT, gs, gs, gs, gs, 0);  /* cvt, mul, div, q8_round(add) */
             for (k = 0; k < gs; k++) {
-                float g32 = (float)grp[k];
+                volatile float g32 = (float)grp[k];
                 int qi = q8_round((g32 * deq) / s[g]);
                 qi = (qi > 127) ? 127 : qi;
                 out[k] = (int8_t)((qi < -127) ? -127 : qi);
