@@ -15,6 +15,22 @@
  * Both are reported. The second is the one a single-token probe would
  * miss entirely.
  *
+ * THE MARGIN IS CHECKPOINT-DEPENDENT, and tighter than LZ_CONV_ES's
+ * comment in src/forward.c reads. That comment quotes this probe on
+ * recover_r20, 64 tokens, 1.18M samples: max |x| = 22.3, and 22.3*2^9
+ * = 11423 against the 16384 bound. Re-measured on kmr20 with an
+ * instrumented build tracking the PRE-clamp magnitude inside
+ * lz_causal_conv1d_step_fixed:
+ *
+ *   build/norm_int_gate_tokens_zh.txt (603 tok): max |q| 13865, |x| 27.08
+ *   build/norm_int_gate_tokens_en.txt (661 tok): max |q| 13690, |x| 26.74
+ *   clamps: 0 on both
+ *
+ * Nothing clips, but the headroom to the silent clip at |x| = 32 is
+ * 1.18x, not the 1.43x that 22.3 implies. Re-run this before assuming
+ * the tail on any new checkpoint - and measure PRE-clamp, since the
+ * clamp is what hides the answer.
+ *
  * Instrumentation is LZ_TAP, defined before forward.c is included -
  * the mechanism the file's own header describes for exactly this. The
  * taps wanted are kq/kk/kv (KDA conv inputs, before the convolution)
