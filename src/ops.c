@@ -614,14 +614,18 @@ void lz_quantize_q8_int(const int32_t *t, int n, int gs, float deq,
                convention the MIN_SCALE branch gets everywhere else. */
             LZ_FCX(LZ_FC_QUANT, gs, gs, 1, gs + 1, 0);
             for (k = 0; k < gs; k++) {
-                int qi = q8_round((float)grp[k] * inv_elem);
+                int qi = q8_round(lz_i32f(grp[k]) * inv_elem);
                 qi = (qi > 127) ? 127 : qi;
                 out[k] = (int8_t)((qi < -127) ? -127 : qi);
             }
         } else {
+            /* Unreachable under the default LZ_Q8_MIN_SCALE floor (a tiny
+               amax hits MIN_SCALE first, see this function's own comment)
+               - fixed anyway rather than leaving a second copy of the
+               lz_i32f hazard below. */
             LZ_FCX(LZ_FC_QUANT, gs, gs, gs, gs, 0);  /* cvt, mul, div, q8_round(add) */
             for (k = 0; k < gs; k++) {
-                int qi = q8_round(((float)grp[k] * deq) / s[g]);
+                int qi = q8_round((lz_i32f(grp[k]) * deq) / s[g]);
                 qi = (qi > 127) ? 127 : qi;
                 out[k] = (int8_t)((qi < -127) ? -127 : qi);
             }
@@ -1520,7 +1524,8 @@ void lz_matmul_xq_nt(float *o, const float *x, const int8_t *xq,
        The list SHRINKS as cells get filled - src/ops.c's km_reg is the
        registry of which, and this line is what makes a filled cell
        actually run. */
-    if (w->dtype != LZ_FMT_T2 && w->dtype != LZ_FMT_Q16_0) {
+    if (w->dtype != LZ_FMT_T2 && w->dtype != LZ_FMT_Q16_0 &&
+        w->dtype != LZ_FMT_Q8_0) {
         matmul_scalar_ref(o, xq, xqs, w, in_dim, out_dim, nt);
         return;
     }
@@ -2135,12 +2140,11 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
 
    ---- TODO -------------------------------------------------------------
 
-   armC, armA on q8_0, q4_1 and q6_1. lz_matmul_xq_nt still sends those
-   three dtypes straight to matmul_scalar_ref on ARM. Nothing about
-   ARMv5TE refuses them: smlaxy is a 16x16+32 MAC and the byte/nibble
-   unpacks are ordinary shifts and masks - q16_0's pair
-   (row_q16_arm / row_q16_arm_asm, leaves in src/ops_arm.c) is the
-   worked example. They are not written. */
+   armC, armA on q4_1 and q6_1. lz_matmul_xq_nt still sends those two
+   dtypes straight to matmul_scalar_ref on ARM. Nothing about ARMv5TE
+   refuses them: smlaxy is a 16x16+32 MAC and the nibble unpacks are
+   ordinary shifts and masks - q8_0's and q16_0's pairs (src/ops_arm.c)
+   are the worked examples. They are not written. */
 #define LZ_KM_IMPOSSIBLE 1
 #define LZ_KM_TODO       2
 
@@ -2188,6 +2192,7 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
    and a named constant is what stops a reorder of km_unit from moving
    an ARM cell onto a format that has none. */
 #define LZ_KM_UNIT_Q16 3
+#define LZ_KM_UNIT_Q8  0
 /* Column 0 is ref and columns 7..9 are armC/armA/g128; columns 1..6 are
    the six LZ_ROW_* slots in slot order, so column c reads tab[c - 1]. */
 #define LZ_KM_COL_ROW0 1
@@ -2233,7 +2238,7 @@ typedef struct { unsigned char have; unsigned char why; const char *text; } LZKm
    nobody can miss. */
 static const LZKmReg km_reg[LZ_KM_NUNIT][LZ_KM_NCOL] = {
 /*          ref          mmxI              sseI                sse2I             mmxA              sseA                sse2A             armC                 armA                 g128            */
-/* q8_0 */{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_T(km_why_arm),    KM_T(km_why_arm),    KM_H(LZ_KMB_G128) },
+/* q8_0 */{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128) },
 /* q4_1 */{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_T(km_why_arm),    KM_T(km_why_arm),    KM_H(LZ_KMB_G128) },
 /* q6_1 */{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_T(km_why_arm),    KM_T(km_why_arm),    KM_H(LZ_KMB_G128) },
 /* q16_0*/{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128) },
@@ -2274,7 +2279,7 @@ static const lz_rowfn *km_tab(int f) {
    line is what makes a filled cell actually run, and the two going out
    of step is a cell that reports present and never executes. */
 static int km_arm_row(int f) {
-    return f == LZ_KM_UNIT_T2 || f == LZ_KM_UNIT_Q16;
+    return f == LZ_KM_UNIT_T2 || f == LZ_KM_UNIT_Q16 || f == LZ_KM_UNIT_Q8;
 }
 
 /* The asm column is answered per unit, not per build: each format's
@@ -2286,7 +2291,7 @@ static int km_arm_asm(int f) {
     if (f == LZ_KM_UNIT_T2) return 1;
 #endif /* LZ_T2_ARM_ASM_EXTERN */
 #if defined(LZ_ARM_ASM_EXTERN)
-    if (f == LZ_KM_UNIT_Q16) return 1;
+    if (f == LZ_KM_UNIT_Q16 || f == LZ_KM_UNIT_Q8) return 1;
 #endif /* LZ_ARM_ASM_EXTERN */
     (void)f;
     return 0;

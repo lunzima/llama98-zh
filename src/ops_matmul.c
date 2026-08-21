@@ -163,6 +163,45 @@ static void row_q8_mmx_intrin(int32_t *acc32, const void *w4, const void *w2,
    registers, so it belongs in the translation unit built with -msse2.
    Declared in src/ops_sse2.h, already visible in this translation unit. */
 
+#if defined(__arm__)
+/* The two ARM tiers, picked in matmul_q8_impl rather than from the
+   table below - those six slots are x86 slots. Leaves in
+   src/ops_arm.c; the w4 pointer is the int8 weight row, the same slot
+   row_q8_mmx_intrin reads. No pairing: g_pair's two-token kernels are
+   an x86 register-budget trick, and there is no ARM twin to select. */
+static void row_q8_arm(int32_t *acc32, const void *w4, const void *w2,
+                       const int16_t *xw, int nb, int nt, int in_dim,
+                       const void *pf_end, const void *pf_end2) {
+    const int8_t *wr = (const int8_t *)w4;
+    int tk, s;
+    (void)w2; (void)pf_end; (void)pf_end2;
+    for (tk = 0; tk < nt; tk++) {
+        const int16_t *xwt = xw + (size_t)tk * in_dim;
+        int32_t *acc = acc32 + (size_t)tk * nb;
+        for (s = 0; s < nb; s++)
+            acc[s] = lz_dot32_q8_arm(wr + (size_t)s * 32,
+                                     xwt + (size_t)s * 32);
+    }
+}
+
+#if defined(LZ_ARM_ASM_EXTERN)
+static void row_q8_arm_asm(int32_t *acc32, const void *w4, const void *w2,
+                           const int16_t *xw, int nb, int nt, int in_dim,
+                           const void *pf_end, const void *pf_end2) {
+    const int8_t *wr = (const int8_t *)w4;
+    int tk, s;
+    (void)w2; (void)pf_end; (void)pf_end2;
+    for (tk = 0; tk < nt; tk++) {
+        const int16_t *xwt = xw + (size_t)tk * in_dim;
+        int32_t *acc = acc32 + (size_t)tk * nb;
+        for (s = 0; s < nb; s++)
+            acc[s] = lz_dot32_q8_arm_asm(wr + (size_t)s * 32,
+                                         xwt + (size_t)s * 32);
+    }
+}
+#endif /* LZ_ARM_ASM_EXTERN */
+#endif /* __arm__ */
+
 /* The table. A NULL slot is a tier this build does not carry; the two
    SSE slots stay NULL because no SSE row kernel exists for this format. */
 const lz_rowfn LZ_ROW_Q8[LZ_ROW_N] = {
@@ -220,6 +259,13 @@ void matmul_q8_impl(float *o, const int8_t *xq, const float *xqs,
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
     if (fixed_epi) epi_pack_act(xqs, nb, nt);
     row = lz_row_pick(LZ_ROW_Q8);
+#if defined(__arm__)
+#if defined(LZ_ARM_ASM_EXTERN)
+    row = (g_kernel == LZ_KERNEL_ARM_ASM) ? row_q8_arm_asm : row_q8_arm;
+#else
+    row = row_q8_arm;
+#endif /* LZ_ARM_ASM_EXTERN */
+#endif /* __arm__ */
 
     /* Two ways to have no row kernel, and both must land on the scalar
        reference rather than on a second inline implementation:

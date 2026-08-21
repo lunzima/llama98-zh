@@ -52,6 +52,7 @@ extern "C" {
    guards); matmul_*_impl's g_xw carries an aligned(4) attribute. */
 
 int32_t lz_dot32_q16_arm(const int16_t *restrict w, const int16_t *restrict x);
+int32_t lz_dot32_q8_arm(const int8_t *restrict w, const int16_t *restrict x);
 
 #if defined(__arm__) && defined(__GNUC__)
 #define LZ_ARM_ASM_EXTERN 1
@@ -62,8 +63,10 @@ int32_t lz_dot32_q16_arm(const int16_t *restrict w, const int16_t *restrict x);
    of the loop gcc actually emits at -O2 -march=armv5te:
 
      q16_0   47 against 135   1.47 vs 4.22 instructions per element
+     q8_0    69 against 135   2.16 vs 4.22
  */
 int32_t lz_dot32_q16_arm_asm(const int16_t *w, const int16_t *x);
+int32_t lz_dot32_q8_arm_asm(const int8_t *w, const int16_t *x);
 #endif /* __arm__ && __GNUC__ */
 
 #ifdef __cplusplus
