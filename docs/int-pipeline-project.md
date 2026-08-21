@@ -254,6 +254,45 @@ q6_1，见 §1）会通过 `epi_q41` 的这个新出口重新变得可达，而�
 数值上不是退让而是改善：对同一浮点参照的 rms 相对误差 6.94e-5（M1）→
 4.29e-5（M2）。
 
+**milestone 3 状态：已交付（int16 出口 + 第一个真实消费者）。**
+milestone 2 缺的那一半——"真实会跑的整数消费者"——由 `kda_q/k/v_proj →
+lz_causal_conv1d_step_fixed` 补上（#8/#9/#10 的复活路径，§2.3 预告的那
+条）。落地形状：
+
+- `epi_q41_join`（`ops.c`）把 milestone 2 的整数合并从 `epi_q41_fixed`
+  里拆出来，float 出口和新的 `epi_q41_align_i16` 共用它——归约顺序是
+  bit-identity 合同本身，不能有第二份。
+- `epi_q41_align_i16` = `epi_q41_join` + 已交付的 `epi_align_i16`
+  （§2.2），出口是对齐到 `LZ_CONV_ES`、钳到 `lz_conv_accum_bound(k)` 的
+  int16，全程整数，记账为 0。
+- `lz_matmul_xq_nt_i16` / `lz_matmul_xq_i16_ok`（`ops_matmul.c`）：row
+  kernel、int32 累加器、`epi_pack_act`/`epi_zero_act_int` 全部共用，只
+  换 epilogue 出口；三个 impl 的 per-row epilogue 循环合并成一个
+  `epi_q41_row`。判据和入口问的是同一个函数（`probe` 位走同一段 guard），
+  所以"能不能走 int"只有一份答案。
+- `lz_causal_conv1d_step_fixed` 加一个 `xi` 参数；非 NULL 时通道循环顶
+  上的 `x[c]*in_scale` + `q8_round` + 钳位三行不跑，其余（抽头循环、
+  历史移位、激活）一字不改。
+- 三个张量要么全走 int 要么全不走：SubLN 下每个投影各自重量化 `s->xq`，
+  中途退回就再也补不回前一个的 float 缓冲。
+
+实测（kmr20，`--fixed all`，两条闸门语料）：省下 **55,296 f32 ops/token
+（−4.38%）**，总量 1,263,190 → 1,207,894；dequant epilogue 323,856 →
+286,992（−36,864 = 每个输出元素 1 cvt + 1 mul），conv1d 147,456 →
+129,024（−18,432 = 每 channel-step 1 mul）。独立计数器（数
+`epi_q41_align_i16` 调用与 conv int 分支的 channel-step，不看 LZ_FCX
+参数）给出 18,432 + 18,432，推导出的省量与 census 差值逐位相同。
+与被删掉的往返对照：1,111 万（zh）/ 1,218 万（en）个 int16 输出里最大
+差 1 LSB，非零占 0.002%（半数进位规则不同），max |int16| 13,824 对界
+16,384，钳位 0 次。
+
+**GDN 那一侧（`in_proj_qkv → conv`，即 #3）没有接**，理由不是取舍而是
+实测：这棵树里的所有 checkpoint 上 `in_proj_qkv` 要么 `n=0`（kmr20、
+kunmoe-v2，`forward_ssm` 从不执行），要么 `dtype=f32`（s1v3、
+kunkun98-pilot、kunmoe-v2-dense，`n=1572864`）。f32 在
+`lz_matmul_xq_nt` 第一个分支就走了，根本到不了 `epi_q41` 这一族，所以
+没有可接的出口，也没有任何闸门能跑它。
+
 **闸门**：milestone 1（float 出口不变，只换内部算法）是**value-changing**
 的——`epi_fixed_raw` 的整数 MAC 累加顺序和现在 `epi_q41` 逐子块浮点累加
 的顺序不同,不是 bit-identical 的重构，要走和其它定点档一样的门：新 tier
@@ -310,9 +349,10 @@ Q4_1/Q6_1/T2 的调用点上跑"这一层接线，以及 milestone 2 的零点�
 下仍然成立**，只是这个前提在这个 checkpoint 上不成立。它们退出优先级
 的理由是"当前证据下没有可付费的路径"，不是"设计错了"：
 
-- #8/#9/#10 有一条**新的**复活路径——§2.1 milestone 2 如果做出一个
-  `epi_q41` 的 int 出口，它们可以通过那个出口而不是 `epi_fixed` 变得
-  可达（producer 是 q6_1，`epi_q41` 恰好服务 q6_1）。
+- #8/#9/#10 **已经沿这条复活路径交付**（§2.1 milestone 3）：`epi_q41`
+  的 int16 出口 `epi_q41_align_i16` 做出来了，三条链路通过它而不是
+  `epi_fixed` 变得可达（producer 是 q6_1，`epi_q41` 恰好服务 q6_1），
+  省下 55,296 f32 ops/token。
 - #3 除非未来有一个 checkpoint 真的用了普通 GDN/SSM 层（`in_proj_qkv`
   非空），否则在"这个项目度量所依据的模型"上没有意义；这不是这个
   checkpoint 独有的巧合——`kmr20` 是 KDA 架构，普通 GDN 层本来就是这个
@@ -369,16 +409,17 @@ int-in 入口（§9.1 已经分析过这部分独立于哪个 producer）。这�
    `moe_shared_gate/up/down`，以及 `kda_q/k/v_proj` 的 producer 端）。
 2. **SwiGLU 重做（两处）**（§2.4）——和 1 并行，不依赖它，缺陷/修复/
    验证公式都已知，是置信度最高的一项，理由和旧版相同。
-3. **`epi_q41` milestone 2**（§2.1）——**浮点出口这一半已交付**（见
-   §2.1 的状态段）；剩下的 int16 出口仍然按原条件挂着，即先找到一个
-   真实的整数消费者，那也正是给 #8/#9/#10 的第二条复活路径。
+3. **`epi_q41` milestone 2/3**（§2.1）——**两档都已交付**（见 §2.1 的两
+   段状态）：milestone 2 是浮点出口下的整数合并，milestone 3 是 int16
+   出口加上第一个真实消费者（#8/#9/#10 的那条复活路径）。
 4. **#16（`moe_down_proj → expert`）**——不变：需要 milestone 2 级别的
    零点项设计（这里是 producer 侧对称的 q8_0，consumer 侧非对称，和
    `epi_q41` 自己的非对称问题是同构但不同的两个零点设计,不能指望共用）。
 5. **#4/#5/#6/#11/#13、#15、#12**——推迟，触发条件见 §9（§2.5 补充了
-   #11 的一处细化）。#3/#8/#9/#10 单独列出：#3 在可预见的将来都没有
-   触发条件（依赖一个这个项目没有在用的 checkpoint 特征）；#8/#9/#10
-   的触发条件现在是"milestone 2 完成"，见第 3 项。
+   #11 的一处细化）。#3/#8/#9/#10 单独列出：#3 仍然没有触发条件，而且
+   现在的理由比"checkpoint 特征"更硬——`in_proj_qkv` 在这棵树的所有
+   checkpoint 上要么 n=0 要么 f32，两种都到不了 `epi_q41`（§2.1
+   milestone 3 段）；#8/#9/#10 **已完成**，见第 3 项。
 
 ## 4. 逐阶段 go/no-go 判据（新增 `epi_q41` 两档，其余不变）
 
@@ -407,9 +448,19 @@ int-in 入口（§9.1 已经分析过这部分独立于哪个 producer）。这�
   不算失败。
 - 实际交付把这条判据劈成了两半：零点项的整数表示这一半 go 了（双编译器
   逐位一致、四条语料的配对判据、census 独立重推导都过，且相对浮点参照
-  的 rms 误差比 milestone 1 更小），**int 消费者这一半没有 go**，因为
-  §2.1 要求的"真实会跑的 int 消费者"仍然不存在。所以出口留在 float，
+  的 rms 误差比 milestone 1 更小），**int 消费者这一半当时没有 go**，
+  因为 §2.1 要求的"真实会跑的 int 消费者"还不存在。所以出口留在 float，
   没有按"造了但没人接"的方向多走一步。
+
+**`epi_q41` milestone 3**（int16 出口 + 消费者）
+- go：消费者是 `lz_causal_conv1d_step_fixed`，真实、已在跑、且这条链路
+  的三个 producer（`kda_q/k/v_proj`）实测都是 q6_1；30 行
+  `fixed_tier_xcompiler_gate.sh` 全 PASS（在 `git archive HEAD` 的隔离
+  检出上跑，避开别的会话在途改动）；census 降幅由独立计数器重推导，两
+  个数逐位相同；配对 NLL 的 |t| 比它上下游那两档已出货的 tier 都小。
+- no-go 会是什么样：三个 producer 里只有一部分能走 int（那样得整体退回
+  float，代码里 `conv_int` 这个全或无的标志就是为此），或者 int16 在
+  `LZ_CONV_ES` 下发生钳位（实测 0 次，max 13,824 / 界 16,384）。
 
 其余（#3/#8/#9/#10 旧分析、SwiGLU、#16、#12）的 go/no-go 判据与旧版相同，
 §2.3/§2.4/§2.5 已经标出了各自现在依赖的前置条件，此处不重复。
