@@ -1508,7 +1508,33 @@ int main(int argc, char **argv) {
         const char *t = (strcmp(group_fixed, "all") == 0) ? "fixed"
                        : (strcmp(group_fixed, "off") == 0) ? "float"
                        : "auto";
+        /* Six of the seven write tiers resolve their own `auto` from the
+           exact same hardware question (lz_soft_float_target, its own
+           comment in ops_sched.c names all six call sites) - one
+           decision, not six. Table-driven here so --fixed's group-apply
+           is that single fact made structural: an eighth axis lands in
+           one array entry, not as a seventh copy-pasted is_auto/select
+           pair that this loop and ops_sched.c's own comment could drift
+           out of step with independently. Recurrence (lz_gdn_p2_*) stays
+           out of the table: its select() has no "float" value, so
+           `--fixed off` needs the distinct message below instead of a
+           silent no-op skip; scalar (lz_scalar_*) IS in the table - its
+           auto does not ask hardware (see ops_sched.c), but --fixed
+           still overrides it with an explicit value like every other
+           axis, which is unaffected by that distinction. */
+        static const struct {
+            int (*is_auto)(void);
+            const char *(*select)(const char *);
+        } axes[] = {
+            { lz_conv_is_auto,   lz_conv_select },
+            { lz_attn_is_auto,   lz_attn_select },
+            { lz_epi_is_auto,    lz_epi_select },
+            { lz_sig_is_auto,    lz_sig_select },
+            { lz_norm_is_auto,   lz_norm_select },
+            { lz_scalar_is_auto, lz_scalar_select },
+        };
         int skipped = 0;
+        int gi;
         /* The recurrence selector takes only auto|fixed - there is no
            explicit float. So `--fixed off` leaves it on auto and SAYS
            SO, rather than passing a name that returns NULL into a call
@@ -1518,12 +1544,9 @@ int main(int argc, char **argv) {
         else if (lz_gdn_p2_is_auto())
             printf("--fixed off: the recurrence tier has no float "
                    "setting (auto|fixed only); left on auto\n");
-        if (lz_conv_is_auto()) skipped += (lz_conv_select(t) == NULL);
-        if (lz_attn_is_auto()) skipped += (lz_attn_select(t) == NULL);
-        if (lz_epi_is_auto())  skipped += (lz_epi_select(t) == NULL);
-        if (lz_sig_is_auto())  skipped += (lz_sig_select(t) == NULL);
-        if (lz_norm_is_auto()) skipped += (lz_norm_select(t) == NULL);
-        if (lz_scalar_is_auto()) skipped += (lz_scalar_select(t) == NULL);
+        for (gi = 0; gi < (int)(sizeof(axes) / sizeof(axes[0])); gi++)
+            if (axes[gi].is_auto())
+                skipped += (axes[gi].select(t) == NULL);
         /* A selector that does not take this name returns NULL and
            changes nothing, which is indistinguishable from success at
            the call site - and the result is a group setter that reached

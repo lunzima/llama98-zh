@@ -123,7 +123,25 @@ int q8r_have_simd(void) {
 }
 
 /* lz_soft_float_target: "is this machine's float slow relative to its
-   integer". One-bit CPUID proxy. */
+   integer". One-bit CPUID proxy.
+
+   THE SINGLE PREDICATE SIX WRITE TIERS' AUTO RESOLVES FROM: lz_gdn_p2_mode,
+   lz_conv_mode, lz_attn_mode, lz_sig_mode, lz_norm_mode and lz_epi_mode
+   each call this function directly in their own `auto` branch below -
+   six call sites, one decision. Under auto they therefore cannot diverge;
+   they only do when a CLI flag pins one of them apart from the rest
+   (docs/fixed-tier-pipeline-breakpoints.md maps where those pinned
+   combinations are structurally needed - cross-compiler parity gates,
+   single-axis A/B measurement - and finds none of the pipeline's data
+   boundaries actually require a mismatched pair, so `--fixed auto|off|all`
+   (cli_main.c) is a safe, lossless way to move all six at once; the
+   per-tier flags stay reachable for the cases that are not deployment).
+
+   lz_scalar_mode is deliberately NOT wired to this predicate - its auto
+   resolves to fixed unconditionally (commit 508e015, a settled,
+   value-changing user decision to offload x87 even where SSE is
+   present), not to "does this machine have SSE". Folding it into the
+   six above would silently reverse that decision. */
 static int lz_soft_float_target(void) {
 #ifdef LZ_NO_FPU
     return 1;
