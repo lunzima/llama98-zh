@@ -20,6 +20,7 @@
 #include "ops_sched.h"
 #include "ops_matmul.h"
 #include "ops_t2_arm.h"
+#include "ops_arm.h"
 
 #ifndef LZ_GDN_FIXED
 #define LZ_GDN_FIXED 1
@@ -41,12 +42,13 @@
 
    token-major: g_xw[t*in_dim + k], g_acc32[t*nsb + s], g_xg[t*ng + g]. */
 
-/* lz_dot32_t2_arm_asm reads g_xw with LDM, which faults on ARM below a
-   word boundary. int16_t promises 2 bytes, so the alignment gcc happens
-   to give a 64KB array is not the contract - this is. The offsets stay
-   aligned on their own: every block pointer is g_xw plus a multiple of
-   64 bytes, in_dim being a multiple of 32 by the T2 dispatch guard.
-   Empty off ARM; Watcom never sees __arm__ and has no __attribute__. */
+/* The hand-written ARM leaf kernels read g_xw with LDM, which faults on
+   ARM below a word boundary. int16_t promises 2 bytes, so the alignment
+   gcc happens to give a 64KB array is not the contract - this is. The
+   offsets stay aligned on their own: every block pointer is g_xw plus a
+   multiple of 64 bytes, in_dim being a multiple of 32 by the dispatch
+   guards. Empty off ARM; Watcom never sees __arm__ and has no
+   __attribute__. */
 #if defined(LZ_T2_ARM_ASM_EXTERN)
 #define LZ_XW_ALIGN __attribute__((aligned(4)))
 #else
@@ -837,7 +839,11 @@ void matmul_q61_impl(float *o, const int8_t *xq, const float *xqs,
 }
 
 /* ---- Q16 block ---- */
-#if defined(__WATCOMC__) || defined(LZ_DOT_MMX_EXTERN)
+/* __arm__ joins the guard for the row TABLE and the impl, not for the
+   MMX kernels below: the ARM build reaches matmul_q16_impl through the
+   armC/armA tiers picked inside it, and its LZ_ROW_Q16 is all-NULL just
+   like the other four formats' tables are there. */
+#if defined(__WATCOMC__) || defined(LZ_DOT_MMX_EXTERN) || defined(__arm__)
 /* Q16_0 SIMD matmul. Same shape as matmul_q8_impl - weight row loads
    once, nt tokens' int32 sub-block sums computed under MMX, ONE emms,
    then the x87 float epilogue - with two differences that both come
@@ -871,7 +877,7 @@ void matmul_q61_impl(float *o, const int8_t *xq, const float *xqs,
    lz_dot128_q16_mmx_w, src/ops_mmx.c's real wrapper around the MMX
    #pragma aux group kernel. */
 
-#else  /* gcc: intrinsics */
+#elif defined(LZ_DOT_MMX_EXTERN)  /* gcc: intrinsics */
 
 static void row_q16_mmx_intrin(int32_t *acc32, const void *w4, const void *w2,
                                const int16_t *xw, int nb, int nt, int in_dim,
@@ -897,12 +903,56 @@ static void row_q16_mmx_intrin(int32_t *acc32, const void *w4, const void *w2,
 /* row_q16_sse2_intrin's body lives in src/ops_sse2.c, same reason as
    row_q8_sse2_intrin above. Declared in src/ops_sse2.h. */
 
+#if defined(__arm__)
+/* The two ARM tiers. All six LZ_ROW_Q16 slots are x86 SIMD and NULL on
+   this build, so matmul_q16_impl picks between these directly, the way
+   matmul_t2_impl does - one enum value per code body (rule 8), so
+   lz_kernel_name() can answer which one ran. Leaves in src/ops_arm.c;
+   the w4 pointer is the int16 weight row, matching the slot
+   row_q16_mmx_intrin reads on x86. */
+static void row_q16_arm(int32_t *acc32, const void *w4, const void *w2,
+                        const int16_t *xw, int nb, int nt, int in_dim,
+                        const void *pf_end, const void *pf_end2) {
+    const int16_t *wr = (const int16_t *)w4;
+    int tk, s;
+    (void)w2; (void)pf_end; (void)pf_end2;
+    for (tk = 0; tk < nt; tk++) {
+        const int16_t *xwt = xw + (size_t)tk * in_dim;
+        int32_t *acc = acc32 + (size_t)tk * nb;
+        for (s = 0; s < nb; s++)
+            acc[s] = lz_dot32_q16_arm(wr + (size_t)s * 32,
+                                      xwt + (size_t)s * 32);
+    }
+}
+
+#if defined(LZ_ARM_ASM_EXTERN)
+/* Same row, hand-written leaf. A separate row function rather than a
+   function pointer inside one: the leaf is called nb times per row, and
+   an indirect call there would cost more than the kernel it dispatches
+   to (dispatch is once per matmul, the rule lz_row_pick follows). */
+static void row_q16_arm_asm(int32_t *acc32, const void *w4, const void *w2,
+                            const int16_t *xw, int nb, int nt, int in_dim,
+                            const void *pf_end, const void *pf_end2) {
+    const int16_t *wr = (const int16_t *)w4;
+    int tk, s;
+    (void)w2; (void)pf_end; (void)pf_end2;
+    for (tk = 0; tk < nt; tk++) {
+        const int16_t *xwt = xw + (size_t)tk * in_dim;
+        int32_t *acc = acc32 + (size_t)tk * nb;
+        for (s = 0; s < nb; s++)
+            acc[s] = lz_dot32_q16_arm_asm(wr + (size_t)s * 32,
+                                          xwt + (size_t)s * 32);
+    }
+}
+#endif /* LZ_ARM_ASM_EXTERN */
+#endif /* __arm__ */
+
 const lz_rowfn LZ_ROW_Q16[LZ_ROW_N] = {
-#ifndef __WATCOMC__
+#if defined(LZ_DOT_MMX_EXTERN)
     row_q16_mmx_intrin,
 #else
     NULL,
-#endif /* __WATCOMC__ */
+#endif /* LZ_DOT_MMX_EXTERN */
     NULL,        /* sse-intrin: no SSE1 op applies, see lz_row_pick */
 #if defined(LZ_ROW_SSE2_EXTERN)
     row_q16_sse2_intrin,
@@ -930,6 +980,16 @@ void matmul_q16_impl(float *o, const int8_t *xq, const float *xqs,
 
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
     row = lz_row_pick(LZ_ROW_Q16);
+#if defined(__arm__)
+    /* Picked here rather than from the table, same as matmul_t2_impl:
+       those six slots are x86 slots. LZ_KERNEL_REF never reaches this
+       function - lz_matmul_xq_nt sends it to matmul_scalar_ref first. */
+#if defined(LZ_ARM_ASM_EXTERN)
+    row = (g_kernel == LZ_KERNEL_ARM_ASM) ? row_q16_arm_asm : row_q16_arm;
+#else
+    row = row_q16_arm;
+#endif /* LZ_ARM_ASM_EXTERN */
+#endif /* __arm__ */
     if (!row || in_dim > LZ_MM_WIDEN_MAX) {
         matmul_scalar_ref(o, xq, xqs, w, in_dim, out_dim, nt);
         return;

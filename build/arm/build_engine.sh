@@ -47,7 +47,7 @@ FLAGS="$FLAGS -ffp-contract=off -I$ROOT/src"
 
 # Same list as the Makefile's ENG, and it has to stay the same list -
 # see the Makefile note about source lists living in exactly one place.
-ENG="err compat lfn json safetensors model ops ops_quant ops_sched ops_matmul ops_t2_arm ops_t2_scalar ops_norm ops_gdn fwht forward sampler generate
+ENG="err compat lfn json safetensors model ops ops_quant ops_sched ops_matmul ops_t2_arm ops_arm ops_t2_scalar ops_norm ops_gdn fwht forward sampler generate
      tokenizer unicode chat gbk cpucheck"
 
 mkdir -p "$OUT"

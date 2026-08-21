@@ -49,6 +49,7 @@
 #include "ops_sched.h"   /* lz_q8r_tier, q8r_have_simd */
 #include "ops_matmul.h"  /* matmul impls, LZ_ROW_* tables, epilogue fns */
 #include "ops_t2_arm.h"  /* LZ_T2_ARM_ASM_EXTERN */
+#include "ops_arm.h"     /* LZ_ARM_ASM_EXTERN */
 
 /* Accumulator bound for the fixed conv tier, derived not chosen.
    k products of two values bounded by B reach k*B^2, which must stay
@@ -1509,19 +1510,21 @@ void lz_matmul_xq_nt(float *o, const float *x, const int8_t *xq,
         matmul_scalar_ref(o, xq, xqs, w, in_dim, out_dim, nt);
         return;
     }
-#if defined(LZ_T2_ARM_ASM_EXTERN)
-    /* The ARM tiers carry exactly one kernel, ternary. Every other
-       format has to reach the scalar reference by the SAME route
-       `--kernel ref` takes, or the tiers would differ by which fallback
-       they fell through (matmul_q8_impl's epi_pack_act runs before its
-       own NULL-row check, for one) rather than by the kernel under
-       test, and the three-way bit-identity gate would be comparing
-       something else. */
-    if (w->dtype != LZ_FMT_T2) {
+#if defined(__arm__)
+    /* Formats with NO ARM row kernel yet have to reach the scalar
+       reference by the SAME route `--kernel ref` takes, or the tiers
+       would differ by which fallback they fell through
+       (matmul_q8_impl's epi_pack_act runs before its own NULL-row
+       check, for one) rather than by the kernel under test, and the
+       three-way bit-identity gate would be comparing something else.
+       The list SHRINKS as cells get filled - src/ops.c's km_reg is the
+       registry of which, and this line is what makes a filled cell
+       actually run. */
+    if (w->dtype != LZ_FMT_T2 && w->dtype != LZ_FMT_Q16_0) {
         matmul_scalar_ref(o, xq, xqs, w, in_dim, out_dim, nt);
         return;
     }
-#endif /* LZ_T2_ARM_ASM_EXTERN */
+#endif /* __arm__ */
     /* The SIMD fast path currently covers only (Q8_0, gs=32). Other
        formats/groups go through the scalar reference - correct but
        slow.
@@ -1566,7 +1569,7 @@ void lz_matmul_xq_nt(float *o, const float *x, const int8_t *xq,
         matmul_t2_impl(o, xq, xqs, w, in_dim, out_dim, nt);
         return;
     }
-#if defined(__WATCOMC__) || defined(LZ_DOT_MMX_EXTERN)
+#if defined(__WATCOMC__) || defined(LZ_DOT_MMX_EXTERN) || defined(__arm__)
     /* Q16_0 has no non-widened fallback: unlike Q8_0 it always needs the
        activation expanded to int16, so in_dim past the buffer cap goes to
        the scalar reference. The gcc/SSE2-only dev build has no Q16_0 SIMD
@@ -2132,12 +2135,12 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
 
    ---- TODO -------------------------------------------------------------
 
-   armC, armA on q8_0, q4_1, q6_1 and q16_0. The ARM build carries
-   exactly one row kernel, ternary (row_t2_arm / row_t2_arm_asm,
-   src/ops_matmul.c), and lz_matmul_xq_nt sends every other dtype
-   straight to matmul_scalar_ref there. Nothing about ARMv5TE refuses
-   the others: smlaxy is a 16x16+32 MAC and the byte/nibble unpacks are
-   ordinary shifts and masks. They are not written. */
+   armC, armA on q8_0, q4_1 and q6_1. lz_matmul_xq_nt still sends those
+   three dtypes straight to matmul_scalar_ref on ARM. Nothing about
+   ARMv5TE refuses them: smlaxy is a 16x16+32 MAC and the byte/nibble
+   unpacks are ordinary shifts and masks - q16_0's pair
+   (row_q16_arm / row_q16_arm_asm, leaves in src/ops_arm.c) is the
+   worked example. They are not written. */
 #define LZ_KM_IMPOSSIBLE 1
 #define LZ_KM_TODO       2
 
@@ -2181,6 +2184,10 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
    need it, and a named constant is what stops a reorder of km_unit from
    silently moving them onto another format. */
 #define LZ_KM_UNIT_T2 4
+/* The units with ARM row kernels, same reason: km_arm_row reads them,
+   and a named constant is what stops a reorder of km_unit from moving
+   an ARM cell onto a format that has none. */
+#define LZ_KM_UNIT_Q16 3
 /* Column 0 is ref and columns 7..9 are armC/armA/g128; columns 1..6 are
    the six LZ_ROW_* slots in slot order, so column c reads tab[c - 1]. */
 #define LZ_KM_COL_ROW0 1
@@ -2208,8 +2215,8 @@ static const char km_why_t2g128[] =
     "nothing to hoist across the four sub-blocks - see LZ_G128_T2 in "
     "src/ops.c";
 static const char km_why_arm[] =
-    "not written: the ARM build has one row kernel, ternary, and "
-    "lz_matmul_xq_nt sends every other dtype to matmul_scalar_ref";
+    "not written: lz_matmul_xq_nt still sends this dtype to "
+    "matmul_scalar_ref on ARM; see q16_0's pair in src/ops_arm.c";
 
 typedef struct { unsigned char have; unsigned char why; const char *text; } LZKmReg;
 #define KM_H(mask) { (unsigned char)(mask), 0, (const char *)0 }
@@ -2229,7 +2236,7 @@ static const LZKmReg km_reg[LZ_KM_NUNIT][LZ_KM_NCOL] = {
 /* q8_0 */{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_T(km_why_arm),    KM_T(km_why_arm),    KM_H(LZ_KMB_G128) },
 /* q4_1 */{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_T(km_why_arm),    KM_T(km_why_arm),    KM_H(LZ_KMB_G128) },
 /* q6_1 */{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_T(km_why_arm),    KM_T(km_why_arm),    KM_H(LZ_KMB_G128) },
-/* q16_0*/{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_T(km_why_arm),    KM_T(km_why_arm),    KM_H(LZ_KMB_G128) },
+/* q16_0*/{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128) },
 /* t2   */{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_I(km_why_t2g128) }
 };
 
@@ -2249,17 +2256,42 @@ static const lz_rowfn *km_tab(int f) {
     case 0: return LZ_ROW_Q8;
     case 1: return LZ_ROW_Q41;
     case 2: return LZ_ROW_Q61;
-#if defined(__WATCOMC__) || defined(LZ_DOT_MMX_EXTERN)
+#if defined(__WATCOMC__) || defined(LZ_DOT_MMX_EXTERN) || defined(__arm__)
     case 3: return LZ_ROW_Q16;
 #else
     case 3: return (const lz_rowfn *)0;
-#endif /* __WATCOMC__ || LZ_DOT_MMX_EXTERN */
+#endif /* __WATCOMC__ || LZ_DOT_MMX_EXTERN || __arm__ */
     case LZ_KM_UNIT_T2: return LZ_ROW_T2;
     /* An operator unit has its own table with its own shape; it gets an
        arm here when it gets a row in km_reg, not a share of this one. */
     default: return (const lz_rowfn *)0;
     }
 }
+
+#if defined(__arm__)
+/* Does THIS build carry an ARM row kernel for unit f? The list grows as
+   cells get filled, in step with lz_matmul_xq_nt's dtype list - that
+   line is what makes a filled cell actually run, and the two going out
+   of step is a cell that reports present and never executes. */
+static int km_arm_row(int f) {
+    return f == LZ_KM_UNIT_T2 || f == LZ_KM_UNIT_Q16;
+}
+
+/* The asm column is answered per unit, not per build: each format's
+   hand-written leaf sits behind its own file's EXTERN macro, so a
+   toolchain that compiles one and not the other is a state this can
+   report rather than one it averages away. */
+static int km_arm_asm(int f) {
+#if defined(LZ_T2_ARM_ASM_EXTERN)
+    if (f == LZ_KM_UNIT_T2) return 1;
+#endif /* LZ_T2_ARM_ASM_EXTERN */
+#if defined(LZ_ARM_ASM_EXTERN)
+    if (f == LZ_KM_UNIT_Q16) return 1;
+#endif /* LZ_ARM_ASM_EXTERN */
+    (void)f;
+    return 0;
+}
+#endif /* __arm__ */
 
 static int km_g128(int f) {
     switch (f) {
@@ -2283,13 +2315,13 @@ static int km_present(int f, int c) {
     }
     if (c == LZ_KM_COL_G128) return km_g128(f);
 #if defined(__arm__)
-    /* The ARM row functions are picked in matmul_t2_impl, not from
-       LZ_ROW_T2 - those six slots are x86 slots. Ternary only, and it
-       is the only consumer of --kernel arm-c/arm-asm in the tree. */
-    if (c == LZ_KM_COL_ARMC) return f == LZ_KM_UNIT_T2;
-#if defined(LZ_T2_ARM_ASM_EXTERN)
-    if (c == LZ_KM_COL_ARMA) return f == LZ_KM_UNIT_T2;
-#endif /* LZ_T2_ARM_ASM_EXTERN */
+    /* The ARM row functions are picked inside each matmul_*_impl, not
+       from the LZ_ROW_* tables - those six slots are x86 slots. One
+       list, read by both ARM columns: a format whose C tier exists but
+       whose asm tier does not is a real state (the asm needs
+       __GNUC__), a format with the asm and no C tier is not. */
+    if (c == LZ_KM_COL_ARMC) return km_arm_row(f);
+    if (c == LZ_KM_COL_ARMA) return km_arm_asm(f);
 #else
     (void)f;
 #endif /* __arm__ */
