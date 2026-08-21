@@ -520,17 +520,23 @@ const char *lz_kernel_tier(void) {
 
 /* ---- tier report and pin string -------------------------------------- */
 
-/* CROSS-PLATFORM pins: the value each knob takes that BOTH an x86 and a
-   soft-float ARM build can actually select, so build/arm/parity_gate.sh
-   compares one code path instead of two. A fixed string, not a report of
-   what is running - it is deliberately NOT the auto resolution.
+/* CROSS-PLATFORM pins: a fixed, deliberately mostly-float string for
+   build/arm/parity_gate.sh to compare one code path across x86 and ARM
+   with, not a report of what is running and not the auto resolution.
 
-   NOT USABLE AS A SINGLE-PLATFORM REGRESSION PIN. On ARM,
-   lz_soft_float_target() resolves several of these knobs to fixed under
-   auto; pinning from here forces them back to float and switches OFF the
-   very tiers a change may have touched. A regression run pinned from
-   this string compared two builds with both new fixed kernels disabled
-   and looked clean. Regress on `auto`, or pin the knob under test
+   NOT USABLE AS A SINGLE-PLATFORM REGRESSION PIN, on x86 or on ARM: auto
+   is now unconditionally fixed on every platform (lz_soft_float_target,
+   the per-platform hardware predicate this comment used to name, is
+   retired - see its own former site's note, still readable in this
+   file's history, and docs/fixed-tier-pipeline-breakpoints.md), so this
+   string's mostly-float values are guaranteed to differ from what EVERY
+   platform's auto now gives, everywhere, not just on the one platform a
+   stale version of this comment singled out. Pinning from here for a
+   regression run forces most tiers back to float and switches OFF the
+   very kernels a change may have touched. A regression run pinned from
+   this string once compared two builds with both new fixed kernels
+   disabled and looked clean. Regress on plain `auto` (now the same
+   fixed-everywhere answer on every platform), or pin the knob under test
    explicitly; use this string only for the x86<->ARM comparison it
    exists for. lz_tier_report() below is the one that reads live state. */
 const char *lz_tier_pins(void) {

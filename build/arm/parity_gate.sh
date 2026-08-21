@@ -33,27 +33,36 @@
 #
 #   They do NOT owe it on an unpinned auto run, and that is not a
 #   defect: ref routes Q8_0 to matmul_scalar_ref, which has no fixed
-#   epilogue, while arm-c/arm-asm reach matmul_q8_impl where
-#   --epi-write's auto->fixed (a soft-float target) actually selects
-#   epi_fixed. Measured on _armgate2: ref differs from arm-c on auto
-#   and matches once --epi-write float is pinned. --epi-write is
-#   Q8_0-only on every platform, so a model without Q8_0 tensors shows
-#   no such split. See docs/arm-asm-audit.md section 1.
+#   epilogue at all, structurally, regardless of any tier's value, while
+#   arm-c/arm-asm reach matmul_q8_impl where --epi-write's auto selects
+#   epi_fixed - unconditionally now on every platform (the shipping
+#   build is fixed-point by default everywhere; auto no longer asks a
+#   per-platform hardware question - see
+#   docs/fixed-tier-pipeline-breakpoints.md), so ref and arm-c/arm-asm
+#   diverge on plain auto on x86 too, not only against an ARM target.
+#   Measured on _armgate2: ref differs from arm-c on auto and matches
+#   once --epi-write float is pinned. --epi-write is Q8_0-only on every
+#   platform, so a model without Q8_0 tensors shows no such split. See
+#   docs/arm-asm-audit.md section 1 (written before the tiers'
+#   auto-resolution changed; read its epilogue-routing claim, not its
+#   per-platform-hardware framing).
 #
 #   Asking for a tier the build lacks clamps, and cli_main.c's --kernel
 #   handler only prints "requested X, running Y" when the CLI arg and
 #   the tier actually run disagree; on an unpinned "auto" run there is
 #   no CLI arg to disagree with, so nothing gets printed.
 #
-#   --recur-write only accepts auto|fixed on the CLI - there is no
-#   explicit "float" string (see lz_gdn_p2_select in src/ops.c). "auto"
-#   resolves from lz_cpu_has_sse(): true on this x86 host -> float,
-#   false on the ARM target -> fixed. Left on auto, the two builds run
-#   genuinely different arithmetic (measured: --kernel ref alone with
-#   --recur-write left on auto already produces a different dump than
-#   pinning both, on the SAME x86 binary), and a real cross-build
-#   divergence would look exactly like this expected one. "fixed" is
-#   the only value selectable on both sides.
+#   --recur-write now accepts auto|float|fixed on the CLI (an explicit
+#   "float" string was added along with retiring auto's hardware
+#   question - see lz_gdn_p2_select in src/ops_sched.c and
+#   docs/fixed-tier-pipeline-breakpoints.md). Left on auto it resolves
+#   to fixed unconditionally, the same on x86 and on ARM - no more
+#   per-platform divergence to guard against on this axis by itself.
+#   lz_tier_pins() below still pins it explicitly to "fixed" anyway,
+#   consistent with pinning every other axis rather than trusting that
+#   two builds' unpinned autos agree; --pin-tiers is the single source
+#   of the whole list, so this comment does not need to track it value
+#   by value.
 #
 # What this does NOT check: timing. See run_qemu.sh's own header - QEMU
 # user-mode has no cache/bus/pipeline model, so a wall-clock number here
@@ -237,14 +246,21 @@ X86_DUMP="$WORK/x86.logits"
 ARM_DUMP="$ARM_WORK/arm.logits"
 
 # ASKED FOR, not transcribed. Every AUTO-resolved tier must be pinned:
-# each resolves from hardware, the predicate answers differently on ARM
-# than on x86, and an unpinned one makes this comparison compare nothing.
+# not because ARM and x86 disagree on what their own auto gives any
+# more (they do not - every tier's auto is unconditionally fixed on
+# both now, see docs/fixed-tier-pipeline-breakpoints.md), but because
+# this gate deliberately compares a specific, mostly-FLOAT configuration
+# (lz_tier_pins()'s own values, ops_sched.c) rather than the shipping
+# default, so that a real x86<->ARM divergence in the float fallback
+# arithmetic is not masked by both sides already agreeing on fixed. An
+# unpinned run would compare each side's own (now-agreeing) auto and
+# tell this gate nothing about the float paths it exists to check.
 #
 # The list is NOT a literal here, because a literal goes stale silently:
-# one that pinned only --kernel and --recur-write, against four more AUTO
-# knobs sharing the same predicate, made this gate report 94505 of 131072
-# bytes differing for that reason alone. lz_tier_pins() in ops.c is the
-# single home, so adding a knob updates this script with no edit here.
+# one that pinned only --kernel and --recur-write, against four more
+# pinned knobs, made this gate report 94505 of 131072 bytes differing
+# for that reason alone. lz_tier_pins() in src/ops_sched.c is the single
+# home, so adding a knob updates this script with no edit here.
 PINS=$("$X86_BIN" --pin-tiers) || {
     echo "FAIL: could not read --pin-tiers from $X86_BIN" >&2
     exit 1
