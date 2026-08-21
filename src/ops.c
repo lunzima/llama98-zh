@@ -85,7 +85,7 @@ int lz_conv_norm_pow2(const float *v, int n, short *out, int bound) {
     while (e < 30 && amax * (float)(1 << (e + 1)) < (float)bound) e++;
     for (i = 0; i < n; i++) {
         float t = v[i] * (float)(1 << e);
-        int q = (int)(t < 0.0f ? t - 0.5f : t + 0.5f);
+        int q = q8_round(t);
         if (q > bound) q = bound;
         if (q < -bound) q = -bound;
         out[i] = (short)q;
@@ -883,7 +883,7 @@ void lz_epi_prep(LZTensor *w, int in_dim) {
         while (e < 100 && amax * pow2f(e + 1) < 32767.0f) e++;
         for (g = 0; g < ngw; g++) {
             float t = ws[g] * pow2f(e);
-            int q = (int)(t < 0.0f ? t - 0.5f : t + 0.5f);
+            int q = q8_round(t);
             if (q >  32767) q =  32767;
             if (q < -32767) q = -32767;
             out[g] = (int16_t)q;
@@ -1062,9 +1062,10 @@ void epi_pack_act(const float *xqs, int nb, int nt) {
     /* One multiply per group plus the amax scan, per token. Counted so
        the census cannot report the fixed tier as free - the work moved,
        it did not vanish, and a site that bills nothing is how the old
-       hand-made table lost the two heaviest ones. The amax scan and the
-       packing loop's round-direction compare are both comparisons, not
-       billed (same convention as the four scans B1 leaves alone). */
+       hand-made table lost the two heaviest ones. The amax scan is a
+       comparison, not billed (same convention as the four scans B1
+       leaves alone); the round itself is q8_round's magic add, so there
+       is no compare left in the packing loop to bill. */
     LZ_FCX(LZ_FC_EPI, (long)nt * nb, 0, 0, 0, 0);
     for (tk = 0; tk < nt; tk++) {
         const float *xsb = xqs + (size_t)tk * nb;
@@ -1082,7 +1083,7 @@ void epi_pack_act(const float *xqs, int nb, int nt) {
         while (e < 100 && amax * pow2f(e + 1) < 32767.0f) e++;
         for (g = 0; g < nb; g++) {
             float t = xsb[g] * pow2f(e);
-            int q = (int)(t < 0.0f ? t - 0.5f : t + 0.5f);
+            int q = q8_round(t);
             if (q >  32767) q =  32767;
             if (q < -32767) q = -32767;
             g_epi_xq[tk][g] = (int16_t)q;
@@ -1842,7 +1843,7 @@ void lz_causal_conv1d_step_fixed(float *o, const float *x,
         const short *wr = mw + (size_t)c * k;
         int acc = 0, q;
         float t = x[c] * in_scale;
-        q = (int)(t < 0.0f ? t - 0.5f : t + 0.5f);
+        q = q8_round(t);
         if (q > bound) q = bound;
         if (q < -bound) q = -bound;
         for (j = 0; j < hist; j++) acc += (int)wr[j] * (int)si[j];
