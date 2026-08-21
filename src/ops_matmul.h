@@ -45,6 +45,15 @@ float epi_q41(const int32_t *accb, const float *xsb, const float *xgb,
               const float *wd, const float *wm, int ng, int r);
 float epi_fixed(const int32_t *accb, const LZTensor *w, int row,
                 int tk, int ng, int r, float post);
+/* int-pipeline milestone 1 (docs/int-pipeline-project.md #2.1): epi_q41's
+   dot/scale term via the shared epi_fixed exit, zsum unchanged in float.
+   `ng`/`r` are epi_q41's own convention (ng = weight-group count, r =
+   32-sub-blocks per group), matching epi_q41 exactly - NOT epi_fixed's
+   (sub-block-count, r) convention, which this function converts to
+   internally. */
+float epi_q41_fixed(const int32_t *accb, const LZTensor *w, int row,
+                    int tk, const float *xgb, const float *wm,
+                    int ng, int r);
 void epi_pack_act(const float *xqs, int nb, int nt);
 /* Exponent alignment primitive (docs/int-pipeline-project.md batch 1
    #1) - epi_align_i16's epilogue-shaped wrapper. Not called from any

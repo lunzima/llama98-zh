@@ -1588,6 +1588,38 @@ float epi_q41(const int32_t *accb, const float *xsb, const float *xgb,
     return dotsum * (1.0f / 256.0f) + zsum;
 }
 
+/* int-pipeline milestone 1 (docs/int-pipeline-project.md #2.1): epi_q41's
+   dot/scale term routed through the shared epi_fixed exit instead of its
+   own float accumulation - epi_fixed_raw's integer MAC replaces the
+   ng*(r+1) mul/add + ng*r cvt the float loop above still costs (see
+   epi_q41's own accounting comment), leaving only epi_fixed's own O(1)
+   exponent fold. zsum (the zero-point term) is untouched, in float,
+   exactly the loop epi_q41 already runs - milestone 2's separate design
+   (see the project doc: wm[g] is an additive offset, not a multiplicative
+   scale, so the exponent-alignment trick this borrows does not apply to
+   it).
+
+   `ng`/`r` are epi_q41's own convention (ng weight groups, r 32-wide
+   sub-blocks per group); epi_fixed's own `ng` parameter means "sub-block
+   count" (its Q8_0 call site passes nb directly) - ng*r converts between
+   the two without changing what either function already does. */
+float epi_q41_fixed(const int32_t *accb, const LZTensor *w, int row,
+                    int tk, const float *xgb, const float *wm,
+                    int ng, int r) {
+    float dotsum = epi_fixed(accb, w, row, tk, ng * r, r, 1.0f / 256.0f);
+    float zsum = 0.0f;
+    int g;
+    /* Same zsum loop epi_q41 runs (ng mul + ng add), plus the one add
+       that combines it with dotsum - re-derived against epi_q41's own
+       LZ_FC_EPI formula: replacing its ng*(r+1) mul/add + ng*r cvt
+       dot/scale cost with epi_fixed's own O(1) billing (which epi_fixed
+       bills itself, on its own call above) is exactly the (r+1)/(r+2)
+       share the project doc's milestone-1 estimate is built on. */
+    LZ_FCX(LZ_FC_EPI, ng, ng + 1, 0, 0, 0);
+    for (g = 0; g < ng; g++) zsum += xgb[g] * wm[g];
+    return dotsum + zsum;
+}
+
 /* ---- Q4_1 row kernels, one per (ISA x impl) --------------------------- */
 
 /* ---- T2 row kernels, one per (ISA x impl) -----------------------------
