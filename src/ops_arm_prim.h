@@ -274,6 +274,225 @@ static __inline__ int32_t lz_exp_resid_arm_asm(int32_t ms, int32_t t,
     return rq;
 }
 
+/* ---- sigmoid_q15 / sigmoid_q15_t ------------------------------------- */
+
+/* THE COORDINATE, ONCE. Both entry points end in the same three C
+   lines - `idx = (int)t`, `frac = (int32_t)((t - (float)idx) *
+   32768.0f)`, then a table pair and a linear step - and both are the
+   same single integer: F = floor(t * 2^15), with idx = F >> 15 and
+   frac = F & 32767.
+
+   That identity is exact, not approximate. (float)idx is exact for
+   idx <= 383; t - (float)idx is exact because t and idx are multiples
+   of the same power of two and the difference is under 1, so it needs
+   at most 23 significant bits; and the 32768.0f that follows is a
+   power of two applied to a value that stays normal. Three float
+   operations - two of them library calls on a target with no FPU -
+   collapse into one shift.
+
+   SMULBB, NOT MUL, for (b - a) * frac. sigmoid's derivative is at most
+   1/4 and one table step is 1/16 of x, so |b - a| <= 32768/64 + 1 =
+   513: both operands are int16 and the halfword multiply is the same
+   product. That bound is a proof obligation about the TABLE, not
+   something the code can test cheaply, so the gate sweeps every one of
+   the 385 x 32768 (idx, frac) pairs against the C instead.
+
+   NOT LDRD, deliberately, although g_sigtab[idx] and g_sigtab[idx+1]
+   are adjacent int32s: LDRD needs an 8-byte-aligned address on
+   ARMv5TE and idx is odd half the time. Declining half the domain to
+   save one instruction is a bad trade, so this is two LDRs. */
+#define LZ_SIG_ARM_LOOKUP                                     \
+    "mov    %[e], %[F], lsr #15\n\t"                          \
+    "sub    %[m], %[F], %[e], lsl #15\n\t"                    \
+    "add    %[e], %[tb], %[e], lsl #2\n\t"                    \
+    "ldr    %[r], [%[e]]\n\t"                                 \
+    "ldr    %[e], [%[e], #4]\n\t"                             \
+    "sub    %[e], %[e], %[r]\n\t"                             \
+    "smulbb %[m], %[e], %[m]\n\t"                             \
+    "add    %[r], %[r], %[m], asr #15\n\t"
+
+/* sigmoid_q15_t(t): the table-only entry, so the coordinate arrives
+   already scaled and there is no arithmetic in front of it at all.
+
+   THE TWO CLAMPS BECOME ONE UNSIGNED COMPARE. Positive floats order
+   the same way their bit patterns do, so `t <= 0.0f` and
+   `t >= 384.0f` - two `bl __aeabi_fcmp*` calls, about 30 instructions
+   each - are the single test u < 0x43C00000, which every negative
+   value, every NaN and every t >= 384 fails because their bit patterns
+   are larger. The out-of-window arm then answers both clamps from the
+   sign bit, and declines only NaN.
+
+   Declines on zero and subnormals: the implicit-bit reconstruction
+   below is wrong for a zero exponent, and t = +0 is the C's `t <= 0`
+   case rather than a table lookup. Both run the C. */
+static __inline__ int lz_sig_q15_t_arm_asm(uint32_t ut, const int32_t *tab,
+                                           int32_t *out) {
+    uint32_t ok, e, m, F;
+    int32_t r;
+    __asm__(
+        "mov    %[o], #0\n\t"
+        "mov    %[r], #0\n\t"
+        "cmp    %[u], %[c384]\n\t"
+        "bhs    2f\n\t"
+        "movs   %[e], %[u], lsr #23\n\t"
+        "beq    1f\n\t"                  /* +0 or subnormal: declined */
+        "mov    %[o], #1\n\t"
+        "bic    %[m], %[u], #0xFF000000\n\t"
+        "orr    %[m], %[m], #0x800000\n\t"
+        "rsb    %[e], %[e], #135\n\t"    /* 0 .. 134 bits to drop */
+        "mov    %[F], %[m], lsr %[e]\n\t"
+        LZ_SIG_ARM_LOOKUP
+        "b      1f\n\t"
+        "2:\n\t"                         /* t >= 384, t <= 0, inf, nan */
+        "mov    %[e], %[u], lsl #1\n\t"
+        "cmp    %[e], #0xFF000000\n\t"
+        "bhi    1f\n\t"                  /* nan: declined */
+        "mov    %[o], #1\n\t"
+        "cmp    %[u], #0\n\t"
+        "ldrpl  %[r], [%[tb], #1536]\n\t"   /* t >= 384 -> tab[384] */
+        "1:\n\t"
+        : [o] "=&r"(ok), [r] "=&r"(r), [e] "=&r"(e), [m] "=&r"(m),
+          [F] "=&r"(F)
+        : [u] "r"(ut), [tb] "r"(tab), [c384] "r"(0x43C00000u)
+        : "cc");
+    *out = r;
+    return (int)ok;
+}
+
+/* sigmoid_q15(x): the same table, reached through t = (x + 12) * 16.
+   The multiply by 16 is an exact power of two and disappears into the
+   coordinate; the ADD DOES NOT, and reproducing its rounding bit for
+   bit is the whole content of this function.
+
+   WHY IT IS AN INTEGER PROBLEM. What the table needs is
+   F = floor(fl(x + 12) * 2^19), and fl(x + 12) is a correctly rounded
+   float32 - i.e. the exact sum expressed in units of the RESULT's ulp
+   and rounded half-to-even. The exact sum is 12 +- |x| with both terms
+   dyadic, so in units of the result's ulp it is a 24-bit integer plus
+   the bits of |x| that fall below that ulp, and the rounding decision
+   is the standard "dropped bits, left-justified, against 2^31" the two
+   primitives above already use. The four cases are the four places the
+   result's binade can be:
+
+     x >= 0, |x| >= 4      sum in [16,24), ulp 2^-19, 12 -> 0x600000
+     x >= 0, |x| <  4      sum in [12,16), ulp 2^-20, 12 -> 0xC00000
+     x <  0, |x| in [4,8)  sum in (4,8],   ulp 2^-21, EXACT
+     x <  0, |x| >= 8      sum in (0,4],   ulp 2^-20, EXACT
+     x <  0, |x| <  4      sum in (8,12],  ulp 2^-20, 12 -> 0xC00000
+
+   The two exact rows are Sterbenz cancellation: no bits of x fall off,
+   so no rounding happens and the binade of the result does not matter -
+   only the scale the coordinate is read at does. The subtracting rows
+   round the OTHER WAY round, because dropping bits off the subtrahend
+   moves the result up: a tie there rounds to even by clearing the low
+   bit rather than adding it.
+
+   ZERO AND SUBNORMALS NEED NO CASE. Their exponent makes the shift
+   count 130, so the quotient and the dropped bits are both zero on
+   ARM's register-specified shifts, and the arm falls out at 12 exactly
+   - which is what fl(x + 12) is for every |x| < 2^-126.
+
+   THE ONE DECLINE IS NaN. Both clamps are answered from the sign bit
+   once |x| >= 12, so infinities are handled too.
+
+   idx CAN REACH 384 even though |x| < 12, which is why the lookup is
+   guarded here and not in sigmoid_q15_t: x = 12 - 2^-20 makes the
+   exact sum 24 - 2^-20, a tie at ulp 2^-19 that rounds up to 24, and
+   the C's own `idx >= LZ_SIG_N` test is what catches it. */
+static __inline__ int lz_sig_q15_arm_asm(uint32_t ux, const int32_t *tab,
+                                         int32_t *out) {
+    uint32_t ok, e, m, T, F;
+    int32_t r;
+    __asm__(
+        "mov    %[o], #0\n\t"
+        "mov    %[r], #0\n\t"
+        "bic    %[e], %[u], #0x80000000\n\t"
+        "cmp    %[e], %[c12]\n\t"
+        "bhs    2f\n\t"                  /* |x| >= 12, inf, nan */
+        "mov    %[o], #1\n\t"
+        "mov    %[m], %[e], lsr #23\n\t"       /* biased exponent, 0..130 */
+        "bic    %[T], %[e], #0xFF000000\n\t"
+        "orr    %[T], %[T], #0x800000\n\t"     /* mantissa, implicit bit in */
+        "cmp    %[u], #0\n\t"
+        "bmi    3f\n\t"
+        "cmp    %[m], #129\n\t"                /* x >= 0 */
+        "blo    4f\n\t"
+        "mov    %[F], #0x600000\n\t"           /* 12 in units of 2^-19 */
+        "rsb    %[m], %[m], #131\n\t"
+        "mov    %[e], #0\n\t"
+        "b      5f\n\t"
+        "4:\n\t"
+        "mov    %[F], #0xC00000\n\t"           /* 12 in units of 2^-20 */
+        "rsb    %[m], %[m], #130\n\t"
+        "mov    %[e], #1\n\t"
+        "5:\n\t"
+        "add    %[F], %[F], %[T], lsr %[m]\n\t"
+        "rsb    %[m], %[m], #32\n\t"
+        "mov    %[T], %[T], lsl %[m]\n\t"      /* dropped bits, left-just. */
+        "cmp    %[T], #0x80000000\n\t"
+        "addhi  %[F], %[F], #1\n\t"
+        "andeq  %[T], %[F], #1\n\t"
+        "addeq  %[F], %[F], %[T]\n\t"
+        "mov    %[F], %[F], lsr %[e]\n\t"
+        "b      6f\n\t"
+        "3:\n\t"                               /* x < 0 */
+        "cmp    %[m], #129\n\t"
+        "blo    7f\n\t"
+        "bhi    8f\n\t"
+        "rsb    %[F], %[T], #0x1800000\n\t"    /* |x| in [4,8): exact, 2^-21 */
+        "mov    %[F], %[F], lsr #2\n\t"
+        "b      6f\n\t"
+        "8:\n\t"
+        "rsb    %[F], %[T], #0xC00000\n\t"     /* |x| in [8,12): exact, 2^-20 */
+        "mov    %[F], %[F], lsr #1\n\t"
+        "b      6f\n\t"
+        "7:\n\t"
+        "rsb    %[m], %[m], #130\n\t"
+        "mov    %[F], %[T], lsr %[m]\n\t"
+        "rsb    %[F], %[F], #0xC00000\n\t"
+        "rsb    %[m], %[m], #32\n\t"
+        "mov    %[T], %[T], lsl %[m]\n\t"
+        "cmp    %[T], #0x80000000\n\t"
+        "subhi  %[F], %[F], #1\n\t"            /* dropped bits push it down */
+        /* NO TIE INSTRUCTION HERE, and that is not an omission. Round-
+           half-to-even on this branch picks between T-1 and T, and the
+           `lsr #1` below discards exactly the bit they differ in:
+           (T-1)>>1 == T>>1 for odd T, and T is the answer when T is
+           even. The mutation harness found this by leaving a `bic ..,
+           #1` green - it was dead. The ADD branch above is different,
+           because there the tie moves T upward, which does survive the
+           shift. */
+        "mov    %[F], %[F], lsr #1\n\t"
+        "6:\n\t"
+        "cmp    %[F], #0xC00000\n\t"
+        "bhs    9f\n\t"                        /* idx >= 384 */
+        LZ_SIG_ARM_LOOKUP
+        "b      1f\n\t"
+        "9:\n\t"
+        /* The C's own `idx >= LZ_SIG_N` return. It cannot change the
+           VALUE - frac is zero whenever F reaches 0xC00000, so the
+           interpolation would return tab[384] anyway - it is here so
+           the lookup never reads tab[385], which is off the end of the
+           array. A bounds guard, not an arithmetic one, so no mutation
+           of it can be red. */
+        "ldr    %[r], [%[tb], #1536]\n\t"
+        "b      1f\n\t"
+        "2:\n\t"
+        "mov    %[m], %[u], lsl #1\n\t"
+        "cmp    %[m], #0xFF000000\n\t"
+        "bhi    1f\n\t"                        /* nan: declined */
+        "mov    %[o], #1\n\t"
+        "cmp    %[u], #0\n\t"
+        "movpl  %[r], #0x8000\n\t"             /* x >= 12 -> 32768 */
+        "1:\n\t"
+        : [o] "=&r"(ok), [r] "=&r"(r), [e] "=&r"(e), [m] "=&r"(m),
+          [T] "=&r"(T), [F] "=&r"(F)
+        : [u] "r"(ux), [tb] "r"(tab), [c12] "r"(0x41400000u)
+        : "cc");
+    *out = r;
+    return (int)ok;
+}
+
 #endif /* __arm__ && __GNUC__ */
 
 #endif /* LZ_OPS_ARM_PRIM_H */

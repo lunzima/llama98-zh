@@ -505,6 +505,15 @@ int32_t sigmoid_q15(float x) {
     int idx;
     int32_t frac, a, b;
     if (!g_sigtab_ready) sig_build();
+#if defined(LZ_ARM_PRIM_ASM)
+    /* After sig_build, never before: the primitive reads the table. */
+    if (g_kernel == LZ_KERNEL_ARM_ASM) {
+        union { float f; uint32_t u; } bx;
+        int32_t r;
+        bx.f = x;
+        if (lz_sig_q15_arm_asm(bx.u, g_sigtab, &r)) return r;
+    }
+#endif /* LZ_ARM_PRIM_ASM */
     if (x <= LZ_SIG_LO) return 0;
     if (x >= -LZ_SIG_LO) return 32768;
     t = (x - LZ_SIG_LO) * LZ_SIG_STEP;
@@ -529,6 +538,14 @@ int32_t sigmoid_q15_t(float t) {
     int idx;
     int32_t frac, a, b;
     if (!g_sigtab_ready) sig_build();
+#if defined(LZ_ARM_PRIM_ASM)
+    if (g_kernel == LZ_KERNEL_ARM_ASM) {
+        union { float f; uint32_t u; } bt;
+        int32_t r;
+        bt.f = t;
+        if (lz_sig_q15_t_arm_asm(bt.u, g_sigtab, &r)) return r;
+    }
+#endif /* LZ_ARM_PRIM_ASM */
     if (t <= 0.0f) return 0;
     if (t >= (float)LZ_SIG_N) return g_sigtab[LZ_SIG_N];
     idx = (int)t;
