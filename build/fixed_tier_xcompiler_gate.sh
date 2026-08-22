@@ -20,6 +20,12 @@
 # probe and on English input, only surfacing past ~150 tokens of real
 # Chinese text.
 #
+# (--norm-write's `int` value is gone since 2d5e6c1, which folded the
+# int output into the fixed tier unconditionally - lz_norm_int() now
+# just returns lz_norm_mode(). The rows below say `fixed` where this
+# comment says `int`; the tier the RCA was about is still covered, it
+# is no longer separately selectable.)
+#
 # THIS SCRIPT USED TO ONLY COVER --norm-write int / --attn-write int
 # (the two tiers the RCA above was about). docs/fixed-tier-precision-
 # audit.md then re-ran gcc<->Watcom identity for the other ten tier
@@ -64,8 +70,9 @@
 #   --attn-write int      (the original RCA's other tier)
 #   --epi-write fixed
 #   --sig-write fixed
-#   --norm-write fixed
-#   --norm-write int       (the original RCA's tier)
+#   --norm-write fixed     (the original RCA's tier - it used to have a
+#                           separate `int` value, folded into `fixed` by
+#                           2d5e6c1, so this row is now its coverage)
 #   --scalar-fixed fixed
 #   --fixed all
 #   (shipping default, zero flags)
@@ -266,7 +273,6 @@ TIERS_ISOLATED=(
     "--epi-write fixed"
     "--sig-write fixed"
     "--norm-write fixed"
-    "--norm-write int"
     "--scalar-fixed fixed"
 )
 for tier in "${TIERS_ISOLATED[@]}"; do
