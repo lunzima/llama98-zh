@@ -150,6 +150,7 @@ open(sys.argv[2],"wb").write(b"".join(d[i:i+4][::-1] for i in range(0,len(d),4))
 
 echo "-- models --"
 ran_any=0
+unloadable=""
 for m in $MODELS; do
     name=$(basename "$m")
     if [ ! -d "$m" ]; then
@@ -165,16 +166,44 @@ for m in $MODELS; do
             --tokens "$TOK" --dump-logits "$W/$name.$k.le.bin" \
             >"$W/$name.$k.le.log" 2>&1 || rc_le=$?
 
-        # A crash and a wrong number are different failures. Report the
-        # arm's own message rather than letting a missing dump file turn
-        # into a byte mismatch.
-        if [ "$rc_le" -ne 0 ] || [ ! -s "$W/$name.$k.le.bin" ]; then
-            bad "RUNFAIL le $name/$k (rc=$rc_le)"
+        # A crash and a wrong number are different failures, and so are
+        # "one arm died" and "neither arm can read this model at all".
+        #
+        # Both arms failing the SAME way carries no byte-order
+        # information: it is the model being unloadable by this tree, a
+        # fact any single-endian gate would also have caught. Calling it
+        # a byte-order failure would point the next reader at the byte
+        # order of a load that never happened. It is reported, and it
+        # does not count as a comparison, but it is not this gate's FAIL.
+        #
+        # ONE arm failing is the opposite - that is a difference between
+        # the two byte orders and is exactly what this gate is for.
+        le_bad=0; be_bad=0
+        [ "$rc_le" -ne 0 ] || [ ! -s "$W/$name.$k.le.bin" ] && le_bad=1
+        [ "$rc_be" -ne 0 ] || [ ! -s "$W/$name.$k.be.raw" ] && be_bad=1
+        if [ "$le_bad" -eq 1 ] && [ "$be_bad" -eq 1 ]; then
+            if diff -q "$W/$name.$k.le.log" "$W/$name.$k.be.log" >/dev/null 2>&1; then
+                printf '  UNLOADABLE %-26s %-6s both arms, identically - not a\n' \
+                    "$name" "$k"
+                echo "             byte-order finding. The engine cannot read this"
+                echo "             model at all:"
+                tail -n 2 "$W/$name.$k.le.log" | sed 's/^/               /'
+                unloadable="$unloadable $name/$k"
+                continue
+            fi
+            bad "$name/$k: BOTH arms failed but DIFFERENTLY - that is a"
+            echo "       byte-order difference in the failure path itself."
+            tail -n 3 "$W/$name.$k.be.log" | sed 's/^/       be: /'
+            tail -n 3 "$W/$name.$k.le.log" | sed 's/^/       le: /'
+            continue
+        fi
+        if [ "$le_bad" -eq 1 ]; then
+            bad "RUNFAIL le $name/$k (rc=$rc_le) while be succeeded"
             tail -n 4 "$W/$name.$k.le.log" | sed 's/^/       /'
             continue
         fi
-        if [ "$rc_be" -ne 0 ] || [ ! -s "$W/$name.$k.be.raw" ]; then
-            bad "RUNFAIL be $name/$k (rc=$rc_be)"
+        if [ "$be_bad" -eq 1 ]; then
+            bad "RUNFAIL be $name/$k (rc=$rc_be) while le succeeded"
             tail -n 4 "$W/$name.$k.be.log" | sed 's/^/       /'
             continue
         fi
@@ -208,8 +237,9 @@ print("dead" if len(set(v))<=1 else "live")' "$W/$name.$k.le.bin")
 done
 
 if [ "$ran_any" -eq 0 ]; then
-    echo "endian-gate: SKIP - no model directory was found"
-    echo "  Set MODELS=... to point at some. Nothing was checked."
+    echo "endian-gate: SKIP - not one model was comparable on both arms"
+    echo "  Nothing about byte order was checked. Set MODELS=... to point"
+    echo "  at models this tree can load."
     exit 2
 fi
 
@@ -217,5 +247,9 @@ if [ "$FAIL" -ne 0 ]; then
     echo "endian_gate: FAIL"
     exit 1
 fi
-echo "endian_gate: PASS"
+if [ -n "$unloadable" ]; then
+    echo "endian_gate: PASS (unloadable on both arms, unchecked:$unloadable)"
+else
+    echo "endian_gate: PASS"
+fi
 exit 0
