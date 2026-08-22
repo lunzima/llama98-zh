@@ -312,9 +312,12 @@ const char *lz_scalar_select(const char *name) {
    value. As two flags the pair (float, int) was representable and
    silently did nothing - a combination that cannot be spelled cannot be
    mis-set. */
-#define LZ_NORM_FLOAT 0
-#define LZ_NORM_FIXED 1
-#define LZ_NORM_INT   2
+/* FIXEDT, not FIXED: LZ_NORM_FIXED is the compile switch in ops.h that
+   decides whether the fixed bodies exist at all. Same collision
+   LZ_CONV_FIXEDT dodges above. */
+#define LZ_NORM_FLOAT  0
+#define LZ_NORM_FIXEDT 1
+#define LZ_NORM_INT    2
 
 static int g_norm = -1;
 
@@ -331,7 +334,7 @@ int lz_norm_int(void) { return g_norm == LZ_NORM_INT; }
 const char *lz_norm_select(const char *name) {
     if (!name) return NULL;
     if (strcmp(name, "float") == 0) g_norm = LZ_NORM_FLOAT;
-    else if (strcmp(name, "fixed") == 0) g_norm = LZ_NORM_FIXED;
+    else if (strcmp(name, "fixed") == 0) g_norm = LZ_NORM_FIXEDT;
     else if (strcmp(name, "int") == 0) g_norm = LZ_NORM_INT;
     else if (strcmp(name, "auto") == 0) g_norm = -1;
     else return NULL;
@@ -344,12 +347,16 @@ const char *lz_norm_select(const char *name) {
 #endif /* LZ_NORM_MAX_N */
 
 int lz_norm_can_fixed(int n) {
-#if LZ_GDN_FIXED
+#if LZ_NORM_FIXED
     return lz_norm_mode() && n > 0 && n <= LZ_NORM_MAX_N;
 #else
+    /* The fixed bodies are not in this build, so no answer from
+       --norm-write can make them runnable. Saying no here is what keeps
+       the call sites off a compiled-out path; norm_ss_fixed declines
+       for the same reason. */
     (void)n;
     return 0;
-#endif /* LZ_GDN_FIXED */
+#endif /* LZ_NORM_FIXED */
 }
 
 /* ---- epilogue tier --------------------------------------------------- */

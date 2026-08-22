@@ -564,6 +564,18 @@ const char *lz_sig_select(const char *name);
 int lz_sig_mode(void);
 int lz_sig_is_auto(void);
 
+/* Fixed norms tier, compiled in or out. Its own axis: the recurrence's
+   LZ_GDN_FIXED says nothing about the norms and this says nothing about
+   the recurrence, so -DLZ_GDN_FIXED=0 isolates the recurrence and
+   -DLZ_NORM_FIXED=0 isolates the norms. Guards norm_ss_fixed
+   (ops_quant.c), the three fixed output loops (ops_norm.c) and
+   lz_norm_can_fixed (ops_sched.c). In the HEADER, like LZ_CONV_FIXED, so
+   build/switch_matrix_gate.sh's -dM proof reaches it through ops.c and
+   forward.c. */
+#ifndef LZ_NORM_FIXED
+#define LZ_NORM_FIXED 1
+#endif /* LZ_NORM_FIXED */
+
 /* The RMS/L2 norm tier. fixed accumulates the sum of squares in int64
    from the int16 image of x rather than in f32, so the per-element
    multiply-add leaves the float domain; the reciprocal square root and
@@ -572,7 +584,7 @@ int lz_norm_mode(void);
 int lz_norm_is_auto(void);
 const char *lz_norm_select(const char *name);
 /* Whether lz_rmsnorm_gated will take the fixed tier for an n-element
-   norm: false in a LZ_GDN_FIXED=0 build, where the fixed body is
+   norm: false in a LZ_NORM_FIXED=0 build, where the fixed body is
    compiled out and norm_ss_fixed declines. The fixed-tier call sites
    that hand the pre-silu product and the Q15 sigmoid to
    lz_quantize_q8_silu gate on this, so the float tier keeps the plain

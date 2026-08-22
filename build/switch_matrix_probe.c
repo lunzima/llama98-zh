@@ -45,6 +45,13 @@
 #error "LZ_CONV_FIXED != 0"
 #endif
 
+#ifndef LZ_NORM_FIXED
+#error "LZ_NORM_FIXED not defined (expected 0)"
+#endif
+#if LZ_NORM_FIXED != 0
+#error "LZ_NORM_FIXED != 0"
+#endif
+
 #ifndef LZ_SSE2_GROUP
 #error "LZ_SSE2_GROUP not defined (expected 0)"
 #endif

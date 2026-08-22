@@ -20,11 +20,6 @@
 
 #include "ops_kernel_amax.h"  /* dispatch table for q8_amax */
 
-/* GDN fixed tier default - same as ops.c's block. */
-#ifndef LZ_GDN_FIXED
-#define LZ_GDN_FIXED 1
-#endif /* LZ_GDN_FIXED */
-
 #ifndef LZ_NORM_MAX_N
 #define LZ_NORM_MAX_N 4096
 #endif /* LZ_NORM_MAX_N */
@@ -707,15 +702,19 @@ int q8_group_scale(const float *grp, int gs, float *sg, float *inv) {
     return fast;
 }
 
-/* ---- norm_ss_fixed (integer sum-of-squares) -------------------------- */
+/* ---- expof / norm_ss_fixed (integer sum-of-squares) ------------------ */
 
-#if LZ_GDN_FIXED
+/* Under no tier guard: a pure read of a float's exponent field, used by
+   the GDN coefficient scale (ops_gdn.c) and by the fixed norms
+   (ops_norm.c, and norm_ss_fixed below). Guarding it on either one
+   would make that subsystem's off switch compile the other one out. */
 int expof(float x) {
     union { float f; uint32_t u; } b;
     b.f = x;
     return (int)((b.u >> 23) & 0xFFu) - 127;
 }
 
+#if LZ_NORM_FIXED
 /* Sum of squares for the norms fixed tier, with the accumulation done
    as a per-element multiply-add in the INTEGER domain rather than
    float. Getting each element there still costs two float operations -
@@ -778,11 +777,12 @@ float norm_ss_fixed(const float *x, int n, short *qout, int *eout) {
     return (float)acc * pow2f(-2 * e);
 }
 #else
-/* No fixed GDN in this build, so no expof to derive the scale from.
-   Declining sends every caller down the float path, which is the
-   correct behaviour for a build with no fixed arithmetic at all. */
+/* The fixed norms tier is compiled out. Declining is the same answer
+   the oversized-n case above gives, and reaches every caller through
+   the one path they already handle, so each one runs its float body.
+   Other fixed tiers in this build are unaffected. */
 float norm_ss_fixed(const float *x, int n, short *qout, int *eout) {
     (void)x; (void)n; (void)qout; (void)eout;
     return -1.0f;
 }
-#endif /* LZ_GDN_FIXED */
+#endif /* LZ_NORM_FIXED */

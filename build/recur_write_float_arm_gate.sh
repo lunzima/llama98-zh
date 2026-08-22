@@ -15,25 +15,26 @@
 # THE CHECK. If a runtime float arm is complete, then additionally removing
 # the fixed path AT COMPILE TIME must change nothing: the code deleted was
 # code the runtime flag had already stopped executing. So build the tree
-# twice, once ordinary and once -DLZ_GDN_FIXED=0, and require byte-identical
-# --dump-all-logits. With the pass-1 defect present all four rows below
+# three times - ordinary, -DLZ_GDN_FIXED=0, -DLZ_NORM_FIXED=0 - and require
+# byte-identical --dump-all-logits. With the pass-1 defect present rows 1-4
 # differ; the difference is the whole recurrence's pass-1 contraction.
 #
-# WHY ROWS 3 AND 4 ALSO PASS --norm-write float. -DLZ_GDN_FIXED=0 is not
-# only "no fixed recurrence": ops_quant.c's norm_ss_fixed/expof and
-# ops_norm.c's three fixed output loops sit inside the same #if, and
-# lz_norm_can_fixed() returns 0 in that build whatever --norm-write says.
-# So the compile-time build has NO fixed norm either, and --recur-write
-# float alone cannot match it - the residual is the norms tier, not the
-# recurrence. Floating the norms too isolates the axis under test. Rows 1
-# and 2 need no such flag because --fixed off already floats every axis.
+# ONE SWITCH, ONE AXIS. Each -D here must remove exactly the tier it
+# names, so each row pairs a compile-time off switch with the runtime
+# flag for that same tier and nothing else. -DLZ_GDN_FIXED=0 used to
+# compile out the fixed norms as well - norm_ss_fixed and ops_norm.c's
+# three output loops sat inside its #if - so rows 3 and 4 had to pass
+# --norm-write float on top of --recur-write float, and the norms tier
+# had no control arm of its own at all. LZ_NORM_FIXED now guards the
+# norms; --recur-write float alone matches the recurrence build, and
+# rows 5-6 run the same argument on the norms axis.
 #
-# ROW 5 IS A ZERO CONTROL. Four rows that must be IDENTICAL are exactly the
+# ROWS 7-8 ARE ZERO CONTROLS. Rows that must be IDENTICAL are exactly the
 # shape that passes when the runner is broken - a --dump-all-logits that
 # never varies, a flag the binary ignores, two cmp calls against the same
-# file. Row 5 requires the ordinary build's --fixed off to DIFFER from its
-# own shipping default, i.e. that this instrument can see a difference at
-# all. Without it rows 1-4 could be vacuous from birth.
+# file. They require each runtime flag to DIFFER from the shipping default
+# on the ordinary build, i.e. that this instrument can see a difference at
+# all. Without them rows 1-6 could be vacuous from birth.
 #
 # Builds are derived from `make -Bn llama98` and written to a temp dir, so
 # this gate never touches build/native/ and cannot leave differently-flagged
@@ -102,6 +103,8 @@ echo "-- build: ordinary --"
 build_one on "" || exit 2
 echo "-- build: -DLZ_GDN_FIXED=0 --"
 build_one off "-DLZ_GDN_FIXED=0" || exit 2
+echo "-- build: -DLZ_NORM_FIXED=0 --"
+build_one nof "-DLZ_NORM_FIXED=0" || exit 2
 
 FAIL=0
 # run <binary-tag> <outfile-tag> <corpus> <flags...>
@@ -155,17 +158,30 @@ run_dump on  fo_on_en  "$TOK_EN" --fixed off
 run_dump off fo_off_en "$TOK_EN" --fixed off
 check_same "--fixed off / en" fo_on_en fo_off_en
 
-echo "-- rows 3-4: --recur-write float --norm-write float, same pair --"
-run_dump on  rw_on_zh  "$TOK_ZH" --recur-write float --norm-write float
-run_dump off rw_off_zh "$TOK_ZH" --recur-write float --norm-write float
-check_same "--recur-write float --norm-write float / zh" rw_on_zh rw_off_zh
-run_dump on  rw_on_en  "$TOK_EN" --recur-write float --norm-write float
-run_dump off rw_off_en "$TOK_EN" --recur-write float --norm-write float
-check_same "--recur-write float --norm-write float / en" rw_on_en rw_off_en
+echo "-- rows 3-4: --recur-write float, ordinary vs -DLZ_GDN_FIXED=0 --"
+run_dump on  rw_on_zh  "$TOK_ZH" --recur-write float
+run_dump off rw_off_zh "$TOK_ZH" --recur-write float
+check_same "--recur-write float / zh" rw_on_zh rw_off_zh
+run_dump on  rw_on_en  "$TOK_EN" --recur-write float
+run_dump off rw_off_en "$TOK_EN" --recur-write float
+check_same "--recur-write float / en" rw_on_en rw_off_en
 
-echo "-- row 5: zero control --"
+echo "-- rows 5-6: --norm-write float, ordinary vs -DLZ_NORM_FIXED=0 --"
+run_dump on  nw_on_zh  "$TOK_ZH" --norm-write float
+run_dump nof nw_nof_zh "$TOK_ZH" --norm-write float
+check_same "--norm-write float / zh" nw_on_zh nw_nof_zh
+run_dump on  nw_on_en  "$TOK_EN" --norm-write float
+run_dump nof nw_nof_en "$TOK_EN" --norm-write float
+check_same "--norm-write float / en" nw_on_en nw_nof_en
+
+echo "-- rows 7-8: zero controls, one per axis --"
 run_dump on def_on_zh "$TOK_ZH"
 check_diff "ordinary build: --fixed off vs shipping default / zh" fo_on_zh def_on_zh
+# One control per runtime flag, not one for the pair: a --norm-write that
+# the binary ignored would leave rows 5-6 identical for the wrong reason,
+# and row 7 says nothing about it.
+check_diff "ordinary build: --norm-write float vs shipping default / zh" \
+    nw_on_zh def_on_zh
 
 if [ "$FAIL" -ne 0 ]; then
     echo "recur_write_float_arm_gate: FAIL"

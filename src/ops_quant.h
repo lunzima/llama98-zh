@@ -66,10 +66,11 @@ unsigned short lz_x87_cw_get(void);
 void lz_x87_cw_set(unsigned short cw);
 #endif /* __WATCOMC__ || LZ_X87_FLOAT_CW */
 
-/* Exponent extraction (bit manipulation). GDN_FIXED only. */
-#if LZ_GDN_FIXED
+/* Exponent extraction (bit manipulation). Shared: the GDN coefficient
+   scale and the fixed norms both derive their power-of-two scale from
+   it, so it belongs to neither guard - a build that calls it from
+   neither subsystem simply drops it at link time. */
 int expof(float x);
-#endif /* LZ_GDN_FIXED */
 
 /* Shared constants (defined once in ops_quant.c, extern here to avoid
    excess-precision folding in other TUs). */

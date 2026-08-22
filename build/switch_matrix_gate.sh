@@ -41,6 +41,10 @@
 #   LZ_GDN_STATE_2PLANE 0        #ifndef default 1
 #   LZ_ATTN_FIXED       0        #ifndef default 3
 #   LZ_CONV_FIXED       0        #ifndef default 1
+#   LZ_NORM_FIXED       0        #ifndef default 1 - the fixed norms tier,
+#      an axis of its own. It used to ride on LZ_GDN_FIXED, which made
+#      the recurrence's control arm float the norms too and left the
+#      norms with no control arm at all.
 #   LZ_SSE2_GROUP       0        #ifndef default 1 (guarded code in ops_sse2.c)
 #   LZ_Q8_MIN_SCALE     0.0f     #ifndef default 1.0e-30f
 #   LZ_EXACT_MATH       1        defined-style (#if defined)
@@ -226,7 +230,7 @@ check_one() {
 # q16_0 int16 exits (forward.c). Each defaults to 1 and each =0 build is
 # the control arm its measurement was taken against, which is exactly the
 # kind of build nobody runs again unless a gate does.
-SWITCHES="LZ_GDN_FIXED=0 LZ_GDN_STATE_2PLANE=0 LZ_ATTN_FIXED=0 LZ_CONV_FIXED=0 LZ_SSE2_GROUP=0 LZ_Q8_MIN_SCALE=0.0f LZ_EXACT_MATH=1 LZ_CPUID_NOCACHE=1 LZ_NO_FPU=1 LZ_KV_2PLANE=1 LZ_GDN_STATE_F32=1 LZ_BATCH_MAX=1 LZ_SPEC_K=1 LZ_PF_DIST=0 LZ_Q8R_FORCE_SSE=1 LZ_P2_FORCE_MMX=1 LZ_BVEC_I16=0 LZ_MOEGATE_I16=0 LZ_KLAT_I16=0 LZ_KGATE_I16=0"
+SWITCHES="LZ_GDN_FIXED=0 LZ_GDN_STATE_2PLANE=0 LZ_ATTN_FIXED=0 LZ_CONV_FIXED=0 LZ_NORM_FIXED=0 LZ_SSE2_GROUP=0 LZ_Q8_MIN_SCALE=0.0f LZ_EXACT_MATH=1 LZ_CPUID_NOCACHE=1 LZ_NO_FPU=1 LZ_KV_2PLANE=1 LZ_GDN_STATE_F32=1 LZ_BATCH_MAX=1 LZ_SPEC_K=1 LZ_PF_DIST=0 LZ_Q8R_FORCE_SSE=1 LZ_P2_FORCE_MMX=1 LZ_BVEC_I16=0 LZ_MOEGATE_I16=0 LZ_KLAT_I16=0 LZ_KGATE_I16=0"
 
 for entry in $SWITCHES; do
     name="${entry%%=*}"

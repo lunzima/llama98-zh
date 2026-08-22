@@ -2,13 +2,10 @@
    fixed-tier gated output loop. A separate TU from ops.c to keep #if
    guard density low. These call norm_ss_fixed/expof/q8_amax from
    ops_quant.c and the LZ_NORMOUT/VMAX/VSCALE dispatch tables from
-   ops_kernel_norm.h. */
+   ops_kernel_norm.h. The fixed output loops are guarded by
+   LZ_NORM_FIXED (ops.h). */
 #include <stddef.h>
 #include <stdint.h>
-
-#ifndef LZ_GDN_FIXED
-#define LZ_GDN_FIXED 1
-#endif /* LZ_GDN_FIXED */
 
 #ifndef LZ_NORM_MAX_N
 #define LZ_NORM_MAX_N 4096
@@ -26,7 +23,7 @@
 
 #include "ops_kernel_norm.h"
 
-#if LZ_GDN_FIXED
+#if LZ_NORM_FIXED
 /* Fixed output loop of lz_rmsnorm_gated. The full Q15 int-multiply:
    x, w, g each get their own power-of-two Q15 scale (q8_amax +
    pow2f(14-expof)), inv is scaled likewise, sigmoid comes straight from
@@ -77,9 +74,9 @@ void lz_rmsnorm_gated_out_fixed(float *o, const float *x,
                                        float inv, int n, int32_t *sig) {
     (void)o; (void)x; (void)g; (void)w; (void)inv; (void)n; (void)sig;
 }
-#endif /* LZ_GDN_FIXED */
+#endif /* LZ_NORM_FIXED */
 
-#if LZ_GDN_FIXED
+#if LZ_NORM_FIXED
 /* Int output variant of lz_rmsnorm_gated_out_fixed: identical Q15
    int-multiply, but instead of dequantizing to float per element the
    Q15 result is written as int and the single power-of-two scale
@@ -130,7 +127,7 @@ void lz_rmsnorm_gated_out_fixed_int(int32_t *t, const float *x,
     (void)t; (void)x; (void)g; (void)w; (void)inv; (void)n; (void)sig;
     *deq = 0.0f;
 }
-#endif /* LZ_GDN_FIXED */
+#endif /* LZ_NORM_FIXED */
 
 /* lz_rmsnorm_gated fixed-tier wrapper for the int output: same
    sum-of-squares and rsqrt as lz_rmsnorm_gated, then the Q15
@@ -163,7 +160,7 @@ have_ss_gated_int:
     lz_rmsnorm_gated_out_fixed_int(t, x, g, w, inv, n, NULL, deq);
 }
 
-#if LZ_GDN_FIXED
+#if LZ_NORM_FIXED
 /* Int output loop for lz_rmsnorm's fixed tier: o[i] = x[i]*inv*(1+w[i])
    as a Q15 int-multiply, mirroring lz_rmsnorm_gated_out_fixed_int's
    shape for a 2-factor (not 4-factor) chain. qx/ex are norm_ss_fixed's
@@ -214,7 +211,7 @@ void lz_rmsnorm_out_fixed_int(int32_t *t, const short *qx, int ex,
     (void)t; (void)qx; (void)ex; (void)w; (void)inv; (void)n;
     *deq = 0.0f;
 }
-#endif /* LZ_GDN_FIXED */
+#endif /* LZ_NORM_FIXED */
 
 /* lz_rmsnorm fixed-tier wrapper for the int output: same sum-of-squares
    as lz_rmsnorm, then the Q15 int-multiply output loop writing int
