@@ -1800,11 +1800,11 @@ static void gdn_step_impl(float *out, const int8_t *sq_in, int8_t *sq_out,
        sq_in/sq2_in/ss_in - the "_in" side, whether or not it aliases
        "_out" (see this function's own header comment on the ring). */
 #if LZ_GDN_FIXED
-    /* g_gdn_fixed is the runtime knob; the kd bound is a hard capacity
-       limit (the coefficient table is int16_t[LZ_GDN_MAX_KD/2][8]).
-       Either one falling through lands on the same float path below,
-       which is exactly why that path is the baseline worth being able
-       to ask for. */
+    /* lz_gdn_mode() is --recur-write, the same selector pass 2 reads;
+       the kd bound is a hard capacity limit (the coefficient table is
+       int16_t[LZ_GDN_MAX_KD/2][8]). Either one falling through lands on
+       the same float path below, which is exactly why that path is the
+       baseline worth being able to ask for. */
     if (lz_gdn_mode() && kd <= LZ_GDN_MAX_KD) {
         kq = gdn_pass1_fixed_head(sq_in,
 #if LZ_GDN_STATE_2PLANE

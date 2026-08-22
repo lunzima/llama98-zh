@@ -95,20 +95,6 @@ const char *lz_pair_select(const char *name) {
 
 int lz_pair_is_auto(void) { return g_pair_auto; }
 
-/* ---- GDN pass-1 tier ------------------------------------------------- */
-
-#if LZ_GDN_FIXED
-static int g_gdn_fixed = 1;
-#endif /* LZ_GDN_FIXED */
-
-int lz_gdn_mode(void) {
-#if LZ_GDN_FIXED
-    return g_gdn_fixed;
-#else
-    return 0;
-#endif /* LZ_GDN_FIXED */
-}
-
 /* ---- q8r_have_simd / lz_q8r_tier ------------------------------------ */
 
 /* THE question every fixed-point tier's AUTO asks.
@@ -168,7 +154,7 @@ int lz_q8r_tier(void) {
 }
 #endif /* LZ_HAVE_Q8R_SIMD || LZ_HAVE_Q8R_SSE */
 
-/* ---- GDN pass-2 tier ------------------------------------------------- */
+/* ---- GDN recurrence tier (--recur-write): BOTH passes ---------------- */
 
 #define LZ_P2_FLOAT 0
 #define LZ_P2_FIXED 1
@@ -183,6 +169,12 @@ int lz_gdn_p2_mode(void) {
     return 0;
 #endif /* LZ_GDN_FIXED */
 }
+
+/* Pass 1 reads the SAME selector as pass 2. One axis for the whole
+   recurrence, so --fixed off is a complete float arm for it: a pass-1
+   tier with no runtime value would leave the float oracle running fixed
+   arithmetic for the larger of the two passes. */
+int lz_gdn_mode(void) { return lz_gdn_p2_mode(); }
 
 int lz_gdn_p2_is_auto(void) { return g_gdn_p2 == LZ_P2_AUTO; }
 

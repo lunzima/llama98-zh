@@ -245,8 +245,10 @@ static void usage(void) {
     "                   one, whatever order they appear in; they are what\n"
     "                   the ARM parity gate pins and what a bisect needs.\n"
     "  --recur-write TIER  auto|float|fixed (default auto = fixed). The\n"
-    "                   recurrence state write-back tier: fixed keeps the\n"
-    "                   integer result and skips the float re-quantize.\n"
+    "                   WHOLE GDN/KDA recurrence, both passes: pass 1's\n"
+    "                   int16 coefficient contraction and pass 2's state\n"
+    "                   write-back, which keeps the integer result and\n"
+    "                   skips the float re-quantize.\n"
     "  --sig-write TIER    auto|float|fixed (default auto = fixed). sigmoid\n"
     "                   and SiLU from a Q15 table (NOT the KDA decay).\n"
     "  --norm-write TIER   auto|float|fixed|int (default auto = fixed).\n"
@@ -1322,13 +1324,15 @@ int main(int argc, char **argv) {
             group_fixed = v;
         }
         else if (strcmp(a, "--recur-write") == 0 && i + 1 < argc) {
-            /* State write-back tier. `fixed` keeps the recurrence's own
-               integer result and skips the float re-quantize; `auto` is
-               the shipping default, unconditionally fixed - it does not
-               ask hardware (see ops_sched.c's retirement note on
-               lz_soft_float_target). `float` is the measurement/
-               correctness-oracle value, same shape the other six now
-               have. */
+            /* The whole recurrence, both passes: pass 1's contraction
+               (lz_gdn_mode) and pass 2's state write-back read this one
+               selector, so `float` floats all of it. `fixed` keeps the
+               recurrence's own integer result and skips the float
+               re-quantize; `auto` is the shipping default,
+               unconditionally fixed - it does not ask hardware (see
+               ops_sched.c's retirement note on lz_soft_float_target).
+               `float` is the measurement/correctness-oracle value, same
+               shape the other six now have. */
             const char *got = lz_gdn_p2_select(argv[++i]);
             if (!got) {
                 printf("--recur-write: unknown tier (auto|float|fixed)\n");
@@ -1527,7 +1531,11 @@ int main(int argc, char **argv) {
            - it does now (same reason every other axis needed one: float
            has to stay reachable as the measurement/correctness-oracle
            path even though nothing defaults to it anymore), so it folds
-           in like the rest and `--fixed off` needs no special case. */
+           in like the rest and `--fixed off` needs no special case.
+           That entry covers BOTH recurrence passes: pass 1 resolves
+           from the same selector (lz_gdn_mode), so this table floats
+           every fixed-point site the engine has and `off` is a complete
+           float arm. */
         static const struct {
             int (*is_auto)(void);
             const char *(*select)(const char *);

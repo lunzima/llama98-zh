@@ -44,10 +44,12 @@
 enum {
     LZ_FC_EPI, LZ_FC_ATTN_SCORE, LZ_FC_ATTN_WSUM, LZ_FC_SOFTMAX,
     LZ_FC_EXP, LZ_FC_SIGMOID, LZ_FC_CONV, LZ_FC_NORM, LZ_FC_RSQRT,
-    /* The recurrence state write-back, i.e. what --recur-write selects.
-       Without a site the tier moves the logits and moves the census by
-       zero, so the measurement cannot see one of the tiers it is used
-       to compare. */
+    /* The recurrence state write-back - pass 2 only, which is LESS than
+       what --recur-write selects. Pass 1 has no site in either arm,
+       neither the int16 head nor the float body, so this row reads the
+       same whichever pass-1 arm runs and the axis's census marginal
+       under-reports its float arm by more than the row itself. Measured
+       counts for both arms are in .prof/census_audit. */
     LZ_FC_RECUR,
     /* lz_quantize_q8 and its int/int64/silu twins: the amax*(1/127) mul,
        127/amax div and the per-element round, at every one of their many
@@ -361,15 +363,17 @@ const char *lz_prefetch_name(void);
 
    Needs nt >= 2 to do anything, so at decode (nt == 1) both settings
    run identical code. Must not change one output bit. */
-/* GDN pass-1 tier is always "fixed" now (there is no --gdn selector);
-   lz_gdn_mode() returns 0 only when the fixed path was not compiled in
-   (-DLZ_GDN_FIXED=0). The float body remains reachable as a capacity
+/* GDN/KDA pass-1 tier. NOT a selector of its own: it resolves from
+   lz_gdn_p2_mode(), i.e. from --recur-write, so that one axis names the
+   whole recurrence and --fixed off floats all of it. Returns 0 for the
+   runtime value `float`, and also when the fixed path was not compiled
+   in (-DLZ_GDN_FIXED=0). The float body is additionally the capacity
    fallback for kd > LZ_GDN_MAX_KD. */
 int lz_gdn_mode(void);
 
-/* "fixed" | "float" | "auto". SEPARATE from the pass-1 tier above:
-   pass 1's fixed path adds ~1.5e-05 and ships by default; pass 2's adds
-   ~1.2e-05 on top of a 1.8e-05 baseline. See
+/* "fixed" | "float" | "auto". Selects BOTH recurrence passes (pass 1
+   through lz_gdn_mode above): pass 1's fixed path adds ~1.5e-05, pass
+   2's adds ~1.2e-05 on top of a 1.8e-05 baseline. See
    gdn_p2_group_fixed in ops.c.
 
    AUTO ASKS THE HARDWARE QUESTION - does this machine have a SIMD tier

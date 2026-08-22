@@ -20,9 +20,14 @@
 #      (lz_quantize_q8_int's double-rounding hazard, see that script's
 #      own header) and that a later audit's 153/211-token re-check of
 #      the other ten tiers could not see either, for the same reason
-#   7. make watcom-gui / watcom-dll / watcom-dos (the remaining Watcom
+#   7. build/recur_write_float_arm_gate.sh - runtime-off vs
+#      compile-time-off of the fixed recurrence, the one comparison a
+#      cross-compiler gate cannot make: two toolchains agreeing about a
+#      fixed path they both take says nothing about whether the float
+#      arm is reachable at all
+#   8. make watcom-gui / watcom-dll / watcom-dos (the remaining Watcom
 #      targets; DOS is left out of `make check` by design)
-#   8. build/x87/build_engine.sh under WSL (32-bit x87 gcc, the fourth
+#   9. build/x87/build_engine.sh under WSL (32-bit x87 gcc, the fourth
 #      toolchain shape)
 #
 # Judging discipline (this repo has paid for getting this wrong before):
@@ -66,7 +71,7 @@ freshness_sentinel() {
 # ---------------------------------------------------------------------
 # Stage 1: make native (gcc)
 # ---------------------------------------------------------------------
-echo "==== [1/8] make native ===="
+echo "==== [1/9] make native ===="
 NATIVE_EXE="$ROOT/llama98.exe"
 [ -e "$NATIVE_EXE" ] || NATIVE_EXE="$ROOT/llama98"
 LOG=build/ci-native.log
@@ -105,7 +110,7 @@ rm -f "$SENTINEL"
 # Stage 2: make watcom-cli (Open Watcom, the target compiler)
 # ---------------------------------------------------------------------
 echo
-echo "==== [2/8] make watcom-cli ===="
+echo "==== [2/9] make watcom-cli ===="
 WATCOM_EXE="$ROOT/llama98-w.exe"
 WATCOM_OBJDIR="$ROOT/build/watcom/cli"
 LOG=build/ci-watcom-cli.log
@@ -157,7 +162,7 @@ rm -f "$SENTINEL"
 # Stage 3: llama98 <dir> --check on a curated set of KunMoe checkpoints
 # ---------------------------------------------------------------------
 echo
-echo "==== [3/8] model --check sweep ===="
+echo "==== [3/9] model --check sweep ===="
 MODELS_ROOT=${MODELS_ROOT:-/e/LLM/models}
 # Curated, not a blind sweep of every directory under MODELS_ROOT:
 # a usable sweep is a handful of representative checkpoints, and
@@ -204,7 +209,7 @@ fi
 # Stage 4: x86 <-> ARMv5TE parity gate
 # ---------------------------------------------------------------------
 echo
-echo "==== [4/8] ARM parity gate ===="
+echo "==== [4/9] ARM parity gate ===="
 ARM_MODEL="$MODELS_ROOT/kunkun98-pilot-20260806"
 LOG=build/ci-arm.log
 if [ "$native_ok" -ne 1 ]; then
@@ -239,7 +244,7 @@ fi
 # Stage 5: control-switch matrix (every non-default value, gcc + Watcom)
 # ---------------------------------------------------------------------
 echo
-echo "==== [5/8] control-switch matrix ===="
+echo "==== [5/9] control-switch matrix ===="
 LOG=build/ci-switch-matrix.log
 build/switch_matrix_gate.sh >"$LOG" 2>&1
 MATRIX_RC=$?
@@ -267,7 +272,7 @@ esac
 # Stage 6: every fixed-point write tier's gcc<->Watcom bit-identity
 # ---------------------------------------------------------------------
 echo
-echo "==== [6/8] fixed-tier cross-compiler gate ===="
+echo "==== [6/9] fixed-tier cross-compiler gate ===="
 LOG=build/ci-fixed-tier-xcompiler.log
 build/fixed_tier_xcompiler_gate.sh >"$LOG" 2>&1
 NIX_RC=$?
@@ -292,12 +297,44 @@ case $NIX_RC in
 esac
 
 # ---------------------------------------------------------------------
-# Stage 7: the remaining Watcom targets. `make check` builds gui and dll
+# Stage 7: --fixed off has to be a COMPLETE float arm, not a float arm
+# for the axes that happen to have a runtime selector. Stage 6 compares
+# two compilers against each other, so an axis both of them run in fixed
+# point is invisible there; this one compares runtime-off against
+# compile-time-off in the same compiler, where it is not.
+# ---------------------------------------------------------------------
+echo
+echo "==== [7/9] recurrence float-arm gate ===="
+LOG=build/ci-recur-write-float-arm.log
+build/recur_write_float_arm_gate.sh >"$LOG" 2>&1
+NIX_RC=$?
+cat "$LOG"
+case $NIX_RC in
+    0)
+        echo "PASS: recurrence float-arm gate"
+        note "PASS  recurrence float-arm gate"
+        PASS=$((PASS + 1))
+        ;;
+    2)
+        REASON=$(grep -m1 '^recur_write_float_arm_gate: SKIP' "$LOG")
+        echo "SKIP: recurrence float-arm gate ($REASON)"
+        note "SKIP  recurrence float-arm gate ($REASON)"
+        SKIP=$((SKIP + 1))
+        ;;
+    *)
+        echo "FAIL: recurrence float-arm gate"
+        note "FAIL  recurrence float-arm gate"
+        FAIL=$((FAIL + 1))
+        ;;
+esac
+
+# ---------------------------------------------------------------------
+# Stage 8: the remaining Watcom targets. `make check` builds gui and dll
 # but deliberately leaves out dos (it needs the extender stub and is a
 # separate delivery decision); none of the three is in ci.sh's stage 2.
 # ---------------------------------------------------------------------
 echo
-echo "==== [7/8] watcom gui/dll/dos targets ===="
+echo "==== [8/9] watcom gui/dll/dos targets ===="
 for t in watcom-gui watcom-dll watcom-dos; do
     case $t in
         watcom-gui) EXE="$ROOT/kunkun98-w.exe" ;;
@@ -334,7 +371,7 @@ done
 # as its only float unit. SKIP when WSL is not usable, never PASS.
 # ---------------------------------------------------------------------
 echo
-echo "==== [8/8] 32-bit x87 gcc build (WSL) ===="
+echo "==== [9/9] 32-bit x87 gcc build (WSL) ===="
 LOG=build/ci-x87.log
 if ! command -v wsl >/dev/null 2>&1; then
     echo "SKIP: 32-bit x87 build (wsl not installed)"
