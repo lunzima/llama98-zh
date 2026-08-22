@@ -112,7 +112,7 @@ matmul 本体（`lz_matmul*`、`lz_dot32_*`、`dot32_x16`、`epi_q8` / `epi_q41`
 
 | 旋钮 | auto 的解析结果（每台机器） | 走到的代码 |
 |---|---|---|
-| `--recur-write`（`lz_gdn_p2_mode`） | fixed | `gdn_p2_fixed_rows` / `gdn_p2_group_fixed` |
+| `--recur-write`（`lz_gdn_p2_mode`，`lz_gdn_mode` 现在也读它） | fixed | pass 2 `gdn_p2_fixed_rows` / `gdn_p2_group_fixed`，pass 1 `gdn_pass1_fixed_head` / `gdn_build_table` |
 | `--conv-write`（`lz_conv_mode`） | fixed | `lz_causal_conv1d_step_fixed` |
 | `--attn-write`（`lz_attn_mode`） | fixed（3 = scoring+wsum） | `lz_attn_score_q8` / `lz_attn_wsum_q8` |
 | `--sig-write`（`lz_sig_mode`） | fixed | `sigmoid_q15` |

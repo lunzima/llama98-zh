@@ -19,7 +19,7 @@ SHA `4c4b4b8c8d9af5282813ee7c36a4bf1c5ca87856`，分支 `feat/attn-conv-fixed-ti
 
 | flag | 取值 | 默认 |
 |---|---|---|
-| `--recur-write` | `auto\|fixed` （无 `float` 值——见下） | auto |
+| `--recur-write` | `auto\|float\|fixed` | auto（= fixed） |
 | `--conv-write` | `auto\|float\|fixed` | auto |
 | `--attn-write` | `auto\|float\|scoring\|wsum\|fixed\|int` | auto |
 | `--epi-write` | `auto\|float\|fixed` | auto |
@@ -30,9 +30,12 @@ SHA `4c4b4b8c8d9af5282813ee7c36a4bf1c5ca87856`，分支 `feat/attn-conv-fixed-ti
 
 交付方给的 12 项与这份枚举**完全对上，没有遗漏项**。两处需要单独说明：
 
-- `--recur-write` 没有显式 `float` 值：它的 `auto` 直接问硬件
-  `lz_soft_float_target()`，在这台开发机（有 SSE）上解析成 float，效果等同显式
-  float，但命令行拼不出 `--recur-write float`。
+- `--recur-write` 现在有显式 `float`，且 `auto` 解析成 **fixed**，不再问硬件
+  （`lz_soft_float_target()` 已退役，见 `src/ops_sched.c` 的退役说明）。本节
+  此前记的是旧行为，据它拼出的「baseline 已经是 float」是错的。
+  这个轴的**覆盖面也变了**：它现在同时选 GDN/KDA 的 pass 1 与 pass 2。此前
+  它只到得了 pass 2，pass 1 的定点没有任何运行期关闭方式——于是当时以
+  `--fixed off` 为参照的量都是对着一条仍在跑定点 pass 1 的臂量的。
 - `--scalar-fixed` 的默认不是 `auto→float`，而是 `auto→fixed`（`lz_scalar_mode()`
   无视硬件，永远返回 1，除非显式传 `float`）。**这意味着「什么都不传」不是
   float 基线** —— 必须显式 `--scalar-fixed float` 才能把七个轴全部钉在 float
