@@ -22,12 +22,17 @@ shifted `forward.c` and moved 6,240 ops/token out of the NOSITE rows
 into SIGMOID. `compare.sh` now refuses when `src/forward.c` is not the
 blob the map was built against, warns when it cannot tell, and takes
 `CENSUS_AUDIT_SKIP_BLOBCHECK=1` for the regenerate-then-rerun case. The
-recorded blob is `b143c6c5` (`e65f181`'s); **the map is stale for
-anything later and needs regenerating, not shifting by hand.**
-Regenerate it by matching each mapped line's source TEXT into the new
-file, not by shifting the numbers: 34 of the 36 land on a unique line
-and the two that do not (`s->qn[i] *= scale`, the residual add) are
-placed by which of their two occurrences the old map named.
+recorded blob is `ae54f175`, `75a1604`'s and unchanged since, so the map
+is CURRENT - `compare.sh` refusing here means the working tree carries an
+uncommitted `forward.c`, which is a different thing from a stale map.
+
+When it does go stale, regenerate it by matching each mapped line's
+source TEXT into the new file, not by shifting the numbers: 32 of the 36
+land on a unique line, and the four that do not are placed by which
+occurrence the old map named. One of those four was a HOLE rather than a
+move - `s->qn[i] *= scale` matches twice and only one was mapped, so an
+occurrence had been falling into the default bucket since the map was
+written.
 
 **`slotmap.tsv` and `rawcounters.diff` are still `0283fa0`'s** and were
 not regenerated with the map. Whoever needs the full 26-slot override

@@ -2,7 +2,8 @@
 # work belonging to different sites (forward.c does, all six of its
 # billing points sit in one of three functions).
 #
-# forward.c line keys belong to blob ae54f175 (HEAD at 2b1150d).
+# forward.c line keys belong to blob ae54f175, which is 75a1604's - the
+# commit that last touched the file, not 2b1150d as first written here.
 # Regenerated from e65f181's map by matching each mapped line's source
 # TEXT into the new file, never by shifting numbers: 32 of 36 landed on
 # a unique line.
