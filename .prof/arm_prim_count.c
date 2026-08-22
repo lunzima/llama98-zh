@@ -49,7 +49,7 @@
 #include "sp_args_q8r.h"        /* only for SP_N; the arms use cv_* */
 #elif PRIM_MODE == 13 || PRIM_MODE == 14 || PRIM_MODE == 15
 #include "sp_args_q8r.h"        /* real norm rows; see sm_setup/nm_setup */
-#elif PRIM_MODE == 16 || PRIM_MODE == 17
+#elif PRIM_MODE == 16 || PRIM_MODE == 17 || PRIM_MODE == 19 || PRIM_MODE == 20
 #include "sp_args_q8r.h"        /* real floats; only the shape matters */
 #elif PRIM_MODE == 18
 #include "sp_args_q8r.h"        /* only for SP_N; the arm uses gd_* */
@@ -71,7 +71,8 @@ __attribute__((noinline)) static float i32f_null(int32_t v) {
 }
 
 volatile int32_t g_sink;
-volatile float g_mulc = 1.4142135f;      /* modes 16/17, see there */
+volatile float g_mulc = 1.4142135f;      /* modes 16/17/19/20, see there */
+volatile float g_facc = 0.7071068f;      /* mode 20's accumulator */
 
 /* norm_ss_fixed's Q15 image and its exponent (mode 9). Live outside the
  * loop so the call, not the buffer, is what the marginal measures. */
@@ -359,6 +360,38 @@ int main(int argc, char **argv) {
         u.f = SP_ARG[k] * g_mulc;          g_sink = u.i;
 #else
         u.f = SP_ARG[k] + g_mulc;          g_sink = u.i;
+#endif
+#elif PRIM_MODE == 19 || PRIM_MODE == 20
+        /* THE TWO CHAINS docs/arm-asm-audit.md G2 rates worth writing,
+         * measured instead of argued. Modes 16/17 answer what ONE bare
+         * float operation costs; these answer what the PAIR costs when
+         * both halves come from the same operands - which is the whole
+         * G2 claim, that one unpack+align can serve both.
+         *
+         * 19 is lz_fwht's butterfly: a+b and a-b, two roundings of two
+         * different values from one pair of operands. Nothing about
+         * sharing the unpack changes either rounding, so a hand-written
+         * cell here is rounding-NEUTRAL.
+         *
+         * 20 is lz_matmul's inner MAC: acc + w*x. The shareable part is
+         * smaller than it looks and the reason is a correctness one -
+         * skipping the product's rounding turns this into an FMA, which
+         * is a DIFFERENT function from fl(fl(w*x)+acc) and would break
+         * the x86<->ARM parity gate. So only the pack/unpack round trip
+         * between the two operations is available, not the rounding.
+         *
+         * Both sinks are consumed so neither half can be dropped. */
+#if PRIM_MODE == 19
+        {
+            float a = SP_ARG[k], b = g_mulc;
+            u.f = a + b;  g_sink = u.i;
+            u.f = a - b;  g_sink ^= u.i;
+        }
+#else
+        {
+            float w = SP_ARG[k];
+            u.f = g_facc + w * g_mulc;      g_sink = u.i;
+        }
 #endif
 #elif PRIM_MODE == 18
         lz_gdn_step(gd_out, gd_sq, gd_sq, GD_P2 gd_ss, gd_ss,

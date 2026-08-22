@@ -3439,10 +3439,11 @@ static const char km_why_fwhtf_mmx[] =
     "impossible: MMX is integer-only and this transform is over floats. "
     "The int32 twin (fwhti) is the one MMX can take";
 static const char km_why_fwhtf_arma[] =
-    "not written yet: docs/arm-asm-audit.md G2 rates it worth writing - "
-    "one unpack+align serving both the sum and the difference, instead "
-    "of two __addsf3 calls, which is a CHAIN and so survives M5's "
-    "negative result on rewriting single float operations";
+    "not written yet, and the reason is now MEASURED rather than rated: "
+    "libgcc shares nothing across the butterfly (94.1 instructions for "
+    "a+b and a-b against 86.1 for two isolated adds), but a hand cell "
+    "can only take the one shared unpack+align and one call/return - "
+    "about 94 -> 78, not a factor. docs/arm-asm-audit.md G2";
 static const char km_why_fwht_g128[] =
     "this column is the 128-ELEMENT quantization group; the Hadamard's "
     "block is hadamard_o/hadamard_down (up to 512, capped by the "
@@ -3460,9 +3461,12 @@ static const char km_why_f32mm_mmx[] =
     "impossible: MMX is integer-only and this is a float multiply-add. "
     "SSE1 is the first tier that can express it";
 static const char km_why_f32mm_arma[] =
-    "not written: no SIMD on ARMv5TE, but the multiply and the add can "
-    "share one unpack+align instead of paying two __aeabi_* calls - a "
-    "chain, which is the category that pays here";
+    "not written yet, reason MEASURED: the MAC costs 74.0 instructions, "
+    "exactly mul 30.0 + add 43.0, so libgcc shares nothing - but a hand "
+    "cell may only take the pack/unpack round trip and one call/return "
+    "(about 74 -> 57). It may NOT skip the product's rounding: that "
+    "would make this an FMA, a different function, and the x86<->ARM "
+    "parity gate would go red. docs/arm-asm-audit.md G2";
 static const char km_why_f32mm_g128[] =
     "this column is the 128-ELEMENT quantization group; lz_matmul's "
     "unit of work is a whole weight ROW against a whole activation "
