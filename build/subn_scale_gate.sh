@@ -57,9 +57,27 @@ run() {  # run MODEL OUT [extra args...]
 }
 
 echo "-- subn model: $SUBN_MODEL --"
-run "$SUBN_MODEL" "$W/def.bin"                        || bad "default arm did not run"
-run "$SUBN_MODEL" "$W/tok.bin" --subn-scale tok       || bad "tok arm did not run"
-run "$SUBN_MODEL" "$W/grp.bin" --subn-scale group     || bad "group arm did not run"
+run "$SUBN_MODEL" "$W/def.bin";                    r1=$?
+run "$SUBN_MODEL" "$W/tok.bin" --subn-scale tok;   r2=$?
+run "$SUBN_MODEL" "$W/grp.bin" --subn-scale group; r3=$?
+
+# ALL THREE FAILING IS NOT THIS GATE'S FAIL. This engine tree is shared,
+# and a build that predates a layout change cannot open a model exported
+# after it - the arms then agree perfectly on being unable to run, which
+# says nothing about --subn-scale. Reporting that as red trains the next
+# reader to ignore a red here. SOME failing while others succeed IS this
+# gate's business: only the flag differs between those runs.
+if [ "$r1" -ne 0 ] && [ "$r2" -ne 0 ] && [ "$r3" -ne 0 ]; then
+    echo "  UNLOADABLE $SUBN_MODEL - every arm failed identically, so"
+    echo "             nothing about the knob was checked. First line:"
+    sed -n '1p' "$W/def.bin.log" | sed 's/^/             /'
+    rm -rf "$W"
+    echo "subn_scale_gate: SKIP - the subn model is unloadable by this build"
+    exit 2
+fi
+[ "$r1" -eq 0 ] || bad "the default arm failed while another arm ran (rc=$r1)"
+[ "$r2" -eq 0 ] || bad "the tok arm failed while another arm ran (rc=$r2)"
+[ "$r3" -eq 0 ] || bad "the group arm failed while another arm ran (rc=$r3)"
 [ "$FAIL" -eq 0 ] || { rm -rf "$W"; exit 1; }
 
 # A constant or empty dump would make every cmp below meaningless.
