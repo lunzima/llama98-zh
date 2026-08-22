@@ -3333,7 +3333,7 @@ static const LZKmReg km_reg[LZ_KM_NUNIT][LZ_KM_NCOL] = {
 /* atdot*/{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_T(km_why_op_sse2), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_T(km_why_op_sse2), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_attn_g128) },
 /* wsump*/{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_T(km_why_op_sse2), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_T(km_why_op_sse2), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_attn_g128) },
 /* sigq */{ KM_H(KM_ALL), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128) },
-/* nrmss*/{ KM_H(KM_ALL), KM_I(km_why_nrmss_mmx), KM_I(km_why_nrmss_sse1), KM_T(km_why_nrmss_sse2), KM_I(km_why_nrmss_mmx), KM_I(km_why_nrmss_sse1), KM_T(km_why_nrmss_sse2), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_nrmss_g128) },
+/* nrmss*/{ KM_H(KM_ALL), KM_I(km_why_nrmss_mmx), KM_I(km_why_nrmss_sse1), KM_H(LZ_KMB_GCC), KM_I(km_why_nrmss_mmx), KM_I(km_why_nrmss_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_nrmss_g128) },
 /* The two Hadamards are the only units here whose armA cell is EMPTY.
    That is the point of registering them: without a row, a gate counting
    filled cells could not tell "no assembly" from "no such operator",
@@ -3459,6 +3459,13 @@ static int km_op_present(int f, int c) {
     if (f == LZ_KM_UNIT_FWHTI && c == LZ_KM_COL_ROW0 + LZ_ROW_SSE2_I) return 1;
 #endif /* __WATCOMC__ */
 #endif /* LZ_FWHT_SSE2_EXTERN */
+#if defined(LZ_NORM_SS_SSE2_EXTERN)
+#if defined(__WATCOMC__)
+    if (f == LZ_KM_UNIT_NRMSS && c == LZ_KM_COL_ROW0 + LZ_ROW_SSE2_A) return 1;
+#else
+    if (f == LZ_KM_UNIT_NRMSS && c == LZ_KM_COL_ROW0 + LZ_ROW_SSE2_I) return 1;
+#endif /* __WATCOMC__ */
+#endif /* LZ_NORM_SS_SSE2_EXTERN */
     if (f != LZ_KM_UNIT_ATDOT && f != LZ_KM_UNIT_WSUMP) return 0;
 #if defined(__WATCOMC__)
     if (c == LZ_KM_COL_ROW0 + LZ_ROW_MMX_A) return 1;

@@ -52,6 +52,14 @@
    declaration serves both. */
 void lz_fwht_stage_sse2(int32_t *y, int n, int len);
 
+/* norm_ss_fixed's element loop. Consumes whole groups of 8 and returns
+   how many it took; the caller runs the remainder in C. qout may be
+   NULL. See the body for why cvtps2dq is q8_round rather than an
+   approximation of it. */
+#define LZ_NORM_SS_SSE2_EXTERN 1
+int lz_norm_ss_sse2(const float *x, int n, float sc, short *qout,
+                    long long *acc);
+
 #define LZ_HAVE_AMAX_SSE2  1
 #define LZ_HAVE_Q8R_SIMD   1
 

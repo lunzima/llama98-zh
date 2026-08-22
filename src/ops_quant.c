@@ -786,7 +786,20 @@ float norm_ss_fixed(const float *x, int n, short *qout, int *eout) {
     }
 #endif /* LZ_ARM_ASM_EXTERN */
     sc = pow2f(e);
-    for (i = 0; i < n; i++) {
+    i = 0;
+#if defined(LZ_NORM_SS_SSE2_EXTERN)
+    /* SELECTED BY TIER, like every other kernel here: --kernel ref and
+       mmx must reach the C loop below or the arm this is compared
+       against would be this. The kernel takes whole groups of 8 and
+       hands back the count; the tail runs in C, so `i` continues rather
+       than restarting. */
+    if (g_kernel == LZ_KERNEL_SSE2 && n >= 8) {
+        long long sacc = 0;
+        i = lz_norm_ss_sse2(x, n, sc, qout, &sacc);
+        acc = sacc;
+    }
+#endif /* LZ_NORM_SS_SSE2_EXTERN */
+    for (; i < n; i++) {
         int v = q8_round(x[i] * sc);           /* one mul, one magic add */
         if (v >  32767) v =  32767;
         if (v < -32767) v = -32767;

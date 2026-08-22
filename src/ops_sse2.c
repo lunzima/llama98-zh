@@ -388,6 +388,73 @@ unsigned lz_amax32_sse2_w(const float *x, int n) {
     return lz_amax32_sse2_asm(x, n);
 }
 
+/* ---- norm_ss_fixed's element loop, SSE2 Watcom twin.
+   gcc twin: lz_norm_ss_sse2, the intrinsics body below - read that one
+   for why cvtps2dq IS q8_round, why packssdw is the upper clamp, and
+   why the pairwise square sum cannot overflow but the next one can.
+
+   `qout` NULL is handled by branching once, outside the loop, into two
+   otherwise identical bodies rather than by storing to a scratch: three
+   of norm_ss_fixed's four call sites pass NULL, the same reason the ARM
+   twin gives (src/ops_arm.h). */
+extern int lz_norm_ss_sse2_asm(const float *x, int n, const float *scp,
+                               short *qout, long long *acc);
+#pragma aux lz_norm_ss_sse2_asm = \
+    ".686"                                                      \
+    "movss   xmm5, [ebx]"                                       \
+    "shufps  xmm5, xmm5, 0"         /* sc broadcast */          \
+    "pcmpeqw xmm6, xmm6"                                        \
+    "psrlw   xmm6, 1"               /* 0x7FFF per lane */       \
+    "pxor    xmm7, xmm7"                                        \
+    "psubw   xmm7, xmm6"            /* -32767 per lane */       \
+    "movdqa  xmm6, xmm7"            /* keep the low clamp */     \
+    "pxor    xmm4, xmm4"            /* running int64 acc */     \
+    "pxor    xmm3, xmm3"            /* zero for the widen */    \
+    "and     edx, -8"                                           \
+    "mov     ecx, edx"                                          \
+    "test    ecx, ecx"                                          \
+    "jz      nsdone"                                            \
+    "nsloop:"                                                   \
+    "movups  xmm0, [eax]"                                       \
+    "movups  xmm1, [eax+16]"                                    \
+    "mulps   xmm0, xmm5"                                        \
+    "mulps   xmm1, xmm5"                                        \
+    "cvtps2dq xmm0, xmm0"                                       \
+    "cvtps2dq xmm1, xmm1"                                       \
+    "packssdw xmm0, xmm1"                                       \
+    "pmaxsw  xmm0, xmm6"                                        \
+    "test    esi, esi"                                          \
+    "jz      nsnostore"                                         \
+    "movdqu  [esi], xmm0"                                       \
+    "add     esi, 16"                                           \
+    "nsnostore:"                                                \
+    "movdqa  xmm2, xmm0"                                        \
+    "pmaddwd xmm2, xmm0"                                        \
+    "movdqa  xmm1, xmm2"                                        \
+    "punpckldq xmm2, xmm3"                                      \
+    "punpckhdq xmm1, xmm3"                                      \
+    "paddq   xmm4, xmm2"                                        \
+    "paddq   xmm4, xmm1"                                        \
+    "add     eax, 32"                                           \
+    "sub     ecx, 8"                                            \
+    "jnz     nsloop"                                            \
+    "nsdone:"                                                   \
+    "movdqa  xmm0, xmm4"                                        \
+    "psrldq  xmm0, 8"                                           \
+    "paddq   xmm4, xmm0"                                        \
+    "movq    [edi], xmm4"                                       \
+    "mov     eax, edx"                                          \
+    parm [eax] [edx] [ebx] [esi] [edi]                          \
+    value [eax]                                                 \
+    modify [eax ecx edx esi];
+
+/* Thin wrapper: the #pragma aux body expands at the call site, and the
+   call site is src/ops_quant.c. Same reason lz_amax32_sse2_w exists. */
+int lz_norm_ss_sse2(const float *x, int n, float sc, short *qout,
+                    long long *acc) {
+    return lz_norm_ss_sse2_asm(x, n, &sc, qout, acc);
+}
+
 /* ---- Hadamard: one butterfly stage of lz_fwht_i32, SSE2 Watcom twin.
    gcc twin: lz_fwht_stage_sse2, the intrinsics body below. Four int32
    per movdqu against the MMX cell's two; see that one (src/ops_mmx.c)
@@ -1819,6 +1886,61 @@ void lz_q8round32_simd(const float *x, int8_t *o, const float *pinv) {
         h = _mm_max_epi16(_mm_min_epi16(h, p127), m127);
         _mm_storeu_si128((__m128i *)(void *)(o + b * 16), _mm_packs_epi16(l, h));
     }
+}
+
+/* ---- norm_ss_fixed's element loop, SSE2 gcc twin.
+   Watcom twin: lz_norm_ss_sse2_asm, the #pragma aux in the branch
+   above. Consumes whole groups of 8 and returns how many it took; the
+   caller runs the remainder in C.
+
+   THREE STEPS, ONE INSTRUCTION EACH, which is why this cell is worth
+   filling and the scalar leaves next to it are not:
+     x[i] * sc          mulps
+     q8_round           cvtps2dq - round-to-nearest-even is the DEFAULT
+                        MXCSR mode, and that is q8_round's own rule, so
+                        the magic add is not being approximated here,
+                        it is being spelled a second way
+     v * v accumulated  pmaddwd, which is exactly a pairwise sum of
+                        products and therefore exactly this loop's
+                        accumulate
+
+   THE UPPER CLAMP IS FREE. packssdw saturates int32 to [-32768, 32767],
+   so `if (v > 32767) v = 32767` is the pack itself; only the low end
+   needs fixing, from -32768 to the C's -32767, and that is one pmaxsw.
+
+   NO OVERFLOW IN THE PAIRWISE SUM, and it is close enough to be worth
+   the arithmetic: |v| <= 32767 gives v*v <= 1073676289, and pmaddwd
+   adds two of them - 2147352578, which is 131069 under INT32_MAX. So
+   the pair is safe and the NEXT add is not, which is why each pmaddwd
+   result is widened to int64 (punpck against zero, the squares being
+   non-negative) before it joins the running sum.
+
+   Bit-identical to the C by the same argument the MMX Hadamard uses for
+   its half: integer addition is associative and exact, so the order the
+   squares are summed in cannot change the total. */
+int lz_norm_ss_sse2(const float *x, int n, float sc, short *qout,
+                    long long *acc) {
+    __m128i vacc = _mm_setzero_si128();
+    const __m128i zero = _mm_setzero_si128();
+    const __m128i lo = _mm_set1_epi16((short)-32767);
+    const __m128 vsc = _mm_set1_ps(sc);
+    union { __m128i v; long long q[2]; } out;
+    int i, ng = n & ~7;
+    for (i = 0; i < ng; i += 8) {
+        __m128i a = _mm_cvtps_epi32(_mm_mul_ps(
+            _mm_loadu_ps(x + i), vsc));
+        __m128i b = _mm_cvtps_epi32(_mm_mul_ps(
+            _mm_loadu_ps(x + i + 4), vsc));
+        __m128i w = _mm_max_epi16(_mm_packs_epi32(a, b), lo);
+        __m128i p;
+        if (qout) _mm_storeu_si128((__m128i *)(void *)(qout + i), w);
+        p = _mm_madd_epi16(w, w);
+        vacc = _mm_add_epi64(vacc, _mm_unpacklo_epi32(p, zero));
+        vacc = _mm_add_epi64(vacc, _mm_unpackhi_epi32(p, zero));
+    }
+    out.v = vacc;
+    *acc = out.q[0] + out.q[1];
+    return ng;
 }
 
 /* ---- Hadamard: one butterfly stage of lz_fwht_i32, SSE2 gcc twin.
