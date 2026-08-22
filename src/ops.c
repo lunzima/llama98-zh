@@ -580,7 +580,25 @@ void lz_quantize_q8_tok_int(const int32_t *t, int n, float deq,
    decision and the MIN_SCALE zeroing identical to q8_group_scale; the
    else branch (unreachable with the default LZ_Q8_MIN_SCALE floor - a
    tiny amax hits MIN_SCALE first) keeps deq in the numerator to match
-   the float path's own else exactly. */
+   the float path's own else exactly.
+
+   WHY THIS ONE STILL CONVERTS PER ELEMENT while its int16 twin does not.
+   lz_quantize_q8_i16 got an integer element loop (a per-group reciprocal
+   plus an exact correction test); transplanting it here does not work,
+   and the reason is measured, not argued. An instrumented build reports
+   this function's per-group amax reaching 490,628,226 - 490M/455M on
+   kmr20 zh/en and 445M/439M on kunmoe-v2-t2-probe, i.e. ~2^28.7, four
+   orders past int16. So the i16 entry cannot serve these callers, and
+   the twin's correction test `254*m + tam < 2*tam*qi` overflows int32 on
+   its left side alone (254 * 4.9e8 = 1.25e11). Both sides need int64,
+   where Watcom emits `call __I8M`.
+
+   It is therefore a design item, not a wiring one: 13,043 hardware
+   converts plus 6,528 magic adds per token on 6,528 elements, against
+   the i16 twin's 80 per token on 2,560. Whoever takes it needs either a
+   correction test that fits int32 at this magnitude or a pre-shift that
+   trades exactness for range, and the exactness claim is what the twin's
+   536,920,065-case proof exists to defend. */
 void lz_quantize_q8_int(const int32_t *t, int n, int gs, float deq,
                         int8_t *q, float *s) {
     int g, k;
