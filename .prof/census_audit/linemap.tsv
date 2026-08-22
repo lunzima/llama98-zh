@@ -2,44 +2,61 @@
 # work belonging to different sites (forward.c does, all six of its
 # billing points sit in one of three functions).
 #
-# forward.c line keys belong to blob b143c6c5 (e65f181). Regenerated
-# from 0283fa0's map by matching each mapped line's source TEXT into the
-# new file: 34 of 36 matched a unique line, `s->qn[i] *= scale` and the
-# residual add each match twice and were placed by which of the two the
-# old map named.
-forward.c	2747	SIGMOID
-forward.c	2755	SIGMOID
-forward.c	2771	SIGMOID
-forward.c	2772	SIGMOID
-forward.c	2823	NOSITE-qn-scale
-forward.c	1900	NOSITE-attn-gate
-forward.c	1424	ATTN_SCORE
-forward.c	3100	NOSITE-moe
-forward.c	3104	NOSITE-moe
-forward.c	3151	NOSITE-moe
-forward.c	3158	NOSITE-moe
-forward.c	3545	NOSITE-residual
-forward.c	3565	NOSITE-residual
-forward.c	1680	ATTN_SCORE
-forward.c	1681	ATTN_SCORE
-forward.c	1683	ATTN_SCORE
-forward.c	1622	ATTN_SCORE
-forward.c	1623	ATTN_SCORE
-forward.c	1625	ATTN_SCORE
-forward.c	1637	ATTN_SCORE
-forward.c	1638	ATTN_SCORE
-forward.c	1767	ATTN_WSUM
-forward.c	1770	ATTN_WSUM
-forward.c	1771	ATTN_WSUM
-forward.c	1782	ATTN_WSUM
-forward.c	1818	ATTN_WSUM
-forward.c	1865	ATTN_WSUM
-forward.c	1867	ATTN_WSUM
-forward.c	1891	SIGMOID
-forward.c	1892	SIGMOID
-forward.c	2782	SIGMOID
-forward.c	2785	SIGMOID
-forward.c	2787	SIGMOID
-forward.c	506	NOSITE-kdagate
-forward.c	563	NOSITE-kdagate
-forward.c	564	NOSITE-kdagate
+# forward.c line keys belong to blob ae54f175 (HEAD at 2b1150d).
+# Regenerated from e65f181's map by matching each mapped line's source
+# TEXT into the new file, never by shifting numbers: 32 of 36 landed on
+# a unique line.
+#
+# The four that did not, and how each was placed:
+#   `s->qn[i] *= scale`  - matches twice in BOTH files (old 2063 and
+#     2823, new 2361 and 3190). The old map listed only 2823, so one of
+#     the two occurrences had been falling into the default bucket since
+#     the map was written. Both are mapped now; that is a hole fixed,
+#     not a line moved.
+#   the residual add     - matches twice in both (old 3545/3565, new
+#     4092/4112). Placed order-preserving; both carry the same site, so
+#     the assignment does not affect any roll-up.
+#   `float k1 = decay_base[h] * gk`  - DROPPED. 665a19b replaced the
+#     gate's folded float coordinate with sigmoid_q15_ti/lz_exp_t, so
+#     that line no longer exists and the work it carried is attributed
+#     by function name through sitemap.tsv instead.
+#
+# compare.sh refuses to run when src/forward.c is not this blob. That is
+# the point: line keys go stale silently, and a stale map moves work
+# between sites while still printing a table.
+forward.c	715	NOSITE-kdagate
+forward.c	780	NOSITE-kdagate
+forward.c	781	NOSITE-kdagate
+forward.c	1704	ATTN_SCORE
+forward.c	1919	ATTN_SCORE
+forward.c	1920	ATTN_SCORE
+forward.c	1922	ATTN_SCORE
+forward.c	1934	ATTN_SCORE
+forward.c	1935	ATTN_SCORE
+forward.c	1977	ATTN_SCORE
+forward.c	1978	ATTN_SCORE
+forward.c	1980	ATTN_SCORE
+forward.c	2064	ATTN_WSUM
+forward.c	2067	ATTN_WSUM
+forward.c	2068	ATTN_WSUM
+forward.c	2079	ATTN_WSUM
+forward.c	2115	ATTN_WSUM
+forward.c	2162	ATTN_WSUM
+forward.c	2164	ATTN_WSUM
+forward.c	2188	SIGMOID
+forward.c	2189	SIGMOID
+forward.c	2197	NOSITE-attn-gate
+forward.c	2361	NOSITE-qn-scale
+forward.c	3072	SIGMOID
+forward.c	3138	SIGMOID
+forward.c	3139	SIGMOID
+forward.c	3149	SIGMOID
+forward.c	3152	SIGMOID
+forward.c	3154	SIGMOID
+forward.c	3190	NOSITE-qn-scale
+forward.c	3590	NOSITE-moe
+forward.c	3597	NOSITE-moe
+forward.c	3668	NOSITE-moe
+forward.c	3688	NOSITE-moe
+forward.c	4092	NOSITE-residual
+forward.c	4112	NOSITE-residual

@@ -16,15 +16,20 @@ CEN=$1; MEAS=$2; RAWFIX=$3; TOK=$4
 # Refuse instead of reporting. Regenerating the map is the fix; this
 # only makes the staleness loud. Overridable for the "I know, I am
 # regenerating" case.
-# Refuse only on a POSITIVE mismatch. An archive checkout has no .git,
-# and a check that also fires when it cannot tell would be red
-# everywhere and therefore carry nothing.
-LINEMAP_FORWARD_BLOB=b143c6c5dc5a98d11062786dc007076263733fbc
+#
+# Hash the WORKING FILE, not HEAD. The measurement is taken from a
+# binary, and the binary is built from what is on disk. An earlier
+# version of this check asked git for HEAD's blob, which passes in a
+# repo whose working tree carries someone else's uncommitted forward.c -
+# exactly the case it exists for. `git hash-object` on the path is also
+# what works in a `git archive` checkout, which has no .git at all.
+#
+# Refuse only on a POSITIVE mismatch: a check that also fires when it
+# cannot tell would be red everywhere and therefore carry nothing.
+LINEMAP_FORWARD_BLOB=ae54f175c17dbfd38a76cec81295a04d3f9c538f
 if [ "${CENSUS_AUDIT_SKIP_BLOBCHECK:-0}" != "1" ]; then
-    cur=$(cd .. && cd .. && git rev-parse HEAD:src/forward.c 2>/dev/null) || cur=
-    if [ -z "$cur" ]; then
-        cur=$(git hash-object ../../src/forward.c 2>/dev/null) || cur=
-    fi
+    cur=$(git hash-object --path src/forward.c ../../src/forward.c 2>/dev/null) \
+        || cur=
     if [ -z "$cur" ]; then
         echo "compare.sh: WARNING - cannot identify src/forward.c;" >&2
         echo "  linemap.tsv's 36 line keys are unverified for this tree." >&2
