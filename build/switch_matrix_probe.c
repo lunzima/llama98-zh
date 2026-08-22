@@ -144,3 +144,41 @@ typedef char lz_q8min_check[1 - 2 * (int)!(LZ_Q8_MIN_SCALE == 0.0f)];
 #if LZ_P2_FORCE_MMX != 1
 #error "LZ_P2_FORCE_MMX != 1"
 #endif
+
+/* The five int-pipeline int16 exits. The per-entry Watcom probe
+   check_one generates already asserts each one alone; these are the
+   canonical set's cross-check, which they were missing. */
+#ifndef LZ_BVEC_I16
+#error "LZ_BVEC_I16 not defined (expected 0)"
+#endif
+#if LZ_BVEC_I16 != 0
+#error "LZ_BVEC_I16 != 0"
+#endif
+
+#ifndef LZ_MOEGATE_I16
+#error "LZ_MOEGATE_I16 not defined (expected 0)"
+#endif
+#if LZ_MOEGATE_I16 != 0
+#error "LZ_MOEGATE_I16 != 0"
+#endif
+
+#ifndef LZ_KLAT_I16
+#error "LZ_KLAT_I16 not defined (expected 0)"
+#endif
+#if LZ_KLAT_I16 != 0
+#error "LZ_KLAT_I16 != 0"
+#endif
+
+#ifndef LZ_KGATE_I16
+#error "LZ_KGATE_I16 not defined (expected 0)"
+#endif
+#if LZ_KGATE_I16 != 0
+#error "LZ_KGATE_I16 != 0"
+#endif
+
+#ifndef LZ_MLAT_I16
+#error "LZ_MLAT_I16 not defined (expected 0)"
+#endif
+#if LZ_MLAT_I16 != 0
+#error "LZ_MLAT_I16 != 0"
+#endif

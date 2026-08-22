@@ -759,6 +759,24 @@ void lz_quantize_q8_tok_int(const int32_t *t, int n, float deq,
 void lz_quantize_q8_int(const int32_t *t, int n, int gs, float deq,
                         int8_t *q, float *s);
 
+/* int16-input twin of lz_quantize_q8_int, for a producer whose int16
+   exit (epi_align_i16) already delivered the vector at a fixed
+   exponent. Same deq fold, same MIN_SCALE floor, and BIT-IDENTICAL to
+   widening t into an int32 buffer and calling lz_quantize_q8_int.
+
+   It exists for what the census cannot see. lz_quantize_q8_int's
+   element loop must route its convert through lz_i32f, whose
+   split-and-add is FOUR float operations billed as one - the price of
+   forcing a float32 rounding that neither gcc/SSE nor Watcom/x87 can
+   fuse away, and unavoidable there because a Q15 int32 passes 2^24.
+   An int16 cannot: (float)t is exact, so both toolchains multiply the
+   same operand and round once, and a plain cast is safe here for the
+   same reason lz_i32f is needed there. Widening to int32 and reusing
+   the int32 entry would therefore have cost three unbilled float ops
+   per element for no numerical difference at all. */
+void lz_quantize_q8_i16(const short *t, int n, int gs, float deq,
+                        int8_t *q, float *s);
+
 /* int64-input twin of lz_quantize_q8_int, for the fixed-tier attention
    weighted sum. The attention accumulator is exact only at int64 width:
    each 512-row int32 chunk fits, but their full-context SUM does not
@@ -932,14 +950,15 @@ int lz_matmul_xq_reads_float_row(const LZTensor *w);
 
 /* Same matmul, int16 exit (int-pipeline milestone 3). The row kernel
    and the int32 accumulators are the same ones lz_matmul_xq_nt uses -
-   only the epilogue differs, exiting through epi_q41_align_i16 instead
-   of materializing a float. `o` is token-major [t * out_dim + i] like
-   lz_matmul_xq_nt's, in int16 at exponent `target_e`, clamped to
-   +-bound; there is no f32-weight fallback because there is no int16
-   exit for one.
+   only the epilogue differs, exiting through epi_q41_align_i16 (the
+   Q4_1/Q6_1/T2 family) or epi_fixed_align_i16 (the symmetric Q8_0 /
+   Q16_0 one) instead of materializing a float. `o` is token-major
+   [t * out_dim + i] like lz_matmul_xq_nt's, in int16 at exponent
+   `target_e`, clamped to +-bound; there is no f32-weight fallback
+   because there is no int16 exit for one.
 
-   Serves the Q4_1/Q6_1/T2 family only, and only where the fixed
-   epilogue is live. Returns 1 if it ran and 0 if it refused, having
+   Serves every quantized format the fixed epilogue reaches, and only
+   where it is live. Returns 1 if it ran and 0 if it refused, having
    written nothing - ask lz_matmul_xq_i16_ok FIRST if the caller needs
    to choose between tiers for a GROUP of tensors, which is the normal
    case: one consumer fed half in int and half in float is worse than

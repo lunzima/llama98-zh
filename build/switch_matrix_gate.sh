@@ -154,23 +154,36 @@ check_one() {
     # gcc -dM proof: every asserted macro appears with its non-default
     # value under the flags, and not with that value without them.
     #
-    # Both translation units, unioned: a switch's #ifndef site can live in
-    # either. The int-pipeline exits (LZ_*_I16) are defined in forward.c
-    # and appear nowhere in ops.c's preprocessed output, so an ops.c-only
-    # proof would have failed them for the wrong reason. The union is the
-    # right shape for the "with" side (proven anywhere counts) and for the
-    # "without" side too (a default that already equals the asserted value
-    # in EITHER unit means the switch proves nothing there).
-    dm_with=$(gcc $GCC_BASE $defines -E -dM src/ops.c 2>/dev/null
-              gcc $GCC_BASE $defines -E -dM src/forward.c 2>/dev/null)
+    # The "with" side is checked PER TRANSLATION UNIT, not unioned. A -D
+    # on the command line shows up in the -dM of every unit that does not
+    # touch the macro, so a union lets the one file that DOES override the
+    # switch hide behind the other one - which is this gate's whole
+    # subject (LZ_NORM_FIXED collided with an ops_sched.c enum constant of
+    # the same name, and the ops.c proof stayed green). Measured, not
+    # argued: an unconditional `#define LZ_MLAT_I16 1` in forward.c leaves
+    # ops.c reading 0 from the command line and the union green, while the
+    # per-unit form reports forward.c and only forward.c. A switch whose
+    # #ifndef site is in either file still satisfies both units, because
+    # the other one simply inherits the command line.
+    #
+    # The "without" side stays a UNION: a default that already equals the
+    # asserted value in EITHER unit means the switch proves nothing there.
+    dm_with_ops=$(gcc $GCC_BASE $defines -E -dM src/ops.c 2>/dev/null)
+    dm_with_fwd=$(gcc $GCC_BASE $defines -E -dM src/forward.c 2>/dev/null)
+    dm_with="$dm_with_ops
+$dm_with_fwd"
     dm_without=$(gcc $GCC_BASE -E -dM src/ops.c 2>/dev/null
                  gcc $GCC_BASE -E -dM src/forward.c 2>/dev/null)
     for p in $proves; do
         pname="${p%%=*}"
         pval="${p#*=}"
         line="#define $pname $pval"
-        if ! echo "$dm_with" | grep -Fxq "$line"; then
-            echo "FAIL: $label  -dM: '$line' not in preprocessed output with $defines"
+        if ! echo "$dm_with_ops" | grep -Fxq "$line"; then
+            echo "FAIL: $label  -dM src/ops.c: '$line' not in preprocessed output with $defines"
+            ok=0
+        fi
+        if ! echo "$dm_with_fwd" | grep -Fxq "$line"; then
+            echo "FAIL: $label  -dM src/forward.c: '$line' not in preprocessed output with $defines"
             ok=0
         fi
         if echo "$dm_without" | grep -Fxq "$line"; then
@@ -227,10 +240,11 @@ check_one() {
 # name=value pairs, whitespace-separated. The two pair-entries are
 # handled in the loop below.
 # LZ_BVEC_I16 / LZ_MOEGATE_I16 / LZ_KLAT_I16 / LZ_KGATE_I16 are the four
-# q16_0 int16 exits (forward.c). Each defaults to 1 and each =0 build is
-# the control arm its measurement was taken against, which is exactly the
-# kind of build nobody runs again unless a gate does.
-SWITCHES="LZ_GDN_FIXED=0 LZ_GDN_STATE_2PLANE=0 LZ_ATTN_FIXED=0 LZ_CONV_FIXED=0 LZ_NORM_FIXED=0 LZ_SSE2_GROUP=0 LZ_Q8_MIN_SCALE=0.0f LZ_EXACT_MATH=1 LZ_CPUID_NOCACHE=1 LZ_NO_FPU=1 LZ_KV_2PLANE=1 LZ_GDN_STATE_F32=1 LZ_BATCH_MAX=1 LZ_SPEC_K=1 LZ_PF_DIST=0 LZ_Q8R_FORCE_SSE=1 LZ_P2_FORCE_MMX=1 LZ_BVEC_I16=0 LZ_MOEGATE_I16=0 LZ_KLAT_I16=0 LZ_KGATE_I16=0"
+# q16_0 int16 exits and LZ_MLAT_I16 the MoE latent's (forward.c). Each
+# defaults to 1 and each =0 build is the control arm its measurement was
+# taken against, which is exactly the kind of build nobody runs again
+# unless a gate does.
+SWITCHES="LZ_GDN_FIXED=0 LZ_GDN_STATE_2PLANE=0 LZ_ATTN_FIXED=0 LZ_CONV_FIXED=0 LZ_NORM_FIXED=0 LZ_SSE2_GROUP=0 LZ_Q8_MIN_SCALE=0.0f LZ_EXACT_MATH=1 LZ_CPUID_NOCACHE=1 LZ_NO_FPU=1 LZ_KV_2PLANE=1 LZ_GDN_STATE_F32=1 LZ_BATCH_MAX=1 LZ_SPEC_K=1 LZ_PF_DIST=0 LZ_Q8R_FORCE_SSE=1 LZ_P2_FORCE_MMX=1 LZ_BVEC_I16=0 LZ_MOEGATE_I16=0 LZ_KLAT_I16=0 LZ_KGATE_I16=0 LZ_MLAT_I16=0"
 
 for entry in $SWITCHES; do
     name="${entry%%=*}"

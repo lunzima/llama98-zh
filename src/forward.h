@@ -475,6 +475,19 @@ typedef struct {
     int32_t *kda_lat_i32;
     short *kda_gate_i16;
     short *kda_dtb_i16;
+    /* The MoE latent's int16 exit (int-pipeline milestone 6), same
+       one-of-the-two contract: moe_lat_i16 carries what moe_lat_x
+       would have, at LZ_MLAT_ES.
+         moe_lat_i16  s->moe_lat_x -> the routed experts' w1/w3 quantize
+       moe_lat_q/_qs are that quantize's OUTPUT, and they are separate
+       from s->xq/s->xqs because the w2 matmul in the same loop body
+       quantizes moe_h1 into those - one token wide, since the expert
+       loop is per token. They are allocated with (and used by) the
+       float path too: the hoist out of the expert loop is what needs
+       them, not the int exit. */
+    short *moe_lat_i16;
+    int8_t *moe_lat_q;
+    float  *moe_lat_qs;
     float *conv_sig_k1;
     float *conv_sig_oscale2;
     float  conv_sig_k2;         /* lz_sig_q15_t_offset(), same for every channel */

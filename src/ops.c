@@ -660,6 +660,73 @@ void lz_quantize_q8_int(const int32_t *t, int n, int gs, float deq,
     }
 }
 
+/* int16-input twin of lz_quantize_q8_int (see its comment for the deq
+   folding, and ops.h for why the width gets its own entry rather than a
+   widening copy into the int32 one). Structurally the same function
+   with two differences, both consequences of |t| <= 32767:
+
+     - the element convert is a plain (float)grp[k]. int16 is exact in
+       float32, so the two toolchains hand the multiply the SAME operand
+       and round once each; lz_i32f's split-and-add exists to force that
+       for inputs past 2^24 and would only add three float operations
+       here. This is the reason the function exists and the reason it is
+       bit-identical to the int32 entry on the same values.
+     - tam fits int16, so the amax scan needs no widening either.
+
+   deq is the producer's power-of-two exit scale (2^-target_e). */
+void lz_quantize_q8_i16(const short *t, int n, int gs, float deq,
+                        int8_t *q, float *s) {
+    int g, k;
+    if (gs <= 0 || n < gs || (n % gs) != 0) return;   /* defense: f32 weights have gs=0 etc. */
+    for (g = 0; g < n / gs; g++) {
+        const short *grp = t + (size_t)g * gs;
+        int8_t *out = q + (size_t)g * gs;
+        int32_t tam = 0;
+        float amax, inv;
+        int fast;
+        for (k = 0; k < gs; k++) {
+            int32_t a = grp[k] < 0 ? -(int32_t)grp[k] : (int32_t)grp[k];
+            if (a > tam) tam = a;
+        }
+        amax = (float)tam * deq;
+        LZ_FCX(LZ_FC_QUANT, 1, 0, 0, 1, 0);  /* deq mul, tam->float cvt */
+        if (amax > 0.0f) {
+            s[g] = amax * LZ_Q8_INV127;
+            inv = 127.0f / amax;
+            LZ_FCX(LZ_FC_QUANT, 1, 0, 1, 0, 0);  /* amax*(1/127) mul, 127/amax div */
+            fast = (inv <= FLT_MAX);
+            if (s[g] < LZ_Q8_MIN_SCALE_F) {
+                s[g] = 1.0f;
+                inv = 0.0f;
+                fast = 1;
+            }
+        } else {
+            s[g] = 1.0f;
+            inv = 0.0f;
+            fast = 1;
+        }
+        if (fast) {
+            float inv_elem = (inv == 0.0f) ? 0.0f : 127.0f / (float)tam;
+            LZ_FCX(LZ_FC_QUANT, gs, gs, 1, gs + 1, 0);
+            for (k = 0; k < gs; k++) {
+                int qi = q8_round((float)grp[k] * inv_elem);
+                qi = (qi > 127) ? 127 : qi;
+                out[k] = (int8_t)((qi < -127) ? -127 : qi);
+            }
+        } else {
+            /* Unreachable under the default LZ_Q8_MIN_SCALE floor, same
+               as the int32 entry's else - carried so the two functions
+               stay term for term the same. */
+            LZ_FCX(LZ_FC_QUANT, gs, gs, gs, gs, 0);  /* cvt, mul, div, q8_round(add) */
+            for (k = 0; k < gs; k++) {
+                int qi = q8_round(((float)grp[k] * deq) / s[g]);
+                qi = (qi > 127) ? 127 : qi;
+                out[k] = (int8_t)((qi < -127) ? -127 : qi);
+            }
+        }
+    }
+}
+
 /* int64-input twin of lz_quantize_q8_int (see its comment for the deq
    folding). The attention weighted sum is exact only at int64 width, so
    this is what the fixed-tier attention int path consumes. The element
@@ -1432,11 +1499,11 @@ static int32_t epi_align_i16(long long s, int e, int target_e, int bound) {
 
 /* Epilogue-shaped wrapper: same call signature as epi_fixed (drop-in at
    a matmul row loop's call site) but exits through epi_align_i16 instead
-   of a float. Still wired to no forward.c call site: the candidate
-   producers it was meant to prove out (kda_q/k/v_proj) are q6_1 on the
-   checkpoint this project measures, so epi_fixed never runs for them and
-   they reach epi_align_i16 through epi_q41_align_i16 instead. This one
-   waits for a Q8_0 or Q16_0 producer feeding an int16 consumer.
+   of a float. Serves both symmetric formats: matmul_q16_impl (q16_0's
+   four exits) and matmul_q8_impl (the MoE latent). The candidate
+   producers it was written for first, kda_q/k/v_proj, are q6_1 on the
+   checkpoints this project measures, so epi_fixed never runs for them
+   and they reach epi_align_i16 through epi_q41_align_i16 instead.
 
    epi_align_i16 reads its (s, e) pair as `s * 2^(e-8)`, the convention
    from when Q8_0 was the only format that could reach it and its x256
@@ -2023,7 +2090,8 @@ void lz_matmul_xq_nt(float *o, const float *x, const int8_t *xq,
        trigger worse. */
     if (w->dtype == LZ_FMT_Q8_0 && w->gs >= 32 && (w->gs % 32) == 0 &&
         (in_dim % w->gs) == 0) {
-        matmul_q8_impl(o, xq, xqs, w, in_dim, out_dim, nt);
+        LZMatOut ex; mat_out_f32(&ex, o);
+        matmul_q8_impl(&ex, xq, xqs, w, in_dim, out_dim, nt);
         return;
     }
     /* Q4_1's SIMD path pre-expands activations to int16; beyond the

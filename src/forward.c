@@ -462,6 +462,41 @@ static void *xcalloc(size_t n, size_t sz, int *ok, long long *acc) {
 #define LZ_KGATE_ES 9
 #endif /* LZ_KGATE_ES */
 
+/* ---- the MoE latent's int16 exit (int-pipeline milestone 6) ----------
+ *
+ * moe_down_proj is the tree's one Q8_0 producer whose consumer is an
+ * activation quantize, so it is the first caller of
+ * epi_fixed_align_i16's Q8_0 half - delivered in batch 1, verified
+ * standalone, and until now reached only by q16_0. Same _I16 / _ES pair
+ * shape as the four chains above and the same conventions.
+ *
+ * MEASURED, both gate corpora on kmr20, instrumented shipping build
+ * (1.23M / 1.35M latent elements): max |x| 9.270 / 10.126, so ES = 11
+ * is the largest that clamps nothing - ES = 12 clamps 75 / 67.
+ *
+ * It ships at 10, one lower, for the reason LZ_KGATE_ES is: 11 leaves
+ * 1.58x of headroom against a SILENT clamp and paired NLL cannot tell
+ * the two apart - zh t -1.190 at 11 vs -0.804 at 10, en +1.552 vs
+ * +1.077, both arms against the same pre-change control, n = 602/660,
+ * with argmax and top-5 agreement swapping which one leads. Given a
+ * tie on quality, the exponent with twice the headroom (3.16x) ships.
+ *
+ * Unlike the four q16_0 chains, this one also has a per-GROUP precision
+ * question, because the consumer is a per-32 activation quantize and a
+ * group whose amax lands near the bottom of int16 would reach int8 with
+ * fewer than 127 levels available. Measured over the same runs: the
+ * SMALLEST 32-element group amax is 0.385 / 0.549, i.e. 394 / 562 at
+ * the shipping ES, 3.1x above the 127 the int8 output needs, and no
+ * group on either corpus falls under 128. So the shared exponent costs
+ * the consumer nothing here; re-measure it on a checkpoint whose latent
+ * might be scaled differently. */
+#ifndef LZ_MLAT_I16
+#define LZ_MLAT_I16 1
+#endif /* LZ_MLAT_I16 */
+#ifndef LZ_MLAT_ES
+#define LZ_MLAT_ES 10
+#endif /* LZ_MLAT_ES */
+
 #if LZ_CONV_FIXED
 /* Quantize the conv taps once, laying them out per channel in the same
    order forward_kda/forward_ssm index the history.
@@ -987,6 +1022,19 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
         s->kda_lat_i32 = (int32_t *)xcalloc((size_t)c->kda_gate_rank,
                                             sizeof(int32_t), &ok, &s->bytes_alloc);
 #endif /* LZ_KLAT_I16 */
+#if LZ_MLAT_I16
+        s->moe_lat_i16 = (short *)xcalloc((size_t)nt * c->moe_latent_dim,
+                                          sizeof(short), &ok, &s->bytes_alloc);
+#endif /* LZ_MLAT_I16 */
+        /* Not under LZ_MLAT_I16: the expert loop's hoisted activation
+           quantize writes here on both the float and the int path. One
+           token wide (the loop is per token) and the scale array is
+           sized for the worst case, an in-row gs of 1, the same way
+           s->xqs is. */
+        s->moe_lat_q = (int8_t *)xcalloc((size_t)c->moe_latent_dim, 1,
+                                         &ok, &s->bytes_alloc);
+        s->moe_lat_qs = (float *)xcalloc((size_t)c->moe_latent_dim,
+                                         sizeof(float), &ok, &s->bytes_alloc);
 #if LZ_KGATE_I16
         s->kda_gate_i16 = (short *)xcalloc((size_t)nt * nvk, sizeof(short),
                                            &ok, &s->bytes_alloc);
@@ -1104,6 +1152,7 @@ void lz_state_free(LZRunState *s) {
     free(s->bvec_i16); free(s->moe_logits_i16);
     free(s->kda_lat_i16); free(s->kda_lat_i32);
     free(s->kda_gate_i16); free(s->kda_dtb_i16);
+    free(s->moe_lat_i16); free(s->moe_lat_q); free(s->moe_lat_qs);
     free(s->conv_sig_k1); free(s->conv_sig_oscale2);
     free(s->xq); free(s->xqs); free(s->wscr); free(s->fwht_scratch);
     free(s->subn_norm_int);
@@ -3051,6 +3100,27 @@ static void forward_moe(const LZModel *m, LZRunState *s,
     mrt_may = lz_sig_mode() && s->moe_logits_i16 && c->moe_router_sigmoid &&
               lz_matmul_xq_i16_ok(&L->moe_gate_w, hdim, nt);
 #endif /* LZ_MOEGATE_I16 */
+    /* int-pipeline milestone 6: the latent's only consumer is the
+       routed experts' activation quantize, which lz_quantize_q8_i16
+       serves directly from the int16 - so moe_down_proj's Q8_0
+       epilogue can stop building a float that the next statement takes
+       apart again. Decided before the matmul, like every other exit in
+       this file. */
+    int mlat_int = 0, mlat_may = 0;
+#if LZ_MLAT_I16
+    mlat_may = s->moe_lat_i16 && L->moe_expert_w1 && L->moe_expert_w3 &&
+               lz_matmul_xq_i16_ok(&L->moe_down_proj, hdim, nt);
+    /* lz_matmul_xq reads its FLOAT argument when - and only when - the
+       weight is F32, so an F32 expert would read a moe_lat_x the int
+       exit never wrote. Refused for the whole layer rather than per
+       expert: which experts a token routes to is not known until after
+       the matmul that would have written the float. ne dtype loads per
+       call and no float work. */
+    for (i = 0; mlat_may && i < ne; i++)
+        if (L->moe_expert_w1[i].dtype == LZ_FMT_F32 ||
+            L->moe_expert_w3[i].dtype == LZ_FMT_F32)
+            mlat_may = 0;
+#endif /* LZ_MLAT_I16 */
     (void)layer;   /* only used inside LZ_TAP, which is a no-op in a normal build */
 
     /* PHASE 1 - everything that reads xt and does not depend on routing.
@@ -3068,12 +3138,14 @@ static void forward_moe(const LZModel *m, LZRunState *s,
                  s->moe_logits_i16,
                  s->xb, &L->moe_gate_w, hdim, ne, nt,
                  LZ_MOEGATE_ES, lz_sig_q15_domain(LZ_MOEGATE_ES));
-    lz_matmul_xq_nt(s->moe_lat_x, s->xb, s->xq, s->xqs,
-                    &L->moe_down_proj, hdim, latent, nt);
+    kda_i16_proj(s, mlat_may, &mlat_int, s->moe_lat_x, s->moe_lat_i16,
+                 s->xb, &L->moe_down_proj, hdim, latent, nt,
+                 LZ_MLAT_ES, 32767);
     /* Slot 0 is token 0's, so these tap what the per-token version
-       taped under `if (tk == 0)`. "mrt" reads the FLOAT buffer, which
-       holds nothing when mrt_int took the int16 exit - dump
-       moe_logits_i16 instead, same as the KDA taps above. */
+       taped under `if (tk == 0)`. Both read a FLOAT buffer that holds
+       nothing when its chain took the int16 exit - dump
+       moe_logits_i16 / moe_lat_i16 instead, same as the KDA taps
+       above. */
     LZ_TAP("mrt", layer, s->moe_router_logits, ne);
     LZ_TAP("mlat", layer, s->moe_lat_x, latent);
 
@@ -3084,7 +3156,10 @@ static void forward_moe(const LZModel *m, LZRunState *s,
        block comment above this function. */
     for (tk = 0; tk < nt; tk++) {
         float *lat_x = s->moe_lat_x + (size_t)tk * latent;
+        const short *lat_i = mlat_int ? s->moe_lat_i16 + (size_t)tk * latent
+                                      : NULL;
         float *lat_y = s->moe_lat_y + (size_t)tk * latent;
+        int gs_have = 0;        /* group size moe_lat_q currently holds */
 
         lz_moe_route(s->moe_router_logits + (size_t)tk * ne,
                     mrt_int ? s->moe_logits_i16 + (size_t)tk * ne : NULL,
@@ -3107,26 +3182,42 @@ static void forward_moe(const LZModel *m, LZRunState *s,
             if (ei < 0) continue;               /* topk > n_experts padding */
             /* KdaExpert.forward: w2(act(w1(x)) * w3(x)) - w1 is the gate,
                w3 the up projection, w2 the down projection back to latent. */
-            /* w1 and w3 both read lat_x with the same in_dim (latent),
-               so quantize it ONCE and share, instead of letting each
-               lz_matmul_w re-quantize the identical vector. This must be
-               INSIDE the kk loop, not hoisted out: the w2 matmul just
-               below quantizes moe_h1 into the same xq/xqs scratch, so a
-               hoisted quantization would be overwritten before the next
-               expert's w1/w3 read it (a real, silent corruption). The
-               day w1/w3 carry different weight gs this also keeps them
-               reading the SAME quantization, the mixed-precision hazard
-               forward_attn's q/k/v comment names.
-               Slot 0 of the (now nt-wide) scratch throughout: this whole
-               loop is one token's work and phases 1 and 3 are done with
-               their copies by the time it runs. */
+            /* w1 and w3 both read the latent with the same in_dim, so
+               quantize it once and share, instead of letting each
+               lz_matmul_w re-quantize the identical vector. The
+               quantization ALSO survives across experts, because the
+               vector does not change and lz_act_gs is a function of
+               (in_dim, whether the weight's gs is a sane multiple of
+               32) - not of which expert. So it is redone only when the
+               group size actually differs, which keeps the
+               mixed-precision hazard forward_attn's q/k/v comment names
+               (w1 and w3 must read the SAME quantization) while paying
+               for it once per DISTINCT group size instead of once per
+               expert. Measured invariant on both checkpoints: 128
+               w1/w3 pairs each, lz_act_gs == 32 throughout, so the
+               second expert's quantize is pure repetition.
+
+               Its output is moe_lat_q/_qs and NOT s->xq/s->xqs: the w2
+               matmul below quantizes moe_h1 into those, so a result
+               left there would be gone before the next expert reads it.
+               That, not the group size, is what used to force the
+               quantize back inside this loop. */
             {
                 int gsl = lz_act_gs(&L->moe_expert_w1[ei], latent);
-                lz_quantize_q8(lat_x, latent, gsl, s->xq, s->xqs);
+                if (gsl != gs_have) {
+                    if (mlat_int)
+                        lz_quantize_q8_i16(lat_i, latent, gsl,
+                                           pow2f(-LZ_MLAT_ES),
+                                           s->moe_lat_q, s->moe_lat_qs);
+                    else
+                        lz_quantize_q8(lat_x, latent, gsl,
+                                       s->moe_lat_q, s->moe_lat_qs);
+                    gs_have = gsl;
+                }
             }
-            lz_matmul_xq(s->moe_h1, lat_x, s->xq, s->xqs,
+            lz_matmul_xq(s->moe_h1, lat_x, s->moe_lat_q, s->moe_lat_qs,
                         &L->moe_expert_w1[ei], latent, inter);
-            lz_matmul_xq(s->moe_h3, lat_x, s->xq, s->xqs,
+            lz_matmul_xq(s->moe_h3, lat_x, s->moe_lat_q, s->moe_lat_qs,
                         &L->moe_expert_w3[ei], latent, inter);
             for (vv = 0; vv < inter; vv++)
                 s->moe_h1[vv] = lz_silu(s->moe_h1[vv]) * s->moe_h3[vv];

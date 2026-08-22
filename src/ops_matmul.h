@@ -51,7 +51,7 @@ typedef struct {
 } LZMatOut;
 
 /* ---- matmul impls (defined in ops_matmul.c) -------------------------- */
-void matmul_q8_impl(float *o, const int8_t *xq, const float *xqs,
+void matmul_q8_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
                     const LZTensor *w, int in_dim, int out_dim, int nt);
 void matmul_q41_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
                      const LZTensor *w, int in_dim, int out_dim, int nt);

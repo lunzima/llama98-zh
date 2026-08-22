@@ -277,7 +277,7 @@ static int q8_fixed_epi(const LZTensor *w, int in_dim, int nb, int nt) {
            && nt <= LZ_BATCH_MAX;
 }
 
-void matmul_q8_impl(float *o, const int8_t *xq, const float *xqs,
+void matmul_q8_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
                            const LZTensor *w, int in_dim, int out_dim, int nt) {
     int i, tk, t;
     int r  = w->gs / 32;    /* 32-sub-blocks per weight group (gs=128 -> 4) */
@@ -286,13 +286,13 @@ void matmul_q8_impl(float *o, const int8_t *xq, const float *xqs,
     lz_rowfn row;
     /* Same predicate as the float epilogue - see q8_fixed_epi. */
     int fixed_epi = q8_fixed_epi(w, in_dim, nb, nt);
+    int want_i16 = (out->oi != NULL) || out->probe;
     /* 2^-8, the kernels' x256 undone - taken from the same place the
        fixed epilogue takes its exponent fold, not spelled out again. */
     int post_e = lz_epi_post_e(w);
     float post = pow2f(post_e);
 
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
-    if (fixed_epi) epi_pack_act(xqs, nb, nt);
     row = lz_row_pick(LZ_ROW_Q8);
 #if defined(__arm__)
 #if defined(LZ_ARM_ASM_EXTERN)
@@ -316,14 +316,25 @@ void matmul_q8_impl(float *o, const int8_t *xq, const float *xqs,
        largest in_dim in any current model is 3584 against a 4096 cap.
        Dead code in three association orders is worse than dead code in
        one, and matmul_scalar_ref is the contract. */
+    /* Same all-or-nothing refusal as matmul_q16_impl, and for the same
+       reason: the int16 exit IS the fixed epilogue's exit
+       (epi_fixed_align_i16 is epi_fixed_raw plus epi_align_i16), so
+       !fixed_epi refuses here even though the float exit below would
+       have been happy to run without it. Refusing leaves out->ok at 0
+       and writes nothing; the caller falls back. */
+    if (want_i16 && (!fixed_epi || !row || in_dim > LZ_MM_WIDEN_MAX
+                     || post_e == LZ_EPI_POST_NA)) return;
     if (!row || in_dim > LZ_MM_WIDEN_MAX || post_e == LZ_EPI_POST_NA) {
-        matmul_scalar_ref(o, xq, xqs, w, in_dim, out_dim, nt);
+        matmul_scalar_ref(out->o, xq, xqs, w, in_dim, out_dim, nt);
         return;
     }
+    out->ok = 1;
+    if (out->probe) return;
 
     /* Expand the whole batch's activations to int16 once (in_dim <=
        4096, resident in L1); amortized over out_dim rows. */
     for (t = 0; t < nt * in_dim; t++) g_xw[t] = (int16_t)xq[t];
+    if (fixed_epi) epi_pack_act(xqs, nb, nt);
 
     for (i = 0; i < out_dim; i++) {
         const int8_t *wr = w->q + (size_t)i * in_dim;
@@ -333,8 +344,17 @@ void matmul_q8_impl(float *o, const int8_t *xq, const float *xqs,
            file and the epilogue below is x87 on the Watcom build. */
         row(g_acc32, wr, NULL, g_xw, nb, nt, in_dim, wend, NULL);
         if (lz_cpu_has_mmx()) _mm_empty();
+        /* The clamp inside epi_align_i16 has already brought the result
+           within +-out->bound, so the narrowing cast cannot lose a bit. */
+        if (out->oi) {
+            for (tk = 0; tk < nt; tk++)
+                out->oi[(size_t)tk * out_dim + i] = (short)epi_fixed_align_i16(
+                    g_acc32 + (size_t)tk * nb, w, i, tk, nb, r,
+                    out->target_e, out->bound);
+            continue;
+        }
         for (tk = 0; tk < nt; tk++)
-            o[(size_t)tk * out_dim + i] = fixed_epi
+            out->o[(size_t)tk * out_dim + i] = fixed_epi
                 ? epi_fixed(g_acc32 + (size_t)tk * nb, w, i, tk, nb, r)
                 : epi_q8(g_acc32 + (size_t)tk * nb, xqs + (size_t)tk * nb,
                          ws, nb, r, post);
@@ -1113,6 +1133,15 @@ static int mm_i16_dispatch(LZMatOut *out, const int8_t *xq, const float *xqs,
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
     if (g_kernel == LZ_KERNEL_REF) return 0;
     switch (w->dtype) {
+        case LZ_FMT_Q8_0:
+            /* Symmetric like Q16_0 - no zero plane to require. No
+               in_dim cap restated either: matmul_q8_impl's own
+               want_i16 refusal covers LZ_MM_WIDEN_MAX, and it is the
+               one place that also knows whether a row kernel exists.
+               Unlike Q16_0 this needs no build guard - the float
+               dispatch reaches matmul_q8_impl unconditionally. */
+            matmul_q8_impl(out, xq, xqs, w, in_dim, out_dim, nt);
+            return 1;
         case LZ_FMT_Q4_1:
             if (!w->zero) return 0;
             matmul_q41_impl(out, xq, xqs, w, in_dim, out_dim, nt);
