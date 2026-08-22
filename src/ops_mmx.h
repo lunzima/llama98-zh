@@ -70,6 +70,13 @@ lz_p2_blk *p2_blk(void);
    renamed to match the *_MMX_EXTERN pattern: code far from here reads
    them (q8r_have_simd/lz_q8r_tier, LZ_AMAX_TAB), and a rename risks
    missing one of those call sites. */
+/* BOTH toolchains, not gcc-only like the _EXTERN trio above: the
+   Hadamard stage kernel has a real body on each side (intrinsics and a
+   #pragma aux), and src/ops_mmx.h maps the Watcom one onto the gcc
+   name, so src/fwht.c can call ONE symbol without a compiler test of
+   its own. */
+#define LZ_FWHT_MMX_EXTERN 1
+
 #define LZ_HAVE_AMAX_MMX   1
 #define LZ_HAVE_Q8R_SSE    1
 
@@ -203,7 +210,17 @@ void row_q16_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
                      const void *pf_end, const void *pf_end2);
 void lz_dot128_q16_mmx_w(const int16_t *w, const int16_t *x, int32_t *out4);
 
+/* ---- Hadamard: one butterfly stage of lz_fwht_i32 --------------------
+   The wrapper, not the pragma: src/fwht.c is the call site and is not
+   this TU, so it cannot see a #pragma aux body. src/ops_mmx.c defines
+   this as a real function around it, the same way lz_dot128_q16_mmx_w
+   wraps lz_dot128_q16_asm. */
+void lz_fwht_stage_mmx(int32_t *y, int n, int len);
+
 #else /* gcc: intrinsics, existing declarations */
+
+/* ---- Hadamard: one butterfly stage of lz_fwht_i32 -------------------- */
+void lz_fwht_stage_mmx(int32_t *y, int n, int len);
 
 /* ---- wsum: src/ops.c's LZ_WSUM_PAIR, attention scoring's dot ---------- */
 void lz_wsum_pair_mmx(const int8_t *rowA, const int8_t *rowB,

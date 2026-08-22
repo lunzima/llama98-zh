@@ -2722,6 +2722,55 @@ void row_q16_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
     }
 }
 
+/* ---- Hadamard: one butterfly stage of lz_fwht_i32, Watcom twin.
+   gcc twin: lz_fwht_stage_mmx, the intrinsics body below.
+
+   Two int32 per movq, paddd and psubd for the two halves of the
+   butterfly, no shuffle - see the gcc twin's comment for why len >= 2
+   makes the partners contiguous and why len == 1 stays in the C.
+
+   The inner loop is written over BYTE offsets so `len` enters as a byte
+   count once (shl 2) instead of being scaled at every index. edi walks
+   the low half, esi the high; both advance by 8 per iteration, which is
+   the two int32 a movq moves. */
+extern void lz_fwht_stage_mmx_asm(int32_t *y, int n, int len);
+#pragma aux lz_fwht_stage_mmx_asm = \
+    "shl    ecx, 2"                 /* len -> bytes */          \
+    "shl    edx, 2"                 /* n   -> bytes */          \
+    "lea    ebx, [ecx+ecx]"         /* stride = 2*len bytes */  \
+    "add    edx, eax"               /* end of y */              \
+    "outer:"                                                    \
+    "mov    edi, eax"                                           \
+    "lea    esi, [eax+ecx]"                                     \
+    "mov    ebp, ecx"                                           \
+    "inner:"                                                    \
+    "movq   mm0, [edi]"                                         \
+    "movq   mm1, [esi]"                                         \
+    "movq   mm2, mm0"                                           \
+    "paddd  mm0, mm1"                                           \
+    "psubd  mm2, mm1"                                           \
+    "movq   [edi], mm0"                                         \
+    "movq   [esi], mm2"                                         \
+    "add    edi, 8"                                             \
+    "add    esi, 8"                                             \
+    "sub    ebp, 8"                                             \
+    "jnz    inner"                                              \
+    "add    eax, ebx"                                           \
+    "cmp    eax, edx"                                           \
+    "jb     outer"                                              \
+    parm [eax] [edx] [ecx]                                      \
+    modify [eax ebx ecx edx esi edi ebp];
+
+/* Thin wrapper, and it is not optional: a #pragma aux body expands at
+   the CALL SITE, and the call site is src/fwht.c, which is not this TU
+   and therefore never sees the pragma - it emitted a call to a symbol
+   nothing defines and the link failed. Same shape as
+   lz_dot128_q16_mmx_w and lz_amax32_sse2_w, and for the same reason:
+   the wrapper is the real symbol, the pragma expands inside it. */
+void lz_fwht_stage_mmx(int32_t *y, int n, int len) {
+    lz_fwht_stage_mmx_asm(y, n, len);
+}
+
 #else /* gcc: intrinsics */
 
 #include "mmx_compat.h"
@@ -2929,6 +2978,44 @@ unsigned lz_amax32_mmx(const float *x, int n) {
         union { __m64 m; unsigned u[2]; } o;
         o.m = acc;
         return o.u[0] > o.u[1] ? o.u[0] : o.u[1];
+    }
+}
+
+/* ---- Hadamard: one butterfly stage of lz_fwht_i32, gcc twin.
+   Watcom twin: lz_fwht_stage_mmx_asm, the #pragma aux above.
+
+   ONE STAGE, NOT THE WHOLE TRANSFORM, and the split is where the
+   vectorization stops being free. The butterfly at stride `len` pairs
+   y[i+j] with y[i+j+len], so for len >= 2 those are two CONTIGUOUS
+   pairs of int32 - one movq each, one paddd, one psubd, two movq back,
+   and not a single shuffle. At len == 1 the partners are adjacent
+   words, which needs an unpack per butterfly and buys nothing, so that
+   stage stays in the C.
+
+   BIT-IDENTITY IS BY CONSTRUCTION HERE, unlike every other kernel in
+   this file: the transform is int32 add and subtract, wrapping, with no
+   rounding, no saturation and no reassociation - each output word is
+   the same two inputs combined by the same operator. There is no
+   tolerance to argue about and no float path to agree with.
+
+   Emits no emms. The caller does one after the last stage, which is
+   where the x87 that follows it begins (rule 6 item 6). */
+void lz_fwht_stage_mmx(int32_t *y, int n, int len) {
+    __m64 u, v;
+    int i, j;
+    for (i = 0; i < n; i += (len << 1)) {
+        int32_t *a = y + i;
+        int32_t *b = y + i + len;
+        for (j = 0; j < len; j += 2) {
+            memcpy(&u, a + j, 8);
+            memcpy(&v, b + j, 8);
+            {
+                __m64 s = _mm_add_pi32(u, v);
+                __m64 d = _mm_sub_pi32(u, v);
+                memcpy(a + j, &s, 8);
+                memcpy(b + j, &d, 8);
+            }
+        }
     }
 }
 

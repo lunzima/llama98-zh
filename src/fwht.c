@@ -5,6 +5,16 @@
 #include "ops_kernel_shared.h"    /* g_kernel */
 #endif /* LZ_ARM_ASM_EXTERN */
 
+/* OUTSIDE the ARM guard above, deliberately: these three are what the
+   x86 MMX stage kernel needs, and putting them inside it is exactly the
+   mistake this file made first - on x86 LZ_ARM_ASM_EXTERN is not
+   defined, so the includes vanished, LZ_FWHT_MMX_EXTERN was never seen,
+   and the MMX branch below compiled out silently. A mutation of the
+   kernel then changed nothing, which is how it was found. */
+#include "mmx_compat.h"           /* _mm_empty, on both toolchains */
+#include "ops_mmx.h"              /* LZ_FWHT_MMX_EXTERN, lz_fwht_stage_mmx */
+#include "ops_quant.h"            /* lz_cpu_has_mmx */
+
 /* Sylvester recursion, in place, mirroring lz_fwht (float) in ops.c.
    Every stage is a butterfly of one add and one sub - no multiply,
    sqrt or divide in the transform body, so it is exact in int32 up to
@@ -31,6 +41,40 @@ void lz_fwht_i32(int32_t *restrict y, const int32_t *restrict x, int n) {
     }
 #endif /* LZ_ARM_ASM_EXTERN */
     for (i = 0; i < n; i++) tmp[i] = x[i];
+#if defined(LZ_FWHT_MMX_EXTERN)
+    /* MMX from the second stage on. The butterfly at stride len pairs
+       tmp[i+j] with tmp[i+j+len], so for len >= 2 the two halves are
+       CONTIGUOUS pairs of int32 - one movq each, paddd, psubd, two movq
+       back, no shuffle anywhere. At len == 1 the partners are adjacent
+       words and an unpack per butterfly would cost more than it saves,
+       so that one stage stays in the C below.
+
+       n >= 4 because len reaches 2 only then, and (n & 3) == 0 because
+       the stage kernel moves two int32 per iteration over a half-block
+       of `len` words; every shipping block (hadamard_o/hadamard_down,
+       powers of two from 64 up) satisfies both.
+
+       EXACT BY CONSTRUCTION, not by tolerance: int32 add and subtract,
+       wrapping, no rounding and no reassociation - each output word is
+       the same two inputs under the same operator as the C. That is why
+       this cell needs no bit-identity argument of the kind every float
+       kernel in this engine owes.
+
+       ONE emms FOR THE WHOLE TRANSFORM, here rather than per stage: the
+       stage loop contains no x87, and rule 6 item 6 permits hoisting it
+       exactly that far. What follows lz_fwht_i32 does (subn_fwht_quant's
+       amax and q8_round), which is why it cannot be hoisted further. */
+    if (lz_cpu_has_mmx() && n >= 4 && (n & 3) == 0) {
+        for (i = 0; i < n; i += 2) {
+            int32_t u = tmp[i], v = tmp[i + 1];
+            tmp[i]     = u + v;
+            tmp[i + 1] = u - v;
+        }
+        for (len = 2; len < n; len <<= 1) lz_fwht_stage_mmx(tmp, n, len);
+        _mm_empty();
+        return;
+    }
+#endif /* LZ_FWHT_MMX_EXTERN */
     for (len = 1; len < n; len <<= 1) {
         for (i = 0; i < n; i += (len << 1)) {
             for (j = 0; j < len; j++) {
