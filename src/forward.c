@@ -2167,16 +2167,25 @@ static void forward_ssm(const LZModel *m, LZRunState *s,
    add/sub. The unnormalized transform grows RMS by sqrt(blk); 1/sqrt(blk)
    is folded into the STORED scale (the H.264 pattern), so the kernels
    stay integer and the dequant matches the training side's orthonormal
-   _block_hadamard within quantization tolerance. The per-token scale is
-   the post-Hadamard absmax, replicated into every n/32 xqs slot for the
-   matmul's per-32 read. q/s semantics match lz_quantize_q8 (round-half-
-   even, clamp [-127,127], all-zero row scale 1.0). */
-static void subn_fwht_quant(const float *x, int n, int blk,
+   _block_hadamard within quantization tolerance.
+
+   gw is the width of one stored scale: n for BitNet v2's per-token
+   absmax, or the engine's own activation group (32) when --subn-scale
+   group is on. It is NOT the Hadamard block - the transform runs
+   identically either way, and the grouping applies to the ROTATED int32
+   values, where it is exact: within a group the dequant q[i]*s[g] still
+   reproduces fscr[i]*inv_S/sqrt(blk), because inv_S and sqrt(blk) are
+   row-wide constants and only the 127/tam fold is per group. Whichever
+   gw is used, one xqs slot is still written per 32 elements, which is
+   what the matmul reads.
+
+   q/s semantics match lz_quantize_q8 (round-half-even, clamp
+   [-127,127], all-zero group scale 1.0). */
+static void subn_fwht_quant(const float *x, int n, int blk, int gw,
                             int8_t *q, float *s, int32_t *fscr) {
     union { float f; uint32_t u; } b;
-    float amax, S, inv_S, inv_q, scale;
-    int32_t tam = 0;
-    int e, i, b_i;
+    float amax, S, inv_S, inv_q, scale, rs;
+    int e, i, b_i, base;
     b.u = q8_amax(x, n);
     amax = b.f;
     if (amax <= 0.0f) {          /* all-zero row: q all 0, scale 1.0 */
@@ -2192,31 +2201,51 @@ static void subn_fwht_quant(const float *x, int n, int blk,
     for (i = 0; i < n; i++) fscr[i] = q8_round(x[i] * S);
     for (b_i = 0; b_i < n; b_i += blk)          /* block-diagonal Sylvester */
         lz_fwht_i32(fscr + n + b_i, fscr + b_i, blk);
-    for (i = 0; i < n; i++) {
-        int32_t a = fscr[n + i] < 0 ? (int32_t)(0u - (uint32_t)fscr[n + i])
-                                    : fscr[n + i];
-        if (a > tam) tam = a;
+    if (gw <= 0 || (gw & 31) != 0 || (n % gw) != 0) gw = n;
+    /* Hoisted, not folded into a single constant: the multiply chain
+       below must stay (tam*inv_S)*rs*INV127 in that order, or the
+       per-token arm stops being bit-identical to the engine that had no
+       gw. lz_rsqrt_float_body is pure and blk is row-wide, so calling it
+       once here is the same call the row made before. */
+    rs = lz_rsqrt_float_body((float)blk);
+    for (base = 0; base < n; base += gw) {
+        int32_t tam = 0;
+        for (i = base; i < base + gw; i++) {
+            int32_t a = fscr[n + i] < 0 ? (int32_t)(0u - (uint32_t)fscr[n + i])
+                                        : fscr[n + i];
+            if (a > tam) tam = a;
+        }
+        /* Dequant scale = post-Hadamard amax / sqrt(blk) / 127. The
+           element loop rounds t*127/tam, identical to
+           lz_quantize_q8_int's fold. tam == 0 is the group's fixed-point
+           collapse and takes the same scale-1.0 exit q8_group_scale
+           gives a zero group. */
+        scale = (float)tam * inv_S * rs * LZ_Q8_INV127;
+        if (tam == 0 || scale < LZ_Q8_MIN_SCALE_F) {
+            scale = 1.0f;
+            inv_q = 0.0f;
+        } else {
+            inv_q = 127.0f / (float)tam;
+        }
+        for (i = base; i < base + gw; i++) {
+            int qv = q8_round((float)fscr[n + i] * inv_q);
+            qv = (qv > 127) ? 127 : qv;
+            q[i] = (int8_t)((qv < -127) ? -127 : qv);
+        }
+        for (i = base / 32; i < (base + gw) / 32; i++) s[i] = scale;
     }
-    if (tam == 0) {              /* fixed-point row collapsed to zero */
-        for (i = 0; i < n; i++) q[i] = 0;
-        for (i = 0; i < n / 32; i++) s[i] = 1.0f;
-        return;
-    }
-    /* Dequant scale = post-Hadamard amax / sqrt(blk) / 127. The element
-       loop rounds t*127/tam, identical to lz_quantize_q8_int's fold. */
-    scale = (float)tam * inv_S * lz_rsqrt_float_body((float)blk) * LZ_Q8_INV127;
-    if (scale < LZ_Q8_MIN_SCALE_F) {
-        scale = 1.0f;
-        inv_q = 0.0f;
-    } else {
-        inv_q = 127.0f / (float)tam;
-    }
-    for (i = 0; i < n; i++) {
-        int qv = q8_round((float)fscr[n + i] * inv_q);
-        qv = (qv > 127) ? 127 : qv;
-        q[i] = (int8_t)((qv < -127) ? -127 : qv);
-    }
-    for (i = 0; i < n / 32; i++) s[i] = scale;
+}
+
+/* Width of one stored activation scale on the SubLN o_proj/down_proj
+   input, resolved from --subn-scale. 0 means "the whole row" and is
+   what subn_fwht_quant / lz_quantize_q8_tok already do; gs is the
+   site's lz_act_gs, which is 0 when the width is not a multiple of 32.
+   Returning 0 for a gs this path cannot honour keeps the fallback in
+   ONE place instead of at each of the four call sites. */
+static int subn_scale_gs(int gs, int n) {
+    if (!lz_subn_scale_group()) return 0;
+    if (gs <= 0 || (gs & 31) != 0 || n < gs || (n % gs) != 0) return 0;
+    return gs;
 }
 
 /* Kimi Delta Attention: same role as forward_ssm's GatedDeltaNet block,
@@ -2847,11 +2876,17 @@ static void forward_kda(const LZModel *m, LZRunState *s,
                (model.c resolve_hadamard). 0 = no Hadamard. */
             {
                 int oblk = c->hadamard_o;
+                int qgw = subn_scale_gs(gso, vdim);
                 if (oblk > 1) {
                     for (tk = 0; tk < nt; tk++)
                         subn_fwht_quant(s->ssm_out + (size_t)tk * vdim, vdim,
-                                        oblk, s->xq + (size_t)tk * vdim,
+                                        oblk, qgw, s->xq + (size_t)tk * vdim,
                                         s->xqs + (size_t)tk * nso, s->fwht_scratch);
+                } else if (qgw > 0) {
+                    for (tk = 0; tk < nt; tk++)
+                        lz_quantize_q8(s->ssm_out + (size_t)tk * vdim, vdim, qgw,
+                                       s->xq + (size_t)tk * vdim,
+                                       s->xqs + (size_t)tk * nso);
                 } else {
                     for (tk = 0; tk < nt; tk++)
                         lz_quantize_q8_tok(s->ssm_out + (size_t)tk * vdim, vdim,
@@ -3262,14 +3297,20 @@ static void dense_ffn_step(const LZModel *m, LZRunState *s,
                                            s->xqs + (size_t)tk * nsd);
                 }
             } else {
+                int qgw = subn_scale_gs(gsd, idim);
                 for (tk = 0; tk < nt; tk++)
                     lz_rmsnorm(s->hb2 + (size_t)tk * idim, s->hb + (size_t)tk * idim,
                                lz_t_f32(&L->down_norm, s->wscr), idim, c->rms_norm_eps);
                 if (dblk > 1) {
                     for (tk = 0; tk < nt; tk++)
                         subn_fwht_quant(s->hb2 + (size_t)tk * idim, idim, dblk,
-                                        s->xq + (size_t)tk * idim,
+                                        qgw, s->xq + (size_t)tk * idim,
                                         s->xqs + (size_t)tk * nsd, s->fwht_scratch);
+                } else if (qgw > 0) {
+                    for (tk = 0; tk < nt; tk++)
+                        lz_quantize_q8(s->hb2 + (size_t)tk * idim, idim, qgw,
+                                       s->xq + (size_t)tk * idim,
+                                       s->xqs + (size_t)tk * nsd);
                 } else {
                     for (tk = 0; tk < nt; tk++)
                         lz_quantize_q8_tok(s->hb2 + (size_t)tk * idim, idim,

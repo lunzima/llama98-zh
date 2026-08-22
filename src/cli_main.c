@@ -256,6 +256,12 @@ static void usage(void) {
     "                   adds the gated norm writing its Q15 result as int for\n"
     "                   lz_quantize_q8_int instead of dequantizing to float\n"
     "                   and re-quantizing (bit-identical); it implies fixed.\n"
+    "  --subn-scale MODE   tok|group (default tok). Width of one INT8\n"
+    "                   activation scale on the SubLN o_proj/down_proj input.\n"
+    "                   tok is BitNet v2's per-token absmax; group keeps the\n"
+    "                   engine's own per-32 grouping across the Hadamard.\n"
+    "                   Value-changing, and inert unless the model sets\n"
+    "                   use_subn. NOT a fixed-point tier: --fixed skips it.\n"
     "  --scalar-fixed TIER auto|float|fixed (default auto = fixed, same as\n"
     "                   the other six). lz_exp and lz_rsqrt together - the\n"
     "                   last two scalar x87 ops the fixed tiers leave on\n"
@@ -1366,6 +1372,16 @@ int main(int argc, char **argv) {
             const char *got = lz_norm_select(argv[++i]);
             if (!got) {
                 printf("--norm-write: unknown tier (auto|float|fixed)\n");
+                return 2;
+            }
+        }
+        else if (strcmp(a, "--subn-scale") == 0 && i + 1 < argc) {
+            /* Deliberately outside the --fixed group table below: this
+               picks a scale LAYOUT, not a float/int tier, so `--fixed
+               off` must leave it alone. */
+            const char *got = lz_subn_scale_select(argv[++i]);
+            if (!got) {
+                printf("--subn-scale: unknown mode (tok|group)\n");
                 return 2;
             }
         }

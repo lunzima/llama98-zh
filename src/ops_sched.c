@@ -366,6 +366,46 @@ int lz_norm_can_fixed(int n) {
 #endif /* LZ_NORM_FIXED */
 }
 
+/* ---- SubLN activation scale granularity ------------------------------ */
+
+/* How wide one INT8 activation scale is on the SubLN o_proj/down_proj
+   input. NOT a fixed-point tier: it changes no float/int decision and is
+   deliberately absent from cli_main.c's --fixed axes[] table, which
+   floats every fixed-point site. Putting it there would make `--fixed
+   off` silently change the scale layout too.
+
+   `tok` is BitNet v2's per-token absmax: one scale for the whole row,
+   replicated into every n/32 slot. That is where the SubLN path started,
+   because the reference quantizes per token EVERYWHERE - weights per
+   tensor, activations per token - so it had no finer grouping to give
+   up. This engine's native activation granularity is per 32 elements
+   (lz_act_gs), which the non-SubLN path uses, so `tok` hands back a
+   grouping the rest of the engine keeps.
+
+   `group` keeps that per-32 grouping across the Hadamard. The transform
+   does not require a row-wide scale: the fixed-point FWHT's own scale S
+   is per row because a butterfly mixes a whole blk-wide block, but that
+   is the INPUT representation; once the rotated int32 values exist,
+   quantizing them in 32-wide groups is exact - each group's dequant
+   q[i]*s[g] reproduces fscr[i]*inv_S/sqrt(blk) as before.
+
+   A knob rather than a straight replacement: which one wins is measured,
+   not derived, and the two disagree on the wire. */
+#define LZ_SUBN_SCALE_TOK   0
+#define LZ_SUBN_SCALE_GROUP 1
+
+static int g_subn_scale = LZ_SUBN_SCALE_TOK;
+
+int lz_subn_scale_group(void) { return g_subn_scale == LZ_SUBN_SCALE_GROUP; }
+
+const char *lz_subn_scale_select(const char *name) {
+    if (!name) return NULL;
+    if (strcmp(name, "tok") == 0) g_subn_scale = LZ_SUBN_SCALE_TOK;
+    else if (strcmp(name, "group") == 0) g_subn_scale = LZ_SUBN_SCALE_GROUP;
+    else return NULL;
+    return lz_subn_scale_group() ? "group" : "tok";
+}
+
 /* ---- epilogue tier --------------------------------------------------- */
 
 static int g_epi = -1;

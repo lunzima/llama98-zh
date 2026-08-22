@@ -44,6 +44,7 @@
 !/build/native_obj_gate.sh
 !/build/f32count_billing_gate.sh
 !/build/recur_write_float_arm_gate.sh
+!/build/subn_scale_gate.sh
 
 # Stray compiler/linker intermediates (gcc, Open Watcom), plus the raw
 # dumps probes drop at the repo root when run without a -o path.

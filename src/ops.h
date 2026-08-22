@@ -592,6 +592,22 @@ int lz_norm_can_fixed(int n);
    only exists on top of the fixed tier. */
 int lz_norm_int(void);
 
+/* SubLN activation scale granularity: "tok" | "group" (default tok).
+   Selected as `--subn-scale`. Applies ONLY where use_subn is on, to the
+   o_proj / down_proj input - the two projections H-BitLinear covers.
+
+   tok:   one absmax over the whole row, replicated into every n/32 slot
+          (BitNet v2's per-token scheme).
+   group: the engine's own per-32 grouping (lz_act_gs), kept across the
+          Hadamard.
+
+   A VALUE-CHANGING knob, like the conv/attn/epi tiers: the two produce
+   different INT8 and different scales. `tok` is bit-identical to the
+   engine before this knob existed. See ops_sched.c for why the Hadamard
+   does not force a row-wide scale. */
+int lz_subn_scale_group(void);
+const char *lz_subn_scale_select(const char *name);
+
 /* Scalar transcendental tier (lz_exp and lz_rsqrt together):
    "float" | "fixed" | "auto".
 
