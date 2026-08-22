@@ -176,6 +176,13 @@ typedef char lz_q8min_check[1 - 2 * (int)!(LZ_Q8_MIN_SCALE == 0.0f)];
 #error "LZ_KGATE_I16 != 0"
 #endif
 
+#ifndef LZ_KGATE_EXP_I
+#error "LZ_KGATE_EXP_I not defined (expected 0)"
+#endif
+#if LZ_KGATE_EXP_I != 0
+#error "LZ_KGATE_EXP_I != 0"
+#endif
+
 #ifndef LZ_MLAT_I16
 #error "LZ_MLAT_I16 not defined (expected 0)"
 #endif

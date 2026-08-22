@@ -56,13 +56,16 @@ for M in neg pos narrow out; do
     # step for NEGATIVE v only. Only the sign correction can be wrong
     # for one sign and right for the other, which is what makes the
     # two wide rows two rows.
+    # The two patterns follow sig_t15_wide's body, which now reaches the
+    # floor through fold_floor_shr instead of open-coding the bias. The
+    # `did not apply` guard below is what caught the move.
     neg)
         ROW=WIDE-NEG
-        sed -i 's/return q + LZ_SIG_T15;/return q + LZ_SIG_T15 + (v < 0 ? 1 : 0);/' "$Q"
+        sed -i 's/, e - 19) + LZ_SIG_T15;/, e - 19) + LZ_SIG_T15 + (v < 0 ? 1 : 0);/' "$Q"
         CHK='(v < 0 ? 1 : 0)' ;;
     pos)
         ROW=WIDE-POS
-        sed -i 's/return q + LZ_SIG_T15;/return q + LZ_SIG_T15 + (v >= 0 ? 1 : 0);/' "$Q"
+        sed -i 's/, e - 19) + LZ_SIG_T15;/, e - 19) + LZ_SIG_T15 + (v >= 0 ? 1 : 0);/' "$Q"
         CHK='(v >= 0 ? 1 : 0)' ;;
     # The pre-existing narrow body's shift. Reaches no e >= 20, so the
     # two wide rows must stay green under it.

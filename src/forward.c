@@ -198,6 +198,25 @@ long long lz_debug_attn_skip = 0;
    uses directly. */
 long long lz_debug_vproj_i16 = 0;
 
+/* Positive control for the decay gate's integer chain (LZ_KGATE_EXP_I),
+   same role and same reason as the counter above: the integer and float
+   chains compute the same function to within the fixed tier's own
+   drift, so no output comparison can tell "the chain ran" from "both
+   folds refused and it silently kept the float one". Elements, so the
+   number is the one the conversion arithmetic multiplies.
+
+   _exp_s and _sig_slo/_sig_shi are the two folds' exponents as actually
+   built from this checkpoint's constants - the derivation says they
+   should be 31 and 29..42, and a value outside that says the fold met a
+   constant the measurement never saw. _fold_no counts refusals: it must
+   be 0 whenever the chain was asked for, and a nonzero there is the one
+   failure mode that otherwise looks exactly like success. */
+long long lz_debug_kgate_exp_i = 0;
+long long lz_debug_kgate_fold_no = 0;
+int lz_debug_kgate_exp_s = -1;
+int lz_debug_kgate_sig_slo = 9999;
+int lz_debug_kgate_sig_shi = -9999;
+
 /* --kv f32: keep the KV cache unquantized. Reference arm only, see
    forward.h's kf32 comment for why it has to exist. */
 int lz_kv_kfmt = LZ_KVF_Q8;
@@ -481,6 +500,25 @@ static void *xcalloc(size_t n, size_t sz, int *ok, long long *acc) {
 #ifndef LZ_KGATE_ES
 #define LZ_KGATE_ES 9
 #endif /* LZ_KGATE_ES */
+
+/* The decay gate's two transcendentals in the integer domain, on top of
+   the int16 exit above. LZ_KGATE_I16 delivered `pre` as an integer and
+   then spent nine semantic conversions per element getting from it to
+   gt: one for the sigmoid's float coordinate, three inside
+   sigmoid_q15_t taking that coordinate apart again, one for the Q15
+   descale, and four in lz_exp_fixed (two i2f plus its magic floor and
+   q8_round, neither of which emits a cvt but both of which are a full
+   soft-float add on a machine with no FPU). sigmoid_q15_ti and lz_exp_t
+   take the two folded integer coordinates instead and leave ONE - the
+   int->float on lz_exp_t's own exit, which stands until gt itself stops
+   being a float array.
+
+   0 is the control arm: it keeps the float-coordinate chain, which is
+   also the arm that runs whenever the scalar transcendental tier is off
+   (lz_exp_t is lz_exp_fixed's twin, not lz_exp's) or a fold refuses. */
+#ifndef LZ_KGATE_EXP_I
+#define LZ_KGATE_EXP_I 1
+#endif /* LZ_KGATE_EXP_I */
 
 /* ---- the MoE latent's int16 exit (int-pipeline milestone 6) ----------
  *
@@ -3033,11 +3071,53 @@ static void forward_kda(const LZModel *m, LZRunState *s,
             float gk = pow2f(4 - LZ_KGATE_ES);
             float t_off = lz_sig_q15_t_offset();
             const short *dtb = s->kda_dtb_i16 + (size_t)li * nvk;
+#if LZ_KGATE_EXP_I
+            /* The exp's fold: x == s15 * lower_bound * 2^-15, one
+               constant for the whole model, so this is asked here only
+               because here is where decay_base is built. lz_scalar_mode
+               because lz_exp_t is lz_exp_FIXED's twin - with the scalar
+               tier off, lz_exp is the float body and taking the integer
+               entry would answer from the other tier. */
+            int32_t em = 0;
+            int es = 0;
+            int exp_int = lz_scalar_mode() &&
+                          lz_exp_t_fold(c->kda_gate_lower_bound, -15, &em, &es);
+            if (lz_scalar_mode() && !exp_int) lz_debug_kgate_fold_no++;
+            if (exp_int) lz_debug_kgate_exp_s = es;
+#endif /* LZ_KGATE_EXP_I */
             for (tk = 0; tk < nt; tk++) {
                 const short *gi = s->kda_gate_i16 + (size_t)tk * nvk;
                 float *gt = s->kda_gate + (size_t)tk * nvk;
                 for (h = 0; h < nv; h++) {
-                    float k1 = decay_base[h] * gk;
+                    float k1;
+#if LZ_KGATE_EXP_I
+                    int32_t sm = 0;
+                    int ss = 0;
+                    /* The sigmoid's fold: x == pre * decay_base[h] *
+                       2^-LZ_KGATE_ES, per head. */
+                    int sig_int = exp_int &&
+                                  lz_fold_f32(decay_base[h], -LZ_KGATE_ES,
+                                              &sm, &ss);
+                    if (exp_int && !sig_int) lz_debug_kgate_fold_no++;
+                    if (sig_int) {
+                        /* Integer to the last line of lz_exp_t. The site
+                           bills nothing because there is nothing to bill
+                           - lz_exp_t bills its own exit, exactly as
+                           sigmoid_q15_i bills nothing at the conv
+                           epilogue's integer coordinate. */
+                        if (ss < lz_debug_kgate_sig_slo) lz_debug_kgate_sig_slo = ss;
+                        if (ss > lz_debug_kgate_sig_shi) lz_debug_kgate_sig_shi = ss;
+                        lz_debug_kgate_exp_i += kd;
+                        for (i = 0; i < kd; i++) {
+                            int idx = h * kd + i;
+                            int32_t pre = (int32_t)gi[idx] + (int32_t)dtb[idx];
+                            gt[idx] = lz_exp_t(sigmoid_q15_ti(pre, sm, ss),
+                                               em, es);
+                        }
+                        continue;
+                    }
+#endif /* LZ_KGATE_EXP_I */
+                    k1 = decay_base[h] * gk;
                     LZ_FCX(LZ_FC_SIGMOID, 3 * (long)kd, (long)kd, 0,
                            2 * (long)kd, 0);
                     for (i = 0; i < kd; i++) {

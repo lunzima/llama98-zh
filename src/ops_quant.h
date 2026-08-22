@@ -113,6 +113,25 @@ void lz_sig_q15_fold(float oscale, float *k1, float *oscale2);
    so the two stop agreeing and this one is the correct of the pair. */
 int32_t sigmoid_q15_i(int32_t v, int e);
 
+/* Folded-scale twins of the two entries above: x == v * m * 2^-s, where
+   (m, s) is a constant the caller folds ONCE with lz_fold_f32 /
+   lz_exp_t_fold. sigmoid_q15_i needs a power-of-two scale and lz_exp
+   needs a float argument; the KDA decay gate's two constants are
+   neither, which is what kept it on a float coordinate. lz_exp_t takes
+   lz_exp's own table coordinate y32 == x * log2(e) * 32, so its fold
+   carries that factor and the caller never sees it.
+
+   lz_exp_t is lz_exp_fixed's twin: ask lz_scalar_mode() before choosing
+   it, the way lz_sigmoid_i's callers ask lz_sig_mode().
+
+   The folds return 1 on an exact split and 0 as a REFUSAL - on 0 the
+   pair must not be used. See ops_quant.c for each entry's domain and
+   for the enumerated range of every intermediate. */
+int32_t sigmoid_q15_ti(int32_t v, int32_t m, int s);
+float lz_exp_t(int32_t v, int32_t m, int s);
+int lz_fold_f32(float a, int p, int32_t *m, int *s);
+int lz_exp_t_fold(float a, int p, int32_t *m, int *s);
+
 /* The magnitude at which the table above saturates, in sigmoid_q15_i's
    input domain: |v| >= this is exactly where sigmoid_q15 clamps. A
    producer clamping its int16 exit here is therefore not adding a clamp,

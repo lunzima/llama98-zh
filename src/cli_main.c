@@ -112,6 +112,16 @@ extern long long lz_debug_swiglu_i16;
    Channel-steps that entered sigmoid through sigmoid_q15_i; 0 under
    -DLZ_CONV_SIG_I=0 and 0 on the float conv tier. */
 extern long long lz_debug_conv_sig_i;
+/* The KDA decay gate's integer chain, forward.c. Elements whose sigmoid
+   and exp were both reached through folded integer coordinates; 0 under
+   -DLZ_KGATE_EXP_I=0 and 0 with the scalar tier off. The two exponents
+   are the folds as built from this checkpoint, and `refused` must be 0
+   whenever the chain was asked for. */
+extern long long lz_debug_kgate_exp_i;
+extern long long lz_debug_kgate_fold_no;
+extern int lz_debug_kgate_exp_s;
+extern int lz_debug_kgate_sig_slo;
+extern int lz_debug_kgate_sig_shi;
 extern int lz_debug_swiglu_pmax;
 extern int lz_debug_swiglu_gmax;
 extern int lz_debug_swiglu_omax;
@@ -1880,6 +1890,11 @@ int main(int argc, char **argv) {
                lz_debug_swiglu_i16, lz_debug_swiglu_pmax,
                lz_debug_swiglu_gmax, lz_debug_swiglu_omax);
         printf("conv sig int   %lld channel-steps\n", lz_debug_conv_sig_i);
+        printf("kda gate int   %lld elements  exp s %d  sig s %d..%d"
+               "  refused %lld\n",
+               lz_debug_kgate_exp_i, lz_debug_kgate_exp_s,
+               lz_debug_kgate_sig_slo, lz_debug_kgate_sig_shi,
+               lz_debug_kgate_fold_no);
         printf("gate sig int   %lld elements  eg %d..%d\n",
                lz_debug_norm_sig_i, lz_debug_norm_eg_lo,
                lz_debug_norm_eg_hi);

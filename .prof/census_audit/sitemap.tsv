@@ -26,10 +26,15 @@ lz_sigmoid	SIGMOID
 lz_silu	SIGMOID
 lz_sigmoid_i	SIGMOID
 sigmoid_q15_i	SIGMOID
+sigmoid_q15_ti	SIGMOID
+sig_t15_wide	SIGMOID
 lz_sig_q15_fold	SIGMOID
 lz_exp_fixed	EXP
 lz_exp_float_body	EXP
 lz_exp	EXP
+lz_exp_t	EXP
+lz_exp_t_fold	EXP
+exp_t_bounds	EXP
 lz_rsqrt_fixed	RSQRT
 lz_rsqrt_float_body	RSQRT
 rsqrt_tab_build	RSQRT

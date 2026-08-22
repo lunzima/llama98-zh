@@ -295,9 +295,17 @@ $dm_with_fwd"
 # bit-identical. Each =0 arm and the both-off arm were all measured;
 # both off reproduces the pre-change census exactly (888,102 on kmr20/zh)
 # and byte-identical logits on both fixtures and both gate models.
+# LZ_KGATE_EXP_I is the KDA decay gate's two transcendentals in the
+# integer domain (forward.c), on top of LZ_KGATE_I16's int16 exit. ONE
+# switch and not two, unlike the gated norm's pair: sigmoid_q15_ti's
+# output is lz_exp_t's input, so with only one of them integer the
+# coordinate has to be rebuilt in float between them and neither half's
+# saving could be measured alone. Its =0 arm reproduces the pre-change
+# census exactly (808,230 on kmr20/zh, 828,487 en) and byte-identical
+# logits on both fixtures and both gate models.
 # The _ES exponents are calibration constants, not switches, and are
 # excluded for the same reason LZ_CONV_ES is.
-SWITCHES="LZ_GDN_FIXED=0 LZ_GDN_STATE_2PLANE=0 LZ_ATTN_FIXED=0 LZ_CONV_FIXED=0 LZ_NORM_FIXED=0 LZ_SSE2_GROUP=0 LZ_Q8_MIN_SCALE=0.0f LZ_EXACT_MATH=1 LZ_CPUID_NOCACHE=1 LZ_NO_FPU=1 LZ_KV_2PLANE=1 LZ_GDN_STATE_F32=1 LZ_BATCH_MAX=1 LZ_SPEC_K=1 LZ_PF_DIST=0 LZ_Q8R_FORCE_SSE=1 LZ_P2_FORCE_MMX=1 LZ_BVEC_I16=0 LZ_MOEGATE_I16=0 LZ_KLAT_I16=0 LZ_KGATE_I16=0 LZ_MLAT_I16=0 LZ_MLAT_REUSE=0 LZ_VPROJ_I16=0 LZ_Q8I16_INT=0 LZ_SWIGLU_I16=0 LZ_CONV_SIG_I=0 LZ_GATE_SIG_I=0 LZ_GATE_QW=0"
+SWITCHES="LZ_GDN_FIXED=0 LZ_GDN_STATE_2PLANE=0 LZ_ATTN_FIXED=0 LZ_CONV_FIXED=0 LZ_NORM_FIXED=0 LZ_SSE2_GROUP=0 LZ_Q8_MIN_SCALE=0.0f LZ_EXACT_MATH=1 LZ_CPUID_NOCACHE=1 LZ_NO_FPU=1 LZ_KV_2PLANE=1 LZ_GDN_STATE_F32=1 LZ_BATCH_MAX=1 LZ_SPEC_K=1 LZ_PF_DIST=0 LZ_Q8R_FORCE_SSE=1 LZ_P2_FORCE_MMX=1 LZ_BVEC_I16=0 LZ_MOEGATE_I16=0 LZ_KLAT_I16=0 LZ_KGATE_I16=0 LZ_KGATE_EXP_I=0 LZ_MLAT_I16=0 LZ_MLAT_REUSE=0 LZ_VPROJ_I16=0 LZ_Q8I16_INT=0 LZ_SWIGLU_I16=0 LZ_CONV_SIG_I=0 LZ_GATE_SIG_I=0 LZ_GATE_QW=0"
 
 for entry in $SWITCHES; do
     name="${entry%%=*}"

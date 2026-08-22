@@ -434,6 +434,231 @@ float lz_exp_fixed(float x) {
     return (float)prod * pow2f(n - LZ_EXP_Q);
 }
 
+/* ---- folded-scale integer coordinates -------------------------------
+ *
+ * sigmoid_q15_i takes an integer whose scale is a POWER OF TWO (x ==
+ * v * 2^-e). The entries here take one whose scale is not: x ==
+ * v * m * 2^-s, with (m, s) a constant the caller folds once. That is
+ * the shape the KDA decay gate needs, and the reason it still reached
+ * both of its transcendentals through float coordinates after milestone
+ * 5 - neither of its constants is a power of two:
+ *
+ *   pre  = gate_i16 + dt_bias_i16                           integer
+ *   s15  = sigmoid(decay_base[h] * pre * 2^-LZ_KGATE_ES)    per head
+ *   gt   = exp(s15 * lower_bound / 32768)                   per model
+ *
+ * decay_base[h] = exp(A_log[h]); measured on both checkpoints it runs
+ * 0.00137..10.585 while lower_bound is a single -5.0 (.prof/m5range.c
+ * reports both). So ONE SHARED SCALE DOES NOT SERVE BOTH: the exp's
+ * fold is per model and the sigmoid's is per head. Per head rather than
+ * per layer because it costs nothing to be - (m, s) is hoisted out of
+ * the element loop either way, and a shared scale would quantize the
+ * smallest head's constant against the largest head's exponent.
+ *
+ * WHY (m, s) AND NOT A PRE-MULTIPLIED COORDINATE, which is what
+ * sigmoid_q15_t's float shape would suggest: the caller would need the
+ * same 64-bit multiply, would add an intermediate rounding between it
+ * and the table, and would put a signed shift in forward.c. Here the
+ * product stays inside one exhaustively verified function and the table
+ * index is derived from it with no rounding before it at all.
+ *
+ * WHY m CARRIES ONLY 24 BITS. The constants being folded ARE float32s,
+ * so 24 bits is all the information in them; lz_fold_f32 splits one
+ * exactly and the fold adds no error of its own. What it removes is the
+ * pair of float32 roundings the old chain paid PER ELEMENT (`(float)s15
+ * * lbq`, then `x * LZ_EXP_LOG2E32` inside lz_exp), so the integer
+ * coordinate is the more accurate of the two and not the looser one.
+ */
+
+/* floor(p / 2^sh) for a signed 64-bit p, computed on a biased unsigned
+   so that no negative value is ever right-shifted - that is only
+   implementation-defined in C and none of this may depend on it.
+   (uint64_t)p + 2^63 is exactly p + 2^63 as a value in [0, 2^64) for
+   every p including INT64_MIN, and 2^63 is divisible by 2^sh, so
+   (up >> sh) == floor(p/2^sh) + 2^(63-sh) and subtracting that constant
+   back leaves the floor. Total: sh <= 0 is the identity, sh >= 64 is
+   the sign, since |p| * 2^-64 < 1.
+
+   This is the 64-bit form of the argument sig_t15_wide used to carry
+   inline; that function calls this one now, so the file has ONE floor
+   shift rather than two. It is not a second epi_shr_half either - that
+   primitive rounds half-away-from-zero, and a rounded quotient has no
+   remainder to pair with, which is exactly what a table coordinate is
+   made of. */
+static int64_t fold_floor_shr(int64_t p, int sh) {
+    uint64_t up;
+    if (sh <= 0) return p;
+    if (sh >= 64) return (p < 0) ? -1 : 0;
+    up = (uint64_t)p + ((uint64_t)1 << 63);
+    return (int64_t)(up >> sh) - (int64_t)((uint64_t)1 << (63 - sh));
+}
+
+/* Split a * 2^p into m * 2^-s, EXACTLY.
+
+   A finite normal float32 IS mant * 2^(e-150) with mant in [2^23, 2^24)
+   and e the stored exponent field, so the split is a field read and an
+   integer subtract: no rounding, no libm, and no double - which the
+   PC=24 region would compress to 24 bits anyway.
+
+   Returns 1 when the split is exact. 0 IS A REFUSAL, not a bound: on 0
+   the entries below must not be given the pair, and m/s carry a
+   saturated stand-in only so that a caller which ignores the return
+   gets a defined value instead of an out-of-range shift. Refused are
+   inf, NaN, subnormals, and any value whose exponent leaves the window
+   [2^23 * 2^-LZ_FOLD_SMAX, 2^31). Zero splits exactly, as m = 0, s = 0.
+
+   s is capped at LZ_FOLD_SMAX = 62 because that is the widest shift
+   past which fold_floor_shr can only return a sign, and because both
+   entries state their domain in terms of it. Negative exponents below
+   -7 are refused rather than represented: |mant| < 2^24, so widening it
+   by more than 7 places leaves int32. */
+#define LZ_FOLD_SMAX 62
+
+int lz_fold_f32(float a, int p, int32_t *m, int *s) {
+    union { float f; uint32_t u; } b;
+    int e, sc;
+    int32_t mant;
+    b.f = a;
+    e = (int)((b.u >> 23) & 0xFFu);
+    if (e == 0) {                          /* zero or subnormal */
+        *m = 0;
+        *s = 0;
+        return (b.u & 0x7FFFFFFFu) == 0;
+    }
+    if (e == 0xFF) {                       /* inf or NaN */
+        *m = 0;
+        *s = 0;
+        return 0;
+    }
+    mant = (int32_t)((b.u & 0x007FFFFFu) | 0x00800000u);
+    if (b.u & 0x80000000u) mant = -mant;
+    sc = 150 - e - p;                      /* a * 2^p == mant * 2^-sc */
+    if (sc > LZ_FOLD_SMAX) {
+        *m = 0;
+        *s = 0;
+        return 0;
+    }
+    if (sc < 0) {
+        if (sc < -7) {
+            *m = (mant < 0) ? -2147483647 : 2147483647;
+            *s = 0;
+            return 0;
+        }
+        *m = mant * (int32_t)(1 << -sc);   /* |mant| < 2^24, so < 2^31 */
+        *s = 0;
+        return 1;
+    }
+    *m = mant;
+    *s = sc;
+    return 1;
+}
+
+/* The exp entry's own fold: y32 == v * m * 2^-s for x == v * a * 2^p,
+   i.e. m * 2^-s is a * 2^p * log2(e) * 32. LZ_EXP_LOG2E32 stays private
+   to this file for the reason lz_sig_q15_t_offset keeps LZ_SIG_LO
+   private, so the caller hands over its own constant and gets the table
+   coordinate's fold back. The float32 multiply here is the ONLY
+   rounding anywhere on the path, and it happens once per layer in place
+   of two per element. */
+int lz_exp_t_fold(float a, int p, int32_t *m, int *s) {
+    return lz_fold_f32(a * LZ_EXP_LOG2E32, p, m, s);
+}
+
+/* The guard window in t's domain (t == floor(y32)), derived from the
+   float bodies' own x-domain guards rather than written down: the two
+   constants below are what `x > 88.0f` and `x < LZ_EXP_LO` are once
+   multiplied by LZ_EXP_LOG2E32. One step of slack on each side, so the
+   integer test never saturates for an x the float bodies would still
+   evaluate; inside that step the ordinary path stays in range (t <=
+   4064 keeps n <= 127, and pow2f already returns 0 below -126). */
+static int32_t g_expt_hi, g_expt_lo;
+static int g_expt_ready;
+
+static void exp_t_bounds(void) {
+    g_expt_hi = (int32_t)q8_round(88.0f * LZ_EXP_LOG2E32) + 1;
+    g_expt_lo = (int32_t)q8_round(LZ_EXP_LO * LZ_EXP_LOG2E32) - 1;
+    g_expt_ready = 1;
+}
+
+/* exp, entered through lz_exp's OWN table coordinate as an integer:
+ * y32 == v * m * 2^-s, where y32 is what the float body computes as
+ * `x * LZ_EXP_LOG2E32` and from which the floor, the table index and
+ * the residual all follow. Build (m, s) with lz_exp_t_fold.
+ *
+ * THE ARITHMETIC, integer up to the last line:
+ *   p    = v * m                   exact in int64, |p| <= 2^62
+ *   t    = floor(p * 2^-s)         the same floor the magic add
+ *                                  computes in lz_exp_fixed
+ *   n    = floor(t/32),  idx = t & 31
+ *   frac = p - t * 2^s             the low s bits of p, unsigned
+ *   sq   = round(frac * 2^(15-s))  == round(r * 2^15), r == y32 - t
+ * and sq enters lz_exp_fixed's Taylor unchanged: that body's own `s` is
+ * `q8_round(r * 2^20) >> 5`, the same quantity reached through a magic
+ * add and a shift. So this is lz_exp_fixed with the two i2f, the magic
+ * floor and q8_round removed - not a second approximation of exp.
+ *
+ * ROUNDED, NOT FLOORED, AT sq. A floor there is a one-sided 2^-16
+ * average bias on every element, and the factor it scales multiplies
+ * the recurrence state once per step, so the bias would accumulate
+ * along the sequence rather than cancel. Clamped at 32767 for the
+ * r -> 1 boundary, where the rounded value names the next table entry's
+ * residual instead of this one's.
+ *
+ * DOMAIN: v and m any int32, 0 <= s <= LZ_FOLD_SMAX. Outside that s
+ * band the entry REFUSES and returns 0, which a caller must not pass on
+ * as exp's value - lz_fold_f32 cannot produce such an s, and the call
+ * site checks that fold's return before choosing this path at all.
+ *
+ * INTERMEDIATE RANGE OVER THE WHOLE ACCEPTED DOMAIN, not over what
+ * today's caller presents (the narrow sigmoid_q15_i body overflowed at
+ * e == 27 for exactly the other habit): |p| <= 2^62, attained at
+ * v == m == INT32_MIN, which is why the product is int64 and not the
+ * int32 the caller's own operands would suggest; |t| <= 2^62 before the
+ * guards and 4064 after them; frac < 2^s <= 2^62; sq in [0, 32767];
+ * cq < 2^21; g_exptab[idx] * cq < 2^42; prod < 2^22. Enumerated in
+ * .prof/verify_exp_t.c.
+ *
+ * THE TIER: this is lz_exp_fixed's twin, so a caller asks
+ * lz_scalar_mode() before choosing it, the same way lz_sigmoid_i's
+ * callers ask lz_sig_mode(). An entry that ignored the tier would
+ * answer from the wrong one. */
+float lz_exp_t(int32_t v, int32_t m, int s) {
+    int64_t p, t64;
+    uint64_t frac;
+    int32_t t, n, idx, sq, cq, prod;
+    if (!g_exptab_ready) exp_tab_build();
+    if (!g_expt_ready) exp_t_bounds();
+    if (s < 0 || s > LZ_FOLD_SMAX) return 0.0f;
+    p = (int64_t)v * (int64_t)m;
+    t64 = fold_floor_shr(p, s);
+    if (t64 > g_expt_hi) return FLT_MAX;
+    if (t64 < g_expt_lo) return 0.0f;
+    t = (int32_t)t64;
+    n = (int32_t)fold_floor_shr((int64_t)t, 5);
+    idx = t & 31;                          /* always 0..31 in two's complement */
+    frac = (s == 0) ? (uint64_t)0
+                    : ((uint64_t)p & ((((uint64_t)1) << s) - 1));
+    if (s >= 16)
+        sq = (int32_t)((frac + ((uint64_t)1 << (s - 16))) >> (s - 15));
+    else if (s == 15)
+        sq = (int32_t)frac;
+    else
+        sq = (int32_t)(frac << (15 - s));
+    if (sq > 32767) sq = 32767;
+    cq = LZ_EXP_QSCALE
+       + (int32_t)((((int64_t)LZ_EXP2_LN2 * sq)
+                    + (1 << (LZ_EXP_Q - 1))) >> LZ_EXP_Q)
+       + (int32_t)((((int64_t)LZ_EXP2_LN2SQ * sq * sq)
+                    + (1LL << (2 * LZ_EXP_Q - 1))) >> (2 * LZ_EXP_Q));
+    prod = (int32_t)((((int64_t)g_exptab[idx] * cq)
+                      + (1 << (LZ_EXP_Q - 1))) >> LZ_EXP_Q);
+    /* One multiply and one convert, and that pair is the entire float
+       cost of the entry - against the nine semantic conversions the
+       float chain into lz_exp_fixed paid per element. */
+    LZ_FCX(LZ_FC_EXP, 1, 0, 0, 1, 0);
+    return (float)prod * pow2f(n - LZ_EXP_Q);
+}
+
 /* ---- sigmoid Q15 table ----------------------------------------------- */
 
 #define LZ_SIG_N    384
@@ -582,10 +807,20 @@ int32_t sigmoid_q15_t(float t) {
 #define LZ_SIG_EMAX 50          /* s == e - 19 <= 31, the widest shift */
 
 static int32_t sig_t15_wide(int32_t v, int e) {
-    int s = e - 19;                             /* >= 1 */
-    uint32_t uu = (uint32_t)v + 0x80000000u;    /* v + 2^31, exactly */
-    int32_t q = (int32_t)(uu >> s) - (int32_t)((uint32_t)1 << (31 - s));
-    return q + LZ_SIG_T15;
+    return (int32_t)fold_floor_shr((int64_t)v, e - 19) + LZ_SIG_T15;
+}
+
+/* The table read and the lerp, from a coordinate in units of 2^-15 of
+   one table step. Factored out because both integer entries reach the
+   table through it, so the interpolation exists once. The caller has
+   already established 0 < t15 < LZ_SIG_N << 15, which is what makes
+   idx + 1 a legal index and the shift a shift of a positive value. */
+static int32_t sig_from_t15(int32_t t15) {
+    int idx = (int)(t15 >> 15);
+    int32_t frac = t15 & 32767;
+    int32_t a = g_sigtab[idx];
+    int32_t b = g_sigtab[idx + 1];
+    return a + (((b - a) * frac) >> 15);
 }
 
 int32_t sigmoid_q15_i(int32_t v, int e) {
@@ -602,8 +837,7 @@ int32_t sigmoid_q15_i(int32_t v, int e) {
            g_sigtab read if the table geometry ever moves. */
         if (t15 <= 0) return 0;
         if (t15 >= (int32_t)LZ_SIG_N << 15) return 32768;
-        idx = (int)(t15 >> 15);
-        frac = t15 & 32767;
+        return sig_from_t15(t15);
     } else {
         lim = (int32_t)(-(int)LZ_SIG_LO) << e;  /* x == +-12, the table edge */
         if (v <= -lim) return 0;
@@ -620,6 +854,54 @@ int32_t sigmoid_q15_i(int32_t v, int e) {
     a = g_sigtab[idx];
     b = g_sigtab[idx + 1];
     return a + (((b - a) * frac) >> 15);
+}
+
+/* Integer-input sigmoid at a FOLDED scale: x == v * m * 2^-s, with
+ * (m, s) from lz_fold_f32. sigmoid_q15_i's scale has to be a power of
+ * two and the KDA gate's is not (decay_base[h] * 2^-LZ_KGATE_ES), which
+ * is why that site was still deriving its coordinate in float.
+ *
+ * EXACT, in the sense sigmoid_q15_i's wide band is: t * 2^15 ==
+ * 192 * 2^15 + x * 2^19 because -LZ_SIG_LO * LZ_SIG_STEP is 192 exactly
+ * and LZ_SIG_STEP is 2^4, and x * 2^19 == v * m * 2^(19-s). So the
+ * coordinate is an integer product and a floored shift, with no float
+ * and no rounding before the table index. sigmoid_q15_t rounds the same
+ * coordinate twice (its multiply and its add, both float32) and then
+ * converts three times to take it apart again.
+ *
+ * DOMAIN: v, m any int32; s any int. INTERMEDIATE RANGE over ALL of it:
+ * |v * m| <= 2^62, attained at v == m == INT32_MIN, which is why the
+ * product is int64 - the narrow sigmoid_q15_i body's int32 `u` is
+ * exactly the intermediate that overflowed at e == 27 when a wider
+ * producer arrived, and this one accepts a wider producer by
+ * construction. The coordinate then stays int64 until the two clamps
+ * have cut it to [0, LZ_SIG_N << 15], so nothing narrows before it is
+ * bounded.
+ *
+ * s < 19 needs a LEFT shift, and that branch saturates on the table's
+ * own edge rather than shifting: past the edge every input has the same
+ * answer already, so the saturation adds no behaviour - the same
+ * argument lz_sig_q15_domain makes for its producers. */
+int32_t sigmoid_q15_ti(int32_t v, int32_t m, int s) {
+    const int64_t sat = (int64_t)LZ_SIG_N << 15;
+    int64_t p, t15;
+    if (!g_sigtab_ready) sig_build();
+    p = (int64_t)v * (int64_t)m;
+    if (s >= 19) {
+        t15 = fold_floor_shr(p, s - 19);
+    } else if (p == 0) {
+        t15 = 0;
+    } else {
+        int sl = 19 - s;                        /* >= 1 */
+        if (sl >= 62 || p > (sat >> sl) || p < -(sat >> sl))
+            t15 = (p > 0) ? sat : -sat;
+        else
+            t15 = p * ((int64_t)1 << sl);
+    }
+    t15 += LZ_SIG_T15;
+    if (t15 <= 0) return 0;
+    if (t15 >= sat) return 32768;
+    return sig_from_t15((int32_t)t15);
 }
 
 /* Declines past e = 27 because 12*2^e leaves int32 there - which is the
