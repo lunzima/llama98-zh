@@ -6,12 +6,80 @@
 
 #include <stdint.h>
 #include "ops.h"
+#include "ops_arm_prim.h"   /* LZ_ARM_PRIM_ASM, lz_q8_round_pow2_arm_asm */
+
+/* The runtime-selected ISA tier, defined in ops_sched.c. Declared here
+   rather than pulling in ops_kernel_shared.h, which would put lz_i32f
+   and the dispatch macros into every TU that only wants to round. */
+extern int g_kernel;
+
+/* For a `static` definition in a header: two of the TUs that include
+   this one (ops_matmul.c, ops_sched.c) want the other declarations and
+   never round, and an unused-function warning per TU is not a price
+   worth paying for an inline body. Watcom has no equivalent spelling
+   and does not warn about it, so the empty expansion is correct there
+   rather than merely tolerated. */
+#if defined(__GNUC__)
+#define LZ_MAYBE_UNUSED __attribute__((unused))
+#else
+#define LZ_MAYBE_UNUSED
+#endif /* __GNUC__ */
 
 /* 2^e by integer manipulation of the exponent field. */
 float pow2f(int e);
 
-/* Magic-number round-to-nearest (IEEE round-half-to-even). */
-int q8_round(float qv);
+/* Round-to-nearest (IEEE default round-half-to-even) via a magic-number
+   add.
+
+   Adding 1.5x2^23 forces the mantissa to align on integer bits; the
+   integer part lands in the low 23 bits and is read straight out of the
+   union. Valid for |qv| < 2^22 - quant inputs are scaled within +/-127,
+   lz_exp's exponent within +/-127, all far inside.
+
+   Why not `(int)`: C's float-to-int conversion truncates toward zero
+   while x87 defaults to round-to-nearest, so the compiler must rewrite
+   the FPU control word around every conversion - an operation that
+   serializes the pipeline. Measured on Open Watcom 32-bit: a bare
+   `(int)` cast costs 89.8 ns vs 4.0 ns for the magic add - 22x. On the
+   dev box's gcc/SSE it is one cvttss2si instruction, invisible, but
+   the target is x87, where this difference decides everything (~2.4M
+   elements quantized per token).
+
+   The rounding rule thus changes from half-away-from-zero to
+   half-to-even. Only inputs exactly on a half-integer differ, and
+   quantization noise is 254x larger; the exporter uses `np.rint`, in
+   sync with this, unifying the project on IEEE defaults - no more two
+   coexisting rules.
+
+   ARM turns the trick upside down. There is no FPU and no control word
+   to rewrite, so the magic add is a full __aeabi_fadd - 43 instructions
+   measured for what is a shift and a rounding decision on the bit
+   pattern. --kernel arm-asm takes that path (src/ops_arm_prim.h);
+   outside |qv| < 2^22, the domain stated above, the primitive declines
+   and the magic add below runs, so the two tiers agree everywhere and
+   not just where the contract holds.
+
+   IN THE HEADER, AND THE REASON IS A COUNT. It is called 234,713 times
+   per token - instrumented on .prof/x87test over five tokens, not
+   derived from the census, which counts SOURCE-level invocations and
+   reads 178,176 for a different model shape. Measured out of line it
+   costs 36 instructions on the arm-asm tier while the primitive it
+   dispatches to is about 20: the call, the argument and result moves,
+   and the g_kernel load that cannot be hoisted out of a caller's loop
+   are the rest. Same body, same numbers - `static` in a header is what
+   this codebase already does for lz_i32f, and for the same reason. */
+LZ_MAYBE_UNUSED static int q8_round(float qv) {
+    union { float f; uint32_t u; } t;
+#if defined(LZ_ARM_PRIM_ASM)
+    if (g_kernel == LZ_KERNEL_ARM_ASM) {
+        int32_t r;
+        t.f = qv;
+        if (lz_q8_round_pow2_arm_asm(t.u, 0, &r)) return (int)r;
+    }
+#endif /* LZ_ARM_PRIM_ASM */
+    t.f = qv + 12582912.0f;                 /* 1.5 * 2^23 */
+    return (int)(t.u & 0x007FFFFFu) - 0x00400000;
+}
 
 /* Per-group absolute-maximum scan (dispatched via amax table). */
 uint32_t q8_amax(const float *grp, int gs);

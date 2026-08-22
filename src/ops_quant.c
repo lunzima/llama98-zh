@@ -64,50 +64,9 @@ float pow2f(int e) {
     return b.f;
 }
 
-/* ---- q8_round -------------------------------------------------------- */
-
-/* Round-to-nearest (IEEE default round-half-to-even) via a magic-number
-   add.
-
-   Adding 1.5x2^23 forces the mantissa to align on integer bits; the
-   integer part lands in the low 23 bits and is read straight out of the
-   union. Valid for |qv| < 2^22 - quant inputs are scaled within +/-127,
-   lz_exp's exponent within +/-127, all far inside.
-
-   Why not `(int)`: C's float-to-int conversion truncates toward zero
-   while x87 defaults to round-to-nearest, so the compiler must rewrite
-   the FPU control word around every conversion - an operation that
-   serializes the pipeline. Measured on Open Watcom 32-bit: a bare
-   `(int)` cast costs 89.8 ns vs 4.0 ns for the magic add - 22x. On the
-   dev box's gcc/SSE it is one cvttss2si instruction, invisible, but
-   the target is x87, where this difference decides everything (~2.4M
-   elements quantized per token).
-
-   The rounding rule thus changes from half-away-from-zero to
-   half-to-even. Only inputs exactly on a half-integer differ, and
-   quantization noise is 254x larger; the exporter uses `np.rint`, in
-   sync with this, unifying the project on IEEE defaults - no more two
-   coexisting rules.
-
-   ARM turns the trick upside down. There is no FPU and no control word
-   to rewrite, so the magic add is a full __aeabi_fadd - 48 instructions
-   measured for what is a shift and a rounding decision on the bit
-   pattern. --kernel arm-asm takes that path (src/ops_arm_prim.h);
-   outside |qv| < 2^22, the domain stated above, the primitive declines
-   and the magic add below runs, so the two tiers agree everywhere and
-   not just where the contract holds. */
-int q8_round(float qv) {
-    union { float f; uint32_t u; } t;
-#if defined(LZ_ARM_PRIM_ASM)
-    if (g_kernel == LZ_KERNEL_ARM_ASM) {
-        int32_t r;
-        t.f = qv;
-        if (lz_q8_round_pow2_arm_asm(t.u, 0, &r)) return (int)r;
-    }
-#endif /* LZ_ARM_PRIM_ASM */
-    t.f = qv + 12582912.0f;                 /* 1.5 * 2^23 */
-    return (int)(t.u & 0x007FFFFFu) - 0x00400000;
-}
+/* q8_round now lives in ops_quant.h - it is called 234,713 times per
+   token (counted, .prof/x87test) and the call plus the tier dispatch
+   cost more than its body does. See the header for the measurement. */
 
 /* ---- rsqrt (float body + fixed) -------------------------------------- */
 
