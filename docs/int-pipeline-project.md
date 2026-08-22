@@ -123,7 +123,8 @@ src/forward.c`，48 处调用点合并 `use_subn` if/else 后是 33 条链路。
 
 | # | producer（权重张量） | 输出 buffer | 消费者（数量，逐个列出） | 分类 |
 |---|---|---|---|---|
-| 1 | q_proj/k_proj/v_proj | `s->qg`/`ktmp`/`vtmp` | 3+：`lz_rmsnorm`(QK-Norm)、`lz_rope`、`rot_head`(Hadamard，条件性)、KV cache 的 Q8 写入、KV cache 的 float 参考面写入(`kf`/`vf`，条件性)、`lz_kv4_quantize`(条件性) | **多消费者，且部分本质需要 float**（RoPE 三角函数、Hadamard）——不是候选 |
+| 1 | q_proj/k_proj | `s->qg`/`ktmp` | 3+：`lz_rmsnorm`(QK-Norm)、`lz_rope`、`rot_head`(Hadamard，条件性)、KV cache 的 Q8 写入、float 参考面(`kf`)、`lz_kv4_quantize`(条件性) | **多消费者，且部分本质需要 float**（RoPE 三角函数、Hadamard）——不是候选。q_proj 还多一层：它的输出按头交错着 q 与门控两半，q 半进 QK-Norm、门控半进 `lz_sigmoid`，一次 matmul 出口无法只给其中一半 |
+| 1v | v_proj | `s->vtmp` | 1（默认配方）：KV cache 的 Q8 写入 `lz_quantize_q8`。条件性的另外三个（`rot_head`、float 参考面 `vf`、`lz_kv4_quantize`）都不在默认路径上 | **已交付**（milestone 7，§2.8）——原表把 v 与 q/k 合成一行，于是"部分消费者本质需要 float"这句盖住了 v；v 自己一个消费者都不需要 float |
 | 2 | o_proj | `s->xb2` | 1：残差加 `s->x[i] += s->xb2[i]`(`forward.c:3200`/`3220`) | 结构性 float（B9）——**不在本项目范围**，见 §8 |
 | 3 | in_proj_qkv | `s->qkv` | 1：`lz_causal_conv1d_step`/`_fixed`(`forward.c:1895`/`1885`) | **已退出优先级**——`.prof/dtype_probe_kda.c` 实测 `n=0`，链路在 kmr20 上不存在，见 §2.3 |
 | 4 | in_proj_z | `s->zbuf` | 1：`lz_rmsnorm_gated`/`_int` 的门控输入(`forward.c:2008`) | producer `in_proj_z` 实测 `n=0`（同属 SSM 分支）——推迟，且在这个 checkpoint 上不会跑，见 §9.1 |
@@ -543,6 +544,59 @@ int64→float；而如果按 milestone 5 的加宽形状接线，会新引入 2,
 省量还大。int16 入口就是为了不付这笔钱，而两个构建的 census 逐位
 相同这件事本身就是「census 看不见它」的证据。
 
+### 2.8 V 投影的 int16 出口（milestone 7，候选 #1v），以及重量化那一半根本不省 convert
+
+**状态：已交付。** 把 int16 出口从两个调用者（`kda_conv_proj`、
+`kda_i16_proj`）推到「所有能接的消费者」之后，`forward.c` 的 37 个
+matmul 调用点里只多出一个：`v_proj`。它的输出与消费者之间没有任何浮点
+运算——KV cache 的那次 `lz_quantize_q8` 就是消费者——所以
+`lz_quantize_q8_i16` 直接服务它，形状与 §2.7 完全一样。
+
+**原表 #1 把 q/k/v 合成一行是这条被漏掉的唯一原因**，不是新证据出现：
+"部分消费者本质需要 float" 对 q（RoPE、QK-Norm）和 k（同上）成立，对 v
+不成立。v 在默认配方下只有一个消费者；`rot_head`(kv_rot_v)、float 参考
+面(`vf`)、4-bit 面(`v4`) 三条都是条件性的，而且都逐元素读浮点行，所以
+它们进入的是**能力判据**而不是 matmul 判据——这与 `--attn-int` 拒绝的
+是同一组条件。
+
+**指数是量出来的**：kmr20 与 kunmoe-v2-t2-probe 两个 checkpoint、两条
+语料、插桩构建，308,736 / 338,432 个 v 元素上 max |v| = 6.42 / 6.79
+（kmr20）与 6.99 / 6.80（t2-probe），所以 ES=12 是「一次都不钳」的最大
+值。**出货取 11**，理由和 `LZ_MLAT_ES` 相同，而且这次两档都跑了：配对
+NLL 分不出（11: t −0.365 / −0.340 / −0.723 / −0.663；12: −0.573 /
+−0.522 / **+1.129** / −1.538，12 是唯一出现过"更差"的一档），argmax 与
+top-5 谁领先也不一致；打平就取余量翻倍的那个（2.29x 对 1.14x）。消费者
+的每组问题一起量了：最小 32 元素组 amax = 0.4157，在出货 ES 下是 851，
+是 int8 需要的 127 的 6.7 倍，两个模型两条语料上没有任何一组低于 128。
+
+**实测省量**（kmr20，出货默认）：census 1,121,798 → 1,121,350
+（**−448/token**，epilogue −1,024、quantize +576），en 1,142,055 →
+1,141,607（同样 −448）。
+
+**而按 convert 记账，这一半根本不省——这是本里程碑真正的结论。**
+用 `.prof/census_audit/cvtroll.awk` 重量（不是读 census 的 `cvt` 列，
+那列少记 1.95x 且非均匀）：硬件 convert 510,258 → 509,778（**−480**），
+语义 convert（含 magic add）662,288 → 662,320（**+32**）。
+
+原因在 `lz_quantize_q8_i16` 的元素循环：它仍然要 `(float)t[k]` 才能乘
+`127/tam`，所以 epilogue 省下的那次 int→float 只是搬到了重量化里，而
+浮点档被替掉的 `cvtps2dq` 换成了 `q8_round` 的 magic add。**这不是本
+链路的特例，是这个模式本身的性质**，已在已落地的链路上量过：
+`LZ_MLAT_I16=0` 对出货默认是硬件 512,178 → 510,258（−1,920）、语义
+662,160 → 662,288（**+128**），符号完全相同。
+
+所以「epilogue 的 99,328 + 它解锁的 48,640 = 147,968 次/token 的天花板」
+这个算法高估了：第二项不是消掉，是换掉。真正能把它变成消掉的，是让
+`lz_quantize_q8_i16` 的元素循环留在整数域（`q = (t*127 + tam/2)/tam`
+形状的整数重量化），那是另一个里程碑，而且是 value-changing 的。
+
+**census 看不见但真实存在的收益**（按 §7 口径）：浮点档的 amax 扫描是
+每元素一次浮点取绝对值加一次浮点比较，int 档换成整数扫描——每 token
+512 次，两者都被 census 的约定排除在外。另有一处免费项没做：
+`lz_quantize_q8_i16` 里 `(float)tam` 算了两次（`ops.c:691` 的
+`amax = (float)tam * deq` 和 `:709` 的 `127.0f / (float)tam`），每组
+一次多余 convert；本里程碑 +32 里有 16 次就是它。
+
 ## 3. 排序（重排后）
 
 1. **`epi_q41` milestone 1**（§2.1）——新的头号目标。理由：它覆盖的
@@ -566,7 +620,12 @@ int64→float；而如果按 milestone 5 的加宽形状接线，会新引入 2,
    §2.7）。这里原本写的是「需要 milestone 2 级别的零点项设计」，那条
    约束针对的是把 int 直接送进专家 matmul 的设计；实际接的是它前面那次
    重量化，零点项不进入这条路径（§9.3 已就地标注）。
-6. **#4/#5/#6/#11/#13、#15、#12**——推迟，触发条件见 §9（§2.5 补充了
+6. **#1v（`v_proj → KV cache 量化`）**——**已交付**（milestone 7，
+   §2.8）。原表把它并进 #1 那行"多消费者、部分本质需要 float"里，所以
+   它从来没有被单独评估过。它同时给出了这批工作的边界：接完它，
+   `forward.c` 里再没有「消费者是一次重量化」的 matmul 出口了，剩下的
+   要么是结构性 float，要么要新的定点内核（SwiGLU、门控 norm 的门）。
+7. **#4/#5/#6/#11/#13、#15、#12**——推迟，触发条件见 §9（§2.5 补充了
    #11 的一处细化）。#3/#8/#9/#10 单独列出：#3 仍然没有触发条件，而且
    现在的理由比"checkpoint 特征"更硬——`in_proj_qkv` 在这棵树的所有
    checkpoint 上要么 n=0 要么 f32，两种都到不了 `epi_q41`（§2.1
