@@ -584,12 +584,35 @@ const char *lz_norm_select(const char *name);
    lz_rmsnorm_gated + lz_quantize_q8 path. */
 int lz_norm_can_fixed(int n);
 
-/* Whether the sgdn norm's fixed tier writes its Q15 result as int
-   (consumed by lz_quantize_q8_int) instead of dequantizing to float
-   and re-quantizing. The two paths are bit-identical, so this is a perf
-   switch, not a numerics one. Selected as `--norm-write int` - the
-   third value on that tier's axis, not a separate flag, because it
-   only exists on top of the fixed tier. */
+/* Whether the norm's fixed tier writes its Q15 result as int (consumed
+   by lz_quantize_q8_int) instead of dequantizing to float and
+   re-quantizing. Selected as `--norm-write int` - the third value on
+   that tier's axis, not a separate flag, because it only exists on top
+   of the fixed tier.
+
+   THIS LINE USED TO CLAIM THE TWO PATHS ARE BIT-IDENTICAL. Measured
+   2026-08-22 on kunkun-ce q8, 500 tokens of real corpus, --norm-write
+   fixed against int: |diff| rms 0.144 against a signal rms of 2.01 -
+   7% - top-1 agreement 88.58%, and NOT ONE element equal. So on a
+   SubLN model this is a NUMERICS knob, not a perf switch.
+
+   Six sites account for all of it, and they are the ones SubLN added
+   after the claim was made: forward_kda's four projection input norms
+   and dense_ffn_step's gate/up pair, every one inside a use_subn
+   branch. Disabling exactly those six restores bit-identity on
+   kunkun-ce - that is how the list was arrived at, not by reading a
+   diff.
+
+   AND THE CLAIM HAS NO MODEL BEHIND IT AT ALL. The obvious control is
+   s1v3, where fixed and int agree on every token chunk tried. They also
+   agree with lz_quantize_q8_int mutated to a constant, and with
+   lz_quantize_q8_tok_int mutated: s1v3 reaches NO int site, so its
+   agreement measures nothing. Of what is on disk, kunkun-ce is the only
+   model that exercises this value, and it is the one that diverges.
+
+   Nothing shipped is wrong, for one reason only: `auto` resolves to
+   fixed, never to int (see ops_sched.c). That is also why this sat
+   here unnoticed - the value is reachable, documented, and untested. */
 int lz_norm_int(void);
 
 /* SubLN activation scale granularity: "tok" | "group" (default tok).

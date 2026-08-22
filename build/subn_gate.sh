@@ -16,6 +16,9 @@
 #   quantized-rotates `--hadamard off` must change a QUANTIZED run.
 #   float-rotates     `--hadamard off` must change an UNQUANTIZED run.
 #
+# There is deliberately NO --norm-write assertion; see the note next to
+# the plain model below for the one that was tried and thrown out.
+#
 # THE TWO ARE NOT EQUALLY STRONG, and saying so here is cheaper than
 # someone discovering it during an incident. On the FLOAT path, oblk <= 1
 # does nothing to the row at all, so "the output changed" can only mean
@@ -169,6 +172,14 @@ if [ -n "$PLAIN_MODEL" ] && [ -e "$PLAIN_MODEL" ]; then
         bad "correctly-scoped: the knob changed a model that has no" \
             "use_subn - it has leaked outside the SubLN path"
     fi
+
+    # NO --norm-write ASSERTION HERE, and the reason is worth the lines.
+    # An obvious one to add is "int must equal fixed on a plain model",
+    # which lz_norm_int claims. It passes on s1v3 - and it passes with
+    # lz_quantize_q8_int mutated to a constant, which is how it was
+    # found out: s1v3 reaches NO int site at all, so the assertion was
+    # measuring nothing. See lz_norm_int in src/ops.h for where that
+    # leaves the claim.
 else
     echo "  SKIP  correctly-scoped    (set PLAIN_MODEL to check the scope)"
 fi
