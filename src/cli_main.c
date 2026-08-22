@@ -239,10 +239,10 @@ static void usage(void) {
     "                   cells of the ARMv5TE column and only that build\n"
     "                   selects them. All tiers must be bit-identical; an\n"
     "                   uncompiled tier falls back loudly.\n"
-    "  --fixed MODE        auto|off|all (default auto). Sets every write\n"
+    "  --fixed MODE        off|all. Sets every write\n"
     "                   tier at once - recurrence, conv1d, attention,\n"
-    "                   epilogue, sigmoid, norms, scalar. auto and all are\n"
-    "                   the same shipping default (every tier fixed,\n"
+    "                   epilogue, sigmoid, norms, scalar. all is the\n"
+    "                   shipping default (every tier fixed,\n"
     "                   unconditionally - not a hardware question); off is\n"
     "                   the float correctness oracle every tolerance in\n"
     "                   CLAUDE.md and every cross-compiler gate is measured\n"
@@ -250,14 +250,14 @@ static void usage(void) {
     "                   per-tier flags below still work and WIN over this\n"
     "                   one, whatever order they appear in; they are what\n"
     "                   the ARM parity gate pins and what a bisect needs.\n"
-    "  --recur-write TIER  auto|float|fixed (default auto = fixed). The\n"
+    "  --recur-write TIER  float|fixed (default fixed). The\n"
     "                   WHOLE GDN/KDA recurrence, both passes: pass 1's\n"
     "                   int16 coefficient contraction and pass 2's state\n"
     "                   write-back, which keeps the integer result and\n"
     "                   skips the float re-quantize.\n"
-    "  --sig-write TIER    auto|float|fixed (default auto = fixed). sigmoid\n"
+    "  --sig-write TIER    float|fixed (default fixed). sigmoid\n"
     "                   and SiLU from a Q15 table (NOT the KDA decay).\n"
-    "  --norm-write TIER   auto|float|fixed (default auto = fixed). RMS/L2\n"
+    "  --norm-write TIER   float|fixed (default fixed). RMS/L2\n"
     "                   norm sum-of-squares in int64 fixed point, and the\n"
     "                   output loop writing its Q15 result as int rather than\n"
     "                   dequantizing for the consumer to requantize. Those\n"
@@ -273,20 +273,20 @@ static void usage(void) {
     "                   control arm: off forces hadamard_o/hadamard_down to 0,\n"
     "                   the same state a model without the fields has. Inert\n"
     "                   unless the model sets both use_subn and a block.\n"
-    "  --scalar-fixed TIER auto|float|fixed (default auto = fixed, same as\n"
+    "  --scalar-fixed TIER float|fixed (default fixed, same as\n"
     "                   the other six). lz_exp and lz_rsqrt together - the\n"
     "                   last two scalar x87 ops the fixed tiers leave on\n"
     "                   float. Value-changing by design (~1e-6 rel); the\n"
     "                   KDA decay follows lz_exp.\n"
-    "  --epi-write TIER    auto|float|fixed (default auto = fixed). Dequant\n"
+    "  --epi-write TIER    float|fixed (default fixed). Dequant\n"
     "                   epilogue in int64 fixed point.\n"
-    "  --attn-write TIER   auto|float|scoring|wsum|fixed|int (default auto\n"
-    "                   = fixed). Attention scoring / weighted sum in fixed\n"
+    "  --attn-write TIER   float|scoring|wsum|fixed|int (default\n"
+    "                   fixed). Attention scoring / weighted sum in fixed\n"
     "                   point. int adds the weighted sum keeping its exact\n"
     "                   int64 accumulator for lz_quantize_q8_int64 instead of\n"
     "                   dequantizing and re-quantizing (value-changing); it\n"
     "                   implies fixed.\n"
-    "  --conv-write TIER   auto|float|fixed (default auto = fixed). Causal\n"
+    "  --conv-write TIER   float|fixed (default fixed). Causal\n"
     "                   conv1d tier: fixed keeps the history in int16 so the\n"
     "                   conversion is per sample, not per tap. Drifts ~3e-5\n"
     "                   from float (noise floor 3.9e-3) - not bit-identical.\n"
@@ -1333,9 +1333,8 @@ int main(int argc, char **argv) {
                overwritten. Argument order is not a thing a reader
                should have to know. */
             const char *v = argv[++i];
-            if (strcmp(v, "auto") != 0 && strcmp(v, "off") != 0
-                && strcmp(v, "all") != 0) {
-                printf("--fixed: unknown mode (auto|off|all)\n");
+            if (strcmp(v, "off") != 0 && strcmp(v, "all") != 0) {
+                printf("--fixed: unknown mode (off|all)\n");
                 return 2;
             }
             group_fixed = v;
@@ -1352,7 +1351,7 @@ int main(int argc, char **argv) {
                shape the other six now have. */
             const char *got = lz_gdn_p2_select(argv[++i]);
             if (!got) {
-                printf("--recur-write: unknown tier (auto|float|fixed)\n");
+                printf("--recur-write: unknown tier (float|fixed)\n");
                 return 2;
             }
         }
@@ -1364,7 +1363,7 @@ int main(int argc, char **argv) {
                ~3e-5 against a 3.9e-3 noise floor. */
             const char *got = lz_conv_select(argv[++i]);
             if (!got) {
-                printf("--conv-write: unknown tier (auto|float|fixed)\n");
+                printf("--conv-write: unknown tier (float|fixed)\n");
                 return 2;
             }
         }
@@ -1375,14 +1374,14 @@ int main(int argc, char **argv) {
                steps. */
             const char *got = lz_sig_select(argv[++i]);
             if (!got) {
-                printf("--sig-write: unknown tier (auto|float|fixed)\n");
+                printf("--sig-write: unknown tier (float|fixed)\n");
                 return 2;
             }
         }
         else if (strcmp(a, "--norm-write") == 0 && i + 1 < argc) {
             const char *got = lz_norm_select(argv[++i]);
             if (!got) {
-                printf("--norm-write: unknown tier (auto|float|fixed)\n");
+                printf("--norm-write: unknown tier (float|fixed)\n");
                 return 2;
             }
         }
@@ -1415,7 +1414,7 @@ int main(int argc, char **argv) {
                through lz_exp too and follow this knob. */
             const char *got = lz_scalar_select(argv[++i]);
             if (!got) {
-                printf("--scalar-fixed: unknown tier (auto|float|fixed)\n");
+                printf("--scalar-fixed: unknown tier (float|fixed)\n");
                 return 2;
             }
         }
@@ -1426,7 +1425,7 @@ int main(int argc, char **argv) {
                the target's float-to-integer cost ratio. */
             const char *got = lz_epi_select(argv[++i]);
             if (!got) {
-                printf("--epi-write: unknown tier (auto|float|fixed)\n");
+                printf("--epi-write: unknown tier (float|fixed)\n");
                 return 2;
             }
         }
@@ -1554,8 +1553,7 @@ int main(int argc, char **argv) {
        is exactly the question here. */
     if (group_fixed) {
         const char *t = (strcmp(group_fixed, "all") == 0) ? "fixed"
-                       : (strcmp(group_fixed, "off") == 0) ? "float"
-                       : "auto";
+                                                          : "float";
         /* All seven write tiers now share one shape: `auto` is the
            shipping default, unconditionally fixed, not a hardware
            question (ops_sched.c's retirement note on

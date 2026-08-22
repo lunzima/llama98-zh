@@ -19,28 +19,31 @@ SHA `4c4b4b8c8d9af5282813ee7c36a4bf1c5ca87856`，分支 `feat/attn-conv-fixed-ti
 
 | flag | 取值 | 默认 |
 |---|---|---|
-| `--recur-write` | `auto\|float\|fixed` | auto（= fixed） |
-| `--conv-write` | `auto\|float\|fixed` | auto |
-| `--attn-write` | `auto\|float\|scoring\|wsum\|fixed\|int` | auto |
-| `--epi-write` | `auto\|float\|fixed` | auto |
-| `--sig-write` | `auto\|float\|fixed` | auto |
-| `--norm-write` | `auto\|float\|fixed\|int` | auto |
-| `--scalar-fixed` | `auto\|float\|fixed` | **fixed**（唯一默认非 auto 的轴） |
-| `--fixed` | `auto\|off\|all`，群控开关 | auto |
+| `--recur-write` | `float\|fixed` | fixed |
+| `--conv-write` | `float\|fixed` | fixed |
+| `--attn-write` | `float\|scoring\|wsum\|fixed\|int` | fixed |
+| `--epi-write` | `float\|fixed` | fixed |
+| `--sig-write` | `float\|fixed` | fixed |
+| `--norm-write` | `float\|fixed` | fixed |
+| `--scalar-fixed` | `float\|fixed` | fixed |
+| `--fixed` | `off\|all`，群控开关 | all |
+
+**`auto` 曾是这七个轴各自的第三个取值，现已删除。** 它从来只是 `fixed` 的
+别名——`lz_soft_float_target()` 退役后没有任何轴的 auto 再问硬件，而它作为
+一个「有名字的取值」持续产出假注释（`lz_gdn_p2_select` 与 `q8r_have_simd`
+两处都写着「AUTO 问硬件」，两处都不成立）。「没人设过这个轴」这个**状态**仍
+存在，`--fixed` 的优先级机制需要它，但它不再有 CLI 名字，banner 里显示为
+`(default)`。`--pair` 与 `--prefetch` 的 `auto` 保留——那两个真的问硬件。
 
 交付方给的 12 项与这份枚举**完全对上，没有遗漏项**。两处需要单独说明：
 
-- `--recur-write` 现在有显式 `float`，且 `auto` 解析成 **fixed**，不再问硬件
-  （`lz_soft_float_target()` 已退役，见 `src/ops_sched.c` 的退役说明）。本节
-  此前记的是旧行为，据它拼出的「baseline 已经是 float」是错的。
-  这个轴的**覆盖面也变了**：它现在同时选 GDN/KDA 的 pass 1 与 pass 2。此前
-  它只到得了 pass 2，pass 1 的定点没有任何运行期关闭方式——于是当时以
+- `--recur-write` 的**覆盖面变了**：它现在同时选 GDN/KDA 的 pass 1 与 pass 2。
+  此前它只到得了 pass 2，pass 1 的定点没有任何运行期关闭方式——于是当时以
   `--fixed off` 为参照的量都是对着一条仍在跑定点 pass 1 的臂量的。
-- `--scalar-fixed` 的默认不是 `auto→float`，而是 `auto→fixed`（`lz_scalar_mode()`
-  无视硬件，永远返回 1，除非显式传 `float`）。**这意味着「什么都不传」不是
-  float 基线** —— 必须显式 `--scalar-fixed float` 才能把七个轴全部钉在 float
-  上。本文全部 baseline 命令都带这个显式覆盖；若省略，baseline 本身就已经
-  混了 scalar-fixed 的偏差，任何后续对照都会把这份偏差错记成别的 tier 的贡献。
+- **「什么都不传」不是 float 基线，七个轴都不是**（此前只有 `--scalar-fixed`
+  一个轴是这样，现在全部统一）。要把它们全钉在 float 上用 `--fixed off`；
+  本文全部 baseline 命令都带这个覆盖，若省略，baseline 本身就已经混了各档的
+  偏差，任何后续对照都会把这份偏差错记成别的 tier 的贡献。
 
 `--fixed all` 是群控：把 `recur/conv/attn/epi/sig/norm/scalar` 七轴（除已被
 命令行上其它 per-tier flag 显式设过的）都设成 "fixed" 这个**词**，但 `attn` 和

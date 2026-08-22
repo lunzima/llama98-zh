@@ -195,7 +195,6 @@ const char *lz_gdn_p2_select(const char *name) {
        measurement/correctness-oracle path, not a deployment choice. */
     if (strcmp(name, "float") == 0) g_gdn_p2 = LZ_P2_FLOAT;
     else if (strcmp(name, "fixed") == 0) g_gdn_p2 = LZ_P2_FIXED;
-    else if (strcmp(name, "auto") == 0) g_gdn_p2 = LZ_P2_AUTO;
     else return NULL;
     return lz_gdn_p2_mode() ? "fixed" : "float";
 }
@@ -222,7 +221,6 @@ const char *lz_conv_select(const char *name) {
     if (!name) return NULL;
     if (strcmp(name, "float") == 0) g_conv = LZ_CONV_FLOAT;
     else if (strcmp(name, "fixed") == 0) g_conv = LZ_CONV_FIXEDT;
-    else if (strcmp(name, "auto") == 0) g_conv = LZ_CONV_AUTO;
     else return NULL;
     return lz_conv_mode() ? "fixed" : "float";
 }
@@ -254,7 +252,6 @@ const char *lz_attn_select(const char *name) {
     else if (strcmp(name, "wsum") == 0) g_attn = 2;
     else if (strcmp(name, "fixed") == 0) g_attn = 3;
     else if (strcmp(name, "int") == 0) g_attn = LZ_ATTN_TIER_INT;
-    else if (strcmp(name, "auto") == 0) g_attn = -1;
     else return NULL;
     if (lz_attn_int()) return "int";
     switch (lz_attn_mode()) {
@@ -279,7 +276,6 @@ const char *lz_sig_select(const char *name) {
     if (!name) return NULL;
     if (strcmp(name, "float") == 0) g_sig = 0;
     else if (strcmp(name, "fixed") == 0) g_sig = 1;
-    else if (strcmp(name, "auto") == 0) g_sig = -1;
     else return NULL;
     return lz_sig_mode() ? "fixed" : "float";
 }
@@ -307,7 +303,6 @@ const char *lz_scalar_select(const char *name) {
     if (!name) return NULL;
     if (strcmp(name, "float") == 0) g_scalar = 0;
     else if (strcmp(name, "fixed") == 0) g_scalar = 1;
-    else if (strcmp(name, "auto") == 0) g_scalar = -1;
     else return NULL;
     return lz_scalar_mode() ? "fixed" : "float";
 }
@@ -353,7 +348,6 @@ const char *lz_norm_select(const char *name) {
     if (!name) return NULL;
     if (strcmp(name, "float") == 0) g_norm = LZ_NORM_FLOAT;
     else if (strcmp(name, "fixed") == 0) g_norm = LZ_NORM_FIXEDT;
-    else if (strcmp(name, "auto") == 0) g_norm = -1;
     else return NULL;
     return lz_norm_mode() ? "fixed" : "float";
 }
@@ -455,7 +449,6 @@ const char *lz_epi_select(const char *name) {
     if (!name) return NULL;
     if (strcmp(name, "float") == 0) g_epi = 0;
     else if (strcmp(name, "fixed") == 0) g_epi = 1;
-    else if (strcmp(name, "auto") == 0) g_epi = -1;
     else return NULL;
     return lz_epi_mode() ? "fixed" : "float";
 }
@@ -632,27 +625,27 @@ const char *lz_tier_report(void) {
     int p = 0;
     p += sprintf(buf + p, "  recurrence   %s%s\n",
                  lz_gdn_p2_mode() ? "fixed" : "float",
-                 lz_gdn_p2_is_auto() ? " (auto)" : "");
+                 lz_gdn_p2_is_auto() ? " (default)" : "");
     p += sprintf(buf + p, "  conv1d       %s%s\n",
                  lz_conv_mode() ? "fixed" : "float",
-                 lz_conv_is_auto() ? " (auto)" : "");
+                 lz_conv_is_auto() ? " (default)" : "");
     p += sprintf(buf + p, "  attention    %s%s\n",
                  lz_attn_mode() == 3 ? "fixed" :
                  lz_attn_mode() == 1 ? "scoring" :
                  lz_attn_mode() == 2 ? "wsum" : "float",
-                 lz_attn_is_auto() ? " (auto)" : "");
+                 lz_attn_is_auto() ? " (default)" : "");
     p += sprintf(buf + p, "  epilogue     %s%s\n",
                  lz_epi_mode() ? "fixed" : "float",
-                 lz_epi_is_auto() ? " (auto)" : "");
+                 lz_epi_is_auto() ? " (default)" : "");
     p += sprintf(buf + p, "  sigmoid/silu %s%s\n",
                  lz_sig_mode() ? "fixed" : "float",
-                 lz_sig_is_auto() ? " (auto)" : "");
+                 lz_sig_is_auto() ? " (default)" : "");
     p += sprintf(buf + p, "  norms        %s%s\n",
                  lz_norm_mode() ? "fixed" : "float",
-                 lz_norm_is_auto() ? " (auto)" : "");
+                 lz_norm_is_auto() ? " (default)" : "");
     p += sprintf(buf + p, "  scalar       %s%s\n",
                  lz_scalar_mode() ? "fixed" : "float",
-                 lz_scalar_is_auto() ? " (auto)" : "");
+                 lz_scalar_is_auto() ? " (default)" : "");
     p += sprintf(buf + p, "  pairing      %s%s\n",
                  lz_pair_mode() ? "on" : "off",
                  lz_pair_is_auto() ? " (auto = on; no hardware question)"
