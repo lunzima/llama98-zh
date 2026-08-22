@@ -57,6 +57,10 @@ lz_softmax	SOFTMAX
 lz_quantize_q8	QUANT
 lz_quantize_q8_int	QUANT
 lz_quantize_q8_int64	QUANT
+# Missing since milestone 6 wrote it, so its work reported as
+# UNMAPPED:lz_quantize_q8_i16 rather than under QUANT. Totals were right,
+# the QUANT row was 5,280 converts/token short.
+lz_quantize_q8_i16	QUANT
 lz_quantize_q8_silu	QUANT
 q8_group_scale	QUANT
 lz_t_row_f32	NOSITE-dequant
