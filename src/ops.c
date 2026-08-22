@@ -3447,11 +3447,6 @@ static const char km_why_fwht_g128[] =
     "this column is the 128-ELEMENT quantization group; the Hadamard's "
     "block is hadamard_o/hadamard_down (up to 512, capped by the "
     "fixed-point headroom) and is a different axis, not this cell";
-static const char km_why_op_sse2[] =
-    "not written: both call sites reach dot32_x16_mmx / lz_wsum_pair_mmx "
-    "unconditionally, so no SSE2 twin was ever selected - unaudited, not "
-    "impossible";
-
 /* AUDITED WITH THE KERNEL. MMX is integer-only and this is a float
    multiply-add, so those two cells cannot exist. SSE1 is where mulps
    and addps arrive, and every SSE2 machine has them - so ONE body
@@ -3507,9 +3502,14 @@ static const LZKmReg km_reg[LZ_KM_NUNIT * LZ_KM_NCOL] = {
 /* The two attention MAC units DO have x86 kernels, and they are
    macro-selected rather than table-selected, so km_op_present answers
    for them. atdot's assembly is q8_0's leaf, reused rather than copied
-   (docs/arm-asm-audit.md section 6); wsump's is its own. */
-/* atdot*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_T(km_why_op_sse2), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_T(km_why_op_sse2), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_attn_g128),
-/* wsump*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_T(km_why_op_sse2), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_T(km_why_op_sse2), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_attn_g128),
+   (docs/arm-asm-audit.md section 6); wsump's is its own. That holds at
+   BOTH x86 tiers now - the SSE2 cells were empty not because SSE2 could
+   not express these but because the two call sites named the MMX body
+   with no tier test, so no SSE2 twin was selectable. Gate:
+   .prof/attn_sse2_xcheck.sh (kernel against kernel against C) plus
+   build/kernel_isa_identity_gate.sh (whether the dispatch reaches it). */
+/* atdot*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_attn_g128),
+/* wsump*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_attn_g128),
 /* sigq */ KM_H(KM_ALL), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128),
 /* nrmss*/ KM_H(KM_ALL), KM_I(km_why_nrmss_mmx), KM_I(km_why_nrmss_sse1), KM_H(LZ_KMB_GCC), KM_I(km_why_nrmss_mmx), KM_I(km_why_nrmss_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_nrmss_g128),
 /* fwhtf's armA is the only EMPTY cell left in these two rows, and that
@@ -3678,6 +3678,19 @@ static int km_op_present(int f, int c) {
 #endif /* __WATCOMC__ */
 #endif /* LZ_FWHT_F32_SSE_EXTERN */
     if (f != LZ_KM_UNIT_ATDOT && f != LZ_KM_UNIT_WSUMP) return 0;
+#if defined(LZ_ATTN_SSE2_EXTERN)
+    /* Both attention MACs at the SSE2 tier. Defined for BOTH toolchains
+       like LZ_FWHT_MMX_EXTERN above, so the column is chosen by build
+       class rather than by the macro. atdot's SSE2 cell is a REUSE of
+       the matmul's own Q8 leaf - the same relationship its ARM cell has
+       to q8_0's - while wsump's is a new body; the matrix records
+       PRESENCE, and a reused body is present. */
+#if defined(__WATCOMC__)
+    if (c == LZ_KM_COL_ROW0 + LZ_ROW_SSE2_A) return 1;
+#else
+    if (c == LZ_KM_COL_ROW0 + LZ_ROW_SSE2_I) return 1;
+#endif /* __WATCOMC__ */
+#endif /* LZ_ATTN_SSE2_EXTERN */
 #if defined(__WATCOMC__)
     if (c == LZ_KM_COL_ROW0 + LZ_ROW_MMX_A) return 1;
 #endif /* __WATCOMC__ */

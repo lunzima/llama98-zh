@@ -60,6 +60,19 @@ void lz_fwht_stage_sse2(int32_t *y, int n, int len);
 int lz_norm_ss_sse2(const float *x, int n, float sc, short *qout,
                     long long *acc);
 
+/* Attention's two fixed-point MACs, SSE2 tier. Outside the __WATCOMC__
+   split for the same reason lz_fwht_stage_sse2 is: one name and one
+   prototype per kernel, a #pragma aux wrapper on one side and the
+   intrinsics body on the other.
+
+   coef points at FOUR int16 even though this kernel reads two: the MMX
+   twin needs the pair duplicated to fill its 64-bit constant, and one
+   signature for both tiers is worth more than two unread halfwords. */
+#define LZ_ATTN_SSE2_EXTERN 1
+int32_t lz_dot32_x16_sse2(const int8_t *w, const int16_t *x);
+void lz_wsum_pair_sse2(const int8_t *rowA, const int8_t *rowB,
+                       const int16_t *coef, int32_t *acc32);
+
 #define LZ_HAVE_AMAX_SSE2  1
 #define LZ_HAVE_Q8R_SIMD   1
 

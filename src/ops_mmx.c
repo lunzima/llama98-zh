@@ -32,6 +32,19 @@
 
 #if defined(__WATCOMC__)
 #include "mmx_compat.h"
+#include "ops.h"               /* LZ_KERNEL_* - the tier constants
+                           wsum_pair_tier below compares g_kernel
+                           against. ops_kernel_shared.h declares
+                           g_kernel but names the constants only inside
+                           a macro, which expands at ITS call sites and
+                           so never required them here before. */
+#include "ops_sse2.h"          /* lz_wsum_pair_sse2 - the SSE2 tier of
+                           the pair MAC the group loops below call. This
+                           TU owns the loop for BOTH tiers because the
+                           loop is the call boundary on Watcom (see
+                           lz_wsum_group_mmx), so the tier test lives
+                           here rather than at a caller that does not
+                           exist. */
 #include "ops_kernel_shared.h" /* lz_i32f, LZ_WSUM_CHUNK, LZ_SLOT_NEXT,
                            gdn_tail_row, p2_shift_of - shared with
                            ops.c and the other suffixed TUs, one
@@ -293,6 +306,30 @@ extern void lz_wsum_pair_asm(const int8_t *rowA, const int8_t *rowB,
     __parm [__eax] [__edx] [__ecx] [__ebx] \
     __modify [8087]
 
+/* The x86 tier split for the pair MAC, and it has to be HERE rather
+   than in src/ops_gdn.c the way the gcc build's is: on Watcom the group
+   loop below IS the call boundary (ops.c's lz_attn_wsum_q8 calls
+   lz_wsum_group_mmx and never sees a pair), so there is no caller
+   outside this file to put the test in.
+
+   One branch per row PAIR, against ~56 instructions of work - the same
+   trade the ARM tier split makes at lz_wsum_pair_arm, and for the same
+   reason an indirect call would be worse. g_kernel alone, no CPUID:
+   lz_kernel_select cannot leave LZ_KERNEL_SSE2 set on a machine that
+   lacks it. */
+#if defined(LZ_ATTN_SSE2_EXTERN)
+static void wsum_pair_tier(const int8_t *rowA, const int8_t *rowB,
+                           const int16_t *coef, int32_t *acc32) {
+    if (g_kernel == LZ_KERNEL_SSE2) {
+        lz_wsum_pair_sse2(rowA, rowB, coef, acc32);
+        return;
+    }
+    lz_wsum_pair_asm(rowA, rowB, coef, acc32);
+}
+#else
+#define wsum_pair_tier(a, b, c, d) lz_wsum_pair_asm(a, b, c, d)
+#endif /* LZ_ATTN_SSE2_EXTERN */
+
 /* lz_wsum_group_mmx(): the ENTIRE multi-chunk second walk for one
    group - all of LZ_WSUM_CHUNK's chunks, all pairs, the ring-buffer
    slot walk, the per-chunk emms and lz_i32f fold - behind ONE call
@@ -321,14 +358,14 @@ void lz_wsum_group_mmx(const int8_t *vc, int kvd, int g, int sink, int ring,
             LZ_SLOT_NEXT(slot, sink, ring);
             coef[0] = cq[tp];     coef[1] = cq[tp + 1];
             coef[2] = cq[tp];     coef[3] = cq[tp + 1];
-            lz_wsum_pair_asm(rowA, rowB, coef, acc32);
+            wsum_pair_tier(rowA, rowB, coef, acc32);
         }
         if (tp < t0 + tn) {            /* odd leftover row in this chunk */
             int16_t coef[4];
             const int8_t *rowA = vc + (size_t)slot * kvd + (size_t)g * 32;
             coef[0] = cq[tp]; coef[1] = 0;
             coef[2] = cq[tp]; coef[3] = 0;
-            lz_wsum_pair_asm(rowA, rowA, coef, acc32);
+            wsum_pair_tier(rowA, rowA, coef, acc32);
             LZ_SLOT_NEXT(slot, sink, ring);
         }
         _mm_empty();      /* no x87 inside the row-pair loop above */
@@ -365,14 +402,14 @@ void lz_wsum_group_mmx_int(const int8_t *vc, int kvd, int g, int sink, int ring,
             LZ_SLOT_NEXT(slot, sink, ring);
             coef[0] = cq[tp];     coef[1] = cq[tp + 1];
             coef[2] = cq[tp];     coef[3] = cq[tp + 1];
-            lz_wsum_pair_asm(rowA, rowB, coef, acc32);
+            wsum_pair_tier(rowA, rowB, coef, acc32);
         }
         if (tp < t0 + tn) {            /* odd leftover row in this chunk */
             int16_t coef[4];
             const int8_t *rowA = vc + (size_t)slot * kvd + (size_t)g * 32;
             coef[0] = cq[tp]; coef[1] = 0;
             coef[2] = cq[tp]; coef[3] = 0;
-            lz_wsum_pair_asm(rowA, rowA, coef, acc32);
+            wsum_pair_tier(rowA, rowA, coef, acc32);
             LZ_SLOT_NEXT(slot, sink, ring);
         }
         _mm_empty();      /* no x87 inside the row-pair loop above */

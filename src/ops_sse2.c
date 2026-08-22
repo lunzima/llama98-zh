@@ -1592,6 +1592,137 @@ void row_q16_sse2_asm(int32_t *acc32, const void *w4, const void *w2,
     }
 }
 
+/* ---- attention's two fixed-point MACs, SSE2 tier ----------------------
+   Both had an MMX cell and no SSE2 one, not because SSE2 could not
+   express them but because the two call sites bound to the MMX name
+   with no tier test at all - so no SSE2 twin was ever selectable. The
+   matrix called that "unaudited, not impossible"; this is the audit.
+
+   1. The SCORING DOT is a REUSE, not a new kernel. lz_dot32_x16_sse2_asm
+      above already computes 256*sum(w*x) for int8 weights against
+      int16 activations - the punpcklbw(0, w) puts each weight in the
+      HIGH byte, which IS the x256 the attention path folds out with its
+      single 1/256. Exactly the reuse ARM makes of q8_0's leaf
+      (docs/arm-asm-audit.md section 6); a second body would be a copy.
+
+   2. The WEIGHTED SUM is a real new body, and it is the MMX one
+      widened: sign-extend two int8 rows to int16, interleave so one
+      pmaddwd covers a (rowA,rowB) pair against (ckA,ckB), accumulate in
+      place. SSE2 does 16 elements per pass where MMX does 8, so 32
+      elements take two passes instead of four, and the 128-bit constant
+      comes from ONE dword load broadcast with pshufd rather than the
+      caller's duplicated coef[4] (which stays, unread past coef[1], so
+      the two kernels keep one call signature).
+
+   BIT-IDENTICAL BY CONSTRUCTION, not by measurement: every operation
+   here is integer, and integer sums are exact under reassociation. The
+   gate still runs, because "by construction" is an argument about the
+   algorithm and not about what got typed.
+
+   No emms owed by either: pure %xmm, no %mm register touched. The
+   group loop's existing _mm_empty stays where it is - it is the
+   caller's duty and it is free on an already-clean state. */
+int32_t lz_dot32_x16_sse2(const int8_t *w, const int16_t *x) {
+    return lz_dot32_x16_sse2_asm(w, x);
+}
+
+/* parm order is rowA/rowB/coef/acc32 -> eax/edx/EBX/ECX, which is the
+   last two SWAPPED relative to lz_wsum_pair_asm's eax/edx/ecx/ebx. Not
+   an oversight and not worth unifying: both are reached only through
+   the C wrapper below (or, for the MMX one, its own call site in this
+   file's twin), so the mapping is internal to each pragma. Written this
+   way because ecx addresses the accumulator sixteen times here and the
+   register a Watcom pragma must not renumber is the one in the parm
+   list, not the one in the body. */
+extern void lz_wsum_pair_sse2_asm(const int8_t *rowA, const int8_t *rowB,
+                                  const int16_t *coef, int32_t *acc32);
+#pragma aux lz_wsum_pair_sse2_asm = \
+    ".686"                          \
+    "movd      xmm7, [ebx]"         \
+    "pshufd    xmm7, xmm7, 0"       \
+    "movdqu    xmm0, [eax]"         \
+    "movdqu    xmm1, [edx]"         \
+    "movdqa    xmm2, xmm0"          \
+    "punpcklbw xmm2, xmm2"          \
+    "psraw     xmm2, 8"             \
+    "movdqa    xmm3, xmm1"          \
+    "punpcklbw xmm3, xmm3"          \
+    "psraw     xmm3, 8"             \
+    "movdqa    xmm4, xmm2"          \
+    "punpcklwd xmm4, xmm3"          \
+    "pmaddwd   xmm4, xmm7"          \
+    "punpckhwd xmm2, xmm3"          \
+    "pmaddwd   xmm2, xmm7"          \
+    "movdqu    xmm5, [ecx]"         \
+    "paddd     xmm5, xmm4"          \
+    "movdqu    [ecx], xmm5"         \
+    "movdqu    xmm5, [ecx+16]"      \
+    "paddd     xmm5, xmm2"          \
+    "movdqu    [ecx+16], xmm5"      \
+    "movdqa    xmm2, xmm0"          \
+    "punpckhbw xmm2, xmm2"          \
+    "psraw     xmm2, 8"             \
+    "movdqa    xmm3, xmm1"          \
+    "punpckhbw xmm3, xmm3"          \
+    "psraw     xmm3, 8"             \
+    "movdqa    xmm4, xmm2"          \
+    "punpcklwd xmm4, xmm3"          \
+    "pmaddwd   xmm4, xmm7"          \
+    "punpckhwd xmm2, xmm3"          \
+    "pmaddwd   xmm2, xmm7"          \
+    "movdqu    xmm5, [ecx+32]"      \
+    "paddd     xmm5, xmm4"          \
+    "movdqu    [ecx+32], xmm5"      \
+    "movdqu    xmm5, [ecx+48]"      \
+    "paddd     xmm5, xmm2"          \
+    "movdqu    [ecx+48], xmm5"      \
+    "movdqu    xmm0, [eax+16]"      \
+    "movdqu    xmm1, [edx+16]"      \
+    "movdqa    xmm2, xmm0"          \
+    "punpcklbw xmm2, xmm2"          \
+    "psraw     xmm2, 8"             \
+    "movdqa    xmm3, xmm1"          \
+    "punpcklbw xmm3, xmm3"          \
+    "psraw     xmm3, 8"             \
+    "movdqa    xmm4, xmm2"          \
+    "punpcklwd xmm4, xmm3"          \
+    "pmaddwd   xmm4, xmm7"          \
+    "punpckhwd xmm2, xmm3"          \
+    "pmaddwd   xmm2, xmm7"          \
+    "movdqu    xmm5, [ecx+64]"      \
+    "paddd     xmm5, xmm4"          \
+    "movdqu    [ecx+64], xmm5"      \
+    "movdqu    xmm5, [ecx+80]"      \
+    "paddd     xmm5, xmm2"          \
+    "movdqu    [ecx+80], xmm5"      \
+    "movdqa    xmm2, xmm0"          \
+    "punpckhbw xmm2, xmm2"          \
+    "psraw     xmm2, 8"             \
+    "movdqa    xmm3, xmm1"          \
+    "punpckhbw xmm3, xmm3"          \
+    "psraw     xmm3, 8"             \
+    "movdqa    xmm4, xmm2"          \
+    "punpcklwd xmm4, xmm3"          \
+    "pmaddwd   xmm4, xmm7"          \
+    "punpckhwd xmm2, xmm3"          \
+    "pmaddwd   xmm2, xmm7"          \
+    "movdqu    xmm5, [ecx+96]"      \
+    "paddd     xmm5, xmm4"          \
+    "movdqu    [ecx+96], xmm5"      \
+    "movdqu    xmm5, [ecx+112]"     \
+    "paddd     xmm5, xmm2"          \
+    "movdqu    [ecx+112], xmm5"     \
+    __parm [__eax] [__edx] [__ebx] [__ecx] \
+    __modify [8087];
+
+/* Thin wrapper, and it is not optional: a #pragma aux body expands at
+   the CALL SITE, and the call site is src/ops_mmx.c's group loop.
+   Same shape as lz_fwht_stage_mmx and lz_dot128_q16_mmx_w. */
+void lz_wsum_pair_sse2(const int8_t *rowA, const int8_t *rowB,
+                       const int16_t *coef, int32_t *acc32) {
+    lz_wsum_pair_sse2_asm(rowA, rowB, coef, acc32);
+}
+
 #else /* gcc: intrinsics */
 
 #include <emmintrin.h>
@@ -1968,6 +2099,54 @@ void lz_fwht_stage_sse2(int32_t *y, int n, int len) {
             _mm_storeu_si128((__m128i *)(void *)(a + j), _mm_add_epi32(u, v));
             _mm_storeu_si128((__m128i *)(void *)(b + j), _mm_sub_epi32(u, v));
         }
+    }
+}
+
+/* ---- attention's two fixed-point MACs, SSE2 tier ----------------------
+   Watcom twins: lz_dot32_x16_sse2 (a wrapper on the existing
+   lz_dot32_x16_sse2_asm) and lz_wsum_pair_sse2_asm, both above in this
+   file. Read the long comment there for why the dot is a REUSE and the
+   weighted sum a real body, and for the bit-identity argument. */
+
+/* part32_x16 leaves four int32 partials; the matmul row loop folds four
+   of those together, which this single-group caller has nothing to
+   pair with, so it reduces in place. The x256 is part32_x16's own -
+   see its comment - and the attention path cancels it with the same
+   single 1/256 the matmul row end uses. */
+int32_t lz_dot32_x16_sse2(const int8_t *w, const int16_t *x) {
+    __m128i p = part32_x16(w, x);
+    p = _mm_add_epi32(p, _mm_srli_si128(p, 8));
+    p = _mm_add_epi32(p, _mm_srli_si128(p, 4));
+    return _mm_cvtsi128_si32(p);
+}
+
+void lz_wsum_pair_sse2(const int8_t *rowA, const int8_t *rowB,
+                       const int16_t *coef, int32_t *acc32) {
+    int32_t cw;
+    __m128i c;
+    int off;
+    memcpy(&cw, coef, 4);           /* (ckA, ckB), one dword */
+    c = _mm_set1_epi32(cw);
+    for (off = 0; off < 32; off += 16) {
+        __m128i ra = _mm_loadu_si128((const __m128i *)(const void *)(rowA + off));
+        __m128i rb = _mm_loadu_si128((const __m128i *)(const void *)(rowB + off));
+        __m128i al = _mm_srai_epi16(_mm_unpacklo_epi8(ra, ra), 8);
+        __m128i bl = _mm_srai_epi16(_mm_unpacklo_epi8(rb, rb), 8);
+        __m128i ah = _mm_srai_epi16(_mm_unpackhi_epi8(ra, ra), 8);
+        __m128i bh = _mm_srai_epi16(_mm_unpackhi_epi8(rb, rb), 8);
+        int32_t *acc = acc32 + off;
+        _mm_storeu_si128((__m128i *)(void *)(acc + 0),
+            _mm_add_epi32(_mm_loadu_si128((const __m128i *)(const void *)(acc + 0)),
+                          _mm_madd_epi16(_mm_unpacklo_epi16(al, bl), c)));
+        _mm_storeu_si128((__m128i *)(void *)(acc + 4),
+            _mm_add_epi32(_mm_loadu_si128((const __m128i *)(const void *)(acc + 4)),
+                          _mm_madd_epi16(_mm_unpackhi_epi16(al, bl), c)));
+        _mm_storeu_si128((__m128i *)(void *)(acc + 8),
+            _mm_add_epi32(_mm_loadu_si128((const __m128i *)(const void *)(acc + 8)),
+                          _mm_madd_epi16(_mm_unpacklo_epi16(ah, bh), c)));
+        _mm_storeu_si128((__m128i *)(void *)(acc + 12),
+            _mm_add_epi32(_mm_loadu_si128((const __m128i *)(const void *)(acc + 12)),
+                          _mm_madd_epi16(_mm_unpackhi_epi16(ah, bh), c)));
     }
 }
 

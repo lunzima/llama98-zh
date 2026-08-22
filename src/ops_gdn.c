@@ -87,7 +87,33 @@
 #elif defined(LZ_WSUM_MMX_EXTERN)
 /* lz_wsum_pair_mmx's body lives in src/ops_mmx.c now - it writes %mm
    registers. Declared in src/ops_mmx.h, already visible here. */
+#if defined(LZ_ATTN_SSE2_EXTERN)
+/* The x86 tier split, and the shape is the ARM one twelve lines down,
+   for the same reason: this runs once per ROW PAIR, so an indirect call
+   would be paid T/2 times per group while this test folds into a branch
+   the compiler already emits. Same-tier for a whole run, so the two
+   kernels never interleave.
+
+   Tested on g_kernel and on NOTHING ELSE, unlike the SSE1 float cells
+   in src/ops.c which also ask lz_cpu_has_sse(): there is no
+   lz_cpu_has_sse2() to ask, because lz_kernel_select already clamps
+   LZ_KERNEL_SSE2 to whatever kernel_detect found, so this value cannot
+   be set on a machine without SSE2. Adding a CPUID test here would be a
+   second answer to a question already settled, and testing CPUID
+   INSTEAD would hand --kernel mmx the SSE2 body and destroy the control
+   arm kernel_isa_identity_gate compares against. */
+static void lz_wsum_pair_x86(const int8_t *rowA, const int8_t *rowB,
+                             const int16_t *coef, int32_t *acc32) {
+    if (g_kernel == LZ_KERNEL_SSE2) {
+        lz_wsum_pair_sse2(rowA, rowB, coef, acc32);
+        return;
+    }
+    lz_wsum_pair_mmx(rowA, rowB, coef, acc32);
+}
+#define LZ_WSUM_PAIR(ra, rb, co, ac) lz_wsum_pair_x86(ra, rb, co, ac)
+#else
 #define LZ_WSUM_PAIR(ra, rb, co, ac) lz_wsum_pair_mmx(ra, rb, co, ac)
+#endif /* LZ_ATTN_SSE2_EXTERN */
 
 #else
 /* Non-MMX builds. Integer sums are exact under reassociation, so this is
@@ -153,7 +179,19 @@ static int32_t dot32_x16_attn_arm(const int8_t *w, const int16_t *x) {
 #define LZ_ATTN_DOT32(w, x) dot32_x16_attn_ref(w, x)
 #endif /* LZ_ARM_ASM_EXTERN */
 #else
+/* The MMX/SSE2 split, same tier test as LZ_WSUM_PAIR above. The SSE2
+   arm is a REUSE of the matmul's own SSE2 Q8 leaf, exactly as the ARM
+   arm above reuses q8_0's - and it owes identity for the same reason,
+   the x256 fold distributing over the sum in int32. */
+#if defined(LZ_ATTN_SSE2_EXTERN)
+static int32_t dot32_x16_attn_x86(const int8_t *w, const int16_t *x) {
+    if (g_kernel == LZ_KERNEL_SSE2) return lz_dot32_x16_sse2(w, x);
+    return dot32_x16_mmx(w, x);
+}
+#define LZ_ATTN_DOT32(w, x) dot32_x16_attn_x86(w, x)
+#else
 #define LZ_ATTN_DOT32(w, x) dot32_x16_mmx(w, x)
+#endif /* LZ_ATTN_SSE2_EXTERN */
 #endif /* !__WATCOMC__ && !LZ_DOT_MMX_EXTERN */
 
 /* Empty everywhere but the ARM cross-build: Watcom never sees __arm__
