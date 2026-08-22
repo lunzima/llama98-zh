@@ -3178,9 +3178,29 @@ static const char km_why_t2g128[] =
 /* The operator units' x86 and group columns. docs/arm-asm-audit.md is
    an ARM-only audit, so it cannot answer for an x86 tier here and this
    says so rather than guessing 'impossible'. */
+/* AUDITED NOW, and the answer is the same for all four of the scalar
+   leaves: a SIMD cell needs a caller that hands it more than one value,
+   and these have none. lz_i32f, q8_round, lz_exp_fixed and sigmoid_q15
+   are each called with one scalar from inside somebody else's loop, and
+   the loops that ARE vectorizable (the quantize group, the norm element
+   loop, the matmul rows) already carry their own kernels - a vector
+   twin here would have to be called four values at a time by code that
+   does not have four. That is a fact about the call sites, not about
+   the ISA, so it does not change with the instruction set and the six
+   columns get one reason.
+
+   The two table leaves have a second, independent block: lz_exp_fixed
+   and sigmoid_q15 index a table by a value computed per element, and
+   neither MMX, SSE1 nor SSE2 has a gather - VPGATHERDD is AVX2. Four
+   lanes would have to be scattered back to scalar loads, which is the
+   scalar code with extra shuffling in front of it. */
 static const char km_why_op_x86[] =
-    "not audited: these are one-value scalar leaves and the only audit "
-    "that has opened them (docs/arm-asm-audit.md) is ARM-only";
+    "impossible as a VECTOR cell: a one-value scalar leaf called from "
+    "inside somebody else's loop, and no caller hands it four at a time "
+    "- the loops that could are the quantize group, the norm element "
+    "loop and the matmul rows, which carry their own kernels. The two "
+    "table leaves (expfx, sigq) are blocked twice over: a per-element "
+    "table index needs a gather, and that is AVX2";
 static const char km_why_op_g128[] =
     "no 128-element group form exists - a scalar leaf has no group to "
     "hoist across";
@@ -3198,10 +3218,36 @@ static const char km_why_attn_g128[] =
    same shape lz_quantize_q8 already vectorizes, and whether an x86
    kernel belongs here is a real open question rather than a category
    error. The ARM-only audit cannot answer it either way. */
-static const char km_why_nrmss_x86[] =
-    "not audited: an element loop of lz_quantize_q8's shape, so unlike "
-    "the scalar leaves here an x86 kernel is not ruled out - the only "
-    "audit that has opened it (docs/arm-asm-audit.md) is ARM-only";
+/* AUDITED NOW. Unlike the scalar leaves this one IS an element loop -
+   x[i]*sc, round to int16, accumulate v*v - so the question is which
+   instruction set can do all three steps, and the answer splits the six
+   columns rather than filling them with one reason.
+
+   SSE2 can: mulps for the scale, cvtps2dq for the round (round-to-
+   nearest under the default MXCSR, which is q8_round's own rule), and
+   pmaddwd for the squares, which is exactly the accumulate this loop
+   wants. That cell is REAL and unwritten.
+
+   SSE1 cannot finish it: mulps exists, but the float-to-int is
+   cvtps2pi, two lanes into an MMX register, and the int32 accumulate
+   would then need MMX anyway - so an SSE1 cell is an SSE1/MMX hybrid
+   whose useful half is the MMX half, which is the next row down.
+
+   MMX alone cannot start it: the scale is a FLOAT multiply and MMX is
+   integer-only. */
+static const char km_why_nrmss_sse2[] =
+    "not written: mulps + cvtps2dq (round-to-nearest is the default "
+    "MXCSR mode, which is q8_round's own rule) + pmaddwd for the squares "
+    "covers all three steps of this loop. A real cell, and the largest "
+    "unwritten one in this table";
+static const char km_why_nrmss_sse1[] =
+    "impossible as an SSE1 cell: mulps scales, but the float-to-int is "
+    "cvtps2pi into an MMX register and the v*v accumulate is integer, so "
+    "what is left is an MMX kernel with mulps in front - that is the MMX "
+    "row, not this one";
+static const char km_why_nrmss_mmx[] =
+    "impossible: the per-element scale x[i]*sc is a FLOAT multiply and "
+    "MMX is integer-only. The loop cannot start under MMX alone";
 static const char km_why_nrmss_g128[] =
     "this column is the 128-ELEMENT quantization group; norm_ss_fixed's "
     "loop runs over a whole norm row, and the group-shaped part of it "
@@ -3211,10 +3257,34 @@ static const char km_why_nrmss_g128[] =
    SIMD is best at, and no multiply or constant enters. So "not audited"
    here does not mean "probably nothing there" - the ARM audit found real
    content on both and the x86 side has simply never been opened. */
-static const char km_why_fwht_x86[] =
-    "not written: a pure add/sub butterfly over a power-of-two block is "
-    "the SIMD-friendly end of the spectrum, not a scalar leaf - the only "
-    "audit that has opened it (docs/arm-asm-audit.md G1/G2) is ARM-only";
+/* AUDITED NOW, and the two transforms take OPPOSITE answers per ISA
+   because one is integer and the other is float - which is the whole
+   reason they are two units.
+
+   lz_fwht_i32 is paddd/psubd: MMX does two lanes, SSE2 does four, and
+   SSE1 has no integer add at all. lz_fwht is addps/subps: SSE1 and SSE2
+   both do four lanes, and MMX is integer-only.
+
+   Neither needs a shuffle. The butterfly at stride `len` pairs y[i]
+   with y[i+len], and for every stage with len >= 4 (SSE2) or len >= 2
+   (MMX) those are two CONTIGUOUS vectors - one load each, one add, one
+   sub, two stores. Only the last stages, where len drops below the
+   vector width, need an unpack, and those are the cheap ones. */
+static const char km_why_fwhti_sse1[] =
+    "impossible: SSE1 has no integer add - paddd is MMX/SSE2. The int32 "
+    "butterfly cannot be expressed in xmm under SSE1";
+static const char km_why_fwhti_x86[] =
+    "not written: paddd/psubd on contiguous pairs - the butterfly at "
+    "stride len >= the vector width needs no shuffle at all, one load "
+    "each and one store each. A real cell";
+static const char km_why_fwhtf_mmx[] =
+    "impossible: MMX is integer-only and this transform is over floats. "
+    "The int32 twin (fwhti) is the one MMX can take";
+static const char km_why_fwhtf_x86[] =
+    "not written: addps/subps on contiguous pairs, same no-shuffle "
+    "argument as fwhti - but OFF the shipping path, since an F32 weight "
+    "is what reaches this twin and every quantized export leaves the "
+    "projections quantized";
 static const char km_why_fwhtf_arma[] =
     "not written: docs/arm-asm-audit.md G2 rates it worth writing (one "
     "unpack+align serving both the sum and the difference, instead of "
@@ -3253,23 +3323,23 @@ static const LZKmReg km_reg[LZ_KM_NUNIT][LZ_KM_NCOL] = {
 /* operator units (LZ_KM_OP): registry only, no grid line. ref is the
    shared C body, which is also what --kernel arm-c runs - so armC is
    present on ARM for the same reason ref is present everywhere. */
-/* i32f */{ KM_H(KM_ALL), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128) },
-/* q8rnd*/{ KM_H(KM_ALL), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128) },
-/* expfx*/{ KM_H(KM_ALL), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128) },
+/* i32f */{ KM_H(KM_ALL), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128) },
+/* q8rnd*/{ KM_H(KM_ALL), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128) },
+/* expfx*/{ KM_H(KM_ALL), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128) },
 /* The two attention MAC units DO have x86 kernels, and they are
    macro-selected rather than table-selected, so km_op_present answers
    for them. atdot's assembly is q8_0's leaf, reused rather than copied
    (docs/arm-asm-audit.md section 6); wsump's is its own. */
 /* atdot*/{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_T(km_why_op_sse2), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_T(km_why_op_sse2), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_attn_g128) },
 /* wsump*/{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_T(km_why_op_sse2), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_T(km_why_op_sse2), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_attn_g128) },
-/* sigq */{ KM_H(KM_ALL), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128) },
-/* nrmss*/{ KM_H(KM_ALL), KM_T(km_why_nrmss_x86), KM_T(km_why_nrmss_x86), KM_T(km_why_nrmss_x86), KM_T(km_why_nrmss_x86), KM_T(km_why_nrmss_x86), KM_T(km_why_nrmss_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_nrmss_g128) },
+/* sigq */{ KM_H(KM_ALL), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128) },
+/* nrmss*/{ KM_H(KM_ALL), KM_I(km_why_nrmss_mmx), KM_I(km_why_nrmss_sse1), KM_T(km_why_nrmss_sse2), KM_I(km_why_nrmss_mmx), KM_I(km_why_nrmss_sse1), KM_T(km_why_nrmss_sse2), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_nrmss_g128) },
 /* The two Hadamards are the only units here whose armA cell is EMPTY.
    That is the point of registering them: without a row, a gate counting
    filled cells could not tell "no assembly" from "no such operator",
    and src/fwht.c could be deleted without a single cell changing. */
-/* fwhti*/{ KM_H(KM_ALL), KM_T(km_why_fwht_x86), KM_T(km_why_fwht_x86), KM_T(km_why_fwht_x86), KM_T(km_why_fwht_x86), KM_T(km_why_fwht_x86), KM_T(km_why_fwht_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM),       KM_I(km_why_fwht_g128) },
-/* fwhtf*/{ KM_H(KM_ALL), KM_T(km_why_fwht_x86), KM_T(km_why_fwht_x86), KM_T(km_why_fwht_x86), KM_T(km_why_fwht_x86), KM_T(km_why_fwht_x86), KM_T(km_why_fwht_x86), KM_H(LZ_KMB_ARM), KM_T(km_why_fwhtf_arma), KM_I(km_why_fwht_g128) }
+/* fwhti*/{ KM_H(KM_ALL), KM_T(km_why_fwhti_x86), KM_I(km_why_fwhti_sse1), KM_T(km_why_fwhti_x86), KM_T(km_why_fwhti_x86), KM_I(km_why_fwhti_sse1), KM_T(km_why_fwhti_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM),       KM_I(km_why_fwht_g128) },
+/* fwhtf*/{ KM_H(KM_ALL), KM_I(km_why_fwhtf_mmx), KM_T(km_why_fwhtf_x86), KM_T(km_why_fwhtf_x86), KM_I(km_why_fwhtf_mmx), KM_T(km_why_fwhtf_x86), KM_T(km_why_fwhtf_x86), KM_H(LZ_KMB_ARM), KM_T(km_why_fwhtf_arma), KM_I(km_why_fwht_g128) }
 };
 
 #if defined(__WATCOMC__)
