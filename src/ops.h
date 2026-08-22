@@ -583,6 +583,42 @@ int lz_sig_is_auto(void);
 #define LZ_NORM_FIXED 1
 #endif /* LZ_NORM_FIXED */
 
+/* The gated norm's sigmoid reads the INTEGER coordinate.
+   lz_rmsnorm_gated_out_fixed_int already quantizes the gate to Q15 (qg
+   at exponent eg) for its product chain, and then reached sigmoid_q15
+   through the float g a second time - three converts per element
+   deriving a table coordinate that sigmoid_q15_i gets with a shift and
+   a mask. With this on the sigmoid comes from sigmoid_q15_i(qg, eg).
+
+   VALUE-CHANGING, and consistently so: silu(g) = g * sigmoid(g), the
+   product's g factor was already qg, and now both factors read the same
+   quantized gate instead of one reading g and the other its Q15 image.
+
+   0 or 1 only - ops_norm.c's census formula is arithmetic on this value,
+   not a preprocessor branch. 0 is the control arm the saving was
+   measured against. In the HEADER, like LZ_NORM_FIXED, so
+   build/switch_matrix_gate.sh's -dM proof reaches it through ops.c and
+   forward.c. */
+#ifndef LZ_GATE_SIG_I
+#define LZ_GATE_SIG_I 1
+#endif /* LZ_GATE_SIG_I */
+
+/* The gated norm's weight Q15 table, cached per weight pointer.
+   lz_rmsnorm_gated_out_fixed_int scanned w for its amax and rounded
+   every element to Q15 on every token, although w is a norm weight -
+   the same object for the life of the model. With this on it reads
+   build_qw's table instead (ops_norm.c), which the plain norm's int
+   output loop already used.
+
+   BIT-IDENTICAL by construction, not by tolerance: the table is filled
+   by the same arithmetic in the same order the inline loop ran.
+
+   0 or 1 only, same reason as LZ_GATE_SIG_I. 0 is the control arm and
+   computes the scan and the rounding per call exactly as before. */
+#ifndef LZ_GATE_QW
+#define LZ_GATE_QW 1
+#endif /* LZ_GATE_QW */
+
 /* The RMS/L2 norm tier. fixed accumulates the sum of squares in int64
    from the int16 image of x rather than in f32, so the per-element
    multiply-add leaves the float domain; the reciprocal square root and

@@ -26,6 +26,17 @@
  * the table is for the scalar loop. ref is the tier the ARM build runs
  * here anyway - its own normout cells are all NULL.
  *
+ * TWO Q15 CONSUMERS, TWO INVOCATIONS. build_qw serves two tables now -
+ * 1+w for lz_rmsnorm_out_fixed_int and plain w for the gated loop
+ * (lz_rmsnorm_gated_int, which is the one that actually runs on these
+ * models). They share one bump-allocated pool with no eviction, so
+ * whichever arm goes first takes every slot and the second one gets no
+ * cached rows at all - a check that compares one arm to itself and
+ * cannot fail. So the arm is chosen by argv[1] and the driver runs the
+ * binary twice:
+ *     norm_wp_xcheck            wp table + the 1+w Q15 table
+ *     norm_wp_xcheck gated      wp table + the plain-w Q15 table
+ *
  * Build:
  *   gcc -O2 -std=c99 -I../src -o norm_wp_xcheck norm_wp_xcheck.c \
  *       ../src/ops.c ../src/ops_quant.c ../src/ops_sched.c \
@@ -60,9 +71,16 @@ static float out[NW][NN];
 static float wq_rows[NW][NN];
 static int32_t iout[NW][NN];
 static float ideq[NW];
+/* The gated arm's own gate vector. Held constant across rows for the
+   same reason the weights are: the only thing allowed to differ between
+   rows is which build_qw arm served them. */
+static float gv[NN];
 
-int main(void) {
+extern long long lz_debug_norm_qw;
+
+int main(int argc, char **argv) {
     uint32_t st = 0x9E3779B9u;
+    int gated = (argc > 1 && argv[1][0] == 'g');
     int r, i, bad = 0, first = -1;
     lz_kernel_select(LZ_KERNEL_REF);
     for (i = 0; i < NN; i++) {
@@ -87,6 +105,10 @@ int main(void) {
     }
     wq_rows[0][0] = -1.0f;      /* 1+w == 0, the entry `w` alone is -1 at */
     wq_rows[0][1] = 0.5f;
+    for (i = 0; i < NN; i++) {
+        st ^= st << 13; st ^= st >> 17; st ^= st << 5;
+        gv[i] = ((float)(int32_t)st / 2147483648.0f) * 6.0f;
+    }
     for (r = 1; r < NW; r++) {
         memcpy(w_rows[r], w_rows[0], sizeof(w_rows[0]));
         memcpy(wq_rows[r], wq_rows[0], sizeof(wq_rows[0]));
@@ -127,8 +149,13 @@ int main(void) {
        skips the Q15 output loop entirely and this would compare that
        fallback to itself. */
     lz_norm_select("fixed");
-    for (r = 0; r < NW; r++)
-        lz_rmsnorm_int(iout[r], xv, wq_rows[r], NN, 1e-6f, &ideq[r]);
+    if (gated)
+        for (r = 0; r < NW; r++)
+            lz_rmsnorm_gated_int(iout[r], xv, gv, wq_rows[r], NN, 1e-6f,
+                                 &ideq[r]);
+    else
+        for (r = 0; r < NW; r++)
+            lz_rmsnorm_int(iout[r], xv, wq_rows[r], NN, 1e-6f, &ideq[r]);
     first = -1;
     for (r = 1; r < NW; r++)
         if (memcmp(iout[r], iout[0], sizeof(iout[0])) != 0 ||
@@ -136,18 +163,31 @@ int main(void) {
             if (first < 0) first = r;
             bad++;
         }
-    printf("norm Q15 (1+w) table: %d rows, %d differ from row 0", NW, bad);
+    printf("norm Q15 %s table: %d rows, %d differ from row 0",
+           gated ? "plain-w (gated)" : "(1+w)", NW, bad);
     if (first >= 0) printf(", first at row %d", first);
     printf("  [deq=%.9g t0=%ld]\n", (double)ideq[0], (long)iout[0][0]);
-    /* deq == 0 is lz_rmsnorm_out_fixed_int's LZ_NORM_FIXED=0 stub, or a
-       norm_ss_fixed that declined: either way the Q15 loop did not run
-       and the rows above are identical for a reason that has nothing to
-       do with the table. */
+    /* deq == 0 is the LZ_NORM_FIXED=0 stub, or a norm_ss_fixed that
+       declined: either way the Q15 loop did not run and the rows above
+       are identical for a reason that has nothing to do with the table. */
     if (ideq[0] == 0.0f) {
         printf("FAIL: the Q15 output loop did not run (deq is 0) - the "
                "rows above compare nothing\n");
         return 1;
     }
+    /* The gated arm has a positive control the (1+w) arm does not: with
+       the pool already carrying the wp table's rows, "0 differ" would
+       also be what a build that never consulted the table produces. The
+       counter says how many elements really came from it. */
+    if (gated && lz_debug_norm_qw == 0) {
+        printf("FAIL: the gated loop never read the table (0 elements) - "
+               "the rows above compare one arm to itself\n");
+        return 1;
+    }
+    if (gated)
+        printf("  gated cached elements: %lld of %d (%d rows of %d)\n",
+               lz_debug_norm_qw, NW * NN,
+               (int)(lz_debug_norm_qw / NN), NW);
     if (bad) { printf("FAIL\n"); return 1; }
 
     printf("PASS\n");

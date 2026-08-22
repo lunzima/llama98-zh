@@ -137,47 +137,204 @@ void lz_rmsnorm_gated_out_fixed(float *o, const float *x,
 }
 #endif /* LZ_NORM_FIXED */
 
+/* Positive controls for the two switches on the gated int output loop,
+   in ELEMENTS, and outside LZ_NORM_FIXED so a tier-off build still
+   links. Both read 0 in their control build, which is the only thing
+   that separates "the path ran" from "the path was compiled out": the
+   gated chain's output is bit-identical across LZ_GATE_QW and close
+   across LZ_GATE_SIG_I, so an output comparison cannot tell either apart
+   on its own. eg_lo/eg_hi are the observed range of the gate's Q15
+   exponent - sigmoid_q15_i's integer path has a band (LZ_SIG_EMAX) and
+   falls back to the float coordinate outside it, so this is the
+   measurement that says which one ran rather than an assumption that
+   the domain holds. */
+long long lz_debug_norm_sig_i = 0;
+long long lz_debug_norm_qw = 0;
+int lz_debug_norm_eg_lo = 32767;
+int lz_debug_norm_eg_hi = -32768;
+
 #if LZ_NORM_FIXED
+/* ---- the norm weight's Q15 table, cached per weight pointer ----------
+
+   THE LIBRARY CALLS THAT READ ONLY w DO NOT DEPEND ON THE TOKEN. Both
+   int output loops below quantize a norm weight to Q15 - the gated one
+   quantizes w, the plain one 1+w - and a norm weight tensor is the same
+   object on every call for the life of the model. Measured on the ARM
+   cross build, that pair is ~130 of the ~147 instructions per element
+   the plain loop spends: one __aeabi_fadd (48) in its own loop, one
+   __aeabi_fmul (28) plus one q8_round (48) in the main one, plus the two
+   clamps. Hoisting them into a table built once leaves the int64 chain
+   and the loads. The amax scan goes with them: it is compares and
+   absolute values, outside the census's convention but not free.
+
+   Keyed on the POINTER, PLUS a two-word content sentinel, and the
+   sentinel is not belt-and-braces. lz_t_f32 returns t->f unchanged for
+   an F32 tensor, which is what every norm weight in every checkpoint
+   here is (.prof/dtype_by_role.c), so the pointer is the tensor's own
+   storage and is stable. But for a QUANTIZED tensor lz_t_f32 dequantizes
+   into the caller's scratch and returns THAT, so two different norm
+   weights of the same length would arrive as the same pointer and a
+   pointer-only key would hand the second one the first one's table -
+   silently wrong, not slow. The sentinel (the bit patterns of w[0] and
+   w[n-1]) catches that for any pair differing at either end; on a
+   mismatch the lookup declines and the caller runs its inline arm, which
+   is correct by construction and does not thrash the pool.
+
+   Static, single-threaded, like the scratch below. The pool is a bump
+   allocator with no eviction: a model has a fixed set of norm weights,
+   so it either fits or it does not, and a cache that thrashed would be
+   worse than the miss path. On a full pool build_qw returns NULL and the
+   caller computes inline exactly as before - that path is not dead code,
+   it is what any model past the bound runs. */
+#ifndef LZ_QW_POOL
+#define LZ_QW_POOL 32768        /* int16 entries; CE uses 36 x 512 */
+#endif /* LZ_QW_POOL */
+#ifndef LZ_QW_SLOTS
+#define LZ_QW_SLOTS 64
+#endif /* LZ_QW_SLOTS */
+
+static short qw_pool[LZ_QW_POOL];
+static int qw_used = 0;
+static struct { const float *w; int n; int add1; int ew;
+                uint32_t k0, k1; short *q; } qw_slot[LZ_QW_SLOTS];
+static int qw_slots = 0;
+
+/* The Q15 table for w[0..n), or NULL if the pool is full or the sentinel
+   says this pointer is carrying different data than it did. add1 selects
+   which table: 1 for the Q15 image of 1+w (lz_rmsnorm's chain), 0 for w
+   itself (the gated chain). They are separate slots because they are
+   different tables of the same tensor. *ew_out receives the shared
+   exponent.
+
+   The build is the SAME arithmetic the inline path ran, in the same
+   order, so a cached run and an uncached one agree bit for bit.
+   .prof/norm_wp_xcheck.c asserts that for both tables by driving more
+   distinct weight pointers than the pool has slots, so the two arms run
+   in one process and must agree; its mutation run reports the split.
+   (An earlier version of this comment cited build/norm_qw_gate.sh, which
+   was never written.) */
+static const short *build_qw(const float *w, int n, int add1, int *ew_out) {
+    union { float f; uint32_t u; } bit;
+    static float wp[LZ_NORM_MAX_N];
+    uint32_t k0, k1;
+    float sw;
+    short *q;
+    int ew, i;
+
+    bit.f = w[0];     k0 = bit.u;
+    bit.f = w[n - 1]; k1 = bit.u;
+    for (i = 0; i < qw_slots; i++)
+        if (qw_slot[i].w == w && qw_slot[i].n == n &&
+            qw_slot[i].add1 == add1) {
+            if (qw_slot[i].k0 != k0 || qw_slot[i].k1 != k1) return NULL;
+            *ew_out = qw_slot[i].ew;
+            return qw_slot[i].q;
+        }
+    if (qw_slots >= LZ_QW_SLOTS || qw_used + n > LZ_QW_POOL) return NULL;
+    q = qw_pool + qw_used;
+    /* One fill per table rather than one fill over a `src` pointer: each
+       branch is then textually the arithmetic ITS consumer's inline arm
+       runs, which is what the bit-identity claim is about, and
+       .prof/norm_wp_xcheck.sh has a mutation point per table. */
+    if (add1) {
+        for (i = 0; i < n; i++) wp[i] = 1.0f + w[i];
+        bit.u = q8_amax(wp, n); ew = 14 - expof(bit.f); sw = pow2f(ew);
+        for (i = 0; i < n; i++) {
+            int v = q8_round(wp[i] * sw);
+            if (v > 32767) v = 32767; else if (v < -32767) v = -32767;
+            q[i] = (short)v;
+        }
+    } else {
+        bit.u = q8_amax(w, n); ew = 14 - expof(bit.f); sw = pow2f(ew);
+        for (i = 0; i < n; i++) {
+            int v = q8_round(w[i] * sw);
+            if (v > 32767) v = 32767; else if (v < -32767) v = -32767;
+            q[i] = (short)v;
+        }
+    }
+    qw_used += n;
+    qw_slot[qw_slots].w = w;
+    qw_slot[qw_slots].n = n;
+    qw_slot[qw_slots].add1 = add1;
+    qw_slot[qw_slots].ew = ew;
+    qw_slot[qw_slots].k0 = k0;
+    qw_slot[qw_slots].k1 = k1;
+    qw_slot[qw_slots].q = q;
+    qw_slots++;
+    *ew_out = ew;
+    return q;
+}
+
 /* Int output variant of lz_rmsnorm_gated_out_fixed: identical Q15
    int-multiply, but instead of dequantizing to float per element the
    Q15 result is written as int and the single power-of-two scale
    deq = 2^(30-ex-ew-eg-ei) is returned out-of-band. lz_quantize_q8_int
    then folds deq into the stored group scale only, so the Q15 -> float
    -> int8 double conversion disappears while staying bit-identical to
-   the float chain (the cancellation proof lives at lz_quantize_q8_int). */
+   the float chain (the cancellation proof lives at lz_quantize_q8_int).
+
+   qw comes from the table above (LZ_GATE_QW); the local fill is the
+   miss path, running the same arithmetic per call. The sigmoid reads the
+   gate's Q15 image rather than the float g (LZ_GATE_SIG_I) - see
+   src/ops.h for both switches and for why the second one is
+   value-changing. */
 void lz_rmsnorm_gated_out_fixed_int(int32_t *t, const float *x,
                                     const float *g, const float *w,
                                     float inv, int n, int32_t *sig,
                                     float *deq) {
+    static short qwl[LZ_NORM_MAX_N];
     union { float f; uint32_t u; } bit;
+    const short *qwt = NULL;
     float sx, sw, sg;
-    int ex, ew, eg, ei;
+    int ex, ew = 0, eg, ei;
     int32_t qinv;
     int i;
     (void)sig;
 
     bit.u = q8_amax(x, n); ex = 14 - expof(bit.f); sx = pow2f(ex);
-    bit.u = q8_amax(w, n); ew = 14 - expof(bit.f); sw = pow2f(ew);
     bit.u = q8_amax(g, n); eg = 14 - expof(bit.f); sg = pow2f(eg);
     bit.u = q8_amax(&inv, 1); ei = 14 - expof(bit.f);
     qinv = q8_round(inv * pow2f(ei));
     if (qinv > 32767) qinv = 32767;
     if (qinv < -32767) qinv = -32767;
+    if (eg < lz_debug_norm_eg_lo) lz_debug_norm_eg_lo = eg;
+    if (eg > lz_debug_norm_eg_hi) lz_debug_norm_eg_hi = eg;
+
+#if LZ_GATE_QW
+    qwt = build_qw(w, n, 0, &ew);
+    if (qwt) lz_debug_norm_qw += n;
+#endif /* LZ_GATE_QW */
+    if (!qwt) {
+        bit.u = q8_amax(w, n); ew = 14 - expof(bit.f); sw = pow2f(ew);
+        for (i = 0; i < n; i++) {
+            int v = q8_round(w[i] * sw);
+            if (v > 32767) v = 32767; else if (v < -32767) v = -32767;
+            qwl[i] = (short)v;
+        }
+        qwt = qwl;
+    }
     for (i = 0; i < n; i++) {
         int qx = q8_round(x[i] * sx);
-        int qw = q8_round(w[i] * sw);
+        int qw = qwt[i];
         int qg = q8_round(g[i] * sg);
-        int32_t sigv = sigmoid_q15(g[i]);
+        int32_t sigv;
         int64_t t64;
         if (qx > 32767) qx = 32767; else if (qx < -32767) qx = -32767;
-        if (qw > 32767) qw = 32767; else if (qw < -32767) qw = -32767;
         if (qg > 32767) qg = 32767; else if (qg < -32767) qg = -32767;
+#if LZ_GATE_SIG_I
+        sigv = sigmoid_q15_i(qg, eg);
+#else
+        sigv = sigmoid_q15(g[i]);
+#endif /* LZ_GATE_SIG_I */
         t64 = (int64_t)qx * qw;
         t64 = (t64 * qg) >> 15;
         t64 = (t64 * qinv) >> 15;
         t64 = (t64 * sigv) >> 15;
         t[i] = (int32_t)t64;
     }
+#if LZ_GATE_SIG_I
+    lz_debug_norm_sig_i += n;
+#endif /* LZ_GATE_SIG_I */
     *deq = pow2f(30 - ex - ew - eg - ei);
 }
 #else
@@ -206,8 +363,19 @@ void lz_rmsnorm_gated_int(int32_t *t, const float *x, const float *g,
             /* Same replacement as lz_rmsnorm_gated's fixed branch, minus
                the per-element dequant (1 cvt + 1 mul) the float output
                loop spent; the Q15 value stays int and deq is one scalar
-               per call. */
-            LZ_FCX(LZ_FC_NORM, 4 * n + 1, 3 * n + 1, 1, n + 1, 0);
+               per call.
+
+               The two switches subtract exactly what they remove, which
+               is why they have to be 0 or 1 rather than merely nonzero:
+               LZ_GATE_SIG_I drops the float coordinate the sigmoid was
+               billed for (1 mul, 1 cvt per element) and LZ_GATE_QW drops
+               w's q8_round (1 mul, 1 add). The amax scan either switch
+               also removes is compares, outside this census's
+               convention. */
+            LZ_FCX(LZ_FC_NORM,
+                   (4 - LZ_GATE_SIG_I - LZ_GATE_QW) * n + 1,
+                   (3 - LZ_GATE_QW) * n + 1, 1,
+                   (1 - LZ_GATE_SIG_I) * n + 1, 0);
             ss = ssf;
             goto have_ss_gated_int;
         }
@@ -222,82 +390,6 @@ have_ss_gated_int:
 }
 
 #if LZ_NORM_FIXED
-/* ---- the (1+w) Q15 table, cached per norm weight ---------------------
-
-   THE TWO LIBRARY CALLS IN THE OUTPUT LOOP DO NOT DEPEND ON THE TOKEN.
-   `wp[i] = 1.0f + w[i]` and `q8_round(wp[i] * sw)` read only w - the
-   norm weight tensor, which is the same object on every call for the
-   life of the model. Measured on the ARM cross build, that pair is
-   ~130 of the ~147 instructions per element this path spends: one
-   __aeabi_fadd (48) in its own loop, one __aeabi_fmul (28) plus one
-   q8_round (48) in the main one, plus the two clamps. Hoisting them
-   into a table built once leaves the int64 chain and the loads.
-
-   Keyed on the POINTER, which is sound for exactly one reason worth
-   stating: lz_t_f32 returns t->f unchanged for an F32 tensor, and norm
-   weights are non-2D so the exporter never quantizes them. The pointer
-   is therefore the tensor's own storage and is stable. If that ever
-   stops being true the key stops matching, the table is rebuilt every
-   call, and the numbers stay right - the failure mode is slow, not
-   wrong.
-
-   Static, single-threaded, like the qx/wp scratch above it. The pool is
-   a bump allocator with no eviction: a model has a fixed set of norm
-   weights, so it either fits or it does not, and a cache that thrashed
-   would be worse than the miss path. On a full pool build_qw returns
-   NULL and the caller computes inline exactly as before - that path is
-   not dead code, it is what any model past the bound runs. */
-#ifndef LZ_QW_POOL
-#define LZ_QW_POOL 32768        /* int16 entries; CE uses 36 x 512 */
-#endif /* LZ_QW_POOL */
-#ifndef LZ_QW_SLOTS
-#define LZ_QW_SLOTS 64
-#endif /* LZ_QW_SLOTS */
-
-static short qw_pool[LZ_QW_POOL];
-static int qw_used = 0;
-static struct { const float *w; int n; int ew; short *q; }
-qw_slot[LZ_QW_SLOTS];
-static int qw_slots = 0;
-
-/* The table for w[0..n), or NULL if it will not fit. *ew_out receives
-   the shared exponent. The build is the SAME arithmetic the inline path
-   ran, in the same order, so a cached run and an uncached one agree bit
-   for bit. .prof/norm_wp_xcheck.c asserts it by driving more distinct
-   weight pointers than the pool has slots, so the two arms run in one
-   process and must agree; its mutation run reports the split. (An
-   earlier version of this comment cited build/norm_qw_gate.sh, which
-   was never written.) */
-static const short *build_qw(const float *w, int n, int *ew_out) {
-    union { float f; uint32_t u; } bit;
-    static float wp[LZ_NORM_MAX_N];
-    float sw;
-    short *q;
-    int ew, i;
-    for (i = 0; i < qw_slots; i++)
-        if (qw_slot[i].w == w && qw_slot[i].n == n) {
-            *ew_out = qw_slot[i].ew;
-            return qw_slot[i].q;
-        }
-    if (qw_slots >= LZ_QW_SLOTS || qw_used + n > LZ_QW_POOL) return NULL;
-    for (i = 0; i < n; i++) wp[i] = 1.0f + w[i];
-    bit.u = q8_amax(wp, n); ew = 14 - expof(bit.f); sw = pow2f(ew);
-    q = qw_pool + qw_used;
-    for (i = 0; i < n; i++) {
-        int v = q8_round(wp[i] * sw);
-        if (v > 32767) v = 32767; else if (v < -32767) v = -32767;
-        q[i] = (short)v;
-    }
-    qw_used += n;
-    qw_slot[qw_slots].w = w;
-    qw_slot[qw_slots].n = n;
-    qw_slot[qw_slots].ew = ew;
-    qw_slot[qw_slots].q = q;
-    qw_slots++;
-    *ew_out = ew;
-    return q;
-}
-
 /* Int output loop for lz_rmsnorm's fixed tier: o[i] = x[i]*inv*(1+w[i])
    as a Q15 int-multiply, mirroring lz_rmsnorm_gated_out_fixed_int's
    shape for a 2-factor (not 4-factor) chain. qx/ex are norm_ss_fixed's
@@ -344,7 +436,7 @@ void lz_rmsnorm_out_fixed_int(int32_t *t, const short *qx, int ex,
     if (qinv > 32767) qinv = 32767;
     if (qinv < -32767) qinv = -32767;
 
-    qwt = build_qw(w, n, &ew);
+    qwt = build_qw(w, n, 1, &ew);
     if (qwt) {
         for (i = 0; i < n; i++) {
             int64_t t64 = (int64_t)qx[i] * qwt[i];  /* x*(1+w), unshifted */

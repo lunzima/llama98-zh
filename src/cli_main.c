@@ -115,6 +115,15 @@ extern long long lz_debug_conv_sig_i;
 extern int lz_debug_swiglu_pmax;
 extern int lz_debug_swiglu_gmax;
 extern int lz_debug_swiglu_omax;
+/* The gated norm's two switches, ops_norm.c. Elements whose sigmoid came
+   from the integer coordinate and elements whose Q15 weight came from
+   the cached table; eg_lo/eg_hi are the gate exponent's observed range,
+   which is what says sigmoid_q15_i's integer path was the one that ran
+   rather than its float-coordinate fallback. */
+extern long long lz_debug_norm_sig_i;
+extern long long lz_debug_norm_qw;
+extern int lz_debug_norm_eg_lo;
+extern int lz_debug_norm_eg_hi;
 extern int lz_kv_kfmt;
 extern int lz_kv_vfmt;
 extern int lz_attn_sink;
@@ -1871,6 +1880,10 @@ int main(int argc, char **argv) {
                lz_debug_swiglu_i16, lz_debug_swiglu_pmax,
                lz_debug_swiglu_gmax, lz_debug_swiglu_omax);
         printf("conv sig int   %lld channel-steps\n", lz_debug_conv_sig_i);
+        printf("gate sig int   %lld elements  eg %d..%d\n",
+               lz_debug_norm_sig_i, lz_debug_norm_eg_lo,
+               lz_debug_norm_eg_hi);
+        printf("gate qw table  %lld elements\n", lz_debug_norm_qw);
         /* The f32 census, in a build that can answer it (-DLZ_F32COUNT=1).
            Printed here rather than behind a flag: a counting build exists
            only to produce this, and a number that needs asking for is a

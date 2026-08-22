@@ -34,12 +34,23 @@ if ! build "$R" gate; then
 fi
 echo "-- gate --"
 "$O/gate" || { echo "FAIL: the gate itself is red"; exit 1; }
+echo "-- gate (gated arm) --"
+"$O/gate" gated || { echo "FAIL: the gated arm is red"; exit 1; }
 
-# One mutation per table. Each drops the `+ 1.0f` from its own fill
-# loop, so the differing-row count is that table's cached/inline split.
+# One mutation per table, and the ARGV column says which invocation the
+# table lives in - the two Q15 tables share one pool, so only the arm
+# that runs first gets a cached/inline split (see the probe's header).
+#
+# wp and qw drop the `+ 1.0f` from their own fill loop, so the
+# differing-row count is that table's split. The gated table has no
+# `+ 1.0f` to drop - it quantizes w itself - so its mutation is an
+# off-by-one in the same fill, applied inside build_qw's line range
+# because the identical expression also appears in the two callers'
+# cache-miss arms, which are the very thing it must NOT change.
 FAILED=0
-for M in wp qw; do
+for M in wp qw gated; do
     rm -rf "$O/tree"; mkdir -p "$O/tree"; cp -r "$R/src" "$O/tree/src"
+    ARGV=""
     case $M in
     wp) sed -i '0,/for (i = 0; i < n; i++) p\[i\] = 1.0f + w\[i\];/s//for (i = 0; i < n; i++) p[i] = w[i];/' \
             "$O/tree/src/ops_norm.c"
@@ -47,6 +58,11 @@ for M in wp qw; do
     qw) sed -i '0,/for (i = 0; i < n; i++) wp\[i\] = 1.0f + w\[i\];/s//for (i = 0; i < n; i++) wp[i] = w[i];/' \
             "$O/tree/src/ops_norm.c"
         PAT='wp\[i\] = w\[i\];' ;;
+    gated)
+        sed -i '/^static const short \*build_qw/,/^    qw_used += n;/ s/int v = q8_round(w\[i\] \* sw);/int v = q8_round(w[i] * sw) + 1;/' \
+            "$O/tree/src/ops_norm.c"
+        PAT='q8_round(w\[i\] \* sw) + 1;'
+        ARGV=gated ;;
     esac
     if ! grep -q "$PAT" "$O/tree/src/ops_norm.c"; then
         echo "FAIL: mutation '$M' did not apply - its fill loop moved"
@@ -59,8 +75,8 @@ for M in wp qw; do
         FAILED=1
         continue
     fi
-    echo "-- mutation $M (its fill loop forgets the +1) --"
-    OUT=$("$O/mut_$M" 2>&1)
+    echo "-- mutation $M --"
+    OUT=$("$O/mut_$M" $ARGV 2>&1)
     echo "$OUT" | grep -E 'rows|elem'
     if ! echo "$OUT" | grep -q '^FAIL'; then
         echo "FAIL: mutation '$M' left the check GREEN - that table is never"
@@ -69,5 +85,5 @@ for M in wp qw; do
     fi
 done
 [ $FAILED -eq 0 ] || exit 1
-echo "norm_wp_xcheck: PASS (gate green, both mutations red)"
+echo "norm_wp_xcheck: PASS (gate green, all three mutations red)"
 exit 0
