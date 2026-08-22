@@ -376,21 +376,13 @@ int lz_gdn_mode(void);
    2's adds ~1.2e-05 on top of a 1.8e-05 baseline. See
    gdn_p2_group_fixed in ops.c.
 
-   AUTO ASKS THE HARDWARE QUESTION - does this machine have a SIMD tier
-   for the write-back quantize? - and answers "fixed" only where it does
-   not. The test is q8r_have_simd(), i.e. CPUID leaf 1 EDX bit 25, SSE.
-
-   THE PREDICATE IS SSE AND MUST STAY SSE, NOT MMX. It covers every
-   pre-SSE part, not just "a Pentium II or K6-2": the rest of that set
-   is the whole Socket 7 generation - Cyrix 6x86MX/MII and IDT WinChip
-   C6/2 alongside the K6 - and it is exactly the part that must not be
-   lost, because those have MMX and an x87 WEAKER than the K6's
-   Rewriting this test in terms of MMX would push the three
-   machines with the worst x87 in the family back onto the float path,
-   and no gate would see it: the two tiers are required to be bit
-   identical, so a wrong tier choice is invisible to every consistency
-   check we have. Enumerating machines in a comment is how that edit
-   gets rationalised; the predicate is the contract.
+   AUTO ASKS NOTHING - it returns fixed on every machine. The shipping
+   build is fixed-point unconditionally, so speed is not what selects a
+   tier here; lz_soft_float_target() and q8r_have_simd() are no longer
+   consulted by any tier's auto (ops_sched.c carries the retirement note
+   for the first, and the second now only picks a q8-round
+   implementation). The knob exists so a control arm can be built, not
+   so a machine can choose.
 
    Two earlier assumptions behind that reasoning have been re-measured:
 
@@ -406,9 +398,10 @@ int lz_gdn_mode(void);
        write-back quantize, it DELETES it - the state never becomes
        float - and that quantize was 83% of this operator.
 
-   One host cannot decide a family of targets, so the default is
-   unchanged pending a PII/PIII measurement. The knob is the decision
-   point, not this comment. */
+   One host cannot decide a family of targets, and no target-machine
+   wall clock has been taken yet - but that no longer gates the default,
+   which is fixed because the shipping build is. The knob is the
+   decision point, not this comment. */
 const char *lz_gdn_p2_select(const char *name);
 int lz_gdn_p2_mode(void);
 /* Was the tier chosen by AUTO rather than asked for? The banner says so,

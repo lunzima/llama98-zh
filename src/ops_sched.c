@@ -97,9 +97,16 @@ int lz_pair_is_auto(void) { return g_pair_auto; }
 
 /* ---- q8r_have_simd / lz_q8r_tier ------------------------------------ */
 
-/* THE question every fixed-point tier's AUTO asks.
-   CPUID SSE, never MMX. Every Socket 7 part has MMX and no SSE, and
-   those are exactly the machines whose x87 is weakest. */
+/* Which q8-round implementation to use, and nothing else. No tier's
+   AUTO asks it any more - the shipping build is fixed-point whatever
+   the machine, so auto answers "fixed" without a CPUID.
+
+   CPUID SSE, never MMX, for the choice it does still make: every
+   Socket 7 part has MMX and no SSE, so an MMX-worded test would claim a
+   SIMD tier on exactly the machines that have none - Cyrix 6x86MX/MII
+   and IDT WinChip C6/2 alongside the K6, the weakest x87 in the family.
+   Enumerating machines in a comment is how that edit gets rationalised;
+   the predicate is the contract. */
 int q8r_have_simd(void) {
 #if defined(LZ_HAVE_Q8R_SIMD) || defined(LZ_HAVE_Q8R_SSE)
     return lz_cpu_has_sse();
