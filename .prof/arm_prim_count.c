@@ -51,6 +51,8 @@
 #include "sp_args_q8r.h"        /* real norm rows; see sm_setup/nm_setup */
 #elif PRIM_MODE == 16 || PRIM_MODE == 17
 #include "sp_args_q8r.h"        /* real floats; only the shape matters */
+#elif PRIM_MODE == 18
+#include "sp_args_q8r.h"        /* only for SP_N; the arm uses gd_* */
 #else
 # if PRIM_INTARG
 #  include "sp_args_i32f.h"
@@ -217,6 +219,47 @@ static void nm_setup(void) {
         nm_w[i] = 1.0f + SP_ARG[i] * (0.25f / 16384.0f);
 }
 
+/* GDN recurrence arm (mode 18). One whole lz_gdn_step per iteration -
+ * the entry gdn_pass1_fixed_head and therefore gdn_sum_gg sit under,
+ * which is where docs/arm-asm-audit.md's D2 row lives. Driven through
+ * the SHIPPED entry rather than by calling the static directly, so the
+ * pass-1 tier selection and the state write-back are in the measured
+ * window exactly as the engine runs them. */
+#define GD_KD 32
+#define GD_VD 64
+static int8_t  gd_sq[GD_KD * GD_VD];
+#if LZ_GDN_STATE_2PLANE
+static int8_t  gd_sq2[GD_KD * GD_VD];
+#define GD_P2 gd_sq2, gd_sq2,
+#else
+#define GD_P2
+#endif
+static float   gd_ss[GD_KD * (GD_VD / 32)];
+static float   gd_q[GD_KD], gd_k[GD_KD], gd_v[GD_VD], gd_out[GD_VD];
+
+static void gd_setup(void) {
+    uint32_t st = 0x9E3779B9u;
+    int i;
+    for (i = 0; i < GD_KD * GD_VD; i++) {
+        st ^= st << 13; st ^= st >> 17; st ^= st << 5;
+        gd_sq[i] = (int8_t)((int)(st % 255u) - 127);
+    }
+    for (i = 0; i < GD_KD * (GD_VD / 32); i++) {
+        st ^= st << 13; st ^= st >> 17; st ^= st << 5;
+        gd_ss[i] = ((float)(st >> 8) / 16777216.0f) * 0.02f + 1e-4f;
+    }
+    for (i = 0; i < GD_KD; i++) {
+        st ^= st << 13; st ^= st >> 17; st ^= st << 5;
+        gd_q[i] = ((float)(int32_t)st / 2147483648.0f) * 0.5f;
+        st ^= st << 13; st ^= st >> 17; st ^= st << 5;
+        gd_k[i] = ((float)(int32_t)st / 2147483648.0f) * 0.5f;
+    }
+    for (i = 0; i < GD_VD; i++) {
+        st ^= st << 13; st ^= st >> 17; st ^= st << 5;
+        gd_v[i] = ((float)(int32_t)st / 2147483648.0f) * 1.5f;
+    }
+}
+
 int main(int argc, char **argv) {
     long n = (argc > 1) ? atol(argv[1]) : 0;
     long i;
@@ -237,6 +280,9 @@ int main(int argc, char **argv) {
 #endif
 #if PRIM_MODE == 14
     nm_setup();
+#endif
+#if PRIM_MODE == 18
+    gd_setup();
 #endif
     for (i = 0; i < n; i++) {
         int k = (int)(i & (SP_N - 1));
@@ -307,6 +353,10 @@ int main(int argc, char **argv) {
 #else
         u.f = SP_ARG[k] + g_mulc;          g_sink = u.i;
 #endif
+#elif PRIM_MODE == 18
+        lz_gdn_step(gd_out, gd_sq, gd_sq, GD_P2 gd_ss, gd_ss,
+                    gd_q, gd_k, gd_v, 0.98f, 0.7f, GD_KD, GD_VD);
+        u.f = gd_out[k & (GD_VD - 1)];     g_sink = u.i;
 #else
 # if PRIM_INTARG
         g_sink = SP_ARG[k];

@@ -721,6 +721,39 @@ static void gdn_build_table(const float *ss, const float *q, const float *k,
    order - and integer sums are exact under reassociation, so this is
    bit-identical to the MMX version. Verified over 200000+ random groups
    plus extremes. */
+/* DO NOT "FIX" THE DOUBLE LOAD IN THIS LOOP FROM C. It looks like free
+   money and it is not; three shapes were tried and disassembled.
+ *
+ * gcc emits 16 ARM instructions per lane here, and rowA[j]/rowB[j] are
+ * each read TWICE - int8_t is a character type and may alias int32_t,
+ * so after the store to au_gg[j] the compiler must assume the state row
+ * changed under it, and C89 has no `restrict` to say otherwise.
+ * Hoisting them into locals does remove the reload: 16 -> 14.
+ *
+ * IT ALSO TURNS FOUR SMULBB/SMLABB INTO FOUR MUL/MLA. gcc fuses the
+ * narrow load into the halfword multiply only while each byte feeds one
+ * multiply; CSE the load and both operands become plain ints. On
+ * ARM926EJ-S SMULxy/SMLAxy are one cycle and MUL/MLA are two to five
+ * (early termination on Rs, a 16-bit coefficient costing three). The
+ * loop goes from about 16 cycles to about 22 - two instructions FEWER
+ * and six cycles MORE.
+ *
+ * The other two shapes fail differently: putting kp inside keeps each
+ * lane's accumulator in a register but re-loads the four coefficients
+ * per lane instead of once per 32, and at two lanes per block gcc
+ * spilled the accumulators anyway (16.5 per lane); unrolling kp by two
+ * needs eight coefficients live and spills for the same reason.
+ *
+ * So the 16 stands until somebody writes the assembly the audit's D2
+ * row describes - LDM for four bytes at once, SMLABB/SMLATT halfword
+ * selection, accumulators in registers - which can have BOTH. From C
+ * the compiler will give one or the other.
+ *
+ * This is the one place in this file where the project's usual metric
+ * lies: static instruction count transfers across machines and cycle
+ * counts do not, which is why everything else is counted rather than
+ * timed - but the multiply family's cycle difference is an ISA fact,
+ * documented, and large enough to invert the ranking. */
 static void gdn_sum_gg(const int8_t *sq_gg, int kd, int vd,
                        const int16_t (*tab)[8], int32_t tcu, int32_t tcw,
                        int32_t *au_gg, int32_t *aw_gg) {
