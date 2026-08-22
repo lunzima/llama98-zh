@@ -16,25 +16,34 @@
 # the fixed path AT COMPILE TIME must change nothing: the code deleted was
 # code the runtime flag had already stopped executing. So build the tree
 # three times - ordinary, -DLZ_GDN_FIXED=0, -DLZ_NORM_FIXED=0 - and require
-# byte-identical --dump-all-logits. With the pass-1 defect present rows 1-4
-# differ; the difference is the whole recurrence's pass-1 contraction.
+# byte-identical --dump-all-logits. With the pass-1 defect present rows 1-2
+# and 5-6 differ; the difference is the whole recurrence's pass-1
+# contraction.
 #
 # ONE SWITCH, ONE AXIS. Each -D here must remove exactly the tier it
 # names, so each row pairs a compile-time off switch with the runtime
 # flag for that same tier and nothing else. -DLZ_GDN_FIXED=0 used to
 # compile out the fixed norms as well - norm_ss_fixed and ops_norm.c's
-# three output loops sat inside its #if - so rows 3 and 4 had to pass
+# three output loops sat inside its #if - so rows 5 and 6 had to pass
 # --norm-write float on top of --recur-write float, and the norms tier
 # had no control arm of its own at all. LZ_NORM_FIXED now guards the
 # norms; --recur-write float alone matches the recurrence build, and
-# rows 5-6 run the same argument on the norms axis.
+# rows 7-8 run the same argument on the norms axis.
 #
-# ROWS 7-8 ARE ZERO CONTROLS. Rows that must be IDENTICAL are exactly the
+# WHY --fixed off IS CHECKED AGAINST BOTH BUILDS (rows 1-2 AND 3-4). While
+# the two tiers shared a macro, a --fixed off that reached the recurrence
+# but not the norms showed up in rows 1-2, because the one -D build had
+# neither tier. Decoupled, that build still has the fixed norms and rows
+# 1-2 would pass such a --fixed off. Each compile-time off switch
+# therefore gets its own --fixed off pair: the group setter has to be
+# complete for every axis separately, not for their union.
+#
+# ROWS 9-10 ARE ZERO CONTROLS. Rows that must be IDENTICAL are exactly the
 # shape that passes when the runner is broken - a --dump-all-logits that
 # never varies, a flag the binary ignores, two cmp calls against the same
 # file. They require each runtime flag to DIFFER from the shipping default
 # on the ordinary build, i.e. that this instrument can see a difference at
-# all. Without them rows 1-6 could be vacuous from birth.
+# all. Without them rows 1-8 could be vacuous from birth.
 #
 # Builds are derived from `make -Bn llama98` and written to a temp dir, so
 # this gate never touches build/native/ and cannot leave differently-flagged
@@ -150,15 +159,21 @@ check_diff() {
     fi
 }
 
-echo "-- rows 1-2: --fixed off, runtime-off vs compile-time-off --"
+echo "-- rows 1-2: --fixed off, runtime-off vs -DLZ_GDN_FIXED=0 --"
 run_dump on  fo_on_zh  "$TOK_ZH" --fixed off
 run_dump off fo_off_zh "$TOK_ZH" --fixed off
-check_same "--fixed off / zh" fo_on_zh fo_off_zh
+check_same "--fixed off vs GDN compiled out / zh" fo_on_zh fo_off_zh
 run_dump on  fo_on_en  "$TOK_EN" --fixed off
 run_dump off fo_off_en "$TOK_EN" --fixed off
-check_same "--fixed off / en" fo_on_en fo_off_en
+check_same "--fixed off vs GDN compiled out / en" fo_on_en fo_off_en
 
-echo "-- rows 3-4: --recur-write float, ordinary vs -DLZ_GDN_FIXED=0 --"
+echo "-- rows 3-4: --fixed off, runtime-off vs -DLZ_NORM_FIXED=0 --"
+run_dump nof fo_nof_zh "$TOK_ZH" --fixed off
+check_same "--fixed off vs norms compiled out / zh" fo_on_zh fo_nof_zh
+run_dump nof fo_nof_en "$TOK_EN" --fixed off
+check_same "--fixed off vs norms compiled out / en" fo_on_en fo_nof_en
+
+echo "-- rows 5-6: --recur-write float, ordinary vs -DLZ_GDN_FIXED=0 --"
 run_dump on  rw_on_zh  "$TOK_ZH" --recur-write float
 run_dump off rw_off_zh "$TOK_ZH" --recur-write float
 check_same "--recur-write float / zh" rw_on_zh rw_off_zh
@@ -166,7 +181,7 @@ run_dump on  rw_on_en  "$TOK_EN" --recur-write float
 run_dump off rw_off_en "$TOK_EN" --recur-write float
 check_same "--recur-write float / en" rw_on_en rw_off_en
 
-echo "-- rows 5-6: --norm-write float, ordinary vs -DLZ_NORM_FIXED=0 --"
+echo "-- rows 7-8: --norm-write float, ordinary vs -DLZ_NORM_FIXED=0 --"
 run_dump on  nw_on_zh  "$TOK_ZH" --norm-write float
 run_dump nof nw_nof_zh "$TOK_ZH" --norm-write float
 check_same "--norm-write float / zh" nw_on_zh nw_nof_zh
@@ -174,7 +189,7 @@ run_dump on  nw_on_en  "$TOK_EN" --norm-write float
 run_dump nof nw_nof_en "$TOK_EN" --norm-write float
 check_same "--norm-write float / en" nw_on_en nw_nof_en
 
-echo "-- rows 7-8: zero controls, one per axis --"
+echo "-- rows 9-10: zero controls, one per runtime flag --"
 run_dump on def_on_zh "$TOK_ZH"
 check_diff "ordinary build: --fixed off vs shipping default / zh" fo_on_zh def_on_zh
 # One control per runtime flag, not one for the pair: a --norm-write that
