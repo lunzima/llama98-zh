@@ -175,6 +175,7 @@ void lz_attn_score_q8(float *att, const float *qhh, int hd,
     static float   qs[LZ_ATTN_MAX_HD / 32];
     static int16_t qw[LZ_ATTN_MAX_HD] LZ_ATTN_QW_ALIGN;
     int ng = hd / 32, g, t, i, slot = 0;
+    float sc;
 
     /* Once per head: the q quantization - now billed by lz_quantize_q8
        itself under LZ_FC_QUANT (it used to be invisible to the census,
@@ -194,6 +195,18 @@ void lz_attn_score_q8(float *att, const float *qhh, int hd,
            0);
     lz_quantize_q8(qhh, hd, 32, qq, qs);
     for (i = 0; i < hd; i++) qw[i] = (int16_t)qq[i];
+
+    /* The 2^-8 that undoes LZ_ATTN_DOT32's `* 256`, folded into scale
+       ONCE instead of once per row. Exact, and therefore the same
+       number the two-step form produces: multiplying by a power of two
+       only moves the exponent, so fl(fold * 2^-8) is fold * 2^-8
+       exactly and fl(2^-8 * scale) is 2^-8 * scale exactly - both forms
+       round the identical product fold * scale * 2^-8 exactly once.
+       The one place that stops being true is an operand the scaling
+       pushes out of the normal range, and the caller's scale is
+       1/sqrt(head_dim); a fold small enough to go subnormal at 2^-8 is
+       an attention score under 2^-118. */
+    sc = (1.0f / 256.0f) * scale;
 
     for (t = 0; t <= pos; t++, LZ_SLOT_NEXT(slot, sink, ring)) {
         const int8_t *kt = kc + (size_t)slot * kvd;
@@ -222,7 +235,18 @@ void lz_attn_score_q8(float *att, const float *qhh, int hd,
         }
         for (; g < ng; g++)
             a0 += lz_i32f(rr[g]) * (qs[g] * kts[g]);
-        att[t] = ((a0 + a2) + (a1 + a3)) * (1.0f / 256.0f) * scale;
+        /* THREE OF THESE ADDS ARE ADDS OF ZERO whenever ng < 4, and a
+           float add of zero costs 43 instructions on a soft-float
+           target - the unrolled loop above needs ng >= 4 to run at all,
+           so for a 32- or 64-wide head every group lands in a0 and a1,
+           a2, a3 are still their +0.0f initializers.
+
+           Dropping them is exact, not close: x + (+0.0f) is x for every
+           x except -0.0f, which would come back as +0.0f - and a0
+           cannot be -0.0f, because it starts at +0.0f and 0.0f + y is y
+           (or +0.0f when y is -0.0f). NaN and infinities pass through
+           either form unchanged. */
+        att[t] = (ng >= 4 ? ((a0 + a2) + (a1 + a3)) : a0) * sc;
     }
 }
 #endif /* LZ_ATTN_FIXED & 1 */
@@ -260,11 +284,37 @@ void lz_attn_wsum_q8(float *out, const float *att, int hd,
         int t, d, t0;
 
         int slot = 0;
-        for (t = 0; t < T; t++, LZ_SLOT_NEXT(slot, sink, ring)) {
-            float c = att[t] * vs[(size_t)slot * (kvd / 32) + g];
-            float ac = (c < 0.0f) ? -c : c;
-            cbuf[t] = c;
-            if (ac > cmax) cmax = ac;
+        /* THE MAGNITUDE SCAN RUNS IN THE INTEGER DOMAIN, the same move
+           lz_softmax's max scan makes and for the same reason: `ac >
+           cmax` is a bl __aeabi_fcmpgt, about 30 instructions, once per
+           coefficient, and the sign-strip that feeds it is a compare
+           and a negate on top.
+
+           Simpler than softmax's key, because both operands are already
+           non-negative: clearing the sign bit IS fabs, and non-negative
+           floats compare exactly as their bit patterns do when read as
+           unsigned - no order-preserving transform is needed. The
+           winning pattern is then the float itself, so cmax comes back
+           by a plain reinterpret with nothing to undo.
+
+           NaN is the one input where this differs from the float form,
+           and it takes the same disposition lz_softmax's scan does:
+           float `>` is false for NaN so the old loop never selected
+           one, while NaN's magnitude bits exceed every finite value and
+           this one would. A NaN reaching attention weighting means the
+           upstream is already destroyed. */
+        {
+            union { float f; uint32_t u; } b;
+            uint32_t best = 0;
+            for (t = 0; t < T; t++, LZ_SLOT_NEXT(slot, sink, ring)) {
+                uint32_t a;
+                b.f = att[t] * vs[(size_t)slot * (kvd / 32) + g];
+                cbuf[t] = b.f;
+                a = b.u & 0x7FFFFFFFu;
+                if (a > best) best = a;
+            }
+            b.u = best;
+            cmax = b.f;
         }
         if (cmax > 0.0f) {
             inv = 32767.0f / cmax;
@@ -368,11 +418,37 @@ void lz_attn_wsum_q8_int(int64_t *acc, float *sscale, const float *att,
         int t, d, t0;
 
         int slot = 0;
-        for (t = 0; t < T; t++, LZ_SLOT_NEXT(slot, sink, ring)) {
-            float c = att[t] * vs[(size_t)slot * (kvd / 32) + g];
-            float ac = (c < 0.0f) ? -c : c;
-            cbuf[t] = c;
-            if (ac > cmax) cmax = ac;
+        /* THE MAGNITUDE SCAN RUNS IN THE INTEGER DOMAIN, the same move
+           lz_softmax's max scan makes and for the same reason: `ac >
+           cmax` is a bl __aeabi_fcmpgt, about 30 instructions, once per
+           coefficient, and the sign-strip that feeds it is a compare
+           and a negate on top.
+
+           Simpler than softmax's key, because both operands are already
+           non-negative: clearing the sign bit IS fabs, and non-negative
+           floats compare exactly as their bit patterns do when read as
+           unsigned - no order-preserving transform is needed. The
+           winning pattern is then the float itself, so cmax comes back
+           by a plain reinterpret with nothing to undo.
+
+           NaN is the one input where this differs from the float form,
+           and it takes the same disposition lz_softmax's scan does:
+           float `>` is false for NaN so the old loop never selected
+           one, while NaN's magnitude bits exceed every finite value and
+           this one would. A NaN reaching attention weighting means the
+           upstream is already destroyed. */
+        {
+            union { float f; uint32_t u; } b;
+            uint32_t best = 0;
+            for (t = 0; t < T; t++, LZ_SLOT_NEXT(slot, sink, ring)) {
+                uint32_t a;
+                b.f = att[t] * vs[(size_t)slot * (kvd / 32) + g];
+                cbuf[t] = b.f;
+                a = b.u & 0x7FFFFFFFu;
+                if (a > best) best = a;
+            }
+            b.u = best;
+            cmax = b.f;
         }
         if (cmax > 0.0f) {
             inv = 32767.0f / cmax;
