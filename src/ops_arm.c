@@ -413,6 +413,121 @@ void lz_wsum_pair_arm_asm(const int8_t *rowA, const int8_t *rowB,
 }
 #endif /* LZ_ARM_ASM_EXTERN */
 
+/* ---- the SubLN Hadamard's transform body ------------------------------ */
+
+#if defined(LZ_ARM_ASM_EXTERN)
+/* ONE INSTRUCTION IS THE WHOLE TRICK, and it is not a DSP instruction:
+
+     add  r4, r4, r5            @ r4 = u + v
+     sub  r5, r4, r5, lsl #1    @ r5 = (u+v) - 2v = u - v
+
+   The butterfly writes both outputs with NO temporary register and no
+   third instruction, because the barrel shifter is free on the second
+   operand. C cannot express it - `u+v` and `u-v` are two reads of u,
+   so gcc keeps u live and spends a move or a third register. That is
+   what turns 8 registers of LDM into 4 butterflies with 8 arithmetic
+   instructions instead of 12.
+
+   The bound is what makes the doubling safe: fwht.h states
+   |y| <= n*32767 ~= 1.68e7, so 2v stays under 2^26. Saturating QADD/
+   QSUB are NOT usable here for the same reason they are not needed -
+   the transform wants wraparound semantics, and the C it must match
+   has them.
+
+   Three shapes, because the pair spacing changes with the stage:
+     len=1  the two halves are ADJACENT, so one ldm of 8 words is four
+            butterflies - and it reads from x while writing to y, which
+            is how the entry memcpy disappears entirely.
+     len=2  pairs are (0,2) and (1,3) inside each group of 4; one ldm
+            of 8 covers two groups.
+     len>=4 the halves are len words apart, so two ldm and two stm.
+            stmdb after a writeback ldmia puts them back where they came
+            from without a second pointer.
+
+   Register map is the same in all three: r4-r11 the eight words in
+   flight, nothing else. */
+
+#define LZ_FWHT_BFLY(A, B)                                        \
+    "add    " A ", " A ", " B "\n\t"                              \
+    "sub    " B ", " A ", " B ", lsl #1\n\t"
+
+/* len=1 fused with the copy: y[2k] = x[2k]+x[2k+1], y[2k+1] = diff. */
+static void fwht_arm_stage1(int32_t *y, const int32_t *x, int n) {
+    const int32_t *xp = x;
+    int32_t *yp = y;
+    int cnt = n >> 3;
+    __asm__ __volatile__(
+        "1:\n\t"
+        "ldmia  %[xp]!, {r4, r5, r6, r7, r8, r9, r10, r11}\n\t"
+        LZ_FWHT_BFLY("r4", "r5")
+        LZ_FWHT_BFLY("r6", "r7")
+        LZ_FWHT_BFLY("r8", "r9")
+        LZ_FWHT_BFLY("r10", "r11")
+        "stmia  %[yp]!, {r4, r5, r6, r7, r8, r9, r10, r11}\n\t"
+        "subs   %[cnt], %[cnt], #1\n\t"
+        "bne    1b\n\t"
+        : [xp] "+r"(xp), [yp] "+r"(yp), [cnt] "+r"(cnt)
+        :
+        : "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "cc",
+          "memory");
+}
+
+/* len=2: inside each group of four, the pairs are (0,2) and (1,3). */
+static void fwht_arm_stage2(int32_t *y, int n) {
+    int32_t *p = y;
+    int cnt = n >> 3;
+    __asm__ __volatile__(
+        "1:\n\t"
+        "ldmia  %[p], {r4, r5, r6, r7, r8, r9, r10, r11}\n\t"
+        LZ_FWHT_BFLY("r4", "r6")
+        LZ_FWHT_BFLY("r5", "r7")
+        LZ_FWHT_BFLY("r8", "r10")
+        LZ_FWHT_BFLY("r9", "r11")
+        "stmia  %[p]!, {r4, r5, r6, r7, r8, r9, r10, r11}\n\t"
+        "subs   %[cnt], %[cnt], #1\n\t"
+        "bne    1b\n\t"
+        : [p] "+r"(p), [cnt] "+r"(cnt)
+        :
+        : "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "cc",
+          "memory");
+}
+
+/* len>=4: one group, `len` butterflies, the halves len words apart.
+   The group loop stays in C - it keeps this block to three operands,
+   which is what leaves gcc enough registers outside the r4-r11 clobber
+   to allocate them without spilling. */
+static void fwht_arm_group(int32_t *lo, int32_t *hi, int len) {
+    int32_t *p1 = lo;
+    int32_t *p2 = hi;
+    int cnt = len >> 2;
+    __asm__ __volatile__(
+        "1:\n\t"
+        "ldmia  %[p1]!, {r4, r5, r6, r7}\n\t"
+        "ldmia  %[p2]!, {r8, r9, r10, r11}\n\t"
+        LZ_FWHT_BFLY("r4", "r8")
+        LZ_FWHT_BFLY("r5", "r9")
+        LZ_FWHT_BFLY("r6", "r10")
+        LZ_FWHT_BFLY("r7", "r11")
+        "stmdb  %[p1], {r4, r5, r6, r7}\n\t"
+        "stmdb  %[p2], {r8, r9, r10, r11}\n\t"
+        "subs   %[cnt], %[cnt], #1\n\t"
+        "bne    1b\n\t"
+        : [p1] "+r"(p1), [p2] "+r"(p2), [cnt] "+r"(cnt)
+        :
+        : "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "cc",
+          "memory");
+}
+
+void lz_fwht_i32_arm_asm(int32_t *y, const int32_t *x, int n) {
+    int len, i;
+    fwht_arm_stage1(y, x, n);
+    fwht_arm_stage2(y, n);
+    for (len = 4; len < n; len <<= 1)
+        for (i = 0; i < n; i += (len << 1))
+            fwht_arm_group(y + i, y + i + len, len);
+}
+#endif /* LZ_ARM_ASM_EXTERN */
+
 /* ---- norm_ss_fixed's element loop ------------------------------------ */
 
 #if defined(LZ_ARM_ASM_EXTERN)

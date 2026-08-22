@@ -2871,10 +2871,6 @@ static const char km_why_fwht_x86[] =
     "not written: a pure add/sub butterfly over a power-of-two block is "
     "the SIMD-friendly end of the spectrum, not a scalar leaf - the only "
     "audit that has opened it (docs/arm-asm-audit.md G1/G2) is ARM-only";
-static const char km_why_fwhti_arma[] =
-    "not written: docs/arm-asm-audit.md G1 rates it WORTH WRITING - LDM/"
-    "STM take 8 instructions per butterfly to 3.5, and folding the entry "
-    "memcpy into the first stage saves a whole n-element pass";
 static const char km_why_fwhtf_arma[] =
     "not written: docs/arm-asm-audit.md G2 rates it worth writing (one "
     "unpack+align serving both the sum and the difference, instead of "
@@ -2928,7 +2924,7 @@ static const LZKmReg km_reg[LZ_KM_NUNIT][LZ_KM_NCOL] = {
    That is the point of registering them: without a row, a gate counting
    filled cells could not tell "no assembly" from "no such operator",
    and src/fwht.c could be deleted without a single cell changing. */
-/* fwhti*/{ KM_H(KM_ALL), KM_T(km_why_fwht_x86), KM_T(km_why_fwht_x86), KM_T(km_why_fwht_x86), KM_T(km_why_fwht_x86), KM_T(km_why_fwht_x86), KM_T(km_why_fwht_x86), KM_H(LZ_KMB_ARM), KM_T(km_why_fwhti_arma), KM_I(km_why_fwht_g128) },
+/* fwhti*/{ KM_H(KM_ALL), KM_T(km_why_fwht_x86), KM_T(km_why_fwht_x86), KM_T(km_why_fwht_x86), KM_T(km_why_fwht_x86), KM_T(km_why_fwht_x86), KM_T(km_why_fwht_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM),       KM_I(km_why_fwht_g128) },
 /* fwhtf*/{ KM_H(KM_ALL), KM_T(km_why_fwht_x86), KM_T(km_why_fwht_x86), KM_T(km_why_fwht_x86), KM_T(km_why_fwht_x86), KM_T(km_why_fwht_x86), KM_T(km_why_fwht_x86), KM_H(LZ_KMB_ARM), KM_T(km_why_fwhtf_arma), KM_I(km_why_fwht_g128) }
 };
 
@@ -3002,6 +2998,11 @@ static int km_arm_asm(int f) {
        inline block: its per-call setup amortizes over a whole row. */
     if (f == LZ_KM_UNIT_ATDOT || f == LZ_KM_UNIT_WSUMP ||
         f == LZ_KM_UNIT_NRMSS) return 1;
+    /* fwhti only. The float twin's cell stays empty and registered:
+       it needs an F32 weight to run, which no quantized export
+       produces, so writing it would be assembly for a path the target
+       machine never takes. */
+    if (f == LZ_KM_UNIT_FWHTI) return 1;
 #endif /* LZ_ARM_ASM_EXTERN */
     (void)f;
     return 0;

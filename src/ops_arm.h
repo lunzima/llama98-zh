@@ -89,6 +89,42 @@ int32_t lz_dot32_q61_arm_asm(const unsigned char *b4, const unsigned char *b2,
 void lz_wsum_pair_arm_asm(const int8_t *rowA, const int8_t *rowB,
                           const int16_t *coef, int32_t *acc32);
 
+/* The SubLN Hadamard's transform body (docs/arm-asm-audit.md G1), the
+   #2 hottest scalar operator on the CE path: 129,024 butterflies per
+   token at the settled geometry.
+
+   n must be a power of two AND at least 8 - lz_fwht_i32 keeps the C
+   body for anything smaller. That is not a tail-handling shortcut, it
+   is what lets every loop here move 8 words at a time with no epilogue;
+   n < 8 means blk 2 or 4, which no shipping config uses (the exporter's
+   cap is 512 and CE settles on it).
+
+   Bit-identity is by CONSTRUCTION rather than by argument, and this is
+   the one leaf here where that is true: the transform is integer
+   add/sub with no rounding, and within a stage every butterfly touches
+   a disjoint pair, so any order gives the same words. The C body and
+   this one differ in order and agree bitwise for that reason - not
+   because the order was matched.
+
+   Instruction count is the whole point (rule 3: static counts, not QEMU
+   wall clock). gcc's inner loop is 8 per butterfly plus an entry memcpy
+   over n words. Here the len=1 stage IS the copy, so that pass is gone
+   outright, and the three inner loops disassemble to 12 / 12 / 14
+   instructions per FOUR butterflies - 3.0 / 3.0 / 3.5.
+
+   The whole-transform figure is worse than those three, and the gap is
+   real rather than a rounding: the len>=4 stages keep their GROUP loop
+   in C, and it costs 9 instructions per group because gcc spills the
+   stage constants. At n=512 that is 8951 instructions for 2304
+   butterflies, 3.89 each, against 18432 + the memcpy - 2.06x on the
+   transform alone. The overhead concentrates at len=4 (5.75 per
+   butterfly, where one group is one inner iteration) and falls to 3.54
+   by len=256. Folding the group loop into the assembly would recover
+   most of it and is the obvious next step; it needs two more operands
+   than the three these blocks use, which is what keeps it out of this
+   version. */
+void lz_fwht_i32_arm_asm(int32_t *y, const int32_t *x, int n);
+
 /* norm_ss_fixed's element loop (docs/arm-asm-audit.md B1): for each
    x[i], q8_round(x[i] * 2^k), clamp to +-32767, optionally write the
    Q15 image, and accumulate the square into a 64-bit sum.
