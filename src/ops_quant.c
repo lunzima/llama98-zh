@@ -286,10 +286,14 @@ static const float LZ_EXP_LO = -87.3f;
    drops 0.644% -> 0.0258%), so take 4th order directly.
 
    The rounding must be DOWN (the low 23 bits only work as a
-   positive fraction), hence subtract 0.5 before the magic number;
-   the integer magnitude reaches 1e9, beyond the float magic's 2^22
-   range, so use double's 1.5x2^52. Relies on little-endian reads
-   of double's low 32 bits - the target platforms are x86 only. */
+   positive fraction), hence subtract 0.5 before the magic number.
+
+   Scaling x by log2e*2^23 in ONE step would push the integer past the
+   float magic's 2^22 range; the body scales by log2e*32 instead and
+   recovers the exponent, the table index and the residue from that -
+   see the two-level explanation there. Every bit operation goes
+   through a `union { float f; int32_t i; }`, so the two members have
+   the same width and this function does not depend on byte order. */
 float lz_exp_float_body(float x) {
     static const float LZ_EXP_C2 = 0.242844437f;
     static const float LZ_EXP_C1 = 0.207425515f;
