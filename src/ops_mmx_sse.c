@@ -484,6 +484,53 @@ void lz_q8round_2p_group_sse(const float *grp, int8_t *ho, int8_t *lw,
     _mm_empty();
 }
 
+/* ---- lz_matmul's F32-weight row, SSE1 Watcom twin.
+   gcc twin: lz_matmul_row_sse, the intrinsics body below - read that
+   one for why two xmm accumulators ARE the C's eight scalars rather
+   than a re-association of them, and why the final combine stays with
+   the caller.
+
+   Touches no %mm register, so no emms is owed: mulps/addps/movups are
+   the SSE1 additions to the FLOAT side, not the MMX register file that
+   this file's other kernels share with x87. */
+extern int lz_matmul_row_sse_asm(const float *row, const float *x,
+                                 int in_dim, float *acc8);
+#pragma aux lz_matmul_row_sse_asm = \
+    ".686"                                                      \
+    "xorps   xmm0, xmm0"                                        \
+    "xorps   xmm1, xmm1"                                        \
+    "and     ecx, -8"                                           \
+    "mov     esi, ecx"                                          \
+    "test    esi, esi"                                          \
+    "jz      mmdone"                                            \
+    "mmloop:"                                                   \
+    "movups  xmm2, [eax]"                                       \
+    "movups  xmm3, [edx]"                                       \
+    "mulps   xmm2, xmm3"                                        \
+    "addps   xmm0, xmm2"                                        \
+    "movups  xmm2, [eax+16]"                                    \
+    "movups  xmm3, [edx+16]"                                    \
+    "mulps   xmm2, xmm3"                                        \
+    "addps   xmm1, xmm2"                                        \
+    "add     eax, 32"                                           \
+    "add     edx, 32"                                           \
+    "sub     esi, 8"                                            \
+    "jnz     mmloop"                                            \
+    "mmdone:"                                                   \
+    "movups  [ebx], xmm0"                                       \
+    "movups  [ebx+16], xmm1"                                    \
+    "mov     eax, ecx"                                          \
+    parm [eax] [edx] [ecx] [ebx]                                \
+    value [eax]                                                 \
+    modify [eax ecx edx esi];
+
+/* Thin wrapper: a #pragma aux body expands at the call site, and the
+   call site is src/ops.c. Same reason lz_dot128_q16_mmx_w exists. */
+int lz_matmul_row_sse(const float *row, const float *x, int in_dim,
+                      float *acc8) {
+    return lz_matmul_row_sse_asm(row, x, in_dim, acc8);
+}
+
 #else /* gcc: intrinsics */
 
 #include "mmx_compat.h"
@@ -556,6 +603,45 @@ void lz_q8round32_sse(const float *x, int8_t *o, const float *pinv) {
         r = _mm_packs_pi16(l, h);
         memcpy(o + b * 8, &r, 8);
     }
+}
+
+/* ---- lz_matmul's F32-weight row, SSE1 gcc twin.
+   Watcom twin: lz_matmul_row_sse_asm, the #pragma aux above.
+
+   THE ONE HOT LOOP THE MATRIX HAD NO UNIT FOR. Every quantized format
+   carries row kernels; an F32 weight went through a plain C loop on
+   every platform, and that loop's own comment calls itself "the hottest
+   loop in the whole forward, ~750M MACs per token".
+
+   BIT-IDENTICAL BECAUSE THE C ALREADY HAS EIGHT ACCUMULATORS. It strides
+   by 8 and keeps a0..a7 apart to break the latency chain - so lane k of
+   these two vectors accumulates EXACTLY the sequence of products
+   scalar a_k does, in the same order. Two __m128 are those eight
+   accumulators, not a re-association of them.
+
+   THE FINAL COMBINE STAYS IN C, deliberately. Reducing eight lanes to
+   one is 7 adds against in_dim MACs, so nothing is saved by doing it
+   here - and the C's order is ((a0+a1)+(a2+a3)) + ((a4+a5)+(a6+a7)),
+   which a shuffle-based horizontal add would have to reproduce exactly
+   rather than approximately. Returning the eight partials and letting
+   the caller combine them makes that impossible to get wrong.
+
+   Returns how many elements it consumed (a multiple of 8); the tail is
+   the caller's, in C, exactly as before. */
+int lz_matmul_row_sse(const float *row, const float *x, int in_dim,
+                      float *acc8) {
+    __m128 a = _mm_setzero_ps();
+    __m128 b = _mm_setzero_ps();
+    int j = 0, ng = in_dim & ~7;
+    for (; j < ng; j += 8) {
+        a = _mm_add_ps(a, _mm_mul_ps(_mm_loadu_ps(row + j),
+                                     _mm_loadu_ps(x + j)));
+        b = _mm_add_ps(b, _mm_mul_ps(_mm_loadu_ps(row + j + 4),
+                                     _mm_loadu_ps(x + j + 4)));
+    }
+    _mm_storeu_ps(acc8, a);
+    _mm_storeu_ps(acc8 + 4, b);
+    return ng;
 }
 
 #endif /* __WATCOMC__ */

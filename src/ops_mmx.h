@@ -80,6 +80,16 @@ lz_p2_blk *p2_blk(void);
 #define LZ_HAVE_AMAX_MMX   1
 #define LZ_HAVE_Q8R_SSE    1
 
+/* lz_matmul's F32-weight row. BOTH toolchains from one macro, like
+   LZ_FWHT_MMX_EXTERN above, and declared outside the __WATCOMC__ split
+   below because the wrapper has the same name and prototype on each
+   side. Returns how many elements it consumed (a multiple of 8) and
+   leaves the C's EIGHT accumulators in acc8 for the caller to combine -
+   see the body for why the combine does not belong in the kernel. */
+#define LZ_MATMUL_F32_SSE_EXTERN 1
+int lz_matmul_row_sse(const float *row, const float *x, int in_dim,
+                      float *acc8);
+
 #if defined(__WATCOMC__)
 /* Watcom's kernels live in src/ops_mmx.c too. Grouped by their
    call-site shape, not by kernel, because that shape is the point:

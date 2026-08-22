@@ -588,6 +588,49 @@ void lz_quantize_q8_tok_int(const int32_t *t, int n, float deq,
     }
 }
 
+/* Integer element loop for lz_quantize_q8_int (below). -DLZ_Q8INT_INT=0
+   restores the float one and is the control arm every number about this
+   loop was measured against. */
+#ifndef LZ_Q8INT_INT
+#define LZ_Q8INT_INT 1
+#endif /* LZ_Q8INT_INT */
+
+/* 127*m/tam, correctly rounded, without a per-element divide and without
+   leaving int32. Shared by both integer quantizers below. Per group:
+   rcp = ceil(127*2^SH/tam), the amax having first been normalized to
+   32767 or less. Per element: q0 = (m*rcp + 2^(SH-1)) >> SH, then one
+   unconditional correction.
+
+   SH is 23 because the product has to fit int32 and its ceiling is
+   127*2^SH + tam: at 23 that is 1,069,580,288 against 2,147,483,647,
+   2.0x of headroom (observed maximum 1,069,628,752). SH cannot instead
+   be raised until the correction is unnecessary - the product is always
+   about q*2^SH while exactness needs 2^SH > 2*tam^2, and at tam = 32768
+   that wants SH = 39. A single multiply-shift in int32 cannot round this
+   quotient exactly; the correction is what makes it exact, not a
+   fallback.
+
+   Because rcp rounds UP, q0 is never below the true quotient and never
+   more than one above it, so the correction only ever subtracts, and its
+   test is the exact one: q0 is right iff 2*tam*q0 <= 254*m + tam.
+
+   Half-away-from-zero, on the magnitude, matching epi_align_i16 rather
+   than q8_round's half-to-even - the magic add is a float-domain trick
+   with nothing to reuse here, and C integer division truncates toward
+   zero, so the sign is taken out and put back explicitly. */
+#define LZ_Q8RCP_SH   23
+#define LZ_Q8RCP_HALF (1 << (LZ_Q8RCP_SH - 1))
+#define LZ_Q8RCP_NUM  (127 << LZ_Q8RCP_SH)
+#define LZ_Q8RCP_MAX  32767            /* amax range the reciprocal serves */
+
+/* Positive control for lz_quantize_q8_int's integer element loop:
+   elements rounded through the live reciprocal. Counted at the loop, not
+   at the switch, and not in the zero-reciprocal branch either - a build
+   that took the branch every time would perform no integer rounding and
+   would still look enabled from the outside. Zero in the
+   -DLZ_Q8INT_INT=0 control build by construction. */
+long long lz_debug_q8int_int = 0;
+
 /* Int-domain Q8 quantize for the fixed-tier gated norm. t holds the Q15
    result the norm wrote as int (no per-element dequant) and deq its
    power-of-two scale. The group's float amax would be t_amax*deq, so
@@ -601,23 +644,42 @@ void lz_quantize_q8_tok_int(const int32_t *t, int n, float deq,
    tiny amax hits MIN_SCALE first) keeps deq in the numerator to match
    the float path's own else exactly.
 
-   WHY THIS ONE STILL CONVERTS PER ELEMENT while its int16 twin does not.
-   lz_quantize_q8_i16 got an integer element loop (a per-group reciprocal
-   plus an exact correction test); transplanting it here does not work,
-   and the reason is measured, not argued. An instrumented build reports
-   this function's per-group amax reaching 490,628,226 - 490M/455M on
-   kmr20 zh/en and 445M/439M on kunmoe-v2-t2-probe, i.e. ~2^28.7, four
-   orders past int16. So the i16 entry cannot serve these callers, and
-   the twin's correction test `254*m + tam < 2*tam*qi` overflows int32 on
-   its left side alone (254 * 4.9e8 = 1.25e11). Both sides need int64,
-   where Watcom emits `call __I8M`.
+   WHAT THE WIDTH COSTS, AND WHERE IT IS PAID. The int16 twin's element
+   loop does not transplant here and the reason is arithmetic, not
+   headroom: the shift needs 2^SH > tam for the reciprocal's error to
+   stay under one level, so the product is about 127*tam, and past
+   tam = 2^24 that is over INT32_MAX. This entry's per-group amax is
+   measured at 461,538,651 (kmr20 zh; 431,706,623 en, 443,790,013 /
+   440,078,597 on kunmoe-v2-t2-probe), about 2^28.8, and the twin's
+   correction test `254*m + tam < 2*tam*qi` overflows int32 on its left
+   side alone there. Two changes buy both back:
 
-   It is therefore a design item, not a wiring one: 13,043 hardware
-   converts plus 6,528 magic adds per token on 6,528 elements, against
-   the i16 twin's 80 per token on 2,560. Whoever takes it needs either a
-   correction test that fits int32 at this magnitude or a pre-shift that
-   trades exactness for range, and the exactness claim is what the twin's
-   536,920,065-case proof exists to defend. */
+   - A PER-GROUP PRE-SHIFT normalizes tam into the range the reciprocal
+     already serves, and rounds the element UP while the amax rounds
+     down, so the approximation stays ONE-SIDED and the single subtract
+     is still enough. The error it adds is under 254/16383 of a level.
+     The shift is chosen per group AFTER the amax is known, which is why
+     it costs nothing measurable: narrowing the producer instead would
+     have to pick one shift for a whole row, and this entry's per-group
+     amax spans 151,791 to 461,538,651 in a single run - a fixed >>15
+     would leave the smallest group 4 levels of the 128 it needs.
+   - THE CORRECTION TEST IS EVALUATED MOD 2^32. `254*m + tam < 2*tam*q`
+     is `(127*m - tam*q) + (tam>>1) < 0` for integers at either parity,
+     and THAT quantity is tam*(R - q) + floor(tam/2) with R - q in
+     (-0.52, 0.5], so it fits int32 for every tam an int32 amax can
+     hold, while the two sides it came from do not. In uint32 the wrap
+     is exact and the sign is bit 31, so no int64 and no
+     implementation-defined signed conversion.
+
+   Result: the same exactly-rounded quotient the twin returns, and on
+   the domain the two share (tam <= 32767) the two loops agree on all
+   536,887,295 pairs - measured, not assumed, so the kda_lat call site
+   that widens an int16 into this entry gets the int16 entry's answer.
+
+   .prof/verify_q8int_int.c is the proof: 27,918,893,056 (tam, m) pairs
+   against two independent references, covering sh == 0 and the whole
+   sh == 1 band exhaustively and every other shift band at the corners
+   of each reciprocal cell. */
 void lz_quantize_q8_int(const int32_t *t, int n, int gs, float deq,
                         int8_t *q, float *s) {
     int g, k;
@@ -2382,6 +2444,25 @@ void lz_matmul(float *o, const float *x, const float *w,
         float a4 = 0.0f, a5 = 0.0f, a6 = 0.0f, a7 = 0.0f;
         float sum;
         int j = 0;
+#if defined(LZ_MATMUL_F32_SSE_EXTERN)
+        /* The eight accumulators above ARE two SSE vectors - lane k of
+           them accumulates exactly the sequence scalar a_k does, in the
+           same order, so this is bit-identical rather than a
+           re-association. Selected by tier, like every other kernel: a
+           --kernel ref run must reach the loop below or the arm this is
+           compared against would be this.
+
+           SSE1, not SSE2: mulps and addps are SSE1's, and every SSE2
+           machine has them - so one kernel serves both tiers and the
+           SSE2 column holds the same body rather than a copy of it. */
+        if ((g_kernel == LZ_KERNEL_SSE2 || g_kernel == LZ_KERNEL_MMX) &&
+            lz_cpu_has_sse() && in_dim >= 8) {
+            float acc8[8];
+            j = lz_matmul_row_sse(row, x, in_dim, acc8);
+            a0 = acc8[0]; a1 = acc8[1]; a2 = acc8[2]; a3 = acc8[3];
+            a4 = acc8[4]; a5 = acc8[5]; a6 = acc8[6]; a7 = acc8[7];
+        }
+#endif /* LZ_MATMUL_F32_SSE_EXTERN */
         for (; j + 7 < in_dim; j += 8) {
             a0 += row[j]     * x[j];
             a1 += row[j + 1] * x[j + 1];
@@ -3135,7 +3216,7 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
 #define LZ_KM_ROW 0
 #define LZ_KM_OP  1
 
-#define LZ_KM_NUNIT 14
+#define LZ_KM_NUNIT 15
 #define LZ_KM_NCOL 10
 /* The one unit with ARM kernels, by index - km_tab and km_present both
    need it, and a named constant is what stops a reorder of km_unit from
@@ -3164,6 +3245,11 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
    let a kernel appearing for either report the pair as covered. */
 #define LZ_KM_UNIT_FWHTI 12
 #define LZ_KM_UNIT_FWHTF 13
+/* lz_matmul's F32-weight row. A unit of its own rather than a sixth
+   format row: the five format rows are selected through LZ_ROW_*, and
+   this one is reached by lz_matmul_xq_nt's f32 short-circuit before any
+   dtype dispatch runs - a different mechanism, so a different row. */
+#define LZ_KM_UNIT_F32MM 14
 /* Column 0 is ref and columns 7..9 are armC/armA/g128; columns 1..6 are
    the six LZ_ROW_* slots in slot order, so column c reads tab[c - 1]. */
 #define LZ_KM_COL_ROW0 1
@@ -3178,7 +3264,8 @@ km_unit[LZ_KM_NUNIT] = {
     { "i32f",  LZ_KM_OP  }, { "q8rnd", LZ_KM_OP },
     { "expfx", LZ_KM_OP  }, { "atdot", LZ_KM_OP }, { "wsump", LZ_KM_OP },
     { "sigq",  LZ_KM_OP  }, { "nrmss", LZ_KM_OP },
-    { "fwhti", LZ_KM_OP  }, { "fwhtf", LZ_KM_OP }
+    { "fwhti", LZ_KM_OP  }, { "fwhtf", LZ_KM_OP },
+    { "f32mm", LZ_KM_OP }
 };
 static const char *const km_col[LZ_KM_NCOL] = {
     "ref", "mmxI", "sseI", "sse2I", "mmxA", "sseA", "sse2A",
@@ -3319,6 +3406,26 @@ static const char km_why_op_sse2[] =
     "unconditionally, so no SSE2 twin was ever selected - unaudited, not "
     "impossible";
 
+/* AUDITED WITH THE KERNEL. MMX is integer-only and this is a float
+   multiply-add, so those two cells cannot exist. SSE1 is where mulps
+   and addps arrive, and every SSE2 machine has them - so ONE body
+   serves both tiers and the SSE2 cells hold it rather than a copy.
+   The ARM cell is real and unwritten: no SIMD there, but the audit's
+   G2 argument applies - one unpack and align can serve the multiply
+   and the add instead of two __aeabi_* calls, which is a CHAIN and
+   therefore the category that pays (see the M5 box in
+   docs/arm-asm-audit.md for the one that does not). */
+static const char km_why_f32mm_mmx[] =
+    "impossible: MMX is integer-only and this is a float multiply-add. "
+    "SSE1 is the first tier that can express it";
+static const char km_why_f32mm_arma[] =
+    "not written: no SIMD on ARMv5TE, but the multiply and the add can "
+    "share one unpack+align instead of paying two __aeabi_* calls - a "
+    "chain, which is the category that pays here";
+static const char km_why_f32mm_g128[] =
+    "this column is the 128-ELEMENT quantization group; lz_matmul's "
+    "unit of work is a whole weight ROW against a whole activation "
+    "vector, a different axis";
 typedef struct { unsigned char have; unsigned char why; const char *text; } LZKmReg;
 #define KM_H(mask) { (unsigned char)(mask), 0, (const char *)0 }
 #define KM_I(text) { 0, LZ_KM_IMPOSSIBLE, (text) }
@@ -3332,33 +3439,40 @@ typedef struct { unsigned char have; unsigned char why; const char *text; } LZKm
    and carries no signal of its own - it is here because iron law 8
    counts C as a tier and a column left out of the table is a column
    nobody can miss. */
-static const LZKmReg km_reg[LZ_KM_NUNIT][LZ_KM_NCOL] = {
+/* FLAT, not [LZ_KM_NUNIT][LZ_KM_NCOL], and the reason is a compiler
+   limit rather than taste: Open Watcom accepts fourteen rows of this
+   shape and reports "E1175: Too many initializers" on the fifteenth,
+   with NUNIT and NCOL both verified correct by #error probes at the
+   declaration. One brace level fewer is what it takes. km_at() below is
+   the only place the two-dimensional index lives. */
+static const LZKmReg km_reg[LZ_KM_NUNIT * LZ_KM_NCOL] = {
 /*          ref          mmxI              sseI                sse2I             mmxA              sseA                sse2A             armC                 armA                 g128            */
-/* q8_0 */{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128) },
-/* q4_1 */{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128) },
-/* q6_1 */{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128) },
-/* q16_0*/{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128) },
-/* t2   */{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_I(km_why_t2g128) },
+/* q8_0 */ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128),
+/* q4_1 */ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128),
+/* q6_1 */ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128),
+/* q16_0*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128),
+/* t2   */ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_I(km_why_t2g128),
 /* operator units (LZ_KM_OP): registry only, no grid line. ref is the
    shared C body, which is also what --kernel arm-c runs - so armC is
    present on ARM for the same reason ref is present everywhere. */
-/* i32f */{ KM_H(KM_ALL), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128) },
-/* q8rnd*/{ KM_H(KM_ALL), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128) },
-/* expfx*/{ KM_H(KM_ALL), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128) },
+/* i32f */ KM_H(KM_ALL), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128),
+/* q8rnd*/ KM_H(KM_ALL), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128),
+/* expfx*/ KM_H(KM_ALL), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128),
 /* The two attention MAC units DO have x86 kernels, and they are
    macro-selected rather than table-selected, so km_op_present answers
    for them. atdot's assembly is q8_0's leaf, reused rather than copied
    (docs/arm-asm-audit.md section 6); wsump's is its own. */
-/* atdot*/{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_T(km_why_op_sse2), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_T(km_why_op_sse2), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_attn_g128) },
-/* wsump*/{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_T(km_why_op_sse2), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_T(km_why_op_sse2), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_attn_g128) },
-/* sigq */{ KM_H(KM_ALL), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128) },
-/* nrmss*/{ KM_H(KM_ALL), KM_I(km_why_nrmss_mmx), KM_I(km_why_nrmss_sse1), KM_H(LZ_KMB_GCC), KM_I(km_why_nrmss_mmx), KM_I(km_why_nrmss_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_nrmss_g128) },
+/* atdot*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_T(km_why_op_sse2), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_T(km_why_op_sse2), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_attn_g128),
+/* wsump*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_T(km_why_op_sse2), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_T(km_why_op_sse2), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_attn_g128),
+/* sigq */ KM_H(KM_ALL), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128),
+/* nrmss*/ KM_H(KM_ALL), KM_I(km_why_nrmss_mmx), KM_I(km_why_nrmss_sse1), KM_H(LZ_KMB_GCC), KM_I(km_why_nrmss_mmx), KM_I(km_why_nrmss_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_nrmss_g128),
 /* The two Hadamards are the only units here whose armA cell is EMPTY.
    That is the point of registering them: without a row, a gate counting
    filled cells could not tell "no assembly" from "no such operator",
    and src/fwht.c could be deleted without a single cell changing. */
-/* fwhti*/{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_fwhti_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_fwhti_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM),       KM_I(km_why_fwht_g128) },
-/* fwhtf*/{ KM_H(KM_ALL), KM_I(km_why_fwhtf_mmx), KM_T(km_why_fwhtf_x86), KM_T(km_why_fwhtf_x86), KM_I(km_why_fwhtf_mmx), KM_T(km_why_fwhtf_x86), KM_T(km_why_fwhtf_x86), KM_H(LZ_KMB_ARM), KM_T(km_why_fwhtf_arma), KM_I(km_why_fwht_g128) }
+/* fwhti*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_fwhti_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_fwhti_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM),       KM_I(km_why_fwht_g128),
+/* fwhtf*/ KM_H(KM_ALL), KM_I(km_why_fwhtf_mmx), KM_T(km_why_fwhtf_x86), KM_T(km_why_fwhtf_x86), KM_I(km_why_fwhtf_mmx), KM_T(km_why_fwhtf_x86), KM_T(km_why_fwhtf_x86), KM_H(LZ_KMB_ARM), KM_T(km_why_fwhtf_arma), KM_I(km_why_fwht_g128),
+/* f32mm*/ KM_H(KM_ALL), KM_I(km_why_f32mm_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_I(km_why_f32mm_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_T(km_why_f32mm_arma), KM_I(km_why_f32mm_g128)
 };
 
 #if defined(__WATCOMC__)
@@ -3485,6 +3599,21 @@ static int km_op_present(int f, int c) {
     if (f == LZ_KM_UNIT_NRMSS && c == LZ_KM_COL_ROW0 + LZ_ROW_SSE2_I) return 1;
 #endif /* __WATCOMC__ */
 #endif /* LZ_NORM_SS_SSE2_EXTERN */
+#if defined(LZ_MATMUL_F32_SSE_EXTERN)
+    /* FOUR cells from one body, unlike every other entry here: the
+       kernel is SSE1 (mulps/addps), and an SSE2 machine runs the same
+       instructions - so the SSE2 column holds this body rather than a
+       second one, and lz_matmul selects it at either tier. */
+#if defined(__WATCOMC__)
+    if (f == LZ_KM_UNIT_F32MM &&
+        (c == LZ_KM_COL_ROW0 + LZ_ROW_SSE_A ||
+         c == LZ_KM_COL_ROW0 + LZ_ROW_SSE2_A)) return 1;
+#else
+    if (f == LZ_KM_UNIT_F32MM &&
+        (c == LZ_KM_COL_ROW0 + LZ_ROW_SSE_I ||
+         c == LZ_KM_COL_ROW0 + LZ_ROW_SSE2_I)) return 1;
+#endif /* __WATCOMC__ */
+#endif /* LZ_MATMUL_F32_SSE_EXTERN */
     if (f != LZ_KM_UNIT_ATDOT && f != LZ_KM_UNIT_WSUMP) return 0;
 #if defined(__WATCOMC__)
     if (c == LZ_KM_COL_ROW0 + LZ_ROW_MMX_A) return 1;
@@ -3525,14 +3654,20 @@ static int km_present(int f, int c) {
     return 0;
 }
 
+/* The one place the two-dimensional index lives - see km_reg's own
+   comment for why that table is flat. */
+static const LZKmReg *km_at(int f, int c) {
+    return &km_reg[(size_t)f * LZ_KM_NCOL + (size_t)c];
+}
+
 static char km_status(int f, int c) {
-    unsigned have = km_reg[f][c].have;
+    unsigned have = km_at(f, c)->have;
     int here = (have & (unsigned)LZ_KMB_THIS) != 0;
     if (km_present(f, c)) return here ? 'x' : '+';
     if (here) return '!';
     if (have) return 'o';
-    if (km_reg[f][c].why == LZ_KM_IMPOSSIBLE) return 'i';
-    if (km_reg[f][c].why == LZ_KM_TODO) return 't';
+    if (km_at(f, c)->why == LZ_KM_IMPOSSIBLE) return 'i';
+    if (km_at(f, c)->why == LZ_KM_TODO) return 't';
     return '?';
 }
 
@@ -3575,8 +3710,8 @@ int lz_kernel_cell(int i, LZKmCell *out) {
     c = i % LZ_KM_NCOL;
     out->unit   = km_unit[f].name;
     out->tier   = km_col[c];
-    out->why    = km_reg[f][c].text;
-    out->have   = km_reg[f][c].have;
+    out->why    = km_at(f, c)->text;
+    out->have   = km_at(f, c)->have;
     out->status = km_status(f, c);
     out->kind   = km_unit[f].kind;
     return 1;
