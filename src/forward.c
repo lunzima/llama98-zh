@@ -188,6 +188,16 @@ long long lz_debug_n_lmhead = 0;
    if the loops still walked every row. */
 long long lz_debug_attn_skip = 0;
 
+/* Positive control for the V projection's int16 exit (LZ_VPROJ_I16).
+   Counted at the CONSUMER - inside the branch that hands vtmp_i16 to
+   lz_quantize_q8_i16 - not where the projection wrote it: an exit that
+   was taken and then read from the wrong buffer would still increment a
+   producer-side counter, and the int16 path is bit-comparable to the
+   float one, so the logits cannot tell the two apart on their own.
+   Elements, not calls, so it is the number the conversion arithmetic
+   uses directly. */
+long long lz_debug_vproj_i16 = 0;
+
 /* --kv f32: keep the KV cache unquantized. Reference arm only, see
    forward.h's kf32 comment for why it has to exist. */
 int lz_kv_kfmt = LZ_KVF_Q8;
@@ -507,6 +517,43 @@ static void *xcalloc(size_t n, size_t sz, int *ok, long long *acc) {
 #ifndef LZ_MLAT_ES
 #define LZ_MLAT_ES 10
 #endif /* LZ_MLAT_ES */
+
+/* ---- the V projection's int16 exit (int-pipeline milestone 7) --------
+ *
+ * v_proj is the only matmul left in this file whose output goes into an
+ * activation quantize with no float operation in between: the KV cache
+ * write IS its consumer, so lz_quantize_q8_i16 serves it the way it
+ * already serves the MoE latent. Same _I16 / _ES pair, same conventions.
+ * Every other remaining consumer either needs a float by construction (a
+ * residual add, an RMSNorm, RoPE, the logits' softmax, the routed
+ * mixture's float weight) or needs a fixed-point kernel this tree does
+ * not have (the SwiGLU pair, the gated norm's gate).
+ *
+ * The exit is refused whenever anything else reads the float row: the
+ * Hadamard rotation (kv_rot_v), the f32 reference plane (--kv f32) and
+ * the 4-bit plane (--kv q4) all take vtt apart element by element. That
+ * is the same set --attn-int already refuses on, for the same reason.
+ *
+ * MEASURED, both gate corpora on kmr20 AND kunmoe-v2-t2-probe (v_proj is
+ * q6_1 on the first and t2 on the second, so both epilogue families are
+ * covered), instrumented build over 308,736 / 338,432 v elements:
+ * max |v| 6.42 / 6.79 (kmr20) and 6.99 / 6.80 (t2-probe), so ES = 12 is
+ * the largest that clamps nothing against the int16 edge.
+ *
+ * It ships at 11, one lower, for the reason LZ_MLAT_ES does: the clamp
+ * is silent, 11 leaves 2.29x of headroom against 12's 1.14x, and paired
+ * NLL cannot tell the two apart. The per-GROUP question the consumer
+ * raises - a 32-element group whose amax lands near the bottom of int16
+ * reaches int8 with fewer than 127 levels - is measured the same way:
+ * the SMALLEST group amax over those runs is 0.4157, i.e. 851 at the
+ * shipping ES, 6.7x above the 127 the int8 cache needs, and no group on
+ * either corpus or either model falls under 128. */
+#ifndef LZ_VPROJ_I16
+#define LZ_VPROJ_I16 1
+#endif /* LZ_VPROJ_I16 */
+#ifndef LZ_VPROJ_ES
+#define LZ_VPROJ_ES 11
+#endif /* LZ_VPROJ_ES */
 
 #if LZ_CONV_FIXED
 /* Quantize the conv taps once, laying them out per channel in the same
@@ -1037,6 +1084,13 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
         s->moe_lat_i16 = (short *)xcalloc((size_t)nt * c->moe_latent_dim,
                                           sizeof(short), &ok, &s->bytes_alloc);
 #endif /* LZ_MLAT_I16 */
+#if LZ_VPROJ_I16
+        /* Sized like s->vtmp, in int16. Zero-sized (and so NULL) on a
+           model with no full-attention layers, which forward_attn's
+           predicate reads as "no int path". */
+        s->vtmp_i16 = (short *)xcalloc((size_t)nt * c->attn_kv_dim,
+                                       sizeof(short), &ok, &s->bytes_alloc);
+#endif /* LZ_VPROJ_I16 */
         /* Under neither LZ_MLAT_I16 nor LZ_MLAT_REUSE: the expert loop's
            hoisted activation quantize writes here on the float path, the
            int path, and the reuse control arm alike - what the switches
@@ -1166,6 +1220,7 @@ void lz_state_free(LZRunState *s) {
     free(s->kda_lat_i16); free(s->kda_lat_i32);
     free(s->kda_gate_i16); free(s->kda_dtb_i16);
     free(s->moe_lat_i16); free(s->moe_lat_q); free(s->moe_lat_qs);
+    free(s->vtmp_i16);
     free(s->conv_sig_k1); free(s->conv_sig_oscale2);
     free(s->xq); free(s->xqs); free(s->wscr); free(s->fwht_scratch);
     free(s->subn_norm_int);
@@ -1425,6 +1480,16 @@ int lz_ckpt_restore(const LZStateCkpt *ck, LZRunState *s, const LZModel *m,
    indexing cache_idx[layer]. */
 #define LZ_MTP_CACHE_LAYER (-1)
 
+/* Defined with the KDA projections it was written for, and declared here
+   because forward_attn's v_proj is a third caller of the same shape.
+   Moving the definition up instead would separate it from kda_conv_proj,
+   whose header carries the flag-discipline argument both of them obey. */
+static void kda_i16_proj(LZRunState *s, int may_int, int *wrote_int,
+                         float *of, short *oi,
+                         const float *x, const LZTensor *w,
+                         int in_dim, int out_dim, int nt,
+                         int target_e, int bound);
+
 /* Run nt tokens through this layer together. Batching reuses the
    WEIGHT LOADS: each output row's weights stream from memory once,
    serving nt tokens (arithmetic intensity 1 -> nt).
@@ -1481,9 +1546,24 @@ static void forward_attn(const LZModel *m, LZRunState *s,
        The quantize step after the tk loop must know which tokens took the
        int wsum; only the MTP window override can split a batch. */
     int attn_int[LZ_BATCH_MAX];
+    /* int-pipeline milestone 7. v_may is the capability, v_int is "the
+       int buffer holds it" and is raised only by kda_i16_proj - two
+       objects, for the reason that function's header gives.
+
+       The consumer conditions are part of the capability, not of the
+       matmul: vc is the plane lz_quantize_q8_i16 would write, and
+       kv_rot_v / vf / v4 each read the float row element by element, so
+       any of them means the exit would have to rebuild what it declined
+       to build. Same set --attn-int refuses on. */
+    int v_int = 0, v_may = 0;
     int h, d, t, tk;
 
     if (s->kv_rot_k) scale /= (float)s->kv_rot_k;
+#if LZ_VPROJ_I16
+    v_may = s->vtmp_i16 && vc && vs && !vf && !v4 && s->kv_rot_v == 0 &&
+            !LZ_KV_2PLANE && kvd >= 32 && (kvd % 32) == 0 &&
+            lz_matmul_xq_i16_ok(&L->v_proj, hdim, nt);
+#endif /* LZ_VPROJ_I16 */
 
     /* Quantize xb once; the q/k/v projections share the same xq/xqs
        (avoid rescanning activations).
@@ -1498,7 +1578,8 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                        s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
     lz_matmul_xq_nt(s->qg, s->xb, s->xq, s->xqs, &L->q_proj, hdim, qgd, nt);
     lz_matmul_xq_nt(s->ktmp, s->xb, s->xq, s->xqs, &L->k_proj, hdim, kvd, nt);
-    lz_matmul_xq_nt(s->vtmp, s->xb, s->xq, s->xqs, &L->v_proj, hdim, kvd, nt);
+    kda_i16_proj(s, v_may, &v_int, s->vtmp, s->vtmp_i16,
+                 s->xb, &L->v_proj, hdim, kvd, nt, LZ_VPROJ_ES, 32767);
 
     /* QK-Norm + RoPE + write KV cache. **All cache rows of the batch
        must be written before scoring**: token t in the batch must see
@@ -1555,8 +1636,19 @@ static void forward_attn(const LZModel *m, LZRunState *s,
 #else
         if (kc) lz_quantize_q8(ktt, kvd, 32, kc + (size_t)kv_slot(s, pos) * kvd,
                                ks + (size_t)kv_slot(s, pos) * kvd / 32);
-        if (vc) lz_quantize_q8(vtt, kvd, 32, vc + (size_t)kv_slot(s, pos) * kvd,
+        /* v_int says the projection left this token in vtmp_i16 at
+           LZ_VPROJ_ES and vtt holds nothing - the int16 twin of the
+           quantize below, folding 2^-ES into the stored group scale. */
+        if (v_int) {
+            lz_quantize_q8_i16(s->vtmp_i16 + (size_t)tk * kvd, kvd, 32,
+                               pow2f(-LZ_VPROJ_ES),
+                               vc + (size_t)kv_slot(s, pos) * kvd,
                                vs + (size_t)kv_slot(s, pos) * kvd / 32);
+            lz_debug_vproj_i16 += kvd;
+        } else if (vc) {
+            lz_quantize_q8(vtt, kvd, 32, vc + (size_t)kv_slot(s, pos) * kvd,
+                           vs + (size_t)kv_slot(s, pos) * kvd / 32);
+        }
 #endif /* LZ_KV_2PLANE */
         /* Reference arm: the same post-QK-norm, post-RoPE (and, when
            enabled, post-Hadamard) vectors the Q8 path just quantized,

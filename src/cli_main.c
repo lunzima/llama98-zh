@@ -97,6 +97,9 @@ extern long long lz_debug_n_lmhead;
 /* sink+window's row-skip positive control, forward.c. Zero when no
    window is set; non-zero only if evicted rows were really skipped. */
 extern long long lz_debug_attn_skip;
+/* The V projection int16 exit's positive control, forward.c. Elements
+   the KV write took from vtmp_i16 rather than from the float row. */
+extern long long lz_debug_vproj_i16;
 extern int lz_kv_kfmt;
 extern int lz_kv_vfmt;
 extern int lz_attn_sink;
@@ -1844,6 +1847,11 @@ int main(int argc, char **argv) {
         t1 = lz_time_ms();
         printf("Time           %.2f s, %.3f s/token\n",
                (t1 - t0) / 1000.0, (t1 - t0) / 1000.0 / n_tokens);
+        /* The int16 exits' positive control. Printed unconditionally,
+           like the census below and for the same reason: the int and
+           float rows are bit-comparable, so an output comparison can
+           never tell "the exit ran" from "the exit was refused". */
+        printf("v_proj int16   %lld elements\n", lz_debug_vproj_i16);
         /* The f32 census, in a build that can answer it (-DLZ_F32COUNT=1).
            Printed here rather than behind a flag: a counting build exists
            only to produce this, and a number that needs asking for is a

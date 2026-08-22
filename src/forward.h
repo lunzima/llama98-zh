@@ -488,6 +488,15 @@ typedef struct {
     short *moe_lat_i16;
     int8_t *moe_lat_q;
     float  *moe_lat_qs;
+    /* The V projection's int16 exit (int-pipeline milestone 7), same
+       one-of-the-two contract: vtmp_i16 carries what vtmp would have,
+       at LZ_VPROJ_ES.
+         vtmp_i16  s->vtmp -> the V cache's activation quantize
+       Only the plain single-plane Q8 cache write can read it; the
+       Hadamard rotation and the f32/q4 reference planes each take the
+       float row apart element by element, so forward_attn refuses the
+       exit when any of them is live. */
+    short *vtmp_i16;
     float *conv_sig_k1;
     float *conv_sig_oscale2;
     float  conv_sig_k2;         /* lz_sig_q15_t_offset(), same for every channel */
