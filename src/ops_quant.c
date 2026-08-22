@@ -659,6 +659,109 @@ float lz_exp_t(int32_t v, int32_t m, int s) {
     return (float)prod * pow2f(n - LZ_EXP_Q);
 }
 
+/* ---- softplus -------------------------------------------------------- */
+
+/* log(1+u)/u on u in [0,1], degree 8, Remez (.prof/sp_fit.py). The
+ * function this file needs is log1p, and this is the form that makes
+ * log1p RELATIVELY accurate for free: the result is u * P(u), so as
+ * u -> 0 the answer is u times something that rounds to exactly 1, and
+ * no cancellation exists anywhere on the domain. A polynomial for
+ * log1p(u) itself would lose every bit of the tail, and the shape the
+ * rest of this file uses - strip the exponent, poly the mantissa -
+ * loses it too, because 1+u rounds to 1.
+ *
+ * DEGREE 8 IS WHERE float32 STOPS PAYING, measured over every float32
+ * in [2^-24, 1] per degree (.prof/sp_fit.py): 7 -> 3.99e-7, 8 ->
+ * 2.03e-7, 9 -> 1.95e-7, 10 -> 2.07e-7. Past 8 the Horner's own
+ * rounding grows as fast as the fit shrinks, so the extra multiply buys
+ * 4% and then goes backwards. 8 also puts this step under
+ * lz_exp_float_body's own error, which is what keeps the composition's
+ * accuracy the exp's rather than the log's.
+ *
+ * `static const float` array rather than inline literals for the reason
+ * LZ_EXP_TAB32 is one: an inline float-literal expression on x87 is
+ * folded and kept at extended precision (fldt), carrying bits the `f`
+ * suffix did not promise. c0 is exactly 1 and is written out anyway -
+ * the Horner loop below reads all nine. */
+static const float LZ_SP_LOG1P[9] = {
+    1.000000000f,    -0.499995530f,    0.333203435f,
+   -0.248529464f,     0.191451162f,   -0.137466222f,
+    0.079210736f,    -0.030110965f,    0.005384062f,
+};
+
+/* Above this the correction log1p(exp(-x)) is smaller than half an ulp
+   of x, so returning x is the correctly-rounded answer and not an
+   approximation. DERIVED, not inherited: within a binade ulp(x) is
+   constant and exp(-x) decreasing, so the binade's left edge is its
+   worst point, and 2^4 is the lowest power of two whose edge clears -
+   exp(-16) = 1.1e-7 against a half-ulp of 9.5e-7. Enumerated over every
+   float32 above it in .prof/verify_softplus.c.
+
+   The old libm form needed a shortcut here for a different reason (its
+   exp overflowed); this body's exp argument is -|x| and can never
+   overflow, so the shortcut is now only an economy. Measured argument
+   range at the live GDN call site is -15.10..11.29 and the KDA gate's
+   own pre runs -32.19..10.35, both instrumented over 603 tokens, so it
+   fires on no checkpoint in the tree - it is a guard for a model that
+   does not exist yet, and it is priced as one. */
+#define LZ_SP_HI 16.0f
+
+/* softplus(x) = log(1+e^x), in float, with no libm and no double.
+ *
+ *   softplus(x) = max(x,0) + log1p(exp(-|x|))
+ *
+ * is the standard stable rearrangement, and here it is also the cheap
+ * one: the exp argument is <= 0, so u = exp(-|x|) lands in (0,1], which
+ * is exactly the interval the polynomial above is fitted on, and no
+ * second range reduction exists. For x > 0 the sum is of two
+ * like-signed terms and cannot cancel.
+ *
+ * THE EXP IS THE TIER'S. lz_exp's own choice is spelled out here rather
+ * than calling lz_exp: this file holds the two exp BODIES and ops.c
+ * holds the chooser, so a call upward would make every probe that
+ * #includes ops_quant.c link ops.c as well. Same predicate, same two
+ * bodies. softplus was the one scalar transcendental outside the tier
+ * before this, because it was libm.
+ *
+ * INTERMEDIATES over the WHOLE accepted domain, which is every float32:
+ * u in [0,1] by construction (the abs, then the exp's own guards);
+ * P(u) in [0.693, 1]; u*P(u) in [0, 0.694]. Nothing here is an integer,
+ * so there is no width to overflow - the hazard this shape has instead
+ * is u > 1, where the polynomial is outside its fit and the answer is
+ * silently wrong. The abs is what prevents it, which is why
+ * .prof/verify_softplus.c's compose row is aimed there.
+ *
+ * NaN and inf are outside the contract, as they are for lz_exp: `x >
+ * LZ_SP_HI` is false for NaN and the exp bodies' own guards let NaN
+ * through, so a NaN in gives an unspecified float out. The old libm
+ * form propagated NaN; nothing in the engine feeds one. */
+/* log1p on u in [0,1], the only new arithmetic here. Its own function
+   rather than inline in the caller so that .prof/verify_softplus.c can
+   sweep it over every float32 of its domain instead of only over the u
+   the exp happens to produce - the same reason fold_floor_shr is
+   separate. 8 Horner steps and one multiply. */
+static float sp_log1p(float u) {
+    float p = LZ_SP_LOG1P[8];
+    int i;
+    for (i = 7; i >= 0; i--) p = p * u + LZ_SP_LOG1P[i];
+    LZ_FCX(LZ_FC_SOFTPLUS, 9, 8, 0, 0, 0);
+    return u * p;
+}
+
+float lz_softplus_poly(float x) {
+    float nx, u;
+    if (x > LZ_SP_HI) return x;
+    nx = (x < 0.0f) ? x : -x;              /* -|x|; a sign flip, no op */
+    u = lz_scalar_mode() ? lz_exp_fixed(nx) : lz_exp_float_body(nx);
+    if (x > 0.0f) {
+        /* Billed in the branch that pays it rather than flat: the two
+           branches really do differ by exactly one add. */
+        LZ_FCX(LZ_FC_SOFTPLUS, 0, 1, 0, 0, 0);
+        return x + sp_log1p(u);
+    }
+    return sp_log1p(u);
+}
+
 /* ---- sigmoid Q15 table ----------------------------------------------- */
 
 #define LZ_SIG_N    384

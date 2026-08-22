@@ -245,3 +245,10 @@ typedef char lz_q8min_check[1 - 2 * (int)!(LZ_Q8_MIN_SCALE == 0.0f)];
 #if LZ_GATE_QW != 0
 #error "LZ_GATE_QW != 0"
 #endif
+
+#ifndef LZ_SOFTPLUS_POLY
+#error "LZ_SOFTPLUS_POLY not defined (expected 0)"
+#endif
+#if LZ_SOFTPLUS_POLY != 0
+#error "LZ_SOFTPLUS_POLY != 0"
+#endif

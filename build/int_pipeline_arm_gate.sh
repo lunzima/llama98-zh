@@ -38,6 +38,15 @@
 # out of step silently. That is the same mistake in miniature that left
 # the xcompiler gate listing a tier value the parser had dropped.
 #
+# LZ_SOFTPLUS_POLY IS INERT ON THE DEFAULT MODEL and this gate cannot
+# say otherwise: lz_softplus runs only under forward_ssm, and kmr20 is
+# KDA with a gate lower bound, so on it the =0 arm proves linkage and
+# nothing else. Point the gate at a GDN checkpoint to exercise it -
+# LZ_NORM_INT_GATE_MODEL=/e/LLM/models/_armgate2 - which is how the arm
+# was checked when it landed. Recorded here rather than defaulted,
+# because every other arm's numbers are on kmr20 and moving the default
+# would silently re-baseline all twelve.
+#
 # gcc only. Watcom cross-compiler identity is fixed_tier_xcompiler_gate's
 # subject and it exercises the shipping default, not these arms; adding
 # a second toolchain here would double a cost that is already 9 links.
@@ -48,7 +57,7 @@ cd "$(dirname "$0")/.." || exit 1
 
 ARMS="LZ_BVEC_I16 LZ_MOEGATE_I16 LZ_KLAT_I16 LZ_KGATE_I16 LZ_KGATE_EXP_I
 LZ_MLAT_I16 LZ_MLAT_REUSE LZ_VPROJ_I16 LZ_Q8I16_INT LZ_Q8INT_INT
-LZ_SWIGLU_I16 LZ_CONV_SIG_I"
+LZ_SWIGLU_I16 LZ_CONV_SIG_I LZ_SOFTPLUS_POLY"
 
 if ! command -v gcc >/dev/null 2>&1; then
     echo "int_pipeline_arm_gate: ERROR - gcc not found"
@@ -65,6 +74,7 @@ DRIFT=0
 for m in $MATRIX; do
     case "$m" in
         *_I16|LZ_Q8I16_INT|LZ_Q8INT_INT|LZ_MLAT_REUSE|LZ_CONV_SIG_I|LZ_KGATE_EXP_I) ;;
+        LZ_SOFTPLUS_POLY) ;;
         *) continue ;;
     esac
     echo "$ARMS" | tr ' ' '\n' | grep -qx "$m" || {

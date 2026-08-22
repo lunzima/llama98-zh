@@ -43,7 +43,14 @@
    soft-float target it is a call like any other. */
 enum {
     LZ_FC_EPI, LZ_FC_ATTN_SCORE, LZ_FC_ATTN_WSUM, LZ_FC_SOFTMAX,
-    LZ_FC_EXP, LZ_FC_SIGMOID, LZ_FC_CONV, LZ_FC_NORM, LZ_FC_RSQRT,
+    LZ_FC_EXP, LZ_FC_SIGMOID,
+    /* Its own row and not a share of LZ_FC_EXP: until this site existed
+       lz_softplus was libm double, which the census counts as zero, and
+       a row that reads zero for a reason is what keeps that from
+       happening again. LZ_FC_NAMES in ops.c is positional - the two
+       lists move together. */
+    LZ_FC_SOFTPLUS,
+    LZ_FC_CONV, LZ_FC_NORM, LZ_FC_RSQRT,
     /* The recurrence state write-back - pass 2 only, which is LESS than
        what --recur-write selects. Pass 1 has no site in either arm,
        neither the int16 head nor the float body, so this row reads the
@@ -196,7 +203,23 @@ float lz_sigmoid(float x);
    so callers ask lz_sig_mode() before choosing the int exit at all. */
 float lz_sigmoid_i(int32_t v, int e);
 float lz_silu(float x);
+
+/* log(1+e^x). A table+poly float body (lz_softplus_poly, ops_quant.c),
+   under the same lz_scalar_mode() tier as lz_exp - it was the one
+   scalar transcendental outside it, because it was a pair of libm
+   DOUBLE calls. That pair is what LZ_SOFTPLUS_POLY=0 restores. */
 float lz_softplus(float x);
+
+/* The libm double pair lz_softplus used to be. Measured on soft-float
+   ARM under QEMU (.prof/softplus_weight.c, ratio only - QEMU models no
+   cycles) it is 2.59x the cost of the shipped body in guest
+   instructions, and the f32 census scores it zero because it counts
+   neither libm nor doubles. 0 restores it, as the control arm every
+   number here was measured against; it is also what LZ_EXACT_MATH
+   selects. */
+#ifndef LZ_SOFTPLUS_POLY
+#define LZ_SOFTPLUS_POLY 1
+#endif
 
 /* x87 precision control: set the control word to 24 bits (single
    precision) so x87 float semantics become isomorphic to SSE - the
@@ -209,8 +232,9 @@ float lz_softplus(float x);
    stack and need this to agree with SSE bit for bit.
 
    No double inside the region (incl. libm double routines): PC=24
-   compresses double to 24 bits too. lz_exp is all-float now;
-   lz_softplus restores precision internally. */
+   compresses double to 24 bits too. lz_exp is all-float, and so is
+   lz_softplus now - only its LZ_SOFTPLUS_POLY=0 control arm still has
+   to restore precision internally. */
 unsigned lz_fpu_float_begin(void);
 void     lz_fpu_float_end(unsigned save);
 

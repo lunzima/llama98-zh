@@ -101,7 +101,7 @@ int lz_f32_reached[LZ_FC_N];
 
 static const char *const LZ_FC_NAMES[LZ_FC_N] = {
     "dequant epilogue", "attention scoring", "attention wsum",
-    "softmax", "exp", "sigmoid", "conv1d", "norms", "rsqrt",
+    "softmax", "exp", "sigmoid", "softplus", "conv1d", "norms", "rsqrt",
     "recurrence write", "quantize"
 };
 
@@ -276,36 +276,32 @@ void lz_fpu_float_end(unsigned save) {
 #endif /* __WATCOMC__ */
 }
 
+/* log(1+e^x). The body is lz_softplus_poly (ops_quant.c) - table+poly,
+   all float, under lz_scalar_mode() like every other transcendental.
+
+   Below is the arm it replaced and the control every number was
+   measured against: two libm DOUBLE calls. On a target with an FPU
+   those need the x87 control word widened back to 64 bits around them,
+   because PC=24 is in effect for the whole lz_forward pass and libm's
+   double routines read wrong under it; on a target with NO FPU there is
+   no control word and the cost is the two soft-float double
+   transcendentals themselves - 3604 guest instructions a call against
+   the shipped body's 1389, measured under QEMU in
+   .prof/softplus_weight.c, and invisible to the f32 census, which
+   counts neither libm nor doubles.
+
+   LZ_EXACT_MATH takes this arm too, for the reason lz_exp and lz_rsqrt
+   do: that build exists to answer with the library. */
 float lz_softplus(float x) {
+#if LZ_SOFTPLUS_POLY && !defined(LZ_EXACT_MATH)
+    return lz_softplus_poly(x);
+#else
     /* Stable form of log(1+exp(x)): for large x it degenerates to x,
        avoiding exp overflow. In this model a + dt_bias can take fairly
        large positive values; the naive form overflows to inf. */
     if (x > 20.0f) return x;
 #if defined(__WATCOMC__)
     {
-        /* libm's double routines return wrong values under PC=24;
-           restore 64-bit precision here temporarily. Only nv x linear
-           layers = 144 calls per token; two fldcw at ~50 cycles is
-           ~14K cycles (48 us on PII), not worth writing our own log.
-
-           That arithmetic prices the CONTROL WORD, and it only applies
-           to a target that has an FPU. A no-FPU target takes the #else
-           below, where there is no control word and the cost is the two
-           libm DOUBLE transcendentals - which the f32 census cannot see
-           (it counts neither libm nor doubles). Measured there, soft-float
-           ARM under QEMU, ratio only (.prof/softplus_weight.c): libm
-           double 36.0 s, libm float 25.2 s, a table+poly of the shape
-           lz_exp_fixed already uses 10.1 s - so a fixed-point softplus
-           would be 3.58x cheaper per call.
-
-           The conclusion still holds and the reason is the COUNT, not
-           the control word: 144 calls x 3.58 is about 515 table-exp
-           equivalents a token against the 11,072 exps the engine already
-           pays, and it is 0 on both shipping KDA checkpoints
-           (kda_has_gate_lower_bound is true on each, so forward.c's gate
-           takes the sigmoid branch and this runs only under
-           forward_ssm). If a model ever makes this hot, re-read the
-           ratio above rather than this sentence. */
         unsigned save = _control87(0, 0);
         float r;
         _control87(_PC_64, _MCW_PC);
@@ -315,10 +311,6 @@ float lz_softplus(float x) {
     }
 #elif defined(LZ_X87_FLOAT_CW)
     {
-        /* Same reason as the Watcom branch above: PC=24 is in effect
-           for the whole lz_forward pass on this target too now, and
-           glibc's double log1p/exp read wrong under it exactly like
-           Watcom's do. */
         unsigned short save = lz_x87_cw_get();
         float r;
         lz_x87_cw_set((unsigned short)(save | 0x0300u));   /* PC=64 */
@@ -329,6 +321,7 @@ float lz_softplus(float x) {
 #else
     return (float)log1p(exp((double)x));
 #endif /* __WATCOMC__ */
+#endif /* LZ_SOFTPLUS_POLY && !LZ_EXACT_MATH */
 }
 
 /* q8_round, lz_rsqrt_float_body, lz_rsqrt_fixed and their tables

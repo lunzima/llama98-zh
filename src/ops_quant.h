@@ -95,6 +95,14 @@ float lz_rsqrt_float_body(float x);
 float lz_exp_fixed(float x);
 float lz_rsqrt_fixed(float x);
 
+/* softplus without libm and without double: max(x,0) plus a degree-8
+   minimax polynomial for log1p(u)/u composed with this file's own exp,
+   so it follows lz_scalar_mode() like every other scalar transcendental.
+   ops.c's lz_softplus is the entry; LZ_SOFTPLUS_POLY=0 keeps the libm
+   pair as the control arm. See ops_quant.c for the domain and for why
+   the result is relatively accurate all the way into the tail. */
+float lz_softplus_poly(float x);
+
 /* Q15 sigmoid (interpolated table). */
 int32_t sigmoid_q15(float x);
 
