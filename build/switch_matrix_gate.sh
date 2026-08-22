@@ -244,7 +244,13 @@ $dm_with_fwd"
 # defaults to 1 and each =0 build is the control arm its measurement was
 # taken against, which is exactly the kind of build nobody runs again
 # unless a gate does.
-SWITCHES="LZ_GDN_FIXED=0 LZ_GDN_STATE_2PLANE=0 LZ_ATTN_FIXED=0 LZ_CONV_FIXED=0 LZ_NORM_FIXED=0 LZ_SSE2_GROUP=0 LZ_Q8_MIN_SCALE=0.0f LZ_EXACT_MATH=1 LZ_CPUID_NOCACHE=1 LZ_NO_FPU=1 LZ_KV_2PLANE=1 LZ_GDN_STATE_F32=1 LZ_BATCH_MAX=1 LZ_SPEC_K=1 LZ_PF_DIST=0 LZ_Q8R_FORCE_SSE=1 LZ_P2_FORCE_MMX=1 LZ_BVEC_I16=0 LZ_MOEGATE_I16=0 LZ_KLAT_I16=0 LZ_KGATE_I16=0 LZ_MLAT_I16=0"
+# LZ_MLAT_REUSE is the expert loop's quantize-reuse, an axis of its own:
+# it landed in the same commit as LZ_MLAT_I16 and is worth more, and
+# with the two on one switch neither half's contribution could be
+# rebuilt. All four arms now close: both off reproduces the pre-change
+# census exactly (1,127,814 on kmr20/zh) and byte-identical logits on
+# both fixtures; the exit alone is +512, the reuse alone -4,224.
+SWITCHES="LZ_GDN_FIXED=0 LZ_GDN_STATE_2PLANE=0 LZ_ATTN_FIXED=0 LZ_CONV_FIXED=0 LZ_NORM_FIXED=0 LZ_SSE2_GROUP=0 LZ_Q8_MIN_SCALE=0.0f LZ_EXACT_MATH=1 LZ_CPUID_NOCACHE=1 LZ_NO_FPU=1 LZ_KV_2PLANE=1 LZ_GDN_STATE_F32=1 LZ_BATCH_MAX=1 LZ_SPEC_K=1 LZ_PF_DIST=0 LZ_Q8R_FORCE_SSE=1 LZ_P2_FORCE_MMX=1 LZ_BVEC_I16=0 LZ_MOEGATE_I16=0 LZ_KLAT_I16=0 LZ_KGATE_I16=0 LZ_MLAT_I16=0 LZ_MLAT_REUSE=0"
 
 for entry in $SWITCHES; do
     name="${entry%%=*}"

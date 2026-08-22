@@ -493,6 +493,17 @@ static void *xcalloc(size_t n, size_t sz, int *ok, long long *acc) {
 #ifndef LZ_MLAT_I16
 #define LZ_MLAT_I16 1
 #endif /* LZ_MLAT_I16 */
+
+/* The expert loop's hoisted activation quantize: reuse the previous
+   expert's result when the group size has not changed. A separate axis
+   from LZ_MLAT_I16 because it is a separate saving that happens to have
+   arrived in the same commit - it is worth more than the int16 exit and
+   is value-neutral, while the exit alone is a small regression. Without
+   its own switch neither half's contribution can be rebuilt, which is
+   how "measured -4,224/token" becomes a number nobody can reproduce. */
+#ifndef LZ_MLAT_REUSE
+#define LZ_MLAT_REUSE 1
+#endif /* LZ_MLAT_REUSE */
 #ifndef LZ_MLAT_ES
 #define LZ_MLAT_ES 10
 #endif /* LZ_MLAT_ES */
@@ -1026,9 +1037,11 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
         s->moe_lat_i16 = (short *)xcalloc((size_t)nt * c->moe_latent_dim,
                                           sizeof(short), &ok, &s->bytes_alloc);
 #endif /* LZ_MLAT_I16 */
-        /* Not under LZ_MLAT_I16: the expert loop's hoisted activation
-           quantize writes here on both the float and the int path. One
-           token wide (the loop is per token) and the scale array is
+        /* Under neither LZ_MLAT_I16 nor LZ_MLAT_REUSE: the expert loop's
+           hoisted activation quantize writes here on the float path, the
+           int path, and the reuse control arm alike - what the switches
+           select is whether the quantize is skipped, not where it lands.
+           One token wide (the loop is per token) and the scale array is
            sized for the worst case, an in-row gs of 1, the same way
            s->xqs is. */
         s->moe_lat_q = (int8_t *)xcalloc((size_t)c->moe_latent_dim, 1,
@@ -3204,7 +3217,12 @@ static void forward_moe(const LZModel *m, LZRunState *s,
                quantize back inside this loop. */
             {
                 int gsl = lz_act_gs(&L->moe_expert_w1[ei], latent);
-                if (gsl != gs_have) {
+                /* LZ_MLAT_REUSE=0 is this saving's control arm: quantize
+                   on every expert, as the loop did before the hoist.
+                   Folds at compile time; the destination is moe_lat_q/_qs
+                   either way, so the arm isolates the SKIP and not the
+                   buffer move, and reproduces the pre-hoist cost exactly. */
+                if (!LZ_MLAT_REUSE || gsl != gs_have) {
                     if (mlat_int)
                         lz_quantize_q8_i16(lat_i, latent, gsl,
                                            pow2f(-LZ_MLAT_ES),
