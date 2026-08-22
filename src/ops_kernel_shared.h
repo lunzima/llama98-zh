@@ -66,12 +66,38 @@ extern int g_kernel;
    per call rather than per matmul because this has no dispatch point to
    hoist to - three instructions against the 112.8 the C tier measures
    (docs/arm-asm-audit.md). Compiled out entirely off ARM, so no x86
-   build gains a branch. */
+   build gains a branch.
+
+   AND THE SPLIT IS ONLY NEEDED WHERE EXCESS PRECISION EXISTS. Everything
+   above is about ONE hazard: a compiler that may keep the intermediate
+   wider than float32, which is x87 and nothing else. Where
+   __FLT_EVAL_METHOD__ is 0 the standard says float expressions evaluate
+   to float's own range and precision, so `(float)v` IS the correctly
+   rounded float32 the split constructs by hand - and it is the same
+   number, not merely a close one, because the split's own derivation
+   shows it computes exactly that.
+
+   Verified rather than argued: 87,108,878 values compared on
+   gcc/x86-64, the whole +-2^25 band (every rounding decision lives
+   there, since |v| < 2^24 is exact either way) plus 20 M random plus
+   INT32_MIN/MAX and the neighbours of 2^24 - 0 mismatches. On ARM the
+   check already exists and runs: .prof/arm_leafgate.c compares this C
+   tier against lz_i32f_arm_asm, so a `(float)v` that disagreed with a
+   correctly rounded conversion would fail it.
+
+   Costs: 9 SSE2 instructions become 2, and on the ARM C tier four
+   __aeabi_* calls (116.8 instructions) become one __aeabi_i2f. Watcom
+   and any 32-bit x87 gcc build do not define __FLT_EVAL_METHOD__ as 0
+   and keep the split, which is the whole reason it was written. */
 static float lz_i32f(int32_t v) {
 #if defined(LZ_ARM_PRIM_ASM)
     if (g_kernel == LZ_KERNEL_ARM_ASM) return lz_i32f_arm_asm(v);
 #endif /* LZ_ARM_PRIM_ASM */
+#if defined(__FLT_EVAL_METHOD__) && __FLT_EVAL_METHOD__ == 0
+    return (float)v;
+#else
     return (float)(v >> 12) * 4096.0f + (float)(v & 0xFFF);
+#endif /* __FLT_EVAL_METHOD__ == 0 */
 }
 
 /* Attention wsum's chunking constant. lz_attn_wsum_q8's int32

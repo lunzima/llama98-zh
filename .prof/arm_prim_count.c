@@ -134,6 +134,12 @@ static void ac_setup(void) {
  * here depends on the value beyond its being the exponent the taps were
  * normalized against, and the arm would measure the same shape at any
  * other. */
+/* Guarded, unlike the arms above it, because this one calls a function
+   whose SIGNATURE changes: lz_causal_conv1d_step_fixed has gained a
+   parameter twice now, and an unguarded setup makes every OTHER mode
+   fail to build the moment it does. A measurement harness that cannot
+   be built is not a slow harness, it is no harness. */
+#if PRIM_MODE == 11 || PRIM_MODE == 12
 #define CV_K   4
 #define CV_NCH 64
 #define CV_ES  9
@@ -177,6 +183,7 @@ static void cv_setup(void) {
                                     cv_k2, cv_in_scale, cv_bound,
                                     CV_NCH, CV_K);
 }
+#endif /* PRIM_MODE == 11 || PRIM_MODE == 12 */
 
 /* Softmax and rmsnorm arms (modes 13/15 and 14). These are the two rows
  * docs/arm-asm-audit.md still carries as `~100` ESTIMATES, and the conv
