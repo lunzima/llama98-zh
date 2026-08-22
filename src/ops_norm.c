@@ -23,6 +23,67 @@
 
 #include "ops_kernel_norm.h"
 
+/* ---- the (1 + w) table, cached per norm weight ------------------------
+
+   THE OUTPUT LOOP'S ADD DOES NOT DEPEND ON THE TOKEN. lz_rmsnorm's
+   `o[i] = x[i] * inv * (1.0f + w[i])` reads x and inv per call, but
+   `1.0f + w[i]` reads only w - the norm weight tensor, the same object
+   on every call for the life of the model. Measured on the ARM cross
+   build (.prof/arm_prim_count.sh mode 14): the whole loop is 112
+   instructions per element and a bare __aeabi_fadd is 43 of them, so
+   hoisting the add leaves two multiplies and the loads.
+
+   THE PATH THIS SERVES IS THE ONE THAT RUNS. lz_rmsnorm_out_fixed_int
+   below carries a Q15 version of the same hoist, but every call site
+   that reaches it (forward.c, nine of them) is inside a SubLN branch;
+   counted on .prof/x87test, 147,200 of 147,200 norm elements go through
+   the float loop and none through the int one.
+
+   BIT-IDENTICAL BY CONSTRUCTION rather than by tolerance: the table
+   holds exactly fl(1.0f + w[i]), which is what the inline expression
+   computes, and float addition is deterministic. A miss runs the inline
+   form, so both live in one build and .prof/norm_wp_xcheck.c compares
+   them element by element.
+
+   Keyed on the POINTER, sound for one reason worth stating: lz_t_f32
+   returns t->f unchanged for an F32 tensor, and norm weights are non-2D,
+   so the exporter never quantizes them and the pointer is the tensor's
+   own storage. If that stops being true the key stops matching, the
+   table is rebuilt every call, and the numbers stay right - the failure
+   mode is slow, not wrong.
+
+   Static and single-threaded, a bump allocator with no eviction, for the
+   same reason the Q15 pool below is: a model has a fixed set of norm
+   weights, so it either fits or it does not, and a cache that thrashed
+   would be worse than the miss path. */
+#ifndef LZ_WP_POOL
+#define LZ_WP_POOL 32768        /* floats; CE uses 36 x 512 */
+#endif /* LZ_WP_POOL */
+#ifndef LZ_WP_SLOTS
+#define LZ_WP_SLOTS 64
+#endif /* LZ_WP_SLOTS */
+
+static float wp_pool[LZ_WP_POOL];
+static int wp_used = 0;
+static struct { const float *w; int n; float *p; } wp_slot[LZ_WP_SLOTS];
+static int wp_slots = 0;
+
+static const float *build_wp(const float *w, int n) {
+    float *p;
+    int i;
+    for (i = 0; i < wp_slots; i++)
+        if (wp_slot[i].w == w && wp_slot[i].n == n) return wp_slot[i].p;
+    if (wp_slots >= LZ_WP_SLOTS || wp_used + n > LZ_WP_POOL) return NULL;
+    p = wp_pool + wp_used;
+    for (i = 0; i < n; i++) p[i] = 1.0f + w[i];
+    wp_used += n;
+    wp_slot[wp_slots].w = w;
+    wp_slot[wp_slots].n = n;
+    wp_slot[wp_slots].p = p;
+    wp_slots++;
+    return p;
+}
+
 #if LZ_NORM_FIXED
 /* Fixed output loop of lz_rmsnorm_gated. The full Q15 int-multiply:
    x, w, g each get their own power-of-two Q15 scale (q8_amax +
@@ -202,7 +263,11 @@ static int qw_slots = 0;
 /* The table for w[0..n), or NULL if it will not fit. *ew_out receives
    the shared exponent. The build is the SAME arithmetic the inline path
    ran, in the same order, so a cached run and an uncached one agree bit
-   for bit - that is the property build/norm_qw_gate.sh asserts. */
+   for bit. .prof/norm_wp_xcheck.c asserts it by driving more distinct
+   weight pointers than the pool has slots, so the two arms run in one
+   process and must agree; its mutation run reports the split. (An
+   earlier version of this comment cited build/norm_qw_gate.sh, which
+   was never written.) */
 static const short *build_qw(const float *w, int n, int *ew_out) {
     union { float f; uint32_t u; } bit;
     static float wp[LZ_NORM_MAX_N];
@@ -367,14 +432,18 @@ void lz_rmsnorm(float *o, const float *x, const float *w, int n, float eps) {
                output loop (2 mul + 1 add per element) and the
                divide+eps (1 div, 1 add; the (float)n cast is not
                billed, see B1 report). */
-            LZ_FCX(LZ_FC_NORM, 3 * n + 1, 2 * n + 1, 1, 1, 0);
+            LZ_FCX(LZ_FC_NORM, 3 * n + 1, n + 1, 1, 1, 0);
             ss = ssf;
             goto have_ss;
         }
     }
-    /* 2n accumulating ss, 2 for the divide and the eps add, 3n in the
-       output loop (two multiplies and the 1+w add). rsqrt bills itself. */
-    LZ_FCX(LZ_FC_NORM, 3 * n, 2 * n + 1, 1, 0, 0);
+    /* 2n accumulating ss, 2 for the divide and the eps add, 2n in the
+       output loop's two multiplies. rsqrt bills itself. THE (1+w) ADD IS
+       NOT HERE: it is billed where it is performed, below, because the
+       cached table makes it a once-per-model cost rather than a
+       per-token one and a census that billed it either way could not
+       order this row against the rows it competes with. */
+    LZ_FCX(LZ_FC_NORM, 3 * n, n + 1, 1, 0, 0);
     for (i = 0; i < n; i++) ss += x[i] * x[i];
 have_ss:
     inv = lz_rsqrt(ss / (float)n + eps);
@@ -387,10 +456,22 @@ have_ss:
             int n4 = n >> 2;
             k2[0] = inv;
             k2[1] = 1.0f;
+            LZ_FCX(LZ_FC_NORM, 0, n4 << 2, 0, 0, 0);   /* the kernel's +k2[1] */
             f(o, x, w, n4, k2);
             i = n4 << 2;
+        } else {
+            /* THE TABLE ONLY PAYS WHEN THE SCALAR LOOP IS THE WHOLE ROW.
+               With a vector kernel above, what is left here is at most
+               three tail elements, and a pool slot for three adds is a
+               worse trade than the adds. */
+            const float *wp = build_wp(w, n);
+            if (wp) {
+                for (; i < n; i++) o[i] = x[i] * inv * wp[i];
+                return;
+            }
         }
     }
+    LZ_FCX(LZ_FC_NORM, 0, n - i, 0, 0, 0);
     for (; i < n; i++) o[i] = x[i] * inv * (1.0f + w[i]);
 }
 

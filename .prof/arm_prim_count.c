@@ -47,6 +47,10 @@
 #include "sp_args_q8r.h"        /* real norm_ss_fixed row, pre-scale */
 #elif PRIM_MODE == 11 || PRIM_MODE == 12
 #include "sp_args_q8r.h"        /* only for SP_N; the arms use cv_* */
+#elif PRIM_MODE == 13 || PRIM_MODE == 14 || PRIM_MODE == 15
+#include "sp_args_q8r.h"        /* real norm rows; see sm_setup/nm_setup */
+#elif PRIM_MODE == 16 || PRIM_MODE == 17
+#include "sp_args_q8r.h"        /* real floats; only the shape matters */
 #else
 # if PRIM_INTARG
 #  include "sp_args_i32f.h"
@@ -65,6 +69,7 @@ __attribute__((noinline)) static float i32f_null(int32_t v) {
 }
 
 volatile int32_t g_sink;
+volatile float g_mulc = 1.4142135f;      /* modes 16/17, see there */
 
 /* norm_ss_fixed's Q15 image and its exponent (mode 9). Live outside the
  * loop so the call, not the buffer, is what the marginal measures. */
@@ -171,6 +176,47 @@ static void cv_setup(void) {
                                     CV_NCH, CV_K);
 }
 
+/* Softmax and rmsnorm arms (modes 13/15 and 14). These are the two rows
+ * docs/arm-asm-audit.md still carries as `~100` ESTIMATES, and the conv
+ * row is what an estimate of that shape is worth on this machine.
+ *
+ * NEITHER IS TIER-GATED, unlike every arm above: the softmax max scan
+ * runs in the integer domain on every platform and the norm's (1+w) Q15
+ * weight table is cached on every platform, so t0 and t1 differ here
+ * only through the leaves they call (q8_round, lz_i32f, norm_ss_fixed).
+ * A before/after for those two changes has to compile this same harness
+ * against an older src tree, which is why the arms exist rather than a
+ * tier flag.
+ *
+ * MODE 15 IS THE CONTROL FOR MODE 13, not for 14: lz_softmax works in
+ * place, so the arm has to refill its input every iteration and that
+ * refill is inside the measured window. 14 needs no control beyond c0 -
+ * lz_rmsnorm does not touch its input. The output-loop figure is
+ * 14 minus 9 (norm_ss_fixed on the SAME row), which is why both read
+ * SP_ARG at SP_N rather than a length of their own. */
+static float sm_x[SP_N];
+static float sm_src[SP_N];
+static float nm_o[SP_N];
+static float nm_w[SP_N];
+
+static void sm_setup(void) {
+    int i;
+    /* Attention logits, not norm inputs: q . k * scale lands within a
+     * few units of zero either side, which is the range softmax's
+     * exp and its max scan actually see. */
+    for (i = 0; i < SP_N; i++) sm_src[i] = SP_ARG[i] * (8.0f / 16384.0f);
+}
+
+static void nm_setup(void) {
+    int i;
+    /* An RMSNorm weight row sits near 1. The Q15 (1+w) table this
+     * exercises is keyed on the weight POINTER, so a single static
+     * array is the shipping case (one table per layer weight), not a
+     * best case invented for the measurement. */
+    for (i = 0; i < SP_N; i++)
+        nm_w[i] = 1.0f + SP_ARG[i] * (0.25f / 16384.0f);
+}
+
 int main(int argc, char **argv) {
     long n = (argc > 1) ? atol(argv[1]) : 0;
     long i;
@@ -185,6 +231,12 @@ int main(int argc, char **argv) {
 #endif
 #if PRIM_MODE == 11 || PRIM_MODE == 12
     cv_setup();
+#endif
+#if PRIM_MODE == 13 || PRIM_MODE == 15
+    sm_setup();
+#endif
+#if PRIM_MODE == 14
+    nm_setup();
 #endif
     for (i = 0; i < n; i++) {
         int k = (int)(i & (SP_N - 1));
@@ -227,6 +279,34 @@ int main(int argc, char **argv) {
                                     (PRIM_MODE == 11) ? CV_NCH : CV_NCH / 2,
                                     CV_K);
         u.f = cv_o[k & (CV_NCH - 1)];      g_sink = u.i;
+#elif PRIM_MODE == 13 || PRIM_MODE == 15
+        {
+            int j;
+            for (j = 0; j < SP_N; j++) sm_x[j] = sm_src[j];
+#if PRIM_MODE == 13
+            lz_softmax(sm_x, SP_N);
+#endif
+        }
+        u.f = sm_x[k];                     g_sink = u.i;
+#elif PRIM_MODE == 14
+        lz_rmsnorm(nm_o, SP_ARG, nm_w, SP_N, 1e-6f);
+        u.f = nm_o[k];                     g_sink = u.i;
+#elif PRIM_MODE == 16 || PRIM_MODE == 17
+        /* ONE BARE SOFT-FLOAT OPERATION, against control arm c0 (which
+         * is this loop with the operation removed). Every "is it worth
+         * writing this in assembly" question in docs/arm-asm-audit.md
+         * reduces to this number, and until it was measured it was
+         * being INFERRED - the conv epilogue's row is what an inferred
+         * one is worth. `g_mulc` is volatile so neither operand folds.
+         *
+         * The multiplier is a constant in the SOURCE because that is
+         * the shape M5 is about (one operand loop-invariant); volatile
+         * keeps the compiler from acting on it. */
+#if PRIM_MODE == 16
+        u.f = SP_ARG[k] * g_mulc;          g_sink = u.i;
+#else
+        u.f = SP_ARG[k] + g_mulc;          g_sink = u.i;
+#endif
 #else
 # if PRIM_INTARG
         g_sink = SP_ARG[k];

@@ -44,6 +44,9 @@ for t in 0 1; do
     build 10 $t 0
     build 11 $t 0
     build 12 $t 0
+    build 13 $t 0
+    build 14 $t 0
+    build 15 $t 0
     build 0 $t 0
     mv "$O/m0_t$t.elf" "$O/c0_t$t.elf"
     build 0 $t 1
@@ -65,9 +68,13 @@ count() { $Q -one-insn-per-tb -d exec,nochain "$1" "$2" 2>&1 >/dev/null | wc -l;
 printf '%-10s %10s %12s %12s %12s %10s %9s %9s\n' \
        arm n=0 n=N n=2N n=3N per-call gap1 gap2
 for t in 0 1; do
-    for e in m1 m2 m3 m4 m5 m6 m7 m8 m9 m10 m11 m12 c0 c1; do
+    for e in m1 m2 m3 m4 m5 m6 m7 m8 m9 m10 m11 m12 m13 m14 m15 c0 c1; do
         f="$O/${e}_t$t.elf"
-        case $e in m5|m6) N=16 ;; m9|m10|m11|m12) N=64 ;; *) N=256 ;; esac
+        case $e in
+        m5|m6) N=16 ;;
+        m9|m10|m11|m12|m13|m14|m15) N=64 ;;
+        *) N=256 ;;
+        esac
         a=$(count "$f" 0); b=$(count "$f" "$N")
         c=$(count "$f" $((N * 2))); d=$(count "$f" $((N * 3)))
         printf '%-10s %10d %12d %12d %12d %10.2f %9d %9d\n' \
