@@ -285,7 +285,7 @@ void lz_fpu_float_end(unsigned save) {
    because PC=24 is in effect for the whole lz_forward pass and libm's
    double routines read wrong under it; on a target with NO FPU there is
    no control word and the cost is the two soft-float double
-   transcendentals themselves - 3604 guest instructions a call against
+   transcendentals themselves - 3603 guest instructions a call against
    the shipped body's 1389, measured under QEMU in
    .prof/softplus_weight.c, and invisible to the f32 census, which
    counts neither libm nor doubles.

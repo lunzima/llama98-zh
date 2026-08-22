@@ -12,16 +12,17 @@
  * have to beat: the engine's own lz_exp table lookup, which is what
  * lz_exp_fixed is built on.
  *
- * THE NUMBER THAT CARRIES is the instruction count, not the seconds;
- * the seconds are only usable as a ratio because TCG's cost per guest
- * instruction is roughly flat, and the two agree here to 2%. Measured,
+ * THE NUMBER THAT CARRIES is the instruction count, not the seconds.
+ * The count is deterministic and the seconds are not: two runs of the
+ * same four arms gave wall ratios 3.78/1.49/2.54 and 3.63/1.41/2.51,
+ * while the counts reproduced to one instruction in 3600. Measured,
  * qemu 8.2.2 -cpu arm926, per call, harness subtracted:
  *
- *   arm                        insns/call    ratio      wall (12.8M calls)
- *   1 libm double (was shipped)      3604     1.00x      38.582 s
- *   2 libm float                     2130     1.69x      25.939 s
- *   3 table+poly SHAPE PROBE          953     3.78x      10.214 s
- *   4 lz_softplus_poly, SHIPPED      1389     2.59x      15.218 s
+ *   arm                        insns/call    ratio    wall, two runs
+ *   1 libm double (was shipped)      3603     1.00x    38.582 / 35.244 s
+ *   2 libm float                     2130     1.69x    25.939 / 25.020 s
+ *   3 table+poly SHAPE PROBE          953     3.78x    10.214 /  9.717 s
+ *   4 lz_softplus_poly, SHIPPED      1389     2.59x    15.218 / 14.027 s
  *
  * so the real thing is 2.59x, not the shape probe's 3.78x, and the
  * difference between those two IS the accuracy: arm 3's acc comes out
