@@ -1925,10 +1925,34 @@ static void gdn_step_impl(float *out, const int8_t *sq_in, int8_t *sq_out,
     }
 
     /* Scalar epilogue: output needs no second state read.
-       S_new = gt·S + k⊗δ  =>  S_new^T q = gt·(S^T q) + δ·(k·q) */
-    for (vv = 0; vv < vd; vv++) {
-        u[vv] = (v[vv] - gt * u[vv]) * beta;      /* u becomes delta */
-        out[vv] = gt * w[vv] + u[vv] * kq;
+       S_new = gt·S + k⊗δ  =>  S_new^T q = gt·(S^T q) + δ·(k·q)
+     *
+     * gt IS EXACTLY 1.0f ON EVERY KDA CALL - lz_kda_step passes the
+     * literal, because KDA's decay already lives in pass 1's
+     * coefficients (see that function's header). Multiplying by 1.0f is
+     * exact for every value, zeros and infinities included, so dropping
+     * the multiply is the SAME number rather than a close one. That
+     * deletes two __aeabi_fmuls per element, 30 instructions each on
+     * this target, for one integer compare hoisted out of the loop.
+     *
+     * TESTED ON THE BIT PATTERN, not with `gt == 1.0f`: a float compare
+     * is itself a library call here and would put back a third of what
+     * the branch saves. The two tests ask the same question - 0x3F800000
+     * is the only encoding of 1.0f, and a NaN gt fails both. */
+    {
+        union { float f; uint32_t u; } gb;
+        gb.f = gt;
+        if (gb.u == 0x3F800000u) {
+            for (vv = 0; vv < vd; vv++) {
+                u[vv] = (v[vv] - u[vv]) * beta;   /* u becomes delta */
+                out[vv] = w[vv] + u[vv] * kq;
+            }
+        } else {
+            for (vv = 0; vv < vd; vv++) {
+                u[vv] = (v[vv] - gt * u[vv]) * beta;
+                out[vv] = gt * w[vv] + u[vv] * kq;
+            }
+        }
     }
 
     /* Pass 2: read the OLD state from sq_in/ss_in (same as pass 1 - the
