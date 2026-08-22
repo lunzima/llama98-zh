@@ -2391,9 +2391,11 @@ static void forward_ssm(const LZModel *m, LZRunState *s,
        lz_quantize_q8 quantizes it. With --norm-int the fixed tier
        writes the Q15 value as int into ssm_sig instead and hands the
        power-of-two scale out-of-band, so lz_quantize_q8_int folds it
-       into the stored group scale and the dequant round-trip is gone
-       (bit-identical - see lz_quantize_q8_int). The float tier keeps
-       the plain norm + lz_quantize_q8 path. */
+       into the stored group scale and the dequant round-trip is gone.
+       The fold itself is bit-identical; the element rounding is not any
+       more, since that entry's loop became integer and exact - see
+       lz_quantize_q8_int. The float tier keeps the plain norm +
+       lz_quantize_q8 path. */
     {
         int gso = lz_act_gs(&L->out_proj, vdim);
         int nso = (gso > 0) ? vdim / gso : 0;

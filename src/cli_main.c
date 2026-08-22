@@ -103,6 +103,10 @@ extern long long lz_debug_vproj_i16;
 /* The int16 quantizer's integer element loop, ops.c. Elements rounded
    without leaving the integer domain; 0 under -DLZ_Q8I16_INT=0. */
 extern long long lz_debug_q8i16_int;
+/* The int32 quantizer's integer element loop, ops.c. Elements rounded
+   through the live reciprocal; 0 under -DLZ_Q8INT_INT=0, and 0 also for
+   a group the MIN_SCALE branch zeroes without arithmetic. */
+extern long long lz_debug_q8int_int;
 /* The integer SwiGLU's positive control and its silent-clamp probe,
    ops.c. Elements the int path produced, and the post-clamp maxima of
    its two inputs and its output - each strictly below 32767 is the proof
@@ -1886,6 +1890,7 @@ int main(int argc, char **argv) {
            never tell "the exit ran" from "the exit was refused". */
         printf("v_proj int16   %lld elements\n", lz_debug_vproj_i16);
         printf("q8_i16 int     %lld elements\n", lz_debug_q8i16_int);
+        printf("q8_int int     %lld elements\n", lz_debug_q8int_int);
         printf("swiglu int16   %lld elements  max|p| %d max|g| %d max|o| %d\n",
                lz_debug_swiglu_i16, lz_debug_swiglu_pmax,
                lz_debug_swiglu_gmax, lz_debug_swiglu_omax);

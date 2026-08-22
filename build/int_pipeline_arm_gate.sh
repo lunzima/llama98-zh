@@ -47,8 +47,8 @@ set -u
 cd "$(dirname "$0")/.." || exit 1
 
 ARMS="LZ_BVEC_I16 LZ_MOEGATE_I16 LZ_KLAT_I16 LZ_KGATE_I16 LZ_KGATE_EXP_I
-LZ_MLAT_I16 LZ_MLAT_REUSE LZ_VPROJ_I16 LZ_Q8I16_INT LZ_SWIGLU_I16
-LZ_CONV_SIG_I"
+LZ_MLAT_I16 LZ_MLAT_REUSE LZ_VPROJ_I16 LZ_Q8I16_INT LZ_Q8INT_INT
+LZ_SWIGLU_I16 LZ_CONV_SIG_I"
 
 if ! command -v gcc >/dev/null 2>&1; then
     echo "int_pipeline_arm_gate: ERROR - gcc not found"
@@ -64,7 +64,7 @@ MATRIX=$(grep -oE 'LZ_[A-Z0-9_]+=' build/switch_matrix_gate.sh | sed 's/=//' \
 DRIFT=0
 for m in $MATRIX; do
     case "$m" in
-        *_I16|LZ_Q8I16_INT|LZ_MLAT_REUSE|LZ_CONV_SIG_I|LZ_KGATE_EXP_I) ;;
+        *_I16|LZ_Q8I16_INT|LZ_Q8INT_INT|LZ_MLAT_REUSE|LZ_CONV_SIG_I|LZ_KGATE_EXP_I) ;;
         *) continue ;;
     esac
     echo "$ARMS" | tr ' ' '\n' | grep -qx "$m" || {

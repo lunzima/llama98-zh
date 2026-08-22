@@ -717,6 +717,59 @@ void lz_quantize_q8_int(const int32_t *t, int n, int gs, float deq,
             fast = 1;
         }
         if (fast) {
+#if LZ_Q8INT_INT
+            if (inv == 0.0f) {
+                /* MIN_SCALE or an empty group: the float path multiplies
+                   by 0 and every q is 0. A BRANCH, where the int16 twin
+                   folds the same case into its arithmetic - the fold does
+                   not survive the width. With rcp == 0 the correction
+                   term degenerates to 127*m + (tam>>1), which reaches bit
+                   31 at m = 16,909,321 and would return -1. Live, not
+                   defensive: the kda_lat call site takes it for 3,618 of
+                   its 7,236 groups on the zh fixture, all with tam == 0. */
+                for (k = 0; k < gs; k++) out[k] = 0;
+            } else {
+                /* Normalize the amax into the reciprocal's range, then
+                   round each element with a multiply-shift and one
+                   correction. Nothing here is billed: the loop performs
+                   no float operation at all, and the reciprocal replaced
+                   a float divide with an integer one. */
+                int sh = 0;
+                int32_t tamn, rcp, rnd;
+                uint32_t tamu = (uint32_t)tam, tamh = tamu >> 1;
+                while ((tam >> sh) > LZ_Q8RCP_MAX) sh++;
+                tamn = tam >> sh;
+                rnd  = (1 << sh) - 1;
+                rcp  = (int32_t)((LZ_Q8RCP_NUM + tamn - 1) / tamn);
+                for (k = 0; k < gs; k++) {
+                    int32_t v = grp[k];
+                    int neg = (v < 0);
+                    /* two's-complement negation, UB-free, same
+                       convention as the amax scan above */
+                    uint32_t mu = neg ? 0u - (uint32_t)v : (uint32_t)v;
+                    /* ceil, and unsigned so mu + rnd cannot overflow a
+                       magnitude near INT32_MAX */
+                    int32_t mn = (int32_t)((mu + (uint32_t)rnd) >> sh);
+                    int32_t qi = (mn * rcp + LZ_Q8RCP_HALF) >> LZ_Q8RCP_SH;
+                    /* `254*m + tam < 2*tam*qi` rewritten so it fits: see
+                       this function's header. Bit 31 IS the sign, so no
+                       signed conversion of a wrapped value. */
+                    qi -= (int32_t)((127u * mu - tamu * (uint32_t)qi
+                                     + tamh) >> 31);
+                    /* Both clamps are defense and known to be: the proof
+                       reports qi in [0, 127] over the whole domain,
+                       because tam is this group's own amax. They stay for
+                       an input the amax scan mis-negates - INT32_MIN,
+                       whose magnitude the scan drops, leaving m > tam -
+                       and cost nothing on the criterion this loop was
+                       rewritten for (the census excludes compares). */
+                    qi = (qi > 127) ? 127 : qi;
+                    qi = (qi < 0) ? 0 : qi;
+                    out[k] = (int8_t)(neg ? -qi : qi);
+                }
+                lz_debug_q8int_int += gs;
+            }
+#else
             /* The float path multiplies (t[i]*deq) by 127/(tam*deq); in
                the int domain the same round is t[i] * (127/tam). inv==0
                is the MIN_SCALE/zero-amax path, where the float path
@@ -744,6 +797,7 @@ void lz_quantize_q8_int(const int32_t *t, int n, int gs, float deq,
                 qi = (qi > 127) ? 127 : qi;
                 out[k] = (int8_t)((qi < -127) ? -127 : qi);
             }
+#endif /* LZ_Q8INT_INT */
         } else {
             /* Unreachable under the default LZ_Q8_MIN_SCALE floor (a tiny
                amax hits MIN_SCALE first, see this function's own comment)
@@ -766,36 +820,16 @@ void lz_quantize_q8_int(const int32_t *t, int n, int gs, float deq,
 #define LZ_Q8I16_INT 1
 #endif /* LZ_Q8I16_INT */
 
-/* 127*m/tam, correctly rounded, without a per-element divide and without
-   leaving int32. Per group: rcp = ceil(127*2^SH/tam). Per element:
-   q0 = (m*rcp + 2^(SH-1)) >> SH, then one unconditional correction.
-
-   SH is 23 because the product has to fit int32 and its ceiling is
-   127*2^SH + tam: at 23 that is 1,069,580,288 against 2,147,483,647,
-   2.0x of headroom (observed maximum 1,069,579,901). SH cannot instead
-   be raised until the correction is unnecessary - the product is always
-   about q*2^SH while exactness needs 2^SH > 2*tam^2, and at tam = 32768
-   that wants SH = 39. A single multiply-shift in int32 cannot round this
-   quotient exactly; the correction is what makes it exact, not a
-   fallback.
-
-   Because rcp rounds UP, q0 is never below the true quotient and never
-   more than one above it, so the correction only ever subtracts, and its
-   test is the exact one: q0 is right iff 2*tam*q0 <= 254*m + tam.
-
-   Half-away-from-zero, on the magnitude, matching epi_align_i16 rather
-   than q8_round's half-to-even - the magic add is a float-domain trick
-   with nothing to reuse here, and C integer division truncates toward
-   zero, so the sign is taken out and put back explicitly.
+/* The reciprocal is LZ_Q8RCP_* above, defined once and shared with
+   lz_quantize_q8_int - the two entries round the same quotient the same
+   way and differ only in whether the amax needs normalizing first (here
+   it never does: |t| <= 32768 already).
 
    Exhaustive, not sampled: .prof/verify_q8i16_int.c enumerates all
    536,920,065 (tam, m) pairs with 0 <= m <= tam <= 32768 against two
    independent references (integer floor division and long double) -
    0 mismatches, q always within [0, 127], and the correction fires on
    0.0627% of them, without which 336,591 cases are wrong. */
-#define LZ_Q8I16_SH   23
-#define LZ_Q8I16_HALF (1 << (LZ_Q8I16_SH - 1))
-#define LZ_Q8I16_NUM  (127 << LZ_Q8I16_SH)
 
 /* Positive control for the integer element loop: elements quantized
    through it. Counted at the loop, not at the switch - a build that
@@ -813,15 +847,15 @@ long long lz_debug_q8i16_int = 0;
      - the fast branch's element loop never leaves the integer domain.
        127*(t*deq)/(tam*deq) is 127*t/tam, and both operands are small
        enough for that quotient to be rounded exactly in int32 (see
-       LZ_Q8I16_SH above), so the producer's int16 exit is not paid for
+       LZ_Q8RCP_SH above), so the producer's int16 exit is not paid for
        with a convert back to float on the very next statement. That is
        what makes the exits feeding this function removals rather than
-       relocations - it is also why the result is NOT bit-identical to
-       the int32 entry any more (integer exact rounding against a float32
-       multiply-then-round), and why it IS bit-identical across
-       toolchains by construction, with no float rounding for gcc/SSE and
-       Watcom/x87 to disagree about.
-     - tam fits int16, so the amax scan needs no widening either.
+       relocations, and it is bit-identical across toolchains by
+       construction, with no float rounding for gcc/SSE and Watcom/x87 to
+       disagree about. It agrees with the int32 entry again now that that
+       one is integer too - measured on all 536,887,295 shared pairs, not
+       assumed.
+     - tam fits int16, so the amax scan needs no normalizing pre-shift.
 
    The stored scale s[g] stays float and stays exactly what it was:
    lz_matmul_xq reads xqs as float, and only the per-element path moved.
@@ -869,12 +903,12 @@ void lz_quantize_q8_i16(const short *t, int n, int gs, float deq,
                the loop performs no float operation at all, and the
                reciprocal replaced a float divide with an integer one. */
             int32_t rcp = (inv == 0.0f)
-                        ? 0 : (int32_t)((LZ_Q8I16_NUM + tam - 1) / tam);
+                        ? 0 : (int32_t)((LZ_Q8RCP_NUM + tam - 1) / tam);
             for (k = 0; k < gs; k++) {
                 int32_t v = grp[k];
                 int neg = (v < 0);
                 int32_t m = neg ? -v : v;
-                int32_t qi = (m * rcp + LZ_Q8I16_HALF) >> LZ_Q8I16_SH;
+                int32_t qi = (m * rcp + LZ_Q8RCP_HALF) >> LZ_Q8RCP_SH;
                 qi -= (254 * m + tam < 2 * tam * qi);
                 /* Defense only, and known to be: the exhaustive proof
                    reports qi in [0, 127] over the whole domain, because

@@ -862,10 +862,16 @@ void lz_quantize_q8_tok_int(const int32_t *t, int n, float deq,
    matching lz_quantize_q8 on the float input (float)t[i]*deq bit for
    bit, while the element loop rounds t*127/t_amax - deq enters the
    scale only, never the element loop (the same fold lz_quantize_q8_silu
-   applies to 2^-15). Holds because |t*127| < 2^22 (Q15 t, 32767*127
-   4,161,409 < 2^22). deq is a non-negative power of two; a zero deq
+   applies to 2^-15). deq is a non-negative power of two; a zero deq
    collapses every group to all-zero q with scale 1.0, same as the float
-   path's zero output. */
+   path's zero output.
+
+   The element loop is INTEGER (LZ_Q8INT_INT, src/ops.c) and returns the
+   exactly-rounded quotient, so it is not a float32 multiply any more
+   and is bit-identical across toolchains by construction. t is Q15 in
+   ORIGIN only - the gated norm's four-factor chain leaves it up to
+   32767^2, and 4.6e8 is measured - so the loop normalizes the group
+   amax before applying the shared reciprocal. */
 void lz_quantize_q8_int(const int32_t *t, int n, int gs, float deq,
                         int8_t *q, float *s);
 
@@ -875,14 +881,13 @@ void lz_quantize_q8_int(const int32_t *t, int n, int gs, float deq,
 
    It exists because at int16 width the element loop needs no float at
    all: 127*t/tam is rounded exactly in int32 by a per-group reciprocal
-   and a multiply-shift (LZ_Q8I16_INT, src/ops.c). The int32 entry cannot
-   do that - its input passes 2^24, so 254*t already overflows int32 -
-   and has to route its convert through lz_i32f instead, four float
-   operations billed as one. So the two entries are no longer
-   bit-identical on the same values: this one rounds exactly and that one
-   rounds a float32 multiply. Cross-compiler bit-identity comes for free
-   here, there being no float rounding left for gcc/SSE and Watcom/x87 to
-   resolve differently. */
+   and a multiply-shift (LZ_Q8I16_INT, src/ops.c), and no normalizing
+   pre-shift is needed to get there, the amax already being in the
+   reciprocal's range. The int32 entry reaches the same answer with one
+   (LZ_Q8INT_INT), so the two agree again on the values they share -
+   measured over all 536,887,295 of them. Cross-compiler bit-identity
+   comes for free in both, there being no float rounding left for
+   gcc/SSE and Watcom/x87 to resolve differently. */
 void lz_quantize_q8_i16(const short *t, int n, int gs, float deq,
                         int8_t *q, float *s);
 
