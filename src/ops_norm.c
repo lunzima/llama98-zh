@@ -175,7 +175,17 @@ have_ss_gated_int:
    first pairing (qx*qwp) accumulates unshifted, the second
    (*qinv) consumes the one shift, unlike the gated chain's three
    shifts for its four factors. t receives the Q15 product, *deq the
-   power-of-two scale lz_quantize_q8_tok_int folds into the row scale. */
+   power-of-two scale lz_quantize_q8_tok_int folds into the row scale.
+
+   NOT BIT-IDENTICAL TO THE TIER IT REPLACES, unlike its gated
+   counterpart, and the difference is structural rather than a bound.
+   lz_rmsnorm_gated_out_fixed_int elides a round trip: its fixed twin
+   computes the same Q15 product and then dequantizes it, so the two
+   cancel. lz_rmsnorm has no such twin - its fixed tier replaces the sum
+   of squares only and its output loop is float throughout - so this
+   function INTRODUCES a Q15 chain rather than exposing one. Measured on
+   kunkun-ce at 7% rms; see lz_norm_int in src/ops.h for the numbers and
+   for how the flag's reach outgrew the proof. */
 void lz_rmsnorm_out_fixed_int(int32_t *t, const short *qx, int ex,
                               const float *w, float inv, int n,
                               float *deq) {

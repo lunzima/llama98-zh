@@ -584,35 +584,50 @@ const char *lz_norm_select(const char *name);
    lz_rmsnorm_gated + lz_quantize_q8 path. */
 int lz_norm_can_fixed(int n);
 
-/* Whether the norm's fixed tier writes its Q15 result as int (consumed
-   by lz_quantize_q8_int) instead of dequantizing to float and
+/* Whether a norm's fixed tier writes its Q15 result as int (consumed by
+   lz_quantize_q8_int) instead of dequantizing to float and
    re-quantizing. Selected as `--norm-write int` - the third value on
    that tier's axis, not a separate flag, because it only exists on top
    of the fixed tier.
 
-   THIS LINE USED TO CLAIM THE TWO PATHS ARE BIT-IDENTICAL. Measured
-   2026-08-22 on kunkun-ce q8, 500 tokens of real corpus, --norm-write
-   fixed against int: |diff| rms 0.144 against a signal rms of 2.01 -
-   7% - top-1 agreement 88.58%, and NOT ONE element equal. So on a
-   SubLN model this is a NUMERICS knob, not a perf switch.
+   BIT-IDENTICAL FOR THE GATED NORM. NOT FOR THE PLAIN ONE. The identity
+   is a CANCELLATION, not a property of int arithmetic: it needs the
+   fixed tier to already be computing the very same Q15 product, so that
+   `int` only elides a Q15 -> float -> int8 round trip. That premise
+   holds for lz_rmsnorm_gated, whose fixed output loop
+   (lz_rmsnorm_gated_out_fixed) ends in `o[i] = (float)t * pow2f(...)`
+   over exactly the chain its _int twin writes out - the proof lives at
+   lz_quantize_q8_int.
 
-   Six sites account for all of it, and they are the ones SubLN added
-   after the claim was made: forward_kda's four projection input norms
-   and dense_ffn_step's gate/up pair, every one inside a use_subn
-   branch. Disabling exactly those six restores bit-identity on
-   kunkun-ce - that is how the list was arrived at, not by reading a
-   diff.
+   It does NOT hold for lz_rmsnorm. That one's fixed tier replaces the
+   sum of squares ONLY; its output loop is float end to end
+   (`o[i] = x[i] * inv * (1.0f + w[i])`, ops_norm.c). So
+   lz_rmsnorm_out_fixed_int does not elide a round trip - it introduces
+   a Q15 chain that the fixed path never had. Different arithmetic, no
+   cancellation, and nothing was wrong with the proof: the flag's REACH
+   grew past it.
 
-   AND THE CLAIM HAS NO MODEL BEHIND IT AT ALL. The obvious control is
-   s1v3, where fixed and int agree on every token chunk tried. They also
-   agree with lz_quantize_q8_int mutated to a constant, and with
-   lz_quantize_q8_tok_int mutated: s1v3 reaches NO int site, so its
-   agreement measures nothing. Of what is on disk, kunkun-ce is the only
-   model that exercises this value, and it is the one that diverges.
+   This line used to open with "the SGDN norm's fixed tier", scoped
+   correctly, and the bit-identity clause was true of that scope. SubLN
+   then reused the flag for six lz_rmsnorm sites - forward_kda's four
+   projection input norms and dense_ffn_step's gate/up pair, all inside
+   a use_subn branch - and the qualifier stopped covering the sentence
+   after it.
 
-   Nothing shipped is wrong, for one reason only: `auto` resolves to
-   fixed, never to int (see ops_sched.c). That is also why this sat
-   here unnoticed - the value is reachable, documented, and untested. */
+   Measured 2026-08-22, kunkun-ce q8, 500 tokens of real corpus, fixed
+   against int: |diff| rms 0.144 on a signal rms of 2.01 (7%), top-1
+   88.58%, NOT ONE element equal. Disabling exactly those six restores
+   bit-identity, which is how the list was arrived at rather than read
+   off a diff.
+
+   Do not reach for s1v3 as the control: fixed and int agree there, and
+   they go on agreeing with lz_quantize_q8_int mutated to a constant.
+   s1v3 reaches no int site at all. Of what is on disk, kunkun-ce is the
+   only model that exercises this value.
+
+   Nothing shipped is wrong for one reason: `auto` resolves to fixed,
+   never to int (ops_sched.c). That is also why this sat here - the
+   value is reachable, documented, and untested. */
 int lz_norm_int(void);
 
 /* SubLN activation scale granularity: "tok" | "group" (default tok).
