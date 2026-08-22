@@ -2772,7 +2772,7 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
 #define LZ_KM_ROW 0
 #define LZ_KM_OP  1
 
-#define LZ_KM_NUNIT 12
+#define LZ_KM_NUNIT 14
 #define LZ_KM_NCOL 10
 /* The one unit with ARM kernels, by index - km_tab and km_present both
    need it, and a named constant is what stops a reorder of km_unit from
@@ -2795,6 +2795,12 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
 #define LZ_KM_UNIT_WSUMP 9
 #define LZ_KM_UNIT_SIGQ  10
 #define LZ_KM_UNIT_NRMSS 11
+/* The two Hadamard transforms. TWO units, not one: they are separate
+   bodies in separate files serving separate tiers (lz_fwht_i32 is the
+   shipping path's, lz_fwht the float reference's), and one row would
+   let a kernel appearing for either report the pair as covered. */
+#define LZ_KM_UNIT_FWHTI 12
+#define LZ_KM_UNIT_FWHTF 13
 /* Column 0 is ref and columns 7..9 are armC/armA/g128; columns 1..6 are
    the six LZ_ROW_* slots in slot order, so column c reads tab[c - 1]. */
 #define LZ_KM_COL_ROW0 1
@@ -2808,7 +2814,8 @@ km_unit[LZ_KM_NUNIT] = {
     { "q16_0", LZ_KM_ROW }, { "t2",   LZ_KM_ROW },
     { "i32f",  LZ_KM_OP  }, { "q8rnd", LZ_KM_OP },
     { "expfx", LZ_KM_OP  }, { "atdot", LZ_KM_OP }, { "wsump", LZ_KM_OP },
-    { "sigq",  LZ_KM_OP  }, { "nrmss", LZ_KM_OP }
+    { "sigq",  LZ_KM_OP  }, { "nrmss", LZ_KM_OP },
+    { "fwhti", LZ_KM_OP  }, { "fwhtf", LZ_KM_OP }
 };
 static const char *const km_col[LZ_KM_NCOL] = {
     "ref", "mmxI", "sseI", "sse2I", "mmxA", "sseA", "sse2A",
@@ -2855,6 +2862,29 @@ static const char km_why_nrmss_g128[] =
     "this column is the 128-ELEMENT quantization group; norm_ss_fixed's "
     "loop runs over a whole norm row, and the group-shaped part of it "
     "is q8_amax, which carries its own kernels";
+/* The Hadamards are the opposite of the scalar leaves above: a butterfly
+   loop of pure add/sub over a power-of-two block, which is the shape
+   SIMD is best at, and no multiply or constant enters. So "not audited"
+   here does not mean "probably nothing there" - the ARM audit found real
+   content on both and the x86 side has simply never been opened. */
+static const char km_why_fwht_x86[] =
+    "not written: a pure add/sub butterfly over a power-of-two block is "
+    "the SIMD-friendly end of the spectrum, not a scalar leaf - the only "
+    "audit that has opened it (docs/arm-asm-audit.md G1/G2) is ARM-only";
+static const char km_why_fwhti_arma[] =
+    "not written: docs/arm-asm-audit.md G1 rates it WORTH WRITING - LDM/"
+    "STM take 8 instructions per butterfly to 3.5, and folding the entry "
+    "memcpy into the first stage saves a whole n-element pass";
+static const char km_why_fwhtf_arma[] =
+    "not written: docs/arm-asm-audit.md G2 rates it worth writing (one "
+    "unpack+align serving both the sum and the difference, instead of "
+    "two __addsf3 calls) but OFF the shipping path - an F32 weight is "
+    "what reaches it, and every quantized export leaves the projections "
+    "quantized";
+static const char km_why_fwht_g128[] =
+    "this column is the 128-ELEMENT quantization group; the Hadamard's "
+    "block is hadamard_o/hadamard_down (up to 512, capped by the "
+    "fixed-point headroom) and is a different axis, not this cell";
 static const char km_why_op_sse2[] =
     "not written: both call sites reach dot32_x16_mmx / lz_wsum_pair_mmx "
     "unconditionally, so no SSE2 twin was ever selected - unaudited, not "
@@ -2893,7 +2923,13 @@ static const LZKmReg km_reg[LZ_KM_NUNIT][LZ_KM_NCOL] = {
 /* atdot*/{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_T(km_why_op_sse2), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_T(km_why_op_sse2), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_attn_g128) },
 /* wsump*/{ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_T(km_why_op_sse2), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_T(km_why_op_sse2), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_attn_g128) },
 /* sigq */{ KM_H(KM_ALL), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128) },
-/* nrmss*/{ KM_H(KM_ALL), KM_T(km_why_nrmss_x86), KM_T(km_why_nrmss_x86), KM_T(km_why_nrmss_x86), KM_T(km_why_nrmss_x86), KM_T(km_why_nrmss_x86), KM_T(km_why_nrmss_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_nrmss_g128) }
+/* nrmss*/{ KM_H(KM_ALL), KM_T(km_why_nrmss_x86), KM_T(km_why_nrmss_x86), KM_T(km_why_nrmss_x86), KM_T(km_why_nrmss_x86), KM_T(km_why_nrmss_x86), KM_T(km_why_nrmss_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_nrmss_g128) },
+/* The two Hadamards are the only units here whose armA cell is EMPTY.
+   That is the point of registering them: without a row, a gate counting
+   filled cells could not tell "no assembly" from "no such operator",
+   and src/fwht.c could be deleted without a single cell changing. */
+/* fwhti*/{ KM_H(KM_ALL), KM_T(km_why_fwht_x86), KM_T(km_why_fwht_x86), KM_T(km_why_fwht_x86), KM_T(km_why_fwht_x86), KM_T(km_why_fwht_x86), KM_T(km_why_fwht_x86), KM_H(LZ_KMB_ARM), KM_T(km_why_fwhti_arma), KM_I(km_why_fwht_g128) },
+/* fwhtf*/{ KM_H(KM_ALL), KM_T(km_why_fwht_x86), KM_T(km_why_fwht_x86), KM_T(km_why_fwht_x86), KM_T(km_why_fwht_x86), KM_T(km_why_fwht_x86), KM_T(km_why_fwht_x86), KM_H(LZ_KMB_ARM), KM_T(km_why_fwhtf_arma), KM_I(km_why_fwht_g128) }
 };
 
 #if defined(__WATCOMC__)
@@ -2931,9 +2967,11 @@ static const lz_rowfn *km_tab(int f) {
    of step is a cell that reports present and never executes. */
 static int km_arm_row(int f) {
     (void)f;
-    /* All five row units since q6_1 landed, and both operator units by
-       construction: their C tier is the shared body every build has, so
-       `--kernel arm-c` is the same code `--kernel ref` runs. */
+    /* Every unit, and deliberately without enumerating them: the C tier
+       IS the shared body every build carries, so `--kernel arm-c` runs
+       the same code `--kernel ref` runs. A list here would have to be
+       extended with each new unit and would say nothing a reader could
+       check - it was already out of date once. */
     return 1;
 }
 

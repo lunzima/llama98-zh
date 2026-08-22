@@ -949,8 +949,11 @@ subnormal 消掉了，`ops.h` 该宏上方注释是权威文本）。于是内�
 #### G2 `lz_fwht`（浮点，`ops.c`）
 
 1. **操作序列**：每蝶形 `bl __addsf3`（加）+ `bl __addsf3`（减），
-   约 80 条。调用点只有 `rot_head`，由 `--kv-rot` 控制，**默认 off**
-   （`cli_main.c:224` 写的是 `default OFF`），CE 上每 token 0 次。
+   约 80 条。两个调用点，都不在出货路径上：`rot_head` 由 `--kv-rot`
+   控制、**默认 off**（`cli_main.c` 的帮助文本写 `default OFF`）；
+   `subn_rot_f32` 只在 `lz_matmul_xq_reads_float_row()` 为真时跑，
+   即权重是 F32——而导出器把非 2D 与 n<512 之外的张量全部量化，
+   所以两个 SubLN 投影在任何量化导出里都不走这条。CE 上每 token 0 次。
 2. **可用指令核对**：`a+b` 与 `a-b` 共用同一份对阶工作（比较指数、
    移位对齐尾数），而两次 `__addsf3` 调用把这份工作做了两遍——**一次
    解包+对阶服务两个结果**，这是 M5 的最强形式。`LDM` 打包（M3）。
