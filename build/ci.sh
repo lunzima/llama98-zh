@@ -76,7 +76,7 @@ freshness_sentinel() {
 # ---------------------------------------------------------------------
 # Stage 1: make native (gcc)
 # ---------------------------------------------------------------------
-echo "==== [1/10] make native ===="
+echo "==== [1/11] make native ===="
 NATIVE_EXE="$ROOT/llama98.exe"
 [ -e "$NATIVE_EXE" ] || NATIVE_EXE="$ROOT/llama98"
 LOG=build/ci-native.log
@@ -115,7 +115,7 @@ rm -f "$SENTINEL"
 # Stage 2: make watcom-cli (Open Watcom, the target compiler)
 # ---------------------------------------------------------------------
 echo
-echo "==== [2/10] make watcom-cli ===="
+echo "==== [2/11] make watcom-cli ===="
 WATCOM_EXE="$ROOT/llama98-w.exe"
 WATCOM_OBJDIR="$ROOT/build/watcom/cli"
 LOG=build/ci-watcom-cli.log
@@ -167,7 +167,7 @@ rm -f "$SENTINEL"
 # Stage 3: llama98 <dir> --check on a curated set of KunMoe checkpoints
 # ---------------------------------------------------------------------
 echo
-echo "==== [3/10] model --check sweep ===="
+echo "==== [3/11] model --check sweep ===="
 MODELS_ROOT=${MODELS_ROOT:-/e/LLM/models}
 # Curated, not a blind sweep of every directory under MODELS_ROOT:
 # a usable sweep is a handful of representative checkpoints, and
@@ -214,7 +214,7 @@ fi
 # Stage 4: x86 <-> ARMv5TE parity gate
 # ---------------------------------------------------------------------
 echo
-echo "==== [4/10] ARM parity gate ===="
+echo "==== [4/11] ARM parity gate ===="
 ARM_MODEL="$MODELS_ROOT/kunkun98-pilot-20260806"
 LOG=build/ci-arm.log
 if [ "$native_ok" -ne 1 ]; then
@@ -249,7 +249,7 @@ fi
 # Stage 5: control-switch matrix (every non-default value, gcc + Watcom)
 # ---------------------------------------------------------------------
 echo
-echo "==== [5/10] control-switch matrix ===="
+echo "==== [5/11] control-switch matrix ===="
 LOG=build/ci-switch-matrix.log
 build/switch_matrix_gate.sh >"$LOG" 2>&1
 MATRIX_RC=$?
@@ -277,7 +277,7 @@ esac
 # Stage 6: every fixed-point write tier's gcc<->Watcom bit-identity
 # ---------------------------------------------------------------------
 echo
-echo "==== [6/10] fixed-tier cross-compiler gate ===="
+echo "==== [6/11] fixed-tier cross-compiler gate ===="
 LOG=build/ci-fixed-tier-xcompiler.log
 build/fixed_tier_xcompiler_gate.sh >"$LOG" 2>&1
 NIX_RC=$?
@@ -309,7 +309,7 @@ esac
 # compile-time-off in the same compiler, where it is not.
 # ---------------------------------------------------------------------
 echo
-echo "==== [7/10] recurrence float-arm gate ===="
+echo "==== [7/11] recurrence float-arm gate ===="
 LOG=build/ci-recur-write-float-arm.log
 build/recur_write_float_arm_gate.sh >"$LOG" 2>&1
 NIX_RC=$?
@@ -339,7 +339,7 @@ esac
 # separate delivery decision); none of the three is in ci.sh's stage 2.
 # ---------------------------------------------------------------------
 echo
-echo "==== [8/10] watcom gui/dll/dos targets ===="
+echo "==== [8/11] watcom gui/dll/dos targets ===="
 for t in watcom-gui watcom-dll watcom-dos; do
     case $t in
         watcom-gui) EXE="$ROOT/kunkun98-w.exe" ;;
@@ -376,7 +376,7 @@ done
 # as its only float unit. SKIP when WSL is not usable, never PASS.
 # ---------------------------------------------------------------------
 echo
-echo "==== [9/10] 32-bit x87 gcc build (WSL) ===="
+echo "==== [9/11] 32-bit x87 gcc build (WSL) ===="
 LOG=build/ci-x87.log
 if ! command -v wsl >/dev/null 2>&1; then
     echo "SKIP: 32-bit x87 build (wsl not installed)"
@@ -420,7 +420,7 @@ fi
 # MIPS cross toolchain is absent, never PASS.
 # ---------------------------------------------------------------------
 echo
-echo "==== [10/10] big-endian parity gate (WSL) ===="
+echo "==== [10/11] big-endian parity gate (WSL) ===="
 LOG=build/ci-endian.log
 if ! command -v wsl >/dev/null 2>&1; then
     echo "SKIP: big-endian parity gate (wsl not installed)"
@@ -455,6 +455,38 @@ else
             ;;
     esac
 fi
+
+# ---------------------------------------------------------------------
+# Stage 11: the two PERFORMANCE-only knobs. Every other knob in this
+# engine is a tier, and a tier that moves the numbers is doing its job -
+# which is why the tier gates cannot say anything about --pair and
+# --prefetch, whose entire contract is that they move NOTHING. That made
+# them the two easiest knobs to break silently.
+# ---------------------------------------------------------------------
+echo
+echo "==== [11/11] performance-knob invariance ===="
+LOG=build/ci-perf-knob.log
+build/perf_knob_gate.sh "$ARM_MODEL" >"$LOG" 2>&1
+PK_RC=$?
+cat "$LOG"
+case $PK_RC in
+    0)
+        echo "PASS: performance-knob invariance"
+        note "PASS  performance-knob invariance"
+        PASS=$((PASS + 1))
+        ;;
+    2)
+        REASON=$(grep -m1 'perf_knob_gate: SKIP' "$LOG")
+        echo "SKIP: performance-knob invariance ($REASON)"
+        note "SKIP  performance-knob invariance ($REASON)"
+        SKIP=$((SKIP + 1))
+        ;;
+    *)
+        echo "FAIL: performance-knob invariance"
+        note "FAIL  performance-knob invariance"
+        FAIL=$((FAIL + 1))
+        ;;
+esac
 
 # ---------------------------------------------------------------------
 # Summary
