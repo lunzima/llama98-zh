@@ -103,6 +103,14 @@ extern long long lz_debug_vproj_i16;
 /* The int16 quantizer's integer element loop, ops.c. Elements rounded
    without leaving the integer domain; 0 under -DLZ_Q8I16_INT=0. */
 extern long long lz_debug_q8i16_int;
+/* The integer SwiGLU's positive control and its silent-clamp probe,
+   ops.c. Elements the int path produced, and the post-clamp maxima of
+   its two inputs and its output - each strictly below 32767 is the proof
+   that LZ_SWIGLU_ES_P/_G/_O clamped nothing on this run. */
+extern long long lz_debug_swiglu_i16;
+extern int lz_debug_swiglu_pmax;
+extern int lz_debug_swiglu_gmax;
+extern int lz_debug_swiglu_omax;
 extern int lz_kv_kfmt;
 extern int lz_kv_vfmt;
 extern int lz_attn_sink;
@@ -1855,6 +1863,9 @@ int main(int argc, char **argv) {
            never tell "the exit ran" from "the exit was refused". */
         printf("v_proj int16   %lld elements\n", lz_debug_vproj_i16);
         printf("q8_i16 int     %lld elements\n", lz_debug_q8i16_int);
+        printf("swiglu int16   %lld elements  max|p| %d max|g| %d max|o| %d\n",
+               lz_debug_swiglu_i16, lz_debug_swiglu_pmax,
+               lz_debug_swiglu_gmax, lz_debug_swiglu_omax);
         /* The f32 census, in a build that can answer it (-DLZ_F32COUNT=1).
            Printed here rather than behind a flag: a counting build exists
            only to produce this, and a number that needs asking for is a

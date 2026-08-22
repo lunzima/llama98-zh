@@ -527,7 +527,8 @@ static void *xcalloc(size_t n, size_t sz, int *ok, long long *acc) {
  * Every other remaining consumer either needs a float by construction (a
  * residual add, an RMSNorm, RoPE, the logits' softmax, the routed
  * mixture's float weight) or needs a fixed-point kernel this tree does
- * not have (the SwiGLU pair, the gated norm's gate).
+ * not have (the gated norm's gate; the SwiGLU pair got one in milestone
+ * 8, below).
  *
  * The exit is refused whenever anything else reads the float row: the
  * Hadamard rotation (kv_rot_v), the f32 reference plane (--kv f32) and
@@ -554,6 +555,63 @@ static void *xcalloc(size_t n, size_t sz, int *ok, long long *acc) {
 #ifndef LZ_VPROJ_ES
 #define LZ_VPROJ_ES 11
 #endif /* LZ_VPROJ_ES */
+
+/* ---- the SwiGLU pair's int16 exits (int-pipeline milestone 8) --------
+ *
+ * silu(p)*g was the largest remaining block of conversions in the
+ * engine: the two producing matmuls each materialize a float
+ * (epi_q41_fixed's `(float)comb * pow2f(target)`, one cvt per element),
+ * lz_sigmoid converts once more to leave sigmoid_q15's table and
+ * sigmoid_q15 itself measures 2.975 converts per call deriving the table
+ * coordinate from a float, and the product then goes back to int through
+ * lz_quantize_q8's SIMD round. lz_swiglu_q15_i16 (src/ops.c) removes all
+ * four: with p and g arriving as int16, sigmoid_q15_i reads p's bits and
+ * the whole chain from the two matmuls to lz_quantize_q8_i16 stays
+ * integer.
+ *
+ * ONE switch for the two MoE sites, not one per site: they are the same
+ * mechanism on the same models, reached by the same helper, and neither
+ * would ever be enabled without the other - what the switch selects is
+ * the saving, and the saving is one. The dense FFN's site is NOT here;
+ * see forward_ffn.
+ *
+ * THREE exponents, all measured (.prof/m8range.c, both gate corpora on
+ * kmr20 AND kunmoe-v2-t2-probe - w1/w3 are q4_1+q6_1 on the first and
+ * q8_0 on the second, so both epilogue families are covered). Largest ES
+ * that clamps NOTHING, per run, worst case across all four:
+ *
+ *   role   kmr20 zh/en   t2probe zh/en   worst   shipped   headroom
+ *   p       12 / 12        12 / 11        11       11       1.89x
+ *   g       14 / 13        13 / 13        13       12       1.44x
+ *   out     13 / 12        11 / 12        11       11       1.25x
+ *
+ * p is at the worst case rather than one below it because the next step
+ * down costs a bit of the sigmoid coordinate on every element; g and out
+ * have room to spare and are placed where the clamp cannot be reached by
+ * a corpus 1.4x wider than these. Re-run .prof/m8range.c on any
+ * checkpoint whose FFN might be scaled differently - and read
+ * lz_debug_swiglu_pmax/_gmax/_omax, which the CLI prints: a maximum
+ * strictly below 32767 is the proof that nothing clamped, since the
+ * clamp inside epi_align_i16 is silent.
+ *
+ * The sigmoid table's own edge is a non-event here and that is measured
+ * too: |p| never reaches 12 on either model or either corpus (0 of
+ * 8,644,608 routed and 0 of 2,469,888 shared elements), so sigmoid_q15_i
+ * runs its interpolation on every element rather than its clamp. Its
+ * domain cap (e <= 27, past which it reconstructs a float) is not
+ * reachable either: ep is a compile-time 11. */
+#ifndef LZ_SWIGLU_I16
+#define LZ_SWIGLU_I16 1
+#endif /* LZ_SWIGLU_I16 */
+#ifndef LZ_SWIGLU_ES_P
+#define LZ_SWIGLU_ES_P 11
+#endif /* LZ_SWIGLU_ES_P */
+#ifndef LZ_SWIGLU_ES_G
+#define LZ_SWIGLU_ES_G 12
+#endif /* LZ_SWIGLU_ES_G */
+#ifndef LZ_SWIGLU_ES_O
+#define LZ_SWIGLU_ES_O 11
+#endif /* LZ_SWIGLU_ES_O */
 
 #if LZ_CONV_FIXED
 /* Quantize the conv taps once, laying them out per channel in the same
@@ -1091,6 +1149,20 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
         s->vtmp_i16 = (short *)xcalloc((size_t)nt * c->attn_kv_dim,
                                        sizeof(short), &ok, &s->bytes_alloc);
 #endif /* LZ_VPROJ_I16 */
+#if LZ_SWIGLU_I16
+        /* Sized like moe_h1/moe_h3 - the wider of the routed experts'
+           intermediate and the shared expert's width, since both sites
+           write these. Zero-sized (and so NULL) on a dense model, which
+           forward_moe's predicate reads as "no int path". */
+        {
+            int sw = c->moe_intermediate_size;
+            if (c->moe_shared_width > sw) sw = c->moe_shared_width;
+            s->moe_h1_i16 = (short *)xcalloc((size_t)nt * sw, sizeof(short),
+                                             &ok, &s->bytes_alloc);
+            s->moe_h3_i16 = (short *)xcalloc((size_t)nt * sw, sizeof(short),
+                                             &ok, &s->bytes_alloc);
+        }
+#endif /* LZ_SWIGLU_I16 */
         /* Under neither LZ_MLAT_I16 nor LZ_MLAT_REUSE: the expert loop's
            hoisted activation quantize writes here on the float path, the
            int path, and the reuse control arm alike - what the switches
@@ -1221,6 +1293,7 @@ void lz_state_free(LZRunState *s) {
     free(s->kda_gate_i16); free(s->kda_dtb_i16);
     free(s->moe_lat_i16); free(s->moe_lat_q); free(s->moe_lat_qs);
     free(s->vtmp_i16);
+    free(s->moe_h1_i16); free(s->moe_h3_i16);
     free(s->conv_sig_k1); free(s->conv_sig_oscale2);
     free(s->xq); free(s->xqs); free(s->wscr); free(s->fwht_scratch);
     free(s->subn_norm_int);
@@ -3226,6 +3299,41 @@ static void forward_moe(const LZModel *m, LZRunState *s,
             L->moe_expert_w3[i].dtype == LZ_FMT_F32)
             mlat_may = 0;
 #endif /* LZ_MLAT_I16 */
+    /* int-pipeline milestone 8: the two SwiGLU sites in this function.
+       Both are decided here, before any matmul, and both are
+       all-or-nothing over their own triple (gate, up, down) for the
+       reason kda_conv_proj's comment gives - one consumer fed half in
+       int and half in float is worse than either.
+
+       The routed predicate scans every expert rather than the two a
+       token routes to, exactly as mlat_may above does and for the same
+       reason: routing is not known until after the matmul that would
+       have written the float. The down-projection is in the scan because
+       lz_matmul_xq reads its FLOAT argument when the weight is F32, and
+       on the int path that argument is a moe_h1 nothing wrote.
+
+       use_subn refuses BOTH sites even though this function does not
+       implement SubLN's per-projection norms at all today. The moment it
+       does, moe_shared_down_norm lands between the SwiGLU and its
+       quantize, and there is no int16-input norm for it to read - the
+       float would have to be rebuilt, which is the swap this milestone
+       exists to avoid. Refusing now costs nothing (no MoE checkpoint
+       here sets the flag) and keeps the two changes from having to be
+       correct together. */
+    int rsw_may = 0, ssw_may = 0;
+#if LZ_SWIGLU_I16
+    rsw_may = s->moe_h1_i16 && s->moe_h3_i16 && !c->use_subn &&
+              L->moe_expert_w1 && L->moe_expert_w3 && L->moe_expert_w2;
+    for (i = 0; rsw_may && i < ne; i++)
+        if (!lz_matmul_xq_i16_ok(&L->moe_expert_w1[i], latent, 1) ||
+            !lz_matmul_xq_i16_ok(&L->moe_expert_w3[i], latent, 1) ||
+            lz_matmul_xq_reads_float_row(&L->moe_expert_w2[i]))
+            rsw_may = 0;
+    ssw_may = s->moe_h1_i16 && s->moe_h3_i16 && !c->use_subn && shared_w > 0 &&
+              lz_matmul_xq_i16_ok(&L->moe_shared_gate, hdim, nt) &&
+              lz_matmul_xq_i16_ok(&L->moe_shared_up, hdim, nt) &&
+              !lz_matmul_xq_reads_float_row(&L->moe_shared_down);
+#endif /* LZ_SWIGLU_I16 */
     (void)layer;   /* only used inside LZ_TAP, which is a no-op in a normal build */
 
     /* PHASE 1 - everything that reads xt and does not depend on routing.
@@ -3325,6 +3433,40 @@ static void forward_moe(const LZModel *m, LZRunState *s,
                     gs_have = gsl;
                 }
             }
+#if LZ_SWIGLU_I16
+            /* The int path, when rsw_may said the whole triple can take
+               it. Both exits are asked here rather than through a
+               kda_i16_proj-style helper because there is nothing to
+               recover: rsw_may already ran lz_matmul_xq_i16_ok on both
+               tensors, and that predicate IS the entry point's own, so a
+               refusal below is unreachable. The `&&` is the
+               all-or-nothing enforcement anyway - a w3 that somehow
+               refused leaves moe_h1_i16 written and moe_h1 stale, and
+               the float branch below would then read the stale float, so
+               the second call's failure has to take the first one's
+               result with it. It does: nothing between here and the
+               requantize reads either buffer. */
+            if (rsw_may &&
+                lz_matmul_xq_nt_i16(s->moe_h1_i16, s->moe_lat_q, s->moe_lat_qs,
+                                    &L->moe_expert_w1[ei], latent, inter, 1,
+                                    LZ_SWIGLU_ES_P, 32767) &&
+                lz_matmul_xq_nt_i16(s->moe_h3_i16, s->moe_lat_q, s->moe_lat_qs,
+                                    &L->moe_expert_w3[ei], latent, inter, 1,
+                                    LZ_SWIGLU_ES_G, 32767)) {
+                lz_swiglu_q15_i16(s->moe_h1_i16, s->moe_h1_i16, s->moe_h3_i16,
+                                  inter, LZ_SWIGLU_ES_P, LZ_SWIGLU_ES_G,
+                                  LZ_SWIGLU_ES_O);
+                /* lz_matmul_w's two halves, with the quantize taking the
+                   int16 instead of a float. The float argument is NULL
+                   because moe_h1 holds nothing on this path and the
+                   weight is not F32 (rsw_may checked). */
+                lz_quantize_q8_i16(s->moe_h1_i16, inter,
+                                   lz_act_gs(&L->moe_expert_w2[ei], inter),
+                                   pow2f(-LZ_SWIGLU_ES_O), s->xq, s->xqs);
+                lz_matmul_xq(s->moe_h2, NULL, s->xq, s->xqs,
+                             &L->moe_expert_w2[ei], inter, latent);
+            } else {
+#endif /* LZ_SWIGLU_I16 */
             lz_matmul_xq(s->moe_h1, lat_x, s->moe_lat_q, s->moe_lat_qs,
                         &L->moe_expert_w1[ei], latent, inter);
             lz_matmul_xq(s->moe_h3, lat_x, s->moe_lat_q, s->moe_lat_qs,
@@ -3333,6 +3475,9 @@ static void forward_moe(const LZModel *m, LZRunState *s,
                 s->moe_h1[vv] = lz_silu(s->moe_h1[vv]) * s->moe_h3[vv];
             lz_matmul_w(s->moe_h2, s->moe_h1, &L->moe_expert_w2[ei],
                        inter, latent, s->xq, s->xqs);
+#if LZ_SWIGLU_I16
+            }
+#endif /* LZ_SWIGLU_I16 */
             for (vv = 0; vv < latent; vv++)
                 lat_y[vv] += ww * s->moe_h2[vv];
         }
@@ -3366,6 +3511,7 @@ static void forward_moe(const LZModel *m, LZRunState *s,
         int nss = (gss > 0) ? hdim / gss : 0;
         int gsd = lz_act_gs(&L->moe_shared_down, shared_w);
         int nsd = (gsd > 0) ? shared_w / gsd : 0;
+        int ssw_int = 0;    /* the pair landed in moe_h1_i16/moe_h3_i16 */
 
         /* gate and up both read xt with in_dim == hidden_size, so
            quantize ONCE and share - the same fix, and the same hazard,
@@ -3376,17 +3522,53 @@ static void forward_moe(const LZModel *m, LZRunState *s,
             lz_quantize_q8(s->xb + (size_t)tk * hdim, hdim, gss,
                            s->xq + (size_t)tk * hdim,
                            s->xqs + (size_t)tk * nss);
+#if LZ_SWIGLU_I16
+        /* Same all-or-nothing pair as the routed experts above, and the
+           same unreachability argument for the second call refusing -
+           ssw_may already asked lz_matmul_xq_i16_ok for both. `ssw_int`
+           goes OUT and means one thing only: moe_h1_i16/moe_h3_i16 hold
+           the two projections, so nothing may read moe_h1/moe_h3. */
+        if (ssw_may &&
+            lz_matmul_xq_nt_i16(s->moe_h1_i16, s->xq, s->xqs,
+                                &L->moe_shared_gate, hdim, shared_w, nt,
+                                LZ_SWIGLU_ES_P, 32767) &&
+            lz_matmul_xq_nt_i16(s->moe_h3_i16, s->xq, s->xqs,
+                                &L->moe_shared_up, hdim, shared_w, nt,
+                                LZ_SWIGLU_ES_G, 32767))
+            ssw_int = 1;
+#endif /* LZ_SWIGLU_I16 */
+        if (ssw_int) {
+            /* Token-major with stride shared_w, so the whole batch is one
+               contiguous run - the float pair below treats it the same
+               way. */
+            lz_swiglu_q15_i16(s->moe_h1_i16, s->moe_h1_i16, s->moe_h3_i16,
+                              nt * shared_w, LZ_SWIGLU_ES_P, LZ_SWIGLU_ES_G,
+                              LZ_SWIGLU_ES_O);
+        } else {
         lz_matmul_xq_nt(s->moe_h1, s->xb, s->xq, s->xqs,
                         &L->moe_shared_gate, hdim, shared_w, nt);
         lz_matmul_xq_nt(s->moe_h3, s->xb, s->xq, s->xqs,
                         &L->moe_shared_up, hdim, shared_w, nt);
         for (i = 0; i < nt * shared_w; i++)
             s->moe_h1[i] = lz_silu(s->moe_h1[i]) * s->moe_h3[i];
-        for (tk = 0; tk < nt; tk++)
-            lz_quantize_q8(s->moe_h1 + (size_t)tk * shared_w, shared_w, gsd,
-                           s->xq + (size_t)tk * shared_w,
-                           s->xqs + (size_t)tk * nsd);
-        lz_matmul_xq_nt(s->moe_shared_out, s->moe_h1, s->xq, s->xqs,
+        }
+        for (tk = 0; tk < nt; tk++) {
+            if (ssw_int)
+                lz_quantize_q8_i16(s->moe_h1_i16 + (size_t)tk * shared_w,
+                                   shared_w, gsd, pow2f(-LZ_SWIGLU_ES_O),
+                                   s->xq + (size_t)tk * shared_w,
+                                   s->xqs + (size_t)tk * nsd);
+            else
+                lz_quantize_q8(s->moe_h1 + (size_t)tk * shared_w, shared_w, gsd,
+                               s->xq + (size_t)tk * shared_w,
+                               s->xqs + (size_t)tk * nsd);
+        }
+        /* NULL, not moe_h1, on the int path: the down-projection is the
+           one caller that could still read the float row, and ssw_may
+           already established it will not (lz_matmul_xq_reads_float_row).
+           Passing the stale buffer would leave that as a promise. */
+        lz_matmul_xq_nt(s->moe_shared_out, ssw_int ? NULL : s->moe_h1,
+                        s->xq, s->xqs,
                         &L->moe_shared_down, shared_w, hdim, nt);
         for (i = 0; i < nt * hdim; i++) s->xb2[i] += s->moe_shared_out[i];
     }
@@ -3494,6 +3676,16 @@ static void dense_ffn_step(const LZModel *m, LZRunState *s,
            not worth vectorizing - measured at 0.7%% of decode
            (--profile), because the three matmuls around it dominate the
            ffn phase and those are already SIMD.
+
+           lz_swiglu_q15_i16 is deliberately NOT wired here, and the
+           reason is the checkpoints rather than the code: gate/up/down
+           are f32 on every dense model in /e/LLM/models/ that loads
+           (.prof/dtype_by_role.c on all 30), so there is no int16 exit
+           for the producers to take. The one exception is the throwaway
+           ARM fixture _armgate2 (q4_1/q4_1/q6_1), where
+           lz_matmul_xq_i16_ok does answer 1 - so this is unreached, not
+           unreachable, and wiring it means calibrating three exponents
+           on a fixture no quality gate runs.
 
            Do not read "scalar" as "impossible here". This repo already
            replaces float with integer MMX where it pays and controls the

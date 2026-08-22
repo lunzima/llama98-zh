@@ -497,6 +497,16 @@ typedef struct {
        float row apart element by element, so forward_attn refuses the
        exit when any of them is live. */
     short *vtmp_i16;
+    /* The SwiGLU pair's int16 exits (int-pipeline milestone 8), same
+       one-of-the-two contract: moe_h1_i16/moe_h3_i16 carry what
+       moe_h1/moe_h3 would have, at LZ_SWIGLU_ES_P / LZ_SWIGLU_ES_G.
+       Unlike the exits above these serve TWO call sites of different
+       widths (the routed experts' w1/w3 at moe_intermediate_size and the
+       shared expert's gate/up at moe_shared_width), so they are sized
+       like moe_h1/moe_h3 themselves - the max of the two, nt_cap wide.
+       lz_swiglu_q15_i16 writes its output back over moe_h1_i16, which is
+       then the activation lz_quantize_q8_i16 reads. */
+    short *moe_h1_i16, *moe_h3_i16;
     float *conv_sig_k1;
     float *conv_sig_oscale2;
     float  conv_sig_k2;         /* lz_sig_q15_t_offset(), same for every channel */

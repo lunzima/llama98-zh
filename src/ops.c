@@ -1613,6 +1613,75 @@ int32_t epi_fixed_align_i16(const int32_t *accb, const LZTensor *w, int row,
     return epi_align_i16(s, e + lz_epi_post_e(w) + 8, target_e, bound);
 }
 
+/* ---- SwiGLU in the integer domain (int-pipeline milestone 8) ---------
+ *
+ * silu(p)*g == p * sigmoid(p) * g, and with p and g arriving as int16 at
+ * fixed exponents (lz_matmul_xq_nt_i16) every factor is already an
+ * integer: sigmoid_q15_i takes p's bits directly and returns Q15, so the
+ * whole product can be done with two int32 multiplies and two shifts and
+ * no float appears anywhere between the two matmuls and the requantize.
+ *
+ * Lives here, next to epi_align_i16, because it is that primitive's
+ * first consumer outside a matmul epilogue - the final shift+round+clamp
+ * IS epi_align_i16, not a second copy of it, and the intermediate
+ * narrowing is epi_shr_half for the same reason.
+ *
+ * TWO int32 MULTIPLIES, NOT ONE int64 ONE. p*sig*g reaches 2^45 and
+ * would need a 64-bit product (Watcom emits `call __I8M` for
+ * int32*int32->int64, which is a soft-multiply per element); narrowing
+ * in between keeps both products inside int32, and the second one sits
+ * at the edge:
+ *   |p| <= 32767 and sig <= 32768 (sigmoid_q15's range is [0, 32768],
+ *   the upper end INCLUSIVE), so |p*sig| <= 1,073,709,056 < 2^31.
+ *   sv = epi_shr_half(p*sig, 14) then has |sv| <= 65,534, attained -
+ *   twice int16's range, so stage 2 cannot be an int16 multiply.
+ *   |sv*g| <= 65,534 * 32,767 = 2,147,352,578 <= INT32_MAX, 131,069 to
+ *   spare. At a narrowing of 13 the same product is 4,294,705,156 and
+ *   does not fit, so 14 is the largest usable shift, not a taste; 15
+ *   would cost a bit of the silu value for margin already there.
+ * Verified exhaustively stage by stage in .prof/verify_swiglu_i16.c -
+ * every (p, sig) pair for stage 1, every (sv, g) pair for stage 2, every
+ * reachable int32 accumulator for the exit. Its A1 asserts the 65,534 is
+ * ATTAINED, which is what rejected the 65,536 this comment first
+ * carried.
+ *
+ * The (s, e) pair handed to epi_align_i16 means `s * 2^(e-8)`, and this
+ * accumulator's value is `sv*g * 2^-(ep+1+eg)` (sv carries ep+15-14 ==
+ * ep+1 fractional bits), so e == 8 - (ep + 1 + eg). Same bookkeeping as
+ * epi_q41_align_i16's `target + 8`, written in the same units.
+ *
+ * `o` may alias `p`: element i reads p[i] and g[i] before writing o[i],
+ * and nothing later reads p again. The routed expert relies on this.
+ *
+ * Bills nothing because there is nothing to bill - sigmoid_q15_i is a
+ * table lookup on integers, and the rest is multiplies and shifts. */
+long long lz_debug_swiglu_i16 = 0;   /* elements the int path produced */
+/* Post-clamp maxima, the silent-clamp probe the LZ_SWIGLU_ES_* comment
+   in forward.c reports from: a maximum strictly below the bound proves
+   no element clamped, which a clamp inside epi_align_i16 cannot say for
+   itself. */
+int lz_debug_swiglu_pmax = 0;
+int lz_debug_swiglu_gmax = 0;
+int lz_debug_swiglu_omax = 0;
+
+void lz_swiglu_q15_i16(short *o, const short *p, const short *g, int n,
+                       int ep, int eg, int eo) {
+    int i;
+    int e = 8 - (ep + 1 + eg);
+    for (i = 0; i < n; i++) {
+        int32_t pv = p[i];
+        int32_t gv = g[i];
+        int32_t sv = (int32_t)epi_shr_half((long long)(pv * sigmoid_q15_i(pv, ep)), 14);
+        int32_t q  = epi_align_i16((long long)(sv * gv), e, eo, 32767);
+        int32_t a;
+        o[i] = (short)q;
+        a = pv < 0 ? -pv : pv; if (a > lz_debug_swiglu_pmax) lz_debug_swiglu_pmax = a;
+        a = gv < 0 ? -gv : gv; if (a > lz_debug_swiglu_gmax) lz_debug_swiglu_gmax = a;
+        a = q  < 0 ? -q  : q;  if (a > lz_debug_swiglu_omax) lz_debug_swiglu_omax = a;
+    }
+    lz_debug_swiglu_i16 += n;
+}
+
 float epi_q8(const int32_t *accb, const float *xsb, const float *ws,
                     int ng, int r, float post) {
     int g;
