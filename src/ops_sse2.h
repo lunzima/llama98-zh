@@ -41,6 +41,17 @@
    match the *_SSE2_EXTERN pattern: code far from here reads them
    (q8r_have_simd/lz_q8r_tier, LZ_AMAX_TAB), same reason ops_mmx.h keeps
    LZ_HAVE_AMAX_MMX/LZ_HAVE_Q8R_SSE under their names. */
+/* BOTH toolchains, like LZ_FWHT_MMX_EXTERN in src/ops_mmx.h and for the
+   same reason: the Hadamard stage kernel has a real body on each side
+   and src/fwht.c names one symbol. */
+#define LZ_FWHT_SSE2_EXTERN 1
+
+/* Declared outside the __WATCOMC__ split below, unlike everything else
+   here: the wrapper has the same name and prototype in both branches
+   (Watcom's wraps a #pragma aux, gcc's is the intrinsics body), so one
+   declaration serves both. */
+void lz_fwht_stage_sse2(int32_t *y, int n, int len);
+
 #define LZ_HAVE_AMAX_SSE2  1
 #define LZ_HAVE_Q8R_SIMD   1
 

@@ -26,6 +26,7 @@
 #include <string.h>
 
 #include "fwht.h"
+#include "ops.h"    /* lz_kernel_select - the tier is the point here */
 
 #define NMAX 512
 
@@ -37,10 +38,20 @@ static uint32_t rnd(void) {
     return rs;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
     static const int NS[] = { 2, 4, 8, 16, 32, 64, 128, 256, 512 };
     uint32_t h = 2166136261u;
     int ni, pat, i;
+    /* The TIER is what selects the kernel (src/fwht.c dispatches on
+       g_kernel, not on CPUID - a --kernel ref run must reach the C body
+       or the control arm becomes the kernel). So the caller names it,
+       and the driver runs this once per tier: ref, mmx, sse2. */
+    if (argc > 1) {
+        int t = LZ_KERNEL_REF;
+        if (argv[1][0] == 'm') t = LZ_KERNEL_MMX;
+        else if (argv[1][0] == 's') t = LZ_KERNEL_SSE2;
+        lz_kernel_select(t);
+    }
     for (ni = 0; ni < (int)(sizeof(NS) / sizeof(NS[0])); ni++) {
         int n = NS[ni];
         for (pat = 0; pat < 6; pat++) {

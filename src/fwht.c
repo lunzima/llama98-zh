@@ -13,6 +13,7 @@
    kernel then changed nothing, which is how it was found. */
 #include "mmx_compat.h"           /* _mm_empty, on both toolchains */
 #include "ops_mmx.h"              /* LZ_FWHT_MMX_EXTERN, lz_fwht_stage_mmx */
+#include "ops_sse2.h"             /* LZ_FWHT_SSE2_EXTERN, lz_fwht_stage_sse2 */
 #include "ops_quant.h"            /* lz_cpu_has_mmx */
 
 /* Sylvester recursion, in place, mirroring lz_fwht (float) in ops.c.
@@ -63,14 +64,39 @@ void lz_fwht_i32(int32_t *restrict y, const int32_t *restrict x, int n) {
        ONE emms FOR THE WHOLE TRANSFORM, here rather than per stage: the
        stage loop contains no x87, and rule 6 item 6 permits hoisting it
        exactly that far. What follows lz_fwht_i32 does (subn_fwht_quant's
-       amax and q8_round), which is why it cannot be hoisted further. */
-    if (lz_cpu_has_mmx() && n >= 4 && (n & 3) == 0) {
+       amax and q8_round), which is why it cannot be hoisted further.
+
+       SELECTED BY TIER, not by CPUID, and the first version of this got
+       it wrong. `lz_cpu_has_mmx()` alone would give --kernel ref the MMX
+       body too, and then the tier the kernel is COMPARED AGAINST would
+       be the kernel - the same trap the ARM guard above spells out. The
+       CPUID test stays as well: a tier can be asked for on a machine
+       that cannot run it (lz_kernel_select clamps, but the emms below
+       would still be reached on a 486 without it). */
+    if ((g_kernel == LZ_KERNEL_MMX || g_kernel == LZ_KERNEL_SSE2) &&
+        lz_cpu_has_mmx() && n >= 4 && (n & 3) == 0) {
+        int start = 2;
         for (i = 0; i < n; i += 2) {
             int32_t u = tmp[i], v = tmp[i + 1];
             tmp[i]     = u + v;
             tmp[i + 1] = u - v;
         }
-        for (len = 2; len < n; len <<= 1) lz_fwht_stage_mmx(tmp, n, len);
+#if defined(LZ_FWHT_SSE2_EXTERN)
+        /* SSE2 takes the stages it can and hands the rest back, rather
+           than replacing the MMX path: four int32 per xmm needs len >= 4
+           for the halves to be whole vectors, so len == 2 stays on MMX
+           and everything above it widens. Same reason LZ_DEFINE_PICK
+           falls back from the SSE2 row to the MMX one instead of to
+           nothing. */
+        if (g_kernel == LZ_KERNEL_SSE2 && n >= 8 && (n & 7) == 0) {
+            lz_fwht_stage_mmx(tmp, n, 2);
+            for (len = 4; len < n; len <<= 1)
+                lz_fwht_stage_sse2(tmp, n, len);
+            _mm_empty();
+            return;
+        }
+#endif /* LZ_FWHT_SSE2_EXTERN */
+        for (len = start; len < n; len <<= 1) lz_fwht_stage_mmx(tmp, n, len);
         _mm_empty();
         return;
     }

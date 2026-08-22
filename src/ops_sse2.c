@@ -388,6 +388,50 @@ unsigned lz_amax32_sse2_w(const float *x, int n) {
     return lz_amax32_sse2_asm(x, n);
 }
 
+/* ---- Hadamard: one butterfly stage of lz_fwht_i32, SSE2 Watcom twin.
+   gcc twin: lz_fwht_stage_sse2, the intrinsics body below. Four int32
+   per movdqu against the MMX cell's two; see that one (src/ops_mmx.c)
+   for why the halves are contiguous and need no shuffle.
+
+   Byte offsets for the same reason the MMX twin uses them: `len` is
+   scaled once instead of at every index. edi walks the low half, esi
+   the high, both by 16 - the four int32 a movdqu moves. */
+extern void lz_fwht_stage_sse2_asm(int32_t *y, int n, int len);
+#pragma aux lz_fwht_stage_sse2_asm = \
+    ".686"                                                      \
+    "shl    ecx, 2"                 /* len -> bytes */          \
+    "shl    edx, 2"                 /* n   -> bytes */          \
+    "lea    ebx, [ecx+ecx]"         /* stride = 2*len bytes */  \
+    "add    edx, eax"               /* end of y */              \
+    "outer2:"                                                   \
+    "mov    edi, eax"                                           \
+    "lea    esi, [eax+ecx]"                                     \
+    "mov    ebp, ecx"                                           \
+    "inner2:"                                                   \
+    "movdqu xmm0, [edi]"                                        \
+    "movdqu xmm1, [esi]"                                        \
+    "movdqa xmm2, xmm0"                                         \
+    "paddd  xmm0, xmm1"                                         \
+    "psubd  xmm2, xmm1"                                         \
+    "movdqu [edi], xmm0"                                        \
+    "movdqu [esi], xmm2"                                        \
+    "add    edi, 16"                                            \
+    "add    esi, 16"                                            \
+    "sub    ebp, 16"                                            \
+    "jnz    inner2"                                             \
+    "add    eax, ebx"                                           \
+    "cmp    eax, edx"                                           \
+    "jb     outer2"                                             \
+    parm [eax] [edx] [ecx]                                      \
+    modify [eax ebx ecx edx esi edi ebp];
+
+/* Thin wrapper: a #pragma aux body expands at the CALL SITE, and the
+   call site is src/fwht.c - which is not this TU. Same reason
+   lz_amax32_sse2_w above exists. */
+void lz_fwht_stage_sse2(int32_t *y, int n, int len) {
+    lz_fwht_stage_sse2_asm(y, n, len);
+}
+
 /* ---- Q8 activation rounding, SSE2 tier - in this TU; the algorithm
    documentation is in src/ops_kernel_q8round.h. cvtps2dq converts 4
    floats at once - no MMX register touched, unlike the SSE1+MMX tier's
@@ -1774,6 +1818,34 @@ void lz_q8round32_simd(const float *x, int8_t *o, const float *pinv) {
         l = _mm_max_epi16(_mm_min_epi16(l, p127), m127);
         h = _mm_max_epi16(_mm_min_epi16(h, p127), m127);
         _mm_storeu_si128((__m128i *)(void *)(o + b * 16), _mm_packs_epi16(l, h));
+    }
+}
+
+/* ---- Hadamard: one butterfly stage of lz_fwht_i32, SSE2 gcc twin.
+   Watcom twin: lz_fwht_stage_sse2_asm, the #pragma aux in the branch
+   above. Four int32 per xmm where the MMX cell (src/ops_mmx.c) does
+   two - same butterfly, same no-shuffle argument, and the same
+   by-construction bit-identity: integer add and subtract, wrapping,
+   with no rounding and no reassociation.
+
+   len >= 4 is the precondition, not a preference: below it the two
+   halves of the butterfly are not whole 16-byte vectors, and src/fwht.c
+   hands those stages to the MMX kernel rather than growing a tail here.
+
+   No emms: SSE2 touches no MMX register (that is the whole difference
+   from the SSE1+MMX tier), so this cell owes none. The caller's one
+   emms is for the len == 2 stage, which IS on MMX. */
+void lz_fwht_stage_sse2(int32_t *y, int n, int len) {
+    int i, j;
+    for (i = 0; i < n; i += (len << 1)) {
+        int32_t *a = y + i;
+        int32_t *b = y + i + len;
+        for (j = 0; j < len; j += 4) {
+            __m128i u = _mm_loadu_si128((const __m128i *)(const void *)(a + j));
+            __m128i v = _mm_loadu_si128((const __m128i *)(const void *)(b + j));
+            _mm_storeu_si128((__m128i *)(void *)(a + j), _mm_add_epi32(u, v));
+            _mm_storeu_si128((__m128i *)(void *)(b + j), _mm_sub_epi32(u, v));
+        }
     }
 }
 
