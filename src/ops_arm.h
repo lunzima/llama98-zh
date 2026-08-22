@@ -112,17 +112,18 @@ void lz_wsum_pair_arm_asm(const int8_t *rowA, const int8_t *rowB,
    outright, and the three inner loops disassemble to 12 / 12 / 14
    instructions per FOUR butterflies - 3.0 / 3.0 / 3.5.
 
-   The whole-transform figure is worse than those three, and the gap is
-   real rather than a rounding: the len>=4 stages keep their GROUP loop
-   in C, and it costs 9 instructions per group because gcc spills the
-   stage constants. At n=512 that is 8951 instructions for 2304
-   butterflies, 3.89 each, against 18432 + the memcpy - 2.06x on the
-   transform alone. The overhead concentrates at len=4 (5.75 per
-   butterfly, where one group is one inner iteration) and falls to 3.54
-   by len=256. Folding the group loop into the assembly would recover
-   most of it and is the obvious next step; it needs two more operands
-   than the three these blocks use, which is what keeps it out of this
-   version. */
+   The whole-transform figure is worse than those three and the gap is
+   structural, not rounding: the len>=4 stages pay a GROUP loop, five
+   instructions each. At n=512 that is 8499 instructions for 2304
+   butterflies, 3.69 each, against gcc's 18432 plus an n-word memcpy -
+   2.17x on the transform alone. The overhead concentrates where the
+   groups are smallest (len=4 costs 4.75 per butterfly, one group being
+   one inner iteration) and falls to 3.52 by len=256.
+
+   3.5 is the floor for those stages as written: four LDM/STM move the
+   eight words, eight instructions do the arithmetic, two run the loop.
+   Below it needs the inner loop unrolled to eight butterflies, which
+   buys 3.25 there - worth roughly another 4% overall and not done. */
 void lz_fwht_i32_arm_asm(int32_t *y, const int32_t *x, int n);
 
 /* norm_ss_fixed's element loop (docs/arm-asm-audit.md B1): for each

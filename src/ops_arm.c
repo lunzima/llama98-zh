@@ -492,15 +492,31 @@ static void fwht_arm_stage2(int32_t *y, int n) {
           "memory");
 }
 
-/* len>=4: one group, `len` butterflies, the halves len words apart.
-   The group loop stays in C - it keeps this block to three operands,
-   which is what leaves gcc enough registers outside the r4-r11 clobber
-   to allocate them without spilling. */
-static void fwht_arm_group(int32_t *lo, int32_t *hi, int len) {
-    int32_t *p1 = lo;
-    int32_t *p2 = hi;
-    int cnt = len >> 2;
+/* len>=4: the WHOLE stage, group loop included. The halves are len words
+   apart, so this is the one shape that needs two pointers and two
+   stores; stmdb after a writeback ldmia puts the words back where they
+   came from without keeping a third.
+
+   The group loop is here rather than in C because in C it cost NINE
+   instructions per group - gcc ran out of registers outside the r4-r11
+   clobber and reloaded the stage constants from the stack every group.
+   Here it is five, and the trick that makes it fit is deriving the
+   inner count from lenb instead of carrying it: `mov cnt, lenb, lsr #4`
+   is len/4, one instruction, one register saved.
+
+   Advancing both pointers by lenb after the inner loop lands them
+   exactly on the next group. p1 ends the inner loop at y+i+len and p2
+   at y+i+2len; +lenb each gives y+i+2len and y+i+3len, which are the
+   next group's two halves. So the group step needs no multiply and no
+   separate index - and `cmp p1, end` is the whole termination test. */
+static void fwht_arm_stagen(int32_t *y, int n, int len) {
+    int32_t *p1 = y;
+    int32_t *p2 = y + len;
+    int lenb = len << 2;
+    const int32_t *end = y + n;
     __asm__ __volatile__(
+        "2:\n\t"
+        "mov    r12, %[lenb], lsr #4\n\t"       /* len/4 butterflies-by-4 */
         "1:\n\t"
         "ldmia  %[p1]!, {r4, r5, r6, r7}\n\t"
         "ldmia  %[p2]!, {r8, r9, r10, r11}\n\t"
@@ -510,21 +526,24 @@ static void fwht_arm_group(int32_t *lo, int32_t *hi, int len) {
         LZ_FWHT_BFLY("r7", "r11")
         "stmdb  %[p1], {r4, r5, r6, r7}\n\t"
         "stmdb  %[p2], {r8, r9, r10, r11}\n\t"
-        "subs   %[cnt], %[cnt], #1\n\t"
+        "subs   r12, r12, #1\n\t"
         "bne    1b\n\t"
-        : [p1] "+r"(p1), [p2] "+r"(p2), [cnt] "+r"(cnt)
-        :
-        : "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "cc",
+        "add    %[p1], %[p1], %[lenb]\n\t"
+        "add    %[p2], %[p2], %[lenb]\n\t"
+        "cmp    %[p1], %[end]\n\t"
+        "blo    2b\n\t"
+        : [p1] "+r"(p1), [p2] "+r"(p2)
+        : [lenb] "r"(lenb), [end] "r"(end)
+        : "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "r12", "cc",
           "memory");
 }
 
 void lz_fwht_i32_arm_asm(int32_t *y, const int32_t *x, int n) {
-    int len, i;
+    int len;
     fwht_arm_stage1(y, x, n);
     fwht_arm_stage2(y, n);
     for (len = 4; len < n; len <<= 1)
-        for (i = 0; i < n; i += (len << 1))
-            fwht_arm_group(y + i, y + i + len, len);
+        fwht_arm_stagen(y, n, len);
 }
 #endif /* LZ_ARM_ASM_EXTERN */
 
