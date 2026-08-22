@@ -1,6 +1,8 @@
 #!/bin/bash
-# Build and run the conv1d epilogue's cross-entry gate, AND the two
-# mutations that show it can fail.
+# Build and run the sigmoid_q15 / sigmoid_q15_t cross-entry gate, AND
+# the two mutations that show it can fail. Named for the conv epilogue
+# because that is what it was written for; LZ_CONV_SIG_I took that
+# consumer off both float entries - see the .c file's own header.
 #
 #   bash .prof/conv_epi_xentry.sh
 #
@@ -15,8 +17,7 @@
 # both to fail, in the region they belong to.
 #
 # Runs on the host compiler: the identity is a fact about the two C
-# entry points in ops_quant.c, and it is --kernel arm-asm's conv
-# epilogue (src/ops.c) that consumes it. No ARM toolchain needed.
+# entry points in ops_quant.c. No ARM toolchain needed.
 set -u
 R=${R:-$(cd "$(dirname "$0")/.." && pwd)}
 O=${O:-/tmp/cvxentry}

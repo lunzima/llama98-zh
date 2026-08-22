@@ -1,14 +1,16 @@
-/* Cross-entry gate for the conv1d epilogue's ARM tier.
+/* Cross-entry gate for sigmoid_q15 against sigmoid_q15_t.
  *
- * WHAT THE ARM ARM CHANGED. lz_causal_conv1d_step_fixed's C tier reaches
- * the sigmoid through sigmoid_q15_t at the FOLDED coordinate
- * t = acc_f*sig_k1[c] + sig_k2; its --kernel arm-asm arm reaches it
- * through sigmoid_q15 at x = acc_f*oscale instead, because the "+12"
- * that separates the two is an integer problem lz_sig_q15_arm_asm
- * already solves and a whole __aeabi_fadd the t-form cannot avoid.
- * Everything else in that arm is exponent-field arithmetic whose
- * exactness the primitives' own gate (.prof/arm_leafgate.c) covers.
- * THIS is the one step that is not - it swaps entry points.
+ * NO LONGER THE CONV EPILOGUE'S GATE. It was written for it: the C tier
+ * reached the sigmoid through sigmoid_q15_t at the folded coordinate
+ * t = acc_f*sig_k1[c] + sig_k2 and the --kernel arm-asm arm through
+ * sigmoid_q15 at x = acc_f*oscale, and this file was the proof that the
+ * two entries are one function. Under LZ_CONV_SIG_I both tiers call
+ * sigmoid_q15_i on the accumulator's bits instead and neither of the
+ * two float entries is on that path at all; .prof/verify_sig_i_wide.c
+ * is what covers it now. What is kept here is the identity itself,
+ * which sigmoid_q15_t's remaining callers (lz_silu, lz_sigmoid, the
+ * =0 control arm) still rest on - and the table fact below, which no
+ * algebraic argument replaces.
  *
  * THE IDENTITY IS ALGEBRAIC, WITH ONE TABLE FACT IN IT.
  *   t == fl(16*(x+12)) == 16*fl(x+12), since scaling by a power of two
