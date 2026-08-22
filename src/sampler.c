@@ -386,6 +386,52 @@ static int select_topk(const float *p, int n, int k, LZProbIndex *buf) {
     return cnt;
 }
 
+/* top_k WITHOUT the whole-vocabulary softmax in front of it.
+ *
+ * THE NORMALIZER CANCELS IN EVERY COMPARISON DOWNSTREAM, which is what
+ * makes this legal rather than merely cheaper. With top_k active, every
+ * later step is a ratio inside the candidate set:
+ *   min_p  buf[i].prob < m_eff * buf[0].prob
+ *   top_p  cumulative >= topp * (the CANDIDATE SET's mass, not the
+ *          vocabulary's - see select_candidates' own comment and the
+ *          three-reference derivation it cites)
+ *   draw   r = coin * cumulative, then a running cdf
+ *   ins    buf[i].prob / mass
+ *   target out_p[...] = buf[i].prob / mass
+ * Scale all of buf[] by any positive constant and not one of those
+ * decisions moves. So the 1/Z that lz_softmax divides by is computed
+ * from 32,768 exponentials and then divided back out.
+ *
+ * AND THE SET IS THE SAME SET. exp is strictly increasing, so the k
+ * largest post-softmax probabilities are the k largest logits, in the
+ * same order, and select_topk's comparisons are all `<` between two
+ * transformed values. What it does NOT preserve is a TIE that the
+ * softmax manufactures: two distinct logits far below the max both
+ * round to the same float probability, and there the old code's
+ * index-order tie-break picked between entries this one now orders
+ * strictly. Those entries have equal probability by construction, so
+ * the distribution sampled from is the same one - the token drawn from
+ * it can differ, which is why this is a documented value-changing
+ * change and not a bit-identical one.
+ *
+ * buf[] comes back holding UNNORMALIZED exp(l - lmax), and lmax is the
+ * global maximum because the top-k set always contains the argmax.
+ *
+ * Measured: the full-vocabulary softmax is 32,768 elements per sampled
+ * token at 322 ARM instructions each (.prof/arm_prim_count.sh mode 13),
+ * about 10.5 M - larger than any single row in docs/arm-asm-audit.md,
+ * and absent from that document entirely, which counts only the
+ * attention softmax's 16*T. */
+static int select_topk_exp(const float *l, int n, int k, LZProbIndex *buf) {
+    int n0 = select_topk(l, n, k, buf);
+    float lmax;
+    int i;
+    if (n0 <= 0) return n0;
+    lmax = buf[0].prob;                  /* still a logit at this point */
+    for (i = 0; i < n0; i++) buf[i].prob = lz_exp(buf[i].prob - lmax);
+    return n0;
+}
+
 /* Path when top_k is off: coarse threshold filter, then sort; matches llama2.c */
 static int select_all(const float *p, int n, float topp, LZProbIndex *buf) {
     int n0 = 0, i;
@@ -424,16 +470,26 @@ static int select_all(const float *p, int n, float topp, LZProbIndex *buf) {
    index to keep (buf[0..return] survive) or -1 if nothing survived
    (this matches lz_sample's own n0<=0 fallback to argmax - *out_mass
    is left unwritten on this path). */
-static int select_candidates(const LZSampleParams *pr, const float *logits,
+static int select_candidates(const LZSampleParams *pr, float *logits,
                              int n, LZProbIndex *buf, float *out_mass,
                              float temperature) {
     int n0, topk_cut = 0, i, last;
     float cumulative = 0.0f;
 
+    /* `logits` arrives TEMPERATURE-SCALED AND RAW, not softmaxed - the
+       callers used to run lz_softmax over the whole vocabulary first
+       and now only do so on the branches that need a normalized vector
+       in their own right. See select_topk_exp for why the top_k branch
+       does not. */
     if (pr->topk > 0 && pr->topk < n) {
-        n0 = select_topk(logits, n, pr->topk, buf);
+        n0 = select_topk_exp(logits, n, pr->topk, buf);
         topk_cut = 1;
     } else {
+        /* select_all's coarse cutoff is (1-topp)/(n-1), a threshold on
+           NORMALIZED probability, and the `mass = 1.0f` below leans on
+           the same thing - so this branch keeps the whole-vocabulary
+           softmax it always had. */
+        lz_softmax(logits, n);
         n0 = select_all(logits, n, pr->topp, buf);
     }
     if (n0 <= 0) return -1;
@@ -540,14 +596,16 @@ void lz_target_dist(const LZSampleParams *pr, float *logits, int n,
         float inv = 1.0f / pr->temperature;
         for (i = 0; i < n; i++) logits[i] *= inv;
     }
-    lz_softmax(logits, n);
 
     if ((pr->topk <= 0 || pr->topk >= n) &&
         (pr->topp <= 0.0f || pr->topp >= 1.0f) && pr->minp <= 0.0f) {
         /* No filters: the softmax IS the final distribution already -
            same "nothing to restrict" case lz_sample's own step 3
            short-circuits, just returning the vector instead of a
-           sample drawn from it. */
+           sample drawn from it. This is the one exit that needs every
+           entry normalized, so it is the one that still pays for the
+           whole-vocabulary softmax. */
+        lz_softmax(logits, n);
         memcpy(out_p, logits, (size_t)n * sizeof(float));
         return;
     }
@@ -701,7 +759,6 @@ int lz_sample_ex(LZSampler *s, float *logits, LZInspect *ins,
         float inv = 1.0f / temp;
         for (i = 0; i < n; i++) logits[i] *= inv;
     }
-    lz_softmax(logits, n);
 
     coin = lz_random_f32(&s->rng_state);
 
@@ -717,7 +774,13 @@ int lz_sample_ex(LZSampler *s, float *logits, LZInspect *ins,
        nothing has renormalized a subset of it. */
     if ((pr->topk <= 0 || pr->topk >= n) &&
         (pr->topp <= 0.0f || pr->topp >= 1.0f) && pr->minp <= 0.0f) {
-        int idx = sample_mult(logits, n, coin);
+        int idx;
+        /* The one exit that samples from the WHOLE vector, so the one
+           that still needs every entry normalized. Every other path
+           below works inside the candidate set, where the normalizer
+           cancels - see select_topk_exp. */
+        lz_softmax(logits, n);
+        idx = sample_mult(logits, n, coin);
         if (ins) {
             int k = (LZ_INSPECT_CAND_MAX < n) ? LZ_INSPECT_CAND_MAX : n;
             select_topk(logits, n, k, buf);
