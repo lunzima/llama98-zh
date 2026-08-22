@@ -286,7 +286,26 @@ float lz_softplus(float x) {
         /* libm's double routines return wrong values under PC=24;
            restore 64-bit precision here temporarily. Only nv x linear
            layers = 144 calls per token; two fldcw at ~50 cycles is
-           ~14K cycles (48 us on PII), not worth writing our own log. */
+           ~14K cycles (48 us on PII), not worth writing our own log.
+
+           That arithmetic prices the CONTROL WORD, and it only applies
+           to a target that has an FPU. A no-FPU target takes the #else
+           below, where there is no control word and the cost is the two
+           libm DOUBLE transcendentals - which the f32 census cannot see
+           (it counts neither libm nor doubles). Measured there, soft-float
+           ARM under QEMU, ratio only (.prof/softplus_weight.c): libm
+           double 36.0 s, libm float 25.2 s, a table+poly of the shape
+           lz_exp_fixed already uses 10.1 s - so a fixed-point softplus
+           would be 3.58x cheaper per call.
+
+           The conclusion still holds and the reason is the COUNT, not
+           the control word: 144 calls x 3.58 is about 515 table-exp
+           equivalents a token against the 11,072 exps the engine already
+           pays, and it is 0 on both shipping KDA checkpoints
+           (kda_has_gate_lower_bound is true on each, so forward.c's gate
+           takes the sigmoid branch and this runs only under
+           forward_ssm). If a model ever makes this hot, re-read the
+           ratio above rather than this sentence. */
         unsigned save = _control87(0, 0);
         float r;
         _control87(_PC_64, _MCW_PC);
