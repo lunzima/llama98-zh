@@ -678,7 +678,19 @@ const char *lz_hadamard_select(const char *name);
    AUTO asks the same CPUID SSE question every other tier asks, so a
    no-SIMD (weak-x87) target lands on fixed. The float path stays the
    default anywhere x87 is not the bottleneck. */
-int lz_scalar_mode(void);
+/* INLINE, unlike its eleven siblings, and the reason is where it is
+   called from. Every other tier getter is asked once per operator call;
+   this one is asked once per lz_exp / lz_rsqrt / lz_sigmoid, which
+   softmax invokes PER ELEMENT. Left out of line it made lz_exp's
+   dispatch shell fifteen instructions on ARM - a push/pop pair, an
+   argument shuffle and a cross-TU `bl` for a one-line getter - in front
+   of a body that is 169.
+
+   g_scalar stops being file-static to allow it, which is the same trade
+   g_kernel already makes in ops_kernel_shared.h. lz_scalar_select is
+   still the only writer; nothing outside ops_sched.c may assign it. */
+extern int lz_scalar_g;
+#define lz_scalar_mode() ((lz_scalar_g < 0) ? 1 : lz_scalar_g)
 int lz_scalar_is_auto(void);
 const char *lz_scalar_select(const char *name);
 
@@ -823,6 +835,22 @@ void lz_quantize_q8_int(const int32_t *t, int n, int gs, float deq,
    resolve differently. */
 void lz_quantize_q8_i16(const short *t, int n, int gs, float deq,
                         int8_t *q, float *s);
+
+/* SwiGLU with both operands already int16 (int-pipeline milestone 8):
+   o[i] = silu(p[i]) * g[i], entirely in integers.
+
+   p is at exponent ep and g at eg (value == q * 2^-ES, epi_align_i16's
+   convention); o comes out at eo, clamped to +-32767 by epi_align_i16.
+   sigmoid comes from sigmoid_q15_i, which takes p's bits directly, so
+   the chain from the two producing matmuls to lz_quantize_q8_i16 crosses
+   no int<->float boundary at all. `o` may alias `p`.
+
+   ep must be within sigmoid_q15_i's domain (0 <= ep <= 27); outside it
+   that function reconstructs a float and this function's whole point is
+   gone. See src/ops.c for the exact accumulator bounds - both int32
+   products sit at their edges by construction, not by margin. */
+void lz_swiglu_q15_i16(short *o, const short *p, const short *g, int n,
+                       int ep, int eg, int eo);
 
 /* int64-input twin of lz_quantize_q8_int, for the fixed-tier attention
    weighted sum. The attention accumulator is exact only at int64 width:

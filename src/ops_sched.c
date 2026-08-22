@@ -291,11 +291,11 @@ const char *lz_sig_select(const char *name) {
    folded into a shared helper - it is one line, and a helper would only
    hide that this was already the answer six other places needed to
    copy, not the other way round. */
-static int g_scalar = -1;
-
-int lz_scalar_mode(void) {
-    return (g_scalar < 0) ? 1 : g_scalar;
-}
+/* NOT file-static, unlike its eleven siblings: lz_scalar_mode is a
+   macro in ops.h so that softmax's per-element lz_exp does not pay a
+   cross-TU call for it. This file is still its only writer. */
+int lz_scalar_g = -1;
+#define g_scalar lz_scalar_g
 
 int lz_scalar_is_auto(void) { return g_scalar < 0; }
 
