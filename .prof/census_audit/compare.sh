@@ -19,7 +19,7 @@ CEN=$1; MEAS=$2; RAWFIX=$3; TOK=$4
 # Refuse only on a POSITIVE mismatch. An archive checkout has no .git,
 # and a check that also fires when it cannot tell would be red
 # everywhere and therefore carry nothing.
-LINEMAP_FORWARD_BLOB=f81eb6dba04953c413b3cd9cb2ebd533c17ea23f
+LINEMAP_FORWARD_BLOB=b143c6c5dc5a98d11062786dc007076263733fbc
 if [ "${CENSUS_AUDIT_SKIP_BLOBCHECK:-0}" != "1" ]; then
     cur=$(cd .. && cd .. && git rev-parse HEAD:src/forward.c 2>/dev/null) || cur=
     if [ -z "$cur" ]; then

@@ -22,8 +22,18 @@ shifted `forward.c` and moved 6,240 ops/token out of the NOSITE rows
 into SIGMOID. `compare.sh` now refuses when `src/forward.c` is not the
 blob the map was built against, warns when it cannot tell, and takes
 `CENSUS_AUDIT_SKIP_BLOBCHECK=1` for the regenerate-then-rerun case. The
-recorded blob is `f81eb6db` (`0283fa0`'s); **the map is stale for
+recorded blob is `b143c6c5` (`e65f181`'s); **the map is stale for
 anything later and needs regenerating, not shifting by hand.**
+Regenerate it by matching each mapped line's source TEXT into the new
+file, not by shifting the numbers: 34 of the 36 land on a unique line
+and the two that do not (`s->qn[i] *= scale`, the residual add) are
+placed by which of their two occurrences the old map named.
+
+**`slotmap.tsv` and `rawcounters.diff` are still `0283fa0`'s** and were
+not regenerated with the map. Whoever needs the full 26-slot override
+table again has to redo them. The conversion measurement below did not:
+only two of its lines are UNEQUAL and both were resolved by the
+leaf-total constraint (below).
 
 ## Method
 
@@ -119,6 +129,50 @@ Three mechanisms account for nearly all of the gap:
 - `forward.c`'s own element-wise loops have no site at all: the MoE
   SwiGLU multiply and expert combine, the two residual adds, the
   q-scale loop, the attention output gate, RoPE, `lz_t_row_f32`.
+
+## Conversion-ranked view (`cvtroll.awk`)
+
+`cvtroll.awk` is the same collection filtered to int<->float converts,
+which is the ranking that matters when the target has no FPU: a convert
+is the boundary, and removing one is what lets a chain stay integer.
+Same attribution as `rollup.awk` (validated: its `f32` column reproduces
+`rollup.awk`'s on all 18 sites that carry work, exactly).
+
+    awk -v tokens=603 -v sitemap=sitemap.tsv -v linemap=linemap.tsv \
+        -v rawfix=<f> -v magic=magic.tsv -f cvtroll.awk measured.tsv
+
+kmr20, zh fixture, shipping default, `e65f181`. 514,226 hardware
+converts/token against 263,928 billed - the census sees 51.3%. Adding
+the conversions performed with no cvt instruction (`magic.tsv`:
+`q8_round`'s magic add, `lz_exp`'s floor) takes the true count to
+664,183 and the census's share to 39.7%.
+
+Three things the instruction count gets right that a formula cannot:
+
+- `lz_i32f` measures 2.000 converts per call, so its 130,154/token show
+  up whether or not the caller's formula says `cvt`.
+- **int<->double is not counted, and that is not an assumption.** Every
+  executed `cvtsi2sd`/`cvttsd2si` in the run was checked: all of them
+  are `LZ_FCX` counter arguments, which exist only in the counting
+  build, or one-time table setup.
+- `q8_round` emits no cvt instruction at all. It is 138,884 float->int
+  conversions per token that an instruction count scores 0, which is
+  why `magic.tsv` declares them instead.
+
+The two UNEQUAL lines that carry conversions were resolved without the
+raw-counter build, by the constraint that the parts sum to the leaf's
+own unambiguous instruction count:
+
+- `ops_gdn.c:336` (`lz_attn_wsum_q8` -> `lz_i32f`): `lz_i32f`'s own
+  78,482,944 converts / 2 minus the 37,820,160 unambiguous calls leaves
+  1,421,312, i.e. 2,357.07/token - the number the census bills there.
+- `ops_gdn.c:1196/1197` (`p2_group_norm` -> `q8_round`): 83,746,958
+  minus 68,943,764 leaves 14,803,194. Only the sum is measured; both
+  lines are RECUR and `q8_round` emits no cvt, so the split is inert.
+
+Everything else is bracketed by running `basis=hi` and `basis=lo`:
+512,743..514,226, 0.29%. The `f32` denominators are looser (2.3%
+overall, 11% on EPI) because they include lines the conversions do not.
 
 ## Not covered
 

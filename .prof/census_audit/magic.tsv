@@ -1,0 +1,15 @@
+# Conversions this tree performs with no cvt instruction, for
+# cvtroll.awk -v magic=. A magic-number add rounds a float to an
+# integer and the integer is read out of the mantissa, so an
+# instruction count scores the conversion 0 while a machine with no FPU
+# pays a full soft-float add for it (q8_round's own header: 48 ARM
+# instructions).
+#
+#   LEAF<TAB>function<TAB>converts per call
+#   LINE<TAB>file<TAB>line<TAB>converts per execution
+#
+# Found by grepping the magic constant 12582912.0f (1.5*2^23): three
+# sites, one of them q8_round itself.
+LEAF	q8_round	1
+LINE	ops_quant.c	333	1
+LINE	ops_quant.c	448	1
