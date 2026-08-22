@@ -34,6 +34,21 @@
 #                the expected values that catches table typos the
 #                differ-from-default check cannot.
 #
+# WHAT THIS GATE DOES NOT DO, and a PASS must not be read as: it never
+# LINKS and never RUNS. Every check above is per translation unit, so a
+# switch whose non-default value leaves a definition missing behind its
+# own guard compiles clean here and fails only when someone links - and
+# for a control switch, nobody does. Measured: of the switches below,
+# exactly two (LZ_GDN_FIXED=0, LZ_NORM_FIXED=0) have a standing gate that
+# builds a binary and runs it, in recur_write_float_arm_gate.sh. The rest
+# were run once, by hand, on the day they were written.
+#
+# build/int_pipeline_arm_gate.sh closes that for the int-pipeline family
+# (links and runs each =0 arm) and FAILS if a switch is added to SWITCHES
+# below without being added there - so the two tables cannot drift apart
+# silently the way this gate and fixed_tier_xcompiler_gate did over
+# --norm-write int.
+#
 # The switches and their non-default values (reconciled against the
 # #ifndef sites in src/ops.h / src/ops.c / src/ops_kernel_shared.h):
 #

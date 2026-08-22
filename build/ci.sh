@@ -34,6 +34,11 @@
 #      other stage above runs on a little-endian machine, so a loader
 #      that assumes little-endian byte order passes all nine of them;
 #      this is the only one that can tell portable from untested
+#  13. build/int_pipeline_arm_gate.sh - stage 5 compiles every control
+#      switch's non-default value but never links or runs one, so a
+#      definition missing behind a guard is invisible there. This links
+#      and runs each int-pipeline =0 arm, and fails if stage 5 gains a
+#      switch it does not list
 #
 # Judging discipline (this repo has paid for getting this wrong before):
 #   - Never grep bare 'error' - "0 errors" contains the substring.
@@ -76,7 +81,7 @@ freshness_sentinel() {
 # ---------------------------------------------------------------------
 # Stage 1: make native (gcc)
 # ---------------------------------------------------------------------
-echo "==== [1/12] make native ===="
+echo "==== [1/13]make native ===="
 NATIVE_EXE="$ROOT/llama98.exe"
 [ -e "$NATIVE_EXE" ] || NATIVE_EXE="$ROOT/llama98"
 LOG=build/ci-native.log
@@ -115,7 +120,7 @@ rm -f "$SENTINEL"
 # Stage 2: make watcom-cli (Open Watcom, the target compiler)
 # ---------------------------------------------------------------------
 echo
-echo "==== [2/12] make watcom-cli ===="
+echo "==== [2/13]make watcom-cli ===="
 WATCOM_EXE="$ROOT/llama98-w.exe"
 WATCOM_OBJDIR="$ROOT/build/watcom/cli"
 LOG=build/ci-watcom-cli.log
@@ -167,7 +172,7 @@ rm -f "$SENTINEL"
 # Stage 3: llama98 <dir> --check on a curated set of KunMoe checkpoints
 # ---------------------------------------------------------------------
 echo
-echo "==== [3/12] model --check sweep ===="
+echo "==== [3/13]model --check sweep ===="
 MODELS_ROOT=${MODELS_ROOT:-/e/LLM/models}
 # Curated, not a blind sweep of every directory under MODELS_ROOT:
 # a usable sweep is a handful of representative checkpoints, and
@@ -214,7 +219,7 @@ fi
 # Stage 4: x86 <-> ARMv5TE parity gate
 # ---------------------------------------------------------------------
 echo
-echo "==== [4/12] ARM parity gate ===="
+echo "==== [4/13]ARM parity gate ===="
 ARM_MODEL="$MODELS_ROOT/kunkun98-pilot-20260806"
 LOG=build/ci-arm.log
 if [ "$native_ok" -ne 1 ]; then
@@ -249,7 +254,7 @@ fi
 # Stage 5: control-switch matrix (every non-default value, gcc + Watcom)
 # ---------------------------------------------------------------------
 echo
-echo "==== [5/12] control-switch matrix ===="
+echo "==== [5/13]control-switch matrix ===="
 LOG=build/ci-switch-matrix.log
 build/switch_matrix_gate.sh >"$LOG" 2>&1
 MATRIX_RC=$?
@@ -277,7 +282,7 @@ esac
 # Stage 6: every fixed-point write tier's gcc<->Watcom bit-identity
 # ---------------------------------------------------------------------
 echo
-echo "==== [6/12] fixed-tier cross-compiler gate ===="
+echo "==== [6/13]fixed-tier cross-compiler gate ===="
 LOG=build/ci-fixed-tier-xcompiler.log
 build/fixed_tier_xcompiler_gate.sh >"$LOG" 2>&1
 NIX_RC=$?
@@ -309,7 +314,7 @@ esac
 # compile-time-off in the same compiler, where it is not.
 # ---------------------------------------------------------------------
 echo
-echo "==== [7/12] recurrence float-arm gate ===="
+echo "==== [7/13]recurrence float-arm gate ===="
 LOG=build/ci-recur-write-float-arm.log
 build/recur_write_float_arm_gate.sh >"$LOG" 2>&1
 NIX_RC=$?
@@ -339,7 +344,7 @@ esac
 # separate delivery decision); none of the three is in ci.sh's stage 2.
 # ---------------------------------------------------------------------
 echo
-echo "==== [8/12] watcom gui/dll/dos targets ===="
+echo "==== [8/13]watcom gui/dll/dos targets ===="
 for t in watcom-gui watcom-dll watcom-dos; do
     case $t in
         watcom-gui) EXE="$ROOT/kunkun98-w.exe" ;;
@@ -376,7 +381,7 @@ done
 # as its only float unit. SKIP when WSL is not usable, never PASS.
 # ---------------------------------------------------------------------
 echo
-echo "==== [9/12] 32-bit x87 gcc build (WSL) ===="
+echo "==== [9/13]32-bit x87 gcc build (WSL) ===="
 LOG=build/ci-x87.log
 if ! command -v wsl >/dev/null 2>&1; then
     echo "SKIP: 32-bit x87 build (wsl not installed)"
@@ -420,7 +425,7 @@ fi
 # MIPS cross toolchain is absent, never PASS.
 # ---------------------------------------------------------------------
 echo
-echo "==== [10/12] big-endian parity gate (WSL) ===="
+echo "==== [10/13]big-endian parity gate (WSL) ===="
 LOG=build/ci-endian.log
 if ! command -v wsl >/dev/null 2>&1; then
     echo "SKIP: big-endian parity gate (wsl not installed)"
@@ -464,7 +469,7 @@ fi
 # them the two easiest knobs to break silently.
 # ---------------------------------------------------------------------
 echo
-echo "==== [11/12] performance-knob invariance ===="
+echo "==== [11/13]performance-knob invariance ===="
 LOG=build/ci-perf-knob.log
 build/perf_knob_gate.sh "$ARM_MODEL" >"$LOG" 2>&1
 PK_RC=$?
@@ -495,7 +500,7 @@ esac
 # error, so the rotated run must land closer to the --kv f32 reference.
 # ---------------------------------------------------------------------
 echo
-echo "==== [12/12] --kv-rot quality gate ===="
+echo "==== [12/13]--kv-rot quality gate ===="
 LOG=build/ci-kv-rot.log
 build/kv_rot_gate.sh "$ARM_MODEL" >"$LOG" 2>&1
 KR_RC=$?
@@ -515,6 +520,40 @@ case $KR_RC in
     *)
         echo "FAIL: --kv-rot quality gate"
         note "FAIL  --kv-rot quality gate"
+        FAIL=$((FAIL + 1))
+        ;;
+esac
+
+# ---------------------------------------------------------------------
+# Stage 13: stage 5 proves every control switch compiles at its
+# non-default value; it never links or runs one. For the int-pipeline
+# family that is the whole risk - each =0 arm keeps a replaced float
+# path alive that nothing else executes, so a definition missing behind
+# the guard compiles clean and shows up only when someone links, and
+# nobody does. Measured before this stage existed: exactly two of the
+# matrix's switches had a standing gate that ran their build.
+# ---------------------------------------------------------------------
+echo
+echo "==== [13/13] int-pipeline control arms ===="
+LOG=build/ci-int-pipeline-arms.log
+build/int_pipeline_arm_gate.sh >"$LOG" 2>&1
+IPA_RC=$?
+cat "$LOG"
+case $IPA_RC in
+    0)
+        echo "PASS: int-pipeline control arms"
+        note "PASS  int-pipeline control arms"
+        PASS=$((PASS + 1))
+        ;;
+    2)
+        REASON=$(grep -m1 '^int_pipeline_arm_gate: SKIP' "$LOG")
+        echo "SKIP: int-pipeline control arms ($REASON)"
+        note "SKIP  int-pipeline control arms ($REASON)"
+        SKIP=$((SKIP + 1))
+        ;;
+    *)
+        echo "FAIL: int-pipeline control arms"
+        note "FAIL  int-pipeline control arms"
         FAIL=$((FAIL + 1))
         ;;
 esac
