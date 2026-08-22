@@ -161,6 +161,78 @@ have_ss_gated_int:
 }
 
 #if LZ_NORM_FIXED
+/* ---- the (1+w) Q15 table, cached per norm weight ---------------------
+
+   THE TWO LIBRARY CALLS IN THE OUTPUT LOOP DO NOT DEPEND ON THE TOKEN.
+   `wp[i] = 1.0f + w[i]` and `q8_round(wp[i] * sw)` read only w - the
+   norm weight tensor, which is the same object on every call for the
+   life of the model. Measured on the ARM cross build, that pair is
+   ~130 of the ~147 instructions per element this path spends: one
+   __aeabi_fadd (48) in its own loop, one __aeabi_fmul (28) plus one
+   q8_round (48) in the main one, plus the two clamps. Hoisting them
+   into a table built once leaves the int64 chain and the loads.
+
+   Keyed on the POINTER, which is sound for exactly one reason worth
+   stating: lz_t_f32 returns t->f unchanged for an F32 tensor, and norm
+   weights are non-2D so the exporter never quantizes them. The pointer
+   is therefore the tensor's own storage and is stable. If that ever
+   stops being true the key stops matching, the table is rebuilt every
+   call, and the numbers stay right - the failure mode is slow, not
+   wrong.
+
+   Static, single-threaded, like the qx/wp scratch above it. The pool is
+   a bump allocator with no eviction: a model has a fixed set of norm
+   weights, so it either fits or it does not, and a cache that thrashed
+   would be worse than the miss path. On a full pool build_qw returns
+   NULL and the caller computes inline exactly as before - that path is
+   not dead code, it is what any model past the bound runs. */
+#ifndef LZ_QW_POOL
+#define LZ_QW_POOL 32768        /* int16 entries; CE uses 36 x 512 */
+#endif /* LZ_QW_POOL */
+#ifndef LZ_QW_SLOTS
+#define LZ_QW_SLOTS 64
+#endif /* LZ_QW_SLOTS */
+
+static short qw_pool[LZ_QW_POOL];
+static int qw_used = 0;
+static struct { const float *w; int n; int ew; short *q; }
+qw_slot[LZ_QW_SLOTS];
+static int qw_slots = 0;
+
+/* The table for w[0..n), or NULL if it will not fit. *ew_out receives
+   the shared exponent. The build is the SAME arithmetic the inline path
+   ran, in the same order, so a cached run and an uncached one agree bit
+   for bit - that is the property build/norm_qw_gate.sh asserts. */
+static const short *build_qw(const float *w, int n, int *ew_out) {
+    union { float f; uint32_t u; } bit;
+    static float wp[LZ_NORM_MAX_N];
+    float sw;
+    short *q;
+    int ew, i;
+    for (i = 0; i < qw_slots; i++)
+        if (qw_slot[i].w == w && qw_slot[i].n == n) {
+            *ew_out = qw_slot[i].ew;
+            return qw_slot[i].q;
+        }
+    if (qw_slots >= LZ_QW_SLOTS || qw_used + n > LZ_QW_POOL) return NULL;
+    for (i = 0; i < n; i++) wp[i] = 1.0f + w[i];
+    bit.u = q8_amax(wp, n); ew = 14 - expof(bit.f); sw = pow2f(ew);
+    q = qw_pool + qw_used;
+    for (i = 0; i < n; i++) {
+        int v = q8_round(wp[i] * sw);
+        if (v > 32767) v = 32767; else if (v < -32767) v = -32767;
+        q[i] = (short)v;
+    }
+    qw_used += n;
+    qw_slot[qw_slots].w = w;
+    qw_slot[qw_slots].n = n;
+    qw_slot[qw_slots].ew = ew;
+    qw_slot[qw_slots].q = q;
+    qw_slots++;
+    *ew_out = ew;
+    return q;
+}
+
 /* Int output loop for lz_rmsnorm's fixed tier: o[i] = x[i]*inv*(1+w[i])
    as a Q15 int-multiply, mirroring lz_rmsnorm_gated_out_fixed_int's
    shape for a 2-factor (not 4-factor) chain. qx/ex are norm_ss_fixed's
@@ -190,20 +262,36 @@ void lz_rmsnorm_out_fixed_int(int32_t *t, const short *qx, int ex,
                               const float *w, float inv, int n,
                               float *deq) {
     /* static, not stack: same single-threaded-forward-pass assumption
-       norm_ss_fixed's own scratch used to make (see its history). */
+       norm_ss_fixed's own scratch used to make (see its history). Only
+       the cache-miss path still needs it. */
     static float wp[LZ_NORM_MAX_N];
     union { float f; uint32_t u; } bit;
+    const short *qwt;
     float sw;
     int ew, ei;
     int32_t qinv;
     int i;
 
-    for (i = 0; i < n; i++) wp[i] = 1.0f + w[i];
-    bit.u = q8_amax(wp, n); ew = 14 - expof(bit.f); sw = pow2f(ew);
+    /* qinv is per CALL - inv is this row's rsqrt - so it stays here. It
+       is one scalar; the per-ELEMENT work is what the table removes. */
     bit.u = q8_amax(&inv, 1); ei = 14 - expof(bit.f);
     qinv = q8_round(inv * pow2f(ei));
     if (qinv > 32767) qinv = 32767;
     if (qinv < -32767) qinv = -32767;
+
+    qwt = build_qw(w, n, &ew);
+    if (qwt) {
+        for (i = 0; i < n; i++) {
+            int64_t t64 = (int64_t)qx[i] * qwt[i];  /* x*(1+w), unshifted */
+            t64 = (t64 * qinv) >> 15;               /* x*(1+w)*inv */
+            t[i] = (int32_t)t64;
+        }
+        *deq = pow2f(15 - ex - ew - ei);
+        return;
+    }
+    /* Pool exhausted. Same numbers, computed per call - see build_qw. */
+    for (i = 0; i < n; i++) wp[i] = 1.0f + w[i];
+    bit.u = q8_amax(wp, n); ew = 14 - expof(bit.f); sw = pow2f(ew);
     for (i = 0; i < n; i++) {
         int qw = q8_round(wp[i] * sw);
         int64_t t64;
