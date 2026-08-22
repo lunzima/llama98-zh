@@ -492,7 +492,36 @@ void lz_softmax(float *x, int n) {
             i = 1 + (n4 << 2);
         }
     }
-    for (; i < n; i++) if (x[i] > mx) mx = x[i];
+    /* THE MAX SCAN RUNS IN THE INTEGER DOMAIN. On a soft-float target
+       `x[i] > mx` is a bl __aeabi_fcmpgt, ~30 instructions, once per
+       element; the key below is three (lsr, orr, eor) and then a plain
+       unsigned cmp.
+
+       The mapping is the standard IEEE-754 order-preserving one: xor
+       the sign-extended sign bit into every bit and force the top bit,
+       so non-negatives land above 0x80000000 in increasing order and
+       negatives below it in decreasing order. Comparing keys as
+       UNSIGNED then reproduces `>` exactly - it is a permutation of the
+       same total order, not an approximation, so this owes the float
+       loop bit-identity and delivers it.
+
+       NaN is the one input where it does not: float `>` is false for
+       NaN so the old loop never selected one, while NaN's key is the
+       largest and this loop would. Same disposition ops.c's SSE2 q8
+       round takes - NaN reaching attention scoring means the upstream
+       is already destroyed, and no slow path is kept for it. */
+    {
+        union { float f; uint32_t u; } b;
+        uint32_t best;
+        b.f = mx;
+        best = b.u ^ (((uint32_t)((int32_t)b.u >> 31)) | 0x80000000u);
+        for (; i < n; i++) {
+            uint32_t k;
+            b.f = x[i];
+            k = b.u ^ (((uint32_t)((int32_t)b.u >> 31)) | 0x80000000u);
+            if (k > best) { best = k; mx = x[i]; }
+        }
+    }
     for (i = 0; i < n; i++) {
         x[i] = lz_exp(x[i] - mx);
         sum += x[i];
