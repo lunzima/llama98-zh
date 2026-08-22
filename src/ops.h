@@ -407,7 +407,7 @@ int lz_gdn_p2_mode(void);
 /* Was the tier chosen by AUTO rather than asked for? The banner says so,
    because "fixed" that a machine picked and "fixed" that a flag forced
    are different facts and only one of them travels to another machine. */
-int lz_gdn_p2_is_auto(void);
+int lz_gdn_p2_is_default(void);
 /* Which of the fixed pass-2 bodies is selected: "ref", "mmx-intrin",
    "mmx-asm", or "-" when the float tier is running. The same join
    lz_kernel_tier() reports, and it exists for the same reason: the
@@ -447,7 +447,7 @@ const char *lz_gdn_p2_impl(void);
    (.prof/wconv.c), so switching tiers needs a tolerance gate, not cmp. */
 const char *lz_conv_select(const char *name);
 int lz_conv_mode(void);
-int lz_conv_is_auto(void);
+int lz_conv_is_default(void);
 
 /* Fixed-tier helpers, exposed because forward.c builds the quantized
    weight and history buffers with them. See their definitions for why
@@ -569,7 +569,7 @@ int lz_pair_is_auto(void);
 
 const char *lz_sig_select(const char *name);
 int lz_sig_mode(void);
-int lz_sig_is_auto(void);
+int lz_sig_is_default(void);
 
 /* Fixed norms tier, compiled in or out. Its own axis: the recurrence's
    LZ_GDN_FIXED says nothing about the norms and this says nothing about
@@ -624,7 +624,7 @@ int lz_sig_is_auto(void);
    multiply-add leaves the float domain; the reciprocal square root and
    the output scale stay float. */
 int lz_norm_mode(void);
-int lz_norm_is_auto(void);
+int lz_norm_is_default(void);
 const char *lz_norm_select(const char *name);
 /* Whether lz_rmsnorm_gated will take the fixed tier for an n-element
    norm: false in a LZ_NORM_FIXED=0 build, where the fixed body is
@@ -741,7 +741,7 @@ const char *lz_hadamard_select(const char *name);
    still the only writer; nothing outside ops_sched.c may assign it. */
 extern int lz_scalar_g;
 #define lz_scalar_mode() ((lz_scalar_g < 0) ? 1 : lz_scalar_g)
-int lz_scalar_is_auto(void);
+int lz_scalar_is_default(void);
 const char *lz_scalar_select(const char *name);
 
 /* Dequant epilogue tier: "float" | "fixed" | "auto".
@@ -766,7 +766,7 @@ const char *lz_scalar_select(const char *name);
    AUTO asks the same CPUID SSE question the conv and pass-2 tiers ask. */
 const char *lz_epi_select(const char *name);
 int lz_epi_mode(void);
-int lz_epi_is_auto(void);
+int lz_epi_is_default(void);
 
 /* Build a tensor's int16 scale plane. Idempotent, and a no-op when the
    shape is outside the derived bound - callers do not have to know the
@@ -1288,7 +1288,7 @@ void lz_kv4_quantize(const float *x, int n, unsigned char *out, float *scale);
    NOT numerics-neutral, so switching tiers needs a tolerance gate. */
 const char *lz_attn_select(const char *name);
 int lz_attn_mode(void);
-int lz_attn_is_auto(void);
+int lz_attn_is_default(void);
 
 /* Whether the fixed attention weighted sum keeps its int accumulator
    for lz_quantize_q8_int64 instead of dequantizing to float and

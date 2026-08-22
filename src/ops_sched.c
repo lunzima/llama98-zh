@@ -183,7 +183,7 @@ int lz_gdn_p2_mode(void) {
    arithmetic for the larger of the two passes. */
 int lz_gdn_mode(void) { return lz_gdn_p2_mode(); }
 
-int lz_gdn_p2_is_auto(void) { return g_gdn_p2 == LZ_P2_AUTO; }
+int lz_gdn_p2_is_default(void) { return g_gdn_p2 == LZ_P2_AUTO; }
 
 const char *lz_gdn_p2_select(const char *name) {
     if (!name) return NULL;
@@ -215,7 +215,7 @@ int lz_conv_mode(void) {
 #endif /* LZ_CONV_FIXED */
 }
 
-int lz_conv_is_auto(void) { return g_conv == LZ_CONV_AUTO; }
+int lz_conv_is_default(void) { return g_conv == LZ_CONV_AUTO; }
 
 const char *lz_conv_select(const char *name) {
     if (!name) return NULL;
@@ -241,7 +241,7 @@ int lz_attn_mode(void) {
     return m & LZ_ATTN_FIXED;
 }
 
-int lz_attn_is_auto(void) { return g_attn < 0; }
+int lz_attn_is_default(void) { return g_attn < 0; }
 
 int lz_attn_int(void) { return g_attn == LZ_ATTN_TIER_INT; }
 
@@ -270,7 +270,7 @@ int lz_sig_mode(void) {
     return (g_sig < 0) ? 1 : g_sig;
 }
 
-int lz_sig_is_auto(void) { return g_sig < 0; }
+int lz_sig_is_default(void) { return g_sig < 0; }
 
 const char *lz_sig_select(const char *name) {
     if (!name) return NULL;
@@ -297,7 +297,7 @@ const char *lz_sig_select(const char *name) {
 int lz_scalar_g = -1;
 #define g_scalar lz_scalar_g
 
-int lz_scalar_is_auto(void) { return g_scalar < 0; }
+int lz_scalar_is_default(void) { return g_scalar < 0; }
 
 const char *lz_scalar_select(const char *name) {
     if (!name) return NULL;
@@ -335,7 +335,7 @@ int lz_norm_mode(void) {
     return (g_norm < 0) ? 1 : (g_norm != LZ_NORM_FLOAT);
 }
 
-int lz_norm_is_auto(void) { return g_norm < 0; }
+int lz_norm_is_default(void) { return g_norm < 0; }
 
 /* Kept as the one place that says "the fixed tier writes int", now
    answered by the tier itself. Not folded into its call sites: they
@@ -443,7 +443,7 @@ int lz_epi_mode(void) {
     return (g_epi < 0) ? 1 : g_epi;
 }
 
-int lz_epi_is_auto(void) { return g_epi < 0; }
+int lz_epi_is_default(void) { return g_epi < 0; }
 
 const char *lz_epi_select(const char *name) {
     if (!name) return NULL;
@@ -625,27 +625,27 @@ const char *lz_tier_report(void) {
     int p = 0;
     p += sprintf(buf + p, "  recurrence   %s%s\n",
                  lz_gdn_p2_mode() ? "fixed" : "float",
-                 lz_gdn_p2_is_auto() ? " (default)" : "");
+                 lz_gdn_p2_is_default() ? " (default)" : "");
     p += sprintf(buf + p, "  conv1d       %s%s\n",
                  lz_conv_mode() ? "fixed" : "float",
-                 lz_conv_is_auto() ? " (default)" : "");
+                 lz_conv_is_default() ? " (default)" : "");
     p += sprintf(buf + p, "  attention    %s%s\n",
                  lz_attn_mode() == 3 ? "fixed" :
                  lz_attn_mode() == 1 ? "scoring" :
                  lz_attn_mode() == 2 ? "wsum" : "float",
-                 lz_attn_is_auto() ? " (default)" : "");
+                 lz_attn_is_default() ? " (default)" : "");
     p += sprintf(buf + p, "  epilogue     %s%s\n",
                  lz_epi_mode() ? "fixed" : "float",
-                 lz_epi_is_auto() ? " (default)" : "");
+                 lz_epi_is_default() ? " (default)" : "");
     p += sprintf(buf + p, "  sigmoid/silu %s%s\n",
                  lz_sig_mode() ? "fixed" : "float",
-                 lz_sig_is_auto() ? " (default)" : "");
+                 lz_sig_is_default() ? " (default)" : "");
     p += sprintf(buf + p, "  norms        %s%s\n",
                  lz_norm_mode() ? "fixed" : "float",
-                 lz_norm_is_auto() ? " (default)" : "");
+                 lz_norm_is_default() ? " (default)" : "");
     p += sprintf(buf + p, "  scalar       %s%s\n",
                  lz_scalar_mode() ? "fixed" : "float",
-                 lz_scalar_is_auto() ? " (default)" : "");
+                 lz_scalar_is_default() ? " (default)" : "");
     p += sprintf(buf + p, "  pairing      %s%s\n",
                  lz_pair_mode() ? "on" : "off",
                  lz_pair_is_auto() ? " (auto = on; no hardware question)"

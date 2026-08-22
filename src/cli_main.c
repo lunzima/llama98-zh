@@ -1570,7 +1570,7 @@ int main(int argc, char **argv) {
     }
     /* Applied after the loop so command-line order does not decide the
        result: a per-tier flag wins whether it came before or after
-       --fixed. lz_*_is_auto() is the record of "nobody set this", which
+       --fixed. lz_*_is_default() is the record of "nobody set this", which
        is exactly the question here. */
     if (group_fixed) {
         const char *t = (strcmp(group_fixed, "all") == 0) ? "fixed"
@@ -1595,13 +1595,13 @@ int main(int argc, char **argv) {
             int (*is_auto)(void);
             const char *(*select)(const char *);
         } axes[] = {
-            { lz_gdn_p2_is_auto, lz_gdn_p2_select },
-            { lz_conv_is_auto,   lz_conv_select },
-            { lz_attn_is_auto,   lz_attn_select },
-            { lz_epi_is_auto,    lz_epi_select },
-            { lz_sig_is_auto,    lz_sig_select },
-            { lz_norm_is_auto,   lz_norm_select },
-            { lz_scalar_is_auto, lz_scalar_select },
+            { lz_gdn_p2_is_default, lz_gdn_p2_select },
+            { lz_conv_is_default,   lz_conv_select },
+            { lz_attn_is_default,   lz_attn_select },
+            { lz_epi_is_default,    lz_epi_select },
+            { lz_sig_is_default,    lz_sig_select },
+            { lz_norm_is_default,   lz_norm_select },
+            { lz_scalar_is_default, lz_scalar_select },
         };
         int skipped = 0;
         int gi;
