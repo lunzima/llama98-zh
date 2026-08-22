@@ -100,6 +100,9 @@ extern long long lz_debug_attn_skip;
 /* The V projection int16 exit's positive control, forward.c. Elements
    the KV write took from vtmp_i16 rather than from the float row. */
 extern long long lz_debug_vproj_i16;
+/* The int16 quantizer's integer element loop, ops.c. Elements rounded
+   without leaving the integer domain; 0 under -DLZ_Q8I16_INT=0. */
+extern long long lz_debug_q8i16_int;
 extern int lz_kv_kfmt;
 extern int lz_kv_vfmt;
 extern int lz_attn_sink;
@@ -254,11 +257,12 @@ static void usage(void) {
     "                   skips the float re-quantize.\n"
     "  --sig-write TIER    auto|float|fixed (default auto = fixed). sigmoid\n"
     "                   and SiLU from a Q15 table (NOT the KDA decay).\n"
-    "  --norm-write TIER   auto|float|fixed|int (default auto = fixed).\n"
-    "                   RMS/L2 norm sum-of-squares in int64 fixed point. int\n"
-    "                   adds the gated norm writing its Q15 result as int for\n"
-    "                   lz_quantize_q8_int instead of dequantizing to float\n"
-    "                   and re-quantizing (bit-identical); it implies fixed.\n"
+    "  --norm-write TIER   auto|float|fixed (default auto = fixed). RMS/L2\n"
+    "                   norm sum-of-squares in int64 fixed point, and the\n"
+    "                   output loop writing its Q15 result as int rather than\n"
+    "                   dequantizing for the consumer to requantize. Those\n"
+    "                   used to be separate (`int` was a third value); they\n"
+    "                   are one tier now - see lz_norm_select.\n"
     "  --subn-scale MODE   tok|group (default tok). Width of one INT8\n"
     "                   activation scale on the SubLN o_proj/down_proj input.\n"
     "                   tok is BitNet v2's per-token absmax; group keeps the\n"
@@ -1852,6 +1856,7 @@ int main(int argc, char **argv) {
            float rows are bit-comparable, so an output comparison can
            never tell "the exit ran" from "the exit was refused". */
         printf("v_proj int16   %lld elements\n", lz_debug_vproj_i16);
+        printf("q8_i16 int     %lld elements\n", lz_debug_q8i16_int);
         /* The f32 census, in a build that can answer it (-DLZ_F32COUNT=1).
            Printed here rather than behind a flag: a counting build exists
            only to produce this, and a number that needs asking for is a

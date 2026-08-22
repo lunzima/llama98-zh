@@ -314,38 +314,47 @@ const char *lz_scalar_select(const char *name) {
 
 /* ---- norm tier ------------------------------------------------------- */
 
-/* ONE ordered axis, not a tier plus an independent boolean: the int
-   output only exists on top of the fixed tier, so "int" is its third
-   value. As two flags the pair (float, int) was representable and
-   silently did nothing - a combination that cannot be spelled cannot be
-   mis-set. */
+/* TWO values, not three. `int` used to be the third, meaning "the fixed
+   tier writes its Q15 result as int instead of dequantizing it and
+   letting the consumer requantize". It is gone as a SELECTABLE value
+   because there is nothing left to select between: on the gated norms
+   the two spellings are bit-identical (the dequantize/requantize pair
+   cancels - proof at lz_quantize_q8_int), and on the plain norm the int
+   form is ~9.5x cheaper per element on the target and is the same
+   float-to-fixed call the user already settled for every other write
+   tier. A knob whose one setting is never worth choosing is a knob that
+   only records history.
+
+   Float is not gone - `--norm-write float` still reaches the float
+   output loop, and that arm is the oracle, not an auto outcome. Same
+   shape as this file's lz_soft_float_target retirement note above. */
 /* FIXEDT, not FIXED: LZ_NORM_FIXED is the compile switch in ops.h that
    decides whether the fixed bodies exist at all. Same collision
    LZ_CONV_FIXEDT dodges above. */
 #define LZ_NORM_FLOAT  0
 #define LZ_NORM_FIXEDT 1
-#define LZ_NORM_INT    2
 
 static int g_norm = -1;
 
 int lz_norm_mode(void) {
-    /* int implies fixed - every caller asking "is this tier fixed" must
-       see yes, so the int value folds down here rather than at each site. */
     return (g_norm < 0) ? 1 : (g_norm != LZ_NORM_FLOAT);
 }
 
 int lz_norm_is_auto(void) { return g_norm < 0; }
 
-int lz_norm_int(void) { return g_norm == LZ_NORM_INT; }
+/* Kept as the one place that says "the fixed tier writes int", now
+   answered by the tier itself. Not folded into its call sites: they
+   read `lz_norm_int() && lz_norm_can_fixed(n) && ...`, and the name is
+   what tells a reader WHICH of the two fixed output loops the branch
+   selects - lz_norm_can_fixed alone would not. */
+int lz_norm_int(void) { return lz_norm_mode(); }
 
 const char *lz_norm_select(const char *name) {
     if (!name) return NULL;
     if (strcmp(name, "float") == 0) g_norm = LZ_NORM_FLOAT;
     else if (strcmp(name, "fixed") == 0) g_norm = LZ_NORM_FIXEDT;
-    else if (strcmp(name, "int") == 0) g_norm = LZ_NORM_INT;
     else if (strcmp(name, "auto") == 0) g_norm = -1;
     else return NULL;
-    if (lz_norm_int()) return "int";
     return lz_norm_mode() ? "fixed" : "float";
 }
 

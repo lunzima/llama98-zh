@@ -586,9 +586,14 @@ int lz_norm_can_fixed(int n);
 
 /* Whether a norm's fixed tier writes its Q15 result as int (consumed by
    lz_quantize_q8_int) instead of dequantizing to float and
-   re-quantizing. Selected as `--norm-write int` - the third value on
-   that tier's axis, not a separate flag, because it only exists on top
-   of the fixed tier.
+   re-quantizing.
+
+   NO LONGER SELECTABLE. It was `--norm-write int`, a third value on
+   that tier's axis; it now answers yes whenever the fixed tier is on,
+   and the value is gone from the selector. Nothing was left to choose
+   between - see lz_norm_select in ops_sched.c for the two halves of
+   that argument, and read the rest of this comment for the half that
+   was a defect rather than a preference.
 
    BIT-IDENTICAL FOR THE GATED NORM. NOT FOR THE PLAIN ONE. The identity
    is a CANCELLATION, not a property of int arithmetic: it needs the
@@ -625,9 +630,14 @@ int lz_norm_can_fixed(int n);
    s1v3 reaches no int site at all. Of what is on disk, kunkun-ce is the
    only model that exercises this value.
 
-   Nothing shipped is wrong for one reason: `auto` resolves to fixed,
-   never to int (ops_sched.c). That is also why this sat here - the
-   value is reachable, documented, and untested. */
+   Until 2026-08-22 nothing shipped was wrong for one reason only:
+   `auto` resolved to fixed and never to int, so the divergence sat here
+   reachable, documented and untested. THAT IS NO LONGER THE POSITION -
+   the int form is now what the fixed tier does, so the six plain-norm
+   sites ship it, and the ~7% is a deliberate float-to-fixed step of the
+   kind already taken for every other write tier. It buys 114 -> 12
+   instructions per element on the target (measured, ops_norm.c) with
+   the (1+w) table cached; `--norm-write float` remains the oracle. */
 int lz_norm_int(void);
 
 /* SubLN activation scale granularity: "tok" | "group" (default tok).
@@ -799,19 +809,18 @@ void lz_quantize_q8_int(const int32_t *t, int n, int gs, float deq,
 
 /* int16-input twin of lz_quantize_q8_int, for a producer whose int16
    exit (epi_align_i16) already delivered the vector at a fixed
-   exponent. Same deq fold, same MIN_SCALE floor, and BIT-IDENTICAL to
-   widening t into an int32 buffer and calling lz_quantize_q8_int.
+   exponent. Same deq fold, same MIN_SCALE floor, same stored scale.
 
-   It exists for what the census cannot see. lz_quantize_q8_int's
-   element loop must route its convert through lz_i32f, whose
-   split-and-add is FOUR float operations billed as one - the price of
-   forcing a float32 rounding that neither gcc/SSE nor Watcom/x87 can
-   fuse away, and unavoidable there because a Q15 int32 passes 2^24.
-   An int16 cannot: (float)t is exact, so both toolchains multiply the
-   same operand and round once, and a plain cast is safe here for the
-   same reason lz_i32f is needed there. Widening to int32 and reusing
-   the int32 entry would therefore have cost three unbilled float ops
-   per element for no numerical difference at all. */
+   It exists because at int16 width the element loop needs no float at
+   all: 127*t/tam is rounded exactly in int32 by a per-group reciprocal
+   and a multiply-shift (LZ_Q8I16_INT, src/ops.c). The int32 entry cannot
+   do that - its input passes 2^24, so 254*t already overflows int32 -
+   and has to route its convert through lz_i32f instead, four float
+   operations billed as one. So the two entries are no longer
+   bit-identical on the same values: this one rounds exactly and that one
+   rounds a float32 multiply. Cross-compiler bit-identity comes for free
+   here, there being no float rounding left for gcc/SSE and Watcom/x87 to
+   resolve differently. */
 void lz_quantize_q8_i16(const short *t, int n, int gs, float deq,
                         int8_t *q, float *s);
 
