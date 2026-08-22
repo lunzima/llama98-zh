@@ -2435,6 +2435,30 @@ void lz_causal_conv1d_step(float *o, const float *x,
 }
 
 #if LZ_CONV_FIXED
+#if defined(LZ_ARM_PRIM_ASM)
+/* Is `v` an exact positive power of two, and if so at what exponent?
+ *
+ * ASKED, NOT ASSUMED. sig_k1/sig_oscale2 are lz_sig_q15_fold's outputs,
+ * which are a pow2f scaled by 2^4 and by 2^-15, so both ARE powers of
+ * two today - but that is a fact about a caller in another file, and the
+ * exponent-field arithmetic it licenses is silently wrong for anything
+ * else. Six integer instructions ask the question at the site that
+ * depends on the answer, and a channel that answers no runs the C.
+ *
+ * `e >= 255` rejects a negative v as well as inf/nan: the sign bit lands
+ * in bit 8 of e, so every negative float reads as e >= 256. */
+static int conv_pow2_exp(float v, int32_t *k) {
+    union { float f; uint32_t u; } b;
+    uint32_t e;
+    b.f = v;
+    if ((b.u & 0x007FFFFFu) != 0u) return 0;
+    e = b.u >> 23;
+    if (e == 0u || e >= 255u) return 0;
+    *k = (int32_t)e - 127;
+    return 1;
+}
+#endif /* LZ_ARM_PRIM_ASM */
+
 /* Fixed tier. The float path above is untouched and stays the control
    arm; this is a separate body, selected by lz_conv_mode().
  *
@@ -2483,6 +2507,12 @@ void lz_causal_conv1d_step_fixed(float *o, const float *x, const short *xi,
                                  int n_ch, int k) {
     int hist = k - 1;
     int c, j;
+#if defined(LZ_ARM_PRIM_ASM)
+    /* Hoisted, not per channel: the tier is fixed for the whole call and
+       a compare inside the loop would bill 6,144 times a token for an
+       answer that cannot change. */
+    int prim = (g_kernel == LZ_KERNEL_ARM_ASM);
+#endif /* LZ_ARM_PRIM_ASM */
     /* Per channel: input multiply (1), lz_i32f (1 cvt), sig_k1 multiply
        + sig_k2 add (the folded entry, 1 mul + 1 add), sigmoid_q15_t's
        own frac-interpolation multiply (1, not itemized here, same
@@ -2512,9 +2542,62 @@ void lz_causal_conv1d_step_fixed(float *o, const float *x, const short *xi,
         for (j = 0; j < hist; j++) acc += (int)wr[j] * (int)si[j];
         acc += (int)wr[hist] * q;
         {
-            float acc_f = lz_i32f(acc);
-            int32_t s15 = sigmoid_q15_t(acc_f * sig_k1[c] + sig_k2);
-            o[c] = (acc_f * sig_oscale2[c]) * (float)s15;
+            int done = 0;
+#if defined(LZ_ARM_PRIM_ASM)
+            /* THE TWO MULTIPLIES ARE EXPONENT ADDS. Both scale the same
+               acc_f by an exact power of two, which is exact in IEEE, so
+               fl(acc_f * 2^k) IS acc_f with k added to its exponent
+               field - the same number the C's __aeabi_fmul arrives at,
+               not an approximation of it. lz_scale2_arm_asm declines
+               every case where the add is not the whole story (a zero or
+               subnormal acc_f, a result that leaves the normal range),
+               and a decline here drops the channel to the C below.
+               (float)s15 is a correctly-rounded int32->float32 either
+               way, so lz_i32f_arm_asm and the cast agree over the whole
+               int32 domain - s15's own [0, 32768] range is not what
+               makes that true and is not relied on.
+
+               AND THE SIGMOID IS ENTERED IN THE X DOMAIN, not the folded
+               t one, which is what deletes the `+ sig_k2` __aeabi_fadd
+               rather than moving it: sigmoid_q15's own assembly tier
+               does that add in the integer domain (lz_sig_q15_arm_asm's
+               "+12" case analysis) while sigmoid_q15_t's cannot, because
+               by the time t arrives the add has already happened. The
+               two entries are the same function here - t is exactly
+               16*fl(x+12) and sigmoid_q15's coordinate IS 16*fl(x+12),
+               scaling by a power of two commuting with rounding - with
+               one fact left over that is about the TABLE and not the
+               algebra: the upper clamps return a literal 32768 and
+               g_sigtab[384] respectively, and those are equal only
+               because sig_build makes them so. .prof/conv_epi_xentry.sh
+               sweeps both halves and requires a mutation of each to go
+               red. `ke - 4` is oscale's exponent, sig_k1 being oscale
+               scaled by LZ_SIG_STEP == 2^4.
+
+               What is left: sigmoid_q15 (which has its own assembly
+               tier) and the final multiply, whose operands are both
+               variable. Two calls where the C tier makes seven, and one
+               soft-float call where it makes five. Measured 253.8 ->
+               229.7 instructions per channel, docs/arm-asm-audit.md E2. */
+            if (prim) {
+                union { float f; uint32_t u; } ab, xb, pb;
+                int32_t ke, oe;
+                if (conv_pow2_exp(sig_k1[c], &ke) &&
+                    conv_pow2_exp(sig_oscale2[c], &oe)) {
+                    ab.f = lz_i32f_arm_asm(acc);
+                    if (lz_scale2_arm_asm(ab.u, ke - 4, &xb.u) &&
+                        lz_scale2_arm_asm(ab.u, oe, &pb.u)) {
+                        o[c] = pb.f * lz_i32f_arm_asm(sigmoid_q15(xb.f));
+                        done = 1;
+                    }
+                }
+            }
+#endif /* LZ_ARM_PRIM_ASM */
+            if (!done) {
+                float acc_f = lz_i32f(acc);
+                int32_t s15 = sigmoid_q15_t(acc_f * sig_k1[c] + sig_k2);
+                o[c] = (acc_f * sig_oscale2[c]) * (float)s15;
+            }
         }
         for (j = 0; j + 1 < hist; j++) so[j] = si[j + 1];
         if (hist > 0) so[hist - 1] = (short)q;
