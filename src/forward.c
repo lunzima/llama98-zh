@@ -2248,6 +2248,31 @@ static int subn_scale_gs(int gs, int n) {
     return gs;
 }
 
+/* The SAME block-diagonal Hadamard, applied to the float row.
+   subn_fwht_quant writes q/s and never touches x, so on the one path
+   where lz_matmul_xq_nt reads x - an F32 weight - the rotation would
+   otherwise not happen at all, and the model would compute W.x while
+   the quantized build of the same config computes W.quant(Hx). Those
+   are different functions, which is what made the unquantized run
+   useless as a reference for the quantized one.
+
+   Float, not the fixed-point twin, because this row IS the reference:
+   lz_fwht takes no constants, so it is bit-identical across
+   wcc386 and gcc, and the orthonormal form matches the training side's
+   _block_hadamard exactly rather than within quantization tolerance.
+   The 1/sqrt(blk) uses lz_rsqrt_float_body, the same call
+   subn_fwht_quant folds into its stored scale, so the two paths differ
+   by the transform's arithmetic and NOT by the normalisation constant.
+
+   In place: the caller has already quantized from this row, and the
+   matmul is the only reader left. */
+static void subn_rot_f32(float *x, int n, int blk) {
+    float inv = lz_rsqrt_float_body((float)blk);
+    int b_i, i;
+    for (b_i = 0; b_i < n; b_i += blk) lz_fwht(x + b_i, blk);
+    for (i = 0; i < n; i++) x[i] *= inv;
+}
+
 /* Kimi Delta Attention: same role as forward_ssm's GatedDeltaNet block,
    generalized to a per-channel decay gate and three independent q/k/v
    projections (KdaAttention). See ops.h's
@@ -2875,13 +2900,20 @@ static void forward_kda(const LZModel *m, LZRunState *s,
             /* SubLN Hadamard: o_proj's block, settled at load time
                (model.c resolve_hadamard). 0 = no Hadamard. */
             {
-                int oblk = c->hadamard_o;
+                int oblk = lz_hadamard_on() ? c->hadamard_o : 0;
                 int qgw = subn_scale_gs(gso, vdim);
                 if (oblk > 1) {
                     for (tk = 0; tk < nt; tk++)
                         subn_fwht_quant(s->ssm_out + (size_t)tk * vdim, vdim,
                                         oblk, qgw, s->xq + (size_t)tk * vdim,
                                         s->xqs + (size_t)tk * nso, s->fwht_scratch);
+                    /* Only when the matmul below will read the float row -
+                       otherwise this is a second transform nobody reads,
+                       on every token, on the target machine. */
+                    if (lz_matmul_xq_reads_float_row(&L->kda_o_proj))
+                        for (tk = 0; tk < nt; tk++)
+                            subn_rot_f32(s->ssm_out + (size_t)tk * vdim,
+                                         vdim, oblk);
                 } else if (qgw > 0) {
                     for (tk = 0; tk < nt; tk++)
                         lz_quantize_q8(s->ssm_out + (size_t)tk * vdim, vdim, qgw,
@@ -3279,7 +3311,7 @@ static void dense_ffn_step(const LZModel *m, LZRunState *s,
            SubLN block Hadamard, whose block is settled at load time
            (model.c resolve_hadamard). 0 = no Hadamard. */
         {
-            int dblk = c->hadamard_down;
+            int dblk = lz_hadamard_on() ? c->hadamard_down : 0;
             /* --norm-write int only applies when dblk<=1: the dblk>1
                branch feeds subn_fwht_quant, which needs the FLOAT row to
                run the Hadamard transform before it quantizes - there is
@@ -3306,6 +3338,13 @@ static void dense_ffn_step(const LZModel *m, LZRunState *s,
                         subn_fwht_quant(s->hb2 + (size_t)tk * idim, idim, dblk,
                                         qgw, s->xq + (size_t)tk * idim,
                                         s->xqs + (size_t)tk * nsd, s->fwht_scratch);
+                    /* See forward_kda's twin: the float row is what an
+                       F32 down_proj reads, and only then is this worth
+                       running. */
+                    if (lz_matmul_xq_reads_float_row(&L->down_proj))
+                        for (tk = 0; tk < nt; tk++)
+                            subn_rot_f32(s->hb2 + (size_t)tk * idim,
+                                         idim, dblk);
                 } else if (qgw > 0) {
                     for (tk = 0; tk < nt; tk++)
                         lz_quantize_q8(s->hb2 + (size_t)tk * idim, idim, qgw,

@@ -1947,6 +1947,17 @@ void lz_matmul_xq(float *o, const float *x, const int8_t *xq,
     lz_matmul_xq_nt(o, x, xq, xqs, w, in_dim, out_dim, 1);
 }
 
+/* Which of lz_matmul_xq_nt's two inputs it will actually read.
+   Exported because a caller that PREPARES those inputs differently -
+   the SubLN Hadamard prepares the quantized row only - has to ask the
+   same question, and two spellings of it drift. That drift already
+   happened once: the rotation reached xq and never the float row, so
+   an unquantized model computed W.x while a quantized one computed
+   W.quant(Hx), silently, from one config. */
+int lz_matmul_xq_reads_float_row(const LZTensor *w) {
+    return !w || w->dtype == LZ_FMT_F32;
+}
+
 void lz_matmul_xq_nt(float *o, const float *x, const int8_t *xq,
                      const float *xqs, const LZTensor *w,
                      int in_dim, int out_dim, int nt) {
@@ -1957,7 +1968,7 @@ void lz_matmul_xq_nt(float *o, const float *x, const int8_t *xq,
        is a bug - clamp, never silently overrun. */
     if (nt < 1) return;
     if (nt > LZ_BATCH_MAX) nt = LZ_BATCH_MAX;
-    if (!w || w->dtype == LZ_FMT_F32) {
+    if (lz_matmul_xq_reads_float_row(w)) {
         for (i = 0; i < nt; i++)
             lz_matmul(o + (size_t)i * out_dim, x + (size_t)i * in_dim,
                       w ? w->f : NULL, in_dim, out_dim);

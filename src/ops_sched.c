@@ -406,6 +406,32 @@ const char *lz_subn_scale_select(const char *name) {
     return lz_subn_scale_group() ? "group" : "tok";
 }
 
+/* ---- SubLN Hadamard on/off ------------------------------------------- */
+
+/* The control arm for the block Hadamard. `off` forces the resolved
+   hadamard_o / hadamard_down to 0 at their use sites, which is the same
+   thing a model that never had the fields does.
+
+   It exists because the feature had NO way to be turned off at runtime,
+   and a transform with no control arm cannot be measured or gated: the
+   only way to ask "did the rotation happen" was to export a second
+   model with the field zeroed. It also makes the f32-vs-quantized
+   agreement checkable without a threshold - see build/subn_scale_gate.sh.
+
+   Turning it off on weights TRAINED in the rotated basis produces a
+   worse model, not a broken one; that is what a control arm is. */
+static int g_hadamard_off = 0;
+
+int lz_hadamard_on(void) { return !g_hadamard_off; }
+
+const char *lz_hadamard_select(const char *name) {
+    if (!name) return NULL;
+    if (strcmp(name, "on") == 0) g_hadamard_off = 0;
+    else if (strcmp(name, "off") == 0) g_hadamard_off = 1;
+    else return NULL;
+    return lz_hadamard_on() ? "on" : "off";
+}
+
 /* ---- epilogue tier --------------------------------------------------- */
 
 static int g_epi = -1;

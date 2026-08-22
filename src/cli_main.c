@@ -262,6 +262,10 @@ static void usage(void) {
     "                   engine's own per-32 grouping across the Hadamard.\n"
     "                   Value-changing, and inert unless the model sets\n"
     "                   use_subn. NOT a fixed-point tier: --fixed skips it.\n"
+    "  --hadamard MODE     on|off (default on). The SubLN block Hadamard's\n"
+    "                   control arm: off forces hadamard_o/hadamard_down to 0,\n"
+    "                   the same state a model without the fields has. Inert\n"
+    "                   unless the model sets both use_subn and a block.\n"
     "  --scalar-fixed TIER auto|float|fixed (default auto = fixed, same as\n"
     "                   the other six). lz_exp and lz_rsqrt together - the\n"
     "                   last two scalar x87 ops the fixed tiers leave on\n"
@@ -1382,6 +1386,15 @@ int main(int argc, char **argv) {
             const char *got = lz_subn_scale_select(argv[++i]);
             if (!got) {
                 printf("--subn-scale: unknown mode (tok|group)\n");
+                return 2;
+            }
+        }
+        else if (strcmp(a, "--hadamard") == 0 && i + 1 < argc) {
+            /* Like --subn-scale, deliberately outside the --fixed group
+               table: this removes a transform, not a fixed-point tier. */
+            const char *got = lz_hadamard_select(argv[++i]);
+            if (!got) {
+                printf("--hadamard: unknown mode (on|off)\n");
                 return 2;
             }
         }

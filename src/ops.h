@@ -608,6 +608,13 @@ int lz_norm_int(void);
 int lz_subn_scale_group(void);
 const char *lz_subn_scale_select(const char *name);
 
+/* SubLN block Hadamard: "on" | "off" (default on), `--hadamard`.
+   off forces the resolved hadamard_o/hadamard_down to 0 at their use
+   sites. The feature's control arm - without it the only way to ask
+   whether the rotation ran was to export a second model. */
+int lz_hadamard_on(void);
+const char *lz_hadamard_select(const char *name);
+
 /* Scalar transcendental tier (lz_exp and lz_rsqrt together):
    "float" | "fixed" | "auto".
 
@@ -916,6 +923,12 @@ void lz_matmul_xq(float *o, const float *x, const int8_t *xq,
 void lz_matmul_xq_nt(float *o, const float *x, const int8_t *xq,
                      const float *xqs, const LZTensor *w,
                      int in_dim, int out_dim, int nt);
+
+/* 1 if the call above will read `x` (the f32-weight fallback), 0 if it
+   will read `xq`/`xqs`. A caller that prepares the two inputs
+   DIFFERENTLY must branch on this and not on its own copy of the dtype
+   test - see the definition for the bug that produced. */
+int lz_matmul_xq_reads_float_row(const LZTensor *w);
 
 /* Same matmul, int16 exit (int-pipeline milestone 3). The row kernel
    and the int32 accumulators are the same ones lz_matmul_xq_nt uses -
