@@ -18,13 +18,24 @@
 # --dump-all-logits on both fixtures. One binary, one model, two tiers;
 # any difference is a twin that diverged.
 #
-# NOT asserted: --kernel ref. The scalar reference is not a twin of the
-# SIMD tiers - matmul_scalar_ref takes a different path that skips the
-# dequant epilogue entirely, so it differs by construction (measured:
-# 58,153,879 of 78,905,344 bytes). Asserting it would be asserting
-# something false, and a gate that has to be excused is worse than one
-# that says what it covers. Its correctness is kernel_matrix_gate's and
-# the per-operator exhaustive probes' subject.
+# ALSO ASSERTS: --kernel ref == --kernel sse2 under --epi-write float.
+# ref differs from the SIMD tiers on the shipping default - 57,975,565
+# of 78,905,344 bytes - and that reads like a diverged kernel. It is not.
+# lz_matmul_xq_nt routes LZ_KERNEL_REF to matmul_scalar_ref BEFORE any
+# epilogue is selected (mm_i16_dispatch refuses only that tier), so ref
+# structurally has no fixed epilogue. Turning off that ONE axis makes the
+# two byte-identical, which localises the whole difference to it:
+#
+#   --epi-write float   ref == sse2      (measured, both fixtures)
+#   shipping default    ref != sse2      (the epilogue ref does not have)
+#
+# So the row that belongs in a gate is the first one. It covers conv,
+# norms, sigmoid, recurrence, attention and the scalar tier against their
+# C reference and would catch a SIMD cell that drifted in any of them;
+# only the epilogue is excluded, and excluded for a reason that is
+# measured rather than asserted. Dropping ref entirely - the first
+# version of this gate did - throws that coverage away to avoid one
+# known difference.
 #
 # Runs on whatever kernels the host offers: if the CPU has no SSE2 the
 # tier selector refuses and the gate SKIPs rather than comparing a tier
@@ -87,17 +98,23 @@ echo "sse2 -> $SEL_SSE"
 # attention epilogue and folds kv_rot_k into the softmax scale, so a
 # different selection of twins runs under it than under the default.
 #
-# One LABEL:FLAGS per LINE, and read with `while read`, not `for` -
-# FLAGS contains spaces, and word-splitting a space-separated list turned
-# "--kv-rot on" into a flagset named "on" that the loader then tried to
-# open as a model directory. It failed loudly here; it would not have
-# in a gate whose runs are allowed to be empty.
+# One LABEL:TIER_A:TIER_B:FLAGS per LINE, and read with `while read`, not
+# `for` - FLAGS contains spaces, and word-splitting a space-separated list
+# turned "--kv-rot on" into a flagset named "on" that the loader then
+# tried to open as a model directory. It failed loudly here; it would not
+# have in a gate whose runs are allowed to be empty.
+#
+# The tier PAIR is per line because the `epi` row compares ref against
+# sse2 while the others compare mmx against sse2 - see the header for why
+# ref is only comparable once the epilogue axis is off, and why dropping
+# it entirely would throw away the coverage it does bring.
 #
 # Adding a flag set here is the cheap half of covering a new operator end
 # to end; the expensive half (SIMD arm against the same binary's C arm,
 # byte for byte) is the per-operator .prof/*_xcheck.sh probe.
-FLAGSETS="dflt:
-rot:--kv-rot on"
+FLAGSETS="dflt:mmx:sse2:
+rot:mmx:sse2:--kv-rot on
+epi:ref:sse2:--epi-write float"
 
 FAIL=0
 PASS=0
@@ -106,10 +123,12 @@ for fx in zh en; do
     [ -f "$TOK" ] || { echo "SKIP: fixture missing: $TOK"; continue; }
     while IFS= read -r fs; do
         [ -n "$fs" ] || continue
-        lbl=${fs%%:*}
-        flags=${fs#*:}
+        lbl=${fs%%:*};   rest=${fs#*:}
+        ta=${rest%%:*};  rest=${rest#*:}
+        tb=${rest%%:*}
+        flags=${rest#*:}
         ok=1
-        for k in mmx sse2; do
+        for k in "$ta" "$tb"; do
             if ! "./$BIN" "$MODEL" --tokens-file "$TOK" --kernel "$k" \
                     $flags --dump-all-logits "$TMPD/$k.bin" \
                     >"$TMPD/$k.log" 2>&1; then
@@ -121,18 +140,18 @@ for fx in zh en; do
             fi
         done
         [ "$ok" = 1 ] || continue
-        SZ=$(wc -c <"$TMPD/mmx.bin")
+        SZ=$(wc -c <"$TMPD/$ta.bin")
         if [ "$SZ" -eq 0 ]; then
             echo "FAIL: $fx / $lbl - empty dump"
             FAIL=1
             continue
         fi
-        if cmp -s "$TMPD/mmx.bin" "$TMPD/sse2.bin"; then
-            echo "PASS: $fx / $lbl - mmx == sse2 ($SZ bytes)"
+        if cmp -s "$TMPD/$ta.bin" "$TMPD/$tb.bin"; then
+            echo "PASS: $fx / $lbl - $ta == $tb ($SZ bytes)"
             PASS=$((PASS + 1))
         else
-            ND=$(cmp -l "$TMPD/mmx.bin" "$TMPD/sse2.bin" 2>/dev/null | wc -l)
-            echo "FAIL: $fx / $lbl - mmx and sse2 differ in $ND of $SZ bytes"
+            ND=$(cmp -l "$TMPD/$ta.bin" "$TMPD/$tb.bin" 2>/dev/null | wc -l)
+            echo "FAIL: $fx / $lbl - $ta and $tb differ in $ND of $SZ bytes"
             FAIL=1
         fi
     done <<EOF
