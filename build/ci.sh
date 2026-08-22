@@ -29,6 +29,11 @@
 #      targets; DOS is left out of `make check` by design)
 #   9. build/x87/build_engine.sh under WSL (32-bit x87 gcc, the fourth
 #      toolchain shape)
+#  10. build/mips/endian_gate.sh under WSL - the same source cross-built
+#      big-endian AND little-endian and compared byte for byte. Every
+#      other stage above runs on a little-endian machine, so a loader
+#      that assumes little-endian byte order passes all nine of them;
+#      this is the only one that can tell portable from untested
 #
 # Judging discipline (this repo has paid for getting this wrong before):
 #   - Never grep bare 'error' - "0 errors" contains the substring.
@@ -71,7 +76,7 @@ freshness_sentinel() {
 # ---------------------------------------------------------------------
 # Stage 1: make native (gcc)
 # ---------------------------------------------------------------------
-echo "==== [1/9] make native ===="
+echo "==== [1/10] make native ===="
 NATIVE_EXE="$ROOT/llama98.exe"
 [ -e "$NATIVE_EXE" ] || NATIVE_EXE="$ROOT/llama98"
 LOG=build/ci-native.log
@@ -110,7 +115,7 @@ rm -f "$SENTINEL"
 # Stage 2: make watcom-cli (Open Watcom, the target compiler)
 # ---------------------------------------------------------------------
 echo
-echo "==== [2/9] make watcom-cli ===="
+echo "==== [2/10] make watcom-cli ===="
 WATCOM_EXE="$ROOT/llama98-w.exe"
 WATCOM_OBJDIR="$ROOT/build/watcom/cli"
 LOG=build/ci-watcom-cli.log
@@ -162,7 +167,7 @@ rm -f "$SENTINEL"
 # Stage 3: llama98 <dir> --check on a curated set of KunMoe checkpoints
 # ---------------------------------------------------------------------
 echo
-echo "==== [3/9] model --check sweep ===="
+echo "==== [3/10] model --check sweep ===="
 MODELS_ROOT=${MODELS_ROOT:-/e/LLM/models}
 # Curated, not a blind sweep of every directory under MODELS_ROOT:
 # a usable sweep is a handful of representative checkpoints, and
@@ -209,7 +214,7 @@ fi
 # Stage 4: x86 <-> ARMv5TE parity gate
 # ---------------------------------------------------------------------
 echo
-echo "==== [4/9] ARM parity gate ===="
+echo "==== [4/10] ARM parity gate ===="
 ARM_MODEL="$MODELS_ROOT/kunkun98-pilot-20260806"
 LOG=build/ci-arm.log
 if [ "$native_ok" -ne 1 ]; then
@@ -244,7 +249,7 @@ fi
 # Stage 5: control-switch matrix (every non-default value, gcc + Watcom)
 # ---------------------------------------------------------------------
 echo
-echo "==== [5/9] control-switch matrix ===="
+echo "==== [5/10] control-switch matrix ===="
 LOG=build/ci-switch-matrix.log
 build/switch_matrix_gate.sh >"$LOG" 2>&1
 MATRIX_RC=$?
@@ -272,7 +277,7 @@ esac
 # Stage 6: every fixed-point write tier's gcc<->Watcom bit-identity
 # ---------------------------------------------------------------------
 echo
-echo "==== [6/9] fixed-tier cross-compiler gate ===="
+echo "==== [6/10] fixed-tier cross-compiler gate ===="
 LOG=build/ci-fixed-tier-xcompiler.log
 build/fixed_tier_xcompiler_gate.sh >"$LOG" 2>&1
 NIX_RC=$?
@@ -304,7 +309,7 @@ esac
 # compile-time-off in the same compiler, where it is not.
 # ---------------------------------------------------------------------
 echo
-echo "==== [7/9] recurrence float-arm gate ===="
+echo "==== [7/10] recurrence float-arm gate ===="
 LOG=build/ci-recur-write-float-arm.log
 build/recur_write_float_arm_gate.sh >"$LOG" 2>&1
 NIX_RC=$?
@@ -334,7 +339,7 @@ esac
 # separate delivery decision); none of the three is in ci.sh's stage 2.
 # ---------------------------------------------------------------------
 echo
-echo "==== [8/9] watcom gui/dll/dos targets ===="
+echo "==== [8/10] watcom gui/dll/dos targets ===="
 for t in watcom-gui watcom-dll watcom-dos; do
     case $t in
         watcom-gui) EXE="$ROOT/kunkun98-w.exe" ;;
@@ -371,7 +376,7 @@ done
 # as its only float unit. SKIP when WSL is not usable, never PASS.
 # ---------------------------------------------------------------------
 echo
-echo "==== [9/9] 32-bit x87 gcc build (WSL) ===="
+echo "==== [9/10] 32-bit x87 gcc build (WSL) ===="
 LOG=build/ci-x87.log
 if ! command -v wsl >/dev/null 2>&1; then
     echo "SKIP: 32-bit x87 build (wsl not installed)"
@@ -405,6 +410,50 @@ else
         note "FAIL  32-bit x87 build (WSL)"
         FAIL=$((FAIL + 1))
     fi
+fi
+
+# ---------------------------------------------------------------------
+# Stage 10: big-endian vs little-endian bit-identity (WSL + MIPS cross).
+# The ONLY stage that can see a byte-order bug: every other target here
+# is little-endian, so a loader that assumes little-endian byte order is
+# bit-identical to a correct one in all nine stages above. SKIP when the
+# MIPS cross toolchain is absent, never PASS.
+# ---------------------------------------------------------------------
+echo
+echo "==== [10/10] big-endian parity gate (WSL) ===="
+LOG=build/ci-endian.log
+if ! command -v wsl >/dev/null 2>&1; then
+    echo "SKIP: big-endian parity gate (wsl not installed)"
+    note "SKIP  big-endian parity gate (wsl not installed)"
+    SKIP=$((SKIP + 1))
+else
+    WSL_ROOT=$ROOT
+    case "$ROOT" in
+        /[a-z]/*) WSL_ROOT="/mnt/$(echo "$ROOT" | cut -c2)/$(echo "$ROOT" | cut -c4-)" ;;
+    esac
+    wsl bash -lc "cd '$WSL_ROOT' && bash build/mips/endian_gate.sh" >"$LOG" 2>&1
+    END_RC=$?
+    case $END_RC in
+        0)
+            echo "PASS: big-endian parity gate"
+            note "PASS  big-endian parity gate"
+            PASS=$((PASS + 1))
+            ;;
+        2)
+            REASON=$(grep -m1 'endian-gate: SKIP' "$LOG")
+            echo "SKIP: big-endian parity gate ($REASON)"
+            echo "  Byte-order portability goes UNVERIFIED - no other stage"
+            echo "  in this script runs on a big-endian machine."
+            note "SKIP  big-endian parity gate ($REASON)"
+            SKIP=$((SKIP + 1))
+            ;;
+        *)
+            echo "FAIL: big-endian parity gate - see $LOG"
+            tail -n 15 "$LOG"
+            note "FAIL  big-endian parity gate"
+            FAIL=$((FAIL + 1))
+            ;;
+    esac
 fi
 
 # ---------------------------------------------------------------------

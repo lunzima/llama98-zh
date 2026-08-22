@@ -144,6 +144,11 @@ static const char *const LZ_ERR_EN[LZ_ERR_COUNT] = {
     [LZ_ERR_CPU_NO_FPU]   = "this processor has no floating-point unit. "
                             "llama98 needs one - a 486DX, a Pentium, or "
                             "anything newer.",
+    [LZ_ERR_ENDIAN_MISMATCH] = "this build was compiled for the wrong byte "
+                            "order and would read every weight reversed. "
+                            "Rebuild with -DLZ_BIG_ENDIAN=1 on a big-endian "
+                            "machine, or -DLZ_BIG_ENDIAN=0 on a "
+                            "little-endian one.",
     [LZ_ERR_INTERNAL]     = "internal error",
 };
 
@@ -284,6 +289,9 @@ static const char *const LZ_ERR_ZH[LZ_ERR_COUNT] = {
                             "支持什么。需要奔腾级（Socket 7）或更新的处理器。",
     [LZ_ERR_CPU_NO_FPU]   = "这颗处理器没有浮点单元，而 llama98 需要它。"
                             "486DX、奔腾或更新的处理器都可以。",
+    [LZ_ERR_ENDIAN_MISMATCH] = "本次构建的字节序与运行的机器不符，会把每一个"
+                            "权重都读反。请在大端机上加 -DLZ_BIG_ENDIAN=1、"
+                            "在小端机上加 -DLZ_BIG_ENDIAN=0 重新编译。",
     [LZ_ERR_INTERNAL]     = "内部错误",
 };
 

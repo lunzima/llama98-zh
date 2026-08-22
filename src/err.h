@@ -198,6 +198,13 @@ typedef enum {
     LZ_ERR_CPU_NO_CPUID,       /* no CPUID instruction */
     LZ_ERR_CPU_NO_FPU,         /* no floating-point unit */
 
+    /* The build was compiled for the wrong byte order for the machine it
+       is running on - see lz_endian_ok in compat.h. Its own error rather
+       than a generic one because the fix is a build flag
+       (-DLZ_BIG_ENDIAN=0/1), not anything about the model file the user
+       was pointing at when it fired. */
+    LZ_ERR_ENDIAN_MISMATCH,    /* built for the wrong byte order */
+
     /* Generic failure. Two jobs, and it must stay LAST before
        LZ_ERR_COUNT for the second one:
        1. the initial value of a return code that every failure path is

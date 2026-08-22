@@ -273,8 +273,19 @@ int lz_st_read_f32(LZSafetensors *st, const LZStTensor *t,
         return 1;
     }
 
-    if (t->dtype == LZ_DT_F32)
-        return st_seek_read(st, t, dst, t->nbytes, errbuf, errlen);
+    /* safetensors stores every scalar little-endian, by specification.
+       The bf16 and f16 branches below already honour that - they assemble
+       each value from raw[i*2] and raw[i*2+1] by name, so they are
+       correct on any host. This f32 branch reads the file's bytes
+       straight into float storage, which is only the same thing on a
+       little-endian machine, so it is the one that needs converting.
+       lz_le32 is empty on a little-endian build. */
+    if (t->dtype == LZ_DT_F32) {
+        if (st_seek_read(st, t, dst, t->nbytes, errbuf, errlen) != 0)
+            return 1;
+        lz_le32(dst, (size_t)n);
+        return 0;
+    }
 
     if (t->dtype != LZ_DT_BF16 && t->dtype != LZ_DT_F16) {
         sterr(errbuf, errlen, LZ_ERR_ST_DTYPE_F32,

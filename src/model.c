@@ -982,6 +982,16 @@ int lz_open(LZModel *m, const char *dir, char *errbuf, int errlen) {
     memset(&bc, 0, sizeof(bc));
     if (errbuf && errlen > 0) errbuf[0] = '\0';
 
+    /* Both loaders below convert from the file's little-endian order
+       using LZ_BIG_ENDIAN, so a build that guessed its host's byte order
+       wrong reads every weight reversed and reports nothing. Checked here,
+       at the single door both paths go through, and before any file is
+       touched - the answer does not depend on the model. */
+    if (!lz_endian_ok()) {
+        qerr(errbuf, errlen, LZ_ERR_ENDIAN_MISMATCH);
+        return 1;
+    }
+
     /* mixed-precision bin preferred: if model.bin exists, load everything
        at once. Resolved rather than fopen'd directly (src/lfn.h): this
        probe decides between the bin and safetensors loaders, so a wrong
@@ -1101,6 +1111,28 @@ static int visit_read(LZModel *m, const LZStTensor *t, LZTensor *field,
     return 0;
 }
 
+/* Read one quantized tensor's group size and vet it. Non-zero on either
+   a short read or a value this format cannot use; the caller reports
+   both as LZ_ERR_TENSOR_GS, which is what it did when the read and the
+   checks shared one `if`.
+
+   They cannot share one any more: the value has to be converted from
+   little-endian BETWEEN being read and being divided by, and on a
+   big-endian host an unconverted group size is not merely wrong but
+   usually enormous, so `n % gs` would silently pass the "divides evenly"
+   test by never dividing at all.
+
+   mul32 says whether this format also requires a multiple of 32 - the
+   sub-byte packings fix their sub-blocks at 32 elements (see model.h),
+   Q8_0 does not. */
+static int read_gs(FILE *f, uint32_t n, uint32_t *gs, int mul32) {
+    if (fread(gs, 4, 1, f) != 1) return 1;
+    lz_le32(gs, 1);
+    if (*gs == 0 || (n % *gs) != 0) return 1;
+    if (mul32 && (*gs % 32) != 0) return 1;
+    return 0;
+}
+
 /* bin path: tensors are streamed from the file in model_walk order (dtype 0=f32 / 1=Q8_0) */
 static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
                           void *ctx, char *errbuf, int errlen) {
@@ -1109,11 +1141,19 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
     uint32_t n, gs;
     (void)m;
 
+    /* Every multi-byte field below - the element count, the group size,
+       the f32 planes and the Q16_0 int16 plane - is little-endian in the
+       file and is converted after reading. The Q8_0, Q4_1, Q6_1 and T2
+       code planes are NOT, and must not be: those are byte and sub-byte
+       packings whose unpackers index bits within a byte, so their bytes
+       are already in the only order they have. dtype is one byte.
+       lz_le32/lz_le16 are empty on a little-endian build. */
     if (fread(&dtype, 1, 1, f) != 1 ||
         fread(&n, 4, 1, f) != 1) {
         qerr(errbuf, errlen, LZ_ERR_TENSOR_READ, t->name);
         return 1;
     }
+    lz_le32(&n, 1);
     if ((long long)n != t->n_elem) {
         qerr(errbuf, errlen, LZ_ERR_TENSOR_ELEMS,
              t->name, t->n_elem, n);
@@ -1137,6 +1177,7 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
             field->f = NULL;
             return 1;
         }
+        lz_le32(field->f, (size_t)n);
         m->bytes_alloc += (long long)n * sizeof(float);
     } else if (dtype == LZ_FMT_Q16_0) {
         /* int16: n*2 bytes of data + n/gs scales. Used for in_proj_a/b -
@@ -1148,8 +1189,7 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
            to 1.01x. */
         field->dtype = LZ_FMT_Q16_0;
         field->f = NULL;
-        if (fread(&gs, 4, 1, f) != 1 || gs == 0 || (gs % 32) != 0 ||
-            (n % gs) != 0) {
+        if (read_gs(f, n, &gs, 1) != 0) {
             qerr(errbuf, errlen, LZ_ERR_TENSOR_GS, t->name);
             return 1;
         }
@@ -1167,6 +1207,11 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
             lz_t_free(field);
             return 1;
         }
+        /* The only quantized code plane that is not bytes: Q16_0 stores
+           int16 and the kernels read it through an int16_t *, so its
+           halves have to be put the right way round here. */
+        lz_le16(field->q, (size_t)n);
+        lz_le32(field->scale, (size_t)(n / gs));
         m->bytes_alloc += (long long)n * 2 +
                           (long long)(n / gs) * sizeof(float);
     } else if (dtype == LZ_FMT_Q6_1) {
@@ -1175,8 +1220,7 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
            first. */
         field->dtype = LZ_FMT_Q6_1;
         field->f = NULL;
-        if (fread(&gs, 4, 1, f) != 1 || gs == 0 || (gs % 32) != 0 ||
-            (n % gs) != 0) {
+        if (read_gs(f, n, &gs, 1) != 0) {
             qerr(errbuf, errlen, LZ_ERR_TENSOR_GS, t->name);
             return 1;
         }
@@ -1197,6 +1241,8 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
             lz_t_free(field);
             return 1;
         }
+        lz_le32(field->scale, (size_t)(n / gs));
+        lz_le32(field->zero,  (size_t)(n / gs));
         m->bytes_alloc += (long long)n / 2 + (long long)n / 4 +
                           2 * (long long)(n / gs) * sizeof(float);
     } else if (dtype == LZ_FMT_T2) {
@@ -1206,8 +1252,7 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
            instead of a stored min (see model.h). */
         field->dtype = LZ_FMT_T2;
         field->f = NULL;
-        if (fread(&gs, 4, 1, f) != 1 || gs == 0 || (gs % 32) != 0 ||
-            (n % gs) != 0) {
+        if (read_gs(f, n, &gs, 1) != 0) {
             qerr(errbuf, errlen, LZ_ERR_TENSOR_GS, t->name);
             return 1;
         }
@@ -1225,6 +1270,7 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
             lz_t_free(field);
             return 1;
         }
+        lz_le32(field->scale, (size_t)(n / gs));
         m->bytes_alloc += (long long)n / 4 +
                           (long long)(n / gs) * sizeof(float);
     } else if (dtype == LZ_FMT_Q4_1) {
@@ -1233,8 +1279,7 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
            32 elements (see model.h). */
         field->dtype = LZ_FMT_Q4_1;
         field->f = NULL;
-        if (fread(&gs, 4, 1, f) != 1 || gs == 0 || (gs % 32) != 0 ||
-            (n % gs) != 0) {
+        if (read_gs(f, n, &gs, 1) != 0) {
             qerr(errbuf, errlen, LZ_ERR_TENSOR_GS, t->name);
             return 1;
         }
@@ -1254,12 +1299,14 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
             lz_t_free(field);
             return 1;
         }
+        lz_le32(field->scale, (size_t)(n / gs));
+        lz_le32(field->zero,  (size_t)(n / gs));
         m->bytes_alloc += (long long)n / 2 +
                           2 * (long long)(n / gs) * sizeof(float);
     } else if (dtype == LZ_FMT_Q8_0) {
         field->dtype = LZ_FMT_Q8_0;
         field->f = NULL;
-        if (fread(&gs, 4, 1, f) != 1 || gs == 0 || (n % gs) != 0) {
+        if (read_gs(f, n, &gs, 0) != 0) {
             qerr(errbuf, errlen, LZ_ERR_TENSOR_GS, t->name);
             return 1;
         }
@@ -1283,6 +1330,7 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
             field->scale = NULL;
             return 1;
         }
+        lz_le32(field->scale, (size_t)(n / gs));
         m->bytes_alloc += (long long)n + (long long)(n / gs) * sizeof(float);
     } else {
         qerr(errbuf, errlen, LZ_ERR_TENSOR_DTYPE, t->name, dtype);
@@ -1312,13 +1360,30 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
         return 1;
     }
 
-#define RD(ptr, sz) do { \
+/* RDB reads BYTES and leaves them alone; RD reads 32-bit WORDS and
+   converts them from the file's little-endian order.
+
+   Every field in this header is 4 bytes wide - int32 or float32, and the
+   conversion is the same for both - except the magic, which is four
+   characters and is the one caller of RDB. Putting the conversion in the
+   macro rather than at each of the sixty-odd call sites is not brevity:
+   a field added later gets it automatically, whereas a list of explicit
+   conversions is a list somebody has to remember to extend, and the
+   symptom of forgetting is a plausible-looking wrong number rather than
+   a failure. lz_le32 is empty on a little-endian build, so this is also
+   byte-for-byte what it was on every shipping target. */
+#define RDB(ptr, sz) do { \
     if (fread((ptr), (sz), 1, m->bin_file) != 1) { \
         qerr(errbuf, errlen, LZ_ERR_BIN_CFG_READ); \
         goto fail; \
     } } while (0)
 
-    RD(magic, 4);
+#define RD(ptr, sz) do { \
+    RDB((ptr), (sz)); \
+    lz_le32((ptr), (size_t)(sz) / 4); \
+    } while (0)
+
+    RDB(magic, 4);
     if (memcmp(magic, "L98Z", 4) != 0) {
         qerr(errbuf, errlen, LZ_ERR_BIN_MAGIC);
         goto fail;
@@ -1443,6 +1508,7 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
         c->hadamard_down = -1;
     }
 #undef RD
+#undef RDB
 
     /* Defense: derived quantities and key fields self-consistent (same checks as lz_load_config) */
     if (c->vocab_size <= 0 || c->hidden_size <= 0 || c->head_dim <= 0 ||

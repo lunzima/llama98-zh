@@ -69,4 +69,77 @@ long lz_time_epoch(void);
 void lz_init_stdout(void);
 void lz_init_stdin(void);
 
+/* ---- byte order -----------------------------------------------------
+ *
+ * On-disk model data is LITTLE-ENDIAN, always, on every host. That is
+ * not a preference, it is what already exists: export_q8.py writes every
+ * scalar with struct.pack("<i"/"<f"), and safetensors is little-endian
+ * by specification. A reader is therefore converting from a fixed
+ * external order to host order, never "writing whatever this machine
+ * uses" - so there is no second convention to negotiate and no byte-order
+ * flag in the file.
+ *
+ * LZ_BIG_ENDIAN is 1 on a big-endian host, 0 otherwise. Every shipping
+ * target is little-endian - x86 (gcc/MinGW/Open Watcom), x86-64, ARMv5TE,
+ * and MIPS under Windows NT, which runs little-endian on a Loongson 2F
+ * just as it did on an R4000 - so the value is 0 everywhere the engine is
+ * actually built, and the conversion helpers below compile to nothing.
+ * That is deliberate: it is what makes "byte order support" cost zero
+ * instructions and zero bits of output on the machines that ship.
+ *
+ * Detection is compile-time with a conservative macro list and a
+ * -DLZ_BIG_ENDIAN=1 override, because there is no portable compile-time
+ * predicate and VC++ 4.0 on MIPS predates every standard one. A host the
+ * list does not recognise is assumed little-endian and then CAUGHT at
+ * runtime by lz_endian_ok() - see there for why that is the safe way
+ * round.
+ */
+#if !defined(LZ_BIG_ENDIAN)
+# if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__)
+#  if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+#   define LZ_BIG_ENDIAN 1
+#  else /* __BYTE_ORDER__ != __ORDER_BIG_ENDIAN__ */
+#   define LZ_BIG_ENDIAN 0
+#  endif /* __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__ */
+# elif defined(__BIG_ENDIAN__) || defined(_BIG_ENDIAN) || \
+       defined(__MIPSEB__) || defined(_MIPSEB) || defined(MIPSEB) || \
+       defined(__ARMEB__) || defined(__THUMBEB__) || defined(__AARCH64EB__) || \
+       defined(__sparc) || defined(__sparc__) || defined(__hppa__) || \
+       defined(__s390__) || defined(__s390x__) || defined(__m68k__)
+#  define LZ_BIG_ENDIAN 1
+# else /* no big-endian macro matched */
+#  define LZ_BIG_ENDIAN 0
+# endif /* byte-order macro probe */
+#endif /* !LZ_BIG_ENDIAN */
+
+/* Convert n words in place between little-endian and host order. Both
+ * directions are the same operation, so one function serves load and
+ * store; the names say the EXTERNAL order, which is the one that is
+ * fixed.
+ *
+ * On a little-endian host these are empty functions - not merely cheap
+ * but incapable of changing a byte, which is what makes the little-endian
+ * builds bit-identical to the versions of this engine that had no
+ * byte-order handling at all.
+ *
+ * These take void * because every caller has a differently-typed buffer
+ * (float *, int32_t *, a struct field) and casting at the call site is
+ * how the alignment question gets answered: the pointer always comes from
+ * malloc or from an object of the right type, never from a byte offset
+ * into a packed buffer. */
+void lz_le32(void *p, size_t n);
+void lz_le16(void *p, size_t n);
+
+/* Does LZ_BIG_ENDIAN match the machine actually running? 1 yes, 0 no.
+ *
+ * The macro list above cannot know every compiler, and the failure it
+ * has when it guesses wrong is the worst kind: a big-endian host that
+ * took the little-endian default loads every weight byte-reversed and
+ * produces confident nonsense, with no crash and no message. This is
+ * checked once per model open so that case becomes a refusal instead.
+ *
+ * The reverse mistake - LZ_BIG_ENDIAN=1 on a little-endian host - is
+ * caught by the same comparison. */
+int lz_endian_ok(void);
+
 #endif

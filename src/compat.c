@@ -239,3 +239,55 @@ unsigned long long lz_seed_mix(unsigned long long x) {
     x ^= x >> 27;
     return x * 0x2545F4914F6CDD1DULL;
 }
+
+/* ---- byte order (see compat.h for the contract) --------------------- */
+
+#if LZ_BIG_ENDIAN
+
+/* Byte-reversal through an unsigned char * rather than through an
+   integer type: the buffers these are handed hold float as often as
+   int32_t, and reading a float's bytes as an integer to shift them is
+   the aliasing violation the rest of this tree avoids with unions. Bytes
+   are bytes under any type. */
+void lz_le32(void *p, size_t n) {
+    unsigned char *b = (unsigned char *)p;
+    size_t i;
+    for (i = 0; i < n; i++, b += 4) {
+        unsigned char t;
+        t = b[0]; b[0] = b[3]; b[3] = t;
+        t = b[1]; b[1] = b[2]; b[2] = t;
+    }
+}
+
+void lz_le16(void *p, size_t n) {
+    unsigned char *b = (unsigned char *)p;
+    size_t i;
+    for (i = 0; i < n; i++, b += 2) {
+        unsigned char t = b[0]; b[0] = b[1]; b[1] = t;
+    }
+}
+
+#else /* !LZ_BIG_ENDIAN */
+
+/* Empty on purpose. A little-endian host needs no conversion, and an
+   empty body is the strongest available statement that these builds are
+   byte-for-byte what they were before byte-order support existed. */
+void lz_le32(void *p, size_t n) { (void)p; (void)n; }
+void lz_le16(void *p, size_t n) { (void)p; (void)n; }
+
+#endif /* LZ_BIG_ENDIAN */
+
+int lz_endian_ok(void) {
+    /* Not a compile-time trick: the whole point is to catch the case
+       where the compile-time answer is WRONG, so the probe has to be
+       something the running machine decides. `volatile` keeps a
+       constant-folding compiler from answering it from the same macro
+       list that may have got it wrong. */
+    volatile unsigned long probe = 1UL;
+    int host_big = (*(const volatile unsigned char *)&probe) == 0;
+#if LZ_BIG_ENDIAN
+    return host_big == 1;
+#else /* !LZ_BIG_ENDIAN */
+    return host_big == 0;
+#endif /* LZ_BIG_ENDIAN */
+}
