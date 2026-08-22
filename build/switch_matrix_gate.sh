@@ -263,9 +263,14 @@ check_one "LZ_GDN_FIXED=2(+LZ_GDN_STATE_2PLANE=0)" \
 # check_one the singles use, which also proves every flag took effect.
 # A cross naming LZ_SSE2_GROUP compiles ops_sse2.c as well (its guarded
 # code lives there), matching the single-switch handling.
+# LZ_GDN_FIXED=0,LZ_NORM_FIXED=0 is the both-tiers-off build. It only
+# became a combination worth naming when the norms got their own switch:
+# before that, -DLZ_GDN_FIXED=0 alone floated both, and this pair could
+# not be expressed.
 CROSS="LZ_SSE2_GROUP=0,LZ_GDN_FIXED=2,LZ_GDN_STATE_2PLANE=0
 LZ_NO_FPU=1,LZ_GDN_FIXED=0
-LZ_GDN_STATE_2PLANE=0,LZ_GDN_FIXED=0"
+LZ_GDN_STATE_2PLANE=0,LZ_GDN_FIXED=0
+LZ_GDN_FIXED=0,LZ_NORM_FIXED=0"
 
 while IFS= read -r cross; do
     [ -z "$cross" ] && continue
