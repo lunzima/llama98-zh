@@ -10,6 +10,15 @@
 #
 # Found by grepping the magic constant 12582912.0f (1.5*2^23): three
 # sites, one of them q8_round itself.
+#
+# THE TWO LINE KEYS ARE LINE NUMBERS and go stale exactly the way
+# linemap.tsv's do, silently and downward: a missed row is work that
+# reports as zero, not as an error. Re-grep 12582912.0f before trusting
+# a measurement. Both were stale as recorded (333/448, from 0283fa0);
+# 84adffc moved q8_round into ops_quant.h and the two lz_exp floors to
+# 292/407, where they are at 3f796fd. q8_round itself stays a LEAF row
+# rather than an ops_quant.h LINE row - the LEAF form charges it to the
+# caller, and having both would count it twice.
 LEAF	q8_round	1
-LINE	ops_quant.c	333	1
-LINE	ops_quant.c	448	1
+LINE	ops_quant.c	292	1
+LINE	ops_quant.c	407	1

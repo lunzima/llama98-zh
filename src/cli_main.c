@@ -108,6 +108,10 @@ extern long long lz_debug_q8i16_int;
    its two inputs and its output - each strictly below 32767 is the proof
    that LZ_SWIGLU_ES_P/_G/_O clamped nothing on this run. */
 extern long long lz_debug_swiglu_i16;
+/* The fixed conv epilogue's integer-coordinate activation, ops.c.
+   Channel-steps that entered sigmoid through sigmoid_q15_i; 0 under
+   -DLZ_CONV_SIG_I=0 and 0 on the float conv tier. */
+extern long long lz_debug_conv_sig_i;
 extern int lz_debug_swiglu_pmax;
 extern int lz_debug_swiglu_gmax;
 extern int lz_debug_swiglu_omax;
@@ -1866,6 +1870,7 @@ int main(int argc, char **argv) {
         printf("swiglu int16   %lld elements  max|p| %d max|g| %d max|o| %d\n",
                lz_debug_swiglu_i16, lz_debug_swiglu_pmax,
                lz_debug_swiglu_gmax, lz_debug_swiglu_omax);
+        printf("conv sig int   %lld channel-steps\n", lz_debug_conv_sig_i);
         /* The f32 census, in a build that can answer it (-DLZ_F32COUNT=1).
            Printed here rather than behind a flag: a counting build exists
            only to produce this, and a number that needs asking for is a

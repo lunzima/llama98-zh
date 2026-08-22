@@ -108,7 +108,9 @@ void lz_sig_q15_fold(float oscale, float *k1, float *oscale2);
    coordinate derivation is a shift and a mask instead of a subtract,
    two multiplies and two converts. Same table, same lerp, same Q15
    result - see ops_quant.c for why it is EXACT against sigmoid_q15 and
-   not merely close. e is the number of fractional bits, 0 <= e <= 27. */
+   not merely close. e is the number of fractional bits, 0 <= e <= 50;
+   past 19 it is sigmoid_q15 that rounds and this entry that does not,
+   so the two stop agreeing and this one is the correct of the pair. */
 int32_t sigmoid_q15_i(int32_t v, int e);
 
 /* The magnitude at which the table above saturates, in sigmoid_q15_i's

@@ -2521,6 +2521,15 @@ void lz_causal_conv1d_step(float *o, const float *x,
     }
 }
 
+/* The integer-coordinate activation's positive control: channel-steps
+   the fixed conv epilogue took through sigmoid_q15_i. Zero under
+   -DLZ_CONV_SIG_I=0, and zero is also what a float-tier run reports -
+   the two arms differ only inside this tier's own tolerance, so no
+   output comparison can tell "it ran" from "it did not". Defined
+   outside LZ_CONV_FIXED so the front end's extern still links in a
+   build that compiles the tier out. */
+long long lz_debug_conv_sig_i = 0;
+
 #if LZ_CONV_FIXED
 #if defined(LZ_ARM_PRIM_ASM)
 /* Is `v` an exact positive power of two, and if so at what exponent?
@@ -2565,17 +2574,26 @@ static int conv_pow2_exp(float v, int32_t *k) {
  * float multiply here (input, sig_k1, sig_oscale2) is by an exact power
  * of two, so none of them round.
  *
- * Activation calls sigmoid_q15_t directly instead of going through
- * lz_silu/lz_sigmoid: the old shape computed v = acc_f*oscale once and
- * reused it for both the sigmoid input and the output multiply, but
- * each side then had to scale v again on top (entry by LZ_SIG_STEP,
- * exit by 1/32768) - v was never actually shared work. sig_k1/
- * sig_oscale2 (lz_sig_q15_fold) are oscale pre-multiplied by those two
- * factors, so acc_f is scaled by each ONCE, and v itself is never
- * materialized. Bit-identical to the old lz_silu(lz_i32f(acc)*oscale[c])
- * chain - verified over the accumulator's realistic range,
- * .prof/verify_conv_fold3.c, 0 mismatches - and one multiply per
- * channel cheaper.
+ * THE ACTIVATION IS ENTERED IN THE INTEGER COORDINATE (LZ_CONV_SIG_I).
+ * `acc` already IS the number the table wants indexing by - x == acc *
+ * 2^-(ew[c]+es) - so sigmoid_q15_i takes its bits and the entire float
+ * coordinate derivation disappears: three of the epilogue's six
+ * int<->float converts per channel, 55,296 a token on kmr20's 18,432
+ * channels. What is left is the exit, which has to produce a float:
+ * one lz_i32f of the accumulator and one cast of the Q15 result.
+ *
+ * NOT bit-identical to the float entry below it, and the integer one is
+ * the MORE accurate: sigmoid_q15's `x + 12` is exact only while
+ * e <= 19, and the measured exponents here run 22..39 (8.24% of kmr20's
+ * channels, 11.26% of kunmoe-v2-t2-probe's, sit past 27 and needed
+ * sigmoid_q15_i's wide band to exist at all).
+ *
+ * The =0 arm keeps the folded float entry, which is what the census
+ * control build and the pre-change bit-identity comparison run:
+ * sigmoid_q15_t takes t = acc*k1 + k2 directly, sig_k1/sig_oscale2
+ * (lz_sig_q15_fold) being oscale pre-multiplied by LZ_SIG_STEP and by
+ * 1/32768 so acc_f is scaled by each once - bit-identical to the older
+ * lz_silu(lz_i32f(acc)*oscale[c]) chain, .prof/verify_conv_fold3.c.
  *
  * `xi` is int-pipeline milestone 3: the producer (an int16-exit matmul,
  * lz_matmul_xq_nt_i16) has already delivered this vector at exponent
@@ -2590,6 +2608,7 @@ void lz_causal_conv1d_step_fixed(float *o, const float *x, const short *xi,
                                  const short *sh_in, short *sh_out,
                                  const short *mw, const float *sig_k1,
                                  const float *sig_oscale2, float sig_k2,
+                                 const signed char *sig_e,
                                  float in_scale, int bound,
                                  int n_ch, int k) {
     int hist = k - 1;
@@ -2600,6 +2619,24 @@ void lz_causal_conv1d_step_fixed(float *o, const float *x, const short *xi,
        answer that cannot change. */
     int prim = (g_kernel == LZ_KERNEL_ARM_ASM);
 #endif /* LZ_ARM_PRIM_ASM */
+#if LZ_CONV_SIG_I
+    /* The folded float coordinate's two factors, unread here and kept in
+       the signature for the =0 arm below - the caller builds both tables
+       and one build must not need a different call shape from the other. */
+    (void)sig_k1; (void)sig_k2;
+    /* Per channel: input multiply (1), lz_i32f (1 cvt), the exit cast
+       (1 cvt) and sig_oscale2 multiply (1), and the final product (1) =
+       3 mul, 0 add, 2 cvt. The float entry's own three - sig_k1 multiply,
+       sig_k2 add, sigmoid_q15_t's frac interpolation - are integers now
+       and bill nothing, exactly as sigmoid_q15_i bills nothing at
+       lz_swiglu_q15_i16's site. The int16 input drops the first multiply.
+       q8_round bills nothing of its own (its magic add is not counted at
+       any of its call sites), so 2 is the whole difference. */
+    LZ_FCX(LZ_FC_CONV, (long)n_ch * (xi ? 2 : 3), 0, 0,
+           (long)n_ch * 2, 0);
+    lz_debug_conv_sig_i += n_ch;
+#else
+    (void)sig_e;   /* the integer coordinate's table, unread in this arm */
     /* Per channel: input multiply (1), lz_i32f (1 cvt), sig_k1 multiply
        + sig_k2 add (the folded entry, 1 mul + 1 add), sigmoid_q15_t's
        own frac-interpolation multiply (1, not itemized here, same
@@ -2613,6 +2650,7 @@ void lz_causal_conv1d_step_fixed(float *o, const float *x, const short *xi,
        sites), so 4 is the whole difference. */
     LZ_FCX(LZ_FC_CONV, (long)n_ch * (xi ? 4 : 5), (long)n_ch, 0,
            (long)n_ch * 2, 0);
+#endif /* LZ_CONV_SIG_I */
     for (c = 0; c < n_ch; c++) {
         const short *si = sh_in + (size_t)c * hist;
         short *so = sh_out + (size_t)c * hist;
@@ -2629,6 +2667,48 @@ void lz_causal_conv1d_step_fixed(float *o, const float *x, const short *xi,
         for (j = 0; j < hist; j++) acc += (int)wr[j] * (int)si[j];
         acc += (int)wr[hist] * q;
         {
+#if LZ_CONV_SIG_I
+            /* x == acc * 2^-sig_e[c] by construction (sig_e is ew[c]+es,
+               the exponent lz_sig_q15_fold turned into 2^(4-e) for the
+               float entry), so the table index comes out of acc's own
+               bits and the coordinate costs nothing. */
+            int32_t s15 = sigmoid_q15_i(acc, sig_e[c]);
+            int done = 0;
+#if defined(LZ_ARM_PRIM_ASM)
+            /* THE REMAINING MULTIPLY IS AN EXPONENT ADD. It scales acc_f
+               by an exact power of two, which is exact in IEEE, so
+               fl(acc_f * 2^oe) IS acc_f with oe added to its exponent
+               field - the same number the C's __aeabi_fmul arrives at,
+               not an approximation of it. lz_scale2_arm_asm declines
+               every case where the add is not the whole story (a zero or
+               subnormal acc_f, a result that leaves the normal range),
+               and a decline here drops the channel to the C below.
+               (float)s15 is a correctly-rounded int32->float32 either
+               way, so lz_i32f_arm_asm and the cast agree over the whole
+               int32 domain - s15's own [0, 32768] range is not what
+               makes that true and is not relied on.
+
+               The x-domain float entry this branch used to make (a
+               second lz_scale2_arm_asm to build x, then sigmoid_q15)
+               is gone with the C's: BOTH TIERS NOW CALL sigmoid_q15_i,
+               so the two agree by construction instead of by the
+               table-edge coincidence .prof/conv_epi_xentry.sh had to
+               sweep. One soft-float call left where the C tier makes
+               three, against docs/arm-asm-audit.md E2's five. */
+            if (prim) {
+                union { float f; uint32_t u; } ab, pb;
+                int32_t oe;
+                if (conv_pow2_exp(sig_oscale2[c], &oe)) {
+                    ab.f = lz_i32f_arm_asm(acc);
+                    if (lz_scale2_arm_asm(ab.u, oe, &pb.u)) {
+                        o[c] = pb.f * lz_i32f_arm_asm(s15);
+                        done = 1;
+                    }
+                }
+            }
+#endif /* LZ_ARM_PRIM_ASM */
+            if (!done) o[c] = (lz_i32f(acc) * sig_oscale2[c]) * (float)s15;
+#else /* !LZ_CONV_SIG_I */
             int done = 0;
 #if defined(LZ_ARM_PRIM_ASM)
             /* THE TWO MULTIPLIES ARE EXPONENT ADDS. Both scale the same
@@ -2685,6 +2765,7 @@ void lz_causal_conv1d_step_fixed(float *o, const float *x, const short *xi,
                 int32_t s15 = sigmoid_q15_t(acc_f * sig_k1[c] + sig_k2);
                 o[c] = (acc_f * sig_oscale2[c]) * (float)s15;
             }
+#endif /* LZ_CONV_SIG_I */
         }
         for (j = 0; j + 1 < hist; j++) so[j] = si[j + 1];
         if (hist > 0) so[hist - 1] = (short)q;

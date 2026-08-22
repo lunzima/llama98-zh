@@ -446,6 +446,9 @@ typedef struct {
                            oscale / 32768 (oscale is 2^-(ew+es); neither
                            array stores oscale itself - it has no other
                            consumer, see lz_sig_q15_fold)
+         conv_sig_e       (n_linear, lin_conv_dim) the same exponent as an
+                           integer, which is what the epilogue's sigmoid
+                           reads under LZ_CONV_SIG_I
        All are derived from the model and never change; they live here
        rather than on LZModel only to keep the loader untouched. */
     short *conv_state_q;
@@ -509,6 +512,8 @@ typedef struct {
     short *moe_h1_i16, *moe_h3_i16;
     float *conv_sig_k1;
     float *conv_sig_oscale2;
+    signed char *conv_sig_e;    /* (n_linear, lin_conv_dim) ew[c] + LZ_CONV_ES,
+                                   the integer the two floats above encode */
     float  conv_sig_k2;         /* lz_sig_q15_t_offset(), same for every channel */
     float  conv_in_scale;
     int    conv_bound;

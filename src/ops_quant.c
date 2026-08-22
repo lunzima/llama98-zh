@@ -536,8 +536,7 @@ int32_t sigmoid_q15_t(float t) {
  *   below compute: for sh <= 15 exactly, and for sh > 15 the extra
  *   right shift is the same floor.
  * Beyond e = 19 the float path's `x + 12` starts rounding and this
- * entry is the more accurate of the two rather than the equal one -
- * which is why the range is capped here instead of silently drifting.
+ * entry is the more accurate of the two rather than the equal one.
  * Verified exhaustively over the full int16 input domain at the
  * exponents the engine uses, .prof/m5sig.c, 0 mismatches.
  *
@@ -545,30 +544,88 @@ int32_t sigmoid_q15_t(float t) {
  * non-negative value: a right shift of a negative int is only
  * implementation-defined in C, and this entry must not depend on it.
  *
+ * THE NARROW BODY STOPS AT e = 19 FOR A SECOND REASON, and it is not
+ * accuracy: u == v + 12*2^e is only an int32 while 24*2^e is, so at
+ * e = 27 every |v| above 2^31-1 - 12*2^27 overflows it. No int16
+ * producer can reach that, which is why it stood; the conv accumulator
+ * is an int32 and can, so the band above is the wide body's.
+ *
  * No ARM primitive hook, unlike the two float entries above: those exist
  * to do the coordinate derivation the ARM way, and here there is no
  * float coordinate to derive. */
+
+/* The wide band's coordinate, in units of 2^-15 of one table step:
+ *
+ *   t == (x - LZ_SIG_LO) * LZ_SIG_STEP and x == v * 2^-e, so
+ *   t * 2^15 == 192 * 2^15 + v * 2^(19-e), and for e >= 19 that is
+ *   192 * 2^15 + floor(v / 2^(e-19)) EXACTLY - an integer plus a
+ *   floored shift, no float and no rounding anywhere. idx and frac are
+ *   then this value's two halves, since 192*2^15 is an integer:
+ *   floor(t*2^15) == idx*2^15 + floor((t-idx)*2^15).
+ *
+ * THE SHIFT RUNS ON A BIASED UNSIGNED, not on v itself, for the same
+ * reason the narrow body forms u: `>>` on a negative int is only
+ * implementation-defined. (uint32_t)v + 2^31 is exactly v + 2^31 as a
+ * value in [0, 2^32) for every v including INT32_MIN, and 2^31 is
+ * divisible by 2^s for s <= 31, so (uu >> s) == floor(v/2^s) + 2^(31-s)
+ * and subtracting that constant back leaves the floor.
+ *
+ * NOTHING OVERFLOWS FOR s >= 1: |floor(v / 2^s)| <= 2^30, so q is
+ * inside +-2^30 and the sum inside +-(2^30 + 192*2^15). s == 0 (e == 19)
+ * is exactly where it would not be - v near INT32_MAX plus 192*2^15
+ * leaves int32 - which is why the wide band starts at 20 and the
+ * subtraction is written before the add.
+ *
+ * Verified exhaustively in .prof/verify_sig_i_wide.c against a reference
+ * that does the floor in long long. */
+#define LZ_SIG_T15  (((int32_t)(-(int)LZ_SIG_LO) * 16) << 15)  /* 192 << 15 */
+#define LZ_SIG_EMAX 50          /* s == e - 19 <= 31, the widest shift */
+
+static int32_t sig_t15_wide(int32_t v, int e) {
+    int s = e - 19;                             /* >= 1 */
+    uint32_t uu = (uint32_t)v + 0x80000000u;    /* v + 2^31, exactly */
+    int32_t q = (int32_t)(uu >> s) - (int32_t)((uint32_t)1 << (31 - s));
+    return q + LZ_SIG_T15;
+}
+
 int32_t sigmoid_q15_i(int32_t v, int e) {
     int32_t lim, u, frac, a, b;
     int idx, sh;
     if (!g_sigtab_ready) sig_build();
-    if (e < 0 || e > 27) return sigmoid_q15((float)v * pow2f(-e));
-    lim = (int32_t)(-(int)LZ_SIG_LO) << e;      /* x == +-12, the table edge */
-    if (v <= -lim) return 0;
-    if (v >= lim) return 32768;
-    u = v + lim;                                /* 0 < u < 24 * 2^e */
-    sh = e - 4;                                 /* t == u * 2^-sh */
-    if (sh <= 0) { idx = (int)(u << -sh); frac = 0; }
-    else {
-        idx = (int)(u >> sh);
-        frac = u & (((int32_t)1 << sh) - 1);
-        frac = (sh <= 15) ? (frac << (15 - sh)) : (frac >> (sh - 15));
+    if (e < 0 || e > LZ_SIG_EMAX) return sigmoid_q15((float)v * pow2f(-e));
+    if (e >= 20) {
+        int32_t t15 = sig_t15_wide(v, e);
+        /* Live for e <= 27 and provably dead above it: |q| <= 2^(31-s)
+           and 2^(31-s) < 192*2^15 once s >= 9, so no int32 v reaches
+           either table edge there. Kept rather than branched away - the
+           cost is two compares and the alternative is an out-of-range
+           g_sigtab read if the table geometry ever moves. */
+        if (t15 <= 0) return 0;
+        if (t15 >= (int32_t)LZ_SIG_N << 15) return 32768;
+        idx = (int)(t15 >> 15);
+        frac = t15 & 32767;
+    } else {
+        lim = (int32_t)(-(int)LZ_SIG_LO) << e;  /* x == +-12, the table edge */
+        if (v <= -lim) return 0;
+        if (v >= lim) return 32768;
+        u = v + lim;                            /* 0 < u < 24 * 2^e */
+        sh = e - 4;                             /* t == u * 2^-sh */
+        if (sh <= 0) { idx = (int)(u << -sh); frac = 0; }
+        else {
+            idx = (int)(u >> sh);
+            frac = u & (((int32_t)1 << sh) - 1);
+            frac = (sh <= 15) ? (frac << (15 - sh)) : (frac >> (sh - 15));
+        }
     }
     a = g_sigtab[idx];
     b = g_sigtab[idx + 1];
     return a + (((b - a) * frac) >> 15);
 }
 
+/* Declines past e = 27 because 12*2^e leaves int32 there - which is the
+   same fact as "no int32 input reaches the table edge at that exponent",
+   so a producer at such an exponent needs no clamp rather than a wider
+   one. 0 is a refusal, not a bound: a caller must not pass it on as one. */
 int32_t lz_sig_q15_domain(int e) {
     if (e < 0 || e > 27) return 0;
     return (int32_t)(-(int)LZ_SIG_LO) << e;

@@ -282,9 +282,14 @@ $dm_with_fwd"
 # neither half's contribution could be rebuilt separately anyway. Its =0
 # arm reproduces the pre-change census exactly (1,108,134 on kmr20/zh)
 # and byte-identical logits on both fixtures and both gate models.
+# LZ_CONV_SIG_I is the fixed conv epilogue's integer-coordinate sigmoid
+# (ops.h, so ops.c and forward.c see the same value - forward.c builds
+# the exponent table the kernel reads). Its =0 arm reproduces the
+# pre-change census exactly (888,102 on kmr20/zh) and byte-identical
+# logits on both fixtures and both gate models.
 # The _ES exponents are calibration constants, not switches, and are
 # excluded for the same reason LZ_CONV_ES is.
-SWITCHES="LZ_GDN_FIXED=0 LZ_GDN_STATE_2PLANE=0 LZ_ATTN_FIXED=0 LZ_CONV_FIXED=0 LZ_NORM_FIXED=0 LZ_SSE2_GROUP=0 LZ_Q8_MIN_SCALE=0.0f LZ_EXACT_MATH=1 LZ_CPUID_NOCACHE=1 LZ_NO_FPU=1 LZ_KV_2PLANE=1 LZ_GDN_STATE_F32=1 LZ_BATCH_MAX=1 LZ_SPEC_K=1 LZ_PF_DIST=0 LZ_Q8R_FORCE_SSE=1 LZ_P2_FORCE_MMX=1 LZ_BVEC_I16=0 LZ_MOEGATE_I16=0 LZ_KLAT_I16=0 LZ_KGATE_I16=0 LZ_MLAT_I16=0 LZ_MLAT_REUSE=0 LZ_VPROJ_I16=0 LZ_Q8I16_INT=0 LZ_SWIGLU_I16=0"
+SWITCHES="LZ_GDN_FIXED=0 LZ_GDN_STATE_2PLANE=0 LZ_ATTN_FIXED=0 LZ_CONV_FIXED=0 LZ_NORM_FIXED=0 LZ_SSE2_GROUP=0 LZ_Q8_MIN_SCALE=0.0f LZ_EXACT_MATH=1 LZ_CPUID_NOCACHE=1 LZ_NO_FPU=1 LZ_KV_2PLANE=1 LZ_GDN_STATE_F32=1 LZ_BATCH_MAX=1 LZ_SPEC_K=1 LZ_PF_DIST=0 LZ_Q8R_FORCE_SSE=1 LZ_P2_FORCE_MMX=1 LZ_BVEC_I16=0 LZ_MOEGATE_I16=0 LZ_KLAT_I16=0 LZ_KGATE_I16=0 LZ_MLAT_I16=0 LZ_MLAT_REUSE=0 LZ_VPROJ_I16=0 LZ_Q8I16_INT=0 LZ_SWIGLU_I16=0 LZ_CONV_SIG_I=0"
 
 for entry in $SWITCHES; do
     name="${entry%%=*}"

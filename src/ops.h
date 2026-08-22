@@ -425,6 +425,20 @@ const char *lz_gdn_p2_impl(void);
 #define LZ_CONV_FIXED 1
 #endif
 
+/* The fixed conv1d epilogue's activation enters sigmoid in the INTEGER
+   coordinate (sigmoid_q15_i) instead of the folded float one
+   (sigmoid_q15_t). Three of the epilogue's six int<->float converts per
+   channel go away - the whole coordinate derivation was the float work,
+   and the accumulator is already the number the table wants indexing by.
+   NOT bit-identical, and the integer entry is the MORE accurate of the
+   two: every measured channel sits at e >= 22, far past the e <= 19
+   band where sigmoid_q15's `x + 12` is still exact.
+   In the header for LZ_CONV_FIXED's reason - forward.c builds the
+   exponent table this reads, so both files must see the same value. */
+#ifndef LZ_CONV_SIG_I
+#define LZ_CONV_SIG_I 1
+#endif
+
 /* Causal conv1d tier: "float" | "fixed" | "auto". AUTO asks the same
    hardware question as lz_gdn_p2_select - CPUID SSE, never MMX - so a
    Socket 7 part lands on fixed. Returns the resolved name, or NULL on an
@@ -845,7 +859,7 @@ void lz_quantize_q8_i16(const short *t, int n, int gs, float deq,
    the chain from the two producing matmuls to lz_quantize_q8_i16 crosses
    no int<->float boundary at all. `o` may alias `p`.
 
-   ep must be within sigmoid_q15_i's domain (0 <= ep <= 27); outside it
+   ep must be within sigmoid_q15_i's domain (0 <= ep <= 50); outside it
    that function reconstructs a float and this function's whole point is
    gone. See src/ops.c for the exact accumulator bounds - both int32
    products sit at their edges by construction, not by margin. */
@@ -1688,11 +1702,18 @@ void lz_causal_conv1d_step(float *o, const float *x,
    `xi` non-NULL takes the input already quantized at `es` and clamped
    to +-bound (lz_matmul_xq_nt_i16's exit), and `x`/`in_scale` go
    unread: the int pipeline's producer-consumer join, one float
-   multiply and one q8_round per channel deleted rather than moved. */
+   multiply and one q8_round per channel deleted rather than moved.
+
+   `sig_e` is the same per-channel exponent as `sig_k1`, ew[c] + es,
+   carried as the integer it always was instead of as the float 2^(4-e)
+   the folded coordinate needed. Under LZ_CONV_SIG_I it is what the
+   activation reads and sig_k1/sig_k2 go unread; under =0 the reverse,
+   and the caller passes NULL because it never allocated the table. */
 void lz_causal_conv1d_step_fixed(float *o, const float *x, const short *xi,
                                  const short *sh_in, short *sh_out,
                                  const short *mw, const float *sig_k1,
                                  const float *sig_oscale2, float sig_k2,
+                                 const signed char *sig_e,
                                  float in_scale, int bound,
                                  int n_ch, int k);
 

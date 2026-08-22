@@ -403,6 +403,16 @@ static void *xcalloc(size_t n, size_t sz, int *ok, long long *acc) {
 #define LZ_CONV_ES 9
 #endif /* LZ_CONV_ES */
 
+/* The per-channel exponent table's call-site accessor. A macro rather
+   than a plain `s->conv_sig_e + off` because the =0 build never
+   allocates the array, and `NULL + off` is undefined even where nothing
+   dereferences it - the kernel's own parameter is unread in that arm. */
+#if LZ_CONV_SIG_I
+#define LZ_CONV_SIG_E(s, off) ((s)->conv_sig_e + (off))
+#else
+#define LZ_CONV_SIG_E(s, off) ((const signed char *)0)
+#endif /* LZ_CONV_SIG_I */
+
 /* ---- q16_0's four int16 exits (int-pipeline milestone 5) -------------
  *
  * Every q16_0 role on this checkpoint - kda_b_proj, moe_gate_w,
@@ -667,6 +677,14 @@ static int conv_fixed_build(LZRunState *s, const LZModel *m) {
                 float oscale = (float)ldexp(1.0, -((int)e + LZ_CONV_ES));
                 lz_sig_q15_fold(oscale, &s->conv_sig_k1[base + ch + i],
                                 &s->conv_sig_oscale2[base + ch + i]);
+#if LZ_CONV_SIG_I
+                /* The same exponent, undivided. Measured 22..39 on both
+                   checkpoints, so it fits signed char with room; a model
+                   whose taps put it outside sigmoid_q15_i's 0..50 is not
+                   refused here - that entry rebuilds a float for such a
+                   channel and only the saving is lost. */
+                s->conv_sig_e[base + ch + i] = (signed char)((int)e + LZ_CONV_ES);
+#endif /* LZ_CONV_SIG_I */
             }
             ch += (size_t)cnt[t];
         }
@@ -1071,6 +1089,10 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
                                           &s->bytes_alloc);
         s->conv_sig_oscale2 = (float *)xcalloc(nch, sizeof(float), &ok,
                                                &s->bytes_alloc);
+#if LZ_CONV_SIG_I
+        s->conv_sig_e = (signed char *)xcalloc(nch, sizeof(signed char), &ok,
+                                               &s->bytes_alloc);
+#endif /* LZ_CONV_SIG_I */
         s->conv_sig_k2 = lz_sig_q15_t_offset();
         if (!ok) s->conv_fixed = 0;
         /* conv_fixed_build runs LATER, after cache_idx is filled - it
@@ -1304,7 +1326,7 @@ void lz_state_free(LZRunState *s) {
     free(s->moe_lat_i16); free(s->moe_lat_q); free(s->moe_lat_qs);
     free(s->vtmp_i16);
     free(s->moe_h1_i16); free(s->moe_h3_i16);
-    free(s->conv_sig_k1); free(s->conv_sig_oscale2);
+    free(s->conv_sig_k1); free(s->conv_sig_oscale2); free(s->conv_sig_e);
     free(s->xq); free(s->xqs); free(s->wscr); free(s->fwht_scratch);
     free(s->subn_norm_int);
     free(s->rope_cs);
@@ -2246,6 +2268,7 @@ static void forward_ssm(const LZModel *m, LZRunState *s,
                 s->conv_state_q + (size_t)slot_out * conv_slot_stride + li_off_conv,
                 s->conv_mw + cb * c->conv_kernel,
                 s->conv_sig_k1 + cb, s->conv_sig_oscale2 + cb, s->conv_sig_k2,
+                LZ_CONV_SIG_E(s, cb),
                 s->conv_in_scale, s->conv_bound, cdim, c->conv_kernel);
             continue;
         }
@@ -2864,21 +2887,21 @@ static void forward_kda(const LZModel *m, LZRunState *s,
                 qxi, qi + q_off, qo + q_off,
                 s->conv_mw + (cb + q_ch) * c->conv_kernel,
                 s->conv_sig_k1 + cb + q_ch, s->conv_sig_oscale2 + cb + q_ch,
-                s->conv_sig_k2,
+                s->conv_sig_k2, LZ_CONV_SIG_E(s, cb + q_ch),
                 s->conv_in_scale, s->conv_bound, kdim, c->conv_kernel);
             lz_causal_conv1d_step_fixed(
                 s->kda_kc + (size_t)tk * kdim, s->kda_k + (size_t)tk * kdim,
                 kxi, qi + k_off, qo + k_off,
                 s->conv_mw + (cb + k_ch) * c->conv_kernel,
                 s->conv_sig_k1 + cb + k_ch, s->conv_sig_oscale2 + cb + k_ch,
-                s->conv_sig_k2,
+                s->conv_sig_k2, LZ_CONV_SIG_E(s, cb + k_ch),
                 s->conv_in_scale, s->conv_bound, kdim, c->conv_kernel);
             lz_causal_conv1d_step_fixed(
                 s->kda_vc + (size_t)tk * vdim, s->kda_v + (size_t)tk * vdim,
                 vxi, qi + v_off, qo + v_off,
                 s->conv_mw + (cb + v_ch) * c->conv_kernel,
                 s->conv_sig_k1 + cb + v_ch, s->conv_sig_oscale2 + cb + v_ch,
-                s->conv_sig_k2,
+                s->conv_sig_k2, LZ_CONV_SIG_E(s, cb + v_ch),
                 s->conv_in_scale, s->conv_bound, vdim, c->conv_kernel);
             continue;
         }
