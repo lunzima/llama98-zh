@@ -2575,6 +2575,32 @@ void lz_fwht(float *v, int n) {
        this is bit-identical between wcc386 and gcc without any of the
        care the multiply-by-reciprocal paths demand. */
     int len, i, j;
+#if defined(LZ_FWHT_F32_SSE_EXTERN)
+    /* SSE1 from the third stage on. The butterfly at stride len pairs
+       v[i+j] with v[i+j+len], so for len >= 4 both halves are whole
+       16-byte vectors - one load each, addps, subps, two stores, no
+       shuffle. len 1 and 2 stay in the loop below, where an unpack per
+       butterfly would cost more than it saves.
+
+       Selected by tier, not by CPUID: --kernel ref must reach the C or
+       the arm this is compared against would be this. Same guard shape
+       src/fwht.c's int32 twin carries, and the same reason. */
+    if ((g_kernel == LZ_KERNEL_SSE2 || g_kernel == LZ_KERNEL_MMX) &&
+        lz_cpu_has_sse() && n >= 8 && (n & 7) == 0) {
+        for (len = 1; len < 4 && len < n; len <<= 1) {
+            for (i = 0; i < n; i += (len << 1)) {
+                for (j = 0; j < len; j++) {
+                    float a = v[i + j];
+                    float b = v[i + j + len];
+                    v[i + j]       = a + b;
+                    v[i + j + len] = a - b;
+                }
+            }
+        }
+        for (len = 4; len < n; len <<= 1) lz_fwht_stage_f32_sse(v, n, len);
+        return;
+    }
+#endif /* LZ_FWHT_F32_SSE_EXTERN */
     for (len = 1; len < n; len <<= 1) {
         for (i = 0; i < n; i += (len << 1)) {
             for (j = 0; j < len; j++) {
@@ -3358,15 +3384,16 @@ static const char km_why_attn_g128[] =
    same shape lz_quantize_q8 already vectorizes, and whether an x86
    kernel belongs here is a real open question rather than a category
    error. The ARM-only audit cannot answer it either way. */
-/* AUDITED NOW. Unlike the scalar leaves this one IS an element loop -
-   x[i]*sc, round to int16, accumulate v*v - so the question is which
-   instruction set can do all three steps, and the answer splits the six
-   columns rather than filling them with one reason.
+/* Unlike the scalar leaves this one IS an element loop - x[i]*sc, round
+   to int16, accumulate v*v - so the question is which instruction set
+   can do all three steps, and the answer splits the six columns rather
+   than filling them with one reason.
 
-   SSE2 can: mulps for the scale, cvtps2dq for the round (round-to-
-   nearest under the default MXCSR, which is q8_round's own rule), and
+   SSE2 can, and lz_norm_ss_sse2 is that cell: mulps for the scale,
+   cvtps2dq for the round (round-to-nearest under the default MXCSR,
+   which is q8_round's own rule), packssdw + pmaxsw for the clamp, and
    pmaddwd for the squares, which is exactly the accumulate this loop
-   wants. That cell is REAL and unwritten.
+   wants. Gate: .prof/norm_ss_sse2_xcheck.sh.
 
    SSE1 cannot finish it: mulps exists, but the float-to-int is
    cvtps2pi, two lanes into an MMX register, and the int32 accumulate
@@ -3375,11 +3402,6 @@ static const char km_why_attn_g128[] =
 
    MMX alone cannot start it: the scale is a FLOAT multiply and MMX is
    integer-only. */
-static const char km_why_nrmss_sse2[] =
-    "not written: mulps + cvtps2dq (round-to-nearest is the default "
-    "MXCSR mode, which is q8_round's own rule) + pmaddwd for the squares "
-    "covers all three steps of this loop. A real cell, and the largest "
-    "unwritten one in this table";
 static const char km_why_nrmss_sse1[] =
     "impossible as an SSE1 cell: mulps scales, but the float-to-int is "
     "cvtps2pi into an MMX register and the v*v accumulate is integer, so "
@@ -3394,43 +3416,40 @@ static const char km_why_nrmss_g128[] =
     "is q8_amax, which carries its own kernels";
 /* The Hadamards are the opposite of the scalar leaves above: a butterfly
    loop of pure add/sub over a power-of-two block, which is the shape
-   SIMD is best at, and no multiply or constant enters. So "not audited"
-   here does not mean "probably nothing there" - the ARM audit found real
-   content on both and the x86 side has simply never been opened. */
-/* AUDITED NOW, and the two transforms take OPPOSITE answers per ISA
-   because one is integer and the other is float - which is the whole
-   reason they are two units.
+   SIMD is best at, and no multiply or constant enters.
 
-   lz_fwht_i32 is paddd/psubd: MMX does two lanes, SSE2 does four, and
-   SSE1 has no integer add at all. lz_fwht is addps/subps: SSE1 and SSE2
-   both do four lanes, and MMX is integer-only.
+   The two transforms take OPPOSITE answers per ISA because one is
+   integer and the other is float - which is the whole reason they are
+   two units. lz_fwht_i32 is paddd/psubd: MMX does two lanes, SSE2 does
+   four, and SSE1 has no integer add at all. lz_fwht is addps/subps:
+   SSE1 and SSE2 both do four lanes, and MMX is integer-only. So fwhti
+   fills its four x86 cells with TWO bodies and fwhtf with one.
 
    Neither needs a shuffle. The butterfly at stride `len` pairs y[i]
-   with y[i+len], and for every stage with len >= 4 (SSE2) or len >= 2
-   (MMX) those are two CONTIGUOUS vectors - one load each, one add, one
-   sub, two stores. Only the last stages, where len drops below the
-   vector width, need an unpack, and those are the cheap ones. */
+   with y[i+len], and for every stage with len >= the vector width those
+   are two CONTIGUOUS vectors - one load each, one add, one sub, two
+   stores. The last stages, where len drops below the vector width, stay
+   scalar: an unpack per butterfly would cost more than it saves, and
+   they are the cheap ones anyway.
+
+   Both are bit-identical to the C body rather than close, and that is a
+   structural claim, not a measurement that happened to come out even:
+   each output is one add or one sub of the same pair the scalar loop
+   forms, so nothing is reassociated and no constant enters. The gates
+   are .prof/fwht_mmx_xcheck.sh and .prof/fwht_f32_xcheck.sh, both with
+   a mutation, and .prof/wbuild_xcheck.sh runs the same probes through
+   the target compiler. */
 static const char km_why_fwhti_sse1[] =
     "impossible: SSE1 has no integer add - paddd is MMX/SSE2. The int32 "
     "butterfly cannot be expressed in xmm under SSE1";
-static const char km_why_fwhti_x86[] =
-    "not written: paddd/psubd on contiguous pairs - the butterfly at "
-    "stride len >= the vector width needs no shuffle at all, one load "
-    "each and one store each. A real cell";
 static const char km_why_fwhtf_mmx[] =
     "impossible: MMX is integer-only and this transform is over floats. "
     "The int32 twin (fwhti) is the one MMX can take";
-static const char km_why_fwhtf_x86[] =
-    "not written: addps/subps on contiguous pairs, same no-shuffle "
-    "argument as fwhti - but OFF the shipping path, since an F32 weight "
-    "is what reaches this twin and every quantized export leaves the "
-    "projections quantized";
 static const char km_why_fwhtf_arma[] =
-    "not written: docs/arm-asm-audit.md G2 rates it worth writing (one "
-    "unpack+align serving both the sum and the difference, instead of "
-    "two __addsf3 calls) but OFF the shipping path - an F32 weight is "
-    "what reaches it, and every quantized export leaves the projections "
-    "quantized";
+    "not written yet: docs/arm-asm-audit.md G2 rates it worth writing - "
+    "one unpack+align serving both the sum and the difference, instead "
+    "of two __addsf3 calls, which is a CHAIN and so survives M5's "
+    "negative result on rewriting single float operations";
 static const char km_why_fwht_g128[] =
     "this column is the 128-ELEMENT quantization group; the Hadamard's "
     "block is hadamard_o/hadamard_down (up to 512, capped by the "
@@ -3500,12 +3519,12 @@ static const LZKmReg km_reg[LZ_KM_NUNIT * LZ_KM_NCOL] = {
 /* wsump*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_T(km_why_op_sse2), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_T(km_why_op_sse2), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_attn_g128),
 /* sigq */ KM_H(KM_ALL), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128),
 /* nrmss*/ KM_H(KM_ALL), KM_I(km_why_nrmss_mmx), KM_I(km_why_nrmss_sse1), KM_H(LZ_KMB_GCC), KM_I(km_why_nrmss_mmx), KM_I(km_why_nrmss_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_nrmss_g128),
-/* The two Hadamards are the only units here whose armA cell is EMPTY.
-   That is the point of registering them: without a row, a gate counting
+/* fwhtf's armA is the only EMPTY cell left in these two rows, and that
+   is the point of registering them: without a row, a gate counting
    filled cells could not tell "no assembly" from "no such operator",
    and src/fwht.c could be deleted without a single cell changing. */
 /* fwhti*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_fwhti_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_fwhti_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM),       KM_I(km_why_fwht_g128),
-/* fwhtf*/ KM_H(KM_ALL), KM_I(km_why_fwhtf_mmx), KM_T(km_why_fwhtf_x86), KM_T(km_why_fwhtf_x86), KM_I(km_why_fwhtf_mmx), KM_T(km_why_fwhtf_x86), KM_T(km_why_fwhtf_x86), KM_H(LZ_KMB_ARM), KM_T(km_why_fwhtf_arma), KM_I(km_why_fwht_g128),
+/* fwhtf*/ KM_H(KM_ALL), KM_I(km_why_fwhtf_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_I(km_why_fwhtf_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_T(km_why_fwhtf_arma), KM_I(km_why_fwht_g128),
 /* f32mm*/ KM_H(KM_ALL), KM_I(km_why_f32mm_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_I(km_why_f32mm_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_T(km_why_f32mm_arma), KM_I(km_why_f32mm_g128)
 };
 
@@ -3579,10 +3598,11 @@ static int km_arm_asm(int f) {
        inline block: its per-call setup amortizes over a whole row. */
     if (f == LZ_KM_UNIT_ATDOT || f == LZ_KM_UNIT_WSUMP ||
         f == LZ_KM_UNIT_NRMSS) return 1;
-    /* fwhti only. The float twin's cell stays empty and registered:
-       it needs an F32 weight to run, which no quantized export
-       produces, so writing it would be assembly for a path the target
-       machine never takes. */
+    /* fwhti only. The float twin's ARM cell is still empty - not
+       because an F32 weight is a path worth skipping (the x86 columns
+       are written, and an F32 model is a shipping configuration), but
+       because the ARM body has not been written yet. Its reason string
+       says so. */
     if (f == LZ_KM_UNIT_FWHTI) return 1;
 #endif /* LZ_ARM_ASM_EXTERN */
     (void)f;
@@ -3648,6 +3668,22 @@ static int km_op_present(int f, int c) {
          c == LZ_KM_COL_ROW0 + LZ_ROW_SSE2_I)) return 1;
 #endif /* __WATCOMC__ */
 #endif /* LZ_MATMUL_F32_SSE_EXTERN */
+#if defined(LZ_FWHT_F32_SSE_EXTERN)
+    /* Four cells from one body, same as f32mm just above and for the
+       same reason - addps/subps is SSE1, and lz_fwht offers it at both
+       the mmx and sse2 tiers. Note the asymmetry with fwhti two entries
+       up, which needs TWO bodies for its four cells because MMX's paddd
+       is two lanes and SSE2's is four. */
+#if defined(__WATCOMC__)
+    if (f == LZ_KM_UNIT_FWHTF &&
+        (c == LZ_KM_COL_ROW0 + LZ_ROW_SSE_A ||
+         c == LZ_KM_COL_ROW0 + LZ_ROW_SSE2_A)) return 1;
+#else
+    if (f == LZ_KM_UNIT_FWHTF &&
+        (c == LZ_KM_COL_ROW0 + LZ_ROW_SSE_I ||
+         c == LZ_KM_COL_ROW0 + LZ_ROW_SSE2_I)) return 1;
+#endif /* __WATCOMC__ */
+#endif /* LZ_FWHT_F32_SSE_EXTERN */
     if (f != LZ_KM_UNIT_ATDOT && f != LZ_KM_UNIT_WSUMP) return 0;
 #if defined(__WATCOMC__)
     if (c == LZ_KM_COL_ROW0 + LZ_ROW_MMX_A) return 1;

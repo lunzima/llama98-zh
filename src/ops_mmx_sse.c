@@ -484,6 +484,48 @@ void lz_q8round_2p_group_sse(const float *grp, int8_t *ho, int8_t *lw,
     _mm_empty();
 }
 
+/* ---- Hadamard over FLOATS: one butterfly stage of lz_fwht, SSE1
+   Watcom twin. gcc twin: lz_fwht_stage_f32_sse, the intrinsics body
+   below - read that one for why this is exact rather than close, and
+   why the float and int32 transforms take mirrored ISA answers.
+
+   Byte offsets, like both of the int32 twins: `len` is scaled once
+   instead of at every index. */
+extern void lz_fwht_stage_f32_sse_asm(float *y, int n, int len);
+/* No separate base register: after the inner loop a has reached base+len
+   and b has reached base+2*len, which IS the next block's base. So the
+   outer step is `a = b; b = a + len` - two moves, and ebx/ebp stay out
+   of the clobber list entirely. */
+#pragma aux lz_fwht_stage_f32_sse_asm = \
+    ".686"                                                      \
+    "shl    ecx, 2"                 /* len -> bytes */          \
+    "lea    edx, [eax+edx*4]"       /* end = y + n */           \
+    "lea    esi, [eax+ecx]"         /* b = y + len */           \
+    "fwfouter:"                                                 \
+    "mov    edi, ecx"                                           \
+    "fwfinner:"                                                 \
+    "movups xmm0, [eax]"                                        \
+    "movups xmm1, [esi]"                                        \
+    "movaps xmm2, xmm0"                                         \
+    "addps  xmm0, xmm1"                                         \
+    "subps  xmm2, xmm1"                                         \
+    "movups [eax], xmm0"                                        \
+    "movups [esi], xmm2"                                        \
+    "add    eax, 16"                                            \
+    "add    esi, 16"                                            \
+    "sub    edi, 16"                                            \
+    "jnz    fwfinner"                                           \
+    "mov    eax, esi"                                           \
+    "lea    esi, [esi+ecx]"                                     \
+    "cmp    eax, edx"                                           \
+    "jb     fwfouter"                                           \
+    parm [eax] [edx] [ecx]                                      \
+    modify [eax ecx edx esi edi];
+
+void lz_fwht_stage_f32_sse(float *y, int n, int len) {
+    lz_fwht_stage_f32_sse_asm(y, n, len);
+}
+
 /* ---- lz_matmul's F32-weight row, SSE1 Watcom twin.
    gcc twin: lz_matmul_row_sse, the intrinsics body below - read that
    one for why two xmm accumulators ARE the C's eight scalars rather
@@ -628,6 +670,40 @@ void lz_q8round32_sse(const float *x, int8_t *o, const float *pinv) {
 
    Returns how many elements it consumed (a multiple of 8); the tail is
    the caller's, in C, exactly as before. */
+/* ---- Hadamard over FLOATS: one butterfly stage of lz_fwht, SSE1 gcc
+   twin. Watcom twin: lz_fwht_stage_f32_sse_asm, the #pragma aux above.
+
+   The float sibling of src/ops_mmx.c's int32 cell, and the ISA answers
+   are mirrored: this one needs addps/subps, which arrive with SSE1 and
+   which MMX (integer only) cannot express; the int32 one needs
+   paddd/psubd, which MMX has and SSE1 does not. That is why the two
+   transforms are two units in the coverage matrix rather than one.
+
+   len >= 4 is the precondition: below it the halves of the butterfly
+   are not whole 16-byte vectors, and lz_fwht keeps those stages.
+
+   EXACT, not close. The transform is one add and one sub per butterfly
+   with no constant entering - lz_fwht's own comment already says that
+   is why it is bit-identical between wcc386 and gcc - so a vector form
+   that pairs the same operands under the same operators produces the
+   same floats. It is not a reassociation: y[i+j] and y[i+j+len] are
+   combined pairwise exactly as the scalar loop combines them.
+
+   No emms: SSE1's float side touches no %mm register. */
+void lz_fwht_stage_f32_sse(float *y, int n, int len) {
+    int i, j;
+    for (i = 0; i < n; i += (len << 1)) {
+        float *a = y + i;
+        float *b = y + i + len;
+        for (j = 0; j < len; j += 4) {
+            __m128 u = _mm_loadu_ps(a + j);
+            __m128 v = _mm_loadu_ps(b + j);
+            _mm_storeu_ps(a + j, _mm_add_ps(u, v));
+            _mm_storeu_ps(b + j, _mm_sub_ps(u, v));
+        }
+    }
+}
+
 int lz_matmul_row_sse(const float *row, const float *x, int in_dim,
                       float *acc8) {
     __m128 a = _mm_setzero_ps();

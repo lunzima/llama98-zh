@@ -90,6 +90,13 @@ lz_p2_blk *p2_blk(void);
 int lz_matmul_row_sse(const float *row, const float *x, int in_dim,
                       float *acc8);
 
+/* lz_fwht's butterfly stage over FLOATS - the SSE1 sibling of the int32
+   cell in src/ops_mmx.c. Mirrored ISA answers: this needs addps/subps
+   (SSE1, and MMX cannot express it), that one needs paddd/psubd (MMX,
+   and SSE1 cannot). len >= 4. */
+#define LZ_FWHT_F32_SSE_EXTERN 1
+void lz_fwht_stage_f32_sse(float *y, int n, int len);
+
 #if defined(__WATCOMC__)
 /* Watcom's kernels live in src/ops_mmx.c too. Grouped by their
    call-site shape, not by kernel, because that shape is the point:

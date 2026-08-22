@@ -34,11 +34,23 @@
 #      other stage above runs on a little-endian machine, so a loader
 #      that assumes little-endian byte order passes all nine of them;
 #      this is the only one that can tell portable from untested
+#  11. build/perf_knob_gate.sh - the PERFORMANCE-only knobs, where the
+#      assertion is invariance: a knob that only trades speed for memory
+#      must not move a single logit bit
+#  12. build/kv_rot_gate.sh - --kv-rot, the one output-CHANGING knob,
+#      so the assertion is a quality number rather than invariance
 #  13. build/int_pipeline_arm_gate.sh - stage 5 compiles every control
 #      switch's non-default value but never links or runs one, so a
 #      definition missing behind a guard is invisible there. This links
 #      and runs each int-pipeline =0 arm, and fails if stage 5 gains a
 #      switch it does not list
+#  14. build/kernel_matrix_gate.sh - iron law 8's coverage matrix, built
+#      on all three classes and cross-checked against each binary's own
+#      macros, so neither an unregistered kernel nor a registration
+#      outliving its kernel survives
+#  15. build/kernel_isa_identity_gate.sh - iron law 2 end to end: two
+#      TIERS in one binary, the comparison stage 6's two-COMPILER gate
+#      cannot make
 #
 # Judging discipline (this repo has paid for getting this wrong before):
 #   - Never grep bare 'error' - "0 errors" contains the substring.
@@ -81,7 +93,7 @@ freshness_sentinel() {
 # ---------------------------------------------------------------------
 # Stage 1: make native (gcc)
 # ---------------------------------------------------------------------
-echo "==== [1/13]make native ===="
+echo "==== [1/15]make native ===="
 NATIVE_EXE="$ROOT/llama98.exe"
 [ -e "$NATIVE_EXE" ] || NATIVE_EXE="$ROOT/llama98"
 LOG=build/ci-native.log
@@ -120,7 +132,7 @@ rm -f "$SENTINEL"
 # Stage 2: make watcom-cli (Open Watcom, the target compiler)
 # ---------------------------------------------------------------------
 echo
-echo "==== [2/13]make watcom-cli ===="
+echo "==== [2/15]make watcom-cli ===="
 WATCOM_EXE="$ROOT/llama98-w.exe"
 WATCOM_OBJDIR="$ROOT/build/watcom/cli"
 LOG=build/ci-watcom-cli.log
@@ -172,7 +184,7 @@ rm -f "$SENTINEL"
 # Stage 3: llama98 <dir> --check on a curated set of KunMoe checkpoints
 # ---------------------------------------------------------------------
 echo
-echo "==== [3/13]model --check sweep ===="
+echo "==== [3/15]model --check sweep ===="
 MODELS_ROOT=${MODELS_ROOT:-/e/LLM/models}
 # Curated, not a blind sweep of every directory under MODELS_ROOT:
 # a usable sweep is a handful of representative checkpoints, and
@@ -219,7 +231,7 @@ fi
 # Stage 4: x86 <-> ARMv5TE parity gate
 # ---------------------------------------------------------------------
 echo
-echo "==== [4/13]ARM parity gate ===="
+echo "==== [4/15]ARM parity gate ===="
 ARM_MODEL="$MODELS_ROOT/kunkun98-pilot-20260806"
 LOG=build/ci-arm.log
 if [ "$native_ok" -ne 1 ]; then
@@ -254,7 +266,7 @@ fi
 # Stage 5: control-switch matrix (every non-default value, gcc + Watcom)
 # ---------------------------------------------------------------------
 echo
-echo "==== [5/13]control-switch matrix ===="
+echo "==== [5/15]control-switch matrix ===="
 LOG=build/ci-switch-matrix.log
 build/switch_matrix_gate.sh >"$LOG" 2>&1
 MATRIX_RC=$?
@@ -282,7 +294,7 @@ esac
 # Stage 6: every fixed-point write tier's gcc<->Watcom bit-identity
 # ---------------------------------------------------------------------
 echo
-echo "==== [6/13]fixed-tier cross-compiler gate ===="
+echo "==== [6/15]fixed-tier cross-compiler gate ===="
 LOG=build/ci-fixed-tier-xcompiler.log
 build/fixed_tier_xcompiler_gate.sh >"$LOG" 2>&1
 NIX_RC=$?
@@ -314,7 +326,7 @@ esac
 # compile-time-off in the same compiler, where it is not.
 # ---------------------------------------------------------------------
 echo
-echo "==== [7/13]recurrence float-arm gate ===="
+echo "==== [7/15]recurrence float-arm gate ===="
 LOG=build/ci-recur-write-float-arm.log
 build/recur_write_float_arm_gate.sh >"$LOG" 2>&1
 NIX_RC=$?
@@ -344,7 +356,7 @@ esac
 # separate delivery decision); none of the three is in ci.sh's stage 2.
 # ---------------------------------------------------------------------
 echo
-echo "==== [8/13]watcom gui/dll/dos targets ===="
+echo "==== [8/15]watcom gui/dll/dos targets ===="
 for t in watcom-gui watcom-dll watcom-dos; do
     case $t in
         watcom-gui) EXE="$ROOT/kunkun98-w.exe" ;;
@@ -376,12 +388,12 @@ for t in watcom-gui watcom-dll watcom-dos; do
 done
 
 # ---------------------------------------------------------------------
-# Stage 8: 32-bit x87 gcc build under WSL (Windows gcc has no 32-bit
+# Stage 9: 32-bit x87 gcc build under WSL (Windows gcc has no 32-bit
 # libs). The fourth toolchain shape - a Socket-7-class target with x87
 # as its only float unit. SKIP when WSL is not usable, never PASS.
 # ---------------------------------------------------------------------
 echo
-echo "==== [9/13]32-bit x87 gcc build (WSL) ===="
+echo "==== [9/15]32-bit x87 gcc build (WSL) ===="
 LOG=build/ci-x87.log
 if ! command -v wsl >/dev/null 2>&1; then
     echo "SKIP: 32-bit x87 build (wsl not installed)"
@@ -425,7 +437,7 @@ fi
 # MIPS cross toolchain is absent, never PASS.
 # ---------------------------------------------------------------------
 echo
-echo "==== [10/13]big-endian parity gate (WSL) ===="
+echo "==== [10/15]big-endian parity gate (WSL) ===="
 LOG=build/ci-endian.log
 if ! command -v wsl >/dev/null 2>&1; then
     echo "SKIP: big-endian parity gate (wsl not installed)"
@@ -469,7 +481,7 @@ fi
 # them the two easiest knobs to break silently.
 # ---------------------------------------------------------------------
 echo
-echo "==== [11/13]performance-knob invariance ===="
+echo "==== [11/15]performance-knob invariance ===="
 LOG=build/ci-perf-knob.log
 build/perf_knob_gate.sh "$ARM_MODEL" >"$LOG" 2>&1
 PK_RC=$?
@@ -500,7 +512,7 @@ esac
 # error, so the rotated run must land closer to the --kv f32 reference.
 # ---------------------------------------------------------------------
 echo
-echo "==== [12/13]--kv-rot quality gate ===="
+echo "==== [12/15]--kv-rot quality gate ===="
 LOG=build/ci-kv-rot.log
 build/kv_rot_gate.sh "$ARM_MODEL" >"$LOG" 2>&1
 KR_RC=$?
@@ -534,7 +546,7 @@ esac
 # matrix's switches had a standing gate that ran their build.
 # ---------------------------------------------------------------------
 echo
-echo "==== [13/13] int-pipeline control arms ===="
+echo "==== [13/15] int-pipeline control arms ===="
 LOG=build/ci-int-pipeline-arms.log
 build/int_pipeline_arm_gate.sh >"$LOG" 2>&1
 IPA_RC=$?
@@ -554,6 +566,73 @@ case $IPA_RC in
     *)
         echo "FAIL: int-pipeline control arms"
         note "FAIL  int-pipeline control arms"
+        FAIL=$((FAIL + 1))
+        ;;
+esac
+
+# ---------------------------------------------------------------------
+# Stage 14: the kernel-coverage matrix. Iron law 8 says every operator
+# has a cell per tier per build class and that an EMPTY cell carries a
+# reason; nothing enforced that from CI, so the matrix could go stale in
+# either direction - a kernel written and never registered, or a
+# registration outliving the kernel it names. The gate builds all three
+# classes (gcc, Watcom, ARM cross) and cross-checks each binary's own
+# --kernel-matrix against what its macros actually define.
+# ---------------------------------------------------------------------
+echo
+echo "==== [14/15]kernel coverage matrix ===="
+LOG=build/ci-kernel-matrix.log
+build/kernel_matrix_gate.sh >"$LOG" 2>&1
+KMX_RC=$?
+cat "$LOG"
+case $KMX_RC in
+    0)
+        echo "PASS: kernel coverage matrix"
+        note "PASS  kernel coverage matrix"
+        PASS=$((PASS + 1))
+        ;;
+    2)
+        REASON=$(grep -m1 'SKIP' "$LOG")
+        echo "SKIP: kernel coverage matrix ($REASON)"
+        note "SKIP  kernel coverage matrix ($REASON)"
+        SKIP=$((SKIP + 1))
+        ;;
+    *)
+        echo "FAIL: kernel coverage matrix"
+        note "FAIL  kernel coverage matrix"
+        FAIL=$((FAIL + 1))
+        ;;
+esac
+
+# ---------------------------------------------------------------------
+# Stage 15: iron law 2 END TO END. Stage 6 compares two COMPILERS on one
+# tier; this compares two TIERS in one binary, which is where a twin
+# that drifted from its sibling shows and where a cross-compiler gate is
+# blind by construction. Both gates existed on disk before this stage
+# and neither was called from here - stage 14's was uncommitted
+# entirely, so a clean checkout did not have it.
+# ---------------------------------------------------------------------
+echo
+echo "==== [15/15]kernel ISA identity ===="
+LOG=build/ci-kernel-isa.log
+build/kernel_isa_identity_gate.sh >"$LOG" 2>&1
+KID_RC=$?
+cat "$LOG"
+case $KID_RC in
+    0)
+        echo "PASS: kernel ISA identity"
+        note "PASS  kernel ISA identity"
+        PASS=$((PASS + 1))
+        ;;
+    2)
+        REASON=$(grep -m1 'kernel_isa_identity_gate: SKIP' "$LOG")
+        echo "SKIP: kernel ISA identity ($REASON)"
+        note "SKIP  kernel ISA identity ($REASON)"
+        SKIP=$((SKIP + 1))
+        ;;
+    *)
+        echo "FAIL: kernel ISA identity"
+        note "FAIL  kernel ISA identity"
         FAIL=$((FAIL + 1))
         ;;
 esac
