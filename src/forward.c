@@ -580,19 +580,29 @@ static void *xcalloc(size_t n, size_t sz, int *ok, long long *acc) {
  * q8_0 on the second, so both epilogue families are covered). Largest ES
  * that clamps NOTHING, per run, worst case across all four:
  *
- *   role   kmr20 zh/en   t2probe zh/en   worst   shipped   headroom
- *   p       12 / 12        12 / 11        11       11       1.89x
- *   g       14 / 13        13 / 13        13       12       1.44x
- *   out     13 / 12        11 / 12        11       11       1.25x
+ * PER SITE, because the two sites do not agree and one constant per role
+ * has to take the smaller of them:
  *
- * p is at the worst case rather than one below it because the next step
- * down costs a bit of the sigmoid coordinate on every element; g and out
- * have room to spare and are placed where the clamp cannot be reached by
- * a corpus 1.4x wider than these. Re-run .prof/m8range.c on any
- * checkpoint whose FFN might be scaled differently - and read
- * lz_debug_swiglu_pmax/_gmax/_omax, which the CLI prints: a maximum
- * strictly below 32767 is the proof that nothing clamped, since the
- * clamp inside epi_align_i16 is silent.
+ *   role              kmr20 zh/en   t2probe zh/en   worst
+ *   routed p  (w1)     12 / 12        12 / 11        11
+ *   shared p  (gate)   12 / 11        12 / 12        11
+ *   routed g  (w3)     14 / 13        13 / 13        13
+ *   shared g  (up)     12 / 12        13 / 13        12
+ *   routed out         13 / 12        11 / 11        11
+ *   shared out         11 / 11        12 / 12        11
+ *
+ * so the shipping p 11 / g 12 / out 11 is each role's worst case exactly,
+ * with none of the three dropped an extra octave the way LZ_KGATE_ES and
+ * LZ_VPROJ_ES were. That is a deliberate difference: a step down costs a
+ * bit on every element of a chain already three roundings deep, and what
+ * replaces the extra octave here is a live probe instead of an argument.
+ * lz_debug_swiglu_pmax/_gmax/_omax carry the post-clamp maxima and the
+ * CLI prints them - a maximum strictly below 32767 is the proof that
+ * nothing clamped, since the clamp inside epi_align_i16 is silent.
+ * Measured over both corpora on both models: 17,377 / 22,582 / 26,691,
+ * i.e. 1.89x / 1.45x / 1.23x of margin. Re-run .prof/m8range.c on any
+ * checkpoint whose FFN might be scaled differently, and read those three
+ * on any run that matters.
  *
  * The sigmoid table's own edge is a non-event here and that is measured
  * too: |p| never reaches 12 on either model or either corpus (0 of
