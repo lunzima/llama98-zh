@@ -33,6 +33,7 @@
 !/build/dedupe_gate.sh
 !/build/dup_body_gate.sh
 !/build/c89_floor_gate.sh
+!/build/twin_pair_gate.sh
 !/build/int_pipeline_arm_gate.sh
 !/build/mm_alias_gate.sh
 !/build/isa_floor_watcom_gate.sh
