@@ -269,6 +269,32 @@ itself lives outside this repo; what the tree evidences:
 9. **A contested choice is a knob, not a decision.** If the right value differs
    across the target family, it becomes an option with a default, not a
    constant. (`LZ_DOS_EXTENDER`, `--pair`, `--prefetch`, `stream_ms`, …)
+10. **The target family includes big-endian machines and a 1995 C89 compiler.**
+    Windows NT on MIPS, built with Visual C++ 4.0, is a target. So the language
+    floor is C89 as that compiler implements it, and the data floor is "byte
+    order is not an assumption you get to make".
+
+    What that costs, measured rather than feared — `grep` over `src/` today:
+    **213 uses of `long long`** and **23 files including `<stdint.h>`**. VC++ 4.0
+    has neither: the 64-bit type is `__int64` and the fixed-width names do not
+    exist. Both need to go behind one header that each toolchain answers in its
+    own terms; scattering `#ifdef _MSC_VER` at 213 sites is the shape rule
+    "one authority per fact" exists to forbid. Also absent there: `//`
+    comments (the tree is already clean — 0 occurrences), declarations after
+    statements, `inline`, `__attribute__`, and anything from C99's library.
+
+    **UNALIGNED ACCESS IS A CORRECTNESS BUG, not a slow path.** On ARMv5TE an
+    unaligned word load does not fault — it returns the word ROTATED, so the
+    engine computes confidently wrong numbers. On MIPS it faults. On a Pentium
+    it costs three cycles. One of those three is silent, which is why this is a
+    law and not a tuning note. Buffers that SIMD or `LDM` will read declare
+    their alignment (`LZ_XW_ALIGN`); they do not inherit it from whatever the
+    compiler happened to give a large array.
+
+    **`build/mips/endian_gate.sh` is the only gate that can see a byte-order
+    bug.** Every other target — x86 under gcc/MinGW/Watcom, x86-64, ARMv5TE — is
+    little-endian, so a load path that assumes little-endian passes the entire
+    rest of the suite, ARM bit-identity included.
 
 Two more, not numbered but enforced everywhere:
 
