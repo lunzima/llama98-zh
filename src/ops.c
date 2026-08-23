@@ -179,10 +179,12 @@ float lz_sigmoid(float x) {
     }
     /* Billed flat for both branches: add (1.0f+z) and divide. The
        positive branch also negates before calling lz_exp, but a negate
-       is a sign flip (bills zero), so both branches are really 2 ops;
-       the extra unit here is folded into add to hold the site's
-       historical total - see B1 report. */
-    LZ_FCX(LZ_FC_SIGMOID, 0, 2, 1, 0, 0);
+       is a sign flip and bills zero, so both branches are 1 add + 1 div.
+       The site billed 2 adds to hold an older total; corrected with the
+       three in src/ops_norm.c, and like two of those it is worth 0 in
+       the shipping census - lz_sig_mode() is on by default, so this
+       branch does not run. Measured, not assumed. */
+    LZ_FCX(LZ_FC_SIGMOID, 0, 1, 1, 0, 0);
     if (x >= 0.0f) {
         float z = lz_exp(-x);
         return 1.0f / (1.0f + z);

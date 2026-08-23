@@ -380,8 +380,18 @@ void lz_rmsnorm_gated_int(int32_t *t, const float *x, const float *g,
             goto have_ss_gated_int;
         }
     }
-    /* float ss fallback - same billing as lz_rmsnorm_gated's float row
-       (the output loop is skipped entirely here). */
+    /* float ss fallback. NOT RE-DERIVED, unlike the three other
+       "historical total" sites corrected in this file and src/ops.c,
+       and the comment that used to be here was wrong about why: it said
+       "the output loop is skipped entirely here", but
+       lz_rmsnorm_gated_out_fixed_int runs unconditionally eight lines
+       down and has no site of its own, so this site has to cover it.
+       Whether 5n is the right cover for an int output loop is an open
+       question, not a settled one.
+       Left alone deliberately: lz_norm_int() is -1 by default so
+       nothing here runs in the shipping census, and replacing one
+       unverified number with another unverified number is not a
+       correction. */
     LZ_FCX(LZ_FC_NORM, 5 * n, n + 1, 1, 0, 0);
     for (i = 0; i < n; i++) ss += x[i] * x[i];
 have_ss_gated_int:
@@ -592,14 +602,13 @@ void lz_rmsnorm_gated(float *o, const float *x, const float *g,
             goto have_ss_gated;
         }
     }
-    /* ss loop 2n, divide+eps (1 div, 1 add), output loop x*inv*w*silu(g)
-       (three multiplies, no add per element - the gate replaces
-       rmsnorm's (1+w) add with a multiply). The site bills one more n
-       than that sums to (6n+2 vs the 5n+2 the code performs); the
-       extra n is folded into mul here to hold the site's historical
-       total - see B1 report, this looks like a real overcount. silu
-       bills itself. */
-    LZ_FCX(LZ_FC_NORM, 5 * n, n + 1, 1, 0, 0);
+    /* ss loop n mul + n add, divide+eps (1 div, 1 add), output loop
+       x*inv*w*silu(g) - three multiplies, no add per element, since the
+       gate replaces rmsnorm's (1+w) add with a multiply. silu bills
+       itself. That is 4n mul, n+1 add, 1 div; the site billed 5n mul
+       to hold an older total. Same correction as lz_l2norm's, and worth
+       0 in the shipping census for the same reason - measured. */
+    LZ_FCX(LZ_FC_NORM, 4 * n, n + 1, 1, 0, 0);
     for (i = 0; i < n; i++) ss += x[i] * x[i];
 have_ss_gated:
     inv = lz_rsqrt(ss / (float)n + eps);
@@ -620,25 +629,40 @@ void lz_l2norm(float *o, const float *x, int n, float eps) {
     if (lz_norm_mode()) {
         ssf = norm_ss_fixed(x, n, NULL, NULL);
         if (ssf >= 0.0f) {
-            /* Same replacement again: norm_ss_fixed's 2n+2 in place of
-               the 2n float ss loop. Untouched: the 1n output loop (a
-               single multiply, no weight) and the eps add (1, no
-               divide - l2norm normalizes by the sum, not the mean).
-               That sums to 3n+3, one n short of the site's 4n+3;
-               the extra n is folded into mul here to hold the site's
-               historical total - see B1 report, this looks like a
-               real overcount. */
-            LZ_FCX(LZ_FC_NORM, 3 * n + 1, n + 1, 0, 1, 0);
+            /* norm_ss_fixed: n mul (x[i]*sc) + n add (q8_round's magic
+               add, and q8_round has no site of its own) + 1 mul + 1 cvt
+               for (float)acc * pow2f(-2e). Then lz_rsqrt(ss + eps) is
+               one add (rsqrt bills itself, and l2norm normalizes by the
+               SUM, so there is no divide). Then the output loop is n
+               mul, no weight.
+                 mul  (n + 1) + n = 2n+1
+                 add  n + 1
+                 cvt  1        div 0
+
+               THE n THAT USED TO BE HERE WAS REAL, AND IT WAS THE ONLY
+               ONE THAT MATTERED. This site billed 3n+1 mul "to hold the
+               site's historical total". Measured on kmr20 at 603 tokens:
+               removing it takes the whole NORMS class from 131,156 to
+               118,868 ops/token, 9.4% - because this function runs 192
+               times a token (6 KDA layers x 16 heads x q and k, n=64)
+               and 192*64 = 12,288 is exactly the delta. That was enough
+               to make NORMS look like the largest class in the census
+               (18.2%) when the dequant epilogue is (17.2% against
+               16.8%). A ranking is what a census is FOR, so a formula
+               kept for continuity with an older number was costing the
+               thing the instrument exists to produce. */
+            LZ_FCX(LZ_FC_NORM, 2 * n + 1, n + 1, 0, 1, 0);
             ss = ssf;
             goto have_ss_l2;
         }
     }
-    /* ss loop 2n, eps add (1, no divide), output loop 1n (single
-       multiply, no weight). That sums to 3n+1, one n short of the
-       site's 4n+1; the extra n is folded into mul here to hold the
-       site's historical total - see B1 report, this looks like a real
-       overcount. */
-    LZ_FCX(LZ_FC_NORM, 3 * n, n + 1, 0, 0, 0);
+    /* ss loop n mul + n add, eps add (1, no divide - see the fixed
+       branch), output loop n mul. Same correction as the fixed branch
+       above and for the same reason; this one is worth 0 in the shipping
+       census because lz_norm_mode() is on by default and this fallback
+       does not run. Measured, not assumed: changing it alone moves the
+       kmr20 census by zero. */
+    LZ_FCX(LZ_FC_NORM, 2 * n, n + 1, 0, 0, 0);
     for (i = 0; i < n; i++) ss += x[i] * x[i];
 have_ss_l2:
     inv = lz_rsqrt(ss + eps);          /* sum, not mean */
