@@ -2442,7 +2442,21 @@ static void gdn_step_impl(float *out, const int8_t *sq_in, int8_t *sq_out,
      * is the only encoding of 1.0f, and a NaN gt fails both. */
     {
         union { float f; uint32_t u; } gb;
+        int vs_e = 0;
         gb.f = gt;
+        if (vi) {
+            /* vscale's exponent, or an exponent no operand can reach if
+               vscale is not a power of two - f32_scale_pow2 then
+               declines on every element and the multiply stays. Read
+               with a bit test rather than a float compare, the same way
+               su/sw are read in pass 1's tail. */
+            union { float f; uint32_t u; } vb;
+            vb.f = vscale;
+            vs_e = (((vb.u & 0x007FFFFFu) == 0u)
+                    && (uint32_t)(((vb.u >> 23) & 0xFFu) - 1u) < 0xFEu)
+                   ? (int)((vb.u >> 23) & 0xFFu) - 127
+                   : 0x40000000;
+        }
         /* THIS LOOP HAD NO SITE. Pass 1 bills at gdn_pass1_fixed_head
            and pass 2 at gdn_p2_fixed_rows, so the recurrence class read
            as those two and this scalar epilogue was invisible - 5 or 6
@@ -2463,11 +2477,23 @@ static void gdn_step_impl(float *out, const int8_t *sq_in, int8_t *sq_out,
            be a second value change on top of the quantization and it
            has not been measured apart from it. */
         if (gb.u == 0x3F800000u) {
-            LZ_FCX(LZ_FC_RECUR, (long)vd * (vi ? 3 : 2), (long)vd * 2, 0,
+            /* vi costs the SAME two multiplies as the float v now, not
+               three: the convert's `* vscale` is an exponent add. */
+            LZ_FCX(LZ_FC_RECUR, (long)vd * 2, (long)vd * 2, 0,
                    vi ? (long)vd : 0, 0);
             if (vi)
                 for (vv = 0; vv < vd; vv++) {
-                    u[vv] = ((float)vi[vv] * vscale - u[vv]) * beta;
+                    /* vscale is pow2f(-LZ_CONVO_V_ES) at the one caller
+                       that passes it (forward.c's lz_kda_step_vi16
+                       site) - a compile-time power of two, so the
+                       convert's scaling is an exponent add. The guard
+                       keeps the multiply for a zero vi[vv], which is
+                       ordinary, and for any caller that ever passes a
+                       vscale that is not a power of two. */
+                    float vf;
+                    if (!f32_scale_pow2((float)vi[vv], vs_e, &vf))
+                        vf = (float)vi[vv] * vscale;
+                    u[vv] = (vf - u[vv]) * beta;
                     out[vv] = w[vv] + u[vv] * kq;
                 }
             else
@@ -2476,11 +2502,14 @@ static void gdn_step_impl(float *out, const int8_t *sq_in, int8_t *sq_out,
                     out[vv] = w[vv] + u[vv] * kq;
                 }
         } else {
-            LZ_FCX(LZ_FC_RECUR, (long)vd * (vi ? 5 : 4), (long)vd * 2, 0,
+            LZ_FCX(LZ_FC_RECUR, (long)vd * 4, (long)vd * 2, 0,
                    vi ? (long)vd : 0, 0);
             if (vi)
                 for (vv = 0; vv < vd; vv++) {
-                    u[vv] = ((float)vi[vv] * vscale - gt * u[vv]) * beta;
+                    float vf;                 /* see the gt==1 twin above */
+                    if (!f32_scale_pow2((float)vi[vv], vs_e, &vf))
+                        vf = (float)vi[vv] * vscale;
+                    u[vv] = (vf - gt * u[vv]) * beta;
                     out[vv] = gt * w[vv] + u[vv] * kq;
                 }
             else
