@@ -123,6 +123,22 @@ static int f32_scale_pow2(float v, int e, float *out) {
     uint32_t bex;
     int ex;
     b.f = v;
+#if defined(LZ_ARM_PRIM_ASM)
+    /* lz_scale2_arm_asm is this function in ARM assembly, with the same
+       four declines, and it was already in the tree serving the conv
+       kernel before this one existed. Dispatched the way lz_i32f
+       dispatches below, so the arm-asm tier does not run the C form of
+       an operator it has a cell for - which is what the kernel matrix
+       is for. Bit-identical by contract, not by tolerance: both forms
+       decline exactly where the exponent add is not the whole story. */
+    if (g_kernel == LZ_KERNEL_ARM_ASM) {
+        uint32_t r;
+        if (!lz_scale2_arm_asm(b.u, (int32_t)e, &r)) return 0;
+        b.u = r;
+        *out = b.f;
+        return 1;
+    }
+#endif /* LZ_ARM_PRIM_ASM */
     bex = (b.u >> 23) & 0xFFu;
     ex  = (int)bex + e;
     /* TWO compares, not four. `bex == 0 || bex == 0xFF` is exactly
