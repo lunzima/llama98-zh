@@ -87,7 +87,7 @@ void *lz_read_file(const char *path, size_t *out_size,
     return buf;
 }
 
-int lz_fseek64(FILE *f, unsigned long long off) {
+int lz_fseek64(FILE *f, lz_u64 off) {
 #if defined(_WIN32) && !defined(__WATCOMC__)
     /* MinGW/MSVC both provide _fseeki64. Watcom's C library lacks it; fall back below. */
     return _fseeki64(f, (__int64)off, SEEK_SET) == 0 ? 0 : 1;
@@ -103,7 +103,7 @@ int lz_fseek64(FILE *f, unsigned long long off) {
 #endif /* _WIN32 && !__WATCOMC__ || _LARGEFILE_SOURCE || __USE_LARGEFILE64 || (__unix__ && !__WATCOMC__) */
 }
 
-long long lz_fsize(const char *path) {
+lz_i64 lz_fsize(const char *path) {
 #if defined(_WIN32) && !defined(__WATCOMC__)
     FILE *f = fopen(path, "rb");
     __int64 n;
@@ -111,7 +111,7 @@ long long lz_fsize(const char *path) {
     if (_fseeki64(f, 0, SEEK_END) != 0) { fclose(f); return -1; }
     n = _ftelli64(f);
     fclose(f);
-    return (long long)n;
+    return (lz_i64)n;
 #else
     FILE *f = fopen(path, "rb");
     long n;
@@ -119,7 +119,7 @@ long long lz_fsize(const char *path) {
     if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return -1; }
     n = ftell(f);
     fclose(f);
-    return (long long)n;
+    return (lz_i64)n;
 #endif /* _WIN32 && !__WATCOMC__ */
 }
 
@@ -219,7 +219,7 @@ void lz_init_stdin(void) {
 #endif /* LZ_HAVE_SETMODE */
 }
 
-unsigned long long lz_seed_mix(unsigned long long x) {
+lz_u64 lz_seed_mix(lz_u64 x) {
     /* One round of xorshift64* (the same generator sampler.c's
        random_u32 uses), applied as a bijection over the seed. The
        multiplication constant is the same 0x2545F4914F6CDD1DULL so a

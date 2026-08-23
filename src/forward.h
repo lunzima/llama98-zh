@@ -668,7 +668,7 @@ typedef struct {
     float   ssm_scale;          /* 1/sqrt(lin_k_head_dim) */
 
     int *cache_idx;             /* layer index -> index within its class */
-    long long bytes_alloc;
+    lz_i64 bytes_alloc;
 
     /* Bumped by lz_state_alloc and lz_state_reset. A checkpoint records
        it and lz_ckpt_restore refuses a mismatch.

@@ -15,6 +15,7 @@
    Forward, sampling and generation are shape-neutral and depend only on
    model.h's config. */
 
+#include "lz_int.h"   /* lz_u64 - iron law 10 */
 #include "model.h"
 #include "forward.h"
 #include "tokenizer.h"
@@ -79,7 +80,7 @@ typedef enum {
 
 typedef struct {
     LZSampleParams sample;      /* sampling & penalties; defaults in sampler.h */
-    unsigned long long rng_seed;
+    lz_u64 rng_seed;
     int   max_new_tokens;       /* <=0 means use the model's seq_len */
 
     /* Termination tokens. The real turn-ender in Qwen's vocab is
@@ -422,7 +423,7 @@ int lz_spec_accept(const int *draft, const int *targ, int n_draft,
    deliberately model-independent (p, q, u, residual_rng are all
    caller-supplied arrays/values, not read from an LZRunState). */
 int lz_spec_accept_temp(const float *p, const float *q, int x, int vocab,
-                        float u, unsigned long long *residual_rng,
+                        float u, lz_u64 *residual_rng,
                         int *out_accepted);
 
 /* One speculative round: draft k tokens with the MTP head and verify

@@ -1,6 +1,7 @@
 #ifndef LZ_SAMPLER_H
 #define LZ_SAMPLER_H
 
+#include "lz_int.h"   /* lz_u64 - iron law 10 */
 #include "inspect.h"
 
 /* Sampling parameters and penalties.
@@ -176,7 +177,7 @@ typedef struct {
 typedef struct {
     int   vocab_size;
     LZSampleParams p;
-    unsigned long long rng_state;
+    lz_u64 rng_state;
     LZProbIndex   *probindex;   /* sort buffer for top-k / top-p */
     unsigned short *counts;     /* occurrence count per token in the window */
     int           *ring;        /* last cap generated tokens */
@@ -215,7 +216,7 @@ void lz_sample_defaults_think(LZSampleParams *p);
 void lz_sample_apply_think_preset(LZSampleParams *dst, unsigned manual);
 
 int  lz_sampler_init(LZSampler *s, int vocab_size, const LZSampleParams *p,
-                     unsigned long long seed);
+                     lz_u64 seed);
 void lz_sampler_free(LZSampler *s);
 
 /* Start a new generation: clear penalty counts. Without this, the
@@ -376,7 +377,7 @@ int  lz_argmax_p1(const float *logits, int n, float *out_p);
    sampler.c for why that specific duplication is the one this project
    least wants. state is caller-owned, advanced in
    place; typically an LZSampler's own rng_state, but any u64 works. */
-float lz_random_f32(unsigned long long *state);
+float lz_random_f32(lz_u64 *state);
 
 /* Target-side distribution builder for temp>0 speculative verify
    (generate.c's lz_spec_round_temp): penalties (assumed
@@ -417,6 +418,6 @@ void lz_target_dist(const LZSampleParams *p, float *logits, int n,
    receives (same "just advance whatever I am given" convention lz_
    random_f32 above documents). Returns the sampled index. */
 int  lz_sample_temp_q(float *logits, int n, float temperature,
-                      unsigned long long *rng_state);
+                      lz_u64 *rng_state);
 
 #endif

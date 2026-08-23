@@ -107,7 +107,7 @@ void lz_sample_apply_think_preset(LZSampleParams *dst, unsigned manual) {
 }
 
 int lz_sampler_init(LZSampler *s, int vocab_size, const LZSampleParams *p,
-                    unsigned long long seed) {
+                    lz_u64 seed) {
     int cap;
     memset(s, 0, sizeof(*s));
     s->vocab_size = vocab_size;
@@ -181,7 +181,7 @@ void lz_sampler_observe(LZSampler *s, int token) {
     if (s->counts[token] < 0xFFFF) s->counts[token]++;
 }
 
-static unsigned int random_u32(unsigned long long *state) {
+static unsigned int random_u32(lz_u64 *state) {
     /* xorshift64* - matches llama2.c so the same seed reproduces */
     *state ^= *state >> 12;
     *state ^= *state << 25;
@@ -197,7 +197,7 @@ static unsigned int random_u32(unsigned long long *state) {
    independent copies of "the same" arithmetic drift. random_u32 above
    stays static/private: nothing outside this file needs the raw 32-bit
    draw, only the [0,1) float lz_sample itself uses. */
-float lz_random_f32(unsigned long long *state) {
+float lz_random_f32(lz_u64 *state) {
     return (float)(random_u32(state) >> 8) / 16777216.0f;
 }
 
@@ -693,7 +693,7 @@ void lz_target_dist(const LZSampleParams *pr, float *logits, int n,
    apply_penalties_assumed taking a caller-built window instead of
    reaching into a specific LZSampler). */
 int lz_sample_temp_q(float *logits, int n, float temperature,
-                     unsigned long long *rng_state) {
+                     lz_u64 *rng_state) {
     float coin;
     int i;
     float inv = 1.0f / temperature;

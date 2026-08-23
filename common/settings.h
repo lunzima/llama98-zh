@@ -1,6 +1,8 @@
 #ifndef LZ_GUI_SETTINGS_H
 #define LZ_GUI_SETTINGS_H
 
+#include "../src/lz_int.h"   /* lz_u64 - iron law 10 */
+
 /* Thinking mode and temperature, and the coupling between them.
  *
  * Four rules govern the coupling, and they are the kind of small that
@@ -85,7 +87,7 @@ typedef struct {
        same thing it means to the engine (the sampler substitutes 1),
        so a user who types 0 gets a working fixed seed rather than a
        silently random one. */
-    unsigned long long seed;
+    lz_u64 seed;
     /* Requested context window, in tokens, always a multiple of
        LZ_COMMON_CTX_STEP within [MIN, MAX]. This is what the USER asked
        for; what a loaded model's run state was actually allocated with

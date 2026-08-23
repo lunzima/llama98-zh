@@ -1,6 +1,7 @@
 #ifndef LZ_COMPAT_H
 #define LZ_COMPAT_H
 
+#include "lz_int.h"   /* lz_i64/lz_u64 - iron law 10 */
 #include <stddef.h>
 #include <stdio.h>
 
@@ -15,10 +16,10 @@ void *lz_read_file(const char *path, size_t *out_size,
    hence this platform shim (M4.5). Returns 0 on success; on 32-bit
    platforms an offset beyond long returns non-zero rather than silently
    truncating. */
-int lz_fseek64(FILE *f, unsigned long long off);
+int lz_fseek64(FILE *f, lz_u64 off);
 
 /* Get file size, -1 on failure. Also needs 64 bits to cover unpruned models. */
-long long lz_fsize(const char *path);
+lz_i64 lz_fsize(const char *path);
 
 /* Monotonic millisecond timer. GetTickCount on Win98 has only 55ms
    resolution, so QueryPerformanceCounter is preferred. */
@@ -44,7 +45,7 @@ double lz_time_ms(void);
  * Pure integer arithmetic, no float, no OS entropy API: identical on
  * DOS, NT 3.51 and Win95, and not part of the forward pass, so the
  * cross-compiler bit-exactness rules do not bind it. */
-unsigned long long lz_seed_mix(unsigned long long x);
+lz_u64 lz_seed_mix(lz_u64 x);
 
 /* Seconds since the Unix epoch, for OpenAI's `created` field.
 

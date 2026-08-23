@@ -222,7 +222,7 @@ static void lz_stopf_flush(lz_stopf_t *f, lz_emit_t *e) {
    path, and bit-identity (a REAL gate for this specific mechanism,
    unlike catch-up/the mtp_chain seed - see lz_spec_round's own module
    comment) is what proves that path was correct. */
-long long lz_debug_n_ring_rollback = 0;
+lz_i64 lz_debug_n_ring_rollback = 0;
 
 /* Contract and its provenance: llama_zh.h. Deliberately takes arrays
    rather than reaching into LZRunState - it has no state of its own, so
@@ -258,7 +258,7 @@ int lz_spec_accept(const int *draft, const int *targ, int n_draft,
    cannot have p uniformly <= q while also both summing to 1 unless
    p==q exactly). */
 static int sample_residual(const float *p, const float *q, int vocab,
-                           unsigned long long *residual_rng) {
+                           lz_u64 *residual_rng) {
     float total = 0.0f, coin, cdf = 0.0f;
     int i, last_pos = -1;
     for (i = 0; i < vocab; i++) {
@@ -316,7 +316,7 @@ static int sample_residual(const float *p, const float *q, int vocab,
    lz_spec_accept had to worry about, since IT reports a COUNT, not a
    token). */
 int lz_spec_accept_temp(const float *p, const float *q, int x, int vocab,
-                        float u, unsigned long long *residual_rng,
+                        float u, lz_u64 *residual_rng,
                         int *out_accepted) {
     float qx, ratio;
     if (!p || !q || !residual_rng || vocab <= 0 || x < 0 || x >= vocab) {
@@ -981,7 +981,7 @@ int lz_spec_round(const LZModel *m, LZRunState *s,
    sampler.h) that sums to ~1.0 on its own, so a coin in [0,1) needs no
    extra scaling - reusing sample_mult's contract here would require
    fabricating a "mass" argument that is always ~1.0 anyway. */
-static int sample_from_dist(const float *p, int vocab, unsigned long long *rng) {
+static int sample_from_dist(const float *p, int vocab, lz_u64 *rng) {
     float coin = lz_random_f32(rng);
     float cdf = 0.0f;
     int i;
