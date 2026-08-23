@@ -2136,6 +2136,7 @@ static void gdn_p2_fixed_rows(const int8_t *sq_in, int8_t *sq_out,
        removed for 6,144 ands and 6,144 integer compares. */
     for (gg = 0; gg < ng; gg++) {
         float amd, inv_d, sd;
+        int ed;
         union { float f; uint32_t u; } dbit;
         uint32_t amu = 0;
         for (vv = gg * 32; vv < gg * 32 + 32; vv++) {
@@ -2146,12 +2147,30 @@ static void gdn_p2_fixed_rows(const int8_t *sq_in, int8_t *sq_out,
         }
         dbit.u = amu;
         amd = dbit.f;
-        /* ONE multiply, not two: the guard below and the assignment used
-           to compute amd*LZ_Q15_INV separately. Same value by
-           construction - same operands, same rounding - so hoisting is
-           exact rather than close. */
-        sd = amd * LZ_Q15_INV;
-        LZ_FCX(LZ_FC_RECUR, 1, 0, 0, 0, 0);
+        /* BLOCK-NORMALIZED to 32767 * 2^ed, the same trade
+           gdn_build_table's coefficient table takes (8017c83): sd
+           becomes 2^ed and inv_d becomes 2^-ed EXACTLY, so the 32
+           per-element multiplies below are exponent adds, p2_group_coef's
+           c2 folds, and the divide disappears.
+         *
+         * Built from pow2f rather than from amd*LZ_Q15_INV and
+         * 32767/amd for the reason 8017c83 gives: LZ_Q15_INV is
+         * fl(1/32767), so the product would be a ULP off 2^ed and the
+         * fold would be of the wrong number.
+         *
+         * VALUE-CHANGING, measured before landing. Rounding amd UP
+         * costs at most one bit of the delta group's range. Paired NLL,
+         * three models x two fixtures, n=3786: +7.88e-04 at t=+0.62 -
+         * indistinguishable, and the same band as the coefficient
+         * table's +6.45e-04/t=0.48 and the --attn-write int default at
+         * t=0.65. */
+        {
+            float r = amd * LZ_Q15_INV;
+            ed = expof(r);
+            if (pow2f(ed) < r) ed++;      /* round the block UP */
+            sd = pow2f(ed);
+        }
+        LZ_FCX(LZ_FC_RECUR, 1, 0, 0, 0, 0);   /* the amd*LZ_Q15_INV above */
         /* Same floor as everywhere else: a delta group below this is
            numerically zero, and letting its scale reach the subnormal
            range is how x87 and SSE stop agreeing (ops.h's
@@ -2162,13 +2181,16 @@ static void gdn_p2_fixed_rows(const int8_t *sq_in, int8_t *sq_out,
             continue;
         }
         s_dg[gg] = sd;
-        inv_d = LZ_FDIV(32767.0f, amd);
-        /* 1 div, then per element the scale multiply and q8_round's
-           magic add - the same two the other quantize sites in this file
-           bill (see the `q8_round(add)` notes at the LZ_FC_QUANT ones). */
-        LZ_FCX(LZ_FC_RECUR, 32, 32, 1, 0, 0);
+        inv_d = pow2f(-ed);               /* exact; was 32767/amd */
+        /* 0 div and 0 mul per element now: inv_d is 2^-ed, so the scale
+           is an exponent add. Only q8_round's magic add is left, the
+           same one the other quantize sites in this file bill. */
+        LZ_FCX(LZ_FC_RECUR, 0, 32, 0, 0, 0);
         for (vv = gg * 32; vv < gg * 32 + 32; vv++) {
-            int t = q8_round(delta[vv] * inv_d);
+            float dv;
+            int t;
+            if (!f32_scale_pow2(delta[vv], -ed, &dv)) dv = delta[vv] * inv_d;
+            t = q8_round(dv);
             if (t >  32767) t =  32767;
             if (t < -32767) t = -32767;
             dq[vv] = (int16_t)t;
