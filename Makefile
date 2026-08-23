@@ -99,10 +99,15 @@ native: llama98
 gui: kunkun98-gui
 serve: kunkun98-serve
 
-# One .o per $(ENG_MMX) file per gcc flavor below (native/serve
-# share X86_64_CFLAGS, gui uses CFLAGS) - not shared across flavors, the
-# same way each Watcom target below keeps its own object dir, so a flag
-# change to one flavor cannot link in an object built with another's.
+# One .o per $(ENG_MMX) file per gcc flavor below - not shared across
+# flavors, the same way each Watcom target below keeps its own object
+# dir, so a flag change to one flavor cannot link in an object built
+# with another's.
+#
+# ALL THREE use X86_64_CFLAGS. The gui used to use CFLAGS, which is -O2
+# against the others' -O3 - and the gui links the SAME $(ENG_SRCS), so
+# the shipped window ran a less optimised engine than the shipped
+# command line while both claimed to be the same build.
 # Pattern rules, not one rule per file: `-c -o x.o a.c b.c` is invalid
 # gcc (multiple sources cannot share one -c output), so each of
 # $(ENG_MMX)'s files needs its own compile, and there are now two.
@@ -115,7 +120,7 @@ build/native/%.o: src/%.c
 
 build/gui/%.o: src/%.c
 	@mkdir -p build/gui
-	$(CC) $(CFLAGS) -mmmx -msse -msse2 -c -o $@ $<
+	$(CC) $(X86_64_CFLAGS) -mmmx -msse -msse2 -c -o $@ $<
 
 # cli_main.c's -i loop runs on the shared LZSession core (common/session.c),
 # a front-end helper deliberately outside $(ENG) - so this target lists it
@@ -148,7 +153,7 @@ $(GUI_RES): gui/kunkun98.rc gui/resource.h gui/kunkun98.manifest \
 	windres -I. gui/kunkun98.rc -O coff -o $@
 
 kunkun98-gui: $(GUI_SRCS) $(COM_SRCS) $(ENG_SRCS) gui/layout.h gui/localized_strings.h $(GUI_RES) $(ENG_MMX_GCC_GUI_OBJS)
-	$(CC) $(CFLAGS) -Igui -Icommon -mwindows -o $@ $(GUI_SRCS) $(COM_SRCS) $(ENG_SRCS) $(GUI_RES) $(ENG_MMX_GCC_GUI_OBJS) \
+	$(CC) $(X86_64_CFLAGS) -Igui -Icommon -mwindows -o $@ $(GUI_SRCS) $(COM_SRCS) $(ENG_SRCS) $(GUI_RES) $(ENG_MMX_GCC_GUI_OBJS) \
 	    -lgdi32 -luser32 -lcomdlg32 -lm -Wl,--stack=524288
 
 # ----------------------------------------------------------------------
