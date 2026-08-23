@@ -563,7 +563,7 @@ void lz_fwht_i32_arm_asm(int32_t *y, const int32_t *x, int n) {
       as lz_q8_round_pow2_arm_asm in src/ops_arm_prim.h - CLZ is not
       even needed, because the shift count comes out of the exponent
       field directly - against a full `bl __aeabi_fadd` (48).
-   3. SMLALBB IS THE ACCUMULATE. `acc += (long long)(v * v)` is a 32x32
+   3. SMLALBB IS THE ACCUMULATE. `acc += (lz_i64)(v * v)` is a 32x32
       `mul` plus `adds`/`adc` from gcc, because the C says int. After
       the clamp |v| <= 32767, so it is a 16x16 multiply into a 64-bit
       accumulator: ONE instruction, and on ARM9E the halfword multiply
@@ -607,7 +607,7 @@ void lz_fwht_i32_arm_asm(int32_t *y, const int32_t *x, int n) {
     "subs   %[cnt], %[cnt], #1\n\t"
 
 void lz_norm_ss_fixed_arm_asm(const float *x, int n, int k, short *qout,
-                              long long *acc) {
+                              lz_i64 *acc) {
     const float *xp = x;
     short *qp = qout;
     int cnt = n;

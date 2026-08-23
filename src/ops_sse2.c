@@ -398,7 +398,7 @@ unsigned lz_amax32_sse2_w(const float *x, int n) {
    of norm_ss_fixed's four call sites pass NULL, the same reason the ARM
    twin gives (src/ops_arm.h). */
 extern int lz_norm_ss_sse2_asm(const float *x, int n, const float *scp,
-                               short *qout, long long *acc);
+                               short *qout, lz_i64 *acc);
 #pragma aux lz_norm_ss_sse2_asm = \
     ".686"                                                      \
     "movss   xmm5, [ebx]"                                       \
@@ -451,7 +451,7 @@ extern int lz_norm_ss_sse2_asm(const float *x, int n, const float *scp,
 /* Thin wrapper: the #pragma aux body expands at the call site, and the
    call site is src/ops_quant.c. Same reason lz_amax32_sse2_w exists. */
 int lz_norm_ss_sse2(const float *x, int n, float sc, short *qout,
-                    long long *acc) {
+                    lz_i64 *acc) {
     return lz_norm_ss_sse2_asm(x, n, &sc, qout, acc);
 }
 
@@ -2050,12 +2050,12 @@ void lz_q8round32_simd(const float *x, int8_t *o, const float *pinv) {
    its half: integer addition is associative and exact, so the order the
    squares are summed in cannot change the total. */
 int lz_norm_ss_sse2(const float *x, int n, float sc, short *qout,
-                    long long *acc) {
+                    lz_i64 *acc) {
     __m128i vacc = _mm_setzero_si128();
     const __m128i zero = _mm_setzero_si128();
     const __m128i lo = _mm_set1_epi16((short)-32767);
     const __m128 vsc = _mm_set1_ps(sc);
-    union { __m128i v; long long q[2]; } out;
+    union { __m128i v; lz_i64 q[2]; } out;
     int i, ng = n & ~7;
     for (i = 0; i < ng; i += 8) {
         __m128i a = _mm_cvtps_epi32(_mm_mul_ps(

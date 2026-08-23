@@ -186,8 +186,8 @@ void lz_rmsnorm_gated_out_fixed(float *o, const float *x,
    falls back to the float coordinate outside it, so this is the
    measurement that says which one ran rather than an assumption that
    the domain holds. */
-long long lz_debug_norm_sig_i = 0;
-long long lz_debug_norm_qw = 0;
+lz_i64 lz_debug_norm_sig_i = 0;
+lz_i64 lz_debug_norm_qw = 0;
 int lz_debug_norm_eg_lo = 32767;
 int lz_debug_norm_eg_hi = -32768;
 
@@ -735,7 +735,7 @@ have_ss_l2:
    engine uses (n = 64 gives 6.9e10, and even n = 4096 gives 4.4e12).
    So the only rounding before rsqrt is the single convert. */
 void lz_l2norm_i16(float *o, const short *x, int n, int e, float eps) {
-    long long acc = 0;
+    lz_i64 acc = 0;
     float ss, inv, m;
     int i;
     /* n mul + n add for the squares are INTEGER and bill nothing, the
@@ -743,7 +743,7 @@ void lz_l2norm_i16(float *o, const short *x, int n, int e, float eps) {
        one convert, the scale multiply, eps's add, and the output loop's
        convert-and-multiply per element. */
     LZ_FCX(LZ_FC_NORM, n + 2, 1, 0, n + 1, 0);
-    for (i = 0; i < n; i++) acc += (long long)x[i] * (long long)x[i];
+    for (i = 0; i < n; i++) acc += (lz_i64)x[i] * (lz_i64)x[i];
     /* (float)acc first, then the power of two: the product of two
        exponent-only factors is exact either way, but splitting them
        keeps the convert on a value whose magnitude the caller can bound

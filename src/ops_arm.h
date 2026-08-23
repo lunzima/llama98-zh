@@ -154,7 +154,7 @@ void lz_fwht_i32_arm_asm(int32_t *y, const int32_t *x, int n);
    4-byte alignment on x and acc, 2-byte on qout - all three are what
    their C types already promise. */
 void lz_norm_ss_fixed_arm_asm(const float *x, int n, int k, short *qout,
-                              long long *acc);
+                              lz_i64 *acc);
 
 /* lz_matmul's F32 row (docs/arm-asm-audit.md G2, the f32mm cell).
    Accumulates acc8[0..7] over groups of eight elements and returns how

@@ -1,6 +1,9 @@
 #ifndef LZ_OPS_H
 #define LZ_OPS_H
 
+#include "lz_int.h"   /* lz_i64 - iron law 10. Here rather than in
+                         model.h so every ops_*.c inherits it from the
+                         header it already includes. */
 #include "model.h"
 
 /* Operators needed by the Qwen3.5 forward.
@@ -1922,7 +1925,7 @@ extern long lz_conv_o_clamped;
 /* Elements that took the int16 exit. The clamp counter above cannot
    serve as the switch's positive control - it is 0 in the healthy case
    AND 0 when the exit is compiled out. */
-extern long long lz_debug_convo_i16;
+extern lz_i64 lz_debug_convo_i16;
 
 /* Precompute the scales the fixed kernel multiplies by, once per model
    rather than per token. Built with ldexp: `1 << (ew+es)` overflows,

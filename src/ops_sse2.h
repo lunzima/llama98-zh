@@ -21,7 +21,9 @@
 #ifndef LZ_OPS_SSE2_H
 #define LZ_OPS_SSE2_H
 
-#include <stdint.h>
+#include "lz_int.h"   /* lz_i64 and the width types - iron law 10.
+                         Replaces <stdint.h>, which Visual C++ 4.0
+                         does not have. */
 
 #include "ops_p2_blk.h"
 
@@ -58,7 +60,7 @@ void lz_fwht_stage_sse2(int32_t *y, int n, int len);
    approximation of it. */
 #define LZ_NORM_SS_SSE2_EXTERN 1
 int lz_norm_ss_sse2(const float *x, int n, float sc, short *qout,
-                    long long *acc);
+                    lz_i64 *acc);
 
 /* Attention's two fixed-point MACs, SSE2 tier. Outside the __WATCOMC__
    split for the same reason lz_fwht_stage_sse2 is: one name and one
