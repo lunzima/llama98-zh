@@ -51,6 +51,9 @@
 #  15. build/kernel_isa_identity_gate.sh - iron law 2 end to end: two
 #      TIERS in one binary, the comparison stage 6's two-COMPILER gate
 #      cannot make
+#  16. build/subn_gate.sh - --subn-scale and --hadamard, the two knobs
+#      whose gate could not run until a SubLN checkpoint that exports
+#      was found
 #
 # Judging discipline (this repo has paid for getting this wrong before):
 #   - Never grep bare 'error' - "0 errors" contains the substring.
@@ -93,7 +96,7 @@ freshness_sentinel() {
 # ---------------------------------------------------------------------
 # Stage 1: make native (gcc)
 # ---------------------------------------------------------------------
-echo "==== [1/15]make native ===="
+echo "==== [1/16]make native ===="
 NATIVE_EXE="$ROOT/llama98.exe"
 [ -e "$NATIVE_EXE" ] || NATIVE_EXE="$ROOT/llama98"
 LOG=build/ci-native.log
@@ -132,7 +135,7 @@ rm -f "$SENTINEL"
 # Stage 2: make watcom-cli (Open Watcom, the target compiler)
 # ---------------------------------------------------------------------
 echo
-echo "==== [2/15]make watcom-cli ===="
+echo "==== [2/16]make watcom-cli ===="
 WATCOM_EXE="$ROOT/llama98-w.exe"
 WATCOM_OBJDIR="$ROOT/build/watcom/cli"
 LOG=build/ci-watcom-cli.log
@@ -184,7 +187,7 @@ rm -f "$SENTINEL"
 # Stage 3: llama98 <dir> --check on a curated set of KunMoe checkpoints
 # ---------------------------------------------------------------------
 echo
-echo "==== [3/15]model --check sweep ===="
+echo "==== [3/16]model --check sweep ===="
 MODELS_ROOT=${MODELS_ROOT:-/e/LLM/models}
 # Curated, not a blind sweep of every directory under MODELS_ROOT:
 # a usable sweep is a handful of representative checkpoints, and
@@ -231,7 +234,7 @@ fi
 # Stage 4: x86 <-> ARMv5TE parity gate
 # ---------------------------------------------------------------------
 echo
-echo "==== [4/15]ARM parity gate ===="
+echo "==== [4/16]ARM parity gate ===="
 ARM_MODEL="$MODELS_ROOT/kunkun98-pilot-20260806"
 LOG=build/ci-arm.log
 if [ "$native_ok" -ne 1 ]; then
@@ -266,7 +269,7 @@ fi
 # Stage 5: control-switch matrix (every non-default value, gcc + Watcom)
 # ---------------------------------------------------------------------
 echo
-echo "==== [5/15]control-switch matrix ===="
+echo "==== [5/16]control-switch matrix ===="
 LOG=build/ci-switch-matrix.log
 build/switch_matrix_gate.sh >"$LOG" 2>&1
 MATRIX_RC=$?
@@ -294,7 +297,7 @@ esac
 # Stage 6: every fixed-point write tier's gcc<->Watcom bit-identity
 # ---------------------------------------------------------------------
 echo
-echo "==== [6/15]fixed-tier cross-compiler gate ===="
+echo "==== [6/16]fixed-tier cross-compiler gate ===="
 LOG=build/ci-fixed-tier-xcompiler.log
 build/fixed_tier_xcompiler_gate.sh >"$LOG" 2>&1
 NIX_RC=$?
@@ -326,7 +329,7 @@ esac
 # compile-time-off in the same compiler, where it is not.
 # ---------------------------------------------------------------------
 echo
-echo "==== [7/15]recurrence float-arm gate ===="
+echo "==== [7/16]recurrence float-arm gate ===="
 LOG=build/ci-recur-write-float-arm.log
 build/recur_write_float_arm_gate.sh >"$LOG" 2>&1
 NIX_RC=$?
@@ -356,7 +359,7 @@ esac
 # separate delivery decision); none of the three is in ci.sh's stage 2.
 # ---------------------------------------------------------------------
 echo
-echo "==== [8/15]watcom gui/dll/dos targets ===="
+echo "==== [8/16]watcom gui/dll/dos targets ===="
 for t in watcom-gui watcom-dll watcom-dos; do
     case $t in
         watcom-gui) EXE="$ROOT/kunkun98-w.exe" ;;
@@ -393,7 +396,7 @@ done
 # as its only float unit. SKIP when WSL is not usable, never PASS.
 # ---------------------------------------------------------------------
 echo
-echo "==== [9/15]32-bit x87 gcc build (WSL) ===="
+echo "==== [9/16]32-bit x87 gcc build (WSL) ===="
 LOG=build/ci-x87.log
 if ! command -v wsl >/dev/null 2>&1; then
     echo "SKIP: 32-bit x87 build (wsl not installed)"
@@ -437,7 +440,7 @@ fi
 # MIPS cross toolchain is absent, never PASS.
 # ---------------------------------------------------------------------
 echo
-echo "==== [10/15]big-endian parity gate (WSL) ===="
+echo "==== [10/16]big-endian parity gate (WSL) ===="
 LOG=build/ci-endian.log
 if ! command -v wsl >/dev/null 2>&1; then
     echo "SKIP: big-endian parity gate (wsl not installed)"
@@ -481,7 +484,7 @@ fi
 # them the two easiest knobs to break silently.
 # ---------------------------------------------------------------------
 echo
-echo "==== [11/15]performance-knob invariance ===="
+echo "==== [11/16]performance-knob invariance ===="
 LOG=build/ci-perf-knob.log
 build/perf_knob_gate.sh "$ARM_MODEL" >"$LOG" 2>&1
 PK_RC=$?
@@ -512,7 +515,7 @@ esac
 # error, so the rotated run must land closer to the --kv f32 reference.
 # ---------------------------------------------------------------------
 echo
-echo "==== [12/15]--kv-rot quality gate ===="
+echo "==== [12/16]--kv-rot quality gate ===="
 LOG=build/ci-kv-rot.log
 build/kv_rot_gate.sh "$ARM_MODEL" >"$LOG" 2>&1
 KR_RC=$?
@@ -546,7 +549,7 @@ esac
 # matrix's switches had a standing gate that ran their build.
 # ---------------------------------------------------------------------
 echo
-echo "==== [13/15] int-pipeline control arms ===="
+echo "==== [13/16] int-pipeline control arms ===="
 LOG=build/ci-int-pipeline-arms.log
 build/int_pipeline_arm_gate.sh >"$LOG" 2>&1
 IPA_RC=$?
@@ -580,7 +583,7 @@ esac
 # --kernel-matrix against what its macros actually define.
 # ---------------------------------------------------------------------
 echo
-echo "==== [14/15]kernel coverage matrix ===="
+echo "==== [14/16]kernel coverage matrix ===="
 LOG=build/ci-kernel-matrix.log
 build/kernel_matrix_gate.sh >"$LOG" 2>&1
 KMX_RC=$?
@@ -613,7 +616,7 @@ esac
 # entirely, so a clean checkout did not have it.
 # ---------------------------------------------------------------------
 echo
-echo "==== [15/15]kernel ISA identity ===="
+echo "==== [15/16]kernel ISA identity ===="
 LOG=build/ci-kernel-isa.log
 build/kernel_isa_identity_gate.sh >"$LOG" 2>&1
 KID_RC=$?
@@ -633,6 +636,38 @@ case $KID_RC in
     *)
         echo "FAIL: kernel ISA identity"
         note "FAIL  kernel ISA identity"
+        FAIL=$((FAIL + 1))
+        ;;
+esac
+
+# ---------------------------------------------------------------------
+# Stage 16: the SubLN activation path. --subn-scale and --hadamard were
+# the only two knobs in docs/knob-audit.md whose gate could not run, and
+# the recorded reason was that no SubLN checkpoint exports. That was
+# generalised from the ones that predate the attention projection norms;
+# kunkun-ce exports clean. Now that it runs, it runs here.
+# ---------------------------------------------------------------------
+echo
+echo "==== [16/16]SubLN activation path ===="
+LOG=build/ci-subn.log
+build/subn_gate.sh >"$LOG" 2>&1
+SUBN_RC=$?
+cat "$LOG"
+case $SUBN_RC in
+    0)
+        echo "PASS: SubLN activation path"
+        note "PASS  SubLN activation path"
+        PASS=$((PASS + 1))
+        ;;
+    2)
+        REASON=$(grep -m1 'SKIP' "$LOG")
+        echo "SKIP: SubLN activation path ($REASON)"
+        note "SKIP  SubLN activation path ($REASON)"
+        SKIP=$((SKIP + 1))
+        ;;
+    *)
+        echo "FAIL: SubLN activation path"
+        note "FAIL  SubLN activation path"
         FAIL=$((FAIL + 1))
         ;;
 esac

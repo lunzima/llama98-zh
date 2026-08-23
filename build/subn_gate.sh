@@ -59,10 +59,39 @@ ENG="$ROOT/llama98.exe"
 [ -x "$ENG" ] || ENG="$ROOT/llama98"
 W="${TMPDIR:-/tmp}/subn_gate.$$"
 
-SUBN_MODEL="${SUBN_MODEL:-}"          # QUANTIZED bin, use_subn + hadamard_o > 1
-SUBN_F32_MODEL="${SUBN_F32_MODEL:-}"  # the same shape UNQUANTIZED (safetensors)
-PLAIN_MODEL="${PLAIN_MODEL:-}"        # any model without use_subn
-TOKENS="${SUBN_TOKENS:-}"
+# DEFAULTS, so ci.sh can call this with no arguments. Every one is
+# overridable; every one SKIPs loudly if absent.
+#
+# HOW TO PRODUCE SUBN_MODEL (it is a build artifact, not a checkpoint):
+#   python3 tools/export_q8.py <models>/kunkun-ce /tmp/subn_ce_q8.bin
+#   mkdir -p <models>/_subn_gate_q8
+#   cp /tmp/subn_ce_q8.bin <models>/_subn_gate_q8/model.bin
+#   cp <models>/kunkun-ce/tokenizer.json <models>/_subn_gate_q8/
+# tools/export_q8.py lives in the TRAINING tree (see CLAUDE.md on the
+# two trees), which is why this is a recipe here and not a build rule.
+#
+# WHICH CHECKPOINT, and why this was recorded as a resource block for so
+# long: the exporter's use_subn tensor list includes the ATTENTION
+# projection norms (self_attn.q_proj.norm.weight and its three
+# siblings), and most of the trained SubLN checkpoints predate that
+# field - _smoke_mhc0, _abl_mhc*, ce-abl-mhc* all carry only the KDA and
+# MLP norms and fail export with a KeyError on exactly that name. That
+# got generalised to "no SubLN checkpoint exports". kunkun-ce DOES (it
+# was migrated; its model.safetensors.bak-before-attn-subn is the
+# migration's own leftover) and exports clean. Measured 2026-08-23.
+MODELS_ROOT="${MODELS_ROOT:-/e/LLM/models}"
+# QUANTIZED bin, use_subn + hadamard_o > 1 - see the recipe above.
+SUBN_MODEL="${SUBN_MODEL:-$MODELS_ROOT/_subn_gate_q8}"
+# The same weights UNQUANTIZED. Not "a similar model": float-rotates and
+# quantized-rotates are only comparable if the shape is the same one.
+SUBN_F32_MODEL="${SUBN_F32_MODEL:-$MODELS_ROOT/kunkun-ce}"
+# Any model WITHOUT use_subn. kmr20 is the one every other gate here uses.
+PLAIN_MODEL="${PLAIN_MODEL:-$MODELS_ROOT/kmr20}"
+# The token ids MUST be inside the subn model's vocab, which is 6144
+# here and 32768 on kmr20 - so this file is the subn model's, not the
+# other gates'. Produced with:
+#   llama98 <subn-model> --prompt '<text>' --dump-prompt-tokens F
+TOKENS="${SUBN_TOKENS:-$ROOT/build/subn_gate_tokens_zh.txt}"
 
 miss=
 [ -x "$ENG" ] || miss="$miss engine"
