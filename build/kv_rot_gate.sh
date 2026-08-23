@@ -30,6 +30,8 @@
 # neither, so it cannot be reproduced or compared against:
 #   --kv q8   rot off 4.582e-02, rot on 3.836e-02  - 16.3% better
 #   --kv q4   rot off 2.882e-01, rot on 1.736e-01  - 39.7% better
+# The q8 half of that has since been overtaken by conv1d's int16 exit;
+# see the note above the q8 arm below. The q4 half stands.
 # The shape is what the theory predicted all along: the rotation helps
 # the LOSSIER format far more. q8's number was never the surprise; q4's
 # zero was, and the zero was the instrument, not the engine.
@@ -113,8 +115,45 @@ helps() {
 }
 
 echo "kv_rot_gate: reference is --kv f32, $NTOK tokens"
-helps q8 || FAILED=1
+
+# q4 KEEPS THE DIRECTION ASSERTION. It is the lossier format and the one
+# the theory says gains most, and it does - 46% closer to the f32 cache
+# at the time of writing.
 helps q4 || FAILED=1
+
+# q8 NO LONGER ASSERTS A DIRECTION, and that is a measurement rather than
+# a weakening. It used to: 4.582e-02 off against 3.836e-02 on, 16%
+# better. It is now 3.407e-02 off against 3.792e-02 on - rotation makes
+# q8 WORSE by 11%.
+#
+# BISECTED, not guessed. At 2eb14d2 the old pair reproduces exactly; it
+# becomes the new one at b16c77e/514fe48, conv1d's int16 exit for q, k
+# and then v. What moved is the OFF arm (4.58e-02 -> 3.41e-02, 26%
+# better); the ON arm barely moved. So the rotation was partly
+# compensating for error the conv exit has since removed, and on q8 what
+# is left no longer pays for the rotation's own rounding.
+#
+# That leaves --kv-rot's defaults right on both formats - off for q8, on
+# for q4 - which is what the aliveness check below is for. Asserting the
+# old direction would now be asserting something false, and pinning the
+# CURRENT direction instead is precisely the move that produced this
+# gate's earlier "q4 is inert" mistake: a recorded state read as a
+# property.
+alive() {   # alive FMT - the knob must still change the output
+    local fmt="$1" off on
+    run "${fmt}off" --kv "$fmt" --kv-rot off || return 1
+    run "${fmt}on"  --kv "$fmt" --kv-rot on || return 1
+    off=$("$W/logit_rms" "$W/ref.bin" "$W/${fmt}off.bin" | cut -d' ' -f1)
+    on=$("$W/logit_rms" "$W/ref.bin" "$W/${fmt}on.bin"  | cut -d' ' -f1)
+    printf '  %-4s rot off %s  rot on %s  ' "$fmt" "$off" "$on"
+    if cmp -s "$W/${fmt}off.bin" "$W/${fmt}on.bin"; then
+        echo "FAIL (the knob is inert on this format)"
+        return 1
+    fi
+    echo "alive (direction not asserted - see the header)"
+    return 0
+}
+alive q8 || FAILED=1
 
 # THE DEFAULT IS PART OF THE CLAIM. helps() above pins both arms, so it
 # can no longer see whether --kv q4 still turns rotation on by itself -
