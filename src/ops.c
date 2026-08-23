@@ -1666,18 +1666,25 @@ static long long epi_fixed_raw(const int32_t *accb, const LZTensor *w,
        crashes: the callee's plain `ret` leaves the argument on the
        stack. With it, the Watcom binary runs to completion.
 
-       WHERE IT STANDS, so the next attempt does not restart from zero:
-       the kernel BUILDS AND RUNS under both toolchains and is still not
-       shippable, because its logits differ from HEAD's on both fixtures
-       and the two toolchains differ from each other - so the arithmetic
-       or the frame offset is still wrong. Reverted rather than shipped.
-       A numeric change that cannot be shown bit-identical does not go
-       in, and "it runs" is not that proof.
+       AND THE ARITHMETIC IS WRONG, which a gcc-ONLY build settled:
+       gcc never compiles the pragma, so building just the C fusion and
+       comparing to HEAD takes the asm out of the question entirely. It
+       differs - 56,362,522 of 78,905,344 bytes on zh - so the frame
+       offset was never the remaining problem.
 
-       Five readings of this one obstacle - a matrix cell, the divide,
-       the register count, the parm syntax, the cleanup convention - and
-       every single one was settled by running something. None was
-       settled by reasoning, including the ones that sounded certain. */
+       THE BUG IS `ng / r` TRUNCATING. The flat loop walks g over ALL of
+       ng and indexes ww[g / r], which reaches ceil(ng / r) groups; the
+       fused loop walks floor(ng / r) groups of exactly r and drops the
+       tail whenever r does not divide ng. A fused version has to derive
+       its bound the same way the flat one does, or carry the partial
+       group explicitly - it cannot assume the division is exact just
+       because the pointer arithmetic above it does.
+
+       Six readings of this one obstacle - a matrix cell, the divide,
+       the register count, the parm syntax, the cleanup convention, the
+       loop bound - and every single one was settled by running
+       something. None was settled by reasoning, including the ones that
+       sounded certain. */
     for (g = 0; g < ng; g++)
         g_epi_m[g] = (int32_t)g_epi_xq[tk][g] * (int32_t)ww[g / r];
     /* The exponent is per ROW, so a libm call here would run once per
