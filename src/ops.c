@@ -1287,7 +1287,7 @@ static void epi_prep_plane(const float *src, int16_t *out, signed char *ex,
     for (row = 0; row < rows; row++) {
         const float *ws = src + (size_t)row * ngw;
         int16_t *o = out + (size_t)row * ngw;
-        float amax = 0.0f;
+        float amax = 0.0f, se;
         int e = 0;
         for (g = 0; g < ngw; g++) {
             float a = ws[g] < 0.0f ? -ws[g] : ws[g];
@@ -1298,9 +1298,29 @@ static void epi_prep_plane(const float *src, int16_t *out, signed char *ex,
             ex[row] = 0;
             continue;
         }
-        while (e < 100 && amax * pow2f(e + 1) < 32767.0f) e++;
+        /* The exponent is a read of amax, not a search for it.
+           amax = M x 2^E with M in [1,2), so the condition
+           `amax * 2^e < 32767` turns on E + e: below 14 it always
+           holds, at 15 it never does, and at exactly 14 it reduces to
+           M < 32767/16384, which is a comparison of the mantissa field
+           against 0x7FFE00. Hence a bias subtract, one correction, and
+           the clamp the old loop got from starting at 0 and stopping at
+           100. Subnormals fall out: their biased exponent is 0, giving
+           141, which clamps to 100 - the same place the loop capped.
+           Verified against the loop over all 2^32 bit patterns, not a
+           sample; the two can only part at a boundary a sample would
+           have to already know about to hit. */
+        {
+            union { float f; uint32_t u; } ab;
+            ab.f = amax;
+            e = 141 - (int)((ab.u >> 23) & 0xFFu);
+            if ((ab.u & 0x7FFFFFu) >= 0x7FFE00u) e--;
+            if (e < 0) e = 0;
+            if (e > 100) e = 100;
+        }
+        se = pow2f(e);
         for (g = 0; g < ngw; g++) {
-            float t = ws[g] * pow2f(e);
+            float t = ws[g] * se;
             int q = q8_round(t);
             if (q >  32767) q =  32767;
             if (q < -32767) q = -32767;
