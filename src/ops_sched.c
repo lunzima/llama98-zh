@@ -113,32 +113,17 @@ int q8r_have_simd(void) {
 #endif /* LZ_HAVE_Q8R_SIMD || LZ_HAVE_Q8R_SSE */
 }
 
-/* lz_soft_float_target ("is this machine's float slow relative to its
-   integer" - a one-bit CPUID proxy) USED to be what all seven write
-   tiers' `auto` resolved from, six of them directly and lz_scalar_mode
-   deliberately not (commit 508e015 already made scalar fixed
-   unconditionally, ignoring this question, before this file did).
+/* NOTHING ASKS WHETHER THIS MACHINE'S FLOAT IS SLOW. There is no
+   hardware predicate behind the arithmetic tier: the shipping build is
+   fixed-point on every host, and float is reached only by asking for it
+   (--fixed off), which is the correctness oracle rather than an
+   outcome. docs/fixed-tier-pipeline-breakpoints.md lists which
+   float-to-fixed conversions that makes removable and which are forced
+   by data regardless - the residual stream's cross-layer dynamic range
+   and the SubLN Hadamard's float-only kernel.
 
-   REMOVED (this commit): the user settled the question these tiers
-   existed to keep open. The shipping build is fixed-point
-   unconditionally, on every host, regardless of what this predicate
-   would have answered there - so nothing asks it anymore, and every one
-   of the seven tiers now has the same shape lz_scalar_mode already did.
-   Float is not gone; it is reachable exactly like every other explicit
-   tier value (--recur-write float et al.) and in one command for all
-   seven at once (--fixed off, cli_main.c) - the correctness oracle every
-   tolerance in CLAUDE.md and every cross-compiler gate is measured
-   against, not an auto outcome. See
-   docs/fixed-tier-pipeline-breakpoints.md for which of the resulting
-   float-to-fixed conversions are removable now that fixed is
-   unconditional (most - they existed only because a stage's neighbor
-   might have been float) and which are forced by data regardless (a
-   short list: the residual stream's cross-layer dynamic range, and
-   the SubLN Hadamard transform's float-only kernel). q8r_have_simd
-   (this predicate's own building block) still has its
-   LZ_HAVE_Q8R_SIMD/LZ_HAVE_Q8R_SSE-guarded caller below, untouched -
-   that is a different axis (the Q8 row-kernel tier), not a write tier,
-   and out of scope here. */
+   q8r_have_simd below is a different axis - the Q8 row-kernel tier, not
+   the arithmetic one - and keeps its CPUID question. */
 
 #if defined(LZ_HAVE_Q8R_SIMD) || defined(LZ_HAVE_Q8R_SSE)
 int lz_q8r_tier(void) {

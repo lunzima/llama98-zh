@@ -736,9 +736,8 @@ static void gdn_build_table(const float *ss, const float *q, const float *k,
        the sign bit gives the magnitude, and for magnitudes the unsigned
        bit-pattern order IS the numeric order, so this is a permutation
        of the same total order and owes the float loop bit-identity.
-       Same transformation as gdn_p2_fixed_rows' delta scan (765e798),
-       q8_amax and lz_softmax's max scan; this was the last per-element
-       float compare left in the recurrence. NaN cannot reach here - a
+       Same transformation as gdn_p2_fixed_rows' delta scan, q8_amax and
+       lz_softmax's max scan. NaN cannot reach here - a
        and b are finite products of finite state and inputs - and a
        negative zero masks to +0, which the float form also read as 0. */
     /* THE TWO PRODUCTS ARE EXPONENT ADDS TOO, and this one is free -
@@ -1458,11 +1457,9 @@ static void p2_group_coef(float decs, float rs, float kv, float sd,
        recurrence's q8_group_scale scale) are not powers of two and keep
        the multiply, which is why the guard is here rather than assumed
        away.
-       c2 stays a multiply: sd is the DELTA group scale, amd*LZ_Q15_INV,
-       and nothing has normalized it. Block-normalizing it the way
-       gdn_build_table's amk was (8017c83) would fold c2 too, at the
-       same kind of cost - value-changing, so it needs its own paired
-       measurement and is not smuggled in here. */
+       c2 stays a multiply here: sd is the DELTA group scale and this
+       function does not know whether it was block-normalized. Its
+       caller's own site folds it when it was. */
     union { float f; uint32_t u; } rb;
     rb.f = rs;
     if (((rb.u & 0x007FFFFFu) != 0u)
@@ -2148,15 +2145,14 @@ static void gdn_p2_fixed_rows(const int8_t *sq_in, int8_t *sq_out,
         dbit.u = amu;
         amd = dbit.f;
         /* BLOCK-NORMALIZED to 32767 * 2^ed, the same trade
-           gdn_build_table's coefficient table takes (8017c83): sd
-           becomes 2^ed and inv_d becomes 2^-ed EXACTLY, so the 32
-           per-element multiplies below are exponent adds, p2_group_coef's
-           c2 folds, and the divide disappears.
+           gdn_build_table's coefficient table takes: sd becomes 2^ed
+           and inv_d becomes 2^-ed EXACTLY, so the 32 per-element
+           multiplies below are exponent adds, p2_group_coef's c2 folds,
+           and the divide disappears.
          *
          * Built from pow2f rather than from amd*LZ_Q15_INV and
-         * 32767/amd for the reason 8017c83 gives: LZ_Q15_INV is
-         * fl(1/32767), so the product would be a ULP off 2^ed and the
-         * fold would be of the wrong number.
+         * 32767/amd: LZ_Q15_INV is fl(1/32767), so the product would be
+         * a ULP off 2^ed and the fold would be of the wrong number.
          *
          * VALUE-CHANGING, measured before landing. Rounding amd UP
          * costs at most one bit of the delta group's range. Paired NLL,

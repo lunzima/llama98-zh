@@ -602,7 +602,7 @@ const char *lz_kernel_matrix(void);
  *   '?'  absent with no registry entry at all            -> gate failure
  *   '+'  present but the registry does not expect it here -> gate failure
  *
- * '!' is the 2026-08-09 shape: the Watcom assembly vanished from the
+ * '!' is the shape this registry was built after: the Watcom assembly vanished from the
  * build and every numeric gate stayed green, because a kernel that
  * falls back to the scalar reference is bit-identical to one that does
  * not. '?' is the other direction - a cell nobody registered reads as
@@ -797,7 +797,7 @@ int lz_norm_can_fixed(int n);
    a use_subn branch - and the qualifier stopped covering the sentence
    after it.
 
-   Measured 2026-08-22, kunkun-ce q8, 500 tokens of real corpus, fixed
+   Measured on kunkun-ce q8, 500 tokens of real corpus, fixed
    against int: |diff| rms 0.144 on a signal rms of 2.01 (7%), top-1
    88.58%, NOT ONE element equal. Disabling exactly those six restores
    bit-identity, which is how the list was arrived at rather than read
@@ -808,10 +808,7 @@ int lz_norm_can_fixed(int n);
    s1v3 reaches no int site at all. Of what is on disk, kunkun-ce is the
    only model that exercises this value.
 
-   Until 2026-08-22 nothing shipped was wrong for one reason only:
-   `auto` resolved to fixed and never to int, so the divergence sat here
-   reachable, documented and untested. THAT IS NO LONGER THE POSITION -
-   the int form is now what the fixed tier does, so the six plain-norm
+   THE INT FORM IS WHAT THE FIXED TIER DOES, so the six plain-norm
    sites ship it, and the ~7% is a deliberate float-to-fixed step of the
    kind already taken for every other write tier. It buys 114 -> 12
    instructions per element on the target (measured, ops_norm.c) with

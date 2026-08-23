@@ -981,12 +981,15 @@ int main(int argc, char **argv) {
     {   /* THE SAME CONVERSION, and it is the same problem: with a
            Chinese character system resident the bytes DOS puts in argv
            are GBK, and everything past this loop is UTF-8. Without it
-           `--prompt 你好` reaches the tokenizer as four bytes that are
-           not valid UTF-8, become U+FFFD, and come back out as 锟斤拷.
+           a two-character prompt (U+4F60 U+597D, "ni hao") reaches the
+           tokenizer as four GBK bytes that are not valid UTF-8, become
+           U+FFFD, and come back out as the four-character mojibake
+           U+9535 U+65A4 U+62F7 that Chinese users recognize on sight.
 
            936 as a constant rather than a query: DOS has no GetACP,
            and INT 21h/6601h reports the code page the OS was told
-           about, which a TSR like 天汇 does not necessarily set. The
+           about, which a resident IME (U+5929 U+6C47, "tian hui") does
+           not necessarily set. The
            honest statement is "this build assumes a GBK console on
            DOS", which is what LZ_CONSOLE_GBK_DEFAULT already says and
            what --console overrides. lz_gbk_argv_convert returns NULL
@@ -2087,8 +2090,9 @@ int main(int argc, char **argv) {
        The GUI and --interactive feed the model through lz_chat_render,
        which injects the system prompt and the think-mode generation tail.
        --prompt does NOT: it feeds the raw bytes as a bare continuation.
-       The two are different tasks - a bare "你好！" continuation and a
-       chat turn produce different replies - and a CLI used to reproduce
+       The two are different tasks - a bare greeting as a continuation
+       and the same greeting as a chat turn produce different replies -
+       and a CLI used to reproduce
        GUI behaviour must offer the chat path. --chat is that single turn,
        byte-identical to interactive's first turn. --prompt stays the
        continuation probe the numeric tests depend on. */

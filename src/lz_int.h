@@ -4,8 +4,8 @@
  * compiler in the target family and it has neither of the two things
  * this tree reaches for by reflex.
  *
- * WHAT VISUAL C++ 4.0 DOES NOT HAVE, and the count of what that reaches
- * (grep over src/ on 2026-08-24, the day the law landed):
+ * WHAT VISUAL C++ 4.0 DOES NOT HAVE, and the count of what that reached
+ * when the law landed (grep over src/):
  *
  *   <stdint.h>      absent - arrived in Visual C++ 2010.   23 files
  *   long long       absent - the 64-bit type is __int64.  213 uses
