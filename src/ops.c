@@ -1656,17 +1656,28 @@ static long long epi_fixed_raw(const int32_t *accb, const LZTensor *w,
        read the empty [] as "this one goes on the stack", it mis-parses
        the whole list. The documented way to put a parameter on the
        stack is to LIST FEWER REGISTERS than the prototype has
-       arguments; the remainder go on the stack by themselves. So the
-       shape to write next time is
+       arguments; the remainder go on the stack by themselves - AND the
+       list has to say who cleans it:
 
-           parm [esi] [edi] [ecx]        with a 4-argument prototype
+           parm caller [esi] [edi] [ecx]      4-argument prototype
 
-       and the offset still has to be read out of a disassembly rather
-       than assumed, because `push ebp` is inside the body.
+       Both halves are load-bearing and each was found by running it.
+       Without `caller` the build is still 0 errors and the binary still
+       crashes: the callee's plain `ret` leaves the argument on the
+       stack. With it, the Watcom binary runs to completion.
 
-       Four readings of this obstacle - a matrix cell, the divide, the
-       register count, the stack offset - and every one of them was
-       settled by running something, never by arguing. */
+       WHERE IT STANDS, so the next attempt does not restart from zero:
+       the kernel BUILDS AND RUNS under both toolchains and is still not
+       shippable, because its logits differ from HEAD's on both fixtures
+       and the two toolchains differ from each other - so the arithmetic
+       or the frame offset is still wrong. Reverted rather than shipped.
+       A numeric change that cannot be shown bit-identical does not go
+       in, and "it runs" is not that proof.
+
+       Five readings of this one obstacle - a matrix cell, the divide,
+       the register count, the parm syntax, the cleanup convention - and
+       every single one was settled by running something. None was
+       settled by reasoning, including the ones that sounded certain. */
     for (g = 0; g < ng; g++)
         g_epi_m[g] = (int32_t)g_epi_xq[tk][g] * (int32_t)ww[g / r];
     /* The exponent is per ROW, so a libm call here would run once per
