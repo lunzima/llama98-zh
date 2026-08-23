@@ -1948,11 +1948,13 @@ static float gdn_pass1_fixed_head(const int8_t *sq_in,
 
        Prologue: 3 mul + 1 add per kk with a gvec (KDA), 1 mul + 1 add
        without (GDN). Epilogue, per ELEMENT and for each of u and w:
-       2 lz_i32f (2 cvt), 1 mul, 1 add under the two-plane shape - the
-       low plane's 1/LZ_GDN_LO_SCALE was the second multiply and is an
-       exponent subtract now (f32_scale_pow2), leaving only `* su[gg]`,
-       which is a real one. The two-TABLE shape (LZ_GDN_FIXED>=2) still
-       spends 2 and shares this bill; it is a non-default arm, so the
+       2 lz_i32f (2 cvt), 0 mul, 1 add under the two-plane shape. BOTH
+       multiplies are exponent adds now - the low plane's
+       1/LZ_GDN_LO_SCALE always was one, and `* su[gg]` became one when
+       gdn_build_table started block-normalizing to 32767*2^k, which
+       makes su and sw exact powers of two. The two-TABLE shape
+       (LZ_GDN_FIXED>=2) still spends 2 and shares this bill; it is a
+       non-default arm, so the
        count below follows the default and understates that one - said
        here rather than left for a reader to find by subtraction.
        Single-plane: 1 cvt and 1 mul.
@@ -1963,10 +1965,10 @@ static float gdn_pass1_fixed_head(const int8_t *sq_in,
        shape audited, and a half-derived formula is exactly what this
        file has twice been wrong by. */
 #if LZ_GDN_STATE_2PLANE || LZ_GDN_FIXED >= 2
-    LZ_FCX(LZ_FC_RECUR, (long)vd * 2 + (long)kd * (gvec ? 3 : 1),
+    LZ_FCX(LZ_FC_RECUR, (long)kd * (gvec ? 3 : 1),
            (long)vd * 2 + (long)kd, 0, (long)vd * 4, 0);
 #else
-    LZ_FCX(LZ_FC_RECUR, (long)vd * 2 + (long)kd * (gvec ? 3 : 1),
+    LZ_FCX(LZ_FC_RECUR, (long)kd * (gvec ? 3 : 1),
            (long)kd, 0, (long)vd * 2, 0);
 #endif /* LZ_GDN_STATE_2PLANE || LZ_GDN_FIXED >= 2 */
 #if LZ_GDN_STATE_2PLANE
@@ -1976,7 +1978,30 @@ static float gdn_pass1_fixed_head(const int8_t *sq_in,
     gdn_pass1_fixed(sq_in, ss_in, qq, kk_, kd, vd,
                     au, aw, su, sw, au2, aw2, su2, sw2);
 #endif /* LZ_GDN_STATE_2PLANE */
-    for (gg = 0; gg < ng; gg++)
+    for (gg = 0; gg < ng; gg++) {
+      /* `* su[gg]` IS AN EXPONENT ADD NOW, because gdn_build_table
+         block-normalizes to 32767*2^k and so writes su and sw as exact
+         powers of two. The exponent is read back out of the float
+         rather than threaded through LZGdnTable - su is pow2f(ek), so
+         its stored exponent IS ek, and a parallel int array would be a
+         second copy of a number already in the first one.
+         WITH A BIT TEST, NOT A FLOAT COMPARE: mantissa zero and the
+         exponent field neither 0 nor 255 is exactly "this is a power of
+         two", costs two integer ops per GROUP, and never asks
+         __aeabi_fcmp. The guard is live, not decoration - the all-zero
+         group takes su = LZ_Q15_INV, which is 1/32767 and not a power
+         of two, and those groups fall back to the multiply.
+         Hoisted per gg because that is where su changes. */
+      union { float f; uint32_t u; } sb;
+      int su_e, sw_e, su_p2, sw_p2;
+      sb.f = su[gg];
+      su_p2 = ((sb.u & 0x007FFFFFu) == 0u)
+              && (uint32_t)(((sb.u >> 23) & 0xFFu) - 1u) < 0xFEu;
+      su_e = (int)((sb.u >> 23) & 0xFFu) - 127;
+      sb.f = sw[gg];
+      sw_p2 = ((sb.u & 0x007FFFFFu) == 0u)
+              && (uint32_t)(((sb.u >> 23) & 0xFFu) - 1u) < 0xFEu;
+      sw_e = (int)((sb.u >> 23) & 0xFFu) - 127;
         for (j = 0; j < 32; j++) {
             int vi = gg * 32 + j;
 #if LZ_GDN_STATE_2PLANE
@@ -1985,25 +2010,31 @@ static float gdn_pass1_fixed_head(const int8_t *sq_in,
                is an exponent SUBTRACT, not a __aeabi_fmul. Two per
                element, in pass 1's tail, which is 61,440 operations a
                token on kmr20 and the third-largest block of the
-               census's largest row. The `* su[gg]` beside it is a real
-               multiply and stays. */
+               census's largest row. */
             {
-                float lo;
+                float lo, acc;
                 if (!f32_scale_pow2(lz_i32f(aul[vi]), -LZ_GDN_LO_SHIFT, &lo))
                     lo = lz_i32f(aul[vi]) * (1.0f / LZ_GDN_LO_SCALE);
-                u[vi] = (lz_i32f(au[vi]) + lo) * su[gg];
+                acc = lz_i32f(au[vi]) + lo;
+                if (!su_p2 || !f32_scale_pow2(acc, su_e, &u[vi]))
+                    u[vi] = acc * su[gg];
                 if (!f32_scale_pow2(lz_i32f(awl[vi]), -LZ_GDN_LO_SHIFT, &lo))
                     lo = lz_i32f(awl[vi]) * (1.0f / LZ_GDN_LO_SCALE);
-                w[vi] = (lz_i32f(aw[vi]) + lo) * sw[gg];
+                acc = lz_i32f(aw[vi]) + lo;
+                if (!sw_p2 || !f32_scale_pow2(acc, sw_e, &w[vi]))
+                    w[vi] = acc * sw[gg];
             }
 #elif LZ_GDN_FIXED >= 2
             u[vi] = lz_i32f(au[vi]) * su[gg] + lz_i32f(au2[vi]) * su2[gg];
             w[vi] = lz_i32f(aw[vi]) * sw[gg] + lz_i32f(aw2[vi]) * sw2[gg];
 #else
-            u[vi] = lz_i32f(au[vi]) * su[gg];
-            w[vi] = lz_i32f(aw[vi]) * sw[gg];
+            if (!su_p2 || !f32_scale_pow2(lz_i32f(au[vi]), su_e, &u[vi]))
+                u[vi] = lz_i32f(au[vi]) * su[gg];
+            if (!sw_p2 || !f32_scale_pow2(lz_i32f(aw[vi]), sw_e, &w[vi]))
+                w[vi] = lz_i32f(aw[vi]) * sw[gg];
 #endif /* LZ_GDN_STATE_2PLANE */
         }
+    }
     return kq;
 }
 
