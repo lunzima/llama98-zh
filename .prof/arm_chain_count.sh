@@ -20,6 +20,8 @@
 #   16   one bare multiply          17  one bare add
 #   19   the butterfly: a+b and a-b from one pair (fwhtf armA)
 #   20   the MAC: acc + w*x                       (f32mm armA)
+#   21   mode 19 through lz_faddsub_arm_asm, fallback included - the
+#        shipped cost of the fwhtf armA cell against 19, its control
 #
 # WHAT THE NUMBERS DECIDE. 19 minus c0 against 2*(17 - c0) says how much
 # of the butterfly is already shared by the compiler; 20 minus c0
@@ -43,7 +45,7 @@ for f in ops ops_quant ops_sched ops_norm ops_gdn ops_matmul ops_t2_arm \
     $CC $F -I"$R/src" -c "$R/src/$f.c" -o "$O/$f.o"
     OBJ="$OBJ $O/$f.o"
 done
-for m in 0 16 17 19 20; do
+for m in 0 16 17 19 20 21 22 23; do
     $CC $F -I"$R/src" -I"$R/.prof" -DPRIM_MODE=$m -DPRIM_TIER=1 \
         -DPRIM_INTARG=0 -static -Wl,--gc-sections \
         "$R/.prof/arm_prim_count.c" $OBJ -lm -o "$O/m$m.elf"
@@ -54,7 +56,7 @@ count() { $Q -one-insn-per-tb -d exec,nochain "$1" "$2" 2>&1 >/dev/null | wc -l;
 # Linearity is the judgement that makes a marginal number mean anything:
 # X(512)-X(256) must equal X(256)-X(0), or the arm has no per-call cost
 # and the difference is measuring startup.
-for m in 0 16 17 19 20; do
+for m in 0 16 17 19 20 21 22 23; do
     z=$(count "$O/m$m.elf" 0)
     a=$(count "$O/m$m.elf" 256)
     b=$(count "$O/m$m.elf" 512)

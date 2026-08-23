@@ -493,6 +493,160 @@ static __inline__ int lz_sig_q15_arm_asm(uint32_t ux, const int32_t *tab,
     return (int)ok;
 }
 
+/* ---- lz_fwht's butterfly: a+b and a-b from one unpack ---------------- */
+
+/* gcc emits `bl __addsf3` and `bl __subsf3` here, 94.1 instructions
+   measured (.prof/arm_chain_count.sh mode 19) against 86.1 for two
+   isolated adds - libgcc shares nothing, so the same two operands are
+   unpacked, aligned, normalised, rounded and packed twice.
+
+   ALIGNMENT IS THE SHARED PART, and it is shared because it depends on
+   the MAGNITUDES only: |a| and |b| line up the same way whichever sign
+   the operation carries. What cannot be shared is normalise/round/pack,
+   which is per result. This computes both magnitudes - P = |a| + |b|
+   and M = ||a| - |b|| - off one unpack and one alignment.
+
+   THE TWO OPERATIONS ARE ONE ADD AND ONE SUBTRACT, always. a+b is an
+   effective add exactly when the signs agree, and a-b is then the
+   effective subtract; when they disagree the roles swap. So P and M are
+   each computed once and the caller only chooses which is which.
+
+   SIGNS FALL OUT WITHOUT A CASE ANALYSIS. The effective-add result is
+   a+b when the signs agree and a-b when they do not, and both carry
+   sign(a) - so P's sign is sign(a) unconditionally. The effective
+   subtract is |a|-|b| taken with the sign of whichever operand is
+   larger, under the operation that keeps a's sign when a wins: M's sign
+   is sign(a) ^ (|a| < |b|), also unconditionally.
+
+   DECLINES, and each is a case where identity would need a real IEEE
+   adder rather than a proof:
+     either operand zero, subnormal, inf or NaN   (exponent 0 or 255)
+     exponent difference above 27                 (small is pure sticky)
+     P overflows to exponent 255
+     M underflows to exponent 0
+   The caller runs the C for those, so this tier can be slower than the
+   C and never different.
+
+   WHY THE STICKY BIT SURVIVES NORMALISATION, which is the one step
+   where a shift could invalidate it. The significands are held three
+   bits above their final ulp, so an alignment shift of d <= 3 drops
+   only the zeros those three bits added and the sticky is 0. For
+   d >= 4 the aligned small operand is under 2^23 while the big one is
+   at least 2^26, so their difference stays above 2^25 and CLZ asks for
+   at most one bit of left shift - which moves the sticky from bit 0 to
+   bit 1, still below the guard bit the tie test reads. A shift of two
+   or more therefore only ever happens where the sticky is 0.
+   .prof/verify_fwht_arm.c sweeps this rather than trusting it.
+
+   ONE ASSEMBLY BLOCK, not three, and the reason is measured rather
+   than stylistic. Split into unpack / add / subtract with C between
+   them, gcc has to keep e, mA, mB and the two seeds live across the
+   boundaries and spills eight words a butterfly - 100.0 instructions
+   against libgcc's 106.7 on this operand distribution. Merged, the
+   same arithmetic needs nine registers and no stack at all. The C left
+   outside is the one thing that cannot go in: which of the two results
+   is the sum, which the answer only knows from the operand signs. */
+static __inline__ int lz_faddsub_arm_asm(uint32_t ua, uint32_t ub,
+                                         uint32_t *psum, uint32_t *pdif) {
+    uint32_t ok, S, D, e, mA, mB, t, a = ua, b = ub;
+    __asm__(
+        "eor    %[ok], %[a], %[b]\n\t"
+        "mov    %[ok], %[ok], lsr #31\n\t"    /* 1 when the signs differ */
+        "and    %[S],  %[a], #0x80000000\n\t" /* P's sign is always a's */
+        "mov    %[a],  %[a], lsl #1\n\t"      /* |a| << 1: exponent at 31:24 */
+        "mov    %[b],  %[b], lsl #1\n\t"
+        "sub    %[e],  %[a], #0x01000000\n\t"
+        "cmp    %[e],  #0xFE000000\n\t"
+        "sublo  %[e],  %[b], #0x01000000\n\t"
+        "cmplo  %[e],  #0xFE000000\n\t"
+        "bhs    9f\n\t"                       /* 0/subnormal/inf/nan */
+
+        "cmp    %[a],  %[b]\n\t"              /* sign-magnitude order */
+        "mov    %[D],  %[S]\n\t"
+        "eorlo  %[D],  %[D], #0x80000000\n\t" /* M's sign: a's ^ swapped */
+        "movlo  %[e],  %[a]\n\t"
+        "movlo  %[a],  %[b]\n\t"
+        "movlo  %[b],  %[e]\n\t"
+        "mov    %[e],  %[a], lsr #24\n\t"     /* larger exponent */
+        "mov    %[t],  %[b], lsr #24\n\t"
+        "sub    %[t],  %[e], %[t]\n\t"        /* d */
+        "cmp    %[t],  #27\n\t"
+        "bhi    9f\n\t"
+        "mov    %[mB], %[b], lsl #8\n\t"
+        "mov    %[mB], %[mB], lsr #6\n\t"
+        "orr    %[mB], %[mB], #0x04000000\n\t"
+        "rsb    %[b],  %[t], #32\n\t"
+        "mov    %[b],  %[mB], lsl %[b]\n\t"   /* d=0 shifts by 32, giving 0 */
+        "mov    %[mB], %[mB], lsr %[t]\n\t"
+        "cmp    %[b],  #0\n\t"
+        "orrne  %[mB], %[mB], #1\n\t"         /* sticky */
+        "mov    %[mA], %[a], lsl #8\n\t"
+        "mov    %[mA], %[mA], lsr #6\n\t"
+        "orr    %[mA], %[mA], #0x04000000\n\t"
+
+        /* P = |a| + |b|: one carry out at most, folded with its sticky. */
+        "add    %[t],  %[mA], %[mB]\n\t"
+        "sub    %[a],  %[e], #1\n\t"
+        "cmp    %[t],  #0x08000000\n\t"
+        "movhs  %[b],  %[t], lsr #1\n\t"
+        "andhs  %[t],  %[t], #1\n\t"
+        "orrhs  %[t],  %[b], %[t]\n\t"
+        "addhs  %[a],  %[a], #1\n\t"
+        "and    %[b],  %[t], #7\n\t"
+        "mov    %[t],  %[t], lsr #3\n\t"
+        "cmp    %[b],  #4\n\t"
+        "addhi  %[t],  %[t], #1\n\t"
+        "andeq  %[b],  %[t], #1\n\t"
+        "addeq  %[t],  %[t], %[b]\n\t"
+        "cmp    %[t],  #0x01000000\n\t"       /* rounding carried out */
+        "addeq  %[a],  %[a], #1\n\t"
+        "subeq  %[t],  %[t], #0x800000\n\t"
+        "cmp    %[a],  #254\n\t"
+        "bhs    9f\n\t"                       /* P overflows to inf */
+        "add    %[t],  %[t], %[a], lsl #23\n\t"
+        "orr    %[S],  %[S], %[t]\n\t"
+
+        /* M = |a| - |b|. CLZ normalises; M cannot overflow, because
+           rounding is monotone and M is below the larger operand,
+           which is representable at this exponent. */
+        "subs   %[t],  %[mA], %[mB]\n\t"
+        "moveq  %[D],  #0\n\t"                /* exact cancellation: +0 */
+        "beq    8f\n\t"
+        "clz    %[a],  %[t]\n\t"
+        "sub    %[a],  %[a], #5\n\t"
+        "mov    %[t],  %[t], lsl %[a]\n\t"
+        "subs   %[a],  %[e], %[a]\n\t"
+        "ble    9f\n\t"                       /* M is subnormal */
+        "sub    %[a],  %[a], #1\n\t"
+        "and    %[b],  %[t], #7\n\t"
+        "mov    %[t],  %[t], lsr #3\n\t"
+        "cmp    %[b],  #4\n\t"
+        "addhi  %[t],  %[t], #1\n\t"
+        "andeq  %[b],  %[t], #1\n\t"
+        "addeq  %[t],  %[t], %[b]\n\t"
+        "cmp    %[t],  #0x01000000\n\t"
+        "addeq  %[a],  %[a], #1\n\t"
+        "subeq  %[t],  %[t], #0x800000\n\t"
+        "add    %[t],  %[t], %[a], lsl #23\n\t"
+        "orr    %[D],  %[D], %[t]\n\t"
+
+        "8:\n\t"
+        "orr    %[ok], %[ok], #2\n\t"
+        "b      7f\n\t"
+        "9:\n\t"
+        "mov    %[ok], #0\n\t"
+        "7:\n\t"
+        : [ok] "=&r"(ok), [S] "=&r"(S), [D] "=&r"(D), [e] "=&r"(e),
+          [mA] "=&r"(mA), [mB] "=&r"(mB), [t] "=&r"(t),
+          [a] "+r"(a), [b] "+r"(b)
+        :
+        : "cc");
+    if (!ok) return 0;
+    if (ok & 1) { *psum = D; *pdif = S; }     /* signs differ */
+    else        { *psum = S; *pdif = D; }
+    return 1;
+}
+
 #endif /* __arm__ && __GNUC__ */
 
 #endif /* LZ_OPS_ARM_PRIM_H */

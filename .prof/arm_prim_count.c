@@ -361,6 +361,43 @@ int main(int argc, char **argv) {
 #else
         u.f = SP_ARG[k] + g_mulc;          g_sink = u.i;
 #endif
+#elif PRIM_MODE == 21 || PRIM_MODE == 22 || PRIM_MODE == 23
+        /* 21 is mode 19's operand pair through the hand-written cell,
+         * WITH the fallback the real caller runs - a declined pair pays
+         * the check and then the two library calls anyway, so this is
+         * the shipped cost and not the fast path's.
+         *
+         * 22 and 23 are the same two arms over a HADAMARD-LIKE pair.
+         * Mode 19 puts a row element against a fixed constant, which
+         * spreads the exponent difference across the whole float range;
+         * a butterfly pairs two partial sums of one transform, whose
+         * magnitudes track each other. Which distribution is measured
+         * decides how often the cell declines, so both are here and
+         * each has its own C control - 21 against 19, 23 against 22. */
+        {
+            union { float f; uint32_t u; } ba, bb;
+            ba.f = SP_ARG[k];
+#if PRIM_MODE == 21
+            bb.f = g_mulc;
+#else
+            bb.f = SP_ARG[k ^ 1];
+#endif
+#if PRIM_MODE == 22
+            u.f = ba.f + bb.f;  g_sink = u.i;
+            u.f = ba.f - bb.f;  g_sink ^= u.i;
+#else
+            {
+                uint32_t s, d;
+                if (lz_faddsub_arm_asm(ba.u, bb.u, &s, &d)) {
+                    g_sink = (int32_t)s;
+                    g_sink ^= (int32_t)d;
+                } else {
+                    u.f = ba.f + bb.f;  g_sink = u.i;
+                    u.f = ba.f - bb.f;  g_sink ^= u.i;
+                }
+            }
+#endif
+        }
 #elif PRIM_MODE == 19 || PRIM_MODE == 20
         /* THE TWO CHAINS docs/arm-asm-audit.md G2 rates worth writing,
          * measured instead of argued. Modes 16/17 answer what ONE bare

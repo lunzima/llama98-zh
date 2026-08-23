@@ -2594,6 +2594,40 @@ void lz_fwht(float *v, int n) {
         return;
     }
 #endif /* LZ_FWHT_F32_SSE_EXTERN */
+#if defined(LZ_ARM_PRIM_ASM)
+    /* ARMv5TE has no FPU, so each butterfly below is `bl __addsf3` plus
+       `bl __subsf3` - two full soft-float adders over one pair of
+       operands. lz_faddsub_arm_asm does the unpack and the alignment
+       once and declines the cases it cannot prove identical, which the
+       C tail then answers. 95.0 instructions a butterfly against 112.7
+       (.prof/arm_chain_count.sh modes 23 and 22).
+
+       Selected by tier, not by CPU: ref and arm-c must reach the loop
+       below or the arm this is compared against would be this one. */
+    if (g_kernel == LZ_KERNEL_ARM_ASM) {
+        for (len = 1; len < n; len <<= 1) {
+            for (i = 0; i < n; i += (len << 1)) {
+                for (j = 0; j < len; j++) {
+                    union { float f; uint32_t u; } ba, bb;
+                    uint32_t s, d;
+                    ba.f = v[i + j];
+                    bb.f = v[i + j + len];
+                    if (lz_faddsub_arm_asm(ba.u, bb.u, &s, &d)) {
+                        ba.u = s;
+                        bb.u = d;
+                    } else {
+                        float a = ba.f, b = bb.f;
+                        ba.f = a + b;
+                        bb.f = a - b;
+                    }
+                    v[i + j]       = ba.f;
+                    v[i + j + len] = bb.f;
+                }
+            }
+        }
+        return;
+    }
+#endif /* LZ_ARM_PRIM_ASM */
     for (len = 1; len < n; len <<= 1) {
         for (i = 0; i < n; i += (len << 1)) {
             for (j = 0; j < len; j++) {
@@ -3438,12 +3472,6 @@ static const char km_why_fwhti_sse1[] =
 static const char km_why_fwhtf_mmx[] =
     "impossible: MMX is integer-only and this transform is over floats. "
     "The int32 twin (fwhti) is the one MMX can take";
-static const char km_why_fwhtf_arma[] =
-    "not written yet, and the reason is now MEASURED rather than rated: "
-    "libgcc shares nothing across the butterfly (94.1 instructions for "
-    "a+b and a-b against 86.1 for two isolated adds), but a hand cell "
-    "can only take the one shared unpack+align and one call/return - "
-    "about 94 -> 78, not a factor. docs/arm-asm-audit.md G2";
 static const char km_why_fwht_g128[] =
     "this column is the 128-ELEMENT quantization group; the Hadamard's "
     "block is hadamard_o/hadamard_down (up to 512, capped by the "
@@ -3516,12 +3544,11 @@ static const LZKmReg km_reg[LZ_KM_NUNIT * LZ_KM_NCOL] = {
 /* wsump*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_attn_g128),
 /* sigq */ KM_H(KM_ALL), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128),
 /* nrmss*/ KM_H(KM_ALL), KM_I(km_why_nrmss_mmx), KM_I(km_why_nrmss_sse1), KM_H(LZ_KMB_GCC), KM_I(km_why_nrmss_mmx), KM_I(km_why_nrmss_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_nrmss_g128),
-/* fwhtf's armA is the only EMPTY cell left in these two rows, and that
-   is the point of registering them: without a row, a gate counting
-   filled cells could not tell "no assembly" from "no such operator",
-   and src/fwht.c could be deleted without a single cell changing. */
+/* Registering these two rows is what makes a gate able to tell "no
+   assembly" from "no such operator": without them src/fwht.c could be
+   deleted and not a single cell would change. */
 /* fwhti*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_fwhti_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_fwhti_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM),       KM_I(km_why_fwht_g128),
-/* fwhtf*/ KM_H(KM_ALL), KM_I(km_why_fwhtf_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_I(km_why_fwhtf_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_T(km_why_fwhtf_arma), KM_I(km_why_fwht_g128),
+/* fwhtf*/ KM_H(KM_ALL), KM_I(km_why_fwhtf_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_I(km_why_fwhtf_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM),          KM_I(km_why_fwht_g128),
 /* f32mm*/ KM_H(KM_ALL), KM_I(km_why_f32mm_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_I(km_why_f32mm_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_T(km_why_f32mm_arma), KM_I(km_why_f32mm_g128)
 };
 
@@ -3587,6 +3614,11 @@ static int km_arm_asm(int f) {
        rows for one body. */
     if (f == LZ_KM_UNIT_I32F || f == LZ_KM_UNIT_Q8RND ||
         f == LZ_KM_UNIT_EXPFX || f == LZ_KM_UNIT_SIGQ) return 1;
+    /* fwhtf's cell is lz_faddsub_arm_asm, an inline block like the four
+       above rather than a loop leaf: the butterfly's operands come from
+       two strides of the caller's array, so a leaf would pass them
+       through memory and lose what the shared unpack bought. */
+    if (f == LZ_KM_UNIT_FWHTF) return 1;
 #endif /* LZ_ARM_PRIM_ASM */
 #if defined(LZ_ARM_ASM_EXTERN)
     /* Both attention MACs, and atdot's cell IS q8_0's leaf - the reuse
@@ -3595,11 +3627,8 @@ static int km_arm_asm(int f) {
        inline block: its per-call setup amortizes over a whole row. */
     if (f == LZ_KM_UNIT_ATDOT || f == LZ_KM_UNIT_WSUMP ||
         f == LZ_KM_UNIT_NRMSS) return 1;
-    /* fwhti only. The float twin's ARM cell is still empty - not
-       because an F32 weight is a path worth skipping (the x86 columns
-       are written, and an F32 model is a shipping configuration), but
-       because the ARM body has not been written yet. Its reason string
-       says so. */
+    /* fwhti's is a loop leaf in src/ops_arm.c; the float twin's is the
+       inline block registered above, under a different guard. */
     if (f == LZ_KM_UNIT_FWHTI) return 1;
 #endif /* LZ_ARM_ASM_EXTERN */
     (void)f;
