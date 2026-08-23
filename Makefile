@@ -278,12 +278,11 @@ WATCOM_BASE := -za99 -otexan -zp4 -DLZ_MMX_TU=1 -DLZ_SSE2_TU=1 $(EXTRA_DEFS)
 #
 # EVERY LOWERED TARGET ASSUMES A 387 IS PRESENT (386+387 or 486DX) -
 # this is not incidental, it is the floor: no target here is a no-387
-# build. The user's decision (2026-08-19) is that no-387 support waits
-# until the ARM branch is finished; until then this is a RESERVATION,
-# not a shipped configuration - tracked as isa_floor.py's `x87` class
-# (task #26), which stays a reservation rather than an enforced floor
-# for exactly this reason. Do not infer soft-float coverage from the
-# existing fixed-point tiers (--recur-write fixed etc.) - those are
+# build. No-387 support waits until the ARM branch is finished; until
+# then it is a RESERVATION, not a shipped configuration - tracked as
+# isa_floor.py's `x87` class, which stays a reservation rather than an
+# enforced floor for exactly that reason. Do not infer soft-float
+# coverage from the fixed-point tiers `--fixed all` selects - those are
 # tested for cross-compiler bit-identity, never against a target with
 # no FPU at all, and presenting them as such would be a claim this
 # project has not measured.
@@ -380,8 +379,8 @@ watcom-cli:
 
 # WHICH DOS EXTENDER - a contested choice, so it is a knob.
 #   dos4gw  wstub.exe   loads DOS4GW.EXE at run time - the period default,
-#                       but DOS/4GW OOMs loading a real model (measured
-#                       2026-08-12), so it is no longer the default.
+#                       but DOS/4GW OOMs loading a real model, measured,
+#                       so it is no longer the default.
 #   dos32a  stub32a.exe loads DOS32A.EXE at run time - faster, no DOS4GW
 #                       licensing history, and loads the model fine. A
 #                       drop-in otherwise; this is the default now.
@@ -550,9 +549,10 @@ mm-alias-gate:
 isa-floor-watcom-gate:
 	@bash build/isa_floor_watcom_gate.sh
 
-# Iron law 8's coverage assertion, made into a gate: every (format x
-# tier) cell is either implemented or registered with a reason, and the
-# union across build classes covers everything the registry claims. This
+# Every operator carries a path on every tier, asserted rather than
+# assumed: each (format x tier) cell is either implemented or registered
+# with a reason, and the union across build classes covers everything
+# the registry claims. This
 # is the only check that can see a whole kernel path disappear - the
 # numeric gates cannot, because falling back to the scalar reference is
 # bit-identical.

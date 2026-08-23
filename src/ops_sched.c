@@ -250,10 +250,10 @@ int lz_norm_can_fixed(int n) {
 #if LZ_NORM_FIXED
     return lz_norm_mode() && n > 0 && n <= LZ_NORM_MAX_N;
 #else
-    /* The fixed bodies are not in this build, so no answer from
-       --norm-write can make them runnable. Saying no here is what keeps
-       the call sites off a compiled-out path; norm_ss_fixed declines
-       for the same reason. */
+    /* The fixed bodies are not in this build, so no value of --fixed
+       can make them runnable. Saying no here is what keeps the call
+       sites off a compiled-out path; norm_ss_fixed declines for the
+       same reason. */
     (void)n;
     return 0;
 #endif /* LZ_NORM_FIXED */

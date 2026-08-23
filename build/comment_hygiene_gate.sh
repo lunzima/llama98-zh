@@ -37,28 +37,41 @@
 set -u
 cd "$(dirname "$0")/.."
 
-# file:hashes:dates. Only non-zero entries listed.
+# WHAT IS SCANNED. src/ is not the tree. Three of this session's
+# findings - a date, a rulebook cite, a dead flag name - were in the
+# Makefile, and every earlier report of "zero tree-wide" was a src/-only
+# figure presented as a whole-tree one. The build files carry as much
+# prose as the sources do, and gui/ is a third of the shipping product.
+SCAN="Makefile src/*.c src/*.h gui/*.c gui/*.h common/*.c common/*.h"
+
+# path:count. Only non-zero entries listed, and keyed by PATH rather
+# than basename: a basename key means a future gui/model.c silently
+# inherits src/model.c's allowance, which is the failure mode where a
+# table keyed by name hands a newcomer someone else's excuse.
 #
-#   ops.h:0:1   one 'Measured 2026-...' left inside a longer derivation
-#               where removing the date would need the paragraph
-#               rewritten; every other date in this file is gone.
-#   err.c:138  NOT comment debt: the user-visible Chinese error-message
-#              table, which is the shape the project asks for - every
-#              user-visible string lives in a table, source stays ASCII
-#              everywhere else.
-#              Counted because the scan cannot tell a string from a
-#              comment; excused here rather than by weakening the scan.
-#   forward.c:1 model.c:1
-#              The lz_int.h include comment, already corrected in the
-#              working tree but sharing a diff hunk with another
-#              session's include-block reshuffle. Their commit carries
-#              it; baselined rather than left silently red.
-BASELINE="err.c:138 forward.c:1 model.c:1"
+#   src/err.c:138            NOT comment debt: the user-visible Chinese
+#   gui/localized_strings.c:99   message tables, which are the shape the
+#                            project asks for - every user-visible
+#                            string lives in a table, source stays ASCII
+#                            everywhere else. Counted because the scan
+#                            cannot tell a string from a comment;
+#                            excused here rather than by weakening the
+#                            scan, which would also stop catching a
+#                            Chinese COMMENT in those same files.
+#   src/forward.c:1 src/model.c:1
+#                            The lz_int.h include comment, already
+#                            corrected in the working tree but sharing a
+#                            diff hunk with another session's
+#                            include-block reshuffle. Their commit
+#                            carries it; baselined rather than left
+#                            silently red.
+BASELINE="src/err.c:138 gui/localized_strings.c:99 src/forward.c:1 src/model.c:1"
 
 FAIL=0
 TOTAL=0
-for f in src/*.c src/*.h; do
-    b=$(basename "$f")
+for f in $SCAN; do
+    [ -f "$f" ] || continue
+    b=$f
     exp=0
     for e in $BASELINE; do
         [ "${e%%:*}" = "$b" ] && exp=$(echo "$e" | cut -d: -f2)
