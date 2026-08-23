@@ -110,7 +110,19 @@ bad() { echo "subn-gate: FAIL $*"; FAIL=1; }
 
 run() {  # run MODEL OUT [extra args...]
     m=$1; out=$2; shift 2
-    "$ENG" "$m" --tokens-file "$TOKENS" --dump-logits "$out" "$@" >"$out.log" 2>&1
+    # --dump-all-logits, not --dump-logits: three of the assertions below
+    # are "these two arms must DIFFER", and the last position alone is one
+    # sample of that - two configurations that differ everywhere else can
+    # coincide there, which this gate would report as "the knob is inert".
+    # That is the exact mistake build/kv_rot_gate.sh made and its header
+    # records. Every comparison here is cmp/cmp -l and $sz is derived from
+    # the file, so nothing else changes; the byte counts in the PASS lines
+    # get larger by the number of positions.
+    #
+    # UNVERIFIED AT HEAD, and it cannot be otherwise: this gate SKIPs at
+    # HEAD because no use_subn export loads (see the SKIP text below), so
+    # leaving the weaker flag in place would have been equally unverified.
+    "$ENG" "$m" --tokens-file "$TOKENS" --dump-all-logits "$out" "$@" >"$out.log" 2>&1
 }
 
 echo "-- subn model (quantized): $SUBN_MODEL --"

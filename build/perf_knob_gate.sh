@@ -50,10 +50,16 @@ fi
 W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
 
+# --dump-all-logits, not --dump-logits: the latter writes the LAST
+# position only, so a knob that perturbed an early position and left the
+# final one alone would pass an invariance check that never looked at it.
+# Strictly stronger for the same number of runs. (build/kv_rot_gate.sh's
+# header has the measurement that made the difference between the two
+# flags impossible to keep ignoring.)
 run() {   # run TAG ARGS...
     local tag="$1"; shift
     if ! "$BIN" "$MODEL" --tokens "$TOKENS" \
-            --dump-logits "$W/$tag.bin" "$@" >"$W/$tag.log" 2>&1; then
+            --dump-all-logits "$W/$tag.bin" "$@" >"$W/$tag.log" 2>&1; then
         echo "FAIL: run '$tag' exited nonzero"
         tail -5 "$W/$tag.log"
         return 1
