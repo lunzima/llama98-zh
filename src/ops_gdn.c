@@ -1302,9 +1302,29 @@ static int p2_tier(void) {
    call this - because they are the only float arithmetic left that is
    not exact, so two textually-equal copies could still differ by which
    intermediate the compiler chose to keep in an x87 register. */
-static void p2_group_coef(float dec, float rs, float kv, float sd,
+
+/* TAKES decs = dec * 2^-8, NOT dec. The 1/LZ_GDN_LO_SCALE factor is a
+   property of the ROW (dec is per row, the constant is per build), so
+   paying it per GROUP was ng multiplies where one would do. Both callers
+   now scale once above their group loop.
+
+   EXACT, not close, and for the same reason lz_attn_score_q8's 2^-8 fold
+   is: LZ_GDN_LO_SCALE is 256, so c = 2^-8 only moves an exponent.
+   fl(x*c) is fl(x)*c for any x, so fl(fl(dec*rs)*c) - the old form - and
+   fl(fl(dec*c)*rs) - the new one - both equal fl(dec*rs*c), the single
+   rounding of the same real product. A static assert two hundred lines
+   up already pins LZ_GDN_LO_SCALE at 256; if it ever stops being a power
+   of two this argument goes with it.
+
+   The one operand that breaks it is one the scaling pushes out of the
+   normal range: dec*2^-8 goes subnormal below dec = 2^-118. dec is a
+   decay gate, so that is a gate whose state contribution is already
+   zero to 24 bits - but it is a bound, not an impossibility, which is
+   why the end-to-end byte comparison is what this change was accepted
+   on and not the algebra alone. */
+static void p2_group_coef(float decs, float rs, float kv, float sd,
                           float *c1, float *c2) {
-    *c1 = dec * rs * (1.0f / LZ_GDN_LO_SCALE);
+    *c1 = decs * rs;
     *c2 = kv * sd;
 }
 
@@ -1519,7 +1539,7 @@ static void gdn_p2_row_simd(const int8_t *ph_row,
 #if LZ_GDN_STATE_2PLANE
                             const int8_t *pl_row,
 #endif /* LZ_GDN_STATE_2PLANE */
-                            const float *rs_in, float dec,
+                            const float *rs_in, float decs,
                             const int16_t *dq, const float *s_dg, float kv,
                             int8_t *oh_row,
 #if LZ_GDN_STATE_2PLANE
@@ -1551,7 +1571,7 @@ static void gdn_p2_row_simd(const int8_t *ph_row,
     /* PHASE 1 - float only. */
     for (gg = 0; gg < ng; gg++) {
         float c1, c2;
-        p2_group_coef(dec, rs_in[gg], kv, s_dg[gg], &c1, &c2);
+        p2_group_coef(decs, rs_in[gg], kv, s_dg[gg], &c1, &c2);
         p2_group_norm(c1, c2, mul[gg], &sacc[gg]);
     }
 
@@ -1834,6 +1854,11 @@ static void gdn_p2_fixed_rows(const int8_t *sq_in, int8_t *sq_out,
         const float *rs_in = ss_in + (size_t)kk * ng;
         float *rs_out = ss_out + (size_t)kk * ng;
         float dec = gvec ? gvec[kk] : gt;    /* the one family difference */
+        /* Scaled ONCE per row, not once per group: see p2_group_coef,
+           which now takes this rather than dec. Above the tier fork so
+           both row paths get the same value from the same multiply -
+           two textually-equal copies is the hazard that comment names. */
+        float decs = dec * (1.0f / LZ_GDN_LO_SCALE);
 #if LZ_GDN_STATE_2PLANE
         const int8_t *row_lo_in = sq2_in + (size_t)kk * vd;
         int8_t *row_lo_out = sq2_out + (size_t)kk * vd;
@@ -1841,15 +1866,17 @@ static void gdn_p2_fixed_rows(const int8_t *sq_in, int8_t *sq_out,
         /* Both SIMD (gdn_p2_row_simd) and scalar (gg loop below) row
            paths cost the same per group. Billed once, above the fork -
            billing only inside gdn_p2_row_simd would read zero on
-           --kernel ref, where p2_tier()==0 takes the scalar path only. */
-        LZ_FCX(LZ_FC_RECUR, 7 * ng, 2 * ng, 0, 0, 0);  /* coef 3 mul; norm 2 mul + 2 q8_round(add); scale 2 mul */
+           --kernel ref, where p2_tier()==0 takes the scalar path only.
+           coef 2 mul (was 3; the 2^-8 moved to the row, +1 below); norm
+           2 mul + 2 q8_round(add); scale 2 mul. */
+        LZ_FCX(LZ_FC_RECUR, 6 * ng + 1, 2 * ng, 0, 0, 0);
 #ifdef LZ_HAVE_P2_MMX
         if (p2_tier()) {
             gdn_p2_row_simd(row_in,
 #if LZ_GDN_STATE_2PLANE
                             row_lo_in,
 #endif /* LZ_GDN_STATE_2PLANE */
-                            rs_in, dec, dq, s_dg, k[kk], row_out,
+                            rs_in, decs, dq, s_dg, k[kk], row_out,
 #if LZ_GDN_STATE_2PLANE
                             row_lo_out,
 #endif /* LZ_GDN_STATE_2PLANE */
@@ -1859,7 +1886,7 @@ static void gdn_p2_fixed_rows(const int8_t *sq_in, int8_t *sq_out,
 #endif /* LZ_HAVE_P2_MMX */
         for (gg = 0; gg < ng; gg++) {
             float c1, c2;
-            p2_group_coef(dec, rs_in[gg], k[kk], s_dg[gg], &c1, &c2);
+            p2_group_coef(decs, rs_in[gg], k[kk], s_dg[gg], &c1, &c2);
             gdn_p2_group_fixed(row_in + gg * 32,
 #if LZ_GDN_STATE_2PLANE
                                row_lo_in + gg * 32,
