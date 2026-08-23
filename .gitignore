@@ -51,6 +51,7 @@
 !/build/recur_write_float_arm_gate.sh
 !/build/subn_gate.sh
 !/build/gcc_flag_parity_gate.sh
+!/build/changelog_comment_gate.sh
 # Comparators, not gates: a gate that ships without the program it
 # compares with is a gate that SKIPs in a fresh clone. logit_rms.c and
 # the gate scripts above predate this list and are tracked already, so

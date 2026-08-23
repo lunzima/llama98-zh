@@ -714,9 +714,10 @@ static void gdn_build_table(const float *ss, const float *q, const float *k,
                   products are exponent adds - free, no value traded,
                   the power of two was already there.
          scales   0 mul, 0 div. su/sw and ik/iq are pow2f of the block
-                  exponent now - bit construction, nothing to bill -
-                  where they used to be 2 mul (amk*LZ_Q15_INV) and 2 div
-                  (32767/amk).
+                  exponent - bit construction, nothing to bill. This is
+                  what the block normalization buys: without it the pair
+                  costs 2 mul (amk*LZ_Q15_INV) and 2 div (32767/amk),
+                  and the divides are why the normalization is there.
          loop 2   0 mul (the two ik/iq products are exponent adds after
                   the block normalization) and 2 add per kk (q8_round's
                   magic add, billed the way every other quantize site in
@@ -1806,8 +1807,10 @@ static void gdn_p2_row_simd(const int8_t *ph_row,
         lz_p2_rows_mmx(ph_row, plg0, pstride, dq, mul,
                        oh_row, olg0, pstride, shv, ng);
     }
-#else /* gcc: unchanged per-group loop, extern calls into ops_mmx.c/
-         ops_mmx_sse.c/ops_sse2.c exactly as before this task. */
+#else /* gcc: per-group loop with extern calls into ops_mmx.c /
+         ops_mmx_sse.c / ops_sse2.c. The row-at-a-time form above is
+         Watcom-only because its bodies are #pragma aux, which gcc has
+         no equivalent for; the two arms must stay bit-identical. */
     for (gg = 0; gg < ng; gg++) {
         int32_t amax;
         int sh;

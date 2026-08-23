@@ -1363,15 +1363,11 @@ int main(int argc, char **argv) {
                        lz_kernel_tier());
         }
         else if (strcmp(a, "--fixed") == 0 && i + 1 < argc) {
-            /* THE float knob, and the only one. It used to be a group
-               setter over seven per-tier flags - --recur-write,
-               --conv-write, --attn-write, --epi-write, --sig-write,
-               --norm-write, --scalar-fixed - applied after the argument
-               loop so a per-tier flag could win regardless of order.
-               There is nothing left to defer: seven axes could only buy
-               mixed settings, and mixing measured worse than either end
-               (ops.h, at lz_float_ref_select). Applied here, in order,
-               like every other flag.
+            /* THE float knob, and the only one. Applied here, in order,
+               like every other flag: there is no per-site override left
+               that could need to win regardless of position. Why one
+               axis rather than one per site is measured at
+               lz_float_ref_select in ops_sched.c.
 
                `all` is the shipping engine. `off` floats every
                arithmetic site at once and is the arm for cross-checking

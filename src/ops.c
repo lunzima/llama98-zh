@@ -33,7 +33,7 @@
                            first use is well before any of the ops_kernel_*.h
                            #includes below. */
 
-/* LZ_GDN_FIXED is in ops.h now, with the note that used to live here. */
+/* LZ_GDN_FIXED and its rationale are in ops.h. */
 
 #include "ops_quant.h"   /* pow2f, q8_round, q8_amax, sigmoid_q15,
                            sigmoid_q15_t, lz_sig_q15_fold,
@@ -1402,8 +1402,9 @@ void lz_epi_prep_zero(LZTensor *w, int in_dim) {
    than L1 because two pragma-aux bodies in one translation unit must
    not both define L1. */
 /* One GROUP of the fused epilogue MAC: sum a[i] * (xq[i] * w) over n
-   elements, w being the group's shared int16 weight. Lets
-   epi_fixed_raw drop the g_epi_m plane it used to materialise.
+   elements, w being the group's shared int16 weight. Fusing the two
+   means epi_fixed_raw needs no g_epi_m plane - the products are
+   consumed as they are formed, so nothing has to be stored.
 
    w RIDES THE STACK because the body has no register left for it: esi
    (a), edi (xq), ecx (the counter), ebx/ebp (the int64 accumulator) and
@@ -1501,10 +1502,10 @@ static lz_i64 lz_epi_mac_i16(const int32_t *a, const int16_t *m, int n) {
    is not safe. The engine is single-threaded and non-recursive, so
    static is safe. */
 
-/* Cap for the activation pre-expansion buffers (element count).
-   Value in ops.h - this used to say "defined here as well as in
-   ops_matmul.c, because lz_matmul_xq_nt checks it", which is a
-   description of the duplication rather than a reason for it. */
+/* Cap for the activation pre-expansion buffers (element count). One
+   value, in ops.h, because lz_matmul_xq_nt checks it too and two copies
+   of a cap are two chances for a buffer to be sized against the one
+   nobody edited. */
 
 /* ---- prefetch (lever J) ------------------------------------------------
    LZ_PF_DIST, LZ_PFI_LOAD/NTA/AMD/NONE and the lz_pf_load/lz_pf_nta/

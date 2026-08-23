@@ -63,6 +63,10 @@
 #      product's APPEARANCE, and it does so as arithmetic because the
 #      two rectangles are computed from metrics rather than from each
 #      other
+#  19. build/changelog_comment_gate.sh - the phrasing half of the
+#      comment rule: no file gains an "it used to be" / "no longer" /
+#      "the old loop". A ratchet, because some of those sentences are
+#      load-bearing and the repair is to restate them, not delete them
 #
 # Judging discipline (this repo has paid for getting this wrong before):
 #   - Never grep bare 'error' - "0 errors" contains the substring.
@@ -105,7 +109,7 @@ freshness_sentinel() {
 # ---------------------------------------------------------------------
 # Stage 1: make native (gcc)
 # ---------------------------------------------------------------------
-echo "==== [1/18]make native ===="
+echo "==== [1/19]make native ===="
 NATIVE_EXE="$ROOT/llama98.exe"
 [ -e "$NATIVE_EXE" ] || NATIVE_EXE="$ROOT/llama98"
 LOG=build/ci-native.log
@@ -144,7 +148,7 @@ rm -f "$SENTINEL"
 # Stage 2: make watcom-cli (Open Watcom, the target compiler)
 # ---------------------------------------------------------------------
 echo
-echo "==== [2/18]make watcom-cli ===="
+echo "==== [2/19]make watcom-cli ===="
 WATCOM_EXE="$ROOT/llama98-w.exe"
 WATCOM_OBJDIR="$ROOT/build/watcom/cli"
 LOG=build/ci-watcom-cli.log
@@ -196,7 +200,7 @@ rm -f "$SENTINEL"
 # Stage 3: llama98 <dir> --check on a curated set of KunMoe checkpoints
 # ---------------------------------------------------------------------
 echo
-echo "==== [3/18]model --check sweep ===="
+echo "==== [3/19]model --check sweep ===="
 MODELS_ROOT=${MODELS_ROOT:-/e/LLM/models}
 # Curated, not a blind sweep of every directory under MODELS_ROOT:
 # a usable sweep is a handful of representative checkpoints, and
@@ -243,7 +247,7 @@ fi
 # Stage 4: x86 <-> ARMv5TE parity gate
 # ---------------------------------------------------------------------
 echo
-echo "==== [4/18]ARM parity gate ===="
+echo "==== [4/19]ARM parity gate ===="
 ARM_MODEL="$MODELS_ROOT/kunkun98-pilot-20260806"
 LOG=build/ci-arm.log
 if [ "$native_ok" -ne 1 ]; then
@@ -278,7 +282,7 @@ fi
 # Stage 5: control-switch matrix (every non-default value, gcc + Watcom)
 # ---------------------------------------------------------------------
 echo
-echo "==== [5/18]control-switch matrix ===="
+echo "==== [5/19]control-switch matrix ===="
 LOG=build/ci-switch-matrix.log
 build/switch_matrix_gate.sh >"$LOG" 2>&1
 MATRIX_RC=$?
@@ -306,7 +310,7 @@ esac
 # Stage 6: every fixed-point write tier's gcc<->Watcom bit-identity
 # ---------------------------------------------------------------------
 echo
-echo "==== [6/18]fixed-tier cross-compiler gate ===="
+echo "==== [6/19]fixed-tier cross-compiler gate ===="
 LOG=build/ci-fixed-tier-xcompiler.log
 build/fixed_tier_xcompiler_gate.sh >"$LOG" 2>&1
 NIX_RC=$?
@@ -338,7 +342,7 @@ esac
 # compile-time-off in the same compiler, where it is not.
 # ---------------------------------------------------------------------
 echo
-echo "==== [7/18]recurrence float-arm gate ===="
+echo "==== [7/19]recurrence float-arm gate ===="
 LOG=build/ci-recur-write-float-arm.log
 build/recur_write_float_arm_gate.sh >"$LOG" 2>&1
 NIX_RC=$?
@@ -368,7 +372,7 @@ esac
 # separate delivery decision); none of the three is in ci.sh's stage 2.
 # ---------------------------------------------------------------------
 echo
-echo "==== [8/18]watcom gui/dll/dos targets ===="
+echo "==== [8/19]watcom gui/dll/dos targets ===="
 for t in watcom-gui watcom-dll watcom-dos; do
     case $t in
         watcom-gui) EXE="$ROOT/kunkun98-w.exe" ;;
@@ -405,7 +409,7 @@ done
 # as its only float unit. SKIP when WSL is not usable, never PASS.
 # ---------------------------------------------------------------------
 echo
-echo "==== [9/18]32-bit x87 gcc build (WSL) ===="
+echo "==== [9/19]32-bit x87 gcc build (WSL) ===="
 LOG=build/ci-x87.log
 if ! command -v wsl >/dev/null 2>&1; then
     echo "SKIP: 32-bit x87 build (wsl not installed)"
@@ -449,7 +453,7 @@ fi
 # MIPS cross toolchain is absent, never PASS.
 # ---------------------------------------------------------------------
 echo
-echo "==== [10/18]big-endian parity gate (WSL) ===="
+echo "==== [10/19]big-endian parity gate (WSL) ===="
 LOG=build/ci-endian.log
 if ! command -v wsl >/dev/null 2>&1; then
     echo "SKIP: big-endian parity gate (wsl not installed)"
@@ -493,7 +497,7 @@ fi
 # them the two easiest knobs to break silently.
 # ---------------------------------------------------------------------
 echo
-echo "==== [11/18]performance-knob invariance ===="
+echo "==== [11/19]performance-knob invariance ===="
 LOG=build/ci-perf-knob.log
 build/perf_knob_gate.sh "$ARM_MODEL" >"$LOG" 2>&1
 PK_RC=$?
@@ -535,7 +539,7 @@ esac
 # (build/kv_rot_gate.sh <model>) to cover that side.
 # ---------------------------------------------------------------------
 echo
-echo "==== [12/18]--kv-rot quality gate ===="
+echo "==== [12/19]--kv-rot quality gate ===="
 LOG=build/ci-kv-rot.log
 build/kv_rot_gate.sh "$ARM_MODEL" >"$LOG" 2>&1
 KR_RC=$?
@@ -569,7 +573,7 @@ esac
 # matrix's switches had a standing gate that ran their build.
 # ---------------------------------------------------------------------
 echo
-echo "==== [13/18] int-pipeline control arms ===="
+echo "==== [13/19] int-pipeline control arms ===="
 LOG=build/ci-int-pipeline-arms.log
 build/int_pipeline_arm_gate.sh >"$LOG" 2>&1
 IPA_RC=$?
@@ -603,7 +607,7 @@ esac
 # --kernel-matrix against what its macros actually define.
 # ---------------------------------------------------------------------
 echo
-echo "==== [14/18]kernel coverage matrix ===="
+echo "==== [14/19]kernel coverage matrix ===="
 LOG=build/ci-kernel-matrix.log
 build/kernel_matrix_gate.sh >"$LOG" 2>&1
 KMX_RC=$?
@@ -645,7 +649,7 @@ esac
 # half runs on one fixture.
 # ---------------------------------------------------------------------
 echo
-echo "==== [15/18]kernel ISA identity ===="
+echo "==== [15/19]kernel ISA identity ===="
 LOG=build/ci-kernel-isa.log
 build/kernel_isa_identity_gate.sh >"$LOG" 2>&1
 KID_RC=$?
@@ -685,7 +689,7 @@ esac
 # lands.
 # ---------------------------------------------------------------------
 echo
-echo "==== [16/18]SubLN activation path ===="
+echo "==== [16/19]SubLN activation path ===="
 LOG=build/ci-subn.log
 build/subn_gate.sh >"$LOG" 2>&1
 SUBN_RC=$?
@@ -721,7 +725,7 @@ esac
 # against the CLI's -O3.
 # ---------------------------------------------------------------------
 echo
-echo "==== [17/18]gui/CLI engine flag parity ===="
+echo "==== [17/19]gui/CLI engine flag parity ===="
 LOG=build/ci-flagparity.log
 build/gcc_flag_parity_gate.sh >"$LOG" 2>&1
 FLAGP_RC=$?
@@ -759,7 +763,7 @@ esac
 # criterion that could see it.
 # ---------------------------------------------------------------------
 echo
-echo "==== [18/18]caption bar symmetry ===="
+echo "==== [18/19]caption bar symmetry ===="
 LOG=build/ci-capsym.log
 build/caption_symmetry_gate.sh >"$LOG" 2>&1
 CAPSYM_RC=$?
@@ -779,6 +783,36 @@ case $CAPSYM_RC in
     *)
         echo "FAIL: caption bar symmetry"
         note "FAIL  caption bar symmetry"
+        FAIL=$((FAIL + 1))
+        ;;
+esac
+
+# ---------------------------------------------------------------------
+# Stage 19: comments describe the code, not the edits that made it.
+#
+# The phrasing half of the rule comment_hygiene_gate covers by hash,
+# date and script. A ratchet, per file: some of these sentences carry
+# knowledge that stops a removed design being re-added, so the repair is
+# to restate them in the present tense, not to delete them, and doing
+# that everywhere at once is a large edit across files other sessions
+# hold open. Lowering a baseline number is the work; raising one is the
+# regression this catches.
+# ---------------------------------------------------------------------
+echo
+echo "==== [19/19]comment phrasing ratchet ===="
+LOG=build/ci-changelog.log
+build/changelog_comment_gate.sh >"$LOG" 2>&1
+CHLOG_RC=$?
+cat "$LOG"
+case $CHLOG_RC in
+    0)
+        echo "PASS: comment phrasing ratchet"
+        note "PASS  comment phrasing ratchet"
+        PASS=$((PASS + 1))
+        ;;
+    *)
+        echo "FAIL: comment phrasing ratchet"
+        note "FAIL  comment phrasing ratchet"
         FAIL=$((FAIL + 1))
         ;;
 esac
