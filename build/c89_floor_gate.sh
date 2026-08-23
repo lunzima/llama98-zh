@@ -4,12 +4,13 @@
 # The target family includes Windows NT on MIPS built with Visual C++
 # 4.0 - a 1995 C89 compiler. gcc and Watcom both accept far more than
 # that, so nothing in the normal build says a word when C99 creeps in.
-# This runs gcc -std=c89 -pedantic over src/ and counts the two
-# constructs that are BOTH easy to add by accident and impossible for
+# This runs gcc -std=c89 -pedantic over src/ and counts the three
+# constructs that are both easy to add by accident and impossible for
 # VC++ 4.0:
 #
 #   mixed declarations and code   - a declaration after a statement
 #   //                            - already 0 in this tree, kept at 0
+#   designated initialisers       - [IDX] = val, C99 only
 #
 # NOT `long long` and NOT <stdint.h>. Those were 213 and 23 hits of
 # known, tracked debt, and the plan for them was one header per
@@ -56,7 +57,16 @@ command -v gcc >/dev/null 2>&1 || { echo "c89_floor_gate: SKIP - no gcc"; exit 2
 # gate was written after finding - both in ops_gdn.c, both introduced
 # after bc4f1ba landed mid-session - are fixed rather than baselined,
 # which is the difference between debt and a new hole.
-BASELINE="ops.c:1 forward.c:16"
+# DESIGNATED INITIALISERS are the third construct, added after the
+# compile pass below went in and found nothing: gcc reports them as a
+# WARNING, so an errors-only check walks straight past 266 of them in
+# err.c and 186 in gui/localized_strings.c. Both are the message tables,
+# where the whole point of the form is that an enum value and its string
+# cannot drift apart - so they are baselined rather than converted.
+# Positional initialisers would put 452 strings in an order nothing
+# checks, which trades a compiler the tree cannot run for a class of bug
+# it currently cannot have.
+BASELINE="ops.c:1 forward.c:16 err.c:266"
 
 FAIL=0
 TOTAL=0
@@ -67,12 +77,12 @@ for f in src/*.c; do
         [ "${e%%:*}" = "$b" ] && exp=${e##*:}
     done
     n=$(gcc -std=c89 -pedantic -Isrc -fsyntax-only "$f" 2>&1 \
-        | grep -cE "mixed declarations|ISO C90 forbids .*//" )
+        | grep -cE "mixed declarations|ISO C90 forbids .*//|forbids specifying subobject" )
     TOTAL=$((TOTAL + n))
     if [ "$n" -gt "$exp" ]; then
         echo "FAIL: $b has $n C89 violation(s), baseline $exp"
         gcc -std=c89 -pedantic -Isrc -fsyntax-only "$f" 2>&1 \
-            | grep -E "mixed declarations|ISO C90 forbids .*//" \
+            | grep -E "mixed declarations|ISO C90 forbids .*//|forbids specifying subobject" \
             | head -5 | sed 's/^/      /'
         FAIL=1
     elif [ "$n" -lt "$exp" ]; then
