@@ -2252,6 +2252,25 @@ static long long epi_q41_join(const int32_t *accb, const LZTensor *w, int row,
     s_dot = epi_fixed_raw(accb, w, row, tk, ng * r, r, &e_dot);
     s_dot = epi_shr_half(s_dot, 8);        /* exact: acc32 is the x256 */
     e_zero = -g_epi_xe[tk] - (int)(zneg ? w->sexp[row] : w->zexp[row]);
+    /* WIDENING COPY, and it is the third-hottest branch in the engine.
+       Measured (gcov -b -c, kmr20/zh, 603 tokens): this loop's back-edge
+       is evaluated 145,723,392 times with its minority arm at 41.9% -
+       ng is 2 here, so a two-iteration loop mispredicts about once per
+       call on a machine whose default is not-taken.
+
+       The loop exists ONLY because zp is int16 and lz_epi_mac takes
+       int32. It is duplicate work (241k copies a token) and a duplicate
+       buffer (g_epi_zm, a global whose whole purpose is to hold the
+       widened copy for the next statement). An int16-input twin of
+       lz_epi_mac would delete all three - the copy, the branch and the
+       buffer - and the values would not move: the widen is exact and
+       the MAC's accumulator is already int64.
+
+       NOT DONE HERE because lz_epi_mac is dual-implemented (C body plus
+       a wcc386 #pragma aux twin above), so a second entry is two hand
+       written kernels and two kernel-matrix cells under iron law 2, not
+       a signature change. Written down with its number so the next pass
+       has a located item rather than a suspicion. */
     for (g = 0; g < ng; g++) g_epi_zm[g] = (int32_t)zp[(size_t)row * ng + g];
     s_zero = lz_epi_mac(g_epi_zg[tk], g_epi_zm, ng);
     if (zneg) s_zero = -s_zero;
