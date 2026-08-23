@@ -103,50 +103,54 @@ static __inline__ int spw_fmul_arm(uint32_t ua, uint32_t ub,
                                    uint32_t *out) {
     uint32_t ok, R, e, pl, ph, t, a = ua, b = ub;
     __asm__(
-        "and    %[R],  %[a], #0x80000000\n\t"
-        "eor    %[R],  %[R], %[b]\n\t"
-        "and    %[R],  %[R], #0x80000000\n\t"
-        "mov    %[a],  %[a], lsl #1\n\t"
-        "mov    %[b],  %[b], lsl #1\n\t"
-        "sub    %[e],  %[a], #0x01000000\n\t"
-        "cmp    %[e],  #0xFE000000\n\t"
-        "sublo  %[e],  %[b], #0x01000000\n\t"
-        "cmplo  %[e],  #0xFE000000\n\t"
-        "bhs    9f\n\t"
-        "mov    %[e],  %[a], lsr #24\n\t"
-        "mov    %[t],  %[b], lsr #24\n\t"
-        "add    %[e],  %[e], %[t]\n\t"
-        "sub    %[e],  %[e], #127\n\t"
-        "mov    %[a],  %[a], lsl #8\n\t"
-        "mov    %[a],  %[a], lsr #9\n\t"
-        "orr    %[a],  %[a], #0x800000\n\t"
-        "mov    %[b],  %[b], lsl #8\n\t"
-        "mov    %[b],  %[b], lsr #9\n\t"
-        "orr    %[b],  %[b], #0x800000\n\t"
+        /* Four special-case tests in five instructions, by chaining
+           conditions rather than branching between them: ANDS leaves Z
+           when an exponent is 0, and each following test only runs if
+           the previous one passed. */
+        "mov    %[t],  #255\n\t"
+        "ands   %[e],  %[t], %[a], lsr #23\n\t"
+        "andnes %[R],  %[t], %[b], lsr #23\n\t"
+        "teqne  %[e],  %[t]\n\t"
+        "teqne  %[R],  %[t]\n\t"
+        "beq    9f\n\t"
+        "add    %[e],  %[e], %[R]\n\t"
+        "eor    %[t],  %[a], %[b]\n\t"
+        /* SIGNIFICANDS PRE-SCALED BY 2^4, which is what makes UMULL's
+           HIGH WORD the answer: 28-bit factors give a 56-bit product,
+           so its top 24 bits land in the high word already positioned
+           as a significand. Extracting them from a 48-bit product
+           straddling both words costs three more instructions and a
+           second shift of the low word. */
+        "mov    %[ph], #0x8000000\n\t"
+        "mov    %[a],  %[a], lsl #9\n\t"
+        "orr    %[a],  %[ph], %[a], lsr #5\n\t"
+        "mov    %[b],  %[b], lsl #9\n\t"
+        "orr    %[b],  %[ph], %[b], lsr #5\n\t"
         "umull  %[pl], %[ph], %[a], %[b]\n\t"
-        /* Normalise to bit 47 - the significand product reaching 2,
-           one exponent step and never more, both factors being
-           under 2. */
-        "cmp    %[ph], #0x8000\n\t"
-        "addhs  %[e],  %[e], #1\n\t"
-        "movlo  %[ph], %[ph], lsl #1\n\t"
-        "orrlo  %[ph], %[ph], %[pl], lsr #31\n\t"
-        "movlo  %[pl], %[pl], lsl #1\n\t"
-        "mov    %[a],  %[ph], lsl #8\n\t"
-        "orr    %[a],  %[a], %[pl], lsr #24\n\t"   /* 24-bit significand */
-        "mov    %[b],  %[pl], lsl #8\n\t"          /* dropped, left-just. */
-        "cmp    %[b],  #0x80000000\n\t"
-        "addhi  %[a],  %[a], #1\n\t"
-        "andeq  %[b],  %[a], #1\n\t"
-        "addeq  %[a],  %[a], %[b]\n\t"
-        "cmp    %[a],  #0x01000000\n\t"
-        "addeq  %[e],  %[e], #1\n\t"
-        "subeq  %[a],  %[a], #0x800000\n\t"
-        "sub    %[e],  %[e], #1\n\t"
-        "cmp    %[e],  #254\n\t"
-        "bhs    9f\n\t"                            /* over- or underflow */
-        "add    %[a],  %[a], %[e], lsl #23\n\t"
-        "orr    %[R],  %[R], %[a]\n\t"
+        "and    %[R],  %[t], #0x80000000\n\t"
+        "cmp    %[ph], #0x800000\n\t"
+        "movcc  %[ph], %[ph], lsl #1\n\t"
+        "orrcc  %[ph], %[ph], %[pl], lsr #31\n\t"
+        "movcc  %[pl], %[pl], lsl #1\n\t"
+        "orr    %[R],  %[R], %[ph]\n\t"
+        /* SBC, not SUB: the carry the compare above left is exactly
+           "the product reached 2", so the normalisation's exponent step
+           rides the bias subtraction. None of the three conditional
+           moves between them writes flags. e ends one BELOW the biased
+           result exponent, because the significand's implicit bit
+           supplies the missing one in the ADC below. */
+        "sbc    %[e],  %[e], #127\n\t"
+        "cmp    %[e],  #253\n\t"
+        "bhi    9f\n\t"                    /* over- or underflow */
+        /* ADC, not ADD: the guard bit is the carry out of this compare,
+           so rounding up and adding the exponent are one instruction -
+           and a mantissa that carries to 2^24 walks into the exponent
+           field on its own, needing no case. BICEQ is round-half-to-
+           even entire: EQ is the exact tie, and clearing bit 0 is what
+           that decides. */
+        "cmp    %[pl], #0x80000000\n\t"
+        "adc    %[R],  %[R], %[e], lsl #23\n\t"
+        "biceq  %[R],  %[R], #1\n\t"
         "mov    %[ok], #1\n\t"
         "b      8f\n\t"
         "9:\n\t"

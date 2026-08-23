@@ -522,8 +522,12 @@ static __inline__ int lz_sig_q15_arm_asm(uint32_t ux, const int32_t *tab,
    adder rather than a proof:
      either operand zero, subnormal, inf or NaN   (exponent 0 or 255)
      exponent difference above 27                 (small is pure sticky)
-     P overflows to exponent 255
+     P's exponent reaches 255 before rounding
      M underflows to exponent 0
+
+   P rounding UP into exponent 255 is not declined - inf is then the
+   correctly rounded answer and the ADC produces it. Only an exponent
+   already at 255 before the round is refused.
    The caller runs the C for those, so this tier can be slower than the
    C and never different.
 
@@ -592,19 +596,23 @@ static __inline__ int lz_faddsub_arm_asm(uint32_t ua, uint32_t ub,
         "andhs  %[t],  %[t], #1\n\t"
         "orrhs  %[t],  %[b], %[t]\n\t"
         "addhs  %[a],  %[a], #1\n\t"
-        "and    %[b],  %[t], #7\n\t"
+        /* Round and pack in four, the way __aeabi_fmul does it. The
+           three extra bits go to the TOP of a register, so one compare
+           against 2^31 puts the guard bit in C and the exact tie in Z;
+           ADC then rounds up and adds the exponent together, BICEQ is
+           round-half-to-even entire, and a significand that carries to
+           2^24 walks into the exponent field by itself because the
+           implicit bit is added in rather than masked off. The
+           six-instruction AND/CMP/ADDHI/ANDEQ/ADDEQ form this replaced
+           needed three more to handle that carry. */
+        "mov    %[b],  %[t], lsl #29\n\t"     /* dropped, left-justified */
         "mov    %[t],  %[t], lsr #3\n\t"
-        "cmp    %[b],  #4\n\t"
-        "addhi  %[t],  %[t], #1\n\t"
-        "andeq  %[b],  %[t], #1\n\t"
-        "addeq  %[t],  %[t], %[b]\n\t"
-        "cmp    %[t],  #0x01000000\n\t"       /* rounding carried out */
-        "addeq  %[a],  %[a], #1\n\t"
-        "subeq  %[t],  %[t], #0x800000\n\t"
         "cmp    %[a],  #254\n\t"
         "bhs    9f\n\t"                       /* P overflows to inf */
-        "add    %[t],  %[t], %[a], lsl #23\n\t"
         "orr    %[S],  %[S], %[t]\n\t"
+        "cmp    %[b],  #0x80000000\n\t"
+        "adc    %[S],  %[S], %[a], lsl #23\n\t"
+        "biceq  %[S],  %[S], #1\n\t"
 
         /* M = |a| - |b|. CLZ normalises; M cannot overflow, because
            rounding is monotone and M is below the larger operand,
@@ -618,17 +626,12 @@ static __inline__ int lz_faddsub_arm_asm(uint32_t ua, uint32_t ub,
         "subs   %[a],  %[e], %[a]\n\t"
         "ble    9f\n\t"                       /* M is subnormal */
         "sub    %[a],  %[a], #1\n\t"
-        "and    %[b],  %[t], #7\n\t"
+        "mov    %[b],  %[t], lsl #29\n\t"     /* same round-and-pack */
         "mov    %[t],  %[t], lsr #3\n\t"
-        "cmp    %[b],  #4\n\t"
-        "addhi  %[t],  %[t], #1\n\t"
-        "andeq  %[b],  %[t], #1\n\t"
-        "addeq  %[t],  %[t], %[b]\n\t"
-        "cmp    %[t],  #0x01000000\n\t"
-        "addeq  %[a],  %[a], #1\n\t"
-        "subeq  %[t],  %[t], #0x800000\n\t"
-        "add    %[t],  %[t], %[a], lsl #23\n\t"
         "orr    %[D],  %[D], %[t]\n\t"
+        "cmp    %[b],  #0x80000000\n\t"
+        "adc    %[D],  %[D], %[a], lsl #23\n\t"
+        "biceq  %[D],  %[D], #1\n\t"
 
         "8:\n\t"
         "orr    %[ok], %[ok], #2\n\t"
