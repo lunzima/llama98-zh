@@ -265,8 +265,13 @@ const lz_rowfn LZ_ROW_Q8[LZ_ROW_N] = {
    derived state, not the weights, and making every matmul signature
    non-const to say so would be a larger lie than this one. */
 static int q8_fixed_epi(const LZTensor *w, int in_dim, int nb, int nt) {
-    if (lz_epi_mode() && !lz_epi_ready(w)) lz_epi_prep((LZTensor *)w, in_dim);
-    return lz_epi_mode() && lz_epi_ready(w) && nb <= LZ_EPI_MAX_NG
+    /* Both reads hoisted: lz_epi_mode is a cross-TU call and lz_epi_ready
+       a pointer test, and neither can change between the two statements -
+       lz_epi_prep only ever makes ready go false->true, which is why the
+       second read is of the value AFTER the prep, not a re-ask. */
+    int on = lz_epi_mode();
+    if (on && !lz_epi_ready(w)) lz_epi_prep((LZTensor *)w, in_dim);
+    return on && lz_epi_ready(w) && nb <= LZ_EPI_MAX_NG
            && nt <= LZ_BATCH_MAX;
 }
 
@@ -1339,8 +1344,14 @@ const lz_rowfn LZ_ROW_Q16[LZ_ROW_N] = {
    64x1024 gs=64). The weight plane does reach the full +-32767, so the
    derivation above is not vacuous on this checkpoint. */
 static int q16_fixed_epi(const LZTensor *w, int in_dim, int nb, int nt) {
-    if (lz_epi_mode() && !lz_epi_ready(w)) lz_epi_prep((LZTensor *)w, in_dim);
-    return lz_epi_mode() && lz_epi_ready(w) && nb <= LZ_EPI_MAX_NG
+    /* Hoisted for the reason q8_fixed_epi gives. Hoisted SEPARATELY, and
+       the body stays its own: this predicate must not become a call to
+       that one - see the note above epi_q41_fixed on why the two bounds
+       are derived from different accumulator ranges and must be free to
+       diverge. */
+    int on = lz_epi_mode();
+    if (on && !lz_epi_ready(w)) lz_epi_prep((LZTensor *)w, in_dim);
+    return on && lz_epi_ready(w) && nb <= LZ_EPI_MAX_NG
            && nt <= LZ_BATCH_MAX;
 }
 
