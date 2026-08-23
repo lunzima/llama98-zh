@@ -1616,14 +1616,30 @@ static long long epi_fixed_raw(const int32_t *accb, const LZTensor *w,
        the int32 product is formed the same way and the accumulation
        order is unchanged.
 
-       WHAT ACTUALLY BLOCKS IT is `ww[g / r]`, not iron law 2 - the
-       fused kernel would need both toolchains' twins, which
-       lz_epi_mac_i16 just showed is a bounded job, but r is a RUNTIME
-       value, so a naive fusion puts an integer divide on every element
-       of a 1.1-billion-iteration loop. The shape that works is a nested
-       loop - one scalar ww[j] times an r-element MAC of accb*xq - and
-       that is a different kernel again, not a fusion of this one.
-       Measured and located rather than attempted with the budget left. */
+       THE DIVIDE IS NOT THE BLOCKER, and saying it was is a mistake I
+       am correcting in place rather than leaving for the next reader.
+       `ww[g / r]` looks like it forces a divide per element only while
+       the loop is flat; nesting removes it and changes nothing else:
+
+           for (j = 0, g = 0; j < ng / r; j++) {
+               int32_t w = ww[j];
+               for (i = 0; i < r; i++, g++)
+                   s += (long long)accb[g] * (long long)(xq[g] * w);
+           }
+
+       Same per-element product, same ascending g, so bit-identical by
+       construction - not "within tolerance", and not a different
+       reduction the way hoisting ww[j] out of the inner sum would be
+       (that one changes what overflows).
+
+       WHAT IS LEFT is the twin: this call site's MAC is lz_epi_mac,
+       which has a wcc386 #pragma aux body, so the fused form needs a
+       nested-loop twin written and cross-checked before it can replace
+       a flat one. lz_epi_mac_i16 showed that is a bounded job - two
+       instructions and a label - but a nested loop is a bigger one, and
+       an asm kernel committed without both toolchains built and compared
+       is how a broken HEAD gets in. Located, priced, and left with the
+       obstacle stated correctly. */
     for (g = 0; g < ng; g++)
         g_epi_m[g] = (int32_t)g_epi_xq[tk][g] * (int32_t)ww[g / r];
     /* The exponent is per ROW, so a libm call here would run once per
