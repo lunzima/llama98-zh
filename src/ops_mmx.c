@@ -23,7 +23,7 @@
    Kernels do NOT emit emms themselves (rule 6 item 6) - the caller
    emits one after its loop. That contract is the same in every TU that
    compiles %mm instructions; only the translation unit differs. */
-#include "lz_int.h"   /* iron law 10: <stdint.h> is not on the floor */
+#include "lz_int.h"   /* <stdint.h> is not on the language floor */
 #include <string.h>
 
 #include "ops_mmx.h"

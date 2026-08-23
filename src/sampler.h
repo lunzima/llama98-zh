@@ -1,7 +1,7 @@
 #ifndef LZ_SAMPLER_H
 #define LZ_SAMPLER_H
 
-#include "lz_int.h"   /* lz_u64 - iron law 10 */
+#include "lz_int.h"   /* lz_u64: the 64-bit type, portably */
 #include "inspect.h"
 
 /* Sampling parameters and penalties.

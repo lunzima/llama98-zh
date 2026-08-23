@@ -20,7 +20,7 @@
    so this split serves a different purpose per toolchain, same as
    src/ops_mmx.c's own header explains for the register-file-alias vs.
    CPU-generation-ceiling split. */
-#include "lz_int.h"   /* iron law 10: <stdint.h> is not on the floor */
+#include "lz_int.h"   /* <stdint.h> is not on the language floor */
 #include <string.h>
 
 #include "ops_mmx.h"

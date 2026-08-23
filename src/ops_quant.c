@@ -2,7 +2,7 @@
    helpers. A separate TU from ops.c to keep its #if guard density low.
 
    Every function here is extern, declared in ops_quant.h. */
-#include "lz_int.h"   /* lz_i64 - iron law 10 */
+#include "lz_int.h"   /* lz_i64: the 64-bit type, portably */
 #include <stddef.h>
 #include <float.h>
 #include <math.h>

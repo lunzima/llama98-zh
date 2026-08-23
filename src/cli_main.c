@@ -10,7 +10,7 @@
    All output is English; column alignment uses fixed-width fields only
    (no CJK width tricks), so it stays aligned in any terminal.
 */
-#include "lz_int.h"   /* lz_i64/lz_u64 and LZ_PRI64 - iron law 10 */
+#include "lz_int.h"   /* lz_i64/lz_u64 and LZ_PRI64: the 64-bit type and its printf modifier, portably */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1058,7 +1058,7 @@ int main(int argc, char **argv) {
 
                Exit code is the gate: '!' (registered here, gone), '?'
                (no registry entry) and '+' (present, unregistered) each
-               make this non-zero. Iron law 1 - the engine returns the
+               make this non-zero: the engine returns the
                cells, this file prints them and decides. */
             LZKmCell kc;
             int n = 0, here = 0, other = 0, imp = 0, todo = 0, bad = 0;

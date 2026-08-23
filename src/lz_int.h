@@ -1,11 +1,11 @@
 #ifndef LZ_INT_H
 #define LZ_INT_H
-/* One authority for the integer types, because iron law 10 put a 1995
- * compiler in the target family and it has neither of the two things
- * this tree reaches for by reflex.
+/* One authority for the integer types. The target family includes a
+ * 1995 compiler, and it has neither of the two things this tree reaches
+ * for by reflex.
  *
  * WHAT VISUAL C++ 4.0 DOES NOT HAVE, and the count of what that reached
- * when the law landed (grep over src/):
+ * when the conversion started (grep over src/):
  *
  *   <stdint.h>      absent - arrived in Visual C++ 2010.   23 files
  *   long long       absent - the 64-bit type is __int64.  213 uses

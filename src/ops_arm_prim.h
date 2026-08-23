@@ -26,7 +26,7 @@
 #ifndef LZ_OPS_ARM_PRIM_H
 #define LZ_OPS_ARM_PRIM_H
 
-#include "lz_int.h"   /* iron law 10: <stdint.h> is not on the floor */
+#include "lz_int.h"   /* <stdint.h> is not on the language floor */
 
 #if defined(__arm__) && defined(__GNUC__)
 #define LZ_ARM_PRIM_ASM 1

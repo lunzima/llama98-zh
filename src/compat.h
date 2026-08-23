@@ -1,7 +1,7 @@
 #ifndef LZ_COMPAT_H
 #define LZ_COMPAT_H
 
-#include "lz_int.h"   /* lz_i64/lz_u64 - iron law 10 */
+#include "lz_int.h"   /* lz_i64/lz_u64: the 64-bit type, portably */
 #include <stddef.h>
 #include <stdio.h>
 

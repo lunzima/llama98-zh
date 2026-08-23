@@ -1,7 +1,7 @@
 #ifndef LZ_SAFETENSORS_H
 #define LZ_SAFETENSORS_H
 
-#include "lz_int.h"   /* lz_i64/lz_u64 - iron law 10 */
+#include "lz_int.h"   /* lz_i64/lz_u64: the 64-bit type, portably */
 #include <stdio.h>
 
 #include "json.h"

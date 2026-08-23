@@ -41,16 +41,22 @@ command -v gcc >/dev/null 2>&1 || { echo "c89_floor_gate: SKIP - no gcc"; exit 2
 #                    which costs 1 ULP - so moving it is not free.
 #   forward.c:16     48327cc, 75c8adc and neighbours, in forward_attn's
 #                    per-head blocks.
-#   ops_matmul.c:1   ec1b01a, matmul_q41_impl's `int i, t;` after the
-#                    kernel-select call.
 #
-# All three predate iron law 10 (bc4f1ba). They are recorded, not
-# excused: this gate stops the number growing, and each is a one-line
-# reorder for whoever next edits that function. The two violations THIS
+# matmul_q41_impl's used to be a third: `int i, t;` sat after the
+# kernel-select call. Fixed rather than baselined - the whole
+# declaration block moved above the call and the call became the
+# function's first statement. Safe because nothing in those
+# initialisers reads the tier: q41_fixed_epi asks lz_epi_mode and
+# lz_epi_ready, and lz_row_pick - which does read it - still runs
+# after. Verified byte-identical on both fixtures rather than argued.
+#
+# The rest predate the language floor. They are recorded, not excused:
+# this gate stops the number growing, and each is a one-line reorder
+# for whoever next edits that function. The two violations THIS
 # gate was written after finding - both in ops_gdn.c, both introduced
 # after bc4f1ba landed mid-session - are fixed rather than baselined,
 # which is the difference between debt and a new hole.
-BASELINE="ops.c:1 forward.c:16 ops_matmul.c:1"
+BASELINE="ops.c:1 forward.c:16"
 
 FAIL=0
 TOTAL=0

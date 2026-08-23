@@ -740,7 +740,6 @@ static void epi_zero_act(const int8_t *xq, const float *xqs, int in_dim,
 
 void matmul_q41_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
                             const LZTensor *w, int in_dim, int out_dim, int nt) {
-    if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
     int i, t;
     int r  = w->gs / 32;              /* 32 sub-blocks per weight group */
     int ng = in_dim / w->gs;          /* weight-group count */
@@ -750,6 +749,11 @@ void matmul_q41_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
     int fixed_epi = q41_fixed_epi(w, in_dim, nb, nt, r, 0);
     int want_i16 = (out->oi != NULL) || out->probe;
     lz_rowfn row;
+
+    /* After the declarations, not before them: the tier selector has no
+       bearing on any initialiser above and the language floor puts
+       declarations first. */
+    if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
 
     row = lz_row_pick(LZ_ROW_Q41);
 #if defined(__arm__)

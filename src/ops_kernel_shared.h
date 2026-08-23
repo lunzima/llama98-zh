@@ -25,7 +25,7 @@
 #ifndef LZ_OPS_KERNEL_SHARED_H
 #define LZ_OPS_KERNEL_SHARED_H
 
-#include "lz_int.h"   /* iron law 10: <stdint.h> is not on the floor */
+#include "lz_int.h"   /* <stdint.h> is not on the language floor */
 
 #include "ops_arm_prim.h"   /* LZ_ARM_PRIM_ASM, lz_i32f_arm_asm */
 
@@ -334,7 +334,7 @@ extern void lz_pf_amd(const void *p);
    per-32 path writes.
 
    Whether the group path WINS on any given machine is a separate,
-   unmeasured question (iron law 3: the dev machine is not the target),
+   unmeasured question (the dev machine is not the target),
    so it is a knob. Default 1 matches Watcom's shipped shape; build with
    -DLZ_G128_GCC=0 to run the per-32 path on the dev machine. */
 #ifndef LZ_G128_GCC

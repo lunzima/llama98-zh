@@ -4,7 +4,7 @@
 #ifndef OPS_QUANT_H
 #define OPS_QUANT_H
 
-#include "lz_int.h"   /* iron law 10: <stdint.h> is not on the floor */
+#include "lz_int.h"   /* <stdint.h> is not on the language floor */
 #include "ops.h"
 #include "ops_arm_prim.h"   /* LZ_ARM_PRIM_ASM, lz_q8_round_pow2_arm_asm */
 

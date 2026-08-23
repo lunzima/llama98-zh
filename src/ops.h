@@ -1,7 +1,7 @@
 #ifndef LZ_OPS_H
 #define LZ_OPS_H
 
-#include "lz_int.h"   /* lz_i64 - iron law 10. Here rather than in
+#include "lz_int.h"   /* lz_i64. Here rather than in
                          model.h so every ops_*.c inherits it from the
                          header it already includes. */
 #include "model.h"

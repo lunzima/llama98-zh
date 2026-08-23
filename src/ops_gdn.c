@@ -10,7 +10,7 @@
    LZ_SLOT_NEXT, gdn_tail_row, p2_shift_of). */
 #include <stddef.h>
 #include <float.h>
-#include "lz_int.h"   /* iron law 10: <stdint.h> is not on the floor */
+#include "lz_int.h"   /* <stdint.h> is not on the language floor */
 #include <stdlib.h>
 #include <string.h>
 
@@ -2208,7 +2208,7 @@ static void gdn_p2_fixed_rows(const int8_t *sq_in, int8_t *sq_out,
         const int8_t *row_lo_in = sq2_in + (size_t)kk * vd;
         int8_t *row_lo_out = sq2_out + (size_t)kk * vd;
 #endif /* LZ_GDN_STATE_2PLANE */
-        /* Declarations first: iron law 10's C89 floor. This assignment
+        /* Declarations first, for the C89 floor. This assignment
            sat above the two above it until a C89 build said so. */
         if (!f32_scale_pow2(dec, -LZ_GDN_LO_SHIFT, &decs))
             decs = dec * (1.0f / LZ_GDN_LO_SCALE);

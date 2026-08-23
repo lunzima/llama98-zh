@@ -7,7 +7,7 @@
 #ifndef LZ_OPS_P2_BLK_H
 #define LZ_OPS_P2_BLK_H
 
-#include "lz_int.h"   /* iron law 10: <stdint.h> is not on the floor */
+#include "lz_int.h"   /* <stdint.h> is not on the language floor */
 
 typedef struct {
     int16_t mul[8];      /*   0  in   m1,m2 repeated 4x (pmaddwd operand) */

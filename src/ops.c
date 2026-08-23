@@ -1,4 +1,4 @@
-#include "lz_int.h"   /* lz_i64/lz_u64 and the width types - iron law 10:
+#include "lz_int.h"   /* lz_i64/lz_u64 and the width types:
                          Visual C++ 4.0 has neither <stdint.h> nor
                          `long long`, and 236 sites deciding that for
                          themselves is the shape one-authority forbids */
@@ -3489,7 +3489,7 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
    function and cannot be read from outside. Both halves have to be
    edited together; the TRAINING tree's tests/test_kernel_matrix.py
    (E:\LLM\llama98-zh, pointed at this tree by LZ_ENGINE - there is no
-   tests/ here, iron law zero) compares this against the source, and
+   tests/ here by policy) compares this against the source, and
    build/kernel_matrix_gate.sh checks the registry below out of the
    shipped binaries. The previous version of this map lived in a
    document and drifted for months. */
@@ -3535,7 +3535,7 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
 
 /* ---- the reason registry ---------------------------------------------
 
-   Iron law 8: a missing cell must carry a reason, and "still empty"
+   A missing cell must carry a reason, and "still empty"
    must be distinguishable from "impossible". Three classes, one letter
    each in the matrix (ops.h's LZKmCell documents the full alphabet):
 
@@ -3591,7 +3591,7 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
    Structural half, and it is independent of the ISA argument:
    lz_row_pick (src/ops_matmul.c) never indexes LZ_ROW_SSE_I or
    LZ_ROW_SSE_A, and ops.h has no LZ_KERNEL_SSE value, so `--kernel sse`
-   cannot be spelled. Iron law 8: a path the CLI cannot select cannot be
+   cannot be spelled. A path the CLI cannot select cannot be
    compared, so a kernel written into those two slots would be dead on
    arrival.
 
@@ -3625,8 +3625,8 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
 /* g128's gcc expectation follows the knob rather than being hand-
    declared: -DLZ_G128_GCC=0 is the documented A/B control arm, the row
    functions really do revert to the per-32 path, and a control build
-   that trips the gate is a control build nobody runs (iron law 4's
-   companion - an A/B arm with no gate rots). Watcom's group kernels
+   that trips the gate is a control build nobody runs - an A/B arm
+   with no gate rots. Watcom's group kernels
    have no knob and are always expected. */
 #if defined(LZ_G128_GCC) && LZ_G128_GCC
 #define LZ_KMB_G128 (LZ_KMB_GCC | LZ_KMB_WAT)
@@ -3856,7 +3856,7 @@ typedef struct { unsigned char have; unsigned char why; const char *text; } LZKm
    lz_matmul_xq_nt routes LZ_KERNEL_REF to matmul_scalar_ref before any
    dtype dispatch, and matmul_scalar_ref_one branches on all five. It
    cannot go empty for one format only, so it is KM_ALL by construction
-   and carries no signal of its own - it is here because iron law 8
+   and carries no signal of its own - it is here because the registry
    counts C as a tier and a column left out of the table is a column
    nobody can miss. */
 /* FLAT, not [LZ_KM_NUNIT][LZ_KM_NCOL], and the reason is a compiler

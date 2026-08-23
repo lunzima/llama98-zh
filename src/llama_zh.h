@@ -15,7 +15,7 @@
    Forward, sampling and generation are shape-neutral and depend only on
    model.h's config. */
 
-#include "lz_int.h"   /* lz_u64 - iron law 10 */
+#include "lz_int.h"   /* lz_u64: the 64-bit type, portably */
 #include "model.h"
 #include "forward.h"
 #include "tokenizer.h"

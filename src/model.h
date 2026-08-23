@@ -1,7 +1,7 @@
 #ifndef LZ_MODEL_H
 #define LZ_MODEL_H
 
-#include "lz_int.h"   /* iron law 10: <stdint.h> is not on the floor */
+#include "lz_int.h"   /* <stdint.h> is not on the language floor */
 #include <stdio.h>
 
 #include "safetensors.h"
@@ -508,7 +508,7 @@ typedef struct {
     LZMtp *mtp;
 
     int weights_loaded;             /* 0 = metadata bound only, weights not read */
-    /* lz_i64, not long long - iron law 10. On every toolchain that
+    /* lz_i64, not long long. On every toolchain that
        exists today this IS long long; on Visual C++ 4.0 it is __int64,
        which is the point. safetensors.h supplies it (included above)
        and n_elem beside these already uses it. */

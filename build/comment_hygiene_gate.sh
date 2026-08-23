@@ -11,8 +11,16 @@
 #                      A measurement's CONDITIONS (model, token count,
 #                      fixture) are what let someone repeat it; the day
 #                      it happened does not.
-#   CHINESE            The tree is ASCII by iron law seven clause 7;
-#                      this catches a comment slipping through.
+#   CHINESE            Source stays ASCII; this catches a comment
+#                      slipping through. The user-visible string tables
+#                      are the exception and are baselined below.
+#   RULEBOOK CITES     "iron law 10", "iron law 8: a missing cell ...".
+#                      A citation is not a reason: at the call site
+#                      "iron law 10" says nothing, while "a 1995
+#                      compiler is in the target family" says the whole
+#                      thing. The rulebook can be renumbered or
+#                      reorganised and every citation in the source
+#                      then points at the wrong rule, silently.
 #
 # NOT CHECKED HERE: "overly long" and "misleading". Neither has a
 # mechanical predicate, and a gate that guesses at them would fail on
@@ -66,10 +74,12 @@ for f in src/*.c src/*.h; do
     # host.
     z=$(LC_ALL=C grep -c $'[\xe4-\xe9][\x80-\xbf][\x80-\xbf]' "$f" 2>/dev/null)
     [ -n "$z" ] || z=0
-    n=$((h + d + z))
+    r=$(grep -ciE "iron law" "$f" 2>/dev/null)
+    [ -n "$r" ] || r=0
+    n=$((h + d + z + r))
     TOTAL=$((TOTAL + n))
     if [ "$n" -gt "$exp" ]; then
-        echo "FAIL: $b - $h commit hash(es), $d date(s), $z line(s) with CJK (baseline $exp)"
+        echo "FAIL: $b - $h hash(es), $d date(s), $z CJK, $r rulebook cite(s) (baseline $exp)"
         grep -nohE "\b[0-9a-f]{7,8}\b|20[0-9]{2}-[0-9]{2}-[0-9]{2}" "$f" 2>/dev/null \
             | grep -vE "^[0-9]+$" | head -4 | sed 's/^/        /'
         FAIL=1
@@ -80,11 +90,14 @@ done
 # in this script's own text would be caught by the src/ loop only if it
 # lived in src/, so the control is a direct test of the three regexes
 # against strings that must match.
-CTL=$(printf 'see 8017c83\nmeasured 2026-08-24\n' \
-      | grep -cE "\b[0-9a-f]{7,8}\b|20[0-9]{2}-[0-9]{2}-[0-9]{2}")
-if [ "$CTL" -ne 2 ]; then
-    echo "FAIL: the patterns do not match their own examples ($CTL of 2) -"
-    echo "      this gate is blind and its PASS means nothing"
+CTL=$(printf 'see 8017c83\nmeasured 2026-08-24\nper iron law 10\n' \
+      | grep -ciE "\b[0-9a-f]{7}\b|20[0-9]{2}-[0-9]{2}-[0-9]{2}|iron law")
+CJK=$(printf '/* \xe4\xb8\xad */\n' \
+      | LC_ALL=C grep -c $'[\xe4-\xe9][\x80-\xbf][\x80-\xbf]')
+if [ "$CTL" -ne 3 ] || [ "$CJK" -ne 1 ]; then
+    echo "FAIL: the patterns do not match their own examples"
+    echo "      (ascii $CTL of 3, cjk $CJK of 1) - this gate is blind"
+    echo "      and its PASS means nothing"
     FAIL=1
 fi
 

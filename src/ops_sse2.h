@@ -21,7 +21,7 @@
 #ifndef LZ_OPS_SSE2_H
 #define LZ_OPS_SSE2_H
 
-#include "lz_int.h"   /* lz_i64 and the width types - iron law 10.
+#include "lz_int.h"   /* lz_i64 and the width types.
                          Replaces <stdint.h>, which Visual C++ 4.0
                          does not have. */
 
