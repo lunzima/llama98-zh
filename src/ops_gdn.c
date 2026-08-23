@@ -717,16 +717,32 @@ static void gdn_build_table(const float *ss, const float *q, const float *k,
        default level, and a term for a path this build does not take is
        a term nobody can check. */
     LZ_FCX(LZ_FC_RECUR, (long)kd * 4 + 2, (long)kd * 2, 2, 0, 0);
-    for (kk = 0; kk < kd; kk++) {
-        float a = ss[(size_t)kk * ng + gg] * k[kk];
-        float b = ss[(size_t)kk * ng + gg] * q[kk];
-        float t;
-        ka[kk] = a;
-        qa[kk] = b;
-        t = (a < 0.0f) ? -a : a;
-        if (t > amk) amk = t;
-        t = (b < 0.0f) ? -b : b;
-        if (t > amq) amq = t;
+    /* THE TWO ABSMAX SCANS RUN IN THE INTEGER DOMAIN. They were four
+       float comparisons per kk - `a < 0.0f` and `b < 0.0f` for the sign,
+       `t > amk` and `t > amq` for the max - which on a soft-float target
+       is four `bl __aeabi_fcmpXX` at ~25 instructions each. Masking off
+       the sign bit gives the magnitude, and for magnitudes the unsigned
+       bit-pattern order IS the numeric order, so this is a permutation
+       of the same total order and owes the float loop bit-identity.
+       Same transformation as gdn_p2_fixed_rows' delta scan (765e798),
+       q8_amax and lz_softmax's max scan; this was the last per-element
+       float compare left in the recurrence. NaN cannot reach here - a
+       and b are finite products of finite state and inputs - and a
+       negative zero masks to +0, which the float form also read as 0. */
+    {
+        union { float f; uint32_t u; } mb;
+        uint32_t amku = 0u, amqu = 0u;
+        for (kk = 0; kk < kd; kk++) {
+            float a = ss[(size_t)kk * ng + gg] * k[kk];
+            float b = ss[(size_t)kk * ng + gg] * q[kk];
+            uint32_t t;
+            ka[kk] = a;
+            qa[kk] = b;
+            mb.f = a; t = mb.u & 0x7FFFFFFFu; if (t > amku) amku = t;
+            mb.f = b; t = mb.u & 0x7FFFFFFFu; if (t > amqu) amqu = t;
+        }
+        mb.u = amku; amk = mb.f;
+        mb.u = amqu; amq = mb.f;
     }
     /* Rule 6 item 1: `amk / 32767.0f` gets strength-reduced to a multiply
        by Watcom and left as a divide by gcc - 1 ULP apart. Write the
