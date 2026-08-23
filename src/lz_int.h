@@ -50,6 +50,13 @@ typedef unsigned __int64   lz_u64;
  * print a 64-bit counter use LZ_PRI64 rather than embedding either. */
 #define LZ_PRI64 "I64"
 
+/* `restrict` is C99 and 26 declarations across twelve files use it. It
+ * is an OPTIMISER HINT, so defining it away costs nothing but the hint;
+ * it is not part of any interface's meaning. Legal to macro here
+ * precisely because the compilers that need this are the ones where the
+ * word is not a keyword. */
+#define restrict
+
 #else
 
 #include <stdint.h>
