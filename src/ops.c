@@ -1360,16 +1360,9 @@ void lz_epi_prep_zero(LZTensor *w, int in_dim) {
    that modify tells the truth. imul owns edx:eax, so the two
    accumulator halves are ebx and ebp.
 
-   THE INT32xINT32 ENTRY IS GONE. lz_epi_mac(a, m, n) took a
-   pre-widened int32 plane, and both of its callers stopped building
-   one: the zero term takes lz_epi_mac_i16 and the dot takes
-   lz_epi_mac_grp, each reading the int16 plane directly. Its
-   derivation is not gone with it - the int64 accumulator bound the two
-   comments in ops_matmul.c refer to is the same bound, computed the
-   same way, and the two survivors inherit it unchanged: n products of
-   an int32 accumulator by an int16, summed at 64 bits. What the entry
-   contributed beyond that was the widening pass and the buffer to hold
-   it, which is exactly what removing it removed. */
+   Both entries read the tensor's int16 plane directly: the accumulator
+   bound is n products of an int32 accumulator by an int16, summed at 64
+   bits, which is the bound ops_matmul.c's LZ_EPI_MAX_NG comments cite. */
 #if defined(__WATCOMC__)
 /* int16-multiplier twin, for a caller whose m plane is int16 and who
    would otherwise widen it into a scratch buffer first. epi_q41_join
@@ -1594,9 +1587,6 @@ static lz_i64 lz_epi_mac_i16(const int32_t *a, const int16_t *m, int n) {
    reach here. */
 static int16_t g_epi_xq[LZ_BATCH_MAX][LZ_EPI_MAX_NG];
 static int     g_epi_xe[LZ_BATCH_MAX];
-/* g_epi_m is gone with the pass that filled it - see lz_epi_mac_grp.
-   Like g_epi_zm before it, every element was written once and read once,
-   by the very next statement. */
 /* The zero term's activation half in integer form (epi_zero_act_int) and
    the widened weight half epi_q41_fixed pairs it with. Same reason as
    the three above for being static rather than stack. */
@@ -1727,11 +1717,9 @@ static lz_i64 epi_fixed_raw(const int32_t *accb, const LZTensor *w,
     const int16_t *ww = w->sq + (size_t)row * (ng / r);
     lz_i64 s = 0;
     int g = 0, j = 0;
-    /* ONE PASS, not two. This used to fill g_epi_m in a loop over ng
-       and then hand it to a MAC that read it back; the buffer's every
-       element was written once and read once, by the next statement.
-       lz_epi_mac_grp takes the int16 plane and the group's scalar
-       directly, so the fill and the buffer are both gone.
+    /* ONE PASS over ng, not two: lz_epi_mac_grp reads the int16 plane
+       and the group's scalar directly, so no widened copy is
+       materialised for a MAC to read back.
 
        Bit-identical to the flat form by construction: the same
        per-element int32 product xq[g]*ww[g/r] and the same ascending g,
@@ -1866,7 +1854,7 @@ float epi_fixed(const int32_t *accb, const LZTensor *w, int row,
  * cross-compiler-safe by construction rather than by verification.
  *
  * Two overflow hazards, both avoided rather than checked-after-the-fact
- * because s can be as large as +-2^63 (lz_epi_mac's own derivation:
+ * because s can be as large as +-2^63 (the epilogue MAC's derivation:
  * ng * 2^27 * 2^30 stays inside int64 only up to ng==64==LZ_EPI_MAX_NG,
  * i.e. right at the boundary, and the magnitude of LLONG_MIN itself is
  * exactly 2^63):
@@ -2409,7 +2397,7 @@ float epi_q41(const int32_t *accb, const float *xsb, const float *xgb,
    epi_fixed cancels with a 1/256 post-multiply; here it is an exact
    integer shift instead (measured: 953,024,512 acc32 entries over the
    English corpus, 0 of them not a multiple of 256), and doing it before
-   the join leaves 8 bits of headroom under lz_epi_mac's own worst case
+   the join leaves 8 bits of headroom under the epilogue MAC's worst case
    so the addition that follows provably cannot overflow int64:
    |s_dot| <= 2^63 by LZ_EPI_MAX_NG's derivation, hence |s_dot>>8| <=
    2^55, while |s_zero| <= 64 * 2^31 * 2^15 = 2^52.

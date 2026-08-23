@@ -1343,7 +1343,7 @@ const lz_rowfn LZ_ROW_Q16[LZ_ROW_N] = {
    lz_epi_ready alone is the readiness question.
 
    BOUND, derived against epi_fixed_raw's own MAC rather than restated
-   from Q8_0's: lz_epi_mac sums ng products of an int32 accumulator by an
+   from Q8_0's: that MAC sums ng products of an int32 accumulator by an
    int16 x int16 mantissa product, and LZ_EPI_MAX_NG = 64 is exactly
    where 64 * 2^27 * 2^30 fills int64. The Q16_0 kernels return an
    UNSCALED dot of int16 weights against int8 activations, so
@@ -1352,7 +1352,7 @@ const lz_rowfn LZ_ROW_Q16[LZ_ROW_N] = {
    are 256x larger in magnitude exactly where Q8_0 has its 256x fold.
    The other factor is unchanged: epi_pack_act and epi_prep_plane both
    clamp to +-32767, so |xq_i16 * sq| <= 2^30 whatever the format. So
-   nothing in lz_epi_mac's derivation moves and LZ_EPI_MAX_NG carries
+   nothing in that derivation moves and LZ_EPI_MAX_NG carries
    over as-is.
 
    MEASURED on kmr20, both gate corpora, instrumented build: max |acc32|
