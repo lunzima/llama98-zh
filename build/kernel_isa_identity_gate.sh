@@ -159,6 +159,142 @@ $FLAGSETS
 EOF
 done
 
+# ---------------------------------------------------------------------
+# CROSS-COMPILER, PER TIER. The loop above compares tiers inside ONE
+# binary; fixed_tier_xcompiler_gate.sh compares gcc against Watcom but
+# never pins --kernel (the string does not appear in it), so it has only
+# ever compared whatever `auto` resolved to on each side - sse2 on both.
+# That leaves the pair iron law 2 is actually about untested: the MMX
+# and SSE2 kernels are written TWICE, once as gcc intrinsics and once as
+# wcc386 #pragma aux, and nothing compared intrinsic against assembly
+# per tier.
+#
+# It also leaves out x87 entirely. gcc on x86-64 compiles scalar float
+# to SSE; the only x87 in this tree is the Watcom build's `ref` tier, so
+# "does the C reference give the same answer on an 80-bit stack as on
+# SSE" was a question no gate asked. It is the question
+# lz_fpu_float_begin/end (PC=24) exists to answer, and the answer should
+# be yes - but should-be is not a measurement.
+#
+# MEASURED, kmr20, zh corpus, 6 arms:
+#   shipping default   gcc/wat ref  agree     (x87 == SSE scalar)
+#                      gcc/wat mmx  agree     )  and all four SIMD arms
+#                      gcc/wat sse2 agree     )  share one hash
+#                      ref != the SIMD four   (the epilogue ref has not)
+#   --epi-write float  ALL SIX collapse to one hash
+#
+# The soft-float fourth architecture is NOT here: ARMv5TE has no FPU and
+# its arm is build/arm/parity_gate.sh, which pins `ref` on both sides.
+# ref is in the six above, so the chain closes transitively - soft-float
+# == x86 ref == every other x86 tier - but only while both gates use the
+# same pin. If either changes its pins, that chain breaks silently.
+#
+# MUTATION-TESTED, and both mutations were surgical - one arm's flags
+# changed, only the assertions fed by that arm went red:
+#   --kv q4 on the gcc ref arm  -> x87-vs-SSE and all-six FAIL,
+#                                  both twin pairs stay green
+#   --kv q4 on the wat sse2 arm -> the sse2 twin pair FAILs alone, the
+#                                  mmx pair, x87 and all-six stay green
+# The six intra-binary rows stayed green through both, which is what
+# says these four assertions are new coverage rather than a restatement.
+WBIN=""
+for c in llama98-w.exe llama98-w; do [ -x "$c" ] && WBIN=$c && break; done
+if [ -z "$WBIN" ] && [ -x /c/WATCOM/binnt64/wcc386.exe ]; then
+    if make watcom-cli >"$TMPD/wat.build.log" 2>&1; then
+        for c in llama98-w.exe llama98-w; do [ -x "$c" ] && WBIN=$c && break; done
+    else
+        echo "  cross-compiler: SKIP - 'make watcom-cli' failed"
+        tail -n 3 "$TMPD/wat.build.log" | sed 's/^/      /'
+    fi
+fi
+if [ -n "$WBIN" ] && ! "./$WBIN" "$MODEL" --check >"$TMPD/wchk.log" 2>&1; then
+    echo "  cross-compiler: SKIP - $WBIN does not run on this host"
+    WBIN=""
+fi
+if [ -z "$WBIN" ]; then
+    echo "  cross-compiler: SKIP - no Watcom binary (wcc386 absent, or a"
+    echo "      host that cannot execute a 32-bit Windows image)"
+else
+    # ONE FIXTURE, and it is a budget decision with a stated cost: the
+    # Watcom `ref` tier takes 89 s on this host against gcc's 30 s and
+    # 14 s for its own SIMD, so the full 2x2x3 is twelve minutes. The en
+    # corpus is not uncovered - fixed_tier_xcompiler_gate.sh runs BOTH
+    # corpora across every write axis, on the auto tier - it is the
+    # per-TIER cross-compiler pairing that runs on zh only.
+    #
+    # FIVE RUNS PER COMPILER, NOT SIX. `ref` is run once, under
+    # --epi-write float, and its result is used for both rows: ref
+    # reaches matmul_scalar_ref before any epilogue is selected, so that
+    # axis cannot move it. Measured rather than assumed - gcc ref and
+    # Watcom ref give the same hash with the flag and without it - and
+    # the structural reason is in this gate's header.
+    fx=zh
+    TOK="build/norm_int_gate_tokens_$fx.txt"
+    if [ ! -f "$TOK" ]; then
+        echo "  cross-compiler: SKIP - fixture missing: $TOK"
+    else
+        n=0
+        for cc in gcc wat; do
+            b=$BIN; [ "$cc" = wat ] && b=$WBIN
+            for spec in "ref:epi:--epi-write float" "mmx:dflt:" "sse2:dflt:" \
+                        "mmx:epi:--epi-write float" "sse2:epi:--epi-write float"; do
+                k=${spec%%:*};   r=${spec#*:}
+                lbl=${r%%:*};    flags=${r#*:}
+                if ! "./$b" "$MODEL" --tokens-file "$TOK" --kernel "$k" \
+                        $flags --dump-all-logits "$TMPD/x.$cc.$k.$lbl.bin" \
+                        >"$TMPD/x.$cc.$k.$lbl.log" 2>&1; then
+                    echo "FAIL: $cc / --kernel $k / $lbl did not run"
+                    tail -n 3 "$TMPD/x.$cc.$k.$lbl.log" | sed 's/^/      /'
+                    FAIL=1; continue
+                fi
+                n=$((n + 1))
+            done
+        done
+        if [ "$n" -ne 10 ]; then
+            echo "  cross-compiler: incomplete ($n/10 runs), nothing compared"
+        else
+            # Twin pairs as SHIPPED: gcc intrinsics against wcc386
+            # #pragma aux, per tier, on the default flags.
+            for k in mmx sse2; do
+                if cmp -s "$TMPD/x.gcc.$k.dflt.bin" "$TMPD/x.wat.$k.dflt.bin"; then
+                    echo "PASS: $fx / xcc - gcc $k == watcom $k (intrinsics vs asm)"
+                    PASS=$((PASS + 1))
+                else
+                    ND=$(cmp -l "$TMPD/x.gcc.$k.dflt.bin" \
+                                "$TMPD/x.wat.$k.dflt.bin" | wc -l)
+                    echo "FAIL: $fx / xcc - gcc $k and watcom $k differ in $ND bytes"
+                    FAIL=1
+                fi
+            done
+            # x87 against SSE scalar: the same C, two float units.
+            if cmp -s "$TMPD/x.gcc.ref.epi.bin" "$TMPD/x.wat.ref.epi.bin"; then
+                echo "PASS: $fx / xcc - gcc ref == watcom ref (SSE scalar vs x87)"
+                PASS=$((PASS + 1))
+            else
+                ND=$(cmp -l "$TMPD/x.gcc.ref.epi.bin" \
+                            "$TMPD/x.wat.ref.epi.bin" | wc -l)
+                echo "FAIL: $fx / xcc - SSE scalar and x87 differ in $ND bytes"
+                FAIL=1
+            fi
+            # And with the epilogue axis off, the six are ONE value.
+            allsame=1
+            for f in "$TMPD"/x.gcc.ref.epi.bin "$TMPD"/x.wat.ref.epi.bin \
+                     "$TMPD"/x.gcc.mmx.epi.bin "$TMPD"/x.wat.mmx.epi.bin \
+                     "$TMPD"/x.gcc.sse2.epi.bin "$TMPD"/x.wat.sse2.epi.bin; do
+                cmp -s "$TMPD/x.gcc.ref.epi.bin" "$f" || allsame=0
+            done
+            if [ "$allsame" = 1 ]; then
+                echo "PASS: $fx / xcc - all six arms (SSE, MMX, x87; two" \
+                     "independent implementations) are one value"
+                PASS=$((PASS + 1))
+            else
+                echo "FAIL: $fx / xcc - the six arms are not one value"
+                FAIL=1
+            fi
+        fi
+    fi
+fi
+
 echo "kernel_isa_identity_gate: $PASS fixture x flagset combination(s) identical"
 # FAIL is checked FIRST. An earlier order asked "did anything pass?"
 # before "did anything fail?", so a run where BOTH fixtures diverged

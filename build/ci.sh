@@ -625,6 +625,15 @@ esac
 # blind by construction. Both gates existed on disk before this stage
 # and neither was called from here - stage 14's was uncommitted
 # entirely, so a clean checkout did not have it.
+#
+# It now also closes the third side of that square: the same TIER across
+# both compilers, which neither gate did (stage 6 never pins --kernel,
+# so it has only ever compared auto-vs-auto). That is where the MMX and
+# SSE2 kernels' two hand-written implementations meet, and where x87
+# lives at all - gcc on x86-64 compiles scalar float to SSE, so the only
+# x87 in this tree is the Watcom build's `ref` tier. Adds a Watcom build
+# and ten runs; the Watcom `ref` tier alone is 89 s, which is why that
+# half runs on one fixture.
 # ---------------------------------------------------------------------
 echo
 echo "==== [15/16]kernel ISA identity ===="
