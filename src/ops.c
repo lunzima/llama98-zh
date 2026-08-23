@@ -64,12 +64,14 @@ int lz_conv_accum_bound(int k) {
    exact in binary, so this adds no rounding of its own and cannot
    differ between x87 and SSE. */
 int lz_conv_norm_pow2(const float *v, int n, short *out, int bound) {
-    float amax = 0.0f;
+    /* q8_amax, not a hand-written scan: two __aeabi_fcmpXX per ELEMENT
+       otherwise, and this was the fifth copy of the same loop. See
+       epi_pack_act for why the integer-domain form is exact. */
+    union { float f; uint32_t u; } ab;
+    float amax;
     int i, e = 0;
-    for (i = 0; i < n; i++) {
-        float a = v[i] < 0.0f ? -v[i] : v[i];
-        if (a > amax) amax = a;
-    }
+    ab.u = q8_amax(v, n);
+    amax = ab.f;
     if (amax == 0.0f) {
         for (i = 0; i < n; i++) out[i] = 0;
         return 0;
@@ -1645,12 +1647,21 @@ void epi_pack_act(const float *xqs, int nb, int nt) {
     LZ_FCX(LZ_FC_EPI, 0, 0, 0, 0, 0);
     for (tk = 0; tk < nt; tk++) {
         const float *xsb = xqs + (size_t)tk * nb;
-        float amax = 0.0f;
+        /* THE AMAX SCAN IS q8_amax, not a hand-written loop. It was two
+           __aeabi_fcmpXX per group - `xsb[g] < 0.0f` for the sign and
+           `a > amax` for the max - and q8_amax already does exactly this
+           in the integer domain, with a SIMD tier on top. Calling it
+           removes the compares AND a fourth open-coded copy of the same
+           scan. Exact either way: the maximum of magnitudes cannot
+           depend on lane order or on comparing bit patterns instead of
+           values (the unsigned order of magnitudes IS their numeric
+           order), which is the argument lz_softmax's max scan already
+           makes for its own version. */
+        union { float f; uint32_t u; } ab;
+        float amax;
         int e = 0;
-        for (g = 0; g < nb; g++) {
-            float a = xsb[g] < 0.0f ? -xsb[g] : xsb[g];
-            if (a > amax) amax = a;
-        }
+        ab.u = q8_amax(xsb, nb);
+        amax = ab.f;
         if (amax <= 0.0f) {
             for (g = 0; g < nb; g++) g_epi_xq[tk][g] = 0;
             g_epi_xe[tk] = 0;
