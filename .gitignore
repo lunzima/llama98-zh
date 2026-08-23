@@ -50,6 +50,7 @@
 !/build/f32count_billing_gate.sh
 !/build/recur_write_float_arm_gate.sh
 !/build/subn_gate.sh
+!/build/gcc_flag_parity_gate.sh
 # Comparators, not gates: a gate that ships without the program it
 # compares with is a gate that SKIPs in a fresh clone. logit_rms.c and
 # the gate scripts above predate this list and are tracked already, so
@@ -57,6 +58,7 @@
 !/build/nll_paired.c
 !/build/gcc_watcom_pair_gate.sh
 !/build/dev_timing.sh
+!/build/xcc_codesize.sh
 
 # Stray compiler/linker intermediates (gcc, Open Watcom), plus the raw
 # dumps probes drop at the repo root when run without a -o path.
