@@ -51,6 +51,7 @@
 # the gate scripts above predate this list and are tracked already, so
 # the rule never bit them; a NEW one has to be named here.
 !/build/nll_paired.c
+!/build/gcc_watcom_pair_gate.sh
 
 # Stray compiler/linker intermediates (gcc, Open Watcom), plus the raw
 # dumps probes drop at the repo root when run without a -o path.
