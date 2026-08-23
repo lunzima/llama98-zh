@@ -338,7 +338,7 @@ $dm_with_fwd"
 # execute, =0 reproduces 981,938 exactly.
 # The _ES exponents are calibration constants, not switches, and are
 # excluded for the same reason LZ_CONV_ES is.
-SWITCHES="LZ_GDN_FIXED=0 LZ_GDN_STATE_2PLANE=0 LZ_ATTN_FIXED=0 LZ_CONV_FIXED=0 LZ_NORM_FIXED=0 LZ_SSE2_GROUP=0 LZ_Q8_MIN_SCALE=0.0f LZ_EXACT_MATH=1 LZ_CPUID_NOCACHE=1 LZ_NO_FPU=1 LZ_KV_2PLANE=1 LZ_GDN_STATE_F32=1 LZ_BATCH_MAX=1 LZ_SPEC_K=1 LZ_PF_DIST=0 LZ_Q8R_FORCE_SSE=1 LZ_P2_FORCE_MMX=1 LZ_BVEC_I16=0 LZ_MOEGATE_I16=0 LZ_KLAT_I16=0 LZ_KGATE_I16=0 LZ_KGATE_EXP_I=0 LZ_MLAT_I16=0 LZ_MLAT_REUSE=0 LZ_VPROJ_I16=0 LZ_Q8I16_INT=0 LZ_Q8INT_INT=0 LZ_SWIGLU_I16=0 LZ_CONV_SIG_I=0 LZ_CONVO_I16=0 LZ_GATE_SIG_I=0 LZ_GATE_QW=0 LZ_SOFTPLUS_POLY=0 LZ_FDIV_RECIP=1"
+SWITCHES="LZ_GDN_FIXED=0 LZ_GDN_STATE_2PLANE=0 LZ_ATTN_FIXED=0 LZ_CONV_FIXED=0 LZ_NORM_FIXED=0 LZ_EPI_FIXED=0 LZ_SSE2_GROUP=0 LZ_Q8_MIN_SCALE=0.0f LZ_EXACT_MATH=1 LZ_CPUID_NOCACHE=1 LZ_NO_FPU=1 LZ_KV_2PLANE=1 LZ_GDN_STATE_F32=1 LZ_BATCH_MAX=1 LZ_SPEC_K=1 LZ_PF_DIST=0 LZ_Q8R_FORCE_SSE=1 LZ_P2_FORCE_MMX=1 LZ_BVEC_I16=0 LZ_MOEGATE_I16=0 LZ_KLAT_I16=0 LZ_KGATE_I16=0 LZ_KGATE_EXP_I=0 LZ_MLAT_I16=0 LZ_MLAT_REUSE=0 LZ_VPROJ_I16=0 LZ_Q8I16_INT=0 LZ_Q8INT_INT=0 LZ_SWIGLU_I16=0 LZ_CONV_SIG_I=0 LZ_CONVO_I16=0 LZ_GATE_SIG_I=0 LZ_GATE_QW=0 LZ_SOFTPLUS_POLY=0 LZ_FDIV_RECIP=1"
 
 for entry in $SWITCHES; do
     name="${entry%%=*}"
@@ -426,6 +426,55 @@ else
     echo "FAIL: probe (watcom) - a -D flag did not take effect:"
     grep -E 'Error' "$TMPD/probe.log" | head -5 | sed 's/^/      /'
     FAIL=$((FAIL + 1))
+fi
+
+# --- all-at-once LINK: the class check_one structurally cannot see ---
+# check_one compiles ops.c and forward.c to /dev/null. A switch that
+# compiles out a definition still referenced from a TU it does not
+# compile - cli_main.c's --debug-counters block reads a dozen of these
+# counters unconditionally - produces an object that is fine on its own
+# and a binary that does not exist. That is not hypothetical:
+# -DLZ_CONV_FIXED=0 would not link (lz_conv_o_clamped,
+# lz_debug_convo_i16) and every gate above it was green, because none of
+# them ever reached the linker.
+#
+# ONE link, not one per switch: 35 full builds would dominate this
+# gate's runtime, and the probe above has already asserted that all 35
+# non-default values are simultaneously legal, so one binary with every
+# switch flipped reaches every conditional definition at once. What it
+# cannot do is ATTRIBUTE - it names the missing symbol, not the switch
+# that removed it - so on a failure, bisect with the four tier switches
+# first (build/recur_write_float_arm_gate.sh links those five builds
+# individually and is the finer instrument).
+# LZ_GDN_STATE_2PLANE=0 is held OUT of the link set, and the reason is
+# a finding rather than a convenience: LZ_KV_2PLANE=1 calls
+# lz_gdn_quantize_2p, which LZ_GDN_STATE_2PLANE owns, so the two
+# non-default values contradict each other. That is now an #error in
+# ops.h (it was a link failure with no declaration, which is the same
+# fact arriving later and less legibly). Both remain covered
+# individually by check_one above; what this one link cannot do is hold
+# both at once, and saying so beats a set quietly trimmed to whatever
+# happened to build. Coverage here: 34 of the 35 switches.
+LINKDEFS=""
+for entry in $SWITCHES; do
+    [ "$entry" = "LZ_GDN_STATE_2PLANE=0" ] && continue
+    LINKDEFS="$LINKDEFS -D$entry"
+done
+
+LINKSRC=$(make -n llama98 2>/dev/null | grep -m1 -- '-o llama98 ')
+if [ -z "$LINKSRC" ]; then
+    echo "SKIP: all-at-once link - could not read the link command from make"
+else
+    LINKCMD=${LINKSRC/ -o llama98 / -o $TMPD/allsw.exe }
+    if eval "$LINKCMD $LINKDEFS -DLZ_BATCH_DEFAULT=1" \
+            >"$TMPD/allsw.log" 2>&1; then
+        echo "PASS: all-at-once link (34 of 35 switches non-default, one binary)"
+    else
+        echo "FAIL: all-at-once link - a switch removed a definition someone still references:"
+        grep -E 'undefined reference|error:' "$TMPD/allsw.log" \
+            | head -6 | sed 's/^/      /'
+        FAIL=$((FAIL + 1))
+    fi
 fi
 
 echo

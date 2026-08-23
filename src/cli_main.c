@@ -293,30 +293,22 @@ static void usage(void) {
     "                   cells of the ARMv5TE column and only that build\n"
     "                   selects them. All tiers must be bit-identical; an\n"
     "                   uncompiled tier falls back loudly.\n"
-    "  --fixed MODE        off|all. Sets every write\n"
-    "                   tier at once - recurrence, conv1d, attention,\n"
-    "                   epilogue, sigmoid, norms, scalar. all is the\n"
-    "                   shipping default (every tier fixed,\n"
-    "                   unconditionally - not a hardware question); off is\n"
-    "                   the float correctness oracle every tolerance in\n"
-    "                   CLAUDE.md and every cross-compiler gate is measured\n"
-    "                   against - use it to get a clean float baseline. The\n"
-    "                   per-tier flags below still work and WIN over this\n"
-    "                   one, whatever order they appear in; they are what\n"
-    "                   the ARM parity gate pins and what a bisect needs.\n"
-    "  --recur-write TIER  float|fixed (default fixed). The\n"
-    "                   WHOLE GDN/KDA recurrence, both passes: pass 1's\n"
-    "                   int16 coefficient contraction and pass 2's state\n"
-    "                   write-back, which keeps the integer result and\n"
-    "                   skips the float re-quantize.\n"
-    "  --sig-write TIER    float|fixed (default fixed). sigmoid\n"
-    "                   and SiLU from a Q15 table (NOT the KDA decay).\n"
-    "  --norm-write TIER   float|fixed (default fixed). RMS/L2\n"
-    "                   norm sum-of-squares in int64 fixed point, and the\n"
-    "                   output loop writing its Q15 result as int rather than\n"
-    "                   dequantizing for the consumer to requantize. Those\n"
-    "                   used to be separate (`int` was a third value); they\n"
-    "                   are one tier now - see lz_norm_select.\n"
+    "  --fixed MODE     off|all (default all). THE float knob, and the\n"
+    "                   only one. all is the shipping engine: recurrence\n"
+    "                   (both passes), conv1d, attention scoring/wsum and\n"
+    "                   its int64 exit, dequant epilogue, sigmoid/SiLU,\n"
+    "                   norms, and lz_exp/lz_rsqrt, all in fixed point.\n"
+    "                   off floats every one of them at once, for\n"
+    "                   cross-checking operator precision against another\n"
+    "                   implementation (llama.cpp, HF transformers, vLLM,\n"
+    "                   SGLang) or across rounding regimes (SSE2, SSE,\n"
+    "                   MMX, x87, ARMv5TE soft-float, gcc, Watcom). It is\n"
+    "                   also the float baseline every tolerance in\n"
+    "                   CLAUDE.md is measured against.\n"
+    "                   There is no per-tier flag and no third setting:\n"
+    "                   floating one tier at a time measured worse than\n"
+    "                   BOTH ends on six of seven axes, while the two ends\n"
+    "                   are indistinguishable from each other.\n"
     "  --subn-scale MODE   tok|group (default tok). Width of one INT8\n"
     "                   activation scale on the SubLN o_proj/down_proj input.\n"
     "                   tok is BitNet v2's per-token absmax; group keeps the\n"
@@ -327,23 +319,6 @@ static void usage(void) {
     "                   control arm: off forces hadamard_o/hadamard_down to 0,\n"
     "                   the same state a model without the fields has. Inert\n"
     "                   unless the model sets both use_subn and a block.\n"
-    "  --scalar-fixed TIER float|fixed (default fixed, same as\n"
-    "                   the other six). lz_exp and lz_rsqrt together - the\n"
-    "                   last two scalar x87 ops the fixed tiers leave on\n"
-    "                   float. Value-changing by design (~1e-6 rel); the\n"
-    "                   KDA decay follows lz_exp.\n"
-    "  --epi-write TIER    float|fixed (default fixed). Dequant\n"
-    "                   epilogue in int64 fixed point.\n"
-    "  --attn-write TIER   float|scoring|wsum|fixed|int (default\n"
-    "                   fixed). Attention scoring / weighted sum in fixed\n"
-    "                   point. int adds the weighted sum keeping its exact\n"
-    "                   int64 accumulator for lz_quantize_q8_int64 instead of\n"
-    "                   dequantizing and re-quantizing (value-changing); it\n"
-    "                   implies fixed.\n"
-    "  --conv-write TIER   float|fixed (default fixed). Causal\n"
-    "                   conv1d tier: fixed keeps the history in int16 so the\n"
-    "                   conversion is per sample, not per tap. Drifts ~3e-5\n"
-    "                   from float (noise floor 3.9e-3) - not bit-identical.\n"
     "  --pair MODE      auto|on|off (default on). Share one weight unpack\n"
     "                   across two tokens (needs --batch >= 2).\n"
     "  --prefetch MODE  auto|none|load|nta|3dnow (default auto).\n"
@@ -928,7 +903,6 @@ int main(int argc, char **argv) {
     const char *all_path = NULL;
     const char *prompt_tok_path = NULL;
     const char *top5_path = NULL;
-    const char *group_fixed = NULL;   /* --fixed's value, applied after the loop */
     float *nll = NULL;
     FILE *af = NULL;    /* --dump-all-logits stream, fclosed after the loop */
     FILE *tf = NULL;    /* --dump-top5 stream, same lifetime as af */
@@ -1385,60 +1359,23 @@ int main(int argc, char **argv) {
                        lz_kernel_tier());
         }
         else if (strcmp(a, "--fixed") == 0 && i + 1 < argc) {
-            /* A group setter, recorded and applied after the loop, so a
-               per-tier flag appearing before it is not silently
-               overwritten. Argument order is not a thing a reader
-               should have to know. */
-            const char *v = argv[++i];
-            if (strcmp(v, "off") != 0 && strcmp(v, "all") != 0) {
+            /* THE float knob, and the only one. It used to be a group
+               setter over seven per-tier flags - --recur-write,
+               --conv-write, --attn-write, --epi-write, --sig-write,
+               --norm-write, --scalar-fixed - applied after the argument
+               loop so a per-tier flag could win regardless of order.
+               There is nothing left to defer: seven axes could only buy
+               mixed settings, and mixing measured worse than either end
+               (ops.h, at lz_float_ref_select). Applied here, in order,
+               like every other flag.
+
+               `all` is the shipping engine. `off` floats every
+               arithmetic site at once and is the arm for cross-checking
+               operator precision against another implementation or
+               across rounding regimes. NOT numerics-neutral. */
+            const char *got = lz_float_ref_select(argv[++i]);
+            if (!got) {
                 printf("--fixed: unknown mode (off|all)\n");
-                return 2;
-            }
-            group_fixed = v;
-        }
-        else if (strcmp(a, "--recur-write") == 0 && i + 1 < argc) {
-            /* The whole recurrence, both passes: pass 1's contraction
-               (lz_gdn_mode) and pass 2's state write-back read this one
-               selector, so `float` floats all of it. `fixed` keeps the
-               recurrence's own integer result and skips the float
-               re-quantize; `auto` is the shipping default,
-               unconditionally fixed - it does not ask hardware (see
-               ops_sched.c's retirement note on lz_soft_float_target).
-               `float` is the measurement/correctness-oracle value, same
-               shape the other six now have. */
-            const char *got = lz_gdn_p2_select(argv[++i]);
-            if (!got) {
-                printf("--recur-write: unknown tier (float|fixed)\n");
-                return 2;
-            }
-        }
-        else if (strcmp(a, "--conv-write") == 0 && i + 1 < argc) {
-            /* Causal conv1d tier. `fixed` keeps the history in int16 so
-               the conversion is paid once per sample instead of once per
-               tap; `auto` is the shipping default, unconditionally fixed
-               (see --recur-write's comment above). NOT numerics-neutral:
-               ~3e-5 against a 3.9e-3 noise floor. */
-            const char *got = lz_conv_select(argv[++i]);
-            if (!got) {
-                printf("--conv-write: unknown tier (float|fixed)\n");
-                return 2;
-            }
-        }
-        else if (strcmp(a, "--sig-write") == 0 && i + 1 < argc) {
-            /* sigmoid and SiLU only. The KDA decay goes through the same
-               lz_exp and must not follow: its error compounds over the
-               recurrence, measured 42x over the noise floor at 512
-               steps. */
-            const char *got = lz_sig_select(argv[++i]);
-            if (!got) {
-                printf("--sig-write: unknown tier (float|fixed)\n");
-                return 2;
-            }
-        }
-        else if (strcmp(a, "--norm-write") == 0 && i + 1 < argc) {
-            const char *got = lz_norm_select(argv[++i]);
-            if (!got) {
-                printf("--norm-write: unknown tier (float|fixed)\n");
                 return 2;
             }
         }
@@ -1458,46 +1395,6 @@ int main(int argc, char **argv) {
             const char *got = lz_hadamard_select(argv[++i]);
             if (!got) {
                 printf("--hadamard: unknown mode (on|off)\n");
-                return 2;
-            }
-        }
-        else if (strcmp(a, "--scalar-fixed") == 0 && i + 1 < argc) {
-            /* lz_exp and lz_rsqrt together - the last two scalar x87
-               operators the fixed tiers leave on float. Both fixed
-               bodies are integer-domain and CHANGE the value vs float
-               (measured ~1e-6 relative for exp, ~1e-7 for rsqrt, both
-               under the Q8 floor), so this tier is a documented
-               value-changing knob. The KDA decay and the sampler route
-               through lz_exp too and follow this knob. */
-            const char *got = lz_scalar_select(argv[++i]);
-            if (!got) {
-                printf("--scalar-fixed: unknown tier (float|fixed)\n");
-                return 2;
-            }
-        }
-        else if (strcmp(a, "--epi-write") == 0 && i + 1 < argc) {
-            /* Dequant epilogue. Both tiers ship because this host cannot
-               decide between them: the fixed one is 1.65x slower here
-               and does 32x less f32 work, and which matters depends on
-               the target's float-to-integer cost ratio. */
-            const char *got = lz_epi_select(argv[++i]);
-            if (!got) {
-                printf("--epi-write: unknown tier (float|fixed)\n");
-                return 2;
-            }
-        }
-        else if (strcmp(a, "--attn-write") == 0 && i + 1 < argc) {
-            /* Attention scoring and weighted sum, split because they
-               quantize at different granularity (int8 q vs int16
-               coefficients). `auto` is the shipping default,
-               unconditionally fixed (--recur-write's comment above).
-               NOT numerics-neutral, and it is the one tier whose cost is
-               context-dependent: measured ~2.6% slower below 200 tokens,
-               3.7x less O(ctx) work above. */
-            const char *got = lz_attn_select(argv[++i]);
-            if (!got) {
-                printf("--attn-write: unknown tier "
-                       "(auto|float|scoring|wsum|fixed|int)\n");
                 return 2;
             }
         }
@@ -1603,56 +1500,6 @@ int main(int argc, char **argv) {
             usage();
             return 2;
         } else dir = a;
-    }
-    /* Applied after the loop so command-line order does not decide the
-       result: a per-tier flag wins whether it came before or after
-       --fixed. lz_*_is_default() is the record of "nobody set this", which
-       is exactly the question here. */
-    if (group_fixed) {
-        const char *t = (strcmp(group_fixed, "all") == 0) ? "fixed"
-                                                          : "float";
-        /* All seven write tiers now share one shape: `auto` is the
-           shipping default, unconditionally fixed, not a hardware
-           question (ops_sched.c's retirement note on
-           lz_soft_float_target). Table-driven so --fixed's group-apply
-           is a single array instead of seven near-identical
-           is_auto/select pairs that could drift out of step with each
-           other as axes are added. Recurrence (lz_gdn_p2_*) used to sit
-           outside this table because its select() had no "float" value
-           - it does now (same reason every other axis needed one: float
-           has to stay reachable as the measurement/correctness-oracle
-           path even though nothing defaults to it anymore), so it folds
-           in like the rest and `--fixed off` needs no special case.
-           That entry covers BOTH recurrence passes: pass 1 resolves
-           from the same selector (lz_gdn_mode), so this table floats
-           every fixed-point site the engine has and `off` is a complete
-           float arm. */
-        static const struct {
-            int (*is_auto)(void);
-            const char *(*select)(const char *);
-        } axes[] = {
-            { lz_gdn_p2_is_default, lz_gdn_p2_select },
-            { lz_conv_is_default,   lz_conv_select },
-            { lz_attn_is_default,   lz_attn_select },
-            { lz_epi_is_default,    lz_epi_select },
-            { lz_sig_is_default,    lz_sig_select },
-            { lz_norm_is_default,   lz_norm_select },
-            { lz_scalar_is_default, lz_scalar_select },
-        };
-        int skipped = 0;
-        int gi;
-        for (gi = 0; gi < (int)(sizeof(axes) / sizeof(axes[0])); gi++)
-            if (axes[gi].is_auto())
-                skipped += (axes[gi].select(t) == NULL);
-        /* A selector that does not take this name returns NULL and
-           changes nothing, which is indistinguishable from success at
-           the call site - and the result is a group setter that reached
-           a subset while reading as though it reached everything. */
-        if (skipped) {
-            printf("--fixed %s: %d tier(s) do not take that setting and "
-                   "were left alone\n", group_fixed, skipped);
-            return 2;
-        }
     }
     if (!dir) {
         usage();

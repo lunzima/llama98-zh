@@ -13,10 +13,10 @@
 #      value compiled on gcc + Watcom, so a "configuration nobody
 #      happens to build" fails here instead of silently diverging
 #   6. build/fixed_tier_xcompiler_gate.sh - gcc/Watcom bit-identity of
-#      EVERY fixed-point write tier (all 12 --*-write values plus
-#      --fixed all, plus the float baseline as a control) over hundreds
-#      of tokens of real text, the case the --norm-write int tier's
-#      original 8/16-token verification could not see
+#      BOTH arms of --fixed (all, the shipping engine; off, the float
+#      control) over hundreds of tokens of real text - it used to be 12
+#      per-tier values, which is what the one knob replaced. This is the
+#      case the norms tier's original 8/16-token verification could not see
 #      (lz_quantize_q8_int's double-rounding hazard, see that script's
 #      own header) and that a later audit's 153/211-token re-check of
 #      the other ten tiers could not see either, for the same reason

@@ -259,35 +259,26 @@ if [ "$BASE_ZH" -ne 0 ] || [ "$BASE_EN" -ne 0 ]; then
     exit 1
 fi
 
-# Isolated: tested tier plus --fixed off so every OTHER axis is forced
-# to float and cannot also move and blur attribution - true uniformly
-# now (--fixed off reaches all seven, recurrence included). Order
-# matches --help / the audit's table.
-TIERS_ISOLATED=(
-    "--recur-write fixed"
-    "--conv-write fixed"
-    "--attn-write scoring"
-    "--attn-write wsum"
-    "--attn-write fixed"
-    "--attn-write int"
-    "--epi-write fixed"
-    "--sig-write fixed"
-    "--norm-write fixed"
-    "--scalar-fixed fixed"
-)
-for tier in "${TIERS_ISOLATED[@]}"; do
-    run_one "$tier --fixed off" zh "$TOK_ZH"
-    run_one "$tier --fixed off" en "$TOK_EN"
-done
-
-# Inverse isolation: --recur-write float is the one row testing an
-# axis's FLOAT path standing alone among six FIXED siblings, so it needs
-# --fixed all around it instead of --fixed off - the combination "one
-# axis float, the rest fixed" that only became reachable once
-# --recur-write gained an explicit float value (see this script's own
-# header comment).
-run_one "--recur-write float --fixed all" zh "$TOK_ZH"
-run_one "--recur-write float --fixed all" en "$TOK_EN"
+# WHERE THE TWELVE ISOLATED ROWS WENT, and how to get attribution back.
+#
+# This block used to run one row per runtime tier flag, each with
+# --fixed off around it, so a gcc/Watcom divergence named the tier. The
+# seven per-tier flags are gone: they could only ever select MIXED
+# settings, mixing measured worse than either end on six of seven axes,
+# and one float knob replaced the lot (ops.h, at lz_float_ref_select).
+# There is nothing left for those rows to isolate - "--attn-write
+# scoring" is not a state the engine can be in.
+#
+# What that costs is attribution, and it is a real cost: this gate now
+# says "the two toolchains disagree" without saying where. Attribution
+# moved to the COMPILE switches, which are still per-tier and are what
+# build/switch_matrix_gate.sh drives - LZ_GDN_FIXED, LZ_CONV_FIXED,
+# LZ_NORM_FIXED, LZ_ATTN_FIXED, LZ_CONVO_I16, LZ_EPI_FIXED. On a
+# failure here, rebuild both toolchains with one of them at 0 at a time
+# and re-run the two arms below; the switch that makes the divergence
+# disappear is the tier that owns it. Slower than a flag, because it is
+# a rebuild per row rather than an argv per row - which is why it is a
+# failure procedure rather than the default sweep.
 
 # --fixed all and the shipping default: NOT isolated with any extra
 # flag. "Every axis fixed" (spelled explicitly, or reached by the

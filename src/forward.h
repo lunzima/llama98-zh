@@ -566,8 +566,8 @@ typedef struct {
        buffer for both). */
     int32_t *fwht_scratch;
 
-    /* SubLN plain-norm int output scratch (--norm-write int, use_subn
-       only): qcap int32, one token wide. lz_rmsnorm_int writes here,
+    /* SubLN plain-norm int output scratch (the norms tier's int output,
+       use_subn only): qcap int32, one token wide. lz_rmsnorm_int writes here,
        lz_quantize_q8_tok_int reads it immediately after - single-token
        like fwht_scratch, not nt-wide, since each site's norm+quantize
        pair for one tk completes before the next tk starts. */

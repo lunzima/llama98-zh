@@ -382,6 +382,36 @@ const char *lz_prefetch_name(void);
 
    Prefetch is a HINT: changing this tier must not change a single
    output bit. */
+
+/* ---- THE float knob: --fixed all | off ------------------------------- */
+
+/* `all` is the shipping engine and the default. `off` floats every
+   arithmetic site at once - recurrence (both passes), conv1d,
+   attention scoring/wsum/int-exit, dequant epilogue, sigmoid/silu,
+   norms, and the scalar transcendentals - and exists so operator
+   precision can be cross-checked against another implementation
+   (llama.cpp, HF transformers, vLLM, SGLang) or across the rounding
+   regimes this engine targets: SSE2, SSE, MMX, x87, ARMv5TE
+   soft-float, gcc and Watcom.
+
+   ORTHOGONAL to --kernel (which instruction set) and to --pair and
+   --prefetch. Those stay separate axes because they answer "which
+   implementation of the same arithmetic", not "which arithmetic".
+
+   There is no third setting and no per-tier flag. Mixing was measured:
+   floating exactly one tier at a time, six of the seven arms came out
+   worse than BOTH ends, while the two ends are indistinguishable from
+   each other (+3.49e-05, t=0.01, n=1262). See ops_sched.c.
+
+   NOT numerics-neutral, obviously - that is the point of it. A gate
+   that switches this needs a tolerance, not cmp. lz_float_ref_g is
+   read directly by the lz_scalar_mode macro below so that softmax's
+   per-element lz_exp does not pay a cross-TU call; use lz_float_ref()
+   everywhere else. Only lz_float_ref_select writes it. */
+extern int lz_float_ref_g;
+const char *lz_float_ref_select(const char *name);
+int lz_float_ref(void);
+
 /* Token pairing: "on" | "off" | "auto" (= on). Returns the setting in
    effect, or NULL if the name is unknown.
 
@@ -433,12 +463,7 @@ int lz_gdn_mode(void);
    wall clock has been taken yet - but that no longer gates the default,
    which is fixed because the shipping build is. The knob is the
    decision point, not this comment. */
-const char *lz_gdn_p2_select(const char *name);
 int lz_gdn_p2_mode(void);
-/* Was the tier chosen by AUTO rather than asked for? The banner says so,
-   because "fixed" that a machine picked and "fixed" that a flag forced
-   are different facts and only one of them travels to another machine. */
-int lz_gdn_p2_is_default(void);
 /* Which of the fixed pass-2 bodies is selected: "ref", "mmx-intrin",
    "mmx-asm", or "-" when the float tier is running. The same join
    lz_kernel_tier() reports, and it exists for the same reason: the
@@ -493,15 +518,10 @@ const char *lz_gdn_p2_impl(void);
 #define LZ_CONV_SIG_I 1
 #endif
 
-/* Causal conv1d tier: "float" | "fixed" | "auto". AUTO asks the same
-   hardware question as lz_gdn_p2_select - CPUID SSE, never MMX - so a
-   Socket 7 part lands on fixed. Returns the resolved name, or NULL on an
-   unknown one.
+/* Causal conv1d tier, resolved from the one float knob above.
    NOT numerics-neutral: the fixed tier drifts ~4.8e-5 from float
    (.prof/wconv.c), so switching tiers needs a tolerance gate, not cmp. */
-const char *lz_conv_select(const char *name);
 int lz_conv_mode(void);
-int lz_conv_is_default(void);
 
 /* Fixed-tier helpers, exposed because forward.c builds the quantized
    weight and history buffers with them. See their definitions for why
@@ -621,9 +641,7 @@ const char *lz_tier_pins(void);
 const char *lz_tier_report(void);
 int lz_pair_is_auto(void);
 
-const char *lz_sig_select(const char *name);
 int lz_sig_mode(void);
-int lz_sig_is_default(void);
 
 /* Fixed norms tier, compiled in or out. Its own axis: the recurrence's
    LZ_GDN_FIXED says nothing about the norms and this says nothing about
@@ -673,6 +691,15 @@ int lz_sig_is_default(void);
 #ifndef LZ_MM_WIDEN_MAX
 #define LZ_MM_WIDEN_MAX 4096
 #endif /* LZ_MM_WIDEN_MAX */
+/* Whether the fixed dequant epilogue exists at all. Same shape as
+   LZ_GDN_FIXED / LZ_CONV_FIXED / LZ_NORM_FIXED, and set to 0 by
+   build/kernel_isa_identity_gate.sh for the one build where --kernel
+   ref and --kernel sse2 must be byte-identical: ref never reaches an
+   epilogue, so that is the single axis on which the two legitimately
+   differ. See lz_epi_mode. */
+#ifndef LZ_EPI_FIXED
+#define LZ_EPI_FIXED 1
+#endif /* LZ_EPI_FIXED */
 
 /* x87 precision-control availability, one detect instead of two. ops.c
    and ops_quant.c each ran this same three-condition test; they are the
@@ -723,8 +750,6 @@ int lz_sig_is_default(void);
    multiply-add leaves the float domain; the reciprocal square root and
    the output scale stay float. */
 int lz_norm_mode(void);
-int lz_norm_is_default(void);
-const char *lz_norm_select(const char *name);
 /* Whether lz_rmsnorm_gated will take the fixed tier for an n-element
    norm: false in a LZ_NORM_FIXED=0 build, where the fixed body is
    compiled out and norm_ss_fixed declines. The fixed-tier call sites
@@ -738,11 +763,12 @@ int lz_norm_can_fixed(int n);
    re-quantizing.
 
    NO LONGER SELECTABLE. It was `--norm-write int`, a third value on
-   that tier's axis; it now answers yes whenever the fixed tier is on,
-   and the value is gone from the selector. Nothing was left to choose
-   between - see lz_norm_select in ops_sched.c for the two halves of
-   that argument, and read the rest of this comment for the half that
-   was a defect rather than a preference.
+   that tier's axis; it now answers yes whenever the fixed tier is on.
+   Nothing was left to choose between: on the gated norms the two
+   spellings are bit-identical (the dequantize/requantize pair cancels
+   - proof at lz_quantize_q8_int), and on the plain norm the int form
+   is ~9.5x cheaper per element on the target. Read the rest of this
+   comment for the half that was a defect rather than a preference.
 
    BIT-IDENTICAL FOR THE GATED NORM. NOT FOR THE PLAIN ONE. The identity
    is a CANCELLATION, not a property of int arithmetic: it needs the
@@ -835,13 +861,12 @@ const char *lz_hadamard_select(const char *name);
    argument shuffle and a cross-TU `bl` for a one-line getter - in front
    of a body that is 169.
 
-   g_scalar stops being file-static to allow it, which is the same trade
-   g_kernel already makes in ops_kernel_shared.h. lz_scalar_select is
-   still the only writer; nothing outside ops_sched.c may assign it. */
-extern int lz_scalar_g;
-#define lz_scalar_mode() ((lz_scalar_g < 0) ? 1 : lz_scalar_g)
-int lz_scalar_is_default(void);
-const char *lz_scalar_select(const char *name);
+   The global stops being file-static to allow it, which is the same
+   trade g_kernel already makes in ops_kernel_shared.h. lz_float_ref_g
+   is now that global for every tier, not just this one, and
+   lz_float_ref_select is still its only writer; nothing outside
+   ops_sched.c may assign it. */
+#define lz_scalar_mode() (!lz_float_ref_g)
 
 /* Dequant epilogue tier: "float" | "fixed" | "auto".
 
@@ -863,9 +888,7 @@ const char *lz_scalar_select(const char *name);
    target-machine question, so it is a knob.
 
    AUTO asks the same CPUID SSE question the conv and pass-2 tiers ask. */
-const char *lz_epi_select(const char *name);
 int lz_epi_mode(void);
-int lz_epi_is_default(void);
 
 /* Build a tensor's int16 scale plane. Idempotent, and a no-op when the
    shape is outside the derived bound - callers do not have to know the
@@ -1390,9 +1413,7 @@ void lz_kv4_quantize(const float *x, int n, unsigned char *out, float *scale);
    underneath a running sequence is a worse bargain than one chosen once.
 
    NOT numerics-neutral, so switching tiers needs a tolerance gate. */
-const char *lz_attn_select(const char *name);
 int lz_attn_mode(void);
-int lz_attn_is_default(void);
 
 /* Whether the fixed attention weighted sum keeps its int accumulator
    for lz_quantize_q8_int64 instead of dequantizing to float and
@@ -1486,6 +1507,18 @@ void lz_attn_wsum_q8_int(int64_t *acc, float *sscale, const float *att,
    out-of-order machine's wall clock. */
 #ifndef LZ_GDN_STATE_2PLANE
 #define LZ_GDN_STATE_2PLANE 1
+#endif
+
+/* LZ_KV_2PLANE's write path calls lz_gdn_quantize_2p, which this switch
+   owns - so the two are coupled and nothing said so. Both at their
+   non-default values (KV on, state off) built every TU cleanly and
+   failed at the LINK, which is a place no gate was looking: the
+   switch-matrix gate compiled ops.c and forward.c to /dev/null, and the
+   call sits in forward.c under LZ_KV_2PLANE while the declaration sits
+   here under LZ_GDN_STATE_2PLANE. Found by that gate's new all-at-once
+   link. A contradiction that can be a compile error should be one. */
+#if defined(LZ_KV_2PLANE) && LZ_KV_2PLANE && !LZ_GDN_STATE_2PLANE
+#error "LZ_KV_2PLANE=1 needs LZ_GDN_STATE_2PLANE: it calls lz_gdn_quantize_2p"
 #endif
 
 #if LZ_GDN_STATE_2PLANE

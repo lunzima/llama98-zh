@@ -77,12 +77,20 @@ FP_STRICT := -ffp-contract=off
 # never with them removed - see the $(ENG_MMX) rules.
 MMX_TU_DEFINE := -DLZ_MMX_TU=1
 SSE2_TU_DEFINE := -DLZ_SSE2_TU=1
-CFLAGS  ?= -O2 -std=c99 -Wall -Wextra -Isrc $(FP_STRICT) $(MMX_TU_DEFINE) $(SSE2_TU_DEFINE)
+# Compile-switch hook for the A/B gates: `make EXTRA_DEFS=-DLZ_EPI_FIXED=0`.
+# Appended to BOTH flag sets, so a gate that builds a control arm does
+# not have to restate -O3 -march=x86-64 $(FP_STRICT) and the two TU
+# defines to add one -D. A gate that restates them is a hardcoded
+# sibling of this line, free to drift the moment either is edited, and
+# the drift shows up as an A/B pair that silently compared two things
+# that differed in more than the switch under test.
+EXTRA_DEFS ?=
+CFLAGS  ?= -O2 -std=c99 -Wall -Wextra -Isrc $(FP_STRICT) $(MMX_TU_DEFINE) $(SSE2_TU_DEFINE) $(EXTRA_DEFS)
 # Release builds are portable x86-64 (SSE2 baseline), NOT -march=native:
 # a native build runs only on the machine that compiled it. The engine
 # hot path is hand-written intrinsics anyway, so the portability cost is
 # negligible.
-X86_64_CFLAGS := -O3 -march=x86-64 -std=c99 -Wall -Wextra -Isrc $(FP_STRICT) $(MMX_TU_DEFINE) $(SSE2_TU_DEFINE)
+X86_64_CFLAGS := -O3 -march=x86-64 -std=c99 -Wall -Wextra -Isrc $(FP_STRICT) $(MMX_TU_DEFINE) $(SSE2_TU_DEFINE) $(EXTRA_DEFS)
 
 HTTP_LIBS := $(if $(filter Windows_NT,$(OS)),-lwsock32,)
 
@@ -215,7 +223,7 @@ WINVER_FLAGS := -we -DWIN32_LEAN_AND_MEAN -DWINVER=$(LZ_WINVER) -D_WIN32_WINNT=$
 # declarations always were. Harmless on every other ENG file: nothing
 # outside ops.c/ops_mmx.c/ops_mmx_sse.c/ops_sse2.c even #includes the two
 # headers that test them.
-WATCOM_BASE := -za99 -otexan -zp4 -DLZ_MMX_TU=1 -DLZ_SSE2_TU=1
+WATCOM_BASE := -za99 -otexan -zp4 -DLZ_MMX_TU=1 -DLZ_SSE2_TU=1 $(EXTRA_DEFS)
 
 # CPU-GENERATION FLOOR (task #28). -Nr/-Ns select codegen AND calling
 # convention together; both targets below use -Nr (register convention -

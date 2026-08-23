@@ -887,7 +887,7 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
     s->att      = (float *)xcalloc((size_t)seq_len, sizeof(float), &ok, &s->bytes_alloc);
 #if (LZ_ATTN_FIXED & 2)
     /* Allocated whenever the kernel is compiled, not when the tier is
-       selected: lz_attn_select can run after this point, and 6 bytes per
+       selected: lz_float_ref_select can run after this point, and 6 bytes per
        context slot (196 KB at ctx 32768, counted in bytes_alloc) is a
        cheaper bargain than a buffer that appears only on some paths. */
     s->wsum_cbuf = (float *)xcalloc((size_t)seq_len, sizeof(float), &ok, &s->bytes_alloc);
@@ -2170,7 +2170,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
             {
 #if (LZ_ATTN_FIXED & 2)
             /* s->wsum_cbuf is in the condition, not asserted: an embedder
-               may call lz_attn_select after the state exists, and the
+               may call lz_float_ref_select after the state exists, and the
                allocation above cannot see that. Reading the buffer the
                kernel needs is the only test that cannot drift from it. */
             if (attn_int[tk]) {
@@ -2813,7 +2813,7 @@ static void forward_kda(const LZModel *m, LZRunState *s,
        tier is not this table at all (lz_exp-based, a different value),
        so there is no integer entry to hand an integer to - the same
        shape as "the fixed conv tier is the consumer, so its absence
-       answers this on its own". --sig-write float therefore turns both
+       answers this on its own". --fixed off therefore turns both
        off at runtime, which is what makes it a control. */
     /* *_may is the capability, *_int is "the int buffer holds it" and is
        raised only by kda_i16_proj - see its header for why they are two
@@ -2856,7 +2856,7 @@ static void forward_kda(const LZModel *m, LZRunState *s,
            for Q8 weights the matmul reads the quantized xq/xqs, not the
            float scratch. f_a/b_proj stay on raw s->xb - no SubLN norm
            field exists for the low-rank decay-gate projections. */
-        /* --norm-write int: fixed-tier norm writes a Q15 int product
+        /* Norms tier, int output: the fixed norm writes a Q15 int product
            straight into subn_norm_int (single-token scratch, not
            nt-wide - see forward.h), the immediate tok-int quantize
            reads it, and s->xb2 is never touched. Falls back to the
@@ -3885,8 +3885,8 @@ static void dense_ffn_step(const LZModel *m, LZRunState *s,
            the down_proj matmul below), down normalizes the intermediate
            activation with down_norm (s->hb2 as scratch, dead after the
            SwiGLU loop). */
-        /* --norm-write int: see forward_kda's matching comment - same
-           subn_norm_int scratch, same fallback conditions. */
+        /* Norms tier, int output: see forward_kda's matching comment -
+           same subn_norm_int scratch, same fallback conditions. */
         if (lz_norm_int() && lz_norm_can_fixed(dim) &&
             gsg > 0 && (dim % gsg) == 0) {
             for (tk = 0; tk < nt; tk++) {
@@ -3973,7 +3973,7 @@ static void dense_ffn_step(const LZModel *m, LZRunState *s,
            (model.c resolve_hadamard). 0 = no Hadamard. */
         {
             int dblk = lz_hadamard_on() ? c->hadamard_down : 0;
-            /* --norm-write int only applies when dblk<=1: the dblk>1
+            /* The int norm output only applies when dblk<=1: the dblk>1
                branch feeds subn_fwht_quant, which needs the FLOAT row to
                run the Hadamard transform before it quantizes - there is
                no int-input twin of it, so that branch stays exactly as

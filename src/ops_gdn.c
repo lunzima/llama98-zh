@@ -2123,7 +2123,7 @@ static void gdn_step_impl(float *out, const int8_t *sq_in, int8_t *sq_out,
        sq_in/sq2_in/ss_in - the "_in" side, whether or not it aliases
        "_out" (see this function's own header comment on the ring). */
 #if LZ_GDN_FIXED
-    /* lz_gdn_mode() is --recur-write, the same selector pass 2 reads;
+    /* lz_gdn_mode() resolves from --fixed, the same knob pass 2 reads;
        the kd bound is a hard capacity limit (the coefficient table is
        int16_t[LZ_GDN_MAX_KD/2][8]). Either one falling through lands on
        the same float path below, which is exactly why that path is the
@@ -2295,7 +2295,7 @@ static void gdn_step_impl(float *out, const int8_t *sq_in, int8_t *sq_out,
 #endif /* LZ_GDN_STATE_2PLANE */
         }
 #if LZ_GDN_STATE_2PLANE
-        /* Reads zero when --recur-write is fixed: the work is billed
+        /* Reads zero when the recurrence is fixed: the work is billed
            through gdn_p2_fixed_rows, not here - it did not vanish. */
         lz_gdn_quantize_2p(buf, vd, 32, row_out, row_lo_out, rs_out,
                            LZ_FC_RECUR);

@@ -2893,6 +2893,18 @@ void lz_causal_conv1d_step(float *o, const float *x,
    build that compiles the tier out. */
 long long lz_debug_conv_sig_i = 0;
 
+/* Same reason, and they were inside the #if until a -DLZ_CONV_FIXED=0
+   row was added to build/recur_write_float_arm_gate.sh and would not
+   LINK: cli_main.c's --debug-counters block reads both unconditionally.
+   Nothing caught it earlier because the switch-matrix gate compiles the
+   probe with -fsyntax-only, which never reaches the linker.
+
+   lz_debug_convo_i16 is the int16 exit's positive control; the clamp
+   counter is not one, because it reads 0 both when the exit is compiled
+   out and when it ran without clipping, which is the normal case. */
+long lz_conv_o_clamped;
+long long lz_debug_convo_i16;
+
 #if LZ_CONV_FIXED
 #if defined(LZ_ARM_PRIM_ASM)
 /* Is `v` an exact positive power of two, and if so at what exponent?
@@ -2967,12 +2979,6 @@ static int conv_pow2_exp(float v, int32_t *k) {
  * the same code either way - only the source of `q` differs, and it is
  * the caller's job (forward.c) to make sure the two ways of obtaining
  * it are not mixed within one model's conv block. */
-long lz_conv_o_clamped;
-/* THE INT16 EXIT'S POSITIVE CONTROL, and the clamp counter above is not
-   one: it reads 0 both when the exit is compiled out and when it ran
-   without clipping, which is the normal case - an always-zero signal
-   carries nothing. This one separates them. */
-long long lz_debug_convo_i16;
 
 /* The int16 exit is a NEW ENTRY POINT rather than two more parameters on
    the old one, and the reason is the call-site count: six of the eight

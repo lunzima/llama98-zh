@@ -109,12 +109,70 @@ echo "sse2 -> $SEL_SSE"
 # ref is only comparable once the epilogue axis is off, and why dropping
 # it entirely would throw away the coverage it does bring.
 #
+# The BIN column is there for the same row. Turning the epilogue off
+# used to be `--epi-write float`, one of seven per-tier runtime flags;
+# those collapsed into the single --fixed knob, and --fixed off would
+# take conv, norms, sigmoid, recurrence and attention out of the
+# comparison too - which is the coverage this row exists for. So the
+# axis moved to a COMPILE switch, LZ_EPI_FIXED, and the row runs against
+# a second binary built with it at 0. Measured, not assumed:
+# LZ_EPI_FIXED=0 makes ref and sse2 byte-identical on kmr20/zh, and the
+# ordinary build (the control) leaves them differing - the same pair of
+# results --epi-write float used to give.
+#
 # Adding a flag set here is the cheap half of covering a new operator end
 # to end; the expensive half (SIMD arm against the same binary's C arm,
 # byte for byte) is the per-operator .prof/*_xcheck.sh probe.
-FLAGSETS="dflt:mmx:sse2:
-rot:mmx:sse2:--kv-rot on
-epi:ref:sse2:--epi-write float"
+RBIN="./$BIN"
+
+# The LZ_EPI_FIXED=0 control build. Made here rather than kept in the
+# tree because it is one define away from the ordinary build and a
+# checked-in second binary is a stale-artifact problem waiting to
+# happen. EXTRA_DEFS is the Makefile's hook, so this does not restate
+# -O3 -march=x86-64 and the TU defines and cannot drift from them.
+# If it will not build, the row SKIPs with its reason rather than
+# quietly leaving ref uncompared.
+EPI0_BIN=""
+EPI0_WBIN=""
+EPI0_DIR="$TMPD/epi0"
+mkdir -p "$EPI0_DIR"
+if tar -cf - --exclude=.git --exclude=.prof --exclude='*.o' \
+        --exclude='*.obj' --exclude='*.exe' . 2>/dev/null \
+        | tar -x -C "$EPI0_DIR" 2>/dev/null; then
+    if command -v gcc >/dev/null 2>&1; then
+        if ( cd "$EPI0_DIR" && rm -rf build/native \
+             && make EXTRA_DEFS=-DLZ_EPI_FIXED=0 -j4 ) \
+                >"$TMPD/epi0.gcc.log" 2>&1; then
+            for c in "$EPI0_DIR/llama98.exe" "$EPI0_DIR/llama98"; do
+                [ -x "$c" ] && EPI0_BIN=$c && break
+            done
+        fi
+        [ -n "$EPI0_BIN" ] || {
+            echo "note: gcc LZ_EPI_FIXED=0 build failed, epi row will SKIP"
+            tail -n 3 "$TMPD/epi0.gcc.log" 2>/dev/null | sed 's/^/      /'; }
+    else
+        echo "note: no gcc, epi row will SKIP"
+    fi
+    # Watcom control, for the cross-compiler block's x87 rows only.
+    if [ -x /c/WATCOM/binnt64/wcc386.exe ]; then
+        if ( cd "$EPI0_DIR" && rm -rf build/watcom/cli \
+             && make watcom-cli EXTRA_DEFS=-DLZ_EPI_FIXED=0 ) \
+                >"$TMPD/epi0.wat.log" 2>&1; then
+            for c in "$EPI0_DIR/llama98-w.exe" "$EPI0_DIR/llama98-w"; do
+                [ -x "$c" ] && EPI0_WBIN=$c && break
+            done
+        fi
+        [ -n "$EPI0_WBIN" ] || {
+            echo "note: Watcom LZ_EPI_FIXED=0 build failed, x87 rows will SKIP"
+            tail -n 3 "$TMPD/epi0.wat.log" 2>/dev/null | sed 's/^/      /'; }
+    fi
+else
+    echo "note: could not copy the tree, epi rows will SKIP"
+fi
+
+FLAGSETS="dflt:mmx:sse2:$RBIN:
+rot:mmx:sse2:$RBIN:--kv-rot on
+epi:ref:sse2:$EPI0_BIN:"
 
 FAIL=0
 PASS=0
@@ -125,11 +183,16 @@ for fx in zh en; do
         [ -n "$fs" ] || continue
         lbl=${fs%%:*};   rest=${fs#*:}
         ta=${rest%%:*};  rest=${rest#*:}
-        tb=${rest%%:*}
+        tb=${rest%%:*};  rest=${rest#*:}
+        rbin=${rest%%:*}
         flags=${rest#*:}
+        if [ -z "$rbin" ]; then
+            echo "SKIP: $fx / $lbl - its binary was not built"
+            continue
+        fi
         ok=1
         for k in "$ta" "$tb"; do
-            if ! "./$BIN" "$MODEL" --tokens-file "$TOK" --kernel "$k" \
+            if ! "$rbin" "$MODEL" --tokens-file "$TOK" --kernel "$k" \
                     $flags --dump-all-logits "$TMPD/$k.bin" \
                     >"$TMPD/$k.log" 2>&1; then
                 echo "FAIL: --kernel $k / $fx / $lbl did not run"
@@ -234,14 +297,26 @@ else
         echo "  cross-compiler: SKIP - fixture missing: $TOK"
     else
         n=0
+        # Two binaries per compiler now, not two flagsets on one: the
+        # `epi` rows turn the epilogue off through LZ_EPI_FIXED, a
+        # compile switch, because the runtime flag they used to use
+        # (--epi-write float) is gone with the other six per-tier flags.
+        # A missing control build SKIPs its rows rather than silently
+        # dropping the count check below.
         for cc in gcc wat; do
-            b=$BIN; [ "$cc" = wat ] && b=$WBIN
-            for spec in "ref:epi:--epi-write float" "mmx:dflt:" "sse2:dflt:" \
-                        "mmx:epi:--epi-write float" "sse2:epi:--epi-write float"; do
-                k=${spec%%:*};   r=${spec#*:}
-                lbl=${r%%:*};    flags=${r#*:}
-                if ! "./$b" "$MODEL" --tokens-file "$TOK" --kernel "$k" \
-                        $flags --dump-all-logits "$TMPD/x.$cc.$k.$lbl.bin" \
+            b=$RBIN; e=$EPI0_BIN
+            [ "$cc" = wat ] && { b="./$WBIN"; e=$EPI0_WBIN; }
+            for spec in "ref:epi" "mmx:dflt" "sse2:dflt" \
+                        "mmx:epi" "sse2:epi"; do
+                k=${spec%%:*};   lbl=${spec#*:}
+                rb=$b; [ "$lbl" = epi ] && rb=$e
+                if [ -z "$rb" ]; then
+                    echo "  cross-compiler: SKIP $cc / $k / $lbl -" \
+                         "no LZ_EPI_FIXED=0 build"
+                    continue
+                fi
+                if ! "$rb" "$MODEL" --tokens-file "$TOK" --kernel "$k" \
+                        --dump-all-logits "$TMPD/x.$cc.$k.$lbl.bin" \
                         >"$TMPD/x.$cc.$k.$lbl.log" 2>&1; then
                     echo "FAIL: $cc / --kernel $k / $lbl did not run"
                     tail -n 3 "$TMPD/x.$cc.$k.$lbl.log" | sed 's/^/      /'

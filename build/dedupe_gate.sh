@@ -107,6 +107,7 @@ check_one_in '^#define LZ_NORM_MAX_N '   'LZ_NORM_MAX_N'   src/ops.h
 check_one_in '^#define LZ_EPI_MAX_NG '   'LZ_EPI_MAX_NG'   src/ops.h
 check_one_in '^#define LZ_MM_WIDEN_MAX ' 'LZ_MM_WIDEN_MAX' src/ops.h
 check_one_in '^#define LZ_X87_FLOAT_CW ' 'LZ_X87_FLOAT_CW' src/ops.h
+check_one_in '^#define LZ_EPI_FIXED '    'LZ_EPI_FIXED'    src/ops.h
 check_one_in '^#define LZ_ATTN_MAX_HD '  'LZ_ATTN_MAX_HD'  src/ops.h
 
 # Renamed-copy check, separate from the count above: a name defined

@@ -34,14 +34,18 @@
 #   They do NOT owe it on an unpinned auto run, and that is not a
 #   defect: ref routes Q8_0 to matmul_scalar_ref, which has no fixed
 #   epilogue at all, structurally, regardless of any tier's value, while
-#   arm-c/arm-asm reach matmul_q8_impl where --epi-write's auto selects
+#   arm-c/arm-asm reach matmul_q8_impl where the epilogue selects
 #   epi_fixed - unconditionally now on every platform (the shipping
-#   build is fixed-point by default everywhere; auto no longer asks a
+#   build is fixed-point by default everywhere; nothing asks a
 #   per-platform hardware question - see
 #   docs/fixed-tier-pipeline-breakpoints.md), so ref and arm-c/arm-asm
-#   diverge on plain auto on x86 too, not only against an ARM target.
-#   Measured on _armgate2: ref differs from arm-c on auto and matches
-#   once --epi-write float is pinned. --epi-write is Q8_0-only on every
+#   diverge on the default on x86 too, not only against an ARM target.
+#   Measured on _armgate2: ref differs from arm-c by default and matches
+#   once the epilogue is off. That used to be `--epi-write float`, one
+#   of seven per-tier runtime flags; they collapsed into --fixed, and
+#   the epilogue's own axis is now the LZ_EPI_FIXED compile switch (see
+#   ops.h and build/kernel_isa_identity_gate.sh, which builds with it at
+#   0 for exactly this row). The epilogue is Q8_0-only on every
 #   platform, so a model without Q8_0 tensors shows no such split. See
 #   docs/arm-asm-audit.md section 1 (written before the tiers'
 #   auto-resolution changed; read its epilogue-routing claim, not its
@@ -52,14 +56,12 @@
 #   the tier actually run disagree; on an unpinned "auto" run there is
 #   no CLI arg to disagree with, so nothing gets printed.
 #
-#   --recur-write now accepts auto|float|fixed on the CLI (an explicit
-#   "float" string was added along with retiring auto's hardware
-#   question - see lz_gdn_p2_select in src/ops_sched.c and
-#   docs/fixed-tier-pipeline-breakpoints.md). Left on auto it resolves
-#   to fixed unconditionally, the same on x86 and on ARM - no more
-#   per-platform divergence to guard against on this axis by itself.
-#   lz_tier_pins() below still pins it explicitly to "fixed" anyway,
-#   consistent with pinning every other axis rather than trusting that
+#   The recurrence has no axis of its own any more: it resolves from
+#   --fixed like every other arithmetic site (see lz_float_ref_select in
+#   src/ops_sched.c and docs/fixed-tier-pipeline-breakpoints.md), fixed
+#   by default, the same on x86 and on ARM - no per-platform divergence
+#   to guard against on this axis by itself. lz_tier_pins() below still
+#   pins the whole engine explicitly anyway, rather than trusting that
 #   two builds' unpinned autos agree; --pin-tiers is the single source
 #   of the whole list, so this comment does not need to track it value
 #   by value.
@@ -276,22 +278,32 @@ fi
 X86_DUMP="$WORK/x86.logits"
 ARM_DUMP="$ARM_WORK/arm.logits"
 
-# ASKED FOR, not transcribed. Every AUTO-resolved tier must be pinned:
-# not because ARM and x86 disagree on what their own auto gives any
-# more (they do not - every tier's auto is unconditionally fixed on
-# both now, see docs/fixed-tier-pipeline-breakpoints.md), but because
-# this gate deliberately compares a specific, mostly-FLOAT configuration
-# (lz_tier_pins()'s own values, ops_sched.c) rather than the shipping
-# default, so that a real x86<->ARM divergence in the float fallback
-# arithmetic is not masked by both sides already agreeing on fixed. An
-# unpinned run would compare each side's own (now-agreeing) auto and
-# tell this gate nothing about the float paths it exists to check.
+# ASKED FOR, not transcribed. The configuration must be pinned: not
+# because ARM and x86 disagree on what they resolve to by default (they
+# do not - both are fixed everywhere, see
+# docs/fixed-tier-pipeline-breakpoints.md), but because this gate
+# deliberately compares the FLOAT arm (lz_tier_pins()'s own values,
+# ops_sched.c) rather than the shipping default, so that a real
+# x86<->ARM divergence in the float arithmetic is not masked by both
+# sides already agreeing on integer results that cannot differ. An
+# unpinned run would compare each side's default and tell this gate
+# nothing about the float paths it exists to check.
+#
+# WHAT THIS GATE NO LONGER COVERS, now that the seven per-tier flags
+# collapsed into --fixed: the pin string used to be a MIXED setting, so
+# each run exercised some fixed kernels and some float ones on both
+# targets at once. It is `--fixed off` now, a clean float arm. The fixed
+# side is not lost - it is integer arithmetic, so x86 and ARM must be
+# byte-identical on it and the shipping-default run in this gate's own
+# rows below is that comparison - but the two are separate rows now
+# rather than one blended one, and only the float row carries a
+# tolerance.
 #
 # The list is NOT a literal here, because a literal goes stale silently:
-# one that pinned only --kernel and --recur-write, against four more
+# one that pinned only --kernel and the recurrence, against four more
 # pinned knobs, made this gate report 94505 of 131072 bytes differing
 # for that reason alone. lz_tier_pins() in src/ops_sched.c is the single
-# home, so adding a knob updates this script with no edit here.
+# home, so changing the pins updates this script with no edit here.
 PINS=$("$X86_BIN" --pin-tiers) || {
     echo "FAIL: could not read --pin-tiers from $X86_BIN" >&2
     exit 1

@@ -159,196 +159,105 @@ int lz_q8r_tier(void) {
 }
 #endif /* LZ_HAVE_Q8R_SIMD || LZ_HAVE_Q8R_SSE */
 
-/* ---- GDN recurrence tier (--recur-write): BOTH passes ---------------- */
+/* ---- THE float knob -------------------------------------------------- */
 
-#define LZ_P2_FLOAT 0
-#define LZ_P2_FIXED 1
-#define LZ_P2_AUTO  2
-static int g_gdn_p2 = LZ_P2_AUTO;
+/* One axis for every fixed-point site the engine has. It used to be
+   seven - --recur-write, --conv-write, --attn-write, --epi-write,
+   --sig-write, --norm-write, --scalar-fixed - each with its own global,
+   selector and is_default, and --fixed off|all as a table-driven group
+   setter over the lot.
 
+   Seven axes could only ever buy MIXED settings, and mixing is the one
+   thing that measured worse than either end. Paired NLL over 1262
+   positions on kmr20/zh+en, one tier floated at a time against the
+   all-fixed default: six of the seven arms came out WORSE than both
+   all-fixed and all-float, and all-fixed against all-float is +3.49e-05
+   at t=0.01, i.e. the two ends are indistinguishable while every point
+   between them is measurably off. What the seven axes were selling was
+   a menu of ways to be worse.
+
+   So the knob that remains is the one the mixing was hiding: float or
+   fixed, whole engine, no in-between. Float exists as the arm you pin
+   when cross-checking operator precision against another
+   implementation - llama.cpp, HF transformers, vLLM, SGLang - which is
+   a measurement path, not a deployment choice. Nothing selects it
+   automatically on any platform.
+
+   NOT file-static: lz_scalar_mode is a macro in ops.h so that softmax's
+   per-element lz_exp does not pay a cross-TU call for its tier, and
+   that macro reads this. This file is still the only writer. */
+int lz_float_ref_g = 0;
+
+const char *lz_float_ref_select(const char *name) {
+    if (!name) return NULL;
+    if (strcmp(name, "all") == 0) lz_float_ref_g = 0;
+    else if (strcmp(name, "off") == 0) lz_float_ref_g = 1;
+    else return NULL;
+    return lz_float_ref_g ? "off" : "all";
+}
+
+int lz_float_ref(void) { return lz_float_ref_g; }
+
+/* ---- GDN recurrence tier: BOTH passes -------------------------------- */
+
+/* Pass 1 resolves from the same knob as pass 2, so the float arm is a
+   complete one for the recurrence: a pass-1 tier with no runtime value
+   would leave the float oracle running fixed arithmetic for the larger
+   of the two passes.
+
+   LZ_GDN_FIXED (ops.h) is the COMPILE switch deciding whether the fixed
+   bodies exist at all; this is the runtime one. Both must say yes. */
 int lz_gdn_p2_mode(void) {
 #if LZ_GDN_FIXED
-    if (g_gdn_p2 == LZ_P2_AUTO) return LZ_P2_FIXED;
-    return g_gdn_p2;
+    return !lz_float_ref_g;
 #else
     return 0;
 #endif /* LZ_GDN_FIXED */
 }
 
-/* Pass 1 reads the SAME selector as pass 2. One axis for the whole
-   recurrence, so --fixed off is a complete float arm for it: a pass-1
-   tier with no runtime value would leave the float oracle running fixed
-   arithmetic for the larger of the two passes. */
 int lz_gdn_mode(void) { return lz_gdn_p2_mode(); }
-
-int lz_gdn_p2_is_default(void) { return g_gdn_p2 == LZ_P2_AUTO; }
-
-const char *lz_gdn_p2_select(const char *name) {
-    if (!name) return NULL;
-    /* float used to have no explicit spelling here - auto asked
-       hardware and an SSE machine landed on float that way, so a caller
-       who wanted float explicitly had nothing to type. Auto no longer
-       asks hardware (see lz_soft_float_target's retirement note above),
-       so this value is what makes float reachable at all now - the
-       measurement/correctness-oracle path, not a deployment choice. */
-    if (strcmp(name, "float") == 0) g_gdn_p2 = LZ_P2_FLOAT;
-    else if (strcmp(name, "fixed") == 0) g_gdn_p2 = LZ_P2_FIXED;
-    else return NULL;
-    return lz_gdn_p2_mode() ? "fixed" : "float";
-}
 
 /* ---- conv1d tier ----------------------------------------------------- */
 
-#define LZ_CONV_FLOAT 0
-#define LZ_CONV_FIXEDT 1
-#define LZ_CONV_AUTO  2
-static int g_conv = LZ_CONV_AUTO;
-
 int lz_conv_mode(void) {
 #if LZ_CONV_FIXED
-    if (g_conv == LZ_CONV_AUTO) return LZ_CONV_FIXEDT;
-    return g_conv;
+    return !lz_float_ref_g;
 #else
     return 0;
 #endif /* LZ_CONV_FIXED */
 }
 
-int lz_conv_is_default(void) { return g_conv == LZ_CONV_AUTO; }
-
-const char *lz_conv_select(const char *name) {
-    if (!name) return NULL;
-    if (strcmp(name, "float") == 0) g_conv = LZ_CONV_FLOAT;
-    else if (strcmp(name, "fixed") == 0) g_conv = LZ_CONV_FIXEDT;
-    else return NULL;
-    return lz_conv_mode() ? "fixed" : "float";
-}
-
 /* ---- attention tier -------------------------------------------------- */
 
-/* The three low bits are the scoring/wsum bitmask; LZ_ATTN_TIER_INT sits
-   above them as a fourth VALUE on the same axis rather than a separate
-   boolean. The int output rides on the fixed wsum, so selecting it
-   selects that too - and "float + int", which used to be spellable and
-   silently inert, no longer is. */
-#define LZ_ATTN_TIER_INT 4
+/* Two questions, one answer. lz_attn_mode is the scoring/wsum bitmask
+   that the kernels branch on; lz_attn_int is whether the wsum hands its
+   int64 accumulator straight to lz_quantize_q8_int64 instead of
+   draining to float and letting the quantizer re-round. The int exit
+   rides on the fixed wsum, so they cannot disagree and no longer have
+   separate storage to disagree in.
 
-static int g_attn = -1;
+   The int exit was the last integer tier still off by default. Over
+   3786 paired positions (kmr20, kunmoe-v2-t2-probe, _armgate2 x zh+en)
+   it is +5.09e-04 at t=0.65 against the old default - indistinguishable
+   - for 8,064 fewer float ops per forward, of which the sigmoid row
+   alone drops 10,688 to 448. */
+int lz_attn_mode(void) { return lz_float_ref_g ? 0 : LZ_ATTN_FIXED; }
 
-int lz_attn_mode(void) {
-    int m = (g_attn < 0) ? 3 : ((g_attn == LZ_ATTN_TIER_INT) ? 3 : g_attn);
-    return m & LZ_ATTN_FIXED;
-}
-
-int lz_attn_is_default(void) { return g_attn < 0; }
-
-int lz_attn_int(void) { return g_attn == LZ_ATTN_TIER_INT; }
-
-const char *lz_attn_select(const char *name) {
-    if (!name) return NULL;
-    if (strcmp(name, "float") == 0) g_attn = 0;
-    else if (strcmp(name, "scoring") == 0) g_attn = 1;
-    else if (strcmp(name, "wsum") == 0) g_attn = 2;
-    else if (strcmp(name, "fixed") == 0) g_attn = 3;
-    else if (strcmp(name, "int") == 0) g_attn = LZ_ATTN_TIER_INT;
-    else return NULL;
-    if (lz_attn_int()) return "int";
-    switch (lz_attn_mode()) {
-        case 1:  return "scoring";
-        case 2:  return "wsum";
-        case 3:  return "fixed";
-        default: return "float";
-    }
-}
+int lz_attn_int(void) { return !lz_float_ref_g; }
 
 /* ---- sigmoid/silu tier ----------------------------------------------- */
 
-static int g_sig = -1;
-
-int lz_sig_mode(void) {
-    return (g_sig < 0) ? 1 : g_sig;
-}
-
-int lz_sig_is_default(void) { return g_sig < 0; }
-
-const char *lz_sig_select(const char *name) {
-    if (!name) return NULL;
-    if (strcmp(name, "float") == 0) g_sig = 0;
-    else if (strcmp(name, "fixed") == 0) g_sig = 1;
-    else return NULL;
-    return lz_sig_mode() ? "fixed" : "float";
-}
-
-/* ---- scalar tier ----------------------------------------------------- */
-
-/* Used to be the one axis whose auto ignored hardware (commit 508e015)
-   while the other six asked lz_soft_float_target - an odd one out, and
-   worth a warning at the CLI (cli_main.c's own note that "pass no flags"
-   was not a float baseline). That asymmetry is gone: lz_soft_float_target
-   is retired and every one of the seven tiers now has exactly this
-   shape, `(g_X < 0) ? 1 : g_X`. Kept as its own section rather than
-   folded into a shared helper - it is one line, and a helper would only
-   hide that this was already the answer six other places needed to
-   copy, not the other way round. */
-/* NOT file-static, unlike its eleven siblings: lz_scalar_mode is a
-   macro in ops.h so that softmax's per-element lz_exp does not pay a
-   cross-TU call for it. This file is still its only writer. */
-int lz_scalar_g = -1;
-#define g_scalar lz_scalar_g
-
-int lz_scalar_is_default(void) { return g_scalar < 0; }
-
-const char *lz_scalar_select(const char *name) {
-    if (!name) return NULL;
-    if (strcmp(name, "float") == 0) g_scalar = 0;
-    else if (strcmp(name, "fixed") == 0) g_scalar = 1;
-    else return NULL;
-    return lz_scalar_mode() ? "fixed" : "float";
-}
+int lz_sig_mode(void) { return !lz_float_ref_g; }
 
 /* ---- norm tier ------------------------------------------------------- */
 
-/* TWO values, not three. `int` used to be the third, meaning "the fixed
-   tier writes its Q15 result as int instead of dequantizing it and
-   letting the consumer requantize". It is gone as a SELECTABLE value
-   because there is nothing left to select between: on the gated norms
-   the two spellings are bit-identical (the dequantize/requantize pair
-   cancels - proof at lz_quantize_q8_int), and on the plain norm the int
-   form is ~9.5x cheaper per element on the target and is the same
-   float-to-fixed call the user already settled for every other write
-   tier. A knob whose one setting is never worth choosing is a knob that
-   only records history.
+/* lz_norm_int kept as its own name rather than folded into its call
+   sites: they read `lz_norm_int() && lz_norm_can_fixed(n) && ...`, and
+   the name is what tells a reader WHICH of the two fixed output loops
+   the branch selects - lz_norm_can_fixed alone would not. */
+int lz_norm_mode(void) { return !lz_float_ref_g; }
 
-   Float is not gone - `--norm-write float` still reaches the float
-   output loop, and that arm is the oracle, not an auto outcome. Same
-   shape as this file's lz_soft_float_target retirement note above. */
-/* FIXEDT, not FIXED: LZ_NORM_FIXED is the compile switch in ops.h that
-   decides whether the fixed bodies exist at all. Same collision
-   LZ_CONV_FIXEDT dodges above. */
-#define LZ_NORM_FLOAT  0
-#define LZ_NORM_FIXEDT 1
-
-static int g_norm = -1;
-
-int lz_norm_mode(void) {
-    return (g_norm < 0) ? 1 : (g_norm != LZ_NORM_FLOAT);
-}
-
-int lz_norm_is_default(void) { return g_norm < 0; }
-
-/* Kept as the one place that says "the fixed tier writes int", now
-   answered by the tier itself. Not folded into its call sites: they
-   read `lz_norm_int() && lz_norm_can_fixed(n) && ...`, and the name is
-   what tells a reader WHICH of the two fixed output loops the branch
-   selects - lz_norm_can_fixed alone would not. */
 int lz_norm_int(void) { return lz_norm_mode(); }
-
-const char *lz_norm_select(const char *name) {
-    if (!name) return NULL;
-    if (strcmp(name, "float") == 0) g_norm = LZ_NORM_FLOAT;
-    else if (strcmp(name, "fixed") == 0) g_norm = LZ_NORM_FIXEDT;
-    else return NULL;
-    return lz_norm_mode() ? "fixed" : "float";
-}
 
 /* LZ_NORM_MAX_N: ops.h. */
 
@@ -433,20 +342,23 @@ const char *lz_hadamard_select(const char *name) {
 
 /* ---- epilogue tier --------------------------------------------------- */
 
-static int g_epi = -1;
-
+/* LZ_EPI_FIXED is the compile switch, the same shape LZ_GDN_FIXED and
+   LZ_CONV_FIXED have. It exists because --kernel ref structurally has
+   no fixed epilogue - lz_matmul_xq_nt routes LZ_KERNEL_REF to
+   matmul_scalar_ref before any epilogue is selected - so ref and sse2
+   differ on the shipping default for that one reason, and
+   build/kernel_isa_identity_gate.sh needs a build where they do not in
+   order to compare every OTHER fixed kernel against its C reference.
+   That used to be `--epi-write float`, a runtime flag; floating the
+   whole engine instead would take conv, norms, sigmoid, recurrence and
+   attention out of that comparison, which is the coverage the row is
+   there for. */
 int lz_epi_mode(void) {
-    return (g_epi < 0) ? 1 : g_epi;
-}
-
-int lz_epi_is_default(void) { return g_epi < 0; }
-
-const char *lz_epi_select(const char *name) {
-    if (!name) return NULL;
-    if (strcmp(name, "float") == 0) g_epi = 0;
-    else if (strcmp(name, "fixed") == 0) g_epi = 1;
-    else return NULL;
-    return lz_epi_mode() ? "fixed" : "float";
+#if LZ_EPI_FIXED
+    return !lz_float_ref_g;
+#else
+    return 0;
+#endif /* LZ_EPI_FIXED */
 }
 
 /* ---- prefetch selector ----------------------------------------------- */
@@ -590,58 +502,51 @@ const char *lz_kernel_tier(void) {
 
 /* ---- tier report and pin string -------------------------------------- */
 
-/* CROSS-PLATFORM pins: a fixed, deliberately mostly-float string for
-   build/arm/parity_gate.sh to compare one code path across x86 and ARM
-   with, not a report of what is running and not the auto resolution.
+/* CROSS-PLATFORM pins: the FLOAT arm, for comparing one code path
+   across SSE2 / SSE / MMX / x87 / ARMv5TE soft-float and across gcc and
+   Watcom. Not a report of what is running, and not the shipping
+   configuration.
 
-   NOT USABLE AS A SINGLE-PLATFORM REGRESSION PIN, on x86 or on ARM: auto
-   is now unconditionally fixed on every platform (lz_soft_float_target,
-   the per-platform hardware predicate this comment used to name, is
-   retired - see its own former site's note, still readable in this
-   file's history, and docs/fixed-tier-pipeline-breakpoints.md), so this
-   string's mostly-float values are guaranteed to differ from what EVERY
-   platform's auto now gives, everywhere, not just on the one platform a
-   stale version of this comment singled out. Pinning from here for a
-   regression run forces most tiers back to float and switches OFF the
-   very kernels a change may have touched. A regression run pinned from
-   this string once compared two builds with both new fixed kernels
-   disabled and looked clean. Regress on plain `auto` (now the same
-   fixed-everywhere answer on every platform), or pin the knob under test
-   explicitly; use this string only for the x86<->ARM comparison it
-   exists for. lz_tier_report() below is the one that reads live state. */
+   This string used to name seven separate tiers at a deliberately
+   mixed, mostly-float setting, which made it a pin for a configuration
+   that nothing shipped and no gate defaulted to. It is `--fixed off`
+   now for the same reason the seven axes collapsed to one: the float
+   arm is what a cross-implementation precision check needs, and any
+   setting between the two ends is neither the shipping engine nor a
+   clean oracle.
+
+   NOT USABLE AS A SINGLE-PLATFORM REGRESSION PIN. The shipping default
+   is fixed everywhere, so pinning from here switches OFF the very
+   kernels a change may have touched - a regression run pinned from this
+   string once compared two builds with both new fixed kernels disabled
+   and looked clean. Regress on the default, or pin `--fixed off`
+   explicitly when the float path is the thing under test. Cross-target
+   gates want BOTH arms: the fixed arm is integer and must match
+   bit-for-bit, the float arm is where rounding regimes are allowed to
+   differ and the tolerance lives. lz_tier_report() reads live state. */
 const char *lz_tier_pins(void) {
-    return "--kernel ref --recur-write fixed --conv-write float "
-           "--attn-write float --epi-write float --sig-write float "
-           "--norm-write float --scalar-fixed float --pair off "
-           "--prefetch none";
+    return "--kernel ref --fixed off --pair off --prefetch none";
 }
 
+/* Every arithmetic row resolves from one global, so they cannot
+   disagree and printing seven of them would be printing the same bit
+   seven times. They are still listed individually: the row names are
+   what a reader matches against a census row or a kernel-matrix cell,
+   and "the engine is in fixed mode" does not tell anyone that the
+   attention wsum is the thing feeding lz_quantize_q8_int64. */
 const char *lz_tier_report(void) {
     static char buf[512];
+    const char *t = lz_float_ref_g ? "float" : "fixed";
+    const char *d = lz_float_ref_g ? "" : " (default)";
     int p = 0;
-    p += sprintf(buf + p, "  recurrence   %s%s\n",
-                 lz_gdn_p2_mode() ? "fixed" : "float",
-                 lz_gdn_p2_is_default() ? " (default)" : "");
-    p += sprintf(buf + p, "  conv1d       %s%s\n",
-                 lz_conv_mode() ? "fixed" : "float",
-                 lz_conv_is_default() ? " (default)" : "");
+    p += sprintf(buf + p, "  recurrence   %s%s\n", t, d);
+    p += sprintf(buf + p, "  conv1d       %s%s\n", t, d);
     p += sprintf(buf + p, "  attention    %s%s\n",
-                 lz_attn_mode() == 3 ? "fixed" :
-                 lz_attn_mode() == 1 ? "scoring" :
-                 lz_attn_mode() == 2 ? "wsum" : "float",
-                 lz_attn_is_default() ? " (default)" : "");
-    p += sprintf(buf + p, "  epilogue     %s%s\n",
-                 lz_epi_mode() ? "fixed" : "float",
-                 lz_epi_is_default() ? " (default)" : "");
-    p += sprintf(buf + p, "  sigmoid/silu %s%s\n",
-                 lz_sig_mode() ? "fixed" : "float",
-                 lz_sig_is_default() ? " (default)" : "");
-    p += sprintf(buf + p, "  norms        %s%s\n",
-                 lz_norm_mode() ? "fixed" : "float",
-                 lz_norm_is_default() ? " (default)" : "");
-    p += sprintf(buf + p, "  scalar       %s%s\n",
-                 lz_scalar_mode() ? "fixed" : "float",
-                 lz_scalar_is_default() ? " (default)" : "");
+                 lz_float_ref_g ? "float" : "fixed+int", d);
+    p += sprintf(buf + p, "  epilogue     %s%s\n", t, d);
+    p += sprintf(buf + p, "  sigmoid/silu %s%s\n", t, d);
+    p += sprintf(buf + p, "  norms        %s%s\n", t, d);
+    p += sprintf(buf + p, "  scalar       %s%s\n", t, d);
     p += sprintf(buf + p, "  pairing      %s%s\n",
                  lz_pair_mode() ? "on" : "off",
                  lz_pair_is_auto() ? " (auto = on; no hardware question)"

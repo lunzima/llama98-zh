@@ -16,7 +16,7 @@
 #   quantized-rotates `--hadamard off` must change a QUANTIZED run.
 #   float-rotates     `--hadamard off` must change an UNQUANTIZED run.
 #
-# There is deliberately NO --norm-write assertion; see the note next to
+# There is deliberately NO norms-tier assertion; see the note next to
 # the plain model below for the one that was tried and thrown out.
 #
 # THE TWO ARE NOT EQUALLY STRONG, and saying so here is cheaper than
@@ -223,7 +223,7 @@ if [ -n "$PLAIN_MODEL" ] && [ -e "$PLAIN_MODEL" ]; then
             "use_subn - it has leaked outside the SubLN path"
     fi
 
-    # NO --norm-write ASSERTION HERE, and the reason is worth the lines.
+    # NO NORMS-TIER ASSERTION HERE, and the reason is worth the lines.
     # An obvious one to add is "int must equal fixed on a plain model",
     # which lz_norm_int claims. It passes on s1v3 - and it passes with
     # lz_quantize_q8_int mutated to a constant, which is how it was

@@ -114,6 +114,10 @@ echo "-- build: -DLZ_GDN_FIXED=0 --"
 build_one off "-DLZ_GDN_FIXED=0" || exit 2
 echo "-- build: -DLZ_NORM_FIXED=0 --"
 build_one nof "-DLZ_NORM_FIXED=0" || exit 2
+echo "-- build: -DLZ_CONV_FIXED=0 --"
+build_one cof "-DLZ_CONV_FIXED=0" || exit 2
+echo "-- build: -DLZ_EPI_FIXED=0 --"
+build_one eof "-DLZ_EPI_FIXED=0" || exit 2
 
 FAIL=0
 # run <binary-tag> <outfile-tag> <corpus> <flags...>
@@ -173,30 +177,40 @@ check_same "--fixed off vs norms compiled out / zh" fo_on_zh fo_nof_zh
 run_dump nof fo_nof_en "$TOK_EN" --fixed off
 check_same "--fixed off vs norms compiled out / en" fo_on_en fo_nof_en
 
-echo "-- rows 5-6: --recur-write float, ordinary vs -DLZ_GDN_FIXED=0 --"
-run_dump on  rw_on_zh  "$TOK_ZH" --recur-write float
-run_dump off rw_off_zh "$TOK_ZH" --recur-write float
-check_same "--recur-write float / zh" rw_on_zh rw_off_zh
-run_dump on  rw_on_en  "$TOK_EN" --recur-write float
-run_dump off rw_off_en "$TOK_EN" --recur-write float
-check_same "--recur-write float / en" rw_on_en rw_off_en
+echo "-- rows 5-6: --fixed off, runtime-off vs -DLZ_CONV_FIXED=0 --"
+run_dump cof fo_cof_zh "$TOK_ZH" --fixed off
+check_same "--fixed off vs conv1d compiled out / zh" fo_on_zh fo_cof_zh
+run_dump cof fo_cof_en "$TOK_EN" --fixed off
+check_same "--fixed off vs conv1d compiled out / en" fo_on_en fo_cof_en
 
-echo "-- rows 7-8: --norm-write float, ordinary vs -DLZ_NORM_FIXED=0 --"
-run_dump on  nw_on_zh  "$TOK_ZH" --norm-write float
-run_dump nof nw_nof_zh "$TOK_ZH" --norm-write float
-check_same "--norm-write float / zh" nw_on_zh nw_nof_zh
-run_dump on  nw_on_en  "$TOK_EN" --norm-write float
-run_dump nof nw_nof_en "$TOK_EN" --norm-write float
-check_same "--norm-write float / en" nw_on_en nw_nof_en
+echo "-- rows 7-8: --fixed off, runtime-off vs -DLZ_EPI_FIXED=0 --"
+run_dump eof fo_eof_zh "$TOK_ZH" --fixed off
+check_same "--fixed off vs epilogue compiled out / zh" fo_on_zh fo_eof_zh
+run_dump eof fo_eof_en "$TOK_EN" --fixed off
+check_same "--fixed off vs epilogue compiled out / en" fo_on_en fo_eof_en
 
-echo "-- rows 9-10: zero controls, one per runtime flag --"
+# ROWS 5-8 USED TO PAIR EACH -D WITH ITS OWN RUNTIME FLAG - --recur-write
+# float against -DLZ_GDN_FIXED=0, --norm-write float against
+# -DLZ_NORM_FIXED=0 - because "each -D removes exactly the tier it names"
+# needed a runtime arm that named the same tier and nothing else. The
+# seven per-tier flags are gone (ops.h, at lz_float_ref_select), so those
+# pairings are unspellable and, with one knob, redundant: rows 1-4
+# already run --fixed off against both builds. The rows were not
+# deleted, they were SPENT - the two freed slots now run the same
+# argument against the two compile switches that never had a row,
+# LZ_CONV_FIXED and LZ_EPI_FIXED. Four compile switches covered, up from
+# two.
+#
+# What the collapse does cost: a per-tier runtime arm was an independent
+# way to reach one tier, so a --fixed off that missed exactly one axis
+# used to be visible as "rows 1-2 pass, rows 5-6 fail". Now the only
+# instrument for that is the compile switch itself, which is why every
+# switch needs its own row and why adding a switch without adding one
+# here leaves it uncovered.
+
+echo "-- row 9: zero control --"
 run_dump on def_on_zh "$TOK_ZH"
 check_diff "ordinary build: --fixed off vs shipping default / zh" fo_on_zh def_on_zh
-# One control per runtime flag, not one for the pair: a --norm-write that
-# the binary ignored would leave rows 5-6 identical for the wrong reason,
-# and row 7 says nothing about it.
-check_diff "ordinary build: --norm-write float vs shipping default / zh" \
-    nw_on_zh def_on_zh
 
 if [ "$FAIL" -ne 0 ]; then
     echo "recur_write_float_arm_gate: FAIL"

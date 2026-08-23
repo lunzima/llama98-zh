@@ -9,8 +9,8 @@
 # path that replaced a float one, and each `=0` build keeps the replaced
 # float path alive as the arm its milestone measured against. Nothing
 # else executes those paths: the shipping default takes the int side and
-# the runtime tiers (--epi-write float et al.) turn off a different,
-# coarser thing. So a `=0` build is code that ran once, by hand, on the
+# --fixed off, the one runtime float knob, turns off a different and
+# much coarser thing. So a `=0` build is code that ran once, by hand, on the
 # day it was written - exactly the "configuration nobody happens to
 # build" this project keeps getting bitten by, one step further along
 # (it builds; nobody checks it still WORKS).
@@ -28,7 +28,7 @@
 # so a pinned expectation would be stale within a day and would then be
 # red for a reason that has nothing to do with the commit under test -
 # the failure mode build/fixed_tier_xcompiler_gate.sh spent weeks in
-# when --norm-write int was folded away and its row stayed. Each
+# when the norms tier's `int` value was folded away and its row stayed. Each
 # milestone checks its own arm's byte-identity at the time it lands;
 # this gate keeps the arm alive afterwards.
 #

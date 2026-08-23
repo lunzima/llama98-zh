@@ -16,9 +16,9 @@
 # the ARM branch is finished (2026-08-19), so it is a RESERVATION for
 # now - tracked as isa_floor.py's `x87` class (task #26), which stays a
 # reservation rather than an enforced floor for exactly this reason.
-# Do not infer soft-float coverage from the fixed-point tiers this
-# engine already has (--recur-write fixed etc.) - those exist for
-# cross-compiler bit-identity and have never been measured against a
+# Do not infer soft-float coverage from the fixed-point arithmetic this
+# engine already ships by default (--fixed all) - it exists for
+# cross-compiler bit-identity and has never been measured against a
 # target with no FPU at all.
 #
 # THE FLOOR IS -march=i586, MATCHING THAT FAMILY. Socket 7 is P5;
