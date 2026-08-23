@@ -296,6 +296,26 @@ itself lives outside this repo; what the tree evidences:
     little-endian, so a load path that assumes little-endian passes the entire
     rest of the suite, ARM bit-identity included.
 
+    **WHERE THE WEIGHT PATH'S ALIGNMENT ACTUALLY COMES FROM**, surveyed
+    2026-08-24 rather than assumed. `src/` holds 204 casts to a wider type; 111
+    are `(float *)xcalloc(...)` and alignment-free by construction. The other 93
+    reduce to a handful of operands — `w->q`, `t->q`, and the `w4`/`w2`/`pf_end`
+    the row kernels derive from them — and the whole surface then rests on ONE
+    invariant: every `q` plane comes from `malloc` (`model.c` 1232–1349, so the
+    base is fundamentally aligned), and every offset added before the cast is a
+    multiple of the target's size *because `gs` and `in_dim` are multiples of
+    32*. That is enforced, not hoped: `model.c:1167` rejects a non-multiple at
+    load, and `ops.c` 2373 / 2745 / 2754 / 2760 re-check it per format before
+    any kernel runs.
+
+    `-Wcast-align=strict` CANNOT audit this and must not be quoted as if it
+    had. It reports 9 sites, all `(LZTensor *)((char *)L + offsetof)` in
+    `model.c` — aligned by construction, false positives — and stays silent on
+    every real one, because the tree writes `(const int16_t *)(const void *)w->q`
+    and an intermediate `void *` silences the warning. An instrument that finds
+    only the benign cases is the always-green probe this project keeps
+    re-learning about.
+
 Two more, not numbered but enforced everywhere:
 
 - **A new feature turned off must be bit-identical to a build that never had
