@@ -1712,15 +1712,41 @@ static unsigned long long epi_shr_half_u(unsigned long long umag, int rs) {
    for the LLONG_MIN reason epi_align_i16's header gives; the result is
    below 2^63 for every rs >= 1 (widest is rs == 1, where
    (2^63 + 2^62) >> 1 < 2^63), so negating it back is representable. */
+   THE SIGN WORK IS BRANCHLESS, and the reason is the TARGET rather than
+   taste. Measured with gcov -b -c over kmr20/zh (603 tokens): the two
+   `neg ? :` ternaries were evaluated 144,472,859 times each with the
+   minority arm at 34.5% - near-coinflips in the dequant epilogue, the
+   census's second-largest row. A P5 has no branch predictor worth the
+   name and its default is not-taken, so a third of 289 million
+   evaluations mispredicted. Both are gone.
+
+   `mask` is 0 or all-ones from the SIGN BIT OF THE UNSIGNED VALUE -
+   `um >> 63` on an unsigned is fully defined, where `s >> 63` on a
+   signed would be implementation-defined - and (x ^ mask) - mask is
+   two's-complement abs on the way in and negate on the way out. Same
+   UB-free convention as the negations elsewhere in this file.
+
+   `s == 0` IS GONE, not moved: it was a fast path, not a special case.
+   At s == 0 the general path gives umag = 0, and epi_shr_half_u(0, rs)
+   is (0 + 2^(rs-1)) >> rs == 0 for every rs in 1..63 and 0 for rs >= 64,
+   so the answer was already 0. It cost one compare and bought nothing:
+   gcov puts that arm at 0.0%, i.e. it never fired on either fixture.
+
+   `rs <= 0` STAYS, and it is the 29.7% one - I had the two the wrong
+   way round until the post-change census said otherwise. It is not kept
+   for its share, it is LOAD-BEARING: at rs <= 0 with s == LLONG_MIN the
+   magnitude is 2^63, and converting that back with (long long) is
+   implementation-defined. Every rs >= 1 keeps the result under 2^63 (see
+   the header above), which is exactly what makes the general path safe
+   and the rs <= 0 case not. Removing it would be a correctness bug that
+   this model's data would never show. */
 static long long epi_shr_half(long long s, int rs) {
+    unsigned long long um = (unsigned long long)s;
+    unsigned long long mask = (unsigned long long)0 - (um >> 63);
     unsigned long long umag;
-    int neg;
-    if (rs <= 0 || s == 0) return s;
-    neg = (s < 0);
-    umag = neg ? (unsigned long long)0 - (unsigned long long)s
-               : (unsigned long long)s;
-    umag = epi_shr_half_u(umag, rs);
-    return neg ? -(long long)umag : (long long)umag;
+    if (rs <= 0) return s;
+    umag = epi_shr_half_u((um ^ mask) - mask, rs);
+    return (long long)((umag ^ mask) - mask);
 }
 
 static int32_t epi_align_i16(long long s, int e, int target_e, int bound) {
