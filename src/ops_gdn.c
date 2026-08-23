@@ -1401,7 +1401,21 @@ static int p2_group_norm(float c1, float c2, int16_t *mul4, float *sacc) {
    from the normalization, so multiplying by 2^sh and by L introduces no
    rounding of its own. Returns 0 when the group must be written as an
    exact zero - either the prologue flushed it (sacc == 0) or the new
-   scale itself falls under the floor. */
+   scale itself falls under the floor.
+
+   DO NOT FUSE THE TWO POWER-OF-TWO MULTIPLIES into pow2f(sh + 8). It
+   looks like the same free win the row-level 2^-8 hoist above is - two
+   exponent moves collapsing into one, one multiply per group saved,
+   about 12k a token on kmr20 - and it is exact everywhere except where
+   pow2f CLAMPS, which is where the two forms stop agreeing:
+     sh in [120, 127]    2^sh * 256 overflows to inf; pow2f(sh+8) clamps
+                         the exponent and returns 2^127
+     sh in [-134, -127]  pow2f(sh) is 0 so the product is 0;
+                         pow2f(sh+8) is a normal number
+   Both regions need a proven bound on sh to rule out, and there is not
+   one here - sh comes from p2_shift_of on live data. An unbounded fusion
+   that is exact "in practice" is how a scale silently becomes inf on the
+   one input nobody swept. */
 static int p2_group_scale(float sacc, int sh, float *os) {
     float s_new;
     if (!(sacc > 0.0f)) { *os = 1.0f; return 0; }
