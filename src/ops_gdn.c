@@ -1377,7 +1377,13 @@ static void p2_group_coef(float decs, float rs, float kv, float sd,
    land in that last half-step. -32768 would not need clamping, but the
    bound is kept symmetric: a one-sided bound reads like an oversight and
    gets "fixed" in the wrong direction later. */
-static int p2_group_norm(float c1, float c2, int16_t *mul4, float *sacc) {
+/* esac_out is the EXPONENT sacc was built from, handed out alongside the
+   float so p2_group_scale can fold two power-of-two factors into one
+   pow2f instead of multiplying them. Kept as a second output rather than
+   replacing sacc: the flush case signals itself through sacc == 0, and
+   an exponent has no spare value to mean that. */
+static int p2_group_norm(float c1, float c2, int16_t *mul4, float *sacc,
+                         int *esac_out) {
     float cm1 = (c1 < 0.0f) ? -c1 : c1;
     float cm2 = (c2 < 0.0f) ? -c2 : c2;
     float cmax = (cm1 > cm2) ? cm1 : cm2;
@@ -1402,13 +1408,14 @@ static int p2_group_norm(float c1, float c2, int16_t *mul4, float *sacc) {
        3e-26 next to activations of order 1. */
     if (!(cmax >= LZ_Q8_MIN_SCALE_F)) {
         mul4[0] = mul4[1] = mul4[2] = mul4[3] = 0;
-        *sacc = 0.0f;
+        *sacc = 0.0f; *esac_out = 0;
         return 0;
     }
     e  = expof(cmax);               /* cmax >= LZ_Q8_MIN_SCALE, so normal */
     p  = pow2f(14 - e);             /* exact */
     t1 = c1 * p;                    /* exact: multiply by a power of two */
     t2 = c2 * p;
+    *esac_out = e - 14;
     *sacc = pow2f(e - 14);          /* exact reciprocal of p */
     m1 = (t1 > -0.5f && t1 < 0.5f) ? 0 : q8_round(t1);
     m2 = (t2 > -0.5f && t2 < 0.5f) ? 0 : q8_round(t2);
@@ -1448,11 +1455,29 @@ static int p2_group_norm(float c1, float c2, int16_t *mul4, float *sacc) {
    the fused form is the same float and not merely a close one.
 
    (An earlier version of this comment said the bound did not exist. It
-   does; I had not read p2_shift_of.) */
-static int p2_group_scale(float sacc, int sh, float *os) {
+   does; I had not read p2_shift_of.)
+
+   THE REMAINING MULTIPLY GOES THE SAME WAY, but it needs a GUARD rather
+   than a bound, because the exponent it folds comes from live data.
+   sacc is pow2f(esac) by construction, so sacc * pow2f(sh + 8) is
+   2^(esac + sh + 8) - one pow2f, no multiply - EXCEPT where pow2f
+   clamps. The guard is epi_fixed's, one file over: take the fused form
+   only inside pow2f's normal range and fall back to the ORIGINAL
+   expression outside it, so the two are bit-identical everywhere by
+   construction rather than by an argument about reachability.
+
+   The two edges are already closed on the other side: esac < -126 makes
+   pow2f return 0, and sacc == 0 is the flush case that returns above;
+   esac > 127 makes pow2f clamp, and then ee > 127 takes the fallback.
+   So inside the fused branch both esac and ee are in range and the
+   identity is exact. */
+static int p2_group_scale(float sacc, int esac, int sh, float *os) {
     float s_new;
+    int ee;
     if (!(sacc > 0.0f)) { *os = 1.0f; return 0; }
-    s_new = sacc * pow2f(sh + LZ_GDN_LO_SHIFT);
+    ee = esac + sh + LZ_GDN_LO_SHIFT;
+    if (ee < -126 || ee > 127) s_new = sacc * pow2f(sh + LZ_GDN_LO_SHIFT);
+    else                       s_new = pow2f(ee);
     if (!(s_new >= LZ_Q8_MIN_SCALE_F)) { *os = 1.0f; return 0; }
     *os = s_new;
     return 1;
@@ -1495,9 +1520,10 @@ static void gdn_p2_group_fixed(const int8_t *ph,
     int16_t mul4[4];
     int32_t amax = 0;
     float sacc;
+    int esac;
     int j, sh = 0;
 
-    if (p2_group_norm(c1, c2, mul4, &sacc)) {
+    if (p2_group_norm(c1, c2, mul4, &sacc, &esac)) {
         int32_t m1 = mul4[0], m2 = mul4[1];
         for (j = 0; j < 32; j++) {
 #if LZ_GDN_STATE_2PLANE
@@ -1550,7 +1576,7 @@ static void gdn_p2_group_fixed(const int8_t *ph,
 #endif /* LZ_GDN_STATE_2PLANE */
         }
     }
-    if (!p2_group_scale(sacc, sh, os)) {
+    if (!p2_group_scale(sacc, esac, sh, os)) {
         for (j = 0; j < 32; j++) {
             oh[j] = 0;
 #if LZ_GDN_STATE_2PLANE
@@ -1600,6 +1626,7 @@ static void gdn_p2_row_simd(const int8_t *ph_row,
                                        below. */
 #endif /* !__WATCOMC__ */
     static float sacc[LZ_GDN_MAX_VD / 32];
+    static int   esac[LZ_GDN_MAX_VD / 32];
     static int   shv[LZ_GDN_MAX_VD / 32];
     static int16_t mul[LZ_GDN_MAX_VD / 32][4];
 #if !LZ_GDN_STATE_2PLANE
@@ -1619,7 +1646,7 @@ static void gdn_p2_row_simd(const int8_t *ph_row,
     for (gg = 0; gg < ng; gg++) {
         float c1, c2;
         p2_group_coef(decs, rs_in[gg], kv, s_dg[gg], &c1, &c2);
-        p2_group_norm(c1, c2, mul[gg], &sacc[gg]);
+        p2_group_norm(c1, c2, mul[gg], &sacc[gg], &esac[gg]);
     }
 
     /* PHASE 2 - integer and MMX only, NO x87 anywhere in this loop.
@@ -1729,7 +1756,7 @@ static void gdn_p2_row_simd(const int8_t *ph_row,
        case and produced zeros anyway, but relying on that would be
        relying on an accident. */
     for (gg = 0; gg < ng; gg++)
-        if (!p2_group_scale(sacc[gg], shv[gg], rs_out + gg))
+        if (!p2_group_scale(sacc[gg], esac[gg], shv[gg], rs_out + gg))
             for (j = 0; j < 32; j++) {
                 oh_row[gg * 32 + j] = 0;
 #if LZ_GDN_STATE_2PLANE
@@ -1964,9 +1991,13 @@ static void gdn_p2_fixed_rows(const int8_t *sq_in, int8_t *sq_out,
            billing only inside gdn_p2_row_simd would read zero on
            --kernel ref, where p2_tier()==0 takes the scalar path only.
            coef 2 mul (was 3; the 2^-8 moved to the row, +1 below); norm
-           2 mul + 2 q8_round(add); scale 1 mul (was 2; the two
-           power-of-two factors fused - see p2_group_scale). */
-        LZ_FCX(LZ_FC_RECUR, 5 * ng + 1, 2 * ng, 0, 0, 0);
+           2 mul + 2 q8_round(add); scale 0 mul (was 2: both
+           power-of-two factors are folded into one pow2f now, which
+           bills nothing - see p2_group_scale). The fallback arm outside
+           pow2f's range still spends one, and is not billed: it is
+           unreachable on every input measured and billing a branch by
+           its worst case would overstate every row that has one. */
+        LZ_FCX(LZ_FC_RECUR, 4 * ng + 1, 2 * ng, 0, 0, 0);
 #ifdef LZ_HAVE_P2_MMX
         if (p2_tier()) {
             gdn_p2_row_simd(row_in,
