@@ -80,7 +80,15 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 case "$ARCH" in
     be) TRIPLE=mips-linux-gnu ;;
     le) TRIPLE=mipsel-linux-gnu ;;
-    *)  echo "build_engine.sh: ARCH must be 'be' or 'le', got '$ARCH'" >&2
+    # HOST: the same source built by the host's own gcc, as a
+    # little-endian arm for hosts where gcc-14-mipsel-linux-gnu is not
+    # installed. endian_gate.sh's header says what that costs - the arms
+    # then differ in compiler and architecture as well as byte order.
+    # It is here rather than in the gate so both arms still come from ONE
+    # build recipe; a second recipe for the fallback would be the second
+    # copy that always drifts.
+    host) TRIPLE=host ;;
+    *)  echo "build_engine.sh: ARCH must be 'be', 'le' or 'host', got '$ARCH'" >&2
         exit 2 ;;
 esac
 
@@ -90,6 +98,9 @@ if [ -n "${LZ_MIPS_XTC:-}" ]; then
     export PATH LD_LIBRARY_PATH
 fi
 
+if [ -z "${CC:-}" ] && [ "$TRIPLE" = host ]; then
+    command -v gcc >/dev/null 2>&1 && CC=gcc
+fi
 if [ -z "${CC:-}" ]; then
     for cand in "$TRIPLE-gcc-14" "$TRIPLE-gcc"; do
         if command -v "$cand" >/dev/null 2>&1; then CC=$cand; break; fi

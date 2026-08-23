@@ -87,11 +87,48 @@ fi
 
 CC_BE=$(find_cc mips-linux-gnu   || true)
 CC_LE=$(find_cc mipsel-linux-gnu || true)
+
+# LE ARM FALLBACK: the native x86 binary.
+#
+# The two-MIPS-arm design exists so the ONLY difference between the arms
+# is byte order - same compiler, same source, same libc. It is the right
+# comparison and it is what this gate does when both cross compilers are
+# there. But a host with only the BE package installed then checks
+# NOTHING, forever, and "byte-order portability goes unverified" is a
+# worse outcome than a comparison with a stated confound.
+#
+# So: if the LE cross compiler is absent and a native build is present,
+# the native binary becomes the LE arm. What that costs is written into
+# the PASS line and into this comment rather than left for someone to
+# discover - the arms then differ in COMPILER and LIBC as well as in
+# byte order, so a FAIL cannot be attributed to byte order without
+# further work. A PASS still means what it always meant: no byte-order
+# bug, because a load path that assumed little-endian could not produce
+# the same logits on a big-endian machine.
+#
+# KERNELS is already pinned to `ref` (see its default above), which is
+# what makes the fallback possible at all: the MIPS build has no MMX or
+# SSE tiers, so an unpinned comparison against an x86 default of sse2
+# would differ for a reason that is not byte order. Measured while
+# adding this: unpinned, 6,023,238 of 8,257,536 bytes differ; pinned to
+# ref, byte-swapped BE and LE are identical.
+# It is built HERE, by ARCH=host through the same build_engine.sh the
+# MIPS arms use - not borrowed from the repo root. The root binary on a
+# Windows host is a .exe that cannot resolve the /mnt/... paths this
+# script hands it, which is how the first version of this fallback
+# failed: three models "not found" on the LE arm and loaded fine on BE.
+NATIVE_LE=""
+if [ -z "$CC_LE" ] && command -v gcc >/dev/null 2>&1; then
+    NATIVE_LE=host
+fi
+
 missing=""
 [ -n "$CC_BE" ] || missing="$missing gcc-14-mips-linux-gnu(BE)"
-[ -n "$CC_LE" ] || missing="$missing gcc-14-mipsel-linux-gnu(LE)"
 command -v qemu-mips-static   >/dev/null 2>&1 || missing="$missing qemu-mips-static"
-command -v qemu-mipsel-static >/dev/null 2>&1 || missing="$missing qemu-mipsel-static"
+if [ -z "$NATIVE_LE" ]; then
+    [ -n "$CC_LE" ] || missing="$missing gcc-14-mipsel-linux-gnu(LE)-or-a-native-build"
+    command -v qemu-mipsel-static >/dev/null 2>&1 || missing="$missing qemu-mipsel-static"
+fi
 if [ -n "$missing" ]; then
     echo "endian-gate: SKIP - missing:$missing"
     echo "  Nothing was checked. Byte-order portability of the model"
@@ -105,19 +142,36 @@ if [ -n "$missing" ]; then
 fi
 
 VER_BE=$($CC_BE -dumpfullversion 2>/dev/null || $CC_BE -dumpversion)
-VER_LE=$($CC_LE -dumpfullversion 2>/dev/null || $CC_LE -dumpversion)
 echo "-- toolchain --"
 echo "  BE $CC_BE  $VER_BE"
-echo "  LE $CC_LE  $VER_LE"
-if [ "$VER_BE" != "$VER_LE" ]; then
-    bad "compiler versions differ ($VER_BE vs $VER_LE) - a byte mismatch"
-    echo "     below could be the compilers, not the engine. Install a"
-    echo "     matched pair before believing any DIFFER line."
+if [ -n "$NATIVE_LE" ]; then
+    # No version comparison to make: the LE arm is a different compiler
+    # on a different architecture by construction, which the fallback
+    # banner above already says. Running the matched-pair check here
+    # anyway would print a FAIL for the thing the fallback IS.
+    echo "  LE (native build, no MIPS LE compiler installed)"
+else
+    VER_LE=$($CC_LE -dumpfullversion 2>/dev/null || $CC_LE -dumpversion)
+    echo "  LE $CC_LE  $VER_LE"
+    if [ "$VER_BE" != "$VER_LE" ]; then
+        bad "compiler versions differ ($VER_BE vs $VER_LE) - a byte mismatch"
+        echo "     below could be the compilers, not the engine. Install a"
+        echo "     matched pair before believing any DIFFER line."
+    fi
 fi
 
 # ---- build both arms ----------------------------------------------------
 rm -rf "$W"; mkdir -p "$W"
-for a in be le; do
+ARMS="be le"
+if [ -n "$NATIVE_LE" ]; then
+    ARMS="be host"
+    echo "-- LE arm is a HOST build, not a MIPS one --"
+    echo "   gcc-14-mipsel-linux-gnu is absent, so the two arms differ in"
+    echo "   compiler and libc as well as in byte order. A PASS still"
+    echo "   rules out a byte-order bug; a FAIL would need the LE cross"
+    echo "   compiler installed before it could be attributed."
+fi
+for a in $ARMS; do
     echo "-- cross-building $a --"
     if ! ARCH=$a OUT="$W/$a" bash "$ROOT/build/mips/build_engine.sh" \
             >"$W/$a.build.log" 2>&1; then
@@ -133,9 +187,16 @@ done
 # compare equal and the gate would report PASS for a tree with no
 # byte-order handling at all.
 be_kind=$(file "$W/be/llama98-mips")
-le_kind=$(file "$W/le/llama98-mips")
 case "$be_kind" in *MSB*) ;; *) bad "the BE build is not MSB: $be_kind" ;; esac
-case "$le_kind" in *LSB*) ;; *) bad "the LE build is not LSB: $le_kind" ;; esac
+# The LE arm is still checked for LSB when it is the MIPS one. When it is
+# the native fallback the check moves rather than disappearing: the host
+# this runs on is x86 or amd64, both LSB, so asserting it would be
+# asserting the host - and the BE assertion above is the one that
+# carries the information either way.
+if [ -z "$NATIVE_LE" ]; then
+    le_kind=$(file "$W/le/llama98-mips")
+    case "$le_kind" in *LSB*) ;; *) bad "the LE build is not LSB: $le_kind" ;; esac
+fi
 [ "$FAIL" -eq 0 ] || { echo "endian_gate: FAIL"; exit 1; }
 
 # ---- run and compare ----------------------------------------------------
@@ -162,9 +223,15 @@ for m in $MODELS; do
         qemu-mips-static   "$W/be/llama98-mips" "$m" --kernel "$k" \
             --tokens "$TOK" --dump-logits "$W/$name.$k.be.raw" \
             >"$W/$name.$k.be.log" 2>&1 || rc_be=$?
-        qemu-mipsel-static "$W/le/llama98-mips" "$m" --kernel "$k" \
-            --tokens "$TOK" --dump-logits "$W/$name.$k.le.bin" \
-            >"$W/$name.$k.le.log" 2>&1 || rc_le=$?
+        if [ -n "$NATIVE_LE" ]; then
+            "$W/host/llama98-mips" "$m" --kernel "$k" \
+                --tokens "$TOK" --dump-logits "$W/$name.$k.le.bin" \
+                >"$W/$name.$k.le.log" 2>&1 || rc_le=$?
+        else
+            qemu-mipsel-static "$W/le/llama98-mips" "$m" --kernel "$k" \
+                --tokens "$TOK" --dump-logits "$W/$name.$k.le.bin" \
+                >"$W/$name.$k.le.log" 2>&1 || rc_le=$?
+        fi
 
         # A crash and a wrong number are different failures, and so are
         # "one arm died" and "neither arm can read this model at all".
