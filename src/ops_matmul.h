@@ -82,8 +82,10 @@ float epi_q8(const int32_t *accb, const float *xsb, const float *ws,
              int ng, int r, float post);
 float epi_q41(const int32_t *accb, const float *xsb, const float *xgb,
               const float *wd, const float *wm, int ng, int r);
+/* `pe` is lz_epi_post_e(w), hoisted to the caller's row loop - see the
+   note at the definition for why it is not read inside. */
 float epi_fixed(const int32_t *accb, const LZTensor *w, int row,
-                int tk, int ng, int r);
+                int tk, int ng, int r, int pe);
 /* int-pipeline milestone 2 (docs/int-pipeline-project.md #2.1): both of
    epi_q41's terms joined in the integer domain, one float materialized
    per output element. `ng`/`r` are epi_q41's own convention (ng =

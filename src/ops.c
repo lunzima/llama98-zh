@@ -1801,9 +1801,18 @@ int lz_epi_post_e(const LZTensor *w) {
     }
 }
 
+/* `pe` IS A PARAMETER, not a lz_epi_post_e(w) call in here, because this
+   function runs once per output element and that value depends only on
+   w->dtype. It was a call plus a switch on every one of 59,904 elements
+   per token on kmr20 - the dequant epilogue is the census's second
+   largest row - for an answer the caller already had before it entered
+   its row loop. Not a float op, so the census cannot see it; on a P5,
+   which is the target, a call and a switch per element is not nothing.
+   `e` cannot be hoisted the same way and is not: it is
+   -g_epi_xe[tk] - w->sexp[row], genuinely per element. */
 float epi_fixed(const int32_t *accb, const LZTensor *w, int row,
-                       int tk, int ng, int r) {
-    int e, pe = lz_epi_post_e(w);
+                       int tk, int ng, int r, int pe) {
+    int e;
     long long s = epi_fixed_raw(accb, w, row, tk, ng, r, &e);
     /* The kernels' scaling is a power of two, so pow2f(e) * 2^pe is
        pow2f(e + pe) and folding it into the exponent drops a multiply.

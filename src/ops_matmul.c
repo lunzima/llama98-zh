@@ -353,7 +353,8 @@ void matmul_q8_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
         }
         for (tk = 0; tk < nt; tk++)
             out->o[(size_t)tk * out_dim + i] = fixed_epi
-                ? epi_fixed(g_acc32 + (size_t)tk * nb, w, i, tk, nb, r)
+                ? epi_fixed(g_acc32 + (size_t)tk * nb, w, i, tk, nb, r,
+                            post_e)
                 : epi_q8(g_acc32 + (size_t)tk * nb, xqs + (size_t)tk * nb,
                          ws, nb, r, post);
     }
@@ -1426,7 +1427,8 @@ void matmul_q16_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
         }
         for (tk = 0; tk < nt; tk++)
             out->o[(size_t)tk * out_dim + i] = fixed_epi
-                ? epi_fixed(g_acc32 + (size_t)tk * ng, w, i, tk, ng, r)
+                ? epi_fixed(g_acc32 + (size_t)tk * ng, w, i, tk, ng, r,
+                            post_e)
                 : epi_q8(g_acc32 + (size_t)tk * ng, xqs + (size_t)tk * ng,
                          ws, ng, r, post);
     }
