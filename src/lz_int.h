@@ -50,13 +50,6 @@ typedef unsigned __int64   lz_u64;
  * print a 64-bit counter use LZ_PRI64 rather than embedding either. */
 #define LZ_PRI64 "I64"
 
-/* `restrict` is C99 and 26 declarations across twelve files use it. It
- * is an OPTIMISER HINT, so defining it away costs nothing but the hint;
- * it is not part of any interface's meaning. Legal to macro here
- * precisely because the compilers that need this are the ones where the
- * word is not a keyword. */
-#define restrict
-
 #else
 
 #include <stdint.h>
@@ -65,5 +58,23 @@ typedef unsigned long long lz_u64;
 #define LZ_PRI64 "ll"
 
 #endif /* _MSC_VER < 1600 */
+
+/* `restrict` is C99 and 26 declarations across twelve files use it, so
+ * a compiler without it does not merely lose the hint - it fails to
+ * parse the declaration. OUTSIDE the branch above because the question
+ * is the LANGUAGE version, not the vendor: gcc invoked as -std=c89 has
+ * the same problem as a 1995 compiler, and gcc is the only one here
+ * that can be asked.
+ *
+ * gcc keeps the hint through __restrict; anyone else loses it, which
+ * costs nothing but the hint - restrict is an optimiser annotation, not
+ * part of any interface's meaning. */
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L
+/* C99 or later: restrict is a keyword. */
+#elif defined(__GNUC__)
+#define restrict __restrict
+#else
+#define restrict
+#endif
 
 #endif /* LZ_INT_H */
