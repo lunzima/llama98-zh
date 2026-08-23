@@ -29,16 +29,7 @@
                            first use is well before any of the ops_kernel_*.h
                            #includes below. */
 
-/* GDN pass-1 tier default. Defined here, not next to the kernels,
-   because lz_gdn_mode() sits far above them and `#if LZ_GDN_FIXED` on
-   an UNDEFINED macro is silently 0 - which made the accessor return
-   "float" always AND, through it, disabled the fixed path outright.
-   The knob's two settings then produced identical logits, i.e. it
-   looked numerics-neutral instead of broken. A knob whose effect is
-   not observable is indistinguishable from a knob that does nothing. */
-#ifndef LZ_GDN_FIXED
-#define LZ_GDN_FIXED 1
-#endif /* LZ_GDN_FIXED */
+/* LZ_GDN_FIXED is in ops.h now, with the note that used to live here. */
 
 #include "ops_quant.h"   /* pow2f, q8_round, q8_amax, sigmoid_q15,
                            sigmoid_q15_t, lz_sig_q15_fold,
@@ -247,8 +238,7 @@ float lz_silu(float x) {
    32-bit build that opts into SSE scalar float correctly skip this and
    fall to the same "already has float semantics" no-op Watcom's
    comment describes for gcc in general. */
-#if defined(__i386__) && !defined(__SSE_MATH__) && !defined(__SSE2_MATH__)
-#define LZ_X87_FLOAT_CW 1
+#if defined(LZ_X87_FLOAT_CW)   /* the detect is in ops.h, once */
 /* lz_x87_cw_get/_set defined in ops_quant.c. */
 extern unsigned short lz_x87_cw_get(void);
 extern void lz_x87_cw_set(unsigned short cw);
@@ -1207,8 +1197,7 @@ int lz_cpu_has_mmx(void) { return 0; }
 
 /* Derived bound for the fixed epilogue: per group the product is
    |acc| * |xw*ww| <= 2^27 * 2^30, so ng of them stay inside
-   int64 while ng <= 64. */
-#define LZ_EPI_MAX_NG 64
+   int64 while ng <= 64. Value in ops.h; the derivation stays here. */
 
 int lz_epi_ready(const LZTensor *w) { return w && w->sq && w->sexp; }
 int lz_epi_zero_ready(const LZTensor *w) { return w && w->zq && w->zexp; }
@@ -1370,9 +1359,9 @@ static long long lz_epi_mac(const int32_t *a, const int32_t *m, int n) {
    static is safe. */
 
 /* Cap for the activation pre-expansion buffers (element count).
-   Defined here as well as in ops_matmul.c, because lz_matmul_xq_nt
-   checks it. */
-#define LZ_MM_WIDEN_MAX 4096
+   Value in ops.h - this used to say "defined here as well as in
+   ops_matmul.c, because lz_matmul_xq_nt checks it", which is a
+   description of the duplication rather than a reason for it. */
 
 /* ---- prefetch (lever J) ------------------------------------------------
    LZ_PF_DIST, LZ_PFI_LOAD/NTA/AMD/NONE and the lz_pf_load/lz_pf_nta/

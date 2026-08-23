@@ -14,9 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifndef LZ_GDN_FIXED
-#define LZ_GDN_FIXED 1
-#endif /* LZ_GDN_FIXED */
+/* LZ_GDN_FIXED, LZ_ATTN_MAX_HD: ops.h, included below. */
 
 #include "ops.h"
 #include "err.h"
@@ -63,9 +61,12 @@
    logit-difference metric saturates, so "this error is 200x that one"
    says nothing about which output is better (section 6.1). */
 #if LZ_ATTN_FIXED
-/* Largest head_dim served by this path. 256 covers the 0.8B; anything
-   larger falls back to the float loops rather than truncating. */
-#define LZ_ATTN_MAX_HD 256
+/* LZ_ATTN_MAX_HD comes from ops.h, which this file already includes.
+   It used to be redefined here to the same 256 - legal C, because an
+   identical redefinition is allowed, and therefore silent until someone
+   changed one copy. The comment three lines below has said "a constant
+   duplicated across that TU boundary is a failure mode" the whole time,
+   about a different constant. */
 /* LZ_WSUM_CHUNK, LZ_SLOT_NEXT: defined in src/ops_kernel_shared.h.
    src/ops_mmx.c's lz_wsum_group_mmx walks the exact same ring buffer
    in the exact same chunks, and a constant duplicated across that TU

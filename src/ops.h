@@ -637,6 +637,51 @@ int lz_sig_is_default(void);
 #define LZ_NORM_FIXED 1
 #endif /* LZ_NORM_FIXED */
 
+/* GDN pass-1 tier default. IN THE HEADER FOR THE SAME REASON
+   LZ_NORM_FIXED and LZ_CONV_FIXED are, and it took four copies to get
+   here: ops.c, ops_gdn.c, ops_matmul.c and ops_sched.c each carried
+   their own `#ifndef LZ_GDN_FIXED / #define 1`. All four agreed, so
+   nothing was wrong - and nothing would have SAID anything if one had
+   been edited and the others not, because each TU only ever sees its
+   own. build/dedupe_gate.sh now asserts the single definition.
+
+   ops.c's original note, kept because it is the reason the default is
+   spelled out at all rather than left to `#if` on an undefined macro:
+   `#if LZ_GDN_FIXED` on an UNDEFINED macro is silently 0, which made
+   lz_gdn_mode() return "float" always AND, through it, disabled the
+   fixed path outright. The knob's two settings then produced identical
+   logits - it looked numerics-neutral instead of broken. A knob whose
+   effect is not observable is indistinguishable from a knob that does
+   nothing. */
+#ifndef LZ_GDN_FIXED
+#define LZ_GDN_FIXED 1
+#endif /* LZ_GDN_FIXED */
+
+/* Sizing constants that were also once per-TU, and these are the ones
+   where drift is not a style problem: each bounds a STATIC ARRAY, so
+   two TUs disagreeing is a buffer one side thinks is longer than the
+   other side allocated. All were 4096 / 64 / 4096 in every copy.
+     LZ_NORM_MAX_N    ops_norm.c, ops_quant.c, ops_sched.c
+     LZ_EPI_MAX_NG    ops.c, ops_matmul.c
+     LZ_MM_WIDEN_MAX  ops.c, ops_matmul.c */
+#ifndef LZ_NORM_MAX_N
+#define LZ_NORM_MAX_N 4096
+#endif /* LZ_NORM_MAX_N */
+#ifndef LZ_EPI_MAX_NG
+#define LZ_EPI_MAX_NG 64
+#endif /* LZ_EPI_MAX_NG */
+#ifndef LZ_MM_WIDEN_MAX
+#define LZ_MM_WIDEN_MAX 4096
+#endif /* LZ_MM_WIDEN_MAX */
+
+/* x87 precision-control availability, one detect instead of two. ops.c
+   and ops_quant.c each ran this same three-condition test; they are the
+   same test, and a target where they answered differently would have
+   one file saving the control word and the other not. */
+#if defined(__i386__) && !defined(__SSE_MATH__) && !defined(__SSE2_MATH__)
+#define LZ_X87_FLOAT_CW 1
+#endif /* x87 float control word */
+
 /* The gated norm's sigmoid reads the INTEGER coordinate.
    lz_rmsnorm_gated_out_fixed_int already quantizes the gate to Q15 (qg
    at exponent eg) for its product chain, and then reached sigmoid_q15

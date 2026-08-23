@@ -20,14 +20,11 @@
 
 #include "ops_kernel_amax.h"  /* dispatch table for q8_amax */
 
-#ifndef LZ_NORM_MAX_N
-#define LZ_NORM_MAX_N 4096
-#endif /* LZ_NORM_MAX_N */
+/* LZ_NORM_MAX_N: ops.h. */
 
 /* ---- x87 precision control ------------------------------------------- */
 
-#if defined(__i386__) && !defined(__SSE_MATH__) && !defined(__SSE2_MATH__)
-#define LZ_X87_FLOAT_CW 1
+#if defined(LZ_X87_FLOAT_CW)   /* the detect is in ops.h, once */
 /* fnstcw/fldcw directly, not a libc wrapper: this project's other 32-bit
    x86 targets (DOS, Win9x) have no libc guaranteed to carry one, and
    the instructions need no library at all. PC is control-word bits

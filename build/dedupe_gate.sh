@@ -61,6 +61,54 @@ check_one '^#define LZ_SLOT_NEXT'        'LZ_SLOT_NEXT'
 check_one '^static void gdn_tail_row('   'gdn_tail_row'
 check_one '^static int p2_shift_of('     'p2_shift_of'
 
+# ---- the same defect, in macros, found by scanning rather than by
+# ---- being reported ---------------------------------------------------
+# Six more were carrying two to four copies each, all agreeing, none
+# with anything to say if one were edited and the others not:
+#
+#   LZ_GDN_FIXED     4 (ops.c, ops_gdn.c, ops_matmul.c, ops_sched.c)
+#   LZ_NORM_MAX_N    3 (ops_norm.c, ops_quant.c, ops_sched.c)
+#   LZ_EPI_MAX_NG    2 (ops.c, ops_matmul.c)
+#   LZ_MM_WIDEN_MAX  2 (ops.c, ops_matmul.c)
+#   LZ_X87_FLOAT_CW  2 (ops.c, ops_quant.c)
+#   LZ_ATTN_MAX_HD   2 (ops.h, ops_gdn.c)
+#
+# FOUR OF THE SIX BOUND A STATIC ARRAY, which is what makes this a
+# memory-safety check and not a tidiness one: two TUs disagreeing on
+# LZ_NORM_MAX_N is one side indexing a buffer the other side allocated
+# shorter. ops.c's own note on LZ_MM_WIDEN_MAX read "Defined here as
+# well as in ops_matmul.c, because lz_matmul_xq_nt checks it" - a
+# description of the duplication offered as a reason for it.
+#
+# They live in ops.h now. HOME is a parameter because these belong with
+# the tier flags rather than with the kernel helpers above.
+check_one_in() {
+    local pattern="$1" name="$2" home="$3"
+    local total=0 n f
+    for f in src/*.h src/*.c; do
+        [ -f "$f" ] || continue
+        n=$(grep -c -- "$pattern" "$f")
+        total=$((total + n))
+        if [ "$n" -gt 0 ] && [ "$f" != "$home" ]; then
+            echo "FAIL: $name defined outside $home (in $f, $n hit(s))"
+            FAIL=1
+        fi
+    done
+    if [ "$total" -eq 1 ]; then
+        echo "OK:   $name defined exactly once, in $home"
+    else
+        echo "FAIL: $name defined $total times, expected 1"
+        FAIL=1
+    fi
+}
+
+check_one_in '^#define LZ_GDN_FIXED '    'LZ_GDN_FIXED'    src/ops.h
+check_one_in '^#define LZ_NORM_MAX_N '   'LZ_NORM_MAX_N'   src/ops.h
+check_one_in '^#define LZ_EPI_MAX_NG '   'LZ_EPI_MAX_NG'   src/ops.h
+check_one_in '^#define LZ_MM_WIDEN_MAX ' 'LZ_MM_WIDEN_MAX' src/ops.h
+check_one_in '^#define LZ_X87_FLOAT_CW ' 'LZ_X87_FLOAT_CW' src/ops.h
+check_one_in '^#define LZ_ATTN_MAX_HD '  'LZ_ATTN_MAX_HD'  src/ops.h
+
 # Renamed-copy check, separate from the count above: a name defined
 # once under a DIFFERENT identifier (lz_i32f_wsum, gdn_tail_row_mmx)
 # would pass every test above while still being exactly the defect

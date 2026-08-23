@@ -19,9 +19,7 @@
 #include "ops_t2_arm.h" /* LZ_T2_ARM_ASM_EXTERN: one home for "this build
                            carries the ARM asm tier" */
 
-#ifndef LZ_GDN_FIXED
-#define LZ_GDN_FIXED 1
-#endif /* LZ_GDN_FIXED */
+/* LZ_GDN_FIXED, LZ_NORM_MAX_N: ops.h. */
 
 /* ---- g_kernel (the selected ISA tier) ---------------------------------
    Defined here (was in ops.c). Declared extern in ops_kernel_shared.h. */
@@ -352,9 +350,7 @@ const char *lz_norm_select(const char *name) {
     return lz_norm_mode() ? "fixed" : "float";
 }
 
-#ifndef LZ_NORM_MAX_N
-#define LZ_NORM_MAX_N 4096
-#endif /* LZ_NORM_MAX_N */
+/* LZ_NORM_MAX_N: ops.h. */
 
 int lz_norm_can_fixed(int n) {
 #if LZ_NORM_FIXED

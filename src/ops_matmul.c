@@ -22,16 +22,9 @@
 #include "ops_t2_arm.h"
 #include "ops_arm.h"
 
-#ifndef LZ_GDN_FIXED
-#define LZ_GDN_FIXED 1
-#endif /* LZ_GDN_FIXED */
+/* LZ_GDN_FIXED, LZ_EPI_MAX_NG, LZ_MM_WIDEN_MAX: ops.h. */
 
-#ifndef LZ_EPI_MAX_NG
-#define LZ_EPI_MAX_NG 64
-#endif /* LZ_EPI_MAX_NG */
-
-/* ---- LZ_MM_WIDEN_MAX + scratch ---- */
-#define LZ_MM_WIDEN_MAX 4096
+/* ---- scratch, sized by LZ_MM_WIDEN_MAX (ops.h) ---- */
 
 /* Scratch shared by the three SIMD matmuls (batched version widens by
    LZ_BATCH_MAX). The three are never alive simultaneously

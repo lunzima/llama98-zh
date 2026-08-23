@@ -7,9 +7,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#ifndef LZ_NORM_MAX_N
-#define LZ_NORM_MAX_N 4096
-#endif /* LZ_NORM_MAX_N */
+/* LZ_NORM_MAX_N: ops.h, included below. */
 
 #include "ops.h"
 #include "err.h"
