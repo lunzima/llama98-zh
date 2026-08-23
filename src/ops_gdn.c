@@ -689,13 +689,40 @@ typedef struct {
 
 static void gdn_build_table(const float *ss, const float *q, const float *k,
                             int kd, int vd, int gg, LZGdnTable *tb) {
+    /* static, not stack, per rule 6 item 4 - and the reason they exist
+       at all is that the second loop used to RECOMPUTE ss*k and ss*q.
+       Reusing the first loop's products is exact, not close: that loop
+       evaluates left to right, so `ss*k*ik` is fl(fl(ss*k)*ik) either
+       way, the same two roundings of the same two products. Worth
+       2*kd multiplies per call - 24,576 a token on kmr20. */
+    static float ka[LZ_GDN_MAX_KD], qa[LZ_GDN_MAX_KD];
     int ng = vd / 32, kk;
     float amk = 0.0f, amq = 0.0f, ik, iq;
 
+    /* THIS FUNCTION HAD NO CENSUS SITE. It runs once per group inside
+       gdn_pass1_fixed, which itself was unbilled until one commit ago,
+       so the whole coefficient table build read as zero. Found by
+       .prof/unbilled_scan.awk. Per call, at LZ_GDN_FIXED == 1:
+         loop 1   2 mul per kk
+         scales   2 mul (su, sw) and 2 div (ik, iq)
+         loop 2   2 mul per kk (the two ik/iq products) and 2 add per kk
+                  (q8_round's magic add, billed the way every other
+                  quantize site in this file bills it)
+       The absmax compares stay unbilled - the census's standing
+       convention, not an omission here.
+
+       The LZ_GDN_FIXED >= 2 residual plane below adds 2 cvt, 2 add and
+       2 mul per kk and is NOT in this formula: it compiles out at the
+       default level, and a term for a path this build does not take is
+       a term nobody can check. */
+    LZ_FCX(LZ_FC_RECUR, (long)kd * 4 + 2, (long)kd * 2, 2, 0, 0);
     for (kk = 0; kk < kd; kk++) {
         float a = ss[(size_t)kk * ng + gg] * k[kk];
         float b = ss[(size_t)kk * ng + gg] * q[kk];
-        float t = (a < 0.0f) ? -a : a;
+        float t;
+        ka[kk] = a;
+        qa[kk] = b;
+        t = (a < 0.0f) ? -a : a;
         if (t > amk) amk = t;
         t = (b < 0.0f) ? -b : b;
         if (t > amq) amq = t;
@@ -716,8 +743,8 @@ static void gdn_build_table(const float *ss, const float *q, const float *k,
 #endif /* LZ_GDN_FIXED >= 2 */
 
     for (kk = 0; kk < kd; kk++) {
-        float fa = ss[(size_t)kk * ng + gg] * k[kk] * ik;
-        float fb = ss[(size_t)kk * ng + gg] * q[kk] * iq;
+        float fa = ka[kk] * ik;
+        float fb = qa[kk] * iq;
         int ia = q8_round(fa);
         int ib = q8_round(fb);
         int kp = kk >> 1, half = kk & 1;
