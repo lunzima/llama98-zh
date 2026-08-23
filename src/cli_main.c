@@ -121,6 +121,12 @@ extern long long lz_debug_conv_sig_i;
    any count here means a checkpoint that exponent was not measured on,
    and the clamp is otherwise silent. */
 extern long lz_conv_o_clamped;
+/* lz_fdiv_recip's positive control, ops_quant.c. The two arms of
+   LZ_FDIV_RECIP are bit-identical, so this counter is the only thing
+   that says which one ran; `decl` next to it says the accepted ones are
+   not all falling through to the divide anyway. */
+extern long long lz_debug_fdiv_recip;
+extern long long lz_debug_fdiv_decl;
 /* The KDA decay gate's integer chain, forward.c. Elements whose sigmoid
    and exp were both reached through folded integer coordinates; 0 under
    -DLZ_KGATE_EXP_I=0 and 0 with the scalar tier off. The two exponents
@@ -1903,6 +1909,8 @@ int main(int argc, char **argv) {
                lz_debug_swiglu_i16, lz_debug_swiglu_pmax,
                lz_debug_swiglu_gmax, lz_debug_swiglu_omax);
         printf("conv sig int   %lld channel-steps\n", lz_debug_conv_sig_i);
+        printf("fdiv recip     %lld taken  %lld declined\n",
+               lz_debug_fdiv_recip, lz_debug_fdiv_decl);
         printf("conv o16 clamp %ld elements%s\n", lz_conv_o_clamped,
                lz_conv_o_clamped ? "  <- LZ_CONVO_ES is wrong for this "
                                    "model; re-run .prof/convqk_range.c"

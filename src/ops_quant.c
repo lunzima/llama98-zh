@@ -1083,6 +1083,112 @@ const float LZ_Q8_MIN_SCALE_F = LZ_Q8_MIN_SCALE;
 const float LZ_Q8_INV127 = 1.0f / 127.0f;
 const float LZ_Q15_INV = 1.0f / 32767.0f;
 
+/* ---- float divide by integer reciprocal ------------------------------
+ *
+ * A DIVIDE IS NOT A MULTIPLY on this target: 117 instructions against a
+ * multiply's 30 (.prof/arm_chain_count.sh modes 29 and 16), while the
+ * f32 census counts both as one. The engine issues 2,251 a token and
+ * every one of them is `constant / amax` - q8_group_scale's 127/amax,
+ * the recurrence's 32767/amd and gdn_build_table's two - so the COUNT is
+ * already at its structural minimum, one reciprocal per quantization
+ * group rather than one per element. What is left is the price.
+ *
+ * __aeabi_fdiv's core is a restoring loop, 4 quotient bits per 12
+ * instructions, six times for 24. Generic and small, which libgcc has to
+ * be and this does not: the quotient mantissa is 24 bits and ARMv5TE has
+ * UMULL. Measured at 91.7 net against its 117, -21.6%.
+ *
+ * BIT-IDENTICAL, not close. The reciprocal is exact (floor(2^47/mb),
+ * corrected), the quotient's remainder is exact, and the rounding is
+ * half-to-even on that remainder - so this returns the same float a
+ * correctly-rounded divide does, and everything it will not handle
+ * (either operand zero/subnormal/inf/NaN, a result outside the normal
+ * range) falls through to the divide itself. Swept in
+ * .prof/fdiv_recip.c: 31.8M cases, 0 mismatches, including every one of
+ * the 2^23 divisor significands against both constants the engine uses.
+ *
+ * THE TABLE IS BUILT, NOT WRITTEN. 4096 entries is the one part of this
+ * that could be silently wrong - one bad entry is a wrong answer on one
+ * divisor in 4096, with no symptom - so it comes from its own
+ * definition on first use rather than from a literal array that would
+ * need a producer script and a check that the two still agree.
+ *
+ * THE SEED MUST UNDER-ESTIMATE, and this is not a style point. Seeded
+ * from each bucket's midpoint the estimate is too large for the
+ * bucket's small half; then `2^47 - mb*r` underflows as unsigned, the
+ * Newton step adds a garbage term, and the correction loop walks back
+ * from there - to the RIGHT answer, every time. The value sweep passed.
+ * It measured 655,457 instructions a call. Seeding from the bucket's
+ * LARGEST mb makes the estimate one-sided and the correction bounded. */
+#define LZ_FDR_BITS 12
+#define LZ_FDR_N    (1 << LZ_FDR_BITS)
+#define LZ_FDR_SH   (23 - LZ_FDR_BITS)
+
+static uint32_t g_fdr_tab[LZ_FDR_N];
+static int g_fdr_ready;
+
+static void fdr_build(void) {
+    int i;
+    for (i = 0; i < LZ_FDR_N; i++) {
+        uint64_t mb = 0x800000u + ((uint64_t)i << LZ_FDR_SH)
+                    + ((1u << LZ_FDR_SH) - 1u);
+        g_fdr_tab[i] = (uint32_t)(((uint64_t)1 << 47) / mb);
+    }
+    g_fdr_ready = 1;
+}
+
+/* floor(2^47 / mb) exactly, mb in [2^23, 2^24). */
+static uint32_t fdr_recip47(uint32_t mb) {
+    uint64_t N = (uint64_t)1 << 47;
+    uint32_t r = g_fdr_tab[(mb >> LZ_FDR_SH) & (LZ_FDR_N - 1)];
+    uint64_t e = N - (uint64_t)mb * r;      /* >= 0: the seed is a floor */
+    r += (uint32_t)(((uint64_t)r * e) >> 47);
+    while ((uint64_t)mb * (r + 1u) <= N) r++;
+    while ((uint64_t)mb * r > N) r--;
+    return r;
+}
+
+/* Positive control. The two arms of LZ_FDIV_RECIP are BIT-IDENTICAL, so
+   a logits comparison cannot tell "the reciprocal ran" from "the switch
+   compiled it out" - it reads rc=0 either way. This counter is the only
+   thing that separates them, and `declined` is here for the same reason
+   in reverse: a build where everything declines would count calls and
+   still be running __aeabi_fdiv. */
+long long lz_debug_fdiv_recip;
+long long lz_debug_fdiv_decl;
+
+float lz_fdiv_recip(float a, float b) {
+    union { float f; uint32_t u; } ba, bb, br;
+    uint32_t ea, eb, ma, mb, sg, R, Q0;
+    uint64_t N, rem;
+    int e;
+    ba.f = a; bb.f = b;
+    ea = (ba.u >> 23) & 255u;
+    eb = (bb.u >> 23) & 255u;
+    if (ea == 0u || ea == 255u || eb == 0u || eb == 255u) {
+        lz_debug_fdiv_decl++;
+        return a / b;
+    }
+    ma = (ba.u & 0x7FFFFFu) | 0x800000u;
+    mb = (bb.u & 0x7FFFFFu) | 0x800000u;
+    sg = (ba.u ^ bb.u) & 0x80000000u;
+    e = (int)ea - (int)eb + 127;
+    if (ma < mb) { ma <<= 1; e--; }
+    if (e < 1 || e > 254) { lz_debug_fdiv_decl++; return a / b; }
+    lz_debug_fdiv_recip++;
+    if (!g_fdr_ready) fdr_build();
+    R = fdr_recip47(mb);
+    Q0 = (uint32_t)(((uint64_t)ma * R) >> 24);
+    N = (uint64_t)ma << 23;
+    rem = N - (uint64_t)Q0 * mb;
+    while (rem >= mb) { Q0++; rem -= mb; }
+    if (rem * 2u > mb || (rem * 2u == mb && (Q0 & 1u))) Q0++;
+    /* Q0 can reach 2^24; adding it to (e-1)<<23 carries into the
+       exponent field by itself, the trick lz_i32f_arm_asm also uses. */
+    br.u = sg + ((uint32_t)(e - 1) << 23) + Q0;
+    return br.f;
+}
+
 int q8_group_scale(const float *grp, int gs, float *sg, float *inv) {
     union { float f; uint32_t u; } bit;
     uint32_t am = q8_amax(grp, gs);
@@ -1092,7 +1198,8 @@ int q8_group_scale(const float *grp, int gs, float *sg, float *inv) {
     amax = bit.f;
     if (amax > 0.0f) {
         *sg = amax * LZ_Q8_INV127;
-        *inv = 127.0f / amax;
+        /* 1,462 of the engine's 2,251 divides a token are this one. */
+        *inv = LZ_FDIV(127.0f, amax);
         fast = (*inv <= FLT_MAX);
         if (*sg < LZ_Q8_MIN_SCALE_F) {
             *sg = 1.0f;

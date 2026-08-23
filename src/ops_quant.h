@@ -87,6 +87,14 @@ uint32_t q8_amax(const float *grp, int gs);
 /* Per-group scale and reciprocal. Returns fast flag. */
 int q8_group_scale(const float *grp, int gs, float *sg, float *inv);
 
+/* a / b, by integer reciprocal instead of __aeabi_fdiv's restoring loop
+   - 91.7 instructions against 117 on ARMv5TE, where the census counts a
+   divide as one operation and the target charges four. BIT-IDENTICAL:
+   correctly rounded, ties to even, and every case it declines falls
+   through to the divide itself. See the body, and LZ_FDIV_RECIP in
+   ops.h for when the callers use it. */
+float lz_fdiv_recip(float a, float b);
+
 /* Float-only exp/rsqrt bodies (scalar tier independent). */
 float lz_exp_float_body(float x);
 float lz_rsqrt_float_body(float x);

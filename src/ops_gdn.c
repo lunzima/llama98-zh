@@ -733,8 +733,8 @@ static void gdn_build_table(const float *ss, const float *q, const float *k,
        division on both sides, so they are fine as written. */
     tb->su = (amk > 0.0f) ? amk * LZ_Q15_INV : LZ_Q15_INV;
     tb->sw = (amq > 0.0f) ? amq * LZ_Q15_INV : LZ_Q15_INV;
-    ik = (amk > 0.0f) ? 32767.0f / amk : 0.0f;
-    iq = (amq > 0.0f) ? 32767.0f / amq : 0.0f;
+    ik = (amk > 0.0f) ? LZ_FDIV(32767.0f, amk) : 0.0f;
+    iq = (amq > 0.0f) ? LZ_FDIV(32767.0f, amq) : 0.0f;
     tb->tail_cu = 0; tb->tail_cw = 0;
 #if LZ_GDN_FIXED >= 2
     tb->su2 = tb->su * LZ_Q15_INV;
@@ -1958,7 +1958,7 @@ static void gdn_p2_fixed_rows(const int8_t *sq_in, int8_t *sq_out,
             continue;
         }
         s_dg[gg] = sd;
-        inv_d = 32767.0f / amd;
+        inv_d = LZ_FDIV(32767.0f, amd);
         /* 1 div, then per element the scale multiply and q8_round's
            magic add - the same two the other quantize sites in this file
            bill (see the `q8_round(add)` notes at the LZ_FC_QUANT ones). */

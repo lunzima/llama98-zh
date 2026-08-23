@@ -239,6 +239,15 @@ typedef char lz_q8min_check[1 - 2 * (int)!(LZ_Q8_MIN_SCALE == 0.0f)];
 #error "LZ_CONVO_I16 != 0"
 #endif
 
+/* The one switch in the table whose non-default value is 1 - the
+   default is 0 off the soft-float targets, so this asserts the ON arm. */
+#ifndef LZ_FDIV_RECIP
+#error "LZ_FDIV_RECIP not defined (expected 1)"
+#endif
+#if LZ_FDIV_RECIP != 1
+#error "LZ_FDIV_RECIP != 1"
+#endif
+
 #ifndef LZ_GATE_SIG_I
 #error "LZ_GATE_SIG_I not defined (expected 0)"
 #endif

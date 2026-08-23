@@ -456,6 +456,29 @@ const char *lz_gdn_p2_impl(void);
 #define LZ_CONV_FIXED 1
 #endif
 
+/* Route the engine's divides through lz_fdiv_recip (ops_quant.c) instead
+   of the compiler's. BIT-IDENTICAL either way - the two arms of this
+   switch give the same logits, which is unusual here and is what makes
+   it checkable by cmp rather than by tolerance.
+   DEFAULT ON ONLY WHERE FLOATS ARE SOFTWARE. On a host with a hardware
+   divider the reciprocal is not obviously a win and has not been
+   measured there; -DLZ_NO_FPU=1 is what the ARM cross build passes and
+   is the one target the 117-against-30 number was taken on. Socket 7's
+   x87 FDIV is 39 cycles against FMUL's 5, so it is a candidate too -
+   also unmeasured, which is why it is not the default. */
+#ifndef LZ_FDIV_RECIP
+#if defined(LZ_NO_FPU)
+#define LZ_FDIV_RECIP 1
+#else
+#define LZ_FDIV_RECIP 0
+#endif
+#endif /* LZ_FDIV_RECIP */
+#if LZ_FDIV_RECIP
+#define LZ_FDIV(a, b) lz_fdiv_recip((a), (b))
+#else
+#define LZ_FDIV(a, b) ((a) / (b))
+#endif
+
 /* The fixed conv1d epilogue's activation enters sigmoid in the INTEGER
    coordinate (sigmoid_q15_i) instead of the folded float one
    (sigmoid_q15_t). Three of the epilogue's six int<->float converts per
