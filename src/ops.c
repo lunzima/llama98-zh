@@ -1398,20 +1398,13 @@ void lz_epi_prep_zero(LZTensor *w, int in_dim) {
    `imul r32, r/m32` takes a memory operand and leaves edx alone, so w
    stays where the caller put it: after `push ebp` the frame is
    [esp]=old ebp, [esp+4]=w. NO RETURN ADDRESS between them - wcc386
-   INLINES a pragma-aux body, so there is no call and nothing to return
-   to. Deriving the offset as "old ebp, return address, then the
-   argument" gives [esp+8], assembles clean, and reads a saved register:
-   the logits came out wrong on both fixtures until a probe
-   (.prof/wstackparm.c) printed the sentinel at +4.
+   INLINES a pragma-aux body, so [esp+8] would read a saved register.
 
-   `parm caller [esi] [edi] [ecx]` - THREE registers for FOUR arguments,
-   and the cleanup named. Both halves were found by running it. Listing
-   an explicit empty slot (`[esi] [edi] [ecx] []`) is not how you ask
-   for a stack argument: wcc386 takes it without complaint and hands
-   every register the LAST argument, which a probe caught by finding the
-   same sentinel in esi, edi and ecx with the return address gone. And
-   without `caller` the build is still 0 errors and the binary still
-   crashes, because the callee's plain `ret` leaves the argument behind.
+   `parm caller [esi] [edi] [ecx]` - three registers for four arguments,
+   with the cleanup named. Both halves matter and neither errors when
+   wrong: an explicit empty slot (`[esi] [edi] [ecx] []`) makes wcc386
+   hand every register the LAST argument, and omitting `caller` leaves
+   the callee's plain `ret` with the stack argument still on it.
 
    Same per-element product and the same ascending order as the flat
    loop it replaces. NOT the same as hoisting w out of the sum - that
@@ -1734,104 +1727,26 @@ static lz_i64 epi_fixed_raw(const int32_t *accb, const LZTensor *w,
     const int16_t *ww = w->sq + (size_t)row * (ng / r);
     lz_i64 s = 0;
     int g = 0, j = 0;
-    /* THIS WAS TWO PASSES OVER ng, and they were the census's top two
-       branches: a fill loop and lz_epi_mac's, 1,135,588,896 evaluations
-       EACH (gcov -b -c, kmr20/zh, 603 tokens), with g_epi_m between
-       them - the same write-once-read-once buffer g_epi_zm was, every
-       element written and then read once by the next statement.
+    /* ONE PASS, not two. This used to fill g_epi_m in a loop over ng
+       and then hand it to a MAC that read it back; the buffer's every
+       element was written once and read once, by the next statement.
+       lz_epi_mac_grp takes the int16 plane and the group's scalar
+       directly, so the fill and the buffer are both gone.
 
-       MEASURED AFTER, on the same fixture: one inner loop at
-       1,159,052,832 plus this group loop at 173,625,408, so
-       2,271,177,792 evaluations became 1,332,678,240 - 938 million
-       fewer per 603 tokens, 41.3%. The buffer and the pass are gone
-       with them. Bit-identical on both toolchains and both fixtures:
-       the int32 product is formed the same way and the accumulation
-       order is unchanged.
+       Bit-identical to the flat form by construction: the same
+       per-element int32 product xq[g]*ww[g/r] and the same ascending g,
+       which is NOT what hoisting ww[j] out of the inner sum would be -
+       that reassociates the reduction and changes what can overflow.
 
-       THE DIVIDE IS NOT THE BLOCKER, and saying it was is a mistake I
-       am correcting in place rather than leaving for the next reader.
-       `ww[g / r]` looks like it forces a divide per element only while
-       the loop is flat; nesting removes it and changes nothing else:
+       Cost, on the branch census (kmr20/zh, 603 tokens): the two flat
+       loops were 1,135,588,896 evaluations each; the fused inner loop
+       and this group loop are 1,159,052,832 and 173,625,408, so
+       2,271,177,792 became 1,332,678,240.
 
-           for (j = 0, g = 0; j < ng / r; j++) {
-               int32_t w = ww[j];
-               for (i = 0; i < r; i++, g++)
-                   s += (lz_i64)accb[g] * (lz_i64)(xq[g] * w);
-           }
-
-       Same per-element product, same ascending g, so bit-identical by
-       construction - not "within tolerance", and not a different
-       reduction the way hoisting ww[j] out of the inner sum would be
-       (that one changes what overflows).
-
-       WHAT IS LEFT is the twin, and the obstacle is a REGISTER BUDGET
-       that was tried and measured rather than argued. A per-group
-       kernel needs esi (a), edi (xq), ecx (count), ebx/ebp (the int64
-       accumulator) and edx:eax (imul's fixed pair) - seven, with
-       nothing left for the group's w. The 386's two-operand
-       `imul r32, r/m32` takes a memory operand and does not touch edx,
-       so w on the stack looks like it closes the gap:
-
-           parm [esi] [edi] [ecx] []      w at [esp+8] after push ebp
-           imul eax, dword ptr [esp+8]
-
-       BUILT AND RUN, both toolchains. gcc's C arm came out byte-
-       identical to this code on both fixtures (78,905,344 and
-       86,507,520 bytes), so the fusion itself is right. The wcc386 arm
-       compiled with 0 errors and then CRASHED on the first model load.
-       Reverted rather than shipped or guessed at.
-
-       THE CRASH WAS THE SYNTAX, not the offset and not the budget, and
-       a three-arm probe said so: calling `rd(1, 2, 3, sentinel)` under
-       `parm [esi] [edi] [ecx] []` leaves esi, edi AND ecx all holding
-       the SENTINEL, and the return address clobbered - Watcom does not
-       read the empty [] as "this one goes on the stack", it mis-parses
-       the whole list. The documented way to put a parameter on the
-       stack is to LIST FEWER REGISTERS than the prototype has
-       arguments; the remainder go on the stack by themselves - AND the
-       list has to say who cleans it:
-
-           parm caller [esi] [edi] [ecx]      4-argument prototype
-
-       Both halves are load-bearing and each was found by running it.
-       Without `caller` the build is still 0 errors and the binary still
-       crashes: the callee's plain `ret` leaves the argument on the
-       stack. With it, the Watcom binary runs to completion.
-
-       AND THE ARITHMETIC IS WRONG, which a gcc-ONLY build settled:
-       gcc never compiles the pragma, so building just the C fusion and
-       comparing to HEAD takes the asm out of the question entirely. It
-       differs - 56,362,522 of 78,905,344 bytes on zh - so the frame
-       offset was never the remaining problem.
-
-       AND `ng / r` TRUNCATING IS NOT THE BUG EITHER, though it was the
-       obvious next reading. Rewriting the fused loop to walk g to ng and
-       clip the last group - so a partial tail cannot be dropped - gives
-       byte counts IDENTICAL to the version without it (56,362,522 and
-       61,082,055 again, not merely similar). r divides ng here; the tail
-       never existed.
-
-       WHAT THAT IDENTITY SAYS, and it is the useful part: two different
-       loop shapes produced exactly the same divergence, so the cause is
-       in what BOTH attempts changed, not in how either one iterated.
-       Both replaced the same thing - the g_epi_m write plus
-       lz_epi_mac's read - so the next reading to test is whether that
-       pair is doing something other than `sum accb[g] * (xq[g] *
-       ww[g/r])`, at one of the three call sites rather than in general
-       (epi_fixed_raw is called with `ng` at two of them and `ng * r` at
-       the third, so "ng" does not mean the same count everywhere the
-       function is entered).
-
-       Six readings of this one obstacle - a matrix cell, the divide,
-       the register count, the parm syntax, the cleanup convention, the
-       loop bound - and every single one was settled by running
-       something. None was settled by reasoning, including the ones that
-       sounded certain. */
-    /* The bound is derived the way the flat loop derived it - walk g to
+       The bound is derived the way the flat loop derived it - walk g to
        ng and clip the last group - rather than assuming r divides ng.
-       It does on every checkpoint measured here, and the clip costs one
-       compare per group; assuming it would be an invariant nothing
-       states. */
+       It does on every checkpoint here; the clip costs one compare per
+       group, and assuming it would be an invariant nothing states. */
     while (g < ng) {
         int n = ng - g; if (n > r) n = r;
         s += lz_epi_mac_grp(accb + g, g_epi_xq[tk] + g, n, (int32_t)ww[j]);
@@ -2009,34 +1924,22 @@ static lz_u64 epi_shr_half_u(lz_u64 umag, int rs) {
    below 2^63 for every rs >= 1 (widest is rs == 1, where
    (2^63 + 2^62) >> 1 < 2^63), so negating it back is representable.
 
-   THE SIGN WORK IS BRANCHLESS, and the reason is the TARGET rather than
-   taste. Measured with gcov -b -c over kmr20/zh (603 tokens): the two
-   `neg ? :` ternaries were evaluated 144,472,859 times each with the
-   minority arm at 34.5% - near-coinflips in the dequant epilogue, the
-   census's second-largest row. A P5 has no branch predictor worth the
-   name and its default is not-taken, so a third of 289 million
-   evaluations mispredicted. Both are gone.
+   The sign work is branchless for the TARGET's sake: the two `neg ? :`
+   ternaries this replaced were 144,472,859 evaluations each with the
+   minority arm at 34.5%, and a P5 has no predictor worth the name.
+   `mask` comes from the sign bit of the UNSIGNED value - `um >> 63` is
+   defined where `s >> 63` on a signed would be implementation-defined -
+   and (x ^ mask) - mask is two's-complement abs in and negate out.
 
-   `mask` is 0 or all-ones from the SIGN BIT OF THE UNSIGNED VALUE -
-   `um >> 63` on an unsigned is fully defined, where `s >> 63` on a
-   signed would be implementation-defined - and (x ^ mask) - mask is
-   two's-complement abs on the way in and negate on the way out. Same
-   UB-free convention as the negations elsewhere in this file.
+   `s == 0` is not a special case: the general path gives umag = 0 and
+   epi_shr_half_u(0, rs) is 0 for every rs, so the old fast path bought
+   nothing and its arm never fired.
 
-   `s == 0` IS GONE, not moved: it was a fast path, not a special case.
-   At s == 0 the general path gives umag = 0, and epi_shr_half_u(0, rs)
-   is (0 + 2^(rs-1)) >> rs == 0 for every rs in 1..63 and 0 for rs >= 64,
-   so the answer was already 0. It cost one compare and bought nothing:
-   gcov puts that arm at 0.0%, i.e. it never fired on either fixture.
-
-   `rs <= 0` STAYS, and it is the 29.7% one - I had the two the wrong
-   way round until the post-change census said otherwise. It is not kept
-   for its share, it is LOAD-BEARING: at rs <= 0 with s == LLONG_MIN the
-   magnitude is 2^63, and converting that back with (lz_i64) is
+   `rs <= 0` STAYS, and not for its share: at rs <= 0 with s == LLONG_MIN
+   the magnitude is 2^63 and converting it back with (lz_i64) is
    implementation-defined. Every rs >= 1 keeps the result under 2^63 (see
-   the header above), which is exactly what makes the general path safe
-   and the rs <= 0 case not. Removing it would be a correctness bug that
-   this model's data would never show. */
+   above), which is what makes the general path safe and this case not.
+   Removing it is a correctness bug no data from this model would show. */
 static lz_i64 epi_shr_half(lz_i64 s, int rs) {
     lz_u64 um = (lz_u64)s;
     lz_u64 mask = (lz_u64)0 - (um >> 63);
