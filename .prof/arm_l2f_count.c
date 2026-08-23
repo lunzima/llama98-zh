@@ -80,6 +80,33 @@ int main(int argc, char **argv) {
             int64_t t = ((int64_t)g_au[j] << 8) + (int64_t)g_aul[j];
             u.f = (float)t * g_su;                  g_sink = u.i;
         }
+#elif L2F_MODE == 5
+        /* THE SHIPPING CHAIN AS IT IS SINCE 7c8ff86, which mode 3 is no
+           longer: the 2^-8 weighting is an exponent subtract now, not a
+           __aeabi_fmul. Mode 3 is kept because the rejection recorded in
+           docs/int-pipeline-project.md 0.5 was measured against it and a
+           table whose baseline silently moved is worse than a stale one.
+           The body below must stay a verbatim copy of f32_scale_pow2 in
+           src/ops_kernel_shared.h - it is duplicated here on purpose, so
+           the probe stays standalone, and if the two drift this arm
+           measures nothing. */
+        {
+            union { float f; uint32_t u; } b;
+            uint32_t bex;
+            int ex;
+            float lo;
+            b.f = (float)g_aul[j];
+            bex = (b.u >> 23) & 0xFFu;
+            ex  = (int)bex - 8;
+            if ((uint32_t)(bex - 1u) >= 0xFEu ||
+                (uint32_t)(ex - 1) >= 254u) {
+                lo = (float)g_aul[j] * (1.0f / 256.0f);
+            } else {
+                b.u = (b.u & 0x807FFFFFu) | ((uint32_t)ex << 23);
+                lo = b.f;
+            }
+            u.f = ((float)g_au[j] + lo) * g_su;     g_sink = u.i;
+        }
 #else
         g_sink = g_au[j];
 #endif

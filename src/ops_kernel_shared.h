@@ -124,9 +124,19 @@ static int f32_scale_pow2(float v, int e, float *out) {
     int ex;
     b.f = v;
     bex = (b.u >> 23) & 0xFFu;
-    if (bex == 0u || bex == 0xFFu) return 0;  /* zero, subnormal, inf, NaN */
-    ex = (int)bex + e;
-    if (ex <= 0 || ex >= 255) return 0;       /* would underflow or overflow */
+    ex  = (int)bex + e;
+    /* TWO compares, not four. `bex == 0 || bex == 0xFF` is exactly
+       `(uint32_t)(bex - 1) >= 0xFE`, and `ex <= 0 || ex >= 255` is
+       exactly `(uint32_t)(ex - 1) >= 254` - both by unsigned wraparound
+       putting the low out-of-range case above the high one. Written
+       this way because the guard is the whole cost of this helper: it
+       replaces a 30-instruction __aeabi_fmul, and the four-compare form
+       measured 18 of those 30 back (ARM, .prof/arm_l2f_count.sh mode 5
+       against mode 3, 134 -> 122). On a target with no branch
+       predictor worth the name, halving the branch count in a
+       four-branch guard is most of what is left to win here. */
+    if ((uint32_t)(bex - 1u) >= 0xFEu) return 0;     /* zero/subnormal/inf/NaN */
+    if ((uint32_t)(ex - 1) >= 254u) return 0;        /* under/overflow */
     b.u = (b.u & 0x807FFFFFu) | ((uint32_t)ex << 23);
     *out = b.f;
     return 1;

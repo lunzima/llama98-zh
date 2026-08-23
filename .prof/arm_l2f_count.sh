@@ -20,13 +20,13 @@ command -v "$CC" >/dev/null 2>&1 || { echo "arm_l2f_count: SKIP - no $CC"; exit 
 command -v "$Q"  >/dev/null 2>&1 || { echo "arm_l2f_count: SKIP - no $Q"; exit 2; }
 
 mkdir -p "$O"; rm -f "$O"/*.elf
-for m in 0 1 2 3 4; do
+for m in 0 1 2 3 4 5; do
     $CC $F -DL2F_MODE=$m -static "$R/.prof/arm_l2f_count.c" -o "$O/m$m.elf"
 done
 
 count() { $Q -one-insn-per-tb -d exec,nochain "$1" "$2" 2>&1 >/dev/null | wc -l; }
 
-for m in 0 1 2 3 4; do
+for m in 0 1 2 3 4 5; do
     a=$(count "$O/m$m.elf" 256)
     b=$(count "$O/m$m.elf" 512)
     printf 'mode %s  n256=%-8s n512=%-8s per-iter=%s\n' \
