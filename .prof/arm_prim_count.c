@@ -54,7 +54,7 @@
 #include "sp_args_q8r.h"        /* real floats; only the shape matters */
 #elif PRIM_MODE == 27 || PRIM_MODE == 28
 #include "sp_args_q8r.h"        /* the row arms build mm_w/mm_x from it */
-#elif PRIM_MODE == 29
+#elif PRIM_MODE == 29 || PRIM_MODE == 31
 #include "sp_args_q8r.h"        /* real floats; only the shape matters */
 #elif PRIM_MODE == 18
 #include "sp_args_q8r.h"        /* only for SP_N; the arm uses gd_* */
@@ -77,6 +77,11 @@ __attribute__((noinline)) static float i32f_null(int32_t v) {
 
 volatile int32_t g_sink;
 volatile float g_mulc = 1.4142135f;      /* modes 16/17/19/20, see there */
+
+#if PRIM_MODE == 31
+#define FDIV_RECIP_NO_MAIN 1
+#include "fdiv_recip.c"          /* one copy: priced here, checked there */
+#endif /* PRIM_MODE == 31 */
 
 #if PRIM_MODE == 27 || PRIM_MODE == 28
 /* f32mm's row arms. 64 elements is a whole harness body's worth, so the
@@ -537,6 +542,9 @@ int main(int argc, char **argv) {
 #if PRIM_MODE == 27 || PRIM_MODE == 28
     mm_setup();
 #endif
+#if PRIM_MODE == 31
+    build_rtab();                /* once, as at model load */
+#endif
     for (i = 0; i < n; i++) {
         int k = (int)(i & (SP_N - 1));
 #if PRIM_MODE == 1
@@ -590,6 +598,20 @@ int main(int argc, char **argv) {
 #elif PRIM_MODE == 14
         lz_rmsnorm(nm_o, SP_ARG, nm_w, SP_N, 1e-6f);
         u.f = nm_o[k];                     g_sink = u.i;
+#elif PRIM_MODE == 31
+        /* The integer-reciprocal divide (.prof/fdiv_recip.c, verified
+         * there over 31.8M cases) priced against mode 29's
+         * __aeabi_fdiv on the same stream. The table is built once at
+         * startup, as it would be at model load. */
+        {
+            union { float f; uint32_t u; } ba, bb;
+            int dcl;
+            ba.f = SP_ARG[k];
+            bb.f = g_mulc;
+            u.i = (int32_t)fdiv_fast(ba.u, bb.u, &dcl);
+            if (dcl) u.f = ba.f / bb.f;
+            g_sink = u.i;
+        }
 #elif PRIM_MODE == 29
         /* ONE BARE DIVIDE, the operation the f32 census weights the
          * same as a multiply and this target does not. The engine still
