@@ -223,11 +223,30 @@ void lz_attn_score_q8(float *att, const float *qhh, int hd,
        fold. This is the term that makes the fixed tier LOSE below ~200
        tokens - it does not shrink with context, and the per-t term it
        replaces is 2*hd.
+
        Per-t, per group: cvt=1, mul=2 (qs*kts, then the outer product),
-       add=1 (accumulate) - times ng. Per-t fold: add=3, mul=2. */
+       add=1 (accumulate) - times ng. Per-t fold: 1 mul for `* sc`, and
+       the three fold adds ONLY when ng >= 4.
+
+       BOTH TAILS USED TO BE BILLED FLAT. Only one of the two was
+       actually wrong here, and measuring is what separated them:
+         - mul was 2*ng+2. The second one was `* (1.0f/256.0f)` applied
+           after `* scale`; folding the 2^-8 into sc above deleted it
+           and left this site billing it. Real: kmr20 at 603 tokens
+           drops the class 101,472 -> 96,640, 4.8%.
+         - add was ng+3 unconditionally. Now conditional, because the
+           three fold adds are adds of +0.0f when ng < 4 and the
+           conditional below skips them - but ng is 4 on this model
+           (head_dim 128), so the three ARE performed and this half
+           moves the census by exactly zero here. It is written for the
+           32- and 64-wide heads where it is not zero.
+       The estimate before the measurement was 38%, on a guess that ng
+       was 2. An optimisation that does not update its own site leaves
+       the row claiming work that is no longer done; a correction that
+       does not measure replaces one wrong number with another. */
     LZ_FCX(LZ_FC_ATTN_SCORE,
-           (long)(pos + 1) * (2 * ng + 2),
-           (long)(pos + 1) * (ng + 3),
+           (long)(pos + 1) * (2 * ng + 1),
+           (long)(pos + 1) * (ng + (ng >= 4 ? 3 : 0)),
            0,
            (long)(pos + 1) * ng,
            0);
