@@ -1,20 +1,28 @@
 #!/bin/bash
-# build/native/*.o must be COFF (MinGW gcc's native output), never ELF.
+# build/native/*.o must match the OBJECT FORMAT OF THE HOST LINKING THEM.
 #
-# A Linux/WSL gcc invocation that writes into this same relative path
-# (build/native/) leaves ELF object files behind. MinGW's `ld` links
-# them into the PE without a link error - the binary comes out
-# malformed ("section below image base", not executable) and the
-# failure is only visible when someone tries to run it, far from the
-# build that produced it. This runs right before the link step, so a
-# stray ELF object is a build failure, not a silent bad binary.
+# One relative path, build/native/, serves both hosts. A MinGW build and
+# a Linux/WSL build of this tree write their objects to the same place,
+# and neither `ld` rejects the other's: MinGW's links ELF into a
+# malformed PE ("section below image base", not executable) and GNU ld
+# links COFF into "dangerous relocation: R_AMD64_IMAGEBASE with
+# __ImageBase undefined". Both failures land far from the build that
+# caused them. This runs right before the link step so a mismatched
+# object is a build failure instead.
 #
-# Checks file TYPE, not provenance: it does not ask whether a Linux
-# build ran, it opens whatever is sitting in build/native/*.o right now.
+# BOTH DIRECTIONS, and the second one was missing. The gate used to
+# assert COFF unconditionally - the format of the host it was written
+# on - so on Linux it rejected the correct objects and passed the
+# wrong ones. It surfaced when build/arm/parity_gate.sh needed an x86
+# Linux binary and could not get one: the tree held MinGW objects, the
+# gate demanded MinGW objects, and the link failed anyway.
+#
+# Checks file TYPE, not provenance: it does not ask which build ran, it
+# opens whatever is sitting in build/native/*.o right now.
 #
 # Exit codes:
-#   0  PASS - no build/native/*.o present, or all present ones are COFF
-#   1  FAIL - at least one is not COFF (ELF, or anything else)
+#   0  PASS - no build/native/*.o present, or all match this host
+#   1  FAIL - at least one is the other host's format
 set -u
 cd "$(dirname "$0")/.."
 
@@ -25,20 +33,29 @@ shopt -u nullglob
 
 [ ${#objs[@]} -eq 0 ] && exit 0
 
+# uname, not $OSTYPE: this script runs under Git Bash on Windows (where
+# OSTYPE is msys) and under WSL and native Linux, and uname_s tells the
+# three apart the same way in all of them.
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) WANT=COFF; WANT_NAME="COFF (MinGW)" ;;
+    *)                    WANT=ELF;  WANT_NAME="ELF" ;;
+esac
+
 bad=()
 for f in "${objs[@]}"; do
     t=$(file -b "$f")
     case "$t" in
-        *COFF*) ;;
+        *"$WANT"*) ;;
         *) bad+=("$f: $t") ;;
     esac
 done
 
 [ ${#bad[@]} -eq 0 ] && exit 0
 
-echo "FAIL: $DIR has non-COFF object file(s) - a Linux/WSL build wrote" >&2
-echo "here, and MinGW's ld would link these silently into a malformed," >&2
-echo "non-executable PE." >&2
+echo "FAIL: $DIR holds objects this host cannot link - expected $WANT_NAME" >&2
+echo "on $(uname -s), so the other host's build wrote here and its \`ld\`" >&2
+echo "would either produce a malformed binary or fail with a relocation" >&2
+echo "error far from the cause." >&2
 for b in "${bad[@]}"; do echo "  $b" >&2; done
 echo "Fix: rm $DIR/*.o && make (or make native/serve) to rebuild them." >&2
 exit 1

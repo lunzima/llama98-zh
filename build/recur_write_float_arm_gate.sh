@@ -118,6 +118,19 @@ echo "-- build: -DLZ_CONV_FIXED=0 --"
 build_one cof "-DLZ_CONV_FIXED=0" || exit 2
 echo "-- build: -DLZ_EPI_FIXED=0 --"
 build_one eof "-DLZ_EPI_FIXED=0" || exit 2
+# The exact-float-state scaffold. Built and RUN here, not asserted for
+# byte-identity - it deliberately computes different numbers, it is the
+# reference the int8 state is measured against. What it needs is a
+# caller: it compiled, it linked, and it segfaulted on every KunMoe
+# model, because gdn_step_impl grew an int16 `v` entry whose `v` is NULL
+# and the scaffold read v[] anyway. Then, once it ran, it ignored gvec
+# and reported +1.29 NLL at t=27.9 - the number a scaffold gives when it
+# is measuring an undecayed recurrence. Neither a compile check nor the
+# switch-matrix gate's all-at-once link can see either failure; only a
+# run can, and this is the only gate that already has a model and the
+# build machinery in the same place.
+echo "-- build: -DLZ_GDN_STATE_F32=1 (exact-state scaffold) --"
+build_one sf32 "-DLZ_GDN_STATE_F32=1" || exit 2
 
 FAIL=0
 # run <binary-tag> <outfile-tag> <corpus> <flags...>
@@ -211,6 +224,63 @@ check_same "--fixed off vs epilogue compiled out / en" fo_on_en fo_eof_en
 echo "-- row 9: zero control --"
 run_dump on def_on_zh "$TOK_ZH"
 check_diff "ordinary build: --fixed off vs shipping default / zh" fo_on_zh def_on_zh
+
+echo "-- rows 10-11: the exact-state scaffold runs, and differs --"
+# run_dump already FAILs on a non-zero exit or an empty dump, which is
+# the segfault check. check_diff against the shipping default is the
+# second half: a scaffold that produced the SAME bytes as the int8 state
+# would not be an independent reference, it would be the thing it is
+# supposed to be measuring.
+run_dump sf32 sf_zh "$TOK_ZH"
+check_diff "LZ_GDN_STATE_F32=1 vs shipping default / zh" sf_zh def_on_zh
+run_dump sf32 sf_en "$TOK_EN"
+run_dump on   def_on_en "$TOK_EN"
+check_diff "LZ_GDN_STATE_F32=1 vs shipping default / en" sf_en def_on_en
+
+echo "-- row 12: the scaffold is NEAR the default, not merely different --"
+# ROWS 10-11 CANNOT SEE THE SECOND DEFECT THIS SCAFFOLD HAD, and saying
+# so is the point of this row. "Differs from the default" is true of a
+# correct exact-state arm AND of the gvec-ignoring one that reported
+# +1.29 NLL at t=27.9 - an undecayed recurrence differs too. The
+# assertion that separates them is a BOUND: a better state cannot move
+# NLL by more than a whisker, because it is the same recurrence with
+# less rounding. Measured after the fix, over three models x two
+# fixtures (n=3786): -4.1e-04. Broken: +1.29, four orders up.
+#
+# 0.05 is deliberately loose - three orders above the real value and
+# still 25x below the defect it exists to catch. A tight bound here
+# would go red on an ordinary model change; this one only goes red when
+# the scaffold has stopped computing the recurrence.
+SF_TOL=0.05
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "SKIP: row 12 - no python3 to average the NLL dumps"
+else
+    for fx in zh en; do
+        tok=$TOK_ZH; [ "$fx" = en ] && tok=$TOK_EN
+        "$WORK/sf32.exe" "$MODEL" --tokens-file "$tok" \
+            --dump-nll "$WORK/sfn_$fx.bin" >/dev/null 2>&1
+        "$WORK/on.exe" "$MODEL" --tokens-file "$tok" \
+            --dump-nll "$WORK/den_$fx.bin" >/dev/null 2>&1
+        if [ ! -s "$WORK/sfn_$fx.bin" ] || [ ! -s "$WORK/den_$fx.bin" ]; then
+            echo "FAIL: row 12 / $fx - an NLL dump is missing"; FAIL=1; continue
+        fi
+        d=$(python3 -c "
+import struct,sys
+def rd(p):
+    b=open(p,'rb').read(); return struct.unpack('<%df'%(len(b)//4),b)
+a=rd(sys.argv[1]); b=rd(sys.argv[2])
+print('%.6f'%(sum(x-y for x,y in zip(a,b))/len(a)))
+" "$WORK/sfn_$fx.bin" "$WORK/den_$fx.bin")
+        if python3 -c "import sys; sys.exit(0 if abs(float(sys.argv[1]))<=float(sys.argv[2]) else 1)" \
+                "$d" "$SF_TOL"; then
+            echo "PASS: exact-state NLL delta / $fx - $d, within +-$SF_TOL"
+        else
+            echo "FAIL: exact-state NLL delta / $fx - $d, outside +-$SF_TOL;" \
+                 "the scaffold is not computing this recurrence"
+            FAIL=1
+        fi
+    done
+fi
 
 if [ "$FAIL" -ne 0 ]; then
     echo "recur_write_float_arm_gate: FAIL"

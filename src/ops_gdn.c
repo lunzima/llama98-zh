@@ -2093,26 +2093,46 @@ static void gdn_step_impl(float *out, const int8_t *sq_in, int8_t *sq_out,
         float *sf = gdn_shadow(sq_in, kd * vd);
         if (sf) {
             /* Same recurrence, exact float state: no quantization anywhere
-               in the loop, so what is left is only float rounding. */
+               in the loop, so what is left is only float rounding.
+
+               gvec IS THE WHOLE DECAY ON A KDA MODEL, where gt is the
+               literal 1.0f, and this block used to ignore it - it read
+               only gt, which is the GDN family's scalar decay. So on
+               every KunMoe checkpoint the "exact float state" arm was
+               an undecayed recurrence, and it reported +1.29 NLL
+               against the shipping default at t=27.9: a scaffold that
+               answers, loudly, about a model this engine does not run.
+               Mirrors the reference float path below exactly - kcw/qcw
+               for the contraction, raw kc for the update, dec for the
+               state scale. */
             for (vv = 0; vv < vd; vv++) { u[vv] = 0.0f; w[vv] = 0.0f; }
             for (kk = 0; kk < kd; kk++) {
                 const float *row = sf + (size_t)kk * vd;
                 float kc = k[kk], qc = q[kk];
-                kq += kc * qc;
+                float kcw = gvec ? kc * gvec[kk] : kc;
+                float qcw = gvec ? qc * gvec[kk] : qc;
+                kq += kc * qc;              /* RAW dot, both families */
                 for (vv = 0; vv < vd; vv++) {
-                    u[vv] += row[vv] * kc;
-                    w[vv] += row[vv] * qc;
+                    u[vv] += row[vv] * kcw;
+                    w[vv] += row[vv] * qcw;
                 }
             }
+            /* `v` is NULL whenever the caller took the int16 v entry
+               (lz_kda_step_vi16), so this reads it the way the shipping
+               loops below do. It did not, and this scaffold segfaulted
+               on every KunMoe model - a compile switch the switch-matrix
+               gate builds and nothing runs. */
             for (vv = 0; vv < vd; vv++) {
-                u[vv] = (v[vv] - gt * u[vv]) * beta;
+                float vc = vi ? (float)vi[vv] * vscale : v[vv];
+                u[vv] = (vc - gt * u[vv]) * beta;
                 out[vv] = gt * w[vv] + u[vv] * kq;
             }
             for (kk = 0; kk < kd; kk++) {
                 float *row = sf + (size_t)kk * vd;
                 float kc = k[kk];
+                float dec = gvec ? gvec[kk] : gt;
                 for (vv = 0; vv < vd; vv++)
-                    row[vv] = row[vv] * gt + kc * u[vv];
+                    row[vv] = row[vv] * dec + kc * u[vv];
             }
             return;
         }
