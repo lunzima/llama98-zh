@@ -40,13 +40,29 @@
    gcc happens to give a 64KB array is not the contract - this is. The
    offsets stay aligned on their own: every block pointer is g_xw plus a
    multiple of 64 bytes, in_dim being a multiple of 32 by the dispatch
-   guards. Empty off ARM; Watcom never sees __arm__ and has no
-   __attribute__. */
-#if defined(LZ_T2_ARM_ASM_EXTERN)
-#define LZ_XW_ALIGN __attribute__((aligned(4)))
+   guards.
+
+   SIXTEEN, NOT FOUR, and no longer only on ARM. The SSE2 kernels read
+   this array through _mm_loadu_si128, and an alignment probe over one
+   full fixture says they never needed to: 189,486,720 calls to
+   part32_x16, and the OR of every pointer's low four bits is ZERO on
+   both the weight and the activation side. That measurement is about
+   one model on one host, though - what makes it a property is
+   declaring it. gcc happens to give a 64KB array 32-byte alignment;
+   int16_t promises 2. Between "happens to" and "promises" there was
+   nothing, which is exactly the gap that made the ARM LDM note
+   necessary in the first place.
+
+   Watcom has no __attribute__ and its 32-bit malloc/static alignment is
+   8, so the aligned SSE2 form cannot be switched on there off the back
+   of this - the declaration is what the gcc twins can rely on, and the
+   Watcom twins keep their unaligned loads until their own probe says
+   otherwise. */
+#if defined(__GNUC__)
+#define LZ_XW_ALIGN __attribute__((aligned(16)))
 #else
 #define LZ_XW_ALIGN
-#endif /* LZ_T2_ARM_ASM_EXTERN */
+#endif /* __GNUC__ */
 static int16_t g_xw[LZ_BATCH_MAX * LZ_MM_WIDEN_MAX] LZ_XW_ALIGN;
 static float   g_xg[LZ_BATCH_MAX * (LZ_MM_WIDEN_MAX / 32)];
 /* Unguarded: the SSE2-intrinsics path writes here too now that it fills
