@@ -166,9 +166,40 @@ if tar -cf - --exclude=.git --exclude=.prof --exclude='*.o' \
             echo "note: Watcom LZ_EPI_FIXED=0 build failed, x87 rows will SKIP"
             tail -n 3 "$TMPD/epi0.wat.log" 2>/dev/null | sed 's/^/      /'; }
     fi
+    # THE SSE1 ARM. SSE1 is not a --kernel tier and cannot be: the row
+    # kernels' sseI/sseA cells are `i`, impossible, with the
+    # instruction-by-instruction reason registered in the matrix (no
+    # signed 16x16->32 MAC, no integer %xmm). But ONE operator does have
+    # a real SSE1 body - the q8 rounding kernel, lz_q8round32_sse - and
+    # lz_q8r_tier picks it on a machine with SSE and no SSE2. That tier
+    # had no comparison: switch_matrix_gate compiles LZ_Q8R_FORCE_SSE=1
+    # and nothing ran it, the same gap LZ_GDN_STATE_F32 sat in.
+    #
+    # Compared against SSE2 with --kernel sse2 on BOTH sides, so the q8r
+    # tier is the only thing that moves - forcing it via the compile
+    # switch rather than via --kernel ref, which would change the matmul
+    # kernel too and blur what the row measures.
+    if [ -n "$EPI0_BIN" ]; then
+        SSE1_DIR="$TMPD/sse1"
+        mkdir -p "$SSE1_DIR"
+        if tar -cf - --exclude=.git --exclude=.prof --exclude='*.o' \
+                --exclude='*.obj' --exclude='*.exe' . 2>/dev/null \
+                | tar -x -C "$SSE1_DIR" 2>/dev/null \
+           && ( cd "$SSE1_DIR" && rm -rf build/native \
+                && make EXTRA_DEFS=-DLZ_Q8R_FORCE_SSE=1 -j4 ) \
+                   >"$TMPD/sse1.log" 2>&1; then
+            for c in "$SSE1_DIR/llama98.exe" "$SSE1_DIR/llama98"; do
+                [ -x "$c" ] && SSE1_BIN=$c && break
+            done
+        fi
+        [ -n "${SSE1_BIN:-}" ] || {
+            echo "note: LZ_Q8R_FORCE_SSE=1 build failed, q8r row will SKIP"
+            tail -n 3 "$TMPD/sse1.log" 2>/dev/null | sed 's/^/      /'; }
+    fi
 else
     echo "note: could not copy the tree, epi rows will SKIP"
 fi
+SSE1_BIN=${SSE1_BIN:-}
 
 FLAGSETS="dflt:mmx:sse2:$RBIN:
 rot:mmx:sse2:$RBIN:--kv-rot on
@@ -221,6 +252,50 @@ for fx in zh en; do
 $FLAGSETS
 EOF
 done
+
+# ---------------------------------------------------------------------
+# THE q8-ROUNDING TIER, SSE1 against SSE2. Two BINARIES at one --kernel,
+# not two --kernels in one binary, so it does not fit the loop above:
+# the tier is chosen by lz_q8r_tier, and the only way to pin its SSE1
+# value on an SSE2 host is the compile switch.
+if [ -z "$SSE1_BIN" ]; then
+    echo "  q8r: SKIP - no LZ_Q8R_FORCE_SSE=1 build"
+else
+    for fx in zh en; do
+        TOK="build/norm_int_gate_tokens_$fx.txt"
+        [ -f "$TOK" ] || { echo "  q8r: SKIP - fixture missing: $TOK"; continue; }
+        ok=1
+        for side in sse1 sse2; do
+            b=$RBIN; [ "$side" = sse1 ] && b=$SSE1_BIN
+            if ! "$b" "$MODEL" --tokens-file "$TOK" --kernel sse2 \
+                    --dump-all-logits "$TMPD/q8r.$side.$fx.bin" \
+                    >"$TMPD/q8r.$side.$fx.log" 2>&1; then
+                echo "FAIL: q8r / $side / $fx did not run"
+                tail -n 3 "$TMPD/q8r.$side.$fx.log" | sed 's/^/      /'
+                FAIL=1; ok=0; break
+            fi
+        done
+        [ "$ok" = 1 ] || continue
+        SZ=$(wc -c <"$TMPD/q8r.sse2.$fx.bin")
+        if cmp -s "$TMPD/q8r.sse1.$fx.bin" "$TMPD/q8r.sse2.$fx.bin"; then
+            echo "PASS: $fx / q8r - SSE1 == SSE2 rounding tier ($SZ bytes)"
+            PASS=$((PASS + 1))
+        else
+            ND=$(cmp -l "$TMPD/q8r.sse1.$fx.bin" "$TMPD/q8r.sse2.$fx.bin" \
+                 2>/dev/null | wc -l)
+            echo "FAIL: $fx / q8r - SSE1 and SSE2 differ in $ND of $SZ bytes"
+            FAIL=1
+        fi
+    done
+    # THE ROW ABOVE IS THE SHAPE THAT LIES IF THE SWITCH IS INERT, so
+    # this is not left to the reader: mutating p127 from 127 to 126 in
+    # lz_q8round32_sse (the SSE1 body, src/ops_mmx_sse.c) changes the
+    # LZ_Q8R_FORCE_SSE=1 binary's output and leaves the ordinary build's
+    # byte-identical - measured on kmr20/zh, both directions. So the
+    # SSE1 tier executes, and "identical" above means the two roundings
+    # agree rather than that only one of them ran.
+    :
+fi
 
 # ---------------------------------------------------------------------
 # CROSS-COMPILER, PER TIER. The loop above compares tiers inside ONE
