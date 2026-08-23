@@ -89,6 +89,49 @@ extern int g_kernel;
    __aeabi_* calls (116.8 instructions) become one __aeabi_i2f. Watcom
    and any 32-bit x87 gcc build do not define __FLT_EVAL_METHOD__ as 0
    and keep the split, which is the whole reason it was written. */
+/* v * 2^e for a float v and an integer e, WITHOUT the multiply.
+ *
+ * Scaling by a power of two only moves the exponent field, so on the
+ * normal range this is an integer add on the bit pattern - about six
+ * instructions - where `v * pow2f(e)` is a __aeabi_fmul at 30 on the
+ * soft-float target. pow2f itself is already bit construction and costs
+ * nothing to speak of; the multiply is the whole expense.
+ *
+ * WHY IT IS THE SAME NUMBER AND NOT A CLOSE ONE: for a normal v and an
+ * in-range result, v * 2^e is exactly representable with the same
+ * significand, so the IEEE-754 product IS v with e added to its
+ * exponent. Neither form rounds, which is why this owes its callers
+ * bit-identity rather than a tolerance.
+ *
+ * THE CASES IT DECLINES, returning 0 so the caller keeps the multiply
+ * it already has written:
+ *   - v is zero or subnormal: the exponent field is 0 and adding to it
+ *     would build a different number entirely.
+ *   - the result would reach 255: overflow to inf. The multiply gets
+ *     that right; an exponent add would walk into the sign bit.
+ *   - the result would reach 0: gradual underflow to a subnormal, which
+ *     an exponent add cannot express.
+ * inf and NaN are excluded by the same first test - their exponent
+ * field is 255 - rather than by a separate case.
+ *
+ * Callers: both epilogue exits (ops.c, once per output element) and
+ * p2_group_norm (ops_gdn.c, twice per recurrence group, where the
+ * multiply it replaces already carried the comment "exact: multiply by
+ * a power of two"). */
+static int f32_scale_pow2(float v, int e, float *out) {
+    union { float f; uint32_t u; } b;
+    uint32_t bex;
+    int ex;
+    b.f = v;
+    bex = (b.u >> 23) & 0xFFu;
+    if (bex == 0u || bex == 0xFFu) return 0;  /* zero, subnormal, inf, NaN */
+    ex = (int)bex + e;
+    if (ex <= 0 || ex >= 255) return 0;       /* would underflow or overflow */
+    b.u = (b.u & 0x807FFFFFu) | ((uint32_t)ex << 23);
+    *out = b.f;
+    return 1;
+}
+
 static float lz_i32f(int32_t v) {
 #if defined(LZ_ARM_PRIM_ASM)
     if (g_kernel == LZ_KERNEL_ARM_ASM) return lz_i32f_arm_asm(v);

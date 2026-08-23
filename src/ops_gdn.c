@@ -1417,9 +1417,20 @@ static int p2_group_norm(float c1, float c2, int16_t *mul4, float *sacc,
         return 0;
     }
     e  = expof(cmax);               /* cmax >= LZ_Q8_MIN_SCALE, so normal */
-    p  = pow2f(14 - e);             /* exact */
-    t1 = c1 * p;                    /* exact: multiply by a power of two */
-    t2 = c2 * p;
+    /* Exact: multiplying by a power of two only moves the exponent, so
+       f32_scale_pow2 (ops_kernel_shared.h) does it as an integer add
+       and the __aeabi_fmul goes away - twice per group, in pass 2's
+       per-row block, which is the second-largest piece of the census's
+       largest row. It declines a zero/subnormal c and an out-of-range
+       result; pow2f keeps those, so the pair below is the same number
+       either way and the fallback is not dead code (c1 or c2 being
+       exactly zero is ordinary). */
+    if (!f32_scale_pow2(c1, 14 - e, &t1) ||
+        !f32_scale_pow2(c2, 14 - e, &t2)) {
+        p  = pow2f(14 - e);         /* exact */
+        t1 = c1 * p;
+        t2 = c2 * p;
+    }
     *esac_out = e - 14;
     *sacc = pow2f(e - 14);          /* exact reciprocal of p */
     m1 = (t1 > -0.5f && t1 < 0.5f) ? 0 : q8_round(t1);
@@ -2027,13 +2038,14 @@ static void gdn_p2_fixed_rows(const int8_t *sq_in, int8_t *sq_out,
            billing only inside gdn_p2_row_simd would read zero on
            --kernel ref, where p2_tier()==0 takes the scalar path only.
            coef 2 mul (was 3; the 2^-8 moved to the row, +1 below); norm
-           2 mul + 2 q8_round(add); scale 0 mul (was 2: both
-           power-of-two factors are folded into one pow2f now, which
-           bills nothing - see p2_group_scale). The fallback arm outside
-           pow2f's range still spends one, and is not billed: it is
-           unreachable on every input measured and billing a branch by
+           0 mul (was 2: p2_group_norm's `c * pow2f(14-e)` pair is an
+           exponent add now, f32_scale_pow2 - same number, no multiply)
+           + 2 q8_round(add); scale 0 mul (was 2: both power-of-two
+           factors are folded into one pow2f, which bills nothing - see
+           p2_group_scale). The fallback arms outside pow2f's range
+           still spend theirs and are not billed: billing a branch by
            its worst case would overstate every row that has one. */
-        LZ_FCX(LZ_FC_RECUR, 4 * ng + 1, 2 * ng, 0, 0, 0);
+        LZ_FCX(LZ_FC_RECUR, 2 * ng + 1, 2 * ng, 0, 0, 0);
 #ifdef LZ_HAVE_P2_MMX
         if (p2_tier()) {
             gdn_p2_row_simd(row_in,

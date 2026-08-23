@@ -1841,48 +1841,10 @@ int lz_epi_post_e(const LZTensor *w) {
     }
 }
 
-/* v * 2^e for a float v and an integer e, WITHOUT the multiply.
- *
- * Scaling by a power of two only moves the exponent field, so on the
- * normal range this is an integer add on the bit pattern - about six
- * instructions - where `v * pow2f(e)` is a __aeabi_fmul at 30 on the
- * soft-float target. pow2f itself is already bit construction and costs
- * nothing to speak of; the multiply is the whole expense, and the two
- * epilogue exits below run it once per OUTPUT ELEMENT.
- *
- * WHY IT IS THE SAME NUMBER AND NOT A CLOSE ONE: for a normal v and an
- * in-range result, v * 2^e is exactly representable with the same
- * significand, so the IEEE-754 product IS v with e added to its
- * exponent. Neither form rounds, which is why this owes its callers
- * bit-identity rather than a tolerance.
- *
- * THE CASES IT DECLINES, returning 0 so the caller keeps the multiply
- * it already has written:
- *   - v is zero or subnormal: the exponent field is 0 and adding to it
- *     would build a different number entirely.
- *   - the result would reach 255: overflow to inf. The multiply gets
- *     that right; an exponent add would walk into the sign bit.
- *   - the result would reach 0: gradual underflow to a subnormal, which
- *     an exponent add cannot express.
- * inf and NaN are excluded by the same first test - their exponent
- * field is 255 - rather than by a separate case.
- *
- * Same trick as p2_group_scale's power-of-two fold and as pow2f's own
- * construction, applied at the site that runs per element instead of
- * per group. */
-static int f32_scale_pow2(float v, int e, float *out) {
-    union { float f; uint32_t u; } b;
-    uint32_t bex;
-    int ex;
-    b.f = v;
-    bex = (b.u >> 23) & 0xFFu;
-    if (bex == 0u || bex == 0xFFu) return 0;  /* zero, subnormal, inf, NaN */
-    ex = (int)bex + e;
-    if (ex <= 0 || ex >= 255) return 0;       /* would underflow or overflow */
-    b.u = (b.u & 0x807FFFFFu) | ((uint32_t)ex << 23);
-    *out = b.f;
-    return 1;
-}
+/* f32_scale_pow2: src/ops_kernel_shared.h. Two TUs need it - this one
+   for both epilogue exits, ops_gdn.c for p2_group_norm - and a second
+   copy of a bit-layout helper is what build/dedupe_gate.sh exists to
+   refuse. */
 
 /* `pe` IS A PARAMETER, not a lz_epi_post_e(w) call in here, because this
    function runs once per output element and that value depends only on

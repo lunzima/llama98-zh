@@ -60,6 +60,7 @@ check_one '^#define LZ_WSUM_CHUNK'       'LZ_WSUM_CHUNK'
 check_one '^#define LZ_SLOT_NEXT'        'LZ_SLOT_NEXT'
 check_one '^static void gdn_tail_row('   'gdn_tail_row'
 check_one '^static int p2_shift_of('     'p2_shift_of'
+check_one '^static int f32_scale_pow2('  'f32_scale_pow2'
 
 # ---- the same defect, in macros, found by scanning rather than by
 # ---- being reported ---------------------------------------------------
