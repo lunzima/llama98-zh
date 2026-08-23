@@ -24,8 +24,9 @@
 #                this: the assembly columns are empty on gcc and the
 #                intrinsics columns are empty on Watcom, both correctly.
 #                That is exactly why 2026-08-09 went unnoticed.
-#   the rest     every cell no class carries is 'i' (impossible) or 't'
-#                (todo) in every binary, never blank.
+#   the rest     every cell no class carries is 'i' (impossible), 't'
+#                (todo) or 'd' (written, measured, not better) in every
+#                binary, never blank.
 #
 # gcc and Watcom are MANDATORY - a union of one is not a union. ARM is
 # optional and skipping it is announced with the cells that go unchecked,
@@ -249,7 +250,7 @@ while read -r cell _status have _kind; do
             for c in $CLASSES; do
                 s=$(awk -v k="$cell" '$1 == k {print $2}' "$WORK/$c.cells")
                 case "$s" in
-                    i|t) ;;
+                    i|t|d) ;;
                     *) bad "$cell is empty everywhere but class $c reports '$s'," \
                            "not a reason letter" ;;
                 esac
@@ -278,7 +279,8 @@ done < "$WORK/$REF.cells"
 say "-- union --"
 say "  covered: $COVERED (unit x tier x build class)"
 say "  registered empty: $(awk '$2 == "i"' "$WORK/$REF.cells" | wc -l) impossible," \
-    "$(awk '$2 == "t"' "$WORK/$REF.cells" | wc -l) todo" \
+    "$(awk '$2 == "t"' "$WORK/$REF.cells" | wc -l) todo," \
+    "$(awk '$2 == "d"' "$WORK/$REF.cells" | wc -l) declined" \
     "(per binary; the reasons are in --kernel-matrix)"
 if [ -n "$UNCHECKED" ]; then
     say "  UNCHECKED (no binary of that class):$UNCHECKED"

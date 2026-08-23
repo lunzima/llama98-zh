@@ -1065,6 +1065,7 @@ int main(int argc, char **argv) {
                cells, this file prints them and decides. */
             LZKmCell kc;
             int n = 0, here = 0, other = 0, imp = 0, todo = 0, bad = 0;
+            int decl = 0;
             char hs[4];
 #if defined(__arm__)
             printf("format mmxI sseI sse2I mmxA sseA sse2A armC armA  g128\n%s",
@@ -1074,6 +1075,7 @@ int main(int argc, char **argv) {
                    lz_kernel_matrix());
 #endif /* __arm__ */
             printf("legend x=here o=other-build i=impossible t=todo "
+                   "d=declined-measured "
                    "!=MISSING-HERE ?=UNREGISTERED +=UNDECLARED\n");
             for (n = 0; lz_kernel_cell(n, &kc); n++) {
                 hs[0] = (kc.have & LZ_KMB_GCC) ? 'G' : '-';
@@ -1089,14 +1091,15 @@ int main(int argc, char **argv) {
                 case 'o': other++; break;
                 case 'i': imp++;   break;
                 case 't': todo++;  break;
+                case 'd': decl++;  break;
                 default:   bad++;  break;
                 }
             }
             printf("cells %d class %c here %d elsewhere %d impossible %d "
-                   "todo %d bad %d\n", n,
+                   "todo %d declined %d bad %d\n", n,
                    (lz_kernel_build_class() & LZ_KMB_GCC) ? 'G' :
                    (lz_kernel_build_class() & LZ_KMB_WAT) ? 'W' : 'A',
-                   here, other, imp, todo, bad);
+                   here, other, imp, todo, decl, bad);
             if (bad) {
                 for (n = 0; lz_kernel_cell(n, &kc); n++) {
                     const char *msg;

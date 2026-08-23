@@ -3203,10 +3203,19 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
      IMPOSSIBLE  no build will ever have it; the audit is below.
      TODO        nobody has written it. Not a defect - a registration.
                  An unregistered cell is '?', which IS a defect.
+     DECLINED    it WAS written and measured, and the measurement said
+                 the hand cell is not better. Settled, like IMPOSSIBLE,
+                 but for a reason that a faster idea could overturn.
 
    Filling in IMPOSSIBLE where TODO belongs is the expensive mistake:
    it retires the cell permanently and the next person reads it as
    settled. TODO only waits.
+
+   DECLINED exists because that pair could not express f32mm armA.
+   IMPOSSIBLE was false - the code compiles and is bit-identical - and
+   TODO invited the next reader to spend a day arriving at a number
+   already measured. A class that cannot say "tried, worse" makes
+   "tried, worse" indistinguishable from "nobody got to it".
 
    ---- IMPOSSIBLE, cell by cell -----------------------------------------
 
@@ -3268,6 +3277,7 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
    than by the kernel under test. */
 #define LZ_KM_IMPOSSIBLE 1
 #define LZ_KM_TODO       2
+#define LZ_KM_DECLINED   3
 
 /* g128's gcc expectation follows the knob rather than being hand-
    declared: -DLZ_G128_GCC=0 is the documented A/B control arm, the row
@@ -3480,21 +3490,22 @@ static const char km_why_fwht_g128[] =
    multiply-add, so those two cells cannot exist. SSE1 is where mulps
    and addps arrive, and every SSE2 machine has them - so ONE body
    serves both tiers and the SSE2 cells hold it rather than a copy.
-   The ARM cell is real and unwritten: no SIMD there, but the audit's
-   G2 argument applies - one unpack and align can serve the multiply
-   and the add instead of two __aeabi_* calls, which is a CHAIN and
-   therefore the category that pays (see the M5 box in
-   docs/arm-asm-audit.md for the one that does not). */
+   The ARM cell is DECLINED rather than unwritten: what a hand cell can
+   take there is the product's pack and the addend's unpack of that same
+   word, and the multiply core it would need costs more than that. See
+   the reason string. */
 static const char km_why_f32mm_mmx[] =
     "impossible: MMX is integer-only and this is a float multiply-add. "
     "SSE1 is the first tier that can express it";
 static const char km_why_f32mm_arma[] =
-    "not written yet, reason MEASURED: the MAC costs 74.0 instructions, "
-    "exactly mul 30.0 + add 43.0, so libgcc shares nothing - but a hand "
-    "cell may only take the pack/unpack round trip and one call/return "
-    "(about 74 -> 57). It may NOT skip the product's rounding: that "
-    "would make this an FMA, a different function, and the x86<->ARM "
-    "parity gate would go red. docs/arm-asm-audit.md G2";
+    "DECLINED on a measurement of the cell, not an estimate of it. The "
+    "MAC costs 74.0 and a hand cell may only take the pack/unpack round "
+    "trip, about 14 - it may NOT skip the product's rounding, which "
+    "would make it an FMA and redden the x86<->ARM parity gate. The "
+    "multiply core it needs was then written and measured (mode 24 "
+    "against 16, .prof/arm_chain_count.sh): 49.0 against __aeabi_fmul's "
+    "30.0, zero declines. Overspending by 19 to save 14 settles it "
+    "without the adder half. docs/arm-asm-audit.md G2";
 static const char km_why_f32mm_g128[] =
     "this column is the 128-ELEMENT quantization group; lz_matmul's "
     "unit of work is a whole weight ROW against a whole activation "
@@ -3503,6 +3514,7 @@ typedef struct { unsigned char have; unsigned char why; const char *text; } LZKm
 #define KM_H(mask) { (unsigned char)(mask), 0, (const char *)0 }
 #define KM_I(text) { 0, LZ_KM_IMPOSSIBLE, (text) }
 #define KM_T(text) { 0, LZ_KM_TODO, (text) }
+#define KM_D(text) { 0, LZ_KM_DECLINED, (text) }
 #define KM_ALL (LZ_KMB_GCC | LZ_KMB_WAT | LZ_KMB_ARM)
 
 /* ref is the one DECLARED-present column with no per-format variation:
@@ -3549,7 +3561,7 @@ static const LZKmReg km_reg[LZ_KM_NUNIT * LZ_KM_NCOL] = {
    deleted and not a single cell would change. */
 /* fwhti*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_fwhti_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_fwhti_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM),       KM_I(km_why_fwht_g128),
 /* fwhtf*/ KM_H(KM_ALL), KM_I(km_why_fwhtf_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_I(km_why_fwhtf_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM),          KM_I(km_why_fwht_g128),
-/* f32mm*/ KM_H(KM_ALL), KM_I(km_why_f32mm_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_I(km_why_f32mm_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_T(km_why_f32mm_arma), KM_I(km_why_f32mm_g128)
+/* f32mm*/ KM_H(KM_ALL), KM_I(km_why_f32mm_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_I(km_why_f32mm_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_D(km_why_f32mm_arma), KM_I(km_why_f32mm_g128)
 };
 
 #if defined(__WATCOMC__)
@@ -3777,6 +3789,7 @@ static char km_status(int f, int c) {
     if (have) return 'o';
     if (km_at(f, c)->why == LZ_KM_IMPOSSIBLE) return 'i';
     if (km_at(f, c)->why == LZ_KM_TODO) return 't';
+    if (km_at(f, c)->why == LZ_KM_DECLINED) return 'd';
     return '?';
 }
 

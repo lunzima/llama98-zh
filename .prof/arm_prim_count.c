@@ -72,6 +72,94 @@ __attribute__((noinline)) static float i32f_null(int32_t v) {
 
 volatile int32_t g_sink;
 volatile float g_mulc = 1.4142135f;      /* modes 16/17/19/20, see there */
+
+#if PRIM_MODE == 24 && defined(LZ_ARM_PRIM_ASM)
+/* THE QUESTION MODE 24 ANSWERS, and the only reason this body exists:
+ * can a hand-written soft-float core in this tree beat libgcc's?
+ *
+ * It lives HERE and not in src/ops_arm_prim.h because nothing ships it.
+ * f32mm armA is `acc + w*x`, and what a hand cell can take there is the
+ * product's pack and the addend's unpack of that same word - about 14
+ * of the chain's 74 instructions. That only pays if the multiply and
+ * add cores are themselves no worse than __aeabi_fmul and __addsf3,
+ * which are hand-tuned assembly.
+ *
+ * Half the answer was already in: lz_faddsub_arm_asm does two adds off
+ * one unpack for 89, so its adder core runs about 44.5 an add against
+ * __addsf3's 43.03. This is the other half, deliberately a MULTIPLY
+ * ALONE rather than the whole MAC - a core that cannot match
+ * __aeabi_fmul's 30 settles the cell without anyone writing the loop,
+ * the group snapshot and the group-wide decline the full one needs.
+ *
+ * ANSWER: 49.0 against 30.0, with zero declines on this argument
+ * stream (the fallback's `bl` executes 0 times in 1024 calls). It
+ * overspends by 19 to save 14, so the cell is DECLINED in the matrix
+ * rather than left TODO.
+ *
+ * Same decline set as the adder plus the product's own: an
+ * out-of-range product exponent either way. UMULL gives the 48-bit
+ * significand product in one instruction. */
+static __inline__ int spw_fmul_arm(uint32_t ua, uint32_t ub,
+                                   uint32_t *out) {
+    uint32_t ok, R, e, pl, ph, t, a = ua, b = ub;
+    __asm__(
+        "and    %[R],  %[a], #0x80000000\n\t"
+        "eor    %[R],  %[R], %[b]\n\t"
+        "and    %[R],  %[R], #0x80000000\n\t"
+        "mov    %[a],  %[a], lsl #1\n\t"
+        "mov    %[b],  %[b], lsl #1\n\t"
+        "sub    %[e],  %[a], #0x01000000\n\t"
+        "cmp    %[e],  #0xFE000000\n\t"
+        "sublo  %[e],  %[b], #0x01000000\n\t"
+        "cmplo  %[e],  #0xFE000000\n\t"
+        "bhs    9f\n\t"
+        "mov    %[e],  %[a], lsr #24\n\t"
+        "mov    %[t],  %[b], lsr #24\n\t"
+        "add    %[e],  %[e], %[t]\n\t"
+        "sub    %[e],  %[e], #127\n\t"
+        "mov    %[a],  %[a], lsl #8\n\t"
+        "mov    %[a],  %[a], lsr #9\n\t"
+        "orr    %[a],  %[a], #0x800000\n\t"
+        "mov    %[b],  %[b], lsl #8\n\t"
+        "mov    %[b],  %[b], lsr #9\n\t"
+        "orr    %[b],  %[b], #0x800000\n\t"
+        "umull  %[pl], %[ph], %[a], %[b]\n\t"
+        /* Normalise to bit 47 - the significand product reaching 2,
+           one exponent step and never more, both factors being
+           under 2. */
+        "cmp    %[ph], #0x8000\n\t"
+        "addhs  %[e],  %[e], #1\n\t"
+        "movlo  %[ph], %[ph], lsl #1\n\t"
+        "orrlo  %[ph], %[ph], %[pl], lsr #31\n\t"
+        "movlo  %[pl], %[pl], lsl #1\n\t"
+        "mov    %[a],  %[ph], lsl #8\n\t"
+        "orr    %[a],  %[a], %[pl], lsr #24\n\t"   /* 24-bit significand */
+        "mov    %[b],  %[pl], lsl #8\n\t"          /* dropped, left-just. */
+        "cmp    %[b],  #0x80000000\n\t"
+        "addhi  %[a],  %[a], #1\n\t"
+        "andeq  %[b],  %[a], #1\n\t"
+        "addeq  %[a],  %[a], %[b]\n\t"
+        "cmp    %[a],  #0x01000000\n\t"
+        "addeq  %[e],  %[e], #1\n\t"
+        "subeq  %[a],  %[a], #0x800000\n\t"
+        "sub    %[e],  %[e], #1\n\t"
+        "cmp    %[e],  #254\n\t"
+        "bhs    9f\n\t"                            /* over- or underflow */
+        "add    %[a],  %[a], %[e], lsl #23\n\t"
+        "orr    %[R],  %[R], %[a]\n\t"
+        "mov    %[ok], #1\n\t"
+        "b      8f\n\t"
+        "9:\n\t"
+        "mov    %[ok], #0\n\t"
+        "8:\n\t"
+        : [ok] "=&r"(ok), [R] "=&r"(R), [e] "=&r"(e), [pl] "=&r"(pl),
+          [ph] "=&r"(ph), [t] "=&r"(t), [a] "+r"(a), [b] "+r"(b)
+        :
+        : "cc");
+    *out = R;
+    return (int)ok;
+}
+#endif /* PRIM_MODE == 24 && LZ_ARM_PRIM_ASM */
 volatile float g_facc = 0.7071068f;      /* mode 20's accumulator */
 
 /* norm_ss_fixed's Q15 image and its exponent (mode 9). Live outside the
@@ -361,6 +449,23 @@ int main(int argc, char **argv) {
 #else
         u.f = SP_ARG[k] + g_mulc;          g_sink = u.i;
 #endif
+#elif PRIM_MODE == 24
+        /* Mode 16's bare multiply through spw_fmul_arm, fallback
+         * included. 24 against 16 is the whole f32mm armA question:
+         * a hand core that cannot match __aeabi_fmul settles the cell,
+         * because the MAC's shareable part is only the pack/unpack
+         * round trip between the two operations. */
+        {
+            union { float f; uint32_t u; } ba, bb;
+            uint32_t r;
+            ba.f = SP_ARG[k];
+            bb.f = g_mulc;
+            if (spw_fmul_arm(ba.u, bb.u, &r)) {
+                g_sink = (int32_t)r;
+            } else {
+                u.f = ba.f * bb.f;   g_sink = u.i;
+            }
+        }
 #elif PRIM_MODE == 21 || PRIM_MODE == 22 || PRIM_MODE == 23
         /* 21 is mode 19's operand pair through the hand-written cell,
          * WITH the fallback the real caller runs - a declined pair pays
