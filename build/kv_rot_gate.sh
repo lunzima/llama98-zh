@@ -41,9 +41,10 @@
 # so the arm did not move. Something else in the engine or the model did,
 # and the older figure has no provenance to chase it with.)
 #
-# So both formats now go through helps(), and helps() names --kv-rot on
-# BOTH arms so it can never again depend on a default. What the default
-# does is asserted separately, below, where it is the subject.
+# helps() names --kv-rot on BOTH arms so it can never again depend on a
+# default; what the default does is asserted separately, below, where it
+# is the subject. q4 goes through helps(); q8 goes through alive(), for
+# the measured reason spelled out above that arm.
 #
 # Exit: 0 PASS, 1 FAIL, 2 SKIP.
 set -u
