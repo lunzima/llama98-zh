@@ -1,5 +1,5 @@
 #!/bin/bash
-# Iron law 10's language floor, as a gate instead of a memory.
+# The language floor, as a gate instead of a memory.
 #
 # The target family includes Windows NT on MIPS built with Visual C++
 # 4.0 - a 1995 C89 compiler. gcc and Watcom both accept far more than
@@ -11,9 +11,9 @@
 #   mixed declarations and code   - a declaration after a statement
 #   //                            - already 0 in this tree, kept at 0
 #
-# NOT `long long` and NOT <stdint.h>. Those are 213 and 23 hits of
-# KNOWN, TRACKED debt (CLAUDE.md iron law 10 counts them), and the plan
-# for them is one header per toolchain rather than a per-site fix. A
+# NOT `long long` and NOT <stdint.h>. Those were 213 and 23 hits of
+# known, tracked debt, and the plan for them was one header per
+# toolchain rather than a per-site fix - src/lz_int.h is that header. A
 # gate that fails on the whole existing surface fails every run and
 # gets switched off; this one has to redden only on NEW breakage, so it
 # is a RATCHET: a baseline count per file, and any increase is a
@@ -88,6 +88,44 @@ if [ "$TOTAL" -eq 0 ]; then
     echo "      reporting mixed declarations and this gate is blind"
     FAIL=1
 fi
+
+# DOES IT COMPILE, which the counting above never asked.
+#
+# Everything before this point greps for two constructs and tolerates a
+# baseline of them. That is a WARNING-class check and it is blind to the
+# error class: `restrict` is C99, twenty-six declarations used it, every
+# translation unit that saw one failed to PARSE, and this gate reported
+# PASS across all forty errors. Counting patterns is not compiling.
+#
+# ERRORS ONLY, no baseline. A warning here is a style question with a
+# recorded number above; an error means the floor is not met at all, and
+# there is no such thing as an acceptable number of those.
+#
+# WHAT THIS DOES NOT PROVE, and the distinction matters more here than
+# in most gates: green means the code is standard C89. It does NOT mean
+# Visual C++ 4.0 accepts it - that compiler's C89 is incomplete and has
+# quirks of its own, and nothing in this tree can run it. Reading this
+# gate as "the MIPS target builds" is the mistake it is written to
+# prevent.
+CFAIL=0
+for f in src/*.c; do
+    case "$(basename "$f")" in
+        ops_mmx.c|ops_mmx_sse.c|ops_sse2.c) isa="-mmmx -msse -msse2" ;;
+        *) isa="" ;;
+    esac
+    n=$(gcc -std=c89 -pedantic -fsyntax-only -Isrc -Icommon \
+            -DLZ_MMX_TU=1 -DLZ_SSE2_TU=1 $isa "$f" 2>&1 \
+        | grep -c " error: ")
+    if [ "$n" -gt 0 ]; then
+        echo "FAIL: $(basename "$f") - $n C89 compile error(s)"
+        gcc -std=c89 -pedantic -fsyntax-only -Isrc -Icommon \
+            -DLZ_MMX_TU=1 -DLZ_SSE2_TU=1 $isa "$f" 2>&1 \
+            | grep -m2 " error: " | sed 's/^/      /'
+        CFAIL=$((CFAIL + n))
+        FAIL=1
+    fi
+done
+[ "$CFAIL" -eq 0 ] && echo "c89 compile: 0 errors across $(ls src/*.c | wc -l) file(s)"
 
 if [ "$FAIL" -eq 0 ]; then
     echo "c89_floor_gate: PASS ($TOTAL known violation(s), none new)"
