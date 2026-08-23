@@ -74,7 +74,30 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
 
 MODEL=${1:-}
-TOKENS=${2:-1,2,3,4,5,6,7,8,9,10}
+# TEN TOKENS WAS NOT ENOUGH AND THIS GATE'S SIBLING SAYS SO IN WRITING.
+# build/fixed_tier_xcompiler_gate.sh's header: the tier divergences it
+# hunts need "~150 tokens of specific text" before they surface, and "at
+# 8 tokens even THAT one reads clean" - which is why that gate runs the
+# 603/661-token real-text fixtures. This one ran 1..10, so the
+# soft-float arm of the cross-regime comparison was being certified on a
+# length the tree had already measured as too short. The two gates also
+# therefore shared no fixture, so "gcc == Watcom" and "gcc == ARM" did
+# not compose into a four-way claim.
+#
+# Default is now the same fixture, truncated past that threshold.
+# PARITY_NTOK picks the length: 160 crosses the ~150 the sibling names,
+# at roughly seven minutes of QEMU. The whole 603 passes too - run
+# 2026-08-23, bit-identical on all three ARM tiers - and is not the
+# default only because it takes about half an hour.
+TOKFILE=${TOKFILE:-$ROOT/build/norm_int_gate_tokens_zh.txt}
+NTOK=${PARITY_NTOK:-160}
+if [ -z "${2:-}" ] && [ -f "$TOKFILE" ]; then
+    TOKENS=$(tr -s ' \n' '\n' < "$TOKFILE" | grep -v '^$' | head -n "$NTOK" \
+             | paste -sd, -)
+    echo "-- fixture: first $NTOK of $(basename "$TOKFILE") --"
+else
+    TOKENS=${2:-1,2,3,4,5,6,7,8,9,10}
+fi
 if [ -z "$MODEL" ]; then
     echo "usage: parity_gate.sh <model-dir> [tokens]" >&2
     exit 1
