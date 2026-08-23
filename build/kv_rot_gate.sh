@@ -13,19 +13,35 @@
 # lossy format the rotated run must land closer to it than the
 # unrotated one.
 #
-# WHAT THIS FOUND ON ITS FIRST RUN, and why one entry is inverted:
-#   --kv q8   rot off 2.963e-02, rot on 2.943e-02  - 0.68% better
-#   --kv q4   rot off 1.0035e-01, rot on 1.0035e-01 - BYTE-IDENTICAL
-# The knob does NOTHING for q4, the lossier of the two formats and the
-# one that would gain most. That is either a defect or an undocumented
-# limitation; it is not something to leave unrecorded, and asserting
-# "rot helps" for q4 would leave a permanently red gate that everyone
-# learns to ignore.
+# WHAT THIS FOUND, AND WHAT IT GOT WRONG FIRST. The first version
+# reported q8 rot off 2.963e-02 / rot on 2.943e-02 (0.68% better) and q4
+# BYTE-IDENTICAL between its two arms, and concluded the knob does
+# nothing for q4 - the lossier format, the one that should gain most -
+# so it recorded "either a defect or an undocumented limitation" and
+# pinned the identity.
 #
-# So q4's entry asserts the CURRENT state - identical - and says what
-# that means. If the rotation ever starts reaching q4, this gate FAILS
-# and someone updates it deliberately. A gate that only catches
-# regressions cannot notice a knob quietly starting to work.
+# BOTH q4 ARMS WERE THE SAME ARM. The off arm was a bare `--kv q4`, and
+# choosing q4 turns rotation ON (parse_kvfmt). Two identical
+# configurations are byte-identical for a reason that carries no
+# information about the knob at all.
+#
+# MEASURED WITH A REAL OFF ARM. kmr20, 200 tokens, 2026-08-23 - and the
+# model and date are written down here because the older pair above has
+# neither, so it cannot be reproduced or compared against:
+#   --kv q8   rot off 4.582e-02, rot on 3.836e-02  - 16.3% better
+#   --kv q4   rot off 2.882e-01, rot on 1.736e-01  - 39.7% better
+# The shape is what the theory predicted all along: the rotation helps
+# the LOSSIER format far more. q8's number was never the surprise; q4's
+# zero was, and the zero was the instrument, not the engine.
+#
+# (q8 moved from 0.68% to 16.3% between the two runs. Not this change -
+# verified: bare `--kv q8` and `--kv q8 --kv-rot off` are byte-identical,
+# so the arm did not move. Something else in the engine or the model did,
+# and the older figure has no provenance to chase it with.)
+#
+# So both formats now go through helps(), and helps() names --kv-rot on
+# BOTH arms so it can never again depend on a default. What the default
+# does is asserted separately, below, where it is the subject.
 #
 # Exit: 0 PASS, 1 FAIL, 2 SKIP.
 set -u
@@ -73,10 +89,19 @@ run() {   # run TAG ARGS...
 run ref --kv f32 || exit 1
 FAILED=0
 
-# helps FMT - the rotated run must be strictly closer to the f32 cache
+# helps FMT - the rotated run must be strictly closer to the f32 cache.
+#
+# BOTH ARMS NAME --kv-rot EXPLICITLY, and that is the whole correction
+# this function once needed: the off arm used to be a bare `--kv $fmt`
+# and rely on the default being off. True for q8. NOT true for q4, which
+# turns rotation on as part of choosing the format (parse_kvfmt, and the
+# comment above it says so) - so the q4 "off" arm was a second copy of
+# the on arm, the two came out byte-identical, and this gate recorded
+# that as "the knob is inert on q4, either a defect or an undocumented
+# limitation". It was neither. It was one missing flag.
 helps() {
     local fmt="$1" off on
-    run "${fmt}off" --kv "$fmt" || return 1
+    run "${fmt}off" --kv "$fmt" --kv-rot off || return 1
     run "${fmt}on"  --kv "$fmt" --kv-rot on || return 1
     off=$("$W/logit_rms" "$W/ref.bin" "$W/${fmt}off.bin" | cut -d' ' -f1)
     on=$("$W/logit_rms" "$W/ref.bin" "$W/${fmt}on.bin"  | cut -d' ' -f1)
@@ -89,19 +114,26 @@ helps() {
 
 echo "kv_rot_gate: reference is --kv f32, $NTOK tokens"
 helps q8 || FAILED=1
+helps q4 || FAILED=1
 
-# q4: asserted INERT, deliberately. See the header.
-run q4off --kv q4 || exit 1
-run q4on  --kv q4 --kv-rot on || exit 1
-if cmp -s "$W/q4off.bin" "$W/q4on.bin"; then
-    echo "  q4   rot on is BYTE-IDENTICAL to rot off - the knob is inert"
-    echo "       here, which is the recorded state, not a pass of its claim"
-else
-    echo "  q4   rot on now CHANGES the output, which it did not when this"
-    echo "       gate was written. That is not a regression - it is the knob"
-    echo "       starting to reach q4. Measure it and turn this entry into"
-    echo "       a helps() call."
+# THE DEFAULT IS PART OF THE CLAIM. helps() above pins both arms, so it
+# can no longer see whether --kv q4 still turns rotation on by itself -
+# and that coupling is what makes the obvious `--kv q4` invocation the
+# good one. Asserted here, where it is the only thing being asserted:
+# bare --kv q4 must equal --kv q4 --kv-rot on, and both must differ from
+# --kv q4 --kv-rot off.
+run q4dflt --kv q4 || exit 1
+if ! cmp -s "$W/q4dflt.bin" "$W/q4on.bin"; then
+    echo "  q4   FAIL: bare --kv q4 is no longer rotating - parse_kvfmt's"
+    echo "       coupling to lz_kv_rot_enable is gone, so the obvious"
+    echo "       invocation now gets the WORSE arm"
     FAILED=1
+elif cmp -s "$W/q4dflt.bin" "$W/q4off.bin"; then
+    echo "  q4   FAIL: --kv-rot off did not turn rotation off, so the two"
+    echo "       arms compared above were one arm measured twice"
+    FAILED=1
+else
+    echo "  q4   default couples to rotation (bare == on, both != off)"
 fi
 
 [ $FAILED -eq 0 ] || { echo "kv_rot_gate: FAIL"; exit 1; }
