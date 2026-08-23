@@ -55,11 +55,11 @@ static int dtype_from_name(const char *s) {
 
 int lz_st_open(LZSafetensors *st, const char *path, char *errbuf, int errlen) {
     unsigned char lenbuf[8];
-    unsigned long long hdr_len = 0;
+    lz_u64 hdr_len = 0;
     char *hdr = NULL;
     const LZJsonNode *root, *m;
     int i;
-    unsigned long long max_end = 0;
+    lz_u64 max_end = 0;
 
     memset(st, 0, sizeof(*st));
     if (errbuf && errlen > 0) errbuf[0] = '\0';
@@ -80,10 +80,10 @@ int lz_st_open(LZSafetensors *st, const char *path, char *errbuf, int errlen) {
         goto fail;
     }
     /* assemble little-endian u64 byte by byte: no host-endianness or alignment assumptions */
-    for (i = 7; i >= 0; i--) hdr_len = (hdr_len << 8) | (unsigned long long)lenbuf[i];
+    for (i = 7; i >= 0; i--) hdr_len = (hdr_len << 8) | (lz_u64)lenbuf[i];
 
     if (hdr_len == 0 || hdr_len > LZ_ST_MAX_HEADER ||
-        hdr_len + 8ULL > (unsigned long long)st->file_size) {
+        hdr_len + 8ULL > (lz_u64)st->file_size) {
         sterr(errbuf, errlen, LZ_ERR_ST_HEADER_BAD,
               hdr_len, st->file_size);
         goto fail;
@@ -126,7 +126,7 @@ int lz_st_open(LZSafetensors *st, const char *path, char *errbuf, int errlen) {
         LZStTensor *t;
         const LZJsonNode *sh, *off, *e;
         const char *dts;
-        long long s0, e0;
+        lz_i64 s0, e0;
 
         /* __metadata__ is the format-mandated non-tensor member; skip */
         if (m->key && strcmp(m->key, "__metadata__") == 0) continue;
@@ -165,7 +165,7 @@ int lz_st_open(LZSafetensors *st, const char *path, char *errbuf, int errlen) {
                 sterr(errbuf, errlen, LZ_ERR_ST_SHAPE, t->name);
                 goto fail;
             }
-            t->shape[i] = (long long)e->num;
+            t->shape[i] = (lz_i64)e->num;
             t->n_elem *= t->shape[i];
         }
 
@@ -174,29 +174,29 @@ int lz_st_open(LZSafetensors *st, const char *path, char *errbuf, int errlen) {
             sterr(errbuf, errlen, LZ_ERR_ST_OFFSET, t->name);
             goto fail;
         }
-        s0 = (long long)lz_json_at(&st->json, off, 0)->num;
-        e0 = (long long)lz_json_at(&st->json, off, 1)->num;
+        s0 = (lz_i64)lz_json_at(&st->json, off, 0)->num;
+        e0 = (lz_i64)lz_json_at(&st->json, off, 1)->num;
         if (s0 < 0 || e0 < s0) {
             sterr(errbuf, errlen, LZ_ERR_ST_OFFSET_RANGE, t->name);
             goto fail;
         }
-        t->off_begin = (unsigned long long)s0;
-        t->nbytes = (unsigned long long)(e0 - s0);
+        t->off_begin = (lz_u64)s0;
+        t->nbytes = (lz_u64)(e0 - s0);
 
         /* declared byte count must match shape×dtype, or later reads misalign silently */
-        if (t->nbytes != (unsigned long long)t->n_elem *
-                         (unsigned long long)lz_st_dtype_size(t->dtype)) {
+        if (t->nbytes != (lz_u64)t->n_elem *
+                         (lz_u64)lz_st_dtype_size(t->dtype)) {
             sterr(errbuf, errlen, LZ_ERR_ST_NBYTES,
                   t->name, t->nbytes,
                   t->n_elem * lz_st_dtype_size(t->dtype));
             goto fail;
         }
-        if (st->data_start + (unsigned long long)e0 >
-            (unsigned long long)st->file_size) {
+        if (st->data_start + (lz_u64)e0 >
+            (lz_u64)st->file_size) {
             sterr(errbuf, errlen, LZ_ERR_ST_OVERFLOW, t->name);
             goto fail;
         }
-        if ((unsigned long long)e0 > max_end) max_end = (unsigned long long)e0;
+        if ((lz_u64)e0 > max_end) max_end = (lz_u64)e0;
 
         st->n_tensors++;
     }
@@ -205,7 +205,7 @@ int lz_st_open(LZSafetensors *st, const char *path, char *errbuf, int errlen) {
         sterr(errbuf, errlen, LZ_ERR_ST_NO_TENSORS);
         goto fail;
     }
-    if (st->data_start + max_end != (unsigned long long)st->file_size) {
+    if (st->data_start + max_end != (lz_u64)st->file_size) {
         sterr(errbuf, errlen, LZ_ERR_ST_DATA_SIZE,
               st->data_start, max_end, st->file_size);
         goto fail;
@@ -235,7 +235,7 @@ const LZStTensor *lz_st_find(const LZSafetensors *st, const char *name) {
 }
 
 static int st_seek_read(LZSafetensors *st, const LZStTensor *t,
-                        void *dst, unsigned long long nbytes,
+                        void *dst, lz_u64 nbytes,
                         char *errbuf, int errlen) {
     if (lz_fseek64(st->fp, st->data_start + t->off_begin) != 0) {
         sterr(errbuf, errlen, LZ_ERR_ST_SEEK,
@@ -259,8 +259,8 @@ int lz_st_read_raw(LZSafetensors *st, const LZStTensor *t,
 }
 
 int lz_st_read_f32(LZSafetensors *st, const LZStTensor *t,
-                   float *dst, long long n, char *errbuf, int errlen) {
-    long long i;
+                   float *dst, lz_i64 n, char *errbuf, int errlen) {
+    lz_i64 i;
     unsigned char *raw;
 
     if (!st || !t || !dst) {
@@ -300,7 +300,7 @@ int lz_st_read_f32(LZSafetensors *st, const LZStTensor *t,
        i<n we always have 4i < 2n+2i, so writes never catch up with
        unread data. */
     raw = (unsigned char *)dst + (size_t)(n * 2);
-    if (st_seek_read(st, t, raw, (unsigned long long)(n * 2), errbuf, errlen) != 0)
+    if (st_seek_read(st, t, raw, (lz_u64)(n * 2), errbuf, errlen) != 0)
         return 1;
 
     if (t->dtype == LZ_DT_BF16) {

@@ -10,6 +10,7 @@
    All output is English; column alignment uses fixed-width fields only
    (no CJK width tricks), so it stays aligned in any terminal.
 */
+#include "lz_int.h"   /* lz_i64/lz_u64 and LZ_PRI64 - iron law 10 */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -62,86 +63,86 @@ static const char *tok_path_for(const char *dir, char *buf, int cap,
    llama_zh.h - since generate.c, not forward.c, needs to read it.) */
 extern float lz_debug_mtp_attn_scale;
 extern int lz_debug_mtp_attn_window;
-extern long long lz_debug_mtp_attn_rows;
+extern lz_i64 lz_debug_mtp_attn_rows;
 /* Part 4: microseconds inside each piece of a speculative
    round. Printed here rather than in the engine because nothing there
    forbids console output below cli_main.c - the engine only ever
    accumulates. */
-extern long long lz_debug_us_verify;
-extern long long lz_debug_us_draft;
-extern long long lz_debug_us_capture;
+extern lz_i64 lz_debug_us_verify;
+extern lz_i64 lz_debug_us_draft;
+extern lz_i64 lz_debug_us_capture;
 /* Part 5: call-count companion to lz_debug_us_capture - see
    forward.c's own comment on why a removed call and a merely-fast call
    are indistinguishable without this. */
-extern long long lz_debug_n_capture;
+extern lz_i64 lz_debug_n_capture;
 /* Part 6: timer + call-count pair for catch-up decode - see
    forward.c's own comment on lz_mtp_catchup for why it is a separate
    entry point from lz_mtp_prefill. */
-extern long long lz_debug_us_catchup;
-extern long long lz_debug_n_catchup;
+extern lz_i64 lz_debug_us_catchup;
+extern lz_i64 lz_debug_n_catchup;
 /* Part 7: positive control for the ring-based rollback -
    defined in generate.c, not forward.c, unlike every counter above -
    see its own comment there for why. */
-extern long long lz_debug_n_ring_rollback;
+extern lz_i64 lz_debug_n_ring_rollback;
 
 /* --kv-rot on|off, forward.c. On by default; off must reproduce the
    pre-rotation engine bit for bit. */
 extern int lz_kv_rot_enable;
-extern long long lz_debug_n_kv_rot;
+extern lz_i64 lz_debug_n_kv_rot;
 /* --batch's positive control, forward.c. Prefilling n tokens at width T
    must take ceil(n/T) chunks; bit-identity alone cannot see the width. */
-extern long long lz_debug_n_chunks;
+extern lz_i64 lz_debug_n_chunks;
 /* skip_logits' positive control, forward.c. A prompt prefill must run
    lm_head once, not once per chunk. */
-extern long long lz_debug_n_lmhead;
+extern lz_i64 lz_debug_n_lmhead;
 /* sink+window's row-skip positive control, forward.c. Zero when no
    window is set; non-zero only if evicted rows were really skipped. */
-extern long long lz_debug_attn_skip;
+extern lz_i64 lz_debug_attn_skip;
 /* The V projection int16 exit's positive control, forward.c. Elements
    the KV write took from vtmp_i16 rather than from the float row. */
-extern long long lz_debug_vproj_i16;
+extern lz_i64 lz_debug_vproj_i16;
 /* The int16 quantizer's integer element loop, ops.c. Elements rounded
    without leaving the integer domain; 0 under -DLZ_Q8I16_INT=0. */
-extern long long lz_debug_q8i16_int;
+extern lz_i64 lz_debug_q8i16_int;
 /* The int32 quantizer's integer element loop, ops.c. Elements rounded
    through the live reciprocal; 0 under -DLZ_Q8INT_INT=0, and 0 also for
    a group the MIN_SCALE branch zeroes without arithmetic. */
-extern long long lz_debug_q8int_int;
+extern lz_i64 lz_debug_q8int_int;
 /* The integer SwiGLU's positive control and its silent-clamp probe,
    ops.c. Elements the int path produced, and the post-clamp maxima of
    its two inputs and its output - each strictly below 32767 is the proof
    that LZ_SWIGLU_ES_P/_G/_O clamped nothing on this run. */
-extern long long lz_debug_swiglu_i16;
+extern lz_i64 lz_debug_swiglu_i16;
 /* The fixed conv epilogue's integer-coordinate activation, ops.c.
    Channel-steps that entered sigmoid through sigmoid_q15_i; 0 under
    -DLZ_CONV_SIG_I=0 and 0 on the float conv tier. */
-extern long long lz_debug_conv_sig_i;
+extern lz_i64 lz_debug_conv_sig_i;
 /* The conv's int16 exit, ops.c. Elements the exit had to clamp to
    +-32767 - LZ_CONVO_ES was chosen at zero on both measured chains, so
    any count here means a checkpoint that exponent was not measured on,
    and the clamp is otherwise silent. */
 extern long lz_conv_o_clamped;
-extern long long lz_debug_convo_i16;
+extern lz_i64 lz_debug_convo_i16;
 /* forward.c's four, added with the same reasoning their neighbours
    carry: registered in both gates without a positive control, so
    neither gate could say the arm did anything. */
-extern long long lz_debug_bvec_i16;
-extern long long lz_debug_klat_i16;
-extern long long lz_debug_mlat_i16;
-extern long long lz_debug_mlat_quant;
+extern lz_i64 lz_debug_bvec_i16;
+extern lz_i64 lz_debug_klat_i16;
+extern lz_i64 lz_debug_mlat_i16;
+extern lz_i64 lz_debug_mlat_quant;
 /* lz_fdiv_recip's positive control, ops_quant.c. The two arms of
    LZ_FDIV_RECIP are bit-identical, so this counter is the only thing
    that says which one ran; `decl` next to it says the accepted ones are
    not all falling through to the divide anyway. */
-extern long long lz_debug_fdiv_recip;
-extern long long lz_debug_fdiv_decl;
+extern lz_i64 lz_debug_fdiv_recip;
+extern lz_i64 lz_debug_fdiv_decl;
 /* The KDA decay gate's integer chain, forward.c. Elements whose sigmoid
    and exp were both reached through folded integer coordinates; 0 under
    -DLZ_KGATE_EXP_I=0 and 0 with the scalar tier off. The two exponents
    are the folds as built from this checkpoint, and `refused` must be 0
    whenever the chain was asked for. */
-extern long long lz_debug_kgate_exp_i;
-extern long long lz_debug_kgate_fold_no;
+extern lz_i64 lz_debug_kgate_exp_i;
+extern lz_i64 lz_debug_kgate_fold_no;
 extern int lz_debug_kgate_exp_s;
 extern int lz_debug_kgate_sig_slo;
 extern int lz_debug_kgate_sig_shi;
@@ -153,8 +154,8 @@ extern int lz_debug_swiglu_omax;
    the cached table; eg_lo/eg_hi are the gate exponent's observed range,
    which is what says sigmoid_q15_i's integer path was the one that ran
    rather than its float-coordinate fallback. */
-extern long long lz_debug_norm_sig_i;
-extern long long lz_debug_norm_qw;
+extern lz_i64 lz_debug_norm_sig_i;
+extern lz_i64 lz_debug_norm_qw;
 extern int lz_debug_norm_eg_lo;
 extern int lz_debug_norm_eg_hi;
 extern int lz_kv_kfmt;
@@ -500,16 +501,16 @@ static void print_config(const LZModelConfig *c) {
 /* Streaming tensor stats: f32 direct scan; Q8 dequantize per group. */
 static void tensor_stats_t(const char *name, const LZTensor *t) {
     double sum = 0.0, sumsq = 0.0, amax = 0.0;
-    unsigned long long chk = 0;
-    long long i, n_nan = 0;
-    long long n = t ? t->n : 0;
+    lz_u64 chk = 0;
+    lz_i64 i, n_nan = 0;
+    lz_i64 n = t ? t->n : 0;
 
     if (t->dtype == 0 && t->f) {
         for (i = 0; i < n; i++) {
             unsigned int u;
             double v = (double)t->f[i];
             memcpy(&u, &t->f[i], sizeof(u));
-            chk += (unsigned long long)u * (unsigned long long)(i + 1);
+            chk += (lz_u64)u * (lz_u64)(i + 1);
             if (!(v == v)) { n_nan++; continue; }
             sum += v;
             sumsq += v * v;
@@ -517,7 +518,7 @@ static void tensor_stats_t(const char *name, const LZTensor *t) {
             if (v > amax) amax = v;
         }
     } else if (t->dtype == 1 && t->q && t->scale) {
-        long long g, k;
+        lz_i64 g, k;
         for (g = 0; g < n / t->gs; g++) {
             double sv = (double)t->scale[g];
             for (k = 0; k < t->gs; k++) {
@@ -525,7 +526,7 @@ static void tensor_stats_t(const char *name, const LZTensor *t) {
                 unsigned int u;
                 float fv = (float)v;
                 memcpy(&u, &fv, sizeof(u));
-                chk += (unsigned long long)u * (unsigned long long)(g * t->gs + k + 1);
+                chk += (lz_u64)u * (lz_u64)(g * t->gs + k + 1);
                 if (!(v == v)) { n_nan++; continue; }
                 sum += v;
                 sumsq += v * v;
@@ -1902,7 +1903,7 @@ int main(int argc, char **argv) {
 
         if (!no_eos) lz_gen_opts_set_eos(&g, &tok);
         g.max_new_tokens = n_gen > 0 ? n_gen : 128;
-        if (g.rng_seed == 0) g.rng_seed = lz_seed_mix((unsigned long long)t1);
+        if (g.rng_seed == 0) g.rng_seed = lz_seed_mix((lz_u64)t1);
 
         /* KV cache only covers prompt + generation; never preallocate the
            full max_position_embeddings. */
@@ -2113,7 +2114,7 @@ int main(int argc, char **argv) {
         }
         if (!no_eos) lz_gen_opts_set_eos(&g, &tok);
         g.max_new_tokens = n_gen > 0 ? n_gen : 128;
-        if (g.rng_seed == 0) g.rng_seed = lz_seed_mix((unsigned long long)lz_time_ms());
+        if (g.rng_seed == 0) g.rng_seed = lz_seed_mix((lz_u64)lz_time_ms());
 
         {
             int seq = ctx_limit;
@@ -2179,7 +2180,7 @@ int main(int argc, char **argv) {
         }
         if (!no_eos) lz_gen_opts_set_eos(&g, &tok);
         g.max_new_tokens = n_gen > 0 ? n_gen : 128;
-        if (g.rng_seed == 0) g.rng_seed = lz_seed_mix((unsigned long long)lz_time_ms());
+        if (g.rng_seed == 0) g.rng_seed = lz_seed_mix((lz_u64)lz_time_ms());
 
         seq = ctx_limit;
         if (seq > cfg->seq_len) seq = cfg->seq_len;

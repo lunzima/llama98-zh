@@ -2,6 +2,7 @@
    helpers. A separate TU from ops.c to keep its #if guard density low.
 
    Every function here is extern, declared in ops_quant.h. */
+#include "lz_int.h"   /* lz_i64 - iron law 10 */
 #include <stddef.h>
 #include <float.h>
 #include <math.h>
@@ -902,7 +903,7 @@ int32_t sigmoid_q15_t(float t) {
  * subtraction is written before the add.
  *
  * Verified exhaustively in .prof/verify_sig_i_wide.c against a reference
- * that does the floor in long long. */
+ * that does the floor in lz_i64. */
 #define LZ_SIG_T15  (((int32_t)(-(int)LZ_SIG_LO) * 16) << 15)  /* 192 << 15 */
 #define LZ_SIG_EMAX 50          /* s == e - 19 <= 31, the widest shift */
 
@@ -1151,8 +1152,8 @@ static uint32_t fdr_recip47(uint32_t mb) {
    thing that separates them, and `declined` is here for the same reason
    in reverse: a build where everything declines would count calls and
    still be running __aeabi_fdiv. */
-long long lz_debug_fdiv_recip;
-long long lz_debug_fdiv_decl;
+lz_i64 lz_debug_fdiv_recip;
+lz_i64 lz_debug_fdiv_decl;
 
 float lz_fdiv_recip(float a, float b) {
     union { float f; uint32_t u; } ba, bb, br;
@@ -1248,7 +1249,7 @@ int expof(float x) {
    runs the float path instead of being silently wrong. */
 float norm_ss_fixed(const float *x, int n, short *qout, int *eout) {
     union { float f; uint32_t u; } bit;
-    long long acc = 0;
+    lz_i64 acc = 0;
     float sc;
     int i, e;
 
@@ -1268,7 +1269,7 @@ float norm_ss_fixed(const float *x, int n, short *qout, int *eout) {
        Anything outside the band runs the C loop below. */
     if (g_kernel == LZ_KERNEL_ARM_ASM && bit.u < 0x7F800000u &&
         e >= -105 && e <= 125) {
-        long long facc;
+        lz_i64 facc;
         lz_norm_ss_fixed_arm_asm(x, n, e, qout, &facc);
         if (eout) *eout = e;
         return (float)facc * pow2f(-2 * e);
@@ -1283,7 +1284,7 @@ float norm_ss_fixed(const float *x, int n, short *qout, int *eout) {
        hands back the count; the tail runs in C, so `i` continues rather
        than restarting. */
     if (g_kernel == LZ_KERNEL_SSE2 && n >= 8) {
-        long long sacc = 0;
+        lz_i64 sacc = 0;
         i = lz_norm_ss_sse2(x, n, sc, qout, &sacc);
         acc = sacc;
     }
@@ -1293,7 +1294,7 @@ float norm_ss_fixed(const float *x, int n, short *qout, int *eout) {
         if (v >  32767) v =  32767;
         if (v < -32767) v = -32767;
         if (qout) qout[i] = (short)v;
-        acc += (long long)(v * v);
+        acc += (lz_i64)(v * v);
     }
     if (eout) *eout = e;
     return (float)acc * pow2f(-2 * e);
