@@ -1633,8 +1633,16 @@ void epi_pack_act(const float *xqs, int nb, int nt) {
        hand-made table lost the two heaviest ones. The amax scan is a
        comparison, not billed (same convention as the four scans B1
        leaves alone); the round itself is q8_round's magic add, so there
-       is no compare left in the packing loop to bill. */
-    LZ_FCX(LZ_FC_EPI, (long)nt * nb, 0, 0, 0, 0);
+       is no compare left in the packing loop to bill.
+
+       ZERO MULTIPLIES NOW, not one per group: the pack's scale and the
+       exponent search's are both powers of two, so both go through
+       f32_scale_pow2 as exponent adds. The bill drops from nt*nb to
+       nothing, which is the honest number and also the reason this
+       comment stays - a site that bills zero because its work moved is
+       one edit away from being mistaken for a site that bills zero
+       because nobody wrote the bill. */
+    LZ_FCX(LZ_FC_EPI, 0, 0, 0, 0, 0);
     for (tk = 0; tk < nt; tk++) {
         const float *xsb = xqs + (size_t)tk * nb;
         float amax = 0.0f;
@@ -1648,10 +1656,25 @@ void epi_pack_act(const float *xqs, int nb, int nt) {
             g_epi_xe[tk] = 0;
             continue;
         }
-        while (e < 100 && amax * pow2f(e + 1) < 32767.0f) e++;
+        /* Both scalings here are by a power of two, so both are
+           exponent adds rather than __aeabi_fmul - the search below
+           runs up to 100 times per token and the pack once per group.
+           f32_scale_pow2 declines zero/subnormal and out-of-range, and
+           pow2f keeps those: amax is already known positive at this
+           point, but xsb[g] being exactly zero is ordinary. */
+        {
+            float pr;
+            while (e < 100) {
+                if (!f32_scale_pow2(amax, e + 1, &pr)) pr = amax * pow2f(e + 1);
+                if (!(pr < 32767.0f)) break;
+                e++;
+            }
+        }
         for (g = 0; g < nb; g++) {
-            float t = xsb[g] * pow2f(e);
-            int q = q8_round(t);
+            float t, xs = xsb[g];
+            int q;
+            if (!f32_scale_pow2(xs, e, &t)) t = xs * pow2f(e);
+            q = q8_round(t);
             if (q >  32767) q =  32767;
             if (q < -32767) q = -32767;
             g_epi_xq[tk][g] = (int16_t)q;

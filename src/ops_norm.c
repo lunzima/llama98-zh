@@ -129,7 +129,7 @@ void lz_rmsnorm_gated_out_fixed(float *o, const float *x,
                                        float inv, int n, int32_t *sig) {
     union { float f; uint32_t u; } bit;
     float sx, sw, sg;
-    int ex, ew, eg, ei;
+    int ex, ew, eg, ei, oe;
     int32_t qinv;
     int i;
     (void)sig;
@@ -138,6 +138,7 @@ void lz_rmsnorm_gated_out_fixed(float *o, const float *x,
     bit.u = q8_amax(w, n); ew = 14 - expof(bit.f); sw = pow2f(ew);
     bit.u = q8_amax(g, n); eg = 14 - expof(bit.f); sg = pow2f(eg);
     bit.u = q8_amax(&inv, 1); ei = 14 - expof(bit.f);
+    oe = 30 - ex - ew - eg - ei;   /* the output exponent, loop-invariant */
     qinv = q8_round(inv * pow2f(ei));
     if (qinv > 32767) qinv = 32767;
     if (qinv < -32767) qinv = -32767;
@@ -154,7 +155,16 @@ void lz_rmsnorm_gated_out_fixed(float *o, const float *x,
         t = (t * qg) >> 15;
         t = (t * qinv) >> 15;
         t = (t * sigv) >> 15;
-        o[i] = (float)t * pow2f(30 - ex - ew - eg - ei);
+        {
+            /* The exponent is loop-invariant and the scale is a power
+               of two, so f32_scale_pow2 (ops_kernel_shared.h) does it
+               as an exponent add - same number, no __aeabi_fmul, once
+               per element. pow2f stays as the fallback for the zero
+               and out-of-range cases it declines; t == 0 is ordinary
+               here, so that arm is live. */
+            float tf = (float)t, sc;
+            o[i] = f32_scale_pow2(tf, oe, &sc) ? sc : tf * pow2f(oe);
+        }
     }
 }
 #else
@@ -621,10 +631,11 @@ void lz_rmsnorm_gated(float *o, const float *x, const float *g,
                int-multiply (x*inv*w*silu) so the sigmoid site stops
                billing it. Per element: sigmoid_q15 (2 mul, 2 cvt, 2
                sub), q8_round per factor (3 mul, 3 add), int64 product
-               (3 mul, 3 shift), dequant (1 cvt, 1 mul); plus
-               norm_ss_fixed (n mul, n add, 1 mul, 1 cvt) and the
+               (3 mul, 3 shift), dequant (1 cvt, 0 mul - the scale is a
+               power of two and f32_scale_pow2 adds it to the exponent);
+               plus norm_ss_fixed (n mul, n add, 1 mul, 1 cvt) and the
                divide+eps (1 div, 1 add). */
-            LZ_FCX(LZ_FC_NORM, 5 * n + 1 + LZ_SSN_MUL(n), 3 * n + 1, LZ_SSN_DIV(n), 2 * n + 1, 0);
+            LZ_FCX(LZ_FC_NORM, 4 * n + 1 + LZ_SSN_MUL(n), 3 * n + 1, LZ_SSN_DIV(n), 2 * n + 1, 0);
             ss = ssf;
             fixed_ss = 1;
             goto have_ss_gated;
