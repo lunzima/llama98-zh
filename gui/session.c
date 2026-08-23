@@ -125,7 +125,7 @@ void lz_gui_session_set_system(LZGuiSession *s, const char *utf8) {
 }
 
 void lz_gui_session_set_seed(LZGuiSession *s, int mode,
-                             unsigned long long fixed) {
+                             lz_u64 fixed) {
     if (!s) return;
     s->seed_mode = (mode == LZ_COMMON_SEED_FIXED) ? LZ_COMMON_SEED_FIXED
                                                : LZ_COMMON_SEED_RANDOM;
@@ -149,7 +149,7 @@ static void seed_next_turn(LZGuiSession *s) {
        spreads the clock's weak entropy across the whole word instead of
        leaving the low bits at zero on DOS/Win9x, where lz_time_ms
        quantises to the 54.9 ms tick. */
-    s->opts.rng_seed = lz_seed_mix((unsigned long long)lz_time_ms())
+    s->opts.rng_seed = lz_seed_mix((lz_u64)lz_time_ms())
                      + s->seed_turn;
 }
 

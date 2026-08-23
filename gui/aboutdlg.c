@@ -29,6 +29,7 @@
  * and the icon is the same IDI_APP the main window loads. aboutdlg.h's
  * header comment says why.
  */
+#include "../src/lz_int.h"  /* lz_u64: the 64-bit type, portably */
 #include <stdio.h>       /* snprintf - split_body's line slices */
 #include <string.h>
 
@@ -630,9 +631,9 @@ static void sys_disk(char *out, int cap) {
     root[2] = '\\';
     root[3] = '\0';
     if (GetDiskFreeSpaceA(root, &spc, &bps, &freec, &totc)) {
-        unsigned long long bytes = (unsigned long long)totc * spc * bps;
+        lz_u64 bytes = (lz_u64)totc * spc * bps;
         snprintf(out, cap, "%s %llu MB total", root,
-                 (unsigned long long)(bytes / (1024 * 1024)));
+                 (lz_u64)(bytes / (1024 * 1024)));
     } else {
         snprintf(out, cap, "%s ?", root);
     }

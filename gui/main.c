@@ -3140,7 +3140,7 @@ static int create_children(HWND hwnd) {
        this. The widening on the way out is deliberate and lossless. */
     g.set.seed_mode = lz_ini_get_int("seed_mode", LZ_COMMON_SEED_RANDOM)
                       ? LZ_COMMON_SEED_FIXED : LZ_COMMON_SEED_RANDOM;
-    g.set.seed = (unsigned long long)(unsigned)lz_ini_get_int("seed", 1);
+    g.set.seed = (lz_u64)(unsigned)lz_ini_get_int("seed", 1);
     g.set.think = lz_ini_get_int("think", g.set.think) ? 1 : 0;
     /* Context window. Through the clamp with no model cap - there is no
        model at this point in startup, and the cap is applied again at
@@ -5964,7 +5964,7 @@ static int st_transcript(FILE *f) {
            re-run of one turn has to differ from the first run. */
         LZGuiModel empty;
         LZGuiSession ss;
-        unsigned long long a, b;
+        lz_u64 a, b;
         char err[128];
         memset(&empty, 0, sizeof empty);
         lz_gui_session_init(&ss, &empty, 1);

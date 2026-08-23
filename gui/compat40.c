@@ -47,6 +47,7 @@
  * windows.h's own include guard. */
 #include <windows.h>
 #include <commdlg.h>
+#include "../src/lz_int.h"  /* lz_i64: Visual C++ 4.0 has no `long long` */
 #include "compat40.h"    /* pulls windows.h; must come after the raise */
 #include "resource.h"    /* IDI_APP for lz_ui_icon_16 */
 
@@ -129,7 +130,7 @@ typedef BOOL (WINAPI *DrawIconExFn)(HDC, int, int, HICON, int, int, UINT,
    the same reason gui/toolbar.h spells its own: basetsd.h is not
    reachable at the API floor. */
 #if defined(_WIN64) || defined(__x86_64__) || defined(_M_X64)
-typedef long long LZ_IPTR_T;
+typedef lz_i64    LZ_IPTR_T;
 #else
 typedef long      LZ_IPTR_T;
 #endif

@@ -1,7 +1,7 @@
 #ifndef LZ_GUI_SETTINGS_H
 #define LZ_GUI_SETTINGS_H
 
-#include "../src/lz_int.h"   /* lz_u64 - iron law 10 */
+#include "../src/lz_int.h"   /* lz_u64: the 64-bit type, portably */
 
 /* Thinking mode and temperature, and the coupling between them.
  *

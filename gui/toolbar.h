@@ -1,6 +1,7 @@
 #ifndef LZ_GUI_TOOLBAR_H
 #define LZ_GUI_TOOLBAR_H
 
+#include "../src/lz_int.h"   /* lz_i64/lz_u64: the 64-bit types, portably */
 #include <windows.h>
 
 /* comctl32's toolbar, declared by hand because commctrl.h cannot be
@@ -28,8 +29,8 @@
  */
 
 #if defined(_WIN64) || defined(__x86_64__) || defined(_M_X64)
-typedef unsigned long long LZ_UPTR;
-typedef long long          LZ_IPTR;
+typedef lz_u64 LZ_UPTR;
+typedef lz_i64 LZ_IPTR;
 #define LZ_TB_RESERVED 6
 #else
 typedef unsigned long      LZ_UPTR;
