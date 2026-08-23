@@ -481,6 +481,35 @@ static int select_topk_exp(const float *l, int n, int k, float inv,
     return n0;
 }
 
+/* minp^(1/T), memoised on the exact bits of both arguments.
+ *
+ * This is the only libm double call left in the per-token path, and its
+ * two inputs are sampling settings: they change when a caller changes
+ * one, which for a normal generation is never. Recomputing it per token
+ * is the same answer at a double-precision pow's price, on a target
+ * family whose slowest members have no hardware divide behind that pow
+ * at all.
+ *
+ * Keyed by ==, not by a tolerance. A hit returns the value pow returned
+ * for those bits, not a value near it, so memoising cannot move a
+ * sampled token. The sentinels are negative and both real arguments are
+ * guarded positive by the caller, so the first call always misses. A
+ * NaN argument compares unequal to everything including itself and
+ * simply recomputes, which is the behaviour that keeps a NaN from
+ * pinning a stale value in the cache.
+ *
+ * No lock, and none needed: nothing in this tree creates a thread. The
+ * server's slots are sequential. */
+static float minp_pow(float minp, float temperature)
+{
+    static float k_minp = -1.0f, k_temp = -1.0f, cached = 0.0f;
+    if (minp == k_minp && temperature == k_temp) return cached;
+    cached = (float)pow((double)minp, 1.0 / (double)temperature);
+    k_minp = minp;
+    k_temp = temperature;
+    return cached;
+}
+
 /* Path when top_k is off: coarse threshold filter, then sort; matches llama2.c */
 static int select_all(const float *p, int n, float topp, LZProbIndex *buf) {
     int n0 = 0, i;
@@ -556,7 +585,8 @@ static int select_candidates(const LZSampleParams *pr, float *logits,
            llama.cpp units (fraction of the RAW peak) becomes
            minp^(1/T) here - see "min_p units" in sampler.h. Done per
            token rather than at init so it tracks a caller that
-           changes temperature; one pow() against a 32K softmax.
+           changes temperature; memoised in minp_pow, so the steady
+           state costs a float compare rather than a pow.
            Sampling runs OUTSIDE the PC=24 region (lz_fpu_float_end
            already ran in forward_chunk), so libm double is safe here -
            inside it, pow would return wrong values. */
@@ -569,8 +599,7 @@ static int select_candidates(const LZSampleParams *pr, float *logits,
            logits, not pr->temperature: the two are the same float only
            when no override is active. */
         if (pr->minp_llamacpp && temperature > 0.0f)
-            m_eff = (float)pow((double)pr->minp,
-                               1.0 / (double)temperature);
+            m_eff = minp_pow(pr->minp, temperature);
         thresh = m_eff * buf[0].prob;
         for (i = 1; i < n0; i++) {
             if (buf[i].prob < thresh) { m = i; break; }

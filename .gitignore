@@ -59,6 +59,7 @@
 !/build/gcc_watcom_pair_gate.sh
 !/build/dev_timing.sh
 !/build/xcc_codesize.sh
+!/build/xcc_mnemonics.sh
 !/build/caption_symmetry_gate.sh
 !/build/capmetrics.c
 

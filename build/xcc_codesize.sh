@@ -12,15 +12,23 @@
 # .obj/.o container sizes are not comparable at all (OMF vs COFF, and
 # gcc's carries debug sections Watcom's does not).
 #
+# BOTH SIDES 32-BIT. wcc386 emits 32-bit code with eight registers and
+# stack-passed arguments beyond the first few; a gcc left at the host
+# default emits x86-64, with sixteen registers and six register-passed
+# arguments. Comparing those two measures the ISA, not the compiler -
+# the first version of this script did exactly that, and the per-mnemonic
+# view of the same objects showed Watcom emitting a hundred more pushes,
+# which is what eight registers costs and says nothing about codegen.
+# -march=i486 -mtune=pentium matches what the Makefile actually ships
+# (-4r, tuned for an in-order multi-issue core).
+#
 # HOW TO READ THE RATIO. Not against 1.0. gcc -O3 inlines and unrolls,
 # so it emits MORE instructions than Watcom for the same source while
-# executing fewer - measured across the thirteen non-operator TUs, the
-# ratio centres near 0.75 and only two files exceed 1.0. A file at 1.0
-# is therefore already 1.3x off the pack, not "even". Rank by distance
-# from the SET'S OWN median, printed below the table, and treat the
-# number as a screen that says where to go disassemble - never as a
-# verdict, because instruction count is not cycle count and this repo
-# has already measured one case where the shorter sequence was slower.
+# executing fewer. Rank by distance from the SET'S OWN median, printed
+# below the table, and treat the number as a screen that says where to
+# go disassemble - never as a verdict, because instruction count is not
+# cycle count and this repo has already measured one case where the
+# shorter sequence was slower.
 set -u
 WCC=/c/WATCOM/binnt64/wcc386.exe
 [ -x "$WCC" ] || { echo "SKIP: no wcc386"; exit 2; }
@@ -31,7 +39,8 @@ RATIOS=""
 printf '%-20s %8s %8s %6s\n' file gcc wat ratio
 for f in "$@"; do
     b=$(basename "$f" .c)
-    gcc -O3 -march=x86-64 -std=c99 $D -c -o "$W/$b.o" "$f" 2>/dev/null || continue
+    gcc -O3 -m32 -march=i486 -mtune=pentium -std=c99 $D \
+        -c -o "$W/$b.o" "$f" 2>/dev/null || continue
     g=$(objdump -d "$W/$b.o" 2>/dev/null | grep -cE "^ *[0-9a-f]+:")
     "$WCC" -q -za99 -otexan -zp4 -4r -bt=nt -I/c/WATCOM/h -I/c/WATCOM/h/nt \
         -Isrc -DLZ_MMX_TU=1 -DLZ_SSE2_TU=1 -fo="$W/$b.obj" "$f" >/dev/null 2>&1 || continue
