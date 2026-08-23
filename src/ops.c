@@ -412,6 +412,19 @@ int lz_cpu_has_mmx(void);
    ops_quant.c. lz_quantize_q8 stays here (it uses the dispatch
    tables and lz_q8r_tier). */
 
+/* Above this amax, 127/amax provably cannot overflow, so the four
+   INT-INPUT quantizers below do not have to perform the division to
+   find that out.
+   The true threshold is 127/FLT_MAX = 3.73e-37; this is eight orders
+   above it, which is what makes the implication one-way and exact
+   rather than a boundary the rounding of the division could sit on.
+   Below it they still divide and still test, so behaviour is identical
+   on every input - including under -DLZ_Q8_MIN_SCALE=0.0f, the probe
+   build that is the only way the slow arm is reachable at all.
+   A DIVIDE IS NOT A MULTIPLY: 117 instructions against 30 on ARMv5TE
+   (.prof/arm_div_count.sh), while the census counts both as 1. */
+#define LZ_Q8_INV_SAFE 1.0e-30f
+
 void lz_quantize_q8(const float *x, int n, int gs, int8_t *q, float *s) {
     int g, k;
 #if defined(LZ_HAVE_Q8R_SIMD) || defined(LZ_HAVE_Q8R_SSE)
@@ -554,12 +567,13 @@ void lz_quantize_q8_tok_int(const int32_t *t, int n, float deq,
     amax = (float)tam * deq;
     if (amax > 0.0f) {
         sg = amax * LZ_Q8_INV127;
-        inv = 127.0f / amax;
-        fast = (inv <= FLT_MAX);
+        inv = 1.0f;                          /* NON-ZERO FLAG ONLY */
+        fast = 1;
         if (sg < LZ_Q8_MIN_SCALE_F) {
             sg = 1.0f;
             inv = 0.0f;
-            fast = 1;
+        } else if (amax < LZ_Q8_INV_SAFE) {
+            fast = ((127.0f / amax) <= FLT_MAX);
         }
     } else {
         sg = 1.0f;
@@ -698,13 +712,22 @@ void lz_quantize_q8_int(const int32_t *t, int n, int gs, float deq,
         LZ_FCX(LZ_FC_QUANT, 1, 0, 0, 1, 0);  /* deq mul, tam->float cvt */
         if (amax > 0.0f) {
             s[g] = amax * LZ_Q8_INV127;
-            inv = 127.0f / amax;
-            LZ_FCX(LZ_FC_QUANT, 1, 0, 1, 0, 0);  /* amax*(1/127) mul, 127/amax div */
-            fast = (inv <= FLT_MAX);
+            LZ_FCX(LZ_FC_QUANT, 1, 0, 0, 0, 0);  /* amax*(1/127) mul */
+            /* NON-ZERO FLAG ONLY. This quantizer's element loop scales
+               by inv_elem = 127/(float)tam, never by inv, so inv's VALUE
+               is dead here - it survives as the "amax was usable" flag
+               inv_elem tests. That is exactly why the division can go:
+               nothing reads what it computes, only whether it would have
+               overflowed, and LZ_Q8_INV_SAFE answers that without
+               dividing. */
+            inv = 1.0f;
+            fast = 1;
             if (s[g] < LZ_Q8_MIN_SCALE_F) {
                 s[g] = 1.0f;
                 inv = 0.0f;
-                fast = 1;
+            } else if (amax < LZ_Q8_INV_SAFE) {
+                LZ_FCX(LZ_FC_QUANT, 0, 0, 1, 0, 0);  /* 127/amax div */
+                fast = ((127.0f / amax) <= FLT_MAX);
             }
         } else {
             s[g] = 1.0f;
@@ -874,13 +897,22 @@ void lz_quantize_q8_i16(const short *t, int n, int gs, float deq,
         LZ_FCX(LZ_FC_QUANT, 1, 0, 0, 1, 0);  /* deq mul, tam->float cvt */
         if (amax > 0.0f) {
             s[g] = amax * LZ_Q8_INV127;
-            inv = 127.0f / amax;
-            LZ_FCX(LZ_FC_QUANT, 1, 0, 1, 0, 0);  /* amax*(1/127) mul, 127/amax div */
-            fast = (inv <= FLT_MAX);
+            LZ_FCX(LZ_FC_QUANT, 1, 0, 0, 0, 0);  /* amax*(1/127) mul */
+            /* NON-ZERO FLAG ONLY. This quantizer's element loop scales
+               by inv_elem = 127/(float)tam, never by inv, so inv's VALUE
+               is dead here - it survives as the "amax was usable" flag
+               inv_elem tests. That is exactly why the division can go:
+               nothing reads what it computes, only whether it would have
+               overflowed, and LZ_Q8_INV_SAFE answers that without
+               dividing. */
+            inv = 1.0f;
+            fast = 1;
             if (s[g] < LZ_Q8_MIN_SCALE_F) {
                 s[g] = 1.0f;
                 inv = 0.0f;
-                fast = 1;
+            } else if (amax < LZ_Q8_INV_SAFE) {
+                LZ_FCX(LZ_FC_QUANT, 0, 0, 1, 0, 0);  /* 127/amax div */
+                fast = ((127.0f / amax) <= FLT_MAX);
             }
         } else {
             s[g] = 1.0f;
@@ -984,13 +1016,22 @@ void lz_quantize_q8_int64(const int64_t *t, int n, int gs, float deq,
         LZ_FCX(LZ_FC_QUANT, 1, 0, 0, 1, 0);  /* deq mul, tam->float cvt */
         if (amax > 0.0f) {
             s[g] = amax * LZ_Q8_INV127;
-            inv = 127.0f / amax;
-            LZ_FCX(LZ_FC_QUANT, 1, 0, 1, 0, 0);  /* amax*(1/127) mul, 127/amax div */
-            fast = (inv <= FLT_MAX);
+            LZ_FCX(LZ_FC_QUANT, 1, 0, 0, 0, 0);  /* amax*(1/127) mul */
+            /* NON-ZERO FLAG ONLY. This quantizer's element loop scales
+               by inv_elem = 127/(float)tam, never by inv, so inv's VALUE
+               is dead here - it survives as the "amax was usable" flag
+               inv_elem tests. That is exactly why the division can go:
+               nothing reads what it computes, only whether it would have
+               overflowed, and LZ_Q8_INV_SAFE answers that without
+               dividing. */
+            inv = 1.0f;
+            fast = 1;
             if (s[g] < LZ_Q8_MIN_SCALE_F) {
                 s[g] = 1.0f;
                 inv = 0.0f;
-                fast = 1;
+            } else if (amax < LZ_Q8_INV_SAFE) {
+                LZ_FCX(LZ_FC_QUANT, 0, 0, 1, 0, 0);  /* 127/amax div */
+                fast = ((127.0f / amax) <= FLT_MAX);
             }
         } else {
             s[g] = 1.0f;
