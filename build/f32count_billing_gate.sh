@@ -116,6 +116,110 @@ END {
 }
 '
 
+# ---------------------------------------------------------------------
+# THE SECOND RULE, keyed on the OPERATION rather than the signature.
+#
+# The LIMITATION note above named this rule and declined to implement it
+# because "the current call sites have not been audited for the
+# legitimate exception". They have been now, and the audit found THREE
+# real gaps in one pass - the delta quantization in gdn_p2_fixed_rows,
+# gdn_pass1_fixed_head's own prologue and epilogue, and the whole of
+# gdn_build_table. Together they were 160,896 ops/token invisible, and
+# billing them moved `recurrence write` from third place to first with
+# more than twice the runner-up. The signature rule was passing that
+# entire time: all three are void functions.
+#
+# THE RULE: a top-level function whose body calls lz_i32f() or
+# q8_round() - this tree's int->float and float->int primitives - and
+# calls neither LZ_FCX() nor LZ_FC() performs a conversion nothing
+# bills. That is a FAIL unless it is in EXEMPT below.
+#
+# EXEMPT IS A TABLE OF REASONS, NOT A LIST OF NAMES. Each entry says
+# which of the three legitimate shapes it is, because a name-only list
+# lets a function change shape underneath its own exemption:
+#
+#   caller-bills   a leaf whose call sites bill on its behalf, and say so
+#                  at the call site (norm_ss_fixed's callers each carry
+#                  its n+1 mul / n add / 1 cvt in their own formula)
+#   once-per-model setup that runs once and is cached or idempotent, so
+#                  it carries no per-token cost for a per-token census to
+#                  miss (lz_epi_prep is `if (w->sq) return;`,
+#                  conv_fixed_build's own comment says "once", build_qw
+#                  is a keyed slot cache, exp_t_bounds is
+#                  `if (!g_expt_ready)`)
+#   tier-or-model  reachable only on a path this census does not measure
+#                  - --kernel ref, or a use_subn model
+#
+# ONE ENTRY IS AN ADMISSION AND IS MARKED AS ONE:
+# lz_rmsnorm_gated_out_fixed_int's caller bills 5n with a comment that
+# was wrong about why (it claimed the output loop is skipped; it is
+# not). Its number has not been re-derived. It is off by default
+# (lz_norm_int() is -1), so it costs the shipping census nothing, and
+# replacing an unverified number with another is not a correction.
+EXEMPT='
+p2_group_norm                   caller-bills
+norm_ss_fixed                   caller-bills
+lz_wsum_group_mmx               caller-bills
+lz_rmsnorm_gated_out_fixed      caller-bills
+lz_rmsnorm_out_fixed_int        caller-bills
+lz_rmsnorm_gated_out_fixed_int  caller-bills-UNVERIFIED
+lz_conv_norm_pow2               once-per-model
+epi_prep_plane                  once-per-model
+build_qw                        once-per-model
+exp_t_bounds                    once-per-model
+matmul_scalar_ref_one           tier-or-model
+subn_fwht_quant                 tier-or-model
+lz_quantize_q8_tok_int          tier-or-model
+'
+
+OP_PROG='
+{ L[NR] = $0 }
+END {
+    for (i = 1; i <= NR; i++) {
+        line = L[i]
+        if (line !~ /^[A-Za-z_]/) continue
+        if (line ~ /^#/) continue
+        if (index(line, "(") == 0) continue
+        j = i; brace = -1; k = 0
+        while (k < 12 && j <= NR) {
+            if (index(L[j], "{") > 0) { brace = j; break }
+            if (index(L[j], ";") > 0) break
+            k++; j++
+        }
+        if (brace < 0) continue
+        head = line
+        sub(/\(.*$/, "", head)
+        nm = head
+        sub(/^.*[^A-Za-z0-9_]/, "", nm)
+        if (nm == "" || nm == "if" || nm == "for" || nm == "while" ||
+            nm == "switch" || nm == "return") continue
+        d = 0; ops = 0; bill = 0
+        for (j = brace; j <= NR; j++) {
+            s = L[j]
+            for (c = 1; c <= length(s); c++) {
+                ch = substr(s, c, 1)
+                if (ch == "{") d++
+                else if (ch == "}") d--
+            }
+            if (index(s, "lz_i32f(") > 0 || index(s, "q8_round(") > 0) ops = 1
+            if (index(s, "LZ_FCX(") > 0 || index(s, "LZ_FC(") > 0) bill = 1
+            if (d <= 0) break
+        }
+        if (ops && !bill) {
+            if (!(nm in ex))
+                print FILENAME ":" i ": FAIL " nm "() converts and bills nothing"
+            else
+                seen[nm] = 1
+            total++
+        }
+        i = j
+    }
+    for (e in ex) if (!(e in seen)) unused = unused " " e
+    print "OPCANDS=" total > "/dev/stderr"
+    print "UNUSED=" unused > "/dev/stderr"
+}
+'
+
 FAIL=0
 CANDS=0
 for f in src/*.c; do
@@ -133,7 +237,26 @@ for f in src/*.c; do
     fi
 done
 
-echo "f32count_billing_gate: $CANDS candidate(s) checked"
+echo "f32count_billing_gate: $CANDS candidate(s) checked (signature rule)"
+
+# --- operation rule ----------------------------------------------------
+EXFILE=$(mktemp)
+echo "$EXEMPT" | awk 'NF { print $1 }' > "$EXFILE"
+OPC=0
+ALLSEEN=$(mktemp)
+for f in src/*.c; do
+    [ -e "$f" ] || continue
+    out=$(awk -v exf="$EXFILE" '
+        BEGIN { while ((getline e < exf) > 0) if (e != "") ex[e] = 1 }
+        '"$OP_PROG" "$f" 2>"$f.op.stderr")
+    c=$(sed -n 's/^OPCANDS=//p' "$f.op.stderr")
+    OPC=$((OPC + ${c:-0}))
+    rm -f "$f.op.stderr"
+    if [ -n "$out" ]; then echo "$out"; FAIL=1; fi
+done
+rm -f "$EXFILE" "$ALLSEEN"
+
+echo "f32count_billing_gate: $OPC converting function(s) checked (operation rule)"
 if [ "$FAIL" -eq 0 ]; then
     echo "f32count_billing_gate: PASS"
     exit 0
