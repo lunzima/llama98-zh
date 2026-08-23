@@ -10,7 +10,7 @@
    LZ_SLOT_NEXT, gdn_tail_row, p2_shift_of). */
 #include <stddef.h>
 #include <float.h>
-#include <stdint.h>
+#include "lz_int.h"   /* iron law 10: <stdint.h> is not on the floor */
 #include <stdlib.h>
 #include <string.h>
 

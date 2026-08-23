@@ -1,7 +1,7 @@
 #ifndef LZ_MODEL_H
 #define LZ_MODEL_H
 
-#include <stdint.h>
+#include "lz_int.h"   /* iron law 10: <stdint.h> is not on the floor */
 #include <stdio.h>
 
 #include "safetensors.h"
