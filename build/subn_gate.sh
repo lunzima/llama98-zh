@@ -127,9 +127,18 @@ run "$SUBN_MODEL" "$W/hoff.bin" --hadamard off;     r4=$?
 if [ "$r1" -ne 0 ] && [ "$r2" -ne 0 ] && [ "$r3" -ne 0 ] && [ "$r4" -ne 0 ]; then
     echo "  UNLOADABLE $SUBN_MODEL - every arm failed identically, so"
     echo "             nothing was checked. First line:"
-    sed -n '1p' "$W/def.bin.log" | sed 's/^/             /'
+    grep -m1 'Failed to load' "$W/def.bin.log" | sed 's/^/             /'
     rm -rf "$W"
     echo "subn_gate: SKIP - the subn model is unloadable by this build"
+    echo "  KNOWN CAUSE at the time of writing, and it is the ENGINE side,"
+    echo "  not the model: a use_subn export carries the per-projection"
+    echo "  input norms (mlp.gate_proj.norm.weight and its siblings) and"
+    echo "  the tensor spec list does not claim them yet, so the loader"
+    echo "  matches the next spec positionally and reports an elem-count"
+    echo "  mismatch on mlp.gate_proj.weight (want 1048576, file 512 - the"
+    echo "  512 IS the norm). The five assertions below were verified on a"
+    echo "  build carrying that loader work uncommitted; this gate turns"
+    echo "  green on its own the moment it lands."
     exit 2
 fi
 for pair in "1 default" "2 tok" "3 group" "4 hadamard-off"; do

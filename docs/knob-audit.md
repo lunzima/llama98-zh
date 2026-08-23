@@ -37,7 +37,7 @@
 | `--scalar-fixed` | float\|fixed | `lz_exp_fixed`/`lz_rsqrt_fixed` 的控制臂 | ci 阶段 6 | **留** |
 | `--kernel` | auto\|ref\|mmx\|sse2\|arm-c\|arm-asm | 每一档都是铁律八的一格；`arm-c` 是 `arm-asm` 的对照臂，本轮多次靠它定位问题 | ci 阶段 4 | **留** |
 | `--kv-rot` | on\|off | **实测（kmr20，200 token，2026-08-23）：q8 好 16.3%，q4 好 39.7%** | ci 阶段 12 | **留**。收益是全表最大的之一 |
-| `--subn-scale` | tok\|group | 实测平局（rms 好 0.94%、top-1 差 0.5pp） | `subn_gate.sh`，ci 阶段 16，**五条断言全 PASS**（2026-08-23 起） | **留**。平局不是「从不更好」 |
+| `--subn-scale` | tok\|group | 实测平局（rms 好 0.94%、top-1 差 0.5pp） | `subn_gate.sh`，ci 阶段 16。**五条断言全 PASS，但那是在带着别人未提交的加载器改动的构建上量的**；HEAD 上仍 SKIP，闸门的 SKIP 文本写明了原因 | **留**。平局不是「从不更好」 |
 | `--hadamard` | on\|off | SubLN 块 Hadamard 的控制臂 | 同上，量化臂与浮点臂**分别**断言 | **留** |
 | `--fixed` | off\|all | 元旗标，一次设完七个轴 | 被上面每一条间接使用 | **留**。删它不减状态空间，只减便利 |
 

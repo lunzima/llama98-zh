@@ -645,7 +645,15 @@ esac
 # the only two knobs in docs/knob-audit.md whose gate could not run, and
 # the recorded reason was that no SubLN checkpoint exports. That was
 # generalised from the ones that predate the attention projection norms;
-# kunkun-ce exports clean. Now that it runs, it runs here.
+# kunkun-ce exports clean.
+#
+# IT STILL SKIPS AT HEAD, and the honest reason is in the gate's own SKIP
+# text: the five assertions were verified on a build carrying in-flight
+# loader work, and HEAD's tensor spec list does not yet claim the
+# per-projection SubLN norms. Wired here anyway rather than held back -
+# a stage that says exactly why it is skipping is worth more than one
+# nobody has written, and it turns green by itself when the loader
+# lands.
 # ---------------------------------------------------------------------
 echo
 echo "==== [16/16]SubLN activation path ===="
