@@ -155,6 +155,21 @@ void lz_fwht_i32_arm_asm(int32_t *y, const int32_t *x, int n);
    their C types already promise. */
 void lz_norm_ss_fixed_arm_asm(const float *x, int n, int k, short *qout,
                               long long *acc);
+
+/* lz_matmul's F32 row (docs/arm-asm-audit.md G2, the f32mm cell).
+   Accumulates acc8[0..7] over groups of eight elements and returns how
+   many elements it consumed - always a multiple of 8, and 0 when n < 8
+   or when the first group declines.
+
+   The return is the caller's resume index and the reason declines are
+   by the GROUP: lz_matmul's tail folds leftovers into a0 alone, so
+   resuming part-way through a group would change the summation order.
+   Every group snapshots the accumulators before touching them.
+
+   4-byte alignment on all three pointers, which their C types promise;
+   acc8 must have room for eight floats whatever n is. */
+int lz_matmul_row_arm_asm(const float *w, const float *x, int n,
+                          float *acc8);
 #endif /* __arm__ && __GNUC__ */
 
 #ifdef __cplusplus

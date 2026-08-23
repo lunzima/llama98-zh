@@ -48,6 +48,13 @@ int main(int argc, char **argv) {
         int t = LZ_KERNEL_REF;
         if (argv[1][0] == 'm') t = LZ_KERNEL_MMX;
         else if (argv[1][0] == 's') t = LZ_KERNEL_SSE2;
+#if defined(LZ_KERNEL_ARM_ASM)
+        /* The ARM cell landed after this probe was written, and it is
+           the same question in the same shape: `a` must reach
+           lz_matmul_row_arm_asm and `c` the C loop beside it. */
+        else if (argv[1][0] == 'a') t = LZ_KERNEL_ARM_ASM;
+        else if (argv[1][0] == 'c') t = LZ_KERNEL_ARM;
+#endif /* LZ_KERNEL_ARM_ASM */
         lz_kernel_select(t);
     }
     /* PC=24, WHICH IS NOT OPTIONAL HERE. On x87 the C body's eight

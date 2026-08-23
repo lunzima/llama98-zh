@@ -2492,6 +2492,20 @@ void lz_matmul(float *o, const float *x, const float *w,
             a4 = acc8[4]; a5 = acc8[5]; a6 = acc8[6]; a7 = acc8[7];
         }
 #endif /* LZ_MATMUL_F32_SSE_EXTERN */
+#if defined(LZ_ARM_ASM_EXTERN)
+        /* Same shape, same contract - the kernel INITIALISES acc8, so
+           the eight scalars above are overwritten rather than added to,
+           and lane k still accumulates the sequence scalar a_k does.
+           On a target with no FPU each of these MACs is two library
+           calls; the kernel fuses them and returns where it stopped.
+           Selected by tier for the reason the SSE arm gives. */
+        if (g_kernel == LZ_KERNEL_ARM_ASM && in_dim >= 8) {
+            float acc8[8];
+            j = lz_matmul_row_arm_asm(row, x, in_dim, acc8);
+            a0 = acc8[0]; a1 = acc8[1]; a2 = acc8[2]; a3 = acc8[3];
+            a4 = acc8[4]; a5 = acc8[5]; a6 = acc8[6]; a7 = acc8[7];
+        }
+#endif /* LZ_ARM_ASM_EXTERN */
         for (; j + 7 < in_dim; j += 8) {
             a0 += row[j]     * x[j];
             a1 += row[j + 1] * x[j + 1];
@@ -3492,26 +3506,14 @@ static const char km_why_fwht_g128[] =
    multiply-add, so those two cells cannot exist. SSE1 is where mulps
    and addps arrive, and every SSE2 machine has them - so ONE body
    serves both tiers and the SSE2 cells hold it rather than a copy.
-   The ARM cell is DECLINED rather than unwritten: what a hand cell can
-   take there is the product's pack and the addend's unpack of that same
-   word, and the multiply core it would need costs more than that. See
-   the reason string. */
+   The ARM cell is lz_matmul_row_arm_asm, a leaf rather than an inline
+   block: the fusion's win is per GROUP (one scan, one decline, the
+   first group needing no addend at all) and an inline per-element form
+   gives it all back in wrapper. 69.8 an element against the C loop's
+   78.1, .prof/arm_chain_count.sh mode 27 against 28. */
 static const char km_why_f32mm_mmx[] =
     "impossible: MMX is integer-only and this is a float multiply-add. "
     "SSE1 is the first tier that can express it";
-static const char km_why_f32mm_arma[] =
-    "WINNABLE and not yet written as a leaf, which is the only shape "
-    "that keeps the win. The fused core, with __addsf3's algorithm "
-    "(signed significands so one ADDS with an inline ASR is both "
-    "effective operations, the shifted-out bits kept whole rather than "
-    "compressed to a sticky, cmp #25 answering the far-apart case), "
-    "measures 61.0 against the 74.0 chain - mode 26 against 20, "
-    ".prof/arm_chain_count.sh, verified over 21.8M in-domain cases by "
-    ".prof/verify_fmac_core.c. A per-element primitive gives that back "
-    "in decline wrapper (mode 25, 86.5); a leaf pays the scan once and "
-    "lands near 67. Two earlier reasons here were about my own code "
-    "rather than the cell: an unread adder, and a wrapper a leaf does "
-    "not pay. docs/arm-asm-audit.md G2";
 static const char km_why_f32mm_g128[] =
     "this column is the 128-ELEMENT quantization group; lz_matmul's "
     "unit of work is a whole weight ROW against a whole activation "
@@ -3567,7 +3569,7 @@ static const LZKmReg km_reg[LZ_KM_NUNIT * LZ_KM_NCOL] = {
    deleted and not a single cell would change. */
 /* fwhti*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_fwhti_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_fwhti_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM),       KM_I(km_why_fwht_g128),
 /* fwhtf*/ KM_H(KM_ALL), KM_I(km_why_fwhtf_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_I(km_why_fwhtf_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM),          KM_I(km_why_fwht_g128),
-/* f32mm*/ KM_H(KM_ALL), KM_I(km_why_f32mm_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_I(km_why_f32mm_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_T(km_why_f32mm_arma), KM_I(km_why_f32mm_g128)
+/* f32mm*/ KM_H(KM_ALL), KM_I(km_why_f32mm_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_I(km_why_f32mm_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM),        KM_I(km_why_f32mm_g128)
 };
 
 #if defined(__WATCOMC__)
@@ -3644,7 +3646,7 @@ static int km_arm_asm(int f) {
        loop, so it is a leaf function in src/ops_arm.c rather than an
        inline block: its per-call setup amortizes over a whole row. */
     if (f == LZ_KM_UNIT_ATDOT || f == LZ_KM_UNIT_WSUMP ||
-        f == LZ_KM_UNIT_NRMSS) return 1;
+        f == LZ_KM_UNIT_NRMSS || f == LZ_KM_UNIT_F32MM) return 1;
     /* fwhti's is a loop leaf in src/ops_arm.c; the float twin's is the
        inline block registered above, under a different guard. */
     if (f == LZ_KM_UNIT_FWHTI) return 1;

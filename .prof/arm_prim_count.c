@@ -20,6 +20,7 @@
 #include "ops.h"
 #include "ops_quant.h"
 #include "ops_kernel_shared.h"
+#include "ops_arm.h"
 
 #ifndef PRIM_MODE
 #define PRIM_MODE 0
@@ -51,6 +52,8 @@
 #include "sp_args_q8r.h"        /* real norm rows; see sm_setup/nm_setup */
 #elif PRIM_MODE == 16 || PRIM_MODE == 17 || PRIM_MODE == 19 || PRIM_MODE == 20
 #include "sp_args_q8r.h"        /* real floats; only the shape matters */
+#elif PRIM_MODE == 27 || PRIM_MODE == 28
+#include "sp_args_q8r.h"        /* the row arms build mm_w/mm_x from it */
 #elif PRIM_MODE == 18
 #include "sp_args_q8r.h"        /* only for SP_N; the arm uses gd_* */
 #else
@@ -72,6 +75,22 @@ __attribute__((noinline)) static float i32f_null(int32_t v) {
 
 volatile int32_t g_sink;
 volatile float g_mulc = 1.4142135f;      /* modes 16/17/19/20, see there */
+
+#if PRIM_MODE == 27 || PRIM_MODE == 28
+/* f32mm's row arms. 64 elements is a whole harness body's worth, so the
+   per-iteration figure stays per element; the weights are the same real
+   float stream the other arms use, which keeps the decline rate honest
+   (a row of invented values could be all-normal by construction). */
+#define MM_N 64
+static float mm_w[MM_N], mm_x[MM_N], mm_acc[8];
+static void mm_setup(void) {
+    int i;
+    for (i = 0; i < MM_N; i++) {
+        mm_w[i] = SP_ARG[i];
+        mm_x[i] = SP_ARG[(i + 17) & (SP_N - 1)];
+    }
+}
+#endif /* PRIM_MODE == 27 || 28 */
 
 #if PRIM_MODE == 24 && defined(LZ_ARM_PRIM_ASM)
 /* THE QUESTION MODE 24 ANSWERS, and the only reason this body exists:
@@ -513,6 +532,9 @@ int main(int argc, char **argv) {
 #if PRIM_MODE == 18
     gd_setup();
 #endif
+#if PRIM_MODE == 27 || PRIM_MODE == 28
+    mm_setup();
+#endif
     for (i = 0; i < n; i++) {
         int k = (int)(i & (SP_N - 1));
 #if PRIM_MODE == 1
@@ -582,6 +604,35 @@ int main(int argc, char **argv) {
 #else
         u.f = SP_ARG[k] + g_mulc;          g_sink = u.i;
 #endif
+#elif PRIM_MODE == 27 || PRIM_MODE == 28
+        /* THE SHIPPED CELL, a whole row rather than one element: the
+         * leaf's scan and decline are per group, so a per-element probe
+         * would price machinery the real caller does not pay per
+         * element. One 64-element row on the first of the harness's 64
+         * bodies, so the per-iteration figure is again per ELEMENT.
+         * 28 is the same row through the C loop lz_matmul actually
+         * has - its own control, because mode 20's loop shape is not
+         * this one. */
+        {
+            int j2, k2;
+            /* A volatile read into the row, so the whole computation is
+             * not loop-invariant and hoisted out - which it was on the
+             * first attempt, and the giveaway was a per-element figure
+             * of 25 where the C control alone costs 74. */
+            mm_x[0] = g_mulc;
+#if PRIM_MODE == 27
+            j2 = lz_matmul_row_arm_asm(mm_w, mm_x, MM_N, mm_acc);
+#else
+            j2 = 0;
+            for (k2 = 0; k2 < 8; k2++) mm_acc[k2] = 0.0f;
+#endif
+            for (; j2 + 7 < MM_N; j2 += 8)
+                for (k2 = 0; k2 < 8; k2++) {
+                    volatile float p = mm_w[j2 + k2] * mm_x[j2 + k2];
+                    mm_acc[k2] = mm_acc[k2] + p;
+                }
+            g_sink = (int32_t)mm_acc[0];
+        }
 #elif PRIM_MODE == 26
         /* The fused core with no decline wrapper - an upper bound on
          * what a leaf kernel can reach, against mode 20. */

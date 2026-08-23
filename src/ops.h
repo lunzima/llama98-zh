@@ -324,11 +324,13 @@ void     lz_fpu_float_end(unsigned save);
    returns them under __arm__ and lz_kernel_select clamps them to the
    local tier everywhere else, the same way `sse2` clamps on a PII.
 
-   These are NOT a full ISA tier the way MMX/SSE2 are. Ternary is the
-   only operator with an ARM kernel today, so lz_matmul_xq sends every
-   other format to the scalar reference by the same route `--kernel ref`
-   takes - otherwise the two tiers would differ by which fallback they
-   picked instead of by the kernel under test. */
+   These are NOT a full ISA tier the way MMX/SSE2 are, but they are no
+   longer ternary-only: every quantized row format has an ARM cell now,
+   plus the operator leaves (wsum pair, the int32 Hadamard, norm_ss) and
+   the F32 matmul row. Whatever still has no ARM kernel goes to the
+   scalar reference by the same route `--kernel ref` takes, so the two
+   tiers differ by the kernel under test and not by which fallback they
+   picked. */
 #define LZ_KERNEL_ARM     4
 #define LZ_KERNEL_ARM_ASM 5
 int lz_kernel_select(int which);

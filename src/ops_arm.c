@@ -638,4 +638,207 @@ void lz_norm_ss_fixed_arm_asm(const float *x, int n, int k, short *qout,
         : "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "cc",
           "memory");
 }
+
+/* lz_matmul's F32 row, eight accumulators at a time (audit G2's f32mm
+   cell). On a target with no FPU each of those MACs is `bl __aeabi_fmul`
+   plus `bl __addsf3`, 74.0 instructions measured; this fuses them and
+   costs 61.0 in the core (.prof/arm_chain_count.sh mode 26 against 20).
+
+   WHAT THE FUSION TAKES, and it is not what the audit first priced.
+   Both cores are libgcc's own: significands pre-scaled by 2^4 so UMULL's
+   high word IS the product's, SBC folding the normalisation step into
+   the bias, signed significands so one ADDS with an inline ASR is both
+   effective operations, and ADC/BICEQ rounding. What is left over is the
+   two call/return pairs, __addsf3's scan of an operand this code just
+   produced, and - only in a loop - the accumulator's scan, because after
+   the first element the accumulator is this kernel's own output. It does
+   NOT skip the product's rounding: that would be an FMA, a different
+   function, and build/arm/parity_gate.sh would go red.
+
+   DECLINES BY THE GROUP, never inside one. The C tail this returns to
+   folds leftovers into a0 alone, so resuming mid-group would change the
+   summation order and stop being bit-identical. Each group therefore
+   snapshots the eight accumulators onto the stack before touching them
+   and restores that snapshot on the way out - PUSH/POP rather than a
+   scratch pointer, which is what keeps the register budget at thirteen.
+   Declined: either factor zero/subnormal/inf/NaN, a product exponent
+   outside the normal range BEFORE rounding, an accumulator that is
+   subnormal/inf/NaN, and a sum that would be subnormal or overflow.
+   A zero accumulator is NOT declined - it is every row's first element.
+
+   n < 8 returns 0 and the C does the row, the same convention
+   lz_fwht_i32_arm_asm uses for the blocks its loops cannot cover. */
+#define LZ_F32MM_PROD                                            \
+        "mov    ip, #255\n\t"                                    \
+        "ands   r7, ip, r4, lsr #23\n\t"                         \
+        "andnes r9, ip, r5, lsr #23\n\t"                         \
+        "teqne  r7, ip\n\t"                                      \
+        "teqne  r9, ip\n\t"                                      \
+        "beq    7f\n\t"                                          \
+        "add    r7, r7, r9\n\t"                                  \
+        "eor    lr, r4, r5\n\t"                                  \
+        "mov    r9, #0x8000000\n\t"                              \
+        "mov    r4, r4, lsl #9\n\t"                              \
+        "orr    r4, r9, r4, lsr #5\n\t"                          \
+        "mov    r5, r5, lsl #9\n\t"                              \
+        "orr    r5, r9, r5, lsr #5\n\t"                          \
+        "umull  r10, r9, r4, r5\n\t"                             \
+        "and    lr, lr, #0x80000000\n\t"                         \
+        "cmp    r9, #0x800000\n\t"                               \
+        "movcc  r9, r9, lsl #1\n\t"                              \
+        "orrcc  r9, r9, r10, lsr #31\n\t"                        \
+        "movcc  r10, r10, lsl #1\n\t"                            \
+        "orr    lr, lr, r9\n\t"                                  \
+        "sbc    r7, r7, #127\n\t"                                \
+        "cmp    r7, #253\n\t"                                    \
+        "bhi    7f\n\t"                                          \
+        "cmp    r10, #0x80000000\n\t"                            \
+        "adc    lr, lr, r7, lsl #23\n\t"                         \
+        "biceq  lr, lr, #1\n\t"
+
+int lz_matmul_row_arm_asm(const float *w, const float *x, int n,
+                          float *acc8) {
+    const float *wp = w;
+    const float *xp = x;
+    int ng0 = n >> 3;
+    int ng = ng0;
+    __asm__ __volatile__(
+        /* GROUP ZERO IS PEELED, and it is not an unrolling trick: this
+           kernel INITIALISES acc8 rather than accumulating into it (the
+           SSE twin's `xorps xmm0, xmm0` is the same contract), so the
+           first group has no addend and skips the adder entirely -
+           eight of the row's elements at a third of the cost. The C it
+           reproduces starts each accumulator at 0.0f and 0.0f + p is p
+           for every p this can produce; p is never a zero, because a
+           zero factor declines.
+
+           It also removes the accumulator's special-case scan from
+           every LATER group: after this, acc8[k] is always something
+           this kernel wrote, which is normal or exactly +0 - never
+           subnormal, inf or NaN, because those decline. Only the zero
+           test survives. */
+        "mov    r4, #0\n\t"                /* acc8 is written even when */
+        "mov    r5, #0\n\t"                /* nothing is consumed - the */
+        "mov    r6, #0\n\t"                /* caller reads it either way */
+        "mov    r7, #0\n\t"
+        "mov    r9, #0\n\t"
+        "mov    r10, #0\n\t"
+        "mov    r11, #0\n\t"
+        "mov    ip, #0\n\t"
+        "cmp    %[ng], #0\n\t"
+        "bne    0f\n\t"
+        "stmia  %[ac], {r4, r5, r6, r7, r9, r10, r11, ip}\n\t"
+        "b      8f\n\t"
+        "0:\n\t"
+        "sub    %[ng], %[ng], #1\n\t"
+        /* Zeros are group zero's snapshot, so the shared rollback below
+           serves it too: a decline here restores zeros, which is what
+           "consumed nothing" has to leave behind. */
+        "push   {r4, r5, r6, r7, r9, r10, r11, ip}\n\t"
+        "mov    r8, #0\n\t"
+        "11:\n\t"
+        "ldr    r4, [%[wp]], #4\n\t"
+        "ldr    r5, [%[xp]], #4\n\t"
+        LZ_F32MM_PROD
+        "str    lr, [%[ac], r8, lsl #2]\n\t"
+        "add    r8, r8, #1\n\t"
+        "cmp    r8, #8\n\t"
+        "bne    11b\n\t"
+        "add    sp, sp, #32\n\t"           /* group zero committed */
+        "1:\n\t"
+        "cmp    %[ng], #0\n\t"
+        "beq    8f\n\t"
+        "sub    %[ng], %[ng], #1\n\t"
+        "ldmia  %[ac], {r4, r5, r6, r7, r9, r10, r11, ip}\n\t"
+        "push   {r4, r5, r6, r7, r9, r10, r11, ip}\n\t"
+        "mov    r8, #0\n\t"
+        "2:\n\t"
+        "ldr    r4, [%[wp]], #4\n\t"
+        "ldr    r5, [%[xp]], #4\n\t"
+        "ldr    r6, [%[ac], r8, lsl #2]\n\t"
+        LZ_F32MM_PROD
+        /* ---- accumulator: this kernel's own output, so normal or +0 */
+        "movs   r4, r6, lsl #1\n\t"
+        "moveq  r7, lr\n\t"
+        "beq    6f\n\t"                    /* acc is zero: take the product */
+        "mov    r5, lr, lsl #1\n\t"
+        "teq    r4, r5\n\t"
+        "bne    5f\n\t"
+        "eors   r7, r6, lr\n\t"
+        "movmi  r7, #0\n\t"
+        "bmi    6f\n\t"                    /* exact cancellation: +0 */
+        "5:\n\t"
+        "mov    r7, r4, lsr #24\n\t"
+        "rsbs   r9, r7, r5, lsr #24\n\t"
+        "addgt  r7, r7, r9\n\t"
+        "eorgt  lr, r6, lr\n\t"
+        "eorgt  r6, lr, r6\n\t"
+        "eorgt  lr, r6, lr\n\t"
+        "rsblt  r9, r9, #0\n\t"
+        "cmp    r9, #25\n\t"
+        "movhi  r7, r6\n\t"
+        "bhi    6f\n\t"                    /* too far apart to interact */
+        "tst    r6, #0x80000000\n\t"
+        "orr    r6, r6, #0x800000\n\t"
+        "bic    r6, r6, #0xFF000000\n\t"
+        "rsbne  r6, r6, #0\n\t"
+        "tst    lr, #0x80000000\n\t"
+        "orr    lr, lr, #0x800000\n\t"
+        "bic    lr, lr, #0xFF000000\n\t"
+        "rsbne  lr, lr, #0\n\t"
+        "sub    r7, r7, #1\n\t"
+        "adds   r6, r6, lr, asr r9\n\t"
+        "rsb    r9, r9, #32\n\t"
+        "mov    lr, lr, lsl r9\n\t"
+        "and    r9, r6, #0x80000000\n\t"
+        "bpl    4f\n\t"
+        "rsbs   lr, lr, #0\n\t"
+        "rsc    r6, r6, #0\n\t"
+        "4:\n\t"
+        "cmp    r6, #0x800000\n\t"
+        "bcc    9f\n\t"
+        "cmp    r6, #0x1000000\n\t"
+        "bcc    3f\n\t"
+        "movs   r6, r6, lsr #1\n\t"
+        "rrx    lr, lr\n\t"
+        "add    r7, r7, #1\n\t"
+        "cmp    r7, #254\n\t"
+        "bcs    7f\n\t"                    /* would overflow to inf */
+        "3:\n\t"
+        "cmp    lr, #0x80000000\n\t"
+        "adc    r6, r6, r7, lsl #23\n\t"
+        "biceq  r6, r6, #1\n\t"
+        "orr    r7, r6, r9\n\t"
+        "b      6f\n\t"
+        "9:\n\t"                           /* cancellation, one bit first */
+        "lsls   lr, lr, #1\n\t"
+        "adc    r6, r6, r6\n\t"
+        "subs   r7, r7, #1\n\t"
+        "cmpcs  r6, #0x800000\n\t"
+        "bcs    3b\n\t"
+        "clz    ip, r6\n\t"
+        "sub    ip, ip, #8\n\t"
+        "subs   r7, r7, ip\n\t"
+        "blt    7f\n\t"                    /* subnormal result */
+        "mov    r6, r6, lsl ip\n\t"
+        "add    r6, r6, r7, lsl #23\n\t"
+        "orr    r7, r6, r9\n\t"
+        "6:\n\t"
+        "str    r7, [%[ac], r8, lsl #2]\n\t"
+        "add    r8, r8, #1\n\t"
+        "cmp    r8, #8\n\t"
+        "bne    2b\n\t"
+        "add    sp, sp, #32\n\t"           /* group committed */
+        "b      1b\n\t"
+        "7:\n\t"
+        "pop    {r4, r5, r6, r7, r9, r10, r11, ip}\n\t"
+        "stmia  %[ac], {r4, r5, r6, r7, r9, r10, r11, ip}\n\t"
+        "add    %[ng], %[ng], #1\n\t"      /* this group did not commit */
+        "8:\n\t"
+        : [wp] "+r"(wp), [xp] "+r"(xp), [ng] "+r"(ng)
+        : [ac] "r"(acc8)
+        : "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "ip", "lr",
+          "cc", "memory");
+    return (ng0 - ng) * 8;
+}
 #endif /* LZ_ARM_ASM_EXTERN */
