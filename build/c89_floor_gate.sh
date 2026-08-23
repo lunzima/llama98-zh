@@ -57,16 +57,22 @@ command -v gcc >/dev/null 2>&1 || { echo "c89_floor_gate: SKIP - no gcc"; exit 2
 # gate was written after finding - both in ops_gdn.c, both introduced
 # after bc4f1ba landed mid-session - are fixed rather than baselined,
 # which is the difference between debt and a new hole.
-# DESIGNATED INITIALISERS are the third construct, added after the
-# compile pass below went in and found nothing: gcc reports them as a
-# WARNING, so an errors-only check walks straight past 266 of them in
-# err.c and 186 in gui/localized_strings.c. Both are the message tables,
-# where the whole point of the form is that an enum value and its string
-# cannot drift apart - so they are baselined rather than converted.
-# Positional initialisers would put 452 strings in an order nothing
-# checks, which trades a compiler the tree cannot run for a class of bug
-# it currently cannot have.
-BASELINE="ops.c:1 forward.c:16 err.c:266"
+# DESIGNATED INITIALISERS are the third construct, and gcc reports them
+# as a WARNING, so an errors-only check walks straight past them. They
+# were 266 in err.c and 186 in gui/localized_strings.c - the two message
+# tables, where the form exists so that a code and its string cannot
+# drift apart.
+#
+# err.c is converted. The objection to converting was that positional
+# initialisers put the strings in an order nothing checks; that is now
+# build/err_table_order_gate.sh, which compares each row's tag comment
+# against the enum and is strictly stronger than the designated form -
+# the designated form made order irrelevant, and so let one code sit two
+# slots out of place there for as long as it did.
+#
+# gui/localized_strings.c is the remaining 186, and wants the same pair:
+# convert, plus a gate over its own tag comments.
+BASELINE="ops.c:1 forward.c:16"
 
 FAIL=0
 TOTAL=0

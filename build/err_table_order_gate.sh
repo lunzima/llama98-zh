@@ -28,8 +28,10 @@ W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 # The enum, minus its count sentinel.
 grep -oE "^ *LZ_ERR_[A-Z0-9_]+" src/err.h | tr -d ' ' \
     | grep -v '^LZ_ERR_COUNT$' > "$W/enum.txt"
-# Every initialiser tag, in file order. Two tables, so twice the enum.
-grep -oE "^ *\[LZ_ERR_[A-Z0-9_]+\]" src/err.c | tr -d ' []' > "$W/tbl.txt"
+# Every row's tag comment, in file order. Two tables, so twice the enum.
+# The comment IS the binding now - the compiler sees position only - so
+# this reads exactly what a human reads and nothing else.
+grep -oE "^ *\/\* LZ_ERR_[A-Z0-9_]+" src/err.c | grep -oE "LZ_ERR_[A-Z0-9_]+" > "$W/tbl.txt"
 
 N=$(wc -l < "$W/enum.txt")
 T=$(wc -l < "$W/tbl.txt")
