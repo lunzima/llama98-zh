@@ -836,12 +836,12 @@ static void gdn_build_table(const float *ss, const float *q, const float *k,
            multiply wherever the multiply was already exact. */
         float fa, fb;
         int ia, ib;
+        int kp = kk >> 1, half = kk & 1;
+        int tail = (kk == kd - 1 && (kd & 1));
         if (!ik_p2 || !f32_scale_pow2(ka[kk], -ek, &fa)) fa = ka[kk] * ik;
         if (!iq_p2 || !f32_scale_pow2(qa[kk], -eq, &fb)) fb = qa[kk] * iq;
         ia = q8_round(fa);
         ib = q8_round(fb);
-        int kp = kk >> 1, half = kk & 1;
-        int tail = (kk == kd - 1 && (kd & 1));
         if (ia >  32767) ia =  32767;
         if (ia < -32767) ia = -32767;
         if (ib >  32767) ib =  32767;
@@ -2208,12 +2208,14 @@ static void gdn_p2_fixed_rows(const int8_t *sq_in, int8_t *sq_out,
            both row paths get the same value from the same multiply -
            two textually-equal copies is the hazard that comment names. */
         float decs;
-        if (!f32_scale_pow2(dec, -LZ_GDN_LO_SHIFT, &decs))
-            decs = dec * (1.0f / LZ_GDN_LO_SCALE);
 #if LZ_GDN_STATE_2PLANE
         const int8_t *row_lo_in = sq2_in + (size_t)kk * vd;
         int8_t *row_lo_out = sq2_out + (size_t)kk * vd;
 #endif /* LZ_GDN_STATE_2PLANE */
+        /* Declarations first: iron law 10's C89 floor. This assignment
+           sat above the two above it until a C89 build said so. */
+        if (!f32_scale_pow2(dec, -LZ_GDN_LO_SHIFT, &decs))
+            decs = dec * (1.0f / LZ_GDN_LO_SCALE);
         /* Both SIMD (gdn_p2_row_simd) and scalar (gg loop below) row
            paths cost the same per group. Billed once, above the fork -
            billing only inside gdn_p2_row_simd would read zero on
