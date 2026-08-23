@@ -709,7 +709,10 @@ static void gdn_build_table(const float *ss, const float *q, const float *k,
        gdn_pass1_fixed, which itself was unbilled until one commit ago,
        so the whole coefficient table build read as zero. Found by
        .prof/unbilled_scan.awk. Per call, at LZ_GDN_FIXED == 1:
-         loop 1   2 mul per kk
+         loop 1   0 mul per kk. ss is the state's group scale and
+                  p2_group_scale writes it as pow2f(ee), so both
+                  products are exponent adds - free, no value traded,
+                  the power of two was already there.
          scales   0 mul, 0 div. su/sw and ik/iq are pow2f of the block
                   exponent now - bit construction, nothing to bill -
                   where they used to be 2 mul (amk*LZ_Q15_INV) and 2 div
@@ -725,7 +728,7 @@ static void gdn_build_table(const float *ss, const float *q, const float *k,
        2 mul per kk and is NOT in this formula: it compiles out at the
        default level, and a term for a path this build does not take is
        a term nobody can check. */
-    LZ_FCX(LZ_FC_RECUR, (long)kd * 2, (long)kd * 2, 0, 0, 0);
+    LZ_FCX(LZ_FC_RECUR, 0, (long)kd * 2, 0, 0, 0);
     /* THE TWO ABSMAX SCANS RUN IN THE INTEGER DOMAIN. They were four
        float comparisons per kk - `a < 0.0f` and `b < 0.0f` for the sign,
        `t > amk` and `t > amq` for the max - which on a soft-float target
@@ -738,13 +741,29 @@ static void gdn_build_table(const float *ss, const float *q, const float *k,
        float compare left in the recurrence. NaN cannot reach here - a
        and b are finite products of finite state and inputs - and a
        negative zero masks to +0, which the float form also read as 0. */
+    /* THE TWO PRODUCTS ARE EXPONENT ADDS TOO, and this one is free -
+       no value change, nothing traded. ss is the STATE's group scale,
+       written by p2_group_scale, which returns pow2f(ee) on its main
+       path: it is already an exact power of two and nobody had used
+       that. One bit test per kk serves both products, since a and b
+       scale by the same ss. The guard is live - p2_group_scale's
+       out-of-range arm returns sacc*pow2f(...) and its zero arm returns
+       1.0f, and on the FLOAT recurrence ss comes from q8_group_scale's
+       amax*(1/127) instead, which is not a power of two at all. */
     {
-        union { float f; uint32_t u; } mb;
+        union { float f; uint32_t u; } mb, sb;
         uint32_t amku = 0u, amqu = 0u;
         for (kk = 0; kk < kd; kk++) {
-            float a = ss[(size_t)kk * ng + gg] * k[kk];
-            float b = ss[(size_t)kk * ng + gg] * q[kk];
+            float ssv = ss[(size_t)kk * ng + gg];
+            float a, b;
             uint32_t t;
+            int se, sp2;
+            sb.f = ssv;
+            sp2 = ((sb.u & 0x007FFFFFu) == 0u)
+                  && (uint32_t)(((sb.u >> 23) & 0xFFu) - 1u) < 0xFEu;
+            se = (int)((sb.u >> 23) & 0xFFu) - 127;
+            if (!sp2 || !f32_scale_pow2(k[kk], se, &a)) a = ssv * k[kk];
+            if (!sp2 || !f32_scale_pow2(q[kk], se, &b)) b = ssv * q[kk];
             ka[kk] = a;
             qa[kk] = b;
             mb.f = a; t = mb.u & 0x7FFFFFFFu; if (t > amku) amku = t;
