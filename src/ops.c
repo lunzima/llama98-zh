@@ -1646,18 +1646,27 @@ static long long epi_fixed_raw(const int32_t *accb, const LZTensor *w,
        BUILT AND RUN, both toolchains. gcc's C arm came out byte-
        identical to this code on both fixtures (78,905,344 and
        86,507,520 bytes), so the fusion itself is right. The wcc386 arm
-       compiled with 0 errors and then CRASHED on the first model load -
-       the stack parm is not where that offset says it is. Reverted
-       rather than shipped or guessed at: a kernel that assembles and
-       corrupts the stack is worse than the copy it replaces.
+       compiled with 0 errors and then CRASHED on the first model load.
+       Reverted rather than shipped or guessed at.
 
-       So the next attempt needs Watcom's actual stack-parm frame layout
-       checked against a disassembly first, or a decomposition that
-       fits in seven registers. What it does NOT need is another
-       argument about whether it is possible - three earlier readings of
-       this obstacle (a matrix cell, the divide, the register count) were
-       all wrong, and the only one that settled anything was building
-       it. */
+       THE CRASH WAS THE SYNTAX, not the offset and not the budget, and
+       a three-arm probe said so: calling `rd(1, 2, 3, sentinel)` under
+       `parm [esi] [edi] [ecx] []` leaves esi, edi AND ecx all holding
+       the SENTINEL, and the return address clobbered - Watcom does not
+       read the empty [] as "this one goes on the stack", it mis-parses
+       the whole list. The documented way to put a parameter on the
+       stack is to LIST FEWER REGISTERS than the prototype has
+       arguments; the remainder go on the stack by themselves. So the
+       shape to write next time is
+
+           parm [esi] [edi] [ecx]        with a 4-argument prototype
+
+       and the offset still has to be read out of a disassembly rather
+       than assumed, because `push ebp` is inside the body.
+
+       Four readings of this obstacle - a matrix cell, the divide, the
+       register count, the stack offset - and every one of them was
+       settled by running something, never by arguing. */
     for (g = 0; g < ng; g++)
         g_epi_m[g] = (int32_t)g_epi_xq[tk][g] * (int32_t)ww[g / r];
     /* The exponent is per ROW, so a libm call here would run once per
