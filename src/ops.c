@@ -1632,14 +1632,32 @@ static long long epi_fixed_raw(const int32_t *accb, const LZTensor *w,
        reduction the way hoisting ww[j] out of the inner sum would be
        (that one changes what overflows).
 
-       WHAT IS LEFT is the twin: this call site's MAC is lz_epi_mac,
-       which has a wcc386 #pragma aux body, so the fused form needs a
-       nested-loop twin written and cross-checked before it can replace
-       a flat one. lz_epi_mac_i16 showed that is a bounded job - two
-       instructions and a label - but a nested loop is a bigger one, and
-       an asm kernel committed without both toolchains built and compared
-       is how a broken HEAD gets in. Located, priced, and left with the
-       obstacle stated correctly. */
+       WHAT IS LEFT is the twin, and the obstacle is a REGISTER BUDGET
+       that was tried and measured rather than argued. A per-group
+       kernel needs esi (a), edi (xq), ecx (count), ebx/ebp (the int64
+       accumulator) and edx:eax (imul's fixed pair) - seven, with
+       nothing left for the group's w. The 386's two-operand
+       `imul r32, r/m32` takes a memory operand and does not touch edx,
+       so w on the stack looks like it closes the gap:
+
+           parm [esi] [edi] [ecx] []      w at [esp+8] after push ebp
+           imul eax, dword ptr [esp+8]
+
+       BUILT AND RUN, both toolchains. gcc's C arm came out byte-
+       identical to this code on both fixtures (78,905,344 and
+       86,507,520 bytes), so the fusion itself is right. The wcc386 arm
+       compiled with 0 errors and then CRASHED on the first model load -
+       the stack parm is not where that offset says it is. Reverted
+       rather than shipped or guessed at: a kernel that assembles and
+       corrupts the stack is worse than the copy it replaces.
+
+       So the next attempt needs Watcom's actual stack-parm frame layout
+       checked against a disassembly first, or a decomposition that
+       fits in seven registers. What it does NOT need is another
+       argument about whether it is possible - three earlier readings of
+       this obstacle (a matrix cell, the divide, the register count) were
+       all wrong, and the only one that settled anything was building
+       it. */
     for (g = 0; g < ng; g++)
         g_epi_m[g] = (int32_t)g_epi_xq[tk][g] * (int32_t)ww[g / r];
     /* The exponent is per ROW, so a libm call here would run once per
