@@ -1786,6 +1786,34 @@ static float gdn_pass1_fixed_head(const int8_t *sq_in,
         for (kk = 0; kk < kd; kk++) kq += k[kk] * q[kk];
     }
 
+    /* PASS 1's FLOAT WORK HAD NO SITE. gdn_p2_fixed_rows bills pass 2
+       and nothing billed this, so the recurrence class read as pass 2
+       alone. Found by .prof/unbilled_scan.awk, which keys on the
+       OPERATION (lz_i32f / q8_round) rather than on the signature the
+       way build/f32count_billing_gate.sh does - that gate's own header
+       names this rule and says why it was not implemented.
+
+       Billed here rather than at the call site so the two arms below
+       cannot drift apart: the epilogue's shape is a compile-time choice
+       and the count has to move with it.
+
+       Prologue: 3 mul + 1 add per kk with a gvec (KDA), 1 mul + 1 add
+       without (GDN). Epilogue, per ELEMENT and for each of u and w:
+       2 lz_i32f (2 cvt), 2 mul, 1 add under either the two-plane or the
+       two-table shape; 1 cvt and 1 mul under the single-plane one.
+
+       NOT COVERED, and it is the larger half: gdn_build_table runs once
+       per group inside gdn_pass1_fixed and does its own float work
+       (.prof/unbilled_scan.awk lists it). Deriving it needs the table
+       shape audited, and a half-derived formula is exactly what this
+       file has twice been wrong by. */
+#if LZ_GDN_STATE_2PLANE || LZ_GDN_FIXED >= 2
+    LZ_FCX(LZ_FC_RECUR, (long)vd * 4 + (long)kd * (gvec ? 3 : 1),
+           (long)vd * 2 + (long)kd, 0, (long)vd * 4, 0);
+#else
+    LZ_FCX(LZ_FC_RECUR, (long)vd * 2 + (long)kd * (gvec ? 3 : 1),
+           (long)kd, 0, (long)vd * 2, 0);
+#endif /* LZ_GDN_STATE_2PLANE || LZ_GDN_FIXED >= 2 */
 #if LZ_GDN_STATE_2PLANE
     gdn_pass1_fixed(sq_in, sq2_in, aul, awl, ss_in, qq, kk_, kd, vd,
                     au, aw, su, sw, au2, aw2, su2, sw2);
@@ -1837,23 +1865,44 @@ static void gdn_p2_fixed_rows(const int8_t *sq_in, int8_t *sq_out,
 
        Group boundaries match the state's own quantization groups, which
        is what lets c2 stay a single scalar per (row, group) call. */
+    /* THIS LOOP HAD NO CENSUS SITE AT ALL. gdn_p2_fixed_rows billed only
+       its per-ROW work, so the whole delta quantization - a divide and 32
+       multiply-and-round per group, every group, every call - read as
+       zero. That is the defect class build/f32count_billing_gate.sh
+       exists for, and it does not catch this one: the gate looks for a
+       function returning float from an int accumulator, and this is a
+       void function quantizing a float vector.
+
+       The amax scan itself stays unbilled, which is the census's
+       standing convention (compares and sign masks are not counted) and
+       not an omission here - see the note on that convention in ops.h. */
     for (gg = 0; gg < ng; gg++) {
-        float amd = 0.0f, inv_d;
+        float amd = 0.0f, inv_d, sd;
         for (vv = gg * 32; vv < gg * 32 + 32; vv++) {
             float a = (delta[vv] < 0.0f) ? -delta[vv] : delta[vv];
             if (a > amd) amd = a;
         }
+        /* ONE multiply, not two: the guard below and the assignment used
+           to compute amd*LZ_Q15_INV separately. Same value by
+           construction - same operands, same rounding - so hoisting is
+           exact rather than close. */
+        sd = amd * LZ_Q15_INV;
+        LZ_FCX(LZ_FC_RECUR, 1, 0, 0, 0, 0);
         /* Same floor as everywhere else: a delta group below this is
            numerically zero, and letting its scale reach the subnormal
            range is how x87 and SSE stop agreeing (ops.h's
            LZ_Q8_MIN_SCALE has the mechanism). */
-        if (!(amd * LZ_Q15_INV >= LZ_Q8_MIN_SCALE_F)) {
+        if (!(sd >= LZ_Q8_MIN_SCALE_F)) {
             s_dg[gg] = 1.0f;
             for (vv = gg * 32; vv < gg * 32 + 32; vv++) dq[vv] = 0;
             continue;
         }
-        s_dg[gg] = amd * LZ_Q15_INV;
+        s_dg[gg] = sd;
         inv_d = 32767.0f / amd;
+        /* 1 div, then per element the scale multiply and q8_round's
+           magic add - the same two the other quantize sites in this file
+           bill (see the `q8_round(add)` notes at the LZ_FC_QUANT ones). */
+        LZ_FCX(LZ_FC_RECUR, 32, 32, 1, 0, 0);
         for (vv = gg * 32; vv < gg * 32 + 32; vv++) {
             int t = q8_round(delta[vv] * inv_d);
             if (t >  32767) t =  32767;
