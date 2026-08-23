@@ -121,6 +121,14 @@ extern long long lz_debug_conv_sig_i;
    any count here means a checkpoint that exponent was not measured on,
    and the clamp is otherwise silent. */
 extern long lz_conv_o_clamped;
+extern long long lz_debug_convo_i16;
+/* forward.c's four, added with the same reasoning their neighbours
+   carry: registered in both gates without a positive control, so
+   neither gate could say the arm did anything. */
+extern long long lz_debug_bvec_i16;
+extern long long lz_debug_klat_i16;
+extern long long lz_debug_mlat_i16;
+extern long long lz_debug_mlat_quant;
 /* lz_fdiv_recip's positive control, ops_quant.c. The two arms of
    LZ_FDIV_RECIP are bit-identical, so this counter is the only thing
    that says which one ran; `decl` next to it says the accepted ones are
@@ -1903,6 +1911,10 @@ int main(int argc, char **argv) {
            float rows are bit-comparable, so an output comparison can
            never tell "the exit ran" from "the exit was refused". */
         printf("v_proj int16   %lld elements\n", lz_debug_vproj_i16);
+        printf("bvec int16     %lld heads\n", lz_debug_bvec_i16);
+        printf("klat int16     %lld elements\n", lz_debug_klat_i16);
+        printf("mlat int16     %lld elements  quantizes %lld\n",
+               lz_debug_mlat_i16, lz_debug_mlat_quant);
         printf("q8_i16 int     %lld elements\n", lz_debug_q8i16_int);
         printf("q8_int int     %lld elements\n", lz_debug_q8int_int);
         printf("swiglu int16   %lld elements  max|p| %d max|g| %d max|o| %d\n",
@@ -1911,6 +1923,7 @@ int main(int argc, char **argv) {
         printf("conv sig int   %lld channel-steps\n", lz_debug_conv_sig_i);
         printf("fdiv recip     %lld taken  %lld declined\n",
                lz_debug_fdiv_recip, lz_debug_fdiv_decl);
+        printf("conv o16 int   %lld elements\n", lz_debug_convo_i16);
         printf("conv o16 clamp %ld elements%s\n", lz_conv_o_clamped,
                lz_conv_o_clamped ? "  <- LZ_CONVO_ES is wrong for this "
                                    "model; re-run .prof/convqk_range.c"

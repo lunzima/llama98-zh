@@ -2849,6 +2849,11 @@ static int conv_pow2_exp(float v, int32_t *k) {
  * the caller's job (forward.c) to make sure the two ways of obtaining
  * it are not mixed within one model's conv block. */
 long lz_conv_o_clamped;
+/* THE INT16 EXIT'S POSITIVE CONTROL, and the clamp counter above is not
+   one: it reads 0 both when the exit is compiled out and when it ran
+   without clipping, which is the normal case - an always-zero signal
+   carries nothing. This one separates them. */
+long long lz_debug_convo_i16;
 
 /* The int16 exit is a NEW ENTRY POINT rather than two more parameters on
    the old one, and the reason is the call-site count: six of the eight
@@ -2892,9 +2897,10 @@ void lz_causal_conv1d_step_fixed_o16(float *o, short *oi, int out_es,
        multiply the float entry needs, and nothing at all with xi. A
        formula that kept charging the old shape would report this
        change as worth zero, which is what the first run of it did. */
-    if (oi)
+    if (oi) {
         LZ_FCX(LZ_FC_CONV, (long)n_ch * (xi ? 0 : 1), 0, 0, 0, 0);
-    else
+        lz_debug_convo_i16 += n_ch;
+    } else
         LZ_FCX(LZ_FC_CONV, (long)n_ch * (xi ? 2 : 3), 0, 0,
                (long)n_ch * 2, 0);
     lz_debug_conv_sig_i += n_ch;

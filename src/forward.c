@@ -110,6 +110,22 @@ long long lz_debug_us_capture = 0;
    role lz_debug_mtp_attn_rows plays for the attention-window change. */
 long long lz_debug_n_capture = 0;
 
+/* POSITIVE CONTROLS FOR FOUR MORE INT-PIPELINE SWITCHES. The v_proj /
+   q8_i16 / q8_int / swiglu / conv-sig set already has them and the
+   reason is stated at their print site: the int and float arms are
+   bit-comparable, so an output comparison can never separate "the exit
+   ran" from "the exit was refused". LZ_BVEC_I16, LZ_KLAT_I16,
+   LZ_MLAT_I16 and LZ_MLAT_REUSE were registered in
+   switch_matrix_gate and int_pipeline_arm_gate without one, so both
+   gates proved their arms BUILD and RUN and neither could prove either
+   arm did anything. mlat_quant is the pair for reuse specifically:
+   with it on that number is below mlat's own, and with it off they are
+   equal, which is what a compiled-out guard looks like from outside. */
+long long lz_debug_bvec_i16 = 0;
+long long lz_debug_klat_i16 = 0;
+long long lz_debug_mlat_i16 = 0;
+long long lz_debug_mlat_quant = 0;
+
 /* Timer + call-count pair for lz_mtp_catchup, same shape as the capture
    pair above and same reason: team-lead's explicit
    requirement is a POSITIVE control proving catch-up decode actually
@@ -3100,6 +3116,7 @@ static void forward_kda(const LZModel *m, LZRunState *s,
                        float op and introduces no rounding. */
                     int k;
                     const short *li = s->kda_lat_i16 + (size_t)tk * gate_rank;
+                    lz_debug_klat_i16 += gate_rank;
                     for (k = 0; k < gate_rank; k++) s->kda_lat_i32[k] = li[k];
                     lz_quantize_q8_int(s->kda_lat_i32, gate_rank, gsb,
                                        pow2f(-LZ_KLAT_ES), s->xq, s->xqs);
@@ -3308,6 +3325,7 @@ static void forward_kda(const LZModel *m, LZRunState *s,
             /* bvec's only consumer, and with `bvec_int` it never became
                a float: the projection exited int16 at LZ_BVEC_ES and
                lz_sigmoid_i reaches the same table from there. */
+            if (bvec_int) lz_debug_bvec_i16++;
             beta = bvec_int
                  ? lz_sigmoid_i(s->bvec_i16[(size_t)tk * nv + h], LZ_BVEC_ES)
                  : lz_sigmoid(s->bvec[(size_t)tk * nv + h]);
@@ -3663,11 +3681,21 @@ static void forward_moe(const LZModel *m, LZRunState *s,
                    either way, so the arm isolates the SKIP and not the
                    buffer move, and reproduces the pre-hoist cost exactly. */
                 if (!LZ_MLAT_REUSE || gsl != gs_have) {
-                    if (mlat_int)
+                    /* Positive controls for two switches at once, and
+                       they say different things: mlat counts the int16
+                       exit being consumed, reuse counts the
+                       quantizations this guard let through. With reuse
+                       on the second number is the smaller one, which is
+                       the saving - and with it off the two are equal,
+                       which is what "the guard is compiled out" looks
+                       like from outside. */
+                    lz_debug_mlat_quant++;
+                    if (mlat_int) {
+                        lz_debug_mlat_i16 += latent;
                         lz_quantize_q8_i16(lat_i, latent, gsl,
                                            pow2f(-LZ_MLAT_ES),
                                            s->moe_lat_q, s->moe_lat_qs);
-                    else
+                    } else
                         lz_quantize_q8(lat_x, latent, gsl,
                                        s->moe_lat_q, s->moe_lat_qs);
                     gs_have = gsl;

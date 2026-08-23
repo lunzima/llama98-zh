@@ -1841,6 +1841,10 @@ void lz_causal_conv1d_step_fixed_o16(float *o, short *oi, int out_es,
    picked at zero on both measured chains, so any count is a checkpoint
    this exponent was not measured on. */
 extern long lz_conv_o_clamped;
+/* Elements that took the int16 exit. The clamp counter above cannot
+   serve as the switch's positive control - it is 0 in the healthy case
+   AND 0 when the exit is compiled out. */
+extern long long lz_debug_convo_i16;
 
 /* Precompute the scales the fixed kernel multiplies by, once per model
    rather than per token. Built with ldexp: `1 << (ew+es)` overflows,
