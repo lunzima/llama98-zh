@@ -232,6 +232,13 @@ typedef char lz_q8min_check[1 - 2 * (int)!(LZ_Q8_MIN_SCALE == 0.0f)];
 #error "LZ_CONV_SIG_I != 0"
 #endif
 
+#ifndef LZ_CONVO_I16
+#error "LZ_CONVO_I16 not defined (expected 0)"
+#endif
+#if LZ_CONVO_I16 != 0
+#error "LZ_CONVO_I16 != 0"
+#endif
+
 #ifndef LZ_GATE_SIG_I
 #error "LZ_GATE_SIG_I not defined (expected 0)"
 #endif

@@ -169,6 +169,11 @@ void lz_rmsnorm_int(int32_t *t, const float *x, const float *w, int n,
 
 /* o = x * rsqrt(sum(x^2) + eps)  - note sum, not mean */
 void lz_l2norm(float *o, const float *x, int n, float eps);
+/* Same normalisation from an int16 input at 2^-e. Output is float and
+   stays float - see the body for why the chain ends there, and why eps
+   is what stops the exponent from cancelling the way the mathematics
+   says it should. */
+void lz_l2norm_i16(float *o, const short *x, int n, int e, float eps);
 
 /* exp = 2^(x·log2e) via bit construction. Default path; -DLZ_EXACT_MATH falls back to libm.
 
@@ -1783,6 +1788,25 @@ void lz_causal_conv1d_step_fixed(float *o, const float *x, const short *xi,
                                  const signed char *sig_e,
                                  float in_scale, int bound,
                                  int n_ch, int k);
+/* Same kernel with an INT16 EXIT: `oi` non-NULL writes the output there
+   at 2^-out_es and leaves `o` alone. The exit is purely integer, which
+   is a property of how the caller builds the scales rather than of this
+   code - sig_oscale2 is an exact power of two whose exponent is
+   -(sig_e[c]+15), so the epilogue is one 32x32 product and a shift.
+   NULL is the float exit, which is what the wrapper above passes.
+   Clamps are counted in lz_conv_o_clamped rather than being silent. */
+void lz_causal_conv1d_step_fixed_o16(float *o, short *oi, int out_es,
+                                 const float *x, const short *xi,
+                                 const short *sh_in, short *sh_out,
+                                 const short *mw, const float *sig_k1,
+                                 const float *sig_oscale2, float sig_k2,
+                                 const signed char *sig_e,
+                                 float in_scale, int bound,
+                                 int n_ch, int k);
+/* Non-zero means the int16 exit above hit its bound. LZ_CONVO_ES was
+   picked at zero on both measured chains, so any count is a checkpoint
+   this exponent was not measured on. */
+extern long lz_conv_o_clamped;
 
 /* Precompute the scales the fixed kernel multiplies by, once per model
    rather than per token. Built with ldexp: `1 << (ew+es)` overflows,

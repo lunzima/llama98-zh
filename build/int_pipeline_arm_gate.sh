@@ -57,7 +57,7 @@ cd "$(dirname "$0")/.." || exit 1
 
 ARMS="LZ_BVEC_I16 LZ_MOEGATE_I16 LZ_KLAT_I16 LZ_KGATE_I16 LZ_KGATE_EXP_I
 LZ_MLAT_I16 LZ_MLAT_REUSE LZ_VPROJ_I16 LZ_Q8I16_INT LZ_Q8INT_INT
-LZ_SWIGLU_I16 LZ_CONV_SIG_I LZ_SOFTPLUS_POLY"
+LZ_SWIGLU_I16 LZ_CONV_SIG_I LZ_CONVO_I16 LZ_SOFTPLUS_POLY"
 
 if ! command -v gcc >/dev/null 2>&1; then
     echo "int_pipeline_arm_gate: ERROR - gcc not found"

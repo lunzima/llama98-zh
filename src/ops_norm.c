@@ -669,6 +669,52 @@ have_ss_l2:
     for (i = 0; i < n; i++) o[i] = x[i] * inv;
 }
 
+/* lz_l2norm's int16 entry: x[i] * 2^-e is the value, and the caller
+   producing it (lz_causal_conv1d_step_fixed's int16 exit) never built
+   the float. Output stays FLOAT, and that is not an oversight - the
+   consumer is gdn_build_table's `ss[kk*ng+gg] * q[kk]`, whose scale
+   varies with BOTH indices, so there is no common factor to lift and an
+   int16 handed over there costs a convert in that multiply. The chain
+   ends here on purpose.
+
+   WHAT IT SAVES, per element: the float entry's requantisation (a
+   multiply and q8_round's magic add, inside norm_ss_fixed) and the
+   producer's two converts. WHAT IT COSTS: one convert in the output
+   loop, which the float entry does not pay because its x is already
+   float. Net one convert and two operations an element - see
+   docs/int-pipeline-project.md 9.4 for why the naive reading of this is
+   twice as good as the real one.
+
+   EPS IS WHY THIS IS NOT FREE. L2 normalisation is scale-invariant in
+   mathematics, so "the exponent cancels" looks like an enabling fact.
+   It is not: rsqrt is taken of ss + eps and eps is ABSOLUTE, so the
+   integer sum of squares has to be brought to the true scale before it
+   is added. That is the pow2f below and it is the whole reason this
+   function needs e at all.
+
+   The sum is EXACT: 32767^2 * n stays inside int64 for any n this
+   engine uses (n = 64 gives 6.9e10, and even n = 4096 gives 4.4e12).
+   So the only rounding before rsqrt is the single convert. */
+void lz_l2norm_i16(float *o, const short *x, int n, int e, float eps) {
+    long long acc = 0;
+    float ss, inv, m;
+    int i;
+    /* n mul + n add for the squares are INTEGER and bill nothing, the
+       same convention lz_swiglu_q15_i16's site uses. What bills is the
+       one convert, the scale multiply, eps's add, and the output loop's
+       convert-and-multiply per element. */
+    LZ_FCX(LZ_FC_NORM, n + 2, 1, 0, n + 1, 0);
+    for (i = 0; i < n; i++) acc += (long long)x[i] * (long long)x[i];
+    /* (float)acc first, then the power of two: the product of two
+       exponent-only factors is exact either way, but splitting them
+       keeps the convert on a value whose magnitude the caller can bound
+       from e alone. */
+    ss = (float)acc * pow2f(-2 * e);
+    inv = lz_rsqrt(ss + eps);
+    m = inv * pow2f(-e);
+    for (i = 0; i < n; i++) o[i] = (float)x[i] * m;
+}
+
 void lz_softmax(float *x, int n) {
     float mx = x[0], sum = 0.0f;
     int i;

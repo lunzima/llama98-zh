@@ -116,6 +116,11 @@ extern long long lz_debug_swiglu_i16;
    Channel-steps that entered sigmoid through sigmoid_q15_i; 0 under
    -DLZ_CONV_SIG_I=0 and 0 on the float conv tier. */
 extern long long lz_debug_conv_sig_i;
+/* The conv's int16 exit, ops.c. Elements the exit had to clamp to
+   +-32767 - LZ_CONVO_ES was chosen at zero on both measured chains, so
+   any count here means a checkpoint that exponent was not measured on,
+   and the clamp is otherwise silent. */
+extern long lz_conv_o_clamped;
 /* The KDA decay gate's integer chain, forward.c. Elements whose sigmoid
    and exp were both reached through folded integer coordinates; 0 under
    -DLZ_KGATE_EXP_I=0 and 0 with the scalar tier off. The two exponents
@@ -1898,6 +1903,10 @@ int main(int argc, char **argv) {
                lz_debug_swiglu_i16, lz_debug_swiglu_pmax,
                lz_debug_swiglu_gmax, lz_debug_swiglu_omax);
         printf("conv sig int   %lld channel-steps\n", lz_debug_conv_sig_i);
+        printf("conv o16 clamp %ld elements%s\n", lz_conv_o_clamped,
+               lz_conv_o_clamped ? "  <- LZ_CONVO_ES is wrong for this "
+                                   "model; re-run .prof/convqk_range.c"
+                                 : "");
         printf("kda gate int   %lld elements  exp s %d  sig s %d..%d"
                "  refused %lld\n",
                lz_debug_kgate_exp_i, lz_debug_kgate_exp_s,

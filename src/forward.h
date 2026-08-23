@@ -461,6 +461,13 @@ typedef struct {
        rest of the fixed conv tier and NULL without it. */
     short *kda_q_i16, *kda_k_i16;
     short *kda_v_i16;
+    /* The CONV's own int16 exit for q and k, at LZ_CONVO_ES
+       (int-pipeline 9.4). Not v: its consumer is lz_kda_step, which
+       does not quantize v - the recurrence uses it in
+       `(v - gt*u)*beta` - so v's exit waits on the recurrence tier.
+       kda_qc/kda_kc stay allocated and hold the same vectors whenever
+       the int exit is off; exactly one of the two is written. */
+    short *kda_qc_i16, *kda_kc_i16;
     /* q16_0's four int16 exits (int-pipeline milestone 5), same
        one-of-the-two contract as the three above and the same NULL
        meaning. Each sits at its chain's LZ_*_ES exponent:

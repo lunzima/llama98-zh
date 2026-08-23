@@ -2807,7 +2807,16 @@ static int conv_pow2_exp(float v, int32_t *k) {
  * the same code either way - only the source of `q` differs, and it is
  * the caller's job (forward.c) to make sure the two ways of obtaining
  * it are not mixed within one model's conv block. */
-void lz_causal_conv1d_step_fixed(float *o, const float *x, const short *xi,
+long lz_conv_o_clamped;
+
+/* The int16 exit is a NEW ENTRY POINT rather than two more parameters on
+   the old one, and the reason is the call-site count: six of the eight
+   callers are probes (.prof/fwd_mine.c, .prof/arm_prim_count.c), and a
+   signature change there is churn with no reader. The old name stays as
+   a wrapper passing NULL - one call per (layer, tensor), not per
+   element, so it costs nothing measurable. */
+void lz_causal_conv1d_step_fixed_o16(float *o, short *oi, int out_es,
+                                 const float *x, const short *xi,
                                  const short *sh_in, short *sh_out,
                                  const short *mw, const float *sig_k1,
                                  const float *sig_oscale2, float sig_k2,
@@ -2835,8 +2844,18 @@ void lz_causal_conv1d_step_fixed(float *o, const float *x, const short *xi,
        lz_swiglu_q15_i16's site. The int16 input drops the first multiply.
        q8_round bills nothing of its own (its magic add is not counted at
        any of its call sites), so 2 is the whole difference. */
-    LZ_FCX(LZ_FC_CONV, (long)n_ch * (xi ? 2 : 3), 0, 0,
-           (long)n_ch * 2, 0);
+    /* THE INT16 EXIT BILLS ITS OWN SHAPE, in the same commit as the
+       code: with `oi` the three float operations after the accumulator
+       - lz_i32f, the exit cast and the two multiplies - are a 64-bit
+       integer product and a shift, so all that is left is the input
+       multiply the float entry needs, and nothing at all with xi. A
+       formula that kept charging the old shape would report this
+       change as worth zero, which is what the first run of it did. */
+    if (oi)
+        LZ_FCX(LZ_FC_CONV, (long)n_ch * (xi ? 0 : 1), 0, 0, 0, 0);
+    else
+        LZ_FCX(LZ_FC_CONV, (long)n_ch * (xi ? 2 : 3), 0, 0,
+               (long)n_ch * 2, 0);
     lz_debug_conv_sig_i += n_ch;
 #else
     (void)sig_e;   /* the integer coordinate's table, unread in this arm */
@@ -2877,6 +2896,31 @@ void lz_causal_conv1d_step_fixed(float *o, const float *x, const short *xi,
                bits and the coordinate costs nothing. */
             int32_t s15 = sigmoid_q15_i(acc, sig_e[c]);
             int done = 0;
+            /* INT16 EXIT, and there is no float anywhere in it. The
+               output is acc * s15 * sig_oscale2[c], and sig_oscale2 is
+               an EXACT power of two by construction - forward.c builds
+               oscale = ldexp(1, -(ew+LZ_CONV_ES)) and lz_sig_q15_fold
+               divides it by 32768 - so its exponent is -(sig_e[c]+15)
+               and conv_pow2_exp does not need to be asked. What is left
+               is a 32x32 product and a shift.
+
+               The product needs 64 bits: acc is int32 and s15 reaches
+               32768, so it can hold 2^46. epi_shr_half is the same
+               half-away-from-zero the fixed epilogue rounds with.
+
+               THE CLAMP IS COUNTED, not silent. LZ_CONVO_ES was chosen
+               from .prof/convqk_range.c's clamp column at zero on both
+               chains, and a checkpoint whose conv outputs are scaled
+               differently would clip here with no other symptom - the
+               same trap LZ_CONV_ES's own comment names. */
+            if (oi) {
+                long long p = (long long)acc * (long long)s15;
+                long long r = epi_shr_half(p, (int)sig_e[c] + 15 - out_es);
+                if (r > 32767)       { r = 32767;  lz_conv_o_clamped++; }
+                else if (r < -32767) { r = -32767; lz_conv_o_clamped++; }
+                oi[c] = (short)r;
+                done = 1;
+            }
 #if defined(LZ_ARM_PRIM_ASM)
             /* THE REMAINING MULTIPLY IS AN EXPONENT ADD. It scales acc_f
                by an exact power of two, which is exact in IEEE, so
@@ -2973,6 +3017,18 @@ void lz_causal_conv1d_step_fixed(float *o, const float *x, const short *xi,
         for (j = 0; j + 1 < hist; j++) so[j] = si[j + 1];
         if (hist > 0) so[hist - 1] = (short)q;
     }
+}
+
+void lz_causal_conv1d_step_fixed(float *o, const float *x, const short *xi,
+                                 const short *sh_in, short *sh_out,
+                                 const short *mw, const float *sig_k1,
+                                 const float *sig_oscale2, float sig_k2,
+                                 const signed char *sig_e,
+                                 float in_scale, int bound,
+                                 int n_ch, int k) {
+    lz_causal_conv1d_step_fixed_o16(o, (short *)0, 0, x, xi, sh_in, sh_out,
+                                    mw, sig_k1, sig_oscale2, sig_k2, sig_e,
+                                    in_scale, bound, n_ch, k);
 }
 
 /* Build the per-channel output scale 2^-(ew[c]+es) and the input scale

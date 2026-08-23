@@ -422,6 +422,29 @@ static void *xcalloc(size_t n, size_t sz, int *ok, long long *acc) {
 #define LZ_CONV_ES 9
 #endif /* LZ_CONV_ES */
 
+/* The conv's OUTPUT exponent for the q and k chains (int-pipeline 9.4),
+ * and the knob that turns that exit on. Unlike LZ_CONV_ES this one is
+ * not chosen on headroom alone: the consumer is an L2 normalisation,
+ * which divides each vector by its own length, so a clip is the only
+ * thing a too-large exponent costs and a too-small one costs relative
+ * precision on the QUIETEST vector rather than on the largest.
+ *
+ * .prof/convqk_range.c, kmr20/zh, 603 tokens, 3.7M samples each chain:
+ * max 26.3953 (q) and 13.2716 (k), zero clamps at 2^10 on both. What
+ * that reading does NOT show, and what the probe reports for this
+ * reason, is that the quietest of the 3,618 vectors peaks at 0.278 -
+ * 94.8x below the global max - so it gets 285 int16 levels where the
+ * loudest gets 27,029. That spread vanishes in the normalisation; the
+ * 285 does not. Re-run the probe on any checkpoint before trusting
+ * either number, and read lz_conv_o_clamped after, because the clamp
+ * is silent everywhere else. */
+#ifndef LZ_CONVO_ES
+#define LZ_CONVO_ES 10
+#endif /* LZ_CONVO_ES */
+#ifndef LZ_CONVO_I16
+#define LZ_CONVO_I16 1
+#endif /* LZ_CONVO_I16 */
+
 /* The per-channel exponent table's call-site accessor. A macro rather
    than a plain `s->conv_sig_e + off` because the =0 build never
    allocates the array, and `NULL + off` is undefined even where nothing
@@ -1123,6 +1146,13 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
                                         sizeof(short), &ok, &s->bytes_alloc);
         s->kda_v_i16 = (short *)xcalloc((size_t)nt * c->lin_value_dim,
                                         sizeof(short), &ok, &s->bytes_alloc);
+#if LZ_CONVO_I16
+        /* The conv's own int16 exit, q and k only - see forward.h. */
+        s->kda_qc_i16 = (short *)xcalloc((size_t)nt * c->lin_key_dim,
+                                         sizeof(short), &ok, &s->bytes_alloc);
+        s->kda_kc_i16 = (short *)xcalloc((size_t)nt * c->lin_key_dim,
+                                         sizeof(short), &ok, &s->bytes_alloc);
+#endif /* LZ_CONVO_I16 */
         s->conv_sig_k1 = (float *)xcalloc(nch, sizeof(float), &ok,
                                           &s->bytes_alloc);
         s->conv_sig_oscale2 = (float *)xcalloc(nch, sizeof(float), &ok,
@@ -1358,6 +1388,7 @@ void lz_state_free(LZRunState *s) {
     free(s->conv_state);
     free(s->conv_state_q); free(s->conv_mw);
     free(s->kda_q_i16); free(s->kda_k_i16); free(s->kda_v_i16);
+    free(s->kda_qc_i16); free(s->kda_kc_i16);
     free(s->bvec_i16); free(s->moe_logits_i16);
     free(s->kda_lat_i16); free(s->kda_lat_i32);
     free(s->kda_gate_i16); free(s->kda_dtb_i16);
@@ -2699,6 +2730,12 @@ static void forward_kda(const LZModel *m, LZRunState *s,
        reasoning from "they are the same dtype") because a checkpoint may
        quantize them differently. */
     int conv_int = 0;
+    /* The conv's OUTPUT int16 exit for q and k (int-pipeline 9.4). It is
+       independent of conv_int - that one is about the conv's INPUT, and
+       either side can take its exit without the other. What it does need
+       is the fixed tier and LZ_CONV_SIG_I, because the exit is integer
+       only by way of the sig_e table those build. */
+    int convo_i16 = 0;
 #if LZ_CONV_FIXED
     if (s->conv_fixed && s->kda_q_i16 && s->kda_k_i16 && s->kda_v_i16) {
         int okq = lz_matmul_xq_i16_ok(&L->kda_q_proj, hdim, nt);
@@ -2706,6 +2743,9 @@ static void forward_kda(const LZModel *m, LZRunState *s,
         int okv = lz_matmul_xq_i16_ok(&L->kda_v_proj, hdim, nt);
         conv_int = okq && okk && okv;
     }
+#if LZ_CONVO_I16 && LZ_CONV_SIG_I
+    convo_i16 = s->conv_fixed && s->kda_qc_i16 && s->kda_kc_i16;
+#endif /* LZ_CONVO_I16 && LZ_CONV_SIG_I */
 #endif /* LZ_CONV_FIXED */
     /* int-pipeline milestone 5, decided here for the same reason
        conv_int is: the producing matmul has to know before it runs, and
@@ -2922,15 +2962,25 @@ static void forward_kda(const LZModel *m, LZRunState *s,
             const short *qxi = conv_int ? s->kda_q_i16 + (size_t)tk * kdim : NULL;
             const short *kxi = conv_int ? s->kda_k_i16 + (size_t)tk * kdim : NULL;
             const short *vxi = conv_int ? s->kda_v_i16 + (size_t)tk * vdim : NULL;
-            lz_causal_conv1d_step_fixed(
-                s->kda_qc + (size_t)tk * kdim, s->kda_q + (size_t)tk * kdim,
+            /* q and k take the conv's int16 exit when it is compiled in;
+               convo_i16 is what forward_kda's l2norm below reads to know
+               which of the two buffers holds this token. LZ_CONV_SIG_I
+               is a precondition, not a preference: the exit is integer
+               only because sig_oscale2 is an exact power of two, and the
+               =0 arm has no sig_e table to derive its exponent from. */
+            lz_causal_conv1d_step_fixed_o16(
+                s->kda_qc + (size_t)tk * kdim,
+                convo_i16 ? s->kda_qc_i16 + (size_t)tk * kdim : (short *)0,
+                LZ_CONVO_ES, s->kda_q + (size_t)tk * kdim,
                 qxi, qi + q_off, qo + q_off,
                 s->conv_mw + (cb + q_ch) * c->conv_kernel,
                 s->conv_sig_k1 + cb + q_ch, s->conv_sig_oscale2 + cb + q_ch,
                 s->conv_sig_k2, LZ_CONV_SIG_E(s, cb + q_ch),
                 s->conv_in_scale, s->conv_bound, kdim, c->conv_kernel);
-            lz_causal_conv1d_step_fixed(
-                s->kda_kc + (size_t)tk * kdim, s->kda_k + (size_t)tk * kdim,
+            lz_causal_conv1d_step_fixed_o16(
+                s->kda_kc + (size_t)tk * kdim,
+                convo_i16 ? s->kda_kc_i16 + (size_t)tk * kdim : (short *)0,
+                LZ_CONVO_ES, s->kda_k + (size_t)tk * kdim,
                 kxi, qi + k_off, qo + k_off,
                 s->conv_mw + (cb + k_ch) * c->conv_kernel,
                 s->conv_sig_k1 + cb + k_ch, s->conv_sig_oscale2 + cb + k_ch,
@@ -3185,8 +3235,23 @@ static void forward_kda(const LZModel *m, LZRunState *s,
             float *out = s->ssm_out + (size_t)tk * vdim + (size_t)h * vd;
             float beta;
 
-            lz_l2norm(s->qn, qp, kd, LZ_L2NORM_EPS);
-            lz_l2norm(s->kn, kp, kd, LZ_L2NORM_EPS);
+            /* The conv's int16 exit ends HERE, and the output stays
+               float: this normalisation's consumer is gdn_build_table's
+               ss[kk*ng+gg] * q[kk], whose scale varies with both indices
+               and so has no common factor an integer q could ride. */
+            if (convo_i16) {
+                lz_l2norm_i16(s->qn,
+                              s->kda_qc_i16 + (size_t)tk * kdim
+                                            + (size_t)kh * kd,
+                              kd, LZ_CONVO_ES, LZ_L2NORM_EPS);
+                lz_l2norm_i16(s->kn,
+                              s->kda_kc_i16 + (size_t)tk * kdim
+                                            + (size_t)kh * kd,
+                              kd, LZ_CONVO_ES, LZ_L2NORM_EPS);
+            } else {
+                lz_l2norm(s->qn, qp, kd, LZ_L2NORM_EPS);
+                lz_l2norm(s->kn, kp, kd, LZ_L2NORM_EPS);
+            }
             for (i = 0; i < kd; i++) s->qn[i] *= scale;
 
             /* bvec's only consumer, and with `bvec_int` it never became
