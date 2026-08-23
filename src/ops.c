@@ -1734,12 +1734,17 @@ static long long epi_fixed_raw(const int32_t *accb, const LZTensor *w,
     const int16_t *ww = w->sq + (size_t)row * (ng / r);
     long long s = 0;
     int g = 0, j = 0;
-    /* TWO PASSES OVER ng WHERE ONE WOULD DO, and they are the census's
-       top two branches: this loop and lz_epi_mac's are 1,135,588,896
-       evaluations each (gcov -b -c, kmr20/zh, 603 tokens). g_epi_m is
-       the same write-once-read-once buffer g_epi_zm was - every element
-       is written here and read exactly once, by the call below.
-       s += accb[g] * (xq[g] * ww[g/r]) in one loop is bit-identical:
+    /* THIS WAS TWO PASSES OVER ng, and they were the census's top two
+       branches: a fill loop and lz_epi_mac's, 1,135,588,896 evaluations
+       EACH (gcov -b -c, kmr20/zh, 603 tokens), with g_epi_m between
+       them - the same write-once-read-once buffer g_epi_zm was, every
+       element written and then read once by the next statement.
+
+       MEASURED AFTER, on the same fixture: one inner loop at
+       1,159,052,832 plus this group loop at 173,625,408, so
+       2,271,177,792 evaluations became 1,332,678,240 - 938 million
+       fewer per 603 tokens, 41.3%. The buffer and the pass are gone
+       with them. Bit-identical on both toolchains and both fixtures:
        the int32 product is formed the same way and the accumulation
        order is unchanged.
 
