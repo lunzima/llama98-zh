@@ -1875,8 +1875,14 @@ static float gdn_pass1_fixed_head(const int8_t *sq_in,
 
        Prologue: 3 mul + 1 add per kk with a gvec (KDA), 1 mul + 1 add
        without (GDN). Epilogue, per ELEMENT and for each of u and w:
-       2 lz_i32f (2 cvt), 2 mul, 1 add under either the two-plane or the
-       two-table shape; 1 cvt and 1 mul under the single-plane one.
+       2 lz_i32f (2 cvt), 1 mul, 1 add under the two-plane shape - the
+       low plane's 1/LZ_GDN_LO_SCALE was the second multiply and is an
+       exponent subtract now (f32_scale_pow2), leaving only `* su[gg]`,
+       which is a real one. The two-TABLE shape (LZ_GDN_FIXED>=2) still
+       spends 2 and shares this bill; it is a non-default arm, so the
+       count below follows the default and understates that one - said
+       here rather than left for a reader to find by subtraction.
+       Single-plane: 1 cvt and 1 mul.
 
        NOT COVERED, and it is the larger half: gdn_build_table runs once
        per group inside gdn_pass1_fixed and does its own float work
@@ -1884,7 +1890,7 @@ static float gdn_pass1_fixed_head(const int8_t *sq_in,
        shape audited, and a half-derived formula is exactly what this
        file has twice been wrong by. */
 #if LZ_GDN_STATE_2PLANE || LZ_GDN_FIXED >= 2
-    LZ_FCX(LZ_FC_RECUR, (long)vd * 4 + (long)kd * (gvec ? 3 : 1),
+    LZ_FCX(LZ_FC_RECUR, (long)vd * 2 + (long)kd * (gvec ? 3 : 1),
            (long)vd * 2 + (long)kd, 0, (long)vd * 4, 0);
 #else
     LZ_FCX(LZ_FC_RECUR, (long)vd * 2 + (long)kd * (gvec ? 3 : 1),
@@ -1901,10 +1907,22 @@ static float gdn_pass1_fixed_head(const int8_t *sq_in,
         for (j = 0; j < 32; j++) {
             int vi = gg * 32 + j;
 #if LZ_GDN_STATE_2PLANE
-            u[vi] = (lz_i32f(au[vi]) +
-                     lz_i32f(aul[vi]) * (1.0f / LZ_GDN_LO_SCALE)) * su[gg];
-            w[vi] = (lz_i32f(aw[vi]) +
-                     lz_i32f(awl[vi]) * (1.0f / LZ_GDN_LO_SCALE)) * sw[gg];
+            /* 1/LZ_GDN_LO_SCALE is 2^-8 - the static assert further
+               down pins LO_SCALE at 256 - so the low plane's weighting
+               is an exponent SUBTRACT, not a __aeabi_fmul. Two per
+               element, in pass 1's tail, which is 61,440 operations a
+               token on kmr20 and the third-largest block of the
+               census's largest row. The `* su[gg]` beside it is a real
+               multiply and stays. */
+            {
+                float lo;
+                if (!f32_scale_pow2(lz_i32f(aul[vi]), -LZ_GDN_LO_SHIFT, &lo))
+                    lo = lz_i32f(aul[vi]) * (1.0f / LZ_GDN_LO_SCALE);
+                u[vi] = (lz_i32f(au[vi]) + lo) * su[gg];
+                if (!f32_scale_pow2(lz_i32f(awl[vi]), -LZ_GDN_LO_SHIFT, &lo))
+                    lo = lz_i32f(awl[vi]) * (1.0f / LZ_GDN_LO_SCALE);
+                w[vi] = (lz_i32f(aw[vi]) + lo) * sw[gg];
+            }
 #elif LZ_GDN_FIXED >= 2
             u[vi] = lz_i32f(au[vi]) * su[gg] + lz_i32f(au2[vi]) * su2[gg];
             w[vi] = lz_i32f(aw[vi]) * sw[gg] + lz_i32f(aw2[vi]) * sw2[gg];
