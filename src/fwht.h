@@ -1,6 +1,6 @@
 #ifndef LZ_FWHT_H
 #define LZ_FWHT_H
-#include <stdint.h>
+#include "lz_int.h"   /* iron law 10: <stdint.h> is not on the floor */
 #ifdef __cplusplus
 extern "C" {
 #endif

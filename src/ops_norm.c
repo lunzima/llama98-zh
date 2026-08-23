@@ -5,7 +5,7 @@
    ops_kernel_norm.h. The fixed output loops are guarded by
    LZ_NORM_FIXED (ops.h). */
 #include <stddef.h>
-#include <stdint.h>
+#include "lz_int.h"   /* iron law 10: <stdint.h> is not on the floor */
 
 /* LZ_NORM_MAX_N: ops.h, included below. */
 

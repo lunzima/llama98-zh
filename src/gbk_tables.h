@@ -7,7 +7,7 @@
 #ifndef LZ_GBK_TABLES_H
 #define LZ_GBK_TABLES_H
 
-#include <stdint.h>
+#include "lz_int.h"   /* iron law 10: <stdint.h> is not on the floor */
 
 #define LZ_GBK_LEAD_LO 0x81
 #define LZ_GBK_LEAD_HI 0xFE

@@ -1,7 +1,7 @@
 #ifndef LZ_UNICODE_H
 #define LZ_UNICODE_H
 
-#include <stdint.h>
+#include "lz_int.h"   /* iron law 10: <stdint.h> is not on the floor */
 
 /* Unicode utilities: NFC normalization and character classification.
    Tables generated (Unicode 15.0);

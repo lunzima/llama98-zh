@@ -1,4 +1,4 @@
-#include <stdint.h>
+#include "lz_int.h"   /* iron law 10: <stdint.h> is not on the floor */
 #include "ops_t2_arm.h"
 
 /* ARMv5TE ternary dot, one 32-wide block (one 8-byte plane), UNROLLED

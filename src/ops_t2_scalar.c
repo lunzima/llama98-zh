@@ -1,4 +1,4 @@
-#include <stdint.h>
+#include "lz_int.h"   /* iron law 10: <stdint.h> is not on the floor */
 #include "ops_t2_scalar.h"
 
 /* Scalar ternary dot product, one 32-wide block (one 8-byte plane).

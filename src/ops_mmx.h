@@ -24,7 +24,7 @@
 #ifndef LZ_OPS_MMX_H
 #define LZ_OPS_MMX_H
 
-#include <stdint.h>
+#include "lz_int.h"   /* iron law 10: <stdint.h> is not on the floor */
 #include <stddef.h>
 
 /* The pass-2 scratch block's type lives in src/ops_p2_blk.h, shared with

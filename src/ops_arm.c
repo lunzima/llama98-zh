@@ -1,4 +1,4 @@
-#include <stdint.h>
+#include "lz_int.h"   /* iron law 10: <stdint.h> is not on the floor */
 #include "ops_arm.h"
 
 /* ARMv5TE row leaf kernels, non-ternary formats. The contract each one

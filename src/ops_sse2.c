@@ -24,7 +24,7 @@
    -Nr/-Ns is a hard ceiling its own .686 directives cannot exceed, so
    a #pragma aux body needing .686 codegen cannot sit in a TU pinned
    at the lower i486/i386 floor. */
-#include <stdint.h>
+#include "lz_int.h"   /* iron law 10: <stdint.h> is not on the floor */
 #include <string.h>
 
 #include "ops_sse2.h"
