@@ -787,8 +787,8 @@ static void gdn_build_table(const float *ss, const float *q, const float *k,
      * Rounding amk UP to the next 32767*2^k costs up to one bit of the
      * coefficient table's range. Paired NLL, three models x two
      * fixtures, n=3786: +6.45e-04 at t=+0.48 - indistinguishable, and
-     * in the same band as the --attn-write int default change that
-     * shipped at t=0.65. The GLOBAL version of this idea, snapping
+     * in the same band as the attention int wsum's default change,
+     * which shipped at t=0.65. The GLOBAL version of this idea, snapping
      * every quantizer's group scale, was rejected at +4.72e-03 and
      * t=+2.70 (docs/int-pipeline-project.md 0.6); localising it to this
      * one table is what brings the cost down sevenfold. That is the
@@ -2158,8 +2158,8 @@ static void gdn_p2_fixed_rows(const int8_t *sq_in, int8_t *sq_out,
          * costs at most one bit of the delta group's range. Paired NLL,
          * three models x two fixtures, n=3786: +7.88e-04 at t=+0.62 -
          * indistinguishable, and the same band as the coefficient
-         * table's +6.45e-04/t=0.48 and the --attn-write int default at
-         * t=0.65. */
+         * table's +6.45e-04/t=0.48 and the attention int wsum's default
+         * at t=0.65. */
         {
             float r = amd * LZ_Q15_INV;
             ed = expof(r);

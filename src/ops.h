@@ -55,7 +55,7 @@ enum {
     LZ_FC_SOFTPLUS,
     LZ_FC_CONV, LZ_FC_NORM, LZ_FC_RSQRT,
     /* The recurrence state write-back - pass 2 only, which is LESS than
-       what --recur-write selects. Pass 1 has no site in either arm,
+       what the recurrence tier covers. Pass 1 has no site in either arm,
        neither the int16 head nor the float body, so this row reads the
        same whichever pass-1 arm runs and the axis's census marginal
        under-reports its float arm by more than the row itself. Measured
@@ -428,8 +428,8 @@ int lz_float_ref(void);
    Needs nt >= 2 to do anything, so at decode (nt == 1) both settings
    run identical code. Must not change one output bit. */
 /* GDN/KDA pass-1 tier. NOT a selector of its own: it resolves from
-   lz_gdn_p2_mode(), i.e. from --recur-write, so that one axis names the
-   whole recurrence and --fixed off floats all of it. Returns 0 for the
+   lz_gdn_p2_mode(), so one tier names the whole recurrence and
+   `--fixed off` floats all of it. Returns 0 for the
    runtime value `float`, and also when the fixed path was not compiled
    in (-DLZ_GDN_FIXED=0). The float body is additionally the capacity
    fallback for kd > LZ_GDN_MAX_KD. */
@@ -765,9 +765,8 @@ int lz_norm_can_fixed(int n);
    lz_quantize_q8_int) instead of dequantizing to float and
    re-quantizing.
 
-   NO LONGER SELECTABLE. It was `--norm-write int`, a third value on
-   that tier's axis; it now answers yes whenever the fixed tier is on.
-   Nothing was left to choose between: on the gated norms the two
+   NOT SELECTABLE, and there is nothing to select between: it answers
+   yes whenever the fixed tier is on. On the gated norms the two
    spellings are bit-identical (the dequantize/requantize pair cancels
    - proof at lz_quantize_q8_int), and on the plain norm the int form
    is ~9.5x cheaper per element on the target. Read the rest of this
@@ -812,7 +811,7 @@ int lz_norm_can_fixed(int n);
    sites ship it, and the ~7% is a deliberate float-to-fixed step of the
    kind already taken for every other write tier. It buys 114 -> 12
    instructions per element on the target (measured, ops_norm.c) with
-   the (1+w) table cached; `--norm-write float` remains the oracle. */
+   the (1+w) table cached; `--fixed off` remains the oracle. */
 int lz_norm_int(void);
 
 /* SubLN activation scale granularity: "tok" | "group" (default tok).
@@ -1421,8 +1420,7 @@ int lz_attn_mode(void);
    replaces the float per-chunk drain, which rounds each 512-row chunk
    to 24-bit float, and the per-32-group dequant scale (cmax*LZ_Q15_INV)
    is not a power of two, so the stored group scales shift too. Rides on
-   the wsum fixed tier, so it is selected as `--attn-write int` - the
-   fourth value on that axis, not a separate flag. */
+   the wsum fixed tier rather than carrying a selector of its own. */
 int lz_attn_int(void);
 
 #if LZ_ATTN_FIXED
