@@ -1171,6 +1171,10 @@ static float *gdn_shadow(const int8_t *sq, int n) {
    compute a wrong answer silently, so it is now a build error. */
 typedef char lz_p2_needs_lo_scale_256[
     ((int)(LZ_GDN_LO_SCALE) == 256) ? 1 : -1];
+/* The same constant a fifth time, as the exponent. p2_group_scale folds
+   it into a pow2f argument, which is only legal because the assert above
+   pins the base at 2. */
+#define LZ_GDN_LO_SHIFT 8
 
 #include "ops_kernel_p2.h"        /* the MMX pair; defines lz_p2_blk and,
                                      on Watcom, LZ_HAVE_P2_MMX_ASM */
@@ -1403,23 +1407,25 @@ static int p2_group_norm(float c1, float c2, int16_t *mul4, float *sacc) {
    exact zero - either the prologue flushed it (sacc == 0) or the new
    scale itself falls under the floor.
 
-   DO NOT FUSE THE TWO POWER-OF-TWO MULTIPLIES into pow2f(sh + 8). It
-   looks like the same free win the row-level 2^-8 hoist above is - two
-   exponent moves collapsing into one, one multiply per group saved,
-   about 12k a token on kmr20 - and it is exact everywhere except where
-   pow2f CLAMPS, which is where the two forms stop agreeing:
-     sh in [120, 127]    2^sh * 256 overflows to inf; pow2f(sh+8) clamps
-                         the exponent and returns 2^127
-     sh in [-134, -127]  pow2f(sh) is 0 so the product is 0;
-                         pow2f(sh+8) is a normal number
-   Both regions need a proven bound on sh to rule out, and there is not
-   one here - sh comes from p2_shift_of on live data. An unbounded fusion
-   that is exact "in practice" is how a scale silently becomes inf on the
-   one input nobody swept. */
+   THE TWO POWER-OF-TWO MULTIPLIES ARE FUSED, and the thing that makes
+   that legal is a BOUND, not the algebra. pow2f clamps at both ends, so
+   pow2f(sh) * 256 and pow2f(sh + 8) disagree exactly where the clamp
+   bites: at sh in [120, 127] the first overflows to inf and the second
+   returns 2^127, and at sh in [-134, -127] the first is 0 and the second
+   is a normal number.
+
+   Neither region is reachable. Both call sites pass sh straight from
+   p2_shift_of, whose whole body is `while ((amax >> sh) > 32512) sh++`
+   on an int32 - so sh is in [0, 31] and sh + 8 in [8, 39]. Away from
+   the clamps, multiplying by a power of two only moves an exponent, so
+   the fused form is the same float and not merely a close one.
+
+   (An earlier version of this comment said the bound did not exist. It
+   does; I had not read p2_shift_of.) */
 static int p2_group_scale(float sacc, int sh, float *os) {
     float s_new;
     if (!(sacc > 0.0f)) { *os = 1.0f; return 0; }
-    s_new = sacc * pow2f(sh) * LZ_GDN_LO_SCALE;
+    s_new = sacc * pow2f(sh + LZ_GDN_LO_SHIFT);
     if (!(s_new >= LZ_Q8_MIN_SCALE_F)) { *os = 1.0f; return 0; }
     *os = s_new;
     return 1;
@@ -1931,8 +1937,9 @@ static void gdn_p2_fixed_rows(const int8_t *sq_in, int8_t *sq_out,
            billing only inside gdn_p2_row_simd would read zero on
            --kernel ref, where p2_tier()==0 takes the scalar path only.
            coef 2 mul (was 3; the 2^-8 moved to the row, +1 below); norm
-           2 mul + 2 q8_round(add); scale 2 mul. */
-        LZ_FCX(LZ_FC_RECUR, 6 * ng + 1, 2 * ng, 0, 0, 0);
+           2 mul + 2 q8_round(add); scale 1 mul (was 2; the two
+           power-of-two factors fused - see p2_group_scale). */
+        LZ_FCX(LZ_FC_RECUR, 5 * ng + 1, 2 * ng, 0, 0, 0);
 #ifdef LZ_HAVE_P2_MMX
         if (p2_tier()) {
             gdn_p2_row_simd(row_in,
