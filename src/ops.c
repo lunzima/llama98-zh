@@ -1607,6 +1607,23 @@ static long long epi_fixed_raw(const int32_t *accb, const LZTensor *w,
                                int row, int tk, int ng, int r, int *e_out) {
     const int16_t *ww = w->sq + (size_t)row * (ng / r);
     int g;
+    /* TWO PASSES OVER ng WHERE ONE WOULD DO, and they are the census's
+       top two branches: this loop and lz_epi_mac's are 1,135,588,896
+       evaluations each (gcov -b -c, kmr20/zh, 603 tokens). g_epi_m is
+       the same write-once-read-once buffer g_epi_zm was - every element
+       is written here and read exactly once, by the call below.
+       s += accb[g] * (xq[g] * ww[g/r]) in one loop is bit-identical:
+       the int32 product is formed the same way and the accumulation
+       order is unchanged.
+
+       WHAT ACTUALLY BLOCKS IT is `ww[g / r]`, not iron law 2 - the
+       fused kernel would need both toolchains' twins, which
+       lz_epi_mac_i16 just showed is a bounded job, but r is a RUNTIME
+       value, so a naive fusion puts an integer divide on every element
+       of a 1.1-billion-iteration loop. The shape that works is a nested
+       loop - one scalar ww[j] times an r-element MAC of accb*xq - and
+       that is a different kernel again, not a fusion of this one.
+       Measured and located rather than attempted with the budget left. */
     for (g = 0; g < ng; g++)
         g_epi_m[g] = (int32_t)g_epi_xq[tk][g] * (int32_t)ww[g / r];
     /* The exponent is per ROW, so a libm call here would run once per
