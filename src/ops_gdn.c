@@ -699,16 +699,25 @@ static void gdn_build_table(const float *ss, const float *q, const float *k,
     static float ka[LZ_GDN_MAX_KD], qa[LZ_GDN_MAX_KD];
     int ng = vd / 32, kk;
     float amk = 0.0f, amq = 0.0f, ik, iq;
+    /* The block exponents: ik is 2^-ek and iq is 2^-eq exactly, so
+       loop 2 scales by an exponent add. ik_p2/iq_p2 say whether that
+       holds - they go 0 on the amax==0 arm, where ik is 0 and no power
+       of two describes it. */
+    int ek = 0, eq = 0, ik_p2 = 1, iq_p2 = 1;
 
     /* THIS FUNCTION HAD NO CENSUS SITE. It runs once per group inside
        gdn_pass1_fixed, which itself was unbilled until one commit ago,
        so the whole coefficient table build read as zero. Found by
        .prof/unbilled_scan.awk. Per call, at LZ_GDN_FIXED == 1:
          loop 1   2 mul per kk
-         scales   2 mul (su, sw) and 2 div (ik, iq)
-         loop 2   2 mul per kk (the two ik/iq products) and 2 add per kk
-                  (q8_round's magic add, billed the way every other
-                  quantize site in this file bills it)
+         scales   0 mul, 0 div. su/sw and ik/iq are pow2f of the block
+                  exponent now - bit construction, nothing to bill -
+                  where they used to be 2 mul (amk*LZ_Q15_INV) and 2 div
+                  (32767/amk).
+         loop 2   0 mul (the two ik/iq products are exponent adds after
+                  the block normalization) and 2 add per kk (q8_round's
+                  magic add, billed the way every other quantize site in
+                  this file bills it)
        The absmax compares stay unbilled - the census's standing
        convention, not an omission here.
 
@@ -716,7 +725,7 @@ static void gdn_build_table(const float *ss, const float *q, const float *k,
        2 mul per kk and is NOT in this formula: it compiles out at the
        default level, and a term for a path this build does not take is
        a term nobody can check. */
-    LZ_FCX(LZ_FC_RECUR, (long)kd * 4 + 2, (long)kd * 2, 2, 0, 0);
+    LZ_FCX(LZ_FC_RECUR, (long)kd * 2, (long)kd * 2, 0, 0, 0);
     /* THE TWO ABSMAX SCANS RUN IN THE INTEGER DOMAIN. They were four
        float comparisons per kk - `a < 0.0f` and `b < 0.0f` for the sign,
        `t > amk` and `t > amq` for the max - which on a soft-float target
@@ -744,14 +753,54 @@ static void gdn_build_table(const float *ss, const float *q, const float *k,
         mb.u = amku; amk = mb.f;
         mb.u = amqu; amq = mb.f;
     }
-    /* Rule 6 item 1: `amk / 32767.0f` gets strength-reduced to a multiply
-       by Watcom and left as a divide by gcc - 1 ULP apart. Write the
-       multiply explicitly. ik/iq are constant-over-variable, a real
-       division on both sides, so they are fine as written. */
-    tb->su = (amk > 0.0f) ? amk * LZ_Q15_INV : LZ_Q15_INV;
-    tb->sw = (amq > 0.0f) ? amq * LZ_Q15_INV : LZ_Q15_INV;
-    ik = (amk > 0.0f) ? LZ_FDIV(32767.0f, amk) : 0.0f;
-    iq = (amq > 0.0f) ? LZ_FDIV(32767.0f, amq) : 0.0f;
+    /* BLOCK-NORMALIZED to 32767 * 2^k, which makes su = 2^k and
+       ik = 2^-k EXACTLY - so loop 2's two multiplies per kk become
+       exponent adds, and the two divides go away entirely rather than
+       going through LZ_FDIV.
+     *
+     * su and ik are built from pow2f, NOT from amk * LZ_Q15_INV and
+     * 32767/amk. Those would be a ULP off: LZ_Q15_INV is fl(1/32767)
+     * and 32767 * fl(1/32767) is not exactly 1, so the product is not
+     * exactly 2^k and f32_scale_pow2 would be folding the wrong number.
+     * The division IS exact at the normalized amk (both operands exact,
+     * quotient exactly 2^-k), but there is no reason to spend it.
+     *
+     * VALUE-CHANGING, and measured before landing rather than after.
+     * Rounding amk UP to the next 32767*2^k costs up to one bit of the
+     * coefficient table's range. Paired NLL, three models x two
+     * fixtures, n=3786: +6.45e-04 at t=+0.48 - indistinguishable, and
+     * in the same band as the --attn-write int default change that
+     * shipped at t=0.65. The GLOBAL version of this idea, snapping
+     * every quantizer's group scale, was rejected at +4.72e-03 and
+     * t=+2.70 (docs/int-pipeline-project.md 0.6); localising it to this
+     * one table is what brings the cost down sevenfold. That is the
+     * whole reason this lands and that one did not.
+     *
+     * Rule 6 item 1's note about `amk / 32767.0f` still applies to any
+     * future code that wants the un-normalized ratio: Watcom strength-
+     * reduces it and gcc does not, 1 ULP apart, so write the multiply. */
+    if (amk > 0.0f) {
+        float r = amk * LZ_Q15_INV;
+        ek = expof(r);
+        if (pow2f(ek) < r) ek++;          /* round the block UP */
+        tb->su = pow2f(ek);
+        ik = pow2f(-ek);
+    } else {
+        tb->su = LZ_Q15_INV;
+        ik = 0.0f;
+        ik_p2 = 0;
+    }
+    if (amq > 0.0f) {
+        float r = amq * LZ_Q15_INV;
+        eq = expof(r);
+        if (pow2f(eq) < r) eq++;
+        tb->sw = pow2f(eq);
+        iq = pow2f(-eq);
+    } else {
+        tb->sw = LZ_Q15_INV;
+        iq = 0.0f;
+        iq_p2 = 0;
+    }
     tb->tail_cu = 0; tb->tail_cw = 0;
 #if LZ_GDN_FIXED >= 2
     tb->su2 = tb->su * LZ_Q15_INV;
@@ -760,10 +809,18 @@ static void gdn_build_table(const float *ss, const float *q, const float *k,
 #endif /* LZ_GDN_FIXED >= 2 */
 
     for (kk = 0; kk < kd; kk++) {
-        float fa = ka[kk] * ik;
-        float fb = qa[kk] * iq;
-        int ia = q8_round(fa);
-        int ib = q8_round(fb);
+        /* ik and iq are exact powers of two after the block
+           normalization above, so these are exponent adds. The float
+           multiply stays as the fallback for the amax==0 arm and for
+           the operands f32_scale_pow2 declines (a zero ka[kk] is
+           ordinary), which is also what keeps this bit-identical to the
+           multiply wherever the multiply was already exact. */
+        float fa, fb;
+        int ia, ib;
+        if (!ik_p2 || !f32_scale_pow2(ka[kk], -ek, &fa)) fa = ka[kk] * ik;
+        if (!iq_p2 || !f32_scale_pow2(qa[kk], -eq, &fb)) fb = qa[kk] * iq;
+        ia = q8_round(fa);
+        ib = q8_round(fb);
         int kp = kk >> 1, half = kk & 1;
         int tail = (kk == kd - 1 && (kd & 1));
         if (ia >  32767) ia =  32767;
