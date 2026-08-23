@@ -1,3 +1,7 @@
+#include "lz_int.h"   /* lz_i64/lz_u64 and the width types - iron law 10:
+                         Visual C++ 4.0 has neither <stdint.h> nor
+                         `long long`, and 236 sites deciding that for
+                         themselves is the shape one-authority forbids */
 #include <stddef.h>   /* size_t: used a lot here for pointer offsets; math.h does not guarantee it */
 #include <float.h>    /* FLT_MAX: overflow guard for quant reciprocal */
 #include <math.h>
@@ -646,7 +650,7 @@ void lz_quantize_q8_tok_int(const int32_t *t, int n, float deq,
    that took the branch every time would perform no integer rounding and
    would still look enabled from the outside. Zero in the
    -DLZ_Q8INT_INT=0 control build by construction. */
-long long lz_debug_q8int_int = 0;
+lz_i64 lz_debug_q8int_int = 0;
 
 /* Int-domain Q8 quantize for the fixed-tier gated norm. t holds the Q15
    result the norm wrote as int (no per-element dequant) and deq its
@@ -871,7 +875,7 @@ void lz_quantize_q8_int(const int32_t *t, int n, int gs, float deq,
    still look enabled from the outside, and the int and float paths agree
    on all but a handful of elements, so the logits cannot separate them.
    Zero in the -DLZ_Q8I16_INT=0 control build by construction. */
-long long lz_debug_q8i16_int = 0;
+lz_i64 lz_debug_q8i16_int = 0;
 
 /* int16-input twin of lz_quantize_q8_int (see its comment for the deq
    folding, and ops.h for why the width gets its own entry rather than a
@@ -1347,8 +1351,8 @@ void lz_epi_prep_zero(LZTensor *w, int in_dim) {
     epi_prep_plane(w->zero, w->zq, w->zexp, ngw, rows);
 }
 
-/* int32 x int32 -> int64, which C cannot ask for: `(long long)a *
-   (long long)b` is 64x64 by the standard and Watcom emits `call __I8M`,
+/* int32 x int32 -> int64, which C cannot ask for: `(lz_i64)a *
+   (lz_i64)b` is 64x64 by the standard and Watcom emits `call __I8M`,
    2.75x the cost of the one `imul r/m32` x86 has had since the 386.
 
    In both of the kernels below, ebp is pushed and popped rather
@@ -1413,7 +1417,7 @@ void lz_epi_prep_zero(LZTensor *w, int in_dim) {
    loop it replaces. NOT the same as hoisting w out of the sum - that
    reassociates the reduction and changes what can overflow; this does
    not. */
-long long lz_epi_mac_grp(const int32_t *a, const int16_t *xq, int n, int32_t w);
+lz_i64 lz_epi_mac_grp(const int32_t *a, const int16_t *xq, int n, int32_t w);
 #pragma aux lz_epi_mac_grp =            \
     "push ebp"                          \
     "xor ebx,ebx"                       \
@@ -1435,7 +1439,7 @@ long long lz_epi_mac_grp(const int32_t *a, const int16_t *xq, int n, int32_t w);
     parm caller [esi] [edi] [ecx]       \
     value [edx eax]                     \
     modify [eax ebx ecx edx esi edi 8087];
-long long lz_epi_mac_i16(const int32_t *a, const int16_t *m, int n);
+lz_i64 lz_epi_mac_i16(const int32_t *a, const int16_t *m, int n);
 #pragma aux lz_epi_mac_i16 =            \
     "push ebp"                          \
     "xor ebx,ebx"                       \
@@ -1459,19 +1463,19 @@ long long lz_epi_mac_i16(const int32_t *a, const int16_t *m, int n);
 #else
 /* See the Watcom twin above for the register argument this shape
    satisfies; here it is just the loop. */
-static long long lz_epi_mac_grp(const int32_t *a, const int16_t *xq,
+static lz_i64 lz_epi_mac_grp(const int32_t *a, const int16_t *xq,
                                 int n, int32_t w) {
-    long long s = 0;
+    lz_i64 s = 0;
     int i;
     for (i = 0; i < n; i++)
-        s += (long long)a[i] * (long long)((int32_t)xq[i] * w);
+        s += (lz_i64)a[i] * (lz_i64)((int32_t)xq[i] * w);
     return s;
 }
 /* See the Watcom twin above for why this exists and what it replaced. */
-static long long lz_epi_mac_i16(const int32_t *a, const int16_t *m, int n) {
-    long long s = 0;
+static lz_i64 lz_epi_mac_i16(const int32_t *a, const int16_t *m, int n) {
+    lz_i64 s = 0;
     int g;
-    for (g = 0; g < n; g++) s += (long long)a[g] * (long long)m[g];
+    for (g = 0; g < n; g++) s += (lz_i64)a[g] * (lz_i64)m[g];
     return s;
 }
 #endif /* __WATCOMC__ */
@@ -1725,10 +1729,10 @@ void epi_zero_act_int(const int8_t *xq, int in_dim, int ng, int r, int nt) {
    int16 exit "build on top of epi_fixed" rather than a second,
    independent accumulator - both exits share the exact MAC epi_fixed
    has always used, not a reimplementation of it. */
-static long long epi_fixed_raw(const int32_t *accb, const LZTensor *w,
+static lz_i64 epi_fixed_raw(const int32_t *accb, const LZTensor *w,
                                int row, int tk, int ng, int r, int *e_out) {
     const int16_t *ww = w->sq + (size_t)row * (ng / r);
-    long long s = 0;
+    lz_i64 s = 0;
     int g = 0, j = 0;
     /* THIS WAS TWO PASSES OVER ng, and they were the census's top two
        branches: a fill loop and lz_epi_mac's, 1,135,588,896 evaluations
@@ -1752,7 +1756,7 @@ static long long epi_fixed_raw(const int32_t *accb, const LZTensor *w,
            for (j = 0, g = 0; j < ng / r; j++) {
                int32_t w = ww[j];
                for (i = 0; i < r; i++, g++)
-                   s += (long long)accb[g] * (long long)(xq[g] * w);
+                   s += (lz_i64)accb[g] * (lz_i64)(xq[g] * w);
            }
 
        Same per-element product, same ascending g, so bit-identical by
@@ -1882,7 +1886,7 @@ int lz_epi_post_e(const LZTensor *w) {
 float epi_fixed(const int32_t *accb, const LZTensor *w, int row,
                        int tk, int ng, int r, int pe) {
     int e;
-    long long s = epi_fixed_raw(accb, w, row, tk, ng, r, &e);
+    lz_i64 s = epi_fixed_raw(accb, w, row, tk, ng, r, &e);
     /* The kernels' scaling is a power of two, so pow2f(e) * 2^pe is
        pow2f(e + pe) and folding it into the exponent drops a multiply.
        That fold is exact wherever pow2f itself is exact; the exception
@@ -1993,11 +1997,11 @@ float epi_fixed(const int32_t *accb, const LZTensor *w, int row,
    closed form for rs >= 64, where `>>rs` and `1ULL<<(rs-1)` are
    themselves undefined: umag * 2^-rs <= 0.5 there, with equality (and so
    a half-away-from-zero result of 1) only at rs == 64, umag == 2^63. */
-static unsigned long long epi_shr_half_u(unsigned long long umag, int rs) {
+static lz_u64 epi_shr_half_u(lz_u64 umag, int rs) {
     if (rs <= 0) return umag;
     if (rs >= 64)
-        return (rs == 64 && umag == ((unsigned long long)1 << 63)) ? 1 : 0;
-    return (umag + ((unsigned long long)1 << (rs - 1))) >> rs;
+        return (rs == 64 && umag == ((lz_u64)1 << 63)) ? 1 : 0;
+    return (umag + ((lz_u64)1 << (rs - 1))) >> rs;
 }
 
 /* Signed wrapper. The magnitude is taken by converting to unsigned FIRST
@@ -2028,40 +2032,40 @@ static unsigned long long epi_shr_half_u(unsigned long long umag, int rs) {
    `rs <= 0` STAYS, and it is the 29.7% one - I had the two the wrong
    way round until the post-change census said otherwise. It is not kept
    for its share, it is LOAD-BEARING: at rs <= 0 with s == LLONG_MIN the
-   magnitude is 2^63, and converting that back with (long long) is
+   magnitude is 2^63, and converting that back with (lz_i64) is
    implementation-defined. Every rs >= 1 keeps the result under 2^63 (see
    the header above), which is exactly what makes the general path safe
    and the rs <= 0 case not. Removing it would be a correctness bug that
    this model's data would never show. */
-static long long epi_shr_half(long long s, int rs) {
-    unsigned long long um = (unsigned long long)s;
-    unsigned long long mask = (unsigned long long)0 - (um >> 63);
-    unsigned long long umag;
+static lz_i64 epi_shr_half(lz_i64 s, int rs) {
+    lz_u64 um = (lz_u64)s;
+    lz_u64 mask = (lz_u64)0 - (um >> 63);
+    lz_u64 umag;
     if (rs <= 0) return s;
     umag = epi_shr_half_u((um ^ mask) - mask, rs);
-    return (long long)((umag ^ mask) - mask);
+    return (lz_i64)((umag ^ mask) - mask);
 }
 
-static int32_t epi_align_i16(long long s, int e, int target_e, int bound) {
-    unsigned long long umag;
-    long long r;
+static int32_t epi_align_i16(lz_i64 s, int e, int target_e, int bound) {
+    lz_u64 umag;
+    lz_i64 r;
     int neg, shift;
     if (s == 0) return 0;
     neg = (s < 0);
-    umag = neg ? (unsigned long long)0 - (unsigned long long)s
-               : (unsigned long long)s;
+    umag = neg ? (lz_u64)0 - (lz_u64)s
+               : (lz_u64)s;
     shift = e - 8 + target_e;
     if (shift > 32) shift = 32;    /* umag<<32 already dwarfs any real bound */
     if (shift >= 0) {
-        unsigned long long capped = (unsigned long long)bound >> shift; /* shift<=32: safe */
+        lz_u64 capped = (lz_u64)bound >> shift; /* shift<=32: safe */
         if (umag > capped + 1)
-            r = (long long)bound + 1;          /* clamps below regardless */
+            r = (lz_i64)bound + 1;          /* clamps below regardless */
         else
-            r = (long long)(umag << shift);    /* <= (capped+1)<<shift <=
+            r = (lz_i64)(umag << shift);    /* <= (capped+1)<<shift <=
                                                    bound+2^32: far inside
                                                    unsigned 64 bits */
     } else {
-        r = (long long)epi_shr_half_u(umag, -shift);
+        r = (lz_i64)epi_shr_half_u(umag, -shift);
     }
     if (r > bound) r = bound;
     return (int32_t)(neg ? -r : r);
@@ -2086,7 +2090,7 @@ static int32_t epi_align_i16(long long s, int e, int target_e, int bound) {
 int32_t epi_fixed_align_i16(const int32_t *accb, const LZTensor *w, int row,
                              int tk, int ng, int r, int target_e, int bound) {
     int e;
-    long long s = epi_fixed_raw(accb, w, row, tk, ng, r, &e);
+    lz_i64 s = epi_fixed_raw(accb, w, row, tk, ng, r, &e);
     return epi_align_i16(s, e + lz_epi_post_e(w) + 8, target_e, bound);
 }
 
@@ -2132,7 +2136,7 @@ int32_t epi_fixed_align_i16(const int32_t *accb, const LZTensor *w, int row,
  *
  * Bills nothing because there is nothing to bill - sigmoid_q15_i is a
  * table lookup on integers, and the rest is multiplies and shifts. */
-long long lz_debug_swiglu_i16 = 0;   /* elements the int path produced */
+lz_i64 lz_debug_swiglu_i16 = 0;   /* elements the int path produced */
 /* Post-clamp maxima, the silent-clamp probe the LZ_SWIGLU_ES_* comment
    in forward.c reports from: a maximum strictly below the bound proves
    no element clamped, which a clamp inside epi_align_i16 cannot say for
@@ -2148,8 +2152,8 @@ void lz_swiglu_q15_i16(short *o, const short *p, const short *g, int n,
     for (i = 0; i < n; i++) {
         int32_t pv = p[i];
         int32_t gv = g[i];
-        int32_t sv = (int32_t)epi_shr_half((long long)(pv * sigmoid_q15_i(pv, ep)), 14);
-        int32_t q  = epi_align_i16((long long)(sv * gv), e, eo, 32767);
+        int32_t sv = (int32_t)epi_shr_half((lz_i64)(pv * sigmoid_q15_i(pv, ep)), 14);
+        int32_t q  = epi_align_i16((lz_i64)(sv * gv), e, eo, 32767);
         int32_t a;
         o[i] = (short)q;
         a = pv < 0 ? -pv : pv; if (a > lz_debug_swiglu_pmax) lz_debug_swiglu_pmax = a;
@@ -2537,10 +2541,10 @@ float epi_q41(const int32_t *accb, const float *xsb, const float *xgb,
    ORDER is the bit-identity contract, and the float exit
    (epi_q41_fixed) and the aligned-int16 exit (epi_q41_align_i16) must
    share this arithmetic rather than each carry a copy of it. */
-static long long epi_q41_join(const int32_t *accb, const LZTensor *w, int row,
+static lz_i64 epi_q41_join(const int32_t *accb, const LZTensor *w, int row,
                               int tk, int ng, int r, int zneg, int *e_out) {
     int e_dot, e_zero, target;
-    long long s_dot, s_zero;
+    lz_i64 s_dot, s_zero;
     const int16_t *zp = zneg ? w->sq : w->zq;
     s_dot = epi_fixed_raw(accb, w, row, tk, ng * r, r, &e_dot);
     s_dot = epi_shr_half(s_dot, 8);        /* exact: acc32 is the x256 */
@@ -2562,7 +2566,7 @@ static long long epi_q41_join(const int32_t *accb, const LZTensor *w, int row,
 float epi_q41_fixed(const int32_t *accb, const LZTensor *w, int row,
                     int tk, int ng, int r, int zneg) {
     int target;
-    long long comb = epi_q41_join(accb, w, row, tk, ng, r, zneg, &target);
+    lz_i64 comb = epi_q41_join(accb, w, row, tk, ng, r, zneg, &target);
     /* pow2f returns 0 below 2^-126 rather than a denormal, and |comb|
        reaches 2^55, so at a deep enough target a single multiply would
        zero a result that is still an ordinary normal float. e_dot and
@@ -2608,7 +2612,7 @@ int32_t epi_q41_align_i16(const int32_t *accb, const LZTensor *w, int row,
                           int tk, int ng, int r, int zneg,
                           int target_e, int bound) {
     int target;
-    long long comb = epi_q41_join(accb, w, row, tk, ng, r, zneg, &target);
+    lz_i64 comb = epi_q41_join(accb, w, row, tk, ng, r, zneg, &target);
     return epi_align_i16(comb, target + 8, target_e, bound);
 }
 
@@ -3095,7 +3099,7 @@ void lz_causal_conv1d_step(float *o, const float *x,
    output comparison can tell "it ran" from "it did not". Defined
    outside LZ_CONV_FIXED so the front end's extern still links in a
    build that compiles the tier out. */
-long long lz_debug_conv_sig_i = 0;
+lz_i64 lz_debug_conv_sig_i = 0;
 
 /* Same reason, and they were inside the #if until a -DLZ_CONV_FIXED=0
    row was added to build/recur_write_float_arm_gate.sh and would not
@@ -3107,7 +3111,7 @@ long long lz_debug_conv_sig_i = 0;
    counter is not one, because it reads 0 both when the exit is compiled
    out and when it ran without clipping, which is the normal case. */
 long lz_conv_o_clamped;
-long long lz_debug_convo_i16;
+lz_i64 lz_debug_convo_i16;
 
 #if LZ_CONV_FIXED
 #if defined(LZ_ARM_PRIM_ASM)
@@ -3290,8 +3294,8 @@ void lz_causal_conv1d_step_fixed_o16(float *o, short *oi, int out_es,
                differently would clip here with no other symptom - the
                same trap LZ_CONV_ES's own comment names. */
             if (oi) {
-                long long p = (long long)acc * (long long)s15;
-                long long r = epi_shr_half(p, (int)sig_e[c] + 15 - out_es);
+                lz_i64 p = (lz_i64)acc * (lz_i64)s15;
+                lz_i64 r = epi_shr_half(p, (int)sig_e[c] + 15 - out_es);
                 if (r > 32767)       { r = 32767;  lz_conv_o_clamped++; }
                 else if (r < -32767) { r = -32767; lz_conv_o_clamped++; }
                 oi[c] = (short)r;
