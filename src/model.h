@@ -324,6 +324,16 @@ typedef struct {
     LZTensor q_norm;                 /* (head_dim) f32 */
     LZTensor k_norm;                 /* (head_dim) f32 */
 
+    /* SubLN (use_subn=1 only): full attention's per-projection INPUT
+       RMSNorms. Distinct from q_norm/k_norm above, which are Qwen3.5's
+       per-head QK norms over head_dim and are present at every use_subn
+       setting. These normalize what the projection reads: the residual
+       for q/k/v, the attention value output for o_proj. */
+    LZTensor attn_q_subn_norm;       /* (hidden) f32 - q_proj input */
+    LZTensor attn_k_subn_norm;       /* (hidden) f32 - k_proj input */
+    LZTensor attn_v_subn_norm;       /* (hidden) f32 - v_proj input */
+    LZTensor attn_o_subn_norm;       /* (attn_q_dim) f32 - o_proj input */
+
     /* linear_attention only */
     LZTensor in_proj_qkv;            /* (lin_conv_dim, hidden) Q8 */
     LZTensor in_proj_z;              /* (lin_value_dim, hidden) Q8 */
@@ -389,6 +399,20 @@ typedef struct {
     LZTensor moe_shared_gate;        /* (moe_shared_width, hidden) Q8, only when moe_shared_width > 0 */
     LZTensor moe_shared_up;          /* (moe_shared_width, hidden) Q8 */
     LZTensor moe_shared_down;        /* (hidden, moe_shared_width) Q8 */
+
+    /* SubLN (use_subn=1 only): the latent-MoE block's per-projection
+       input RMSNorms. Under SubLN the block reads the RAW residual - the
+       pre-layer norm is gone - so each projection normalizes its own
+       input. The ROUTER is included on purpose: its logits go through a
+       softmax, so the input magnitude is a temperature, and leaving it
+       bare changes every routing decision rather than merely skipping a
+       normalization. */
+    LZTensor moe_gate_norm;          /* (hidden) f32 - router input */
+    LZTensor moe_down_norm;          /* (hidden) f32 - routed_expert_down_proj input */
+    LZTensor moe_up_norm;            /* (moe_latent_dim) f32 - routed_expert_up_proj input */
+    LZTensor moe_shared_gate_norm;   /* (hidden) f32, only when moe_shared_width > 0 */
+    LZTensor moe_shared_up_norm;     /* (hidden) f32 */
+    LZTensor moe_shared_down_norm;   /* (moe_shared_width) f32 */
     /* Per-expert triplet, config.num_experts entries each, allocated at
        load time (model.c) - NOT part of the fixed LZLayerSpec table
        because the count is a runtime config value, not a compile-time
@@ -484,9 +508,13 @@ typedef struct {
     LZMtp *mtp;
 
     int weights_loaded;             /* 0 = metadata bound only, weights not read */
-    long long n_params;             /* text-tower parameter count */
-    long long n_params_skipped;     /* dropped parts (vision tower) */
-    long long bytes_alloc;          /* bytes actually allocated */
+    /* lz_i64, not long long - iron law 10. On every toolchain that
+       exists today this IS long long; on Visual C++ 4.0 it is __int64,
+       which is the point. safetensors.h supplies it (included above)
+       and n_elem beside these already uses it. */
+    lz_i64 n_params;                /* text-tower parameter count */
+    lz_i64 n_params_skipped;        /* dropped parts (vision tower) */
+    lz_i64 bytes_alloc;             /* bytes actually allocated */
 } LZModel;
 
 /* Parse config.json. Supports both the multimodal shell (fields under

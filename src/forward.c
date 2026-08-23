@@ -5,6 +5,7 @@
 
 #include "forward.h"
 #include "compat.h"    /* lz_time_ms, for the debug probes below only */
+#include "lz_int.h"    /* lz_i64 - iron law 10; the 64-bit type here */
 #include "err.h"
 #include "ops.h"
 #include "ops_quant.h"   /* q8_round/q8_amax/pow2f/LZ_Q8_*, lz_rsqrt_float_body */
@@ -74,7 +75,7 @@ int lz_debug_mtp_attn_window = 0;
    of skipping lz_mtp_prefill's own forward pass). Zero unless this
    specific investigation reads/resets it; body forward passes are
    provably unaffected since they never increment it. */
-long long lz_debug_mtp_attn_rows = 0;
+lz_i64 lz_debug_mtp_attn_rows = 0;
 
 /* Debug-only investigative probe, part 4. Microseconds spent inside
    each of a speculative round's three pieces.
@@ -95,12 +96,12 @@ long long lz_debug_mtp_attn_rows = 0;
 
    Integer microseconds, not float seconds: %f is barred inside the
    PC=24 region, and these are read by cli_main.c which
-   may print them; a long long crosses that boundary safely. Zero cost
+   may print them; an lz_i64 crosses that boundary safely. Zero cost
    when nothing reads them, and body-only forwards never touch the two
    MTP ones. */
-long long lz_debug_us_verify = 0;
-long long lz_debug_us_draft = 0;
-long long lz_debug_us_capture = 0;
+lz_i64 lz_debug_us_verify = 0;
+lz_i64 lz_debug_us_draft = 0;
+lz_i64 lz_debug_us_capture = 0;
 
 /* Call-count companion to lz_debug_us_capture, for the "capture skipped,
    not just cheap" gate: a removed-but-still-called
@@ -108,7 +109,7 @@ long long lz_debug_us_capture = 0;
    pure timing/output comparison if the removed call happened to be fast
    that run - this counter is what actually distinguishes them, same
    role lz_debug_mtp_attn_rows plays for the attention-window change. */
-long long lz_debug_n_capture = 0;
+lz_i64 lz_debug_n_capture = 0;
 
 /* POSITIVE CONTROLS FOR FOUR MORE INT-PIPELINE SWITCHES. The v_proj /
    q8_i16 / q8_int / swiglu / conv-sig set already has them and the
@@ -121,10 +122,10 @@ long long lz_debug_n_capture = 0;
    arm did anything. mlat_quant is the pair for reuse specifically:
    with it on that number is below mlat's own, and with it off they are
    equal, which is what a compiled-out guard looks like from outside. */
-long long lz_debug_bvec_i16 = 0;
-long long lz_debug_klat_i16 = 0;
-long long lz_debug_mlat_i16 = 0;
-long long lz_debug_mlat_quant = 0;
+lz_i64 lz_debug_bvec_i16 = 0;
+lz_i64 lz_debug_klat_i16 = 0;
+lz_i64 lz_debug_mlat_i16 = 0;
+lz_i64 lz_debug_mlat_quant = 0;
 
 /* Timer + call-count pair for lz_mtp_catchup, same shape as the capture
    pair above and same reason: team-lead's explicit
@@ -136,8 +137,8 @@ long long lz_debug_mlat_quant = 0;
    both the FFN half and lm_head (lz_mtp_prefill's own comment), so it
    is cheaper per token than even a draft step, let alone a full
    forward. */
-long long lz_debug_us_catchup = 0;
-long long lz_debug_n_catchup = 0;
+lz_i64 lz_debug_us_catchup = 0;
+lz_i64 lz_debug_n_catchup = 0;
 
 /* --kv-rot on|off. Default OFF, and that default is a measurement, not a
    guess: with the current Q8_0 group-32 KV cache the rotation costs PPL
@@ -178,7 +179,7 @@ int lz_kv_rot_enable = 0;
    makes on-vs-off look identical for the wrong reason as easily as the
    right one, so the gate cannot be an output comparison alone - this
    counts head-rotations actually performed. */
-long long lz_debug_n_kv_rot = 0;
+lz_i64 lz_debug_n_kv_rot = 0;
 
 /* Positive control for --batch, same reason as the one above. Batching
    is defined to be bit-identical across widths, so an output comparison
@@ -187,13 +188,13 @@ long long lz_debug_n_kv_rot = 0;
    looked like from the CLI. Counts forward_chunk calls: prefilling n
    tokens at width T must take ceil(n/T) of them, which is a number the
    width cannot fake. */
-long long lz_debug_n_chunks = 0;
+lz_i64 lz_debug_n_chunks = 0;
 
 /* Positive control for skip_logits. Prefilling n tokens at width T must
    run lm_head ONCE, not ceil(n/T) times - and since the skipped chunks'
    logits were never read, output comparison cannot see the difference
    any more than it can see the batch width. */
-long long lz_debug_n_lmhead = 0;
+lz_i64 lz_debug_n_lmhead = 0;
 
 /* Positive control for the sink+window row skip. Counted in the SKIP
    branch, not in the scoring loop: on the default path (no window) the
@@ -202,7 +203,7 @@ long long lz_debug_n_lmhead = 0;
    count it was supposed to achieve. A counter derived from pos and
    attn_win would have been the fake kind - right by construction even
    if the loops still walked every row. */
-long long lz_debug_attn_skip = 0;
+lz_i64 lz_debug_attn_skip = 0;
 
 /* Positive control for the V projection's int16 exit (LZ_VPROJ_I16).
    Counted at the CONSUMER - inside the branch that hands vtmp_i16 to
@@ -212,7 +213,7 @@ long long lz_debug_attn_skip = 0;
    float one, so the logits cannot tell the two apart on their own.
    Elements, not calls, so it is the number the conversion arithmetic
    uses directly. */
-long long lz_debug_vproj_i16 = 0;
+lz_i64 lz_debug_vproj_i16 = 0;
 
 /* Positive control for the decay gate's integer chain (LZ_KGATE_EXP_I),
    same role and same reason as the counter above: the integer and float
@@ -227,8 +228,8 @@ long long lz_debug_vproj_i16 = 0;
    constant the measurement never saw. _fold_no counts refusals: it must
    be 0 whenever the chain was asked for, and a nonzero there is the one
    failure mode that otherwise looks exactly like success. */
-long long lz_debug_kgate_exp_i = 0;
-long long lz_debug_kgate_fold_no = 0;
+lz_i64 lz_debug_kgate_exp_i = 0;
+lz_i64 lz_debug_kgate_fold_no = 0;
 int lz_debug_kgate_exp_s = -1;
 int lz_debug_kgate_sig_slo = 9999;
 int lz_debug_kgate_sig_shi = -9999;
@@ -410,12 +411,12 @@ static void rot_head(float *v, int hd, int n) {
 
 /* ------------------------------------------------------------ state allocation */
 
-static void *xcalloc(size_t n, size_t sz, int *ok, long long *acc) {
+static void *xcalloc(size_t n, size_t sz, int *ok, lz_i64*acc) {
     void *p;
     if (n == 0) return NULL;
     p = calloc(n, sz);
     if (!p) { *ok = 0; return NULL; }
-    *acc += (long long)n * (long long)sz;
+    *acc += (lz_i64)n * (lz_i64)sz;
     return p;
 }
 
@@ -1930,7 +1931,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
            proxy for the MTP's own attention (score loop runs once per
            head, (pos-win_t0+1) rows each), not just a byte count. Body
            layers (layer >= 0) never increment this. */
-        if (layer < 0) lz_debug_mtp_attn_rows += (long long)(pos - win_t0 + 1) * nh;
+        if (layer < 0) lz_debug_mtp_attn_rows += (lz_i64)(pos - win_t0 + 1) * nh;
 
         /* Positions [dead0, dead1) fall outside sink+window. The mask
            block further down already sets their att[] to -1e30f, so
@@ -4104,7 +4105,7 @@ float *lz_mtp_draft_step(const LZModel *m, LZRunState *s, int next_token, int po
                 &m->embed_tokens, dim, c->vocab_size);
 
     lz_fpu_float_end(fpu);
-    lz_debug_us_draft += (long long)(lz_time_ms() * LZ_US_SCALE - t_us0);
+    lz_debug_us_draft += (lz_i64)(lz_time_ms() * LZ_US_SCALE - t_us0);
     return s->mtp_draft_logits;
 }
 
@@ -4402,7 +4403,7 @@ float *lz_forward_capture(const LZModel *m, LZRunState *s, int token, int pos) {
     double t_us0 = lz_time_ms() * LZ_US_SCALE;  /* debug probe, see part 4 */
     float *r = forward_chunk(m, s, &token, 1, pos,
                              m->mtp ? s->mtp_chain : NULL, 0, NULL, 0);
-    lz_debug_us_capture += (long long)(lz_time_ms() * LZ_US_SCALE - t_us0);
+    lz_debug_us_capture += (lz_i64)(lz_time_ms() * LZ_US_SCALE - t_us0);
     lz_debug_n_capture++;
     return r;
 }
@@ -4463,7 +4464,7 @@ int lz_forward_verify(const LZModel *m, LZRunState *s,
             return 1;
         done += k;
     }
-    lz_debug_us_verify += (long long)(lz_time_ms() * LZ_US_SCALE - t_us0);
+    lz_debug_us_verify += (lz_i64)(lz_time_ms() * LZ_US_SCALE - t_us0);
     return 0;
 }
 
@@ -4589,7 +4590,7 @@ int lz_mtp_catchup(const LZModel *m, LZRunState *s, const float *h_body_all,
                    const int *next_tokens, int n, int pos0) {
     double t_us0 = lz_time_ms() * LZ_US_SCALE;
     int r = lz_mtp_prefill(m, s, h_body_all, next_tokens, n, pos0);
-    lz_debug_us_catchup += (long long)(lz_time_ms() * LZ_US_SCALE - t_us0);
+    lz_debug_us_catchup += (lz_i64)(lz_time_ms() * LZ_US_SCALE - t_us0);
     lz_debug_n_catchup++;
     return r;
 }

@@ -8,6 +8,7 @@
 #include "compat.h"
 #include "err.h"
 #include "lfn.h"
+#include "lz_int.h"   /* lz_i64 - iron law 10; the 64-bit type here */
 #include "model.h"
 
 static void qerr(char *errbuf, int errlen, LZErr code, ...) {
@@ -561,10 +562,10 @@ static long long resolve_dim(const LZModelConfig *c, int kind) {
     case DK_VHEADDIM:   return c->lin_v_head_dim;
     case DK_ONE:        return 1;
     case DK_KERNEL:     return c->conv_kernel;
-    case DK_HIDDEN2:    return (long long)c->hidden_size * 2;
+    case DK_HIDDEN2:    return (lz_i64)c->hidden_size * 2;
     case DK_KEY:        return c->lin_key_dim;
     case DK_GATE_RANK:  return c->kda_gate_rank;
-    case DK_NVK:        return (long long)c->lin_n_v_heads * c->lin_k_head_dim;
+    case DK_NVK:        return (lz_i64)c->lin_n_v_heads * c->lin_k_head_dim;
     case DK_NUM_EXPERTS: return c->num_experts;
     case DK_LATENT:     return c->moe_latent_dim;
     case DK_SHARED_W:   return c->moe_shared_width;
@@ -585,7 +586,7 @@ static int check_shape(const LZModelConfig *c, const LZStTensor *t,
         return 1;
     }
     for (i = 0; i < nd; i++) {
-        long long want = resolve_dim(c, dims[i]);
+        lz_i64 want = resolve_dim(c, dims[i]);
         if (t->shape[i] != want) {
             qerr(errbuf, errlen, LZ_ERR_TENSOR_SHAPE,
                  t->name, i, want, t->shape[i]);
@@ -619,7 +620,7 @@ static int model_walk(LZModel *m, LZVisit visit, void *ctx,
         desc.n_dims = 2;
         desc.shape[0] = c->vocab_size;
         desc.shape[1] = c->hidden_size;
-        desc.n_elem = (long long)c->vocab_size * c->hidden_size;
+        desc.n_elem = (lz_i64)c->vocab_size * c->hidden_size;
         t = &desc;
     } else {
         t = lz_st_find(&m->st, name);
@@ -669,12 +670,12 @@ static int model_walk(LZModel *m, LZVisit visit, void *ctx,
             snprintf(name, sizeof(name), "%slayers.%d.%s",
                      m->prefix, li, sp->suffix);
             if (m->bin_file) {
-                long long ne = 1;
+                lz_i64 ne = 1;
                 int di;
                 memset(&desc, 0, sizeof(desc));
                 desc.name = name;
                 for (di = 0; di < 3 && sp->dims[di] != DK_END; di++) {
-                    long long d = resolve_dim(c, sp->dims[di]);
+                    lz_i64 d = resolve_dim(c, sp->dims[di]);
                     desc.shape[desc.n_dims++] = d;
                     ne *= d;
                 }
@@ -712,12 +713,12 @@ static int model_walk(LZModel *m, LZVisit visit, void *ctx,
                     snprintf(name, sizeof(name), "%slayers.%d.mlp.experts.%d.%s",
                              m->prefix, li, e, EXPERT_SPECS[k].suf);
                     if (m->bin_file) {
-                        long long ne = 1;
+                        lz_i64 ne = 1;
                         int di;
                         memset(&desc, 0, sizeof(desc));
                         desc.name = name;
                         for (di = 0; di < 3 && EXPERT_SPECS[k].dims[di] != DK_END; di++) {
-                            long long d = resolve_dim(c, EXPERT_SPECS[k].dims[di]);
+                            lz_i64 d = resolve_dim(c, EXPERT_SPECS[k].dims[di]);
                             desc.shape[desc.n_dims++] = d;
                             ne *= d;
                         }
@@ -805,12 +806,12 @@ static int model_walk(LZModel *m, LZVisit visit, void *ctx,
                above - no field tags in the bin format, so the MTP
                tensors have to be described the same way the body's do. */
             if (m->bin_file) {
-                long long ne = 1;
+                lz_i64 ne = 1;
                 int di;
                 memset(&desc, 0, sizeof(desc));
                 desc.name = name;
                 for (di = 0; di < 3 && sp->dims[di] != DK_END; di++) {
-                    long long d = resolve_dim(c, sp->dims[di]);
+                    lz_i64 d = resolve_dim(c, sp->dims[di]);
                     desc.shape[desc.n_dims++] = d;
                     ne *= d;
                 }
@@ -831,12 +832,12 @@ static int model_walk(LZModel *m, LZVisit visit, void *ctx,
             LZTensor *field;
             snprintf(name, sizeof(name), "mtp.layers.0.%s", MTP_FFN_SPECS[k].suffix);
             if (m->bin_file) {
-                long long ne = 1;
+                lz_i64 ne = 1;
                 int di;
                 memset(&desc, 0, sizeof(desc));
                 desc.name = name;
                 for (di = 0; di < 3 && MTP_FFN_SPECS[k].dims[di] != DK_END; di++) {
-                    long long d = resolve_dim(c, MTP_FFN_SPECS[k].dims[di]);
+                    lz_i64 d = resolve_dim(c, MTP_FFN_SPECS[k].dims[di]);
                     desc.shape[desc.n_dims++] = d;
                     ne *= d;
                 }
@@ -857,12 +858,12 @@ static int model_walk(LZModel *m, LZVisit visit, void *ctx,
             LZTensor *field;
             snprintf(name, sizeof(name), "mtp.%s", MTP_SPECS[k].suffix);
             if (m->bin_file) {
-                long long ne = 1;
+                lz_i64 ne = 1;
                 int di;
                 memset(&desc, 0, sizeof(desc));
                 desc.name = name;
                 for (di = 0; di < 3 && MTP_SPECS[k].dims[di] != DK_END; di++) {
-                    long long d = resolve_dim(c, MTP_SPECS[k].dims[di]);
+                    lz_i64 d = resolve_dim(c, MTP_SPECS[k].dims[di]);
                     desc.shape[desc.n_dims++] = d;
                     ne *= d;
                 }
@@ -887,7 +888,7 @@ static int model_walk(LZModel *m, LZVisit visit, void *ctx,
 
 typedef struct {
     unsigned char *claimed;     /* whether each tensor was claimed; for leak detection */
-    long long n_params;
+    lz_i64 n_params;
 } LZBindCtx;
 
 static int visit_bind(LZModel *m, const LZStTensor *t, LZTensor *field,
@@ -1099,7 +1100,7 @@ static int visit_read(LZModel *m, const LZStTensor *t, LZTensor *field,
     field->f = (float *)malloc((size_t)t->n_elem * sizeof(float));
     if (!field->f) {
         qerr(errbuf, errlen, LZ_ERR_TENSOR_ALLOC_BYTES,
-             t->name, t->n_elem * (long long)sizeof(float));
+             t->name, t->n_elem * (lz_i64)sizeof(float));
         return 1;
     }
     if (lz_st_read_f32(&m->st, t, field->f, t->n_elem, errbuf, errlen) != 0) {
@@ -1107,7 +1108,7 @@ static int visit_read(LZModel *m, const LZStTensor *t, LZTensor *field,
         field->f = NULL;
         return 1;
     }
-    m->bytes_alloc += t->n_elem * (long long)sizeof(float);
+    m->bytes_alloc += t->n_elem * (lz_i64)sizeof(float);
     return 0;
 }
 
@@ -1154,7 +1155,7 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
         return 1;
     }
     lz_le32(&n, 1);
-    if ((long long)n != t->n_elem) {
+    if ((lz_i64)n != t->n_elem) {
         qerr(errbuf, errlen, LZ_ERR_TENSOR_ELEMS,
              t->name, t->n_elem, n);
         return 1;
@@ -1178,7 +1179,7 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
             return 1;
         }
         lz_le32(field->f, (size_t)n);
-        m->bytes_alloc += (long long)n * sizeof(float);
+        m->bytes_alloc += (lz_i64)n * sizeof(float);
     } else if (dtype == LZ_FMT_Q16_0) {
         /* int16: n*2 bytes of data + n/gs scales. Used for in_proj_a/b -
            they produce gt, the decay rate multiplied into the SSM state
@@ -1212,8 +1213,8 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
            halves have to be put the right way round here. */
         lz_le16(field->q, (size_t)n);
         lz_le32(field->scale, (size_t)(n / gs));
-        m->bytes_alloc += (long long)n * 2 +
-                          (long long)(n / gs) * sizeof(float);
+        m->bytes_alloc += (lz_i64)n * 2 +
+                          (lz_i64)(n / gs) * sizeof(float);
     } else if (dtype == LZ_FMT_Q6_1) {
         /* two planes: n/2 bytes 4bit + n/4 bytes 2bit + n/gs scales +
            n/gs mins. Both planes live contiguously in one malloc, 4bit
@@ -1243,8 +1244,8 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
         }
         lz_le32(field->scale, (size_t)(n / gs));
         lz_le32(field->zero,  (size_t)(n / gs));
-        m->bytes_alloc += (long long)n / 2 + (long long)n / 4 +
-                          2 * (long long)(n / gs) * sizeof(float);
+        m->bytes_alloc += (lz_i64)n / 2 + (lz_i64)n / 4 +
+                          2 * (lz_i64)(n / gs) * sizeof(float);
     } else if (dtype == LZ_FMT_T2) {
         /* ternary: n/4 bytes of 2-bit codes + n/gs scales. NO mins -
            ternary is symmetric, and `zero` staying NULL is what the
@@ -1271,8 +1272,8 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
             return 1;
         }
         lz_le32(field->scale, (size_t)(n / gs));
-        m->bytes_alloc += (long long)n / 4 +
-                          (long long)(n / gs) * sizeof(float);
+        m->bytes_alloc += (lz_i64)n / 4 +
+                          (lz_i64)(n / gs) * sizeof(float);
     } else if (dtype == LZ_FMT_Q4_1) {
         /* nibbles: n/2 bytes of data + n/gs scales + n/gs mins.
            gs must be a multiple of 32 - nibble sub-blocks are fixed at
@@ -1301,8 +1302,8 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
         }
         lz_le32(field->scale, (size_t)(n / gs));
         lz_le32(field->zero,  (size_t)(n / gs));
-        m->bytes_alloc += (long long)n / 2 +
-                          2 * (long long)(n / gs) * sizeof(float);
+        m->bytes_alloc += (lz_i64)n / 2 +
+                          2 * (lz_i64)(n / gs) * sizeof(float);
     } else if (dtype == LZ_FMT_Q8_0) {
         field->dtype = LZ_FMT_Q8_0;
         field->f = NULL;
@@ -1331,7 +1332,7 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
             return 1;
         }
         lz_le32(field->scale, (size_t)(n / gs));
-        m->bytes_alloc += (long long)n + (long long)(n / gs) * sizeof(float);
+        m->bytes_alloc += (lz_i64)n + (lz_i64)(n / gs) * sizeof(float);
     } else {
         qerr(errbuf, errlen, LZ_ERR_TENSOR_DTYPE, t->name, dtype);
         return 1;
@@ -1348,7 +1349,7 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
     uint32_t ver;
     LZModelConfig *c = &m->config;
     int i;
-    long long n_params = 0;
+    lz_i64 n_params = 0;
 
     /* lz_open's probe already proved this name opens, so a failure here
        is a race and keeps LZ_ERR_BIN_OPEN's wording. */
