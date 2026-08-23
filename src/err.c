@@ -8,7 +8,7 @@
  * sit two slots out of order here unnoticed, because order did not
  * reach the compiler at all.
  *
- * build/err_table_order_gate.sh reads these comments and err.h's enum
+ * build/str_table_order_gate.sh reads these comments and err.h's enum
  * and requires them equal, element for element. That is the safety the
  * designated form provided, in a shape that survives losing it: add a
  * code without adding a row here, or reorder either, and the gate names

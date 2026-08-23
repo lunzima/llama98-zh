@@ -63,31 +63,52 @@ command -v gcc >/dev/null 2>&1 || { echo "c89_floor_gate: SKIP - no gcc"; exit 2
 # tables, where the form exists so that a code and its string cannot
 # drift apart.
 #
-# err.c is converted. The objection to converting was that positional
+# Both are converted. The objection to converting was that positional
 # initialisers put the strings in an order nothing checks; that is now
-# build/err_table_order_gate.sh, which compares each row's tag comment
-# against the enum and is strictly stronger than the designated form -
+# build/str_table_order_gate.sh, which compares each row's tag comment
+# against its enum and is strictly stronger than the designated form -
 # the designated form made order irrelevant, and so let one code sit two
-# slots out of place there for as long as it did.
+# slots out of place in err.c for as long as it did.
 #
-# gui/localized_strings.c is the remaining 186, and wants the same pair:
-# convert, plus a gate over its own tag comments.
 BASELINE="ops.c:1 forward.c:16"
+
+# gui/ is in scope too, and not as an afterthought: its string table was
+# 186 of the 452 designated initialisers, and the front end is a shipped
+# product on the same compilers. Only the files that compile standalone
+# under -fsyntax-only are listed - the window procedures need <windows.h>
+# and a host SDK, which this scan is not trying to be.
+CFILES="src/*.c gui/localized_strings.c"
+
+# THE INCLUDE PATH IS PER FILE, and matches what the Makefile passes.
+# Widening it for everyone is not free: cli_main.c is built with
+# -Icommon, and scanning it with -Isrc alone resolved a header
+# differently and hid a real mixed declaration. Scanning it with the
+# widened set that gui/localized_strings.c needs would be the same
+# mistake pointed the other way - a gate whose compile line is not the
+# build's compile line is answering about a program nobody ships.
+inc_for() {
+    case "$1" in
+        src/cli_main.c)             echo "-Isrc -Icommon" ;;
+        gui/*)                      echo "-Igui -Isrc -Icommon" ;;
+        *)                          echo "-Isrc" ;;
+    esac
+}
 
 FAIL=0
 TOTAL=0
-for f in src/*.c; do
+for f in $CFILES; do
     b=$(basename "$f")
     exp=0
     for e in $BASELINE; do
         [ "${e%%:*}" = "$b" ] && exp=${e##*:}
     done
-    n=$(gcc -std=c89 -pedantic -Isrc -fsyntax-only "$f" 2>&1 \
+    INC=$(inc_for "$f")
+    n=$(gcc -std=c89 -pedantic $INC -fsyntax-only "$f" 2>&1 \
         | grep -cE "mixed declarations|ISO C90 forbids .*//|forbids specifying subobject" )
     TOTAL=$((TOTAL + n))
     if [ "$n" -gt "$exp" ]; then
         echo "FAIL: $b has $n C89 violation(s), baseline $exp"
-        gcc -std=c89 -pedantic -Isrc -fsyntax-only "$f" 2>&1 \
+        gcc -std=c89 -pedantic $INC -fsyntax-only "$f" 2>&1 \
             | grep -E "mixed declarations|ISO C90 forbids .*//|forbids specifying subobject" \
             | head -5 | sed 's/^/      /'
         FAIL=1

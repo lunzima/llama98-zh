@@ -67,9 +67,11 @@
 #      comment rule: no file gains an "it used to be" / "no longer" /
 #      "the old loop". A ratchet, because some of those sentences are
 #      load-bearing and the repair is to restate them, not delete them
-#  20. build/err_table_order_gate.sh - err.c's two message tables list
-#      their codes in LZErr order. The precondition for dropping the C99
-#      designated initialisers that Visual C++ 4.0 cannot compile
+#  20. build/str_table_order_gate.sh - src/err.c and
+#      gui/localized_strings.c list their codes in their enums' order.
+#      Those tables are positional now, because Visual C++ 4.0 cannot
+#      compile the designated form, so order is the only thing binding a
+#      string to a code
 #
 # Judging discipline (this repo has paid for getting this wrong before):
 #   - Never grep bare 'error' - "0 errors" contains the substring.
@@ -821,30 +823,30 @@ case $CHLOG_RC in
 esac
 
 # ---------------------------------------------------------------------
-# Stage 20: err.c's two message tables are in LZErr order.
+# Stage 20: the bilingual string tables are in their enums' order.
 #
-# They use designated initialisers, so order is irrelevant today and a
-# misordered file still prints the right messages - which is how one
-# code sat two slots early in both tables unnoticed. That construct is
-# C99 and Visual C++ 4.0 cannot compile it; the conversion it needs is
-# positional, where order is the only thing binding a string to a code.
-# This asserts the property that conversion depends on.
+# src/err.c and gui/localized_strings.c are positional, because Visual
+# C++ 4.0 cannot compile the designated form - so position is what binds
+# a string to a code, and the tag comment on each row is the only thing
+# that says which. Nothing else here would notice a transposed pair: the
+# strings are all still present, and the engine's numeric output does not
+# touch them.
 # ---------------------------------------------------------------------
 echo
-echo "==== [20/20]err table order ===="
-LOG=build/ci-errtbl.log
-build/err_table_order_gate.sh >"$LOG" 2>&1
-ERRTBL_RC=$?
+echo "==== [20/20]string table order ===="
+LOG=build/ci-strtbl.log
+build/str_table_order_gate.sh >"$LOG" 2>&1
+STRTBL_RC=$?
 cat "$LOG"
-case $ERRTBL_RC in
+case $STRTBL_RC in
     0)
-        echo "PASS: err table order"
-        note "PASS  err table order"
+        echo "PASS: string table order"
+        note "PASS  string table order"
         PASS=$((PASS + 1))
         ;;
     *)
-        echo "FAIL: err table order"
-        note "FAIL  err table order"
+        echo "FAIL: string table order"
+        note "FAIL  string table order"
         FAIL=$((FAIL + 1))
         ;;
 esac

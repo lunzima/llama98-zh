@@ -894,8 +894,6 @@ int main(int argc, char **argv) {
        lz_tokenizer_load ever ran. lz_free and lz_tokenizer_free are both
        safe on a zeroed struct (each frees NULL and re-zeroes), so one
        shared tail suffices for every error point. */
-    memset(&m, 0, sizeof m);
-    memset(&tok, 0, sizeof tok);
     /* static, not stack: the target is Win98 and
        this frame is the base of the CLI stack. Single-threaded, written
        by the callee before it is read, so one instance is enough. */
@@ -937,6 +935,9 @@ int main(int argc, char **argv) {
     LZModelConfig *cfg;
     int i, rc = 0;
     double t0, t1;
+
+    memset(&m, 0, sizeof m);
+    memset(&tok, 0, sizeof tok);
 
     lz_init_stdout();
     lz_attr_mode("auto");
