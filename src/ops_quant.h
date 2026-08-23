@@ -121,7 +121,17 @@ LZ_MAYBE_UNUSED static int lz_q8_round_bits(uint32_t u, int k, int32_t *out) {
    LZ_FDIV_RECIP takes and for the same reason: on a host with an FPU the
    magic add is three cycles and the integer sequence is not obviously a
    win, so it is available there and not chosen there. Bit-identical
-   either arm, which is what makes the switch checkable by cmp. */
+   either arm, which is what makes the switch checkable by cmp.
+
+   WHO ACTUALLY GETS IT. The ARM cross build is the one target that
+   passes -DLZ_NO_FPU today, and there the assembly above takes every
+   call: AUTO resolves to arm-asm, so lz_debug_q8r_bits reads 0 taken on
+   that tier and 131,978,654 under --kernel arm-c. So this serves ARM's
+   C and ref tiers, and any no-FPU target with no assembly of its own -
+   a 386 with no 387, a MIPS without an FPU, the VC++ 4.0 targets. It
+   also gives the rounding rule a second statement, in C, that the
+   assembly can be checked against: the two are cmp-equal over the same
+   fixture (78,905,344 bytes on _armgate2/zh). */
 #ifndef LZ_Q8R_BITS
 #if defined(LZ_NO_FPU)
 #define LZ_Q8R_BITS 1
