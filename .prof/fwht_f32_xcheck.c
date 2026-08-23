@@ -48,6 +48,12 @@ int main(int argc, char **argv) {
         int t = LZ_KERNEL_REF;
         if (argv[1][0] == 'm') t = LZ_KERNEL_MMX;
         else if (argv[1][0] == 's') t = LZ_KERNEL_SSE2;
+#if defined(LZ_KERNEL_ARM_ASM)
+        /* The soft-float regime, added when lz_faddsub_arm_asm landed:
+           `a` must reach it and `c` the C butterfly beside it. */
+        else if (argv[1][0] == 'a') t = LZ_KERNEL_ARM_ASM;
+        else if (argv[1][0] == 'c') t = LZ_KERNEL_ARM;
+#endif /* LZ_KERNEL_ARM_ASM */
         lz_kernel_select(t);
     }
     fpu = lz_fpu_float_begin();

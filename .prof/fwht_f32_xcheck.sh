@@ -73,6 +73,53 @@ MREF=$(get mut ref); MSSE=$(get mut sse2)
 echo "  shipped   ref=$REF  mmx=$MMX  sse2=$SSE"
 echo "  mutated   ref=$MREF  sse2=$MSSE"
 
+# ---- SOFT-FLOAT ---------------------------------------------------------
+# THE ARM CELL LANDED (13dc51f, 35e1b87) AND THIS SCRIPT DID NOT GROW AN
+# ARM. lz_faddsub_arm_asm is a hand-written float adder pair - the one
+# kernel here whose rounding is written out by hand rather than emitted
+# by a compiler - and until now the only thing comparing it to anything
+# was .prof/verify_fwht_arm.c, which checks it against the SAME machine's
+# __addsf3. That is a within-regime check. This is the across-regime one:
+# does the ARM butterfly land on the value SSE lands on.
+ARM_CC=$(command -v arm-linux-gnueabi-gcc-14 2>/dev/null \
+      || command -v arm-linux-gnueabi-gcc 2>/dev/null || true)
+ARM_ROWS=""
+if [ -n "$ARM_CC" ] && command -v qemu-arm-static >/dev/null 2>&1; then
+    AF="-O2 -std=c99 -static -march=armv5te -mtune=arm926ej-s"
+    AF="$AF -mfloat-abi=soft -DLZ_NO_FPU=1 -ffp-contract=off"
+    ASRC="ops ops_quant ops_sched ops_norm ops_gdn ops_matmul ops_t2_arm
+          ops_t2_scalar ops_arm fwht cpucheck err"
+    alist=""
+    for f in $ASRC; do alist="$alist $O/on/src/$f.c"; done
+    # The ARM arm needs its OWN mutation. The x86 one is in ops_mmx_sse.c,
+    # which this build does not compile, so without this a tier selector
+    # that silently fell back to the C would run the C twice and match -
+    # the same false green the x86 mutation exists to prevent.
+    sed -i 's|"biceq  %\[S\],  %\[S\], #1\\n\\t"|"nop\\n\\t"|' \
+        "$O/mut/src/ops_arm_prim.h"
+    grep -q '"nop' "$O/mut/src/ops_arm_prim.h" || {
+        echo "  soft-fp   FAIL - the ARM mutation did not apply"; exit 1; }
+    amlist=""
+    for f in $ASRC; do amlist="$amlist $O/mut/src/$f.c"; done
+    if $ARM_CC $AF -I"$O/on/src" -o "$O/bin_arm" \
+            "$R/.prof/fwht_f32_xcheck.c" $alist -lm 2>"$O/arm.log" \
+       && $ARM_CC $AF -I"$O/mut/src" -o "$O/bin_armmut" \
+            "$R/.prof/fwht_f32_xcheck.c" $amlist -lm 2>>"$O/arm.log"; then
+        AREF=$(qemu-arm-static "$O/bin_arm" c | grep '^FWHTF')
+        AASM=$(qemu-arm-static "$O/bin_arm" a | grep '^FWHTF')
+        AMREF=$(qemu-arm-static "$O/bin_armmut" c | grep '^FWHTF')
+        AMASM=$(qemu-arm-static "$O/bin_armmut" a | grep '^FWHTF')
+        echo "  soft-fp   arm-c=$AREF  arm-asm=$AASM"
+        echo "  soft-mut  arm-c=$AMREF  arm-asm=$AMASM"
+        ARM_ROWS=1
+    else
+        echo "  soft-fp   SKIP - the ARM arm did not build"
+        tail -3 "$O/arm.log"
+    fi
+else
+    echo "  soft-fp   SKIP - no ARM cross toolchain or qemu"
+fi
+
 FAILED=0
 [ "$SSE" = "$REF" ] || { echo "FAIL: the SSE kernel differs from the C body"; FAILED=1; }
 [ "$MMX" = "$REF" ] || { echo "FAIL: the mmx tier differs from the C body"; FAILED=1; }
@@ -81,6 +128,24 @@ if [ "$MSSE" = "$REF" ]; then
     echo "FAIL: mutating the kernel changed NOTHING - it is never reached,"
     echo "      so the check above ran the C body twice"
     FAILED=1
+fi
+if [ -n "$ARM_ROWS" ]; then
+    [ "$AREF" = "$REF" ] || {
+        echo "FAIL: the soft-float C butterfly differs from the x86 one"
+        FAILED=1; }
+    [ "$AASM" = "$REF" ] || {
+        echo "FAIL: lz_faddsub_arm_asm differs from the x86 C body -"
+        echo "      a hand-written adder agreeing with its OWN __addsf3"
+        echo "      is not the same claim as agreeing with SSE"
+        FAILED=1; }
+    [ "$AMREF" = "$REF" ] || {
+        echo "FAIL: the ARM mutation moved the C butterfly too"; FAILED=1; }
+    if [ "$AMASM" = "$REF" ]; then
+        echo "FAIL: mutating lz_faddsub_arm_asm changed NOTHING - the"
+        echo "      arm-asm tier never reaches it, so the row above"
+        echo "      compared the C body against itself"
+        FAILED=1
+    fi
 fi
 [ $FAILED -eq 0 ] || exit 1
 echo "fwht_f32_xcheck: PASS"
