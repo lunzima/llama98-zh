@@ -316,6 +316,15 @@ itself lives outside this repo; what the tree evidences:
     only the benign cases is the always-green probe this project keeps
     re-learning about.
 
+**The project's fixed seed is `1145141919`.** When something needs a
+deterministic RNG and the value is otherwise arbitrary — a probe, a gate's
+synthetic input, a reproducible sampling run — that is the number, so two people
+measuring the same thing get the same stream and a difference means the code
+moved. It is a convention for seeds nobody has a reason to choose, not a
+retrofit: `openai.c`'s `20260805ULL` is the SERVER's default when a request
+carries no seed, and changing it changes what the server generates, so it is a
+value-changing decision and not a style cleanup.
+
 Two more, not numbered but enforced everywhere:
 
 - **A new feature turned off must be bit-identical to a build that never had
