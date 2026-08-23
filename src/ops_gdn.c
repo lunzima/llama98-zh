@@ -1452,7 +1452,23 @@ static int p2_tier(void) {
    on and not the algebra alone. */
 static void p2_group_coef(float decs, float rs, float kv, float sd,
                           float *c1, float *c2) {
-    *c1 = decs * rs;
+    /* rs IS THE STATE'S GROUP SCALE, which p2_group_scale writes as
+       pow2f(ee) - so c1 is an exponent add, free and bit-identical.
+       Its three other arms (out-of-range, all-zero, and the float
+       recurrence's q8_group_scale scale) are not powers of two and keep
+       the multiply, which is why the guard is here rather than assumed
+       away.
+       c2 stays a multiply: sd is the DELTA group scale, amd*LZ_Q15_INV,
+       and nothing has normalized it. Block-normalizing it the way
+       gdn_build_table's amk was (8017c83) would fold c2 too, at the
+       same kind of cost - value-changing, so it needs its own paired
+       measurement and is not smuggled in here. */
+    union { float f; uint32_t u; } rb;
+    rb.f = rs;
+    if (((rb.u & 0x007FFFFFu) != 0u)
+        || (uint32_t)(((rb.u >> 23) & 0xFFu) - 1u) >= 0xFEu
+        || !f32_scale_pow2(decs, (int)((rb.u >> 23) & 0xFFu) - 127, c1))
+        *c1 = decs * rs;
     *c2 = kv * sd;
 }
 
@@ -2169,7 +2185,9 @@ static void gdn_p2_fixed_rows(const int8_t *sq_in, int8_t *sq_out,
            which now takes this rather than dec. Above the tier fork so
            both row paths get the same value from the same multiply -
            two textually-equal copies is the hazard that comment names. */
-        float decs = dec * (1.0f / LZ_GDN_LO_SCALE);
+        float decs;
+        if (!f32_scale_pow2(dec, -LZ_GDN_LO_SHIFT, &decs))
+            decs = dec * (1.0f / LZ_GDN_LO_SCALE);
 #if LZ_GDN_STATE_2PLANE
         const int8_t *row_lo_in = sq2_in + (size_t)kk * vd;
         int8_t *row_lo_out = sq2_out + (size_t)kk * vd;
@@ -2178,7 +2196,11 @@ static void gdn_p2_fixed_rows(const int8_t *sq_in, int8_t *sq_out,
            paths cost the same per group. Billed once, above the fork -
            billing only inside gdn_p2_row_simd would read zero on
            --kernel ref, where p2_tier()==0 takes the scalar path only.
-           coef 2 mul (was 3; the 2^-8 moved to the row, +1 below); norm
+           coef 1 mul (was 3, then 2: the 2^-8 moved to the row and is
+           an exponent add there too, and c1's `decs * rs` folds because
+           rs is the state's group scale, pow2f. Only c2's `kv * sd`
+           is left - sd is the DELTA scale and nothing normalized it);
+           norm
            0 mul (was 2: p2_group_norm's `c * pow2f(14-e)` pair is an
            exponent add now, f32_scale_pow2 - same number, no multiply)
            + 2 q8_round(add); scale 0 mul (was 2: both power-of-two
@@ -2186,7 +2208,7 @@ static void gdn_p2_fixed_rows(const int8_t *sq_in, int8_t *sq_out,
            p2_group_scale). The fallback arms outside pow2f's range
            still spend theirs and are not billed: billing a branch by
            its worst case would overstate every row that has one. */
-        LZ_FCX(LZ_FC_RECUR, 2 * ng + 1, 2 * ng, 0, 0, 0);
+        LZ_FCX(LZ_FC_RECUR, ng, 2 * ng, 0, 0, 0);
 #ifdef LZ_HAVE_P2_MMX
         if (p2_tier()) {
             gdn_p2_row_simd(row_in,
