@@ -371,6 +371,31 @@ static const double LZ_US_SCALE = 1000.0;
 #define LZ_PROF_END(v, slot) do { if (lz_prof_enable) \
     lz_prof_us[slot] += (lz_time_ms() - (v)) * LZ_US_SCALE; } while (0)
 
+/* kv_slot for t+1 given kv_slot for t, without the divide.
+ *
+ * The scoring and accumulation loops walk t contiguously, so the cache
+ * row they read walks with it and wraps at the end of the ring. Calling
+ * kv_slot per iteration spends an integer modulo by a runtime value on
+ * every one - around forty cycles on the in-order cores in the target
+ * family, and not pipelined. This spends a compare and an increment,
+ * and the compare is taken once per ring period, so it is as
+ * predictable as a branch gets.
+ *
+ * ONE RULE FOR ALL FOUR CASES, checked against kv_slot's three branches:
+ *   ring == 0        slot == t, and sink + ring == sink, which slot + 1
+ *                    equals exactly once (at t + 1 == sink) - where the
+ *                    answer is sink either way
+ *   t + 1 <  sink    below the sink, slot == t, increments
+ *   t + 1 == sink    kv_slot gives sink + 0; slot was sink - 1
+ *   t + 1 >  sink    increments until slot + 1 reaches sink + ring,
+ *                    then restarts at sink
+ * Callers must seed with kv_slot(s, first_t) and advance in the loop's
+ * INCREMENT clause, not its body - the row advances on iterations the
+ * body skips with continue. */
+static int kv_slot_next(const LZRunState *s, int slot) {
+    return (slot + 1 == s->attn_sink + s->kv_ring) ? s->attn_sink : slot + 1;
+}
+
 static int kv_slot(const LZRunState *s, int t) {
     if (!s->kv_ring) return t;
     if (t < s->attn_sink) return t;
@@ -2001,6 +2026,18 @@ static void forward_attn(const LZModel *m, LZRunState *s,
             const float *qhh = qht + (size_t)h * hd;
             int kvh = h / kv_mul;
             float *out = aot + (size_t)h * hd;
+            /* Cache row for the position being scored. Assigned once per
+               iteration in each scoring loop below rather than called
+               twice: kv_slot ends in an integer modulo by a runtime
+               value, several of these loops used it for both the data
+               pointer and the scale pointer, and the calls straddle the
+               dot product so the compiler will not fold them. Declared
+               out here because C89 wants declarations at the top of a
+               block and these loop bodies already open with a statement.
+               It depends only on t, never on h - hoisting it out of the
+               HEAD loop as well would need a per-token table, which is
+               a buffer this function does not have. */
+            int rslot, lslot;
 
             if (k4) {
                 /* score = sum_d q[d] * (scale_t * cents[code]) - the row
@@ -2009,9 +2046,10 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                    codebook is 64 bytes and stays in L1; that is what
                    makes a table lookup per coordinate affordable here
                    and would not be with a per-coordinate table. */
-                for (t = win_t0; t <= pos; t++) {
+                for (t = win_t0, rslot = kv_slot(s, win_t0); t <= pos;
+                     t++, rslot = kv_slot_next(s, rslot)) {
                     if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
-                    const unsigned char *kt = k4 + (size_t)kv_slot(s, t) * kvd / 2 +
+                    const unsigned char *kt = k4 + (size_t)rslot * kvd / 2 +
                                               (size_t)kvh * (hd / 2);
                     float sum = 0.0f;
                     for (d = 0; d < hd; d += 2) {
@@ -2019,7 +2057,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                         sum += qhh[d]     * lz_kv4_cents[pk & 0x0F];
                         sum += qhh[d + 1] * lz_kv4_cents[pk >> 4];
                     }
-                    s->att[t] = sum * ks4[(size_t)kv_slot(s, t) * nkv + kvh] * scale;
+                    s->att[t] = sum * ks4[(size_t)rslot * nkv + kvh] * scale;
                 }
             } else
             if (kf) {
@@ -2027,9 +2065,10 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                    path, so any gap between this and the Q8 arm IS the
                    cache format's cost - which is the whole point of
                    having the arm. */
-                for (t = win_t0; t <= pos; t++) {
+                for (t = win_t0, rslot = kv_slot(s, win_t0); t <= pos;
+                     t++, rslot = kv_slot_next(s, rslot)) {
                     if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
-                    const float *kt = kf + (size_t)kv_slot(s, t) * kvd + (size_t)kvh * hd;
+                    const float *kt = kf + (size_t)rslot * kvd + (size_t)kvh * hd;
                     float sum = 0.0f;
                     for (d = 0; d < hd; d++) sum += qhh[d] * kt[d];
                     s->att[t] = sum * scale;
@@ -2056,7 +2095,8 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                                  kvd, pos, scale, s->attn_sink, s->kv_ring);
             } else
 #endif /* LZ_ATTN_FIXED & 1 */
-            for (t = win_t0; t <= pos; t++) {
+            for (t = win_t0, rslot = kv_slot(s, win_t0); t <= pos;
+                 t++, rslot = kv_slot_next(s, rslot)) {
                 if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
                 /* scoring: q (f32) × k (Q8). float accumulation within
                    a group, one scale multiply at the group tail
@@ -2064,8 +2104,8 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                    scale multiply). win_t0 is 0 (t starts at 0, as
                    always) unless the investigative window override
                    above is active. */
-                const int8_t *kt = kc + (size_t)kv_slot(s, t) * kvd + (size_t)kvh * hd;
-                const float *kts = ks + (size_t)kv_slot(s, t) * kvd / 32 +
+                const int8_t *kt = kc + (size_t)rslot * kvd + (size_t)kvh * hd;
+                const float *kts = ks + (size_t)rslot * kvd / 32 +
                                    (size_t)(kvh * hd) / 32;
                 float sum = 0.0f;
                 /* A convert, a multiply and an add per element; a
@@ -2098,9 +2138,10 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                                      s->attn_sink, s->kv_ring);
                 } else
 #endif /* LZ_ATTN_FIXED & 1 */
-                for (tt = 0; tt <= pos; tt++) {
-                    const int8_t *kt = kc_lo + (size_t)kv_slot(s, tt) * kvd + (size_t)kvh * hd;
-                    const float *kts = ks + (size_t)kv_slot(s, tt) * kvd / 32 +
+                for (tt = 0, lslot = kv_slot(s, 0); tt <= pos;
+                     tt++, lslot = kv_slot_next(s, lslot)) {
+                    const int8_t *kt = kc_lo + (size_t)lslot * kvd + (size_t)kvh * hd;
+                    const float *kts = ks + (size_t)lslot * kvd / 32 +
                                        (size_t)(kvh * hd) / 32;
                     float sum = 0.0f;
                     /* Same shape as the scoring loop above: convert +
@@ -2155,13 +2196,14 @@ static void forward_attn(const LZModel *m, LZRunState *s,
 
             if (v4) {
                 memset(out, 0, (size_t)hd * sizeof(float));
-                for (t = win_t0; t <= pos; t++) {
+                for (t = win_t0, rslot = kv_slot(s, win_t0); t <= pos;
+                     t++, rslot = kv_slot_next(s, rslot)) {
                     if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
-                    const unsigned char *vt = v4 + (size_t)kv_slot(s, t) * kvd / 2 +
+                    const unsigned char *vt = v4 + (size_t)rslot * kvd / 2 +
                                               (size_t)kvh * (hd / 2);
                     /* Row scale folded into the attention weight, same
                        trick as the scoring pass. */
-                    float a = s->att[t] * vs4[(size_t)kv_slot(s, t) * nkv + kvh];
+                    float a = s->att[t] * vs4[(size_t)rslot * nkv + kvh];
                     for (d = 0; d < hd; d += 2) {
                         unsigned char pk = vt[d / 2];
                         out[d]     += a * lz_kv4_cents[pk & 0x0F];
@@ -2171,9 +2213,10 @@ static void forward_attn(const LZModel *m, LZRunState *s,
             } else
             if (vf) {
                 memset(out, 0, (size_t)hd * sizeof(float));
-                for (t = win_t0; t <= pos; t++) {
+                for (t = win_t0, rslot = kv_slot(s, win_t0); t <= pos;
+                     t++, rslot = kv_slot_next(s, rslot)) {
                     if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
-                    const float *vt = vf + (size_t)kv_slot(s, t) * kvd + (size_t)kvh * hd;
+                    const float *vt = vf + (size_t)rslot * kvd + (size_t)kvh * hd;
                     float a = s->att[t];
                     LZ_FCX(LZ_FC_ATTN_WSUM, hd, hd, 0, 0, 0);   /* f32 V: no convert */
                     for (d = 0; d < hd; d++) out[d] += a * vt[d];
@@ -2204,10 +2247,11 @@ static void forward_attn(const LZModel *m, LZRunState *s,
             } else {
 #endif /* LZ_ATTN_FIXED & 2 */
             memset(out, 0, (size_t)hd * sizeof(float));
-            for (t = win_t0; t <= pos; t++) {
+            for (t = win_t0, rslot = kv_slot(s, win_t0); t <= pos;
+                 t++, rslot = kv_slot_next(s, rslot)) {
                 if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
-                const int8_t *vt = vc + (size_t)kv_slot(s, t) * kvd + (size_t)kvh * hd;
-                const float *vts = vs + (size_t)kv_slot(s, t) * kvd / 32 +
+                const int8_t *vt = vc + (size_t)rslot * kvd + (size_t)kvh * hd;
+                const float *vts = vs + (size_t)rslot * kvd / 32 +
                                    (size_t)(kvh * hd) / 32;
                 float a = s->att[t];
                 /* Convert, two multiplies and an add per element. */
@@ -2232,10 +2276,11 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                 } else {
 #endif /* LZ_ATTN_FIXED & 2 */
                 memset(s->wsum_lo, 0, (size_t)hd * sizeof(float));
-                for (t = 0; t <= pos; t++) {
+                for (t = 0, rslot = kv_slot(s, 0); t <= pos;
+                     t++, rslot = kv_slot_next(s, rslot)) {
                     if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
-                    const int8_t *vt = vc_lo + (size_t)kv_slot(s, t) * kvd + (size_t)kvh * hd;
-                    const float *vts = vs + (size_t)kv_slot(s, t) * kvd / 32 +
+                    const int8_t *vt = vc_lo + (size_t)rslot * kvd + (size_t)kvh * hd;
+                    const float *vts = vs + (size_t)rslot * kvd / 32 +
                                        (size_t)(kvh * hd) / 32;
                     float a = s->att[t];
                     /* Same shape as the wsum loop above: convert, two
