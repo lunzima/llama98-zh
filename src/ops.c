@@ -1334,8 +1334,53 @@ long long lz_epi_mac(const int32_t *a, const int32_t *m, int n);
     parm [esi] [edi] [ecx]              \
     value [edx eax]                     \
     modify [eax ebx ecx edx esi edi 8087];
+/* int16-multiplier twin, for a caller whose m plane is int16 and who
+   would otherwise widen it into a scratch buffer first. epi_q41_join
+   was that caller: its widening loop was the third-hottest branch in the
+   engine (gcov -b -c, kmr20/zh, 603 tokens: 145,723,392 evaluations,
+   minority arm 41.9%, because ng is 2 and a two-iteration loop's
+   back-edge is a coinflip to a not-taken default), and it also cost
+   241k copies a token and a global buffer that existed only to hold
+   them.
+
+   IDENTICAL VALUES, not merely close: the widen was exact and the
+   accumulator is int64 either way, so this computes the same sum the
+   copy-then-mac did. Verified byte for byte on both fixtures.
+
+   The asm differs from its int32 sibling in two instructions - movsx
+   instead of mov, and add edi,2 instead of 4. The label is L1i rather
+   than L1 because two pragma-aux bodies in one translation unit must
+   not both define L1. */
+long long lz_epi_mac_i16(const int32_t *a, const int16_t *m, int n);
+#pragma aux lz_epi_mac_i16 =            \
+    "push ebp"                          \
+    "xor ebx,ebx"                       \
+    "xor ebp,ebp"                       \
+    "L1i:"                              \
+    "mov eax,[esi]"                     \
+    "movsx edx,word ptr [edi]"          \
+    "imul edx"                          \
+    "add ebx,eax"                       \
+    "adc ebp,edx"                       \
+    "add esi,4"                         \
+    "add edi,2"                         \
+    "dec ecx"                           \
+    "jnz L1i"                           \
+    "mov eax,ebx"                       \
+    "mov edx,ebp"                       \
+    "pop ebp"                           \
+    parm [esi] [edi] [ecx]              \
+    value [edx eax]                     \
+    modify [eax ebx ecx edx esi edi 8087];
 #else
 static long long lz_epi_mac(const int32_t *a, const int32_t *m, int n) {
+    long long s = 0;
+    int g;
+    for (g = 0; g < n; g++) s += (long long)a[g] * (long long)m[g];
+    return s;
+}
+/* See the Watcom twin above for why this exists and what it replaced. */
+static long long lz_epi_mac_i16(const int32_t *a, const int16_t *m, int n) {
     long long s = 0;
     int g;
     for (g = 0; g < n; g++) s += (long long)a[g] * (long long)m[g];
@@ -1469,7 +1514,9 @@ static int32_t g_epi_m[LZ_EPI_MAX_NG];
    the widened weight half epi_q41_fixed pairs it with. Same reason as
    the three above for being static rather than stack. */
 static int32_t g_epi_zg[LZ_BATCH_MAX][LZ_EPI_MAX_NG];
-static int32_t g_epi_zm[LZ_EPI_MAX_NG];
+/* g_epi_zm is gone with the widening copy it existed to hold - see
+   lz_epi_mac_i16. It was duplicate memory in the strict sense: a buffer
+   whose every write was read exactly once, by the next statement. */
 
 /* All tokens packed up front, because the row loop is OUTER and the
    token loop inner - packing inside would run once per (row, token) and
@@ -1711,7 +1758,8 @@ static unsigned long long epi_shr_half_u(unsigned long long umag, int rs) {
 /* Signed wrapper. The magnitude is taken by converting to unsigned FIRST
    for the LLONG_MIN reason epi_align_i16's header gives; the result is
    below 2^63 for every rs >= 1 (widest is rs == 1, where
-   (2^63 + 2^62) >> 1 < 2^63), so negating it back is representable. */
+   (2^63 + 2^62) >> 1 < 2^63), so negating it back is representable.
+
    THE SIGN WORK IS BRANCHLESS, and the reason is the TARGET rather than
    taste. Measured with gcov -b -c over kmr20/zh (603 tokens): the two
    `neg ? :` ternaries were evaluated 144,472,859 times each with the
@@ -2246,33 +2294,19 @@ float epi_q41(const int32_t *accb, const float *xsb, const float *xgb,
    share this arithmetic rather than each carry a copy of it. */
 static long long epi_q41_join(const int32_t *accb, const LZTensor *w, int row,
                               int tk, int ng, int r, int zneg, int *e_out) {
-    int e_dot, e_zero, target, g;
+    int e_dot, e_zero, target;
     long long s_dot, s_zero;
     const int16_t *zp = zneg ? w->sq : w->zq;
     s_dot = epi_fixed_raw(accb, w, row, tk, ng * r, r, &e_dot);
     s_dot = epi_shr_half(s_dot, 8);        /* exact: acc32 is the x256 */
     e_zero = -g_epi_xe[tk] - (int)(zneg ? w->sexp[row] : w->zexp[row]);
-    /* WIDENING COPY, and it is the third-hottest branch in the engine.
-       Measured (gcov -b -c, kmr20/zh, 603 tokens): this loop's back-edge
-       is evaluated 145,723,392 times with its minority arm at 41.9% -
-       ng is 2 here, so a two-iteration loop mispredicts about once per
-       call on a machine whose default is not-taken.
-
-       The loop exists ONLY because zp is int16 and lz_epi_mac takes
-       int32. It is duplicate work (241k copies a token) and a duplicate
-       buffer (g_epi_zm, a global whose whole purpose is to hold the
-       widened copy for the next statement). An int16-input twin of
-       lz_epi_mac would delete all three - the copy, the branch and the
-       buffer - and the values would not move: the widen is exact and
-       the MAC's accumulator is already int64.
-
-       NOT DONE HERE because lz_epi_mac is dual-implemented (C body plus
-       a wcc386 #pragma aux twin above), so a second entry is two hand
-       written kernels and two kernel-matrix cells under iron law 2, not
-       a signature change. Written down with its number so the next pass
-       has a located item rather than a suspicion. */
-    for (g = 0; g < ng; g++) g_epi_zm[g] = (int32_t)zp[(size_t)row * ng + g];
-    s_zero = lz_epi_mac(g_epi_zg[tk], g_epi_zm, ng);
+    /* Was a widening copy into a global scratch, then a mac. Three
+       things at once and all three measured: the engine's third-hottest
+       branch (145,723,392 evaluations at 41.9%, ng being 2), 241k
+       duplicate copies a token, and a buffer whose only purpose was to
+       carry the copy to the next statement. lz_epi_mac_i16 takes the
+       int16 plane directly; see its header. */
+    s_zero = lz_epi_mac_i16(g_epi_zg[tk], zp + (size_t)row * ng, ng);
     if (zneg) s_zero = -s_zero;
     target = e_dot > e_zero ? e_dot : e_zero;
     *e_out = target;
