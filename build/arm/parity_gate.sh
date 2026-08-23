@@ -6,7 +6,7 @@
 # Cross-builds the ARM binary (build_engine.sh), runs the SAME model
 # through it under QEMU and through an already-built native x86 binary,
 # with EVERY AUTO-resolved tier PINNED EXPLICITLY on both sides (the
-# list comes from --pin-tiers, see below), then cmp's the --dump-logits
+# list comes from --pin-tiers, see below), then cmp's the --dump-all-logits
 # output byte for byte.
 #
 # Exit codes:
@@ -223,16 +223,24 @@ fi
 trap 'rm -rf "$WORK" "${ARM_WORK:-}"' EXIT
 
 # run_arm_dump DUMPFILE ARGS... - run the ARM binary under QEMU, locally
-# or via WSL per $ARM_BACKEND, writing --dump-logits to DUMPFILE.
+# or via WSL per $ARM_BACKEND, writing --dump-all-logits to DUMPFILE.
 # DUMPFILE must be under $ARM_WORK so both sides of a wsl run can see it.
+#
+# --dump-all-logits, not --dump-logits. The latter writes the LAST
+# position and nothing else, so this gate - the only thing standing
+# between a soft-float divergence and shipping - was asserting
+# bit-identity on 1 of the fixture's 159 prediction vectors. A kernel
+# that diverged at position 3 and reconverged by the end would have
+# passed it. The run is what costs 35 minutes under QEMU; the dump is
+# 20 MB instead of 128 KB, so this is 159x the assertion for free.
 run_arm_dump() {
     local dump="$1"; shift
     if [ "$ARM_BACKEND" = wsl ]; then
         local wdump
         wdump=$(to_wsl_path "$dump")
-        wsl -e bash -lc "cd '$WSL_ROOT' && BIN='$WSL_ARM_BIN' SYSROOT=/usr/arm-linux-gnueabi bash build/arm/run_qemu.sh '$WSL_MODEL' $* --dump-logits '$wdump'"
+        wsl -e bash -lc "cd '$WSL_ROOT' && BIN='$WSL_ARM_BIN' SYSROOT=/usr/arm-linux-gnueabi bash build/arm/run_qemu.sh '$WSL_MODEL' $* --dump-all-logits '$wdump'"
     else
-        BIN="$ARM_BIN" SYSROOT="$SYSROOT" "$HERE/run_qemu.sh" "$MODEL" "$@" --dump-logits "$dump"
+        BIN="$ARM_BIN" SYSROOT="$SYSROOT" "$HERE/run_qemu.sh" "$MODEL" "$@" --dump-all-logits "$dump"
     fi
 }
 
@@ -296,7 +304,7 @@ fi
 
 echo "-- x86 native: $X86_BIN --"
 if ! "$X86_BIN" "$MODEL" $PINS \
-        --tokens "$TOKENS" --dump-logits "$X86_DUMP" \
+        --tokens "$TOKENS" --dump-all-logits "$X86_DUMP" \
         >"$WORK/x86.log" 2>&1; then
     echo "FAIL: x86 run failed:" >&2
     cat "$WORK/x86.log" >&2
@@ -332,7 +340,7 @@ if ! cmp -s "$X86_DUMP" "$ARM_DUMP"; then
     cmp "$X86_DUMP" "$ARM_DUMP" >&2
     exit 1
 fi
-echo "PASS: x86 and ARM --dump-logits are bit-identical ($X86_SZ bytes)"
+echo "PASS: x86 and ARM --dump-all-logits are bit-identical ($X86_SZ bytes)"
 
 # ---- the ARM column's own tiers ------------------------------------------
 # The pins force --kernel ref because that is the one tier BOTH sides can
