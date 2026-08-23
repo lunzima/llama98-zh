@@ -468,7 +468,29 @@ typedef struct {
        the answer is the same one, a convert at the consumer rather
        than two at the producer. kda_qc/kda_kc/kda_vc stay allocated
        and hold the same vectors whenever the int exit is off; exactly
-       one of the two is written. */
+       one of the two is written.
+
+       "EXACTLY ONE IS WRITTEN" IS MEASURED NOW, not asserted. A counter
+       on the float store in lz_causal_conv1d_step_fixed_o16 (the
+       `if (!done)` arm) reads 0 on kmr20 against 11,114,496 int writes,
+       and 16,671,744 against 0 on _armgate2 - one counter, both
+       directions, so the zero means the store did not run rather than
+       the counter not being reached.
+
+       SO THE FLOAT TRIO IS DEAD MEMORY WHENEVER THE INT EXIT FIRES, and
+       it is kept anyway: 3 x nt x dim floats is 12,288 bytes on kmr20,
+       0.33% of a 3.7 MB run state, while dropping it means allocating
+       on a predicate that is not final until conv_fixed_build runs,
+       several hundred lines after this allocation - and a NULL here is
+       a crash on the fallback path, not a wrong number. Priced and
+       declined, not overlooked.
+
+       TWO PROBES THAT CANNOT SETTLE THIS, recorded so nobody repeats
+       them: poisoning the buffers at allocation (everything here is
+       written before it is read, so the poison never survives to a
+       read - and the control, poisoning a live buffer, came back green
+       too), and nulling the pointers (control also green). Both had no
+       discriminating power. The write counter is the one that does. */
     short *kda_qc_i16, *kda_kc_i16, *kda_vc_i16;
     /* q16_0's four int16 exits (int-pipeline milestone 5), same
        one-of-the-two contract as the three above and the same NULL
