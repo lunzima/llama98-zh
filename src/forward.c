@@ -1734,13 +1734,42 @@ static void forward_attn(const LZModel *m, LZRunState *s,
     int attn_int[LZ_BATCH_MAX];
     /* int-pipeline milestone 7. v_may is the capability, v_int is "the
        int buffer holds it" and is raised only by kda_i16_proj - two
-       objects, for the reason that function's header gives.
+       objects, for the reason that function's header gives. The SubLN
+       branch below never calls it, so v_int stays 0 there and the KV
+       write reads the float row it actually got.
 
        The consumer conditions are part of the capability, not of the
        matmul: vc is the plane lz_quantize_q8_i16 would write, and
        kv_rot_v / vf / v4 each read the float row element by element, so
        any of them means the exit would have to rebuild what it declined
-       to build. Same set --attn-int refuses on. */
+       to build. Same set --attn-int refuses on.
+
+       kv_rot_v STAYS IN THAT LIST, and the reason is now measured
+       rather than assumed, because the obvious objection is right: the
+       rotation DOES have an exact integer form (widen the int16 row to
+       int32, lz_fwht_i32 in pure add/sub, out through
+       lz_quantize_q8_int), so the exit does not strictly have to rebuild
+       anything. Built and measured, kmr20, whole-sequence logit rms
+       against --kv f32 on both gate corpora:
+
+         --kv q8 --kv-rot on    zh          en
+           float rotation     7.107e-02   7.161e-02   (this code)
+           int rotation       7.296e-02   7.837e-02   +2.7% / +9.4%
+
+       WHY IT LOSES, and it is not the transform: vtmp_i16 is at ONE
+       row-wide exponent, so its error is uniform in ABSOLUTE terms,
+       while the per-32 group scale downstream is not. The Hadamard
+       conserves that error's energy and spreads it evenly, so a quiet
+       group that would have been quantized against its own small scale
+       inherits the row's average error instead. The float row has no
+       such floor to spread. The exit and the rotation are antagonistic
+       for that reason, not for want of an integer kernel.
+
+       WHAT THE REFUSAL COSTS THE GATE is real and is paid there instead:
+       on q8 the `off` arm takes this exit and the `on` arm does not, so
+       build/kv_rot_gate.sh's two arms differ in the exit as well as in
+       the rotation. That gate now prints this counter per arm and says
+       so, rather than reading the sum as the rotation's own effect. */
     int v_int = 0, v_may = 0;
     int h, d, t, tk;
 

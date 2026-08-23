@@ -513,6 +513,17 @@ esac
 # invariance (stage 11's assertion) - a QUALITY claim with a number:
 # rotating before the KV cache quantizes is supposed to reduce the
 # error, so the rotated run must land closer to the --kv f32 reference.
+# Two real corpora, whole-sequence logits, and a per-arm check that the
+# int16 exits did not move underneath the comparison; the gate's header
+# gives the three ways it has been wrong before and the measurements
+# that closed each one.
+#
+# ARM_MODEL is an F32 safetensors checkpoint, so lz_matmul_xq_i16_ok
+# refuses every int16 exit on it (v_proj, swiglu, kda gate, moe router:
+# all read 0). That is what makes the arms matched here and lets q8 take
+# the direction assertion - and it also means stages 4, 11 and 12 do not
+# exercise the int pipeline at all. Point the gate at a quantized model
+# (build/kv_rot_gate.sh <model>) to cover that side.
 # ---------------------------------------------------------------------
 echo
 echo "==== [12/16]--kv-rot quality gate ===="
