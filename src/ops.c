@@ -1349,33 +1349,24 @@ void lz_epi_prep_zero(LZTensor *w, int in_dim) {
 
 /* int32 x int32 -> int64, which C cannot ask for: `(long long)a *
    (long long)b` is 64x64 by the standard and Watcom emits `call __I8M`,
-   2.75x the cost of the one `imul r/m32` x86 has had since the 386. */
+   2.75x the cost of the one `imul r/m32` x86 has had since the 386.
+
+   In both of the kernels below, ebp is pushed and popped rather
+   than declared modified - it is the frame pointer, and the rule is
+   that modify tells the truth. imul owns edx:eax, so the two
+   accumulator halves are ebx and ebp.
+
+   THE INT32xINT32 ENTRY IS GONE. lz_epi_mac(a, m, n) took a
+   pre-widened int32 plane, and both of its callers stopped building
+   one: the zero term takes lz_epi_mac_i16 and the dot takes
+   lz_epi_mac_grp, each reading the int16 plane directly. Its
+   derivation is not gone with it - the int64 accumulator bound the two
+   comments in ops_matmul.c refer to is the same bound, computed the
+   same way, and the two survivors inherit it unchanged: n products of
+   an int32 accumulator by an int16, summed at 64 bits. What the entry
+   contributed beyond that was the widening pass and the buffer to hold
+   it, which is exactly what removing it removed. */
 #if defined(__WATCOMC__)
-long long lz_epi_mac(const int32_t *a, const int32_t *m, int n);
-/* ebp is pushed and popped rather than declared modified - it is the
-   frame pointer, and the rule is that modify tells
-   the truth. imul owns edx:eax, so the two accumulator halves are ebx
-   and ebp. */
-#pragma aux lz_epi_mac =                \
-    "push ebp"                          \
-    "xor ebx,ebx"                       \
-    "xor ebp,ebp"                       \
-    "L1:"                               \
-    "mov eax,[esi]"                     \
-    "mov edx,[edi]"                     \
-    "imul edx"                          \
-    "add ebx,eax"                       \
-    "adc ebp,edx"                       \
-    "add esi,4"                         \
-    "add edi,4"                         \
-    "dec ecx"                           \
-    "jnz L1"                            \
-    "mov eax,ebx"                       \
-    "mov edx,ebp"                       \
-    "pop ebp"                           \
-    parm [esi] [edi] [ecx]              \
-    value [edx eax]                     \
-    modify [eax ebx ecx edx esi edi 8087];
 /* int16-multiplier twin, for a caller whose m plane is int16 and who
    would otherwise widen it into a scratch buffer first. epi_q41_join
    was that caller: its widening loop was the third-hottest branch in the
@@ -1466,12 +1457,6 @@ long long lz_epi_mac_i16(const int32_t *a, const int16_t *m, int n);
     value [edx eax]                     \
     modify [eax ebx ecx edx esi edi 8087];
 #else
-static long long lz_epi_mac(const int32_t *a, const int32_t *m, int n) {
-    long long s = 0;
-    int g;
-    for (g = 0; g < n; g++) s += (long long)a[g] * (long long)m[g];
-    return s;
-}
 /* See the Watcom twin above for the register argument this shape
    satisfies; here it is just the loop. */
 static long long lz_epi_mac_grp(const int32_t *a, const int16_t *xq,
