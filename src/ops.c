@@ -3500,17 +3500,18 @@ static const char km_why_f32mm_mmx[] =
     "impossible: MMX is integer-only and this is a float multiply-add. "
     "SSE1 is the first tier that can express it";
 static const char km_why_f32mm_arma[] =
-    "DECLINED on a measurement of the WHOLE cell, written with the "
-    "techniques __aeabi_fmul itself uses (pre-scaled significands so "
-    "UMULL's high word IS the result, SBC-folded normalisation, "
-    "ADC-folded rounding). Fused, no spills, no declines: 86.5 against "
-    "the 74.0 chain (mode 25 against 20, .prof/arm_chain_count.sh). The "
-    "premise was wrong, not the code - the pack/unpack round trip the "
-    "fusion targets costs the same 8 either way, because the unpacked "
-    "form has to renormalise a significand that rounds to 2^24. What "
-    "fusion really buys is two call/return pairs, 4, against libgcc's "
-    "__addsf3 averaging 43.0 WITH early-outs where a straight-line hand "
-    "adder pays 45 always. docs/arm-asm-audit.md G2";
+    "WINNABLE and not yet written as a leaf, which is the only shape "
+    "that keeps the win. The fused core, with __addsf3's algorithm "
+    "(signed significands so one ADDS with an inline ASR is both "
+    "effective operations, the shifted-out bits kept whole rather than "
+    "compressed to a sticky, cmp #25 answering the far-apart case), "
+    "measures 61.0 against the 74.0 chain - mode 26 against 20, "
+    ".prof/arm_chain_count.sh, verified over 21.8M in-domain cases by "
+    ".prof/verify_fmac_core.c. A per-element primitive gives that back "
+    "in decline wrapper (mode 25, 86.5); a leaf pays the scan once and "
+    "lands near 67. Two earlier reasons here were about my own code "
+    "rather than the cell: an unread adder, and a wrapper a leaf does "
+    "not pay. docs/arm-asm-audit.md G2";
 static const char km_why_f32mm_g128[] =
     "this column is the 128-ELEMENT quantization group; lz_matmul's "
     "unit of work is a whole weight ROW against a whole activation "
@@ -3566,7 +3567,7 @@ static const LZKmReg km_reg[LZ_KM_NUNIT * LZ_KM_NCOL] = {
    deleted and not a single cell would change. */
 /* fwhti*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_fwhti_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_fwhti_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM),       KM_I(km_why_fwht_g128),
 /* fwhtf*/ KM_H(KM_ALL), KM_I(km_why_fwhtf_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_I(km_why_fwhtf_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM),          KM_I(km_why_fwht_g128),
-/* f32mm*/ KM_H(KM_ALL), KM_I(km_why_f32mm_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_I(km_why_f32mm_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_D(km_why_f32mm_arma), KM_I(km_why_f32mm_g128)
+/* f32mm*/ KM_H(KM_ALL), KM_I(km_why_f32mm_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_I(km_why_f32mm_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_T(km_why_f32mm_arma), KM_I(km_why_f32mm_g128)
 };
 
 #if defined(__WATCOMC__)

@@ -165,6 +165,10 @@ static __inline__ int spw_fmul_arm(uint32_t ua, uint32_t ub,
 }
 #endif /* PRIM_MODE == 24 && LZ_ARM_PRIM_ASM */
 
+#if PRIM_MODE == 26 && defined(LZ_ARM_PRIM_ASM)
+#include "spw_fmac_core.h"
+#endif /* PRIM_MODE == 26 && LZ_ARM_PRIM_ASM */
+
 #if PRIM_MODE == 25 && defined(LZ_ARM_PRIM_ASM)
 /* f32mm armA's cell, fused: fl(acc + fl(w*x)) with the product never
  * packed to memory and never handed to a second special-case scan.
@@ -578,6 +582,16 @@ int main(int argc, char **argv) {
 #else
         u.f = SP_ARG[k] + g_mulc;          g_sink = u.i;
 #endif
+#elif PRIM_MODE == 26
+        /* The fused core with no decline wrapper - an upper bound on
+         * what a leaf kernel can reach, against mode 20. */
+        {
+            union { float f; uint32_t u; } bw, bx, bc;
+            bw.f = SP_ARG[k];
+            bx.f = g_mulc;
+            bc.f = g_facc;
+            g_sink = (int32_t)spw_fmac_core(bc.u, bw.u, bx.u);
+        }
 #elif PRIM_MODE == 25
         /* Mode 20's MAC through the fused cell, fallback included.
          * 25 against 20 is f32mm armA measured rather than projected. */
