@@ -1672,13 +1672,23 @@ static long long epi_fixed_raw(const int32_t *accb, const LZTensor *w,
        differs - 56,362,522 of 78,905,344 bytes on zh - so the frame
        offset was never the remaining problem.
 
-       THE BUG IS `ng / r` TRUNCATING. The flat loop walks g over ALL of
-       ng and indexes ww[g / r], which reaches ceil(ng / r) groups; the
-       fused loop walks floor(ng / r) groups of exactly r and drops the
-       tail whenever r does not divide ng. A fused version has to derive
-       its bound the same way the flat one does, or carry the partial
-       group explicitly - it cannot assume the division is exact just
-       because the pointer arithmetic above it does.
+       AND `ng / r` TRUNCATING IS NOT THE BUG EITHER, though it was the
+       obvious next reading. Rewriting the fused loop to walk g to ng and
+       clip the last group - so a partial tail cannot be dropped - gives
+       byte counts IDENTICAL to the version without it (56,362,522 and
+       61,082,055 again, not merely similar). r divides ng here; the tail
+       never existed.
+
+       WHAT THAT IDENTITY SAYS, and it is the useful part: two different
+       loop shapes produced exactly the same divergence, so the cause is
+       in what BOTH attempts changed, not in how either one iterated.
+       Both replaced the same thing - the g_epi_m write plus
+       lz_epi_mac's read - so the next reading to test is whether that
+       pair is doing something other than `sum accb[g] * (xq[g] *
+       ww[g/r])`, at one of the three call sites rather than in general
+       (epi_fixed_raw is called with `ng` at two of them and `ng * r` at
+       the third, so "ng" does not mean the same count everywhere the
+       function is entered).
 
        Six readings of this one obstacle - a matrix cell, the divide,
        the register count, the parm syntax, the cleanup convention, the
