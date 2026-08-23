@@ -312,6 +312,13 @@ $dm_with_fwd"
 # and is why the switch carries a positive control (lz_debug_fdiv_recip,
 # 713,568 taken on kmr20/zh against 0 in the off arm): a logits cmp
 # reads rc=0 whichever arm compiled, so it cannot tell them apart.
+# LZ_Q8R_BITS is q8_round done on the bit pattern instead of through the
+# magic add (ops_quant.h). Same disposition as LZ_FDIV_RECIP and for the
+# same reason - default off where an FPU makes the add three cycles, on
+# under -DLZ_NO_FPU - so the non-default arm to prove here is 1. Also
+# bit-identical both ways, so it carries the same kind of positive
+# control: lz_debug_q8r_bits, 59,316,632 taken and 0 declined on
+# kmr20/zh against 0 taken in the off arm.
 # LZ_GATE_SIG_I and LZ_GATE_QW are the gated norm's two savings
 # (ops_norm.c), TWO switches and not one because they are two different
 # removals in one loop and neither number could be rebuilt from a single
@@ -338,7 +345,7 @@ $dm_with_fwd"
 # execute, =0 reproduces 981,938 exactly.
 # The _ES exponents are calibration constants, not switches, and are
 # excluded for the same reason LZ_CONV_ES is.
-SWITCHES="LZ_GDN_FIXED=0 LZ_GDN_STATE_2PLANE=0 LZ_ATTN_FIXED=0 LZ_CONV_FIXED=0 LZ_NORM_FIXED=0 LZ_EPI_FIXED=0 LZ_SSE2_GROUP=0 LZ_Q8_MIN_SCALE=0.0f LZ_EXACT_MATH=1 LZ_CPUID_NOCACHE=1 LZ_NO_FPU=1 LZ_KV_2PLANE=1 LZ_GDN_STATE_F32=1 LZ_BATCH_MAX=1 LZ_SPEC_K=1 LZ_PF_DIST=0 LZ_Q8R_FORCE_SSE=1 LZ_P2_FORCE_MMX=1 LZ_BVEC_I16=0 LZ_MOEGATE_I16=0 LZ_KLAT_I16=0 LZ_KGATE_I16=0 LZ_KGATE_EXP_I=0 LZ_MLAT_I16=0 LZ_MLAT_REUSE=0 LZ_VPROJ_I16=0 LZ_Q8I16_INT=0 LZ_Q8INT_INT=0 LZ_SWIGLU_I16=0 LZ_CONV_SIG_I=0 LZ_CONVO_I16=0 LZ_GATE_SIG_I=0 LZ_GATE_QW=0 LZ_SOFTPLUS_POLY=0 LZ_FDIV_RECIP=1"
+SWITCHES="LZ_GDN_FIXED=0 LZ_GDN_STATE_2PLANE=0 LZ_ATTN_FIXED=0 LZ_CONV_FIXED=0 LZ_NORM_FIXED=0 LZ_EPI_FIXED=0 LZ_SSE2_GROUP=0 LZ_Q8_MIN_SCALE=0.0f LZ_EXACT_MATH=1 LZ_CPUID_NOCACHE=1 LZ_NO_FPU=1 LZ_KV_2PLANE=1 LZ_GDN_STATE_F32=1 LZ_BATCH_MAX=1 LZ_SPEC_K=1 LZ_PF_DIST=0 LZ_Q8R_FORCE_SSE=1 LZ_P2_FORCE_MMX=1 LZ_BVEC_I16=0 LZ_MOEGATE_I16=0 LZ_KLAT_I16=0 LZ_KGATE_I16=0 LZ_KGATE_EXP_I=0 LZ_MLAT_I16=0 LZ_MLAT_REUSE=0 LZ_VPROJ_I16=0 LZ_Q8I16_INT=0 LZ_Q8INT_INT=0 LZ_SWIGLU_I16=0 LZ_CONV_SIG_I=0 LZ_CONVO_I16=0 LZ_GATE_SIG_I=0 LZ_GATE_QW=0 LZ_SOFTPLUS_POLY=0 LZ_FDIV_RECIP=1 LZ_Q8R_BITS=1"
 
 for entry in $SWITCHES; do
     name="${entry%%=*}"

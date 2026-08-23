@@ -1155,6 +1155,14 @@ static uint32_t fdr_recip47(uint32_t mb) {
 lz_i64 lz_debug_fdiv_recip;
 lz_i64 lz_debug_fdiv_decl;
 
+/* Same shape, same reason, for LZ_Q8R_BITS: its two arms are also
+   bit-identical, so nothing in a logits cmp separates "the integer
+   rounding ran" from "the switch compiled it out". Defined
+   unconditionally - a counter that only exists in the arm it counts
+   cannot report zero, and zero is the answer that matters. */
+lz_i64 lz_debug_q8r_bits;
+lz_i64 lz_debug_q8r_decl;
+
 float lz_fdiv_recip(float a, float b) {
     union { float f; uint32_t u; } ba, bb, br;
     uint32_t ea, eb, ma, mb, sg, R, Q0;

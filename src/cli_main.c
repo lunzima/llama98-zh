@@ -136,6 +136,10 @@ extern lz_i64 lz_debug_mlat_quant;
    not all falling through to the divide anyway. */
 extern lz_i64 lz_debug_fdiv_recip;
 extern lz_i64 lz_debug_fdiv_decl;
+/* LZ_Q8R_BITS, the same shape: bit-identical arms, so these two are
+   what says the integer rounding ran rather than compiled away. */
+extern lz_i64 lz_debug_q8r_bits;
+extern lz_i64 lz_debug_q8r_decl;
 /* The KDA decay gate's integer chain, forward.c. Elements whose sigmoid
    and exp were both reached through folded integer coordinates; 0 under
    -DLZ_KGATE_EXP_I=0 and 0 with the scalar tier off. The two exponents
@@ -1770,6 +1774,8 @@ int main(int argc, char **argv) {
         printf("conv sig int   %lld channel-steps\n", lz_debug_conv_sig_i);
         printf("fdiv recip     %lld taken  %lld declined\n",
                lz_debug_fdiv_recip, lz_debug_fdiv_decl);
+        printf("q8r bits       %lld taken  %lld declined\n",
+               lz_debug_q8r_bits, lz_debug_q8r_decl);
         printf("conv o16 int   %lld elements\n", lz_debug_convo_i16);
         printf("conv o16 clamp %ld elements%s\n", lz_conv_o_clamped,
                lz_conv_o_clamped ? "  <- LZ_CONVO_ES is wrong for this "

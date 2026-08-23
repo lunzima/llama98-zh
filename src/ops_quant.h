@@ -28,6 +28,11 @@ extern int g_kernel;
 /* 2^e by integer manipulation of the exponent field. */
 float pow2f(int e);
 
+/* Positive controls for LZ_Q8R_BITS, defined in ops_quant.c. Both arms
+   of that switch are bit-identical, so these are what separate them. */
+extern lz_i64 lz_debug_q8r_bits;
+extern lz_i64 lz_debug_q8r_decl;
+
 /* Round-to-nearest (IEEE default round-half-to-even) via a magic-number
    add.
 
@@ -68,6 +73,63 @@ float pow2f(int e);
    and the g_kernel load that cannot be hoisted out of a caller's loop
    are the rest. Same body, same numbers - `static` in a header is what
    this codebase already does for lz_i32f, and for the same reason. */
+/* The same rounding as the magic add, done on the bit pattern.
+ *
+ * This is the C statement of what lz_q8_round_pow2_arm_asm does, and it
+ * exists for two reasons. One: the assembly is reachable only on ARM and
+ * only under --kernel arm-asm, while every target whose floats are
+ * software pays the same __aeabi_fadd - a 386 with no 387, a MIPS with
+ * no FPU. Two: a hand-written kernel whose rule is stated nowhere in C
+ * is a rule with one witness.
+ *
+ * Cost, measured on armv5te soft-float: this reaches its return in
+ * about 21 instructions with no call, against the magic arm's 7 plus a
+ * branch into __addsf3, whose static size in that libgcc is 100
+ * instructions (0x190 bytes). What __addsf3 actually executes for THIS
+ * operand pattern - one large fixed addend, one small - is not measured
+ * here and is shorter than its size; the number that is certain is that
+ * the call goes away.
+ *
+ * DECLINES, and the decline is not a domain check. Outside |v| < 2^22
+ * the magic add is unreadable and this returns 0, which is the stated
+ * contract. It also declines when the result is exactly +2^22: the sum
+ * reaches 2^24 there, its low 23 bits are zero, and the magic arm
+ * answers -2^22. This arm has to MATCH that, not be right about it, so
+ * it hands those two inputs (4194303.5 and 4194303.75) back.
+ *
+ * Verified against the magic arm over every one of the 2^32 bit
+ * patterns: 2,499,805,182 agree, 1,795,162,114 decline, 0 differ. */
+LZ_MAYBE_UNUSED static int lz_q8_round_bits(uint32_t u, int k, int32_t *out) {
+    uint32_t m, t;
+    int32_t r;
+    int e = (int)((u >> 23) & 0xFFu) + k;
+    if (e >= 149) return 0;                 /* |v| >= 2^22, or inf/nan */
+    e = 150 - e;                            /* bits to drop, >= 2 */
+    if (e >= 25) { *out = 0; return 1; }    /* |v| < 0.5 */
+    m = (u & 0x00FFFFFFu) | 0x00800000u;    /* mantissa, implicit bit set */
+    r = (int32_t)(m >> e);
+    t = m << (32 - e);                      /* the dropped bits, aligned */
+    if (t > 0x80000000u) r++;
+    else if (t == 0x80000000u) r += (r & 1);  /* half to even */
+    if (u & 0x80000000u) r = -r;
+    if (r == 0x400000) return 0;
+    *out = r;
+    return 1;
+}
+
+/* Default on only where floats are software, the same disposition
+   LZ_FDIV_RECIP takes and for the same reason: on a host with an FPU the
+   magic add is three cycles and the integer sequence is not obviously a
+   win, so it is available there and not chosen there. Bit-identical
+   either arm, which is what makes the switch checkable by cmp. */
+#ifndef LZ_Q8R_BITS
+#if defined(LZ_NO_FPU)
+#define LZ_Q8R_BITS 1
+#else
+#define LZ_Q8R_BITS 0
+#endif
+#endif /* LZ_Q8R_BITS */
+
 LZ_MAYBE_UNUSED static int q8_round(float qv) {
     union { float f; uint32_t u; } t;
 #if defined(LZ_ARM_PRIM_ASM)
@@ -77,6 +139,14 @@ LZ_MAYBE_UNUSED static int q8_round(float qv) {
         if (lz_q8_round_pow2_arm_asm(t.u, 0, &r)) return (int)r;
     }
 #endif /* LZ_ARM_PRIM_ASM */
+#if LZ_Q8R_BITS
+    {
+        int32_t r;
+        t.f = qv;
+        if (lz_q8_round_bits(t.u, 0, &r)) { lz_debug_q8r_bits++; return (int)r; }
+        lz_debug_q8r_decl++;
+    }
+#endif /* LZ_Q8R_BITS */
     t.f = qv + 12582912.0f;                 /* 1.5 * 2^23 */
     return (int)(t.u & 0x007FFFFFu) - 0x00400000;
 }
