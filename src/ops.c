@@ -1351,6 +1351,57 @@ long long lz_epi_mac(const int32_t *a, const int32_t *m, int n);
    instead of mov, and add edi,2 instead of 4. The label is L1i rather
    than L1 because two pragma-aux bodies in one translation unit must
    not both define L1. */
+/* One GROUP of the fused epilogue MAC: sum a[i] * (xq[i] * w) over n
+   elements, w being the group's shared int16 weight. Lets
+   epi_fixed_raw drop the g_epi_m plane it used to materialise.
+
+   w RIDES THE STACK because the body has no register left for it: esi
+   (a), edi (xq), ecx (the counter), ebx/ebp (the int64 accumulator) and
+   edx:eax (imul's fixed pair) is already seven. The 386's two-operand
+   `imul r32, r/m32` takes a memory operand and leaves edx alone, so w
+   stays where the caller put it: after `push ebp` the frame is
+   [esp]=old ebp, [esp+4]=w. NO RETURN ADDRESS between them - wcc386
+   INLINES a pragma-aux body, so there is no call and nothing to return
+   to. Deriving the offset as "old ebp, return address, then the
+   argument" gives [esp+8], assembles clean, and reads a saved register:
+   the logits came out wrong on both fixtures until a probe
+   (.prof/wstackparm.c) printed the sentinel at +4.
+
+   `parm caller [esi] [edi] [ecx]` - THREE registers for FOUR arguments,
+   and the cleanup named. Both halves were found by running it. Listing
+   an explicit empty slot (`[esi] [edi] [ecx] []`) is not how you ask
+   for a stack argument: wcc386 takes it without complaint and hands
+   every register the LAST argument, which a probe caught by finding the
+   same sentinel in esi, edi and ecx with the return address gone. And
+   without `caller` the build is still 0 errors and the binary still
+   crashes, because the callee's plain `ret` leaves the argument behind.
+
+   Same per-element product and the same ascending order as the flat
+   loop it replaces. NOT the same as hoisting w out of the sum - that
+   reassociates the reduction and changes what can overflow; this does
+   not. */
+long long lz_epi_mac_grp(const int32_t *a, const int16_t *xq, int n, int32_t w);
+#pragma aux lz_epi_mac_grp =            \
+    "push ebp"                          \
+    "xor ebx,ebx"                       \
+    "xor ebp,ebp"                       \
+    "Lgrp:"                             \
+    "movsx eax,word ptr [edi]"          \
+    "imul eax,dword ptr [esp+4]"        \
+    "mov edx,[esi]"                     \
+    "imul edx"                          \
+    "add ebx,eax"                       \
+    "adc ebp,edx"                       \
+    "add esi,4"                         \
+    "add edi,2"                         \
+    "dec ecx"                           \
+    "jnz Lgrp"                          \
+    "mov eax,ebx"                       \
+    "mov edx,ebp"                       \
+    "pop ebp"                           \
+    parm caller [esi] [edi] [ecx]       \
+    value [edx eax]                     \
+    modify [eax ebx ecx edx esi edi 8087];
 long long lz_epi_mac_i16(const int32_t *a, const int16_t *m, int n);
 #pragma aux lz_epi_mac_i16 =            \
     "push ebp"                          \
@@ -1377,6 +1428,16 @@ static long long lz_epi_mac(const int32_t *a, const int32_t *m, int n) {
     long long s = 0;
     int g;
     for (g = 0; g < n; g++) s += (long long)a[g] * (long long)m[g];
+    return s;
+}
+/* See the Watcom twin above for the register argument this shape
+   satisfies; here it is just the loop. */
+static long long lz_epi_mac_grp(const int32_t *a, const int16_t *xq,
+                                int n, int32_t w) {
+    long long s = 0;
+    int i;
+    for (i = 0; i < n; i++)
+        s += (long long)a[i] * (long long)((int32_t)xq[i] * w);
     return s;
 }
 /* See the Watcom twin above for why this exists and what it replaced. */
@@ -1509,7 +1570,9 @@ static long long lz_epi_mac_i16(const int32_t *a, const int16_t *m, int n) {
    reach here. */
 static int16_t g_epi_xq[LZ_BATCH_MAX][LZ_EPI_MAX_NG];
 static int     g_epi_xe[LZ_BATCH_MAX];
-static int32_t g_epi_m[LZ_EPI_MAX_NG];
+/* g_epi_m is gone with the pass that filled it - see lz_epi_mac_grp.
+   Like g_epi_zm before it, every element was written once and read once,
+   by the very next statement. */
 /* The zero term's activation half in integer form (epi_zero_act_int) and
    the widened weight half epi_q41_fixed pairs it with. Same reason as
    the three above for being static rather than stack. */
@@ -1606,7 +1669,8 @@ void epi_zero_act_int(const int8_t *xq, int in_dim, int ng, int r, int nt) {
 static long long epi_fixed_raw(const int32_t *accb, const LZTensor *w,
                                int row, int tk, int ng, int r, int *e_out) {
     const int16_t *ww = w->sq + (size_t)row * (ng / r);
-    int g;
+    long long s = 0;
+    int g = 0, j = 0;
     /* TWO PASSES OVER ng WHERE ONE WOULD DO, and they are the census's
        top two branches: this loop and lz_epi_mac's are 1,135,588,896
        evaluations each (gcov -b -c, kmr20/zh, 603 tokens). g_epi_m is
@@ -1695,12 +1759,20 @@ static long long epi_fixed_raw(const int32_t *accb, const LZTensor *w,
        loop bound - and every single one was settled by running
        something. None was settled by reasoning, including the ones that
        sounded certain. */
-    for (g = 0; g < ng; g++)
-        g_epi_m[g] = (int32_t)g_epi_xq[tk][g] * (int32_t)ww[g / r];
+    /* The bound is derived the way the flat loop derived it - walk g to
+       ng and clip the last group - rather than assuming r divides ng.
+       It does on every checkpoint measured here, and the clip costs one
+       compare per group; assuming it would be an invariant nothing
+       states. */
+    while (g < ng) {
+        int n = ng - g; if (n > r) n = r;
+        s += lz_epi_mac_grp(accb + g, g_epi_xq[tk] + g, n, (int32_t)ww[j]);
+        g += n; j++;
+    }
     /* The exponent is per ROW, so a libm call here would run once per
        output element and cost more than the epilogue it replaces. */
     *e_out = -g_epi_xe[tk] - (int)w->sexp[row];  /* int arithmetic, no f32 work */
-    return lz_epi_mac(accb, g_epi_m, ng);
+    return s;
 }
 
 /* How much the row kernels feeding this epilogue family scale their
