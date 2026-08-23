@@ -1822,6 +1822,17 @@ static void forward_attn(const LZModel *m, LZRunState *s,
         float *ktt = s->ktmp + (size_t)tk * kvd;
         float *vtt = s->vtmp + (size_t)tk * kvd;
         int pos = pos0 + tk;
+        /* The cache row this token writes to. The writes below asked for
+           it eighteen times with the same argument, and kv_slot ends in
+           an integer modulo by a runtime value - which the compiler
+           cannot always fold, since lz_gdn_quantize_2p and memcpy sit
+           between the calls and it has no way to know they leave *s
+           alone. It folds MOST of them: hoisting removes six idiv from
+           this translation unit, not seventeen, so the other twelve were
+           already gone. Six is still worth it on the in-order cores in
+           the target family, where idiv r/m32 is around forty cycles and
+           does not pipeline. */
+        int wslot = kv_slot(s, pos);
         /* q_proj output is laid out PER HEAD as [q(hd), gate(hd)], not
            [all q][all gate]. The reference does view(..., n_heads, hd*2)
            then chunks along the last dim; treating it as two contiguous
@@ -1859,49 +1870,49 @@ static void forward_attn(const LZModel *m, LZRunState *s,
            the low plane cannot perturb the high one. fc_site -1: this is
            the KV cache write, not the recurrence write-back, and has no
            census site of its own yet. */
-        if (kc) lz_gdn_quantize_2p(ktt, kvd, 32, kc + (size_t)kv_slot(s, pos) * kvd,
-                                   kc_lo + (size_t)kv_slot(s, pos) * kvd,
-                                   ks + (size_t)kv_slot(s, pos) * kvd / 32, -1);
-        if (vc) lz_gdn_quantize_2p(vtt, kvd, 32, vc + (size_t)kv_slot(s, pos) * kvd,
-                                   vc_lo + (size_t)kv_slot(s, pos) * kvd,
-                                   vs + (size_t)kv_slot(s, pos) * kvd / 32, -1);
+        if (kc) lz_gdn_quantize_2p(ktt, kvd, 32, kc + (size_t)wslot * kvd,
+                                   kc_lo + (size_t)wslot * kvd,
+                                   ks + (size_t)wslot * kvd / 32, -1);
+        if (vc) lz_gdn_quantize_2p(vtt, kvd, 32, vc + (size_t)wslot * kvd,
+                                   vc_lo + (size_t)wslot * kvd,
+                                   vs + (size_t)wslot * kvd / 32, -1);
 #else
-        if (kc) lz_quantize_q8(ktt, kvd, 32, kc + (size_t)kv_slot(s, pos) * kvd,
-                               ks + (size_t)kv_slot(s, pos) * kvd / 32);
+        if (kc) lz_quantize_q8(ktt, kvd, 32, kc + (size_t)wslot * kvd,
+                               ks + (size_t)wslot * kvd / 32);
         /* v_int says the projection left this token in vtmp_i16 at
            LZ_VPROJ_ES and vtt holds nothing - the int16 twin of the
            quantize below, folding 2^-ES into the stored group scale. */
         if (v_int) {
             lz_quantize_q8_i16(s->vtmp_i16 + (size_t)tk * kvd, kvd, 32,
                                pow2f(-LZ_VPROJ_ES),
-                               vc + (size_t)kv_slot(s, pos) * kvd,
-                               vs + (size_t)kv_slot(s, pos) * kvd / 32);
+                               vc + (size_t)wslot * kvd,
+                               vs + (size_t)wslot * kvd / 32);
             lz_debug_vproj_i16 += kvd;
         } else if (vc) {
-            lz_quantize_q8(vtt, kvd, 32, vc + (size_t)kv_slot(s, pos) * kvd,
-                           vs + (size_t)kv_slot(s, pos) * kvd / 32);
+            lz_quantize_q8(vtt, kvd, 32, vc + (size_t)wslot * kvd,
+                           vs + (size_t)wslot * kvd / 32);
         }
 #endif /* LZ_KV_2PLANE */
         /* Reference arm: the same post-QK-norm, post-RoPE (and, when
            enabled, post-Hadamard) vectors the Q8 path just quantized,
            kept exactly. Written alongside rather than instead of the Q8
            planes so the two differ ONLY in the cache format. */
-        if (kf) memcpy(kf + (size_t)kv_slot(s, pos) * kvd, ktt, (size_t)kvd * sizeof(float));
-        if (vf) memcpy(vf + (size_t)kv_slot(s, pos) * kvd, vtt, (size_t)kvd * sizeof(float));
+        if (kf) memcpy(kf + (size_t)wslot * kvd, ktt, (size_t)kvd * sizeof(float));
+        if (vf) memcpy(vf + (size_t)wslot * kvd, vtt, (size_t)kvd * sizeof(float));
         /* Per HEAD, not per row: the norm that gets split off has to be
            the norm of the vector the attention actually dots against,
            and that is one head's worth. */
         if (v4)
             for (h = 0; h < nkv; h++)
                 lz_kv4_quantize(vtt + (size_t)h * hd, hd,
-                                v4 + (size_t)kv_slot(s, pos) * kvd / 2 + (size_t)h * (hd / 2),
-                                vs4 + (size_t)kv_slot(s, pos) * nkv + h);
+                                v4 + (size_t)wslot * kvd / 2 + (size_t)h * (hd / 2),
+                                vs4 + (size_t)wslot * nkv + h);
         if (k4) {
             for (h = 0; h < nkv; h++) {
                 {
-                    unsigned char *kc4 = k4 + (size_t)kv_slot(s, pos) * kvd / 2 +
+                    unsigned char *kc4 = k4 + (size_t)wslot * kvd / 2 +
                                          (size_t)h * (hd / 2);
-                    float *ksc = ks4 + (size_t)kv_slot(s, pos) * nkv + h;
+                    float *ksc = ks4 + (size_t)wslot * nkv + h;
                     lz_kv4_quantize(ktt + (size_t)h * hd, hd, kc4, ksc);
                 }
             }
