@@ -1011,8 +1011,12 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
         int8_t *lw = lo + (size_t)g * gs;
         float inv;
         fast = q8_group_scale(grp, gs, &s[g], &inv);
-        /* Paid once per group regardless of which branch below runs. */
-        if ((unsigned)fc_site < (unsigned)LZ_FC_N) LZ_FCX(fc_site, 1, 0, 1, 0, 0);  /* amax*(1/127) mul, 127/amax div */
+        /* Paid once per group regardless of which branch below runs:
+           amax*(1/127) mul, 127/amax div, and q8_group_scale's three
+           float comparisons (see lz_quantize_q8's identical bill in
+           ops.c for which three, and for why the amax scan is not one
+           of them). */
+        if ((unsigned)fc_site < (unsigned)LZ_FC_N) LZ_FCX(fc_site, 1, 0, 1, 0, 3);
         if (!fast) {
             /* Same shape as the fast&&tier==0 branch below (that one
                multiplies instead of dividing), same count. */
@@ -1934,15 +1938,46 @@ static void gdn_p2_fixed_rows(const int8_t *sq_in, int8_t *sq_out,
        function returning float from an int accumulator, and this is a
        void function quantizing a float vector.
 
-       The amax scan itself stays unbilled, which is the census's
-       standing convention (compares and sign masks are not counted) and
-       not an omission here - see the note on that convention in ops.h. */
+       THE AMAX SCAN RUNS IN THE INTEGER DOMAIN, and used not to. It was
+       two float comparisons per element - `delta[vv] < 0.0f` for the
+       sign and `a > amd` for the max - which on a soft-float target is
+       two `bl __aeabi_fcmpXX` at ~25 instructions each, 12,480 of them
+       per token on kmr20. It was also UNBILLED, under the census's
+       "compares are not counted" convention, so the largest row in the
+       table was hiding its second-largest per-element cost.
+
+       Same IEEE-754 trick q8_amax (ops_quant.c) and lz_softmax's max
+       scan (ops_norm.c) already use, and the reason it is exact here is
+       the same: masking off the sign bit gives the magnitude, and for
+       magnitudes the unsigned bit-pattern order IS the numeric order,
+       so this is a permutation of the same total order rather than an
+       approximation. It owes the float loop bit-identity and delivers
+       it. NaN cannot reach here - delta is a finite recurrence delta -
+       and a negative zero masks to +0, which the float form also
+       treated as 0.
+
+       BILLED AS ZERO, and that is not the old convention sneaking back.
+       This is the f32 census; an integer compare is not an f32
+       operation, and billing one would make the cmp column
+       inhomogeneous - some entries costing 25 instructions and some
+       costing 1, summed into one number. The loop is not hidden by
+       being unbilled any more, it is empty of float work. What it cost
+       before is measured, not estimated: ng*32 is 6,144 elements per
+       token on kmr20/zh, so 12,288 __aeabi_fcmp at ~25 instructions,
+       307,200 per token, against 25.6M for the whole token - 1.2%,
+       removed for 6,144 ands and 6,144 integer compares. */
     for (gg = 0; gg < ng; gg++) {
-        float amd = 0.0f, inv_d, sd;
+        float amd, inv_d, sd;
+        union { float f; uint32_t u; } dbit;
+        uint32_t amu = 0;
         for (vv = gg * 32; vv < gg * 32 + 32; vv++) {
-            float a = (delta[vv] < 0.0f) ? -delta[vv] : delta[vv];
-            if (a > amd) amd = a;
+            uint32_t a;
+            dbit.f = delta[vv];
+            a = dbit.u & 0x7FFFFFFFu;
+            if (a > amu) amu = a;
         }
+        dbit.u = amu;
+        amd = dbit.f;
         /* ONE multiply, not two: the guard below and the assignment used
            to compute amd*LZ_Q15_INV separately. Same value by
            construction - same operands, same rounding - so hoisting is

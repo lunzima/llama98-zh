@@ -428,8 +428,16 @@ void lz_quantize_q8(const float *x, int n, int gs, int8_t *q, float *s) {
         float inv;
         int fast = q8_group_scale(grp, gs, &s[g], &inv);
         /* Paid once per group regardless of which branch below runs -
-           same convention as lz_gdn_quantize_2p's identical bill. */
-        LZ_FCX(LZ_FC_QUANT, 1, 0, 1, 0, 0);  /* amax*(1/127) mul, 127/amax div */
+           same convention as lz_gdn_quantize_2p's identical bill.
+           amax*(1/127) mul, 127/amax div, and q8_group_scale's three
+           float comparisons: amax > 0.0f, *inv <= FLT_MAX, *sg <
+           LZ_Q8_MIN_SCALE_F. Billed here rather than inside it because
+           its callers already bill everything else on its behalf, and
+           a helper that bills half of itself is worse than one that
+           bills none. Its amax SCAN is not among them: q8_amax compares
+           bit patterns as uint32, one instruction each, not
+           __aeabi_fcmp. */
+        LZ_FCX(LZ_FC_QUANT, 1, 0, 1, 0, 3);
         if (fast) {
             /* One division per group (the reciprocal); everything inside
                is multiplies. x87's FDIV is 39 cycles vs FMUL's 5 - this
@@ -555,14 +563,22 @@ void lz_quantize_q8_tok_int(const int32_t *t, int n, float deq,
         if (a > tam) tam = a;
     }
     amax = (float)tam * deq;
+    /* deq mul, tam->float cvt, and the `amax > 0.0f` below. The element
+       scan above is int32 - `a > tam` is one instruction, not a
+       __aeabi_fcmp - so it is not billed as a comparison. */
+    LZ_FCX(LZ_FC_QUANT, 1, 0, 0, 1, 1);
     if (amax > 0.0f) {
         sg = amax * LZ_Q8_INV127;
+        /* amax*(1/127) mul, and the sg < LZ_Q8_MIN_SCALE_F below. */
+        LZ_FCX(LZ_FC_QUANT, 1, 0, 0, 0, 1);
         inv = 1.0f;                          /* NON-ZERO FLAG ONLY */
         fast = 1;
         if (sg < LZ_Q8_MIN_SCALE_F) {
             sg = 1.0f;
             inv = 0.0f;
         } else if (amax < LZ_Q8_INV_SAFE) {
+            /* Billed inside, for the reason the twin above gives. */
+            LZ_FCX(LZ_FC_QUANT, 0, 0, 1, 0, 2);
             fast = ((127.0f / amax) <= FLT_MAX);
         }
     } else {
@@ -699,10 +715,14 @@ void lz_quantize_q8_int(const int32_t *t, int n, int gs, float deq,
             if (a > tam) tam = a;
         }
         amax = (float)tam * deq;
-        LZ_FCX(LZ_FC_QUANT, 1, 0, 0, 1, 0);  /* deq mul, tam->float cvt */
+        /* deq mul, tam->float cvt, and the `amax > 0.0f` below. The
+           element scan above is NOT billed as comparisons: `a > tam` is
+           int32, one instruction, not a __aeabi_fcmp. */
+        LZ_FCX(LZ_FC_QUANT, 1, 0, 0, 1, 1);
         if (amax > 0.0f) {
             s[g] = amax * LZ_Q8_INV127;
-            LZ_FCX(LZ_FC_QUANT, 1, 0, 0, 0, 0);  /* amax*(1/127) mul */
+            /* amax*(1/127) mul, and the s[g] < LZ_Q8_MIN_SCALE_F below. */
+            LZ_FCX(LZ_FC_QUANT, 1, 0, 0, 0, 1);
             /* NON-ZERO FLAG ONLY. This quantizer's element loop scales
                by inv_elem = 127/(float)tam, never by inv, so inv's VALUE
                is dead here - it survives as the "amax was usable" flag
@@ -716,8 +736,12 @@ void lz_quantize_q8_int(const int32_t *t, int n, int gs, float deq,
                 s[g] = 1.0f;
                 inv = 0.0f;
             } else if (amax < LZ_Q8_INV_SAFE) {
-                LZ_FCX(LZ_FC_QUANT, 0, 0, 1, 0, 0);  /* 127/amax div */
-                fast = ((127.0f / amax) <= FLT_MAX);
+                /* 127/amax div, the amax < LZ_Q8_INV_SAFE that got here,
+                   and the <= FLT_MAX on the quotient. Billed INSIDE the
+                   else-if, not above it: the INV_SAFE test only runs when
+                   the MIN_SCALE one was false, and billing both at the
+                   top would credit the rare branch to every group. */
+                LZ_FCX(LZ_FC_QUANT, 0, 0, 1, 0, 2);
             }
         } else {
             s[g] = 1.0f;
@@ -884,10 +908,14 @@ void lz_quantize_q8_i16(const short *t, int n, int gs, float deq,
             if (a > tam) tam = a;
         }
         amax = (float)tam * deq;
-        LZ_FCX(LZ_FC_QUANT, 1, 0, 0, 1, 0);  /* deq mul, tam->float cvt */
+        /* deq mul, tam->float cvt, and the `amax > 0.0f` below. The
+           element scan above is NOT billed as comparisons: `a > tam` is
+           int32, one instruction, not a __aeabi_fcmp. */
+        LZ_FCX(LZ_FC_QUANT, 1, 0, 0, 1, 1);
         if (amax > 0.0f) {
             s[g] = amax * LZ_Q8_INV127;
-            LZ_FCX(LZ_FC_QUANT, 1, 0, 0, 0, 0);  /* amax*(1/127) mul */
+            /* amax*(1/127) mul, and the s[g] < LZ_Q8_MIN_SCALE_F below. */
+            LZ_FCX(LZ_FC_QUANT, 1, 0, 0, 0, 1);
             /* NON-ZERO FLAG ONLY. This quantizer's element loop scales
                by inv_elem = 127/(float)tam, never by inv, so inv's VALUE
                is dead here - it survives as the "amax was usable" flag
@@ -901,8 +929,12 @@ void lz_quantize_q8_i16(const short *t, int n, int gs, float deq,
                 s[g] = 1.0f;
                 inv = 0.0f;
             } else if (amax < LZ_Q8_INV_SAFE) {
-                LZ_FCX(LZ_FC_QUANT, 0, 0, 1, 0, 0);  /* 127/amax div */
-                fast = ((127.0f / amax) <= FLT_MAX);
+                /* 127/amax div, the amax < LZ_Q8_INV_SAFE that got here,
+                   and the <= FLT_MAX on the quotient. Billed INSIDE the
+                   else-if, not above it: the INV_SAFE test only runs when
+                   the MIN_SCALE one was false, and billing both at the
+                   top would credit the rare branch to every group. */
+                LZ_FCX(LZ_FC_QUANT, 0, 0, 1, 0, 2);
             }
         } else {
             s[g] = 1.0f;
@@ -1003,10 +1035,14 @@ void lz_quantize_q8_int64(const int64_t *t, int n, int gs, float deq,
            volatile forces the float32 store, breaking the fusion on both. */
         volatile float tamf = (float)tam;
         amax = tamf * deq;
-        LZ_FCX(LZ_FC_QUANT, 1, 0, 0, 1, 0);  /* deq mul, tam->float cvt */
+        /* deq mul, tam->float cvt, and the `amax > 0.0f` below. The
+           element scan above is NOT billed as comparisons: `a > tam` is
+           int32, one instruction, not a __aeabi_fcmp. */
+        LZ_FCX(LZ_FC_QUANT, 1, 0, 0, 1, 1);
         if (amax > 0.0f) {
             s[g] = amax * LZ_Q8_INV127;
-            LZ_FCX(LZ_FC_QUANT, 1, 0, 0, 0, 0);  /* amax*(1/127) mul */
+            /* amax*(1/127) mul, and the s[g] < LZ_Q8_MIN_SCALE_F below. */
+            LZ_FCX(LZ_FC_QUANT, 1, 0, 0, 0, 1);
             /* NON-ZERO FLAG ONLY. This quantizer's element loop scales
                by inv_elem = 127/(float)tam, never by inv, so inv's VALUE
                is dead here - it survives as the "amax was usable" flag
@@ -1020,8 +1056,12 @@ void lz_quantize_q8_int64(const int64_t *t, int n, int gs, float deq,
                 s[g] = 1.0f;
                 inv = 0.0f;
             } else if (amax < LZ_Q8_INV_SAFE) {
-                LZ_FCX(LZ_FC_QUANT, 0, 0, 1, 0, 0);  /* 127/amax div */
-                fast = ((127.0f / amax) <= FLT_MAX);
+                /* 127/amax div, the amax < LZ_Q8_INV_SAFE that got here,
+                   and the <= FLT_MAX on the quotient. Billed INSIDE the
+                   else-if, not above it: the INV_SAFE test only runs when
+                   the MIN_SCALE one was false, and billing both at the
+                   top would credit the rare branch to every group. */
+                LZ_FCX(LZ_FC_QUANT, 0, 0, 1, 0, 2);
             }
         } else {
             s[g] = 1.0f;
