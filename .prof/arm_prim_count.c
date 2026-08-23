@@ -54,6 +54,8 @@
 #include "sp_args_q8r.h"        /* real floats; only the shape matters */
 #elif PRIM_MODE == 27 || PRIM_MODE == 28
 #include "sp_args_q8r.h"        /* the row arms build mm_w/mm_x from it */
+#elif PRIM_MODE == 29
+#include "sp_args_q8r.h"        /* real floats; only the shape matters */
 #elif PRIM_MODE == 18
 #include "sp_args_q8r.h"        /* only for SP_N; the arm uses gd_* */
 #else
@@ -588,6 +590,14 @@ int main(int argc, char **argv) {
 #elif PRIM_MODE == 14
         lz_rmsnorm(nm_o, SP_ARG, nm_w, SP_N, 1e-6f);
         u.f = nm_o[k];                     g_sink = u.i;
+#elif PRIM_MODE == 29
+        /* ONE BARE DIVIDE, the operation the f32 census weights the
+         * same as a multiply and this target does not. The engine still
+         * issues 2,251 a token (kmr20/zh: quantize 1,462, recurrence
+         * 576, norms 133, attention wsum 64, softmax 16), and whether
+         * that is a rounding error or a row of its own is exactly what
+         * modes 16 and 29 answer together. */
+        u.f = SP_ARG[k] / g_mulc;          g_sink = u.i;
 #elif PRIM_MODE == 16 || PRIM_MODE == 17
         /* ONE BARE SOFT-FLOAT OPERATION, against control arm c0 (which
          * is this loop with the operation removed). Every "is it worth
