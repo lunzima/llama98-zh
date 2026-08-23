@@ -68,6 +68,36 @@ static int wp_used = 0;
 static struct { const float *w; int n; float *p; } wp_slot[LZ_WP_SLOTS];
 static int wp_slots = 0;
 
+/* Whether ss_over_n below takes its multiply arm. Also the census
+ * predicate: a site that billed the divide flat would report one for
+ * every call while the code performs one only for the lengths that are
+ * not a power of two - and this tree has 512, 128 and 64 alongside the
+ * MoE intermediate's 896, so both arms are live in the same run. */
+static int ssn_pow2(int n) { return n > 0 && (n & (n - 1)) == 0; }
+#define LZ_SSN_MUL(n) (ssn_pow2(n) ? 1 : 0)
+#define LZ_SSN_DIV(n) (ssn_pow2(n) ? 0 : 1)
+
+/* ss / n, without the divide when n is a power of two.
+ *
+ * A DIVIDE IS NOT A MULTIPLY: 117 instructions against 30 on ARMv5TE
+ * (.prof/arm_div_count.sh), while the f32 census counts both as 1. The
+ * four RMSNorm entries below each spend one on `ss / (float)n`, and n is
+ * a row length - 512, 128, 64 on every checkpoint here.
+ *
+ * EXACT, not close, and the guard is what makes it so rather than an
+ * argument about which lengths occur: for a power-of-two n, (float)n is
+ * exact and 1/n is exactly representable, so multiplying by 2^-log2(n)
+ * only moves the exponent and lands on the same float the division
+ * rounds to. Any other n takes the division, unchanged - so a model
+ * with a length like 896 is not silently given a different number.
+ *
+ * expof((float)n) IS log2(n) here for the same reason: a power of two
+ * has a zero mantissa, so its stored exponent is the answer. */
+static float ss_over_n(float ss, int n) {
+    if (n > 0 && (n & (n - 1)) == 0) return ss * pow2f(-expof((float)n));
+    return ss / (float)n;
+}
+
 static const float *build_wp(const float *w, int n) {
     float *p;
     int i;
@@ -373,8 +403,8 @@ void lz_rmsnorm_gated_int(int32_t *t, const float *x, const float *g,
                also removes is compares, outside this census's
                convention. */
             LZ_FCX(LZ_FC_NORM,
-                   (4 - LZ_GATE_SIG_I - LZ_GATE_QW) * n + 1,
-                   (3 - LZ_GATE_QW) * n + 1, 1,
+                   (4 - LZ_GATE_SIG_I - LZ_GATE_QW) * n + 1 + LZ_SSN_MUL(n),
+                   (3 - LZ_GATE_QW) * n + 1, LZ_SSN_DIV(n),
                    (1 - LZ_GATE_SIG_I) * n + 1, 0);
             ss = ssf;
             goto have_ss_gated_int;
@@ -392,10 +422,10 @@ void lz_rmsnorm_gated_int(int32_t *t, const float *x, const float *g,
        nothing here runs in the shipping census, and replacing one
        unverified number with another unverified number is not a
        correction. */
-    LZ_FCX(LZ_FC_NORM, 5 * n, n + 1, 1, 0, 0);
+    LZ_FCX(LZ_FC_NORM, 5 * n + LZ_SSN_MUL(n), n + 1, LZ_SSN_DIV(n), 0, 0);
     for (i = 0; i < n; i++) ss += x[i] * x[i];
 have_ss_gated_int:
-    inv = lz_rsqrt(ss / (float)n + eps);
+    inv = lz_rsqrt(ss_over_n(ss, n) + eps);
     lz_rmsnorm_gated_out_fixed_int(t, x, g, w, inv, n, NULL, deq);
 }
 
@@ -503,7 +533,7 @@ void lz_rmsnorm_int(int32_t *t, const float *x, const float *w, int n,
                and qinv's own q8_round (1 mul, 1 add) - net n+1 mul,
                2n+1 add, no cvt (t stays int, no per-element dequant).
                Plus the divide+eps (1 div, 1 add). */
-            LZ_FCX(LZ_FC_NORM, 2 * n + 2, 3 * n + 2, 1, 1, 0);
+            LZ_FCX(LZ_FC_NORM, 2 * n + 2 + LZ_SSN_MUL(n), 3 * n + 2, LZ_SSN_DIV(n), 1, 0);
             ss = ssf;
             goto have_ss_int;
         }
@@ -511,10 +541,10 @@ void lz_rmsnorm_int(int32_t *t, const float *x, const float *w, int n,
     /* float ss fallback - same billing as lz_rmsnorm's float row (the
        output loop runs unconditionally below regardless of which ss
        branch fired, same as lz_rmsnorm_gated_int's fallback). */
-    LZ_FCX(LZ_FC_NORM, 3 * n, 2 * n + 1, 1, 0, 0);
+    LZ_FCX(LZ_FC_NORM, 3 * n + LZ_SSN_MUL(n), 2 * n + 1, LZ_SSN_DIV(n), 0, 0);
     for (i = 0; i < n; i++) ss += x[i] * x[i];
 have_ss_int:
-    inv = lz_rsqrt(ss / (float)n + eps);
+    inv = lz_rsqrt(ss_over_n(ss, n) + eps);
     lz_rmsnorm_out_fixed_int(t, qx, ex, w, inv, n, deq);
 }
 
@@ -534,7 +564,7 @@ void lz_rmsnorm(float *o, const float *x, const float *w, int n, float eps) {
                output loop (2 mul + 1 add per element) and the
                divide+eps (1 div, 1 add; the (float)n cast is not
                billed, see B1 report). */
-            LZ_FCX(LZ_FC_NORM, 3 * n + 1, n + 1, 1, 1, 0);
+            LZ_FCX(LZ_FC_NORM, 3 * n + 1 + LZ_SSN_MUL(n), n + 1, LZ_SSN_DIV(n), 1, 0);
             ss = ssf;
             goto have_ss;
         }
@@ -545,10 +575,10 @@ void lz_rmsnorm(float *o, const float *x, const float *w, int n, float eps) {
        cached table makes it a once-per-model cost rather than a
        per-token one and a census that billed it either way could not
        order this row against the rows it competes with. */
-    LZ_FCX(LZ_FC_NORM, 3 * n, n + 1, 1, 0, 0);
+    LZ_FCX(LZ_FC_NORM, 3 * n + LZ_SSN_MUL(n), n + 1, LZ_SSN_DIV(n), 0, 0);
     for (i = 0; i < n; i++) ss += x[i] * x[i];
 have_ss:
-    inv = lz_rsqrt(ss / (float)n + eps);
+    inv = lz_rsqrt(ss_over_n(ss, n) + eps);
     /* (1 + w), not w: see the header */
     i = 0;
     {
@@ -596,7 +626,7 @@ void lz_rmsnorm_gated(float *o, const float *x, const float *g,
                (3 mul, 3 shift), dequant (1 cvt, 1 mul); plus
                norm_ss_fixed (n mul, n add, 1 mul, 1 cvt) and the
                divide+eps (1 div, 1 add). */
-            LZ_FCX(LZ_FC_NORM, 5 * n + 1, 3 * n + 1, 1, 2 * n + 1, 0);
+            LZ_FCX(LZ_FC_NORM, 5 * n + 1 + LZ_SSN_MUL(n), 3 * n + 1, LZ_SSN_DIV(n), 2 * n + 1, 0);
             ss = ssf;
             fixed_ss = 1;
             goto have_ss_gated;
@@ -608,10 +638,10 @@ void lz_rmsnorm_gated(float *o, const float *x, const float *g,
        itself. That is 4n mul, n+1 add, 1 div; the site billed 5n mul
        to hold an older total. Same correction as lz_l2norm's, and worth
        0 in the shipping census for the same reason - measured. */
-    LZ_FCX(LZ_FC_NORM, 4 * n, n + 1, 1, 0, 0);
+    LZ_FCX(LZ_FC_NORM, 4 * n + LZ_SSN_MUL(n), n + 1, LZ_SSN_DIV(n), 0, 0);
     for (i = 0; i < n; i++) ss += x[i] * x[i];
 have_ss_gated:
-    inv = lz_rsqrt(ss / (float)n + eps);
+    inv = lz_rsqrt(ss_over_n(ss, n) + eps);
     /* plain w here, and the gate applies last. The fixed path computes
        the full silu value in Q15 int-multiply (value-changing); the
        float path is untouched. */
