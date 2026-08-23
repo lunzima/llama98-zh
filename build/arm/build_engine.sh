@@ -37,6 +37,17 @@
 # machines anyway - and qemu can produce that with a TCG plugin.
 set -u
 
+# Unsuffixed FIRST but not only: Debian ships arm-linux-gnueabi-gcc-14
+# with no unsuffixed alias, and this script's failure mode there is 24
+# compile FAILs in a row - which reads as "the tree does not build for
+# ARM", not as "the compiler is called something else".
+# kernel_matrix_gate.sh already probes both names; this is the same
+# probe for anyone running the script directly.
+if [ -z "${CC:-}" ]; then
+    for c in arm-linux-gnueabi-gcc arm-linux-gnueabi-gcc-14; do
+        command -v "$c" >/dev/null 2>&1 && CC=$c && break
+    done
+fi
 CC=${CC:-arm-linux-gnueabi-gcc}
 OUT=${OUT:-/tmp/armbuild}
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
