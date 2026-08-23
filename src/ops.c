@@ -3498,14 +3498,17 @@ static const char km_why_f32mm_mmx[] =
     "impossible: MMX is integer-only and this is a float multiply-add. "
     "SSE1 is the first tier that can express it";
 static const char km_why_f32mm_arma[] =
-    "DECLINED on a measurement of the cell, not an estimate of it. The "
-    "MAC costs 74.0 and a hand cell may only take the pack/unpack round "
-    "trip, about 14 - it may NOT skip the product's rounding, which "
-    "would make it an FMA and redden the x86<->ARM parity gate. The "
-    "multiply core it needs was then written and measured (mode 24 "
-    "against 16, .prof/arm_chain_count.sh): 49.0 against __aeabi_fmul's "
-    "30.0, zero declines. Overspending by 19 to save 14 settles it "
-    "without the adder half. docs/arm-asm-audit.md G2";
+    "DECLINED on a measurement of the WHOLE cell, written with the "
+    "techniques __aeabi_fmul itself uses (pre-scaled significands so "
+    "UMULL's high word IS the result, SBC-folded normalisation, "
+    "ADC-folded rounding). Fused, no spills, no declines: 86.5 against "
+    "the 74.0 chain (mode 25 against 20, .prof/arm_chain_count.sh). The "
+    "premise was wrong, not the code - the pack/unpack round trip the "
+    "fusion targets costs the same 8 either way, because the unpacked "
+    "form has to renormalise a significand that rounds to 2^24. What "
+    "fusion really buys is two call/return pairs, 4, against libgcc's "
+    "__addsf3 averaging 43.0 WITH early-outs where a straight-line hand "
+    "adder pays 45 always. docs/arm-asm-audit.md G2";
 static const char km_why_f32mm_g128[] =
     "this column is the 128-ELEMENT quantization group; lz_matmul's "
     "unit of work is a whole weight ROW against a whole activation "

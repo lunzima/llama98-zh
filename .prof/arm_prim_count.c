@@ -164,6 +164,131 @@ static __inline__ int spw_fmul_arm(uint32_t ua, uint32_t ub,
     return (int)ok;
 }
 #endif /* PRIM_MODE == 24 && LZ_ARM_PRIM_ASM */
+
+#if PRIM_MODE == 25 && defined(LZ_ARM_PRIM_ASM)
+/* f32mm armA's cell, fused: fl(acc + fl(w*x)) with the product never
+ * packed to memory and never handed to a second special-case scan.
+ * Measured by mode 25 against mode 20, which is the same expression
+ * through __aeabi_fmul and __addsf3.
+ *
+ * WHAT THE FUSION ACTUALLY BUYS, now that both halves are written the
+ * way libgcc writes them: two call/return pairs, __addsf3's scan of an
+ * operand this code just produced and therefore knows is normal, and
+ * one shared decline exit instead of two. NOT the product's rounding -
+ * skipping that would turn this into an FMA, a different function that
+ * build/arm/parity_gate.sh would catch.
+ *
+ * The product half is spw_fmul_arm's, minus its pack; the sum half is
+ * lz_faddsub_arm_asm's, minus the second result. Both use the ADC/BICEQ
+ * round-and-pack and the SBC-folded normalisation step. */
+static __inline__ int spw_fmac_arm(uint32_t uacc, uint32_t uw, uint32_t ux,
+                                   uint32_t *out) {
+    uint32_t ok, R, e, t, pl, ph, a = uw, b = ux, c = uacc;
+    __asm__(
+        /* ---- product ---- */
+        "mov    %[t],  #255\n\t"
+        "ands   %[e],  %[t], %[a], lsr #23\n\t"
+        "andnes %[ph], %[t], %[b], lsr #23\n\t"
+        "teqne  %[e],  %[t]\n\t"
+        "teqne  %[ph], %[t]\n\t"
+        "beq    9f\n\t"
+        "add    %[e],  %[e], %[ph]\n\t"
+        "eor    %[R],  %[a], %[b]\n\t"
+        "mov    %[ph], #0x8000000\n\t"
+        "mov    %[a],  %[a], lsl #9\n\t"
+        "orr    %[a],  %[ph], %[a], lsr #5\n\t"
+        "mov    %[b],  %[b], lsl #9\n\t"
+        "orr    %[b],  %[ph], %[b], lsr #5\n\t"
+        "umull  %[pl], %[ph], %[a], %[b]\n\t"
+        "and    %[R],  %[R], #0x80000000\n\t"
+        "cmp    %[ph], #0x800000\n\t"
+        "movcc  %[ph], %[ph], lsl #1\n\t"
+        "orrcc  %[ph], %[ph], %[pl], lsr #31\n\t"
+        "movcc  %[pl], %[pl], lsl #1\n\t"
+        "orr    %[R],  %[R], %[ph]\n\t"
+        "sbc    %[e],  %[e], #127\n\t"
+        "cmp    %[e],  #253\n\t"
+        "bhi    9f\n\t"
+        "cmp    %[pl], #0x80000000\n\t"
+        "adc    %[R],  %[R], %[e], lsl #23\n\t"
+        "biceq  %[R],  %[R], #1\n\t"
+        /* ---- acc + product ---- */
+        "eor    %[ok], %[c], %[R]\n\t"
+        "mov    %[ok], %[ok], lsr #31\n\t"     /* 1 when the signs differ */
+        "mov    %[a],  %[c], lsl #1\n\t"
+        "mov    %[b],  %[R], lsl #1\n\t"
+        "sub    %[e],  %[a], #0x01000000\n\t"
+        "cmp    %[e],  #0xFE000000\n\t"
+        "bhs    9f\n\t"                        /* acc 0/subnormal/inf/nan */
+        /* The result's sign is the LARGER operand's, under both
+           effective operations: when the signs agree they are the same
+           sign, and when they differ the larger one wins. */
+        "cmp    %[a],  %[b]\n\t"
+        "and    %[pl], %[c], #0x80000000\n\t"
+        "andlo  %[pl], %[R], #0x80000000\n\t"
+        "movlo  %[e],  %[a]\n\t"
+        "movlo  %[a],  %[b]\n\t"
+        "movlo  %[b],  %[e]\n\t"
+        "mov    %[e],  %[a], lsr #24\n\t"
+        "mov    %[ph], %[b], lsr #24\n\t"
+        "sub    %[ph], %[e], %[ph]\n\t"        /* d */
+        "cmp    %[ph], #27\n\t"
+        "bhi    9f\n\t"
+        "mov    %[t],  %[b], lsl #8\n\t"
+        "mov    %[t],  %[t], lsr #6\n\t"
+        "orr    %[t],  %[t], #0x04000000\n\t"
+        "rsb    %[b],  %[ph], #32\n\t"
+        "mov    %[b],  %[t], lsl %[b]\n\t"
+        "mov    %[t],  %[t], lsr %[ph]\n\t"
+        "cmp    %[b],  #0\n\t"
+        "orrne  %[t],  %[t], #1\n\t"           /* sticky */
+        "mov    %[ph], %[a], lsl #8\n\t"
+        "mov    %[ph], %[ph], lsr #6\n\t"
+        "orr    %[ph], %[ph], #0x04000000\n\t"
+        "tst    %[ok], #1\n\t"
+        "bne    2f\n\t"
+        "add    %[t],  %[ph], %[t]\n\t"        /* effective add */
+        "sub    %[a],  %[e], #1\n\t"
+        "cmp    %[t],  #0x08000000\n\t"
+        "movhs  %[b],  %[t], lsr #1\n\t"
+        "andhs  %[t],  %[t], #1\n\t"
+        "orrhs  %[t],  %[b], %[t]\n\t"
+        "addhs  %[a],  %[a], #1\n\t"
+        "b      3f\n\t"
+        "2:\n\t"
+        "subs   %[t],  %[ph], %[t]\n\t"        /* effective subtract */
+        "moveq  %[R],  #0\n\t"                 /* exact cancellation: +0 */
+        "beq    4f\n\t"
+        "clz    %[b],  %[t]\n\t"
+        "sub    %[b],  %[b], #5\n\t"
+        "mov    %[t],  %[t], lsl %[b]\n\t"
+        "subs   %[a],  %[e], %[b]\n\t"
+        "ble    9f\n\t"                        /* subnormal */
+        "sub    %[a],  %[a], #1\n\t"
+        "3:\n\t"
+        "mov    %[b],  %[t], lsl #29\n\t"
+        "mov    %[t],  %[t], lsr #3\n\t"
+        "cmp    %[a],  #254\n\t"
+        "bhs    9f\n\t"
+        "orr    %[R],  %[pl], %[t]\n\t"
+        "cmp    %[b],  #0x80000000\n\t"
+        "adc    %[R],  %[R], %[a], lsl #23\n\t"
+        "biceq  %[R],  %[R], #1\n\t"
+        "4:\n\t"
+        "mov    %[ok], #1\n\t"
+        "b      8f\n\t"
+        "9:\n\t"
+        "mov    %[ok], #0\n\t"
+        "8:\n\t"
+        : [ok] "=&r"(ok), [R] "=&r"(R), [e] "=&r"(e), [t] "=&r"(t),
+          [pl] "=&r"(pl), [ph] "=&r"(ph),
+          [a] "+r"(a), [b] "+r"(b), [c] "+r"(c)
+        :
+        : "cc");
+    *out = R;
+    return (int)ok;
+}
+#endif /* PRIM_MODE == 25 && LZ_ARM_PRIM_ASM */
 volatile float g_facc = 0.7071068f;      /* mode 20's accumulator */
 
 /* norm_ss_fixed's Q15 image and its exponent (mode 9). Live outside the
@@ -453,6 +578,21 @@ int main(int argc, char **argv) {
 #else
         u.f = SP_ARG[k] + g_mulc;          g_sink = u.i;
 #endif
+#elif PRIM_MODE == 25
+        /* Mode 20's MAC through the fused cell, fallback included.
+         * 25 against 20 is f32mm armA measured rather than projected. */
+        {
+            union { float f; uint32_t u; } bw, bx, bc;
+            uint32_t r;
+            bw.f = SP_ARG[k];
+            bx.f = g_mulc;
+            bc.f = g_facc;
+            if (spw_fmac_arm(bc.u, bw.u, bx.u, &r)) {
+                g_sink = (int32_t)r;
+            } else {
+                u.f = bc.f + bw.f * bx.f;   g_sink = u.i;
+            }
+        }
 #elif PRIM_MODE == 24
         /* Mode 16's bare multiply through spw_fmul_arm, fallback
          * included. 24 against 16 is the whole f32mm armA question:
