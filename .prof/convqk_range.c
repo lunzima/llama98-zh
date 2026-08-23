@@ -25,9 +25,15 @@
  * therefore reported too: min over vectors of (max|x| in that vector),
  * which is what sets how many int16 levels the quietest head gets.
  *
+ * -DLZ_CONVO_I16=0 IS NOT OPTIONAL. With the exit on, the conv writes
+ * kda_*c_i16 and leaves the float buffers these taps read untouched, so
+ * every sample is zero and the report is a table of nothing. That is
+ * also the distribution the exponent has to be chosen on: the values
+ * BEFORE quantization, which only the =0 build produces.
+ *
  * Build (one TU, the engine spliced in, as m5range):
- *   gcc -O1 -std=gnu99 -Isrc -o .prof/convqk_range.exe \
- *       .prof/convqk_range.c src/cpucheck.c -lm
+ *   gcc -O1 -std=gnu99 -Isrc -DLZ_CONVO_I16=0 \
+ *       -o .prof/convqk_range.exe .prof/convqk_range.c src/cpucheck.c -lm
  * Usage:  convqk_range <model-dir> <tokens-file>
  */
 #include <stdio.h>
@@ -35,12 +41,13 @@
 #include <string.h>
 #include <math.h>
 
-#define NCH 2
+#define NCH 3
 #define NB  40                 /* bucket = floor(log2|x|) + 24 */
 #define EMIN (-24)
 #define EMAX 0
 
-static const char *chname[NCH] = { "kqc (conv q)", "kkc (conv k)" };
+static const char *chname[NCH] = { "kqc (conv q)", "kkc (conv k)",
+                                   "kvc (conv v)" };
 static long hist[NCH][NB];
 static long nseen[NCH];
 static double gmax[NCH];
@@ -104,6 +111,12 @@ static void tap_cq(const char *tag, int li, const float *p, int n) {
     (void)li;
     if (strcmp(tag, "kqc") == 0) { acc(0, p, n); return; }
     if (strcmp(tag, "kkc") == 0) { acc(1, p, n); return; }
+    /* v was added after the first landing, and adding it is the point:
+       LZ_CONVO_ES was picked from q and k and then USED for v without
+       anyone measuring v. That is choosing a constant on a distribution
+       it was not measured on, which is the mistake this whole file
+       exists to prevent. */
+    if (strcmp(tag, "kvc") == 0) { acc(2, p, n); return; }
 }
 
 static int *read_tokens(const char *path, int *n_out) {

@@ -1745,6 +1745,17 @@ void lz_kda_step(float *out, const int8_t *sq_in, int8_t *sq_out,
                  const float *ss_in, float *ss_out,
                  const float *q, const float *k, const float *v,
                  const float *gvec, float beta, int kd, int vd);
+/* Same, with v arriving as int16 at `vscale` - the conv's int16 exit
+   (int-pipeline 9.4). The convert this loop then pays is smaller than
+   the two the conv's float exit paid to avoid it. */
+void lz_kda_step_vi16(float *out, const int8_t *sq_in, int8_t *sq_out,
+#if LZ_GDN_STATE_2PLANE
+                 const int8_t *sq2_in, int8_t *sq2_out,
+#endif
+                 const float *ss_in, float *ss_out,
+                 const float *q, const float *k, const short *vi,
+                 float vscale, const float *gvec, float beta,
+                 int kd, int vd);
 
 /* Causal depthwise separable conv, single-step advance.
    state_in holds the last (k-1) inputs, layout (n_ch, k-1);

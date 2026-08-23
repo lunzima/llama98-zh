@@ -441,6 +441,16 @@ static void *xcalloc(size_t n, size_t sz, int *ok, long long *acc) {
 #ifndef LZ_CONVO_ES
 #define LZ_CONVO_ES 10
 #endif /* LZ_CONVO_ES */
+/* v GETS ITS OWN, and the first version of this did not - it reused
+ * q and k's 10, which is choosing a constant on a distribution nobody
+ * measured. v's max is 4.5376 against q's 26.3953, so 10 left it at
+ * 4,645 of the 32,767 available and threw away 2.8 bits; 12 is the
+ * largest with zero clamps (13 clips 16 samples). Its spread is also
+ * far tighter - the quietest vector peaks 12.4x below the largest,
+ * against q's 94.8x - which is why it can afford the full range. */
+#ifndef LZ_CONVO_V_ES
+#define LZ_CONVO_V_ES 12
+#endif /* LZ_CONVO_V_ES */
 #ifndef LZ_CONVO_I16
 #define LZ_CONVO_I16 1
 #endif /* LZ_CONVO_I16 */
@@ -1147,10 +1157,12 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
         s->kda_v_i16 = (short *)xcalloc((size_t)nt * c->lin_value_dim,
                                         sizeof(short), &ok, &s->bytes_alloc);
 #if LZ_CONVO_I16
-        /* The conv's own int16 exit, q and k only - see forward.h. */
+        /* The conv's own int16 exit - see forward.h. */
         s->kda_qc_i16 = (short *)xcalloc((size_t)nt * c->lin_key_dim,
                                          sizeof(short), &ok, &s->bytes_alloc);
         s->kda_kc_i16 = (short *)xcalloc((size_t)nt * c->lin_key_dim,
+                                         sizeof(short), &ok, &s->bytes_alloc);
+        s->kda_vc_i16 = (short *)xcalloc((size_t)nt * c->lin_value_dim,
                                          sizeof(short), &ok, &s->bytes_alloc);
 #endif /* LZ_CONVO_I16 */
         s->conv_sig_k1 = (float *)xcalloc(nch, sizeof(float), &ok,
@@ -1388,7 +1400,7 @@ void lz_state_free(LZRunState *s) {
     free(s->conv_state);
     free(s->conv_state_q); free(s->conv_mw);
     free(s->kda_q_i16); free(s->kda_k_i16); free(s->kda_v_i16);
-    free(s->kda_qc_i16); free(s->kda_kc_i16);
+    free(s->kda_qc_i16); free(s->kda_kc_i16); free(s->kda_vc_i16);
     free(s->bvec_i16); free(s->moe_logits_i16);
     free(s->kda_lat_i16); free(s->kda_lat_i32);
     free(s->kda_gate_i16); free(s->kda_dtb_i16);
@@ -2744,7 +2756,8 @@ static void forward_kda(const LZModel *m, LZRunState *s,
         conv_int = okq && okk && okv;
     }
 #if LZ_CONVO_I16 && LZ_CONV_SIG_I
-    convo_i16 = s->conv_fixed && s->kda_qc_i16 && s->kda_kc_i16;
+    convo_i16 = s->conv_fixed && s->kda_qc_i16 && s->kda_kc_i16
+                && s->kda_vc_i16;
 #endif /* LZ_CONVO_I16 && LZ_CONV_SIG_I */
 #endif /* LZ_CONV_FIXED */
     /* int-pipeline milestone 5, decided here for the same reason
@@ -2986,8 +2999,10 @@ static void forward_kda(const LZModel *m, LZRunState *s,
                 s->conv_sig_k1 + cb + k_ch, s->conv_sig_oscale2 + cb + k_ch,
                 s->conv_sig_k2, LZ_CONV_SIG_E(s, cb + k_ch),
                 s->conv_in_scale, s->conv_bound, kdim, c->conv_kernel);
-            lz_causal_conv1d_step_fixed(
-                s->kda_vc + (size_t)tk * vdim, s->kda_v + (size_t)tk * vdim,
+            lz_causal_conv1d_step_fixed_o16(
+                s->kda_vc + (size_t)tk * vdim,
+                convo_i16 ? s->kda_vc_i16 + (size_t)tk * vdim : (short *)0,
+                LZ_CONVO_V_ES, s->kda_v + (size_t)tk * vdim,
                 vxi, qi + v_off, qo + v_off,
                 s->conv_mw + (cb + v_ch) * c->conv_kernel,
                 s->conv_sig_k1 + cb + v_ch, s->conv_sig_oscale2 + cb + v_ch,
@@ -3016,6 +3031,13 @@ static void forward_kda(const LZModel *m, LZRunState *s,
                               c->conv_kernel);
         }
     }
+    /* THESE THREE READ THE FLOAT BUFFERS, which LZ_CONVO_I16 leaves
+       unwritten - the conv puts the token in kda_*c_i16 instead. A tap
+       build (the differential dump tool, .prof/convqk_range.c) must
+       therefore pass -DLZ_CONVO_I16=0, and the symptom otherwise is
+       silent: every sample reads zero. Found by convqk_range reporting
+       max|kvc| = 0 over 3.7M samples, which is not a number a live
+       model produces. */
     LZ_TAP("kqc", layer, s->kda_qc, kdim);
     LZ_TAP("kkc", layer, s->kda_kc, kdim);
     LZ_TAP("kvc", layer, s->kda_vc, vdim);
@@ -3261,7 +3283,16 @@ static void forward_kda(const LZModel *m, LZRunState *s,
                  ? lz_sigmoid_i(s->bvec_i16[(size_t)tk * nv + h], LZ_BVEC_ES)
                  : lz_sigmoid(s->bvec[(size_t)tk * nv + h]);
             LZ_PROF_BEG(_tr);
-            lz_kda_step(out, sq_in, sq_out,
+            if (convo_i16)
+                lz_kda_step_vi16(out, sq_in, sq_out,
+#if LZ_GDN_STATE_2PLANE
+                        sq2_in, sq2_out,
+#endif /* LZ_GDN_STATE_2PLANE */
+                        ss_in, ss_out, s->qn, s->kn,
+                        s->kda_vc_i16 + (size_t)tk * vdim + (size_t)h * vd,
+                        pow2f(-LZ_CONVO_V_ES), gv, beta, kd, vd);
+            else
+                lz_kda_step(out, sq_in, sq_out,
 #if LZ_GDN_STATE_2PLANE
                         sq2_in, sq2_out,
 #endif /* LZ_GDN_STATE_2PLANE */

@@ -2033,6 +2033,7 @@ static void gdn_step_impl(float *out, const int8_t *sq_in, int8_t *sq_out,
 #endif /* LZ_GDN_STATE_2PLANE */
                  const float *ss_in, float *ss_out,
                  const float *q, const float *k, const float *v,
+                 const short *vi, float vscale,
                  const float *gvec, float gt, float beta, int kd, int vd) {
     float u[LZ_GDN_MAX_VD];      /* holds S^T k first, then reused in place as delta */
     float w[LZ_GDN_MAX_VD];      /* S^T q */
@@ -2156,16 +2157,51 @@ static void gdn_step_impl(float *out, const int8_t *sq_in, int8_t *sq_out,
     {
         union { float f; uint32_t u; } gb;
         gb.f = gt;
+        /* THIS LOOP HAD NO SITE. Pass 1 bills at gdn_pass1_fixed_head
+           and pass 2 at gdn_p2_fixed_rows, so the recurrence class read
+           as those two and this scalar epilogue was invisible - 5 or 6
+           operations an element, 6,144 elements a token on kmr20, about
+           31K the census could not see. Found while pricing v's int16
+           exit, whose whole cost lands here: without a site the exit
+           would have shown the producer's saving and none of the
+           consumer's cost, which is the shape of a fake win.
+
+           Billed per ARM because they differ by two multiplies, and gt
+           is exactly 1.0f on every KDA call - averaging them would
+           misreport whichever family is running. */
+        /* v's INT16 ENTRY (int-pipeline 9.4's second half). It is a
+           convert and a multiply here where the float entry has
+           neither, and the conv it comes from drops two of each - so
+           the trade is two operations an element, in this loop's
+           favour. NOT re-associated into vi*(vscale*beta): that would
+           be a second value change on top of the quantization and it
+           has not been measured apart from it. */
         if (gb.u == 0x3F800000u) {
-            for (vv = 0; vv < vd; vv++) {
-                u[vv] = (v[vv] - u[vv]) * beta;   /* u becomes delta */
-                out[vv] = w[vv] + u[vv] * kq;
-            }
+            LZ_FCX(LZ_FC_RECUR, (long)vd * (vi ? 3 : 2), (long)vd * 2, 0,
+                   vi ? (long)vd : 0, 0);
+            if (vi)
+                for (vv = 0; vv < vd; vv++) {
+                    u[vv] = ((float)vi[vv] * vscale - u[vv]) * beta;
+                    out[vv] = w[vv] + u[vv] * kq;
+                }
+            else
+                for (vv = 0; vv < vd; vv++) {
+                    u[vv] = (v[vv] - u[vv]) * beta;   /* u becomes delta */
+                    out[vv] = w[vv] + u[vv] * kq;
+                }
         } else {
-            for (vv = 0; vv < vd; vv++) {
-                u[vv] = (v[vv] - gt * u[vv]) * beta;
-                out[vv] = gt * w[vv] + u[vv] * kq;
-            }
+            LZ_FCX(LZ_FC_RECUR, (long)vd * (vi ? 5 : 4), (long)vd * 2, 0,
+                   vi ? (long)vd : 0, 0);
+            if (vi)
+                for (vv = 0; vv < vd; vv++) {
+                    u[vv] = ((float)vi[vv] * vscale - gt * u[vv]) * beta;
+                    out[vv] = gt * w[vv] + u[vv] * kq;
+                }
+            else
+                for (vv = 0; vv < vd; vv++) {
+                    u[vv] = (v[vv] - gt * u[vv]) * beta;
+                    out[vv] = gt * w[vv] + u[vv] * kq;
+                }
         }
     }
 
@@ -2253,7 +2289,8 @@ void lz_gdn_step(float *out, const int8_t *sq_in, int8_t *sq_out,
 #if LZ_GDN_STATE_2PLANE
                   sq2_in, sq2_out,
 #endif /* LZ_GDN_STATE_2PLANE */
-                  ss_in, ss_out, q, k, v, NULL, gt, beta, kd, vd);
+                  ss_in, ss_out, q, k, v, (const short *)0, 0.0f,
+                  NULL, gt, beta, kd, vd);
 }
 
 /* gt = 1.0f is not a placeholder. KDA's decay is already inside pass 1's
@@ -2272,5 +2309,26 @@ void lz_kda_step(float *out, const int8_t *sq_in, int8_t *sq_out,
 #if LZ_GDN_STATE_2PLANE
                   sq2_in, sq2_out,
 #endif /* LZ_GDN_STATE_2PLANE */
-                  ss_in, ss_out, q, k, v, gvec, 1.0f, beta, kd, vd);
+                  ss_in, ss_out, q, k, v, (const short *)0, 0.0f,
+                  gvec, 1.0f, beta, kd, vd);
+}
+
+/* Same call with v arriving as int16 at `vscale` (int-pipeline 9.4).
+   A separate entry rather than two more parameters for the reason
+   lz_causal_conv1d_step_fixed_o16 is one: five of the six callers of
+   lz_kda_step are probes. `vi` NULL is exactly lz_kda_step. */
+void lz_kda_step_vi16(float *out, const int8_t *sq_in, int8_t *sq_out,
+#if LZ_GDN_STATE_2PLANE
+                 const int8_t *sq2_in, int8_t *sq2_out,
+#endif /* LZ_GDN_STATE_2PLANE */
+                 const float *ss_in, float *ss_out,
+                 const float *q, const float *k, const short *vi,
+                 float vscale, const float *gvec, float beta,
+                 int kd, int vd) {
+    gdn_step_impl(out, sq_in, sq_out,
+#if LZ_GDN_STATE_2PLANE
+                  sq2_in, sq2_out,
+#endif /* LZ_GDN_STATE_2PLANE */
+                  ss_in, ss_out, q, k, (const float *)0, vi, vscale,
+                  gvec, 1.0f, beta, kd, vd);
 }
