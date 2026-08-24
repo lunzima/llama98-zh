@@ -29,6 +29,28 @@
 # Pentium does not. Read it as "the impossible needs re-examining
 # here", never as "ship this".
 #
+# AND IT IS FUNCTION GRANULARITY, which is coarser than the question.
+# expfx reads arith=127 at SSE2, but its loop lives in lz_moe_route
+# beside a max scan, a sum and a normalise, and those three vectorise
+# trivially. The number says nothing about the exp loop.
+#
+# Settling one takes a throwaway TU holding ONE loop and two controls -
+# a loop gcc must vectorise, and the same shape minus the thing under
+# suspicion. Done for expfx:
+#
+#     ctl_mul  o[i] = x[i]*y[i]        insns=73  arith=2   <- works
+#     iso_exp  o[i] = lz_exp(x[i])     insns=28  arith=0
+#     ctl_tab  o[i] = tab[idx[i] & 31] insns=22  arith=0
+#
+# Identical at -march=x86-64 and at -march=x86-64-v3. The control fires,
+# so the measurement is live; the subject is zero; and ctl_tab - a bare
+# per-element table index with no transcendental in it - is zero too,
+# which is what isolates the CAUSE to the index rather than to the
+# arithmetic around it. Offered AVX2, where vgatherdps exists, gcc still
+# declines. expfx's reason is confirmed at the granularity it is stated.
+#
+# So a nonzero here opens a question; it does not answer one.
+#
 # Usage: bash build/o3_probe.sh [unit ...]
 #        no arguments prints every unit the matrix currently calls
 #        impossible, with the function that implements it.
