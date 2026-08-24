@@ -66,6 +66,7 @@
 !/build/kv_slot_next_probe.c
 !/build/caption_symmetry_gate.sh
 !/build/capmetrics.c
+!/build/capshot.c
 
 # Stray compiler/linker intermediates (gcc, Open Watcom), plus the raw
 # dumps probes drop at the repo root when run without a -o path.

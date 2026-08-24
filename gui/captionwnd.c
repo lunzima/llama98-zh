@@ -120,10 +120,19 @@ static void btn_rect(HWND h, int which, RECT *b)
     RECT wr;
     int bw, bh, right, top;
     GetWindowRect(h, &wr);
-    /* Width asked of the frame: SM_CXSIZE is not the button width on modern
-       frames (this box reports 36, the real buttons are 24), and drawing at
-       36 puts the buttons where they do not hit. The other metrics stay
-       MSO95's, which still mean what they always meant. */
+    /* Width asked of the frame, not of SM_CXSIZE, which is not the button
+       width on modern frames. The other metrics stay MSO95's, which still
+       mean what they always meant.
+       DELIBERATELY NOT WORD 95'S NUMBER. Running Word 95 beside this and
+       measuring both captures gives 34 there against 24 here - but 34 is
+       what a 1995 binary computes from a frame it was never shown, and
+       the owner's decision is that the platform's answer is the right
+       one. Everything else in the strip does match: caption 22 tall,
+       button 18 tall, 2 px above and below, minimise and maximise
+       adjacent, a 2 px gap before close, 2 px to the caption's right
+       edge. That layout came out of the comparison, not out of this
+       file's arithmetic, and it is why the widths being different is a
+       decision rather than an oversight. */
     bw    = lz_caption_button_width(h);
     /* Height from the caption's own height, not from SM_CYSIZE. MSO95
        asks for seventeen different metrics across fifty-four call sites
