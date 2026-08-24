@@ -18,6 +18,22 @@
  * derivations agree, not that one function was called twice.
  *
  * Build: gcc -O2 -std=c99 -Wall -Wextra -Isrc .prof/epi_mac_oracle.c -o /tmp/epi_oracle
+ *
+ * A NOTE FOR WHOEVER WRITES THE SSE2 KERNEL. SSE2 has no 32x32->32
+ * multiply (_mm_mullo_epi32 is SSE4.1), so the two usable primitives
+ * are pmuludq and pmaddwd, and both push you toward a 16-bit split.
+ * The textbook signed split is
+ *
+ *     ah = (a >> 16) + ((a >> 15) & 1);   sal = (short)(a & 0xFFFF);
+ *     a  = ah * 65536 + sal
+ *
+ * which lets pmaddwd do both halves because ah and sal are both
+ * int16-shaped. It has one failure: for a near INT_MAX the carry pushes
+ * ah to 32768, which is not int16, and the lane silently wraps to
+ * -32768. a = 2147483647 is in the edge list above precisely so that
+ * this is caught the first time it is run rather than in a model months
+ * later. If a kernel passes the random sweep and fails the edge block,
+ * this is the first thing to check.
  */
 
 #include <stdio.h>
