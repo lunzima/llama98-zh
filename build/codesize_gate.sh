@@ -21,6 +21,15 @@
 # but never the instruction cache. They are different questions and take
 # different numbers.
 #
+# NEITHER MEASURES RUNTIME MEMORY, and that was checked rather than
+# assumed to be a gap. The state is demand-sized, not ceiling-sized:
+# 3.5 MB at --ctx 512 and the same 3.5 MB at --ctx 32768, with the KV
+# slot count following the generation instead (64 slots at -n 1, 217 at
+# -n 200, +0.1 MB). So there is no reservation-against-the-maximum and
+# no shadow copy to find, and the buffer pairs in the base 3.5 MB
+# (x/xb/xb2, hb/hb2, ktmp/vtmp) are the ordinary residual-plus-scratch
+# shape. A gate would have nothing to hold down.
+#
 # NOT COUNTED under A, and it would matter if the answer were close: the
 # volume's own overhead is subtracted (boot sector, two FATs, root
 # directory - 33 of 2880 sectors), but a directory entry per file and
