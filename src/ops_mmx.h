@@ -80,6 +80,20 @@ lz_p2_blk *p2_blk(void);
 #define LZ_HAVE_AMAX_MMX   1
 #define LZ_HAVE_Q8R_SSE    1
 
+/* norm_ss_fixed's element loop, SSE1 tier. HERE and not in ops_sse.h
+   for the same reason as lz_p2_split32_sse below: SSE1's convert is
+   cvtps2pi, so the pack, the clamp and the multiply-add all land in
+   %mm and this cell owes an emms.
+   OUTSIDE the __WATCOMC__ split, like LZ_FWHT_MMX_EXTERN above: the
+   wrapper has the same name and prototype on each side. Declaring it
+   in the gcc arm alone left the Watcom build registering a cell it
+   could not see, which kernel_matrix_gate reported as
+   "nrmss/sseA registered for this build and ABSENT".
+   Groups of 4; the caller runs the tail. */
+#define LZ_NORM_SS_SSE_EXTERN 1
+int lz_norm_ss_sse(const float *x, int n, float sc, short *qout,
+                   lz_i64 *acc);
+
 /* lz_matmul_row_sse and lz_fwht_stage_f32_sse were declared here. They
    are SSE1 on %xmm and touch no MMX register, so they moved to
    src/ops_sse.h - see its header for the %mm/%xmm distinction that
@@ -235,13 +249,6 @@ void lz_p2_split32_mmx(const lz_p2_blk *blk, int8_t *oh, int8_t *ol);
    above. See ops.c's own note beside the Watcom twin. */
 void lz_p2_split32_sse(const lz_p2_blk *blk, int8_t *oh, int8_t *ol);
 
-/* norm_ss_fixed's element loop, SSE1 tier - here and not in ops_sse.h
-   for the same reason as lz_p2_split32_sse above: SSE1's convert is
-   cvtps2pi, so the pack, clamp and multiply-add all land in %mm and
-   this cell owes an emms. Groups of 4; the caller runs the tail. */
-#define LZ_NORM_SS_SSE_EXTERN 1
-int lz_norm_ss_sse(const float *x, int n, float sc, short *qout,
-                   lz_i64 *acc);
 
 /* ---- GDN/KDA pass 1, 4-lane table contraction -------------------------
    Same name as the Watcom #pragma aux declaration in ops.c: the two are
