@@ -33,6 +33,11 @@
 #define LZ_ROW_SSE2_EXTERN  1
 #define LZ_P2_SSE2_EXTERN   1
 #define LZ_ROPE_SSE2_EXTERN 1
+/* epi's int32 x int16 -> int64 accumulation. gcc-only for now: the
+   Watcom #pragma aux twin is not written, so this sits with the trio
+   above rather than with the LZ_HAVE_* flags that cover both. */
+#define LZ_EPI_SSE2_EXTERN  1
+lz_i64 lz_epi_mac_i16_sse2(const int32_t *a, const int16_t *m, int n);
 #endif
 
 /* The two LZ_HAVE_* flags are defined for BOTH toolchains, not just gcc

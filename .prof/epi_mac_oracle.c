@@ -141,6 +141,22 @@ static lz_i64 mac_carry_free(const int *a, const short *m, int n) {
    lane - a periodic flush would need a period of one, which is what
    this already is. */
 #include <emmintrin.h>
+
+/* -DEPI_LINK_SHIPPED points the harness at the real symbol in
+   ops_sse2.c instead of the copy below. Both are kept: the copy lets
+   this file build and run standalone, and the link mode is what proves
+   the SHIPPED function passes rather than a body that merely resembles
+   it. Verifying a copy and calling the artifact verified is a mistake
+   this tree has made before.
+
+   Build: gcc -O2 -std=c99 -Wall -Wextra -msse2 -Isrc -DEPI_LINK_SHIPPED \
+          -DLZ_SSE2_TU=1 .prof/epi_mac_oracle.c src/ops_sse2.c -o /tmp/x */
+#ifdef EPI_LINK_SHIPPED
+#include "ops_sse2.h"
+static lz_i64 mac_sse2(const int *a, const short *m, int n) {
+    return lz_epi_mac_i16_sse2((const int32_t *)a, (const int16_t *)m, n);
+}
+#else
 static lz_i64 mac_sse2(const int *a, const short *m, int n) {
     const __m128i lo16 = _mm_set1_epi32(0x0000FFFF);
     const __m128i one  = _mm_set1_epi32(1);
@@ -190,6 +206,7 @@ static lz_i64 mac_sse2(const int *a, const short *m, int n) {
     }
     return (((s_ah + tail_ah) + (s_b + tail_b)) << 16) + (s_als + tail_als);
 }
+#endif /* EPI_LINK_SHIPPED */
 
 static unsigned rng_state = SEED;
 static unsigned rng_next(void) {

@@ -3294,6 +3294,69 @@ void lz_wsum_pair_sse2(const int8_t *rowA, const int8_t *rowB,
     }
 }
 
+/* epi's int32 x int16 -> int64 accumulation, the shape lz_epi_mac_i16
+   has. Three madds per group of four and no pmuludq: each operand is
+   built with the value in the low 16 bits and zero in the high, so
+   _mm_madd_epi16 - which reads both halves as signed int16 and adds
+   them - returns v*m per lane, the high half contributing nothing while
+   the low keeps the correct two's complement pattern for negatives.
+
+   The split is carry-free on purpose. Folding the borrow into ah is the
+   textbook form and it takes ah to 32768 for a near INT_MAX, which is
+   not int16 and wraps silently; carrying the borrow as its own term
+   keeps every lane in range. S_ah and S_b meet only in 64 bits.
+
+   Products widen every iteration rather than accumulating in int32:
+   |ah * m| reaches 2^30, so two of them overflow a lane.
+
+   Predicate: .prof/epi_mac_oracle.c, which checks this against three
+   independent scalar derivations over 20091 cases and carries a
+   mutation (-DEPI_MUT_SIGNED_LOW) proving it can go red. */
+lz_i64 lz_epi_mac_i16_sse2(const int32_t *a, const int16_t *m, int n) {
+    const __m128i lo16 = _mm_set1_epi32(0x0000FFFF);
+    const __m128i one  = _mm_set1_epi32(1);
+    const __m128i zero = _mm_setzero_si128();
+    __m128i acc_ah = zero, acc_als = zero, acc_b = zero;
+    lz_i64 t[2], s_ah, s_als, s_b;
+    int g = 0;
+
+    for (; g + 3 < n; g += 4) {
+        __m128i av  = _mm_loadu_si128((const __m128i *)(const void *)(a + g));
+        __m128i mv  = _mm_loadl_epi64((const __m128i *)(const void *)(m + g));
+        __m128i m32 = _mm_and_si128(_mm_unpacklo_epi16(mv, zero), lo16);
+        __m128i ah  = _mm_and_si128(_mm_srai_epi32(av, 16), lo16);
+        __m128i als = _mm_and_si128(av, lo16);
+        __m128i bb  = _mm_and_si128(_mm_srli_epi32(av, 15), one);
+        __m128i pa  = _mm_madd_epi16(ah,  m32);
+        __m128i pl  = _mm_madd_epi16(als, m32);
+        __m128i pb  = _mm_madd_epi16(bb,  m32);
+        acc_ah  = _mm_add_epi64(acc_ah,
+                  _mm_unpacklo_epi32(pa, _mm_srai_epi32(pa, 31)));
+        acc_ah  = _mm_add_epi64(acc_ah,
+                  _mm_unpackhi_epi32(pa, _mm_srai_epi32(pa, 31)));
+        acc_als = _mm_add_epi64(acc_als,
+                  _mm_unpacklo_epi32(pl, _mm_srai_epi32(pl, 31)));
+        acc_als = _mm_add_epi64(acc_als,
+                  _mm_unpackhi_epi32(pl, _mm_srai_epi32(pl, 31)));
+        acc_b   = _mm_add_epi64(acc_b,
+                  _mm_unpacklo_epi32(pb, _mm_srai_epi32(pb, 31)));
+        acc_b   = _mm_add_epi64(acc_b,
+                  _mm_unpackhi_epi32(pb, _mm_srai_epi32(pb, 31)));
+    }
+    _mm_storeu_si128((__m128i *)(void *)t, acc_ah);  s_ah  = t[0] + t[1];
+    _mm_storeu_si128((__m128i *)(void *)t, acc_als); s_als = t[0] + t[1];
+    _mm_storeu_si128((__m128i *)(void *)t, acc_b);   s_b   = t[0] + t[1];
+    for (; g < n; g++) {
+        int ah  = a[g] >> 16;
+        int als = (short)((unsigned)a[g] & 0xFFFFu);
+        int b   = (a[g] >> 15) & 1;
+        s_ah  += (lz_i64)(ah  * m[g]);
+        s_als += (lz_i64)(als * m[g]);
+        s_b   += (lz_i64)(b   * m[g]);
+    }
+    return ((s_ah + s_b) << 16) + s_als;
+}
+
 #endif /* __WATCOMC__ */
 
 #endif /* LZ_SSE2_TU */
