@@ -1518,10 +1518,21 @@ static lz_i64 lz_epi_mac_grp(const int32_t *a, const int16_t *xq,
         s += (lz_i64)a[i] * (lz_i64)((int32_t)xq[i] * w);
     return s;
 }
-/* See the Watcom twin above for why this exists and what it replaced. */
+/* See the Watcom twin above for why this exists and what it replaced.
+
+   The SSE2 body is selected at the tier, not by an ifdef alone: the C
+   loop stays reachable so --kernel ref and --kernel mmx still exercise
+   it, which is what the identity gate compares against. */
 static lz_i64 lz_epi_mac_i16(const int32_t *a, const int16_t *m, int n) {
     lz_i64 s = 0;
     int g;
+#if defined(LZ_EPI_SSE2_EXTERN)
+    /* Same lazy guard the other dispatch sites carry: the GUI never
+       calls lz_kernel_select, so g_kernel reaches its value here. */
+    if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
+    if (g_kernel == LZ_KERNEL_SSE2)
+        return lz_epi_mac_i16_sse2(a, m, n);
+#endif /* LZ_EPI_SSE2_EXTERN */
     for (g = 0; g < n; g++) s += (lz_i64)a[g] * (lz_i64)m[g];
     return s;
 }
@@ -4172,6 +4183,10 @@ static const char km_why_epi_x86[] =
     "pmaddwd shape the name suggests. SSE2 reaches it with pmuludq plus "
     "sign correction, MMX by splitting the int32 into 16-bit halves; "
     "both are more work than a straight pmaddwd, neither is impossible";
+static const char km_why_epi_wat_sse2[] =
+    "todo: the gcc SSE2 body (lz_epi_mac_i16_sse2, ops_sse2.c) exists; "
+    "its Watcom #pragma aux twin does not, which is the half of the "
+    "both-toolchains rule this operator still owes";
 static const char km_why_epi_arma[] =
     "todo: same int32 x int16 -> int64 accumulation as the x86 cells. "
     "ARMv5TE has SMLAL, which is exactly this shape, so this cell is "
@@ -4237,7 +4252,7 @@ static const LZKmReg km_reg[LZ_KM_NUNIT * LZ_KM_NCOL] = {
    LZ_P2_SSE2_EXTERN are what km_op_present can key off, and the SSE2
    one is declared under !__WATCOMC__. */
 /* recur*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_T(km_why_recur_wat_mmx), KM_H(LZ_KMB_WAT), KM_T(km_why_recur_wat_sse2), KM_H(LZ_KMB_ARM), KM_T(km_why_recur_arma), KM_N(km_why_op_g128),
-/* epi  */ KM_H(KM_ALL), KM_T(km_why_epi_x86), KM_T(km_why_epi_x86), KM_T(km_why_epi_x86), KM_T(km_why_epi_x86), KM_T(km_why_epi_x86), KM_T(km_why_epi_x86), KM_H(LZ_KMB_ARM), KM_T(km_why_epi_arma), KM_N(km_why_op_g128)
+/* epi  */ KM_H(KM_ALL), KM_T(km_why_epi_x86), KM_T(km_why_epi_x86), KM_H(LZ_KMB_GCC), KM_T(km_why_epi_x86), KM_T(km_why_epi_x86), KM_T(km_why_epi_wat_sse2), KM_H(LZ_KMB_ARM), KM_T(km_why_epi_arma), KM_N(km_why_op_g128)
 };
 
 #if defined(__WATCOMC__)
@@ -4367,6 +4382,10 @@ static int km_op_present(int f, int c) {
        gcc column with no build-class split - the macro IS the split. */
     if (f == LZ_KM_UNIT_RECUR && c == LZ_KM_COL_ROW0 + LZ_ROW_SSE2_I) return 1;
 #endif /* LZ_P2_SSE2_EXTERN */
+#if defined(LZ_EPI_SSE2_EXTERN)
+    /* Same shape: gcc-only macro, so no build-class split needed. */
+    if (f == LZ_KM_UNIT_EPI && c == LZ_KM_COL_ROW0 + LZ_ROW_SSE2_I) return 1;
+#endif /* LZ_EPI_SSE2_EXTERN */
 
 #if defined(LZ_FWHT_MMX_EXTERN)
     /* The Hadamard's MMX stage kernel. LZ_FWHT_MMX_EXTERN is defined for
