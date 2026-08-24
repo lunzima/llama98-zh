@@ -31,9 +31,16 @@
 
 #if !defined(__WATCOMC__)
 #define LZ_ROW_SSE2_EXTERN  1
-#define LZ_P2_SSE2_EXTERN   1
 #define LZ_ROPE_SSE2_EXTERN 1
 #endif
+
+/* Unconditional, like LZ_P2_MMX_EXTERN and LZ_P2_SSE_EXTERN: the SSE2
+   recurrence pair is in the Watcom link too, and ops_gdn.c already
+   reaches it through LZ_HAVE_P2_SSE2_ASM. Leaving it gcc-only left
+   km_op_present with no macro for the Watcom cell, which is why an
+   operator with a body on both sides registered one. Callers must now
+   pick the column by build class - the macro is no longer the split. */
+#define LZ_P2_SSE2_EXTERN   1
 
 /* epi's int32 x int16 -> int64 accumulation. OUTSIDE the trio above,
    because both toolchains have a body: intrinsics on gcc, a #pragma aux

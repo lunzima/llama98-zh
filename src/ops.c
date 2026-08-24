@@ -4231,10 +4231,6 @@ static const char km_why_recur_arma[] =
     "todo: the GDN recurrence has four x86 bodies and no ARM one. "
     "ARMv5TE can do the int16 multiply-accumulate this needs, so the "
     "cell is owed rather than impossible";
-static const char km_why_recur_wat_sse2[] =
-    "todo: lz_p2_rows_sse2's body is in the Watcom link, but "
-    "LZ_P2_SSE2_EXTERN is declared under !__WATCOMC__, so there is no "
-    "macro for km_op_present to key this cell off yet";
 /* The four 64-bit-lane cells. SSE1 shares this reason with MMX because
    for THIS operator it adds nothing: its integer additions are pmaxsw,
    pshufw, pextrw and movntq on %mm, none of which is a multiply and
@@ -4314,7 +4310,7 @@ static const LZKmReg km_reg[LZ_KM_NUNIT * LZ_KM_NCOL] = {
    Watcom SSE columns stay with the gcc class: LZ_P2_SSE_EXTERN and
    LZ_P2_SSE2_EXTERN are what km_op_present can key off, and the SSE2
    one is declared under !__WATCOMC__. */
-/* recur*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_T(km_why_recur_wat_sse2), KM_H(LZ_KMB_ARM), KM_T(km_why_recur_arma), KM_N(km_why_op_g128),
+/* recur*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_T(km_why_recur_arma), KM_N(km_why_op_g128),
 /* epi  */ KM_H(KM_ALL), KM_T(km_why_epi_x86), KM_T(km_why_epi_x86), KM_H(LZ_KMB_GCC), KM_T(km_why_epi_x86), KM_T(km_why_epi_x86), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_op_g128)
 };
 
@@ -4445,9 +4441,11 @@ static int km_op_present(int f, int c) {
 #endif /* __WATCOMC__ */
 #endif /* LZ_P2_SSE_EXTERN */
 #if defined(LZ_P2_SSE2_EXTERN)
-    /* Declared under !__WATCOMC__ in ops_sse2.h, so this one names the
-       gcc column with no build-class split - the macro IS the split. */
+#if defined(__WATCOMC__)
+    if (f == LZ_KM_UNIT_RECUR && c == LZ_KM_COL_ROW0 + LZ_ROW_SSE2_A) return 1;
+#else
     if (f == LZ_KM_UNIT_RECUR && c == LZ_KM_COL_ROW0 + LZ_ROW_SSE2_I) return 1;
+#endif /* __WATCOMC__ */
 #endif /* LZ_P2_SSE2_EXTERN */
 #if defined(LZ_EPI_SSE2_EXTERN)
     /* Both toolchains have an epi SSE2 body, so this one IS split by
