@@ -3783,11 +3783,13 @@ static const char *const km_col[LZ_KM_NCOL] = {
 
 /* Printed, so one line each; the audit above is the long form. */
 /* CONFIRMED BY THE COMPILER, not only by the instruction audit. gcc
-   -O3 on the same C, build/o3_probe.sh: lz_attn_score_q8 emits 63
-   packed-ARITHMETIC instructions at -march=x86-64 and lz_attn_wsum_q8
-   emits 73, and BOTH emit ZERO at -m32 -march=pentium3 - out of 393
-   and 538 instructions in the body, so the zero is the vectoriser
-   declining and not the probe missing its symbol.
+   -O3 on the same C, build/o3_probe.sh: ALL FIFTEEN probed units emit
+   zero packed ARITHMETIC at -m32 -march=pentium3, every one of them
+   with a non-empty body, so the zero is the vectoriser declining and
+   not the probe missing its symbol. The five weight formats these
+   cells belong to are among them - q8_0 at 388 instructions, q4_1 at
+   340 - as are lz_attn_score_q8 (393) and lz_attn_wsum_q8 (538), which
+   emit 63 and 73 at -march=x86-64.
 
    THE FIGURE READ 151 AND 122 HERE for one commit and was wrong: the
    pattern counted movaps and movdqa, which is how gcc copies an xmm
@@ -3804,8 +3806,8 @@ static const char *const km_col[LZ_KM_NCOL] = {
 static const char km_why_sse1[] =
     "SSE1 adds no signed 16x16->32 MAC and no integer %xmm; its own MMX "
     "additions (pmaxsw/pshufw/psadbw) are real but are not a MAC. gcc "
-    "-O3 at -march=pentium3 emits zero packed ARITHMETIC for these loops "
-    "against 63 at -march=x86-64 (build/o3_probe.sh)";
+    "-O3 at -march=pentium3 emits zero packed ARITHMETIC for every unit "
+    "probed, these five formats included (build/o3_probe.sh)";
 static const char km_why_t2g128[] =
     "nothing to hoist across the four sub-blocks - see LZ_G128_T2 in "
     "src/ops.c";
