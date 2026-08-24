@@ -69,6 +69,7 @@ cls() {   # cls UNIT COLUMN -> the one-letter class
 FAIL=0
 NPAIR=0
 NBOTH=0
+NOWED=0
 for u in $UNITS; do
     for p in "mmxI:mmxA" "sseI:sseA" "sse2I:sse2A"; do
         gi=${p%%:*}; wa=${p#*:}
@@ -81,6 +82,25 @@ for u in $UNITS; do
         case "$g" in x|o) gf=1 ;; esac
         case "$w" in x|o) wf=1 ;; esac
         if [ "$gf" != "$wf" ]; then
+            # A DECLARED todo IS NOT THIS GATE'S FAILURE. `t` is an
+            # explicit registry state carrying a reason string, and
+            # twin_pair_gate counts every one of them against a ceiling
+            # that only a deliberate edit raises. Failing here as well
+            # judges the same fact twice, with the harsher of the two
+            # verdicts winning - which makes that ceiling meaningless
+            # and makes a unit landing its gcc side first redden the
+            # build for everyone until its twin exists. It surfaced when
+            # recur and epi arrived that way.
+            #
+            # Anything OTHER than `t` on the empty side still fails: `!`
+            # is a kernel present but unregistered and `?` a
+            # registration with no kernel, and both mean the registry is
+            # describing a binary that does not exist. Those are this
+            # gate's business and nobody else's.
+            if [ "$g" = "t" ] || [ "$w" = "t" ]; then
+                NOWED=$((NOWED + 1))
+                continue
+            fi
             echo "FAIL: $u - $gi is '$g' but $wa is '$w'; one toolchain has a"
             echo "      hand-written kernel the other does not, so there is no"
             echo "      twin for the identity gate to compare"
@@ -150,7 +170,8 @@ for o in $G128_OWED; do
     fi
 done
 
-echo "gcc_watcom_pair_gate: $NPAIR paired, $NBOTH empty on both sides"
+echo "gcc_watcom_pair_gate: $NPAIR paired, $NBOTH empty on both sides,"
+echo "  $NOWED declared todo (bounded by twin_pair_gate, not here)"
 [ "$FAIL" -eq 0 ] || { echo "gcc_watcom_pair_gate: FAIL"; exit 1; }
 echo "gcc_watcom_pair_gate: PASS"
 exit 0

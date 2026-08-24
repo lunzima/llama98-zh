@@ -49,6 +49,33 @@
 # Before optimising anything this table names, put a counter in it and
 # generate one token.
 #
+# THE FIRST LOOK, over the non-operator files - the ones the project's
+# goal singles out as "new compilers optimise well, old ones do not".
+# Measured on generate, sampler, chat, json, session and model:
+#
+#   file        gcc move   watcom move
+#   generate       53%         51%
+#   sampler        35%         40%
+#   chat           44%         45%
+#   json           45%         50%
+#   session        52%         51%
+#   model          54%         56%
+#
+# WATCOM IS NOWHERE WELL ABOVE gcc, which is the criterion this file
+# sets three paragraphs up. The widest gap is five points, and on two of
+# the six Watcom is the LOWER of the two. So the shape the goal
+# describes - old compiler doing badly where the new one does fine - is
+# not present in this code, and there is no source-level register
+# pressure target to attack here.
+#
+# What is true is that both columns sit near half, above the third this
+# header calls ordinary. That is a property of 32-bit x86 with eight
+# registers and of these functions' argument counts, not of Watcom, and
+# moving it would mean restructuring for fewer live values against BOTH
+# compilers at once. A different job from the one the goal asks for,
+# and it should not be started on this evidence alone: see the counter
+# paragraph above.
+#
 # WHERE THE TABLE POINTS, per function, generate.c at the shipping
 # flags, functions of 100+ instructions:
 #
@@ -145,10 +172,24 @@ classify() {
         END { printf "%d %d %d %d\n", t, mv + 0, lea + 0, fp + 0 }'
 }
 
+# A BARE RUN USED TO PRINT THE HEADER AND NOTHING, exit 0 - which reads
+# as "measured, nothing to report" and is really "measured nothing".
+# Same failure o3_probe's SYMBOL-NOT-FOUND arm exists to prevent. The
+# default is the non-operator set the first look above covers; the
+# operator files are deliberately not in it, since their movement share
+# is a property of hand-written kernels rather than of the compiler.
+SRCS="$*"
+if [ -z "$SRCS" ]; then
+    SRCS="src/generate.c src/sampler.c src/chat.c src/json.c"
+    SRCS="$SRCS common/session.c src/model.c"
+    echo "(no files given; using the non-operator default set)"
+fi
+
 printf '%-14s %s\n' "" "        gcc                    watcom"
 printf '%-14s %8s %7s %6s   %8s %7s %6s\n' \
        file total move lea total move lea
-for src in "$@"; do
+rows=0
+for src in $SRCS; do
     [ -f "$src" ] || continue
     b=$(basename "$src" .c)
     gcc -O2 -m32 -march=i486 -mtune=pentium -std=c99 $D \
@@ -171,4 +212,16 @@ for src in "$@"; do
     [ "${gt:-0}" -gt 0 ] && [ "${kt:-0}" -gt 0 ] || continue
     printf '%-14s %8d %6d%% %5d   %8d %6d%% %5d\n' \
         "$b" "$gt" $((gm * 100 / gt)) "$gl" "$kt" $((km * 100 / kt)) "$kl"
+    rows=$((rows + 1))
 done
+
+# A table with no rows is not a clean bill: every file was skipped, by a
+# compile that failed or a disassembly that came back empty, and the
+# `continue`s above are silent about which.
+if [ "$rows" -eq 0 ]; then
+    echo
+    echo "move_census: no file produced a row - every one was skipped."
+    echo "  Both compilers have to build it and both disassemblers have"
+    echo "  to return mnemonics; an empty table measures nothing."
+    exit 1
+fi
