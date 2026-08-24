@@ -12,24 +12,45 @@
    PASS is a clean compile. E1175 here means the flat form has its own
    ceiling and the two new units need a different container.
 
-   RESULT SO FAR: INCONCLUSIVE, and the control is why. Both forms
-   compile clean at 17 x 10 under wcc386 -6r - flat AND the nested shape
-   ops.c says drew E1175 on its fifteenth row. A control that will not
-   go red means this probe is not reproducing the real constraint, so
-   its green says nothing about whether recur and epi fit.
+   RESULT: recur and epi are not blocked by the initializer count. The
+   installed Open Watcom compiles 17 x 10 clean, and it does so in BOTH
+   shapes - including the nested one ops.c says drew E1175 on its
+   fifteenth row.
 
-   What this file leaves out that the real table has: every row here is
-   KM_H with a null pointer, while km_reg mixes KM_H, KM_I, KM_N, KM_T
-   and KM_D, and the last four each put a string literal into the
-   initializer. String literals are the obvious next suspect - reproduce
-   with those before trusting any answer here. */
+   That took two controls to establish honestly. The first (nested at
+   17 x 10) would not go red, which meant the probe might simply be
+   unable to see the diagnostic. The second pushes to 130 rows / 1300
+   cells, nested, with the string literals the real table carries. It
+   compiles too. So this wcc386 has no ceiling anywhere near the sizes
+   in play, and the greens above are real rather than blind.
+
+   Which leaves ops.c's own comment: it justifies the flat shape as
+   forced by a compiler limit, and that limit does not reproduce here.
+   It may have been true of a different Open Watcom, or the original
+   E1175 may have had another cause. Either way it now reads as a hard
+   constraint on the table's shape and is not one for this toolchain.
+   NOT acted on: flat works, ops.c is checked out elsewhere, and a
+   comment that was true once is a different problem from a wrong one. */
 
 typedef struct { unsigned char have; unsigned char why; const char *text; } LZKmReg;
 #define KM_H(mask) { (unsigned char)(mask), 0, (const char *)0 }
 
-/* One grid line, ten columns - the shape of a real row. */
-#define R10 KM_H(7), KM_H(1), KM_H(0), KM_H(1), KM_H(2), \
-            KM_H(0), KM_H(2), KM_H(4), KM_H(4), KM_H(1)
+#define KM_I(text) { 0, 1, (text) }
+#define KM_N(text) { 0, 2, (text) }
+
+/* The four why-macros put a string literal in the initializer. km_reg's
+   operator rows carry three of them each, so a faithful row has to as
+   well - the count alone was not the constraint. */
+static const char why_a[] =
+    "impossible: MMX is integer-only and this is a float multiply-add. "
+    "SSE1 is the first tier that can express it";
+static const char why_b[] =
+    "this column is the 128-ELEMENT quantization group; this operator's "
+    "unit of work is a whole row, a different axis";
+
+/* One grid line, ten columns - the shape of a real operator row. */
+#define R10 KM_H(7), KM_H(1), KM_I(why_a), KM_H(1), KM_H(2), \
+            KM_I(why_a), KM_H(2), KM_H(4), KM_H(4), KM_N(why_b)
 
 /* Seventeen of them: the fifteen that exist plus recur and epi. */
 static const LZKmReg km_reg_probe[17 * 10] = {
@@ -53,7 +74,25 @@ static const LZKmReg km_reg_nested[17][10] = {
 };
 #endif
 
+/* Second control, because the first one would not go red either. If the
+   compiler never reports E1175 at any size this probe can express, then
+   it is not detecting the diagnostic at all and both greens above are
+   worthless. 130 rows / 1300 cells.
+
+   Build:  wcc386 -6r -zq -DKM_PROBE_HUGE .prof/... */
+#ifdef KM_PROBE_HUGE
+#define R100 { R10 }, { R10 }, { R10 }, { R10 }, { R10 }, \
+             { R10 }, { R10 }, { R10 }, { R10 }, { R10 }
+static const LZKmReg km_reg_huge[130][10] = {
+    R100, R100, R100, R100, R100, R100, R100, R100, R100, R100,
+    R100, R100, R100
+};
+#endif
+
 int main(void) {
+#ifdef KM_PROBE_HUGE
+    if (km_reg_huge[129][9].why != 2) return 3;
+#endif
     /* Touch the last cell so nothing is optimised away before the
        initializer count is checked. */
 #ifdef KM_PROBE_NESTED
