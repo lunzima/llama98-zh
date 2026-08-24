@@ -527,7 +527,7 @@ watcom-gui:
 # committed, and then invoked by nothing: not here, not in ci.sh. They
 # passed every time anyone ran them by hand and could not have reddened
 # a build. A gate no target depends on is a script.
-check: bare-endif-gate dead-ifndef-gate f32count-billing-gate dedupe-gate mm-alias-gate c89-floor-gate comment-hygiene-gate vc4-limits-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate kernel-matrix-gate
+check: bare-endif-gate dead-ifndef-gate f32count-billing-gate dedupe-gate mm-alias-gate c89-floor-gate comment-hygiene-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate kernel-matrix-gate
 
 # Two shared helpers with the same body under different names, which is
 # the duplication dedupe-gate cannot see: that one knows the names it is
@@ -571,6 +571,12 @@ comment-hygiene-gate:
 .PHONY: vc4-limits-gate
 vc4-limits-gate:
 	@bash build/vc4_limits_gate.sh
+
+# The real compiler, on the no-assembly set. Wired only once it was
+# green: a gate that starts red is one people learn to skip.
+.PHONY: vc4-compile-gate
+vc4-compile-gate:
+	@bash build/vc4_compile_gate.sh
 
 # A bare "#endif" (no trailing comment) is a regression the split ops
 # commits already made once - every #endif must say what it closes.
