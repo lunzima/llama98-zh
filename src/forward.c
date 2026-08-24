@@ -2138,7 +2138,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                It depends only on t, never on h - hoisting it out of the
                HEAD loop as well would need a per-token table, which is
                a buffer this function does not have. */
-            int rslot, lslot;
+            int rslot;
 
             if (k4) {
                 /* score = sum_d q[d] * (scale_t * cents[code]) - the row
@@ -2228,6 +2228,12 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                not the probability. */
             {
                 int tt;
+                /* Declared HERE, not beside rslot above: every use is
+                   inside this LZ_KV_2PLANE block, which is off by
+                   default, so a declaration outside it is an unused
+                   variable in every shipping build. rslot stays up
+                   there because the k4 loop does use it. */
+                int lslot;
 #if (LZ_ATTN_FIXED & 1)
                 if ((lz_attn_mode() & 1) && LZ_ATTN_NORING &&
                     hd > 0 && (hd % 32) == 0 && hd <= LZ_ATTN_MAX_HD) {
