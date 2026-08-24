@@ -58,7 +58,7 @@ HARNESSES=$(ls .prof/*_xcheck.sh 2>/dev/null | grep -v "wbuild_xcheck")
 # UNCOVERED is printed every run rather than kept in a comment, so
 # "every harness green" cannot be read as "every operator compared"
 # while it has entries.
-UNCOVERED=""
+UNCOVERED="recur epi"
 
 P=0; F=0; S=0
 for h in $HARNESSES; do
@@ -90,7 +90,7 @@ echo "xcheck_gate: $P passed, $F failed, $S skipped"
 if [ -n "$UNCOVERED" ]; then
     echo "xcheck_gate: NO per-operator check for:$(printf ' %s' $UNCOVERED)"
 else
-    echo "xcheck_gate: all 15 matrix units have a per-operator check"
+    echo "xcheck_gate: all 17 matrix units have a per-operator check"
 fi
 
 # The uncovered list is checked against the matrix, not trusted. A unit
@@ -100,8 +100,8 @@ fi
 if [ -x ./llama98.exe ] || [ -x ./llama98 ]; then
     BIN=./llama98.exe; [ -x "$BIN" ] || BIN=./llama98
     NU=$("$BIN" --kernel-matrix 2>/dev/null | grep -c "^cell .* ref ")
-    if [ "${NU:-0}" -gt 0 ] && [ "$NU" -ne 15 ]; then
-        echo "xcheck_gate: FAIL - the matrix has $NU units, not the 15 the"
+    if [ "${NU:-0}" -gt 0 ] && [ "$NU" -ne 17 ]; then
+        echo "xcheck_gate: FAIL - the matrix has $NU units, not the 17 the"
         echo "  mapping above was written against; re-derive UNCOVERED"
         exit 1
     fi
