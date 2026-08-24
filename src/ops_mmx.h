@@ -63,9 +63,16 @@
    ops.c's own static copy is gone. */
 lz_p2_blk *p2_blk(void);
 
+/* Unconditional, like LZ_P2_SSE_EXTERN above and for the same reason:
+   the MMX recurrence bodies (lz_gdn1_x4_asm, lz_gdn_sum_gg_mmx) are in
+   the Watcom link too, and ops_gdn.c already reaches them through
+   LZ_HAVE_P2_MMX_ASM. Only km_op_present was left with no macro to key
+   the Watcom cell off, so an operator with four x86 bodies registered
+   three. Its probe already picks the column by build class. */
+#define LZ_P2_MMX_EXTERN   1
+
 #if !defined(__WATCOMC__)
 #define LZ_WSUM_MMX_EXTERN 1
-#define LZ_P2_MMX_EXTERN   1
 #define LZ_DOT_MMX_EXTERN  1
 #endif
 

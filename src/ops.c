@@ -4231,10 +4231,6 @@ static const char km_why_recur_arma[] =
     "todo: the GDN recurrence has four x86 bodies and no ARM one. "
     "ARMv5TE can do the int16 multiply-accumulate this needs, so the "
     "cell is owed rather than impossible";
-static const char km_why_recur_wat_mmx[] =
-    "todo: lz_gdn1_x4_asm and lz_gdn_sum_gg_mmx are the Watcom bodies "
-    "and they run, but LZ_P2_MMX_EXTERN is declared under !__WATCOMC__, "
-    "so km_op_present has no macro to key this cell off";
 static const char km_why_recur_wat_sse2[] =
     "todo: lz_p2_rows_sse2's body is in the Watcom link, but "
     "LZ_P2_SSE2_EXTERN is declared under !__WATCOMC__, so there is no "
@@ -4318,7 +4314,7 @@ static const LZKmReg km_reg[LZ_KM_NUNIT * LZ_KM_NCOL] = {
    Watcom SSE columns stay with the gcc class: LZ_P2_SSE_EXTERN and
    LZ_P2_SSE2_EXTERN are what km_op_present can key off, and the SSE2
    one is declared under !__WATCOMC__. */
-/* recur*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_T(km_why_recur_wat_mmx), KM_H(LZ_KMB_WAT), KM_T(km_why_recur_wat_sse2), KM_H(LZ_KMB_ARM), KM_T(km_why_recur_arma), KM_N(km_why_op_g128),
+/* recur*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_T(km_why_recur_wat_sse2), KM_H(LZ_KMB_ARM), KM_T(km_why_recur_arma), KM_N(km_why_op_g128),
 /* epi  */ KM_H(KM_ALL), KM_T(km_why_epi_x86), KM_T(km_why_epi_x86), KM_H(LZ_KMB_GCC), KM_T(km_why_epi_x86), KM_T(km_why_epi_x86), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_op_g128)
 };
 
