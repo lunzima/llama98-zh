@@ -38,6 +38,10 @@
                            g_kernel but names the constants only inside
                            a macro, which expands at ITS call sites and
                            so never required them here before. */
+#include "ops_sse.h"           /* lz_i32f_acc32_sse - the SSE1 tier of the
+                           chunk fold. Between ops_mmx.h and ops_sse2.h,
+                           like the ISA ladder: a reader scanning the
+                           include block sees the tiers in order. */
 #include "ops_sse2.h"          /* lz_wsum_pair_sse2 - the SSE2 tier of
                            the pair MAC the group loops below call. This
                            TU owns the loop for BOTH tiers because the
@@ -45,6 +49,10 @@
                            lz_wsum_group_mmx), so the tier test lives
                            here rather than at a caller that does not
                            exist. */
+#include "ops_sched.h"         /* lz_i32facc_tier - LZ_I32F_ACC32 calls it.
+                           Both ISA headers come first: that macro picks
+                           its arm from the LZ_HAVE_I32FACC_* they
+                           define. */
 #include "ops_kernel_shared.h" /* lz_i32f, LZ_WSUM_CHUNK, LZ_SLOT_NEXT,
                            gdn_tail_row, p2_shift_of - shared with
                            ops.c and the other suffixed TUs, one
@@ -375,11 +383,7 @@ void lz_wsum_group_mmx(const int8_t *vc, int kvd, int g, int sink, int ring,
            a P4 running this kernel has cvtdq2ps for the fold and no
            reason to spend lz_i32f's x87 split form on it. The emms
            above has already run, so the cell owes nothing. */
-#if defined(LZ_HAVE_I32FACC_SSE2)
-        if (g_kernel == LZ_KERNEL_SSE2) lz_i32f_acc32_simd(accf, acc32);
-        else
-#endif /* LZ_HAVE_I32FACC_SSE2 */
-        for (d = 0; d < 32; d++) accf[d] += lz_i32f(acc32[d]);
+        LZ_I32F_ACC32(accf, acc32, d);
     }
 }
 

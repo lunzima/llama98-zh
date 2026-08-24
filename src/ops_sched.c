@@ -144,6 +144,35 @@ int lz_q8r_tier(void) {
 }
 #endif /* LZ_HAVE_Q8R_SIMD || LZ_HAVE_Q8R_SSE */
 
+/* Attention wsum's chunk fold: 0 scalar, 1 SSE1, 2 SSE2. Same shape as
+   lz_q8r_tier above and for the same reason - the two tiers here are a
+   scalar convert (cvtsi2ss, SSE1) and a packed one (cvtdq2ps, SSE2),
+   which is the float axis rather than the integer one g_kernel tracks,
+   so SSE1 comes from CPUID and not from g_kernel.
+
+   LZ_I32FACC_FORCE_SSE mirrors LZ_Q8R_FORCE_SSE. Without it the SSE1
+   cell is unreachable on any machine with SSE2 - which is every machine
+   that runs this suite - and a path that cannot be selected is a path
+   that cannot be validated. */
+#if defined(LZ_HAVE_I32FACC_SSE2) || defined(LZ_HAVE_I32FACC_SSE)
+int lz_i32facc_tier(void) {
+    if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
+    if (g_kernel == LZ_KERNEL_REF) return 0;
+#if defined(LZ_HAVE_I32FACC_SSE)
+#ifdef LZ_I32FACC_FORCE_SSE
+    return 1;
+#endif /* LZ_I32FACC_FORCE_SSE */
+#endif /* LZ_HAVE_I32FACC_SSE */
+#if defined(LZ_HAVE_I32FACC_SSE2)
+    if (g_kernel == LZ_KERNEL_SSE2) return 2;
+#endif /* LZ_HAVE_I32FACC_SSE2 */
+#if defined(LZ_HAVE_I32FACC_SSE)
+    if (lz_cpu_has_sse()) return 1;
+#endif /* LZ_HAVE_I32FACC_SSE */
+    return 0;
+}
+#endif /* LZ_HAVE_I32FACC_SSE2 || LZ_HAVE_I32FACC_SSE */
+
 /* ---- THE float knob -------------------------------------------------- */
 
 /* ONE axis for every fixed-point site the engine has, and one is not an

@@ -169,6 +169,55 @@ LZ_MAYBE_UNUSED static float lz_i32f(int32_t v) {
 #endif /* __FLT_EVAL_METHOD__ == 0 */
 }
 
+/* The chunk fold: accf[d] += (float)acc32[d] for 32 elements, at
+ * whichever tier the machine has.
+ *
+ * HERE, like LZ_WSUM_CHUNK and LZ_SLOT_NEXT below, and for the same
+ * reason: the two arms of the LZ_WSUM_MMX_EXTERN split - src/ops_mmx.c's
+ * group kernel and src/ops_gdn.c's inline walk - both run this fold, and
+ * a tier decision that could differ between them is a divergence nothing
+ * would report. One text, both sides.
+ *
+ * A MACRO rather than a static function because the SIMD cells are
+ * declared in src/ops_sse.h and src/ops_sse2.h, which this header does
+ * not include and must not: it is included by four TUs, two of which
+ * have no business seeing the x86 declarations at all. Expanding at the
+ * call site lets each consumer's own includes decide which cells exist.
+ * `dv` is the caller's loop variable, passed in for the same reason -
+ * C89 wants declarations at the top of a block and the fallback loop
+ * needs one.
+ *
+ * The kernels are bit-identical to the fallback, not close: lz_i32f's
+ * own comment above records the split form agreeing with the correctly
+ * rounded conversion on 87,108,878 values, and cvtdq2ps/cvtsi2ss are
+ * that conversion. */
+#if defined(LZ_HAVE_I32FACC_SSE2) && defined(LZ_HAVE_I32FACC_SSE)
+#define LZ_I32F_ACC32(accf, acc32, dv) do { \
+        int lz_tr_ = lz_i32facc_tier(); \
+        if (lz_tr_ >= 2)      lz_i32f_acc32_simd((accf), (acc32)); \
+        else if (lz_tr_ >= 1) lz_i32f_acc32_sse((accf), (acc32)); \
+        else for ((dv) = 0; (dv) < 32; (dv)++) \
+                 (accf)[dv] += lz_i32f((acc32)[dv]); \
+    } while (0)
+#elif defined(LZ_HAVE_I32FACC_SSE2)
+#define LZ_I32F_ACC32(accf, acc32, dv) do { \
+        if (lz_i32facc_tier() >= 2) lz_i32f_acc32_simd((accf), (acc32)); \
+        else for ((dv) = 0; (dv) < 32; (dv)++) \
+                 (accf)[dv] += lz_i32f((acc32)[dv]); \
+    } while (0)
+#elif defined(LZ_HAVE_I32FACC_SSE)
+#define LZ_I32F_ACC32(accf, acc32, dv) do { \
+        if (lz_i32facc_tier() >= 1) lz_i32f_acc32_sse((accf), (acc32)); \
+        else for ((dv) = 0; (dv) < 32; (dv)++) \
+                 (accf)[dv] += lz_i32f((acc32)[dv]); \
+    } while (0)
+#else
+#define LZ_I32F_ACC32(accf, acc32, dv) do { \
+        for ((dv) = 0; (dv) < 32; (dv)++) \
+            (accf)[dv] += lz_i32f((acc32)[dv]); \
+    } while (0)
+#endif /* LZ_HAVE_I32FACC_* */
+
 /* Attention wsum's chunking constant. lz_attn_wsum_q8's int32
    accumulator only holds 516 rows before the worst-case product sum
    (4,161,409 per row) risks overflow, so it chunks at 512 (2.13e9,

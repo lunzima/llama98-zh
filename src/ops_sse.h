@@ -53,6 +53,16 @@ int lz_matmul_row_sse(const float *row, const float *x, int in_dim,
 #define LZ_FWHT_F32_SSE_EXTERN 1
 void lz_fwht_stage_f32_sse(float *y, int n, int len);
 
+/* Attention wsum's chunk fold - accf[d] += (float)acc32[d], 32 wide.
+   SSE1 converts one at a time (cvtsi2ss); the packed convert at this
+   tier is cvtpi2ps, whose source is an %mm register, and the call site
+   has just paid an emms. So this cell belongs here and not with the
+   %mm family - and it still replaces lz_i32f's six-operation x87 split
+   with three instructions an element. src/ops_sse2.c holds the packed
+   twin for machines that have SSE2. */
+#define LZ_HAVE_I32FACC_SSE 1
+void lz_i32f_acc32_sse(float *accf, const int32_t *acc32);
+
 #if defined(__WATCOMC__)
 /* RMSNorm's output loop and softmax's max scan and normalize loop. The
    _w wrappers sit between the #pragma aux bodies and the three dispatch

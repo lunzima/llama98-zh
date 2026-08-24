@@ -13,13 +13,13 @@
 #include "err.h"
 #include "mmx_compat.h"
 #include "ops_mmx.h"
+#include "ops_sse.h"     /* the three norm _w wrappers LZ_NORM_SLOTS pastes */
 #include "ops_sse2.h"
 #include "ops_quant.h"
 #include "ops_sched.h"
 #include "ops_kernel_shared.h"
 #include "ops_norm.h"
 
-#include "ops_sse.h"          /* the three norm _w wrappers LZ_NORM_SLOTS pastes */
 #include "ops_kernel_norm.h"
 
 /* ---- the (1 + w) table, cached per norm weight ------------------------

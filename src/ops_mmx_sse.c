@@ -486,6 +486,41 @@ void lz_q8round_2p_group_sse(const float *grp, int8_t *ho, int8_t *lw,
     _mm_empty();
 }
 
+/* ---- attention wsum's chunk fold, SSE1 tier, Watcom twin.
+   accf[d] += (float)acc32[d]. cvtsi2ss converts ONE int32 at a time -
+   SSE1's packed convert is cvtpi2ps, whose source is an %mm register,
+   and the caller has just paid an emms to leave the row-pair loop and
+   goes back to x87 immediately after. Reaching for %mm here would owe a
+   second emms for two elements a conversion; the scalar convert owes
+   nothing and still replaces lz_i32f's six-operation x87 split form.
+
+   FOUR AT A TIME so the converts and the adds of neighbouring elements
+   can pair - cvtsi2ss has a long enough latency that a single
+   dependency chain would stall on every one. The 32-element loop is the
+   wrapper's, like lz_q8round_group_sse's above. */
+extern void lz_i32f_acc4_sse_asm(float *accf, const int32_t *acc32);
+#pragma aux lz_i32f_acc4_sse_asm = \
+    ".686" \
+    "cvtsi2ss xmm0, dword ptr [edx]" \
+    "cvtsi2ss xmm1, dword ptr [edx+4]" \
+    "cvtsi2ss xmm2, dword ptr [edx+8]" \
+    "cvtsi2ss xmm3, dword ptr [edx+12]" \
+    "addss    xmm0, dword ptr [eax]" \
+    "addss    xmm1, dword ptr [eax+4]" \
+    "addss    xmm2, dword ptr [eax+8]" \
+    "addss    xmm3, dword ptr [eax+12]" \
+    "movss    dword ptr [eax], xmm0" \
+    "movss    dword ptr [eax+4], xmm1" \
+    "movss    dword ptr [eax+8], xmm2" \
+    "movss    dword ptr [eax+12], xmm3" \
+    __parm [__eax] [__edx] \
+    __modify [8087]
+
+void lz_i32f_acc32_sse(float *accf, const int32_t *acc32) {
+    int k;
+    for (k = 0; k < 32; k += 4) lz_i32f_acc4_sse_asm(accf + k, acc32 + k);
+}
+
 /* ---- Hadamard over FLOATS: one butterfly stage of lz_fwht, SSE1
    Watcom twin. gcc twin: lz_fwht_stage_f32_sse, the intrinsics body
    below - read that one for why this is exact rather than close, and
@@ -692,6 +727,23 @@ void lz_q8round32_sse(const float *x, int8_t *o, const float *pinv) {
    combined pairwise exactly as the scalar loop combines them.
 
    No emms: SSE1's float side touches no %mm register. */
+/* Attention wsum's chunk fold, SSE1 tier, gcc twin of
+   lz_i32f_acc4_sse_asm above - read that one for why the convert is
+   scalar (cvtsi2ss) rather than SSE1's packed cvtpi2ps, which would
+   reach for %mm at a site that has just paid an emms.
+
+   Written rather than left to gcc's vectorizer for the reason
+   src/ops_sse2.c's SSE2 twin gives: an auto-vectorization has no name
+   the kernel matrix can register and no symbol a cross-toolchain
+   comparison can reach. */
+void lz_i32f_acc32_sse(float *accf, const int32_t *acc32) {
+    int k;
+    for (k = 0; k < 32; k++)
+        _mm_store_ss(accf + k,
+                     _mm_add_ss(_mm_load_ss(accf + k),
+                                _mm_cvtsi32_ss(_mm_setzero_ps(), acc32[k])));
+}
+
 void lz_fwht_stage_f32_sse(float *y, int n, int len) {
     int i, j;
     for (i = 0; i < n; i += (len << 1)) {

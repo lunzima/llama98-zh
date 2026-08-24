@@ -11,6 +11,11 @@
    Called by lz_quantize_q8 (ops.c) and lz_gdn_quantize_2p (ops_gdn.c). */
 int lz_q8r_tier(void);
 
+/* Attention wsum's chunk-fold tier (0=scalar, 1=SSE, 2=SSE2).
+   Called by lz_wsum_group_mmx (ops_mmx.c) and lz_attn_wsum_q8's own
+   walk (ops_gdn.c) - the two arms of the LZ_WSUM_MMX_EXTERN split. */
+int lz_i32facc_tier(void);
+
 /* Whether this build+machine has SIMD rounding (CPUID SSE).
    Called by lz_gdn_p2_mode, lz_epi_mode, etc. (all in ops_sched.c)
    and by lz_gdn_quantize_2p (ops_gdn.c, module 5). */
