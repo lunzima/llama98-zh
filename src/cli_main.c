@@ -1076,6 +1076,14 @@ int main(int argc, char **argv) {
             int n = 0, here = 0, other = 0, imp = 0, todo = 0, bad = 0;
             int decl = 0;
             char hs[4];
+            /* Distinct reason strings, in first-seen order, so a cell
+               that repeats one prints its number instead. 32 is well
+               over the registry's handful; overflow falls back to
+               printing the text, which is the old behaviour. */
+            const char *whytab[32];
+            char whyseen[32];
+            int nwhy = 0;
+            memset(whyseen, 0, sizeof whyseen);
 #if defined(__arm__)
             printf("format mmxI sseI sse2I mmxA sseA sse2A armC armA  g128\n%s",
                    lz_kernel_matrix());
@@ -1087,14 +1095,48 @@ int main(int argc, char **argv) {
                    "d=declined-measured "
                    "!=MISSING-HERE ?=UNREGISTERED +=UNDECLARED\n");
             for (n = 0; lz_kernel_cell(n, &kc); n++) {
+                const char *w;
+                int wi;
                 hs[0] = (kc.have & LZ_KMB_GCC) ? 'G' : '-';
                 hs[1] = (kc.have & LZ_KMB_WAT) ? 'W' : '-';
                 hs[2] = (kc.have & LZ_KMB_ARM) ? 'A' : '-';
                 hs[3] = '\0';
-                printf("cell %-5s %-5s %c %s %s %s\n", kc.unit, kc.tier,
-                       kc.status, hs,
-                       (kc.kind == LZ_KM_ROW) ? "row" : "op",
-                       kc.why ? kc.why : "-");
+                /* The reason ONCE, then by number. km_reg already shares
+                   one string across the cells that give the same reason,
+                   so printing it per cell was 24 copies of a 300-byte
+                   paragraph in 158 lines of output - and the fact a
+                   reader wants (which cells ARE filled) was buried in
+                   them. Compared by pointer, not by strcmp: cells that
+                   share a reason share the string, and two that merely
+                   read alike are two reasons. */
+                w = kc.why ? kc.why : "-";
+                wi = -1;
+                if (kc.why) {
+                    int k;
+                    for (k = 0; k < nwhy; k++)
+                        if (whytab[k] == kc.why) { wi = k; break; }
+                    if (wi < 0 && nwhy < (int)(sizeof whytab / sizeof whytab[0])) {
+                        wi = nwhy;
+                        whytab[nwhy++] = kc.why;
+                    }
+                }
+                if (wi >= 0 && whyseen[wi]) {
+                    printf("cell %-5s %-5s %c %s %s (why %d)\n",
+                           kc.unit, kc.tier, kc.status, hs,
+                           (kc.kind == LZ_KM_ROW) ? "row" : "op", wi + 1);
+                } else {
+                    if (wi >= 0) {
+                        whyseen[wi] = 1;
+                        printf("cell %-5s %-5s %c %s %s [why %d] %s\n",
+                               kc.unit, kc.tier, kc.status, hs,
+                               (kc.kind == LZ_KM_ROW) ? "row" : "op",
+                               wi + 1, w);
+                    } else {
+                        printf("cell %-5s %-5s %c %s %s %s\n",
+                               kc.unit, kc.tier, kc.status, hs,
+                               (kc.kind == LZ_KM_ROW) ? "row" : "op", w);
+                    }
+                }
                 switch (kc.status) {
                 case 'x': here++;  break;
                 case 'o': other++; break;
