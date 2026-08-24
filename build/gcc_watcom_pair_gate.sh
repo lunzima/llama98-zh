@@ -107,6 +107,7 @@ done
 # #pragma aux MMX and SSE2 this would need - and it is recorded here so
 # that a SECOND one cannot arrive unnoticed.
 G128_OWED="t2"
+G128_SEEN=""
 for u in $UNITS; do
     st=$(cls "$u" g128)
     case "$st" in x|o) ;; *) continue ;; esac
@@ -117,6 +118,7 @@ for u in $UNITS; do
             owed=0
             for o in $G128_OWED; do [ "$o" = "$u" ] && owed=1; done
             if [ "$owed" = 1 ]; then
+                G128_SEEN="$G128_SEEN $u"
                 echo "note: $u g128 is '$h' - the 128-element group form is"
                 echo "      gcc-only and the Watcom twin is owed (baselined)"
             else
@@ -127,6 +129,25 @@ for u in $UNITS; do
             fi
             ;;
     esac
+done
+
+# AND THE BASELINE MUST STILL BE OWED. The check above is one-directional:
+# it catches a second gap arriving and says nothing about the first one
+# being closed. A paid debt left in G128_OWED is worse than no baseline,
+# because the name goes on excusing a cell that no longer needs excusing
+# - and if that cell ever regressed to gcc-only again, the gate would
+# print "baselined" instead of failing. So a name that is no longer
+# unpaired is itself a failure, and clearing the debt costs deleting it.
+for o in $G128_OWED; do
+    seen=0
+    for s in $G128_SEEN; do [ "$s" = "$o" ] && seen=1; done
+    if [ "$seen" = 0 ]; then
+        echo "FAIL: '$o' is in G128_OWED but its g128 column is not"
+        echo "      gcc-only any more - either the Watcom twin landed, in"
+        echo "      which case delete the name, or the unit stopped being"
+        echo "      probed and the baseline is now excusing nothing"
+        FAIL=1
+    fi
 done
 
 echo "gcc_watcom_pair_gate: $NPAIR paired, $NBOTH empty on both sides"
