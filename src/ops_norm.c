@@ -559,6 +559,34 @@ have_ss_int:
     lz_rmsnorm_out_fixed_int(t, qx, ex, w, inv, n, deq);
 }
 
+/* THE FLOAT ENTRY, and it is still where the norms census row lives.
+ *
+ * Measured on kmr20/zh, 603 tokens: 22,311 calls, 37 per token, over
+ * five sites in forward.c - and the census puts `norms` at 106,772 float
+ * operations per token, 17.8% of the engine's total, essentially all of
+ * it here. lz_rmsnorm_int above is the same arithmetic writing int32
+ * instead of dequantizing, so the gap is not a missing operator. It is
+ * five consumers, each its own int-pipeline step, listed smallest first
+ * so the next one to do is obvious:
+ *
+ *   final_norm            1 call/token. The NEXT STATEMENT after it is
+ *                         lz_quantize_q8 on the value it just built -
+ *                         a float constructed and taken apart again.
+ *                         Blocked only on lz_matmul_xq's float argument,
+ *                         which it reads when the weight is F32, and on
+ *                         the fnorm tap.
+ *   post_attention_norm   8 calls/token. Consumer is the MoE or dense
+ *                         FFN entry, which quantizes internally.
+ *   input_layernorm       8 calls/token. Consumer is one of THREE block
+ *                         types (forward_attn, forward_kda, forward_ssm),
+ *                         each quantizing on its own, plus a float tap -
+ *                         so this one is three steps, not one.
+ *   q_norm                16 calls/token, and k_norm 4. Consumer is
+ *                         RoPE, which is float trigonometry; there is no
+ *                         int entry to hand it to.
+ *
+ * Not started here because every one of them is an edit to forward.c.
+ * The numbers are recorded so the next reader does not re-measure. */
 void lz_rmsnorm(float *o, const float *x, const float *w, int n, float eps) {
     float ss = 0.0f;
     float inv;
