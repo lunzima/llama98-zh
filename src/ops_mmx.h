@@ -101,6 +101,19 @@ void lz_q8round32_pack_mmx(const int32_t *q, int8_t *out);
 #define LZ_HAVE_NORM_SS_PACK_MMX 1
 lz_i64 lz_norm_ss_pack_mmx(const int32_t *q, short *qout);
 
+/* The Q15 table interpolation that ends sigmoid_q15 and lz_exp_fixed:
+   out[k] = a[k] + (((b[k] - a[k]) * frac[k]) >> 15). The LOOKUP stays
+   scalar - a per-element table index needs a gather, and that is AVX2 -
+   and the arithmetic around it does not.
+   PRECONDITION |b - a| <= 32767: the multiply is 16-bit and this
+   saturates rather than wrapping if it is broken. The callers meet it
+   because a and b are adjacent entries of a 384-step table. `a` itself
+   does NOT fit int16 - it reaches 32768 - so it stays int32.
+   Whole groups of 32; the caller runs the tail. */
+#define LZ_HAVE_LERP_Q15_MMX 1
+void lz_lerp_q15_mmx(const int32_t *a, const int32_t *b,
+                     const int32_t *frac, int32_t *out, int n);
+
 /* norm_ss_fixed's element loop, SSE1 tier. HERE and not in ops_sse.h
    for the same reason as lz_p2_split32_sse below: SSE1's convert is
    cvtps2pi, so the pack, the clamp and the multiply-add all land in

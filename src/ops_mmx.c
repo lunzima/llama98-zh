@@ -1215,6 +1215,65 @@ lz_i64 lz_norm_ss_pack_mmx(const int32_t *q, short *qout) {
     return acc;
 }
 
+/* ---- the Q15 table interpolation, MMX tier, Watcom twin.
+   gcc twin: lz_lerp_q15_mmx in the #else arm - read that one for the
+   precondition (|b - a| <= 32767, which the callers meet because a and
+   b are adjacent table entries) and for why `a` stays int32.
+
+   32 ELEMENTS a call, eight passes of four, one emms at the exit. A
+   four-element pragma would put an emms every four values, and the
+   caller returns to x87 immediately, so the granularity is the whole
+   difference between this being a kernel and being a regression - the
+   same reason lz_norm_ss_pack_mmx_asm loops internally. */
+extern void lz_lerp_q15_32_mmx_asm(const int32_t *a, const int32_t *b,
+                                   const int32_t *frac, int32_t *out);
+#pragma aux lz_lerp_q15_32_mmx_asm = \
+    ".586"                              \
+    "push    esi"                       \
+    "mov     esi, 8"                    \
+    "lerploop:"                         \
+    "movq    mm0, [eax]"                \
+    "movq    mm1, [eax+8]"              \
+    "movq    mm2, [edx]"                \
+    "movq    mm3, [edx+8]"              \
+    "psubd   mm2, mm0"                  \
+    "psubd   mm3, mm1"                  \
+    "packssdw mm2, mm3"                 \
+    "movq    mm4, [ebx]"                \
+    "movq    mm5, [ebx+8]"              \
+    "packssdw mm4, mm5"                 \
+    "movq    mm5, mm2"                  \
+    "pmullw  mm5, mm4"                  \
+    "pmulhw  mm2, mm4"                  \
+    "movq    mm6, mm5"                  \
+    "punpcklwd mm6, mm2"                \
+    "punpckhwd mm5, mm2"                \
+    "psrad   mm6, 15"                   \
+    "psrad   mm5, 15"                   \
+    "paddd   mm6, mm0"                  \
+    "paddd   mm5, mm1"                  \
+    "movq    [ecx], mm6"                \
+    "movq    [ecx+8], mm5"              \
+    "add     eax, 16"                   \
+    "add     edx, 16"                   \
+    "add     ebx, 16"                   \
+    "add     ecx, 16"                   \
+    "dec     esi"                       \
+    "jnz     lerploop"                  \
+    "pop     esi"                       \
+    "emms"                              \
+    __parm [__eax] [__edx] [__ebx] [__ecx] \
+    __modify [__eax __ebx __ecx __edx 8087];
+
+void lz_lerp_q15_mmx(const int32_t *a, const int32_t *b,
+                     const int32_t *frac, int32_t *out, int n) {
+    int k = 0;
+    for (; k + 31 < n; k += 32)
+        lz_lerp_q15_32_mmx_asm(a + k, b + k, frac + k, out + k);
+    for (; k < n; k++)
+        out[k] = a[k] + (((b[k] - a[k]) * frac[k]) >> 15);
+}
+
 /* ---- Q8_0 32/128-element dot products and row kernel, MMX tier -
    in this TU. Algorithm documentation (why the weight side is widened
    via punpcklbw(zero,w), the register-budget accounting for the paired
