@@ -4247,12 +4247,17 @@ static const char km_why_epi_x86[] =
     "todo: the products are pmaddwd's shape but the ACCUMULATOR is not. "
     "paddq is SSE2 even on %mm, so a 64-bit sum has to leave the vector "
     "unit: |ah*m| reaches 2^30 and two of them overflow an int32 lane, "
-    "which caps a flush-free run at two elements per lane. The shape "
-    "lz_norm_ss_sse already uses - products in %mm, accumulate in "
-    "scalar int64, one spill per group of four - costs about 10.75 "
-    "instructions an element against the scalar imul loop's 8.00, and "
-    "buys a quarter of the branches. Owed, not impossible; the pack is "
-    "{b,ah} against {m,m} so one pmaddwd lane is the whole high term";
+    "and a lane takes ONE madd result, not two: 2*2^30 lands exactly on "
+    "2^31. WRITTEN AND MEASURED, then not shipped - the intrinsics body "
+    "passes the oracle's 20106 cases and costs 19 instructions an "
+    "element on the 32-bit i486 build against the scalar imul loop's 8, "
+    "because spilling every two elements is what the lane bound forces "
+    "and gcc stacks the accumulators on top of that. A Pentium MMX "
+    "resolves auto to this tier, so shipping it would slow down the "
+    "machine the tier exists for. Owed, not impossible; the pack is "
+    "{b,ah} against {m,m}, which makes one pmaddwd lane the whole high "
+    "term, and Open Watcom's mmintrin.h declares __m64 and none of the "
+    "intrinsics, so its twin has to be a #pragma aux";
 typedef struct { unsigned char have; unsigned char why; const char *text; } LZKmReg;
 #define KM_H(mask) { (unsigned char)(mask), 0, (const char *)0 }
 #define KM_I(text) { 0, LZ_KM_IMPOSSIBLE, (text) }
