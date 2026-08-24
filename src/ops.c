@@ -3991,31 +3991,14 @@ static const char km_why_attn_g128[] =
    because the reason argued taxonomy - an SSE1/MMX hybrid is still an
    SSE1 cell, it needs SSE1 to run.
 
-   MMX alone cannot start it: the scale is a FLOAT multiply and MMX is
-   integer-only. */
-/* REOPENED under the standard above: "MMX is integer-only" answers
-   whether the loop runs in ONE pass, and the question is whether the
-   tier can do ANY PART. It can. The scale and the convert are float,
-   but the clamp and the sum of squares are not: packssdw saturates the
-   int32 pair and pmaddwd IS the pairwise sum of products, both MMX.
-   Two passes - x87 scales and converts a block into an int32 scratch,
-   one emms, MMX runs the integer half four wide - and the emms is once
-   per block rather than once per element, which is what made the
-   one-pass form a regression rather than a speedup. The int64
-   accumulate stays scalar for the reason the SSE1 cell gives: paddq is
-   SSE2 even on %mm.
+   MMX gets a cell too, and the sentence that used to sit here - "MMX
+   alone cannot start it: the scale is a FLOAT multiply and MMX is
+   integer-only" - was answering whether the loop runs in ONE pass. It
+   does not have to. lz_norm_ss_pack_mmx takes the int32 an x87 pass
+   produced and does the clamp and the pmaddwd sum of squares, which is
+   the part MMX can reach; the emms is once per 32 elements rather than
+   once per element, which is what separates it from a regression. */
 
-   NOT pmaxsw, which this comment claimed for one commit. pmaxsw and
-   pminsw are SSE1 additions to the MMX register file, not MMX -
-   verified by compiling _mm_max_pi16 at -march=pentium-mmx, where it
-   does not exist. The -32767 floor costs the pcmpgtw/pandn/pand/por
-   idiom instead, four instructions where the SSE1 cell spends one.
-   Slower is still owed. */
-static const char km_why_nrmss_mmx[] =
-    "todo: the scale and convert are float, but the clamp and the sum of "
-    "squares are not - packssdw and pmaddwd are MMX, and the -32767 "
-    "floor is the pcmpgtw idiom since pmaxsw is SSE1. Two passes with "
-    "one emms between them, not one pass with an emms per element";
 static const char km_why_nrmss_g128[] =
     "this column is the 128-ELEMENT quantization group; norm_ss_fixed's "
     "loop runs over a whole norm row, and the group-shaped part of it "
@@ -4079,19 +4062,6 @@ static const char km_why_i32f_mmx[] =
     "impossible: MMX has no integer-to-float conversion at all - the "
     "first one on this ladder is SSE1's cvtsi2ss. lz_i32f_acc32_sse is "
     "that cell";
-/* REOPENED for the same reason as nrmss above, and it is the same
-   shape: the multiply and the convert are float, everything after them
-   is not. lz_q8round32_sse's tail is packssdw, pminsw, pmaxsw and
-   packsswb; of those only the two packs are MMX, and they carry most
-   of the work - packsswb saturates to [-128, 127], so the +127 clamp
-   is exact and only the -128 lane needs lifting to -127. That is one
-   pcmpgtw idiom in int16, not the pair of scalar compares per element
-   the C spends. Two passes with one emms. */
-static const char km_why_q8rnd_mmx[] =
-    "todo: the multiply and convert are float, but the pack is MMX - "
-    "packssdw then packsswb, whose saturation IS the +127 clamp; only "
-    "the -128 lane needs lifting to -127, since pminsw/pmaxsw are SSE1. "
-    "Two passes with one emms between them";
 static const char km_why_fwhtf_mmx[] =
     "impossible: MMX is integer-only and this transform is over floats. "
     "The int32 twin (fwhti) is the one MMX can take";
@@ -4147,7 +4117,7 @@ static const LZKmReg km_reg[LZ_KM_NUNIT * LZ_KM_NCOL] = {
    shared C body, which is also what --kernel arm-c runs - so armC is
    present on ARM for the same reason ref is present everywhere. */
 /* i32f */ KM_H(KM_ALL), KM_I(km_why_i32f_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_I(km_why_i32f_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_i32f_g128),
-/* q8rnd*/ KM_H(KM_ALL), KM_T(km_why_q8rnd_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_T(km_why_q8rnd_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_q8rnd_g128),
+/* q8rnd*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_q8rnd_g128),
 /* expfx*/ KM_H(KM_ALL), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_op_g128),
 /* The two attention MAC units DO have x86 kernels, and they are
    macro-selected rather than table-selected, so km_op_present answers
@@ -4161,7 +4131,7 @@ static const LZKmReg km_reg[LZ_KM_NUNIT * LZ_KM_NCOL] = {
 /* atdot*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_attn_g128),
 /* wsump*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_attn_g128),
 /* sigq */ KM_H(KM_ALL), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_op_g128),
-/* nrmss*/ KM_H(KM_ALL), KM_T(km_why_nrmss_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_T(km_why_nrmss_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_nrmss_g128),
+/* nrmss*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_nrmss_g128),
 /* Registering these two rows is what makes a gate able to tell "no
    assembly" from "no such operator": without them src/fwht.c could be
    deleted and not a single cell would change. */
@@ -4322,6 +4292,27 @@ static int km_op_present(int f, int c) {
          c == LZ_KM_COL_ROW0 + LZ_ROW_SSE2_I)) return 1;
 #endif /* __WATCOMC__ */
 #endif /* LZ_MATMUL_F32_SSE_EXTERN */
+    /* The two MMX PACK HALVES, which are cells the "part of it counts"
+       standard opened and which now exist. Both take the int32 the
+       caller's x87 pass produced and do the part MMX can reach:
+       q8round the clamp and the two packs, nrmss the clamp and the
+       pmaddwd sum of squares. Registered from the same macros the call
+       sites test, so a registration cannot outlive its kernel. */
+#if defined(LZ_HAVE_Q8R_PACK_MMX)
+#if defined(__WATCOMC__)
+    if (f == LZ_KM_UNIT_Q8RND && c == LZ_KM_COL_ROW0 + LZ_ROW_MMX_A) return 1;
+#else
+    if (f == LZ_KM_UNIT_Q8RND && c == LZ_KM_COL_ROW0 + LZ_ROW_MMX_I) return 1;
+#endif /* __WATCOMC__ */
+#endif /* LZ_HAVE_Q8R_PACK_MMX */
+#if defined(LZ_HAVE_NORM_SS_PACK_MMX)
+#if defined(__WATCOMC__)
+    if (f == LZ_KM_UNIT_NRMSS && c == LZ_KM_COL_ROW0 + LZ_ROW_MMX_A) return 1;
+#else
+    if (f == LZ_KM_UNIT_NRMSS && c == LZ_KM_COL_ROW0 + LZ_ROW_MMX_I) return 1;
+#endif /* __WATCOMC__ */
+#endif /* LZ_HAVE_NORM_SS_PACK_MMX */
+
     /* i32f, the attention wsum chunk fold. Four cells from two bodies
        per toolchain: SSE1 converts one value at a time (cvtsi2ss,
        lz_i32f_acc32_sse) because the packed convert at that tier reads
