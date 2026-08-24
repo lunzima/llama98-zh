@@ -79,6 +79,7 @@
 !/build/ppbrace_gate.sh
 !/build/ppbrace_census.awk
 !/build/o3_probe.sh
+!/build/branch_census.sh
 !/build/gcc_warning_gate.sh
 
 # Stray compiler/linker intermediates (gcc, Open Watcom), plus the raw
@@ -92,6 +93,13 @@
 *.lst
 *.mbr
 *.sym
+# gcov's notes, data and annotated listings. build/branch_census.sh has
+# to run gcov from the repo root - it resolves source paths relative to
+# the current directory - so the .gcov land here and are swept into a
+# temp dir. These catch whatever a killed run leaves behind.
+*.gcov
+*.gcda
+*.gcno
 
 # Binaries
 /llama98
