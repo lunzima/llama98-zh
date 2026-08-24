@@ -453,7 +453,7 @@ int lz_gdn_mode(void);
    2's adds ~1.2e-05 on top of a 1.8e-05 baseline. See
    gdn_p2_group_fixed in ops.c.
 
-   AUTO ASKS NOTHING - it returns fixed on every machine. The shipping
+   Auto asks nothing - it returns fixed on every machine. The shipping
    build is fixed-point unconditionally, so speed is not what selects a
    tier here; lz_soft_float_target() and q8r_have_simd() are no longer
    consulted by any tier's auto (ops_sched.c carries the retirement note
@@ -501,7 +501,7 @@ const char *lz_gdn_p2_impl(void);
    of the compiler's. BIT-IDENTICAL either way - the two arms of this
    switch give the same logits, which is unusual here and is what makes
    it checkable by cmp rather than by tolerance.
-   DEFAULT ON ONLY WHERE FLOATS ARE SOFTWARE. On a host with a hardware
+   Default on only where floats are software. On a host with a hardware
    divider the reciprocal is not obviously a win and has not been
    measured there; -DLZ_NO_FPU=1 is what the ARM cross build passes and
    is the one target the 117-against-30 number was taken on. Socket 7's
@@ -785,7 +785,7 @@ int lz_norm_can_fixed(int n);
    is ~9.5x cheaper per element on the target. Read the rest of this
    comment for the half that was a defect rather than a preference.
 
-   BIT-IDENTICAL FOR THE GATED NORM. NOT FOR THE PLAIN ONE. The identity
+   Bit-identical for the gated norm, not for the plain one. The identity
    is a CANCELLATION, not a property of int arithmetic: it needs the
    fixed tier to already be computing the very same Q15 product, so that
    `int` only elides a Q15 -> float -> int8 round trip. That premise
@@ -819,7 +819,7 @@ int lz_norm_can_fixed(int n);
    s1v3 reaches no int site at all. Of what is on disk, kunkun-ce is the
    only model that exercises this value.
 
-   THE INT FORM IS WHAT THE FIXED TIER DOES, so the six plain-norm
+   The int form is what the fixed tier does, so the six plain-norm
    sites ship it, and the ~7% is a deliberate float-to-fixed step of the
    kind already taken for every other write tier. It buys 114 -> 12
    instructions per element on the target (measured, ops_norm.c) with
@@ -835,8 +835,8 @@ int lz_norm_int(void);
    group: the engine's own per-32 grouping (lz_act_gs), kept across the
           Hadamard.
 
-   A VALUE-CHANGING knob, like the conv/attn/epi tiers: the two produce
-   different INT8 and different scales. `tok` is bit-identical to the
+   A value-changing knob, like the conv/attn/epi tiers: the two produce
+   different int8 and different scales. `tok` is bit-identical to the
    engine before this knob existed. See ops_sched.c for why the Hadamard
    does not force a row-wide scale. */
 int lz_subn_scale_group(void);
@@ -1085,8 +1085,8 @@ void lz_matmul_w(float *o, const float *x, const LZTensor *w,
    reuses one quantization for q/k/v/gate/up sharing xb's xq/xqs,
    avoiding repeated activation scans.
 
-   THE SUFFIX NAMES THE ACTIVATION SIDE, NOT THE WEIGHTS. `xq` is the
-   parameter it takes; the WEIGHT format is whatever w->dtype says, and
+   The suffix names the activation side, not the weights. `xq` is the
+   parameter it takes; the weight format is whatever w->dtype says, and
    this one entry point dispatches every one of them - F32, Q8_0, Q4_1,
    Q6_1, Q16_0, T2. A name that mentions one format gets read as "the
    path for that format", which happened here more than once, including in a
@@ -1285,7 +1285,7 @@ void lz_fwht(float *v, int n);
                                                 nibble first
      x_hat[d] = scale * cents[code[d]]
 
-   WHY ONE SCALE PER ROW AND NOT PER 32. This is the difference that
+   Why one scale per row and not per 32. This is the difference that
    decides whether rotating the activations is worth anything. Q8_0's
    per-32 absmax already adapts to local variance, so spreading the
    energy with a Hadamard takes resolution away from the groups that had
@@ -1294,7 +1294,7 @@ void lz_fwht(float *v, int n);
    adapt, so the rotation's job - making every coordinate the same size -
    is exactly what it needs. The two choices only make sense together.
 
-   WHY A GAUSSIAN CODEBOOK. After the norm is split off, x/||x|| is a
+   Why a Gaussian codebook. After the norm is split off, x/||x|| is a
    direction in R^n, whose per-coordinate law is (1-z^2)^((n-3)/2)
    (IsoQuant eq. 36); at n = 256 that is Gaussian well past 4-bit
    resolution, and sqrt(n) = 16 makes the scaling exact. The table is
@@ -1596,7 +1596,7 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
    silently overrides the -D and the control reports "no difference",
    which reads exactly like "the change does not matter".
 
-   THAT CONTROL IS A BUILD ERROR, not a comparison, and the note
+   That control is a build error, not a comparison, and the note
    belongs here rather than only at the assertion (ops.c,
    lz_p2_needs_lo_scale_256). The fixed pass 2 splits H with `>> 8` and
    `<< 8`, both hardcoded to L=256; a -DLZ_GDN_LO_SCALE=254.0f override
@@ -1610,7 +1610,7 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
 #define LZ_GDN_LO_SCALE 256.0f
 #endif
 
-/* THE SUBNORMAL FLOOR, and it is one number for the whole engine rather
+/* The subnormal floor, one number for the whole engine rather
    than a per-operator constant, because two operators that disagree
    about where zero starts would disagree about results.
 
