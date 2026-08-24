@@ -381,7 +381,7 @@ watcom-cli:
 	    echo "file $(CLI_OBJ)/_main.obj"; \
 	    echo "file $(CLI_OBJ)/_argv.obj"; \
 	    echo "file $(CLI_OBJ)/_attr.obj"; \
-	    echo "library clib3r, math387r, kernel32, user32, advapi32"; \
+	    echo "library $(LIBROOT)\\nt\\clib3r.lib, math387r, kernel32, user32, advapi32"; \
 	} > "$(CLI_OBJ)/cli.lnk"
 	"$(WLINK)" @"$(CLI_OBJ)/cli.lnk"
 	@echo "== done: $(CLI_EXE)"
@@ -463,7 +463,7 @@ watcom-dll: $(DLL_OBJ)/exports.lnk
 	    echo "libpath $(LIBROOT)"; \
 	    $(foreach f,$(ENG),echo "file $(DLL_OBJ)/$f.obj";) \
 	    $(foreach f,$(ENG_MMX),echo "file $(DLL_OBJ)/$f.obj";) \
-	    echo "library clib3r, math387r, kernel32, user32, advapi32"; \
+	    echo "library $(LIBROOT)\\nt\\clib3r.lib, math387r, kernel32, user32, advapi32"; \
 	} > "$(DLL_OBJ)/dll.lnk"
 	@cat "$(DLL_OBJ)/exports.lnk" >> "$(DLL_OBJ)/dll.lnk"
 	$(WLINK_ENV) "$(WLINK)" @"$(DLL_OBJ)/dll.lnk"
@@ -498,7 +498,7 @@ watcom-gui:
 	    $(foreach f,$(COM),echo "file $(GUI_OBJ)/$(call common_obj,$f).obj";) \
 	    $(foreach f,$(ENG),echo "file $(GUI_OBJ)/$f.obj";) \
 	    $(foreach f,$(ENG_MMX),echo "file $(GUI_OBJ)/$f.obj";) \
-	    echo "library clib3r, math387r, kernel32, user32, gdi32, comdlg32"; \
+	    echo "library $(LIBROOT)\\nt\\clib3r.lib, math387r, kernel32, user32, gdi32, comdlg32"; \
 	    echo "name $(GUI_EXE)"; \
 	} > "$(GUI_OBJ)/gui.lnk"
 	$(WLINK_ENV) "$(WLINK)" @"$(GUI_OBJ)/gui.lnk"
