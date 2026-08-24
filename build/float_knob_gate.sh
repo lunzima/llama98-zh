@@ -90,17 +90,71 @@ for k in $KEPT; do
     fi
 done
 
-# The source side. One global, so a second axis cannot be added without
-# this number moving.
-N=$(grep -cE "^int lz_float_ref_g = " src/ops_sched.c)
-if [ "$N" -ne 1 ]; then
-    echo "FAIL: ops_sched.c defines $N float-selection global(s), expected 1"
+# The source side, as the WHOLE SET rather than one member.
+#
+# This counted `^int lz_float_ref_g = ` and said a second axis could not
+# be added without the number moving. It could: planting
+# `int lz_attn_float_g = 0;` next to it leaves the count at 1, because
+# the pattern names one variable and a new axis has a new name. The
+# blacklist above has the same hole one layer up - it rejects seven
+# names and cannot see an eighth.
+#
+# So assert the set. ops_sched.c is where a tier selector lives, and a
+# non-static global here IS an axis:
+#
+#   g_kernel          the ISA selector - --kernel. Kept: MMX/SSE/SSE2
+#                     stay by requirement.
+#   g_pair            --pair. A performance knob; perf_knob_gate holds
+#                     it to not changing any number.
+#   lz_float_ref_g    --fixed. The float axis, and the only one.
+#
+# A fourth of any name reddens. That is the safe direction: a new knob
+# has to be argued for here rather than arriving silently.
+EXPECT_GLOBALS="g_kernel g_pair lz_float_ref_g"
+GOT=$(grep -oE "^(int|unsigned|long|float|double)[a-zA-Z0-9_ ]*\**([a-zA-Z_][a-zA-Z0-9_]*) *=" \
+      src/ops_sched.c | grep -oE "[a-zA-Z_][a-zA-Z0-9_]* *=$" | sed 's/ *=$//' | sort | tr '\n' ' ')
+WANT=$(printf '%s\n' $EXPECT_GLOBALS | sort | tr '\n' ' ')
+if [ "$GOT" != "$WANT" ]; then
+    echo "FAIL: ops_sched.c's non-static globals are"
+    echo "        $GOT"
+    echo "      expected"
+    echo "        $WANT"
+    echo "      Each one is a runtime axis. A new one is a new knob and"
+    echo "      needs a line in this gate saying which requirement keeps it."
+    FAIL=1
+fi
+
+# The CLI side, by SHAPE rather than by name, for the same reason. The
+# seven retired flags were --*-write and --scalar-fixed; an eighth would
+# be spelled the same way and the blacklist would not see it.
+STRAY=$(grep -ohE '"--[a-z0-9-]+"' src/cli_main.c | tr -d '"' | sort -u \
+        | grep -E -- "-write$|fixed" | grep -v "^--fixed$" | tr '\n' ' ')
+if [ -n "$STRAY" ]; then
+    echo "FAIL: option(s) shaped like a per-tier float knob: $STRAY"
+    echo "      --fixed is the whole axis; these are the shape the seven"
+    echo "      retired ones had."
+    FAIL=1
+fi
+
+# Mutation for both, because each was just found to be a rule that could
+# not fail. A planted global and a planted option must each redden.
+MG=$(printf 'int lz_float_ref_g = 0;\nint lz_attn_float_g = 0;\n' \
+     | grep -oE "^(int|unsigned|long|float|double)[a-zA-Z0-9_ ]*\**([a-zA-Z_][a-zA-Z0-9_]*) *=" \
+     | grep -c "lz_attn_float_g")
+MO=$(printf '"--attn-write"\n"--fixed"\n' | tr -d '"' \
+     | grep -E -- "-write$|fixed" | grep -vc "^--fixed$")
+if [ "$MG" -ne 1 ] || [ "$MO" -ne 1 ]; then
+    echo "FAIL: the planted second axis reports global=$MG option=$MO;"
+    echo "      a zero means the rule above cannot fail and its silence"
+    echo "      carries nothing"
     FAIL=1
 fi
 
 if [ "$FAIL" -eq 0 ]; then
     echo "float_knob_gate: PASS (1 axis, 7 retired names rejected,"
-    echo "  2 performance knobs kept)"
+    echo "  2 performance knobs kept; ops_sched.c's global set is exactly"
+    echo "  {${WANT% }}, no option is shaped like a per-tier float knob,"
+    echo "  and both planted axes redden)"
     exit 0
 fi
 echo "float_knob_gate: FAIL"
