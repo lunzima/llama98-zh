@@ -9392,6 +9392,7 @@ static int st_settings_dialog(FILE *f, HINSTANCE inst) {
            added, provided whoever adds one extends CHAIN - which they
            will notice, because leaving it alone reddens this. */
         static const int CHAIN[] = {
+            3024,         /* beep on finish - the checkbox under think */
             3004, 3003,   /* temperature: slider, box */
             3023, 3022,   /* think-temp: slider, box */
             3013, 3012,   /* top-p */

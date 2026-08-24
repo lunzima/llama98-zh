@@ -99,11 +99,25 @@ static const char *const LZ_STR_EN[LZ_STR_COUNT] = {
     /* LZ_STR_DLG_THINK */ "&Thinking (think)",
     /* LZ_STR_DLG_TEMPERATURE */ "Tem&perature",
     /* LZ_STR_DLG_TEMP_CAP */ "Temperature is capped at 1.0",
-    /* Mnemonics inside this dialog must not collide with each other:
-       T think, P temperature, O top-p, E repetition, N context,
-       M max new, R restore defaults. A STATIC's mnemonic moves focus
-       to the next tab stop in Z-order, which is why each label is
-       created immediately before its own controls. */
+    /* THE SETTINGS DIALOG'S MNEMONICS, all of them, in one place -
+       every other entry in this table points here rather than
+       repeating a subset, because two hand-kept lists drift and the
+       shorter one then reads as permission to reuse a letter:
+
+           T think        P temperature   B think-block temp
+           O top-p        E repetition    N context
+           M max new      S system prompt F beep on finish
+           R restore defaults
+
+       The ZH table takes the SAME letter for each, so this list
+       governs both. OK and Cancel carry none in either language.
+       A collision is silent - Windows cycles focus between the
+       clashing controls instead of activating one - so gui/main.c's
+       selftest reads the letters off the real controls of the real
+       dialog and reddens on a repeat.
+       A STATIC's mnemonic moves focus to the next tab stop in Z-order,
+       which is why each label is created immediately before its own
+       controls. */
     /* LZ_STR_DLG_CONTEXT */ "Co&ntext",
     /* LZ_STR_DLG_CTX_NOTE */ "512 to 32768; larger needs more memory",
     /* LZ_STR_DLG_TOPP */ "T&op-p",
@@ -197,9 +211,8 @@ static const char *const LZ_STR_EN[LZ_STR_COUNT] = {
     /* LZ_STR_SYSINFO_DISK */ "Disk: %s",
     /* LZ_STR_SYSINFO_TIER */ "Operators: %s",
 
-    /* Think-block dynamic temperature. Mnemonic B - the
-       dialog's other controls use T P O E N M R S, and the collision
-       check in gui/main.c's selftest enforces that. */
+    /* Think-block dynamic temperature. Mnemonic B; the whole set is
+       listed at LZ_STR_DLG_TEMP_CAP above. */
     /* LZ_STR_DLG_THINK_TEMP */ "Think-&block temp",
     /* LZ_STR_ERR_BAD_THINK_TEMP */ "think-block temperature must be "
                                     "between 0 and 1.0",
@@ -211,7 +224,10 @@ static const char *const LZ_STR_EN[LZ_STR_COUNT] = {
         "Copyright (c) 2026 Lunzima\n"
         "Licensed under the Apache License, Version 2.0",
     /* LZ_STR_CAPTION_UNTITLED */ "Untitled Chat",
-    /* LZ_STR_DLG_BEEP */ "Bee&p when a reply finishes"
+    /* Mnemonic F, not the P of "Bee&p": temperature already holds P
+       (see the set at LZ_STR_DLG_TEMP_CAP), and this checkbox is the
+       newcomer. */
+    /* LZ_STR_DLG_BEEP */ "Beep when a reply &finishes"
 };
 
 static const char *const LZ_STR_ZH[LZ_STR_COUNT] = {
@@ -379,7 +395,7 @@ static const char *const LZ_STR_ZH[LZ_STR_COUNT] = {
         /* U+56DE U+590D U+5B8C U+6210 U+540E U+63D0 U+793A U+97F3
            "hui fu wan cheng hou ti shi yin" */
         "\xe5\x9b\x9e\xe5\xa4\x8d\xe5\xae\x8c\xe6\x88\x90\xe5\x90\x8e"
-        "\xe6\x8f\x90\xe7\xa4\xba\xe9\x9f\xb3(&P)"
+        "\xe6\x8f\x90\xe7\xa4\xba\xe9\x9f\xb3(&F)"
 };
 
 /* Static, not stack: the target's default stack is small enough that a
