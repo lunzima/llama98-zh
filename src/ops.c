@@ -3887,6 +3887,18 @@ static const char km_why_nrmss_g128[] =
 static const char km_why_fwhti_sse1[] =
     "impossible: SSE1 has no integer add - paddd is MMX/SSE2. The int32 "
     "butterfly cannot be expressed in xmm under SSE1";
+/* AUDITED WITH THE KERNEL, which is how the row above it was found to
+   be wrong. q8rnd had all six x86 cells marked impossible on the
+   scalar-leaf reason, and four of them ship: lz_q8round32_sse
+   (ops_mmx_sse.c) and lz_q8round32_simd (ops_sse2.c) on gcc,
+   lz_q8round32_sse_asm and lz_q8round32_sse2_asm as #pragma aux on
+   Watcom, selected at runtime by lz_q8r_tier. The function is named for
+   the thirty-two values it takes at once. Only the MMX pair is
+   genuinely out, and for a different reason than the one it carried. */
+static const char km_why_q8rnd_mmx[] =
+    "impossible: rounding a Q8 group starts with x[i] * inv, a float "
+    "multiply, and MMX is integer-only. SSE1 is the first tier that can "
+    "express it - lz_q8round32_sse is that kernel";
 static const char km_why_fwhtf_mmx[] =
     "impossible: MMX is integer-only and this transform is over floats. "
     "The int32 twin (fwhti) is the one MMX can take";
@@ -3941,7 +3953,7 @@ static const LZKmReg km_reg[LZ_KM_NUNIT * LZ_KM_NCOL] = {
    shared C body, which is also what --kernel arm-c runs - so armC is
    present on ARM for the same reason ref is present everywhere. */
 /* i32f */ KM_H(KM_ALL), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128),
-/* q8rnd*/ KM_H(KM_ALL), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128),
+/* q8rnd*/ KM_H(KM_ALL), KM_I(km_why_q8rnd_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_I(km_why_q8rnd_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128),
 /* expfx*/ KM_H(KM_ALL), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128),
 /* The two attention MAC units DO have x86 kernels, and they are
    macro-selected rather than table-selected, so km_op_present answers
@@ -4106,6 +4118,27 @@ static int km_op_present(int f, int c) {
          c == LZ_KM_COL_ROW0 + LZ_ROW_SSE2_I)) return 1;
 #endif /* __WATCOMC__ */
 #endif /* LZ_MATMUL_F32_SSE_EXTERN */
+    /* q8rnd, whose four x86 cells were registered impossible on the
+       scalar-leaf reason until they were audited against the kernels.
+       TWO bodies here, not one shared across tiers like f32mm above:
+       SSE1 rounds thirty-two values through two MMX registers
+       (lz_q8round32_sse / lz_q8round32_sse_asm) and SSE2 does the same
+       thirty-two in xmm (lz_q8round32_simd / lz_q8round32_sse2_asm), so
+       each tier holds its own. lz_q8r_tier picks between them. */
+#if defined(LZ_HAVE_Q8R_SSE)
+#if defined(__WATCOMC__)
+    if (f == LZ_KM_UNIT_Q8RND && c == LZ_KM_COL_ROW0 + LZ_ROW_SSE_A) return 1;
+#else
+    if (f == LZ_KM_UNIT_Q8RND && c == LZ_KM_COL_ROW0 + LZ_ROW_SSE_I) return 1;
+#endif /* __WATCOMC__ */
+#endif /* LZ_HAVE_Q8R_SSE */
+#if defined(LZ_HAVE_Q8R_SIMD)
+#if defined(__WATCOMC__)
+    if (f == LZ_KM_UNIT_Q8RND && c == LZ_KM_COL_ROW0 + LZ_ROW_SSE2_A) return 1;
+#else
+    if (f == LZ_KM_UNIT_Q8RND && c == LZ_KM_COL_ROW0 + LZ_ROW_SSE2_I) return 1;
+#endif /* __WATCOMC__ */
+#endif /* LZ_HAVE_Q8R_SIMD */
 #if defined(LZ_FWHT_F32_SSE_EXTERN)
     /* Four cells from one body, same as f32mm just above and for the
        same reason - addps/subps is SSE1, and lz_fwht offers it at both
