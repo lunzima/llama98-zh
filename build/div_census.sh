@@ -46,6 +46,20 @@
 # READ LINE ATTRIBUTIONS WITH THAT IN MIND. A hit on a line holding a
 # clamp or a closing brace is an inlined body, not a divide written
 # there; three of the top seven in forward.c look like that.
+#
+# THE SIMD KERNELS EMIT NONE. ops_mmx, ops_mmx_sse, ops_sse2 (each with
+# its ISA flags, which the default set here does not carry - without
+# them all three fail to build and the table prints "no build" rather
+# than zero), ops_arm and ops_t2_scalar: zero divide instructions
+# between them.
+#
+# Worth stating because the opposite was asserted here for several
+# rounds without being measured - that the divides worth attacking were
+# inside the fixed attention kernel, and reaching them would mean a
+# four-path parity check and a Watcom twin. There is nothing there to
+# reach. The kernels are multiply-and-shift throughout; every divide in
+# the engine is in the C dispatch and setup code this census already
+# walks.
 set -u
 cd "$(dirname "$0")/.."
 command -v gcc >/dev/null 2>&1 || { echo "SKIP: no gcc"; exit 2; }
