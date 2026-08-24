@@ -3925,16 +3925,30 @@ static const char km_why_sse1[] =
 /* SPLIT IN TWO under the standard above. The gather argument closes the
    cells where the LOOKUP is the work, and does not close the ones where
    arithmetic happens around it. sigmoid_q15 and lz_exp_fixed both end
-   in a linear interpolation - a + (((b - a) * frac) >> 15) - which is
-   int32 arithmetic that pmullw, paddd and psrad express two wide. The
-   two table loads stay scalar; the interpolation does not have to.
-   The win is small and said so: two lanes of int32 against four scalar
-   loads. Small is not none, and none is the bar. */
+   in a linear interpolation - a + (((b - a) * frac) >> 15) - and the
+   two table loads stay scalar while that does not have to.
+   THE MULTIPLY IS int16 x int16, which is the fact that decides
+   whether this is writable at all, and it was checked rather than
+   assumed. g_sigtab holds (int32_t)(s * 32768 + 0.5) for s in [0, 1],
+   so a and b are in [0, 32768] and their adjacent difference is in the
+   hundreds - 384 steps across the table and a sigmoid slope that never
+   exceeds 0.25. frac is (t - idx) * 32768 with t - idx in [0, 1), so
+   [0, 32767]. Both operands fit int16, so the product is pmaddwd, which
+   is MMX.
+   HAD IT BEEN int32 x int32 these cells would be genuinely shut: the
+   instruction for that is pmulld and pmulld is SSE4.1, off this target
+   family entirely. Worth writing down because reaching for it is the
+   obvious first move and it does not exist here.
+   The win is still small - two lanes on MMX, four on SSE2, against
+   scalar loads that stay scalar. Small is not none, and none is the
+   bar. */
 static const char km_why_op_x86[] =
     "todo: the per-element table INDEX needs a gather (AVX2, off this "
     "target family) and stays scalar, but the interpolation around it - "
-    "a + (((b - a) * frac) >> 15) - is int32 arithmetic pmullw/paddd/"
-    "psrad express two wide. Small win, not no win";
+    "a + (((b - a) * frac) >> 15) - has both multiply operands inside "
+    "int16 (checked: b-a is hundreds, frac <= 32767), so it is pmaddwd "
+    "and paddd, two wide on MMX and four on SSE2. Not pmulld, which is "
+    "SSE4.1 and absent. Small win, not no win";
 /* EXPFX AND SIGQ ONLY, and the scope line is here because this string
    used to be the default for every operator unit and was wrong for
    three of them. i32f and q8rnd both have group forms - the wsum chunk
