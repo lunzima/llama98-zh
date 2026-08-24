@@ -43,15 +43,27 @@ MODEL=${LZ_NORM_INT_GATE_MODEL:-$MODELS_ROOT/kmr20}
 # does not redden the gate - only losing one does.
 FLOOR=21
 
-"./$BIN" "$MODEL" --kernel-matrix 2>&1 | grep "^cell" | awk -v floor="$FLOOR" '
+# CELLS REGISTERED todo, which is what a cell looks like after the
+# "partial relief obliges a kernel" standard reopens it and before
+# anyone writes it. Six PAIRS today - this gate counts (unit, ISA)
+# pairs, so the twelve cells expfx and sigq carry across the six x86
+# columns are six here - whose table lookup stays scalar while the interpolation
+# around it does not have to. A CEILING rather than a floor - the number
+# owed may shrink freely and may not grow unnoticed. Before this state
+# existed the gate had two answers, implemented or impossible, and a
+# reopened cell read as an unpaired kernel.
+TODO_CEIL=6
+
+"./$BIN" "$MODEL" --kernel-matrix 2>&1 | grep "^cell" | awk -v floor="$FLOOR" -v tceil="$TODO_CEIL" '
 $3=="mmxI"||$3=="sse2I"||$3=="sseI" {
     isa=substr($3,1,length($3)-1); I[$2" "isa]=$5; SI[$2" "isa]=$4 }
 $3=="mmxA"||$3=="sse2A"||$3=="sseA" {
     isa=substr($3,1,length($3)-1); A[$2" "isa]=$5; SA[$2" "isa]=$4 }
 END {
-    bad=0; impl=0; imp=0;
+    bad=0; impl=0; imp=0; todo=0;
     for (k in I) {
         if (SI[k]=="i" || SA[k]=="i") { imp++; continue }
+        if (SI[k]=="t" || SA[k]=="t") { todo++; continue }
         impl++;
         g = (index(I[k],"G") > 0);
         w = (index(A[k],"W") > 0);
@@ -61,7 +73,14 @@ END {
             bad++;
         }
     }
-    printf "x86 pairs: %d implemented, %d registered impossible\n", impl, imp;
+    printf "x86 pairs: %d implemented, %d registered impossible, %d owed\n",
+           impl, imp, todo;
+    if (todo > tceil) {
+        printf "FAIL: %d cells registered todo, ceiling is %d - a cell the\n", todo, tceil;
+        printf "      ISA can partly reach is owed, and the number owed may\n";
+        printf "      not grow without someone deciding it should\n";
+        bad++;
+    }
     if (impl < floor) {
         printf "FAIL: implemented population is %d, below the floor of %d -\n", impl, floor;
         printf "      this gate has stopped measuring rather than found nothing\n";
