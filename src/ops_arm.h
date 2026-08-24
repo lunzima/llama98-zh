@@ -10,7 +10,7 @@ extern "C" {
    Q4_1's nibble plane plus T2's 2-bit plane and the three would
    otherwise carry three copies of the same halfword-selection macro.
 
-   Two tiers per format, both selectable (rule 8): the C kernels here
+   Two tiers per format, both selectable: the C kernels here
    are `--kernel arm-c`, the hand-written ones `--kernel arm-asm`. The
    C tier is not decoration - it is the control arm the assembly is
    compared against on the same code path, which `--kernel ref` cannot
@@ -63,7 +63,7 @@ int32_t lz_dot32_q61_arm(const unsigned char *restrict b4,
 #define LZ_ARM_ASM_EXTERN 1
 
 /* Hand-written ARMv5TE tier. Static instruction counts, which is what
-   transfers to the AK7802 (rule 3 - QEMU models no cache or bus, so no
+   transfers to the AK7802 (QEMU models no cache or bus, so no
    wall clock from it means anything); the C figure is the dynamic count
    of the loop gcc actually emits at -O2 -march=armv5te:
 
@@ -106,7 +106,7 @@ void lz_wsum_pair_arm_asm(const int8_t *rowA, const int8_t *rowB,
    this one differ in order and agree bitwise for that reason - not
    because the order was matched.
 
-   Instruction count is the whole point (rule 3: static counts, not QEMU
+   Instruction count is the whole point (static counts, not QEMU
    wall clock). gcc's inner loop is 8 per butterfly plus an entry memcpy
    over n words. Here the len=1 stage IS the copy, so that pass is gone
    outright, and the three inner loops disassemble to 12 / 12 / 14
@@ -170,6 +170,20 @@ void lz_norm_ss_fixed_arm_asm(const float *x, int n, int k, short *qout,
    acc8 must have room for eight floats whatever n is. */
 int lz_matmul_row_arm_asm(const float *w, const float *x, int n,
                           float *acc8);
+
+/* The dequantization epilogue's zero-point MAC (the epi cell):
+   sum over n of a[i] * m[i], int32 times int16 into int64.
+
+   Owes the C body identity rather than a tolerance, and by
+   construction - 64-bit two's-complement addition is exact and
+   associative for these operands, so no summation order can differ.
+   ARMv5TE's SMLAL is this shape exactly, which is why the cell needs
+   none of the 16-bit splitting the x86 tiers do; 2.75 instructions an
+   element against gcc's 5.00.
+
+   n <= 0 returns 0. No alignment precondition beyond what the pointer
+   types already promise. */
+lz_i64 lz_epi_mac_i16_arm_asm(const int32_t *a, const int16_t *m, int n);
 #endif /* __arm__ && __GNUC__ */
 
 #ifdef __cplusplus

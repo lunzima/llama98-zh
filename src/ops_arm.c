@@ -38,7 +38,7 @@ int32_t lz_dot32_q16_arm(const int16_t *restrict w, const int16_t *restrict x) {
       header and met by the g_xw / weight-row offsets.
 
    Not used, deliberately: PLD. Prefetch is its own orthogonal tier
-   (--prefetch, rule 9) and does not belong inside a leaf kernel.
+   (--prefetch) and does not belong inside a leaf kernel.
 
    Register map: r4-r7 eight weights, r8-r11 eight activations, r12 the
    second accumulator. */
@@ -694,7 +694,7 @@ void lz_norm_ss_fixed_arm_asm(const float *x, int n, int k, short *qout,
         "bhi    7f\n\t"                                          \
         "cmp    r10, #0x80000000\n\t"                            \
         "adc    lr, lr, r7, lsl #23\n\t"                         \
-        "biceq  lr, lr, #1\n\t"
+        "orreq  lr, lr, #1\n\t"
 
 int lz_matmul_row_arm_asm(const float *w, const float *x, int n,
                           float *acc8) {
@@ -840,5 +840,77 @@ int lz_matmul_row_arm_asm(const float *w, const float *x, int n,
         : "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "ip", "lr",
           "cc", "memory");
     return (ng0 - ng) * 8;
+}
+
+/* ---- the epilogue MAC: int32 x int16 -> int64 ------------------------ */
+
+/* SMLAL IS THE WHOLE KERNEL. The x86 tiers reach this shape by
+   splitting the int32 into 16-bit halves, because neither MMX nor SSE2
+   has a signed 32x32 multiply; ARMv5TE has SMLAL - signed 32x32 with a
+   64-bit accumulate - so the split, the carry term and the sign
+   correction all disappear and one instruction per element does it.
+   Exact by construction: the accumulator is the full 64-bit product
+   sum, so there is nothing to round and no order to preserve.
+
+   gcc already finds SMLAL for this loop, so the gain is not the
+   multiply - it is the operand traffic around it. gcc's inner loop is
+   ldr / ldrsh / cmp / smlal / bne, five instructions an element. Here
+   LDMIA fetches four a-words in one, which leaves 11 per four
+   elements - 2.75 against 5.00.
+
+   The m loads are interleaved between the multiplies rather than issued
+   as a block, and r8 is deliberately reused for the fourth: its first
+   value is consumed by the time the reload issues, and on an in-order
+   core the reload then covers the SMLAL result latency instead of
+   stalling behind it. It also leaves r11 to the register allocator,
+   which matters - five operands and eight clobbers is already most of
+   the file.
+
+   n <= 0 returns 0, matching the C body's empty loop, and the test is
+   per CALL. The tail is up to three elements in C; the shipping call
+   passes one group count per weight row, which every packed geometry
+   makes a multiple of four.
+
+   Alignment is what the pointer types already promise: 4 bytes for the
+   int32 LDMIA, 2 for the LDRSH halfwords. Unlike the row kernels above
+   this adds no precondition of its own. */
+lz_i64 lz_epi_mac_i16_arm_asm(const int32_t *a, const int16_t *m, int n) {
+    const int32_t *ap = a;
+    const int16_t *mp = m;
+    int blk = n >> 2;
+    int32_t lo, hi;
+    lz_i64 s;
+    int g, tail;
+
+    if (n <= 0) return 0;
+    __asm__(
+        "mov    %[lo], #0\n\t"
+        "mov    %[hi], #0\n\t"
+        "cmp    %[blk], #0\n\t"
+        "beq    2f\n\t"
+        "1:\n\t"
+        "ldmia  %[ap]!, {r4, r5, r6, r7}\n\t"
+        "ldrsh  r8,  [%[mp]], #2\n\t"
+        "ldrsh  r9,  [%[mp]], #2\n\t"
+        "ldrsh  r10, [%[mp]], #2\n\t"
+        "smlal  %[lo], %[hi], r4, r8\n\t"
+        "ldrsh  r8,  [%[mp]], #2\n\t"
+        "smlal  %[lo], %[hi], r5, r9\n\t"
+        "smlal  %[lo], %[hi], r6, r10\n\t"
+        "smlal  %[lo], %[hi], r7, r8\n\t"
+        "subs   %[blk], %[blk], #1\n\t"
+        "bne    1b\n\t"
+        "2:\n\t"
+        : [lo] "=&r"(lo), [hi] "=&r"(hi), [ap] "+r"(ap), [mp] "+r"(mp),
+          [blk] "+r"(blk)
+        :
+        : "r4", "r5", "r6", "r7", "r8", "r9", "r10", "cc", "memory");
+
+    /* One 64-bit two's-complement value in two registers. The low word
+       widens UNSIGNED or its top bit is subtracted a second time. */
+    s = ((lz_i64)hi << 32) + (lz_i64)(uint32_t)lo;
+    tail = n & 3;
+    for (g = 0; g < tail; g++) s += (lz_i64)ap[g] * (lz_i64)mp[g];
+    return s;
 }
 #endif /* LZ_ARM_ASM_EXTERN */
