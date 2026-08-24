@@ -78,6 +78,47 @@
 # So: high share here is a property of the calling convention, not a
 # finding. That is worth knowing before the next reader spends the trip.
 #
+# AND HERE IS THE SIZE OF IT, because "not a finding" without a number
+# is still an opinion. lz_generate_resume_ex runs ONCE PER TOKEN. Its
+# 1743 instructions against 10.5 ms/token of instrumented time
+# (kmr20, 8 tokens, --profile, seed 1145141919) are on the order of
+# 0.006% of a token. The 1011 that move data are a third of that.
+# Changing a public signature both front ends call, to recover it, is
+# not a trade to take.
+#
+# WHERE THE EXECUTED WORK IS, same run, one number:
+#
+#   --kernel ref     299946 us      the C loops
+#   --kernel mmx     122378
+#   --kernel sse2     82316 us      the shipping default
+#
+# The kernels remove 72.6% of the time, so at least that much of a token
+# is inside the inner multiply-accumulate the SIMD units replace - not
+# in any C the table below ranks. Per-stage: ffn 37.9%, linear 32.2%,
+# lm_head 24.9%, attn 5.1%, all matmul-dominated.
+#
+# That is the axis this census does not have and cannot get: the C files
+# it ranks are per-layer and per-token orchestration, and forward.c
+# leading the table at 52% is a statement about forward.c's SHAPE, not
+# about where the machine spends a token. Rank with it; take the
+# ranking to --profile before spending anything.
+#
+# The table at the shipping flags, for the files that carry the work:
+#
+#   file          gcc total  move    watcom total  move
+#   ops                6202   35%            5721   38%
+#   ops_matmul         3383   49%            2533   48%
+#   ops_gdn            3788   37%            2749   42%
+#   ops_norm           1729   35%            1674   43%
+#   ops_quant          2007   29%            1867   37%
+#   forward           14761   52%           11657   52%
+#   generate           5072   53%            4636   50%
+#   sampler            1977   35%            1538   40%
+#
+# The two toolchains agree to within a few points everywhere, which is
+# the useful negative result: there is no file where Watcom is being
+# made to shuffle and gcc is not.
+#
 # Both sides at the shipping settings, 32-bit, for the reason in
 # xcc_codesize.sh's header.
 set -u
