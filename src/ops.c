@@ -3861,45 +3861,15 @@ static const char km_why_attn_g128[] =
    pmaddwd for the squares, which is exactly the accumulate this loop
    wants. Gate: .prof/norm_ss_sse2_xcheck.sh.
 
-   SSE1 cannot finish it: mulps exists, but the float-to-int is
-   cvtps2pi, two lanes into an MMX register, and the int32 accumulate
-   would then need MMX anyway - so an SSE1 cell is an SSE1/MMX hybrid
-   whose useful half is the MMX half, which is the next row down.
+   SSE1 finishes it too, and lz_norm_ss_sse is that cell: the same five
+   steps with cvtps2pi in place of cvtps2dq, so everything after the
+   scale lands in %mm and the kernel owes an emms. Four elements a pass
+   against eight. This row read "impossible" for as long as it did
+   because the reason argued taxonomy - an SSE1/MMX hybrid is still an
+   SSE1 cell, it needs SSE1 to run.
 
    MMX alone cannot start it: the scale is a FLOAT multiply and MMX is
    integer-only. */
-/* THIS WAS REGISTERED IMPOSSIBLE and it is not. The old text read
-   "what is left is an MMX kernel with mulps in front - that is the MMX
-   row, not this one", which is a statement about taxonomy, not about
-   the instruction set: an MMX kernel with mulps in front is precisely
-   an SSE1 cell, needs SSE1 to run, and is the shape lz_q8round32_sse
-   in src/ops_mmx_sse.c already has. Partial acceleration still beats
-   the scalar loop, and the MMX row below is separately out because MMX
-   cannot start the loop at all.
-
-   THE DESIGN, so the next hand does not re-derive it. Per four
-   elements, against the SSE2 twin's eight:
-     mulps                    the scale, xmm, unchanged
-     cvtps2pi x2 + movhlps    float->int32 into %mm; SSE1's convert
-                              targets the MMX register file, which is
-                              why this cell owes the caller an emms
-     packssdw                 MMX; the upper clamp is still free
-     pmaxsw                   SSE1-on-%mm; the low clamp to -32767
-     pmaddwd                  MMX; the exact pairwise sum of squares
-   and then the int64 accumulate falls back to scalar, because paddq is
-   SSE2 even on %mm and an int32 accumulator cannot take a second
-   pmaddwd result: each is up to 2147352578, and INT32_MAX is
-   131069 above that. One movq and two int64 adds per four elements.
-
-   Bit-identical by the SSE2 twin's own argument, which does not depend
-   on width: cvtps2pi reads the same round-to-nearest-even MXCSR mode as
-   cvtps2dq, packssdw saturates identically, and integer addition is
-   associative and exact so the summation order cannot move the total. */
-static const char km_why_nrmss_sse1[] =
-    "todo: SSE1 can express this - mulps, cvtps2pi into %mm, packssdw, "
-    "pmaxsw, pmaddwd, with the int64 accumulate scalar because paddq is "
-    "SSE2. Same shape as lz_q8round32_sse. Registered todo rather than "
-    "impossible because the old reason argued taxonomy, not the ISA";
 static const char km_why_nrmss_mmx[] =
     "impossible: the per-element scale x[i]*sc is a FLOAT multiply and "
     "MMX is integer-only. The loop cannot start under MMX alone";
