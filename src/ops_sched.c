@@ -149,23 +149,17 @@ int lz_q8r_tier(void) {
 
 /* Attention wsum's chunk fold: 0 scalar, 1 SSE1, 2 SSE2. Same shape as
    lz_q8r_tier above and for the same reason - the two tiers here are a
-   scalar convert (cvtsi2ss, SSE1) and a packed one (cvtdq2ps, SSE2),
-   which is the float axis rather than the integer one g_kernel tracks,
-   so SSE1 comes from CPUID and not from g_kernel.
+   scalar convert (cvtsi2ss, SSE1) and a packed one (cvtdq2ps, SSE2).
 
-   LZ_I32FACC_FORCE_SSE mirrors LZ_Q8R_FORCE_SSE. Without it the SSE1
-   cell is unreachable on any machine with SSE2 - which is every machine
-   that runs this suite - and a path that cannot be selected is a path
-   that cannot be validated. */
+   LZ_I32FACC_FORCE_SSE is gone. It existed because the SSE1 cell was
+   unreachable on any machine with SSE2 - every machine that runs this
+   suite - and a path that cannot be selected cannot be validated. That
+   is what `--kernel sse` is, so the compile-time escape was a second
+   way to say it and the two could disagree. */
 #if defined(LZ_HAVE_I32FACC_SSE2) || defined(LZ_HAVE_I32FACC_SSE)
 int lz_i32facc_tier(void) {
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
     if (g_kernel == LZ_KERNEL_REF) return 0;
-#if defined(LZ_HAVE_I32FACC_SSE)
-#ifdef LZ_I32FACC_FORCE_SSE
-    return 1;
-#endif /* LZ_I32FACC_FORCE_SSE */
-#endif /* LZ_HAVE_I32FACC_SSE */
 #if defined(LZ_HAVE_I32FACC_SSE2)
     if (g_kernel == LZ_KERNEL_SSE2) return 2;
 #endif /* LZ_HAVE_I32FACC_SSE2 */

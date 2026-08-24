@@ -516,7 +516,7 @@ void lz_exp_fixed_run(const float *x, float *out, int n) {
            III, Athlon) is a real point on this target family. Selected
            by tier - it used to read CPUID, which made this arm shadow
            the MMX one on every machine that runs the suite and needed a
-           separate LZ_EXP_Q20_FORCE_MMX build to get underneath. */
+           separate control build to get underneath. */
         if (g_kernel == LZ_KERNEL_SSE)
             lz_exp_q20_sse(tv, sv, pv, m);
         else

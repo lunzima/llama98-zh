@@ -277,9 +277,9 @@ SSE1_BIN=${SSE1_BIN:-}
 # CPUID behind g_kernel's back, which is why --kernel mmx measured as
 # "recurrence impl sse-intrin" before LZ_KERNEL_SSE existed - the mmx row
 # above was comparing SSE1 against SSE2 and calling it MMX. ssem is the
-# comparison the LZ_P2_FORCE_MMX / LZ_EXP_Q20_FORCE_MMX control builds
-# were standing in for; ssef reaches the SSE1 float matmul row, which the
-# fixed default does not.
+# comparison the deleted P2 and EXP_Q20 control builds were standing in
+# for; ssef reaches the SSE1 float matmul row, which the fixed default
+# does not.
 FLAGSETS="dflt:mmx:sse2:$RBIN:
 rot:mmx:sse2:$RBIN:--kv-rot on
 sse:sse:sse2:$RBIN:

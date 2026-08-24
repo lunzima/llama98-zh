@@ -344,7 +344,10 @@ void     lz_fpu_float_end(unsigned save);
    escape so the cell could be tested at all: LZ_Q8R_FORCE_SSE,
    LZ_I32FACC_FORCE_SSE, LZ_P2_FORCE_MMX, LZ_EXP_Q20_FORCE_MMX,
    LZ_NORM_SS_FORCE_MMX. Five separate control BUILDS for one missing
-   selector value.
+   selector value. Three are now deleted - the P2, I32FACC and EXP_Q20
+   ones - because a compile-time escape beside a runtime tier is a
+   second way to say the same thing, and two ways can disagree. The
+   remaining two are on the list.
 
    6, not 3-with-everything-renumbered. The value only has to be
    distinct; renumbering would move SSE2 and MMX under every comparison
