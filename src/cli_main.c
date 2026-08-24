@@ -1592,7 +1592,16 @@ int main(int argc, char **argv) {
         goto cleanup;
     }
 
-    printf("\nLoading weights (f32 expand ~%.2f GB)...\n",
+    /* n_params * 4, and it says so. The old wording was "f32 expand
+       ~N GB", which reads as a measured allocation and as a statement
+       that the weights ARE f32 - it is neither. It is an arithmetic
+       estimate of what the parameters WOULD occupy at four bytes each,
+       printed before the loader has looked at a single tensor's dtype.
+       For an f32 checkpoint the two coincide, which is what makes the
+       old phrasing survive; for a quantised one it overstates by the
+       compression ratio. `--tensors` reports the dtypes actually
+       stored. */
+    printf("\nLoading weights (%.2f GB at 4 bytes/param)...\n",
            (double)m.n_params * 4.0 / 1e9);
     t0 = lz_time_ms();
     if (lz_read_weights(&m, err, sizeof(err)) != 0) {
