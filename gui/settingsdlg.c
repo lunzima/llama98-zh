@@ -1029,6 +1029,25 @@ int lz_gui_settings_dialog_read(HWND dlg, const LZGuiSettings *cur,
     return LZ_GUI_SET_OK;
 }
 
+/* Which message names the box that refused a value, indexed by the
+   LZ_GUI_SET_* code. A table rather than a chain of ternaries, so
+   adding the seventh setting is one row.
+   Index 0 is LZ_GUI_SET_OK, which cannot reach the lookup; it holds the
+   temperature message so a code this table has not heard of degrades to
+   a real sentence instead of reading past the end.
+   FILE SCOPE, not a static inside the block that uses it: a
+   declaration there follows statements, which C89 forbids and Visual
+   C++ 4.0 rejects. */
+static const int SETTING_MSG[] = {
+    LZ_STR_ERR_BAD_TEMP,    /* LZ_GUI_SET_OK - unreachable */
+    LZ_STR_ERR_BAD_TEMP,
+    LZ_STR_ERR_BAD_CTX,
+    LZ_STR_ERR_BAD_TOPP,
+    LZ_STR_ERR_BAD_REP,
+    LZ_STR_ERR_BAD_MAXNEW,
+    LZ_STR_ERR_BAD_THINK_TEMP
+};
+
 int lz_gui_settings_dialog(HWND owner, HINSTANCE inst, LZGuiSettings *set) {
     HWND h;
     MSG msg;
@@ -1062,6 +1081,7 @@ int lz_gui_settings_dialog(HWND owner, HINSTANCE inst, LZGuiSettings *set) {
 
     if (g_result == 1) {
         int rc = lz_gui_settings_dialog_read(h, set, &edited);
+        int which;
         if (rc == 0) {
             *set = edited;
             if (IsWindow(h)) DestroyWindow(h);
@@ -1069,24 +1089,11 @@ int lz_gui_settings_dialog(HWND owner, HINSTANCE inst, LZGuiSettings *set) {
         }
         /* The value was refused. Say so - naming the box that refused
            rather than defaulting to the temperature - and treat it as a
-           cancel rather than committing half of it.
-           A table rather than a chain of ternaries, indexed by the
-           code, so adding the seventh setting is one row. Index 0 is
-           LZ_GUI_SET_OK, which cannot get here; it holds the
-           temperature message so that a code this table has not heard
-           of degrades to a real sentence instead of reading past the
-           end. */
-        static const int MSG[] = {
-            LZ_STR_ERR_BAD_TEMP,    /* LZ_GUI_SET_OK - unreachable */
-            LZ_STR_ERR_BAD_TEMP,
-            LZ_STR_ERR_BAD_CTX,
-            LZ_STR_ERR_BAD_TOPP,
-            LZ_STR_ERR_BAD_REP,
-            LZ_STR_ERR_BAD_MAXNEW,
-            LZ_STR_ERR_BAD_THINK_TEMP
-        };
-        int which = (rc >= 0 && rc < (int)(sizeof MSG / sizeof MSG[0]))
-                    ? MSG[rc] : LZ_STR_ERR_BAD_TEMP;
+           cancel rather than committing half of it. The table is
+           SETTING_MSG at file scope. */
+        which = (rc >= 0 && rc < (int)(sizeof SETTING_MSG /
+                                       sizeof SETTING_MSG[0]))
+                ? SETTING_MSG[rc] : LZ_STR_ERR_BAD_TEMP;
         MessageBoxA(owner, lz_str_display((LZStr)which),
                     lz_str_display(LZ_STR_ERR_TITLE),
                     MB_ICONEXCLAMATION | MB_OK);

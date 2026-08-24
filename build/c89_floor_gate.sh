@@ -70,14 +70,15 @@ command -v gcc >/dev/null 2>&1 || { echo "c89_floor_gate: SKIP - no gcc"; exit 2
 # the designated form made order irrelevant, and so let one code sit two
 # slots out of place in err.c for as long as it did.
 #
-BASELINE="ops.c:1 forward.c:16"
+BASELINE="forward.c:16 main.c:7"
 
-# gui/ is in scope too, and not as an afterthought: its string table was
-# 186 of the 452 designated initialisers, and the front end is a shipped
-# product on the same compilers. Only the files that compile standalone
-# under -fsyntax-only are listed - the window procedures need <windows.h>
-# and a host SDK, which this scan is not trying to be.
-CFILES="src/*.c gui/localized_strings.c"
+# ALL THREE DIRECTORIES. The front end and the shared front-end core
+# are shipped products on the same compilers, and scanning one gui file
+# out of fourteen was not a decision - all fourteen pass -fsyntax-only
+# here, checked, and doing so found eight violations nothing was looking
+# at. common/ was unscanned and clean; a directory that is clean and
+# unwatched is one commit from not being.
+CFILES="src/*.c gui/*.c common/*.c"
 
 # THE INCLUDE PATH IS PER FILE, and matches what the Makefile passes.
 # Widening it for everyone is not free: cli_main.c is built with
@@ -120,9 +121,21 @@ done
 # The gate's own positive control: if -pedantic stopped reporting the
 # construct at all, every count would be 0 and this would pass while
 # measuring nothing. ops.c's one known violation is the control.
-if [ "$TOTAL" -eq 0 ]; then
-    echo "FAIL: total is 0, including ops.c's known one - the compiler is not"
-    echo "      reporting mixed declarations and this gate is blind"
+# A count of zero over the whole tree would mean -pedantic stopped
+# reporting the construct, not that the tree is clean: the baseline
+# above names 23 known ones, so zero is the instrument failing. Compare
+# against the baseline's own sum rather than against 0, so this keeps
+# working as the baseline shrinks - and says so when it reaches zero,
+# because then the control has to become something else.
+EXPECT=0
+for e in $BASELINE; do EXPECT=$((EXPECT + ${e##*:})); done
+if [ "$EXPECT" -eq 0 ]; then
+    echo "note: the baseline is empty - this control no longer proves the"
+    echo "      scan works. Plant a violation and check it reddens, or"
+    echo "      replace this with a direct probe of -pedantic."
+elif [ "$TOTAL" -eq 0 ]; then
+    echo "FAIL: total is 0 against a baseline of $EXPECT - the compiler is"
+    echo "      not reporting mixed declarations and this gate is blind"
     FAIL=1
 fi
 
@@ -145,24 +158,30 @@ fi
 # gate as "the MIPS target builds" is the mistake it is written to
 # prevent.
 CFAIL=0
-for f in src/*.c; do
+NC=0
+for f in $CFILES; do
     case "$(basename "$f")" in
         ops_mmx.c|ops_mmx_sse.c|ops_sse2.c) isa="-mmmx -msse -msse2" ;;
         *) isa="" ;;
     esac
-    n=$(gcc -std=c89 -pedantic -fsyntax-only -Isrc -Icommon \
+    NC=$((NC + 1))
+    n=$(gcc -std=c89 -pedantic -fsyntax-only -Isrc -Icommon -Igui \
             -DLZ_MMX_TU=1 -DLZ_SSE2_TU=1 $isa "$f" 2>&1 \
         | grep -c " error: ")
     if [ "$n" -gt 0 ]; then
         echo "FAIL: $(basename "$f") - $n C89 compile error(s)"
-        gcc -std=c89 -pedantic -fsyntax-only -Isrc -Icommon \
+        gcc -std=c89 -pedantic -fsyntax-only -Isrc -Icommon -Igui \
             -DLZ_MMX_TU=1 -DLZ_SSE2_TU=1 $isa "$f" 2>&1 \
             | grep -m2 " error: " | sed 's/^/      /'
         CFAIL=$((CFAIL + n))
         FAIL=1
     fi
 done
-[ "$CFAIL" -eq 0 ] && echo "c89 compile: 0 errors across $(ls src/*.c | wc -l) file(s)"
+# The file count is printed because it is the thing that silently
+# shrinks: this loop scanned src/ alone while the warning loop above had
+# already been widened, so the two were answering about different
+# programs.
+[ "$CFAIL" -eq 0 ] && echo "c89 compile: 0 errors across $NC file(s)"
 
 if [ "$FAIL" -eq 0 ]; then
     echo "c89_floor_gate: PASS ($TOTAL known violation(s), none new)"

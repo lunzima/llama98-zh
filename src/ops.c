@@ -1026,6 +1026,10 @@ void lz_quantize_q8_int64(const int64_t *t, int n, int gs, float deq,
         int64_t tam = 0;
         float amax, inv;
         int fast;
+        /* volatile, and declared here with the others because a
+           declaration after the scan below is C99 - see the assignment
+           for what the qualifier is doing. */
+        volatile float tamf;
         for (k = 0; k < gs; k++) {
             int64_t a = grp[k] < 0 ? (int64_t)(0ull - (uint64_t)grp[k])
                                    : grp[k];
@@ -1037,7 +1041,7 @@ void lz_quantize_q8_int64(const int64_t *t, int n, int gs, float deq,
            the product - and deq here is NOT a power of two (unlike the
            int32 twin's deq), so the two roundings differ by 1 ULP.
            volatile forces the float32 store, breaking the fusion on both. */
-        volatile float tamf = (float)tam;
+        tamf = (float)tam;
         amax = tamf * deq;
         /* deq mul, tam->float cvt, and the `amax > 0.0f` below. The
            element scan above is NOT billed as comparisons: `a > tam` is
