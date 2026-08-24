@@ -372,7 +372,7 @@ watcom-cli:
 	    echo "runtime console"; \
 	    echo "option quiet"; \
 	    echo "name $(CLI_EXE)"; \
-	    echo "libpath $(LIBROOT)/nt"; \
+	    echo "libpath $(LIBROOT)\\nt"; \
 	    echo "libpath $(LIBROOT)"; \
 	    $(foreach f,$(ENG),echo "file $(CLI_OBJ)/$f.obj";) \
 	    $(foreach f,$(ENG_MMX),echo "file $(CLI_OBJ)/$f.obj";) \
@@ -459,7 +459,7 @@ watcom-dll: $(DLL_OBJ)/exports.lnk
 	    echo "format windows nt dll"; \
 	    echo "option map=$(DLL_OBJ)/llama98.map"; \
 	    echo "name $(DLL_EXE)"; \
-	    echo "libpath $(LIBROOT)/nt"; \
+	    echo "libpath $(LIBROOT)\\nt"; \
 	    echo "libpath $(LIBROOT)"; \
 	    $(foreach f,$(ENG),echo "file $(DLL_OBJ)/$f.obj";) \
 	    $(foreach f,$(ENG_MMX),echo "file $(DLL_OBJ)/$f.obj";) \
@@ -492,7 +492,7 @@ watcom-gui:
 	    echo "system nt_win"; \
 	    echo "option quiet"; \
 	    echo "option stack=0x80000"; \
-	    echo "libpath $(LIBROOT)/nt"; \
+	    echo "libpath $(LIBROOT)\\nt"; \
 	    echo "libpath $(LIBROOT)"; \
 	    $(foreach f,$(GUI),echo "file $(GUI_OBJ)/$f.obj";) \
 	    $(foreach f,$(COM),echo "file $(GUI_OBJ)/$(call common_obj,$f).obj";) \
