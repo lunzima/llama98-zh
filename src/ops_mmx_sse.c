@@ -24,6 +24,8 @@
 #include <string.h>
 
 #include "ops_mmx.h"
+#include "ops_sse.h"    /* this file's own %xmm half - see that header for
+                           which kernels stayed with the MMX declarations */
 
 #if defined(LZ_MMX_TU)
 

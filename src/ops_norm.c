@@ -19,6 +19,7 @@
 #include "ops_kernel_shared.h"
 #include "ops_norm.h"
 
+#include "ops_sse.h"          /* the three norm _w wrappers LZ_NORM_SLOTS pastes */
 #include "ops_kernel_norm.h"
 
 /* ---- the (1 + w) table, cached per norm weight ------------------------

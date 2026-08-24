@@ -80,22 +80,10 @@ lz_p2_blk *p2_blk(void);
 #define LZ_HAVE_AMAX_MMX   1
 #define LZ_HAVE_Q8R_SSE    1
 
-/* lz_matmul's F32-weight row. BOTH toolchains from one macro, like
-   LZ_FWHT_MMX_EXTERN above, and declared outside the __WATCOMC__ split
-   below because the wrapper has the same name and prototype on each
-   side. Returns how many elements it consumed (a multiple of 8) and
-   leaves the C's EIGHT accumulators in acc8 for the caller to combine -
-   see the body for why the combine does not belong in the kernel. */
-#define LZ_MATMUL_F32_SSE_EXTERN 1
-int lz_matmul_row_sse(const float *row, const float *x, int in_dim,
-                      float *acc8);
-
-/* lz_fwht's butterfly stage over FLOATS - the SSE1 sibling of the int32
-   cell in src/ops_mmx.c. Mirrored ISA answers: this needs addps/subps
-   (SSE1, and MMX cannot express it), that one needs paddd/psubd (MMX,
-   and SSE1 cannot). len >= 4. */
-#define LZ_FWHT_F32_SSE_EXTERN 1
-void lz_fwht_stage_f32_sse(float *y, int n, int len);
+/* lz_matmul_row_sse and lz_fwht_stage_f32_sse were declared here. They
+   are SSE1 on %xmm and touch no MMX register, so they moved to
+   src/ops_sse.h - see its header for the %mm/%xmm distinction that
+   decides which kernels stay. */
 
 #if defined(__WATCOMC__)
 /* Watcom's kernels live in src/ops_mmx.c too. Grouped by their
@@ -156,15 +144,9 @@ void lz_p2_rows_sse(const int8_t *ph_row, const int8_t *pl_row,
    #pragma aux body cannot be taken by pointer. */
 unsigned lz_amax32_mmx_w(const float *x, int n);
 
-/* RMSNorm's output loop / softmax's max scan and normalize loop, SSE1
-   tier. Bodies in src/ops_mmx_sse.c (genuine SSE1-on-xmm, no MMX
-   register touched), declared here alongside their MMX-tier siblings -
-   same "this header is the ops_mmx.c/ops_mmx_sse.c pair's
-   declarations" precedent as lz_p2_rows_sse above. */
-void lz_rmsnorm_out_sse_w(float *o, const float *x, const float *w,
-                          int n4, const float *k2);
-void lz_vmax_sse_w(const float *x, int n4, float *pmax);
-void lz_vscale_sse_w(float *x, int n4, const float *pk);
+/* The three norm _w wrappers were declared here. They are SSE1 on
+   %xmm - no `8087` in any __modify list - so they moved to
+   src/ops_sse.h with the rest of that tier. */
 
 /* Q8 activation rounding, SSE1+MMX tier, GROUP granularity - the whole
    gs/32-chunk loop (lz_q8round_group_sse) or two-plane loop pair plus

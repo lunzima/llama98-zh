@@ -24,6 +24,10 @@
                            guarded on LZ_MMX_TU, a build flag (-D, from the
                            Makefile) rather than on __MMX__, which this file
                            must never be compiled with. */
+#include "ops_sse.h"    /* the SSE1-on-%xmm half of src/ops_mmx_sse.c. A
+                           separate include from ops_mmx.h on purpose: those
+                           kernels need an SSE1 machine, and an include line
+                           saying "mmx" would not say so. */
 #include "ops_sse2.h"   /* declarations for src/ops_sse2.c's functions - the
                            %xmm-touching kernels are defined there. Same
                            LZ_SSE2_TU/__SSE2__ contract, one ISA tier up. */
