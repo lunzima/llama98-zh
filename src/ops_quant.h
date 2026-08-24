@@ -13,17 +13,10 @@
    and the dispatch macros into every TU that only wants to round. */
 extern int g_kernel;
 
-/* For a `static` definition in a header: two of the TUs that include
-   this one (ops_matmul.c, ops_sched.c) want the other declarations and
-   never round, and an unused-function warning per TU is not a price
-   worth paying for an inline body. Watcom has no equivalent spelling
-   and does not warn about it, so the empty expansion is correct there
-   rather than merely tolerated. */
-#if defined(__GNUC__)
-#define LZ_MAYBE_UNUSED __attribute__((unused))
-#else
-#define LZ_MAYBE_UNUSED
-#endif /* __GNUC__ */
+/* LZ_MAYBE_UNUSED is in lz_int.h, with the other portability spellings.
+   Two of the TUs that include this one (ops_matmul.c, ops_sched.c) want
+   the declarations and never round, and an unused-function warning per
+   TU is not a price worth paying for an inline body. */
 
 /* 2^e by integer manipulation of the exponent field. */
 float pow2f(int e);

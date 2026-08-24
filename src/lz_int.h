@@ -77,4 +77,22 @@ typedef unsigned long long lz_u64;
 #define restrict
 #endif
 
+/* For a `static` function defined in a header. Several translation
+ * units include a header for one of its declarations and never call the
+ * inline bodies beside it, and gcc warns once per function per TU: the
+ * big-endian MIPS cross build alone reported 34 of them, which is a
+ * build whose warning count carries no information. Watcom has no
+ * equivalent spelling and does not warn, so the empty expansion there is
+ * correct rather than merely tolerated.
+ *
+ * Here rather than in one of the headers that uses it: ops_quant.h and
+ * ops_kernel_shared.h both need it, ops.c includes the second one
+ * first, and two definitions of the same portability spelling is the
+ * duplication this file exists to prevent. */
+#if defined(__GNUC__)
+#define LZ_MAYBE_UNUSED __attribute__((unused))
+#else
+#define LZ_MAYBE_UNUSED
+#endif
+
 #endif /* LZ_INT_H */

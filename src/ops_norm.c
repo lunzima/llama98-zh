@@ -71,7 +71,10 @@ static int wp_slots = 0;
  * every call while the code performs one only for the lengths that are
  * not a power of two - and this tree has 512, 128 and 64 alongside the
  * MoE intermediate's 896, so both arms are live in the same run. */
-static int ssn_pow2(int n) { return n > 0 && (n & (n - 1)) == 0; }
+/* MAYBE_UNUSED because its only callers are LZ_SSN_MUL and LZ_SSN_DIV
+   just below, and both of those appear only inside LZ_FCX - which
+   expands to nothing unless the build is a counting one. */
+LZ_MAYBE_UNUSED static int ssn_pow2(int n) { return n > 0 && (n & (n - 1)) == 0; }
 #define LZ_SSN_MUL(n) (ssn_pow2(n) ? 1 : 0)
 #define LZ_SSN_DIV(n) (ssn_pow2(n) ? 0 : 1)
 

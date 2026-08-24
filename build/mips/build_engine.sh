@@ -141,6 +141,25 @@ echo
 echo "objects: $(ls -1 "$OUT"/*.o 2>/dev/null | wc -l)  failed: $fail  warnings: $warn"
 [ "$fail" -eq 0 ] || exit 1
 
+# The warning count is an assertion, not a printout. It was counted,
+# printed and discarded, and sat at 18 - all of them one shape,
+# "defined but not used" for a static in a header that this TU includes
+# for something else. A build whose warning count is a number nobody
+# looks at cannot report the one warning that matters, and this is the
+# only build in the tree that is big-endian.
+#
+# The ceiling is the current count, not zero: src/forward.c has an
+# unused lslot behind a conditional, and it is being edited elsewhere.
+# Lowering this is the work; raising it is the regression.
+MIPS_WARN_CEIL=${MIPS_WARN_CEIL:-1}
+if [ "$warn" -gt "$MIPS_WARN_CEIL" ]; then
+    echo "FAIL: $warn warnings, ceiling $MIPS_WARN_CEIL"
+    grep -h 'warning:' "$OUT"/*.log 2>/dev/null \
+        | sed 's/.*warning: //' | sort | uniq -c | sort -rn | head -6 \
+        | sed 's/^/      /'
+    exit 1
+fi
+
 # Link the CLI, exactly as build/arm/build_engine.sh does: cli_main.c's
 # interactive loop runs on the shared LZSession core in common/, which is
 # a front-end helper deliberately outside $(ENG).

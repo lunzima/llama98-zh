@@ -118,7 +118,7 @@ extern int g_kernel;
  * p2_group_norm (ops_gdn.c, twice per recurrence group, where the
  * multiply it replaces already carried the comment "exact: multiply by
  * a power of two"). */
-static int f32_scale_pow2(float v, int e, float *out) {
+LZ_MAYBE_UNUSED static int f32_scale_pow2(float v, int e, float *out) {
     union { float f; uint32_t u; } b;
     uint32_t bex;
     int ex;
@@ -158,7 +158,7 @@ static int f32_scale_pow2(float v, int e, float *out) {
     return 1;
 }
 
-static float lz_i32f(int32_t v) {
+LZ_MAYBE_UNUSED static float lz_i32f(int32_t v) {
 #if defined(LZ_ARM_PRIM_ASM)
     if (g_kernel == LZ_KERNEL_ARM_ASM) return lz_i32f_arm_asm(v);
 #endif /* LZ_ARM_PRIM_ASM */
@@ -193,7 +193,7 @@ static float lz_i32f(int32_t v) {
    this closes it. Pure integer, touches neither x87 nor MMX, so it is
    safe to call from inside a row's SIMD phase without disturbing
    either register file. */
-static void gdn_tail_row(const int8_t *sq_gg, int kd, int vd,
+LZ_MAYBE_UNUSED static void gdn_tail_row(const int8_t *sq_gg, int kd, int vd,
                          int32_t cu, int32_t cw,
                          int32_t *au_gg, int32_t *aw_gg) {
     if (!(kd & 1)) return;
@@ -219,7 +219,7 @@ static void gdn_tail_row(const int8_t *sq_gg, int kd, int vd,
    32512 rather than 32767 is what makes |hn| <= 32513 and therefore
    |hi| <= 127 after the split - the two saturating packs in the MMX twin
    depend on that bound and must never fire. */
-static int p2_shift_of(int32_t amax) {
+LZ_MAYBE_UNUSED static int p2_shift_of(int32_t amax) {
     int sh = 0;
     while ((amax >> sh) > 32512) sh++;
     return sh;
