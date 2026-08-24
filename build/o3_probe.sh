@@ -59,6 +59,40 @@
 #
 # So a nonzero here opens a question; it does not answer one.
 #
+# THE SECOND LOOK, over all twelve units the matrix now calls
+# impossible, so the next reader does not redo it. They split two ways:
+#
+#   SSE1 columns (sseI/sseA): atdot fwhti q16_0 q4_1 q6_1 q8_0 sigq t2
+#                             wsump - nine units, reason km_why_sse1
+#   MMX  columns (mmxI/mmxA): f32mm fwhtf i32f - three, and their
+#                             reasons are about absent float/convert
+#                             instructions, which no compiler probe can
+#                             refute or support
+#
+# The x86-64 rows look alarming for the nine - wsump reads arith=75,
+# q8rnd 134, nrmss 82 - and every one of those is explained by the
+# baseline. Disassembling the largest of them, lz_attn_wsum_q8 at
+# -march=x86-64, the packed work is por/pand/pandn/pxor/pcmpgtd/
+# punpck[lh]wd/psubd/psrld/paddd/pshufd with addps/mulps/cvtdq2ps
+# around it. Everything in that first group is INTEGER %xmm, which is
+# precisely what SSE1 does not have - SSE1's integer operations are on
+# %mm only, and the %xmm forms arrived with SSE2. The float three are
+# SSE1-available and are not the loop's arithmetic.
+#
+# So the reason holds, and it holds for a reason the count alone does
+# not give: SSE1 adds nothing BETWEEN the MMX tier and the SSE2 one for
+# these units. The integer work lives on %mm at the MMX tier - where
+# every one of these nine has a cell - and widening it to %xmm needs
+# SSE2, which also has a cell. The SSE1 column is the gap between two
+# implemented tiers, not an unwritten kernel.
+#
+# THE pentium3 ROW READING ZERO IS CORROBORATION, NOT THE ARGUMENT, and
+# the distinction matters here more than anywhere else in this file: a
+# compiler declining to vectorise is not a reason to leave a cell
+# unwritten. If it were, every hand-written kernel in this tree would be
+# unjustified - gcc declines on most of them. The argument is the
+# instruction list above; the zero is only consistent with it.
+#
 # Usage: bash build/o3_probe.sh [unit ...]
 #        no arguments walks every unit in MAP below.
 #
