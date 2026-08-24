@@ -24,7 +24,7 @@
 
 /* ---- the (1 + w) table, cached per norm weight ------------------------
 
-   THE OUTPUT LOOP'S ADD DOES NOT DEPEND ON THE TOKEN. lz_rmsnorm's
+   The output loop's add does not depend on the token. lz_rmsnorm's
    `o[i] = x[i] * inv * (1.0f + w[i])` reads x and inv per call, but
    `1.0f + w[i]` reads only w - the norm weight tensor, the same object
    on every call for the life of the model. Measured on the ARM cross
@@ -32,13 +32,13 @@
    instructions per element and a bare __aeabi_fadd is 43 of them, so
    hoisting the add leaves two multiplies and the loads.
 
-   THE PATH THIS SERVES IS THE ONE THAT RUNS. lz_rmsnorm_out_fixed_int
+   The path this serves is the one that runs. lz_rmsnorm_out_fixed_int
    below carries a Q15 version of the same hoist, but every call site
    that reaches it (forward.c, nine of them) is inside a SubLN branch;
    counted on .prof/x87test, 147,200 of 147,200 norm elements go through
    the float loop and none through the int one.
 
-   BIT-IDENTICAL BY CONSTRUCTION rather than by tolerance: the table
+   Bit-identical by construction rather than by tolerance: the table
    holds exactly fl(1.0f + w[i]), which is what the inline expression
    computes, and float addition is deterministic. A miss runs the inline
    form, so both live in one build and .prof/norm_wp_xcheck.c compares
@@ -81,7 +81,7 @@ LZ_MAYBE_UNUSED static int ssn_pow2(int n) { return n > 0 && (n & (n - 1)) == 0;
 
 /* ss / n, without the divide when n is a power of two.
  *
- * A DIVIDE IS NOT A MULTIPLY: 117 instructions against 30 on ARMv5TE
+ * A divide is not a multiply: 117 instructions against 30 on ARMv5TE
  * (.prof/arm_div_count.sh), while the f32 census counts both as 1. The
  * four RMSNorm entries below each spend one on `ss / (float)n`, and n is
  * a row length - 512, 128, 64 on every checkpoint here.
@@ -198,7 +198,7 @@ int lz_debug_norm_eg_hi = -32768;
 #if LZ_NORM_FIXED
 /* ---- the norm weight's Q15 table, cached per weight pointer ----------
 
-   THE LIBRARY CALLS THAT READ ONLY w DO NOT DEPEND ON THE TOKEN. Both
+   The library calls that read only w do not depend on the token. Both
    int output loops below quantize a norm weight to Q15 - the gated one
    quantizes w, the plain one 1+w - and a norm weight tensor is the same
    object on every call for the life of the model. Measured on the ARM
@@ -458,7 +458,7 @@ have_ss_gated_int:
    shifts for its four factors. t receives the Q15 product, *deq the
    power-of-two scale lz_quantize_q8_tok_int folds into the row scale.
 
-   NOT BIT-IDENTICAL TO THE TIER IT REPLACES, unlike its gated
+   Not bit-identical to the tier it replaces, unlike its gated
    counterpart, and the difference is structural rather than a bound.
    lz_rmsnorm_gated_out_fixed_int elides a round trip: its fixed twin
    computes the same Q15 product and then dequantizes it, so the two
@@ -632,7 +632,7 @@ have_ss:
             f(o, x, w, n4, k2);
             i = n4 << 2;
         } else {
-            /* THE TABLE ONLY PAYS WHEN THE SCALAR LOOP IS THE WHOLE ROW.
+            /* The table only pays when the scalar loop is the whole row.
                With a vector kernel above, what is left here is at most
                three tail elements, and a pool slot for three adds is a
                worse trade than the adds. */
@@ -710,8 +710,8 @@ void lz_l2norm(float *o, const float *x, int n, float eps) {
                  add  n + 1
                  cvt  1        div 0
 
-               2n+1, NOT 3n+1, AND THAT ONE n IS THE ONLY CORRECTION
-               HERE THAT MATTERED. Billing 3n+1 "to hold the site's
+               2n+1, not 3n+1; that one n is the only correction here
+               that mattered. Billing 3n+1 "to hold the site's
                historical total" overstates by n. Measured on kmr20 at
                603 tokens: the extra n is the difference between a NORMS
                class of 131,156 and 118,868 ops/token, 9.4% - because
@@ -757,7 +757,7 @@ have_ss_l2:
    docs/int-pipeline-project.md 9.4 for why the naive reading of this is
    twice as good as the real one.
 
-   EPS IS WHY THIS IS NOT FREE. L2 normalisation is scale-invariant in
+   Eps is why this is not free. L2 normalisation is scale-invariant in
    mathematics, so "the exponent cancels" looks like an enabling fact.
    It is not: rsqrt is taken of ss + eps and eps is ABSOLUTE, so the
    integer sum of squares has to be brought to the true scale before it
@@ -807,7 +807,7 @@ void lz_softmax(float *x, int n) {
             i = 1 + (n4 << 2);
         }
     }
-    /* THE MAX SCAN RUNS IN THE INTEGER DOMAIN. On a soft-float target
+    /* The max scan runs in the integer domain. On a soft-float target
        `x[i] > mx` is a bl __aeabi_fcmpgt, ~30 instructions, once per
        element; the key below is three (lsr, orr, eor) and then a plain
        unsigned cmp.
