@@ -3826,9 +3826,16 @@ static const char km_why_op_x86[] =
     "a gather, and that is AVX2 - off this target family. Not a batching "
     "question: lz_attn_wsum_q8's chunk fold does hand a scalar leaf "
     "thirty-two values at a time, which is what i32f's cells are";
+/* EXPFX AND SIGQ ONLY, and the scope line is here because this string
+   used to be the default for every operator unit and was wrong for
+   three of them. i32f and q8rnd both have group forms - the wsum chunk
+   fold's 32 and lz_q8round_group_sse's gs - and each now carries a
+   reason that says which axis it is on instead. For a per-element table
+   lookup both clauses below are true: there is no group form, and the
+   leaf really has nothing to hoist across. */
 static const char km_why_op_g128[] =
-    "no 128-element group form exists - a scalar leaf has no group to "
-    "hoist across";
+    "no 128-element group form exists - a per-element table lookup has "
+    "no group to hoist across";
 static const char km_why_attn_g128[] =
     "this column is the 128-ELEMENT group; attention's group runs over "
     "context length, which is unbounded, and lz_wsum_group_mmx already "
@@ -3936,6 +3943,21 @@ static const char km_why_fwhti_sse1[] =
    Watcom, selected at runtime by lz_q8r_tier. The function is named for
    the thirty-two values it takes at once. Only the MMX pair is
    genuinely out, and for a different reason than the one it carried. */
+/* q8rnd DOES have a group form, which the shared operator reason denied
+   twice over. lz_q8round_group_sse (src/ops_mmx.h) takes gs and runs
+   the whole gs/32-chunk loop - hand it 128 and it runs four chunks. So
+   neither "no group form exists" nor "a scalar leaf has no group" is
+   true here; the second clause is the one this file already retired at
+   km_why_i32f_g128, and q8rnd kept pointing at the old string.
+   What is true is narrower, and it is what the column asks: this column
+   is the matmul row kernel's relationship to a group-of-128 kernel
+   (dot128_*), and q8round's group kernel is called by lz_quantize_q8
+   per group, not hoisted across sub-blocks by a row. */
+static const char km_why_q8rnd_g128[] =
+    "this column is the ROW kernel's 128-element group hoist (dot128_*); "
+    "q8round does have a group form - lz_q8round_group_sse takes gs and "
+    "runs gs/32 chunks - but lz_quantize_q8 calls it per group rather "
+    "than a row hoisting it across sub-blocks. A different axis";
 static const char km_why_i32f_g128[] =
     "this column is the 128-ELEMENT quantization group; the fold's group "
     "is the wsum chunk's 32, which is where its cells are. Not \"a scalar "
@@ -4002,7 +4024,7 @@ static const LZKmReg km_reg[LZ_KM_NUNIT * LZ_KM_NCOL] = {
    shared C body, which is also what --kernel arm-c runs - so armC is
    present on ARM for the same reason ref is present everywhere. */
 /* i32f */ KM_H(KM_ALL), KM_I(km_why_i32f_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_I(km_why_i32f_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_i32f_g128),
-/* q8rnd*/ KM_H(KM_ALL), KM_I(km_why_q8rnd_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_I(km_why_q8rnd_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128),
+/* q8rnd*/ KM_H(KM_ALL), KM_I(km_why_q8rnd_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_I(km_why_q8rnd_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_q8rnd_g128),
 /* expfx*/ KM_H(KM_ALL), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128),
 /* The two attention MAC units DO have x86 kernels, and they are
    macro-selected rather than table-selected, so km_op_present answers
