@@ -274,6 +274,12 @@ void dot32_q61_mmx_2(const unsigned char *w4, const unsigned char *w2,
                      int32_t *oa, int32_t *ob);
 int32_t dot32_t2_mmx(const unsigned char *w2, const int16_t *x);
 int32_t dot32_q16_mmx(const int16_t *w, const int16_t *x);
+/* T2 over a whole 128-element group: four sub-blocks, four sums, one
+   pairwise fold. Bit-identical to four dot32_t2_mmx calls - see the body
+   in src/ops_kernel_dot_mmx.h for why folding pairwise changes only
+   which lanes meet first. */
+void dot128_t2_mmx(const unsigned char *w2, const int16_t *x,
+                   int32_t *out4);
 
 /* ---- 128-element group kernels ----------------------------------------
    One call per 128 elements instead of four dot32 calls, with the mask

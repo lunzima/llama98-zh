@@ -94,7 +94,14 @@ static int check_table(const char *fmt, const lz_rowfn *tab,
             memcpy(acc_ref, acc, sizeof acc);
             continue;
         }
-        if (memcmp(acc_ref, acc, (size_t)nt * 4) != 0) {
+        /* EVERY accumulator, not the first per token. This compared
+           `nt * 4` bytes - nt int32 - while the kernels write nb*nt of
+           them, so only sub-block 0 of each token was ever checked and a
+           kernel could be wrong in all the others silently. Found by
+           mutating a 128-element group kernel that folds four sub-blocks
+           at once: breaking its third and fourth lanes left this green,
+           because those land in acc[2] and acc[3]. */
+        if (memcmp(acc_ref, acc, (size_t)nb * nt * 4) != 0) {
             printf("  FAIL %s n=%d nt=%d: slot %s differs from %s\n",
                    fmt, in_dim, nt, slot_name(s), slot_name(first));
             for (i = 0; i < nt; i++)

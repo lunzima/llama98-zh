@@ -288,7 +288,12 @@ void dot128_q41_mmx(const unsigned char *w, const int16_t *x, int32_t *out4) {
    entire 16-bit lane. Aligning it with one right shift leaves the low
    byte's contents in the lane; push to the top, clear below, restore:
    psllw (6-sh) ; psrlw 14 ; psllw 8. */
-int32_t dot32_t2_mmx(const unsigned char *w2, const int16_t *x) {
+/* The eight groups, stopping before the horizontal fold: two int32 lanes
+   still to be summed. Split out so the 128-element form below can fold
+   four of these TOGETHER - the arithmetic above the fold is untouched,
+   which is what keeps both entries bit-identical to the old single
+   function. */
+static __m64 part32_t2_mmx(const unsigned char *w2, const int16_t *x) {
     __m64 acc = _mm_setzero_si64();
     __m64 pl  = *(const __m64 *)(const void *)w2;
     int gi;
@@ -311,8 +316,45 @@ int32_t dot32_t2_mmx(const unsigned char *w2, const int16_t *x) {
         t = _mm_slli_pi16(t, 8);
         acc = _mm_add_pi32(acc, _mm_madd_pi16(t, xv));
     }
+    return acc;
+}
+
+int32_t dot32_t2_mmx(const unsigned char *w2, const int16_t *x) {
+    __m64 acc = part32_t2_mmx(w2, x);
     acc = _mm_add_pi32(acc, _mm_srli_si64(acc, 32));
     return _mm_cvtsi64_si32(acc);
+}
+
+/* T2 over a 128-element group, MMX tier - the %mm twin of
+   dot128_t2_sse2, and it pays for the same reason: the horizontal fold,
+   not the unpack.
+ *
+ * Per-32 each sub-block folds its own two lanes and extracts - srli_si64,
+ * add, cvtsi64_si32, three instructions each, twelve for four sub-blocks.
+ * Pairwise here: unpackldq and unpackhdq bring two sub-blocks' lanes
+ * alongside each other so ONE add finishes both, three instructions per
+ * pair and six for four. The two results are whole %mm registers, so
+ * they store as two 8-byte writes instead of four int32 extracts.
+ *
+ * Bit-identical to four dot32_t2_mmx calls: same part32_t2_mmx above,
+ * and int32 addition is associative and exact, so pairing changes only
+ * which lanes meet first.
+ *
+ * NO EMMS HERE. This leaves the register file in MMX state exactly as
+ * dot32_t2_mmx does, and the caller's row kernel owns the emms - the
+ * rule this file's other kernels already follow. */
+void dot128_t2_mmx(const unsigned char *w2, const int16_t *x,
+                   int32_t *out4) {
+    __m64 a0 = part32_t2_mmx(w2,      x);
+    __m64 a1 = part32_t2_mmx(w2 +  8, x +  32);
+    __m64 a2 = part32_t2_mmx(w2 + 16, x +  64);
+    __m64 a3 = part32_t2_mmx(w2 + 24, x +  96);
+    __m64 p0 = _mm_add_pi32(_mm_unpacklo_pi32(a0, a1),
+                            _mm_unpackhi_pi32(a0, a1));
+    __m64 p1 = _mm_add_pi32(_mm_unpacklo_pi32(a2, a3),
+                            _mm_unpackhi_pi32(a2, a3));
+    *(__m64 *)(void *)(out4)     = p0;
+    *(__m64 *)(void *)(out4 + 2) = p1;
 }
 
 /* ---- Q6_1: dot32_q61_mmx / dot32_q61_mmx_2 ------------------------------

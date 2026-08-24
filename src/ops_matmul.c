@@ -809,7 +809,19 @@ static void row_t2_mmx_intrin(int32_t *acc32, const void *w4, const void *w2v,
     for (tk = 0; tk < nt; tk++) {
         const int16_t *xwt = xw + (size_t)tk * in_dim;
         int32_t *acc = acc32 + (size_t)tk * nb;
-        for (s = 0; s < nb; s++)
+        s = 0;
+        /* Whole groups of four first, the per-32 fold for the nb % 4
+           tail. Both write the same values - dot128_t2_mmx folds the
+           same partials pairwise instead of singly - so the row is split
+           between two instruction counts, never two answers.
+           The knob is spelled this way because LZ_G128_GCC lives in
+           ops_kernel_shared.h, which is not on every TU's include path;
+           the A/B is run as -DLZ_G128_GCC=0. */
+#if !defined(LZ_G128_GCC) || LZ_G128_GCC
+        for (; s + 4 <= nb; s += 4)
+            dot128_t2_mmx(p2 + (size_t)s * 8, xwt + (size_t)s * 32, acc + s);
+#endif /* !defined(LZ_G128_GCC) || LZ_G128_GCC */
+        for (; s < nb; s++)
             acc[s] = dot32_t2_mmx(p2 + (size_t)s * 8, xwt + (size_t)s * 32);
     }
 }
