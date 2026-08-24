@@ -3795,7 +3795,23 @@ static const char *const km_col[LZ_KM_NCOL] = {
 };
 
 /* Printed, so one line each; the audit above is the long form. */
-/* CONFIRMED BY THE COMPILER, not only by the instruction audit. gcc
+/* THE STANDARD AN EMPTY ISA CELL HAS TO MEET, because two weaker ones
+   were used here before it and both let a writable kernel go unwritten:
+   the tier must be unable to express ANY PART of the work. Partial
+   relief obliges a kernel - a loop that goes half as fast in SIMD and
+   finishes in scalar is still a cell, and "an SSE1 kernel would just be
+   an MMX kernel with mulps in front" is a sentence about taxonomy that
+   cost nrmss its two cells for as long as it stood.
+   AND "THE COMPILER ALREADY DOES IT" IS NOT A REASON. gcc -O2 does
+   vectorise the wsum chunk fold on x86-64, and that cell is written
+   anyway: an auto-vectorisation has no name the matrix can register, no
+   symbol a cross-toolchain comparison can reach, and it disappears when
+   a compiler version or a flag moves. It is not a kernel, it is a
+   compiler's current mood.
+   So o3_probe's zero at -march=pentium3 is evidence in ONE direction
+   only. It cannot license an empty cell; only the instruction list can.
+
+   CONFIRMED BY THE COMPILER, not only by the instruction audit. gcc
    -O3 on the same C, build/o3_probe.sh: ALL FIFTEEN probed units emit
    zero packed ARITHMETIC at -m32 -march=pentium3, every one of them
    with a non-empty body, so the zero is the vectoriser declining and
@@ -3810,12 +3826,28 @@ static const char *const km_col[LZ_KM_NCOL] = {
    evidence of vectorisation - separating the two dropped lz_exp from
    "22 packed" to zero arithmetic in 163 instructions.
 
-   The audit and the compiler agree, which is the point of running
-   both: an audit is an argument about an ISA table, and three cells in
-   this registry turned out to have plausible arguments that were
-   wrong. SSE1's own integer additions - pmaxsw, pminsw, pshufw, pavgw,
-   pmulhuw, psadbw - are real and this tree uses pmaxsw elsewhere; they
-   are simply not a 16x16->32 MAC, which is what these loops are. */
+   AND THE INSTRUCTION LIST, which is the half that licenses the empty
+   cell. What the MMX dot kernels execute is pmaddwd, punpcklbw, psllw,
+   psrlw and pxor - measured out of src/ops_kernel_dot_mmx.h, not
+   recalled. Against that, every integer instruction SSE1 adds:
+
+     pmaxsw pminsw   a saturating clamp; these loops have none
+     pavgb pavgw     rounded average; not a MAC
+     pmulhuw         UNSIGNED high multiply; the operands are signed
+     psadbw          unsigned byte SAD; not a signed MAC
+     pshufw          a lane permute; the shifts here are bit-field
+                     extraction inside a lane, not a permute
+     pextrw pinsrw   scalar lane access; slower than the load it replaces
+     pmovmskb        a mask extract with no consumer here
+     maskmovq movntq stores; these kernels accumulate in a register
+
+   None of them applies. The one SSE1 instruction that does is
+   prefetchnta, and it is already emitted - 14 in the shipped binary,
+   from the row loops in ops_matmul.c under --prefetch - so an SSE1
+   cell would be the MMX kernel with nothing added.
+
+   That is the test being met: not "gcc declined", which is only
+   evidence, but "the tier has no instruction that touches this work". */
 static const char km_why_sse1[] =
     "SSE1 adds no signed 16x16->32 MAC and no integer %xmm; its own MMX "
     "additions (pmaxsw/pshufw/psadbw) are real but are not a MAC. gcc "
