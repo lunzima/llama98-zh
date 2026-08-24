@@ -3955,6 +3955,27 @@ static const char km_why_sse1[] =
    The win is still small - two lanes on MMX, four on SSE2, against
    scalar loads that stay scalar. Small is not none, and none is the
    bar. */
+/* expfx IS NOT THE SAME SHAPE, and this reason was extended to it from
+   sigq without checking. lz_exp_fixed does no linear interpolation: it
+   is a Q20 Taylor series - s = rq >> 5, then
+   cq = QSCALE + ((LN2*s + rnd) >> Q) + ((LN2SQ*s*s + rnd) >> 2Q), then
+   prod = (g_exptab[idx] * cq + rnd) >> Q - whose multiplies are
+   32 x 32 -> 64, not the 16 x 16 -> 32 that made sigq's tail a pmaddwd.
+   That changes which instruction each tier needs and it changes the
+   answer for one of them:
+     SSE2  pmuludq is exactly 32 x 32 -> 64, two lanes. The operands are
+           signed and pmuludq is not, so the sign has to be folded in
+           by hand, but the instruction is there.
+     MMX   has nothing wider than pmaddwd. The product has to be built
+           from 16-bit halves with shifts and adds - several
+           instructions where SSE2 spends one. Owed, not impossible:
+           expressible is the bar, not convenient.
+   The 32-entry table lookup stays scalar on both, same as sigq's. */
+static const char km_why_expfx_x86[] =
+    "todo: not sigq's interpolation - lz_exp_fixed is a Q20 Taylor whose "
+    "multiplies are 32x32->64. SSE2 has pmuludq (unsigned, so the sign "
+    "is folded by hand); MMX has to build the product from 16-bit halves. "
+    "The 32-entry lookup stays scalar on both";
 static const char km_why_op_x86[] =
     "todo: the per-element table INDEX needs a gather (AVX2, off this "
     "target family) and stays scalar, but the interpolation around it - "
@@ -4131,7 +4152,7 @@ static const LZKmReg km_reg[LZ_KM_NUNIT * LZ_KM_NCOL] = {
    present on ARM for the same reason ref is present everywhere. */
 /* i32f */ KM_H(KM_ALL), KM_I(km_why_i32f_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_I(km_why_i32f_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_i32f_g128),
 /* q8rnd*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_q8rnd_g128),
-/* expfx*/ KM_H(KM_ALL), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_op_g128),
+/* expfx*/ KM_H(KM_ALL), KM_T(km_why_expfx_x86), KM_T(km_why_expfx_x86), KM_T(km_why_expfx_x86), KM_T(km_why_expfx_x86), KM_T(km_why_expfx_x86), KM_T(km_why_expfx_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_op_g128),
 /* The two attention MAC units DO have x86 kernels, and they are
    macro-selected rather than table-selected, so km_op_present answers
    for them. atdot's assembly is q8_0's leaf, reused rather than copied
