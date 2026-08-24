@@ -34,8 +34,8 @@ cd "$(dirname "$0")/.."
 
 PAT="used to be|used to |no longer|the old |originally|before this task|as before this|previously|formerly"
 
-BASELINE="cli_main.c:1 err.c:1 forward.c:3 generate.c:6 model.c:1 ops.c:15
-          ops_gdn.c:12 ops_matmul.c:1 ops_mmx.c:2 ops_norm.c:5 ops_quant.c:4
+BASELINE="err.c:1 forward.c:3 generate.c:6 model.c:1 ops.c:8
+          ops_gdn.c:1 ops_matmul.c:1 ops_mmx.c:2 ops_norm.c:5 ops_quant.c:4
           ops_sched.c:5 sampler.c:4 llama_zh.h:1 lz_int.h:1 net.h:1 ops.h:6
           ops_kernel_dot.h:2"
 

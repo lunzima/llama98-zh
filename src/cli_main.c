@@ -1592,15 +1592,15 @@ int main(int argc, char **argv) {
         goto cleanup;
     }
 
-    /* n_params * 4, and it says so. The old wording was "f32 expand
-       ~N GB", which reads as a measured allocation and as a statement
-       that the weights ARE f32 - it is neither. It is an arithmetic
-       estimate of what the parameters WOULD occupy at four bytes each,
-       printed before the loader has looked at a single tensor's dtype.
-       For an f32 checkpoint the two coincide, which is what makes the
-       old phrasing survive; for a quantised one it overstates by the
-       compression ratio. `--tensors` reports the dtypes actually
-       stored. */
+    /* n_params * 4, and the wording says so. Do not phrase this as
+       "f32 expand ~N GB": that reads as a measured allocation and as a
+       statement that the weights ARE f32, and it is neither. It is an
+       arithmetic estimate of what the parameters WOULD occupy at four
+       bytes each, printed before the loader has looked at a single
+       tensor's dtype. On an f32 checkpoint the two coincide, which is
+       what lets a wrong phrasing survive unnoticed; on a quantised one
+       it overstates by the compression ratio. `--tensors` reports the
+       dtypes actually stored. */
     printf("\nLoading weights (%.2f GB at 4 bytes/param)...\n",
            (double)m.n_params * 4.0 / 1e9);
     t0 = lz_time_ms();
@@ -2104,8 +2104,8 @@ int main(int argc, char **argv) {
        --prompt does NOT: it feeds the raw bytes as a bare continuation.
        The two are different tasks - a bare greeting as a continuation
        and the same greeting as a chat turn produce different replies -
-       and a CLI used to reproduce
-       GUI behaviour must offer the chat path. --chat is that single turn,
+       so a CLI meant to reproduce GUI behaviour must offer the chat
+       path. --chat is that single turn,
        byte-identical to interactive's first turn. --prompt stays the
        continuation probe the numeric tests depend on. */
     if (chat) {

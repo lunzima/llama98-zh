@@ -1968,9 +1968,9 @@ static lz_u64 epi_shr_half_u(lz_u64 umag, int rs) {
    instructions from the C, so that twin would exist only to satisfy the
    pairing. Not done; the cost is recorded so it need not be re-derived.
 
-   `s == 0` is not a special case: the general path gives umag = 0 and
-   epi_shr_half_u(0, rs) is 0 for every rs, so the old fast path bought
-   nothing and its arm never fired.
+   `s == 0` needs no special case, and a fast path for it would never
+   fire: the general path gives umag = 0, and epi_shr_half_u(0, rs) is 0
+   for every rs.
 
    `rs <= 0` STAYS, and not for its share: at rs <= 0 with s == LLONG_MIN
    the magnitude is 2^63 and converting it back with (lz_i64) is
@@ -2659,14 +2659,13 @@ void lz_matmul_xq_nt(float *o, const float *x, const int8_t *xq,
         matmul_scalar_ref(o, xq, xqs, w, in_dim, out_dim, nt);
         return;
     }
-    /* There used to be an ARM interception here, sending every dtype
-       without an ARM row kernel to matmul_scalar_ref so that the tiers
-       differed by the kernel under test and not by which fallback they
-       fell through. All five formats now have their armC/armA pair
-       (src/ops_arm.c, plus ternary in src/ops_t2_arm.c), so the list is
-       empty and the dispatch below is the whole story on ARM too. A new
-       format lands here as a `t` in km_reg and needs the interception
-       back, for one dtype, until its pair is written. */
+    /* No ARM interception here, and the reason it is absent rather than
+       forgotten: all five formats have their armC/armA pair
+       (src/ops_arm.c, plus ternary in src/ops_t2_arm.c), so the dispatch
+       below is the whole story on ARM too. A format WITHOUT one needs
+       the interception - route that dtype to matmul_scalar_ref, so the
+       tiers differ by the kernel under test and not by which fallback
+       they fell through. Such a format lands as a `t` in km_reg. */
     /* The SIMD fast path currently covers only (Q8_0, gs=32). Other
        formats/groups go through the scalar reference - correct but
        slow.
@@ -3128,12 +3127,13 @@ static int conv_pow2_exp(float v, int32_t *k) {
  * the caller's job (forward.c) to make sure the two ways of obtaining
  * it are not mixed within one model's conv block. */
 
-/* The int16 exit is a NEW ENTRY POINT rather than two more parameters on
-   the old one, and the reason is the call-site count: six of the eight
-   callers are probes (.prof/fwd_mine.c, .prof/arm_prim_count.c), and a
-   signature change there is churn with no reader. The old name stays as
-   a wrapper passing NULL - one call per (layer, tensor), not per
-   element, so it costs nothing measurable. */
+/* The int16 exit is a SEPARATE ENTRY POINT rather than two more
+   parameters on lz_causal_conv1d_step_fixed, and the reason is the
+   call-site count: six of that function's eight callers are probes
+   (.prof/fwd_mine.c, .prof/arm_prim_count.c), where a signature change
+   is churn with no reader. It stays as a wrapper passing NULL - one
+   call per (layer, tensor), not per element, so it costs nothing
+   measurable. */
 void lz_causal_conv1d_step_fixed_o16(float *o, short *oi, int out_es,
                                  const float *x, const short *xi,
                                  const short *sh_in, short *sh_out,
@@ -3184,9 +3184,10 @@ void lz_causal_conv1d_step_fixed_o16(float *o, short *oi, int out_es,
        own frac-interpolation multiply (1, not itemized here, same
        convention lz_sigmoid's flat bill already used for it), the exit
        cast (1 cvt) and sig_oscale2 multiply (1), and the final product
-       (1) = 5 mul, 1 add, 2 cvt. Was 2 mul + 1 cvt here plus 4 mul + 1
-       add + 1 cvt at the sigmoid site through lz_silu (9 total); the
-       sigmoid site no longer sees this call at all. The int16 input
+       (1) = 5 mul, 1 add, 2 cvt. The float entry costs 2 mul + 1 cvt
+       here plus 4 mul + 1 add + 1 cvt at the sigmoid site through
+       lz_silu, 9 in all, and reaches the sigmoid site; this one does
+       not. The int16 input
        drops the first of those five multiplies; q8_round bills nothing
        of its own (its magic add is not counted at any of its call
        sites), so 4 is the whole difference. */
@@ -3563,9 +3564,9 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
    behind LZ_DOT_MMX_EXTERN in src/ops_mmx.c, the #pragma aux twins
    behind __WATCOMC__. The ARM cross-build is the case - it has no row
    kernel for these four formats either, so there is nothing that could
-   call a group kernel. This branch used to be absent and the ARM binary
-   printed 'G' for all four: a column that is lit on a target with an
-   empty row is the exact shape of signal this map exists to refuse. */
+   call a group kernel. Without this branch the ARM binary reports 'G'
+   for all four - a column lit on a target whose row is empty, which is
+   the exact shape of signal this map exists to refuse. */
 #define LZ_G128_Q8  0
 #define LZ_G128_Q41 0
 #define LZ_G128_Q61 0
@@ -3659,11 +3660,10 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
 
    A NEW FORMAT ARRIVES WITH TWO EMPTY ARM CELLS, and filling them is
    two edits, not one: the kernel, and the line in lz_matmul_xq_nt that
-   lets its dtype past. That function used to intercept every dtype
-   without an ARM kernel and send it to matmul_scalar_ref; the
-   interception is gone because the list emptied, so a new format
-   reaches its impl with an all-NULL row table and falls back from
-   inside it instead. Register the cells as TODO and restore the
+   lets its dtype past. That function carries no interception - the list
+   of dtypes needing one is empty - so a new format reaches its impl
+   with an all-NULL row table and falls back from inside it instead.
+   Register the cells as TODO and add the
    interception for that one dtype until the pair exists - otherwise
    the two tiers differ by which fallback they fell through rather
    than by the kernel under test. */

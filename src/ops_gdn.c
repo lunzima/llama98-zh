@@ -62,7 +62,7 @@
    says nothing about which output is better (section 6.1). */
 #if LZ_ATTN_FIXED
 /* LZ_ATTN_MAX_HD comes from ops.h, which this file already includes.
-   It used to be redefined here to the same 256 - legal C, because an
+   Do NOT redefine it here to the same 256 - legal C, because an
    identical redefinition is allowed, and therefore silent until someone
    changed one copy. The comment three lines below has said "a constant
    duplicated across that TU boundary is a failure mode" the whole time,
@@ -216,10 +216,11 @@ void lz_attn_score_q8(float *att, const float *qhh, int hd,
     int ng = hd / 32, g, t, i, slot = 0;
     float sc;
 
-    /* Once per head: the q quantization - now billed by lz_quantize_q8
-       itself under LZ_FC_QUANT (it used to be invisible to the census,
-       so this site approximated it with mul=hd, div=ng; that approximation
-       is gone, not doubled). Then per t: a convert, the qs*kts product
+    /* Once per head: the q quantization - billed by lz_quantize_q8
+       itself under LZ_FC_QUANT, NOT here. This site carries no
+       approximation for it (an mul=hd, div=ng estimate here would
+       double-count, since the quantizer now has its own site). Then
+       per t: a convert, the qs*kts product
        and a multiply-add per group, plus 3 adds and 2 multiplies to
        fold. This is the term that makes the fixed tier LOSE below ~200
        tokens - it does not shrink with context, and the per-t term it
@@ -229,22 +230,22 @@ void lz_attn_score_q8(float *att, const float *qhh, int hd,
        add=1 (accumulate) - times ng. Per-t fold: 1 mul for `* sc`, and
        the three fold adds ONLY when ng >= 4.
 
-       BOTH TAILS USED TO BE BILLED FLAT. Only one of the two was
-       actually wrong here, and measuring is what separated them:
-         - mul was 2*ng+2. The second one was `* (1.0f/256.0f)` applied
-           after `* scale`; folding the 2^-8 into sc above deleted it
-           and left this site billing it. Real: kmr20 at 603 tokens
-           drops the class 101,472 -> 96,640, 4.8%.
-         - add was ng+3 unconditionally. Now conditional, because the
-           three fold adds are adds of +0.0f when ng < 4 and the
-           conditional below skips them - but ng is 4 on this model
-           (head_dim 128), so the three ARE performed and this half
-           moves the census by exactly zero here. It is written for the
-           32- and 64-wide heads where it is not zero.
-       The estimate before the measurement was 38%, on a guess that ng
-       was 2. An optimisation that does not update its own site leaves
-       the row claiming work that is no longer done; a correction that
-       does not measure replaces one wrong number with another. */
+       NEITHER TAIL IS FLAT, and only one of the two flat forms was
+       actually wrong here - measuring is what separated them:
+         - mul is 2*ng+1, not 2*ng+2. The extra one would be
+           `* (1.0f/256.0f)` applied after `* scale`, and the 2^-8 is
+           folded into sc above, so no such multiply is performed.
+           Worth 4.8% of the class: kmr20 at 603 tokens, 101,472
+           against 96,640.
+         - add is ng+3 only when ng >= 4. Below that the three fold adds
+           are adds of +0.0f and the conditional below skips them. On
+           this model ng is 4 (head_dim 128), so the three ARE performed
+           and the condition changes the census by exactly zero here;
+           it is written for the 32- and 64-wide heads where it is not.
+       A guess put the first at 38%, on ng being 2. An optimisation that
+       does not update its own site leaves the row claiming work nobody
+       performs; a correction that does not measure replaces one wrong
+       number with another. */
     LZ_FCX(LZ_FC_ATTN_SCORE,
            (long)(pos + 1) * (2 * ng + 1),
            (long)(pos + 1) * (ng + (ng >= 4 ? 3 : 0)),
@@ -357,9 +358,9 @@ void lz_attn_wsum_q8(float *out, const float *att, int hd,
 
            NaN is the one input where this differs from the float form,
            and it takes the same disposition lz_softmax's scan does:
-           float `>` is false for NaN so the old loop never selected
-           one, while NaN's magnitude bits exceed every finite value and
-           this one would. A NaN reaching attention weighting means the
+           float `>` is false for NaN so a float scan never selects one,
+           while NaN's magnitude bits exceed every finite value and this
+           one would. A NaN reaching attention weighting means the
            upstream is already destroyed. */
         {
             union { float f; uint32_t u; } b;
@@ -491,9 +492,9 @@ void lz_attn_wsum_q8_int(int64_t *acc, float *sscale, const float *att,
 
            NaN is the one input where this differs from the float form,
            and it takes the same disposition lz_softmax's scan does:
-           float `>` is false for NaN so the old loop never selected
-           one, while NaN's magnitude bits exceed every finite value and
-           this one would. A NaN reaching attention weighting means the
+           float `>` is false for NaN so a float scan never selects one,
+           while NaN's magnitude bits exceed every finite value and this
+           one would. A NaN reaching attention weighting means the
            upstream is already destroyed. */
         {
             union { float f; uint32_t u; } b;
@@ -691,7 +692,7 @@ typedef struct {
 static void gdn_build_table(const float *ss, const float *q, const float *k,
                             int kd, int vd, int gg, LZGdnTable *tb) {
     /* static, not stack, per rule 6 item 4 - and the reason they exist
-       at all is that the second loop used to RECOMPUTE ss*k and ss*q.
+       at all is to keep the second loop from RECOMPUTING ss*k and ss*q.
        Reusing the first loop's products is exact, not close: that loop
        evaluates left to right, so `ss*k*ik` is fl(fl(ss*k)*ik) either
        way, the same two roundings of the same two products. Worth
@@ -1438,8 +1439,9 @@ static int p2_tier(void) {
 
    EXACT, not close, and for the same reason lz_attn_score_q8's 2^-8 fold
    is: LZ_GDN_LO_SCALE is 256, so c = 2^-8 only moves an exponent.
-   fl(x*c) is fl(x)*c for any x, so fl(fl(dec*rs)*c) - the old form - and
-   fl(fl(dec*c)*rs) - the new one - both equal fl(dec*rs*c), the single
+   fl(x*c) is fl(x)*c for any x, so fl(fl(dec*rs)*c) - scaling per
+   element - and fl(fl(dec*c)*rs) - scaling once above the loop, which
+   is what this does - both equal fl(dec*rs*c), the single
    rounding of the same real product. A static assert two hundred lines
    up already pins LZ_GDN_LO_SCALE at 256; if it ever stops being a power
    of two this argument goes with it.
@@ -2124,7 +2126,7 @@ static void gdn_p2_fixed_rows(const int8_t *sq_in, int8_t *sq_out,
        and a negative zero masks to +0, which the float form also
        treated as 0.
 
-       BILLED AS ZERO, and that is not the old convention sneaking back.
+       BILLED AS ZERO, and that is a rule rather than an omission.
        This is the f32 census; an integer compare is not an f32
        operation, and billing one would make the cmp column
        inhomogeneous - some entries costing 25 instructions and some
@@ -2329,10 +2331,10 @@ static void gdn_step_impl(float *out, const int8_t *sq_in, int8_t *sq_out,
                in the loop, so what is left is only float rounding.
 
                gvec IS THE WHOLE DECAY ON A KDA MODEL, where gt is the
-               literal 1.0f, and this block used to ignore it - it read
-               only gt, which is the GDN family's scalar decay. So on
-               every KunMoe checkpoint the "exact float state" arm was
-               an undecayed recurrence, and it reported +1.29 NLL
+               literal 1.0f - so this block must read gvec and not only
+               gt, which is the GDN family's scalar decay. Reading gt
+               alone makes the "exact float state" arm an UNDECAYED
+               recurrence on every KunMoe checkpoint, worth +1.29 NLL
                against the shipping default at t=27.9: a scaffold that
                answers, loudly, about a model this engine does not run.
                Mirrors the reference float path below exactly - kcw/qcw
@@ -2582,11 +2584,10 @@ static void gdn_step_impl(float *out, const int8_t *sq_in, int8_t *sq_out,
         lz_gdn_quantize_2p(buf, vd, 32, row_out, row_lo_out, rs_out,
                            LZ_FC_RECUR);
 #else
-        /* lz_quantize_q8 now bills its own three branches - SIMD,
-           scalar-multiply, scalar-divide - under LZ_FC_QUANT (see its
-           own comment in ops.c). Used to be billed here as an
-           approximation (LZ_FC_RECUR, since lz_quantize_q8 had no site
-           of its own); removed, not doubled, now that it does. */
+        /* No LZ_FCX here: lz_quantize_q8 bills its own three branches -
+           SIMD, scalar-multiply, scalar-divide - under LZ_FC_QUANT (see
+           its own comment in ops.c). An approximation at this site
+           would double-count it. */
         lz_quantize_q8(buf, vd, 32, row_out, rs_out);
 #endif /* LZ_GDN_STATE_2PLANE */
     }
