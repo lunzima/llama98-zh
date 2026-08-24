@@ -88,6 +88,17 @@ void lz_wsum_pair_sse2(const int8_t *rowA, const int8_t *rowB,
    runs lz_i32f's x87 split form instead, six operations an element. */
 #define LZ_HAVE_I32FACC_SSE2 1
 
+/* The Q15 table interpolation, SSE2 tier - eight elements a pass
+   against the MMX cell's four, and no emms because every instruction is
+   the %xmm form. Precondition |b - a| <= 32767, same as the MMX twin
+   in src/ops_mmx.c, which carries the derivation. Declared for both
+   arms under one name; the Watcom body is a #pragma aux behind a
+   wrapper, because a pragma expands at its call site and has no
+   address. */
+#define LZ_HAVE_LERP_Q15_SIMD 1
+void lz_lerp_q15_simd(const int32_t *a, const int32_t *b,
+                      const int32_t *frac, int32_t *out, int n);
+
 /* Declared for both arms under one name. On Watcom the body is a
    #pragma aux, which expands at its CALL SITE and so cannot be reached
    from another translation unit - lz_i32f_acc32_simd is the real

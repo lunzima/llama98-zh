@@ -574,6 +574,62 @@ void lz_i32f_acc32_simd(float *accf, const int32_t *acc32) {
     lz_i32f_acc32_sse2_asm(accf, acc32);
 }
 
+/* ---- the Q15 table interpolation, SSE2 tier, Watcom twin.
+   gcc twin: lz_lerp_q15_simd, the intrinsics body in the #else arm.
+   MMX twin: lz_lerp_q15_mmx (src/ops_mmx.c), which carries the
+   precondition |b - a| <= 32767 and why `a` stays int32.
+
+   32 ELEMENTS a call, four passes of eight. No emms: every instruction
+   is the %xmm form and nothing here aliases the x87 stack, which is
+   the one way this differs from the MMX twin beyond the width. */
+extern void lz_lerp_q15_32_sse2_asm(const int32_t *a, const int32_t *b,
+                                    const int32_t *frac, int32_t *out);
+#pragma aux lz_lerp_q15_32_sse2_asm = \
+    ".686"                              \
+    "push    esi"                       \
+    "mov     esi, 4"                    \
+    "lerp2loop:"                        \
+    "movdqu  xmm0, [eax]"               \
+    "movdqu  xmm1, [eax+16]"            \
+    "movdqu  xmm2, [edx]"               \
+    "movdqu  xmm3, [edx+16]"            \
+    "psubd   xmm2, xmm0"                \
+    "psubd   xmm3, xmm1"                \
+    "packssdw xmm2, xmm3"               \
+    "movdqu  xmm4, [ebx]"               \
+    "movdqu  xmm5, [ebx+16]"            \
+    "packssdw xmm4, xmm5"               \
+    "movdqa  xmm5, xmm2"                \
+    "pmullw  xmm5, xmm4"                \
+    "pmulhw  xmm2, xmm4"                \
+    "movdqa  xmm6, xmm5"                \
+    "punpcklwd xmm6, xmm2"              \
+    "punpckhwd xmm5, xmm2"              \
+    "psrad   xmm6, 15"                  \
+    "psrad   xmm5, 15"                  \
+    "paddd   xmm6, xmm0"                \
+    "paddd   xmm5, xmm1"                \
+    "movdqu  [ecx], xmm6"               \
+    "movdqu  [ecx+16], xmm5"            \
+    "add     eax, 32"                   \
+    "add     edx, 32"                   \
+    "add     ebx, 32"                   \
+    "add     ecx, 32"                   \
+    "dec     esi"                       \
+    "jnz     lerp2loop"                 \
+    "pop     esi"                       \
+    __parm [__eax] [__edx] [__ebx] [__ecx] \
+    __modify [__eax __ebx __ecx __edx];
+
+void lz_lerp_q15_simd(const int32_t *a, const int32_t *b,
+                      const int32_t *frac, int32_t *out, int n) {
+    int k = 0;
+    for (; k + 31 < n; k += 32)
+        lz_lerp_q15_32_sse2_asm(a + k, b + k, frac + k, out + k);
+    for (; k < n; k++)
+        out[k] = a[k] + (((b[k] - a[k]) * frac[k]) >> 15);
+}
+
 /* ---- Q8 activation rounding, SSE2 tier - in this TU; the algorithm
    documentation is in src/ops_kernel_q8round.h. cvtps2dq converts 4
    floats at once - no MMX register touched, unlike the SSE1+MMX tier's
@@ -2435,6 +2491,48 @@ void lz_i32f_acc32_simd(float *accf, const int32_t *acc32) {
                       _mm_add_ps(_mm_loadu_ps(accf + b * 4),
                                  _mm_cvtepi32_ps(vi)));
     }
+}
+
+/* ---- the Q15 table interpolation, SSE2 tier.
+   Watcom twin: lz_lerp_q15_32_sse2_asm, the #pragma aux in the other
+   arm. MMX twin: lz_lerp_q15_mmx (src/ops_mmx.c), which carries the
+   derivation and the precondition.
+
+   EIGHT ELEMENTS A PASS against the MMX cell's four, and no emms: every
+   instruction here is the %xmm form, so nothing aliases the x87 stack.
+   That is the whole difference - psubd, packssdw, pmullw, pmulhw,
+   punpck[lh]wd, psrad and paddd all exist at both widths and the
+   sequence is identical otherwise.
+
+   PRECONDITION |b - a| <= 32767, same as the MMX cell: the multiply is
+   16-bit and packs_epi32 saturates rather than wrapping. The callers
+   meet it because a and b are adjacent entries of a 384-step table.
+   `a` itself reaches 32768 and stays int32. */
+void lz_lerp_q15_simd(const int32_t *a, const int32_t *b,
+                      const int32_t *frac, int32_t *out, int n) {
+    int k;
+
+    for (k = 0; k + 7 < n; k += 8) {
+        __m128i a0 = _mm_loadu_si128((const __m128i *)(const void *)(a + k));
+        __m128i a1 = _mm_loadu_si128((const __m128i *)(const void *)(a + k + 4));
+        __m128i b0 = _mm_loadu_si128((const __m128i *)(const void *)(b + k));
+        __m128i b1 = _mm_loadu_si128((const __m128i *)(const void *)(b + k + 4));
+        __m128i f0 = _mm_loadu_si128((const __m128i *)(const void *)(frac + k));
+        __m128i f1 = _mm_loadu_si128((const __m128i *)(const void *)(frac + k + 4));
+        __m128i d  = _mm_packs_epi32(_mm_sub_epi32(b0, a0),
+                                     _mm_sub_epi32(b1, a1));
+        __m128i f  = _mm_packs_epi32(f0, f1);
+        __m128i lo = _mm_mullo_epi16(d, f);
+        __m128i hi = _mm_mulhi_epi16(d, f);
+        __m128i p0 = _mm_srai_epi32(_mm_unpacklo_epi16(lo, hi), 15);
+        __m128i p1 = _mm_srai_epi32(_mm_unpackhi_epi16(lo, hi), 15);
+        _mm_storeu_si128((__m128i *)(void *)(out + k),
+                         _mm_add_epi32(p0, a0));
+        _mm_storeu_si128((__m128i *)(void *)(out + k + 4),
+                         _mm_add_epi32(p1, a1));
+    }
+    for (; k < n; k++)
+        out[k] = a[k] + (((b[k] - a[k]) * frac[k]) >> 15);
 }
 
 /* ---- Q8 activation rounding, SSE2 tier -----------------------------------

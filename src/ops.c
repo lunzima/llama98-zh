@@ -3971,18 +3971,25 @@ static const char km_why_sse1[] =
            instructions where SSE2 spends one. Owed, not impossible:
            expressible is the bar, not convenient.
    The 32-entry table lookup stays scalar on both, same as sigq's. */
+/* sigq's SSE1 cells, and this one CLOSES rather than opens. The
+   interpolation is psubd, packssdw, pmullw, pmulhw, punpck[lh]wd,
+   psrad and paddd - every one of them MMX, at the width MMX has. SSE1
+   adds pmaxsw, pminsw, pshufw, pavgw, pmulhuw and psadbw to the MMX
+   register file and not one of them appears in that list, so an SSE1
+   cell would be the MMX kernel with nothing added. That is the test
+   the standard sets, and it is the same instruction-list argument the
+   fourteen dot-product cells pass. The wider form is SSE2's, and SSE2
+   has its own cell. */
+static const char km_why_sigq_sse1[] =
+    "SSE1 adds nothing this sequence uses: psubd, packssdw, pmullw, "
+    "pmulhw, punpck[lh]wd, psrad and paddd are all MMX, and SSE1's own "
+    "additions (pmaxsw/pshufw/psadbw) appear nowhere in it. The wider "
+    "form is SSE2's, which has its own cell";
 static const char km_why_expfx_x86[] =
     "todo: not sigq's interpolation - lz_exp_fixed is a Q20 Taylor whose "
     "multiplies are 32x32->64. SSE2 has pmuludq (unsigned, so the sign "
     "is folded by hand); MMX has to build the product from 16-bit halves. "
     "The 32-entry lookup stays scalar on both";
-static const char km_why_op_x86[] =
-    "todo: the per-element table INDEX needs a gather (AVX2, off this "
-    "target family) and stays scalar, but the interpolation around it - "
-    "a + (((b - a) * frac) >> 15) - has both multiply operands inside "
-    "int16 (checked: b-a is hundreds, frac <= 32767), so it is pmaddwd "
-    "and paddd, two wide on MMX and four on SSE2. Not pmulld, which is "
-    "SSE4.1 and absent. Small win, not no win";
 /* EXPFX AND SIGQ ONLY, and the scope line is here because this string
    used to be the default for every operator unit and was wrong for
    three of them. i32f and q8rnd both have group forms - the wsum chunk
@@ -4164,7 +4171,7 @@ static const LZKmReg km_reg[LZ_KM_NUNIT * LZ_KM_NCOL] = {
    build/kernel_isa_identity_gate.sh (whether the dispatch reaches it). */
 /* atdot*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_attn_g128),
 /* wsump*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_attn_g128),
-/* sigq */ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_H(LZ_KMB_WAT), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_op_g128),
+/* sigq */ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sigq_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sigq_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_op_g128),
 /* nrmss*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_nrmss_g128),
 /* Registering these two rows is what makes a gate able to tell "no
    assembly" from "no such operator": without them src/fwht.c could be
@@ -4357,6 +4364,13 @@ static int km_op_present(int f, int c) {
     if (f == LZ_KM_UNIT_SIGQ && c == LZ_KM_COL_ROW0 + LZ_ROW_MMX_I) return 1;
 #endif /* __WATCOMC__ */
 #endif /* LZ_HAVE_LERP_Q15_MMX */
+#if defined(LZ_HAVE_LERP_Q15_SIMD)
+#if defined(__WATCOMC__)
+    if (f == LZ_KM_UNIT_SIGQ && c == LZ_KM_COL_ROW0 + LZ_ROW_SSE2_A) return 1;
+#else
+    if (f == LZ_KM_UNIT_SIGQ && c == LZ_KM_COL_ROW0 + LZ_ROW_SSE2_I) return 1;
+#endif /* __WATCOMC__ */
+#endif /* LZ_HAVE_LERP_Q15_SIMD */
 
     /* i32f, the attention wsum chunk fold. Four cells from two bodies
        per toolchain: SSE1 converts one value at a time (cvtsi2ss,

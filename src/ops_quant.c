@@ -865,6 +865,14 @@ void lz_sigmoid_q15_run(const float *x, int32_t *out, int n) {
             tb[k] = g_sigtab[idx + 1];
             tf[k] = sat[k] ? 0 : (int32_t)((t - (float)idx) * 32768.0f);
         }
+#if defined(LZ_HAVE_LERP_Q15_SIMD)
+        /* SSE2 first: eight lanes against MMX's four, and it owes no
+           emms. Below it the MMX cell, which a machine without SSE2
+           still reaches. */
+        if (g_kernel == LZ_KERNEL_SSE2)
+            lz_lerp_q15_simd(ta, tb, tf, out + i, m);
+        else
+#endif /* LZ_HAVE_LERP_Q15_SIMD */
 #if defined(LZ_HAVE_LERP_Q15_MMX)
         if (g_kernel != LZ_KERNEL_REF && lz_cpu_has_mmx())
             lz_lerp_q15_mmx(ta, tb, tf, out + i, m);

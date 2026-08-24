@@ -18,6 +18,16 @@
 
 void lz_lerp_q15_mmx(const int32_t *a, const int32_t *b,
                      const int32_t *frac, int32_t *out, int n);
+#if defined(LZ_PROBE_SIMD)
+void lz_lerp_q15_simd(const int32_t *a, const int32_t *b,
+                      const int32_t *frac, int32_t *out, int n);
+/* ONE probe, both cells. The SSE2 body is the same sequence at twice
+   the width, so testing it with a second copy of this file would let
+   the two drift; -DLZ_PROBE_SIMD picks which one is under test and
+   everything else - the contract, the boundaries, the tail sweep -
+   stays one text. */
+#define lz_lerp_q15_mmx lz_lerp_q15_simd
+#endif
 
 static unsigned long rs = 1145141919UL;
 static int32_t nextv(void) {
