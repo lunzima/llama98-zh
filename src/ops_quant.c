@@ -1287,7 +1287,7 @@ float norm_ss_fixed(const float *x, int n, short *qout, int *eout) {
 #endif /* LZ_ARM_ASM_EXTERN */
     sc = pow2f(e);
     i = 0;
-#if defined(LZ_NORM_SS_SSE2_EXTERN) && !defined(LZ_NORM_SS_FORCE_SSE)
+#if defined(LZ_NORM_SS_SSE2_EXTERN) && !defined(LZ_NORM_SS_FORCE_SSE) && !defined(LZ_NORM_SS_FORCE_MMX)
     /* SELECTED BY TIER, like every other kernel here: --kernel ref and
        mmx must reach the C loop below or the arm this is compared
        against would be this. The kernel takes whole groups of 8 and
@@ -1299,7 +1299,7 @@ float norm_ss_fixed(const float *x, int n, short *qout, int *eout) {
         acc = sacc;
     }
 #endif /* LZ_NORM_SS_SSE2_EXTERN */
-#if defined(LZ_NORM_SS_SSE_EXTERN)
+#if defined(LZ_NORM_SS_SSE_EXTERN) && !defined(LZ_NORM_SS_FORCE_MMX)
     /* The SSE1 tier, BELOW the SSE2 one so a machine with both takes
        the wider kernel. Reached from CPUID rather than g_kernel, the
        same way lz_q8r_tier reads SSE1: there is no LZ_KERNEL_SSE, and
@@ -1315,6 +1315,28 @@ float norm_ss_fixed(const float *x, int n, short *qout, int *eout) {
         acc = sacc;
     }
 #endif /* LZ_NORM_SS_SSE_EXTERN */
+#if defined(LZ_HAVE_NORM_SS_PACK_MMX)
+    /* The MMX tier, below both. A machine with MMX and no SSE1 - the
+       floor of the target family - ran the scalar loop for every
+       element and now runs it only for the tail. Two passes over each
+       32: x87 does the scale and the round into a scratch, then the
+       kernel does the clamp and the sum of squares four wide and takes
+       the emms with it. The x87 pass IS the C's arithmetic, so what
+       changes is only which instructions the clamp and the accumulate
+       use.
+       LZ_NORM_SS_FORCE_MMX mirrors the SSE knob above and exists for
+       the same reason: on a machine with SSE2 this arm is otherwise
+       unreachable, and a path that cannot be selected cannot be
+       validated. */
+    if (i == 0 && g_kernel != LZ_KERNEL_REF && lz_cpu_has_mmx() && n >= 32) {
+        int32_t blk[32];
+        int j;
+        for (; i + 31 < n; i += 32) {
+            for (j = 0; j < 32; j++) blk[j] = q8_round(x[i + j] * sc);
+            acc += lz_norm_ss_pack_mmx(blk, qout ? qout + i : (short *)0);
+        }
+    }
+#endif /* LZ_HAVE_NORM_SS_PACK_MMX */
     for (; i < n; i++) {
         int v = q8_round(x[i] * sc);           /* one mul, one magic add */
         if (v >  32767) v =  32767;
