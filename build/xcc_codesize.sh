@@ -34,6 +34,26 @@
 # go disassemble - never as a verdict, because instruction count is not
 # cycle count and this repo has already measured one case where the
 # shorter sequence was slower.
+#
+# THE RANKING MOVED THREE TIMES WHILE THIS SCRIPT WAS BEING CORRECTED,
+# and every "worst file" named before the last correction came from a
+# build nobody ships:
+#   x86-64 gcc vs 32-bit Watcom   compat 1.22 was the top outlier
+#   32-bit both, -O3              fwht 1.05 was
+#   32-bit both, -O2 (shipping)   chat 1.17 was, and was real
+# Only the third row is a reading. The first two measured the register
+# file and an optimisation level the project dropped.
+#
+# WHAT THE SWEEP FOUND, once the instrument was right. One defect of the
+# kind this dimension is for - a construct the new compiler folds and the
+# old one does not - in chat.c: strlen of a string literal, emitted as
+# repne scasb twelve times. Fixed, 1.17 -> 1.06. The remaining outliers
+# are lfn 1.08 and net 1.04, both cold, and tokenizer 0.99, which is hot
+# but shows nothing of that kind: no repne, no redundant library call,
+# and its surplus is push/pop, which move_census.sh shows is idiom rather
+# than volume - Watcom moves a SMALLER fraction there than gcc does.
+# Absence of a finding is a result; recorded so the next sweep starts
+# from it rather than repeating it.
 set -u
 WCC=/c/WATCOM/binnt64/wcc386.exe
 [ -x "$WCC" ] || { echo "SKIP: no wcc386"; exit 2; }
