@@ -195,6 +195,7 @@ static const char *const LZ_STR_EN[LZ_STR_COUNT] = {
     /* LZ_STR_SYSINFO_CPU */ "CPU: %s",
     /* LZ_STR_SYSINFO_MEM */ "Memory: %s",
     /* LZ_STR_SYSINFO_DISK */ "Disk: %s",
+    /* LZ_STR_SYSINFO_TIER */ "Operators: %s",
 
     /* Think-block dynamic temperature. Mnemonic B - the
        dialog's other controls use T P O E N M R S, and the collision
@@ -356,6 +357,7 @@ static const char *const LZ_STR_ZH[LZ_STR_COUNT] = {
     /* LZ_STR_SYSINFO_CPU */ "CPU: %s",
     /* LZ_STR_SYSINFO_MEM */ "内存: %s",
     /* LZ_STR_SYSINFO_DISK */ "磁盘: %s",
+    /* LZ_STR_SYSINFO_TIER */ "算子: %s",
 
     /* Think-block dynamic temperature - same B mnemonic as
        the English table, kept in parens per the ZH convention. */

@@ -197,6 +197,12 @@ typedef enum {
     LZ_STR_SYSINFO_CPU,          /* CPU line */
     LZ_STR_SYSINFO_MEM,          /* memory line */
     LZ_STR_SYSINFO_DISK,         /* disk line */
+    /* Operator tier line. The CLI prints the selected tier in its
+       banner and the window had no equivalent, so the one thing a user
+       could not check about "the GUI and the CLI run the same
+       operators" was the half that is decided at run time. Must stay
+       last of the SYSINFO run: aboutdlg.c walks LZ_STR_SYSINFO_OS + i. */
+    LZ_STR_SYSINFO_TIER,         /* kernel tier line */
 
     /* --- settings dialog: think-block dynamic temperature ---
        Appended, not inserted, so the ids above never shift - the same
