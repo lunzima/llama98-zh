@@ -3203,6 +3203,66 @@ lz_i64 lz_norm_ss_pack_mmx(const int32_t *q, short *qout) {
     return acc;
 }
 
+/* ---- the Q15 table interpolation, MMX tier.
+   Watcom twin: lz_lerp_q15_mmx_asm, the #pragma aux in the other arm.
+
+   out[k] = a[k] + (((b[k] - a[k]) * frac[k]) >> 15), which is the tail
+   of sigmoid_q15 and lz_exp_fixed. The two TABLE LOOKUPS stay scalar -
+   a per-element index needs a gather and that is AVX2, off this target
+   family - and the arithmetic around them does not have to.
+
+   PRECONDITION: |b - a| <= 32767, and it is a precondition rather than
+   a property because this saturates rather than wrapping if it is
+   broken. The callers satisfy it - a and b are ADJACENT entries of a
+   384-step table whose whole range is 32768, so their difference is in
+   the hundreds - but "the caller happens to" is not a contract, and
+   the first version of this comment said "b - a is in the hundreds" as
+   though that were one. build/lerp_q15_probe.c drives the boundary
+   deliberately: a = 0 with b = 32768 is off by one here, which is what
+   found the omission.
+
+   ONLY TWO OF THE THREE VALUES GO THROUGH THE 16-BIT MULTIPLY, and
+   getting that wrong is how this silently loses the table's endpoint.
+   b - a and frac do; `a` itself reaches 32768 exactly - s = 1.0 rounds
+   there - which is one past INT16_MAX, so it stays int32 and joins
+   with paddd.
+
+   pmullw and pmulhw give the low and high halves of the signed
+   product; punpck[lh]wd rebuilds them into two full int32 each. psrad
+   is an ARITHMETIC shift, which is what >> 15 on a signed value has to
+   be - b - a is negative wherever the table falls. */
+void lz_lerp_q15_mmx(const int32_t *a, const int32_t *b,
+                     const int32_t *frac, int32_t *out, int n) {
+    int k;
+
+    for (k = 0; k + 3 < n; k += 4) {
+        __m64 a0, a1, b0, b1, f0, f1, d, f, lo, hi, p0, p1;
+
+        memcpy(&a0, a + k,     8);
+        memcpy(&a1, a + k + 2, 8);
+        memcpy(&b0, b + k,     8);
+        memcpy(&b1, b + k + 2, 8);
+        d = _mm_packs_pi32(_mm_sub_pi32(b0, a0), _mm_sub_pi32(b1, a1));
+
+        memcpy(&f0, frac + k,     8);
+        memcpy(&f1, frac + k + 2, 8);
+        f = _mm_packs_pi32(f0, f1);
+
+        lo = _mm_mullo_pi16(d, f);
+        hi = _mm_mulhi_pi16(d, f);
+        p0 = _mm_srai_pi32(_mm_unpacklo_pi16(lo, hi), 15);
+        p1 = _mm_srai_pi32(_mm_unpackhi_pi16(lo, hi), 15);
+
+        p0 = _mm_add_pi32(p0, a0);
+        p1 = _mm_add_pi32(p1, a1);
+        memcpy(out + k,     &p0, 8);
+        memcpy(out + k + 2, &p1, 8);
+    }
+    _mm_empty();
+    for (; k < n; k++)
+        out[k] = a[k] + (((b[k] - a[k]) * frac[k]) >> 15);
+}
+
 /* ---- wsum: attention scoring's weighted-sum dot, LZ_WSUM_PAIR's gcc
    twin. Watcom twin: lz_wsum_pair_asm, src/ops.c ~3960-4041.
    Sign-extend two int8 rows to int16, interleave so one pmaddwd covers a
