@@ -542,7 +542,7 @@ watcom-gui:
 # nested inside another comment; gcc said so on every build and `check`
 # reported 16 PASS over it. Having a caller somewhere is not the test -
 # being reachable from what people actually run is.
-check: bare-endif-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate dedupe-gate mm-alias-gate c89-floor-gate comment-hygiene-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate gcc-warning-gate gcc-flag-parity-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate kernel-matrix-gate
+check: bare-endif-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate dedupe-gate mm-alias-gate c89-floor-gate comment-hygiene-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate gcc-warning-gate gcc-flag-parity-gate seed-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate kernel-matrix-gate
 
 # Zero gcc warnings, asserted rather than printed. The Watcom side has
 # always been counted ("N lines, 0 warnings, 0 errors", per file); this
@@ -572,6 +572,14 @@ gcc-warning-gate:
 .PHONY: gcc-flag-parity-gate
 gcc-flag-parity-gate:
 	@bash build/gcc_flag_parity_gate.sh
+
+# Where a fixed random seed is needed it is the same one everywhere. A
+# grep over build/, so it belongs in `check` rather than ci.sh: two
+# harnesses seeded differently produce incomparable numbers that both
+# look reproducible, which is the expensive version of this failure.
+.PHONY: seed-gate
+seed-gate:
+	@bash build/seed_gate.sh
 
 # Two shared helpers with the same body under different names, which is
 # the duplication dedupe-gate cannot see: that one knows the names it is
