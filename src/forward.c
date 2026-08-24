@@ -87,7 +87,7 @@ lz_i64 lz_debug_mtp_attn_rows = 0;
 /* Debug-only investigative probe, part 4. Microseconds spent inside
    each of a speculative round's three pieces.
 
-   WHY A TIMER AND NOT MORE ARITHMETIC: the round's cost was derived
+   Why a timer instead of more arithmetic: the round's cost was derived
    six different ways from byte counts and CLI deltas, and six
    hypotheses about where it goes were each refuted by the next
    measurement (the draft head, lz_matmul_w's "slow path", unquantized
@@ -95,7 +95,7 @@ lz_i64 lz_debug_mtp_attn_rows = 0;
    lm_head, the per-round checkpoint). What IS measured: on a Ryzen
    5800X with Qwen3.5-0.8B, a round costs 3.78x one plain forward, of
    which the draft step is 0.32x - exactly what its bytes predict - and
-   VERIFYING TWO TOKENS costs 2.46x, where the same accounting says
+   Verifying two tokens costs 2.46x, where the same accounting says
    ~1.5x. Prefill batches the same trunk at 0.54x per token, so the
    amortization exists and this path is not getting it. That gap is the
    only thing left worth chasing, and it will not be found by dividing
@@ -118,7 +118,7 @@ lz_i64 lz_debug_us_capture = 0;
    role lz_debug_mtp_attn_rows plays for the attention-window change. */
 lz_i64 lz_debug_n_capture = 0;
 
-/* POSITIVE CONTROLS FOR FOUR MORE INT-PIPELINE SWITCHES. The v_proj /
+/* Positive controls for four more int-pipeline switches. The v_proj /
    q8_i16 / q8_int / swiglu / conv-sig set already has them and the
    reason is stated at their print site: the int and float arms are
    bit-comparable, so an output comparison can never separate "the exit
@@ -305,7 +305,8 @@ int lz_kv_rot_v_dim = 0;
    be made deliberately, not a default: 1/4 span costs 2.6%% and 1/8
    costs 5.4%%.
 
-   WE DO NOT DO THE PAPER'S POSITION SHIFT, AND THAT IS LOAD-BEARING.
+   The paper's position shift is deliberately not done here, and that
+   choice is load-bearing.
    The reference caches PRE-RoPE keys and re-applies RoPE to the entire
    cache every step, renumbering positions by cache slot
    (pos_shift/modify_llama.py). Our cache holds POST-RoPE, QUANTIZED
@@ -396,7 +397,7 @@ static const double LZ_US_SCALE = 1000.0;
  * and the compare is taken once per ring period, so it is as
  * predictable as a branch gets.
  *
- * ONE RULE FOR ALL FOUR CASES, checked against kv_slot's three branches:
+ * One rule for all four cases, checked against kv_slot's three branches:
  *   ring == 0        slot == t, and sink + ring == sink, which slot + 1
  *                    equals exactly once (at t + 1 == sink) - where the
  *                    answer is sink either way
@@ -408,7 +409,7 @@ static const double LZ_US_SCALE = 1000.0;
  * INCREMENT clause, not its body - the row advances on iterations the
  * body skips with continue.
  *
- * WHICH PATH THIS IS ON, measured rather than assumed. The loops below
+ * Which path this is on, measured rather than assumed. The loops below
  * are the FALLBACK. lz_attn_score_q8 and its wsum twin take attn_sink
  * and kv_ring and do the row arithmetic themselves, and they are
  * selected whenever LZ_ATTN_NORING holds - which is win_t0 == 0, which
@@ -586,7 +587,7 @@ static void *xcalloc(size_t n, size_t sz, int *ok, lz_i64*acc) {
  * bits (value == q * 2^-ES), the convention epi_align_i16's target_e
  * uses.
  *
- * THE EXPONENTS ARE MEASURED, not chosen, exactly like LZ_CONV_ES above
+ * The exponents are measured, not chosen, exactly like LZ_CONV_ES above
  * (.prof/m5range.c on kmr20, both gate corpora, 603/661 tokens). Each is
  * the LARGEST that clamps nothing, since the clamp is silent:
  *
@@ -819,7 +820,7 @@ static void *xcalloc(size_t n, size_t sz, int *ok, lz_i64*acc) {
 /* Quantize the conv taps once, laying them out per channel in the same
    order forward_kda/forward_ssm index the history.
  *
- * THE OFFSETS ARE DUPLICATED from those two functions, which is a drift
+ * The offsets are duplicated from those two functions, which is a drift
  * surface, so the loop asserts that the channels it covered add up to
  * lin_conv_dim. A layout change then fails here instead of quantizing
  * the wrong tensor into the right slot. */
@@ -1237,7 +1238,7 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
        flag, and a state whose buffers were not allocated must not start
        taking the fixed branch halfway through a run.
      *
-     * THE HISTORY EXPONENT was the one parameter that kept this tier
+     * The history exponent was the one parameter that kept this tier
      * unwired for a while, and the answer it eventually got is
      * LZ_CONV_ES: a CONSTANT power of two, measured once from the real
      * conv input distribution rather than derived per token, because the
@@ -1876,7 +1877,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
        such floor to spread. The exit and the rotation are antagonistic
        for that reason, not for want of an integer kernel.
 
-       WHAT THE REFUSAL COSTS THE GATE is real and is paid there instead:
+       The refusal does cost the gate something, and it is paid there:
        on q8 the `off` arm takes this exit and the `on` arm does not, so
        build/kv_rot_gate.sh's two arms differ in the exit as well as in
        the rotation. That gate now prints this counter per arm and says
@@ -2882,7 +2883,7 @@ static void subn_rot_f32(float *x, int n, int blk) {
    `(float)comb * pow2f(target)` and the consumer's `x[c] * in_scale` +
    q8_round both stop existing rather than moving somewhere else.
 
-   ALL THREE OR NONE, and the flag is what enforces it. A refusal here
+   All three or none, enforced by the flag. A refusal here
    cannot be recovered from per-projection: under SubLN each projection
    re-quantizes s->xq/s->xqs from its own norm, so an earlier one's float
    buffer can no longer be recomputed by the time a later one refuses.
@@ -3255,7 +3256,7 @@ static void forward_kda(const LZModel *m, LZRunState *s,
                               c->conv_kernel);
         }
     }
-    /* THESE THREE READ THE FLOAT BUFFERS, which LZ_CONVO_I16 leaves
+    /* These three read the float buffers, which LZ_CONVO_I16 leaves
        unwritten - the conv puts the token in kda_*c_i16 instead. A tap
        build (the differential dump tool, .prof/convqk_range.c) must
        therefore pass -DLZ_CONVO_I16=0, and the symptom otherwise is
@@ -3649,7 +3650,7 @@ static void forward_kda(const LZModel *m, LZRunState *s,
    the routed experts cannot - two tokens in the same chunk may pick
    different experts entirely, so there is no shared weight stream.
 
-   WHY NOT GROUP THE TOKENS BY EXPERT, which is what llama.cpp's
+   Why the tokens are not grouped by expert, which is what llama.cpp's
    ggml_compute_forward_mul_mat_id (a per-expert row bucket, no padding)
    and vLLM/SGLang's moe_align_block_size do: their scale is not ours.
    SGLang's CPU int8 MoE pads each expert's rows to BLOCK_M = 32 and
@@ -4668,7 +4669,7 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
            norm having no Q15-chain-then-dequant sibling to match. It
            therefore rides --fixed like every other fixed tier.
 
-           TWO GUARDS BEYOND THE TIER, both of them things that read a
+           Two guards beyond the tier, both of them things that read a
            buffer this path stops writing:
              gse > 0    the weight is quantized, so lz_matmul_xq below
                         takes xq/xqs. At gse == 0 the weight is F32 and
