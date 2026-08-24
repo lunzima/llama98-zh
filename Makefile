@@ -527,7 +527,7 @@ watcom-gui:
 # committed, and then invoked by nothing: not here, not in ci.sh. They
 # passed every time anyone ran them by hand and could not have reddened
 # a build. A gate no target depends on is a script.
-check: bare-endif-gate dead-ifndef-gate f32count-billing-gate dedupe-gate mm-alias-gate c89-floor-gate comment-hygiene-gate vc4-limits-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate kernel-matrix-gate
+check: bare-endif-gate dead-ifndef-gate f32count-billing-gate dedupe-gate mm-alias-gate c89-floor-gate comment-hygiene-gate vc4-limits-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate kernel-matrix-gate
 
 # Two shared helpers with the same body under different names, which is
 # the duplication dedupe-gate cannot see: that one knows the names it is
@@ -547,6 +547,12 @@ twin-pair-gate:
 .PHONY: gcc-watcom-pair-gate
 gcc-watcom-pair-gate:
 	@bash build/gcc_watcom_pair_gate.sh
+
+# Every gate has a caller. Six did not, and two of those were the only
+# checks behind standing requirements - see the script's header.
+.PHONY: gate-wiring-gate
+gate-wiring-gate:
+	@bash build/gate_wiring_gate.sh
 
 # The language floor, as a ratchet plus a real -std=c89 compile. See the
 # script's header for what green does and does not mean.
