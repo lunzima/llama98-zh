@@ -9,7 +9,7 @@
 
 /* A header should never reach this size; rejects malformed files and
    avoids malloc'ing astronomical numbers based on them */
-#define LZ_ST_MAX_HEADER  (64ULL * 1024ULL * 1024ULL)
+#define LZ_ST_MAX_HEADER  (LZ_U64_C(64) * LZ_U64_C(1024) * LZ_U64_C(1024))
 
 static void sterr(char *errbuf, int errlen, LZErr code, ...) {
     va_list ap;
@@ -83,12 +83,12 @@ int lz_st_open(LZSafetensors *st, const char *path, char *errbuf, int errlen) {
     for (i = 7; i >= 0; i--) hdr_len = (hdr_len << 8) | (lz_u64)lenbuf[i];
 
     if (hdr_len == 0 || hdr_len > LZ_ST_MAX_HEADER ||
-        hdr_len + 8ULL > (lz_u64)st->file_size) {
+        hdr_len + LZ_U64_C(8) > (lz_u64)st->file_size) {
         sterr(errbuf, errlen, LZ_ERR_ST_HEADER_BAD,
               hdr_len, st->file_size);
         goto fail;
     }
-    st->data_start = 8ULL + hdr_len;
+    st->data_start = LZ_U64_C(8) + hdr_len;
 
     hdr = (char *)malloc((size_t)hdr_len);
     if (!hdr) {

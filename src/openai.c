@@ -480,7 +480,7 @@ static void completions(LZOpenAICtx *c, const LZHttpReq *req, LZHttpResp *rs) {
     }
     /* Deterministic by default: a fixed seed makes a bug reproducible,
        and a client that wants variety sends one. */
-    g.rng_seed = r->has_seed ? (lz_u64)r->seed : 20260805ULL;
+    g.rng_seed = r->has_seed ? (lz_u64)r->seed : LZ_U64_C(20260805);
     {
         int i;
         for (i = 0; i < r->n_stop; i++) g.stop[i] = r->stop[i];

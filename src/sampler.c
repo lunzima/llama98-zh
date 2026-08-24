@@ -116,7 +116,7 @@ int lz_sampler_init(LZSampler *s, int vocab_size, const LZSampleParams *p,
     } else {
         lz_sample_defaults(&s->p);
     }
-    s->rng_state = seed ? seed : 1ULL;
+    s->rng_state = seed ? seed : LZ_U64_C(1);
     s->probindex = (LZProbIndex *)malloc((size_t)vocab_size *
                                          sizeof(LZProbIndex));
     /* Penalty window.
@@ -186,7 +186,7 @@ static unsigned int random_u32(lz_u64 *state) {
     *state ^= *state >> 12;
     *state ^= *state << 25;
     *state ^= *state >> 27;
-    return (unsigned int)((*state * 0x2545F4914F6CDD1DULL) >> 32);
+    return (unsigned int)((*state * LZ_U64_C(0x2545F4914F6CDD1D)) >> 32);
 }
 
 /* Not static: lz_sample_temp_q (below) and generate.c's

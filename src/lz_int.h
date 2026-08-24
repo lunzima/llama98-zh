@@ -44,11 +44,27 @@ typedef int                int32_t;
 typedef unsigned int       uint32_t;
 typedef __int64            lz_i64;
 typedef unsigned __int64   lz_u64;
+/* int64_t as well, and it was missing until a real VC++ 4.0 tried to
+ * compile the tree. The `long long` sweep converted 213 sites to lz_i64
+ * and stopped there; int64_t in a signature is the same type by another
+ * spelling, and gcc has <stdint.h> so nothing here could see it. Four
+ * uses in headers - ops.h twice, forward.h, ops_mmx.h - and 75 in .c,
+ * every one of which failed with "syntax error : missing ')' before '*'"
+ * because the type simply did not exist. */
+typedef __int64            int64_t;
+typedef unsigned __int64   uint64_t;
 
 /* The printf length modifier for lz_i64. MSVC before 2013 does not
  * understand "ll"; it spells the same thing "I64". Call sites that
  * print a 64-bit counter use LZ_PRI64 rather than embedding either. */
 #define LZ_PRI64 "I64"
+
+/* A 64-bit unsigned constant. `1ULL` is a syntax error here - MSVC
+ * before 2003 spells the suffix i64 and rejects ULL outright with
+ * "bad suffix on number", which takes the whole expression with it.
+ * Same shape as LZ_PRI64: one spelling at the call site, the toolchain
+ * difference in this header. */
+#define LZ_U64_C(x) x##ui64
 
 #else
 
@@ -56,6 +72,7 @@ typedef unsigned __int64   lz_u64;
 typedef long long          lz_i64;
 typedef unsigned long long lz_u64;
 #define LZ_PRI64 "ll"
+#define LZ_U64_C(x) x##ULL
 
 #endif /* _MSC_VER < 1600 */
 

@@ -98,7 +98,7 @@ int lz_fseek64(FILE *f, lz_u64 off) {
     /* Fallback: only long is available. Out-of-range must error out
        explicitly, never silently truncate - truncation reads a completely
        wrong tensor, and the symptom is extremely hard to locate. */
-    if (off > 0x7FFFFFFFULL) return 1;
+    if (off > LZ_U64_C(0x7FFFFFFF)) return 1;
     return fseek(f, (long)off, SEEK_SET) == 0 ? 0 : 1;
 #endif /* _WIN32 && !__WATCOMC__ || _LARGEFILE_SOURCE || __USE_LARGEFILE64 || (__unix__ && !__WATCOMC__) */
 }
@@ -222,7 +222,7 @@ void lz_init_stdin(void) {
 lz_u64 lz_seed_mix(lz_u64 x) {
     /* One round of xorshift64* (the same generator sampler.c's
        random_u32 uses), applied as a bijection over the seed. The
-       multiplication constant is the same 0x2545F4914F6CDD1DULL so a
+       multiplication constant is the same LZ_U64_C(0x2545F4914F6CDD1D) so a
        seed that happens to equal a sampler state stays in the same
        family - not a correctness requirement, just the one already
        proven on every target.
@@ -233,11 +233,11 @@ lz_u64 lz_seed_mix(lz_u64 x) {
        seed 1 after the sampler's `seed ? seed : 1`. The constant is
        arbitrary but non-zero and odd. See compat.h for why this must
        stay pure. */
-    x ^= 0x9E3779B97F4A7C15ULL;
+    x ^= LZ_U64_C(0x9E3779B97F4A7C15);
     x ^= x >> 12;
     x ^= x << 25;
     x ^= x >> 27;
-    return x * 0x2545F4914F6CDD1DULL;
+    return x * LZ_U64_C(0x2545F4914F6CDD1D);
 }
 
 /* ---- byte order (see compat.h for the contract) --------------------- */
