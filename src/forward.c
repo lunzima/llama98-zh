@@ -3629,10 +3629,13 @@ static void forward_moe(const LZModel *m, LZRunState *s,
     int gsh;
     int nsh;
     int tk, kk, vv, i;
-    if (lz_moe_topk > 0 && lz_moe_topk <= ne)
-        topk = lz_moe_topk;
-    gsh = lz_act_gs(&L->moe_down_proj, hdim);
-    nsh = (gsh > 0) ? hdim / gsh : 0;
+    /* The topk override and the shared-expert group sizes are computed
+       after the exit predicates below, not here. They are statements,
+       and C89 wants every declaration in this block ahead of every
+       statement in it - each of mrt, mlat and rsw carries a paragraph
+       explaining a decision, so moving those up would separate three
+       explanations from what they explain. These two have nothing to
+       say and their first use is far below. */
     /* int-pipeline milestone 5: the router logits' only consumer is
        lz_moe_route, and the exit is the same one bvec takes - int16 at
        LZ_MOEGATE_ES, bounded by the sigmoid table's own domain rather
@@ -3682,15 +3685,18 @@ static void forward_moe(const LZModel *m, LZRunState *s,
        lz_matmul_xq reads its FLOAT argument when the weight is F32, and
        on the int path that argument is a moe_h1 nothing wrote.
 
-       use_subn refuses BOTH sites even though this function does not
-       implement SubLN's per-projection norms at all today. The moment it
-       does, moe_shared_down_norm lands between the SwiGLU and its
-       quantize, and there is no int16-input norm for it to read - the
-       float would have to be rebuilt, which is the swap this milestone
-       exists to avoid. Refusing now costs nothing (no MoE checkpoint
-       here sets the flag) and keeps the two changes from having to be
-       correct together. */
+       use_subn refuses BOTH sites: SubLN puts an RMSNorm between the
+       SwiGLU and its quantize (moe_shared_down_norm), and this tree has
+       no int16-input norm for it to read - the float would have to be
+       rebuilt, which is the swap this milestone exists to avoid. */
     int rsw_may = 0, ssw_may = 0;
+
+    /* Moved down from the top of the block - see the note there. */
+    if (lz_moe_topk > 0 && lz_moe_topk <= ne)
+        topk = lz_moe_topk;
+    gsh = lz_act_gs(&L->moe_down_proj, hdim);
+    nsh = (gsh > 0) ? hdim / gsh : 0;
+
 #if LZ_SWIGLU_I16
     rsw_may = s->moe_h1_i16 && s->moe_h3_i16 && !c->use_subn &&
               L->moe_expert_w1 && L->moe_expert_w3 && L->moe_expert_w2;
