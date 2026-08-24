@@ -2264,9 +2264,11 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                 memset(out, 0, (size_t)hd * sizeof(float));
                 for (t = win_t0, rslot = kv_slot(s, win_t0); t <= pos;
                      t++, rslot = kv_slot_next(s, rslot)) {
+                    const float *vt;
+                    float a;
                     if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
-                    const float *vt = vf + (size_t)rslot * kvd + (size_t)kvh * hd;
-                    float a = s->att[t];
+                    vt = vf + (size_t)rslot * kvd + (size_t)kvh * hd;
+                    a  = s->att[t];
                     LZ_FCX(LZ_FC_ATTN_WSUM, hd, hd, 0, 0, 0);   /* f32 V: no convert */
                     for (d = 0; d < hd; d++) out[d] += a * vt[d];
                 }
@@ -2298,11 +2300,14 @@ static void forward_attn(const LZModel *m, LZRunState *s,
             memset(out, 0, (size_t)hd * sizeof(float));
             for (t = win_t0, rslot = kv_slot(s, win_t0); t <= pos;
                  t++, rslot = kv_slot_next(s, rslot)) {
+                const int8_t *vt;
+                const float *vts;
+                float a;
                 if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
-                const int8_t *vt = vc + (size_t)rslot * kvd + (size_t)kvh * hd;
-                const float *vts = vs + (size_t)rslot * kvd / 32 +
-                                   (size_t)(kvh * hd) / 32;
-                float a = s->att[t];
+                vt  = vc + (size_t)rslot * kvd + (size_t)kvh * hd;
+                vts = vs + (size_t)rslot * kvd / 32 +
+                      (size_t)(kvh * hd) / 32;
+                a   = s->att[t];
                 /* Convert, two multiplies and an add per element. */
                 LZ_FCX(LZ_FC_ATTN_WSUM, 2 * hd, hd, 0, hd, 0);
                 wsum_q8_row(out, vt, vts, a, hd);
