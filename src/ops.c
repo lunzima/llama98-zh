@@ -419,7 +419,7 @@ float lz_exp(float x) {
    Below it they still divide and still test, so behaviour is identical
    on every input - including under -DLZ_Q8_MIN_SCALE=0.0f, the probe
    build that is the only way the slow arm is reachable at all.
-   A DIVIDE IS NOT A MULTIPLY: 117 instructions against 30 on ARMv5TE
+   A divide is not a multiply: 117 instructions against 30 on ARMv5TE
    (.prof/arm_div_count.sh), while the census counts both as 1. */
 #define LZ_Q8_INV_SAFE 1.0e-30f
 
@@ -483,9 +483,9 @@ void lz_quantize_q8(const float *x, int n, int gs, int8_t *q, float *s) {
                 {
                     for (k = 0; k + 31 < gs; k += 32)
                         lz_q8round32_sse(grp + k, out + k, &inv);
-                    /* **This emms must be INSIDE the group loop**, NOT
-                       at the function tail. Rule 6.6's "kernels
-                       don't emit; the caller emits once after its loop"
+                    /* This emms must be INSIDE the group loop, not at
+                       the function tail. The usual convention - kernels
+                       don't emit; the caller emits once after its loop -
                        assumes no x87 in the loop body; that does not
                        hold here - the next group's
                        `s[g] = amax*(1/127)` and `inv = 127/amax` are
@@ -689,7 +689,7 @@ lz_i64 lz_debug_q8int_int = 0;
    tiny amax hits MIN_SCALE first) keeps deq in the numerator to match
    the float path's own else exactly.
 
-   WHAT THE WIDTH COSTS, AND WHERE IT IS PAID. The int16 twin's element
+   What the width costs, and where it is paid. The int16 twin's element
    loop does not transplant here and the reason is arithmetic, not
    headroom: the shift needs 2^SH > tam for the reciprocal's error to
    stay under one level, so the product is about 127*tam, and past
@@ -753,7 +753,7 @@ void lz_quantize_q8_int(const int32_t *t, int n, int gs, float deq,
             s[g] = amax * LZ_Q8_INV127;
             /* amax*(1/127) mul, and the s[g] < LZ_Q8_MIN_SCALE_F below. */
             LZ_FCX(LZ_FC_QUANT, 1, 0, 0, 0, 1);
-            /* NON-ZERO FLAG ONLY. This quantizer's element loop scales
+            /* Non-zero flag only. This quantizer's element loop scales
                by inv_elem = 127/(float)tam, never by inv, so inv's VALUE
                is dead here - it survives as the "amax was usable" flag
                inv_elem tests. That is exactly why the division can go:
@@ -946,7 +946,7 @@ void lz_quantize_q8_i16(const short *t, int n, int gs, float deq,
             s[g] = amax * LZ_Q8_INV127;
             /* amax*(1/127) mul, and the s[g] < LZ_Q8_MIN_SCALE_F below. */
             LZ_FCX(LZ_FC_QUANT, 1, 0, 0, 0, 1);
-            /* NON-ZERO FLAG ONLY. This quantizer's element loop scales
+            /* Non-zero flag only. This quantizer's element loop scales
                by inv_elem = 127/(float)tam, never by inv, so inv's VALUE
                is dead here - it survives as the "amax was usable" flag
                inv_elem tests. That is exactly why the division can go:
@@ -1077,7 +1077,7 @@ void lz_quantize_q8_int64(const int64_t *t, int n, int gs, float deq,
             s[g] = amax * LZ_Q8_INV127;
             /* amax*(1/127) mul, and the s[g] < LZ_Q8_MIN_SCALE_F below. */
             LZ_FCX(LZ_FC_QUANT, 1, 0, 0, 0, 1);
-            /* NON-ZERO FLAG ONLY. This quantizer's element loop scales
+            /* Non-zero flag only. This quantizer's element loop scales
                by inv_elem = 127/(float)tam, never by inv, so inv's VALUE
                is dead here - it survives as the "amax was usable" flag
                inv_elem tests. That is exactly why the division can go:
@@ -1257,7 +1257,7 @@ void lz_quantize_q8_silu(const float *p, const float *g, const int32_t *sig,
    "emms is an MMX instruction, so it is #UD on an MMX-less CPU". Defined
    on every target (not just x86): the call sites test it on ARM too, where
    _mm_empty() is a no-op and this returns 0 so the test compiles away. */
-/* THE CACHE IS NOT ENOUGH ON ITS OWN, and the reason is the call. This
+/* The cache is not enough on its own, and the reason is the call. This
    was one extern function reading a cached global, and the call sites
    are in row loops: 75,080,736 of them over 603 tokens on kmr20, which
    is 124,512 per token. gcc hoists most of them; Open Watcom hoists
@@ -1573,7 +1573,7 @@ static lz_i64 lz_epi_mac_i16(const int32_t *a, const int16_t *m, int n) {
    is a harmless hint out of bounds but PII's dummy load is a REAL
    access and segfaults on an unmapped page.
 
-   THE DISPATCH IS AT ROW LEVEL, never inside. At in_dim=1024 that is
+   The dispatch is at row level, never inside. At in_dim=1024 that is
    one indirect call per 32 kernel calls; one per 32 MACs would be the
    disaster the file's opening comment warns about. */
 
@@ -1848,7 +1848,7 @@ int lz_epi_post_e(const LZTensor *w) {
    `e` cannot be hoisted the same way and is not: it is
    -g_epi_xe[tk] - w->sexp[row], genuinely per element.
 
-   THIS IS THE MINORITY EXIT. Counted on kmr20/zh, 603 tokens:
+   This is the minority exit. Counted on kmr20/zh, 603 tokens:
    epi_fixed_raw runs 75,080,736 times and hands its (s, e) pair to
    epi_q41_fixed 27,477,504 times, epi_fixed_align_i16 5,306,400, and
    this float conversion 8,644,608 - 11.5%. The integer exits are the
@@ -1992,7 +1992,7 @@ static lz_u64 epi_shr_half_u(lz_u64 umag, int rs) {
    defined where `s >> 63` on a signed would be implementation-defined -
    and (x ^ mask) - mask is two's-complement abs in and negate out.
 
-   THE SHIFT COSTS A HELPER CALL ON wcc386, and no portable spelling
+   The shift costs a helper call on wcc386, and no portable spelling
    avoids it. Four were measured there, function bodies including
    prologue:
      (lz_u64)0 - (um >> 63)          13 insns, 1 __U8RS call, no branch
