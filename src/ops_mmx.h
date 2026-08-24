@@ -114,6 +114,18 @@ lz_i64 lz_norm_ss_pack_mmx(const int32_t *q, short *qout);
 void lz_lerp_q15_mmx(const int32_t *a, const int32_t *b,
                      const int32_t *frac, int32_t *out, int n);
 
+/* lz_exp_fixed's Q20 Taylor, MMX tier - the OTHER half of the same
+   operator's arithmetic, and a different kernel from the one above
+   rather than a second caller of it: exp's tail is a Taylor series, not
+   an interpolation. Every product in it is 32 x 32 -> 64 and MMX's
+   widest is pmaddwd, so the body rebuilds each one from limbs that fit
+   int16. Two elements a pass against the SSE2 twin's four; the caller
+   runs the tail. See the body for the four decompositions and for why
+   each partial sum is proved to stay inside its int32 lane. */
+#define LZ_HAVE_EXP_Q20_MMX 1
+void lz_exp_q20_mmx(const int32_t *tab, const int32_t *s,
+                    int32_t *prod, int n);
+
 /* norm_ss_fixed's element loop, SSE1 tier. HERE and not in ops_sse.h
    for the same reason as lz_p2_split32_sse below: SSE1's convert is
    cvtps2pi, so the pack, the clamp and the multiply-add all land in

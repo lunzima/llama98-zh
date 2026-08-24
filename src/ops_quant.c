@@ -503,10 +503,18 @@ void lz_exp_fixed_run(const float *x, float *out, int n) {
             ev[k] = (t >> 5) - LZ_EXP_Q;
         }
 #if defined(LZ_HAVE_EXP_Q20_SIMD)
+        /* SSE2 first: four lanes against MMX's two, and it owes no
+           emms. Below it the MMX cell, which a machine without SSE2
+           still reaches - same order as the sigmoid run's. */
         if (g_kernel == LZ_KERNEL_SSE2)
             lz_exp_q20_simd(tv, sv, pv, m);
         else
 #endif /* LZ_HAVE_EXP_Q20_SIMD */
+#if defined(LZ_HAVE_EXP_Q20_MMX)
+        if (g_kernel != LZ_KERNEL_REF && lz_cpu_has_mmx())
+            lz_exp_q20_mmx(tv, sv, pv, m);
+        else
+#endif /* LZ_HAVE_EXP_Q20_MMX */
         for (k = 0; k < m; k++) {
             int32_t cq = LZ_EXP_QSCALE
                + (int32_t)((((lz_i64)LZ_EXP2_LN2 * sv[k])

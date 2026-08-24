@@ -22,8 +22,24 @@
 #include <stdio.h>
 #include "lz_int.h"
 
+/* ONE TEXT, EITHER TIER: -DLZ_PROBE_MMX drives the MMX cell and
+ * otherwise the SSE2 one. The two are separate kernels with separate
+ * arithmetic - SSE2 has pmuludq and MMX rebuilds every product out of
+ * pmaddwd-sized limbs - so they owe the same answers for opposite
+ * reasons, and a probe that only ever ran against one of them would say
+ * nothing about the other.
+ */
+#if defined(LZ_PROBE_MMX)
+void lz_exp_q20_mmx(const int32_t *tab, const int32_t *s,
+                    int32_t *prod, int n);
+#define KERNEL lz_exp_q20_mmx
+#define KNAME  "mmx"
+#else
 void lz_exp_q20_simd(const int32_t *tab, const int32_t *s,
                      int32_t *prod, int n);
+#define KERNEL lz_exp_q20_simd
+#define KNAME  "sse2"
+#endif
 
 static unsigned long rs = 1145141919UL;
 static int32_t nextv(void) {
@@ -61,7 +77,7 @@ int main(void) {
                 tab[k] = 1048576 + (nextv() % 1048577);
             }
         }
-        lz_exp_q20_simd(tab, s, got, N);
+        KERNEL(tab, s, got, N);
         for (k = 0; k < N; k++, n++) {
             int32_t want = ref(tab[k], s[k]);
             if (got[k] != want) {
@@ -74,14 +90,17 @@ int main(void) {
         }
     }
 
-    /* The tail: n not a multiple of four runs in C and must neither
-       differ nor write past its end. */
+    /* The tail: a length the kernel's pass width does not divide runs in
+       C and must neither differ nor write past its end. Driven to 3
+       because that covers both widths - SSE2 takes four at a time, MMX
+       two - so the same loop exercises a full pass plus a remainder on
+       the narrower one. */
     for (k = 0; k < N; k++) { s[k] = k * 4096; tab[k] = 1048576 + k * 1000; }
     for (k = 1; k <= 3; k++) {
         int j;
         int32_t t[N];
         for (j = 0; j < N; j++) t[j] = -1;
-        lz_exp_q20_simd(tab, s, t, k);
+        KERNEL(tab, s, t, k);
         for (j = 0; j < k; j++, n++)
             if (t[j] != ref(tab[j], s[j])) {
                 if (bad < 6) printf("  tail n=%d lane %d\n", k, j);
@@ -90,6 +109,7 @@ int main(void) {
         if (t[k] != -1) { printf("  tail n=%d wrote past the end\n", k); bad++; }
     }
 
-    printf("exp_q20_probe: %ld value(s), %ld mismatch(es)\n", n, bad);
+    printf("exp_q20_probe[%s]: %ld value(s), %ld mismatch(es)\n",
+           KNAME, n, bad);
     return bad != 0;
 }

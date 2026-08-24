@@ -1274,6 +1274,130 @@ void lz_lerp_q15_mmx(const int32_t *a, const int32_t *b,
         out[k] = a[k] + (((b[k] - a[k]) * frac[k]) >> 15);
 }
 
+/* ---- lz_exp_fixed's Q20 Taylor, MMX tier, Watcom arm.
+   gcc twin: lz_exp_q20_mmx in the #else arm, which carries the whole
+   derivation - why every product is rebuilt from pmaddwd-sized limbs,
+   why s is carried as u = s >> 1 plus a masked odd bit, and why the
+   output multiply's big half cancels against the shift.
+
+   THE CONSTANTS STAY IN MEMORY rather than in registers, which is the
+   one structural difference from the SSE2 twin. MMX has eight registers
+   and this body needs eight live values at its widest; MMX instructions
+   also take a 64-bit memory operand directly, so a constant costs an
+   addressing mode instead of a register. The SSE2 arm went the other
+   way for the opposite reason: it had four to spare.
+
+   int64 ELEMENTS, NOT int32 PAIRS, so the block is 8-byte aligned and
+   every movq/pmaddwd against it is an aligned access. An int32[18]
+   would hold the same bytes with 4-byte alignment and every other
+   operand would straddle. */
+#define LZ_D2(v) ((((lz_i64)(v)) << 32) | (lz_i64)(unsigned)(v))
+static const lz_i64 exp_q20_mk[9] = {
+    LZ_D2(1), LZ_D2(1023), LZ_D2(2047), LZ_D2(1 << 19),
+    LZ_D2(726817), LZ_D2(22), LZ_D2(5921), LZ_D2(7), LZ_D2(22530)
+};
+#undef LZ_D2
+
+/* np is the number of TWO-element passes. One emms at the exit, not one
+   per pass: the caller returns to x87 immediately and a per-pass emms
+   would be most of the kernel - same reason lz_lerp_q15_32_mmx_asm
+   loops internally. */
+extern void lz_exp_q20_2_mmx_asm(const int32_t *tab, const int32_t *s,
+                                 int32_t *prod, const void *k, int np);
+#pragma aux lz_exp_q20_2_mmx_asm =  \
+    ".586"                          \
+    "expq20mloop:"                  \
+    "movq    mm0, [edx]"            \
+    "movq    mm1, mm0"              \
+    "psrld   mm1, 1"                \
+    "movq    mm2, mm0"              \
+    "pand    mm2, [ecx]"            \
+    "pxor    mm3, mm3"              \
+    "psubd   mm3, mm2"              \
+    "movq    mm4, mm1"              \
+    "pmaddwd mm4, [ecx+40]"         \
+    "movq    mm5, mm1"              \
+    "pmaddwd mm5, [ecx+48]"         \
+    "pslld   mm5, 1"                \
+    "movq    mm6, [ecx+32]"         \
+    "pand    mm6, mm3"              \
+    "paddd   mm5, mm6"              \
+    "paddd   mm5, [ecx+24]"         \
+    "psrld   mm5, 16"               \
+    "paddd   mm4, mm5"              \
+    "psrld   mm4, 4"                \
+    "movq    mm5, mm1"              \
+    "pmaddwd mm5, mm1"              \
+    "pslld   mm5, 2"                \
+    "movq    mm6, mm1"              \
+    "pslld   mm6, 2"                \
+    "paddd   mm6, [ecx]"            \
+    "pand    mm6, mm3"              \
+    "paddd   mm5, mm6"              \
+    "movq    mm6, mm5"              \
+    "pand    mm6, [ecx+8]"          \
+    "movq    mm7, mm5"              \
+    "psrld   mm7, 10"               \
+    "pand    mm7, [ecx+8]"          \
+    "psrld   mm5, 20"               \
+    "movq    mm3, mm6"              \
+    "pmaddwd mm3, [ecx+64]"         \
+    "pmaddwd mm6, [ecx+56]"         \
+    "pslld   mm6, 15"               \
+    "paddd   mm3, mm6"              \
+    "movq    mm6, mm7"              \
+    "pmaddwd mm6, [ecx+64]"         \
+    "pmaddwd mm7, [ecx+56]"         \
+    "pslld   mm7, 15"               \
+    "paddd   mm6, mm7"              \
+    "movq    mm7, mm5"              \
+    "pmaddwd mm7, [ecx+64]"         \
+    "pmaddwd mm5, [ecx+56]"         \
+    "pslld   mm5, 15"               \
+    "paddd   mm7, mm5"              \
+    "psrld   mm3, 10"               \
+    "paddd   mm6, mm3"              \
+    "psrld   mm6, 10"               \
+    "paddd   mm7, [ecx+24]"         \
+    "paddd   mm7, mm6"              \
+    "psrld   mm7, 20"               \
+    "paddd   mm4, mm7"              \
+    "movq    mm0, [eax]"            \
+    "movq    mm1, mm0"              \
+    "psrld   mm1, 11"               \
+    "movq    mm2, mm0"              \
+    "pand    mm2, [ecx+16]"         \
+    "pmaddwd mm1, mm4"              \
+    "pmaddwd mm2, mm4"              \
+    "paddd   mm2, [ecx+24]"         \
+    "psrld   mm2, 11"               \
+    "paddd   mm1, mm2"              \
+    "psrld   mm1, 9"                \
+    "paddd   mm0, mm1"              \
+    "movq    [ebx], mm0"            \
+    "add     eax, 8"                \
+    "add     edx, 8"                \
+    "add     ebx, 8"                \
+    "dec     esi"                   \
+    "jnz     expq20mloop"           \
+    "emms"                          \
+    __parm [__eax] [__edx] [__ebx] [__ecx] [__esi] \
+    __modify [__eax __ebx __ecx __edx __esi 8087];
+
+void lz_exp_q20_mmx(const int32_t *tab, const int32_t *s,
+                    int32_t *prod, int n) {
+    int k = n & ~1;
+    if (k) lz_exp_q20_2_mmx_asm(tab, s, prod, exp_q20_mk, k >> 1);
+    for (; k < n; k++) {
+        int32_t sk = s[k], cq;
+        cq = (1 << 20)
+           + (int32_t)((((lz_i64)726817 * sk) + (1 << 19)) >> 20)
+           + (int32_t)((((lz_i64)251906 * ((lz_i64)sk * sk))
+                        + (LZ_I64_C(1) << 39)) >> 40);
+        prod[k] = (int32_t)((((lz_i64)tab[k] * cq) + (1 << 19)) >> 20);
+    }
+}
+
 /* ---- Q8_0 32/128-element dot products and row kernel, MMX tier -
    in this TU. Algorithm documentation (why the weight side is widened
    via punpcklbw(zero,w), the register-budget accounting for the paired
@@ -3322,12 +3446,123 @@ void lz_lerp_q15_mmx(const int32_t *a, const int32_t *b,
         out[k] = a[k] + (((b[k] - a[k]) * frac[k]) >> 15);
 }
 
+/* ---- lz_exp_fixed's Q20 Taylor, MMX tier.
+   Watcom twin: lz_exp_q20_2_mmx_asm, the #pragma aux in the other arm.
+   SSE2 twin: lz_exp_q20_simd (src/ops_sse2.c), which has pmuludq and so
+   spends one instruction where this spends a limb decomposition.
+
+   THE WHOLE CELL IS ABOUT ONE MISSING INSTRUCTION. Every multiply in
+   this operator is 32 x 32 -> 64; MMX's widest is pmaddwd, 16 x 16 ->
+   32. So each product is rebuilt from pieces small enough that pmaddwd
+   holds them and the running value never leaves an int32 lane. Two
+   elements a pass, against SSE2's four.
+
+   pmaddwd IS USED AS A PLAIN 16x16->32 MULTIPLY here, not as a dot
+   product: the operands sit in int32 lanes with zero high halves, so
+   as int16 they read [x, 0, x', 0] and the pairwise add contributes
+   0*0. That costs nothing and is the only 16x16->32 MMX has - pmullo
+   and pmulhi give two halves that then need reassembling.
+
+   EVERY OPERAND MUST FIT SIGNED int16, which is what drives the splits
+   below, and s is exactly the value that does not: it reaches 2^15,
+   one past int16. So s is carried as u = s >> 1 and b = s & 1 - u is
+   at most 2^14 - and b is folded back with a mask instead of a branch.
+   Splitting the CONSTANTS at 2^15 rather than 2^16 is the same
+   constraint seen from the other side.
+
+     t1  LN2 = 22*2^15 + 5921, so LN2*s = 22*u*2^16 + 2*(5921*u) +
+         LN2*b. The 2^16 term needs no multiply at all: shifting the
+         sum right by 16 turns it into a plain add.
+     ss  s*s = 4*u^2 + (4u + 1 masked by b), exact, one pmaddwd.
+     t2  LN2SQ*(s*s) >> 40 with s*s up to 2^30. Three 10-bit limbs of
+         s*s, each times LN2SQ (itself split 7*2^15 + 22530), then two
+         >>10 stages instead of one >>20 so no partial sum exceeds
+         int32. 10 bits is the largest limb width that keeps
+         LN2SQ*limb inside int32.
+     out cq = 2^20 + d, so tab*cq = tab*2^20 + tab*d and
+         prod = tab + ((tab*d + 2^19) >> 20) - the big half of the
+         product cancels against the shift and never has to be formed.
+         d < 2^15 and tab < 2^21, so one 2^11 split of tab finishes it.
+
+   NO SATURATION ANYWHERE. Every value above is proved to fit its lane,
+   so packssdw never appears and there is nothing to clamp; the shifts
+   are all psrld (logical) because every operand is non-negative. */
+void lz_exp_q20_mmx(const int32_t *tab, const int32_t *s,
+                    int32_t *prod, int n) {
+    const __m64 k1     = _mm_set1_pi32(1);
+    const __m64 k1023  = _mm_set1_pi32(1023);
+    const __m64 k2047  = _mm_set1_pi32(2047);
+    const __m64 kr19   = _mm_set1_pi32(1 << 19);
+    const __m64 kln2   = _mm_set1_pi32(726817);
+    const __m64 k22    = _mm_set1_pi32(22);
+    const __m64 k5921  = _mm_set1_pi32(5921);
+    const __m64 k7     = _mm_set1_pi32(7);
+    const __m64 k22530 = _mm_set1_pi32(22530);
+    const __m64 zero   = _mm_setzero_si64();
+    int k;
+
+    for (k = 0; k + 1 < n; k += 2) {
+        __m64 sv, tv, u, b, mb, av, bv, xv, t1, u2, ss;
+        __m64 l0, l1, l2, m0, m1, m2, inner, t2, d, a1, a0;
+
+        memcpy(&sv, s + k, 8);
+        memcpy(&tv, tab + k, 8);
+        u  = _mm_srli_pi32(sv, 1);
+        b  = _mm_and_si64(sv, k1);
+        mb = _mm_sub_pi32(zero, b);          /* 0 or all-ones */
+
+        av = _mm_madd_pi16(u, k22);          /* 22*u   <= 2^19 */
+        bv = _mm_madd_pi16(u, k5921);        /* 5921*u <= 2^27 */
+        xv = _mm_add_pi32(_mm_slli_pi32(bv, 1), _mm_and_si64(kln2, mb));
+        xv = _mm_add_pi32(xv, kr19);
+        t1 = _mm_srli_pi32(_mm_add_pi32(av, _mm_srli_pi32(xv, 16)), 4);
+
+        u2 = _mm_madd_pi16(u, u);            /* u*u <= 2^28 */
+        ss = _mm_add_pi32(_mm_slli_pi32(u2, 2),
+                          _mm_and_si64(_mm_add_pi32(_mm_slli_pi32(u, 2),
+                                                    k1), mb));
+
+        l0 = _mm_and_si64(ss, k1023);
+        l1 = _mm_and_si64(_mm_srli_pi32(ss, 10), k1023);
+        l2 = _mm_srli_pi32(ss, 20);
+        m0 = _mm_add_pi32(_mm_madd_pi16(l0, k22530),
+                          _mm_slli_pi32(_mm_madd_pi16(l0, k7), 15));
+        m1 = _mm_add_pi32(_mm_madd_pi16(l1, k22530),
+                          _mm_slli_pi32(_mm_madd_pi16(l1, k7), 15));
+        m2 = _mm_add_pi32(_mm_madd_pi16(l2, k22530),
+                          _mm_slli_pi32(_mm_madd_pi16(l2, k7), 15));
+        inner = _mm_srli_pi32(_mm_add_pi32(m1, _mm_srli_pi32(m0, 10)), 10);
+        t2 = _mm_srli_pi32(_mm_add_pi32(_mm_add_pi32(m2, kr19), inner), 20);
+
+        d  = _mm_add_pi32(t1, t2);           /* cq - 2^20, < 2^15 */
+        a1 = _mm_srli_pi32(tv, 11);
+        a0 = _mm_and_si64(tv, k2047);
+        {
+            __m64 p1 = _mm_madd_pi16(a1, d);
+            __m64 p0 = _mm_add_pi32(_mm_madd_pi16(a0, d), kr19);
+            __m64 r  = _mm_srli_pi32(
+                           _mm_add_pi32(p1, _mm_srli_pi32(p0, 11)), 9);
+            r = _mm_add_pi32(tv, r);
+            memcpy(prod + k, &r, 8);
+        }
+    }
+    _mm_empty();
+    for (; k < n; k++) {
+        int32_t sk = s[k], cq;
+        cq = (1 << 20)
+           + (int32_t)((((lz_i64)726817 * sk) + (1 << 19)) >> 20)
+           + (int32_t)((((lz_i64)251906 * ((lz_i64)sk * sk))
+                        + (LZ_I64_C(1) << 39)) >> 40);
+        prod[k] = (int32_t)((((lz_i64)tab[k] * cq) + (1 << 19)) >> 20);
+    }
+}
+
 /* ---- wsum: attention scoring's weighted-sum dot, LZ_WSUM_PAIR's gcc
    twin. Watcom twin: lz_wsum_pair_asm, src/ops.c ~3960-4041.
    Sign-extend two int8 rows to int16, interleave so one pmaddwd covers a
    (rowA,rowB) pair against (ckA,ckB), accumulate into acc32 in place.
    Emits no emms; the driver does one per chunk, and that chunk's
-   row-pair loop contains no x87 (rule 6 item 6). */
+   row-pair loop contains no x87. */
 void lz_wsum_pair_mmx(const int8_t *rowA, const int8_t *rowB,
                       const int16_t *coef, int32_t *acc32) {
     __m64 c, ra, rb, a0, b0, p, q, acc;
