@@ -3975,12 +3975,19 @@ static const char km_why_sse1[] =
            instructions where SSE2 spends one. Owed, not impossible:
            expressible is the bar, not convenient.
 
-   THE REAL COST IS THE SECOND TAYLOR TERM, on either tier. LN2SQ*s*s
-   is ((int64)LN2SQ * s) * s in C, so the first product is 32 x 32 -> 64
-   and pmuludq takes it, but the second is 64 x 32 and pmuludq does not
-   - that one needs the hi/lo split, two more multiplies and a shifted
-   add. Reassociating to LN2SQ * (s*s) would not help and is not
-   available anyway: it is a different number.
+   THE SECOND TAYLOR TERM IS NOT THE 64 x 32 IT LOOKS LIKE, and this
+   note said twice that it was. C writes LN2SQ*s*s as
+   ((int64)LN2SQ * s) * s, whose first product is 2^33 and whose second
+   is therefore 64 x 32 - which pmuludq cannot do. But s = rq >> 5 with
+   rq at most 2^20, so s <= 2^15 and s*s <= 2^30 fits int32. Grouped as
+   LN2SQ * (s*s) both factors are under 2^32 and pmuludq takes it in
+   one, and the two groupings are the SAME NUMBER: integer
+   multiplication is associative and exact, and every intermediate here
+   is at most 2^48, far inside int64.
+   So all four multiplies in this operator are 32 x 32 -> 64:
+   LN2*s, s*s, LN2SQ*(s*s), and g_exptab[idx]*cq. On SSE2 that is
+   pmuludq four times (two lanes each); on MMX it is the 16-bit-halves
+   construction, which is where the cost actually sits.
 
    The 32-entry table lookup stays scalar on both, same as sigq's. */
 /* sigq's SSE1 cells, and this one CLOSES rather than opens. The
@@ -4000,9 +4007,10 @@ static const char km_why_sigq_sse1[] =
 static const char km_why_expfx_x86[] =
     "todo: not sigq's interpolation - lz_exp_fixed is a Q20 Taylor whose "
     "multiplies are 32x32->64, every operand non-negative so pmuludq "
-    "needs no sign handling. The cost is LN2SQ*s*s: the second multiply "
-    "is 64x32 and needs a hi/lo split on either tier. MMX has nothing "
-    "wider than pmaddwd. The 32-entry lookup stays scalar on both";
+    "needs no sign handling. All four fit it - LN2*s, s*s, LN2SQ*(s*s) "
+    "and tab*cq - because s <= 2^15 makes s*s an int32, and the "
+    "regrouping is exact. MMX has nothing wider than pmaddwd and pays "
+    "the 16-bit-halves construction. The 32-entry lookup stays scalar";
 /* EXPFX AND SIGQ ONLY, and the scope line is here because this string
    is wrong for any unit that HAS a group form. i32f's is the wsum
    chunk fold's 32 and q8rnd's is lz_q8round_group_sse's gs, so each of
