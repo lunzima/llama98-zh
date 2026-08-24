@@ -369,6 +369,16 @@ void lz_wsum_group_mmx(const int8_t *vc, int kvd, int g, int sink, int ring,
             LZ_SLOT_NEXT(slot, sink, ring);
         }
         _mm_empty();      /* no x87 inside the row-pair loop above */
+        /* The fold, at the SSE2 tier when the machine has one. Asked
+           here rather than at the caller because THIS loop is what the
+           tier changes: the row-pair walk above stays MMX either way -
+           a P4 running this kernel has cvtdq2ps for the fold and no
+           reason to spend lz_i32f's x87 split form on it. The emms
+           above has already run, so the cell owes nothing. */
+#if defined(LZ_HAVE_I32FACC_SSE2)
+        if (g_kernel == LZ_KERNEL_SSE2) lz_i32f_acc32_simd(accf, acc32);
+        else
+#endif /* LZ_HAVE_I32FACC_SSE2 */
         for (d = 0; d < 32; d++) accf[d] += lz_i32f(acc32[d]);
     }
 }

@@ -499,6 +499,81 @@ void lz_fwht_stage_sse2(int32_t *y, int n, int len) {
     lz_fwht_stage_sse2_asm(y, n, len);
 }
 
+/* ---- attention wsum's chunk fold: accf[d] += (float)acc32[d], 32 wide.
+   cvtdq2ps converts four int32 at once and addps accumulates four
+   floats. No MMX register is touched, which matters at this particular
+   site: the caller has just paid an emms to leave the row-pair loop,
+   and a cell that reached for cvtpi2ps would owe another.
+
+   WHY THIS CELL IS WATCOM-ONLY. gcc compiles the scalar loop to exactly
+   these instructions - 19 cvtdq2ps in ops_gdn.o at -O2 on x86-64 - so
+   an intrinsics twin would duplicate what the compiler already emits.
+   Watcom emits zero, and runs lz_i32f's x87 split form instead: 32 fild
+   and 78 fmul in the same object.
+
+   SAME VALUE AS THE SCALAR FORM, not a close one. ops_kernel_shared.h's
+   lz_i32f records 87,108,878 values compared against the correctly
+   rounded conversion with 0 mismatches - the whole +-2^25 band, where
+   every rounding decision lives. cvtdq2ps IS that conversion.
+
+   Unaligned moves throughout: acc32 is a caller's automatic array and
+   accf is a caller-owned buffer, neither aligned to 16 by anything.
+   Two lanes in flight per block so the convert and the add of adjacent
+   groups can pair. */
+void lz_i32f_acc32_sse2_asm(float *accf, const int32_t *acc32);
+#pragma aux lz_i32f_acc32_sse2_asm = \
+    ".686" \
+    "movdqu   xmm0, [edx]" \
+    "movdqu   xmm2, [edx+16]" \
+    "cvtdq2ps xmm0, xmm0" \
+    "cvtdq2ps xmm2, xmm2" \
+    "movups   xmm1, [eax]" \
+    "movups   xmm3, [eax+16]" \
+    "addps    xmm1, xmm0" \
+    "addps    xmm3, xmm2" \
+    "movups   [eax], xmm1" \
+    "movups   [eax+16], xmm3" \
+    "movdqu   xmm0, [edx+32]" \
+    "movdqu   xmm2, [edx+48]" \
+    "cvtdq2ps xmm0, xmm0" \
+    "cvtdq2ps xmm2, xmm2" \
+    "movups   xmm1, [eax+32]" \
+    "movups   xmm3, [eax+48]" \
+    "addps    xmm1, xmm0" \
+    "addps    xmm3, xmm2" \
+    "movups   [eax+32], xmm1" \
+    "movups   [eax+48], xmm3" \
+    "movdqu   xmm0, [edx+64]" \
+    "movdqu   xmm2, [edx+80]" \
+    "cvtdq2ps xmm0, xmm0" \
+    "cvtdq2ps xmm2, xmm2" \
+    "movups   xmm1, [eax+64]" \
+    "movups   xmm3, [eax+80]" \
+    "addps    xmm1, xmm0" \
+    "addps    xmm3, xmm2" \
+    "movups   [eax+64], xmm1" \
+    "movups   [eax+80], xmm3" \
+    "movdqu   xmm0, [edx+96]" \
+    "movdqu   xmm2, [edx+112]" \
+    "cvtdq2ps xmm0, xmm0" \
+    "cvtdq2ps xmm2, xmm2" \
+    "movups   xmm1, [eax+96]" \
+    "movups   xmm3, [eax+112]" \
+    "addps    xmm1, xmm0" \
+    "addps    xmm3, xmm2" \
+    "movups   [eax+96], xmm1" \
+    "movups   [eax+112], xmm3" \
+    __parm [__eax] [__edx] \
+    __modify [8087]
+
+/* The real function the other translation units call. A #pragma aux
+   body expands at its call site and has no address of its own, so the
+   wrapper is what crosses the TU boundary - same shape as
+   ops_kernel_norm.h's _w wrappers, and same reason. */
+void lz_i32f_acc32_simd(float *accf, const int32_t *acc32) {
+    lz_i32f_acc32_sse2_asm(accf, acc32);
+}
+
 /* ---- Q8 activation rounding, SSE2 tier - in this TU; the algorithm
    documentation is in src/ops_kernel_q8round.h. cvtps2dq converts 4
    floats at once - no MMX register touched, unlike the SSE1+MMX tier's
@@ -1994,6 +2069,33 @@ unsigned lz_amax32_sse2(const float *x, int n) {
         a = o.u[0] > o.u[1] ? o.u[0] : o.u[1];
         b = o.u[2] > o.u[3] ? o.u[2] : o.u[3];
         return a > b ? a : b;
+    }
+}
+
+/* ---- attention wsum's chunk fold, SSE2 tier ------------------------------
+   Watcom twin: lz_i32f_acc32_sse2_asm above. accf[d] += (float)acc32[d]
+   for 32 elements - cvtdq2ps four int32 at a time, addps to accumulate.
+   No MMX register, so no emms is owed at a site that has just paid one.
+
+   WRITTEN RATHER THAN LEFT TO THE OPTIMIZER, which is the point of the
+   cell. gcc -O2 does vectorize the scalar loop this replaces, but an
+   auto-vectorization has no name the kernel matrix can register, no
+   symbol a cross-toolchain comparison can reach, and it goes away
+   silently when a flag or a compiler version changes. The Watcom side
+   never had it at all.
+
+   Bit-identical to the scalar form by ops_kernel_shared.h's own
+   evidence: lz_i32f's split and the correctly rounded conversion agree
+   on 87,108,878 compared values, the whole +-2^25 band included.
+   cvtdq2ps IS that conversion. */
+void lz_i32f_acc32_simd(float *accf, const int32_t *acc32) {
+    int b;
+    for (b = 0; b < 8; b++) {
+        __m128i vi = _mm_loadu_si128((const __m128i *)(const void *)
+                                     (acc32 + b * 4));
+        _mm_storeu_ps(accf + b * 4,
+                      _mm_add_ps(_mm_loadu_ps(accf + b * 4),
+                                 _mm_cvtepi32_ps(vi)));
     }
 }
 

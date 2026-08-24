@@ -78,7 +78,25 @@ void lz_wsum_pair_sse2(const int8_t *rowA, const int8_t *rowB,
 #define LZ_HAVE_AMAX_SSE2  1
 #define LZ_HAVE_Q8R_SIMD   1
 
+/* Attention wsum's chunk fold - accf[d] += (float)acc32[d], 32 wide.
+   BOTH toolchains, and the gcc half is written rather than left to the
+   optimizer on purpose: gcc -O2 does vectorize the scalar loop today
+   (19 cvtdq2ps in ops_gdn.o on x86-64), but an auto-vectorization is
+   not a cell. It has no name for the kernel matrix to register, no
+   symbol for a cross-toolchain comparison to reach, and it disappears
+   silently on a compiler or flag change. Watcom emits none of it and
+   runs lz_i32f's x87 split form instead, six operations an element. */
+#define LZ_HAVE_I32FACC_SSE2 1
+
+/* Declared for both arms under one name. On Watcom the body is a
+   #pragma aux, which expands at its CALL SITE and so cannot be reached
+   from another translation unit - lz_i32f_acc32_simd is the real
+   function in src/ops_sse2.c that wraps it, the same shape the _w
+   wrappers have for ops_kernel_norm.h's tables. */
+void lz_i32f_acc32_simd(float *accf, const int32_t *acc32);
+
 #if defined(__WATCOMC__)
+
 /* GDN/KDA fixed-point pass 2, SSE2 tier, row granularity.
    Self-contained unlike lz_p2_rows_sse (ops_mmx_sse.c): SSE2 has full
    content for BOTH mul32 and split32 (see ops_kernel_p2.h's ISA
@@ -172,6 +190,7 @@ unsigned lz_amax32_sse2(const float *x, int n);
 
 /* ---- Q8 activation rounding, SSE2 tier -------------------------------- */
 void lz_q8round32_simd(const float *x, int8_t *o, const float *pinv);
+
 
 #endif /* __WATCOMC__ */
 

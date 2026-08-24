@@ -465,6 +465,14 @@ void lz_attn_wsum_q8(float *out, const float *att, int hd,
 #if defined(LZ_WSUM_MMX_EXTERN)
             if (lz_cpu_has_mmx()) _mm_empty();      /* no x87 inside the row-pair loop above */
 #endif /* LZ_WSUM_MMX_EXTERN */
+            /* Same dispatch as src/ops_mmx.c's group kernel carries at
+               its own copy of this fold - the two walks are the same
+               chunk loop on either side of the LZ_WSUM_MMX_EXTERN
+               split, so the tier question is the same question. */
+#if defined(LZ_HAVE_I32FACC_SSE2)
+            if (g_kernel == LZ_KERNEL_SSE2) lz_i32f_acc32_simd(accf, acc32);
+            else
+#endif /* LZ_HAVE_I32FACC_SSE2 */
             for (d = 0; d < 32; d++) accf[d] += lz_i32f(acc32[d]);
         }
 #endif /* __WATCOMC__ */
