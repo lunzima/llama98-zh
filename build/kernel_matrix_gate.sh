@@ -251,7 +251,7 @@ while read -r cell _status have _kind; do
             for c in $CLASSES; do
                 s=$(awk -v k="$cell" '$1 == k {print $2}' "$WORK/$c.cells")
                 case "$s" in
-                    i|t|d) ;;
+                    i|t|d|n) ;;
                     *) bad "$cell is empty everywhere but class $c reports '$s'," \
                            "not a reason letter" ;;
                 esac
@@ -281,8 +281,16 @@ say "-- union --"
 say "  covered: $COVERED (unit x tier x build class)"
 say "  registered empty: $(awk '$2 == "i"' "$WORK/$REF.cells" | wc -l) impossible," \
     "$(awk '$2 == "t"' "$WORK/$REF.cells" | wc -l) todo," \
-    "$(awk '$2 == "d"' "$WORK/$REF.cells" | wc -l) declined" \
+    "$(awk '$2 == "d"' "$WORK/$REF.cells" | wc -l) declined," \
+    "$(awk '$2 == "n"' "$WORK/$REF.cells" | wc -l) n/a" \
     "(per binary; the reasons are in --kernel-matrix)"
+# n/a is not impossible, and the split is here because the impossible
+# count is read as a work list. A cell is n/a when the COLUMN asks
+# nothing of the ROW - the g128 column is the matmul row kernel's
+# 128-element group hoist, and an attention weighted sum whose group is
+# the context length has no answer to give it. Eleven cells were
+# registered impossible on that basis, so the ISA-blocked surface read
+# 29% larger than it is.
 if [ -n "$UNCHECKED" ]; then
     say "  UNCHECKED (no binary of that class):$UNCHECKED"
 fi
