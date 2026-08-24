@@ -170,6 +170,22 @@ int lz_q8r_tier(void) {
    a measurement path, not a deployment choice. Nothing selects it
    automatically on any platform.
 
+   THAT CROSS-CHECK HAS NOT BEEN RUN, and the reason is a missing
+   reference rather than a missing switch. It needs three things this
+   machine does not have together: a reference implementation to run
+   (no llama.cpp binary here - .prof/bench_vs_llamacpp.py names it in
+   its header but measures only llama98, and it measures SPEED), the
+   same weights in both (the local GGUF is unsloth's Qwen3.5-0.8B, a
+   different quantisation of a different export from the model.bin the
+   engine reads), and a comparison at a defined point - per-layer
+   activations, not logits, since two implementations agreeing on
+   argmax says nothing about an operator.
+   `--fixed off` is the arm to pin when someone has those. What the
+   tree DOES check today is internal: gcc against Watcom, MMX against
+   SSE2 against C, x87 against ARM soft-float, all bit-identical
+   (build/xcheck_gate.sh). That answers "the tiers agree", not "the
+   engine agrees with PyTorch".
+
    NOT file-static: lz_scalar_mode is a macro in ops.h so that softmax's
    per-element lz_exp does not pay a cross-TU call for its tier, and
    that macro reads this. This file is still the only writer. */
