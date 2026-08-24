@@ -20,7 +20,7 @@ typedef struct { long h; struct _finddata_t fd; int first; } lz_dir;
 #else
 #include <dirent.h>
 typedef struct { DIR *d; } lz_dir;
-#endif
+#endif /* _MSC_VER */
 
 static int dir_open(lz_dir *it, const char *path) {
 #if defined(_MSC_VER)
@@ -38,7 +38,7 @@ static int dir_open(lz_dir *it, const char *path) {
 #else
     it->d = opendir(path);
     return it->d != NULL;
-#endif
+#endif /* _MSC_VER */
 }
 
 static const char *dir_next(lz_dir *it) {
@@ -49,7 +49,7 @@ static const char *dir_next(lz_dir *it) {
 #else
     struct dirent *e = readdir(it->d);
     return e ? e->d_name : NULL;
-#endif
+#endif /* _MSC_VER */
 }
 
 static void dir_close(lz_dir *it) {
@@ -57,7 +57,7 @@ static void dir_close(lz_dir *it) {
     if (it->h != -1L) _findclose(it->h);
 #else
     if (it->d) closedir(it->d);
-#endif
+#endif /* _MSC_VER */
 }
 
 #include "err.h"

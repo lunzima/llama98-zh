@@ -870,7 +870,7 @@ static char **utf8_argv(int *argc) {
        the reader still sees which code page is meant. */
 #ifndef CP_UTF8
 #define CP_UTF8 65001
-#endif
+#endif /* CP_UTF8 */
     for (i = 0; i < n; i++) {
         int nb = WideCharToMultiByte(CP_UTF8, 0, wargv[i], -1,
                                      NULL, 0, NULL, NULL);
