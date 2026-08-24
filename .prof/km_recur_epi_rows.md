@@ -43,11 +43,27 @@ Row:
 | sseI | `KM_H(LZ_KMB_GCC)` | `lz_p2_rows_sse` - see warning below |
 | sse2I | `KM_H(LZ_KMB_GCC)` | `lz_p2_rows_sse2` |
 | mmxA | `KM_H(LZ_KMB_WAT)` | `lz_gdn1_x4_asm`, `lz_gdn_sum_gg_mmx` |
-| sseA | CONFIRM | is `ops_mmx_sse.c` in the Watcom TU set? |
-| sse2A | CONFIRM | same question for the SSE2 body |
+| sseA | likely `KM_H(LZ_KMB_WAT)` - probe decides | see below |
+| sse2A | likely `KM_H(LZ_KMB_WAT)` - probe decides | see below |
 | armC | `KM_H(LZ_KMB_ARM)` | the shared C body runs there |
 | armA | `KM_T` | no gdn/p2_rows symbol in `ops_arm.c/.h`; ARMv5TE can do this, so owed, not impossible |
 | g128 | `KM_N` | zero `g128` references in `ops_gdn.c` - different axis, same as the other operator rows |
+
+### The Watcom SSE cells: file membership is not the answer
+
+`ops_mmx_sse.obj` and `ops_sse2.obj` are in the Watcom link for all four
+targets (`build/watcom/{cli,clidos,dll,gui}/*.lnk`), and the bodies live
+there - `lz_p2_rows_sse` at `ops_mmx_sse.c:214`, `lz_p2_rows_sse2` at
+`ops_sse2.c:302`. Neither carries a `#if defined(__WATCOMC__)` of its
+own; each is plain C over per-group helpers, and `lz_p2_rows_sse`'s
+comment says its split step's pragma is textually inline while its mul32
+step is a cross-TU call into `ops_mmx.c`.
+
+So Watcom compiles them, but what a cell asserts is that THIS build
+class has the assembly, not that the file was in the link. Set these two
+from what `km_op_present` can actually probe under `__WATCOMC__` and let
+the gate arbitrate. Guessing from file membership is how a cell ends up
+declaring assembly that a gcc build then reports as present.
 
 **Do not paste `KM_I(km_why_sse1)` into recur's sseI cell.** That string
 fills the SSE1 column for every weight-format row and the reflex is to
