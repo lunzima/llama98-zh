@@ -72,9 +72,9 @@ int  lz_net_recv(lz_sock s, char *buf, int cap);
    reproduce. */
 int  lz_net_send_all(lz_sock s, const char *buf, int n);
 
-/* True when the peer has closed or sent data unexpectedly. Used to stop
-   a generation whose client has gone away rather than spending minutes
-   of a Pentium's time producing bytes nobody will read. */
+/* True when the peer has closed or sent data unexpectedly. Called to
+   stop a generation whose client has gone away rather than spending
+   minutes of a Pentium's time producing bytes nobody will read. */
 int  lz_net_peer_gone(lz_sock s);
 
 #endif

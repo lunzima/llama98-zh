@@ -218,7 +218,8 @@ float lz_silu(float x);
    DOUBLE calls. That pair is what LZ_SOFTPLUS_POLY=0 restores. */
 float lz_softplus(float x);
 
-/* The libm double pair lz_softplus used to be. Measured on soft-float
+/* The libm double pair, kept as the reference lz_softplus is checked
+   against rather than as its body. Measured on soft-float
    ARM under QEMU (.prof/softplus_weight.c, ratio only - QEMU models no
    cycles) it is 2.59x the cost of the shipped body in guest
    instructions, and the f32 census scores it zero because it counts
@@ -789,12 +790,11 @@ int lz_norm_can_fixed(int n);
    cancellation, and nothing was wrong with the proof: the flag's REACH
    grew past it.
 
-   This line used to open with "the SGDN norm's fixed tier", scoped
-   correctly, and the bit-identity clause was true of that scope. SubLN
-   then reused the flag for six lz_rmsnorm sites - forward_kda's four
-   projection input norms and dense_ffn_step's gate/up pair, all inside
-   a use_subn branch - and the qualifier stopped covering the sentence
-   after it.
+   Do NOT scope this line to "the SGDN norm's fixed tier". That scope
+   would make the bit-identity clause true, and it is not: SubLN reuses
+   the flag for six lz_rmsnorm sites - forward_kda's four projection
+   input norms and dense_ffn_step's gate/up pair, all inside a use_subn
+   branch - which the narrower qualifier does not cover.
 
    Measured on kunkun-ce q8, 500 tokens of real corpus, fixed
    against int: |diff| rms 0.144 on a signal rms of 2.01 (7%), top-1

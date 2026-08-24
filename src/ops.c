@@ -2025,8 +2025,8 @@ static int32_t epi_align_i16(lz_i64 s, int e, int target_e, int bound) {
    pair handed over is (s, e + pe + 8) - not a fudge factor, the same
    quantity written in the primitive's units, exactly as
    epi_q41_align_i16's `target + 8` is. Taking pe from lz_epi_post_e
-   rather than assuming Q8_0's is what keeps this exit from acquiring
-   the 256x error epi_fixed's `post` parameter used to make possible. */
+   rather than assuming Q8_0's is what keeps this exit clear of the
+   256x error a hardcoded `post` makes possible. */
 int32_t epi_fixed_align_i16(const int32_t *accb, const LZTensor *w, int row,
                              int tk, int ng, int r, int target_e, int bound) {
     int e;
@@ -3256,9 +3256,9 @@ void lz_causal_conv1d_step_fixed_o16(float *o, short *oi, int out_es,
                int32 domain - s15's own [0, 32768] range is not what
                makes that true and is not relied on.
 
-               The x-domain float entry this branch used to make (a
-               second lz_scale2_arm_asm to build x, then sigmoid_q15)
-               is gone with the C's: BOTH TIERS NOW CALL sigmoid_q15_i,
+               No x-domain float entry in this branch - it would be a
+               second lz_scale2_arm_asm to build x, then sigmoid_q15,
+               and the C has none either: BOTH TIERS CALL sigmoid_q15_i,
                so the two agree by construction instead of by the
                table-edge coincidence .prof/conv_epi_xentry.sh had to
                sweep. One soft-float call left where the C tier makes

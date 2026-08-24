@@ -423,10 +423,10 @@ void lz_rmsnorm_gated_int(int32_t *t, const float *x, const float *g,
     }
     /* float ss fallback. NOT RE-DERIVED, unlike the three other
        "historical total" sites corrected in this file and src/ops.c,
-       and the comment that used to be here was wrong about why: it said
-       "the output loop is skipped entirely here", but
-       lz_rmsnorm_gated_out_fixed_int runs unconditionally eight lines
-       down and has no site of its own, so this site has to cover it.
+       and NOT for the reason that looks obvious. It is not that "the
+       output loop is skipped entirely here": lz_rmsnorm_gated_out_fixed_int
+       runs unconditionally eight lines down and has no site of its own,
+       so this site has to cover it.
        Whether 5n is the right cover for an int output loop is an open
        question, not a settled one.
        Left alone deliberately: lz_norm_int() is -1 by default so
@@ -469,9 +469,9 @@ have_ss_gated_int:
 void lz_rmsnorm_out_fixed_int(int32_t *t, const short *qx, int ex,
                               const float *w, float inv, int n,
                               float *deq) {
-    /* static, not stack: same single-threaded-forward-pass assumption
-       norm_ss_fixed's own scratch used to make (see its history). Only
-       the cache-miss path still needs it. */
+    /* static, not stack: the same single-threaded-forward-pass
+       assumption norm_ss_fixed's own scratch rests on. Only the
+       cache-miss path needs it. */
     static float wp[LZ_NORM_MAX_N];
     union { float f; uint32_t u; } bit;
     const short *qwt;
@@ -709,11 +709,12 @@ void lz_l2norm(float *o, const float *x, int n, float eps) {
                  add  n + 1
                  cvt  1        div 0
 
-               THE n THAT USED TO BE HERE WAS REAL, AND IT WAS THE ONLY
-               ONE THAT MATTERED. This site billed 3n+1 mul "to hold the
-               site's historical total". Measured on kmr20 at 603 tokens:
-               removing it takes the whole NORMS class from 131,156 to
-               118,868 ops/token, 9.4% - because this function runs 192
+               2n+1, NOT 3n+1, AND THAT ONE n IS THE ONLY CORRECTION
+               HERE THAT MATTERED. Billing 3n+1 "to hold the site's
+               historical total" overstates by n. Measured on kmr20 at
+               603 tokens: the extra n is the difference between a NORMS
+               class of 131,156 and 118,868 ops/token, 9.4% - because
+               this function runs 192
                times a token (6 KDA layers x 16 heads x q and k, n=64)
                and 192*64 = 12,288 is exactly the delta. That was enough
                to make NORMS look like the largest class in the census

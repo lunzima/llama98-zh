@@ -32,12 +32,28 @@
 set -u
 cd "$(dirname "$0")/.."
 
-PAT="used to be|used to |no longer|the old |originally|before this task|as before this|previously|formerly"
+# TWO PATTERNS, because the phrases are not equally guilty.
+#
+# STRICT is unambiguous: "it used to be", "previously", "formerly", "as
+# before this task" have no reading in which they describe the code as
+# it is. They are a ratchet toward zero and the baseline below is what
+# is left.
+#
+# LOOSE catches "no longer", "the old" and "originally", which DO have
+# legitimate present-tense uses and are full of them here - "once they
+# can no longer participate" describes a state, "the OLD s->mtp_pos" is
+# the pre-step value, "the old in-place update" names the other code
+# path. Rewriting those to satisfy a regex would make the comments
+# worse. So LOOSE is counted and printed, never failed on: it is a
+# number to look at, not an assertion.
+STRICT="used to be|used to |before this task|as before this|previously|formerly"
+LOOSE="no longer|the old |originally"
+PAT="$STRICT"
 
-BASELINE="err.c:1 forward.c:3 generate.c:6 model.c:1 ops.c:8
-          ops_gdn.c:1 ops_matmul.c:1 ops_mmx.c:2 ops_norm.c:5 ops_quant.c:4
-          ops_sched.c:5 sampler.c:4 llama_zh.h:1 lz_int.h:1 net.h:1 ops.h:6
-          ops_kernel_dot.h:2"
+# Two left, both in files another session holds open. Everything else
+# is at zero, so this is a ratchet with almost nothing left to ratchet:
+# any new one is a FAIL in the file that gained it.
+BASELINE="forward.c:1 model.c:1"
 
 FAIL=0
 TOTAL=0
@@ -60,19 +76,31 @@ for f in src/*.c src/*.h; do
     fi
 done
 
-# Positive control. Without it a typo in $PAT makes every file report
-# zero, every file is at or under its baseline, and the gate passes
-# while measuring nothing - the shape this repo has hit more than once.
-CTL=$(printf 'it used to be four\nthis is no longer true\nthe old loop\n' \
-      | grep -ciE "$PAT")
-if [ "$CTL" -ne 3 ]; then
-    echo "FAIL: the pattern does not match its own examples ($CTL of 3)"
-    echo "      - this gate is blind and its PASS means nothing"
+# Positive control, one per pattern. Without it a typo makes every file
+# report zero, every file is at or under its baseline, and the gate
+# passes while measuring nothing - the shape this repo has hit more than
+# once. Two examples each, because a pattern that lost one alternative
+# out of six would still match the other.
+SCTL=$(printf 'it used to be four\nformerly the case\n' | grep -ciE "$STRICT")
+LCTL=$(printf 'this is no longer true\nthe old loop\n' | grep -ciE "$LOOSE")
+if [ "$SCTL" -ne 2 ] || [ "$LCTL" -ne 2 ]; then
+    echo "FAIL: a pattern does not match its own examples"
+    echo "      (strict $SCTL of 2, loose $LCTL of 2) - this gate is blind"
     FAIL=1
 fi
 
+# The loose phrases are COUNTED, not asserted on: "once they can no
+# longer participate" describes a state and "the OLD s->mtp_pos" is the
+# pre-step value. Printed so the number is visible if it starts growing.
+LTOT=0
+for f in src/*.c src/*.h; do
+    n=$(grep -oiE "$LOOSE" "$f" 2>/dev/null | wc -l)
+    LTOT=$((LTOT + n))
+done
+
 if [ "$FAIL" -eq 0 ]; then
-    echo "changelog_comment_gate: PASS ($TOTAL total, none above baseline)"
+    echo "changelog_comment_gate: PASS ($TOTAL strict, none above baseline;"
+    echo "  $LTOT loose - counted, not asserted, see the header)"
     exit 0
 fi
 echo "changelog_comment_gate: FAIL"

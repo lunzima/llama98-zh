@@ -477,9 +477,9 @@ float lz_exp_fixed(float x) {
    back leaves the floor. Total: sh <= 0 is the identity, sh >= 64 is
    the sign, since |p| * 2^-64 < 1.
 
-   This is the 64-bit form of the argument sig_t15_wide used to carry
-   inline; that function calls this one now, so the file has ONE floor
-   shift rather than two. It is not a second epi_shr_half either - that
+   This is the 64-bit floor shift, factored out so the file has ONE of
+   them rather than a copy inline in sig_t15_wide, which calls this
+   instead. It is not a second epi_shr_half either - that
    primitive rounds half-away-from-zero, and a rounded quotient has no
    remainder to pair with, which is exactly what a table coordinate is
    made of. */

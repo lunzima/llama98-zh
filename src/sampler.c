@@ -566,10 +566,10 @@ static int select_candidates(const LZSampleParams *pr, float *logits,
     float cumulative = 0.0f;
 
     /* `logits` arrives RAW - neither divided by the temperature nor
-       softmaxed. The callers used to do both over the whole vocabulary
-       before getting here; now each branch does whichever it actually
-       needs, and the top_k branch needs neither over more than k
-       entries. See select_topk_exp. */
+       softmaxed, and deliberately so: doing either in the caller spends
+       it on the whole vocabulary. Each branch below does whichever it
+       actually needs, and the top_k branch needs neither over more than
+       k entries. See select_topk_exp. */
     if (pr->topk > 0 && pr->topk < n) {
         n0 = select_topk_exp(logits, n, pr->topk, 1.0f / temperature, buf);
         topk_cut = 1;
@@ -839,12 +839,12 @@ int lz_sample_ex(LZSampler *s, float *logits, LZInspect *ins,
         if (ins) inspect_fill_single(ins, idx);
         return idx;
     }
-    /* The temperature divide is NOT here any more. It used to run over
-       every vocab entry before anything had decided which entries
-       matter; with a filter active it now runs on the k survivors
-       inside select_topk_exp, which is legal because 1/T is positive
-       and therefore monotone. The no-filter exit below still does the
-       whole vector - it returns the whole vector. */
+    /* NO temperature divide here, and that is the point: at this spot
+       it would run over every vocab entry before anything had decided
+       which entries matter. With a filter active it runs on the k
+       survivors inside select_topk_exp instead, which is legal because
+       1/T is positive and therefore monotone. The no-filter exit below
+       does do the whole vector - it returns the whole vector. */
     coin = lz_random_f32(&s->rng_state);
 
     /* 3. none of top_k/top_p/min_p active: sample directly from the

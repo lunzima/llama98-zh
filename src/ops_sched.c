@@ -146,11 +146,13 @@ int lz_q8r_tier(void) {
 
 /* ---- THE float knob -------------------------------------------------- */
 
-/* One axis for every fixed-point site the engine has. It used to be
-   seven - --recur-write, --conv-write, --attn-write, --epi-write,
-   --sig-write, --norm-write, --scalar-fixed - each with its own global,
-   selector and is_default, and --fixed off|all as a table-driven group
-   setter over the lot.
+/* ONE axis for every fixed-point site the engine has, and one is not an
+   accident of how it grew. Seven are possible - a --recur-write,
+   --conv-write, --attn-write, --epi-write, --sig-write, --norm-write
+   and --scalar-fixed, each with its own global, selector and
+   is_default, with --fixed off|all a table-driven group setter over
+   the lot. build/float_knob_gate.sh asserts that none of those seven
+   names is accepted.
 
    Seven axes could only ever buy MIXED settings, and mixing is the one
    thing that measured worse than either end. Paired NLL over 1262
@@ -334,10 +336,10 @@ const char *lz_hadamard_select(const char *name) {
    differ on the shipping default for that one reason, and
    build/kernel_isa_identity_gate.sh needs a build where they do not in
    order to compare every OTHER fixed kernel against its C reference.
-   That used to be `--epi-write float`, a runtime flag; floating the
-   whole engine instead would take conv, norms, sigmoid, recurrence and
-   attention out of that comparison, which is the coverage the row is
-   there for. */
+   A per-site runtime flag would serve that; a whole-engine float switch
+   does not, because floating everything takes conv, norms, sigmoid,
+   recurrence and attention out of the comparison, which is the coverage
+   the row exists for. Hence the compile-time switch here. */
 int lz_epi_mode(void) {
 #if LZ_EPI_FIXED
     return !lz_float_ref_g;
@@ -492,10 +494,10 @@ const char *lz_kernel_tier(void) {
    Watcom. Not a report of what is running, and not the shipping
    configuration.
 
-   This string used to name seven separate tiers at a deliberately
-   mixed, mostly-float setting, which made it a pin for a configuration
-   that nothing shipped and no gate defaulted to. It is `--fixed off`
-   now for the same reason the seven axes collapsed to one: the float
+   This string names ONE axis, not seven tiers at a mixed setting -
+   which would pin a configuration nothing ships and no gate defaults
+   to. `--fixed off` for the same reason the seven axes are one: the
+   float
    arm is what a cross-implementation precision check needs, and any
    setting between the two ends is neither the shipping engine nor a
    clean oracle.
