@@ -1518,6 +1518,11 @@ static lz_i64 lz_epi_mac_grp(const int32_t *a, const int16_t *xq,
         s += (lz_i64)a[i] * (lz_i64)((int32_t)xq[i] * w);
     return s;
 }
+/* Counts calls that reached the SSE2 epi body. Read by cli_main's
+   --debug line; see the dispatch below for why a counter is needed
+   when a byte-identity gate already passes. */
+lz_i64 lz_debug_epi_sse2 = 0;
+
 /* See the Watcom twin above for why this exists and what it replaced.
 
    The SSE2 body is selected at the tier, not by an ifdef alone: the C
@@ -1530,8 +1535,15 @@ static lz_i64 lz_epi_mac_i16(const int32_t *a, const int16_t *m, int n) {
     /* Same lazy guard the other dispatch sites carry: the GUI never
        calls lz_kernel_select, so g_kernel reaches its value here. */
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
-    if (g_kernel == LZ_KERNEL_SSE2)
+    if (g_kernel == LZ_KERNEL_SSE2) {
+        /* Counted because the identity gate cannot tell whether this
+           ran. Its epi comparison is ref against sse2, and the C loop
+           below produces the same bytes - so a dispatch that never
+           fires passes it exactly as a working one does. The count is
+           what separates "agrees" from "agrees and was reached". */
+        lz_debug_epi_sse2++;
         return lz_epi_mac_i16_sse2(a, m, n);
+    }
 #endif /* LZ_EPI_SSE2_EXTERN */
     for (g = 0; g < n; g++) s += (lz_i64)a[g] * (lz_i64)m[g];
     return s;

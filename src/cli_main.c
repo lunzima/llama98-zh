@@ -99,6 +99,10 @@ extern lz_i64 lz_debug_n_lmhead;
 /* sink+window's row-skip positive control, forward.c. Zero when no
    window is set; non-zero only if evicted rows were really skipped. */
 extern lz_i64 lz_debug_attn_skip;
+/* Whether the SSE2 epi dispatch fired. The identity gate cannot answer
+   that: its epi comparison is ref against sse2 and both produce the
+   same bytes, so it passes whether the kernel ran or not. */
+extern lz_i64 lz_debug_epi_sse2;
 /* The V projection int16 exit's positive control, forward.c. Elements
    the KV write took from vtmp_i16 rather than from the float row. */
 extern lz_i64 lz_debug_vproj_i16;
@@ -315,7 +319,7 @@ static void usage(void) {
     "                   SGLang) or across rounding regimes (SSE2, SSE,\n"
     "                   MMX, x87, ARMv5TE soft-float, gcc, Watcom). It is\n"
     "                   also the float baseline every tolerance in\n"
-    "                   CLAUDE.md is measured against.\n"
+    "                   the engine is measured against.\n"
     "                   There is no per-tier flag and no third setting:\n"
     "                   floating one tier at a time measured worse than\n"
     "                   BOTH ends on six of seven axes, while the two ends\n"
@@ -1086,7 +1090,7 @@ int main(int argc, char **argv) {
             /* Distinct reason strings, in first-seen order, so a cell
                that repeats one prints its number instead. 32 is well
                over the registry's handful; overflow falls back to
-               printing the text, which is the old behaviour. */
+               printing the text. */
             const char *whytab[32];
             char whyseen[32];
             int nwhy = 0;
@@ -2128,6 +2132,8 @@ int main(int argc, char **argv) {
                    st.nt_cap, lz_debug_n_chunks, lz_debug_n_lmhead);
             printf("[attn: sink %d window %d, %lld evicted rows skipped]\n",
                    st.attn_sink, st.attn_win, lz_debug_attn_skip);
+            printf("[epi: %lld calls on the SSE2 body]\n",
+                   lz_debug_epi_sse2);
             printf("\n[%d tokens, %.1f s, %.3f s/token]\n",
                    n_out, ms / 1000.0, ms / 1000.0 / (n_out > 0 ? n_out : 1));
             if (g.spec_k > 0) {
