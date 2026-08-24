@@ -55,12 +55,22 @@ check_one() {
     fi
 }
 
-check_one '^static float lz_i32f('       'lz_i32f'
-check_one '^#define LZ_WSUM_CHUNK'       'LZ_WSUM_CHUNK'
-check_one '^#define LZ_SLOT_NEXT'        'LZ_SLOT_NEXT'
-check_one '^static void gdn_tail_row('   'gdn_tail_row'
-check_one '^static int p2_shift_of('     'p2_shift_of'
-check_one '^static int f32_scale_pow2('  'f32_scale_pow2'
+# The optional attribute prefix is load-bearing. These were anchored at
+# `^static`, and when LZ_MAYBE_UNUSED went on in front of four of them
+# the anchor stopped matching - so the gate reported "zero definitions
+# anywhere" for four helpers that had not moved at all. A gate that
+# turns red with the message "it vanished" when what happened is "it
+# gained an attribute" is worse than one that says nothing: the message
+# points away from the cause.
+#
+# [A-Z_]* rather than the specific macro, so the next attribute does not
+# break it again.
+check_one '^\([A-Z_]* \)\?static float lz_i32f('       'lz_i32f'
+check_one '^#define LZ_WSUM_CHUNK'                     'LZ_WSUM_CHUNK'
+check_one '^#define LZ_SLOT_NEXT'                      'LZ_SLOT_NEXT'
+check_one '^\([A-Z_]* \)\?static void gdn_tail_row('   'gdn_tail_row'
+check_one '^\([A-Z_]* \)\?static int p2_shift_of('     'p2_shift_of'
+check_one '^\([A-Z_]* \)\?static int f32_scale_pow2('  'f32_scale_pow2'
 
 # ---- the same defect, in macros, found by scanning rather than by
 # ---- being reported ---------------------------------------------------
