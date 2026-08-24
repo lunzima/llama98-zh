@@ -500,6 +500,61 @@ static int ring_slot_next(int slot, int depth) {
     for ((T) = (T0), (SLOT) = kv_slot((S), (T0)); (T) <= (POS); \
          (T)++, (SLOT) = kv_slot_next((S), (SLOT)))
 
+/* One Q8 KV plane's weighted sum: dst = sum_t att[t] * dequant(v[t]).
+ *
+ * WRITTEN ONCE BECAUSE IT WAS WRITTEN TWICE. forward_attn had this body
+ * for the high plane and again, under LZ_KV_2PLANE, for the low one -
+ * the fixed fast path and the scalar walk both duplicated, differing
+ * only in which buffer they write and which plane they read. The second
+ * copy is compiled out of every shipping build, so it was a body nobody
+ * built and nobody ran, kept in step with this one by hand. Now the
+ * plane is an argument and the two callers reach the same code.
+ *
+ * noring IS SEPARATE FROM walk_t0 and the low plane is why. The fixed
+ * kernel cannot express win_t0 - it walks from 0 - so the caller guards
+ * it with LZ_ATTN_NORING. The low plane's scalar walk, though, starts at
+ * a literal 0 rather than at win_t0, so its guard and its start were
+ * already two different values in the original. Preserved rather than
+ * unified: they may well be the same thing, but the path that would
+ * prove it is not in any build that runs here.
+ *
+ * dead0/dead1 are parameters for the same reason the skip is spelled out
+ * instead of using LZ_ATTN_SKIP_DEAD - that macro reads them from the
+ * caller's scope and is #undef'd at the end of forward_attn, so it does
+ * not exist out here. Same behaviour, including the debug counter. */
+static void attn_wsum_plane(LZRunState *s, float *dst,
+                            const int8_t *vplane, const float *vs,
+                            int hd, int kvd, int kvh, int pos,
+                            int walk_t0, int noring, int dead0, int dead1) {
+    int t, rslot;
+#if (LZ_ATTN_FIXED & 2)
+    if ((lz_attn_mode() & 2) && s->wsum_cbuf && noring &&
+        hd > 0 && (hd % 32) == 0 && hd <= LZ_ATTN_MAX_HD) {
+        lz_attn_wsum_q8(dst, s->att, hd,
+                        vplane + (size_t)kvh * hd,
+                        vs + (size_t)(kvh * hd) / 32,
+                        kvd, pos, s->wsum_cbuf, s->wsum_cq,
+                        s->attn_sink, s->kv_ring);
+        return;
+    }
+#else
+    (void)noring;
+#endif /* LZ_ATTN_FIXED & 2 */
+    memset(dst, 0, (size_t)hd * sizeof(float));
+    LZ_KV_WALK(s, pos, t, rslot, walk_t0) {
+        const int8_t *vt;
+        const float *vts;
+        float a;
+        if (t >= dead0 && t < dead1) { lz_debug_attn_skip++; continue; }
+        vt  = vplane + (size_t)rslot * kvd + (size_t)kvh * hd;
+        vts = vs + (size_t)rslot * kvd / 32 + (size_t)(kvh * hd) / 32;
+        a   = s->att[t];
+        /* Convert, two multiplies and an add per element. */
+        LZ_FCX(LZ_FC_ATTN_WSUM, 2 * hd, hd, 0, hd, 0);
+        wsum_q8_row(dst, vt, vts, a, hd);
+    }
+}
+
 /* --kv q4: 4-bit KV rows, one scale per row per head. Mutually exclusive
    with the f32 arm; cli_main enforces that, and lz_state_alloc makes f32
    win if both are somehow set. */
@@ -2389,62 +2444,15 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                                     kvd, pos, s->wsum_cbuf, s->wsum_cq,
                                     s->attn_sink, s->kv_ring);
             } else
-            if ((lz_attn_mode() & 2) && s->wsum_cbuf && LZ_ATTN_NORING &&
-                hd > 0 && (hd % 32) == 0 && hd <= LZ_ATTN_MAX_HD) {
-                lz_attn_wsum_q8(out, s->att, hd,
-                                vc + (size_t)kvh * hd,
-                                vs + (size_t)(kvh * hd) / 32,
-                                kvd, pos, s->wsum_cbuf, s->wsum_cq,
-                                s->attn_sink, s->kv_ring);
-            } else
 #endif /* LZ_ATTN_FIXED & 2 */
-            {
-            memset(out, 0, (size_t)hd * sizeof(float));
-            LZ_KV_WALK(s, pos, t, rslot, win_t0) {
-                const int8_t *vt;
-                const float *vts;
-                float a;
-                LZ_ATTN_SKIP_DEAD(t)
-                vt  = vc + (size_t)rslot * kvd + (size_t)kvh * hd;
-                vts = vs + (size_t)rslot * kvd / 32 +
-                      (size_t)(kvh * hd) / 32;
-                a   = s->att[t];
-                /* Convert, two multiplies and an add per element. */
-                LZ_FCX(LZ_FC_ATTN_WSUM, 2 * hd, hd, 0, hd, 0);
-                wsum_q8_row(out, vt, vts, a, hd);
-            }
-            }   /* the scalar weighted sum */
+            attn_wsum_plane(s, out, vc, vs, hd, kvd, kvh, pos,
+                            win_t0, LZ_ATTN_NORING, dead0, dead1);
 #if LZ_KV_2PLANE
             /* Same argument as the scoring pass: the weighted sum is
                linear in v. */
             {
-#if (LZ_ATTN_FIXED & 2)
-                if ((lz_attn_mode() & 2) && s->wsum_cbuf && LZ_ATTN_NORING &&
-                    hd > 0 && (hd % 32) == 0 && hd <= LZ_ATTN_MAX_HD) {
-                    lz_attn_wsum_q8(s->wsum_lo, s->att, hd,
-                                    vc_lo + (size_t)kvh * hd,
-                                    vs + (size_t)(kvh * hd) / 32,
-                                    kvd, pos, s->wsum_cbuf, s->wsum_cq,
-                                    s->attn_sink, s->kv_ring);
-                } else
-#endif /* LZ_ATTN_FIXED & 2 */
-                {
-                memset(s->wsum_lo, 0, (size_t)hd * sizeof(float));
-                LZ_KV_WALK(s, pos, t, rslot, 0) {
-                    const int8_t *vt;
-                    const float *vts;
-                    float a;
-                    LZ_ATTN_SKIP_DEAD(t)
-                    vt  = vc_lo + (size_t)rslot * kvd + (size_t)kvh * hd;
-                    vts = vs + (size_t)rslot * kvd / 32 +
-                          (size_t)(kvh * hd) / 32;
-                    a   = s->att[t];
-                    /* Same shape as the wsum loop above: convert, two
-                       multiplies and an add per element. */
-                    LZ_FCX(LZ_FC_ATTN_WSUM, 2 * hd, hd, 0, hd, 0);
-                    wsum_q8_row(s->wsum_lo, vt, vts, a, hd);
-                }
-                }   /* the scalar weighted sum, low plane */
+                attn_wsum_plane(s, s->wsum_lo, vc_lo, vs, hd, kvd, kvh, pos,
+                                0, LZ_ATTN_NORING, dead0, dead1);
                 for (d = 0; d < hd; d++)
                     out[d] += s->wsum_lo[d] * (1.0f / LZ_GDN_LO_SCALE);
             }
