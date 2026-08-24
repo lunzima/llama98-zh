@@ -2918,6 +2918,12 @@ static void forward_kda(const LZModel *m, LZRunState *s,
        objects. */
     int bvec_int = 0, lat_int = 0, gate_int = 0;
     int bvec_may = 0, lat_may = 0;
+    /* Assigned far below, where s->wscr is known free. Declared here
+       because C89 wants the declaration ahead of the statements between,
+       and dt_bias_arr outlives the block that would otherwise have held
+       both. */
+    const float *a_log_arr;
+    const float *dt_bias_arr;
 #if LZ_BVEC_I16
     bvec_may = lz_sig_mode() && s->bvec_i16 &&
                lz_matmul_xq_i16_ok(&L->kda_b_proj, hdim, nt);
@@ -3281,8 +3287,8 @@ static void forward_kda(const LZModel *m, LZRunState *s,
        dequantization is hoisted out of the tk loop too. decay_base goes
        into s->wscr: A_log/dt_bias are F32 (lz_t_f32 returns t->f, no
        write to wscr), so wscr is free here, and it is sized >= nvk >= nv. */
-    const float *a_log_arr = lz_t_f32(&L->kda_A_log, s->wscr);
-    const float *dt_bias_arr = lz_t_f32(&L->kda_dt_bias, s->wscr);
+    a_log_arr   = lz_t_f32(&L->kda_A_log, s->wscr);
+    dt_bias_arr = lz_t_f32(&L->kda_dt_bias, s->wscr);
     {
         float *decay_base = s->wscr;
         for (h = 0; h < nv; h++) decay_base[h] = lz_exp(a_log_arr[h]);
