@@ -90,7 +90,16 @@ CFLAGS  ?= -O2 -std=c99 -Wall -Wextra -Isrc $(FP_STRICT) $(MMX_TU_DEFINE) $(SSE2
 # a native build runs only on the machine that compiled it. The engine
 # hot path is hand-written intrinsics anyway, so the portability cost is
 # negligible.
-X86_64_CFLAGS := -O3 -march=x86-64 -std=c99 -Wall -Wextra -Isrc $(FP_STRICT) $(MMX_TU_DEFINE) $(SSE2_TU_DEFINE) $(EXTRA_DEFS)
+#
+# -O2, NOT -O3. What -O3 adds over -O2 here is loop unrolling and
+# aggressive inlining applied to code that is already hand-written
+# intrinsics, and it buys that with size: the .text section is the thing
+# a target with an 8 KB I-cache has least of. Measured on this tree,
+# llama98.exe -O3 against -O2: 401,616 against 261,968 bytes of .text,
+# 53.3% larger, and 731,538 against 590,881 bytes of file. Anything that
+# wants -O3 can pass it - the flag is not forbidden, it is not the
+# default.
+X86_64_CFLAGS := -O2 -march=x86-64 -std=c99 -Wall -Wextra -Isrc $(FP_STRICT) $(MMX_TU_DEFINE) $(SSE2_TU_DEFINE) $(EXTRA_DEFS)
 
 HTTP_LIBS := $(if $(filter Windows_NT,$(OS)),-lwsock32,)
 
