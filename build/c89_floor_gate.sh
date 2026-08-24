@@ -70,7 +70,11 @@ command -v gcc >/dev/null 2>&1 || { echo "c89_floor_gate: SKIP - no gcc"; exit 2
 # the designated form made order irrelevant, and so let one code sit two
 # slots out of place in err.c for as long as it did.
 #
-BASELINE="forward.c:9"
+#   Empty. It was 16 in forward.c and is 0 - Visual C++ 4.0 turns each
+#   of these into an error rather than a warning, so they stopped being
+#   tolerable debt the day the compiler arrived. The control below is a
+#   planted probe now, for the reason its own comment gave in advance.
+BASELINE=""
 
 # ALL THREE DIRECTORIES. The front end and the shared front-end core
 # are shipped products on the same compilers, and scanning one gui file
@@ -130,9 +134,25 @@ done
 EXPECT=0
 for e in $BASELINE; do EXPECT=$((EXPECT + ${e##*:})); done
 if [ "$EXPECT" -eq 0 ]; then
-    echo "note: the baseline is empty - this control no longer proves the"
-    echo "      scan works. Plant a violation and check it reddens, or"
-    echo "      replace this with a direct probe of -pedantic."
+    # The baseline is empty, so there is no existing violation to prove
+    # the scan on. Plant one instead - the control the old branch said
+    # to write when this day came.
+    # BOTH constructs, not just the mixed declaration. The scan counts
+    # two patterns and a probe for one of them keeps passing while the
+    # other goes undetected - and the designated initialiser is the one
+    # that mattered here, 452 of this tree's violations against 23.
+    PROBE=/tmp/c89ctl.$$.c
+    printf 'void f(void) { int a = 1; a++; { int b = a; (void)b; } }\nvoid g(void) { int a = 1; a++; int b = a; (void)b; }\nstruct p { int x, y; };\nstruct p q = { .y = 2 };\n' > "$PROBE"
+    OUT=$(gcc -std=c89 -pedantic -fsyntax-only "$PROBE" 2>&1)
+    rm -f "$PROBE"
+    NM=$(printf '%s\n' "$OUT" | grep -c "mixed declarations")
+    ND=$(printf '%s\n' "$OUT" | grep -c "forbids specifying subobject")
+    if [ "${NM:-0}" -eq 0 ] || [ "${ND:-0}" -eq 0 ]; then
+        echo "FAIL: the planted probe reports mixed=$NM designated=$ND;"
+        echo "      a zero in either means the zero above is the scan"
+        echo "      being blind rather than the tree being clean"
+        FAIL=1
+    fi
 elif [ "$TOTAL" -eq 0 ]; then
     echo "FAIL: total is 0 against a baseline of $EXPECT - the compiler is"
     echo "      not reporting mixed declarations and this gate is blind"

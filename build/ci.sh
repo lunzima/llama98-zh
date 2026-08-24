@@ -88,6 +88,18 @@
 #      compare one operator's implementations against each other, which
 #      is the only way to reach the arms no local checkpoint exercises
 #
+# BEFORE READING A RED: this tree is shared. A run started while another
+# session has a file half-edited reports that session's state as this
+# run's failure, and it does not report it once - one source file that
+# does not compile takes every stage that builds the engine with it. A
+# full run has been seen at 45 PASS / 53 FAIL where all 53 traced to two
+# undeclared identifiers in src/forward.c, mid-edit elsewhere.
+#
+# So: check `git status --short src/` first. If a file is modified and
+# not yours, the red is a snapshot, not a result - re-run when it
+# settles. The stage list below cannot tell those apart, and neither can
+# the exit code.
+#
 # Judging discipline (this repo has paid for getting this wrong before):
 #   - Never grep bare 'error' - "0 errors" contains the substring.
 #     Watcom's own per-file line ("N lines, included M, W warnings,
@@ -107,6 +119,22 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 ROOT=$(pwd)
+
+# The shared-tree warning above, made visible at the top of the run
+# rather than left for whoever reads the summary. Printed, not enforced:
+# a dirty tree is the normal way to test a change, and refusing would
+# make this unusable. What it prevents is reading someone else's
+# half-finished edit as this run's result.
+DIRTY=$(git status --short -- src gui common 2>/dev/null | grep '^ M' | wc -l)
+if [ "${DIRTY:-0}" -gt 0 ]; then
+    echo "NOTE: $DIRTY modified source file(s) in the working tree:"
+    git status --short -- src gui common 2>/dev/null | grep '^ M' \
+        | sed 's/^/        /'
+    echo "      A red below may be one of these mid-edit rather than a"
+    echo "      defect. One file that does not compile fails every stage"
+    echo "      that builds the engine."
+    echo
+fi
 
 PASS=0
 FAIL=0
