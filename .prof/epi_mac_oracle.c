@@ -34,6 +34,30 @@
  * this is caught the first time it is run rather than in a model months
  * later. If a kernel passes the random sweep and fails the edge block,
  * this is the first thing to check.
+ *
+ * The carry is avoidable. It only exists because the textbook form
+ * folds the borrow into ah, and nothing forces that: (a >> 16) is
+ * already int16-shaped for any int32, and the borrow can be carried as
+ * its own term instead.
+ *
+ *     ah  = a >> 16                 int16, no carry, never overflows
+ *     als = (short)(a & 0xFFFF)     pmaddwd's signed reading of the low
+ *     b   = (a >> 15) & 1           1 exactly when als read low by 2^16
+ *
+ *     a * m = ((ah * m) << 16) + (als * m) + ((b * m) << 16)
+ *
+ * Three accumulators, summed into 64 bits at the very end:
+ *
+ *     total = ((S_ah + S_b) << 16) + S_als
+ *
+ * S_ah and S_b are only added to each other in 64-bit, so the 32768
+ * that broke the folded form never gets formed in a 16-bit lane. All
+ * three products are int16 x int16, which is exactly pmaddwd's shape,
+ * so no pmuludq and no sign correction are needed at all.
+ *
+ * Watch the accumulator width, not just the lane width: each product is
+ * int32 and n runs to the group size, so the running sums need widening
+ * to 64 bits before they can overflow, not after.
  */
 
 #include <stdio.h>
