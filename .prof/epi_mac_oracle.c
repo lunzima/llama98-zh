@@ -126,6 +126,71 @@ static lz_i64 mac_carry_free(const int *a, const short *m, int n) {
     return ((s_ah + s_b) << 16) + s_als;
 }
 
+/* The SSE2 body itself, written here rather than in ops_sse2.c so it is
+   testable against the three scalar derivations before it moves into a
+   shipping file.
+
+   Every operand is built with the value in the low 16 bits and zero in
+   the high 16, which is what makes _mm_madd_epi16 return v*m per lane:
+   it reads both halves as signed int16 and adds them, so a zero high
+   half contributes nothing and the low half carries the correct
+   two's-complement pattern even for negatives.
+
+   Products widen to 64 bits every iteration rather than accumulating in
+   int32. |ah * m| reaches 2^30, so two of them can overflow an int32
+   lane - a periodic flush would need a period of one, which is what
+   this already is. */
+#include <emmintrin.h>
+static lz_i64 mac_sse2(const int *a, const short *m, int n) {
+    const __m128i lo16 = _mm_set1_epi32(0x0000FFFF);
+    const __m128i one  = _mm_set1_epi32(1);
+    const __m128i zero = _mm_setzero_si128();
+    __m128i acc_hi = zero, acc_lo = zero;   /* 2 x int64 each */
+    lz_i64 s_ah, s_als, s_b, tail_ah = 0, tail_als = 0, tail_b = 0;
+    __m128i acc_b = zero;
+    int g = 0;
+
+    for (; g + 3 < n; g += 4) {
+        __m128i av  = _mm_loadu_si128((const __m128i *)(a + g));
+        __m128i mv  = _mm_loadl_epi64((const __m128i *)(m + g));
+        __m128i m32 = _mm_and_si128(_mm_unpacklo_epi16(mv, zero), lo16);
+        __m128i ah  = _mm_and_si128(_mm_srai_epi32(av, 16), lo16);
+        __m128i als = _mm_and_si128(av, lo16);
+        __m128i bb  = _mm_and_si128(_mm_srli_epi32(av, 15), one);
+        __m128i p_ah  = _mm_madd_epi16(ah,  m32);
+        __m128i p_als = _mm_madd_epi16(als, m32);
+        __m128i p_b   = _mm_madd_epi16(bb,  m32);
+        /* Widen each int32 lane to int64 by sign-extension, then add. */
+        acc_hi = _mm_add_epi64(acc_hi,
+                 _mm_unpacklo_epi32(p_ah, _mm_srai_epi32(p_ah, 31)));
+        acc_hi = _mm_add_epi64(acc_hi,
+                 _mm_unpackhi_epi32(p_ah, _mm_srai_epi32(p_ah, 31)));
+        acc_lo = _mm_add_epi64(acc_lo,
+                 _mm_unpacklo_epi32(p_als, _mm_srai_epi32(p_als, 31)));
+        acc_lo = _mm_add_epi64(acc_lo,
+                 _mm_unpackhi_epi32(p_als, _mm_srai_epi32(p_als, 31)));
+        acc_b  = _mm_add_epi64(acc_b,
+                 _mm_unpacklo_epi32(p_b, _mm_srai_epi32(p_b, 31)));
+        acc_b  = _mm_add_epi64(acc_b,
+                 _mm_unpackhi_epi32(p_b, _mm_srai_epi32(p_b, 31)));
+    }
+    {
+        lz_i64 t[2];
+        _mm_storeu_si128((__m128i *)t, acc_hi);  s_ah  = t[0] + t[1];
+        _mm_storeu_si128((__m128i *)t, acc_lo);  s_als = t[0] + t[1];
+        _mm_storeu_si128((__m128i *)t, acc_b);   s_b   = t[0] + t[1];
+    }
+    for (; g < n; g++) {   /* scalar tail, same three terms */
+        int ah  = a[g] >> 16;
+        int als = (short)((unsigned)a[g] & 0xFFFFu);
+        int b   = (a[g] >> 15) & 1;
+        tail_ah  += (lz_i64)(ah  * m[g]);
+        tail_als += (lz_i64)(als * m[g]);
+        tail_b   += (lz_i64)(b   * m[g]);
+    }
+    return (((s_ah + tail_ah) + (s_b + tail_b)) << 16) + (s_als + tail_als);
+}
+
 static unsigned rng_state = SEED;
 static unsigned rng_next(void) {
     /* xorshift32 - the values only have to be reproducible, not good. */
@@ -151,14 +216,22 @@ int main(void) {
         int i, j;
         for (i = 0; i < (int)(sizeof ae / sizeof ae[0]); i++) {
             for (j = 0; j < (int)(sizeof me / sizeof me[0]); j++) {
-                lz_i64 d, s;
-                a[0] = ae[i]; m[0] = me[j];
-                d = mac_direct(0, a, m, 1);
-                s = mac_split(a, m, 1);
+                lz_i64 d, s, c, v;
+                int k;
+                /* Filled to 8, not 1: at n=1 the SSE2 body runs only its
+                   scalar tail, so a vector-path bug on exactly these
+                   values would go unseen - which is what the first
+                   version of this block did. */
+                for (k = 0; k < 8; k++) { a[k] = ae[i]; m[k] = me[j]; }
+                d = mac_direct(0, a, m, 8);
+                s = mac_split(a, m, 8);
+                c = mac_carry_free(a, m, 8);
+                v = mac_sse2(a, m, 8);
                 checked++;
-                if (d != s) {
-                    printf("MISMATCH a=%d m=%d direct=%ld split=%ld\n",
-                           ae[i], (int)me[j], (long)d, (long)s);
+                if (d != s || d != c || d != v) {
+                    printf("MISMATCH a=%d m=%d direct=%ld split=%ld "
+                           "cfree=%ld sse2=%ld\n", ae[i], (int)me[j],
+                           (long)d, (long)s, (long)c, (long)v);
                     bad++;
                 }
             }
@@ -167,7 +240,7 @@ int main(void) {
 
     for (trial = 0; trial < 20000; trial++) {
         int n = 1 + (int)(rng_next() % 512u);
-        lz_i64 d, s, c;
+        lz_i64 d, s, c, v;
         for (g = 0; g < n; g++) {
             a[g] = (int)rng_next();
             m[g] = (short)(rng_next() & 0xFFFFu);
@@ -175,10 +248,11 @@ int main(void) {
         d = mac_direct(0, a, m, n);
         s = mac_split(a, m, n);
         c = mac_carry_free(a, m, n);
+        v = mac_sse2(a, m, n);
         checked++;
-        if (d != s || d != c) {
-            printf("MISMATCH trial=%d n=%d direct=%ld split=%ld cfree=%ld\n",
-                   trial, n, (long)d, (long)s, (long)c);
+        if (d != s || d != c || d != v) {
+            printf("MISMATCH trial=%d n=%d direct=%ld split=%ld cfree=%ld sse2=%ld\n",
+                   trial, n, (long)d, (long)s, (long)c, (long)v);
             if (++bad > 8) break;
         }
     }
