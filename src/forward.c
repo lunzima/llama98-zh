@@ -374,7 +374,8 @@ static const double LZ_US_SCALE = 1000.0;
    half and an assignment half is the fix, and it has to land in the
    same edit as the six declarations it needs at the call sites: the
    macro alone leaves every _t* undeclared. */
-#define LZ_PROF_BEG(v) double v = lz_prof_enable ? lz_time_ms() : 0.0
+#define LZ_PROF_DECL(v) double v = 0.0
+#define LZ_PROF_BEG(v) v = lz_prof_enable ? lz_time_ms() : 0.0
 #define LZ_PROF_END(v, slot) do { if (lz_prof_enable) \
     lz_prof_us[slot] += (lz_time_ms() - (v)) * LZ_US_SCALE; } while (0)
 
@@ -2544,6 +2545,7 @@ static void forward_ssm(const LZModel *m, LZRunState *s,
         float dt_bias_h = lz_t_f32(&L->dt_bias, s->wscr)[h];
 
         for (tk = 0; tk < nt; tk++) {
+            LZ_PROF_DECL(_tr);
             int slot_in  = advance_ring ? (ring_base + tk) % ring_depth : ring_base;
             int slot_out = advance_ring ? (ring_base + tk + 1) % ring_depth : ring_base;
             const int8_t *sq_in  = s->ssm_state_q8 + (size_t)slot_in  * q8_slot_stride + h_off_q8;
@@ -3414,6 +3416,7 @@ static void forward_kda(const LZModel *m, LZRunState *s,
         size_t h_off_s  = h_off_q8 / 32;
 
         for (tk = 0; tk < nt; tk++) {
+            LZ_PROF_DECL(_tr);
             int slot_in  = advance_ring ? (ring_base + tk) % ring_depth : ring_base;
             int slot_out = advance_ring ? (ring_base + tk + 1) % ring_depth : ring_base;
             const int8_t *sq_in  = s->ssm_state_q8 + (size_t)slot_in  * q8_slot_stride + h_off_q8;
@@ -4017,6 +4020,7 @@ static void dense_ffn_step(const LZModel *m, LZRunState *s,
     int gsd = lz_act_gs(&L->down_proj, idim);
     int nsd = (gsd > 0) ? idim / gsd : 0;
     int i, tk;
+    LZ_PROF_DECL(_ta);
     (void)layer;   /* only used inside LZ_TAP, which is a no-op in a normal build */
 
     if (c->use_subn) {
@@ -4304,6 +4308,7 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
     const LZModelConfig *c = &m->config;
     int dim = c->hidden_size;
     int l, i, tk;
+    LZ_PROF_DECL(_th);
     int ring_base;               /* see its own comment below, before the layer loop */
     unsigned fpu;
 
@@ -4357,6 +4362,8 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
 
     for (l = 0; l < c->n_layers; l++) {
         const LZLayer *L = &m->layers[l];
+        LZ_PROF_DECL(_tp);
+        LZ_PROF_DECL(_tf);
 
         /* docs/x87-gcc-reg-stack-leak.md: this is the checkpoint that
            first showed the x87 stack going dirty and staying dirty
