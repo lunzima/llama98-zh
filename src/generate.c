@@ -389,7 +389,7 @@ int lz_spec_accept_temp(const float *p, const float *q, int x, int vocab,
                    from s->mtp_pos as of the LAST accepted count. The
                    ring does not reach this either.
 
-   THE RING'S OWN CONTRACT: lz_forward_verify's k_eff+1-token batch
+   The ring's contract. lz_forward_verify's k_eff+1-token batch
    advances s->ssm_slot INTERNALLY, one slot per token forwarded
    (forward_chunk's own ring_base comment) - by the time it returns,
    s->ssm_slot already equals (base_slot + k_eff + 1) % ring_depth,
@@ -409,7 +409,7 @@ int lz_spec_accept_temp(const float *p, const float *q, int x, int vocab,
    s->ssm_slot at the same point before this function's own verify call
    ever runs, with nothing in between to change it).
 
-   THE TRAP THE ROLLBACK DESIGN EXISTS TO AVOID: if the accept/reject
+   The failure the rollback design guards against: if the accept/reject
    path is never actually exercised by a test, a bug in the restore
    branch (starting with "forgot to restore conv_state") could pass
    every gate silently. LZGenOpts.spec_debug_break_rollback exists for
@@ -576,7 +576,7 @@ static int lz_look_is_eos(const LZGenOpts *o, int tok) {
    back to nothing - it aborts, because a half-restored recurrent state
    is not something to keep generating on.
 
-   *** WHY A CHECKPOINT AND NOT THE ROLLBACK RING ***
+   Why a checkpoint here instead of the rollback ring.
    The ring (forward.h s->ssm_slot) makes a speculative round's rollback
    free, but it cannot serve this function: only lz_forward_verify
    advances slots, while the single-token path this lookahead is built
@@ -1349,7 +1349,7 @@ static int gen_emit_token(int next, int sampled,
  * below. Two copies of this loop drifted apart the moment the second
  * knob (cancellation) exists in only one of them.
  *
- * SLICES ARE A MULTIPLE OF s->nt_cap. lz_forward_batch chunks by that
+ * Slices are a multiple of s->nt_cap. lz_forward_batch chunks by that
  * width internally, so a slice that is not a multiple would make
  * ceil(n_i/T) sum to more than ceil(n/T) and change lz_debug_n_chunks -
  * the very counter that exists to prove the batching did what it said.
@@ -1817,8 +1817,8 @@ int lz_generate_call(const LZModel *m, LZTokenizer *t, LZRunState *s,
            accumulating segments sees a range twice as long, which is
            what C actually costs.
 
-           SKIP STILL OUTRANKS POS_ONLY. With both knobs set the old
-           chain took the skip branch and never jumped; the jump below
+           Skip still outranks pos_only. With both knobs set the chain
+           takes the skip branch and never jumps; the jump below
            carries that precedence explicitly, because it is the one
            thing an if/else-if chain expressed for free and a shared
            call does not. */
