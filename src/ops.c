@@ -1501,8 +1501,12 @@ lz_i64 lz_epi_mac_grp(const int32_t *a, const int16_t *xq, int n, int32_t w);
     parm caller [esi] [edi] [ecx]       \
     value [edx eax]                     \
     modify [eax ebx ecx edx esi edi 8087];
-lz_i64 lz_epi_mac_i16(const int32_t *a, const int16_t *m, int n);
-#pragma aux lz_epi_mac_i16 =            \
+/* One-operand imul IS a signed 32x32 -> 64 with the result in edx:eax,
+   so this needs none of the 16-bit splitting the SSE2 twin does. Eight
+   instructions an element, which is why that twin's win is in the
+   branch count and not the instruction count. */
+lz_i64 lz_epi_mac_i16_asm(const int32_t *a, const int16_t *m, int n);
+#pragma aux lz_epi_mac_i16_asm =        \
     "push ebp"                          \
     "xor ebx,ebx"                       \
     "xor ebp,ebp"                       \
@@ -1522,6 +1526,29 @@ lz_i64 lz_epi_mac_i16(const int32_t *a, const int16_t *m, int n);
     parm [esi] [edi] [ecx]              \
     value [edx eax]                     \
     modify [eax ebx ecx edx esi edi 8087];
+
+/* The tier dispatch, which the pragma above cannot carry: a #pragma aux
+   body expands at the call site and has no C in it. Without this the
+   Watcom SSE2 kernel is a registered cell nobody reaches - the matrix
+   would report it present, because the symbol is, and no call would
+   ever arrive.
+
+   n <= 0 is answered here rather than in either body. The C loop in the
+   gcc branch below returns 0 for it by not iterating; `dec ecx / jnz`
+   with ecx zero goes round 2^32 times. */
+static lz_i64 lz_epi_mac_i16(const int32_t *a, const int16_t *m, int n) {
+    if (n <= 0) return 0;
+#if defined(LZ_EPI_SSE2_EXTERN)
+    /* Same lazy guard the other dispatch sites carry: the GUI never
+       calls lz_kernel_select, so g_kernel reaches its value here. */
+    if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
+    if (g_kernel == LZ_KERNEL_SSE2) {
+        lz_debug_epi_kern++;
+        return lz_epi_mac_i16_sse2(a, m, n);
+    }
+#endif /* LZ_EPI_SSE2_EXTERN */
+    return lz_epi_mac_i16_asm(a, m, n);
+}
 #else
 /* See the Watcom twin above for the register argument this shape
    satisfies; here it is just the loop. */
