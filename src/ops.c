@@ -1433,7 +1433,7 @@ void lz_epi_prep_zero(LZTensor *w, int in_dim) {
    241k copies a token and a global buffer that existed only to hold
    them.
 
-   IDENTICAL VALUES, not merely close: the widen was exact and the
+   Identical values, not merely close: the widen was exact and the
    accumulator is int64 either way, so this computes the same sum the
    copy-then-mac did. Verified byte for byte on both fixtures.
 
@@ -2493,7 +2493,7 @@ float epi_q41(const int32_t *accb, const float *xsb, const float *xgb,
    |s_dot| <= 2^63 by LZ_EPI_MAX_NG's derivation, hence |s_dot>>8| <=
    2^55, while |s_zero| <= 64 * 2^31 * 2^15 = 2^52.
 
-   WHICH SIDE GETS SHIFTED is not a free choice: shifting up would have
+   Which side gets shifted is not a free choice: shifting up would have
    to fit inside the 3 bits of int64 headroom |s_dot| already leaves, so
    the join always aligns DOWN, to the coarser of the two exponents.
    Measured on kmr20, e_zero is coarser on 100% of calls, by 0 to 6 bits
@@ -3098,7 +3098,7 @@ lz_i64 lz_debug_convo_i16;
 #if defined(LZ_ARM_PRIM_ASM)
 /* Is `v` an exact positive power of two, and if so at what exponent?
  *
- * ASKED, NOT ASSUMED. sig_k1/sig_oscale2 are lz_sig_q15_fold's outputs,
+ * Asked, not assumed. sig_k1/sig_oscale2 are lz_sig_q15_fold's outputs,
  * which are a pow2f scaled by 2^4 and by 2^-15, so both ARE powers of
  * two today - but that is a fact about a caller in another file, and the
  * exponent-field arithmetic it licenses is silently wrong for anything
@@ -3482,7 +3482,7 @@ void lz_moe_route(const float *logits, const short *li, int li_e,
        worth more here than saving a few
        cycles in a per-layer, n_experts-long loop.
 
-       NO FLUSH-TO-ZERO HERE, and that is a measurement rather than an
+       No flush-to-zero here; that is a measurement rather than an
        omission. Dividing by a small tau drives l/tau deep negative,
        which is exactly the operand class rule two clause (c) forbids.
        No floor is needed: lz_exp already returns a hard
@@ -3618,7 +3618,7 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
    (ops_kernel_dot_sse2.h), dot128_t2_mmx (ops_kernel_dot_mmx.h) and
    lz_dot128_t2_asm (ops_mmx.c, the Watcom #pragma aux).
 
-   THE ARGUMENT THAT KEPT THIS AT 0 EXAMINED THE UNPACK. It said q6_1
+   The argument that kept this at 0 examined the unpack. It said q6_1
    hoists two mask constants across four sub-blocks while T2's unpack has
    only a zero register, which trades pxor for movq one instruction for
    one. Both halves are true, and the group form does not pay there. It
@@ -3717,7 +3717,7 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
    in src/ops_t2_arm.c). The eleven remaining empty cells are the sseI
    and sseA columns and t2/g128, all IMPOSSIBLE and all audited above.
 
-   A NEW FORMAT ARRIVES WITH TWO EMPTY ARM CELLS, and filling them is
+   A new format arrives with two empty ARM cells, and filling them is
    two edits, not one: the kernel, and the line in lz_matmul_xq_nt that
    lets its dtype past. That function carries no interception - the list
    of dtypes needing one is empty - so a new format reaches its impl
@@ -3842,7 +3842,7 @@ static const char *const km_col[LZ_KM_NCOL] = {
 };
 
 /* Printed, so one line each; the audit above is the long form. */
-/* THE STANDARD AN EMPTY ISA CELL HAS TO MEET, because two weaker ones
+/* The standard an empty ISA cell has to meet, because two weaker ones
    were used here before it and both let a writable kernel go unwritten:
    the tier must be unable to express ANY PART of the work. Partial
    relief obliges a kernel - a loop that goes half as fast in SIMD and
