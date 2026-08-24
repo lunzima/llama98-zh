@@ -7,7 +7,7 @@
 # every configuration compiles, and the text simply stops meaning what
 # its indentation says.
 #
-# THE BASELINE IS THREE PAIRS, all in forward.c, all the same shape:
+# THE BASELINE IS EMPTY. It was three pairs, all in forward.c, all
 #
 #     #if (LZ_ATTN_FIXED & 2)
 #     if (...) { kernel } else {          <- opens here
@@ -17,21 +17,24 @@
 #     }                                   <- closes in a DIFFERENT #if
 #     #endif
 #
-# forward.c:2324/2362 and 2369/2395 are the attention weighted sum, high
-# plane and low; 3937/3979 is the MoE SwiGLU int16 exit. The two scoring
-# sites a few lines above take the other shape - a dangling `else`
-# before #endif, every brace balanced - which is why they are not here
-# and why the fix for these three is known: wrap the fallback in braces
-# so the `else` is the only token that crosses.
+# two in the attention weighted sum, high plane and low, and one at the
+# MoE SwiGLU int16 exit. All three now take the shape the two scoring
+# sites beside them already had: the `else` is the last token of the
+# guarded arm and the fallback is an unconditional block, so every brace
+# opens and closes in one region and only the `else` crosses. A dangling
+# `else` before #endif is not reported - see the scanner's header.
 #
-# They are baselined rather than fixed because the fix moves code inside
-# forward_attn, and a reassociated float sum is a different number: it
-# needs the fixed-tier cross-toolchain comparison run against it, not a
-# reviewer's confidence. Recorded so the count cannot grow while that
-# waits.
+# The change is free, which was measured rather than argued: forward.c
+# compiles to a BYTE-IDENTICAL object before and after under all of
+# default, LZ_ATTN_FIXED 0/1/2, LZ_KV_2PLANE=1, LZ_SWIGLU_I16 0/1 and
+# 2PLANE+ATTN_FIXED=0. That mattered because a reassociated float sum is
+# a different number, and adding a block around a statement is exactly
+# the kind of edit that can spill an x87 register. The control for the
+# identity is that those same switches give each other DIFFERENT
+# objects, so the regions are live and the identity is not dead code.
 #
 # Exit codes:
-#   0  PASS - no file exceeds its baseline
+#   0  PASS - no straddle
 #   1  FAIL - a new straddle, or the scanner stopped detecting one
 set -u
 cd "$(dirname "$0")/.."
@@ -39,9 +42,9 @@ cd "$(dirname "$0")/.."
 SCAN=build/ppbrace_census.awk
 SRC=$(ls src/*.c src/*.h gui/*.c gui/*.h common/*.c common/*.h 2>/dev/null)
 
-# file:count, counting REPORT LINES - a pair is two, one per end, and
-# both have to be named or a half-fix reads as progress.
-BASELINE="forward.c:6"
+# file:count, counting REPORT LINES - a pair is two, one per end, so a
+# half-fix cannot read as progress.
+BASELINE=""
 
 FAIL=0
 OUT=$(awk -f "$SCAN" $SRC 2>&1)
@@ -100,8 +103,8 @@ fi
 
 if [ "$FAIL" -eq 0 ]; then
     N=$(printf '%s\n' "$OUT" | grep -c "SPLIT")
-    echo "ppbrace_gate: PASS ($N straddle(s), all baselined; mutation"
-    echo "  pair=$MP stmt=$MS, exempted idioms silent)"
+    echo "ppbrace_gate: PASS ($N straddle(s); planted mutation pair=$MP"
+    echo "  stmt=$MS, exempted idioms silent)"
     exit 0
 fi
 echo "ppbrace_gate: FAIL"

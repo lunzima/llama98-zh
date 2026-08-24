@@ -2303,8 +2303,9 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                                 vs + (size_t)(kvh * hd) / 32,
                                 kvd, pos, s->wsum_cbuf, s->wsum_cq,
                                 s->attn_sink, s->kv_ring);
-            } else {
+            } else
 #endif /* LZ_ATTN_FIXED & 2 */
+            {
             memset(out, 0, (size_t)hd * sizeof(float));
             for (t = win_t0, rslot = kv_slot(s, win_t0); t <= pos;
                  t++, rslot = kv_slot_next(s, rslot)) {
@@ -2320,9 +2321,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                 LZ_FCX(LZ_FC_ATTN_WSUM, 2 * hd, hd, 0, hd, 0);
                 wsum_q8_row(out, vt, vts, a, hd);
             }
-#if (LZ_ATTN_FIXED & 2)
-            }
-#endif /* LZ_ATTN_FIXED & 2 */
+            }   /* the scalar weighted sum */
 #if LZ_KV_2PLANE
             /* Same argument as the scoring pass: the weighted sum is
                linear in v. */
@@ -2335,8 +2334,9 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                                     vs + (size_t)(kvh * hd) / 32,
                                     kvd, pos, s->wsum_cbuf, s->wsum_cq,
                                     s->attn_sink, s->kv_ring);
-                } else {
+                } else
 #endif /* LZ_ATTN_FIXED & 2 */
+                {
                 memset(s->wsum_lo, 0, (size_t)hd * sizeof(float));
                 for (t = 0, rslot = kv_slot(s, 0); t <= pos;
                      t++, rslot = kv_slot_next(s, rslot)) {
@@ -2353,9 +2353,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                     LZ_FCX(LZ_FC_ATTN_WSUM, 2 * hd, hd, 0, hd, 0);
                     wsum_q8_row(s->wsum_lo, vt, vts, a, hd);
                 }
-#if (LZ_ATTN_FIXED & 2)
-                }
-#endif /* LZ_ATTN_FIXED & 2 */
+                }   /* the scalar weighted sum, low plane */
                 for (d = 0; d < hd; d++)
                     out[d] += s->wsum_lo[d] * (1.0f / LZ_GDN_LO_SCALE);
             }
@@ -3880,8 +3878,9 @@ static void forward_moe(const LZModel *m, LZRunState *s,
                                    pow2f(-LZ_SWIGLU_ES_O), s->xq, s->xqs);
                 lz_matmul_xq(s->moe_h2, NULL, s->xq, s->xqs,
                              &L->moe_expert_w2[ei], inter, latent);
-            } else {
+            } else
 #endif /* LZ_SWIGLU_I16 */
+            {
             lz_matmul_xq(s->moe_h1, lat_x, s->moe_lat_q, s->moe_lat_qs,
                         &L->moe_expert_w1[ei], latent, inter);
             lz_matmul_xq(s->moe_h3, lat_x, s->moe_lat_q, s->moe_lat_qs,
@@ -3890,9 +3889,7 @@ static void forward_moe(const LZModel *m, LZRunState *s,
                 s->moe_h1[vv] = lz_silu(s->moe_h1[vv]) * s->moe_h3[vv];
             lz_matmul_w(s->moe_h2, s->moe_h1, &L->moe_expert_w2[ei],
                        inter, latent, s->xq, s->xqs);
-#if LZ_SWIGLU_I16
-            }
-#endif /* LZ_SWIGLU_I16 */
+            }   /* the float SwiGLU */
             for (vv = 0; vv < latent; vv++)
                 lat_y[vv] += ww * s->moe_h2[vv];
         }
