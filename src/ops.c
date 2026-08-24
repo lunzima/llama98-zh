@@ -3592,16 +3592,23 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
 #define LZ_G128_Q61 0
 #define LZ_G128_Q16 0
 #endif /* __WATCOMC__ */
-/* T2 on both compilers, and this one IS "nothing to offer". Derived by
-   comparing against q6_1, which unpacks a 2-bit plane the same way and
-   does have one: q6_1's group kernel hoists two mask constants (0x0F and
-   0x03) plus a zero register across its four sub-blocks. T2's unpack is
-   a zero register and three immediate shifts, and hoisting the zero
-   turns `pxor mm2,mm2` into `movq mm2,mm7`, one instruction for one.
-   Each sub-block carries its own 2-bit plane, its own accumulator and
-   its own fold, so a T2 group kernel would emit the same instruction
-   sequence as four separate calls. */
+/* T2's group form exists on the gcc tiers: dot128_t2_sse2
+   (ops_kernel_dot_sse2.h) and dot128_t2_mmx (ops_kernel_dot_mmx.h).
+   The Watcom #pragma aux twins are not written, so this follows the
+   same knob the other four do on gcc and stays 0 there.
+
+   THE ARGUMENT THAT KEPT THIS AT 0 EXAMINED THE UNPACK. It said q6_1
+   hoists two mask constants across four sub-blocks while T2's unpack has
+   only a zero register, which trades pxor for movq one instruction for
+   one. Both halves are true, and the group form does not pay there. It
+   pays on the HORIZONTAL FOLD: per-32 every sub-block reduces its own
+   lanes and extracts, and folding four together costs about half that
+   and leaves the results in one register to store whole. */
+#if defined(__WATCOMC__)
 #define LZ_G128_T2  0
+#else
+#define LZ_G128_T2  LZ_G128_GCC
+#endif /* __WATCOMC__ */
 
 /* ---- the reason registry ---------------------------------------------
 
@@ -3853,9 +3860,6 @@ static const char km_why_sse1[] =
     "additions (pmaxsw/pshufw/psadbw) are real but are not a MAC. gcc "
     "-O3 at -march=pentium3 emits zero packed ARITHMETIC for every unit "
     "probed, these five formats included (build/o3_probe.sh)";
-static const char km_why_t2g128[] =
-    "nothing to hoist across the four sub-blocks - see LZ_G128_T2 in "
-    "src/ops.c";
 /* The operator units' x86 and group columns. docs/arm-asm-audit.md is
    an ARM-only audit, so it cannot answer for an x86 tier here and this
    says so rather than guessing 'impossible'. */
@@ -4093,7 +4097,7 @@ static const LZKmReg km_reg[LZ_KM_NUNIT * LZ_KM_NCOL] = {
 /* q4_1 */ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128),
 /* q6_1 */ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128),
 /* q16_0*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128),
-/* t2   */ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_N(km_why_t2g128),
+/* t2   */ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_GCC),
 /* operator units (LZ_KM_OP): registry only, no grid line. ref is the
    shared C body, which is also what --kernel arm-c runs - so armC is
    present on ARM for the same reason ref is present everywhere. */
