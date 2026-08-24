@@ -3809,13 +3809,23 @@ static const char km_why_t2g128[] =
    neither MMX, SSE1 nor SSE2 has a gather - VPGATHERDD is AVX2. Four
    lanes would have to be scattered back to scalar loads, which is the
    scalar code with extra shuffling in front of it. */
+/* THE ENUMERATION IN THIS REASON WAS WRONG ONCE, and the correction is
+   why i32f no longer carries it. It listed the quantize group, the norm
+   element loop and the matmul rows as the only loops that could batch a
+   scalar leaf, and concluded that none of them would because each
+   carries its own kernel. It missed a fourth: lz_attn_wsum_q8's chunk
+   fold, which hands over thirty-two at a time and sits inside a SIMD
+   kernel's own epilogue, after the emms. i32f has four x86 cells now.
+
+   What survives is the part that was never about batching. expfx and
+   sigq index a table per element, and a per-element table index needs a
+   gather - AVX2, which is off the target family entirely. That holds no
+   matter who calls them. */
 static const char km_why_op_x86[] =
-    "impossible as a VECTOR cell: a one-value scalar leaf called from "
-    "inside somebody else's loop, and no caller hands it four at a time "
-    "- the loops that could are the quantize group, the norm element "
-    "loop and the matmul rows, which carry their own kernels. The two "
-    "table leaves (expfx, sigq) are blocked twice over: a per-element "
-    "table index needs a gather, and that is AVX2";
+    "impossible as a VECTOR cell: a per-element TABLE INDEX, which needs "
+    "a gather, and that is AVX2 - off this target family. Not a batching "
+    "question: lz_attn_wsum_q8's chunk fold does hand a scalar leaf "
+    "thirty-two values at a time, which is what i32f's cells are";
 static const char km_why_op_g128[] =
     "no 128-element group form exists - a scalar leaf has no group to "
     "hoist across";
@@ -3899,6 +3909,14 @@ static const char km_why_fwhti_sse1[] =
    Watcom, selected at runtime by lz_q8r_tier. The function is named for
    the thirty-two values it takes at once. Only the MMX pair is
    genuinely out, and for a different reason than the one it carried. */
+static const char km_why_i32f_g128[] =
+    "this column is the 128-ELEMENT quantization group; the fold's group "
+    "is the wsum chunk's 32, which is where its cells are. Not \"a scalar "
+    "leaf has no group\" - it has one, just not this one";
+static const char km_why_i32f_mmx[] =
+    "impossible: MMX has no integer-to-float conversion at all - the "
+    "first one on this ladder is SSE1's cvtsi2ss. lz_i32f_acc32_sse is "
+    "that cell";
 static const char km_why_q8rnd_mmx[] =
     "impossible: rounding a Q8 group starts with x[i] * inv, a float "
     "multiply, and MMX is integer-only. SSE1 is the first tier that can "
@@ -3956,7 +3974,7 @@ static const LZKmReg km_reg[LZ_KM_NUNIT * LZ_KM_NCOL] = {
 /* operator units (LZ_KM_OP): registry only, no grid line. ref is the
    shared C body, which is also what --kernel arm-c runs - so armC is
    present on ARM for the same reason ref is present everywhere. */
-/* i32f */ KM_H(KM_ALL), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128),
+/* i32f */ KM_H(KM_ALL), KM_I(km_why_i32f_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_I(km_why_i32f_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_i32f_g128),
 /* q8rnd*/ KM_H(KM_ALL), KM_I(km_why_q8rnd_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_I(km_why_q8rnd_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128),
 /* expfx*/ KM_H(KM_ALL), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128),
 /* The two attention MAC units DO have x86 kernels, and they are
@@ -4122,6 +4140,26 @@ static int km_op_present(int f, int c) {
          c == LZ_KM_COL_ROW0 + LZ_ROW_SSE2_I)) return 1;
 #endif /* __WATCOMC__ */
 #endif /* LZ_MATMUL_F32_SSE_EXTERN */
+    /* i32f, the attention wsum chunk fold. Four cells from two bodies
+       per toolchain: SSE1 converts one value at a time (cvtsi2ss,
+       lz_i32f_acc32_sse) because the packed convert at that tier reads
+       an %mm register the caller has just emms'd away from, and SSE2
+       converts four (cvtdq2ps, lz_i32f_acc32_simd). */
+#if defined(LZ_HAVE_I32FACC_SSE)
+#if defined(__WATCOMC__)
+    if (f == LZ_KM_UNIT_I32F && c == LZ_KM_COL_ROW0 + LZ_ROW_SSE_A) return 1;
+#else
+    if (f == LZ_KM_UNIT_I32F && c == LZ_KM_COL_ROW0 + LZ_ROW_SSE_I) return 1;
+#endif /* __WATCOMC__ */
+#endif /* LZ_HAVE_I32FACC_SSE */
+#if defined(LZ_HAVE_I32FACC_SSE2)
+#if defined(__WATCOMC__)
+    if (f == LZ_KM_UNIT_I32F && c == LZ_KM_COL_ROW0 + LZ_ROW_SSE2_A) return 1;
+#else
+    if (f == LZ_KM_UNIT_I32F && c == LZ_KM_COL_ROW0 + LZ_ROW_SSE2_I) return 1;
+#endif /* __WATCOMC__ */
+#endif /* LZ_HAVE_I32FACC_SSE2 */
+
     /* q8rnd, whose four x86 cells were registered impossible on the
        scalar-leaf reason until they were audited against the kernels.
        TWO bodies here, not one shared across tiers like f32mm above:
