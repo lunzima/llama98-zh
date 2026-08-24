@@ -62,6 +62,12 @@ int    lz_json_get_int(const LZJson *j, const LZJsonNode *obj,
                        const char *key, int def);
 double lz_json_get_num(const LZJson *j, const LZJsonNode *obj,
                        const char *key, double def);
+/* Accepts BOOL and NUM alike. Python writes config flags as `true`, so
+   reading one with lz_json_get_int silently yields the default - the
+   flag is off, the model loads, and only the tensors it gates go
+   missing. */
+int    lz_json_get_bool(const LZJson *j, const LZJsonNode *obj,
+                        const char *key, int def);
 /* return STR content if present, else def */
 const char *lz_json_get_str(const LZJson *j, const LZJsonNode *obj,
                             const char *key, const char *def);

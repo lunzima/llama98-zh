@@ -8,7 +8,7 @@
 #include "compat.h"
 #include "err.h"
 #include "lfn.h"
-#include "lz_int.h"   /* lz_i64 - iron law 10; the 64-bit type here */
+#include "lz_int.h"   /* lz_i64: the 64-bit type, portably */
 #include "model.h"
 
 static void qerr(char *errbuf, int errlen, LZErr code, ...) {
@@ -161,7 +161,7 @@ int lz_load_config(LZModelConfig *c, const char *path,
         const LZJsonNode *n = lz_json_get(&j, tc, "attn_output_gate");
         c->attn_output_gate = (n && n->type == LZ_JSON_BOOL && n->num != 0.0);
     }
-    c->use_subn = lz_json_get_int(&j, tc, "use_subn", 0);
+    c->use_subn = lz_json_get_bool(&j, tc, "use_subn", 0);
     /* Block-diagonal Hadamard block sizes. -1 = "derive" (resolved by
        resolve_hadamard below), which is what a config.json written
        before these keys existed gets. */
@@ -422,6 +422,9 @@ typedef struct {
 static int present_moe_shared(const LZModelConfig *c) { return c->moe_shared_width > 0; }
 static int present_moe_latent_norm(const LZModelConfig *c) { return c->moe_latent_use_norm; }
 static int present_subn(const LZModelConfig *c) { return c->use_subn; }
+static int present_subn_shared(const LZModelConfig *c) {
+    return c->use_subn && c->moe_shared_width > 0;
+}
 
 static const LZLayerSpec LAYER_SPECS[] = {
     /* shared by every layer kind and every FFN kind */
@@ -459,6 +462,18 @@ static const LZLayerSpec LAYER_SPECS[] = {
       { DK_HEAD_DIM, DK_END, DK_END }, NULL },
     { "self_attn.k_norm.weight", LZ_LT_FULL, -1, LOFF(k_norm),
       { DK_HEAD_DIM, DK_END, DK_END }, NULL },
+
+    /* SubLN (use_subn=1 only): full attention's per-projection INPUT
+       RMSNorms - not q_norm/k_norm above, which are the per-head QK
+       norms over head_dim and are present regardless. */
+    { "self_attn.q_proj.norm.weight", LZ_LT_FULL, -1, LOFF(attn_q_subn_norm),
+      { DK_HIDDEN, DK_END, DK_END }, present_subn },
+    { "self_attn.k_proj.norm.weight", LZ_LT_FULL, -1, LOFF(attn_k_subn_norm),
+      { DK_HIDDEN, DK_END, DK_END }, present_subn },
+    { "self_attn.v_proj.norm.weight", LZ_LT_FULL, -1, LOFF(attn_v_subn_norm),
+      { DK_HIDDEN, DK_END, DK_END }, present_subn },
+    { "self_attn.o_proj.norm.weight", LZ_LT_FULL, -1, LOFF(attn_o_subn_norm),
+      { DK_ATTN_Q, DK_END, DK_END }, present_subn },
 
     /* linear_attention / GatedDeltaNet only */
     { "linear_attn.in_proj_qkv.weight", LZ_LT_LINEAR, -1, LOFF(in_proj_qkv),
@@ -543,11 +558,31 @@ static const LZLayerSpec LAYER_SPECS[] = {
     { "mlp.shared_experts.up_proj.weight",     -1, 1, LOFF(moe_shared_up),
       { DK_SHARED_W, DK_HIDDEN, DK_END }, present_moe_shared },
     { "mlp.shared_experts.down_proj.weight",   -1, 1, LOFF(moe_shared_down),
-      { DK_HIDDEN, DK_SHARED_W, DK_END }, present_moe_shared }
+      { DK_HIDDEN, DK_SHARED_W, DK_END }, present_moe_shared },
+
+    /* SubLN (use_subn=1 only): the latent-MoE block's per-projection
+       input RMSNorms. The router carries one because its logits feed a
+       softmax - an un-normalized input is a changed temperature, not a
+       skipped normalization. */
+    { "mlp.gate.norm.weight",                  -1, 1, LOFF(moe_gate_norm),
+      { DK_HIDDEN, DK_END, DK_END }, present_subn },
+    { "mlp.routed_expert_down_proj.norm.weight", -1, 1, LOFF(moe_down_norm),
+      { DK_HIDDEN, DK_END, DK_END }, present_subn },
+    { "mlp.routed_expert_up_proj.norm.weight", -1, 1, LOFF(moe_up_norm),
+      { DK_LATENT, DK_END, DK_END }, present_subn },
+    { "mlp.shared_experts.gate_proj.norm.weight", -1, 1,
+      LOFF(moe_shared_gate_norm),
+      { DK_HIDDEN, DK_END, DK_END }, present_subn_shared },
+    { "mlp.shared_experts.up_proj.norm.weight", -1, 1,
+      LOFF(moe_shared_up_norm),
+      { DK_HIDDEN, DK_END, DK_END }, present_subn_shared },
+    { "mlp.shared_experts.down_proj.norm.weight", -1, 1,
+      LOFF(moe_shared_down_norm),
+      { DK_SHARED_W, DK_END, DK_END }, present_subn_shared }
 };
 #define N_LAYER_SPECS ((int)(sizeof(LAYER_SPECS) / sizeof(LAYER_SPECS[0])))
 
-static long long resolve_dim(const LZModelConfig *c, int kind) {
+static lz_i64 resolve_dim(const LZModelConfig *c, int kind) {
     switch (kind) {
     case DK_HIDDEN:     return c->hidden_size;
     case DK_INTER:      return c->intermediate_size;

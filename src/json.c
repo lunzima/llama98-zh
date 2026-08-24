@@ -420,6 +420,14 @@ double lz_json_get_num(const LZJson *j, const LZJsonNode *obj,
     return n->num;
 }
 
+int lz_json_get_bool(const LZJson *j, const LZJsonNode *obj,
+                     const char *key, int def) {
+    const LZJsonNode *n = lz_json_get(j, obj, key);
+    if (!n) return def;
+    if (n->type != LZ_JSON_BOOL && n->type != LZ_JSON_NUM) return def;
+    return n->num != 0.0;
+}
+
 const char *lz_json_get_str(const LZJson *j, const LZJsonNode *obj,
                             const char *key, const char *def) {
     const LZJsonNode *n = lz_json_get(j, obj, key);
