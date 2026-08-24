@@ -60,9 +60,28 @@ WCC=/c/WATCOM/binnt64/wcc386.exe
 D="-Isrc -DLZ_MMX_TU=1 -DLZ_SSE2_TU=1"
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 
+# A DEFAULT FILE SET, because a census that has to be handed one cannot
+# be run as a standing check and gets run as `bash build/xcc_codesize.sh`
+# instead - which prints an empty table and a "0 files" line that reads
+# like a clean result to anyone skimming.
+#
+# The set is the NON-OPERATOR code, which is the question this script
+# exists for: the kernels are hand-written on both sides and a ratio
+# over them measures two people's assembly, not two compilers'
+# optimisers. src/ops*.c and the three SIMD units are therefore out;
+# what is left is the front end, the loaders, the tokenizer and the
+# session core, where gcc's advantage over a 1990s compiler is the
+# thing the requirement is about.
+FILES="$*"
+if [ -z "$FILES" ]; then
+    FILES=$(ls src/*.c common/*.c 2>/dev/null \
+            | grep -vE "src/ops[a-z0-9_]*\.c$" \
+            | grep -vE "src/(forward|fwht)\.c$")
+fi
+
 RATIOS=""
 printf '%-20s %8s %8s %6s\n' file gcc wat ratio
-for f in "$@"; do
+for f in $FILES; do
     b=$(basename "$f" .c)
     gcc -O2 -m32 -march=i486 -mtune=pentium -std=c99 $D \
         -c -o "$W/$b.o" "$f" 2>/dev/null || continue
