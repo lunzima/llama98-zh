@@ -60,8 +60,21 @@
 # So a nonzero here opens a question; it does not answer one.
 #
 # Usage: bash build/o3_probe.sh [unit ...]
-#        no arguments prints every unit the matrix currently calls
-#        impossible, with the function that implements it.
+#        no arguments walks every unit in MAP below.
+#
+# MAP IS HAND-MAINTAINED AND CANNOT BE DERIVED: the matrix knows which
+# cells are impossible, but not which C function implements a unit, and
+# picking that function is a judgement (see the three corrections above,
+# each of which was a MAP entry pointing at a function the unit does not
+# dominate). So the list is written out - and then CHECKED against the
+# matrix at the end of the run, because a hand-maintained list of names
+# is exactly the thing that goes stale silently. A unit that acquires an
+# impossible cell and has no MAP entry would otherwise just not be
+# probed, and the absence would look like a clean sheet.
+#
+# This text used to say the run covered "every unit the matrix currently
+# calls impossible". It never did: MAP is every unit, impossible or not,
+# and nothing compared the two lists.
 set -u
 cd "$(dirname "$0")/.."
 
@@ -239,3 +252,40 @@ for e in $MAP; do
     # an SSE1 cell has to be an SSE1 machine.
     probe32 "$u" "$f" "$s" pentium3 "-m32 -march=pentium3 (SSE1)"
 done
+
+# COMPLETENESS: every unit the matrix calls impossible must be in MAP.
+# The binary is the source of truth for which those are - not this file,
+# which is what went stale. Reported even when a unit subset was
+# requested, because the gap is a property of MAP and not of the run.
+#
+# Silent on the other direction: MAP carrying a unit with no impossible
+# cell left is not a defect. expfx sits there today with all three x86
+# tiers written, and probing it is still how anyone checks whether the
+# hand-written kernels are worth keeping.
+BIN=./llama98.exe
+[ -x "$BIN" ] || BIN=./llama98
+if [ -x "$BIN" ]; then
+    # MAP is newline-separated; unquoted expansion rejoins it with single
+    # spaces so one pattern can carry the leading delimiter. Matching
+    # bare "$u:" instead would be a substring test, and unit names are
+    # prefixes of each other here (q8_0 / q8rnd, fwhti / fwhtf).
+    MAPSP=" $(echo $MAP) "
+    miss=
+    for u in $("$BIN" --kernel-matrix 2>/dev/null \
+               | awk '$1=="cell" && $4=="i" {print $2}' | sort -u); do
+        case "$MAPSP" in
+            *" $u:"*) ;;
+            *) miss="$miss $u" ;;
+        esac
+    done
+    if [ -n "$miss" ]; then
+        echo
+        echo "o3_probe: NOT PROBED -$miss"
+        echo "  the matrix calls these impossible and MAP has no entry;"
+        echo "  add one naming the function whose loop the unit dominates"
+        exit 1
+    fi
+else
+    echo
+    echo "o3_probe: MAP completeness unchecked - no engine binary to ask"
+fi
