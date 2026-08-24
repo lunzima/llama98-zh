@@ -22,6 +22,37 @@
 #      it here stops this gate being read as "no knobs at all".
 #   4. ops_sched.c defines exactly one float-selection global.
 #
+# WHAT THE AXIS COSTS, measured rather than assumed, so the next reader
+# asking "how much precision does the integer default give up" has a
+# number instead of a guess. kmr20 on .prof/tz.bin, 152 positions,
+# vocab 32768, --kernel sse2, --fixed all against --fixed off:
+#
+#   max abs diff   1.742
+#   rms diff       0.107
+#   top-1 agree    148 / 152  (97.37%)
+#
+# THE FOUR DISAGREEMENTS ARE ALL NEAR-TIES, which is the part that
+# decides whether there is anything to fix. At each of them the FLOAT
+# reference's own top-1/top-2 margin is 0.017, 0.034, 0.053 and 0.067 -
+# every one below the 0.107 rms difference between the two tiers. So
+# the integer tier diverges only where the float model was already
+# close to indifferent, and there is no position where it overturns a
+# confident float decision.
+#
+# THE CRITERION FOR NEXT TIME, since "97%" alone does not say whether
+# that is good: a disagreement at a float margin WELL ABOVE the rms
+# difference is a real defect and worth chasing. One inside it is the
+# two tiers disagreeing about a coin flip, and chasing it would be
+# chasing noise.
+#
+# NOT ATTRIBUTABLE PER OPERATOR, and that is a consequence of this
+# gate's own requirement rather than an oversight: --fixed off floats
+# every operator at once, so a difference cannot be split between the
+# norms, the attention MACs and the transcendentals. The per-tier knobs
+# that could have bisected it are the seven this gate exists to keep
+# retired. Attribution would need a temporary build, not a shipped
+# option.
+#
 # Exit codes:
 #   0  PASS
 #   1  FAIL - a retired knob answered, a kept one did not, or the
