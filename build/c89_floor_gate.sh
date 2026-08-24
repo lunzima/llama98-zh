@@ -99,6 +99,50 @@ inc_for() {
     esac
 }
 
+# AND THE DEFINES, for the same reason and by the same rule. CFLAGS gives
+# LZ_MMX_TU/LZ_SSE2_TU to every gcc TU and the three SIMD units get
+# -mmmx -msse -msse2 on top. The warning scan below passed neither, so it
+# read the #else arm of every LZ_HAVE_P2_* block - a different program
+# from the one that ships, and one mixed declaration in ops_gdn.c lived
+# in the gap between the two scans for as long as they disagreed.
+defs_for() {
+    case "$(basename "$1")" in
+        ops_mmx.c|ops_mmx_sse.c|ops_sse2.c)
+            echo "-DLZ_MMX_TU=1 -DLZ_SSE2_TU=1 -mmmx -msse -msse2" ;;
+        *)  echo "-DLZ_MMX_TU=1 -DLZ_SSE2_TU=1" ;;
+    esac
+}
+
+# THE SWITCHES THAT ARE OFF BY DEFAULT. A scan of one configuration says
+# nothing about the code the configuration excludes, and the excluded
+# code is the code nobody reads. LZ_KV_2PLANE=1 alone reveals a mixed
+# declaration in forward.c's low-plane weighted sum that every scan
+# before this one called clean.
+#
+# One switch at a time, not the product: the point is to REACH the
+# guarded text, and each of these guards a disjoint region. The
+# combinations are switch_matrix_gate's job.
+SWITCH_CFGS="
+-DLZ_KV_2PLANE=1
+-DLZ_GDN_STATE_2PLANE=0
+-DLZ_ATTN_FIXED=0
+-DLZ_ATTN_FIXED=1
+-DLZ_ATTN_FIXED=2
+-DLZ_GDN_FIXED=0
+-DLZ_CONV_FIXED=0
+-DLZ_NORM_FIXED=0
+-DLZ_EPI_FIXED=0
+"
+
+PATTERN="mixed declarations|ISO C90 forbids .*//|forbids specifying subobject"
+
+# One place that knows the compile line, so the passes below cannot drift
+# apart the way the warning and error scans did.
+scan_warn() {
+    gcc -std=c89 -pedantic $(inc_for "$1") $(defs_for "$1") ${2:-} \
+        -fsyntax-only "$1" 2>&1 | grep -E "$PATTERN"
+}
+
 FAIL=0
 TOTAL=0
 for f in $CFILES; do
@@ -107,20 +151,40 @@ for f in $CFILES; do
     for e in $BASELINE; do
         [ "${e%%:*}" = "$b" ] && exp=${e##*:}
     done
-    INC=$(inc_for "$f")
-    n=$(gcc -std=c89 -pedantic $INC -fsyntax-only "$f" 2>&1 \
-        | grep -cE "mixed declarations|ISO C90 forbids .*//|forbids specifying subobject" )
+    n=$(scan_warn "$f" | grep -c .)
     TOTAL=$((TOTAL + n))
     if [ "$n" -gt "$exp" ]; then
         echo "FAIL: $b has $n C89 violation(s), baseline $exp"
-        gcc -std=c89 -pedantic $INC -fsyntax-only "$f" 2>&1 \
-            | grep -E "mixed declarations|ISO C90 forbids .*//|forbids specifying subobject" \
-            | head -5 | sed 's/^/      /'
+        scan_warn "$f" | head -5 | sed 's/^/      /'
         FAIL=1
     elif [ "$n" -lt "$exp" ]; then
         echo "note: $b is at $n, below its baseline of $exp - tighten BASELINE"
     fi
 done
+
+# The same scan through each off-by-default switch. Reported per
+# configuration rather than summed into TOTAL: a violation that only
+# exists under -DLZ_KV_2PLANE=1 is not a violation of the shipping
+# build, and rolling it into the headline count would make the headline
+# unfixable by anyone who builds the default.
+SWFAIL=0
+for cfg in $SWITCH_CFGS; do
+    for f in $CFILES; do
+        d=$(scan_warn "$f" "$cfg")
+        [ -n "$d" ] || continue
+        # Only what the DEFAULT configuration does not already report -
+        # otherwise every baselined violation is re-reported nine times.
+        base=$(scan_warn "$f" | grep -c .)
+        n=$(printf '%s\n' "$d" | grep -c .)
+        if [ "$n" -gt "$base" ]; then
+            echo "FAIL: $cfg reveals $((n - base)) C89 violation(s) in $(basename "$f")"
+            printf '%s\n' "$d" | head -3 | sed 's/^/      /'
+            SWFAIL=$((SWFAIL + 1))
+        fi
+    done
+done
+[ "$SWFAIL" -eq 0 ] || FAIL=1
+[ "$SWFAIL" -eq 0 ] && echo "c89 switches: 0 violations behind $(echo $SWITCH_CFGS | wc -w) off-by-default switch(es)"
 
 # The gate's own positive control: if -pedantic stopped reporting the
 # construct at all, every count would be 0 and this would pass while

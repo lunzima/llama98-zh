@@ -2340,11 +2340,14 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                 memset(s->wsum_lo, 0, (size_t)hd * sizeof(float));
                 for (t = 0, rslot = kv_slot(s, 0); t <= pos;
                      t++, rslot = kv_slot_next(s, rslot)) {
+                    const int8_t *vt;
+                    const float *vts;
+                    float a;
                     if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
-                    const int8_t *vt = vc_lo + (size_t)rslot * kvd + (size_t)kvh * hd;
-                    const float *vts = vs + (size_t)rslot * kvd / 32 +
-                                       (size_t)(kvh * hd) / 32;
-                    float a = s->att[t];
+                    vt  = vc_lo + (size_t)rslot * kvd + (size_t)kvh * hd;
+                    vts = vs + (size_t)rslot * kvd / 32 +
+                          (size_t)(kvh * hd) / 32;
+                    a   = s->att[t];
                     /* Same shape as the wsum loop above: convert, two
                        multiplies and an add per element. */
                     LZ_FCX(LZ_FC_ATTN_WSUM, 2 * hd, hd, 0, hd, 0);

@@ -1839,6 +1839,7 @@ static void gdn_p2_row_simd(const int8_t *ph_row,
     for (gg = 0; gg < ng; gg++) {
         int32_t amax;
         int sh;
+        const int8_t *plg;
         /* Every constant replicated across the full 16 bytes. MMX reads
            the low 8 and SSE2 reads all 16, so one fill serves both -
            see the block's comment in ops_kernel_p2.h. */
@@ -1846,11 +1847,14 @@ static void gdn_p2_row_simd(const int8_t *ph_row,
             blk->mul[j]     = mul[gg][0];
             blk->mul[j + 1] = mul[gg][1];
         }
-        const int8_t *plg =
+        /* A whole statement in each arm rather than one statement split
+           across the #if: half a statement per branch reads as a
+           conditional expression and is not one, and the declaration it
+           used to carry sat after a statement, which C89 does not have. */
 #if LZ_GDN_STATE_2PLANE
-            pl_row + gg * 32;
+        plg = pl_row + gg * 32;
 #else
-            zero_lo;
+        plg = zero_lo;
 #endif /* LZ_GDN_STATE_2PLANE */
 #ifdef LZ_HAVE_P2_SSE2
         if (tier >= 3) lz_p2_mul32_sse2(ph_row + gg * 32, plg, dq + gg * 32, blk);
