@@ -113,7 +113,7 @@ int q8r_have_simd(void) {
 #endif /* LZ_HAVE_Q8R_SIMD || LZ_HAVE_Q8R_SSE */
 }
 
-/* NOTHING ASKS WHETHER THIS MACHINE'S FLOAT IS SLOW. There is no
+/* Nothing asks whether this machine's float is slow. There is no
    hardware predicate behind the arithmetic tier: the shipping build is
    fixed-point on every host, and float is reached only by asking for it
    (--fixed off), which is the correctness oracle rather than an

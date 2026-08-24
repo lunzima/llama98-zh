@@ -133,7 +133,7 @@ typedef struct {
    `_mm256_sub_epi16(sumi0, ysum)` against the pre-computed y->bsums),
    arrived at independently on both sides.
 
-   WHAT IS NOT COPIED, and why: llama.cpp also ships TQ1_0 at 1.6875
+   What is not copied, and why: llama.cpp also ships TQ1_0 at 1.6875
    bpw, packing 5 elements per byte in base 3 (3^5 = 243 < 256). It is
    the denser format and it is unusable on the ARM926EJ-S target -
    unpacking needs division by 3 and that core has NO hardware divide.

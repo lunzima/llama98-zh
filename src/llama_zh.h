@@ -180,7 +180,7 @@ typedef struct {
        see lz_spec_round's own comment and generate.c's
        build_assumed_window.
 
-       DEFAULT INTENTIONALLY DIFFERS FROM llama.cpp's own reference
+       Default intentionally differs from llama.cpp's own reference
        (its common_params_speculative::n_max = 3, i.e. speculative
        decoding ON by default there). This project's own rule from the
        start: MTP defaults OFF, and spec_k == 0 must be bit-identical
@@ -205,7 +205,7 @@ typedef struct {
        and returns one. Deliberately NOT named --beam: a name that
        overclaims gets read as a status.
 
-       *** WHAT THIS IS FOR, AND WHY THE ANSWER IS NOT ASSUMED ***
+       What this is for, and why the answer is not assumed
        The hypothesis under test is that likelihood-maximizing decoding
        makes THIS model's repetition worse, not better. Measured on
        models/kunkun98-recover-r20 at a real looping position, the top
@@ -621,7 +621,7 @@ int lz_generate_resume_ex(const LZModel *m, LZTokenizer *t, LZRunState *s,
  * a sixteenth would change every declaration, every wrapper and every
  * caller again.
  *
- * ZERO IS THE OLD BEHAVIOUR, for every field, and a new field must keep
+ * Zero is the old behaviour, for every field, and a new field must keep
  * that true: callers memset the struct and then set what they mean, so
  * an addition does not silently change what an existing caller asked
  * for. lz_gen_call_init does the memset and is the supported way to

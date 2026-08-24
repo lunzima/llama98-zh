@@ -52,7 +52,7 @@ static __m128i part32_x16(const int8_t *w, const int16_t *x) {
 
 /* The same sub-block against TWO tokens, sharing the weight side.
  *
- * MORE IS SHARED HERE THAN AT THE MMX TIER, which is the argument for
+ * More is shared here than at the MMX tier, which is the argument for
  * doing it: q16_0's pair shares only the load, because int16 weights
  * need no unpack. Here the weight costs two loads AND four unpacks
  * (w0l/w0h/w1l/w1h against zero), and a pair pays that once instead of
@@ -132,7 +132,7 @@ static __m128i part32_q41(const unsigned char *w, const int16_t *x) {
 
 /* The same sub-block against two tokens, sharing the weight side.
  *
- * WORTH MORE HERE THAN AT q8_0, which is why this format is second into
+ * Worth more here than at q8_0, which is why this format is second into
  * the tier. q8_0's weight side is two loads and four unpacks; q4_1's is
  * one load, a mask, a shift, a second mask and four unpacks, plus the
  * 0x0F constant kept live. All of it is paid once for two tokens, and
@@ -214,7 +214,7 @@ static __m128i part32_q61(const unsigned char *w4, const unsigned char *w2,
 /* The same sub-block against two tokens - and of the five formats this
  * is where the pair is worth most.
  *
- * COUNT THE WEIGHT SIDE: two loads, four masks, three shifts, two ORs,
+ * Count the weight side: two loads, four masks, three shifts, two ORs,
  * two 64-bit merges and four unpacks, because a 6-bit value has to be
  * reassembled from a 4-bit plane and a 2-bit plane before it can be
  * widened. That is roughly nineteen instructions against q4_1's eight
