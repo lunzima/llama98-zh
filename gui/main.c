@@ -12945,12 +12945,20 @@ static void sb_compare(FILE *f, const char *path, int *checks) {
 
 /* ------------------------------------------------------------ entry */
 
-static const char *selftest_path(const char *cmdline) {
-    /* Deliberately not CommandLineToArgvW: it lives in shell32 and is a
-       wide entry point, and src/cli_main.c already records that both of
-       those are unverified on Win9x. One flag with one argument does not
-       need an argv parser. */
+/* Returns the report path. Sets *asked when --selftest was on the
+   command line at all, which is a different question from whether it
+   carried a path: `--selftest` with no path used to return NULL and fall
+   straight through to launching the window, so the flag exited 0 having
+   checked nothing. Nothing distinguishes that from a clean run, and it
+   read as one.
+
+   Deliberately not CommandLineToArgvW: it lives in shell32 and is a wide
+   entry point, and src/cli_main.c already records that both of those are
+   unverified on Win9x. One flag with one argument does not need an argv
+   parser. */
+static const char *selftest_path(const char *cmdline, int *asked) {
     const char *p = strstr(cmdline, "--selftest");
+    *asked = (p != NULL);
     if (!p) return NULL;
     p += strlen("--selftest");
     while (*p == ' ' || *p == '\t') p++;
@@ -12961,6 +12969,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmdline, int show) {
     MSG msg;
     HWND hwnd;
     const char *st;
+    int st_asked = 0;
 
     (void)prev;
     g.inst = inst;
@@ -13021,8 +13030,19 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmdline, int show) {
         }
     }
 
-    st = selftest_path(cmdline ? cmdline : "");
+    st = selftest_path(cmdline ? cmdline : "", &st_asked);
     if (st) return selftest(inst, st);
+    if (st_asked) {
+        /* Asked for, cannot be done. Exit 2, the code the build scripts
+           already read as SKIP rather than PASS, and say so on stderr -
+           this is a -mwindows binary with no console of its own, so a
+           caller that redirected will see it and one that did not still
+           gets a code that is not zero. Silently launching the window
+           here is what made a mis-typed invocation look like a pass. */
+        fprintf(stderr, "--selftest needs a report path: "
+                        "kunkun98-gui --selftest <file>\n");
+        return 2;
+    }
 
     {
         /* Up before the window is built, down after: on the target that
