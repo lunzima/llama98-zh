@@ -4239,11 +4239,20 @@ static const char km_why_recur_wat_sse2[] =
     "todo: lz_p2_rows_sse2's body is in the Watcom link, but "
     "LZ_P2_SSE2_EXTERN is declared under !__WATCOMC__, so there is no "
     "macro for km_op_present to key this cell off yet";
+/* The four 64-bit-lane cells. SSE1 shares this reason with MMX because
+   for THIS operator it adds nothing: its integer additions are pmaxsw,
+   pshufw, pextrw and movntq on %mm, none of which is a multiply and
+   none of which is a 64-bit add. */
 static const char km_why_epi_x86[] =
-    "todo: the accumulation is int32 x int16 -> int64, not the int16 "
-    "pmaddwd shape the name suggests. SSE2 reaches it with pmuludq plus "
-    "sign correction, MMX by splitting the int32 into 16-bit halves; "
-    "both are more work than a straight pmaddwd, neither is impossible";
+    "todo: the products are pmaddwd's shape but the ACCUMULATOR is not. "
+    "paddq is SSE2 even on %mm, so a 64-bit sum has to leave the vector "
+    "unit: |ah*m| reaches 2^30 and two of them overflow an int32 lane, "
+    "which caps a flush-free run at two elements per lane. The shape "
+    "lz_norm_ss_sse already uses - products in %mm, accumulate in "
+    "scalar int64, one spill per group of four - costs about 10.75 "
+    "instructions an element against the scalar imul loop's 8.00, and "
+    "buys a quarter of the branches. Owed, not impossible; the pack is "
+    "{b,ah} against {m,m} so one pmaddwd lane is the whole high term";
 typedef struct { unsigned char have; unsigned char why; const char *text; } LZKmReg;
 #define KM_H(mask) { (unsigned char)(mask), 0, (const char *)0 }
 #define KM_I(text) { 0, LZ_KM_IMPOSSIBLE, (text) }
