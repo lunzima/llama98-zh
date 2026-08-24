@@ -2443,10 +2443,30 @@ static void forward_attn(const LZModel *m, LZRunState *s,
             for (h = 0; h < nh; h++) {
                 const float *gate = qgt + (size_t)h * 2 * hd + hd;
                 int64_t *ac = s->attn_acc + (size_t)tk * qd + (size_t)h * hd;
-                for (d = 0; d < hd; d++) {
-                    int32_t s15 = sig_fixed ? sigmoid_q15(gate[d])
-                                 : (int32_t)(lz_sigmoid(gate[d]) * 32768.0f);
-                    ac[d] = (ac[d] * (int64_t)s15) >> 15;
+                if (sig_fixed) {
+                    /* A RUN, not an element at a time. sigmoid_q15's
+                       interpolation tail has a SIMD cell and a scalar
+                       caller could never reach it - the kernel needs
+                       more than one value to have anything to
+                       vectorise. lz_sigmoid_q15_run is bit-identical
+                       to the per-element call; see its own comment for
+                       how the saturating exits are split out. */
+                    int32_t s15[64];
+                    int base;
+                    for (base = 0; base < hd; base += 64) {
+                        int m = hd - base;
+                        if (m > 64) m = 64;
+                        lz_sigmoid_q15_run(gate + base, s15, m);
+                        for (d = 0; d < m; d++)
+                            ac[base + d] =
+                                (ac[base + d] * (int64_t)s15[d]) >> 15;
+                    }
+                } else {
+                    for (d = 0; d < hd; d++) {
+                        int32_t s15 =
+                            (int32_t)(lz_sigmoid(gate[d]) * 32768.0f);
+                        ac[d] = (ac[d] * (int64_t)s15) >> 15;
+                    }
                 }
             }
         } else {

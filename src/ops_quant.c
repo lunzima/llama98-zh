@@ -812,6 +812,75 @@ int32_t sigmoid_q15(float x) {
     return a + (((b - a) * frac) >> 15);
 }
 
+/* sigmoid_q15 over a RUN, which is what the MMX interpolation cell
+   needs and what the scalar entry above cannot give it: a kernel that
+   vectorises the arithmetic has to see more than one element.
+ *
+ * THE SPLIT IS BY BRANCH, not by element. Three of sigmoid_q15's exits
+ * are saturations - below the table, above it, and past its last index
+ * - and they are per-element decisions the vector part cannot make. So
+ * this walks once in scalar to write idx, frac and the two table
+ * entries for the elements that INTERPOLATE, marking the rest; runs
+ * the kernel over the whole block; then writes the saturated answers
+ * over their own slots. The saturating elements are rare in practice
+ * (the table spans the range where sigmoid is not already 0 or 1) and
+ * correctness does not depend on that - only the cost does.
+ *
+ * idx IS CLAMPED BEFORE THE TABLE READ even for elements whose answer
+ * is about to be overwritten, because a[k] and b[k] are read for every
+ * slot and an out-of-range index is an out-of-bounds load whether or
+ * not the value is used. The scalar entry never had this problem: it
+ * returns before it reads.
+ *
+ * The result is bit-identical to calling sigmoid_q15 per element - the
+ * interpolating path is the same arithmetic and the saturating paths
+ * are copied verbatim. build/lerp_q15_probe.c covers the kernel; this
+ * wrapper's own risk is the branch split, which is why the SATURATED
+ * slots are written last and unconditionally. */
+void lz_sigmoid_q15_run(const float *x, int32_t *out, int n) {
+    enum { LZ_SIGRUN = 64 };
+    int32_t ta[LZ_SIGRUN], tb[LZ_SIGRUN], tf[LZ_SIGRUN];
+    unsigned char sat[LZ_SIGRUN];
+    int i, k, m;
+
+    if (!g_sigtab_ready) sig_build();
+    for (i = 0; i < n; i += LZ_SIGRUN) {
+        m = n - i;
+        if (m > LZ_SIGRUN) m = LZ_SIGRUN;
+        for (k = 0; k < m; k++) {
+            float xv = x[i + k], t;
+            int idx;
+            sat[k] = 0;
+            if (xv <= LZ_SIG_LO)        { sat[k] = 1; out[i + k] = 0;     }
+            else if (xv >= -LZ_SIG_LO)  { sat[k] = 1; out[i + k] = 32768; }
+            t = (xv - LZ_SIG_LO) * LZ_SIG_STEP;
+            idx = (int)t;
+            if (idx >= LZ_SIG_N) {
+                if (!sat[k]) { sat[k] = 1; out[i + k] = g_sigtab[LZ_SIG_N]; }
+                idx = LZ_SIG_N - 1;
+            } else if (idx < 0) {
+                idx = 0;
+            }
+            ta[k] = g_sigtab[idx];
+            tb[k] = g_sigtab[idx + 1];
+            tf[k] = sat[k] ? 0 : (int32_t)((t - (float)idx) * 32768.0f);
+        }
+#if defined(LZ_HAVE_LERP_Q15_MMX)
+        if (g_kernel != LZ_KERNEL_REF && lz_cpu_has_mmx())
+            lz_lerp_q15_mmx(ta, tb, tf, out + i, m);
+        else
+#endif /* LZ_HAVE_LERP_Q15_MMX */
+        for (k = 0; k < m; k++)
+            out[i + k] = ta[k] + (((tb[k] - ta[k]) * tf[k]) >> 15);
+        for (k = 0; k < m; k++) {
+            if (!sat[k]) continue;
+            if (x[i + k] <= LZ_SIG_LO)       out[i + k] = 0;
+            else if (x[i + k] >= -LZ_SIG_LO) out[i + k] = 32768;
+            else                             out[i + k] = g_sigtab[LZ_SIG_N];
+        }
+    }
+}
+
 /* Table-only sigmoid_q15: takes the pre-scaled coordinate t = (x -
    LZ_SIG_LO) * LZ_SIG_STEP directly instead of computing it from x, for
    callers that fold LZ_SIG_STEP into their own per-call scale (see

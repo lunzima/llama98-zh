@@ -45,14 +45,14 @@ FLOOR=21
 
 # CELLS REGISTERED todo, which is what a cell looks like after the
 # "partial relief obliges a kernel" standard reopens it and before
-# anyone writes it. Six PAIRS today - this gate counts (unit, ISA)
+# anyone writes it. Five PAIRS today - sigq mmx landed and the ceiling came down with it - this gate counts (unit, ISA)
 # pairs, so the twelve cells expfx and sigq carry across the six x86
 # columns are six here - whose table lookup stays scalar while the interpolation
 # around it does not have to. A CEILING rather than a floor - the number
 # owed may shrink freely and may not grow unnoticed. Before this state
 # existed the gate had two answers, implemented or impossible, and a
 # reopened cell read as an unpaired kernel.
-TODO_CEIL=6
+TODO_CEIL=5
 
 "./$BIN" "$MODEL" --kernel-matrix 2>&1 | grep "^cell" | awk -v floor="$FLOOR" -v tceil="$TODO_CEIL" '
 $3=="mmxI"||$3=="sse2I"||$3=="sseI" {

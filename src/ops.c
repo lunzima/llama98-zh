@@ -4143,7 +4143,7 @@ static const LZKmReg km_reg[LZ_KM_NUNIT * LZ_KM_NCOL] = {
    build/kernel_isa_identity_gate.sh (whether the dispatch reaches it). */
 /* atdot*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_attn_g128),
 /* wsump*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_attn_g128),
-/* sigq */ KM_H(KM_ALL), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_op_g128),
+/* sigq */ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_H(LZ_KMB_WAT), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_op_g128),
 /* nrmss*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_nrmss_g128),
 /* Registering these two rows is what makes a gate able to tell "no
    assembly" from "no such operator": without them src/fwht.c could be
@@ -4325,6 +4325,17 @@ static int km_op_present(int f, int c) {
     if (f == LZ_KM_UNIT_NRMSS && c == LZ_KM_COL_ROW0 + LZ_ROW_MMX_I) return 1;
 #endif /* __WATCOMC__ */
 #endif /* LZ_HAVE_NORM_SS_PACK_MMX */
+    /* sigq's interpolation tail. expfx shares the shape but not yet the
+       wiring - lz_exp_fixed has no run entry, so its cells stay todo
+       and this names only sigq. Registering both from one macro would
+       be the registry claiming a kernel nobody calls. */
+#if defined(LZ_HAVE_LERP_Q15_MMX)
+#if defined(__WATCOMC__)
+    if (f == LZ_KM_UNIT_SIGQ && c == LZ_KM_COL_ROW0 + LZ_ROW_MMX_A) return 1;
+#else
+    if (f == LZ_KM_UNIT_SIGQ && c == LZ_KM_COL_ROW0 + LZ_ROW_MMX_I) return 1;
+#endif /* __WATCOMC__ */
+#endif /* LZ_HAVE_LERP_Q15_MMX */
 
     /* i32f, the attention wsum chunk fold. Four cells from two bodies
        per toolchain: SSE1 converts one value at a time (cvtsi2ss,

@@ -186,6 +186,11 @@ float lz_softplus_poly(float x);
 
 /* Q15 sigmoid (interpolated table). */
 int32_t sigmoid_q15(float x);
+/* sigmoid_q15 over a run, bit-identical to calling it per element.
+   Exists so the MMX interpolation cell has a caller that hands it more
+   than one value - see its definition for how the three saturating
+   exits are split from the interpolating path. */
+void lz_sigmoid_q15_run(const float *x, int32_t *out, int n);
 
 /* Table-only sigmoid_q15 taking the pre-scaled coordinate directly, and
    the two helpers that build it from a caller's own dequant scale. */
