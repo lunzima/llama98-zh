@@ -4,11 +4,11 @@
  *
  *     for (g = 0; g < n; g++) s += (lz_i64)a[g] * (lz_i64)m[g];
  *
- * Its six x86 cells are empty (km_reg, "epi" row). SSE2 reaches it with
- * pmuludq plus sign correction and MMX by splitting the int32 into
- * 16-bit halves - both of which get the sign wrong quietly rather than
- * loudly. A wrong correction returns a plausible number, so the kernel
- * needs a predicate written before it exists, not after.
+ * On x86 there is no signed 32x32 multiply below SSE4.1: SSE2 reaches
+ * this with pmuludq plus sign correction and MMX by splitting the int32
+ * into 16-bit halves, both of which get the sign wrong quietly rather
+ * than loudly. A wrong correction returns a plausible number, so the
+ * kernel needed a predicate written before it existed, not after.
  *
  * This is that predicate. It is deliberately not a comparison against
  * the shipping C body: that body IS one of the things under test once a
@@ -17,7 +17,20 @@
  * signs handled explicitly - so agreement means two independent
  * derivations agree, not that one function was called twice.
  *
- * Build: gcc -O2 -std=c99 -Wall -Wextra -Isrc .prof/epi_mac_oracle.c -o /tmp/epi_oracle
+ * Builds, all four verified to run:
+ *
+ *   gcc -O2 -std=c99 -Wall -Wextra -msse2 -Isrc \
+ *       .prof/epi_mac_oracle.c -o /tmp/epi_oracle
+ *   ... -DEPI_MUT_SIGNED_LOW ...             must FAIL (25 mismatches)
+ *   ... -DEPI_LINK_SHIPPED -DLZ_SSE2_TU=1 .prof/epi_mac_oracle.c \
+ *       src/ops_sse2.c src/ops_sched.c src/cpucheck.c src/err.c
+ *   bash .prof/epi_arm_gate.sh               the ARM kernel, under QEMU
+ *
+ * The three extra TUs in the link mode are ops_sse2.c's own references
+ * (g_pair, lz_cpuid1_edx, lz_err_fmt) reached from functions this
+ * harness never calls. They are listed rather than stubbed because a
+ * stub is a second definition of engine state, and mingw's .refptr
+ * indirection defeats -Wl,--gc-sections for the data ones anyway.
  *
  * A NOTE FOR WHOEVER WRITES THE SSE2 KERNEL. SSE2 has no 32x32->32
  * multiply (_mm_mullo_epi32 is SSE4.1), so the two usable primitives
@@ -126,8 +139,45 @@ static lz_i64 mac_carry_free(const int *a, const short *m, int n) {
     return ((s_ah + s_b) << 16) + s_als;
 }
 
-/* The SSE2 body itself, written here rather than in ops_sse2.c so it is
-   testable against the three scalar derivations before it moves into a
+/* The fourth derivation is the KERNEL UNDER TEST, and which one that is
+   depends on how this file is built:
+
+     (default)         the SSE2 body copied below, so the harness builds
+                       and runs standalone on any x86 host
+     -DEPI_LINK_SHIPPED  lz_epi_mac_i16_sse2, from src/ops_sse2.c
+     -DEPI_ARM         lz_epi_mac_i16_arm_asm, from src/ops_arm.c,
+                       cross-built and run under QEMU
+
+   The copy is kept for the reason the link modes exist at all: a copy
+   that passes proves the FORMULA, and only a link mode proves the
+   shipped function. Verifying a copy and calling the artifact verified
+   is a mistake this tree has made before. */
+#if defined(EPI_ARM)
+#include "ops_arm.h"
+#define KERNEL_NAME "arm"
+/* ARMv5TE needs none of the 16-bit splitting the header describes:
+   SMLAL is signed 32x32 with a 64-bit accumulate, which is this
+   operator's shape exactly. What is being checked here is therefore not
+   a sign correction but the operand plumbing around it - the LDMIA
+   stride, the LDRSH sign extension, and the hi:lo recombination, where
+   an unsigned widening of the low word is the one that fails only for
+   half the inputs.
+   Build: .prof/epi_arm_gate.sh */
+static lz_i64 mac_kernel(const int *a, const short *m, int n) {
+    return lz_epi_mac_i16_arm_asm((const int32_t *)a, (const int16_t *)m, n);
+}
+#elif defined(EPI_LINK_SHIPPED)
+#include "ops_sse2.h"
+#define KERNEL_NAME "sse2"
+/* Build: gcc -O2 -std=c99 -Wall -Wextra -msse2 -Isrc -DEPI_LINK_SHIPPED \
+          -DLZ_SSE2_TU=1 .prof/epi_mac_oracle.c src/ops_sse2.c -o /tmp/x */
+static lz_i64 mac_kernel(const int *a, const short *m, int n) {
+    return lz_epi_mac_i16_sse2((const int32_t *)a, (const int16_t *)m, n);
+}
+#else
+#define KERNEL_NAME "sse2"
+/* The SSE2 body itself, written here rather than in ops_sse2.c so it was
+   testable against the three scalar derivations before it moved into a
    shipping file.
 
    Every operand is built with the value in the low 16 bits and zero in
@@ -141,23 +191,7 @@ static lz_i64 mac_carry_free(const int *a, const short *m, int n) {
    lane - a periodic flush would need a period of one, which is what
    this already is. */
 #include <emmintrin.h>
-
-/* -DEPI_LINK_SHIPPED points the harness at the real symbol in
-   ops_sse2.c instead of the copy below. Both are kept: the copy lets
-   this file build and run standalone, and the link mode is what proves
-   the SHIPPED function passes rather than a body that merely resembles
-   it. Verifying a copy and calling the artifact verified is a mistake
-   this tree has made before.
-
-   Build: gcc -O2 -std=c99 -Wall -Wextra -msse2 -Isrc -DEPI_LINK_SHIPPED \
-          -DLZ_SSE2_TU=1 .prof/epi_mac_oracle.c src/ops_sse2.c -o /tmp/x */
-#ifdef EPI_LINK_SHIPPED
-#include "ops_sse2.h"
-static lz_i64 mac_sse2(const int *a, const short *m, int n) {
-    return lz_epi_mac_i16_sse2((const int32_t *)a, (const int16_t *)m, n);
-}
-#else
-static lz_i64 mac_sse2(const int *a, const short *m, int n) {
+static lz_i64 mac_kernel(const int *a, const short *m, int n) {
     const __m128i lo16 = _mm_set1_epi32(0x0000FFFF);
     const __m128i one  = _mm_set1_epi32(1);
     const __m128i zero = _mm_setzero_si128();
@@ -206,7 +240,14 @@ static lz_i64 mac_sse2(const int *a, const short *m, int n) {
     }
     return (((s_ah + tail_ah) + (s_b + tail_b)) << 16) + (s_als + tail_als);
 }
-#endif /* EPI_LINK_SHIPPED */
+#endif /* kernel selection */
+
+/* NOT %ld. This harness cross-builds to a 32-bit target, where long is
+   32 bits and every reported value would be the low half of the one
+   actually compared - two sums that differ only above bit 31 then print
+   identically, which is exactly the failure the carry terms exist for.
+   The comparisons were always on lz_i64; only the report was lossy. */
+#define P64 "%" LZ_PRI64 "d"
 
 static unsigned rng_state = SEED;
 static unsigned rng_next(void) {
@@ -217,11 +258,24 @@ static unsigned rng_next(void) {
     return rng_state;
 }
 
-int main(void) {
+/* argv is arm_mutgate.sh's calling convention, not a feature of this
+   harness: [leaf] [seed] [divisor]. The divisor shortens the random
+   sweep for a mutation run, which only has to reach the first
+   mismatch. Seed 0 means "the fixed one", so a caller that passes no
+   seed and one that passes 0 sample the same inputs. */
+int main(int argc, char **argv) {
     static int a[512];
     static short m[512];
-    int trial, g, bad = 0;
-    long checked = 0;
+    int g, bad = 0;
+    long trial, checked = 0;
+    long trials = 20000;
+
+    if (argc > 2) rng_state = (unsigned)strtoul(argv[2], NULL, 0);
+    if (!rng_state) rng_state = SEED;
+    if (argc > 3) {
+        long d = strtol(argv[3], NULL, 0);
+        if (d > 1) trials = (trials / d) < 1 ? 1 : (trials / d);
+    }
 
     /* Edge cases first, since these are where a sign correction fails
        and a uniform random sweep is least likely to land. */
@@ -243,19 +297,57 @@ int main(void) {
                 d = mac_direct(0, a, m, 8);
                 s = mac_split(a, m, 8);
                 c = mac_carry_free(a, m, 8);
-                v = mac_sse2(a, m, 8);
+                v = mac_kernel(a, m, 8);
                 checked++;
                 if (d != s || d != c || d != v) {
-                    printf("MISMATCH a=%d m=%d direct=%ld split=%ld "
-                           "cfree=%ld sse2=%ld\n", ae[i], (int)me[j],
-                           (long)d, (long)s, (long)c, (long)v);
+                    printf("MISMATCH a=%d m=%d direct=" P64 " split=" P64
+                           " cfree=" P64 " " KERNEL_NAME "=" P64 "\n",
+                           ae[i], (int)me[j], d, s, c, v);
                     bad++;
                 }
             }
         }
     }
 
-    for (trial = 0; trial < 20000; trial++) {
+    /* n around the loop's floor, swept rather than sampled. The random
+       block below draws n from 1..512, so it reaches any particular
+       small n about once in five hundred trials - and small n is where
+       a vector body is nothing BUT its entry guard and its scalar tail.
+       At or below zero the answer is 0 by the C body's empty loop, and
+       a guard that lets a 4-wide loop start there walks backwards. */
+    {
+        static const int nz[] = { -7, -1, 0 };
+        int i, nn;
+        for (i = 0; i < (int)(sizeof nz / sizeof nz[0]); i++) {
+            lz_i64 v = mac_kernel(a, m, nz[i]);
+            checked++;
+            if (v != 0) {
+                printf("MISMATCH n=%d " KERNEL_NAME "=" P64
+                       ", expected 0\n", nz[i], v);
+                bad++;
+            }
+        }
+        for (nn = 1; nn <= 12; nn++) {
+            lz_i64 d, s, c, v;
+            for (g = 0; g < nn; g++) {
+                a[g] = (int)rng_next();
+                m[g] = (short)(rng_next() & 0xFFFFu);
+            }
+            d = mac_direct(0, a, m, nn);
+            s = mac_split(a, m, nn);
+            c = mac_carry_free(a, m, nn);
+            v = mac_kernel(a, m, nn);
+            checked++;
+            if (d != s || d != c || d != v) {
+                printf("MISMATCH n=%d direct=" P64 " split=" P64
+                       " cfree=" P64 " " KERNEL_NAME "=" P64 "\n",
+                       nn, d, s, c, v);
+                bad++;
+            }
+        }
+    }
+
+    for (trial = 0; trial < trials; trial++) {
         int n = 1 + (int)(rng_next() % 512u);
         lz_i64 d, s, c, v;
         for (g = 0; g < n; g++) {
@@ -265,11 +357,12 @@ int main(void) {
         d = mac_direct(0, a, m, n);
         s = mac_split(a, m, n);
         c = mac_carry_free(a, m, n);
-        v = mac_sse2(a, m, n);
+        v = mac_kernel(a, m, n);
         checked++;
         if (d != s || d != c || d != v) {
-            printf("MISMATCH trial=%d n=%d direct=%ld split=%ld cfree=%ld sse2=%ld\n",
-                   trial, n, (long)d, (long)s, (long)c, (long)v);
+            printf("MISMATCH trial=%ld n=%d direct=" P64 " split=" P64
+                   " cfree=" P64 " " KERNEL_NAME "=" P64 "\n",
+                   trial, n, d, s, c, v);
             if (++bad > 8) break;
         }
     }

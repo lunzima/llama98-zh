@@ -85,6 +85,13 @@ attn|wsum-halfword-select|$ARMC|s/smlawt r10, %\[ka\], r7, r10/smlawb r10, %[ka]
 attn|wsum-coefficient|$ARMC|s/smlawb r8,  %\[ka\], r7, r8/smlawb r8,  %[kb], r7, r8/
 attn|wsum-row-stride|$ARMC|s/ldr    r6, \[%\[pa\]\], #4/ldr    r6, [%[pa]], #8/
 attn|wsum-store-writeback|$ARMC|s/stmia  %\[ac\]!, {r8, r9, r10, r11}/stmia  %[ac], {r8, r9, r10, r11}/
+epi|ldrsh-sign-extension|$ARMC|s/ldrsh  r9,  \[%\[mp\]\], #2/ldrh   r9,  [%[mp]], #2/
+epi|smlal-operand-pairing|$ARMC|s/smlal  %\[lo\], %\[hi\], r5, r9/smlal  %[lo], %[hi], r5, r8/
+epi|ldm-block-size|$ARMC|s/ldmia  %\[ap\]!, {r4, r5, r6, r7}/ldmia  %[ap]!, {r4, r5, r6}/
+epi|loop-count|$ARMC|s/subs   %\[blk\], %\[blk\], #1/subs   %[blk], %[blk], #2/
+epi|low-word-widening|$ARMC|s/(lz_i64)(uint32_t)lo/(lz_i64)(int32_t)lo/
+epi|tail-count|$ARMC|s/tail = n \& 3/tail = n \& 1/
+epi|empty-guard|$ARMC|s/if (n <= 0) return 0;/if (n <= 1) return 0;/
 EOF
 )
 
@@ -95,13 +102,20 @@ printf '%-6s %-24s %-8s %s\n' LEAF MUTATION VERDICT DETAIL
 while IFS='|' read -r leaf name file expr; do
     [ -n "$leaf" ] || continue
     [ -z "$ONLY" ] || [ "$leaf" = "$ONLY" ] || continue
+    # epi's driver is not the leaf gate: its entry point is static in
+    # ops.c, so the harness that can reach the kernel is the oracle,
+    # and it takes the same [leaf] [seed] [divisor] arguments.
+    case "$leaf" in
+    epi) GATE=epi_arm_gate.sh; DRV=epi_mac_oracle.c ;;
+    *)   GATE=arm_leafgate.sh; DRV=arm_leafgate.c ;;
+    esac
     rm -rf "$W"; mkdir -p "$W/.prof"
     cp -r "$R/src" "$W/src"
-    # The two files arm_leafgate.sh reads, not the whole directory:
-    # .prof has grown to 2.7 GB of build products and copying it across
-    # DrvFs was costing ~2 minutes PER MUTATION, which is most of a
-    # working afternoon over a full run.
-    cp "$R/.prof/arm_leafgate.c" "$R/.prof/arm_leafgate.sh" "$W/.prof/"
+    # The two files the driver reads, not the whole directory: .prof has
+    # grown to 2.7 GB of build products and copying it across DrvFs was
+    # costing ~2 minutes PER MUTATION, which is most of a working
+    # afternoon over a full run.
+    cp "$R/.prof/$DRV" "$R/.prof/$GATE" "$W/.prof/"
     if ! sed -i "$expr" "$W/$file"; then
         printf '%-6s %-24s %-8s %s\n' "$leaf" "$name" FAIL "sed failed"
         fail=$((fail + 1)); continue
@@ -111,7 +125,7 @@ while IFS='|' read -r leaf name file expr; do
                "sed matched nothing - the pattern is stale"
         fail=$((fail + 1)); continue
     fi
-    if ! R="$W" O="$W/o" bash "$W/.prof/arm_leafgate.sh" "$leaf" 0 "$DIVI" \
+    if ! R="$W" O="$W/o" bash "$W/.prof/$GATE" "$leaf" 0 "$DIVI" \
             >"$W/run.log" 2>&1; then
         if grep -q 'MISMATCH' "$W/run.log"; then
             printf '%-6s %-24s %-8s %s\n' "$leaf" "$name" RED \
