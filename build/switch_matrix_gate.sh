@@ -472,14 +472,47 @@ LINKSRC=$(make -n llama98 2>/dev/null | grep -m1 -- '-o llama98 ')
 if [ -z "$LINKSRC" ]; then
     echo "SKIP: all-at-once link - could not read the link command from make"
 else
+    # The link line names build/native/*.o, which make builds by a
+    # separate rule. If they are absent - a fresh clone, a `make clean`,
+    # or another session's build removing them mid-run in this shared
+    # tree - ld reports "cannot find" and this stage would call it "a
+    # switch removed a definition someone still references". That is an
+    # environment fact wearing a code defect's words, and it was seen:
+    # 41 of 42 passing with the one failure entirely missing objects.
+    MISSING=""
+    for o in $(printf '%s\n' $LINKSRC | grep -oE 'build/native/[a-z0-9_]+\.o'); do
+        [ -f "$o" ] || MISSING="$MISSING $o"
+    done
+    if [ -n "$MISSING" ]; then
+        echo "SKIP: all-at-once link - missing prerequisite object(s):$MISSING"
+        echo "      Run 'make llama98' first. This is not a switch failure."
+        LINKSRC=""
+    fi
+fi
+if [ -n "$LINKSRC" ]; then
     LINKCMD=${LINKSRC/ -o llama98 / -o $TMPD/allsw.exe }
     if eval "$LINKCMD $LINKDEFS -DLZ_BATCH_DEFAULT=1" \
             >"$TMPD/allsw.log" 2>&1; then
         echo "PASS: all-at-once link (34 of 35 switches non-default, one binary)"
     else
         echo "FAIL: all-at-once link - a switch removed a definition someone still references:"
-        grep -E 'undefined reference|error:' "$TMPD/allsw.log" \
-            | head -6 | sed 's/^/      /'
+        # The SYMBOL, which is the whole content of this failure. ld
+        # writes it with a long toolchain path in front and the phrase
+        # broken across the line, so a grep for 'undefined reference'
+        # catches the wrapped continuation and not the name - this
+        # printed only "collect2.exe: error" and left the reader with a
+        # failure that named nothing.
+        SYMS=$(grep -oE "undefined reference to \`[^']+'" "$TMPD/allsw.log" \
+               | sed "s/.*\`//;s/'//" | sort -u)
+        [ -n "$SYMS" ] || SYMS=$(grep -oE "undefined symbol[: ]+[A-Za-z_][A-Za-z0-9_]*" \
+                                 "$TMPD/allsw.log" | awk '{print $NF}' | sort -u)
+        if [ -n "$SYMS" ]; then
+            printf '      %s\n' $SYMS
+        else
+            echo "      (no symbol in the log - the link failed for some other"
+            echo "       reason; the tail follows)"
+            tail -6 "$TMPD/allsw.log" | sed 's/^/      /'
+        fi
         FAIL=$((FAIL + 1))
     fi
 fi
