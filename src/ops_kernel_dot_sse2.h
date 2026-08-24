@@ -302,6 +302,50 @@ static __m128i part32_t2(const unsigned char *w2, const int16_t *x) {
     return _mm_add_epi32(s0, s1);
 }
 
+/* The same sub-block against two tokens, sharing the ternary decode.
+ *
+ * T2 IS NOT THE CHEAPEST FORMAT AT THIS TIER, which is worth stating
+ * because it is at the MMX one. There the unpack is a zero register and
+ * three immediate shifts, and a pair would share almost nothing. Here
+ * the four 2-bit fields are extracted with four masks, three shifts and
+ * two 64-bit merges before the four unpacks - fourteen instructions on
+ * the weight side, second only to q6_1's nineteen and more than q4_1's
+ * eight. Same operator, different decode, opposite conclusion.
+ *
+ * Bit-identical to two part32_t2 calls: the decode is the single form's
+ * line for line, each token accumulates in its own registers in the
+ * same order, and nothing crosses between them. */
+static void part32_t2_2(const unsigned char *w2, const int16_t *xa,
+                        const int16_t *xb, __m128i *pa, __m128i *pb) {
+    const __m128i m03 = _mm_set1_epi8(0x03);
+    __m128i z  = _mm_setzero_si128();
+    __m128i t  = _mm_loadl_epi64((const __m128i *)(const void *)w2);
+    __m128i g0 = _mm_and_si128(t, m03);
+    __m128i g1 = _mm_and_si128(_mm_srli_epi16(t, 2), m03);
+    __m128i g2 = _mm_and_si128(_mm_srli_epi16(t, 4), m03);
+    __m128i g3 = _mm_and_si128(_mm_srli_epi16(t, 6), m03);
+    __m128i lo = _mm_unpacklo_epi64(g0, g1);
+    __m128i hi = _mm_unpacklo_epi64(g2, g3);
+    __m128i l0 = _mm_unpacklo_epi8(z, lo);
+    __m128i l1 = _mm_unpackhi_epi8(z, lo);
+    __m128i h0 = _mm_unpacklo_epi8(z, hi);
+    __m128i h1 = _mm_unpackhi_epi8(z, hi);
+    __m128i a0 = _mm_loadu_si128((const __m128i *)(const void *)xa);
+    __m128i a1 = _mm_loadu_si128((const __m128i *)(const void *)(xa + 8));
+    __m128i a2 = _mm_loadu_si128((const __m128i *)(const void *)(xa + 16));
+    __m128i a3 = _mm_loadu_si128((const __m128i *)(const void *)(xa + 24));
+    __m128i b0 = _mm_loadu_si128((const __m128i *)(const void *)xb);
+    __m128i b1 = _mm_loadu_si128((const __m128i *)(const void *)(xb + 8));
+    __m128i b2 = _mm_loadu_si128((const __m128i *)(const void *)(xb + 16));
+    __m128i b3 = _mm_loadu_si128((const __m128i *)(const void *)(xb + 24));
+    *pa = _mm_add_epi32(
+              _mm_add_epi32(_mm_madd_epi16(l0, a0), _mm_madd_epi16(l1, a1)),
+              _mm_add_epi32(_mm_madd_epi16(h0, a2), _mm_madd_epi16(h1, a3)));
+    *pb = _mm_add_epi32(
+              _mm_add_epi32(_mm_madd_epi16(l0, b0), _mm_madd_epi16(l1, b1)),
+              _mm_add_epi32(_mm_madd_epi16(h0, b2), _mm_madd_epi16(h1, b3)));
+}
+
 /* T2 over a 128-element group: four sub-blocks, four sums, one fold.
  *
  * WHAT THIS SAVES, because the registry's reason for leaving the t2/g128
