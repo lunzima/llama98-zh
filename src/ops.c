@@ -3782,11 +3782,23 @@ static const char *const km_col[LZ_KM_NCOL] = {
 };
 
 /* Printed, so one line each; the audit above is the long form. */
+/* CONFIRMED BY THE COMPILER, not only by the instruction audit. gcc
+   -O3 on the same C, build/o3_probe.sh: lz_attn_score_q8 emits 151
+   packed instructions at -march=x86-64 and lz_attn_wsum_q8 emits 122,
+   and BOTH emit ZERO at -m32 -march=pentium3. The vectoriser, given
+   every optimisation and an SSE1 target, finds nothing to vector.
+
+   The audit and the compiler agree, which is the point of running
+   both: an audit is an argument about an ISA table, and three cells in
+   this registry turned out to have plausible arguments that were
+   wrong. SSE1's own integer additions - pmaxsw, pminsw, pshufw, pavgw,
+   pmulhuw, psadbw - are real and this tree uses pmaxsw elsewhere; they
+   are simply not a 16x16->32 MAC, which is what these loops are. */
 static const char km_why_sse1[] =
-    "SSE1 adds no signed 16x16->32 MAC and no integer %xmm; its two "
-    "useful additions (prefetchnta, movntq) are already in the MMX "
-    "kernels and belong to --prefetch; instruction-by-instruction audit "
-    "above km_reg in src/ops.c";
+    "SSE1 adds no signed 16x16->32 MAC and no integer %xmm; its own MMX "
+    "additions (pmaxsw/pshufw/psadbw) are real but are not a MAC. gcc "
+    "-O3 at -march=pentium3 emits zero packed instructions for these "
+    "loops against 151 at -march=x86-64 (build/o3_probe.sh)";
 static const char km_why_t2g128[] =
     "nothing to hoist across the four sub-blocks - see LZ_G128_T2 in "
     "src/ops.c";
