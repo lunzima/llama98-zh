@@ -3961,15 +3961,27 @@ static const char km_why_sse1[] =
    cq = QSCALE + ((LN2*s + rnd) >> Q) + ((LN2SQ*s*s + rnd) >> 2Q), then
    prod = (g_exptab[idx] * cq + rnd) >> Q - whose multiplies are
    32 x 32 -> 64, not the 16 x 16 -> 32 that made sigq's tail a pmaddwd.
-   That changes which instruction each tier needs and it changes the
-   answer for one of them:
-     SSE2  pmuludq is exactly 32 x 32 -> 64, two lanes. The operands are
-           signed and pmuludq is not, so the sign has to be folded in
-           by hand, but the instruction is there.
+   That changes which instruction each tier needs:
+     SSE2  pmuludq is exactly 32 x 32 -> 64, two lanes, and it needs NO
+           sign handling here - every operand is non-negative. r is
+           [0,1) by construction, so rq >= 0 and s = rq >> 5 >= 0;
+           LN2 and LN2SQ are positive Q20 constants; g_exptab holds
+           exp() times QSCALE; cq is QSCALE plus two non-negative
+           terms. An earlier version of this note said the sign had to
+           be folded in by hand, which would send the next reader down
+           a path the arithmetic does not need.
      MMX   has nothing wider than pmaddwd. The product has to be built
            from 16-bit halves with shifts and adds - several
            instructions where SSE2 spends one. Owed, not impossible:
            expressible is the bar, not convenient.
+
+   THE REAL COST IS THE SECOND TAYLOR TERM, on either tier. LN2SQ*s*s
+   is ((int64)LN2SQ * s) * s in C, so the first product is 32 x 32 -> 64
+   and pmuludq takes it, but the second is 64 x 32 and pmuludq does not
+   - that one needs the hi/lo split, two more multiplies and a shifted
+   add. Reassociating to LN2SQ * (s*s) would not help and is not
+   available anyway: it is a different number.
+
    The 32-entry table lookup stays scalar on both, same as sigq's. */
 /* sigq's SSE1 cells, and this one CLOSES rather than opens. The
    interpolation is psubd, packssdw, pmullw, pmulhw, punpck[lh]wd,
@@ -3987,9 +3999,10 @@ static const char km_why_sigq_sse1[] =
     "form is SSE2's, which has its own cell";
 static const char km_why_expfx_x86[] =
     "todo: not sigq's interpolation - lz_exp_fixed is a Q20 Taylor whose "
-    "multiplies are 32x32->64. SSE2 has pmuludq (unsigned, so the sign "
-    "is folded by hand); MMX has to build the product from 16-bit halves. "
-    "The 32-entry lookup stays scalar on both";
+    "multiplies are 32x32->64, every operand non-negative so pmuludq "
+    "needs no sign handling. The cost is LN2SQ*s*s: the second multiply "
+    "is 64x32 and needs a hi/lo split on either tier. MMX has nothing "
+    "wider than pmaddwd. The 32-entry lookup stays scalar on both";
 /* EXPFX AND SIGQ ONLY, and the scope line is here because this string
    used to be the default for every operator unit and was wrong for
    three of them. i32f and q8rnd both have group forms - the wsum chunk
