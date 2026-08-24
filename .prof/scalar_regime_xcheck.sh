@@ -78,26 +78,56 @@ else
 fi
 
 # ---- ARM / soft-float ---------------------------------------------------
+# THROUGH WSL WHEN THE HOST SHELL HAS NO CROSS TOOLCHAIN. On this machine
+# arm-linux-gnueabi-gcc and qemu-arm-static exist only inside WSL, and
+# probing for them from Git Bash finds nothing - so this arm skipped
+# every run while reporting PASS, which is the one regime the whole
+# script exists to reach. The other WSL stages (mips, x87, align) take
+# the same shape.
 ACC=$(command -v arm-linux-gnueabi-gcc-14 2>/dev/null \
    || command -v arm-linux-gnueabi-gcc 2>/dev/null || true)
-if [ -n "$ACC" ] && command -v qemu-arm-static >/dev/null 2>&1; then
+ARM_VIA=native
+if [ -z "$ACC" ] && command -v wsl >/dev/null 2>&1; then
+    if wsl bash -lc "command -v arm-linux-gnueabi-gcc-14 >/dev/null \
+                     && command -v qemu-arm-static >/dev/null" 2>/dev/null; then
+        ARM_VIA=wsl
+    fi
+fi
+
+arm_ok=0
+if [ "$ARM_VIA" = native ] && [ -n "$ACC" ] \
+   && command -v qemu-arm-static >/dev/null 2>&1; then
     if $ACC -O2 -std=c99 -static -march=armv5te -mtune=arm926ej-s \
             -mfloat-abi=soft -DLZ_NO_FPU=1 -ffp-contract=off -I"$R/src" \
             -o "$O/arm" "$R/.prof/scalar_regime_xcheck.c" \
             $(list "$R/src" $SRC $ARM_EXTRA) -lm > "$O/arm.log" 2>&1; then
-        G=$(qemu-arm-static "$O/arm" | norm)
-        echo "-- ARM soft-float (no FPU) --"; echo "$G" | sed 's/^/  /'
-        [ "$G" = "$REF" ] || {
-            echo "FAIL: the soft-float build differs from gcc/SSE2"
-            FAILED=1; }
-    else
-        MISSING="$MISSING soft-float"
-        echo "-- ARM soft-float -- SKIP, the cross build failed"
-        tail -5 "$O/arm.log"
+        G=$(qemu-arm-static "$O/arm" | norm); arm_ok=1
     fi
+elif [ "$ARM_VIA" = wsl ]; then
+    case "$R" in /[a-z]/*) WR="/mnt$R" ;; *) WR="$R" ;; esac
+    SRCLIST=$(list "$R/src" $SRC $ARM_EXTRA | sed "s|$R|$WR|g")
+    if wsl bash -lc "cd '$WR' && arm-linux-gnueabi-gcc-14 -O2 -std=c99 \
+            -static -march=armv5te -mtune=arm926ej-s -mfloat-abi=soft \
+            -DLZ_NO_FPU=1 -ffp-contract=off -I'$WR/src' -o /tmp/srx_arm \
+            '$WR/.prof/scalar_regime_xcheck.c' $SRCLIST -lm" \
+            > "$O/arm.log" 2>&1; then
+        G=$(wsl bash -lc "qemu-arm-static /tmp/srx_arm" | norm); arm_ok=1
+    fi
+fi
+
+if [ "$arm_ok" -eq 1 ]; then
+    echo "-- ARM soft-float (no FPU, via $ARM_VIA) --"; echo "$G" | sed 's/^/  /'
+    [ "$G" = "$REF" ] || {
+        echo "FAIL: the soft-float build differs from gcc/SSE2"
+        FAILED=1; }
 else
     MISSING="$MISSING soft-float"
-    echo "-- ARM soft-float -- SKIP, no cross toolchain or qemu"
+    if [ "$ARM_VIA" = wsl ]; then
+        echo "-- ARM soft-float -- SKIP, the WSL cross build failed"
+        tail -5 "$O/arm.log"
+    else
+        echo "-- ARM soft-float -- SKIP, no cross toolchain or qemu"
+    fi
 fi
 
 [ $FAILED -eq 0 ] || { echo "scalar_regime_xcheck: FAIL"; exit 1; }

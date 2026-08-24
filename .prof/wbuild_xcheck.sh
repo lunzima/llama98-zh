@@ -34,10 +34,18 @@ O=${O:-.prof/_wxc}
 [ -f "$R/.prof/$P.c" ] || { echo "no such probe: .prof/$P.c"; exit 2; }
 cd "$R" || exit 2
 
+# LIBNT is spelled out rather than built as "$LIBROOT/nt": on Windows
+# LIBROOT is a BACKSLASH path, and appending a forward slash produced
+# 'C:\WATCOM\lib386/nt', which wlink does not resolve. The nt directory
+# then goes unsearched, clib3r falls through to the target-neutral copy
+# one level up, and every libc symbol comes back undefined - including
+# __I8RS, which reads like a compiler problem rather than a path one.
 if [ -x /c/WATCOM/binnt64/wcc386.exe ]; then
-    W=/c/WATCOM/binnt64; WROOT=/c/WATCOM; LIBROOT='C:\WATCOM\lib386'
+    W=/c/WATCOM/binnt64; WROOT=/c/WATCOM
+    LIBROOT='C:\WATCOM\lib386'; LIBNT='C:\WATCOM\lib386\nt'; LIBSEP='\'
 elif [ -x /mnt/c/WATCOM/binl64/wcc386 ]; then
-    W=/mnt/c/WATCOM/binl64; WROOT=/mnt/c/WATCOM; LIBROOT=/mnt/c/WATCOM/lib386
+    W=/mnt/c/WATCOM/binl64; WROOT=/mnt/c/WATCOM
+    LIBROOT=/mnt/c/WATCOM/lib386; LIBNT=/mnt/c/WATCOM/lib386/nt; LIBSEP=/
 else
     echo "$P: SKIP - no C:\\WATCOM"; exit 2
 fi
@@ -71,11 +79,22 @@ done
     echo "runtime console"
     echo "option quiet"
     echo "name $O/probe.exe"
-    echo "libpath $LIBROOT/nt"
+    # LIBSEP, not a literal '/': on Windows LIBROOT is a backslash path
+    # ('C:\WATCOM\lib386') and appending "/nt" gave wlink
+    # 'C:\WATCOM\lib386/nt', which it does not resolve. The nt directory
+    # then never gets searched, clib3r falls through to the target-neutral
+    # copy one level up, and every libc symbol comes back undefined -
+    # including __I8RS, which reads like a compiler problem rather than a
+    # path one.
+    echo "libpath $LIBNT"
     echo "libpath $LIBROOT"
     for f in $SRC $SRC_HIGH; do echo "file $O/$f.obj"; done
     echo "file $O/probe.obj"
-    echo "library clib3r, math387r, kernel32, user32, advapi32"
+    # clib3r by FULL PATH, the way the Makefile's own link line does it.
+    # By bare name it is resolved against libpath, and the copy that wins
+    # there is the target-neutral one a level above nt/ - which does not
+    # carry the NT C runtime, so every libc symbol comes back undefined.
+    echo "library $LIBNT${LIBSEP}clib3r.lib, math387r, kernel32, user32, advapi32"
 } > "$O/probe.lnk"
 "$WLINK" @"$O/probe.lnk" > "$O/link.log" 2>&1 \
     || { echo "$P: FAIL - link"; tail -12 "$O/link.log"; exit 1; }
