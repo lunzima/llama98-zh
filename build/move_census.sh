@@ -62,8 +62,21 @@
 # lz_generate_resume_ex is the one worth opening: largest in the file,
 # highest absolute movement, and unlike the lz_spec_* entries around it
 # the default path does run it. 1011 of its 1743 instructions move data.
-# Whether that movement is redundant or inherent to marshalling the
-# generation state is the question, and it is not answered here.
+#
+# IT WAS OPENED, AND IT IS NOT A DEFECT. The obvious source cause would
+# be option fields re-read through the pointer every token; they are
+# not. Thirty-five opts-> dereferences across the function, ten inside
+# the per-token loop, four of those spec_debug fields in branches the
+# default never enters - and the one that would have mattered,
+# opts->spec_k, is already hoisted into spec_active with a comment
+# saying why. What is left is a function taking thirteen parameters on
+# a target with eight registers: every one is a stack slot and every use
+# is a load. Fixing that means changing a public signature that both
+# front ends call, which is a different piece of work from anything a
+# census can motivate.
+#
+# So: high share here is a property of the calling convention, not a
+# finding. That is worth knowing before the next reader spends the trip.
 #
 # Both sides at the shipping settings, 32-bit, for the reason in
 # xcc_codesize.sh's header.
