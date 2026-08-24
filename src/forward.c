@@ -367,6 +367,13 @@ static const double LZ_US_SCALE = 1000.0;
    report only the tail after the last inner call and the total would
    come out 25%% short. Phases that nest are reported INCLUSIVE, with
    the inner one also listed on its own. */
+/* Declares AND assigns, so it can only appear where a declaration is
+   legal. Under C89 that is the top of a block, and none of the six call
+   sites is there - Visual C++ 4.0 turns each into an error and gcc only
+   warns, which is why they survived. Splitting it into a declaration
+   half and an assignment half is the fix, and it has to land in the
+   same edit as the six declarations it needs at the call sites: the
+   macro alone leaves every _t* undeclared. */
 #define LZ_PROF_BEG(v) double v = lz_prof_enable ? lz_time_ms() : 0.0
 #define LZ_PROF_END(v, slot) do { if (lz_prof_enable) \
     lz_prof_us[slot] += (lz_time_ms() - (v)) * LZ_US_SCALE; } while (0)
