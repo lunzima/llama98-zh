@@ -131,6 +131,26 @@ fi
 echo "mmx  -> $SEL_MMX"
 echo "sse2 -> $SEL_SSE"
 
+# THE SSE1 ROWS NEED A DIFFERENT OBSERVABLE, and the one above would lie
+# about them. SSE1 adds no integer ROW kernel, so `--kernel sse` and
+# `--kernel mmx` both report "tier mmx-intrin" - identical on the line
+# checked above, while the operator bodies underneath differ. The
+# recurrence line is where the three separate, so that is what the
+# distinctness check reads for them. Without it the sse/ssem/ssef rows
+# would pass on a host that clamped sse away, measuring nothing.
+imp_of() { "./$BIN" "$MODEL" --kernel "$1" --check 2>&1 | \
+           grep -m1 -o 'recurrence impl [a-z0-9-]*'; }
+IMP_MMX=$(imp_of mmx); IMP_SSE1=$(imp_of sse); IMP_SSE2=$(imp_of sse2)
+SSE1_ROWS=1
+if [ -z "$IMP_MMX" ] || [ -z "$IMP_SSE1" ] || [ -z "$IMP_SSE2" ] ||
+   [ "$IMP_MMX" = "$IMP_SSE1" ] || [ "$IMP_SSE1" = "$IMP_SSE2" ]; then
+    echo "note: SSE1 rows will SKIP - mmx/sse/sse2 do not resolve to three"
+    echo "  distinct bodies here (mmx=$IMP_MMX sse=$IMP_SSE1 sse2=$IMP_SSE2)"
+    SSE1_ROWS=0
+else
+    echo "sse  -> $IMP_SSE1 (mmx=$IMP_MMX sse2=$IMP_SSE2)"
+fi
+
 # FLAG SETS, not just fixtures. Default flags do not reach every kernel
 # in the matrix: the float Hadamard (fwhtf, lz_fwht) only runs when
 # --kv-rot is on, so with one flag set this gate never executed that
@@ -253,8 +273,18 @@ else
 fi
 SSE1_BIN=${SSE1_BIN:-}
 
+# sse and ssem are SSE1 as a real tier. It used to be reachable only by
+# CPUID behind g_kernel's back, which is why --kernel mmx measured as
+# "recurrence impl sse-intrin" before LZ_KERNEL_SSE existed - the mmx row
+# above was comparing SSE1 against SSE2 and calling it MMX. ssem is the
+# comparison the LZ_P2_FORCE_MMX / LZ_EXP_Q20_FORCE_MMX control builds
+# were standing in for; ssef reaches the SSE1 float matmul row, which the
+# fixed default does not.
 FLAGSETS="dflt:mmx:sse2:$RBIN:
 rot:mmx:sse2:$RBIN:--kv-rot on
+sse:sse:sse2:$RBIN:
+ssem:mmx:sse:$RBIN:
+ssef:mmx:sse:$RBIN:--fixed off
 epi:ref:sse2:$EPI0_BIN:"
 
 FAIL=0
@@ -273,6 +303,13 @@ for fx in zh en; do
             echo "SKIP: $fx / $lbl - its binary was not built"
             continue
         fi
+        case "$lbl" in
+        sse|ssem|ssef)
+            [ "$SSE1_ROWS" = 1 ] || {
+                echo "SKIP: $fx / $lbl - sse is not distinct on this host"
+                continue
+            } ;;
+        esac
         ok=1
         for k in "$ta" "$tb"; do
             if ! "$rbin" "$MODEL" --tokens-file "$TOK" --kernel "$k" \

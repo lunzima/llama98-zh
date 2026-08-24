@@ -510,18 +510,14 @@ void lz_exp_fixed_run(const float *x, float *out, int n) {
             lz_exp_q20_simd(tv, sv, pv, m);
         else
 #endif /* LZ_HAVE_EXP_Q20_SIMD */
-#if defined(LZ_HAVE_EXP_Q20_SSE) && !defined(LZ_EXP_Q20_FORCE_MMX)
+#if defined(LZ_HAVE_EXP_Q20_SSE)
         /* Above the MMX cell and below SSE2: same width as MMX, fewer
            instructions, and a machine with SSE1 but not SSE2 (Pentium
-           III, Athlon) is a real point on this target family. Reached
-           from CPUID rather than g_kernel because there is no
-           LZ_KERNEL_SSE - on a PIII g_kernel is LZ_KERNEL_MMX while the
-           machine does have SSE.
-           LZ_EXP_Q20_FORCE_MMX mirrors LZ_NORM_SS_FORCE_MMX, and for
-           the same reason: without it this arm shadows the MMX one on
-           every machine that runs the suite, and a path that cannot be
-           selected cannot be validated. */
-        if (g_kernel != LZ_KERNEL_REF && lz_cpu_has_sse())
+           III, Athlon) is a real point on this target family. Selected
+           by tier - it used to read CPUID, which made this arm shadow
+           the MMX one on every machine that runs the suite and needed a
+           separate LZ_EXP_Q20_FORCE_MMX build to get underneath. */
+        if (g_kernel == LZ_KERNEL_SSE)
             lz_exp_q20_sse(tv, sv, pv, m);
         else
 #endif /* LZ_HAVE_EXP_Q20_SSE */
@@ -580,7 +576,7 @@ void lz_exp_fixed_run(const float *x, float *out, int n) {
  * WHY m CARRIES ONLY 24 BITS. The constants being folded ARE float32s,
  * so 24 bits is all the information in them; lz_fold_f32 splits one
  * exactly and the fold adds no error of its own. What it removes is the
- * pair of float32 roundings the old chain paid PER ELEMENT (`(float)s15
+ * pair of float32 roundings a naive chain pays PER ELEMENT (`(float)s15
  * * lbq`, then `x * LZ_EXP_LOG2E32` inside lz_exp), so the integer
  * coordinate is the more accurate of the two and not the looser one.
  */
@@ -1491,17 +1487,13 @@ float norm_ss_fixed(const float *x, int n, short *qout, int *eout) {
         acc = sacc;
     }
 #endif /* LZ_NORM_SS_SSE2_EXTERN */
-#if defined(LZ_NORM_SS_SSE_EXTERN) && !defined(LZ_NORM_SS_FORCE_MMX)
-    /* The SSE1 tier, BELOW the SSE2 one so a machine with both takes
-       the wider kernel. Reached from CPUID rather than g_kernel, the
-       same way lz_q8r_tier reads SSE1: there is no LZ_KERNEL_SSE, and
-       on a PIII g_kernel is LZ_KERNEL_MMX while the machine does have
-       SSE.
-       LZ_NORM_SS_FORCE_SSE mirrors LZ_Q8R_FORCE_SSE. Without it this
-       arm is unreachable on any machine with SSE2 - every machine that
-       runs the suite - and a path that cannot be selected cannot be
-       validated. */
-    if (i == 0 && g_kernel != LZ_KERNEL_REF && lz_cpu_has_sse() && n >= 4) {
+#if defined(LZ_NORM_SS_SSE_EXTERN)
+    /* The SSE1 tier, BELOW the SSE2 one so a machine with both takes the
+       wider kernel. Selected by tier - it used to read CPUID, which made
+       it fire for --kernel mmx too and left it unreachable from any
+       knob on a machine with SSE2, which is every machine in the
+       suite. */
+    if (i == 0 && g_kernel == LZ_KERNEL_SSE && n >= 4) {
         lz_i64 sacc = 0;
         i = lz_norm_ss_sse(x, n, sc, qout, &sacc);
         acc = sacc;

@@ -2901,9 +2901,12 @@ void lz_matmul(float *o, const float *x, const float *w,
 
            SSE1, not SSE2: mulps and addps are SSE1's, and every SSE2
            machine has them - so one kernel serves both tiers and the
-           SSE2 column holds the same body rather than a copy of it. */
-        if ((g_kernel == LZ_KERNEL_SSE2 || g_kernel == LZ_KERNEL_MMX) &&
-            lz_cpu_has_sse() && in_dim >= 8) {
+           SSE2 column holds the same body rather than a copy of it.
+           No CPUID in the test: lz_kernel_select clamps both of these
+           values to what CPUID found, so reaching either one is already
+           the answer this used to ask for a second time. */
+        if ((g_kernel == LZ_KERNEL_SSE2 || g_kernel == LZ_KERNEL_SSE) &&
+            in_dim >= 8) {
             float acc8[8];
             j = lz_matmul_row_sse(row, x, in_dim, acc8);
             a0 = acc8[0]; a1 = acc8[1]; a2 = acc8[2]; a3 = acc8[3];
@@ -3012,8 +3015,8 @@ void lz_fwht(float *v, int n) {
        Selected by tier, not by CPUID: --kernel ref must reach the C or
        the arm this is compared against would be this. Same guard shape
        src/fwht.c's int32 twin carries, and the same reason. */
-    if ((g_kernel == LZ_KERNEL_SSE2 || g_kernel == LZ_KERNEL_MMX) &&
-        lz_cpu_has_sse() && n >= 8 && (n & 7) == 0) {
+    if ((g_kernel == LZ_KERNEL_SSE2 || g_kernel == LZ_KERNEL_SSE) &&
+        n >= 8 && (n & 7) == 0) {
         for (len = 1; len < 4 && len < n; len <<= 1) {
             for (i = 0; i < n; i += (len << 1)) {
                 for (j = 0; j < len; j++) {

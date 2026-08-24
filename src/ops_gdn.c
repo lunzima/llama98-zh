@@ -122,7 +122,7 @@ static void lz_wsum_pair_x86(const int8_t *rowA, const int8_t *rowB,
 /* Non-MMX builds. Integer sums are exact under reassociation, so this is
    bit-identical to both kernels above - the same reason the SSM pass 1
    has a scalar twin. Without it, enabling this tier would make the output
-   depend on which compiler built the binary, and rule 2's byte-compare
+   depend on which compiler built the binary, and the cross-compiler byte-compare
    gate would stop meaning anything. */
 static void lz_wsum_pair_ref(const int8_t *rowA, const int8_t *rowB,
                              const int16_t *coef, int32_t *acc32) {
@@ -208,7 +208,7 @@ static int32_t dot32_x16_attn_x86(const int8_t *w, const int16_t *x) {
 void lz_attn_score_q8(float *att, const float *qhh, int hd,
                       const int8_t *kc, const float *ks, int kvd,
                       int pos, float scale, int sink, int ring) {
-    /* static, not stack (rule 6 item 4). qw carries the same aligned(4)
+    /* static, not stack (Win98 has a small stack). qw carries the same aligned(4)
        as matmul's g_xw and for the same reason: the hand-written leaf
        reads it with LDM, and int16_t promises two bytes, so whatever
        alignment gcc happens to give the array is not the contract. */
@@ -277,7 +277,7 @@ void lz_attn_score_q8(float *att, const float *qhh, int hd,
 
         /* Phase 1 is MMX only: collect every group's raw dot before any
            x87 runs. Interleaving the two leaves MMX registers dirty
-           across an x87 fld/fmul - the bug rule 6 item 6 describes. It
+           across an x87 fld/fmul. It
            showed 0 mismatches in a short bit-identity test and -nan in a
            longer one, on the Watcom build only. */
         for (g = 0; g < ng; g++)
@@ -286,7 +286,7 @@ void lz_attn_score_q8(float *att, const float *qhh, int hd,
         if (lz_cpu_has_mmx()) _mm_empty();
 #endif /* __WATCOMC__ || LZ_DOT_MMX_EXTERN */
         /* Phase 2, x87 only. Raw magnitude reaches 256*127*127*32 =
-           1.33e8 > 2^24, so lz_i32f() is mandatory here (rule 6 item 7),
+           1.33e8 > 2^24, so lz_i32f() is mandatory here,
            not a stylistic choice. */
         for (g = 0; g + 3 < ng; g += 4) {
             a0 += lz_i32f(rr[g + 0]) * (qs[g + 0] * kts[g + 0]);
@@ -660,7 +660,7 @@ void lz_attn_wsum_q8_int(int64_t *acc, float *sscale, const float *att,
 
    It applies to EVERY build, not only the MMX ones. A tier that is
    deliberately non-bit-identical must not be selected by which compiler
-   you used, or rule 2's "all builds byte-compare equal" gate stops meaning
+   you used, or the cross-compiler byte-compare gate stops meaning
    anything. So the non-MMX path gets a scalar fixed-point summation that
    shares the coefficient table; integer sums are exact under
    reassociation, so the two are bit-identical to each other. */
@@ -716,7 +716,7 @@ typedef struct {
 
 static void gdn_build_table(const float *ss, const float *q, const float *k,
                             int kd, int vd, int gg, LZGdnTable *tb) {
-    /* static, not stack, per rule 6 item 4 - and the reason they exist
+    /* static, not stack (Win98 has a small stack) - and the reason they exist
        at all is to keep the second loop from RECOMPUTING ss*k and ss*q.
        Reusing the first loop's products is exact, not close: that loop
        evaluates left to right, so `ss*k*ik` is fl(fl(ss*k)*ik) either
@@ -1013,7 +1013,7 @@ static void gdn_sum_gg(const int8_t *sq_gg, int kd, int vd,
 
 /* au/aw come back as scaled-up int32 with su/sw the matching dequant
    scale. The accumulator bound is 127*32767*256 ~= 1.06e9, far past 2^24,
-   so the caller must convert with lz_i32f() - rule 6 item 7. */
+   so the caller must convert with lz_i32f(). */
 static void gdn_pass1_fixed(const int8_t *sq,
 #if LZ_GDN_STATE_2PLANE
                             const int8_t *sq_lo, int32_t *aul, int32_t *awl,
@@ -1023,7 +1023,7 @@ static void gdn_pass1_fixed(const int8_t *sq,
                             int32_t *au, int32_t *aw, float *su, float *sw,
                             int32_t *au2, int32_t *aw2, float *su2, float *sw2) {
     int gg, ng = vd / 32;
-    /* static, not stack: 2-4 KB of table on a Win98 stack, per rule 6 item 4. */
+    /* static, not stack: 2-4 KB of table on a Win98 stack. */
     static LZGdnTable tb;
 #if LZ_GDN_FIXED < 2
     (void)au2; (void)aw2; (void)su2; (void)sw2;
@@ -1044,7 +1044,7 @@ static void gdn_pass1_fixed(const int8_t *sq,
 #if LZ_GDN_FIXED >= 2
         /* Second plane, same kernel, second table. The MMX gdn_sum_gg emits
            its own emms, so this runs a redundant one - kept rather than
-           hoisted, because rule 6 item 6's precondition ("no x87 in the
+           hoisted, because the emms-hoisting precondition ("no x87 in the
            loop body") fails here: gdn_build_table for the NEXT gg is x87.
            One extra tag-word write per gg is not worth reopening that trap. */
         gdn_sum_gg(sg, kd, vd, tb.t2, tb.tail2_cu, tb.tail2_cw,
@@ -1083,7 +1083,7 @@ static void gdn_pass1_fixed(const int8_t *sq,
 
 /* Two-plane quantize of one state row. Deliberately mirrors
    lz_quantize_q8: same integer-domain absmax, same amax*(1/127) scale
-   written as a multiply (rule 6 item 1), same q8_round, and the SAME
+   written as a multiply, same q8_round, and the SAME
    three rounding tiers. `hi` alone therefore matches what
    lz_quantize_q8 would have written, which makes
    -DLZ_GDN_STATE_2PLANE=0 vs 1 a clean A/B rather than two unrelated
@@ -1120,7 +1120,7 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
     lz_q8r_hits[tier < 0 ? 0 : (tier > 2 ? 2 : tier)]++;
 #endif /* LZ_Q8R_COUNT */
     static const float lo_mul = LZ_GDN_LO_SCALE;
-    /* static, not stack (rule 6 item 4); one row's residual at most. */
+    /* static, not stack; one row's residual at most. */
     static float res[LZ_GDN_MAX_VD];
 #endif /* LZ_HAVE_Q8R_SIMD || LZ_HAVE_Q8R_SSE */
     for (g = 0; g < ng; g++) {
@@ -1198,8 +1198,11 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
                     lz_q8round32_sse(grp + k, ho + k, &inv);
                 /* emms before the x87 residual arithmetic below, and
                    again before the next group's amax/inv - same reason as
-                   the identical placement in lz_quantize_q8 (rule 6 item
-                   6's precondition does not hold here). */
+                   the identical placement in lz_quantize_q8: the loop
+                   body contains x87, so the hoist that works elsewhere
+                   does not apply here. lz_q8round32_sse uses pmaxsw,
+                   which is SSE1 on an MMX REGISTER, so this tier leaves
+                   MMX state behind exactly as the MMX one does. */
                 if (lz_cpu_has_mmx()) _mm_empty();
                 for (k = 0; k < gs; k++)
                     res[k] = grp[k] * inv - (float)ho[k];
@@ -1306,7 +1309,7 @@ static float *gdn_shadow(const int8_t *sq, int n) {
    per element is integer, and integer sums are exact under
    reassociation, so a future MMX twin agrees with this scalar path by
    construction - the same argument gdn_pass1_fixed's own comment makes.
-   The float lines obey rule 6 item 1 (every constant divisor written as
+   The float lines write every constant divisor as
    a multiply by its reciprocal; the one real division has a variable
    divisor, which both compilers emit as a true divide). */
 
@@ -1415,30 +1418,17 @@ static int p2_tier(void) {
 #ifdef LZ_HAVE_P2_SSE2
     if (g_kernel == LZ_KERNEL_SSE2) return 3;
 #endif /* LZ_HAVE_P2_SSE2 */
-    /* SSE1 is read from CPUID rather than from g_kernel, the same way
-       lz_q8r_tier does it and for the same reason: there is no
-       LZ_KERNEL_SSE, and on a PIII g_kernel is LZ_KERNEL_MMX while the
-       machine does have SSE. Deriving this from g_kernel would leave the
-       tier unreachable on exactly the machines it exists for, and
-       nothing would report it - the tiers are bit-identical.
+    /* SSE1 comes from g_kernel now that LZ_KERNEL_SSE exists. It used to
+       come from CPUID, which meant --kernel mmx ran this arm on every
+       machine in the suite and the pure MMX split below was unreachable
+       - the state LZ_P2_FORCE_MMX was a separate build to escape. The
+       tiers are bit-identical, so nothing reported the substitution.
 
-       LZ_P2_FORCE_MMX is the mirror of LZ_Q8R_FORCE_SSE. Without it
-       the PURE MMX split becomes unreachable on any machine with SSE1,
-       which is every machine that can run this test suite, and a path
-       that cannot be selected is a path that cannot be validated. */
-#if defined(LZ_HAVE_P2_SSE) && !defined(LZ_P2_FORCE_MMX)
-    /* REAL CPUID, not "the build carries the tier" - the same fix
-       kernel_detect() needed: LZ_HAVE_P2_SSE being defined
-       means src/ops_mmx_sse.c's lz_p2_split32_sse is linked in, which
-       is true on every gcc build including the 32-bit x87 target, where
-       it is not the same fact as "this machine has SSE1" (Pentium
-       MMX/K6/Cyrix 6x86 in the Socket 7 family do not). True on x86-64
-       unconditionally (SSE1 is ABI-guaranteed there), so nothing changes
-       for that build. This function is the other hot-loop caller the
-       big comment above lz_cpu_has_sse() names (once per state row), so
-       it uses the cached function too, not a fresh cpuid per call. */
-    if (lz_cpu_has_sse()) return 2;
-#endif /* LZ_HAVE_P2_SSE && !LZ_P2_FORCE_MMX */
+       kernel_detect resolves a PIII to LZ_KERNEL_SSE, so the machines
+       this tier exists for still get it from auto. */
+#if defined(LZ_HAVE_P2_SSE)
+    if (g_kernel == LZ_KERNEL_SSE) return 2;
+#endif /* LZ_HAVE_P2_SSE */
     return 1;
 }
 #endif /* LZ_HAVE_P2_MMX */
@@ -1741,7 +1731,7 @@ static void gdn_p2_group_fixed(const int8_t *ph,
    above by construction, not by tolerance: every step is the same
    integer operation on the same integers, verified at 100k scale.
 
-   WHY A ROW AND NOT A GROUP - it is entirely about rule 6 item 6. The
+   WHY A ROW AND NOT A GROUP - it is entirely about emms hoisting. The
    emms may only be hoisted out of a loop whose body has no x87, and the
    per-group body has plenty: the coefficients, the normalization, the
    new scale. So the row is PHASE-SPLIT instead - all the float work of
@@ -1901,7 +1891,7 @@ static void gdn_p2_row_simd(const int8_t *ph_row,
     /* Only the 64-bit tiers leave MMX state behind, and the SSE1 one is
        a 64-bit tier: pmaxsw is an SSE1 instruction operating on an MMX
        REGISTER, so tier 2 needs the emms exactly as tier 1 does. Tier 3
-       touches xmm and nothing else, so rule 6 item 6 has nothing to
+       touches xmm and nothing else, so there is no emms to
        clear there, and skipping it is worth a few cycles a row on the
        P4 - the machine the SSE2 tier is for. */
     if (tier < 3) _mm_empty();

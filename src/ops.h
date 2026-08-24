@@ -337,6 +337,27 @@ void     lz_fpu_float_end(unsigned save);
 #define LZ_KERNEL_MMX  2
 #define LZ_KERNEL_SSE2 3
 
+/* SSE1, and WRONG 2 above is what it closes. Five sites had an SSE1
+   kernel reachable only from CPUID, each carrying the same sentence -
+   "there is no LZ_KERNEL_SSE, and on a PIII g_kernel is LZ_KERNEL_MMX
+   while the machine does have SSE" - and each carrying a compile-time
+   escape so the cell could be tested at all: LZ_Q8R_FORCE_SSE,
+   LZ_I32FACC_FORCE_SSE, LZ_P2_FORCE_MMX, LZ_EXP_Q20_FORCE_MMX,
+   LZ_NORM_SS_FORCE_MMX. Five separate control BUILDS for one missing
+   selector value.
+
+   6, not 3-with-everything-renumbered. The value only has to be
+   distinct; renumbering would move SSE2 and MMX under every comparison
+   in the tree at once, for tidiness, and the enum is not in tier order
+   anyway (ARM is 4 and 5).
+
+   WHAT THIS CHANGES ABOUT --kernel mmx: it now means MMX. The sites
+   below used to read `g_kernel != LZ_KERNEL_REF && lz_cpu_has_sse()`,
+   so on any machine with SSE1 - which is every machine that runs the
+   suite - asking for mmx ran the SSE1 body. The tiers owe each other
+   bit-identity, so nothing reported it. */
+#define LZ_KERNEL_SSE  6
+
 /* The ARM column. Two values because the ARM side is two cells, C and
    hand-written asm, and WRONG 1 above is precisely about not letting one
    enum value stand for two code bodies - `--kernel arm-c` and

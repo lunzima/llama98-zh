@@ -62,7 +62,7 @@ void lz_fwht_i32(int32_t *restrict y, const int32_t *restrict x, int n) {
        kernel in this engine owes.
 
        ONE emms FOR THE WHOLE TRANSFORM, here rather than per stage: the
-       stage loop contains no x87, and rule 6 item 6 permits hoisting it
+       stage loop contains no x87, and the emms can be hoisted
        exactly that far. What follows lz_fwht_i32 does (subn_fwht_quant's
        amax and q8_round), which is why it cannot be hoisted further.
 
@@ -72,8 +72,13 @@ void lz_fwht_i32(int32_t *restrict y, const int32_t *restrict x, int n) {
        be the kernel - the same trap the ARM guard above spells out. The
        CPUID test stays as well: a tier can be asked for on a machine
        that cannot run it (lz_kernel_select clamps, but the emms below
-       would still be reached on a 486 without it). */
-    if ((g_kernel == LZ_KERNEL_MMX || g_kernel == LZ_KERNEL_SSE2) &&
+       would still be reached on a 486 without it).
+
+       LZ_KERNEL_SSE is listed because this is an MMX body and every SSE1
+       machine has MMX. A tier that dropped to the scalar loop for
+       `--kernel sse` would be reporting a narrower ISA than it has. */
+    if ((g_kernel == LZ_KERNEL_MMX || g_kernel == LZ_KERNEL_SSE ||
+         g_kernel == LZ_KERNEL_SSE2) &&
         lz_cpu_has_mmx() && n >= 4 && (n & 3) == 0) {
         int start = 2;
         for (i = 0; i < n; i += 2) {

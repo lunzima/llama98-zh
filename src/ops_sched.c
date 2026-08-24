@@ -138,7 +138,10 @@ int lz_q8r_tier(void) {
     if (g_kernel == LZ_KERNEL_SSE2) return 2;
 #endif /* LZ_HAVE_Q8R_SIMD */
 #if defined(LZ_HAVE_Q8R_SSE)
-    if (lz_cpu_has_sse()) return 1;
+    /* g_kernel, not CPUID. This used to be `lz_cpu_has_sse()`, which
+       answered yes for --kernel mmx on every machine in the suite - so
+       the mmx tier ran the SSE1 body and nothing said so. */
+    if (g_kernel == LZ_KERNEL_SSE) return 1;
 #endif /* LZ_HAVE_Q8R_SSE */
     return 0;
 }
@@ -167,7 +170,7 @@ int lz_i32facc_tier(void) {
     if (g_kernel == LZ_KERNEL_SSE2) return 2;
 #endif /* LZ_HAVE_I32FACC_SSE2 */
 #if defined(LZ_HAVE_I32FACC_SSE)
-    if (lz_cpu_has_sse()) return 1;
+    if (g_kernel == LZ_KERNEL_SSE) return 1;
 #endif /* LZ_HAVE_I32FACC_SSE */
     return 0;
 }
@@ -435,19 +438,27 @@ static int kernel_detect(void) {
        floor (build/arm/build_engine.sh), and the asm tier needs exactly
        that and nothing later. */
     return LZ_KERNEL_ARM_ASM;
+/* SSE1 sits between MMX and SSE2 here, which is new: a PIII or Athlon
+   used to auto-detect as MMX and then reach the SSE1 bodies through
+   CPUID behind its back. The kernels it runs are the same ones; what
+   changes is that the tier now has the name of what it runs, so
+   --kernel reports it and lz_kernel_select can be asked for it. */
 #elif defined(__WATCOMC__)
     unsigned edx = lz_cpuid1_edx();
     if (edx & (1u << 26)) return LZ_KERNEL_SSE2;
+    if (edx & (1u << 25)) return LZ_KERNEL_SSE;
     if (edx & (1u << 23)) return LZ_KERNEL_MMX;
     return LZ_KERNEL_REF;
 #elif defined(LZ_ROW_SSE2_EXTERN)
     if (lz_cpuid1_edx() & (1u << 26)) return LZ_KERNEL_SSE2;
+    if (lz_cpu_has_sse()) return LZ_KERNEL_SSE;
 #if defined(LZ_DOT_MMX_EXTERN)
     return LZ_KERNEL_MMX;
 #else
     return LZ_KERNEL_REF;
 #endif /* LZ_DOT_MMX_EXTERN */
 #elif defined(LZ_DOT_MMX_EXTERN)
+    if (lz_cpu_has_sse()) return LZ_KERNEL_SSE;
     return LZ_KERNEL_MMX;
 #else
     return LZ_KERNEL_REF;
@@ -476,12 +487,19 @@ int lz_kernel_select(int which) {
            x86 tier and clamps. */
         g_kernel = (which == LZ_KERNEL_REF || which == LZ_KERNEL_ARM ||
                     which == LZ_KERNEL_ARM_ASM) ? which : have;
-#elif defined(__WATCOMC__)
-        g_kernel = (which == LZ_KERNEL_SSE2 && have != LZ_KERNEL_SSE2)
-                   ? have : which;
-#elif defined(LZ_DOT_MMX_EXTERN) && defined(LZ_ROW_SSE2_EXTERN)
-        g_kernel = (which == LZ_KERNEL_SSE2 && have != LZ_KERNEL_SSE2)
-                   ? have : which;
+#elif defined(__WATCOMC__) || \
+      (defined(LZ_DOT_MMX_EXTERN) && defined(LZ_ROW_SSE2_EXTERN))
+        /* Asking DOWN is always honoured - that is what the knob is for,
+           and running the SSE1 tier on a machine that also has SSE2 is
+           the only way to compare them. Asking UP clamps to what CPUID
+           found: sse2 needs SSE2, and sse needs SSE, which an SSE2
+           machine also has. */
+        if (which == LZ_KERNEL_SSE2 && have != LZ_KERNEL_SSE2)
+            which = have;
+        else if (which == LZ_KERNEL_SSE &&
+                 have != LZ_KERNEL_SSE && have != LZ_KERNEL_SSE2)
+            which = have;
+        g_kernel = which;
 #else
         g_kernel = (which == LZ_KERNEL_REF) ? LZ_KERNEL_REF : have;
 #endif /* __WATCOMC__ */
@@ -492,6 +510,7 @@ int lz_kernel_select(int which) {
 const char *lz_kernel_name(void) {
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
     if (g_kernel == LZ_KERNEL_SSE2) return "sse2";
+    if (g_kernel == LZ_KERNEL_SSE) return "sse";
     if (g_kernel == LZ_KERNEL_MMX) return "mmx";
     if (g_kernel == LZ_KERNEL_ARM_ASM) return "arm-asm";
     if (g_kernel == LZ_KERNEL_ARM) return "arm-c";
