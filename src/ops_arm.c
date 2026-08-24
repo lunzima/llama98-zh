@@ -694,7 +694,7 @@ void lz_norm_ss_fixed_arm_asm(const float *x, int n, int k, short *qout,
         "bhi    7f\n\t"                                          \
         "cmp    r10, #0x80000000\n\t"                            \
         "adc    lr, lr, r7, lsl #23\n\t"                         \
-        "orreq  lr, lr, #1\n\t"
+        "biceq  lr, lr, #1\n\t"
 
 int lz_matmul_row_arm_asm(const float *w, const float *x, int n,
                           float *acc8) {
