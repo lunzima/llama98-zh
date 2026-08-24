@@ -994,13 +994,12 @@ static int sample_from_dist(const float *p, int vocab, lz_u64 *rng) {
 
 /* temp>0 speculative round (phase 2 - the coupled-sampling analog of
    lz_spec_round above). DELIBERATELY A SEPARATE FUNCTION, not a
-   temperature branch inside lz_spec_round itself - an explicit
-   requirement, given in Chinese and translated here: lz_spec_round does
-   not change one character for this phase,
-   so phase 1's own hard bit-identity gate (K=1..6 vs K=0 at temp=0,
-   under real penalties) stays covered by code that provably cannot
-   have been touched by anything written here - not an argument that
-   needs re-verifying each time this file changes, a structural fact.
+   temperature branch inside lz_spec_round itself. lz_spec_round does
+   not change one character for this path, so its own hard bit-identity
+   gate (K=1..6 vs K=0 at temp=0, under real penalties) stays covered by
+   code that provably cannot have been touched by anything written here
+   - a structural fact, not an argument that needs re-verifying every
+   time this file changes.
 
    Consequence: the temperature-INDEPENDENT back half of a round - ring
    rollback, mtp_chain reseed from the verify batch's own captured
