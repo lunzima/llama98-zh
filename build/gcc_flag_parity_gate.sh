@@ -16,6 +16,23 @@
 # `make -n` rather than a real build: this asks what the recipe WOULD
 # pass, which is the question, and it costs nothing.
 #
+# WHY FLAGS SETTLE THE RUNTIME TIER TOO, which is not obvious and was
+# checked rather than assumed. The GUI never calls lz_kernel_select -
+# there is no such call anywhere under gui/ - so g_kernel reaches its
+# value through the lazy `if (!g_kernel) lz_kernel_select(AUTO)` guards
+# scattered through the dispatch files. The hazard would be an operator
+# entry point without one: it would dispatch with g_kernel still 0,
+# which reads as LZ_KERNEL_REF, and the window would silently run the
+# scalar reference while the command line ran SSE2.
+# Counted: ops_matmul.c 6, ops_sched.c 3, ops.c, ops_gdn.c and
+# ops_quant.c 1 each. ops_norm.c has none - and does not reference
+# g_kernel at all, so it does not dispatch on the tier and needs none.
+# Every file that dispatches on it is guarded.
+# With identical flags and the same machine, the detected tier is
+# therefore the same value on both. What the GUI still cannot do is SAY
+# which tier it is on; the CLI prints it in its banner and the About
+# dialog has no equivalent line.
+#
 # Exit codes:
 #   0  PASS - the two sets are equal
 #   1  FAIL - they differ, with both printed
