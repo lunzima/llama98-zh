@@ -1041,6 +1041,115 @@ unsigned lz_amax32_mmx_w(const float *x, int n) {
     return lz_amax32_mmx_asm(x, n);
 }
 
+/* ---- Q8 activation rounding, the PACK HALF, MMX tier, Watcom twin.
+   gcc twin: lz_q8round32_pack_mmx, the intrinsics body in the #else
+   arm below - read that one for why this is a half, why packsswb's
+   saturation IS the +127 clamp, and why pminsw/pmaxsw are unavailable
+   here (they are SSE1, not MMX).
+
+   mm7 holds -127 in every word for the whole run; the -127 floor is
+   the pcmpgtw/pand/pandn/por idiom, four instructions per four lanes.
+   Eight elements a block, four blocks, one emms at the exit - the
+   caller's x87 pass has already run and its next x87 instruction comes
+   after this returns. */
+extern void lz_q8round32_pack_mmx_asm(const int32_t *q, int8_t *out);
+#pragma aux lz_q8round32_pack_mmx_asm = \
+    ".586"                              \
+    "pcmpeqw mm7, mm7"                  \
+    "psrlw   mm7, 9"                    /* 127 per word */ \
+    "pxor    mm6, mm6"                  \
+    "psubw   mm6, mm7"                  /* -127 per word */ \
+    "movq    mm7, mm6"                  \
+    "movq    mm0, [eax]"                \
+    "movq    mm1, [eax+8]"              \
+    "packssdw mm0, mm1"                 \
+    "movq    mm2, [eax+16]"             \
+    "movq    mm3, [eax+24]"             \
+    "packssdw mm2, mm3"                 \
+    "movq    mm4, mm7"                  \
+    "pcmpgtw mm4, mm0"                  \
+    "movq    mm5, mm4"                  \
+    "pand    mm4, mm7"                  \
+    "pandn   mm5, mm0"                  \
+    "por     mm4, mm5"                  \
+    "movq    mm1, mm7"                  \
+    "pcmpgtw mm1, mm2"                  \
+    "movq    mm3, mm1"                  \
+    "pand    mm1, mm7"                  \
+    "pandn   mm3, mm2"                  \
+    "por     mm1, mm3"                  \
+    "packsswb mm4, mm1"                 \
+    "movq    [edx], mm4"                \
+    "movq    mm0, [eax+32]"             \
+    "movq    mm1, [eax+40]"             \
+    "packssdw mm0, mm1"                 \
+    "movq    mm2, [eax+48]"             \
+    "movq    mm3, [eax+56]"             \
+    "packssdw mm2, mm3"                 \
+    "movq    mm4, mm7"                  \
+    "pcmpgtw mm4, mm0"                  \
+    "movq    mm5, mm4"                  \
+    "pand    mm4, mm7"                  \
+    "pandn   mm5, mm0"                  \
+    "por     mm4, mm5"                  \
+    "movq    mm1, mm7"                  \
+    "pcmpgtw mm1, mm2"                  \
+    "movq    mm3, mm1"                  \
+    "pand    mm1, mm7"                  \
+    "pandn   mm3, mm2"                  \
+    "por     mm1, mm3"                  \
+    "packsswb mm4, mm1"                 \
+    "movq    [edx+8], mm4"              \
+    "movq    mm0, [eax+64]"             \
+    "movq    mm1, [eax+72]"             \
+    "packssdw mm0, mm1"                 \
+    "movq    mm2, [eax+80]"             \
+    "movq    mm3, [eax+88]"             \
+    "packssdw mm2, mm3"                 \
+    "movq    mm4, mm7"                  \
+    "pcmpgtw mm4, mm0"                  \
+    "movq    mm5, mm4"                  \
+    "pand    mm4, mm7"                  \
+    "pandn   mm5, mm0"                  \
+    "por     mm4, mm5"                  \
+    "movq    mm1, mm7"                  \
+    "pcmpgtw mm1, mm2"                  \
+    "movq    mm3, mm1"                  \
+    "pand    mm1, mm7"                  \
+    "pandn   mm3, mm2"                  \
+    "por     mm1, mm3"                  \
+    "packsswb mm4, mm1"                 \
+    "movq    [edx+16], mm4"             \
+    "movq    mm0, [eax+96]"             \
+    "movq    mm1, [eax+104]"            \
+    "packssdw mm0, mm1"                 \
+    "movq    mm2, [eax+112]"            \
+    "movq    mm3, [eax+120]"            \
+    "packssdw mm2, mm3"                 \
+    "movq    mm4, mm7"                  \
+    "pcmpgtw mm4, mm0"                  \
+    "movq    mm5, mm4"                  \
+    "pand    mm4, mm7"                  \
+    "pandn   mm5, mm0"                  \
+    "por     mm4, mm5"                  \
+    "movq    mm1, mm7"                  \
+    "pcmpgtw mm1, mm2"                  \
+    "movq    mm3, mm1"                  \
+    "pand    mm1, mm7"                  \
+    "pandn   mm3, mm2"                  \
+    "por     mm1, mm3"                  \
+    "packsswb mm4, mm1"                 \
+    "movq    [edx+24], mm4"             \
+    "emms"                              \
+    __parm [__eax] [__edx]              \
+    __modify [8087];
+
+/* The real function the other translation units call: a #pragma aux
+   body expands at its call site and has no address. */
+void lz_q8round32_pack_mmx(const int32_t *q, int8_t *out) {
+    lz_q8round32_pack_mmx_asm(q, out);
+}
+
 /* ---- Q8_0 32/128-element dot products and row kernel, MMX tier -
    in this TU. Algorithm documentation (why the weight side is widened
    via punpcklbw(zero,w), the register-budget accounting for the paired
