@@ -90,9 +90,69 @@ for f in $CLI $GUI; do
     esac
 done
 
+# ---- AND THE SAME OPERATORS, not just the same flags ------------------
+#
+# The requirement is that the GUI and the CLI use the same optimization
+# configuration AND the same operator configuration. Equal flags settle
+# the first half only: two binaries can compile every kernel identically
+# and still select different ones at run time.
+#
+# THE INVARIANT IS THAT gui/ SELECTS NOTHING. The CLI parses --kernel,
+# --fixed, --pair and --prefetch and calls the four selectors; the GUI
+# exposes none of them and calls none, so it runs the engine defaults -
+# which are the CLI's defaults. That is the whole guarantee, and it
+# holds only as long as nothing under gui/ starts calling a selector.
+#
+# ASKED OF THE LINKER, not of the text. Two textual attempts failed
+# first and both failed silently-looking: a plain grep counts the
+# comment in gui/aboutdlg.c that describes what lz_kernel_tier() does
+# internally, and running the source through -E to drop comments then
+# counts the four PROTOTYPES that ops.h inlines into every translation
+# unit - four hits in every gui file, none of them a call.
+#
+# An undefined symbol in the object file is a call and nothing else. It
+# cannot be a comment, a declaration, or a macro that expanded to
+# nothing.
+SELECTORS='lz_kernel_select|lz_float_ref_select|lz_pair_select|lz_prefetch_select'
+SEL_HITS=""
+SW=$(mktemp -d)
+for g in gui/*.c; do
+    [ -f "$g" ] || continue
+    gcc $GUI -Isrc -Icommon -Igui -c -o "$SW/probe.o" "$g" 2>/dev/null || continue
+    n=$(nm -u "$SW/probe.o" 2>/dev/null | grep -cE "\b($SELECTORS)\b" || true)
+    [ -n "$n" ] || n=0
+    [ "$n" -gt 0 ] && SEL_HITS="$SEL_HITS $(basename $g)($n)"
+done
+
+# Positive control pointed the way this needs: the same search over the
+# CLI MUST find calls. If the compile or nm stopped working, gui/ would
+# read clean for that reason and this half would pass by measuring
+# nothing.
+CTL=0
+if gcc $GUI -Isrc -Icommon -c -o "$SW/ctl.o" src/cli_main.c 2>/dev/null; then
+    CTL=$(nm -u "$SW/ctl.o" 2>/dev/null | grep -cE "\b($SELECTORS)\b" || true)
+fi
+[ -n "$CTL" ] || CTL=0
+rm -rf "$SW"
+if [ "$CTL" -eq 0 ]; then
+    echo "gcc_flag_parity_gate: FAIL - the selector search finds no call in"
+    echo "  src/cli_main.c, which makes them; the search is broken and a"
+    echo "  clean gui/ result would mean nothing"
+    exit 1
+fi
+
+if [ -n "$SEL_HITS" ]; then
+    echo "gcc_flag_parity_gate: FAIL - gui/ selects operators for itself:"
+    for h in $SEL_HITS; do echo "    $h"; done
+    echo "  The GUI has no operator options and must run the engine"
+    echo "  defaults, so that it and the CLI cannot diverge at run time."
+    exit 1
+fi
+
 if [ "$CLI" = "$GUI" ]; then
     echo "gcc_flag_parity_gate: PASS ($N flags, identical, release level"
-    echo "  $(printf '%s\n' $CLI | grep -m1 -E '^-O'))"
+    echo "  $(printf '%s\n' $CLI | grep -m1 -E '^-O');"
+    echo "  gui/ calls 0 operator selectors against the CLI's $CTL)"
     printf '  %s\n' $CLI
     exit 0
 fi

@@ -1551,7 +1551,7 @@ static lz_i64 lz_epi_mac_i16(const int32_t *a, const int16_t *m, int n) {
        passes it exactly as a working one does. The count is what
        separates "agrees" from "agrees and was reached". */
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
-#endif
+#endif /* LZ_EPI_SSE2_EXTERN || LZ_ARM_ASM_EXTERN */
 #if defined(LZ_EPI_SSE2_EXTERN)
     if (g_kernel == LZ_KERNEL_SSE2) {
         lz_debug_epi_kern++;
