@@ -21,6 +21,21 @@
 # it is free, and the same instruction in a per-element loop is not.
 # Where each one sits is the reading, and that needs the function name,
 # which is why the per-function breakdown is the second table.
+#
+# ops.c, the largest count in the set, has been walked. Nothing there is
+# a target and the reasons are worth keeping so the next reader does not
+# repeat the walk:
+#   lz_t_row_f32 6, lz_matmul_xq_nt 6, lz_moe_route 5, and a long tail -
+#   none above six, so there is no concentration to attack.
+#   The one divide inside a per-element loop is in lz_quantize_q8's
+#   `else` arm, `((float)t[k] * deq) / sg`. Its `if` arm already hoists
+#   127/tam and multiplies; the divide arm is the OVERFLOW GUARD, taken
+#   only when amax is small enough that 127/amax exceeds FLT_MAX.
+#   The rest are once per group (127.0f/tam, the Q8RCP reciprocal) or
+#   once per call (the `n % gs` defensive checks).
+#
+# forward.c's 67 are similarly spread: 7 in kv_slot's inlined copies,
+# the other ~52 across 48 lines at one to four each.
 set -u
 cd "$(dirname "$0")/.."
 command -v gcc >/dev/null 2>&1 || { echo "SKIP: no gcc"; exit 2; }
