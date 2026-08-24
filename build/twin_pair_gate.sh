@@ -38,21 +38,22 @@ MODELS_ROOT=${LZ_MODELS_ROOT:-/e/LLM/models}
 MODEL=${LZ_NORM_INT_GATE_MODEL:-$MODELS_ROOT/kmr20}
 [ -d "$MODEL" ] || { echo "twin_pair_gate: SKIP - no model at $MODEL"; exit 2; }
 
-# 21 implemented pairs at the commit that added this gate. A NEW
-# operator raises it; this is a floor, not an equality, so adding one
-# does not redden the gate - only losing one does.
-FLOOR=21
+# Implemented pairs. A floor, not an equality: adding an operator raises
+# it and does not redden the gate, losing one does. RATCHETED when a
+# pair lands, so a delivered kernel cannot quietly disappear later - the
+# gate was created at 21 and the number below is what the tree carries
+# now.
+FLOOR=31
 
 # CELLS REGISTERED todo, which is what a cell looks like after the
-# "partial relief obliges a kernel" standard reopens it and before
-# anyone writes it. Three PAIRS today - sigq is complete across mmx and sse2, and its SSE1 pair closed on the instruction list rather than being written - this gate counts (unit, ISA)
-# pairs, so the twelve cells expfx and sigq carry across the six x86
-# columns are six here - whose table lookup stays scalar while the interpolation
-# around it does not have to. A CEILING rather than a floor - the number
+# "partial relief obliges a kernel" standard reopens one and before
+# anyone writes it. This gate counts (unit, ISA) PAIRS, not cells, so
+# expfx's four remaining x86 cells - MMX and SSE1, each in its gcc and
+# Watcom form - are two here. A CEILING rather than a floor: the number
 # owed may shrink freely and may not grow unnoticed. Before this state
 # existed the gate had two answers, implemented or impossible, and a
 # reopened cell read as an unpaired kernel.
-TODO_CEIL=3
+TODO_CEIL=2
 
 "./$BIN" "$MODEL" --kernel-matrix 2>&1 | grep "^cell" | awk -v floor="$FLOOR" -v tceil="$TODO_CEIL" '
 $3=="mmxI"||$3=="sse2I"||$3=="sseI" {

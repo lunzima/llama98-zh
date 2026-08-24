@@ -434,6 +434,98 @@ float lz_exp_fixed(float x) {
     return (float)prod * pow2f(n - LZ_EXP_Q);
 }
 
+/* lz_exp_fixed over a RUN, for the same reason lz_sigmoid_q15_run
+   exists: the Q20 Taylor is four widening multiplies an element and a
+   kernel cannot see them one call at a time.
+ *
+ * THE SPLIT IS BY DOMAIN, not by branch, which is what makes it simpler
+ * than the sigmoid run's. Only the two guard exits are per-element
+ * decisions; everything between them is straight-line. So the scalar
+ * front pass writes the table entry, the Q15 residue and the exit
+ * exponent for each element and marks the guarded ones, the kernel runs
+ * the Taylor over the whole block, and the float exit multiply walks
+ * back over it. That exit stays scalar deliberately - pow2f is a
+ * table-free exponent build and the multiply is one float op, so
+ * vectorising it would need the exponents equal, which across a softmax
+ * row they are not.
+ *
+ * The guarded slots get tv = LZ_EXP_QSCALE and sv = 0 rather than being
+ * left uninitialised: the kernel reads every lane of the block whether
+ * or not its answer survives, and a garbage operand is a garbage
+ * operand even when its result is discarded. Their answers are written
+ * last, after the exit loop, so nothing the vector part did can reach
+ * the output.
+ *
+ * s IS NON-NEGATIVE AND AT MOST 2^15, which is what lets the kernel use
+ * pmuludq: the magic floor rounds y32 - 0.5 to nearest, so t <= y32 and
+ * r = y32 - t lands in [0, 1] (1 exactly when y32 is an integer and the
+ * tie rounds down), giving rq in [0, 2^20] and s = rq >> 5 in [0, 2^15].
+ * build/exp_q20_probe.c drives both ends of that range.
+ *
+ * Bit-identical to calling lz_exp_fixed per element, and the float-op
+ * census is charged per element in the same place, so neither the
+ * numbers nor the cost table move. The ARM asm tier returns to the
+ * scalar entry outright: its floor and residue are inline primitives
+ * that would have to be replayed here to stay identical, and it has no
+ * x86 kernel to reach anyway. */
+void lz_exp_fixed_run(const float *x, float *out, int n) {
+    enum { LZ_EXPRUN = 64 };
+    int32_t tv[LZ_EXPRUN], sv[LZ_EXPRUN], pv[LZ_EXPRUN], ev[LZ_EXPRUN];
+    unsigned char sat[LZ_EXPRUN];
+    int i, k, m;
+
+#if defined(LZ_ARM_PRIM_ASM)
+    if (g_kernel == LZ_KERNEL_ARM_ASM) {
+        for (i = 0; i < n; i++) out[i] = lz_exp_fixed(x[i]);
+        return;
+    }
+#endif /* LZ_ARM_PRIM_ASM */
+    if (!g_exptab_ready) exp_tab_build();
+    for (i = 0; i < n; i += LZ_EXPRUN) {
+        m = n - i;
+        if (m > LZ_EXPRUN) m = LZ_EXPRUN;
+        for (k = 0; k < m; k++) {
+            union { float f; int32_t i; } u;
+            float xv = x[i + k], y32, r;
+            int32_t t;
+            sat[k] = 0;
+            if (xv > 88.0f)          sat[k] = 1;
+            else if (xv < LZ_EXP_LO) sat[k] = 2;
+            if (sat[k]) { tv[k] = LZ_EXP_QSCALE; sv[k] = 0; ev[k] = 0; continue; }
+            LZ_FCX(LZ_FC_EXP, 3, 3, 0, 1, 0);
+            y32 = xv * LZ_EXP_LOG2E32;
+            u.f = y32 - 0.5f + 12582912.0f;
+            t = (u.i & 0x007FFFFF) - 0x00400000;
+            r = y32 - (float)t;
+            tv[k] = g_exptab[t & 31];               /* t & 31 is [0,31] for
+                                                       negative t too */
+            sv[k] = q8_round(r * (float)LZ_EXP_QSCALE) >> 5;
+            ev[k] = (t >> 5) - LZ_EXP_Q;
+        }
+#if defined(LZ_HAVE_EXP_Q20_SIMD)
+        if (g_kernel == LZ_KERNEL_SSE2)
+            lz_exp_q20_simd(tv, sv, pv, m);
+        else
+#endif /* LZ_HAVE_EXP_Q20_SIMD */
+        for (k = 0; k < m; k++) {
+            int32_t cq = LZ_EXP_QSCALE
+               + (int32_t)((((lz_i64)LZ_EXP2_LN2 * sv[k])
+                            + (1 << (LZ_EXP_Q - 1))) >> LZ_EXP_Q)
+               + (int32_t)((((lz_i64)LZ_EXP2_LN2SQ * sv[k] * sv[k])
+                            + (LZ_I64_C(1) << (2 * LZ_EXP_Q - 1)))
+                           >> (2 * LZ_EXP_Q));
+            pv[k] = (int32_t)((((lz_i64)tv[k] * cq)
+                               + (1 << (LZ_EXP_Q - 1))) >> LZ_EXP_Q);
+        }
+        for (k = 0; k < m; k++)
+            out[i + k] = (float)pv[k] * pow2f(ev[k]);
+        for (k = 0; k < m; k++) {
+            if (!sat[k]) continue;
+            out[i + k] = (sat[k] == 1) ? FLT_MAX : 0.0f;
+        }
+    }
+}
+
 /* ---- folded-scale integer coordinates -------------------------------
  *
  * sigmoid_q15_i takes an integer whose scale is a POWER OF TWO (x ==

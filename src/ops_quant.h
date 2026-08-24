@@ -192,6 +192,14 @@ int32_t sigmoid_q15(float x);
    exits are split from the interpolating path. */
 void lz_sigmoid_q15_run(const float *x, int32_t *out, int n);
 
+/* lz_exp_fixed over a run, bit-identical to calling it per element and
+   charging the float-op census identically. Exists so the Q20 Taylor
+   cell has a caller that hands it a block; see its definition for the
+   guard split and for why the exit multiply stays scalar. Only the
+   fixed-point exp has one - the float body is already a straight line
+   of hardware float ops with nothing for an integer kernel to take. */
+void lz_exp_fixed_run(const float *x, float *out, int n);
+
 /* Table-only sigmoid_q15 taking the pre-scaled coordinate directly, and
    the two helpers that build it from a caller's own dequant scale. */
 int32_t sigmoid_q15_t(float t);

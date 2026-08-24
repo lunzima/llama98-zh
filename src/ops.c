@@ -3924,9 +3924,11 @@ static const char km_why_sse1[] =
    matter who calls them. */
 /* SPLIT IN TWO under the standard above. The gather argument closes the
    cells where the LOOKUP is the work, and does not close the ones where
-   arithmetic happens around it. sigmoid_q15 and lz_exp_fixed both end
-   in a linear interpolation - a + (((b - a) * frac) >> 15) - and the
-   two table loads stay scalar while that does not have to.
+   arithmetic happens around it. sigmoid_q15 ends in a linear
+   interpolation - a + (((b - a) * frac) >> 15) - and its two table
+   loads stay scalar while that does not have to. lz_exp_fixed has
+   arithmetic around its lookup too, but not this arithmetic; see the
+   next block, which is where saying otherwise here led.
    THE MULTIPLY IS int16 x int16, which is the fact that decides
    whether this is writable at all, and it was checked rather than
    assumed. g_sigtab holds (int32_t)(s * 32768 + 0.5) for s in [0, 1],
@@ -3955,9 +3957,8 @@ static const char km_why_sse1[] =
    The win is still small - two lanes on MMX, four on SSE2, against
    scalar loads that stay scalar. Small is not none, and none is the
    bar. */
-/* expfx IS NOT THE SAME SHAPE, and this reason was extended to it from
-   sigq without checking. lz_exp_fixed does no linear interpolation: it
-   is a Q20 Taylor series - s = rq >> 5, then
+/* expfx IS NOT THE SAME SHAPE as sigq. lz_exp_fixed does no linear
+   interpolation: it is a Q20 Taylor series - s = rq >> 5, then
    cq = QSCALE + ((LN2*s + rnd) >> Q) + ((LN2SQ*s*s + rnd) >> 2Q), then
    prod = (g_exptab[idx] * cq + rnd) >> Q - whose multiplies are
    32 x 32 -> 64, not the 16 x 16 -> 32 that made sigq's tail a pmaddwd.
@@ -4005,12 +4006,12 @@ static const char km_why_sigq_sse1[] =
     "additions (pmaxsw/pshufw/psadbw) appear nowhere in it. The wider "
     "form is SSE2's, which has its own cell";
 static const char km_why_expfx_x86[] =
-    "todo: not sigq's interpolation - lz_exp_fixed is a Q20 Taylor whose "
-    "multiplies are 32x32->64, every operand non-negative so pmuludq "
-    "needs no sign handling. All four fit it - LN2*s, s*s, LN2SQ*(s*s) "
-    "and tab*cq - because s <= 2^15 makes s*s an int32, and the "
-    "regrouping is exact. MMX has nothing wider than pmaddwd and pays "
-    "the 16-bit-halves construction. The 32-entry lookup stays scalar";
+    "todo: the SSE2 pair is done (pmuludq is exactly the 32x32->64 all "
+    "four multiplies need, every operand non-negative); these tiers are "
+    "not, because MMX has nothing wider than pmaddwd and must build each "
+    "product from 16-bit halves. SSE1 adds pmulhuw, the unsigned high "
+    "half MMX lacks, so it is a cell of its own and not a copy. The "
+    "32-entry lookup stays scalar at every tier";
 /* EXPFX AND SIGQ ONLY, and the scope line is here because this string
    is wrong for any unit that HAS a group form. i32f's is the wsum
    chunk fold's 32 and q8rnd's is lz_q8round_group_sse's gs, so each of
@@ -4179,7 +4180,7 @@ static const LZKmReg km_reg[LZ_KM_NUNIT * LZ_KM_NCOL] = {
    present on ARM for the same reason ref is present everywhere. */
 /* i32f */ KM_H(KM_ALL), KM_I(km_why_i32f_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_I(km_why_i32f_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_i32f_g128),
 /* q8rnd*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_q8rnd_g128),
-/* expfx*/ KM_H(KM_ALL), KM_T(km_why_expfx_x86), KM_T(km_why_expfx_x86), KM_T(km_why_expfx_x86), KM_T(km_why_expfx_x86), KM_T(km_why_expfx_x86), KM_T(km_why_expfx_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_op_g128),
+/* expfx*/ KM_H(KM_ALL), KM_T(km_why_expfx_x86), KM_T(km_why_expfx_x86), KM_H(LZ_KMB_GCC), KM_T(km_why_expfx_x86), KM_T(km_why_expfx_x86), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_op_g128),
 /* The two attention MAC units DO have x86 kernels, and they are
    macro-selected rather than table-selected, so km_op_present answers
    for them. atdot's assembly is q8_0's leaf, reused rather than copied
@@ -4373,10 +4374,12 @@ static int km_op_present(int f, int c) {
     if (f == LZ_KM_UNIT_NRMSS && c == LZ_KM_COL_ROW0 + LZ_ROW_MMX_I) return 1;
 #endif /* __WATCOMC__ */
 #endif /* LZ_HAVE_NORM_SS_PACK_MMX */
-    /* sigq's interpolation tail. expfx shares the shape but not yet the
-       wiring - lz_exp_fixed has no run entry, so its cells stay todo
-       and this names only sigq. Registering both from one macro would
-       be the registry claiming a kernel nobody calls. */
+    /* sigq's interpolation tail, and expfx's Q20 Taylor beneath it.
+       SEPARATE MACROS even though the two units are neighbours in the
+       registry: they are different kernels with different wiring, and
+       registering both from one flag would let either cell outlive its
+       own body. expfx's SSE2 pair is wired (lz_exp_fixed_run, reached
+       from softmax); its MMX and SSE1 cells are still owed. */
 #if defined(LZ_HAVE_LERP_Q15_MMX)
 #if defined(__WATCOMC__)
     if (f == LZ_KM_UNIT_SIGQ && c == LZ_KM_COL_ROW0 + LZ_ROW_MMX_A) return 1;
@@ -4391,6 +4394,13 @@ static int km_op_present(int f, int c) {
     if (f == LZ_KM_UNIT_SIGQ && c == LZ_KM_COL_ROW0 + LZ_ROW_SSE2_I) return 1;
 #endif /* __WATCOMC__ */
 #endif /* LZ_HAVE_LERP_Q15_SIMD */
+#if defined(LZ_HAVE_EXP_Q20_SIMD)
+#if defined(__WATCOMC__)
+    if (f == LZ_KM_UNIT_EXPFX && c == LZ_KM_COL_ROW0 + LZ_ROW_SSE2_A) return 1;
+#else
+    if (f == LZ_KM_UNIT_EXPFX && c == LZ_KM_COL_ROW0 + LZ_ROW_SSE2_I) return 1;
+#endif /* __WATCOMC__ */
+#endif /* LZ_HAVE_EXP_Q20_SIMD */
 
     /* i32f, the attention wsum chunk fold. Four cells from two bodies
        per toolchain: SSE1 converts one value at a time (cvtsi2ss,

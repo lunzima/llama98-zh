@@ -83,6 +83,7 @@
 !/build/q8pack_mmx_probe.c
 !/build/normss_pack_mmx_probe.c
 !/build/lerp_q15_probe.c
+!/build/exp_q20_probe.c
 !/build/gcc_warning_gate.sh
 
 # Stray compiler/linker intermediates (gcc, Open Watcom), plus the raw

@@ -821,7 +821,7 @@ void lz_softmax(float *x, int n) {
        loop bit-identity and delivers it.
 
        NaN is the one input where it does not: float `>` is false for
-       NaN so the old loop never selected one, while NaN's key is the
+       NaN so a plain loop never selects one, while NaN's key is the
        largest and this loop would. Same disposition ops.c's SSE2 q8
        round takes - NaN reaching attention scoring means the upstream
        is already destroyed, and no slow path is kept for it. */
@@ -837,6 +837,20 @@ void lz_softmax(float *x, int n) {
             if (k > best) { best = k; mx = x[i]; }
         }
     }
+    /* The subtract, then the exponentials, then the sum - three passes
+       rather than one pass, because lz_exp_fixed's Taylor only has
+       a kernel if it sees a block. The sum is a SEPARATE pass rather
+       than folded into the exit loop so that its addition order is the
+       one the single loop had; float addition is not associative and
+       this owes that loop bit-identity, not a tolerance.
+       LZ_SOFTMAX_RUN=0 keeps the per-element form as the control arm. */
+#if LZ_SOFTMAX_RUN
+    if (lz_scalar_mode()) {
+        for (i = 0; i < n; i++) x[i] -= mx;
+        lz_exp_fixed_run(x, x, n);
+        for (i = 0; i < n; i++) sum += x[i];
+    } else
+#endif /* LZ_SOFTMAX_RUN */
     for (i = 0; i < n; i++) {
         x[i] = lz_exp(x[i] - mx);
         sum += x[i];

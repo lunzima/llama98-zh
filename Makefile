@@ -534,7 +534,31 @@ watcom-gui:
 # committed, and then invoked by nothing: not here, not in ci.sh. They
 # passed every time anyone ran them by hand and could not have reddened
 # a build. A gate no target depends on is a script.
-check: bare-endif-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate dedupe-gate mm-alias-gate c89-floor-gate comment-hygiene-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate kernel-matrix-gate
+#
+# gcc-warning-gate had a caller - ci.sh - and was still missing HERE,
+# which is a weaker version of the same hole: `check` is the target that
+# gets run, and it asserted the Watcom warning count while letting the
+# gcc one past. Found by a dropped comment terminator that left a `/*`
+# nested inside another comment; gcc said so on every build and `check`
+# reported 16 PASS over it. Having a caller somewhere is not the test -
+# being reachable from what people actually run is.
+check: bare-endif-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate dedupe-gate mm-alias-gate c89-floor-gate comment-hygiene-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate gcc-warning-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate kernel-matrix-gate
+
+# Zero gcc warnings, asserted rather than printed. The Watcom side has
+# always been counted ("N lines, 0 warnings, 0 errors", per file); this
+# is the same assertion for the toolchain whose warnings only ever went
+# to the console. Forces a real compile - see the script for why an
+# up-to-date build is the failure mode it has to avoid.
+#
+# MAKEFLAGS IS CLEARED because the gate proves a real compile happened by
+# finding gcc command lines in the sub-make's output, and `make -s check`
+# propagates -s to that sub-make - which suppresses exactly those lines.
+# The gate then reports "ran no compile", a FAIL that says nothing about
+# the tree. It is the gate's own blindness check firing on the harness
+# instead of on the subject.
+.PHONY: gcc-warning-gate
+gcc-warning-gate:
+	@MAKEFLAGS= MFLAGS= bash build/gcc_warning_gate.sh
 
 # Two shared helpers with the same body under different names, which is
 # the duplication dedupe-gate cannot see: that one knows the names it is

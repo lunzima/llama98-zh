@@ -49,6 +49,14 @@
 # arithmetic around it. Offered AVX2, where vgatherdps exists, gcc still
 # declines. expfx's reason is confirmed at the granularity it is stated.
 #
+# THAT FINDING IS WHY THE HAND-WRITTEN CELL HAS THE SHAPE IT HAS. The
+# blocker it isolated is the per-element table INDEX, not the Q20 Taylor
+# around it - so lz_exp_fixed_run walks the lookup in scalar and hands
+# the kernel the two int32 arrays it produced. gcc still will not
+# vectorise the original loop and that is still the right answer; the
+# operator ships a kernel anyway, because the part gcc cannot reach and
+# the part worth reaching are not the same part.
+#
 # So a nonzero here opens a question; it does not answer one.
 #
 # Usage: bash build/o3_probe.sh [unit ...]

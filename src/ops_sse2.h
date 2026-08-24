@@ -95,6 +95,15 @@ void lz_wsum_pair_sse2(const int8_t *rowA, const int8_t *rowB,
    arms under one name; the Watcom body is a #pragma aux behind a
    wrapper, because a pragma expands at its call site and has no
    address. */
+/* lz_exp_fixed's Q20 Taylor, SSE2 tier. Four 32x32->64 multiplies -
+   LN2*s, s*s, LN2SQ*(s*s) and tab*cq - every one a pmuludq, every
+   operand non-negative. The regrouping of the second Taylor term is
+   exact: s <= 2^15 so s*s fits int32, and integer multiplication is
+   associative. Whole groups of 4; the caller runs the tail. */
+#define LZ_HAVE_EXP_Q20_SIMD 1
+void lz_exp_q20_simd(const int32_t *tab, const int32_t *s,
+                     int32_t *prod, int n);
+
 #define LZ_HAVE_LERP_Q15_SIMD 1
 void lz_lerp_q15_simd(const int32_t *a, const int32_t *b,
                       const int32_t *frac, int32_t *out, int n);

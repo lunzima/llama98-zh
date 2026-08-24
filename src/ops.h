@@ -230,6 +230,18 @@ float lz_softplus(float x);
 #define LZ_SOFTPLUS_POLY 1
 #endif
 
+/* Whether softmax reaches lz_exp_fixed through its RUN entry (see
+   ops_quant.h) instead of one call per element. Only the fixed tier
+   changes - lz_scalar_mode() gates it - and the two forms are
+   bit-identical, including the order the sum accumulates in, so 0 is a
+   control arm rather than a second numerical behaviour. It exists
+   because the run is what gives the Q20 Taylor cell a caller: without a
+   consumer the kernel is unreachable, and an unreachable kernel is a
+   kernel no gate can measure. */
+#ifndef LZ_SOFTMAX_RUN
+#define LZ_SOFTMAX_RUN 1
+#endif
+
 /* x87 precision control: set the control word to 24 bits (single
    precision) so x87 float semantics become isomorphic to SSE - the
    prerequisite for bit-identical Watcom and gcc builds. Returns the
@@ -464,7 +476,7 @@ int lz_gdn_mode(void);
        float - and that quantize was 83% of this operator.
 
    One host cannot decide a family of targets, and no target-machine
-   wall clock has been taken yet - but that no longer gates the default,
+   wall clock has been taken yet - but that does not gate the default,
    which is fixed because the shipping build is. The knob is the
    decision point, not this comment. */
 int lz_gdn_p2_mode(void);
@@ -570,7 +582,7 @@ int lz_conv_norm_pow2(const float *v, int n, short *out, int bound);
    Watcom the assembly ones, and only their union is the answer.
    build/kernel_matrix_gate.sh is what forms that union.
 
-   Empty cells no longer print '.': see lz_kernel_cell below for the
+   Empty cells do not print '.': see lz_kernel_cell below for the
    letters and what each one asserts. */
 const char *lz_kernel_matrix(void);
 
@@ -1482,14 +1494,14 @@ void lz_attn_wsum_q8_int(int64_t *acc, float *sscale, const float *att,
    s1v3-testfrozen (a FROZEN copy of a valid model):
 
      bytes    0.56 -> 1.12 MB of state, +4.12% of per-token streamed
-              bytes. Transfers to the target (rule 3).
+              bytes. Transfers to the target.
      static   +15.6% instructions across the GDN path, counted from
               `wdis` on wcc386 -otexan objects built both ways
               (gdn_pass1_fixed +4, lz_gdn_step +1, and the 12-instruction
               lz_gdn_quantize_2p that replaces lz_quantize_q8).
               Transfers as a COUNT, not as a time.
      time     +7.1% end-to-end s/token, gcc/x86-64 dev box, 7 rounds min.
-              **Does NOT transfer** (rule 3) - quoted only so a target
+              **Does NOT transfer** - quoted only so a target
               run has something to disagree with.
 
    To get the target number, one command, no new instrument - the CLI
