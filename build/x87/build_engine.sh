@@ -42,7 +42,7 @@
 #                            src/ops_sse2.c (-mmmx -msse -msse2), which
 #                            each build separately below. The MMX/SSE1
 #                            split (see src/ops_mmx.h) is the fix for
-#                            src/ops.c:5788's rms=-nan bug: gcc and
+#                            the rms=-nan bug in lz_rmsnorm's row: gcc and
 #                            clang both use MMX for an 8-byte block
 #                            store when -mmmx is on, with no emms before
 #                            the x87 code that follows, corrupting the

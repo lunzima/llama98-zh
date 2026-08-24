@@ -144,6 +144,60 @@ for f in $BSCAN; do
     fi
 done
 
+# ---- SOURCE-LINE CITATIONS, over the same two scopes ------------------
+#
+# `src/ops.c:1104` in a comment is a fact about a file that keeps being
+# edited, and it rots without anyone touching the comment. Four of them
+# were live when this check was added, and all four were wrong: two in
+# ops_t2_scalar.{c,h} pointed at Q8 quantization instead of the T2
+# unpack, and two in switch_matrix_gate.sh named ops.c for an #error
+# that lives in ops_gdn.c - a reader following that one finds nothing
+# and concludes the guard does not exist.
+#
+# A FUNCTION NAME IS THE FIX, not a better number: it survives edits,
+# and grep finds it. Same argument as the rulebook cite above - say the
+# thing, not the coordinate.
+#
+# EXTERNAL FILES ARE EXEMPT. `graph.h:903` and `common.h:260` cite
+# llama.cpp, which this repo does not edit and cannot check; the checks
+# below only fire on names that exist in this tree.
+#
+# OUT OF RANGE ONLY, which is the part that can be decided. `file.c:N`
+# is also how this repo writes file:COUNT tables - c89_floor_gate's
+# baseline reads `forward.c:16` for sixteen known violations, and
+# vc4_limits_gate assigns STR_BASELINE="src/cli_main.c:2" for two
+# over-long strings - so "looks like a citation" is not decidable, and
+# two successively looser rules produced a false positive each. A line
+# PAST THE END of the file it names is stale by arithmetic, whatever it
+# meant: src/ops.c:5788 sat in build/x87/build_engine.sh with ops.c at
+# 4706 lines.
+#
+# An in-range citation that points at the wrong thing is not
+# mechanically checkable and is not attempted. Four were live when this
+# was written - two in ops_t2_scalar.{c,h} aimed at Q8 quantization
+# instead of the T2 unpack, two in switch_matrix_gate.sh naming ops.c
+# for an #error that is in ops_gdn.c - and all four were fixed by hand.
+# Half a check that survives beats a whole one that gets switched off,
+# the same trade seed_gate makes about missing seeds.
+CR=0
+for f in $SCAN $BSCAN; do
+    [ -f "$f" ] || continue
+    while read -r cite; do
+        [ -n "$cite" ] || continue
+        num=${cite##*:}
+        base=${cite%:*}; base=${base##*/}
+        [ -f "src/$base" ] || continue
+        len=$(grep -c '' "src/$base" 2>/dev/null || echo 0)
+        [ "$num" -gt "$len" ] 2>/dev/null || continue
+        echo "FAIL: $f cites $cite but src/$base has $len lines"
+        echo "        - name the function; a line number rots unedited"
+        CR=$((CR + 1))
+        FAIL=1
+    done <<EOF
+$(grep -oE "\b(src/)?[a-z_0-9]+\.[ch]:[0-9]+" "$f" 2>/dev/null | sort -u)
+EOF
+done
+
 # Positive control: the scan must be able to see one. Planting a hash
 # in this script's own text would be caught by the src/ loop only if it
 # lived in src/, so the control is a direct test of the three regexes

@@ -4,8 +4,11 @@
 /* Scalar ternary dot product, one 32-wide block (one 8-byte plane).
    Weights {-1,0,1} packed 2-bit, code=value+1, STRIDE-8 layout:
    weight[k] (k in 0..31) lives in byte k&7, nibble k>>3 - the same
-   layout src/ops.c:1104/1177 and dot32_t2_mmx use, so this is the exact
-   scalar reference both SIMD paths must reproduce bit-for-bit (rule 2:
+   layout lz_t_f32 and lz_t_row_f32 use in src/ops.c
+   (`(b2[k & 7] >> (2 * (k >> 3))) & 3`, the same expression Q6_1's low
+   plane reads through lz_q61_get), and the same one
+   dot32_t2_mmx unpacks, so this is the exact
+   scalar reference both SIMD paths must reproduce bit-for-bit (
    the scalar reference is the contract).
 
    Returns 256 * sum(code*x), code read unsigned in 0..3 - the SIMD

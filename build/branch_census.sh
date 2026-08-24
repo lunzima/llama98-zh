@@ -44,11 +44,13 @@
 # UTF-8 decode in unicode.c - are LOOP-BACK edges, whose minority arm
 # is the single exit and which no predictor gets wrong twice.
 #
-# NAMED, NOT NUMBERED, because the numbers rotted: this paragraph used
-# to cite ops.c:1503 for that accumulate loop and the loop is at 1525
-# now. A line number in a comment is a fact about a file that keeps
-# being edited, and the next reader checks the line rather than the
-# function. The head is still epi_shr_half at the same 4,495,576.
+# NAMED, NOT NUMBERED, because the numbers rotted: this paragraph cited
+# a line in ops.c for that accumulate loop, and the loop had moved
+# twenty-odd lines down by the time anyone looked. A line number in a
+# comment is a fact about a file that keeps being edited, and the next
+# reader checks the line rather than the function - so no line numbers
+# here, including for the correction. The head is still epi_shr_half at
+# the same 4,495,576 executions.
 #
 # Usage: bash build/branch_census.sh [MODEL] [TOP]
 set -u

@@ -7,10 +7,11 @@ extern "C" {
 /* Scalar ternary (LZ_FMT_T2) dot product, one 32-wide block. The bit-exact
    C reference the SIMD tiers must reproduce: dot32_t2_mmx (gcc, MMX
    intrinsics), the Watcom twins lz_dot32_t2_asm / lz_dot32_t2_sse2_asm,
-   and the planned ARMv5TE asm (rule 2: the scalar reference is the
+   and the planned ARMv5TE asm (the scalar reference is the
    contract).
 
-   STRIDE-8 layout, same decode as src/ops.c:1104 and 1177: weight[k] for
+   STRIDE-8 layout, same decode as lz_t_f32 and lz_t_row_f32 in
+   src/ops.c: weight[k] for
    k in 0..31 lives in byte k&7 at nibble k>>3 - byte j holds weights
    j, j+8, j+16, j+24. Code = weight+1, read UNSIGNED, in 0..3.
 

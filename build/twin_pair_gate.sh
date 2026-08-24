@@ -49,15 +49,21 @@ FLOOR=33
 # "partial relief obliges a kernel" standard reopens one and before
 # anyone writes it. This gate counts (unit, ISA) PAIRS, not cells.
 #
-# ZERO TODAY: every x86 cell is either written on both sides or
-# registered impossible with a reason. A CEILING rather than a floor,
-# so this is now also the assertion that nothing gets reopened and left
-# - a new todo reddens the build the moment it is registered. Raising
-# it is the deliberate act of accepting a debt, which is the only way
-# it should ever go up. Before this state existed the gate had two
-# answers, implemented or impossible, and a reopened cell read as an
-# unpaired kernel.
-TODO_CEIL=0
+# A CEILING rather than a floor: the number owed may shrink freely and
+# may not grow unnoticed. Raising it is the deliberate act of accepting
+# a debt, which is the only way it should ever go up. Before this state
+# existed the gate had two answers, implemented or impossible, and a
+# reopened cell read as an unpaired kernel.
+#
+# It reached ZERO when expfx's last cell landed - every x86 cell either
+# written on both sides or registered impossible with a reason - and
+# went back up when two NEW operator units arrived: recur and epi. That
+# is the mechanism working, not failing. A unit lands its gcc side
+# first and owes the Watcom twin for as long as it takes to write, and
+# this number is what stops "for as long as it takes" becoming
+# permanent. It is expected to fall as those two are paired; it should
+# not be raised again without a unit to point at.
+TODO_CEIL=5
 
 "./$BIN" "$MODEL" --kernel-matrix 2>&1 | grep "^cell" | awk -v floor="$FLOOR" -v tceil="$TODO_CEIL" '
 $3=="mmxI"||$3=="sse2I"||$3=="sseI" {

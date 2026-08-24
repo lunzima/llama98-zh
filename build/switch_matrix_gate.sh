@@ -75,9 +75,10 @@
 # Plus one PAIR that is not a switch's single off value:
 #
 #   LZ_GDN_FIXED=2 + LZ_GDN_STATE_2PLANE=0   the fixed pass-2 tier. The
-#      lone LZ_GDN_FIXED=2 is a genuine contradiction: ops.c:4038's own
-#      #error rejects it against the default LZ_GDN_STATE_2PLANE=1. The
-#      pair is the legal build, verified to compile on both toolchains.
+#      lone LZ_GDN_FIXED=2 is a genuine contradiction: src/ops_gdn.c's
+#      own #error rejects it against the default LZ_GDN_STATE_2PLANE=1
+#      ("would be four kernel passes"). The pair is the legal build,
+#      verified to compile on both toolchains.
 #
 # Plus a CROSS list (below): multi-switch combinations where an #error
 # only fires when two non-default values interact. Same check_one, same
@@ -365,7 +366,7 @@ for entry in $SWITCHES; do
 done
 
 # The fixed pass-2 tier: legal only as the pair with the two-plane state
-# off (ops.c:4038's #error rejects it against the default), a distinct
+# off (src/ops_gdn.c's #error rejects it against the default), a distinct
 # code path from LZ_GDN_FIXED=0.
 check_one "LZ_GDN_FIXED=2(+LZ_GDN_STATE_2PLANE=0)" \
     "-DLZ_GDN_FIXED=2 -DLZ_GDN_STATE_2PLANE=0" \
