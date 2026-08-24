@@ -115,10 +115,17 @@ echo "  CC=$CC  ($($CC -dumpversion 2>/dev/null))"
 
 FLAGS="-O2 -std=c99 -Wall -Wextra -ffp-contract=off -static -I$ROOT/src"
 
-# Same list as the Makefile's ENG, and it has to stay the same list -
-# see the Makefile note about source lists living in exactly one place.
-ENG="err compat lfn json safetensors model ops ops_quant ops_sched ops_matmul ops_t2_arm ops_arm ops_t2_scalar ops_norm ops_gdn fwht forward sampler generate
-     tokenizer unicode chat gbk cpucheck"
+# ASKED FOR, not restated. This was a hand-copy carrying a comment
+# saying it had to stay the same list, and it did not: common/beep.c
+# arrived and the link here failed with undefined references to lz_beep
+# while the comment still claimed the two matched. A copy cannot notice
+# its own rot; `make -s print-ENG` has nothing to rot. build/x87 made
+# the same move after nine files went missing from its copy.
+ENG=$(make -s -C "$ROOT" print-ENG)
+if [ -z "$ENG" ]; then
+    echo "mips: cannot read ENG from $ROOT/Makefile (make -s print-ENG)"
+    exit 2
+fi
 
 mkdir -p "$OUT"
 rm -f "$OUT"/*.o "$OUT"/*.log "$OUT/llama98-mips"
@@ -163,7 +170,11 @@ fi
 # Link the CLI, exactly as build/arm/build_engine.sh does: cli_main.c's
 # interactive loop runs on the shared LZSession core in common/, which is
 # a front-end helper deliberately outside $(ENG).
-COM="stream settings command savechat mru chatfile session"
+COM=$(make -s -C "$ROOT" print-COM)
+if [ -z "$COM" ]; then
+    echo "mips: cannot read COM from $ROOT/Makefile (make -s print-COM)"
+    exit 2
+fi
 COMSRC=""
 for c in $COM; do
     [ -f "$ROOT/common/$c.c" ] && COMSRC="$COMSRC $ROOT/common/$c.c"

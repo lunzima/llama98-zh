@@ -56,6 +56,34 @@ set -u
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 
+# ---- WSL, which is where the toolchain lives on this host ---------------
+# build/arm/parity_gate.sh already has this fallback and says why; this
+# gate did not, so it reported "SKIP - missing: gcc-14-mips-linux-gnu(BE)
+# qemu-mips-static" on a machine where both are at /usr/bin inside WSL.
+# The message was accurate about the shell it ran in and wrong about the
+# machine, and byte-order portability went unverified for that reason
+# alone - the same shape as the ARM toolchain sitting in WSL while a
+# gate looked on PATH.
+#
+# RE-EXEC THE WHOLE SCRIPT rather than shimming each command: everything
+# below cross-compiles and runs under qemu, so one boundary crossing is
+# enough and the paths stay in one namespace. LZ_ENDIAN_IN_WSL stops the
+# recursion; an explicit LZ_MIPS_XTC or a toolchain already on PATH skips
+# the hop entirely, so a Linux CI host is unaffected.
+if [ -z "${LZ_ENDIAN_IN_WSL:-}" ] && [ -z "${LZ_MIPS_XTC:-}" ] \
+   && ! command -v mips-linux-gnu-gcc-14 >/dev/null 2>&1 \
+   && ! command -v mips-linux-gnu-gcc >/dev/null 2>&1 \
+   && command -v wsl.exe >/dev/null 2>&1; then
+    if wsl.exe -e bash -lc 'command -v mips-linux-gnu-gcc-14 >/dev/null 2>&1 && command -v qemu-mips-static >/dev/null 2>&1' >/dev/null 2>&1; then
+        case "$ROOT" in
+            /[a-z]/*) WROOT="/mnt/$(echo "$ROOT" | cut -c2)/$(echo "$ROOT" | cut -c4-)" ;;
+            *)        WROOT="$ROOT" ;;
+        esac
+        echo "endian-gate: toolchain is in WSL, re-running there ($WROOT)"
+        exec wsl.exe -e bash -lc "cd '$WROOT' && LZ_ENDIAN_IN_WSL=1 bash build/mips/endian_gate.sh"
+    fi
+fi
+
 MODELS=${MODELS:-"/mnt/e/LLM/models/kunkun98-pilot-20260806 /mnt/e/LLM/models/kunmoe-v2 /mnt/e/LLM/models/_armgate2"}
 TOK=${TOK:-1,2,3,4,5,6,7,8,9,10}
 W=${W:-/tmp/mipsendian}
