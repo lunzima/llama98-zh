@@ -24,7 +24,7 @@
 # THE FIRST LOOK, and it found one kernel unlike the others:
 #
 #   lz_exp_q20_2_mmx_asm      69%
-#   lz_dot32_t2_asm           75%
+#   lz_dot32_t2_asm           75%   <-- since interleaved, now 7%
 #   lz_dot128_t2_asm          72%
 #   lz_dot128_x16_asm         70%
 #   lz_lerp_q15_32_mmx_asm    20%   <-- the outlier
@@ -58,11 +58,22 @@
 #
 # Whole set: 4791 adjacent register pairs, 59% dependent.
 #
-# NOT ATTEMPTED HERE. Interleaving the single-token kernels by hand is a
-# real edit to each, needing its probe re-run on both toolchains; it is
-# named, measured and left. What this script exists for is that the next
-# person does not have to re-derive which kernels are worth it - and the
-# two low scorers say what the target looks like when it is reached.
+# ONE HAS BEEN DONE, so the technique is not hypothetical here.
+# lz_dot32_t2_asm was the worst in the file at 75% and is now 7% - the
+# best - by running the low and high nibble of each weight byte side by
+# side on separate scratch into separate accumulators. Bit-identical:
+# the same eight products in a different summation grouping, int32
+# addition being associative and exact. Verified by
+# build/dot128_t2_probe.c (16,388 values, 0 mismatches, and its printed
+# lane sums unchanged from before the edit) and end to end on
+# kunmoe-v2-t2-probe, whose logits hash did not move.
+#
+# THE REST ARE NOT DONE. Each is a real edit needing its own probe
+# re-run on both toolchains, and lz_dot128_t2_asm in particular has only
+# one spare register - its four accumulators fill the file, so
+# interleaving it needs a different split rather than the same one.
+# Named and measured; what this script is for is that the next person
+# does not re-derive which kernels are worth it.
 #
 # Usage: bash build/pair_census.sh [file ...]   (default: src/ops_mmx.c)
 set -u

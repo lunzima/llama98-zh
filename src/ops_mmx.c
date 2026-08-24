@@ -2302,72 +2302,88 @@ void row_q41_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
    wrapper needed. */
 extern int32_t lz_dot32_t2_asm(const unsigned char *w2,
                                const int16_t *x);
+/* TWO CHUNKS IN FLIGHT, not one, because the target core is in-order
+   and dual-issue. Written as one chain this body was seven instructions
+   each reading what the last wrote - pxor, punpck, psllw, psrlw, psllw,
+   pmaddwd, paddd - and build/pair_census.sh scored it 75% dependent
+   adjacent pairs, the worst in the file. A dependent pair cannot issue
+   together on a Pentium, so most of the second pipe was unreachable.
+
+   The low and high nibbles of the same weight byte are independent, so
+   the two halves of each shift level run side by side on separate
+   scratch (mm0/mm2 against mm1/mm3) into separate accumulators.
+
+   BIT-IDENTICAL, not close: the same eight products in a different
+   summation grouping, and int32 addition is associative and exact. The
+   two accumulators join before the horizontal fold. */
 #pragma aux lz_dot32_t2_asm = \
     ".586" \
     "pxor      mm6, mm6" \
+    "pxor      mm7, mm7" \
     "movq      mm4, [edx]" \
     "movq      mm0, [ecx]" \
+    "movq      mm1, [ecx+8]" \
     "pxor      mm2, mm2" \
+    "pxor      mm3, mm3" \
     "punpcklbw mm2, mm4" \
+    "punpckhbw mm3, mm4" \
     "psllw     mm2, 6" \
+    "psllw     mm3, 6" \
     "psrlw     mm2, 14" \
+    "psrlw     mm3, 14" \
     "psllw     mm2, 8" \
+    "psllw     mm3, 8" \
     "pmaddwd   mm2, mm0" \
+    "pmaddwd   mm3, mm1" \
     "paddd     mm6, mm2" \
-    "movq      mm0, [ecx+8]" \
-    "pxor      mm2, mm2" \
-    "punpckhbw mm2, mm4" \
-    "psllw     mm2, 6" \
-    "psrlw     mm2, 14" \
-    "psllw     mm2, 8" \
-    "pmaddwd   mm2, mm0" \
-    "paddd     mm6, mm2" \
+    "paddd     mm7, mm3" \
     "movq      mm0, [ecx+16]" \
+    "movq      mm1, [ecx+24]" \
     "pxor      mm2, mm2" \
+    "pxor      mm3, mm3" \
     "punpcklbw mm2, mm4" \
+    "punpckhbw mm3, mm4" \
     "psllw     mm2, 4" \
+    "psllw     mm3, 4" \
     "psrlw     mm2, 14" \
+    "psrlw     mm3, 14" \
     "psllw     mm2, 8" \
+    "psllw     mm3, 8" \
     "pmaddwd   mm2, mm0" \
+    "pmaddwd   mm3, mm1" \
     "paddd     mm6, mm2" \
-    "movq      mm0, [ecx+24]" \
-    "pxor      mm2, mm2" \
-    "punpckhbw mm2, mm4" \
-    "psllw     mm2, 4" \
-    "psrlw     mm2, 14" \
-    "psllw     mm2, 8" \
-    "pmaddwd   mm2, mm0" \
-    "paddd     mm6, mm2" \
+    "paddd     mm7, mm3" \
     "movq      mm0, [ecx+32]" \
+    "movq      mm1, [ecx+40]" \
     "pxor      mm2, mm2" \
+    "pxor      mm3, mm3" \
     "punpcklbw mm2, mm4" \
+    "punpckhbw mm3, mm4" \
     "psllw     mm2, 2" \
+    "psllw     mm3, 2" \
     "psrlw     mm2, 14" \
+    "psrlw     mm3, 14" \
     "psllw     mm2, 8" \
+    "psllw     mm3, 8" \
     "pmaddwd   mm2, mm0" \
+    "pmaddwd   mm3, mm1" \
     "paddd     mm6, mm2" \
-    "movq      mm0, [ecx+40]" \
-    "pxor      mm2, mm2" \
-    "punpckhbw mm2, mm4" \
-    "psllw     mm2, 2" \
-    "psrlw     mm2, 14" \
-    "psllw     mm2, 8" \
-    "pmaddwd   mm2, mm0" \
-    "paddd     mm6, mm2" \
+    "paddd     mm7, mm3" \
     "movq      mm0, [ecx+48]" \
+    "movq      mm1, [ecx+56]" \
     "pxor      mm2, mm2" \
+    "pxor      mm3, mm3" \
     "punpcklbw mm2, mm4" \
+    "punpckhbw mm3, mm4" \
     "psrlw     mm2, 14" \
+    "psrlw     mm3, 14" \
     "psllw     mm2, 8" \
+    "psllw     mm3, 8" \
     "pmaddwd   mm2, mm0" \
+    "pmaddwd   mm3, mm1" \
     "paddd     mm6, mm2" \
-    "movq      mm0, [ecx+56]" \
-    "pxor      mm2, mm2" \
-    "punpckhbw mm2, mm4" \
-    "psrlw     mm2, 14" \
-    "psllw     mm2, 8" \
-    "pmaddwd   mm2, mm0" \
-    "paddd     mm6, mm2" \
+    "paddd     mm7, mm3" \
+    "paddd     mm6, mm7" \
     "movq      mm0, mm6" \
     "psrlq     mm0, 32" \
     "paddd     mm6, mm0" \
