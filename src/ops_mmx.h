@@ -48,6 +48,13 @@
    this. */
 #define LZ_GDN1_MMX_EXTERN 1
 
+/* Same unconditional treatment, and for the same reason: the SSE1
+   recurrence body (lz_p2_rows_sse, ops_mmx_sse.c) is compiled for both
+   toolchains because ops_mmx_sse is in every Watcom link script. Until
+   this existed, km_op_present had no macro to key that cell off, which
+   is why an operator with four x86 bodies read as having none. */
+#define LZ_P2_SSE_EXTERN 1
+
 /* Unconditional (both compilers): Watcom's lz_p2_rows_mmx (this file's
    TU, ops_mmx.c) and lz_p2_rows_sse (ops_mmx_sse.c) need the SAME
    16-byte-aligned scratch buffer this returns: the split step reads
@@ -208,17 +215,10 @@ void lz_p2_mul32_mmx(const int8_t *hi, const int8_t *lo,
    ops_mmx_sse.c pair's declarations" rather than "ops_mmx.c's
    declarations" being what this header actually is.
 
-   LZ_P2_SSE_EXTERN is what lets a cell for this kernel be probed. The
-   body has shipped since the SSE1 tier landed and no entry in km_reg
-   reports it, because km_op_present keys every cell off an _EXTERN and
-   this one had none - so there was nothing a probe could test, and a
-   KM_H would have been an assertion the gate could not check.
-
-   Outside the __WATCOMC__ split, for the reason LZ_NORM_SS_SSE_EXTERN
-   above carries: the body is compiled for both toolchains (ops_mmx_sse
-   is in every Watcom link script), so declaring it in the gcc arm alone
-   leaves the Watcom build registering a cell it cannot see. */
-#define LZ_P2_SSE_EXTERN 1
+   LZ_P2_SSE_EXTERN, which lets a cell for this kernel be probed, is
+   NOT here - this point is inside the __WATCOMC__ arm that opens well
+   above, so a macro defined here is invisible to gcc. It sits with
+   LZ_GDN1_MMX_EXTERN instead, which is unconditional. */
 void lz_p2_rows_sse(const int8_t *ph_row, const int8_t *pl_row,
                     int pl_stride, const int16_t *dq,
                     const int16_t (*mul)[4], int8_t *oh_row,

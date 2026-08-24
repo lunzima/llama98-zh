@@ -386,7 +386,7 @@ float lz_exp(float x) {
    reference on all non-NaN inputs.
 
    **No emms emitted**: xmm and x87/MMX do not share register files
-   (rule 6.6 only covers MMX), so this kernel can be called straight
+   (the no-emms convention only covers MMX), so this kernel can be called straight
    from lz_gdn_step's x87 section.
 
    No PIII tier - `cvtps2dq` is SSE2;
@@ -1149,7 +1149,7 @@ void lz_quantize_q8_silu(const float *p, const float *g, const int32_t *sig,
     int grp, k;
     /* Moved from LZ_FC_NORM: this is lz_quantize_q8_silu's OWN
        arithmetic (the amax-pass reconstruction and the final
-       2^-15 rescale below), not the norm function's - rule 2 says a
+       2^-15 rescale below), not the norm function's - cross-compiler bit-identity requires a
        site counts its own arithmetic only, and this function is the
        quantize wrapper, not the norm itself. */
     LZ_FCX(LZ_FC_QUANT, 3 * n, 0, 0, n, 0);
@@ -1344,7 +1344,7 @@ static void epi_prep_plane(const float *src, int16_t *out, signed char *ex,
            holds, at 15 it never does, and at exactly 14 it reduces to
            M < 32767/16384, which is a comparison of the mantissa field
            against 0x7FFE00. Hence a bias subtract, one correction, and
-           the clamp the old loop got from starting at 0 and stopping at
+           the clamp from starting at 0 and stopping at
            100. Subnormals fall out: their biased exponent is 0, giving
            141, which clamps to 100 - the same place the loop capped.
            Verified against the loop over all 2^32 bit patterns, not a
@@ -1643,7 +1643,7 @@ static lz_i64 lz_epi_mac_i16(const int32_t *a, const int16_t *m, int n) {
 /* The fixed counterpart. Same signature plus the tensor's int16 plane
    and the row, because the shared exponent is per row.
 
-   xq16/mprod are static rather than stack (rule 6 item 4) and sized by
+   xq16/mprod are static rather than stack (Win98 has a small stack) and sized by
    the same bound lz_epi_prep enforces, so a shape it refused cannot
    reach here. */
 static int16_t g_epi_xq[LZ_BATCH_MAX][LZ_EPI_MAX_NG];
@@ -2151,7 +2151,7 @@ float epi_q8(const int32_t *accb, const float *xsb, const float *ws,
     /* r>1: per group a convert, a multiply and an add, then per r-run one
        multiply and one add, then the post scale. r==1: convert plus two
        multiplies plus an add per group, and 4 to fold the accumulators.
-       This is the row the old census put at 1,995,552 by a rule nobody
+       This is the row the census put at 1,995,552 by a rule nobody
        could reconstruct. The convert (lz_i32f, once per group either
        way) is the same ng in both branches. */
     LZ_FCX(LZ_FC_EPI,
@@ -2694,7 +2694,7 @@ void lz_matmul_xq_nt(float *o, const float *x, const int8_t *xq,
        affect the name reported. Dispatch is by dtype, so without this
        check `--kernel ref` would actually run SIMD, unnoticed because
        all kernels are bit-identical. The scalar reference is the
-       CONTRACT for new formats (rule 2); an oracle that cannot be
+       CONTRACT for new formats; an oracle that cannot be
        selected is no oracle. */
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
     if (g_kernel == LZ_KERNEL_REF) {
@@ -2761,7 +2761,7 @@ void lz_matmul_xq_nt(float *o, const float *x, const int8_t *xq,
        activation expanded to int16, so in_dim past the buffer cap goes to
        the scalar reference. The gcc/SSE2-only dev build has no Q16_0 SIMD
        kernel either and lands there too - that is deliberate, not an
-       oversight. The differential oracle rule 2 asks for is a gcc build
+       oversight. The differential oracle the bit-identity contract requires is a gcc build
        with LZ_MMX_TU set (src/ops_mmx.c linked in), which compiles the
        intrinsics twin and exercises this same path. */
     if (w->dtype == LZ_FMT_Q16_0 && w->gs >= 32 && (w->gs % 32) == 0 &&
@@ -3083,7 +3083,7 @@ void lz_causal_conv1d_step(float *o, const float *x,
 lz_i64 lz_debug_conv_sig_i = 0;
 
 /* Same reason, and they were inside the #if until a -DLZ_CONV_FIXED=0
-   row was added to build/recur_write_float_arm_gate.sh and would not
+   row exists in build/recur_write_float_arm_gate.sh and would not
    LINK: cli_main.c's --debug-counters block reads both unconditionally.
    Nothing caught it earlier because the switch-matrix gate compiles the
    probe with -fsyntax-only, which never reaches the linker.
@@ -3210,7 +3210,7 @@ void lz_causal_conv1d_step_fixed_o16(float *o, short *oi, int out_es,
        - lz_i32f, the exit cast and the two multiplies - are a 64-bit
        integer product and a shift, so all that is left is the input
        multiply the float entry needs, and nothing at all with xi. A
-       formula that kept charging the old shape would report this
+       formula that kept charging the previous shape would report this
        change as worth zero, which is what the first run of it did. */
     if (oi) {
         LZ_FCX(LZ_FC_CONV, (long)n_ch * (xi ? 0 : 1), 0, 0, 0, 0);
@@ -3762,10 +3762,10 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
    `arm-asm` has exactly ONE consumer (matmul_t2_impl's ternary row,
    src/ops_matmul.c). The moment a second operator gets an ARM tier -
    docs/arm-asm-audit.md ranks the candidates by calls per token - a
-   single global enum value can no longer say WHICH operator has the
-   assembly, which is the x86 mistake this project already made once
-   (one LZ_KERNEL_MMX covering Watcom assembly and gcc intrinsics, so
-   lz_kernel_name could not answer what ran). The registry therefore
+   single global enum value cannot say WHICH operator has the
+   assembly -
+   one LZ_KERNEL_MMX covering both Watcom assembly and gcc intrinsics
+   would make lz_kernel_name unable to answer what ran. The registry therefore
    keys on the unit, not on the build.
 
    LZ_KM_ROW units print in the grid. LZ_KM_OP units are registry-only:
@@ -3777,7 +3777,7 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
 #define LZ_KM_ROW 0
 #define LZ_KM_OP  1
 
-#define LZ_KM_NUNIT 15
+#define LZ_KM_NUNIT 17
 #define LZ_KM_NCOL 10
 /* The one unit with ARM kernels, by index - km_tab and km_present both
    need it, and a named constant is what stops a reorder of km_unit from
@@ -3811,6 +3811,13 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
    this one is reached by lz_matmul_xq_nt's f32 short-circuit before any
    dtype dispatch runs - a different mechanism, so a different row. */
 #define LZ_KM_UNIT_F32MM 14
+/* The two largest float census sites, which had no row until now.
+   recur is the GDN recurrence (LZ_FC_RECUR, 26.7% of per-token float);
+   epi is the matmul epilogue (LZ_FC_EPI, 10.0%). Their absence was not
+   a statement that the operators lack kernels - recur has four x86
+   bodies - it was that nothing in the table could say either way. */
+#define LZ_KM_UNIT_RECUR 15
+#define LZ_KM_UNIT_EPI   16
 /* Column 0 is ref and columns 7..9 are armC/armA/g128; columns 1..6 are
    the six LZ_ROW_* slots in slot order, so column c reads tab[c - 1]. */
 #define LZ_KM_COL_ROW0 1
@@ -3826,7 +3833,8 @@ km_unit[LZ_KM_NUNIT] = {
     { "expfx", LZ_KM_OP  }, { "atdot", LZ_KM_OP }, { "wsump", LZ_KM_OP },
     { "sigq",  LZ_KM_OP  }, { "nrmss", LZ_KM_OP },
     { "fwhti", LZ_KM_OP  }, { "fwhtf", LZ_KM_OP },
-    { "f32mm", LZ_KM_OP }
+    { "f32mm", LZ_KM_OP },
+    { "recur", LZ_KM_OP  }, { "epi",   LZ_KM_OP }
 };
 static const char *const km_col[LZ_KM_NCOL] = {
     "ref", "mmxI", "sseI", "sse2I", "mmxA", "sseA", "sse2A",
@@ -3911,8 +3919,7 @@ static const char km_why_sse1[] =
    neither MMX, SSE1 nor SSE2 has a gather - VPGATHERDD is AVX2. Four
    lanes would have to be scattered back to scalar loads, which is the
    scalar code with extra shuffling in front of it. */
-/* THE ENUMERATION IN THIS REASON WAS WRONG ONCE, and the correction is
-   why i32f no longer carries it. It listed the quantize group, the norm
+/* This reason initially listed the quantize group, the norm
    element loop and the matmul rows as the only loops that could batch a
    scalar leaf, and concluded that none of them would because each
    carries its own kernel. It missed a fourth: lz_attn_wsum_q8's chunk
@@ -4107,7 +4114,7 @@ static const char km_why_fwhti_sse1[] =
    the whole gs/32-chunk loop - hand it 128 and it runs four chunks. So
    neither "no group form exists" nor "a scalar leaf has no group" is
    true here; the second clause is the one this file already retired at
-   km_why_i32f_g128, and q8rnd kept pointing at the old string.
+   km_why_i32f_g128.
    What is true is narrower, and it is what the column asks: this column
    is the matmul row kernel's relationship to a group-of-128 kernel
    (dot128_*), and q8round's group kernel is called by lz_quantize_q8
@@ -4148,6 +4155,25 @@ static const char km_why_f32mm_g128[] =
     "this column is the 128-ELEMENT quantization group; lz_matmul's "
     "unit of work is a whole weight ROW against a whole activation "
     "vector, a different axis";
+static const char km_why_recur_arma[] =
+    "todo: the GDN recurrence has four x86 bodies and no ARM one. "
+    "ARMv5TE can do the int16 multiply-accumulate this needs, so the "
+    "cell is owed rather than impossible";
+static const char km_why_recur_wat_mmx[] =
+    "todo: lz_gdn1_x4_asm and lz_gdn_sum_gg_mmx are the Watcom bodies "
+    "and they run, but LZ_P2_MMX_EXTERN is declared under !__WATCOMC__, "
+    "so km_op_present has no macro to key this cell off";
+static const char km_why_recur_wat_sse2[] =
+    "todo: lz_p2_rows_sse2's body is in the Watcom link, but "
+    "LZ_P2_SSE2_EXTERN is declared under !__WATCOMC__, so there is no "
+    "macro for km_op_present to key this cell off yet";
+static const char km_why_epi_x86[] =
+    "todo: lz_epi_mac_i16 is an int16 multiply-accumulate and nothing "
+    "but the C body exists. pmaddwd expresses it directly, so all six "
+    "x86 cells are owed";
+static const char km_why_epi_arma[] =
+    "todo: same int16 multiply-accumulate as the x86 cells, and ARMv5TE "
+    "reaches it the same way the other operator rows do";
 typedef struct { unsigned char have; unsigned char why; const char *text; } LZKmReg;
 #define KM_H(mask) { (unsigned char)(mask), 0, (const char *)0 }
 #define KM_I(text) { 0, LZ_KM_IMPOSSIBLE, (text) }
@@ -4200,7 +4226,16 @@ static const LZKmReg km_reg[LZ_KM_NUNIT * LZ_KM_NCOL] = {
    deleted and not a single cell would change. */
 /* fwhti*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_fwhti_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_fwhti_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM),       KM_N(km_why_fwht_g128),
 /* fwhtf*/ KM_H(KM_ALL), KM_I(km_why_fwhtf_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_I(km_why_fwhtf_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM),          KM_N(km_why_fwht_g128),
-/* f32mm*/ KM_H(KM_ALL), KM_I(km_why_f32mm_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_I(km_why_f32mm_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM),        KM_N(km_why_f32mm_g128)
+/* f32mm*/ KM_H(KM_ALL), KM_I(km_why_f32mm_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_I(km_why_f32mm_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM),        KM_N(km_why_f32mm_g128),
+/* recur's SSE1 cell is NOT km_why_sse1. That string fills the SSE1
+   column for every weight-format row above and copying it down is the
+   reflex; lz_p2_rows_sse (ops_mmx_sse.c) exists, and a false absent is
+   worse than an empty cell because the gate then enforces it. The
+   Watcom SSE columns stay with the gcc class: LZ_P2_SSE_EXTERN and
+   LZ_P2_SSE2_EXTERN are what km_op_present can key off, and the SSE2
+   one is declared under !__WATCOMC__. */
+/* recur*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_T(km_why_recur_wat_mmx), KM_H(LZ_KMB_WAT), KM_T(km_why_recur_wat_sse2), KM_H(LZ_KMB_ARM), KM_T(km_why_recur_arma), KM_N(km_why_op_g128),
+/* epi  */ KM_H(KM_ALL), KM_T(km_why_epi_x86), KM_T(km_why_epi_x86), KM_T(km_why_epi_x86), KM_T(km_why_epi_x86), KM_T(km_why_epi_x86), KM_T(km_why_epi_x86), KM_H(LZ_KMB_ARM), KM_T(km_why_epi_arma), KM_N(km_why_op_g128)
 };
 
 #if defined(__WATCOMC__)
@@ -4304,6 +4339,33 @@ static int km_g128(int f) {
    table - both call sites pick their kernel with a #if, so the presence
    answer has to come from the same macros the #if reads, and it does. */
 static int km_op_present(int f, int c) {
+    /* The GDN recurrence. Four bodies, and until LZ_P2_SSE_EXTERN landed
+       the SSE1 one had no macro to key a cell off - which is why an
+       operator with x86 assembly showed as having none.
+       Columns by build class, like FWHTI below: LZ_P2_MMX_EXTERN and
+       LZ_P2_SSE_EXTERN are defined for both toolchains, so naming the
+       gcc column unconditionally would make a Watcom build report the
+       gcc cell present. */
+#if defined(LZ_P2_MMX_EXTERN)
+#if defined(__WATCOMC__)
+    if (f == LZ_KM_UNIT_RECUR && c == LZ_KM_COL_ROW0 + LZ_ROW_MMX_A) return 1;
+#else
+    if (f == LZ_KM_UNIT_RECUR && c == LZ_KM_COL_ROW0 + LZ_ROW_MMX_I) return 1;
+#endif /* __WATCOMC__ */
+#endif /* LZ_P2_MMX_EXTERN */
+#if defined(LZ_P2_SSE_EXTERN)
+#if defined(__WATCOMC__)
+    if (f == LZ_KM_UNIT_RECUR && c == LZ_KM_COL_ROW0 + LZ_ROW_SSE_A) return 1;
+#else
+    if (f == LZ_KM_UNIT_RECUR && c == LZ_KM_COL_ROW0 + LZ_ROW_SSE_I) return 1;
+#endif /* __WATCOMC__ */
+#endif /* LZ_P2_SSE_EXTERN */
+#if defined(LZ_P2_SSE2_EXTERN)
+    /* Declared under !__WATCOMC__ in ops_sse2.h, so this one names the
+       gcc column with no build-class split - the macro IS the split. */
+    if (f == LZ_KM_UNIT_RECUR && c == LZ_KM_COL_ROW0 + LZ_ROW_SSE2_I) return 1;
+#endif /* LZ_P2_SSE2_EXTERN */
+
 #if defined(LZ_FWHT_MMX_EXTERN)
     /* The Hadamard's MMX stage kernel. LZ_FWHT_MMX_EXTERN is defined for
        BOTH toolchains, unlike the dot/wsum _EXTERNs below - so the COLUMN
