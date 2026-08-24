@@ -40,6 +40,25 @@ HARNESSES=$(ls .prof/*_xcheck.sh 2>/dev/null | grep -v "wbuild_xcheck")
     exit 2
 }
 
+# WHICH UNITS THESE REACH, and which they do not. The kernel matrix has
+# fifteen units; mapping each to the harness that compares it:
+#
+#   atdot wsump        attn_sse2_xcheck        (SSE2 / MMX / C)
+#   expfx sigq q8rnd
+#   i32f               scalar_regime_xcheck    (gcc / x87 / soft-float)
+#   nrmss              norm_ss_sse2 + norm_wp
+#   fwhtf fwhti        fwht_f32 + fwht_mmx
+#   f32mm              matmul_f32
+#   q8_0 q4_1 q6_1
+#   q16_0 t2           NOTHING
+#
+# The five row kernels are the gap, and they are exactly the code the
+# end-to-end fixture reaches least - 47.57% of ops_kernel_dot_mmx.h. So
+# "ten harnesses, all green" must not be read as "every operator is
+# cross-checked". UNCOVERED below is that list, printed every run; it
+# shrinks when a harness for one of them is written.
+UNCOVERED="q8_0 q4_1 q6_1 q16_0 t2"
+
 P=0; F=0; S=0
 for h in $HARNESSES; do
     n=$(basename "$h" .sh)
@@ -67,6 +86,23 @@ if [ $((P + F + S)) -lt 5 ]; then
 fi
 
 echo "xcheck_gate: $P passed, $F failed, $S skipped"
+echo "xcheck_gate: NO per-operator check for:$(printf ' %s' $UNCOVERED)"
+echo "  (row kernels; end-to-end reaches 47.57% of their MMX lines)"
+
+# The uncovered list is checked against the matrix, not trusted. A unit
+# that gains a harness and is not removed from UNCOVERED understates the
+# coverage; a unit ADDED to the matrix and not listed here overstates it,
+# which is the direction that matters.
+if [ -x ./llama98.exe ] || [ -x ./llama98 ]; then
+    BIN=./llama98.exe; [ -x "$BIN" ] || BIN=./llama98
+    NU=$("$BIN" --kernel-matrix 2>/dev/null | grep -c "^cell .* ref ")
+    if [ "${NU:-0}" -gt 0 ] && [ "$NU" -ne 15 ]; then
+        echo "xcheck_gate: FAIL - the matrix has $NU units, not the 15 the"
+        echo "  mapping above was written against; re-derive UNCOVERED"
+        exit 1
+    fi
+fi
+
 [ "$F" -eq 0 ] || { echo "xcheck_gate: FAIL"; exit 1; }
 echo "xcheck_gate: PASS"
 exit 0
