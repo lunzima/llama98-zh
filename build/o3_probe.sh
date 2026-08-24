@@ -64,37 +64,75 @@ wsump:src/ops_gdn.c:lz_attn_wsum_q8
 # with -march=x86-64-v3 gcc emits vmulps and vpaddd, so an AVX2 column
 # read ZERO everywhere while the SSE2 column read a hundred. The number
 # was measuring the pattern, not the compiler.
-PACKED='\bv?(mulps|addps|subps|divps|maxps|minps|andps|andnps|orps|xorps'
+PACKED='\bv?(mulps|addps|subps|divps|maxps|minps'
 PACKED="$PACKED"'|mulpd|addpd|subpd|cvtps2dq|cvtdq2ps|cvttps2dq'
 PACKED="$PACKED"'|paddb|paddw|paddd|paddq|psubb|psubw|psubd|psubq'
 PACKED="$PACKED"'|pmaddwd|pmullw|pmulld|pmulhw|pmulhuw|psadbw'
 PACKED="$PACKED"'|packssdw|packsswb|packuswb|pmaxsw|pminsw|pmaxsd|pminsd'
 PACKED="$PACKED"'|punpck[lh][a-z]+|pshufd|pshufb|pshufw|pshuflw|pshufhw'
 PACKED="$PACKED"'|pcmpeq[bwd]|pcmpgt[bwd]|psll[wdq]|psrl[wdq]|psra[wd]'
-PACKED="$PACKED"'|movdqa|movdqu|movaps|movups|movntdq|movntps'
 PACKED="$PACKED"'|permd|permq|pgatherdd|gatherdps|pbroadcast[bwdq]'
 PACKED="$PACKED"'|fmadd[0-9]*ps|insertf128|extractf128|perm2f128)\b'
+
+# MOVES AND BITWISE ARE NOT EVIDENCE, and keeping them in the count above
+# is how this script reported that gcc vectorises lz_exp. It does not:
+# at -O3 -march=x86-64 that function is 163 instructions of which the
+# "22 packed" were 20 movaps and 2 pshufd - zero packed ARITHMETIC.
+# movaps is how gcc copies an xmm register in ordinary scalar float
+# code, and xorps/andps are how it negates and takes absolute value, so
+# a pattern holding them fires on exactly the scalar code this script
+# exists to distinguish from vector code.
+#
+# They are still counted, and printed in their own column, because
+# "gcc moved a lot of vectors around here" is worth seeing next to
+# "and did no vector arithmetic". It is context, never the verdict.
+MOVES='\bv?(movdqa|movdqu|movaps|movups|movntdq|movntps'
+MOVES="$MOVES"'|andps|andnps|orps|xorps|andpd|xorpd)\b'
+
+# THE WHOLE FUNCTION, not up to its first `ret`. Stopping there truncates
+# any function with an early return - lz_exp_fixed's domain guards are
+# two of them before a single loop iteration - and the loss is silent and
+# one-directional. objdump separates functions with a blank line, so that
+# is the terminator.
+#
+# REPORTS insns TOO, and that is not decoration. A symbol that was not
+# found yields an empty body and "0 packed", which is indistinguishable
+# from a function the compiler declined to vectorise. This script had ten
+# rows of "0 packed" in its SSE1 column and no way to tell which kind
+# they were. insns=0 means the probe missed; insns=163 arith=0 means it
+# looked.
+body_of() {
+    objdump -d "$1" 2>/dev/null \
+        | awk -v s="<$2>:" -v u="<_$2>:" \
+              'index($0,s)||index($0,u) {on=1; next} on && /^$/ {exit} on'
+}
+
+report() {
+    local unit=$1 tag=$2 body=$3
+    local insns arith moves
+    insns=$(printf '%s' "$body" | grep -c '')
+    arith=$(printf '%s' "$body" | grep -coE "$PACKED")
+    moves=$(printf '%s' "$body" | grep -coE "$MOVES")
+    if [ "$insns" -eq 0 ]; then
+        printf '  %-6s %-22s SYMBOL NOT FOUND\n' "$unit" "$tag"
+        return
+    fi
+    printf '  %-6s %-22s insns=%-5s arith=%-4s moves=%s\n' \
+           "$unit" "$tag" "$insns" "$arith" "$moves"
+}
 
 probe() {
     local unit=$1 file=$2 sym=$3 arch=$4 tag=$5
     gcc -O3 -march="$arch" $D -c -o "$W/o.o" "$file" 2>/dev/null || {
         printf '  %-6s %-22s BUILD FAIL\n' "$unit" "$tag"; return; }
-    local n
-    n=$(objdump -d "$W/o.o" 2>/dev/null \
-        | awk -v s="<$sym>:" 'index($0, s) {on=1} on && /\tret/ {print; exit} on' \
-        | grep -coE "$PACKED")
-    printf '  %-6s %-22s %s packed\n' "$unit" "$tag" "$n"
+    report "$unit" "$tag" "$(body_of "$W/o.o" "$sym")"
 }
 
 probe32() {
     local unit=$1 file=$2 sym=$3 arch=$4 tag=$5
     gcc -O3 -m32 -march="$arch" $D -c -o "$W/o32.o" "$file" 2>/dev/null || {
         printf '  %-6s %-22s BUILD FAIL\n' "$unit" "$tag"; return; }
-    local n
-    n=$(objdump -d "$W/o32.o" 2>/dev/null \
-        | awk -v s="<_$sym>:" -v t="<$sym>:" 'index($0,s)||index($0,t) {on=1} on && /\tret/ {print; exit} on' \
-        | grep -coE "$PACKED")
-    printf '  %-6s %-22s %s packed\n' "$unit" "$tag" "$n"
+    report "$unit" "$tag" "$(body_of "$W/o32.o" "$sym")"
 }
 
 SEL="${*:-}"
