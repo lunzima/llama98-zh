@@ -2,7 +2,7 @@
    docs/arm-asm-audit.md is the per-operator audit these come from; the
    row kernels live in src/ops_arm.c and src/ops_t2_arm.c.
 
-   WHY THESE ARE INLINE ASM AND NOT LEAF FUNCTIONS. lz_i32f is `static`
+   Why these are inline asm and not leaf functions. lz_i32f is `static`
    in ops_kernel_shared.h and is inlined at every one of its call sites;
    q8_round's magic add is inlined into norm_ss_fixed. A leaf function
    here would add a call where there is none today, and the call alone
@@ -10,7 +10,7 @@
    __asm__ block that expands where it is used, with numeric local
    labels so several expansions can coexist in one function.
 
-   WHAT MAKES THEM REACHABLE ONLY FROM ASSEMBLY. The target has no FPU,
+   What makes them reachable only from assembly. The target has no FPU,
    so gcc turns every float operation into a `bl __aeabi_*`: 105
    instructions for lz_i32f's four calls, 48 for q8_round's one. The
    values these compute are integer facts about the bit pattern - a
@@ -19,7 +19,7 @@
    do in a dozen instructions with no call at all. gcc cannot get there
    from the C, because the C says "float add" and it has to honour that.
 
-   EVERY ONE OWES ITS C TIER BIT-IDENTITY, not closeness. Where a case
+   Every one owes its C tier bit-identity, not closeness. Where a case
    is not provably identical the primitive DECLINES (returns 0) and the
    caller runs the C, so the tier can only ever be slower, never
    different. The declined cases are named at each function. */
@@ -80,7 +80,7 @@ static __inline__ float lz_i32f_arm_asm(int32_t v) {
    boundary |qv * 2^k| < 2^22 (inf and NaN land there too, since their
    biased exponent is 255) - plus one case the stated boundary misses.
 
-   THE EXTRA DECLINE. The magic add is only readable while the sum
+   The extra decline. The magic add is only readable while the sum
    stays inside [2^23, 2^24), and the sum reaches 2^24 exactly when the
    rounded result is +2^22: qv = 4194303.5 rounds half-to-even up to
    4194304, the sum lands on 16777216, the low 23 bits are zero and
@@ -189,7 +189,7 @@ static __inline__ int lz_scale2_arm_asm(uint32_t ua, int32_t k,
    mantissa and the shift, so the float is unpacked once for this and
    for the residue step below.
 
-   THE DECLINE IS WHAT MAKES IT IDENTICAL. `y32 - 0.5f` is an exact
+   The decline is what makes it identical. `y32 - 0.5f` is an exact
    float32 subtraction only while N = +-mantissa - 2^(sh-1) fits in 24
    bits; past that the subtraction rounds first and the magic add rounds
    again, and reproducing that double rounding is a float adder, not an
@@ -284,7 +284,7 @@ static __inline__ int32_t lz_exp_resid_arm_asm(int32_t ms, int32_t t,
 
 /* ---- sigmoid_q15 / sigmoid_q15_t ------------------------------------- */
 
-/* THE COORDINATE, ONCE. Both entry points end in the same three C
+/* The coordinate, computed once. Both entry points end in the same three C
    lines - `idx = (int)t`, `frac = (int32_t)((t - (float)idx) *
    32768.0f)`, then a table pair and a linear step - and both are the
    same single integer: F = floor(t * 2^15), with idx = F >> 15 and
@@ -322,7 +322,7 @@ static __inline__ int32_t lz_exp_resid_arm_asm(int32_t ms, int32_t t,
 /* sigmoid_q15_t(t): the table-only entry, so the coordinate arrives
    already scaled and there is no arithmetic in front of it at all.
 
-   THE TWO CLAMPS BECOME ONE UNSIGNED COMPARE. Positive floats order
+   The two clamps become one unsigned compare. Positive floats order
    the same way their bit patterns do, so `t <= 0.0f` and
    `t >= 384.0f` - two `bl __aeabi_fcmp*` calls, about 30 instructions
    each - are the single test u < 0x43C00000, which every negative
@@ -372,7 +372,7 @@ static __inline__ int lz_sig_q15_t_arm_asm(uint32_t ut, const int32_t *tab,
    coordinate; the ADD DOES NOT, and reproducing its rounding bit for
    bit is the whole content of this function.
 
-   WHY IT IS AN INTEGER PROBLEM. What the table needs is
+   Why it is an integer problem. What the table needs is
    F = floor(fl(x + 12) * 2^19), and fl(x + 12) is a correctly rounded
    float32 - i.e. the exact sum expressed in units of the RESULT's ulp
    and rounded half-to-even. The exact sum is 12 +- |x| with both terms
@@ -395,12 +395,12 @@ static __inline__ int lz_sig_q15_t_arm_asm(uint32_t ut, const int32_t *tab,
    moves the result up: a tie there rounds to even by clearing the low
    bit rather than adding it.
 
-   ZERO AND SUBNORMALS NEED NO CASE. Their exponent makes the shift
+   Zero and subnormals need no case. Their exponent makes the shift
    count 130, so the quotient and the dropped bits are both zero on
    ARM's register-specified shifts, and the arm falls out at 12 exactly
    - which is what fl(x + 12) is for every |x| < 2^-126.
 
-   THE ONE DECLINE IS NaN. Both clamps are answered from the sign bit
+   The one decline is NaN. Both clamps are answered from the sign bit
    once |x| >= 12, so infinities are handled too.
 
    idx CAN REACH 384 even though |x| < 12, which is why the lookup is
@@ -462,7 +462,7 @@ static __inline__ int lz_sig_q15_arm_asm(uint32_t ux, const int32_t *tab,
         "mov    %[T], %[T], lsl %[m]\n\t"
         "cmp    %[T], #0x80000000\n\t"
         "subhi  %[F], %[F], #1\n\t"            /* dropped bits push it down */
-        /* NO TIE INSTRUCTION HERE, and that is not an omission. Round-
+        /* No tie instruction here; that is deliberate. Round-
            half-to-even on this branch picks between T-1 and T, and the
            `lsr #1` below discards exactly the bit they differ in:
            (T-1)>>1 == T>>1 for odd T, and T is the answer when T is
@@ -508,18 +508,18 @@ static __inline__ int lz_sig_q15_arm_asm(uint32_t ux, const int32_t *tab,
    isolated adds - libgcc shares nothing, so the same two operands are
    unpacked, aligned, normalised, rounded and packed twice.
 
-   ALIGNMENT IS THE SHARED PART, and it is shared because it depends on
+   Alignment is the shared part, shared because it depends on
    the MAGNITUDES only: |a| and |b| line up the same way whichever sign
    the operation carries. What cannot be shared is normalise/round/pack,
    which is per result. This computes both magnitudes - P = |a| + |b|
    and M = ||a| - |b|| - off one unpack and one alignment.
 
-   THE TWO OPERATIONS ARE ONE ADD AND ONE SUBTRACT, always. a+b is an
+   The two operations are one add and one subtract, always. a+b is an
    effective add exactly when the signs agree, and a-b is then the
    effective subtract; when they disagree the roles swap. So P and M are
    each computed once and the caller only chooses which is which.
 
-   SIGNS FALL OUT WITHOUT A CASE ANALYSIS. The effective-add result is
+   Signs fall out without a case analysis. The effective-add result is
    a+b when the signs agree and a-b when they do not, and both carry
    sign(a) - so P's sign is sign(a) unconditionally. The effective
    subtract is |a|-|b| taken with the sign of whichever operand is
@@ -539,7 +539,7 @@ static __inline__ int lz_sig_q15_arm_asm(uint32_t ux, const int32_t *tab,
    The caller runs the C for those, so this tier can be slower than the
    C and never different.
 
-   WHY THE STICKY BIT SURVIVES NORMALISATION, which is the one step
+   Why the sticky bit survives normalisation, the one step
    where a shift could invalidate it. The significands are held three
    bits above their final ulp, so an alignment shift of d <= 3 drops
    only the zeros those three bits added and the sticky is 0. For
@@ -550,7 +550,7 @@ static __inline__ int lz_sig_q15_arm_asm(uint32_t ux, const int32_t *tab,
    or more therefore only ever happens where the sticky is 0.
    .prof/verify_fwht_arm.c sweeps this rather than trusting it.
 
-   ONE ASSEMBLY BLOCK, not three, and the reason is measured rather
+   One assembly block, not three, for a measured reason rather
    than stylistic. Split into unpack / add / subtract with C between
    them, gcc has to keep e, mA, mB and the two seeds live across the
    boundaries and spills eight words a butterfly - 100.0 instructions
