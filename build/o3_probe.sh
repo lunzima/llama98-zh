@@ -81,9 +81,17 @@ D="-std=c99 -Isrc -Icommon -ffp-contract=off -DLZ_MMX_TU=1 -DLZ_SSE2_TU=1"
 # is lz_attn_wsum_q8. Two units in one function print two identical
 # rows; the alternative is pointing one of them somewhere it does not
 # live.
+#
+# sigq was forward_attn, 684 lines of attention scoring, RoPE and
+# softmax - a number off that function describes everything except the
+# sigmoid. Its per-element loop is lz_rmsnorm_gated_out_fixed, whose
+# body is `sigv = sigmoid_q15(g[i])` over the gate vector. Third entry
+# of the ten found pointing somewhere the unit does not live; the
+# check is to read the named function and confirm the operator's
+# arithmetic is what dominates it.
 MAP="
 expfx:src/ops.c:lz_moe_route
-sigq:src/forward.c:forward_attn
+sigq:src/ops_norm.c:lz_rmsnorm_gated_out_fixed
 i32f:src/ops_gdn.c:lz_attn_wsum_q8
 q8rnd:src/ops.c:lz_quantize_q8
 nrmss:src/ops_quant.c:norm_ss_fixed
