@@ -211,8 +211,11 @@ void row_q41_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
 void lz_dot128_q41_mmx_w(const unsigned char *w, const int16_t *x, int32_t *out4);
 
 /* T2 matmul, MMX tier. row_t2_mmx_asm is the real call boundary
-   (LZ_ROW_T2, src/ops.c). No 128-wide kernel for this format, so no
-   *_mmx_w wrapper is needed. */
+   (LZ_ROW_T2, src/ops.c). The 128-wide form is dot128_t2_mmx, declared
+   above and used by the gcc row kernel; this Watcom path has no
+   #pragma aux twin for it yet and runs the per-32 loop, so it needs no
+   *_mmx_w wrapper - that wrapper shape exists only to let one TU take
+   the address of another's #pragma aux body. */
 void row_t2_mmx_asm(int32_t *acc32, const void *w4, const void *w2v,
                     const int16_t *xw, int nb, int nt, int in_dim,
                     const void *pf_end, const void *pf_end2);
