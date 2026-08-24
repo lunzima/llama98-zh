@@ -1150,6 +1150,71 @@ void lz_q8round32_pack_mmx(const int32_t *q, int8_t *out) {
     lz_q8round32_pack_mmx_asm(q, out);
 }
 
+/* ---- norm_ss_fixed's pack-and-square half, MMX tier, Watcom twin.
+   gcc twin: lz_norm_ss_pack_mmx in the #else arm - read that one for
+   the clamp derivation and the overflow bound.
+
+   FOUR ELEMENTS a pass, which is one %mm of int16 and one pmaddwd. The
+   two int32 lanes it produces are drained to the caller's int64
+   immediately: each is at most 2147352578 and a second add would
+   overflow, and paddq is SSE2 even on %mm.
+
+   ecx counts the eight passes, edi holds the running sum in memory
+   because there is no spare register pair for it and one add/adc per
+   four elements is cheaper than the register juggling would be.
+   qout NULL is a branch per pass rather than two loop bodies: this
+   kernel is called once per 32 elements, not per element, so the
+   predictable test costs nothing beside the work it guards. */
+extern void lz_norm_ss_pack_mmx_asm(const int32_t *q, short *qout,
+                                    lz_i64 *acc);
+#pragma aux lz_norm_ss_pack_mmx_asm = \
+    ".586"                              \
+    "pcmpeqw mm7, mm7"                  \
+    "psrlw   mm7, 1"                    /* 32767 per word */ \
+    "pxor    mm6, mm6"                  \
+    "psubw   mm6, mm7"                  /* -32767 per word */ \
+    "movq    mm7, mm6"                  \
+    "xor     ecx, ecx"                  \
+    "mov     [ebx], ecx"                \
+    "mov     [ebx+4], ecx"              \
+    "mov     ecx, 8"                    \
+    "nsploop:"                          \
+    "movq    mm0, [eax]"                \
+    "movq    mm1, [eax+8]"              \
+    "packssdw mm0, mm1"                 \
+    "movq    mm2, mm7"                  \
+    "pcmpgtw mm2, mm0"                  \
+    "movq    mm3, mm2"                  \
+    "pand    mm2, mm7"                  \
+    "pandn   mm3, mm0"                  \
+    "por     mm2, mm3"                  \
+    "test    edx, edx"                  \
+    "jz      nspnostore"                \
+    "movq    [edx], mm2"                \
+    "add     edx, 8"                    \
+    "nspnostore:"                       \
+    "movq    mm4, mm2"                  \
+    "pmaddwd mm4, mm2"                  \
+    "movd    esi, mm4"                  \
+    "psrlq   mm4, 32"                   \
+    "movd    edi, mm4"                  \
+    "add     [ebx], esi"                \
+    "adc     dword ptr [ebx+4], 0"      \
+    "add     [ebx], edi"                \
+    "adc     dword ptr [ebx+4], 0"      \
+    "add     eax, 16"                   \
+    "dec     ecx"                       \
+    "jnz     nsploop"                   \
+    "emms"                              \
+    __parm [__eax] [__edx] [__ebx]      \
+    __modify [__eax __ecx __edx __esi __edi 8087];
+
+lz_i64 lz_norm_ss_pack_mmx(const int32_t *q, short *qout) {
+    lz_i64 acc;
+    lz_norm_ss_pack_mmx_asm(q, qout, &acc);
+    return acc;
+}
+
 /* ---- Q8_0 32/128-element dot products and row kernel, MMX tier -
    in this TU. Algorithm documentation (why the weight side is widened
    via punpcklbw(zero,w), the register-budget accounting for the paired
@@ -2990,6 +3055,51 @@ void lz_q8round32_pack_mmx(const int32_t *q, int8_t *out) {
         memcpy(out + b * 8, &r, 8);
     }
     _mm_empty();
+}
+
+/* ---- norm_ss_fixed's element loop, the PACK-AND-SQUARE HALF, MMX tier.
+   Watcom twin: lz_norm_ss_pack_mmx_asm, the #pragma aux in the other
+   arm. SSE1 twin: lz_norm_ss_sse, which does the whole loop because
+   cvtps2pi lets it convert in %mm; this cannot, so the caller runs the
+   scale and the round in x87 and hands over the int32.
+
+   THE SAME SHAPE AS q8round32_pack_mmx above and for the same reason:
+   packssdw saturates int32 to [-32768, 32767], so the C's +32767 clamp
+   IS that saturation and only the -32768 lane needs lifting to -32767.
+   pmaxsw would do it in one; it is SSE1, so this pays the
+   pcmpgtw/pand/pandn/por idiom instead.
+
+   THEN pmaddwd, which is exactly the pairwise sum of products this
+   accumulate wants, and the SSE2 twin's bound carries over unchanged:
+   |v| <= 32767 gives v*v <= 1073676289 and a pair sums to 2147352578,
+   131069 under INT32_MAX. The pair is safe and the NEXT add is not,
+   so each pmaddwd result is drained to the int64 immediately rather
+   than accumulated in %mm - paddq is SSE2 even there.
+
+   Returns the sum for the 32 elements; qout is written only when the
+   caller wants the quantized row, matching the C. */
+lz_i64 lz_norm_ss_pack_mmx(const int32_t *q, short *qout) {
+    const __m64 flr = _mm_set1_pi16((short)-32767);
+    lz_i64 acc = 0;
+    int b;
+
+    for (b = 0; b < 8; b++) {
+        const int32_t *p = q + b * 4;
+        __m64 a, c, w, g, s;
+        union { __m64 m; int32_t d[2]; } o;
+
+        memcpy(&a, p,     8);
+        memcpy(&c, p + 2, 8);
+        w = _mm_packs_pi32(a, c);
+        g = _mm_cmpgt_pi16(flr, w);
+        w = _mm_or_si64(_mm_and_si64(g, flr), _mm_andnot_si64(g, w));
+        if (qout) memcpy(qout + b * 4, &w, 8);
+        s = _mm_madd_pi16(w, w);
+        o.m = s;
+        acc += (lz_i64)o.d[0] + (lz_i64)o.d[1];
+    }
+    _mm_empty();
+    return acc;
 }
 
 /* ---- wsum: attention scoring's weighted-sum dot, LZ_WSUM_PAIR's gcc

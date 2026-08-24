@@ -91,6 +91,16 @@ lz_p2_blk *p2_blk(void);
 #define LZ_HAVE_Q8R_PACK_MMX 1
 void lz_q8round32_pack_mmx(const int32_t *q, int8_t *out);
 
+/* norm_ss_fixed's element loop, the PACK-AND-SQUARE HALF. Same split
+   and same reason as the q8round pack above: the scale and the round
+   are float, the clamp and the sum of squares are not. Takes 32 int32
+   the caller's x87 pass produced, writes the clamped int16 when qout
+   is wanted, returns the sum of their squares, and emits the emms.
+   The SSE1 tier does the whole loop instead (lz_norm_ss_sse) because
+   cvtps2pi converts into %mm; MMX has no convert at all. */
+#define LZ_HAVE_NORM_SS_PACK_MMX 1
+lz_i64 lz_norm_ss_pack_mmx(const int32_t *q, short *qout);
+
 /* norm_ss_fixed's element loop, SSE1 tier. HERE and not in ops_sse.h
    for the same reason as lz_p2_split32_sse below: SSE1's convert is
    cvtps2pi, so the pack, the clamp and the multiply-add all land in
