@@ -24,6 +24,21 @@
 #   257 case labels likewise. Limits are checked when the codebase can
 #   plausibly reach them, not because the standard lists them.
 #
+# CHECKED ELSEWHERE, AND CLEAN, so nobody re-derives them: no
+# `#pragma once`, no __func__ or __FUNCTION__, no anonymous union or
+# struct members, no trailing comma in an enumerator, and no bitfield of
+# a type other than int - C89 allows only int, and a 1995 compiler is
+# entitled to enforce that. All five are zero tree-wide.
+#
+# PLAIN `char` SIGNEDNESS is implementation-defined and differs by
+# platform, which is the kind of thing that produces a wrong answer
+# rather than a diagnostic. Measured rather than reasoned about:
+# building with -funsigned-char and running the same prompt and seed
+# gives byte-identical output to the default build. Nothing here depends
+# on it. To re-check:
+#     make clean && make EXTRA_DEFS=-funsigned-char
+# then diff a generation against one from the ordinary build.
+#
 # WHAT THIS STILL DOES NOT PROVE. Nothing in this tree can run VC++ 4.0.
 # Green means the code does not exceed the limits that compiler is
 # allowed to have; it does not mean it compiles there. Reading this as
