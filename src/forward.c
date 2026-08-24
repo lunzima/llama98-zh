@@ -426,6 +426,26 @@ static void wsum_q8_row(float *dst, const int8_t *vt, const float *vts,
     for (d = 0; d < hd; d++) dst[d] += a * (float)vt[d] * vts[d / 32];
 }
 
+/* One row of the Q8 score: q . dequantised(kt), grouped by 32.
+ *
+ * The scoring twin of wsum_q8_row, and the same four-parameter reason.
+ * The high and low planes ran this letter for letter; the accumulation
+ * ORDER is what has to survive, since a float sum reassociated is a
+ * different number, and that is why the group loop comes along rather
+ * than being left at the call sites. */
+static float score_q8_row(const float *qhh, const int8_t *kt,
+                          const float *kts, int hd) {
+    float sum = 0.0f;
+    int d;
+    for (d = 0; d < hd; d += 32) {
+        float acc = 0.0f;
+        int e;
+        for (e = 0; e < 32; e++) acc += qhh[d + e] * (float)kt[d + e];
+        sum += acc * kts[d / 32];
+    }
+    return sum;
+}
+
 static int kv_slot_next(const LZRunState *s, int slot) {
     return (slot + 1 == s->attn_sink + s->kv_ring) ? s->attn_sink : slot + 1;
 }
@@ -2145,12 +2165,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                 /* A convert, a multiply and an add per element; a
                    multiply and an add per group; one output scale. */
                 LZ_FCX(LZ_FC_ATTN_SCORE, hd + (hd / 32) + 1, hd + (hd / 32), 0, hd, 0);
-                for (d = 0; d < hd; d += 32) {
-                    float acc = 0.0f;
-                    int e;
-                    for (e = 0; e < 32; e++) acc += qhh[d + e] * (float)kt[d + e];
-                    sum += acc * kts[d / 32];
-                }
+                sum = score_q8_row(qhh, kt, kts, hd);
                 s->att[t] = sum * scale;
             }
 #if LZ_KV_2PLANE
@@ -2182,13 +2197,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                        multiply + add per element, multiply + add per
                        group, one output scale. */
                     LZ_FCX(LZ_FC_ATTN_SCORE, hd + (hd / 32) + 1, hd + (hd / 32), 0, hd, 0);
-                    for (d = 0; d < hd; d += 32) {
-                        float acc = 0.0f;
-                        int e;
-                        for (e = 0; e < 32; e++)
-                            acc += qhh[d + e] * (float)kt[d + e];
-                        sum += acc * kts[d / 32];
-                    }
+                    sum = score_q8_row(qhh, kt, kts, hd);
                     s->att_lo[tt] = sum * scale;
                 }
                 for (tt = 0; tt <= pos; tt++)
