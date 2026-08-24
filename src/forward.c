@@ -2102,10 +2102,11 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                    and would not be with a per-coordinate table. */
                 for (t = win_t0, rslot = kv_slot(s, win_t0); t <= pos;
                      t++, rslot = kv_slot_next(s, rslot)) {
-                    if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
-                    const unsigned char *kt = k4 + (size_t)rslot * kvd / 2 +
-                                              (size_t)kvh * (hd / 2);
+                    const unsigned char *kt;
                     float sum = 0.0f;
+                    if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
+                    kt = k4 + (size_t)rslot * kvd / 2 +
+                         (size_t)kvh * (hd / 2);
                     for (d = 0; d < hd; d += 2) {
                         unsigned char pk = kt[d / 2];
                         sum += qhh[d]     * lz_kv4_cents[pk & 0x0F];
@@ -2121,9 +2122,10 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                    having the arm. */
                 for (t = win_t0, rslot = kv_slot(s, win_t0); t <= pos;
                      t++, rslot = kv_slot_next(s, rslot)) {
-                    if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
-                    const float *kt = kf + (size_t)rslot * kvd + (size_t)kvh * hd;
+                    const float *kt;
                     float sum = 0.0f;
+                    if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
+                    kt = kf + (size_t)rslot * kvd + (size_t)kvh * hd;
                     for (d = 0; d < hd; d++) sum += qhh[d] * kt[d];
                     s->att[t] = sum * scale;
                 }
@@ -2151,17 +2153,19 @@ static void forward_attn(const LZModel *m, LZRunState *s,
 #endif /* LZ_ATTN_FIXED & 1 */
             for (t = win_t0, rslot = kv_slot(s, win_t0); t <= pos;
                  t++, rslot = kv_slot_next(s, rslot)) {
-                if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
                 /* scoring: q (f32) × k (Q8). float accumulation within
                    a group, one scale multiply at the group tail
                    (head_dim is a multiple of 32; saves a per-element
                    scale multiply). win_t0 is 0 (t starts at 0, as
                    always) unless the investigative window override
                    above is active. */
-                const int8_t *kt = kc + (size_t)rslot * kvd + (size_t)kvh * hd;
-                const float *kts = ks + (size_t)rslot * kvd / 32 +
-                                   (size_t)(kvh * hd) / 32;
+                const int8_t *kt;
+                const float *kts;
                 float sum = 0.0f;
+                if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
+                kt  = kc + (size_t)rslot * kvd + (size_t)kvh * hd;
+                kts = ks + (size_t)rslot * kvd / 32 +
+                      (size_t)(kvh * hd) / 32;
                 /* A convert, a multiply and an add per element; a
                    multiply and an add per group; one output scale. */
                 LZ_FCX(LZ_FC_ATTN_SCORE, hd + (hd / 32) + 1, hd + (hd / 32), 0, hd, 0);
@@ -2241,12 +2245,14 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                 memset(out, 0, (size_t)hd * sizeof(float));
                 for (t = win_t0, rslot = kv_slot(s, win_t0); t <= pos;
                      t++, rslot = kv_slot_next(s, rslot)) {
-                    if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
-                    const unsigned char *vt = v4 + (size_t)rslot * kvd / 2 +
-                                              (size_t)kvh * (hd / 2);
+                    const unsigned char *vt;
                     /* Row scale folded into the attention weight, same
                        trick as the scoring pass. */
-                    float a = s->att[t] * vs4[(size_t)rslot * nkv + kvh];
+                    float a;
+                    if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
+                    vt = v4 + (size_t)rslot * kvd / 2 +
+                         (size_t)kvh * (hd / 2);
+                    a = s->att[t] * vs4[(size_t)rslot * nkv + kvh];
                     for (d = 0; d < hd; d += 2) {
                         unsigned char pk = vt[d / 2];
                         out[d]     += a * lz_kv4_cents[pk & 0x0F];
