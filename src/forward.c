@@ -5,7 +5,7 @@
 
 #include "forward.h"
 #include "compat.h"    /* lz_time_ms, for the debug probes below only */
-#include "lz_int.h"    /* lz_i64 - iron law 10; the 64-bit type here */
+#include "lz_int.h"    /* lz_i64: the 64-bit type, portably */
 #include "err.h"
 #include "ops.h"
 #include "ops_quant.h"   /* q8_round/q8_amax/pow2f/LZ_Q8_*, lz_rsqrt_float_body */
@@ -1892,6 +1892,39 @@ static void forward_attn(const LZModel *m, LZRunState *s,
        lz_act_gs only looks at whether in_dim is a multiple of 32, and
        all three share the same in_dim, so the answer is identical.
        Asking q_proj once suffices. */
+    if (c->use_subn) {
+        /* SubLN: the two pre-layer norms are gone, so q/k/v each
+           normalize the raw residual with their OWN weight. That is
+           exactly what the shared quantization above cannot express -
+           three different inputs, so three norms, three quantizes,
+           three matmuls. s->xb2 is free through this whole function.
+
+           Plain norm + quantize on every tier: the norms tier's int
+           shortcut (used by the KDA block) is an optimization, and the
+           three inputs here differ whether or not it is on. */
+        struct { const LZTensor *nrm; const LZTensor *w; float *out; int od; }
+            p[3];
+        int pi;
+        p[0].nrm = &L->attn_q_subn_norm; p[0].w = &L->q_proj;
+        p[0].out = s->qg;   p[0].od = qgd;
+        p[1].nrm = &L->attn_k_subn_norm; p[1].w = &L->k_proj;
+        p[1].out = s->ktmp; p[1].od = kvd;
+        p[2].nrm = &L->attn_v_subn_norm; p[2].w = &L->v_proj;
+        p[2].out = s->vtmp; p[2].od = kvd;
+        for (pi = 0; pi < 3; pi++) {
+            for (tk = 0; tk < nt; tk++)
+                lz_rmsnorm(s->xb2 + (size_t)tk * hdim,
+                           s->xb + (size_t)tk * hdim,
+                           lz_t_f32(p[pi].nrm, s->wscr), hdim,
+                           c->rms_norm_eps);
+            for (tk = 0; tk < nt; tk++)
+                lz_quantize_q8(s->xb2 + (size_t)tk * hdim, hdim, gsa,
+                               s->xq + (size_t)tk * hdim,
+                               s->xqs + (size_t)tk * nsa);
+            lz_matmul_xq_nt(p[pi].out, s->xb2, s->xq, s->xqs, p[pi].w,
+                            hdim, p[pi].od, nt);
+        }
+    } else {
     for (tk = 0; tk < nt; tk++)
         lz_quantize_q8(s->xb + (size_t)tk * hdim, hdim, gsa,
                        s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
@@ -1899,6 +1932,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
     lz_matmul_xq_nt(s->ktmp, s->xb, s->xq, s->xqs, &L->k_proj, hdim, kvd, nt);
     kda_i16_proj(s, v_may, &v_int, s->vtmp, s->vtmp_i16,
                  s->xb, &L->v_proj, hdim, kvd, nt, LZ_VPROJ_ES, 32767);
+    }
 
     /* QK-Norm + RoPE + write KV cache. **All cache rows of the batch
        must be written before scoring**: token t in the batch must see
@@ -2075,8 +2109,13 @@ static void forward_attn(const LZModel *m, LZRunState *s,
         /* wsum_cbuf and LZ_ATTN_MAX_HD only exist when the fixed wsum is
            compiled in, and the int path rides on it - so the predicate
            is compiled out with it rather than merely evaluating false. */
+        /* !use_subn: the int tail leaves the result in attn_acc as
+           per-group ints and never materializes attn_out, but SubLN has
+           to run a per-ELEMENT weight multiply over that vector before
+           o_proj reads it. Same reason the KDA block computes its own
+           o_proj norm in float on every tier. */
         attn_int[tk] = lz_attn_int() && (lz_attn_mode() & 2) &&
-                       s->wsum_cbuf && LZ_ATTN_NORING &&
+                       s->wsum_cbuf && LZ_ATTN_NORING && !c->use_subn &&
                        hd > 0 && (hd % 32) == 0 && hd <= LZ_ATTN_MAX_HD &&
                        s->kv_rot_v == 0 && gso == 32 && !v4 && !vf &&
                        !LZ_KV_2PLANE;
@@ -2412,6 +2451,16 @@ static void forward_attn(const LZModel *m, LZRunState *s,
        The int path quantizes each 32-group from attn_acc with its own
        sscale: attn_int requires gso==32, so one Q8 group == one wsum group
        and the xq/xqs layout is identical to the float call below. */
+    if (c->use_subn) {
+        /* SubLN: o_proj's own input RMSNorm over the attention output.
+           In place - attn_out is dead after this, and the tap above
+           already recorded the pre-norm value as "ax". */
+        for (tk = 0; tk < nt; tk++)
+            lz_rmsnorm(s->attn_out + (size_t)tk * qd,
+                       s->attn_out + (size_t)tk * qd,
+                       lz_t_f32(&L->attn_o_subn_norm, s->wscr), qd,
+                       c->rms_norm_eps);
+    }
     for (tk = 0; tk < nt; tk++) {
         if (attn_int[tk]) {
             int g;
@@ -3746,6 +3795,42 @@ static void forward_moe(const LZModel *m, LZRunState *s,
        the same weights nt times.
        They also share one activation quantization, the same reasoning
        forward_attn's q/k/v_proj comment gives. */
+    if (c->use_subn) {
+        /* SubLN: this block is handed the RAW residual, so the router
+           and the latent down-projection each normalize it with their
+           own weight and the shared quantization above no longer
+           applies. s->xb2 is this function's OUTPUT but nothing writes
+           it until phase 3, so it is scratch here.
+
+           The router is normalized like any other projection, and that
+           is not cosmetic: its logits go through a softmax, so the input
+           magnitude acts as a temperature and skipping it would move
+           every routing decision. */
+        int gsg = lz_act_gs(&L->moe_gate_w, hdim);
+        int nsg = (gsg > 0) ? hdim / gsg : 0;
+        for (tk = 0; tk < nt; tk++)
+            lz_rmsnorm(s->xb2 + (size_t)tk * hdim, s->xb + (size_t)tk * hdim,
+                       lz_t_f32(&L->moe_gate_norm, s->wscr), hdim,
+                       c->rms_norm_eps);
+        for (tk = 0; tk < nt; tk++)
+            lz_quantize_q8(s->xb2 + (size_t)tk * hdim, hdim, gsg,
+                           s->xq + (size_t)tk * hdim,
+                           s->xqs + (size_t)tk * nsg);
+        kda_i16_proj(s, mrt_may, &mrt_int, s->moe_router_logits,
+                     s->moe_logits_i16,
+                     s->xb2, &L->moe_gate_w, hdim, ne, nt,
+                     LZ_MOEGATE_ES, lz_sig_q15_domain(LZ_MOEGATE_ES));
+        for (tk = 0; tk < nt; tk++)
+            lz_rmsnorm(s->xb2 + (size_t)tk * hdim, s->xb + (size_t)tk * hdim,
+                       lz_t_f32(&L->moe_down_norm, s->wscr), hdim,
+                       c->rms_norm_eps);
+        for (tk = 0; tk < nt; tk++)
+            lz_quantize_q8(s->xb2 + (size_t)tk * hdim, hdim, gsh,
+                           s->xq + (size_t)tk * hdim,
+                           s->xqs + (size_t)tk * nsh);
+        lz_matmul_xq_nt(s->moe_lat_x, s->xb2, s->xq, s->xqs,
+                        &L->moe_down_proj, hdim, latent, nt);
+    } else {
     for (tk = 0; tk < nt; tk++)
         lz_quantize_q8(s->xb + (size_t)tk * hdim, hdim, gsh,
                        s->xq + (size_t)tk * hdim,
@@ -3757,6 +3842,7 @@ static void forward_moe(const LZModel *m, LZRunState *s,
     kda_i16_proj(s, mlat_may, &mlat_int, s->moe_lat_x, s->moe_lat_i16,
                  s->xb, &L->moe_down_proj, hdim, latent, nt,
                  LZ_MLAT_ES, 32767);
+    }
     /* Slot 0 is token 0's, so these tap what the per-token version
        taped under `if (tk == 0)`. Both read a FLOAT buffer that holds
        nothing when its chain took the int16 exit - dump
@@ -3905,6 +3991,15 @@ static void forward_moe(const LZModel *m, LZRunState *s,
     {
         int gsu = lz_act_gs(&L->moe_up_proj, latent);
         int nsu = (gsu > 0) ? latent / gsu : 0;
+        if (c->use_subn) {
+            /* In place: moe_lat_y is dead after the quantize below, and
+               the "mrou" tap above already recorded the pre-norm value. */
+            for (tk = 0; tk < nt; tk++)
+                lz_rmsnorm(s->moe_lat_y + (size_t)tk * latent,
+                           s->moe_lat_y + (size_t)tk * latent,
+                           lz_t_f32(&L->moe_up_norm, s->wscr), latent,
+                           c->rms_norm_eps);
+        }
         for (tk = 0; tk < nt; tk++)
             lz_quantize_q8(s->moe_lat_y + (size_t)tk * latent, latent, gsu,
                            s->xq + (size_t)tk * latent,
@@ -3930,6 +4025,35 @@ static void forward_moe(const LZModel *m, LZRunState *s,
            as the routed experts' w1/w3 above. Re-quantized rather than
            reusing phase 1's: the shared gate may carry a different
            activation group size than the down-projection did. */
+        if (c->use_subn) {
+            /* SubLN: gate and up read the raw residual with their own
+               weights, so they cannot share a quantization either.
+               Scratch is moe_shared_out - hidden-wide and not written
+               until this block's last matmul. xb2 is NOT free here:
+               phase 3 has already put the routed output in it. */
+            for (tk = 0; tk < nt; tk++)
+                lz_rmsnorm(s->moe_shared_out + (size_t)tk * hdim,
+                           s->xb + (size_t)tk * hdim,
+                           lz_t_f32(&L->moe_shared_gate_norm, s->wscr), hdim,
+                           c->rms_norm_eps);
+            for (tk = 0; tk < nt; tk++)
+                lz_quantize_q8(s->moe_shared_out + (size_t)tk * hdim, hdim, gss,
+                               s->xq + (size_t)tk * hdim,
+                               s->xqs + (size_t)tk * nss);
+            lz_matmul_xq_nt(s->moe_h1, s->moe_shared_out, s->xq, s->xqs,
+                            &L->moe_shared_gate, hdim, shared_w, nt);
+            for (tk = 0; tk < nt; tk++)
+                lz_rmsnorm(s->moe_shared_out + (size_t)tk * hdim,
+                           s->xb + (size_t)tk * hdim,
+                           lz_t_f32(&L->moe_shared_up_norm, s->wscr), hdim,
+                           c->rms_norm_eps);
+            for (tk = 0; tk < nt; tk++)
+                lz_quantize_q8(s->moe_shared_out + (size_t)tk * hdim, hdim, gss,
+                               s->xq + (size_t)tk * hdim,
+                               s->xqs + (size_t)tk * nss);
+            lz_matmul_xq_nt(s->moe_h3, s->moe_shared_out, s->xq, s->xqs,
+                            &L->moe_shared_up, hdim, shared_w, nt);
+        } else {
         for (tk = 0; tk < nt; tk++)
             lz_quantize_q8(s->xb + (size_t)tk * hdim, hdim, gss,
                            s->xq + (size_t)tk * hdim,
@@ -3949,20 +4073,30 @@ static void forward_moe(const LZModel *m, LZRunState *s,
                                 LZ_SWIGLU_ES_G, 32767))
             ssw_int = 1;
 #endif /* LZ_SWIGLU_I16 */
+        if (!ssw_int) {
+        lz_matmul_xq_nt(s->moe_h1, s->xb, s->xq, s->xqs,
+                        &L->moe_shared_gate, hdim, shared_w, nt);
+        lz_matmul_xq_nt(s->moe_h3, s->xb, s->xq, s->xqs,
+                        &L->moe_shared_up, hdim, shared_w, nt);
+        }
+        }
         if (ssw_int) {
             /* Token-major with stride shared_w, so the whole batch is one
-               contiguous run - the float pair below treats it the same
+               contiguous run - the float loop below treats it the same
                way. */
             lz_swiglu_q15_i16(s->moe_h1_i16, s->moe_h1_i16, s->moe_h3_i16,
                               nt * shared_w, LZ_SWIGLU_ES_P, LZ_SWIGLU_ES_G,
                               LZ_SWIGLU_ES_O);
         } else {
-        lz_matmul_xq_nt(s->moe_h1, s->xb, s->xq, s->xqs,
-                        &L->moe_shared_gate, hdim, shared_w, nt);
-        lz_matmul_xq_nt(s->moe_h3, s->xb, s->xq, s->xqs,
-                        &L->moe_shared_up, hdim, shared_w, nt);
         for (i = 0; i < nt * shared_w; i++)
             s->moe_h1[i] = lz_silu(s->moe_h1[i]) * s->moe_h3[i];
+        if (c->use_subn) {
+            for (tk = 0; tk < nt; tk++)
+                lz_rmsnorm(s->moe_h1 + (size_t)tk * shared_w,
+                           s->moe_h1 + (size_t)tk * shared_w,
+                           lz_t_f32(&L->moe_shared_down_norm, s->wscr),
+                           shared_w, c->rms_norm_eps);
+        }
         }
         for (tk = 0; tk < nt; tk++) {
             if (ssw_int)
