@@ -65,6 +65,7 @@ typedef unsigned __int64   uint64_t;
  * Same shape as LZ_PRI64: one spelling at the call site, the toolchain
  * difference in this header. */
 #define LZ_U64_C(x) x##ui64
+#define LZ_I64_C(x) x##i64
 
 #else
 
@@ -73,6 +74,7 @@ typedef long long          lz_i64;
 typedef unsigned long long lz_u64;
 #define LZ_PRI64 "ll"
 #define LZ_U64_C(x) x##ULL
+#define LZ_I64_C(x) x##LL
 
 #endif /* _MSC_VER < 1600 */
 

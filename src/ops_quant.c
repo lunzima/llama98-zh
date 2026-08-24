@@ -416,7 +416,7 @@ float lz_exp_fixed(float x) {
        + (int32_t)((((int64_t)LZ_EXP2_LN2 * s)
                     + (1 << (LZ_EXP_Q - 1))) >> LZ_EXP_Q)
        + (int32_t)((((int64_t)LZ_EXP2_LN2SQ * s * s)
-                    + (1LL << (2 * LZ_EXP_Q - 1))) >> (2 * LZ_EXP_Q));
+                    + (LZ_I64_C(1) << (2 * LZ_EXP_Q - 1))) >> (2 * LZ_EXP_Q));
     prod = (int32_t)((((int64_t)g_exptab[idx] * cq)
                       + (1 << (LZ_EXP_Q - 1))) >> LZ_EXP_Q);
 #if defined(LZ_ARM_PRIM_ASM)
@@ -647,7 +647,7 @@ float lz_exp_t(int32_t v, int32_t m, int s) {
        + (int32_t)((((int64_t)LZ_EXP2_LN2 * sq)
                     + (1 << (LZ_EXP_Q - 1))) >> LZ_EXP_Q)
        + (int32_t)((((int64_t)LZ_EXP2_LN2SQ * sq * sq)
-                    + (1LL << (2 * LZ_EXP_Q - 1))) >> (2 * LZ_EXP_Q));
+                    + (LZ_I64_C(1) << (2 * LZ_EXP_Q - 1))) >> (2 * LZ_EXP_Q));
     prod = (int32_t)((((int64_t)g_exptab[idx] * cq)
                       + (1 << (LZ_EXP_Q - 1))) >> LZ_EXP_Q);
     /* One multiply and one convert, and that pair is the entire float

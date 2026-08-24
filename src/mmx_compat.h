@@ -54,7 +54,25 @@ extern void lz_mmx_empty_local(void);
    rely on the intrinsic. GAS accepts the mnemonic regardless of the
    compiler's own -mmmx/-msse target flags - inline asm text is opaque
    to gcc's codegen choices, only real intrinsics are gated by them. */
+#if defined(_MSC_VER)
+/* NOTHING, and for the same reason the no-x86 arm below is nothing:
+   this build has no MMX state to leave.
+   The GNU form above is a syntax error here - "'__asm__' : undeclared
+   identifier" and four more as the parser unwinds - and the MSVC
+   spelling does not help, because Visual C++ 4.0 is a 1996 compiler and
+   its inline assembler has no emms mnemonic at all: MMX shipped the
+   following year. `__asm { emms }` gives "inline assembler syntax error
+   in 'opcode'; found 'newline'" even on its own line, outside any
+   macro.
+   That is not a gap to work around. This arm is reached only when the
+   translation unit was built without MMX, and the requirement for this
+   compiler is the no-assembly build - there are no MMX kernels linked
+   in to have dirtied the register file. The MIPS edition never reaches
+   here at all: _M_IX86 is undefined, so it takes the no-x86 arm. */
+#define _mm_empty()            ((void)0)
+#else
 #define _mm_empty()            __asm__ __volatile__("emms" ::: "memory")
+#endif /* _MSC_VER */
 #else
 /* Not an x86 target at all - ARMv5TE is the first one (the kunkun-CE
    device). There is no <mmintrin.h> to include, and nothing here needs

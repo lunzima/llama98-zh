@@ -71,6 +71,7 @@
 !/build/vc4_limits_gate.sh
 !/build/gate_wiring_gate.sh
 !/build/utf8_escape.py
+!/build/vc4_compile_gate.sh
 !/build/kv_slot_next_probe.c
 !/build/caption_symmetry_gate.sh
 !/build/capmetrics.c

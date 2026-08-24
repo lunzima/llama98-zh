@@ -864,6 +864,13 @@ static char **utf8_argv(int *argc) {
     if (!wargv || n <= 0) return NULL;
     out = (char **)calloc((size_t)n + 1, sizeof(char *));
     if (!out) { LocalFree(wargv); return NULL; }
+    /* Visual C++ 4.0's winnls.h stops at CP_MACCP and does not name this
+       one; the value is fixed by the API and every later SDK spells it
+       the same. Defined rather than substituted at the call sites, so
+       the reader still sees which code page is meant. */
+#ifndef CP_UTF8
+#define CP_UTF8 65001
+#endif
     for (i = 0; i < n; i++) {
         int nb = WideCharToMultiByte(CP_UTF8, 0, wargv[i], -1,
                                      NULL, 0, NULL, NULL);

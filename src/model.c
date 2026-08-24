@@ -1,6 +1,6 @@
 #include <stdarg.h>
 #include <stddef.h>
-#include <stdint.h>
+#include "lz_int.h"   /* not <stdint.h>: VC++ 4.0 has no such header */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

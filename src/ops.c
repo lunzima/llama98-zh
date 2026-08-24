@@ -1031,7 +1031,7 @@ void lz_quantize_q8_int64(const int64_t *t, int n, int gs, float deq,
            for what the qualifier is doing. */
         volatile float tamf;
         for (k = 0; k < gs; k++) {
-            int64_t a = grp[k] < 0 ? (int64_t)(0ull - (uint64_t)grp[k])
+            int64_t a = grp[k] < 0 ? (int64_t)(LZ_U64_C(0) - (uint64_t)grp[k])
                                    : grp[k];
             if (a > tam) tam = a;
         }
