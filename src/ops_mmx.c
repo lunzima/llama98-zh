@@ -2827,6 +2827,62 @@ void lz_fwht_stage_mmx(int32_t *y, int n, int len) {
 #include "mmx_compat.h"
 #include <mmintrin.h>
 
+/* ---- Q8 activation rounding, the PACK HALF, MMX tier.
+   Watcom twin: lz_q8round32_pack_mmx_asm, the #pragma aux above.
+
+   WHY A HALF. Rounding a Q8 group is x[k] * inv, a round, and a clamp
+   to [-127, 127]. The multiply and the round are float and MMX has
+   neither, which is why this cell read "impossible" for as long as the
+   question was whether the WHOLE loop runs here. It is not: the caller
+   runs the float half into an int32 scratch with x87, takes one emms,
+   and this runs the clamp-and-pack four wide. One emms per block, not
+   one per element - that difference is what separates partial
+   acceleration from a regression.
+
+   NO pminsw OR pmaxsw, which are SSE1 additions to the MMX register
+   file and not MMX; lz_q8round32_sse uses both and this cannot.
+   It does not need them:
+
+     packssdw   int32 -> int16, saturating at +-32768. Harmless: the
+                clamp below is tighter.
+     the floor  max(w, -127) as pcmpgtw/pand/pandn/por. Four
+                instructions where SSE1 spends one, and still four per
+                FOUR lanes against the C's two compares per element.
+     packsswb   int16 -> int8, saturating at [-128, 127]. The +127 half
+                of the C clamp IS this saturation, exactly; only the
+                -128 lane needed the floor above, and it got it before
+                this pack rather than after, where it would be
+                unrecoverable.
+
+   Bit-identical to the C by construction: every value the C would
+   clamp, these two saturations and one floor clamp to the same
+   number, and the arithmetic that produced the int32 is the C's own. */
+void lz_q8round32_pack_mmx(const int32_t *q, int8_t *out) {
+    const __m64 flr = _mm_set1_pi16((short)-127);
+    int b;
+
+    for (b = 0; b < 4; b++) {
+        const int32_t *p = q + b * 8;
+        __m64 a, c, w0, w1, g0, g1, r;
+
+        memcpy(&a, p,     8);
+        memcpy(&c, p + 2, 8);
+        w0 = _mm_packs_pi32(a, c);
+        memcpy(&a, p + 4, 8);
+        memcpy(&c, p + 6, 8);
+        w1 = _mm_packs_pi32(a, c);
+
+        g0 = _mm_cmpgt_pi16(flr, w0);
+        g1 = _mm_cmpgt_pi16(flr, w1);
+        w0 = _mm_or_si64(_mm_and_si64(g0, flr), _mm_andnot_si64(g0, w0));
+        w1 = _mm_or_si64(_mm_and_si64(g1, flr), _mm_andnot_si64(g1, w1));
+
+        r = _mm_packs_pi16(w0, w1);
+        memcpy(out + b * 8, &r, 8);
+    }
+    _mm_empty();
+}
+
 /* ---- wsum: attention scoring's weighted-sum dot, LZ_WSUM_PAIR's gcc
    twin. Watcom twin: lz_wsum_pair_asm, src/ops.c ~3960-4041.
    Sign-extend two int8 rows to int16, interleave so one pmaddwd covers a
