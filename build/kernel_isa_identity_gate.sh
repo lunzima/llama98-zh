@@ -18,6 +18,19 @@
 # --dump-all-logits on both fixtures. One binary, one model, two tiers;
 # any difference is a twin that diverged.
 #
+# HOW MUCH OF THE TWINS THAT REACHES, measured rather than assumed: a
+# coverage build run at --kernel mmx over the zh fixture executes 47.57%
+# of the 103 lines in src/ops_kernel_dot_mmx.h. The rest is the arms for
+# weight formats this model does not use. So a PASS here means "the
+# kernels this fixture exercises agree", and the other half is covered
+# by registration (kernel_matrix_gate) and by having a twin at all
+# (twin_pair_gate) - neither of which compares numbers.
+#
+# Closing that needs fixtures whose weights span the formats, not a
+# change to this script. Written down because "12 combinations
+# identical" reads like every kernel was compared, and it is not what
+# was measured.
+#
 # ALSO ASSERTS: --kernel ref == --kernel sse2 under --epi-write float.
 # ref differs from the SIMD tiers on the shipping default - 57,975,565
 # of 78,905,344 bytes - and that reads like a diverged kernel. It is not.

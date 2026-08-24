@@ -50,14 +50,15 @@ HARNESSES=$(ls .prof/*_xcheck.sh 2>/dev/null | grep -v "wbuild_xcheck")
 #   fwhtf fwhti        fwht_f32 + fwht_mmx
 #   f32mm              matmul_f32
 #   q8_0 q4_1 q6_1
-#   q16_0 t2           NOTHING
+#   q16_0 t2           rowdot_xcheck           (six slots, both builds)
 #
-# The five row kernels are the gap, and they are exactly the code the
-# end-to-end fixture reaches least - 47.57% of ops_kernel_dot_mmx.h. So
-# "ten harnesses, all green" must not be read as "every operator is
-# cross-checked". UNCOVERED below is that list, printed every run; it
-# shrinks when a harness for one of them is written.
-UNCOVERED="q8_0 q4_1 q6_1 q16_0 t2"
+# The five row kernels were the gap, and they are exactly the code the
+# end-to-end fixture reaches least - 47.57% of ops_kernel_dot_mmx.h.
+# rowdot_xcheck closes it by feeding the dispatch tables directly.
+# UNCOVERED is printed every run rather than kept in a comment, so
+# "every harness green" cannot be read as "every operator compared"
+# while it has entries.
+UNCOVERED=""
 
 P=0; F=0; S=0
 for h in $HARNESSES; do
@@ -86,8 +87,11 @@ if [ $((P + F + S)) -lt 5 ]; then
 fi
 
 echo "xcheck_gate: $P passed, $F failed, $S skipped"
-echo "xcheck_gate: NO per-operator check for:$(printf ' %s' $UNCOVERED)"
-echo "  (row kernels; end-to-end reaches 47.57% of their MMX lines)"
+if [ -n "$UNCOVERED" ]; then
+    echo "xcheck_gate: NO per-operator check for:$(printf ' %s' $UNCOVERED)"
+else
+    echo "xcheck_gate: all 15 matrix units have a per-operator check"
+fi
 
 # The uncovered list is checked against the matrix, not trusted. A unit
 # that gains a harness and is not removed from UNCOVERED understates the
