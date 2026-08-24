@@ -522,7 +522,30 @@ watcom-gui:
 # - the union of three binaries is the whole point, one binary cannot
 # show it). LZ_KM_SKIP_ARM=1 drops the ARM arm for a faster loop; the
 # gate then says which columns went unchecked.
-check: bare-endif-gate dead-ifndef-gate f32count-billing-gate dedupe-gate mm-alias-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate kernel-matrix-gate
+#
+# c89-floor-gate, comment-hygiene-gate and vc4-limits-gate were written,
+# committed, and then invoked by nothing: not here, not in ci.sh. They
+# passed every time anyone ran them by hand and could not have reddened
+# a build. A gate no target depends on is a script.
+check: bare-endif-gate dead-ifndef-gate f32count-billing-gate dedupe-gate mm-alias-gate c89-floor-gate comment-hygiene-gate vc4-limits-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate kernel-matrix-gate
+
+# The language floor, as a ratchet plus a real -std=c89 compile. See the
+# script's header for what green does and does not mean.
+.PHONY: c89-floor-gate
+c89-floor-gate:
+	@bash build/c89_floor_gate.sh
+
+# Comments say what is true, not when it changed or which rule says so.
+.PHONY: comment-hygiene-gate
+comment-hygiene-gate:
+	@bash build/comment_hygiene_gate.sh
+
+# The translation limits a 1995 compiler may enforce - identifier
+# truncation and string literal length. Not the same question as the
+# floor gate, which asks whether the code is standard C89 at all.
+.PHONY: vc4-limits-gate
+vc4-limits-gate:
+	@bash build/vc4_limits_gate.sh
 
 # A bare "#endif" (no trailing comment) is a regression the split ops
 # commits already made once - every #endif must say what it closes.
