@@ -50,8 +50,32 @@ if [ "$N" -lt 3 ]; then
     exit 1
 fi
 
+# The release level, checked here because this is the one place that
+# already knows what the recipes pass.
+#
+# -O3 is not a release level for this project. It inflated the shipped
+# binaries 19% (llama98) and 14% (the gui) over -O2 while producing
+# byte-equal --dump-all-logits, which is what makes it a size decision
+# with nothing on the other side of the ledger. The target family's
+# instruction caches are small enough that the size is itself a speed
+# question.
+#
+# Equality above would not catch this: both targets could agree on -O3
+# and the gate would say PASS. Two separate properties, two checks.
+for f in $CLI $GUI; do
+    case "$f" in
+        -O3)
+            echo "gcc_flag_parity_gate: FAIL - a release recipe passes -O3"
+            echo "  Release builds are -O2. -O3 costs ~19% binary size here"
+            echo "  and buys nothing numerically; see X86_64_CFLAGS."
+            exit 1
+            ;;
+    esac
+done
+
 if [ "$CLI" = "$GUI" ]; then
-    echo "gcc_flag_parity_gate: PASS ($N flags, identical)"
+    echo "gcc_flag_parity_gate: PASS ($N flags, identical, release level"
+    echo "  $(printf '%s\n' $CLI | grep -m1 -E '^-O'))"
     printf '  %s\n' $CLI
     exit 0
 fi

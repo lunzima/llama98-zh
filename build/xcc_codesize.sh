@@ -22,8 +22,13 @@
 # -march=i486 -mtune=pentium matches what the Makefile actually ships
 # (-4r, tuned for an in-order multi-issue core).
 #
-# HOW TO READ THE RATIO. Not against 1.0. gcc -O3 inlines and unrolls,
-# so it emits MORE instructions than Watcom for the same source while
+# -O2, the release level, NOT -O3. Measuring an optimisation level the
+# project does not ship describes a machine nobody runs; -O3 inflated
+# the shipped binary 19% and was dropped for exactly that reason, so a
+# ratio taken at -O3 would be answering about the discarded build.
+#
+# HOW TO READ THE RATIO. Not against 1.0. gcc still inlines more than
+# Watcom at -O2, so it emits MORE instructions for the same source while
 # executing fewer. Rank by distance from the SET'S OWN median, printed
 # below the table, and treat the number as a screen that says where to
 # go disassemble - never as a verdict, because instruction count is not
@@ -39,7 +44,7 @@ RATIOS=""
 printf '%-20s %8s %8s %6s\n' file gcc wat ratio
 for f in "$@"; do
     b=$(basename "$f" .c)
-    gcc -O3 -m32 -march=i486 -mtune=pentium -std=c99 $D \
+    gcc -O2 -m32 -march=i486 -mtune=pentium -std=c99 $D \
         -c -o "$W/$b.o" "$f" 2>/dev/null || continue
     g=$(objdump -d "$W/$b.o" 2>/dev/null | grep -cE "^ *[0-9a-f]+:")
     "$WCC" -q -za99 -otexan -zp4 -4r -bt=nt -I/c/WATCOM/h -I/c/WATCOM/h/nt \
@@ -82,7 +87,7 @@ if [ "$N" -ge 3 ]; then
         print (NR % 2) ? a[(NR+1)/2] : (a[NR/2] + a[NR/2+1]) / 2 }')
     echo
     echo "median ratio over $N files: $MED  (rank by distance from THIS,"
-    echo "not from 1.0 - gcc -O3 unrolls, so parity is already an outlier)"
+    echo "not from 1.0 - gcc inlines more, so parity is already an outlier)"
 else
     echo
     echo "($N file(s): too few for a median - the ratio has no baseline"

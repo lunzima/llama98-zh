@@ -29,7 +29,7 @@ for f in "$@"; do
     # 32-bit both sides, and tuned the way the Makefile ships. See
     # xcc_codesize.sh's header: an x86-64 gcc against a 32-bit Watcom
     # measures the register file, not the compiler.
-    gcc -O3 -m32 -march=i486 -mtune=pentium -std=c99 $D \
+    gcc -O2 -m32 -march=i486 -mtune=pentium -std=c99 $D \
         -c -o "$W/$b.o" "$f" 2>/dev/null || continue
     "$WCC" -q -za99 -otexan -zp4 -4r -bt=nt -I/c/WATCOM/h -I/c/WATCOM/h/nt \
         $D -fo="$W/$b.obj" "$f" >/dev/null 2>&1 || continue

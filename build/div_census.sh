@@ -36,7 +36,7 @@ printf '%-16s %6s\n' file divides
 for f in $FILES; do
     [ -f "$f" ] || continue
     b=$(basename "$f" .c)
-    gcc -O3 -m32 -march=i486 -mtune=pentium -std=c99 -Isrc -Icommon \
+    gcc -O2 -m32 -march=i486 -mtune=pentium -std=c99 -Isrc -Icommon \
         -DLZ_MMX_TU=1 -DLZ_SSE2_TU=1 -c -o "$W/$b.o" "$f" 2>/dev/null \
         || { printf '%-16s %6s\n' "$b" "(no build)"; continue; }
     objdump -d "$W/$b.o" 2>/dev/null \
