@@ -472,6 +472,17 @@ static int kv_slot(const LZRunState *s, int t) {
     return s->attn_sink + ((t - s->attn_sink) % s->kv_ring);
 }
 
+/* Walk the cache in time order from T0 to POS, carrying the row index
+   alongside. Once the ring wraps, SLOT is no longer T, so advancing one
+   without the other reads a different token's row - the two fixed
+   kernels index by absolute t and that is exactly why they carry an
+   LZ_ATTN_NORING guard. Every scoring and weighted-sum loop in
+   forward_attn needs this same pair, so it is written once here rather
+   than eight times there. */
+#define LZ_KV_WALK(S, POS, T, SLOT, T0) \
+    for ((T) = (T0), (SLOT) = kv_slot((S), (T0)); (T) <= (POS); \
+         (T)++, (SLOT) = kv_slot_next((S), (SLOT)))
+
 /* --kv q4: 4-bit KV rows, one scale per row per head. Mutually exclusive
    with the f32 arm; cli_main enforces that, and lz_state_alloc makes f32
    win if both are somehow set. */
@@ -2155,8 +2166,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                    codebook is 64 bytes and stays in L1; that is what
                    makes a table lookup per coordinate affordable here
                    and would not be with a per-coordinate table. */
-                for (t = win_t0, rslot = kv_slot(s, win_t0); t <= pos;
-                     t++, rslot = kv_slot_next(s, rslot)) {
+                LZ_KV_WALK(s, pos, t, rslot, win_t0) {
                     const unsigned char *kt;
                     float sum = 0.0f;
                     if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
@@ -2175,8 +2185,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                    path, so any gap between this and the Q8 arm IS the
                    cache format's cost - which is the whole point of
                    having the arm. */
-                for (t = win_t0, rslot = kv_slot(s, win_t0); t <= pos;
-                     t++, rslot = kv_slot_next(s, rslot)) {
+                LZ_KV_WALK(s, pos, t, rslot, win_t0) {
                     const float *kt;
                     float sum = 0.0f;
                     if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
@@ -2206,8 +2215,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                                  kvd, pos, scale, s->attn_sink, s->kv_ring);
             } else
 #endif /* LZ_ATTN_FIXED & 1 */
-            for (t = win_t0, rslot = kv_slot(s, win_t0); t <= pos;
-                 t++, rslot = kv_slot_next(s, rslot)) {
+            LZ_KV_WALK(s, pos, t, rslot, win_t0) {
                 /* scoring: q (f32) × k (Q8). float accumulation within
                    a group, one scale multiply at the group tail
                    (head_dim is a multiple of 32; saves a per-element
@@ -2252,8 +2260,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                                      s->attn_sink, s->kv_ring);
                 } else
 #endif /* LZ_ATTN_FIXED & 1 */
-                for (tt = 0, lslot = kv_slot(s, 0); tt <= pos;
-                     tt++, lslot = kv_slot_next(s, lslot)) {
+                LZ_KV_WALK(s, pos, tt, lslot, 0) {
                     const int8_t *kt = kc_lo + (size_t)lslot * kvd + (size_t)kvh * hd;
                     const float *kts = ks + (size_t)lslot * kvd / 32 +
                                        (size_t)(kvh * hd) / 32;
@@ -2304,8 +2311,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
 
             if (v4) {
                 memset(out, 0, (size_t)hd * sizeof(float));
-                for (t = win_t0, rslot = kv_slot(s, win_t0); t <= pos;
-                     t++, rslot = kv_slot_next(s, rslot)) {
+                LZ_KV_WALK(s, pos, t, rslot, win_t0) {
                     const unsigned char *vt;
                     /* Row scale folded into the attention weight, same
                        trick as the scoring pass. */
@@ -2323,8 +2329,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
             } else
             if (vf) {
                 memset(out, 0, (size_t)hd * sizeof(float));
-                for (t = win_t0, rslot = kv_slot(s, win_t0); t <= pos;
-                     t++, rslot = kv_slot_next(s, rslot)) {
+                LZ_KV_WALK(s, pos, t, rslot, win_t0) {
                     const float *vt;
                     float a;
                     if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
@@ -2360,8 +2365,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
 #endif /* LZ_ATTN_FIXED & 2 */
             {
             memset(out, 0, (size_t)hd * sizeof(float));
-            for (t = win_t0, rslot = kv_slot(s, win_t0); t <= pos;
-                 t++, rslot = kv_slot_next(s, rslot)) {
+            LZ_KV_WALK(s, pos, t, rslot, win_t0) {
                 const int8_t *vt;
                 const float *vts;
                 float a;
@@ -2391,8 +2395,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
 #endif /* LZ_ATTN_FIXED & 2 */
                 {
                 memset(s->wsum_lo, 0, (size_t)hd * sizeof(float));
-                for (t = 0, rslot = kv_slot(s, 0); t <= pos;
-                     t++, rslot = kv_slot_next(s, rslot)) {
+                LZ_KV_WALK(s, pos, t, rslot, 0) {
                     const int8_t *vt;
                     const float *vts;
                     float a;
