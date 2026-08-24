@@ -24,6 +24,7 @@
 #include "chat.h"
 #include "cli_attr.h" /* console attributes for the styles */
 #include "stream.h"   /* LZStream - see console_out */
+#include "beep.h"     /* lz_beep - --beep */
 #include "session.h"  /* LZSession conversation core (Task 3) */
 #include "llama_zh.h"
 #include "model.h"
@@ -278,6 +279,11 @@ static void usage(void) {
     "  --think          Thinking-mode defaults\n"
     "  --stop TEXT      Stop string (repeatable)\n"
     "  --no-eos         Do not stop on EOS\n"
+    "  --no-beep        Do not sound a beep when a reply finishes. On by\n"
+    "                   default; Win32 plays the system sound, DOS and\n"
+    "                   everything else use the speaker. It goes to\n"
+    "                   stderr, so redirecting stdout keeps the output\n"
+    "                   clean either way.\n"
     "  --no-ckpt        Disable cross-turn prefix reuse (-i only)\n"
     "  --kv MODE        q8|q4|f32 (default q8). q4 halves KV bytes and turns\n"
     "                   rotation on. f32 is the measuring arm, not a\n"
@@ -924,6 +930,7 @@ int main(int argc, char **argv) {
        knob, not a tuning suggestion: see LZ_BATCH_MAX in ops.h. */
     int batch_width = 0;
     int think = 0, no_eos = 0, interactive = 0, chat = 0;
+    int beep = 1;       /* --no-beep clears it; see beep.h for the sound */
     /* Which sampling fields the user set EXPLICITLY with a -- flag, as a
        bit mask. The think preset would otherwise overwrite them: it runs
        AFTER the parse loop and rewrites the whole sampling block, so a
@@ -1479,6 +1486,7 @@ int main(int argc, char **argv) {
             if (g.n_stop < LZ_MAX_STOP) g.stop[g.n_stop++] = argv[++i];
         }
         else if (strcmp(a, "--no-eos") == 0) no_eos = 1;
+        else if (strcmp(a, "--no-beep") == 0) beep = 0;
         else if (strcmp(a, "--no-ckpt") == 0) ckpt_on = 0;
         else if (strcmp(a, "--kv") == 0 && i + 1 < argc) {
             int f = parse_kvfmt(argv[++i]);
@@ -2074,6 +2082,7 @@ int main(int argc, char **argv) {
                          &g, sink_stdout, NULL, NULL,
                          &n_out, &ms, err, sizeof(err));
         printf("\n---- generation end ----\n");
+        if (beep) lz_beep();
         if (rc != 0) {
             printf("Generation failed: %s\n", err);
         } else {
@@ -2209,6 +2218,7 @@ int main(int argc, char **argv) {
                          &g, sink_stdout, NULL, NULL,
                          &n_out, &ms, err, sizeof(err));
         printf("\n---- chat end ----\n");
+        if (beep) lz_beep();
         if (rc != 0) printf("Generation failed: %s\n", err);
 
         lz_chat_buf_free(&cb);
@@ -2379,6 +2389,11 @@ int main(int argc, char **argv) {
             if (reused > 0 && n_prompt_tok > 0)
                 printf(", prompt %d reused %d", n_prompt_tok, reused);
             printf("]\n");
+            /* After the statistics line, not before it: the beep means
+               "the turn is over and the prompt is yours", and a reader
+               who looks up on hearing it should find the screen already
+               settled. This is the turn loop the flag exists for. */
+            if (beep) lz_beep();
             /* Fold the reply back into history: normalize + push the
                assistant turn, reading the session's authority buffer. */
             if (lz_session_end(&sess, err, sizeof err) != 0) {

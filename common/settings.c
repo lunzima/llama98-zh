@@ -107,6 +107,7 @@ void lz_common_settings_init(LZGuiSettings *s) {
     s->seed_mode = LZ_COMMON_SEED_RANDOM;             /* see settings.h */
     s->seed = 1;
     s->ctx = LZ_COMMON_CTX_DEFAULT;
+    s->beep = 1;                                      /* see settings.h */
 }
 
 int lz_common_ctx_clamp(int want, int model_cap) {
@@ -229,4 +230,8 @@ void lz_common_settings_restore(LZGuiSettings *s) {
     s->rep = lz_common_settings_default_rep(s->think);
     s->max_new = LZ_COMMON_MAXNEW_UNLIMITED;
     s->ctx = LZ_COMMON_CTX_DEFAULT;
+    /* Restored, not preserved: `think` is a MODE the user is currently
+       in and this function reads it, but the beep is an ordinary
+       default and "restore defaults" means turning it back on. */
+    s->beep = 1;
 }

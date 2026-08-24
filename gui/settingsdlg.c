@@ -68,7 +68,9 @@ enum {
        temperature, created under the base temperature row. */
     ID_THINK_TEMP_LABEL,
     ID_THINK_TEMP,
-    ID_THINK_TEMP_SCROLL
+    ID_THINK_TEMP_SCROLL,
+    /* 3024 - appended again, same rule. Beep when a reply finishes. */
+    ID_BEEP
 };
 
 /* Fixed geometry: four controls that never resize. The main window's
@@ -90,10 +92,18 @@ enum {
    row-heights instead of one; it is the LAST row so its box does not
    reflow whatever is under it.
    The think-block temperature row sits under the base temperature as
-   one more value_row. 406 tall plus a caption still clears a 640x480
-   screen, which is the floor gui/layout.c targets. */
+   one more value_row.
+
+   The reply-finished beep is a checkbox on its OWN row rather than
+   sharing Think's, which would have cost no height: two checkboxes side
+   by side needs each label to fit in half of DLG_W - 2*PAD, and the
+   labels are localized, so that is a text measurement and not an
+   estimate. 439 is the arithmetic instead: 480 - 439 - a caption and
+   border of about 25 leaves ~16 px on the 640x480 screen gui/layout.c
+   treats as the floor. Another row does NOT fit; the next setting that
+   wants one has to take the measurement. */
 #define DLG_W   330
-#define DLG_H   406
+#define DLG_H   439
 #define PAD     LZ_GUI_DLG_MARGIN
 #define ROW_H     22
 #define BTN_W   LZ_GUI_BTN_W
@@ -339,6 +349,9 @@ static void dlg_show(HWND h, const LZGuiSettings *s) {
     c = GetDlgItem(h, ID_THINK);
     if (c) SendMessage(c, BM_SETCHECK,
                        s->think ? BST_CHECKED : BST_UNCHECKED, 0);
+    c = GetDlgItem(h, ID_BEEP);
+    if (c) SendMessage(c, BM_SETCHECK,
+                       s->beep ? BST_CHECKED : BST_UNCHECKED, 0);
 }
 
 static LRESULT CALLBACK dlgproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
@@ -717,6 +730,15 @@ HWND lz_gui_settings_dialog_create(HWND owner, HINSTANCE inst,
        a one-off fix for one pair of controls. See gui/compat40.h's
        lz_ui_untheme for why the function is named for any class. */
     g_untheme.think = lz_ui_untheme(ctl);
+    y += ROW_H;
+
+    child(h, "BUTTON", lz_str_display(LZ_STR_DLG_BEEP),
+          BS_AUTOCHECKBOX | WS_TABSTOP, PAD, y, DLG_W - 2 * PAD, ROW_H,
+          ID_BEEP, inst);
+    ctl = GetDlgItem(h, ID_BEEP);
+    SendMessage(ctl, BM_SETCHECK,
+                set->beep ? BST_CHECKED : BST_UNCHECKED, 0);
+    g_untheme.beep = lz_ui_untheme(ctl);
     y += ROW_H + PAD;
 
     /* The value rows, in visual order - which is also creation
@@ -925,6 +947,8 @@ int lz_gui_settings_dialog_read(HWND dlg, const LZGuiSettings *cur,
     s = *cur;
     s.think = (int)SendMessage(GetDlgItem(dlg, ID_THINK), BM_GETCHECK, 0, 0)
               == BST_CHECKED;
+    s.beep = (int)SendMessage(GetDlgItem(dlg, ID_BEEP), BM_GETCHECK, 0, 0)
+             == BST_CHECKED;
     /* Both preset-following values start from the mode's default with
        their flag clear, and the setters below raise the flag again for
        whichever ones the boxes actually carry a value for. Doing it

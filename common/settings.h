@@ -96,6 +96,13 @@ typedef struct {
        the question is "how much context is there", the first only when
        the question is "what did the user pick". */
     int   ctx;
+    /* Sound a beep when a reply finishes. ON by default - the machines
+       this targets take long enough per reply that the user goes and
+       does something else, which is the whole reason the setting is
+       here. See common/beep.h for what "beep" is on each platform.
+       The CLI has the same behaviour behind --no-beep, but its flag is
+       its own local: the command line does not read the ini. */
+    int   beep;
 } LZGuiSettings;
 
 /* Context window range. The range exists because a fixed size is the

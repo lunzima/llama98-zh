@@ -223,6 +223,9 @@ typedef enum {
        segments, and this is the chat segment when there is no file. */
     LZ_STR_CAPTION_UNTITLED,
 
+    /* --- settings dialog: the reply-finished beep --- */
+    LZ_STR_DLG_BEEP,
+
     LZ_STR_COUNT
 } LZStr;
 

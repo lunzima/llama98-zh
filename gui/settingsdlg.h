@@ -86,6 +86,7 @@ float lz_gui_scroll_to_temp(int pos);
  * last dialog lz_gui_settings_dialog_create built" is unambiguous. */
 typedef struct {
     int think;
+    int beep;                   /* the reply-finished checkbox */
     int think_temp, think_temp_scroll;
     int temp, temp_scroll;
     int topp, topp_scroll;

@@ -210,7 +210,8 @@ static const char *const LZ_STR_EN[LZ_STR_COUNT] = {
     /* LZ_STR_ABOUT_LICENSE */
         "Copyright (c) 2026 Lunzima\n"
         "Licensed under the Apache License, Version 2.0",
-    /* LZ_STR_CAPTION_UNTITLED */ "Untitled Chat"
+    /* LZ_STR_CAPTION_UNTITLED */ "Untitled Chat",
+    /* LZ_STR_DLG_BEEP */ "Bee&p when a reply finishes"
 };
 
 static const char *const LZ_STR_ZH[LZ_STR_COUNT] = {
@@ -373,7 +374,12 @@ static const char *const LZ_STR_ZH[LZ_STR_COUNT] = {
     /* LZ_STR_ABOUT_LICENSE */
         "Copyright (c) 2026 Lunzima\n"
         "Licensed under the Apache License, Version 2.0",
-    /* LZ_STR_CAPTION_UNTITLED */ "\xe6\x9c\xaa\xe5\x91\xbd\xe5\x90\x8d\xe5\xaf\xb9\xe8\xaf\x9d"
+    /* LZ_STR_CAPTION_UNTITLED */ "\xe6\x9c\xaa\xe5\x91\xbd\xe5\x90\x8d\xe5\xaf\xb9\xe8\xaf\x9d",
+    /* LZ_STR_DLG_BEEP */
+        /* U+56DE U+590D U+5B8C U+6210 U+540E U+63D0 U+793A U+97F3
+           "hui fu wan cheng hou ti shi yin" */
+        "\xe5\x9b\x9e\xe5\xa4\x8d\xe5\xae\x8c\xe6\x88\x90\xe5\x90\x8e"
+        "\xe6\x8f\x90\xe7\xa4\xba\xe9\x9f\xb3(&P)"
 };
 
 /* Static, not stack: the target's default stack is small enough that a

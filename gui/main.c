@@ -35,6 +35,7 @@
 #include "savechat.h"
 #include "session.h"
 #include "settings.h"
+#include "beep.h"     /* lz_beep - the reply-finished sound */
 #include "settingsdlg.h"
 #include "resource.h"
 #include "splash.h"
@@ -2533,6 +2534,12 @@ static void finish_job(HWND hwnd, int rc) {
            looked identical to one that ended on its own. */
         if (g.sess.opts.out_finish == LZ_FINISH_CANCELLED)
             sys_line(LZ_STR_SYS_GEN_STOPPED);
+        /* The reply is finished and the transcript is settled, which is
+           when the sound means what it says. On EVERY ending including
+           a stopped one: the user who walked away wants to know the
+           machine is idle, and "it stopped because you pressed Stop" is
+           already on screen for when they come back. */
+        if (g.set.beep) lz_beep();
     }
 
     /* AFTER the branch: the model lamp's third state is "the last load
@@ -3152,6 +3159,9 @@ static int create_children(HWND hwnd) {
                       ? LZ_COMMON_SEED_FIXED : LZ_COMMON_SEED_RANDOM;
     g.set.seed = (lz_u64)(unsigned)lz_ini_get_int("seed", 1);
     g.set.think = lz_ini_get_int("think", g.set.think) ? 1 : 0;
+    /* Default 1: a missing key means a user who has never had the
+       setting, and the reply-finished beep is on for them. */
+    g.set.beep = lz_ini_get_int("beep", 1) ? 1 : 0;
     /* Context window. Through the clamp with no model cap - there is no
        model at this point in startup, and the cap is applied again at
        load time where cfg->seq_len is finally knowable. Clamping here
@@ -5467,6 +5477,7 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             lz_ini_set_int("input_h", g.input_h);
             lz_ini_set_int("lang", lz_str_lang_english());
             lz_ini_set_int("think", g.set.think);
+            lz_ini_set_int("beep", g.set.beep);
             lz_ini_set_int("temp_milli", (int)(g.set.temp * 1000.0f + 0.5f));
             lz_ini_set_int("seed_mode", g.set.seed_mode);
             lz_ini_set_int("seed", (int)(unsigned)g.set.seed);

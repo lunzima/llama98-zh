@@ -21,7 +21,13 @@ ENG := err compat lfn json safetensors model ops ops_quant ops_sched ops_matmul 
 SRV := net http openai
 GUI := main layout localized_strings worker modelload session compat40 \
        settingsdlg aboutdlg splash toolbar inifile caption captionwnd
-COM := stream settings command savechat mru chatfile session
+COM := stream settings command savechat mru chatfile session beep
+# The subset the COMMAND LINE needs - the gui links all of $(COM), the
+# CLI and DOS builds only these. ONE list: each Watcom recipe names
+# these files twice (a compile line and a link line) and the gcc recipe
+# once, so spelling them out would put the same list in five places and
+# adding one file would mean finding all five.
+CLI_COM := session stream beep
 
 # src/ops_mmx.c, src/ops_mmx_sse.c and src/ops_sse2.c are deliberately
 # NOT in $(ENG) on EITHER toolchain, but for two different reasons as of
@@ -52,6 +58,7 @@ ENG_SRCS := $(addprefix src/,$(addsuffix .c,$(ENG)))
 SRV_SRCS := $(addprefix src/,$(addsuffix .c,$(SRV)))
 GUI_SRCS := $(addprefix gui/,$(addsuffix .c,$(GUI)))
 COM_SRCS := $(addprefix common/,$(addsuffix .c,$(COM)))
+CLI_COM_SRCS := $(addprefix common/,$(addsuffix .c,$(CLI_COM)))
 
 # ----------------------------------------------------------------------
 # gcc (dev machine)
@@ -141,9 +148,9 @@ build/gui/%.o: src/%.c
 # checks the file type of whatever is in build/native/*.o right now, so
 # a stale ELF object is a build failure here instead of a bad binary
 # discovered only when someone tries to run it.
-llama98: $(ENG_SRCS) common/session.c common/stream.c src/cli_attr.c src/cli_main.c $(ENG_MMX_GCC_NATIVE_OBJS)
+llama98: $(ENG_SRCS) $(CLI_COM_SRCS) src/cli_attr.c src/cli_main.c $(ENG_MMX_GCC_NATIVE_OBJS)
 	@bash build/native_obj_gate.sh
-	$(CC) $(X86_64_CFLAGS) -Icommon -o $@ $(ENG_SRCS) common/session.c common/stream.c src/cli_attr.c src/cli_main.c $(ENG_MMX_GCC_NATIVE_OBJS) -lm
+	$(CC) $(X86_64_CFLAGS) -Icommon -o $@ $(ENG_SRCS) $(CLI_COM_SRCS) src/cli_attr.c src/cli_main.c $(ENG_MMX_GCC_NATIVE_OBJS) -lm
 
 kunkun98-serve: $(ENG_SRCS) $(SRV_SRCS) src/server_main.c $(ENG_MMX_GCC_NATIVE_OBJS)
 	@bash build/native_obj_gate.sh
@@ -362,8 +369,9 @@ watcom-cli:
 	@set -e; for f in $(ENG_MMX); do \
 	    "$(WCC)" $(CLI_FLAGS_HIGH) $(INC_CLI) -fo="$(CLI_OBJ)/$$f.obj" "src/$$f.c"; \
 	done
-	@"$(WCC)" $(CLI_FLAGS) $(INC_CLI) -fo="$(CLI_OBJ)/common_session.obj" common/session.c
-	@"$(WCC)" $(CLI_FLAGS) $(INC_CLI) -fo="$(CLI_OBJ)/common_stream.obj" common/stream.c
+	@set -e; for f in $(CLI_COM); do \
+	    "$(WCC)" $(CLI_FLAGS) $(INC_CLI) -fo="$(CLI_OBJ)/common_$$f.obj" "common/$$f.c"; \
+	done
 	@"$(WCC)" $(CLI_FLAGS) $(INC_CLI) -fo="$(CLI_OBJ)/_main.obj" src/cli_main.c
 	@"$(WCC)" $(CLI_FLAGS) $(INC_CLI) -fo="$(CLI_OBJ)/_argv.obj" src/cli_argv.c
 	@"$(WCC)" $(CLI_FLAGS) $(INC_CLI) -fo="$(CLI_OBJ)/_attr.obj" src/cli_attr.c
@@ -376,8 +384,7 @@ watcom-cli:
 	    echo "libpath $(LIBROOT)"; \
 	    $(foreach f,$(ENG),echo "file $(CLI_OBJ)/$f.obj";) \
 	    $(foreach f,$(ENG_MMX),echo "file $(CLI_OBJ)/$f.obj";) \
-	    echo "file $(CLI_OBJ)/common_session.obj"; \
-	    echo "file $(CLI_OBJ)/common_stream.obj"; \
+	    $(foreach f,$(CLI_COM),echo "file $(CLI_OBJ)/common_$f.obj";) \
 	    echo "file $(CLI_OBJ)/_main.obj"; \
 	    echo "file $(CLI_OBJ)/_argv.obj"; \
 	    echo "file $(CLI_OBJ)/_attr.obj"; \
@@ -413,8 +420,9 @@ watcom-dos:
 	@set -e; for f in $(ENG_MMX); do \
 	    "$(WCC)" $(DOS_FLAGS_HIGH) $(INC_DOS) -fo="$(DOS_OBJ)/$$f.obj" "src/$$f.c"; \
 	done
-	@"$(WCC)" $(DOS_FLAGS) $(INC_DOS) -fo="$(DOS_OBJ)/common_session.obj" common/session.c
-	@"$(WCC)" $(DOS_FLAGS) $(INC_DOS) -fo="$(DOS_OBJ)/common_stream.obj" common/stream.c
+	@set -e; for f in $(CLI_COM); do \
+	    "$(WCC)" $(DOS_FLAGS) $(INC_DOS) -fo="$(DOS_OBJ)/common_$$f.obj" "common/$$f.c"; \
+	done
 	@"$(WCC)" $(DOS_FLAGS) $(INC_DOS) -fo="$(DOS_OBJ)/_main.obj" src/cli_main.c
 	@"$(WCC)" $(DOS_FLAGS) $(INC_DOS) -fo="$(DOS_OBJ)/_argv.obj" src/cli_argv.c
 	@"$(WCC)" $(DOS_FLAGS) $(INC_DOS) -fo="$(DOS_OBJ)/_attr.obj" src/cli_attr.c
@@ -428,8 +436,7 @@ watcom-dos:
 	    echo "option stack=262144"; \
 	    $(foreach f,$(ENG),echo "file $(DOS_OBJ)/$f.obj";) \
 	    $(foreach f,$(ENG_MMX),echo "file $(DOS_OBJ)/$f.obj";) \
-	    echo "file $(DOS_OBJ)/common_session.obj"; \
-	    echo "file $(DOS_OBJ)/common_stream.obj"; \
+	    $(foreach f,$(CLI_COM),echo "file $(DOS_OBJ)/common_$f.obj";) \
 	    echo "file $(DOS_OBJ)/_main.obj"; \
 	    echo "file $(DOS_OBJ)/_argv.obj"; \
 	    echo "file $(DOS_OBJ)/_attr.obj"; \
