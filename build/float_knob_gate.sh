@@ -45,6 +45,28 @@
 # two tiers disagreeing about a coin flip, and chasing it would be
 # chasing noise.
 #
+# AND WHAT THE AXIS IS FOR: comparing this engine against another
+# implementation. Done, against HF transformers 5.5 on Qwen3.5-0.8B -
+# the same safetensors directory both read, no conversion - with the
+# same 153 token ids fed to each, llama98 at --fixed off and torch at
+# float32:
+#
+#   rms diff      0.032   over 37.7M logits
+#   max abs diff  0.49
+#   top-1 agree   149 / 152  (98.0%)
+#
+# THE ALIGNMENT IS ITS OWN CONTROL. llama98 emits 152 positions for 153
+# ids and transformers emits 153, so one of them has to be offset, and
+# picking wrong would have been reported as poor agreement. Offset by
+# one the rms is 1.68 - fifty times worse - so the head alignment is
+# not a lucky guess.
+#
+# WHAT THIS IS NOT: a gate. It needs torch, CUDA (Qwen3.5's fused
+# activation refuses to run on CPU) and a 1.7GB checkpoint, none of
+# which belong in `check`. It is the measurement the knob exists to
+# make possible, recorded so the next reader knows it has been made and
+# what it said.
+#
 # NOT ATTRIBUTABLE PER OPERATOR, and that is a consequence of this
 # gate's own requirement rather than an oversight: --fixed off floats
 # every operator at once, so a difference cannot be split between the
