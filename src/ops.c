@@ -1670,7 +1670,7 @@ void epi_pack_act(const float *xqs, int nb, int nt) {
        leaves alone); the round itself is q8_round's magic add, so there
        is no compare left in the packing loop to bill.
 
-       ZERO MULTIPLIES NOW, not one per group: the pack's scale and the
+       Zero multiplies now, not one per group: the pack's scale and the
        exponent search's are both powers of two, so both go through
        f32_scale_pow2 as exponent adds. The bill drops from nt*nb to
        nothing, which is the honest number and also the reason this
@@ -1680,7 +1680,7 @@ void epi_pack_act(const float *xqs, int nb, int nt) {
     LZ_FCX(LZ_FC_EPI, 0, 0, 0, 0, 0);
     for (tk = 0; tk < nt; tk++) {
         const float *xsb = xqs + (size_t)tk * nb;
-        /* THE AMAX SCAN IS q8_amax, not a hand-written loop. It was two
+        /* The amax scan is q8_amax, not a hand-written loop. It was two
            __aeabi_fcmpXX per group - `xsb[g] < 0.0f` for the sign and
            `a > amax` for the max - and q8_amax already does exactly this
            in the integer domain, with a SIMD tier on top. Calling it
@@ -3138,7 +3138,7 @@ static int conv_pow2_exp(float v, int32_t *k) {
  * float multiply here (input, sig_k1, sig_oscale2) is by an exact power
  * of two, so none of them round.
  *
- * THE ACTIVATION IS ENTERED IN THE INTEGER COORDINATE (LZ_CONV_SIG_I).
+ * The activation is entered in the integer coordinate (LZ_CONV_SIG_I).
  * `acc` already IS the number the table wants indexing by - x == acc *
  * 2^-(ew[c]+es) - so sigmoid_q15_i takes its bits and the entire float
  * coordinate derivation disappears: three of the epilogue's six
@@ -3271,7 +3271,7 @@ void lz_causal_conv1d_step_fixed_o16(float *o, short *oi, int out_es,
                32768, so it can hold 2^46. epi_shr_half is the same
                half-away-from-zero the fixed epilogue rounds with.
 
-               THE CLAMP IS COUNTED, not silent. LZ_CONVO_ES was chosen
+               The clamp is counted, not silent. LZ_CONVO_ES was chosen
                from .prof/convqk_range.c's clamp column at zero on both
                chains, and a checkpoint whose conv outputs are scaled
                differently would clip here with no other symptom - the
@@ -3285,7 +3285,7 @@ void lz_causal_conv1d_step_fixed_o16(float *o, short *oi, int out_es,
                 done = 1;
             }
 #if defined(LZ_ARM_PRIM_ASM)
-            /* THE REMAINING MULTIPLY IS AN EXPONENT ADD. It scales acc_f
+            /* The remaining multiply is an exponent add. It scales acc_f
                by an exact power of two, which is exact in IEEE, so
                fl(acc_f * 2^oe) IS acc_f with oe added to its exponent
                field - the same number the C's __aeabi_fmul arrives at,
@@ -3321,7 +3321,7 @@ void lz_causal_conv1d_step_fixed_o16(float *o, short *oi, int out_es,
 #else /* !LZ_CONV_SIG_I */
             int done = 0;
 #if defined(LZ_ARM_PRIM_ASM)
-            /* THE TWO MULTIPLIES ARE EXPONENT ADDS. Both scale the same
+            /* The two multiplies are exponent adds. Both scale the same
                acc_f by an exact power of two, which is exact in IEEE, so
                fl(acc_f * 2^k) IS acc_f with k added to its exponent
                field - the same number the C's __aeabi_fmul arrives at,
@@ -3334,7 +3334,7 @@ void lz_causal_conv1d_step_fixed_o16(float *o, short *oi, int out_es,
                int32 domain - s15's own [0, 32768] range is not what
                makes that true and is not relied on.
 
-               AND THE SIGMOID IS ENTERED IN THE X DOMAIN, not the folded
+               The sigmoid is entered in the x domain, not the folded
                t one, which is what deletes the `+ sig_k2` __aeabi_fadd
                rather than moving it: sigmoid_q15's own assembly tier
                does that add in the integer domain (lz_sig_q15_arm_asm's
@@ -3858,7 +3858,7 @@ static const char *const km_col[LZ_KM_NCOL] = {
    So o3_probe's zero at -march=pentium3 is evidence in ONE direction
    only. It cannot license an empty cell; only the instruction list can.
 
-   CONFIRMED BY THE COMPILER, not only by the instruction audit. gcc
+   Confirmed by the compiler, not only by the instruction audit. gcc
    -O3 on the same C, build/o3_probe.sh: ALL FIFTEEN probed units emit
    zero packed ARITHMETIC at -m32 -march=pentium3, every one of them
    with a non-empty body, so the zero is the vectoriser declining and
@@ -3873,7 +3873,7 @@ static const char *const km_col[LZ_KM_NCOL] = {
    evidence of vectorisation - separating the two dropped lz_exp from
    "22 packed" to zero arithmetic in 163 instructions.
 
-   AND THE INSTRUCTION LIST, which is the half that licenses the empty
+   And the instruction list, which is the half that licenses the empty
    cell. What the MMX dot kernels execute is pmaddwd, punpcklbw, psllw,
    psrlw and pxor - measured out of src/ops_kernel_dot_mmx.h, not
    recalled. Against that, every integer instruction SSE1 adds:
@@ -4020,7 +4020,7 @@ static const char km_why_sigq_sse1[] =
    cell that does NOT exist. The 32-entry table lookup still stays
    scalar at every tier: a per-element index needs a gather and that is
    AVX2, which km_why_sse1's block above covers for both table units. */
-/* EXPFX AND SIGQ ONLY, and the scope line is here because this string
+/* expfx and sigq only, and the scope line is here because this string
    is wrong for any unit that HAS a group form. i32f's is the wsum
    chunk fold's 32 and q8rnd's is lz_q8round_group_sse's gs, so each of
    those carries a reason naming its own axis instead. For a per-element
@@ -4101,7 +4101,7 @@ static const char km_why_nrmss_g128[] =
 static const char km_why_fwhti_sse1[] =
     "impossible: SSE1 has no integer add - paddd is MMX/SSE2. The int32 "
     "butterfly cannot be expressed in xmm under SSE1";
-/* AUDITED WITH THE KERNEL, which is how the row above it was found to
+/* Audited with the kernel, which is how the row above it was found to
    be wrong. q8rnd had all six x86 cells marked impossible on the
    scalar-leaf reason, and four of them ship: lz_q8round32_sse
    (ops_mmx_sse.c) and lz_q8round32_simd (ops_sse2.c) on gcc,
@@ -4139,7 +4139,7 @@ static const char km_why_fwht_g128[] =
     "this column is the 128-ELEMENT quantization group; the Hadamard's "
     "block is hadamard_o/hadamard_down (up to 512, capped by the "
     "fixed-point headroom) and is a different axis, not this cell";
-/* AUDITED WITH THE KERNEL. MMX is integer-only and this is a float
+/* Audited with the kernel. MMX is integer-only and this is a float
    multiply-add, so those two cells cannot exist. SSE1 is where mulps
    and addps arrive, and every SSE2 machine has them - so ONE body
    serves both tiers and the SSE2 cells hold it rather than a copy.
