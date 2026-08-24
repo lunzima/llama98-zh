@@ -206,7 +206,19 @@ void lz_p2_mul32_mmx(const int8_t *hi, const int8_t *lo,
    declares gcc's lz_p2_split32_sse below despite ITS body living in
    ops_mmx_sse.c too, so there is precedent for "the ops_mmx.c/
    ops_mmx_sse.c pair's declarations" rather than "ops_mmx.c's
-   declarations" being what this header actually is. */
+   declarations" being what this header actually is.
+
+   LZ_P2_SSE_EXTERN is what lets a cell for this kernel be probed. The
+   body has shipped since the SSE1 tier landed and no entry in km_reg
+   reports it, because km_op_present keys every cell off an _EXTERN and
+   this one had none - so there was nothing a probe could test, and a
+   KM_H would have been an assertion the gate could not check.
+
+   Outside the __WATCOMC__ split, for the reason LZ_NORM_SS_SSE_EXTERN
+   above carries: the body is compiled for both toolchains (ops_mmx_sse
+   is in every Watcom link script), so declaring it in the gcc arm alone
+   leaves the Watcom build registering a cell it cannot see. */
+#define LZ_P2_SSE_EXTERN 1
 void lz_p2_rows_sse(const int8_t *ph_row, const int8_t *pl_row,
                     int pl_stride, const int16_t *dq,
                     const int16_t (*mul)[4], int8_t *oh_row,
