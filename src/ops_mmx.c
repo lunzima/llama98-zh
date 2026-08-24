@@ -20,8 +20,8 @@
    cross-build must still never see this file: it has no MMX register
    file at all.
 
-   Kernels do NOT emit emms themselves (rule 6 item 6) - the caller
-   emits one after its loop. That contract is the same in every TU that
+   Kernels do NOT emit emms themselves - the caller emits one after its
+   loop, so a row loop pays one instead of one per row. That contract is the same in every TU that
    compiles %mm instructions; only the translation unit differs. */
 #include "lz_int.h"   /* <stdint.h> is not on the language floor */
 #include <string.h>
@@ -73,8 +73,8 @@
 /* Eight 4-lane sub-windows cover this gg's 32 vv lanes.
 
    The emms belongs HERE, once per gg - not per sub-window, and not after
-   the whole loop. Rule 6 item 6 permits hoisting the emms out only when
-   the loop body has no x87, and that precondition fails one level up: the
+   the whole loop. Hoisting the emms out is allowed only when the loop
+   body has no x87, and that precondition fails one level up: the
    next gg's gdn_build_table runs q8_round and 32767/amax on x87 right
    after this returns. Hoisting it would reopen the trap that broke the
    mmx tier. */
@@ -160,7 +160,8 @@ void lz_gdn_sum_gg_mmx(const int8_t *sq_gg, int kd, int vd,
    coef is [ckA,ckB,ckA,ckB] so one pmaddwd covers a 2-int32 lane pair.
    Reads [eax]/[edx]/[ecx], writes only [ebx] and MMX - every offset is a
    literal, no GP register is modified, so `__modify [8087]` is the truth
-   and not an `__exact []`-style lie (rule 2 item 3).
+   and not an `__exact []`-style lie: modify has to tell the truth or
+   the compiler keeps a live value in a register this body overwrites.
    Emits no emms; the driver does one per chunk. */
 extern void lz_wsum_pair_asm(const int8_t *rowA, const int8_t *rowB,
                 const int16_t *coef, int32_t *acc32);
@@ -1001,7 +1002,8 @@ void lz_p2_rows_mmx(const int8_t *ph_row, const int8_t *pl_row,
 /* Two lanes of uint32 in one MMX register. The mask is built in-register
    (pcmpeqd then psrld 1) rather than loaded, so the routine touches no
    memory but its input. Leaves MMX state dirty - the caller emits one
-   emms after the group loop, never the kernel (rule 6 item 6). */
+   emms after the group loop, never the kernel - one per loop rather
+   than one per group. */
 extern unsigned lz_amax32_mmx_asm(const float *x, int n);
 #pragma aux lz_amax32_mmx_asm =         \
     "pxor     mm0, mm0"                 \
@@ -1503,7 +1505,7 @@ extern int32_t lz_dot32_x16_asm(const int8_t *w, const int16_t *x);
    mm3 its copy for the second token - six of eight, with none to spare
    for a third token's accumulator plus its activation.
 
-   No emms here, by rule 6.6: the caller emits one after the row loop.
+   No emms here: the caller emits one after the row loop.
 
    VERIFIED BIT-IDENTICAL: 200000 random plus 8 extreme trials against
    the scalar reference, 0 mismatches - and the
@@ -1935,7 +1937,7 @@ extern int32_t lz_dot32_q41_asm(const unsigned char *w, const int16_t *x);
    zero, mm6/mm5 accumulators, mm1 lo nibbles, mm4 hi nibbles, mm2
    widened half, mm3 its copy for the second token - all eight.
 
-   No emms here (rule 6.6: the caller emits one after the row loop).
+   No emms here; the caller emits one after the row loop.
 
    VERIFIED BIT-IDENTICAL: 200000 random plus 8 extreme trials against
    a scalar reference, 0 mismatches; the differential's
@@ -4125,7 +4127,7 @@ unsigned lz_amax32_mmx(const float *x, int n) {
    tolerance to argue about and no float path to agree with.
 
    Emits no emms. The caller does one after the last stage, which is
-   where the x87 that follows it begins (rule 6 item 6). */
+   where the x87 that follows it begins. */
 void lz_fwht_stage_mmx(int32_t *y, int n, int len) {
     __m64 u, v;
     int i, j;

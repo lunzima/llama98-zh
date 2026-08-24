@@ -37,6 +37,15 @@
 set -u
 cd "$(dirname "$0")/.."
 
+# TWO SPELLINGS, one predicate. This matched "iron law" only, and six
+# citations in src/ops_mmx.c spelled it "rule 6 item 6" / "rule 6.6" and
+# went straight through - the phrase the rulebook happens to use is not
+# the thing being banned. What is banned is a citation standing in for a
+# reason, whatever it is called.
+# `rule N` needs the digit: "the rule is that modify tells the truth" is
+# a sentence, not a cite, and must not redden.
+RULECITE='iron law|\brule [0-9]'
+
 # WHAT IS SCANNED. src/ is not the tree. Three of this session's
 # findings - a date, a rulebook cite, a dead flag name - were in the
 # Makefile, and every earlier report of "zero tree-wide" was a src/-only
@@ -98,7 +107,7 @@ for f in $SCAN; do
     # host.
     z=$(LC_ALL=C grep -c $'[\xe4-\xe9][\x80-\xbf][\x80-\xbf]' "$f" 2>/dev/null)
     [ -n "$z" ] || z=0
-    r=$(grep -ciE "iron law" "$f" 2>/dev/null)
+    r=$(grep -ciE "$RULECITE" "$f" 2>/dev/null)
     [ -n "$r" ] || r=0
     n=$((h + d + z + r))
     TOTAL=$((TOTAL + n))
@@ -134,11 +143,11 @@ BSCAN=$(ls build/*.sh build/*.awk build/*.c build/*.py \
         | grep -v "comment_hygiene_gate.sh")
 BR=0
 for f in $BSCAN; do
-    n=$(grep -ci "iron law" "$f" 2>/dev/null)
+    n=$(grep -ciE "$RULECITE" "$f" 2>/dev/null)
     [ -n "$n" ] || n=0
     if [ "$n" -gt 0 ]; then
         echo "FAIL: $f - $n rulebook cite(s); say the reason, not the number"
-        grep -in "iron law" "$f" | head -3 | sed 's/^/        /'
+        grep -inE "$RULECITE" "$f" | head -3 | sed 's/^/        /'
         BR=$((BR + n))
         FAIL=1
     fi

@@ -821,8 +821,8 @@ static void gdn_build_table(const float *ss, const float *q, const float *k,
      * one table is what brings the cost down sevenfold. That is the
      * whole reason this lands and that one did not.
      *
-     * Rule 6 item 1's note about `amk / 32767.0f` still applies to any
-     * future code that wants the un-normalized ratio: Watcom strength-
+     * The same caution applies to any future code that wants the
+     * un-normalized `amk / 32767.0f` ratio: Watcom strength-
      * reduces it and gcc does not, 1 ULP apart, so write the multiply. */
     if (amk > 0.0f) {
         float r = amk * LZ_Q15_INV;
@@ -988,8 +988,8 @@ static void gdn_sum_gg(const int8_t *sq_gg, int kd, int vd,
 /* Eight 4-lane sub-windows cover this gg's 32 vv lanes.
 
    The emms belongs HERE, once per gg - not per sub-window, and not after
-   the whole loop. Rule 6 item 6 permits hoisting the emms out only when
-   the loop body has no x87, and that precondition fails one level up: the
+   the whole loop. Hoisting the emms out is allowed only when the loop
+   body has no x87, and that precondition fails one level up: the
    next gg's gdn_build_table runs q8_round and 32767/amax on x87 right
    after this returns. Hoisting it would reopen the trap that broke the
    mmx tier. */

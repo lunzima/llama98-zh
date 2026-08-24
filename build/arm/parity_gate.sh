@@ -424,7 +424,7 @@ echo "PASS: x86 and ARM --dump-all-logits are bit-identical ($X86_SZ bytes)"
 # ---- the ARM column's own tiers ------------------------------------------
 # The pins force --kernel ref because that is the one tier BOTH sides can
 # run, which means the comparison above never executes an ARM ternary
-# kernel at all. Rule 8's gate is bit-identity ACROSS tiers, so the other
+# kernel at all. What has to hold is bit-identity ACROSS tiers, so the other
 # two run here against the SAME binary's ref dump ($ARM_DUMP, produced
 # with the pins as-is). Without this a hand-written kernel could rot
 # untouched behind a passing gate.
