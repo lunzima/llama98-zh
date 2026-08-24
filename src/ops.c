@@ -4004,11 +4004,10 @@ static const char km_why_expfx_x86[] =
     "is 64x32 and needs a hi/lo split on either tier. MMX has nothing "
     "wider than pmaddwd. The 32-entry lookup stays scalar on both";
 /* EXPFX AND SIGQ ONLY, and the scope line is here because this string
-   used to be the default for every operator unit and was wrong for
-   three of them. i32f and q8rnd both have group forms - the wsum chunk
-   fold's 32 and lz_q8round_group_sse's gs - and each now carries a
-   reason that says which axis it is on instead. For a per-element table
-   lookup both clauses below are true: there is no group form, and the
+   is wrong for any unit that HAS a group form. i32f's is the wsum
+   chunk fold's 32 and q8rnd's is lz_q8round_group_sse's gs, so each of
+   those carries a reason naming its own axis instead. For a per-element
+   table lookup both clauses below are true: there is no group form, and the
    leaf really has nothing to hoist across. */
 static const char km_why_op_g128[] =
     "no 128-element group form exists - a per-element table lookup has "
@@ -4045,10 +4044,10 @@ static const char km_why_attn_g128[] =
    because the reason argued taxonomy - an SSE1/MMX hybrid is still an
    SSE1 cell, it needs SSE1 to run.
 
-   MMX gets a cell too, and the sentence that used to sit here - "MMX
-   alone cannot start it: the scale is a FLOAT multiply and MMX is
-   integer-only" - was answering whether the loop runs in ONE pass. It
-   does not have to. lz_norm_ss_pack_mmx takes the int32 an x87 pass
+   MMX gets a cell too. "MMX alone cannot start it: the scale is a
+   FLOAT multiply and MMX is integer-only" answers whether the loop runs
+   in ONE pass, which is not what the cell asks. It does not have to.
+   lz_norm_ss_pack_mmx takes the int32 an x87 pass
    produced and does the clamp and the pmaddwd sum of squares, which is
    the part MMX can reach; the emms is once per 32 elements rather than
    once per element, which is what separates it from a regression. */
