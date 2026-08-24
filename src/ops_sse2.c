@@ -1461,6 +1461,120 @@ void row_t2_sse2_asm(int32_t *acc32, const void *w4, const void *w2v,
     }
 }
 
+/* Two tokens, one 6-bit reassembly - the Watcom twin of part32_q61_2,
+   and the pair that saves most of the five formats.
+
+   A RESTRUCTURE, NOT A TRANSCRIPTION of the single-token body below.
+   That one interleaves: build the lo byte-vector, use it, then reuse
+   the planes and the two masks to build hi. All eight %xmm are live
+   while it does so, which leaves nowhere for a second accumulator.
+
+   Here BOTH byte-vectors are reassembled first, into xmm2 (lo) and
+   xmm3 (hi). That retires the 4-bit plane, the 2-bit plane and both
+   masks in one go, and the freed registers become the second
+   accumulator and the temps. Same arithmetic, different order of the
+   same steps - the reassembly is line for line what the single form
+   does, which is what keeps the 6-bit value identical.
+
+   After the split: xmm2/xmm3 the byte-vectors, xmm4/xmm5 the two
+   accumulators, xmm0 the shared unpack, xmm1 the activation, xmm6 the
+   multiply temp pmaddwd destroys.
+
+   movdqu for activations, never a pmaddwd memory operand - the
+   alignment reason the other kernels in this file carry. */
+extern void lz_dot32_q61_sse2_asm_2(const unsigned char *w4,
+                                    const unsigned char *w2,
+                                    const int16_t *xa, const int16_t *xb,
+                                    int32_t *oa, int32_t *ob);
+#pragma aux lz_dot32_q61_sse2_asm_2 = \
+    ".686" \
+    "pxor      xmm4, xmm4" \
+    "pxor      xmm5, xmm5" \
+    "pcmpeqb   xmm7, xmm7" \
+    "psrlw     xmm7, 12" \
+    "packuswb  xmm7, xmm7" \
+    "pcmpeqb   xmm6, xmm6" \
+    "psrlw     xmm6, 14" \
+    "packuswb  xmm6, xmm6" \
+    "movdqu    xmm0, [eax]" \
+    "movq      xmm1, [edx]" \
+    "movdqa    xmm2, xmm1" \
+    "pand      xmm2, xmm6" \
+    "movdqa    xmm3, xmm1" \
+    "psrlw     xmm3, 2" \
+    "pand      xmm3, xmm6" \
+    "punpcklqdq xmm2, xmm3" \
+    "psllw     xmm2, 4" \
+    "movdqa    xmm3, xmm0" \
+    "pand      xmm3, xmm7" \
+    "por       xmm2, xmm3" \
+    "movdqa    xmm3, xmm1" \
+    "psrlw     xmm3, 4" \
+    "pand      xmm3, xmm6" \
+    "psrlw     xmm1, 6" \
+    "pand      xmm1, xmm6" \
+    "punpcklqdq xmm3, xmm1" \
+    "psllw     xmm3, 4" \
+    "psrlw     xmm0, 4" \
+    "pand      xmm0, xmm7" \
+    "por       xmm3, xmm0" \
+    "pxor      xmm0, xmm0" \
+    "punpcklbw xmm0, xmm2" \
+    "movdqu    xmm1, [ebx]" \
+    "movdqa    xmm6, xmm0" \
+    "pmaddwd   xmm6, xmm1" \
+    "paddd     xmm4, xmm6" \
+    "movdqu    xmm1, [ecx]" \
+    "movdqa    xmm6, xmm0" \
+    "pmaddwd   xmm6, xmm1" \
+    "paddd     xmm5, xmm6" \
+    "pxor      xmm0, xmm0" \
+    "punpckhbw xmm0, xmm2" \
+    "movdqu    xmm1, [ebx+16]" \
+    "movdqa    xmm6, xmm0" \
+    "pmaddwd   xmm6, xmm1" \
+    "paddd     xmm4, xmm6" \
+    "movdqu    xmm1, [ecx+16]" \
+    "movdqa    xmm6, xmm0" \
+    "pmaddwd   xmm6, xmm1" \
+    "paddd     xmm5, xmm6" \
+    "pxor      xmm0, xmm0" \
+    "punpcklbw xmm0, xmm3" \
+    "movdqu    xmm1, [ebx+32]" \
+    "movdqa    xmm6, xmm0" \
+    "pmaddwd   xmm6, xmm1" \
+    "paddd     xmm4, xmm6" \
+    "movdqu    xmm1, [ecx+32]" \
+    "movdqa    xmm6, xmm0" \
+    "pmaddwd   xmm6, xmm1" \
+    "paddd     xmm5, xmm6" \
+    "pxor      xmm0, xmm0" \
+    "punpckhbw xmm0, xmm3" \
+    "movdqu    xmm1, [ebx+48]" \
+    "movdqa    xmm6, xmm0" \
+    "pmaddwd   xmm6, xmm1" \
+    "paddd     xmm4, xmm6" \
+    "movdqu    xmm1, [ecx+48]" \
+    "movdqa    xmm6, xmm0" \
+    "pmaddwd   xmm6, xmm1" \
+    "paddd     xmm5, xmm6" \
+    "movdqa    xmm1, xmm4" \
+    "psrldq    xmm1, 8" \
+    "paddd     xmm4, xmm1" \
+    "movdqa    xmm1, xmm4" \
+    "psrldq    xmm1, 4" \
+    "paddd     xmm4, xmm1" \
+    "movd      [esi], xmm4" \
+    "movdqa    xmm1, xmm5" \
+    "psrldq    xmm1, 8" \
+    "paddd     xmm5, xmm1" \
+    "movdqa    xmm1, xmm5" \
+    "psrldq    xmm1, 4" \
+    "paddd     xmm5, xmm1" \
+    "movd      [edi], xmm5" \
+    __parm [__eax] [__edx] [__ebx] [__ecx] [__esi] [__edi] \
+    __modify [8087]
+
 /* ---- Q6_1 32/128-element dot products and row kernel, SSE2 tier -
    in this TU. Both this format's SSE2 kernels are genuine %xmm-only
    implementations, not an MMX reuse. */
@@ -1770,6 +1884,26 @@ void row_q61_sse2_asm(int32_t *acc32, const void *w4, const void *w2v,
     for (tk = 0; tk < nt; tk++) {
         const int16_t *xwt = xw + (size_t)tk * in_dim;
         int32_t *acc = acc32 + (size_t)tk * nb;
+        /* Pair before grouping, matching the gcc twin. This format has
+           the heaviest weight side of the five - the 6-bit value is
+           reassembled from two planes before it can be widened - so one
+           pass of it serving two tokens is the largest saving the pair
+           buys anywhere. */
+        if (nt - tk >= 2 && lz_pair_mode()) {
+            const int16_t *xw2 = xwt + in_dim;
+            int32_t *accb = acc + nb;
+            int sp;
+            for (sp = 0; sp < nb; sp++) {
+                LZ_Q61_PF(sp);
+                lz_dot32_q61_sse2_asm_2(wn + (size_t)sp * 16,
+                                        w2 + (size_t)sp * 8,
+                                        xwt + (size_t)sp * 32,
+                                        xw2 + (size_t)sp * 32,
+                                        acc + sp, accb + sp);
+            }
+            tk++;
+            continue;
+        }
 #if LZ_SSE2_GROUP
         if ((nb & 3) == 0) LZ_Q61_GROUP4(lz_dot128_q61_sse2_asm);
 #else
@@ -2287,6 +2421,28 @@ void row_q61_sse2_intrin(int32_t *acc32, const void *w4, const void *w2v,
     for (tk = 0; tk < nt; tk++) {
         const int16_t *xwt = xw + (size_t)tk * in_dim;
         int32_t *acc = acc32 + (size_t)tk * nb;
+        /* The pair is worth most on this format: the 6-bit reassembly
+           is ~19 instructions on the weight side against q4_1's 8 and
+           q8_0's 6, and one pass of it now serves two tokens. No group
+           form here to combine with - this row runs per-32 either way. */
+        if (tk + 1 < nt && g_pair) {
+            const int16_t *xw2 = xwt + in_dim;
+            int32_t *accb = acc + nb;
+            for (s = 0; s < nb; s++) {
+                __m128i pa, pb;
+                part32_q61_2(wn + (size_t)s * 16, w2 + (size_t)s * 8,
+                             xwt + (size_t)s * 32, xw2 + (size_t)s * 32,
+                             &pa, &pb);
+                pa = _mm_add_epi32(pa, _mm_srli_si128(pa, 8));
+                pa = _mm_add_epi32(pa, _mm_srli_si128(pa, 4));
+                acc[s] = _mm_cvtsi128_si32(pa);
+                pb = _mm_add_epi32(pb, _mm_srli_si128(pb, 8));
+                pb = _mm_add_epi32(pb, _mm_srli_si128(pb, 4));
+                accb[s] = _mm_cvtsi128_si32(pb);
+            }
+            tk++;
+            continue;
+        }
         for (s = 0; s < nb; s++) {
             __m128i p = part32_q61(wn + (size_t)s * 16, w2 + (size_t)s * 8,
                                    xwt + (size_t)s * 32);
@@ -2533,6 +2689,75 @@ void lz_lerp_q15_simd(const int32_t *a, const int32_t *b,
     }
     for (; k < n; k++)
         out[k] = a[k] + (((b[k] - a[k]) * frac[k]) >> 15);
+}
+
+/* ---- lz_exp_fixed's Q20 Taylor, SSE2 tier.
+   Watcom twin: lz_exp_q20_sse2_asm, the #pragma aux in the other arm.
+
+   prod = (tab * cq + 2^19) >> 20, where
+   cq = 2^20 + ((LN2*s + 2^19) >> 20) + ((LN2SQ*(s*s) + 2^39) >> 40).
+
+   FOUR 32 x 32 -> 64 MULTIPLIES AND NOTHING WIDER, which is the fact
+   that makes this cell exist. The C writes the second Taylor term as
+   ((int64)LN2SQ * s) * s, whose first product is 2^33 and whose second
+   would therefore be 64 x 32 - but s = rq >> 5 with rq <= 2^20, so
+   s <= 2^15 and s*s <= 2^30 fits int32. Grouped as LN2SQ * (s*s) both
+   factors are under 2^32, pmuludq takes it, and the two groupings are
+   the same number: integer multiplication is associative and exact and
+   every intermediate here is at most 2^48.
+
+   EVERY OPERAND IS NON-NEGATIVE, so pmuludq's unsignedness costs
+   nothing. r is [0,1) by construction so rq >= 0; LN2 and LN2SQ are
+   positive constants; g_exptab holds exp() times 2^20; cq is 2^20 plus
+   two non-negative terms.
+
+   pmuludq works on the EVEN 32-bit lanes only, so each multiply runs
+   twice - once on the vector and once on it shifted down by one lane -
+   and the two halves interleave back with unpack. Results fit int32,
+   so the odd 32-bit halves of each 64-bit lane are zero and the
+   recombination is exact. */
+static __m128i exp_mul_shr(__m128i v, __m128i w, __m128i rnd, int sh) {
+    /* BOTH operands take the lane shift, not just the first: pmuludq
+       reads lanes 0 and 2, so the odd pass has to bring the odd lanes
+       of each side down together. A broadcast constant survives the
+       shift unchanged in those two lanes, which is why this one helper
+       serves the constant multiplies and the per-element ones alike. */
+    __m128i e = _mm_srli_epi64(_mm_add_epi64(_mm_mul_epu32(v, w), rnd), sh);
+    __m128i o = _mm_srli_epi64(
+        _mm_add_epi64(_mm_mul_epu32(_mm_srli_si128(v, 4),
+                                    _mm_srli_si128(w, 4)), rnd), sh);
+    return _mm_unpacklo_epi64(_mm_unpacklo_epi32(e, o),
+                              _mm_unpackhi_epi32(e, o));
+}
+
+void lz_exp_q20_simd(const int32_t *tab, const int32_t *s,
+                     int32_t *prod, int n) {
+    const __m128i kln2   = _mm_set1_epi32(726817);
+    const __m128i kln2sq = _mm_set1_epi32(251906);
+    const __m128i r20    = _mm_set1_epi64x((long long)1 << 19);
+    const __m128i r40    = _mm_set1_epi64x((long long)1 << 39);
+    const __m128i qscale = _mm_set1_epi32(1 << 20);
+    const __m128i zero   = _mm_setzero_si128();
+    int k;
+
+    for (k = 0; k + 3 < n; k += 4) {
+        __m128i sv = _mm_loadu_si128((const __m128i *)(const void *)(s + k));
+        __m128i tv = _mm_loadu_si128((const __m128i *)(const void *)(tab + k));
+        __m128i ss = exp_mul_shr(sv, sv, zero, 0);   /* s*s, exact in int32 */
+        __m128i t1 = exp_mul_shr(sv, kln2,   r20, 20);
+        __m128i t2 = exp_mul_shr(ss, kln2sq, r40, 40);
+        __m128i cq = _mm_add_epi32(qscale, _mm_add_epi32(t1, t2));
+        _mm_storeu_si128((__m128i *)(void *)(prod + k),
+                         exp_mul_shr(tv, cq, r20, 20));
+    }
+    for (; k < n; k++) {
+        int32_t sk = s[k], cq;
+        cq = (1 << 20)
+           + (int32_t)((((lz_i64)726817 * sk) + (1 << 19)) >> 20)
+           + (int32_t)((((lz_i64)251906 * ((lz_i64)sk * sk))
+                        + (LZ_I64_C(1) << 39)) >> 40);
+        prod[k] = (int32_t)((((lz_i64)tab[k] * cq) + (1 << 19)) >> 20);
+    }
 }
 
 /* ---- Q8 activation rounding, SSE2 tier -----------------------------------

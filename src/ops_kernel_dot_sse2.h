@@ -211,6 +211,56 @@ static __m128i part32_q61(const unsigned char *w4, const unsigned char *w2,
     return _mm_add_epi32(s0, s1);
 }
 
+/* The same sub-block against two tokens - and of the five formats this
+ * is where the pair is worth most.
+ *
+ * COUNT THE WEIGHT SIDE: two loads, four masks, three shifts, two ORs,
+ * two 64-bit merges and four unpacks, because a 6-bit value has to be
+ * reassembled from a 4-bit plane and a 2-bit plane before it can be
+ * widened. That is roughly nineteen instructions against q4_1's eight
+ * and q8_0's six, and the pair pays it once. Only the four activation
+ * loads and the eight pmaddwd double, exactly as in the other two.
+ *
+ * Bit-identical to two part32_q61 calls: the reassembly is the single
+ * form's line for line, so the 6-bit value and the caller's scale are
+ * unchanged, and each token accumulates in its own registers in the
+ * same order with nothing crossing between them. */
+static void part32_q61_2(const unsigned char *w4, const unsigned char *w2,
+                         const int16_t *xa, const int16_t *xb,
+                         __m128i *pa, __m128i *pb) {
+    const __m128i m0f = _mm_set1_epi8(0x0F);
+    const __m128i m03 = _mm_set1_epi8(0x03);
+    __m128i z  = _mm_setzero_si128();
+    __m128i b  = _mm_loadu_si128((const __m128i *)w4);
+    __m128i t  = _mm_loadl_epi64((const __m128i *)w2);
+    __m128i g0 = _mm_and_si128(t, m03);
+    __m128i g1 = _mm_and_si128(_mm_srli_epi16(t, 2), m03);
+    __m128i g2 = _mm_and_si128(_mm_srli_epi16(t, 4), m03);
+    __m128i g3 = _mm_and_si128(_mm_srli_epi16(t, 6), m03);
+    __m128i lo = _mm_or_si128(_mm_and_si128(b, m0f),
+                              _mm_slli_epi16(_mm_unpacklo_epi64(g0, g1), 4));
+    __m128i hi = _mm_or_si128(_mm_and_si128(_mm_srli_epi16(b, 4), m0f),
+                              _mm_slli_epi16(_mm_unpacklo_epi64(g2, g3), 4));
+    __m128i l0 = _mm_unpacklo_epi8(z, lo);
+    __m128i l1 = _mm_unpackhi_epi8(z, lo);
+    __m128i h0 = _mm_unpacklo_epi8(z, hi);
+    __m128i h1 = _mm_unpackhi_epi8(z, hi);
+    __m128i a0 = _mm_loadu_si128((const __m128i *)xa);
+    __m128i a1 = _mm_loadu_si128((const __m128i *)(xa + 8));
+    __m128i a2 = _mm_loadu_si128((const __m128i *)(xa + 16));
+    __m128i a3 = _mm_loadu_si128((const __m128i *)(xa + 24));
+    __m128i b0 = _mm_loadu_si128((const __m128i *)xb);
+    __m128i b1 = _mm_loadu_si128((const __m128i *)(xb + 8));
+    __m128i b2 = _mm_loadu_si128((const __m128i *)(xb + 16));
+    __m128i b3 = _mm_loadu_si128((const __m128i *)(xb + 24));
+    *pa = _mm_add_epi32(
+              _mm_add_epi32(_mm_madd_epi16(l0, a0), _mm_madd_epi16(l1, a1)),
+              _mm_add_epi32(_mm_madd_epi16(h0, a2), _mm_madd_epi16(h1, a3)));
+    *pb = _mm_add_epi32(
+              _mm_add_epi32(_mm_madd_epi16(l0, b0), _mm_madd_epi16(l1, b1)),
+              _mm_add_epi32(_mm_madd_epi16(h0, b2), _mm_madd_epi16(h1, b3)));
+}
+
 /* T2 (ternary) SSE2: part32_q61 with the 4-bit plane deleted.
  *
  * That is the whole derivation, and it is why this format got a kernel
