@@ -3153,7 +3153,7 @@ static void forward_kda(const LZModel *m, LZRunState *s,
         /* Once, not once per projection: the answer depends on hdim and
            gsa, and all four share both. */
         int nint = lz_norm_int() && lz_norm_can_fixed(hdim) &&
-                   gsa > 0 && (hdim % gsa) == 0;
+                   gsa > 0 && nsa * gsa == hdim;
 
         subn_norm_q8(s, &L->kda_q_norm, hdim, nt, nsa, c->rms_norm_eps, nint);
         kda_conv_proj(s, &conv_int, s->kda_q, s->kda_q_i16, s->xb2,
