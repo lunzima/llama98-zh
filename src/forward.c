@@ -2127,6 +2127,15 @@ static void forward_attn(const LZModel *m, LZRunState *s,
             }
         }
 #define LZ_ATTN_DEAD(t) ((t) >= dead0 && (t) < dead1)
+
+/* Drop an evicted position and record that it was dropped. Seven walks
+   below do this identically, and the counter is what keeps the drop
+   visible in --debug rather than silent.
+   Not wrapped in do/while(0): the continue has to reach the caller's
+   loop, and a do/while would swallow it. So this expands to a bare if
+   and the call sites carry no semicolon, same as LZ_KV_WALK. */
+#define LZ_ATTN_SKIP_DEAD(t) \
+    if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
 /* The kernels take kv_slot()'s two parameters and walk the ring
    themselves; what they still cannot express is win_t0, the
    investigative override that leaves att[0..win_t0-1] unscored. Rows the
@@ -2195,7 +2204,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                 LZ_KV_WALK(s, pos, t, rslot, win_t0) {
                     const unsigned char *kt;
                     float sum = 0.0f;
-                    if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
+                    LZ_ATTN_SKIP_DEAD(t)
                     kt = k4 + (size_t)rslot * kvd / 2 +
                          (size_t)kvh * (hd / 2);
                     for (d = 0; d < hd; d += 2) {
@@ -2214,7 +2223,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                 LZ_KV_WALK(s, pos, t, rslot, win_t0) {
                     const float *kt;
                     float sum = 0.0f;
-                    if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
+                    LZ_ATTN_SKIP_DEAD(t)
                     kt = kf + (size_t)rslot * kvd + (size_t)kvh * hd;
                     for (d = 0; d < hd; d++) sum += qhh[d] * kt[d];
                     s->att[t] = sum * scale;
@@ -2251,7 +2260,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                 const int8_t *kt;
                 const float *kts;
                 float sum = 0.0f;
-                if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
+                LZ_ATTN_SKIP_DEAD(t)
                 kt  = kc + (size_t)rslot * kvd + (size_t)kvh * hd;
                 kts = ks + (size_t)rslot * kvd / 32 +
                       (size_t)(kvh * hd) / 32;
@@ -2342,7 +2351,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                     /* Row scale folded into the attention weight, same
                        trick as the scoring pass. */
                     float a;
-                    if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
+                    LZ_ATTN_SKIP_DEAD(t)
                     vt = v4 + (size_t)rslot * kvd / 2 +
                          (size_t)kvh * (hd / 2);
                     a = s->att[t] * vs4[(size_t)rslot * nkv + kvh];
@@ -2358,7 +2367,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                 LZ_KV_WALK(s, pos, t, rslot, win_t0) {
                     const float *vt;
                     float a;
-                    if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
+                    LZ_ATTN_SKIP_DEAD(t)
                     vt = vf + (size_t)rslot * kvd + (size_t)kvh * hd;
                     a  = s->att[t];
                     LZ_FCX(LZ_FC_ATTN_WSUM, hd, hd, 0, 0, 0);   /* f32 V: no convert */
@@ -2395,7 +2404,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                 const int8_t *vt;
                 const float *vts;
                 float a;
-                if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
+                LZ_ATTN_SKIP_DEAD(t)
                 vt  = vc + (size_t)rslot * kvd + (size_t)kvh * hd;
                 vts = vs + (size_t)rslot * kvd / 32 +
                       (size_t)(kvh * hd) / 32;
@@ -2425,7 +2434,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                     const int8_t *vt;
                     const float *vts;
                     float a;
-                    if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
+                    LZ_ATTN_SKIP_DEAD(t)
                     vt  = vc_lo + (size_t)rslot * kvd + (size_t)kvh * hd;
                     vts = vs + (size_t)rslot * kvd / 32 +
                           (size_t)(kvh * hd) / 32;
@@ -2507,6 +2516,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
             }
         }
     }
+#undef LZ_ATTN_SKIP_DEAD
 #undef LZ_ATTN_DEAD
     LZ_TAP("ax", layer, s->attn_out, qd);
 
