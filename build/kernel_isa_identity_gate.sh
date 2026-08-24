@@ -72,6 +72,45 @@ if [ ! -x "$BIN" ]; then
     exit 2
 fi
 
+# IS THAT BINARY THIS SOURCE? Every row below compares it against a
+# binary this script BUILDS from the working tree, so the two differ by
+# the switch under test only if the pre-built one came from the same
+# sources. Nothing checked that, and the failure sentence names a cause
+# the script never established: "SSE1 and SSE2 differ in 57813945 of
+# 78905344 bytes" on a run where the SSE1 side was built minutes ago and
+# ./llama98.exe was two hours and several commits old. The same byte
+# count appeared in three rows, which is the tell - one stale binary,
+# not three ISA defects.
+#
+# mtime, because that is the relation make itself uses within one tree,
+# and the direction is the safe one: refuse to report rather than report
+# a wrong cause. A source newer than the binary is a SKIP with the
+# command to run, never a FAIL.
+#
+# Positive control, in the direction this can go quiet: an empty result
+# has to mean "nothing is newer", not "find -newer answered nothing".
+# A marker dated 2000 must come back with sources newer than it.
+OLDMARK=$(mktemp) && touch -t 200001010000 "$OLDMARK" 2>/dev/null
+if [ -n "${OLDMARK:-}" ] && \
+   [ -z "$(find src -name '*.c' -newer "$OLDMARK" -print 2>/dev/null | head -1)" ]; then
+    echo "kernel_isa_identity_gate: ERROR - 'find -newer' reports nothing"
+    echo "  newer than a marker dated 2000, so the freshness check below"
+    echo "  cannot fail and its silence would carry nothing"
+    rm -f "$OLDMARK"
+    exit 2
+fi
+rm -f "$OLDMARK"
+
+NEWER=$(find src common -name '*.c' -newer "$BIN" -print 2>/dev/null | head -4)
+if [ -n "$NEWER" ]; then
+    echo "kernel_isa_identity_gate: SKIP - $BIN is older than its sources,"
+    echo "  so every row below would compare two different programs and"
+    echo "  report the difference as an ISA divergence. Newer:"
+    printf '%s\n' "$NEWER" | sed 's/^/      /'
+    echo "  Run 'make llama98' first."
+    exit 2
+fi
+
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT
 
