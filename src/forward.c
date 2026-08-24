@@ -2902,19 +2902,7 @@ static void forward_kda(const LZModel *m, LZRunState *s,
        either side can take its exit without the other. What it does need
        is the fixed tier and LZ_CONV_SIG_I, because the exit is integer
        only by way of the sig_e table those build. */
-    int convo_i16 = 0;
-#if LZ_CONV_FIXED
-    if (s->conv_fixed && s->kda_q_i16 && s->kda_k_i16 && s->kda_v_i16) {
-        int okq = lz_matmul_xq_i16_ok(&L->kda_q_proj, hdim, nt);
-        int okk = lz_matmul_xq_i16_ok(&L->kda_k_proj, hdim, nt);
-        int okv = lz_matmul_xq_i16_ok(&L->kda_v_proj, hdim, nt);
-        conv_int = okq && okk && okv;
-    }
-#if LZ_CONVO_I16 && LZ_CONV_SIG_I
-    convo_i16 = s->conv_fixed && s->kda_qc_i16 && s->kda_kc_i16
-                && s->kda_vc_i16;
-#endif /* LZ_CONVO_I16 && LZ_CONV_SIG_I */
-#endif /* LZ_CONV_FIXED */
+    int convo_i16 = 0;   /* set below, past the last declaration */
     /* int-pipeline milestone 5, decided here for the same reason
        conv_int is: the producing matmul has to know before it runs, and
        the consumer reads the answer far below.
@@ -2954,6 +2942,23 @@ static void forward_kda(const LZModel *m, LZRunState *s,
                c->kda_has_gate_lower_bound &&
                lz_matmul_xq_i16_ok(&L->kda_f_b_proj, gate_rank, 1);
 #endif /* LZ_KGATE_I16 */
+
+    /* Moved down past the declarations above, for the reason
+       forward_moe's own note gives: C89 wants every declaration in a
+       block ahead of every statement, and the declarations here each
+       carry an explanation that should not be separated from them. */
+#if LZ_CONV_FIXED
+    if (s->conv_fixed && s->kda_q_i16 && s->kda_k_i16 && s->kda_v_i16) {
+        int okq = lz_matmul_xq_i16_ok(&L->kda_q_proj, hdim, nt);
+        int okk = lz_matmul_xq_i16_ok(&L->kda_k_proj, hdim, nt);
+        int okv = lz_matmul_xq_i16_ok(&L->kda_v_proj, hdim, nt);
+        conv_int = okq && okk && okv;
+    }
+#if LZ_CONVO_I16 && LZ_CONV_SIG_I
+    convo_i16 = s->conv_fixed && s->kda_qc_i16 && s->kda_kc_i16
+                && s->kda_vc_i16;
+#endif /* LZ_CONVO_I16 && LZ_CONV_SIG_I */
+#endif /* LZ_CONV_FIXED */
 
     if (c->use_subn) {
         /* SubLN per-projection input RMSNorms for the four hidden-space
