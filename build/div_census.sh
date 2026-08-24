@@ -34,8 +34,18 @@
 #   The rest are once per group (127.0f/tam, the Q8RCP reciprocal) or
 #   once per call (the `n % gs` defensive checks).
 #
-# forward.c's 67 are similarly spread: 7 in kv_slot's inlined copies,
-# the other ~52 across 48 lines at one to four each.
+# forward.c's 67 are not a second target: 7 are kv_slot's inlined
+# copies, and mapping the rest to source lines mostly lands on CALL
+# SITES of lz_t_f32 and lz_quantize_q8 - the debug info attributes an
+# inlined divide to where it was inlined, not to the expression, so the
+# tail here is the ops.c tail seen a second time. What is genuinely
+# forward.c's own is the per-call group arithmetic, e.g.
+# `int nsd = (gsd > 0) ? idim / gsd : 0;` - once per call, not per
+# element.
+#
+# READ LINE ATTRIBUTIONS WITH THAT IN MIND. A hit on a line holding a
+# clamp or a closing brace is an inlined body, not a divide written
+# there; three of the top seven in forward.c look like that.
 set -u
 cd "$(dirname "$0")/.."
 command -v gcc >/dev/null 2>&1 || { echo "SKIP: no gcc"; exit 2; }
