@@ -92,7 +92,26 @@ fwhtf:src/ops.c:lz_fwht
 f32mm:src/ops.c:lz_matmul_w
 atdot:src/ops_gdn.c:lz_attn_score_q8
 wsump:src/ops_gdn.c:lz_attn_wsum_q8
+q8_0:src/ops_matmul.c:matmul_q8_impl
+q4_1:src/ops_matmul.c:matmul_q41_impl
+q6_1:src/ops_matmul.c:matmul_q61_impl
+q16_0:src/ops_matmul.c:matmul_q16_impl
+t2:src/ops_matmul.c:matmul_t2_impl
 "
+
+# THE FIVE WEIGHT-FORMAT UNITS WERE MISSING, and that is what the rule
+# they serve makes serious: every cell the matrix calls impossible gets
+# a look at what gcc -O3 emits. These five carry impossible cells - the
+# sseI column on the "SSE1 adds no signed 16x16->32 MAC and no integer
+# %xmm" reason, and g128 - and no row here at all, so the rule held for
+# ten of fifteen units and nobody could see which five it did not.
+#
+# Comparing this list against the matrix is one command, and it is worth
+# running whenever a unit gains an impossible cell:
+#
+#   llama98 --kernel-matrix | awk '$4=="i"{print $2}' | sort -u
+#
+# against the unit names on the left below.
 
 # Packed-SIMD mnemonics, and nothing scalar: the ss/sd forms are what
 # the compiler emits for ordinary float code and would make every
