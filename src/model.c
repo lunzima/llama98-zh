@@ -1009,6 +1009,74 @@ static int alloc_mtp(LZModel *m, char *errbuf, int errlen) {
 /* Load config and all weights in one pass from model.bin */
 static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen);
 
+/* Where the weights are when they are not in model.safetensors.
+ *
+ * A HUGGING FACE EXPORT NAMES ITS SHARDS AND LISTS THEM IN
+ * model.safetensors.index.json, whose weight_map sends every tensor to a
+ * file. Without this the loader looks for exactly one name, and a
+ * perfectly ordinary export fails with "cannot find model.safetensors"
+ * in a directory that plainly holds the weights - which is what
+ * Qwen3.5-0.8B does here, its single shard being called
+ * model.safetensors-00001-of-00001.safetensors.
+ *
+ * ONE SHARD ONLY, and the limit is deliberate rather than provisional.
+ * LZSafetensors owns a single FILE * and one tensor table; spanning
+ * several would mean a shard index per tensor and a handle array, which
+ * is a real feature and not a redirect. Every index this has been shown
+ * maps to one file, so the redirect is the whole of what is needed
+ * today - and a multi-shard index gets a message SAYING it is
+ * unsupported rather than the missing-file one, because the difference
+ * matters to whoever hits it.
+ *
+ * Returns 1 and fills `out` when the index named a single shard, -1 with
+ * errbuf set for a MULTI-shard one, and 0 for everything else - no
+ * index, unreadable, malformed, empty weight_map. Those all fall back
+ * to the caller's ordinary "cannot find model.safetensors", which is
+ * the right message when the index could not be used: the file the
+ * reader is missing is still that one. Only the multi-shard case earns
+ * a message of its own, because there the weights ARE all present and
+ * the loader is the thing that cannot take them.
+ */
+static int st_path_from_index(const char *dir, char *out, int outlen,
+                              char *errbuf, int errlen) {
+    char ipath[512];
+    void *txt;
+    size_t len;
+    LZJson j;
+    const LZJsonNode *map, *n;
+    const char *first = NULL;
+    int rc = 0;
+
+    if (!lz_lfn_exists(dir, "model.safetensors.index.json")) return 0;
+    if (lz_lfn_path(dir, "model.safetensors.index.json", ipath,
+                    (int)sizeof ipath, errbuf, errlen) != 0) return 0;
+    txt = lz_read_file(ipath, &len, errbuf, errlen);
+    if (!txt) return 0;
+    if (lz_json_parse(&j, (const char *)txt, len, errbuf, errlen) != 0) {
+        free(txt);
+        return 0;
+    }
+    map = lz_json_get(&j, lz_json_root(&j), "weight_map");
+    if (!map) goto done;
+    /* Distinct VALUES, not the member count: the map has one entry per
+       tensor and they nearly all name the same file. */
+    for (n = lz_json_first(&j, map); n; n = lz_json_next(&j, n)) {
+        if (n->type != LZ_JSON_STR || !n->text) continue;
+        if (!first) { first = n->text; continue; }
+        if (strcmp(first, n->text) != 0) {
+            qerr(errbuf, errlen, LZ_ERR_ST_INDEX_SHARDS);
+            rc = -1;
+            goto done;
+        }
+    }
+    if (!first) goto done;
+    if (lz_lfn_path(dir, first, out, outlen, errbuf, errlen) == 0) rc = 1;
+done:
+    lz_json_free(&j);
+    free(txt);
+    return rc;
+}
+
 int lz_open(LZModel *m, const char *dir, char *errbuf, int errlen) {
     char path[512];
     LZBindCtx bc;
@@ -1039,8 +1107,22 @@ int lz_open(LZModel *m, const char *dir, char *errbuf, int errlen) {
                     errbuf, errlen) != 0) return 1;
     if (lz_load_config(&m->config, path, errbuf, errlen) != 0) return 1;
 
-    if (lz_lfn_path(dir, "model.safetensors", path, (int)sizeof path,
-                    errbuf, errlen) != 0) return 1;
+    /* model.safetensors first, then the shard index. Tried in this order
+       so an export carrying both keeps the behaviour it already had. */
+    if (lz_lfn_exists(dir, "model.safetensors")) {
+        if (lz_lfn_path(dir, "model.safetensors", path, (int)sizeof path,
+                        errbuf, errlen) != 0) return 1;
+    } else {
+        int ir = st_path_from_index(dir, path, (int)sizeof path,
+                                    errbuf, errlen);
+        if (ir < 0) return 1;
+        if (ir == 0) {
+            /* No index either: report the file the user expected to
+               have, which is still model.safetensors. */
+            if (lz_lfn_path(dir, "model.safetensors", path,
+                            (int)sizeof path, errbuf, errlen) != 0) return 1;
+        }
+    }
     if (lz_st_open(&m->st, path, errbuf, errlen) != 0) return 1;
 
     if (detect_prefix(m, errbuf, errlen) != 0) goto fail;

@@ -155,6 +155,7 @@ typedef enum {
     LZ_ERR_ST_NBYTES,         /* tensor %s byte count vs shape mismatch */
     LZ_ERR_ST_DATA_SIZE,      /* data section size does not match file */
     LZ_ERR_ST_READ,
+    LZ_ERR_ST_INDEX_SHARDS,   /* index.json names more than one shard */
     LZ_ERR_ST_NULL,
     LZ_ERR_OOM,              /* out of memory */
     LZ_ERR_ST_NULL2,
