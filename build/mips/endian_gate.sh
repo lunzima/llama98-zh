@@ -1,5 +1,6 @@
 #!/bin/bash
-# Big-endian vs little-endian bit-identity gate (iron law 2).
+# Big-endian vs little-endian bit-identity gate: the same source tree
+# must produce the same logits on either byte order.
 #
 #   bash build/mips/endian_gate.sh
 #

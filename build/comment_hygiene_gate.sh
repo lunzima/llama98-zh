@@ -123,7 +123,14 @@ done
 #
 # THIS FILE IS THE EXEMPTION, and it has to be: naming the phrase is how
 # the check finds it. Nothing else may.
-BSCAN=$(ls build/*.sh build/*.awk build/*.c build/*.py 2>/dev/null \
+#
+# SUBDIRECTORIES TOO. This listed build/*.sh only, so build/arm,
+# build/mips and build/x87 were outside a predicate whose stated scope is
+# "the whole repository" - and build/mips/endian_gate.sh opened with a
+# rulebook citation for as long as that was true. The scope in the
+# comment above was right; the glob under it was one level short.
+BSCAN=$(ls build/*.sh build/*.awk build/*.c build/*.py \
+           build/arm/*.sh build/mips/*.sh build/x87/*.sh 2>/dev/null \
         | grep -v "comment_hygiene_gate.sh")
 BR=0
 for f in $BSCAN; do
