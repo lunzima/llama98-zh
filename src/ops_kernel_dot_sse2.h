@@ -50,6 +50,47 @@ static __m128i part32_x16(const int8_t *w, const int16_t *x) {
     return _mm_add_epi32(s0, s1);
 }
 
+/* The same sub-block against TWO tokens, sharing the weight side.
+ *
+ * MORE IS SHARED HERE THAN AT THE MMX TIER, which is the argument for
+ * doing it: q16_0's pair shares only the load, because int16 weights
+ * need no unpack. Here the weight costs two loads AND four unpacks
+ * (w0l/w0h/w1l/w1h against zero), and a pair pays that once instead of
+ * twice. Only the four activation loads and the eight pmaddwd double.
+ *
+ * Bit-identical to two part32_x16 calls: each token accumulates in its
+ * own pair of registers in the same order, and nothing crosses between
+ * them.
+ *
+ * SAME (z, w) OPERAND ORDER as the single form. The byte lands in the
+ * HIGH half of each int16, so the product carries a factor of 256 the
+ * caller's scale already accounts for - swapping the operands here
+ * would be a silent 256x, which is the note the MMX twin carries too. */
+static void part32_x16_2(const int8_t *w, const int16_t *xa,
+                         const int16_t *xb, __m128i *pa, __m128i *pb) {
+    __m128i z = _mm_setzero_si128();
+    __m128i w0 = _mm_loadu_si128((const __m128i *)w);
+    __m128i w1 = _mm_loadu_si128((const __m128i *)(w + 16));
+    __m128i w0l = _mm_unpacklo_epi8(z, w0);
+    __m128i w0h = _mm_unpackhi_epi8(z, w0);
+    __m128i w1l = _mm_unpacklo_epi8(z, w1);
+    __m128i w1h = _mm_unpackhi_epi8(z, w1);
+    __m128i a0 = _mm_loadu_si128((const __m128i *)xa);
+    __m128i a1 = _mm_loadu_si128((const __m128i *)(xa + 8));
+    __m128i a2 = _mm_loadu_si128((const __m128i *)(xa + 16));
+    __m128i a3 = _mm_loadu_si128((const __m128i *)(xa + 24));
+    __m128i b0 = _mm_loadu_si128((const __m128i *)xb);
+    __m128i b1 = _mm_loadu_si128((const __m128i *)(xb + 8));
+    __m128i b2 = _mm_loadu_si128((const __m128i *)(xb + 16));
+    __m128i b3 = _mm_loadu_si128((const __m128i *)(xb + 24));
+    *pa = _mm_add_epi32(
+              _mm_add_epi32(_mm_madd_epi16(w0l, a0), _mm_madd_epi16(w0h, a1)),
+              _mm_add_epi32(_mm_madd_epi16(w1l, a2), _mm_madd_epi16(w1h, a3)));
+    *pb = _mm_add_epi32(
+              _mm_add_epi32(_mm_madd_epi16(w0l, b0), _mm_madd_epi16(w0h, b1)),
+              _mm_add_epi32(_mm_madd_epi16(w1l, b2), _mm_madd_epi16(w1h, b3)));
+}
+
 /* Q4_1 32-element partial sum (activations pre-expanded to int16).
 
    Nibble layout (see model.h): 32 elements in 16 bytes; byte j's low
