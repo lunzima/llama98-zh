@@ -256,7 +256,23 @@ extern const float LZ_Q8_MIN_SCALE_F;
 extern const float LZ_Q8_INV127;
 extern const float LZ_Q15_INV;
 
-/* Cached CPUID MMX bit. Defined in ops.c. */
-int lz_cpu_has_mmx(void);
+/* Cached CPUID MMX bit, read inline.
+ *
+ * Every _mm_empty() in this engine is guarded by this, and those sit in
+ * row loops - 75,080,736 evaluations over 603 tokens on kmr20, 124,512
+ * per token. As one extern function reading a cached global it was that
+ * many CALLS on Open Watcom, which hoists none of them (an extern
+ * function may have side effects it cannot see); gcc hoists most. The
+ * body is a compare, so the call cost more than the answer.
+ *
+ * Defined on every target, not just x86: the sites test it on ARM too,
+ * where _mm_empty() is a no-op and the probe returns 0, so the whole
+ * test folds away. */
+extern int g_lz_has_mmx;          /* -1 until probed, then 0 or 1 */
+int lz_cpu_has_mmx_probe(void);   /* ops.c; runs once */
+
+LZ_MAYBE_UNUSED static int lz_cpu_has_mmx(void) {
+    return g_lz_has_mmx >= 0 ? g_lz_has_mmx : lz_cpu_has_mmx_probe();
+}
 
 #endif /* OPS_QUANT_H */

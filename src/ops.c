@@ -397,11 +397,9 @@ float lz_exp(float x) {
 
 /* lz_q8r_tier and q8r_have_simd: declared in ops_sched.h,
    defined in ops_sched.c. */
-/* Cached CPUID MMX bit. Non-static: ops_quant.c's q8_amax needs it.
-   Declared UNconditionally: _mm_empty() compiles on ARM too (as a no-op),
-   and the call sites test lz_cpu_has_mmx() there, so the name must exist
-   on every target - it just returns 0 where there is no MMX to have. */
-int lz_cpu_has_mmx(void);
+/* lz_cpu_has_mmx is an inline read of g_lz_has_mmx, in ops_quant.h,
+   which this file already includes. The one-time probe behind it is
+   defined further down. */
 
 /* lz_i32f (from ops_kernel_shared.h), q8_amax, q8_group_scale,
    LZ_Q8_MIN_SCALE_F, LZ_Q8_INV127 and LZ_Q15_INV are in
@@ -1229,14 +1227,26 @@ void lz_quantize_q8_silu(const float *p, const float *g, const int32_t *sig,
    "emms is an MMX instruction, so it is #UD on an MMX-less CPU". Defined
    on every target (not just x86): the call sites test it on ARM too, where
    _mm_empty() is a no-op and this returns 0 so the test compiles away. */
+/* THE CACHE IS NOT ENOUGH ON ITS OWN, and the reason is the call. This
+   was one extern function reading a cached global, and the call sites
+   are in row loops: 75,080,736 of them over 603 tokens on kmr20, which
+   is 124,512 per token. gcc hoists most of them; Open Watcom hoists
+   none, because an extern function may have side effects it cannot see
+   - all five sites in ops_matmul.c survive as real calls there.
+
+   So the FAST path is inline, in ops_quant.h, reading g_lz_has_mmx
+   directly; this is only the one-time probe it falls back to. Same
+   shape as q8_round, and for the same reason: the call and the
+   dispatch cost more than the body does. */
+int g_lz_has_mmx = -1;
+
 #if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86)
-static int g_has_mmx = -1;
-int lz_cpu_has_mmx(void) {
-    if (g_has_mmx < 0) g_has_mmx = (lz_cpuid1_edx() & (1u << 23)) != 0;
-    return g_has_mmx;
+int lz_cpu_has_mmx_probe(void) {
+    g_lz_has_mmx = (lz_cpuid1_edx() & (1u << 23)) != 0;
+    return g_lz_has_mmx;
 }
 #else
-int lz_cpu_has_mmx(void) { return 0; }
+int lz_cpu_has_mmx_probe(void) { g_lz_has_mmx = 0; return 0; }
 #endif /* __i386__ || __x86_64__ || _M_IX86 */
 
 /* pf_detect, lz_prefetch_mode, g_pair, lz_pair_mode: in ops_sched.c. */
