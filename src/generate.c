@@ -361,8 +361,8 @@ int lz_spec_accept_temp(const float *p, const float *q, int x, int vocab,
                    t <= pos - so once *out_new_pos stops short of the
                    rejected rows, they are simply never read again and
                    get overwritten whenever a future position lands on
-                   the same index. No copy anywhere. UNCHANGED by this
-                   round's work.
+                   the same index. No copy anywhere, and the ring below
+                   changes nothing here.
      SSM/conv       CANNOT roll back by "not advancing" the way the KV
                    cache does: forward_ssm/forward_kda's recurrence
                    folds every token it sees into ONE running state,
@@ -386,8 +386,8 @@ int lz_spec_accept_temp(const float *p, const float *q, int x, int vocab,
                    during drafting regardless of what verify later
                    decides; a rejected round's later rows are simply
                    never scored by a future round, which always starts
-                   from s->mtp_pos as of the LAST accepted count.
-                   UNCHANGED by this round's work.
+                   from s->mtp_pos as of the LAST accepted count. The
+                   ring does not reach this either.
 
    THE RING'S OWN CONTRACT: lz_forward_verify's k_eff+1-token batch
    advances s->ssm_slot INTERNALLY, one slot per token forwarded
@@ -1348,7 +1348,7 @@ static int gen_emit_token(int next, int sampled,
  * has no LZGenOpts to read one off, lz_generate_resume_ex does, and
  * that is the whole of the difference between them - see gen_prefill
  * below. Two copies of this loop drifted apart the moment the second
- * knob (cancellation) was added to only one of them.
+ * knob (cancellation) exists in only one of them.
  *
  * SLICES ARE A MULTIPLE OF s->nt_cap. lz_forward_batch chunks by that
  * width internally, so a slice that is not a multiple would make
