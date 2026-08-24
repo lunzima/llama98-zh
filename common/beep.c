@@ -4,7 +4,7 @@
 #include <windows.h>
 #else
 #include <stdio.h>
-#endif
+#endif /* _WIN32 */
 
 void lz_beep(void) {
 #ifdef _WIN32
