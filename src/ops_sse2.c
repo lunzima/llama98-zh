@@ -505,13 +505,14 @@ void lz_fwht_stage_sse2(int32_t *y, int n, int len) {
    site: the caller has just paid an emms to leave the row-pair loop,
    and a cell that reached for cvtpi2ps would owe another.
 
-   WHY THIS CELL IS WATCOM-ONLY. gcc compiles the scalar loop to exactly
+   Why this cell is Watcom-only. gcc compiles the scalar loop to exactly
    these instructions - 19 cvtdq2ps in ops_gdn.o at -O2 on x86-64 - so
    an intrinsics twin would duplicate what the compiler already emits.
    Watcom emits zero, and runs lz_i32f's x87 split form instead: 32 fild
    and 78 fmul in the same object.
 
-   SAME VALUE AS THE SCALAR FORM, not a close one. ops_kernel_shared.h's
+   The same value as the scalar form, not a close one.
+   ops_kernel_shared.h's
    lz_i32f records 87,108,878 values compared against the correctly
    rounded conversion with 0 mismatches - the whole +-2^25 band, where
    every rounding decision lives. cvtdq2ps IS that conversion.
@@ -637,7 +638,7 @@ void lz_lerp_q15_simd(const int32_t *a, const int32_t *b,
    pmuludq halves, and why cq's 2^20 rides in the second term's rounding
    constant instead of a fifth broadcast.
 
-   THE FOUR CONSTANTS LIVE IN %xmm4-7 ACROSS THE WHOLE CALL, which is
+   The four constants live in %xmm4-7 across the whole call, which is
    the whole reason the folding above was worth doing: 32-bit mode has
    eight %xmm registers, the body needs four working ones, and a fifth
    constant would have meant reloading one of them every pass.
@@ -880,7 +881,7 @@ extern int32_t lz_dot32_x16_sse2_asm(const int8_t *w, const int16_t *x);
 /* Two tokens, one weight side - the Watcom twin of part32_x16_2
    (src/ops_kernel_dot_sse2.h), and the SSE2 member of the g_pair family.
  *
- * THE FOUR UNPACKED WEIGHT HALVES STAY LIVE across both tokens, in
+ * The four unpacked weight halves stay live across both tokens, in
  * xmm1-xmm4, which is the whole saving: two movdqu and four punpck paid
  * once where two single-token calls pay them twice. Only the activation
  * loads and the pmaddwd double.
@@ -890,7 +891,7 @@ extern int32_t lz_dot32_x16_sse2_asm(const int8_t *w, const int16_t *x);
  * pmaddwd destroys, and xmm7 the zero - which is dead after the last
  * punpck, so it is reused as the activation temp. Nothing spills.
  *
- * ACTIVATIONS GO THROUGH movdqu, never a pmaddwd memory operand: the
+ * Activations go through movdqu, never a pmaddwd memory operand: the
  * single-token body above does the same, because SSE2's integer ops
  * fault on a 16-byte-unaligned memory operand and xw carries no such
  * guarantee. That is also why the weight copy is register-register.
@@ -1212,7 +1213,7 @@ static int32_t dot32_q41_sse2a(const unsigned char *w, const int16_t *x) {
 
 /* Two tokens, one weight side - the Watcom twin of part32_q41_2.
  *
- * A DIFFERENT REGISTER STRATEGY FROM THE q8_0 PAIR, forced by this
+ * The register strategy differs from the q8_0 pair, forced by this
  * format. There the four unpacked halves stay live in xmm1-4 across
  * both tokens. Here the nibble mask (xmm3) and the zero (xmm7) are both
  * needed through the unpacks, and lo/hi occupy two more, so four live
@@ -1552,7 +1553,7 @@ extern int32_t lz_dot32_t2_sse2_asm(const unsigned char *w2,
 
 /* Two tokens, one ternary decode - the Watcom twin of part32_t2_2.
 
-   THIS ONE NEEDED NO RESTRUCTURE, unlike q6_1's. The single-token body
+   This one needed no restructure, unlike q6_1's. The single-token body
    above already builds BOTH code vectors up front (xmm0 lo, xmm1 hi)
    before it touches an activation, so the 2-bit plane in xmm3 and the
    0x03 mask in xmm7 are both dead by then. xmm3 becomes the second
@@ -1683,7 +1684,8 @@ void row_t2_sse2_asm(int32_t *acc32, const void *w4, const void *w2v,
 /* Two tokens, one 6-bit reassembly - the Watcom twin of part32_q61_2,
    and the pair that saves most of the five formats.
 
-   A RESTRUCTURE, NOT A TRANSCRIPTION of the single-token body below.
+   This is a restructure of the single-token body below, not a
+   transcription of it.
    That one interleaves: build the lo byte-vector, use it, then reuse
    the planes and the two masks to build hi. All eight %xmm are live
    while it does so, which leaves nowhere for a second accumulator.
@@ -2130,7 +2132,7 @@ void row_q61_sse2_asm(int32_t *acc32, const void *w4, const void *w2v,
            the MMX #pragma aux group kernel. */
         if ((nb & 3) == 0) LZ_Q61_GROUP4(lz_dot128_q61_mmx_w);
 #endif /* LZ_SSE2_GROUP */
-        /* MEASURED ON TARGET: on a real Pentium M the SSE2 kernel is
+        /* Measured on target: on a real Pentium M the SSE2 kernel is
            20-30% faster at kernel level and no worse end-to-end. Uop
            counts compare only WITHIN one instruction set; a 128-bit uop
            and a 64-bit uop are not the same unit of work, so the
@@ -2411,7 +2413,7 @@ void row_q16_sse2_asm(int32_t *acc32, const void *w4, const void *w2,
       caller's duplicated coef[4] (which stays, unread past coef[1], so
       the two kernels keep one call signature).
 
-   BIT-IDENTICAL BY CONSTRUCTION, not by measurement: every operation
+   Bit-identical by construction, not by measurement: every operation
    here is integer, and integer sums are exact under reassociation. The
    gate still runs, because "by construction" is an argument about the
    algorithm and not about what got typed.
@@ -2709,7 +2711,7 @@ void row_t2_sse2_intrin(int32_t *acc32, const void *w4, const void *w2v,
             continue;
         }
         s = 0;
-        /* THE KNOB IS HONOURED BUT NOT REDEFINED HERE. LZ_G128_GCC lives
+        /* The knob is honoured but not redefined here. LZ_G128_GCC lives
            in ops_kernel_shared.h, which this file includes only under
            __WATCOMC__ (line 34) - so in a gcc build the name is not
            visible and a plain `#if LZ_G128_GCC` is `#if 0`, which is
@@ -2995,7 +2997,7 @@ unsigned lz_amax32_sse2(const float *x, int n) {
    for 32 elements - cvtdq2ps four int32 at a time, addps to accumulate.
    No MMX register, so no emms is owed at a site that has just paid one.
 
-   WRITTEN RATHER THAN LEFT TO THE OPTIMIZER, which is the point of the
+   Written rather than left to the optimizer, which is the point of the
    cell. gcc -O2 does vectorize the scalar loop this replaces, but an
    auto-vectorization has no name the kernel matrix can register, no
    symbol a cross-toolchain comparison can reach, and it goes away
@@ -3022,7 +3024,7 @@ void lz_i32f_acc32_simd(float *accf, const int32_t *acc32) {
    arm. MMX twin: lz_lerp_q15_mmx (src/ops_mmx.c), which carries the
    derivation and the precondition.
 
-   EIGHT ELEMENTS A PASS against the MMX cell's four, and no emms: every
+   Eight elements a pass against the MMX cell's four, and no emms: every
    instruction here is the %xmm form, so nothing aliases the x87 stack.
    That is the whole difference - psubd, packssdw, pmullw, pmulhw,
    punpck[lh]wd, psrad and paddd all exist at both widths and the
@@ -3074,7 +3076,7 @@ void lz_lerp_q15_simd(const int32_t *a, const int32_t *b,
    the same number: integer multiplication is associative and exact and
    every intermediate here is at most 2^48.
 
-   EVERY OPERAND IS NON-NEGATIVE, so pmuludq's unsignedness costs
+   Every operand is non-negative, so pmuludq's unsignedness costs
    nothing. r is [0,1) by construction so rq >= 0; LN2 and LN2SQ are
    positive constants; g_exptab holds exp() times 2^20; cq is 2^20 plus
    two non-negative terms.
@@ -3082,7 +3084,7 @@ void lz_lerp_q15_simd(const int32_t *a, const int32_t *b,
    pmuludq works on the EVEN 32-bit lanes only, so each multiply runs
    twice - once on the vector and once on it shifted down by one lane.
 
-   THE TWO HALVES COME BACK TOGETHER WITH pslldq+por, not with a pair of
+   The two halves come back together with pslldq+por, not with a pair of
    unpacks: every result here fits int32, so the high half of each
    64-bit lane is zero, and the odd half shifted up by one lane lands
    exactly in the gaps the even half left. Two instructions instead of
@@ -3166,7 +3168,7 @@ void lz_q8round32_simd(const float *x, int8_t *o, const float *pinv) {
    above. Consumes whole groups of 8 and returns how many it took; the
    caller runs the remainder in C.
 
-   THREE STEPS, ONE INSTRUCTION EACH, which is why this cell is worth
+   Three steps, one instruction each, which is why this cell is worth
    filling and the scalar leaves next to it are not:
      x[i] * sc          mulps
      q8_round           cvtps2dq - round-to-nearest-even is the DEFAULT
@@ -3177,11 +3179,11 @@ void lz_q8round32_simd(const float *x, int8_t *o, const float *pinv) {
                         products and therefore exactly this loop's
                         accumulate
 
-   THE UPPER CLAMP IS FREE. packssdw saturates int32 to [-32768, 32767],
+   The upper clamp is free. packssdw saturates int32 to [-32768, 32767],
    so `if (v > 32767) v = 32767` is the pack itself; only the low end
    needs fixing, from -32768 to the C's -32767, and that is one pmaxsw.
 
-   NO OVERFLOW IN THE PAIRWISE SUM, and it is close enough to be worth
+   No overflow in the pairwise sum, and it is close enough to be worth
    the arithmetic: |v| <= 32767 gives v*v <= 1073676289, and pmaddwd
    adds two of them - 2147352578, which is 131069 under INT32_MAX. So
    the pair is safe and the NEXT add is not, which is why each pmaddwd
