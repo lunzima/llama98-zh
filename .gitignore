@@ -86,6 +86,7 @@
 !/build/exp_q20_probe.c
 !/build/dot128_t2_probe.c
 !/build/seed_gate.sh
+!/build/pair_census.sh
 !/build/gcc_warning_gate.sh
 
 # Stray compiler/linker intermediates (gcc, Open Watcom), plus the raw
