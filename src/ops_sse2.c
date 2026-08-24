@@ -1047,6 +1047,95 @@ static int32_t dot32_q41_sse2a(const unsigned char *w, const int16_t *x) {
     return lz_dot32_q41_sse2_asm(w, x);
 }
 
+/* Two tokens, one weight side - the Watcom twin of part32_q41_2.
+ *
+ * A DIFFERENT REGISTER STRATEGY FROM THE q8_0 PAIR, forced by this
+ * format. There the four unpacked halves stay live in xmm1-4 across
+ * both tokens. Here the nibble mask (xmm3) and the zero (xmm7) are both
+ * needed through the unpacks, and lo/hi occupy two more, so four live
+ * halves would not fit. Instead each quarter is unpacked ONCE into xmm1
+ * and used against both tokens before the next - which shares exactly
+ * what matters: the load, the two masks, the shift and the four
+ * punpck. Only the activation loads and the pmaddwd double.
+ *
+ * xmm3 is reused as the multiply temp after the two pand, since the
+ * mask is dead by then and pmaddwd destroys its first operand.
+ *
+ * movdqu for activations, never a pmaddwd memory operand - same
+ * alignment reason as the single-token body above. */
+extern void lz_dot32_q41_sse2_asm_2(const unsigned char *w,
+                                    const int16_t *xa, const int16_t *xb,
+                                    int32_t *oa, int32_t *ob);
+#pragma aux lz_dot32_q41_sse2_asm_2 = \
+    ".686"                          \
+    "pxor      xmm7, xmm7"          \
+    "pxor      xmm5, xmm5"          \
+    "pxor      xmm6, xmm6"          \
+    "pcmpeqb   xmm3, xmm3"          \
+    "psrlw     xmm3, 12"            \
+    "packuswb  xmm3, xmm3"          \
+    "movdqu    xmm0, [eax]"         \
+    "movdqa    xmm4, xmm0"          \
+    "pand      xmm0, xmm3"          \
+    "psrlw     xmm4, 4"             \
+    "pand      xmm4, xmm3"          \
+    "movdqa    xmm1, xmm7"          \
+    "punpcklbw xmm1, xmm0"          \
+    "movdqu    xmm2, [edx]"         \
+    "movdqa    xmm3, xmm1"          \
+    "pmaddwd   xmm3, xmm2"          \
+    "paddd     xmm5, xmm3"          \
+    "movdqu    xmm2, [ebx]"         \
+    "movdqa    xmm3, xmm1"          \
+    "pmaddwd   xmm3, xmm2"          \
+    "paddd     xmm6, xmm3"          \
+    "movdqa    xmm1, xmm7"          \
+    "punpckhbw xmm1, xmm0"          \
+    "movdqu    xmm2, [edx+16]"      \
+    "movdqa    xmm3, xmm1"          \
+    "pmaddwd   xmm3, xmm2"          \
+    "paddd     xmm5, xmm3"          \
+    "movdqu    xmm2, [ebx+16]"      \
+    "movdqa    xmm3, xmm1"          \
+    "pmaddwd   xmm3, xmm2"          \
+    "paddd     xmm6, xmm3"          \
+    "movdqa    xmm1, xmm7"          \
+    "punpcklbw xmm1, xmm4"          \
+    "movdqu    xmm2, [edx+32]"      \
+    "movdqa    xmm3, xmm1"          \
+    "pmaddwd   xmm3, xmm2"          \
+    "paddd     xmm5, xmm3"          \
+    "movdqu    xmm2, [ebx+32]"      \
+    "movdqa    xmm3, xmm1"          \
+    "pmaddwd   xmm3, xmm2"          \
+    "paddd     xmm6, xmm3"          \
+    "movdqa    xmm1, xmm7"          \
+    "punpckhbw xmm1, xmm4"          \
+    "movdqu    xmm2, [edx+48]"      \
+    "movdqa    xmm3, xmm1"          \
+    "pmaddwd   xmm3, xmm2"          \
+    "paddd     xmm5, xmm3"          \
+    "movdqu    xmm2, [ebx+48]"      \
+    "movdqa    xmm3, xmm1"          \
+    "pmaddwd   xmm3, xmm2"          \
+    "paddd     xmm6, xmm3"          \
+    "movdqa    xmm2, xmm5"          \
+    "psrldq    xmm2, 8"             \
+    "paddd     xmm5, xmm2"          \
+    "movdqa    xmm2, xmm5"          \
+    "psrldq    xmm2, 4"             \
+    "paddd     xmm5, xmm2"          \
+    "movd      [ecx], xmm5"         \
+    "movdqa    xmm2, xmm6"          \
+    "psrldq    xmm2, 8"             \
+    "paddd     xmm6, xmm2"          \
+    "movdqa    xmm2, xmm6"          \
+    "psrldq    xmm2, 4"             \
+    "paddd     xmm6, xmm2"          \
+    "movd      [esi], xmm6"         \
+    __parm [__eax] [__edx] [__ebx] [__ecx] [__esi] \
+    __modify [8087]
+
 extern void lz_dot128_q41_sse2_asm(const unsigned char *w,
                 const int16_t *x, int32_t *out4);
 #pragma aux lz_dot128_q41_sse2_asm = \
@@ -1203,6 +1292,33 @@ void row_q41_sse2_asm(int32_t *acc32, const void *w4, const void *w2,
     for (tk = 0; tk < nt; tk++) {
         const int16_t *xwt = xw + (size_t)tk * in_dim;
         int32_t *acc = acc32 + (size_t)tk * nb;
+        /* Pair before grouping, matching the gcc twin: the pair shares
+           the load, both masks, the shift and the four punpck across
+           two tokens; the group only amortizes the per-32 call. */
+        if (nt - tk >= 2 && lz_pair_mode()) {
+            const int16_t *xw2 = xwt + in_dim;
+            int32_t *accb = acc + nb;
+            int sp;
+            for (sp = 0; sp < nb; sp++) {
+                /* Prefetch spelled out rather than through LZ_Q41_PF:
+                   that macro is not on this TU's include path, and the
+                   q8_0 pair above does the same for the same reason. */
+                const unsigned char *pf_ = wn + (size_t)(sp + LZ_PF_DIST) * 16;
+                if (pf_ < wend) {
+                    int pf_m_ = lz_prefetch_mode();
+                    if (pf_m_ == LZ_PF_AMD)       LZ_PFI_AMD(pf_);
+                    else if (pf_m_ == LZ_PF_LOAD) LZ_PFI_LOAD(pf_);
+                    else if (pf_m_ == LZ_PF_NONE) LZ_PFI_NONE(pf_);
+                    else                          LZ_PFI_NTA(pf_);
+                }
+                lz_dot32_q41_sse2_asm_2(wn + (size_t)sp * 16,
+                                        xwt + (size_t)sp * 32,
+                                        xw2 + (size_t)sp * 32,
+                                        acc + sp, accb + sp);
+            }
+            tk++;
+            continue;
+        }
 #if LZ_SSE2_GROUP
         if ((nb & 3) == 0) LZ_Q41_GROUP4(lz_dot128_q41_sse2_asm);
 #else
@@ -2003,6 +2119,47 @@ void row_q41_sse2_intrin(int32_t *acc32, const void *w4, const void *w2,
     for (tk = 0; tk < nt; tk++) {
         const int16_t *xwt = xw + (size_t)tk * in_dim;
         int32_t *acc = acc32 + (size_t)tk * nb;
+        /* Pair and group together, the shape q8_0 established at this
+           tier: fold4_sse2 already takes four partials per token, so one
+           weight pass feeds two folds. q4_1 shares more than q8_0 did -
+           the nibble mask, the shift and the second mask on top of the
+           four unpacks. */
+        if (tk + 1 < nt && g_pair) {
+            const int16_t *xw2 = xwt + in_dim;
+            int32_t *accb = acc + nb;
+            for (s = 0; s + 3 < nb; s += 4) {
+                __m128i pa0, pa1, pa2, pa3, pb0, pb1, pb2, pb3;
+                part32_q41_2(wn + (size_t)(s + 0) * 16,
+                             xwt + (size_t)(s + 0) * 32,
+                             xw2 + (size_t)(s + 0) * 32, &pa0, &pb0);
+                part32_q41_2(wn + (size_t)(s + 1) * 16,
+                             xwt + (size_t)(s + 1) * 32,
+                             xw2 + (size_t)(s + 1) * 32, &pa1, &pb1);
+                part32_q41_2(wn + (size_t)(s + 2) * 16,
+                             xwt + (size_t)(s + 2) * 32,
+                             xw2 + (size_t)(s + 2) * 32, &pa2, &pb2);
+                part32_q41_2(wn + (size_t)(s + 3) * 16,
+                             xwt + (size_t)(s + 3) * 32,
+                             xw2 + (size_t)(s + 3) * 32, &pa3, &pb3);
+                _mm_storeu_si128((__m128i *)(void *)(acc + s),
+                                 fold4_sse2(pa0, pa1, pa2, pa3));
+                _mm_storeu_si128((__m128i *)(void *)(accb + s),
+                                 fold4_sse2(pb0, pb1, pb2, pb3));
+            }
+            for (; s < nb; s++) {
+                __m128i pa, pb;
+                part32_q41_2(wn + (size_t)s * 16, xwt + (size_t)s * 32,
+                             xw2 + (size_t)s * 32, &pa, &pb);
+                pa = _mm_add_epi32(pa, _mm_srli_si128(pa, 8));
+                pa = _mm_add_epi32(pa, _mm_srli_si128(pa, 4));
+                acc[s] = _mm_cvtsi128_si32(pa);
+                pb = _mm_add_epi32(pb, _mm_srli_si128(pb, 8));
+                pb = _mm_add_epi32(pb, _mm_srli_si128(pb, 4));
+                accb[s] = _mm_cvtsi128_si32(pb);
+            }
+            tk++;
+            continue;
+        }
         for (s = 0; s + 3 < nb; s += 4) {
             _mm_storeu_si128((__m128i *)(void *)(acc + s),
                 fold4_sse2(

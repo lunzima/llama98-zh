@@ -130,6 +130,46 @@ static __m128i part32_q41(const unsigned char *w, const int16_t *x) {
     return _mm_add_epi32(s0, s1);
 }
 
+/* The same sub-block against two tokens, sharing the weight side.
+ *
+ * WORTH MORE HERE THAN AT q8_0, which is why this format is second into
+ * the tier. q8_0's weight side is two loads and four unpacks; q4_1's is
+ * one load, a mask, a shift, a second mask and four unpacks, plus the
+ * 0x0F constant kept live. All of it is paid once for two tokens, and
+ * only the four activation loads and the eight pmaddwd double.
+ *
+ * Bit-identical to two part32_q41 calls: each token accumulates in its
+ * own registers in the same order and nothing crosses between them. The
+ * (z, nibble) operand order is the single form's, so the value still
+ * lands in the high half of each int16 and the caller's 256x scale is
+ * unchanged. */
+static void part32_q41_2(const unsigned char *w, const int16_t *xa,
+                         const int16_t *xb, __m128i *pa, __m128i *pb) {
+    const __m128i m0f = _mm_set1_epi8(0x0F);
+    __m128i z  = _mm_setzero_si128();
+    __m128i b  = _mm_loadu_si128((const __m128i *)w);
+    __m128i lo = _mm_and_si128(b, m0f);
+    __m128i hi = _mm_and_si128(_mm_srli_epi16(b, 4), m0f);
+    __m128i l0 = _mm_unpacklo_epi8(z, lo);
+    __m128i l1 = _mm_unpackhi_epi8(z, lo);
+    __m128i h0 = _mm_unpacklo_epi8(z, hi);
+    __m128i h1 = _mm_unpackhi_epi8(z, hi);
+    __m128i a0 = _mm_loadu_si128((const __m128i *)xa);
+    __m128i a1 = _mm_loadu_si128((const __m128i *)(xa + 8));
+    __m128i a2 = _mm_loadu_si128((const __m128i *)(xa + 16));
+    __m128i a3 = _mm_loadu_si128((const __m128i *)(xa + 24));
+    __m128i b0 = _mm_loadu_si128((const __m128i *)xb);
+    __m128i b1 = _mm_loadu_si128((const __m128i *)(xb + 8));
+    __m128i b2 = _mm_loadu_si128((const __m128i *)(xb + 16));
+    __m128i b3 = _mm_loadu_si128((const __m128i *)(xb + 24));
+    *pa = _mm_add_epi32(
+              _mm_add_epi32(_mm_madd_epi16(l0, a0), _mm_madd_epi16(l1, a1)),
+              _mm_add_epi32(_mm_madd_epi16(h0, a2), _mm_madd_epi16(h1, a3)));
+    *pb = _mm_add_epi32(
+              _mm_add_epi32(_mm_madd_epi16(l0, b0), _mm_madd_epi16(l1, b1)),
+              _mm_add_epi32(_mm_madd_epi16(h0, b2), _mm_madd_epi16(h1, b3)));
+}
+
 /* Q6_1 SSE2 version: isomorphic to the MMX version - rebuild the 6-bit
    value in the BYTE domain and unpack once, rather than computing two
    dot products and merging. q = lo | (hi<<4), lo<16 and hi<4 do not
