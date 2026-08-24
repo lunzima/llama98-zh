@@ -99,10 +99,11 @@ extern lz_i64 lz_debug_n_lmhead;
 /* sink+window's row-skip positive control, forward.c. Zero when no
    window is set; non-zero only if evicted rows were really skipped. */
 extern lz_i64 lz_debug_attn_skip;
-/* Whether the SSE2 epi dispatch fired. The identity gate cannot answer
-   that: its epi comparison is ref against sse2 and both produce the
-   same bytes, so it passes whether the kernel ran or not. */
-extern lz_i64 lz_debug_epi_sse2;
+/* Whether the epi dispatch left the C loop for this build's vector
+   body. The identity gate cannot answer that: it compares ref against
+   the tier and both produce the same bytes, so it passes whether the
+   kernel ran or not. */
+extern lz_i64 lz_debug_epi_kern;
 /* The V projection int16 exit's positive control, forward.c. Elements
    the KV write took from vtmp_i16 rather than from the float row. */
 extern lz_i64 lz_debug_vproj_i16;
@@ -2132,8 +2133,8 @@ int main(int argc, char **argv) {
                    st.nt_cap, lz_debug_n_chunks, lz_debug_n_lmhead);
             printf("[attn: sink %d window %d, %lld evicted rows skipped]\n",
                    st.attn_sink, st.attn_win, lz_debug_attn_skip);
-            printf("[epi: %lld calls on the SSE2 body]\n",
-                   lz_debug_epi_sse2);
+            printf("[epi: %lld calls on the kernel body]\n",
+                   lz_debug_epi_kern);
             printf("\n[%d tokens, %.1f s, %.3f s/token]\n",
                    n_out, ms / 1000.0, ms / 1000.0 / (n_out > 0 ? n_out : 1));
             if (g.spec_k > 0) {

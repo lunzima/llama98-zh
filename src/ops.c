@@ -1423,6 +1423,21 @@ void lz_epi_prep_zero(LZTensor *w, int in_dim) {
    Both entries read the tensor's int16 plane directly: the accumulator
    bound is n products of an int32 accumulator by an int16, summed at 64
    bits, which is the bound ops_matmul.c's LZ_EPI_MAX_NG comments cite. */
+
+/* Counts calls that left the scalar body for a vector one, whichever
+   tier this build has. Read by cli_main's --debug line; the dispatch
+   below says why a counter is needed when a byte-identity gate already
+   passes.
+
+   OUTSIDE the toolchain split, and defined even where nothing can
+   increment it. cli_main.c reads it unconditionally, so a definition
+   under one arm is a link error under the other; and zero is the true
+   answer for a build with no epi kernel, which the km_reg row records
+   as a todo rather than as silence. One counter and not one per tier:
+   no build has two of these bodies, and --debug prints the tier on the
+   line above. */
+lz_i64 lz_debug_epi_kern = 0;
+
 #if defined(__WATCOMC__)
 /* int16-multiplier twin, for a caller whose m plane is int16 and who
    would otherwise widen it into a scratch buffer first. epi_q41_join
@@ -1518,33 +1533,37 @@ static lz_i64 lz_epi_mac_grp(const int32_t *a, const int16_t *xq,
         s += (lz_i64)a[i] * (lz_i64)((int32_t)xq[i] * w);
     return s;
 }
-/* Counts calls that reached the SSE2 epi body. Read by cli_main's
-   --debug line; see the dispatch below for why a counter is needed
-   when a byte-identity gate already passes. */
-lz_i64 lz_debug_epi_sse2 = 0;
-
 /* See the Watcom twin above for why this exists and what it replaced.
 
-   The SSE2 body is selected at the tier, not by an ifdef alone: the C
-   loop stays reachable so --kernel ref and --kernel mmx still exercise
-   it, which is what the identity gate compares against. */
+   The kernel is selected at the TIER, not by an ifdef alone: the C loop
+   stays reachable so --kernel ref and --kernel mmx still exercise it,
+   which is what the identity gate compares against. */
 static lz_i64 lz_epi_mac_i16(const int32_t *a, const int16_t *m, int n) {
     lz_i64 s = 0;
     int g;
-#if defined(LZ_EPI_SSE2_EXTERN)
+#if defined(LZ_EPI_SSE2_EXTERN) || defined(LZ_ARM_ASM_EXTERN)
     /* Same lazy guard the other dispatch sites carry: the GUI never
-       calls lz_kernel_select, so g_kernel reaches its value here. */
+       calls lz_kernel_select, so g_kernel reaches its value here.
+
+       Counted because the identity gate cannot tell whether the kernel
+       ran. Its epi comparison is ref against the tier, and the C loop
+       below produces the same bytes - so a dispatch that never fires
+       passes it exactly as a working one does. The count is what
+       separates "agrees" from "agrees and was reached". */
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
+#endif
+#if defined(LZ_EPI_SSE2_EXTERN)
     if (g_kernel == LZ_KERNEL_SSE2) {
-        /* Counted because the identity gate cannot tell whether this
-           ran. Its epi comparison is ref against sse2, and the C loop
-           below produces the same bytes - so a dispatch that never
-           fires passes it exactly as a working one does. The count is
-           what separates "agrees" from "agrees and was reached". */
-        lz_debug_epi_sse2++;
+        lz_debug_epi_kern++;
         return lz_epi_mac_i16_sse2(a, m, n);
     }
 #endif /* LZ_EPI_SSE2_EXTERN */
+#if defined(LZ_ARM_ASM_EXTERN)
+    if (g_kernel == LZ_KERNEL_ARM_ASM) {
+        lz_debug_epi_kern++;
+        return lz_epi_mac_i16_arm_asm(a, m, n);
+    }
+#endif /* LZ_ARM_ASM_EXTERN */
     for (g = 0; g < n; g++) s += (lz_i64)a[g] * (lz_i64)m[g];
     return s;
 }
@@ -4199,10 +4218,6 @@ static const char km_why_epi_wat_sse2[] =
     "todo: the gcc SSE2 body (lz_epi_mac_i16_sse2, ops_sse2.c) exists; "
     "its Watcom #pragma aux twin does not, which is the half of the "
     "both-toolchains rule this operator still owes";
-static const char km_why_epi_arma[] =
-    "todo: same int32 x int16 -> int64 accumulation as the x86 cells. "
-    "ARMv5TE has SMLAL, which is exactly this shape, so this cell is "
-    "the cheapest of the seven to fill";
 typedef struct { unsigned char have; unsigned char why; const char *text; } LZKmReg;
 #define KM_H(mask) { (unsigned char)(mask), 0, (const char *)0 }
 #define KM_I(text) { 0, LZ_KM_IMPOSSIBLE, (text) }
@@ -4264,7 +4279,7 @@ static const LZKmReg km_reg[LZ_KM_NUNIT * LZ_KM_NCOL] = {
    LZ_P2_SSE2_EXTERN are what km_op_present can key off, and the SSE2
    one is declared under !__WATCOMC__. */
 /* recur*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_T(km_why_recur_wat_mmx), KM_H(LZ_KMB_WAT), KM_T(km_why_recur_wat_sse2), KM_H(LZ_KMB_ARM), KM_T(km_why_recur_arma), KM_N(km_why_op_g128),
-/* epi  */ KM_H(KM_ALL), KM_T(km_why_epi_x86), KM_T(km_why_epi_x86), KM_H(LZ_KMB_GCC), KM_T(km_why_epi_x86), KM_T(km_why_epi_x86), KM_T(km_why_epi_wat_sse2), KM_H(LZ_KMB_ARM), KM_T(km_why_epi_arma), KM_N(km_why_op_g128)
+/* epi  */ KM_H(KM_ALL), KM_T(km_why_epi_x86), KM_T(km_why_epi_x86), KM_H(LZ_KMB_GCC), KM_T(km_why_epi_x86), KM_T(km_why_epi_x86), KM_T(km_why_epi_wat_sse2), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_op_g128)
 };
 
 #if defined(__WATCOMC__)
@@ -4342,6 +4357,10 @@ static int km_arm_asm(int f) {
        inline block: its per-call setup amortizes over a whole row. */
     if (f == LZ_KM_UNIT_ATDOT || f == LZ_KM_UNIT_WSUMP ||
         f == LZ_KM_UNIT_NRMSS || f == LZ_KM_UNIT_F32MM) return 1;
+    /* epi's is another loop leaf in src/ops_arm.c. It needs no split of
+       its own: SMLAL is the whole operator, which is why this column
+       filled before any of the six x86 ones. */
+    if (f == LZ_KM_UNIT_EPI) return 1;
     /* fwhti's is a loop leaf in src/ops_arm.c; the float twin's is the
        inline block registered above, under a different guard. */
     if (f == LZ_KM_UNIT_FWHTI) return 1;
