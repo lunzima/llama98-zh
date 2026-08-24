@@ -126,10 +126,34 @@ awk '
         # strings into a single 4642-character literal that does not
         # exist. That was this scan version one, and it reported the
         # whole message table as a violation.
+        # THE LIMIT IS ON THE RESULTING STRING, not on how it is
+        # spelled. "\xe4" is four source characters and one character in
+        # the string; counting the source made every hex-escaped Chinese
+        # message look four times its length, and the UTF-8 conversion
+        # that put those escapes there turned this check red on strings
+        # it had not lengthened by a single byte.
         while (match(line, /"([^"\\]|\\.)*"/)) {
             gap = substr(line, 1, RSTART - 1)
             if (gap !~ /^[ \t]*$/) flush()
-            run += RLENGTH - 2
+            body = substr(line, RSTART + 1, RLENGTH - 2)
+            n = 0
+            while (length(body) > 0) {
+                if (substr(body, 1, 1) == "\\") {
+                    if (substr(body, 2, 1) == "x") {
+                        body = substr(body, 3)
+                        while (length(body) > 0 && \
+                               index("0123456789abcdefABCDEF",
+                                     substr(body, 1, 1)) > 0)
+                            body = substr(body, 2)
+                    } else {
+                        body = substr(body, 3)
+                    }
+                } else {
+                    body = substr(body, 2)
+                }
+                n++
+            }
+            run += n
             prev = FNR
             line = substr(line, RSTART + RLENGTH)
         }
