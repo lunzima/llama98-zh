@@ -4016,7 +4016,7 @@ static const LZKmReg km_reg[LZ_KM_NUNIT * LZ_KM_NCOL] = {
 /* atdot*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_attn_g128),
 /* wsump*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_attn_g128),
 /* sigq */ KM_H(KM_ALL), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128),
-/* nrmss*/ KM_H(KM_ALL), KM_I(km_why_nrmss_mmx), KM_T(km_why_nrmss_sse1), KM_H(LZ_KMB_GCC), KM_I(km_why_nrmss_mmx), KM_T(km_why_nrmss_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_nrmss_g128),
+/* nrmss*/ KM_H(KM_ALL), KM_I(km_why_nrmss_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_I(km_why_nrmss_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_nrmss_g128),
 /* Registering these two rows is what makes a gate able to tell "no
    assembly" from "no such operator": without them src/fwht.c could be
    deleted and not a single cell would change. */
@@ -4152,6 +4152,16 @@ static int km_op_present(int f, int c) {
     if (f == LZ_KM_UNIT_NRMSS && c == LZ_KM_COL_ROW0 + LZ_ROW_SSE2_I) return 1;
 #endif /* __WATCOMC__ */
 #endif /* LZ_NORM_SS_SSE2_EXTERN */
+#if defined(LZ_NORM_SS_SSE_EXTERN)
+    /* The SSE1 cell, a body of its own rather than a second column on
+       the SSE2 one: cvtps2pi puts the pack, the clamp and the
+       multiply-add in %mm, four elements a pass against eight. */
+#if defined(__WATCOMC__)
+    if (f == LZ_KM_UNIT_NRMSS && c == LZ_KM_COL_ROW0 + LZ_ROW_SSE_A) return 1;
+#else
+    if (f == LZ_KM_UNIT_NRMSS && c == LZ_KM_COL_ROW0 + LZ_ROW_SSE_I) return 1;
+#endif /* __WATCOMC__ */
+#endif /* LZ_NORM_SS_SSE_EXTERN */
 #if defined(LZ_MATMUL_F32_SSE_EXTERN)
     /* FOUR cells from one body, unlike every other entry here: the
        kernel is SSE1 (mulps/addps), and an SSE2 machine runs the same

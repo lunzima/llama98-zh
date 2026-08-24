@@ -486,6 +486,80 @@ void lz_q8round_2p_group_sse(const float *grp, int8_t *ho, int8_t *lw,
     _mm_empty();
 }
 
+/* ---- norm_ss_fixed's element loop, SSE1 tier, Watcom twin.
+   gcc twin: lz_norm_ss_sse, the intrinsics body below. SSE2 twin:
+   lz_norm_ss_sse2_asm in src/ops_sse2.c, which carries the derivation
+   of every step - read that one first.
+
+   FOUR ELEMENTS a pass against the SSE2 twin's eight, because SSE1's
+   convert is cvtps2pi and its destination is %mm. Everything after the
+   scale therefore happens in the MMX register file, and the wrapper
+   below owes the emms.
+
+   THE ACCUMULATE IS SCALAR, into the caller's int64 through [edi].
+   paddq is SSE2 even on %mm, and an int32 accumulator cannot take a
+   second pmaddwd result - each is at most 2147352578 against an
+   INT32_MAX only 131069 above. So each pass drains its two lanes with
+   an add/adc pair, which is also why ebx is free to reuse after the
+   scale broadcast. */
+extern int lz_norm_ss_sse_asm(const float *x, int n, const float *scp,
+                              short *qout, lz_i64 *acc);
+#pragma aux lz_norm_ss_sse_asm = \
+    ".686"                                                      \
+    "movss   xmm5, [ebx]"                                       \
+    "shufps  xmm5, xmm5, 0"         /* sc broadcast */          \
+    "pcmpeqw mm6, mm6"                                          \
+    "psrlw   mm6, 1"                /* 0x7FFF per lane */       \
+    "pxor    mm7, mm7"                                          \
+    "psubw   mm7, mm6"              /* -32767 per lane */       \
+    "movq    mm6, mm7"              /* keep the low clamp */    \
+    "xor     ecx, ecx"                                          \
+    "mov     [edi], ecx"                                        \
+    "mov     [edi+4], ecx"          /* acc = 0 */               \
+    "and     edx, -4"                                           \
+    "mov     ecx, edx"                                          \
+    "test    ecx, ecx"                                          \
+    "jz      nssdone"                                           \
+    "nssloop:"                                                  \
+    "movups  xmm0, [eax]"                                       \
+    "mulps   xmm0, xmm5"                                        \
+    "cvtps2pi mm0, xmm0"            /* low two -> int32 */      \
+    "movhlps xmm1, xmm0"                                        \
+    "cvtps2pi mm1, xmm1"            /* high two -> int32 */     \
+    "packssdw mm0, mm1"             /* 4 int16, upper clamp */  \
+    "pmaxsw  mm0, mm6"              /* low clamp to -32767 */   \
+    "test    esi, esi"                                          \
+    "jz      nssnostore"                                        \
+    "movq    [esi], mm0"                                        \
+    "add     esi, 8"                                            \
+    "nssnostore:"                                               \
+    "movq    mm2, mm0"                                          \
+    "pmaddwd mm2, mm0"              /* two pairwise squares */  \
+    "movd    ebx, mm2"                                          \
+    "movq    mm3, mm2"                                          \
+    "psrlq   mm3, 32"                                           \
+    "movd    ebp, mm3"                                          \
+    "add     [edi], ebx"                                        \
+    "adc     dword ptr [edi+4], 0"                              \
+    "add     [edi], ebp"                                        \
+    "adc     dword ptr [edi+4], 0"                              \
+    "add     eax, 16"                                           \
+    "sub     ecx, 4"                                            \
+    "jnz     nssloop"                                           \
+    "nssdone:"                                                  \
+    "emms"                                                      \
+    "mov     eax, edx"                                          \
+    parm [eax] [edx] [ebx] [esi] [edi]                          \
+    value [eax]                                                 \
+    modify [eax ebx ecx edx esi ebp];
+
+/* Thin wrapper: a #pragma aux body expands at its call site, and the
+   call site is src/ops_quant.c. Same reason lz_norm_ss_sse2 exists. */
+int lz_norm_ss_sse(const float *x, int n, float sc, short *qout,
+                   lz_i64 *acc) {
+    return lz_norm_ss_sse_asm(x, n, &sc, qout, acc);
+}
+
 /* ---- attention wsum's chunk fold, SSE1 tier, Watcom twin.
    accf[d] += (float)acc32[d]. cvtsi2ss converts ONE int32 at a time -
    SSE1's packed convert is cvtpi2ps, whose source is an %mm register,
@@ -682,6 +756,52 @@ void lz_q8round32_sse(const float *x, int8_t *o, const float *pinv) {
         r = _mm_packs_pi16(l, h);
         memcpy(o + b * 8, &r, 8);
     }
+}
+
+/* ---- norm_ss_fixed's element loop, SSE1 gcc twin.
+   Watcom twin: lz_norm_ss_sse_asm, the #pragma aux above. SSE2 twin:
+   lz_norm_ss_sse2 in src/ops_sse2.c, which is where the derivation of
+   every step lives - why cvtps2dq IS q8_round, why packssdw's
+   saturation is the upper clamp for free, and why the pairwise square
+   sum is safe and the next add is not.
+
+   THE ONE DIFFERENCE, and it is what makes this an SSE1 cell rather
+   than a copy: SSE1's convert is cvtps2pi, whose destination is the
+   MMX register file. So the pack, the clamp and the multiply-add are
+   all %mm here, four elements at a time against the SSE2 twin's eight,
+   and this cell owes an emms - taken at the exit rather than per
+   iteration, since nothing in the loop is x87.
+
+   AND THE ACCUMULATE FALLS TO SCALAR, which is not a shortcut. paddq
+   is SSE2 even on %mm, and an int32 accumulator cannot take a second
+   pmaddwd result: each is at most 2147352578 and INT32_MAX is 131069
+   above it. One movq and two int64 adds per four elements is the
+   correct answer, not a concession.
+
+   Groups of 4, and the caller runs the tail - same contract as the
+   SSE2 twin, which takes groups of 8. */
+int lz_norm_ss_sse(const float *x, int n, float sc, short *qout,
+                   lz_i64 *acc) {
+    const __m128 vsc = _mm_set1_ps(sc);
+    const __m64 lo = _mm_set1_pi16((short)-32767);
+    lz_i64 a = 0;
+    int nb = n & ~3;
+    int b;
+
+    for (b = 0; b < nb; b += 4) {
+        __m128 v = _mm_mul_ps(_mm_loadu_ps(x + b), vsc);
+        __m64 i0 = _mm_cvtps_pi32(v);
+        __m64 i1 = _mm_cvtps_pi32(_mm_movehl_ps(v, v));
+        __m64 q = _mm_max_pi16(_mm_packs_pi32(i0, i1), lo);
+        __m64 s = _mm_madd_pi16(q, q);
+        union { __m64 m; int32_t d[2]; } o;
+        if (qout) memcpy(qout + b, &q, 8);
+        o.m = s;
+        a += (lz_i64)o.d[0] + (lz_i64)o.d[1];
+    }
+    _mm_empty();
+    *acc = a;
+    return nb;
 }
 
 /* ---- lz_matmul's F32-weight row, SSE1 gcc twin.

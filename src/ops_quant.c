@@ -15,7 +15,9 @@
 #include "cpucheck.h"
 #include "mmx_compat.h"
 #include "ops_mmx.h"
+#include "ops_sse.h"
 #include "ops_sse2.h"
+#include "ops_sched.h"   /* lz_cpu_has_sse - norm_ss_fixed's SSE1 arm */
 #include "ops_kernel_shared.h" /* lz_i32f, LZ_ROW_N, LZ_DEFINE_PICK, g_kernel */
 #include "ops_quant.h"
 
@@ -1285,7 +1287,7 @@ float norm_ss_fixed(const float *x, int n, short *qout, int *eout) {
 #endif /* LZ_ARM_ASM_EXTERN */
     sc = pow2f(e);
     i = 0;
-#if defined(LZ_NORM_SS_SSE2_EXTERN)
+#if defined(LZ_NORM_SS_SSE2_EXTERN) && !defined(LZ_NORM_SS_FORCE_SSE)
     /* SELECTED BY TIER, like every other kernel here: --kernel ref and
        mmx must reach the C loop below or the arm this is compared
        against would be this. The kernel takes whole groups of 8 and
@@ -1297,6 +1299,22 @@ float norm_ss_fixed(const float *x, int n, short *qout, int *eout) {
         acc = sacc;
     }
 #endif /* LZ_NORM_SS_SSE2_EXTERN */
+#if defined(LZ_NORM_SS_SSE_EXTERN)
+    /* The SSE1 tier, BELOW the SSE2 one so a machine with both takes
+       the wider kernel. Reached from CPUID rather than g_kernel, the
+       same way lz_q8r_tier reads SSE1: there is no LZ_KERNEL_SSE, and
+       on a PIII g_kernel is LZ_KERNEL_MMX while the machine does have
+       SSE.
+       LZ_NORM_SS_FORCE_SSE mirrors LZ_Q8R_FORCE_SSE. Without it this
+       arm is unreachable on any machine with SSE2 - every machine that
+       runs the suite - and a path that cannot be selected cannot be
+       validated. */
+    if (i == 0 && g_kernel != LZ_KERNEL_REF && lz_cpu_has_sse() && n >= 4) {
+        lz_i64 sacc = 0;
+        i = lz_norm_ss_sse(x, n, sc, qout, &sacc);
+        acc = sacc;
+    }
+#endif /* LZ_NORM_SS_SSE_EXTERN */
     for (; i < n; i++) {
         int v = q8_round(x[i] * sc);           /* one mul, one magic add */
         if (v >  32767) v =  32767;

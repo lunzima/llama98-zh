@@ -235,6 +235,14 @@ void lz_p2_split32_mmx(const lz_p2_blk *blk, int8_t *oh, int8_t *ol);
    above. See ops.c's own note beside the Watcom twin. */
 void lz_p2_split32_sse(const lz_p2_blk *blk, int8_t *oh, int8_t *ol);
 
+/* norm_ss_fixed's element loop, SSE1 tier - here and not in ops_sse.h
+   for the same reason as lz_p2_split32_sse above: SSE1's convert is
+   cvtps2pi, so the pack, clamp and multiply-add all land in %mm and
+   this cell owes an emms. Groups of 4; the caller runs the tail. */
+#define LZ_NORM_SS_SSE_EXTERN 1
+int lz_norm_ss_sse(const float *x, int n, float sc, short *qout,
+                   lz_i64 *acc);
+
 /* ---- GDN/KDA pass 1, 4-lane table contraction -------------------------
    Same name as the Watcom #pragma aux declaration in ops.c: the two are
    never compiled into the same binary, so one external symbol serves

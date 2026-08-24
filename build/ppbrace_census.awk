@@ -61,10 +61,27 @@ function strip(s,   out, i, c, n) {
     return out
 }
 
-FNR == 1 { depth = 0; sp = 0; incomment = 0; instr = 0; prev = "" }
+FNR == 1 { depth = 0; sp = 0; incomment = 0; instr = 0; prev = ""; cont = 0 }
 
 {
     line = $0
+    # LINE CONTINUATION, and it is not a detail: a multi-line macro puts
+    # its opening brace on the #define line - a directive, skipped - and
+    # its closing `} while (0)` on a continuation line, which is not.
+    # Counting only the second half reported the whole file as one
+    # straddle. The #pragma aux bodies never showed it because their
+    # continuations are quoted asm and strip() takes the braces out.
+    if (cont) {
+        strip(line)
+        cont = (line ~ /\\[ \t]*$/)
+        next
+    }
+    if (line ~ /^[ \t]*#/ && line ~ /\\[ \t]*$/) {
+        strip(line)
+        cont = 1
+        prev = ""
+        next
+    }
     if (line ~ /^[ \t]*#[ \t]*(if|ifdef|ifndef)/) {
         # A directive can still close a block comment opened above it, so
         # the comment state advances through every line, code or not.

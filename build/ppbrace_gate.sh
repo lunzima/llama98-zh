@@ -86,6 +86,13 @@ MS=$(awk -f "$SCAN" "$PROBE" 2>&1 | grep -c "SPLIT STMT")
 # gate is green today only because nobody has run it on a header.
 printf '#ifdef __cplusplus\nextern "C" {\n#endif\nvoid f(int a,\n#if C\n               int b,\n#endif\n               int c);\n#ifdef __cplusplus\n}\n#endif\n' > "$PROBE"
 MN=$(awk -f "$SCAN" "$PROBE" 2>&1 | grep -c "SPLIT")
+# And a CONTINUED MACRO, which is the case this gate got wrong on its
+# own author: `#define M do { \` is a directive and skipped, while the
+# `} while (0)` on the continuation line is not, so counting only the
+# second half made every file holding one read as a straddle.
+printf '%s\n' 'void f(void) {' '#define M do { \' '    g(); \' '    } while (0)' '    M;' '}' > "$PROBE"
+MC=$(awk -f "$SCAN" "$PROBE" 2>&1 | grep -c "SPLIT")
+MN=$((MN + MC))
 rm -f "$PROBE"
 
 if [ "$MP" -eq 0 ] || [ "$MS" -eq 0 ]; then
