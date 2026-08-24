@@ -3861,11 +3861,38 @@ static const char km_why_attn_g128[] =
 
    MMX alone cannot start it: the scale is a FLOAT multiply and MMX is
    integer-only. */
+/* THIS WAS REGISTERED IMPOSSIBLE and it is not. The old text read
+   "what is left is an MMX kernel with mulps in front - that is the MMX
+   row, not this one", which is a statement about taxonomy, not about
+   the instruction set: an MMX kernel with mulps in front is precisely
+   an SSE1 cell, needs SSE1 to run, and is the shape lz_q8round32_sse
+   in src/ops_mmx_sse.c already has. Partial acceleration still beats
+   the scalar loop, and the MMX row below is separately out because MMX
+   cannot start the loop at all.
+
+   THE DESIGN, so the next hand does not re-derive it. Per four
+   elements, against the SSE2 twin's eight:
+     mulps                    the scale, xmm, unchanged
+     cvtps2pi x2 + movhlps    float->int32 into %mm; SSE1's convert
+                              targets the MMX register file, which is
+                              why this cell owes the caller an emms
+     packssdw                 MMX; the upper clamp is still free
+     pmaxsw                   SSE1-on-%mm; the low clamp to -32767
+     pmaddwd                  MMX; the exact pairwise sum of squares
+   and then the int64 accumulate falls back to scalar, because paddq is
+   SSE2 even on %mm and an int32 accumulator cannot take a second
+   pmaddwd result: each is up to 2147352578, and INT32_MAX is
+   131069 above that. One movq and two int64 adds per four elements.
+
+   Bit-identical by the SSE2 twin's own argument, which does not depend
+   on width: cvtps2pi reads the same round-to-nearest-even MXCSR mode as
+   cvtps2dq, packssdw saturates identically, and integer addition is
+   associative and exact so the summation order cannot move the total. */
 static const char km_why_nrmss_sse1[] =
-    "impossible as an SSE1 cell: mulps scales, but the float-to-int is "
-    "cvtps2pi into an MMX register and the v*v accumulate is integer, so "
-    "what is left is an MMX kernel with mulps in front - that is the MMX "
-    "row, not this one";
+    "todo: SSE1 can express this - mulps, cvtps2pi into %mm, packssdw, "
+    "pmaxsw, pmaddwd, with the int64 accumulate scalar because paddq is "
+    "SSE2. Same shape as lz_q8round32_sse. Registered todo rather than "
+    "impossible because the old reason argued taxonomy, not the ISA";
 static const char km_why_nrmss_mmx[] =
     "impossible: the per-element scale x[i]*sc is a FLOAT multiply and "
     "MMX is integer-only. The loop cannot start under MMX alone";
@@ -3989,7 +4016,7 @@ static const LZKmReg km_reg[LZ_KM_NUNIT * LZ_KM_NCOL] = {
 /* atdot*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_attn_g128),
 /* wsump*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_attn_g128),
 /* sigq */ KM_H(KM_ALL), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_op_g128),
-/* nrmss*/ KM_H(KM_ALL), KM_I(km_why_nrmss_mmx), KM_I(km_why_nrmss_sse1), KM_H(LZ_KMB_GCC), KM_I(km_why_nrmss_mmx), KM_I(km_why_nrmss_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_nrmss_g128),
+/* nrmss*/ KM_H(KM_ALL), KM_I(km_why_nrmss_mmx), KM_T(km_why_nrmss_sse1), KM_H(LZ_KMB_GCC), KM_I(km_why_nrmss_mmx), KM_T(km_why_nrmss_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_I(km_why_nrmss_g128),
 /* Registering these two rows is what makes a gate able to tell "no
    assembly" from "no such operator": without them src/fwht.c could be
    deleted and not a single cell would change. */
