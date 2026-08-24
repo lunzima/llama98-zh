@@ -329,7 +329,30 @@ void lz_attn_wsum_q8(float *out, const float *att, int hd,
        + q8_round add per t, common path), 64 per int32 chunk to drain
        the accumulator (32 convert + 32 add), and 33 to scale the 32
        outputs (all mul). The chunk term is why the count is not a
-       clean multiple of T. */
+       clean multiple of T.
+
+       THAT ONE DIVIDE PER GROUP STAYS, here and in the int16 twin
+       below, and the decision was measured. `inv = 32767/cmax` and the
+       `sscale = cmax/32767` at the end are reciprocals of each other
+       and both live inside the function, so normalising cmax to a power
+       of two - the move that took gdn_build_table's recurrence divides
+       to zero - would make both exact exponent writes and remove it. It
+       does not pay for itself:
+
+         gain  64 divides per token of the engine's 688, at 117
+               soft-float instructions each: 7,488 against roughly
+               2.0e7 per token. 0.037%.
+         cost  a numeric change, hence the paired-NLL run over 1262
+               positions before it could ship. 200,000 synthetic groups
+               put the worst reconstruction error at 3.29e-04 of cmax
+               and the mean at 6.13e-05 - about ten times the 15-bit
+               grid, in line with what the GDN table's normalisation
+               costs there.
+
+       Measured against cmax, NOT against the summed output: that sum is
+       a difference of signed terms and goes near zero by cancellation,
+       where the same absolute error reads as 2.05% and looks like a
+       reason to refuse. cmax is what sets the quantiser's grid. */
     LZ_FCX(LZ_FC_ATTN_WSUM,
            (long)ng * (2L * T + 33L),
            (long)ng * ((long)T + 32L * ((T + LZ_WSUM_CHUNK - 1) / LZ_WSUM_CHUNK)),

@@ -481,8 +481,8 @@ static void completions(LZOpenAICtx *c, const LZHttpReq *req, LZHttpResp *rs) {
     /* Deterministic by default: a fixed seed makes a bug reproducible,
        and a client that wants variety sends one. The value is the
        project's one fixed seed, so a server run and a CLI run started
-       without --seed are comparable; it used to be a date, which made
-       them silently different. */
+       without --seed are comparable. NOT a clock reading: that makes
+       two such runs silently different. */
     g.rng_seed = r->has_seed ? (lz_u64)r->seed : LZ_U64_C(1145141919);
     {
         int i;
