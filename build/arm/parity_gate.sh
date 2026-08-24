@@ -181,13 +181,80 @@ if [ -z "$X86_BIN" ]; then
     # cannot resolve it, so preferring .exe there fails with "cannot find
     # config.json" on a directory that plainly exists. Picking a binary
     # this host cannot actually drive is worse than finding none.
+    # NOT A PREFERENCE ON LINUX, AN EXCLUSION. This listed the .exe
+    # second there, which still selects it whenever the ELF binary is
+    # absent - and absent is the normal state on a Windows host, whose
+    # `make` produces only the .exe. The comment above already says
+    # picking a binary this host cannot drive is worse than finding
+    # none; ranking it second does exactly that. Finding none is now the
+    # answer, and the block below builds one.
     case "$(uname -s)" in
-        Linux*)  order="$ROOT/llama98 $ROOT/llama98.exe" ;;
+        Linux*)  order="$ROOT/llama98" ;;
         *)       order="$ROOT/llama98.exe $ROOT/llama98" ;;
     esac
     for cand in $order; do
         [ -x "$cand" ] && X86_BIN=$cand && break
     done
+fi
+# NOTHING USABLE FOUND: build one, out of tree. On a Windows host the
+# repo's only native binary is llama98.exe, and the block above rejects
+# it here for a good reason - it cannot resolve the /mnt/... paths qemu
+# and this script use. That used to end in SKIP, so the gate reported
+# nothing on the machine where the ARM toolchain actually lives.
+#
+# INTO ITS OWN DIRECTORY, never build/native/. That path is shared
+# between a MinGW build and a Linux build of the same tree, and neither
+# host's ld accepts the other's objects - native_obj_gate exists because
+# of it. `make native` here would leave ELF objects where the Windows
+# build expects COFF and break it far from the cause. So this compiles
+# the same $(ENG) list the Makefile owns into $OUT, exactly as
+# build/arm/build_engine.sh does for the ARM side.
+if [ -z "$X86_BIN" ] || [ ! -x "$X86_BIN" ]; then
+    case "$(uname -s)" in
+        Linux*) ;;
+        *)  echo "SKIP: no native x86 binary to compare against (build with 'make native' or set X86_BIN)" >&2
+            exit 2 ;;
+    esac
+    XOUT=${XOUT:-/tmp/x86ref}
+    XCC=${XCC:-gcc}
+    command -v "$XCC" >/dev/null 2>&1 || {
+        echo "SKIP: no x86 binary and no $XCC to build one" >&2; exit 2; }
+    echo "-- no ELF x86 binary; building a reference into $XOUT --"
+    XFLAGS="-O2 -std=c99 -Wall -Wextra -I$ROOT/src -DLZ_MMX_TU=1 -DLZ_SSE2_TU=1"
+    # BOTH LISTS. ENG is the portable engine; ENG_MMX is the three
+    # SIMD translation units the Makefile compiles separately, and the
+    # ARM builder does not need them because ARM has no MMX. Taking only
+    # ENG here links with lz_fwht_stage_mmx and five others undefined -
+    # which is what it did. Read from the Makefile rather than restated,
+    # for the reason build/arm/build_engine.sh's header gives: the copy
+    # that got restated is the copy that went stale.
+    XENG=$(make -s -C "$ROOT" print-ENG) || {
+        echo "SKIP: cannot read ENG from the Makefile" >&2; exit 2; }
+    XENG="$XENG $(make -s -C "$ROOT" print-ENG_MMX)"
+    mkdir -p "$XOUT"; rm -f "$XOUT"/*.o
+    xfail=0
+    for f in $XENG; do
+        $XCC $XFLAGS -mmmx -msse -msse2 -c "$ROOT/src/$f.c" -o "$XOUT/$f.o" \
+            2>"$XOUT/$f.log" || { xfail=1; echo "  $f FAIL"; \
+            grep -E 'error:' "$XOUT/$f.log" | head -3 | sed 's/^/      /'; }
+    done
+    XCOM=$(make -s -C "$ROOT" print-CLI_COM)
+    XCOMSRC=""
+    for c in $XCOM; do
+        [ -f "$ROOT/common/$c.c" ] && XCOMSRC="$XCOMSRC $ROOT/common/$c.c"
+    done
+    if [ "$xfail" -eq 0 ] && $XCC $XFLAGS -I"$ROOT/common" \
+            -o "$XOUT/llama98-x86" "$ROOT/src/cli_main.c" \
+            "$ROOT/src/cli_argv.c" "$ROOT/src/cli_attr.c" \
+            $XCOMSRC "$XOUT"/*.o -lm 2>"$XOUT/link.log"; then
+        X86_BIN="$XOUT/llama98-x86"
+        echo "   built: $X86_BIN"
+    else
+        echo "SKIP: could not build an x86 reference" >&2
+        grep -E 'error|undefined' "$XOUT/link.log" 2>/dev/null | head -6 \
+            | sed 's/^/      /'
+        exit 2
+    fi
 fi
 if [ -z "$X86_BIN" ] || [ ! -x "$X86_BIN" ]; then
     echo "SKIP: no native x86 binary to compare against (build with 'make native' or set X86_BIN)" >&2
