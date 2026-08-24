@@ -3948,17 +3948,25 @@ static const char km_why_attn_g128[] =
    whether the loop runs in ONE pass, and the question is whether the
    tier can do ANY PART. It can. The scale and the convert are float,
    but the clamp and the sum of squares are not: packssdw saturates the
-   int32 pair, pmaxsw lifts -32768 to -32767, pmaddwd IS the pairwise
-   sum of products. Two passes - x87 scales and converts a block into
-   an int32 scratch, one emms, MMX runs the integer half four wide -
-   and the emms is once per block rather than once per element, which
-   is what made the one-pass form a regression rather than a speedup.
-   The int64 accumulate stays scalar for the reason the SSE1 cell gives:
-   paddq is SSE2 even on %mm. */
+   int32 pair and pmaddwd IS the pairwise sum of products, both MMX.
+   Two passes - x87 scales and converts a block into an int32 scratch,
+   one emms, MMX runs the integer half four wide - and the emms is once
+   per block rather than once per element, which is what made the
+   one-pass form a regression rather than a speedup. The int64
+   accumulate stays scalar for the reason the SSE1 cell gives: paddq is
+   SSE2 even on %mm.
+
+   NOT pmaxsw, which this comment claimed for one commit. pmaxsw and
+   pminsw are SSE1 additions to the MMX register file, not MMX -
+   verified by compiling _mm_max_pi16 at -march=pentium-mmx, where it
+   does not exist. The -32767 floor costs the pcmpgtw/pandn/pand/por
+   idiom instead, four instructions where the SSE1 cell spends one.
+   Slower is still owed. */
 static const char km_why_nrmss_mmx[] =
     "todo: the scale and convert are float, but the clamp and the sum of "
-    "squares are not - packssdw, pmaxsw, pmaddwd are all MMX. Two passes "
-    "with one emms between them, not one pass with an emms per element";
+    "squares are not - packssdw and pmaddwd are MMX, and the -32767 "
+    "floor is the pcmpgtw idiom since pmaxsw is SSE1. Two passes with "
+    "one emms between them, not one pass with an emms per element";
 static const char km_why_nrmss_g128[] =
     "this column is the 128-ELEMENT quantization group; norm_ss_fixed's "
     "loop runs over a whole norm row, and the group-shaped part of it "
@@ -4025,11 +4033,16 @@ static const char km_why_i32f_mmx[] =
 /* REOPENED for the same reason as nrmss above, and it is the same
    shape: the multiply and the convert are float, everything after them
    is not. lz_q8round32_sse's tail is packssdw, pminsw, pmaxsw and
-   packsswb - four MMX instructions. Two passes with one emms. */
+   packsswb; of those only the two packs are MMX, and they carry most
+   of the work - packsswb saturates to [-128, 127], so the +127 clamp
+   is exact and only the -128 lane needs lifting to -127. That is one
+   pcmpgtw idiom in int16, not the pair of scalar compares per element
+   the C spends. Two passes with one emms. */
 static const char km_why_q8rnd_mmx[] =
-    "todo: the multiply and convert are float, but the clamp and pack "
-    "are MMX - packssdw, pminsw, pmaxsw, packsswb. Two passes with one "
-    "emms between them; SSE1 does it in one because cvtps2pi lands in %mm";
+    "todo: the multiply and convert are float, but the pack is MMX - "
+    "packssdw then packsswb, whose saturation IS the +127 clamp; only "
+    "the -128 lane needs lifting to -127, since pminsw/pmaxsw are SSE1. "
+    "Two passes with one emms between them";
 static const char km_why_fwhtf_mmx[] =
     "impossible: MMX is integer-only and this transform is over floats. "
     "The int32 twin (fwhti) is the one MMX can take";
