@@ -171,6 +171,34 @@ static __m128i part32_t2(const unsigned char *w2, const int16_t *x) {
     return _mm_add_epi32(s0, s1);
 }
 
+/* T2 over a 128-element group: four sub-blocks, four sums, one fold.
+ *
+ * WHAT THIS SAVES, because the registry's reason for leaving the t2/g128
+ * cell empty examined the wrong half of the kernel. That argument was
+ * about the UNPACK - q6_1's group form hoists two mask constants across
+ * four sub-blocks, and T2's unpack has only a zero register to hoist,
+ * which trades pxor for movq one instruction for one. Both true, and
+ * neither is where a group form pays.
+ *
+ * It pays on the HORIZONTAL FOLD. Per-32, every sub-block reduces its
+ * own four lanes and extracts: two srli_si128, two add and one cvtsi128
+ * each, twenty instructions for four sub-blocks. fold4_sse2 transposes
+ * the four partials and reduces them together - four unpack32, three
+ * add, two unpack64 - and the four results leave in ONE register, so the
+ * caller stores sixteen bytes once instead of extracting four int32.
+ *
+ * Bit-identical to four part32_t2 calls folded singly: int32 addition is
+ * associative and exact, and the transpose only changes which lanes meet
+ * first. Same argument fold4_sse2's existing callers rest on. */
+static void dot128_t2_sse2(const unsigned char *w2, const int16_t *x,
+                           int32_t *out4) {
+    __m128i s0 = part32_t2(w2,      x);
+    __m128i s1 = part32_t2(w2 +  8, x +  32);
+    __m128i s2 = part32_t2(w2 + 16, x +  64);
+    __m128i s3 = part32_t2(w2 + 24, x +  96);
+    _mm_storeu_si128((__m128i *)(void *)out4, fold4_sse2(s0, s1, s2, s3));
+}
+
 /* Q16_0: 32 int16 weights against 32 int16 activations, 4-way partial
    sum, no horizontal reduction - same contract as part32_x16, so
    fold4_sse2 folds four of these the same way.

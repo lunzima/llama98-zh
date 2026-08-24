@@ -1872,7 +1872,28 @@ void row_t2_sse2_intrin(int32_t *acc32, const void *w4, const void *w2v,
     for (tk = 0; tk < nt; tk++) {
         const int16_t *xwt = xw + (size_t)tk * in_dim;
         int32_t *acc = acc32 + (size_t)tk * nb;
-        for (s = 0; s < nb; s++) {
+        s = 0;
+        /* THE KNOB IS HONOURED BUT NOT REDEFINED HERE. LZ_G128_GCC lives
+           in ops_kernel_shared.h, which this file includes only under
+           __WATCOMC__ (line 34) - so in a gcc build the name is not
+           visible and a plain `#if LZ_G128_GCC` is `#if 0`, which is
+           what it was: this loop compiled to nothing and -Wunused-function
+           on dot128_t2_sse2 was the only thing that said so.
+           Including that header here would also define LZ_SSE2_GROUP and
+           flip the branch above onto the Watcom asm path. Defining the
+           default a second time would be a sibling free to drift. So:
+           on unless the command line turns it off, which is exactly how
+           the A/B is run (-DLZ_G128_GCC=0). */
+#if !defined(LZ_G128_GCC) || LZ_G128_GCC
+        /* Groups of four while a whole one is left; the tail below runs
+           the per-32 fold for nb % 4. Both write the same values - see
+           dot128_t2_sse2 on why the transposed fold is bit-identical -
+           so a row is not split between two answers, only between two
+           instruction counts. */
+        for (; s + 4 <= nb; s += 4)
+            dot128_t2_sse2(p2 + (size_t)s * 8, xwt + (size_t)s * 32, acc + s);
+#endif /* !defined(LZ_G128_GCC) || LZ_G128_GCC */
+        for (; s < nb; s++) {
             __m128i p = part32_t2(p2 + (size_t)s * 8, xwt + (size_t)s * 32);
             p = _mm_add_epi32(p, _mm_srli_si128(p, 8));
             p = _mm_add_epi32(p, _mm_srli_si128(p, 4));
