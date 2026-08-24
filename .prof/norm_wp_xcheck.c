@@ -147,8 +147,12 @@ int main(int argc, char **argv) {
 
        Needs the fixed tier: without it lz_rmsnorm_int's float fallback
        skips the Q15 output loop entirely and this would compare that
-       fallback to itself. */
-    lz_norm_select("fixed");
+       fallback to itself.
+
+       Through the ONE float axis. lz_norm_select was one of seven
+       per-tier selectors and is gone; lz_norm_mode() derives from
+       lz_float_ref_g now, and "all" is the fixed end of it. */
+    lz_float_ref_select("all");
     if (gated)
         for (r = 0; r < NW; r++)
             lz_rmsnorm_gated_int(iout[r], xv, gv, wq_rows[r], NN, 1e-6f,

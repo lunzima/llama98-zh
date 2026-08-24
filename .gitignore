@@ -56,6 +56,7 @@
 !/build/align_gate.sh
 !/build/codesize_gate.sh
 !/build/float_knob_gate.sh
+!/build/xcheck_gate.sh
 # Comparators, not gates: a gate that ships without the program it
 # compares with is a gate that SKIPs in a fresh clone. logit_rms.c and
 # the gate scripts above predate this list and are tracked already, so
