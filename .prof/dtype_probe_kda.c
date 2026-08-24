@@ -46,6 +46,23 @@ int main(int argc, char **argv) {
         row("kda_v_proj", &L->kda_v_proj);
         row("kda_g_proj", &L->kda_g_proj);
         row("kda_o_proj", &L->kda_o_proj);
+        row("kda_f_a_proj", &L->kda_f_a_proj);
+        row("kda_f_b_proj", &L->kda_f_b_proj);
+        row("kda_b_proj", &L->kda_b_proj);
+        row("gate_proj", &L->gate_proj);
+        row("up_proj", &L->up_proj);
+        row("down_proj", &L->down_proj);
+        row("moe_gate_w", &L->moe_gate_w);
+        row("moe_down_proj", &L->moe_down_proj);
+        row("moe_up_proj", &L->moe_up_proj);
+        row("moe_shared_gate", &L->moe_shared_gate);
+        row("moe_shared_up", &L->moe_shared_up);
+        row("moe_shared_down", &L->moe_shared_down);
+        if (L->moe_expert_w1) {
+            row("moe_expert_w1[0]", &L->moe_expert_w1[0]);
+            row("moe_expert_w2[0]", &L->moe_expert_w2[0]);
+            row("moe_expert_w3[0]", &L->moe_expert_w3[0]);
+        }
     }
     lz_free(&m);
     return 0;
