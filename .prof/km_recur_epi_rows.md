@@ -92,6 +92,25 @@ Only "the ISA cannot do it at all" earns an impossible.
 | armA | `KM_T` |
 | g128 | `KM_N` |
 
+## Which guard each recur cell can be probed with
+
+`km_op_present` keys every cell off an `_EXTERN` macro. Three of the
+four recur kernels already have one; the SSE1 one does not, and that is
+very likely why the cell was never filled.
+
+| cell | guard | where |
+|---|---|---|
+| mmxI / mmxA | `LZ_P2_MMX_EXTERN`, `LZ_GDN1_MMX_EXTERN` | `ops_mmx.h:61`, `:40` |
+| sse2I / sse2A | `LZ_P2_SSE2_EXTERN` | `ops_sse2.h:34` |
+| sseI / sseA | **none exists** | `lz_p2_rows_sse` (`ops_mmx_sse.c:214`) is unguarded |
+
+So registering recur is not purely additive: the SSE1 pair needs an
+`LZ_P2_SSE_EXTERN` introduced in `ops_mmx_sse.c`, mirroring
+`LZ_NORM_SS_SSE_EXTERN` at `ops_mmx.h:152`, which is the same situation
+one tier up. Until that macro exists there is nothing for the probe to
+test, and a `KM_H` in those two cells would be an assertion the gate
+cannot check - the failure mode the registry exists to prevent.
+
 ## The edit
 
 1. `LZ_KM_NUNIT` 15 -> 17 (`ops.c:3780`)
