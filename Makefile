@@ -527,7 +527,26 @@ watcom-gui:
 # committed, and then invoked by nothing: not here, not in ci.sh. They
 # passed every time anyone ran them by hand and could not have reddened
 # a build. A gate no target depends on is a script.
-check: bare-endif-gate dead-ifndef-gate f32count-billing-gate dedupe-gate mm-alias-gate c89-floor-gate comment-hygiene-gate vc4-limits-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate kernel-matrix-gate
+check: bare-endif-gate dead-ifndef-gate f32count-billing-gate dedupe-gate mm-alias-gate c89-floor-gate comment-hygiene-gate vc4-limits-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate kernel-matrix-gate
+
+# Two shared helpers with the same body under different names, which is
+# the duplication dedupe-gate cannot see: that one knows the names it is
+# looking for, this one compares bodies.
+.PHONY: dup-body-gate
+dup-body-gate:
+	@bash build/dup_body_gate.sh
+
+# Every x86 kernel written twice - gcc intrinsics and a Watcom
+# #pragma aux - or registered with a reason for being impossible.
+# twin-pair-gate counts the pairs; gcc-watcom-pair-gate checks the two
+# sides answer for the same set.
+.PHONY: twin-pair-gate
+twin-pair-gate:
+	@bash build/twin_pair_gate.sh
+
+.PHONY: gcc-watcom-pair-gate
+gcc-watcom-pair-gate:
+	@bash build/gcc_watcom_pair_gate.sh
 
 # The language floor, as a ratchet plus a real -std=c89 compile. See the
 # script's header for what green does and does not mean.
