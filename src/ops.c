@@ -1950,6 +1950,24 @@ static lz_u64 epi_shr_half_u(lz_u64 umag, int rs) {
    defined where `s >> 63` on a signed would be implementation-defined -
    and (x ^ mask) - mask is two's-complement abs in and negate out.
 
+   THE SHIFT COSTS A HELPER CALL ON wcc386, and no portable spelling
+   avoids it. Four were measured there, function bodies including
+   prologue:
+     (lz_u64)0 - (um >> 63)          13 insns, 1 __U8RS call, no branch
+     (lz_u64)0 - (lz_u64)(s < 0)     15 insns, no call, ONE BRANCH
+     (lz_u64)(s >> 63)                8 insns, 1 call, implementation
+                                      -defined for negative s
+     (uint32_t)(um >> 32) >> 31      13 insns, 1 __U8RS call
+   wcc386 routes every 64-bit shift through __U8RS whether or not the
+   count is a compile-time constant, so narrowing first buys nothing;
+   and the compare form trades the call for exactly the branch this
+   code exists to avoid. The form here is the best of the four.
+   What WOULD do it in three instructions is a #pragma aux (mov the high
+   dword, sar 31), which is a new Watcom primitive and owes a gcc twin
+   and a kernel-matrix cell - gcc already emits the optimal two
+   instructions from the C, so that twin would exist only to satisfy the
+   pairing. Not done; the cost is recorded so it need not be re-derived.
+
    `s == 0` is not a special case: the general path gives umag = 0 and
    epi_shr_half_u(0, rs) is 0 for every rs, so the old fast path bought
    nothing and its arm never fired.
