@@ -12,9 +12,9 @@
 # reused, or a branch that costs nothing because it was predicted. So
 # "must not be too slow on a modern box" had no criterion at all.
 #
-# IRON LAW 3 DOES NOT FORBID THIS, and the distinction is the whole
-# reason this script can exist: what that law rules out is QEMU wall
-# clock, because QEMU models no cache and no pipeline, so its timing
+# THE RULE AGAINST WALL CLOCK DOES NOT FORBID THIS, and the distinction
+# is the whole reason this script can exist: what it rules out is QEMU
+# wall clock, because QEMU models no cache and no pipeline, so its timing
 # describes the host translating instructions. Timing a real core on
 # itself describes that core. The number here transfers to nothing else
 # - it is not a claim about a Pentium - and that is stated rather than

@@ -44,13 +44,14 @@
 #      definition missing behind a guard is invisible there. This links
 #      and runs each int-pipeline =0 arm, and fails if stage 5 gains a
 #      switch it does not list
-#  14. build/kernel_matrix_gate.sh - iron law 8's coverage matrix, built
-#      on all three classes and cross-checked against each binary's own
-#      macros, so neither an unregistered kernel nor a registration
-#      outliving its kernel survives
-#  15. build/kernel_isa_identity_gate.sh - iron law 2 end to end: two
-#      TIERS in one binary, the comparison stage 6's two-COMPILER gate
-#      cannot make
+#  14. build/kernel_matrix_gate.sh - every operator has a cell per tier
+#      per build class and an empty one carries a reason. Built on all
+#      three classes and cross-checked against each binary's own macros,
+#      so neither an unregistered kernel nor a registration outliving
+#      its kernel survives
+#  15. build/kernel_isa_identity_gate.sh - every operator's twins are
+#      bit-identical, end to end: two TIERS in one binary, the
+#      comparison stage 6's two-COMPILER gate cannot make
 #  16. build/subn_gate.sh - --subn-scale and --hadamard, the two knobs
 #      whose gate could not run until a SubLN checkpoint that exports
 #      was found
@@ -665,8 +666,8 @@ case $IPA_RC in
 esac
 
 # ---------------------------------------------------------------------
-# Stage 14: the kernel-coverage matrix. Iron law 8 says every operator
-# has a cell per tier per build class and that an EMPTY cell carries a
+# Stage 14: the kernel-coverage matrix. Every operator has a cell per
+# tier per build class and an EMPTY cell carries a
 # reason; nothing enforced that from CI, so the matrix could go stale in
 # either direction - a kernel written and never registered, or a
 # registration outliving the kernel it names. The gate builds all three
@@ -699,7 +700,7 @@ case $KMX_RC in
 esac
 
 # ---------------------------------------------------------------------
-# Stage 15: iron law 2 END TO END. Stage 6 compares two COMPILERS on one
+# Stage 15: twin bit-identity END TO END. Stage 6 compares two COMPILERS on one
 # tier; this compares two TIERS in one binary, which is where a twin
 # that drifted from its sibling shows and where a cross-compiler gate is
 # blind by construction. Both gates existed on disk before this stage

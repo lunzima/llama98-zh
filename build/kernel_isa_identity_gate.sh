@@ -1,7 +1,7 @@
 #!/bin/bash
-# Kernel-ISA numeric identity gate (iron law 2, end to end).
+# Kernel-ISA numeric identity gate, end to end.
 #
-# Iron law 2 says every operator's twins are bit-identical. Nothing
+# Every operator's twins must be bit-identical. Nothing
 # checked it at the whole-engine level. kernel_matrix_gate asserts
 # COVERAGE - which cells have a hand-written kernel and which are
 # honestly empty - and fixed_tier_xcompiler_gate asserts gcc vs Watcom
@@ -354,7 +354,7 @@ fi
 # binary; fixed_tier_xcompiler_gate.sh compares gcc against Watcom but
 # never pins --kernel (the string does not appear in it), so it has only
 # ever compared whatever `auto` resolved to on each side - sse2 on both.
-# That leaves the pair iron law 2 is actually about untested: the MMX
+# That leaves the pair the requirement is actually about untested: the MMX
 # and SSE2 kernels are written TWICE, once as gcc intrinsics and once as
 # wcc386 #pragma aux, and nothing compared intrinsic against assembly
 # per tier.

@@ -1,5 +1,6 @@
 #!/bin/bash
-# Kernel coverage gate (iron law 8).
+# Kernel coverage gate: a cell per operator per tier per build class,
+# and an empty one carries a reason.
 #
 # The matrix used to be a thing you could PRINT. Nothing read it, so the
 # one failure it exists to catch stayed invisible: on 2026-08-09 the

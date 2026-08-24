@@ -110,6 +110,33 @@ for f in $SCAN; do
     fi
 done
 
+# THE RULEBOOK CITE, over build/ as well - the one predicate here whose
+# scope is the whole repository rather than the shipped sources. A
+# citation is not a reason wherever it sits: "iron law 8" says nothing
+# at the line it annotates, the rulebook can be renumbered, and every
+# citation then points at the wrong rule silently. That argument does
+# not stop at src/.
+#
+# Only this predicate widens. Commit hashes and dates in a gate header
+# are derivations - "measured at 261,968 with -O2" needs the commit that
+# measured it - and a gate that reddened on those would be switched off.
+#
+# THIS FILE IS THE EXEMPTION, and it has to be: naming the phrase is how
+# the check finds it. Nothing else may.
+BSCAN=$(ls build/*.sh build/*.awk build/*.c build/*.py 2>/dev/null \
+        | grep -v "comment_hygiene_gate.sh")
+BR=0
+for f in $BSCAN; do
+    n=$(grep -ci "iron law" "$f" 2>/dev/null)
+    [ -n "$n" ] || n=0
+    if [ "$n" -gt 0 ]; then
+        echo "FAIL: $f - $n rulebook cite(s); say the reason, not the number"
+        grep -in "iron law" "$f" | head -3 | sed 's/^/        /'
+        BR=$((BR + n))
+        FAIL=1
+    fi
+done
+
 # Positive control: the scan must be able to see one. Planting a hash
 # in this script's own text would be caught by the src/ loop only if it
 # lived in src/, so the control is a direct test of the three regexes
@@ -126,7 +153,8 @@ if [ "$CTL" -ne 3 ] || [ "$CJK" -ne 1 ]; then
 fi
 
 if [ "$FAIL" -eq 0 ]; then
-    echo "comment_hygiene_gate: PASS ($TOTAL over baseline: 0)"
+    echo "comment_hygiene_gate: PASS ($TOTAL over baseline: 0;"
+    echo "  $(printf '%s\n' $BSCAN | wc -l) build script(s) carry 0 rulebook cite(s))"
     exit 0
 fi
 echo "comment_hygiene_gate: FAIL"

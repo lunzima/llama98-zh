@@ -3,7 +3,7 @@
 #
 #   gcc_watcom_pair_gate.sh [binary]
 #
-# Iron law 2 says the SIMD kernels are written twice - once as gcc
+# The SIMD kernels are written twice - once as gcc
 # intrinsics, once as wcc386 #pragma aux - and bit-identity between the
 # two is checked by build/kernel_isa_identity_gate.sh. What nothing
 # checked is that the two SETS are the same set: a unit with an mmxI
@@ -37,7 +37,7 @@
 # genuinely is NOT written on one side and is HONESTLY registered t or
 # d there. kernel_matrix_gate passes that - the registration matches
 # reality, which is all it asks - and this gate fails it, because the
-# iron law asks for more than honesty about the gap. That case does not
+# the requirement asks for more than honesty about the gap. That case does not
 # exist in the tree today (0 todo, 0 declined), so the mutation proving
 # it would have to DELETE a Watcom kernel rather than re-register one,
 # and it has not been run. Said here rather than left implied: a gate
