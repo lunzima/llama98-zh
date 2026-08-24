@@ -128,7 +128,23 @@ PACKED="$PACKED"'|packssdw|packsswb|packuswb|pmaxsw|pminsw|pmaxsd|pminsd'
 PACKED="$PACKED"'|punpck[lh][a-z]+|pshufd|pshufb|pshufw|pshuflw|pshufhw'
 PACKED="$PACKED"'|pcmpeq[bwd]|pcmpgt[bwd]|psll[wdq]|psrl[wdq]|psra[wd]'
 PACKED="$PACKED"'|permd|permq|pgatherdd|gatherdps|pbroadcast[bwdq]'
-PACKED="$PACKED"'|fmadd[0-9]*ps|insertf128|extractf128|perm2f128)\b'
+PACKED="$PACKED"'|fmadd[0-9]*ps|insertf128|extractf128|perm2f128'
+# THE PATTERN WAS SSE2-SHAPED, so the AVX2 column undercounted the one
+# thing it exists to referee. matmul_q41_impl at -march=x86-64-v3 holds
+# 8 vpmovsxbw and 4 vpmovsxwd - the packed int8->int16->int32 widening
+# that IS an int8 matmul's inner loop - and the count was 7, being
+# vpaddd six times and vpsrlq once. Everything else went unseen, which
+# is why every AVX2 row read LOWER than its SSE2 row and looked like
+# wider registers doing the same work in fewer instructions.
+#
+# pmovsx/pmovzx are conversions, the same class as cvtdq2ps above, not
+# register copies. The 128-lane halves have integer spellings
+# (extracti128, inserti128) as well as the float ones already listed,
+# and the variable shifts are AVX2-only. Lane manipulation counts here
+# because pshufd and punpck already do.
+PACKED="$PACKED"'|pmovsx[bwd][wdq]|pmovzx[bwd][wdq]|packusdw'
+PACKED="$PACKED"'|inserti128|extracti128|psrldq|pslldq'
+PACKED="$PACKED"'|psrlv[dq]|psllv[dq]|psrav[dq])\b'
 
 # MOVES AND BITWISE ARE NOT EVIDENCE, and keeping them in the count above
 # is how this script reported that gcc vectorises lz_exp. It does not:
