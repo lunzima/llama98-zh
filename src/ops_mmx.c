@@ -2798,6 +2798,89 @@ static int32_t dot32_q16_mmx(const int16_t *w, const int16_t *x) {
     return lz_dot32_q16_asm(w, x);
 }
 
+/* Two tokens, one weight load - the Watcom twin of dot32_q16_mmx_2
+   (src/ops_kernel_dot_mmx.h), and the q16_0 member of the g_pair
+   family q8_0/q4_1/q6_1 already had.
+   THE WEIGHT GOES TO mm0 AND IS COPIED, not re-loaded: pmaddwd
+   destroys its first operand, so the single-token form's
+   `movq mm1,[eax+N]` + `pmaddwd mm1,[ecx+N]` cannot simply run twice
+   against two activation pointers - that would reload the weight and
+   save nothing, which is the whole point of the pair. mm6 and mm7 are
+   the two accumulators, mm1/mm2 the per-step temporaries.
+   Same parameter registers as lz_dot32_x16_asm_2 above. */
+extern void lz_dot32_q16_asm_2(const int16_t *w, const int16_t *xa,
+                               const int16_t *xb, int32_t *oa, int32_t *ob);
+#pragma aux lz_dot32_q16_asm_2 = \
+    ".586" \
+    "pxor      mm6, mm6" \
+    "pxor      mm7, mm7" \
+    "movq      mm0, [eax]" \
+    "movq      mm1, mm0" \
+    "pmaddwd   mm1, [edx]" \
+    "paddd     mm6, mm1" \
+    "movq      mm2, mm0" \
+    "pmaddwd   mm2, [ebx]" \
+    "paddd     mm7, mm2" \
+    "movq      mm0, [eax+8]" \
+    "movq      mm1, mm0" \
+    "pmaddwd   mm1, [edx+8]" \
+    "paddd     mm6, mm1" \
+    "movq      mm2, mm0" \
+    "pmaddwd   mm2, [ebx+8]" \
+    "paddd     mm7, mm2" \
+    "movq      mm0, [eax+16]" \
+    "movq      mm1, mm0" \
+    "pmaddwd   mm1, [edx+16]" \
+    "paddd     mm6, mm1" \
+    "movq      mm2, mm0" \
+    "pmaddwd   mm2, [ebx+16]" \
+    "paddd     mm7, mm2" \
+    "movq      mm0, [eax+24]" \
+    "movq      mm1, mm0" \
+    "pmaddwd   mm1, [edx+24]" \
+    "paddd     mm6, mm1" \
+    "movq      mm2, mm0" \
+    "pmaddwd   mm2, [ebx+24]" \
+    "paddd     mm7, mm2" \
+    "movq      mm0, [eax+32]" \
+    "movq      mm1, mm0" \
+    "pmaddwd   mm1, [edx+32]" \
+    "paddd     mm6, mm1" \
+    "movq      mm2, mm0" \
+    "pmaddwd   mm2, [ebx+32]" \
+    "paddd     mm7, mm2" \
+    "movq      mm0, [eax+40]" \
+    "movq      mm1, mm0" \
+    "pmaddwd   mm1, [edx+40]" \
+    "paddd     mm6, mm1" \
+    "movq      mm2, mm0" \
+    "pmaddwd   mm2, [ebx+40]" \
+    "paddd     mm7, mm2" \
+    "movq      mm0, [eax+48]" \
+    "movq      mm1, mm0" \
+    "pmaddwd   mm1, [edx+48]" \
+    "paddd     mm6, mm1" \
+    "movq      mm2, mm0" \
+    "pmaddwd   mm2, [ebx+48]" \
+    "paddd     mm7, mm2" \
+    "movq      mm0, [eax+56]" \
+    "movq      mm1, mm0" \
+    "pmaddwd   mm1, [edx+56]" \
+    "paddd     mm6, mm1" \
+    "movq      mm2, mm0" \
+    "pmaddwd   mm2, [ebx+56]" \
+    "paddd     mm7, mm2" \
+    "movq      mm1, mm6" \
+    "psrlq     mm1, 32" \
+    "paddd     mm6, mm1" \
+    "movd      [ecx], mm6" \
+    "movq      mm2, mm7" \
+    "psrlq     mm2, 32" \
+    "paddd     mm7, mm2" \
+    "movd      [esi], mm7" \
+    __parm [__eax] [__edx] [__ebx] [__ecx] [__esi] \
+    __modify [8087]
+
 extern void lz_dot128_q16_asm(const int16_t *w, const int16_t *x, int32_t *out4);
 #pragma aux lz_dot128_q16_asm = \
     ".586" \
@@ -2942,6 +3025,24 @@ void row_q16_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
     for (tk = 0; tk < nt; tk++) {
         const int16_t *xwt = xw + (size_t)tk * in_dim;
         int32_t *acc = acc32 + (size_t)tk * nb;
+        /* Pair before grouping, the same order and the same reason as
+           the gcc twin: the pair halves the weight traffic while the
+           group only amortizes the per-32 call, and a token pair cannot
+           be expressed once the group loop owns the sub-block index.
+           An odd nt leaves its last token on the paths below. */
+        if (nt - tk >= 2 && lz_pair_mode()) {
+            const int16_t *xw2 = xwt + in_dim;
+            int32_t *accb = acc + nb;
+            for (g = 0; g < nb; g++) {
+                LZ_Q16_PF(g);
+                lz_dot32_q16_asm_2(wr + (size_t)g * 32,
+                                   xwt + (size_t)g * 32,
+                                   xw2 + (size_t)g * 32,
+                                   acc + g, accb + g);
+            }
+            tk++;
+            continue;
+        }
         if ((nb & 3) == 0) LZ_Q16_GROUP4(lz_dot128_q16_asm);
         else               LZ_Q16_ACC(dot32_q16_mmx);
     }
