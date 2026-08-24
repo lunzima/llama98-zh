@@ -40,9 +40,15 @@
 #
 # So the head of this table is load-bearing, which is worth knowing
 # before anyone spends a round on it. What follows it - the per-group
-# accumulate loops at ops.c:1503 and ops_matmul.c:116/122/124, the
+# accumulate loop in lz_epi_mac_i16 and the ones in ops_matmul.c, the
 # UTF-8 decode in unicode.c - are LOOP-BACK edges, whose minority arm
 # is the single exit and which no predictor gets wrong twice.
+#
+# NAMED, NOT NUMBERED, because the numbers rotted: this paragraph used
+# to cite ops.c:1503 for that accumulate loop and the loop is at 1525
+# now. A line number in a comment is a fact about a file that keeps
+# being edited, and the next reader checks the line rather than the
+# function. The head is still epi_shr_half at the same 4,495,576.
 #
 # Usage: bash build/branch_census.sh [MODEL] [TOP]
 set -u
