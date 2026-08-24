@@ -510,7 +510,18 @@ static float minp_pow(float minp, float temperature)
     return cached;
 }
 
-/* Path when top_k is off: coarse threshold filter, then sort; matches llama2.c */
+/* Path when top_k is off: coarse threshold filter, then sort; matches llama2.c
+ *
+ * NOT THE SHIPPING PATH, and the qsort below is why that is worth
+ * saying. An indirect call per comparison is poor on an in-order core
+ * with weak prediction, which makes this look like an obvious target -
+ * but lz_sample_defaults sets topk 20, select_candidates takes the
+ * top_k branch whenever 0 < topk < n, and that branch uses select_topk:
+ * an insertion sort into a k-sized array with an early-out that skips
+ * most of the vocabulary, no function pointer anywhere. Confirmed by
+ * running with and without --topk 0 and getting different output.
+ * Optimising here would be spending on a branch the default never
+ * takes. */
 static int select_all(const float *p, int n, float topp, LZProbIndex *buf) {
     int n0 = 0, i;
     const float cutoff = (n > 1) ? (1.0f - topp) / (float)(n - 1) : 0.0f;
