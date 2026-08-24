@@ -79,6 +79,10 @@
 #  22. build/codesize_gate.sh - the gui fits on a 1.44 MB floppy, and
 #      the CLI's .text stays under a ceiling. Two criteria because the
 #      floppy is at 68% and would not warn about anything
+#  23. build/float_knob_gate.sh - one float axis. --fixed off|all is
+#      accepted, the seven per-tier flags it replaced are rejected, the
+#      two performance knobs are kept, and ops_sched.c has exactly one
+#      float-selection global. Nothing else counts the knobs
 #
 # Judging discipline (this repo has paid for getting this wrong before):
 #   - Never grep bare 'error' - "0 errors" contains the substring.
@@ -121,7 +125,7 @@ freshness_sentinel() {
 # ---------------------------------------------------------------------
 # Stage 1: make native (gcc)
 # ---------------------------------------------------------------------
-echo "==== [1/22]make native ===="
+echo "==== [1/23]make native ===="
 NATIVE_EXE="$ROOT/llama98.exe"
 [ -e "$NATIVE_EXE" ] || NATIVE_EXE="$ROOT/llama98"
 LOG=build/ci-native.log
@@ -160,7 +164,7 @@ rm -f "$SENTINEL"
 # Stage 2: make watcom-cli (Open Watcom, the target compiler)
 # ---------------------------------------------------------------------
 echo
-echo "==== [2/22]make watcom-cli ===="
+echo "==== [2/23]make watcom-cli ===="
 WATCOM_EXE="$ROOT/llama98-w.exe"
 WATCOM_OBJDIR="$ROOT/build/watcom/cli"
 LOG=build/ci-watcom-cli.log
@@ -212,7 +216,7 @@ rm -f "$SENTINEL"
 # Stage 3: llama98 <dir> --check on a curated set of KunMoe checkpoints
 # ---------------------------------------------------------------------
 echo
-echo "==== [3/22]model --check sweep ===="
+echo "==== [3/23]model --check sweep ===="
 MODELS_ROOT=${MODELS_ROOT:-/e/LLM/models}
 # Curated, not a blind sweep of every directory under MODELS_ROOT:
 # a usable sweep is a handful of representative checkpoints, and
@@ -259,7 +263,7 @@ fi
 # Stage 4: x86 <-> ARMv5TE parity gate
 # ---------------------------------------------------------------------
 echo
-echo "==== [4/22]ARM parity gate ===="
+echo "==== [4/23]ARM parity gate ===="
 ARM_MODEL="$MODELS_ROOT/kunkun98-pilot-20260806"
 LOG=build/ci-arm.log
 if [ "$native_ok" -ne 1 ]; then
@@ -294,7 +298,7 @@ fi
 # Stage 5: control-switch matrix (every non-default value, gcc + Watcom)
 # ---------------------------------------------------------------------
 echo
-echo "==== [5/22]control-switch matrix ===="
+echo "==== [5/23]control-switch matrix ===="
 LOG=build/ci-switch-matrix.log
 build/switch_matrix_gate.sh >"$LOG" 2>&1
 MATRIX_RC=$?
@@ -322,7 +326,7 @@ esac
 # Stage 6: every fixed-point write tier's gcc<->Watcom bit-identity
 # ---------------------------------------------------------------------
 echo
-echo "==== [6/22]fixed-tier cross-compiler gate ===="
+echo "==== [6/23]fixed-tier cross-compiler gate ===="
 LOG=build/ci-fixed-tier-xcompiler.log
 build/fixed_tier_xcompiler_gate.sh >"$LOG" 2>&1
 NIX_RC=$?
@@ -354,7 +358,7 @@ esac
 # compile-time-off in the same compiler, where it is not.
 # ---------------------------------------------------------------------
 echo
-echo "==== [7/22]recurrence float-arm gate ===="
+echo "==== [7/23]recurrence float-arm gate ===="
 LOG=build/ci-recur-write-float-arm.log
 build/recur_write_float_arm_gate.sh >"$LOG" 2>&1
 NIX_RC=$?
@@ -384,7 +388,7 @@ esac
 # separate delivery decision); none of the three is in ci.sh's stage 2.
 # ---------------------------------------------------------------------
 echo
-echo "==== [8/22]watcom gui/dll/dos targets ===="
+echo "==== [8/23]watcom gui/dll/dos targets ===="
 for t in watcom-gui watcom-dll watcom-dos; do
     case $t in
         watcom-gui) EXE="$ROOT/kunkun98-w.exe" ;;
@@ -421,7 +425,7 @@ done
 # as its only float unit. SKIP when WSL is not usable, never PASS.
 # ---------------------------------------------------------------------
 echo
-echo "==== [9/22]32-bit x87 gcc build (WSL) ===="
+echo "==== [9/23]32-bit x87 gcc build (WSL) ===="
 LOG=build/ci-x87.log
 if ! command -v wsl >/dev/null 2>&1; then
     echo "SKIP: 32-bit x87 build (wsl not installed)"
@@ -465,7 +469,7 @@ fi
 # MIPS cross toolchain is absent, never PASS.
 # ---------------------------------------------------------------------
 echo
-echo "==== [10/22]big-endian parity gate (WSL) ===="
+echo "==== [10/23]big-endian parity gate (WSL) ===="
 LOG=build/ci-endian.log
 if ! command -v wsl >/dev/null 2>&1; then
     echo "SKIP: big-endian parity gate (wsl not installed)"
@@ -509,7 +513,7 @@ fi
 # them the two easiest knobs to break silently.
 # ---------------------------------------------------------------------
 echo
-echo "==== [11/22]performance-knob invariance ===="
+echo "==== [11/23]performance-knob invariance ===="
 LOG=build/ci-perf-knob.log
 build/perf_knob_gate.sh "$ARM_MODEL" >"$LOG" 2>&1
 PK_RC=$?
@@ -551,7 +555,7 @@ esac
 # (build/kv_rot_gate.sh <model>) to cover that side.
 # ---------------------------------------------------------------------
 echo
-echo "==== [12/22]--kv-rot quality gate ===="
+echo "==== [12/23]--kv-rot quality gate ===="
 LOG=build/ci-kv-rot.log
 build/kv_rot_gate.sh "$ARM_MODEL" >"$LOG" 2>&1
 KR_RC=$?
@@ -585,7 +589,7 @@ esac
 # matrix's switches had a standing gate that ran their build.
 # ---------------------------------------------------------------------
 echo
-echo "==== [13/22] int-pipeline control arms ===="
+echo "==== [13/23] int-pipeline control arms ===="
 LOG=build/ci-int-pipeline-arms.log
 build/int_pipeline_arm_gate.sh >"$LOG" 2>&1
 IPA_RC=$?
@@ -619,7 +623,7 @@ esac
 # --kernel-matrix against what its macros actually define.
 # ---------------------------------------------------------------------
 echo
-echo "==== [14/22]kernel coverage matrix ===="
+echo "==== [14/23]kernel coverage matrix ===="
 LOG=build/ci-kernel-matrix.log
 build/kernel_matrix_gate.sh >"$LOG" 2>&1
 KMX_RC=$?
@@ -661,7 +665,7 @@ esac
 # half runs on one fixture.
 # ---------------------------------------------------------------------
 echo
-echo "==== [15/22]kernel ISA identity ===="
+echo "==== [15/23]kernel ISA identity ===="
 LOG=build/ci-kernel-isa.log
 build/kernel_isa_identity_gate.sh >"$LOG" 2>&1
 KID_RC=$?
@@ -701,7 +705,7 @@ esac
 # lands.
 # ---------------------------------------------------------------------
 echo
-echo "==== [16/22]SubLN activation path ===="
+echo "==== [16/23]SubLN activation path ===="
 LOG=build/ci-subn.log
 build/subn_gate.sh >"$LOG" 2>&1
 SUBN_RC=$?
@@ -737,7 +741,7 @@ esac
 # against the CLI's -O3.
 # ---------------------------------------------------------------------
 echo
-echo "==== [17/22]gui/CLI engine flag parity ===="
+echo "==== [17/23]gui/CLI engine flag parity ===="
 LOG=build/ci-flagparity.log
 build/gcc_flag_parity_gate.sh >"$LOG" 2>&1
 FLAGP_RC=$?
@@ -775,7 +779,7 @@ esac
 # criterion that could see it.
 # ---------------------------------------------------------------------
 echo
-echo "==== [18/22]caption bar symmetry ===="
+echo "==== [18/23]caption bar symmetry ===="
 LOG=build/ci-capsym.log
 build/caption_symmetry_gate.sh >"$LOG" 2>&1
 CAPSYM_RC=$?
@@ -811,7 +815,7 @@ esac
 # regression this catches.
 # ---------------------------------------------------------------------
 echo
-echo "==== [19/22]comment phrasing ratchet ===="
+echo "==== [19/23]comment phrasing ratchet ===="
 LOG=build/ci-changelog.log
 build/changelog_comment_gate.sh >"$LOG" 2>&1
 CHLOG_RC=$?
@@ -840,7 +844,7 @@ esac
 # touch them.
 # ---------------------------------------------------------------------
 echo
-echo "==== [20/22]string table order ===="
+echo "==== [20/23]string table order ===="
 LOG=build/ci-strtbl.log
 build/str_table_order_gate.sh >"$LOG" 2>&1
 STRTBL_RC=$?
@@ -869,7 +873,7 @@ esac
 # a wrong number - and every stage above this one runs on x86.
 # ---------------------------------------------------------------------
 echo
-echo "==== [21/22]unaligned access (UBSan, WSL) ===="
+echo "==== [21/23]unaligned access (UBSan, WSL) ===="
 LOG=build/ci-align.log
 build/align_gate.sh >"$LOG" 2>&1
 ALIGN_RC=$?
@@ -899,7 +903,7 @@ esac
 # redden until something had gone badly wrong.
 # ---------------------------------------------------------------------
 echo
-echo "==== [22/22]code size ===="
+echo "==== [22/23]code size ===="
 LOG=build/ci-codesize.log
 build/codesize_gate.sh >"$LOG" 2>&1
 SIZE_RC=$?
@@ -919,6 +923,40 @@ case $SIZE_RC in
     *)
         echo "FAIL: code size"
         note "FAIL  code size"
+        FAIL=$((FAIL + 1))
+        ;;
+esac
+
+# ---------------------------------------------------------------------
+# Stage 23: one float axis.
+#
+# --fixed off|all replaced seven per-tier flags, and a retired flag
+# comes back by accident - somebody re-adds a parse arm for one tier
+# while chasing something else, and nothing says a word: the binary
+# runs, the logits match, and the axis count has quietly gone from one
+# to two. No other stage counts the knobs.
+# ---------------------------------------------------------------------
+echo
+echo "==== [23/23]float knob count ===="
+LOG=build/ci-floatknob.log
+build/float_knob_gate.sh >"$LOG" 2>&1
+FKNOB_RC=$?
+cat "$LOG"
+case $FKNOB_RC in
+    0)
+        echo "PASS: float knob count"
+        note "PASS  float knob count"
+        PASS=$((PASS + 1))
+        ;;
+    2)
+        REASON=$(grep -m1 'SKIP' "$LOG")
+        echo "SKIP: float knob count ($REASON)"
+        note "SKIP  float knob count ($REASON)"
+        SKIP=$((SKIP + 1))
+        ;;
+    *)
+        echo "FAIL: float knob count"
+        note "FAIL  float knob count"
         FAIL=$((FAIL + 1))
         ;;
 esac
