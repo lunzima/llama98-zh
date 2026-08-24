@@ -3625,7 +3625,8 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
    one. Both halves are true, and the group form does not pay there. It
    pays on the HORIZONTAL FOLD: per-32 every sub-block reduces its own
    lanes and extracts, and folding four together costs about half that
-   and leaves the results in one register to store whole. */
+   and leaves the results in one register to store whole.
+
    THE THIRD BRANCH IS NOT OPTIONAL, and the four formats above carry
    the same one for the same reason. On the ARM cross-build neither
    __WATCOMC__ nor the gcc group kernels exist, so a plain #else lights
