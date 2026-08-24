@@ -4035,8 +4035,11 @@ static void forward_moe(const LZModel *m, LZRunState *s,
         int gsu = lz_act_gs(&L->moe_up_proj, latent);
         int nsu = scale_groups(latent, gsu);
         if (c->use_subn) {
-            /* In place: moe_lat_y is dead after the quantize below, and
-               the "mrou" tap above already recorded the pre-norm value. */
+            /* In place because the "mrou" tap above already recorded the
+               pre-norm value and every later reader wants the post-norm
+               one. Not because the buffer dies at the quantize below: it
+               is still live at lz_matmul_xq_nt, which reads it as a float
+               row whenever moe_up_proj is F32. */
             for (tk = 0; tk < nt; tk++)
                 lz_rmsnorm(s->moe_lat_y + (size_t)tk * latent,
                            s->moe_lat_y + (size_t)tk * latent,
