@@ -53,7 +53,7 @@ static const char *const LZ_STR_EN[LZ_STR_COUNT] = {
     /* LZ_STR_MENU_SETTINGS */ "&Inference Settings...",
     /* LZ_STR_MENU_ABOUT */ "&About",
     /* LZ_STR_MENU_EXIT */ "E&xit",
-    /* LZ_STR_MENU_LANG_ZH */ "中文(&C)",
+    /* LZ_STR_MENU_LANG_ZH */ "\xe4\xb8\xad\xe6\x96\x87(&C)",
     /* LZ_STR_MENU_LANG_EN */ "&English",
 
     /* LZ_STR_MENU_COPY */ "&Copy\tCtrl+C",
@@ -214,51 +214,51 @@ static const char *const LZ_STR_EN[LZ_STR_COUNT] = {
 };
 
 static const char *const LZ_STR_ZH[LZ_STR_COUNT] = {
-    /* LZ_STR_APP_TITLE */ "昆昆98",
+    /* LZ_STR_APP_TITLE */ "\xe6\x98\x86\xe6\x98\x86\x39\x38",
 
     /* Chinese Windows puts the mnemonic in parentheses after the word -
        the label renders as the word followed by (F) with F underlined.
        Not a liberty taken in translation: every menu in Simplified
        Chinese Win9x looks like this, because a Han character has no
        Latin letter of its own to underline. */
-    /* LZ_STR_MENU_FILE */ "文件(&F)",
-    /* LZ_STR_MENU_EDIT */ "编辑(&E)",
-    /* LZ_STR_MENU_MODEL */ "模型(&M)",
-    /* LZ_STR_MENU_SETTINGS_TITLE */ "设置(&S)",
-    /* LZ_STR_MENU_HELP */ "帮助(&H)",
+    /* LZ_STR_MENU_FILE */ "\xe6\x96\x87\xe4\xbb\xb6(&F)",
+    /* LZ_STR_MENU_EDIT */ "\xe7\xbc\x96\xe8\xbe\x91(&E)",
+    /* LZ_STR_MENU_MODEL */ "\xe6\xa8\xa1\xe5\x9e\x8b(&M)",
+    /* LZ_STR_MENU_SETTINGS_TITLE */ "\xe8\xae\xbe\xe7\xbd\xae(&S)",
+    /* LZ_STR_MENU_HELP */ "\xe5\xb8\xae\xe5\x8a\xa9(&H)",
 
-    /* LZ_STR_MENU_OPEN_MODEL */ "打开模型(&O)…\tCtrl+O",
-    /* LZ_STR_MENU_OPEN_CHAT */ "打开对话(&O)…",
-    /* LZ_STR_MENU_SAVE_CHAT */ "保存对话(&S)…\tCtrl+S",
-    /* LZ_STR_MENU_STOP */ "停止生成(&T)\tEsc",
-    /* LZ_STR_MENU_CLEAR */ "清空对话(&C)\tCtrl+N",
-    /* LZ_STR_MENU_SETTINGS */ "推理设置(&I)…",
-    /* LZ_STR_MENU_ABOUT */ "关于(&A)",
-    /* LZ_STR_MENU_EXIT */ "退出(&X)",
-    /* LZ_STR_MENU_LANG_ZH */ "中文(&C)",
+    /* LZ_STR_MENU_OPEN_MODEL */ "\xe6\x89\x93\xe5\xbc\x80\xe6\xa8\xa1\xe5\x9e\x8b(&O)\xe2\x80\xa6\tCtrl+O",
+    /* LZ_STR_MENU_OPEN_CHAT */ "\xe6\x89\x93\xe5\xbc\x80\xe5\xaf\xb9\xe8\xaf\x9d(&O)\xe2\x80\xa6",
+    /* LZ_STR_MENU_SAVE_CHAT */ "\xe4\xbf\x9d\xe5\xad\x98\xe5\xaf\xb9\xe8\xaf\x9d(&S)\xe2\x80\xa6\tCtrl+S",
+    /* LZ_STR_MENU_STOP */ "\xe5\x81\x9c\xe6\xad\xa2\xe7\x94\x9f\xe6\x88\x90(&T)\tEsc",
+    /* LZ_STR_MENU_CLEAR */ "\xe6\xb8\x85\xe7\xa9\xba\xe5\xaf\xb9\xe8\xaf\x9d(&C)\tCtrl+N",
+    /* LZ_STR_MENU_SETTINGS */ "\xe6\x8e\xa8\xe7\x90\x86\xe8\xae\xbe\xe7\xbd\xae(&I)\xe2\x80\xa6",
+    /* LZ_STR_MENU_ABOUT */ "\xe5\x85\xb3\xe4\xba\x8e(&A)",
+    /* LZ_STR_MENU_EXIT */ "\xe9\x80\x80\xe5\x87\xba(&X)",
+    /* LZ_STR_MENU_LANG_ZH */ "\xe4\xb8\xad\xe6\x96\x87(&C)",
     /* LZ_STR_MENU_LANG_EN */ "&English",
 
-    /* LZ_STR_MENU_COPY */ "复制(&C)\tCtrl+C",
-    /* LZ_STR_MENU_SELECT_ALL */ "全选(&A)\tCtrl+A",
-    /* LZ_STR_MENU_FIND */ "查找(&F)…\tCtrl+F",
+    /* LZ_STR_MENU_COPY */ "\xe5\xa4\x8d\xe5\x88\xb6(&C)\tCtrl+C",
+    /* LZ_STR_MENU_SELECT_ALL */ "\xe5\x85\xa8\xe9\x80\x89(&A)\tCtrl+A",
+    /* LZ_STR_MENU_FIND */ "\xe6\x9f\xa5\xe6\x89\xbe(&F)\xe2\x80\xa6\tCtrl+F",
 
-    /* LZ_STR_MENU_REGEN */ "重新生成(&R)",
-    /* LZ_STR_MENU_EDIT_LAST */ "修改上一句(&E)",
-    /* LZ_STR_MENU_DEL_LAST */ "删除上一轮(&D)",
+    /* LZ_STR_MENU_REGEN */ "\xe9\x87\x8d\xe6\x96\xb0\xe7\x94\x9f\xe6\x88\x90(&R)",
+    /* LZ_STR_MENU_EDIT_LAST */ "\xe4\xbf\xae\xe6\x94\xb9\xe4\xb8\x8a\xe4\xb8\x80\xe5\x8f\xa5(&E)",
+    /* LZ_STR_MENU_DEL_LAST */ "\xe5\x88\xa0\xe9\x99\xa4\xe4\xb8\x8a\xe4\xb8\x80\xe8\xbd\xae(&D)",
 
-    /* LZ_STR_BTN_OPEN */ "打开",
-    /* LZ_STR_BTN_SAVE */ "保存",
-    /* LZ_STR_BTN_SEND */ "发送",
-    /* LZ_STR_BTN_STOP */ "停止",
-    /* LZ_STR_BTN_CLEAR */ "清空",
-    /* LZ_STR_BTN_REGEN */ "重试",
-    /* LZ_STR_BTN_SETTINGS */ "设置",
-    /* LZ_STR_BTN_OK */ "确定",
-    /* LZ_STR_BTN_CANCEL */ "取消",
-    /* LZ_STR_BTN_RESTORE_DEFAULT */ "恢复默认(&R)",
+    /* LZ_STR_BTN_OPEN */ "\xe6\x89\x93\xe5\xbc\x80",
+    /* LZ_STR_BTN_SAVE */ "\xe4\xbf\x9d\xe5\xad\x98",
+    /* LZ_STR_BTN_SEND */ "\xe5\x8f\x91\xe9\x80\x81",
+    /* LZ_STR_BTN_STOP */ "\xe5\x81\x9c\xe6\xad\xa2",
+    /* LZ_STR_BTN_CLEAR */ "\xe6\xb8\x85\xe7\xa9\xba",
+    /* LZ_STR_BTN_REGEN */ "\xe9\x87\x8d\xe8\xaf\x95",
+    /* LZ_STR_BTN_SETTINGS */ "\xe8\xae\xbe\xe7\xbd\xae",
+    /* LZ_STR_BTN_OK */ "\xe7\xa1\xae\xe5\xae\x9a",
+    /* LZ_STR_BTN_CANCEL */ "\xe5\x8f\x96\xe6\xb6\x88",
+    /* LZ_STR_BTN_RESTORE_DEFAULT */ "\xe6\x81\xa2\xe5\xa4\x8d\xe9\xbb\x98\xe8\xae\xa4(&R)",
 
-    /* LZ_STR_DLG_ABOUT_TITLE */ "关于 昆昆98",
-    /* LZ_STR_DLG_SETTINGS_TITLE */ "推理设置",
+    /* LZ_STR_DLG_ABOUT_TITLE */ "\xe5\x85\xb3\xe4\xba\x8e \xe6\x98\x86\xe6\x98\x86\x39\x38",
+    /* LZ_STR_DLG_SETTINGS_TITLE */ "\xe6\x8e\xa8\xe7\x90\x86\xe8\xae\xbe\xe7\xbd\xae",
     /* Half-width parentheses and colons throughout the Chinese table.
        Full-width ones are a full em wide with the glyph hugging one
        side, and in SimSun's 12-pixel BITMAP faces - which is what the
@@ -266,32 +266,33 @@ static const char *const LZ_STR_ZH[LZ_STR_COUNT] = {
        substitutes - that reads as a hole in the line. Chinese commas and
        full stops are left alone; the complaint is specific to the marks
        whose full-width form is mostly whitespace. */
-    /* LZ_STR_DLG_THINK */ "深度思考(think)(&T)",
-    /* LZ_STR_DLG_TEMPERATURE */ "温度(&P)",
-    /* LZ_STR_DLG_TEMP_CAP */ "温度上限 1.0",
-    /* LZ_STR_DLG_CONTEXT */ "上下文(&N)",
-    /* LZ_STR_DLG_CTX_NOTE */ "范围 512 - 32768，越大越占内存",
+    /* LZ_STR_DLG_THINK */ "\xe6\xb7\xb1\xe5\xba\xa6\xe6\x80\x9d\xe8\x80\x83(think)(&T)",
+    /* LZ_STR_DLG_TEMPERATURE */ "\xe6\xb8\xa9\xe5\xba\xa6(&P)",
+    /* LZ_STR_DLG_TEMP_CAP */ "\xe6\xb8\xa9\xe5\xba\xa6\xe4\xb8\x8a\xe9\x99\x90 1.0",
+    /* LZ_STR_DLG_CONTEXT */ "\xe4\xb8\x8a\xe4\xb8\x8b\xe6\x96\x87(&N)",
+    /* LZ_STR_DLG_CTX_NOTE */ "\xe8\x8c\x83\xe5\x9b\xb4 512 - 32768\xef\xbc\x8c\xe8\xb6\x8a\xe5\xa4\xa7\xe8\xb6\x8a\xe5\x8d\xa0\xe5\x86\x85\xe5\xad\x98",
     /* LZ_STR_DLG_TOPP */ "Top-p(&O)",
-    /* LZ_STR_DLG_REP */ "重复惩罚(&E)",
-    /* LZ_STR_DLG_MAXNEW */ "最大生成长度(&M)",
-    /* LZ_STR_DLG_MAXNEW_NOTE */ "-1 = 不限（直到 EOS 或上下文占满）",
-    /* LZ_STR_DLG_SYS */ "系统提示词(&S)",
+    /* LZ_STR_DLG_REP */ "\xe9\x87\x8d\xe5\xa4\x8d\xe6\x83\xa9\xe7\xbd\x9a(&E)",
+    /* LZ_STR_DLG_MAXNEW */ "\xe6\x9c\x80\xe5\xa4\xa7\xe7\x94\x9f\xe6\x88\x90\xe9\x95\xbf\xe5\xba\xa6(&M)",
+    /* LZ_STR_DLG_MAXNEW_NOTE */ "-1 = \xe4\xb8\x8d\xe9\x99\x90\xef\xbc\x88\xe7\x9b\xb4\xe5\x88\xb0 EOS \xe6\x88\x96\xe4\xb8\x8a\xe4\xb8\x8b\xe6\x96\x87\xe5\x8d\xa0\xe6\xbb\xa1\xef\xbc\x89",
+    /* LZ_STR_DLG_SYS */ "\xe7\xb3\xbb\xe7\xbb\x9f\xe6\x8f\x90\xe7\xa4\xba\xe8\xaf\x8d(&S)",
 
-    /* LZ_STR_DLG_OPEN_MODEL_TITLE */ "选择模型目录",
-    /* LZ_STR_DLG_SAVE_CHAT_TITLE */ "保存对话",
-    /* LZ_STR_DLG_OPEN_CHAT_TITLE */ "打开对话",
-    /* LZ_STR_DLG_TEXT_FILTER */ "文本文件 (*.txt)",
-    /* LZ_STR_FILTER_MODEL */ "昆昆98 模型 (model.bin)",
+    /* LZ_STR_DLG_OPEN_MODEL_TITLE */ "\xe9\x80\x89\xe6\x8b\xa9\xe6\xa8\xa1\xe5\x9e\x8b\xe7\x9b\xae\xe5\xbd\x95",
+    /* LZ_STR_DLG_SAVE_CHAT_TITLE */ "\xe4\xbf\x9d\xe5\xad\x98\xe5\xaf\xb9\xe8\xaf\x9d",
+    /* LZ_STR_DLG_OPEN_CHAT_TITLE */ "\xe6\x89\x93\xe5\xbc\x80\xe5\xaf\xb9\xe8\xaf\x9d",
+    /* LZ_STR_DLG_TEXT_FILTER */ "\xe6\x96\x87\xe6\x9c\xac\xe6\x96\x87\xe4\xbb\xb6 (*.txt)",
+    /* LZ_STR_FILTER_MODEL */ "\xe6\x98\x86\xe6\x98\x86\x39\x38 \xe6\xa8\xa1\xe5\x9e\x8b (model.bin)",
 
-    /* LZ_STR_STATE_NO_MODEL */ "未加载",
-    /* LZ_STR_STATE_LOADING */ "加载中…",
-    /* LZ_STR_STATE_READY */ "已加载",
-    /* LZ_STR_STATE_GENERATING */ "生成中",
-    /* LZ_STR_STATE_PREFILL */ "处理上下文",
-    /* LZ_STR_STATE_CTX */ "上下文",
+    /* LZ_STR_STATE_NO_MODEL */ "\xe6\x9c\xaa\xe5\x8a\xa0\xe8\xbd\xbd",
+    /* LZ_STR_STATE_LOADING */ "\xe5\x8a\xa0\xe8\xbd\xbd\xe4\xb8\xad\xe2\x80\xa6",
+    /* LZ_STR_STATE_READY */ "\xe5\xb7\xb2\xe5\x8a\xa0\xe8\xbd\xbd",
+    /* LZ_STR_STATE_GENERATING */ "\xe7\x94\x9f\xe6\x88\x90\xe4\xb8\xad",
+    /* LZ_STR_STATE_PREFILL */ "\xe5\xa4\x84\xe7\x90\x86\xe4\xb8\x8a\xe4\xb8\x8b\xe6\x96\x87",
+    /* LZ_STR_STATE_CTX */ "\xe4\xb8\x8a\xe4\xb8\x8b\xe6\x96\x87",
     /* The ZH table DOES translate this one - the state word is ordinary
-       Han and GBK-encodable. The cell uses a comma rather than a `·`
-       separator (the user asked to avoid dot separators), so it needs
+       Han and GBK-encodable. The cell uses a comma rather than a
+       middle-dot separator (the owner asked to avoid dot separators),
+       so it needs
        no mapping and cannot mojibake. What stays ASCII is the TOKEN
        UNIT "tok" and the "/s" - there is no standard localisation for
        a token count unit, and every token-count display in this
@@ -300,69 +301,69 @@ static const char *const LZ_STR_ZH[LZ_STR_COUNT] = {
     /* LZ_STR_STATE_TOKCELL */
         "\xe7\x94\x9f\xe6\x88\x90\xe4\xb8\xad %d tok, %.1f tok/s",
 
-    /* LZ_STR_SIDE_CAND */ "候选",
+    /* LZ_STR_SIDE_CAND */ "\xe5\x80\x99\xe9\x80\x89",
 
-    /* LZ_STR_SPEAKER_USER */ "你",
-    /* LZ_STR_SPEAKER_ASSISTANT */ "昆昆98",
-    /* LZ_STR_SYS_MODEL_LOADED */ "模型已加载: %s (运行状态 %dMB)",
-    /* LZ_STR_SIDE_MODEL */ "%s (运行状态 %dMB)",
-    /* LZ_STR_SYS_CTX_TRIMMED */ "上下文已裁剪",
-    /* LZ_STR_SYS_GEN_STOPPED */ "已停止生成",
-    /* LZ_STR_SYS_TEMP_SET */ "温度已设为 %s",
-    /* LZ_STR_SYS_THINK_ON */ "深度思考: 开",
-    /* LZ_STR_SYS_THINK_OFF */ "深度思考: 关",
+    /* LZ_STR_SPEAKER_USER */ "\xe4\xbd\xa0",
+    /* LZ_STR_SPEAKER_ASSISTANT */ "\xe6\x98\x86\xe6\x98\x86\x39\x38",
+    /* LZ_STR_SYS_MODEL_LOADED */ "\xe6\xa8\xa1\xe5\x9e\x8b\xe5\xb7\xb2\xe5\x8a\xa0\xe8\xbd\xbd: %s (\xe8\xbf\x90\xe8\xa1\x8c\xe7\x8a\xb6\xe6\x80\x81 %dMB)",
+    /* LZ_STR_SIDE_MODEL */ "%s (\xe8\xbf\x90\xe8\xa1\x8c\xe7\x8a\xb6\xe6\x80\x81 %dMB)",
+    /* LZ_STR_SYS_CTX_TRIMMED */ "\xe4\xb8\x8a\xe4\xb8\x8b\xe6\x96\x87\xe5\xb7\xb2\xe8\xa3\x81\xe5\x89\xaa",
+    /* LZ_STR_SYS_GEN_STOPPED */ "\xe5\xb7\xb2\xe5\x81\x9c\xe6\xad\xa2\xe7\x94\x9f\xe6\x88\x90",
+    /* LZ_STR_SYS_TEMP_SET */ "\xe6\xb8\xa9\xe5\xba\xa6\xe5\xb7\xb2\xe8\xae\xbe\xe4\xb8\xba %s",
+    /* LZ_STR_SYS_THINK_ON */ "\xe6\xb7\xb1\xe5\xba\xa6\xe6\x80\x9d\xe8\x80\x83: \xe5\xbc\x80",
+    /* LZ_STR_SYS_THINK_OFF */ "\xe6\xb7\xb1\xe5\xba\xa6\xe6\x80\x9d\xe8\x80\x83: \xe5\x85\xb3",
 
-    /* LZ_STR_ERR_TITLE */ "错误",
-    /* LZ_STR_ERR_NO_RICHEDIT */ "riched20.dll 与 riched32.dll 都加载不了，"
-                                    "昆昆98 没有它们就无法显示对话",
-    /* LZ_STR_ERR_NO_MODEL_BIN */ "该目录里没有 model.bin",
-    /* LZ_STR_ERR_NO_MODEL_LOADED */ "还没有加载模型 —— 用「打开模型」"
-                                    "(Ctrl+O) 或 /load <路径>",
-    /* LZ_STR_ERR_BUSY */ "正在生成，请先停止",
-    /* LZ_STR_ERR_UNKNOWN_CMD */ "未知命令: %s",
-    /* LZ_STR_ERR_BAD_TEMP */ "温度必须在 0 到 1.0 之间",
-    /* LZ_STR_ERR_BAD_CTX */ "上下文窗口必须在 512 到 32768 之间",
-    /* LZ_STR_ERR_BAD_TOPP */ "Top-p 必须在 0.05 到 1.0 之间",
-    /* LZ_STR_ERR_BAD_REP */ "重复惩罚必须在 1.0 到 1.5 之间",
-    /* LZ_STR_ERR_BAD_MAXNEW */ "最大生成长度必须是 -1，"
-                                    "或介于 16 与上下文窗口之间",
-    /* LZ_STR_ERR_BAD_ONOFF */ "请用 on 或 off",
-    /* LZ_STR_ERR_SAVE_FAILED */ "写不了这个文件",
-    /* LZ_STR_FIND_NOT_FOUND */ "找不到这段文字",
+    /* LZ_STR_ERR_TITLE */ "\xe9\x94\x99\xe8\xaf\xaf",
+    /* LZ_STR_ERR_NO_RICHEDIT */ "riched20.dll \xe4\xb8\x8e riched32.dll \xe9\x83\xbd\xe5\x8a\xa0\xe8\xbd\xbd\xe4\xb8\x8d\xe4\xba\x86\xef\xbc\x8c"
+                                    "\xe6\x98\x86\xe6\x98\x86\x39\x38 \xe6\xb2\xa1\xe6\x9c\x89\xe5\xae\x83\xe4\xbb\xac\xe5\xb0\xb1\xe6\x97\xa0\xe6\xb3\x95\xe6\x98\xbe\xe7\xa4\xba\xe5\xaf\xb9\xe8\xaf\x9d",
+    /* LZ_STR_ERR_NO_MODEL_BIN */ "\xe8\xaf\xa5\xe7\x9b\xae\xe5\xbd\x95\xe9\x87\x8c\xe6\xb2\xa1\xe6\x9c\x89 model.bin",
+    /* LZ_STR_ERR_NO_MODEL_LOADED */ "\xe8\xbf\x98\xe6\xb2\xa1\xe6\x9c\x89\xe5\x8a\xa0\xe8\xbd\xbd\xe6\xa8\xa1\xe5\x9e\x8b \xe2\x80\x94\xe2\x80\x94 \xe7\x94\xa8\xe3\x80\x8c\xe6\x89\x93\xe5\xbc\x80\xe6\xa8\xa1\xe5\x9e\x8b\xe3\x80\x8d"
+                                    "(Ctrl+O) \xe6\x88\x96 /load <\xe8\xb7\xaf\xe5\xbe\x84>",
+    /* LZ_STR_ERR_BUSY */ "\xe6\xad\xa3\xe5\x9c\xa8\xe7\x94\x9f\xe6\x88\x90\xef\xbc\x8c\xe8\xaf\xb7\xe5\x85\x88\xe5\x81\x9c\xe6\xad\xa2",
+    /* LZ_STR_ERR_UNKNOWN_CMD */ "\xe6\x9c\xaa\xe7\x9f\xa5\xe5\x91\xbd\xe4\xbb\xa4: %s",
+    /* LZ_STR_ERR_BAD_TEMP */ "\xe6\xb8\xa9\xe5\xba\xa6\xe5\xbf\x85\xe9\xa1\xbb\xe5\x9c\xa8 0 \xe5\x88\xb0 1.0 \xe4\xb9\x8b\xe9\x97\xb4",
+    /* LZ_STR_ERR_BAD_CTX */ "\xe4\xb8\x8a\xe4\xb8\x8b\xe6\x96\x87\xe7\xaa\x97\xe5\x8f\xa3\xe5\xbf\x85\xe9\xa1\xbb\xe5\x9c\xa8 512 \xe5\x88\xb0 32768 \xe4\xb9\x8b\xe9\x97\xb4",
+    /* LZ_STR_ERR_BAD_TOPP */ "Top-p \xe5\xbf\x85\xe9\xa1\xbb\xe5\x9c\xa8 0.05 \xe5\x88\xb0 1.0 \xe4\xb9\x8b\xe9\x97\xb4",
+    /* LZ_STR_ERR_BAD_REP */ "\xe9\x87\x8d\xe5\xa4\x8d\xe6\x83\xa9\xe7\xbd\x9a\xe5\xbf\x85\xe9\xa1\xbb\xe5\x9c\xa8 1.0 \xe5\x88\xb0 1.5 \xe4\xb9\x8b\xe9\x97\xb4",
+    /* LZ_STR_ERR_BAD_MAXNEW */ "\xe6\x9c\x80\xe5\xa4\xa7\xe7\x94\x9f\xe6\x88\x90\xe9\x95\xbf\xe5\xba\xa6\xe5\xbf\x85\xe9\xa1\xbb\xe6\x98\xaf -1\xef\xbc\x8c"
+                                    "\xe6\x88\x96\xe4\xbb\x8b\xe4\xba\x8e 16 \xe4\xb8\x8e\xe4\xb8\x8a\xe4\xb8\x8b\xe6\x96\x87\xe7\xaa\x97\xe5\x8f\xa3\xe4\xb9\x8b\xe9\x97\xb4",
+    /* LZ_STR_ERR_BAD_ONOFF */ "\xe8\xaf\xb7\xe7\x94\xa8 on \xe6\x88\x96 off",
+    /* LZ_STR_ERR_SAVE_FAILED */ "\xe5\x86\x99\xe4\xb8\x8d\xe4\xba\x86\xe8\xbf\x99\xe4\xb8\xaa\xe6\x96\x87\xe4\xbb\xb6",
+    /* LZ_STR_FIND_NOT_FOUND */ "\xe6\x89\xbe\xe4\xb8\x8d\xe5\x88\xb0\xe8\xbf\x99\xe6\xae\xb5\xe6\x96\x87\xe5\xad\x97",
 
     /* LZ_STR_HELP_BODY */
-        "/load <路径>   打开模型\n"
-        "/save          保存对话\n"
-        "/clear         清空对话\n"
-        "/stop          停止生成\n"
-        "/temp <0-1>    温度 (1.0 是硬上限)\n"
-        "/think on|off  深度思考开关\n"
-        "/help          列出命令",
+        "/load <\xe8\xb7\xaf\xe5\xbe\x84>   \xe6\x89\x93\xe5\xbc\x80\xe6\xa8\xa1\xe5\x9e\x8b\n"
+        "/save          \xe4\xbf\x9d\xe5\xad\x98\xe5\xaf\xb9\xe8\xaf\x9d\n"
+        "/clear         \xe6\xb8\x85\xe7\xa9\xba\xe5\xaf\xb9\xe8\xaf\x9d\n"
+        "/stop          \xe5\x81\x9c\xe6\xad\xa2\xe7\x94\x9f\xe6\x88\x90\n"
+        "/temp <0-1>    \xe6\xb8\xa9\xe5\xba\xa6 (1.0 \xe6\x98\xaf\xe7\xa1\xac\xe4\xb8\x8a\xe9\x99\x90)\n"
+        "/think on|off  \xe6\xb7\xb1\xe5\xba\xa6\xe6\x80\x9d\xe8\x80\x83\xe5\xbc\x80\xe5\x85\xb3\n"
+        "/help          \xe5\x88\x97\xe5\x87\xba\xe5\x91\xbd\xe4\xbb\xa4",
 
     /* LZ_STR_ABOUT_BODY */
-        "昆昆98 (Kunkun98)\n"
-        "for Windows, 版本 0.1\n"
+        "\xe6\x98\x86\xe6\x98\x86\x39\x38 (Kunkun98)\n"
+        "for Windows, \xe7\x89\x88\xe6\x9c\xac 0.1\n"
         "\n"
-        "隐空间混合专家 + 线性注意力\n"
-        "引擎: llama98",
+        "\xe9\x9a\x90\xe7\xa9\xba\xe9\x97\xb4\xe6\xb7\xb7\xe5\x90\x88\xe4\xb8\x93\xe5\xae\xb6 + \xe7\xba\xbf\xe6\x80\xa7\xe6\xb3\xa8\xe6\x84\x8f\xe5\x8a\x9b\n"
+        "\xe5\xbc\x95\xe6\x93\x8e: llama98",
     /* Same magic line as the English table, on purpose - see the EN
        table's comment on this entry. */
     /* LZ_STR_SAVE_HEADER */ LZ_CHATFILE_MAGIC,
 
     /* System Info - see the EN table's comment. Mechanism from the
        decompiled Winword.exe, wording ours. */
-    /* LZ_STR_BTN_SYSINFO */ "系统信息(&I)...",
-    /* LZ_STR_DLG_SYSINFO_TITLE */ "昆昆98 系统信息",
+    /* LZ_STR_BTN_SYSINFO */ "\xe7\xb3\xbb\xe7\xbb\x9f\xe4\xbf\xa1\xe6\x81\xaf(&I)...",
+    /* LZ_STR_DLG_SYSINFO_TITLE */ "\xe6\x98\x86\xe6\x98\x86\x39\x38 \xe7\xb3\xbb\xe7\xbb\x9f\xe4\xbf\xa1\xe6\x81\xaf",
     /* LZ_STR_SYSINFO_OS */ "Windows: %s",
     /* LZ_STR_SYSINFO_CPU */ "CPU: %s",
-    /* LZ_STR_SYSINFO_MEM */ "内存: %s",
-    /* LZ_STR_SYSINFO_DISK */ "磁盘: %s",
-    /* LZ_STR_SYSINFO_TIER */ "算子: %s",
+    /* LZ_STR_SYSINFO_MEM */ "\xe5\x86\x85\xe5\xad\x98: %s",
+    /* LZ_STR_SYSINFO_DISK */ "\xe7\xa3\x81\xe7\x9b\x98: %s",
+    /* LZ_STR_SYSINFO_TIER */ "\xe7\xae\x97\xe5\xad\x90: %s",
 
     /* Think-block dynamic temperature - same B mnemonic as
        the English table, kept in parens per the ZH convention. */
-    /* LZ_STR_DLG_THINK_TEMP */ "思考块温度(&B)",
-    /* LZ_STR_ERR_BAD_THINK_TEMP */ "思考块温度必须在 0 到 1.0 之间",
+    /* LZ_STR_DLG_THINK_TEMP */ "\xe6\x80\x9d\xe8\x80\x83\xe5\x9d\x97\xe6\xb8\xa9\xe5\xba\xa6(&B)",
+    /* LZ_STR_ERR_BAD_THINK_TEMP */ "\xe6\x80\x9d\xe8\x80\x83\xe5\x9d\x97\xe6\xb8\xa9\xe5\xba\xa6\xe5\xbf\x85\xe9\xa1\xbb\xe5\x9c\xa8 0 \xe5\x88\xb0 1.0 \xe4\xb9\x8b\xe9\x97\xb4",
 
     /* Apache-2.0 appendix boilerplate. The license text stays in its
        original English in BOTH tables - a legal text is not translated
@@ -372,7 +373,7 @@ static const char *const LZ_STR_ZH[LZ_STR_COUNT] = {
     /* LZ_STR_ABOUT_LICENSE */
         "Copyright (c) 2026 Lunzima\n"
         "Licensed under the Apache License, Version 2.0",
-    /* LZ_STR_CAPTION_UNTITLED */ "未命名对话"
+    /* LZ_STR_CAPTION_UNTITLED */ "\xe6\x9c\xaa\xe5\x91\xbd\xe5\x90\x8d\xe5\xaf\xb9\xe8\xaf\x9d"
 };
 
 /* Static, not stack: the target's default stack is small enough that a

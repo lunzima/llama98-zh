@@ -65,7 +65,12 @@ SCAN="Makefile src/*.c src/*.h gui/*.c gui/*.h common/*.c common/*.h"
 #                            include-block reshuffle. Their commit
 #                            carries it; baselined rather than left
 #                            silently red.
-BASELINE="src/err.c:138 gui/localized_strings.c:100 src/forward.c:1 src/model.c:1"
+#   The two message tables used to be baselined at 138 and 100 CJK
+#   lines. They are 0 now: Visual C++ 4.0 rejects raw UTF-8 in a string
+#   literal, so build/utf8_escape.py rewrote every one as \xNN and the
+#   source is ASCII throughout. The allowance goes with them - left at
+#   138 it would let the whole table come back without a word.
+BASELINE="src/forward.c:1 src/model.c:1"
 
 FAIL=0
 TOTAL=0
