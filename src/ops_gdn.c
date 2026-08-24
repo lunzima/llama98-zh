@@ -1849,8 +1849,9 @@ static void gdn_p2_row_simd(const int8_t *ph_row,
         }
         /* A whole statement in each arm rather than one statement split
            across the #if: half a statement per branch reads as a
-           conditional expression and is not one, and the declaration it
-           used to carry sat after a statement, which C89 does not have. */
+           conditional expression and is not one. plg is declared at the
+           top of the block because C89 has no declaration after a
+           statement. */
 #if LZ_GDN_STATE_2PLANE
         plg = pl_row + gg * 32;
 #else
