@@ -140,7 +140,7 @@ typedef struct {
        1.701, so the split is essentially additive). Spending the same
        bit width on both means overpaying for keys.
 
-       WHICH SIDE IS EXPENSIVE DEPENDS ON THE LANGUAGE. Decomposed with
+       Which side is expensive depends on the language. Decomposed with
        the f32 arm as reference, 1024 tokens, 4-bit on one side at a time:
 
                           K side    V side    joint
@@ -222,7 +222,7 @@ typedef struct {
        measurement that retired them, and the reason the keep-both-tiers
        rule does not protect them.
 
-       ONE OPEN QUESTION SURVIVES THE FORMAT: whether the residual
+       One open question survives the format: whether the residual
        Chinese gap lived in the VALUE reconstruction rather than in key
        scores. Answered on kunkun98-recover-r20, 20,885 positions, f32
        arm as reference:
@@ -264,7 +264,7 @@ typedef struct {
     float *kda_vc;                /* (nt_cap * lin_value_dim) post-conv, post-activation */
     float *kda_gate_lat;         /* (nt_cap * kda_gate_rank) f_a_proj output */
     float *kda_gate;              /* (nt_cap * lin_n_v_heads * lin_k_head_dim) decay,
-                                      ALREADY EXPONENTIATED (gt = exp(g), same
+                                      already exponentiated (gt = exp(g), same
                                       convention lz_gdn_step's scalar gt uses) */
 
     /* latent MoE scratch (LZLayer.ffn_moe layers only). TWO WIDTHS, and
@@ -413,7 +413,7 @@ typedef struct {
        (unrelated LZStateCkpt, see its own comment below, keeps working
        against ONE slot's worth unchanged).
 
-       WHY THIS COSTS ZERO EXTRA BANDWIDTH, ONLY MEMORY (the argument
+       Why this costs zero extra bandwidth, only memory (the argument
        this whole design depends on - see lz_gdn_step's header comment
        in ops.h for the byte-count proof): every recurrent step here
        ALREADY reads the entire per-head state once and rewrites the
@@ -477,7 +477,7 @@ typedef struct {
        directions, so the zero means the store did not run rather than
        the counter not being reached.
 
-       SO THE FLOAT TRIO IS DEAD MEMORY WHENEVER THE INT EXIT FIRES, and
+       So the float trio is dead memory whenever the int exit fires, and
        it is kept anyway: 3 x nt x dim floats is 12,288 bytes on kmr20,
        0.33% of a 3.7 MB run state, while dropping it means allocating
        on a predicate that is not final until conv_fixed_build runs,
@@ -485,7 +485,7 @@ typedef struct {
        a crash on the fallback path, not a wrong number. Priced and
        declined, not overlooked.
 
-       TWO PROBES THAT CANNOT SETTLE THIS, recorded so nobody repeats
+       Two probes that cannot settle this, recorded so nobody repeats
        them: poisoning the buffers at allocation (everything here is
        written before it is read, so the poison never survives to a
        read - and the control, poisoning a live buffer, came back green
@@ -767,7 +767,7 @@ int  lz_ckpt_restore(const LZStateCkpt *ck, LZRunState *s, const LZModel *m,
    clamped up to 1 (never 0) when m->mtp is NULL, since a model with no
    MTP head can never run --spec regardless of what is passed here.
 
-   THIS IS A SIZING HINT, NOT A CONTRACT lz_generate_resume enforces on
+   This is a sizing hint, not a contract lz_generate_resume enforces on
    its own: opts->spec_k must not exceed s->ssm_ring_depth - 1, checked
    there (LZ_ERR_SPEC_K_RANGE) precisely because a k too large for what
    was allocated here would silently alias ring slots via `% ring_depth`
