@@ -406,6 +406,26 @@ static const double LZ_US_SCALE = 1000.0;
  * So this helps the arms that do run them - the float reference, and
  * any head_dim the fixed kernel declines - and is inert on the shipping
  * path. That is worth having and is not worth describing as a speedup. */
+/* One row of the Q8 weighted sum: dst += a * dequantised(vt).
+ *
+ * The two accumulation arms in forward_attn - the high plane into out,
+ * and the low plane into wsum_lo - had this loop written out
+ * identically. They differ in base pointer, destination and start
+ * position, not in the arithmetic.
+ *
+ * FIVE PARAMETERS, and that is the point. The whole loop does not get
+ * extracted the same way: it would need base, scale, kvd, kvh, hd,
+ * scale factor, att, win_t0, pos and slot - ten or more, on a target
+ * with eight registers, where every parameter is a stack slot and every
+ * use is a load. lz_generate_resume_ex is 58% data movement for exactly
+ * that reason. This takes the piece whose parameter count stays small
+ * and whose cost amortises over hd elements. */
+static void wsum_q8_row(float *dst, const int8_t *vt, const float *vts,
+                        float a, int hd) {
+    int d;
+    for (d = 0; d < hd; d++) dst[d] += a * (float)vt[d] * vts[d / 32];
+}
+
 static int kv_slot_next(const LZRunState *s, int slot) {
     return (slot + 1 == s->attn_sink + s->kv_ring) ? s->attn_sink : slot + 1;
 }
@@ -2270,7 +2290,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                 float a = s->att[t];
                 /* Convert, two multiplies and an add per element. */
                 LZ_FCX(LZ_FC_ATTN_WSUM, 2 * hd, hd, 0, hd, 0);
-                for (d = 0; d < hd; d++) out[d] += a * (float)vt[d] * vts[d / 32];
+                wsum_q8_row(out, vt, vts, a, hd);
             }
 #if (LZ_ATTN_FIXED & 2)
             }
@@ -2300,8 +2320,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
                     /* Same shape as the wsum loop above: convert, two
                        multiplies and an add per element. */
                     LZ_FCX(LZ_FC_ATTN_WSUM, 2 * hd, hd, 0, hd, 0);
-                    for (d = 0; d < hd; d++)
-                        s->wsum_lo[d] += a * (float)vt[d] * vts[d / 32];
+                    wsum_q8_row(s->wsum_lo, vt, vts, a, hd);
                 }
 #if (LZ_ATTN_FIXED & 2)
                 }
