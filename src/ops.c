@@ -1820,7 +1820,19 @@ int lz_epi_post_e(const LZTensor *w) {
    its row loop. Not a float op, so the census cannot see it; on a P5,
    which is the target, a call and a switch per element is not nothing.
    `e` cannot be hoisted the same way and is not: it is
-   -g_epi_xe[tk] - w->sexp[row], genuinely per element. */
+   -g_epi_xe[tk] - w->sexp[row], genuinely per element.
+
+   THIS IS THE MINORITY EXIT. Counted on kmr20/zh, 603 tokens:
+   epi_fixed_raw runs 75,080,736 times and hands its (s, e) pair to
+   epi_q41_fixed 27,477,504 times, epi_fixed_align_i16 5,306,400, and
+   this float conversion 8,644,608 - 11.5%. The integer exits are the
+   main road already.
+
+   What keeps those 8.6M is not a missing operator but the two call
+   sites in ops_matmul.c, which write out->o, a float buffer their own
+   callers read. Same shape as lz_rmsnorm's five consumers: the int
+   entry exists, and the work left is in whoever is asking for a
+   float. */
 float epi_fixed(const int32_t *accb, const LZTensor *w, int row,
                        int tk, int ng, int r, int pe) {
     int e;
