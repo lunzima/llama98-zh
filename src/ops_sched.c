@@ -265,14 +265,14 @@ int lz_conv_mode(void) {
    that the kernels branch on; lz_attn_int is whether the wsum hands its
    int64 accumulator straight to lz_quantize_q8_int64 instead of
    draining to float and letting the quantizer re-round. The int exit
-   rides on the fixed wsum, so they cannot disagree and no longer have
-   separate storage to disagree in.
+   rides on the fixed wsum, so they cannot disagree - one global answers
+   both, and there is no second place for them to diverge.
 
-   The int exit was the last integer tier still off by default. Over
-   3786 paired positions (kmr20, kunmoe-v2-t2-probe, _armgate2 x zh+en)
-   it is +5.09e-04 at t=0.65 against the old default - indistinguishable
-   - for 8,064 fewer float ops per forward, of which the sigmoid row
-   alone drops 10,688 to 448. */
+   WHAT IT COSTS, measured over 3786 paired positions (kmr20,
+   kunmoe-v2-t2-probe, _armgate2 x zh+en): +5.09e-04 NLL at t=0.65
+   against the float exit - indistinguishable - for 8,064 fewer float
+   ops per forward, of which the sigmoid row alone accounts for 10,688
+   down to 448. */
 int lz_attn_mode(void) { return lz_float_ref_g ? 0 : LZ_ATTN_FIXED; }
 
 int lz_attn_int(void) { return !lz_float_ref_g; }
