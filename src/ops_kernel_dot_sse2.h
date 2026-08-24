@@ -400,3 +400,38 @@ static __m128i part32_q16(const int16_t *w, const int16_t *x) {
                        _mm_loadu_si128((const __m128i *)(const void *)(x + 24))));
     return _mm_add_epi32(s0, s1);
 }
+
+/* The same sub-block against two tokens - and this is the SMALLEST pair
+ * of the five, which is worth saying plainly rather than implying the
+ * gain the other four get.
+ *
+ * int16 weights need no unpack at all: the weight side is four loads and
+ * nothing else, so that is the entire saving. Against q6_1's nineteen
+ * instructions, t2's fourteen, q4_1's eight and q8_0's six. It is here
+ * because a partial ISA capability obliges a kernel, not because the
+ * arithmetic argues for one, and whether four shared loads clear the
+ * wider prologue is what the knob is for.
+ *
+ * Bit-identical to two part32_q16 calls: same four madd per token into
+ * that token's own accumulator, same order, no reassociation. */
+static void part32_q16_2(const int16_t *w, const int16_t *xa,
+                         const int16_t *xb, __m128i *pa, __m128i *pb) {
+    __m128i w0 = _mm_loadu_si128((const __m128i *)(const void *)w);
+    __m128i w1 = _mm_loadu_si128((const __m128i *)(const void *)(w + 8));
+    __m128i w2 = _mm_loadu_si128((const __m128i *)(const void *)(w + 16));
+    __m128i w3 = _mm_loadu_si128((const __m128i *)(const void *)(w + 24));
+    __m128i a0 = _mm_loadu_si128((const __m128i *)(const void *)xa);
+    __m128i a1 = _mm_loadu_si128((const __m128i *)(const void *)(xa + 8));
+    __m128i a2 = _mm_loadu_si128((const __m128i *)(const void *)(xa + 16));
+    __m128i a3 = _mm_loadu_si128((const __m128i *)(const void *)(xa + 24));
+    __m128i b0 = _mm_loadu_si128((const __m128i *)(const void *)xb);
+    __m128i b1 = _mm_loadu_si128((const __m128i *)(const void *)(xb + 8));
+    __m128i b2 = _mm_loadu_si128((const __m128i *)(const void *)(xb + 16));
+    __m128i b3 = _mm_loadu_si128((const __m128i *)(const void *)(xb + 24));
+    *pa = _mm_add_epi32(
+              _mm_add_epi32(_mm_madd_epi16(w0, a0), _mm_madd_epi16(w1, a1)),
+              _mm_add_epi32(_mm_madd_epi16(w2, a2), _mm_madd_epi16(w3, a3)));
+    *pb = _mm_add_epi32(
+              _mm_add_epi32(_mm_madd_epi16(w0, b0), _mm_madd_epi16(w1, b1)),
+              _mm_add_epi32(_mm_madd_epi16(w2, b2), _mm_madd_epi16(w3, b3)));
+}

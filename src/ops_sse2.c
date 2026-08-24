@@ -2176,6 +2176,77 @@ static int32_t dot32_q16_sse2a(const int16_t *w, const int16_t *x) {
     return lz_dot32_q16_sse2_asm(w, x);
 }
 
+/* Two tokens, one weight load - the Watcom twin of part32_q16_2, and
+   the smallest pair of the five formats.
+
+   int16 weights need no unpack, so what the pair shares is four
+   movdqu and nothing else. xmm0-xmm3 hold the weight quarters for the
+   duration, xmm4/xmm5 are the two accumulators, xmm6 the activation and
+   xmm7 the multiply temp pmaddwd destroys - all eight in use, none
+   spilled, which is what makes holding the weights the whole trick.
+
+   Bit-identical to two lz_dot32_q16_sse2_asm calls: same four pmaddwd
+   per token into that token's own accumulator, same fold order. */
+extern void lz_dot32_q16_sse2_asm_2(const int16_t *w, const int16_t *xa,
+                                    const int16_t *xb,
+                                    int32_t *oa, int32_t *ob);
+#pragma aux lz_dot32_q16_sse2_asm_2 = \
+    ".686" \
+    "pxor      xmm4, xmm4" \
+    "pxor      xmm5, xmm5" \
+    "movdqu    xmm0, [eax]" \
+    "movdqu    xmm1, [eax+16]" \
+    "movdqu    xmm2, [eax+32]" \
+    "movdqu    xmm3, [eax+48]" \
+    "movdqu    xmm6, [edx]" \
+    "movdqa    xmm7, xmm0" \
+    "pmaddwd   xmm7, xmm6" \
+    "paddd     xmm4, xmm7" \
+    "movdqu    xmm6, [edx+16]" \
+    "movdqa    xmm7, xmm1" \
+    "pmaddwd   xmm7, xmm6" \
+    "paddd     xmm4, xmm7" \
+    "movdqu    xmm6, [edx+32]" \
+    "movdqa    xmm7, xmm2" \
+    "pmaddwd   xmm7, xmm6" \
+    "paddd     xmm4, xmm7" \
+    "movdqu    xmm6, [edx+48]" \
+    "movdqa    xmm7, xmm3" \
+    "pmaddwd   xmm7, xmm6" \
+    "paddd     xmm4, xmm7" \
+    "movdqu    xmm6, [ebx]" \
+    "movdqa    xmm7, xmm0" \
+    "pmaddwd   xmm7, xmm6" \
+    "paddd     xmm5, xmm7" \
+    "movdqu    xmm6, [ebx+16]" \
+    "movdqa    xmm7, xmm1" \
+    "pmaddwd   xmm7, xmm6" \
+    "paddd     xmm5, xmm7" \
+    "movdqu    xmm6, [ebx+32]" \
+    "movdqa    xmm7, xmm2" \
+    "pmaddwd   xmm7, xmm6" \
+    "paddd     xmm5, xmm7" \
+    "movdqu    xmm6, [ebx+48]" \
+    "movdqa    xmm7, xmm3" \
+    "pmaddwd   xmm7, xmm6" \
+    "paddd     xmm5, xmm7" \
+    "movdqa    xmm6, xmm4" \
+    "psrldq    xmm6, 8" \
+    "paddd     xmm4, xmm6" \
+    "movdqa    xmm6, xmm4" \
+    "psrldq    xmm6, 4" \
+    "paddd     xmm4, xmm6" \
+    "movd      [ecx], xmm4" \
+    "movdqa    xmm6, xmm5" \
+    "psrldq    xmm6, 8" \
+    "paddd     xmm5, xmm6" \
+    "movdqa    xmm6, xmm5" \
+    "psrldq    xmm6, 4" \
+    "paddd     xmm5, xmm6" \
+    "movd      [esi], xmm5" \
+    __parm [__eax] [__edx] [__ebx] [__ecx] [__esi] \
+    __modify [8087]
+
 extern void lz_dot128_q16_sse2_asm(const int16_t *w, const int16_t *x, int32_t *out4);
 #pragma aux lz_dot128_q16_sse2_asm = \
     ".686" \
@@ -2279,7 +2350,7 @@ extern void lz_dot128_q16_sse2_asm(const int16_t *w, const int16_t *x, int32_t *
     __modify [8087]
 
 /* row_q16_sse2_asm: ALREADY the real call boundary (LZ_ROW_Q16,
-   src/ops.c). No pairing on this format at all (matches T2's shape). */
+   src/ops.c). */
 void row_q16_sse2_asm(int32_t *acc32, const void *w4, const void *w2,
                       const int16_t *xw, int nb, int nt, int in_dim,
                       const void *pf_end, const void *pf_end2) {
@@ -2290,6 +2361,23 @@ void row_q16_sse2_asm(int32_t *acc32, const void *w4, const void *w2,
     for (tk = 0; tk < nt; tk++) {
         const int16_t *xwt = xw + (size_t)tk * in_dim;
         int32_t *acc = acc32 + (size_t)tk * nb;
+        /* Pair before grouping, as every other row kernel here does.
+           Smallest pair of the five - int16 needs no unpack, so four
+           shared loads is all of it. */
+        if (nt - tk >= 2 && lz_pair_mode()) {
+            const int16_t *xw2 = xwt + in_dim;
+            int32_t *accb = acc + nb;
+            int gp;
+            for (gp = 0; gp < nb; gp++) {
+                LZ_Q16_PF(gp);
+                lz_dot32_q16_sse2_asm_2(wr + (size_t)gp * 32,
+                                        xwt + (size_t)gp * 32,
+                                        xw2 + (size_t)gp * 32,
+                                        acc + gp, accb + gp);
+            }
+            tk++;
+            continue;
+        }
 #if LZ_SSE2_GROUP
         if ((nb & 3) == 0) LZ_Q16_GROUP4(lz_dot128_q16_sse2_asm);
 #else
@@ -2705,6 +2793,45 @@ void row_q16_sse2_intrin(int32_t *acc32, const void *w4, const void *w2,
     for (tk = 0; tk < nt; tk++) {
         const int16_t *xwt = xw + (size_t)tk * in_dim;
         int32_t *acc = acc32 + (size_t)tk * nb;
+        /* Pair and group together, as q8_0 and q4_1 do at this tier.
+           The smallest pair of the five: int16 weights need no unpack,
+           so four shared loads is the whole saving. */
+        if (tk + 1 < nt && g_pair) {
+            const int16_t *xw2 = xwt + in_dim;
+            int32_t *accb = acc + nb;
+            for (g = 0; g + 3 < nb; g += 4) {
+                __m128i pa0, pa1, pa2, pa3, pb0, pb1, pb2, pb3;
+                part32_q16_2(wr + (size_t)(g + 0) * 32,
+                             xwt + (size_t)(g + 0) * 32,
+                             xw2 + (size_t)(g + 0) * 32, &pa0, &pb0);
+                part32_q16_2(wr + (size_t)(g + 1) * 32,
+                             xwt + (size_t)(g + 1) * 32,
+                             xw2 + (size_t)(g + 1) * 32, &pa1, &pb1);
+                part32_q16_2(wr + (size_t)(g + 2) * 32,
+                             xwt + (size_t)(g + 2) * 32,
+                             xw2 + (size_t)(g + 2) * 32, &pa2, &pb2);
+                part32_q16_2(wr + (size_t)(g + 3) * 32,
+                             xwt + (size_t)(g + 3) * 32,
+                             xw2 + (size_t)(g + 3) * 32, &pa3, &pb3);
+                _mm_storeu_si128((__m128i *)(void *)(acc + g),
+                                 fold4_sse2(pa0, pa1, pa2, pa3));
+                _mm_storeu_si128((__m128i *)(void *)(accb + g),
+                                 fold4_sse2(pb0, pb1, pb2, pb3));
+            }
+            for (; g < nb; g++) {
+                __m128i pa, pb;
+                part32_q16_2(wr + (size_t)g * 32, xwt + (size_t)g * 32,
+                             xw2 + (size_t)g * 32, &pa, &pb);
+                pa = _mm_add_epi32(pa, _mm_srli_si128(pa, 8));
+                pa = _mm_add_epi32(pa, _mm_srli_si128(pa, 4));
+                acc[g] = _mm_cvtsi128_si32(pa);
+                pb = _mm_add_epi32(pb, _mm_srli_si128(pb, 8));
+                pb = _mm_add_epi32(pb, _mm_srli_si128(pb, 4));
+                accb[g] = _mm_cvtsi128_si32(pb);
+            }
+            tk++;
+            continue;
+        }
         for (g = 0; g + 3 < nb; g += 4) {
             _mm_storeu_si128((__m128i *)(void *)(acc + g),
                 fold4_sse2(
