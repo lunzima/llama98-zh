@@ -3323,8 +3323,14 @@ lz_i64 lz_epi_mac_i16_sse2(const int32_t *a, const int16_t *m, int n) {
     for (; g + 3 < n; g += 4) {
         __m128i av  = _mm_loadu_si128((const __m128i *)(const void *)(a + g));
         __m128i mv  = _mm_loadl_epi64((const __m128i *)(const void *)(m + g));
-        __m128i m32 = _mm_and_si128(_mm_unpacklo_epi16(mv, zero), lo16);
-        __m128i ah  = _mm_and_si128(_mm_srai_epi32(av, 16), lo16);
+        /* No mask on either of these two, and both used to carry one.
+           punpcklwd against zero already leaves the high half clear, and
+           a LOGICAL shift down by 16 is what "keep the top halfword,
+           zero above it" is - psrad followed by an AND is the same two
+           bits of work spelled in two instructions. Only als needs a
+           real mask, because its high half is live data. */
+        __m128i m32 = _mm_unpacklo_epi16(mv, zero);
+        __m128i ah  = _mm_srli_epi32(av, 16);
         __m128i als = _mm_and_si128(av, lo16);
         __m128i bb  = _mm_and_si128(_mm_srli_epi32(av, 15), one);
         __m128i pa  = _mm_madd_epi16(ah,  m32);
