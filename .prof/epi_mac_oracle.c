@@ -17,16 +17,21 @@
  * signs handled explicitly - so agreement means two independent
  * derivations agree, not that one function was called twice.
  *
- * Builds, all four verified to run:
+ * Builds, all five verified to run:
  *
  *   gcc -O2 -std=c99 -Wall -Wextra -msse2 -Isrc \
  *       .prof/epi_mac_oracle.c -o /tmp/epi_oracle
  *   ... -DEPI_MUT_SIGNED_LOW ...             must FAIL (25 mismatches)
  *   ... -DEPI_LINK_SHIPPED -DLZ_SSE2_TU=1 .prof/epi_mac_oracle.c \
  *       src/ops_sse2.c src/ops_sched.c src/cpucheck.c src/err.c
+ *   bash .prof/epi_watcom_gate.sh            the Watcom SSE2 pragma
  *   bash .prof/epi_arm_gate.sh               the ARM kernel, under QEMU
  *
- * The three extra TUs in the link mode are ops_sse2.c's own references
+ * The last three carry the SAME case count as the first, which is the
+ * point: gcc intrinsics, a Watcom #pragma aux and ARMv5TE assembly are
+ * held to one predicate rather than to three that resemble each other.
+ *
+ * The three extra TUs in the link modes are ops_sse2.c's own references
  * (g_pair, lz_cpuid1_edx, lz_err_fmt) reached from functions this
  * harness never calls. They are listed rather than stubbed because a
  * stub is a second definition of engine state, and mingw's .refptr

@@ -51,6 +51,12 @@ HARNESSES=$(ls .prof/*_xcheck.sh 2>/dev/null | grep -v "wbuild_xcheck")
 #   f32mm              matmul_f32
 #   q8_0 q4_1 q6_1
 #   q16_0 t2           rowdot_xcheck           (six slots, both builds)
+#   epi                epi_xcheck              (gcc / Watcom, via one
+#                                              oracle over identical
+#                                              inputs - see its header
+#                                              for why that is a
+#                                              comparison and not two
+#                                              unrelated green runs)
 #
 # The five row kernels were the gap, and they are exactly the code the
 # end-to-end fixture reaches least - 47.57% of ops_kernel_dot_mmx.h.
@@ -58,7 +64,7 @@ HARNESSES=$(ls .prof/*_xcheck.sh 2>/dev/null | grep -v "wbuild_xcheck")
 # UNCOVERED is printed every run rather than kept in a comment, so
 # "every harness green" cannot be read as "every operator compared"
 # while it has entries.
-UNCOVERED="recur epi"
+UNCOVERED="recur"
 
 P=0; F=0; S=0
 for h in $HARNESSES; do

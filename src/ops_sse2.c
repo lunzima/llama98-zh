@@ -2522,6 +2522,116 @@ void lz_wsum_pair_sse2(const int8_t *rowA, const int8_t *rowB,
     lz_wsum_pair_sse2_asm(rowA, rowB, coef, acc32);
 }
 
+/* ---- epi's int32 x int16 -> int64 accumulation, SSE2 tier ------------ */
+
+/* Twin of the intrinsics body in the gcc branch below, which carries the
+   derivation: three madds on a carry-free 16-bit split, the borrow
+   joining ah in int32 rather than in a lane it would overflow.
+
+   WHAT IS HAND-WRITTEN HERE THAT gcc COULD NOT DO. Both constants stay
+   in registers. gcc rebuilds zero and 0xFFFF inside the loop - pxor,
+   then pcmpeqd plus psrld - because two accumulator pairs and four live
+   temporaries already fill eight XMM registers and it has nowhere to
+   hoist them to. The register map below reserves xmm2 and xmm3 for them
+   and spends xmm4-xmm7 on the group, which fits exactly:
+
+     xmm0  s_hi   accumulator, 2 x int64      xmm4  a, then als
+     xmm1  s_als  accumulator, 2 x int64      xmm5  m widened, then a copy
+     xmm2  zero                               xmm6  the ah+b product
+     xmm3  0x0000FFFF per lane                xmm7  b, then a sign mask
+
+   31 instructions per four elements - 7.75 an element, against gcc's
+   8.75 for the same algorithm and 8.00 for the scalar loop. The four
+   saved against gcc are the two constants it rebuilds every group; the
+   rest is the same body. It is a small win on count and a large one on
+   branches, which is the whole argument for a vector body here: one
+   back edge per four elements instead of four.
+
+   NO 16-BYTE ALIGNMENT IS ASSUMED. movdqu on a, movq on m - the caller
+   is epi_q41_join, whose zero plane starts at an arbitrary row offset.
+
+   b WITHOUT A CONSTANT: pslld 16 then psrld 31 leaves bit 15 of a in
+   bit 0 and nothing else set, which is the same three instructions as
+   copy/shift/mask and one fewer live register. That is what pays for
+   0xFFFF staying resident.
+
+   The epilogue folds each accumulator's two lanes with pshufd 0x4E
+   rather than psrldq, matching lz_amax32_sse2_asm, and does the
+   `(s_hi << 16) + s_als` join in the vector unit so only one 64-bit
+   value crosses to edx:eax.
+
+   Whole groups only. The wrapper's tail is the plain product, because
+   ((ah + b) << 16) + als IS a. */
+extern lz_i64 lz_epi_mac_i16_sse2_asm(const int32_t *a, const int16_t *m,
+                                      int nb);
+#pragma aux lz_epi_mac_i16_sse2_asm =   \
+    ".686"                              \
+    "pxor      xmm0, xmm0"              \
+    "pxor      xmm1, xmm1"              \
+    "pxor      xmm2, xmm2"              \
+    "pcmpeqd   xmm3, xmm3"              \
+    "psrld     xmm3, 16"                \
+    "EPIG:"                             \
+    "movdqu    xmm4, [eax]"             \
+    "movq      xmm5, [edx]"             \
+    "punpcklwd xmm5, xmm2"              \
+    "movdqa    xmm6, xmm4"              \
+    "psrld     xmm6, 16"                \
+    "pmaddwd   xmm6, xmm5"              \
+    "movdqa    xmm7, xmm4"              \
+    "pslld     xmm7, 16"                \
+    "psrld     xmm7, 31"                \
+    "pmaddwd   xmm7, xmm5"              \
+    "paddd     xmm6, xmm7"              \
+    "pand      xmm4, xmm3"              \
+    "pmaddwd   xmm4, xmm5"              \
+    "movdqa    xmm7, xmm6"              \
+    "psrad     xmm7, 31"                \
+    "movdqa    xmm5, xmm6"              \
+    "punpckldq xmm6, xmm7"              \
+    "paddq     xmm0, xmm6"              \
+    "punpckhdq xmm5, xmm7"              \
+    "paddq     xmm0, xmm5"              \
+    "movdqa    xmm7, xmm4"              \
+    "psrad     xmm7, 31"                \
+    "movdqa    xmm5, xmm4"              \
+    "punpckldq xmm4, xmm7"              \
+    "paddq     xmm1, xmm4"              \
+    "punpckhdq xmm5, xmm7"              \
+    "paddq     xmm1, xmm5"              \
+    "add       eax, 16"                 \
+    "add       edx, 8"                  \
+    "dec       ecx"                     \
+    "jnz       EPIG"                    \
+    "pshufd    xmm2, xmm0, 0x4E"        \
+    "paddq     xmm0, xmm2"              \
+    "pshufd    xmm2, xmm1, 0x4E"        \
+    "paddq     xmm1, xmm2"              \
+    "psllq     xmm0, 16"                \
+    "paddq     xmm0, xmm1"              \
+    "movd      eax, xmm0"               \
+    "psrlq     xmm0, 32"                \
+    "movd      edx, xmm0"               \
+    __parm [__eax] [__edx] [__ecx]      \
+    __value [__edx __eax]               \
+    __modify [__eax __edx __ecx 8087];
+
+/* Wrapper, for the reason lz_wsum_pair_sse2 gives, plus one of its own:
+   the pragma runs whole groups and cannot branch back into C, so the
+   remainder is handled here.
+
+   nb is clamped rather than early-returned so a non-positive n falls
+   through both the call and the loop - the C body in ops.c answers 0
+   there, and a 4-wide loop entered with a negative count walks
+   backwards through memory. */
+lz_i64 lz_epi_mac_i16_sse2(const int32_t *a, const int16_t *m, int n) {
+    int nb = (n > 0) ? (n >> 2) : 0;
+    int g  = nb << 2;
+    lz_i64 s = nb ? lz_epi_mac_i16_sse2_asm(a, m, nb) : 0;
+    for (; g < n; g++) s += (lz_i64)a[g] * (lz_i64)m[g];
+    return s;
+}
+
 #else /* gcc: intrinsics */
 
 #include <emmintrin.h>
@@ -3317,7 +3427,8 @@ void lz_wsum_pair_sse2(const int8_t *rowA, const int8_t *rowB,
    here, because one-operand imul IS a signed 32x32 -> 64 and needs no
    split at all; what this buys is a quarter of the branches, not fewer
    instructions. Three of the 35 are gcc rebuilding zero and 0xFFFF
-   inside the loop, which eight XMM registers leave it no room to hoist.
+   inside the loop, which eight XMM registers leave it no room to hoist
+   - the Watcom twin above keeps both resident and lands at 31.
 
    Predicate: .prof/epi_mac_oracle.c, which checks this against three
    independent scalar derivations over 20106 cases and carries a
@@ -3363,14 +3474,14 @@ lz_i64 lz_epi_mac_i16_sse2(const int32_t *a, const int16_t *m, int n) {
     }
     _mm_storeu_si128((__m128i *)(void *)t, acc_hi);  s_hi  = t[0] + t[1];
     _mm_storeu_si128((__m128i *)(void *)t, acc_als); s_als = t[0] + t[1];
-    for (; g < n; g++) {
-        int ah  = a[g] >> 16;
-        int als = (short)((unsigned)a[g] & 0xFFFFu);
-        int b   = (a[g] >> 15) & 1;
-        s_hi  += (lz_i64)(ah * m[g]) + (lz_i64)(b * m[g]);
-        s_als += (lz_i64)(als * m[g]);
-    }
-    return (s_hi << 16) + s_als;
+    /* The tail is the plain product, not a fourth copy of the split.
+       ((ah + b) << 16) + als IS a, by construction, so an element that
+       never enters a lane has no reason to be taken apart - and the
+       three-term version that was here computed the same number in
+       eleven operations instead of one. */
+    s_hi = (s_hi << 16) + s_als;
+    for (; g < n; g++) s_hi += (lz_i64)a[g] * (lz_i64)m[g];
+    return s_hi;
 }
 
 #endif /* __WATCOMC__ */

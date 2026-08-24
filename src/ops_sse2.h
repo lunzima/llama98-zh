@@ -33,12 +33,16 @@
 #define LZ_ROW_SSE2_EXTERN  1
 #define LZ_P2_SSE2_EXTERN   1
 #define LZ_ROPE_SSE2_EXTERN 1
-/* epi's int32 x int16 -> int64 accumulation. gcc-only for now: the
-   Watcom #pragma aux twin is not written, so this sits with the trio
-   above rather than with the LZ_HAVE_* flags that cover both. */
+#endif
+
+/* epi's int32 x int16 -> int64 accumulation. OUTSIDE the trio above,
+   because both toolchains have a body: intrinsics on gcc, a #pragma aux
+   with its own register map on Watcom, both in src/ops_sse2.c. Anything
+   keyed off this macro must therefore pick its column by build class -
+   naming the gcc one unconditionally would report it present in a
+   Watcom build. */
 #define LZ_EPI_SSE2_EXTERN  1
 lz_i64 lz_epi_mac_i16_sse2(const int32_t *a, const int16_t *m, int n);
-#endif
 
 /* The two LZ_HAVE_* flags are defined for BOTH toolchains, not just gcc
    like the _EXTERN trio above: the amax SSE2 and q8round SSE2 bodies

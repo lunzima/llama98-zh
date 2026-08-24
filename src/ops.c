@@ -4214,10 +4214,6 @@ static const char km_why_epi_x86[] =
     "pmaddwd shape the name suggests. SSE2 reaches it with pmuludq plus "
     "sign correction, MMX by splitting the int32 into 16-bit halves; "
     "both are more work than a straight pmaddwd, neither is impossible";
-static const char km_why_epi_wat_sse2[] =
-    "todo: the gcc SSE2 body (lz_epi_mac_i16_sse2, ops_sse2.c) exists; "
-    "its Watcom #pragma aux twin does not, which is the half of the "
-    "both-toolchains rule this operator still owes";
 typedef struct { unsigned char have; unsigned char why; const char *text; } LZKmReg;
 #define KM_H(mask) { (unsigned char)(mask), 0, (const char *)0 }
 #define KM_I(text) { 0, LZ_KM_IMPOSSIBLE, (text) }
@@ -4279,7 +4275,7 @@ static const LZKmReg km_reg[LZ_KM_NUNIT * LZ_KM_NCOL] = {
    LZ_P2_SSE2_EXTERN are what km_op_present can key off, and the SSE2
    one is declared under !__WATCOMC__. */
 /* recur*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_T(km_why_recur_wat_mmx), KM_H(LZ_KMB_WAT), KM_T(km_why_recur_wat_sse2), KM_H(LZ_KMB_ARM), KM_T(km_why_recur_arma), KM_N(km_why_op_g128),
-/* epi  */ KM_H(KM_ALL), KM_T(km_why_epi_x86), KM_T(km_why_epi_x86), KM_H(LZ_KMB_GCC), KM_T(km_why_epi_x86), KM_T(km_why_epi_x86), KM_T(km_why_epi_wat_sse2), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_op_g128)
+/* epi  */ KM_H(KM_ALL), KM_T(km_why_epi_x86), KM_T(km_why_epi_x86), KM_H(LZ_KMB_GCC), KM_T(km_why_epi_x86), KM_T(km_why_epi_x86), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_op_g128)
 };
 
 #if defined(__WATCOMC__)
@@ -4414,8 +4410,13 @@ static int km_op_present(int f, int c) {
     if (f == LZ_KM_UNIT_RECUR && c == LZ_KM_COL_ROW0 + LZ_ROW_SSE2_I) return 1;
 #endif /* LZ_P2_SSE2_EXTERN */
 #if defined(LZ_EPI_SSE2_EXTERN)
-    /* Same shape: gcc-only macro, so no build-class split needed. */
+    /* Both toolchains have an epi SSE2 body, so this one IS split by
+       build class - the macro no longer is. */
+#if defined(__WATCOMC__)
+    if (f == LZ_KM_UNIT_EPI && c == LZ_KM_COL_ROW0 + LZ_ROW_SSE2_A) return 1;
+#else
     if (f == LZ_KM_UNIT_EPI && c == LZ_KM_COL_ROW0 + LZ_ROW_SSE2_I) return 1;
+#endif /* __WATCOMC__ */
 #endif /* LZ_EPI_SSE2_EXTERN */
 
 #if defined(LZ_FWHT_MMX_EXTERN)
