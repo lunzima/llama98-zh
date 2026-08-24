@@ -42,6 +42,29 @@
 # per-token loop and a move in a startup path count the same here. Rank
 # with it, do not conclude from it.
 #
+# NOR CAN IT SEE whether a function runs at all in the shipping
+# configuration, which is the trap this project keeps falling into: two
+# rounds of work went into the kv_slot modulo before a counter showed
+# the loops involved are a fallback the fixed attention kernel replaces.
+# Before optimising anything this table names, put a counter in it and
+# generate one token.
+#
+# WHERE THE TABLE POINTS, per function, generate.c at the shipping
+# flags, functions of 100+ instructions:
+#
+#   lz_generate_resume_ex   1743  58%   the per-token driver
+#   lz_spec_round_temp       430  57%   speculative, off by default
+#   lz_prefix_prepare        379  64%
+#   lz_spec_round            363  57%   speculative, off by default
+#   gen_emit_token           299  49%
+#   lz_pool_prepare          267  60%
+#
+# lz_generate_resume_ex is the one worth opening: largest in the file,
+# highest absolute movement, and unlike the lz_spec_* entries around it
+# the default path does run it. 1011 of its 1743 instructions move data.
+# Whether that movement is redundant or inherent to marshalling the
+# generation state is the question, and it is not answered here.
+#
 # Both sides at the shipping settings, 32-bit, for the reason in
 # xcc_codesize.sh's header.
 set -u
