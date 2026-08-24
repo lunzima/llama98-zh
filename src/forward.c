@@ -472,6 +472,14 @@ static int kv_slot(const LZRunState *s, int t) {
     return s->attn_sink + ((t - s->attn_sink) % s->kv_ring);
 }
 
+/* The slot after SLOT in a ring of DEPTH. SLOT is already reduced, so
+   the successor is a compare; recomputing (base + tk + 1) % depth spends
+   a second runtime modulo to reach the same answer. Distinct from
+   kv_slot_next, which walks the KV ring and its attention sink. */
+static int ring_slot_next(int slot, int depth) {
+    return (slot + 1 == depth) ? 0 : slot + 1;
+}
+
 /* Walk the cache in time order from T0 to POS, carrying the row index
    alongside. Once the ring wraps, SLOT is no longer T, so advancing one
    without the other reads a different token's row - the two fixed
@@ -2583,7 +2591,8 @@ static void forward_ssm(const LZModel *m, LZRunState *s,
        own header comment - slot_in==slot_out when !advance_ring. */
     for (tk = 0; tk < nt; tk++) {
         int slot_in  = advance_ring ? (ring_base + tk) % ring_depth : ring_base;
-        int slot_out = advance_ring ? (ring_base + tk + 1) % ring_depth : ring_base;
+        int slot_out = advance_ring ? ring_slot_next(slot_in, ring_depth)
+                                    : ring_base;
 #if LZ_CONV_FIXED
         if (s->conv_fixed) {
             /* One block here, unlike KDA's three: this path's conv
@@ -2643,7 +2652,8 @@ static void forward_ssm(const LZModel *m, LZRunState *s,
         for (tk = 0; tk < nt; tk++) {
             LZ_PROF_DECL(_tr);
             int slot_in  = advance_ring ? (ring_base + tk) % ring_depth : ring_base;
-            int slot_out = advance_ring ? (ring_base + tk + 1) % ring_depth : ring_base;
+            int slot_out = advance_ring ? ring_slot_next(slot_in, ring_depth)
+                                        : ring_base;
             const int8_t *sq_in  = s->ssm_state_q8 + (size_t)slot_in  * q8_slot_stride + h_off_q8;
             int8_t       *sq_out = s->ssm_state_q8 + (size_t)slot_out * q8_slot_stride + h_off_q8;
 #if LZ_GDN_STATE_2PLANE
@@ -3193,7 +3203,8 @@ static void forward_kda(const LZModel *m, LZRunState *s,
        header comment - slot_in==slot_out when !advance_ring. */
     for (tk = 0; tk < nt; tk++) {
         int slot_in  = advance_ring ? (ring_base + tk) % ring_depth : ring_base;
-        int slot_out = advance_ring ? (ring_base + tk + 1) % ring_depth : ring_base;
+        int slot_out = advance_ring ? ring_slot_next(slot_in, ring_depth)
+                                    : ring_base;
 #if LZ_CONV_FIXED
         if (s->conv_fixed) {
             /* Same three disjoint ranges, int16 history. The channel
@@ -3480,7 +3491,8 @@ static void forward_kda(const LZModel *m, LZRunState *s,
         for (tk = 0; tk < nt; tk++) {
             LZ_PROF_DECL(_tr);
             int slot_in  = advance_ring ? (ring_base + tk) % ring_depth : ring_base;
-            int slot_out = advance_ring ? (ring_base + tk + 1) % ring_depth : ring_base;
+            int slot_out = advance_ring ? ring_slot_next(slot_in, ring_depth)
+                                        : ring_base;
             const int8_t *sq_in  = s->ssm_state_q8 + (size_t)slot_in  * q8_slot_stride + h_off_q8;
             int8_t       *sq_out = s->ssm_state_q8 + (size_t)slot_out * q8_slot_stride + h_off_q8;
 #if LZ_GDN_STATE_2PLANE
