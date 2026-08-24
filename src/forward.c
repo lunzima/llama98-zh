@@ -391,7 +391,21 @@ static const double LZ_US_SCALE = 1000.0;
  *                    then restarts at sink
  * Callers must seed with kv_slot(s, first_t) and advance in the loop's
  * INCREMENT clause, not its body - the row advances on iterations the
- * body skips with continue. */
+ * body skips with continue.
+ *
+ * WHICH PATH THIS IS ON, measured rather than assumed. The loops below
+ * are the FALLBACK. lz_attn_score_q8 and its wsum twin take attn_sink
+ * and kv_ring and do the row arithmetic themselves, and they are
+ * selected whenever LZ_ATTN_NORING holds - which is win_t0 == 0, which
+ * is everything except the MTP's own attention under an investigative
+ * override. Counting kv_slot's modulo over a 120-token generation with
+ * the ring on gives 363 both before and after this change, and 363 is
+ * one per token per attention layer: the KV WRITE. The scoring loops
+ * contributed nothing because they did not run.
+ *
+ * So this helps the arms that do run them - the float reference, and
+ * any head_dim the fixed kernel declines - and is inert on the shipping
+ * path. That is worth having and is not worth describing as a speedup. */
 static int kv_slot_next(const LZRunState *s, int slot) {
     return (slot + 1 == s->attn_sink + s->kv_ring) ? s->attn_sink : slot + 1;
 }
