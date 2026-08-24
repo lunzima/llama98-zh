@@ -4005,15 +4005,13 @@ static const char km_why_sigq_sse1[] =
     "pmulhw, punpck[lh]wd, psrad and paddd are all MMX, and SSE1's own "
     "additions (pmaxsw/pshufw/psadbw) appear nowhere in it. The wider "
     "form is SSE2's, which has its own cell";
-static const char km_why_expfx_x86[] =
-    "todo: SSE2 and MMX are both done - one pmuludq per product there, "
-    "and here every product rebuilt from pmaddwd-sized limbs. SSE1 is "
-    "owed and is a cell of its own rather than a copy of either: "
-    "pmulhuw gives the unsigned 16x16 high half MMX lacks and pshufw "
-    "packs two int32 to int16 without packssdw's saturation, which "
-    "together retire the u = s>>1 split the MMX body carries only "
-    "because s reaches 2^15. The 32-entry lookup stays scalar at "
-    "every tier";
+/* km_why_expfx_x86 stood here and is gone with the last cell it
+   explained. What it argued is now in the three bodies themselves
+   (ops_sse2.c, ops_mmx.c, ops_mmx_sse.c), which is where an
+   implemented kernel's reasoning belongs - a reason string is for a
+   cell that does NOT exist. The 32-entry table lookup still stays
+   scalar at every tier: a per-element index needs a gather and that is
+   AVX2, which km_why_sse1's block above covers for both table units. */
 /* EXPFX AND SIGQ ONLY, and the scope line is here because this string
    is wrong for any unit that HAS a group form. i32f's is the wsum
    chunk fold's 32 and q8rnd's is lz_q8round_group_sse's gs, so each of
@@ -4182,7 +4180,7 @@ static const LZKmReg km_reg[LZ_KM_NUNIT * LZ_KM_NCOL] = {
    present on ARM for the same reason ref is present everywhere. */
 /* i32f */ KM_H(KM_ALL), KM_I(km_why_i32f_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_I(km_why_i32f_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_i32f_g128),
 /* q8rnd*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_q8rnd_g128),
-/* expfx*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_T(km_why_expfx_x86), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_T(km_why_expfx_x86), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_op_g128),
+/* expfx*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_op_g128),
 /* The two attention MAC units DO have x86 kernels, and they are
    macro-selected rather than table-selected, so km_op_present answers
    for them. atdot's assembly is q8_0's leaf, reused rather than copied
@@ -4410,6 +4408,13 @@ static int km_op_present(int f, int c) {
     if (f == LZ_KM_UNIT_EXPFX && c == LZ_KM_COL_ROW0 + LZ_ROW_MMX_I) return 1;
 #endif /* __WATCOMC__ */
 #endif /* LZ_HAVE_EXP_Q20_MMX */
+#if defined(LZ_HAVE_EXP_Q20_SSE)
+#if defined(__WATCOMC__)
+    if (f == LZ_KM_UNIT_EXPFX && c == LZ_KM_COL_ROW0 + LZ_ROW_SSE_A) return 1;
+#else
+    if (f == LZ_KM_UNIT_EXPFX && c == LZ_KM_COL_ROW0 + LZ_ROW_SSE_I) return 1;
+#endif /* __WATCOMC__ */
+#endif /* LZ_HAVE_EXP_Q20_SSE */
 
     /* i32f, the attention wsum chunk fold. Four cells from two bodies
        per toolchain: SSE1 converts one value at a time (cvtsi2ss,

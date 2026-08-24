@@ -684,6 +684,126 @@ int lz_matmul_row_sse(const float *row, const float *x, int in_dim,
     return lz_matmul_row_sse_asm(row, x, in_dim, acc8);
 }
 
+/* ---- lz_exp_fixed's Q20 Taylor, SSE1 tier, Watcom twin.
+   gcc twin: lz_exp_q20_sse, the intrinsics body in the other arm,
+   which says what SSE1 adds over the MMX kernel and what it leaves
+   unchanged. The constant block and the back half - the three-limb t2
+   and the output multiply - are the MMX body's, verbatim; only the
+   front half differs.
+
+   THE CONSTANT BLOCK IS THE MMX ONE PLUS TWO WORD BROADCASTS, and it
+   is a second array rather than a shared one because the two front
+   halves need different things: pmaddwd wants 22 and 5921 in int32
+   lanes at a 2^15 split, pmullw/pmulhuw want 11 and 5921 in all four
+   int16 lanes at a 2^16 split. Sharing would mean one of the two
+   reading the other's layout. */
+/* One value broadcast across a 64-bit operand, as two int32 lanes or as
+   four int16 ones. Written as expressions so the compiler produces the
+   words - a hand-assembled hex constant here would be a table with no
+   producer, and the two-power structure would stop being readable. */
+#define LZ_ES2(v) ((((lz_i64)(v)) << 32) | (lz_i64)(unsigned)(v))
+#define LZ_ES4(v) (((lz_i64)(unsigned)((v) & 0xFFFF)) \
+                   * LZ_I64_C(0x0001000100010001))
+static const lz_i64 exp_q20_sk[7] = {
+    LZ_ES2(1023), LZ_ES2(2047), LZ_ES2(1 << 19),
+    LZ_ES2(7), LZ_ES2(22530),
+    LZ_ES4(11), LZ_ES4(5921)
+};
+#undef LZ_ES2
+#undef LZ_ES4
+
+/* np is the number of TWO-element passes. One emms at the exit: pshufw,
+   pmullw, pmulhuw and pmaddwd all write %mm, so this owes it exactly as
+   the MMX twin does - SSE1 moved the instructions, not the register
+   file. */
+extern void lz_exp_q20_2_sse_asm(const int32_t *tab, const int32_t *s,
+                                 int32_t *prod, const void *k, int np);
+#pragma aux lz_exp_q20_2_sse_asm =  \
+    ".686"                          \
+    "expq20sloop:"                  \
+    "pshufw  mm0, [edx], 8"         \
+    "movq    mm4, mm0"              \
+    "pmullw  mm4, [ecx+40]"         \
+    "movq    mm5, mm0"              \
+    "pmulhuw mm5, [ecx+40]"         \
+    "punpcklwd mm4, mm5"            \
+    "movq    mm5, mm0"              \
+    "pmullw  mm5, [ecx+48]"         \
+    "movq    mm6, mm0"              \
+    "pmulhuw mm6, [ecx+48]"         \
+    "punpcklwd mm5, mm6"            \
+    "paddd   mm5, [ecx+16]"         \
+    "psrld   mm5, 16"               \
+    "paddd   mm4, mm5"              \
+    "psrld   mm4, 4"                \
+    "movq    mm5, mm0"              \
+    "pmullw  mm5, mm0"              \
+    "pmulhuw mm0, mm0"              \
+    "punpcklwd mm5, mm0"            \
+    "movq    mm6, mm5"              \
+    "pand    mm6, [ecx]"            \
+    "movq    mm7, mm5"              \
+    "psrld   mm7, 10"               \
+    "pand    mm7, [ecx]"            \
+    "psrld   mm5, 20"               \
+    "movq    mm3, mm6"              \
+    "pmaddwd mm3, [ecx+32]"         \
+    "pmaddwd mm6, [ecx+24]"         \
+    "pslld   mm6, 15"               \
+    "paddd   mm3, mm6"              \
+    "movq    mm6, mm7"              \
+    "pmaddwd mm6, [ecx+32]"         \
+    "pmaddwd mm7, [ecx+24]"         \
+    "pslld   mm7, 15"               \
+    "paddd   mm6, mm7"              \
+    "movq    mm7, mm5"              \
+    "pmaddwd mm7, [ecx+32]"         \
+    "pmaddwd mm5, [ecx+24]"         \
+    "pslld   mm5, 15"               \
+    "paddd   mm7, mm5"              \
+    "psrld   mm3, 10"               \
+    "paddd   mm6, mm3"              \
+    "psrld   mm6, 10"               \
+    "paddd   mm7, [ecx+16]"         \
+    "paddd   mm7, mm6"              \
+    "psrld   mm7, 20"               \
+    "paddd   mm4, mm7"              \
+    "movq    mm0, [eax]"            \
+    "movq    mm1, mm0"              \
+    "psrld   mm1, 11"               \
+    "movq    mm2, mm0"              \
+    "pand    mm2, [ecx+8]"          \
+    "pmaddwd mm1, mm4"              \
+    "pmaddwd mm2, mm4"              \
+    "paddd   mm2, [ecx+16]"         \
+    "psrld   mm2, 11"               \
+    "paddd   mm1, mm2"              \
+    "psrld   mm1, 9"                \
+    "paddd   mm0, mm1"              \
+    "movq    [ebx], mm0"            \
+    "add     eax, 8"                \
+    "add     edx, 8"                \
+    "add     ebx, 8"                \
+    "dec     esi"                   \
+    "jnz     expq20sloop"           \
+    "emms"                          \
+    __parm [__eax] [__edx] [__ebx] [__ecx] [__esi] \
+    __modify [__eax __ebx __ecx __edx __esi 8087];
+
+void lz_exp_q20_sse(const int32_t *tab, const int32_t *s,
+                    int32_t *prod, int n) {
+    int k = n & ~1;
+    if (k) lz_exp_q20_2_sse_asm(tab, s, prod, exp_q20_sk, k >> 1);
+    for (; k < n; k++) {
+        int32_t sk = s[k], cq;
+        cq = (1 << 20)
+           + (int32_t)((((lz_i64)726817 * sk) + (1 << 19)) >> 20)
+           + (int32_t)((((lz_i64)251906 * ((lz_i64)sk * sk))
+                        + (LZ_I64_C(1) << 39)) >> 40);
+        prod[k] = (int32_t)((((lz_i64)tab[k] * cq) + (1 << 19)) >> 20);
+    }
+}
+
 #else /* gcc: intrinsics */
 
 #include "mmx_compat.h"
@@ -892,6 +1012,104 @@ int lz_matmul_row_sse(const float *row, const float *x, int in_dim,
     _mm_storeu_ps(acc8, a);
     _mm_storeu_ps(acc8 + 4, b);
     return ng;
+}
+
+/* ---- lz_exp_fixed's Q20 Taylor, SSE1 gcc twin.
+   Watcom twin: lz_exp_q20_2_sse_asm in the other arm. MMX twin:
+   lz_exp_q20_mmx (src/ops_mmx.c), SSE2 twin: lz_exp_q20_simd
+   (src/ops_sse2.c) - the SSE2 one carries the arithmetic derivation
+   and the MMX one carries the limb decomposition this shares.
+
+   WHAT SSE1 ADDS, and it is exactly two instructions. The MMX body
+   cannot multiply by s directly: s reaches 2^15, one past signed
+   int16, and pmaddwd is a SIGNED 16 x 16. So it carries s as
+   u = s >> 1 plus a masked odd bit, and pays for that in both the
+   first Taylor term and the square. Here:
+
+     pshufw   packs two int32 down to two int16 with no saturation.
+              packssdw would clamp 32768 to 32767 - silently, on the one
+              input the split existed for.
+     pmulhuw  gives the UNSIGNED high half, so pmullw+pmulhuw is a true
+              16 x 16 -> 32 over the full unsigned range.
+
+   With those, 11*s and 5921*s and s*s are each three instructions on
+   the value itself and the u/b apparatus disappears - about six
+   instructions a pass. The constant split moves from 2^15 to 2^16 for
+   the same reason (LN2 = 11*2^16 + 5921 here, 22*2^15 + 5921 there).
+
+   WHAT SSE1 DOES NOT CHANGE is t2 and the output, which are identical
+   to the MMX body: LN2SQ is 18 bits and fits no 16-bit lane at any
+   tier below SSE2, so its three-limb decomposition stays. Two elements
+   a pass, same as MMX - the products are 32-bit and two of them fill
+   an %mm register. A four-wide front half is possible (pmullw sees
+   four words at once) at the cost of holding the back half in two
+   registers; not taken, because the back half is the larger part and
+   MMX's eight registers are already why this file's constants live in
+   memory. */
+void lz_exp_q20_sse(const int32_t *tab, const int32_t *s,
+                    int32_t *prod, int n) {
+    const __m64 k1023  = _mm_set1_pi32(1023);
+    const __m64 k2047  = _mm_set1_pi32(2047);
+    const __m64 kr19   = _mm_set1_pi32(1 << 19);
+    const __m64 k7     = _mm_set1_pi32(7);
+    const __m64 k22530 = _mm_set1_pi32(22530);
+    const __m64 w11    = _mm_set1_pi16(11);
+    const __m64 w5921  = _mm_set1_pi16(5921);
+    int k;
+
+    for (k = 0; k + 1 < n; k += 2) {
+        __m64 sv, tv, sp, av, bv, t1, ss;
+        __m64 l0, l1, l2, m0, m1, m2, inner, t2, d, a1, a0;
+
+        memcpy(&sv, s + k, 8);
+        memcpy(&tv, tab + k, 8);
+        /* words 0 and 2 are the two elements' low halves; s < 2^16 so
+           nothing above them is live. */
+        sp = _mm_shuffle_pi16(sv, 0x08);
+
+        av = _mm_unpacklo_pi16(_mm_mullo_pi16(sp, w11),
+                               _mm_mulhi_pu16(sp, w11));      /* 11*s */
+        bv = _mm_unpacklo_pi16(_mm_mullo_pi16(sp, w5921),
+                               _mm_mulhi_pu16(sp, w5921));    /* 5921*s */
+        bv = _mm_srli_pi32(_mm_add_pi32(bv, kr19), 16);
+        t1 = _mm_srli_pi32(_mm_add_pi32(av, bv), 4);
+
+        ss = _mm_unpacklo_pi16(_mm_mullo_pi16(sp, sp),
+                               _mm_mulhi_pu16(sp, sp));       /* s*s */
+
+        l0 = _mm_and_si64(ss, k1023);
+        l1 = _mm_and_si64(_mm_srli_pi32(ss, 10), k1023);
+        l2 = _mm_srli_pi32(ss, 20);
+        m0 = _mm_add_pi32(_mm_madd_pi16(l0, k22530),
+                          _mm_slli_pi32(_mm_madd_pi16(l0, k7), 15));
+        m1 = _mm_add_pi32(_mm_madd_pi16(l1, k22530),
+                          _mm_slli_pi32(_mm_madd_pi16(l1, k7), 15));
+        m2 = _mm_add_pi32(_mm_madd_pi16(l2, k22530),
+                          _mm_slli_pi32(_mm_madd_pi16(l2, k7), 15));
+        inner = _mm_srli_pi32(_mm_add_pi32(m1, _mm_srli_pi32(m0, 10)), 10);
+        t2 = _mm_srli_pi32(_mm_add_pi32(_mm_add_pi32(m2, kr19), inner), 20);
+
+        d  = _mm_add_pi32(t1, t2);
+        a1 = _mm_srli_pi32(tv, 11);
+        a0 = _mm_and_si64(tv, k2047);
+        {
+            __m64 p1 = _mm_madd_pi16(a1, d);
+            __m64 p0 = _mm_add_pi32(_mm_madd_pi16(a0, d), kr19);
+            __m64 r  = _mm_srli_pi32(
+                           _mm_add_pi32(p1, _mm_srli_pi32(p0, 11)), 9);
+            r = _mm_add_pi32(tv, r);
+            memcpy(prod + k, &r, 8);
+        }
+    }
+    _mm_empty();
+    for (; k < n; k++) {
+        int32_t sk = s[k], cq;
+        cq = (1 << 20)
+           + (int32_t)((((lz_i64)726817 * sk) + (1 << 19)) >> 20)
+           + (int32_t)((((lz_i64)251906 * ((lz_i64)sk * sk))
+                        + (LZ_I64_C(1) << 39)) >> 40);
+        prod[k] = (int32_t)((((lz_i64)tab[k] * cq) + (1 << 19)) >> 20);
+    }
 }
 
 #endif /* __WATCOMC__ */

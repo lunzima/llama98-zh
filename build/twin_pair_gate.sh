@@ -43,17 +43,21 @@ MODEL=${LZ_NORM_INT_GATE_MODEL:-$MODELS_ROOT/kmr20}
 # pair lands, so a delivered kernel cannot quietly disappear later - the
 # gate was created at 21 and the number below is what the tree carries
 # now.
-FLOOR=32
+FLOOR=33
 
 # CELLS REGISTERED todo, which is what a cell looks like after the
 # "partial relief obliges a kernel" standard reopens one and before
-# anyone writes it. This gate counts (unit, ISA) PAIRS, not cells, so
-# expfx's two remaining x86 cells - SSE1, in its gcc and Watcom form -
-# are one here. A CEILING rather than a floor: the number owed may
-# shrink freely and may not grow unnoticed. Before this state existed
-# the gate had two answers, implemented or impossible, and a reopened
-# cell read as an unpaired kernel.
-TODO_CEIL=1
+# anyone writes it. This gate counts (unit, ISA) PAIRS, not cells.
+#
+# ZERO TODAY: every x86 cell is either written on both sides or
+# registered impossible with a reason. A CEILING rather than a floor,
+# so this is now also the assertion that nothing gets reopened and left
+# - a new todo reddens the build the moment it is registered. Raising
+# it is the deliberate act of accepting a debt, which is the only way
+# it should ever go up. Before this state existed the gate had two
+# answers, implemented or impossible, and a reopened cell read as an
+# unpaired kernel.
+TODO_CEIL=0
 
 "./$BIN" "$MODEL" --kernel-matrix 2>&1 | grep "^cell" | awk -v floor="$FLOOR" -v tceil="$TODO_CEIL" '
 $3=="mmxI"||$3=="sse2I"||$3=="sseI" {

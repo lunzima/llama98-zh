@@ -126,6 +126,19 @@ void lz_lerp_q15_mmx(const int32_t *a, const int32_t *b,
 void lz_exp_q20_mmx(const int32_t *tab, const int32_t *s,
                     int32_t *prod, int n);
 
+/* The same Taylor at the SSE1 tier - HERE and not in ops_sse.h for the
+   reason that file's header gives: ops_sse.h holds the SSE1 kernels
+   that work on %xmm, and this one works on %mm. Body in
+   src/ops_mmx_sse.c, next to the other SSE1-over-MMX cells.
+   A CELL OF ITS OWN, not a second caller of lz_exp_q20_mmx: pmulhuw
+   supplies the unsigned 16x16 high half MMX lacks and pshufw packs two
+   int32 to int16 without packssdw's saturation, which together retire
+   the u = s>>1 split the MMX body needs because s reaches 2^15. Same
+   two elements a pass; fewer instructions in them. */
+#define LZ_HAVE_EXP_Q20_SSE 1
+void lz_exp_q20_sse(const int32_t *tab, const int32_t *s,
+                    int32_t *prod, int n);
+
 /* norm_ss_fixed's element loop, SSE1 tier. HERE and not in ops_sse.h
    for the same reason as lz_p2_split32_sse below: SSE1's convert is
    cvtps2pi, so the pack, the clamp and the multiply-add all land in

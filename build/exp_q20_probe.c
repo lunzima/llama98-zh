@@ -34,6 +34,11 @@ void lz_exp_q20_mmx(const int32_t *tab, const int32_t *s,
                     int32_t *prod, int n);
 #define KERNEL lz_exp_q20_mmx
 #define KNAME  "mmx"
+#elif defined(LZ_PROBE_SSE)
+void lz_exp_q20_sse(const int32_t *tab, const int32_t *s,
+                    int32_t *prod, int n);
+#define KERNEL lz_exp_q20_sse
+#define KNAME  "sse"
 #else
 void lz_exp_q20_simd(const int32_t *tab, const int32_t *s,
                      int32_t *prod, int n);

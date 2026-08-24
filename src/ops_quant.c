@@ -510,6 +510,21 @@ void lz_exp_fixed_run(const float *x, float *out, int n) {
             lz_exp_q20_simd(tv, sv, pv, m);
         else
 #endif /* LZ_HAVE_EXP_Q20_SIMD */
+#if defined(LZ_HAVE_EXP_Q20_SSE) && !defined(LZ_EXP_Q20_FORCE_MMX)
+        /* Above the MMX cell and below SSE2: same width as MMX, fewer
+           instructions, and a machine with SSE1 but not SSE2 (Pentium
+           III, Athlon) is a real point on this target family. Reached
+           from CPUID rather than g_kernel because there is no
+           LZ_KERNEL_SSE - on a PIII g_kernel is LZ_KERNEL_MMX while the
+           machine does have SSE.
+           LZ_EXP_Q20_FORCE_MMX mirrors LZ_NORM_SS_FORCE_MMX, and for
+           the same reason: without it this arm shadows the MMX one on
+           every machine that runs the suite, and a path that cannot be
+           selected cannot be validated. */
+        if (g_kernel != LZ_KERNEL_REF && lz_cpu_has_sse())
+            lz_exp_q20_sse(tv, sv, pv, m);
+        else
+#endif /* LZ_HAVE_EXP_Q20_SSE */
 #if defined(LZ_HAVE_EXP_Q20_MMX)
         if (g_kernel != LZ_KERNEL_REF && lz_cpu_has_mmx())
             lz_exp_q20_mmx(tv, sv, pv, m);
