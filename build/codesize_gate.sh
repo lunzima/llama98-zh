@@ -96,6 +96,23 @@ fi
 # ---- B: the instruction cache --------------------------------------
 [ -f "$CLI" ] || { echo "codesize_gate: SKIP - no $CLI; run make native"; exit 2; }
 
+# Provenance, before the measurement. This gate reads a binary it did not
+# build, and a number off the wrong binary is worse than no number: a
+# .text of 401,744 was reported as over the ceiling in this project when
+# what had happened was that a gate which builds at -O3 had left its last
+# build behind. build/native holds the three ISA objects llama98 links
+# and every rule that produces the binary produces them too, so a binary
+# standing next to no object directory came from a build whose flags
+# nothing here can name.
+if [ ! -d build/native ]; then
+    echo "codesize_gate: FAIL - $CLI exists but build/native/ does not, so"
+    echo "  this binary is left over from a build that wiped its objects"
+    echo "  and its flags are unknown. Measuring it would report a size"
+    echo "  for a configuration that is not the shipping one."
+    echo "  Run 'make llama98' and try again."
+    exit 1
+fi
+
 text_of() { size -A "$1" 2>/dev/null | awk '$1 == ".text" { print $2; exit }'; }
 T=$(text_of "$CLI")
 if [ -z "${T:-}" ] && command -v wsl >/dev/null 2>&1; then

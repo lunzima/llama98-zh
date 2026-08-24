@@ -158,7 +158,22 @@ for sw in $ARMS; do
     PASS=$((PASS + 1))
 done
 
+# Put the tree back the way it was found. Every build above used
+# FL_BASE, which is -O3 and has one control switch turned off, and the
+# last one is what llama98.exe holds when this loop ends. Anything that
+# reads the binary afterwards - codesize_gate measures its .text, and
+# several later gates simply run it - would be reading an -O3 build of a
+# crippled engine and would have no way to know. Wiping build/native is
+# not enough on its own: it makes the NEXT `make llama98` rebuild, but a
+# standalone run of this gate is followed by no make at all.
 rm -rf build/native
+if ! make llama98 -j4 >"$TMPD/restore.log" 2>&1; then
+    echo "int_pipeline_arm_gate: FAIL - cannot restore the shipping build;"
+    echo "  llama98.exe is left at $FL_BASE with one switch off"
+    tail -n 5 "$TMPD/restore.log" | sed 's/^/      /'
+    FAIL=1
+fi
+
 echo "int_pipeline_arm_gate: $PASS arm(s) exercised"
 if [ "$FAIL" -eq 0 ]; then
     echo "int_pipeline_arm_gate: PASS"
