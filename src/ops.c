@@ -3783,10 +3783,17 @@ static const char *const km_col[LZ_KM_NCOL] = {
 
 /* Printed, so one line each; the audit above is the long form. */
 /* CONFIRMED BY THE COMPILER, not only by the instruction audit. gcc
-   -O3 on the same C, build/o3_probe.sh: lz_attn_score_q8 emits 151
-   packed instructions at -march=x86-64 and lz_attn_wsum_q8 emits 122,
-   and BOTH emit ZERO at -m32 -march=pentium3. The vectoriser, given
-   every optimisation and an SSE1 target, finds nothing to vector.
+   -O3 on the same C, build/o3_probe.sh: lz_attn_score_q8 emits 63
+   packed-ARITHMETIC instructions at -march=x86-64 and lz_attn_wsum_q8
+   emits 73, and BOTH emit ZERO at -m32 -march=pentium3 - out of 393
+   and 538 instructions in the body, so the zero is the vectoriser
+   declining and not the probe missing its symbol.
+
+   THE FIGURE READ 151 AND 122 HERE for one commit and was wrong: the
+   pattern counted movaps and movdqa, which is how gcc copies an xmm
+   register in ordinary SCALAR float code. A packed MOVE is not
+   evidence of vectorisation - separating the two dropped lz_exp from
+   "22 packed" to zero arithmetic in 163 instructions.
 
    The audit and the compiler agree, which is the point of running
    both: an audit is an argument about an ISA table, and three cells in
@@ -3797,8 +3804,8 @@ static const char *const km_col[LZ_KM_NCOL] = {
 static const char km_why_sse1[] =
     "SSE1 adds no signed 16x16->32 MAC and no integer %xmm; its own MMX "
     "additions (pmaxsw/pshufw/psadbw) are real but are not a MAC. gcc "
-    "-O3 at -march=pentium3 emits zero packed instructions for these "
-    "loops against 151 at -march=x86-64 (build/o3_probe.sh)";
+    "-O3 at -march=pentium3 emits zero packed ARITHMETIC for these loops "
+    "against 63 at -march=x86-64 (build/o3_probe.sh)";
 static const char km_why_t2g128[] =
     "nothing to hoist across the four sub-blocks - see LZ_G128_T2 in "
     "src/ops.c";

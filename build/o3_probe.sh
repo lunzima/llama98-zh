@@ -51,8 +51,8 @@ i32f:src/ops_quant.c:norm_ss_fixed
 q8rnd:src/ops.c:lz_quantize_q8
 nrmss:src/ops_quant.c:norm_ss_fixed
 fwhti:src/fwht.c:lz_fwht_i32
-fwhtf:src/ops.c:lz_hadamard_f32
-f32mm:src/ops_matmul.c:lz_matmul_w
+fwhtf:src/ops.c:lz_fwht
+f32mm:src/ops.c:lz_matmul_w
 atdot:src/ops_gdn.c:lz_attn_score_q8
 wsump:src/ops_gdn.c:lz_attn_wsum_q8
 "
