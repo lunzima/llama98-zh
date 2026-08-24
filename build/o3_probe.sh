@@ -44,10 +44,25 @@ D="-std=c99 -Isrc -Icommon -ffp-contract=off -DLZ_MMX_TU=1 -DLZ_SSE2_TU=1"
 # unit:file:symbol. The symbol is the LOOP, not the leaf: a function
 # that returns one value has nothing to vectorise, and the matrix's
 # operator cells are about the loops that call those leaves.
+#
+# TWO OF THESE POINTED AT THE WRONG FUNCTION and reported confidently.
+# expfx was lz_exp, an eight-instruction dispatcher that tail-calls its
+# two bodies - not a loop at all, and the rule above says so. Its real
+# per-element loop is lz_moe_route's router softmax, `score[i] =
+# lz_exp(logits[i] - m)`. i32f was norm_ss_fixed, which is nrmss's body;
+# the two units printed identical numbers for that reason and one of
+# them was measuring the other's operator.
+#
+# i32f AND wsump NOW SHARE A SYMBOL, and that is correct rather than a
+# second copy of the same mistake: i32f's own reason says the fold "sits
+# inside a SIMD kernel's own epilogue, after the emms", and that kernel
+# is lz_attn_wsum_q8. Two units in one function print two identical
+# rows; the alternative is pointing one of them somewhere it does not
+# live.
 MAP="
-expfx:src/ops.c:lz_exp
+expfx:src/ops.c:lz_moe_route
 sigq:src/forward.c:forward_attn
-i32f:src/ops_quant.c:norm_ss_fixed
+i32f:src/ops_gdn.c:lz_attn_wsum_q8
 q8rnd:src/ops.c:lz_quantize_q8
 nrmss:src/ops_quant.c:norm_ss_fixed
 fwhti:src/fwht.c:lz_fwht_i32
