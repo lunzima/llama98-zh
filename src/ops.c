@@ -3887,11 +3887,19 @@ static const char km_why_t2g128[] =
    sigq index a table per element, and a per-element table index needs a
    gather - AVX2, which is off the target family entirely. That holds no
    matter who calls them. */
+/* SPLIT IN TWO under the standard above. The gather argument closes the
+   cells where the LOOKUP is the work, and does not close the ones where
+   arithmetic happens around it. sigmoid_q15 and lz_exp_fixed both end
+   in a linear interpolation - a + (((b - a) * frac) >> 15) - which is
+   int32 arithmetic that pmullw, paddd and psrad express two wide. The
+   two table loads stay scalar; the interpolation does not have to.
+   The win is small and said so: two lanes of int32 against four scalar
+   loads. Small is not none, and none is the bar. */
 static const char km_why_op_x86[] =
-    "impossible as a VECTOR cell: a per-element TABLE INDEX, which needs "
-    "a gather, and that is AVX2 - off this target family. Not a batching "
-    "question: lz_attn_wsum_q8's chunk fold does hand a scalar leaf "
-    "thirty-two values at a time, which is what i32f's cells are";
+    "todo: the per-element table INDEX needs a gather (AVX2, off this "
+    "target family) and stays scalar, but the interpolation around it - "
+    "a + (((b - a) * frac) >> 15) - is int32 arithmetic pmullw/paddd/"
+    "psrad express two wide. Small win, not no win";
 /* EXPFX AND SIGQ ONLY, and the scope line is here because this string
    used to be the default for every operator unit and was wrong for
    three of them. i32f and q8rnd both have group forms - the wsum chunk
@@ -3936,9 +3944,21 @@ static const char km_why_attn_g128[] =
 
    MMX alone cannot start it: the scale is a FLOAT multiply and MMX is
    integer-only. */
+/* REOPENED under the standard above: "MMX is integer-only" answers
+   whether the loop runs in ONE pass, and the question is whether the
+   tier can do ANY PART. It can. The scale and the convert are float,
+   but the clamp and the sum of squares are not: packssdw saturates the
+   int32 pair, pmaxsw lifts -32768 to -32767, pmaddwd IS the pairwise
+   sum of products. Two passes - x87 scales and converts a block into
+   an int32 scratch, one emms, MMX runs the integer half four wide -
+   and the emms is once per block rather than once per element, which
+   is what made the one-pass form a regression rather than a speedup.
+   The int64 accumulate stays scalar for the reason the SSE1 cell gives:
+   paddq is SSE2 even on %mm. */
 static const char km_why_nrmss_mmx[] =
-    "impossible: the per-element scale x[i]*sc is a FLOAT multiply and "
-    "MMX is integer-only. The loop cannot start under MMX alone";
+    "todo: the scale and convert are float, but the clamp and the sum of "
+    "squares are not - packssdw, pmaxsw, pmaddwd are all MMX. Two passes "
+    "with one emms between them, not one pass with an emms per element";
 static const char km_why_nrmss_g128[] =
     "this column is the 128-ELEMENT quantization group; norm_ss_fixed's "
     "loop runs over a whole norm row, and the group-shaped part of it "
@@ -4002,10 +4022,14 @@ static const char km_why_i32f_mmx[] =
     "impossible: MMX has no integer-to-float conversion at all - the "
     "first one on this ladder is SSE1's cvtsi2ss. lz_i32f_acc32_sse is "
     "that cell";
+/* REOPENED for the same reason as nrmss above, and it is the same
+   shape: the multiply and the convert are float, everything after them
+   is not. lz_q8round32_sse's tail is packssdw, pminsw, pmaxsw and
+   packsswb - four MMX instructions. Two passes with one emms. */
 static const char km_why_q8rnd_mmx[] =
-    "impossible: rounding a Q8 group starts with x[i] * inv, a float "
-    "multiply, and MMX is integer-only. SSE1 is the first tier that can "
-    "express it - lz_q8round32_sse is that kernel";
+    "todo: the multiply and convert are float, but the clamp and pack "
+    "are MMX - packssdw, pminsw, pmaxsw, packsswb. Two passes with one "
+    "emms between them; SSE1 does it in one because cvtps2pi lands in %mm";
 static const char km_why_fwhtf_mmx[] =
     "impossible: MMX is integer-only and this transform is over floats. "
     "The int32 twin (fwhti) is the one MMX can take";
@@ -4061,8 +4085,8 @@ static const LZKmReg km_reg[LZ_KM_NUNIT * LZ_KM_NCOL] = {
    shared C body, which is also what --kernel arm-c runs - so armC is
    present on ARM for the same reason ref is present everywhere. */
 /* i32f */ KM_H(KM_ALL), KM_I(km_why_i32f_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_I(km_why_i32f_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_i32f_g128),
-/* q8rnd*/ KM_H(KM_ALL), KM_I(km_why_q8rnd_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_I(km_why_q8rnd_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_q8rnd_g128),
-/* expfx*/ KM_H(KM_ALL), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_op_g128),
+/* q8rnd*/ KM_H(KM_ALL), KM_T(km_why_q8rnd_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_T(km_why_q8rnd_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_q8rnd_g128),
+/* expfx*/ KM_H(KM_ALL), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_op_g128),
 /* The two attention MAC units DO have x86 kernels, and they are
    macro-selected rather than table-selected, so km_op_present answers
    for them. atdot's assembly is q8_0's leaf, reused rather than copied
@@ -4074,8 +4098,8 @@ static const LZKmReg km_reg[LZ_KM_NUNIT * LZ_KM_NCOL] = {
    build/kernel_isa_identity_gate.sh (whether the dispatch reaches it). */
 /* atdot*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_attn_g128),
 /* wsump*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_attn_g128),
-/* sigq */ KM_H(KM_ALL), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_I(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_op_g128),
-/* nrmss*/ KM_H(KM_ALL), KM_I(km_why_nrmss_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_I(km_why_nrmss_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_nrmss_g128),
+/* sigq */ KM_H(KM_ALL), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_T(km_why_op_x86), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_op_g128),
+/* nrmss*/ KM_H(KM_ALL), KM_T(km_why_nrmss_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_T(km_why_nrmss_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_nrmss_g128),
 /* Registering these two rows is what makes a gate able to tell "no
    assembly" from "no such operator": without them src/fwht.c could be
    deleted and not a single cell would change. */
