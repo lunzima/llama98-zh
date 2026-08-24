@@ -505,7 +505,29 @@ void lz_quantize_q8(const float *x, int n, int gs, int8_t *q, float *s) {
 #endif /* LZ_HAVE_Q8R_SIMD || LZ_HAVE_Q8R_SSE */
             {
                 LZ_FCX(LZ_FC_QUANT, gs, gs, 0, 0, 0);  /* mul, q8_round(add) */
-                for (k = 0; k < gs; k++) {
+                k = 0;
+#if defined(LZ_HAVE_Q8R_PACK_MMX)
+                /* The MMX tier: a machine with MMX and no SSE1 - the
+                   floor of the target family - reaches this arm, where
+                   before it ran the scalar loop below for every
+                   element. Two passes over each 32: x87 does the
+                   multiply and the round into a scratch, then
+                   lz_q8round32_pack_mmx does the clamp and the packs
+                   four wide and takes the emms with it. The scalar loop
+                   below is not duplicated for the tail - `k` continues
+                   into it, which is the same contract the SSE1 and SSE2
+                   kernels have with their callers. */
+                if (lz_cpu_has_mmx()) {
+                    int32_t sc[32];
+                    int j;
+                    for (; k + 31 < gs; k += 32) {
+                        for (j = 0; j < 32; j++)
+                            sc[j] = q8_round(grp[k + j] * inv);
+                        lz_q8round32_pack_mmx(sc, out + k);
+                    }
+                }
+#endif /* LZ_HAVE_Q8R_PACK_MMX */
+                for (; k < gs; k++) {
                     int qi = q8_round(grp[k] * inv);
                     qi = (qi > 127) ? 127 : qi;
                     out[k] = (int8_t)((qi < -127) ? -127 : qi);
@@ -3604,10 +3626,18 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
    pays on the HORIZONTAL FOLD: per-32 every sub-block reduces its own
    lanes and extracts, and folding four together costs about half that
    and leaves the results in one register to store whole. */
+   THE THIRD BRANCH IS NOT OPTIONAL, and the four formats above carry
+   the same one for the same reason. On the ARM cross-build neither
+   __WATCOMC__ nor the gcc group kernels exist, so a plain #else lights
+   this column on a target whose row is empty - kernel_matrix_gate
+   reports it as "t2/g128 present but not registered for this build
+   class", which is what it did. */
 #if defined(__WATCOMC__)
 #define LZ_G128_T2  0
-#else
+#elif defined(LZ_ROW_SSE2_EXTERN)
 #define LZ_G128_T2  LZ_G128_GCC
+#else
+#define LZ_G128_T2  0
 #endif /* __WATCOMC__ */
 
 /* ---- the reason registry ---------------------------------------------

@@ -80,6 +80,17 @@ lz_p2_blk *p2_blk(void);
 #define LZ_HAVE_AMAX_MMX   1
 #define LZ_HAVE_Q8R_SSE    1
 
+/* Q8 activation rounding, the PACK HALF only. The multiply and the
+   round are float and MMX has neither; this takes the int32 they
+   produce and does the clamp and the two packs, which are MMX. The
+   caller runs the float half into a scratch with x87 and takes the
+   emms this kernel emits at its exit - one per 32 elements, not one
+   per element, which is what separates it from a regression.
+   BOTH toolchains from one macro: the wrapper has the same name and
+   prototype on each side. */
+#define LZ_HAVE_Q8R_PACK_MMX 1
+void lz_q8round32_pack_mmx(const int32_t *q, int8_t *out);
+
 /* norm_ss_fixed's element loop, SSE1 tier. HERE and not in ops_sse.h
    for the same reason as lz_p2_split32_sse below: SSE1's convert is
    cvtps2pi, so the pack, the clamp and the multiply-add all land in
