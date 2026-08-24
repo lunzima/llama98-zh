@@ -50,7 +50,7 @@ SCAN="Makefile src/*.c src/*.h gui/*.c gui/*.h common/*.c common/*.h"
 # table keyed by name hands a newcomer someone else's excuse.
 #
 #   src/err.c:138            NOT comment debt: the user-visible Chinese
-#   gui/localized_strings.c:99   message tables, which are the shape the
+#   gui/localized_strings.c:100  message tables, which are the shape the
 #                            project asks for - every user-visible
 #                            string lives in a table, source stays ASCII
 #                            everywhere else. Counted because the scan
@@ -65,7 +65,7 @@ SCAN="Makefile src/*.c src/*.h gui/*.c gui/*.h common/*.c common/*.h"
 #                            include-block reshuffle. Their commit
 #                            carries it; baselined rather than left
 #                            silently red.
-BASELINE="src/err.c:138 gui/localized_strings.c:99 src/forward.c:1 src/model.c:1"
+BASELINE="src/err.c:138 gui/localized_strings.c:100 src/forward.c:1 src/model.c:1"
 
 FAIL=0
 TOTAL=0
