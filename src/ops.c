@@ -3939,6 +3939,19 @@ static const char km_why_sse1[] =
    instruction for that is pmulld and pmulld is SSE4.1, off this target
    family entirely. Worth writing down because reaching for it is the
    obvious first move and it does not exist here.
+
+   ONLY TWO OF THE THREE OPERANDS ARE int16, and mixing that up is the
+   trap this note exists to spring. b - a and frac are; `a` ITSELF IS
+   NOT - g_sigtab holds up to 32768 exactly (s = 1.0 rounds there, and
+   both early exits return it), which is one past INT16_MAX. So the
+   sequence keeps a in int32 and adds it with paddd, and only the
+   difference and the fraction go through the 16-bit multiply:
+     pmullw + pmulhw on (b-a, frac), punpck[lh]wd to rebuild two full
+     int32 products, psrad 15, paddd a.
+   Eight MMX instructions per four elements against the C's four
+   scalar sub/mul/shift/add. Packing `a` into int16 to shorten that
+   would silently clamp the one value the table's own endpoint is.
+
    The win is still small - two lanes on MMX, four on SSE2, against
    scalar loads that stay scalar. Small is not none, and none is the
    bar. */
