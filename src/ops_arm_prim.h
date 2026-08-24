@@ -217,9 +217,17 @@ static __inline__ int lz_exp_floor_arm_asm(uint32_t uy, int32_t *tout,
         "mov    %[t2], #1\n\t"
         "mov    %[t2], %[t2], lsl %[t1]\n\t"        /* 2^(sh-1) */
         "sub    %[t], %[m], %[t2]\n\t"              /* N */
+        /* |N| <= 2^24, or the subtract above rounded. UNREACHABLE on any
+           input this primitive accepts: the entry test eight lines up
+           bounds |y32| below 4096, so |N| stays far under 2^24. Kept as
+           a guard on the arithmetic rather than as a live branch -
+           .prof/arm_mutgate.sh's floor-exactness-test halves the window
+           here and the sweep cannot tell, which is what "unreachable"
+           looks like from the outside. Do not read that GREEN as the
+           sweep being too narrow. */
         "add    %[t1], %[t], #0x1000000\n\t"
         "cmp    %[t1], #0x2000000\n\t"
-        "bhi    1f\n\t"                  /* |N| > 2^24: the subtract rounds */
+        "bhi    1f\n\t"
         "mov    %[o], #1\n\t"
         "mov    %[t1], %[t], asr %[sh]\n\t"
         "sub    %[t], %[t], %[t1], lsl %[sh]\n\t"   /* remainder, >= 0 */
