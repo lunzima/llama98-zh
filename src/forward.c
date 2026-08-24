@@ -3654,20 +3654,14 @@ static void forward_moe(const LZModel *m, LZRunState *s,
        apart again. Decided before the matmul, like every other exit in
        this file. */
     int mlat_int = 0, mlat_may = 0;
-#if LZ_MLAT_I16
-    mlat_may = s->moe_lat_i16 && L->moe_expert_w1 && L->moe_expert_w3 &&
-               lz_matmul_xq_i16_ok(&L->moe_down_proj, hdim, nt);
-    /* lz_matmul_xq reads its FLOAT argument when - and only when - the
-       weight is F32, so an F32 expert would read a moe_lat_x the int
-       exit never wrote. Refused for the whole layer rather than per
-       expert: which experts a token routes to is not known until after
-       the matmul that would have written the float. ne dtype loads per
-       call and no float work. */
-    for (i = 0; mlat_may && i < ne; i++)
-        if (L->moe_expert_w1[i].dtype == LZ_FMT_F32 ||
-            L->moe_expert_w3[i].dtype == LZ_FMT_F32)
-            mlat_may = 0;
-#endif /* LZ_MLAT_I16 */
+    /* The predicate is set below with the others, past the last
+       declaration in this block. Its refusal rule stays here, where it
+       belongs to the reader: lz_matmul_xq reads its FLOAT argument when
+       - and only when - the weight is F32, so an F32 expert would read
+       a moe_lat_x the int exit never wrote. Refused for the whole layer
+       rather than per expert: which experts a token routes to is not
+       known until after the matmul that would have written the float.
+       ne dtype loads per call and no float work. */
     /* int-pipeline milestone 8: the two SwiGLU sites in this function.
        Both are decided here, before any matmul, and both are
        all-or-nothing over their own triple (gate, up, down) for the
@@ -3695,6 +3689,14 @@ static void forward_moe(const LZModel *m, LZRunState *s,
     mrt_may = lz_sig_mode() && s->moe_logits_i16 && c->moe_router_sigmoid &&
               lz_matmul_xq_i16_ok(&L->moe_gate_w, hdim, nt);
 #endif /* LZ_MOEGATE_I16 */
+#if LZ_MLAT_I16
+    mlat_may = s->moe_lat_i16 && L->moe_expert_w1 && L->moe_expert_w3 &&
+               lz_matmul_xq_i16_ok(&L->moe_down_proj, hdim, nt);
+    for (i = 0; mlat_may && i < ne; i++)
+        if (L->moe_expert_w1[i].dtype == LZ_FMT_F32 ||
+            L->moe_expert_w3[i].dtype == LZ_FMT_F32)
+            mlat_may = 0;
+#endif /* LZ_MLAT_I16 */
     if (lz_moe_topk > 0 && lz_moe_topk <= ne)
         topk = lz_moe_topk;
     gsh = lz_act_gs(&L->moe_down_proj, hdim);
