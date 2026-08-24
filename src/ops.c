@@ -4168,12 +4168,14 @@ static const char km_why_recur_wat_sse2[] =
     "LZ_P2_SSE2_EXTERN is declared under !__WATCOMC__, so there is no "
     "macro for km_op_present to key this cell off yet";
 static const char km_why_epi_x86[] =
-    "todo: lz_epi_mac_i16 is an int16 multiply-accumulate and nothing "
-    "but the C body exists. pmaddwd expresses it directly, so all six "
-    "x86 cells are owed";
+    "todo: the accumulation is int32 x int16 -> int64, not the int16 "
+    "pmaddwd shape the name suggests. SSE2 reaches it with pmuludq plus "
+    "sign correction, MMX by splitting the int32 into 16-bit halves; "
+    "both are more work than a straight pmaddwd, neither is impossible";
 static const char km_why_epi_arma[] =
-    "todo: same int16 multiply-accumulate as the x86 cells, and ARMv5TE "
-    "reaches it the same way the other operator rows do";
+    "todo: same int32 x int16 -> int64 accumulation as the x86 cells. "
+    "ARMv5TE has SMLAL, which is exactly this shape, so this cell is "
+    "the cheapest of the seven to fill";
 typedef struct { unsigned char have; unsigned char why; const char *text; } LZKmReg;
 #define KM_H(mask) { (unsigned char)(mask), 0, (const char *)0 }
 #define KM_I(text) { 0, LZ_KM_IMPOSSIBLE, (text) }
