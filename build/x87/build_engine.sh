@@ -146,13 +146,21 @@ SSE2_FLAGS="-O2 -std=c99 -Wall -Wextra"
 SSE2_FLAGS="$SSE2_FLAGS -m32 -march=i686 -mmmx -msse -msse2"
 SSE2_FLAGS="$SSE2_FLAGS -ffp-contract=off -DLZ_SSE2_TU=1 -I$ROOT/src"
 
-# Same list as the Makefile's ENG, and it has to stay the same list -
-# see the Makefile note about source lists living in exactly one place.
+# ASKED FOR, not restated. This was a hand-copy of the Makefile's ENG
+# carrying a comment saying it had to stay in step, and it did not: nine
+# files short, so the link below failed with eight undefined references
+# for as long as this script's CI stage had been skipping for want of a
+# -m32 compiler. A stage that never runs cannot notice its own list
+# rotting; `make -s print-ENG` has nothing to rot.
+#
 # ops_mmx/ops_mmx_sse/ops_sse2 are NOT in ENG (Watcom and the ARM
 # cross-build must not see them - see the Makefile's own ENG_MMX_GCC
 # variable) so they are built separately, right after this loop.
-ENG="err compat lfn json safetensors model ops forward sampler generate
-     tokenizer unicode chat gbk cpucheck"
+ENG=$(make -s -C "$ROOT" print-ENG)
+if [ -z "$ENG" ]; then
+    echo "x87: cannot read ENG from $ROOT/Makefile (make -s print-ENG)"
+    exit 2
+fi
 
 # $OUT is scratch, wiped and rebuilt from nothing on every run - not a
 # durable artifact. A stale directory from an old invocation (a
@@ -215,7 +223,10 @@ echo "objects: $(ls -1 "$OUT"/*.o 2>/dev/null | wc -l)  failed: $fail  warnings:
 # in common/, a front-end helper deliberately outside $(ENG) - so this
 # lists it explicitly with -Icommon, exactly as the Makefile's native
 # target and the ARM/Watcom CLI/DOS builds do.
-COM="stream settings command savechat mru chatfile session"
+# $(CLI_COM), not $(COM): this links the command line, and the gui-only
+# members of common/ are not in it. Asked for, for the reason the ENG
+# query above gives.
+COM=$(make -s -C "$ROOT" print-CLI_COM)
 if [ -f "$ROOT/src/cli_main.c" ]; then
     COMSRC=""
     for c in $COM; do

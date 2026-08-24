@@ -646,6 +646,24 @@ watcom-dos-single: watcom-dos
 	@echo "SB.EXE binds DOS32A.EXE into the exe (404KB -> 431KB, measured)."
 
 # ----------------------------------------------------------------------
+# Ask the Makefile for a variable: `make -s print-ENG`.
+#
+# The source lists live here and the out-of-tree builds - build/x87 and
+# build/arm, which are shell scripts rather than make targets - used to
+# restate them, each carrying a comment saying the copy had to stay in
+# step. It did not: both scripts said "Same list as the Makefile's ENG"
+# and only the ARM one was right, because only the ARM one runs in CI.
+# The x87 copy was nine files short and its link had been broken for as
+# long as its CI stage had been skipping.
+#
+# A gate comparing the copies would have caught that. Deleting the
+# copies is better: `make -s print-ENG` cannot be out of step with the
+# thing it prints.
+# ----------------------------------------------------------------------
+print-%:
+	@echo "$($*)"
+
+# ----------------------------------------------------------------------
 # clean
 # ----------------------------------------------------------------------
 

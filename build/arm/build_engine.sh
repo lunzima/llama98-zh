@@ -56,10 +56,15 @@ FLAGS="-O2 -std=c99 -Wall -Wextra"
 FLAGS="$FLAGS -march=armv5te -mtune=arm926ej-s -mfloat-abi=soft -DLZ_NO_FPU=1"
 FLAGS="$FLAGS -ffp-contract=off -I$ROOT/src"
 
-# Same list as the Makefile's ENG, and it has to stay the same list -
-# see the Makefile note about source lists living in exactly one place.
-ENG="err compat lfn json safetensors model ops ops_quant ops_sched ops_matmul ops_t2_arm ops_arm ops_t2_scalar ops_norm ops_gdn fwht forward sampler generate
-     tokenizer unicode chat gbk cpucheck"
+# Asked for, not restated - see the Makefile's print-% comment. This
+# copy happened to be correct, which is exactly why it is worth
+# deleting: the identical comment sat above the x87 script's copy, which
+# was nine files short, so the sentence proved nothing either way.
+ENG=$(make -s -C "$ROOT" print-ENG)
+if [ -z "$ENG" ]; then
+    echo "arm: cannot read ENG from $ROOT/Makefile (make -s print-ENG)"
+    exit 2
+fi
 
 mkdir -p "$OUT"
 rm -f "$OUT"/*.o "$OUT"/*.log
@@ -86,7 +91,7 @@ echo "objects: $(ls -1 "$OUT"/*.o 2>/dev/null | wc -l)  failed: $fail  warnings:
 # in common/, a front-end helper deliberately outside $(ENG) - so this
 # lists it explicitly with -Icommon, exactly as the Makefile's native
 # target and the Watcom CLI/DOS builds do.
-COM="stream settings command savechat mru chatfile session"
+COM=$(make -s -C "$ROOT" print-CLI_COM)
 if [ -f "$ROOT/src/cli_main.c" ]; then
     COMSRC=""
     for c in $COM; do

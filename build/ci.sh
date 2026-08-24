@@ -459,12 +459,31 @@ done
 echo
 echo "==== [9/24]32-bit x87 gcc build (WSL) ===="
 LOG=build/ci-x87.log
+# WHICH compiler, not whether `gcc` happens to be the one. Ubuntu ships
+# gcc-N-multilib per version, so a box can have working 32-bit support
+# under gcc-14 while plain `gcc` is gcc-13 and fails at the LINK with
+# "skipping incompatible libgcc.a". That is what this stage did: it
+# skipped for want of multilib on a machine that had it, and the skip
+# hid a build/x87 source list that had gone nine files stale.
+#
+# Probes with a LINK, not -c: the missing piece is 32-bit libgcc and a
+# compile-only check passes without it.
+X87CC=""
+if command -v wsl >/dev/null 2>&1; then
+    for cand in gcc gcc-14 gcc-13 gcc-12; do
+        if wsl bash -lc "printf 'int main(void){return 0;}\n' >/tmp/_m32t.c && $cand -m32 /tmp/_m32t.c -o /tmp/_m32t" >/dev/null 2>&1; then
+            X87CC=$cand
+            break
+        fi
+    done
+fi
 if ! command -v wsl >/dev/null 2>&1; then
     echo "SKIP: 32-bit x87 build (wsl not installed)"
     note "SKIP  32-bit x87 build (wsl not installed)"
     SKIP=$((SKIP + 1))
-elif ! wsl bash -lc 'printf "int main(void){return 0;}\n" >/tmp/_m32t.c && gcc -m32 /tmp/_m32t.c -o /tmp/_m32t 2>/dev/null' >/dev/null 2>&1; then
-    echo "SKIP: 32-bit x87 build (WSL present but no gcc -m32 multilib)"
+elif [ -z "$X87CC" ]; then
+    echo "SKIP: 32-bit x87 build (WSL present but no gcc that can link -m32;"
+    echo "      tried gcc gcc-14 gcc-13 gcc-12 - apt install gcc-N-multilib)"
     note "SKIP  32-bit x87 build (no -m32 multilib in WSL)"
     SKIP=$((SKIP + 1))
 else
@@ -474,10 +493,10 @@ else
     case "$ROOT" in
         /[a-z]/*) WSL_ROOT="/mnt/$(echo "$ROOT" | cut -c2)/$(echo "$ROOT" | cut -c4-)" ;;
     esac
-    if wsl bash -lc "cd '$WSL_ROOT' && bash build/x87/build_engine.sh" >"$LOG" 2>&1; then
+    if wsl bash -lc "cd '$WSL_ROOT' && CC=$X87CC bash build/x87/build_engine.sh" >"$LOG" 2>&1; then
         if grep -q '^linked:' "$LOG"; then
-            echo "PASS: 32-bit x87 build (WSL)"
-            note "PASS  32-bit x87 build (WSL)"
+            echo "PASS: 32-bit x87 build (WSL, CC=$X87CC)"
+            note "PASS  32-bit x87 build (WSL, CC=$X87CC)"
             PASS=$((PASS + 1))
         else
             echo "FAIL: 32-bit x87 build exited 0 but no 'linked:' line in $LOG"
