@@ -527,7 +527,7 @@ watcom-gui:
 # committed, and then invoked by nothing: not here, not in ci.sh. They
 # passed every time anyone ran them by hand and could not have reddened
 # a build. A gate no target depends on is a script.
-check: bare-endif-gate dead-ifndef-gate f32count-billing-gate dedupe-gate mm-alias-gate c89-floor-gate comment-hygiene-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate kernel-matrix-gate
+check: bare-endif-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate dedupe-gate mm-alias-gate c89-floor-gate comment-hygiene-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate kernel-matrix-gate
 
 # Two shared helpers with the same body under different names, which is
 # the duplication dedupe-gate cannot see: that one knows the names it is
@@ -589,6 +589,13 @@ bare-endif-gate:
 .PHONY: dead-ifndef-gate
 dead-ifndef-gate:
 	@bash build/dead_ifndef_gate.sh
+
+# A brace pair that opens under one #if and closes under another, or an
+# assignment cut in half by one. Every configuration compiles, so the
+# only symptom is text that stops meaning what its indentation says.
+.PHONY: ppbrace-gate
+ppbrace-gate:
+	@bash build/ppbrace_gate.sh
 
 # A `float` function reading an int32_t*/int64_t* accumulator (the
 # dequant-epilogue family's own shape) that never calls LZ_FCX/LZ_FC is

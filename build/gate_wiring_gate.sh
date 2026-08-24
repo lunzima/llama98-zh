@@ -67,12 +67,41 @@ if ! grep -q "kernel_matrix_gate.sh" Makefile build/ci.sh 2>/dev/null; then
     exit 1
 fi
 
+# AND PRESENT IN A FRESH CLONE, which is the same question one layer
+# out. .gitignore ignores /build/* and names each keeper back in by
+# hand, so a new gate is wired and invisible at the same time: `make
+# check` runs it here and the file does not exist for anyone who clones.
+# dedupe_gate.sh already did this once - the .gitignore comment says so,
+# and until now nothing but that comment held it.
+UNTRACKED=""
+for g in build/*_gate.sh build/*.awk; do
+    [ -e "$g" ] || continue
+    git ls-files --error-unmatch "$g" >/dev/null 2>&1 || UNTRACKED="$UNTRACKED $g"
+done
+if [ -n "$UNTRACKED" ]; then
+    echo "gate_wiring_gate: FAIL - wired but not tracked:"
+    for u in $UNTRACKED; do echo "    $u"; done
+    echo "  .gitignore ignores /build/* by name. Add a \`!\` line for each,"
+    echo "  or the gate runs here and is absent from every clone."
+    FAIL=1
+fi
+
+# Positive control for that half, pointed the same way as the one above:
+# a name that MUST come back tracked. If git stopped answering, every
+# script would read as untracked and the FAIL would be the instrument.
+if ! git ls-files --error-unmatch build/ci.sh >/dev/null 2>&1; then
+    echo "gate_wiring_gate: FAIL - build/ci.sh reads as untracked, which it"
+    echo "  is not; the tracking check is broken"
+    exit 1
+fi
+
 N=$(ls build/*_gate.sh 2>/dev/null | wc -l)
 if [ "$FAIL" -eq 0 ]; then
     echo "gate_wiring_gate: PASS ($N gate script(s), every one reachable"
-    echo "  from make or ci.sh)"
+    echo "  from make or ci.sh, and every one tracked)"
     exit 0
 fi
+[ -n "$UNWIRED" ] || exit 1
 echo "gate_wiring_gate: FAIL - script(s) no target depends on:"
 for u in $UNWIRED; do echo "    $u"; done
 echo "  A gate nothing invokes is a script. Add it to \`check\` in the"

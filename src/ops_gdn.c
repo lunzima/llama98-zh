@@ -1877,11 +1877,11 @@ static void gdn_p2_row_simd(const int8_t *ph_row,
             blk->kmin[j] = -127;    /* SSE1: one pmaxsw does the same */
         }
         {
-            int8_t *olg =
+            int8_t *olg;
 #if LZ_GDN_STATE_2PLANE
-                ol_row + gg * 32;
+            olg = ol_row + gg * 32;
 #else
-                sink_lo;
+            olg = sink_lo;
 #endif /* LZ_GDN_STATE_2PLANE */
 #ifdef LZ_HAVE_P2_SSE2
             if (tier >= 3) lz_p2_split32_sse2(blk, oh_row + gg * 32, olg);
