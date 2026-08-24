@@ -472,6 +472,15 @@ static int kv_slot(const LZRunState *s, int t) {
     return s->attn_sink + ((t - s->attn_sink) % s->kv_ring);
 }
 
+/* Stored scale groups for a row of N elements at group width GS. A GS of
+   0 is "one scale for the whole row", which stores none - callers that
+   pass a width straight from lz_act_gs rely on that, since it returns 0
+   for a width this path cannot honour. Written once because ten sites
+   had it inline and a reader had to check each one for the guard. */
+static int scale_groups(int n, int gs) {
+    return (gs > 0) ? n / gs : 0;
+}
+
 /* The slot after SLOT in a ring of DEPTH. SLOT is already reduced, so
    the successor is a compare; recomputing (base + tk + 1) % depth spends
    a second runtime modulo to reach the same answer. Distinct from
@@ -1856,9 +1865,9 @@ static void forward_attn(const LZModel *m, LZRunState *s,
     int hdim = c->hidden_size, kvd = c->attn_kv_dim, qd = c->attn_q_dim;
     int qgd = c->attn_qgate_dim;
     int gsa = lz_act_gs(&L->q_proj, hdim);
-    int nsa = (gsa > 0) ? hdim / gsa : 0;
+    int nsa = scale_groups(hdim, gsa);
     int gso = lz_act_gs(&L->o_proj, qd);
-    int nso = (gso > 0) ? qd / gso : 0;
+    int nso = scale_groups(qd, gso);
     /* Per-token flag for the fixed-tier attention int path (--attn-int).
        The quantize step after the tk loop must know which tokens took the
        int wsum; only the MTP window override can split a batch. */
@@ -2564,7 +2573,7 @@ static void forward_ssm(const LZModel *m, LZRunState *s,
     float scale = s->ssm_scale;
     int hdim = c->hidden_size, cdim = c->lin_conv_dim, vdim = c->lin_value_dim;
     int gsa = lz_act_gs(&L->in_proj_qkv, hdim);
-    int nsa = (gsa > 0) ? hdim / gsa : 0;
+    int nsa = scale_groups(hdim, gsa);
     int h, i, tk;
 
     /* quantize xb once; the four input projections share it (all in_dim = hidden) */
@@ -2711,7 +2720,7 @@ static void forward_ssm(const LZModel *m, LZRunState *s,
        lz_quantize_q8 path. */
     {
         int gso = lz_act_gs(&L->out_proj, vdim);
-        int nso = (gso > 0) ? vdim / gso : 0;
+        int nso = scale_groups(vdim, gso);
         if (lz_norm_int() && lz_norm_can_fixed(vd) &&
             gso > 0 && (vd % gso) == 0) {
             /* Per-head quantize, not one whole-vdim call: the norm runs
@@ -3041,7 +3050,7 @@ static void forward_kda(const LZModel *m, LZRunState *s,
     int hdim = c->hidden_size, kdim = c->lin_key_dim, vdim = c->lin_value_dim;
     int nvk = nv * kd;
     int gsa = lz_act_gs(&L->kda_q_proj, hdim);
-    int nsa = (gsa > 0) ? hdim / gsa : 0;
+    int nsa = scale_groups(hdim, gsa);
     int h, i, tk;
     /* int-pipeline milestone 3: does the whole q/k/v triple qualify for
        the int16 matmul exit the fixed conv can consume directly? Decided
@@ -3567,7 +3576,7 @@ static void forward_kda(const LZModel *m, LZRunState *s,
        as forward_ssm's sgdn block above (bit-identical, same guard). */
     {
         int gso = lz_act_gs(&L->kda_o_proj, vdim);
-        int nso = (gso > 0) ? vdim / gso : 0;
+        int nso = scale_groups(vdim, gso);
         if (c->use_subn) {
             /* SubLN: o_proj's OWN input RMSNorm (kda_o_subn_norm) over
                the whole lin_value_dim span, applied AFTER the per-head
@@ -3795,7 +3804,7 @@ static void forward_moe(const LZModel *m, LZRunState *s,
     if (lz_moe_topk > 0 && lz_moe_topk <= ne)
         topk = lz_moe_topk;
     gsh = lz_act_gs(&L->moe_down_proj, hdim);
-    nsh = (gsh > 0) ? hdim / gsh : 0;
+    nsh = scale_groups(hdim, gsh);
 
 #if LZ_SWIGLU_I16
     rsw_may = s->moe_h1_i16 && s->moe_h3_i16 && !c->use_subn &&
@@ -3831,7 +3840,7 @@ static void forward_moe(const LZModel *m, LZRunState *s,
            magnitude acts as a temperature and skipping it would move
            every routing decision. */
         int gsg = lz_act_gs(&L->moe_gate_w, hdim);
-        int nsg = (gsg > 0) ? hdim / gsg : 0;
+        int nsg = scale_groups(hdim, gsg);
         for (tk = 0; tk < nt; tk++)
             lz_rmsnorm(s->xb2 + (size_t)tk * hdim, s->xb + (size_t)tk * hdim,
                        lz_t_f32(&L->moe_gate_norm, s->wscr), hdim,
@@ -4014,7 +4023,7 @@ static void forward_moe(const LZModel *m, LZRunState *s,
        again, so batched. */
     {
         int gsu = lz_act_gs(&L->moe_up_proj, latent);
-        int nsu = (gsu > 0) ? latent / gsu : 0;
+        int nsu = scale_groups(latent, gsu);
         if (c->use_subn) {
             /* In place: moe_lat_y is dead after the quantize below, and
                the "mrou" tap above already recorded the pre-norm value. */
@@ -4039,9 +4048,9 @@ static void forward_moe(const LZModel *m, LZRunState *s,
        this is dense_ffn_step's shape, and it is written the same way. */
     if (shared_w > 0) {
         int gss = lz_act_gs(&L->moe_shared_gate, hdim);
-        int nss = (gss > 0) ? hdim / gss : 0;
+        int nss = scale_groups(hdim, gss);
         int gsd = lz_act_gs(&L->moe_shared_down, shared_w);
-        int nsd = (gsd > 0) ? shared_w / gsd : 0;
+        int nsd = scale_groups(shared_w, gsd);
         int ssw_int = 0;    /* the pair landed in moe_h1_i16/moe_h3_i16 */
 
         /* gate and up both read xt with in_dim == hidden_size, so
@@ -4174,9 +4183,9 @@ static void dense_ffn_step(const LZModel *m, LZRunState *s,
     const LZModelConfig *c = &m->config;
     int dim = c->hidden_size;
     int gsg = lz_act_gs(&L->gate_proj, dim);
-    int nsg = (gsg > 0) ? dim / gsg : 0;
+    int nsg = scale_groups(dim, gsg);
     int gsd = lz_act_gs(&L->down_proj, idim);
-    int nsd = (gsd > 0) ? idim / gsd : 0;
+    int nsd = scale_groups(idim, gsd);
     int i, tk;
     LZ_PROF_DECL(_ta);
     (void)layer;   /* only used inside LZ_TAP, which is a no-op in a normal build */
@@ -4638,7 +4647,7 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
            normalizing position nt-1 here AND there would run rmsnorm on
            an already-normalized vector a second time. */
         int gse = lz_act_gs(&m->embed_tokens, dim);
-        int nse = (gse > 0) ? dim / gse : 0;
+        int nse = scale_groups(dim, gse);
         for (tk = 0; tk < nt; tk++) {
             float *xt = s->x + (size_t)tk * dim;
             lz_rmsnorm(xt, xt, lz_t_f32(&m->final_norm, s->wscr), dim,
