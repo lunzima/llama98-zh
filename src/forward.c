@@ -1895,6 +1895,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
        so, rather than reading the sum as the rotation's own effect. */
     int v_int = 0, v_may = 0;
     int h, d, t, tk;
+    int kvh, kvc;                /* h / kv_mul and h % kv_mul, carried */
 
     if (s->kv_rot_k) scale /= (float)s->kv_rot_k;
 #if LZ_VPROJ_I16
@@ -2142,9 +2143,17 @@ static void forward_attn(const LZModel *m, LZRunState *s,
         attn_int[tk] = 0;
 #endif /* LZ_ATTN_FIXED & 2 */
 
-        for (h = 0; h < nh; h++) {
+        /* kvh is h / kv_mul, advanced rather than divided: h steps by one,
+           so the quotient steps once every kv_mul heads. kv_mul is a
+           runtime value, so the compiler cannot strength-reduce the
+           division on its own, and it is one idiv per head per layer.
+           The advance sits in the third clause, where a continue in the
+           body cannot skip it. */
+        kvh = 0;
+        kvc = 0;
+        for (h = 0; h < nh; h++,
+             kvc = (kvc + 1 == kv_mul) ? (kvh++, 0) : kvc + 1) {
             const float *qhh = qht + (size_t)h * hd;
-            int kvh = h / kv_mul;
             float *out = aot + (size_t)h * hd;
             /* Cache row for the position being scored. Assigned once per
                iteration in each scoring loop below rather than called
