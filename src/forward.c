@@ -29,6 +29,13 @@
    makes that fail instead. */
 #ifndef LZ_TAP
 #define LZ_TAP(tag, li, ptr, n) ((void)0)
+/* Set only when nobody supplied a tap, so a site can ask "is anyone
+   reading intermediates here". An int-pipeline step that stops writing
+   the float buffer a tap points at does not blank that tap - it leaves
+   it reading the PREVIOUS contents, which is a plausible-looking wrong
+   number rather than an obvious zero. Such a step guards on this and
+   keeps the float path for a tap build. */
+#define LZ_TAP_OFF 1
 #endif /* LZ_TAP */
 
 /* Debug-only investigative probe for the team-lead's dilution-vs-position
@@ -4629,13 +4636,47 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
        nt-1 == 0, identical to the original path. */
     {
         float *xl = s->x + (size_t)(nt - 1) * dim;
-        lz_rmsnorm(xl, xl, lz_t_f32(&m->final_norm, s->wscr), dim,
-                   c->rms_norm_eps);
-        LZ_TAP("fnorm", -1, xl, dim);
+        int gse = lz_act_gs(&m->embed_tokens, dim);
+        /* The norms census's smallest consumer, and the shape the other
+           four share: a float vector built by the norm and taken apart
+           again by the very next statement. The int tier writes the Q15
+           product into s->subn_norm_int with its scale out of band and
+           lz_quantize_q8_int folds that into the group scale, so xl is
+           never materialized.
+           This is a TIER, not a refactor - lz_rmsnorm_int's own header
+           says it is not bit-identical to the float pair, the plain
+           norm having no Q15-chain-then-dequant sibling to match. It
+           therefore rides --fixed like every other fixed tier.
+
+           TWO GUARDS BEYOND THE TIER, both of them things that read a
+           buffer this path stops writing:
+             gse > 0    the weight is quantized, so lz_matmul_xq below
+                        takes xq/xqs. At gse == 0 the weight is F32 and
+                        the matmul reads xl itself, which would still
+                        hold the UN-normalized residual.
+             LZ_TAP_OFF nobody is tapping "fnorm". A tap build keeps the
+                        float path rather than reporting the residual as
+                        if it were the norm. */
+        int use_int = 0;
+#if defined(LZ_TAP_OFF)
+        use_int = lz_norm_int() && lz_norm_can_fixed(dim) &&
+                  gse > 0 && (dim % gse) == 0;
+#endif /* LZ_TAP_OFF */
         /* tie_word_embeddings: output projection reuses the embedding
            directly; there is no standalone lm_head */
-        lz_quantize_q8(xl, dim, lz_act_gs(&m->embed_tokens, dim),
-                       s->xq, s->xqs);
+        if (use_int) {
+            float deq;
+            lz_rmsnorm_int(s->subn_norm_int, xl,
+                           lz_t_f32(&m->final_norm, s->wscr), dim,
+                           c->rms_norm_eps, &deq);
+            lz_quantize_q8_int(s->subn_norm_int, dim, gse, deq,
+                               s->xq, s->xqs);
+        } else {
+            lz_rmsnorm(xl, xl, lz_t_f32(&m->final_norm, s->wscr), dim,
+                       c->rms_norm_eps);
+            LZ_TAP("fnorm", -1, xl, dim);
+            lz_quantize_q8(xl, dim, gse, s->xq, s->xqs);
+        }
         LZ_PROF_BEG(_th);
         lz_matmul_xq(s->logits, xl, s->xq, s->xqs, &m->embed_tokens, dim,
                      c->vocab_size);
