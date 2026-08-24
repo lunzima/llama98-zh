@@ -100,13 +100,13 @@ done
 # describes the binary, and `x G--` describes it perfectly honestly
 # while saying nothing about the Watcom kernel that is not there.
 #
-# t2 IS THAT CASE and is named rather than left to redden the gate for
-# everyone: LZ_G128_T2 is 0 under __WATCOMC__ (src/ops.c), so the
-# 128-element group form exists on gcc alone while the other four
-# formats have it on both. It is a real debt - Watcom has the same
-# #pragma aux MMX and SSE2 this would need - and it is recorded here so
-# that a SECOND one cannot arrive unnoticed.
-G128_OWED="t2"
+# t2 WAS THAT CASE and is not any more: lz_dot128_t2_asm exists, so all
+# five formats have the 128-element group form on both toolchains and
+# the list is empty. It is kept - not deleted - because an empty
+# baseline is still the mechanism: the first gcc-only g128 column to
+# appear reddens the gate and has to be argued for here rather than
+# accumulating quietly.
+G128_OWED=""
 G128_SEEN=""
 for u in $UNITS; do
     st=$(cls "$u" g128)

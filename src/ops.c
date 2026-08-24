@@ -3614,10 +3614,9 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
 #define LZ_G128_Q61 0
 #define LZ_G128_Q16 0
 #endif /* __WATCOMC__ */
-/* T2's group form exists on the gcc tiers: dot128_t2_sse2
-   (ops_kernel_dot_sse2.h) and dot128_t2_mmx (ops_kernel_dot_mmx.h).
-   The Watcom #pragma aux twins are not written, so this follows the
-   same knob the other four do on gcc and stays 0 there.
+/* T2's group form now exists on all three: dot128_t2_sse2
+   (ops_kernel_dot_sse2.h), dot128_t2_mmx (ops_kernel_dot_mmx.h) and
+   lz_dot128_t2_asm (ops_mmx.c, the Watcom #pragma aux).
 
    THE ARGUMENT THAT KEPT THIS AT 0 EXAMINED THE UNPACK. It said q6_1
    hoists two mask constants across four sub-blocks while T2's unpack has
@@ -3625,7 +3624,9 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
    one. Both halves are true, and the group form does not pay there. It
    pays on the HORIZONTAL FOLD: per-32 every sub-block reduces its own
    lanes and extracts, and folding four together costs about half that
-   and leaves the results in one register to store whole.
+   and leaves the results in one register to store whole. The Watcom
+   kernel also drops four emms to one, which the per-format twins above
+   get for the same reason.
 
    THE THIRD BRANCH IS NOT OPTIONAL, and the four formats above carry
    the same one for the same reason. On the ARM cross-build neither
@@ -3634,7 +3635,7 @@ void lz_moe_hits_add(unsigned char *hits, int cap, const int *idx, int k) {
    reports it as "t2/g128 present but not registered for this build
    class", which is what it did. */
 #if defined(__WATCOMC__)
-#define LZ_G128_T2  0
+#define LZ_G128_T2  1
 #elif defined(LZ_ROW_SSE2_EXTERN)
 #define LZ_G128_T2  LZ_G128_GCC
 #else
@@ -4174,7 +4175,7 @@ static const LZKmReg km_reg[LZ_KM_NUNIT * LZ_KM_NCOL] = {
 /* q4_1 */ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128),
 /* q6_1 */ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128),
 /* q16_0*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128),
-/* t2   */ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_GCC),
+/* t2   */ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128),
 /* operator units (LZ_KM_OP): registry only, no grid line. ref is the
    shared C body, which is also what --kernel arm-c runs - so armC is
    present on ARM for the same reason ref is present everywhere. */

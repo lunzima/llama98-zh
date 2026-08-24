@@ -2377,6 +2377,326 @@ extern int32_t lz_dot32_t2_asm(const unsigned char *w2,
     __value [__eax] \
     __modify [8087]
 
+/* Addressable twin of lz_dot32_t2_asm. row_t2_mmx_asm inlines the
+   pragma directly and needs no such thing; build/dot128_t2_probe.c does,
+   because the group kernel's reference IS this kernel called four times
+   and a #pragma aux body cannot be called from another TU. */
+int32_t lz_dot32_t2_mmx_w(const unsigned char *w2, const int16_t *x) {
+    return lz_dot32_t2_asm(w2, x);
+}
+
+/* ---- T2, 128 elements: four sub-blocks folded together.
+   gcc twins: dot128_t2_mmx (src/ops_kernel_dot_mmx.h) and
+   dot128_t2_sse2 (src/ops_kernel_dot_sse2.h).
+
+   WHAT THE GROUP FORM BUYS, since an earlier reason string said
+   "nothing" and was wrong about where to look. The unpack is unchanged
+   - T2 hoists only a zero register across sub-blocks, so grouping
+   trades pxor for movq one for one and gains nothing there. It pays at
+   the two ENDS: the per-32 kernel finishes every sub-block with its own
+   `movq/psrlq/paddd/movd` horizontal reduction and its own emms, and
+   four of those become one fold of ten instructions and one emms.
+
+   THE FOUR BLOCKS ARE TEXTUALLY IDENTICAL except for which accumulator
+   they add into, because the pointers ADVANCE between them rather than
+   the offsets growing. Written the other way this would carry
+   thirty-two hand-typed displacements up to [ecx+248], and a single
+   digit wrong in one of them is a wrong answer in one lane of one
+   sub-block - the kind of defect that survives a spot check. Two `add`s
+   per block is what that costs.
+
+   THE FOLD transposes rather than reducing each accumulator alone.
+   punpckldq/punpckhdq bring the two lanes of two accumulators together
+   so one paddd finishes a pair, and each pair leaves in one register to
+   be stored whole - two 8-byte stores instead of four movd. */
+extern void lz_dot128_t2_asm(const unsigned char *w2,
+                             const int16_t *x, int32_t *out4);
+#pragma aux lz_dot128_t2_asm = \
+    ".586" \
+    "pxor      mm1, mm1" \
+    "pxor      mm3, mm3" \
+    "pxor      mm5, mm5" \
+    "pxor      mm6, mm6" \
+    "movq      mm4, [edx]" \
+    "movq      mm0, [ecx]" \
+    "pxor      mm2, mm2" \
+    "punpcklbw mm2, mm4" \
+    "psllw     mm2, 6" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm1, mm2" \
+    "movq      mm0, [ecx+8]" \
+    "pxor      mm2, mm2" \
+    "punpckhbw mm2, mm4" \
+    "psllw     mm2, 6" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm1, mm2" \
+    "movq      mm0, [ecx+16]" \
+    "pxor      mm2, mm2" \
+    "punpcklbw mm2, mm4" \
+    "psllw     mm2, 4" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm1, mm2" \
+    "movq      mm0, [ecx+24]" \
+    "pxor      mm2, mm2" \
+    "punpckhbw mm2, mm4" \
+    "psllw     mm2, 4" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm1, mm2" \
+    "movq      mm0, [ecx+32]" \
+    "pxor      mm2, mm2" \
+    "punpcklbw mm2, mm4" \
+    "psllw     mm2, 2" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm1, mm2" \
+    "movq      mm0, [ecx+40]" \
+    "pxor      mm2, mm2" \
+    "punpckhbw mm2, mm4" \
+    "psllw     mm2, 2" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm1, mm2" \
+    "movq      mm0, [ecx+48]" \
+    "pxor      mm2, mm2" \
+    "punpcklbw mm2, mm4" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm1, mm2" \
+    "movq      mm0, [ecx+56]" \
+    "pxor      mm2, mm2" \
+    "punpckhbw mm2, mm4" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm1, mm2" \
+    "add       ecx, 64" \
+    "add       edx, 8" \
+    "movq      mm4, [edx]" \
+    "movq      mm0, [ecx]" \
+    "pxor      mm2, mm2" \
+    "punpcklbw mm2, mm4" \
+    "psllw     mm2, 6" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm3, mm2" \
+    "movq      mm0, [ecx+8]" \
+    "pxor      mm2, mm2" \
+    "punpckhbw mm2, mm4" \
+    "psllw     mm2, 6" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm3, mm2" \
+    "movq      mm0, [ecx+16]" \
+    "pxor      mm2, mm2" \
+    "punpcklbw mm2, mm4" \
+    "psllw     mm2, 4" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm3, mm2" \
+    "movq      mm0, [ecx+24]" \
+    "pxor      mm2, mm2" \
+    "punpckhbw mm2, mm4" \
+    "psllw     mm2, 4" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm3, mm2" \
+    "movq      mm0, [ecx+32]" \
+    "pxor      mm2, mm2" \
+    "punpcklbw mm2, mm4" \
+    "psllw     mm2, 2" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm3, mm2" \
+    "movq      mm0, [ecx+40]" \
+    "pxor      mm2, mm2" \
+    "punpckhbw mm2, mm4" \
+    "psllw     mm2, 2" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm3, mm2" \
+    "movq      mm0, [ecx+48]" \
+    "pxor      mm2, mm2" \
+    "punpcklbw mm2, mm4" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm3, mm2" \
+    "movq      mm0, [ecx+56]" \
+    "pxor      mm2, mm2" \
+    "punpckhbw mm2, mm4" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm3, mm2" \
+    "add       ecx, 64" \
+    "add       edx, 8" \
+    "movq      mm4, [edx]" \
+    "movq      mm0, [ecx]" \
+    "pxor      mm2, mm2" \
+    "punpcklbw mm2, mm4" \
+    "psllw     mm2, 6" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm5, mm2" \
+    "movq      mm0, [ecx+8]" \
+    "pxor      mm2, mm2" \
+    "punpckhbw mm2, mm4" \
+    "psllw     mm2, 6" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm5, mm2" \
+    "movq      mm0, [ecx+16]" \
+    "pxor      mm2, mm2" \
+    "punpcklbw mm2, mm4" \
+    "psllw     mm2, 4" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm5, mm2" \
+    "movq      mm0, [ecx+24]" \
+    "pxor      mm2, mm2" \
+    "punpckhbw mm2, mm4" \
+    "psllw     mm2, 4" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm5, mm2" \
+    "movq      mm0, [ecx+32]" \
+    "pxor      mm2, mm2" \
+    "punpcklbw mm2, mm4" \
+    "psllw     mm2, 2" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm5, mm2" \
+    "movq      mm0, [ecx+40]" \
+    "pxor      mm2, mm2" \
+    "punpckhbw mm2, mm4" \
+    "psllw     mm2, 2" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm5, mm2" \
+    "movq      mm0, [ecx+48]" \
+    "pxor      mm2, mm2" \
+    "punpcklbw mm2, mm4" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm5, mm2" \
+    "movq      mm0, [ecx+56]" \
+    "pxor      mm2, mm2" \
+    "punpckhbw mm2, mm4" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm5, mm2" \
+    "add       ecx, 64" \
+    "add       edx, 8" \
+    "movq      mm4, [edx]" \
+    "movq      mm0, [ecx]" \
+    "pxor      mm2, mm2" \
+    "punpcklbw mm2, mm4" \
+    "psllw     mm2, 6" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm6, mm2" \
+    "movq      mm0, [ecx+8]" \
+    "pxor      mm2, mm2" \
+    "punpckhbw mm2, mm4" \
+    "psllw     mm2, 6" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm6, mm2" \
+    "movq      mm0, [ecx+16]" \
+    "pxor      mm2, mm2" \
+    "punpcklbw mm2, mm4" \
+    "psllw     mm2, 4" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm6, mm2" \
+    "movq      mm0, [ecx+24]" \
+    "pxor      mm2, mm2" \
+    "punpckhbw mm2, mm4" \
+    "psllw     mm2, 4" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm6, mm2" \
+    "movq      mm0, [ecx+32]" \
+    "pxor      mm2, mm2" \
+    "punpcklbw mm2, mm4" \
+    "psllw     mm2, 2" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm6, mm2" \
+    "movq      mm0, [ecx+40]" \
+    "pxor      mm2, mm2" \
+    "punpckhbw mm2, mm4" \
+    "psllw     mm2, 2" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm6, mm2" \
+    "movq      mm0, [ecx+48]" \
+    "pxor      mm2, mm2" \
+    "punpcklbw mm2, mm4" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm6, mm2" \
+    "movq      mm0, [ecx+56]" \
+    "pxor      mm2, mm2" \
+    "punpckhbw mm2, mm4" \
+    "psrlw     mm2, 14" \
+    "psllw     mm2, 8" \
+    "pmaddwd   mm2, mm0" \
+    "paddd     mm6, mm2" \
+    "movq      mm0, mm1" \
+    "punpckldq mm0, mm3" \
+    "punpckhdq mm1, mm3" \
+    "paddd     mm0, mm1" \
+    "movq      [ebx], mm0" \
+    "movq      mm0, mm5" \
+    "punpckldq mm0, mm6" \
+    "punpckhdq mm5, mm6" \
+    "paddd     mm0, mm5" \
+    "movq      [ebx+8], mm0" \
+    "emms" \
+    __parm [__edx] [__ecx] [__ebx] \
+    __modify [__ecx __edx 8087]
+
+/* Real, addressable twin of lz_dot128_t2_asm - a #pragma aux body has
+   no address, and the probe and any cross-TU caller need one. Same
+   reason lz_dot128_x16_mmx_w exists for Q8_0. */
+void lz_dot128_t2_mmx_w(const unsigned char *w2, const int16_t *x,
+                        int32_t *out4) {
+    lz_dot128_t2_asm(w2, x, out4);
+}
+
 /* row_t2_mmx_asm: ALREADY the real call boundary (matmul_t2_impl,
    src/ops.c, dispatched once per matmul via LZ_ROW_T2). Moving the
    whole function here adds NO new call sites - same argument as
@@ -2391,7 +2711,16 @@ void row_t2_mmx_asm(int32_t *acc32, const void *w4, const void *w2v,
     for (tk = 0; tk < nt; tk++) {
         const int16_t *xwt = xw + (size_t)tk * in_dim;
         int32_t *acc = acc32 + (size_t)tk * nb;
-        for (s = 0; s < nb; s++)
+        /* Whole groups of four first, the per-32 kernel for the nb % 4
+           tail - the same split the gcc twin makes in ops_matmul.c. The
+           two write the same values (build/dot128_t2_probe.c holds the
+           group form to four calls of the per-32 one), so a row divided
+           between them has two instruction counts and one answer. */
+        s = 0;
+        for (; s + 4 <= nb; s += 4)
+            lz_dot128_t2_asm(p2 + (size_t)s * 8, xwt + (size_t)s * 32,
+                             acc + s);
+        for (; s < nb; s++)
             acc[s] = lz_dot32_t2_asm(p2 + (size_t)s * 8, xwt + (size_t)s * 32);
     }
 }
