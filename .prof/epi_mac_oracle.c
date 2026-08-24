@@ -105,6 +105,27 @@ static lz_i64 mac_split(const int *a, const short *m, int n) {
     return s;
 }
 
+/* Third derivation: the carry-free split the header describes, in
+   scalar C. The formula is what an SSE2 or MMX kernel will encode, so
+   it gets checked here before anyone writes intrinsics against it - a
+   wrong formula and a wrong kernel look identical from the outside.
+   Every product below is int16 x int16, which is what makes this
+   pmaddwd's shape; the three sums meet only in 64 bits. */
+static lz_i64 mac_carry_free(const int *a, const short *m, int n) {
+    lz_i64 s_ah = 0, s_als = 0, s_b = 0;
+    int g;
+    for (g = 0; g < n; g++) {
+        int ah  = a[g] >> 16;                        /* int16 range */
+        int als = (short)((unsigned)a[g] & 0xFFFFu); /* signed low */
+        int b   = (a[g] >> 15) & 1;
+        int mm  = m[g];
+        s_ah  += (lz_i64)(ah  * mm);
+        s_als += (lz_i64)(als * mm);
+        s_b   += (lz_i64)(b   * mm);
+    }
+    return ((s_ah + s_b) << 16) + s_als;
+}
+
 static unsigned rng_state = SEED;
 static unsigned rng_next(void) {
     /* xorshift32 - the values only have to be reproducible, not good. */
@@ -146,17 +167,18 @@ int main(void) {
 
     for (trial = 0; trial < 20000; trial++) {
         int n = 1 + (int)(rng_next() % 512u);
-        lz_i64 d, s;
+        lz_i64 d, s, c;
         for (g = 0; g < n; g++) {
             a[g] = (int)rng_next();
             m[g] = (short)(rng_next() & 0xFFFFu);
         }
         d = mac_direct(0, a, m, n);
         s = mac_split(a, m, n);
+        c = mac_carry_free(a, m, n);
         checked++;
-        if (d != s) {
-            printf("MISMATCH trial=%d n=%d direct=%ld split=%ld\n",
-                   trial, n, (long)d, (long)s);
+        if (d != s || d != c) {
+            printf("MISMATCH trial=%d n=%d direct=%ld split=%ld cfree=%ld\n",
+                   trial, n, (long)d, (long)s, (long)c);
             if (++bad > 8) break;
         }
     }
