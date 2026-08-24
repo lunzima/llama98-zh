@@ -3309,15 +3309,25 @@ void lz_wsum_pair_sse2(const int8_t *rowA, const int8_t *rowB,
    Products widen every iteration rather than accumulating in int32:
    |ah * m| reaches 2^30, so two of them overflow a lane.
 
+   WHAT THIS COSTS, because it is closer than it looks and nobody
+   should assume a vector body wins here. Counted on the shipping 32-bit
+   i486 build (.prof/epi_mac_x86_probe.c for the scalar side, objdump
+   for both): 35 instructions per four elements against the scalar
+   loop's 8 per element - 8.75 against 8.00. The scalar path is not slow
+   here, because one-operand imul IS a signed 32x32 -> 64 and needs no
+   split at all; what this buys is a quarter of the branches, not fewer
+   instructions. Three of the 35 are gcc rebuilding zero and 0xFFFF
+   inside the loop, which eight XMM registers leave it no room to hoist.
+
    Predicate: .prof/epi_mac_oracle.c, which checks this against three
-   independent scalar derivations over 20091 cases and carries a
+   independent scalar derivations over 20106 cases and carries a
    mutation (-DEPI_MUT_SIGNED_LOW) proving it can go red. */
 lz_i64 lz_epi_mac_i16_sse2(const int32_t *a, const int16_t *m, int n) {
     const __m128i lo16 = _mm_set1_epi32(0x0000FFFF);
     const __m128i one  = _mm_set1_epi32(1);
     const __m128i zero = _mm_setzero_si128();
-    __m128i acc_ah = zero, acc_als = zero, acc_b = zero;
-    lz_i64 t[2], s_ah, s_als, s_b;
+    __m128i acc_hi = zero, acc_als = zero;
+    lz_i64 t[2], s_hi, s_als;
     int g = 0;
 
     for (; g + 3 < n; g += 4) {
@@ -3333,34 +3343,34 @@ lz_i64 lz_epi_mac_i16_sse2(const int32_t *a, const int16_t *m, int n) {
         __m128i ah  = _mm_srli_epi32(av, 16);
         __m128i als = _mm_and_si128(av, lo16);
         __m128i bb  = _mm_and_si128(_mm_srli_epi32(av, 15), one);
-        __m128i pa  = _mm_madd_epi16(ah,  m32);
+        /* The borrow joins ah HERE, one add per group, after both have
+           left the 16-bit lane. That is the whole reason the carry-free
+           form needed a third accumulator, and it does not: what
+           overflows int16 is ah+b, not (ah*m)+(b*m). |ah*m| <= 2^30 and
+           |b*m| <= 2^15, so the int32 lane has room and the two 64-bit
+           accumulators they used to need become one. */
+        __m128i pa  = _mm_add_epi32(_mm_madd_epi16(ah, m32),
+                                    _mm_madd_epi16(bb, m32));
         __m128i pl  = _mm_madd_epi16(als, m32);
-        __m128i pb  = _mm_madd_epi16(bb,  m32);
-        acc_ah  = _mm_add_epi64(acc_ah,
+        acc_hi  = _mm_add_epi64(acc_hi,
                   _mm_unpacklo_epi32(pa, _mm_srai_epi32(pa, 31)));
-        acc_ah  = _mm_add_epi64(acc_ah,
+        acc_hi  = _mm_add_epi64(acc_hi,
                   _mm_unpackhi_epi32(pa, _mm_srai_epi32(pa, 31)));
         acc_als = _mm_add_epi64(acc_als,
                   _mm_unpacklo_epi32(pl, _mm_srai_epi32(pl, 31)));
         acc_als = _mm_add_epi64(acc_als,
                   _mm_unpackhi_epi32(pl, _mm_srai_epi32(pl, 31)));
-        acc_b   = _mm_add_epi64(acc_b,
-                  _mm_unpacklo_epi32(pb, _mm_srai_epi32(pb, 31)));
-        acc_b   = _mm_add_epi64(acc_b,
-                  _mm_unpackhi_epi32(pb, _mm_srai_epi32(pb, 31)));
     }
-    _mm_storeu_si128((__m128i *)(void *)t, acc_ah);  s_ah  = t[0] + t[1];
+    _mm_storeu_si128((__m128i *)(void *)t, acc_hi);  s_hi  = t[0] + t[1];
     _mm_storeu_si128((__m128i *)(void *)t, acc_als); s_als = t[0] + t[1];
-    _mm_storeu_si128((__m128i *)(void *)t, acc_b);   s_b   = t[0] + t[1];
     for (; g < n; g++) {
         int ah  = a[g] >> 16;
         int als = (short)((unsigned)a[g] & 0xFFFFu);
         int b   = (a[g] >> 15) & 1;
-        s_ah  += (lz_i64)(ah  * m[g]);
+        s_hi  += (lz_i64)(ah * m[g]) + (lz_i64)(b * m[g]);
         s_als += (lz_i64)(als * m[g]);
-        s_b   += (lz_i64)(b   * m[g]);
     }
-    return ((s_ah + s_b) << 16) + s_als;
+    return (s_hi << 16) + s_als;
 }
 
 #endif /* __WATCOMC__ */
