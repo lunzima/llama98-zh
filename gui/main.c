@@ -1120,10 +1120,10 @@ static void set_status(const char *display_utf8) {
        form to the windows. `shown` is the GBK form, so the sidebar
        mirror below (also ANSI/GBK) always gets the converted text,
        never the raw UTF-8 that mojibakes. */
+    const char *shown = status_gbk;
     lz_gbk_from_utf8(display_utf8 ? display_utf8 : "",
                      (int)strlen(display_utf8 ? display_utf8 : ""),
                      status_gbk, (int)sizeof status_gbk, NULL);
-    const char *shown = status_gbk;
     if (!h) return;
     /* The throughput cell, on BOTH strips.
        While a generate job runs, and after it ends until the next turn,
@@ -2409,6 +2409,7 @@ static void finish_job(HWND hwnd, int rc) {
     prefill_paint_tick();
 
     if (kind == JOB_LOAD) {
+        const char *rest;
         /* What the window IS has changed either way: a failed load
            leaves nothing open, so the resting text has to follow even on
            failure - otherwise the status line still claims a model. */
@@ -2427,8 +2428,8 @@ static void finish_job(HWND hwnd, int rc) {
            now UTF-8 everywhere, and set_status converts to GBK. Using
            lz_str_display here (GBK) would double-convert through
            set_status and turn every Chinese state string into '?'. */
-        const char *rest = lz_str_utf8(ok ? LZ_STR_STATE_READY
-                                          : LZ_STR_STATE_NO_MODEL);
+        rest = lz_str_utf8(ok ? LZ_STR_STATE_READY
+                              : LZ_STR_STATE_NO_MODEL);
         strncpy(g.idle_status, rest, sizeof g.idle_status - 1);
         g.idle_status[sizeof g.idle_status - 1] = '\0';
         /* Unconditional, not "ok": a load that just FAILED still leaves
@@ -2463,6 +2464,7 @@ static void finish_job(HWND hwnd, int rc) {
                would mojibake any model path with a Chinese character in
                it. This is the two-forms trap in localized_strings.h,
                met in the wild. */
+            {
             const char *name = lz_gui_model_name(&g.mdl);
             char nameu[300], line[512];
             lz_gbk_to_utf8(name, (int)strlen(name), nameu, (int)sizeof nameu,
@@ -2493,6 +2495,7 @@ static void finish_job(HWND hwnd, int rc) {
             set_status(g.idle_status);   /* repaint the sidebar too */
             /* The model segment of the title bar changed with the load. */
             push_caption();
+            }
         } else {
             /* A FAILED load still changed what the window is: the job
                unloaded whatever was open before it started reading, so
@@ -2544,8 +2547,9 @@ static void finish_job(HWND hwnd, int rc) {
        ends reads as hung, not as informative, and the status line must
        return to "ready" once the model finishes. */
     if (rc != 0) {
+        const char *msg;
         g.tok_live = 0;
-        const char *msg = lz_worker_error();
+        msg = lz_worker_error();
         set_status(msg && msg[0] ? msg
                                  : lz_str_display(LZ_STR_ERR_TITLE));
         /* A modal box owned by a window nobody can see has no owner
@@ -2704,30 +2708,36 @@ static void measure_status_h(void) {
  * Glyphs are comctl32's own, chosen for what the era's strip HAS.
  * FILEOPEN, FILESAVE and PROPERTIES are literal. It has no "stop", so
  * that one takes the period's own reading: Internet Explorer's Stop
- * button was an X. FILENEW for clearing is "start a fresh page". */
+ * button was an X. FILENEW for clearing is "start a fresh page".
+ *
+ * IDM_REGEN is the one rollback command that gets a button, because it
+ * is the one a user reaches for repeatedly. LZ_STD_REDOW is comctl32's
+ * own redo arrow, as close as the system strip comes to "do that
+ * again".
+ *
+ * These two are at FILE SCOPE rather than static inside the function:
+ * there they follow the g.no_toolbar early return, and a declaration
+ * after a statement is C99, which Visual C++ 4.0 rejects. */
+static const int TOOLBAR_CMDS[6] = {
+    IDM_OPEN_MODEL, IDM_SAVE_CHAT, IDM_CLEAR, IDM_STOP_GEN,
+    IDM_REGEN, IDM_SETTINGS };
+static const int TOOLBAR_GLYPHS[6] = {
+    LZ_STD_FILEOPEN, LZ_STD_FILESAVE, LZ_STD_FILENEW,
+    LZ_STD_DELETE, LZ_STD_REDOW, LZ_STD_PROPERTIES };
+
 static HWND create_toolbar(HWND hwnd) {
+    const char *labels[6];
     /* See the comment on g.no_toolbar: this is the only way the selftest
        can walk the "comctl32 is absent" path on a machine that has it. */
     if (g.no_toolbar) return NULL;
-    /* IDM_REGEN - the one rollback command that gets
-       a button, because it is the one a user reaches for repeatedly.
-       LZ_STD_REDOW is comctl32's own redo arrow, which is as close as
-       the system strip comes to "do that again". */
-    static const int CMDS[6] = {
-        IDM_OPEN_MODEL, IDM_SAVE_CHAT, IDM_CLEAR, IDM_STOP_GEN,
-        IDM_REGEN, IDM_SETTINGS };
-    static const int GLYPHS[6] = {
-        LZ_STD_FILEOPEN, LZ_STD_FILESAVE, LZ_STD_FILENEW,
-        LZ_STD_DELETE, LZ_STD_REDOW, LZ_STD_PROPERTIES };
-    const char *labels[6];
     labels[0] = lz_str_display(LZ_STR_BTN_OPEN);
     labels[1] = lz_str_display(LZ_STR_BTN_SAVE);
     labels[2] = lz_str_display(LZ_STR_BTN_CLEAR);
     labels[3] = lz_str_display(LZ_STR_BTN_STOP);
     labels[4] = lz_str_display(LZ_STR_BTN_REGEN);
     labels[5] = lz_str_display(LZ_STR_BTN_SETTINGS);
-    return lz_gui_toolbar_create(hwnd, g.inst, CMDS, GLYPHS, labels, 6,
-                                 ID_TOOLBAR);
+    return lz_gui_toolbar_create(hwnd, g.inst, TOOLBAR_CMDS,
+                                 TOOLBAR_GLYPHS, labels, 6, ID_TOOLBAR);
 }
 
 /* kunkun98.ini persistence for the recent list: mru0 is the newest,
@@ -2766,6 +2776,8 @@ static void mru_save(void) {
 }
 
 static int create_children(HWND hwnd) {
+    const char *RICH_CLASS;
+    int i;
     /* BEFORE build_menu_bar, which ends in rollback_sync, which reads
        these. The struct's own zero-init would leave them at 0 - a
        perfectly valid position, the very start of the transcript -
@@ -2791,8 +2803,6 @@ static int create_children(HWND hwnd) {
        own guard below tell "not yet registered" apart from "registered,
        but this isn't it". */
     g_findmsg = RegisterWindowMessageA("commdlg_FindReplace");
-    const char *RICH_CLASS;
-    int i;
 
     /* riched20 is loaded by hand rather than through an import library:
        Watcom has no import lib for it, and a missing DLL must surface as
@@ -12463,6 +12473,7 @@ static int selftest(HINSTANCE inst, const char *path) {
         {
             DWORD start = 0, end = 0;
             int want = (int)strlen(unique);
+            int ctrl;
             SendMessage(tr, EM_GETSEL, (WPARAM)&start, (LPARAM)&end);
             /* Two invariants: the control holds what was written into
                it, and the selection covers all of that. The end may sit
@@ -12472,7 +12483,7 @@ static int selftest(HINSTANCE inst, const char *path) {
                len+1 on RichEdit 2.0 (a lone CR) and len+2 on 1.0
                (CRLF). An under-selection still fails, and so does any
                real over-selection. */
-            int ctrl = (int)SendMessage(tr, WM_GETTEXTLENGTH, 0, 0);
+            ctrl = (int)SendMessage(tr, WM_GETTEXTLENGTH, 0, 0);
             fprintf(f, "  selall start=%d end=%d want=%d ctrl=%d\n",
                     (int)start, (int)end, want, ctrl);
             st_check(f, ctrl == want,

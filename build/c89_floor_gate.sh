@@ -70,7 +70,7 @@ command -v gcc >/dev/null 2>&1 || { echo "c89_floor_gate: SKIP - no gcc"; exit 2
 # the designated form made order irrelevant, and so let one code sit two
 # slots out of place in err.c for as long as it did.
 #
-BASELINE="forward.c:16 main.c:7"
+BASELINE="forward.c:9"
 
 # ALL THREE DIRECTORIES. The front end and the shared front-end core
 # are shipped products on the same compilers, and scanning one gui file
