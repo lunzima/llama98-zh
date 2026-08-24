@@ -3646,11 +3646,7 @@ static void forward_moe(const LZModel *m, LZRunState *s,
        has no integer entry (lz_exp has no int-in form), so it would
        rebuild the float the epilogue declined to build - the same
        operation count, for a value that has moved. Refuse instead. */
-    int mrt_int = 0, mrt_may = 0;
-#if LZ_MOEGATE_I16
-    mrt_may = lz_sig_mode() && s->moe_logits_i16 && c->moe_router_sigmoid &&
-              lz_matmul_xq_i16_ok(&L->moe_gate_w, hdim, nt);
-#endif /* LZ_MOEGATE_I16 */
+    int mrt_int = 0, mrt_may = 0;   /* set below, past the declarations */
     /* int-pipeline milestone 6: the latent's only consumer is the
        routed experts' activation quantize, which lz_quantize_q8_i16
        serves directly from the int16 - so moe_down_proj's Q8_0
@@ -3691,7 +3687,14 @@ static void forward_moe(const LZModel *m, LZRunState *s,
        rebuilt, which is the swap this milestone exists to avoid. */
     int rsw_may = 0, ssw_may = 0;
 
-    /* Moved down from the top of the block - see the note there. */
+    /* Moved down from the top of the block - see the note there. The
+       router predicate joins them for the same reason: its declaration
+       carries a paragraph, so the declaration stays where the paragraph
+       is and the assignment comes here. */
+#if LZ_MOEGATE_I16
+    mrt_may = lz_sig_mode() && s->moe_logits_i16 && c->moe_router_sigmoid &&
+              lz_matmul_xq_i16_ok(&L->moe_gate_w, hdim, nt);
+#endif /* LZ_MOEGATE_I16 */
     if (lz_moe_topk > 0 && lz_moe_topk <= ne)
         topk = lz_moe_topk;
     gsh = lz_act_gs(&L->moe_down_proj, hdim);
