@@ -298,6 +298,11 @@ void dot32_q61_mmx_2(const unsigned char *w4, const unsigned char *w2,
                      int32_t *oa, int32_t *ob);
 int32_t dot32_t2_mmx(const unsigned char *w2, const int16_t *x);
 int32_t dot32_q16_mmx(const int16_t *w, const int16_t *x);
+/* Two tokens, one weight load - the q16_0 member of the g_pair family.
+   Bit-identical to two dot32_q16_mmx calls; see the body for why the
+   saving here is smaller than q8_0's. */
+void dot32_q16_mmx_2(const int16_t *w, const int16_t *xa, const int16_t *xb,
+                     int32_t *oa, int32_t *ob);
 /* T2 over a whole 128-element group: four sub-blocks, four sums, one
    pairwise fold. Bit-identical to four dot32_t2_mmx calls - see the body
    in src/ops_kernel_dot_mmx.h for why folding pairwise changes only

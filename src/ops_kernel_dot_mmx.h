@@ -141,6 +141,42 @@ int32_t dot32_q16_mmx(const int16_t *w, const int16_t *x) {
     return (int32_t)_mm_cvtsi64_si32(s);
 }
 
+/* Two tokens against one weight load - the same trick q8_0, q4_1 and
+   q6_1 already use, which q16_0 and t2 did not have on either
+   toolchain. Eight registers is what makes it worth doing: the weight
+   vector is loaded once and stays live while both tokens' activations
+   pass through it, so the pair costs one load where two single calls
+   cost two.
+ *
+ * Less to save here than at q8_0, and it is worth being exact about
+ * why: int16 weights need no unpack, so what is shared is the LOAD
+ * alone, not a load plus two punpck. Whether that clears the wider
+ * prologue is a wall-clock question on hardware this project does not
+ * have - hence the knob, not a claim.
+ *
+ * Bit-identical to two dot32_q16_mmx calls by construction: same eight
+ * pmaddwd per token into that token's own accumulator, same fold, no
+ * reassociation across the pair. */
+void dot32_q16_mmx_2(const int16_t *w, const int16_t *xa, const int16_t *xb,
+                     int32_t *oa, int32_t *ob) {
+    __m64 sa = _mm_setzero_si64(), sb = _mm_setzero_si64();
+    __m64 w0, x0, t;
+    int k;
+    for (k = 0; k < 32; k += 4) {
+        memcpy(&w0, w + k, 8);
+        memcpy(&x0, xa + k, 8);
+        t = _mm_madd_pi16(w0, x0);
+        sa = _mm_add_pi32(sa, t);
+        memcpy(&x0, xb + k, 8);
+        t = _mm_madd_pi16(w0, x0);
+        sb = _mm_add_pi32(sb, t);
+    }
+    sa = _mm_add_pi32(sa, _mm_srli_si64(sa, 32));
+    sb = _mm_add_pi32(sb, _mm_srli_si64(sb, 32));
+    *oa = (int32_t)_mm_cvtsi64_si32(sa);
+    *ob = (int32_t)_mm_cvtsi64_si32(sb);
+}
+
 /* The 128-element Q16 group kernel: int16 weights need no unpack, so
    there is no mask to hoist - what the Watcom twin (lz_dot128_q16_asm)
    amortizes is the per-32 call and its prologue, by processing four

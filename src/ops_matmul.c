@@ -1272,6 +1272,30 @@ static void row_q16_mmx_intrin(int32_t *acc32, const void *w4, const void *w2,
     for (tk = 0; tk < nt; tk++) {
         const int16_t *xwt = xw + (size_t)tk * in_dim;
         int32_t *acc = acc32 + (size_t)tk * nb;
+        /* Pair this token with the next so ONE weight load serves both,
+           the same shape q8_0/q4_1/q6_1 use above. Less is shared here
+           than there - int16 weights need no unpack, so it is the load
+           alone - and whether that clears the wider prologue is the
+           wall-clock question g_pair exists to let someone answer. An
+           odd nt leaves the last token on the single-token path.
+           Ahead of the group form deliberately: pairing halves the
+           weight traffic, grouping only amortizes the per-32 call, and
+           a token pair cannot be expressed once the group loop owns
+           the sub-block index. */
+        if (tk + 1 < nt && g_pair) {
+            const int16_t *xw2 = xwt + in_dim;
+            int32_t *accb = acc + nb;
+            for (g = 0; g < nb; g++) {
+                const int16_t *pf_ = wr + (size_t)(g + LZ_PF_DIST) * 32;
+                if (pf_ < wend) LZ_PFI_NTA(pf_);
+                dot32_q16_mmx_2(wr + (size_t)g * 32,
+                                xwt + (size_t)g * 32,
+                                xw2 + (size_t)g * 32,
+                                acc + g, accb + g);
+            }
+            tk++;
+            continue;
+        }
 #if defined(LZ_G128_GCC) && LZ_G128_GCC
         if ((nb & 3) == 0) LZ_Q16_GROUP4(dot128_q16_mmx);
         else               LZ_Q16_ACC(dot32_q16_mmx);
