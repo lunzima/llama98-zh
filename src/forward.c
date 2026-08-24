@@ -2878,6 +2878,45 @@ static void kda_conv_proj(LZRunState *s, int *use_int, float *of, short *oi,
     lz_matmul_xq_nt(of, x, s->xq, s->xqs, w, in_dim, out_dim, nt);
 }
 
+/* One SubLN input norm plus the activation quantization its projection
+   reads. q, k, v and g each want this with a different norm weight and
+   nothing else different, and kda_conv_proj above is the matmul half of
+   the same four-way repetition.
+
+   TWO ARMS, and which one ran decides where the result is. The norms
+   tier writes a Q15 int product straight into s->subn_norm_int (single
+   token, not nt-wide - see forward.h), the immediate tok-int quantize
+   reads that, and s->xb2 IS NEVER WRITTEN. The float arm puts the norm
+   in s->xb2 and quantizes from there. Callers pass s->xb2 to the matmul
+   either way, which is correct only because a matmul handed xq/xqs
+   never reads the float buffer - that is the invariant to check first
+   if a caller here ever starts using s->xb2 for something else.
+
+   `use_int` is the caller's, evaluated once for all four: it depends on
+   hdim and gsa, not on which weight is being applied. */
+static void subn_norm_q8(LZRunState *s, const LZTensor *nrm,
+                         int hdim, int nt, int nsa, float eps, int use_int) {
+    int tk;
+    if (use_int) {
+        for (tk = 0; tk < nt; tk++) {
+            float deq;
+            lz_rmsnorm_int(s->subn_norm_int, s->xb + (size_t)tk * hdim,
+                           lz_t_f32(nrm, s->wscr), hdim, eps, &deq);
+            lz_quantize_q8_tok_int(s->subn_norm_int, hdim, deq,
+                                   s->xq + (size_t)tk * hdim,
+                                   s->xqs + (size_t)tk * nsa);
+        }
+        return;
+    }
+    for (tk = 0; tk < nt; tk++)
+        lz_rmsnorm(s->xb2 + (size_t)tk * hdim, s->xb + (size_t)tk * hdim,
+                   lz_t_f32(nrm, s->wscr), hdim, eps);
+    for (tk = 0; tk < nt; tk++)
+        lz_quantize_q8_tok(s->xb2 + (size_t)tk * hdim, hdim,
+                           s->xq + (size_t)tk * hdim,
+                           s->xqs + (size_t)tk * nsa);
+}
+
 /* The same shape for the projections whose consumer is not the conv
    (int-pipeline milestone 5): one projection, one int16 exit at the
    consumer's own exponent, and the SAME all-or-nothing flag discipline
@@ -3036,97 +3075,24 @@ static void forward_kda(const LZModel *m, LZRunState *s,
            for Q8 weights the matmul reads the quantized xq/xqs, not the
            float scratch. f_a/b_proj stay on raw s->xb - no SubLN norm
            field exists for the low-rank decay-gate projections. */
-        /* Norms tier, int output: the fixed norm writes a Q15 int product
-           straight into subn_norm_int (single-token scratch, not
-           nt-wide - see forward.h), the immediate tok-int quantize
-           reads it, and s->xb2 is never touched. Falls back to the
-           float norm + lz_quantize_q8_tok pair when the tier is off or
-           hdim is out of norm_ss_fixed's range. */
-        if (lz_norm_int() && lz_norm_can_fixed(hdim) &&
-            gsa > 0 && (hdim % gsa) == 0) {
-            for (tk = 0; tk < nt; tk++) {
-                float deq;
-                lz_rmsnorm_int(s->subn_norm_int, s->xb + (size_t)tk * hdim,
-                               lz_t_f32(&L->kda_q_norm, s->wscr), hdim,
-                               c->rms_norm_eps, &deq);
-                lz_quantize_q8_tok_int(s->subn_norm_int, hdim, deq,
-                                       s->xq + (size_t)tk * hdim,
-                                       s->xqs + (size_t)tk * nsa);
-            }
-        } else {
-            for (tk = 0; tk < nt; tk++)
-                lz_rmsnorm(s->xb2 + (size_t)tk * hdim, s->xb + (size_t)tk * hdim,
-                           lz_t_f32(&L->kda_q_norm, s->wscr), hdim, c->rms_norm_eps);
-            for (tk = 0; tk < nt; tk++)
-                lz_quantize_q8_tok(s->xb2 + (size_t)tk * hdim, hdim,
-                                   s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
-        }
+        /* Once, not once per projection: the answer depends on hdim and
+           gsa, and all four share both. */
+        int nint = lz_norm_int() && lz_norm_can_fixed(hdim) &&
+                   gsa > 0 && (hdim % gsa) == 0;
+
+        subn_norm_q8(s, &L->kda_q_norm, hdim, nt, nsa, c->rms_norm_eps, nint);
         kda_conv_proj(s, &conv_int, s->kda_q, s->kda_q_i16, s->xb2,
                       &L->kda_q_proj, hdim, kdim, nt);
 
-        if (lz_norm_int() && lz_norm_can_fixed(hdim) &&
-            gsa > 0 && (hdim % gsa) == 0) {
-            for (tk = 0; tk < nt; tk++) {
-                float deq;
-                lz_rmsnorm_int(s->subn_norm_int, s->xb + (size_t)tk * hdim,
-                               lz_t_f32(&L->kda_k_norm, s->wscr), hdim,
-                               c->rms_norm_eps, &deq);
-                lz_quantize_q8_tok_int(s->subn_norm_int, hdim, deq,
-                                       s->xq + (size_t)tk * hdim,
-                                       s->xqs + (size_t)tk * nsa);
-            }
-        } else {
-            for (tk = 0; tk < nt; tk++)
-                lz_rmsnorm(s->xb2 + (size_t)tk * hdim, s->xb + (size_t)tk * hdim,
-                           lz_t_f32(&L->kda_k_norm, s->wscr), hdim, c->rms_norm_eps);
-            for (tk = 0; tk < nt; tk++)
-                lz_quantize_q8_tok(s->xb2 + (size_t)tk * hdim, hdim,
-                                   s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
-        }
+        subn_norm_q8(s, &L->kda_k_norm, hdim, nt, nsa, c->rms_norm_eps, nint);
         kda_conv_proj(s, &conv_int, s->kda_k, s->kda_k_i16, s->xb2,
                       &L->kda_k_proj, hdim, kdim, nt);
 
-        if (lz_norm_int() && lz_norm_can_fixed(hdim) &&
-            gsa > 0 && (hdim % gsa) == 0) {
-            for (tk = 0; tk < nt; tk++) {
-                float deq;
-                lz_rmsnorm_int(s->subn_norm_int, s->xb + (size_t)tk * hdim,
-                               lz_t_f32(&L->kda_v_norm, s->wscr), hdim,
-                               c->rms_norm_eps, &deq);
-                lz_quantize_q8_tok_int(s->subn_norm_int, hdim, deq,
-                                       s->xq + (size_t)tk * hdim,
-                                       s->xqs + (size_t)tk * nsa);
-            }
-        } else {
-            for (tk = 0; tk < nt; tk++)
-                lz_rmsnorm(s->xb2 + (size_t)tk * hdim, s->xb + (size_t)tk * hdim,
-                           lz_t_f32(&L->kda_v_norm, s->wscr), hdim, c->rms_norm_eps);
-            for (tk = 0; tk < nt; tk++)
-                lz_quantize_q8_tok(s->xb2 + (size_t)tk * hdim, hdim,
-                                   s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
-        }
+        subn_norm_q8(s, &L->kda_v_norm, hdim, nt, nsa, c->rms_norm_eps, nint);
         kda_conv_proj(s, &conv_int, s->kda_v, s->kda_v_i16, s->xb2,
                       &L->kda_v_proj, hdim, vdim, nt);
 
-        if (lz_norm_int() && lz_norm_can_fixed(hdim) &&
-            gsa > 0 && (hdim % gsa) == 0) {
-            for (tk = 0; tk < nt; tk++) {
-                float deq;
-                lz_rmsnorm_int(s->subn_norm_int, s->xb + (size_t)tk * hdim,
-                               lz_t_f32(&L->kda_g_norm, s->wscr), hdim,
-                               c->rms_norm_eps, &deq);
-                lz_quantize_q8_tok_int(s->subn_norm_int, hdim, deq,
-                                       s->xq + (size_t)tk * hdim,
-                                       s->xqs + (size_t)tk * nsa);
-            }
-        } else {
-            for (tk = 0; tk < nt; tk++)
-                lz_rmsnorm(s->xb2 + (size_t)tk * hdim, s->xb + (size_t)tk * hdim,
-                           lz_t_f32(&L->kda_g_norm, s->wscr), hdim, c->rms_norm_eps);
-            for (tk = 0; tk < nt; tk++)
-                lz_quantize_q8_tok(s->xb2 + (size_t)tk * hdim, hdim,
-                                   s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
-        }
+        subn_norm_q8(s, &L->kda_g_norm, hdim, nt, nsa, c->rms_norm_eps, nint);
         lz_matmul_xq_nt(s->zbuf, s->xb2, s->xq, s->xqs, &L->kda_g_proj,
                         hdim, vdim, nt);
 
