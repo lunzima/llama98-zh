@@ -3626,11 +3626,13 @@ static void forward_moe(const LZModel *m, LZRunState *s,
        question can be measured - a parameter whose best value differs by
        machine gets swept, not baked - and the scratch buffers are sized from the
        config, so the override is clamped to them. */
+    int gsh;
+    int nsh;
+    int tk, kk, vv, i;
     if (lz_moe_topk > 0 && lz_moe_topk <= ne)
         topk = lz_moe_topk;
-    int gsh = lz_act_gs(&L->moe_down_proj, hdim);
-    int nsh = (gsh > 0) ? hdim / gsh : 0;
-    int tk, kk, vv, i;
+    gsh = lz_act_gs(&L->moe_down_proj, hdim);
+    nsh = (gsh > 0) ? hdim / gsh : 0;
     /* int-pipeline milestone 5: the router logits' only consumer is
        lz_moe_route, and the exit is the same one bvec takes - int16 at
        LZ_MOEGATE_ES, bounded by the sigmoid table's own domain rather
