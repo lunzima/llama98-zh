@@ -93,6 +93,42 @@ for u in $UNITS; do
     done
 done
 
+# THE g128 COLUMN, which the loop above cannot reach. It is ONE column
+# carrying both build classes in its have string rather than a
+# gcc/Watcom pair of columns, so the test is on that string. Nothing
+# else looks: kernel_matrix_gate only asks whether the registration
+# describes the binary, and `x G--` describes it perfectly honestly
+# while saying nothing about the Watcom kernel that is not there.
+#
+# t2 IS THAT CASE and is named rather than left to redden the gate for
+# everyone: LZ_G128_T2 is 0 under __WATCOMC__ (src/ops.c), so the
+# 128-element group form exists on gcc alone while the other four
+# formats have it on both. It is a real debt - Watcom has the same
+# #pragma aux MMX and SSE2 this would need - and it is recorded here so
+# that a SECOND one cannot arrive unnoticed.
+G128_OWED="t2"
+for u in $UNITS; do
+    st=$(cls "$u" g128)
+    case "$st" in x|o) ;; *) continue ;; esac
+    h=$(echo "$M" | awk -v u="$u" '$1=="cell" && $2==u && $3=="g128" {print $5; exit}')
+    case "$h" in
+        *G*W*) NPAIR=$((NPAIR + 1)) ;;
+        *)
+            owed=0
+            for o in $G128_OWED; do [ "$o" = "$u" ] && owed=1; done
+            if [ "$owed" = 1 ]; then
+                echo "note: $u g128 is '$h' - the 128-element group form is"
+                echo "      gcc-only and the Watcom twin is owed (baselined)"
+            else
+                echo "FAIL: $u g128 is '$h' - the 128-element group form exists"
+                echo "      for one toolchain and not the other, and this one"
+                echo "      is not in the baseline"
+                FAIL=1
+            fi
+            ;;
+    esac
+done
+
 echo "gcc_watcom_pair_gate: $NPAIR paired, $NBOTH empty on both sides"
 [ "$FAIL" -eq 0 ] || { echo "gcc_watcom_pair_gate: FAIL"; exit 1; }
 echo "gcc_watcom_pair_gate: PASS"
