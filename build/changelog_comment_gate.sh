@@ -55,9 +55,30 @@ PAT="$STRICT"
 # any new one is a FAIL in the file that gained it.
 BASELINE="forward.c:1 model.c:1"
 
+# WHAT IS SCANNED. src/ was the whole list, which left three sentences
+# standing in gui/ and one in the Makefile that this gate would have
+# failed on the day they were written - the rule is about comments, and
+# the engine is not the only place comments live. common/, gui/ and the
+# Makefile join it.
+#
+# WIDENING IT FOUND A FALSE POSITIVE WORTH KNOWING ABOUT: compat40.h's
+# "Used to save and restore a thread's layout" is the purpose sense of
+# the words, not the historical one, and STRICT cannot tell them apart.
+# It was rewritten to "Callers save and restore" rather than exempted,
+# because the ambiguity was in the comment, not in the regex.
+#
+# build/*.sh is DELIBERATELY OUT, and that is a decision rather than an
+# oversight. Several of its matches are load-bearing in a way source
+# comments are not - "ROWS 5-8 USED TO PAIR EACH -D WITH ITS OWN RUNTIME
+# FLAG" is what stops the next reader re-adding seven retired knobs, and
+# this file's own header has to quote the phrases to say what it catches.
+# The count is MEASURED and printed at the end rather than written here,
+# so it cannot go stale into a claim.
+SCAN="src/*.c src/*.h common/*.c common/*.h gui/*.c gui/*.h Makefile"
+
 FAIL=0
 TOTAL=0
-for f in src/*.c src/*.h; do
+for f in $SCAN; do
     b=$(basename "$f")
     exp=0
     for e in $BASELINE; do
@@ -93,14 +114,19 @@ fi
 # longer participate" describes a state and "the OLD s->mtp_pos" is the
 # pre-step value. Printed so the number is visible if it starts growing.
 LTOT=0
-for f in src/*.c src/*.h; do
+for f in $SCAN; do
     n=$(grep -oiE "$LOOSE" "$f" 2>/dev/null | wc -l)
     LTOT=$((LTOT + n))
 done
 
+# The excluded corner, printed rather than hidden - see the SCAN comment.
+BTOT=$(grep -ohiE "$STRICT" build/*.sh 2>/dev/null | wc -l)
+
 if [ "$FAIL" -eq 0 ]; then
     echo "changelog_comment_gate: PASS ($TOTAL strict, none above baseline;"
     echo "  $LTOT loose - counted, not asserted, see the header)"
+    echo "  scanned: $SCAN"
+    echo "  not scanned: build/*.sh, $BTOT strict match(es) - deliberate"
     exit 0
 fi
 echo "changelog_comment_gate: FAIL"

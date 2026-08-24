@@ -657,8 +657,8 @@ HWND lz_gui_sysinfo_create(HWND owner, HINSTANCE inst) {
     char line[320];
 /* One authority for how many SYSINFO lines there are: the measuring
    loop, the array it walks, the dialog height and the OK button's y all
-   read it. The height used to be the literal 140, which was correct for
-   four lines and silently wrong for five. */
+   read it. A literal height instead would be correct for whatever line
+   count it was written against and silently wrong for the next one. */
 #define LZ_SYS_LINES 5
 
     if (!sys_register(inst)) return NULL;

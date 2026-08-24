@@ -12958,10 +12958,10 @@ static void sb_compare(FILE *f, const char *path, int *checks) {
 
 /* Returns the report path. Sets *asked when --selftest was on the
    command line at all, which is a different question from whether it
-   carried a path: `--selftest` with no path used to return NULL and fall
-   straight through to launching the window, so the flag exited 0 having
-   checked nothing. Nothing distinguishes that from a clean run, and it
-   read as one.
+   carried a path. Without *asked, `--selftest` with no path returns NULL
+   and falls straight through to launching the window: the flag would
+   exit 0 having checked nothing, and nothing would distinguish that from
+   a clean run.
 
    Deliberately not CommandLineToArgvW: it lives in shell32 and is a wide
    entry point, and src/cli_main.c already records that both of those are

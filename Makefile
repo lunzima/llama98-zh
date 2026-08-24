@@ -113,10 +113,10 @@ serve: kunkun98-serve
 # dir, so a flag change to one flavor cannot link in an object built
 # with another's.
 #
-# ALL THREE use X86_64_CFLAGS. The gui used to use CFLAGS, which is -O2
-# against the others' -O3 - and the gui links the SAME $(ENG_SRCS), so
-# the shipped window ran a less optimised engine than the shipped
-# command line while both claimed to be the same build.
+# ALL THREE use X86_64_CFLAGS, and gcc_flag_parity_gate.sh holds them
+# there. A gui recipe on its own flag variable links the SAME $(ENG_SRCS)
+# as the cli, so any divergence ships a window running a differently
+# compiled engine from the command line while both claim to be one build.
 # Pattern rules, not one rule per file: `-c -o x.o a.c b.c` is invalid
 # gcc (multiple sources cannot share one -c output), so each of
 # $(ENG_MMX)'s files needs its own compile, and there are now two.
