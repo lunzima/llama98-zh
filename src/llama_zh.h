@@ -615,6 +615,45 @@ int lz_generate_resume_ex(const LZModel *m, LZTokenizer *t, LZRunState *s,
                           int *out_n_tokens, double *out_elapsed_ms,
                           char *errbuf, int errlen, LZInspect *ins);
 
+/* Everything the three names above pass besides the model, tokenizer and
+ * run state. They grew one argument at a time to fifteen; on a target
+ * with eight registers that is fifteen stack slots pushed per call, and
+ * a sixteenth would change every declaration, every wrapper and every
+ * caller again.
+ *
+ * ZERO IS THE OLD BEHAVIOUR, for every field, and a new field must keep
+ * that true: callers memset the struct and then set what they mean, so
+ * an addition does not silently change what an existing caller asked
+ * for. lz_gen_call_init does the memset and is the supported way to
+ * start one.
+ *
+ * Field meanings are unchanged - see the three declarations above and
+ * LZGenOpts. `ins` is lz_generate_resume_ex's; NULL is
+ * lz_generate_resume. The struct is BORROWED for the duration of the
+ * call, as are the pointers in it. */
+typedef struct {
+    int start_pos;
+    const char *prompt_bytes;
+    int prompt_len;
+    const LZGenOpts *opts;
+    LZTokenSink sink;
+    LZShouldContinue cont;
+    void *ctx;
+    int *out_n_tokens;
+    double *out_elapsed_ms;
+    char *errbuf;
+    int errlen;
+    LZInspect *ins;
+} LZGenCall;
+
+void lz_gen_call_init(LZGenCall *c);
+
+/* The generation loop itself. lz_generate, lz_generate_resume and
+ * lz_generate_resume_ex are wrappers that fill an LZGenCall and land
+ * here, so there is still exactly one loop. */
+int lz_generate_call(const LZModel *m, LZTokenizer *t, LZRunState *s,
+                     const LZGenCall *c);
+
 /* ---------------------------------------------------- prefix reuse */
 
 /* One conversation's reusable prefix: a recurrent-state checkpoint plus

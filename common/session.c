@@ -298,6 +298,10 @@ int lz_session_job(void *ud, const char *system, LZTokenSink sink,
     int n_out = 0, rc = LZ_ERR_INTERNAL, ran;
     int start_pos = 0, reused = 0;
     double ms = 0.0;
+    /* Both generate calls below differ in exactly two things - the start
+       position and which slice of the prompt is new - so everything else
+       is set once, here, instead of being written out twice. */
+    LZGenCall gc;
 
     if (!s) { LZ_ERR_SET(rc, errbuf, errlen, LZ_ERR_NULL_ARG); return rc; }
     if (!(s->model && s->tok && s->state)) {
@@ -310,6 +314,20 @@ int lz_session_job(void *ud, const char *system, LZTokenSink sink,
     cb.cont = cont;
     cb.ctx = cb_ctx;
     s->reply_len = 0;
+
+    lz_gen_call_init(&gc);
+    gc.opts = &s->opts;
+    gc.sink = session_sink;
+    gc.cont = session_cont;
+    gc.ctx = &cb;
+    gc.out_n_tokens = &n_out;
+    gc.out_elapsed_ms = &ms;
+    gc.errbuf = errbuf;
+    gc.errlen = errlen;
+    /* The job's OPTIONAL inspector: NULL (CLI) is what lz_generate_resume
+       would have passed, and the GUI passes &LZGuiSession.ins for the
+       inference inspector - see llama_zh.h. */
+    gc.ins = ins;
 
     /* No EOS/stop policy here - those are the CALLER's sampling
        configuration, set in s->opts before the job runs (the CLI's
@@ -349,16 +367,12 @@ int lz_session_job(void *ud, const char *system, LZTokenSink sink,
                                     &start_pos, &suffix_off, &reused,
                                     &hooks, errbuf, errlen);
             if (prc == 0) {
-                /* lz_generate_resume_ex with the job's OPTIONAL
-                   inspector: NULL (CLI) IS lz_generate_resume, and the
-                   GUI passes &LZGuiSession.ins for the inference
-                   inspector - see llama_zh.h. */
-                rc = lz_generate_resume_ex(s->model, s->tok, s->state, start_pos,
-                                           s->prompt.s + suffix_off,
-                                           s->prompt.len - suffix_off,
-                                           &s->opts, session_sink, session_cont,
-                                           &cb, &n_out, &ms, errbuf, errlen,
-                                           ins);
+                /* Resume: the cached prefix is already forwarded, so
+                   only the suffix is new. */
+                gc.start_pos = start_pos;
+                gc.prompt_bytes = s->prompt.s + suffix_off;
+                gc.prompt_len = s->prompt.len - suffix_off;
+                rc = lz_generate_call(s->model, s->tok, s->state, &gc);
                 ran = 1;
             } else if (prc == LZ_ERR_CANCELLED) {
                 /* Stopped during the prefix forward. Reported as a normal
@@ -410,10 +424,10 @@ int lz_session_job(void *ud, const char *system, LZTokenSink sink,
                state must start empty or the prefix would be forwarded
                twice. */
             lz_state_reset(s->state, s->model);
-            rc = lz_generate_resume_ex(s->model, s->tok, s->state, 0,
-                                       s->prompt.s, s->prompt.len,
-                                       &s->opts, session_sink, session_cont,
-                                       &cb, &n_out, &ms, errbuf, errlen, ins);
+            gc.start_pos = 0;
+            gc.prompt_bytes = s->prompt.s;
+            gc.prompt_len = s->prompt.len;
+            rc = lz_generate_call(s->model, s->tok, s->state, &gc);
         }
         if (rc != LZ_ERR_PROMPT_LONG) {
             /* Last turn's statistics, read by the front end after the job

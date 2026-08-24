@@ -1518,13 +1518,26 @@ static int gen_prefill_capture(const LZModel *m, LZRunState *s,
    message it ships alongside it.
    Client's fault (400): LZ_ERR_PROMPT_LONG, LZ_ERR_STOP_LONG,
    LZ_ERR_PROMPT_ENCODE. Ours (500): everything else here. */
-int lz_generate_resume_ex(const LZModel *m, LZTokenizer *t, LZRunState *s,
-                          int start_pos,
-                          const char *prompt_bytes, int prompt_len,
-                          const LZGenOpts *opts,
-                          LZTokenSink sink, LZShouldContinue cont, void *ctx,
-                          int *out_n_tokens, double *out_elapsed_ms,
-                          char *errbuf, int errlen, LZInspect *ins) {
+int lz_generate_call(const LZModel *m, LZTokenizer *t, LZRunState *s,
+                     const LZGenCall *c) {
+    /* The twelve call fields, back under the names the loop below uses.
+       These are the same stack slots the parameters were, so nothing is
+       saved HERE - the saving is at the call boundary, where fifteen
+       pushes become one pointer. Naming them keeps the loop unchanged,
+       which is what makes this a mechanical change reviewers can read
+       and what makes it impossible for a float result to move. */
+    int start_pos              = c->start_pos;
+    const char *prompt_bytes   = c->prompt_bytes;
+    int prompt_len             = c->prompt_len;
+    const LZGenOpts *opts      = c->opts;
+    LZTokenSink sink           = c->sink;
+    LZShouldContinue cont      = c->cont;
+    void *ctx                  = c->ctx;
+    int *out_n_tokens          = c->out_n_tokens;
+    double *out_elapsed_ms     = c->out_elapsed_ms;
+    char *errbuf               = c->errbuf;
+    int errlen                 = c->errlen;
+    LZInspect *ins             = c->ins;
     LZSampler sampler;
     int *prompt_tokens = NULL;
     int n_prompt = 0;
@@ -2312,6 +2325,39 @@ done:
     return rc;
 }
 
+void lz_gen_call_init(LZGenCall *c) {
+    if (c) memset(c, 0, sizeof *c);
+}
+
+/* Compatibility wrapper: fills an LZGenCall and forwards. The fifteen
+   named arguments stay a supported entry point - the CLI, the HTTP
+   endpoint and the gui all call one of the three - but they are now one
+   place that knows the mapping rather than three signatures the loop
+   itself has to carry. */
+int lz_generate_resume_ex(const LZModel *m, LZTokenizer *t, LZRunState *s,
+                          int start_pos,
+                          const char *prompt_bytes, int prompt_len,
+                          const LZGenOpts *opts,
+                          LZTokenSink sink, LZShouldContinue cont, void *ctx,
+                          int *out_n_tokens, double *out_elapsed_ms,
+                          char *errbuf, int errlen, LZInspect *ins) {
+    LZGenCall c;
+    lz_gen_call_init(&c);
+    c.start_pos = start_pos;
+    c.prompt_bytes = prompt_bytes;
+    c.prompt_len = prompt_len;
+    c.opts = opts;
+    c.sink = sink;
+    c.cont = cont;
+    c.ctx = ctx;
+    c.out_n_tokens = out_n_tokens;
+    c.out_elapsed_ms = out_elapsed_ms;
+    c.errbuf = errbuf;
+    c.errlen = errlen;
+    c.ins = ins;
+    return lz_generate_call(m, t, s, &c);
+}
+
 /* Compatibility wrapper: lz_generate_resume_ex(..., NULL) - a thin
    forward, not a second copy of the loop above, so the two can never
    drift apart on the token sequence they produce. Every existing caller
@@ -2332,7 +2378,12 @@ int lz_generate_resume(const LZModel *m, LZTokenizer *t, LZRunState *s,
 }
 
 /* Compatibility wrapper: start_pos=0 behaves exactly like the original
-   single-shot generation. */
+   single-shot generation.
+
+   Still a chain rather than three separate struct fills. That was
+   measured, not assumed: filling the struct directly in each of these
+   two gave byte-identical symbol sizes on the 32-bit i486 build, so the
+   duplication buys nothing and one place knows the mapping. */
 int lz_generate(const LZModel *m, LZTokenizer *t, LZRunState *s,
                 const char *prompt_bytes, int prompt_len,
                 const LZGenOpts *opts,
