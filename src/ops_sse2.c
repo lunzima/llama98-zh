@@ -714,6 +714,90 @@ extern int32_t lz_dot32_x16_sse2_asm(const int8_t *w, const int16_t *x);
     __value [__eax]                 \
     __modify [8087]
 
+/* Two tokens, one weight side - the Watcom twin of part32_x16_2
+   (src/ops_kernel_dot_sse2.h), and the SSE2 member of the g_pair family.
+ *
+ * THE FOUR UNPACKED WEIGHT HALVES STAY LIVE across both tokens, in
+ * xmm1-xmm4, which is the whole saving: two movdqu and four punpck paid
+ * once where two single-token calls pay them twice. Only the activation
+ * loads and the pmaddwd double.
+ *
+ * REGISTER BUDGET, and it is exactly full. xmm1-4 the weight halves,
+ * xmm5/xmm6 the two accumulators, xmm0 the weight-copy temp that
+ * pmaddwd destroys, and xmm7 the zero - which is dead after the last
+ * punpck, so it is reused as the activation temp. Nothing spills.
+ *
+ * ACTIVATIONS GO THROUGH movdqu, never a pmaddwd memory operand: the
+ * single-token body above does the same, because SSE2's integer ops
+ * fault on a 16-byte-unaligned memory operand and xw carries no such
+ * guarantee. That is also why the weight copy is register-register.
+ *
+ * Bit-identical to two lz_dot32_x16_sse2_asm calls: each token
+ * accumulates in its own register in the same order, and the two folds
+ * are the same pair of psrldq/paddd the single form ends with. */
+extern void lz_dot32_x16_sse2_asm_2(const int8_t *w, const int16_t *xa,
+                                    const int16_t *xb,
+                                    int32_t *oa, int32_t *ob);
+#pragma aux lz_dot32_x16_sse2_asm_2 = \
+    ".686"                          \
+    "pxor      xmm7, xmm7"          \
+    "movdqu    xmm0, [eax]"         \
+    "movdqa    xmm1, xmm7"          \
+    "punpcklbw xmm1, xmm0"          \
+    "movdqa    xmm2, xmm7"          \
+    "punpckhbw xmm2, xmm0"          \
+    "movdqu    xmm0, [eax+16]"      \
+    "movdqa    xmm3, xmm7"          \
+    "punpcklbw xmm3, xmm0"          \
+    "movdqa    xmm4, xmm7"          \
+    "punpckhbw xmm4, xmm0"          \
+    "movdqu    xmm7, [edx]"         \
+    "movdqa    xmm5, xmm1"          \
+    "pmaddwd   xmm5, xmm7"          \
+    "movdqu    xmm7, [edx+16]"      \
+    "movdqa    xmm0, xmm2"          \
+    "pmaddwd   xmm0, xmm7"          \
+    "paddd     xmm5, xmm0"          \
+    "movdqu    xmm7, [edx+32]"      \
+    "movdqa    xmm0, xmm3"          \
+    "pmaddwd   xmm0, xmm7"          \
+    "paddd     xmm5, xmm0"          \
+    "movdqu    xmm7, [edx+48]"      \
+    "movdqa    xmm0, xmm4"          \
+    "pmaddwd   xmm0, xmm7"          \
+    "paddd     xmm5, xmm0"          \
+    "movdqu    xmm7, [ebx]"         \
+    "movdqa    xmm6, xmm1"          \
+    "pmaddwd   xmm6, xmm7"          \
+    "movdqu    xmm7, [ebx+16]"      \
+    "movdqa    xmm0, xmm2"          \
+    "pmaddwd   xmm0, xmm7"          \
+    "paddd     xmm6, xmm0"          \
+    "movdqu    xmm7, [ebx+32]"      \
+    "movdqa    xmm0, xmm3"          \
+    "pmaddwd   xmm0, xmm7"          \
+    "paddd     xmm6, xmm0"          \
+    "movdqu    xmm7, [ebx+48]"      \
+    "movdqa    xmm0, xmm4"          \
+    "pmaddwd   xmm0, xmm7"          \
+    "paddd     xmm6, xmm0"          \
+    "movdqa    xmm0, xmm5"          \
+    "psrldq    xmm0, 8"             \
+    "paddd     xmm5, xmm0"          \
+    "movdqa    xmm0, xmm5"          \
+    "psrldq    xmm0, 4"             \
+    "paddd     xmm5, xmm0"          \
+    "movd      [ecx], xmm5"         \
+    "movdqa    xmm0, xmm6"          \
+    "psrldq    xmm0, 8"             \
+    "paddd     xmm6, xmm0"          \
+    "movdqa    xmm0, xmm6"          \
+    "psrldq    xmm0, 4"             \
+    "paddd     xmm6, xmm0"          \
+    "movd      [esi], xmm6"         \
+    __parm [__eax] [__edx] [__ebx] [__ecx] [__esi] \
+    __modify [8087]
+
 /* Compiled in alongside the MMX tier; the runtime picks by CPUID (see
    lz_kernel_select). One binary must run on both PII (MMX only) and
    T42 (SSE2). */
@@ -870,6 +954,31 @@ void row_q8_sse2_asm(int32_t *acc32, const void *w4, const void *w2,
     for (tk = 0; tk < nt; tk++) {
         const int16_t *xwt = xw + (size_t)tk * in_dim;
         int32_t *acc = acc32 + (size_t)tk * nb;
+        /* Pair before grouping, matching the gcc twin above and the MMX
+           row kernels: the pair keeps the four unpacked weight halves
+           live across two tokens, the group only amortizes the per-32
+           call. An odd nt leaves its last token on the paths below. */
+        if (nt - tk >= 2 && lz_pair_mode()) {
+            const int16_t *xw2 = xwt + in_dim;
+            int32_t *accb = acc + nb;
+            int gp;
+            for (gp = 0; gp < nb; gp++) {
+                const int8_t *pf_ = wr + (size_t)(gp + LZ_PF_DIST) * 32;
+                if (pf_ < wend) {
+                    int pf_m_ = lz_prefetch_mode();
+                    if (pf_m_ == LZ_PF_AMD)       LZ_PFI_AMD(pf_);
+                    else if (pf_m_ == LZ_PF_LOAD) LZ_PFI_LOAD(pf_);
+                    else if (pf_m_ == LZ_PF_NONE) LZ_PFI_NONE(pf_);
+                    else                          LZ_PFI_NTA(pf_);
+                }
+                lz_dot32_x16_sse2_asm_2(wr + (size_t)gp * 32,
+                                        xwt + (size_t)gp * 32,
+                                        xw2 + (size_t)gp * 32,
+                                        acc + gp, accb + gp);
+            }
+            tk++;
+            continue;
+        }
 #if LZ_SSE2_GROUP
         if ((nb & 3) == 0) LZ_Q8_GROUP4(lz_dot128_x16_sse2_asm);
 #else
