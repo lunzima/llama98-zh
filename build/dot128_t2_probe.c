@@ -50,6 +50,9 @@
 void lz_dot128_t2_mmx_w(const unsigned char *w2, const int16_t *x,
                         int32_t *out4);
 int32_t lz_dot32_t2_mmx_w(const unsigned char *w2, const int16_t *x);
+int32_t lz_dot32_t2_sse2_w(const unsigned char *w2, const int16_t *x);
+void lz_dot32_t2_sse2_2_w(const unsigned char *w2, const int16_t *xa,
+                          const int16_t *xb, int32_t *oa, int32_t *ob);
 
 static unsigned long rs = 1145141919UL;
 static int nextv(void) {
@@ -89,6 +92,45 @@ int main(void) {
                 if (bad < 6)
                     printf("  pass %d lane %d: want %ld got %ld\n",
                            pass, b, (long)want[b], (long)got[b]);
+                bad++;
+            }
+        }
+
+        /* THE SSE2 TIER. Everything above lives in ops_mmx.c - the
+           group kernel and the per-32 kernel it is held against are
+           file-mates with the same body shape, so a shared mistake
+           agrees with itself. This arm is the only one that does not.
+           It is also the first time T2's two tiers have been compared
+           at all: nothing had an address on the SSE2 side.
+
+           The paired form is here too, on ONE weight block and TWO
+           deliberately different activation vectors - a kernel that
+           read xa twice would otherwise pass. */
+        for (b = 0; b < 4; b++, n++) {
+            if (lz_dot32_t2_sse2_w(w + b * 8, x + b * 32) != want[b]) {
+                if (bad < 6)
+                    printf("  pass %d block %d: mmx %ld sse2 %ld\n",
+                           pass, b, (long)want[b],
+                           (long)lz_dot32_t2_sse2_w(w + b * 8,
+                                                    x + b * 32));
+                bad++;
+            }
+        }
+        for (b = 0; b < 2; b++, n += 2) {
+            /* ONE weight block against TWO activation vectors, so the
+               second reference is dot(w_b, x_{b+2}) - NOT want[b+2],
+               which is dot(w_{b+2}, x_{b+2}) and uses a different
+               weight block entirely. */
+            const unsigned char *wp = w + b * 8;
+            const int16_t *xb2 = x + b * 32 + 64;
+            int32_t pa = 0, pb = 0;
+            int32_t wb = lz_dot32_t2_mmx_w(wp, xb2);
+            lz_dot32_t2_sse2_2_w(wp, x + b * 32, xb2, &pa, &pb);
+            if (pa != want[b] || pb != wb) {
+                if (bad < 6)
+                    printf("  pass %d pair %d: got %ld,%ld want %ld,%ld\n",
+                           pass, b, (long)pa, (long)pb,
+                           (long)want[b], (long)wb);
                 bad++;
             }
         }

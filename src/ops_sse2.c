@@ -1663,6 +1663,25 @@ extern void lz_dot32_t2_sse2_asm_2(const unsigned char *w2,
     __parm [__edx] [__ecx] [__ebx] [__esi] [__edi] \
     __modify [8087]
 
+/* Addresses for the two T2 kernels above. Neither had one, and the
+   consequence was the same as Q16_0's: T2 has an MMX tier and an SSE2
+   tier that are required to agree bit for bit, and nothing had ever
+   compared them - build/dot128_t2_probe.c held the MMX group kernel
+   against the MMX per-32 kernel and stopped there, both sides of it
+   inside ops_mmx.c.
+
+   The paired form gets one too. Its claim - one weight unpack serving
+   two activation vectors - had never been checked against anything
+   outside its own file either. */
+int32_t lz_dot32_t2_sse2_w(const unsigned char *w2, const int16_t *x) {
+    return lz_dot32_t2_sse2_asm(w2, x);
+}
+
+void lz_dot32_t2_sse2_2_w(const unsigned char *w2, const int16_t *xa,
+                          const int16_t *xb, int32_t *oa, int32_t *ob) {
+    lz_dot32_t2_sse2_asm_2(w2, xa, xb, oa, ob);
+}
+
 /* row_t2_sse2_asm: ALREADY the real call boundary (matmul_t2_impl,
    src/ops.c, dispatched once per matmul via LZ_ROW_T2). Moving the
    whole function here adds NO new call sites. */

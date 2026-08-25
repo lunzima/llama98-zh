@@ -41,17 +41,17 @@ set -u
 cd "$(dirname "$0")/.."
 
 FILES="src/ops_mmx.c src/ops_sse2.c src/ops_mmx_sse.c"
-FLOOR=37
+FLOOR=39
 
-# TWENTY-TWO ARE STILL UNREACHABLE, and the number is what it is
-# because "reachable" means a THIN WRAPPER, not a mention:
+# TWENTY ARE STILL UNREACHABLE, and the number is what it is because
+# "reachable" means a THIN WRAPPER, not a mention:
 #
 #   ops_mmx.c       gdn1_x4, wsum_pair, p2_split32, lerp_q15_32,
 #                   exp_q20_2, dot32_q41_2, dot32_q61, dot32_q61_2,
 #                   dot32_q16_2
 #   ops_sse2.c      p2_mul32, p2_split32, lerp_q15_32, exp_q20,
-#                   dot32_x16_2, dot32_q41_2, dot32_t2, dot32_t2_2,
-#                   dot32_q61_2, dot128_q61, dot32_q16_2
+#                   dot32_x16_2, dot32_q41_2, dot32_q61_2, dot128_q61,
+#                   dot32_q16_2
 #   ops_mmx_sse.c   p2_split32, exp_q20_2
 #
 # THE _2 FORMS DOMINATE what is left, and that is a finding rather than
