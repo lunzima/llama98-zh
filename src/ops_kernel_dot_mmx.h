@@ -123,7 +123,7 @@ void dot128_x16_mmx(const int8_t *w, const int16_t *x, int32_t *out4) {
 
 /* ---- Q16_0: dot32_q16_mmx ----------------------------------------------
    Watcom twin: lz_dot32_q16_asm, src/ops_kernel_dot.h ~563-597.
-   Dev-build twin (rule 2): mirrors the asm step for step, eight pmaddwd
+   Dev-build twin: mirrors the asm step for step, eight pmaddwd
    into one accumulator, then fold the high dword into the low one. No
    reassociation - the integer sums are exact, but keeping the shape
    identical is what makes "same numbers" mean "same kernel". */
@@ -327,7 +327,7 @@ void dot128_q41_mmx(const unsigned char *w, const int16_t *x, int32_t *out4) {
 /* The eight groups, stopping before the horizontal fold: two int32 lanes
    still to be summed. Split out so the 128-element form below can fold
    four of these TOGETHER - the arithmetic above the fold is untouched,
-   which is what keeps both entries bit-identical to the old single
+   which is what keeps both entries bit-identical to the original
    function. */
 static __m64 part32_t2_mmx(const unsigned char *w2, const int16_t *x) {
     __m64 acc = _mm_setzero_si64();

@@ -396,7 +396,7 @@ watcom-cli:
 # WHICH DOS EXTENDER - a contested choice, so it is a knob.
 #   dos4gw  wstub.exe   loads DOS4GW.EXE at run time - the period default,
 #                       but DOS/4GW OOMs loading a real model, measured,
-#                       so it is no longer the default.
+#                       so dos32a is the default.
 #   dos32a  stub32a.exe loads DOS32A.EXE at run time - faster, no DOS4GW
 #                       licensing history, and loads the model fine. A
 #                       drop-in otherwise; this is the default now.
@@ -703,12 +703,8 @@ watcom-dos-single: watcom-dos
 # Ask the Makefile for a variable: `make -s print-ENG`.
 #
 # The source lists live here and the out-of-tree builds - build/x87 and
-# build/arm, which are shell scripts rather than make targets - used to
-# restate them, each carrying a comment saying the copy had to stay in
-# step. It did not: both scripts said "Same list as the Makefile's ENG"
-# and only the ARM one was right, because only the ARM one runs in CI.
-# The x87 copy was nine files short and its link had been broken for as
-# long as its CI stage had been skipping.
+# build/arm, which are shell scripts rather than make targets - read
+# the source list here via `make -s print-ENG` instead of restating it.
 #
 # A gate comparing the copies would have caught that. Deleting the
 # copies is better: `make -s print-ENG` cannot be out of step with the

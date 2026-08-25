@@ -7,7 +7,7 @@
    read unsigned in 0..3, the -1 and 1/256 both live in epi_q41. Unrolled
    so the per-element byte/nibble address arithmetic folds to compile-time
    constants; gcc then emits one smlabb per element (DSP multiply-accumulate,
-   single-cycle on ARM926). This is the C tier of the ARM table (rule 8);
+   single-cycle on ARM926). This is the C tier of the ARM table;
    the hand-written asm tier is lz_dot32_t2_arm_asm below. */
 int32_t lz_dot32_t2_arm(const uint8_t *restrict w2, const int16_t *restrict x) {
     int32_t acc = 0;
@@ -23,7 +23,7 @@ int32_t lz_dot32_t2_arm(const uint8_t *restrict w2, const int16_t *restrict x) {
 }
 
 #if defined(LZ_T2_ARM_ASM_EXTERN)
-/* Hand-written ARMv5TE tier (rule 8's second ARM cell). Bit-identical to
+/* Hand-written ARMv5TE tier. Bit-identical to
    the two C tiers over the whole 0..3 code domain, so it owes them
    identity and not a tolerance.
 
@@ -45,7 +45,7 @@ int32_t lz_dot32_t2_arm(const uint8_t *restrict w2, const int16_t *restrict x) {
       met by matmul_t2_impl's g_xw.
 
    Not used, deliberately: PLD. Prefetch is its own orthogonal tier
-   (--prefetch, rule 9) and does not belong inside a leaf kernel.
+   (--prefetch) and does not belong inside a leaf kernel.
 
    Two accumulators, merged at the end. Exact in int32 - |x| <= 32767,
    code <= 3, 32 terms, worst case below 2^22 - so the split changes no

@@ -42,7 +42,7 @@
    multiple of 64 bytes, in_dim being a multiple of 32 by the dispatch
    guards.
 
-   SIXTEEN, NOT FOUR, and no longer only on ARM. The SSE2 kernels read
+   SIXTEEN, NOT FOUR. The SSE2 kernels read
    this array through _mm_loadu_si128, and an alignment probe over one
    full fixture says they never needed to: 189,486,720 calls to
    part32_x16, and the OR of every pointer's low four bits is ZERO on
@@ -1045,7 +1045,7 @@ void matmul_t2_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
 #if defined(__arm__)
     /* All LZ_ROW_T2 slots are x86 SIMD and NULL on the ARM build, so the
        ARM column is picked here instead of from the table. Two cells,
-       one enum value each (rule 8): the unrolled C and the hand-written
+       one enum value each: the unrolled C and the hand-written
        asm, both in src/ops_t2_arm.c. LZ_KERNEL_REF never reaches this
        function - lz_matmul_xq sends it to matmul_scalar_ref first. */
 #if defined(LZ_T2_ARM_ASM_EXTERN)
@@ -1241,7 +1241,7 @@ int lz_matmul_xq_nt_i16(short *o, const int8_t *xq, const float *xqs,
 
    The epilogue is character-for-character the non-q4 branch of
    matmul_scalar_ref_one, including the (a0+a2)+(a1+a3) reduction order
-   and lz_i32f() on every accumulator. That is the contract (rule 2):
+   and lz_i32f() on every accumulator. That is the contract:
    this function is only allowed to be faster, never different. */
 /* ---- Q16_0 row kernels -------------------------------------------------
    int16 weights, so no int8->int16 unpack and no x256 product scaling -
@@ -1313,7 +1313,7 @@ static void row_q16_mmx_intrin(int32_t *acc32, const void *w4, const void *w2,
 #if defined(__arm__)
 /* The two ARM tiers. All six LZ_ROW_Q16 slots are x86 SIMD and NULL on
    this build, so matmul_q16_impl picks between these directly, the way
-   matmul_t2_impl does - one enum value per code body (rule 8), so
+   matmul_t2_impl does - one enum value per code body, so
    lz_kernel_name() can answer which one ran. Leaves in src/ops_arm.c;
    the w4 pointer is the int16 weight row, matching the slot
    row_q16_mmx_intrin reads on x86. */

@@ -324,7 +324,7 @@ LZ_MAYBE_UNUSED static int p2_shift_of(int32_t amax) {
 
 #if defined(__WATCOMC__)
 /* Watcom side has two: dummy load (PII) and prefetchnta (PIII+).
-   __modify declared truthfully - rule 2.3. Each including TU gets its
+   __modify declared truthfully. Each including TU gets its
    own inlined instance (no address of these is ever taken, so there is
    no linkable symbol to collide across TUs - the same #pragma aux
    semantics every other kernel in this project relies on). */

@@ -6,12 +6,12 @@ extern "C" {
 #endif
 /* Unrolled scalar ternary (LZ_FMT_T2) dot product for ARMv5TE, one
    32-wide block. Same STRIDE-8 decode and same 256*sum(code*x) contract
-   as lz_dot32_t2_scalar (rule 2: the scalar reference is the contract):
+   as lz_dot32_t2_scalar (the scalar reference is the contract):
    code read UNSIGNED in 0..3, and the -1 (code->value) plus the 1/256
    (x256 fold) are both handled exactly by the shared float epilogue
    epi_q41, as documented in ops_t2_scalar.h.
 
-   This is the C tier of the ARM table (rule 8); the hand-written asm
+   This is the C tier of the ARM table; the hand-written asm
    tier is lz_dot32_t2_arm_asm below. Both ship and both are selectable:
    `--kernel arm-c` and `--kernel arm-asm`. See src/ops_t2_arm.c for the
    unrolled byte/nibble decode that folds the per-element address
@@ -33,7 +33,7 @@ int32_t lz_dot32_t2_arm(const uint8_t *restrict w2,
    T2 dispatch guard, blocks are 32 int16 apart).
 
    Static instruction counts, which is what transfers to the AK7802
-   (rule 3 - QEMU models no cache or bus, so no wall clock from it means
+   (QEMU models no cache or bus, so no wall clock from it means
    anything): 13 instructions per 8 elements = 1.625/element against the
    C tier's 17 per 4 = 4.25; 64 instructions per whole call against 143. */
 int32_t lz_dot32_t2_arm_asm(const uint8_t *w2, const int16_t *x);

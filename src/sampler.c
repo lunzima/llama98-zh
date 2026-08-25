@@ -217,7 +217,7 @@ float lz_random_f32(lz_u64 *state) {
 
    NaN is the one input where the two disagree, and it takes the same
    disposition the other two scans document: float comparison is false
-   for NaN so the old loops never selected one, while NaN's key is the
+   for NaN so a plain loop never selects one, while NaN's key is the
    largest and these would. A NaN logit means the forward pass is
    already destroyed. */
 #define LZ_FKEY(u) ((u) ^ (((uint32_t)((int32_t)(u) >> 31)) | 0x80000000u))
@@ -445,7 +445,7 @@ static int select_topk(const float *p, int n, int k, LZProbIndex *buf) {
  * same order, and select_topk's comparisons are all `<` between two
  * transformed values. What it does NOT preserve is a TIE that the
  * softmax manufactures: two distinct logits far below the max both
- * round to the same float probability, and there the old code's
+ * round to the same float probability, and there a naive
  * index-order tie-break picked between entries this one now orders
  * strictly. Those entries have equal probability by construction, so
  * the distribution sampled from is the same one - the token drawn from

@@ -49,7 +49,7 @@ extern void lz_mmx_empty_local(void);
    src/ops_mmx.h. <mmintrin.h> refuses to compile without -mmmx, so
    there is no _mm_empty() to pull in here, yet this TU still needs a
    real emms: it calls into src/ops_mmx.c's kernels, which leave the MMX
-   register file dirty (rule 6 item 6 - kernels don't emit, callers do),
+   register file dirty (kernels don't emit emms, callers do),
    and this caller's -mmmx-free compilation is exactly why it must not
    rely on the intrinsic. GAS accepts the mnemonic regardless of the
    compiler's own -mmmx/-msse target flags - inline asm text is opaque

@@ -453,7 +453,7 @@ extern void lz_q8round32_sse_asm(const float *x, int8_t *o, const float *inv);
 /* lz_q8round_group_sse(): the whole gs/32-chunk loop for one group of
    src/ops.c's lz_quantize_q8 - one call per group instead of gs/32
    calls a per-sub-chunk wrap would cost. The emms is emitted here,
-   inside the group function: rule 6.6's "kernels don't emit" does not
+   inside the group function: the "kernels don't emit emms" convention does not
    hold for this loop, the next group's x87 amax/inv still follows
    immediately in ops.c. */
 void lz_q8round_group_sse(const float *grp, int8_t *out, int gs,
@@ -855,7 +855,7 @@ void lz_p2_split32_sse(const lz_p2_blk *blk, int8_t *oh, int8_t *ol) {
    floats at a time into MMX registers. Multiply in xmm, convert and
    pack in mm, using movhlps to slide the high 2 floats down. Writes
    MMX registers, so the caller must emit one emms after the group loop
-   (rule 6.6). */
+   (the no-emms convention). */
 void lz_q8round32_sse(const float *x, int8_t *o, const float *pinv) {
     __m128 vi = _mm_set1_ps(*pinv);
     __m64 p127 = _mm_set1_pi16(127), m127 = _mm_set1_pi16(-127);

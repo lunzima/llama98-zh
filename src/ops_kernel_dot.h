@@ -65,7 +65,7 @@
    not a precaution: on 4096 real out_proj sub-blocks with |acc| > 2^24,
    a bare (float) cast disagrees between the two compilers on 1210 of
    them (29.5%, always exactly 1 ULP), while lz_i32f() disagrees on 0.
-   See rule 7 for why the divergence is in the load, not the arithmetic,
+   The divergence is in the load, not the arithmetic,
    and why PC=24 does not cover it. */
 #if defined(__WATCOMC__)
 /* lz_dot32_q16_asm / lz_dot32_q16_sse2_asm live in src/ops_mmx.c /
@@ -201,7 +201,7 @@
    byte-wise equivalent here: after `& 3` only each byte's own low two
    bits survive and no shift used reaches across a byte boundary.
 
-   No emms here (rule 6.6: the caller emits one after the row loop).
+   No emms here: the caller emits one after the row loop.
 
    VERIFIED BIT-IDENTICAL: 200000 random plus 8 extreme trials against
    a scalar reference, 0 mismatches; sensitivity checked
