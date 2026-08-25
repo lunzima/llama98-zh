@@ -54,6 +54,21 @@ CAPACITY=$((2847 * 512))
 # Everything that has to be on the disk for the GUI to run. The engine
 # is linked in, not a DLL, so this is one file today; the loop exists
 # because "it is one file" is a fact that can change quietly.
+#
+# THIS IS THE mingw BUILD, NOT THE ONE THAT GOES ON THE FLOPPY. A Win98
+# machine runs kunkun98-w.exe, the Watcom build, and the two are not the
+# same size: 1,003,685 against 793,088, a 21% gap between the artifact
+# measured and the artifact shipped. The floppy answer below is
+# therefore conservative today - the real disk holds MORE headroom than
+# it reports - but conservative by accident is still the wrong file, and
+# the sign is not guaranteed: the two compilers have moved apart before.
+# Same for section B, which ceilings llama98.exe (610,930) while the
+# shipping CLI is llama98-w.exe (486,400).
+#
+# Not changed here, because switching the measured artifact needs the
+# Watcom binaries present for the gate to run at all, and this gate is
+# already a `make gui` prerequisite away from SKIPping. Recorded so the
+# number stops reading as the shipped one.
 SHIP="kunkun98-gui.exe"
 
 # 320 KB. Measured at 261,968 with -O2, so 22% of headroom - room for
