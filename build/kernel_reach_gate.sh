@@ -41,21 +41,23 @@ set -u
 cd "$(dirname "$0")/.."
 
 FILES="src/ops_mmx.c src/ops_sse2.c src/ops_mmx_sse.c"
-FLOOR=43
+FLOOR=45
 
-# SIXTEEN ARE STILL UNREACHABLE, and the number is what it is because
+# FOURTEEN ARE STILL UNREACHABLE, and the number is what it is because
 # "reachable" means a THIN WRAPPER, not a mention:
 #
 #   ops_mmx.c       gdn1_x4, wsum_pair, p2_split32, lerp_q15_32,
-#                   exp_q20_2, dot32_q61, dot32_q61_2
+#                   exp_q20_2, dot32_q61_2
 #   ops_sse2.c      p2_mul32, p2_split32, lerp_q15_32, exp_q20,
-#                   dot32_x16_2, dot32_q61_2, dot128_q61
+#                   dot32_x16_2, dot32_q61_2
 #   ops_mmx_sse.c   p2_split32, exp_q20_2
 #
-# WHAT IS LEFT SPLITS IN TWO. The Q6_1 kernels are the last dot family
-# with no probe at all; the rest are not dot products - exp_q20,
-# lerp_q15_32, p2_split32, p2_mul32, gdn1_x4, wsum_pair - and each
-# needs its own oracle rather than a fourth copy of the dot probe.
+# EVERY DOT FAMILY NOW HAS A PROBE - Q8_0, Q4_1, Q6_1, Q16_0 and T2 -
+# and each holds its MMX tier against its SSE2 tier. What is left is
+# three _2 forms and the kernels that are NOT dot products: exp_q20,
+# lerp_q15_32, p2_split32, p2_mul32, gdn1_x4, wsum_pair. Those need
+# their own oracles rather than a sixth copy of the dot probe, which is
+# why they are last rather than because they matter less.
 #
 # THE _2 FORMS DOMINATE what is left, and that is a finding rather than
 # a coincidence: the paired kernels were added later, each beside a

@@ -2130,6 +2130,15 @@ extern void lz_dot128_q61_sse2_asm(const unsigned char *w4, const unsigned char 
     __parm [__eax] [__edx] [__ecx] [__ebx] \
     __modify [8087]
 
+/* The SSE2 group kernel's address. Q6_1 was the last dot format with
+   no probe of any kind, and this was the missing half of it - the MMX
+   group kernel had lz_dot128_q61_mmx_w and this one had nothing, so
+   the two tiers had never been compared on this format either. */
+void lz_dot128_q61_sse2_w(const unsigned char *w4, const unsigned char *w2,
+                          const int16_t *x, int32_t *out4) {
+    lz_dot128_q61_sse2_asm(w4, w2, x, out4);
+}
+
 /* row_q61_sse2_asm: ALREADY the real call boundary from its own caller
    (matmul_q61_impl, src/ops.c, dispatched once per matmul via
    LZ_ROW_Q61). No pairing on this tier (unmeasured for SSE2, per the

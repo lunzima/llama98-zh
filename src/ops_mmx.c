@@ -2872,7 +2872,10 @@ extern int32_t lz_dot32_q61_asm(const unsigned char *w4, const unsigned char *w2
     __value [__eax] \
     __modify [8087]
 
-static int32_t dot32_q61_mmx(const unsigned char *w4, const unsigned char *w2,
+/* Not static: a #pragma aux has no address, so this wrapper is the
+   only way build/dot128_q61_probe.c can reach the Q6_1 per-32 kernel.
+   Q6_1 was the last dot format with no probe at all. */
+int32_t dot32_q61_mmx(const unsigned char *w4, const unsigned char *w2,
                              const int16_t *x) {
     return lz_dot32_q61_asm(w4, w2, x);
 }
