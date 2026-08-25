@@ -22,6 +22,27 @@
  * with every code nonzero is the largest magnitude this kernel can be
  * asked for, which is where a fold that added the wrong lanes together
  * would show up as something other than a small difference.
+ *
+ * WHICH ARM ANSWERS WHICH QUESTION, because the exhaustive one does not
+ * answer both and reading it as if it did would overstate this probe.
+ *
+ *   passes 0-255, every byte value in every position: the UNPACK. Each
+ *   shift level's view of each code, which is what an error in one
+ *   level shows up in.
+ *
+ *   passes 256+, fixed seed: WHICH ACTIVATIONS EACH CHUNK MULTIPLIES.
+ *   The exhaustive arm is structurally blind here and no choice of
+ *   activation pattern fixes it: with all 32 weight bytes equal, the
+ *   four codes in a quad are equal too, so a chunk's contribution
+ *   collapses to w * (sum of its four x), and swapping a quad for its
+ *   neighbour changes nothing whenever those sums agree. Measured, not
+ *   assumed: a kernel mutated to multiply chunk 0 by chunk 1's
+ *   activations passes all 256 exhaustive passes and fails 3841 of the
+ *   seeded ones. Two attempted sign patterns did not move that
+ *   boundary; the weights, not x, are what makes the arm blind.
+ *
+ *   the tail block: LANE ORDER, on inputs built to make the four sums
+ *   distinct and checked to be distinct before being checked correct.
  */
 #include <stdio.h>
 #include "lz_int.h"

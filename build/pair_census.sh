@@ -25,7 +25,7 @@
 #
 #   lz_exp_q20_2_mmx_asm      69%
 #   lz_dot32_t2_asm           75%   <-- since interleaved, now 7%
-#   lz_dot128_t2_asm          72%
+#   lz_dot128_t2_asm          72%   <-- since interleaved, now 14%
 #   lz_dot128_x16_asm         70%
 #   lz_lerp_q15_32_mmx_asm    20%   <-- the outlier
 #
@@ -56,24 +56,38 @@
 # knob buys issue width as well as bandwidth. Worth knowing before
 # anyone measures --pair and attributes all of it to the unpack.
 #
-# Whole set: 4791 adjacent register pairs, 59% dependent.
+# Whole set: 4791 adjacent register pairs, 59% dependent; ops_mmx.c
+# alone is 2404 and 56% after the two edits below.
 #
-# ONE HAS BEEN DONE, so the technique is not hypothetical here.
+# TWO HAVE BEEN DONE, so the technique is not hypothetical here.
+#
 # lz_dot32_t2_asm was the worst in the file at 75% and is now 7% - the
 # best - by running the low and high nibble of each weight byte side by
-# side on separate scratch into separate accumulators. Bit-identical:
-# the same eight products in a different summation grouping, int32
-# addition being associative and exact. Verified by
-# build/dot128_t2_probe.c (16,388 values, 0 mismatches, and its printed
-# lane sums unchanged from before the edit) and end to end on
-# kunmoe-v2-t2-probe, whose logits hash did not move.
+# side on separate scratch into separate accumulators.
 #
-# THE REST ARE NOT DONE. Each is a real edit needing its own probe
-# re-run on both toolchains, and lz_dot128_t2_asm in particular has only
-# one spare register - its four accumulators fill the file, so
-# interleaving it needs a different split rather than the same one.
-# Named and measured; what this script is for is that the next person
-# does not re-derive which kernels are worth it.
+# lz_dot128_t2_asm, 72% -> 14%, needed a different split and the reason
+# is worth keeping. Its four accumulators plus the weight quad plus one
+# activation register leave exactly ONE free, so two chunks cannot each
+# hold their own activation - but they do not have to. The chunks
+# already pair off: same shift level, punpcklbw against punpckhbw of the
+# same mm4. So the pair takes two SCRATCH registers (mm2 and the spare
+# mm7) and SHARES one activation register, reloading it between the two
+# pmaddwd. That reload is the one remaining dependent pair inside a
+# chunk pair; the other is the second paddd into the accumulator.
+# Instruction count is unchanged at 274.
+#
+# BOTH ARE BIT-IDENTICAL, and not by an argument about associativity -
+# the same products reach the same accumulator in the same order.
+# build/dot128_t2_probe.c passes 16,388 values with 0 mismatches and
+# prints the same four lane sums as before either edit; end to end on
+# kunmoe-v2-t2-probe the generated text is byte-for-byte what a build of
+# the pre-edit kernel produces.
+#
+# THE REST ARE NOT DONE: lz_exp_q20_2_mmx_asm at 69%, lz_dot128_x16_asm
+# at 70%, and the SSE2 single-token kernels at 65-74%. Each is a real
+# edit needing its own probe re-run on both toolchains. Named and
+# measured; what this script is for is that the next person does not
+# re-derive which kernels are worth it.
 #
 # Usage: bash build/pair_census.sh [file ...]   (default: src/ops_mmx.c)
 set -u
