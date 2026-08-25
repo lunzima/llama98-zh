@@ -96,6 +96,23 @@
 # these three is the same one that table got - break the file down per
 # function, then put a counter in whatever it names.
 #
+# DONE on 2026-08-20 (build/move_per_function.sh). Top gap functions:
+#
+#   ops_norm: lz_rmsnorm_gated_out_fixed 250 gcc 36% → watcom 51% (+15)
+#             lz_rmsnorm_int              89 gcc 31% → watcom 42% (+11)
+#             lz_rmsnorm_gated_int        88 gcc 32% → watcom 43% (+11)
+#   ops_gdn:  gdn_step_impl             1848 gcc 33% → watcom 39% (+6)
+#             p2_group_norm               191 gcc 28% → watcom 40% (+12)
+#   ops_quant: lz_exp_fixed              140 gcc 22% → watcom 46% (+24)
+#              lz_rsqrt_fixed             217 gcc 29% → watcom 43% (+14)
+#              lz_exp_t                   254 gcc 33% → watcom 45% (+12)
+#
+# gdn_step_impl dominates ops_gdn by size (1848 of 3788 gcc instr);
+# its +6 gap is modest. ops_norm's gap is spread across several small
+# functions. ops_quant's gap is in the exp/rsqrt family. None of these
+# are findings without execution counters — put a counter in each and
+# generate one token before spending anything.
+#
 # What is true is that both columns sit near half, above the third this
 # header calls ordinary. That is a property of 32-bit x86 with eight
 # registers and of these functions' argument counts, not of Watcom, and

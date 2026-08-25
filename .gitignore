@@ -205,3 +205,4 @@ docs/superpowers/
 # applied to tools/kernelgen's generators would be a defect - those are
 # source. This one is a decision.
 .prof/
+!/build/move_per_function.sh
