@@ -96,15 +96,14 @@
 # all free, so the lo and hi halves of each weight quad just take mm2
 # and mm3 and run side by side. Instruction count unchanged at 167.
 #
-# WHAT THE REMAINING 20% IS, and it is not chunk work: 16 of the 32
-# dependent pairs are the four horizontal folds, four each. A fold is
-# movq/psrlq/paddd/movd and every step reads the last - that is what a
-# horizontal reduction IS. The t2 kernel avoids it by keeping four
-# accumulators and transposing once at the end, two 8-byte stores
-# instead of four movd, and this kernel has the registers to do the
-# same. Not done here: it is a change to the STORE shape, not to the
-# chunk order, and mixing the two would muddy which one a regression
-# came from.
+# AND THEN ITS FOLD, 20% -> 14%, in its own commit because it changes
+# the STORE shape rather than the chunk order. Sixteen of the thirty-two
+# dependent pairs were the four horizontal reductions, four each -
+# movq/psrlq/paddd/movd, every step reading the last, which is what a
+# horizontal reduction IS. Keeping four accumulators (mm6 mm5 mm4 mm0,
+# exactly the free set) and transposing once at the end is the t2
+# kernel's trick: six fewer instructions, and two 8-byte stores instead
+# of four 4-byte ones.
 #
 # lz_dot32_x16_asm, 68% -> 20%, the same edit again - but it is the
 # REFERENCE build/dot128_x16_probe.c holds the group kernel against, so
