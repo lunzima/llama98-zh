@@ -184,6 +184,23 @@ int lz_matmul_row_arm_asm(const float *w, const float *x, int n,
    n <= 0 returns 0. No alignment precondition beyond what the pointer
    types already promise. */
 lz_i64 lz_epi_mac_i16_arm_asm(const int32_t *a, const int16_t *m, int n);
+
+/* The GDN recurrence's pass-1 4-lane contraction (docs/arm-asm-audit.md
+   D2), the ARM twin of lz_gdn1_x4_asm. For one 4-lane sub-window,
+   out8[0..3] = au[l], out8[4..7] = aw[l]:
+
+     au[l] = sum_kp  rowA[(2*kp)*vd + l] * tab[kp][0]
+                   + rowA[(2*kp+1)*vd + l] * tab[kp][1]
+     aw[l] = sum_kp  rowA[(2*kp)*vd + l] * tab[kp][4]
+                   + rowA[(2*kp+1)*vd + l] * tab[kp][5]
+
+   Bit-identical to the C reference and to the x86 twins by construction:
+   16x16 products are exact and the int32 accumulation wraps mod 2^32, so
+   no summation order differs. kpairs == 0 writes eight zeros. No
+   alignment precondition beyond what the pointer types promise (the
+   kernel reads with ldrsb/ldr, not ldm). */
+void lz_gdn1_x4_arm_asm(const int8_t *rowA, int32_t vd, const int16_t *ctab,
+                        int32_t kpairs, int32_t *out8);
 #endif /* __arm__ && __GNUC__ */
 
 #ifdef __cplusplus

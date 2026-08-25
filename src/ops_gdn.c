@@ -957,9 +957,9 @@ static void gdn_build_table(const float *ss, const float *q, const float *k,
  * counts do not, which is why everything else is counted rather than
  * timed - but the multiply family's cycle difference is an ISA fact,
  * documented, and large enough to invert the ranking. */
-static void gdn_sum_gg(const int8_t *sq_gg, int kd, int vd,
-                       const int16_t (*tab)[8], int32_t tcu, int32_t tcw,
-                       int32_t *au_gg, int32_t *aw_gg) {
+static void gdn_sum_gg_ref(const int8_t *sq_gg, int kd, int vd,
+                           const int16_t (*tab)[8], int32_t tcu, int32_t tcw,
+                           int32_t *au_gg, int32_t *aw_gg) {
     int kpairs = kd / 2, kp, j;
     for (j = 0; j < 32; j++) { au_gg[j] = 0; aw_gg[j] = 0; }
     for (kp = 0; kp < kpairs; kp++) {
@@ -974,6 +974,39 @@ static void gdn_sum_gg(const int8_t *sq_gg, int kd, int vd,
     }
     gdn_tail_row(sq_gg, kd, vd, tcu, tcw, au_gg, aw_gg);
 }
+
+#if defined(LZ_ARM_ASM_EXTERN)
+/* ARM dispatch. --kernel arm-asm reaches the hand-written 4-lane kernel
+   (lz_gdn1_x4_arm_asm), arm-c/ref the scalar above; the two are the
+   control arm and the arm this column's cell is for. Same eight
+   sub-window + out8 round-trip structure as the gcc MMX branch below,
+   minus the emms (ARM has no MMX state to clear). */
+static void gdn_sum_gg(const int8_t *sq_gg, int kd, int vd,
+                       const int16_t (*tab)[8], int32_t tcu, int32_t tcw,
+                       int32_t *au_gg, int32_t *aw_gg) {
+    int kpairs = kd / 2, vb;
+    if (g_kernel == LZ_KERNEL_ARM_ASM) {
+        for (vb = 0; vb < 8; vb++) {
+            int v = vb * 4;
+            int32_t out8[8];
+            lz_gdn1_x4_arm_asm(sq_gg + v, vd, &tab[0][0], kpairs, out8);
+            au_gg[v + 0] = out8[0]; au_gg[v + 1] = out8[1];
+            au_gg[v + 2] = out8[2]; au_gg[v + 3] = out8[3];
+            aw_gg[v + 0] = out8[4]; aw_gg[v + 1] = out8[5];
+            aw_gg[v + 2] = out8[6]; aw_gg[v + 3] = out8[7];
+        }
+        gdn_tail_row(sq_gg, kd, vd, tcu, tcw, au_gg, aw_gg);
+        return;
+    }
+    gdn_sum_gg_ref(sq_gg, kd, vd, tab, tcu, tcw, au_gg, aw_gg);
+}
+#else
+static void gdn_sum_gg(const int8_t *sq_gg, int kd, int vd,
+                       const int16_t (*tab)[8], int32_t tcu, int32_t tcw,
+                       int32_t *au_gg, int32_t *aw_gg) {
+    gdn_sum_gg_ref(sq_gg, kd, vd, tab, tcu, tcw, au_gg, aw_gg);
+}
+#endif /* LZ_ARM_ASM_EXTERN */
 #elif defined(__WATCOMC__)
 /* Watcom: one call to src/ops_mmx.c's lz_gdn_sum_gg_mmx, which does the
    eight sub-window lz_gdn1_x4_asm calls internally with the pragma

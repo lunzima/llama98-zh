@@ -913,4 +913,82 @@ lz_i64 lz_epi_mac_i16_arm_asm(const int32_t *a, const int16_t *m, int n) {
     for (g = 0; g < tail; g++) s += (lz_i64)ap[g] * (lz_i64)mp[g];
     return s;
 }
+
+/* ---- GDN/KDA pass-1, 4-lane table contraction ------------------------ */
+
+/* The GDN recurrence's pass-1 contraction, the ARM twin of
+   lz_gdn1_x4_asm (src/ops_mmx.c). One 4-lane sub-window:
+
+     au[l] = sum_kp  rowA[(2*kp)*vd + l] * tab[kp][0]
+                   + rowA[(2*kp+1)*vd + l] * tab[kp][1]
+     aw[l] = sum_kp  rowA[(2*kp)*vd + l] * tab[kp][4]
+                   + rowA[(2*kp+1)*vd + l] * tab[kp][5]
+
+   THE LANE-OUTER STRUCTURE is what the audit's D2 row lands on after the
+   LDM-packed-int8 route turned out negative: eight accumulators do not
+   fit 13 GPRs once rowA/vd/ctab/kpairs are live, so two accumulators
+   stay in registers per lane and the coefficient pair is reloaded for
+   each of the four lanes. 12 instructions per lane-pair against gcc's
+   16, and the optimistic bound the audit states - not the 4-5 its first
+   pass hoped for.
+
+   WHY SMLABB/SMLABT AND NOT MUL/MLA. Inputs are int8 widened to int16,
+   coefficients int16, so every product is a 16x16 halfword multiply.
+   ARM926EJ-S does SMLAxy in one cycle and MUL/MLA in two to five (early
+   termination on Rs; a 16-bit coefficient costs three). gcc fuses the
+   narrow load into the halfword multiply only while each byte feeds one
+   multiply - CSE the load and both operands widen to plain int. Hand
+   writing is the only way to keep both the single load and the halfword
+   MAC; from C the compiler gives one or the other. Each coefficient word
+   is one ldr feeding SMLABB (low half) and SMLABT (high half), the same
+   halfword-selection the matmul row kernels use.
+
+   BIT-IDENTITY IS BY CONSTRUCTION, not by matched order: the products
+   are 16x16 exact and the int32 accumulation wraps mod 2^32, so any
+   summation order agrees with the C reference and with the x86 twins -
+   the same argument gdn_sum_gg's own comment makes. kpairs == 0 writes
+   eight zeros, matching the empty-loop C body and the MMX kernel's
+   test/jz. */
+void lz_gdn1_x4_arm_asm(const int8_t *rowA, int32_t vd, const int16_t *ctab,
+                        int32_t kpairs, int32_t *out8) {
+    int32_t au, aw, lane, k, a, b, co;
+    const int8_t *ra;
+    const int16_t *cb;
+    __asm__ volatile(
+        "mov    %[lane], #0\n\t"           /* lane = 0 */
+        "1:\n\t"
+        "mov    %[au], #0\n\t"             /* au = 0 */
+        "mov    %[aw], #0\n\t"             /* aw = 0 */
+        "add    %[ra], %[rowA], %[lane]\n\t" /* ra = rowA + lane */
+        "mov    %[cb], %[ctab]\n\t"        /* cb = ctab (reset per lane) */
+        "mov    %[k], %[kpairs]\n\t"       /* k = kpairs */
+        "cmp    %[k], #0\n\t"
+        "beq    3f\n\t"
+        "2:\n\t"
+        "ldrsb  %[a], [%[ra]]\n\t"         /* a = ra[0] */
+        "ldrsb  %[b], [%[ra], %[vd]]\n\t"  /* b = ra[vd] */
+        "ldr    %[co], [%[cb]]\n\t"        /* co = ckA | ckB */
+        "smlabb %[au], %[a], %[co], %[au]\n\t" /* au += a*ckA */
+        "smlabt %[au], %[b], %[co], %[au]\n\t" /* au += b*ckB */
+        "ldr    %[co], [%[cb], #8]\n\t"    /* co = cqA | cqB */
+        "smlabb %[aw], %[a], %[co], %[aw]\n\t" /* aw += a*cqA */
+        "smlabt %[aw], %[b], %[co], %[aw]\n\t" /* aw += b*cqB */
+        "add    %[ra], %[ra], %[vd], lsl #1\n\t" /* ra += 2*vd */
+        "add    %[cb], %[cb], #16\n\t"     /* cb += 8 int16 */
+        "subs   %[k], %[k], #1\n\t"
+        "bne    2b\n\t"
+        "3:\n\t"
+        "str    %[au], [%[out], %[lane], lsl #2]\n\t" /* out8[lane] = au */
+        "add    %[co], %[out], #16\n\t"    /* co = &out8[4] */
+        "str    %[aw], [%[co], %[lane], lsl #2]\n\t" /* out8[4+lane] = aw */
+        "add    %[lane], %[lane], #1\n\t"
+        "cmp    %[lane], #4\n\t"
+        "bne    1b\n\t"
+        : [au] "=&r"(au), [aw] "=&r"(aw), [lane] "=&r"(lane),
+          [ra] "=&r"(ra), [cb] "=&r"(cb), [k] "=&r"(k),
+          [a] "=&r"(a), [b] "=&r"(b), [co] "=&r"(co)
+        : [rowA] "r"(rowA), [vd] "r"(vd), [ctab] "r"(ctab),
+          [kpairs] "r"(kpairs), [out] "r"(out8)
+        : "cc", "memory");
+}
 #endif /* LZ_ARM_ASM_EXTERN */

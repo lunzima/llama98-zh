@@ -3795,10 +3795,6 @@ static const char km_why_f32mm_g128[] =
     "this column is the 128-ELEMENT quantization group; lz_matmul's "
     "unit of work is a whole weight ROW against a whole activation "
     "vector, a different axis";
-static const char km_why_recur_arma[] =
-    "todo: the GDN recurrence has four x86 bodies and no ARM one. "
-    "ARMv5TE can do the int16 multiply-accumulate this needs, so the "
-    "cell is owed rather than impossible";
 /* The four 64-bit-lane cells. SSE1 shares this reason with MMX because
    for THIS operator it adds nothing: its integer additions are pmaxsw,
    pshufw, pextrw and movntq on %mm, none of which is a multiply and
@@ -3890,7 +3886,7 @@ static const LZKmReg km_reg[LZ_KM_NUNIT * LZ_KM_NCOL] = {
    Watcom SSE columns stay with the gcc class: LZ_P2_SSE_EXTERN and
    LZ_P2_SSE2_EXTERN are what km_op_present can key off, and the SSE2
    one is declared under !__WATCOMC__. */
-/* recur*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_T(km_why_recur_arma), KM_N(km_why_op_g128),
+/* recur*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_op_g128),
 /* epi  */ KM_H(KM_ALL), KM_T(km_why_epi_x86), KM_T(km_why_epi_x86), KM_H(LZ_KMB_GCC), KM_T(km_why_epi_x86), KM_T(km_why_epi_x86), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_op_g128)
 };
 
@@ -3976,6 +3972,9 @@ static int km_arm_asm(int f) {
     /* fwhti's is a loop leaf in src/ops_arm.c; the float twin's is the
        inline block registered above, under a different guard. */
     if (f == LZ_KM_UNIT_FWHTI) return 1;
+    /* recur's is lz_gdn1_x4_arm_asm, the pass-1 4-lane contraction leaf
+       (docs/arm-asm-audit.md D2). */
+    if (f == LZ_KM_UNIT_RECUR) return 1;
 #endif /* LZ_ARM_ASM_EXTERN */
     (void)f;
     return 0;
