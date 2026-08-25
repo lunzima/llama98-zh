@@ -649,9 +649,13 @@ void lz_fwht_stage_f32_sse(float *y, int n, int len) {
    than a re-association of them, and why the final combine stays with
    the caller.
 
-   Touches no %mm register, so no emms is owed: mulps/addps/movups are
-   the SSE1 additions to the FLOAT side, not the MMX register file that
-   this file's other kernels share with x87. */
+   Touches no %mm register, so no emms is owed: mulps/addps are the SSE1
+   additions to the FLOAT side, not the MMX register file that this
+   file's other kernels share with x87. The row/x LOADS are movaps (both
+   are 16-byte aligned - row is field->f from model.c's aligned_malloc,
+   x is the forward activation from forward.c's xcalloc); the acc8 STORE
+   stays movups because acc8 is the caller's stack array with no
+   16-byte alignment promise. */
 extern int lz_matmul_row_sse_asm(const float *row, const float *x,
                                  int in_dim, float *acc8);
 #pragma aux lz_matmul_row_sse_asm = \
@@ -663,10 +667,10 @@ extern int lz_matmul_row_sse_asm(const float *row, const float *x,
     "test    esi, esi"                                          \
     "jz      mmdone"                                            \
     "mmloop:"                                                   \
-    "movups  xmm2, [eax]"                                       \
-    "movups  xmm3, [edx]"                                       \
-    "movups  xmm4, [eax+16]"                                    \
-    "movups  xmm5, [edx+16]"                                    \
+    "movaps  xmm2, [eax]"                                       \
+    "movaps  xmm3, [edx]"                                       \
+    "movaps  xmm4, [eax+16]"                                    \
+    "movaps  xmm5, [edx+16]"                                    \
     "mulps   xmm2, xmm3"                                        \
     "mulps   xmm4, xmm5"                                        \
     "addps   xmm0, xmm2"                                        \
@@ -1010,10 +1014,10 @@ int lz_matmul_row_sse(const float *row, const float *x, int in_dim,
     __m128 b = _mm_setzero_ps();
     int j = 0, ng = in_dim & ~7;
     for (; j < ng; j += 8) {
-        a = _mm_add_ps(a, _mm_mul_ps(_mm_loadu_ps(row + j),
-                                     _mm_loadu_ps(x + j)));
-        b = _mm_add_ps(b, _mm_mul_ps(_mm_loadu_ps(row + j + 4),
-                                     _mm_loadu_ps(x + j + 4)));
+        a = _mm_add_ps(a, _mm_mul_ps(_mm_load_ps(row + j),
+                                     _mm_load_ps(x + j)));
+        b = _mm_add_ps(b, _mm_mul_ps(_mm_load_ps(row + j + 4),
+                                     _mm_load_ps(x + j + 4)));
     }
     _mm_storeu_ps(acc8, a);
     _mm_storeu_ps(acc8 + 4, b);
