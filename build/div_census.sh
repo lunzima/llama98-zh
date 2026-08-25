@@ -22,6 +22,12 @@
 # Where each one sits is the reading, and that needs the function name,
 # which is why the per-function breakdown is the second table.
 #
+# build/div_hotness.sh ANSWERS THAT SECOND QUESTION with numbers. It
+# takes this site list and joins it against gcov execution counts from a
+# real generation, so the ranking is by how often each divide runs
+# rather than by how many of them share a function. Read that one first;
+# this one is the site inventory it stands on.
+#
 # ops.c, the largest count in the set, has been walked. Nothing there is
 # a target and the reasons are worth keeping so the next reader does not
 # repeat the walk:

@@ -76,9 +76,11 @@ done
 # thing someone chose.
 #
 # CENSUSES, which print and do not judge - there is no PASS to assert:
-#   div_census move_census branch_census o3_probe xcc_codesize dev_timing
+#   div_census div_hotness move_census branch_census o3_probe
+#   xcc_codesize dev_timing
 # Those are not *_gate.sh and so never reach the loop above; named here
-# only so the next reader does not go looking for them.
+# only so the next reader does not go looking for them. cov_run.sh is
+# not a census either - it is the coverage build the last two share.
 #
 # GATES THAT NEED A MODEL, a cross-toolchain build, or minutes of wall
 # clock. `check` is meant to be runnable before every commit.
@@ -160,8 +162,15 @@ fi
 # check` runs it here and the file does not exist for anyone who clones.
 # dedupe_gate.sh already did this once - the .gitignore comment says so,
 # and until now nothing but that comment held it.
+#
+# EVERY SHELL SCRIPT UNDER build/, not only the gates. The first version
+# looked at *_gate.sh and *.awk, and the very next script added here was
+# a census - div_hotness.sh - which `git add` refused and which would
+# have been committed as a working-tree-only file if the refusal had
+# gone unread. A census that is not in the clone is as absent as a gate
+# that is not.
 UNTRACKED=""
-for g in build/*_gate.sh build/*.awk; do
+for g in build/*.sh build/*/*.sh build/*.awk; do
     [ -e "$g" ] || continue
     git ls-files --error-unmatch "$g" >/dev/null 2>&1 || UNTRACKED="$UNTRACKED $g"
 done

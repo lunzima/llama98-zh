@@ -1387,6 +1387,7 @@ void lz_epi_prep(LZTensor *w, int in_dim) {
     w->sq   = (int16_t *)malloc((size_t)ngw * (size_t)rows * sizeof(int16_t));
     w->sexp = (signed char *)malloc((size_t)rows);
     if (!w->sq || !w->sexp) { epi_drop(w); return; }
+    w->sq_row = ngw;
     epi_prep_plane(w->scale, w->sq, w->sexp, ngw, rows);
 }
 
@@ -1408,6 +1409,7 @@ void lz_epi_prep_zero(LZTensor *w, int in_dim) {
     w->zq   = (int16_t *)malloc((size_t)ngw * (size_t)rows * sizeof(int16_t));
     w->zexp = (signed char *)malloc((size_t)rows);
     if (!w->zq || !w->zexp) { epi_drop_zero(w); return; }
+    w->sq_row = ngw;                  /* same stride; either prep may be first */
     epi_prep_plane(w->zero, w->zq, w->zexp, ngw, rows);
 }
 
@@ -1844,7 +1846,15 @@ void epi_zero_act_int(const int8_t *xq, int in_dim, int ng, int r, int nt) {
    has always used, not a reimplementation of it. */
 static lz_i64 epi_fixed_raw(const int32_t *accb, const LZTensor *w,
                                int row, int tk, int ng, int r, int *e_out) {
-    const int16_t *ww = w->sq + (size_t)row * (ng / r);
+    /* w->sq_row, not ng/r. The two are the same number - ng is the
+       sub-block count and r the sub-blocks per group, so ng/r is the
+       group count lz_epi_prep allocated the plane with - but this
+       function runs once per output element, and build/div_hotness.sh
+       counts that divide at 996,096 executions in eight tokens on
+       kmr20, an order of magnitude above every other divide in the
+       engine. The stride is a property of the plane, so it is read
+       from the plane. */
+    const int16_t *ww = w->sq + (size_t)row * (size_t)w->sq_row;
     lz_i64 s = 0;
     int g = 0, j = 0;
     /* ONE PASS over ng, not two: lz_epi_mac_grp reads the int16 plane

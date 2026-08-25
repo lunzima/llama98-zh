@@ -89,6 +89,9 @@
 !/build/pair_census.sh
 !/build/gcc_warning_gate.sh
 !/build/gui_selftest_gate.sh
+!/build/t2_probe_stubs.c
+!/build/div_hotness.sh
+!/build/cov_run.sh
 
 # Stray compiler/linker intermediates (gcc, Open Watcom), plus the raw
 # dumps probes drop at the repo root when run without a -o path.

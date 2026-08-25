@@ -56,54 +56,18 @@
 set -u
 cd "$(dirname "$0")/.."
 
-command -v gcov >/dev/null 2>&1 || { echo "branch_census: SKIP - no gcov"; exit 2; }
-command -v gcc  >/dev/null 2>&1 || { echo "branch_census: SKIP - no gcc"; exit 2; }
-
 MODEL=${1:-/e/LLM/models/kmr20}
 TOP=${2:-25}
-[ -d "$MODEL" ] || { echo "branch_census: SKIP - no model: $MODEL"; exit 2; }
 
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 
-# The engine only. The front end's option parsing runs once and would
-# fill the table with branches nobody executes twice.
-ENG=$(make -s print-ENG) || { echo "branch_census: cannot read ENG"; exit 2; }
-COM=$(make -s print-COM) || { echo "branch_census: cannot read COM"; exit 2; }
-SRC=""
-for f in $ENG; do SRC="$SRC src/$f.c"; done
-for f in $COM; do SRC="$SRC common/$f.c"; done
-
-# -O2 and the shipping defines: a coverage build at -O0 would count
-# branches the optimiser deletes. --coverage keeps its own arcs even at
-# -O2, and the counts are of the OPTIMISED control flow, which is the
-# one that ships.
-gcc -O2 -march=x86-64 -std=c99 -Isrc -Icommon -ffp-contract=off \
-    -DLZ_MMX_TU=1 -DLZ_SSE2_TU=1 --coverage \
-    -o "$W/cov.exe" $SRC src/cli_attr.c src/cli_main.c \
-    build/native/ops_mmx.o build/native/ops_mmx_sse.o build/native/ops_sse2.o \
-    -lm >"$W/build.log" 2>&1 || {
-    echo "branch_census: SKIP - coverage build failed"; tail -3 "$W/build.log"; exit 2; }
-
-# One short generation. Fixed seed so two runs of this script compare.
-( cd "$W" && ./cov.exe "$MODEL" --prompt "hi" -n 8 --seed 1145141919 ) \
-    >"$W/run.log" 2>&1 || { echo "branch_census: SKIP - the run failed"
-                            tail -3 "$W/run.log"; exit 2; }
-
-# gcov writes its .gcov into the CURRENT directory, not into -o, and it
-# resolves source paths relative to the current directory too. So it has
-# to run from the repo root with -o pointing at the .gcda, and the
-# output lands here and is swept up afterwards. The first version ran it
-# from the root but globbed $W for the results and printed an empty
-# table - a census that prints nothing reads exactly like a census that
-# found nothing.
-# THE .gcda FILES, not the source names. gcov derives the notes-file
-# name from whatever it is handed, so `gcov src/ops_gdn.c` looks for
-# ops_gdn.gcno - and gcc named it cov-ops_gdn.gcno, after the output
-# binary, because many sources compiled into one. It then reported
-# "cannot open notes file" and "No executable lines" into the log this
-# script was not reading, and the table came out empty.
-gcov -b -c -o "$W" "$W"/*.gcda >"$W/gcov.log" 2>&1
-mv -f ./*.gcov "$W/" 2>/dev/null
+# build/cov_run.sh holds the build, the run and the gcov invocation, all
+# three of which have edges worth meeting once rather than twice. It is
+# shared with div_hotness.sh so both censuses report on the SAME run -
+# a branch count and a divide count from different generations are not
+# comparable and would look as if they were.
+. build/cov_run.sh
+cov_run "$W" "$MODEL" 8 || exit 2
 
 # Each branch prints as two "branch N taken M" lines under the line that
 # holds it. Score = executions x minority share, so a hot balanced

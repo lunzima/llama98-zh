@@ -86,6 +86,15 @@ typedef struct {
        replaces, which is what the first candidate measured. */
     int16_t     *sq;        /* n/gs int16 */
     signed char *sexp;      /* one exponent per row */
+    /* Row stride of sq and zq, in int16: in_dim/gs, the group count of
+       one output row. Stored because the epilogue indexes those planes
+       once per output element and the alternative is deriving it there
+       from the kernel's (sub-block count, sub-blocks per group) pair,
+       which is an integer divide a million times a generation. It is
+       not a cached copy of that quotient - it is the stride the planes
+       were actually allocated with, so it is the primary value and the
+       quotient was the derivation. */
+    int          sq_row;
     /* The same decomposition of the `zero` plane, built by
        lz_epi_prep_zero(). Q4_1/Q6_1 only: T2 has no stored min - its
        zero coefficient is -scale, which `sq`/`sexp` above already

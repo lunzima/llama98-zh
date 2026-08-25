@@ -1716,6 +1716,7 @@ void lz_t_free(LZTensor *t) {
     t->sexp = NULL;
     t->zq = NULL;
     t->zexp = NULL;
+    t->sq_row = 0;
 }
 
 int lz_read_weights(LZModel *m, char *errbuf, int errlen) {
