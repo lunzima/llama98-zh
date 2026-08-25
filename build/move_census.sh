@@ -61,12 +61,40 @@
 #   session        52%         51%
 #   model          54%         56%
 #
-# WATCOM IS NOWHERE WELL ABOVE gcc, which is the criterion this file
-# sets three paragraphs up. The widest gap is five points, and on two of
-# the six Watcom is the LOWER of the two. So the shape the goal
-# describes - old compiler doing badly where the new one does fine - is
-# not present in this code, and there is no source-level register
-# pressure target to attack here.
+# ON THAT SET Watcom is nowhere well above gcc, which is the criterion
+# this file sets three paragraphs up. The widest gap is five points, and
+# on two of the six Watcom is the LOWER of the two.
+#
+# THAT CONCLUSION WAS THEN WRITTEN AS "there is no source-level register
+# pressure target to attack here", which is a statement about the tree
+# and was only ever measured on six non-operator files. The default set
+# is the non-operator one because the project's goal names those; the
+# operator units were never passed in, and nothing said so.
+#
+# They are, and three of them are over the threshold the paragraph above
+# sets:
+#
+#   file            gcc move   watcom move   gap
+#   ops                35%         37%        +2
+#   ops_matmul         49%         49%         0
+#   ops_gdn            37%         43%        +6
+#   ops_norm           34%         42%        +8
+#   ops_quant          30%         36%        +6
+#   ops_t2_scalar      46%         48%        +2
+#   forward            52%         52%         0
+#
+# ops_norm, ops_gdn and ops_quant are the shape the goal describes -
+# Watcom spending a larger fraction on movement than gcc on the same
+# source - and they are operator units, so unlike lz_generate_resume_ex
+# below they are on the executed path. forward.c is the largest absolute
+# mover in the tree at 14,603 instructions, but its two columns agree to
+# the point, so it is a live-value problem against BOTH compilers rather
+# than the one this criterion looks for.
+#
+# NOT YET A DEFECT, for the reason the paragraph after next gives about
+# the other table: a share is not an execution count. The next step on
+# these three is the same one that table got - break the file down per
+# function, then put a counter in whatever it names.
 #
 # What is true is that both columns sit near half, above the third this
 # header calls ordinary. That is a property of 32-bit x86 with eight
