@@ -454,4 +454,46 @@ for K in arm-c arm-asm; do
     fi
     echo "PASS: ARM tier $K is bit-identical to ref ($ARM_SZ bytes)"
 done
+
+# ---- the ARM column's FIXED tiers -------------------------------------
+# The pins force --fixed off, so the loop above never executes a
+# fixed-point ARM body: recur's lz_gdn1_x4_arm_asm, epi's, sigq's,
+# nrmss's and fwhti's hand-written cells all sit behind the fixed tier,
+# which the float arm turns off. They ARE the shipping default (-fixed
+# all is what every build runs; the float arm exists only for
+# cross-checking), and each owes the scalar reference the same
+# bit-identity the float bodies owe. A fixed kernel change therefore
+# needs this round, not an ad-hoc probe - the recur kernel landed
+# 0d10a89 only after a throwaway unit probe caught what the float-only
+# parity gate could not see. The later --fixed all overrides the pins'
+# --fixed off (the CLI applies flags in order).
+ARM_FX_DUMP="$ARM_WORK/arm.fixed.logits"
+if ! run_arm_dump "$ARM_FX_DUMP" $PINS --fixed all \
+        --tokens "$TOKENS" \
+        >"$WORK/arm.fixed.log" 2>&1; then
+    echo "FAIL: ARM --fixed all run failed:" >&2
+    cat "$WORK/arm.fixed.log" >&2
+    exit 1
+fi
+for K in arm-c arm-asm; do
+    FXDUMP="$ARM_WORK/arm.fixed.$K.logits"
+    if ! run_arm_dump "$FXDUMP" $PINS --fixed all --kernel "$K" \
+            --tokens "$TOKENS" \
+            >"$WORK/arm.fixed.$K.log" 2>&1; then
+        echo "FAIL: ARM --fixed all --kernel $K run failed:" >&2
+        cat "$WORK/arm.fixed.$K.log" >&2
+        exit 1
+    fi
+    if grep -q '\[kernel: requested' "$WORK/arm.fixed.$K.log"; then
+        echo "FAIL: --kernel $K was not honoured by $ARM_BIN:" >&2
+        grep '\[kernel: requested' "$WORK/arm.fixed.$K.log" >&2
+        exit 1
+    fi
+    if ! cmp -s "$ARM_FX_DUMP" "$FXDUMP"; then
+        NDIFF=$(cmp -l "$ARM_FX_DUMP" "$FXDUMP" | wc -l)
+        echo "FAIL: ARM fixed tier $K differs from ref - $NDIFF bytes" >&2
+        exit 1
+    fi
+    echo "PASS: ARM fixed tier $K is bit-identical to ref (fixed, $ARM_SZ bytes)"
+done
 exit 0
