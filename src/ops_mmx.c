@@ -3360,7 +3360,13 @@ extern int32_t lz_dot32_q16_asm(const int16_t *w, const int16_t *x);
     __value [__eax] \
     __modify [8087]
 
-static int32_t dot32_q16_mmx(const int16_t *w, const int16_t *x) {
+/* Not static: src/ops_mmx.h declares this with external linkage (the
+   gcc side defines it in ops_kernel_dot_mmx.h), and a static definition
+   under the same name answered that declaration with a symbol no other
+   TU could reach. Nothing linked against it, so nothing said anything -
+   the same shape dot32_x16_mmx_2 had. build/dot128_q16_probe.c needs
+   the address. */
+int32_t dot32_q16_mmx(const int16_t *w, const int16_t *x) {
     return lz_dot32_q16_asm(w, x);
 }
 
@@ -3450,122 +3456,116 @@ extern void lz_dot32_q16_asm_2(const int16_t *w, const int16_t *xa,
 extern void lz_dot128_q16_asm(const int16_t *w, const int16_t *x, int32_t *out4);
 #pragma aux lz_dot128_q16_asm = \
     ".586" \
+    "pxor      mm0, mm0" \
+    "pxor      mm5, mm5" \
     "pxor      mm6, mm6" \
+    "pxor      mm7, mm7" \
     "movq      mm1, [eax]" \
+    "movq      mm2, [eax+64]" \
+    "movq      mm3, [eax+128]" \
+    "movq      mm4, [eax+192]" \
     "pmaddwd   mm1, [ecx]" \
-    "paddd     mm6, mm1" \
+    "pmaddwd   mm2, [ecx+64]" \
+    "pmaddwd   mm3, [ecx+128]" \
+    "pmaddwd   mm4, [ecx+192]" \
+    "paddd     mm0, mm1" \
+    "paddd     mm5, mm2" \
+    "paddd     mm6, mm3" \
+    "paddd     mm7, mm4" \
     "movq      mm1, [eax+8]" \
+    "movq      mm2, [eax+72]" \
+    "movq      mm3, [eax+136]" \
+    "movq      mm4, [eax+200]" \
     "pmaddwd   mm1, [ecx+8]" \
-    "paddd     mm6, mm1" \
+    "pmaddwd   mm2, [ecx+72]" \
+    "pmaddwd   mm3, [ecx+136]" \
+    "pmaddwd   mm4, [ecx+200]" \
+    "paddd     mm0, mm1" \
+    "paddd     mm5, mm2" \
+    "paddd     mm6, mm3" \
+    "paddd     mm7, mm4" \
     "movq      mm1, [eax+16]" \
+    "movq      mm2, [eax+80]" \
+    "movq      mm3, [eax+144]" \
+    "movq      mm4, [eax+208]" \
     "pmaddwd   mm1, [ecx+16]" \
-    "paddd     mm6, mm1" \
+    "pmaddwd   mm2, [ecx+80]" \
+    "pmaddwd   mm3, [ecx+144]" \
+    "pmaddwd   mm4, [ecx+208]" \
+    "paddd     mm0, mm1" \
+    "paddd     mm5, mm2" \
+    "paddd     mm6, mm3" \
+    "paddd     mm7, mm4" \
     "movq      mm1, [eax+24]" \
+    "movq      mm2, [eax+88]" \
+    "movq      mm3, [eax+152]" \
+    "movq      mm4, [eax+216]" \
     "pmaddwd   mm1, [ecx+24]" \
-    "paddd     mm6, mm1" \
+    "pmaddwd   mm2, [ecx+88]" \
+    "pmaddwd   mm3, [ecx+152]" \
+    "pmaddwd   mm4, [ecx+216]" \
+    "paddd     mm0, mm1" \
+    "paddd     mm5, mm2" \
+    "paddd     mm6, mm3" \
+    "paddd     mm7, mm4" \
     "movq      mm1, [eax+32]" \
+    "movq      mm2, [eax+96]" \
+    "movq      mm3, [eax+160]" \
+    "movq      mm4, [eax+224]" \
     "pmaddwd   mm1, [ecx+32]" \
-    "paddd     mm6, mm1" \
+    "pmaddwd   mm2, [ecx+96]" \
+    "pmaddwd   mm3, [ecx+160]" \
+    "pmaddwd   mm4, [ecx+224]" \
+    "paddd     mm0, mm1" \
+    "paddd     mm5, mm2" \
+    "paddd     mm6, mm3" \
+    "paddd     mm7, mm4" \
     "movq      mm1, [eax+40]" \
+    "movq      mm2, [eax+104]" \
+    "movq      mm3, [eax+168]" \
+    "movq      mm4, [eax+232]" \
     "pmaddwd   mm1, [ecx+40]" \
-    "paddd     mm6, mm1" \
+    "pmaddwd   mm2, [ecx+104]" \
+    "pmaddwd   mm3, [ecx+168]" \
+    "pmaddwd   mm4, [ecx+232]" \
+    "paddd     mm0, mm1" \
+    "paddd     mm5, mm2" \
+    "paddd     mm6, mm3" \
+    "paddd     mm7, mm4" \
     "movq      mm1, [eax+48]" \
+    "movq      mm2, [eax+112]" \
+    "movq      mm3, [eax+176]" \
+    "movq      mm4, [eax+240]" \
     "pmaddwd   mm1, [ecx+48]" \
-    "paddd     mm6, mm1" \
+    "pmaddwd   mm2, [ecx+112]" \
+    "pmaddwd   mm3, [ecx+176]" \
+    "pmaddwd   mm4, [ecx+240]" \
+    "paddd     mm0, mm1" \
+    "paddd     mm5, mm2" \
+    "paddd     mm6, mm3" \
+    "paddd     mm7, mm4" \
     "movq      mm1, [eax+56]" \
+    "movq      mm2, [eax+120]" \
+    "movq      mm3, [eax+184]" \
+    "movq      mm4, [eax+248]" \
     "pmaddwd   mm1, [ecx+56]" \
-    "paddd     mm6, mm1" \
+    "pmaddwd   mm2, [ecx+120]" \
+    "pmaddwd   mm3, [ecx+184]" \
+    "pmaddwd   mm4, [ecx+248]" \
+    "paddd     mm0, mm1" \
+    "paddd     mm5, mm2" \
+    "paddd     mm6, mm3" \
+    "paddd     mm7, mm4" \
+    "movq      mm1, mm0" \
+    "punpckldq mm1, mm5" \
+    "punpckhdq mm0, mm5" \
+    "paddd     mm1, mm0" \
+    "movq      [ebx], mm1" \
     "movq      mm1, mm6" \
-    "psrlq     mm1, 32" \
-    "paddd     mm6, mm1" \
-    "movd      [ebx], mm6" \
-    "pxor      mm6, mm6" \
-    "movq      mm1, [eax+64]" \
-    "pmaddwd   mm1, [ecx+64]" \
-    "paddd     mm6, mm1" \
-    "movq      mm1, [eax+72]" \
-    "pmaddwd   mm1, [ecx+72]" \
-    "paddd     mm6, mm1" \
-    "movq      mm1, [eax+80]" \
-    "pmaddwd   mm1, [ecx+80]" \
-    "paddd     mm6, mm1" \
-    "movq      mm1, [eax+88]" \
-    "pmaddwd   mm1, [ecx+88]" \
-    "paddd     mm6, mm1" \
-    "movq      mm1, [eax+96]" \
-    "pmaddwd   mm1, [ecx+96]" \
-    "paddd     mm6, mm1" \
-    "movq      mm1, [eax+104]" \
-    "pmaddwd   mm1, [ecx+104]" \
-    "paddd     mm6, mm1" \
-    "movq      mm1, [eax+112]" \
-    "pmaddwd   mm1, [ecx+112]" \
-    "paddd     mm6, mm1" \
-    "movq      mm1, [eax+120]" \
-    "pmaddwd   mm1, [ecx+120]" \
-    "paddd     mm6, mm1" \
-    "movq      mm1, mm6" \
-    "psrlq     mm1, 32" \
-    "paddd     mm6, mm1" \
-    "movd      [ebx+4], mm6" \
-    "pxor      mm6, mm6" \
-    "movq      mm1, [eax+128]" \
-    "pmaddwd   mm1, [ecx+128]" \
-    "paddd     mm6, mm1" \
-    "movq      mm1, [eax+136]" \
-    "pmaddwd   mm1, [ecx+136]" \
-    "paddd     mm6, mm1" \
-    "movq      mm1, [eax+144]" \
-    "pmaddwd   mm1, [ecx+144]" \
-    "paddd     mm6, mm1" \
-    "movq      mm1, [eax+152]" \
-    "pmaddwd   mm1, [ecx+152]" \
-    "paddd     mm6, mm1" \
-    "movq      mm1, [eax+160]" \
-    "pmaddwd   mm1, [ecx+160]" \
-    "paddd     mm6, mm1" \
-    "movq      mm1, [eax+168]" \
-    "pmaddwd   mm1, [ecx+168]" \
-    "paddd     mm6, mm1" \
-    "movq      mm1, [eax+176]" \
-    "pmaddwd   mm1, [ecx+176]" \
-    "paddd     mm6, mm1" \
-    "movq      mm1, [eax+184]" \
-    "pmaddwd   mm1, [ecx+184]" \
-    "paddd     mm6, mm1" \
-    "movq      mm1, mm6" \
-    "psrlq     mm1, 32" \
-    "paddd     mm6, mm1" \
-    "movd      [ebx+8], mm6" \
-    "pxor      mm6, mm6" \
-    "movq      mm1, [eax+192]" \
-    "pmaddwd   mm1, [ecx+192]" \
-    "paddd     mm6, mm1" \
-    "movq      mm1, [eax+200]" \
-    "pmaddwd   mm1, [ecx+200]" \
-    "paddd     mm6, mm1" \
-    "movq      mm1, [eax+208]" \
-    "pmaddwd   mm1, [ecx+208]" \
-    "paddd     mm6, mm1" \
-    "movq      mm1, [eax+216]" \
-    "pmaddwd   mm1, [ecx+216]" \
-    "paddd     mm6, mm1" \
-    "movq      mm1, [eax+224]" \
-    "pmaddwd   mm1, [ecx+224]" \
-    "paddd     mm6, mm1" \
-    "movq      mm1, [eax+232]" \
-    "pmaddwd   mm1, [ecx+232]" \
-    "paddd     mm6, mm1" \
-    "movq      mm1, [eax+240]" \
-    "pmaddwd   mm1, [ecx+240]" \
-    "paddd     mm6, mm1" \
-    "movq      mm1, [eax+248]" \
-    "pmaddwd   mm1, [ecx+248]" \
-    "paddd     mm6, mm1" \
-    "movq      mm1, mm6" \
-    "psrlq     mm1, 32" \
-    "paddd     mm6, mm1" \
-    "movd      [ebx+12], mm6" \
+    "punpckldq mm1, mm7" \
+    "punpckhdq mm6, mm7" \
+    "paddd     mm1, mm6" \
+    "movq      [ebx+8], mm1" \
     "emms" \
     __parm [__eax] [__ecx] [__ebx] \
     __modify [8087]

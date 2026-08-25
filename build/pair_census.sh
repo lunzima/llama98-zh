@@ -26,7 +26,8 @@
 #   lz_exp_q20_2_mmx_asm      69%
 #   lz_dot32_t2_asm           75%   <-- since interleaved, now 7%
 #   lz_dot128_t2_asm          72%   <-- since interleaved, now 14%
-#   lz_dot128_x16_asm         70%   <-- since interleaved, now 20%
+#   lz_dot128_x16_asm         70%   <-- since interleaved+folded, now 14%
+#   lz_dot128_q16_asm         71%   <-- since four-streamed, now 6%
 #   lz_lerp_q15_32_mmx_asm    20%   <-- the outlier
 #
 # Four sit near seventy and one sits at twenty, so seventy is NOT "what
@@ -66,9 +67,9 @@
 # issue width for whoever reorders the body.
 #
 # Whole set: 4791 adjacent register pairs, 59% dependent; ops_mmx.c
-# alone is 2404 and 50% after the five edits below.
+# alone is 2396 and 47% after the edits below; ops_sse2.c is 52%.
 #
-# FIVE HAVE BEEN DONE, so the technique is not hypothetical here.
+# SEVEN HAVE BEEN DONE, so the technique is not hypothetical here.
 #
 # lz_dot32_t2_asm was the worst in the file at 75% and is now 7% - the
 # best - by running the low and high nibble of each weight byte side by
@@ -143,10 +144,33 @@
 # GROUP against SSE2 GROUP. That arm is also the only one that covers
 # a FOLD - no per-32 comparison ever reduces four sub-blocks.
 #
+# lz_dot128_q16_asm, 71% -> 6%, and it is the one that shows what the
+# ceiling actually is. Its body was movq/pmaddwd/paddd eight times over,
+# three instructions each reading the last, and only mm1 and mm6 were
+# ever live - six registers idle. The four sub-blocks are four
+# INDEPENDENT streams in memory, so the body now walks chunk i of every
+# block before chunk i+1 of any, each stream into its own accumulator.
+# Zero dependent pairs in the body; the six that remain are the
+# transposing fold. 118 instructions to 112, two 8-byte stores instead
+# of four 4-byte ones.
+#
+# It is also the only one of these that needed NO associativity
+# argument: each accumulator still receives its own block's chunks in
+# their original order. What changed is the order the streams are
+# VISITED, not the order anything is summed.
+#
 # THE REST ARE NOT DONE: lz_exp_q20_2_mmx_asm at 69%, lz_exp_q20_sse2_asm
-# at 74%, and the other SSE2 group and single-token kernels - q61 at 70%
-# and 210 pairs is the largest single block left. Each is a real edit
-# needing its own probe re-run on both toolchains.
+# at 74%, and the q41/q61 group kernels. Each is a real edit needing its
+# own probe re-run on both toolchains.
+#
+# TWO OF THEM HAVE NO SPARE REGISTER, measured rather than assumed:
+# lz_dot128_q61_asm uses all eight mm and lz_dot128_q61_sse2_asm all
+# eight xmm - Q6_1 reconstructs 6-bit values from two planes and holds
+# two mask constants while doing it. Freeing one means spilling a mask
+# to memory and paying a load per use, which trades register pressure
+# for memory traffic in a direction this project's requirements argue
+# against. Not "hard": a different change from the ones above.
+# lz_dot128_q41_asm has mm0 and mm4 free and IS the same edit.
 #
 # THE GENERAL LESSON FROM THE x16 PAIR, since it will come up again:
 # when two kernels in one file share a body and one is the other's
