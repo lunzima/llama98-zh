@@ -67,7 +67,13 @@ static const char *slot_name(int s) {
 
 static int check_table(const char *fmt, const lz_rowfn *tab,
                        int in_dim, int nt) {
-    static unsigned char w4[MAXDIM * MAXNT];
+    /* w4 is the weight the SSE2 kernels now read with movdqa: it must be
+       16-byte aligned, and Watcom's static alignment is 8, so take an
+       aligned view over an over-allocated buffer. The activation xw and
+       the accumulators stay bare - the kernels read xw with movdqu and
+       write acc with movd. */
+    static unsigned char w4buf[MAXDIM * MAXNT + 16];
+    unsigned char *w4 = (unsigned char *)(((size_t)w4buf + 15) & ~(size_t)15);
     static unsigned char w2[MAXDIM * MAXNT];
     static int16_t xw[MAXDIM * MAXNT];
     static int32_t acc_ref[MAXDIM * MAXNT];
