@@ -57,9 +57,9 @@
 # anyone measures --pair and attributes all of it to the unpack.
 #
 # Whole set: 4791 adjacent register pairs, 59% dependent; ops_mmx.c
-# alone is 2404 and 52% after the three edits below.
+# alone is 2404 and 51% after the four edits below.
 #
-# THREE HAVE BEEN DONE, so the technique is not hypothetical here.
+# FOUR HAVE BEEN DONE, so the technique is not hypothetical here.
 #
 # lz_dot32_t2_asm was the worst in the file at 75% and is now 7% - the
 # best - by running the low and high nibble of each weight byte side by
@@ -97,17 +97,27 @@
 # chunk order, and mixing the two would muddy which one a regression
 # came from.
 #
-# THE REST ARE NOT DONE: lz_exp_q20_2_mmx_asm at 69%,
-# lz_dot32_x16_asm at 68%, lz_dot32_x16_asm_2 at 55%, and the SSE2
-# single-token kernels at 65-74%. Each is a real edit needing its own
-# probe re-run on both toolchains.
+# lz_dot32_x16_asm, 68% -> 20%, the same edit again - but it is the
+# REFERENCE build/dot128_x16_probe.c holds the group kernel against, so
+# changing it needed a different oracle rather than a different edit.
+# Two kernels in one TU with the same body, changed the same way, would
+# agree with each other and the probe would say nothing. The probe now
+# also runs lz_dot32_x16_sse2 over every case: it shares no code with
+# either, and cross-tier bit-identity is a requirement in its own
+# right. 32,772 values, 0 mismatches. Mutation (the two pmaddwd
+# operands swapped) fires all three detectors - the group check, the
+# SSE2 check, and the absolute lane sums.
 #
-# lz_dot32_x16_asm HAS A CATCH the others do not: it is the REFERENCE
-# build/dot128_x16_probe.c holds the group kernel against. Changing
-# both in one commit would compare two changed things, and a shared
-# mistake would agree with itself. Change one, verify against the
-# other, then change the second and hold it to the ABSOLUTE lane sums
-# recorded in the probe's own output.
+# THE REST ARE NOT DONE: lz_exp_q20_2_mmx_asm at 69%,
+# lz_dot32_x16_asm_2 at 55%, and the SSE2 single-token kernels at
+# 65-74%. Each is a real edit needing its own probe re-run on both
+# toolchains.
+#
+# THE GENERAL LESSON FROM THE x16 PAIR, since it will come up again:
+# when two kernels in one file share a body and one is the other's
+# reference, the probe's agreement arm goes blind the moment you touch
+# both. Reach for a tier that shares no code before reaching for the
+# edit.
 #
 # Named and measured; what this script is for is that the next person
 # does not re-derive which kernels are worth it.

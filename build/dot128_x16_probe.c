@@ -37,12 +37,21 @@
  *
  *   the tail block: LANE ORDER, on inputs built to make the four sums
  *   distinct and checked to be distinct before being checked correct.
+ *
+ * AND THE SSE2 CROSS-CHECK, which is the only arm not rooted in the MMX
+ * file. The group kernel and the per-32 kernel it is held against live
+ * in the same TU with the same body shape, so a change made to both
+ * would agree with itself and this probe would report nothing.
+ * lz_dot32_x16_sse2 shares no code with either. Bit-identity across
+ * tiers is a requirement in its own right, so this arm is not an extra
+ * - it is what makes the others safe to trust.
  */
 #include <stdio.h>
 #include "lz_int.h"
 
 void lz_dot128_x16_mmx_w(const int8_t *w, const int16_t *x, int32_t *out4);
 int32_t dot32_x16_mmx(const int8_t *w, const int16_t *x);
+int32_t lz_dot32_x16_sse2(const int8_t *w, const int16_t *x);
 
 static unsigned long rs = 1145141919UL;
 static int nextv(void) {
@@ -77,6 +86,23 @@ int main(void) {
                 if (bad < 6)
                     printf("  pass %d lane %d: want %ld got %ld\n",
                            pass, b, (long)want[b], (long)got[b]);
+                bad++;
+            }
+        }
+
+        /* THE MMX PER-32 KERNEL AGAINST THE SSE2 ONE, which is the only
+           check here that does not depend on the MMX file being right.
+           Everything above holds the group kernel to the per-32 kernel,
+           and the two live in the same TU with the same body shape - a
+           change made to both would agree with itself. SSE2 shares no
+           code with either, and the requirement is bit-identity across
+           tiers anyway, so this is the oracle rather than a bonus. */
+        for (b = 0; b < 4; b++, n++) {
+            int32_t s2 = lz_dot32_x16_sse2(w + b * 32, x + b * 32);
+            if (s2 != want[b]) {
+                if (bad < 6)
+                    printf("  pass %d block %d: mmx %ld sse2 %ld\n",
+                           pass, b, (long)want[b], (long)s2);
                 bad++;
             }
         }
