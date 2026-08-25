@@ -200,6 +200,15 @@
 # mm6 is unchanged, so it is bit-identical; the probe holds it against
 # the already-verified group kernel rather than against itself.
 #
+# lz_dot32_q16_asm, 71% -> 15%, the group twin's four-stream trick but
+# with two rounds instead of eight: Q16_0 has no nibble split, so each
+# of the eight MACs is already independent and only the single mm6
+# accumulator serialised them. Four accumulators (mm0/mm5/mm6/mm7) over
+# four 8-element streams, folded at the end with three paddd plus the
+# horizontal one. Integer addition is associative mod 2^32, so the split
+# is bit-identical; the probe holds it against the SSE2 per-32 oracle
+# directly (dot32_q16_sse2a), 81924 values, 0 mismatches.
+#
 # Named and measured; what this script is for is that the next person
 # does not re-derive which kernels are worth it.
 #

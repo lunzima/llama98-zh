@@ -3359,35 +3359,41 @@ void row_q61_mmx_asm(int32_t *acc32, const void *w4, const void *w2v,
 extern int32_t lz_dot32_q16_asm(const int16_t *w, const int16_t *x);
 #pragma aux lz_dot32_q16_asm = \
     ".586" \
+    "pxor      mm0, mm0" \
+    "pxor      mm5, mm5" \
     "pxor      mm6, mm6" \
+    "pxor      mm7, mm7" \
     "movq      mm1, [eax]" \
+    "movq      mm2, [eax+16]" \
+    "movq      mm3, [eax+32]" \
+    "movq      mm4, [eax+48]" \
     "pmaddwd   mm1, [ecx]" \
-    "paddd     mm6, mm1" \
+    "pmaddwd   mm2, [ecx+16]" \
+    "pmaddwd   mm3, [ecx+32]" \
+    "pmaddwd   mm4, [ecx+48]" \
+    "paddd     mm0, mm1" \
+    "paddd     mm5, mm2" \
+    "paddd     mm6, mm3" \
+    "paddd     mm7, mm4" \
     "movq      mm1, [eax+8]" \
+    "movq      mm2, [eax+24]" \
+    "movq      mm3, [eax+40]" \
+    "movq      mm4, [eax+56]" \
     "pmaddwd   mm1, [ecx+8]" \
-    "paddd     mm6, mm1" \
-    "movq      mm1, [eax+16]" \
-    "pmaddwd   mm1, [ecx+16]" \
-    "paddd     mm6, mm1" \
-    "movq      mm1, [eax+24]" \
-    "pmaddwd   mm1, [ecx+24]" \
-    "paddd     mm6, mm1" \
-    "movq      mm1, [eax+32]" \
-    "pmaddwd   mm1, [ecx+32]" \
-    "paddd     mm6, mm1" \
-    "movq      mm1, [eax+40]" \
-    "pmaddwd   mm1, [ecx+40]" \
-    "paddd     mm6, mm1" \
-    "movq      mm1, [eax+48]" \
-    "pmaddwd   mm1, [ecx+48]" \
-    "paddd     mm6, mm1" \
-    "movq      mm1, [eax+56]" \
-    "pmaddwd   mm1, [ecx+56]" \
-    "paddd     mm6, mm1" \
-    "movq      mm1, mm6" \
+    "pmaddwd   mm2, [ecx+24]" \
+    "pmaddwd   mm3, [ecx+40]" \
+    "pmaddwd   mm4, [ecx+56]" \
+    "paddd     mm0, mm1" \
+    "paddd     mm5, mm2" \
+    "paddd     mm6, mm3" \
+    "paddd     mm7, mm4" \
+    "paddd     mm0, mm5" \
+    "paddd     mm6, mm7" \
+    "paddd     mm0, mm6" \
+    "movq      mm1, mm0" \
     "psrlq     mm1, 32" \
-    "paddd     mm6, mm1" \
-    "movd      eax, mm6" \
+    "paddd     mm0, mm1" \
+    "movd      eax, mm0" \
     __parm [__eax] [__ecx] \
     __value [__eax] \
     __modify [8087]
