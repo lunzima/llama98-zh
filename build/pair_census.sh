@@ -179,11 +179,12 @@
 # both. Reach for a tier that shares no code before reaching for the
 # edit.
 #
-# lz_dot128_q41_asm, 74% -> 26%. mm0 and mm4 were free, so both nibble
-# planes are extracted up front - pand for the low, psrlw+pand for the
-# high - and each plane's lo and hi widening halves then run side by
-# side on mm2/mm0. 202 instructions either way, and mm6 receives the
-# four products in the order it received them before.
+# lz_dot128_q41_sse2_asm, 65% -> 47%, instruction count unchanged at 137.
+# The same interleave as the MMX twin: xmm5 was free, so the two nibble
+# planes of each chunk run their lo halves side by side and their hi
+# halves side by side. Four movdqu+pmaddwd pairs become two per half,
+# so the instruction count stays the same - each half's second pmaddwd
+# takes its own movdqu rather than sharing one.
 #
 # THE SAME REFERENCE TRAP AS x16, hit again: lz_dot32_q41_asm's body is
 # lz_dot128_q41_asm's first block, character for character, and the
