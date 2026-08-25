@@ -11271,6 +11271,26 @@ static int selftest(HINSTANCE inst, const char *path) {
         memset(keys, 0, sizeof keys);
         SetKeyboardState(keys);   /* known baseline: nothing held */
 
+        /* AND VERIFY IT TOOK. SetKeyboardState writes the CALLING
+           thread's table, and Windows resynchronises that table with
+           whichever thread owns the foreground input. A console window
+           appearing while this runs - a compiler, in `make check` -
+           can put Ctrl or Shift back before input_send_key reads it,
+           and then plain Enter correctly does not send. The check
+           reddened exactly once, inside make check, immediately after
+           the recipe that builds this binary, and never in four
+           standalone runs.
+           A disturbed instrument is not a failing subject, so say
+           which one it is rather than reporting the wrong one. */
+        if ((GetKeyState(VK_CONTROL) & 0x8000) ||
+            (GetKeyState(VK_SHIFT) & 0x8000) ||
+            (GetKeyState(VK_MENU) & 0x8000)) {
+            st_skip(f, "enter: the modifier keys",
+                    "SetKeyboardState did not hold - another thread owns "
+                    "the foreground input, so this cannot tell a swallowed "
+                    "Enter from a modified one");
+        } else {
+
         /* Plain Enter still sends - unchanged behaviour, re-proven here
            because input_send_key replaces the inline check this used
            to be, and WM_COMMAND is observed via PeekMessage rather than
@@ -11284,6 +11304,7 @@ static int selftest(HINSTANCE inst, const char *path) {
                  LOWORD(msg.wParam) == ID_SEND;
         st_check(f, posted, "enter: plain Enter still posts Send");
         checks++;
+        }
 
         /* Ctrl+Enter does not send - the ORIGINAL rule, re-proven with
            the same instrument as Shift+Enter below so a regression in
