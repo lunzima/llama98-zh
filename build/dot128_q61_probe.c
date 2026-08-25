@@ -36,6 +36,12 @@ void lz_dot128_q61_sse2_w(const unsigned char *w4, const unsigned char *w2,
                           const int16_t *x, int32_t *out4);
 int32_t dot32_q61_sse2a(const unsigned char *w4, const unsigned char *w2,
                         const int16_t *x);
+void dot32_q61_mmx_2(const unsigned char *w4, const unsigned char *w2,
+                     const int16_t *xa, const int16_t *xb,
+                     int32_t *oa, int32_t *ob);
+void dot32_q61_sse2a_2(const unsigned char *w4, const unsigned char *w2,
+                       const int16_t *xa, const int16_t *xb,
+                       int32_t *oa, int32_t *ob);
 
 static unsigned long rs = 1145141919UL;
 static int nextv(void) {
@@ -89,6 +95,32 @@ int main(void) {
                 if (bad < 6)
                     printf("  pass %d block %d: per-32 tiers differ\n",
                            pass, b);
+                bad++;
+            }
+        }
+
+        /* THE PAIRED KERNELS, both tiers. One weight block against two
+           deliberately non-adjacent activation vectors. */
+        for (b = 0; b < 2; b++, n += 4) {
+            const unsigned char *p4 = w4 + b * 16;
+            const unsigned char *p2 = w2 + b * 8;
+            const int16_t *xa = x + b * 32;
+            const int16_t *xb = x + b * 32 + 64;
+            int32_t wb = dot32_q61_mmx(p4, p2, xb);
+            int32_t ma = 0, mb = 0, sa = 0, sb = 0;
+            dot32_q61_mmx_2(p4, p2, xa, xb, &ma, &mb);
+            dot32_q61_sse2a_2(p4, p2, xa, xb, &sa, &sb);
+            if (ma != want[b] || mb != wb) {
+                if (bad < 6)
+                    printf("  pass %d pair %d mmx: got %ld,%ld want %ld,%ld\n",
+                           pass, b, (long)ma, (long)mb,
+                           (long)want[b], (long)wb);
+                bad++;
+            }
+            if (sa != ma || sb != mb) {
+                if (bad < 6)
+                    printf("  pass %d pair %d: mmx %ld,%ld sse2 %ld,%ld\n",
+                           pass, b, (long)ma, (long)mb, (long)sa, (long)sb);
                 bad++;
             }
         }

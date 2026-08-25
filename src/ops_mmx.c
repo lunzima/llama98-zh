@@ -2992,6 +2992,14 @@ extern void lz_dot32_q61_asm_2(const unsigned char *w4, const unsigned char *w2,
     __parm [__eax] [__edx] [__ebx] [__ecx] [__esi] [__edi] \
     __modify [8087]
 
+/* The paired kernel's address. Q6_1's was the last dot format left
+   with a _2 form nothing could call. */
+void dot32_q61_mmx_2(const unsigned char *w4, const unsigned char *w2,
+                     const int16_t *xa, const int16_t *xb,
+                     int32_t *oa, int32_t *ob) {
+    lz_dot32_q61_asm_2(w4, w2, xa, xb, oa, ob);
+}
+
 extern void lz_dot128_q61_asm(const unsigned char *w4, const unsigned char *w2,
                 const int16_t *x, int32_t *out4);
 #pragma aux lz_dot128_q61_asm = \

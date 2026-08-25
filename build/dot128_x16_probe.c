@@ -55,6 +55,8 @@ int32_t lz_dot32_x16_sse2(const int8_t *w, const int16_t *x);
 void dot32_x16_mmx_2(const int8_t *w, const int16_t *xa, const int16_t *xb,
                      int32_t *oa, int32_t *ob);
 void lz_dot128_x16_sse2_w(const int8_t *w, const int16_t *x, int32_t *out4);
+void dot32_x16_sse2a_2(const int8_t *w, const int16_t *xa, const int16_t *xb,
+                       int32_t *oa, int32_t *ob);
 
 static unsigned long rs = 1145141919UL;
 static int nextv(void) {
@@ -152,6 +154,20 @@ int main(void) {
                            pass, b, (long)pa, (long)pb,
                            (long)wa, (long)wb);
                 bad++;
+            }
+            /* The SSE2 twin of the same paired kernel, which had no
+               address until this round either. */
+            {
+                int32_t s2a = 0, s2b = 0;
+                dot32_x16_sse2a_2(wp, xa, xb, &s2a, &s2b);
+                n += 2;
+                if (s2a != pa || s2b != pb) {
+                    if (bad < 6)
+                        printf("  pass %d pair %d: mmx %ld,%ld sse2 %ld,%ld\n",
+                               pass, b, (long)pa, (long)pb,
+                               (long)s2a, (long)s2b);
+                    bad++;
+                }
             }
             /* If the two sums are equal the case cannot tell the two
                outputs apart, so count them: an arm made entirely of

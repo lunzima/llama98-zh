@@ -41,13 +41,12 @@ set -u
 cd "$(dirname "$0")/.."
 
 FILES="src/ops_mmx.c src/ops_sse2.c src/ops_mmx_sse.c"
-FLOOR=50
+FLOOR=53
 
-# NINE ARE STILL UNREACHABLE:
+# SIX ARE STILL UNREACHABLE, and none of them is a dot product:
 #
-#   ops_mmx.c       wsum_pair, p2_split32, dot32_q61_2
-#   ops_sse2.c      p2_mul32, p2_split32, i32f_acc32, dot32_x16_2,
-#                   dot32_q61_2
+#   ops_mmx.c       wsum_pair, p2_split32
+#   ops_sse2.c      p2_mul32, p2_split32, i32f_acc32
 #   ops_mmx_sse.c   p2_split32
 #
 # THIS LIST SAID FOURTEEN AN HOUR AGO, and five of those were the
@@ -55,12 +54,16 @@ FLOOR=50
 # test below. A wrong list is worse than a shorter true one: each name
 # on it is a claim that somebody should go add a wrapper.
 #
-# EVERY DOT FAMILY NOW HAS A PROBE - Q8_0, Q4_1, Q6_1, Q16_0 and T2 -
-# and each holds its MMX tier against its SSE2 tier. What is left is
-# two _2 forms and kernels that are NOT dot products: p2_split32,
-# p2_mul32, i32f_acc32, wsum_pair. Those need their own oracles rather
-# than a sixth copy of the dot probe, which is why they are last rather
-# than because they matter less.
+# EVERY DOT KERNEL IS NOW REACHABLE AND PROBED - Q8_0, Q4_1, Q6_1,
+# Q16_0 and T2, in group, per-32 and paired form, each holding its MMX
+# tier against its SSE2 tier. Not one of the paired forms could be
+# called from outside its own file before this round.
+#
+# WHAT IS LEFT IS NOT A DOT PRODUCT: p2_split32 (three tiers),
+# p2_mul32, i32f_acc32, wsum_pair. Each needs its own oracle rather
+# than a sixth copy of the dot probe - a split has no single return
+# value to compare, an accumulate is float-valued, and wsum_pair reads
+# two rows. That is why they are last, not because they matter less.
 #
 # THE _2 FORMS DOMINATE what is left, and that is a finding rather than
 # a coincidence: the paired kernels were added later, each beside a

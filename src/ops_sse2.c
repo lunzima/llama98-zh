@@ -962,6 +962,12 @@ extern void lz_dot32_x16_sse2_asm_2(const int8_t *w, const int16_t *xa,
     __parm [__eax] [__edx] [__ebx] [__ecx] [__esi] \
     __modify [8087]
 
+/* The paired kernel's address, for the reason its MMX twin has one. */
+void dot32_x16_sse2a_2(const int8_t *w, const int16_t *xa,
+                       const int16_t *xb, int32_t *oa, int32_t *ob) {
+    lz_dot32_x16_sse2_asm_2(w, xa, xb, oa, ob);
+}
+
 /* Compiled in alongside the MMX tier; the runtime picks by CPUID (see
    lz_kernel_select). One binary must run on both PII (MMX only) and
    T42 (SSE2). */
@@ -1835,6 +1841,15 @@ extern void lz_dot32_q61_sse2_asm_2(const unsigned char *w4,
     "movd      [edi], xmm5" \
     __parm [__eax] [__edx] [__ebx] [__ecx] [__esi] [__edi] \
     __modify [8087]
+
+/* The paired kernel's address. With this one every _2 form in the five
+   dot formats can be called from a probe; before this round none of
+   them could. */
+void dot32_q61_sse2a_2(const unsigned char *w4, const unsigned char *w2,
+                       const int16_t *xa, const int16_t *xb,
+                       int32_t *oa, int32_t *ob) {
+    lz_dot32_q61_sse2_asm_2(w4, w2, xa, xb, oa, ob);
+}
 
 /* ---- Q6_1 32/128-element dot products and row kernel, SSE2 tier -
    in this TU. Both this format's SSE2 kernels are genuine %xmm-only
