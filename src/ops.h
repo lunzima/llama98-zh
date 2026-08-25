@@ -41,6 +41,22 @@
      the rows sum to the total exactly once, and a site's row means the
      same thing as every other site's.
 
+   Per-token census, kmr20 133M, fixed tiers, 8 tokens, seed 1145141919:
+
+     recurrence write    159936  40.1%
+     norms               106774  26.8%
+     dequant epilogue     59904  15.0%
+     quantize             47328  11.9%
+     exp                  14090   3.5%
+     attention wsum        7136   1.8%
+     attention scoring     1440   0.4%
+     rsqrt                 1103   0.3%
+     sigmoid                448   0.1%
+     softmax                232   0.1%
+     softplus            (not run)
+     conv1d                  0   0.0%
+     total              398390
+
    A divide counts as one, which understates it on every target this
    engine cares about. Convert (int->float) counts as one, because on a
    soft-float target it is a call like any other. */
