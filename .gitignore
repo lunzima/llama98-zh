@@ -89,6 +89,7 @@
 !/build/pair_census.sh
 !/build/gcc_warning_gate.sh
 !/build/gui_selftest_gate.sh
+!/build/kernel_reach_gate.sh
 !/build/t2_probe_stubs.c
 !/build/dot128_x16_probe.c
 !/build/dot128_q16_probe.c
