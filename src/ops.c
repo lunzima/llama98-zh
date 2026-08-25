@@ -4248,8 +4248,13 @@ static const char km_why_recur_arma[] =
    pshufw, pextrw and movntq on %mm, none of which is a multiply and
    none of which is a 64-bit add.
 
-   THE BODY EXISTS AND WAS MEASURED, which is why the cell says todo
-   rather than impossible. The intrinsics version passes the oracle's
+   A BODY WAS WRITTEN AND MEASURED, which is why the cell says todo
+   rather than impossible - and it is NOT IN THIS TREE. It was built in
+   a scratch copy, run against the oracle, and discarded; grep for an
+   MMX epi kernel here and there is none. "The body exists" is what this
+   said, and a reader taking it at its word would go looking for a file
+   to enable. The measurements below stand; the code has to be written
+   again. The intrinsics version passes the oracle's
    20106 cases and costs 19 instructions an element on the 32-bit i486
    build against the scalar imul loop's 8: the int32 lane bound forces
    a spill every two elements and gcc stacks the accumulators on top of
