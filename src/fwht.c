@@ -16,7 +16,19 @@
 #include "ops_sse2.h"             /* LZ_FWHT_SSE2_EXTERN, lz_fwht_stage_sse2 */
 #include "ops_quant.h"            /* lz_cpu_has_mmx */
 
-/* Sylvester recursion, in place, mirroring lz_fwht (float) in ops.c.
+/* ONE OPERATOR, TWO FILES, AND THIS ONE IS NAMED FOR IT. lz_fwht, the
+   float transform, lives in ops.c with its own SSE1 tier; the int32
+   twin below lives here with its MMX, SSE2 and ARM tiers. The split is
+   by dtype, not by operator, and nothing about the transform asks for
+   it - the two even cross-reference each other's guard shape. Anyone
+   changing the butterfly has to change it in two files, and the census
+   that ranks operator files sees one operator as two.
+   Not moved here yet: lz_fwht is called from forward.c in two places
+   and moving it across a translation unit needs a byte-identity run on
+   both toolchains, which is a commit of its own rather than a hunk in
+   someone else's.
+
+   Sylvester recursion, in place, mirroring lz_fwht (float) in ops.c.
    Every stage is a butterfly of one add and one sub - no multiply,
    sqrt or divide in the transform body, so it is exact in int32 up to
    the additions themselves. The caller folds the 1/sqrt(n) energy
