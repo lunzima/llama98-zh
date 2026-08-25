@@ -241,6 +241,20 @@
 # it against lz_exp_fixed's ORIGINAL association, 1,282,566 values,
 # 0 mismatches under Watcom.
 #
+# lz_wsum_pair_sse2_asm, 68% -> 8%, three independent changes in one body.
+# The attention pair MAC has four groups; each group sign-extends rowA
+# (xmm2) and rowB (xmm3) in two serial chains that never touch, then folds
+# the low and high words into two products accumulated at two disjoint
+# memory offsets. Interleaving the two sign-extension chains (movdqa,
+# punpcklbw/punpckhbw, psraw alternating xmm2/xmm3), moving the high
+# punpckhwd up beside the low punpcklwd, and giving the second product its
+# own accumulator (xmm6 was free) breaks every chain: the two rows, the
+# two products, and the two accumulate-lanes all retire side by side. Each
+# lane still reaches its own store in its original order and the two
+# accumulator offsets are disjoint, so it is bit-identical;
+# build/wsum_pair_probe.c holds it against the MMX tier and the declared C
+# contract, 524288 values, 0 mismatches under Watcom.
+#
 # Named and measured; what this script is for is that the next person
 # does not re-derive which kernels are worth it.
 #
