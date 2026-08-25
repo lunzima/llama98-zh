@@ -21,6 +21,26 @@
 # cross-compiler bit-identity and has never been measured against a
 # target with no FPU at all.
 #
+# THIS SCRIPT BUILDS AND LINKS. NOTHING RUNS WHAT IT PRODUCES, and the
+# distinction matters because ci.sh's stage around it prints PASS and
+# calls this "the fourth toolchain shape", which reads like the fourth
+# member of the eight-way precision comparison the project requires. It
+# is not: it is a link check. No logits from this binary have ever been
+# compared with anything.
+#
+# WHAT IS COVERED, so the gap is the right size rather than the whole
+# word "x87": Watcom's x87 arithmetic IS compared numerically -
+# kernel_isa_identity_gate's xcc row runs "gcc ref == watcom ref (SSE
+# scalar vs x87)" on both fixtures. So x87 as a FLOAT UNIT has a parity
+# check. What has none is gcc's own x87 CODEGEN at -m32, which is a
+# different instruction selection from either of those and the only
+# reason this fourth shape exists.
+#
+# Closing it needs the binary run under a 32-bit loader and its
+# --dump-all-logits compared against the x86-64 build's, which needs
+# -m32 multilib in WSL; without it the stage SKIPs and so would the
+# comparison. The SKIP is honest. The PASS is what overstates.
+#
 # THE FLOOR IS -march=i586, MATCHING THAT FAMILY. Socket 7 is P5;
 # CMOV/FCOMI/FCMOV are i686 (Pentium Pro) additions, and none of Pentium
 # MMX/K6/Cyrix 6x86/WinChip have them - #UD on every machine this build
