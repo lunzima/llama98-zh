@@ -41,18 +41,25 @@ set -u
 cd "$(dirname "$0")/.."
 
 FILES="src/ops_mmx.c src/ops_sse2.c src/ops_mmx_sse.c"
-FLOOR=53
+FLOOR=54
 
-# SIX ARE STILL UNREACHABLE, and none of them is a dot product:
+# FIVE ARE STILL UNREACHABLE, and none of them is a dot product:
 #
 #   ops_mmx.c       wsum_pair, p2_split32
-#   ops_sse2.c      p2_mul32, p2_split32, i32f_acc32
+#   ops_sse2.c      p2_mul32, p2_split32
 #   ops_mmx_sse.c   p2_split32
 #
-# THIS LIST SAID FOURTEEN AN HOUR AGO, and five of those were the
-# gate's fault rather than the code's - see the note on the signature
-# test below. A wrong list is worse than a shorter true one: each name
-# on it is a claim that somebody should go add a wrapper.
+# THIS LIST HAS BEEN WRONG TWICE, both times too long, both times the
+# gate's fault rather than the code's. It said fourteen while a line
+# count stood in for "thin wrapper", and six while nparams() insisted
+# on the word `extern` that half these prototypes do not carry. Six
+# names were on it that had working wrappers all along.
+#
+# A WRONG LIST IS WORSE THAN A SHORTER TRUE ONE: every name on it is a
+# claim that somebody should go write code that already exists. Both
+# faults had the same shape - the scan could not parse something and
+# reported that as a fact about the code - so a prototype it cannot
+# find is now a FAILURE of the gate rather than a silent miss.
 #
 # EVERY DOT KERNEL IS NOW REACHABLE AND PROBED - Q8_0, Q4_1, Q6_1,
 # Q16_0 and T2, in group, per-32 and paired form, each holding its MMX
@@ -176,17 +183,26 @@ def plist(text):
     return cnt
 
 def nparams(src, name):
-    m = re.search(r'\bextern\b[^;]*?\b' + re.escape(name) + r'\s*\(',
-                  src, re.S)
+    """Parameter count from the kernel's prototype.
+
+    NOT anchored on `extern`. Some of these prototypes carry it and
+    some do not - lz_i32f_acc32_sse2_asm's does not - and requiring it
+    returned -1, which then failed the match against every candidate
+    and reported a kernel with a perfectly good wrapper as unreachable.
+    Returning -1 at all is the deeper fault: a parse failure must not
+    be able to look like a finding, so the caller treats -1 as an error
+    in this scan rather than as a fact about the code."""
+    m = re.search(r'\b' + re.escape(name) + r'\s*\([^;{]*\)\s*;', src, re.S)
     if not m:
         return -1
-    return plist(src[m.end() - 1:])
+    return plist(src[m.start() + len(name):])
 
 def nparams_at(lines, a):
     return plist('\n'.join(lines[a:a + 6]))
 
 total = reach = 0
 bad = []
+unparsed = []
 for path in sys.argv[1:]:
     try:
         src = open(path, encoding='utf-8', errors='replace').read()
@@ -211,6 +227,9 @@ for path in sys.argv[1:]:
         # because it handles the odd tail in C. Length is a proxy for
         # the wrong thing.
         want_np = nparams(src, name)
+        if want_np < 0:
+            unparsed.append(path + ':' + name)
+            continue
         hit = False
         for a, b in spans:
             if abs(nparams_at(lines, a) - want_np) > 1:
@@ -228,6 +247,8 @@ print('TOTAL %d' % total)
 print('REACH %d' % reach)
 for b in bad:
     print('MISS %s' % b)
+for u in unparsed:
+    print('UNPARSED %s' % u)
 
 # SELFTEST, run by the SAME code above rather than a copy of it. The
 # first version of this control was a hand-written duplicate of the
@@ -268,6 +289,7 @@ PY
 TOTAL=$(printf '%s\n' "$OUT" | sed -n 's/^TOTAL //p')
 REACH=$(printf '%s\n' "$OUT" | sed -n 's/^REACH //p')
 MISS=$(printf '%s\n' "$OUT" | sed -n 's/^MISS //p')
+UNPARSED=$(printf '%s\n' "$OUT" | sed -n 's/^UNPARSED //p')
 
 if [ -z "$TOTAL" ] || [ -z "$REACH" ]; then
     echo "kernel_reach_gate: FAIL - the scan produced no counts, so its"
@@ -282,6 +304,19 @@ if [ "$TOTAL" -lt 40 ]; then
 fi
 
 BAD=0
+
+# A KERNEL WHOSE PROTOTYPE THIS SCAN CANNOT PARSE IS AN ERROR IN THE
+# SCAN, not a fact about the code. Reporting it as unreachable is how
+# five kernels ended up on a list telling somebody to go add wrappers
+# they already had.
+if [ -n "$UNPARSED" ]; then
+    echo "kernel_reach_gate: FAIL - no prototype found for:"
+    printf '    %s\n' $UNPARSED
+    echo "  The scan cannot judge these, and a kernel it cannot judge"
+    echo "  must not be counted either way."
+    BAD=1
+fi
+
 if [ "$REACH" -lt "$FLOOR" ]; then
     echo "kernel_reach_gate: $REACH of $TOTAL kernels reachable, floor is"
     echo "  $FLOOR. A kernel with no non-static caller in its own file"
