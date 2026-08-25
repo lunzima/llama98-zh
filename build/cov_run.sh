@@ -15,9 +15,13 @@
 #
 # Sourced, not executed:
 #     . build/cov_run.sh
-#     cov_run "$W" "$MODEL" 8   || exit 2
+#     cov_run "$W" "$MODEL" 8 "$EXTRA_CFLAGS"   || exit 2
 # leaves $W/*.gcov, and prints its own SKIP line before returning
-# non-zero.
+# non-zero. The fourth argument is for measuring a configuration the
+# shipping one compiles out: LZ_FCX bills nothing without
+# -DLZ_F32COUNT=1, so its call sites carry no code and gcov reports "-"
+# for every one of them, which reads as eight dead sites rather than as
+# a build that cannot answer.
 #
 # THE BUILD IS -O2, NOT -O0. A coverage build at -O0 counts control flow
 # the optimiser deletes. --coverage keeps its arcs through -O2, so the
@@ -34,6 +38,7 @@ cov_run() {
     cov_w=$1
     cov_model=$2
     cov_n=${3:-8}
+    cov_extra=${4:-}
 
     command -v gcov >/dev/null 2>&1 || { echo "cov_run: SKIP - no gcov"; return 2; }
     command -v gcc  >/dev/null 2>&1 || { echo "cov_run: SKIP - no gcc";  return 2; }
@@ -46,7 +51,7 @@ cov_run() {
     for cov_f in $cov_com; do cov_src="$cov_src common/$cov_f.c"; done
 
     gcc -O2 -march=x86-64 -std=c99 -Isrc -Icommon -ffp-contract=off \
-        -DLZ_MMX_TU=1 -DLZ_SSE2_TU=1 --coverage \
+        -DLZ_MMX_TU=1 -DLZ_SSE2_TU=1 $cov_extra --coverage \
         -o "$cov_w/cov.exe" $cov_src src/cli_attr.c src/cli_main.c \
         build/native/ops_mmx.o build/native/ops_mmx_sse.o \
         build/native/ops_sse2.o \

@@ -59,7 +59,25 @@ enum {
        neither the int16 head nor the float body, so this row reads the
        same whichever pass-1 arm runs and the axis's census marginal
        under-reports its float arm by more than the row itself. Measured
-       counts for both arms are in .prof/census_audit. */
+       counts for both arms are in .prof/census_audit.
+
+       THE LARGEST ROW IN THE CENSUS, and one row over eight billing
+       sites in ops_gdn.c, so the row alone says where to look only if
+       there is one site. There is not. Split by running the coverage
+       build with -DLZ_F32COUNT=1 (build/cov_run.sh takes it as its
+       fourth argument) and multiplying each site's gcov execution count
+       by the formula written at it. On kmr20, ten tokens, every tier
+       resolved fixed - kd 64, vd 64, ng 2, gvec on - the shares are:
+
+         38.4%  the pass-2 fixed entry (mul kd*3, add vd*2+kd, cvt vd*4)
+         23.1%  the p2 group scale (mul ng, add 2*ng), 49,152 executions
+         19.2%  the gt==1 delta arm (mul vd*2, add vd*2, cvt vd)
+         15.4%  the pass-1 tap (add kd*2)
+          3.8%  the delta quantize's magic add (add 32)
+
+       The five reconstruct the row exactly, which is the check that the
+       attribution is of this row and not of a similar one. Read the
+       shares, not the absolute counts: they are per model geometry. */
     LZ_FC_RECUR,
     /* lz_quantize_q8 and its int/int64/silu twins: the amax*(1/127) mul,
        127/amax div and the per-element round, at every one of their many
