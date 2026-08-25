@@ -1,9 +1,11 @@
 #include "fwht.h"
 #include "ops_arm.h"
-#if defined(LZ_ARM_ASM_EXTERN)
-#include "ops.h"                  /* LZ_KERNEL_ARM_ASM */
+/* Unconditional, for the same reason the three below are: both
+   transforms in this file dispatch on g_kernel, so a guard that hides
+   these on x86 hides the dispatch with them. */
+#include "ops.h"                  /* LZ_KERNEL_*, lz_fwht's prototype */
 #include "ops_kernel_shared.h"    /* g_kernel */
-#endif /* LZ_ARM_ASM_EXTERN */
+#include "ops_sse.h"              /* LZ_FWHT_F32_SSE_EXTERN, lz_fwht_stage_f32_sse */
 
 /* OUTSIDE the ARM guard above, deliberately: these three are what the
    x86 MMX stage kernel needs, and putting them inside it is exactly the
@@ -125,6 +127,92 @@ void lz_fwht_i32(int32_t *restrict y, const int32_t *restrict x, int n) {
                 int32_t v = tmp[i + j + len];
                 tmp[i + j]       = u + v;
                 tmp[i + j + len] = u - v;
+            }
+        }
+    }
+}
+
+/* The float transform, moved here from ops.c so one operator is one
+   file. Same Sylvester recursion as the int32 twin above, same
+   butterfly, and both dispatch on g_kernel - the split was by dtype and
+   nothing about the transform asked for it. Its ISA floor is unchanged
+   by the move: ops.c and this file are both compiled at the target's
+   ordinary floor, neither takes HIGH_CPU_FLAGS, which was measured
+   rather than read off the Makefile's comment. */
+void lz_fwht(float *v, int n) {
+    /* Sylvester recursion, in place. Every stage is a butterfly of one
+       add and one sub, so the whole transform is exact in binary float
+       up to the additions themselves - no constants enter, which is why
+       this is bit-identical between wcc386 and gcc without any of the
+       care the multiply-by-reciprocal paths demand. */
+    int len, i, j;
+#if defined(LZ_FWHT_F32_SSE_EXTERN)
+    /* SSE1 from the third stage on. The butterfly at stride len pairs
+       v[i+j] with v[i+j+len], so for len >= 4 both halves are whole
+       16-byte vectors - one load each, addps, subps, two stores, no
+       shuffle. len 1 and 2 stay in the loop below, where an unpack per
+       butterfly would cost more than it saves.
+
+       Selected by tier, not by CPUID: --kernel ref must reach the C or
+       the arm this is compared against would be this. Same guard shape
+       the int32 twin above carries, and the same reason. */
+    if ((g_kernel == LZ_KERNEL_SSE2 || g_kernel == LZ_KERNEL_SSE) &&
+        n >= 8 && (n & 7) == 0) {
+        for (len = 1; len < 4 && len < n; len <<= 1) {
+            for (i = 0; i < n; i += (len << 1)) {
+                for (j = 0; j < len; j++) {
+                    float a = v[i + j];
+                    float b = v[i + j + len];
+                    v[i + j]       = a + b;
+                    v[i + j + len] = a - b;
+                }
+            }
+        }
+        for (len = 4; len < n; len <<= 1) lz_fwht_stage_f32_sse(v, n, len);
+        return;
+    }
+#endif /* LZ_FWHT_F32_SSE_EXTERN */
+#if defined(LZ_ARM_PRIM_ASM)
+    /* ARMv5TE has no FPU, so each butterfly below is `bl __addsf3` plus
+       `bl __subsf3` - two full soft-float adders over one pair of
+       operands. lz_faddsub_arm_asm does the unpack and the alignment
+       once and declines the cases it cannot prove identical, which the
+       C tail then answers. 95.0 instructions a butterfly against 112.7
+       (.prof/arm_chain_count.sh modes 23 and 22).
+
+       Selected by tier, not by CPU: ref and arm-c must reach the loop
+       below or the arm this is compared against would be this one. */
+    if (g_kernel == LZ_KERNEL_ARM_ASM) {
+        for (len = 1; len < n; len <<= 1) {
+            for (i = 0; i < n; i += (len << 1)) {
+                for (j = 0; j < len; j++) {
+                    union { float f; uint32_t u; } ba, bb;
+                    uint32_t s, d;
+                    ba.f = v[i + j];
+                    bb.f = v[i + j + len];
+                    if (lz_faddsub_arm_asm(ba.u, bb.u, &s, &d)) {
+                        ba.u = s;
+                        bb.u = d;
+                    } else {
+                        float a = ba.f, b = bb.f;
+                        ba.f = a + b;
+                        bb.f = a - b;
+                    }
+                    v[i + j]       = ba.f;
+                    v[i + j + len] = bb.f;
+                }
+            }
+        }
+        return;
+    }
+#endif /* LZ_ARM_PRIM_ASM */
+    for (len = 1; len < n; len <<= 1) {
+        for (i = 0; i < n; i += (len << 1)) {
+            for (j = 0; j < len; j++) {
+                float a = v[i + j];
+                float b = v[i + j + len];
+                v[i + j]       = a + b;
+                v[i + j + len] = a - b;
             }
         }
     }

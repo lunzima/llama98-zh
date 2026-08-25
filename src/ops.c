@@ -3010,84 +3010,9 @@ void lz_kv4_quantize(const float *x, int n, unsigned char *out, float *scale) {
     }
 }
 
-void lz_fwht(float *v, int n) {
-    /* Sylvester recursion, in place. Every stage is a butterfly of one
-       add and one sub, so the whole transform is exact in binary float
-       up to the additions themselves - no constants enter, which is why
-       this is bit-identical between wcc386 and gcc without any of the
-       care the multiply-by-reciprocal paths demand. */
-    int len, i, j;
-#if defined(LZ_FWHT_F32_SSE_EXTERN)
-    /* SSE1 from the third stage on. The butterfly at stride len pairs
-       v[i+j] with v[i+j+len], so for len >= 4 both halves are whole
-       16-byte vectors - one load each, addps, subps, two stores, no
-       shuffle. len 1 and 2 stay in the loop below, where an unpack per
-       butterfly would cost more than it saves.
-
-       Selected by tier, not by CPUID: --kernel ref must reach the C or
-       the arm this is compared against would be this. Same guard shape
-       src/fwht.c's int32 twin carries, and the same reason. */
-    if ((g_kernel == LZ_KERNEL_SSE2 || g_kernel == LZ_KERNEL_SSE) &&
-        n >= 8 && (n & 7) == 0) {
-        for (len = 1; len < 4 && len < n; len <<= 1) {
-            for (i = 0; i < n; i += (len << 1)) {
-                for (j = 0; j < len; j++) {
-                    float a = v[i + j];
-                    float b = v[i + j + len];
-                    v[i + j]       = a + b;
-                    v[i + j + len] = a - b;
-                }
-            }
-        }
-        for (len = 4; len < n; len <<= 1) lz_fwht_stage_f32_sse(v, n, len);
-        return;
-    }
-#endif /* LZ_FWHT_F32_SSE_EXTERN */
-#if defined(LZ_ARM_PRIM_ASM)
-    /* ARMv5TE has no FPU, so each butterfly below is `bl __addsf3` plus
-       `bl __subsf3` - two full soft-float adders over one pair of
-       operands. lz_faddsub_arm_asm does the unpack and the alignment
-       once and declines the cases it cannot prove identical, which the
-       C tail then answers. 95.0 instructions a butterfly against 112.7
-       (.prof/arm_chain_count.sh modes 23 and 22).
-
-       Selected by tier, not by CPU: ref and arm-c must reach the loop
-       below or the arm this is compared against would be this one. */
-    if (g_kernel == LZ_KERNEL_ARM_ASM) {
-        for (len = 1; len < n; len <<= 1) {
-            for (i = 0; i < n; i += (len << 1)) {
-                for (j = 0; j < len; j++) {
-                    union { float f; uint32_t u; } ba, bb;
-                    uint32_t s, d;
-                    ba.f = v[i + j];
-                    bb.f = v[i + j + len];
-                    if (lz_faddsub_arm_asm(ba.u, bb.u, &s, &d)) {
-                        ba.u = s;
-                        bb.u = d;
-                    } else {
-                        float a = ba.f, b = bb.f;
-                        ba.f = a + b;
-                        bb.f = a - b;
-                    }
-                    v[i + j]       = ba.f;
-                    v[i + j + len] = bb.f;
-                }
-            }
-        }
-        return;
-    }
-#endif /* LZ_ARM_PRIM_ASM */
-    for (len = 1; len < n; len <<= 1) {
-        for (i = 0; i < n; i += (len << 1)) {
-            for (j = 0; j < len; j++) {
-                float a = v[i + j];
-                float b = v[i + j + len];
-                v[i + j]       = a + b;
-                v[i + j + len] = a - b;
-            }
-        }
-    }
-}
+/* lz_fwht, the float transform, is in src/fwht.c beside its int32 twin.
+   It was here; one operator in two files meant changing the butterfly
+   twice and made every per-file census see one operator as two. */
 
 void lz_rope(float *v, int n_heads, int head_dim, int rotary_dim,
              int pos, const float *cs) {
