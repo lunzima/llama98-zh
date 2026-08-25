@@ -315,6 +315,15 @@ extern void lz_wsum_pair_asm(const int8_t *rowA, const int8_t *rowB,
     __parm [__eax] [__edx] [__ecx] [__ebx] \
     __modify [8087]
 
+/* The MMX pair MAC's address. Its SSE2 twin has had one
+   (lz_wsum_pair_sse2) since the tier split; this side did not, so the
+   two could never be compared even though they are required to agree
+   bit for bit. build/wsum_pair_probe.c does that now. */
+void lz_wsum_pair_mmx_w(const int8_t *rowA, const int8_t *rowB,
+                        const int16_t *coef, int32_t *acc32) {
+    lz_wsum_pair_asm(rowA, rowB, coef, acc32);
+}
+
 /* The x86 tier split for the pair MAC, and it has to be HERE rather
    than in src/ops_gdn.c the way the gcc build's is: on Watcom the group
    loop below IS the call boundary (ops.c's lz_attn_wsum_q8 calls

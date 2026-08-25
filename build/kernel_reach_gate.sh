@@ -41,16 +41,18 @@ set -u
 cd "$(dirname "$0")/.."
 
 FILES="src/ops_mmx.c src/ops_sse2.c src/ops_mmx_sse.c"
-FLOOR=57
+FLOOR=58
 
-# TWO ARE STILL UNREACHABLE:
+# ONE IS STILL UNREACHABLE:
 #
-#   ops_mmx.c       wsum_pair       reads two weight rows and a
-#                                   coefficient vector; needs an oracle
-#                                   built from the attention path
 #   ops_sse2.c      p2_mul32        the other half of the GDN pass-2
-#                                   pair, which writes into the block
-#                                   rather than out of it
+#                                   pair. It writes INTO the block
+#                                   rather than out of it, so a probe
+#                                   has to compare struct fields rather
+#                                   than a returned buffer, and the
+#                                   MMX tier's twin is fused into its
+#                                   row loop rather than standing
+#                                   alone.
 #
 # THIS LIST HAS BEEN WRONG TWICE, both times too long, both times the
 # gate's fault rather than the code's. It said fourteen while a line
