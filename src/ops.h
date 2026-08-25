@@ -79,7 +79,7 @@ enum {
        that the model is wrong, not that n is fractional.
        What closes it is the loop line beside each site: gcov counts
        `for (i = 0; i < n; i++)` sum(n) + count times, which is the
-       missing term. DONE on 2026-08-20, 8-token coverage run on kmr20,
+       missing term. DONE, 8-token coverage run on kmr20,
        -DLZ_F32COUNT=1 -O2 -march=x86-64. The LZ_SSN ternaries inside
        LZ_FCX arguments inflate gcov line counts 2× (two branches per
        macro invocation); all counts below are AFTER dividing out that
