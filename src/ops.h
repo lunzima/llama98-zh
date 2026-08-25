@@ -81,21 +81,21 @@ enum {
        `for (i = 0; i < n; i++)` sum(n) + count times, which is the
        missing term. DONE, 8-token coverage run on kmr20,
        -DLZ_F32COUNT=1 -O2 -march=x86-64. The LZ_SSN ternaries inside
-       LZ_FCX arguments inflate gcov line counts 2× (two branches per
+       LZ_FCX arguments inflate gcov line counts 2x (two branches per
        macro invocation); all counts below are AFTER dividing out that
        inflation. For-loop body counts give sum(n); function call counts
        give reaches. Where no for-loop exists (the normout kernel path),
        sum(n) is inferred from model geometry (n=512 for layer norms).
 
        site                          reaches  sum(n)   avg n  share
-       ─────────────────────────────────────────────────────────────
+       ------------------------------------------------------------------------
        lz_rmsnorm_gated_int:417        768    49152     64    17.2%
        lz_rmsnorm_int:548                8     4096    512     1.8%
        lz_rmsnorm fixed-ss:607         288   147456    512    50.9%
        lz_rmsnorm kernel:631           288   147456    512    12.7%
        lz_rmsnorm scalar tail:646      288   147456    512     0.0%
        lz_l2norm_i16:778              1536    98304     64    17.5%
-                                                         ───────
+                                                         -------
                                                total:   100.1%
 
        THE DOMINANT SITE IS lz_rmsnorm's fixed-ss branch (607) at 50.9%
@@ -103,7 +103,7 @@ enum {
        function accounts for 63.6% of NORM float ops. The second and
        third sites (l2norm_i16 at 17.5% and rmsnorm_gated_int at 17.2%)
        are nearly equal. The scalar tail (646) is always zero: when the
-       normout kernel runs (n ≥ 4, always true here), it processes all n
+       normout kernel runs (n >= 4, always true here), it processes all n
        elements and n-i = 0. lz_rmsnorm_int (548) is a minor site at
        1.8% that the census listing omitted.
 
@@ -114,7 +114,7 @@ enum {
          147,456  site 631  (n4<<2 add per call, kernel's +k2[1])
                0  site 646  (tail empty)
          202,752  site 778  (n+2 mul, 1 add, n+1 cvt per call)
-       ─────────
+       ---------
        1,161,392  total NORM float ops */
     LZ_FC_NORM, LZ_FC_RSQRT,
     /* The recurrence state write-back - pass 2 only, which is LESS than
