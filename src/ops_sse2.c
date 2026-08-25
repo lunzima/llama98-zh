@@ -862,25 +862,25 @@ extern int32_t lz_dot32_x16_sse2_asm(const int8_t *w, const int16_t *x);
 #pragma aux lz_dot32_x16_sse2_asm = \
     ".686"                          \
     "pxor      xmm7, xmm7"          \
-    "movdqu    xmm0, [eax]"         \
+    "movdqa    xmm0, [eax]"         \
     "movdqa    xmm1, xmm7"          \
     "movdqa    xmm3, xmm7"          \
     "punpcklbw xmm1, xmm0"          \
     "punpckhbw xmm3, xmm0"          \
-    "movdqu    xmm2, [edx]"         \
+    "movdqa    xmm2, [edx]"         \
     "pmaddwd   xmm1, xmm2"          \
-    "movdqu    xmm4, [edx+16]"      \
+    "movdqa    xmm4, [edx+16]"      \
     "pmaddwd   xmm3, xmm4"          \
     "movdqa    xmm6, xmm1"          \
     "paddd     xmm6, xmm3"          \
-    "movdqu    xmm0, [eax+16]"      \
+    "movdqa    xmm0, [eax+16]"      \
     "movdqa    xmm1, xmm7"          \
     "movdqa    xmm3, xmm7"          \
     "punpcklbw xmm1, xmm0"          \
     "punpckhbw xmm3, xmm0"          \
-    "movdqu    xmm2, [edx+32]"      \
+    "movdqa    xmm2, [edx+32]"      \
     "pmaddwd   xmm1, xmm2"          \
-    "movdqu    xmm4, [edx+48]"      \
+    "movdqa    xmm4, [edx+48]"      \
     "pmaddwd   xmm3, xmm4"          \
     "paddd     xmm6, xmm1"          \
     "paddd     xmm6, xmm3" \
@@ -922,43 +922,43 @@ extern void lz_dot32_x16_sse2_asm_2(const int8_t *w, const int16_t *xa,
 #pragma aux lz_dot32_x16_sse2_asm_2 = \
     ".686"                          \
     "pxor      xmm7, xmm7"          \
-    "movdqu    xmm0, [eax]"         \
+    "movdqa    xmm0, [eax]"         \
     "movdqa    xmm1, xmm7"          \
     "punpcklbw xmm1, xmm0"          \
     "movdqa    xmm2, xmm7"          \
     "punpckhbw xmm2, xmm0"          \
-    "movdqu    xmm0, [eax+16]"      \
+    "movdqa    xmm0, [eax+16]"      \
     "movdqa    xmm3, xmm7"          \
     "punpcklbw xmm3, xmm0"          \
     "movdqa    xmm4, xmm7"          \
     "punpckhbw xmm4, xmm0"          \
-    "movdqu    xmm7, [edx]"         \
+    "movdqa    xmm7, [edx]"         \
     "movdqa    xmm5, xmm1"          \
     "pmaddwd   xmm5, xmm7"          \
-    "movdqu    xmm7, [edx+16]"      \
+    "movdqa    xmm7, [edx+16]"      \
     "movdqa    xmm0, xmm2"          \
     "pmaddwd   xmm0, xmm7"          \
     "paddd     xmm5, xmm0"          \
-    "movdqu    xmm7, [edx+32]"      \
+    "movdqa    xmm7, [edx+32]"      \
     "movdqa    xmm0, xmm3"          \
     "pmaddwd   xmm0, xmm7"          \
     "paddd     xmm5, xmm0"          \
-    "movdqu    xmm7, [edx+48]"      \
+    "movdqa    xmm7, [edx+48]"      \
     "movdqa    xmm0, xmm4"          \
     "pmaddwd   xmm0, xmm7"          \
     "paddd     xmm5, xmm0"          \
-    "movdqu    xmm7, [ebx]"         \
+    "movdqa    xmm7, [ebx]"         \
     "movdqa    xmm6, xmm1"          \
     "pmaddwd   xmm6, xmm7"          \
-    "movdqu    xmm7, [ebx+16]"      \
+    "movdqa    xmm7, [ebx+16]"      \
     "movdqa    xmm0, xmm2"          \
     "pmaddwd   xmm0, xmm7"          \
     "paddd     xmm6, xmm0"          \
-    "movdqu    xmm7, [ebx+32]"      \
+    "movdqa    xmm7, [ebx+32]"      \
     "movdqa    xmm0, xmm3"          \
     "pmaddwd   xmm0, xmm7"          \
     "paddd     xmm6, xmm0"          \
-    "movdqu    xmm7, [ebx+48]"      \
+    "movdqa    xmm7, [ebx+48]"      \
     "movdqa    xmm0, xmm4"          \
     "pmaddwd   xmm0, xmm7"          \
     "paddd     xmm6, xmm0"          \
@@ -1003,46 +1003,46 @@ extern void lz_dot128_x16_sse2_asm(const int8_t *w,
     "pxor      xmm7, xmm7" \
     "pxor      xmm6, xmm6" \
     "pxor      xmm5, xmm5" \
-    "movdqu    xmm0, [eax]" \
+    "movdqa    xmm0, [eax]" \
     "movdqa    xmm1, xmm7" \
     "movdqa    xmm3, xmm7" \
     "punpcklbw xmm1, xmm0" \
     "punpckhbw xmm3, xmm0" \
-    "movdqu    xmm2, [ecx]" \
-    "movdqu    xmm4, [ecx+16]" \
+    "movdqa    xmm2, [ecx]" \
+    "movdqa    xmm4, [ecx+16]" \
     "pmaddwd   xmm1, xmm2" \
     "pmaddwd   xmm3, xmm4" \
     "paddd     xmm6, xmm1" \
     "paddd     xmm6, xmm3" \
-    "movdqu    xmm0, [eax+16]" \
+    "movdqa    xmm0, [eax+16]" \
     "movdqa    xmm1, xmm7" \
     "movdqa    xmm3, xmm7" \
     "punpcklbw xmm1, xmm0" \
     "punpckhbw xmm3, xmm0" \
-    "movdqu    xmm2, [ecx+32]" \
-    "movdqu    xmm4, [ecx+48]" \
+    "movdqa    xmm2, [ecx+32]" \
+    "movdqa    xmm4, [ecx+48]" \
     "pmaddwd   xmm1, xmm2" \
     "pmaddwd   xmm3, xmm4" \
     "paddd     xmm6, xmm1" \
     "paddd     xmm6, xmm3" \
-    "movdqu    xmm0, [eax+32]" \
+    "movdqa    xmm0, [eax+32]" \
     "movdqa    xmm1, xmm7" \
     "movdqa    xmm3, xmm7" \
     "punpcklbw xmm1, xmm0" \
     "punpckhbw xmm3, xmm0" \
-    "movdqu    xmm2, [ecx+64]" \
-    "movdqu    xmm4, [ecx+80]" \
+    "movdqa    xmm2, [ecx+64]" \
+    "movdqa    xmm4, [ecx+80]" \
     "pmaddwd   xmm1, xmm2" \
     "pmaddwd   xmm3, xmm4" \
     "paddd     xmm5, xmm1" \
     "paddd     xmm5, xmm3" \
-    "movdqu    xmm0, [eax+48]" \
+    "movdqa    xmm0, [eax+48]" \
     "movdqa    xmm1, xmm7" \
     "movdqa    xmm3, xmm7" \
     "punpcklbw xmm1, xmm0" \
     "punpckhbw xmm3, xmm0" \
-    "movdqu    xmm2, [ecx+96]" \
-    "movdqu    xmm4, [ecx+112]" \
+    "movdqa    xmm2, [ecx+96]" \
+    "movdqa    xmm4, [ecx+112]" \
     "pmaddwd   xmm1, xmm2" \
     "pmaddwd   xmm3, xmm4" \
     "paddd     xmm5, xmm1" \
@@ -1261,48 +1261,48 @@ extern void lz_dot32_q41_sse2_asm_2(const unsigned char *w,
     "pcmpeqb   xmm3, xmm3"          \
     "psrlw     xmm3, 12"            \
     "packuswb  xmm3, xmm3"          \
-    "movdqu    xmm0, [eax]"         \
+    "movdqa    xmm0, [eax]"         \
     "movdqa    xmm4, xmm0"          \
     "pand      xmm0, xmm3"          \
     "psrlw     xmm4, 4"             \
     "pand      xmm4, xmm3"          \
     "movdqa    xmm1, xmm7"          \
     "punpcklbw xmm1, xmm0"          \
-    "movdqu    xmm2, [edx]"         \
+    "movdqa    xmm2, [edx]"         \
     "movdqa    xmm3, xmm1"          \
     "pmaddwd   xmm3, xmm2"          \
     "paddd     xmm5, xmm3"          \
-    "movdqu    xmm2, [ebx]"         \
+    "movdqa    xmm2, [ebx]"         \
     "movdqa    xmm3, xmm1"          \
     "pmaddwd   xmm3, xmm2"          \
     "paddd     xmm6, xmm3"          \
     "movdqa    xmm1, xmm7"          \
     "punpckhbw xmm1, xmm0"          \
-    "movdqu    xmm2, [edx+16]"      \
+    "movdqa    xmm2, [edx+16]"      \
     "movdqa    xmm3, xmm1"          \
     "pmaddwd   xmm3, xmm2"          \
     "paddd     xmm5, xmm3"          \
-    "movdqu    xmm2, [ebx+16]"      \
+    "movdqa    xmm2, [ebx+16]"      \
     "movdqa    xmm3, xmm1"          \
     "pmaddwd   xmm3, xmm2"          \
     "paddd     xmm6, xmm3"          \
     "movdqa    xmm1, xmm7"          \
     "punpcklbw xmm1, xmm4"          \
-    "movdqu    xmm2, [edx+32]"      \
+    "movdqa    xmm2, [edx+32]"      \
     "movdqa    xmm3, xmm1"          \
     "pmaddwd   xmm3, xmm2"          \
     "paddd     xmm5, xmm3"          \
-    "movdqu    xmm2, [ebx+32]"      \
+    "movdqa    xmm2, [ebx+32]"      \
     "movdqa    xmm3, xmm1"          \
     "pmaddwd   xmm3, xmm2"          \
     "paddd     xmm6, xmm3"          \
     "movdqa    xmm1, xmm7"          \
     "punpckhbw xmm1, xmm4"          \
-    "movdqu    xmm2, [edx+48]"      \
+    "movdqa    xmm2, [edx+48]"      \
     "movdqa    xmm3, xmm1"          \
     "pmaddwd   xmm3, xmm2"          \
     "paddd     xmm5, xmm3"          \
-    "movdqu    xmm2, [ebx+48]"      \
+    "movdqa    xmm2, [ebx+48]"      \
     "movdqa    xmm3, xmm1"          \
     "pmaddwd   xmm3, xmm2"          \
     "paddd     xmm6, xmm3"          \
@@ -1338,7 +1338,7 @@ extern void lz_dot128_q41_sse2_asm(const unsigned char *w,
     "pcmpeqb   xmm3, xmm3" \
     "psrlw     xmm3, 12" \
     "packuswb  xmm3, xmm3" \
-    "movdqu    xmm0, [eax]" \
+    "movdqa    xmm0, [eax]" \
     "movdqa    xmm4, xmm0" \
     "pand      xmm0, xmm3" \
     "psrlw     xmm4, 4" \
@@ -1348,9 +1348,9 @@ extern void lz_dot128_q41_sse2_asm(const unsigned char *w,
     "movdqa    xmm5, xmm7" \
     "punpcklbw xmm1, xmm0" \
     "punpcklbw xmm5, xmm4" \
-    "movdqu    xmm2, [ecx]" \
+    "movdqa    xmm2, [ecx]" \
     "pmaddwd   xmm1, xmm2" \
-    "movdqu    xmm2, [ecx+32]" \
+    "movdqa    xmm2, [ecx+32]" \
     "pmaddwd   xmm5, xmm2" \
     "paddd     xmm6, xmm1" \
     "paddd     xmm6, xmm5" \
@@ -1358,9 +1358,9 @@ extern void lz_dot128_q41_sse2_asm(const unsigned char *w,
     "movdqa    xmm5, xmm7" \
     "punpckhbw xmm1, xmm0" \
     "punpckhbw xmm5, xmm4" \
-    "movdqu    xmm2, [ecx+16]" \
+    "movdqa    xmm2, [ecx+16]" \
     "pmaddwd   xmm1, xmm2" \
-    "movdqu    xmm2, [ecx+48]" \
+    "movdqa    xmm2, [ecx+48]" \
     "pmaddwd   xmm5, xmm2" \
     "paddd     xmm6, xmm1" \
     "paddd     xmm6, xmm5" \
@@ -1371,7 +1371,7 @@ extern void lz_dot128_q41_sse2_asm(const unsigned char *w,
     "psrldq    xmm2, 4" \
     "paddd     xmm6, xmm2" \
     "movd      [ebx], xmm6" \
-    "movdqu    xmm0, [eax+16]" \
+    "movdqa    xmm0, [eax+16]" \
     "movdqa    xmm4, xmm0" \
     "pand      xmm0, xmm3" \
     "psrlw     xmm4, 4" \
@@ -1381,9 +1381,9 @@ extern void lz_dot128_q41_sse2_asm(const unsigned char *w,
     "movdqa    xmm5, xmm7" \
     "punpcklbw xmm1, xmm0" \
     "punpcklbw xmm5, xmm4" \
-    "movdqu    xmm2, [ecx+64]" \
+    "movdqa    xmm2, [ecx+64]" \
     "pmaddwd   xmm1, xmm2" \
-    "movdqu    xmm2, [ecx+96]" \
+    "movdqa    xmm2, [ecx+96]" \
     "pmaddwd   xmm5, xmm2" \
     "paddd     xmm6, xmm1" \
     "paddd     xmm6, xmm5" \
@@ -1391,9 +1391,9 @@ extern void lz_dot128_q41_sse2_asm(const unsigned char *w,
     "movdqa    xmm5, xmm7" \
     "punpckhbw xmm1, xmm0" \
     "punpckhbw xmm5, xmm4" \
-    "movdqu    xmm2, [ecx+80]" \
+    "movdqa    xmm2, [ecx+80]" \
     "pmaddwd   xmm1, xmm2" \
-    "movdqu    xmm2, [ecx+112]" \
+    "movdqa    xmm2, [ecx+112]" \
     "pmaddwd   xmm5, xmm2" \
     "paddd     xmm6, xmm1" \
     "paddd     xmm6, xmm5" \
@@ -1404,7 +1404,7 @@ extern void lz_dot128_q41_sse2_asm(const unsigned char *w,
     "psrldq    xmm2, 4" \
     "paddd     xmm6, xmm2" \
     "movd      [ebx+4], xmm6" \
-    "movdqu    xmm0, [eax+32]" \
+    "movdqa    xmm0, [eax+32]" \
     "movdqa    xmm4, xmm0" \
     "pand      xmm0, xmm3" \
     "psrlw     xmm4, 4" \
@@ -1414,9 +1414,9 @@ extern void lz_dot128_q41_sse2_asm(const unsigned char *w,
     "movdqa    xmm5, xmm7" \
     "punpcklbw xmm1, xmm0" \
     "punpcklbw xmm5, xmm4" \
-    "movdqu    xmm2, [ecx+128]" \
+    "movdqa    xmm2, [ecx+128]" \
     "pmaddwd   xmm1, xmm2" \
-    "movdqu    xmm2, [ecx+160]" \
+    "movdqa    xmm2, [ecx+160]" \
     "pmaddwd   xmm5, xmm2" \
     "paddd     xmm6, xmm1" \
     "paddd     xmm6, xmm5" \
@@ -1424,9 +1424,9 @@ extern void lz_dot128_q41_sse2_asm(const unsigned char *w,
     "movdqa    xmm5, xmm7" \
     "punpckhbw xmm1, xmm0" \
     "punpckhbw xmm5, xmm4" \
-    "movdqu    xmm2, [ecx+144]" \
+    "movdqa    xmm2, [ecx+144]" \
     "pmaddwd   xmm1, xmm2" \
-    "movdqu    xmm2, [ecx+176]" \
+    "movdqa    xmm2, [ecx+176]" \
     "pmaddwd   xmm5, xmm2" \
     "paddd     xmm6, xmm1" \
     "paddd     xmm6, xmm5" \
@@ -1437,7 +1437,7 @@ extern void lz_dot128_q41_sse2_asm(const unsigned char *w,
     "psrldq    xmm2, 4" \
     "paddd     xmm6, xmm2" \
     "movd      [ebx+8], xmm6" \
-    "movdqu    xmm0, [eax+48]" \
+    "movdqa    xmm0, [eax+48]" \
     "movdqa    xmm4, xmm0" \
     "pand      xmm0, xmm3" \
     "psrlw     xmm4, 4" \
@@ -1447,9 +1447,9 @@ extern void lz_dot128_q41_sse2_asm(const unsigned char *w,
     "movdqa    xmm5, xmm7" \
     "punpcklbw xmm1, xmm0" \
     "punpcklbw xmm5, xmm4" \
-    "movdqu    xmm2, [ecx+192]" \
+    "movdqa    xmm2, [ecx+192]" \
     "pmaddwd   xmm1, xmm2" \
-    "movdqu    xmm2, [ecx+224]" \
+    "movdqa    xmm2, [ecx+224]" \
     "pmaddwd   xmm5, xmm2" \
     "paddd     xmm6, xmm1" \
     "paddd     xmm6, xmm5" \
@@ -1457,9 +1457,9 @@ extern void lz_dot128_q41_sse2_asm(const unsigned char *w,
     "movdqa    xmm5, xmm7" \
     "punpckhbw xmm1, xmm0" \
     "punpckhbw xmm5, xmm4" \
-    "movdqu    xmm2, [ecx+208]" \
+    "movdqa    xmm2, [ecx+208]" \
     "pmaddwd   xmm1, xmm2" \
-    "movdqu    xmm2, [ecx+240]" \
+    "movdqa    xmm2, [ecx+240]" \
     "pmaddwd   xmm5, xmm2" \
     "paddd     xmm6, xmm1" \
     "paddd     xmm6, xmm5" \
