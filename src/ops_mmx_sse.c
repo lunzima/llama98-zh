@@ -284,8 +284,8 @@ extern void lz_rmsnorm_out_sse_asm(float *o, const float *x, const float *w,
     "jz       N2"                       \
     "N1:"                               \
     "movups   xmm0, [edx]"              \
-    "mulps    xmm0, xmm7"               \
     "movups   xmm1, [ebx]"              \
+    "mulps    xmm0, xmm7"               \
     "addps    xmm1, xmm6"               \
     "mulps    xmm0, xmm1"               \
     "movups   [eax], xmm0"              \

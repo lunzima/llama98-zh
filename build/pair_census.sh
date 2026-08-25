@@ -276,6 +276,14 @@
 # the scalar C contract compiled -fp6 (volatile float keeps the product
 # 32-bit, matching mulps), 160000 values, 0 mismatches under Watcom.
 #
+# lz_rmsnorm_out_sse_asm, 67% -> 44%, the element-wise RMS-norm output
+# o = (x*scale)*(w+offset). Its two chains - mulps x*scale and addps
+# w+offset - are independent until the final mulps, but they ran one whole
+# then the other; moving the w load up beside the x load interleaves them
+# and cuts the loop body's dependent pairs from four to two. No arithmetic
+# change; build/rmsnorm_out_probe.c holds it against the scalar C contract
+# compiled -fp6, 1280000 values, 0 mismatches under Watcom.
+#
 # Named and measured; what this script is for is that the next person
 # does not re-derive which kernels are worth it.
 #
