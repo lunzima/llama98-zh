@@ -19,7 +19,7 @@
  * Exit 0 = identical everywhere, 1 = at least one mismatch (the first
  * 10 are printed with both bit patterns).
  *
- * Not in the engine tree's test suite by design (iron law 0): this is a
+ * Not in the engine tree's test suite by design: this is a
  * cross-build driver that needs QEMU, and it lives here with the rest
  * of the ARM instrumentation. */
 #include <stdio.h>
