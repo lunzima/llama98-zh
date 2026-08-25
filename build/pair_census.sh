@@ -194,6 +194,12 @@
 # that is exactly what makes one useless as the other's oracle the
 # moment you touch both.
 #
+# lz_dot32_q41_asm, 73% -> 27%, the same edit as its group twin: mm0 and
+# mm4 were free, so each qword extracts its lo and hi nibbles together
+# (mm1/mm4) and widens them side by side (mm2/mm0). The paddd order into
+# mm6 is unchanged, so it is bit-identical; the probe holds it against
+# the already-verified group kernel rather than against itself.
+#
 # Named and measured; what this script is for is that the next person
 # does not re-derive which kernels are worth it.
 #
