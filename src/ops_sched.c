@@ -142,9 +142,9 @@ int lz_q8r_tier(void) {
     if (g_kernel == LZ_KERNEL_SSE2) return 2;
 #endif /* LZ_HAVE_Q8R_SIMD */
 #if defined(LZ_HAVE_Q8R_SSE)
-    /* g_kernel, not CPUID. This used to be `lz_cpu_has_sse()`, which
-       answered yes for --kernel mmx on every machine in the suite - so
-       the mmx tier ran the SSE1 body and nothing said so. */
+    /* g_kernel, not CPUID: `lz_cpu_has_sse()` answers yes for --kernel mmx
+       on every machine in the suite, so the mmx tier would run the SSE1
+       body and nothing would say so. */
     if (g_kernel == LZ_KERNEL_SSE) return 1;
 #endif /* LZ_HAVE_Q8R_SSE */
     return 0;
@@ -436,11 +436,11 @@ static int kernel_detect(void) {
        floor (build/arm/build_engine.sh), and the asm tier needs exactly
        that and nothing later. */
     return LZ_KERNEL_ARM_ASM;
-/* SSE1 sits between MMX and SSE2 here, which is new: a PIII or Athlon
-   used to auto-detect as MMX and then reach the SSE1 bodies through
-   CPUID behind its back. The kernels it runs are the same ones; what
-   changes is that the tier now has the name of what it runs, so
-   --kernel reports it and lz_kernel_select can be asked for it. */
+/* SSE1 sits between MMX and SSE2 here: a PIII or Athlon auto-detects as
+   MMX, so without this tier it would reach the SSE1 bodies through CPUID
+   behind its back. The kernels are the same ones; the tier has the name
+   of what it runs, so --kernel reports it and lz_kernel_select can be
+   asked for it. */
 #elif defined(__WATCOMC__)
     unsigned edx = lz_cpuid1_edx();
     if (edx & (1u << 26)) return LZ_KERNEL_SSE2;

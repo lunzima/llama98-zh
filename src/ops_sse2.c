@@ -3537,7 +3537,7 @@ lz_i64 lz_epi_mac_i16_sse2(const int32_t *a, const int16_t *m, int n) {
     for (; g + 3 < n; g += 4) {
         __m128i av  = _mm_loadu_si128((const __m128i *)(const void *)(a + g));
         __m128i mv  = _mm_loadl_epi64((const __m128i *)(const void *)(m + g));
-        /* No mask on either of these two, and both used to carry one.
+        /* No mask on either of these two, and none is needed:
            punpcklwd against zero already leaves the high half clear, and
            a LOGICAL shift down by 16 is what "keep the top halfword,
            zero above it" is - psrad followed by an AND is the same two
@@ -3551,8 +3551,9 @@ lz_i64 lz_epi_mac_i16_sse2(const int32_t *a, const int16_t *m, int n) {
            left the 16-bit lane. That is the whole reason the carry-free
            form needed a third accumulator, and it does not: what
            overflows int16 is ah+b, not (ah*m)+(b*m). |ah*m| <= 2^30 and
-           |b*m| <= 2^15, so the int32 lane has room and the two 64-bit
-           accumulators they used to need become one. */
+           |b*m| <= 2^15, so the int32 lane has room and one 64-bit
+           accumulator is enough, not the two a third-accumulator form
+           would need. */
         __m128i pa  = _mm_add_epi32(_mm_madd_epi16(ah, m32),
                                     _mm_madd_epi16(bb, m32));
         __m128i pl  = _mm_madd_epi16(als, m32);

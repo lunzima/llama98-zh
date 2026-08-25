@@ -363,10 +363,10 @@ extern void lz_pf_amd(const void *p);
    trees and hoping the rest matched. Same reason LZ_BATCH_MAX exists.
 
    IT STAYS BECAUSE THERE IS NO RUNTIME TIER FOR IT. The FORCE_* escapes
-   that used to be cited here have been deleted one by one, each when
-   `--kernel sse`/`mmx` came to select the same body at run time. Nothing
-   selects between the 32- and 128-element group kernels that way, so
-   this one is not the same case.
+   once cited here are gone - each was deleted when `--kernel sse`/`mmx`
+   came to select the same body at run time. Nothing selects between the
+   32- and 128-element group kernels that way, so this one is not the
+   same case.
 
    Only the Watcom build has these kernels at all - the gcc translation
    unit does not contain them (they live inside `#if defined(__WATCOMC__)`),

@@ -451,11 +451,11 @@ void     lz_fpu_float_end(unsigned save);
    in the tree at once, for tidiness, and the enum is not in tier order
    anyway (ARM is 4 and 5).
 
-   WHAT THIS CHANGES ABOUT --kernel mmx: it now means MMX. The sites
-   below used to read `g_kernel != LZ_KERNEL_REF && lz_cpu_has_sse()`,
-   so on any machine with SSE1 - which is every machine that runs the
-   suite - asking for mmx ran the SSE1 body. The tiers owe each other
-   bit-identity, so nothing reported it. */
+   WHAT THIS MEANS ABOUT --kernel mmx: it means MMX. The sites below
+   read `g_kernel != LZ_KERNEL_REF && lz_cpu_has_sse()`, so on any
+   machine with SSE1 - which is every machine that runs the suite -
+   asking for mmx runs the SSE1 body. The tiers owe each other
+   bit-identity, so nothing reports it. */
 #define LZ_KERNEL_SSE  6
 
 /* The ARM column. Two values because the ARM side is two cells, C and

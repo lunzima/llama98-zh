@@ -2916,7 +2916,7 @@ void lz_matmul(float *o, const float *x, const float *w,
            SSE2 column holds the same body rather than a copy of it.
            No CPUID in the test: lz_kernel_select clamps both of these
            values to what CPUID found, so reaching either one is already
-           the answer this used to ask for a second time. */
+           the answer, and reading CPUID here would only ask it again. */
         if ((g_kernel == LZ_KERNEL_SSE2 || g_kernel == LZ_KERNEL_SSE) &&
             in_dim >= 8) {
             float acc8[8];

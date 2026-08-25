@@ -514,9 +514,9 @@ void lz_exp_fixed_run(const float *x, float *out, int n) {
         /* Above the MMX cell and below SSE2: same width as MMX, fewer
            instructions, and a machine with SSE1 but not SSE2 (Pentium
            III, Athlon) is a real point on this target family. Selected
-           by tier - it used to read CPUID, which made this arm shadow
-           the MMX one on every machine that runs the suite and needed a
-           separate control build to get underneath. */
+           by tier, not CPUID: reading CPUID here would shadow the MMX
+           arm on every machine that runs the suite and need a separate
+           control build to get underneath. */
         if (g_kernel == LZ_KERNEL_SSE)
             lz_exp_q20_sse(tv, sv, pv, m);
         else
@@ -1489,8 +1489,8 @@ float norm_ss_fixed(const float *x, int n, short *qout, int *eout) {
 #endif /* LZ_NORM_SS_SSE2_EXTERN */
 #if defined(LZ_NORM_SS_SSE_EXTERN)
     /* The SSE1 tier, BELOW the SSE2 one so a machine with both takes the
-       wider kernel. Selected by tier - it used to read CPUID, which made
-       it fire for --kernel mmx too and left it unreachable from any
+       wider kernel. Selected by tier, not CPUID: reading CPUID would make
+       it fire for --kernel mmx too and leave it unreachable from any
        knob on a machine with SSE2, which is every machine in the
        suite. */
     if (i == 0 && g_kernel == LZ_KERNEL_SSE && n >= 4) {
@@ -1509,12 +1509,11 @@ float norm_ss_fixed(const float *x, int n, short *qout, int *eout) {
        changes is only which instructions the clamp and the accumulate
        use.
 
-       Reached by --kernel mmx, which is why the LZ_NORM_SS_FORCE_MMX
-       and LZ_NORM_SS_FORCE_SSE pair that used to switch off the arms
-       above it are gone. They were written when SSE1 was not a tier and
-       these two arms could not be selected on any machine in the suite;
-       LZ_KERNEL_SSE ended that, and the three arms now cascade on
-       g_kernel with `i == 0` carrying the fallthrough. A compile-time
+       Reached by --kernel mmx, which is why there is no LZ_NORM_SS_FORCE_MMX
+       / LZ_NORM_SS_FORCE_SSE pair to select the arms above it: LZ_KERNEL_SSE
+       selects them at run time, so a compile-time escape is pointless.
+       The three arms cascade on g_kernel with `i == 0` carrying the
+       fallthrough. A compile-time
        escape beside a runtime tier is a second way to say the same
        thing, and two ways can disagree. */
     if (i == 0 && g_kernel != LZ_KERNEL_REF && lz_cpu_has_mmx() && n >= 32) {
