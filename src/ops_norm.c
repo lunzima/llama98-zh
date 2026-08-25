@@ -22,6 +22,18 @@
 
 #include "ops_kernel_norm.h"
 
+/* The Q15 scale exponent for a norm, rounded UP: 14 - ceil(log2(x)).
+   Mirrors gdn_build_table's "round the block UP" (ops_gdn.c) - the scale
+   becomes a stable power-of-2 upper bound, so a 1-ULP cross-compiler
+   difference in x (x87 vs SSE2) that straddles a power-of-2 boundary
+   cannot flip the exponent and halve/double the whole Q15 chain. Costs
+   one bit of Q15 range, which the gdn twin measured at +6e-4 NLL. */
+static int norm_q15_exp(float x) {
+    int e = expof(x);
+    if (pow2f(e) < x) e++;
+    return 14 - e;
+}
+
 /* ---- the (1 + w) table, cached per norm weight ------------------------
 
    The output loop's add does not depend on the token. lz_rmsnorm's
@@ -163,10 +175,10 @@ static void lz_rmsnorm_gated_out_fixed(float *o, const float *x,
     int32_t qinv;
     int i;
 
-    bit.u = q8_amax(x, n); ex = 14 - expof(bit.f); sx = pow2f(ex);
-    bit.u = q8_amax(w, n); ew = 14 - expof(bit.f); sw = pow2f(ew);
-    bit.u = q8_amax(g, n); eg = 14 - expof(bit.f); sg = pow2f(eg);
-    bit.u = q8_amax(&inv, 1); ei = 14 - expof(bit.f);
+    bit.u = q8_amax(x, n); ex = norm_q15_exp(bit.f); sx = pow2f(ex);
+    bit.u = q8_amax(w, n); ew = norm_q15_exp(bit.f); sw = pow2f(ew);
+    bit.u = q8_amax(g, n); eg = norm_q15_exp(bit.f); sg = pow2f(eg);
+    bit.u = q8_amax(&inv, 1); ei = norm_q15_exp(bit.f);
     oe = 30 - ex - ew - eg - ei;   /* the output exponent, loop-invariant */
     qinv = q8_round(inv * pow2f(ei));
     if (qinv > 32767) qinv = 32767;
@@ -305,14 +317,14 @@ static const short *build_qw(const float *w, int n, int add1, int *ew_out) {
        .prof/norm_wp_xcheck.sh has a mutation point per table. */
     if (add1) {
         for (i = 0; i < n; i++) wp[i] = 1.0f + w[i];
-        bit.u = q8_amax(wp, n); ew = 14 - expof(bit.f); sw = pow2f(ew);
+        bit.u = q8_amax(wp, n); ew = norm_q15_exp(bit.f); sw = pow2f(ew);
         for (i = 0; i < n; i++) {
             int v = q8_round(wp[i] * sw);
             if (v > 32767) v = 32767; else if (v < -32767) v = -32767;
             q[i] = (short)v;
         }
     } else {
-        bit.u = q8_amax(w, n); ew = 14 - expof(bit.f); sw = pow2f(ew);
+        bit.u = q8_amax(w, n); ew = norm_q15_exp(bit.f); sw = pow2f(ew);
         for (i = 0; i < n; i++) {
             int v = q8_round(w[i] * sw);
             if (v > 32767) v = 32767; else if (v < -32767) v = -32767;
@@ -356,9 +368,9 @@ static void lz_rmsnorm_gated_out_fixed_int(int32_t *t, const float *x,
     int32_t qinv;
     int i;
 
-    bit.u = q8_amax(x, n); ex = 14 - expof(bit.f); sx = pow2f(ex);
-    bit.u = q8_amax(g, n); eg = 14 - expof(bit.f); sg = pow2f(eg);
-    bit.u = q8_amax(&inv, 1); ei = 14 - expof(bit.f);
+    bit.u = q8_amax(x, n); ex = norm_q15_exp(bit.f); sx = pow2f(ex);
+    bit.u = q8_amax(g, n); eg = norm_q15_exp(bit.f); sg = pow2f(eg);
+    bit.u = q8_amax(&inv, 1); ei = norm_q15_exp(bit.f);
     qinv = q8_round(inv * pow2f(ei));
     if (qinv > 32767) qinv = 32767;
     if (qinv < -32767) qinv = -32767;
@@ -370,7 +382,7 @@ static void lz_rmsnorm_gated_out_fixed_int(int32_t *t, const float *x,
     if (qwt) lz_debug_norm_qw += n;
 #endif /* LZ_GATE_QW */
     if (!qwt) {
-        bit.u = q8_amax(w, n); ew = 14 - expof(bit.f); sw = pow2f(ew);
+        bit.u = q8_amax(w, n); ew = norm_q15_exp(bit.f); sw = pow2f(ew);
         for (i = 0; i < n; i++) {
             int v = q8_round(w[i] * sw);
             if (v > 32767) v = 32767; else if (v < -32767) v = -32767;
@@ -505,7 +517,7 @@ static void lz_rmsnorm_out_fixed_int(int32_t *t, const short *qx, int ex,
 
     /* qinv is per CALL - inv is this row's rsqrt - so it stays here. It
        is one scalar; the per-ELEMENT work is what the table removes. */
-    bit.u = q8_amax(&inv, 1); ei = 14 - expof(bit.f);
+    bit.u = q8_amax(&inv, 1); ei = norm_q15_exp(bit.f);
     qinv = q8_round(inv * pow2f(ei));
     if (qinv > 32767) qinv = 32767;
     if (qinv < -32767) qinv = -32767;
@@ -522,7 +534,7 @@ static void lz_rmsnorm_out_fixed_int(int32_t *t, const short *qx, int ex,
     }
     /* Pool exhausted. Same numbers, computed per call - see build_qw. */
     for (i = 0; i < n; i++) wp[i] = 1.0f + w[i];
-    bit.u = q8_amax(wp, n); ew = 14 - expof(bit.f); sw = pow2f(ew);
+    bit.u = q8_amax(wp, n); ew = norm_q15_exp(bit.f); sw = pow2f(ew);
     for (i = 0; i < n; i++) {
         int qw = q8_round(wp[i] * sw);
         int32_t acc;
