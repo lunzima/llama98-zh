@@ -146,11 +146,34 @@ static void rsqrt_tab_build(void) {
     g_rsqrttab_ready = 1;
 }
 
+/* (a*b + 2^22) >> 23 rounding half-up, as int32 - the Q23 Newton step
+   shape of lz_rsqrt_fixed. Fused multiply-round-shift, the same trick
+   as the exp helpers further down: Watcom's natural `(lz_i64)a*b` and
+   `>> 23` would be __I8M + __I8RS per step, one imul + one shrd here.
+   Valid for the rsqrt operands, whose mantissa-scale values keep the
+   shifted result inside int32. */
+#if defined(__WATCOMC__)
+static int32_t lz_i64mul_rnd_rsh23(int32_t a, int32_t b);
+#pragma aux lz_i64mul_rnd_rsh23 = \
+    "imul ebx" \
+    "add  eax, 0x00400000" \
+    "adc  edx, 0" \
+    "mov  ecx, 23" \
+    "shrd eax, edx, cl" \
+    "sar  edx, cl" \
+    parm [eax] [ebx] \
+    value [eax] \
+    modify [ecx edx];
+#else
+#define lz_i64mul_rnd_rsh23(a, b) \
+    (int32_t)((((lz_i64)(a) * (b)) + (1 << 22)) >> 23)
+#endif /* __WATCOMC__ */
+
 float lz_rsqrt_fixed(float x) {
     static const float LZ_RSQRT_SQRT2 = 0.7071067811865476f;
     union { float f; uint32_t u; } b;
     int32_t m23, y23;
-    int64_t p, t, fac;
+    int32_t p, t, fac;
     int e, idx, odd;
     if (!g_rsqrttab_ready) rsqrt_tab_build();
     b.f = x;
@@ -160,15 +183,18 @@ float lz_rsqrt_fixed(float x) {
     idx = (int)((b.u >> 15) & 0xFFu);
     y23 = g_rsqrttab[idx];
     /* Two Newton steps y = y*(3 - m*y^2)/2, all Q23. The shifts round
-       half-up - truncation would bias a whole-vector scale. */
-    p = (((int64_t)y23 * y23) + (1 << 22)) >> 23;
-    t = (((int64_t)m23 * p) + (1 << 22)) >> 23;
-    fac = (3 * (int64_t)(1 << 23) - t + 1) >> 1;
-    y23 = (int32_t)((((int64_t)y23 * fac) + (1 << 22)) >> 23);
-    p = (((int64_t)y23 * y23) + (1 << 22)) >> 23;
-    t = (((int64_t)m23 * p) + (1 << 22)) >> 23;
-    fac = (3 * (int64_t)(1 << 23) - t + 1) >> 1;
-    y23 = (int32_t)((((int64_t)y23 * fac) + (1 << 22)) >> 23);
+       half-up - truncation would bias a whole-vector scale. Every
+       intermediate stays in int32 (the mantissa-scale operands make the
+       >>23 results ~2^23 and the fac arithmetic positive), so each step
+       is a fused multiply-round-shift. */
+    p = lz_i64mul_rnd_rsh23(y23, y23);
+    t = lz_i64mul_rnd_rsh23(m23, p);
+    fac = (3 * (1 << 23) - t + 1) >> 1;
+    y23 = lz_i64mul_rnd_rsh23(y23, fac);
+    p = lz_i64mul_rnd_rsh23(y23, y23);
+    t = lz_i64mul_rnd_rsh23(m23, p);
+    fac = (3 * (1 << 23) - t + 1) >> 1;
+    y23 = lz_i64mul_rnd_rsh23(y23, fac);
     odd = e & 1;
     /* fild + one/two pow2 multiplies: the odd-e case adds the SQRT2. */
     LZ_FCX(LZ_FC_RSQRT, odd ? 3 : 2, 0, 0, 1, 0);
@@ -374,6 +400,22 @@ static int32_t lz_exp_q40(int32_t a, int32_t b); /* (a*b*b + 2^39) >> 40 */
 #define lz_exp_q40(a, b) \
     (int32_t)((((lz_i64)(a) * (b) * (b)) \
                + (LZ_I64_C(1) << (2 * LZ_EXP_Q - 1))) >> (2 * LZ_EXP_Q))
+#endif /* __WATCOMC__ */
+
+/* The bare 32x32 -> 64 multiply, for the products in the exp twins that
+   have no fused shift (lz_exp_t's v*m). Watcom routes `(lz_i64)a * b`
+   through __I8M unless the operands are simple memory loads it can
+   narrow; a fused aux is one imul. gcc widens and multiplies, exact
+   either way. */
+#if defined(__WATCOMC__)
+static lz_i64 lz_i64mul32(int32_t a, int32_t b);
+#pragma aux lz_i64mul32 = \
+    "imul ebx" \
+    parm [eax] [ebx] \
+    value [edx eax] \
+    modify [edx];
+#else
+#define lz_i64mul32(a, b) ((lz_i64)(a) * (b))
 #endif /* __WATCOMC__ */
 
 static void exp_tab_build(void) {
@@ -786,7 +828,7 @@ float lz_exp_t(int32_t v, int32_t m, int s) {
     if (!g_exptab_ready) exp_tab_build();
     if (!g_expt_ready) exp_t_bounds();
     if (s < 0 || s > LZ_FOLD_SMAX) return 0.0f;
-    p = (int64_t)v * (int64_t)m;
+    p = lz_i64mul32(v, m);
     t64 = fold_floor_shr(p, s);
     if (t64 > g_expt_hi) return FLT_MAX;
     if (t64 < g_expt_lo) return 0.0f;
@@ -803,12 +845,9 @@ float lz_exp_t(int32_t v, int32_t m, int s) {
         sq = (int32_t)(frac << (15 - s));
     if (sq > 32767) sq = 32767;
     cq = LZ_EXP_QSCALE
-       + (int32_t)((((int64_t)LZ_EXP2_LN2 * sq)
-                    + (1 << (LZ_EXP_Q - 1))) >> LZ_EXP_Q)
-       + (int32_t)((((int64_t)LZ_EXP2_LN2SQ * sq * sq)
-                    + (LZ_I64_C(1) << (2 * LZ_EXP_Q - 1))) >> (2 * LZ_EXP_Q));
-    prod = (int32_t)((((int64_t)g_exptab[idx] * cq)
-                      + (1 << (LZ_EXP_Q - 1))) >> LZ_EXP_Q);
+       + lz_exp_q20(LZ_EXP2_LN2, sq)
+       + lz_exp_q40(LZ_EXP2_LN2SQ, sq);
+    prod = lz_exp_q20(g_exptab[idx], cq);
     /* One multiply and one convert, and that pair is the entire float
        cost of the entry - against the nine semantic conversions the
        float chain into lz_exp_fixed paid per element. */
@@ -1223,7 +1262,7 @@ int32_t sigmoid_q15_ti(int32_t v, int32_t m, int s) {
     const int64_t sat = (int64_t)LZ_SIG_N << 15;
     int64_t p, t15;
     if (!g_sigtab_ready) sig_build();
-    p = (int64_t)v * (int64_t)m;
+    p = lz_i64mul32(v, m);
     if (s >= 19) {
         t15 = fold_floor_shr(p, s - 19);
     } else if (p == 0) {
@@ -1233,7 +1272,7 @@ int32_t sigmoid_q15_ti(int32_t v, int32_t m, int s) {
         if (sl >= 62 || p > (sat >> sl) || p < -(sat >> sl))
             t15 = (p > 0) ? sat : -sat;
         else
-            t15 = p * ((int64_t)1 << sl);
+            t15 = p << sl;                      /* p * 2^sl, exact under the guard */
     }
     t15 += LZ_SIG_T15;
     if (t15 <= 0) return 0;
