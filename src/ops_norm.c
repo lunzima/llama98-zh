@@ -128,7 +128,7 @@ static const float *build_wp(const float *w, int n) {
    from the sigmoid census site entirely. forward.c uses lz_quantize_q8
    (not lz_quantize_q8_silu) since the output already holds the final
    silu value. */
-void lz_rmsnorm_gated_out_fixed(float *o, const float *x,
+static void lz_rmsnorm_gated_out_fixed(float *o, const float *x,
                                        const float *g, const float *w,
                                        float inv, int n, int32_t *sig) {
     union { float f; uint32_t u; } bit;
@@ -172,7 +172,7 @@ void lz_rmsnorm_gated_out_fixed(float *o, const float *x,
     }
 }
 #else
-void lz_rmsnorm_gated_out_fixed(float *o, const float *x,
+static void lz_rmsnorm_gated_out_fixed(float *o, const float *x,
                                        const float *g, const float *w,
                                        float inv, int n, int32_t *sig) {
     (void)o; (void)x; (void)g; (void)w; (void)inv; (void)n; (void)sig;
@@ -320,7 +320,7 @@ static const short *build_qw(const float *w, int n, int add1, int *ew_out) {
    gate's Q15 image rather than the float g (LZ_GATE_SIG_I) - see
    src/ops.h for both switches and for why the second one is
    value-changing. */
-void lz_rmsnorm_gated_out_fixed_int(int32_t *t, const float *x,
+static void lz_rmsnorm_gated_out_fixed_int(int32_t *t, const float *x,
                                     const float *g, const float *w,
                                     float inv, int n, int32_t *sig,
                                     float *deq) {
@@ -380,7 +380,7 @@ void lz_rmsnorm_gated_out_fixed_int(int32_t *t, const float *x,
     *deq = pow2f(30 - ex - ew - eg - ei);
 }
 #else
-void lz_rmsnorm_gated_out_fixed_int(int32_t *t, const float *x,
+static void lz_rmsnorm_gated_out_fixed_int(int32_t *t, const float *x,
                                     const float *g, const float *w,
                                     float inv, int n, int32_t *sig,
                                     float *deq) {
@@ -467,7 +467,7 @@ have_ss_gated_int:
    function INTRODUCES a Q15 chain rather than exposing one. Measured on
    kunkun-ce at 7% rms; see lz_norm_int in src/ops.h for the numbers and
    for how the flag's reach outgrew the proof. */
-void lz_rmsnorm_out_fixed_int(int32_t *t, const short *qx, int ex,
+static void lz_rmsnorm_out_fixed_int(int32_t *t, const short *qx, int ex,
                               const float *w, float inv, int n,
                               float *deq) {
     /* static, not stack: the same single-threaded-forward-pass
@@ -512,7 +512,7 @@ void lz_rmsnorm_out_fixed_int(int32_t *t, const short *qx, int ex,
     *deq = pow2f(15 - ex - ew - ei);
 }
 #else
-void lz_rmsnorm_out_fixed_int(int32_t *t, const short *qx, int ex,
+static void lz_rmsnorm_out_fixed_int(int32_t *t, const short *qx, int ex,
                               const float *w, float inv, int n,
                               float *deq) {
     (void)t; (void)qx; (void)ex; (void)w; (void)inv; (void)n;
