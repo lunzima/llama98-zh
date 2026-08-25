@@ -11,14 +11,16 @@
 #include "lz_int.h"   /* lz_i64: the 64-bit type, portably */
 #include "model.h"
 
-/* 16-byte aligned malloc/free for the FLOAT weight buffers (field->f).
-   The F32 matmul's SSE1/SSE2 row kernels read these with movaps after
-   the alignment, and the int8/int16 planes (field->q) keep their bare
-   malloc - their per-group strides (nibble/2-bit planes) are not
-   16-byte multiples, so aligning the base would not align the slices.
-   Over-allocates by one pointer plus the pad and stores the ORIGINAL
-   pointer just before the aligned one, the same shape as forward.c's
-   xcalloc/xfree. */
+/* 16-byte aligned malloc/free for the weight buffers (field->f and the
+   quantized planes field->q/scale/zero). The SSE1/SSE2 row/dot kernels
+   read these with movaps/movdqa after the alignment. field->q is aligned
+   uniformly so the Q8/Q4_1/Q16 formats - whose 32-element group is 32,
+   16 or 64 bytes, all 16-byte multiples - become aligned loads; the
+   Q6_1 2-bit plane and Q2 have an 8-byte group stride, so their loads
+   stay movdqu even over the aligned base (16-aligned is still only
+   8-aligned every other group). Over-allocates by one pointer plus the
+   pad and stores the ORIGINAL pointer just before the aligned one, the
+   same shape as forward.c's xcalloc/xfree. */
 static void *aligned_malloc(size_t n, size_t sz) {
     char *base = (char *)malloc(n * sz + 16 + sizeof(void *));
     char *aligned;
@@ -1234,8 +1236,8 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
             return 1;
         }
         field->gs = (int)gs;
-        field->q = (int8_t *)malloc((size_t)n * 2);
-        field->scale = (float *)malloc((size_t)(n / gs) * sizeof(float));
+        field->q = (int8_t *)aligned_malloc((size_t)n * 2, 1);
+        field->scale = (float *)aligned_malloc((size_t)(n / gs), sizeof(float));
         if (!field->q || !field->scale) {
             qerr(errbuf, errlen, LZ_ERR_TENSOR_ALLOC, t->name);
             lz_t_free(field);
@@ -1265,9 +1267,9 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
             return 1;
         }
         field->gs = (int)gs;
-        field->q = (int8_t *)malloc((size_t)n / 2 + (size_t)n / 4);
-        field->scale = (float *)malloc((size_t)(n / gs) * sizeof(float));
-        field->zero = (float *)malloc((size_t)(n / gs) * sizeof(float));
+        field->q = (int8_t *)aligned_malloc((size_t)n / 2 + (size_t)n / 4, 1);
+        field->scale = (float *)aligned_malloc((size_t)(n / gs), sizeof(float));
+        field->zero = (float *)aligned_malloc((size_t)(n / gs), sizeof(float));
         if (!field->q || !field->scale || !field->zero) {
             qerr(errbuf, errlen, LZ_ERR_TENSOR_ALLOC, t->name);
             lz_t_free(field);
@@ -1297,8 +1299,8 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
             return 1;
         }
         field->gs = (int)gs;
-        field->q = (int8_t *)malloc((size_t)n / 4);
-        field->scale = (float *)malloc((size_t)(n / gs) * sizeof(float));
+        field->q = (int8_t *)aligned_malloc((size_t)n / 4, 1);
+        field->scale = (float *)aligned_malloc((size_t)(n / gs), sizeof(float));
         if (!field->q || !field->scale) {
             qerr(errbuf, errlen, LZ_ERR_TENSOR_ALLOC, t->name);
             lz_t_free(field);
@@ -1324,9 +1326,9 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
             return 1;
         }
         field->gs = (int)gs;
-        field->q = (int8_t *)malloc((size_t)n / 2);
-        field->scale = (float *)malloc((size_t)(n / gs) * sizeof(float));
-        field->zero = (float *)malloc((size_t)(n / gs) * sizeof(float));
+        field->q = (int8_t *)aligned_malloc((size_t)n / 2, 1);
+        field->scale = (float *)aligned_malloc((size_t)(n / gs), sizeof(float));
+        field->zero = (float *)aligned_malloc((size_t)(n / gs), sizeof(float));
         if (!field->q || !field->scale || !field->zero) {
             qerr(errbuf, errlen, LZ_ERR_TENSOR_ALLOC, t->name);
             lz_t_free(field);
@@ -1351,12 +1353,12 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
             return 1;
         }
         field->gs = (int)gs;
-        field->q = (int8_t *)malloc((size_t)n);
-        field->scale = (float *)malloc((size_t)(n / gs) * sizeof(float));
+        field->q = (int8_t *)aligned_malloc((size_t)n, 1);
+        field->scale = (float *)aligned_malloc((size_t)(n / gs), sizeof(float));
         if (!field->q || !field->scale) {
             qerr(errbuf, errlen, LZ_ERR_TENSOR_ALLOC, t->name);
-            free(field->q);
-            free(field->scale);
+            aligned_free(field->q);
+            aligned_free(field->scale);
             field->q = NULL;
             field->scale = NULL;
             return 1;
@@ -1364,8 +1366,8 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
         if (fread(field->q, 1, n, f) != n ||
             fread(field->scale, sizeof(float), n / gs, f) != n / gs) {
             qerr(errbuf, errlen, LZ_ERR_TENSOR_READ, t->name);
-            free(field->q);
-            free(field->scale);
+            aligned_free(field->q);
+            aligned_free(field->scale);
             field->q = NULL;
             field->scale = NULL;
             return 1;
@@ -1621,9 +1623,9 @@ fail:
 void lz_t_free(LZTensor *t) {
     if (!t) return;
     aligned_free(t->f);
-    free(t->q);
-    free(t->scale);
-    free(t->zero);
+    aligned_free(t->q);
+    aligned_free(t->scale);
+    aligned_free(t->zero);
     /* Freed here, not through ops.c: this file owns the struct's memory,
        and model.c does not include ops.h. */
     free(t->sq);
