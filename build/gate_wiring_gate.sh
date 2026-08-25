@@ -76,8 +76,8 @@ done
 # thing someone chose.
 #
 # CENSUSES, which print and do not judge - there is no PASS to assert:
-#   div_census div_hotness move_census branch_census o3_probe
-#   xcc_codesize dev_timing
+#   div_census div_hotness move_census branch_census nest_census
+#   o3_probe xcc_codesize dev_timing
 # Those are not *_gate.sh and so never reach the loop above; named here
 # only so the next reader does not go looking for them. cov_run.sh is
 # not a census either - it is the coverage build the last two share.
