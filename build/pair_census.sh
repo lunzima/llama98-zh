@@ -128,9 +128,25 @@
 # dot32_x16_mmx_2 to exist on the Watcom side - src/ops_mmx.h declared
 # it and only the gcc build defined it.
 #
-# THE REST ARE NOT DONE: lz_exp_q20_2_mmx_asm at 69% and the SSE2
-# single-token kernels at 65-74%. Each is a real edit needing its own
-# probe re-run on both toolchains.
+# AND THE SSE2 GROUP TWIN, lz_dot128_x16_sse2_asm: 65% -> 31% by the
+# interleave, then -> 17% by the fold, 122 instructions to 110, four
+# 4-byte stores to two 8-byte ones. Two accumulators are enough there:
+# fold after every SECOND sub-block, transpose the pair with
+# punpckldq/punpckhdq and store both sums at once. Four would not fit -
+# SSE2 needs a register for each of the two activation loads, and
+# giving one up costs more dependent pairs in the body than the extra
+# accumulators save in the fold.
+#
+# THAT KERNEL HAD NO PROBE COVERAGE AT ALL until this round. It is a
+# #pragma aux called by name inside row_q8_sse2_asm, so it had no
+# address; lz_dot128_x16_sse2_w is one, and the probe now holds MMX
+# GROUP against SSE2 GROUP. That arm is also the only one that covers
+# a FOLD - no per-32 comparison ever reduces four sub-blocks.
+#
+# THE REST ARE NOT DONE: lz_exp_q20_2_mmx_asm at 69%, lz_exp_q20_sse2_asm
+# at 74%, and the other SSE2 group and single-token kernels - q61 at 70%
+# and 210 pairs is the largest single block left. Each is a real edit
+# needing its own probe re-run on both toolchains.
 #
 # THE GENERAL LESSON FROM THE x16 PAIR, since it will come up again:
 # when two kernels in one file share a body and one is the other's
