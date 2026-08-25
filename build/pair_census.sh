@@ -28,6 +28,7 @@
 #   lz_dot128_t2_asm          72%   <-- since interleaved, now 14%
 #   lz_dot128_x16_asm         70%   <-- since interleaved+folded, now 14%
 #   lz_dot128_q16_asm         71%   <-- since four-streamed, now 6%
+#   lz_dot128_q41_asm         74%   <-- since interleaved, now 26%
 #   lz_lerp_q15_32_mmx_asm    20%   <-- the outlier
 #
 # Four sit near seventy and one sits at twenty, so seventy is NOT "what
@@ -67,9 +68,9 @@
 # issue width for whoever reorders the body.
 #
 # Whole set: 4791 adjacent register pairs, 59% dependent; ops_mmx.c
-# alone is 2396 and 47% after the edits below; ops_sse2.c is 52%.
+# alone is 2396 and 43% after the edits below; ops_sse2.c is 52%.
 #
-# SEVEN HAVE BEEN DONE, so the technique is not hypothetical here.
+# EIGHT HAVE BEEN DONE, so the technique is not hypothetical here.
 #
 # lz_dot32_t2_asm was the worst in the file at 75% and is now 7% - the
 # best - by running the low and high nibble of each weight byte side by
@@ -177,6 +178,20 @@
 # reference, the probe's agreement arm goes blind the moment you touch
 # both. Reach for a tier that shares no code before reaching for the
 # edit.
+#
+# lz_dot128_q41_asm, 74% -> 26%. mm0 and mm4 were free, so both nibble
+# planes are extracted up front - pand for the low, psrlw+pand for the
+# high - and each plane's lo and hi widening halves then run side by
+# side on mm2/mm0. 202 instructions either way, and mm6 receives the
+# four products in the order it received them before.
+#
+# THE SAME REFERENCE TRAP AS x16, hit again: lz_dot32_q41_asm's body is
+# lz_dot128_q41_asm's first block, character for character, and the
+# Edit refused with "2 matches" before it could do any harm. That is
+# twice now, so it is a property of this file rather than an accident:
+# a per-32 kernel and its group kernel are written to be identical, and
+# that is exactly what makes one useless as the other's oracle the
+# moment you touch both.
 #
 # Named and measured; what this script is for is that the next person
 # does not re-derive which kernels are worth it.

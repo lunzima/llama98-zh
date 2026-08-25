@@ -1442,6 +1442,17 @@ extern void lz_dot128_q41_sse2_asm(const unsigned char *w,
     __parm [__eax] [__ecx] [__ebx] \
     __modify [8087]
 
+/* Real, addressable twin, on the same argument as
+   lz_dot128_x16_sse2_w: the pragma has no address and row_q41_sse2_asm
+   reaches it by name, so a probe in another TU cannot ask this tier
+   anything. build/dot128_q41_probe.c needs it as the oracle for the
+   MMX group kernel - the MMX per-32 kernel shares that kernel's body
+   and would agree with it after a shared mistake. */
+void lz_dot128_q41_sse2_w(const unsigned char *w, const int16_t *x,
+                          int32_t *out4) {
+    lz_dot128_q41_sse2_asm(w, x, out4);
+}
+
 /* row_q41_sse2_asm: ALREADY the real call boundary from its own caller
    (matmul_q41_impl, src/ops.c, dispatched once per matmul via
    LZ_ROW_Q41). No pairing logic, same as Q8_0's SSE2 row function. */
