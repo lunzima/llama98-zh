@@ -1206,7 +1206,11 @@ extern int32_t lz_dot32_q41_sse2_asm(const unsigned char *w, const int16_t *x);
     __value [__eax]                 \
     __modify [8087]
 
-static int32_t dot32_q41_sse2a(const unsigned char *w, const int16_t *x) {
+/* Not static. It is already the thin wrapper a probe needs - the
+   #pragma aux it calls has no address of its own - and `static` was
+   the only thing keeping that address inside this file. Same for the
+   q61 and q16 twins below. */
+int32_t dot32_q41_sse2a(const unsigned char *w, const int16_t *x) {
     return lz_dot32_q41_sse2_asm(w, x);
 }
 
@@ -1874,7 +1878,7 @@ extern int32_t lz_dot32_q61_sse2_asm(const unsigned char *w4, const unsigned cha
     __value [__eax] \
     __modify [8087]
 
-static int32_t dot32_q61_sse2a(const unsigned char *w4, const unsigned char *w2,
+int32_t dot32_q61_sse2a(const unsigned char *w4, const unsigned char *w2,
                                const int16_t *x) {
     return lz_dot32_q61_sse2_asm(w4, w2, x);
 }
@@ -2184,7 +2188,7 @@ extern int32_t lz_dot32_q16_sse2_asm(const int16_t *w, const int16_t *x);
     __value [__eax] \
     __modify [8087]
 
-static int32_t dot32_q16_sse2a(const int16_t *w, const int16_t *x) {
+int32_t dot32_q16_sse2a(const int16_t *w, const int16_t *x) {
     return lz_dot32_q16_sse2_asm(w, x);
 }
 
@@ -2360,6 +2364,16 @@ extern void lz_dot128_q16_sse2_asm(const int16_t *w, const int16_t *x, int32_t *
     "movd      [ebx+12], xmm4" \
     __parm [__eax] [__ecx] [__ebx] \
     __modify [8087]
+
+/* Real, addressable twin. Q16_0 had NO cross-tier check of any kind
+   before this: the MMX group kernel had a wrapper and the SSE2 one did
+   not, so the two tiers were never compared on this format even though
+   bit-identity across tiers is a standing requirement.
+   build/dot128_q16_probe.c uses it. */
+void lz_dot128_q16_sse2_w(const int16_t *w, const int16_t *x,
+                          int32_t *out4) {
+    lz_dot128_q16_sse2_asm(w, x, out4);
+}
 
 /* row_q16_sse2_asm: ALREADY the real call boundary (LZ_ROW_Q16,
    src/ops.c). */

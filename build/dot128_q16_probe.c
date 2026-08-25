@@ -32,6 +32,8 @@
 
 void lz_dot128_q16_mmx_w(const int16_t *w, const int16_t *x, int32_t *out4);
 int32_t dot32_q16_mmx(const int16_t *w, const int16_t *x);
+void lz_dot128_q16_sse2_w(const int16_t *w, const int16_t *x, int32_t *out4);
+int32_t dot32_q16_sse2a(const int16_t *w, const int16_t *x);
 
 static unsigned long rs = 1145141919UL;
 static int nextv(void) {
@@ -73,6 +75,31 @@ int main(void) {
                     printf("  pass %d lane %d: want %ld got %ld\n",
                            pass, b, (long)want[b], (long)got[b]);
                 bad++;
+            }
+        }
+
+        /* THE SSE2 TIER, group and per-32. Q16_0 had no cross-tier
+           check at all until the SSE2 group kernel was given an
+           address - the MMX side had a wrapper and this one did not,
+           so the requirement that the tiers agree bit for bit was
+           unmeasured on this format. It is also the only arm here that
+           does not depend on ops_mmx.c being right. */
+        {
+            int32_t s4[4];
+            lz_dot128_q16_sse2_w(w, x, s4);
+            for (b = 0; b < 4; b++, n += 2) {
+                if (s4[b] != got[b]) {
+                    if (bad < 6)
+                        printf("  pass %d lane %d: mmx %ld sse2 %ld\n",
+                               pass, b, (long)got[b], (long)s4[b]);
+                    bad++;
+                }
+                if (dot32_q16_sse2a(w + b * 32, x + b * 32) != want[b]) {
+                    if (bad < 6)
+                        printf("  pass %d block %d: per-32 tiers differ\n",
+                               pass, b);
+                    bad++;
+                }
             }
         }
     }
