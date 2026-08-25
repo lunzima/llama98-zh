@@ -1014,10 +1014,10 @@ int lz_matmul_row_sse(const float *row, const float *x, int in_dim,
     __m128 b = _mm_setzero_ps();
     int j = 0, ng = in_dim & ~7;
     for (; j < ng; j += 8) {
-        a = _mm_add_ps(a, _mm_mul_ps(_mm_load_ps(row + j),
-                                     _mm_load_ps(x + j)));
-        b = _mm_add_ps(b, _mm_mul_ps(_mm_load_ps(row + j + 4),
-                                     _mm_load_ps(x + j + 4)));
+        a = _mm_add_ps(a, _mm_mul_ps(_mm_loadu_ps(row + j),
+                                     _mm_loadu_ps(x + j)));
+        b = _mm_add_ps(b, _mm_mul_ps(_mm_loadu_ps(row + j + 4),
+                                     _mm_loadu_ps(x + j + 4)));
     }
     _mm_storeu_ps(acc8, a);
     _mm_storeu_ps(acc8 + 4, b);
