@@ -79,7 +79,43 @@ enum {
        that the model is wrong, not that n is fractional.
        What closes it is the loop line beside each site: gcov counts
        `for (i = 0; i < n; i++)` sum(n) + count times, which is the
-       missing term. */
+       missing term. DONE on 2026-08-20, 8-token coverage run on kmr20,
+       -DLZ_F32COUNT=1 -O2 -march=x86-64. The LZ_SSN ternaries inside
+       LZ_FCX arguments inflate gcov line counts 2× (two branches per
+       macro invocation); all counts below are AFTER dividing out that
+       inflation. For-loop body counts give sum(n); function call counts
+       give reaches. Where no for-loop exists (the normout kernel path),
+       sum(n) is inferred from model geometry (n=512 for layer norms).
+
+       site                          reaches  sum(n)   avg n  share
+       ─────────────────────────────────────────────────────────────
+       lz_rmsnorm_gated_int:417        768    49152     64    17.2%
+       lz_rmsnorm_int:548                8     4096    512     1.8%
+       lz_rmsnorm fixed-ss:607         288   147456    512    50.9%
+       lz_rmsnorm kernel:631           288   147456    512    12.7%
+       lz_rmsnorm scalar tail:646      288   147456    512     0.0%
+       lz_l2norm_i16:778              1536    98304     64    17.5%
+                                                         ───────
+                                               total:   100.1%
+
+       THE DOMINANT SITE IS lz_rmsnorm's fixed-ss branch (607) at 50.9%
+       of the row. Together with its kernel add (631) the lz_rmsnorm
+       function accounts for 63.6% of NORM float ops. The second and
+       third sites (l2norm_i16 at 17.5% and rmsnorm_gated_int at 17.2%)
+       are nearly equal. The scalar tail (646) is always zero: when the
+       normout kernel runs (n ≥ 4, always true here), it processes all n
+       elements and n-i = 0. lz_rmsnorm_int (548) is a minor site at
+       1.8% that the census listing omitted.
+
+       Float ops per site (mul+add+div+cvt, 8 tokens):
+         199,680  site 417  (2n+2 mul, 2n+1 add, 1 cvt per call)
+          20,528  site 548  (2n+2 mul, 3n+2 add, 1 cvt per call)
+         590,976  site 607  (3n+2 mul, n+1 add, 1 cvt per call)
+         147,456  site 631  (n4<<2 add per call, kernel's +k2[1])
+               0  site 646  (tail empty)
+         202,752  site 778  (n+2 mul, 1 add, n+1 cvt per call)
+       ─────────
+       1,161,392  total NORM float ops */
     LZ_FC_NORM, LZ_FC_RSQRT,
     /* The recurrence state write-back - pass 2 only, which is LESS than
        what the recurrence tier covers. Pass 1 has no site in either arm,
