@@ -209,6 +209,14 @@
 # is bit-identical; the probe holds it against the SSE2 per-32 oracle
 # directly (dot32_q16_sse2a), 81924 values, 0 mismatches.
 #
+# lz_dot32_q16_asm_2, 72% -> 22%, the x16_2 lesson a third time: the
+# paired kernel ALREADY carried two independent accumulators (mm6/mm7)
+# and still serialised them, feeding token A's whole product chain before
+# token B's. Interleaving the two tokens' pmaddwd/paddd pairs side by
+# side - both mm1/mm2 temporaries copied from mm0 up front - leaves each
+# accumulator's add order untouched, so it is bit-identical. The probe's
+# paired arm holds it against the SSE2 paired oracle, 81924 values.
+#
 # Named and measured; what this script is for is that the next person
 # does not re-derive which kernels are worth it.
 #

@@ -3421,59 +3421,59 @@ extern void lz_dot32_q16_asm_2(const int16_t *w, const int16_t *xa,
     "pxor      mm7, mm7" \
     "movq      mm0, [eax]" \
     "movq      mm1, mm0" \
-    "pmaddwd   mm1, [edx]" \
-    "paddd     mm6, mm1" \
     "movq      mm2, mm0" \
+    "pmaddwd   mm1, [edx]" \
     "pmaddwd   mm2, [ebx]" \
+    "paddd     mm6, mm1" \
     "paddd     mm7, mm2" \
     "movq      mm0, [eax+8]" \
     "movq      mm1, mm0" \
-    "pmaddwd   mm1, [edx+8]" \
-    "paddd     mm6, mm1" \
     "movq      mm2, mm0" \
+    "pmaddwd   mm1, [edx+8]" \
     "pmaddwd   mm2, [ebx+8]" \
+    "paddd     mm6, mm1" \
     "paddd     mm7, mm2" \
     "movq      mm0, [eax+16]" \
     "movq      mm1, mm0" \
-    "pmaddwd   mm1, [edx+16]" \
-    "paddd     mm6, mm1" \
     "movq      mm2, mm0" \
+    "pmaddwd   mm1, [edx+16]" \
     "pmaddwd   mm2, [ebx+16]" \
+    "paddd     mm6, mm1" \
     "paddd     mm7, mm2" \
     "movq      mm0, [eax+24]" \
     "movq      mm1, mm0" \
-    "pmaddwd   mm1, [edx+24]" \
-    "paddd     mm6, mm1" \
     "movq      mm2, mm0" \
+    "pmaddwd   mm1, [edx+24]" \
     "pmaddwd   mm2, [ebx+24]" \
+    "paddd     mm6, mm1" \
     "paddd     mm7, mm2" \
     "movq      mm0, [eax+32]" \
     "movq      mm1, mm0" \
-    "pmaddwd   mm1, [edx+32]" \
-    "paddd     mm6, mm1" \
     "movq      mm2, mm0" \
+    "pmaddwd   mm1, [edx+32]" \
     "pmaddwd   mm2, [ebx+32]" \
+    "paddd     mm6, mm1" \
     "paddd     mm7, mm2" \
     "movq      mm0, [eax+40]" \
     "movq      mm1, mm0" \
-    "pmaddwd   mm1, [edx+40]" \
-    "paddd     mm6, mm1" \
     "movq      mm2, mm0" \
+    "pmaddwd   mm1, [edx+40]" \
     "pmaddwd   mm2, [ebx+40]" \
+    "paddd     mm6, mm1" \
     "paddd     mm7, mm2" \
     "movq      mm0, [eax+48]" \
     "movq      mm1, mm0" \
-    "pmaddwd   mm1, [edx+48]" \
-    "paddd     mm6, mm1" \
     "movq      mm2, mm0" \
+    "pmaddwd   mm1, [edx+48]" \
     "pmaddwd   mm2, [ebx+48]" \
+    "paddd     mm6, mm1" \
     "paddd     mm7, mm2" \
     "movq      mm0, [eax+56]" \
     "movq      mm1, mm0" \
-    "pmaddwd   mm1, [edx+56]" \
-    "paddd     mm6, mm1" \
     "movq      mm2, mm0" \
+    "pmaddwd   mm1, [edx+56]" \
     "pmaddwd   mm2, [ebx+56]" \
+    "paddd     mm6, mm1" \
     "paddd     mm7, mm2" \
     "movq      mm1, mm6" \
     "psrlq     mm1, 32" \
