@@ -3918,6 +3918,18 @@ static void moe_expert_loop(LZRunState *s, const LZModelConfig *c,
     }
 }
 
+/* §9.2 risk-path probe: force the router's float-logits path under an
+   otherwise --fixed all engine, so the int16 quantization's effect on
+   expert selection can be measured against a fresh float baseline. Not
+   a shipping knob - LZ_MOE_ROUTE_FLOAT=1 in the environment, and only
+   the router changes (lz_sig_mode() and every other site stay fixed).
+   getenv is C89 and this file already links the CRT. */
+static int lz_moe_route_float_probe(void) {
+    static int cached = -1;
+    if (cached < 0) cached = (getenv("LZ_MOE_ROUTE_FLOAT") != NULL);
+    return cached;
+}
+
 static void forward_moe(const LZModel *m, LZRunState *s,
                         const LZLayer *L, int layer, int nt) {
     const LZModelConfig *c = &m->config;
@@ -3995,7 +4007,8 @@ static void forward_moe(const LZModel *m, LZRunState *s,
        carries a paragraph, so the declaration stays where the paragraph
        is and the assignment comes here. */
 #if LZ_MOEGATE_I16
-    mrt_may = lz_sig_mode() && s->moe_logits_i16 && c->moe_router_sigmoid &&
+    mrt_may = !lz_moe_route_float_probe() && lz_sig_mode() &&
+              s->moe_logits_i16 && c->moe_router_sigmoid &&
               lz_matmul_xq_i16_ok(&L->moe_gate_w, hdim, nt);
 #endif /* LZ_MOEGATE_I16 */
 #if LZ_MLAT_I16
