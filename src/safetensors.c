@@ -183,7 +183,7 @@ int lz_st_open(LZSafetensors *st, const char *path, char *errbuf, int errlen) {
         t->off_begin = (lz_u64)s0;
         t->nbytes = (lz_u64)(e0 - s0);
 
-        /* declared byte count must match shape×dtype, or later reads misalign silently */
+        /* declared byte count must match shape*dtype, or later reads misalign silently */
         if (t->nbytes != (lz_u64)t->n_elem *
                          (lz_u64)lz_st_dtype_size(t->dtype)) {
             sterr(errbuf, errlen, LZ_ERR_ST_NBYTES,
@@ -321,7 +321,7 @@ int lz_st_read_f32(LZSafetensors *st, const LZStTensor *t,
             unsigned int u;
             if (exp == 0) {
                 if (man == 0) {
-                    u = sign;                       /* ±0 */
+                    u = sign;                       /* +/-0 */
                 } else {
                     /* subnormal: shift mantissa left until the top bit
                        overflows, adjusting the exponent in lockstep */

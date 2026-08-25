@@ -90,6 +90,8 @@
 !/build/gcc_warning_gate.sh
 !/build/gui_selftest_gate.sh
 !/build/t2_probe_stubs.c
+!/build/dot128_x16_probe.c
+!/build/ascii_source_gate.sh
 !/build/div_hotness.sh
 !/build/cov_run.sh
 

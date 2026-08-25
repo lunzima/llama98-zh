@@ -1,4 +1,4 @@
-/* llama98 — KunMoe LLM inference engine CLI
+/* llama98 - KunMoe LLM inference engine CLI
 
    Usage:
      llama98 <model-dir> --check

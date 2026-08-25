@@ -1206,7 +1206,7 @@ static int visit_read(LZModel *m, const LZStTensor *t, LZTensor *field,
                       void *ctx, char *errbuf, int errlen) {
     (void)ctx;
 
-    /* Expanding to f32 needs 4×elem bytes; bf16 raw data is read into
+    /* Expanding to f32 needs 4*elem bytes; bf16 raw data is read into
        the second half and expanded in place, so this buffer doubles as
        the read buffer - no extra scratch memory. */
     field->dtype = 0;

@@ -1,0 +1,107 @@
+/* Does the Q8_0 group-of-four kernel agree with four per-32 calls?
+ *
+ * Same shape as build/dot128_t2_probe.c and for the same reason: the
+ * group form's claim is that it computes the SAME four sums and only
+ * finishes them differently, so the reference is the per-32 kernel
+ * itself rather than a C model. A C model shares none of the
+ * assembly's bugs but also none of its meaning - written from the same
+ * wrong idea of the unpack, both would agree and both be wrong.
+ *
+ * WHAT VARIES. The weights here are plain int8, not packed codes, so
+ * there is no shift-level structure to sweep - what matters instead is
+ * the SIGN, because the kernel widens bytes with punpcklbw against a
+ * zero register and then relies on pmaddwd's signed multiply. A weight
+ * of -1 and a weight of 255 are the same byte and must not give the
+ * same answer. The first pass block therefore drives every byte value
+ * 0..255 through every one of the 32 weight positions.
+ *
+ * ACTIVATIONS AT THE EXTREMES ON PURPOSE: pmaddwd sums two products
+ * into an int32 lane and the kernel accumulates 16 of those per lane
+ * before folding. |w| <= 128 and |x| <= 32767 puts one product at
+ * 4.19e6 and the running lane sum at 1.34e8, well inside int32 - the
+ * sweep exists to show the fold adds the right lanes, not to find an
+ * overflow the format cannot reach.
+ *
+ * WHICH ARM ANSWERS WHICH QUESTION, stated because the exhaustive one
+ * does not answer both:
+ *
+ *   passes 0-255: the WIDENING. Every byte value through every
+ *   position, which is where a sign error shows.
+ *
+ *   passes 256+, fixed seed: WHICH ACTIVATIONS EACH CHUNK MULTIPLIES.
+ *   With all 32 weight bytes equal, a chunk collapses to w * (sum of
+ *   its four x), so a defect that swaps a chunk's activations for its
+ *   neighbour's is invisible whenever those sums agree. This is
+ *   measured behaviour of the t2 probe, not a guess - see its comment.
+ *   The seeded arm is what covers it.
+ *
+ *   the tail block: LANE ORDER, on inputs built to make the four sums
+ *   distinct and checked to be distinct before being checked correct.
+ */
+#include <stdio.h>
+#include "lz_int.h"
+
+void lz_dot128_x16_mmx_w(const int8_t *w, const int16_t *x, int32_t *out4);
+int32_t dot32_x16_mmx(const int8_t *w, const int16_t *x);
+
+static unsigned long rs = 1145141919UL;
+static int nextv(void) {
+    rs = rs * 1103515245UL + 12345UL;
+    return (int)(rs >> 1);
+}
+
+int main(void) {
+    int8_t w[128];
+    int16_t x[128];
+    int32_t got[4], want[4];
+    long bad = 0, n = 0;
+    int pass, k, b;
+
+    for (pass = 0; pass < 4096; pass++) {
+        for (k = 0; k < 128; k++) {
+            if (pass < 256) w[k] = (int8_t)(unsigned char)pass;
+            else            w[k] = (int8_t)(nextv() & 0xFF);
+        }
+        for (k = 0; k < 128; k++) {
+            if (pass < 256)      x[k] = (int16_t)((k & 1) ? 32767 : -32767);
+            else if (pass < 512) x[k] = (int16_t)(k - 64);
+            else                 x[k] = (int16_t)(nextv() % 65536 - 32768);
+        }
+
+        lz_dot128_x16_mmx_w(w, x, got);
+        for (b = 0; b < 4; b++)
+            want[b] = dot32_x16_mmx(w + b * 32, x + b * 32);
+
+        for (b = 0; b < 4; b++, n++) {
+            if (got[b] != want[b]) {
+                if (bad < 6)
+                    printf("  pass %d lane %d: want %ld got %ld\n",
+                           pass, b, (long)want[b], (long)got[b]);
+                bad++;
+            }
+        }
+    }
+
+    /* THE LANES MUST NOT BE INTERCHANGEABLE, or a fold that transposed
+       wrongly would pass everything above. */
+    {
+        int distinct = 1;
+        for (k = 0; k < 128; k++) w[k] = (int8_t)(k - 60);
+        for (k = 0; k < 128; k++) x[k] = (int16_t)(k * 37 - 500);
+        lz_dot128_x16_mmx_w(w, x, got);
+        for (b = 0; b < 4; b++)
+            want[b] = dot32_x16_mmx(w + b * 32, x + b * 32);
+        for (b = 1; b < 4; b++) if (want[b] == want[0]) distinct = 0;
+        for (b = 0; b < 4; b++, n++) if (got[b] != want[b]) bad++;
+        if (!distinct) {
+            printf("  lane-order check is blind: the four sums are equal\n");
+            bad++;
+        } else {
+            printf("  lane order: four distinct sums %ld %ld %ld %ld\n",
+                   (long)want[0], (long)want[1], (long)want[2], (long)want[3]);
+        }
+    }
+
+    printf("dot128_x16_probe: %ld value(s), %ld mismatch(es)\n", n, bad);
+    return bad != 0;
+}

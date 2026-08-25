@@ -5,7 +5,7 @@
 #include "settings.h"
 #include <stdio.h>      /* sprintf */
 
-/* Format the "N tok · X tok/s" status cell for a turn that is (or just
+/* Format the "N tok, X tok/s" status cell for a turn that is (or just
  * was) generating.
  *
  * Pure arithmetic, so it can be driven with a

@@ -542,7 +542,7 @@ watcom-gui:
 # nested inside another comment; gcc said so on every build and `check`
 # reported 16 PASS over it. Having a caller somewhere is not the test -
 # being reachable from what people actually run is.
-check: bare-endif-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate dedupe-gate mm-alias-gate c89-floor-gate comment-hygiene-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate gcc-warning-gate gcc-flag-parity-gate seed-gate gui-selftest-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate kernel-matrix-gate
+check: bare-endif-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate dedupe-gate mm-alias-gate c89-floor-gate comment-hygiene-gate ascii-source-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate gcc-warning-gate gcc-flag-parity-gate seed-gate gui-selftest-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate kernel-matrix-gate
 
 # Zero gcc warnings, asserted rather than printed. The Watcom side has
 # always been counted ("N lines, 0 warnings, 0 errors", per file); this
@@ -589,6 +589,15 @@ seed-gate:
 .PHONY: gui-selftest-gate
 gui-selftest-gate: kunkun98-gui
 	@bash build/gui_selftest_gate.sh
+
+# Every source byte is ASCII. VC++ 4.0 and Watcom read source in the
+# host codepage, and on a DBCS host a lead byte swallows the one after
+# it - which is sometimes a comment terminator. A byte test, not a
+# character test: the character-level search for CJK returns a false
+# zero when the locale disagrees with the file.
+.PHONY: ascii-source-gate
+ascii-source-gate:
+	@bash build/ascii_source_gate.sh
 
 # Two shared helpers with the same body under different names, which is
 # the duplication dedupe-gate cannot see: that one knows the names it is

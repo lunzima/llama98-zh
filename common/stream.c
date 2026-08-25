@@ -362,16 +362,19 @@ static int scan_bytes(LZStream *s, const char *b, int n, int final,
             /* Four or more hyphens, or something other than a line
                ending after three: ordinary text, falls through. */
         }
-        /* Bullet list: "- ", "* " or "+ " at a line start becomes "● ".
-           A TEXT substitution, not a style bit and not an indent -
-           indenting needs PARAFORMAT, and the table's tab stops are the
-           only PARAFORMAT this program sends.
+        /* Bullet list: "- ", "* " or "+ " at a line start becomes a
+           BLACK CIRCLE. A TEXT substitution, not a style bit and not an
+           indent - indenting needs PARAFORMAT, and the table's tab
+           stops are the only PARAFORMAT this program sends.
 
-           U+25CF BLACK CIRCLE, written in UTF-8 (E2 97 8F) and
-           converted by lz_gbk_from_utf8 like everything else, so the
-           encoding table stays the one authority. Of the obvious
-           alternatives, U+2022 "•" does not exist in GBK at all and
-           comes out "?"; U+00B7 "·" is A1A4; U+25CF "●" is A1F1.
+           U+25CF, written in UTF-8 (E2 97 8F) and converted by
+           lz_gbk_from_utf8 like everything else, so the encoding table
+           stays the one authority. Of the obvious alternatives, U+2022
+           BULLET does not exist in GBK at all and comes out "?";
+           U+00B7 MIDDLE DOT is A1A4; U+25CF is A1F1. The codepoints
+           are named rather than shown: this file has to lex correctly
+           under a compiler reading it in a DBCS host codepage, where a
+           lead byte swallows the byte after it.
 
            Checked before the '*' branch, or "* item" would toggle italic
            instead. "**bold**" at a line start is unaffected: the second

@@ -2447,7 +2447,8 @@ static void gdn_step_impl(float *out, const int8_t *sq_in, int8_t *sq_out,
     }
 
     /* Scalar epilogue: output needs no second state read.
-       S_new = gt·S + k⊗δ  =>  S_new^T q = gt·(S^T q) + δ·(k·q)
+       S_new = gt*S + outer(k, delta)
+       =>  S_new^T q = gt*(S^T q) + delta*dot(k, q)
      *
      * gt IS EXACTLY 1.0f ON EVERY KDA CALL - lz_kda_step passes the
      * literal, because KDA's decay already lives in pass 1's

@@ -5,7 +5,7 @@
 
 /* Minimal JSON DOM parser.
    Why it exists: safetensors headers and Qwen3.5 config.json are both JSON,
-   and M4.5 requires zero Python at engine side, so we parse it in C (spec §13.2).
+   and M4.5 requires zero Python at engine side, so we parse it in C (spec 13.2).
 
    Design constraints:
    - Nodes link by index, not pointer: the nodes array reallocs;

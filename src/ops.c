@@ -363,8 +363,8 @@ float lz_exp(float x) {
    SSE2's `cvtps2dq` does this directly, and **the default MXCSR is
    round-half-even, the same rule as the magic add** - so this is not
    "numerically close" but BIT-IDENTICAL: exhaustively checked every
-   quarter-integer within ±127, 16 ULPs on each side of
-   every half-integer, the zero neighborhood (incl. ±0 and subnormals),
+   quarter-integer within +/-127, 16 ULPs on each side of
+   every half-integer, the zero neighborhood (incl. +/-0 and subnormals),
    and 40K random groups - 1,297,000 elements, 0 mismatches, verified
    on both compilers.
 
@@ -1235,7 +1235,7 @@ void lz_quantize_q8_silu(const float *p, const float *g, const int32_t *sig,
 
    **The dispatch point is at the matmul level**: one branch per matmul,
    after which the 32-element kernel inside the row loop is a DIRECT call.
-   Dispatching deeper would pay one indirect call per 32 MACs — exactly
+   Dispatching deeper would pay one indirect call per 32 MACs - exactly
    what this kernel design exists to avoid. */
 /* Defined near the top of the file, above q8_amax, which also reads it. */
 
@@ -2454,20 +2454,21 @@ int lz_act_gs(const LZTensor *w, int in_dim) {
    Semantics (covering both Q8_0 and Q4_1; weight groups gs are a
    multiple of 32, activation groups always 32):
 
-     Q8_0: o[i] = Σ_g  ws[g]·Σ_{sub-block s∈g} xqs[s]·dot32(w, x)
-     Q4_1: o[i] = Σ_g ( d[g]·Σ_s xqs[s]·dot32(q, x) + m[g]·Σ_s xqs[s]·Σx )
+     Q8_0: o[i] = sum_g  ws[g]*sum_{sub-block s in g} xqs[s]*dot32(w, x)
+     Q4_1: o[i] = sum_g ( d[g]*sum_s xqs[s]*dot32(q, x)
+                          + m[g]*sum_s xqs[s]*sum(x) )
 
    **The reference must reproduce the SIMD reduction ORDER bit for
    bit, not merely be "mathematically equivalent".** The contract is
    not the two summation formulas but HOW THE PARENTHESES GO - because
    SSM state is quantized, a 1e-6 association difference flips some
-   ±1 LSB quantization decision and then amplifies per token - eight
+   +/-1 LSB quantization decision and then amplifies per token - eight
    tokens fork generation. So this code is deliberately
    dumb: int32 sub-block sums first go into arrays (on the SIMD side
    MMX/SSE2 does this), then the exact same float reduction structure
    finishes. Three details must not change:
 
-     - `acc·(sx·sw)` not `(acc·sx)·sw` (gs=32 tier)
+     - `acc*(sx*sw)` not `(acc*sx)*sw` (gs=32 tier)
      - 4-way accumulators paired as `(a0+a2)+(a1+a3)`, tail ALL into a0 (gs=32 tier)
      - Q4_1's dot and zero each get their own accumulator, merged once at the end (not interleaved per group)
 
@@ -2477,16 +2478,17 @@ int lz_act_gs(const LZTensor *w, int in_dim) {
 
 /* Q4_1 matmul kernel.
 
-   `o[i] = Σ_g [ d[i][g]·Σ_{sub-block s∈g} xqs[s]·dot32(q_w, q_x) + m[i][g]·xg[g] ]`
+   `o[i] = sum_g [ d[i][g]*sum_{sub-block s in g} xqs[s]*dot32(q_w, q_x)
+                   + m[i][g]*xg[g] ]`
 
    Two savings:
-   1. **Zero term hoisted out of the row loop**. `xg[g] = Σ_{s∈g}
-      xqs[s]·Σ_k xq[k]` depends only on activations - computed once per
+   1. **Zero term hoisted out of the row loop**. `xg[g] = sum_{s in g}
+      xqs[s]*sum_k xq[k]` depends only on activations - computed once per
       matmul, shared by all output rows. So Q4_1's inner loop differs
       from Q4_0's by not a single instruction, while the asymmetric
       tier's quality measures 2.7-4.4x better.
    2. **Nibble expansion needs no sign extension** (unsigned 0..15),
-      keeping the x256 fold from `punpcklbw(0,·)`, cancelled once at
+      keeping the x256 fold from `punpcklbw(0,x)`, cancelled once at
       the row end.
 
    Reduction order deliberately matches the Q8 wide-group path
@@ -2764,7 +2766,7 @@ void lz_matmul_xq_nt(float *o, const float *x, const int8_t *xq,
         for (i = 0; i < nt * out_dim; i++) o[i] = 0.0f;  /* defense: no silent miscalc */
         return;
     }
-    /* The widen buffers are LZ_BATCH_MAX × LZ_MM_WIDEN_MAX; nt tokens'
+    /* The widen buffers are LZ_BATCH_MAX * LZ_MM_WIDEN_MAX; nt tokens'
        activations always fit: the g_xw-filling path carries its own
        `in_dim <= LZ_MM_WIDEN_MAX` check (Q8_0's !widened branch does
        not widen and goes per-token scalar), and Q4_1/Q6_1 dispatch
@@ -2855,7 +2857,7 @@ void lz_matmul_xq_nt(float *o, const float *x, const int8_t *xq,
 
 /* o = W x: unified entry for weight tensors.
    dtype=0 goes f32; dtype=1 quantizes x (Q8_0, group = w->gs) into the
-   caller-provided xq/xqs buffers, int8×int8→int32 accumulation,
+   caller-provided xq/xqs buffers, int8*int8 -> int32 accumulation,
    dequantized per group by (sx * sw). xq needs in_dim bytes, xqs
    in_dim/w->gs f32s. */
 void lz_matmul_w(float *o, const float *x, const LZTensor *w,

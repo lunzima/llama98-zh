@@ -117,12 +117,13 @@ typedef enum {
     LZ_STR_STATE_PREFILL,
     LZ_STR_STATE_CTX,                 /* status bar part 1: "context 137/2048" */
     /* The state word IS localised ("generating" in English); what stays
-       fixed is the separator and the unit. U+00B7 (MIDDLE DOT) is in
-       the GBK tables (A1A4) and round-trips through gui/gbk.c, so the
-       · is safe - verified by a compile-time probe. The "tok" unit is
-       deliberately never translated: the context cell and the
-       candidate list already use the ASCII "tok", and a unit that
-       changes language would read as two different units. */
+       fixed is the separator and the unit. The separator is a plain
+       ASCII comma in both tables - it was U+00B7 MIDDLE DOT, and this
+       comment still argued for it (GBK A1A4, round-trips through
+       gui/gbk.c) long after the owner asked for dot separators to go.
+       The "tok" unit is deliberately never translated: the context
+       cell and the candidate list already use the ASCII "tok", and a
+       unit that changes language would read as two different units. */
     LZ_STR_STATE_TOKCELL,
 
     /* --- inference inspector --- */

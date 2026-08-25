@@ -893,7 +893,7 @@ int lz_tokenizer_load(LZTokenizer *t, const char *path,
     for (e = lz_json_first(&j, merges); e; e = lz_json_next(&j, e), i++) {
         /* Note: do not use lz_json_at(&j, merges, i) on merges - it
            scans linearly from the array head every time, degrading to
-           O(n²) over 247K elements. Walk directly.
+           O(n^2) over 247K elements. Walk directly.
 
            Two on-disk shapes for one merge entry, both real: the older
            `tokenizers` releases (and every vocab this project has built

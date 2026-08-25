@@ -113,10 +113,10 @@ typedef struct {
    with the two 8-byte loads of the 4-bit plane - the activation side's
    pre-expanded registers are reused as-is, no reshuffling needed.
 
-   Value q = lo + (hi<<4) in [0,63], dequantized w = q·d + m. The dot
-   product splits exactly: dot(q,x) = dot(lo,x) + 16·dot(hi,x), two
+   Value q = lo + (hi<<4) in [0,63], dequantized w = q*d + m. The dot
+   product splits exactly: dot(q,x) = dot(lo,x) + 16*dot(hi,x), two
    int32 accumulators merged afterwards, no precision loss (the hi term
-   is 3·127·32 = 12k, far from the int32 limit). */
+   is 3*127*32 = 12k, far from the int32 limit). */
 
 /* LZ_FMT_T2: ternary {-1,0,+1}, BIT-LAYOUT IDENTICAL TO Q6_1's 2-bit
    plane above - every 32 elements take 8 bytes, byte j's bits 0-1 are
@@ -134,7 +134,7 @@ typedef struct {
    symmetric, so there is no min to carry - but the dot product still
    splits into two terms the way Q4_1's does, and for the same reason:
 
-       Σ w·x = d·Σ(code-1)·x = d·[ Σ code·x  -  Σ x ]
+       sum(w*x) = d*sum((code-1)*x) = d*[ sum(code*x) - sum(x) ]
 
    The second term depends only on activations, so it is hoisted out of
    the row loop into xgref[] and shared by every output row. That is the

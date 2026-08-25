@@ -789,7 +789,7 @@ void lz_state_reset(LZRunState *s, const LZModel *m);
 float *lz_forward(const LZModel *m, LZRunState *s, int token, int pos);
 
 /* Batched forward (prefill): tokens[0..n) occupy positions pos0..pos0+n-1;
-   returns the LAST token's logits (intermediate logits are not computed —
+   returns the LAST token's logits (intermediate logits are not computed -
    lm_head is the single largest matmul, and nobody needs its intermediate
    results during prefill).
 

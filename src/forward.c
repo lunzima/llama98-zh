@@ -1280,7 +1280,7 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
                                            sizeof(float), &ok, &s->bytes_alloc);
     }
 
-    /* SSM/conv state: one (kd×vd) block per (layer, head), grouped
+    /* SSM/conv state: one (kd*vd) block per (layer, head), grouped
        within rows, times ssm_ring_depth slots - see forward.h's own
        comment on s->ssm_slot/s->ssm_ring_depth for the ring's shape
        and the "zero extra bandwidth, only memory" argument it depends
@@ -1494,7 +1494,7 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
         lz_state_free(s);
         return 1;
     }
-    /* RoPE precomputed table: pos × (rotary_dim/2) {cos, sin} pairs.
+    /* RoPE precomputed table: pos * (rotary_dim/2) {cos, sin} pairs.
        Shared by all layers/heads under the same theta; the half-precision
        frequency formula matches the reference (denominator is
        rotary_dim, not head_dim). */
@@ -2306,7 +2306,7 @@ static void forward_attn(const LZModel *m, LZRunState *s,
             } else
 #endif /* LZ_ATTN_FIXED & 1 */
             LZ_KV_WALK(s, pos, t, rslot, win_t0) {
-                /* scoring: q (f32) × k (Q8). float accumulation within
+                /* scoring: q (f32) against k (Q8). float accumulation within
                    a group, one scale multiply at the group tail
                    (head_dim is a multiple of 32; saves a per-element
                    scale multiply). win_t0 is 0 (t starts at 0, as
@@ -2612,7 +2612,7 @@ static void forward_ssm(const LZModel *m, LZRunState *s,
     LZ_TAP("sb", layer, s->bvec, nv);
     /* The conv advances serially over t: it reads/writes the rolling
        conv_state history, which is inherently ordered. **Deliberately
-       not batched** - conv weights are only lin_conv_dim×k floats, 0.2%
+       not batched** - conv weights are only lin_conv_dim*k floats, 0.2%
        of per-token bytes; the bandwidth saved is not worth the risk of
        changing reduction order. Ring-aware per this function's
        own header comment - slot_in==slot_out when !advance_ring. */
@@ -2659,7 +2659,7 @@ static void forward_ssm(const LZModel *m, LZRunState *s,
     LZ_TAP("sconv", layer, s->qkv_c, cdim);
 
     /* Recurrence is organized head-major (fix a head, run T steps), not
-       t-major. One head's state is kd×vd = 4 KB, resident in L1 for T
+       t-major. One head's state is kd*vd = 4 KB, resident in L1 for T
        steps - saving (T-1)/T of the per-token 1.33 MB state traffic.
        Heads are independent and each head is strictly serial in t, so
        this reordering changes no numbers. */

@@ -383,7 +383,7 @@ void matmul_scalar_ref_one(float *o, const int8_t *xq, const float *xqs,
     int gs = w->gs, r, ng, nsb;
     int t2 = (w->dtype == LZ_FMT_T2);
     /* T2 rides the q4 flag for the ACTIVATION-SUM hoist, which is the
-       same computation for both (xgref[g] = Σ xqs·Σ xq). What differs
+       same computation for both (xgref[g] = sum(xqs)*sum(xq)). What differs
        is the coefficient it is multiplied by at the end: Q4_1/Q6_1 use
        the per-group min, T2 uses -scale. See model.h's T2 note. */
     int q4 = (w->dtype == LZ_FMT_Q4_1 || w->dtype == LZ_FMT_Q6_1 || t2);
@@ -416,7 +416,7 @@ void matmul_scalar_ref_one(float *o, const int8_t *xq, const float *xqs,
     nsb = in_dim / 32;              /* total number of 32-element sub-blocks */
     if (nsb > LZ_MM_WIDEN_MAX / 32) return;      /* defense: no silent miscalc */
 
-    /* Q4_1's zero term xg[g] = Σ_{sub-block s∈g} xqs[s]·Σ_k xq[k] depends
+    /* Q4_1's zero term xg[g] = sum_{sub-block s in g} xqs[s]*sum_k xq[k] depends
        only on activations and is shared by all output rows - it MUST be
        summed in the same order as matmul_q41_impl, or the
        bit-identical contract breaks on this branch. */
@@ -450,7 +450,7 @@ void matmul_scalar_ref_one(float *o, const int8_t *xq, const float *xqs,
             int base = s * 32;
             int32_t acc = 0;
             if (q6) {
-                /* dot(q,x) = dot(lo,x) + 16·dot(hi,x), exact in
+                /* dot(q,x) = dot(lo,x) + 16*dot(hi,x), exact in
                    integers. The SIMD side splits exactly this way: the
                    lo plane reuses the Q4_1 kernel, the hi plane goes
                    through the 2-bit sub-kernel, ending as
@@ -501,7 +501,7 @@ void matmul_scalar_ref_one(float *o, const int8_t *xq, const float *xqs,
                     dot += lz_i32f(accref[g * r + s]) * xqs[g * r + s];
                 dotsum += dot * ws[g];
                 /* T2's zero coefficient is -scale, not a stored min:
-                   Σ w·x = d·[Σ code·x - Σ x]. Written as a negated
+                   sum(w*x) = d*[sum(code*x) - sum(x)]. Written as a negated
                    multiply rather than folded into the dot term so the
                    two accumulators stay separate, matching the SIMD
                    epilogue's merge order. */
@@ -671,7 +671,8 @@ const lz_rowfn LZ_ROW_Q41[LZ_ROW_N] = {
    Deliberately its own function rather than a literal call to
    q8_fixed_epi above, even though the two bodies are identical: the
    project doc calls this out explicitly (docs/int-pipeline-project.md
-   §2.1's numerical-risk note) - q8_fixed_epi's bound (LZ_EPI_MAX_NG) was
+   section 2.1's numerical-risk note) - q8_fixed_epi's bound
+   (LZ_EPI_MAX_NG) was
    derived for Q8_0's SIGNED int8 x int8 accumulator range, and while
    Q4_1/Q6_1/T2's UNSIGNED nibble/2-bit codes give a PROVABLY SMALLER
    |acc| (Q6_1's worst case is 63*127*32*256 = 65,544,192 < 2^26, against

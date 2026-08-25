@@ -93,7 +93,7 @@
 
 /* Q4_1 32-element dot product (MMX). Same algorithm as SSE2's
    part32_q41: pand(b,0x0F) grabs elements 0..15,
-   pand(psrlw(b,4),0x0F) elements 16..31, then punpcklbw(0,·) expands
+   pand(psrlw(b,4),0x0F) elements 16..31, then punpcklbw(0,x) expands
    to x256 int16 for pmaddwd. Returns the 32-element dot scaled x256;
    the caller cancels once at the row end. */
 #ifdef __WATCOMC__
@@ -152,13 +152,13 @@
    the generator's output against what is here first. 59 instructions / 6 loads.
 
    **Which is faster than the MMX version cannot be decided statically.**
-   SSE2 is 59 instructions / ~116 µop; MMX is 78 / 86 µop - +35% µop,
+   SSE2 is 59 instructions / ~116 uop; MMX is 78 / 86 uop - +35% uop,
    -24% instructions, the two directions oppose. Pentium M's
    (Banias/Dothan) SSE units are 64-bit wide, splitting 128-bit
-   instructions into two µops - but split µops are not necessarily
-   slower: Zen 1's AVX-256 also splits into two 128-bit µops with the
-   same µop total as equivalent AVX-128 code, yet still wins, on front-
-   end bandwidth and paired scheduling. The extra µops are not madds
+   instructions into two uops - but split uops are not necessarily
+   slower: Zen 1's AVX-256 also splits into two 128-bit uops with the
+   same uop total as equivalent AVX-128 code, yet still wins, on front-
+   end bandwidth and paired scheduling. The extra uops are not madds
    (those are even); they are fixed overhead paid twice (masks 6->12,
    epilogue 5->14) plus punpcklqdq, the inherent tax of the 128-bit
    layout. **That fixed overhead is fixable** - processing a whole

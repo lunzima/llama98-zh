@@ -180,7 +180,7 @@ static void part32_q41_2(const unsigned char *w, const int16_t *xa,
    (b>>6)&3; unpacklo_epi64 joins two groups into 16 bytes, aligning
    byte-for-byte with the 4-bit plane's lo/hi nibbles.
 
-   `_mm_slli_epi16(·, 4)` is safe for byte values 0..3: byte 0's bits
+   `_mm_slli_epi16(x, 4)` is safe for byte values 0..3: byte 0's bits
    0,1 move to 4,5 and byte 1's bits 8,9 to 12,13 - no cross-byte
    spill. */
 static __m128i part32_q61(const unsigned char *w4, const unsigned char *w2,

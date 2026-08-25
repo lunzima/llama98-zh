@@ -236,7 +236,7 @@ float lz_common_scroll_to_rep(int pos);
  * hunting for why the program still behaves oddly. */
 void lz_common_settings_restore(LZGuiSettings *s);
 
-/* Format the "N tok · X tok/s" status cell. Pure arithmetic:
+/* Format the "N tok, X tok/s" status cell. Pure arithmetic:
  * no Win32, so known inputs can be tabled and
  * the formatted rate asserted. `elapsed_ms` is a wall-clock span, in the
  * same seconds-as-the-unit convention cli_main.c uses; anything under

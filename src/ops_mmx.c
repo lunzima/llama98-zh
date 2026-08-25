@@ -1444,7 +1444,7 @@ void lz_exp_q20_mmx(const int32_t *tab, const int32_t *s,
    Changing this REQUIRES proving the caller's loop body has no x87.
    Differential-checked over 200K groups (random + extremes,
    bit-identical to the scalar reference).
-   Counts (µop, P6 accounting): Q8_0 52, Q4_1 63, Q6_1 86. */
+   Counts (uop, P6 accounting): Q8_0 52, Q4_1 63, Q6_1 86. */
 extern int32_t lz_dot32_x16_asm(const int8_t *w, const int16_t *x);
 #pragma aux lz_dot32_x16_asm = \
     ".586" \
@@ -1852,7 +1852,7 @@ void row_q8_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
 
 /* Q4_1 32-element dot product (MMX). Same algorithm as SSE2's
    part32_q41: pand(b,0x0F) grabs elements 0..15,
-   pand(psrlw(b,4),0x0F) elements 16..31, then punpcklbw(0,·) expands
+   pand(psrlw(b,4),0x0F) elements 16..31, then punpcklbw(0,x) expands
    to x256 int16 for pmaddwd. Returns the 32-element dot scaled x256;
    the caller cancels once at the row end. Watcom hand-written version,
    same rationale as lz_dot32_x16_asm (_m_* intrinsics are 6x slower
@@ -1863,7 +1863,7 @@ void row_q8_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
    mm2=expand temp mm3=mask mm6=accumulator mm7=zero mm5=reduce temp -
    exactly 8.
    Verified: bit-matches the scalar over 200K random + all-15 x
-   all-±127 extreme groups; measured 3.75 ns/32MAC vs x87
+   all-+/-127 extreme groups; measured 3.75 ns/32MAC vs x87
    scalar 23.50 ns (6.3x). */
 extern int32_t lz_dot32_q41_asm(const unsigned char *w, const int16_t *x);
 #pragma aux lz_dot32_q41_asm = \

@@ -178,9 +178,9 @@ void lz_l2norm(float *o, const float *x, int n, float eps);
    says it should. */
 void lz_l2norm_i16(float *o, const short *x, int n, int e, float eps);
 
-/* exp = 2^(x·log2e) via bit construction. Default path; -DLZ_EXACT_MATH falls back to libm.
+/* exp = 2^(x*log2e) via bit construction. Default path; -DLZ_EXACT_MATH falls back to libm.
 
-   ~69K exps per token, nearly all from conv1d's SiLU (lin_conv_dim ×
+   ~69K exps per token, nearly all from conv1d's SiLU (lin_conv_dim *
    linear layer count) and the FFN SiLU.
 
    Speed-wise it is NOT faster than libm: measured 11.8 ns each on
@@ -1098,7 +1098,7 @@ int lz_act_gs(const LZTensor *w, int in_dim);
 
 /* o = W x (x = f32 activations).
    W is a weight tensor (LZTensor): dtype=0 goes f32; dtype=1 first
-   quantizes x, then int8×int8->int32 accumulation, dequantized per
+   quantizes x, then int8*int8->int32 accumulation, dequantized per
    group by (sx * sw).
    xq/xqs are caller-provided quantization buffers (capacity in_dim
    bytes / in_dim/gs f32s). */
@@ -1355,13 +1355,14 @@ void lz_kv4_quantize(const float *x, int n, unsigned char *out, float *scale);
    row-major, stored as Q8_0 (group 32, contiguous within a row, hence
    vd % 32 == 0 required).
 
-       delta = (v - gt·Sᵀk)·beta
-       S    <- gt·S + k ⊗ delta
-       out   = S_newᵀ q
+       delta = (v - gt*(S^T k))*beta
+       S    <- gt*S + outer(k, delta)
+       out   = S_new^T q
 
-   The implementation touches state twice: pass 1 gathers both Sᵀk and
-   Sᵀq, pass 2 updates and quantizes. Output uses the identity
-   S_newᵀq = gt·(Sᵀq) + delta·(k·q), so the state is not re-read. q
+   The implementation touches state twice: pass 1 gathers both S^T k
+   and S^T q, pass 2 updates and quantizes. Output uses the identity
+   S_new^T q = gt*(S^T q) + delta*dot(k, q), so the state is not
+   re-read. q
    must be pre-multiplied by 1/sqrt(kd) by the caller.
 
    sq_in/ss_in (read) and sq_out/ss_out (write) are DELIBERATELY
@@ -1775,7 +1776,7 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
               head to use. On this model that is embed_tokens at the p0
               recipe, which is a THIRD of the whole per-token weight
               stream. The draft block itself is small next to that.
-     µop      verifying k+1 tokens costs (k+1) x the single-token ALU.
+     uop      verifying k+1 tokens costs (k+1) x the single-token ALU.
               Batching does NOT amortise it: the weight bytes come from
               L1 the second time, but the unpack/mask/shift work is
               redone per token (see LZ_BATCH_MAX's note - T=4 already
@@ -1788,7 +1789,7 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
               still memory-bound - the numbers do not. Nothing here may
               carry a figure until a real s/token is measured on target.
 
-   Transferable: the µop line (a static count, P6 ports). Not
+   Transferable: the uop line (a static count, P6 ports). Not
    transferable: the byte line depends on the quantization recipe in
    force, and the time line does not exist yet.
 
