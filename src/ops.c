@@ -3800,7 +3800,7 @@ static const char km_why_f32mm_g128[] =
    pshufw, pextrw and movntq on %mm, none of which is a multiply and
    none of which is a 64-bit add.
 
-   A BODY WAS WRITTEN AND MEASURED, which is why the cell says todo
+   A BODY WAS WRITTEN AND MEASURED, which is why the cell is declined
    rather than impossible - and it is NOT IN THIS TREE. It was built in
    a scratch copy, run against the oracle, and discarded; grep for an
    MMX epi kernel here and there is none. "The body exists" is what this
@@ -3820,12 +3820,13 @@ static const char km_why_f32mm_g128[] =
    reason has to fit C89's 509-character literal, which VC++ 4.0 holds
    to - it does not get to carry the whole argument. */
 static const char km_why_epi_x86[] =
-    "todo: the products are pmaddwd's shape but the ACCUMULATOR is not. "
-    "paddq is SSE2 even on %mm, so a 64-bit sum has to leave the vector "
-    "unit: |ah*m| reaches 2^30 and two of them overflow an int32 lane, "
-    "and a lane takes ONE madd result, not two: 2*2^30 lands exactly on "
-    "2^31. Written and measured, then not shipped: 19 instructions an "
-    "element against the scalar loop's 8 - see the comment above";
+    "declined: the products are pmaddwd's shape but the ACCUMULATOR is "
+    "not. paddq is SSE2 even on %mm, so a 64-bit sum has to leave the "
+    "vector unit: |ah*m| reaches 2^30 and two of them overflow an int32 "
+    "lane, and a lane takes ONE madd result, not two: 2*2^30 lands exactly "
+    "on 2^31. Written and measured, then not shipped: 19 instructions an "
+    "element against the scalar loop's 8 - slower than pure C, which is "
+    "the one exception (regression), not partial relief";
 typedef struct { unsigned char have; unsigned char why; const char *text; } LZKmReg;
 #define KM_H(mask) { (unsigned char)(mask), 0, (const char *)0 }
 #define KM_I(text) { 0, LZ_KM_IMPOSSIBLE, (text) }
@@ -3887,7 +3888,7 @@ static const LZKmReg km_reg[LZ_KM_NUNIT * LZ_KM_NCOL] = {
    LZ_P2_SSE2_EXTERN are what km_op_present can key off, and the SSE2
    one is declared under !__WATCOMC__. */
 /* recur*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_op_g128),
-/* epi  */ KM_H(KM_ALL), KM_T(km_why_epi_x86), KM_T(km_why_epi_x86), KM_H(LZ_KMB_GCC), KM_T(km_why_epi_x86), KM_T(km_why_epi_x86), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_op_g128)
+/* epi  */ KM_H(KM_ALL), KM_D(km_why_epi_x86), KM_D(km_why_epi_x86), KM_H(LZ_KMB_GCC), KM_D(km_why_epi_x86), KM_D(km_why_epi_x86), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_op_g128)
 };
 
 #if defined(__WATCOMC__)
