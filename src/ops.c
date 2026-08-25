@@ -3537,9 +3537,7 @@ static const char *const km_col[LZ_KM_NCOL] = {
    evidence, but "the tier has no instruction that touches this work". */
 static const char km_why_sse1[] =
     "SSE1 adds no signed 16x16->32 MAC and no integer %xmm; its own MMX "
-    "additions (pmaxsw/pshufw/psadbw) are real but are not a MAC. gcc "
-    "-O3 at -march=pentium3 emits zero packed ARITHMETIC for every unit "
-    "probed, these five formats included (build/o3_probe.sh)";
+    "additions (pmaxsw/pshufw/psadbw) are real but are not a MAC";
 /* The operator units' x86 and group columns. docs/arm-asm-audit.md is
    an ARM-only audit, so it cannot answer for an x86 tier here and this
    says so rather than guessing 'impossible'. */
