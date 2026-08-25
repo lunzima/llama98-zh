@@ -57,6 +57,9 @@ HARNESSES=$(ls .prof/*_xcheck.sh 2>/dev/null | grep -v "wbuild_xcheck")
 #                                              for why that is a
 #                                              comparison and not two
 #                                              unrelated green runs)
+#   recur              kda_gt1 + recur_xcheck  (gt==1 arm; pass-1 tap,
+#                                              p2 group scale, pass-2
+#                                              delta quantize)
 #
 # The five row kernels were the gap, and they are exactly the code the
 # end-to-end fixture reaches least - 47.57% of ops_kernel_dot_mmx.h.
@@ -64,7 +67,7 @@ HARNESSES=$(ls .prof/*_xcheck.sh 2>/dev/null | grep -v "wbuild_xcheck")
 # UNCOVERED is printed every run rather than kept in a comment, so
 # "every harness green" cannot be read as "every operator compared"
 # while it has entries.
-UNCOVERED="recur"
+UNCOVERED=""
 
 P=0; F=0; S=0
 for h in $HARNESSES; do
