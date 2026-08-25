@@ -661,57 +661,57 @@ static int check_shape(const LZModelConfig *c, const LZStTensor *t,
 typedef int (*LZVisit)(LZModel *m, const LZStTensor *t, LZTensor *field,
                           void *ctx, char *errbuf, int errlen);
 
+/* One tensor of the walk: resolve `name` (via the bin desc or the
+   safetensors table), check its shape against `dims`, then hand it to
+   `visit`. Extracted from model_walk so the obtain/check/visit sequence
+   is written once - the per-site parts (name and `field`) are the
+   callers'. */
+static int model_walk_one(LZModel *m, const char *name, const int *dims,
+                          LZTensor *field, LZVisit visit, void *ctx,
+                          char *errbuf, int errlen) {
+    const LZModelConfig *c = &m->config;
+    const LZStTensor *t;
+    LZStTensor desc;            /* bin-path desc; lives for this call so t stays valid */
+    if (m->bin_file) {
+        lz_i64 ne = 1;
+        int di;
+        memset(&desc, 0, sizeof(desc));
+        desc.name = name;
+        for (di = 0; di < 3 && dims[di] != DK_END; di++) {
+            lz_i64 d = resolve_dim(c, dims[di]);
+            desc.shape[desc.n_dims++] = d;
+            ne *= d;
+        }
+        desc.n_elem = ne;
+        t = &desc;
+    } else {
+        t = lz_st_find(&m->st, name);
+        if (!t) {
+            qerr(errbuf, errlen, LZ_ERR_TENSOR_MISSING, name);
+            return 1;
+        }
+    }
+    if (check_shape(c, t, dims, errbuf, errlen) != 0) return 1;
+    if (visit(m, t, field, ctx, errbuf, errlen) != 0) return 1;
+    return 0;
+}
+
 static int model_walk(LZModel *m, LZVisit visit, void *ctx,
                     char *errbuf, int errlen) {
     const LZModelConfig *c = &m->config;
+    static const int EMBED_DIMS[3] = { DK_VOCAB, DK_HIDDEN, DK_END };
+    static const int NORM_DIMS[3] = { DK_HIDDEN, DK_END, DK_END };
     char name[256];
-    const LZStTensor *t;
-    LZStTensor desc;            /* tensor desc for the bin path (reused; avoids stack invalidation) */
     int li, si;
 
     /* top level: embedding and final norm */
     snprintf(name, sizeof(name), "%sembed_tokens.weight", m->prefix);
-    if (m->bin_file) {
-        memset(&desc, 0, sizeof(desc));
-        desc.name = name;
-        desc.n_dims = 2;
-        desc.shape[0] = c->vocab_size;
-        desc.shape[1] = c->hidden_size;
-        desc.n_elem = (lz_i64)c->vocab_size * c->hidden_size;
-        t = &desc;
-    } else {
-        t = lz_st_find(&m->st, name);
-        if (!t) {
-            qerr(errbuf, errlen, LZ_ERR_TENSOR_MISSING, name);
-            return 1;
-        }
-    }
-    {
-        static const int d[3] = { DK_VOCAB, DK_HIDDEN, DK_END };
-        if (check_shape(c, t, d, errbuf, errlen) != 0) return 1;
-    }
-    if (visit(m, t, &m->embed_tokens, ctx, errbuf, errlen) != 0) return 1;
+    if (model_walk_one(m, name, EMBED_DIMS, &m->embed_tokens, visit, ctx,
+                       errbuf, errlen) != 0) return 1;
 
     snprintf(name, sizeof(name), "%snorm.weight", m->prefix);
-    if (m->bin_file) {
-        memset(&desc, 0, sizeof(desc));
-        desc.name = name;
-        desc.n_dims = 1;
-        desc.shape[0] = c->hidden_size;
-        desc.n_elem = c->hidden_size;
-        t = &desc;
-    } else {
-        t = lz_st_find(&m->st, name);
-        if (!t) {
-            qerr(errbuf, errlen, LZ_ERR_TENSOR_MISSING, name);
-            return 1;
-        }
-    }
-    {
-        static const int d[3] = { DK_HIDDEN, DK_END, DK_END };
-        if (check_shape(c, t, d, errbuf, errlen) != 0) return 1;
-    }
-    if (visit(m, t, &m->final_norm, ctx, errbuf, errlen) != 0) return 1;
+    if (model_walk_one(m, name, NORM_DIMS, &m->final_norm, visit, ctx,
+                       errbuf, errlen) != 0) return 1;
 
     /* per layer */
     for (li = 0; li < c->n_layers; li++) {
@@ -726,29 +726,9 @@ static int model_walk(LZModel *m, LZVisit visit, void *ctx,
 
             snprintf(name, sizeof(name), "%slayers.%d.%s",
                      m->prefix, li, sp->suffix);
-            if (m->bin_file) {
-                lz_i64 ne = 1;
-                int di;
-                memset(&desc, 0, sizeof(desc));
-                desc.name = name;
-                for (di = 0; di < 3 && sp->dims[di] != DK_END; di++) {
-                    lz_i64 d = resolve_dim(c, sp->dims[di]);
-                    desc.shape[desc.n_dims++] = d;
-                    ne *= d;
-                }
-                desc.n_elem = ne;
-                t = &desc;
-            } else {
-                t = lz_st_find(&m->st, name);
-                if (!t) {
-                    qerr(errbuf, errlen, LZ_ERR_TENSOR_MISSING, name);
-                    return 1;
-                }
-            }
-            if (check_shape(c, t, sp->dims, errbuf, errlen) != 0) return 1;
-
             field = (LZTensor *)((char *)L + sp->field);
-            if (visit(m, t, field, ctx, errbuf, errlen) != 0) return 1;
+            if (model_walk_one(m, name, sp->dims, field, visit, ctx,
+                               errbuf, errlen) != 0) return 1;
         }
 
         /* Per-expert triplet. Not in LAYER_SPECS above: the count
@@ -769,30 +749,10 @@ static int model_walk(LZModel *m, LZVisit visit, void *ctx,
                     LZTensor *arr, *field;
                     snprintf(name, sizeof(name), "%slayers.%d.mlp.experts.%d.%s",
                              m->prefix, li, e, EXPERT_SPECS[k].suf);
-                    if (m->bin_file) {
-                        lz_i64 ne = 1;
-                        int di;
-                        memset(&desc, 0, sizeof(desc));
-                        desc.name = name;
-                        for (di = 0; di < 3 && EXPERT_SPECS[k].dims[di] != DK_END; di++) {
-                            lz_i64 d = resolve_dim(c, EXPERT_SPECS[k].dims[di]);
-                            desc.shape[desc.n_dims++] = d;
-                            ne *= d;
-                        }
-                        desc.n_elem = ne;
-                        t = &desc;
-                    } else {
-                        t = lz_st_find(&m->st, name);
-                        if (!t) {
-                            qerr(errbuf, errlen, LZ_ERR_TENSOR_MISSING, name);
-                            return 1;
-                        }
-                    }
-                    if (check_shape(c, t, EXPERT_SPECS[k].dims, errbuf, errlen) != 0)
-                        return 1;
                     arr = *(LZTensor **)((char *)L + EXPERT_SPECS[k].field);
                     field = &arr[e];
-                    if (visit(m, t, field, ctx, errbuf, errlen) != 0) return 1;
+                    if (model_walk_one(m, name, EXPERT_SPECS[k].dims, field,
+                                       visit, ctx, errbuf, errlen) != 0) return 1;
                 }
             }
         }
@@ -859,83 +819,23 @@ static int model_walk(LZModel *m, LZVisit visit, void *ctx,
             if (sp->dims[0] == DK_INTER || sp->dims[1] == DK_INTER ||
                 sp->dims[2] == DK_INTER) continue;   /* MTP_FFN_SPECS handles these */
             snprintf(name, sizeof(name), "mtp.layers.0.%s", sp->suffix);
-            /* bin v5: same desc-building shape as every other section
-               above - no field tags in the bin format, so the MTP
-               tensors have to be described the same way the body's do. */
-            if (m->bin_file) {
-                lz_i64 ne = 1;
-                int di;
-                memset(&desc, 0, sizeof(desc));
-                desc.name = name;
-                for (di = 0; di < 3 && sp->dims[di] != DK_END; di++) {
-                    lz_i64 d = resolve_dim(c, sp->dims[di]);
-                    desc.shape[desc.n_dims++] = d;
-                    ne *= d;
-                }
-                desc.n_elem = ne;
-                t = &desc;
-            } else {
-                t = lz_st_find(&m->st, name);
-                if (!t) {
-                    qerr(errbuf, errlen, LZ_ERR_TENSOR_MISSING, name);
-                    return 1;
-                }
-            }
-            if (check_shape(c, t, sp->dims, errbuf, errlen) != 0) return 1;
             field = (LZTensor *)((char *)&m->mtp->blk + sp->field);
-            if (visit(m, t, field, ctx, errbuf, errlen) != 0) return 1;
+            if (model_walk_one(m, name, sp->dims, field, visit, ctx,
+                               errbuf, errlen) != 0) return 1;
         }
         for (k = 0; k < (int)(sizeof(MTP_FFN_SPECS) / sizeof(MTP_FFN_SPECS[0])); k++) {
             LZTensor *field;
             snprintf(name, sizeof(name), "mtp.layers.0.%s", MTP_FFN_SPECS[k].suffix);
-            if (m->bin_file) {
-                lz_i64 ne = 1;
-                int di;
-                memset(&desc, 0, sizeof(desc));
-                desc.name = name;
-                for (di = 0; di < 3 && MTP_FFN_SPECS[k].dims[di] != DK_END; di++) {
-                    lz_i64 d = resolve_dim(c, MTP_FFN_SPECS[k].dims[di]);
-                    desc.shape[desc.n_dims++] = d;
-                    ne *= d;
-                }
-                desc.n_elem = ne;
-                t = &desc;
-            } else {
-                t = lz_st_find(&m->st, name);
-                if (!t) {
-                    qerr(errbuf, errlen, LZ_ERR_TENSOR_MISSING, name);
-                    return 1;
-                }
-            }
-            if (check_shape(c, t, MTP_FFN_SPECS[k].dims, errbuf, errlen) != 0) return 1;
             field = (LZTensor *)((char *)&m->mtp->blk + MTP_FFN_SPECS[k].field);
-            if (visit(m, t, field, ctx, errbuf, errlen) != 0) return 1;
+            if (model_walk_one(m, name, MTP_FFN_SPECS[k].dims, field, visit,
+                               ctx, errbuf, errlen) != 0) return 1;
         }
         for (k = 0; k < (int)(sizeof(MTP_SPECS) / sizeof(MTP_SPECS[0])); k++) {
             LZTensor *field;
             snprintf(name, sizeof(name), "mtp.%s", MTP_SPECS[k].suffix);
-            if (m->bin_file) {
-                lz_i64 ne = 1;
-                int di;
-                memset(&desc, 0, sizeof(desc));
-                desc.name = name;
-                for (di = 0; di < 3 && MTP_SPECS[k].dims[di] != DK_END; di++) {
-                    lz_i64 d = resolve_dim(c, MTP_SPECS[k].dims[di]);
-                    desc.shape[desc.n_dims++] = d;
-                    ne *= d;
-                }
-                desc.n_elem = ne;
-                t = &desc;
-            } else {
-                t = lz_st_find(&m->st, name);
-                if (!t) {
-                    qerr(errbuf, errlen, LZ_ERR_TENSOR_MISSING, name);
-                    return 1;
-                }
-            }
-            if (check_shape(c, t, MTP_SPECS[k].dims, errbuf, errlen) != 0) return 1;
             field = (LZTensor *)((char *)m->mtp + MTP_SPECS[k].field);
-            if (visit(m, t, field, ctx, errbuf, errlen) != 0) return 1;
+            if (model_walk_one(m, name, MTP_SPECS[k].dims, field, visit, ctx,
+                               errbuf, errlen) != 0) return 1;
         }
     }
     return 0;
