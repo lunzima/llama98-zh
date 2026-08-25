@@ -304,7 +304,8 @@ WATCOM_BASE := -za99 -otexan -zp4 -DLZ_MMX_TU=1 -DLZ_SSE2_TU=1 $(EXTRA_DEFS)
 # project has not measured.
 NT_CPU_FLAGS := -4r
 DOS_CPU_FLAGS := -3r
-# ops.c/cpucheck.c only, both targets - see the comment block above.
+# cpucheck.c only among the ENG files, both targets - plus the ENG_MMX
+# units, which take this set outright. See the comment block above.
 # __MMX__ lives here (not WATCOM_BASE) because only the units that may
 # emit MMX should define it: mmx_compat.h's Watcom branch gates the full
 # <mmintrin.h> intrinsics on it, and a non-kernel TU that defined __MMX__
@@ -312,8 +313,20 @@ DOS_CPU_FLAGS := -3r
 # units below reuse this same flag set, so they carry __MMX__ too.
 HIGH_CPU_FLAGS := -6r -D__MMX__=1
 
-# ops.c and cpucheck.c need HIGH_CPU_FLAGS; every other ENG file uses
-# the target's ordinary floor. A shell `case`, not a Make function: the
+# cpucheck.c needs HIGH_CPU_FLAGS; every other ENG file uses the
+# target's ordinary floor.
+#
+# NOT ops.c, which this said for a long time while the case arm below
+# named cpucheck alone. The code was the correct half: src/ops.c's own
+# include block says it "must never be compiled with" __MMX__, because
+# HIGH_CPU_FLAGS carries -D__MMX__=1 and that makes mmx_compat.h pull
+# the full <mmintrin.h> - which does not compile below the -6r floor
+# that a non-kernel TU does not get. So the trap here was a comment
+# inviting someone to add `ops)` to the arm and "fix the
+# inconsistency", which would define __MMX__ for the one file that
+# documents needing it undefined.
+#
+# A shell `case`, not a Make function: the
 # loop variable ($$f below) is only known when the recipe's shell runs,
 # not at Make's own macro-expansion time, so the per-file choice has to
 # be made inside the loop. One case arm, reused by all four `for f in
