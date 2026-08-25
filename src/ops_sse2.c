@@ -219,6 +219,17 @@ extern void lz_p2_mul32_sse2_asm(const signed char *hi, const signed char *lo,
     __parm [__eax] [__edx] [__ebx] [__ecx] \
     __modify [8087]
 
+/* The SSE2 mul32's address. Its MMX twin has had lz_p2_mul32_mmx since
+   the tier split, so this was the last kernel in these three files
+   that nothing outside its own could call. This one writes INTO the
+   block - amax and a[] - rather than returning anything, so
+   build/p2_mul32_probe.c compares those fields. */
+void lz_p2_mul32_sse2_w(const int8_t *hi, const int8_t *lo,
+                        const int16_t *dq, lz_p2_blk *blk) {
+    lz_p2_mul32_sse2_asm((const signed char *)hi, (const signed char *)lo,
+                         (const short *)dq, blk);
+}
+
 /* The 128-bit split. Every constant stays in memory - all four are
    16-byte aligned m128 operands, which frees all eight registers for the
    sixteen elements in flight and is why this needs no register budget

@@ -41,18 +41,15 @@ set -u
 cd "$(dirname "$0")/.."
 
 FILES="src/ops_mmx.c src/ops_sse2.c src/ops_mmx_sse.c"
-FLOOR=58
+FLOOR=59
 
-# ONE IS STILL UNREACHABLE:
+# ALL FIFTY-NINE ARE REACHABLE. Every hand-written kernel in these
+# three files can be called from another translation unit, which is
+# what a differential probe needs and what none of them had for
+# twenty-six of them when this gate was written.
 #
-#   ops_sse2.c      p2_mul32        the other half of the GDN pass-2
-#                                   pair. It writes INTO the block
-#                                   rather than out of it, so a probe
-#                                   has to compare struct fields rather
-#                                   than a returned buffer, and the
-#                                   MMX tier's twin is fused into its
-#                                   row loop rather than standing
-#                                   alone.
+# The floor is now the total. A new kernel arrives with a wrapper or
+# this reddens on the first run.
 #
 # THIS LIST HAS BEEN WRONG TWICE, both times too long, both times the
 # gate's fault rather than the code's. It said fourteen while a line
