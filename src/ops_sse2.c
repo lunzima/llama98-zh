@@ -2223,22 +2223,24 @@ extern int32_t lz_dot32_q16_sse2_asm(const int16_t *w, const int16_t *x);
 #pragma aux lz_dot32_q16_sse2_asm = \
     ".686" \
     "pxor      xmm4, xmm4" \
+    "pxor      xmm3, xmm3" \
     "movdqu    xmm0, [eax]" \
+    "movdqu    xmm5, [eax+32]" \
     "movdqu    xmm1, [ecx]" \
+    "movdqu    xmm6, [ecx+32]" \
     "pmaddwd   xmm0, xmm1" \
+    "pmaddwd   xmm5, xmm6" \
     "paddd     xmm4, xmm0" \
+    "paddd     xmm3, xmm5" \
     "movdqu    xmm0, [eax+16]" \
+    "movdqu    xmm5, [eax+48]" \
     "movdqu    xmm1, [ecx+16]" \
+    "movdqu    xmm6, [ecx+48]" \
     "pmaddwd   xmm0, xmm1" \
+    "pmaddwd   xmm5, xmm6" \
     "paddd     xmm4, xmm0" \
-    "movdqu    xmm0, [eax+32]" \
-    "movdqu    xmm1, [ecx+32]" \
-    "pmaddwd   xmm0, xmm1" \
-    "paddd     xmm4, xmm0" \
-    "movdqu    xmm0, [eax+48]" \
-    "movdqu    xmm1, [ecx+48]" \
-    "pmaddwd   xmm0, xmm1" \
-    "paddd     xmm4, xmm0" \
+    "paddd     xmm3, xmm5" \
+    "paddd     xmm4, xmm3" \
     "movdqa    xmm2, xmm4" \
     "psrldq    xmm2, 8" \
     "paddd     xmm4, xmm2" \

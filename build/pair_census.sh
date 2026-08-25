@@ -217,6 +217,14 @@
 # accumulator's add order untouched, so it is bit-identical. The probe's
 # paired arm holds it against the SSE2 paired oracle, 81924 values.
 #
+# lz_dot32_q16_sse2_asm, 65% -> 32%, two streams where the MMX twin took
+# four: Q16_0 int16 weights need no unpack, so the SSE2 form has xmm3/5/6/7
+# free and each MAC already moves independent loads. Two accumulators
+# (xmm4/xmm3) over two weight+activation pairs (xmm0/xmm5 and xmm1/xmm6)
+# break the single-accumulator chain. Integer addition is associative mod
+# 2^32, so it is bit-identical; the probe's cross-tier arm holds it
+# against dot32_q16_mmx, 81924 values, 0 mismatches.
+#
 # Named and measured; what this script is for is that the next person
 # does not re-derive which kernels are worth it.
 #
