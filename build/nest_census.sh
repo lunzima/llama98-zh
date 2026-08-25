@@ -32,9 +32,12 @@ cd "$(dirname "$0")/.."
 TOP=${1:-20}
 shift 2>/dev/null || true
 FILES=${*:-}
+WHOLE=0
 if [ -z "$FILES" ]; then
     FILES=$(ls src/*.c common/*.c gui/*.c 2>/dev/null)
+    WHOLE=1
 fi
+NFILE=$(printf '%s\n' $FILES | wc -l)
 
 command -v awk >/dev/null 2>&1 || { echo "nest_census: SKIP - no awk"; exit 2; }
 
@@ -42,15 +45,30 @@ W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 awk -f build/nest_census.awk $FILES > "$W/all.txt" || {
     echo "nest_census: the scan failed"; exit 2; }
 
+# Sync check. The scan finding a handful of functions where there are
+# many means the brace machine came adrift - most likely on a construct
+# the comment stripper mishandles - and a short ranking would read as
+# "few functions are deep" rather than as "the instrument stopped
+# counting".
+#
+# THE THRESHOLD IS PER FILE, not a tree-wide constant. The first version
+# refused any run returning under 100, which is right for the default
+# set of ~50 files and wrong the moment anyone passes a file list: two
+# operator files legitimately hold 87 functions between them and the
+# check called that a loss of sync. A count that is correct being
+# reported as instrument failure is the same defect as the reverse, and
+# it arrived within an hour of the gate being written.
+#
+# THE EXPLICIT-LIST CHECK IS WEAK and saying so is the point: two files
+# per function is a floor a badly desynced scan could still clear. The
+# whole-tree run keeps the 100 and is the one to trust; a file list
+# trades that for being able to ask about a subset at all.
 N=$(wc -l < "$W/all.txt")
-if [ "$N" -lt 100 ]; then
-    # Positive control. The scan finding a handful of functions in a
-    # tree this size means the brace machine lost sync - most likely on
-    # a construct the comment stripper mishandles - and a short ranking
-    # would read as "few functions are deep" rather than as "the
-    # instrument stopped counting".
-    echo "nest_census: only $N function(s) found across the tree."
-    echo "  That is too few; the brace tracking has lost sync and the"
+MIN=$((NFILE * 2))
+[ "$WHOLE" = 1 ] && [ "$MIN" -lt 100 ] && MIN=100
+if [ "$N" -lt "$MIN" ]; then
+    echo "nest_census: only $N function(s) across $NFILE file(s), under the"
+    echo "  $MIN this scan expects. The brace tracking has lost sync and the"
     echo "  ranking below would be of whatever it happened to keep."
     exit 2
 fi
