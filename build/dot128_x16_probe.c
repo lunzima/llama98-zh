@@ -54,6 +54,7 @@ int32_t dot32_x16_mmx(const int8_t *w, const int16_t *x);
 int32_t lz_dot32_x16_sse2(const int8_t *w, const int16_t *x);
 void dot32_x16_mmx_2(const int8_t *w, const int16_t *xa, const int16_t *xb,
                      int32_t *oa, int32_t *ob);
+void lz_dot128_x16_sse2_w(const int8_t *w, const int16_t *x, int32_t *out4);
 
 static unsigned long rs = 1145141919UL;
 static int nextv(void) {
@@ -106,6 +107,25 @@ int main(void) {
                     printf("  pass %d block %d: mmx %ld sse2 %ld\n",
                            pass, b, (long)want[b], (long)s2);
                 bad++;
+            }
+        }
+
+        /* THE SSE2 GROUP KERNEL, against the MMX group kernel directly.
+           The two tiers must agree bit for bit - that is a standing
+           requirement, not something this probe invented - and holding
+           group to group also covers the FOLD, which the per-32
+           comparisons above cannot see at all: they never exercise a
+           four-sub-block reduction. */
+        {
+            int32_t s4[4];
+            lz_dot128_x16_sse2_w(w, x, s4);
+            for (b = 0; b < 4; b++, n++) {
+                if (s4[b] != got[b]) {
+                    if (bad < 6)
+                        printf("  pass %d lane %d: mmx %ld sse2 %ld\n",
+                               pass, b, (long)got[b], (long)s4[b]);
+                    bad++;
+                }
             }
         }
 
