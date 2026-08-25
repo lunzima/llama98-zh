@@ -255,6 +255,19 @@
 # build/wsum_pair_probe.c holds it against the MMX tier and the declared C
 # contract, 524288 values, 0 mismatches under Watcom.
 #
+# lz_matmul_row_sse_asm, 33% -> 0%, and it sat hidden behind a measurement
+# bug THIS SCRIPT carried until it was found here: the terminator search
+# looked for __parm, but eleven kernels (this one, lz_fwht_stage_f32_sse_asm,
+# the p2 split kernels) spell it bare `parm`, so their bodies over-extended
+# into the next kernel and every one of their numbers was wrong. Now fixed
+# to accept either spelling. The F32 matmul row held xmm4-xmm7 free yet
+# reused xmm2/xmm3 for the second 4-float half, a WAR serialisation; giving
+# that half its own xmm4/xmm5 retires the two mulps/addps chains side by
+# side. The halves write separate accumulators (xmm0, xmm1) in the same
+# order, so it is bit-identical; build/matmul_row_probe.c holds it against
+# the scalar C contract compiled -fp6 (volatile float keeps the product
+# 32-bit, matching mulps), 160000 values, 0 mismatches under Watcom.
+#
 # Named and measured; what this script is for is that the next person
 # does not re-derive which kernels are worth it.
 #
@@ -276,13 +289,17 @@ def kernels(path):
     except IOError:
         return
     # Each #pragma aux body: the name, then the quoted instructions up to
-    # __parm. Matching on the pragma rather than on quotes anywhere keeps
-    # ordinary string literals out.
+    # its parm specifier. Watcom spells that __parm in most kernels and
+    # bare `parm` in eleven of them (e.g. lz_matmul_row_sse_asm), so the
+    # terminator is either spelling at the start of a line; matching on
+    # the pragma rather than on quotes anywhere keeps ordinary string
+    # literals out.
     for m in re.finditer(r'#pragma aux\s+([A-Za-z_0-9]+)\s*=', s):
         name = m.group(1)
-        end = s.find('__parm', m.end())
-        if end < 0:
+        mm = re.search(r'\n[ \t]*(?:__)?parm\b', s[m.end():])
+        if not mm:
             continue
+        end = m.end() + mm.start()
         body = s[m.end():end]
         ins = re.findall(r'"([a-z][a-z0-9]*)\s+([^"]*)"', body)
         yield name, ins

@@ -665,12 +665,12 @@ extern int lz_matmul_row_sse_asm(const float *row, const float *x,
     "mmloop:"                                                   \
     "movups  xmm2, [eax]"                                       \
     "movups  xmm3, [edx]"                                       \
+    "movups  xmm4, [eax+16]"                                    \
+    "movups  xmm5, [edx+16]"                                    \
     "mulps   xmm2, xmm3"                                        \
+    "mulps   xmm4, xmm5"                                        \
     "addps   xmm0, xmm2"                                        \
-    "movups  xmm2, [eax+16]"                                    \
-    "movups  xmm3, [edx+16]"                                    \
-    "mulps   xmm2, xmm3"                                        \
-    "addps   xmm1, xmm2"                                        \
+    "addps   xmm1, xmm4"                                        \
     "add     eax, 32"                                           \
     "add     edx, 32"                                           \
     "sub     esi, 8"                                            \
