@@ -97,6 +97,7 @@
 !/build/ascii_source_gate.sh
 !/build/div_hotness.sh
 !/build/cov_run.sh
+!/build/watcom_flag_parity_gate.sh
 
 # Stray compiler/linker intermediates (gcc, Open Watcom), plus the raw
 # dumps probes drop at the repo root when run without a -o path.
