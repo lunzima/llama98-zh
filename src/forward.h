@@ -396,7 +396,7 @@ typedef struct {
     float *mtp_target_p;       /* vocab */
 
     /* SSM/conv recurrent state, widened into a (ring_depth, ...) ring
-       (user-directed: speculative-decode rollback without a
+       (speculative-decode rollback without a
        checkpoint-restore-and-replay - see generate.c's lz_spec_round,
        and s->ssm_slot below for the mechanism). ring_depth is
        LZ_SPEC_K_MAX+1 when m->mtp != NULL (lz_state_alloc), 1

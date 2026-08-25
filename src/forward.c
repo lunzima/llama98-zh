@@ -38,7 +38,7 @@
 #define LZ_TAP_OFF 1
 #endif /* LZ_TAP */
 
-/* Debug-only investigative probe for the team-lead's dilution-vs-position
+/* Debug-only investigative probe for the dilution-vs-position
    question on the MTP prefill A/B/C study. Scales the MTP block's own
    attention-branch output before the residual add
    in lz_mtp_draft_step, on EVERY draft step. 1.0f (default) skips the
@@ -50,7 +50,7 @@
    investigation. */
 float lz_debug_mtp_attn_scale = 1.0f;
 
-/* Debug-only investigative probe, part 2 (team-lead's "decoupled"
+/* Debug-only investigative probe, part 2 (the "decoupled"
    experiment - same report as lz_debug_mtp_attn_scale above): when > 0
    and forward_attn's own `layer` argument is the MTP
    sentinel (LZ_MTP_CACHE_LAYER, negative), restrict the MTP's own
@@ -134,8 +134,8 @@ lz_i64 lz_debug_mlat_i16 = 0;
 lz_i64 lz_debug_mlat_quant = 0;
 
 /* Timer + call-count pair for lz_mtp_catchup, same shape as the capture
-   pair above and same reason: team-lead's explicit
-   requirement is a POSITIVE control proving catch-up decode actually
+   pair above and same reason: the explicit requirement is a POSITIVE
+   control proving catch-up decode actually
    ran, not just a plausible-looking diff - "removed" and "still there
    but never called" are indistinguishable without a counter (the
    pos_only dead-code lesson, see lz_debug_mtp_attn_rows's own history).

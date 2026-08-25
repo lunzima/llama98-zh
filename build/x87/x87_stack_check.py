@@ -50,7 +50,7 @@ import sys
 from collections import defaultdict
 
 # ---- instruction depth-delta table ------------------------------------
-# team-lead's original table, extended with every mnemonic actually
+# The original table, extended with every mnemonic actually
 # observed in this project's 32-bit x87 build (see the shell census this
 # script's history was developed against) plus the remaining standard
 # x87 opcodes for completeness.
