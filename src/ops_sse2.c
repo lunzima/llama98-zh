@@ -3477,24 +3477,24 @@ void lz_wsum_pair_sse2(const int8_t *rowA, const int8_t *rowB,
     memcpy(&cw, coef, 4);           /* (ckA, ckB), one dword */
     c = _mm_set1_epi32(cw);
     for (off = 0; off < 32; off += 16) {
-        __m128i ra = _mm_loadu_si128((const __m128i *)(const void *)(rowA + off));
-        __m128i rb = _mm_loadu_si128((const __m128i *)(const void *)(rowB + off));
+        __m128i ra = _mm_load_si128((const __m128i *)(const void *)(rowA + off));
+        __m128i rb = _mm_load_si128((const __m128i *)(const void *)(rowB + off));
         __m128i al = _mm_srai_epi16(_mm_unpacklo_epi8(ra, ra), 8);
         __m128i bl = _mm_srai_epi16(_mm_unpacklo_epi8(rb, rb), 8);
         __m128i ah = _mm_srai_epi16(_mm_unpackhi_epi8(ra, ra), 8);
         __m128i bh = _mm_srai_epi16(_mm_unpackhi_epi8(rb, rb), 8);
         int32_t *acc = acc32 + off;
-        _mm_storeu_si128((__m128i *)(void *)(acc + 0),
-            _mm_add_epi32(_mm_loadu_si128((const __m128i *)(const void *)(acc + 0)),
+        _mm_store_si128((__m128i *)(void *)(acc + 0),
+            _mm_add_epi32(_mm_load_si128((const __m128i *)(const void *)(acc + 0)),
                           _mm_madd_epi16(_mm_unpacklo_epi16(al, bl), c)));
-        _mm_storeu_si128((__m128i *)(void *)(acc + 4),
-            _mm_add_epi32(_mm_loadu_si128((const __m128i *)(const void *)(acc + 4)),
+        _mm_store_si128((__m128i *)(void *)(acc + 4),
+            _mm_add_epi32(_mm_load_si128((const __m128i *)(const void *)(acc + 4)),
                           _mm_madd_epi16(_mm_unpackhi_epi16(al, bl), c)));
-        _mm_storeu_si128((__m128i *)(void *)(acc + 8),
-            _mm_add_epi32(_mm_loadu_si128((const __m128i *)(const void *)(acc + 8)),
+        _mm_store_si128((__m128i *)(void *)(acc + 8),
+            _mm_add_epi32(_mm_load_si128((const __m128i *)(const void *)(acc + 8)),
                           _mm_madd_epi16(_mm_unpacklo_epi16(ah, bh), c)));
-        _mm_storeu_si128((__m128i *)(void *)(acc + 12),
-            _mm_add_epi32(_mm_loadu_si128((const __m128i *)(const void *)(acc + 12)),
+        _mm_store_si128((__m128i *)(void *)(acc + 12),
+            _mm_add_epi32(_mm_load_si128((const __m128i *)(const void *)(acc + 12)),
                           _mm_madd_epi16(_mm_unpackhi_epi16(ah, bh), c)));
     }
 }

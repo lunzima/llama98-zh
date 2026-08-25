@@ -35,16 +35,16 @@ static __m128i fold4_sse2(__m128i s0, __m128i s1, __m128i s2, __m128i s3) {
    accumulation caps around 1.3e8. */
 static __m128i part32_x16(const int8_t *w, const int16_t *x) {
     __m128i z = _mm_setzero_si128();
-    __m128i w0 = _mm_loadu_si128((const __m128i *)w);
-    __m128i w1 = _mm_loadu_si128((const __m128i *)(w + 16));
+    __m128i w0 = _mm_load_si128((const __m128i *)w);
+    __m128i w1 = _mm_load_si128((const __m128i *)(w + 16));
     __m128i w0l = _mm_unpacklo_epi8(z, w0);
     __m128i w0h = _mm_unpackhi_epi8(z, w0);
     __m128i w1l = _mm_unpacklo_epi8(z, w1);
     __m128i w1h = _mm_unpackhi_epi8(z, w1);
-    __m128i x0 = _mm_loadu_si128((const __m128i *)x);
-    __m128i x1 = _mm_loadu_si128((const __m128i *)(x + 8));
-    __m128i x2 = _mm_loadu_si128((const __m128i *)(x + 16));
-    __m128i x3 = _mm_loadu_si128((const __m128i *)(x + 24));
+    __m128i x0 = _mm_load_si128((const __m128i *)x);
+    __m128i x1 = _mm_load_si128((const __m128i *)(x + 8));
+    __m128i x2 = _mm_load_si128((const __m128i *)(x + 16));
+    __m128i x3 = _mm_load_si128((const __m128i *)(x + 24));
     __m128i s0 = _mm_add_epi32(_mm_madd_epi16(w0l, x0), _mm_madd_epi16(w0h, x1));
     __m128i s1 = _mm_add_epi32(_mm_madd_epi16(w1l, x2), _mm_madd_epi16(w1h, x3));
     return _mm_add_epi32(s0, s1);
@@ -69,20 +69,20 @@ static __m128i part32_x16(const int8_t *w, const int16_t *x) {
 static void part32_x16_2(const int8_t *w, const int16_t *xa,
                          const int16_t *xb, __m128i *pa, __m128i *pb) {
     __m128i z = _mm_setzero_si128();
-    __m128i w0 = _mm_loadu_si128((const __m128i *)w);
-    __m128i w1 = _mm_loadu_si128((const __m128i *)(w + 16));
+    __m128i w0 = _mm_load_si128((const __m128i *)w);
+    __m128i w1 = _mm_load_si128((const __m128i *)(w + 16));
     __m128i w0l = _mm_unpacklo_epi8(z, w0);
     __m128i w0h = _mm_unpackhi_epi8(z, w0);
     __m128i w1l = _mm_unpacklo_epi8(z, w1);
     __m128i w1h = _mm_unpackhi_epi8(z, w1);
-    __m128i a0 = _mm_loadu_si128((const __m128i *)xa);
-    __m128i a1 = _mm_loadu_si128((const __m128i *)(xa + 8));
-    __m128i a2 = _mm_loadu_si128((const __m128i *)(xa + 16));
-    __m128i a3 = _mm_loadu_si128((const __m128i *)(xa + 24));
-    __m128i b0 = _mm_loadu_si128((const __m128i *)xb);
-    __m128i b1 = _mm_loadu_si128((const __m128i *)(xb + 8));
-    __m128i b2 = _mm_loadu_si128((const __m128i *)(xb + 16));
-    __m128i b3 = _mm_loadu_si128((const __m128i *)(xb + 24));
+    __m128i a0 = _mm_load_si128((const __m128i *)xa);
+    __m128i a1 = _mm_load_si128((const __m128i *)(xa + 8));
+    __m128i a2 = _mm_load_si128((const __m128i *)(xa + 16));
+    __m128i a3 = _mm_load_si128((const __m128i *)(xa + 24));
+    __m128i b0 = _mm_load_si128((const __m128i *)xb);
+    __m128i b1 = _mm_load_si128((const __m128i *)(xb + 8));
+    __m128i b2 = _mm_load_si128((const __m128i *)(xb + 16));
+    __m128i b3 = _mm_load_si128((const __m128i *)(xb + 24));
     *pa = _mm_add_epi32(
               _mm_add_epi32(_mm_madd_epi16(w0l, a0), _mm_madd_epi16(w0h, a1)),
               _mm_add_epi32(_mm_madd_epi16(w1l, a2), _mm_madd_epi16(w1h, a3)));
@@ -114,17 +114,17 @@ static void part32_x16_2(const int8_t *w, const int16_t *xa,
 static __m128i part32_q41(const unsigned char *w, const int16_t *x) {
     const __m128i m0f = _mm_set1_epi8(0x0F);
     __m128i z  = _mm_setzero_si128();
-    __m128i b  = _mm_loadu_si128((const __m128i *)w);
+    __m128i b  = _mm_load_si128((const __m128i *)w);
     __m128i lo = _mm_and_si128(b, m0f);
     __m128i hi = _mm_and_si128(_mm_srli_epi16(b, 4), m0f);
     __m128i l0 = _mm_unpacklo_epi8(z, lo);
     __m128i l1 = _mm_unpackhi_epi8(z, lo);
     __m128i h0 = _mm_unpacklo_epi8(z, hi);
     __m128i h1 = _mm_unpackhi_epi8(z, hi);
-    __m128i x0 = _mm_loadu_si128((const __m128i *)x);
-    __m128i x1 = _mm_loadu_si128((const __m128i *)(x + 8));
-    __m128i x2 = _mm_loadu_si128((const __m128i *)(x + 16));
-    __m128i x3 = _mm_loadu_si128((const __m128i *)(x + 24));
+    __m128i x0 = _mm_load_si128((const __m128i *)x);
+    __m128i x1 = _mm_load_si128((const __m128i *)(x + 8));
+    __m128i x2 = _mm_load_si128((const __m128i *)(x + 16));
+    __m128i x3 = _mm_load_si128((const __m128i *)(x + 24));
     __m128i s0 = _mm_add_epi32(_mm_madd_epi16(l0, x0), _mm_madd_epi16(l1, x1));
     __m128i s1 = _mm_add_epi32(_mm_madd_epi16(h0, x2), _mm_madd_epi16(h1, x3));
     return _mm_add_epi32(s0, s1);
@@ -147,21 +147,21 @@ static void part32_q41_2(const unsigned char *w, const int16_t *xa,
                          const int16_t *xb, __m128i *pa, __m128i *pb) {
     const __m128i m0f = _mm_set1_epi8(0x0F);
     __m128i z  = _mm_setzero_si128();
-    __m128i b  = _mm_loadu_si128((const __m128i *)w);
+    __m128i b  = _mm_load_si128((const __m128i *)w);
     __m128i lo = _mm_and_si128(b, m0f);
     __m128i hi = _mm_and_si128(_mm_srli_epi16(b, 4), m0f);
     __m128i l0 = _mm_unpacklo_epi8(z, lo);
     __m128i l1 = _mm_unpackhi_epi8(z, lo);
     __m128i h0 = _mm_unpacklo_epi8(z, hi);
     __m128i h1 = _mm_unpackhi_epi8(z, hi);
-    __m128i a0 = _mm_loadu_si128((const __m128i *)xa);
-    __m128i a1 = _mm_loadu_si128((const __m128i *)(xa + 8));
-    __m128i a2 = _mm_loadu_si128((const __m128i *)(xa + 16));
-    __m128i a3 = _mm_loadu_si128((const __m128i *)(xa + 24));
-    __m128i b0 = _mm_loadu_si128((const __m128i *)xb);
-    __m128i b1 = _mm_loadu_si128((const __m128i *)(xb + 8));
-    __m128i b2 = _mm_loadu_si128((const __m128i *)(xb + 16));
-    __m128i b3 = _mm_loadu_si128((const __m128i *)(xb + 24));
+    __m128i a0 = _mm_load_si128((const __m128i *)xa);
+    __m128i a1 = _mm_load_si128((const __m128i *)(xa + 8));
+    __m128i a2 = _mm_load_si128((const __m128i *)(xa + 16));
+    __m128i a3 = _mm_load_si128((const __m128i *)(xa + 24));
+    __m128i b0 = _mm_load_si128((const __m128i *)xb);
+    __m128i b1 = _mm_load_si128((const __m128i *)(xb + 8));
+    __m128i b2 = _mm_load_si128((const __m128i *)(xb + 16));
+    __m128i b3 = _mm_load_si128((const __m128i *)(xb + 24));
     *pa = _mm_add_epi32(
               _mm_add_epi32(_mm_madd_epi16(l0, a0), _mm_madd_epi16(l1, a1)),
               _mm_add_epi32(_mm_madd_epi16(h0, a2), _mm_madd_epi16(h1, a3)));
@@ -188,7 +188,7 @@ static __m128i part32_q61(const unsigned char *w4, const unsigned char *w2,
     const __m128i m0f = _mm_set1_epi8(0x0F);
     const __m128i m03 = _mm_set1_epi8(0x03);
     __m128i z  = _mm_setzero_si128();
-    __m128i b  = _mm_loadu_si128((const __m128i *)w4);
+    __m128i b  = _mm_load_si128((const __m128i *)w4);
     __m128i t  = _mm_loadl_epi64((const __m128i *)w2);
     __m128i g0 = _mm_and_si128(t, m03);
     __m128i g1 = _mm_and_si128(_mm_srli_epi16(t, 2), m03);
@@ -202,10 +202,10 @@ static __m128i part32_q61(const unsigned char *w4, const unsigned char *w2,
     __m128i l1 = _mm_unpackhi_epi8(z, lo);
     __m128i h0 = _mm_unpacklo_epi8(z, hi);
     __m128i h1 = _mm_unpackhi_epi8(z, hi);
-    __m128i x0 = _mm_loadu_si128((const __m128i *)x);
-    __m128i x1 = _mm_loadu_si128((const __m128i *)(x + 8));
-    __m128i x2 = _mm_loadu_si128((const __m128i *)(x + 16));
-    __m128i x3 = _mm_loadu_si128((const __m128i *)(x + 24));
+    __m128i x0 = _mm_load_si128((const __m128i *)x);
+    __m128i x1 = _mm_load_si128((const __m128i *)(x + 8));
+    __m128i x2 = _mm_load_si128((const __m128i *)(x + 16));
+    __m128i x3 = _mm_load_si128((const __m128i *)(x + 24));
     __m128i s0 = _mm_add_epi32(_mm_madd_epi16(l0, x0), _mm_madd_epi16(l1, x1));
     __m128i s1 = _mm_add_epi32(_mm_madd_epi16(h0, x2), _mm_madd_epi16(h1, x3));
     return _mm_add_epi32(s0, s1);
@@ -231,7 +231,7 @@ static void part32_q61_2(const unsigned char *w4, const unsigned char *w2,
     const __m128i m0f = _mm_set1_epi8(0x0F);
     const __m128i m03 = _mm_set1_epi8(0x03);
     __m128i z  = _mm_setzero_si128();
-    __m128i b  = _mm_loadu_si128((const __m128i *)w4);
+    __m128i b  = _mm_load_si128((const __m128i *)w4);
     __m128i t  = _mm_loadl_epi64((const __m128i *)w2);
     __m128i g0 = _mm_and_si128(t, m03);
     __m128i g1 = _mm_and_si128(_mm_srli_epi16(t, 2), m03);
@@ -245,14 +245,14 @@ static void part32_q61_2(const unsigned char *w4, const unsigned char *w2,
     __m128i l1 = _mm_unpackhi_epi8(z, lo);
     __m128i h0 = _mm_unpacklo_epi8(z, hi);
     __m128i h1 = _mm_unpackhi_epi8(z, hi);
-    __m128i a0 = _mm_loadu_si128((const __m128i *)xa);
-    __m128i a1 = _mm_loadu_si128((const __m128i *)(xa + 8));
-    __m128i a2 = _mm_loadu_si128((const __m128i *)(xa + 16));
-    __m128i a3 = _mm_loadu_si128((const __m128i *)(xa + 24));
-    __m128i b0 = _mm_loadu_si128((const __m128i *)xb);
-    __m128i b1 = _mm_loadu_si128((const __m128i *)(xb + 8));
-    __m128i b2 = _mm_loadu_si128((const __m128i *)(xb + 16));
-    __m128i b3 = _mm_loadu_si128((const __m128i *)(xb + 24));
+    __m128i a0 = _mm_load_si128((const __m128i *)xa);
+    __m128i a1 = _mm_load_si128((const __m128i *)(xa + 8));
+    __m128i a2 = _mm_load_si128((const __m128i *)(xa + 16));
+    __m128i a3 = _mm_load_si128((const __m128i *)(xa + 24));
+    __m128i b0 = _mm_load_si128((const __m128i *)xb);
+    __m128i b1 = _mm_load_si128((const __m128i *)(xb + 8));
+    __m128i b2 = _mm_load_si128((const __m128i *)(xb + 16));
+    __m128i b3 = _mm_load_si128((const __m128i *)(xb + 24));
     *pa = _mm_add_epi32(
               _mm_add_epi32(_mm_madd_epi16(l0, a0), _mm_madd_epi16(l1, a1)),
               _mm_add_epi32(_mm_madd_epi16(h0, a2), _mm_madd_epi16(h1, a3)));
@@ -293,10 +293,10 @@ static __m128i part32_t2(const unsigned char *w2, const int16_t *x) {
     __m128i l1 = _mm_unpackhi_epi8(z, lo);
     __m128i h0 = _mm_unpacklo_epi8(z, hi);
     __m128i h1 = _mm_unpackhi_epi8(z, hi);
-    __m128i x0 = _mm_loadu_si128((const __m128i *)(const void *)x);
-    __m128i x1 = _mm_loadu_si128((const __m128i *)(const void *)(x + 8));
-    __m128i x2 = _mm_loadu_si128((const __m128i *)(const void *)(x + 16));
-    __m128i x3 = _mm_loadu_si128((const __m128i *)(const void *)(x + 24));
+    __m128i x0 = _mm_load_si128((const __m128i *)(const void *)x);
+    __m128i x1 = _mm_load_si128((const __m128i *)(const void *)(x + 8));
+    __m128i x2 = _mm_load_si128((const __m128i *)(const void *)(x + 16));
+    __m128i x3 = _mm_load_si128((const __m128i *)(const void *)(x + 24));
     __m128i s0 = _mm_add_epi32(_mm_madd_epi16(l0, x0), _mm_madd_epi16(l1, x1));
     __m128i s1 = _mm_add_epi32(_mm_madd_epi16(h0, x2), _mm_madd_epi16(h1, x3));
     return _mm_add_epi32(s0, s1);
@@ -330,14 +330,14 @@ static void part32_t2_2(const unsigned char *w2, const int16_t *xa,
     __m128i l1 = _mm_unpackhi_epi8(z, lo);
     __m128i h0 = _mm_unpacklo_epi8(z, hi);
     __m128i h1 = _mm_unpackhi_epi8(z, hi);
-    __m128i a0 = _mm_loadu_si128((const __m128i *)(const void *)xa);
-    __m128i a1 = _mm_loadu_si128((const __m128i *)(const void *)(xa + 8));
-    __m128i a2 = _mm_loadu_si128((const __m128i *)(const void *)(xa + 16));
-    __m128i a3 = _mm_loadu_si128((const __m128i *)(const void *)(xa + 24));
-    __m128i b0 = _mm_loadu_si128((const __m128i *)(const void *)xb);
-    __m128i b1 = _mm_loadu_si128((const __m128i *)(const void *)(xb + 8));
-    __m128i b2 = _mm_loadu_si128((const __m128i *)(const void *)(xb + 16));
-    __m128i b3 = _mm_loadu_si128((const __m128i *)(const void *)(xb + 24));
+    __m128i a0 = _mm_load_si128((const __m128i *)(const void *)xa);
+    __m128i a1 = _mm_load_si128((const __m128i *)(const void *)(xa + 8));
+    __m128i a2 = _mm_load_si128((const __m128i *)(const void *)(xa + 16));
+    __m128i a3 = _mm_load_si128((const __m128i *)(const void *)(xa + 24));
+    __m128i b0 = _mm_load_si128((const __m128i *)(const void *)xb);
+    __m128i b1 = _mm_load_si128((const __m128i *)(const void *)(xb + 8));
+    __m128i b2 = _mm_load_si128((const __m128i *)(const void *)(xb + 16));
+    __m128i b3 = _mm_load_si128((const __m128i *)(const void *)(xb + 24));
     *pa = _mm_add_epi32(
               _mm_add_epi32(_mm_madd_epi16(l0, a0), _mm_madd_epi16(l1, a1)),
               _mm_add_epi32(_mm_madd_epi16(h0, a2), _mm_madd_epi16(h1, a3)));
@@ -389,15 +389,15 @@ static void dot128_t2_sse2(const unsigned char *w2, const int16_t *x,
    untouched. */
 static __m128i part32_q16(const int16_t *w, const int16_t *x) {
     __m128i s0 = _mm_add_epi32(
-        _mm_madd_epi16(_mm_loadu_si128((const __m128i *)(const void *)w),
-                       _mm_loadu_si128((const __m128i *)(const void *)x)),
-        _mm_madd_epi16(_mm_loadu_si128((const __m128i *)(const void *)(w + 8)),
-                       _mm_loadu_si128((const __m128i *)(const void *)(x + 8))));
+        _mm_madd_epi16(_mm_load_si128((const __m128i *)(const void *)w),
+                       _mm_load_si128((const __m128i *)(const void *)x)),
+        _mm_madd_epi16(_mm_load_si128((const __m128i *)(const void *)(w + 8)),
+                       _mm_load_si128((const __m128i *)(const void *)(x + 8))));
     __m128i s1 = _mm_add_epi32(
-        _mm_madd_epi16(_mm_loadu_si128((const __m128i *)(const void *)(w + 16)),
-                       _mm_loadu_si128((const __m128i *)(const void *)(x + 16))),
-        _mm_madd_epi16(_mm_loadu_si128((const __m128i *)(const void *)(w + 24)),
-                       _mm_loadu_si128((const __m128i *)(const void *)(x + 24))));
+        _mm_madd_epi16(_mm_load_si128((const __m128i *)(const void *)(w + 16)),
+                       _mm_load_si128((const __m128i *)(const void *)(x + 16))),
+        _mm_madd_epi16(_mm_load_si128((const __m128i *)(const void *)(w + 24)),
+                       _mm_load_si128((const __m128i *)(const void *)(x + 24))));
     return _mm_add_epi32(s0, s1);
 }
 
@@ -416,18 +416,18 @@ static __m128i part32_q16(const int16_t *w, const int16_t *x) {
  * that token's own accumulator, same order, no reassociation. */
 static void part32_q16_2(const int16_t *w, const int16_t *xa,
                          const int16_t *xb, __m128i *pa, __m128i *pb) {
-    __m128i w0 = _mm_loadu_si128((const __m128i *)(const void *)w);
-    __m128i w1 = _mm_loadu_si128((const __m128i *)(const void *)(w + 8));
-    __m128i w2 = _mm_loadu_si128((const __m128i *)(const void *)(w + 16));
-    __m128i w3 = _mm_loadu_si128((const __m128i *)(const void *)(w + 24));
-    __m128i a0 = _mm_loadu_si128((const __m128i *)(const void *)xa);
-    __m128i a1 = _mm_loadu_si128((const __m128i *)(const void *)(xa + 8));
-    __m128i a2 = _mm_loadu_si128((const __m128i *)(const void *)(xa + 16));
-    __m128i a3 = _mm_loadu_si128((const __m128i *)(const void *)(xa + 24));
-    __m128i b0 = _mm_loadu_si128((const __m128i *)(const void *)xb);
-    __m128i b1 = _mm_loadu_si128((const __m128i *)(const void *)(xb + 8));
-    __m128i b2 = _mm_loadu_si128((const __m128i *)(const void *)(xb + 16));
-    __m128i b3 = _mm_loadu_si128((const __m128i *)(const void *)(xb + 24));
+    __m128i w0 = _mm_load_si128((const __m128i *)(const void *)w);
+    __m128i w1 = _mm_load_si128((const __m128i *)(const void *)(w + 8));
+    __m128i w2 = _mm_load_si128((const __m128i *)(const void *)(w + 16));
+    __m128i w3 = _mm_load_si128((const __m128i *)(const void *)(w + 24));
+    __m128i a0 = _mm_load_si128((const __m128i *)(const void *)xa);
+    __m128i a1 = _mm_load_si128((const __m128i *)(const void *)(xa + 8));
+    __m128i a2 = _mm_load_si128((const __m128i *)(const void *)(xa + 16));
+    __m128i a3 = _mm_load_si128((const __m128i *)(const void *)(xa + 24));
+    __m128i b0 = _mm_load_si128((const __m128i *)(const void *)xb);
+    __m128i b1 = _mm_load_si128((const __m128i *)(const void *)(xb + 8));
+    __m128i b2 = _mm_load_si128((const __m128i *)(const void *)(xb + 16));
+    __m128i b3 = _mm_load_si128((const __m128i *)(const void *)(xb + 24));
     *pa = _mm_add_epi32(
               _mm_add_epi32(_mm_madd_epi16(w0, a0), _mm_madd_epi16(w1, a1)),
               _mm_add_epi32(_mm_madd_epi16(w2, a2), _mm_madd_epi16(w3, a3)));
