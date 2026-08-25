@@ -21,12 +21,22 @@
 # pointer that is not aligned for its type", which is the portable half
 # of the question and the half no other gate here asks at all.
 #
-# The SIMD units are linked but not selected: --kernel ref. Dropping
-# them instead does not link, because LZ_MMX_TU=0 leaves the dispatch
-# tables referring to dot32_q41_mmx and its siblings - so which tier RUNS
-# is what makes this a scalar measurement, not which files compile. Their
-# intrinsics would not report anyway: _mm_loadu_si128 takes a pointer
-# type declared __aligned__(1), which is exactly right.
+# EVERY TIER IS RUN, ref through sse2, out of one instrumented build.
+# The tier decides which C executes, not only which kernel: on kmr20
+# --kernel ref never enters the fixed epilogue, so a ref-only run leaves
+# the int pipeline's prologues, tails and epilogues unmeasured and still
+# prints zero. Four runs of one binary cost four forward passes and
+# close that.
+#
+# What is still NOT measured is the SIMD intrinsics themselves, and that
+# is a property of the instrumentation rather than a choice:
+# _mm_loadu_si128 takes a pointer type declared __aligned__(1), so UBSan
+# has nothing to check there and is right not to. What the tiers buy is
+# the scalar C on either side of those loads.
+#
+# The SIMD units are always linked. Dropping them does not link, because
+# LZ_MMX_TU=0 leaves the dispatch tables referring to dot32_q41_mmx and
+# its siblings.
 #
 # Runs under WSL, like the MIPS and x87 stages: MinGW has no UBSan.
 #
@@ -89,12 +99,20 @@ STEP=build/align-step.sh
     # build that silently lost -fsanitize=alignment reports zero
     # misaligned accesses and looks exactly like a clean one.
     echo "echo SITES=\$(objdump -d $OUT | grep -c __ubsan_handle_type_mismatch)"
-    echo "$OUT '$MODEL' --kernel ref --tokens-file '$TOK' \\"
-    echo "  --dump-all-logits /dev/null >$OUT.run.log 2>&1"
-    echo "echo RC=\$?"
-    echo "echo HITS=\$(grep -c 'runtime error:.*misaligned' $OUT.run.log)"
-    echo "grep -q logits $OUT.run.log && echo FORWARDRAN"
-    echo "grep 'runtime error:.*misaligned' $OUT.run.log | sort -u | head -10"
+    # EVERY TIER, not just ref. The instrumented build reaches the C
+    # around the kernels, and which C that is depends on g_kernel: on
+    # kmr20 --kernel ref does not enter the fixed epilogue at all, so a
+    # ref-only run leaves the whole int pipeline's tails, prologues and
+    # epilogues unmeasured while reporting zero.
+    echo "for k in ref mmx sse sse2; do"
+    echo "  $OUT '$MODEL' --kernel \$k --tokens-file '$TOK' \\"
+    echo "    --dump-all-logits /dev/null >$OUT.\$k.log 2>&1"
+    echo "  echo RC_\$k=\$?"
+    echo "  echo HITS_\$k=\$(grep -c 'runtime error:.*misaligned' $OUT.\$k.log)"
+    echo "  grep -q logits $OUT.\$k.log && echo FORWARDRAN_\$k"
+    echo "  grep 'runtime error:.*misaligned' $OUT.\$k.log | sort -u \\"
+    echo "    | head -5 | sed \"s/^/[\$k] /\""
+    echo "done"
 } > "$STEP"
 
 # cd first, then a RELATIVE path. Git Bash rewrites an argument that
@@ -115,11 +133,14 @@ fi
 [ "$WRC" -eq 2 ] && { echo "align_gate: SKIP - wsl step exited 2"; exit 2; }
 
 SITES=$(grep -m1 '^SITES=' "$LOG" | cut -d= -f2)
-RC=$(grep -m1 '^RC=' "$LOG" | cut -d= -f2)
-HITS=$(grep -m1 '^HITS=' "$LOG" | cut -d= -f2)
 [ -n "${SITES:-}" ] || SITES=0
-[ -n "${RC:-}" ] || RC=1
-[ -n "${HITS:-}" ] || HITS=0
+TIERS="ref mmx sse sse2"
+HITS=0
+for k in $TIERS; do
+    h=$(grep -m1 "^HITS_$k=" "$LOG" | cut -d= -f2)
+    [ -n "${h:-}" ] || h=0
+    HITS=$((HITS + h))
+done
 
 # Three controls, because "no reports" is the same output as three
 # different kinds of nothing happening.
@@ -129,19 +150,23 @@ if [ "$SITES" -lt 1000 ]; then
     echo "  here would mean nothing"
     exit 1
 fi
-if ! grep -q FORWARDRAN "$LOG"; then
-    echo "align_gate: FAIL - no logits line: the forward pass did not run,"
-    echo "  so no kernel was ever entered"
-    exit 1
-fi
-if [ "$RC" -ne 0 ]; then
-    echo "align_gate: FAIL - the instrumented run exited $RC"
-    tail -5 "$LOG"
-    exit 1
-fi
+for k in $TIERS; do
+    if ! grep -q "FORWARDRAN_$k" "$LOG"; then
+        echo "align_gate: FAIL - no logits line for --kernel $k: the forward"
+        echo "  pass did not run, so that tier's code was never entered"
+        exit 1
+    fi
+    rc=$(grep -m1 "^RC_$k=" "$LOG" | cut -d= -f2)
+    if [ "${rc:-1}" -ne 0 ]; then
+        echo "align_gate: FAIL - the instrumented run exited ${rc:-?} on --kernel $k"
+        tail -5 "$LOG"
+        exit 1
+    fi
+done
 
 if [ "$HITS" -eq 0 ]; then
-    echo "align_gate: PASS (0 misaligned, $SITES checks compiled in)"
+    echo "align_gate: PASS (0 misaligned across $(echo $TIERS | wc -w) tier(s),"
+    echo "  $SITES checks compiled in)"
     exit 0
 fi
 echo "align_gate: FAIL - $HITS misaligned access(es)"
