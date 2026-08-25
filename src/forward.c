@@ -68,8 +68,7 @@ float lz_debug_mtp_attn_scale = 1.0f;
    regardless of this value. */
 int lz_debug_mtp_attn_window = 0;
 
-/* Debug-only investigative probe, part 3 (team-lead's iron-law-three
-   reminder: a wider MTP attention window is zero extra
+/* Debug-only investigative probe, part 3 (reminder: a wider MTP attention window is zero extra
    BYTES/weight loads, but NOT zero ALU - the score and weighted-sum
    loops both scale with however many rows get attended to, same
    "count bytes but not compute" trap that has reversed a conclusion
