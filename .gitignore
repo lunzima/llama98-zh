@@ -95,6 +95,7 @@
 !/build/dot128_q16_probe.c
 !/build/dot128_q41_probe.c
 !/build/dot128_q61_probe.c
+!/build/p2_split32_probe.c
 !/build/ascii_source_gate.sh
 !/build/div_hotness.sh
 !/build/cov_run.sh

@@ -952,6 +952,16 @@ extern void lz_p2_split32_mmx_asm(const void *blk, signed char *hi_out,
     __parm [__eax] [__edx] [__ebx] \
     __modify [8087]
 
+/* The split kernel's address. Its only caller builds the lz_p2_blk
+   around it, so nothing outside this file could drive the split with
+   chosen inputs - and the same was true of the SSE1 and SSE2 twins, so
+   three implementations of one operation had never been compared.
+   build/p2_split32_probe.c does that. */
+void lz_p2_split32_mmx_w(const void *blk, signed char *hi_out,
+                         signed char *lo_out) {
+    lz_p2_split32_mmx_asm(blk, hi_out, lo_out);
+}
+
 /* lz_p2_rows_mmx(): all of a row's groups, tier 1. One call per row
    from ops.c's gdn_p2_row_simd - see that function's Watcom branch
    for the full accounting. Both pragma-aux kernels above are

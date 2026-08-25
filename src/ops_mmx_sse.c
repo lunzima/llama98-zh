@@ -200,6 +200,12 @@ extern void lz_p2_split32_sse_asm(const void *blk, signed char *hi_out,
     __parm [__eax] [__edx] [__ebx] \
     __modify [8087]
 
+/* The split kernel's address, so the three tiers can be compared. */
+void lz_p2_split32_sse_w(const void *blk, signed char *hi_out,
+                         signed char *lo_out) {
+    lz_p2_split32_sse_asm(blk, hi_out, lo_out);
+}
+
 /* lz_p2_rows_sse(): all of a row's groups, tier 2. One call per row,
    same accounting as src/ops_mmx.c's lz_p2_rows_mmx - see that
    function's comment. The mul32 step is a real cross-TU call (SSE1 has

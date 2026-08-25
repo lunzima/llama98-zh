@@ -299,6 +299,12 @@ extern void lz_p2_split32_sse2_asm(const void *blk, signed char *hi_out,
     __parm [__eax] [__edx] [__ebx] \
     __modify [8087]
 
+/* The split kernel's address, so the three tiers can be compared. */
+void lz_p2_split32_sse2_w(const void *blk, signed char *hi_out,
+                          signed char *lo_out) {
+    lz_p2_split32_sse2_asm(blk, hi_out, lo_out);
+}
+
 /* lz_p2_rows_sse2(): all of a row's groups, tier 3. One call per row
    from ops.c's gdn_p2_row_simd - fully self-contained, unlike
    lz_p2_rows_sse (src/ops_mmx_sse.c): SSE2 has real content for BOTH

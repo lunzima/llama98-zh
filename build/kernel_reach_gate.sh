@@ -41,13 +41,16 @@ set -u
 cd "$(dirname "$0")/.."
 
 FILES="src/ops_mmx.c src/ops_sse2.c src/ops_mmx_sse.c"
-FLOOR=54
+FLOOR=57
 
-# FIVE ARE STILL UNREACHABLE, and none of them is a dot product:
+# TWO ARE STILL UNREACHABLE:
 #
-#   ops_mmx.c       wsum_pair, p2_split32
-#   ops_sse2.c      p2_mul32, p2_split32
-#   ops_mmx_sse.c   p2_split32
+#   ops_mmx.c       wsum_pair       reads two weight rows and a
+#                                   coefficient vector; needs an oracle
+#                                   built from the attention path
+#   ops_sse2.c      p2_mul32        the other half of the GDN pass-2
+#                                   pair, which writes into the block
+#                                   rather than out of it
 #
 # THIS LIST HAS BEEN WRONG TWICE, both times too long, both times the
 # gate's fault rather than the code's. It said fourteen while a line
@@ -66,11 +69,11 @@ FLOOR=54
 # tier against its SSE2 tier. Not one of the paired forms could be
 # called from outside its own file before this round.
 #
-# WHAT IS LEFT IS NOT A DOT PRODUCT: p2_split32 (three tiers),
-# p2_mul32, i32f_acc32, wsum_pair. Each needs its own oracle rather
-# than a sixth copy of the dot probe - a split has no single return
-# value to compare, an accumulate is float-valued, and wsum_pair reads
-# two rows. That is why they are last, not because they matter less.
+# AND THE GDN PASS-2 SPLIT, all three tiers, by build/p2_split32_probe.c.
+# That one is worth a note: the three are NOT one body written twice -
+# MMX and SSE2 clamp with psubsw/paddsw, SSE1 with a single pmaxsw - so
+# their agreement is a real statement rather than a shared assumption
+# agreeing with itself. 262,144 values, 0 mismatches.
 #
 # THE _2 FORMS DOMINATE what is left, and that is a finding rather than
 # a coincidence: the paired kernels were added later, each beside a
