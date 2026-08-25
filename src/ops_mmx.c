@@ -3455,6 +3455,16 @@ extern void lz_dot32_q16_asm_2(const int16_t *w, const int16_t *xa,
     __parm [__eax] [__edx] [__ebx] [__ecx] [__esi] \
     __modify [8087]
 
+/* The paired kernel's address. It had none, which is the shape every
+   _2 form in these files shares: each was added beside a single-token
+   twin that already had a wrapper, and none of them got one, so the
+   claim they exist for - one weight load serving two tokens - has
+   never been checked against anything. */
+void dot32_q16_mmx_2(const int16_t *w, const int16_t *xa, const int16_t *xb,
+                     int32_t *oa, int32_t *ob) {
+    lz_dot32_q16_asm_2(w, xa, xb, oa, ob);
+}
+
 extern void lz_dot128_q16_asm(const int16_t *w, const int16_t *x, int32_t *out4);
 #pragma aux lz_dot128_q16_asm = \
     ".586" \

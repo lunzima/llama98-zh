@@ -34,6 +34,10 @@ void lz_dot128_q16_mmx_w(const int16_t *w, const int16_t *x, int32_t *out4);
 int32_t dot32_q16_mmx(const int16_t *w, const int16_t *x);
 void lz_dot128_q16_sse2_w(const int16_t *w, const int16_t *x, int32_t *out4);
 int32_t dot32_q16_sse2a(const int16_t *w, const int16_t *x);
+void dot32_q16_mmx_2(const int16_t *w, const int16_t *xa, const int16_t *xb,
+                     int32_t *oa, int32_t *ob);
+void dot32_q16_sse2a_2(const int16_t *w, const int16_t *xa,
+                       const int16_t *xb, int32_t *oa, int32_t *ob);
 
 static unsigned long rs = 1145141919UL;
 static int nextv(void) {
@@ -100,6 +104,34 @@ int main(void) {
                                pass, b);
                     bad++;
                 }
+            }
+        }
+
+        /* THE PAIRED KERNELS, both tiers. Their claim is one weight
+           load serving two tokens, so the two activation vectors are
+           deliberately different blocks - a kernel that read xa twice
+           would pass otherwise. Neither had ever been checked against
+           anything: both were unreachable until this round. */
+        for (b = 0; b < 2; b++, n += 4) {
+            const int16_t *wp = w + b * 32;
+            const int16_t *xa = x + b * 32;
+            const int16_t *xb = x + b * 32 + 64;
+            int32_t wb = dot32_q16_mmx(wp, xb);
+            int32_t ma = 0, mb = 0, sa = 0, sb = 0;
+            dot32_q16_mmx_2(wp, xa, xb, &ma, &mb);
+            dot32_q16_sse2a_2(wp, xa, xb, &sa, &sb);
+            if (ma != want[b] || mb != wb) {
+                if (bad < 6)
+                    printf("  pass %d pair %d mmx: got %ld,%ld want %ld,%ld\n",
+                           pass, b, (long)ma, (long)mb,
+                           (long)want[b], (long)wb);
+                bad++;
+            }
+            if (sa != ma || sb != mb) {
+                if (bad < 6)
+                    printf("  pass %d pair %d: mmx %ld,%ld sse2 %ld,%ld\n",
+                           pass, b, (long)ma, (long)mb, (long)sa, (long)sb);
+                bad++;
             }
         }
     }
