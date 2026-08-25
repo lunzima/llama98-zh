@@ -2534,8 +2534,8 @@ extern void lz_wsum_pair_sse2_asm(const int8_t *rowA, const int8_t *rowB,
     ".686" \
     "movd      xmm7, [ebx]" \
     "pshufd    xmm7, xmm7, 0" \
-    "movdqu    xmm0, [eax]" \
-    "movdqu    xmm1, [edx]" \
+    "movdqa    xmm0, [eax]" \
+    "movdqa    xmm1, [edx]" \
     "movdqa    xmm2, xmm0" \
     "movdqa    xmm3, xmm1" \
     "punpcklbw xmm2, xmm2" \
@@ -2570,8 +2570,8 @@ extern void lz_wsum_pair_sse2_asm(const int8_t *rowA, const int8_t *rowB,
     "paddd     xmm6, xmm2" \
     "movdqu    [ecx+32], xmm5" \
     "movdqu    [ecx+48], xmm6" \
-    "movdqu    xmm0, [eax+16]" \
-    "movdqu    xmm1, [edx+16]" \
+    "movdqa    xmm0, [eax+16]" \
+    "movdqa    xmm1, [edx+16]" \
     "movdqa    xmm2, xmm0" \
     "movdqa    xmm3, xmm1" \
     "punpcklbw xmm2, xmm2" \
