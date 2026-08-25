@@ -67,19 +67,27 @@ SCAN="Makefile src/*.c src/*.h gui/*.c gui/*.h common/*.c common/*.h"
 #                            excused here rather than by weakening the
 #                            scan, which would also stop catching a
 #                            Chinese COMMENT in those same files.
-#   src/forward.c:1 src/model.c:1
-#                            The lz_int.h include comment, already
-#                            corrected in the working tree but sharing a
-#                            diff hunk with another session's
-#                            include-block reshuffle. Their commit
-#                            carries it; baselined rather than left
-#                            silently red.
 #   The two message tables used to be baselined at 138 and 100 CJK
 #   lines. They are 0 now: Visual C++ 4.0 rejects raw UTF-8 in a string
 #   literal, so build/utf8_escape.py rewrote every one as \xNN and the
 #   source is ASCII throughout. The allowance goes with them - left at
 #   138 it would let the whole table come back without a word.
-BASELINE="src/forward.c:1 src/model.c:1"
+#
+#   src/forward.c and src/model.c were baselined at 1 each for the
+#   lz_int.h include comment, which was corrected in the working tree
+#   but shared a diff hunk with another session's include-block
+#   reshuffle. That commit landed and both files read 0 under the gate's
+#   own byte pattern, so the allowance is retired for exactly the reason
+#   the message tables' was: an allowance outliving what it excused is a
+#   standing permit for one Chinese comment in each of those two files.
+#
+#   THE TABLE IS EMPTY NOW. That is the interesting state, because an
+#   empty baseline is the one that stops being exercised - nothing here
+#   would notice if the lookup broke. The mutation to run when adding
+#   the next entry is the one that was run when removing this one: plant
+#   a CJK comment in a scratch copy of a baselined file and check it
+#   reddens.
+BASELINE=""
 
 FAIL=0
 TOTAL=0
@@ -223,7 +231,10 @@ if [ "$CTL" -ne 3 ] || [ "$CJK" -ne 1 ]; then
 fi
 
 if [ "$FAIL" -eq 0 ]; then
-    echo "comment_hygiene_gate: PASS ($TOTAL over baseline: 0;"
+    # $TOTAL is every counted line INCLUDING the baselined ones, so
+    # "$TOTAL over baseline: 0" read as one phrase said "1 over
+    # baseline" on a run that passed. Two numbers, named.
+    echo "comment_hygiene_gate: PASS ($TOTAL counted, 0 over baseline;"
     echo "  $(printf '%s\n' $BSCAN | wc -l) build script(s) carry 0 rulebook cite(s))"
     exit 0
 fi
