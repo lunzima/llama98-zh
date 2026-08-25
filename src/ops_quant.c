@@ -1482,6 +1482,16 @@ int q8_group_scale(const float *grp, int gs, float *sg, float *inv) {
         /* 1,462 of the engine's 2,251 divides a token are this one. */
         *inv = LZ_FDIV(127.0f, amax);
         fast = (*inv <= FLT_MAX);
+        /* fast is ALWAYS 1 here, and every caller's div branch never
+           runs. fast=0 would need 127/amax to overflow FLT_MAX, i.e.
+           amax < 127/FLT_MAX ~ 3.7e-36; the floor below fires at amax <
+           1.27e-28 (sg = amax/127 < 1e-30), eight orders of magnitude
+           earlier, and forces fast=1. So amax is never in the range that
+           makes *inv infinite. Verified over the full float domain
+           (.prof/q8scale_probe.c, 4.2M calls covering every exponent
+           field: zero fast=0). The div branches are kept as defensive
+           fallbacks for a future change to LZ_Q8_MIN_SCALE, not as live
+           alternatives. */
         if (*sg < LZ_Q8_MIN_SCALE_F) {
             *sg = 1.0f;
             *inv = 0.0f;
