@@ -1475,7 +1475,7 @@ float norm_ss_fixed(const float *x, int n, short *qout, int *eout) {
 #endif /* LZ_ARM_ASM_EXTERN */
     sc = pow2f(e);
     i = 0;
-#if defined(LZ_NORM_SS_SSE2_EXTERN) && !defined(LZ_NORM_SS_FORCE_SSE) && !defined(LZ_NORM_SS_FORCE_MMX)
+#if defined(LZ_NORM_SS_SSE2_EXTERN)
     /* SELECTED BY TIER, like every other kernel here: --kernel ref and
        mmx must reach the C loop below or the arm this is compared
        against would be this. The kernel takes whole groups of 8 and
@@ -1508,10 +1508,15 @@ float norm_ss_fixed(const float *x, int n, short *qout, int *eout) {
        the emms with it. The x87 pass IS the C's arithmetic, so what
        changes is only which instructions the clamp and the accumulate
        use.
-       LZ_NORM_SS_FORCE_MMX mirrors the SSE knob above and exists for
-       the same reason: on a machine with SSE2 this arm is otherwise
-       unreachable, and a path that cannot be selected cannot be
-       validated. */
+
+       Reached by --kernel mmx, which is why the LZ_NORM_SS_FORCE_MMX
+       and LZ_NORM_SS_FORCE_SSE pair that used to switch off the arms
+       above it are gone. They were written when SSE1 was not a tier and
+       these two arms could not be selected on any machine in the suite;
+       LZ_KERNEL_SSE ended that, and the three arms now cascade on
+       g_kernel with `i == 0` carrying the fallthrough. A compile-time
+       escape beside a runtime tier is a second way to say the same
+       thing, and two ways can disagree. */
     if (i == 0 && g_kernel != LZ_KERNEL_REF && lz_cpu_has_mmx() && n >= 32) {
         int32_t blk[32];
         int j;

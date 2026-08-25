@@ -125,15 +125,19 @@ int q8r_have_simd(void) {
    q8r_have_simd below is a different axis - the Q8 row-kernel tier, not
    the arithmetic one - and keeps its CPUID question. */
 
+/* Q8 rounding: 0 scalar, 1 SSE1 (lz_q8round32_sse), 2 SSE2. The tier is
+   read from g_kernel, and LZ_Q8R_FORCE_SSE is gone for the same reason
+   LZ_I32FACC_FORCE_SSE below is: `--kernel sse` selects the SSE1 body
+   at run time, so the compile-time escape was a second way to say it
+   and the two could disagree. kernel_isa_identity_gate's `sse` flagset
+   compares the two tiers out of one binary, which the control build
+   never did - it was compiled by switch_matrix_gate and run by
+   nothing. */
+
 #if defined(LZ_HAVE_Q8R_SIMD) || defined(LZ_HAVE_Q8R_SSE)
 int lz_q8r_tier(void) {
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
     if (g_kernel == LZ_KERNEL_REF) return 0;
-#if defined(LZ_HAVE_Q8R_SSE)
-#ifdef LZ_Q8R_FORCE_SSE
-    return 1;
-#endif /* LZ_Q8R_FORCE_SSE */
-#endif /* LZ_HAVE_Q8R_SSE */
 #if defined(LZ_HAVE_Q8R_SIMD)
     if (g_kernel == LZ_KERNEL_SSE2) return 2;
 #endif /* LZ_HAVE_Q8R_SIMD */

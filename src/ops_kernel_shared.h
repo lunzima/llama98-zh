@@ -360,8 +360,13 @@ extern void lz_pf_amd(const void *p);
    instead, i.e. the MMX group kernels alone. Two binaries from one
    source tree, so the "did this change any number" question is
    answered by `cmp` on --dump-logits rather than by swapping source
-   trees and hoping the rest matched. Same reason LZ_BATCH_MAX and
-   LZ_Q8R_FORCE_SSE exist.
+   trees and hoping the rest matched. Same reason LZ_BATCH_MAX exists.
+
+   IT STAYS BECAUSE THERE IS NO RUNTIME TIER FOR IT. The FORCE_* escapes
+   that used to be cited here have been deleted one by one, each when
+   `--kernel sse`/`mmx` came to select the same body at run time. Nothing
+   selects between the 32- and 128-element group kernels that way, so
+   this one is not the same case.
 
    Only the Watcom build has these kernels at all - the gcc translation
    unit does not contain them (they live inside `#if defined(__WATCOMC__)`),
