@@ -43,7 +43,7 @@ MODEL=${LZ_NORM_INT_GATE_MODEL:-$MODELS_ROOT/kmr20}
 # pair lands, so a delivered kernel cannot quietly disappear later - the
 # gate was created at 21 and the number below is what the tree carries
 # now.
-FLOOR=33
+FLOOR=37
 
 # CELLS REGISTERED todo, which is what a cell looks like after the
 # "partial relief obliges a kernel" standard reopens one and before
@@ -65,15 +65,26 @@ FLOOR=33
 # not be raised again without a unit to point at.
 TODO_CEIL=5
 
-"./$BIN" "$MODEL" --kernel-matrix 2>&1 | grep "^cell" | awk -v floor="$FLOOR" -v tceil="$TODO_CEIL" '
+# CELLS REGISTERED declined (d) - the one exception to "every cell is
+# written or impossible": a body was WRITTEN and MEASURED and it is
+# slower than the scalar C loop it would replace, so shipping it is a
+# regression, not relief. This is the 5800X negative-optimization veto,
+# and it is the only reason a cell may stay empty on both sides without
+# being impossible. A ceiling like todo's, for the same reason:
+# declining is a deliberate act, and the number may not grow without
+# someone pointing at a fresh measurement.
+DEC_CEIL=2
+
+"./$BIN" "$MODEL" --kernel-matrix 2>&1 | grep "^cell" | awk -v floor="$FLOOR" -v tceil="$TODO_CEIL" -v dceil="$DEC_CEIL" '
 $3=="mmxI"||$3=="sse2I"||$3=="sseI" {
     isa=substr($3,1,length($3)-1); I[$2" "isa]=$5; SI[$2" "isa]=$4 }
 $3=="mmxA"||$3=="sse2A"||$3=="sseA" {
     isa=substr($3,1,length($3)-1); A[$2" "isa]=$5; SA[$2" "isa]=$4 }
 END {
-    bad=0; impl=0; imp=0; todo=0;
+    bad=0; impl=0; imp=0; dec=0; todo=0;
     for (k in I) {
         if (SI[k]=="i" || SA[k]=="i") { imp++; continue }
+        if (SI[k]=="d" || SA[k]=="d") { dec++; continue }
         if (SI[k]=="t" || SA[k]=="t") { todo++; continue }
         impl++;
         g = (index(I[k],"G") > 0);
@@ -84,12 +95,18 @@ END {
             bad++;
         }
     }
-    printf "x86 pairs: %d implemented, %d registered impossible, %d owed\n",
-           impl, imp, todo;
+    printf "x86 pairs: %d implemented, %d registered impossible, %d declined, %d owed\n",
+           impl, imp, dec, todo;
     if (todo > tceil) {
         printf "FAIL: %d cells registered todo, ceiling is %d - a cell the\n", todo, tceil;
         printf "      ISA can partly reach is owed, and the number owed may\n";
         printf "      not grow without someone deciding it should\n";
+        bad++;
+    }
+    if (dec > dceil) {
+        printf "FAIL: %d cells registered declined, ceiling is %d - a cell\n", dec, dceil;
+        printf "      measured slower than C is a decision, and the number\n";
+        printf "      declined may not grow without a fresh measurement\n";
         bad++;
     }
     if (impl < floor) {
