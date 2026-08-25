@@ -4234,22 +4234,29 @@ static const char km_why_recur_arma[] =
 /* The four 64-bit-lane cells. SSE1 shares this reason with MMX because
    for THIS operator it adds nothing: its integer additions are pmaxsw,
    pshufw, pextrw and movntq on %mm, none of which is a multiply and
-   none of which is a 64-bit add. */
+   none of which is a 64-bit add.
+
+   THE BODY EXISTS AND WAS MEASURED, which is why the cell says todo
+   rather than impossible. The intrinsics version passes the oracle's
+   20106 cases and costs 19 instructions an element on the 32-bit i486
+   build against the scalar imul loop's 8: the int32 lane bound forces
+   a spill every two elements and gcc stacks the accumulators on top of
+   that. A Pentium MMX resolves auto to this tier, so shipping it would
+   slow down the machine the tier exists for. The pack is {b,ah}
+   against {m,m}, which makes one pmaddwd lane the whole high term;
+   Open Watcom's mmintrin.h declares __m64 and none of the intrinsics,
+   so the twin has to be a #pragma aux.
+
+   That paragraph is a COMMENT and this is a RUNTIME STRING. The cell
+   reason has to fit C89's 509-character literal, which VC++ 4.0 holds
+   to - it does not get to carry the whole argument. */
 static const char km_why_epi_x86[] =
     "todo: the products are pmaddwd's shape but the ACCUMULATOR is not. "
     "paddq is SSE2 even on %mm, so a 64-bit sum has to leave the vector "
     "unit: |ah*m| reaches 2^30 and two of them overflow an int32 lane, "
     "and a lane takes ONE madd result, not two: 2*2^30 lands exactly on "
-    "2^31. WRITTEN AND MEASURED, then not shipped - the intrinsics body "
-    "passes the oracle's 20106 cases and costs 19 instructions an "
-    "element on the 32-bit i486 build against the scalar imul loop's 8, "
-    "because spilling every two elements is what the lane bound forces "
-    "and gcc stacks the accumulators on top of that. A Pentium MMX "
-    "resolves auto to this tier, so shipping it would slow down the "
-    "machine the tier exists for. Owed, not impossible; the pack is "
-    "{b,ah} against {m,m}, which makes one pmaddwd lane the whole high "
-    "term, and Open Watcom's mmintrin.h declares __m64 and none of the "
-    "intrinsics, so its twin has to be a #pragma aux";
+    "2^31. Written and measured, then not shipped: 19 instructions an "
+    "element against the scalar loop's 8 - see the comment above";
 typedef struct { unsigned char have; unsigned char why; const char *text; } LZKmReg;
 #define KM_H(mask) { (unsigned char)(mask), 0, (const char *)0 }
 #define KM_I(text) { 0, LZ_KM_IMPOSSIBLE, (text) }
