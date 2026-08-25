@@ -588,13 +588,30 @@ static void rot_head(float *v, int hd, int n) {
 
 /* ------------------------------------------------------------ state allocation */
 
+/* 16-byte aligned calloc, so the SSE kernels that read these buffers can
+   use movaps/movdqa (aligned) instead of movups/movdqu. Over-allocates
+   by one pointer plus the pad and stores the ORIGINAL pointer just before
+   the aligned one; xfree hands that back to free(). The SSE1/SSE2 loads
+   in the operators that read these buffers then become aligned loads -
+   the "unaligned loads throughout" note in ops_mmx_sse.c is what this
+   removes. Not every engine buffer goes through here (the tensor slices
+   from model.c do not), so not every _mm_loadu_* is convertible; only the
+   ones whose pointer descends from xcalloc and whose offset is a multiple
+   of 4 floats are. */
 static void *xcalloc(size_t n, size_t sz, int *ok, lz_i64*acc) {
-    void *p;
+    char *base, *aligned;
     if (n == 0) return NULL;
-    p = calloc(n, sz);
-    if (!p) { *ok = 0; return NULL; }
+    base = (char *)calloc(n * sz + 16 + sizeof(void *), 1);
+    if (!base) { *ok = 0; return NULL; }
+    aligned = base + sizeof(void *);
+    aligned += (size_t)(16 - ((size_t)aligned & 15)) & 15;
+    ((void **)(void *)aligned)[-1] = base;
     *acc += (lz_i64)n * (lz_i64)sz;
-    return p;
+    return aligned;
+}
+
+static void xfree(void *p) {
+    if (p) free(((void **)p)[-1]);
 }
 
 /* History exponent for the fixed conv tier.
@@ -1550,8 +1567,8 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
        forward_kda's predicate reads that NULL as "no int path" - one
        place decides, one place asks. */
     if (!kda_gate_build(s, m)) {
-        free(s->kda_dtb_i16);  s->kda_dtb_i16 = NULL;
-        free(s->kda_gate_i16); s->kda_gate_i16 = NULL;
+        xfree(s->kda_dtb_i16);  s->kda_dtb_i16 = NULL;
+        xfree(s->kda_gate_i16); s->kda_gate_i16 = NULL;
     }
 #endif /* LZ_KGATE_I16 */
 
@@ -1560,52 +1577,52 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
 
 void lz_state_free(LZRunState *s) {
     if (!s) return;
-    free(s->x); free(s->xb); free(s->xb2); free(s->hb); free(s->hb2);
-    free(s->logits);
-    free(s->qg); free(s->qh); free(s->att); free(s->attn_out);
-    free(s->attn_acc); free(s->attn_ss);
+    xfree(s->x); xfree(s->xb); xfree(s->xb2); xfree(s->hb); xfree(s->hb2);
+    xfree(s->logits);
+    xfree(s->qg); xfree(s->qh); xfree(s->att); xfree(s->attn_out);
+    xfree(s->attn_acc); xfree(s->attn_ss);
 #if (LZ_ATTN_FIXED & 2)
-    free(s->wsum_cbuf); free(s->wsum_cq);
+    xfree(s->wsum_cbuf); xfree(s->wsum_cq);
 #endif /* LZ_ATTN_FIXED & 2 */
-    free(s->ktmp); free(s->vtmp);
-    free(s->kq8); free(s->vq8); free(s->ksq); free(s->vsq);
-    free(s->kf32); free(s->vf32);
-    free(s->k4); free(s->v4); free(s->ks4); free(s->vs4);
+    xfree(s->ktmp); xfree(s->vtmp);
+    xfree(s->kq8); xfree(s->vq8); xfree(s->ksq); xfree(s->vsq);
+    xfree(s->kf32); xfree(s->vf32);
+    xfree(s->k4); xfree(s->v4); xfree(s->ks4); xfree(s->vs4);
 #if LZ_KV_2PLANE
-    free(s->kq8_lo); free(s->vq8_lo); free(s->att_lo); free(s->wsum_lo);
+    xfree(s->kq8_lo); xfree(s->vq8_lo); xfree(s->att_lo); xfree(s->wsum_lo);
 #endif /* LZ_KV_2PLANE */
-    free(s->qkv); free(s->qkv_c); free(s->zbuf); free(s->avec); free(s->bvec);
-    free(s->ssm_out); free(s->ssm_sig); free(s->qn); free(s->kn);
-    free(s->kda_q); free(s->kda_k); free(s->kda_v);
-    free(s->kda_qc); free(s->kda_kc); free(s->kda_vc);
-    free(s->kda_gate_lat); free(s->kda_gate);
-    free(s->moe_router_logits); free(s->moe_sel_idx); free(s->moe_sel_w);
-    free(s->moe_lat_x); free(s->moe_lat_y);
-    free(s->moe_h1); free(s->moe_h3); free(s->moe_h2); free(s->moe_shared_out);
-    free(s->mtp_x); free(s->mtp_concat); free(s->mtp_emb_raw);
-    free(s->mtp_chain); free(s->mtp_draft_logits); free(s->mtp_logits);
-    free(s->mtp_verify_hidden);
-    free(s->mtp_draft_q);
-    free(s->mtp_target_p);
-    free(s->ssm_state_q8); free(s->ssm_state_s);
+    xfree(s->qkv); xfree(s->qkv_c); xfree(s->zbuf); xfree(s->avec); xfree(s->bvec);
+    xfree(s->ssm_out); xfree(s->ssm_sig); xfree(s->qn); xfree(s->kn);
+    xfree(s->kda_q); xfree(s->kda_k); xfree(s->kda_v);
+    xfree(s->kda_qc); xfree(s->kda_kc); xfree(s->kda_vc);
+    xfree(s->kda_gate_lat); xfree(s->kda_gate);
+    xfree(s->moe_router_logits); xfree(s->moe_sel_idx); xfree(s->moe_sel_w);
+    xfree(s->moe_lat_x); xfree(s->moe_lat_y);
+    xfree(s->moe_h1); xfree(s->moe_h3); xfree(s->moe_h2); xfree(s->moe_shared_out);
+    xfree(s->mtp_x); xfree(s->mtp_concat); xfree(s->mtp_emb_raw);
+    xfree(s->mtp_chain); xfree(s->mtp_draft_logits); xfree(s->mtp_logits);
+    xfree(s->mtp_verify_hidden);
+    xfree(s->mtp_draft_q);
+    xfree(s->mtp_target_p);
+    xfree(s->ssm_state_q8); xfree(s->ssm_state_s);
 #if LZ_GDN_STATE_2PLANE
-    free(s->ssm_state_q8_lo);
+    xfree(s->ssm_state_q8_lo);
 #endif /* LZ_GDN_STATE_2PLANE */
-    free(s->conv_state);
-    free(s->conv_state_q); free(s->conv_mw);
-    free(s->kda_q_i16); free(s->kda_k_i16); free(s->kda_v_i16);
-    free(s->kda_qc_i16); free(s->kda_kc_i16); free(s->kda_vc_i16);
-    free(s->bvec_i16); free(s->moe_logits_i16);
-    free(s->kda_lat_i16); free(s->kda_lat_i32);
-    free(s->kda_gate_i16); free(s->kda_dtb_i16);
-    free(s->moe_lat_i16); free(s->moe_lat_q); free(s->moe_lat_qs);
-    free(s->vtmp_i16);
-    free(s->moe_h1_i16); free(s->moe_h3_i16);
-    free(s->conv_sig_k1); free(s->conv_sig_oscale2); free(s->conv_sig_e);
-    free(s->xq); free(s->xqs); free(s->wscr); free(s->fwht_scratch);
-    free(s->subn_norm_int);
-    free(s->rope_cs);
-    free(s->cache_idx);
+    xfree(s->conv_state);
+    xfree(s->conv_state_q); xfree(s->conv_mw);
+    xfree(s->kda_q_i16); xfree(s->kda_k_i16); xfree(s->kda_v_i16);
+    xfree(s->kda_qc_i16); xfree(s->kda_kc_i16); xfree(s->kda_vc_i16);
+    xfree(s->bvec_i16); xfree(s->moe_logits_i16);
+    xfree(s->kda_lat_i16); xfree(s->kda_lat_i32);
+    xfree(s->kda_gate_i16); xfree(s->kda_dtb_i16);
+    xfree(s->moe_lat_i16); xfree(s->moe_lat_q); xfree(s->moe_lat_qs);
+    xfree(s->vtmp_i16);
+    xfree(s->moe_h1_i16); xfree(s->moe_h3_i16);
+    xfree(s->conv_sig_k1); xfree(s->conv_sig_oscale2); xfree(s->conv_sig_e);
+    xfree(s->xq); xfree(s->xqs); xfree(s->wscr); xfree(s->fwht_scratch);
+    xfree(s->subn_norm_int);
+    xfree(s->rope_cs);
+    xfree(s->cache_idx);
     memset(s, 0, sizeof(*s));
 }
 

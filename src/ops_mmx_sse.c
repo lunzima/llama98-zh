@@ -915,7 +915,7 @@ int lz_norm_ss_sse(const float *x, int n, float sc, short *qout,
     int b;
 
     for (b = 0; b < nb; b += 4) {
-        __m128 v = _mm_mul_ps(_mm_loadu_ps(x + b), vsc);
+        __m128 v = _mm_mul_ps(_mm_load_ps(x + b), vsc);
         __m64 i0 = _mm_cvtps_pi32(v);
         __m64 i1 = _mm_cvtps_pi32(_mm_movehl_ps(v, v));
         __m64 q = _mm_max_pi16(_mm_packs_pi32(i0, i1), lo);
