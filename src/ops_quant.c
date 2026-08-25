@@ -323,6 +323,59 @@ static int g_exptab_ready;
 static const int32_t LZ_EXP2_LN2 = 726817;   /* round(ln 2 * 2^20) */
 static const int32_t LZ_EXP2_LN2SQ = 251906; /* round((ln 2)^2 / 2 * 2^20) */
 
+/* The two Q20 Taylor terms as fused multiply-round-shift leaves. gcc and
+   the ARM cross-compiler widen to lz_i64 and let the hardware do the
+   multiply; Watcom routes `(lz_i64)a * b` through its __I8M library
+   call and the shifts through __I8RS, shuffling 64-bit register pairs
+   for every operation - lz_exp_fixed measured 46% moves on Watcom
+   against 22% on gcc (build/move_per_function.sh), and the shuffle is
+   most of the gap. The #pragma aux bodies emit the same integer product
+   and shift directly (imul/shrd), so the two toolchains agree bit for
+   bit: the multiply is exact and shifting a fixed-point value by its
+   own scale is a permutation of the same bits.
+
+   PRECONDITION (both arms): a and b are non-negative. The two call
+   sites satisfy it - s/sv[k] is the Q20 residue in [0, 2^15]
+   (build/exp_q20_probe.c drives both ends) and the table/coefficient
+   inputs are scaled by 2^20. q40's second multiply is MUL rather than
+   IMUL because the low word of a*b must not be sign-extended into the
+   64x32 product, and with b >= 0 the signed and unsigned results
+   coincide. */
+#if defined(__WATCOMC__)
+static int32_t lz_exp_q20(int32_t a, int32_t b); /* (a*b + 2^19) >> 20 */
+#pragma aux lz_exp_q20 = \
+    "imul ebx" \
+    "add  eax, 0x00080000" \
+    "adc  edx, 0" \
+    "mov  ecx, 20" \
+    "shrd eax, edx, cl" \
+    "sar  edx, cl" \
+    parm [eax] [ebx] \
+    value [eax] \
+    modify [ecx edx];
+
+static int32_t lz_exp_q40(int32_t a, int32_t b); /* (a*b*b + 2^39) >> 40 */
+#pragma aux lz_exp_q40 = \
+    "imul ebx" \
+    "mov  ecx, edx" \
+    "mul  ebx" \
+    "imul ecx, ebx" \
+    "add  edx, ecx" \
+    "add  eax, 0" \
+    "adc  edx, 0x80" \
+    "mov  eax, edx" \
+    "sar  eax, 8" \
+    parm [eax] [ebx] \
+    value [eax] \
+    modify [ecx edx];
+#else
+#define lz_exp_q20(a, b) \
+    (int32_t)((((lz_i64)(a) * (b)) + (1 << (LZ_EXP_Q - 1))) >> LZ_EXP_Q)
+#define lz_exp_q40(a, b) \
+    (int32_t)((((lz_i64)(a) * (b) * (b)) \
+               + (LZ_I64_C(1) << (2 * LZ_EXP_Q - 1))) >> (2 * LZ_EXP_Q))
+#endif /* __WATCOMC__ */
+
 static void exp_tab_build(void) {
     int i;
     for (i = 0; i < 32; i++)
@@ -415,12 +468,9 @@ float lz_exp_fixed(float x) {
        (ln2sq_q*s*s)>>40; both shifts round half-up. */
     s = rq >> 5;
     cq = LZ_EXP_QSCALE
-       + (int32_t)((((int64_t)LZ_EXP2_LN2 * s)
-                    + (1 << (LZ_EXP_Q - 1))) >> LZ_EXP_Q)
-       + (int32_t)((((int64_t)LZ_EXP2_LN2SQ * s * s)
-                    + (LZ_I64_C(1) << (2 * LZ_EXP_Q - 1))) >> (2 * LZ_EXP_Q));
-    prod = (int32_t)((((int64_t)g_exptab[idx] * cq)
-                      + (1 << (LZ_EXP_Q - 1))) >> LZ_EXP_Q);
+       + lz_exp_q20(LZ_EXP2_LN2, s)
+       + lz_exp_q40(LZ_EXP2_LN2SQ, s);
+    prod = lz_exp_q20(g_exptab[idx], cq);
 #if defined(LZ_ARM_PRIM_ASM)
     if (asm_tier) {
         int32_t k = n - LZ_EXP_Q;
@@ -528,13 +578,9 @@ void lz_exp_fixed_run(const float *x, float *out, int n) {
 #endif /* LZ_HAVE_EXP_Q20_MMX */
         for (k = 0; k < m; k++) {
             int32_t cq = LZ_EXP_QSCALE
-               + (int32_t)((((lz_i64)LZ_EXP2_LN2 * sv[k])
-                            + (1 << (LZ_EXP_Q - 1))) >> LZ_EXP_Q)
-               + (int32_t)((((lz_i64)LZ_EXP2_LN2SQ * sv[k] * sv[k])
-                            + (LZ_I64_C(1) << (2 * LZ_EXP_Q - 1)))
-                           >> (2 * LZ_EXP_Q));
-            pv[k] = (int32_t)((((lz_i64)tv[k] * cq)
-                               + (1 << (LZ_EXP_Q - 1))) >> LZ_EXP_Q);
+               + lz_exp_q20(LZ_EXP2_LN2, sv[k])
+               + lz_exp_q40(LZ_EXP2_LN2SQ, sv[k]);
+            pv[k] = lz_exp_q20(tv[k], cq);
         }
         for (k = 0; k < m; k++)
             out[i + k] = (float)pv[k] * pow2f(ev[k]);
