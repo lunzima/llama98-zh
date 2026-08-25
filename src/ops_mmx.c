@@ -2053,14 +2053,19 @@ extern void lz_dot32_q41_asm_2(const unsigned char *w, const int16_t *xa,
     __parm [__eax] [__edx] [__ebx] [__ecx] [__esi] \
     __modify [8087]
 
-/* dot32_q41_mmx stays static: unlike dot32_x16_mmx (Q8_0), nothing
-   outside this file (no LZ_ATTN_DOT32-style macro) calls this format's
-   dot by name across a TU boundary - only row_q41_mmx_asm below does,
-   same TU. */
-/* Not static, for the reason dot32_q16_mmx is not: src/ops_mmx.h
-   declares it with external linkage. */
+/* Not static. It was, on the argument that no caller outside this file
+   names it - true of CALLERS, and beside the point: src/ops_mmx.h
+   declares it with external linkage, and a #pragma aux has no address
+   of its own, so this wrapper is the only way a probe in another TU
+   can reach the Q4_1 per-32 kernel at all. */
 int32_t dot32_q41_mmx(const unsigned char *w, const int16_t *x) {
     return lz_dot32_q41_asm(w, x);
+}
+
+/* The paired kernel's address, on the same argument. */
+void dot32_q41_mmx_2(const unsigned char *w, const int16_t *xa,
+                     const int16_t *xb, int32_t *oa, int32_t *ob) {
+    lz_dot32_q41_asm_2(w, xa, xb, oa, ob);
 }
 
 extern void lz_dot128_q41_asm(const unsigned char *w,

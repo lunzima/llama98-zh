@@ -1303,6 +1303,13 @@ extern void lz_dot32_q41_sse2_asm_2(const unsigned char *w,
     __parm [__eax] [__edx] [__ebx] [__ecx] [__esi] \
     __modify [8087]
 
+/* The paired kernel's address, for the reason its MMX twin now has
+   one. */
+void dot32_q41_sse2a_2(const unsigned char *w, const int16_t *xa,
+                       const int16_t *xb, int32_t *oa, int32_t *ob) {
+    lz_dot32_q41_sse2_asm_2(w, xa, xb, oa, ob);
+}
+
 extern void lz_dot128_q41_sse2_asm(const unsigned char *w,
                 const int16_t *x, int32_t *out4);
 #pragma aux lz_dot128_q41_sse2_asm = \
