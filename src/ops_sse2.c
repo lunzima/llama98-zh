@@ -1229,10 +1229,7 @@ extern int32_t lz_dot32_q41_sse2_asm(const unsigned char *w, const int16_t *x);
     __value [__eax]                 \
     __modify [8087]
 
-/* Not static. It is already the thin wrapper a probe needs - the
-   #pragma aux it calls has no address of its own - and `static` was
-   the only thing keeping that address inside this file. Same for the
-   q61 and q16 twins below. */
+/* Not static: already the thin wrapper a probe needs. */
 int32_t dot32_q41_sse2a(const unsigned char *w, const int16_t *x) {
     return lz_dot32_q41_sse2_asm(w, x);
 }
@@ -1859,9 +1856,7 @@ extern void lz_dot32_q61_sse2_asm_2(const unsigned char *w4,
     __parm [__eax] [__edx] [__ebx] [__ecx] [__esi] [__edi] \
     __modify [8087]
 
-/* The paired kernel's address. With this one every _2 form in the five
-   dot formats can be called from a probe; before this round none of
-   them could. */
+/* The paired kernel's address. */
 void dot32_q61_sse2a_2(const unsigned char *w4, const unsigned char *w2,
                        const int16_t *xa, const int16_t *xb,
                        int32_t *oa, int32_t *ob) {

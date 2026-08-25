@@ -22,7 +22,13 @@
 
    Kernels do NOT emit emms themselves - the caller emits one after its
    loop, so a row loop pays one instead of one per row. That contract is the same in every TU that
-   compiles %mm instructions; only the translation unit differs. */
+   compiles %mm instructions; only the translation unit differs.
+
+   A #pragma aux body has no address, so a kernel named only inside its
+   pragma cannot be called from another TU - a probe, a cross-TU
+   caller, or a linker that needs a symbol. The thin wrappers below
+   (lz_dot128_x16_mmx_w, dot32_q16_mmx, etc.) exist for that reason.
+   Any new kernel must arrive with one, or kernel_reach_gate reddens. */
 #include "lz_int.h"   /* <stdint.h> is not on the language floor */
 #include <string.h>
 
@@ -961,11 +967,7 @@ extern void lz_p2_split32_mmx_asm(const void *blk, signed char *hi_out,
     __parm [__eax] [__edx] [__ebx] \
     __modify [8087]
 
-/* The split kernel's address. Its only caller builds the lz_p2_blk
-   around it, so nothing outside this file could drive the split with
-   chosen inputs - and the same was true of the SSE1 and SSE2 twins, so
-   three implementations of one operation had never been compared.
-   build/p2_split32_probe.c does that. */
+/* The split kernel's address. */
 void lz_p2_split32_mmx_w(const void *blk, signed char *hi_out,
                          signed char *lo_out) {
     lz_p2_split32_mmx_asm(blk, hi_out, lo_out);
@@ -2072,11 +2074,7 @@ extern void lz_dot32_q41_asm_2(const unsigned char *w, const int16_t *xa,
     __parm [__eax] [__edx] [__ebx] [__ecx] [__esi] \
     __modify [8087]
 
-/* Not static. It was, on the argument that no caller outside this file
-   names it - true of CALLERS, and beside the point: src/ops_mmx.h
-   declares it with external linkage, and a #pragma aux has no address
-   of its own, so this wrapper is the only way a probe in another TU
-   can reach the Q4_1 per-32 kernel at all. */
+/* Not static: ops_mmx.h declares it with external linkage. */
 int32_t dot32_q41_mmx(const unsigned char *w, const int16_t *x) {
     return lz_dot32_q41_asm(w, x);
 }
@@ -2891,9 +2889,7 @@ extern int32_t lz_dot32_q61_asm(const unsigned char *w4, const unsigned char *w2
     __value [__eax] \
     __modify [8087]
 
-/* Not static: a #pragma aux has no address, so this wrapper is the
-   only way build/dot128_q61_probe.c can reach the Q6_1 per-32 kernel.
-   Q6_1 was the last dot format with no probe at all. */
+/* Not static: ops_mmx.h declares it with external linkage. */
 int32_t dot32_q61_mmx(const unsigned char *w4, const unsigned char *w2,
                              const int16_t *x) {
     return lz_dot32_q61_asm(w4, w2, x);
@@ -3011,8 +3007,7 @@ extern void lz_dot32_q61_asm_2(const unsigned char *w4, const unsigned char *w2,
     __parm [__eax] [__edx] [__ebx] [__ecx] [__esi] [__edi] \
     __modify [8087]
 
-/* The paired kernel's address. Q6_1's was the last dot format left
-   with a _2 form nothing could call. */
+/* The paired kernel's address. */
 void dot32_q61_mmx_2(const unsigned char *w4, const unsigned char *w2,
                      const int16_t *xa, const int16_t *xb,
                      int32_t *oa, int32_t *ob) {
@@ -3397,12 +3392,7 @@ extern int32_t lz_dot32_q16_asm(const int16_t *w, const int16_t *x);
     __value [__eax] \
     __modify [8087]
 
-/* Not static: src/ops_mmx.h declares this with external linkage (the
-   gcc side defines it in ops_kernel_dot_mmx.h), and a static definition
-   under the same name answered that declaration with a symbol no other
-   TU could reach. Nothing linked against it, so nothing said anything -
-   the same shape dot32_x16_mmx_2 had. build/dot128_q16_probe.c needs
-   the address. */
+/* Not static: ops_mmx.h declares it with external linkage. */
 int32_t dot32_q16_mmx(const int16_t *w, const int16_t *x) {
     return lz_dot32_q16_asm(w, x);
 }
@@ -3490,11 +3480,7 @@ extern void lz_dot32_q16_asm_2(const int16_t *w, const int16_t *xa,
     __parm [__eax] [__edx] [__ebx] [__ecx] [__esi] \
     __modify [8087]
 
-/* The paired kernel's address. It had none, which is the shape every
-   _2 form in these files shares: each was added beside a single-token
-   twin that already had a wrapper, and none of them got one, so the
-   claim they exist for - one weight load serving two tokens - has
-   never been checked against anything. */
+/* The paired kernel's address. */
 void dot32_q16_mmx_2(const int16_t *w, const int16_t *xa, const int16_t *xb,
                      int32_t *oa, int32_t *ob) {
     lz_dot32_q16_asm_2(w, xa, xb, oa, ob);
