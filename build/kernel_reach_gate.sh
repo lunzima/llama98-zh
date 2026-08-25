@@ -41,23 +41,26 @@ set -u
 cd "$(dirname "$0")/.."
 
 FILES="src/ops_mmx.c src/ops_sse2.c src/ops_mmx_sse.c"
-FLOOR=45
+FLOOR=50
 
-# FOURTEEN ARE STILL UNREACHABLE, and the number is what it is because
-# "reachable" means a THIN WRAPPER, not a mention:
+# NINE ARE STILL UNREACHABLE:
 #
-#   ops_mmx.c       gdn1_x4, wsum_pair, p2_split32, lerp_q15_32,
-#                   exp_q20_2, dot32_q61_2
-#   ops_sse2.c      p2_mul32, p2_split32, lerp_q15_32, exp_q20,
-#                   dot32_x16_2, dot32_q61_2
-#   ops_mmx_sse.c   p2_split32, exp_q20_2
+#   ops_mmx.c       wsum_pair, p2_split32, dot32_q61_2
+#   ops_sse2.c      p2_mul32, p2_split32, i32f_acc32, dot32_x16_2,
+#                   dot32_q61_2
+#   ops_mmx_sse.c   p2_split32
+#
+# THIS LIST SAID FOURTEEN AN HOUR AGO, and five of those were the
+# gate's fault rather than the code's - see the note on the signature
+# test below. A wrong list is worse than a shorter true one: each name
+# on it is a claim that somebody should go add a wrapper.
 #
 # EVERY DOT FAMILY NOW HAS A PROBE - Q8_0, Q4_1, Q6_1, Q16_0 and T2 -
 # and each holds its MMX tier against its SSE2 tier. What is left is
-# three _2 forms and the kernels that are NOT dot products: exp_q20,
-# lerp_q15_32, p2_split32, p2_mul32, gdn1_x4, wsum_pair. Those need
-# their own oracles rather than a sixth copy of the dot probe, which is
-# why they are last rather than because they matter less.
+# two _2 forms and kernels that are NOT dot products: p2_split32,
+# p2_mul32, i32f_acc32, wsum_pair. Those need their own oracles rather
+# than a sixth copy of the dot probe, which is why they are last rather
+# than because they matter less.
 #
 # THE _2 FORMS DOMINATE what is left, and that is a finding rather than
 # a coincidence: the paired kernels were added later, each beside a
@@ -104,26 +107,80 @@ def funcs(src):
                 or '(' not in ln):
             i += 1
             continue
-        head = i
-        while head < len(lines) and head < i + 5:
-            if lines[head].rstrip().endswith('{'):
-                break
-            head += 1
-        else:
+        # THE HEAD IS WHERE THE PARAMETER LIST CLOSES AND A BRACE
+        # FOLLOWS - not "some line within five ends in {". That earlier
+        # rule let a one-line function adopt a LATER function's brace:
+        # `void wrap(...) { call(); }` does not end in `{`, so the
+        # search walked forward and attached it to the next definition,
+        # swallowing everything between. The planted selftest caught it
+        # by reporting all three of its kernels reachable.
+        blob = '\n'.join(lines[i:i + 6])
+        p = blob.find('(')
+        d, k = 0, p
+        while k < len(blob):
+            if blob[k] == '(':
+                d += 1
+            elif blob[k] == ')':
+                d -= 1
+                if d == 0:
+                    break
+            k += 1
+        if k >= len(blob) or not blob[k + 1:].lstrip().startswith('{'):
             i += 1
             continue
-        if head >= len(lines) or not lines[head].rstrip().endswith('{'):
-            i += 1
-            continue
+        head = i + blob[:k].count('\n')
         depth, j = 0, head
         while j < len(lines):
             depth += lines[j].count('{') - lines[j].count('}')
-            if depth <= 0 and j > head:
+            # `j > head` was here, and a one-line function never
+            # terminated: its braces balance on the head line, so the
+            # span ran on and swallowed whatever followed. The planted
+            # selftest below is what said so - every one of its three
+            # kernels read as reachable because the first wrapper had
+            # eaten the other two functions.
+            if depth <= 0:
                 break
             j += 1
         out.append((i, j))
         i = j + 1
     return out, lines
+
+def plist(text):
+    """Parameter count of the first (...) in text, 0 for (void)."""
+    i = text.find('(')
+    if i < 0:
+        return -1
+    depth, j = 0, i
+    while j < len(text):
+        if text[j] == '(':
+            depth += 1
+        elif text[j] == ')':
+            depth -= 1
+            if depth == 0:
+                break
+        j += 1
+    inner = text[i + 1:j].strip()
+    if not inner or inner == 'void':
+        return 0
+    d, cnt = 0, 1
+    for ch in inner:
+        if ch in '([':
+            d += 1
+        elif ch in ')]':
+            d -= 1
+        elif ch == ',' and d == 0:
+            cnt += 1
+    return cnt
+
+def nparams(src, name):
+    m = re.search(r'\bextern\b[^;]*?\b' + re.escape(name) + r'\s*\(',
+                  src, re.S)
+    if not m:
+        return -1
+    return plist(src[m.end() - 1:])
+
+def nparams_at(lines, a):
+    return plist('\n'.join(lines[a:a + 6]))
 
 total = reach = 0
 bad = []
@@ -136,14 +193,24 @@ for path in sys.argv[1:]:
     for m in re.finditer(r'^#pragma aux\s+([A-Za-z_0-9]+)', src, re.M):
         name = m.group(1)
         total += 1
+        # A WRAPPER, not merely a mention, and the test is the SIGNATURE
+        # rather than the length. row_t2_mmx_asm names lz_dot128_t2_asm
+        # inside its own row loop, but it takes a ROW's arguments - a
+        # probe driving it cannot choose what the kernel sees. A wrapper
+        # takes the kernel's own arguments, so its parameter count
+        # matches within one (the odd-element tail some of them carry
+        # adds no parameter; a length-n form against a fixed-width
+        # kernel adds exactly one).
+        #
+        # A LINE-COUNT THRESHOLD WAS TRIED FIRST and called
+        # lz_exp_q20_mmx unreachable - a genuine wrapper that
+        # build/exp_q20_probe.c genuinely drives, thirteen lines long
+        # because it handles the odd tail in C. Length is a proxy for
+        # the wrong thing.
+        want_np = nparams(src, name)
         hit = False
         for a, b in spans:
-            # A WRAPPER, not merely a mention. row_t2_mmx_asm names
-            # lz_dot128_t2_asm inside its own row loop, which does not
-            # give a probe the kernel's address or let it choose the
-            # kernel's arguments - it would have to drive a whole row.
-            # A wrapper is short: signature, one call, closing brace.
-            if b - a > 6:
+            if abs(nparams_at(lines, a) - want_np) > 1:
                 continue
             body = '\n'.join(lines[a:b + 1])
             if re.search(r'\b' + re.escape(name) + r'\s*\(', body):
@@ -158,6 +225,40 @@ print('TOTAL %d' % total)
 print('REACH %d' % reach)
 for b in bad:
     print('MISS %s' % b)
+
+# SELFTEST, run by the SAME code above rather than a copy of it. The
+# first version of this control was a hand-written duplicate of the
+# scan, and it went stale the moment the predicate changed from a line
+# count to a signature match - it kept passing while testing logic that
+# no longer ran. Three synthetic kernels: one with a real wrapper, one
+# with only a static wrapper, one named only by a function that takes a
+# row's worth of arguments.
+CTL = (
+ 'extern void k_wrapped(int a, int b);\n'
+ '#pragma aux k_wrapped = "x"\n'
+ 'extern void k_static(int a, int b);\n'
+ '#pragma aux k_static = "x"\n'
+ 'extern void k_rowonly(int a, int b);\n'
+ '#pragma aux k_rowonly = "x"\n'
+ 'void wrap(int a, int b) { k_wrapped(a, b); }\n'
+ 'static void swrap(int a, int b) { k_static(a, b); }\n'
+ 'void rowfn(int a, int b, int c, int d, int e, int f) {\n'
+ '    k_rowonly(a, b);\n'
+ '}\n')
+cspans, clines = funcs(CTL)
+verdict = []
+for m in re.finditer(r'^#pragma aux\s+([A-Za-z_0-9]+)', CTL, re.M):
+    nm = m.group(1)
+    np_ = nparams(CTL, nm)
+    ok = False
+    for a, b in cspans:
+        if abs(nparams_at(clines, a) - np_) > 1:
+            continue
+        if re.search(r'\b' + nm + r'\s*\(', '\n'.join(clines[a:b + 1])):
+            ok = True
+            break
+    verdict.append(nm + ('=reach' if ok else '=miss'))
+print('CTL %s' % ' '.join(verdict))
 PY
 )
 
@@ -187,41 +288,23 @@ if [ "$REACH" -lt "$FLOOR" ]; then
     BAD=1
 fi
 
-# Control: the parser must report a planted kernel as unreachable and a
-# wrapped one as reachable, or its counts carry nothing.
-CTL=$(python - <<'PY'
-import re
-src = ('#pragma aux k_wrapped = "x"\n'
-       '#pragma aux k_bare = "x"\n'
-       'void wrap(void) { k_wrapped(1); }\n'
-       'static void s(void) { k_bare(1); }\n')
-lines = src.split('\n')
-spans = []
-for i, ln in enumerate(lines):
-    if ln and ln[0] not in ' \t#/*}' and not ln.startswith('static') \
-       and '{' in ln:
-        spans.append((i, i))
-got = []
-for m in re.finditer(r'^#pragma aux\s+([A-Za-z_0-9]+)', src, re.M):
-    n = m.group(1)
-    hit = any(re.search(r'\b' + n + r'\s*\(', '\n'.join(lines[a:b + 1]))
-              for a, b in spans)
-    got.append(n + ('=reach' if hit else '=miss'))
-print(' '.join(got))
-PY
-)
-if [ "$CTL" != "k_wrapped=reach k_bare=miss" ]; then
-    echo "kernel_reach_gate: FAIL - on a planted pair the parser said"
-    echo "  '$CTL', expected 'k_wrapped=reach k_bare=miss'. A static"
-    echo "  wrapper must NOT count as reachable; that was the"
-    echo "  dot32_q16_mmx case."
+CTL=$(printf '%s\n' "$OUT" | sed -n 's/^CTL //p')
+WANT_CTL="k_wrapped=reach k_static=miss k_rowonly=miss"
+if [ "$CTL" != "$WANT_CTL" ]; then
+    echo "kernel_reach_gate: FAIL - on the planted set the scan said"
+    echo "    $CTL"
+    echo "  expected"
+    echo "    $WANT_CTL"
+    echo "  A static wrapper must NOT count (that was dot32_q16_mmx),"
+    echo "  and neither must a function that names the kernel while"
+    echo "  taking a row's arguments (that was row_t2_mmx_asm)."
     BAD=1
 fi
 
 if [ "$BAD" -eq 0 ]; then
     echo "kernel_reach_gate: PASS ($REACH of $TOTAL kernels reachable,"
-    echo "  floor $FLOOR; a planted bare kernel reads as unreachable and"
-    echo "  a static wrapper does not rescue it)"
+    echo "  floor $FLOOR; on the planted set a static wrapper and a"
+    echo "  row-signature caller both read as unreachable)"
     [ -n "$MISS" ] && printf '  still unreachable: %s\n' $MISS
     exit 0
 fi
