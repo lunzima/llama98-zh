@@ -10660,6 +10660,86 @@ static void st_about_body(FILE *f, HWND dlg, int *checks) {
     (*checks)++;
 }
 
+/* The divider is drawn in WM_PAINT/WM_PRINTCLIENT (aboutdlg.c's own
+   comment). Render the window into a memory DC and read the pixels back -
+   this is the DETERMINISTIC way to see where the divider actually landed,
+   unlike a screen grab (DPI scaling) or asking the user. The two-row
+   groove is light (160) over dark (100), the reference's own colours,
+   spanning the text column. */
+static void st_about_divider(FILE *f, HWND dlg, int *checks) {
+    HDC hdc = GetDC(dlg);
+    HDC mdc = CreateCompatibleDC(hdc);
+    if (mdc) {
+        RECT cr;
+        HBITMAP bmp;
+        GetClientRect(dlg, &cr);
+        bmp = CreateCompatibleBitmap(hdc, cr.right, cr.bottom);
+        if (bmp) {
+            HGDIOBJ old = SelectObject(mdc, bmp);
+            /* WM_PRINTCLIENT paints controls but not the client
+               background, so a fresh bitmap comes out black. Fill the
+               dialog's own background colour first, exactly as
+               WM_ERASEBKGND would. */
+            {
+                HBRUSH br = (HBRUSH)(COLOR_BTNFACE + 1);
+                RECT fill;
+                fill.left = 0; fill.top = 0;
+                fill.right = cr.right; fill.bottom = cr.bottom;
+                FillRect(mdc, &fill, br);
+            }
+            SendMessage(dlg, WM_PRINTCLIENT, (WPARAM)mdc, 0);
+            {
+                /* The divider's real position, read back from the
+                   rendered pixels - not guessed from a screen. It must be
+                   a light-over-dark two-row groove spanning the FULL
+                   client width (the reference draws it x9..371, below the
+                   logo), so find the widest run of the light-pen colour
+                   and assert it reaches from near the left margin to near
+                   the right one. DETERMINISTIC: client coordinates, no
+                   DPI, no screen grab. */
+                int y, x;
+                int best_w = 0, best_y = 0, best_x0 = 0;
+                for (y = 0; y < cr.bottom; y++) {
+                    int run = 0, run_start = 0;
+                    for (x = 0; x < cr.right; x++) {
+                        COLORREF c = GetPixel(mdc, x, y);
+                        int r = GetRValue(c), g = GetGValue(c), b = GetBValue(c);
+                        int is_light = (r == g && g == b && r >= 150 && r <= 170);
+                        if (is_light) {
+                            if (run == 0) run_start = x;
+                            run++;
+                        } else {
+                            if (run > best_w) {
+                                best_w = run; best_y = y; best_x0 = run_start;
+                            }
+                            run = 0;
+                        }
+                    }
+                    if (run > best_w) {
+                        best_w = run; best_y = y; best_x0 = run_start;
+                    }
+                }
+                fprintf(f, "  divider: %dpx at y=%d x%d..%d (client %ldx%ld)\n",
+                        best_w, best_y, best_x0, best_x0 + best_w,
+                        (long)cr.right, (long)cr.bottom);
+                /* Full-width: from the left margin to the right margin,
+                   within a margin of tolerance. The logo frame's own top
+                   edge is also a light run, but it is narrower (67px) than
+                   the divider (the full width minus two margins), so the
+                   WIDEST run is the divider. */
+                st_check(f, best_w >= cr.right - 2 * LZ_GUI_DLG_MARGIN - 4,
+                         "about: the divider spans the full client "
+                         "width below the logo");
+                (*checks)++;
+            }
+            SelectObject(mdc, old);
+            DeleteObject(bmp);
+        }
+        DeleteDC(mdc);
+    }
+    if (hdc) ReleaseDC(dlg, hdc);
+}
+
 static int st_about(FILE *f, HINSTANCE inst) {
     HWND dlg;
     int checks = 0;
@@ -10732,87 +10812,7 @@ static int st_about(FILE *f, HINSTANCE inst) {
         checks++;
     }
 
-    /* The divider is drawn in WM_PAINT/WM_PRINTCLIENT (aboutdlg.c's
-       own comment). Render the window into a memory DC and read the
-       pixels back - this is the DETERMINISTIC way to see where the
-       divider actually landed, unlike a screen grab (DPI scaling) or
-       asking the user. The two-row groove is light (160) over dark
-       (100), the reference's own colours, spanning the text column. */
-    {
-        HDC hdc = GetDC(dlg);
-        HDC mdc = CreateCompatibleDC(hdc);
-        if (mdc) {
-            RECT cr;
-            HBITMAP bmp;
-            GetClientRect(dlg, &cr);
-            bmp = CreateCompatibleBitmap(hdc, cr.right, cr.bottom);
-            if (bmp) {
-                HGDIOBJ old = SelectObject(mdc, bmp);
-                /* WM_PRINTCLIENT paints controls but not the client
-                   background, so a fresh bitmap comes out black. Fill
-                   the dialog's own background colour first, exactly as
-                   WM_ERASEBKGND would. */
-                {
-                    HBRUSH br = (HBRUSH)(COLOR_BTNFACE + 1);
-                    RECT fill;
-                    fill.left = 0; fill.top = 0;
-                    fill.right = cr.right; fill.bottom = cr.bottom;
-                    FillRect(mdc, &fill, br);
-                }
-                SendMessage(dlg, WM_PRINTCLIENT, (WPARAM)mdc, 0);
-                {
-                    /* The divider's real position, read back from the
-                       rendered pixels - not guessed from a screen. It
-                       must be a light-over-dark two-row groove spanning
-                       the FULL client width (the reference draws it
-                       x9..371, below the logo), so find the widest run
-                       of the light-pen colour and assert it reaches
-                       from near the left margin to near the right one.
-                       DETERMINISTIC: client coordinates, no DPI, no
-                       screen grab. */
-                    int y, x;
-                    int best_w = 0, best_y = 0, best_x0 = 0;
-                    for (y = 0; y < cr.bottom; y++) {
-                        int run = 0, run_start = 0;
-                        for (x = 0; x < cr.right; x++) {
-                            COLORREF c = GetPixel(mdc, x, y);
-                            int r = GetRValue(c), g = GetGValue(c), b = GetBValue(c);
-                            int is_light = (r == g && g == b && r >= 150 && r <= 170);
-                            if (is_light) {
-                                if (run == 0) run_start = x;
-                                run++;
-                            } else {
-                                if (run > best_w) {
-                                    best_w = run; best_y = y; best_x0 = run_start;
-                                }
-                                run = 0;
-                            }
-                        }
-                        if (run > best_w) {
-                            best_w = run; best_y = y; best_x0 = run_start;
-                        }
-                    }
-                    fprintf(f, "  divider: %dpx at y=%d x%d..%d (client %ldx%ld)\n",
-                            best_w, best_y, best_x0, best_x0 + best_w,
-                            (long)cr.right, (long)cr.bottom);
-                    /* Full-width: from the left margin to the right
-                       margin, within a margin of tolerance. The logo
-                       frame's own top edge is also a light run, but it
-                       is narrower (67px) than the divider (the full
-                       width minus two margins), so the WIDEST run is
-                       the divider. */
-                    st_check(f, best_w >= cr.right - 2 * LZ_GUI_DLG_MARGIN - 4,
-                             "about: the divider spans the full client "
-                             "width below the logo");
-                    checks++;
-                }
-                SelectObject(mdc, old);
-                DeleteObject(bmp);
-            }
-            DeleteDC(mdc);
-        }
-        if (hdc) ReleaseDC(dlg, hdc);
-    }
+    st_about_divider(f, dlg, &checks);
 
     /* Three ways out, one check each: OK, Esc (IDCANCEL via the modal
        loop's IsDialogMessage), and WM_CLOSE. All three must destroy the
