@@ -35,16 +35,31 @@ TOK=${TOK:-1,2,3,4,5,6,7,8,9,10}
 W=${W:-/tmp/armproof}
 NAME=$(basename "$MODEL")
 
-# THE sig ROW IS CURRENTLY BAD AND IT IS NOT A SAMPLING ARTIFACT.
+# THE sig ROW IS BAD BECAUSE THE MUTATION IS OFF THE PATH, ANSWERED.
 # Breaking lz_sigmoid_q15's coordinate shift leaves _armgate2's logits
-# byte-identical across all nine positions, so arm-asm reads "same" where
-# it must read "differ". Established: the model does have linear
-# attention layers (9 of 12), and widening from one position to all nine
-# did not change the verdict. NOT established: whether the ARM asm
-# primitive is reached at all - forward.c has an integer path,
-# sigmoid_q15_i, that takes p and g as int16 and may never enter the
-# table core this mutation edits. Until that is answered the sig cell's
-# product-level proof is open; the leaf gate still covers its value.
+# byte-identical across all nine positions, so arm-asm reads "same"
+# where it must read "differ". That is not a sampling artifact - the
+# model has linear attention layers (9 of 12) and widening from one
+# position to all nine did not move it - and it is not a broken gate.
+#
+# The two ARM sigmoid primitives are reached from exactly two call
+# sites, both in src/ops_quant.c, and both hand them a FLOAT: `bx.f = x`
+# into lz_sig_q15_arm_asm, `bt.f = t` into lz_sig_q15_t_arm_asm. They
+# are the ARM tier of the float sigmoid.
+#
+# sigmoid_q15_i is the INTEGER entry and it calls neither. It reaches
+# the float one only through its own out-of-range arm, `e < 0 ||
+# e > LZ_SIG_EMAX`; inside that range it does its own table lookup and
+# interpolation in C. The int pipeline runs it in range - the CLI
+# banner's "conv sig int" and "gate sig int" channel-step counts are
+# what say so - so the mutated instruction never executes and identical
+# logits are the correct answer.
+#
+# WHAT THAT LEAVES. The row is measuring a primitive the shipping
+# integer path does not call, which makes it a product-level proof of
+# nothing rather than a failing one. Fixing it means mutating what
+# sigmoid_q15_i actually executes, not this. The leaf gate still covers
+# the primitive's own value.
 MUT="sig|src/ops_arm_prim.h|s/rsb    %\[e\], %\[e\], #135/rsb    %[e], %[e], #134/
 norm|src/ops_arm.c|s/andeq  r7, r9, #1/andeq  r7, r9, #0/
 epi|src/ops_arm.c|s/smlal  %\[lo\], %\[hi\], r5, r9/smlal  %[lo], %[hi], r5, r8/"
