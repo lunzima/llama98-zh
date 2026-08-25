@@ -225,6 +225,22 @@
 # 2^32, so it is bit-identical; the probe's cross-tier arm holds it
 # against dot32_q16_mmx, 81924 values, 0 mismatches.
 #
+# lz_exp_q20_sse2_asm, 74% -> 43%, the two-lane split a fourth time. Each
+# of the three multiplier stages of the Q20 Taylor computes a LOW lane
+# (pmuludq against the unshifted half) and a HIGH lane (psrldq, pmuludq,
+# pslldq) that recombine with por; the two write xmm2 and xmm3, read only
+# the constants and the shared source, and stay independent until the por.
+# So each stage was two serial chains that could be interleaved: moving
+# the high lane's movdqa xmm3, xmm0 up beside the low lane's movdqa xmm2,
+# xmm0 and alternating the two lanes' pmuludq/paddq/psrlq breaks every
+# chain with no extra register and no arithmetic change - each lane still
+# reaches its por in its original order. The fourth stage differs only in
+# that its source is tab/cq, so its two shifts (psrldq xmm0 and psrldq
+# xmm1) both sit inside the high lane and the low lane's read of the
+# unshifted cq must stay ahead of psrldq xmm1. build/exp_q20_probe.c holds
+# it against lz_exp_fixed's ORIGINAL association, 1,282,566 values,
+# 0 mismatches under Watcom.
+#
 # Named and measured; what this script is for is that the next person
 # does not re-derive which kernels are worth it.
 #

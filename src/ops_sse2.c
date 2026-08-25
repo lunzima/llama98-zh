@@ -691,12 +691,12 @@ extern void lz_exp_q20_sse2_asm(const int32_t *tab, const int32_t *s,
     "expq20loop:"                   \
     "movdqu  xmm0, [edx]"           \
     "movdqa  xmm2, xmm0"            \
-    "pmuludq xmm2, xmm4"            \
-    "paddq   xmm2, xmm6"            \
-    "psrlq   xmm2, 20"              \
     "movdqa  xmm3, xmm0"            \
+    "pmuludq xmm2, xmm4"            \
     "psrldq  xmm3, 4"               \
+    "paddq   xmm2, xmm6"            \
     "pmuludq xmm3, xmm4"            \
+    "psrlq   xmm2, 20"              \
     "paddq   xmm3, xmm6"            \
     "psrlq   xmm3, 20"              \
     "pslldq  xmm3, 4"               \
@@ -709,12 +709,12 @@ extern void lz_exp_q20_sse2_asm(const int32_t *tab, const int32_t *s,
     "pslldq  xmm3, 4"               \
     "por     xmm0, xmm3"            \
     "movdqa  xmm2, xmm0"            \
-    "pmuludq xmm2, xmm5"            \
-    "paddq   xmm2, xmm7"            \
-    "psrlq   xmm2, 40"              \
     "movdqa  xmm3, xmm0"            \
+    "pmuludq xmm2, xmm5"            \
     "psrldq  xmm3, 4"               \
+    "paddq   xmm2, xmm7"            \
     "pmuludq xmm3, xmm5"            \
+    "psrlq   xmm2, 40"              \
     "paddq   xmm3, xmm7"            \
     "psrlq   xmm3, 40"              \
     "pslldq  xmm3, 4"               \
@@ -723,10 +723,10 @@ extern void lz_exp_q20_sse2_asm(const int32_t *tab, const int32_t *s,
     "movdqu  xmm0, [eax]"           \
     "movdqa  xmm2, xmm0"            \
     "pmuludq xmm2, xmm1"            \
-    "paddq   xmm2, xmm6"            \
-    "psrlq   xmm2, 20"              \
     "psrldq  xmm0, 4"               \
+    "paddq   xmm2, xmm6"            \
     "psrldq  xmm1, 4"               \
+    "psrlq   xmm2, 20"              \
     "pmuludq xmm0, xmm1"            \
     "paddq   xmm0, xmm6"            \
     "psrlq   xmm0, 20"              \

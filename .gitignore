@@ -84,6 +84,7 @@
 !/build/normss_pack_mmx_probe.c
 !/build/lerp_q15_probe.c
 !/build/exp_q20_probe.c
+!/build/exp_probe_stubs.c
 !/build/dot128_t2_probe.c
 !/build/seed_gate.sh
 !/build/pair_census.sh
