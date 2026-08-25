@@ -1520,64 +1520,64 @@ extern void lz_dot32_x16_asm_2(const int8_t *w, const int16_t *xa,
     "pxor      mm5, mm5" \
     "movq      mm1, [eax]" \
     "movq      mm2, mm7" \
+    "movq      mm0, mm7" \
     "punpcklbw mm2, mm1" \
+    "punpckhbw mm0, mm1" \
     "movq      mm3, mm2" \
+    "movq      mm4, mm0" \
     "pmaddwd   mm2, [edx]" \
-    "paddd     mm6, mm2" \
+    "pmaddwd   mm0, [edx+8]" \
     "pmaddwd   mm3, [ebx]" \
-    "paddd     mm5, mm3" \
-    "movq      mm2, mm7" \
-    "punpckhbw mm2, mm1" \
-    "movq      mm3, mm2" \
-    "pmaddwd   mm2, [edx+8]" \
+    "pmaddwd   mm4, [ebx+8]" \
     "paddd     mm6, mm2" \
-    "pmaddwd   mm3, [ebx+8]" \
+    "paddd     mm6, mm0" \
     "paddd     mm5, mm3" \
+    "paddd     mm5, mm4" \
     "movq      mm1, [eax+8]" \
     "movq      mm2, mm7" \
+    "movq      mm0, mm7" \
     "punpcklbw mm2, mm1" \
+    "punpckhbw mm0, mm1" \
     "movq      mm3, mm2" \
+    "movq      mm4, mm0" \
     "pmaddwd   mm2, [edx+16]" \
-    "paddd     mm6, mm2" \
+    "pmaddwd   mm0, [edx+24]" \
     "pmaddwd   mm3, [ebx+16]" \
-    "paddd     mm5, mm3" \
-    "movq      mm2, mm7" \
-    "punpckhbw mm2, mm1" \
-    "movq      mm3, mm2" \
-    "pmaddwd   mm2, [edx+24]" \
+    "pmaddwd   mm4, [ebx+24]" \
     "paddd     mm6, mm2" \
-    "pmaddwd   mm3, [ebx+24]" \
+    "paddd     mm6, mm0" \
     "paddd     mm5, mm3" \
+    "paddd     mm5, mm4" \
     "movq      mm1, [eax+16]" \
     "movq      mm2, mm7" \
+    "movq      mm0, mm7" \
     "punpcklbw mm2, mm1" \
+    "punpckhbw mm0, mm1" \
     "movq      mm3, mm2" \
+    "movq      mm4, mm0" \
     "pmaddwd   mm2, [edx+32]" \
-    "paddd     mm6, mm2" \
+    "pmaddwd   mm0, [edx+40]" \
     "pmaddwd   mm3, [ebx+32]" \
-    "paddd     mm5, mm3" \
-    "movq      mm2, mm7" \
-    "punpckhbw mm2, mm1" \
-    "movq      mm3, mm2" \
-    "pmaddwd   mm2, [edx+40]" \
+    "pmaddwd   mm4, [ebx+40]" \
     "paddd     mm6, mm2" \
-    "pmaddwd   mm3, [ebx+40]" \
+    "paddd     mm6, mm0" \
     "paddd     mm5, mm3" \
+    "paddd     mm5, mm4" \
     "movq      mm1, [eax+24]" \
     "movq      mm2, mm7" \
+    "movq      mm0, mm7" \
     "punpcklbw mm2, mm1" \
+    "punpckhbw mm0, mm1" \
     "movq      mm3, mm2" \
+    "movq      mm4, mm0" \
     "pmaddwd   mm2, [edx+48]" \
-    "paddd     mm6, mm2" \
+    "pmaddwd   mm0, [edx+56]" \
     "pmaddwd   mm3, [ebx+48]" \
-    "paddd     mm5, mm3" \
-    "movq      mm2, mm7" \
-    "punpckhbw mm2, mm1" \
-    "movq      mm3, mm2" \
-    "pmaddwd   mm2, [edx+56]" \
+    "pmaddwd   mm4, [ebx+56]" \
     "paddd     mm6, mm2" \
-    "pmaddwd   mm3, [ebx+56]" \
+    "paddd     mm6, mm0" \
     "paddd     mm5, mm3" \
+    "paddd     mm5, mm4" \
     "movq      mm1, mm6" \
     "psrlq     mm1, 32" \
     "paddd     mm6, mm1" \
@@ -1597,6 +1597,20 @@ extern void lz_dot32_x16_asm_2(const int8_t *w, const int16_t *xa,
    within one TU; declared in src/ops_mmx.h. */
 int32_t dot32_x16_mmx(const int8_t *w, const int16_t *x) {
     return lz_dot32_x16_asm(w, x);
+}
+
+/* The paired form's wrapper, which the Watcom build did not have.
+   src/ops_mmx.h declares dot32_x16_mmx_2 and the gcc side defines it in
+   src/ops_kernel_dot_mmx.h; on this side the pragma was only ever
+   called by name from row_q8_mmx_asm below, so the symbol the header
+   promises did not exist here. Nothing linked against it, so nothing
+   complained - one build answering for a declaration the other does
+   not is the shape a pair gate exists to catch. It also gives the
+   kernel an ADDRESS: a #pragma aux body has none, so without this a
+   probe cannot reach it. */
+void dot32_x16_mmx_2(const int8_t *w, const int16_t *xa, const int16_t *xb,
+                     int32_t *oa, int32_t *ob) {
+    lz_dot32_x16_asm_2(w, xa, xb, oa, ob);
 }
 
 /* Gate: 100K groups x 4 sub-blocks, MMX and SSE2 both bit-identical to

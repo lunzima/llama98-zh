@@ -52,6 +52,8 @@
 void lz_dot128_x16_mmx_w(const int8_t *w, const int16_t *x, int32_t *out4);
 int32_t dot32_x16_mmx(const int8_t *w, const int16_t *x);
 int32_t lz_dot32_x16_sse2(const int8_t *w, const int16_t *x);
+void dot32_x16_mmx_2(const int8_t *w, const int16_t *xa, const int16_t *xb,
+                     int32_t *oa, int32_t *ob);
 
 static unsigned long rs = 1145141919UL;
 static int nextv(void) {
@@ -63,7 +65,7 @@ int main(void) {
     int8_t w[128];
     int16_t x[128];
     int32_t got[4], want[4];
-    long bad = 0, n = 0;
+    long bad = 0, n = 0, same_pair = 0;
     int pass, k, b;
 
     for (pass = 0; pass < 4096; pass++) {
@@ -106,6 +108,36 @@ int main(void) {
                 bad++;
             }
         }
+
+        /* THE PAIRED KERNEL, held to SSE2 as well, and to SSE2 rather
+           than to its own single-token twin for the same reason: they
+           are neighbours in one file and share a body shape. Its claim
+           is one weight unpack serving two DIFFERENT activation
+           vectors, so the two must be different or the check cannot
+           tell a kernel that reads xa twice from one that is right. */
+        for (b = 0; b < 2; b++, n += 2) {
+            /* ONE weight block, TWO different activation vectors -
+               that is the kernel's whole claim, so xb is deliberately
+               not adjacent to xa. */
+            const int8_t  *wp = w + b * 32;
+            const int16_t *xa = x + b * 32;
+            const int16_t *xb = x + b * 32 + 64;
+            int32_t pa = 0, pb = 0;
+            int32_t wa = lz_dot32_x16_sse2(wp, xa);
+            int32_t wb = lz_dot32_x16_sse2(wp, xb);
+            dot32_x16_mmx_2(wp, xa, xb, &pa, &pb);
+            if (pa != wa || pb != wb) {
+                if (bad < 6)
+                    printf("  pass %d pair %d: got %ld,%ld want %ld,%ld\n",
+                           pass, b, (long)pa, (long)pb,
+                           (long)wa, (long)wb);
+                bad++;
+            }
+            /* If the two sums are equal the case cannot tell the two
+               outputs apart, so count them: an arm made entirely of
+               those would pass a kernel that wrote oa into both. */
+            if (wa == wb) same_pair++;
+        }
     }
 
     /* THE LANES MUST NOT BE INTERCHANGEABLE, or a fold that transposed
@@ -126,6 +158,16 @@ int main(void) {
             printf("  lane order: four distinct sums %ld %ld %ld %ld\n",
                    (long)want[0], (long)want[1], (long)want[2], (long)want[3]);
         }
+    }
+
+    /* The paired arm is only as good as the fraction of its cases where
+       the two outputs actually differ. Reported rather than assumed. */
+    printf("  paired arm: %ld of 8192 case(s) had oa == ob and could not"
+           " tell the two outputs apart\n", same_pair);
+    if (same_pair > 4096) {
+        printf("  paired arm is mostly blind: over half its cases have"
+               " equal outputs\n");
+        bad++;
     }
 
     printf("dot128_x16_probe: %ld value(s), %ld mismatch(es)\n", n, bad);

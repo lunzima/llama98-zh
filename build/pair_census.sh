@@ -43,23 +43,32 @@
 # change no arithmetic - the accumulators are separate and integer
 # addition is associative and exact.
 #
-# AND --pair ALREADY DOES THIS, which was not why it was built. Its
-# stated job is sharing one weight unpack across two tokens - a memory
-# argument. But every _2 kernel scores lower than its single-token twin,
-# by the same margin, in all five weight formats:
+# --pair HELPS, BUT NOT AS MUCH AS IT FIRST LOOKED, and the correction
+# is worth keeping because the first reading of this table was mine.
+# Its stated job is sharing one weight unpack across two tokens - a
+# memory argument. Every _2 kernel does score lower than its
+# single-token twin, by a similar margin, in all five weight formats:
 #
 #   dot32_x16_sse2   66% -> 57%      dot32_q61_sse2   70% -> 62%
 #   dot32_q41_sse2   66% -> 57%      dot32_q16_sse2   65% -> 56%
 #   dot32_t2_sse2    69% -> 61%
 #
-# Two tokens means two independent chains to interleave, so the pairing
-# knob buys issue width as well as bandwidth. Worth knowing before
-# anyone measures --pair and attributes all of it to the unpack.
+# I read that as "pairing already interleaves, so it buys issue width
+# as well as bandwidth". It does not. CARRYING two independent chains
+# is not INTERLEAVING them: lz_dot32_x16_asm_2 held two accumulators
+# and still scored 55%, because it finished both tokens against one
+# widened half before it touched the other. Hand-interleaving it took
+# it to 20% with the same instruction count - so the ~9 points pairing
+# gives is the unpack being shared, and the other 35 were still on the
+# floor.
+#
+# The right statement: pairing buys bandwidth, and leaves most of the
+# issue width for whoever reorders the body.
 #
 # Whole set: 4791 adjacent register pairs, 59% dependent; ops_mmx.c
-# alone is 2404 and 51% after the four edits below.
+# alone is 2404 and 50% after the five edits below.
 #
-# FOUR HAVE BEEN DONE, so the technique is not hypothetical here.
+# FIVE HAVE BEEN DONE, so the technique is not hypothetical here.
 #
 # lz_dot32_t2_asm was the worst in the file at 75% and is now 7% - the
 # best - by running the low and high nibble of each weight byte side by
@@ -108,10 +117,21 @@
 # operands swapped) fires all three detectors - the group check, the
 # SSE2 check, and the absolute lane sums.
 #
-# THE REST ARE NOT DONE: lz_exp_q20_2_mmx_asm at 69%,
-# lz_dot32_x16_asm_2 at 55%, and the SSE2 single-token kernels at
-# 65-74%. Each is a real edit needing its own probe re-run on both
-# toolchains.
+# lz_dot32_x16_asm_2, 55% -> 20%. It ALREADY carried two independent
+# chains - that is what --pair means - and still scored 55%, because
+# carrying two chains is not the same as interleaving them: it fed both
+# tokens from one widened half before touching the other. mm0 and mm4
+# were free, so the lo and hi halves now go side by side and each token
+# takes its two products in the order it took them before.
+#
+# That kernel had no probe at all, only a commit-message claim of
+# "200000 random trials". It has one now, and reaching it needed
+# dot32_x16_mmx_2 to exist on the Watcom side - src/ops_mmx.h declared
+# it and only the gcc build defined it.
+#
+# THE REST ARE NOT DONE: lz_exp_q20_2_mmx_asm at 69% and the SSE2
+# single-token kernels at 65-74%. Each is a real edit needing its own
+# probe re-run on both toolchains.
 #
 # THE GENERAL LESSON FROM THE x16 PAIR, since it will come up again:
 # when two kernels in one file share a body and one is the other's
