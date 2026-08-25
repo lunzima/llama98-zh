@@ -1870,272 +1870,21 @@ static void kda_i16_proj(LZRunState *s, int may_int, int *wrote_int,
                          int in_dim, int out_dim, int nt,
                          int target_e, int bound);
 
-/* Run nt tokens through this layer together. Batching reuses the
-   WEIGHT LOADS: each output row's weights stream from memory once,
-   serving nt tokens (arithmetic intensity 1 -> nt).
-
-   Each token's own algorithm and ordering are untouched, so nt=1 is
-   bit-identical to batch slice t - a hard gate, not a soft ask (see
-   forward.h).
-
-   `layer` is either a real index into m->layers[] or LZ_MTP_CACHE_LAYER
-   (the MTP block, see above); everything else about this function is
-   unchanged either way - the MTP block's q/k/v/o/q_norm/k_norm tensors
-   are checked at load time (model.c's model_walk) to have exactly the
-   body's attn_qgate_dim/attn_kv_dim/attn_q_dim/head_dim, so nothing here
-   needs to special-case its shapes, only which cache slot it writes. */
-static void forward_attn(const LZModel *m, LZRunState *s,
-                         const LZLayer *L, int layer, int pos0, int nt) {
-    const LZModelConfig *c = &m->config;
-    int hd = c->head_dim, nh = c->n_heads, nkv = c->n_kv_heads;
-    int kv_mul = nh / nkv;
-    int ci = (layer >= 0) ? s->cache_idx[layer] : c->n_full_layers;
-    size_t loff = (size_t)ci * s->kv_slots * c->attn_kv_dim;
-    size_t soff = loff / 32;
-    int8_t *kc = s->kq8 ? s->kq8 + loff : NULL;
-    int8_t *vc = s->vq8 ? s->vq8 + loff : NULL;
-    /* Reference-arm slices; NULL unless --kv f32. Same (layer, pos,
-       kv_dim) layout as kq8/vq8 so `loff` indexes both. */
-    float *kf = s->kf32 ? s->kf32 + loff : NULL;
-    float *vf = s->vf32 ? s->vf32 + loff : NULL;
-    /* 4-bit slices: half the bytes, plus one scale per (pos, kv head). */
-    unsigned char *k4 = s->k4 ? s->k4 + loff / 2 : NULL;
-    unsigned char *v4 = s->v4 ? s->v4 + loff / 2 : NULL;
-    float *ks4 = s->ks4 ? s->ks4 + (size_t)ci * s->kv_slots * c->n_kv_heads : NULL;
-    float *vs4 = s->vs4 ? s->vs4 + (size_t)ci * s->kv_slots * c->n_kv_heads : NULL;
-    float *ks = s->ksq ? s->ksq + soff : NULL;
-    float *vs = s->vsq ? s->vsq + soff : NULL;
+static void attn_score_loop(LZRunState *s, const LZModelConfig *c,
+                            int *attn_int,
+                            const float *ks4, const float *vs4,
+                            const float *ks, const float *vs,
+                            const int8_t *kc, const int8_t *vc,
+                            const float *kf, const float *vf,
+                            const unsigned char *k4, const unsigned char *v4,
 #if LZ_KV_2PLANE
-    int8_t *kc_lo = s->kq8_lo ? s->kq8_lo + loff : NULL;
-    int8_t *vc_lo = s->vq8_lo ? s->vq8_lo + loff : NULL;
+                            const int8_t *kc_lo, const int8_t *vc_lo,
 #endif /* LZ_KV_2PLANE */
-    /* (H q) . (H k) = kv_rot_k * (q . k) because lz_fwht is the
-       unnormalized Hadamard (see its comment in ops.h). Fold that factor
-       out here rather than normalizing the transform: kv_rot_k is a power
-       of two, so this division is exact and identical on both compilers,
-       whereas dividing by a float constant makes the two compilers
-       disagree - one strength-reduces it to a reciprocal multiply. */
-    float scale = s->attn_scale;
-    int hdim = c->hidden_size, kvd = c->attn_kv_dim, qd = c->attn_q_dim;
-    int qgd = c->attn_qgate_dim;
-    int gsa = lz_act_gs(&L->q_proj, hdim);
-    int nsa = scale_groups(hdim, gsa);
-    int gso = lz_act_gs(&L->o_proj, qd);
-    int nso = scale_groups(qd, gso);
-    /* Per-token flag for the fixed-tier attention int path (--attn-int).
-       The quantize step after the tk loop must know which tokens took the
-       int wsum; only the MTP window override can split a batch. */
-    int attn_int[LZ_BATCH_MAX];
-    /* int-pipeline milestone 7. v_may is the capability, v_int is "the
-       int buffer holds it" and is raised only by kda_i16_proj - two
-       objects, for the reason that function's header gives. The SubLN
-       branch below never calls it, so v_int stays 0 there and the KV
-       write reads the float row it actually got.
-
-       The consumer conditions are part of the capability, not of the
-       matmul: vc is the plane lz_quantize_q8_i16 would write, and
-       kv_rot_v / vf / v4 each read the float row element by element, so
-       any of them means the exit would have to rebuild what it declined
-       to build. Same set --attn-int refuses on.
-
-       kv_rot_v STAYS IN THAT LIST, and the reason is now measured
-       rather than assumed, because the obvious objection is right: the
-       rotation DOES have an exact integer form (widen the int16 row to
-       int32, lz_fwht_i32 in pure add/sub, out through
-       lz_quantize_q8_int), so the exit does not strictly have to rebuild
-       anything. Built and measured, kmr20, whole-sequence logit rms
-       against --kv f32 on both gate corpora:
-
-         --kv q8 --kv-rot on    zh          en
-           float rotation     7.107e-02   7.161e-02   (this code)
-           int rotation       7.296e-02   7.837e-02   +2.7% / +9.4%
-
-       WHY IT LOSES, and it is not the transform: vtmp_i16 is at ONE
-       row-wide exponent, so its error is uniform in ABSOLUTE terms,
-       while the per-32 group scale downstream is not. The Hadamard
-       conserves that error's energy and spreads it evenly, so a quiet
-       group that would have been quantized against its own small scale
-       inherits the row's average error instead. The float row has no
-       such floor to spread. The exit and the rotation are antagonistic
-       for that reason, not for want of an integer kernel.
-
-       The refusal does cost the gate something, and it is paid there:
-       on q8 the `off` arm takes this exit and the `on` arm does not, so
-       build/kv_rot_gate.sh's two arms differ in the exit as well as in
-       the rotation. That gate now prints this counter per arm and says
-       so, rather than reading the sum as the rotation's own effect. */
-    int v_int = 0, v_may = 0;
+                            int layer, int pos0, int nt,
+                            int qd, int qgd, int hd, int nh, int nkv,
+                            int kv_mul, int kvd, int gso, float scale) {
     int h, d, t, tk;
     int kvh, kvc;                /* h / kv_mul and h % kv_mul, carried */
-
-    if (s->kv_rot_k) scale /= (float)s->kv_rot_k;
-#if LZ_VPROJ_I16
-    v_may = s->vtmp_i16 && vc && vs && !vf && !v4 && s->kv_rot_v == 0 &&
-            !LZ_KV_2PLANE && kvd >= 32 && (kvd % 32) == 0 &&
-            lz_matmul_xq_i16_ok(&L->v_proj, hdim, nt);
-#endif /* LZ_VPROJ_I16 */
-
-    /* Quantize xb once; the q/k/v projections share the same xq/xqs
-       (avoid rescanning activations).
-
-       Under mixed precision q/k/v may have different formats and
-       different weight gs, but sharing one quantization still holds -
-       lz_act_gs only looks at whether in_dim is a multiple of 32, and
-       all three share the same in_dim, so the answer is identical.
-       Asking q_proj once suffices. */
-    if (c->use_subn) {
-        /* SubLN: the two pre-layer norms are gone, so q/k/v each
-           normalize the raw residual with their OWN weight. That is
-           exactly what the shared quantization above cannot express -
-           three different inputs, so three norms, three quantizes,
-           three matmuls. s->xb2 is free through this whole function.
-
-           Plain norm + quantize on every tier: the norms tier's int
-           shortcut (used by the KDA block) is an optimization, and the
-           three inputs here differ whether or not it is on. */
-        struct { const LZTensor *nrm; const LZTensor *w; float *out; int od; }
-            p[3];
-        int pi;
-        p[0].nrm = &L->attn_q_subn_norm; p[0].w = &L->q_proj;
-        p[0].out = s->qg;   p[0].od = qgd;
-        p[1].nrm = &L->attn_k_subn_norm; p[1].w = &L->k_proj;
-        p[1].out = s->ktmp; p[1].od = kvd;
-        p[2].nrm = &L->attn_v_subn_norm; p[2].w = &L->v_proj;
-        p[2].out = s->vtmp; p[2].od = kvd;
-        for (pi = 0; pi < 3; pi++) {
-            for (tk = 0; tk < nt; tk++)
-                lz_rmsnorm(s->xb2 + (size_t)tk * hdim,
-                           s->xb + (size_t)tk * hdim,
-                           lz_t_f32(p[pi].nrm, s->wscr), hdim,
-                           c->rms_norm_eps);
-            for (tk = 0; tk < nt; tk++)
-                lz_quantize_q8(s->xb2 + (size_t)tk * hdim, hdim, gsa,
-                               s->xq + (size_t)tk * hdim,
-                               s->xqs + (size_t)tk * nsa);
-            lz_matmul_xq_nt(p[pi].out, s->xb2, s->xq, s->xqs, p[pi].w,
-                            hdim, p[pi].od, nt);
-        }
-    } else {
-    for (tk = 0; tk < nt; tk++)
-        lz_quantize_q8(s->xb + (size_t)tk * hdim, hdim, gsa,
-                       s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
-    lz_matmul_xq_nt(s->qg, s->xb, s->xq, s->xqs, &L->q_proj, hdim, qgd, nt);
-    lz_matmul_xq_nt(s->ktmp, s->xb, s->xq, s->xqs, &L->k_proj, hdim, kvd, nt);
-    kda_i16_proj(s, v_may, &v_int, s->vtmp, s->vtmp_i16,
-                 s->xb, &L->v_proj, hdim, kvd, nt, LZ_VPROJ_ES, 32767);
-    }
-
-    /* QK-Norm + RoPE + write KV cache. **All cache rows of the batch
-       must be written before scoring**: token t in the batch must see
-       rows 0..t; merging the two loops would read rows not yet written. */
-    for (tk = 0; tk < nt; tk++) {
-        float *qgt = s->qg + (size_t)tk * qgd;
-        float *qht = s->qh + (size_t)tk * qd;
-        float *ktt = s->ktmp + (size_t)tk * kvd;
-        float *vtt = s->vtmp + (size_t)tk * kvd;
-        int pos = pos0 + tk;
-        /* The cache row this token writes to. The writes below asked for
-           it eighteen times with the same argument, and kv_slot ends in
-           an integer modulo by a runtime value - which the compiler
-           cannot always fold, since lz_gdn_quantize_2p and memcpy sit
-           between the calls and it has no way to know they leave *s
-           alone. It folds MOST of them: hoisting removes six idiv from
-           this translation unit, not seventeen, so the other twelve were
-           already gone. Six is still worth it on the in-order cores in
-           the target family, where idiv r/m32 is around forty cycles and
-           does not pipeline. */
-        int wslot = kv_slot(s, pos);
-        /* q_proj output is laid out PER HEAD as [q(hd), gate(hd)], not
-           [all q][all gate]. The reference does view(..., n_heads, hd*2)
-           then chunks along the last dim; treating it as two contiguous
-           halves feeds every head misaligned data. */
-        for (h = 0; h < nh; h++)
-            lz_rmsnorm(qht + (size_t)h * hd, qgt + (size_t)h * 2 * hd,
-                       lz_t_f32(&L->q_norm, s->wscr), hd, c->rms_norm_eps);
-        for (h = 0; h < nkv; h++)
-            lz_rmsnorm(ktt + (size_t)h * hd, ktt + (size_t)h * hd,
-                       lz_t_f32(&L->k_norm, s->wscr), hd, c->rms_norm_eps);
-        /* QK-Norm first, then RoPE, only then quantize into the cache -
-           the cache holds the rotated k. head_dim is a multiple of 32,
-           so quantization groups never cross heads. */
-        lz_rope(qht, nh, hd, c->rotary_dim, pos, s->rope_cs);
-        lz_rope(ktt, nkv, hd, c->rotary_dim, pos, s->rope_cs);
-        /* Hadamard AFTER RoPE, on q and k alike - the cache holds rotated
-           k, and a query rotated by the same H still scores against it
-           (rotations preserve dot products). Doing it before RoPE would
-           not: RoPE mixes coordinate i with i+rotary_dim/2, which does
-           not commute with H. V is rotated too, and the attention output
-           is rotated back below. */
-        if (s->kv_rot_k) {
-            for (h = 0; h < nh;  h++) rot_head(qht + (size_t)h * hd, hd, s->kv_rot_k);
-            for (h = 0; h < nkv; h++) rot_head(ktt + (size_t)h * hd, hd, s->kv_rot_k);
-        }
-        if (s->kv_rot_v)
-            for (h = 0; h < nkv; h++) rot_head(vtt + (size_t)h * hd, hd, s->kv_rot_v);
-        /* Q8 writes, per side. Guarded on the pointer rather than on the
-           format so a side whose plane was not allocated can never be
-           written through - that is the shape of the segfault --kv q4
-           already caused once, in lz_state_reset. */
-#if LZ_KV_2PLANE
-        /* hi and the scale come out byte-identical to lz_quantize_q8's -
-           that is lz_gdn_quantize_2p's documented contract - so enabling
-           the low plane cannot perturb the high one. fc_site -1: this is
-           the KV cache write, not the recurrence write-back, and has no
-           census site of its own yet. */
-        if (kc) lz_gdn_quantize_2p(ktt, kvd, 32, kc + (size_t)wslot * kvd,
-                                   kc_lo + (size_t)wslot * kvd,
-                                   ks + (size_t)wslot * kvd / 32, -1);
-        if (vc) lz_gdn_quantize_2p(vtt, kvd, 32, vc + (size_t)wslot * kvd,
-                                   vc_lo + (size_t)wslot * kvd,
-                                   vs + (size_t)wslot * kvd / 32, -1);
-#else
-        if (kc) lz_quantize_q8(ktt, kvd, 32, kc + (size_t)wslot * kvd,
-                               ks + (size_t)wslot * kvd / 32);
-        /* v_int says the projection left this token in vtmp_i16 at
-           LZ_VPROJ_ES and vtt holds nothing - the int16 twin of the
-           quantize below, folding 2^-ES into the stored group scale. */
-        if (v_int) {
-            lz_quantize_q8_i16(s->vtmp_i16 + (size_t)tk * kvd, kvd, 32,
-                               pow2f(-LZ_VPROJ_ES),
-                               vc + (size_t)wslot * kvd,
-                               vs + (size_t)wslot * kvd / 32);
-            lz_debug_vproj_i16 += kvd;
-        } else if (vc) {
-            lz_quantize_q8(vtt, kvd, 32, vc + (size_t)wslot * kvd,
-                           vs + (size_t)wslot * kvd / 32);
-        }
-#endif /* LZ_KV_2PLANE */
-        /* Reference arm: the same post-QK-norm, post-RoPE (and, when
-           enabled, post-Hadamard) vectors the Q8 path just quantized,
-           kept exactly. Written alongside rather than instead of the Q8
-           planes so the two differ ONLY in the cache format. */
-        if (kf) memcpy(kf + (size_t)wslot * kvd, ktt, (size_t)kvd * sizeof(float));
-        if (vf) memcpy(vf + (size_t)wslot * kvd, vtt, (size_t)kvd * sizeof(float));
-        /* Per HEAD, not per row: the norm that gets split off has to be
-           the norm of the vector the attention actually dots against,
-           and that is one head's worth. */
-        if (v4)
-            for (h = 0; h < nkv; h++)
-                lz_kv4_quantize(vtt + (size_t)h * hd, hd,
-                                v4 + (size_t)wslot * kvd / 2 + (size_t)h * (hd / 2),
-                                vs4 + (size_t)wslot * nkv + h);
-        if (k4) {
-            for (h = 0; h < nkv; h++) {
-                {
-                    unsigned char *kc4 = k4 + (size_t)wslot * kvd / 2 +
-                                         (size_t)h * (hd / 2);
-                    float *ksc = ks4 + (size_t)wslot * nkv + h;
-                    lz_kv4_quantize(ktt + (size_t)h * hd, hd, kc4, ksc);
-                }
-            }
-        }
-    }
-    /* Post QK-Norm, post RoPE, pre-cache-quantization. These two are the
-       last taps on the attention path that are still exact floats, so
-       they are where a rotary_dim / head interleave / start_pos error has
-       to show up before the KV cache's Q8 noise can hide it. */
-    LZ_TAP("aq", layer, s->qh, qd);
-    LZ_TAP("ak", layer, s->ktmp, kvd);
 
     for (tk = 0; tk < nt; tk++) {
         const float *qht = s->qh + (size_t)tk * qd;
@@ -2525,6 +2274,280 @@ static void forward_attn(const LZModel *m, LZRunState *s,
     }
 #undef LZ_ATTN_SKIP_DEAD
 #undef LZ_ATTN_DEAD
+}
+
+/* Run nt tokens through this layer together. Batching reuses the
+   WEIGHT LOADS: each output row's weights stream from memory once,
+   serving nt tokens (arithmetic intensity 1 -> nt).
+
+   Each token's own algorithm and ordering are untouched, so nt=1 is
+   bit-identical to batch slice t - a hard gate, not a soft ask (see
+   forward.h).
+
+   `layer` is either a real index into m->layers[] or LZ_MTP_CACHE_LAYER
+   (the MTP block, see above); everything else about this function is
+   unchanged either way - the MTP block's q/k/v/o/q_norm/k_norm tensors
+   are checked at load time (model.c's model_walk) to have exactly the
+   body's attn_qgate_dim/attn_kv_dim/attn_q_dim/head_dim, so nothing here
+   needs to special-case its shapes, only which cache slot it writes. */
+static void forward_attn(const LZModel *m, LZRunState *s,
+                         const LZLayer *L, int layer, int pos0, int nt) {
+    const LZModelConfig *c = &m->config;
+    int hd = c->head_dim, nh = c->n_heads, nkv = c->n_kv_heads;
+    int kv_mul = nh / nkv;
+    int ci = (layer >= 0) ? s->cache_idx[layer] : c->n_full_layers;
+    size_t loff = (size_t)ci * s->kv_slots * c->attn_kv_dim;
+    size_t soff = loff / 32;
+    int8_t *kc = s->kq8 ? s->kq8 + loff : NULL;
+    int8_t *vc = s->vq8 ? s->vq8 + loff : NULL;
+    /* Reference-arm slices; NULL unless --kv f32. Same (layer, pos,
+       kv_dim) layout as kq8/vq8 so `loff` indexes both. */
+    float *kf = s->kf32 ? s->kf32 + loff : NULL;
+    float *vf = s->vf32 ? s->vf32 + loff : NULL;
+    /* 4-bit slices: half the bytes, plus one scale per (pos, kv head). */
+    unsigned char *k4 = s->k4 ? s->k4 + loff / 2 : NULL;
+    unsigned char *v4 = s->v4 ? s->v4 + loff / 2 : NULL;
+    float *ks4 = s->ks4 ? s->ks4 + (size_t)ci * s->kv_slots * c->n_kv_heads : NULL;
+    float *vs4 = s->vs4 ? s->vs4 + (size_t)ci * s->kv_slots * c->n_kv_heads : NULL;
+    float *ks = s->ksq ? s->ksq + soff : NULL;
+    float *vs = s->vsq ? s->vsq + soff : NULL;
+#if LZ_KV_2PLANE
+    int8_t *kc_lo = s->kq8_lo ? s->kq8_lo + loff : NULL;
+    int8_t *vc_lo = s->vq8_lo ? s->vq8_lo + loff : NULL;
+#endif /* LZ_KV_2PLANE */
+    /* (H q) . (H k) = kv_rot_k * (q . k) because lz_fwht is the
+       unnormalized Hadamard (see its comment in ops.h). Fold that factor
+       out here rather than normalizing the transform: kv_rot_k is a power
+       of two, so this division is exact and identical on both compilers,
+       whereas dividing by a float constant makes the two compilers
+       disagree - one strength-reduces it to a reciprocal multiply. */
+    float scale = s->attn_scale;
+    int hdim = c->hidden_size, kvd = c->attn_kv_dim, qd = c->attn_q_dim;
+    int qgd = c->attn_qgate_dim;
+    int gsa = lz_act_gs(&L->q_proj, hdim);
+    int nsa = scale_groups(hdim, gsa);
+    int gso = lz_act_gs(&L->o_proj, qd);
+    int nso = scale_groups(qd, gso);
+    /* Per-token flag for the fixed-tier attention int path (--attn-int).
+       The quantize step after the tk loop must know which tokens took the
+       int wsum; only the MTP window override can split a batch. */
+    int attn_int[LZ_BATCH_MAX];
+    /* int-pipeline milestone 7. v_may is the capability, v_int is "the
+       int buffer holds it" and is raised only by kda_i16_proj - two
+       objects, for the reason that function's header gives. The SubLN
+       branch below never calls it, so v_int stays 0 there and the KV
+       write reads the float row it actually got.
+
+       The consumer conditions are part of the capability, not of the
+       matmul: vc is the plane lz_quantize_q8_i16 would write, and
+       kv_rot_v / vf / v4 each read the float row element by element, so
+       any of them means the exit would have to rebuild what it declined
+       to build. Same set --attn-int refuses on.
+
+       kv_rot_v STAYS IN THAT LIST, and the reason is now measured
+       rather than assumed, because the obvious objection is right: the
+       rotation DOES have an exact integer form (widen the int16 row to
+       int32, lz_fwht_i32 in pure add/sub, out through
+       lz_quantize_q8_int), so the exit does not strictly have to rebuild
+       anything. Built and measured, kmr20, whole-sequence logit rms
+       against --kv f32 on both gate corpora:
+
+         --kv q8 --kv-rot on    zh          en
+           float rotation     7.107e-02   7.161e-02   (this code)
+           int rotation       7.296e-02   7.837e-02   +2.7% / +9.4%
+
+       WHY IT LOSES, and it is not the transform: vtmp_i16 is at ONE
+       row-wide exponent, so its error is uniform in ABSOLUTE terms,
+       while the per-32 group scale downstream is not. The Hadamard
+       conserves that error's energy and spreads it evenly, so a quiet
+       group that would have been quantized against its own small scale
+       inherits the row's average error instead. The float row has no
+       such floor to spread. The exit and the rotation are antagonistic
+       for that reason, not for want of an integer kernel.
+
+       The refusal does cost the gate something, and it is paid there:
+       on q8 the `off` arm takes this exit and the `on` arm does not, so
+       build/kv_rot_gate.sh's two arms differ in the exit as well as in
+       the rotation. That gate now prints this counter per arm and says
+       so, rather than reading the sum as the rotation's own effect. */
+    int v_int = 0, v_may = 0;
+    int h, tk;
+
+    if (s->kv_rot_k) scale /= (float)s->kv_rot_k;
+#if LZ_VPROJ_I16
+    v_may = s->vtmp_i16 && vc && vs && !vf && !v4 && s->kv_rot_v == 0 &&
+            !LZ_KV_2PLANE && kvd >= 32 && (kvd % 32) == 0 &&
+            lz_matmul_xq_i16_ok(&L->v_proj, hdim, nt);
+#endif /* LZ_VPROJ_I16 */
+
+    /* Quantize xb once; the q/k/v projections share the same xq/xqs
+       (avoid rescanning activations).
+
+       Under mixed precision q/k/v may have different formats and
+       different weight gs, but sharing one quantization still holds -
+       lz_act_gs only looks at whether in_dim is a multiple of 32, and
+       all three share the same in_dim, so the answer is identical.
+       Asking q_proj once suffices. */
+    if (c->use_subn) {
+        /* SubLN: the two pre-layer norms are gone, so q/k/v each
+           normalize the raw residual with their OWN weight. That is
+           exactly what the shared quantization above cannot express -
+           three different inputs, so three norms, three quantizes,
+           three matmuls. s->xb2 is free through this whole function.
+
+           Plain norm + quantize on every tier: the norms tier's int
+           shortcut (used by the KDA block) is an optimization, and the
+           three inputs here differ whether or not it is on. */
+        struct { const LZTensor *nrm; const LZTensor *w; float *out; int od; }
+            p[3];
+        int pi;
+        p[0].nrm = &L->attn_q_subn_norm; p[0].w = &L->q_proj;
+        p[0].out = s->qg;   p[0].od = qgd;
+        p[1].nrm = &L->attn_k_subn_norm; p[1].w = &L->k_proj;
+        p[1].out = s->ktmp; p[1].od = kvd;
+        p[2].nrm = &L->attn_v_subn_norm; p[2].w = &L->v_proj;
+        p[2].out = s->vtmp; p[2].od = kvd;
+        for (pi = 0; pi < 3; pi++) {
+            for (tk = 0; tk < nt; tk++)
+                lz_rmsnorm(s->xb2 + (size_t)tk * hdim,
+                           s->xb + (size_t)tk * hdim,
+                           lz_t_f32(p[pi].nrm, s->wscr), hdim,
+                           c->rms_norm_eps);
+            for (tk = 0; tk < nt; tk++)
+                lz_quantize_q8(s->xb2 + (size_t)tk * hdim, hdim, gsa,
+                               s->xq + (size_t)tk * hdim,
+                               s->xqs + (size_t)tk * nsa);
+            lz_matmul_xq_nt(p[pi].out, s->xb2, s->xq, s->xqs, p[pi].w,
+                            hdim, p[pi].od, nt);
+        }
+    } else {
+    for (tk = 0; tk < nt; tk++)
+        lz_quantize_q8(s->xb + (size_t)tk * hdim, hdim, gsa,
+                       s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
+    lz_matmul_xq_nt(s->qg, s->xb, s->xq, s->xqs, &L->q_proj, hdim, qgd, nt);
+    lz_matmul_xq_nt(s->ktmp, s->xb, s->xq, s->xqs, &L->k_proj, hdim, kvd, nt);
+    kda_i16_proj(s, v_may, &v_int, s->vtmp, s->vtmp_i16,
+                 s->xb, &L->v_proj, hdim, kvd, nt, LZ_VPROJ_ES, 32767);
+    }
+
+    /* QK-Norm + RoPE + write KV cache. **All cache rows of the batch
+       must be written before scoring**: token t in the batch must see
+       rows 0..t; merging the two loops would read rows not yet written. */
+    for (tk = 0; tk < nt; tk++) {
+        float *qgt = s->qg + (size_t)tk * qgd;
+        float *qht = s->qh + (size_t)tk * qd;
+        float *ktt = s->ktmp + (size_t)tk * kvd;
+        float *vtt = s->vtmp + (size_t)tk * kvd;
+        int pos = pos0 + tk;
+        /* The cache row this token writes to. The writes below asked for
+           it eighteen times with the same argument, and kv_slot ends in
+           an integer modulo by a runtime value - which the compiler
+           cannot always fold, since lz_gdn_quantize_2p and memcpy sit
+           between the calls and it has no way to know they leave *s
+           alone. It folds MOST of them: hoisting removes six idiv from
+           this translation unit, not seventeen, so the other twelve were
+           already gone. Six is still worth it on the in-order cores in
+           the target family, where idiv r/m32 is around forty cycles and
+           does not pipeline. */
+        int wslot = kv_slot(s, pos);
+        /* q_proj output is laid out PER HEAD as [q(hd), gate(hd)], not
+           [all q][all gate]. The reference does view(..., n_heads, hd*2)
+           then chunks along the last dim; treating it as two contiguous
+           halves feeds every head misaligned data. */
+        for (h = 0; h < nh; h++)
+            lz_rmsnorm(qht + (size_t)h * hd, qgt + (size_t)h * 2 * hd,
+                       lz_t_f32(&L->q_norm, s->wscr), hd, c->rms_norm_eps);
+        for (h = 0; h < nkv; h++)
+            lz_rmsnorm(ktt + (size_t)h * hd, ktt + (size_t)h * hd,
+                       lz_t_f32(&L->k_norm, s->wscr), hd, c->rms_norm_eps);
+        /* QK-Norm first, then RoPE, only then quantize into the cache -
+           the cache holds the rotated k. head_dim is a multiple of 32,
+           so quantization groups never cross heads. */
+        lz_rope(qht, nh, hd, c->rotary_dim, pos, s->rope_cs);
+        lz_rope(ktt, nkv, hd, c->rotary_dim, pos, s->rope_cs);
+        /* Hadamard AFTER RoPE, on q and k alike - the cache holds rotated
+           k, and a query rotated by the same H still scores against it
+           (rotations preserve dot products). Doing it before RoPE would
+           not: RoPE mixes coordinate i with i+rotary_dim/2, which does
+           not commute with H. V is rotated too, and the attention output
+           is rotated back below. */
+        if (s->kv_rot_k) {
+            for (h = 0; h < nh;  h++) rot_head(qht + (size_t)h * hd, hd, s->kv_rot_k);
+            for (h = 0; h < nkv; h++) rot_head(ktt + (size_t)h * hd, hd, s->kv_rot_k);
+        }
+        if (s->kv_rot_v)
+            for (h = 0; h < nkv; h++) rot_head(vtt + (size_t)h * hd, hd, s->kv_rot_v);
+        /* Q8 writes, per side. Guarded on the pointer rather than on the
+           format so a side whose plane was not allocated can never be
+           written through - that is the shape of the segfault --kv q4
+           already caused once, in lz_state_reset. */
+#if LZ_KV_2PLANE
+        /* hi and the scale come out byte-identical to lz_quantize_q8's -
+           that is lz_gdn_quantize_2p's documented contract - so enabling
+           the low plane cannot perturb the high one. fc_site -1: this is
+           the KV cache write, not the recurrence write-back, and has no
+           census site of its own yet. */
+        if (kc) lz_gdn_quantize_2p(ktt, kvd, 32, kc + (size_t)wslot * kvd,
+                                   kc_lo + (size_t)wslot * kvd,
+                                   ks + (size_t)wslot * kvd / 32, -1);
+        if (vc) lz_gdn_quantize_2p(vtt, kvd, 32, vc + (size_t)wslot * kvd,
+                                   vc_lo + (size_t)wslot * kvd,
+                                   vs + (size_t)wslot * kvd / 32, -1);
+#else
+        if (kc) lz_quantize_q8(ktt, kvd, 32, kc + (size_t)wslot * kvd,
+                               ks + (size_t)wslot * kvd / 32);
+        /* v_int says the projection left this token in vtmp_i16 at
+           LZ_VPROJ_ES and vtt holds nothing - the int16 twin of the
+           quantize below, folding 2^-ES into the stored group scale. */
+        if (v_int) {
+            lz_quantize_q8_i16(s->vtmp_i16 + (size_t)tk * kvd, kvd, 32,
+                               pow2f(-LZ_VPROJ_ES),
+                               vc + (size_t)wslot * kvd,
+                               vs + (size_t)wslot * kvd / 32);
+            lz_debug_vproj_i16 += kvd;
+        } else if (vc) {
+            lz_quantize_q8(vtt, kvd, 32, vc + (size_t)wslot * kvd,
+                           vs + (size_t)wslot * kvd / 32);
+        }
+#endif /* LZ_KV_2PLANE */
+        /* Reference arm: the same post-QK-norm, post-RoPE (and, when
+           enabled, post-Hadamard) vectors the Q8 path just quantized,
+           kept exactly. Written alongside rather than instead of the Q8
+           planes so the two differ ONLY in the cache format. */
+        if (kf) memcpy(kf + (size_t)wslot * kvd, ktt, (size_t)kvd * sizeof(float));
+        if (vf) memcpy(vf + (size_t)wslot * kvd, vtt, (size_t)kvd * sizeof(float));
+        /* Per HEAD, not per row: the norm that gets split off has to be
+           the norm of the vector the attention actually dots against,
+           and that is one head's worth. */
+        if (v4)
+            for (h = 0; h < nkv; h++)
+                lz_kv4_quantize(vtt + (size_t)h * hd, hd,
+                                v4 + (size_t)wslot * kvd / 2 + (size_t)h * (hd / 2),
+                                vs4 + (size_t)wslot * nkv + h);
+        if (k4) {
+            for (h = 0; h < nkv; h++) {
+                {
+                    unsigned char *kc4 = k4 + (size_t)wslot * kvd / 2 +
+                                         (size_t)h * (hd / 2);
+                    float *ksc = ks4 + (size_t)wslot * nkv + h;
+                    lz_kv4_quantize(ktt + (size_t)h * hd, hd, kc4, ksc);
+                }
+            }
+        }
+    }
+    /* Post QK-Norm, post RoPE, pre-cache-quantization. These two are the
+       last taps on the attention path that are still exact floats, so
+       they are where a rotary_dim / head interleave / start_pos error has
+       to show up before the KV cache's Q8 noise can hide it. */
+    LZ_TAP("aq", layer, s->qh, qd);
+    LZ_TAP("ak", layer, s->ktmp, kvd);
+
+    attn_score_loop(s, c, attn_int, ks4, vs4, ks, vs, kc, vc, kf, vf, k4, v4,
+#if LZ_KV_2PLANE
+                    kc_lo, vc_lo,
+#endif /* LZ_KV_2PLANE */
+                    layer, pos0, nt, qd, qgd, hd, nh, nkv, kv_mul, kvd, gso,
+                    scale);
     LZ_TAP("ax", layer, s->attn_out, qd);
 
     /* o_proj input is the attention output (attn_q_dim); quantize once more.
