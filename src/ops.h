@@ -53,7 +53,34 @@ enum {
        happening again. LZ_FC_NAMES in ops.c is positional - the two
        lists move together. */
     LZ_FC_SOFTPLUS,
-    LZ_FC_CONV, LZ_FC_NORM, LZ_FC_RSQRT,
+    LZ_FC_CONV,
+    /* SECOND LARGEST ROW, 26.8% per token on kmr20 with every tier
+       fixed, and thirteen billing sites in ops_norm.c of which six run
+       on that checkpoint. Their executions, from the coverage build
+       with -DLZ_F32COUNT=1 over the same ten tokens the census row
+       comes from:
+
+         1920  lz_rmsnorm_gated, fixed+int branch
+         1920  lz_l2norm_i16
+          720  lz_rmsnorm, fixed-ss branch
+          360  lz_rmsnorm's normout table kernel
+          360  lz_rmsnorm's scalar tail
+           20  lz_rmsnorm_gated, the 16-wide arm
+
+       THE SHARES DO NOT FOLLOW FROM THOSE, and the difference from
+       LZ_FC_RECUR is worth stating because the method looks the same.
+       Every formula here is linear in n, and n VARIES between calls -
+       head width, hidden width, latent width all reach these
+       functions - so executions times formula needs a sum of n per
+       site, not a count. The recurrence sites happen to be called at
+       one geometry, which is why solving their three class totals
+       there gives whole numbers and reconstructs the row exactly; the
+       same solve here gives n+1 = 64.31 and the right conclusion is
+       that the model is wrong, not that n is fractional.
+       What closes it is the loop line beside each site: gcov counts
+       `for (i = 0; i < n; i++)` sum(n) + count times, which is the
+       missing term. */
+    LZ_FC_NORM, LZ_FC_RSQRT,
     /* The recurrence state write-back - pass 2 only, which is LESS than
        what the recurrence tier covers. Pass 1 has no site in either arm,
        neither the int16 head nor the float body, so this row reads the
