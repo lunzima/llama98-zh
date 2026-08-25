@@ -101,7 +101,12 @@ static int merge_rank(const LZTokenizer *t, const uint32_t *left, int llen,
 static int merge_insert(LZTokenizer *t, const unsigned char *key, int key_len,
                         int rank) {
     int idx, step;
-    if (t->n_merges >= t->merge_cap / 2) return -1;
+    /* Half capacity as a shift. merge_cap is built by doubling from 1,
+       so it is a positive power of two and the two forms agree - but
+       `/ 2` here is one of the few constant divisors gcc does not
+       strength-reduce: at -march=i486 it materialises 2 into ecx and
+       emits a real idiv, 32,278 of them per model load on kmr20. */
+    if (t->n_merges >= (int)((unsigned int)t->merge_cap >> 1)) return -1;
     idx = (int)(merge_hash(key, key_len) & (unsigned int)(t->merge_cap - 1));
     step = 1;
     while (t->merge_tab[idx].used) {

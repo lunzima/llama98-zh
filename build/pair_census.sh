@@ -26,7 +26,7 @@
 #   lz_exp_q20_2_mmx_asm      69%
 #   lz_dot32_t2_asm           75%   <-- since interleaved, now 7%
 #   lz_dot128_t2_asm          72%   <-- since interleaved, now 14%
-#   lz_dot128_x16_asm         70%
+#   lz_dot128_x16_asm         70%   <-- since interleaved, now 20%
 #   lz_lerp_q15_32_mmx_asm    20%   <-- the outlier
 #
 # Four sit near seventy and one sits at twenty, so seventy is NOT "what
@@ -57,9 +57,9 @@
 # anyone measures --pair and attributes all of it to the unpack.
 #
 # Whole set: 4791 adjacent register pairs, 59% dependent; ops_mmx.c
-# alone is 2404 and 56% after the two edits below.
+# alone is 2404 and 52% after the three edits below.
 #
-# TWO HAVE BEEN DONE, so the technique is not hypothetical here.
+# THREE HAVE BEEN DONE, so the technique is not hypothetical here.
 #
 # lz_dot32_t2_asm was the worst in the file at 75% and is now 7% - the
 # best - by running the low and high nibble of each weight byte side by
@@ -83,11 +83,34 @@
 # kunmoe-v2-t2-probe the generated text is byte-for-byte what a build of
 # the pre-edit kernel produces.
 #
-# THE REST ARE NOT DONE: lz_exp_q20_2_mmx_asm at 69%, lz_dot128_x16_asm
-# at 70%, and the SSE2 single-token kernels at 65-74%. Each is a real
-# edit needing its own probe re-run on both toolchains. Named and
-# measured; what this script is for is that the next person does not
-# re-derive which kernels are worth it.
+# lz_dot128_x16_asm, 70% -> 20%, was the easy one: mm0 mm3 mm4 mm5 were
+# all free, so the lo and hi halves of each weight quad just take mm2
+# and mm3 and run side by side. Instruction count unchanged at 167.
+#
+# WHAT THE REMAINING 20% IS, and it is not chunk work: 16 of the 32
+# dependent pairs are the four horizontal folds, four each. A fold is
+# movq/psrlq/paddd/movd and every step reads the last - that is what a
+# horizontal reduction IS. The t2 kernel avoids it by keeping four
+# accumulators and transposing once at the end, two 8-byte stores
+# instead of four movd, and this kernel has the registers to do the
+# same. Not done here: it is a change to the STORE shape, not to the
+# chunk order, and mixing the two would muddy which one a regression
+# came from.
+#
+# THE REST ARE NOT DONE: lz_exp_q20_2_mmx_asm at 69%,
+# lz_dot32_x16_asm at 68%, lz_dot32_x16_asm_2 at 55%, and the SSE2
+# single-token kernels at 65-74%. Each is a real edit needing its own
+# probe re-run on both toolchains.
+#
+# lz_dot32_x16_asm HAS A CATCH the others do not: it is the REFERENCE
+# build/dot128_x16_probe.c holds the group kernel against. Changing
+# both in one commit would compare two changed things, and a shared
+# mistake would agree with itself. Change one, verify against the
+# other, then change the second and hold it to the ABSOLUTE lane sums
+# recorded in the probe's own output.
+#
+# Named and measured; what this script is for is that the next person
+# does not re-derive which kernels are worth it.
 #
 # Usage: bash build/pair_census.sh [file ...]   (default: src/ops_mmx.c)
 set -u

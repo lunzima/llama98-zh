@@ -352,7 +352,6 @@ void matmul_q8_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
 
     for (i = 0; i < out_dim; i++) {
         const int8_t *wr = w->q + (size_t)i * in_dim;
-        const float *ws = w->scale + (size_t)(i * in_dim) / w->gs;
         /* The weight row loads once here and serves all nt tokens; one
            EMMS per row, not per token - MMX and x87 share a register
            file and the epilogue below is x87 on the Watcom build. */
@@ -367,12 +366,31 @@ void matmul_q8_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
                     out->target_e, out->bound);
             continue;
         }
-        for (tk = 0; tk < nt; tk++)
-            out->o[(size_t)tk * out_dim + i] = fixed_epi
-                ? epi_fixed(g_acc32 + (size_t)tk * nb, w, i, tk, nb, r,
-                            post_e)
-                : epi_q8(g_acc32 + (size_t)tk * nb, xqs + (size_t)tk * nb,
-                         ws, nb, r, post);
+        /* fixed_epi does not change inside the row loop, so it picks the
+           loop rather than each element: one predictable branch per row
+           instead of nt unpredictable ones, which is the difference the
+           target's predictor notices.
+           It also puts the float scale pointer where it is used. `ws` is
+           read by nothing but epi_q8, and computing it up here cost an
+           integer divide on every row of every matmul - 131,072 of them
+           in eight tokens on kmr20, where the fixed epilogue runs and
+           epi_q8 never does. The plane is indexed over the flat element
+           array, so the expression stays (i*in_dim)/gs rather than
+           becoming i*(in_dim/gs): those differ when gs does not divide
+           in_dim, and matmul_scalar_ref_one treats that as a tier of its
+           own rather than an impossibility. */
+        if (fixed_epi) {
+            for (tk = 0; tk < nt; tk++)
+                out->o[(size_t)tk * out_dim + i] =
+                    epi_fixed(g_acc32 + (size_t)tk * nb, w, i, tk, nb, r,
+                              post_e);
+        } else {
+            const float *ws = w->scale + (size_t)(i * in_dim) / w->gs;
+            for (tk = 0; tk < nt; tk++)
+                out->o[(size_t)tk * out_dim + i] =
+                    epi_q8(g_acc32 + (size_t)tk * nb, xqs + (size_t)tk * nb,
+                           ws, nb, r, post);
+        }
     }
 }
 
@@ -1466,7 +1484,6 @@ void matmul_q16_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
 
     for (i = 0; i < out_dim; i++) {
         const int16_t *wr = wbase + (size_t)i * in_dim;
-        const float *ws = w->scale + (size_t)(i * in_dim) / w->gs;
         row(g_acc32, wr, NULL, g_xw, ng, nt, in_dim, wend, NULL);
         if (lz_cpu_has_mmx()) _mm_empty();                    /* exit MMX state before x87 */
         /* Term for term the same epilogue as Q8_0's, fixed branch
@@ -1482,12 +1499,22 @@ void matmul_q16_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
                     out->target_e, out->bound);
             continue;
         }
-        for (tk = 0; tk < nt; tk++)
-            out->o[(size_t)tk * out_dim + i] = fixed_epi
-                ? epi_fixed(g_acc32 + (size_t)tk * ng, w, i, tk, ng, r,
-                            post_e)
-                : epi_q8(g_acc32 + (size_t)tk * ng, xqs + (size_t)tk * ng,
-                         ws, ng, r, post);
+        /* Loop picked by fixed_epi, and `ws` computed only in the arm
+           that reads it - the same two reasons matmul_q8_impl's row loop
+           gives, and the same divide: 54,016 executions in eight tokens
+           on kmr20 for a pointer epi_q8 was never handed. */
+        if (fixed_epi) {
+            for (tk = 0; tk < nt; tk++)
+                out->o[(size_t)tk * out_dim + i] =
+                    epi_fixed(g_acc32 + (size_t)tk * ng, w, i, tk, ng, r,
+                              post_e);
+        } else {
+            const float *ws = w->scale + (size_t)(i * in_dim) / w->gs;
+            for (tk = 0; tk < nt; tk++)
+                out->o[(size_t)tk * out_dim + i] =
+                    epi_q8(g_acc32 + (size_t)tk * ng, xqs + (size_t)tk * ng,
+                           ws, ng, r, post);
+        }
     }
 }
 
