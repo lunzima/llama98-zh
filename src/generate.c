@@ -1517,6 +1517,257 @@ static int gen_prefill_capture(const LZModel *m, LZRunState *s,
    message it ships alongside it.
    Client's fault (400): LZ_ERR_PROMPT_LONG, LZ_ERR_STOP_LONG,
    LZ_ERR_PROMPT_ENCODE. Ours (500): everything else here. */
+/* One speculative-decoding (MTP) round. Extracted from lz_generate_call's
+   loop as pure code motion: every statement, branch and comment moved
+   verbatim, so the round stays bit-identical to the inline form.
+   Returns 1 = the outer loop should `continue`, 0 = it should `break`
+   (a token ended generation), or a negative value = an error whose
+   positive value is the rc (already written to errbuf). */
+static int lz_generate_spec_round(
+    const LZModel *m, LZRunState *s, LZTokenizer *t, const LZGenOpts *opts,
+    LZShouldContinue cont, void *ctx, LZInspect *ins,
+    int start_pos, int n_prompt, int round_k,
+    char *errbuf, int errlen,
+    LZSampler *sampler, lz_stopf_t *sf, lz_emit_t *em, LZThinkTrack *tr,
+    int *finish, int *n_rec, int *have_seed,
+    int *spec_rounds, int *spec_draft_tokens, int *spec_accepted,
+    int *generated, int *token, int *pos, int *stop_hit) {
+    int rc = LZ_ERR_INTERNAL;
+    int anchor_pos, anchor;
+    int round_out[LZ_SPEC_K_MAX + 1];
+    int n_accept, new_pos, n_emit, k_eff, ei, stopped = 0;
+    /* s->ssm_slot as of the START of this round - set fresh
+       right before lz_spec_round below (see that function's own
+       module comment on the ring). Only the trim branch further
+       down actually reads it. */
+    int round_base_slot;
+
+    if (*have_seed) {
+        /* The llama.cpp-matching behavior (measured: capture
+           cost 1.00x a plain forward, EVERY round - see the
+           CLI's own [spec us: ...] line): the PREVIOUS round's
+           own verify batch already forwarded
+           this exact token into the body and captured its raw
+           hidden state into s->mtp_chain (lz_spec_round's own
+           tail). `token` here is that SAME token - its EOS/
+           stop check, penalty-window observe, and generated++
+           were ALL already done by the previous round's own
+           emission loop below (the ei==n_accept iteration) -
+           repeating any of that here would double-count it.
+           anchor_pos is one less than `pos` here (not equal to
+           it, unlike the fresh-capture branch below): `pos` is
+           "decided count" (includes this pending token), while
+           lz_spec_round wants "the last position ACTUALLY
+           forwarded", which is one token earlier - see
+           lz_spec_round's own comment on s->mtp_verify_hidden
+           for why anchor forwarded at anchor_pos+1 lands
+           exactly back on `token`'s own true position. */
+        anchor = *token;
+        anchor_pos = *pos - 1;
+    } else {
+        float *logits = lz_forward_capture(m, s, *token, *pos);
+        anchor_pos = *pos;
+
+        if (!logits) {
+            LZ_ERR_SET(rc, errbuf, errlen, LZ_ERR_FORWARD);
+            return -rc;
+        }
+        anchor = lz_sample_ex(sampler, logits, ins, tr->in_think);
+        lz_sampler_observe(sampler, anchor);
+        (*generated)++;
+
+        if (gen_emit_token(anchor, 1, opts, t, sf, em, cont, ctx,
+                           anchor_pos + 1, start_pos, n_prompt,
+                           n_rec, finish, tr)) {
+            /* anchor itself ends generation. It was never
+               forwarded (lz_forward_capture only forwarded
+               `token`, at anchor_pos) - state already matches
+               exactly what was emitted, same as the ordinary
+               path's own "next causes EOS" case below. No
+               draft/verify/rollback needed. */
+            *stop_hit = sf->matched;
+            return 0;
+        }
+    }
+
+    /* Captured for THIS round's own trim branch below (ei <
+       n_accept - 1), which needs the ring's base slot too but
+       lives in this function, not lz_spec_round - same value
+       either way, since nothing touches s->ssm_slot between
+       this read and lz_spec_round's own identical read at its
+       own entry (see that function's module comment). */
+    round_base_slot = s->ssm_slot;
+    /* Dispatch by temperature (phase 2 - see the spec_active
+       precondition block's own comment above): lz_spec_round's
+       own source is never reached by anything
+       temperature does here, it is simply not called when
+       temperature is active - the same shape lz_sample itself
+       uses to dispatch "greedy" vs "everything else"
+       (sampler.c's own `if (!(pr->temperature > LZ_TEMP_
+       FLOOR))` branch), not a new pattern invented for this.
+
+       Dynamic temperature: the dispatch AND the round use the
+       EFFECTIVE temperature (think-block override). One
+       speculative round spans up to k+1 draft/verify tokens
+       which can cross a <think> boundary mid-round, so the round
+       uses the think state at its START rather than per-token
+       (the fine token-level cut is explicitly deferred). The
+       override is applied by
+       temporarily swapping sampler.p.temperature for the round -
+       lz_spec_round_temp reads it via lz_sample_temp_q and
+       lz_target_dist - then restoring it, so a round's draft and
+       verify distributions agree with the per-token path on the
+       same effective temperature. With dynamic temperature off,
+       eff_temp IS sampler.p.temperature and the swap is a
+       same-value no-op. */
+    {
+        float eff_temp = lz_sample_eff_temp(&sampler->p,
+                                            tr->in_think);
+        if (eff_temp > LZ_TEMP_FLOOR_F) {
+            float saved = sampler->p.temperature;
+            sampler->p.temperature = eff_temp;
+            n_emit = lz_spec_round_temp(m, s, anchor, anchor_pos, round_k,
+                                        opts->p_min, opts->n_min, sampler,
+                                        opts->spec_debug_break_rollback,
+                                        opts->spec_debug_skip_catchup,
+                                        round_out, &n_accept, &new_pos, &k_eff,
+                                        errbuf, errlen);
+            sampler->p.temperature = saved;
+        } else {
+            n_emit = lz_spec_round(m, s, anchor, anchor_pos, round_k,
+                                   opts->p_min, opts->n_min, sampler,
+                                   opts->spec_debug_break_rollback,
+                                   opts->spec_debug_skip_catchup,
+                                   round_out, &n_accept, &new_pos, &k_eff,
+                                   errbuf, errlen);
+        }
+    }
+    if (n_emit < 0) { rc = -n_emit; return -rc; }
+    (*spec_rounds)++;
+    *spec_draft_tokens += k_eff;   /* NOT round_k - p_min can make k_eff < round_k, see out_k_eff's own comment */
+    *spec_accepted += n_accept;
+    /* n_emit > 0: lz_spec_round wrote a fresh seed into
+       s->mtp_chain from this round's own verify capture (its
+       own comment) - safe to skip capture next time. n_emit
+       == 0 (discard): verify never ran, and the draft chain's
+       own (thrown-away) chaining already clobbered s->mtp_chain
+       - force a fresh capture for the next attempt. */
+    *have_seed = (n_emit > 0);
+
+    /* n_emit == 0: n_min discarded the whole draft (lz_spec_
+       round's own comment). anchor was already emitted above;
+       round_out[0] (== anchor, per that function's contract)
+       must NOT be emitted a second time, so the accept/emit
+       loop below is skipped entirely for this round. */
+    if (n_emit > 0) {
+    for (ei = 0; ei <= n_accept; ei++) {
+        lz_sampler_observe(sampler, round_out[ei]);
+        (*generated)++;
+        if (gen_emit_token(round_out[ei], 1, opts, t, sf, em, cont, ctx,
+                           anchor_pos + 2 + ei, start_pos, n_prompt,
+                           n_rec, finish, tr)) {
+            *pos = anchor_pos + 2 + ei;
+            /* round_out[n_accept-1] (the LAST token this round
+               actually forwarded, when n_accept>0) and
+               round_out[n_accept] (the correction/bonus, NEVER
+               forwarded - see lz_spec_round) both already leave
+               s exactly at `pos`. Anything EARLIER than that
+               means s holds MORE tokens than were just emitted
+               (later accepted drafts, forwarded before we knew
+               this one would end generation) - trim: point the
+               SSM/conv ring index at the slot that already
+               holds "state after (anchor + round_out[0..ei])
+               tokens forwarded" - ei+2 tokens - so a later
+               resume cannot see phantom history past the true
+               end. No restore, no replay (the ring - see
+               lz_spec_round's own module comment for the full
+               mechanism): lz_spec_round's own verify batch
+               already forwarded the FULL k_eff+1-token draft
+               and left every intermediate state in the ring
+               (round_base_slot+1 .. round_base_slot+k_eff+1,
+               one slot per token count) as a side effect - this
+               trim only ever asks for a SMALLER count
+               (ei+2 <= n_accept < k_eff+1) than lz_spec_round's
+               own rollback already might have used, so the slot
+               it wants was always there to begin with, never
+               overwritten by anything this round did (a later,
+               now-irrelevant row never contaminates an earlier
+               one - forward_attn's/the recurrence's own
+               `t <= pos`-shaped loops). */
+            if (ei < n_accept - 1) {
+                s->ssm_slot = (round_base_slot + ei + 2) % s->ssm_ring_depth;
+                /* s->mtp_pos MUST shrink by the same shortfall
+                   the body's own state just did (an independent
+                   audit's finding: a trim that rolled back the
+                   body but left s->mtp_pos untouched would
+                   silently over-count forever after - LZRunState
+                   persists across turns for both -i and the HTTP
+                   endpoint, so the drift never self-heals).
+
+                   THE INVARIANT: lz_spec_round's own tail already
+                   advanced s->mtp_pos by the FULL n_accept,
+                   unconditionally, before this trim branch ever
+                   runs (it has no way to know a stop is coming).
+                   That advance counts n_accept MTP rows as
+                   "confirmed" - one row per round_out[0..
+                   n_accept-1]. But only round_out[0..ei] (ei+1
+                   tokens) actually survive being emitted; the
+                   rest, round_out[ei+1..n_accept-1] - exactly
+                   (n_accept - ei - 1) of them - never reached the
+                   caller, same as the body tokens the restore+
+                   replay above just discarded. Each of those
+                   corresponds 1:1 to one of the MTP rows
+                   s->mtp_pos's advance had already counted (draft
+                   step i's row is what round_out[i] came from,
+                   for i < n_accept), so the counter must give
+                   back exactly that many.
+
+                   Verified against the two cases that must NOT
+                   trigger a correction, both already excluded by
+                   this `if`: ei == n_accept-1 (every accepted
+                   draft was emitted, 0 shortfall, and indeed
+                   n_accept-ei-1 == 0) and ei == n_accept (the
+                   bonus token itself, never forwarded into the
+                   body either - see lz_spec_round's out_new_pos
+                   comment - so it was never counted in
+                   s->mtp_pos's advance to begin with, again 0
+                   shortfall, and this whole `if` is false for
+                   ei==n_accept since n_accept < n_accept-1 is
+                   never true). */
+                s->mtp_pos -= (n_accept - ei - 1);
+            }
+            stopped = 1;
+            *stop_hit = sf->matched;
+            break;
+        }
+    }
+    if (stopped) return 0;
+    }   /* end if (n_emit > 0) - discard case skips straight to
+           the generic pos/token bookkeeping below, which already
+           works unchanged for it (see lz_spec_round's discard-path
+           output contract: new_pos=anchor_pos, out[0]=anchor). */
+
+    /* new_pos is FORWARDED count (anchor_pos + 1 + n_accept) -
+       lz_spec_round's own contract, matching lz_ckpt_save's "pos
+       = tokens forwarded". The outer loop's `pos`, like the
+       ordinary path's below, tracks DECIDED count instead: every
+       k=0 iteration's `pos++` fires for the just-sampled `next`
+       even though it is left pending (not forwarded) when the
+       loop exits right after - see that path's own comment.
+       round_out[n_accept] (the correction/bonus) is exactly
+       that "decided but not forwarded" token here, so the outer
+       pos must count it too: new_pos + 1, not new_pos. Getting
+       this wrong does not corrupt the KV/SSM state (lz_spec_
+       round already left it correct) - it desyncs `pos` from
+       `generated`, so max_new stops bounding how many tokens
+       come out (caught empirically: -n 24 produced 46 tokens
+       with --spec 1 because pos undercounted by exactly 1 per
+       round and the loop kept running). */
+    *pos = new_pos + 1;
+    *token = round_out[n_accept];   /* pending, like the ordinary path's `next` */
+    return 1;
+}
+
 int lz_generate_call(const LZModel *m, LZTokenizer *t, LZRunState *s,
                      const LZGenCall *c) {
     /* The twelve call fields, back under the names the loop below uses.
@@ -2002,238 +2253,14 @@ int lz_generate_call(const LZModel *m, LZTokenizer *t, LZRunState *s,
         }
 
         if (round_k > 0) {
-            int anchor_pos, anchor;
-            int round_out[LZ_SPEC_K_MAX + 1];
-            int n_accept, new_pos, n_emit, k_eff, ei, stopped = 0;
-            /* s->ssm_slot as of the START of this round - set fresh
-               right before lz_spec_round below (see that function's own
-               module comment on the ring). Only the trim branch further
-               down actually reads it. */
-            int round_base_slot;
-
-            if (have_seed) {
-                /* The llama.cpp-matching behavior (measured: capture
-                   cost 1.00x a plain forward, EVERY round - see the
-                   CLI's own [spec us: ...] line): the PREVIOUS round's
-                   own verify batch already forwarded
-                   this exact token into the body and captured its raw
-                   hidden state into s->mtp_chain (lz_spec_round's own
-                   tail). `token` here is that SAME token - its EOS/
-                   stop check, penalty-window observe, and generated++
-                   were ALL already done by the previous round's own
-                   emission loop below (the ei==n_accept iteration) -
-                   repeating any of that here would double-count it.
-                   anchor_pos is one less than `pos` here (not equal to
-                   it, unlike the fresh-capture branch below): `pos` is
-                   "decided count" (includes this pending token), while
-                   lz_spec_round wants "the last position ACTUALLY
-                   forwarded", which is one token earlier - see
-                   lz_spec_round's own comment on s->mtp_verify_hidden
-                   for why anchor forwarded at anchor_pos+1 lands
-                   exactly back on `token`'s own true position. */
-                anchor = token;
-                anchor_pos = pos - 1;
-            } else {
-                float *logits = lz_forward_capture(m, s, token, pos);
-                anchor_pos = pos;
-
-                if (!logits) {
-                    LZ_ERR_SET(rc, errbuf, errlen, LZ_ERR_FORWARD);
-                    goto done;
-                }
-                anchor = lz_sample_ex(&sampler, logits, ins, tr.in_think);
-                lz_sampler_observe(&sampler, anchor);
-                generated++;
-
-                if (gen_emit_token(anchor, 1, opts, t, &sf, &em, cont, ctx,
-                                   anchor_pos + 1, start_pos, n_prompt,
-                                   &n_rec, &finish, &tr)) {
-                    /* anchor itself ends generation. It was never
-                       forwarded (lz_forward_capture only forwarded
-                       `token`, at anchor_pos) - state already matches
-                       exactly what was emitted, same as the ordinary
-                       path's own "next causes EOS" case below. No
-                       draft/verify/rollback needed. */
-                    stop_hit = sf.matched;
-                    break;
-                }
-            }
-
-            /* Captured for THIS round's own trim branch below (ei <
-               n_accept - 1), which needs the ring's base slot too but
-               lives in this function, not lz_spec_round - same value
-               either way, since nothing touches s->ssm_slot between
-               this read and lz_spec_round's own identical read at its
-               own entry (see that function's module comment). */
-            round_base_slot = s->ssm_slot;
-            /* Dispatch by temperature (phase 2 - see the spec_active
-               precondition block's own comment above): lz_spec_round's
-               own source is never reached by anything
-               temperature does here, it is simply not called when
-               temperature is active - the same shape lz_sample itself
-               uses to dispatch "greedy" vs "everything else"
-               (sampler.c's own `if (!(pr->temperature > LZ_TEMP_
-               FLOOR))` branch), not a new pattern invented for this.
-
-               Dynamic temperature: the dispatch AND the round use the
-               EFFECTIVE temperature (think-block override). One
-               speculative round spans up to k+1 draft/verify tokens
-               which can cross a <think> boundary mid-round, so the round
-               uses the think state at its START rather than per-token
-               (the fine token-level cut is explicitly deferred). The
-               override is applied by
-               temporarily swapping sampler.p.temperature for the round -
-               lz_spec_round_temp reads it via lz_sample_temp_q and
-               lz_target_dist - then restoring it, so a round's draft and
-               verify distributions agree with the per-token path on the
-               same effective temperature. With dynamic temperature off,
-               eff_temp IS sampler.p.temperature and the swap is a
-               same-value no-op. */
-            {
-                float eff_temp = lz_sample_eff_temp(&sampler.p,
-                                                    tr.in_think);
-                if (eff_temp > LZ_TEMP_FLOOR_F) {
-                    float saved = sampler.p.temperature;
-                    sampler.p.temperature = eff_temp;
-                    n_emit = lz_spec_round_temp(m, s, anchor, anchor_pos, round_k,
-                                                opts->p_min, opts->n_min, &sampler,
-                                                opts->spec_debug_break_rollback,
-                                                opts->spec_debug_skip_catchup,
-                                                round_out, &n_accept, &new_pos, &k_eff,
-                                                errbuf, errlen);
-                    sampler.p.temperature = saved;
-                } else {
-                    n_emit = lz_spec_round(m, s, anchor, anchor_pos, round_k,
-                                           opts->p_min, opts->n_min, &sampler,
-                                           opts->spec_debug_break_rollback,
-                                           opts->spec_debug_skip_catchup,
-                                           round_out, &n_accept, &new_pos, &k_eff,
-                                           errbuf, errlen);
-                }
-            }
-            if (n_emit < 0) { rc = -n_emit; goto done; }
-            spec_rounds++;
-            spec_draft_tokens += k_eff;   /* NOT round_k - p_min can make k_eff < round_k, see out_k_eff's own comment */
-            spec_accepted += n_accept;
-            /* n_emit > 0: lz_spec_round wrote a fresh seed into
-               s->mtp_chain from this round's own verify capture (its
-               own comment) - safe to skip capture next time. n_emit
-               == 0 (discard): verify never ran, and the draft chain's
-               own (thrown-away) chaining already clobbered s->mtp_chain
-               - force a fresh capture for the next attempt. */
-            have_seed = (n_emit > 0);
-
-            /* n_emit == 0: n_min discarded the whole draft (lz_spec_
-               round's own comment). anchor was already emitted above;
-               round_out[0] (== anchor, per that function's contract)
-               must NOT be emitted a second time, so the accept/emit
-               loop below is skipped entirely for this round. */
-            if (n_emit > 0) {
-            for (ei = 0; ei <= n_accept; ei++) {
-                lz_sampler_observe(&sampler, round_out[ei]);
-                generated++;
-                if (gen_emit_token(round_out[ei], 1, opts, t, &sf, &em, cont, ctx,
-                                   anchor_pos + 2 + ei, start_pos, n_prompt,
-                                   &n_rec, &finish, &tr)) {
-                    pos = anchor_pos + 2 + ei;
-                    /* round_out[n_accept-1] (the LAST token this round
-                       actually forwarded, when n_accept>0) and
-                       round_out[n_accept] (the correction/bonus, NEVER
-                       forwarded - see lz_spec_round) both already leave
-                       s exactly at `pos`. Anything EARLIER than that
-                       means s holds MORE tokens than were just emitted
-                       (later accepted drafts, forwarded before we knew
-                       this one would end generation) - trim: point the
-                       SSM/conv ring index at the slot that already
-                       holds "state after (anchor + round_out[0..ei])
-                       tokens forwarded" - ei+2 tokens - so a later
-                       resume cannot see phantom history past the true
-                       end. No restore, no replay (the ring - see
-                       lz_spec_round's own module comment for the full
-                       mechanism): lz_spec_round's own verify batch
-                       already forwarded the FULL k_eff+1-token draft
-                       and left every intermediate state in the ring
-                       (round_base_slot+1 .. round_base_slot+k_eff+1,
-                       one slot per token count) as a side effect - this
-                       trim only ever asks for a SMALLER count
-                       (ei+2 <= n_accept < k_eff+1) than lz_spec_round's
-                       own rollback already might have used, so the slot
-                       it wants was always there to begin with, never
-                       overwritten by anything this round did (a later,
-                       now-irrelevant row never contaminates an earlier
-                       one - forward_attn's/the recurrence's own
-                       `t <= pos`-shaped loops). */
-                    if (ei < n_accept - 1) {
-                        s->ssm_slot = (round_base_slot + ei + 2) % s->ssm_ring_depth;
-                        /* s->mtp_pos MUST shrink by the same shortfall
-                           the body's own state just did (an independent
-                           audit's finding: a trim that rolled back the
-                           body but left s->mtp_pos untouched would
-                           silently over-count forever after - LZRunState
-                           persists across turns for both -i and the HTTP
-                           endpoint, so the drift never self-heals).
-
-                           THE INVARIANT: lz_spec_round's own tail already
-                           advanced s->mtp_pos by the FULL n_accept,
-                           unconditionally, before this trim branch ever
-                           runs (it has no way to know a stop is coming).
-                           That advance counts n_accept MTP rows as
-                           "confirmed" - one row per round_out[0..
-                           n_accept-1]. But only round_out[0..ei] (ei+1
-                           tokens) actually survive being emitted; the
-                           rest, round_out[ei+1..n_accept-1] - exactly
-                           (n_accept - ei - 1) of them - never reached the
-                           caller, same as the body tokens the restore+
-                           replay above just discarded. Each of those
-                           corresponds 1:1 to one of the MTP rows
-                           s->mtp_pos's advance had already counted (draft
-                           step i's row is what round_out[i] came from,
-                           for i < n_accept), so the counter must give
-                           back exactly that many.
-
-                           Verified against the two cases that must NOT
-                           trigger a correction, both already excluded by
-                           this `if`: ei == n_accept-1 (every accepted
-                           draft was emitted, 0 shortfall, and indeed
-                           n_accept-ei-1 == 0) and ei == n_accept (the
-                           bonus token itself, never forwarded into the
-                           body either - see lz_spec_round's out_new_pos
-                           comment - so it was never counted in
-                           s->mtp_pos's advance to begin with, again 0
-                           shortfall, and this whole `if` is false for
-                           ei==n_accept since n_accept < n_accept-1 is
-                           never true). */
-                        s->mtp_pos -= (n_accept - ei - 1);
-                    }
-                    stopped = 1;
-                    stop_hit = sf.matched;
-                    break;
-                }
-            }
-            if (stopped) break;
-            }   /* end if (n_emit > 0) - discard case skips straight to
-                   the generic pos/token bookkeeping below, which already
-                   works unchanged for it (see lz_spec_round's discard-path
-                   output contract: new_pos=anchor_pos, out[0]=anchor). */
-
-            /* new_pos is FORWARDED count (anchor_pos + 1 + n_accept) -
-               lz_spec_round's own contract, matching lz_ckpt_save's "pos
-               = tokens forwarded". The outer loop's `pos`, like the
-               ordinary path's below, tracks DECIDED count instead: every
-               k=0 iteration's `pos++` fires for the just-sampled `next`
-               even though it is left pending (not forwarded) when the
-               loop exits right after - see that path's own comment.
-               round_out[n_accept] (the correction/bonus) is exactly
-               that "decided but not forwarded" token here, so the outer
-               pos must count it too: new_pos + 1, not new_pos. Getting
-               this wrong does not corrupt the KV/SSM state (lz_spec_
-               round already left it correct) - it desyncs `pos` from
-               `generated`, so max_new stops bounding how many tokens
-               come out (caught empirically: -n 24 produced 46 tokens
-               with --spec 1 because pos undercounted by exactly 1 per
-               round and the loop kept running). */
-            pos = new_pos + 1;
-            token = round_out[n_accept];   /* pending, like the ordinary path's `next` */
+            int sround = lz_generate_spec_round(
+                m, s, t, opts, cont, ctx, ins, start_pos, n_prompt, round_k,
+                errbuf, errlen,
+                &sampler, &sf, &em, &tr, &finish, &n_rec, &have_seed,
+                &spec_rounds, &spec_draft_tokens, &spec_accepted,
+                &generated, &token, &pos, &stop_hit);
+            if (sround < 0) { rc = -sround; goto done; }
+            if (sround == 0) break;
             continue;
         }
 
