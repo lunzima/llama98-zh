@@ -130,13 +130,12 @@ static const float *build_wp(const float *w, int n) {
    silu value. */
 static void lz_rmsnorm_gated_out_fixed(float *o, const float *x,
                                        const float *g, const float *w,
-                                       float inv, int n, int32_t *sig) {
+                                       float inv, int n) {
     union { float f; uint32_t u; } bit;
     float sx, sw, sg;
     int ex, ew, eg, ei, oe;
     int32_t qinv;
     int i;
-    (void)sig;
 
     bit.u = q8_amax(x, n); ex = 14 - expof(bit.f); sx = pow2f(ex);
     bit.u = q8_amax(w, n); ew = 14 - expof(bit.f); sw = pow2f(ew);
@@ -174,8 +173,8 @@ static void lz_rmsnorm_gated_out_fixed(float *o, const float *x,
 #else
 static void lz_rmsnorm_gated_out_fixed(float *o, const float *x,
                                        const float *g, const float *w,
-                                       float inv, int n, int32_t *sig) {
-    (void)o; (void)x; (void)g; (void)w; (void)inv; (void)n; (void)sig;
+                                       float inv, int n) {
+    (void)o; (void)x; (void)g; (void)w; (void)inv; (void)n;
 }
 #endif /* LZ_NORM_FIXED */
 
@@ -322,8 +321,7 @@ static const short *build_qw(const float *w, int n, int add1, int *ew_out) {
    value-changing. */
 static void lz_rmsnorm_gated_out_fixed_int(int32_t *t, const float *x,
                                     const float *g, const float *w,
-                                    float inv, int n, int32_t *sig,
-                                    float *deq) {
+                                    float inv, int n, float *deq) {
     static short qwl[LZ_NORM_MAX_N];
     union { float f; uint32_t u; } bit;
     const short *qwt = NULL;
@@ -331,7 +329,6 @@ static void lz_rmsnorm_gated_out_fixed_int(int32_t *t, const float *x,
     int ex, ew = 0, eg, ei;
     int32_t qinv;
     int i;
-    (void)sig;
 
     bit.u = q8_amax(x, n); ex = 14 - expof(bit.f); sx = pow2f(ex);
     bit.u = q8_amax(g, n); eg = 14 - expof(bit.f); sg = pow2f(eg);
@@ -382,9 +379,8 @@ static void lz_rmsnorm_gated_out_fixed_int(int32_t *t, const float *x,
 #else
 static void lz_rmsnorm_gated_out_fixed_int(int32_t *t, const float *x,
                                     const float *g, const float *w,
-                                    float inv, int n, int32_t *sig,
-                                    float *deq) {
-    (void)t; (void)x; (void)g; (void)w; (void)inv; (void)n; (void)sig;
+                                    float inv, int n, float *deq) {
+    (void)t; (void)x; (void)g; (void)w; (void)inv; (void)n;
     *deq = 0.0f;
 }
 #endif /* LZ_NORM_FIXED */
@@ -438,7 +434,7 @@ void lz_rmsnorm_gated_int(int32_t *t, const float *x, const float *g,
     for (i = 0; i < n; i++) ss += x[i] * x[i];
 have_ss_gated_int:
     inv = lz_rsqrt(ss_over_n(ss, n) + eps);
-    lz_rmsnorm_gated_out_fixed_int(t, x, g, w, inv, n, NULL, deq);
+    lz_rmsnorm_gated_out_fixed_int(t, x, g, w, inv, n, deq);
 }
 
 #if LZ_NORM_FIXED
@@ -654,6 +650,7 @@ void lz_rmsnorm_gated(float *o, const float *x, const float *g,
     float ssf;
     int i;
     int fixed_ss = 0;
+    (void)sig;   /* API stability: the fixed tier computes sigmoid inline */
     if (lz_norm_mode()) {
         ssf = norm_ss_fixed(x, n, NULL, NULL);
         if (ssf >= 0.0f) {
@@ -687,7 +684,7 @@ have_ss_gated:
        the full silu value in Q15 int-multiply (value-changing); the
        float path is untouched. */
     if (fixed_ss)
-        lz_rmsnorm_gated_out_fixed(o, x, g, w, inv, n, sig);
+        lz_rmsnorm_gated_out_fixed(o, x, g, w, inv, n);
     else
         for (i = 0; i < n; i++) o[i] = x[i] * inv * w[i] * lz_silu(g[i]);
 }
