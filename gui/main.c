@@ -10567,6 +10567,99 @@ static int st_settings_scroll(FILE *f, HINSTANCE inst) {
  * window, read it, drive the dismiss messages, assert IsWindow goes
  * false. A window that lingers is a leak that shows up as nothing else
  * in a selftest. */
+/* The four text controls split the SAME LZ_STR_ABOUT_BODY the string
+   table owns: title (first line), version (second line), the credits
+   and the license. The split lives in aboutdlg.c, so each control is
+   checked against the corresponding slice of the live string, not a
+   re-typed copy. Extracted from st_about because it is the deepest
+   block there; `checks` is a pointer so the increments land in
+   st_about's running count. */
+static void st_about_body(FILE *f, HWND dlg, int *checks) {
+    const char *body = lz_str_display(LZ_STR_ABOUT_BODY);
+    const char *nl1 = strchr(body, '\n');
+    const char *nl2 = nl1 ? strchr(nl1 + 1, '\n') : NULL;
+    char want[512];   /* the license string is ~470 bytes, not the
+                         body's ~70 - sized for the longest it holds */
+    HWND b;
+    char got[512];
+    b = GetDlgItem(dlg, 3103 /* ID_ABT_BODY */);
+    got[0] = '\0';
+    if (b) GetWindowTextA(b, got, (int)sizeof got);
+    if (nl1) {
+        int n = (int)(nl1 - body);
+        if (n > (int)sizeof want - 1) n = (int)sizeof want - 1;
+        memcpy(want, body, (size_t)n);
+        want[n] = '\0';
+    } else { lstrcpynA(want, body, (int)sizeof want); }
+    st_check(f, strcmp(got, want) == 0,
+             "about: the title is the body's first line");
+    if (strcmp(got, want) != 0) fprintf(f, "  title [%s] want [%s]\n",
+                                        got, want);
+    (*checks)++;
+
+    /* The title font: it must be a REAL font answering
+       WM_GETFONT, and it must match the UI font's charset (SimSun
+       GB2312 in Chinese, whatever stock face in English) - NOT
+       the FIXEDFONT a title degrades to when its font handle
+       is freed right after WM_SETFONT. Comparing against the LIVE
+       UI font's charset
+       rather than a hardcoded 134 keeps this true across both
+       languages. */
+    {
+        HFONT tf = (HFONT)SendMessage(b, WM_GETFONT, 0, 0);
+        LOGFONTA lf, uf;
+        int ui_charset;
+        if (!tf || !GetObjectA((HGDIOBJ)tf, (int)sizeof lf, &lf)) {
+            st_check(f, 0, "about: the title control answers "
+                     "WM_GETFONT with a real font");
+        } else {
+            ui_charset = DEFAULT_CHARSET;
+            if (lz_ui_font() &&
+                GetObjectA((HGDIOBJ)lz_ui_font(),
+                           (int)sizeof uf, &uf))
+                ui_charset = uf.lfCharSet;
+            st_check(f, lf.lfCharSet == ui_charset ||
+                        lf.lfCharSet == DEFAULT_CHARSET,
+                     "about: the title font matches the UI font's "
+                     "charset, not FIXEDFONT");
+            fprintf(f, "  title charset %d (UI %d)\n", lf.lfCharSet,
+                    ui_charset);
+        }
+        (*checks)++;
+    }
+
+    /* version = second line */
+    b = GetDlgItem(dlg, 3104 /* ID_ABT_VER */);
+    got[0] = '\0';
+    if (b) GetWindowTextA(b, got, (int)sizeof got);
+    if (nl2 && nl1) {
+        int n = (int)(nl2 - nl1 - 1);
+        if (n > (int)sizeof want - 1) n = (int)sizeof want - 1;
+        memcpy(want, nl1 + 1, (size_t)n);
+        want[n] = '\0';
+    } else { want[0] = '\0'; }
+    st_check(f, strcmp(got, want) == 0,
+             "about: the version is the body's second line");
+    if (strcmp(got, want) != 0)
+        fprintf(f, "  version [%s] want [%s]\n", got, want);
+    (*checks)++;
+
+    /* license = LZ_STR_ABOUT_LICENSE, its own string, NOT the
+       body's last line - the multi-line Apache-2.0
+       boilerplate split off from the body when it grew a full
+       copyright notice + Small Fonts rendering. */
+    b = GetDlgItem(dlg, 3106 /* ID_ABT_CRED */);
+    got[0] = '\0';
+    if (b) GetWindowTextA(b, got, (int)sizeof got);
+    lstrcpynA(want, lz_str_display(LZ_STR_ABOUT_LICENSE),
+              (int)sizeof want);
+    st_check(f, strcmp(got, want) == 0,
+             "about: the license line is the license string");
+    if (strcmp(got, want) != 0)
+        fprintf(f, "  license [%s] want [%s]\n", got, want);
+    (*checks)++;
+}
+
 static int st_about(FILE *f, HINSTANCE inst) {
     HWND dlg;
     int checks = 0;
@@ -10608,91 +10701,7 @@ static int st_about(FILE *f, HINSTANCE inst) {
            line. The split lives in aboutdlg.c, so the checks assert
            each control holds the corresponding SLICE of the live
            string, not a re-typed copy. */
-        {
-            const char *body = lz_str_display(LZ_STR_ABOUT_BODY);
-            const char *nl1 = strchr(body, '\n');
-            const char *nl2 = nl1 ? strchr(nl1 + 1, '\n') : NULL;
-            char want[512];   /* the license string is ~470 bytes, not the
-                                 body's ~70 - sized for the longest it holds */
-            HWND b;
-            char got[512];
-            b = GetDlgItem(dlg, 3103 /* ID_ABT_BODY */);
-            got[0] = '\0';
-            if (b) GetWindowTextA(b, got, (int)sizeof got);
-            if (nl1) {
-                int n = (int)(nl1 - body);
-                if (n > (int)sizeof want - 1) n = (int)sizeof want - 1;
-                memcpy(want, body, (size_t)n);
-                want[n] = '\0';
-            } else { lstrcpynA(want, body, (int)sizeof want); }
-            st_check(f, strcmp(got, want) == 0,
-                     "about: the title is the body's first line");
-            if (strcmp(got, want) != 0) fprintf(f, "  title [%s] want [%s]\n",
-                                                got, want);
-            checks++;
-
-            /* The title font: it must be a REAL font answering
-               WM_GETFONT, and it must match the UI font's charset (SimSun
-               GB2312 in Chinese, whatever stock face in English) - NOT
-               the FIXEDFONT a title degrades to when its font handle
-               is freed right after WM_SETFONT. Comparing against the LIVE
-               UI font's charset
-               rather than a hardcoded 134 keeps this true across both
-               languages. */
-            {
-                HFONT tf = (HFONT)SendMessage(b, WM_GETFONT, 0, 0);
-                LOGFONTA lf, uf;
-                int ui_charset;
-                if (!tf || !GetObjectA((HGDIOBJ)tf, (int)sizeof lf, &lf)) {
-                    st_check(f, 0, "about: the title control answers "
-                             "WM_GETFONT with a real font");
-                } else {
-                    ui_charset = DEFAULT_CHARSET;
-                    if (lz_ui_font() &&
-                        GetObjectA((HGDIOBJ)lz_ui_font(),
-                                   (int)sizeof uf, &uf))
-                        ui_charset = uf.lfCharSet;
-                    st_check(f, lf.lfCharSet == ui_charset ||
-                                lf.lfCharSet == DEFAULT_CHARSET,
-                             "about: the title font matches the UI font's "
-                             "charset, not FIXEDFONT");
-                    fprintf(f, "  title charset %d (UI %d)\n", lf.lfCharSet,
-                            ui_charset);
-                }
-                checks++;
-            }
-
-            /* version = second line */
-            b = GetDlgItem(dlg, 3104 /* ID_ABT_VER */);
-            got[0] = '\0';
-            if (b) GetWindowTextA(b, got, (int)sizeof got);
-            if (nl2 && nl1) {
-                int n = (int)(nl2 - nl1 - 1);
-                if (n > (int)sizeof want - 1) n = (int)sizeof want - 1;
-                memcpy(want, nl1 + 1, (size_t)n);
-                want[n] = '\0';
-            } else { want[0] = '\0'; }
-            st_check(f, strcmp(got, want) == 0,
-                     "about: the version is the body's second line");
-            if (strcmp(got, want) != 0)
-                fprintf(f, "  version [%s] want [%s]\n", got, want);
-            checks++;
-
-            /* license = LZ_STR_ABOUT_LICENSE, its own string, NOT the
-               body's last line - the multi-line Apache-2.0
-               boilerplate split off from the body when it grew a full
-               copyright notice + Small Fonts rendering. */
-            b = GetDlgItem(dlg, 3106 /* ID_ABT_CRED */);
-            got[0] = '\0';
-            if (b) GetWindowTextA(b, got, (int)sizeof got);
-            lstrcpynA(want, lz_str_display(LZ_STR_ABOUT_LICENSE),
-                      (int)sizeof want);
-            st_check(f, strcmp(got, want) == 0,
-                     "about: the license line is the license string");
-            if (strcmp(got, want) != 0)
-                fprintf(f, "  license [%s] want [%s]\n", got, want);
-            checks++;
-        }
+        st_about_body(f, dlg, &checks);
     }
 
     /* The OK button carries the table's OK label. */
@@ -12732,6 +12741,105 @@ static int selftest(HINSTANCE inst, const char *path) {
     return st_fails ? 1 : 0;
 }
 
+/* The captured strip, written out and compared with the other run's
+   counterpart when it is already there. Only the width is asserted; the
+   pixel difference is reported. Extracted from sb_compare because the
+   two-image comparison is the deepest block there; `checks` is a
+   pointer so the increment lands in sb_compare's count. */
+static void sb_compare_shot(FILE *f, const char *path,
+                            const unsigned char *shot, int cw, int ch,
+                            int classic, int *checks) {
+    static char mine[MAX_PATH + 40], other[MAX_PATH + 40];
+    sprintf(mine,  "%.*s.sb-%s.bmp", MAX_PATH, path,
+            classic ? "classic" : "native");
+    sprintf(other, "%.*s.sb-%s.bmp", MAX_PATH, path,
+            classic ? "native" : "classic");
+    st_check(f, sb_bmp_write(mine, shot, cw, ch),
+             "statusbar: the strip image was written");
+    (*checks)++;
+    fprintf(f, "  strip %s %dx%d cells %d/%d -> %s\n",
+            classic ? "simulated" : "comctl32", cw, ch,
+            g_sb_p0, g_sb_p1, mine);
+    {
+        int ow = 0, oh = 0;
+        unsigned char *ref = sb_bmp_load(other, &ow, &oh);
+        int stale = ref && !st_newer_than_exe(other);
+        static char why[MAX_PATH + 80];
+        if (stale) {
+            free(ref);
+            ref = NULL;
+        }
+        if (!ref) {
+            /* Skipped, not silently dropped: without this the
+               report's check count moved between runs depending
+               on what happened to be lying next to it, which is
+               the one thing a report meant to be diffed must
+               not do. Missing and stale get different words -
+               they need different actions from whoever reads
+               this, and one is a leftover that has to go. */
+            sprintf(why, stale
+                    ? "the counterpart predates this build; run "
+                      "again with classic_ui=%d to replace %.*s"
+                    : "no counterpart yet; run again with "
+                      "classic_ui=%d to produce %.*s",
+                    classic ? 0 : 1, MAX_PATH, other);
+            st_skip(f, "statusbar: both strips span the same width",
+                    why);
+        } else {
+            /* Width must match - both strips span the client
+               area, and a difference there is a layout fault
+               rather than a drawing choice. Everything else is
+               reported. */
+            st_check(f, ow == cw,
+                     "statusbar: both strips span the same width");
+            (*checks)++;
+            if (ow == cw && oh == ch) {
+                /* Split at the progress cell, because a
+                   difference there is NOT the same fact as a
+                   difference anywhere else. Everything on the
+                   strip is drawn by this program on both
+                   paths; the progress cell is not - the
+                   comctl32 build puts a real control there,
+                   and on a host with comctl32 v6 that control
+                   keeps drawing its flat accent-coloured self
+                   whether or not SetWindowTheme succeeded.
+                   There is no v6 on the target, so that part
+                   of the count says something about this
+                   machine and nothing about the port; folding
+                   it into one number makes the number
+                   unreadable, and dropping it would hide a
+                   real difference on a host where the
+                   untheming does work. Report both. */
+                long n = sb_stride(cw) * ch, k, diff = 0, inprog = 0;
+                RECT pc2;
+                int have_pc = sb_prog_rect(ch, &pc2);
+                for (k = 0; k < n; k++) {
+                    if (ref[k] == shot[k]) continue;
+                    diff++;
+                    if (have_pc) {
+                        long row = k / sb_stride(cw);
+                        long x   = (k % sb_stride(cw)) / 3;
+                        /* Rows run bottom-up in a DIB. */
+                        long y   = ch - 1 - row;
+                        if (x >= pc2.left && x < pc2.right &&
+                            y >= pc2.top  && y < pc2.bottom) inprog++;
+                    }
+                }
+                fprintf(f, "  pixel bytes differing: %ld / %ld "
+                           "(%.1f%%)\n", diff, n,
+                        n ? (double)diff * 100.0 / (double)n : 0.0);
+                fprintf(f, "  of those, inside the progress cell: "
+                           "%ld; drawn by this program: %ld\n",
+                        inprog, diff - inprog);
+            } else {
+                fprintf(f, "  heights differ: %d vs %d - compare "
+                           "the two images by eye\n", ch, oh);
+            }
+            free(ref);
+        }
+    }
+}
+
 static void sb_compare(FILE *f, const char *path, int *checks) {
     {
         HWND strip = g.part[LZ_GUI_STATUS];
@@ -12900,95 +13008,7 @@ static void sb_compare(FILE *f, const char *path, int *checks) {
                  "statusbar: the strip renders into a supplied DC");
         (*checks)++;
         if (shot) {
-            static char mine[MAX_PATH + 40], other[MAX_PATH + 40];
-            sprintf(mine,  "%.*s.sb-%s.bmp", MAX_PATH, path,
-                    classic ? "classic" : "native");
-            sprintf(other, "%.*s.sb-%s.bmp", MAX_PATH, path,
-                    classic ? "native" : "classic");
-            st_check(f, sb_bmp_write(mine, shot, cw, ch),
-                     "statusbar: the strip image was written");
-            (*checks)++;
-            fprintf(f, "  strip %s %dx%d cells %d/%d -> %s\n",
-                    classic ? "simulated" : "comctl32", cw, ch,
-                    g_sb_p0, g_sb_p1, mine);
-            {
-                int ow = 0, oh = 0;
-                unsigned char *ref = sb_bmp_load(other, &ow, &oh);
-                int stale = ref && !st_newer_than_exe(other);
-                static char why[MAX_PATH + 80];
-                if (stale) {
-                    free(ref);
-                    ref = NULL;
-                }
-                if (!ref) {
-                    /* Skipped, not silently dropped: without this the
-                       report's check count moved between runs depending
-                       on what happened to be lying next to it, which is
-                       the one thing a report meant to be diffed must
-                       not do. Missing and stale get different words -
-                       they need different actions from whoever reads
-                       this, and one is a leftover that has to go. */
-                    sprintf(why, stale
-                            ? "the counterpart predates this build; run "
-                              "again with classic_ui=%d to replace %.*s"
-                            : "no counterpart yet; run again with "
-                              "classic_ui=%d to produce %.*s",
-                            classic ? 0 : 1, MAX_PATH, other);
-                    st_skip(f, "statusbar: both strips span the same width",
-                            why);
-                } else {
-                    /* Width must match - both strips span the client
-                       area, and a difference there is a layout fault
-                       rather than a drawing choice. Everything else is
-                       reported. */
-                    st_check(f, ow == cw,
-                             "statusbar: both strips span the same width");
-                    (*checks)++;
-                    if (ow == cw && oh == ch) {
-                        /* Split at the progress cell, because a
-                           difference there is NOT the same fact as a
-                           difference anywhere else. Everything on the
-                           strip is drawn by this program on both
-                           paths; the progress cell is not - the
-                           comctl32 build puts a real control there,
-                           and on a host with comctl32 v6 that control
-                           keeps drawing its flat accent-coloured self
-                           whether or not SetWindowTheme succeeded.
-                           There is no v6 on the target, so that part
-                           of the count says something about this
-                           machine and nothing about the port; folding
-                           it into one number makes the number
-                           unreadable, and dropping it would hide a
-                           real difference on a host where the
-                           untheming does work. Report both. */
-                        long n = sb_stride(cw) * ch, k, diff = 0, inprog = 0;
-                        RECT pc2;
-                        int have_pc = sb_prog_rect(ch, &pc2);
-                        for (k = 0; k < n; k++) {
-                            if (ref[k] == shot[k]) continue;
-                            diff++;
-                            if (have_pc) {
-                                long row = k / sb_stride(cw);
-                                long x   = (k % sb_stride(cw)) / 3;
-                                /* Rows run bottom-up in a DIB. */
-                                long y   = ch - 1 - row;
-                                if (x >= pc2.left && x < pc2.right &&
-                                    y >= pc2.top  && y < pc2.bottom) inprog++;
-                            }
-                        }
-                        fprintf(f, "  pixel bytes differing: %ld / %ld "
-                                   "(%.1f%%)\n", diff, n,
-                                n ? (double)diff * 100.0 / (double)n : 0.0);
-                        fprintf(f, "  of those, inside the progress cell: "
-                                   "%ld; drawn by this program: %ld\n",
-                                inprog, diff - inprog);
-                    } else {
-                        fprintf(f, "  heights differ: %d vs %d - compare "
-                                   "the two images by eye\n", ch, oh);
-                    }
-                    free(ref);
-                }
-            }
+            sb_compare_shot(f, path, shot, cw, ch, classic, checks);
             free(shot);
         }
     }
