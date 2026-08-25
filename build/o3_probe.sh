@@ -139,20 +139,22 @@ D="-std=c99 -Isrc -Icommon -ffp-contract=off -DLZ_MMX_TU=1 -DLZ_SSE2_TU=1"
 #
 # sigq was forward_attn, 684 lines of attention scoring, RoPE and
 # softmax - a number off that function describes everything except the
-# sigmoid. Its per-element loop is lz_rmsnorm_gated_out_fixed, whose
-# body is `sigv = sigmoid_q15(g[i])` over the gate vector. Third entry
+# sigmoid. It was lz_rmsnorm_gated_out_fixed (sigv = sigmoid_q15(g[i])
+# over the gate vector) until that function went static and gcc inlined
+# it out of the symbol table; lz_swiglu_q15_i16 carries the same shape
+# (sigmoid_q15_i(pv, ep) per element) and stays exported. Third entry
 # of the ten found pointing somewhere the unit does not live; the
 # check is to read the named function and confirm the operator's
 # arithmetic is what dominates it.
 MAP="
 expfx:src/ops.c:lz_moe_route
-sigq:src/ops_norm.c:lz_rmsnorm_gated_out_fixed
+sigq:src/ops.c:lz_swiglu_q15_i16
 i32f:src/ops_gdn.c:lz_attn_wsum_q8
 q8rnd:src/ops.c:lz_quantize_q8
 nrmss:src/ops_quant.c:norm_ss_fixed
 fwhti:src/fwht.c:lz_fwht_i32
-fwhtf:src/ops.c:lz_fwht
-f32mm:src/ops.c:lz_matmul_w
+fwhtf:src/fwht.c:lz_fwht
+f32mm:src/ops.c:lz_matmul
 atdot:src/ops_gdn.c:lz_attn_score_q8
 wsump:src/ops_gdn.c:lz_attn_wsum_q8
 q8_0:src/ops_matmul.c:matmul_q8_impl
