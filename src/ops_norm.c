@@ -117,17 +117,43 @@ static const float *build_wp(const float *w, int n) {
 }
 
 #if LZ_NORM_FIXED
+/* (a*b) >> 15 truncating, as int32, for the Q15 output chains. a and b
+   are Q15 (|.| <= 32768) so a*b <= 2^30 and the shifted result always
+   fits int32 - every intermediate in the four-step chains below stays in
+   range, which is what lets the loop carry an int32 accumulator instead
+   of an int64 one. gcc widens to lz_i64 and lets the hardware multiply;
+   Watcom routes the natural `(lz_i64)a * b` through its __I8M library
+   call and the shift through __I8RS, shuffling 64-bit register pairs
+   for every step - the norm output loops measured 4 __I8M + 3 __I8RS
+   per element against gcc's imul. The aux body is one imul and one
+   shrd; the multiply is exact and the value fits int32 after the shift,
+   so the two toolchains agree bit for bit. */
+#if defined(__WATCOMC__)
+static int32_t lz_i64mul_rsh15(int32_t a, int32_t b);
+#pragma aux lz_i64mul_rsh15 = \
+    "imul ebx" \
+    "mov  ecx, 15" \
+    "shrd eax, edx, cl" \
+    "sar  edx, cl" \
+    parm [eax] [ebx] \
+    value [eax] \
+    modify [ecx edx];
+#else
+#define lz_i64mul_rsh15(a, b) \
+    (int32_t)((((lz_i64)(a) * (b)) >> 15))
+#endif /* __WATCOMC__ */
+
 /* Fixed output loop of lz_rmsnorm_gated. The full Q15 int-multiply:
    x, w, g each get their own power-of-two Q15 scale (q8_amax +
    pow2f(14-expof)), inv is scaled likewise, sigmoid comes straight from
-   the Q15 table, and the product runs in int64 with three >>15 steps.
-   One dequantize at the end. The sig parameter is unused (kept in the
-   signature for API stability). This is value-changing, not bit-identical
-   to the float chain (the float chain's 5 per-step roundings cannot be
-   reproduced by one final rounding), but it offloads the sigmoid work
-   from the sigmoid census site entirely. forward.c uses lz_quantize_q8
-   (not lz_quantize_q8_silu) since the output already holds the final
-   silu value. */
+   the Q15 table, and the product runs as an int32 accumulator through
+   three fused >>15 multiplies. One dequantize at the end. The sig
+   parameter is unused (kept in the signature for API stability). This
+   is value-changing, not bit-identical to the float chain (the float
+   chain's 5 per-step roundings cannot be reproduced by one final
+   rounding), but it offloads the sigmoid work from the sigmoid census
+   site entirely. forward.c uses lz_quantize_q8 (not lz_quantize_q8_silu)
+   since the output already holds the final silu value. */
 static void lz_rmsnorm_gated_out_fixed(float *o, const float *x,
                                        const float *g, const float *w,
                                        float inv, int n) {
@@ -150,14 +176,14 @@ static void lz_rmsnorm_gated_out_fixed(float *o, const float *x,
         int qw = q8_round(w[i] * sw);
         int qg = q8_round(g[i] * sg);
         int32_t sigv = sigmoid_q15(g[i]);
-        int64_t t;
+        int32_t t;
         if (qx > 32767) qx = 32767; else if (qx < -32767) qx = -32767;
         if (qw > 32767) qw = 32767; else if (qw < -32767) qw = -32767;
         if (qg > 32767) qg = 32767; else if (qg < -32767) qg = -32767;
-        t = (int64_t)qx * qw;
-        t = (t * qg) >> 15;
-        t = (t * qinv) >> 15;
-        t = (t * sigv) >> 15;
+        t = qx * qw;
+        t = lz_i64mul_rsh15(t, qg);
+        t = lz_i64mul_rsh15(t, qinv);
+        t = lz_i64mul_rsh15(t, sigv);
         {
             /* The exponent is loop-invariant and the scale is a power
                of two, so f32_scale_pow2 (ops_kernel_shared.h) does it
@@ -357,7 +383,7 @@ static void lz_rmsnorm_gated_out_fixed_int(int32_t *t, const float *x,
         int qw = qwt[i];
         int qg = q8_round(g[i] * sg);
         int32_t sigv;
-        int64_t t64;
+        int32_t acc;
         if (qx > 32767) qx = 32767; else if (qx < -32767) qx = -32767;
         if (qg > 32767) qg = 32767; else if (qg < -32767) qg = -32767;
 #if LZ_GATE_SIG_I
@@ -365,11 +391,11 @@ static void lz_rmsnorm_gated_out_fixed_int(int32_t *t, const float *x,
 #else
         sigv = sigmoid_q15(g[i]);
 #endif /* LZ_GATE_SIG_I */
-        t64 = (int64_t)qx * qw;
-        t64 = (t64 * qg) >> 15;
-        t64 = (t64 * qinv) >> 15;
-        t64 = (t64 * sigv) >> 15;
-        t[i] = (int32_t)t64;
+        acc = qx * qw;
+        acc = lz_i64mul_rsh15(acc, qg);
+        acc = lz_i64mul_rsh15(acc, qinv);
+        acc = lz_i64mul_rsh15(acc, sigv);
+        t[i] = acc;
     }
 #if LZ_GATE_SIG_I
     lz_debug_norm_sig_i += n;
@@ -487,9 +513,9 @@ static void lz_rmsnorm_out_fixed_int(int32_t *t, const short *qx, int ex,
     qwt = build_qw(w, n, 1, &ew);
     if (qwt) {
         for (i = 0; i < n; i++) {
-            int64_t t64 = (int64_t)qx[i] * qwt[i];  /* x*(1+w), unshifted */
-            t64 = (t64 * qinv) >> 15;               /* x*(1+w)*inv */
-            t[i] = (int32_t)t64;
+            int32_t acc = qx[i] * qwt[i];           /* x*(1+w), unshifted */
+            acc = lz_i64mul_rsh15(acc, qinv);       /* x*(1+w)*inv */
+            t[i] = acc;
         }
         *deq = pow2f(15 - ex - ew - ei);
         return;
@@ -499,11 +525,11 @@ static void lz_rmsnorm_out_fixed_int(int32_t *t, const short *qx, int ex,
     bit.u = q8_amax(wp, n); ew = 14 - expof(bit.f); sw = pow2f(ew);
     for (i = 0; i < n; i++) {
         int qw = q8_round(wp[i] * sw);
-        int64_t t64;
+        int32_t acc;
         if (qw > 32767) qw = 32767; else if (qw < -32767) qw = -32767;
-        t64 = (int64_t)qx[i] * qw;      /* x*(1+w), unshifted */
-        t64 = (t64 * qinv) >> 15;        /* x*(1+w)*inv */
-        t[i] = (int32_t)t64;
+        acc = qx[i] * qw;                           /* x*(1+w), unshifted */
+        acc = lz_i64mul_rsh15(acc, qinv);           /* x*(1+w)*inv */
+        t[i] = acc;
     }
     *deq = pow2f(15 - ex - ew - ei);
 }
@@ -773,7 +799,11 @@ void lz_l2norm_i16(float *o, const short *x, int n, int e, float eps) {
        one convert, the scale multiply, eps's add, and the output loop's
        convert-and-multiply per element. */
     LZ_FCX(LZ_FC_NORM, n + 2, 1, 0, n + 1, 0);
-    for (i = 0; i < n; i++) acc += (lz_i64)x[i] * (lz_i64)x[i];
+    /* (short)(short) fits int32 (32767^2 < 2^31), so widening after the
+       multiply keeps Watcom on a 32-bit imul instead of __I8M for the
+       same exact product - the same narrowing the output loops above
+       rely on. */
+    for (i = 0; i < n; i++) acc += (lz_i64)(x[i] * x[i]);
     /* (float)acc first, then the power of two: the product of two
        exponent-only factors is exact either way, but splitting them
        keeps the convert on a value whose magnitude the caller can bound
