@@ -3030,6 +3030,123 @@ static void kda_i16_proj(LZRunState *s, int may_int, int *wrote_int,
     lz_matmul_xq_nt(of, x, s->xq, s->xqs, w, in_dim, out_dim, nt);
 }
 
+/* Build the per-channel decay gate gt = f(A_log, dt_bias, pre) and
+   leave it in s->kda_gate, plus the head-only decay_base in s->wscr.
+   Extracted from forward_kda as pure code motion. */
+static void kda_decay_gate_build(LZRunState *s, const LZModelConfig *c,
+                                 const float *a_log_arr, const float *dt_bias_arr,
+                                 int li, int nv, int kd, int nt, int gate_int) {
+    int nvk = nv * kd;
+    int h, i, tk;
+    {
+        float *decay_base = s->wscr;
+        for (h = 0; h < nv; h++) decay_base[h] = lz_exp(a_log_arr[h]);
+        /* The int-pipeline form of the SAME function, not a second one
+           (int-pipeline milestone 5). With kda_gate arriving as int16 at
+           2^-LZ_KGATE_ES and dt_bias pre-quantized into that same domain
+           (kda_gate_build), `pre` is an INTEGER add, and the sigmoid is
+           reached through sigmoid_q15_t's folded coordinate the way the
+           fixed conv reaches it:
+             t = pre_i * (decay_base[h] * 2^(4-ES)) + 192
+           reproduces (decay_base[h]*pre - LZ_SIG_LO) * LZ_SIG_STEP with
+           one multiply and one add, because both LZ_SIG_STEP and the
+           offset are exact powers of two applied to an already-computed
+           value (lz_sig_q15_t_offset's own argument). The exit folds the
+           lower bound and the Q15 descale into one constant.
+           Per channel: 3 mul, 1 add, 2 cvt, against the float form's
+           add + multiply here and lz_sigmoid's 3 mul, 1 add, 1 cvt plus
+           the epilogue's convert and multiply. */
+        if (gate_int) {
+            float lbq = c->kda_gate_lower_bound * (1.0f / 32768.0f);
+            float gk = pow2f(4 - LZ_KGATE_ES);
+            float t_off = lz_sig_q15_t_offset();
+            const short *dtb = s->kda_dtb_i16 + (size_t)li * nvk;
+#if LZ_KGATE_EXP_I
+            /* The exp's fold: x == s15 * lower_bound * 2^-15, one
+               constant for the whole model, so this is asked here only
+               because here is where decay_base is built. lz_scalar_mode
+               because lz_exp_t is lz_exp_FIXED's twin - with the scalar
+               tier off, lz_exp is the float body and taking the integer
+               entry would answer from the other tier. */
+            int32_t em = 0;
+            int es = 0;
+            int exp_int = lz_scalar_mode() &&
+                          lz_exp_t_fold(c->kda_gate_lower_bound, -15, &em, &es);
+            if (lz_scalar_mode() && !exp_int) lz_debug_kgate_fold_no++;
+            if (exp_int) lz_debug_kgate_exp_s = es;
+#endif /* LZ_KGATE_EXP_I */
+            for (tk = 0; tk < nt; tk++) {
+                const short *gi = s->kda_gate_i16 + (size_t)tk * nvk;
+                float *gt = s->kda_gate + (size_t)tk * nvk;
+                for (h = 0; h < nv; h++) {
+                    float k1;
+#if LZ_KGATE_EXP_I
+                    int32_t sm = 0;
+                    int ss = 0;
+                    /* The sigmoid's fold: x == pre * decay_base[h] *
+                       2^-LZ_KGATE_ES, per head. */
+                    int sig_int = exp_int &&
+                                  lz_fold_f32(decay_base[h], -LZ_KGATE_ES,
+                                              &sm, &ss);
+                    if (exp_int && !sig_int) lz_debug_kgate_fold_no++;
+                    if (sig_int) {
+                        /* Integer to the last line of lz_exp_t. The site
+                           bills nothing because there is nothing to bill
+                           - lz_exp_t bills its own exit, exactly as
+                           sigmoid_q15_i bills nothing at the conv
+                           epilogue's integer coordinate. */
+                        if (ss < lz_debug_kgate_sig_slo) lz_debug_kgate_sig_slo = ss;
+                        if (ss > lz_debug_kgate_sig_shi) lz_debug_kgate_sig_shi = ss;
+                        lz_debug_kgate_exp_i += kd;
+                        for (i = 0; i < kd; i++) {
+                            int idx = h * kd + i;
+                            int32_t pre = (int32_t)gi[idx] + (int32_t)dtb[idx];
+                            gt[idx] = lz_exp_t(sigmoid_q15_ti(pre, sm, ss),
+                                               em, es);
+                        }
+                        continue;
+                    }
+#endif /* LZ_KGATE_EXP_I */
+                    k1 = decay_base[h] * gk;
+                    LZ_FCX(LZ_FC_SIGMOID, 3 * (long)kd, (long)kd, 0,
+                           2 * (long)kd, 0);
+                    for (i = 0; i < kd; i++) {
+                        int idx = h * kd + i;
+                        /* A BARE cast, and the bound is why: both addends
+                           are int16, so |pre| <= 65534, far inside the
+                           2^24 where an int32->float conversion is exact
+                           on x87 and SSE alike. lz_i32f exists for the
+                           conversions that are NOT exact - it costs two
+                           converts, a multiply and an add of its own, so
+                           using it where the hazard cannot occur would
+                           spend four float ops to avoid nothing. Past
+                           the conversion both compilers round the
+                           multiply once and the add once (PC=24). */
+                        int32_t pre = (int32_t)gi[idx] + (int32_t)dtb[idx];
+                        int32_t s15 = sigmoid_q15_t((float)pre * k1 + t_off);
+                        gt[idx] = lz_exp((float)s15 * lbq);
+                    }
+                }
+            }
+        } else
+        for (tk = 0; tk < nt; tk++) {
+            float *gt = s->kda_gate + (size_t)tk * nvk;
+            for (h = 0; h < nv; h++) {
+                for (i = 0; i < kd; i++) {
+                    int idx = h * kd + i;
+                    float pre = gt[idx] + dt_bias_arr[idx];
+                    float g;
+                    if (c->kda_has_gate_lower_bound)
+                        g = c->kda_gate_lower_bound * lz_sigmoid(decay_base[h] * pre);
+                    else
+                        g = -decay_base[h] * lz_softplus(pre);
+                    gt[idx] = lz_exp(g);
+                }
+            }
+        }
+    }
+}
+
 /* advance_ring/ring_base: same contract as forward_ssm's own (see its
    header comment above) - reused verbatim, not re-derived, since both
    functions share the SAME ring buffers (ssm_state_q8/_lo/_s,
@@ -3397,113 +3514,7 @@ static void forward_kda(const LZModel *m, LZRunState *s,
        write to wscr), so wscr is free here, and it is sized >= nvk >= nv. */
     a_log_arr   = lz_t_f32(&L->kda_A_log, s->wscr);
     dt_bias_arr = lz_t_f32(&L->kda_dt_bias, s->wscr);
-    {
-        float *decay_base = s->wscr;
-        for (h = 0; h < nv; h++) decay_base[h] = lz_exp(a_log_arr[h]);
-        /* The int-pipeline form of the SAME function, not a second one
-           (int-pipeline milestone 5). With kda_gate arriving as int16 at
-           2^-LZ_KGATE_ES and dt_bias pre-quantized into that same domain
-           (kda_gate_build), `pre` is an INTEGER add, and the sigmoid is
-           reached through sigmoid_q15_t's folded coordinate the way the
-           fixed conv reaches it:
-             t = pre_i * (decay_base[h] * 2^(4-ES)) + 192
-           reproduces (decay_base[h]*pre - LZ_SIG_LO) * LZ_SIG_STEP with
-           one multiply and one add, because both LZ_SIG_STEP and the
-           offset are exact powers of two applied to an already-computed
-           value (lz_sig_q15_t_offset's own argument). The exit folds the
-           lower bound and the Q15 descale into one constant.
-           Per channel: 3 mul, 1 add, 2 cvt, against the float form's
-           add + multiply here and lz_sigmoid's 3 mul, 1 add, 1 cvt plus
-           the epilogue's convert and multiply. */
-        if (gate_int) {
-            float lbq = c->kda_gate_lower_bound * (1.0f / 32768.0f);
-            float gk = pow2f(4 - LZ_KGATE_ES);
-            float t_off = lz_sig_q15_t_offset();
-            const short *dtb = s->kda_dtb_i16 + (size_t)li * nvk;
-#if LZ_KGATE_EXP_I
-            /* The exp's fold: x == s15 * lower_bound * 2^-15, one
-               constant for the whole model, so this is asked here only
-               because here is where decay_base is built. lz_scalar_mode
-               because lz_exp_t is lz_exp_FIXED's twin - with the scalar
-               tier off, lz_exp is the float body and taking the integer
-               entry would answer from the other tier. */
-            int32_t em = 0;
-            int es = 0;
-            int exp_int = lz_scalar_mode() &&
-                          lz_exp_t_fold(c->kda_gate_lower_bound, -15, &em, &es);
-            if (lz_scalar_mode() && !exp_int) lz_debug_kgate_fold_no++;
-            if (exp_int) lz_debug_kgate_exp_s = es;
-#endif /* LZ_KGATE_EXP_I */
-            for (tk = 0; tk < nt; tk++) {
-                const short *gi = s->kda_gate_i16 + (size_t)tk * nvk;
-                float *gt = s->kda_gate + (size_t)tk * nvk;
-                for (h = 0; h < nv; h++) {
-                    float k1;
-#if LZ_KGATE_EXP_I
-                    int32_t sm = 0;
-                    int ss = 0;
-                    /* The sigmoid's fold: x == pre * decay_base[h] *
-                       2^-LZ_KGATE_ES, per head. */
-                    int sig_int = exp_int &&
-                                  lz_fold_f32(decay_base[h], -LZ_KGATE_ES,
-                                              &sm, &ss);
-                    if (exp_int && !sig_int) lz_debug_kgate_fold_no++;
-                    if (sig_int) {
-                        /* Integer to the last line of lz_exp_t. The site
-                           bills nothing because there is nothing to bill
-                           - lz_exp_t bills its own exit, exactly as
-                           sigmoid_q15_i bills nothing at the conv
-                           epilogue's integer coordinate. */
-                        if (ss < lz_debug_kgate_sig_slo) lz_debug_kgate_sig_slo = ss;
-                        if (ss > lz_debug_kgate_sig_shi) lz_debug_kgate_sig_shi = ss;
-                        lz_debug_kgate_exp_i += kd;
-                        for (i = 0; i < kd; i++) {
-                            int idx = h * kd + i;
-                            int32_t pre = (int32_t)gi[idx] + (int32_t)dtb[idx];
-                            gt[idx] = lz_exp_t(sigmoid_q15_ti(pre, sm, ss),
-                                               em, es);
-                        }
-                        continue;
-                    }
-#endif /* LZ_KGATE_EXP_I */
-                    k1 = decay_base[h] * gk;
-                    LZ_FCX(LZ_FC_SIGMOID, 3 * (long)kd, (long)kd, 0,
-                           2 * (long)kd, 0);
-                    for (i = 0; i < kd; i++) {
-                        int idx = h * kd + i;
-                        /* A BARE cast, and the bound is why: both addends
-                           are int16, so |pre| <= 65534, far inside the
-                           2^24 where an int32->float conversion is exact
-                           on x87 and SSE alike. lz_i32f exists for the
-                           conversions that are NOT exact - it costs two
-                           converts, a multiply and an add of its own, so
-                           using it where the hazard cannot occur would
-                           spend four float ops to avoid nothing. Past
-                           the conversion both compilers round the
-                           multiply once and the add once (PC=24). */
-                        int32_t pre = (int32_t)gi[idx] + (int32_t)dtb[idx];
-                        int32_t s15 = sigmoid_q15_t((float)pre * k1 + t_off);
-                        gt[idx] = lz_exp((float)s15 * lbq);
-                    }
-                }
-            }
-        } else
-        for (tk = 0; tk < nt; tk++) {
-            float *gt = s->kda_gate + (size_t)tk * nvk;
-            for (h = 0; h < nv; h++) {
-                for (i = 0; i < kd; i++) {
-                    int idx = h * kd + i;
-                    float pre = gt[idx] + dt_bias_arr[idx];
-                    float g;
-                    if (c->kda_has_gate_lower_bound)
-                        g = c->kda_gate_lower_bound * lz_sigmoid(decay_base[h] * pre);
-                    else
-                        g = -decay_base[h] * lz_softplus(pre);
-                    gt[idx] = lz_exp(g);
-                }
-            }
-        }
-    }
+    kda_decay_gate_build(s, c, a_log_arr, dt_bias_arr, li, nv, kd, nt, gate_int);
     LZ_TAP("kgate", layer, s->kda_gate, nvk);
 
     /* Recurrence, head-major like forward_ssm's - same L1-residency
