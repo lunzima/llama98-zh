@@ -473,6 +473,33 @@ static const LZMenuItem MENU_HELP[] = {
     { 0, 0, 0 }
 };
 
+/* The recent-list block - the deepest nesting in build_menu_bar (menu ->
+   item -> the 0xFFFF placeholder -> the MRU loop -> the '&'-doubling
+   walk). Extracted so the bar loop's depth drops. The trailing separator
+   is the caller's, not this helper's, so the empty-list case omits only
+   the numbered entries, never the separator that leads to Exit. */
+static void menu_append_mru(HMENU m) {
+    if (g.mru.n > 0) {
+        int k;
+        AppendMenuA(m, MF_SEPARATOR, 0, NULL);
+        for (k = 0; k < g.mru.n; k++) {
+            char label[LZ_MRU_LEN + 8];
+            /* "&1 " gives the item its mnemonic; the path's own
+               ampersands must be doubled or the menu eats them and
+               underlines a letter of the directory name. */
+            int p = sprintf(label, "&%d ", k + 1);
+            const char *s = g.mru.item[k];
+            while (*s && p < (int)sizeof label - 2) {
+                if (*s == '&')
+                    label[p++] = '&';
+                label[p++] = *s++;
+            }
+            label[p] = '\0';
+            AppendMenuA(m, MF_STRING | MF_ENABLED, (UINT)(IDM_MRU0 + k), label);
+        }
+    }
+}
+
 static void build_menu_bar(HWND hwnd) {
     static const struct {
         int title;
@@ -499,27 +526,7 @@ static void build_menu_bar(HWND hwnd) {
                    entry here. Nothing is drawn when the list is empty -
                    an "1." with no path is worse than no block - so a
                    fresh install's File menu omits the recent list. */
-                if (BAR[i].items == MENU_FILE && g.mru.n > 0) {
-                    int k;
-                    AppendMenuA(m, MF_SEPARATOR, 0, NULL);
-                    for (k = 0; k < g.mru.n; k++) {
-                        char label[LZ_MRU_LEN + 8];
-                        /* "&1 " gives the item its mnemonic; the path's
-                           own ampersands must be doubled or the menu
-                           eats them and underlines a letter of the
-                           directory name. */
-                        int p = sprintf(label, "&%d ", k + 1);
-                        const char *s = g.mru.item[k];
-                        while (*s && p < (int)sizeof label - 2) {
-                            if (*s == '&')
-                                label[p++] = '&';
-                            label[p++] = *s++;
-                        }
-                        label[p] = '\0';
-                        AppendMenuA(m, MF_STRING | MF_ENABLED,
-                                    (UINT)(IDM_MRU0 + k), label);
-                    }
-                }
+                if (BAR[i].items == MENU_FILE) menu_append_mru(m);
                 AppendMenuA(m, MF_SEPARATOR, 0, NULL);
             } else {
                 /* The language pair carries its own tick. Baked in here
