@@ -35,6 +35,7 @@
 
 #include "ops.h"
 #include "ops.c"
+#include "ops_conv1d.c"
 
 #define NCH   512
 #define K     4

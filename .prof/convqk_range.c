@@ -92,6 +92,7 @@ static void tap_cq(const char *tag, int li, const float *p, int n);
 #include "model.h"
 #include "forward.h"
 #include "ops.c"
+#include "ops_conv1d.c"
 #include "ops_quant.c"
 #include "ops_sched.c"
 #include "ops_matmul.c"

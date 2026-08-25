@@ -1036,6 +1036,13 @@ int  lz_epi_ready(const LZTensor *w);
 void lz_epi_prep_zero(LZTensor *w, int in_dim);
 int  lz_epi_zero_ready(const LZTensor *w);
 
+/* Half-away-from-zero arithmetic shift right of a 64-bit signed value,
+   the fixed epilogue's narrowing. Shared with the conv1d fixed tier
+   (ops_conv1d.c), which is why it is exported from ops.c rather than
+   static. See its definition for the branchless sign handling and the
+   rs <= 0 / rs >= 64 corners. */
+lz_i64 epi_shr_half(lz_i64 s, int rs);
+
 /* Sub-blocks per weight group (gs/32) that the zero term's integer
    activation fold can take. DERIVED, like LZ_EPI_MAX_NG above it, and
    from the same kind of worst case: |Sum_{k<32} xq| <= 32*127 = 4064

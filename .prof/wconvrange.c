@@ -81,6 +81,7 @@ static void tap_range(const char *tag, const float *p, int n) {
 #include "model.h"
 #include "forward.h"
 #include "ops.c"
+#include "ops_conv1d.c"
 #include "err.c"
 #include "compat.c"
 #include "lfn.c"
