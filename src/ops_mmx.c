@@ -177,10 +177,10 @@ extern void lz_wsum_pair_asm(const int8_t *rowA, const int8_t *rowB,
     "movq      mm0, [eax]" \
     "movq      mm1, [edx]" \
     "movq      mm2, mm0" \
-    "punpcklbw mm2, mm2" \
-    "psraw     mm2, 8" \
     "movq      mm3, mm1" \
+    "punpcklbw mm2, mm2" \
     "punpcklbw mm3, mm3" \
+    "psraw     mm2, 8" \
     "psraw     mm3, 8" \
     "movq      mm4, mm2" \
     "punpcklwd mm4, mm3" \
@@ -188,16 +188,16 @@ extern void lz_wsum_pair_asm(const int8_t *rowA, const int8_t *rowB,
     "pmaddwd   mm4, mm7" \
     "pmaddwd   mm2, mm7" \
     "movq      mm5, [ebx]" \
+    "movq      mm6, [ebx+8]" \
     "paddd     mm5, mm4" \
+    "paddd     mm6, mm2" \
     "movq      [ebx], mm5" \
-    "movq      mm5, [ebx+8]" \
-    "paddd     mm5, mm2" \
-    "movq      [ebx+8], mm5" \
+    "movq      [ebx+8], mm6" \
     "movq      mm2, mm0" \
-    "punpckhbw mm2, mm2" \
-    "psraw     mm2, 8" \
     "movq      mm3, mm1" \
+    "punpckhbw mm2, mm2" \
     "punpckhbw mm3, mm3" \
+    "psraw     mm2, 8" \
     "psraw     mm3, 8" \
     "movq      mm4, mm2" \
     "punpcklwd mm4, mm3" \
@@ -205,18 +205,18 @@ extern void lz_wsum_pair_asm(const int8_t *rowA, const int8_t *rowB,
     "pmaddwd   mm4, mm7" \
     "pmaddwd   mm2, mm7" \
     "movq      mm5, [ebx+16]" \
+    "movq      mm6, [ebx+24]" \
     "paddd     mm5, mm4" \
+    "paddd     mm6, mm2" \
     "movq      [ebx+16], mm5" \
-    "movq      mm5, [ebx+24]" \
-    "paddd     mm5, mm2" \
-    "movq      [ebx+24], mm5" \
+    "movq      [ebx+24], mm6" \
     "movq      mm0, [eax+8]" \
     "movq      mm1, [edx+8]" \
     "movq      mm2, mm0" \
-    "punpcklbw mm2, mm2" \
-    "psraw     mm2, 8" \
     "movq      mm3, mm1" \
+    "punpcklbw mm2, mm2" \
     "punpcklbw mm3, mm3" \
+    "psraw     mm2, 8" \
     "psraw     mm3, 8" \
     "movq      mm4, mm2" \
     "punpcklwd mm4, mm3" \
@@ -224,16 +224,16 @@ extern void lz_wsum_pair_asm(const int8_t *rowA, const int8_t *rowB,
     "pmaddwd   mm4, mm7" \
     "pmaddwd   mm2, mm7" \
     "movq      mm5, [ebx+32]" \
+    "movq      mm6, [ebx+40]" \
     "paddd     mm5, mm4" \
+    "paddd     mm6, mm2" \
     "movq      [ebx+32], mm5" \
-    "movq      mm5, [ebx+40]" \
-    "paddd     mm5, mm2" \
-    "movq      [ebx+40], mm5" \
+    "movq      [ebx+40], mm6" \
     "movq      mm2, mm0" \
-    "punpckhbw mm2, mm2" \
-    "psraw     mm2, 8" \
     "movq      mm3, mm1" \
+    "punpckhbw mm2, mm2" \
     "punpckhbw mm3, mm3" \
+    "psraw     mm2, 8" \
     "psraw     mm3, 8" \
     "movq      mm4, mm2" \
     "punpcklwd mm4, mm3" \
@@ -241,18 +241,18 @@ extern void lz_wsum_pair_asm(const int8_t *rowA, const int8_t *rowB,
     "pmaddwd   mm4, mm7" \
     "pmaddwd   mm2, mm7" \
     "movq      mm5, [ebx+48]" \
+    "movq      mm6, [ebx+56]" \
     "paddd     mm5, mm4" \
+    "paddd     mm6, mm2" \
     "movq      [ebx+48], mm5" \
-    "movq      mm5, [ebx+56]" \
-    "paddd     mm5, mm2" \
-    "movq      [ebx+56], mm5" \
+    "movq      [ebx+56], mm6" \
     "movq      mm0, [eax+16]" \
     "movq      mm1, [edx+16]" \
     "movq      mm2, mm0" \
-    "punpcklbw mm2, mm2" \
-    "psraw     mm2, 8" \
     "movq      mm3, mm1" \
+    "punpcklbw mm2, mm2" \
     "punpcklbw mm3, mm3" \
+    "psraw     mm2, 8" \
     "psraw     mm3, 8" \
     "movq      mm4, mm2" \
     "punpcklwd mm4, mm3" \
@@ -260,16 +260,16 @@ extern void lz_wsum_pair_asm(const int8_t *rowA, const int8_t *rowB,
     "pmaddwd   mm4, mm7" \
     "pmaddwd   mm2, mm7" \
     "movq      mm5, [ebx+64]" \
+    "movq      mm6, [ebx+72]" \
     "paddd     mm5, mm4" \
+    "paddd     mm6, mm2" \
     "movq      [ebx+64], mm5" \
-    "movq      mm5, [ebx+72]" \
-    "paddd     mm5, mm2" \
-    "movq      [ebx+72], mm5" \
+    "movq      [ebx+72], mm6" \
     "movq      mm2, mm0" \
-    "punpckhbw mm2, mm2" \
-    "psraw     mm2, 8" \
     "movq      mm3, mm1" \
+    "punpckhbw mm2, mm2" \
     "punpckhbw mm3, mm3" \
+    "psraw     mm2, 8" \
     "psraw     mm3, 8" \
     "movq      mm4, mm2" \
     "punpcklwd mm4, mm3" \
@@ -277,18 +277,18 @@ extern void lz_wsum_pair_asm(const int8_t *rowA, const int8_t *rowB,
     "pmaddwd   mm4, mm7" \
     "pmaddwd   mm2, mm7" \
     "movq      mm5, [ebx+80]" \
+    "movq      mm6, [ebx+88]" \
     "paddd     mm5, mm4" \
+    "paddd     mm6, mm2" \
     "movq      [ebx+80], mm5" \
-    "movq      mm5, [ebx+88]" \
-    "paddd     mm5, mm2" \
-    "movq      [ebx+88], mm5" \
+    "movq      [ebx+88], mm6" \
     "movq      mm0, [eax+24]" \
     "movq      mm1, [edx+24]" \
     "movq      mm2, mm0" \
-    "punpcklbw mm2, mm2" \
-    "psraw     mm2, 8" \
     "movq      mm3, mm1" \
+    "punpcklbw mm2, mm2" \
     "punpcklbw mm3, mm3" \
+    "psraw     mm2, 8" \
     "psraw     mm3, 8" \
     "movq      mm4, mm2" \
     "punpcklwd mm4, mm3" \
@@ -296,16 +296,16 @@ extern void lz_wsum_pair_asm(const int8_t *rowA, const int8_t *rowB,
     "pmaddwd   mm4, mm7" \
     "pmaddwd   mm2, mm7" \
     "movq      mm5, [ebx+96]" \
+    "movq      mm6, [ebx+104]" \
     "paddd     mm5, mm4" \
+    "paddd     mm6, mm2" \
     "movq      [ebx+96], mm5" \
-    "movq      mm5, [ebx+104]" \
-    "paddd     mm5, mm2" \
-    "movq      [ebx+104], mm5" \
+    "movq      [ebx+104], mm6" \
     "movq      mm2, mm0" \
-    "punpckhbw mm2, mm2" \
-    "psraw     mm2, 8" \
     "movq      mm3, mm1" \
+    "punpckhbw mm2, mm2" \
     "punpckhbw mm3, mm3" \
+    "psraw     mm2, 8" \
     "psraw     mm3, 8" \
     "movq      mm4, mm2" \
     "punpcklwd mm4, mm3" \
@@ -313,11 +313,11 @@ extern void lz_wsum_pair_asm(const int8_t *rowA, const int8_t *rowB,
     "pmaddwd   mm4, mm7" \
     "pmaddwd   mm2, mm7" \
     "movq      mm5, [ebx+112]" \
+    "movq      mm6, [ebx+120]" \
     "paddd     mm5, mm4" \
+    "paddd     mm6, mm2" \
     "movq      [ebx+112], mm5" \
-    "movq      mm5, [ebx+120]" \
-    "paddd     mm5, mm2" \
-    "movq      [ebx+120], mm5" \
+    "movq      [ebx+120], mm6" \
     __parm [__eax] [__edx] [__ecx] [__ebx] \
     __modify [8087]
 

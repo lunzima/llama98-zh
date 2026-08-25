@@ -255,6 +255,14 @@
 # build/wsum_pair_probe.c holds it against the MMX tier and the declared C
 # contract, 524288 values, 0 mismatches under Watcom.
 #
+# lz_wsum_pair_asm (the MMX twin), 56% -> 6%, the same three changes as the
+# SSE2 twin above: the two sign-extension chains interleaved, the high
+# punpckhwd moved up beside the low punpcklwd, and mm6 as the second
+# accumulator (mm6 was free). MMX processes four elements a move, so there
+# are eight groups instead of four and the same edit repeated. It is
+# bit-identical; build/wsum_pair_probe.c holds it against the SSE2 tier and
+# the declared C contract, 524288 values, 0 mismatches under Watcom.
+#
 # lz_matmul_row_sse_asm, 33% -> 0%, and it sat hidden behind a measurement
 # bug THIS SCRIPT carried until it was found here: the terminator search
 # looked for __parm, but eleven kernels (this one, lz_fwht_stage_f32_sse_asm,
