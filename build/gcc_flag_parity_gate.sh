@@ -79,16 +79,42 @@ fi
 #
 # Equality above would not catch this: both targets could agree on -O3
 # and the gate would say PASS. Two separate properties, two checks.
-for f in $CLI $GUI; do
-    case "$f" in
-        -O3)
-            echo "gcc_flag_parity_gate: FAIL - a release recipe passes -O3"
-            echo "  Release builds are -O2. -O3 costs ~19% binary size here"
-            echo "  and buys nothing numerically; see X86_64_CFLAGS."
-            exit 1
-            ;;
-    esac
+#
+# EVERY SHIPPING ARTIFACT, not the two this gate compares. The refusal
+# used to read $CLI and $GUI only, which are the pair whose parity is
+# the subject - and kunkun98-serve, the x87 build, the ARM cross build
+# and the MIPS one all ship too and were outside it. They are all -O2
+# today; nothing said they had to stay that way.
+#
+# The cross builds are shell scripts rather than make targets, so they
+# are scanned as text. That is weaker than reading a recipe and it is
+# the only thing available: they assemble their own command lines.
+O3SRC=""
+for t in llama98 kunkun98-gui kunkun98-serve; do
+    make -Bn "$t" 2>/dev/null | tr ' ' '\n' | grep -qx -- -O3 \
+        && O3SRC="$O3SRC make:$t"
 done
+for s in build/x87/*.sh build/arm/*.sh build/mips/*.sh; do
+    [ -f "$s" ] || continue
+    grep -qE '(^|[[:space:]])-O3([[:space:]]|$|")' "$s" && O3SRC="$O3SRC $s"
+done
+if [ -n "$O3SRC" ]; then
+    echo "gcc_flag_parity_gate: FAIL - a release build passes -O3:"
+    for u in $O3SRC; do echo "    $u"; done
+    echo "  Release builds are -O2. -O3 costs ~19% binary size here"
+    echo "  and buys nothing numerically; see X86_64_CFLAGS."
+    exit 1
+fi
+
+# Positive control over the scan, not over the regex: the cross-build
+# arm reads files, so it is given one that must match. Without this a
+# pattern that stopped matching would report every script clean.
+O3CTL=$(printf 'gcc -O3 -c x.c\n' | grep -cE '(^|[[:space:]])-O3([[:space:]]|$|")')
+if [ "$O3CTL" -ne 1 ]; then
+    echo "gcc_flag_parity_gate: FAIL - the -O3 scan matches nothing, so its"
+    echo "  clean result over the cross-build scripts means nothing"
+    exit 1
+fi
 
 # ---- AND THE SAME OPERATORS, not just the same flags ------------------
 #
