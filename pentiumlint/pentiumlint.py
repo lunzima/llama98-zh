@@ -44,15 +44,22 @@ RULES = [
          "inc/dec there (stall negligible vs 1-byte encoding)"),
     Rule(2, ("movsx",), "p5,p55c,k6,k6-2",
          "sign-extension: 12 on P5 / 8 on K6 vs 4 on PentiumPro - a "
-         "3x/2x cost delta (gcc x86-tune-costs.h). Prefer a widening "
-         "that the asm cell's punpcklbw already does for free."),
+         "3x/2x cost delta (gcc x86-tune-costs.h)."),
     Rule(2, ("movzx",), "p5,p55c,k6,k6-2",
          "zero-extension: 8 on P5 / 8 on K6 vs 4 on PentiumPro - a 2x "
          "cost delta (gcc x86-tune-costs.h)."),
     Rule(2, ("imul", "mul"), "p5,p55c",
-         "integer multiply startup: 44 on P5 vs 16 on PentiumPro - a "
-         "2.75x cost delta (gcc x86-tune-costs.h). Prefer shift/add for "
-         "small constants."),
+         "9-11 cycles non-pairable on P5 (pent_mul = pentium-np*11 in "
+         "gcc i386-costs.h), blocking both U and V. K6/Cyrix/WinChip "
+         "run imul in 2-3 cycles, so the rule does not bite there."),
+    Rule(2, ("idiv",), "p5,p55c,k6,k6-2,cyrix,winchip",
+         "16-40 cycles across the family: idiv blocks all units "
+         "including FP. A constant divisor should be a reciprocal "
+         "multiply when exactness is proven."),
+    Rule(2, ("movs", "stos", "lods", "scas", "cmps"), "p5,p55c",
+         "12 cycles microcoded, non-pairable on P5 (pent_str in gcc "
+         "i386-costs.h). Short fixed-count copies/scans should be "
+         "explicit load/store loops."),
     Rule(3, ("jcc", "jmp"), "p4",
          "behavioral: P4's ~20-stage pipeline makes a branch mispredict "
          "cost ~20 cycles. Prefer branchless selects in hot loops where "
