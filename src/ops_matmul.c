@@ -1212,10 +1212,10 @@ void matmul_q61_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
 
     const char *wd = (const char *)w->scale;
     const char *wm = (const char *)w->zero;
+    const unsigned char *wn = p4b;
+    const unsigned char *w2 = p2b;
     for (i = 0; i < out_dim; i++, wd += (unsigned)ng << 2,
-         wm += (unsigned)ng << 2) {
-        const unsigned char *wn = p4b + (size_t)i * in_dim / 2;
-        const unsigned char *w2 = p2b + (size_t)i * in_dim / 4;
+         wm += (unsigned)ng << 2, wn += in_dim >> 1, w2 += in_dim >> 2) {
         row(g_acc32, wn, w2, g_xw, nb, nt, in_dim,
             p2b,                        /* 4-bit plane ends where 2-bit starts */
             p2b + (size_t)w->n / 4);    /* 2-bit plane's own bound */
