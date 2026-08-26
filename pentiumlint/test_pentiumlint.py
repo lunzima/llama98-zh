@@ -121,6 +121,91 @@ def test_movzx_numbers_are_insns_not_x4_units():
     assert "8 " not in rule.reason, rule.reason
 
 
+def _op_fires(name, body, procs_needle):
+    """Plant a body and assert an operand-rule finding named `name` with
+    procs containing `procs_needle` is present. Returns the finding."""
+    found = pentiumlint.lint(_dis(body))
+    for f in found:
+        if f[1] == name and procs_needle in f[2]:
+            return f
+    assert False, "%s should fire a %s rule: %s" % (name, procs_needle, found)
+
+
+def _op_silent(name, body):
+    """Plant a body and assert no finding named `name` is present. This is
+    the negative control: the predicate must see the operands, not just
+    the mnemonic."""
+    found = pentiumlint.lint(_dis(body))
+    assert not any(f[1] == name for f in found), (name, found)
+
+
+def test_xor_reg_reg_fires_on_k6():
+    f = _op_fires("xor-r,r", [("31 c0", "xor", "eax,eax")], "k6")
+    assert f[0] == 2, f
+
+
+def test_xor_reg_reg_silent_on_distinct_regs():
+    _op_silent("xor-r,r", [("31 d8", "xor", "eax,ebx")])
+
+
+def test_rmw_mem_fires_on_p5():
+    f = _op_fires("rmw-mem", [("01 01", "add", "[ecx],eax")], "p5")
+    assert f[0] == 1, f
+
+
+def test_rmw_mem_silent_on_register_dest():
+    _op_silent("rmw-mem", [("01 c1", "add", "eax,ecx")])
+
+
+def test_push_mem_fires_on_p5():
+    f = _op_fires("push-mem", [("ff 30", "push", "[eax]")], "p5")
+    assert f[0] == 1, f
+
+
+def test_push_mem_silent_on_register():
+    _op_silent("push-mem", [("50", "push", "eax")])
+
+
+def test_not_mem_fires_on_k6():
+    f = _op_fires("not-mem", [("f7 10", "not", "[eax]")], "k6")
+    assert f[0] == 1, f
+
+
+def test_not_mem_silent_on_register():
+    # not eax still fires the bare NOT_UNPAIRABLE rule (p5), but NOT the
+    # K6 NOT_VECTORMODE operand rule.
+    _op_silent("not-mem", [("f7 d0", "not", "eax")])
+
+
+def test_rol_ror_imm8_fires_on_p4():
+    f = _op_fires("rol/ror-8", [("c1 c0 08", "rol", "ax,0x8")], "p4")
+    assert f[0] == 1, f
+
+
+def test_rol_ror_imm8_silent_on_32bit_or_non8():
+    _op_silent("rol/ror-8", [("c1 c0 08", "rol", "eax,0x8"),
+                             ("c1 c0 03", "rol", "ax,0x3")])
+
+
+def test_mov_reg_minus_one_fires_on_p5():
+    f = _op_fires("mov-r,-1", [("b8 ff ff ff ff", "mov", "eax,0xffffffff")],
+                  "p5")
+    assert f[0] == 1, f
+
+
+def test_mov_reg_minus_one_silent_on_zero():
+    _op_silent("mov-r,-1", [("b8 00 00 00 00", "mov", "eax,0x0")])
+
+
+def test_var_shift_fires_on_p5():
+    f = _op_fires("var-shift", [("d3 e0", "shl", "eax,cl")], "p5")
+    assert f[0] == 2, f
+
+
+def test_var_shift_silent_on_constant():
+    _op_silent("var-shift", [("c1 e0 02", "shl", "eax,0x2")])
+
+
 def test_integration_on_real_gcc_intel_fixture():
     # A real gcc `objdump -M intel` fixture (not a synthetic _dis). This
     # exercises _GCC_INST_RE and _GCC_FUNC_RE, which the synthetic tests

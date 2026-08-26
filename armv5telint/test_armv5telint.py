@@ -92,6 +92,43 @@ def test_optimal_asm_is_silent():
     assert found == [], found
 
 
+def test_alu_shift_reg_fires():
+    # A register-specified shift (lsl r3) costs 1 insn on ARMv5TE vs a
+    # constant shift (lsl #3) at 0 (generic_extra_costs shift_reg/shift).
+    body = ("   0:\te0800c93 \tadd\tr0, r0, r2, lsl r3\n"
+            "   4:\te0800c92 \tadd\tr0, r0, r2, lsl #3")
+    found = armv5telint.lint(_func("f", body))
+    hits = [f for f in found if f[0].startswith("alu-shift-reg")]
+    assert hits and hits[0][0] == "alu-shift-reg 1 (1 insn, const shift is 0)", \
+        found
+
+
+def test_alu_shift_reg_silent_on_constant_only():
+    body = "   0:\te0800c92 \tadd\tr0, r0, r2, lsl #3"
+    found = armv5telint.lint(_func("f", body))
+    assert not any(f[0].startswith("alu-shift-reg") for f in found), found
+
+
+def test_fp_ldst_fires():
+    # single (vldr/vstr .32) = 2, double (.64) = 3, from generic_extra_costs
+    # loadf/storef/loadd/stored.
+    body = ("   0:\ted900a00 \tvldr.32\ts0, [r0]\n"
+            "   4:\ted900b00 \tvldr.64\td0, [r0]\n"
+            "   8:\ted800a00 \tvstr.32\ts0, [r0]\n"
+            "   c:\ted800b00 \tvstr.64\td0, [r0]")
+    found = armv5telint.lint(_func("f", body))
+    singles = [f for f in found if f[0].startswith("fp-ldst-single")]
+    doubles = [f for f in found if f[0].startswith("fp-ldst-double")]
+    assert singles and "2" in singles[0][0], found
+    assert doubles and "3" in doubles[0][0], found
+
+
+def test_fp_ldst_silent_on_fp_arith():
+    body = "   0:\tee300a20 \tvadd.f32\ts0, s1, s2"
+    found = armv5telint.lint(_func("f", body))
+    assert not any(f[0].startswith("fp-ldst") for f in found), found
+
+
 if __name__ == "__main__":
     import traceback
     failures = 0

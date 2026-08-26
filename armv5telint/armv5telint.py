@@ -31,11 +31,12 @@ from collections import namedtuple
 Rule = namedtuple("Rule", ["category", "name", "apply"])
 
 FUNC_RE = re.compile(r"^([0-9a-f]+) <([^>]+)>:$")
-MNEMONIC_RE = re.compile(r"^\s*[0-9a-f]+:\s+[0-9a-f]{8}\s+(\S+)")
+INSTR_RE = re.compile(r"^\s*[0-9a-f]+:\s+[0-9a-f]{8}\s+(\S+)\s*(.*)$")
 
 
 def parse_funcs(text):
-    """Split objdump -d output into (name, [mnemonics]) per function."""
+    """Split objdump -d output into (name, [(mnemonic, operands)]) per
+    function. `operands` is the raw text after the mnemonic (may be empty)."""
     funcs = []
     cur = None
     for line in text.splitlines():
@@ -47,9 +48,9 @@ def parse_funcs(text):
             continue
         if cur is None:
             continue
-        m = MNEMONIC_RE.match(line)
+        m = INSTR_RE.match(line)
         if m:
-            cur[1].append(m.group(1))
+            cur[1].append((m.group(1), m.group(2).strip()))
     if cur:
         funcs.append(cur)
     return funcs
@@ -57,10 +58,10 @@ def parse_funcs(text):
 
 def ldrh_run_rule():
     """Four or more consecutive ldrh can be one ldm (4:1 load saving)."""
-    def apply(name, mnems):
+    def apply(name, instrs):
         runs = []
         run = 0
-        for m in mnems:
+        for m, _ in instrs:
             if m == "ldrh":
                 run += 1
             else:
@@ -75,9 +76,9 @@ def ldrh_run_rule():
 
 def smlabb_alone_rule():
     """smlabb with no smlatt/smlabt/smlatb wastes the top halfword."""
-    def apply(name, mnems):
-        sb = sum(1 for m in mnems if m == "smlabb")
-        st = sum(1 for m in mnems if m in ("smlatt", "smlabt", "smlatb"))
+    def apply(name, instrs):
+        sb = sum(1 for m, _ in instrs if m == "smlabb")
+        st = sum(1 for m, _ in instrs if m in ("smlatt", "smlabt", "smlatb"))
         if sb > 0 and st == 0:
             return [("smlabb-alone %d" % sb, name)]
         return []
@@ -120,10 +121,10 @@ def mul_family_rule():
     generic_extra_costs and Cortex-A8 cortexa8_extra_costs, and the
     multiply family is 2-3x pricier on ARMv5TE than on the ARMv7-A
     baseline. muls is 1 vs 1 (equal), so it is deliberately not flagged."""
-    def apply(name, mnems):
+    def apply(name, instrs):
         out = []
         for m, ratio in MUL_FAMILY:
-            n = sum(1 for x in mnems if x == m)
+            n = sum(1 for x, _ in instrs if x == m)
             if n:
                 out.append(("mul-family %s %d (%s vs armv7-a)"
                             % (m, n, ratio), name))
@@ -136,28 +137,68 @@ def ldst_cost_rule():
     ldrd/strd is 3x on ARMv5TE vs Cortex-A8, from the LD/ST sub-table
     in aarch-cost-tables.h. This is a census flag — consecutive loads
     that could be grouped into ldm are the rewrite (see ldrh-run)."""
-    def apply(name, mnems):
+    def apply(name, instrs):
         out = []
-        n2 = sum(1 for m in mnems if m in LDST_2X)
+        n2 = sum(1 for m, _ in instrs if m in LDST_2X)
         if n2:
             out.append(("ldst-single %d (2x vs armv7-a)" % n2, name))
-        n3 = sum(1 for m in mnems if m in LDST_3X)
+        n3 = sum(1 for m, _ in instrs if m in LDST_3X)
         if n3:
             out.append(("ldst-double %d (3x vs armv7-a)" % n3, name))
         return out
     return Rule(2, "ldst-cost", apply)
 
 
+# Register-specified shift in a data-processing operand. gcc's cost table
+# (aarch-cost-tables.h generic_extra_costs, which every ARMv5TE core tunes
+# to) charges COSTS_N_INSNS(1) for a shift_reg operand and 0 for a constant
+# shift: 'add r0,r1,r2,lsl r3' costs an extra insn vs 'add r0,r1,r2,lsl #3'.
+# The register-shift spelling is lsl/lsr/asr/ror followed by a register,
+# never '#' (rrx carries no register). Only data-processing instructions
+# take a register shift, so the pattern itself is unambiguous.
+SHIFT_REG_RE = re.compile(r"\b(?:lsl|lsr|asr|ror)\s+r\d+")
+
+
+def alu_shift_reg_rule():
+    def apply(name, instrs):
+        n = sum(1 for _, o in instrs if SHIFT_REG_RE.search(o))
+        if n:
+            return [("alu-shift-reg %d (1 insn, const shift is 0)" % n, name)]
+        return []
+    return Rule(2, "alu-shift-reg", apply)
+
+
+# FP load/store. generic_extra_costs (every ARMv5TE core) charges
+# loadf/storef (single, vldr/vstr .32) = 2 and loadd/stored (double,
+# vldr/vstr .64) = 3. The .32/.64 suffix is how the cross-objdump spells
+# single vs double; a bare vldr/vstr (older objdump) is left uncounted.
+FP_2X = ("vldr.32", "vstr.32")
+FP_3X = ("vldr.64", "vstr.64")
+
+
+def fp_ldst_rule():
+    def apply(name, instrs):
+        out = []
+        n2 = sum(1 for m, _ in instrs if m in FP_2X)
+        if n2:
+            out.append(("fp-ldst-single %d (2 insns)" % n2, name))
+        n3 = sum(1 for m, _ in instrs if m in FP_3X)
+        if n3:
+            out.append(("fp-ldst-double %d (3 insns)" % n3, name))
+        return out
+    return Rule(2, "fp-ldst", apply)
+
+
 RULES = [ldrh_run_rule(), smlabb_alone_rule(), mul_family_rule(),
-         ldst_cost_rule()]
+         ldst_cost_rule(), alu_shift_reg_rule(), fp_ldst_rule()]
 
 
 def lint(text):
     """Return [(finding, func)] across all rules and functions."""
     out = []
-    for name, mnems in parse_funcs(text):
+    for name, instrs in parse_funcs(text):
         for rule in RULES:
-            out.extend(rule.apply(name, mnems))
+            out.extend(rule.apply(name, instrs))
     return out
 
 

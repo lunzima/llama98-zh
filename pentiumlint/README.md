@@ -37,15 +37,21 @@ Rules come in three categories:
 | 2 | `lea` | `p4,k6` | 3 insns P4 / 2 K6 vs 1 PPro (3x/2x) |
 | 3 | `jcc`, `jmp` | `p4` | P4 ~20-stage pipeline: branch mispredict ~20 cycles |
 
+The next seven are **operand rules**: they need the operand text, not just
+the mnemonic (the `OpRule` kind, as opposed to the mnemonic-count `Rule`).
+
+| 2 | `xor reg,reg` | `k6` | `mov $0,reg` beats `xor reg,reg` on K6 (USE_MOV0) |
+| 1 | `add/adc/sub/sbb/... mem,reg` | `p5` | read-modify-write memory dest avoided (READ_MODIFY) |
+| 1 | `push [mem]` | `p5` | separate load+push beats `push mem` (PUSH_MEMORY) |
+| 1 | `not mem` | `k6` | K6 vector-decodes `not mem` without modRM (NOT_VECTORMODE) |
+| 1 | `rol/ror r16,8` | `p4` | byte swap: `xchgb %rh,%rl` (USE_XCHGB) |
+| 1 | `mov reg,-1` | `p5` | `or reg,-1` beats `mov reg,-1` (MOVE_M1_VIA_OR) |
+| 2 | `shl/shr/sar reg,cl` | `p5` | variable shift 4 insns vs 1 constant (shift_var/shift_const) |
+
 Processors in the engine's target family: `p5` `p55c` `cyrix` `winchip`
 `k6` `k6-2` `p4`. A rule fires only on the processors it names. `cyrix`
 and `winchip` have no gcc cost table (mapped to i486, removed since
 gcc-9), so no rule keys on them directly.
-
-**Deferred (need operand inspection, not bare mnemonics):** `xor reg,reg`
-(K6 `USE_MOV0`), `add mem,reg` (P5 `READ_MODIFY`), `push [mem]` (P5
-`PUSH_MEMORY`), `not mem` (K6 `NOT_VECTORMODE`), `rol/ror reg,8` (P4
-`USE_XCHGB`), P5 variable-shift (4x vs constant 1x).
 
 **Soundness-first.** Each rewrite is only correct when the flags it
 changes are dead; the reader proves that. This lints, it does not judge.
@@ -79,4 +85,8 @@ splitting that the synthetic fixtures cannot.
 Append a `Rule(category, (mnems...), "procs", "reason")` to `RULES` (from
 gcc's `x86-tune.def` / `x86-tune-costs.h`, not memory), and a
 `test_<name>` that asserts it fires on a planted fixture and is silent
-otherwise.
+otherwise. A rule that needs the operands (not just the mnemonic) is an
+`OpRule(category, name, mnems, procs, reason, pred)` in `OP_RULES`, where
+`pred(operands) -> bool`; its test asserts both the fire and the
+same-mnemonic-different-operands silence (the negative control that
+proves the predicate sees the operands).

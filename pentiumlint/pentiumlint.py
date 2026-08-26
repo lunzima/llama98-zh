@@ -84,27 +84,120 @@ RULES = [
     Rule(1, ("sahf",), "p5,p55c",
          "P5 avoids sahf (X86_TUNE_USE_SAHF lists m_PPRO/m_P4_NOCONA/"
          "m_K6_GEODE but not m_PENT, x86-tune.def:348)."),
-    # TODO(cat1, needs operand inspection): xor reg,reg (K6 USE_MOV0),
-    # add mem,reg (P5 READ_MODIFY_WRITE), mov reg,-1 (P5 MOVE_M1_VIA_OR),
-    # push [mem] (P5 PUSH_MEMORY), not mem (K6 NOT_VECTORMODE),
-    # rol/ror reg,8 (P4 USE_XCHGB).
+    # (Operand-inspection quirks — xor reg,reg, add mem,reg, mov reg,-1,
+    # push [mem], not mem, rol/ror reg,8 — live in OP_RULES below.)
     Rule(2, ("shl", "shr", "sar"), "p4",
          "4 insns on P4 vs 1 on PentiumPro (4x, gcc x86-tune-costs.h:2474-"
          "2475). Both variable (reg,cl) and constant (reg,imm) shifts are "
          "expensive on P4's NetBurst pipeline. P5 variable_shift is also "
-         "4x (x86-tune-costs.h:402) but needs operand inspection to "
-         "distinguish from constant shifts."),
+         "4x (x86-tune-costs.h:402); that is the separate var-shift rule "
+         "in OP_RULES."),
     Rule(2, ("lea",), "p4,k6",
          "3 insns on P4 / 2 insns on K6 vs 1 on PentiumPro (3x/2x, gcc "
          "x86-tune-costs.h:2473,832). P4 treats lea as a complex operation; "
          "break into add/mov where possible."),
 ]
 
+# --- operand-inspection rules -------------------------------------------------
+# The mnemonic rules above see only the mnemonic; these need the operands.
+# Each is a predicate over the operand list, pre-filtered by a mnemonic set.
+# Sources, as always, are gcc's x86-tune.def (category 1) and
+# x86-tune-costs.h (category 2).
+
+# x86 register-name sets for operand classification.
+_REG8 = {"al", "cl", "dl", "bl", "ah", "ch", "dh", "bh"}
+_REG16 = {"ax", "cx", "dx", "bx", "sp", "bp", "si", "di"}
+_REG32 = {"eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"}
+_ALL_REGS = _REG8 | _REG16 | _REG32
+
+# Read-modify-write ALU/shift ops. gcc's X86_TUNE_READ_MODIFY excludes
+# m_PENT, so P5 avoids their memory-destination form (load into a reg,
+# operate, store back). cmp/test are not here: they do not write back.
+_RMW_OPS = ("add", "adc", "sub", "sbb", "and", "or", "xor",
+            "neg", "not", "inc", "dec",
+            "shl", "sal", "shr", "sar", "rol", "ror", "rcl", "rcr")
+
+# Variable-count shifts (count in CL) cost 4 insns on P5 vs 1 for a
+# constant count (x86-tune-costs.h pentium_cost shift_var/shift_const).
+_SHIFT_OPS = ("shl", "sal", "shr", "sar", "rol", "ror", "rcl", "rcr")
+
+
+def _is_mem(op):
+    return "[" in op
+
+
+def _is_all_ones(op):
+    """True if `op` is an all-ones immediate: -1, 0xffffffff, 0ffffffffh,
+    0xffff, 0xff, ... in any case/prefix/suffix."""
+    if op == "-1":
+        return True
+    s = op.lower()
+    if s.startswith("0x"):
+        s = s[2:]
+    if s.endswith("h"):
+        s = s[:-1]
+    return bool(s) and all(c == "f" for c in s)
+
+
+def _imm_is_8(op):
+    """True if `op` is the immediate 8 in any spelling (8, 8h, 0x8, 08h)."""
+    s = op.lower()
+    if s.startswith("0x"):
+        s = s[2:]
+    if s.endswith("h"):
+        s = s[:-1]
+    s = s.lstrip("0") or "0"
+    return s == "8"
+
+
+def _same_reg(op0, op1):
+    return op0.lower() == op1.lower() and op0.lower() in _ALL_REGS
+
+
+OpRule = namedtuple("OpRule", ["category", "name", "mnems", "procs",
+                               "reason", "pred"])
+
+OP_RULES = [
+    OpRule(2, "xor-r,r", ("xor",), "k6",
+           "K6 clears a register faster with 'mov $0,reg' than 'xor reg,reg' "
+           "(X86_TUNE_USE_MOV0 = m_K6, x86-tune.def). Rewrite: mov reg,0.",
+           lambda o: len(o) == 2 and _same_reg(o[0], o[1])),
+    OpRule(1, "rmw-mem", _RMW_OPS, "p5",
+           "read-modify-write with a memory destination (e.g. add mem,reg) "
+           "is avoided on P5 (X86_TUNE_READ_MODIFY excludes m_PENT, "
+           "x86-tune.def). Load into a register, operate, store back.",
+           lambda o: bool(o) and _is_mem(o[0])),
+    OpRule(1, "push-mem", ("push",), "p5",
+           "P5 runs a separate load + push faster than 'push mem' "
+           "(X86_TUNE_PUSH_MEMORY excludes m_PENT, x86-tune.def).",
+           lambda o: bool(o) and _is_mem(o[0])),
+    OpRule(1, "not-mem", ("not",), "k6",
+           "on K6, NOT with a memory operand is vector-decoded without a "
+           "modRM byte; XOR is long-decoded, which helps here "
+           "(X86_TUNE_NOT_VECTORMODE = m_K6, x86-tune.def).",
+           lambda o: bool(o) and _is_mem(o[0])),
+    OpRule(1, "rol/ror-8", ("rol", "ror"), "p4",
+           "a 16-bit rotate by 8 is a byte swap; on P4 use xchgb %rh,%rl "
+           "instead (X86_TUNE_USE_XCHGB = m_PENT4, x86-tune.def).",
+           lambda o: len(o) == 2 and o[0].lower() in _REG16 and _imm_is_8(o[1])),
+    OpRule(1, "mov-r,-1", ("mov",), "p5",
+           "on P5, loading -1 via OR is faster than MOV "
+           "(X86_TUNE_MOVE_M1_VIA_OR = m_PENT|m_LAKEMONT, x86-tune.def). "
+           "Rewrite: or reg,-1.",
+           lambda o: len(o) == 2 and o[0].lower() in _ALL_REGS
+           and _is_all_ones(o[1])),
+    OpRule(2, "var-shift", _SHIFT_OPS, "p5",
+           "variable-count shift (count in CL) is 4 insns vs 1 for a "
+           "constant count on P5 (x86-tune-costs.h pentium_cost "
+           "shift_var/shift_const). K6 is 1 vs 1, so it is excluded.",
+           lambda o: len(o) >= 2 and o[1].lower() == "cl"),
+]
+
 # Two disassembly formats are supported:
 #   Watcom wdis:     ADDR  HEXBYTES  MNEMONIC  tab-separated
 #   gcc objdump -M intel:   ADDR:\tHEXBYTES   MNEMONIC  (Intel syntax)
-_WATCOM_INST_RE = re.compile(r"^[0-9A-Fa-f]{4}\s+[0-9A-Fa-f ]{1,40}\t+(\w+)")
-_GCC_INST_RE = re.compile(r"^\s+[0-9a-fA-F]+:\t[0-9a-fA-F ]+\s{2,}(\w+)")
+_WATCOM_INST_RE = re.compile(r"^[0-9A-Fa-f]{4}\s+[0-9A-Fa-f ]{1,40}\t+(\w+)\s*(.*)$")
+_GCC_INST_RE = re.compile(r"^\s+[0-9a-fA-F]+:\t[0-9a-fA-F ]+\s{2,}(\w+)\s*(.*)$")
 
 # Function boundary regexes.
 #   gcc objdump: "00000000 <_forward_chunk>:"
@@ -114,12 +207,19 @@ _WATCOM_FUNC_RE = re.compile(
     r'^[0-9A-Fa-f]{4}\t+([A-Za-z_][A-Za-z0-9_]*):$', re.MULTILINE)
 
 
-def mnemonics(text):
-    """Yield the mnemonic of each instruction line (Watcom or gcc format)."""
+def _operands(opstr):
+    """Split an operand string into a stripped list. Intel syntax never
+    puts a comma inside a memory operand ([base+idx*scale+disp]), so a
+    top-level comma always separates operands."""
+    return [o.strip() for o in opstr.split(",") if o.strip()]
+
+
+def _instructions(text):
+    """Yield (mnemonic, [operand...]) per instruction line (either format)."""
     for line in text.splitlines():
         m = _WATCOM_INST_RE.match(line) or _GCC_INST_RE.match(line)
         if m:
-            yield m.group(1)
+            yield m.group(1), _operands(m.group(2))
 
 
 def _split_funcs(text):
@@ -147,14 +247,20 @@ def lint(text):
     fired rule, sorted by processor priority (p5/k6 first)."""
     out = []
     for fname, body in _split_funcs(text):
+        instrs = list(_instructions(body))
         counts = {}
-        for m in mnemonics(body):
+        for m, _ in instrs:
             counts[m] = counts.get(m, 0) + 1
         for rule in RULES:
             total = sum(counts.get(m, 0) for m in rule.mnems)
             if total > 0:
                 out.append((rule.category, "+".join(rule.mnems),
                             rule.procs, rule.reason, total, fname))
+        for rule in OP_RULES:
+            n = sum(1 for m, o in instrs if m in rule.mnems and rule.pred(o))
+            if n > 0:
+                out.append((rule.category, rule.name, rule.procs,
+                            rule.reason, n, fname))
     out.sort(key=lambda r: _procs_rank(r[2]))
     return out
 

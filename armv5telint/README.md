@@ -19,6 +19,8 @@ per-instruction counts in their comments. gcc cannot match them because
 | `smlabb-alone` | `smlabb` with no `smlatt`/`smlabt`/`smlatb` | pair BB with TT so one loaded word feeds two accumulates |
 | `mul-family` | `mul`/`mla`/`smull`/`umull`/`smlal`/`umlal` (2-3× on ARMv5TE vs ARMv7-A) | shift/add for small constants, or re-schedule into the dot-product's paired MACs |
 | `ldst-cost` | single `ldr`/`str`/`ldrb`/`ldrh`/`ldrsb`/`ldrsh` (2×) and `ldrd`/`strd` (3×) | group consecutive loads into `ldm`/`stm` |
+| `alu-shift-reg` | ALU with a register-specified shift (`add r0,r1,r2,lsl r3`): 1 insn vs a constant shift's 0 | use a constant shift, or hoist the shift out of the loop |
+| `fp-ldst` | `vldr`/`vstr` single (2 insns) and double (3 insns) | group FP loads/stores; the target is softfloat, so this fires only on VFP builds |
 
 ### `mul-family` ratios (from gcc, not memory)
 
@@ -71,5 +73,6 @@ fires.
 
 Add a `def <name>_rule()` that returns a `Rule(name, apply)`, register
 it in `RULES`, and write a `test_<name>_fires` in the test file. The
-`Rule.apply` takes `(func_name, [mnemonics])` and returns
-`[(finding, func_name)]`.
+`Rule.apply` takes `(func_name, [(mnemonic, operands)])` and returns
+`[(finding, func_name)]`; `operands` is the raw text after the mnemonic
+(empty for operands-less instructions).
