@@ -1768,6 +1768,91 @@ static int lz_generate_spec_round(
     return 1;
 }
 
+/* One ordinary per-token forward step. Extracted from lz_generate_call's
+   main loop as pure code motion - the caller still owns the NULL check
+   and its LZ_ERR_SET + goto done, so where an error is reported cannot
+   move. */
+static float *lz_gen_step_logits(const LZModel *m, LZRunState *s,
+                                 int token, int pos) {
+    return lz_forward(m, s, token, pos);
+}
+
+/* Pick the next token for one ordinary step; the forward pass has
+   already run (logits). This is the "digest a prompt token vs sample a
+   new one" decision plus the penalty observe and generated++ that follow
+   a sample. Extracted from lz_generate_call's main loop as pure code
+   motion: every statement, branch and comment moved verbatim.
+   Returns 0 on success (with *next and *sampled written, and *generated
+   incremented iff a token was actually sampled), or -1 when the
+   lookahead path failed (errbuf already set by lz_look_pick); the caller
+   maps that to LZ_ERR_FORWARD exactly as the inline form did. */
+static int lz_gen_step_sample(const LZModel *m, LZRunState *s,
+                              LZSampler *sampler, const LZGenOpts *opts,
+                              LZInspect *ins, LZStateCkpt *look_ck,
+                              float *look_scr, int look_active,
+                              float *logits, int pos,
+                              const int *prompt_tokens,
+                              int start_pos, int n_prompt,
+                              LZThinkTrack *tr, char *errbuf, int errlen,
+                              int *next, int *sampled, int *generated) {
+    *sampled = 0;
+    if (pos < start_pos + n_prompt - 1) {
+        *next = prompt_tokens[pos + 1 - start_pos]; /* digesting the prompt */
+    } else {
+        if (look_active) {
+            /* The lookahead picks; the sampler is bypassed for THIS
+               token, which is the point - a rollout that then
+               sampled from the full distribution would be measuring
+               the sampler, not the search. Penalties still apply,
+               inside lz_look_pick, through the same assumed-window
+               path the speculative verify uses. */
+            *next = lz_look_pick(m, s, sampler, opts, look_ck, look_scr,
+                                 logits, pos, m->config.vocab_size,
+                                 errbuf, errlen);
+            if (*next < 0) return -1;
+        } else
+        *next = lz_sample_ex(sampler, logits, ins, tr->in_think);
+        /* Record into penalty counts. Only GENERATED tokens - words
+           in the prompt are often exactly what the answer needs;
+           penalizing them backfires. Same semantics as the Python
+           side; the two must agree. */
+        lz_sampler_observe(sampler, *next);
+        (*generated)++;
+        *sampled = 1;
+    }
+    return 0;
+}
+
+/* Emit one decided token and advance the loop's own state. Returns 1 if
+   generation must stop (*stop_hit already set to sf->matched), in which
+   case the loop's `token` is deliberately left alone - the last entry is
+   sampled but never forwarded. Extracted from lz_generate_call's main
+   loop as pure code motion. */
+static int lz_gen_step_emit(int next, int sampled,
+                            const LZGenOpts *opts, LZTokenizer *t,
+                            lz_stopf_t *sf, lz_emit_t *em,
+                            LZShouldContinue cont, void *ctx,
+                            int *token, int *pos,
+                            int start_pos, int n_prompt,
+                            int *n_rec, int *finish, LZThinkTrack *tr,
+                            int *stop_hit) {
+    /* Termination tokens, stop strings, out_tokens recording and the
+       cont() callback: gen_emit_token above (shared with the
+       speculative round path so the two bookkeeping paths cannot
+       drift - see its own comment). NOTE the last entry is sampled
+       but never forwarded (the loop breaks before its lz_forward),
+       so it is NOT in the KV either - that is why a resume has to
+       re-send it; see llama_zh.h. */
+    (*pos)++;
+    if (gen_emit_token(next, sampled, opts, t, sf, em, cont, ctx,
+                       *pos, start_pos, n_prompt, n_rec, finish, tr)) {
+        *stop_hit = sf->matched;
+        return 1;
+    }
+    *token = next;
+    return 0;
+}
+
 int lz_generate_call(const LZModel *m, LZTokenizer *t, LZRunState *s,
                      const LZGenCall *c) {
     /* The twelve call fields, back under the names the loop below uses.
@@ -2265,52 +2350,25 @@ int lz_generate_call(const LZModel *m, LZTokenizer *t, LZRunState *s,
         }
 
         {
-        float *logits = lz_forward(m, s, token, pos);
-        if (!logits) {
-            LZ_ERR_SET(rc, errbuf, errlen, LZ_ERR_FORWARD);
-            goto done;
-        }
+            float *logits = lz_gen_step_logits(m, s, token, pos);
+            if (!logits) {
+                LZ_ERR_SET(rc, errbuf, errlen, LZ_ERR_FORWARD);
+                goto done;
+            }
 
-        sampled = 0;
-        if (pos < start_pos + n_prompt - 1) {
-            next = prompt_tokens[pos + 1 - start_pos]; /* digesting the prompt */
-        } else {
-            if (look_active) {
-                /* The lookahead picks; the sampler is bypassed for THIS
-                   token, which is the point - a rollout that then
-                   sampled from the full distribution would be measuring
-                   the sampler, not the search. Penalties still apply,
-                   inside lz_look_pick, through the same assumed-window
-                   path the speculative verify uses. */
-                next = lz_look_pick(m, s, &sampler, opts, &look_ck, look_scr,
-                                    logits, pos, m->config.vocab_size,
-                                    errbuf, errlen);
-                if (next < 0) { rc = LZ_ERR_FORWARD; goto done; }
-            } else
-            next = lz_sample_ex(&sampler, logits, ins, tr.in_think);
-            /* Record into penalty counts. Only GENERATED tokens - words
-               in the prompt are often exactly what the answer needs;
-               penalizing them backfires. Same semantics as the Python
-               side; the two must agree. */
-            lz_sampler_observe(&sampler, next);
-            generated++;
-            sampled = 1;
-        }
-        pos++;
+            if (lz_gen_step_sample(m, s, &sampler, opts, ins, &look_ck,
+                                   look_scr, look_active, logits, pos,
+                                   prompt_tokens, start_pos, n_prompt,
+                                   &tr, errbuf, errlen,
+                                   &next, &sampled, &generated) < 0) {
+                rc = LZ_ERR_FORWARD; goto done;
+            }
 
-        /* Termination tokens, stop strings, out_tokens recording and the
-           cont() callback: gen_emit_token above (shared with the
-           speculative round path so the two bookkeeping paths cannot
-           drift - see its own comment). NOTE the last entry is sampled
-           but never forwarded (the loop breaks before its lz_forward),
-           so it is NOT in the KV either - that is why a resume has to
-           re-send it; see llama_zh.h. */
-        if (gen_emit_token(next, sampled, opts, t, &sf, &em, cont, ctx,
-                           pos, start_pos, n_prompt, &n_rec, &finish, &tr)) {
-            stop_hit = sf.matched;
-            break;
-        }
-        token = next;
+            if (lz_gen_step_emit(next, sampled, opts, t, &sf, &em, cont,
+                                 ctx, &token, &pos, start_pos, n_prompt,
+                                 &n_rec, &finish, &tr, &stop_hit)) {
+                break;
+            }
         }
     }
 
