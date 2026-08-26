@@ -72,10 +72,15 @@ cov_run "$W" "$MODEL" 8 || exit 2
 # Each branch prints as two "branch N taken M" lines under the line that
 # holds it. Score = executions x minority share, so a hot balanced
 # branch outranks both a hot predictable one and a balanced cold one.
+# A never-executed arm is gcov's spelling of "taken 0", and it must
+# still consume the arm slot: skipping it (matching only "taken") pairs
+# this branch's taken arm with the NEXT branch's, and two stable dispatch
+# guards then read as a 50/50 coin flip that never ran. gcov 16 prints
+# "branch N never executed (fallthrough)".
 awk '
     /^[ ]*[0-9]+:[ ]*[0-9]+:/ { split($0, p, ":"); line = p[2] + 0; next }
-    /^branch  *[0-9]+ taken/ {
-        n = $4 + 0
+    /^branch  *[0-9]+ (taken|never)/ {
+        n = ($3 == "taken") ? $4 + 0 : 0
         if (arm == 0) { a = n; arm = 1; next }
         b = n; arm = 0
         tot = a + b
