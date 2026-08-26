@@ -20,11 +20,13 @@ import re
 import sys
 from collections import namedtuple
 
-# A rule is a named predicate over a disassembled function. The scanner
-# feeds each function's instruction stream to every rule and collects
-# the findings. This is the seed of the BOLT-style DSL the full project
-# wants; for now the rules are plain Python, one per file below.
-Rule = namedtuple("Rule", ["name", "apply"])
+# A rule is a category + a named predicate over a disassembled function.
+# Category 1 (quirk) is empty for ARMv5TE - gcc's arm-cpus.in has only
+# LDSCHED/XSCALE/STRONG scheduling models, no "avoid this instruction"
+# flags (the one slow note, smallmul, is cortex-m only). These rules are
+# category 2 (cost-delta: the C tier's sequence is pricier than the asm
+# cell's under the 4-byte contract).
+Rule = namedtuple("Rule", ["category", "name", "apply"])
 
 FUNC_RE = re.compile(r"^([0-9a-f]+) <([^>]+)>:$")
 MNEMONIC_RE = re.compile(r"^\s*[0-9a-f]+:\s+[0-9a-f]{8}\s+(\S+)")
@@ -66,7 +68,7 @@ def ldrh_run_rule():
         if run >= 4:
             runs.append(run)
         return [("ldrh-run %d" % r, name) for r in runs]
-    return Rule("ldrh-run", apply)
+    return Rule(2, "ldrh-run", apply)
 
 
 def smlabb_alone_rule():
@@ -77,7 +79,7 @@ def smlabb_alone_rule():
         if sb > 0 and st == 0:
             return [("smlabb-alone %d" % sb, name)]
         return []
-    return Rule("smlabb-alone", apply)
+    return Rule(2, "smlabb-alone", apply)
 
 
 RULES = [ldrh_run_rule(), smlabb_alone_rule()]

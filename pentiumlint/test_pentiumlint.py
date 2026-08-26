@@ -17,8 +17,32 @@ def test_inc_fires_on_p4_rule():
                  ("4a", "dec", "edx")])
     found = pentiumlint.lint(text)
     assert len(found) == 1, found
-    mn, procs, reason, n = found[0]
-    assert mn == "inc+dec" and procs == "p4" and n == 3, found
+    cat, mn, procs, reason, n = found[0]
+    assert cat == 1 and mn == "inc+dec" and procs == "p4" and n == 3, found
+
+
+def test_movsx_cost_delta_on_p5():
+    text = _dis([("0f bf c0", "movsx", "eax,al"),
+                 ("0f bf c9", "movsx", "ecx,cl")])
+    found = pentiumlint.lint(text)
+    assert any(f[1] == "movsx" and "p5" in f[2] for f in found), found
+
+
+def test_imul_cost_delta_on_p5():
+    text = _dis([("f7 e9", "imul", "ecx"),
+                 ("f7 e8", "imul", "eax")])
+    found = pentiumlint.lint(text)
+    assert any(f[1].startswith("imul") and "p5" in f[2] for f in found), found
+
+
+def test_p5_k6_outrank_cyrix_p4_in_sort():
+    # A fixture hitting both the p5 rule (imul) and the p4 rule (jcc).
+    # p5/k6 findings must come first in the sorted output.
+    text = _dis([("f7 e9", "imul", "ecx"),
+                 ("74 00", "jz", "label")])
+    found = pentiumlint.lint(text)
+    ranks = [pentiumlint._procs_rank(f[2]) for f in found]
+    assert ranks == sorted(ranks), (found, ranks)
 
 
 def test_add_sub_is_silent():

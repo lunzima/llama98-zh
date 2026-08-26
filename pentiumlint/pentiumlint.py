@@ -28,6 +28,12 @@ from collections import namedtuple
 #                   unpredictable branches on P4's long pipeline
 Rule = namedtuple("Rule", ["category", "mnems", "procs", "reason"])
 
+# Processor priority for resolving CONFLICTING rules. p5/k6 are the
+# primary targets; cyrix/p4 are secondary. A rewrite that is good on p4
+# but bad on p5/k6 is NOT recommended - the primary targets win. The
+# output below sorts findings by this order.
+PROC_PRIORITY = ["p5", "p55c", "k6", "k6-2", "cyrix", "winchip", "p4"]
+
 # The seed table, keyed to the engine's target family. grow this from
 # gcc's x86-tune.def (category 1), the instruction cost table (category
 # 2), and branch-predictability analysis (category 3), not from memory.
@@ -36,6 +42,21 @@ RULES = [
          "trace cache stores 2 uops per inc/dec (read-modify-write); "
          "add/sub wins. NOT p5/p6/k6: gcc X86_TUNE_USE_INCDEC keeps "
          "inc/dec there (stall negligible vs 1-byte encoding)"),
+    Rule(2, ("movsx",), "p5,p55c,k6,k6-2",
+         "sign-extension: 12 on P5 / 8 on K6 vs 4 on PentiumPro - a "
+         "3x/2x cost delta (gcc x86-tune-costs.h). Prefer a widening "
+         "that the asm cell's punpcklbw already does for free."),
+    Rule(2, ("movzx",), "p5,p55c,k6,k6-2",
+         "zero-extension: 8 on P5 / 8 on K6 vs 4 on PentiumPro - a 2x "
+         "cost delta (gcc x86-tune-costs.h)."),
+    Rule(2, ("imul", "mul"), "p5,p55c",
+         "integer multiply startup: 44 on P5 vs 16 on PentiumPro - a "
+         "2.75x cost delta (gcc x86-tune-costs.h). Prefer shift/add for "
+         "small constants."),
+    Rule(3, ("jcc", "jmp"), "p4",
+         "behavioral: P4's ~20-stage pipeline makes a branch mispredict "
+         "cost ~20 cycles. Prefer branchless selects in hot loops where "
+         "the branch is a coin flip."),
 ]
 
 # wdis line: ADDR  HEXBYTES  MNEMONIC  OPERANDS, tab-separated.
@@ -51,7 +72,8 @@ def mnemonics(text):
 
 
 def lint(text):
-    """Return [(mnem, procs, reason, count)] for every fired rule."""
+    """Return [(category, mnems, procs, reason, count)] per fired rule,
+    sorted by processor priority (p5/k6 first)."""
     counts = {}
     for m in mnemonics(text):
         counts[m] = counts.get(m, 0) + 1
@@ -59,8 +81,19 @@ def lint(text):
     for rule in RULES:
         total = sum(counts.get(m, 0) for m in rule.mnems)
         if total > 0:
-            out.append(("+".join(rule.mnems), rule.procs, rule.reason, total))
+            out.append((rule.category, "+".join(rule.mnems),
+                        rule.procs, rule.reason, total))
+    out.sort(key=lambda r: _procs_rank(r[2]))
     return out
+
+
+def _procs_rank(procs):
+    """Rank a comma-separated processor set by PROC_PRIORITY; the first
+    named processor determines the rank (p5/k6 outrank cyrix/p4)."""
+    for p in PROC_PRIORITY:
+        if p in procs.split(","):
+            return PROC_PRIORITY.index(p)
+    return len(PROC_PRIORITY)
 
 
 def main(argv):
@@ -70,8 +103,8 @@ def main(argv):
     for path in argv:
         with open(path, encoding="utf-8", errors="replace") as f:
             text = f.read()
-        for mn, procs, reason, n in lint(text):
-            print("%-10s %-12s %d  %s" % (mn, procs, n, reason))
+        for cat, mn, procs, reason, n in lint(text):
+            print("cat%d %-10s %-12s %d  %s" % (cat, mn, procs, n, reason))
     return 0
 
 
