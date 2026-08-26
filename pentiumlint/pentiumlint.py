@@ -48,22 +48,52 @@ RULES = [
     Rule(2, ("movzx",), "p5,p55c,k6,k6-2",
          "zero-extension: 8 on P5 / 8 on K6 vs 4 on PentiumPro - a 2x "
          "cost delta (gcc x86-tune-costs.h)."),
-    Rule(2, ("imul", "mul"), "p5,p55c",
-         "9-11 cycles non-pairable on P5 (pent_mul = pentium-np*11 in "
-         "gcc i386-costs.h), blocking both U and V. K6/Cyrix/WinChip "
-         "run imul in 2-3 cycles, so the rule does not bite there."),
-    Rule(2, ("idiv",), "p5,p55c,k6,k6-2,cyrix,winchip",
-         "16-40 cycles across the family: idiv blocks all units "
-         "including FP. A constant divisor should be a reciprocal "
-         "multiply when exactness is proven."),
+    Rule(2, ("imul", "mul"), "p5,p55c,p4",
+         "11 insns on P5 / 15 insns on P4 vs 4 on PentiumPro "
+         "(2.75x / 3.75x, gcc x86-tune-costs.h:404,2476). "
+         "K6 runs imul in 3 insns (cheaper than PPro), so it is "
+         "excluded. Cyrix/WinChip have no gcc cost table."),
+    Rule(2, ("idiv",), "p4",
+         "56 insns on P4 vs 17 on PentiumPro (3.29x, gcc "
+         "x86-tune-costs.h:2482). P5 (25 insns, 1.47x) and K6 "
+         "(18 insns, 1.06x) are both under 1.5x and excluded. "
+         "A constant divisor should be a reciprocal multiply when "
+         "exactness is proven."),
     Rule(2, ("movs", "stos", "lods", "scas", "cmps"), "p5,p55c",
-         "12 cycles microcoded, non-pairable on P5 (pent_str in gcc "
-         "i386-costs.h). Short fixed-count copies/scans should be "
-         "explicit load/store loops."),
+         "microcoded, non-pairable on P5 (P5 optimization manual "
+         "Table 27-4; gcc models via pentium_memcpy/memset "
+         "stringop_algs in x86-tune-costs.h:359). Short fixed-count "
+         "copies/scans should be explicit load/store loops."),
     Rule(3, ("jcc", "jmp"), "p4",
          "behavioral: P4's ~20-stage pipeline makes a branch mispredict "
          "cost ~20 cycles. Prefer branchless selects in hot loops where "
          "the branch is a coin flip."),
+    # --- category-1 quirks from gcc x86-tune.def ---
+    Rule(1, ("not",), "p5,p55c",
+         "not pairable on P5 (X86_TUNE_NOT_UNPAIRABLE, x86-tune.def:726). "
+         "Rewrite: xor reg,-1."),
+    Rule(1, ("cdq", "cltd"), "p5,p55c",
+         "P5 avoids cdq/cltd (X86_TUNE_USE_CLTD, ~m_PENT, x86-tune.def:355). "
+         "Rewrite: mov edx,eax; sar edx,31."),
+    Rule(1, ("stc", "clc", "cmc"), "p4",
+         "slow on NetBurst (X86_TUNE_SLOW_STC, x86-tune.def:811). "
+         "Rewrite: use sbb idiom."),
+    Rule(1, ("sahf",), "p5,p55c",
+         "P5 avoids sahf (X86_TUNE_USE_SAHF, ~m_PENT, x86-tune.def:348)."),
+    # TODO(cat1, needs operand inspection): xor reg,reg (K6 USE_MOV0),
+    # add mem,reg (P5 READ_MODIFY_WRITE), mov reg,-1 (P5 MOVE_M1_VIA_OR),
+    # push [mem] (P5 PUSH_MEMORY), not mem (K6 NOT_VECTORMODE),
+    # rol/ror reg,8 (P4 USE_XCHGB).
+    Rule(2, ("shl", "shr", "sar"), "p4",
+         "4 insns on P4 vs 1 on PentiumPro (4x, gcc x86-tune-costs.h:2474-"
+         "2475). Both variable (reg,cl) and constant (reg,imm) shifts are "
+         "expensive on P4's NetBurst pipeline. P5 variable_shift is also "
+         "4x (x86-tune-costs.h:402) but needs operand inspection to "
+         "distinguish from constant shifts."),
+    Rule(2, ("lea",), "p4,k6",
+         "3 insns on P4 / 2 insns on K6 vs 1 on PentiumPro (3x/2x, gcc "
+         "x86-tune-costs.h:2473,832). P4 treats lea as a complex operation; "
+         "break into add/mov where possible."),
 ]
 
 # Two disassembly formats are supported:
