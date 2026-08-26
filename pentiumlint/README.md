@@ -77,14 +77,14 @@ changes are dead; the reader proves that. This lints, it does not judge.
 ## Usage
 
 ```bash
-# Watcom OMF (shipping build); wdis reads it:
-wdis build/watcom/cli/ops_quant.obj > /tmp/ops_quant.wdis
+# Watcom OMF; wdis reads it:
+wdis some_obj.obj > some_obj.wdis
 
-# Or gcc Intel-syntax objdump (either is accepted):
-gcc -m32 -O2 -c src/ops_quant.c -o /tmp/ops_quant.o
-objdump -d -M intel /tmp/ops_quant.o > /tmp/ops_quant.dis
+# Or gcc 32-bit Intel-syntax objdump (either format is accepted):
+gcc -m32 -O2 -c some_file.c -o some_file.o
+objdump -d -M intel some_file.o > some_file.dis
 
-python3 pentiumlint.py /tmp/ops_quant.wdis /tmp/ops_quant.dis
+python3 pentiumlint.py some_obj.wdis some_file.dis
 ```
 
 ## Tests

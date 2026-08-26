@@ -2,18 +2,16 @@
 """armv5telint - an ARMv5TE peephole linter.
 
 Finds suboptimal instruction sequences in ARMv5TE assembly, in the
-spirit of gaul/armlint and CSharperMantle/loonglint but aimed at the
-one place this project's suboptimal sequences actually are: the
-gcc-compiled C tier (the hand-written asm cells are already optimal,
-with per-instruction counts in their comments).
+spirit of gaul/armlint and CSharperMantle/loonglint. Rules key on gcc's
+own ARM cost model (generic_extra_costs) rather than hand-measured
+timings.
 
 The linter is a linear scanner over objdump -d output. Each rule is a
-peephole pattern plus a per-processor reason; a rule fires only when the
-pattern matches and the rewrite is provably equivalent under the
-4-byte alignment contract the asm cells assert (src/ops_arm.h).
+peephole pattern plus a reason; a rule fires only when the pattern
+matches.
 
 A CENSUS, not a gate: it reports "look here", and the reader proves the
-rewrite's flags are dead before applying it.
+rewrite's flags are dead (and the alignment holds) before applying it.
 """
 
 import re
@@ -231,7 +229,9 @@ def lint(text):
     return out
 
 
-def main(argv):
+def main(argv=None):
+    if argv is None:
+        argv = sys.argv[1:]
     if not argv:
         print("usage: armv5telint.py <objdump-output>", file=sys.stderr)
         return 2

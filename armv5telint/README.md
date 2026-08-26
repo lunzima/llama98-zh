@@ -4,12 +4,13 @@ An ARMv5TE peephole linter. Finds suboptimal instruction sequences in
 ARMv5TE assembly, in the spirit of [gaul/armlint](https://github.com/gaul/armlint)
 and [CSharperMantle/loonglint](https://github.com/CSharperMantle/loonglint).
 
-The linter targets the one place this project's suboptimal sequences
-actually are: the **gcc-compiled C tier**. The hand-written asm cells
-(`src/ops_arm.c`'s `lz_dot32_*_arm_asm`) are already optimal, with
-per-instruction counts in their comments. gcc cannot match them because
-`int16_t` promises only 2-byte alignment and gcc cannot prove the
-4-byte contract the asm cells assert (`src/ops_arm.h`).
+The linter keys on gcc's own ARM cost model — `generic_extra_costs`,
+the table every ARMv5TE core tunes to — rather than hand-measured
+timings. Its structural target: gcc only promises `int16_t` 2-byte
+alignment, so it emits 2-byte `ldrh` loads where a 4-byte-alignment
+guarantee would let you fold four of them into one `ldm` (a 4:1 saving).
+Hand-written asm can assert that guarantee; gcc's provably-safe C
+cannot.
 
 ## Rules
 
@@ -64,13 +65,12 @@ is armlint's principle, not a convenience.
 ## Usage
 
 ```bash
-# Cross-compile a C tier for ARMv5TE and disassemble:
-arm-linux-gnueabi-gcc-14 -march=armv5te -O2 -std=c99 -Isrc -Icommon \
-    -c -o /tmp/ops_arm.o src/ops_arm.c
-arm-linux-gnueabi-objdump -d /tmp/ops_arm.o > /tmp/ops_arm.dis
+# Cross-compile for ARMv5TE and disassemble:
+arm-linux-gnueabi-gcc -march=armv5te -O2 -c some_file.c -o some_file.o
+arm-linux-gnueabi-objdump -d some_file.o > some_file.dis
 
 # Lint it:
-python3 armv5telint.py /tmp/ops_arm.dis
+python3 armv5telint.py some_file.dis
 ```
 
 ## Tests

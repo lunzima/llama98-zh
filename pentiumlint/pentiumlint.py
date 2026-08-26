@@ -313,7 +313,9 @@ def _procs_rank(procs):
     return len(PROC_PRIORITY)
 
 
-def main(argv):
+def main(argv=None):
+    if argv is None:
+        argv = sys.argv[1:]
     if not argv:
         print("usage: pentiumlint.py <dis-output> ...", file=sys.stderr)
         return 2
