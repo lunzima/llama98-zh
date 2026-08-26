@@ -214,3 +214,7 @@ docs/superpowers/
 # source. This one is a decision.
 .prof/
 !/build/move_per_function.sh
+
+# Python bytecode
+__pycache__/
+*.pyc
