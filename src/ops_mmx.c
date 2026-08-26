@@ -1839,17 +1839,15 @@ void lz_dot128_x16_mmx_w(const int8_t *w, const int16_t *x, int32_t *out4) {
    function cannot see ops.c's static global directly, so it goes
    through the same accessor lz_prefetch_mode() already used one line
    below. */
-void row_q8_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
-                    const int16_t *xw, int nb, int nt, int in_dim,
-                    const void *pf_end, const void *pf_end2) {
-    const int8_t *wr = (const int8_t *)w4;
-    const int8_t *wend = (const int8_t *)pf_end;
+void row_q8_mmx_asm(const lz_row_ctx *c) {
+    const int8_t *wr = (const int8_t *)c->w4;
+    const int8_t *wend = (const int8_t *)c->pf_end;
     int tk, g;
-    (void)w2; (void)pf_end2;
+    (void)c->w2; (void)c->pf_end2;
     {
-        const int16_t *xwt = xw;
-        int32_t *acc = acc32;
-        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+        const int16_t *xwt = c->xw;
+        int32_t *acc = c->acc32;
+        for (tk = 0; tk < c->nt; tk++, xwt += c->in_dim, acc += c->nb) {
             /* Pairing beats the 128-element group kernel whenever there is
                a second token: the group kernel amortizes FIXED overhead
                (mask setup, prologue) from once per 32 elements to once per
@@ -1865,11 +1863,11 @@ void row_q8_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
                prologue on a real PII is a wall-clock question, and the
                machine for it is not here. This is a knob-shaped
                decision recorded as such, not a measured result. */
-            if (nt - tk >= 2 && lz_pair_mode()) {
-                const int16_t *xw2 = xwt + in_dim;
-                int32_t *accb = acc + nb;
+            if (c->nt - tk >= 2 && lz_pair_mode()) {
+                const int16_t *xw2 = xwt + c->in_dim;
+                int32_t *accb = acc + c->nb;
                 int g2;
-                for (g2 = 0; g2 < nb; g2++) {
+                for (g2 = 0; g2 < c->nb; g2++) {
                     const int8_t *pf_ = wr + (size_t)(g2 + LZ_PF_DIST) * 32;
                     if (pf_ < wend) {
                         int pf_m_ = lz_prefetch_mode();
@@ -1884,11 +1882,11 @@ void row_q8_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
                                        acc + g2, accb + g2);
                 }
                 tk++;
-                xwt += in_dim;   /* skip tk+1's pointers too */
-                acc += nb;
+                xwt += c->in_dim;   /* skip tk+1's pointers too */
+                acc += c->nb;
                 continue;
             }
-            if ((nb & 3) == 0) LZ_Q8_GROUP4(lz_dot128_x16_asm);
+            if ((c->nb & 3) == 0) LZ_Q8_GROUP4(lz_dot128_x16_asm);
             else               LZ_Q8_PFSEL(dot32_x16_mmx);
         }
     }
@@ -2309,25 +2307,23 @@ void lz_dot128_q41_mmx_w(const unsigned char *w, const int16_t *x, int32_t *out4
    LZ_ROW_Q41). The whole function adds no new call sites - same
    argument as row_q8_mmx_asm. g_pair is accessed via lz_pair_mode(),
    same as Q8_0's row function. */
-void row_q41_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
-                     const int16_t *xw, int nb, int nt, int in_dim,
-                     const void *pf_end, const void *pf_end2) {
-    const unsigned char *wn = (const unsigned char *)w4;
-    const unsigned char *wend = (const unsigned char *)pf_end;
+void row_q41_mmx_asm(const lz_row_ctx *c) {
+    const unsigned char *wn = (const unsigned char *)c->w4;
+    const unsigned char *wend = (const unsigned char *)c->pf_end;
     int tk, s;
-    (void)w2; (void)pf_end2;
+    (void)c->w2; (void)c->pf_end2;
     {
-        const int16_t *xwt = xw;
-        int32_t *acc = acc32;
-        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+        const int16_t *xwt = c->xw;
+        int32_t *acc = c->acc32;
+        for (tk = 0; tk < c->nt; tk++, xwt += c->in_dim, acc += c->nb) {
             /* Pair whenever a second token exists - same trade as Q8 and
                worth more here (weight side 16 of 40 ops against Q8's 12 of
                36). Not measured on target; see row_q8_mmx_asm. */
-            if (nt - tk >= 2 && lz_pair_mode()) {
-                const int16_t *xw2 = xwt + in_dim;
-                int32_t *accb = acc + nb;
+            if (c->nt - tk >= 2 && lz_pair_mode()) {
+                const int16_t *xw2 = xwt + c->in_dim;
+                int32_t *accb = acc + c->nb;
                 int s2;
-                for (s2 = 0; s2 < nb; s2++) {
+                for (s2 = 0; s2 < c->nb; s2++) {
                     const unsigned char *pf_ = wn + (size_t)(s2 + LZ_PF_DIST) * 16;
                     if (pf_ < wend) {
                         int pf_m_ = lz_prefetch_mode();
@@ -2342,11 +2338,11 @@ void row_q41_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
                                        acc + s2, accb + s2);
                 }
                 tk++;
-                xwt += in_dim;   /* skip tk+1's pointers too */
-                acc += nb;
+                xwt += c->in_dim;   /* skip tk+1's pointers too */
+                acc += c->nb;
                 continue;
             }
-            if ((nb & 3) == 0) LZ_Q41_GROUP4(lz_dot128_q41_asm);
+            if ((c->nb & 3) == 0) LZ_Q41_GROUP4(lz_dot128_q41_asm);
             else               LZ_Q41_PFSEL(dot32_q41_mmx);
         }
     }
@@ -2788,26 +2784,24 @@ void lz_dot128_t2_mmx_w(const unsigned char *w2, const int16_t *x,
    whole function here adds NO new call sites - same argument as
    row_q8_mmx_asm/row_q41_mmx_asm. No pairing (unmeasured, per the
    original comment at this function's old home in ops.c). */
-void row_t2_mmx_asm(int32_t *acc32, const void *w4, const void *w2v,
-                    const int16_t *xw, int nb, int nt, int in_dim,
-                    const void *pf_end, const void *pf_end2) {
-    const unsigned char *p2 = (const unsigned char *)w4;
+void row_t2_mmx_asm(const lz_row_ctx *c) {
+    const unsigned char *p2 = (const unsigned char *)c->w4;
     int tk, s;
-    (void)w2v; (void)pf_end; (void)pf_end2;
+    (void)c->w2; (void)c->pf_end; (void)c->pf_end2;
     {
-        const int16_t *xwt = xw;
-        int32_t *acc = acc32;
-        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+        const int16_t *xwt = c->xw;
+        int32_t *acc = c->acc32;
+        for (tk = 0; tk < c->nt; tk++, xwt += c->in_dim, acc += c->nb) {
             /* Whole groups of four first, the per-32 kernel for the nb % 4
                tail - the same split the gcc twin makes in ops_matmul.c. The
                two write the same values (build/dot128_t2_probe.c holds the
                group form to four calls of the per-32 one), so a row divided
                between them has two instruction counts and one answer. */
             s = 0;
-            for (; s + 4 <= nb; s += 4)
+            for (; s + 4 <= c->nb; s += 4)
                 lz_dot128_t2_asm(p2 + (size_t)s * 8, xwt + (size_t)s * 32,
                                  acc + s);
-            for (; s < nb; s++)
+            for (; s < c->nb; s++)
                 acc[s] = lz_dot32_t2_asm(p2 + (size_t)s * 8, xwt + (size_t)s * 32);
         }
     }
@@ -3329,27 +3323,25 @@ void lz_dot128_q61_mmx_w(const unsigned char *w4, const unsigned char *w2,
    LZ_ROW_Q61). The whole function adds no new call sites - same
    argument as row_q8_mmx_asm/row_q41_mmx_asm. g_pair is accessed via
    lz_pair_mode(), same as the other two formats' row functions. */
-void row_q61_mmx_asm(int32_t *acc32, const void *w4, const void *w2v,
-                     const int16_t *xw, int nb, int nt, int in_dim,
-                     const void *pf_end, const void *pf_end2) {
-    const unsigned char *wn = (const unsigned char *)w4;
-    const unsigned char *w2 = (const unsigned char *)w2v;
-    const unsigned char *wend = (const unsigned char *)pf_end;
-    const unsigned char *wend2 = (const unsigned char *)pf_end2;
+void row_q61_mmx_asm(const lz_row_ctx *c) {
+    const unsigned char *wn = (const unsigned char *)c->w4;
+    const unsigned char *w2 = (const unsigned char *)c->w2;
+    const unsigned char *wend = (const unsigned char *)c->pf_end;
+    const unsigned char *wend2 = (const unsigned char *)c->pf_end2;
     int tk, s;
     {
-        const int16_t *xwt = xw;
-        int32_t *acc = acc32;
-        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+        const int16_t *xwt = c->xw;
+        int32_t *acc = c->acc32;
+        for (tk = 0; tk < c->nt; tk++, xwt += c->in_dim, acc += c->nb) {
             /* Pair whenever a second token exists. Q6_1 gains the most of
                the three formats (weight side 61% of the kernel's ops);
                the gcc twin measured 1.271x on prefill. Not measured on
                target - see row_q8_mmx_asm. */
-            if (nt - tk >= 2 && lz_pair_mode()) {
-                const int16_t *xw2 = xwt + in_dim;
-                int32_t *accb = acc + nb;
+            if (c->nt - tk >= 2 && lz_pair_mode()) {
+                const int16_t *xw2 = xwt + c->in_dim;
+                int32_t *accb = acc + c->nb;
                 int s2;
-                for (s2 = 0; s2 < nb; s2++) {
+                for (s2 = 0; s2 < c->nb; s2++) {
                     LZ_Q61_PF(s2);
                     lz_dot32_q61_asm_2(wn + (size_t)s2 * 16, w2 + (size_t)s2 * 8,
                                        xwt + (size_t)s2 * 32,
@@ -3357,11 +3349,11 @@ void row_q61_mmx_asm(int32_t *acc32, const void *w4, const void *w2v,
                                        acc + s2, accb + s2);
                 }
                 tk++;
-                xwt += in_dim;   /* skip tk+1's pointers too */
-                acc += nb;
+                xwt += c->in_dim;   /* skip tk+1's pointers too */
+                acc += c->nb;
                 continue;
             }
-            if ((nb & 3) == 0) LZ_Q61_GROUP4(lz_dot128_q61_asm);
+            if ((c->nb & 3) == 0) LZ_Q61_GROUP4(lz_dot128_q61_asm);
             else               LZ_Q61_ACC(dot32_q61_mmx);
         }
     }
@@ -3634,26 +3626,24 @@ void lz_dot128_q16_mmx_w(const int16_t *w, const int16_t *x, int32_t *out4) {
 /* row_q16_mmx_asm: the real call boundary (matmul_q16-adjacent
    dispatch, src/ops.c, via LZ_ROW_Q16). The whole function adds no
    new call sites. */
-void row_q16_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
-                     const int16_t *xw, int nb, int nt, int in_dim,
-                     const void *pf_end, const void *pf_end2) {
-    const int16_t *wr = (const int16_t *)w4;
-    const int16_t *wend = (const int16_t *)pf_end;
+void row_q16_mmx_asm(const lz_row_ctx *c) {
+    const int16_t *wr = (const int16_t *)c->w4;
+    const int16_t *wend = (const int16_t *)c->pf_end;
     int tk, g;
-    (void)w2; (void)pf_end2;
+    (void)c->w2; (void)c->pf_end2;
     {
-        const int16_t *xwt = xw;
-        int32_t *acc = acc32;
-        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+        const int16_t *xwt = c->xw;
+        int32_t *acc = c->acc32;
+        for (tk = 0; tk < c->nt; tk++, xwt += c->in_dim, acc += c->nb) {
             /* Pair before grouping, the same order and the same reason as
                the gcc twin: the pair halves the weight traffic while the
                group only amortizes the per-32 call, and a token pair cannot
                be expressed once the group loop owns the sub-block index.
                An odd nt leaves its last token on the paths below. */
-            if (nt - tk >= 2 && lz_pair_mode()) {
-                const int16_t *xw2 = xwt + in_dim;
-                int32_t *accb = acc + nb;
-                for (g = 0; g < nb; g++) {
+            if (c->nt - tk >= 2 && lz_pair_mode()) {
+                const int16_t *xw2 = xwt + c->in_dim;
+                int32_t *accb = acc + c->nb;
+                for (g = 0; g < c->nb; g++) {
                     LZ_Q16_PF(g);
                     lz_dot32_q16_asm_2(wr + (size_t)g * 32,
                                        xwt + (size_t)g * 32,
@@ -3661,11 +3651,11 @@ void row_q16_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
                                        acc + g, accb + g);
                 }
                 tk++;
-                xwt += in_dim;   /* skip tk+1's pointers too */
-                acc += nb;
+                xwt += c->in_dim;   /* skip tk+1's pointers too */
+                acc += c->nb;
                 continue;
             }
-            if ((nb & 3) == 0) LZ_Q16_GROUP4(lz_dot128_q16_asm);
+            if ((c->nb & 3) == 0) LZ_Q16_GROUP4(lz_dot128_q16_asm);
             else               LZ_Q16_ACC(dot32_q16_mmx);
         }
     }

@@ -9,12 +9,21 @@
 #define OPS_MATMUL_H
 
 #include "ops.h"
+#include "ops_kernel_shared.h"  /* LZ_ROW_N: the table sizes below */
 
 /* ---- dispatch tables (defined in ops_matmul.c) ----------------------- */
-typedef void (*lz_rowfn)(int32_t *acc32, const void *w4, const void *w2,
-                         const int16_t *xw, int nb, int nt, int in_dim,
-                         const void *pf_end,
-                         const void *pf_end2);
+typedef struct {
+    int32_t *acc32;
+    const void *w4;
+    const void *w2;
+    const int16_t *xw;
+    int nb;
+    int nt;
+    int in_dim;
+    const void *pf_end;
+    const void *pf_end2;
+} lz_row_ctx;
+typedef void (*lz_rowfn)(const lz_row_ctx *c);
 
 extern const lz_rowfn LZ_ROW_Q8[LZ_ROW_N];
 extern const lz_rowfn LZ_ROW_Q41[LZ_ROW_N];

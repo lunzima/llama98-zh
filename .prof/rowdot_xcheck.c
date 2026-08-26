@@ -94,7 +94,17 @@ static int check_table(const char *fmt, const lz_rowfn *tab,
     for (s = 0; s < LZ_ROW_N; s++) {
         if (!tab[s]) continue;
         memset(acc, 0, sizeof acc);
-        tab[s](acc, w4, w2, xw, nb, nt, in_dim, w2, w2 + sizeof w2 / 2);
+        lz_row_ctx rctx;
+        rctx.acc32 = acc;
+        rctx.w4 = w4;
+        rctx.w2 = w2;
+        rctx.xw = xw;
+        rctx.nb = nb;
+        rctx.nt = nt;
+        rctx.in_dim = in_dim;
+        rctx.pf_end = w2;
+        rctx.pf_end2 = w2 + sizeof w2 / 2;
+        tab[s](&rctx);
         if (first < 0) {
             first = s;
             memcpy(acc_ref, acc, sizeof acc);

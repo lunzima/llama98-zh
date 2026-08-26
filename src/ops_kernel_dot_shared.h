@@ -14,7 +14,8 @@
    same reason src/ops_kernel_shared.h has one.
 
    Each macro assumes local variables already in scope at its call
-   site (g, wr, wend, xwt, acc, nb, ...) - the same convention every
+   site (g, wr, wend, xwt, acc, and the row-context pointer c) - the
+   same convention every
    other LZ_*_PAIR/LZ_*_ACC macro in this project already uses; not
    re-derived here. */
 #ifndef LZ_OPS_KERNEL_DOT_SHARED_H
@@ -34,7 +35,7 @@
    segfaults. One compare buys safety for the whole path; the branch is
    highly predictable. */
 #define LZ_Q8_ACC(DOT32, PF)                                        \
-    for (g = 0; g < nb; g++) {                                      \
+    for (g = 0; g < c->nb; g++) {                                      \
         const int8_t *pf_ = wr + (size_t)(g + LZ_PF_DIST) * 32;     \
         if (pf_ < wend) PF(pf_);                                    \
         acc[g] = DOT32(wr + (size_t)g * 32, xwt + (size_t)g * 32);  \
@@ -63,7 +64,7 @@
    (ops_kernel_shared.h), which defaults on to match Watcom's shape. */
 #define LZ_Q8_GROUP4(DOT128)                                            \
     do {                                                                \
-        for (g = 0; g < nb; g += 4) {                                   \
+        for (g = 0; g < c->nb; g += 4) {                                   \
             const int8_t *pf_ = wr + (size_t)(g + LZ_PF_DIST) * 32;     \
             if (pf_ < wend) {                                           \
                 int pf_m_ = lz_prefetch_mode();                         \
@@ -83,7 +84,7 @@
 #if defined(__WATCOMC__) || defined(LZ_DOT_MMX_EXTERN)
 
 #define LZ_Q41_ACC(DOT32, PF)                                          \
-    for (s = 0; s < nb; s++) {                                         \
+    for (s = 0; s < c->nb; s++) {                                         \
         const unsigned char *pf_ = wn + (size_t)(s + LZ_PF_DIST) * 16; \
         if (pf_ < wend) PF(pf_);                                       \
         acc[s] = DOT32(wn + (size_t)s * 16, xwt + (size_t)s * 32);     \
@@ -103,7 +104,7 @@
    32 elements to once per 128, integer results bit-identical. */
 #define LZ_Q41_GROUP4(DOT128)                                              \
     do {                                                                   \
-        for (s = 0; s < nb; s += 4) {                                      \
+        for (s = 0; s < c->nb; s += 4) {                                      \
             const unsigned char *pf_ = wn + (size_t)(s + LZ_PF_DIST) * 16; \
             if (pf_ < wend) {                                              \
                 int pf_m_ = lz_prefetch_mode();                            \
@@ -146,7 +147,7 @@
     } while (0)
 
 #define LZ_Q61_ACC(DOT32)                                               \
-    for (s = 0; s < nb; s++) {                                          \
+    for (s = 0; s < c->nb; s++) {                                          \
         LZ_Q61_PF(s);                                                   \
         acc[s] = DOT32(wn + (size_t)s * 16, w2 + (size_t)s * 8,         \
                        xwt + (size_t)s * 32);                           \
@@ -155,7 +156,7 @@
 #if defined(__WATCOMC__) || (defined(LZ_G128_GCC) && LZ_G128_GCC)
 #define LZ_Q61_GROUP4(DOT128)                                           \
     do {                                                                \
-        for (s = 0; s < nb; s += 4) {                                   \
+        for (s = 0; s < c->nb; s += 4) {                                   \
             LZ_Q61_PF(s);                                               \
             DOT128(wn + (size_t)s * 16, w2 + (size_t)s * 8,             \
                    xwt + (size_t)s * 32, acc + s);                      \
@@ -185,7 +186,7 @@
     } while (0)
 
 #define LZ_Q16_ACC(DOT32)                                                 \
-    for (g = 0; g < nb; g++) {                                            \
+    for (g = 0; g < c->nb; g++) {                                            \
         LZ_Q16_PF(g);                                                     \
         acc[g] = DOT32(wr + (size_t)g * 32, xwt + (size_t)g * 32);        \
     }
@@ -193,7 +194,7 @@
 #if defined(__WATCOMC__) || (defined(LZ_G128_GCC) && LZ_G128_GCC)
 #define LZ_Q16_GROUP4(DOT128)                                             \
     do {                                                                  \
-        for (g = 0; g < nb; g += 4) {                                     \
+        for (g = 0; g < c->nb; g += 4) {                                     \
             LZ_Q16_PF(g);                                                 \
             DOT128(wr + (size_t)g * 32, xwt + (size_t)g * 32, acc + g);   \
         }                                                                 \

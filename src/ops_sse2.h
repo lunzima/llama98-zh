@@ -26,6 +26,7 @@
                          does not have. */
 
 #include "ops_p2_blk.h"
+#include "ops_matmul.h"   /* lz_row_ctx - the row kernels' parameter struct */
 
 #if defined(LZ_SSE2_TU)
 
@@ -159,33 +160,23 @@ void lz_q8round_2p_group_sse2(const float *grp, int8_t *ho, int8_t *lw,
 
 /* Q8_0 matmul, SSE2 tier. row_q8_sse2_asm is the real call boundary
    (LZ_ROW_Q8, src/ops.c) - see that table's own comment. */
-void row_q8_sse2_asm(int32_t *acc32, const void *w4, const void *w2,
-                     const int16_t *xw, int nb, int nt, int in_dim,
-                     const void *pf_end, const void *pf_end2);
+void row_q8_sse2_asm(const lz_row_ctx *c);
 
 /* Q4_1 matmul, SSE2 tier. row_q41_sse2_asm is the real call boundary
    (LZ_ROW_Q41, src/ops.c). */
-void row_q41_sse2_asm(int32_t *acc32, const void *w4, const void *w2,
-                      const int16_t *xw, int nb, int nt, int in_dim,
-                      const void *pf_end, const void *pf_end2);
+void row_q41_sse2_asm(const lz_row_ctx *c);
 
 /* T2 matmul, SSE2 tier. row_t2_sse2_asm is the real call boundary
    (LZ_ROW_T2, src/ops.c). */
-void row_t2_sse2_asm(int32_t *acc32, const void *w4, const void *w2v,
-                     const int16_t *xw, int nb, int nt, int in_dim,
-                     const void *pf_end, const void *pf_end2);
+void row_t2_sse2_asm(const lz_row_ctx *c);
 
 /* Q6_1 matmul, SSE2 tier. row_q61_sse2_asm is the real call boundary
    (LZ_ROW_Q61, src/ops.c). */
-void row_q61_sse2_asm(int32_t *acc32, const void *w4, const void *w2v,
-                      const int16_t *xw, int nb, int nt, int in_dim,
-                      const void *pf_end, const void *pf_end2);
+void row_q61_sse2_asm(const lz_row_ctx *c);
 
 /* Q16_0 matmul, SSE2 tier. row_q16_sse2_asm is the real call boundary
    (LZ_ROW_Q16, src/ops.c). */
-void row_q16_sse2_asm(int32_t *acc32, const void *w4, const void *w2,
-                      const int16_t *xw, int nb, int nt, int in_dim,
-                      const void *pf_end, const void *pf_end2);
+void row_q16_sse2_asm(const lz_row_ctx *c);
 
 #else /* gcc: intrinsics */
 
@@ -196,21 +187,11 @@ void row_q16_sse2_asm(int32_t *acc32, const void *w4, const void *w2,
    with fold4_sse2 and touch %xmm directly in the row loop itself.
    Bodies in src/ops_sse2.c; the part32_ family and fold4_sse2 itself
    are in src/ops_kernel_dot_sse2.h, included only by that file. */
-void row_q8_sse2_intrin(int32_t *acc32, const void *w4, const void *w2,
-                        const int16_t *xw, int nb, int nt, int in_dim,
-                        const void *pf_end, const void *pf_end2);
-void row_q41_sse2_intrin(int32_t *acc32, const void *w4, const void *w2,
-                         const int16_t *xw, int nb, int nt, int in_dim,
-                         const void *pf_end, const void *pf_end2);
-void row_t2_sse2_intrin(int32_t *acc32, const void *w4, const void *w2v,
-                        const int16_t *xw, int nb, int nt, int in_dim,
-                        const void *pf_end, const void *pf_end2);
-void row_q61_sse2_intrin(int32_t *acc32, const void *w4, const void *w2v,
-                         const int16_t *xw, int nb, int nt, int in_dim,
-                         const void *pf_end, const void *pf_end2);
-void row_q16_sse2_intrin(int32_t *acc32, const void *w4, const void *w2,
-                         const int16_t *xw, int nb, int nt, int in_dim,
-                         const void *pf_end, const void *pf_end2);
+void row_q8_sse2_intrin(const lz_row_ctx *c);
+void row_q41_sse2_intrin(const lz_row_ctx *c);
+void row_t2_sse2_intrin(const lz_row_ctx *c);
+void row_q61_sse2_intrin(const lz_row_ctx *c);
+void row_q16_sse2_intrin(const lz_row_ctx *c);
 
 /* ---- GDN/KDA fixed-point pass 2 --------------------------------------- */
 void lz_p2_mul32_sse2(const int8_t *hi, const int8_t *lo,

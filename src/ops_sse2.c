@@ -1130,16 +1130,14 @@ void lz_dot128_x16_sse2_w(const int8_t *w, const int16_t *x,
    no new call sites. No pairing logic here (unlike the MMX row
    function): SSE2's group kernel is already the fast path, and pairing
    is not wired in for this tier. */
-void row_q8_sse2_asm(int32_t *acc32, const void *w4, const void *w2,
-                     const int16_t *xw, int nb, int nt, int in_dim,
-                     const void *pf_end, const void *pf_end2) {
-    const int8_t *wr = (const int8_t *)w4;
-    const int8_t *wend = (const int8_t *)pf_end;
+void row_q8_sse2_asm(const lz_row_ctx *c) {
+    const int8_t *wr = (const int8_t *)c->w4;
+    const int8_t *wend = (const int8_t *)c->pf_end;
     int tk, g;
-    (void)w2; (void)pf_end2;
+    (void)c->w2; (void)c->pf_end2;
     {
-        const int16_t *xwt = xw;
-        int32_t *acc = acc32;
+        const int16_t *xwt = c->xw;
+        int32_t *acc = c->acc32;
         /* Strength-reduced by hand: xwt/acc are kept as running pointers
            (xwt = xw + tk*in_dim, acc = acc32 + tk*nb) instead of re-derived
            from tk each iteration. Watcom's own strength reduction of the
@@ -1147,16 +1145,16 @@ void row_q8_sse2_asm(int32_t *acc32, const void *w4, const void *w2,
            (0*nb), an 11-15-insn multiply instead of a mov - see
            build/imul0_probe.c. The running form drops it and stays
            bit-identical: same addresses, same order. */
-        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+        for (tk = 0; tk < c->nt; tk++, xwt += c->in_dim, acc += c->nb) {
             /* Pair before grouping, matching the gcc twin above and the MMX
                row kernels: the pair keeps the four unpacked weight halves
                live across two tokens, the group only amortizes the per-32
                call. An odd nt leaves its last token on the paths below. */
-            if (nt - tk >= 2 && lz_pair_mode()) {
-                const int16_t *xw2 = xwt + in_dim;
-                int32_t *accb = acc + nb;
+            if (c->nt - tk >= 2 && lz_pair_mode()) {
+                const int16_t *xw2 = xwt + c->in_dim;
+                int32_t *accb = acc + c->nb;
                 int gp;
-                for (gp = 0; gp < nb; gp++) {
+                for (gp = 0; gp < c->nb; gp++) {
                     const int8_t *pf_ = wr + (size_t)(gp + LZ_PF_DIST) * 32;
                     if (pf_ < wend) {
                         int pf_m_ = lz_prefetch_mode();
@@ -1171,12 +1169,12 @@ void row_q8_sse2_asm(int32_t *acc32, const void *w4, const void *w2,
                                             acc + gp, accb + gp);
                 }
                 tk++;
-                xwt += in_dim;   /* skip tk+1's pointers too */
-                acc += nb;
+                xwt += c->in_dim;   /* skip tk+1's pointers too */
+                acc += c->nb;
                 continue;
             }
 #if LZ_SSE2_GROUP
-            if ((nb & 3) == 0) LZ_Q8_GROUP4(lz_dot128_x16_sse2_asm);
+            if ((c->nb & 3) == 0) LZ_Q8_GROUP4(lz_dot128_x16_sse2_asm);
 #else
             /* LZ_SSE2_GROUP=0 keeps the 128-element step on the MMX kernel;
                the knob exists so an SSE2 CPU can be measured on either.
@@ -1185,7 +1183,7 @@ void row_q8_sse2_asm(int32_t *acc32, const void *w4, const void *w2,
                here for exactly this A/B control build, since a #pragma aux
                body cannot have its address taken and this file does not
                carry the MMX pragma itself. */
-            if ((nb & 3) == 0) LZ_Q8_GROUP4(lz_dot128_x16_mmx_w);
+            if ((c->nb & 3) == 0) LZ_Q8_GROUP4(lz_dot128_x16_mmx_w);
 #endif /* LZ_SSE2_GROUP */
             else               LZ_Q8_PFSEL(dot32_x16_sse2a);
         }
@@ -1498,25 +1496,23 @@ void lz_dot128_q41_sse2_w(const unsigned char *w, const int16_t *x,
 /* row_q41_sse2_asm: ALREADY the real call boundary from its own caller
    (matmul_q41_impl, src/ops.c, dispatched once per matmul via
    LZ_ROW_Q41). No pairing logic, same as Q8_0's SSE2 row function. */
-void row_q41_sse2_asm(int32_t *acc32, const void *w4, const void *w2,
-                      const int16_t *xw, int nb, int nt, int in_dim,
-                      const void *pf_end, const void *pf_end2) {
-    const unsigned char *wn = (const unsigned char *)w4;
-    const unsigned char *wend = (const unsigned char *)pf_end;
+void row_q41_sse2_asm(const lz_row_ctx *c) {
+    const unsigned char *wn = (const unsigned char *)c->w4;
+    const unsigned char *wend = (const unsigned char *)c->pf_end;
     int tk, s;
-    (void)w2; (void)pf_end2;
+    (void)c->w2; (void)c->pf_end2;
     {
-        const int16_t *xwt = xw;
-        int32_t *acc = acc32;
-        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+        const int16_t *xwt = c->xw;
+        int32_t *acc = c->acc32;
+        for (tk = 0; tk < c->nt; tk++, xwt += c->in_dim, acc += c->nb) {
             /* Pair before grouping, matching the gcc twin: the pair shares
                the load, both masks, the shift and the four punpck across
                two tokens; the group only amortizes the per-32 call. */
-            if (nt - tk >= 2 && lz_pair_mode()) {
-                const int16_t *xw2 = xwt + in_dim;
-                int32_t *accb = acc + nb;
+            if (c->nt - tk >= 2 && lz_pair_mode()) {
+                const int16_t *xw2 = xwt + c->in_dim;
+                int32_t *accb = acc + c->nb;
                 int sp;
-                for (sp = 0; sp < nb; sp++) {
+                for (sp = 0; sp < c->nb; sp++) {
                     /* Prefetch spelled out rather than through LZ_Q41_PF:
                        that macro is not on this TU's include path, and the
                        q8_0 pair above does the same for the same reason. */
@@ -1534,16 +1530,16 @@ void row_q41_sse2_asm(int32_t *acc32, const void *w4, const void *w2,
                                             acc + sp, accb + sp);
                 }
                 tk++;
-                xwt += in_dim;   /* skip tk+1's pointers too */
-                acc += nb;
+                xwt += c->in_dim;   /* skip tk+1's pointers too */
+                acc += c->nb;
                 continue;
             }
 #if LZ_SSE2_GROUP
-            if ((nb & 3) == 0) LZ_Q41_GROUP4(lz_dot128_q41_sse2_asm);
+            if ((c->nb & 3) == 0) LZ_Q41_GROUP4(lz_dot128_q41_sse2_asm);
 #else
             /* lz_dot128_q41_mmx_w is src/ops_mmx.c's real wrapper around
                the MMX #pragma aux group kernel. */
-            if ((nb & 3) == 0) LZ_Q41_GROUP4(lz_dot128_q41_mmx_w);
+            if ((c->nb & 3) == 0) LZ_Q41_GROUP4(lz_dot128_q41_mmx_w);
 #endif /* LZ_SSE2_GROUP */
             else               LZ_Q41_PFSEL(dot32_q41_sse2a);
         }
@@ -1729,33 +1725,31 @@ void lz_dot32_t2_sse2_2_w(const unsigned char *w2, const int16_t *xa,
 /* row_t2_sse2_asm: ALREADY the real call boundary (matmul_t2_impl,
    src/ops.c, dispatched once per matmul via LZ_ROW_T2). Moving the
    whole function here adds NO new call sites. */
-void row_t2_sse2_asm(int32_t *acc32, const void *w4, const void *w2v,
-                     const int16_t *xw, int nb, int nt, int in_dim,
-                     const void *pf_end, const void *pf_end2) {
-    const unsigned char *p2 = (const unsigned char *)w4;
+void row_t2_sse2_asm(const lz_row_ctx *c) {
+    const unsigned char *p2 = (const unsigned char *)c->w4;
     int tk, s;
-    (void)w2v; (void)pf_end; (void)pf_end2;
+    (void)c->w2; (void)c->pf_end; (void)c->pf_end2;
     {
-        const int16_t *xwt = xw;
-        int32_t *acc = acc32;
-        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+        const int16_t *xwt = c->xw;
+        int32_t *acc = c->acc32;
+        for (tk = 0; tk < c->nt; tk++, xwt += c->in_dim, acc += c->nb) {
             /* Pair, matching the gcc twin: one ternary decode for two
                tokens. Fourteen instructions of weight side at this tier,
                against three at the MMX one. */
-            if (nt - tk >= 2 && lz_pair_mode()) {
-                const int16_t *xw2 = xwt + in_dim;
-                int32_t *accb = acc + nb;
-                for (s = 0; s < nb; s++)
+            if (c->nt - tk >= 2 && lz_pair_mode()) {
+                const int16_t *xw2 = xwt + c->in_dim;
+                int32_t *accb = acc + c->nb;
+                for (s = 0; s < c->nb; s++)
                     lz_dot32_t2_sse2_asm_2(p2 + (size_t)s * 8,
                                            xwt + (size_t)s * 32,
                                            xw2 + (size_t)s * 32,
                                            acc + s, accb + s);
                 tk++;
-                xwt += in_dim;   /* skip tk+1's pointers too */
-                acc += nb;
+                xwt += c->in_dim;   /* skip tk+1's pointers too */
+                acc += c->nb;
                 continue;
             }
-            for (s = 0; s < nb; s++)
+            for (s = 0; s < c->nb; s++)
                 acc[s] = lz_dot32_t2_sse2_asm(p2 + (size_t)s * 8,
                                               xwt + (size_t)s * 32);
         }
@@ -2191,28 +2185,26 @@ void lz_dot128_q61_sse2_w(const unsigned char *w4, const unsigned char *w2,
    (matmul_q61_impl, src/ops.c, dispatched once per matmul via
    LZ_ROW_Q61). No pairing on this tier (unmeasured for SSE2, per the
    original comment at this function's old home in ops.c). */
-void row_q61_sse2_asm(int32_t *acc32, const void *w4, const void *w2v,
-                      const int16_t *xw, int nb, int nt, int in_dim,
-                      const void *pf_end, const void *pf_end2) {
-    const unsigned char *wn = (const unsigned char *)w4;
-    const unsigned char *w2 = (const unsigned char *)w2v;
-    const unsigned char *wend = (const unsigned char *)pf_end;
-    const unsigned char *wend2 = (const unsigned char *)pf_end2;
+void row_q61_sse2_asm(const lz_row_ctx *c) {
+    const unsigned char *wn = (const unsigned char *)c->w4;
+    const unsigned char *w2 = (const unsigned char *)c->w2;
+    const unsigned char *wend = (const unsigned char *)c->pf_end;
+    const unsigned char *wend2 = (const unsigned char *)c->pf_end2;
     int tk, s;
     {
-        const int16_t *xwt = xw;
-        int32_t *acc = acc32;
-        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+        const int16_t *xwt = c->xw;
+        int32_t *acc = c->acc32;
+        for (tk = 0; tk < c->nt; tk++, xwt += c->in_dim, acc += c->nb) {
             /* Pair before grouping, matching the gcc twin. This format has
                the heaviest weight side of the five - the 6-bit value is
                reassembled from two planes before it can be widened - so one
                pass of it serving two tokens is the largest saving the pair
                buys anywhere. */
-            if (nt - tk >= 2 && lz_pair_mode()) {
-                const int16_t *xw2 = xwt + in_dim;
-                int32_t *accb = acc + nb;
+            if (c->nt - tk >= 2 && lz_pair_mode()) {
+                const int16_t *xw2 = xwt + c->in_dim;
+                int32_t *accb = acc + c->nb;
                 int sp;
-                for (sp = 0; sp < nb; sp++) {
+                for (sp = 0; sp < c->nb; sp++) {
                     LZ_Q61_PF(sp);
                     lz_dot32_q61_sse2_asm_2(wn + (size_t)sp * 16,
                                             w2 + (size_t)sp * 8,
@@ -2221,16 +2213,16 @@ void row_q61_sse2_asm(int32_t *acc32, const void *w4, const void *w2v,
                                             acc + sp, accb + sp);
                 }
                 tk++;
-                xwt += in_dim;   /* skip tk+1's pointers too */
-                acc += nb;
+                xwt += c->in_dim;   /* skip tk+1's pointers too */
+                acc += c->nb;
                 continue;
             }
 #if LZ_SSE2_GROUP
-            if ((nb & 3) == 0) LZ_Q61_GROUP4(lz_dot128_q61_sse2_asm);
+            if ((c->nb & 3) == 0) LZ_Q61_GROUP4(lz_dot128_q61_sse2_asm);
 #else
             /* lz_dot128_q61_mmx_w is src/ops_mmx.c's real wrapper around
                the MMX #pragma aux group kernel. */
-            if ((nb & 3) == 0) LZ_Q61_GROUP4(lz_dot128_q61_mmx_w);
+            if ((c->nb & 3) == 0) LZ_Q61_GROUP4(lz_dot128_q61_mmx_w);
 #endif /* LZ_SSE2_GROUP */
             /* Measured on target: on a real Pentium M the SSE2 kernel is
                20-30% faster at kernel level and no worse end-to-end. Uop
@@ -2457,25 +2449,23 @@ void lz_dot128_q16_sse2_w(const int16_t *w, const int16_t *x,
 
 /* row_q16_sse2_asm: ALREADY the real call boundary (LZ_ROW_Q16,
    src/ops.c). */
-void row_q16_sse2_asm(int32_t *acc32, const void *w4, const void *w2,
-                      const int16_t *xw, int nb, int nt, int in_dim,
-                      const void *pf_end, const void *pf_end2) {
-    const int16_t *wr = (const int16_t *)w4;
-    const int16_t *wend = (const int16_t *)pf_end;
+void row_q16_sse2_asm(const lz_row_ctx *c) {
+    const int16_t *wr = (const int16_t *)c->w4;
+    const int16_t *wend = (const int16_t *)c->pf_end;
     int tk, g;
-    (void)w2; (void)pf_end2;
+    (void)c->w2; (void)c->pf_end2;
     {
-        const int16_t *xwt = xw;
-        int32_t *acc = acc32;
-        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+        const int16_t *xwt = c->xw;
+        int32_t *acc = c->acc32;
+        for (tk = 0; tk < c->nt; tk++, xwt += c->in_dim, acc += c->nb) {
             /* Pair before grouping, as every other row kernel here does.
                Smallest pair of the five - int16 needs no unpack, so four
                shared loads is all of it. */
-            if (nt - tk >= 2 && lz_pair_mode()) {
-                const int16_t *xw2 = xwt + in_dim;
-                int32_t *accb = acc + nb;
+            if (c->nt - tk >= 2 && lz_pair_mode()) {
+                const int16_t *xw2 = xwt + c->in_dim;
+                int32_t *accb = acc + c->nb;
                 int gp;
-                for (gp = 0; gp < nb; gp++) {
+                for (gp = 0; gp < c->nb; gp++) {
                     LZ_Q16_PF(gp);
                     lz_dot32_q16_sse2_asm_2(wr + (size_t)gp * 32,
                                             xwt + (size_t)gp * 32,
@@ -2483,16 +2473,16 @@ void row_q16_sse2_asm(int32_t *acc32, const void *w4, const void *w2,
                                             acc + gp, accb + gp);
                 }
                 tk++;
-                xwt += in_dim;   /* skip tk+1's pointers too */
-                acc += nb;
+                xwt += c->in_dim;   /* skip tk+1's pointers too */
+                acc += c->nb;
                 continue;
             }
 #if LZ_SSE2_GROUP
-            if ((nb & 3) == 0) LZ_Q16_GROUP4(lz_dot128_q16_sse2_asm);
+            if ((c->nb & 3) == 0) LZ_Q16_GROUP4(lz_dot128_q16_sse2_asm);
 #else
             /* lz_dot128_q16_mmx_w is src/ops_mmx.c's real wrapper around
                the MMX #pragma aux group kernel. */
-            if ((nb & 3) == 0) LZ_Q16_GROUP4(lz_dot128_q16_mmx_w);
+            if ((c->nb & 3) == 0) LZ_Q16_GROUP4(lz_dot128_q16_mmx_w);
 #endif /* LZ_SSE2_GROUP */
             else               LZ_Q16_ACC(dot32_q16_sse2a);
         }
@@ -2753,16 +2743,14 @@ lz_i64 lz_epi_mac_i16_sse2(const int32_t *a, const int16_t *m, int n) {
 
 /* ---- Q8 row kernel ------------------------------------------------------
    Watcom twin: row_q8_sse2_asm, src/ops.c. */
-void row_q8_sse2_intrin(int32_t *acc32, const void *w4, const void *w2,
-                        const int16_t *xw, int nb, int nt, int in_dim,
-                        const void *pf_end, const void *pf_end2) {
-    const int8_t *wr = (const int8_t *)w4;
+void row_q8_sse2_intrin(const lz_row_ctx *c) {
+    const int8_t *wr = (const int8_t *)c->w4;
     int tk, g;
-    (void)w2; (void)pf_end; (void)pf_end2;
+    (void)c->w2; (void)c->pf_end; (void)c->pf_end2;
     {
-        const int16_t *xwt = xw;
-        int32_t *acc = acc32;
-        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+        const int16_t *xwt = c->xw;
+        int32_t *acc = c->acc32;
+        for (tk = 0; tk < c->nt; tk++, xwt += c->in_dim, acc += c->nb) {
             /* Pair and group TOGETHER, which the MMX tiers cannot do: there
                the pair replaces the group because a token pair cannot be
                expressed once the group loop owns the sub-block index. Here
@@ -2773,10 +2761,10 @@ void row_q8_sse2_intrin(int32_t *acc32, const void *w4, const void *w2,
                unpacks against zero, paid once instead of twice. Only the
                activation loads and the pmaddwd double. An odd nt leaves its
                last token on the single-token path below. */
-            if (tk + 1 < nt && g_pair) {
-                const int16_t *xw2 = xwt + in_dim;
-                int32_t *accb = acc + nb;
-                for (g = 0; g + 3 < nb; g += 4) {
+            if (tk + 1 < c->nt && g_pair) {
+                const int16_t *xw2 = xwt + c->in_dim;
+                int32_t *accb = acc + c->nb;
+                for (g = 0; g + 3 < c->nb; g += 4) {
                     __m128i pa0, pa1, pa2, pa3, pb0, pb1, pb2, pb3;
                     part32_x16_2(wr + (size_t)(g + 0) * 32,
                                  xwt + (size_t)(g + 0) * 32,
@@ -2795,7 +2783,7 @@ void row_q8_sse2_intrin(int32_t *acc32, const void *w4, const void *w2,
                     _mm_storeu_si128((__m128i *)(void *)(accb + g),
                                      fold4_sse2(pb0, pb1, pb2, pb3));
                 }
-                for (; g < nb; g++) {
+                for (; g < c->nb; g++) {
                     __m128i pa, pb;
                     part32_x16_2(wr + (size_t)g * 32, xwt + (size_t)g * 32,
                                  xw2 + (size_t)g * 32, &pa, &pb);
@@ -2807,11 +2795,11 @@ void row_q8_sse2_intrin(int32_t *acc32, const void *w4, const void *w2,
                     accb[g] = _mm_cvtsi128_si32(pb);
                 }
                 tk++;
-                xwt += in_dim;   /* skip tk+1's pointers too */
-                acc += nb;
+                xwt += c->in_dim;   /* skip tk+1's pointers too */
+                acc += c->nb;
                 continue;
             }
-            for (g = 0; g + 3 < nb; g += 4) {
+            for (g = 0; g + 3 < c->nb; g += 4) {
                 _mm_storeu_si128((__m128i *)(void *)(acc + g),
                     fold4_sse2(
                     part32_x16(wr + (size_t)(g + 0) * 32, xwt + (size_t)(g + 0) * 32),
@@ -2819,7 +2807,7 @@ void row_q8_sse2_intrin(int32_t *acc32, const void *w4, const void *w2,
                     part32_x16(wr + (size_t)(g + 2) * 32, xwt + (size_t)(g + 2) * 32),
                     part32_x16(wr + (size_t)(g + 3) * 32, xwt + (size_t)(g + 3) * 32)));
             }
-            for (; g < nb; g++) {           /* tail when nb % 4 != 0 */
+            for (; g < c->nb; g++) {           /* tail when nb % 4 != 0 */
                 __m128i p = part32_x16(wr + (size_t)g * 32, xwt + (size_t)g * 32);
                 p = _mm_add_epi32(p, _mm_srli_si128(p, 8));
                 p = _mm_add_epi32(p, _mm_srli_si128(p, 4));
@@ -2831,25 +2819,23 @@ void row_q8_sse2_intrin(int32_t *acc32, const void *w4, const void *w2,
 
 /* ---- Q4_1 row kernel -----------------------------------------------------
    Watcom twin: row_q41_sse2_asm, src/ops.c. */
-void row_q41_sse2_intrin(int32_t *acc32, const void *w4, const void *w2,
-                         const int16_t *xw, int nb, int nt, int in_dim,
-                         const void *pf_end, const void *pf_end2) {
-    const unsigned char *wn = (const unsigned char *)w4;
+void row_q41_sse2_intrin(const lz_row_ctx *c) {
+    const unsigned char *wn = (const unsigned char *)c->w4;
     int tk, s;
-    (void)w2; (void)pf_end; (void)pf_end2;
+    (void)c->w2; (void)c->pf_end; (void)c->pf_end2;
     {
-        const int16_t *xwt = xw;
-        int32_t *acc = acc32;
-        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+        const int16_t *xwt = c->xw;
+        int32_t *acc = c->acc32;
+        for (tk = 0; tk < c->nt; tk++, xwt += c->in_dim, acc += c->nb) {
             /* Pair and group together, the shape q8_0 established at this
                tier: fold4_sse2 already takes four partials per token, so one
                weight pass feeds two folds. q4_1 shares more than q8_0 did -
                the nibble mask, the shift and the second mask on top of the
                four unpacks. */
-            if (tk + 1 < nt && g_pair) {
-                const int16_t *xw2 = xwt + in_dim;
-                int32_t *accb = acc + nb;
-                for (s = 0; s + 3 < nb; s += 4) {
+            if (tk + 1 < c->nt && g_pair) {
+                const int16_t *xw2 = xwt + c->in_dim;
+                int32_t *accb = acc + c->nb;
+                for (s = 0; s + 3 < c->nb; s += 4) {
                     __m128i pa0, pa1, pa2, pa3, pb0, pb1, pb2, pb3;
                     part32_q41_2(wn + (size_t)(s + 0) * 16,
                                  xwt + (size_t)(s + 0) * 32,
@@ -2868,7 +2854,7 @@ void row_q41_sse2_intrin(int32_t *acc32, const void *w4, const void *w2,
                     _mm_storeu_si128((__m128i *)(void *)(accb + s),
                                      fold4_sse2(pb0, pb1, pb2, pb3));
                 }
-                for (; s < nb; s++) {
+                for (; s < c->nb; s++) {
                     __m128i pa, pb;
                     part32_q41_2(wn + (size_t)s * 16, xwt + (size_t)s * 32,
                                  xw2 + (size_t)s * 32, &pa, &pb);
@@ -2880,11 +2866,11 @@ void row_q41_sse2_intrin(int32_t *acc32, const void *w4, const void *w2,
                     accb[s] = _mm_cvtsi128_si32(pb);
                 }
                 tk++;
-                xwt += in_dim;   /* skip tk+1's pointers too */
-                acc += nb;
+                xwt += c->in_dim;   /* skip tk+1's pointers too */
+                acc += c->nb;
                 continue;
             }
-            for (s = 0; s + 3 < nb; s += 4) {
+            for (s = 0; s + 3 < c->nb; s += 4) {
                 _mm_storeu_si128((__m128i *)(void *)(acc + s),
                     fold4_sse2(
                     part32_q41(wn + (size_t)(s + 0) * 16, xwt + (size_t)(s + 0) * 32),
@@ -2892,7 +2878,7 @@ void row_q41_sse2_intrin(int32_t *acc32, const void *w4, const void *w2,
                     part32_q41(wn + (size_t)(s + 2) * 16, xwt + (size_t)(s + 2) * 32),
                     part32_q41(wn + (size_t)(s + 3) * 16, xwt + (size_t)(s + 3) * 32)));
             }
-            for (; s < nb; s++) {
+            for (; s < c->nb; s++) {
                 __m128i p = part32_q41(wn + (size_t)s * 16, xwt + (size_t)s * 32);
                 p = _mm_add_epi32(p, _mm_srli_si128(p, 8));
                 p = _mm_add_epi32(p, _mm_srli_si128(p, 4));
@@ -2905,25 +2891,23 @@ void row_q41_sse2_intrin(int32_t *acc32, const void *w4, const void *w2,
 /* ---- T2 row kernel --------------------------------------------------------
    Watcom twin: row_t2_sse2_asm, src/ops.c. No pairing (unmeasured for
    this format, same as the other tiers). */
-void row_t2_sse2_intrin(int32_t *acc32, const void *w4, const void *w2v,
-                        const int16_t *xw, int nb, int nt, int in_dim,
-                        const void *pf_end, const void *pf_end2) {
-    const unsigned char *p2 = (const unsigned char *)w4;
+void row_t2_sse2_intrin(const lz_row_ctx *c) {
+    const unsigned char *p2 = (const unsigned char *)c->w4;
     int tk, s;
-    (void)w2v; (void)pf_end; (void)pf_end2;
+    (void)c->w2; (void)c->pf_end; (void)c->pf_end2;
     {
-        const int16_t *xwt = xw;
-        int32_t *acc = acc32;
-        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+        const int16_t *xwt = c->xw;
+        int32_t *acc = c->acc32;
+        for (tk = 0; tk < c->nt; tk++, xwt += c->in_dim, acc += c->nb) {
             /* Pair ahead of the group form, the order every row kernel here
                uses. T2's decode at THIS tier is fourteen instructions - four
                masks, three shifts, two merges, four unpacks - so the pair
                shares more than q4_1's, unlike at the MMX tier where the same
                operator's unpack is a zero register and three shifts. */
-            if (tk + 1 < nt && g_pair) {
-                const int16_t *xw2 = xwt + in_dim;
-                int32_t *accb = acc + nb;
-                for (s = 0; s < nb; s++) {
+            if (tk + 1 < c->nt && g_pair) {
+                const int16_t *xw2 = xwt + c->in_dim;
+                int32_t *accb = acc + c->nb;
+                for (s = 0; s < c->nb; s++) {
                     __m128i pa, pb;
                     part32_t2_2(p2 + (size_t)s * 8, xwt + (size_t)s * 32,
                                 xw2 + (size_t)s * 32, &pa, &pb);
@@ -2935,8 +2919,8 @@ void row_t2_sse2_intrin(int32_t *acc32, const void *w4, const void *w2v,
                     accb[s] = _mm_cvtsi128_si32(pb);
                 }
                 tk++;
-                xwt += in_dim;   /* skip tk+1's pointers too */
-                acc += nb;
+                xwt += c->in_dim;   /* skip tk+1's pointers too */
+                acc += c->nb;
                 continue;
             }
             s = 0;
@@ -2957,10 +2941,10 @@ void row_t2_sse2_intrin(int32_t *acc32, const void *w4, const void *w2v,
                dot128_t2_sse2 on why the transposed fold is bit-identical -
                so a row is not split between two answers, only between two
                instruction counts. */
-            for (; s + 4 <= nb; s += 4)
+            for (; s + 4 <= c->nb; s += 4)
                 dot128_t2_sse2(p2 + (size_t)s * 8, xwt + (size_t)s * 32, acc + s);
 #endif /* !defined(LZ_G128_GCC) || LZ_G128_GCC */
-            for (; s < nb; s++) {
+            for (; s < c->nb; s++) {
                 __m128i p = part32_t2(p2 + (size_t)s * 8, xwt + (size_t)s * 32);
                 p = _mm_add_epi32(p, _mm_srli_si128(p, 8));
                 p = _mm_add_epi32(p, _mm_srli_si128(p, 4));
@@ -2972,25 +2956,23 @@ void row_t2_sse2_intrin(int32_t *acc32, const void *w4, const void *w2v,
 
 /* ---- Q6_1 row kernel -----------------------------------------------------
    Watcom twin: row_q61_sse2_asm, src/ops.c. */
-void row_q61_sse2_intrin(int32_t *acc32, const void *w4, const void *w2v,
-                         const int16_t *xw, int nb, int nt, int in_dim,
-                         const void *pf_end, const void *pf_end2) {
-    const unsigned char *wn = (const unsigned char *)w4;
-    const unsigned char *w2 = (const unsigned char *)w2v;
+void row_q61_sse2_intrin(const lz_row_ctx *c) {
+    const unsigned char *wn = (const unsigned char *)c->w4;
+    const unsigned char *w2 = (const unsigned char *)c->w2;
     int tk, s;
-    (void)pf_end; (void)pf_end2;
+    (void)c->pf_end; (void)c->pf_end2;
     {
-        const int16_t *xwt = xw;
-        int32_t *acc = acc32;
-        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+        const int16_t *xwt = c->xw;
+        int32_t *acc = c->acc32;
+        for (tk = 0; tk < c->nt; tk++, xwt += c->in_dim, acc += c->nb) {
             /* The pair is worth most on this format: the 6-bit reassembly
                is ~19 instructions on the weight side against q4_1's 8 and
                q8_0's 6, and one pass of it now serves two tokens. No group
                form here to combine with - this row runs per-32 either way. */
-            if (tk + 1 < nt && g_pair) {
-                const int16_t *xw2 = xwt + in_dim;
-                int32_t *accb = acc + nb;
-                for (s = 0; s < nb; s++) {
+            if (tk + 1 < c->nt && g_pair) {
+                const int16_t *xw2 = xwt + c->in_dim;
+                int32_t *accb = acc + c->nb;
+                for (s = 0; s < c->nb; s++) {
                     __m128i pa, pb;
                     part32_q61_2(wn + (size_t)s * 16, w2 + (size_t)s * 8,
                                  xwt + (size_t)s * 32, xw2 + (size_t)s * 32,
@@ -3003,11 +2985,11 @@ void row_q61_sse2_intrin(int32_t *acc32, const void *w4, const void *w2v,
                     accb[s] = _mm_cvtsi128_si32(pb);
                 }
                 tk++;
-                xwt += in_dim;   /* skip tk+1's pointers too */
-                acc += nb;
+                xwt += c->in_dim;   /* skip tk+1's pointers too */
+                acc += c->nb;
                 continue;
             }
-            for (s = 0; s < nb; s++) {
+            for (s = 0; s < c->nb; s++) {
                 __m128i p = part32_q61(wn + (size_t)s * 16, w2 + (size_t)s * 8,
                                        xwt + (size_t)s * 32);
                 p = _mm_add_epi32(p, _mm_srli_si128(p, 8));
@@ -3020,23 +3002,21 @@ void row_q61_sse2_intrin(int32_t *acc32, const void *w4, const void *w2v,
 
 /* ---- Q16_0 row kernel ----------------------------------------------------
    Watcom twin: row_q16_sse2_asm, src/ops.c. */
-void row_q16_sse2_intrin(int32_t *acc32, const void *w4, const void *w2,
-                         const int16_t *xw, int nb, int nt, int in_dim,
-                         const void *pf_end, const void *pf_end2) {
-    const int16_t *wr = (const int16_t *)w4;
+void row_q16_sse2_intrin(const lz_row_ctx *c) {
+    const int16_t *wr = (const int16_t *)c->w4;
     int tk, g;
-    (void)w2; (void)pf_end; (void)pf_end2;
+    (void)c->w2; (void)c->pf_end; (void)c->pf_end2;
     {
-        const int16_t *xwt = xw;
-        int32_t *acc = acc32;
-        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+        const int16_t *xwt = c->xw;
+        int32_t *acc = c->acc32;
+        for (tk = 0; tk < c->nt; tk++, xwt += c->in_dim, acc += c->nb) {
             /* Pair and group together, as q8_0 and q4_1 do at this tier.
                The smallest pair of the five: int16 weights need no unpack,
                so four shared loads is the whole saving. */
-            if (tk + 1 < nt && g_pair) {
-                const int16_t *xw2 = xwt + in_dim;
-                int32_t *accb = acc + nb;
-                for (g = 0; g + 3 < nb; g += 4) {
+            if (tk + 1 < c->nt && g_pair) {
+                const int16_t *xw2 = xwt + c->in_dim;
+                int32_t *accb = acc + c->nb;
+                for (g = 0; g + 3 < c->nb; g += 4) {
                     __m128i pa0, pa1, pa2, pa3, pb0, pb1, pb2, pb3;
                     part32_q16_2(wr + (size_t)(g + 0) * 32,
                                  xwt + (size_t)(g + 0) * 32,
@@ -3055,7 +3035,7 @@ void row_q16_sse2_intrin(int32_t *acc32, const void *w4, const void *w2,
                     _mm_storeu_si128((__m128i *)(void *)(accb + g),
                                      fold4_sse2(pb0, pb1, pb2, pb3));
                 }
-                for (; g < nb; g++) {
+                for (; g < c->nb; g++) {
                     __m128i pa, pb;
                     part32_q16_2(wr + (size_t)g * 32, xwt + (size_t)g * 32,
                                  xw2 + (size_t)g * 32, &pa, &pb);
@@ -3067,11 +3047,11 @@ void row_q16_sse2_intrin(int32_t *acc32, const void *w4, const void *w2,
                     accb[g] = _mm_cvtsi128_si32(pb);
                 }
                 tk++;
-                xwt += in_dim;   /* skip tk+1's pointers too */
-                acc += nb;
+                xwt += c->in_dim;   /* skip tk+1's pointers too */
+                acc += c->nb;
                 continue;
             }
-            for (g = 0; g + 3 < nb; g += 4) {
+            for (g = 0; g + 3 < c->nb; g += 4) {
                 _mm_storeu_si128((__m128i *)(void *)(acc + g),
                     fold4_sse2(
                     part32_q16(wr + (size_t)(g + 0) * 32, xwt + (size_t)(g + 0) * 32),
@@ -3079,7 +3059,7 @@ void row_q16_sse2_intrin(int32_t *acc32, const void *w4, const void *w2,
                     part32_q16(wr + (size_t)(g + 2) * 32, xwt + (size_t)(g + 2) * 32),
                     part32_q16(wr + (size_t)(g + 3) * 32, xwt + (size_t)(g + 3) * 32)));
             }
-            for (; g < nb; g++) {           /* tail when nb % 4 != 0 */
+            for (; g < c->nb; g++) {           /* tail when nb % 4 != 0 */
                 __m128i p = part32_q16(wr + (size_t)g * 32, xwt + (size_t)g * 32);
                 p = _mm_add_epi32(p, _mm_srli_si128(p, 8));
                 p = _mm_add_epi32(p, _mm_srli_si128(p, 4));

@@ -33,6 +33,7 @@
    compilers need the type regardless of LZ_MMX_TU; only the function
    declarations below are gcc-and-MMX-tier-specific. */
 #include "ops_p2_blk.h"
+#include "ops_matmul.h"   /* lz_row_ctx - the row kernels' parameter struct */
 
 #if defined(LZ_MMX_TU)
 
@@ -261,9 +262,7 @@ void lz_q8round_2p_group_sse(const float *grp, int8_t *ho, int8_t *lw,
    calls it directly across the TU boundary. lz_dot128_x16_mmx_w exists
    only for src/ops_sse2.c's -DLZ_SSE2_GROUP=0 A/B control build - see
    that file's row_q8_sse2_asm. */
-void row_q8_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
-                    const int16_t *xw, int nb, int nt, int in_dim,
-                    const void *pf_end, const void *pf_end2);
+void row_q8_mmx_asm(const lz_row_ctx *c);
 int32_t dot32_x16_mmx(const int8_t *w, const int16_t *x);
 void lz_dot128_x16_mmx_w(const int8_t *w, const int16_t *x, int32_t *out4);
 
@@ -272,9 +271,7 @@ void lz_dot128_x16_mmx_w(const int8_t *w, const int16_t *x, int32_t *out4);
    LZ_ATTN_DOT32-style cross-TU caller for this format).
    lz_dot128_q41_mmx_w exists only for src/ops_sse2.c's
    -DLZ_SSE2_GROUP=0 A/B control build. */
-void row_q41_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
-                     const int16_t *xw, int nb, int nt, int in_dim,
-                     const void *pf_end, const void *pf_end2);
+void row_q41_mmx_asm(const lz_row_ctx *c);
 void lz_dot128_q41_mmx_w(const unsigned char *w, const int16_t *x, int32_t *out4);
 
 /* T2 matmul, MMX tier. row_t2_mmx_asm is the real call boundary
@@ -283,25 +280,19 @@ void lz_dot128_q41_mmx_w(const unsigned char *w, const int16_t *x, int32_t *out4
    #pragma aux twin for it yet and runs the per-32 loop, so it needs no
    *_mmx_w wrapper - that wrapper shape exists only to let one TU take
    the address of another's #pragma aux body. */
-void row_t2_mmx_asm(int32_t *acc32, const void *w4, const void *w2v,
-                    const int16_t *xw, int nb, int nt, int in_dim,
-                    const void *pf_end, const void *pf_end2);
+void row_t2_mmx_asm(const lz_row_ctx *c);
 
 /* Q6_1 matmul, MMX tier. row_q61_mmx_asm is the real call boundary
    (LZ_ROW_Q61, src/ops.c). lz_dot128_q61_mmx_w exists only for
    src/ops_sse2.c's -DLZ_SSE2_GROUP=0 A/B control build. */
-void row_q61_mmx_asm(int32_t *acc32, const void *w4, const void *w2v,
-                     const int16_t *xw, int nb, int nt, int in_dim,
-                     const void *pf_end, const void *pf_end2);
+void row_q61_mmx_asm(const lz_row_ctx *c);
 void lz_dot128_q61_mmx_w(const unsigned char *w4, const unsigned char *w2,
                          const int16_t *x, int32_t *out4);
 
 /* Q16_0 matmul, MMX tier. row_q16_mmx_asm is the real call boundary
    (LZ_ROW_Q16, src/ops.c). lz_dot128_q16_mmx_w exists only for
    src/ops_sse2.c's -DLZ_SSE2_GROUP=0 A/B control build. */
-void row_q16_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
-                     const int16_t *xw, int nb, int nt, int in_dim,
-                     const void *pf_end, const void *pf_end2);
+void row_q16_mmx_asm(const lz_row_ctx *c);
 void lz_dot128_q16_mmx_w(const int16_t *w, const int16_t *x, int32_t *out4);
 
 /* ---- Hadamard: one butterfly stage of lz_fwht_i32 --------------------
@@ -354,6 +345,12 @@ void dot32_q61_mmx_2(const unsigned char *w4, const unsigned char *w2,
                      const int16_t *xa, const int16_t *xb,
                      int32_t *oa, int32_t *ob);
 int32_t dot32_t2_mmx(const unsigned char *w2, const int16_t *x);
+/* Two tokens, one ternary unpack - the t2 member of the g_pair family,
+   gcc side only. Bit-identical to two dot32_t2_mmx calls; the Watcom twin
+   is deliberately absent because its pmaddwd destroys the unpack register
+   (see the body's header in src/ops_kernel_dot_mmx.h). */
+void dot32_t2_mmx_2(const unsigned char *w2, const int16_t *xa, const int16_t *xb,
+                    int32_t *oa, int32_t *ob);
 int32_t dot32_q16_mmx(const int16_t *w, const int16_t *x);
 /* Two tokens, one weight load - the q16_0 member of the g_pair family.
    Bit-identical to two dot32_q16_mmx calls; see the body for why the
