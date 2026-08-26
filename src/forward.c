@@ -2471,12 +2471,18 @@ static void forward_attn(const LZModel *m, LZRunState *s,
            [all q][all gate]. The reference does view(..., n_heads, hd*2)
            then chunks along the last dim; treating it as two contiguous
            halves feeds every head misaligned data. */
-        for (h = 0; h < nh; h++)
-            lz_rmsnorm(qht + (size_t)h * hd, qgt + (size_t)h * 2 * hd,
-                       lz_t_f32(&L->q_norm, s->wscr), hd, c->rms_norm_eps);
-        for (h = 0; h < nkv; h++)
-            lz_rmsnorm(ktt + (size_t)h * hd, ktt + (size_t)h * hd,
-                       lz_t_f32(&L->k_norm, s->wscr), hd, c->rms_norm_eps);
+        {
+            const float *q_norm_w = lz_t_f32(&L->q_norm, s->wscr);
+            for (h = 0; h < nh; h++)
+                lz_rmsnorm(qht + (size_t)h * hd, qgt + (size_t)h * 2 * hd,
+                           q_norm_w, hd, c->rms_norm_eps);
+        }
+        {
+            const float *k_norm_w = lz_t_f32(&L->k_norm, s->wscr);
+            for (h = 0; h < nkv; h++)
+                lz_rmsnorm(ktt + (size_t)h * hd, ktt + (size_t)h * hd,
+                           k_norm_w, hd, c->rms_norm_eps);
+        }
         /* QK-Norm first, then RoPE, only then quantize into the cache -
            the cache holds the rotated k. head_dim is a multiple of 32,
            so quantization groups never cross heads. */
@@ -2778,6 +2784,7 @@ static void forward_ssm(const LZModel *m, LZRunState *s,
     {
         int gso = lz_act_gs(&L->out_proj, vdim);
         int nso = scale_groups(vdim, gso);
+        const float *ssm_norm_w = lz_t_f32(&L->ssm_norm, s->wscr);
         if (lz_norm_int() && lz_norm_can_fixed(vd) &&
             gso > 0 && (vd % gso) == 0) {
             /* Per-head quantize, not one whole-vdim call: the norm runs
@@ -2793,7 +2800,7 @@ static void forward_ssm(const LZModel *m, LZRunState *s,
                     lz_rmsnorm_gated_int(s->ssm_sig + (size_t)tk * vdim + (size_t)h * vd,
                                          s->ssm_out + (size_t)tk * vdim + (size_t)h * vd,
                                          s->zbuf + (size_t)tk * vdim + (size_t)h * vd,
-                                         lz_t_f32(&L->ssm_norm, s->wscr), vd,
+                                         ssm_norm_w, vd,
                                          c->rms_norm_eps, &deq);
                     lz_quantize_q8_int(s->ssm_sig + (size_t)tk * vdim + (size_t)h * vd,
                                        vd, gso, deq,
@@ -2806,7 +2813,7 @@ static void forward_ssm(const LZModel *m, LZRunState *s,
                     lz_rmsnorm_gated(s->ssm_out + (size_t)tk * vdim + (size_t)h * vd,
                                      s->ssm_out + (size_t)tk * vdim + (size_t)h * vd,
                                      s->zbuf + (size_t)tk * vdim + (size_t)h * vd,
-                                     lz_t_f32(&L->ssm_norm, s->wscr), vd,
+                                     ssm_norm_w, vd,
                                      c->rms_norm_eps,
                                      NULL);
             for (tk = 0; tk < nt; tk++)
@@ -2818,7 +2825,7 @@ static void forward_ssm(const LZModel *m, LZRunState *s,
                     lz_rmsnorm_gated(s->ssm_out + (size_t)tk * vdim + (size_t)h * vd,
                                      s->ssm_out + (size_t)tk * vdim + (size_t)h * vd,
                                      s->zbuf + (size_t)tk * vdim + (size_t)h * vd,
-                                     lz_t_f32(&L->ssm_norm, s->wscr), vd,
+                                     ssm_norm_w, vd,
                                      c->rms_norm_eps, NULL);
             for (tk = 0; tk < nt; tk++)
                 lz_quantize_q8(s->ssm_out + (size_t)tk * vdim, vdim, gso,
@@ -3645,6 +3652,7 @@ static void forward_kda(const LZModel *m, LZRunState *s,
     {
         int gso = lz_act_gs(&L->kda_o_proj, vdim);
         int nso = scale_groups(vdim, gso);
+        const float *kda_o_norm_w = lz_t_f32(&L->kda_o_norm, s->wscr);
         if (c->use_subn) {
             /* SubLN: o_proj's OWN input RMSNorm (kda_o_subn_norm) over
                the whole lin_value_dim span, applied AFTER the per-head
@@ -3657,7 +3665,7 @@ static void forward_kda(const LZModel *m, LZRunState *s,
                     lz_rmsnorm_gated(s->ssm_out + (size_t)tk * vdim + (size_t)h * vd,
                                      s->ssm_out + (size_t)tk * vdim + (size_t)h * vd,
                                      s->zbuf + (size_t)tk * vdim + (size_t)h * vd,
-                                     lz_t_f32(&L->kda_o_norm, s->wscr), vd,
+                                     kda_o_norm_w, vd,
                                      c->rms_norm_eps, NULL);
             for (tk = 0; tk < nt; tk++)
                 lz_rmsnorm(s->ssm_out + (size_t)tk * vdim,
@@ -3701,7 +3709,7 @@ static void forward_kda(const LZModel *m, LZRunState *s,
                     lz_rmsnorm_gated_int(s->ssm_sig + (size_t)tk * vdim + (size_t)h * vd,
                                          s->ssm_out + (size_t)tk * vdim + (size_t)h * vd,
                                          s->zbuf + (size_t)tk * vdim + (size_t)h * vd,
-                                         lz_t_f32(&L->kda_o_norm, s->wscr), vd,
+                                         kda_o_norm_w, vd,
                                          c->rms_norm_eps, &deq);
                     lz_quantize_q8_int(s->ssm_sig + (size_t)tk * vdim + (size_t)h * vd,
                                        vd, gso, deq,
@@ -3714,7 +3722,7 @@ static void forward_kda(const LZModel *m, LZRunState *s,
                     lz_rmsnorm_gated(s->ssm_out + (size_t)tk * vdim + (size_t)h * vd,
                                      s->ssm_out + (size_t)tk * vdim + (size_t)h * vd,
                                      s->zbuf + (size_t)tk * vdim + (size_t)h * vd,
-                                     lz_t_f32(&L->kda_o_norm, s->wscr), vd,
+                                     kda_o_norm_w, vd,
                                      c->rms_norm_eps,
                                      NULL);
             for (tk = 0; tk < nt; tk++)
@@ -3726,7 +3734,7 @@ static void forward_kda(const LZModel *m, LZRunState *s,
                     lz_rmsnorm_gated(s->ssm_out + (size_t)tk * vdim + (size_t)h * vd,
                                      s->ssm_out + (size_t)tk * vdim + (size_t)h * vd,
                                      s->zbuf + (size_t)tk * vdim + (size_t)h * vd,
-                                     lz_t_f32(&L->kda_o_norm, s->wscr), vd,
+                                     kda_o_norm_w, vd,
                                      c->rms_norm_eps, NULL);
             for (tk = 0; tk < nt; tk++)
                 lz_quantize_q8(s->ssm_out + (size_t)tk * vdim, vdim, gso,
