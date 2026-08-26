@@ -109,7 +109,7 @@ MUL_FAMILY = [
 #   ldrd/strd                                    3 vs 1   -> 3x
 # ldm/stm is MIXED (first reg 2x, subsequent 0.5x) so not flagged here;
 # the ldrh-run rule already targets the 4+ ldrh → ldm rewrite.
-LDST_2X = ("ldr", "ldrb", "ldrh", "ldrsb", "ldrsch",
+LDST_2X = ("ldr", "ldrb", "ldrh", "ldrsb", "ldrsh",
            "str", "strb", "strh")
 LDST_3X = ("ldrd", "strd")
 
