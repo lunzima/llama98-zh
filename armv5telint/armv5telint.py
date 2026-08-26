@@ -104,6 +104,16 @@ MUL_FAMILY = [
 ]
 
 
+# LD/ST sub-table, generic (ARMv5TE) vs cortex-a8, same source:
+#   ldr/ldrb/ldrh/ldrsb/ldrsch/str/strb/strh   2 vs 1   -> 2x
+#   ldrd/strd                                    3 vs 1   -> 3x
+# ldm/stm is MIXED (first reg 2x, subsequent 0.5x) so not flagged here;
+# the ldrh-run rule already targets the 4+ ldrh → ldm rewrite.
+LDST_2X = ("ldr", "ldrb", "ldrh", "ldrsb", "ldrsch",
+           "str", "strb", "strh")
+LDST_3X = ("ldrd", "strd")
+
+
 def mul_family_rule():
     """Category 2 (cost-delta) read from gcc's own cost table, not
     memory: aarch-cost-tables.h gives every ARMv5TE core
@@ -121,7 +131,25 @@ def mul_family_rule():
     return Rule(2, "mul-family", apply)
 
 
-RULES = [ldrh_run_rule(), smlabb_alone_rule(), mul_family_rule()]
+def ldst_cost_rule():
+    """Category 2 (cost-delta): every single ldr/str is 2x and every
+    ldrd/strd is 3x on ARMv5TE vs Cortex-A8, from the LD/ST sub-table
+    in aarch-cost-tables.h. This is a census flag — consecutive loads
+    that could be grouped into ldm are the rewrite (see ldrh-run)."""
+    def apply(name, mnems):
+        out = []
+        n2 = sum(1 for m in mnems if m in LDST_2X)
+        if n2:
+            out.append(("ldst-single %d (2x vs armv7-a)" % n2, name))
+        n3 = sum(1 for m in mnems if m in LDST_3X)
+        if n3:
+            out.append(("ldst-double %d (3x vs armv7-a)" % n3, name))
+        return out
+    return Rule(2, "ldst-cost", apply)
+
+
+RULES = [ldrh_run_rule(), smlabb_alone_rule(), mul_family_rule(),
+         ldst_cost_rule()]
 
 
 def lint(text):
