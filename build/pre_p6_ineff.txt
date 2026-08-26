@@ -17,4 +17,4 @@
 # Soundness: every rewrite a rule implies is only correct when the flags
 # it changes are dead. This table flags candidates; the reader proves.
 
-inc,dec	p5,p55c,cyrix,winchip	partial-flags stall: inc/dec leave CF alone, creating a false dependency on the previous flags; use add/sub
+inc,dec	p4	slow: the P4 trace cache stores 2 uops per inc/dec (read-modify-write), so add/sub wins. NOT p5/p6/k6 - gcc's X86_TUNE_USE_INCDEC keeps inc/dec there: the partial-flags stall is negligible next to the 1-byte encoding
