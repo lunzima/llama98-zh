@@ -66,30 +66,61 @@ RULES = [
          "the branch is a coin flip."),
 ]
 
-# wdis line: ADDR  HEXBYTES  MNEMONIC  OPERANDS, tab-separated.
-MNEMONIC_RE = re.compile(r"^[0-9A-Fa-f]{4}\s+[0-9A-Fa-f ]{1,40}\t+(\w+)")
+# Two disassembly formats are supported:
+#   Watcom wdis:     ADDR  HEXBYTES  MNEMONIC  tab-separated
+#   gcc objdump -M intel:   ADDR:\tHEXBYTES   MNEMONIC  (Intel syntax)
+_WATCOM_INST_RE = re.compile(r"^[0-9A-Fa-f]{4}\s+[0-9A-Fa-f ]{1,40}\t+(\w+)")
+_GCC_INST_RE = re.compile(r"^\s+[0-9a-fA-F]+:\t[0-9a-fA-F ]+\s{2,}(\w+)")
+
+# Function boundary regexes.
+#   gcc objdump: "00000000 <_forward_chunk>:"
+_GCC_FUNC_RE = re.compile(r'^[0-9a-fA-F]+ <([^>]+)>:$', re.MULTILINE)
+#   Watcom wdis: "0000\t\t\tlz_row_pick_:" (NOT local labels like L$1:)
+_WATCOM_FUNC_RE = re.compile(
+    r'^[0-9A-Fa-f]{4}\t+([A-Za-z_][A-Za-z0-9_]*):$', re.MULTILINE)
 
 
 def mnemonics(text):
-    """Yield the mnemonic of each wdis instruction line."""
+    """Yield the mnemonic of each instruction line (Watcom or gcc format)."""
     for line in text.splitlines():
-        m = MNEMONIC_RE.match(line)
+        m = _WATCOM_INST_RE.match(line) or _GCC_INST_RE.match(line)
         if m:
             yield m.group(1)
 
 
+def _split_funcs(text):
+    """Split text into (name, body) by function boundaries. Falls back to
+    one unnamed block if no boundaries found."""
+    boundaries = list(_GCC_FUNC_RE.finditer(text))
+    if not boundaries:
+        boundaries = list(_WATCOM_FUNC_RE.finditer(text))
+    if not boundaries:
+        yield "(whole-file)", text
+        return
+    pos = 0
+    fname = None
+    for m in boundaries:
+        if fname is not None:
+            yield fname, text[pos:m.start()]
+        fname = m.group(1)
+        pos = m.end()
+    if fname is not None:
+        yield fname, text[pos:]
+
+
 def lint(text):
-    """Return [(category, mnems, procs, reason, count)] per fired rule,
-    sorted by processor priority (p5/k6 first)."""
-    counts = {}
-    for m in mnemonics(text):
-        counts[m] = counts.get(m, 0) + 1
+    """Return [(category, mnems, procs, reason, count, func_name)] per
+    fired rule, sorted by processor priority (p5/k6 first)."""
     out = []
-    for rule in RULES:
-        total = sum(counts.get(m, 0) for m in rule.mnems)
-        if total > 0:
-            out.append((rule.category, "+".join(rule.mnems),
-                        rule.procs, rule.reason, total))
+    for fname, body in _split_funcs(text):
+        counts = {}
+        for m in mnemonics(body):
+            counts[m] = counts.get(m, 0) + 1
+        for rule in RULES:
+            total = sum(counts.get(m, 0) for m in rule.mnems)
+            if total > 0:
+                out.append((rule.category, "+".join(rule.mnems),
+                            rule.procs, rule.reason, total, fname))
     out.sort(key=lambda r: _procs_rank(r[2]))
     return out
 
@@ -105,13 +136,15 @@ def _procs_rank(procs):
 
 def main(argv):
     if not argv:
-        print("usage: pentiumlint.py <wdis-output>", file=sys.stderr)
+        print("usage: pentiumlint.py <dis-output> ...", file=sys.stderr)
         return 2
     for path in argv:
         with open(path, encoding="utf-8", errors="replace") as f:
             text = f.read()
-        for cat, mn, procs, reason, n in lint(text):
-            print("cat%d %-10s %-12s %d  %s" % (cat, mn, procs, n, reason))
+        basename = path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+        for cat, mn, procs, reason, n, fname in lint(text):
+            print("%-20s %-28s cat%d %-10s %-12s %d  %s"
+                  % (basename, fname, cat, mn, procs, n, reason))
     return 0
 
 

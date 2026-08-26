@@ -17,7 +17,7 @@ def test_inc_fires_on_p4_rule():
                  ("4a", "dec", "edx")])
     found = pentiumlint.lint(text)
     assert len(found) == 1, found
-    cat, mn, procs, reason, n = found[0]
+    cat, mn, procs, reason, n, fname = found[0]
     assert cat == 1 and mn == "inc+dec" and procs == "p4" and n == 3, found
 
 
