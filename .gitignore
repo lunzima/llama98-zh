@@ -109,6 +109,7 @@
 !/build/watcom_flag_parity_gate.sh
 !/build/nest_census.sh
 !/build/nest_census.awk
+!/build/armv5telint.sh
 
 # Stray compiler/linker intermediates (gcc, Open Watcom), plus the raw
 # dumps probes drop at the repo root when run without a -o path.
