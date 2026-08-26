@@ -14,6 +14,7 @@
 #include "err.h"
 #include "mmx_compat.h"
 #include "ops_mmx.h"
+#include "ops_sse.h"
 #include "ops_sse2.h"
 #include "ops_kernel_shared.h"
 #include "ops_quant.h"
@@ -1519,4 +1520,243 @@ void matmul_q16_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
 }
 
 #endif /* Q16_0 SIMD matmul */
+
+/* The float exit of the impls that take an LZMatOut, which is what every
+   lz_matmul_xq_nt caller wants; the int16 one is reached through
+   lz_matmul_xq_nt_i16 instead. */
+static void mat_out_f32(LZMatOut *x, float *o) {
+    memset(x, 0, sizeof(*x));
+    x->o = o;
+}
+
+/* Matmul consuming already-quantized activations: the forward hot path.
+   xq/xqs quantized by the caller at lz_act_gs()'s group (one activation
+   may be reused by several matmuls). f32 weights fall back to f32 -
+   one call site serves all weight representations. */
+void lz_matmul_xq(float *o, const float *x, const int8_t *xq,
+                  const float *xqs, const LZTensor *w,
+                  int in_dim, int out_dim) {
+    lz_matmul_xq_nt(o, x, xq, xqs, w, in_dim, out_dim, 1);
+}
+
+/* Which of lz_matmul_xq_nt's two inputs it will actually read.
+   Exported because a caller that PREPARES those inputs differently -
+   the SubLN Hadamard prepares the quantized row only - has to ask the
+   same question, and two spellings of it drift. That drift already
+   happened once: the rotation reached xq and never the float row, so
+   an unquantized model computed W.x while a quantized one computed
+   W.quant(Hx), silently, from one config. */
+int lz_matmul_xq_reads_float_row(const LZTensor *w) {
+    return !w || w->dtype == LZ_FMT_F32;
+}
+
+void lz_matmul_xq_nt(float *o, const float *x, const int8_t *xq,
+                     const float *xqs, const LZTensor *w,
+                     int in_dim, int out_dim, int nt) {
+    int i;
+
+    /* An out-of-range nt would read past g_xw/g_acc32. The caller
+       (lz_forward_batch) already chunks by LZ_BATCH_MAX; reaching here
+       is a bug - clamp, never silently overrun. */
+    if (nt < 1) return;
+    if (nt > LZ_BATCH_MAX) nt = LZ_BATCH_MAX;
+    if (lz_matmul_xq_reads_float_row(w)) {
+        for (i = 0; i < nt; i++)
+            lz_matmul(o + (size_t)i * out_dim, x + (size_t)i * in_dim,
+                      w ? w->f : NULL, in_dim, out_dim);
+        return;
+    }
+    if (!xq || !xqs || w->gs <= 0 || (in_dim % w->gs) != 0) {
+        for (i = 0; i < nt * out_dim; i++) o[i] = 0.0f;  /* defense: no silent miscalc */
+        return;
+    }
+    /* The widen buffers are LZ_BATCH_MAX * LZ_MM_WIDEN_MAX; nt tokens'
+       activations always fit: the g_xw-filling path carries its own
+       `in_dim <= LZ_MM_WIDEN_MAX` check (Q8_0's !widened branch does
+       not widen and goes per-token scalar), and Q4_1/Q6_1 dispatch
+       already requires in_dim <= LZ_MM_WIDEN_MAX. */
+    /* LZ_KERNEL_REF must genuinely reach the scalar reference, not just
+       affect the name reported. Dispatch is by dtype, so without this
+       check `--kernel ref` would actually run SIMD, unnoticed because
+       all kernels are bit-identical. The scalar reference is the
+       CONTRACT for new formats; an oracle that cannot be
+       selected is no oracle. */
+    if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
+    if (g_kernel == LZ_KERNEL_REF) {
+        matmul_scalar_ref(o, xq, xqs, w, in_dim, out_dim, nt);
+        return;
+    }
+    /* No ARM interception here, and the reason it is absent rather than
+       forgotten: all five formats have their armC/armA pair
+       (src/ops_arm.c, plus ternary in src/ops_t2_arm.c), so the dispatch
+       below is the whole story on ARM too. A format WITHOUT one needs
+       the interception - route that dtype to matmul_scalar_ref, so the
+       tiers differ by the kernel under test and not by which fallback
+       they fell through. Such a format lands as a `t` in km_reg. */
+    /* The SIMD fast path currently covers only (Q8_0, gs=32). Other
+       formats/groups go through the scalar reference - correct but
+       slow.
+
+       This is not a question of "whether asm is worth it" decided by
+       measurement. The rule requires every operator to have C /
+       MMX / SSE / SSE2 paths, because the bottleneck is a seesaw -
+       relieve the bytes and it moves to the ALU, relieve the ALU and it
+       moves back, so "measure which side binds today, then optimise
+       only that side" chases a moving target and leaves both sides
+       undone. Measurement says how fast and whether it is bit-identical,
+       not whether to write the kernel. Every remaining
+       scalar-reference fallthrough below is therefore a TODO with a
+       name, not a decision. */
+    /* Both SIMD paths pre-expand activations to int16; beyond the
+       buffer cap they fall back to the scalar reference. Q8 has no
+       non-expanding MMX intrinsics fallback - it would be 6x slower
+       than x87 scalar on Watcom; keeping it would only make a real
+       trigger worse. */
+    if (w->dtype == LZ_FMT_Q8_0 && w->gs >= 32 && (w->gs % 32) == 0 &&
+        (in_dim % w->gs) == 0) {
+        LZMatOut ex; mat_out_f32(&ex, o);
+        matmul_q8_impl(&ex, xq, xqs, w, in_dim, out_dim, nt);
+        return;
+    }
+    /* Q4_1's SIMD path pre-expands activations to int16; beyond the
+       buffer cap it falls back to the scalar reference. s1v3's max
+       in_dim is 1024, the 0.8B's 3584 - both within 4096. */
+    if (w->dtype == LZ_FMT_Q4_1 && w->gs >= 32 && (w->gs % 32) == 0 &&
+        (in_dim % w->gs) == 0 && in_dim <= LZ_MM_WIDEN_MAX && w->zero) {
+        LZMatOut ex; mat_out_f32(&ex, o);
+        matmul_q41_impl(&ex, xq, xqs, w, in_dim, out_dim, nt);
+        return;
+    }
+    if (w->dtype == LZ_FMT_Q6_1 && w->gs >= 32 && (w->gs % 32) == 0 &&
+        (in_dim % w->gs) == 0 && in_dim <= LZ_MM_WIDEN_MAX && w->zero) {
+        LZMatOut ex; mat_out_f32(&ex, o);
+        matmul_q61_impl(&ex, xq, xqs, w, in_dim, out_dim, nt);
+        return;
+    }
+    /* No `w->zero` in the guard: ternary carries no min, and a T2 tensor
+       that HAS one was mis-loaded. */
+    if (w->dtype == LZ_FMT_T2 && w->gs >= 32 && (w->gs % 32) == 0 &&
+        (in_dim % w->gs) == 0 && in_dim <= LZ_MM_WIDEN_MAX && !w->zero) {
+        LZMatOut ex; mat_out_f32(&ex, o);
+        matmul_t2_impl(&ex, xq, xqs, w, in_dim, out_dim, nt);
+        return;
+    }
+#if defined(__WATCOMC__) || defined(LZ_DOT_MMX_EXTERN) || defined(__arm__)
+    /* Q16_0 has no non-widened fallback: unlike Q8_0 it always needs the
+       activation expanded to int16, so in_dim past the buffer cap goes to
+       the scalar reference. The gcc/SSE2-only dev build has no Q16_0 SIMD
+       kernel either and lands there too - that is deliberate, not an
+       oversight. The differential oracle the bit-identity contract requires is a gcc build
+       with LZ_MMX_TU set (src/ops_mmx.c linked in), which compiles the
+       intrinsics twin and exercises this same path. */
+    if (w->dtype == LZ_FMT_Q16_0 && w->gs >= 32 && (w->gs % 32) == 0 &&
+        (in_dim % w->gs) == 0 && in_dim <= LZ_MM_WIDEN_MAX) {
+        LZMatOut ex; mat_out_f32(&ex, o);
+        matmul_q16_impl(&ex, xq, xqs, w, in_dim, out_dim, nt);
+        return;
+    }
+#endif /* __WATCOMC__ || LZ_DOT_MMX_EXTERN */
+    matmul_scalar_ref(o, xq, xqs, w, in_dim, out_dim, nt);
+}
+
+/* o = W x: unified entry for weight tensors.
+   dtype=0 goes f32; dtype=1 quantizes x (Q8_0, group = w->gs) into the
+   caller-provided xq/xqs buffers, int8*int8 -> int32 accumulation,
+   dequantized per group by (sx * sw). xq needs in_dim bytes, xqs
+   in_dim/w->gs f32s. */
+void lz_matmul_w(float *o, const float *x, const LZTensor *w,
+                 int in_dim, int out_dim, int8_t *xq, float *xqs) {
+    int i;
+
+    if (!w || w->dtype == LZ_FMT_F32) {
+        lz_matmul(o, x, w ? w->f : NULL, in_dim, out_dim);
+        return;
+    }
+    if (w->gs <= 0 || (in_dim % w->gs) != 0 || !xq || !xqs) {
+        /* Defense: normal export guarantees in_dim % gs == 0 (in-row
+           grouping). Triggering means a bug - zero the output and
+           return; no silent miscalc, no crash. */
+        for (i = 0; i < out_dim; i++) o[i] = 0.0f;
+        return;
+    }
+    /* Activation groups follow lz_act_gs, not w->gs - weights may be
+       coarse to gs=128 while activations stay 32. */
+    lz_quantize_q8(x, in_dim, lz_act_gs(w, in_dim), xq, xqs);
+    lz_matmul_xq(o, x, xq, xqs, w, in_dim, out_dim);
+}
+
+void lz_matmul(float *o, const float *x, const float *w,
+                   int in_dim, int out_dim) {    int i;
+    /* The hottest loop in the whole forward, ~750M MACs per token.
+
+       8 independent accumulators here are not for loop unrolling but
+       to break the dependency chain: a single accumulator makes every
+       iteration wait for the previous float add to retire (~4 cycles
+       latency on Zen 3), pinning throughput at 2 flops/cycle.
+       Measured: single accumulator 9.1 GFLOP/s, eight accumulators
+       19.6 GFLOP/s, while L1-vs-memory for weights makes almost no
+       difference - the bottleneck is the latency chain, not bandwidth.
+
+       Note the summation order therefore changes, giving ~1e-7-level
+       float differences. Differential tests use tolerances at the
+       same order as the reference implementation; this change does not
+       break them. */
+    for (i = 0; i < out_dim; i++) {
+        const float *row = w + (size_t)i * in_dim;
+        float a0 = 0.0f, a1 = 0.0f, a2 = 0.0f, a3 = 0.0f;
+        float a4 = 0.0f, a5 = 0.0f, a6 = 0.0f, a7 = 0.0f;
+        float sum;
+        int j = 0;
+#if defined(LZ_MATMUL_F32_SSE_EXTERN)
+        /* The eight accumulators above ARE two SSE vectors - lane k of
+           them accumulates exactly the sequence scalar a_k does, in the
+           same order, so this is bit-identical rather than a
+           re-association. Selected by tier, like every other kernel: a
+           --kernel ref run must reach the loop below or the arm this is
+           compared against would be this.
+
+           SSE1, not SSE2: mulps and addps are SSE1's, and every SSE2
+           machine has them - so one kernel serves both tiers and the
+           SSE2 column holds the same body rather than a copy of it.
+           No CPUID in the test: lz_kernel_select clamps both of these
+           values to what CPUID found, so reaching either one is already
+           the answer, and reading CPUID here would only ask it again. */
+        if ((g_kernel == LZ_KERNEL_SSE2 || g_kernel == LZ_KERNEL_SSE) &&
+            in_dim >= 8) {
+            float acc8[8];
+            j = lz_matmul_row_sse(row, x, in_dim, acc8);
+            a0 = acc8[0]; a1 = acc8[1]; a2 = acc8[2]; a3 = acc8[3];
+            a4 = acc8[4]; a5 = acc8[5]; a6 = acc8[6]; a7 = acc8[7];
+        }
+#endif /* LZ_MATMUL_F32_SSE_EXTERN */
+#if defined(LZ_ARM_ASM_EXTERN)
+        /* Same shape, same contract - the kernel INITIALISES acc8, so
+           the eight scalars above are overwritten rather than added to,
+           and lane k still accumulates the sequence scalar a_k does.
+           On a target with no FPU each of these MACs is two library
+           calls; the kernel fuses them and returns where it stopped.
+           Selected by tier for the reason the SSE arm gives. */
+        if (g_kernel == LZ_KERNEL_ARM_ASM && in_dim >= 8) {
+            float acc8[8];
+            j = lz_matmul_row_arm_asm(row, x, in_dim, acc8);
+            a0 = acc8[0]; a1 = acc8[1]; a2 = acc8[2]; a3 = acc8[3];
+            a4 = acc8[4]; a5 = acc8[5]; a6 = acc8[6]; a7 = acc8[7];
+        }
+#endif /* LZ_ARM_ASM_EXTERN */
+        for (; j + 7 < in_dim; j += 8) {
+            a0 += row[j]     * x[j];
+            a1 += row[j + 1] * x[j + 1];
+            a2 += row[j + 2] * x[j + 2];
+            a3 += row[j + 3] * x[j + 3];
+            a4 += row[j + 4] * x[j + 4];
+            a5 += row[j + 5] * x[j + 5];
+            a6 += row[j + 6] * x[j + 6];
+            a7 += row[j + 7] * x[j + 7];
+        }
+        /* pair-wise merge rather than sequential adds, reducing rounding error in these last steps */
+        sum = ((a0 + a1) + (a2 + a3)) + ((a4 + a5) + (a6 + a7));
+        for (; j < in_dim; j++) sum += row[j] * x[j];
+        o[i] = sum;
+    }
+}
 
