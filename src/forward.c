@@ -1902,6 +1902,9 @@ static void attn_score_loop(LZRunState *s, const LZModelConfig *c,
                             int kv_mul, int kvd, int gso, float scale) {
     int h, d, t, tk;
     int kvh, kvc;                /* h / kv_mul and h % kv_mul, carried */
+    float invn = 0.0f;           /* 1/kv_rot_v, hoisted: invariant across h and tk */
+
+    if (s->kv_rot_v) invn = 1.0f / (float)s->kv_rot_v;
 
     for (tk = 0; tk < nt; tk++) {
         const float *qht = s->qh + (size_t)tk * qd;
@@ -2230,7 +2233,6 @@ static void attn_score_loop(LZRunState *s, const LZModelConfig *c,
                below: the gate is elementwise against qgt, which lives in
                the original basis. */
             if (s->kv_rot_v) {
-                float invn = 1.0f / (float)s->kv_rot_v;
                 rot_head(out, hd, s->kv_rot_v);
                 for (d = 0; d < hd; d++) out[d] *= invn;
             }
