@@ -35,6 +35,33 @@ def test_smlabb_alone_fires():
     assert ("smlabb-alone 2", "lz_dot32_q8_arm") in found, found
 
 
+def test_mul_family_fires_with_gcc_ratios():
+    # One planted mul, mla, smull, umull, smlal, umlal - each must be
+    # flagged with the ratio read from aarch-cost-tables.h (2x/3x).
+    body = ("   0:\te0000092 \tmul\tr0, r2, r0\n"
+            "   4:\te0203192 \tmla\tr3, r2, r1, r3\n"
+            "   8:\te0c20390 \tsmull\tr0, r2, r0, r3\n"
+            "   c:\te0e21390 \tumull\tr1, r2, r3, r0\n"
+            "  10:\te0e02391 \tsmlal\tr0, r2, r1, r3\n"
+            "  14:\te0e0a391 \tumlal\tr0, r2, r1, r3")
+    found = armv5telint.lint(_func("recur_step", body))
+    got = {f[0].split()[1]: f[0] for f in found if f[0].startswith("mul-family")}
+    assert got["mul"] == "mul-family mul 1 (2x vs armv7-a)", got
+    assert got["mla"] == "mul-family mla 1 (3x vs armv7-a)", got
+    assert got["smull"] == "mul-family smull 1 (2x vs armv7-a)", got
+    assert got["umull"] == "mul-family umull 1 (2x vs armv7-a)", got
+    assert got["smlal"] == "mul-family smlal 1 (3x vs armv7-a)", got
+    assert got["umlal"] == "mul-family umlal 1 (3x vs armv7-a)", got
+
+
+def test_muls_is_silent_equal_cost():
+    # muls is 1 vs 1 in gcc's table (flag_setting), so it must NOT be
+    # flagged - the rule's positive control for "equal cost stays silent".
+    text = _func("f", "   0:\te010f092 \tmuls\tr0, r2, r0")
+    found = armv5telint.lint(text)
+    assert not any(f[0].startswith("mul-family") for f in found), found
+
+
 def test_optimal_asm_is_silent():
     # The hand-written cell: ldm + paired smlabb/smlatt. No finding.
     text = _func("lz_dot32_q16_arm_asm",

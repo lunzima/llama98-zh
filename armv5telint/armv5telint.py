@@ -23,9 +23,11 @@ from collections import namedtuple
 # A rule is a category + a named predicate over a disassembled function.
 # Category 1 (quirk) is empty for ARMv5TE - gcc's arm-cpus.in has only
 # LDSCHED/XSCALE/STRONG scheduling models, no "avoid this instruction"
-# flags (the one slow note, smallmul, is cortex-m only). These rules are
-# category 2 (cost-delta: the C tier's sequence is pricier than the asm
-# cell's under the 4-byte contract).
+# flags (the one slow note, smallmul, is cortex-m only). Category 2
+# (cost-delta) is read from gcc's own cost table, aarch-cost-tables.h,
+# not from memory: it maps every ARMv5TE core to generic_extra_costs and
+# Cortex-A8 to cortexa8_extra_costs. The ldrh/smlabb rules are the C
+# tier's sequence pricier than the asm cell's under the 4-byte contract.
 Rule = namedtuple("Rule", ["category", "name", "apply"])
 
 FUNC_RE = re.compile(r"^([0-9a-f]+) <([^>]+)>:$")
@@ -82,20 +84,44 @@ def smlabb_alone_rule():
     return Rule(2, "smlabb-alone", apply)
 
 
-def mul_mla_rule():
-    """mul/mla is 2-5 cycles on the ARM9TDMI (early-termination
-    multiplier, data-dependent) vs 1 cycle on Cortex-A8 - a 2-5x cost
-    delta, and the data-dependence makes it worse than the number. From
-    the ARM9TDMI / Cortex-A8 TRM instruction timings."""
+# gcc's ARM cost table (gcc/config/arm/aarch-cost-tables.h): every
+# ARMv5TE core (arm9tdmi, arm9e, arm10e, arm926ej-s, arm1026ej-s, xscale,
+# strongarm) tunes to generic_extra_costs; the ARMv7-A baseline is
+# cortexa8_extra_costs. The MULT SImode sub-table, generic vs cortex-a8,
+# in COSTS_N_INSNS units (field -> mnemonic):
+#   simple       mul           2 vs 1   -> 2x
+#   flag_setting muls          1 vs 1   -> equal (not flagged)
+#   extend       smull/umull   2 vs 1   -> 2x
+#   add          mla           3 vs 1   -> 3x
+#   extend_add   smlal/umlal   3 vs 1   -> 3x
+MUL_FAMILY = [
+    ("mul", "2x"),
+    ("mla", "3x"),
+    ("smull", "2x"),
+    ("umull", "2x"),
+    ("smlal", "3x"),
+    ("umlal", "3x"),
+]
+
+
+def mul_family_rule():
+    """Category 2 (cost-delta) read from gcc's own cost table, not
+    memory: aarch-cost-tables.h gives every ARMv5TE core
+    generic_extra_costs and Cortex-A8 cortexa8_extra_costs, and the
+    multiply family is 2-3x pricier on ARMv5TE than on the ARMv7-A
+    baseline. muls is 1 vs 1 (equal), so it is deliberately not flagged."""
     def apply(name, mnems):
-        n = sum(1 for m in mnems if m in ("mul", "mla"))
-        if n > 0:
-            return [("mul-mla %d (2-5x vs armv7-a)" % n, name)]
-        return []
-    return Rule(2, "mul-mla", apply)
+        out = []
+        for m, ratio in MUL_FAMILY:
+            n = sum(1 for x in mnems if x == m)
+            if n:
+                out.append(("mul-family %s %d (%s vs armv7-a)"
+                            % (m, n, ratio), name))
+        return out
+    return Rule(2, "mul-family", apply)
 
 
-RULES = [ldrh_run_rule(), smlabb_alone_rule(), mul_mla_rule()]
+RULES = [ldrh_run_rule(), smlabb_alone_rule(), mul_family_rule()]
 
 
 def lint(text):
