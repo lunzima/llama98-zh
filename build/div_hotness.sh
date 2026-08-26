@@ -74,7 +74,7 @@ for f in $SRC; do
     # -l emits the source location every time it changes, so the file
     # and line have to be carried forward across the instructions that
     # follow. Drive letters make the path contain a colon; splitting on
-    # the LAST colon is what makes "E:\...\ops.c:1848" parse.
+    # the LAST colon is what makes "E:\...\foo.c:1848" parse.
     objdump -dl "$W/site.o" 2>/dev/null | awk -v re="$DIVRE" '
         /^[0-9a-f]+ </ { fn = $0; sub(/^[0-9a-f]+ </, "", fn)
                          sub(/>:.*/, "", fn); next }
