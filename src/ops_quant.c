@@ -2642,3 +2642,51 @@ void lz_quantize_q8_silu(const float *p, const float *g, const int32_t *sig,
             og[k] = og[k] * (1.0f / 32768.0f);
     }
 }
+
+/* Lloyd-Max fixed point for N(0,1), 16 levels. Provenance and the
+   re-derivation script are in ops.h's comment - do not "tidy" these
+   digits, every cached row decodes against them. */
+const float lz_kv4_cents[16] = {
+      -2.732589571f,   -2.069017227f,   -1.618046386f,   -1.256231197f,
+      -0.942340456f,   -0.656759119f,   -0.388048299f,   -0.128395030f,
+       0.128395030f,    0.388048299f,    0.656759119f,    0.942340456f,
+       1.256231197f,    1.618046386f,    2.069017227f,    2.732589571f
+};
+
+/* Decision boundaries: midpoints of adjacent centroids. Derived here
+   rather than shipped so the two can never drift apart. */
+static const float kv4_mid[15] = {
+      -2.400803399f,   -1.843531806f,   -1.437138792f,   -1.099285826f,
+      -0.799549788f,   -0.522403709f,   -0.258221664f,    0.000000000f,
+       0.258221664f,    0.522403709f,    0.799549788f,    1.099285826f,
+       1.437138792f,    1.843531806f,    2.400803399f
+};
+
+void lz_kv4_quantize(const float *x, int n, unsigned char *out, float *scale) {
+    /* Not exactly representable in float32 - see LZ_EXP_LOG2E32's
+       comment in lz_exp for why an inline literal here would risk
+       gcc's x87 excess-precision folding (fldt). */
+    static const float LZ_KV4_EPS = 1e-20f;
+    float n2 = 0.0f, s, inv;
+    int i;
+
+    for (i = 0; i < n; i++) n2 += x[i] * x[i];
+    n2 = (float)sqrt((double)n2);
+    /* sqrt(n) is exact for the power-of-two head dims this path serves;
+       the divide has a runtime divisor, so both compilers emit a real
+       FDIV rather than one strength-reducing it. */
+    s = n2 / (float)sqrt((double)n);
+    if (scale) *scale = s;
+    inv = (s > LZ_KV4_EPS) ? (1.0f / s) : 0.0f;
+
+    for (i = 0; i < n; i += 2) {
+        float z0 = x[i] * inv, z1 = x[i + 1] * inv;
+        int c0 = 0, c1 = 0, k;
+        /* Sorted boundaries, so a walk stops at the first one above z.
+           15 compares worst case and no absolute value - cheaper than
+           scanning the centroids themselves. */
+        for (k = 0; k < 15; k++) { if (z0 < kv4_mid[k]) break; c0++; }
+        for (k = 0; k < 15; k++) { if (z1 < kv4_mid[k]) break; c1++; }
+        out[i / 2] = (unsigned char)(c0 | (c1 << 4));
+    }
+}
