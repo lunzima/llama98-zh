@@ -62,6 +62,26 @@ def test_muls_is_silent_equal_cost():
     assert not any(f[0].startswith("mul-family") for f in found), found
 
 
+def test_ldst_cost_fires():
+    # Single ldr/str are 2x, ldrd is 3x (aarch-cost-tables.h ldst table).
+    body = ("   0:\te5903000 \tldr\tr3, [r0]\n"
+            "   4:\te5803000 \tstr\tr3, [r0]\n"
+            "   8:\te1c030b0 \tldrd\tr3, [r0]")
+    found = armv5telint.lint(_func("f", body))
+    singles = [f for f in found if f[0].startswith("ldst-single")]
+    doubles = [f for f in found if f[0].startswith("ldst-double")]
+    assert singles and "2" in singles[0][0], found
+    assert doubles and "3" in doubles[0][0], found
+
+
+def test_ldrsh_typod_mnemonic_is_covered():
+    # The LDST_2X tuple had 'ldrsch' (typo) which silently never matched.
+    # The real mnemonic is ldrsh. Pin it so the typo cannot regress.
+    body = "   0:\te1d030f0 \tldrsh\tr3, [r0]"
+    found = armv5telint.lint(_func("f", body))
+    assert any(f[0].startswith("ldst-single") for f in found), found
+
+
 def test_optimal_asm_is_silent():
     # The hand-written cell: ldm + paired smlabb/smlatt. No finding.
     text = _func("lz_dot32_q16_arm_asm",
