@@ -24,9 +24,28 @@ Rules come in three categories:
 | cat | mnemonic(s) | processors | why |
 |---|---|---|---|
 | 1 | `inc`, `dec` | `p4` | trace cache stores 2 uops per inc/dec; add/sub wins. NOT p5/p6/k6 |
+| 1 | `not` | `p5,p55c` | not pairable on P5 (X86_TUNE_NOT_UNPAIRABLE); `xor reg,-1` |
+| 1 | `cdq`, `cltd` | `p5,p55c,k6,k6-2` | USE_CLTD excludes m_PENT and m_K6; `mov edx,eax; sar edx,31` |
+| 1 | `stc`, `clc`, `cmc` | `p4` | slow on NetBurst (SLOW_STC); use sbb idiom |
+| 1 | `sahf` | `p5,p55c` | USE_SAHF does not list m_PENT |
+| 2 | `movsx` | `p5,p55c,k6,k6-2` | 3 insns P5 / 2 K6 vs 1 PPro (3x/2x) |
+| 2 | `movzx` | `p5,p55c,k6,k6-2` | 2 insns P5 / 2 K6 vs 1 PPro (2x); P5 prefers AND |
+| 2 | `imul`, `mul` | `p5,p55c,p4` | 11 insns P5 / 15 P4 vs 4 PPro (2.75x/3.75x) |
+| 2 | `idiv` | `p4` | 56 insns vs 17 PPro (3.29x). P5 (1.47x) / K6 (1.06x) excluded |
+| 2 | `movs`, `stos`, `lods`, `scas`, `cmps` | `p5,p55c` | microcoded, non-pairable on P5 |
+| 2 | `shl`, `shr`, `sar` | `p4` | 4 insns vs 1 PPro (4x), both variable and constant |
+| 2 | `lea` | `p4,k6` | 3 insns P4 / 2 K6 vs 1 PPro (3x/2x) |
+| 3 | `jcc`, `jmp` | `p4` | P4 ~20-stage pipeline: branch mispredict ~20 cycles |
 
 Processors in the engine's target family: `p5` `p55c` `cyrix` `winchip`
-`k6` `k6-2` `p4`. A rule fires only on the processors it names.
+`k6` `k6-2` `p4`. A rule fires only on the processors it names. `cyrix`
+and `winchip` have no gcc cost table (mapped to i486, removed since
+gcc-9), so no rule keys on them directly.
+
+**Deferred (need operand inspection, not bare mnemonics):** `xor reg,reg`
+(K6 `USE_MOV0`), `add mem,reg` (P5 `READ_MODIFY`), `push [mem]` (P5
+`PUSH_MEMORY`), `not mem` (K6 `NOT_VECTORMODE`), `rol/ror reg,8` (P4
+`USE_XCHGB`), P5 variable-shift (4x vs constant 1x).
 
 **Soundness-first.** Each rewrite is only correct when the flags it
 changes are dead; the reader proves that. This lints, it does not judge.
@@ -34,20 +53,30 @@ changes are dead; the reader proves that. This lints, it does not judge.
 ## Usage
 
 ```bash
-# The shipping build is 32-bit Watcom (OMF); wdis reads it:
+# Watcom OMF (shipping build); wdis reads it:
 wdis build/watcom/cli/ops_quant.obj > /tmp/ops_quant.wdis
 
-python3 pentiumlint.py /tmp/ops_quant.wdis
+# Or gcc Intel-syntax objdump (either is accepted):
+gcc -m32 -O2 -c src/ops_quant.c -o /tmp/ops_quant.o
+objdump -d -M intel /tmp/ops_quant.o > /tmp/ops_quant.dis
+
+python3 pentiumlint.py /tmp/ops_quant.wdis /tmp/ops_quant.dis
 ```
 
 ## Tests
 
 ```bash
-python3 test_pentiumlint.py
+python3 test_pentiumlint.py   # or: make test
 ```
+
+The unit tests plant one mnemonic and assert the rule fires (positive
+control); `test_integration_on_real_gcc_intel_fixture` runs against a
+real `objdump -M intel` fixture to exercise the gcc parser + per-function
+splitting that the synthetic fixtures cannot.
 
 ## Adding a rule
 
-Append a `Rule((mnems...), "procs", "reason")` to `RULES` (from gcc's
-`x86-tune.def`, not memory), and a `test_<name>` that asserts it fires
-on a planted fixture and is silent otherwise.
+Append a `Rule(category, (mnems...), "procs", "reason")` to `RULES` (from
+gcc's `x86-tune.def` / `x86-tune-costs.h`, not memory), and a
+`test_<name>` that asserts it fires on a planted fixture and is silent
+otherwise.

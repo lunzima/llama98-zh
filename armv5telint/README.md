@@ -18,6 +18,7 @@ per-instruction counts in their comments. gcc cannot match them because
 | `ldrh-run` | 4+ consecutive `ldrh` (16-bit loads) | one `ldm` (4 words = 8 halfwords), a 4:1 load saving |
 | `smlabb-alone` | `smlabb` with no `smlatt`/`smlabt`/`smlatb` | pair BB with TT so one loaded word feeds two accumulates |
 | `mul-family` | `mul`/`mla`/`smull`/`umull`/`smlal`/`umlal` (2-3× on ARMv5TE vs ARMv7-A) | shift/add for small constants, or re-schedule into the dot-product's paired MACs |
+| `ldst-cost` | single `ldr`/`str`/`ldrb`/`ldrh`/`ldrsb`/`ldrsh` (2×) and `ldrd`/`strd` (3×) | group consecutive loads into `ldm`/`stm` |
 
 ### `mul-family` ratios (from gcc, not memory)
 

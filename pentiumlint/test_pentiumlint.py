@@ -121,6 +121,36 @@ def test_movzx_numbers_are_insns_not_x4_units():
     assert "8 " not in rule.reason, rule.reason
 
 
+def test_integration_on_real_gcc_intel_fixture():
+    # A real gcc `objdump -M intel` fixture (not a synthetic _dis). This
+    # exercises _GCC_INST_RE and _GCC_FUNC_RE, which the synthetic tests
+    # never touch. Two functions, each with a distinct imul count.
+    import os
+    here = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(here, "fixtures", "forward_chunk_gcc.dis")
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    found = pentiumlint.lint(text)
+
+    # Per-function splitting: _forward_chunk has 1 imul, 1 movzx, 1 lea,
+    # 1 cdq, 1 idiv; _lz_state_reset has 2 imul and nothing else.
+    by_func = {}
+    for cat, mn, procs, reason, n, fname in found:
+        by_func.setdefault(fname, []).append((mn, n, procs))
+
+    assert "_forward_chunk" in by_func, found
+    assert "_lz_state_reset" in by_func, found
+    chunk = dict((mn, n) for mn, n, _ in by_func["_forward_chunk"])
+    assert chunk["imul+mul"] == 1, chunk
+    assert chunk["movzx"] == 1, chunk
+    assert chunk["lea"] == 1, chunk
+    assert chunk["cdq+cltd"] == 1, chunk
+    assert chunk["idiv"] == 1, chunk
+    reset = dict((mn, n) for mn, n, _ in by_func["_lz_state_reset"])
+    assert reset["imul+mul"] == 2, reset
+    assert "movzx" not in reset, reset
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
