@@ -16,7 +16,7 @@
 # The engine body. net/http/openai are the server and are deliberately
 # NOT here: they are not in the CLI or DOS binary either, and there are
 # no sockets on the target machines.
-ENG := err compat lfn json safetensors model ops ops_kernel ops_rope ops_moe ops_epi ops_quant ops_sched ops_matmul ops_t2_arm ops_arm ops_t2_scalar ops_norm ops_gdn ops_conv1d fwht forward sampler generate \
+ENG := err compat lfn json safetensors model ops ops_kernel ops_rope ops_moe ops_epi ops_quant ops_sched ops_matmul ops_t2_arm ops_arm ops_t2_scalar ops_norm ops_gdn ops_conv1d fwht forward forward_attn forward_moe forward_ssm forward_kda sampler generate \
        tokenizer unicode chat gbk cpucheck
 SRV := net http openai
 GUI := main layout localized_strings worker modelload session compat40 \
@@ -98,15 +98,24 @@ CFLAGS  ?= -O2 -std=c99 -Wall -Wextra -Isrc $(FP_STRICT) $(MMX_TU_DEFINE) $(SSE2
 # hot path is hand-written intrinsics anyway, so the portability cost is
 # negligible.
 #
-# -O2, NOT -O3. What -O3 adds over -O2 here is loop unrolling and
-# aggressive inlining applied to code that is already hand-written
-# intrinsics, and it buys that with size: the .text section is the thing
-# a target with an 8 KB I-cache has least of. Measured on this tree,
-# llama98.exe -O3 against -O2: 401,616 against 261,968 bytes of .text,
-# 53.3% larger, and 731,538 against 590,881 bytes of file. Anything that
-# wants -O3 can pass it - the flag is not forbidden, it is not the
-# default.
-X86_64_CFLAGS := -O2 -march=x86-64 -std=c99 -Wall -Wextra -Isrc $(FP_STRICT) $(MMX_TU_DEFINE) $(SSE2_TU_DEFINE) $(EXTRA_DEFS)
+# Per-TU optimisation tiers, not one level for the whole engine. gcov
+# function-level call counts pick the hot TUs (see HOT_TU / HOT_COM
+# below): they compile at -O2 for speed, everything else defaults to -Os
+# for size. The -Os/-O2 split buys the size win without the -O3 cost:
+# what -O3 adds over -O2 is loop unrolling and aggressive inlining applied
+# to code that is already hand-written intrinsics, and it buys that with
+# size - the .text section is the thing a target with an 8 KB I-cache has
+# least of. Measured on this tree, llama98.exe -O3 against -O2: 401,616
+# against 261,968 bytes of .text, 53.3% larger, and 731,538 against
+# 590,881 bytes of file. Anything that wants -O3 can pass it - the flag
+# is not forbidden, it is not the default.
+X86_64_CFLAGS := -Os -march=x86-64 -mtune=alderlake -std=c99 -Wall -Wextra -Isrc $(FP_STRICT) $(MMX_TU_DEFINE) $(SSE2_TU_DEFINE) $(EXTRA_DEFS)
+# Hot TUs keep -O2. Derived from X86_64_CFLAGS by substitution, so a
+# command-line override - build/int_pipeline_arm_gate.sh passes
+# X86_64_CFLAGS="-O3 ... -D$sw=0" - still reaches every hot TU: an
+# override carries no -Os, so the subst is a no-op and the override's own
+# -O level and -D flow through unchanged.
+X86_64_HOT_CFLAGS := $(subst -Os,-O2,$(X86_64_CFLAGS))
 
 HTTP_LIBS := $(if $(filter Windows_NT,$(OS)),-lwsock32,)
 
@@ -130,13 +139,59 @@ serve: kunkun98-serve
 ENG_MMX_GCC_NATIVE_OBJS := $(addprefix build/native/,$(addsuffix .o,$(ENG_MMX)))
 ENG_MMX_GCC_GUI_OBJS    := $(addprefix build/gui/,$(addsuffix .o,$(ENG_MMX)))
 
+# Per-TU optimisation tier, gcc side (see X86_64_HOT_CFLAGS). HOT_TU are
+# the engine TUs and HOT_COM the common/ TUs the gcov call counts mark
+# hot; they compile separately at -O2. Everything else is cold and keeps
+# the -Os default, compiled in the link target's one-shot compile exactly
+# as before.
+HOT_TU := ops_epi ops_matmul ops_quant ops_gdn json
+HOT_COM := stream
+
+HOT_ENG_SRCS := $(addprefix src/,$(addsuffix .c,$(HOT_TU)))
+HOT_COM_SRCS := $(addprefix common/,$(addsuffix .c,$(HOT_COM)))
+
+# Cold = full minus hot. The link targets compile these in one shot (as
+# they always did) and take the hot TUs as prebuilt objects alongside the
+# $(ENG_MMX) objects.
+COLD_ENG_SRCS     := $(filter-out $(HOT_ENG_SRCS),$(ENG_SRCS))
+COLD_CLI_COM_SRCS := $(filter-out $(HOT_COM_SRCS),$(CLI_COM_SRCS))
+COLD_COM_SRCS     := $(filter-out $(HOT_COM_SRCS),$(COM_SRCS))
+
+# Hot objects, split native vs gui exactly like $(ENG_MMX) above, so a
+# flag change to one flavour cannot link an object built with another's.
+HOT_GCC_NATIVE_ENG_OBJS := $(addprefix build/native/,$(addsuffix .o,$(HOT_TU)))
+HOT_GCC_NATIVE_COM_OBJS := $(addprefix build/native/,$(addsuffix .o,$(HOT_COM)))
+HOT_GCC_GUI_ENG_OBJS    := $(addprefix build/gui/,$(addsuffix .o,$(HOT_TU)))
+HOT_GCC_GUI_COM_OBJS    := $(addprefix build/gui/,$(addsuffix .o,$(HOT_COM)))
+HOT_GCC_NATIVE_OBJS     := $(HOT_GCC_NATIVE_ENG_OBJS) $(HOT_GCC_NATIVE_COM_OBJS)
+HOT_GCC_GUI_OBJS        := $(HOT_GCC_GUI_ENG_OBJS) $(HOT_GCC_GUI_COM_OBJS)
+
 build/native/%.o: src/%.c
 	@mkdir -p build/native
-	$(CC) $(X86_64_CFLAGS) -mmmx -msse -msse2 -c -o $@ $<
+	$(CC) $(X86_64_HOT_CFLAGS) -mmmx -msse -msse2 -c -o $@ $<
 
 build/gui/%.o: src/%.c
 	@mkdir -p build/gui
-	$(CC) $(X86_64_CFLAGS) -mmmx -msse -msse2 -c -o $@ $<
+	$(CC) $(X86_64_HOT_CFLAGS) -mmmx -msse -msse2 -c -o $@ $<
+
+# Static-pattern rules (explicit, so they beat the MMX pattern rules
+# above for these files) compile the hot TUs at -O2. They carry no
+# -mmmx/-msse/-msse2: those are for $(ENG_MMX) only.
+$(HOT_GCC_NATIVE_ENG_OBJS): build/native/%.o: src/%.c
+	@mkdir -p build/native
+	$(CC) $(X86_64_HOT_CFLAGS) -c -o $@ $<
+
+$(HOT_GCC_NATIVE_COM_OBJS): build/native/%.o: common/%.c
+	@mkdir -p build/native
+	$(CC) $(X86_64_HOT_CFLAGS) -Icommon -c -o $@ $<
+
+$(HOT_GCC_GUI_ENG_OBJS): build/gui/%.o: src/%.c
+	@mkdir -p build/gui
+	$(CC) $(X86_64_HOT_CFLAGS) -c -o $@ $<
+
+$(HOT_GCC_GUI_COM_OBJS): build/gui/%.o: common/%.c
+	@mkdir -p build/gui
+	$(CC) $(X86_64_HOT_CFLAGS) -Icommon -c -o $@ $<
 
 # cli_main.c's -i loop runs on the shared LZSession core (common/session.c),
 # a front-end helper deliberately outside $(ENG) - so this target lists it
@@ -148,13 +203,13 @@ build/gui/%.o: src/%.c
 # checks the file type of whatever is in build/native/*.o right now, so
 # a stale ELF object is a build failure here instead of a bad binary
 # discovered only when someone tries to run it.
-llama98: $(ENG_SRCS) $(CLI_COM_SRCS) src/cli_attr.c src/cli_main.c $(ENG_MMX_GCC_NATIVE_OBJS)
+llama98: $(COLD_ENG_SRCS) $(COLD_CLI_COM_SRCS) src/cli_attr.c src/cli_main.c $(HOT_GCC_NATIVE_OBJS) $(ENG_MMX_GCC_NATIVE_OBJS)
 	@bash build/native_obj_gate.sh
-	$(CC) $(X86_64_CFLAGS) -Icommon -o $@ $(ENG_SRCS) $(CLI_COM_SRCS) src/cli_attr.c src/cli_main.c $(ENG_MMX_GCC_NATIVE_OBJS) -lm
+	$(CC) $(X86_64_CFLAGS) -Icommon -o $@ $(COLD_ENG_SRCS) $(COLD_CLI_COM_SRCS) src/cli_attr.c src/cli_main.c $(HOT_GCC_NATIVE_OBJS) $(ENG_MMX_GCC_NATIVE_OBJS) -lm
 
-kunkun98-serve: $(ENG_SRCS) $(SRV_SRCS) src/server_main.c $(ENG_MMX_GCC_NATIVE_OBJS)
+kunkun98-serve: $(COLD_ENG_SRCS) $(SRV_SRCS) src/server_main.c $(HOT_GCC_NATIVE_ENG_OBJS) $(ENG_MMX_GCC_NATIVE_OBJS)
 	@bash build/native_obj_gate.sh
-	$(CC) $(X86_64_CFLAGS) -o $@ $(ENG_SRCS) $(SRV_SRCS) src/server_main.c $(ENG_MMX_GCC_NATIVE_OBJS) -lm $(HTTP_LIBS)
+	$(CC) $(X86_64_CFLAGS) -o $@ $(COLD_ENG_SRCS) $(SRV_SRCS) src/server_main.c $(HOT_GCC_NATIVE_ENG_OBJS) $(ENG_MMX_GCC_NATIVE_OBJS) -lm $(HTTP_LIBS)
 
 # Resources (icon / splash / about logo / lamps). windres for gcc; the
 # Watcom build runs wrc instead (see watcom-gui). Both run from the repo
@@ -168,8 +223,8 @@ $(GUI_RES): gui/kunkun98.rc gui/resource.h gui/kunkun98.manifest \
 	@mkdir -p build/gui
 	windres -I. gui/kunkun98.rc -O coff -o $@
 
-kunkun98-gui: $(GUI_SRCS) $(COM_SRCS) $(ENG_SRCS) gui/layout.h gui/localized_strings.h $(GUI_RES) $(ENG_MMX_GCC_GUI_OBJS)
-	$(CC) $(X86_64_CFLAGS) -Igui -Icommon -mwindows -o $@ $(GUI_SRCS) $(COM_SRCS) $(ENG_SRCS) $(GUI_RES) $(ENG_MMX_GCC_GUI_OBJS) \
+kunkun98-gui: $(GUI_SRCS) $(COLD_COM_SRCS) $(COLD_ENG_SRCS) gui/layout.h gui/localized_strings.h $(GUI_RES) $(HOT_GCC_GUI_OBJS) $(ENG_MMX_GCC_GUI_OBJS)
+	$(CC) $(X86_64_CFLAGS) -Igui -Icommon -mwindows -o $@ $(GUI_SRCS) $(COLD_COM_SRCS) $(COLD_ENG_SRCS) $(GUI_RES) $(HOT_GCC_GUI_OBJS) $(ENG_MMX_GCC_GUI_OBJS) \
 	    -lgdi32 -luser32 -lcomdlg32 -lm -Wl,--stack=524288
 
 # ----------------------------------------------------------------------
