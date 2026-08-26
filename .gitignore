@@ -110,6 +110,8 @@
 !/build/nest_census.sh
 !/build/nest_census.awk
 !/build/armv5telint.sh
+!/build/pentiumlint.sh
+!/build/pre_p6_ineff.txt
 
 # Stray compiler/linker intermediates (gcc, Open Watcom), plus the raw
 # dumps probes drop at the repo root when run without a -o path.
