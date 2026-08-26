@@ -13,9 +13,17 @@ instruction is slow where.
 
 ## Rule table
 
-| mnemonic(s) | processors | why |
-|---|---|---|
-| `inc`, `dec` | `p4` | trace cache stores 2 uops per inc/dec; add/sub wins. NOT p5/p6/k6 |
+Rules come in three categories:
+
+1. **quirk** — gcc's `x86-tune.def` says this instruction is slow here.
+2. **cost-delta** — the instruction cost table shows it much pricier here
+   than on the Pentium II baseline (x86) / ARMv7-A (ARM).
+3. **behavioral** — correct in principle but costly here, e.g. avoid
+   unpredictable branches on P4's long pipeline.
+
+| cat | mnemonic(s) | processors | why |
+|---|---|---|---|
+| 1 | `inc`, `dec` | `p4` | trace cache stores 2 uops per inc/dec; add/sub wins. NOT p5/p6/k6 |
 
 Processors in the engine's target family: `p5` `p55c` `cyrix` `winchip`
 `k6` `k6-2` `p4`. A rule fires only on the processors it names.

@@ -20,13 +20,19 @@ import re
 import sys
 from collections import namedtuple
 
-# A rule: a set of mnemonics, the processors it bites, and the reason.
-Rule = namedtuple("Rule", ["mnems", "procs", "reason"])
+# A rule has a CATEGORY and a per-processor scope:
+#   1 quirk       - gcc's X86_TUNE_* says this instruction is slow here
+#   2 cost-delta  - the instruction cost table shows it much pricier here
+#                   than on the Pentium II baseline (x86) / ARMv7-A (ARM)
+#   3 behavioral  - correct in principle but costly here, e.g. avoid
+#                   unpredictable branches on P4's long pipeline
+Rule = namedtuple("Rule", ["category", "mnems", "procs", "reason"])
 
 # The seed table, keyed to the engine's target family. grow this from
-# gcc's x86-tune.def, not from memory (see the inc/dec correction).
+# gcc's x86-tune.def (category 1), the instruction cost table (category
+# 2), and branch-predictability analysis (category 3), not from memory.
 RULES = [
-    Rule(("inc", "dec"), "p4",
+    Rule(1, ("inc", "dec"), "p4",
          "trace cache stores 2 uops per inc/dec (read-modify-write); "
          "add/sub wins. NOT p5/p6/k6: gcc X86_TUNE_USE_INCDEC keeps "
          "inc/dec there (stall negligible vs 1-byte encoding)"),
