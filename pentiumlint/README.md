@@ -37,7 +37,7 @@ Rules come in three categories:
 | 2 | `lea` | `p4,k6` | 3 insns P4 / 2 K6 vs 1 PPro (3x/2x) |
 | 3 | `jcc`, `jmp` | `p4` | NetBurst ~20-stage pipeline (not gcc's cost table): mispredict ~20 cycles |
 
-The next seven are **operand rules**: they need the operand text, not just
+The next eleven are **operand rules**: they need the operand text, not just
 the mnemonic (the `OpRule` kind, as opposed to the mnemonic-count `Rule`).
 
 | 2 | `xor reg,reg` | `k6` | `mov $0,reg` beats `xor reg,reg` on K6 (USE_MOV0) |
@@ -47,11 +47,29 @@ the mnemonic (the `OpRule` kind, as opposed to the mnemonic-count `Rule`).
 | 1 | `rol/ror r16,8` | `p4` | byte swap: `xchgb %rh,%rl` (USE_XCHGB) |
 | 1 | `mov reg,-1` | `p5` | `or reg,-1` beats `mov reg,-1` (MOVE_M1_VIA_OR) |
 | 2 | `shl/shr/sar reg,cl` | `p5` | variable shift 4 insns vs 1 constant (shift_var/shift_const) |
+| 1 | `sal/shl reg,1` | `p5,p55c,k6,k6-2,p4` | `add reg,reg` beats shift-by-1 (DOUBLE_WITH_ADD=~m_386) |
+| 1 | `mov r8/r16, ...` | `p4` | partial-register store → false dependency (PARTIAL_REG_DEPENDENCY) |
+| 3 | `mov r8/r16, [mem]` | `p5,p55c,k6,k6-2,p4` | partial memory read → forwarding stall (PARTIAL_MEMORY_READ_STALL, needs a preceding large write) |
+| 1 | `fild/fistp dword` | `p5,p55c` | 32-bit x87 integer operand avoided (USE_SIMODE_FIOP) |
 
 Processors in the engine's target family: `p5` `p55c` `cyrix` `winchip`
 `k6` `k6-2` `p4`. A rule fires only on the processors it names. `cyrix`
 and `winchip` have no gcc cost table (mapped to i486, removed since
-gcc-9), so no rule keys on them directly.
+gcc-9), so no **cost-delta** rule keys on them; a quirk whose mask
+includes i486 (e.g. `DOUBLE_WITH_ADD = ~m_386`) still covers them, but is
+kept to the primary targets in the table above.
+
+### Remaining x87 gaps (documented, not keyed)
+
+The integer target never emits x87, so the one remaining cost-delta is
+documented, not keyed:
+
+| field | value | why not keyed |
+|---|---|---|
+| P4 x87 `fadd`/`fsub` | 5 insns vs 3 PPro (1.67x) | x87 floating, P4-only; the integer target never emits x87 |
+
+`ZERO_EXTEND_WITH_AND` (= m_486|m_PENT) is already keyed as the `movzx`
+rule's "P5 prefers AND" reason, so it has no separate rule.
 
 **Soundness-first.** Each rewrite is only correct when the flags it
 changes are dead; the reader proves that. This lints, it does not judge.

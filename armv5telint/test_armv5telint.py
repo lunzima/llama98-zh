@@ -138,6 +138,23 @@ def test_fp_ldst_silent_on_fp_arith():
     assert not any(f[0].startswith("fp-ldst") for f in found), found
 
 
+def test_fp_arith_fires():
+    # vdiv is the FP arithmetic standout: SF div=7, DF div=15 (generic).
+    body = ("   0:\tee800a00 \tvdiv.f32\ts0, s1, s2\n"
+            "   4:\tee800b00 \tvdiv.f64\td0, d1, d2")
+    found = armv5telint.lint(_func("f", body))
+    singles = [f for f in found if f[0].startswith("fp-div-single")]
+    doubles = [f for f in found if f[0].startswith("fp-div-double")]
+    assert singles and "7" in singles[0][0], found
+    assert doubles and "15" in doubles[0][0], found
+
+
+def test_fp_arith_silent_on_add():
+    body = "   0:\tee300a20 \tvadd.f32\ts0, s1, s2"
+    found = armv5telint.lint(_func("f", body))
+    assert not any(f[0].startswith("fp-div") for f in found), found
+
+
 if __name__ == "__main__":
     import traceback
     failures = 0

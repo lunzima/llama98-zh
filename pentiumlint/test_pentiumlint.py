@@ -226,6 +226,44 @@ def test_string_ops_is_cat1_single_stringop():
     assert "k6" in rule.procs, rule.procs
 
 
+def test_double_by_add_fires_on_sal_reg_1():
+    # DOUBLE_WITH_ADD = ~m_386: use add reg,reg instead of sal reg,1.
+    f = _op_fires("double-by-add", [("d1 e0", "sal", "eax,1")], "p5")
+    assert f[0] == 1, f
+    assert "p4" in f[2], f
+
+
+def test_double_by_add_silent_on_shift_2():
+    _op_silent("double-by-add", [("d1 e0", "sal", "eax,2")])
+
+
+def test_partial_reg_fires_on_mov_r8():
+    f = _op_fires("partial-reg", [("88 d8", "mov", "al,bl")], "p4")
+    assert f[0] == 1, f
+
+
+def test_partial_reg_silent_on_full_reg():
+    _op_silent("partial-reg", [("89 d8", "mov", "eax,ebx")])
+
+
+def test_partial_mem_read_fires_on_mov_r8_mem():
+    f = _op_fires("partial-mem-read", [("8a 00", "mov", "al,[eax]")], "p5")
+    assert f[0] == 3, f
+
+
+def test_partial_mem_read_silent_on_full_read():
+    _op_silent("partial-mem-read", [("8b 00", "mov", "eax,[eax]")])
+
+
+def test_simode_fiop_fires_on_fild_dword():
+    f = _op_fires("simode-fiop", [("df 00", "fild", "dword ptr [eax]")], "p5")
+    assert f[0] == 1, f
+
+
+def test_simode_fiop_silent_on_word():
+    _op_silent("simode-fiop", [("df 00", "fild", "word ptr [eax]")])
+
+
 def test_integration_on_real_gcc_intel_fixture():
     # A real gcc `objdump -M intel` fixture (not a synthetic _dis). This
     # exercises _GCC_INST_RE and _GCC_FUNC_RE, which the synthetic tests

@@ -75,10 +75,13 @@ RULES = [
          "should be explicit load/store loops. lods/scas/cmps have no "
          "gcc flag, so they are not flagged."),
     Rule(3, ("jcc", "jmp"), "p4",
-         "behavioral (NetBurst pipeline depth, not gcc's cost table - gcc "
-         "gives P4 no higher branch cost): P4's ~20-stage pipeline makes "
-         "a branch mispredict cost ~20 cycles. Prefer branchless selects "
-         "in hot loops where the branch is a coin flip."),
+         "behavioral (NetBurst pipeline depth, not P4's own cost table - "
+         "pentium4_cost branch_mispredict_scale=2 equals PPro/K6/P5): P4's "
+         "~20-stage pipeline makes a branch mispredict cost ~20 cycles. "
+         "Prefer branchless selects in hot loops where the branch is a coin "
+         "flip. gcc r17-1797 recently raised the GENERIC target's "
+         "branch_mispredict_scale from COSTS_N_INSNS(2) to +3 (~12% on "
+         "modern CPUs), confirming mispredict cost is real and modeled."),
     # --- category-1 quirks from gcc x86-tune.def ---
     Rule(1, ("not",), "p5,p55c",
          "not pairable on P5 (X86_TUNE_NOT_UNPAIRABLE, x86-tune.def:726). "
@@ -147,15 +150,16 @@ def _is_all_ones(op):
     return bool(s) and all(c == "f" for c in s)
 
 
-def _imm_is_8(op):
-    """True if `op` is the immediate 8 in any spelling (8, 8h, 0x8, 08h)."""
+def _imm_is(op, value):
+    """True if `op` is the immediate `value` in any spelling (1, 1h, 0x1,
+    01h). Strips 0x/hex-h and leading zeros before comparing."""
     s = op.lower()
     if s.startswith("0x"):
         s = s[2:]
     if s.endswith("h"):
         s = s[:-1]
     s = s.lstrip("0") or "0"
-    return s == "8"
+    return s == str(value)
 
 
 def _same_reg(op0, op1):
@@ -187,7 +191,7 @@ OP_RULES = [
     OpRule(1, "rol/ror-8", ("rol", "ror"), "p4",
            "a 16-bit rotate by 8 is a byte swap; on P4 use xchgb %rh,%rl "
            "instead (X86_TUNE_USE_XCHGB = m_PENT4, x86-tune.def).",
-           lambda o: len(o) == 2 and o[0].lower() in _REG16 and _imm_is_8(o[1])),
+           lambda o: len(o) == 2 and o[0].lower() in _REG16 and _imm_is(o[1], 8)),
     OpRule(1, "mov-r,-1", ("mov",), "p5",
            "on P5, loading -1 via OR is faster than MOV "
            "(X86_TUNE_MOVE_M1_VIA_OR = m_PENT|m_LAKEMONT, x86-tune.def). "
@@ -199,6 +203,32 @@ OP_RULES = [
            "constant count on P5 (x86-tune-costs.h pentium_cost "
            "shift_var/shift_const). K6 is 1 vs 1, so it is excluded.",
            lambda o: len(o) >= 2 and o[1].lower() == "cl"),
+    OpRule(1, "double-by-add", ("sal", "shl"), "p5,p55c,k6,k6-2,p4",
+           "gcc doubles an integer register with add reg,reg, not sal reg,1 "
+           "(X86_TUNE_DOUBLE_WITH_ADD = ~m_386, x86-tune.def; ~m_386 also "
+           "covers i486/cyrix/winchip, not keyed here). Rewrite: add reg,reg.",
+           lambda o: len(o) == 2 and o[0].lower() in _ALL_REGS
+           and _imm_is(o[1], 1)),
+    OpRule(1, "partial-reg", ("mov",), "p4",
+           "a store to an 8/16-bit register leaves the upper bits stale and "
+           "creates a partial-register dependency on P4 "
+           "(X86_TUNE_PARTIAL_REG_DEPENDENCY = m_P4_NOCONA|..., x86-tune.def). "
+           "Rewrite: movzx/movzbl to the full register.",
+           lambda o: bool(o) and o[0].lower() in (_REG8 | _REG16)),
+    OpRule(3, "partial-mem-read", ("mov",), "p5,p55c,k6,k6-2,p4",
+           "behavioral: reading part of a memory location can hit a "
+           "store-to-load forwarding stall after a large write to the same "
+           "address (X86_TUNE_PARTIAL_MEMORY_READ_STALL, x86-tune.def). "
+           "Census hint - the stall needs a preceding large write; the "
+           "reader proves it.",
+           lambda o: len(o) == 2 and o[0].lower() in (_REG8 | _REG16)
+           and _is_mem(o[1])),
+    OpRule(1, "simode-fiop", ("fild", "fist", "fistp", "fisttp"),
+           "p5,p55c",
+           "P5 avoids x87 integer load/store with a 32-bit (dword) operand "
+           "(X86_TUNE_USE_SIMODE_FIOP excludes m_PENT, x86-tune.def). "
+           "x87 domain - rarely hit on the integer target.",
+           lambda o: any("dword" in x.lower() for x in o)),
 ]
 
 # Two disassembly formats are supported:

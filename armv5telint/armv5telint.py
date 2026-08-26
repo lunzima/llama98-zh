@@ -194,8 +194,31 @@ def fp_ldst_rule():
     return Rule(2, "fp-ldst", apply)
 
 
+# FP arithmetic. generic_extra_costs charges SF div=7 / DF div=15 (the
+# standouts); DF mult=5, mult_addsub=fma=7 are also non-zero. The integer
+# target is softfloat so this fires only on VFP builds, but division is
+# expensive enough to key regardless. The .f32/.f64 suffix is the
+# cross-objdump spelling.
+FP_DIV_7 = ("vdiv.f32",)   # SF div = 7 insns
+FP_DIV_15 = ("vdiv.f64",)  # DF div = 15 insns
+
+
+def fp_arith_rule():
+    def apply(name, instrs):
+        out = []
+        n7 = sum(1 for m, _ in instrs if m in FP_DIV_7)
+        if n7:
+            out.append(("fp-div-single %d (7 insns)" % n7, name))
+        n15 = sum(1 for m, _ in instrs if m in FP_DIV_15)
+        if n15:
+            out.append(("fp-div-double %d (15 insns)" % n15, name))
+        return out
+    return Rule(2, "fp-arith", apply)
+
+
 RULES = [ldrh_run_rule(), smlabb_alone_rule(), mul_family_rule(),
-         ldst_cost_rule(), alu_shift_reg_rule(), fp_ldst_rule()]
+         ldst_cost_rule(), alu_shift_reg_rule(), fp_ldst_rule(),
+         fp_arith_rule()]
 
 
 def lint(text):

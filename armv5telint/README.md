@@ -21,6 +21,7 @@ per-instruction counts in their comments. gcc cannot match them because
 | `ldst-cost` | single `ldr`/`str`/`ldrb`/`ldrh`/`ldrsb`/`ldrsh` (2×) and `ldrd`/`strd` (3×) | group consecutive loads into `ldm`/`stm` |
 | `alu-shift-reg` | ALU with a register-specified shift (`add r0,r1,r2,lsl r3`): 1 insn vs a constant shift's 0 | use a constant shift, or hoist the shift out of the loop |
 | `fp-ldst` | `vldr`/`vstr` single (2 insns) and double (3 insns) | group FP loads/stores; the target is softfloat, so this fires only on VFP builds |
+| `fp-arith` | `vdiv.f32` (7 insns) / `vdiv.f64` (15 insns) | reciprocal-multiply where exactness is proven; softfloat target, VFP builds only |
 
 ### `mul-family` ratios (from gcc, not memory)
 
@@ -43,6 +44,18 @@ The previous stand-in ("2-5 cycles, ARM9TDMI TRM") is superseded by this
 table: the TRM's data-dependent early-termination multiplier is real, but
 gcc's own cost model is the authority the linter keys on, and it says
 2-3×, not 2-5×.
+
+### Remaining `generic_extra_costs` fields (documented, not keyed)
+
+`generic_extra_costs` (the table every ARMv5TE core tunes to) also has
+non-zero fields that the linter deliberately does not key, with reasons:
+
+| field | value | why not keyed |
+|---|---|---|
+| FP `mult` / `mult_addsub` / `fma` (SF) | 2 / 3 / 3 | cheap enough; softfloat target, VFP builds only |
+| FP `mult` / `mult_addsub` / `fma` / `addsub` (DF) | 5 / 7 / 7 / 3 | softfloat target, VFP builds only |
+| ALU `extend_arith` | 1 | the extend ops (uxtb/sxtb) are ARMv6+, unreachable on ARMv5TE |
+| ALU `non_exec` | 1 | predication cost; detecting "conditional and skipped" needs dataflow, not a peephole |
 
 **Soundness-first.** Every rewrite is only correct when the flags it
 changes are dead. The linter flags candidates; the reader proves. This
