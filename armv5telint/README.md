@@ -24,10 +24,11 @@ per-instruction counts in their comments. gcc cannot match them because
 
 ### `mul-family` ratios (from gcc, not memory)
 
-gcc's ARM cost table, `gcc/config/arm/aarch-cost-tables.h`, maps every
-ARMv5TE core (`arm9tdmi`, `arm9e`, `arm10e`, `arm926ej-s`, `arm1026ej-s`,
-`xscale`, `strongarm`) to `generic_extra_costs`, and the ARMv7-A baseline
-Cortex-A8 to `cortexa8_extra_costs`. The MULT SImode sub-table, in
+gcc's ARM cost table maps every ARMv5TE core (`arm9tdmi`, `arm9e`,
+`arm10e`, `arm926ej-s`, `arm1026ej-s`, `xscale`, `strongarm`) to
+`generic_extra_costs` (`gcc/config/arm/aarch-cost-tables.h`), and the
+ARMv7-A baseline Cortex-A8 to `cortexa8_extra_costs` (now in
+`gcc/config/arm/arm.cc`, L1214). The MULT SImode sub-table, in
 `COSTS_N_INSNS` units:
 
 | field | mnemonic | generic (ARMv5TE) | cortex-a8 | ratio |

@@ -34,6 +34,12 @@ Rule = namedtuple("Rule", ["category", "mnems", "procs", "reason"])
 # output below sorts findings by this order.
 PROC_PRIORITY = ["p5", "p55c", "k6", "k6-2", "cyrix", "winchip", "p4"]
 
+# The full shift/rotate family. gcc's cost table charges one
+# shift_var/shift_const for all of them (pentium4_cost = 4/4,
+# pentium_cost = 4/1), so the P4 shift rule and the P5 var-shift rule
+# both key on this single tuple.
+_SHIFT_OPS = ("shl", "sal", "shr", "sar", "rol", "ror", "rcl", "rcr")
+
 # The seed table, keyed to the engine's target family. grow this from
 # gcc's x86-tune.def (category 1), the instruction cost table (category
 # 2), and branch-predictability analysis (category 3), not from memory.
@@ -44,33 +50,35 @@ RULES = [
          "inc/dec there (stall negligible vs 1-byte encoding)"),
     Rule(2, ("movsx",), "p5,p55c,k6,k6-2",
          "sign-extension: 3 insns on P5 / 2 insns on K6 vs 1 on "
-         "PentiumPro - a 3x/2x cost delta (gcc x86-tune-costs.h:"
-         "415,846,632)."),
+         "PentiumPro - a 3x/2x cost delta (pentium_cost.movsx=3, "
+         "k6_cost.movsx=2)."),
     Rule(2, ("movzx",), "p5,p55c,k6,k6-2",
          "zero-extension: 2 insns on P5 / 2 insns on K6 vs 1 on "
-         "PentiumPro - a 2x cost delta (gcc x86-tune-costs.h:"
-         "416,847,633). On P5 gcc prefers AND for zero-extend "
+         "PentiumPro - a 2x cost delta (pentium_cost.movzx=2, "
+         "k6_cost.movzx=2). On P5 gcc prefers AND for zero-extend "
          "(X86_TUNE_ZERO_EXTEND_WITH_AND = m_486|m_PENT)."),
     Rule(2, ("imul", "mul"), "p5,p55c,p4",
          "11 insns on P5 / 15 insns on P4 vs 4 on PentiumPro "
-         "(2.75x / 3.75x, gcc x86-tune-costs.h:404,2476). "
+         "(2.75x / 3.75x, pentium_cost.mul=11, pentium4_cost.mul=15). "
          "K6 runs imul in 3 insns (cheaper than PPro), so it is "
          "excluded. Cyrix/WinChip have no gcc cost table."),
     Rule(2, ("idiv",), "p4",
-         "56 insns on P4 vs 17 on PentiumPro (3.29x, gcc "
-         "x86-tune-costs.h:2482). P5 (25 insns, 1.47x) and K6 "
+         "56 insns on P4 vs 17 on PentiumPro (3.29x, "
+         "pentium4_cost.div=56). P5 (25 insns, 1.47x) and K6 "
          "(18 insns, 1.06x) are both under 1.5x and excluded. "
          "A constant divisor should be a reciprocal multiply when "
          "exactness is proven."),
-    Rule(2, ("movs", "stos", "lods", "scas", "cmps"), "p5,p55c",
-         "microcoded, non-pairable on P5 (P5 optimization manual "
-         "Table 27-4; gcc models via pentium_memcpy/memset "
-         "stringop_algs in x86-tune-costs.h:359). Short fixed-count "
-         "copies/scans should be explicit load/store loops."),
+    Rule(1, ("movs", "stos"), "p5,p55c,k6,k6-2",
+         "gcc does not emit a single rep movs/rep stos on these chips "
+         "(X86_TUNE_SINGLE_STRINGOP = m_386|m_P4_NOCONA, so p5/k6 and "
+         "friends expand to an explicit loop). Short fixed-count copies "
+         "should be explicit load/store loops. lods/scas/cmps have no "
+         "gcc flag, so they are not flagged."),
     Rule(3, ("jcc", "jmp"), "p4",
-         "behavioral: P4's ~20-stage pipeline makes a branch mispredict "
-         "cost ~20 cycles. Prefer branchless selects in hot loops where "
-         "the branch is a coin flip."),
+         "behavioral (NetBurst pipeline depth, not gcc's cost table - gcc "
+         "gives P4 no higher branch cost): P4's ~20-stage pipeline makes "
+         "a branch mispredict cost ~20 cycles. Prefer branchless selects "
+         "in hot loops where the branch is a coin flip."),
     # --- category-1 quirks from gcc x86-tune.def ---
     Rule(1, ("not",), "p5,p55c",
          "not pairable on P5 (X86_TUNE_NOT_UNPAIRABLE, x86-tune.def:726). "
@@ -86,16 +94,17 @@ RULES = [
          "m_K6_GEODE but not m_PENT, x86-tune.def:348)."),
     # (Operand-inspection quirks — xor reg,reg, add mem,reg, mov reg,-1,
     # push [mem], not mem, rol/ror reg,8 — live in OP_RULES below.)
-    Rule(2, ("shl", "shr", "sar"), "p4",
-         "4 insns on P4 vs 1 on PentiumPro (4x, gcc x86-tune-costs.h:2474-"
-         "2475). Both variable (reg,cl) and constant (reg,imm) shifts are "
-         "expensive on P4's NetBurst pipeline. P5 variable_shift is also "
-         "4x (x86-tune-costs.h:402); that is the separate var-shift rule "
-         "in OP_RULES."),
+    Rule(2, _SHIFT_OPS, "p4",
+         "4 insns on P4 vs 1 on PentiumPro (4x, pentium4_cost.shift_var/"
+         "shift_const=4). Both variable (reg,cl) and constant (reg,imm) "
+         "counts are expensive on P4's NetBurst pipeline; gcc's 4 covers "
+         "the whole shift/rotate family. P5 variable_shift is also 4x "
+         "(pentium_cost.shift_var=4 vs shift_const=1); that is the "
+         "separate var-shift rule in OP_RULES."),
     Rule(2, ("lea",), "p4,k6",
-         "3 insns on P4 / 2 insns on K6 vs 1 on PentiumPro (3x/2x, gcc "
-         "x86-tune-costs.h:2473,832). P4 treats lea as a complex operation; "
-         "break into add/mov where possible."),
+         "3 insns on P4 / 2 insns on K6 vs 1 on PentiumPro (3x/2x, "
+         "pentium4_cost.lea=3, k6_cost.lea=2). P4 treats lea as a complex "
+         "operation; break into add/mov where possible."),
 ]
 
 # --- operand-inspection rules -------------------------------------------------
@@ -118,8 +127,7 @@ _RMW_OPS = ("add", "adc", "sub", "sbb", "and", "or", "xor",
             "shl", "sal", "shr", "sar", "rol", "ror", "rcl", "rcr")
 
 # Variable-count shifts (count in CL) cost 4 insns on P5 vs 1 for a
-# constant count (x86-tune-costs.h pentium_cost shift_var/shift_const).
-_SHIFT_OPS = ("shl", "sal", "shr", "sar", "rol", "ror", "rcl", "rcr")
+# constant count; _SHIFT_OPS is defined above, next to RULES.
 
 
 def _is_mem(op):

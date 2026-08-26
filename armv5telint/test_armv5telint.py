@@ -109,6 +109,15 @@ def test_alu_shift_reg_silent_on_constant_only():
     assert not any(f[0].startswith("alu-shift-reg") for f in found), found
 
 
+def test_alu_shift_reg_silent_on_ldr_scaled_offset():
+    # ldr r0,[r1,r2,lsl r3] carries a register shift, but as an addressing
+    # offset inside brackets, NOT the ALU shift_reg cost. The bracket strip
+    # must keep it from firing (the audit caught this false positive).
+    body = "   0:\te7900001 \tldr\tr0, [r1, r2, lsl r3]"
+    found = armv5telint.lint(_func("f", body))
+    assert not any(f[0].startswith("alu-shift-reg") for f in found), found
+
+
 def test_fp_ldst_fires():
     # single (vldr/vstr .32) = 2, double (.64) = 3, from generic_extra_costs
     # loadf/storef/loadd/stored.

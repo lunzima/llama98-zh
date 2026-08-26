@@ -206,6 +206,26 @@ def test_var_shift_silent_on_constant():
     _op_silent("var-shift", [("c1 e0 02", "shl", "eax,0x2")])
 
 
+def test_shift_rule_covers_all_shifts_and_rotates():
+    # The P4 shift cost (shift_var/shift_const=4) covers the whole
+    # shift/rotate family; a rule listing only shl/shr/sar would miss the
+    # rest (the audit caught this). Pin that all 8 fire.
+    for m in ("shl", "sal", "shr", "sar", "rol", "ror", "rcl", "rcr"):
+        text = _dis([("00", m, "eax,0x2")])
+        found = pentiumlint.lint(text)
+        assert any(f[1].startswith("shl+") and "p4" in f[2] for f in found), \
+            (m, found)
+
+
+def test_string_ops_is_cat1_single_stringop():
+    # The movs/stos rule is a category-1 quirk (X86_TUNE_SINGLE_STRINGOP),
+    # not a cost-delta, and it must name k6 too.
+    rule = [r for r in pentiumlint.RULES if r.mnems == ("movs", "stos")][0]
+    assert rule.category == 1, rule
+    assert "SINGLE_STRINGOP" in rule.reason, rule.reason
+    assert "k6" in rule.procs, rule.procs
+
+
 def test_integration_on_real_gcc_intel_fixture():
     # A real gcc `objdump -M intel` fixture (not a synthetic _dis). This
     # exercises _GCC_INST_RE and _GCC_FUNC_RE, which the synthetic tests

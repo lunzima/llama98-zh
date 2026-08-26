@@ -32,10 +32,10 @@ Rules come in three categories:
 | 2 | `movzx` | `p5,p55c,k6,k6-2` | 2 insns P5 / 2 K6 vs 1 PPro (2x); P5 prefers AND |
 | 2 | `imul`, `mul` | `p5,p55c,p4` | 11 insns P5 / 15 P4 vs 4 PPro (2.75x/3.75x) |
 | 2 | `idiv` | `p4` | 56 insns vs 17 PPro (3.29x). P5 (1.47x) / K6 (1.06x) excluded |
-| 2 | `movs`, `stos`, `lods`, `scas`, `cmps` | `p5,p55c` | microcoded, non-pairable on P5 |
-| 2 | `shl`, `shr`, `sar` | `p4` | 4 insns vs 1 PPro (4x), both variable and constant |
+| 1 | `movs`, `stos` | `p5,p55c,k6,k6-2` | gcc avoids single rep movs/stos here (SINGLE_STRINGOP); use explicit loop |
+| 2 | `shl`, `sal`, `shr`, `sar`, `rol`, `ror`, `rcl`, `rcr` | `p4` | 4 insns vs 1 PPro (4x), all shifts/rotates, variable and constant |
 | 2 | `lea` | `p4,k6` | 3 insns P4 / 2 K6 vs 1 PPro (3x/2x) |
-| 3 | `jcc`, `jmp` | `p4` | P4 ~20-stage pipeline: branch mispredict ~20 cycles |
+| 3 | `jcc`, `jmp` | `p4` | NetBurst ~20-stage pipeline (not gcc's cost table): mispredict ~20 cycles |
 
 The next seven are **operand rules**: they need the operand text, not just
 the mnemonic (the `OpRule` kind, as opposed to the mnemonic-count `Rule`).

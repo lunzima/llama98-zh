@@ -85,11 +85,11 @@ def smlabb_alone_rule():
     return Rule(2, "smlabb-alone", apply)
 
 
-# gcc's ARM cost table (gcc/config/arm/aarch-cost-tables.h): every
-# ARMv5TE core (arm9tdmi, arm9e, arm10e, arm926ej-s, arm1026ej-s, xscale,
-# strongarm) tunes to generic_extra_costs; the ARMv7-A baseline is
-# cortexa8_extra_costs. The MULT SImode sub-table, generic vs cortex-a8,
-# in COSTS_N_INSNS units (field -> mnemonic):
+# gcc's ARM cost table: every ARMv5TE core (arm9tdmi, arm9e, arm10e,
+# arm926ej-s, arm1026ej-s, xscale, strongarm) tunes to generic_extra_costs
+# (gcc/config/arm/aarch-cost-tables.h). The ARMv7-A baseline, cortex-a8,
+# moved to gcc/config/arm/arm.cc (L1214) with unchanged values. The MULT
+# SImode sub-table, generic vs cortex-a8, in COSTS_N_INSNS units:
 #   simple       mul           2 vs 1   -> 2x
 #   flag_setting muls          1 vs 1   -> equal (not flagged)
 #   extend       smull/umull   2 vs 1   -> 2x
@@ -105,9 +105,9 @@ MUL_FAMILY = [
 ]
 
 
-# LD/ST sub-table, generic (ARMv5TE) vs cortex-a8, same source:
-#   ldr/ldrb/ldrh/ldrsb/ldrsch/str/strb/strh   2 vs 1   -> 2x
-#   ldrd/strd                                    3 vs 1   -> 3x
+# LD/ST sub-table, generic (ARMv5TE) vs cortex-a8 (arm.cc L1214):
+#   ldr/ldrb/ldrh/ldrsb/ldrsh/str/strb/strh   2 vs 1   -> 2x
+#   ldrd/strd                                   3 vs 1   -> 3x
 # ldm/stm is MIXED (first reg 2x, subsequent 0.5x) so not flagged here;
 # the ldrh-run rule already targets the 4+ ldrh → ldm rewrite.
 LDST_2X = ("ldr", "ldrb", "ldrh", "ldrsb", "ldrsh",
@@ -117,10 +117,10 @@ LDST_3X = ("ldrd", "strd")
 
 def mul_family_rule():
     """Category 2 (cost-delta) read from gcc's own cost table, not
-    memory: aarch-cost-tables.h gives every ARMv5TE core
-    generic_extra_costs and Cortex-A8 cortexa8_extra_costs, and the
-    multiply family is 2-3x pricier on ARMv5TE than on the ARMv7-A
-    baseline. muls is 1 vs 1 (equal), so it is deliberately not flagged."""
+    memory: every ARMv5TE core tunes to generic_extra_costs and the
+    ARMv7-A baseline is cortex-a8 (now in arm.cc L1214), so the multiply
+    family is 2-3x pricier on ARMv5TE than on the ARMv7-A baseline.
+    muls is 1 vs 1 (equal), so it is deliberately not flagged."""
     def apply(name, instrs):
         out = []
         for m, ratio in MUL_FAMILY:
@@ -134,9 +134,9 @@ def mul_family_rule():
 
 def ldst_cost_rule():
     """Category 2 (cost-delta): every single ldr/str is 2x and every
-    ldrd/strd is 3x on ARMv5TE vs Cortex-A8, from the LD/ST sub-table
-    in aarch-cost-tables.h. This is a census flag — consecutive loads
-    that could be grouped into ldm are the rewrite (see ldrh-run)."""
+    ldrd/strd is 3x on ARMv5TE vs Cortex-A8 (arm.cc L1214). This is a
+    census flag — consecutive loads that could be grouped into ldm are
+    the rewrite (see ldrh-run)."""
     def apply(name, instrs):
         out = []
         n2 = sum(1 for m, _ in instrs if m in LDST_2X)
@@ -150,18 +150,23 @@ def ldst_cost_rule():
 
 
 # Register-specified shift in a data-processing operand. gcc's cost table
-# (aarch-cost-tables.h generic_extra_costs, which every ARMv5TE core tunes
-# to) charges COSTS_N_INSNS(1) for a shift_reg operand and 0 for a constant
-# shift: 'add r0,r1,r2,lsl r3' costs an extra insn vs 'add r0,r1,r2,lsl #3'.
-# The register-shift spelling is lsl/lsr/asr/ror followed by a register,
-# never '#' (rrx carries no register). Only data-processing instructions
-# take a register shift, so the pattern itself is unambiguous.
+# (generic_extra_costs, which every ARMv5TE core tunes to) charges
+# COSTS_N_INSNS(1) for a shift_reg operand and 0 for a constant shift:
+# 'add r0,r1,r2,lsl r3' costs an extra insn vs 'add r0,r1,r2,lsl #3'.
+# The spelling is lsl/lsr/asr/ror followed by a register, never '#' (rrx
+# carries no register). Loads/stores ALSO carry a register shift, but as a
+# bracketed addressing offset (ldr r0,[r1,r2,lsl r3]), not the ALU
+# shift_reg cost - so strip [...] before searching.
 SHIFT_REG_RE = re.compile(r"\b(?:lsl|lsr|asr|ror)\s+r\d+")
+BRACKET_RE = re.compile(r"\[[^\]]*\]")
 
 
 def alu_shift_reg_rule():
     def apply(name, instrs):
-        n = sum(1 for _, o in instrs if SHIFT_REG_RE.search(o))
+        n = 0
+        for _, o in instrs:
+            if SHIFT_REG_RE.search(BRACKET_RE.sub("", o)):
+                n += 1
         if n:
             return [("alu-shift-reg %d (1 insn, const shift is 0)" % n, name)]
         return []
