@@ -3928,7 +3928,7 @@ static void moe_expert_loop(LZRunState *s, const LZModelConfig *c,
     }
 }
 
-/* §9.2 risk-path probe: force the router's float-logits path under an
+/* Sec 9.2 risk-path probe: force the router's float-logits path under an
    otherwise --fixed all engine, so the int16 quantization's effect on
    expert selection can be measured against a fresh float baseline. Not
    a shipping knob - LZ_MOE_ROUTE_FLOAT=1 in the environment, and only
