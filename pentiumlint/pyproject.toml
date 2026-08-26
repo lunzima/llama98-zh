@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pentiumlint"
+version = "0.1.0"
+description = "pre-P6 / P4 x86 peephole inefficiency linter (a.k.a. cyrixlint)"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = []
+
+[project.scripts]
+pentiumlint = "pentiumlint:main"
+
+[tool.setuptools]
+py-modules = ["pentiumlint"]
