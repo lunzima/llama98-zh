@@ -144,7 +144,7 @@ void lz_epi_prep(LZTensor *w, int in_dim) {
     if (!w || !w->scale || w->gs <= 0 || in_dim <= 0) return;
     if (w->sq) return;                       /* idempotent */
     if (in_dim % w->gs) return;
-    ngw = in_dim / w->gs;
+    ngw = (unsigned)in_dim / (unsigned)w->gs;
     if (in_dim / 32 > LZ_EPI_MAX_NG) return; /* outside the derived bound */
     rows = w->n / in_dim;
     if (rows <= 0) return;
@@ -166,7 +166,7 @@ void lz_epi_prep_zero(LZTensor *w, int in_dim) {
     if (!w || !w->zero || w->gs <= 0 || in_dim <= 0) return;
     if (w->zq) return;                       /* idempotent */
     if (in_dim % w->gs) return;
-    ngw = in_dim / w->gs;
+    ngw = (unsigned)in_dim / (unsigned)w->gs;
     if (in_dim / 32 > LZ_EPI_MAX_NG) return; /* outside the derived bound */
     rows = w->n / in_dim;
     if (rows <= 0) return;
@@ -1025,7 +1025,7 @@ float *lz_t_f32(const LZTensor *t, float *scratch) {
             int base;
             for (base = g * t->gs; base < (g + 1) * t->gs; base += 32) {
                 const unsigned char *b4 = p4 + base / 2;
-                const unsigned char *b2 = p2 + base / 4;
+                const unsigned char *b2 = p2 + (unsigned)base / 4;
                 for (k = 0; k < 32; k++)
                     scratch[base + k] =
                         (float)(lz_q61_get(b4, b2, k)) * d + m;
@@ -1043,7 +1043,7 @@ float *lz_t_f32(const LZTensor *t, float *scratch) {
             float d = t->scale[g];
             int base;
             for (base = g * t->gs; base < (g + 1) * t->gs; base += 32) {
-                const unsigned char *b2 = p2 + base / 4;
+                const unsigned char *b2 = p2 + (unsigned)base / 4;
                 for (k = 0; k < 32; k++)
                     scratch[base + k] =
                         (float)(((b2[k & 7] >> (2 * (k >> 3))) & 3) - 1) * d;
@@ -1098,7 +1098,7 @@ void lz_t_row_f32(const LZTensor *t, int row, int dim, float *out) {
     if (t->dtype == LZ_FMT_Q6_1) {
         const unsigned char *p4 = (const unsigned char *)t->q + base / 2;
         const unsigned char *p2 = (const unsigned char *)t->q +
-                                  (size_t)t->n / 2 + base / 4;
+                                  (size_t)t->n / 2 + (unsigned)base / 4;
         if (!t->zero) return;
         for (i = 0; i < dim; i += 32) {
             int g = g0 + i / t->gs;
@@ -1112,7 +1112,7 @@ void lz_t_row_f32(const LZTensor *t, int row, int dim, float *out) {
         return;
     }
     if (t->dtype == LZ_FMT_T2) {
-        const unsigned char *p2 = (const unsigned char *)t->q + base / 4;
+        const unsigned char *p2 = (const unsigned char *)t->q + (unsigned)base / 4;
         for (i = 0; i < dim; i += 32) {
             int g = g0 + i / t->gs, k;
             float d = t->scale[g];

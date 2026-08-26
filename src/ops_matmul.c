@@ -310,8 +310,8 @@ static int q8_fixed_epi(const LZTensor *w, int in_dim, int nb, int nt) {
 void matmul_q8_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
                            const LZTensor *w, int in_dim, int out_dim, int nt) {
     int i, tk, t;
-    int r  = w->gs / 32;    /* 32-sub-blocks per weight group (gs=128 -> 4) */
-    int nb = in_dim / 32;   /* 32-sub-block count */
+    int r  = (unsigned)w->gs / 32;    /* 32-sub-blocks per weight group (gs=128 -> 4) */
+    int nb = (unsigned)in_dim / 32;   /* 32-sub-block count */
     const int8_t *wend = w->q + (size_t)w->n;   /* prefetch upper bound */
     lz_rowfn row;
     /* Same predicate as the float epilogue - see q8_fixed_epi. */
@@ -437,7 +437,7 @@ void matmul_scalar_ref_one(float *o, const int8_t *xq, const float *xqs,
             float sum = 0.0f;
             const int8_t *wq = wr;
             const int8_t *xr = xq;
-            for (g = 0; g < in_dim / gs; g++, wq += gs, xr += gs) {
+            for (g = 0; g < (int)((unsigned)in_dim / (unsigned)gs); g++, wq += gs, xr += gs) {
                 int32_t acc = 0;
                 for (k = 0; k < gs; k++)
                     acc += (int32_t)wq[k] * (int32_t)xr[k];
@@ -447,9 +447,9 @@ void matmul_scalar_ref_one(float *o, const int8_t *xq, const float *xqs,
         }
         return;
     }
-    r  = gs / 32;                   /* 32 sub-blocks per weight group */
-    ng = in_dim / gs;
-    nsb = in_dim / 32;              /* total number of 32-element sub-blocks */
+    r  = (unsigned)gs / 32;                   /* 32 sub-blocks per weight group */
+    ng = (unsigned)in_dim / (unsigned)gs;
+    nsb = (unsigned)in_dim / 32;              /* total number of 32-element sub-blocks */
     if (nsb > LZ_MM_WIDEN_MAX / 32) return;      /* defense: no silent miscalc */
 
     /* Q4_1's zero term xg[g] = sum_{sub-block s in g} xqs[s]*sum_k xq[k] depends
@@ -581,7 +581,7 @@ void matmul_scalar_ref_one(float *o, const int8_t *xq, const float *xqs,
 void matmul_scalar_ref(float *o, const int8_t *xq, const float *xqs,
                               const LZTensor *w, int in_dim, int out_dim, int nt) {
     int gsa = lz_act_gs(w, in_dim);
-    int ss = (gsa > 0) ? in_dim / gsa : in_dim / 32;
+    int ss = (gsa > 0) ? (unsigned)in_dim / (unsigned)gsa : (unsigned)in_dim / 32;
     int t;
     float *op = o;
     const int8_t *xqp = xq;
@@ -795,9 +795,9 @@ static void epi_zero_act(const int8_t *xq, const float *xqs, int in_dim,
 void matmul_q41_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
                             const LZTensor *w, int in_dim, int out_dim, int nt) {
     int i, t;
-    int r  = w->gs / 32;              /* 32 sub-blocks per weight group */
+    int r  = (unsigned)w->gs / 32;              /* 32 sub-blocks per weight group */
     int ng = in_dim / w->gs;          /* weight-group count */
-    int nb = in_dim / 32;             /* 32-sub-block count */
+    int nb = (unsigned)in_dim / 32;             /* 32-sub-block count */
     /* Same predicate as the Q8_0 float epilogue, own copy - see
        q41_fixed_epi's comment. */
     int fixed_epi = q41_fixed_epi(w, in_dim, nb, nt, r, 0);
@@ -1113,8 +1113,8 @@ const lz_rowfn LZ_ROW_Q61[LZ_ROW_N] = {
 void matmul_t2_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
                            const LZTensor *w, int in_dim, int out_dim, int nt) {
     int i, g, t;
-    int gs = w->gs, r = gs / 32, ng = in_dim / gs;
-    int nb = in_dim / 32;
+    int gs = w->gs, r = (unsigned)gs / 32, ng = (unsigned)in_dim / (unsigned)gs;
+    int nb = (unsigned)in_dim / 32;
     const unsigned char *p2b = (const unsigned char *)w->q;
     static float g_t2neg[LZ_MM_WIDEN_MAX / 32];
     /* Same predicate as matmul_q41_impl - T2 shares epi_q41/epi_q41_fixed
@@ -1175,8 +1175,8 @@ void matmul_t2_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
 void matmul_q61_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
                             const LZTensor *w, int in_dim, int out_dim, int nt) {
     int i, t;
-    int gs = w->gs, r = gs / 32, ng = in_dim / gs;
-    int nb = in_dim / 32;
+    int gs = w->gs, r = (unsigned)gs / 32, ng = (unsigned)in_dim / (unsigned)gs;
+    int nb = (unsigned)in_dim / 32;
     const unsigned char *p4b = (const unsigned char *)w->q;
     const unsigned char *p2b = p4b + (size_t)w->n / 2;
     /* Same predicate as matmul_q41_impl - see q41_fixed_epi's comment. */
@@ -1511,8 +1511,8 @@ static int q16_fixed_epi(const LZTensor *w, int in_dim, int nb, int nt) {
 void matmul_q16_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
                             const LZTensor *w, int in_dim, int out_dim, int nt) {
     int i, tk;
-    int r = w->gs / 32;
-    int ng = in_dim / 32;
+    int r = (unsigned)w->gs / 32;
+    int ng = (unsigned)in_dim / 32;
     const int16_t *wbase = (const int16_t *)(const void *)w->q;
     const int16_t *wend = wbase + (size_t)w->n;   /* prefetch upper bound */
     int t;

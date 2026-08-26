@@ -1848,7 +1848,7 @@ void lz_quantize_q8(const float *x, int n, int gs, int8_t *q, float *s) {
     int tier = ((gs & 31) == 0) ? lz_q8r_tier() : 0;
 #endif /* LZ_HAVE_Q8R_SIMD || LZ_HAVE_Q8R_SSE */
     if (gs <= 0 || n < gs || (n % gs) != 0) return;   /* defense: f32 weights have gs=0 etc. */
-    for (g = 0; g < n / gs; g++) {
+    for (g = 0; g < (int)((unsigned)n / (unsigned)gs); g++) {
         const float *grp = x + (size_t)g * gs;
         int8_t *out = q + (size_t)g * gs;
         float inv;
@@ -1969,7 +1969,7 @@ void lz_quantize_q8(const float *x, int n, int gs, int8_t *q, float *s) {
    the fast/else decision, the MIN_SCALE floor and the stored scale all
    match lz_quantize_q8 bit for bit; only the grouping changes. */
 void lz_quantize_q8_tok(const float *x, int n, int8_t *q, float *s) {
-    int ns = n / 32;
+    int ns = (unsigned)n / 32;
     int k;
     float inv, sg;
     int fast;
@@ -2000,7 +2000,7 @@ void lz_quantize_q8_tok(const float *x, int n, int8_t *q, float *s) {
    (see its comment), just grouped by the whole row instead of gs. */
 void lz_quantize_q8_tok_int(const int32_t *t, int n, float deq,
                             int8_t *q, float *s) {
-    int ns = n / 32;
+    int ns = (unsigned)n / 32;
     int k;
     int32_t tam = 0;
     float amax, inv, sg;
@@ -2147,7 +2147,7 @@ void lz_quantize_q8_int(const int32_t *t, int n, int gs, float deq,
                         int8_t *q, float *s) {
     int g, k;
     if (gs <= 0 || n < gs || (n % gs) != 0) return;   /* defense: f32 weights have gs=0 etc. */
-    for (g = 0; g < n / gs; g++) {
+    for (g = 0; g < (int)((unsigned)n / (unsigned)gs); g++) {
         const int32_t *grp = t + (size_t)g * gs;
         int8_t *out = q + (size_t)g * gs;
         int32_t tam = 0;
@@ -2234,7 +2234,7 @@ void lz_quantize_q8_int(const int32_t *t, int n, int gs, float deq,
                     /* `254*m + tam < 2*tam*qi` rewritten so it fits: see
                        this function's header. Bit 31 IS the sign, so no
                        signed conversion of a wrapped value. */
-                    qi -= (int32_t)((127u * mu - tamu * (uint32_t)qi
+                    qi -= (int32_t)(((mu << 7) - mu - tamu * (uint32_t)qi
                                      + tamh) >> 31);
                     /* Both clamps are defense and known to be: the proof
                        reports qi in [0, 127] over the whole domain,
@@ -2345,7 +2345,7 @@ void lz_quantize_q8_i16(const short *t, int n, int gs, float deq,
                         int8_t *q, float *s) {
     int g, k;
     if (gs <= 0 || n < gs || (n % gs) != 0) return;   /* defense: f32 weights have gs=0 etc. */
-    for (g = 0; g < n / gs; g++) {
+    for (g = 0; g < (int)((unsigned)n / (unsigned)gs); g++) {
         const short *grp = t + (size_t)g * gs;
         int8_t *out = q + (size_t)g * gs;
         int32_t tam = 0;
@@ -2406,7 +2406,7 @@ void lz_quantize_q8_i16(const short *t, int n, int gs, float deq,
                 int neg = (v < 0);
                 int32_t m = neg ? -v : v;
                 int32_t qi = (m * rcp + LZ_Q8RCP_HALF) >> LZ_Q8RCP_SH;
-                qi -= (254 * m + tam < 2 * tam * qi);
+                qi -= ((m << 8) - (m << 1) + tam < 2 * tam * qi);
                 /* Defense only, and known to be: the exhaustive proof
                    reports qi in [0, 127] over the whole domain, because
                    tam is this group's own amax ten lines up. It stays
@@ -2464,7 +2464,7 @@ void lz_quantize_q8_int64(const int64_t *t, int n, int gs, float deq,
                           int8_t *q, float *s) {
     int g, k;
     if (gs <= 0 || n < gs || (n % gs) != 0) return;   /* defense: f32 weights have gs=0 etc. */
-    for (g = 0; g < n / gs; g++) {
+    for (g = 0; g < (int)((unsigned)n / (unsigned)gs); g++) {
         const int64_t *grp = t + (size_t)g * gs;
         int8_t *out = q + (size_t)g * gs;
         int64_t tam = 0;
@@ -2580,7 +2580,7 @@ void lz_quantize_q8_silu(const float *p, const float *g, const int32_t *sig,
         }
         return;
     }
-    for (grp = 0; grp < n / gs; grp++) {
+    for (grp = 0; grp < (int)((unsigned)n / (unsigned)gs); grp++) {
         const float *pg = p + (size_t)grp * gs;
         const float *gg = g + (size_t)grp * gs;
         const int32_t *sg = sig + (size_t)grp * gs;
