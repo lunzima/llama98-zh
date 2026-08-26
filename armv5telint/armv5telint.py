@@ -82,7 +82,20 @@ def smlabb_alone_rule():
     return Rule(2, "smlabb-alone", apply)
 
 
-RULES = [ldrh_run_rule(), smlabb_alone_rule()]
+def mul_mla_rule():
+    """mul/mla is 2-5 cycles on the ARM9TDMI (early-termination
+    multiplier, data-dependent) vs 1 cycle on Cortex-A8 - a 2-5x cost
+    delta, and the data-dependence makes it worse than the number. From
+    the ARM9TDMI / Cortex-A8 TRM instruction timings."""
+    def apply(name, mnems):
+        n = sum(1 for m in mnems if m in ("mul", "mla"))
+        if n > 0:
+            return [("mul-mla %d (2-5x vs armv7-a)" % n, name)]
+        return []
+    return Rule(2, "mul-mla", apply)
+
+
+RULES = [ldrh_run_rule(), smlabb_alone_rule(), mul_mla_rule()]
 
 
 def lint(text):
