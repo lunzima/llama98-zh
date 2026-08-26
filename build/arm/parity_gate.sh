@@ -461,39 +461,52 @@ done
 # nrmss's and fwhti's hand-written cells all sit behind the fixed tier,
 # which the float arm turns off. They ARE the shipping default (-fixed
 # all is what every build runs; the float arm exists only for
-# cross-checking), and each owes the scalar reference the same
-# bit-identity the float bodies owe. A fixed kernel change therefore
-# needs this round, not an ad-hoc probe - the recur kernel landed
-# 0d10a89 only after a throwaway unit probe caught what the float-only
-# parity gate could not see. The later --fixed all overrides the pins'
-# --fixed off (the CLI applies flags in order).
-ARM_FX_DUMP="$ARM_WORK/arm.fixed.logits"
-if ! run_arm_dump "$ARM_FX_DUMP" $PINS --fixed all \
+# cross-checking). A fixed kernel change therefore needs this round,
+# not an ad-hoc probe - the recur kernel landed 0d10a89 only after a
+# throwaway unit probe caught what the float-only parity gate could not
+# see. The later --fixed all overrides the pins' --fixed off (the CLI
+# applies flags in order).
+#
+# THE REFERENCE IS arm-c, NOT ref. --kernel ref routes every format to
+# matmul_scalar_ref, whose Step-2 reduction is float regardless of
+# --fixed - it has no fixed epilogue at all (see the header note above),
+# so under --fixed all it still yields the FLOAT answer. The fixed
+# tier's scales are quantized to int16 (epi_pack_act / epi_prep_plane),
+# so fixed differs from float by design (the accepted pass-2 precision,
+# docs/fixed-tier-pipeline-breakpoints.md) and a fixed-vs-ref comparison
+# can never be bit-identical. arm-c is the fixed C cell, arm-asm the
+# hand-written one; arm-asm must agree with arm-c bit for bit, which is
+# the fixed analogue of the float loop's arm-c-vs-ref above.
+ARM_FX_DUMP="$ARM_WORK/arm.fixed.arm-c.logits"
+if ! run_arm_dump "$ARM_FX_DUMP" $PINS --fixed all --kernel arm-c \
         --tokens "$TOKENS" \
-        >"$WORK/arm.fixed.log" 2>&1; then
-    echo "FAIL: ARM --fixed all run failed:" >&2
-    cat "$WORK/arm.fixed.log" >&2
+        >"$WORK/arm.fixed.arm-c.log" 2>&1; then
+    echo "FAIL: ARM --fixed all --kernel arm-c run failed:" >&2
+    cat "$WORK/arm.fixed.arm-c.log" >&2
     exit 1
 fi
-for K in arm-c arm-asm; do
-    FXDUMP="$ARM_WORK/arm.fixed.$K.logits"
-    if ! run_arm_dump "$FXDUMP" $PINS --fixed all --kernel "$K" \
-            --tokens "$TOKENS" \
-            >"$WORK/arm.fixed.$K.log" 2>&1; then
-        echo "FAIL: ARM --fixed all --kernel $K run failed:" >&2
-        cat "$WORK/arm.fixed.$K.log" >&2
-        exit 1
-    fi
-    if grep -q '\[kernel: requested' "$WORK/arm.fixed.$K.log"; then
-        echo "FAIL: --kernel $K was not honoured by $ARM_BIN:" >&2
-        grep '\[kernel: requested' "$WORK/arm.fixed.$K.log" >&2
-        exit 1
-    fi
-    if ! cmp -s "$ARM_FX_DUMP" "$FXDUMP"; then
-        NDIFF=$(cmp -l "$ARM_FX_DUMP" "$FXDUMP" | wc -l)
-        echo "FAIL: ARM fixed tier $K differs from ref - $NDIFF bytes" >&2
-        exit 1
-    fi
-    echo "PASS: ARM fixed tier $K is bit-identical to ref (fixed, $ARM_SZ bytes)"
-done
+if grep -q '\[kernel: requested' "$WORK/arm.fixed.arm-c.log"; then
+    echo "FAIL: --kernel arm-c was not honoured by $ARM_BIN:" >&2
+    grep '\[kernel: requested' "$WORK/arm.fixed.arm-c.log" >&2
+    exit 1
+fi
+FXDUMP="$ARM_WORK/arm.fixed.arm-asm.logits"
+if ! run_arm_dump "$FXDUMP" $PINS --fixed all --kernel arm-asm \
+        --tokens "$TOKENS" \
+        >"$WORK/arm.fixed.arm-asm.log" 2>&1; then
+    echo "FAIL: ARM --fixed all --kernel arm-asm run failed:" >&2
+    cat "$WORK/arm.fixed.arm-asm.log" >&2
+    exit 1
+fi
+if grep -q '\[kernel: requested' "$WORK/arm.fixed.arm-asm.log"; then
+    echo "FAIL: --kernel arm-asm was not honoured by $ARM_BIN:" >&2
+    grep '\[kernel: requested' "$WORK/arm.fixed.arm-asm.log" >&2
+    exit 1
+fi
+if ! cmp -s "$ARM_FX_DUMP" "$FXDUMP"; then
+    NDIFF=$(cmp -l "$ARM_FX_DUMP" "$FXDUMP" | wc -l)
+    echo "FAIL: ARM fixed tier arm-asm differs from arm-c - $NDIFF bytes" >&2
+    exit 1
+fi
+echo "PASS: ARM fixed tier arm-asm is bit-identical to arm-c (fixed, $ARM_SZ bytes)"
 exit 0
