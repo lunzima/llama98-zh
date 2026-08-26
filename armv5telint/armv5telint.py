@@ -24,10 +24,11 @@ from collections import namedtuple
 # Category 1 (quirk) is empty for ARMv5TE - gcc's arm-cpus.in has only
 # LDSCHED/XSCALE/STRONG scheduling models, no "avoid this instruction"
 # flags (the one slow note, smallmul, is cortex-m only). Category 2
-# (cost-delta) is read from gcc's own cost table, aarch-cost-tables.h,
-# not from memory: it maps every ARMv5TE core to generic_extra_costs and
-# Cortex-A8 to cortexa8_extra_costs. The ldrh/smlabb rules are the C
-# tier's sequence pricier than the asm cell's under the 4-byte contract.
+# (cost-delta) is read from gcc's own cost tables, not from memory:
+# every ARMv5TE core tunes to generic_extra_costs (aarch-cost-tables.h),
+# and the ARMv7-A baseline is cortex-a8 (now in arm.cc L1214). The
+# ldrh/smlabb rules are the C tier's sequence pricier than the asm
+# cell's under the 4-byte contract.
 Rule = namedtuple("Rule", ["category", "name", "apply"])
 
 FUNC_RE = re.compile(r"^([0-9a-f]+) <([^>]+)>:$")

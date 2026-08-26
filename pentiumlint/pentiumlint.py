@@ -95,8 +95,9 @@ RULES = [
     Rule(1, ("sahf",), "p5,p55c",
          "P5 avoids sahf (X86_TUNE_USE_SAHF lists m_PPRO/m_P4_NOCONA/"
          "m_K6_GEODE but not m_PENT, x86-tune.def:348)."),
-    # (Operand-inspection quirks — xor reg,reg, add mem,reg, mov reg,-1,
-    # push [mem], not mem, rol/ror reg,8 — live in OP_RULES below.)
+    # (Operand-inspection rules — xor reg,reg, rmw-mem, mov reg,-1,
+    # push/not mem, rol/ror reg,8, var-shift, double-by-add, partial-reg,
+    # partial-mem-read, simode-fiop — live in OP_RULES below.)
     Rule(2, _SHIFT_OPS, "p4",
          "4 insns on P4 vs 1 on PentiumPro (4x, pentium4_cost.shift_var/"
          "shift_const=4). Both variable (reg,cl) and constant (reg,imm) "
