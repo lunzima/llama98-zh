@@ -1042,6 +1042,7 @@ int  lz_epi_zero_ready(const LZTensor *w);
    static. See its definition for the branchless sign handling and the
    rs <= 0 / rs >= 64 corners. */
 lz_i64 epi_shr_half(lz_i64 s, int rs);
+lz_u64 epi_shr_half_u(lz_u64 umag, int rs);
 
 /* Sub-blocks per weight group (gs/32) that the zero term's integer
    activation fold can take. DERIVED, like LZ_EPI_MAX_NG above it, and
