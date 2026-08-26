@@ -405,12 +405,6 @@ int lz_act_gs(const LZTensor *w, int in_dim) {
    one addition: the zero coefficient is -scale, so the negated array is
    built per row into g_t2neg and handed to epi_q41 as its `wm`. */
 
-/* lz_rope_sse2's body lives in src/ops_sse2.c: it writes %xmm
-   registers, so it belongs in the translation unit built with -msse2.
-   Declared in src/ops_sse2.h, guarded there by LZ_ROPE_SSE2_EXTERN. */
-
-
-
 /* Lloyd-Max fixed point for N(0,1), 16 levels. Provenance and the
    re-derivation script are in ops.h's comment - do not "tidy" these
    digits, every cached row decodes against them. */
@@ -462,42 +456,6 @@ void lz_kv4_quantize(const float *x, int n, unsigned char *out, float *scale) {
 /* lz_fwht, the float transform, is in src/fwht.c beside its int32 twin.
    It was here; one operator in two files meant changing the butterfly
    twice and made every per-file census see one operator as two. */
-
-void lz_rope(float *v, int n_heads, int head_dim, int rotary_dim,
-             int pos, const float *cs) {
-    /* Bit-exact contract: every kernel below reproduces the scalar path
-       per-element (each rotation is an independent IEEE mul/add). MMX is
-       deliberately NOT used here - MMX has no floating point, so any MMX
-       RoPE would have to quantize (x Q8 / cos-sin Q14), which breaks
-       bit-exactness; RoPE is not a PII bottleneck (~2-3us/token), so
-       correctness wins and MMX builds fall through to scalar. */
-    /* LZ_ROPE_SSE2_EXTERN is defined (in src/ops_sse2.h) exactly when
-       src/ops_sse2.c's lz_rope_sse2 is part of this link - the single
-       source of truth for both this call site and the extern
-       declaration, so the two cannot drift the way two independent
-       `#if defined(__SSE2__) && !defined(__WATCOMC__)` copies once
-       could (one compiling the definition out while the call stayed,
-       failing the build with an implicit-declaration error). */
-#if defined(LZ_ROPE_SSE2_EXTERN)
-    lz_rope_sse2(v, n_heads, head_dim, rotary_dim, pos, cs);
-#else
-    int half = rotary_dim / 2;
-    int h, i;
-    const float *row = cs + (size_t)pos * half * 2;
-    for (i = 0; i < half; i++) {
-        float c = row[i * 2];
-        float s = row[i * 2 + 1];
-        for (h = 0; h < n_heads; h++) {
-            float *base = v + (size_t)h * head_dim;
-            float x0 = base[i];
-            float x1 = base[i + half];
-            base[i]        = x0 * c - x1 * s;
-            base[i + half] = x1 * c + x0 * s;
-        }
-    }
-    /* components beyond rotary_dim stay as-is; they do not rotate */
-#endif /* LZ_ROPE_SSE2_EXTERN */
-}
 
 /* ---- kernel coverage matrix ------------------------------------------
 
