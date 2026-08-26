@@ -441,7 +441,7 @@ void matmul_scalar_ref_one(float *o, const int8_t *xq, const float *xqs,
                 int32_t acc = 0;
                 for (k = 0; k < gs; k++)
                     acc += (int32_t)wq[k] * (int32_t)xr[k];
-                sum += lz_i32f(acc) * xqs[g] * ws[g];
+                sum += lz_i32f(acc) * xqs[g] * ((const float *)ws)[g];
             }
             o[i] = sum;
         }
@@ -472,10 +472,11 @@ void matmul_scalar_ref_one(float *o, const int8_t *xq, const float *xqs,
 
     const int8_t *wr = w->q;
     const int16_t *w16 = (const int16_t *)(const void *)w->q;
-    const float *ws = w->scale;
-    const float *wz = (q4 && !t2) ? w->zero : w->scale;
+    const char *ws = (const char *)w->scale;
+    const char *wz = (q4 && !t2) ? (const char *)w->zero
+                                 : (const char *)w->scale;
     for (i = 0; i < out_dim; i++, wr += in_dim, w16 += in_dim,
-         ws += ng, wz += ng) {
+         ws += (unsigned)ng << 2, wz += (unsigned)ng << 2) {
         const unsigned char *wn = (const unsigned char *)w->q +
                                   (size_t)i * in_dim / 2;
         const unsigned char *w2 = (const unsigned char *)w->q +
@@ -532,38 +533,42 @@ void matmul_scalar_ref_one(float *o, const int8_t *xq, const float *xqs,
         /* Step 2: float reduction, byte-for-byte matching the SIMD side's epilogue. */
         if (q4) {
             float dotsum = 0.0f, zsum = 0.0f;
-            for (g = 0; g < ng; g++) {
+            const int32_t *ap = accref;
+            const float *xp = xqs;
+            for (g = 0; g < ng; g++, ap += r, xp += r) {
                 float dot = 0.0f;
                 for (s = 0; s < r; s++)
-                    dot += lz_i32f(accref[g * r + s]) * xqs[g * r + s];
-                dotsum += dot * ws[g];
+                    dot += lz_i32f(ap[s]) * xp[s];
+                dotsum += dot * ((const float *)ws)[g];
                 /* T2's zero coefficient is -scale, not a stored min:
                    sum(w*x) = d*[sum(code*x) - sum(x)]. Written as a negated
                    multiply rather than folded into the dot term so the
                    two accumulators stay separate, matching the SIMD
                    epilogue's merge order. */
-                zsum += xgref[g] * (t2 ? -ws[g] : wz[g]);
+                zsum += xgref[g] * (t2 ? -((const float *)ws)[g] : ((const float *)wz)[g]);
             }
             o[i] = dotsum + zsum;
         } else if (r > 1) {
             float sum = 0.0f;
-            for (g = 0; g < ng; g++) {
+            const int32_t *ap = accref;
+            const float *xp = xqs;
+            for (g = 0; g < ng; g++, ap += r, xp += r) {
                 float dot = 0.0f;
                 for (s = 0; s < r; s++)
-                    dot += lz_i32f(accref[g * r + s]) * xqs[g * r + s];
-                sum += dot * ws[g];
+                    dot += lz_i32f(ap[s]) * xp[s];
+                sum += dot * ((const float *)ws)[g];
             }
             o[i] = sum;
         } else {
             float a0 = 0.0f, a1 = 0.0f, a2 = 0.0f, a3 = 0.0f;
             for (g = 0; g + 3 < ng; g += 4) {
-                a0 += lz_i32f(accref[g])     * (xqs[g]     * ws[g]);
-                a1 += lz_i32f(accref[g + 1]) * (xqs[g + 1] * ws[g + 1]);
-                a2 += lz_i32f(accref[g + 2]) * (xqs[g + 2] * ws[g + 2]);
-                a3 += lz_i32f(accref[g + 3]) * (xqs[g + 3] * ws[g + 3]);
+                a0 += lz_i32f(accref[g])     * (xqs[g]     * ((const float *)ws)[g]);
+                a1 += lz_i32f(accref[g + 1]) * (xqs[g + 1] * ((const float *)ws)[g + 1]);
+                a2 += lz_i32f(accref[g + 2]) * (xqs[g + 2] * ((const float *)ws)[g + 2]);
+                a3 += lz_i32f(accref[g + 3]) * (xqs[g + 3] * ((const float *)ws)[g + 3]);
             }
             for (; g < ng; g++)                  /* tail all into a0, same as SIMD */
-                a0 += lz_i32f(accref[g]) * (xqs[g] * ws[g]);
+                a0 += lz_i32f(accref[g]) * (xqs[g] * ((const float *)ws)[g]);
             o[i] = (a0 + a2) + (a1 + a3);
         }
     }
@@ -831,9 +836,10 @@ void matmul_q41_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
         epi_zero_act(xq, xqs, in_dim, ng, r, nb, nt);
     }
 
-    const float *wd = w->scale;
-    const float *wm = w->zero;
-    for (i = 0; i < out_dim; i++, wd += ng, wm += ng) {
+    const char *wd = (const char *)w->scale;
+    const char *wm = (const char *)w->zero;
+    for (i = 0; i < out_dim; i++, wd += (unsigned)ng << 2,
+         wm += (unsigned)ng << 2) {
         const unsigned char *wn =
             (const unsigned char *)w->q + (size_t)i * in_dim / 2;
         const unsigned char *wend =            /* prefetch upper bound */
@@ -843,7 +849,7 @@ void matmul_q41_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
         row(g_acc32, wn, NULL, g_xw, nb, nt, in_dim, wend, NULL);
         if (lz_cpu_has_mmx()) _mm_empty();
         epi_q41_row(out, i, out_dim, nt, w, ng, r, nb, 0, fixed_epi,
-                    xqs, wd, wm);
+                    xqs, (const float *)wd, (const float *)wm);
     }
 }
 
@@ -1162,7 +1168,7 @@ void matmul_t2_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
         row(g_acc32, w2, NULL, g_xw, nb, nt, in_dim, NULL, NULL);
         if (lz_cpu_has_mmx()) _mm_empty();
         epi_q41_row(out, i, out_dim, nt, w, ng, r, nb, 1, fixed_epi,
-                    xqs, wd, g_t2neg);
+                    xqs, (const float *)wd, g_t2neg);
     }
 }
 
@@ -1204,9 +1210,10 @@ void matmul_q61_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
         epi_zero_act(xq, xqs, in_dim, ng, r, nb, nt);
     }
 
-    const float *wd = w->scale;
-    const float *wm = w->zero;
-    for (i = 0; i < out_dim; i++, wd += ng, wm += ng) {
+    const char *wd = (const char *)w->scale;
+    const char *wm = (const char *)w->zero;
+    for (i = 0; i < out_dim; i++, wd += (unsigned)ng << 2,
+         wm += (unsigned)ng << 2) {
         const unsigned char *wn = p4b + (size_t)i * in_dim / 2;
         const unsigned char *w2 = p2b + (size_t)i * in_dim / 4;
         row(g_acc32, wn, w2, g_xw, nb, nt, in_dim,
@@ -1214,7 +1221,7 @@ void matmul_q61_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
             p2b + (size_t)w->n / 4);    /* 2-bit plane's own bound */
         if (lz_cpu_has_mmx()) _mm_empty();
         epi_q41_row(out, i, out_dim, nt, w, ng, r, nb, 0, fixed_epi,
-                    xqs, wd, wm);
+                    xqs, (const float *)wd, (const float *)wm);
     }
 }
 
