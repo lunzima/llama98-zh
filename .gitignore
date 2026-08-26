@@ -105,6 +105,7 @@
 !/build/p2_mul32_probe.c
 !/build/ascii_source_gate.sh
 !/build/div_hotness.sh
+!/build/mul_hotness.sh
 !/build/cov_run.sh
 !/build/watcom_flag_parity_gate.sh
 !/build/nest_census.sh
