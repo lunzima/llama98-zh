@@ -89,9 +89,9 @@ static int epi_plane_fits(const float *src, size_t n) {
 static void epi_prep_plane(const float *src, int16_t *out, signed char *ex,
                            int ngw, int rows) {
     int row, g;
-    for (row = 0; row < rows; row++) {
-        const float *ws = src + (size_t)row * ngw;
-        int16_t *o = out + (size_t)row * ngw;
+    const float *ws = src;
+    int16_t *o = out;
+    for (row = 0; row < rows; row++, ws += ngw, o += ngw) {
         float amax = 0.0f, se;
         int e = 0;
         for (g = 0; g < ngw; g++) {
@@ -514,8 +514,8 @@ void epi_pack_act(const float *xqs, int nb, int nt) {
        one edit away from being mistaken for a site that bills zero
        because nobody wrote the bill. */
     LZ_FCX(LZ_FC_EPI, 0, 0, 0, 0, 0);
-    for (tk = 0; tk < nt; tk++) {
-        const float *xsb = xqs + (size_t)tk * nb;
+    const float *xsb = xqs;
+    for (tk = 0; tk < nt; tk++, xsb += nb) {
         /* The amax scan is q8_amax, not a hand-written loop. It was two
            __aeabi_fcmpXX per group - `xsb[g] < 0.0f` for the sign and
            `a > amax` for the max - and q8_amax already does exactly this
@@ -586,8 +586,8 @@ void epi_pack_act(const float *xqs, int nb, int nt) {
    76,280,004, 3.6% of the int32 ceiling. */
 void epi_zero_act_int(const int8_t *xq, int in_dim, int ng, int r, int nt) {
     int t, g, s, k;
-    for (t = 0; t < nt; t++) {
-        const int8_t *xqt = xq + (size_t)t * in_dim;
+    const int8_t *xqt = xq;
+    for (t = 0; t < nt; t++, xqt += in_dim) {
         const int16_t *xqi = g_epi_xq[t];
         for (g = 0; g < ng; g++) {
             int32_t a = 0;
@@ -944,11 +944,12 @@ float epi_q8(const int32_t *accb, const float *xsb, const float *ws,
     if (r > 1) {
         float sum = 0.0f;
         int g128;
-        for (g128 = 0; g128 < ng / r; g128++) {
+        const int32_t *ap = accb;
+        const float *xp = xsb;
+        for (g128 = 0; g128 < ng / r; g128++, ap += r, xp += r) {
             float dot = 0.0f;
             for (g = 0; g < r; g++) {
-                int idx = g128 * r + g;
-                dot += lz_i32f(accb[idx]) * xsb[idx];
+                dot += lz_i32f(ap[g]) * xp[g];
             }
             sum += dot * ws[g128];
         }
@@ -1170,14 +1171,17 @@ float epi_q41(const int32_t *accb, const float *xsb, const float *xgb,
        13.2% to 86.9% of the whole census). */
     LZ_FCX(LZ_FC_EPI, (long)ng * (r + 2) + 1, (long)ng * (r + 2) + 1,
            0, (long)ng * r, 0);
-    for (g = 0; g < ng; g++) {
-        float dot = 0.0f;
-        for (s = 0; s < r; s++) {
-            int sb = g * r + s;
-            dot += lz_i32f(accb[sb]) * xsb[sb];
+    {
+        const int32_t *ap = accb;
+        const float *xp = xsb;
+        for (g = 0; g < ng; g++, ap += r, xp += r) {
+            float dot = 0.0f;
+            for (s = 0; s < r; s++) {
+                dot += lz_i32f(ap[s]) * xp[s];
+            }
+            dotsum += dot * wd[g];
+            zsum += xgb[g] * wm[g];
         }
-        dotsum += dot * wd[g];
-        zsum += xgb[g] * wm[g];
     }
     return dotsum * (1.0f / 256.0f) + zsum;
 }

@@ -114,17 +114,24 @@ static void epi_q41_row(const LZMatOut *out, int i, int out_dim, int nt,
                         const float *wd, const float *wm) {
     int tk;
     if (out->oi) {
-        for (tk = 0; tk < nt; tk++)
-            out->oi[(size_t)tk * out_dim + i] = (short)epi_q41_align_i16(
-                g_acc32 + (size_t)tk * nb, w, i, tk, ng, r, zneg,
-                out->target_e, out->bound);
+        short *op = out->oi + i;
+        const int32_t *accp = g_acc32;
+        for (tk = 0; tk < nt; tk++, op += out_dim, accp += nb)
+            *op = (short)epi_q41_align_i16(accp, w, i, tk, ng, r, zneg,
+                                           out->target_e, out->bound);
         return;
     }
-    for (tk = 0; tk < nt; tk++)
-        out->o[(size_t)tk * out_dim + i] = fixed_epi
-            ? epi_q41_fixed(g_acc32 + (size_t)tk * nb, w, i, tk, ng, r, zneg)
-            : epi_q41(g_acc32 + (size_t)tk * nb, xqs + (size_t)tk * nb,
-                      g_xg + (size_t)tk * ng, wd, wm, ng, r);
+    {
+        float *op = out->o + i;
+        const int32_t *accp = g_acc32;
+        const float *xsp = xqs;
+        const float *xgp = g_xg;
+        for (tk = 0; tk < nt; tk++, op += out_dim, accp += nb,
+             xsp += nb, xgp += ng)
+            *op = fixed_epi
+                ? epi_q41_fixed(accp, w, i, tk, ng, r, zneg)
+                : epi_q41(accp, xsp, xgp, wd, wm, ng, r);
+    }
 }
 
 /* ---- Q8 guard block ---- */
@@ -160,27 +167,31 @@ static void row_q8_mmx_intrin(int32_t *acc32, const void *w4, const void *w2,
     const int8_t *wend = (const int8_t *)pf_end;
     int tk, g;
     (void)w2; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
+    {
+        const int16_t *xwt = xw;
+        int32_t *acc = acc32;
         /* Pair this token with the next so ONE weight unpack serves
            both. The prefetch is issued once for the pair, not once per
            token: it is a hint about the WEIGHT row, and the second
            token reads the bytes the first just pulled in. An odd nt
            leaves the last token on the single-token kernel. */
-        if (tk + 1 < nt && g_pair) {
-            const int16_t *xw2 = xwt + in_dim;
-            int32_t *accb = acc + nb;
-            for (g = 0; g < nb; g++) {
-                const int8_t *pf_ = wr + (size_t)(g + LZ_PF_DIST) * 32;
-                if (pf_ < wend) LZ_PFI_NTA(pf_);
-                dot32_x16_mmx_2(wr + (size_t)g * 32,
-                                xwt + (size_t)g * 32,
-                                xw2 + (size_t)g * 32,
-                                acc + g, accb + g);
+        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+            if (tk + 1 < nt && g_pair) {
+                const int16_t *xw2 = xwt + in_dim;
+                int32_t *accb = acc + nb;
+                for (g = 0; g < nb; g++) {
+                    const int8_t *pf_ = wr + (size_t)(g + LZ_PF_DIST) * 32;
+                    if (pf_ < wend) LZ_PFI_NTA(pf_);
+                    dot32_x16_mmx_2(wr + (size_t)g * 32,
+                                    xwt + (size_t)g * 32,
+                                    xw2 + (size_t)g * 32,
+                                    acc + g, accb + g);
+                }
+                tk++;
+                xwt += in_dim;   /* skip tk+1's pointers too */
+                acc += nb;
+                continue;
             }
-            tk++;
-        } else {
 #if defined(LZ_G128_GCC) && LZ_G128_GCC
             /* Group-of-four path behind the LZ_G128_GCC knob (default on,
                ops_kernel_shared.h): one call per 128 elements with the
@@ -216,12 +227,14 @@ static void row_q8_arm(int32_t *acc32, const void *w4, const void *w2,
     const int8_t *wr = (const int8_t *)w4;
     int tk, s;
     (void)w2; (void)pf_end; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
-        for (s = 0; s < nb; s++)
-            acc[s] = lz_dot32_q8_arm(wr + (size_t)s * 32,
-                                     xwt + (size_t)s * 32);
+    {
+        const int16_t *xwt = xw;
+        int32_t *acc = acc32;
+        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+            for (s = 0; s < nb; s++)
+                acc[s] = lz_dot32_q8_arm(wr + (size_t)s * 32,
+                                         xwt + (size_t)s * 32);
+        }
     }
 }
 
@@ -232,12 +245,14 @@ static void row_q8_arm_asm(int32_t *acc32, const void *w4, const void *w2,
     const int8_t *wr = (const int8_t *)w4;
     int tk, s;
     (void)w2; (void)pf_end; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
-        for (s = 0; s < nb; s++)
-            acc[s] = lz_dot32_q8_arm_asm(wr + (size_t)s * 32,
-                                         xwt + (size_t)s * 32);
+    {
+        const int16_t *xwt = xw;
+        int32_t *acc = acc32;
+        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+            for (s = 0; s < nb; s++)
+                acc[s] = lz_dot32_q8_arm_asm(wr + (size_t)s * 32,
+                                             xwt + (size_t)s * 32);
+        }
     }
 }
 #endif /* LZ_ARM_ASM_EXTERN */
@@ -351,8 +366,8 @@ void matmul_q8_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
     for (t = 0; t < nt * in_dim; t++) g_xw[t] = (int16_t)xq[t];
     if (fixed_epi) epi_pack_act(xqs, nb, nt);
 
-    for (i = 0; i < out_dim; i++) {
-        const int8_t *wr = w->q + (size_t)i * in_dim;
+    const int8_t *wr = w->q;
+    for (i = 0; i < out_dim; i++, wr += in_dim) {
         /* The weight row loads once here and serves all nt tokens; one
            EMMS per row, not per token - MMX and x87 share a register
            file and the epilogue below is x87 on the Watcom build. */
@@ -361,10 +376,11 @@ void matmul_q8_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
         /* The clamp inside epi_align_i16 has already brought the result
            within +-out->bound, so the narrowing cast cannot lose a bit. */
         if (out->oi) {
-            for (tk = 0; tk < nt; tk++)
-                out->oi[(size_t)tk * out_dim + i] = (short)epi_fixed_align_i16(
-                    g_acc32 + (size_t)tk * nb, w, i, tk, nb, r,
-                    out->target_e, out->bound);
+            short *op = out->oi + i;
+            const int32_t *accp = g_acc32;
+            for (tk = 0; tk < nt; tk++, op += out_dim, accp += nb)
+                *op = (short)epi_fixed_align_i16(accp, w, i, tk, nb, r,
+                                                 out->target_e, out->bound);
             continue;
         }
         /* fixed_epi does not change inside the row loop, so it picks the
@@ -381,16 +397,17 @@ void matmul_q8_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
            in_dim, and matmul_scalar_ref_one treats that as a tier of its
            own rather than an impossibility. */
         if (fixed_epi) {
-            for (tk = 0; tk < nt; tk++)
-                out->o[(size_t)tk * out_dim + i] =
-                    epi_fixed(g_acc32 + (size_t)tk * nb, w, i, tk, nb, r,
-                              post_e);
+            float *op = out->o + i;
+            const int32_t *accp = g_acc32;
+            for (tk = 0; tk < nt; tk++, op += out_dim, accp += nb)
+                *op = epi_fixed(accp, w, i, tk, nb, r, post_e);
         } else {
             const float *ws = w->scale + (size_t)(i * in_dim) / w->gs;
-            for (tk = 0; tk < nt; tk++)
-                out->o[(size_t)tk * out_dim + i] =
-                    epi_q8(g_acc32 + (size_t)tk * nb, xqs + (size_t)tk * nb,
-                           ws, nb, r, post);
+            float *op = out->o + i;
+            const int32_t *accp = g_acc32;
+            const float *xsp = xqs;
+            for (tk = 0; tk < nt; tk++, op += out_dim, accp += nb, xsp += nb)
+                *op = epi_q8(accp, xsp, ws, nb, r, post);
         }
     }
 }
@@ -414,14 +431,14 @@ void matmul_scalar_ref_one(float *o, const int8_t *xq, const float *xqs,
 
     if (gs < 32 || (gs % 32) != 0 || (in_dim % gs) != 0) {
         /* degenerate tier (gs < 32, activations share weight groups): Q8_0 only */
-        for (i = 0; i < out_dim; i++) {
-            const int8_t *wr = w->q + (size_t)i * in_dim;
+        const int8_t *wr = w->q;
+        for (i = 0; i < out_dim; i++, wr += in_dim) {
             const float *ws = w->scale + (size_t)(i * in_dim) / gs;
             float sum = 0.0f;
-            for (g = 0; g < in_dim / gs; g++) {
+            const int8_t *wq = wr;
+            const int8_t *xr = xq;
+            for (g = 0; g < in_dim / gs; g++, wq += gs, xr += gs) {
                 int32_t acc = 0;
-                const int8_t *wq = wr + (size_t)g * gs;
-                const int8_t *xr = xq + (size_t)g * gs;
                 for (k = 0; k < gs; k++)
                     acc += (int32_t)wq[k] * (int32_t)xr[k];
                 sum += lz_i32f(acc) * xqs[g] * ws[g];
@@ -440,28 +457,29 @@ void matmul_scalar_ref_one(float *o, const int8_t *xq, const float *xqs,
        summed in the same order as matmul_q41_impl, or the
        bit-identical contract breaks on this branch. */
     if (q4) {
-        for (g = 0; g < ng; g++) {
+        const float *xsp = xqs;
+        const int8_t *xqp = xq;
+        for (g = 0; g < ng; g++, xsp += r, xqp += r * 32) {
             float a = 0.0f;
             for (s = 0; s < r; s++) {
-                int sb = g * r + s;
                 int32_t sx = 0;
-                for (k = 0; k < 32; k++) sx += xq[sb * 32 + k];
-                a += lz_i32f(sx) * xqs[sb];
+                for (k = 0; k < 32; k++) sx += xqp[s * 32 + k];
+                a += lz_i32f(sx) * xsp[s];
             }
             xgref[g] = a;
         }
     }
 
-    for (i = 0; i < out_dim; i++) {
+    const int8_t *wr = w->q;
+    const int16_t *w16 = (const int16_t *)(const void *)w->q;
+    const float *ws = w->scale;
+    const float *wz = (q4 && !t2) ? w->zero : w->scale;
+    for (i = 0; i < out_dim; i++, wr += in_dim, w16 += in_dim,
+         ws += ng, wz += ng) {
         const unsigned char *wn = (const unsigned char *)w->q +
                                   (size_t)i * in_dim / 2;
         const unsigned char *w2 = (const unsigned char *)w->q +
                                   (size_t)w->n / 2 + (size_t)i * in_dim / 4;
-        const int8_t *wr = w->q + (size_t)i * in_dim;
-        const int16_t *w16 = (const int16_t *)(const void *)w->q +
-                             (size_t)i * in_dim;
-        const float *ws = w->scale + (size_t)i * ng;
-        const float *wz = (q4 && !t2) ? w->zero + (size_t)i * ng : NULL;
 
         /* Step 1: the row's int32 sub-block sums. On the SIMD side
            this segment is the MMX/SSE2 kernel. */
@@ -560,9 +578,11 @@ void matmul_scalar_ref(float *o, const int8_t *xq, const float *xqs,
     int gsa = lz_act_gs(w, in_dim);
     int ss = (gsa > 0) ? in_dim / gsa : in_dim / 32;
     int t;
-    for (t = 0; t < nt; t++)
-        matmul_scalar_ref_one(o + (size_t)t * out_dim, xq + (size_t)t * in_dim,
-                              xqs + (size_t)t * ss, w, in_dim, out_dim);
+    float *op = o;
+    const int8_t *xqp = xq;
+    const float *xsp = xqs;
+    for (t = 0; t < nt; t++, op += out_dim, xqp += in_dim, xsp += ss)
+        matmul_scalar_ref_one(op, xqp, xsp, w, in_dim, out_dim);
 }
 
 /* ---- Q41 guard block ---- */
@@ -589,23 +609,27 @@ static void row_q41_mmx_intrin(int32_t *acc32, const void *w4, const void *w2,
     const unsigned char *wend = (const unsigned char *)pf_end;
     int tk, s;
     (void)w2; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
+    {
+        const int16_t *xwt = xw;
+        int32_t *acc = acc32;
         /* Pair with the next token so ONE nibble unpack serves both. */
-        if (tk + 1 < nt && g_pair) {
-            const int16_t *xw2 = xwt + in_dim;
-            int32_t *accb = acc + nb;
-            for (s = 0; s < nb; s++) {
-                const unsigned char *pf_ = wn + (size_t)(s + LZ_PF_DIST) * 16;
-                if (pf_ < wend) LZ_PFI_NTA(pf_);
-                dot32_q41_mmx_2(wn + (size_t)s * 16,
-                                xwt + (size_t)s * 32,
-                                xw2 + (size_t)s * 32,
-                                acc + s, accb + s);
+        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+            if (tk + 1 < nt && g_pair) {
+                const int16_t *xw2 = xwt + in_dim;
+                int32_t *accb = acc + nb;
+                for (s = 0; s < nb; s++) {
+                    const unsigned char *pf_ = wn + (size_t)(s + LZ_PF_DIST) * 16;
+                    if (pf_ < wend) LZ_PFI_NTA(pf_);
+                    dot32_q41_mmx_2(wn + (size_t)s * 16,
+                                    xwt + (size_t)s * 32,
+                                    xw2 + (size_t)s * 32,
+                                    acc + s, accb + s);
+                }
+                tk++;
+                xwt += in_dim;   /* skip tk+1's pointers too */
+                acc += nb;
+                continue;
             }
-            tk++;
-        } else {
 #if defined(LZ_G128_GCC) && LZ_G128_GCC
             if ((nb & 3) == 0) LZ_Q41_GROUP4(dot128_q41_mmx);
             else               LZ_Q41_ACC(dot32_q41_mmx, LZ_PFI_NTA);
@@ -634,12 +658,14 @@ static void row_q41_arm(int32_t *acc32, const void *w4, const void *w2,
     const unsigned char *wn = (const unsigned char *)w4;
     int tk, s;
     (void)w2; (void)pf_end; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
-        for (s = 0; s < nb; s++)
-            acc[s] = lz_dot32_q41_arm(wn + (size_t)s * 16,
-                                      xwt + (size_t)s * 32);
+    {
+        const int16_t *xwt = xw;
+        int32_t *acc = acc32;
+        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+            for (s = 0; s < nb; s++)
+                acc[s] = lz_dot32_q41_arm(wn + (size_t)s * 16,
+                                          xwt + (size_t)s * 32);
+        }
     }
 }
 
@@ -650,12 +676,14 @@ static void row_q41_arm_asm(int32_t *acc32, const void *w4, const void *w2,
     const unsigned char *wn = (const unsigned char *)w4;
     int tk, s;
     (void)w2; (void)pf_end; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
-        for (s = 0; s < nb; s++)
-            acc[s] = lz_dot32_q41_arm_asm(wn + (size_t)s * 16,
-                                          xwt + (size_t)s * 32);
+    {
+        const int16_t *xwt = xw;
+        int32_t *acc = acc32;
+        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+            for (s = 0; s < nb; s++)
+                acc[s] = lz_dot32_q41_arm_asm(wn + (size_t)s * 16,
+                                              xwt + (size_t)s * 32);
+        }
     }
 }
 #endif /* LZ_ARM_ASM_EXTERN */
@@ -741,17 +769,18 @@ static void epi_zero_act(const int8_t *xq, const float *xqs, int in_dim,
     int t, g, s, k;
     LZ_FCX(LZ_FC_EPI, (long)nt * ng * r, (long)nt * ng * r, 0,
            (long)nt * ng * r, 0);
-    for (t = 0; t < nt; t++) {
-        const int8_t *xqt = xq + (size_t)t * in_dim;
-        const float *xst = xqs + (size_t)t * nb;
-        float *xgt = g_xg + (size_t)t * ng;
-        for (g = 0; g < ng; g++) {
+    const int8_t *xqt = xq;
+    const float *xst = xqs;
+    float *xgt = g_xg;
+    for (t = 0; t < nt; t++, xqt += in_dim, xst += nb, xgt += ng) {
+        const float *xsp = xst;
+        const int8_t *xqp = xqt;
+        for (g = 0; g < ng; g++, xsp += r, xqp += r * 32) {
             float a = 0.0f;
             for (s = 0; s < r; s++) {
-                int sb = g * r + s;
                 int32_t sx = 0;
-                for (k = 0; k < 32; k++) sx += xqt[sb * 32 + k];
-                a += lz_i32f(sx) * xst[sb];
+                for (k = 0; k < 32; k++) sx += xqp[s * 32 + k];
+                a += lz_i32f(sx) * xsp[s];
             }
             xgt[g] = a;
         }
@@ -802,13 +831,13 @@ void matmul_q41_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
         epi_zero_act(xq, xqs, in_dim, ng, r, nb, nt);
     }
 
-    for (i = 0; i < out_dim; i++) {
+    const float *wd = w->scale;
+    const float *wm = w->zero;
+    for (i = 0; i < out_dim; i++, wd += ng, wm += ng) {
         const unsigned char *wn =
             (const unsigned char *)w->q + (size_t)i * in_dim / 2;
         const unsigned char *wend =            /* prefetch upper bound */
             (const unsigned char *)w->q + (size_t)w->n / 2;
-        const float *wd = w->scale + (size_t)i * ng;
-        const float *wm = w->zero + (size_t)i * ng;
         /* Weight row loads once and serves all nt tokens; one EMMS per
            row, not per token - the epilogue below is x87 on Watcom. */
         row(g_acc32, wn, NULL, g_xw, nb, nt, in_dim, wend, NULL);
@@ -826,23 +855,43 @@ static void row_t2_mmx_intrin(int32_t *acc32, const void *w4, const void *w2v,
     const unsigned char *p2 = (const unsigned char *)w4;
     int tk, s;
     (void)w2v; (void)pf_end; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
-        s = 0;
-        /* Whole groups of four first, the per-32 fold for the nb % 4
-           tail. Both write the same values - dot128_t2_mmx folds the
-           same partials pairwise instead of singly - so the row is split
-           between two instruction counts, never two answers.
-           The knob is spelled this way because LZ_G128_GCC lives in
-           ops_kernel_shared.h, which is not on every TU's include path;
-           the A/B is run as -DLZ_G128_GCC=0. */
+    {
+        const int16_t *xwt = xw;
+        int32_t *acc = acc32;
+        /* gcc-side pairing only: dot32_t2_mmx_2 shares the ternary unpack
+           across two tokens because the C intrinsic keeps its operand
+           live. The Watcom twin is deliberately absent - its pmaddwd
+           destroys the unpack register, so sharing it there costs a movq
+           per group plus two more accumulators than eight %mm hold. */
+        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+            if (tk + 1 < nt && g_pair) {
+                const int16_t *xw2 = xwt + in_dim;
+                int32_t *accb = acc + nb;
+                for (s = 0; s < nb; s++)
+                    dot32_t2_mmx_2(p2 + (size_t)s * 8,
+                                   xwt + (size_t)s * 32,
+                                   xw2 + (size_t)s * 32,
+                                   acc + s, accb + s);
+                tk++;
+                xwt += in_dim;   /* skip tk+1's pointers too */
+                acc += nb;
+                continue;
+            }
+            s = 0;
+            /* Whole groups of four first, the per-32 fold for the nb % 4
+               tail. Both write the same values - dot128_t2_mmx folds the
+               same partials pairwise instead of singly - so the row is split
+               between two instruction counts, never two answers.
+               The knob is spelled this way because LZ_G128_GCC lives in
+               ops_kernel_shared.h, which is not on every TU's include path;
+               the A/B is run as -DLZ_G128_GCC=0. */
 #if !defined(LZ_G128_GCC) || LZ_G128_GCC
-        for (; s + 4 <= nb; s += 4)
-            dot128_t2_mmx(p2 + (size_t)s * 8, xwt + (size_t)s * 32, acc + s);
+            for (; s + 4 <= nb; s += 4)
+                dot128_t2_mmx(p2 + (size_t)s * 8, xwt + (size_t)s * 32, acc + s);
 #endif /* !defined(LZ_G128_GCC) || LZ_G128_GCC */
-        for (; s < nb; s++)
-            acc[s] = dot32_t2_mmx(p2 + (size_t)s * 8, xwt + (size_t)s * 32);
+            for (; s < nb; s++)
+                acc[s] = dot32_t2_mmx(p2 + (size_t)s * 8, xwt + (size_t)s * 32);
+        }
     }
 }
 #endif /* LZ_DOT_MMX_EXTERN */
@@ -861,11 +910,13 @@ static void row_t2_arm(int32_t *acc32, const void *w4, const void *w2v,
     const unsigned char *p2 = (const unsigned char *)w4;
     int tk, s;
     (void)w2v; (void)pf_end; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
-        for (s = 0; s < nb; s++)
-            acc[s] = lz_dot32_t2_arm(p2 + (size_t)s * 8, xwt + (size_t)s * 32);
+    {
+        const int16_t *xwt = xw;
+        int32_t *acc = acc32;
+        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+            for (s = 0; s < nb; s++)
+                acc[s] = lz_dot32_t2_arm(p2 + (size_t)s * 8, xwt + (size_t)s * 32);
+        }
     }
 }
 
@@ -880,12 +931,14 @@ static void row_t2_arm_asm(int32_t *acc32, const void *w4, const void *w2v,
     const unsigned char *p2 = (const unsigned char *)w4;
     int tk, s;
     (void)w2v; (void)pf_end; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
-        for (s = 0; s < nb; s++)
-            acc[s] = lz_dot32_t2_arm_asm(p2 + (size_t)s * 8,
-                                         xwt + (size_t)s * 32);
+    {
+        const int16_t *xwt = xw;
+        int32_t *acc = acc32;
+        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+            for (s = 0; s < nb; s++)
+                acc[s] = lz_dot32_t2_arm_asm(p2 + (size_t)s * 8,
+                                             xwt + (size_t)s * 32);
+        }
     }
 }
 #endif /* LZ_T2_ARM_ASM_EXTERN */
@@ -938,9 +991,9 @@ static void row_q61_mmx_intrin(int32_t *acc32, const void *w4, const void *w2v,
     const unsigned char *wend = (const unsigned char *)pf_end;
     const unsigned char *wend2 = (const unsigned char *)pf_end2;
     int tk, s;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
+    {
+        const int16_t *xwt = xw;
+        int32_t *acc = acc32;
         /* Q6_1 gains the most of the three formats from pairing: the
            weight side is 61% of the kernel's ops against Q4_1's 40% and
            Q8's 33%, and on the recipe of record it also carries the
@@ -954,24 +1007,28 @@ static void row_q61_mmx_intrin(int32_t *acc32, const void *w4, const void *w2v,
            a knob is worse than no knob - the rule asks for a switch
            plus a gate proving it changes something, and this one would
            change nothing. */
-        if (tk + 1 < nt && g_pair) {
-            const int16_t *xw2 = xwt + in_dim;
-            int32_t *accb = acc + nb;
-            for (s = 0; s < nb; s++) {
-                LZ_Q61_PF(s);
-                dot32_q61_mmx_2(wn + (size_t)s * 16, w2 + (size_t)s * 8,
-                                xwt + (size_t)s * 32, xw2 + (size_t)s * 32,
-                                acc + s, accb + s);
+        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+            if (tk + 1 < nt && g_pair) {
+                const int16_t *xw2 = xwt + in_dim;
+                int32_t *accb = acc + nb;
+                for (s = 0; s < nb; s++) {
+                    LZ_Q61_PF(s);
+                    dot32_q61_mmx_2(wn + (size_t)s * 16, w2 + (size_t)s * 8,
+                                    xwt + (size_t)s * 32, xw2 + (size_t)s * 32,
+                                    acc + s, accb + s);
+                }
+                tk++;
+                xwt += in_dim;   /* skip tk+1's pointers too */
+                acc += nb;
+                continue;
             }
-            tk++;
-            continue;
-        }
 #if defined(LZ_G128_GCC) && LZ_G128_GCC
-        if ((nb & 3) == 0) LZ_Q61_GROUP4(dot128_q61_mmx);
-        else               LZ_Q61_ACC(dot32_q61_mmx);
+            if ((nb & 3) == 0) LZ_Q61_GROUP4(dot128_q61_mmx);
+            else               LZ_Q61_ACC(dot32_q61_mmx);
 #else
-        LZ_Q61_ACC(dot32_q61_mmx);
+            LZ_Q61_ACC(dot32_q61_mmx);
 #endif /* LZ_G128_GCC */
+        }
     }
 }
 
@@ -992,12 +1049,14 @@ static void row_q61_arm(int32_t *acc32, const void *w4, const void *w2v,
     const unsigned char *w2 = (const unsigned char *)w2v;
     int tk, s;
     (void)pf_end; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
-        for (s = 0; s < nb; s++)
-            acc[s] = lz_dot32_q61_arm(wn + (size_t)s * 16, w2 + (size_t)s * 8,
-                                      xwt + (size_t)s * 32);
+    {
+        const int16_t *xwt = xw;
+        int32_t *acc = acc32;
+        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+            for (s = 0; s < nb; s++)
+                acc[s] = lz_dot32_q61_arm(wn + (size_t)s * 16, w2 + (size_t)s * 8,
+                                          xwt + (size_t)s * 32);
+        }
     }
 }
 
@@ -1009,13 +1068,15 @@ static void row_q61_arm_asm(int32_t *acc32, const void *w4, const void *w2v,
     const unsigned char *w2 = (const unsigned char *)w2v;
     int tk, s;
     (void)pf_end; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
-        for (s = 0; s < nb; s++)
-            acc[s] = lz_dot32_q61_arm_asm(wn + (size_t)s * 16,
-                                          w2 + (size_t)s * 8,
-                                          xwt + (size_t)s * 32);
+    {
+        const int16_t *xwt = xw;
+        int32_t *acc = acc32;
+        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+            for (s = 0; s < nb; s++)
+                acc[s] = lz_dot32_q61_arm_asm(wn + (size_t)s * 16,
+                                              w2 + (size_t)s * 8,
+                                              xwt + (size_t)s * 32);
+        }
     }
 }
 #endif /* LZ_ARM_ASM_EXTERN */
@@ -1092,9 +1153,9 @@ void matmul_t2_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
         epi_zero_act(xq, xqs, in_dim, ng, r, nb, nt);
     }
 
-    for (i = 0; i < out_dim; i++) {
+    const float *wd = w->scale;
+    for (i = 0; i < out_dim; i++, wd += ng) {
         const unsigned char *w2 = p2b + (size_t)i * in_dim / 4;
-        const float *wd = w->scale + (size_t)i * ng;
         /* Only the float epilogue reads it - the fixed one negates the
            int16 plane instead. */
         if (!fixed_epi) for (g = 0; g < ng; g++) g_t2neg[g] = -wd[g];
@@ -1143,11 +1204,11 @@ void matmul_q61_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
         epi_zero_act(xq, xqs, in_dim, ng, r, nb, nt);
     }
 
-    for (i = 0; i < out_dim; i++) {
+    const float *wd = w->scale;
+    const float *wm = w->zero;
+    for (i = 0; i < out_dim; i++, wd += ng, wm += ng) {
         const unsigned char *wn = p4b + (size_t)i * in_dim / 2;
         const unsigned char *w2 = p2b + (size_t)i * in_dim / 4;
-        const float *wd = w->scale + (size_t)i * ng;
-        const float *wm = w->zero + (size_t)i * ng;
         row(g_acc32, wn, w2, g_xw, nb, nt, in_dim,
             p2b,                        /* 4-bit plane ends where 2-bit starts */
             p2b + (size_t)w->n / 4);    /* 2-bit plane's own bound */
@@ -1289,9 +1350,9 @@ static void row_q16_mmx_intrin(int32_t *acc32, const void *w4, const void *w2,
     const int16_t *wend = (const int16_t *)pf_end;
     int tk, g;
     (void)w2; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
+    {
+        const int16_t *xwt = xw;
+        int32_t *acc = acc32;
         /* Pair this token with the next so ONE weight load serves both,
            the same shape q8_0/q4_1/q6_1 use above. Less is shared here
            than there - int16 weights need no unpack, so it is the load
@@ -1302,26 +1363,30 @@ static void row_q16_mmx_intrin(int32_t *acc32, const void *w4, const void *w2,
            weight traffic, grouping only amortizes the per-32 call, and
            a token pair cannot be expressed once the group loop owns
            the sub-block index. */
-        if (tk + 1 < nt && g_pair) {
-            const int16_t *xw2 = xwt + in_dim;
-            int32_t *accb = acc + nb;
-            for (g = 0; g < nb; g++) {
-                const int16_t *pf_ = wr + (size_t)(g + LZ_PF_DIST) * 32;
-                if (pf_ < wend) LZ_PFI_NTA(pf_);
-                dot32_q16_mmx_2(wr + (size_t)g * 32,
-                                xwt + (size_t)g * 32,
-                                xw2 + (size_t)g * 32,
-                                acc + g, accb + g);
+        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+            if (tk + 1 < nt && g_pair) {
+                const int16_t *xw2 = xwt + in_dim;
+                int32_t *accb = acc + nb;
+                for (g = 0; g < nb; g++) {
+                    const int16_t *pf_ = wr + (size_t)(g + LZ_PF_DIST) * 32;
+                    if (pf_ < wend) LZ_PFI_NTA(pf_);
+                    dot32_q16_mmx_2(wr + (size_t)g * 32,
+                                    xwt + (size_t)g * 32,
+                                    xw2 + (size_t)g * 32,
+                                    acc + g, accb + g);
+                }
+                tk++;
+                xwt += in_dim;   /* skip tk+1's pointers too */
+                acc += nb;
+                continue;
             }
-            tk++;
-            continue;
-        }
 #if defined(LZ_G128_GCC) && LZ_G128_GCC
-        if ((nb & 3) == 0) LZ_Q16_GROUP4(dot128_q16_mmx);
-        else               LZ_Q16_ACC(dot32_q16_mmx);
+            if ((nb & 3) == 0) LZ_Q16_GROUP4(dot128_q16_mmx);
+            else               LZ_Q16_ACC(dot32_q16_mmx);
 #else
-        LZ_Q16_ACC(dot32_q16_mmx);
+            LZ_Q16_ACC(dot32_q16_mmx);
 #endif /* LZ_G128_GCC */
+        }
     }
 }
 
@@ -1343,12 +1408,14 @@ static void row_q16_arm(int32_t *acc32, const void *w4, const void *w2,
     const int16_t *wr = (const int16_t *)w4;
     int tk, s;
     (void)w2; (void)pf_end; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
-        for (s = 0; s < nb; s++)
-            acc[s] = lz_dot32_q16_arm(wr + (size_t)s * 32,
-                                      xwt + (size_t)s * 32);
+    {
+        const int16_t *xwt = xw;
+        int32_t *acc = acc32;
+        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+            for (s = 0; s < nb; s++)
+                acc[s] = lz_dot32_q16_arm(wr + (size_t)s * 32,
+                                          xwt + (size_t)s * 32);
+        }
     }
 }
 
@@ -1363,12 +1430,14 @@ static void row_q16_arm_asm(int32_t *acc32, const void *w4, const void *w2,
     const int16_t *wr = (const int16_t *)w4;
     int tk, s;
     (void)w2; (void)pf_end; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
-        for (s = 0; s < nb; s++)
-            acc[s] = lz_dot32_q16_arm_asm(wr + (size_t)s * 32,
-                                          xwt + (size_t)s * 32);
+    {
+        const int16_t *xwt = xw;
+        int32_t *acc = acc32;
+        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+            for (s = 0; s < nb; s++)
+                acc[s] = lz_dot32_q16_arm_asm(wr + (size_t)s * 32,
+                                              xwt + (size_t)s * 32);
+        }
     }
 }
 #endif /* LZ_ARM_ASM_EXTERN */
@@ -1483,8 +1552,8 @@ void matmul_q16_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
        what it saves. Same call the Q8_0 path makes. */
     if (fixed_epi) epi_pack_act(xqs, ng, nt);
 
-    for (i = 0; i < out_dim; i++) {
-        const int16_t *wr = wbase + (size_t)i * in_dim;
+    const int16_t *wr = wbase;
+    for (i = 0; i < out_dim; i++, wr += in_dim) {
         row(g_acc32, wr, NULL, g_xw, ng, nt, in_dim, wend, NULL);
         if (lz_cpu_has_mmx()) _mm_empty();                    /* exit MMX state before x87 */
         /* Term for term the same epilogue as Q8_0's, fixed branch
@@ -1494,10 +1563,11 @@ void matmul_q16_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
            The clamp inside epi_align_i16 has already brought the result
            within +-out->bound, so the narrowing cast cannot lose a bit. */
         if (out->oi) {
-            for (tk = 0; tk < nt; tk++)
-                out->oi[(size_t)tk * out_dim + i] = (short)epi_fixed_align_i16(
-                    g_acc32 + (size_t)tk * ng, w, i, tk, ng, r,
-                    out->target_e, out->bound);
+            short *op = out->oi + i;
+            const int32_t *accp = g_acc32;
+            for (tk = 0; tk < nt; tk++, op += out_dim, accp += ng)
+                *op = (short)epi_fixed_align_i16(accp, w, i, tk, ng, r,
+                                                 out->target_e, out->bound);
             continue;
         }
         /* Loop picked by fixed_epi, and `ws` computed only in the arm
@@ -1505,16 +1575,17 @@ void matmul_q16_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
            gives, and the same divide: 54,016 executions in eight tokens
            on kmr20 for a pointer epi_q8 was never handed. */
         if (fixed_epi) {
-            for (tk = 0; tk < nt; tk++)
-                out->o[(size_t)tk * out_dim + i] =
-                    epi_fixed(g_acc32 + (size_t)tk * ng, w, i, tk, ng, r,
-                              post_e);
+            float *op = out->o + i;
+            const int32_t *accp = g_acc32;
+            for (tk = 0; tk < nt; tk++, op += out_dim, accp += ng)
+                *op = epi_fixed(accp, w, i, tk, ng, r, post_e);
         } else {
             const float *ws = w->scale + (size_t)(i * in_dim) / w->gs;
-            for (tk = 0; tk < nt; tk++)
-                out->o[(size_t)tk * out_dim + i] =
-                    epi_q8(g_acc32 + (size_t)tk * ng, xqs + (size_t)tk * ng,
-                           ws, ng, r, post);
+            float *op = out->o + i;
+            const int32_t *accp = g_acc32;
+            const float *xsp = xqs;
+            for (tk = 0; tk < nt; tk++, op += out_dim, accp += ng, xsp += ng)
+                *op = epi_q8(accp, xsp, ws, ng, r, post);
         }
     }
 }
@@ -1561,9 +1632,10 @@ void lz_matmul_xq_nt(float *o, const float *x, const int8_t *xq,
     if (nt < 1) return;
     if (nt > LZ_BATCH_MAX) nt = LZ_BATCH_MAX;
     if (lz_matmul_xq_reads_float_row(w)) {
-        for (i = 0; i < nt; i++)
-            lz_matmul(o + (size_t)i * out_dim, x + (size_t)i * in_dim,
-                      w ? w->f : NULL, in_dim, out_dim);
+        float *op = o;
+        const float *xp = x;
+        for (i = 0; i < nt; i++, op += out_dim, xp += in_dim)
+            lz_matmul(op, xp, w ? w->f : NULL, in_dim, out_dim);
         return;
     }
     if (!xq || !xqs || w->gs <= 0 || (in_dim % w->gs) != 0) {
@@ -1687,6 +1759,7 @@ void lz_matmul_w(float *o, const float *x, const LZTensor *w,
 
 void lz_matmul(float *o, const float *x, const float *w,
                    int in_dim, int out_dim) {    int i;
+    const float *row = w;
     /* The hottest loop in the whole forward, ~750M MACs per token.
 
        8 independent accumulators here are not for loop unrolling but
@@ -1701,8 +1774,7 @@ void lz_matmul(float *o, const float *x, const float *w,
        float differences. Differential tests use tolerances at the
        same order as the reference implementation; this change does not
        break them. */
-    for (i = 0; i < out_dim; i++) {
-        const float *row = w + (size_t)i * in_dim;
+    for (i = 0; i < out_dim; i++, row += in_dim) {
         float a0 = 0.0f, a1 = 0.0f, a2 = 0.0f, a3 = 0.0f;
         float a4 = 0.0f, a5 = 0.0f, a6 = 0.0f, a7 = 0.0f;
         float sum;

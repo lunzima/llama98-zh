@@ -984,11 +984,11 @@ void lz_p2_rows_mmx(const int8_t *ph_row, const int8_t *pl_row,
                     int8_t *ol_row, int ol_stride, int *shv, int ng) {
     lz_p2_blk *blk = p2_blk();
     int gg, j;
-    for (gg = 0; gg < ng; gg++) {
+    const int8_t *plg = pl_row;
+    int8_t *olg = ol_row;
+    for (gg = 0; gg < ng; gg++, plg += pl_stride, olg += ol_stride) {
         int32_t amax;
         int sh;
-        const int8_t *plg = pl_row + (size_t)gg * pl_stride;
-        int8_t *olg = ol_row + (size_t)gg * ol_stride;
         for (j = 0; j < 8; j += 2) {
             blk->mul[j]     = mul[gg][0];
             blk->mul[j + 1] = mul[gg][1];
@@ -1364,27 +1364,27 @@ extern void lz_exp_q20_2_mmx_asm(const int32_t *tab, const int32_t *s,
     "pand    mm7, [ecx+8]"          \
     "psrld   mm5, 20"               \
     "movq    mm3, mm6"              \
+    "movq    mm0, mm7"              \
+    "movq    mm1, mm5"              \
     "pmaddwd mm3, [ecx+64]"         \
+    "pmaddwd mm0, [ecx+64]"         \
+    "pmaddwd mm1, [ecx+64]"         \
     "pmaddwd mm6, [ecx+56]"         \
-    "pslld   mm6, 15"               \
-    "paddd   mm3, mm6"              \
-    "movq    mm6, mm7"              \
-    "pmaddwd mm6, [ecx+64]"         \
     "pmaddwd mm7, [ecx+56]"         \
-    "pslld   mm7, 15"               \
-    "paddd   mm6, mm7"              \
-    "movq    mm7, mm5"              \
-    "pmaddwd mm7, [ecx+64]"         \
     "pmaddwd mm5, [ecx+56]"         \
+    "pslld   mm6, 15"               \
+    "pslld   mm7, 15"               \
     "pslld   mm5, 15"               \
-    "paddd   mm7, mm5"              \
+    "paddd   mm3, mm6"              \
+    "paddd   mm0, mm7"              \
+    "paddd   mm1, mm5"              \
     "psrld   mm3, 10"               \
-    "paddd   mm6, mm3"              \
-    "psrld   mm6, 10"               \
-    "paddd   mm7, [ecx+24]"         \
-    "paddd   mm7, mm6"              \
-    "psrld   mm7, 20"               \
-    "paddd   mm4, mm7"              \
+    "paddd   mm0, mm3"              \
+    "psrld   mm0, 10"               \
+    "paddd   mm1, [ecx+24]"         \
+    "paddd   mm1, mm0"              \
+    "psrld   mm1, 20"               \
+    "paddd   mm4, mm1"              \
     "movq    mm0, [eax]"            \
     "movq    mm1, mm0"              \
     "psrld   mm1, 11"               \
@@ -1846,47 +1846,51 @@ void row_q8_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
     const int8_t *wend = (const int8_t *)pf_end;
     int tk, g;
     (void)w2; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
-        /* Pairing beats the 128-element group kernel whenever there is
-           a second token: the group kernel amortizes FIXED overhead
-           (mask setup, prologue) from once per 32 elements to once per
-           128, while pairing removes the weight unpack itself for the
-           second token - and on the target the weight side is the
-           memory side. Same choice the gcc twin makes, which also keeps
-           the two impls' shapes comparable when they are diffed.
-           At nt == 1 there is nothing to pair, so the group kernel
-           keeps that path unchanged.
+    {
+        const int16_t *xwt = xw;
+        int32_t *acc = acc32;
+        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+            /* Pairing beats the 128-element group kernel whenever there is
+               a second token: the group kernel amortizes FIXED overhead
+               (mask setup, prologue) from once per 32 elements to once per
+               128, while pairing removes the weight unpack itself for the
+               second token - and on the target the weight side is the
+               memory side. Same choice the gcc twin makes, which also keeps
+               the two impls' shapes comparable when they are diffed.
+               At nt == 1 there is nothing to pair, so the group kernel
+               keeps that path unchanged.
 
-           NOT MEASURED ON TARGET. The op-count argument is 12 + 24*NT
-           against 36*NT; whether it beats the group kernel's amortized
-           prologue on a real PII is a wall-clock question, and the
-           machine for it is not here. This is a knob-shaped
-           decision recorded as such, not a measured result. */
-        if (nt - tk >= 2 && lz_pair_mode()) {
-            const int16_t *xw2 = xwt + in_dim;
-            int32_t *accb = acc + nb;
-            int g2;
-            for (g2 = 0; g2 < nb; g2++) {
-                const int8_t *pf_ = wr + (size_t)(g2 + LZ_PF_DIST) * 32;
-                if (pf_ < wend) {
-                    int pf_m_ = lz_prefetch_mode();
-                    if (pf_m_ == LZ_PF_AMD)       LZ_PFI_AMD(pf_);
-                    else if (pf_m_ == LZ_PF_LOAD) LZ_PFI_LOAD(pf_);
-                    else if (pf_m_ == LZ_PF_NONE) LZ_PFI_NONE(pf_);
-                    else                          LZ_PFI_NTA(pf_);
+               NOT MEASURED ON TARGET. The op-count argument is 12 + 24*NT
+               against 36*NT; whether it beats the group kernel's amortized
+               prologue on a real PII is a wall-clock question, and the
+               machine for it is not here. This is a knob-shaped
+               decision recorded as such, not a measured result. */
+            if (nt - tk >= 2 && lz_pair_mode()) {
+                const int16_t *xw2 = xwt + in_dim;
+                int32_t *accb = acc + nb;
+                int g2;
+                for (g2 = 0; g2 < nb; g2++) {
+                    const int8_t *pf_ = wr + (size_t)(g2 + LZ_PF_DIST) * 32;
+                    if (pf_ < wend) {
+                        int pf_m_ = lz_prefetch_mode();
+                        if (pf_m_ == LZ_PF_AMD)       LZ_PFI_AMD(pf_);
+                        else if (pf_m_ == LZ_PF_LOAD) LZ_PFI_LOAD(pf_);
+                        else if (pf_m_ == LZ_PF_NONE) LZ_PFI_NONE(pf_);
+                        else                          LZ_PFI_NTA(pf_);
+                    }
+                    lz_dot32_x16_asm_2(wr + (size_t)g2 * 32,
+                                       xwt + (size_t)g2 * 32,
+                                       xw2 + (size_t)g2 * 32,
+                                       acc + g2, accb + g2);
                 }
-                lz_dot32_x16_asm_2(wr + (size_t)g2 * 32,
-                                   xwt + (size_t)g2 * 32,
-                                   xw2 + (size_t)g2 * 32,
-                                   acc + g2, accb + g2);
+                tk++;
+                xwt += in_dim;   /* skip tk+1's pointers too */
+                acc += nb;
+                continue;
             }
-            tk++;
-            continue;
+            if ((nb & 3) == 0) LZ_Q8_GROUP4(lz_dot128_x16_asm);
+            else               LZ_Q8_PFSEL(dot32_x16_mmx);
         }
-        if ((nb & 3) == 0) LZ_Q8_GROUP4(lz_dot128_x16_asm);
-        else               LZ_Q8_PFSEL(dot32_x16_mmx);
     }
 }
 
@@ -2312,35 +2316,39 @@ void row_q41_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
     const unsigned char *wend = (const unsigned char *)pf_end;
     int tk, s;
     (void)w2; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
-        /* Pair whenever a second token exists - same trade as Q8 and
-           worth more here (weight side 16 of 40 ops against Q8's 12 of
-           36). Not measured on target; see row_q8_mmx_asm. */
-        if (nt - tk >= 2 && lz_pair_mode()) {
-            const int16_t *xw2 = xwt + in_dim;
-            int32_t *accb = acc + nb;
-            int s2;
-            for (s2 = 0; s2 < nb; s2++) {
-                const unsigned char *pf_ = wn + (size_t)(s2 + LZ_PF_DIST) * 16;
-                if (pf_ < wend) {
-                    int pf_m_ = lz_prefetch_mode();
-                    if (pf_m_ == LZ_PF_AMD)       LZ_PFI_AMD(pf_);
-                    else if (pf_m_ == LZ_PF_LOAD) LZ_PFI_LOAD(pf_);
-                    else if (pf_m_ == LZ_PF_NONE) LZ_PFI_NONE(pf_);
-                    else                          LZ_PFI_NTA(pf_);
+    {
+        const int16_t *xwt = xw;
+        int32_t *acc = acc32;
+        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+            /* Pair whenever a second token exists - same trade as Q8 and
+               worth more here (weight side 16 of 40 ops against Q8's 12 of
+               36). Not measured on target; see row_q8_mmx_asm. */
+            if (nt - tk >= 2 && lz_pair_mode()) {
+                const int16_t *xw2 = xwt + in_dim;
+                int32_t *accb = acc + nb;
+                int s2;
+                for (s2 = 0; s2 < nb; s2++) {
+                    const unsigned char *pf_ = wn + (size_t)(s2 + LZ_PF_DIST) * 16;
+                    if (pf_ < wend) {
+                        int pf_m_ = lz_prefetch_mode();
+                        if (pf_m_ == LZ_PF_AMD)       LZ_PFI_AMD(pf_);
+                        else if (pf_m_ == LZ_PF_LOAD) LZ_PFI_LOAD(pf_);
+                        else if (pf_m_ == LZ_PF_NONE) LZ_PFI_NONE(pf_);
+                        else                          LZ_PFI_NTA(pf_);
+                    }
+                    lz_dot32_q41_asm_2(wn + (size_t)s2 * 16,
+                                       xwt + (size_t)s2 * 32,
+                                       xw2 + (size_t)s2 * 32,
+                                       acc + s2, accb + s2);
                 }
-                lz_dot32_q41_asm_2(wn + (size_t)s2 * 16,
-                                   xwt + (size_t)s2 * 32,
-                                   xw2 + (size_t)s2 * 32,
-                                   acc + s2, accb + s2);
+                tk++;
+                xwt += in_dim;   /* skip tk+1's pointers too */
+                acc += nb;
+                continue;
             }
-            tk++;
-            continue;
+            if ((nb & 3) == 0) LZ_Q41_GROUP4(lz_dot128_q41_asm);
+            else               LZ_Q41_PFSEL(dot32_q41_mmx);
         }
-        if ((nb & 3) == 0) LZ_Q41_GROUP4(lz_dot128_q41_asm);
-        else               LZ_Q41_PFSEL(dot32_q41_mmx);
     }
 }
 
@@ -2786,20 +2794,22 @@ void row_t2_mmx_asm(int32_t *acc32, const void *w4, const void *w2v,
     const unsigned char *p2 = (const unsigned char *)w4;
     int tk, s;
     (void)w2v; (void)pf_end; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
-        /* Whole groups of four first, the per-32 kernel for the nb % 4
-           tail - the same split the gcc twin makes in ops_matmul.c. The
-           two write the same values (build/dot128_t2_probe.c holds the
-           group form to four calls of the per-32 one), so a row divided
-           between them has two instruction counts and one answer. */
-        s = 0;
-        for (; s + 4 <= nb; s += 4)
-            lz_dot128_t2_asm(p2 + (size_t)s * 8, xwt + (size_t)s * 32,
-                             acc + s);
-        for (; s < nb; s++)
-            acc[s] = lz_dot32_t2_asm(p2 + (size_t)s * 8, xwt + (size_t)s * 32);
+    {
+        const int16_t *xwt = xw;
+        int32_t *acc = acc32;
+        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+            /* Whole groups of four first, the per-32 kernel for the nb % 4
+               tail - the same split the gcc twin makes in ops_matmul.c. The
+               two write the same values (build/dot128_t2_probe.c holds the
+               group form to four calls of the per-32 one), so a row divided
+               between them has two instruction counts and one answer. */
+            s = 0;
+            for (; s + 4 <= nb; s += 4)
+                lz_dot128_t2_asm(p2 + (size_t)s * 8, xwt + (size_t)s * 32,
+                                 acc + s);
+            for (; s < nb; s++)
+                acc[s] = lz_dot32_t2_asm(p2 + (size_t)s * 8, xwt + (size_t)s * 32);
+        }
     }
 }
 
@@ -3327,29 +3337,33 @@ void row_q61_mmx_asm(int32_t *acc32, const void *w4, const void *w2v,
     const unsigned char *wend = (const unsigned char *)pf_end;
     const unsigned char *wend2 = (const unsigned char *)pf_end2;
     int tk, s;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
-        /* Pair whenever a second token exists. Q6_1 gains the most of
-           the three formats (weight side 61% of the kernel's ops);
-           the gcc twin measured 1.271x on prefill. Not measured on
-           target - see row_q8_mmx_asm. */
-        if (nt - tk >= 2 && lz_pair_mode()) {
-            const int16_t *xw2 = xwt + in_dim;
-            int32_t *accb = acc + nb;
-            int s2;
-            for (s2 = 0; s2 < nb; s2++) {
-                LZ_Q61_PF(s2);
-                lz_dot32_q61_asm_2(wn + (size_t)s2 * 16, w2 + (size_t)s2 * 8,
-                                   xwt + (size_t)s2 * 32,
-                                   xw2 + (size_t)s2 * 32,
-                                   acc + s2, accb + s2);
+    {
+        const int16_t *xwt = xw;
+        int32_t *acc = acc32;
+        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+            /* Pair whenever a second token exists. Q6_1 gains the most of
+               the three formats (weight side 61% of the kernel's ops);
+               the gcc twin measured 1.271x on prefill. Not measured on
+               target - see row_q8_mmx_asm. */
+            if (nt - tk >= 2 && lz_pair_mode()) {
+                const int16_t *xw2 = xwt + in_dim;
+                int32_t *accb = acc + nb;
+                int s2;
+                for (s2 = 0; s2 < nb; s2++) {
+                    LZ_Q61_PF(s2);
+                    lz_dot32_q61_asm_2(wn + (size_t)s2 * 16, w2 + (size_t)s2 * 8,
+                                       xwt + (size_t)s2 * 32,
+                                       xw2 + (size_t)s2 * 32,
+                                       acc + s2, accb + s2);
+                }
+                tk++;
+                xwt += in_dim;   /* skip tk+1's pointers too */
+                acc += nb;
+                continue;
             }
-            tk++;
-            continue;
+            if ((nb & 3) == 0) LZ_Q61_GROUP4(lz_dot128_q61_asm);
+            else               LZ_Q61_ACC(dot32_q61_mmx);
         }
-        if ((nb & 3) == 0) LZ_Q61_GROUP4(lz_dot128_q61_asm);
-        else               LZ_Q61_ACC(dot32_q61_mmx);
     }
 }
 
@@ -3627,29 +3641,33 @@ void row_q16_mmx_asm(int32_t *acc32, const void *w4, const void *w2,
     const int16_t *wend = (const int16_t *)pf_end;
     int tk, g;
     (void)w2; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
-        /* Pair before grouping, the same order and the same reason as
-           the gcc twin: the pair halves the weight traffic while the
-           group only amortizes the per-32 call, and a token pair cannot
-           be expressed once the group loop owns the sub-block index.
-           An odd nt leaves its last token on the paths below. */
-        if (nt - tk >= 2 && lz_pair_mode()) {
-            const int16_t *xw2 = xwt + in_dim;
-            int32_t *accb = acc + nb;
-            for (g = 0; g < nb; g++) {
-                LZ_Q16_PF(g);
-                lz_dot32_q16_asm_2(wr + (size_t)g * 32,
-                                   xwt + (size_t)g * 32,
-                                   xw2 + (size_t)g * 32,
-                                   acc + g, accb + g);
+    {
+        const int16_t *xwt = xw;
+        int32_t *acc = acc32;
+        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+            /* Pair before grouping, the same order and the same reason as
+               the gcc twin: the pair halves the weight traffic while the
+               group only amortizes the per-32 call, and a token pair cannot
+               be expressed once the group loop owns the sub-block index.
+               An odd nt leaves its last token on the paths below. */
+            if (nt - tk >= 2 && lz_pair_mode()) {
+                const int16_t *xw2 = xwt + in_dim;
+                int32_t *accb = acc + nb;
+                for (g = 0; g < nb; g++) {
+                    LZ_Q16_PF(g);
+                    lz_dot32_q16_asm_2(wr + (size_t)g * 32,
+                                       xwt + (size_t)g * 32,
+                                       xw2 + (size_t)g * 32,
+                                       acc + g, accb + g);
+                }
+                tk++;
+                xwt += in_dim;   /* skip tk+1's pointers too */
+                acc += nb;
+                continue;
             }
-            tk++;
-            continue;
+            if ((nb & 3) == 0) LZ_Q16_GROUP4(lz_dot128_q16_asm);
+            else               LZ_Q16_ACC(dot32_q16_mmx);
         }
-        if ((nb & 3) == 0) LZ_Q16_GROUP4(lz_dot128_q16_asm);
-        else               LZ_Q16_ACC(dot32_q16_mmx);
     }
 }
 

@@ -327,11 +327,11 @@ void lz_p2_rows_sse2(const int8_t *ph_row, const int8_t *pl_row,
                      int8_t *ol_row, int ol_stride, int *shv, int ng) {
     lz_p2_blk *blk = p2_blk_sse2();
     int gg, j;
-    for (gg = 0; gg < ng; gg++) {
+    const int8_t *plg = pl_row;
+    int8_t *olg = ol_row;
+    for (gg = 0; gg < ng; gg++, plg += pl_stride, olg += ol_stride) {
         int32_t amax;
         int sh;
-        const int8_t *plg = pl_row + (size_t)gg * pl_stride;
-        int8_t *olg = ol_row + (size_t)gg * ol_stride;
         for (j = 0; j < 8; j += 2) {
             blk->mul[j]     = mul[gg][0];
             blk->mul[j + 1] = mul[gg][1];
@@ -1137,47 +1137,58 @@ void row_q8_sse2_asm(int32_t *acc32, const void *w4, const void *w2,
     const int8_t *wend = (const int8_t *)pf_end;
     int tk, g;
     (void)w2; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
-        /* Pair before grouping, matching the gcc twin above and the MMX
-           row kernels: the pair keeps the four unpacked weight halves
-           live across two tokens, the group only amortizes the per-32
-           call. An odd nt leaves its last token on the paths below. */
-        if (nt - tk >= 2 && lz_pair_mode()) {
-            const int16_t *xw2 = xwt + in_dim;
-            int32_t *accb = acc + nb;
-            int gp;
-            for (gp = 0; gp < nb; gp++) {
-                const int8_t *pf_ = wr + (size_t)(gp + LZ_PF_DIST) * 32;
-                if (pf_ < wend) {
-                    int pf_m_ = lz_prefetch_mode();
-                    if (pf_m_ == LZ_PF_AMD)       LZ_PFI_AMD(pf_);
-                    else if (pf_m_ == LZ_PF_LOAD) LZ_PFI_LOAD(pf_);
-                    else if (pf_m_ == LZ_PF_NONE) LZ_PFI_NONE(pf_);
-                    else                          LZ_PFI_NTA(pf_);
+    {
+        const int16_t *xwt = xw;
+        int32_t *acc = acc32;
+        /* Strength-reduced by hand: xwt/acc are kept as running pointers
+           (xwt = xw + tk*in_dim, acc = acc32 + tk*nb) instead of re-derived
+           from tk each iteration. Watcom's own strength reduction of the
+           derived form emits `imul reg,reg,0` for the tk=0 initial value
+           (0*nb), an 11-15-insn multiply instead of a mov - see
+           build/imul0_probe.c. The running form drops it and stays
+           bit-identical: same addresses, same order. */
+        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+            /* Pair before grouping, matching the gcc twin above and the MMX
+               row kernels: the pair keeps the four unpacked weight halves
+               live across two tokens, the group only amortizes the per-32
+               call. An odd nt leaves its last token on the paths below. */
+            if (nt - tk >= 2 && lz_pair_mode()) {
+                const int16_t *xw2 = xwt + in_dim;
+                int32_t *accb = acc + nb;
+                int gp;
+                for (gp = 0; gp < nb; gp++) {
+                    const int8_t *pf_ = wr + (size_t)(gp + LZ_PF_DIST) * 32;
+                    if (pf_ < wend) {
+                        int pf_m_ = lz_prefetch_mode();
+                        if (pf_m_ == LZ_PF_AMD)       LZ_PFI_AMD(pf_);
+                        else if (pf_m_ == LZ_PF_LOAD) LZ_PFI_LOAD(pf_);
+                        else if (pf_m_ == LZ_PF_NONE) LZ_PFI_NONE(pf_);
+                        else                          LZ_PFI_NTA(pf_);
+                    }
+                    lz_dot32_x16_sse2_asm_2(wr + (size_t)gp * 32,
+                                            xwt + (size_t)gp * 32,
+                                            xw2 + (size_t)gp * 32,
+                                            acc + gp, accb + gp);
                 }
-                lz_dot32_x16_sse2_asm_2(wr + (size_t)gp * 32,
-                                        xwt + (size_t)gp * 32,
-                                        xw2 + (size_t)gp * 32,
-                                        acc + gp, accb + gp);
+                tk++;
+                xwt += in_dim;   /* skip tk+1's pointers too */
+                acc += nb;
+                continue;
             }
-            tk++;
-            continue;
-        }
 #if LZ_SSE2_GROUP
-        if ((nb & 3) == 0) LZ_Q8_GROUP4(lz_dot128_x16_sse2_asm);
+            if ((nb & 3) == 0) LZ_Q8_GROUP4(lz_dot128_x16_sse2_asm);
 #else
-        /* LZ_SSE2_GROUP=0 keeps the 128-element step on the MMX kernel;
-           the knob exists so an SSE2 CPU can be measured on either.
-           lz_dot128_x16_mmx_w is src/ops_mmx.c's real, addressable
-           twin of the #pragma aux lz_dot128_x16_asm - needed cross-TU
-           here for exactly this A/B control build, since a #pragma aux
-           body cannot have its address taken and this file does not
-           carry the MMX pragma itself. */
-        if ((nb & 3) == 0) LZ_Q8_GROUP4(lz_dot128_x16_mmx_w);
+            /* LZ_SSE2_GROUP=0 keeps the 128-element step on the MMX kernel;
+               the knob exists so an SSE2 CPU can be measured on either.
+               lz_dot128_x16_mmx_w is src/ops_mmx.c's real, addressable
+               twin of the #pragma aux lz_dot128_x16_asm - needed cross-TU
+               here for exactly this A/B control build, since a #pragma aux
+               body cannot have its address taken and this file does not
+               carry the MMX pragma itself. */
+            if ((nb & 3) == 0) LZ_Q8_GROUP4(lz_dot128_x16_mmx_w);
 #endif /* LZ_SSE2_GROUP */
-        else               LZ_Q8_PFSEL(dot32_x16_sse2a);
+            else               LZ_Q8_PFSEL(dot32_x16_sse2a);
+        }
     }
 }
 
@@ -1494,44 +1505,48 @@ void row_q41_sse2_asm(int32_t *acc32, const void *w4, const void *w2,
     const unsigned char *wend = (const unsigned char *)pf_end;
     int tk, s;
     (void)w2; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
-        /* Pair before grouping, matching the gcc twin: the pair shares
-           the load, both masks, the shift and the four punpck across
-           two tokens; the group only amortizes the per-32 call. */
-        if (nt - tk >= 2 && lz_pair_mode()) {
-            const int16_t *xw2 = xwt + in_dim;
-            int32_t *accb = acc + nb;
-            int sp;
-            for (sp = 0; sp < nb; sp++) {
-                /* Prefetch spelled out rather than through LZ_Q41_PF:
-                   that macro is not on this TU's include path, and the
-                   q8_0 pair above does the same for the same reason. */
-                const unsigned char *pf_ = wn + (size_t)(sp + LZ_PF_DIST) * 16;
-                if (pf_ < wend) {
-                    int pf_m_ = lz_prefetch_mode();
-                    if (pf_m_ == LZ_PF_AMD)       LZ_PFI_AMD(pf_);
-                    else if (pf_m_ == LZ_PF_LOAD) LZ_PFI_LOAD(pf_);
-                    else if (pf_m_ == LZ_PF_NONE) LZ_PFI_NONE(pf_);
-                    else                          LZ_PFI_NTA(pf_);
+    {
+        const int16_t *xwt = xw;
+        int32_t *acc = acc32;
+        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+            /* Pair before grouping, matching the gcc twin: the pair shares
+               the load, both masks, the shift and the four punpck across
+               two tokens; the group only amortizes the per-32 call. */
+            if (nt - tk >= 2 && lz_pair_mode()) {
+                const int16_t *xw2 = xwt + in_dim;
+                int32_t *accb = acc + nb;
+                int sp;
+                for (sp = 0; sp < nb; sp++) {
+                    /* Prefetch spelled out rather than through LZ_Q41_PF:
+                       that macro is not on this TU's include path, and the
+                       q8_0 pair above does the same for the same reason. */
+                    const unsigned char *pf_ = wn + (size_t)(sp + LZ_PF_DIST) * 16;
+                    if (pf_ < wend) {
+                        int pf_m_ = lz_prefetch_mode();
+                        if (pf_m_ == LZ_PF_AMD)       LZ_PFI_AMD(pf_);
+                        else if (pf_m_ == LZ_PF_LOAD) LZ_PFI_LOAD(pf_);
+                        else if (pf_m_ == LZ_PF_NONE) LZ_PFI_NONE(pf_);
+                        else                          LZ_PFI_NTA(pf_);
+                    }
+                    lz_dot32_q41_sse2_asm_2(wn + (size_t)sp * 16,
+                                            xwt + (size_t)sp * 32,
+                                            xw2 + (size_t)sp * 32,
+                                            acc + sp, accb + sp);
                 }
-                lz_dot32_q41_sse2_asm_2(wn + (size_t)sp * 16,
-                                        xwt + (size_t)sp * 32,
-                                        xw2 + (size_t)sp * 32,
-                                        acc + sp, accb + sp);
+                tk++;
+                xwt += in_dim;   /* skip tk+1's pointers too */
+                acc += nb;
+                continue;
             }
-            tk++;
-            continue;
-        }
 #if LZ_SSE2_GROUP
-        if ((nb & 3) == 0) LZ_Q41_GROUP4(lz_dot128_q41_sse2_asm);
+            if ((nb & 3) == 0) LZ_Q41_GROUP4(lz_dot128_q41_sse2_asm);
 #else
-        /* lz_dot128_q41_mmx_w is src/ops_mmx.c's real wrapper around
-           the MMX #pragma aux group kernel. */
-        if ((nb & 3) == 0) LZ_Q41_GROUP4(lz_dot128_q41_mmx_w);
+            /* lz_dot128_q41_mmx_w is src/ops_mmx.c's real wrapper around
+               the MMX #pragma aux group kernel. */
+            if ((nb & 3) == 0) LZ_Q41_GROUP4(lz_dot128_q41_mmx_w);
 #endif /* LZ_SSE2_GROUP */
-        else               LZ_Q41_PFSEL(dot32_q41_sse2a);
+            else               LZ_Q41_PFSEL(dot32_q41_sse2a);
+        }
     }
 }
 
@@ -1720,26 +1735,30 @@ void row_t2_sse2_asm(int32_t *acc32, const void *w4, const void *w2v,
     const unsigned char *p2 = (const unsigned char *)w4;
     int tk, s;
     (void)w2v; (void)pf_end; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
-        /* Pair, matching the gcc twin: one ternary decode for two
-           tokens. Fourteen instructions of weight side at this tier,
-           against three at the MMX one. */
-        if (nt - tk >= 2 && lz_pair_mode()) {
-            const int16_t *xw2 = xwt + in_dim;
-            int32_t *accb = acc + nb;
+    {
+        const int16_t *xwt = xw;
+        int32_t *acc = acc32;
+        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+            /* Pair, matching the gcc twin: one ternary decode for two
+               tokens. Fourteen instructions of weight side at this tier,
+               against three at the MMX one. */
+            if (nt - tk >= 2 && lz_pair_mode()) {
+                const int16_t *xw2 = xwt + in_dim;
+                int32_t *accb = acc + nb;
+                for (s = 0; s < nb; s++)
+                    lz_dot32_t2_sse2_asm_2(p2 + (size_t)s * 8,
+                                           xwt + (size_t)s * 32,
+                                           xw2 + (size_t)s * 32,
+                                           acc + s, accb + s);
+                tk++;
+                xwt += in_dim;   /* skip tk+1's pointers too */
+                acc += nb;
+                continue;
+            }
             for (s = 0; s < nb; s++)
-                lz_dot32_t2_sse2_asm_2(p2 + (size_t)s * 8,
-                                       xwt + (size_t)s * 32,
-                                       xw2 + (size_t)s * 32,
-                                       acc + s, accb + s);
-            tk++;
-            continue;
+                acc[s] = lz_dot32_t2_sse2_asm(p2 + (size_t)s * 8,
+                                              xwt + (size_t)s * 32);
         }
-        for (s = 0; s < nb; s++)
-            acc[s] = lz_dot32_t2_sse2_asm(p2 + (size_t)s * 8,
-                                          xwt + (size_t)s * 32);
     }
 }
 
@@ -2180,42 +2199,46 @@ void row_q61_sse2_asm(int32_t *acc32, const void *w4, const void *w2v,
     const unsigned char *wend = (const unsigned char *)pf_end;
     const unsigned char *wend2 = (const unsigned char *)pf_end2;
     int tk, s;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
-        /* Pair before grouping, matching the gcc twin. This format has
-           the heaviest weight side of the five - the 6-bit value is
-           reassembled from two planes before it can be widened - so one
-           pass of it serving two tokens is the largest saving the pair
-           buys anywhere. */
-        if (nt - tk >= 2 && lz_pair_mode()) {
-            const int16_t *xw2 = xwt + in_dim;
-            int32_t *accb = acc + nb;
-            int sp;
-            for (sp = 0; sp < nb; sp++) {
-                LZ_Q61_PF(sp);
-                lz_dot32_q61_sse2_asm_2(wn + (size_t)sp * 16,
-                                        w2 + (size_t)sp * 8,
-                                        xwt + (size_t)sp * 32,
-                                        xw2 + (size_t)sp * 32,
-                                        acc + sp, accb + sp);
+    {
+        const int16_t *xwt = xw;
+        int32_t *acc = acc32;
+        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+            /* Pair before grouping, matching the gcc twin. This format has
+               the heaviest weight side of the five - the 6-bit value is
+               reassembled from two planes before it can be widened - so one
+               pass of it serving two tokens is the largest saving the pair
+               buys anywhere. */
+            if (nt - tk >= 2 && lz_pair_mode()) {
+                const int16_t *xw2 = xwt + in_dim;
+                int32_t *accb = acc + nb;
+                int sp;
+                for (sp = 0; sp < nb; sp++) {
+                    LZ_Q61_PF(sp);
+                    lz_dot32_q61_sse2_asm_2(wn + (size_t)sp * 16,
+                                            w2 + (size_t)sp * 8,
+                                            xwt + (size_t)sp * 32,
+                                            xw2 + (size_t)sp * 32,
+                                            acc + sp, accb + sp);
+                }
+                tk++;
+                xwt += in_dim;   /* skip tk+1's pointers too */
+                acc += nb;
+                continue;
             }
-            tk++;
-            continue;
-        }
 #if LZ_SSE2_GROUP
-        if ((nb & 3) == 0) LZ_Q61_GROUP4(lz_dot128_q61_sse2_asm);
+            if ((nb & 3) == 0) LZ_Q61_GROUP4(lz_dot128_q61_sse2_asm);
 #else
-        /* lz_dot128_q61_mmx_w is src/ops_mmx.c's real wrapper around
-           the MMX #pragma aux group kernel. */
-        if ((nb & 3) == 0) LZ_Q61_GROUP4(lz_dot128_q61_mmx_w);
+            /* lz_dot128_q61_mmx_w is src/ops_mmx.c's real wrapper around
+               the MMX #pragma aux group kernel. */
+            if ((nb & 3) == 0) LZ_Q61_GROUP4(lz_dot128_q61_mmx_w);
 #endif /* LZ_SSE2_GROUP */
-        /* Measured on target: on a real Pentium M the SSE2 kernel is
-           20-30% faster at kernel level and no worse end-to-end. Uop
-           counts compare only WITHIN one instruction set; a 128-bit uop
-           and a 64-bit uop are not the same unit of work, so the
-           uop-count argument does not apply across instruction sets. */
-        else               LZ_Q61_ACC(dot32_q61_sse2a);
+            /* Measured on target: on a real Pentium M the SSE2 kernel is
+               20-30% faster at kernel level and no worse end-to-end. Uop
+               counts compare only WITHIN one instruction set; a 128-bit uop
+               and a 64-bit uop are not the same unit of work, so the
+               uop-count argument does not apply across instruction sets. */
+            else               LZ_Q61_ACC(dot32_q61_sse2a);
+        }
     }
 }
 
@@ -2340,101 +2363,85 @@ extern void lz_dot128_q16_sse2_asm(const int16_t *w, const int16_t *x, int32_t *
 #pragma aux lz_dot128_q16_sse2_asm = \
     ".686" \
     "pxor      xmm4, xmm4" \
+    "pxor      xmm5, xmm5" \
+    "pxor      xmm6, xmm6" \
+    "pxor      xmm7, xmm7" \
     "movdqa    xmm0, [eax]" \
-    "movdqu    xmm1, [ecx]" \
-    "pmaddwd   xmm0, xmm1" \
+    "movdqa    xmm1, [eax+64]" \
+    "movdqa    xmm2, [eax+128]" \
+    "movdqa    xmm3, [eax+192]" \
+    "pmaddwd   xmm0, [ecx]" \
+    "pmaddwd   xmm1, [ecx+64]" \
+    "pmaddwd   xmm2, [ecx+128]" \
+    "pmaddwd   xmm3, [ecx+192]" \
     "paddd     xmm4, xmm0" \
+    "paddd     xmm5, xmm1" \
+    "paddd     xmm6, xmm2" \
+    "paddd     xmm7, xmm3" \
     "movdqa    xmm0, [eax+16]" \
-    "movdqu    xmm1, [ecx+16]" \
-    "pmaddwd   xmm0, xmm1" \
+    "movdqa    xmm1, [eax+80]" \
+    "movdqa    xmm2, [eax+144]" \
+    "movdqa    xmm3, [eax+208]" \
+    "pmaddwd   xmm0, [ecx+16]" \
+    "pmaddwd   xmm1, [ecx+80]" \
+    "pmaddwd   xmm2, [ecx+144]" \
+    "pmaddwd   xmm3, [ecx+208]" \
     "paddd     xmm4, xmm0" \
+    "paddd     xmm5, xmm1" \
+    "paddd     xmm6, xmm2" \
+    "paddd     xmm7, xmm3" \
     "movdqa    xmm0, [eax+32]" \
-    "movdqu    xmm1, [ecx+32]" \
-    "pmaddwd   xmm0, xmm1" \
+    "movdqa    xmm1, [eax+96]" \
+    "movdqa    xmm2, [eax+160]" \
+    "movdqa    xmm3, [eax+224]" \
+    "pmaddwd   xmm0, [ecx+32]" \
+    "pmaddwd   xmm1, [ecx+96]" \
+    "pmaddwd   xmm2, [ecx+160]" \
+    "pmaddwd   xmm3, [ecx+224]" \
     "paddd     xmm4, xmm0" \
+    "paddd     xmm5, xmm1" \
+    "paddd     xmm6, xmm2" \
+    "paddd     xmm7, xmm3" \
     "movdqa    xmm0, [eax+48]" \
-    "movdqu    xmm1, [ecx+48]" \
-    "pmaddwd   xmm0, xmm1" \
+    "movdqa    xmm1, [eax+112]" \
+    "movdqa    xmm2, [eax+176]" \
+    "movdqa    xmm3, [eax+240]" \
+    "pmaddwd   xmm0, [ecx+48]" \
+    "pmaddwd   xmm1, [ecx+112]" \
+    "pmaddwd   xmm2, [ecx+176]" \
+    "pmaddwd   xmm3, [ecx+240]" \
     "paddd     xmm4, xmm0" \
-    "movdqa    xmm2, xmm4" \
-    "psrldq    xmm2, 8" \
-    "paddd     xmm4, xmm2" \
-    "movdqa    xmm2, xmm4" \
-    "psrldq    xmm2, 4" \
-    "paddd     xmm4, xmm2" \
+    "paddd     xmm5, xmm1" \
+    "paddd     xmm6, xmm2" \
+    "paddd     xmm7, xmm3" \
+    "movdqa    xmm0, xmm4" \
+    "psrldq    xmm0, 8" \
+    "paddd     xmm4, xmm0" \
+    "movdqa    xmm0, xmm4" \
+    "psrldq    xmm0, 4" \
+    "paddd     xmm4, xmm0" \
     "movd      [ebx], xmm4" \
-    "pxor      xmm4, xmm4" \
-    "movdqa    xmm0, [eax+64]" \
-    "movdqu    xmm1, [ecx+64]" \
-    "pmaddwd   xmm0, xmm1" \
-    "paddd     xmm4, xmm0" \
-    "movdqa    xmm0, [eax+80]" \
-    "movdqu    xmm1, [ecx+80]" \
-    "pmaddwd   xmm0, xmm1" \
-    "paddd     xmm4, xmm0" \
-    "movdqa    xmm0, [eax+96]" \
-    "movdqu    xmm1, [ecx+96]" \
-    "pmaddwd   xmm0, xmm1" \
-    "paddd     xmm4, xmm0" \
-    "movdqa    xmm0, [eax+112]" \
-    "movdqu    xmm1, [ecx+112]" \
-    "pmaddwd   xmm0, xmm1" \
-    "paddd     xmm4, xmm0" \
-    "movdqa    xmm2, xmm4" \
-    "psrldq    xmm2, 8" \
-    "paddd     xmm4, xmm2" \
-    "movdqa    xmm2, xmm4" \
-    "psrldq    xmm2, 4" \
-    "paddd     xmm4, xmm2" \
-    "movd      [ebx+4], xmm4" \
-    "pxor      xmm4, xmm4" \
-    "movdqa    xmm0, [eax+128]" \
-    "movdqu    xmm1, [ecx+128]" \
-    "pmaddwd   xmm0, xmm1" \
-    "paddd     xmm4, xmm0" \
-    "movdqa    xmm0, [eax+144]" \
-    "movdqu    xmm1, [ecx+144]" \
-    "pmaddwd   xmm0, xmm1" \
-    "paddd     xmm4, xmm0" \
-    "movdqa    xmm0, [eax+160]" \
-    "movdqu    xmm1, [ecx+160]" \
-    "pmaddwd   xmm0, xmm1" \
-    "paddd     xmm4, xmm0" \
-    "movdqa    xmm0, [eax+176]" \
-    "movdqu    xmm1, [ecx+176]" \
-    "pmaddwd   xmm0, xmm1" \
-    "paddd     xmm4, xmm0" \
-    "movdqa    xmm2, xmm4" \
-    "psrldq    xmm2, 8" \
-    "paddd     xmm4, xmm2" \
-    "movdqa    xmm2, xmm4" \
-    "psrldq    xmm2, 4" \
-    "paddd     xmm4, xmm2" \
-    "movd      [ebx+8], xmm4" \
-    "pxor      xmm4, xmm4" \
-    "movdqa    xmm0, [eax+192]" \
-    "movdqu    xmm1, [ecx+192]" \
-    "pmaddwd   xmm0, xmm1" \
-    "paddd     xmm4, xmm0" \
-    "movdqa    xmm0, [eax+208]" \
-    "movdqu    xmm1, [ecx+208]" \
-    "pmaddwd   xmm0, xmm1" \
-    "paddd     xmm4, xmm0" \
-    "movdqa    xmm0, [eax+224]" \
-    "movdqu    xmm1, [ecx+224]" \
-    "pmaddwd   xmm0, xmm1" \
-    "paddd     xmm4, xmm0" \
-    "movdqa    xmm0, [eax+240]" \
-    "movdqu    xmm1, [ecx+240]" \
-    "pmaddwd   xmm0, xmm1" \
-    "paddd     xmm4, xmm0" \
-    "movdqa    xmm2, xmm4" \
-    "psrldq    xmm2, 8" \
-    "paddd     xmm4, xmm2" \
-    "movdqa    xmm2, xmm4" \
-    "psrldq    xmm2, 4" \
-    "paddd     xmm4, xmm2" \
-    "movd      [ebx+12], xmm4" \
+    "movdqa    xmm0, xmm5" \
+    "psrldq    xmm0, 8" \
+    "paddd     xmm5, xmm0" \
+    "movdqa    xmm0, xmm5" \
+    "psrldq    xmm0, 4" \
+    "paddd     xmm5, xmm0" \
+    "movd      [ebx+4], xmm5" \
+    "movdqa    xmm0, xmm6" \
+    "psrldq    xmm0, 8" \
+    "paddd     xmm6, xmm0" \
+    "movdqa    xmm0, xmm6" \
+    "psrldq    xmm0, 4" \
+    "paddd     xmm6, xmm0" \
+    "movd      [ebx+8], xmm6" \
+    "movdqa    xmm0, xmm7" \
+    "psrldq    xmm0, 8" \
+    "paddd     xmm7, xmm0" \
+    "movdqa    xmm0, xmm7" \
+    "psrldq    xmm0, 4" \
+    "paddd     xmm7, xmm0" \
+    "movd      [ebx+12], xmm7" \
     __parm [__eax] [__ecx] [__ebx] \
     __modify [8087]
 
@@ -2457,34 +2464,38 @@ void row_q16_sse2_asm(int32_t *acc32, const void *w4, const void *w2,
     const int16_t *wend = (const int16_t *)pf_end;
     int tk, g;
     (void)w2; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
-        /* Pair before grouping, as every other row kernel here does.
-           Smallest pair of the five - int16 needs no unpack, so four
-           shared loads is all of it. */
-        if (nt - tk >= 2 && lz_pair_mode()) {
-            const int16_t *xw2 = xwt + in_dim;
-            int32_t *accb = acc + nb;
-            int gp;
-            for (gp = 0; gp < nb; gp++) {
-                LZ_Q16_PF(gp);
-                lz_dot32_q16_sse2_asm_2(wr + (size_t)gp * 32,
-                                        xwt + (size_t)gp * 32,
-                                        xw2 + (size_t)gp * 32,
-                                        acc + gp, accb + gp);
+    {
+        const int16_t *xwt = xw;
+        int32_t *acc = acc32;
+        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+            /* Pair before grouping, as every other row kernel here does.
+               Smallest pair of the five - int16 needs no unpack, so four
+               shared loads is all of it. */
+            if (nt - tk >= 2 && lz_pair_mode()) {
+                const int16_t *xw2 = xwt + in_dim;
+                int32_t *accb = acc + nb;
+                int gp;
+                for (gp = 0; gp < nb; gp++) {
+                    LZ_Q16_PF(gp);
+                    lz_dot32_q16_sse2_asm_2(wr + (size_t)gp * 32,
+                                            xwt + (size_t)gp * 32,
+                                            xw2 + (size_t)gp * 32,
+                                            acc + gp, accb + gp);
+                }
+                tk++;
+                xwt += in_dim;   /* skip tk+1's pointers too */
+                acc += nb;
+                continue;
             }
-            tk++;
-            continue;
-        }
 #if LZ_SSE2_GROUP
-        if ((nb & 3) == 0) LZ_Q16_GROUP4(lz_dot128_q16_sse2_asm);
+            if ((nb & 3) == 0) LZ_Q16_GROUP4(lz_dot128_q16_sse2_asm);
 #else
-        /* lz_dot128_q16_mmx_w is src/ops_mmx.c's real wrapper around
-           the MMX #pragma aux group kernel. */
-        if ((nb & 3) == 0) LZ_Q16_GROUP4(lz_dot128_q16_mmx_w);
+            /* lz_dot128_q16_mmx_w is src/ops_mmx.c's real wrapper around
+               the MMX #pragma aux group kernel. */
+            if ((nb & 3) == 0) LZ_Q16_GROUP4(lz_dot128_q16_mmx_w);
 #endif /* LZ_SSE2_GROUP */
-        else               LZ_Q16_ACC(dot32_q16_sse2a);
+            else               LZ_Q16_ACC(dot32_q16_sse2a);
+        }
     }
 }
 
@@ -2748,68 +2759,72 @@ void row_q8_sse2_intrin(int32_t *acc32, const void *w4, const void *w2,
     const int8_t *wr = (const int8_t *)w4;
     int tk, g;
     (void)w2; (void)pf_end; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
-        /* Pair and group TOGETHER, which the MMX tiers cannot do: there
-           the pair replaces the group because a token pair cannot be
-           expressed once the group loop owns the sub-block index. Here
-           fold4_sse2 takes four partials per token, so one weight pass
-           feeds two folds - both axes at once, four sub-blocks by two
-           tokens.
-           The weight side is what the pair saves: two loads and four
-           unpacks against zero, paid once instead of twice. Only the
-           activation loads and the pmaddwd double. An odd nt leaves its
-           last token on the single-token path below. */
-        if (tk + 1 < nt && g_pair) {
-            const int16_t *xw2 = xwt + in_dim;
-            int32_t *accb = acc + nb;
+    {
+        const int16_t *xwt = xw;
+        int32_t *acc = acc32;
+        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+            /* Pair and group TOGETHER, which the MMX tiers cannot do: there
+               the pair replaces the group because a token pair cannot be
+               expressed once the group loop owns the sub-block index. Here
+               fold4_sse2 takes four partials per token, so one weight pass
+               feeds two folds - both axes at once, four sub-blocks by two
+               tokens.
+               The weight side is what the pair saves: two loads and four
+               unpacks against zero, paid once instead of twice. Only the
+               activation loads and the pmaddwd double. An odd nt leaves its
+               last token on the single-token path below. */
+            if (tk + 1 < nt && g_pair) {
+                const int16_t *xw2 = xwt + in_dim;
+                int32_t *accb = acc + nb;
+                for (g = 0; g + 3 < nb; g += 4) {
+                    __m128i pa0, pa1, pa2, pa3, pb0, pb1, pb2, pb3;
+                    part32_x16_2(wr + (size_t)(g + 0) * 32,
+                                 xwt + (size_t)(g + 0) * 32,
+                                 xw2 + (size_t)(g + 0) * 32, &pa0, &pb0);
+                    part32_x16_2(wr + (size_t)(g + 1) * 32,
+                                 xwt + (size_t)(g + 1) * 32,
+                                 xw2 + (size_t)(g + 1) * 32, &pa1, &pb1);
+                    part32_x16_2(wr + (size_t)(g + 2) * 32,
+                                 xwt + (size_t)(g + 2) * 32,
+                                 xw2 + (size_t)(g + 2) * 32, &pa2, &pb2);
+                    part32_x16_2(wr + (size_t)(g + 3) * 32,
+                                 xwt + (size_t)(g + 3) * 32,
+                                 xw2 + (size_t)(g + 3) * 32, &pa3, &pb3);
+                    _mm_storeu_si128((__m128i *)(void *)(acc + g),
+                                     fold4_sse2(pa0, pa1, pa2, pa3));
+                    _mm_storeu_si128((__m128i *)(void *)(accb + g),
+                                     fold4_sse2(pb0, pb1, pb2, pb3));
+                }
+                for (; g < nb; g++) {
+                    __m128i pa, pb;
+                    part32_x16_2(wr + (size_t)g * 32, xwt + (size_t)g * 32,
+                                 xw2 + (size_t)g * 32, &pa, &pb);
+                    pa = _mm_add_epi32(pa, _mm_srli_si128(pa, 8));
+                    pa = _mm_add_epi32(pa, _mm_srli_si128(pa, 4));
+                    acc[g] = _mm_cvtsi128_si32(pa);
+                    pb = _mm_add_epi32(pb, _mm_srli_si128(pb, 8));
+                    pb = _mm_add_epi32(pb, _mm_srli_si128(pb, 4));
+                    accb[g] = _mm_cvtsi128_si32(pb);
+                }
+                tk++;
+                xwt += in_dim;   /* skip tk+1's pointers too */
+                acc += nb;
+                continue;
+            }
             for (g = 0; g + 3 < nb; g += 4) {
-                __m128i pa0, pa1, pa2, pa3, pb0, pb1, pb2, pb3;
-                part32_x16_2(wr + (size_t)(g + 0) * 32,
-                             xwt + (size_t)(g + 0) * 32,
-                             xw2 + (size_t)(g + 0) * 32, &pa0, &pb0);
-                part32_x16_2(wr + (size_t)(g + 1) * 32,
-                             xwt + (size_t)(g + 1) * 32,
-                             xw2 + (size_t)(g + 1) * 32, &pa1, &pb1);
-                part32_x16_2(wr + (size_t)(g + 2) * 32,
-                             xwt + (size_t)(g + 2) * 32,
-                             xw2 + (size_t)(g + 2) * 32, &pa2, &pb2);
-                part32_x16_2(wr + (size_t)(g + 3) * 32,
-                             xwt + (size_t)(g + 3) * 32,
-                             xw2 + (size_t)(g + 3) * 32, &pa3, &pb3);
                 _mm_storeu_si128((__m128i *)(void *)(acc + g),
-                                 fold4_sse2(pa0, pa1, pa2, pa3));
-                _mm_storeu_si128((__m128i *)(void *)(accb + g),
-                                 fold4_sse2(pb0, pb1, pb2, pb3));
+                    fold4_sse2(
+                    part32_x16(wr + (size_t)(g + 0) * 32, xwt + (size_t)(g + 0) * 32),
+                    part32_x16(wr + (size_t)(g + 1) * 32, xwt + (size_t)(g + 1) * 32),
+                    part32_x16(wr + (size_t)(g + 2) * 32, xwt + (size_t)(g + 2) * 32),
+                    part32_x16(wr + (size_t)(g + 3) * 32, xwt + (size_t)(g + 3) * 32)));
             }
-            for (; g < nb; g++) {
-                __m128i pa, pb;
-                part32_x16_2(wr + (size_t)g * 32, xwt + (size_t)g * 32,
-                             xw2 + (size_t)g * 32, &pa, &pb);
-                pa = _mm_add_epi32(pa, _mm_srli_si128(pa, 8));
-                pa = _mm_add_epi32(pa, _mm_srli_si128(pa, 4));
-                acc[g] = _mm_cvtsi128_si32(pa);
-                pb = _mm_add_epi32(pb, _mm_srli_si128(pb, 8));
-                pb = _mm_add_epi32(pb, _mm_srli_si128(pb, 4));
-                accb[g] = _mm_cvtsi128_si32(pb);
+            for (; g < nb; g++) {           /* tail when nb % 4 != 0 */
+                __m128i p = part32_x16(wr + (size_t)g * 32, xwt + (size_t)g * 32);
+                p = _mm_add_epi32(p, _mm_srli_si128(p, 8));
+                p = _mm_add_epi32(p, _mm_srli_si128(p, 4));
+                acc[g] = _mm_cvtsi128_si32(p);
             }
-            tk++;
-            continue;
-        }
-        for (g = 0; g + 3 < nb; g += 4) {
-            _mm_storeu_si128((__m128i *)(void *)(acc + g),
-                fold4_sse2(
-                part32_x16(wr + (size_t)(g + 0) * 32, xwt + (size_t)(g + 0) * 32),
-                part32_x16(wr + (size_t)(g + 1) * 32, xwt + (size_t)(g + 1) * 32),
-                part32_x16(wr + (size_t)(g + 2) * 32, xwt + (size_t)(g + 2) * 32),
-                part32_x16(wr + (size_t)(g + 3) * 32, xwt + (size_t)(g + 3) * 32)));
-        }
-        for (; g < nb; g++) {           /* tail when nb % 4 != 0 */
-            __m128i p = part32_x16(wr + (size_t)g * 32, xwt + (size_t)g * 32);
-            p = _mm_add_epi32(p, _mm_srli_si128(p, 8));
-            p = _mm_add_epi32(p, _mm_srli_si128(p, 4));
-            acc[g] = _mm_cvtsi128_si32(p);
         }
     }
 }
@@ -2822,63 +2837,67 @@ void row_q41_sse2_intrin(int32_t *acc32, const void *w4, const void *w2,
     const unsigned char *wn = (const unsigned char *)w4;
     int tk, s;
     (void)w2; (void)pf_end; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
-        /* Pair and group together, the shape q8_0 established at this
-           tier: fold4_sse2 already takes four partials per token, so one
-           weight pass feeds two folds. q4_1 shares more than q8_0 did -
-           the nibble mask, the shift and the second mask on top of the
-           four unpacks. */
-        if (tk + 1 < nt && g_pair) {
-            const int16_t *xw2 = xwt + in_dim;
-            int32_t *accb = acc + nb;
+    {
+        const int16_t *xwt = xw;
+        int32_t *acc = acc32;
+        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+            /* Pair and group together, the shape q8_0 established at this
+               tier: fold4_sse2 already takes four partials per token, so one
+               weight pass feeds two folds. q4_1 shares more than q8_0 did -
+               the nibble mask, the shift and the second mask on top of the
+               four unpacks. */
+            if (tk + 1 < nt && g_pair) {
+                const int16_t *xw2 = xwt + in_dim;
+                int32_t *accb = acc + nb;
+                for (s = 0; s + 3 < nb; s += 4) {
+                    __m128i pa0, pa1, pa2, pa3, pb0, pb1, pb2, pb3;
+                    part32_q41_2(wn + (size_t)(s + 0) * 16,
+                                 xwt + (size_t)(s + 0) * 32,
+                                 xw2 + (size_t)(s + 0) * 32, &pa0, &pb0);
+                    part32_q41_2(wn + (size_t)(s + 1) * 16,
+                                 xwt + (size_t)(s + 1) * 32,
+                                 xw2 + (size_t)(s + 1) * 32, &pa1, &pb1);
+                    part32_q41_2(wn + (size_t)(s + 2) * 16,
+                                 xwt + (size_t)(s + 2) * 32,
+                                 xw2 + (size_t)(s + 2) * 32, &pa2, &pb2);
+                    part32_q41_2(wn + (size_t)(s + 3) * 16,
+                                 xwt + (size_t)(s + 3) * 32,
+                                 xw2 + (size_t)(s + 3) * 32, &pa3, &pb3);
+                    _mm_storeu_si128((__m128i *)(void *)(acc + s),
+                                     fold4_sse2(pa0, pa1, pa2, pa3));
+                    _mm_storeu_si128((__m128i *)(void *)(accb + s),
+                                     fold4_sse2(pb0, pb1, pb2, pb3));
+                }
+                for (; s < nb; s++) {
+                    __m128i pa, pb;
+                    part32_q41_2(wn + (size_t)s * 16, xwt + (size_t)s * 32,
+                                 xw2 + (size_t)s * 32, &pa, &pb);
+                    pa = _mm_add_epi32(pa, _mm_srli_si128(pa, 8));
+                    pa = _mm_add_epi32(pa, _mm_srli_si128(pa, 4));
+                    acc[s] = _mm_cvtsi128_si32(pa);
+                    pb = _mm_add_epi32(pb, _mm_srli_si128(pb, 8));
+                    pb = _mm_add_epi32(pb, _mm_srli_si128(pb, 4));
+                    accb[s] = _mm_cvtsi128_si32(pb);
+                }
+                tk++;
+                xwt += in_dim;   /* skip tk+1's pointers too */
+                acc += nb;
+                continue;
+            }
             for (s = 0; s + 3 < nb; s += 4) {
-                __m128i pa0, pa1, pa2, pa3, pb0, pb1, pb2, pb3;
-                part32_q41_2(wn + (size_t)(s + 0) * 16,
-                             xwt + (size_t)(s + 0) * 32,
-                             xw2 + (size_t)(s + 0) * 32, &pa0, &pb0);
-                part32_q41_2(wn + (size_t)(s + 1) * 16,
-                             xwt + (size_t)(s + 1) * 32,
-                             xw2 + (size_t)(s + 1) * 32, &pa1, &pb1);
-                part32_q41_2(wn + (size_t)(s + 2) * 16,
-                             xwt + (size_t)(s + 2) * 32,
-                             xw2 + (size_t)(s + 2) * 32, &pa2, &pb2);
-                part32_q41_2(wn + (size_t)(s + 3) * 16,
-                             xwt + (size_t)(s + 3) * 32,
-                             xw2 + (size_t)(s + 3) * 32, &pa3, &pb3);
                 _mm_storeu_si128((__m128i *)(void *)(acc + s),
-                                 fold4_sse2(pa0, pa1, pa2, pa3));
-                _mm_storeu_si128((__m128i *)(void *)(accb + s),
-                                 fold4_sse2(pb0, pb1, pb2, pb3));
+                    fold4_sse2(
+                    part32_q41(wn + (size_t)(s + 0) * 16, xwt + (size_t)(s + 0) * 32),
+                    part32_q41(wn + (size_t)(s + 1) * 16, xwt + (size_t)(s + 1) * 32),
+                    part32_q41(wn + (size_t)(s + 2) * 16, xwt + (size_t)(s + 2) * 32),
+                    part32_q41(wn + (size_t)(s + 3) * 16, xwt + (size_t)(s + 3) * 32)));
             }
             for (; s < nb; s++) {
-                __m128i pa, pb;
-                part32_q41_2(wn + (size_t)s * 16, xwt + (size_t)s * 32,
-                             xw2 + (size_t)s * 32, &pa, &pb);
-                pa = _mm_add_epi32(pa, _mm_srli_si128(pa, 8));
-                pa = _mm_add_epi32(pa, _mm_srli_si128(pa, 4));
-                acc[s] = _mm_cvtsi128_si32(pa);
-                pb = _mm_add_epi32(pb, _mm_srli_si128(pb, 8));
-                pb = _mm_add_epi32(pb, _mm_srli_si128(pb, 4));
-                accb[s] = _mm_cvtsi128_si32(pb);
+                __m128i p = part32_q41(wn + (size_t)s * 16, xwt + (size_t)s * 32);
+                p = _mm_add_epi32(p, _mm_srli_si128(p, 8));
+                p = _mm_add_epi32(p, _mm_srli_si128(p, 4));
+                acc[s] = _mm_cvtsi128_si32(p);
             }
-            tk++;
-            continue;
-        }
-        for (s = 0; s + 3 < nb; s += 4) {
-            _mm_storeu_si128((__m128i *)(void *)(acc + s),
-                fold4_sse2(
-                part32_q41(wn + (size_t)(s + 0) * 16, xwt + (size_t)(s + 0) * 32),
-                part32_q41(wn + (size_t)(s + 1) * 16, xwt + (size_t)(s + 1) * 32),
-                part32_q41(wn + (size_t)(s + 2) * 16, xwt + (size_t)(s + 2) * 32),
-                part32_q41(wn + (size_t)(s + 3) * 16, xwt + (size_t)(s + 3) * 32)));
-        }
-        for (; s < nb; s++) {
-            __m128i p = part32_q41(wn + (size_t)s * 16, xwt + (size_t)s * 32);
-            p = _mm_add_epi32(p, _mm_srli_si128(p, 8));
-            p = _mm_add_epi32(p, _mm_srli_si128(p, 4));
-            acc[s] = _mm_cvtsi128_si32(p);
         }
     }
 }
@@ -2892,57 +2911,61 @@ void row_t2_sse2_intrin(int32_t *acc32, const void *w4, const void *w2v,
     const unsigned char *p2 = (const unsigned char *)w4;
     int tk, s;
     (void)w2v; (void)pf_end; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
-        /* Pair ahead of the group form, the order every row kernel here
-           uses. T2's decode at THIS tier is fourteen instructions - four
-           masks, three shifts, two merges, four unpacks - so the pair
-           shares more than q4_1's, unlike at the MMX tier where the same
-           operator's unpack is a zero register and three shifts. */
-        if (tk + 1 < nt && g_pair) {
-            const int16_t *xw2 = xwt + in_dim;
-            int32_t *accb = acc + nb;
-            for (s = 0; s < nb; s++) {
-                __m128i pa, pb;
-                part32_t2_2(p2 + (size_t)s * 8, xwt + (size_t)s * 32,
-                            xw2 + (size_t)s * 32, &pa, &pb);
-                pa = _mm_add_epi32(pa, _mm_srli_si128(pa, 8));
-                pa = _mm_add_epi32(pa, _mm_srli_si128(pa, 4));
-                acc[s] = _mm_cvtsi128_si32(pa);
-                pb = _mm_add_epi32(pb, _mm_srli_si128(pb, 8));
-                pb = _mm_add_epi32(pb, _mm_srli_si128(pb, 4));
-                accb[s] = _mm_cvtsi128_si32(pb);
+    {
+        const int16_t *xwt = xw;
+        int32_t *acc = acc32;
+        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+            /* Pair ahead of the group form, the order every row kernel here
+               uses. T2's decode at THIS tier is fourteen instructions - four
+               masks, three shifts, two merges, four unpacks - so the pair
+               shares more than q4_1's, unlike at the MMX tier where the same
+               operator's unpack is a zero register and three shifts. */
+            if (tk + 1 < nt && g_pair) {
+                const int16_t *xw2 = xwt + in_dim;
+                int32_t *accb = acc + nb;
+                for (s = 0; s < nb; s++) {
+                    __m128i pa, pb;
+                    part32_t2_2(p2 + (size_t)s * 8, xwt + (size_t)s * 32,
+                                xw2 + (size_t)s * 32, &pa, &pb);
+                    pa = _mm_add_epi32(pa, _mm_srli_si128(pa, 8));
+                    pa = _mm_add_epi32(pa, _mm_srli_si128(pa, 4));
+                    acc[s] = _mm_cvtsi128_si32(pa);
+                    pb = _mm_add_epi32(pb, _mm_srli_si128(pb, 8));
+                    pb = _mm_add_epi32(pb, _mm_srli_si128(pb, 4));
+                    accb[s] = _mm_cvtsi128_si32(pb);
+                }
+                tk++;
+                xwt += in_dim;   /* skip tk+1's pointers too */
+                acc += nb;
+                continue;
             }
-            tk++;
-            continue;
-        }
-        s = 0;
-        /* The knob is honoured but not redefined here. LZ_G128_GCC lives
-           in ops_kernel_shared.h, which this file includes only under
-           __WATCOMC__ (line 34) - so in a gcc build the name is not
-           visible and a plain `#if LZ_G128_GCC` is `#if 0`, which is
-           what it was: this loop compiled to nothing and -Wunused-function
-           on dot128_t2_sse2 was the only thing that said so.
-           Including that header here would also define LZ_SSE2_GROUP and
-           flip the branch above onto the Watcom asm path. Defining the
-           default a second time would be a sibling free to drift. So:
-           on unless the command line turns it off, which is exactly how
-           the A/B is run (-DLZ_G128_GCC=0). */
+            s = 0;
+            /* The knob is honoured but not redefined here. LZ_G128_GCC lives
+               in ops_kernel_shared.h, which this file includes only under
+               __WATCOMC__ (line 34) - so in a gcc build the name is not
+               visible and a plain `#if LZ_G128_GCC` is `#if 0`, which is
+               what it was: this loop compiled to nothing and -Wunused-function
+               on dot128_t2_sse2 was the only thing that said so.
+               Including that header here would also define LZ_SSE2_GROUP and
+               flip the branch above onto the Watcom asm path. Defining the
+               default a second time would be a sibling free to drift. So:
+               on unless the command line turns it off, which is exactly how
+               the A/B is run (-DLZ_G128_GCC=0). */
 #if !defined(LZ_G128_GCC) || LZ_G128_GCC
-        /* Groups of four while a whole one is left; the tail below runs
-           the per-32 fold for nb % 4. Both write the same values - see
-           dot128_t2_sse2 on why the transposed fold is bit-identical -
-           so a row is not split between two answers, only between two
-           instruction counts. */
-        for (; s + 4 <= nb; s += 4)
-            dot128_t2_sse2(p2 + (size_t)s * 8, xwt + (size_t)s * 32, acc + s);
+            /* Groups of four while a whole one is left; the tail below runs
+               the per-32 fold for nb % 4. Both write the same values - see
+               dot128_t2_sse2 on why the transposed fold is bit-identical -
+               so a row is not split between two answers, only between two
+               instruction counts. */
+            for (; s + 4 <= nb; s += 4)
+                dot128_t2_sse2(p2 + (size_t)s * 8, xwt + (size_t)s * 32, acc + s);
 #endif /* !defined(LZ_G128_GCC) || LZ_G128_GCC */
-        for (; s < nb; s++) {
-            __m128i p = part32_t2(p2 + (size_t)s * 8, xwt + (size_t)s * 32);
-            p = _mm_add_epi32(p, _mm_srli_si128(p, 8));
-            p = _mm_add_epi32(p, _mm_srli_si128(p, 4));
-            acc[s] = _mm_cvtsi128_si32(p);
+            for (; s < nb; s++) {
+                __m128i p = part32_t2(p2 + (size_t)s * 8, xwt + (size_t)s * 32);
+                p = _mm_add_epi32(p, _mm_srli_si128(p, 8));
+                p = _mm_add_epi32(p, _mm_srli_si128(p, 4));
+                acc[s] = _mm_cvtsi128_si32(p);
+            }
         }
     }
 }
@@ -2956,37 +2979,41 @@ void row_q61_sse2_intrin(int32_t *acc32, const void *w4, const void *w2v,
     const unsigned char *w2 = (const unsigned char *)w2v;
     int tk, s;
     (void)pf_end; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
-        /* The pair is worth most on this format: the 6-bit reassembly
-           is ~19 instructions on the weight side against q4_1's 8 and
-           q8_0's 6, and one pass of it now serves two tokens. No group
-           form here to combine with - this row runs per-32 either way. */
-        if (tk + 1 < nt && g_pair) {
-            const int16_t *xw2 = xwt + in_dim;
-            int32_t *accb = acc + nb;
-            for (s = 0; s < nb; s++) {
-                __m128i pa, pb;
-                part32_q61_2(wn + (size_t)s * 16, w2 + (size_t)s * 8,
-                             xwt + (size_t)s * 32, xw2 + (size_t)s * 32,
-                             &pa, &pb);
-                pa = _mm_add_epi32(pa, _mm_srli_si128(pa, 8));
-                pa = _mm_add_epi32(pa, _mm_srli_si128(pa, 4));
-                acc[s] = _mm_cvtsi128_si32(pa);
-                pb = _mm_add_epi32(pb, _mm_srli_si128(pb, 8));
-                pb = _mm_add_epi32(pb, _mm_srli_si128(pb, 4));
-                accb[s] = _mm_cvtsi128_si32(pb);
+    {
+        const int16_t *xwt = xw;
+        int32_t *acc = acc32;
+        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+            /* The pair is worth most on this format: the 6-bit reassembly
+               is ~19 instructions on the weight side against q4_1's 8 and
+               q8_0's 6, and one pass of it now serves two tokens. No group
+               form here to combine with - this row runs per-32 either way. */
+            if (tk + 1 < nt && g_pair) {
+                const int16_t *xw2 = xwt + in_dim;
+                int32_t *accb = acc + nb;
+                for (s = 0; s < nb; s++) {
+                    __m128i pa, pb;
+                    part32_q61_2(wn + (size_t)s * 16, w2 + (size_t)s * 8,
+                                 xwt + (size_t)s * 32, xw2 + (size_t)s * 32,
+                                 &pa, &pb);
+                    pa = _mm_add_epi32(pa, _mm_srli_si128(pa, 8));
+                    pa = _mm_add_epi32(pa, _mm_srli_si128(pa, 4));
+                    acc[s] = _mm_cvtsi128_si32(pa);
+                    pb = _mm_add_epi32(pb, _mm_srli_si128(pb, 8));
+                    pb = _mm_add_epi32(pb, _mm_srli_si128(pb, 4));
+                    accb[s] = _mm_cvtsi128_si32(pb);
+                }
+                tk++;
+                xwt += in_dim;   /* skip tk+1's pointers too */
+                acc += nb;
+                continue;
             }
-            tk++;
-            continue;
-        }
-        for (s = 0; s < nb; s++) {
-            __m128i p = part32_q61(wn + (size_t)s * 16, w2 + (size_t)s * 8,
-                                   xwt + (size_t)s * 32);
-            p = _mm_add_epi32(p, _mm_srli_si128(p, 8));
-            p = _mm_add_epi32(p, _mm_srli_si128(p, 4));
-            acc[s] = _mm_cvtsi128_si32(p);
+            for (s = 0; s < nb; s++) {
+                __m128i p = part32_q61(wn + (size_t)s * 16, w2 + (size_t)s * 8,
+                                       xwt + (size_t)s * 32);
+                p = _mm_add_epi32(p, _mm_srli_si128(p, 8));
+                p = _mm_add_epi32(p, _mm_srli_si128(p, 4));
+                acc[s] = _mm_cvtsi128_si32(p);
+            }
         }
     }
 }
@@ -2999,61 +3026,65 @@ void row_q16_sse2_intrin(int32_t *acc32, const void *w4, const void *w2,
     const int16_t *wr = (const int16_t *)w4;
     int tk, g;
     (void)w2; (void)pf_end; (void)pf_end2;
-    for (tk = 0; tk < nt; tk++) {
-        const int16_t *xwt = xw + (size_t)tk * in_dim;
-        int32_t *acc = acc32 + (size_t)tk * nb;
-        /* Pair and group together, as q8_0 and q4_1 do at this tier.
-           The smallest pair of the five: int16 weights need no unpack,
-           so four shared loads is the whole saving. */
-        if (tk + 1 < nt && g_pair) {
-            const int16_t *xw2 = xwt + in_dim;
-            int32_t *accb = acc + nb;
+    {
+        const int16_t *xwt = xw;
+        int32_t *acc = acc32;
+        for (tk = 0; tk < nt; tk++, xwt += in_dim, acc += nb) {
+            /* Pair and group together, as q8_0 and q4_1 do at this tier.
+               The smallest pair of the five: int16 weights need no unpack,
+               so four shared loads is the whole saving. */
+            if (tk + 1 < nt && g_pair) {
+                const int16_t *xw2 = xwt + in_dim;
+                int32_t *accb = acc + nb;
+                for (g = 0; g + 3 < nb; g += 4) {
+                    __m128i pa0, pa1, pa2, pa3, pb0, pb1, pb2, pb3;
+                    part32_q16_2(wr + (size_t)(g + 0) * 32,
+                                 xwt + (size_t)(g + 0) * 32,
+                                 xw2 + (size_t)(g + 0) * 32, &pa0, &pb0);
+                    part32_q16_2(wr + (size_t)(g + 1) * 32,
+                                 xwt + (size_t)(g + 1) * 32,
+                                 xw2 + (size_t)(g + 1) * 32, &pa1, &pb1);
+                    part32_q16_2(wr + (size_t)(g + 2) * 32,
+                                 xwt + (size_t)(g + 2) * 32,
+                                 xw2 + (size_t)(g + 2) * 32, &pa2, &pb2);
+                    part32_q16_2(wr + (size_t)(g + 3) * 32,
+                                 xwt + (size_t)(g + 3) * 32,
+                                 xw2 + (size_t)(g + 3) * 32, &pa3, &pb3);
+                    _mm_storeu_si128((__m128i *)(void *)(acc + g),
+                                     fold4_sse2(pa0, pa1, pa2, pa3));
+                    _mm_storeu_si128((__m128i *)(void *)(accb + g),
+                                     fold4_sse2(pb0, pb1, pb2, pb3));
+                }
+                for (; g < nb; g++) {
+                    __m128i pa, pb;
+                    part32_q16_2(wr + (size_t)g * 32, xwt + (size_t)g * 32,
+                                 xw2 + (size_t)g * 32, &pa, &pb);
+                    pa = _mm_add_epi32(pa, _mm_srli_si128(pa, 8));
+                    pa = _mm_add_epi32(pa, _mm_srli_si128(pa, 4));
+                    acc[g] = _mm_cvtsi128_si32(pa);
+                    pb = _mm_add_epi32(pb, _mm_srli_si128(pb, 8));
+                    pb = _mm_add_epi32(pb, _mm_srli_si128(pb, 4));
+                    accb[g] = _mm_cvtsi128_si32(pb);
+                }
+                tk++;
+                xwt += in_dim;   /* skip tk+1's pointers too */
+                acc += nb;
+                continue;
+            }
             for (g = 0; g + 3 < nb; g += 4) {
-                __m128i pa0, pa1, pa2, pa3, pb0, pb1, pb2, pb3;
-                part32_q16_2(wr + (size_t)(g + 0) * 32,
-                             xwt + (size_t)(g + 0) * 32,
-                             xw2 + (size_t)(g + 0) * 32, &pa0, &pb0);
-                part32_q16_2(wr + (size_t)(g + 1) * 32,
-                             xwt + (size_t)(g + 1) * 32,
-                             xw2 + (size_t)(g + 1) * 32, &pa1, &pb1);
-                part32_q16_2(wr + (size_t)(g + 2) * 32,
-                             xwt + (size_t)(g + 2) * 32,
-                             xw2 + (size_t)(g + 2) * 32, &pa2, &pb2);
-                part32_q16_2(wr + (size_t)(g + 3) * 32,
-                             xwt + (size_t)(g + 3) * 32,
-                             xw2 + (size_t)(g + 3) * 32, &pa3, &pb3);
                 _mm_storeu_si128((__m128i *)(void *)(acc + g),
-                                 fold4_sse2(pa0, pa1, pa2, pa3));
-                _mm_storeu_si128((__m128i *)(void *)(accb + g),
-                                 fold4_sse2(pb0, pb1, pb2, pb3));
+                    fold4_sse2(
+                    part32_q16(wr + (size_t)(g + 0) * 32, xwt + (size_t)(g + 0) * 32),
+                    part32_q16(wr + (size_t)(g + 1) * 32, xwt + (size_t)(g + 1) * 32),
+                    part32_q16(wr + (size_t)(g + 2) * 32, xwt + (size_t)(g + 2) * 32),
+                    part32_q16(wr + (size_t)(g + 3) * 32, xwt + (size_t)(g + 3) * 32)));
             }
-            for (; g < nb; g++) {
-                __m128i pa, pb;
-                part32_q16_2(wr + (size_t)g * 32, xwt + (size_t)g * 32,
-                             xw2 + (size_t)g * 32, &pa, &pb);
-                pa = _mm_add_epi32(pa, _mm_srli_si128(pa, 8));
-                pa = _mm_add_epi32(pa, _mm_srli_si128(pa, 4));
-                acc[g] = _mm_cvtsi128_si32(pa);
-                pb = _mm_add_epi32(pb, _mm_srli_si128(pb, 8));
-                pb = _mm_add_epi32(pb, _mm_srli_si128(pb, 4));
-                accb[g] = _mm_cvtsi128_si32(pb);
+            for (; g < nb; g++) {           /* tail when nb % 4 != 0 */
+                __m128i p = part32_q16(wr + (size_t)g * 32, xwt + (size_t)g * 32);
+                p = _mm_add_epi32(p, _mm_srli_si128(p, 8));
+                p = _mm_add_epi32(p, _mm_srli_si128(p, 4));
+                acc[g] = _mm_cvtsi128_si32(p);
             }
-            tk++;
-            continue;
-        }
-        for (g = 0; g + 3 < nb; g += 4) {
-            _mm_storeu_si128((__m128i *)(void *)(acc + g),
-                fold4_sse2(
-                part32_q16(wr + (size_t)(g + 0) * 32, xwt + (size_t)(g + 0) * 32),
-                part32_q16(wr + (size_t)(g + 1) * 32, xwt + (size_t)(g + 1) * 32),
-                part32_q16(wr + (size_t)(g + 2) * 32, xwt + (size_t)(g + 2) * 32),
-                part32_q16(wr + (size_t)(g + 3) * 32, xwt + (size_t)(g + 3) * 32)));
-        }
-        for (; g < nb; g++) {           /* tail when nb % 4 != 0 */
-            __m128i p = part32_q16(wr + (size_t)g * 32, xwt + (size_t)g * 32);
-            p = _mm_add_epi32(p, _mm_srli_si128(p, 8));
-            p = _mm_add_epi32(p, _mm_srli_si128(p, 4));
-            acc[g] = _mm_cvtsi128_si32(p);
         }
     }
 }
