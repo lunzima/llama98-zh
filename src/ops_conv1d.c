@@ -391,3 +391,48 @@ void lz_conv_build_scales(float *oscale, float *in_scale,
         oscale[c] = pow2f(-((int)ew[c] + es));
 }
 #endif /* LZ_CONV_FIXED */
+
+/* Accumulator bound for the fixed conv tier, derived not chosen.
+   k products of two values bounded by B reach k*B^2, which must stay
+   inside int32: B <= sqrt((2^31-1)/k). For k=4 that is 23170, so the
+   largest usable power of two is 2^14. Probe (.prof/wconv.c) measures a
+   peak of 9.09e8 against the 1.07e9 bound - tight, never crossed, 2.36x
+   inside int32.
+
+   int64 accumulation is not the escape: ARMv5TE has SMLAL, but MMX's
+   pmaddwd yields int32 pairs that wrap the same way, so the x86 side
+   would need a carry chain per tap. One bound for both is cheaper. */
+int lz_conv_accum_bound(int k) {
+    int b = 1;
+    while ((double)k * (double)(b * 2) * (double)(b * 2) <= 2147483647.0)
+        b *= 2;
+    return b;
+}
+
+/* Normalize n floats into int16 by a POWER OF TWO, clamped to +-bound.
+   Returns e, so v[i] ~ out[i] * 2^-e. Power of two only: the scale is
+   exact in binary, so this adds no rounding of its own and cannot
+   differ between x87 and SSE. */
+int lz_conv_norm_pow2(const float *v, int n, short *out, int bound) {
+    /* q8_amax, not a hand-written scan: two __aeabi_fcmpXX per ELEMENT
+       otherwise, and this was the fifth copy of the same loop. See
+       epi_pack_act for why the integer-domain form is exact. */
+    union { float f; uint32_t u; } ab;
+    float amax;
+    int i, e = 0;
+    ab.u = q8_amax(v, n);
+    amax = ab.f;
+    if (amax == 0.0f) {
+        for (i = 0; i < n; i++) out[i] = 0;
+        return 0;
+    }
+    while (e < 30 && amax * (float)(1 << (e + 1)) < (float)bound) e++;
+    for (i = 0; i < n; i++) {
+        float t = v[i] * (float)(1 << e);
+        int q = q8_round(t);
+        if (q > bound) q = bound;
+        if (q < -bound) q = -bound;
+        out[i] = (short)q;
+    }
+    return e;
+}
