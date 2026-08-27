@@ -397,6 +397,11 @@ void forward_kda(const LZModel *m, LZRunState *s,
     int nk = c->lin_n_k_heads, nv = c->lin_n_v_heads;
     int kd = c->lin_k_head_dim, vd = c->lin_v_head_dim;
     int gate_rank = c->kda_gate_rank;
+    /* Hoisted config scalar, passed to every norm call below: Watcom
+       pushes a loop-invariant field as `push [mem]` (X86_TUNE_PUSH_MEMORY)
+       and ARM reloads `ldr [c,#offset]` at each call site unless the
+       value is named once here and carried in a register. */
+    float rms_eps = c->rms_norm_eps;
     int li = s->cache_idx[layer];
     int ring_depth = s->ssm_ring_depth;
     size_t q8_slot_stride = (size_t)c->n_linear_layers * nv * kd * vd;
@@ -524,19 +529,19 @@ void forward_kda(const LZModel *m, LZRunState *s,
         int nint = lz_norm_int() && lz_norm_can_fixed(hdim) &&
                    gsa > 0 && nsa * gsa == hdim;
 
-        subn_norm_q8(s, &L->kda_q_norm, hdim, nt, nsa, c->rms_norm_eps, nint);
+        subn_norm_q8(s, &L->kda_q_norm, hdim, nt, nsa, rms_eps, nint);
         kda_conv_proj(s, &conv_int, s->kda_q, s->kda_q_i16, s->xb2,
                       &L->kda_q_proj, hdim, kdim, nt);
 
-        subn_norm_q8(s, &L->kda_k_norm, hdim, nt, nsa, c->rms_norm_eps, nint);
+        subn_norm_q8(s, &L->kda_k_norm, hdim, nt, nsa, rms_eps, nint);
         kda_conv_proj(s, &conv_int, s->kda_k, s->kda_k_i16, s->xb2,
                       &L->kda_k_proj, hdim, kdim, nt);
 
-        subn_norm_q8(s, &L->kda_v_norm, hdim, nt, nsa, c->rms_norm_eps, nint);
+        subn_norm_q8(s, &L->kda_v_norm, hdim, nt, nsa, rms_eps, nint);
         kda_conv_proj(s, &conv_int, s->kda_v, s->kda_v_i16, s->xb2,
                       &L->kda_v_proj, hdim, vdim, nt);
 
-        subn_norm_q8(s, &L->kda_g_norm, hdim, nt, nsa, c->rms_norm_eps, nint);
+        subn_norm_q8(s, &L->kda_g_norm, hdim, nt, nsa, rms_eps, nint);
         lz_matmul_xq_nt(s->zbuf, s->xb2, s->xq, s->xqs, &L->kda_g_proj,
                         hdim, vdim, nt);
 
@@ -878,12 +883,12 @@ void forward_kda(const LZModel *m, LZRunState *s,
                                      s->ssm_out + (size_t)tk * vdim + (size_t)h * vd,
                                      s->zbuf + (size_t)tk * vdim + (size_t)h * vd,
                                      kda_o_norm_w, vd,
-                                     c->rms_norm_eps, NULL);
+                                     rms_eps, NULL);
             for (tk = 0; tk < nt; tk++)
                 lz_rmsnorm(s->ssm_out + (size_t)tk * vdim,
                            s->ssm_out + (size_t)tk * vdim,
                            lz_t_f32(&L->kda_o_subn_norm, s->wscr), vdim,
-                           c->rms_norm_eps);
+                           rms_eps);
             /* SubLN Hadamard: o_proj's block, settled at load time
                (model.c resolve_hadamard). 0 = no Hadamard. */
             {
@@ -922,7 +927,7 @@ void forward_kda(const LZModel *m, LZRunState *s,
                                          s->ssm_out + (size_t)tk * vdim + (size_t)h * vd,
                                          s->zbuf + (size_t)tk * vdim + (size_t)h * vd,
                                          kda_o_norm_w, vd,
-                                         c->rms_norm_eps, &deq);
+                                         rms_eps, &deq);
                     lz_quantize_q8_int(s->ssm_sig + (size_t)tk * vdim + (size_t)h * vd,
                                        vd, gso, deq,
                                        s->xq + (size_t)tk * vdim + (size_t)h * vd,
@@ -935,7 +940,7 @@ void forward_kda(const LZModel *m, LZRunState *s,
                                      s->ssm_out + (size_t)tk * vdim + (size_t)h * vd,
                                      s->zbuf + (size_t)tk * vdim + (size_t)h * vd,
                                      kda_o_norm_w, vd,
-                                     c->rms_norm_eps,
+                                     rms_eps,
                                      NULL);
             for (tk = 0; tk < nt; tk++)
                 lz_quantize_q8(s->ssm_out + (size_t)tk * vdim, vdim, gso,
@@ -947,7 +952,7 @@ void forward_kda(const LZModel *m, LZRunState *s,
                                      s->ssm_out + (size_t)tk * vdim + (size_t)h * vd,
                                      s->zbuf + (size_t)tk * vdim + (size_t)h * vd,
                                      kda_o_norm_w, vd,
-                                     c->rms_norm_eps, NULL);
+                                     rms_eps, NULL);
             for (tk = 0; tk < nt; tk++)
                 lz_quantize_q8(s->ssm_out + (size_t)tk * vdim, vdim, gso,
                                s->xq + (size_t)tk * vdim, s->xqs + (size_t)tk * nso);
@@ -982,6 +987,7 @@ void dense_ffn_step(const LZModel *m, LZRunState *s,
                            const LZLayer *L, int layer, int nt, int idim) {
     const LZModelConfig *c = &m->config;
     int dim = c->hidden_size;
+    float rms_eps = c->rms_norm_eps;
     int gsg = lz_act_gs(&L->gate_proj, dim);
     int nsg = scale_groups(dim, gsg);
     int gsd = lz_act_gs(&L->down_proj, idim);
@@ -1005,7 +1011,7 @@ void dense_ffn_step(const LZModel *m, LZRunState *s,
                 float deq;
                 lz_rmsnorm_int(s->subn_norm_int, s->xb + (size_t)tk * dim,
                                lz_t_f32(&L->gate_norm, s->wscr), dim,
-                               c->rms_norm_eps, &deq);
+                               rms_eps, &deq);
                 lz_quantize_q8_tok_int(s->subn_norm_int, dim, deq,
                                        s->xq + (size_t)tk * dim,
                                        s->xqs + (size_t)tk * nsg);
@@ -1013,7 +1019,7 @@ void dense_ffn_step(const LZModel *m, LZRunState *s,
         } else {
             for (tk = 0; tk < nt; tk++)
                 lz_rmsnorm(s->xb2 + (size_t)tk * dim, s->xb + (size_t)tk * dim,
-                           lz_t_f32(&L->gate_norm, s->wscr), dim, c->rms_norm_eps);
+                           lz_t_f32(&L->gate_norm, s->wscr), dim, rms_eps);
             for (tk = 0; tk < nt; tk++)
                 lz_quantize_q8_tok(s->xb2 + (size_t)tk * dim, dim,
                                    s->xq + (size_t)tk * dim, s->xqs + (size_t)tk * nsg);
@@ -1027,7 +1033,7 @@ void dense_ffn_step(const LZModel *m, LZRunState *s,
                 float deq;
                 lz_rmsnorm_int(s->subn_norm_int, s->xb + (size_t)tk * dim,
                                lz_t_f32(&L->up_norm, s->wscr), dim,
-                               c->rms_norm_eps, &deq);
+                               rms_eps, &deq);
                 lz_quantize_q8_tok_int(s->subn_norm_int, dim, deq,
                                        s->xq + (size_t)tk * dim,
                                        s->xqs + (size_t)tk * nsg);
@@ -1035,7 +1041,7 @@ void dense_ffn_step(const LZModel *m, LZRunState *s,
         } else {
             for (tk = 0; tk < nt; tk++)
                 lz_rmsnorm(s->xb2 + (size_t)tk * dim, s->xb + (size_t)tk * dim,
-                           lz_t_f32(&L->up_norm, s->wscr), dim, c->rms_norm_eps);
+                           lz_t_f32(&L->up_norm, s->wscr), dim, rms_eps);
             for (tk = 0; tk < nt; tk++)
                 lz_quantize_q8_tok(s->xb2 + (size_t)tk * dim, dim,
                                    s->xq + (size_t)tk * dim, s->xqs + (size_t)tk * nsg);
@@ -1096,7 +1102,7 @@ void dense_ffn_step(const LZModel *m, LZRunState *s,
                     float deq;
                     lz_rmsnorm_int(s->subn_norm_int, s->hb + (size_t)tk * idim,
                                    lz_t_f32(&L->down_norm, s->wscr), idim,
-                                   c->rms_norm_eps, &deq);
+                                   rms_eps, &deq);
                     lz_quantize_q8_tok_int(s->subn_norm_int, idim, deq,
                                            s->xq + (size_t)tk * idim,
                                            s->xqs + (size_t)tk * nsd);
@@ -1105,7 +1111,7 @@ void dense_ffn_step(const LZModel *m, LZRunState *s,
                 int qgw = subn_scale_gs(gsd, idim);
                 for (tk = 0; tk < nt; tk++)
                     lz_rmsnorm(s->hb2 + (size_t)tk * idim, s->hb + (size_t)tk * idim,
-                               lz_t_f32(&L->down_norm, s->wscr), idim, c->rms_norm_eps);
+                               lz_t_f32(&L->down_norm, s->wscr), idim, rms_eps);
                 if (dblk > 1) {
                     for (tk = 0; tk < nt; tk++)
                         subn_fwht_quant(s->hb2 + (size_t)tk * idim, idim, dblk,

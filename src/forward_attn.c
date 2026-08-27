@@ -556,6 +556,7 @@ void forward_attn(const LZModel *m, LZRunState *s,
     const LZModelConfig *c = &m->config;
     int hd = c->head_dim, nh = c->n_heads, nkv = c->n_kv_heads;
     int kv_mul = nh / nkv;
+    float rms_eps = c->rms_norm_eps;
     int ci = (layer >= 0) ? s->cache_idx[layer] : c->n_full_layers;
     size_t loff = (size_t)ci * s->kv_slots * c->attn_kv_dim;
     size_t soff = loff / 32;
@@ -673,7 +674,7 @@ void forward_attn(const LZModel *m, LZRunState *s,
                 lz_rmsnorm(s->xb2 + (size_t)tk * hdim,
                            s->xb + (size_t)tk * hdim,
                            lz_t_f32(p[pi].nrm, s->wscr), hdim,
-                           c->rms_norm_eps);
+                           rms_eps);
             for (tk = 0; tk < nt; tk++)
                 lz_quantize_q8(s->xb2 + (size_t)tk * hdim, hdim, gsa,
                                s->xq + (size_t)tk * hdim,
@@ -719,13 +720,13 @@ void forward_attn(const LZModel *m, LZRunState *s,
             const float *q_norm_w = lz_t_f32(&L->q_norm, s->wscr);
             for (h = 0; h < nh; h++)
                 lz_rmsnorm(qht + (size_t)h * hd, qgt + (size_t)h * 2 * hd,
-                           q_norm_w, hd, c->rms_norm_eps);
+                           q_norm_w, hd, rms_eps);
         }
         {
             const float *k_norm_w = lz_t_f32(&L->k_norm, s->wscr);
             for (h = 0; h < nkv; h++)
                 lz_rmsnorm(ktt + (size_t)h * hd, ktt + (size_t)h * hd,
-                           k_norm_w, hd, c->rms_norm_eps);
+                           k_norm_w, hd, rms_eps);
         }
         /* QK-Norm first, then RoPE, only then quantize into the cache -
            the cache holds the rotated k. head_dim is a multiple of 32,
@@ -829,7 +830,7 @@ void forward_attn(const LZModel *m, LZRunState *s,
             lz_rmsnorm(s->attn_out + (size_t)tk * qd,
                        s->attn_out + (size_t)tk * qd,
                        lz_t_f32(&L->attn_o_subn_norm, s->wscr), qd,
-                       c->rms_norm_eps);
+                       rms_eps);
     }
     for (tk = 0; tk < nt; tk++) {
         if (attn_int[tk]) {

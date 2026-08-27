@@ -58,6 +58,7 @@ static void moe_expert_loop(LZRunState *s, const LZModelConfig *c,
     int latent = c->moe_latent_dim;
     int inter = c->moe_intermediate_size;
     int ne = c->num_experts;
+    float rms_eps = c->rms_norm_eps;
     int tk, kk, vv;
     /* Loop-invariant router configuration, packed so the per-token call
        passes one struct pointer instead of nine arguments (see the
@@ -197,7 +198,7 @@ static void moe_expert_loop(LZRunState *s, const LZModelConfig *c,
         if (c->moe_latent_use_norm)
             lz_rmsnorm(lat_y, lat_y,
                       lz_t_f32(&L->moe_latent_norm, s->wscr), latent,
-                      c->rms_norm_eps);
+                      rms_eps);
     }
 }
 
@@ -219,6 +220,7 @@ void forward_moe(const LZModel *m, LZRunState *s,
     int hdim = c->hidden_size, latent = c->moe_latent_dim;
     int shared_w = c->moe_shared_width;
     int ne = c->num_experts, topk = c->num_experts_per_token;
+    float rms_eps = c->rms_norm_eps;
     /* --moe-topk: route to a different number of experts than the model
        was exported with. Nothing in this function or lz_moe_route is
        written for a particular k - the router pads unfillable slots with
@@ -345,7 +347,7 @@ void forward_moe(const LZModel *m, LZRunState *s,
         for (tk = 0; tk < nt; tk++)
             lz_rmsnorm(s->xb2 + (size_t)tk * hdim, s->xb + (size_t)tk * hdim,
                        lz_t_f32(&L->moe_gate_norm, s->wscr), hdim,
-                       c->rms_norm_eps);
+                       rms_eps);
         for (tk = 0; tk < nt; tk++)
             lz_quantize_q8(s->xb2 + (size_t)tk * hdim, hdim, gsg,
                            s->xq + (size_t)tk * hdim,
@@ -357,7 +359,7 @@ void forward_moe(const LZModel *m, LZRunState *s,
         for (tk = 0; tk < nt; tk++)
             lz_rmsnorm(s->xb2 + (size_t)tk * hdim, s->xb + (size_t)tk * hdim,
                        lz_t_f32(&L->moe_down_norm, s->wscr), hdim,
-                       c->rms_norm_eps);
+                       rms_eps);
         for (tk = 0; tk < nt; tk++)
             lz_quantize_q8(s->xb2 + (size_t)tk * hdim, hdim, gsh,
                            s->xq + (size_t)tk * hdim,
@@ -408,7 +410,7 @@ void forward_moe(const LZModel *m, LZRunState *s,
                 lz_rmsnorm(s->moe_lat_y + (size_t)tk * latent,
                            s->moe_lat_y + (size_t)tk * latent,
                            lz_t_f32(&L->moe_up_norm, s->wscr), latent,
-                           c->rms_norm_eps);
+                           rms_eps);
         }
         for (tk = 0; tk < nt; tk++)
             lz_quantize_q8(s->moe_lat_y + (size_t)tk * latent, latent, gsu,
@@ -445,7 +447,7 @@ void forward_moe(const LZModel *m, LZRunState *s,
                 lz_rmsnorm(s->moe_shared_out + (size_t)tk * hdim,
                            s->xb + (size_t)tk * hdim,
                            lz_t_f32(&L->moe_shared_gate_norm, s->wscr), hdim,
-                           c->rms_norm_eps);
+                           rms_eps);
             for (tk = 0; tk < nt; tk++)
                 lz_quantize_q8(s->moe_shared_out + (size_t)tk * hdim, hdim, gss,
                                s->xq + (size_t)tk * hdim,
@@ -456,7 +458,7 @@ void forward_moe(const LZModel *m, LZRunState *s,
                 lz_rmsnorm(s->moe_shared_out + (size_t)tk * hdim,
                            s->xb + (size_t)tk * hdim,
                            lz_t_f32(&L->moe_shared_up_norm, s->wscr), hdim,
-                           c->rms_norm_eps);
+                           rms_eps);
             for (tk = 0; tk < nt; tk++)
                 lz_quantize_q8(s->moe_shared_out + (size_t)tk * hdim, hdim, gss,
                                s->xq + (size_t)tk * hdim,
@@ -505,7 +507,7 @@ void forward_moe(const LZModel *m, LZRunState *s,
                 lz_rmsnorm(s->moe_h1 + (size_t)tk * shared_w,
                            s->moe_h1 + (size_t)tk * shared_w,
                            lz_t_f32(&L->moe_shared_down_norm, s->wscr),
-                           shared_w, c->rms_norm_eps);
+                           shared_w, rms_eps);
         }
         }
         for (tk = 0; tk < nt; tk++) {
