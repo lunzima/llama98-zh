@@ -109,13 +109,21 @@ CFLAGS  ?= -O2 -std=c99 -Wall -Wextra -Isrc $(FP_STRICT) $(MMX_TU_DEFINE) $(SSE2
 # against 261,968 bytes of .text, 53.3% larger, and 731,538 against
 # 590,881 bytes of file. Anything that wants -O3 can pass it - the flag
 # is not forbidden, it is not the default.
-X86_64_CFLAGS := -Os -march=x86-64 -mtune=alderlake -std=c99 -Wall -Wextra -Isrc $(FP_STRICT) $(MMX_TU_DEFINE) $(SSE2_TU_DEFINE) $(EXTRA_DEFS)
-# Hot TUs keep -O2. Derived from X86_64_CFLAGS by substitution, so a
-# command-line override - build/int_pipeline_arm_gate.sh passes
-# X86_64_CFLAGS="-O3 ... -D$sw=0" - still reaches every hot TU: an
-# override carries no -Os, so the subst is a no-op and the override's own
-# -O level and -D flow through unchanged.
-X86_64_HOT_CFLAGS := $(subst -Os,-O2,$(X86_64_CFLAGS))
+# Cold TUs tune for the dev machine (5800X = znver3): at -Os the tune
+# only reorders instructions (size is invariant - see the -O2/-O3 note
+# above), so this is about scheduling the cold plain-C TUs for the CPU
+# that actually runs them, not about .text.
+X86_64_CFLAGS := -Os -march=x86-64 -mtune=znver3 -std=c99 -Wall -Wextra -Isrc $(FP_STRICT) $(MMX_TU_DEFINE) $(SSE2_TU_DEFINE) $(EXTRA_DEFS)
+# Hot TUs keep -O2 AND swap the tune back to alderlake: gcc's
+# long-pipeline branch-prediction optimisation is keyed on alderlake
+# only - generic and znver3 do not carry it (in 16.1 or the newer
+# releases), so a znver3 hot tune would silently drop that. Derived from
+# X86_64_CFLAGS by substitution, so a command-line override -
+# build/int_pipeline_arm_gate.sh passes X86_64_CFLAGS="-O3 ... -D$sw=0"
+# - still reaches every hot TU: an override carries no -Os and no
+# -mtune=znver3, so both substs are no-ops and the override's own -O
+# level, -mtune and -D flow through unchanged.
+X86_64_HOT_CFLAGS := $(subst -Os,-O2,$(subst -mtune=znver3,-mtune=alderlake,$(X86_64_CFLAGS)))
 
 HTTP_LIBS := $(if $(filter Windows_NT,$(OS)),-lwsock32,)
 
