@@ -746,15 +746,15 @@ extern void lz_exp_q20_2_sse_asm(const int32_t *tab, const int32_t *s,
     "pmullw  mm4, [ecx+40]"         \
     "movq    mm5, mm0"              \
     "pmulhuw mm5, [ecx+40]"         \
-    "punpcklwd mm4, mm5"            \
-    "movq    mm5, mm0"              \
-    "pmullw  mm5, [ecx+48]"         \
+    "movq    mm1, mm0"              \
+    "pmullw  mm1, [ecx+48]"         \
     "movq    mm6, mm0"              \
     "pmulhuw mm6, [ecx+48]"         \
-    "punpcklwd mm5, mm6"            \
-    "paddd   mm5, [ecx+16]"         \
-    "psrld   mm5, 16"               \
-    "paddd   mm4, mm5"              \
+    "punpcklwd mm4, mm5"            \
+    "punpcklwd mm1, mm6"            \
+    "paddd   mm1, [ecx+16]"         \
+    "psrld   mm1, 16"               \
+    "paddd   mm4, mm1"              \
     "psrld   mm4, 4"                \
     "movq    mm5, mm0"              \
     "pmullw  mm5, mm0"              \
