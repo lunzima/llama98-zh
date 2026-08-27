@@ -482,6 +482,24 @@ LINKSRC=$(make -n llama98 2>/dev/null | grep -m1 -- '-o llama98 ')
 if [ -z "$LINKSRC" ]; then
     echo "SKIP: all-at-once link - could not read the link command from make"
 else
+    # Per-TU hot objects (Makefile HOT_TU / HOT_COM) are compiled
+    # separately, so the -D flags appended below would never reach them: a
+    # switch owned by a hot TU (LZ_EPI_FIXED, LZ_GDN_FIXED, the
+    # ops_quant.c switches) would compile to its default and this link
+    # would prove nothing for it. Swap each hot object for its source so
+    # it is compiled on the link line under $LINKDEFS, exactly like the
+    # cold TUs. The lists are read from the Makefile, not duplicated here,
+    # so they cannot drift apart the way this gate's own SWITCHES table
+    # could drift from the #ifndef sites.
+    HOT=$(make --no-print-directory --eval 'print_hot:;@printf "%s|%s" "$(HOT_TU)" "$(HOT_COM)"' print_hot 2>/dev/null)
+    HOT_TU=${HOT%%|*}
+    HOT_COM=${HOT#*|}
+    for t in $HOT_TU; do
+        LINKSRC=$(printf '%s' "$LINKSRC" | sed "s|build/native/$t\.o|src/$t.c|")
+    done
+    for t in $HOT_COM; do
+        LINKSRC=$(printf '%s' "$LINKSRC" | sed "s|build/native/$t\.o|common/$t.c|")
+    done
     # The link line names build/native/*.o, which make builds by a
     # separate rule. If they are absent - a fresh clone, a `make clean`,
     # or another session's build removing them mid-run in this shared

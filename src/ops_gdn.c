@@ -2411,7 +2411,7 @@ static void gdn_step_impl(float *out, const int8_t *sq_in, int8_t *sq_out,
                on every KunMoe model - a compile switch the switch-matrix
                gate builds and nothing runs. */
             for (vv = 0; vv < vd; vv++) {
-                float vc = vi ? (float)vi[vv] * vscale : v[vv];
+                float vc = vi ? lz_i32f((int32_t)vi[vv]) * vscale : v[vv];
                 u[vv] = (vc - gt * u[vv]) * beta;
                 out[vv] = gt * w[vv] + u[vv] * kq;
             }
@@ -2468,9 +2468,9 @@ static void gdn_step_impl(float *out, const int8_t *sq_in, int8_t *sq_out,
 #endif /* LZ_GDN_STATE_2PLANE */
             for (j = 0; j < 32; j++) {
 #if LZ_GDN_STATE_2PLANE
-                float e = (float)p[j] + (float)pl[j] * (1.0f / LZ_GDN_LO_SCALE);
+                float e = lz_i32f((int32_t)p[j]) + lz_i32f((int32_t)pl[j]) * (1.0f / LZ_GDN_LO_SCALE);
 #else
-                float e = (float)p[j];
+                float e = lz_i32f((int32_t)p[j]);
 #endif /* LZ_GDN_STATE_2PLANE */
                 uu[j] += e * sck;
                 ww[j] += e * scq;
@@ -2546,8 +2546,8 @@ static void gdn_step_impl(float *out, const int8_t *sq_in, int8_t *sq_out,
                        ordinary, and for any caller that ever passes a
                        vscale that is not a power of two. */
                     float vf;
-                    if (!f32_scale_pow2((float)vi[vv], vs_e, &vf))
-                        vf = (float)vi[vv] * vscale;
+                    if (!f32_scale_pow2(lz_i32f((int32_t)vi[vv]), vs_e, &vf))
+                        vf = lz_i32f((int32_t)vi[vv]) * vscale;
                     u[vv] = (vf - u[vv]) * beta;
                     out[vv] = w[vv] + u[vv] * kq;
                 }
@@ -2562,8 +2562,8 @@ static void gdn_step_impl(float *out, const int8_t *sq_in, int8_t *sq_out,
             if (vi)
                 for (vv = 0; vv < vd; vv++) {
                     float vf;                 /* see the gt==1 twin above */
-                    if (!f32_scale_pow2((float)vi[vv], vs_e, &vf))
-                        vf = (float)vi[vv] * vscale;
+                    if (!f32_scale_pow2(lz_i32f((int32_t)vi[vv]), vs_e, &vf))
+                        vf = lz_i32f((int32_t)vi[vv]) * vscale;
                     u[vv] = (vf - gt * u[vv]) * beta;
                     out[vv] = gt * w[vv] + u[vv] * kq;
                 }
@@ -2624,12 +2624,12 @@ static void gdn_step_impl(float *out, const int8_t *sq_in, int8_t *sq_out,
 #if LZ_GDN_STATE_2PLANE
             const int8_t *pl = row_lo_in + gg * 32;
             for (j = 0; j < 32; j++)
-                bb[j] = ((float)p[j] +
-                         (float)pl[j] * (1.0f / LZ_GDN_LO_SCALE)) * scg +
+                bb[j] = (lz_i32f((int32_t)p[j]) +
+                         lz_i32f((int32_t)pl[j]) * (1.0f / LZ_GDN_LO_SCALE)) * scg +
                         kc * dd[j];
 #else
             for (j = 0; j < 32; j++)
-                bb[j] = (float)p[j] * scg + kc * dd[j];
+                bb[j] = lz_i32f((int32_t)p[j]) * scg + kc * dd[j];
 #endif /* LZ_GDN_STATE_2PLANE */
         }
 #if LZ_GDN_STATE_2PLANE
