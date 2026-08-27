@@ -2514,8 +2514,8 @@ extern void lz_dot128_t2_asm(const unsigned char *w2,
     "movq      mm5, [ecx+8]" \
     "pmaddwd   mm7, mm5" \
     "paddd     mm0, mm6" \
-    "paddd     mm0, mm7" \
     "movq      mm5, [ecx+16]" \
+    "paddd     mm0, mm7" \
     "pxor      mm6, mm6" \
     "pxor      mm7, mm7" \
     "punpcklbw mm6, mm4" \
@@ -2530,8 +2530,8 @@ extern void lz_dot128_t2_asm(const unsigned char *w2,
     "movq      mm5, [ecx+24]" \
     "pmaddwd   mm7, mm5" \
     "paddd     mm0, mm6" \
-    "paddd     mm0, mm7" \
     "movq      mm5, [ecx+32]" \
+    "paddd     mm0, mm7" \
     "pxor      mm6, mm6" \
     "pxor      mm7, mm7" \
     "punpcklbw mm6, mm4" \
@@ -2546,8 +2546,8 @@ extern void lz_dot128_t2_asm(const unsigned char *w2,
     "movq      mm5, [ecx+40]" \
     "pmaddwd   mm7, mm5" \
     "paddd     mm0, mm6" \
-    "paddd     mm0, mm7" \
     "movq      mm5, [ecx+48]" \
+    "paddd     mm0, mm7" \
     "pxor      mm6, mm6" \
     "pxor      mm7, mm7" \
     "punpcklbw mm6, mm4" \
@@ -2560,11 +2560,11 @@ extern void lz_dot128_t2_asm(const unsigned char *w2,
     "movq      mm5, [ecx+56]" \
     "pmaddwd   mm7, mm5" \
     "paddd     mm0, mm6" \
+    "movq      mm4, [edx]" \
+    "movq      mm5, [ecx]" \
     "paddd     mm0, mm7" \
     "add       ecx, 64" \
     "add       edx, 8" \
-    "movq      mm4, [edx]" \
-    "movq      mm5, [ecx]" \
     "pxor      mm6, mm6" \
     "pxor      mm7, mm7" \
     "punpcklbw mm6, mm4" \
@@ -2579,8 +2579,8 @@ extern void lz_dot128_t2_asm(const unsigned char *w2,
     "movq      mm5, [ecx+8]" \
     "pmaddwd   mm7, mm5" \
     "paddd     mm1, mm6" \
-    "paddd     mm1, mm7" \
     "movq      mm5, [ecx+16]" \
+    "paddd     mm1, mm7" \
     "pxor      mm6, mm6" \
     "pxor      mm7, mm7" \
     "punpcklbw mm6, mm4" \
@@ -2595,8 +2595,8 @@ extern void lz_dot128_t2_asm(const unsigned char *w2,
     "movq      mm5, [ecx+24]" \
     "pmaddwd   mm7, mm5" \
     "paddd     mm1, mm6" \
-    "paddd     mm1, mm7" \
     "movq      mm5, [ecx+32]" \
+    "paddd     mm1, mm7" \
     "pxor      mm6, mm6" \
     "pxor      mm7, mm7" \
     "punpcklbw mm6, mm4" \
@@ -2611,8 +2611,8 @@ extern void lz_dot128_t2_asm(const unsigned char *w2,
     "movq      mm5, [ecx+40]" \
     "pmaddwd   mm7, mm5" \
     "paddd     mm1, mm6" \
-    "paddd     mm1, mm7" \
     "movq      mm5, [ecx+48]" \
+    "paddd     mm1, mm7" \
     "pxor      mm6, mm6" \
     "pxor      mm7, mm7" \
     "punpcklbw mm6, mm4" \
@@ -2625,11 +2625,11 @@ extern void lz_dot128_t2_asm(const unsigned char *w2,
     "movq      mm5, [ecx+56]" \
     "pmaddwd   mm7, mm5" \
     "paddd     mm1, mm6" \
+    "movq      mm4, [edx]" \
+    "movq      mm5, [ecx]" \
     "paddd     mm1, mm7" \
     "add       ecx, 64" \
     "add       edx, 8" \
-    "movq      mm4, [edx]" \
-    "movq      mm5, [ecx]" \
     "pxor      mm6, mm6" \
     "pxor      mm7, mm7" \
     "punpcklbw mm6, mm4" \
@@ -2644,8 +2644,8 @@ extern void lz_dot128_t2_asm(const unsigned char *w2,
     "movq      mm5, [ecx+8]" \
     "pmaddwd   mm7, mm5" \
     "paddd     mm2, mm6" \
-    "paddd     mm2, mm7" \
     "movq      mm5, [ecx+16]" \
+    "paddd     mm2, mm7" \
     "pxor      mm6, mm6" \
     "pxor      mm7, mm7" \
     "punpcklbw mm6, mm4" \
@@ -2660,8 +2660,8 @@ extern void lz_dot128_t2_asm(const unsigned char *w2,
     "movq      mm5, [ecx+24]" \
     "pmaddwd   mm7, mm5" \
     "paddd     mm2, mm6" \
-    "paddd     mm2, mm7" \
     "movq      mm5, [ecx+32]" \
+    "paddd     mm2, mm7" \
     "pxor      mm6, mm6" \
     "pxor      mm7, mm7" \
     "punpcklbw mm6, mm4" \
@@ -2676,8 +2676,8 @@ extern void lz_dot128_t2_asm(const unsigned char *w2,
     "movq      mm5, [ecx+40]" \
     "pmaddwd   mm7, mm5" \
     "paddd     mm2, mm6" \
-    "paddd     mm2, mm7" \
     "movq      mm5, [ecx+48]" \
+    "paddd     mm2, mm7" \
     "pxor      mm6, mm6" \
     "pxor      mm7, mm7" \
     "punpcklbw mm6, mm4" \
@@ -2690,11 +2690,11 @@ extern void lz_dot128_t2_asm(const unsigned char *w2,
     "movq      mm5, [ecx+56]" \
     "pmaddwd   mm7, mm5" \
     "paddd     mm2, mm6" \
+    "movq      mm4, [edx]" \
+    "movq      mm5, [ecx]" \
     "paddd     mm2, mm7" \
     "add       ecx, 64" \
     "add       edx, 8" \
-    "movq      mm4, [edx]" \
-    "movq      mm5, [ecx]" \
     "pxor      mm6, mm6" \
     "pxor      mm7, mm7" \
     "punpcklbw mm6, mm4" \
@@ -2709,8 +2709,8 @@ extern void lz_dot128_t2_asm(const unsigned char *w2,
     "movq      mm5, [ecx+8]" \
     "pmaddwd   mm7, mm5" \
     "paddd     mm3, mm6" \
-    "paddd     mm3, mm7" \
     "movq      mm5, [ecx+16]" \
+    "paddd     mm3, mm7" \
     "pxor      mm6, mm6" \
     "pxor      mm7, mm7" \
     "punpcklbw mm6, mm4" \
@@ -2725,8 +2725,8 @@ extern void lz_dot128_t2_asm(const unsigned char *w2,
     "movq      mm5, [ecx+24]" \
     "pmaddwd   mm7, mm5" \
     "paddd     mm3, mm6" \
-    "paddd     mm3, mm7" \
     "movq      mm5, [ecx+32]" \
+    "paddd     mm3, mm7" \
     "pxor      mm6, mm6" \
     "pxor      mm7, mm7" \
     "punpcklbw mm6, mm4" \
@@ -2741,8 +2741,8 @@ extern void lz_dot128_t2_asm(const unsigned char *w2,
     "movq      mm5, [ecx+40]" \
     "pmaddwd   mm7, mm5" \
     "paddd     mm3, mm6" \
-    "paddd     mm3, mm7" \
     "movq      mm5, [ecx+48]" \
+    "paddd     mm3, mm7" \
     "pxor      mm6, mm6" \
     "pxor      mm7, mm7" \
     "punpcklbw mm6, mm4" \
