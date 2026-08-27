@@ -1340,9 +1340,9 @@ extern void lz_exp_q20_2_mmx_asm(const int32_t *tab, const int32_t *s,
     "pmaddwd mm4, [ecx+40]"         \
     "movq    mm5, mm1"              \
     "pmaddwd mm5, [ecx+48]"         \
-    "pslld   mm5, 1"                \
     "movq    mm6, [ecx+32]"         \
     "pand    mm6, mm3"              \
+    "pslld   mm5, 1"                \
     "paddd   mm5, mm6"              \
     "paddd   mm5, [ecx+24]"         \
     "psrld   mm5, 16"               \
@@ -1350,11 +1350,11 @@ extern void lz_exp_q20_2_mmx_asm(const int32_t *tab, const int32_t *s,
     "psrld   mm4, 4"                \
     "movq    mm5, mm1"              \
     "pmaddwd mm5, mm1"              \
-    "pslld   mm5, 2"                \
     "movq    mm6, mm1"              \
     "pslld   mm6, 2"                \
     "paddd   mm6, [ecx]"            \
     "pand    mm6, mm3"              \
+    "pslld   mm5, 2"                \
     "paddd   mm5, mm6"              \
     "movq    mm6, mm5"              \
     "pand    mm6, [ecx+8]"          \
