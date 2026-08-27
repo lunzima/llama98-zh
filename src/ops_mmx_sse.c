@@ -65,138 +65,138 @@ extern void lz_p2_split32_sse_asm(const void *blk, signed char *hi_out,
                                   signed char *lo_out);
 #pragma aux lz_p2_split32_sse_asm = \
     ".686" \
-    "movq      mm7, [eax+224]" \
-    "movq      mm0, [eax+96]" \
-    "movq      mm1, [eax+104]" \
-    "movq      mm2, [eax+112]" \
-    "movq      mm3, [eax+120]" \
-    "paddd     mm0, [eax+32]" \
+    "movq      mm0, [eax+224]" \
+    "movq      mm1, [eax+96]" \
+    "movq      mm2, [eax+104]" \
+    "movq      mm3, [eax+112]" \
+    "movq      mm4, [eax+120]" \
     "paddd     mm1, [eax+32]" \
     "paddd     mm2, [eax+32]" \
     "paddd     mm3, [eax+32]" \
-    "psrad     mm0, [eax+48]" \
+    "paddd     mm4, [eax+32]" \
     "psrad     mm1, [eax+48]" \
     "psrad     mm2, [eax+48]" \
     "psrad     mm3, [eax+48]" \
-    "packssdw  mm0, mm1" \
-    "packssdw  mm2, mm3" \
-    "movq      mm1, mm0" \
-    "paddw     mm1, [eax+64]" \
-    "psraw     mm1, 8" \
-    "movq      mm3, mm2" \
-    "paddw     mm3, [eax+64]" \
-    "psraw     mm3, 8" \
-    "movq      mm4, mm1" \
-    "psllw     mm4, 8" \
-    "psubw     mm0, mm4" \
-    "movq      mm5, mm3" \
+    "psrad     mm4, [eax+48]" \
+    "packssdw  mm1, mm2" \
+    "packssdw  mm3, mm4" \
+    "movq      mm2, mm1" \
+    "paddw     mm2, [eax+64]" \
+    "psraw     mm2, 8" \
+    "movq      mm4, mm3" \
+    "paddw     mm4, [eax+64]" \
+    "psraw     mm4, 8" \
+    "movq      mm5, mm2" \
     "psllw     mm5, 8" \
-    "psubw     mm2, mm5" \
-    "pmaxsw    mm0, mm7" \
-    "pmaxsw    mm2, mm7" \
+    "psubw     mm1, mm5" \
+    "movq      mm6, mm4" \
+    "psllw     mm6, 8" \
+    "psubw     mm3, mm6" \
+    "pmaxsw    mm1, mm0" \
+    "pmaxsw    mm3, mm0" \
+    "packsswb  mm2, mm4" \
+    "movq      [edx], mm2" \
     "packsswb  mm1, mm3" \
-    "movq      [edx], mm1" \
-    "packsswb  mm0, mm2" \
-    "movq      [ebx], mm0" \
+    "movq      [ebx], mm1" \
     \
-    "movq      mm0, [eax+128]" \
-    "movq      mm1, [eax+136]" \
-    "movq      mm2, [eax+144]" \
-    "movq      mm3, [eax+152]" \
-    "paddd     mm0, [eax+32]" \
+    "movq      mm1, [eax+128]" \
+    "movq      mm2, [eax+136]" \
+    "movq      mm3, [eax+144]" \
+    "movq      mm4, [eax+152]" \
     "paddd     mm1, [eax+32]" \
     "paddd     mm2, [eax+32]" \
     "paddd     mm3, [eax+32]" \
-    "psrad     mm0, [eax+48]" \
+    "paddd     mm4, [eax+32]" \
     "psrad     mm1, [eax+48]" \
     "psrad     mm2, [eax+48]" \
     "psrad     mm3, [eax+48]" \
-    "packssdw  mm0, mm1" \
-    "packssdw  mm2, mm3" \
-    "movq      mm1, mm0" \
-    "paddw     mm1, [eax+64]" \
-    "psraw     mm1, 8" \
-    "movq      mm3, mm2" \
-    "paddw     mm3, [eax+64]" \
-    "psraw     mm3, 8" \
-    "movq      mm4, mm1" \
-    "psllw     mm4, 8" \
-    "psubw     mm0, mm4" \
-    "movq      mm5, mm3" \
+    "psrad     mm4, [eax+48]" \
+    "packssdw  mm1, mm2" \
+    "packssdw  mm3, mm4" \
+    "movq      mm2, mm1" \
+    "paddw     mm2, [eax+64]" \
+    "psraw     mm2, 8" \
+    "movq      mm4, mm3" \
+    "paddw     mm4, [eax+64]" \
+    "psraw     mm4, 8" \
+    "movq      mm5, mm2" \
     "psllw     mm5, 8" \
-    "psubw     mm2, mm5" \
-    "pmaxsw    mm0, mm7" \
-    "pmaxsw    mm2, mm7" \
+    "psubw     mm1, mm5" \
+    "movq      mm6, mm4" \
+    "psllw     mm6, 8" \
+    "psubw     mm3, mm6" \
+    "pmaxsw    mm1, mm0" \
+    "pmaxsw    mm3, mm0" \
+    "packsswb  mm2, mm4" \
+    "movq      [edx+8], mm2" \
     "packsswb  mm1, mm3" \
-    "movq      [edx+8], mm1" \
-    "packsswb  mm0, mm2" \
-    "movq      [ebx+8], mm0" \
+    "movq      [ebx+8], mm1" \
     \
-    "movq      mm0, [eax+160]" \
-    "movq      mm1, [eax+168]" \
-    "movq      mm2, [eax+176]" \
-    "movq      mm3, [eax+184]" \
-    "paddd     mm0, [eax+32]" \
+    "movq      mm1, [eax+160]" \
+    "movq      mm2, [eax+168]" \
+    "movq      mm3, [eax+176]" \
+    "movq      mm4, [eax+184]" \
     "paddd     mm1, [eax+32]" \
     "paddd     mm2, [eax+32]" \
     "paddd     mm3, [eax+32]" \
-    "psrad     mm0, [eax+48]" \
+    "paddd     mm4, [eax+32]" \
     "psrad     mm1, [eax+48]" \
     "psrad     mm2, [eax+48]" \
     "psrad     mm3, [eax+48]" \
-    "packssdw  mm0, mm1" \
-    "packssdw  mm2, mm3" \
-    "movq      mm1, mm0" \
-    "paddw     mm1, [eax+64]" \
-    "psraw     mm1, 8" \
-    "movq      mm3, mm2" \
-    "paddw     mm3, [eax+64]" \
-    "psraw     mm3, 8" \
-    "movq      mm4, mm1" \
-    "psllw     mm4, 8" \
-    "psubw     mm0, mm4" \
-    "movq      mm5, mm3" \
+    "psrad     mm4, [eax+48]" \
+    "packssdw  mm1, mm2" \
+    "packssdw  mm3, mm4" \
+    "movq      mm2, mm1" \
+    "paddw     mm2, [eax+64]" \
+    "psraw     mm2, 8" \
+    "movq      mm4, mm3" \
+    "paddw     mm4, [eax+64]" \
+    "psraw     mm4, 8" \
+    "movq      mm5, mm2" \
     "psllw     mm5, 8" \
-    "psubw     mm2, mm5" \
-    "pmaxsw    mm0, mm7" \
-    "pmaxsw    mm2, mm7" \
+    "psubw     mm1, mm5" \
+    "movq      mm6, mm4" \
+    "psllw     mm6, 8" \
+    "psubw     mm3, mm6" \
+    "pmaxsw    mm1, mm0" \
+    "pmaxsw    mm3, mm0" \
+    "packsswb  mm2, mm4" \
+    "movq      [edx+16], mm2" \
     "packsswb  mm1, mm3" \
-    "movq      [edx+16], mm1" \
-    "packsswb  mm0, mm2" \
-    "movq      [ebx+16], mm0" \
+    "movq      [ebx+16], mm1" \
     \
-    "movq      mm0, [eax+192]" \
-    "movq      mm1, [eax+200]" \
-    "movq      mm2, [eax+208]" \
-    "movq      mm3, [eax+216]" \
-    "paddd     mm0, [eax+32]" \
+    "movq      mm1, [eax+192]" \
+    "movq      mm2, [eax+200]" \
+    "movq      mm3, [eax+208]" \
+    "movq      mm4, [eax+216]" \
     "paddd     mm1, [eax+32]" \
     "paddd     mm2, [eax+32]" \
     "paddd     mm3, [eax+32]" \
-    "psrad     mm0, [eax+48]" \
+    "paddd     mm4, [eax+32]" \
     "psrad     mm1, [eax+48]" \
     "psrad     mm2, [eax+48]" \
     "psrad     mm3, [eax+48]" \
-    "packssdw  mm0, mm1" \
-    "packssdw  mm2, mm3" \
-    "movq      mm1, mm0" \
-    "paddw     mm1, [eax+64]" \
-    "psraw     mm1, 8" \
-    "movq      mm3, mm2" \
-    "paddw     mm3, [eax+64]" \
-    "psraw     mm3, 8" \
-    "movq      mm4, mm1" \
-    "psllw     mm4, 8" \
-    "psubw     mm0, mm4" \
-    "movq      mm5, mm3" \
+    "psrad     mm4, [eax+48]" \
+    "packssdw  mm1, mm2" \
+    "packssdw  mm3, mm4" \
+    "movq      mm2, mm1" \
+    "paddw     mm2, [eax+64]" \
+    "psraw     mm2, 8" \
+    "movq      mm4, mm3" \
+    "paddw     mm4, [eax+64]" \
+    "psraw     mm4, 8" \
+    "movq      mm5, mm2" \
     "psllw     mm5, 8" \
-    "psubw     mm2, mm5" \
-    "pmaxsw    mm0, mm7" \
-    "pmaxsw    mm2, mm7" \
+    "psubw     mm1, mm5" \
+    "movq      mm6, mm4" \
+    "psllw     mm6, 8" \
+    "psubw     mm3, mm6" \
+    "pmaxsw    mm1, mm0" \
+    "pmaxsw    mm3, mm0" \
+    "packsswb  mm2, mm4" \
+    "movq      [edx+24], mm2" \
     "packsswb  mm1, mm3" \
-    "movq      [edx+24], mm1" \
-    "packsswb  mm0, mm2" \
-    "movq      [ebx+24], mm0" \
+    "movq      [ebx+24], mm1" \
     __parm [__eax] [__edx] [__ebx] \
     __modify [8087]
 
@@ -274,26 +274,26 @@ extern void lz_rmsnorm_out_sse_asm(float *o, const float *x, const float *w,
  *
  * esi, not ebp: ebp is the frame pointer and Watcom rejects it outright
  * with "Illegal register modified". */
-#pragma aux lz_rmsnorm_out_sse_asm =    \
+#pragma aux lz_rmsnorm_out_sse_asm = \
     ".686"                              \
-    "movss    xmm7, [esi]"              \
-    "shufps   xmm7, xmm7, 0"            \
-    "movss    xmm6, [esi+4]"            \
-    "shufps   xmm6, xmm6, 0"            \
-    "test     ecx, ecx"                 \
-    "jz       N2"                       \
+    "movss     xmm0, [esi]"              \
+    "shufps    xmm0, xmm0, 0"            \
+    "movss     xmm1, [esi+4]"            \
+    "shufps    xmm1, xmm1, 0"            \
+    "test      ecx, ecx"                 \
+    "jz        N2"                       \
     "N1:"                               \
-    "movups   xmm0, [edx]"              \
-    "movups   xmm1, [ebx]"              \
-    "mulps    xmm0, xmm7"               \
-    "addps    xmm1, xmm6"               \
-    "mulps    xmm0, xmm1"               \
-    "movups   [eax], xmm0"              \
-    "add      eax, 16"                  \
-    "add      edx, 16"                  \
-    "add      ebx, 16"                  \
-    "dec      ecx"                      \
-    "jnz      N1"                       \
+    "movups    xmm2, [edx]"              \
+    "movups    xmm3, [ebx]"              \
+    "mulps     xmm2, xmm0"               \
+    "addps     xmm3, xmm1"               \
+    "mulps     xmm2, xmm3"               \
+    "movups    [eax], xmm2"              \
+    "add       eax, 16"                  \
+    "add       edx, 16"                  \
+    "add       ebx, 16"                  \
+    "dec       ecx"                      \
+    "jnz       N1"                       \
     "N2:"                               \
     parm [eax] [edx] [ebx] [ecx] [esi]  \
     modify [eax ebx ecx edx esi];
@@ -311,53 +311,53 @@ extern void lz_vmax_sse_asm(const float *x, int n4, float *pmax);
  * xmm0 - declaring one and producing the other returns whatever was on
  * the stack. It cost a cross-compiler DIFFER on --kernel sse2 and
  * nothing else, which is the only place that mistake is visible. */
-#pragma aux lz_vmax_sse_asm =           \
+#pragma aux lz_vmax_sse_asm = \
     ".686"                              \
-    "movss    xmm0, [ebx]"              \
-    "shufps   xmm0, xmm0, 0"            \
-    "movaps   xmm2, xmm0"               \
-    "test     edx, 1"                   \
-    "jz       M0"                       \
-    "movups   xmm1, [eax]"              \
-    "maxps    xmm0, xmm1"               \
-    "add      eax, 16"                  \
+    "movss     xmm0, [ebx]"              \
+    "shufps    xmm0, xmm0, 0"            \
+    "movaps    xmm1, xmm0"               \
+    "test      edx, 1"                   \
+    "jz        M0"                       \
+    "movups    xmm2, [eax]"              \
+    "maxps     xmm0, xmm2"               \
+    "add       eax, 16"                  \
     "M0:"                               \
-    "shr      edx, 1"                   \
-    "jz       M2"                       \
+    "shr       edx, 1"                   \
+    "jz        M2"                       \
     "M1:"                               \
-    "movups   xmm1, [eax]"              \
-    "maxps    xmm0, xmm1"               \
-    "movups   xmm1, [eax+16]"           \
-    "maxps    xmm2, xmm1"               \
-    "add      eax, 32"                  \
-    "dec      edx"                      \
-    "jnz      M1"                       \
+    "movups    xmm2, [eax]"              \
+    "maxps     xmm0, xmm2"               \
+    "movups    xmm2, [eax+16]"           \
+    "maxps     xmm1, xmm2"               \
+    "add       eax, 32"                  \
+    "dec       edx"                      \
+    "jnz       M1"                       \
     "M2:"                               \
-    "maxps    xmm0, xmm2"               \
-    "movhlps  xmm1, xmm0"               \
-    "maxps    xmm0, xmm1"               \
-    "movaps   xmm1, xmm0"               \
-    "shufps   xmm1, xmm1, 1"            \
-    "maxps    xmm0, xmm1"               \
-    "movss    [ebx], xmm0"              \
+    "maxps     xmm0, xmm1"               \
+    "movhlps   xmm2, xmm0"               \
+    "maxps     xmm0, xmm2"               \
+    "movaps    xmm2, xmm0"               \
+    "shufps    xmm2, xmm2, 1"            \
+    "maxps     xmm0, xmm2"               \
+    "movss     [ebx], xmm0"              \
     parm [eax] [edx] [ebx]              \
     modify [eax edx];
 
 extern void lz_vscale_sse_asm(float *x, int n4, const float *pk);
 /* Softmax's normalize loop: x[i] *= inv, element-wise. */
-#pragma aux lz_vscale_sse_asm =         \
+#pragma aux lz_vscale_sse_asm = \
     ".686"                              \
-    "movss    xmm7, [ebx]"              \
-    "shufps   xmm7, xmm7, 0"            \
-    "test     edx, edx"                 \
-    "jz       V2"                       \
+    "movss     xmm0, [ebx]"              \
+    "shufps    xmm0, xmm0, 0"            \
+    "test      edx, edx"                 \
+    "jz        V2"                       \
     "V1:"                               \
-    "movups   xmm0, [eax]"              \
-    "mulps    xmm0, xmm7"               \
-    "movups   [eax], xmm0"              \
-    "add      eax, 16"                  \
-    "dec      edx"                      \
-    "jnz      V1"                       \
+    "movups    xmm1, [eax]"              \
+    "mulps     xmm1, xmm0"               \
+    "movups    [eax], xmm1"              \
+    "add       eax, 16"                  \
+    "dec       edx"                      \
+    "jnz       V1"                       \
     "V2:"                               \
     parm [eax] [edx] [ebx]              \
     modify [eax edx];
@@ -385,84 +385,84 @@ void lz_vscale_sse_w(float *x, int n4, const float *pk) {
 extern void lz_q8round32_sse_asm(const float *x, int8_t *o, const float *inv);
 #pragma aux lz_q8round32_sse_asm = \
     ".686" \
-    "movss    xmm7, [ecx]" \
-    "shufps   xmm7, xmm7, 0" \
-    "pcmpeqw  mm5, mm5" \
-    "psrlw    mm5, 9" \
-    "pxor     mm6, mm6" \
-    "psubw    mm6, mm5" \
-    "movups   xmm0, [eax]" \
-    "mulps    xmm0, xmm7" \
-    "movups   xmm1, [eax+16]" \
-    "mulps    xmm1, xmm7" \
-    "cvtps2pi mm0, xmm0" \
-    "movhlps  xmm2, xmm0" \
-    "cvtps2pi mm1, xmm2" \
-    "cvtps2pi mm2, xmm1" \
-    "movhlps  xmm3, xmm1" \
-    "cvtps2pi mm3, xmm3" \
-    "packssdw mm0, mm1" \
-    "packssdw mm2, mm3" \
-    "pminsw   mm0, mm5" \
-    "pmaxsw   mm0, mm6" \
-    "pminsw   mm2, mm5" \
-    "pmaxsw   mm2, mm6" \
-    "packsswb mm0, mm2" \
-    "movq     [edx], mm0" \
-    "movups   xmm0, [eax+32]" \
-    "mulps    xmm0, xmm7" \
-    "movups   xmm1, [eax+48]" \
-    "mulps    xmm1, xmm7" \
-    "cvtps2pi mm0, xmm0" \
-    "movhlps  xmm2, xmm0" \
-    "cvtps2pi mm1, xmm2" \
-    "cvtps2pi mm2, xmm1" \
-    "movhlps  xmm3, xmm1" \
-    "cvtps2pi mm3, xmm3" \
-    "packssdw mm0, mm1" \
-    "packssdw mm2, mm3" \
-    "pminsw   mm0, mm5" \
-    "pmaxsw   mm0, mm6" \
-    "pminsw   mm2, mm5" \
-    "pmaxsw   mm2, mm6" \
-    "packsswb mm0, mm2" \
-    "movq     [edx+8], mm0" \
-    "movups   xmm0, [eax+64]" \
-    "mulps    xmm0, xmm7" \
-    "movups   xmm1, [eax+80]" \
-    "mulps    xmm1, xmm7" \
-    "cvtps2pi mm0, xmm0" \
-    "movhlps  xmm2, xmm0" \
-    "cvtps2pi mm1, xmm2" \
-    "cvtps2pi mm2, xmm1" \
-    "movhlps  xmm3, xmm1" \
-    "cvtps2pi mm3, xmm3" \
-    "packssdw mm0, mm1" \
-    "packssdw mm2, mm3" \
-    "pminsw   mm0, mm5" \
-    "pmaxsw   mm0, mm6" \
-    "pminsw   mm2, mm5" \
-    "pmaxsw   mm2, mm6" \
-    "packsswb mm0, mm2" \
-    "movq     [edx+16], mm0" \
-    "movups   xmm0, [eax+96]" \
-    "mulps    xmm0, xmm7" \
-    "movups   xmm1, [eax+112]" \
-    "mulps    xmm1, xmm7" \
-    "cvtps2pi mm0, xmm0" \
-    "movhlps  xmm2, xmm0" \
-    "cvtps2pi mm1, xmm2" \
-    "cvtps2pi mm2, xmm1" \
-    "movhlps  xmm3, xmm1" \
-    "cvtps2pi mm3, xmm3" \
-    "packssdw mm0, mm1" \
-    "packssdw mm2, mm3" \
-    "pminsw   mm0, mm5" \
-    "pmaxsw   mm0, mm6" \
-    "pminsw   mm2, mm5" \
-    "pmaxsw   mm2, mm6" \
-    "packsswb mm0, mm2" \
-    "movq     [edx+24], mm0" \
+    "movss     xmm0, [ecx]" \
+    "shufps    xmm0, xmm0, 0" \
+    "pcmpeqw   mm0, mm0" \
+    "psrlw     mm0, 9" \
+    "pxor      mm1, mm1" \
+    "psubw     mm1, mm0" \
+    "movups    xmm1, [eax]" \
+    "mulps     xmm1, xmm0" \
+    "movups    xmm2, [eax+16]" \
+    "mulps     xmm2, xmm0" \
+    "cvtps2pi  mm2, xmm1" \
+    "movhlps   xmm3, xmm1" \
+    "cvtps2pi  mm3, xmm3" \
+    "cvtps2pi  mm4, xmm2" \
+    "movhlps   xmm4, xmm2" \
+    "cvtps2pi  mm5, xmm4" \
+    "packssdw  mm2, mm3" \
+    "packssdw  mm4, mm5" \
+    "pminsw    mm2, mm0" \
+    "pmaxsw    mm2, mm1" \
+    "pminsw    mm4, mm0" \
+    "pmaxsw    mm4, mm1" \
+    "packsswb  mm2, mm4" \
+    "movq      [edx], mm2" \
+    "movups    xmm1, [eax+32]" \
+    "mulps     xmm1, xmm0" \
+    "movups    xmm2, [eax+48]" \
+    "mulps     xmm2, xmm0" \
+    "cvtps2pi  mm2, xmm1" \
+    "movhlps   xmm3, xmm1" \
+    "cvtps2pi  mm3, xmm3" \
+    "cvtps2pi  mm4, xmm2" \
+    "movhlps   xmm4, xmm2" \
+    "cvtps2pi  mm5, xmm4" \
+    "packssdw  mm2, mm3" \
+    "packssdw  mm4, mm5" \
+    "pminsw    mm2, mm0" \
+    "pmaxsw    mm2, mm1" \
+    "pminsw    mm4, mm0" \
+    "pmaxsw    mm4, mm1" \
+    "packsswb  mm2, mm4" \
+    "movq      [edx+8], mm2" \
+    "movups    xmm1, [eax+64]" \
+    "mulps     xmm1, xmm0" \
+    "movups    xmm2, [eax+80]" \
+    "mulps     xmm2, xmm0" \
+    "cvtps2pi  mm2, xmm1" \
+    "movhlps   xmm3, xmm1" \
+    "cvtps2pi  mm3, xmm3" \
+    "cvtps2pi  mm4, xmm2" \
+    "movhlps   xmm4, xmm2" \
+    "cvtps2pi  mm5, xmm4" \
+    "packssdw  mm2, mm3" \
+    "packssdw  mm4, mm5" \
+    "pminsw    mm2, mm0" \
+    "pmaxsw    mm2, mm1" \
+    "pminsw    mm4, mm0" \
+    "pmaxsw    mm4, mm1" \
+    "packsswb  mm2, mm4" \
+    "movq      [edx+16], mm2" \
+    "movups    xmm1, [eax+96]" \
+    "mulps     xmm1, xmm0" \
+    "movups    xmm2, [eax+112]" \
+    "mulps     xmm2, xmm0" \
+    "cvtps2pi  mm2, xmm1" \
+    "movhlps   xmm3, xmm1" \
+    "cvtps2pi  mm3, xmm3" \
+    "cvtps2pi  mm4, xmm2" \
+    "movhlps   xmm4, xmm2" \
+    "cvtps2pi  mm5, xmm4" \
+    "packssdw  mm2, mm3" \
+    "packssdw  mm4, mm5" \
+    "pminsw    mm2, mm0" \
+    "pmaxsw    mm2, mm1" \
+    "pminsw    mm4, mm0" \
+    "pmaxsw    mm4, mm1" \
+    "packsswb  mm2, mm4" \
+    "movq      [edx+24], mm2" \
     __parm [__eax] [__edx] [__ecx] \
     __modify [8087]
 
@@ -522,49 +522,49 @@ extern int lz_norm_ss_sse_asm(const float *x, int n, const float *scp,
                               short *qout, lz_i64 *acc);
 #pragma aux lz_norm_ss_sse_asm = \
     ".686"                                                      \
-    "movss   xmm5, [ebx]"                                       \
-    "shufps  xmm5, xmm5, 0"         /* sc broadcast */          \
-    "pcmpeqw mm6, mm6"                                          \
-    "psrlw   mm6, 1"                /* 0x7FFF per lane */       \
-    "pxor    mm7, mm7"                                          \
-    "psubw   mm7, mm6"              /* -32767 per lane */       \
-    "movq    mm6, mm7"              /* keep the low clamp */    \
-    "xor     ecx, ecx"                                          \
-    "mov     [edi], ecx"                                        \
-    "mov     [edi+4], ecx"          /* acc = 0 */               \
-    "and     edx, -4"                                           \
-    "mov     ecx, edx"                                          \
-    "test    ecx, ecx"                                          \
-    "jz      nssdone"                                           \
+    "movss     xmm0, [ebx]"                                       \
+    "shufps    xmm0, xmm0, 0"         /* sc broadcast */          \
+    "pcmpeqw   mm0, mm0"                                          \
+    "psrlw     mm0, 1"                /* 0x7FFF per lane */       \
+    "pxor      mm1, mm1"                                          \
+    "psubw     mm1, mm0"              /* -32767 per lane */       \
+    "movq      mm0, mm1"              /* keep the low clamp */    \
+    "xor       ecx, ecx"                                          \
+    "mov       [edi], ecx"                                        \
+    "mov       [edi+4], ecx"          /* acc = 0 */               \
+    "and       edx, -4"                                           \
+    "mov       ecx, edx"                                          \
+    "test      ecx, ecx"                                          \
+    "jz        nssdone"                                           \
     "nssloop:"                                                  \
-    "movups  xmm0, [eax]"                                       \
-    "mulps   xmm0, xmm5"                                        \
-    "cvtps2pi mm0, xmm0"            /* low two -> int32 */      \
-    "movhlps xmm1, xmm0"                                        \
-    "cvtps2pi mm1, xmm1"            /* high two -> int32 */     \
-    "packssdw mm0, mm1"             /* 4 int16, upper clamp */  \
-    "pmaxsw  mm0, mm6"              /* low clamp to -32767 */   \
-    "test    esi, esi"                                          \
-    "jz      nssnostore"                                        \
-    "movq    [esi], mm0"                                        \
-    "add     esi, 8"                                            \
+    "movups    xmm1, [eax]"                                       \
+    "mulps     xmm1, xmm0"                                        \
+    "cvtps2pi  mm2, xmm1"            /* low two -> int32 */      \
+    "movhlps   xmm2, xmm1"                                        \
+    "cvtps2pi  mm3, xmm2"            /* high two -> int32 */     \
+    "packssdw  mm2, mm3"             /* 4 int16, upper clamp */  \
+    "pmaxsw    mm2, mm0"              /* low clamp to -32767 */   \
+    "test      esi, esi"                                          \
+    "jz        nssnostore"                                        \
+    "movq      [esi], mm2"                                        \
+    "add       esi, 8"                                            \
     "nssnostore:"                                               \
-    "movq    mm2, mm0"                                          \
-    "pmaddwd mm2, mm0"              /* two pairwise squares */  \
-    "movd    ebx, mm2"                                          \
-    "movq    mm3, mm2"                                          \
-    "psrlq   mm3, 32"                                           \
-    "movd    ebp, mm3"                                          \
-    "add     [edi], ebx"                                        \
-    "adc     dword ptr [edi+4], 0"                              \
-    "add     [edi], ebp"                                        \
-    "adc     dword ptr [edi+4], 0"                              \
-    "add     eax, 16"                                           \
-    "sub     ecx, 4"                                            \
-    "jnz     nssloop"                                           \
+    "movq      mm4, mm2"                                          \
+    "pmaddwd   mm4, mm2"              /* two pairwise squares */  \
+    "movd      ebx, mm4"                                          \
+    "movq      mm5, mm4"                                          \
+    "psrlq     mm5, 32"                                           \
+    "movd      ebp, mm5"                                          \
+    "add       [edi], ebx"                                        \
+    "adc       dword ptr [edi+4], 0"                              \
+    "add       [edi], ebp"                                        \
+    "adc       dword ptr [edi+4], 0"                              \
+    "add       eax, 16"                                           \
+    "sub       ecx, 4"                                            \
+    "jnz       nssloop"                                           \
     "nssdone:"                                                  \
     "emms"                                                      \
-    "mov     eax, edx"                                          \
+    "mov       eax, edx"                                          \
     parm [eax] [edx] [ebx] [esi] [edi]                          \
     value [eax]                                                 \
     modify [eax ebx ecx edx esi ebp];
@@ -738,74 +738,74 @@ static const lz_i64 exp_q20_sk[7] = {
    file. */
 extern void lz_exp_q20_2_sse_asm(const int32_t *tab, const int32_t *s,
                                  int32_t *prod, const void *k, int np);
-#pragma aux lz_exp_q20_2_sse_asm =  \
+#pragma aux lz_exp_q20_2_sse_asm = \
     ".686"                          \
     "expq20sloop:"                  \
-    "pshufw  mm0, [edx], 8"         \
-    "movq    mm4, mm0"              \
-    "pmullw  mm4, [ecx+40]"         \
-    "movq    mm5, mm0"              \
-    "pmulhuw mm5, [ecx+40]"         \
-    "movq    mm1, mm0"              \
-    "pmullw  mm1, [ecx+48]"         \
-    "movq    mm6, mm0"              \
-    "pmulhuw mm6, [ecx+48]"         \
-    "punpcklwd mm4, mm5"            \
-    "punpcklwd mm1, mm6"            \
-    "paddd   mm1, [ecx+16]"         \
-    "psrld   mm1, 16"               \
-    "paddd   mm4, mm1"              \
-    "psrld   mm4, 4"                \
-    "movq    mm5, mm0"              \
-    "pmullw  mm5, mm0"              \
-    "pmulhuw mm0, mm0"              \
-    "punpcklwd mm5, mm0"            \
-    "movq    mm6, mm5"              \
-    "pand    mm6, [ecx]"            \
-    "movq    mm7, mm5"              \
-    "psrld   mm7, 10"               \
-    "pand    mm7, [ecx]"            \
-    "psrld   mm5, 20"               \
-    "movq    mm3, mm6"              \
-    "pmaddwd mm3, [ecx+32]"         \
-    "pmaddwd mm6, [ecx+24]"         \
-    "movq    mm1, mm7"              \
-    "pmaddwd mm1, [ecx+32]"         \
-    "pmaddwd mm7, [ecx+24]"         \
-    "movq    mm2, mm5"              \
-    "pmaddwd mm2, [ecx+32]"         \
-    "pmaddwd mm5, [ecx+24]"         \
-    "pslld   mm6, 15"               \
-    "paddd   mm3, mm6"              \
-    "pslld   mm7, 15"               \
-    "paddd   mm1, mm7"              \
-    "pslld   mm5, 15"               \
-    "paddd   mm2, mm5"              \
-    "psrld   mm3, 10"               \
-    "paddd   mm1, mm3"              \
-    "psrld   mm1, 10"               \
-    "paddd   mm2, [ecx+16]"         \
-    "paddd   mm2, mm1"              \
-    "psrld   mm2, 20"               \
-    "paddd   mm4, mm2"              \
-    "movq    mm0, [eax]"            \
-    "movq    mm1, mm0"              \
-    "psrld   mm1, 11"               \
-    "movq    mm2, mm0"              \
-    "pand    mm2, [ecx+8]"          \
-    "pmaddwd mm1, mm4"              \
-    "pmaddwd mm2, mm4"              \
-    "paddd   mm2, [ecx+16]"         \
-    "psrld   mm2, 11"               \
-    "paddd   mm1, mm2"              \
-    "psrld   mm1, 9"                \
-    "paddd   mm0, mm1"              \
-    "movq    [ebx], mm0"            \
-    "add     eax, 8"                \
-    "add     edx, 8"                \
-    "add     ebx, 8"                \
-    "dec     esi"                   \
-    "jnz     expq20sloop"           \
+    "pshufw    mm0, [edx], 8"         \
+    "movq      mm1, mm0"              \
+    "pmullw    mm1, [ecx+40]"         \
+    "movq      mm2, mm0"              \
+    "pmulhuw   mm2, [ecx+40]"         \
+    "movq      mm3, mm0"              \
+    "pmullw    mm3, [ecx+48]"         \
+    "movq      mm4, mm0"              \
+    "pmulhuw   mm4, [ecx+48]"         \
+    "punpcklwd mm1, mm2"            \
+    "punpcklwd mm3, mm4"            \
+    "paddd     mm3, [ecx+16]"         \
+    "psrld     mm3, 16"               \
+    "paddd     mm1, mm3"              \
+    "psrld     mm1, 4"                \
+    "movq      mm2, mm0"              \
+    "pmullw    mm2, mm0"              \
+    "pmulhuw   mm0, mm0"              \
+    "punpcklwd mm2, mm0"            \
+    "movq      mm4, mm2"              \
+    "pand      mm4, [ecx]"            \
+    "movq      mm5, mm2"              \
+    "psrld     mm5, 10"               \
+    "pand      mm5, [ecx]"            \
+    "psrld     mm2, 20"               \
+    "movq      mm6, mm4"              \
+    "pmaddwd   mm6, [ecx+32]"         \
+    "pmaddwd   mm4, [ecx+24]"         \
+    "movq      mm3, mm5"              \
+    "pmaddwd   mm3, [ecx+32]"         \
+    "pmaddwd   mm5, [ecx+24]"         \
+    "movq      mm7, mm2"              \
+    "pmaddwd   mm7, [ecx+32]"         \
+    "pmaddwd   mm2, [ecx+24]"         \
+    "pslld     mm4, 15"               \
+    "paddd     mm6, mm4"              \
+    "pslld     mm5, 15"               \
+    "paddd     mm3, mm5"              \
+    "pslld     mm2, 15"               \
+    "paddd     mm7, mm2"              \
+    "psrld     mm6, 10"               \
+    "paddd     mm3, mm6"              \
+    "psrld     mm3, 10"               \
+    "paddd     mm7, [ecx+16]"         \
+    "paddd     mm7, mm3"              \
+    "psrld     mm7, 20"               \
+    "paddd     mm1, mm7"              \
+    "movq      mm0, [eax]"            \
+    "movq      mm3, mm0"              \
+    "psrld     mm3, 11"               \
+    "movq      mm7, mm0"              \
+    "pand      mm7, [ecx+8]"          \
+    "pmaddwd   mm3, mm1"              \
+    "pmaddwd   mm7, mm1"              \
+    "paddd     mm7, [ecx+16]"         \
+    "psrld     mm7, 11"               \
+    "paddd     mm3, mm7"              \
+    "psrld     mm3, 9"                \
+    "paddd     mm0, mm3"              \
+    "movq      [ebx], mm0"            \
+    "add       eax, 8"                \
+    "add       edx, 8"                \
+    "add       ebx, 8"                \
+    "dec       esi"                   \
+    "jnz       expq20sloop"           \
     "emms"                          \
     __parm [__eax] [__edx] [__ebx] [__ecx] [__esi] \
     __modify [__eax __ebx __ecx __edx __esi 8087];
