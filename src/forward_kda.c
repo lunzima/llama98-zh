@@ -837,19 +837,21 @@ void forward_kda(const LZModel *m, LZRunState *s,
                  : lz_sigmoid(s->bvec[(size_t)tk * nv + h]);
             LZ_PROF_BEG(_tr);
             if (convo_i16)
-                lz_kda_step_vi16(out, sq_in, sq_out,
+                lz_recur_step(out, sq_in, sq_out,
 #if LZ_GDN_STATE_2PLANE
                         sq2_in, sq2_out,
 #endif /* LZ_GDN_STATE_2PLANE */
                         ss_in, ss_out, s->qn, s->kn,
+                        (const float *)0,
                         s->kda_vc_i16 + (size_t)tk * vdim + (size_t)h * vd,
-                        pow2f(-LZ_CONVO_V_ES), gv, beta, kd, vd);
+                        pow2f(-LZ_CONVO_V_ES), gv, 1.0f, beta, kd, vd);
             else
-                lz_kda_step(out, sq_in, sq_out,
+                lz_recur_step(out, sq_in, sq_out,
 #if LZ_GDN_STATE_2PLANE
                         sq2_in, sq2_out,
 #endif /* LZ_GDN_STATE_2PLANE */
-                        ss_in, ss_out, s->qn, s->kn, vp, gv, beta, kd, vd);
+                        ss_in, ss_out, s->qn, s->kn, vp,
+                        (const short *)0, 0.0f, gv, 1.0f, beta, kd, vd);
             LZ_PROF_END(_tr, LZ_PROF_REC);
         }
     }

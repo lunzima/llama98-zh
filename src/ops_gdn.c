@@ -2329,7 +2329,7 @@ static void gdn_p2_fixed_rows(const int8_t *sq_in, int8_t *sq_out,
 
    The identity that makes it exact - not approximate, exact:
 
-       lz_kda_step(...) == gdn_step_impl(..., gvec, gt = 1.0f)
+       lz_kda_step(...) == lz_recur_step(..., gvec, gt = 1.0f)
 
    because KDA's per-channel decay is already folded into pass 1 (its
    coefficients are gvec[kk]*k[kk]), so the only place GDN's scalar gt
@@ -2347,7 +2347,7 @@ static void gdn_p2_fixed_rows(const int8_t *sq_in, int8_t *sq_out,
    `gvec` NULL selects the scalar-decay family. The gate is bit-exactness
    against a 10-hash baseline (2 models x --gdn x --gdn-p2); nothing may
    move. */
-static void gdn_step_impl(float *out, const int8_t *sq_in, int8_t *sq_out,
+void lz_recur_step(float *out, const int8_t *sq_in, int8_t *sq_out,
 #if LZ_GDN_STATE_2PLANE
                  const int8_t *sq2_in, int8_t *sq2_out,
 #endif /* LZ_GDN_STATE_2PLANE */
@@ -2654,7 +2654,7 @@ void lz_gdn_step(float *out, const int8_t *sq_in, int8_t *sq_out,
                  const float *ss_in, float *ss_out,
                  const float *q, const float *k, const float *v,
                  float gt, float beta, int kd, int vd) {
-    gdn_step_impl(out, sq_in, sq_out,
+    lz_recur_step(out, sq_in, sq_out,
 #if LZ_GDN_STATE_2PLANE
                   sq2_in, sq2_out,
 #endif /* LZ_GDN_STATE_2PLANE */
@@ -2674,7 +2674,7 @@ void lz_kda_step(float *out, const int8_t *sq_in, int8_t *sq_out,
                  const float *ss_in, float *ss_out,
                  const float *q, const float *k, const float *v,
                  const float *gvec, float beta, int kd, int vd) {
-    gdn_step_impl(out, sq_in, sq_out,
+    lz_recur_step(out, sq_in, sq_out,
 #if LZ_GDN_STATE_2PLANE
                   sq2_in, sq2_out,
 #endif /* LZ_GDN_STATE_2PLANE */
@@ -2694,7 +2694,7 @@ void lz_kda_step_vi16(float *out, const int8_t *sq_in, int8_t *sq_out,
                  const float *q, const float *k, const short *vi,
                  float vscale, const float *gvec, float beta,
                  int kd, int vd) {
-    gdn_step_impl(out, sq_in, sq_out,
+    lz_recur_step(out, sq_in, sq_out,
 #if LZ_GDN_STATE_2PLANE
                   sq2_in, sq2_out,
 #endif /* LZ_GDN_STATE_2PLANE */

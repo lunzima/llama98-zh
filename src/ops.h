@@ -1941,6 +1941,23 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
 #define LZ_LOOK_W_MAX 4
 #define LZ_LOOK_D_MAX 4
 
+/* The one recurrence body lz_gdn_step / lz_kda_step / lz_kda_step_vi16 all
+   forward to. The three wrappers exist so the .prof probes have a stable
+   entry point with the narrow signature they were written against; the
+   engine's own callers (forward_ssm / forward_kda) call this DIRECTLY and
+   fill in the wrapper's constants themselves, so the per-head call pays
+   the 17-argument push once instead of twice (caller -> wrapper ->
+   here). vi/vscale are the int16-v entry, gvec/gt the per-channel vs
+   scalar decay - the three wrappers differ only in which are NULL/1.0f. */
+void lz_recur_step(float *out, const int8_t *sq_in, int8_t *sq_out,
+#if LZ_GDN_STATE_2PLANE
+                   const int8_t *sq2_in, int8_t *sq2_out,
+#endif
+                   const float *ss_in, float *ss_out,
+                   const float *q, const float *k, const float *v,
+                   const short *vi, float vscale,
+                   const float *gvec, float gt, float beta, int kd, int vd);
+
 void lz_gdn_step(float *out, const int8_t *sq_in, int8_t *sq_out,
 #if LZ_GDN_STATE_2PLANE
                  const int8_t *sq2_in, int8_t *sq2_out,

@@ -164,11 +164,12 @@ void forward_ssm(const LZModel *m, LZRunState *s,
                speculative verify batch - see this function's own
                signature comment. */
             LZ_PROF_BEG(_tr);
-            lz_gdn_step(out, sq_in, sq_out,
+            lz_recur_step(out, sq_in, sq_out,
 #if LZ_GDN_STATE_2PLANE
                         sq2_in, sq2_out,
 #endif /* LZ_GDN_STATE_2PLANE */
-                        ss_in, ss_out, s->qn, s->kn, v_t, gt, beta, kd, vd);
+                        ss_in, ss_out, s->qn, s->kn, v_t,
+                        (const short *)0, 0.0f, NULL, gt, beta, kd, vd);
             LZ_PROF_END(_tr, LZ_PROF_REC);
         }
     }
