@@ -144,7 +144,15 @@ ENG_MMX_GCC_GUI_OBJS    := $(addprefix build/gui/,$(addsuffix .o,$(ENG_MMX)))
 # hot; they compile separately at -O2. Everything else is cold and keeps
 # the -Os default, compiled in the link target's one-shot compile exactly
 # as before.
-HOT_TU := ops_epi ops_matmul ops_quant ops_gdn json
+# Per-token execution path (gcov call counts, cov_run.sh on kmr20
+# -n 128): the epilogue/quantize/matmul/recurrence TUs run 8M-85M
+# calls; sched/norm/conv/moe/rope are the next tier; forward_* and
+# sampler/generate are per-token dispatch whose call counts are low but
+# whose bodies are the whole token loop. json is model-load one-shot
+# (jparse_*), NOT hot, and is deliberately cold.
+HOT_TU := ops ops_epi ops_matmul ops_quant ops_gdn ops_norm ops_sched \
+          ops_conv1d ops_moe ops_rope forward forward_attn forward_kda \
+          forward_moe forward_ssm sampler generate
 HOT_COM := stream
 
 HOT_ENG_SRCS := $(addprefix src/,$(addsuffix .c,$(HOT_TU)))
