@@ -7285,7 +7285,7 @@ static int st_worker(FILE *f, HWND hwnd) {
           in the queue; drained, it is the real load job's own failure
           (rc != 0, no old job left to misattribute). */
     {
-        char dir[MAX_PATH], bin[MAX_PATH], cmd[MAX_PATH + 8];
+        char dir[MAX_PATH], bin[MAX_PATH + 16], cmd[MAX_PATH + 8];
         FILE *out;
 
         GetTempPathA((DWORD)sizeof dir, dir);
@@ -7295,7 +7295,7 @@ static int st_worker(FILE *f, HWND hwnd) {
            "%.500s/model.bin") - Win32 accepts both, but the pre-check and
            the selftest must agree on the SAME path or the test only
            passes by the grace of backslash==slash. */
-        sprintf(bin, "%s/model.bin", dir);
+        snprintf(bin, sizeof bin, "%s/model.bin", dir);
         out = fopen(bin, "wb");
         if (out) { fwrite("not a model", 1, 11, out); fclose(out); }
 
@@ -8377,7 +8377,7 @@ static int st_rollback(FILE *f, HWND hwnd) {
    that is not one. The success path needed a trained model and waited -
    st_real_model below is that wait ending. */
 static int st_model(FILE *f) {
-    char dir[MAX_PATH], bin[MAX_PATH];
+    char dir[MAX_PATH], bin[MAX_PATH + 16];
     LZGuiModel m;
     char err[512];
     FILE *out;
@@ -8392,7 +8392,7 @@ static int st_model(FILE *f) {
     st_check(f, !lz_gui_model_dir_ok(dir),
              "model: a directory with no model.bin is refused"); checks++;
 
-    sprintf(bin, "%s/model.bin", dir);
+    snprintf(bin, sizeof bin, "%s/model.bin", dir);
     out = fopen(bin, "wb");
     if (out) { fwrite("not a model", 1, 11, out); fclose(out); }
     /* ... and accepted once the file is there. Without this the check
@@ -10666,6 +10666,37 @@ static void st_about_body(FILE *f, HWND dlg, int *checks) {
    unlike a screen grab (DPI scaling) or asking the user. The two-row
    groove is light (160) over dark (100), the reference's own colours,
    spanning the text column. */
+/* The divider's real position, read back from the rendered pixels - not
+   guessed from a screen. It must be a light-over-dark two-row groove
+   spanning the FULL client width (the reference draws it x9..371, below
+   the logo), so find the widest run of the light-pen colour. DETERMINISTIC:
+   client coordinates, no DPI, no screen grab. */
+static void st_about_scan_divider(HDC mdc, const RECT *cr,
+                                  int *best_w, int *best_y, int *best_x0) {
+    int y, x;
+    *best_w = 0; *best_y = 0; *best_x0 = 0;
+    for (y = 0; y < cr->bottom; y++) {
+        int run = 0, run_start = 0;
+        for (x = 0; x < cr->right; x++) {
+            COLORREF c = GetPixel(mdc, x, y);
+            int r = GetRValue(c), g = GetGValue(c), b = GetBValue(c);
+            int is_light = (r == g && g == b && r >= 150 && r <= 170);
+            if (is_light) {
+                if (run == 0) run_start = x;
+                run++;
+            } else {
+                if (run > *best_w) {
+                    *best_w = run; *best_y = y; *best_x0 = run_start;
+                }
+                run = 0;
+            }
+        }
+        if (run > *best_w) {
+            *best_w = run; *best_y = y; *best_x0 = run_start;
+        }
+    }
+}
+
 static void st_about_divider(FILE *f, HWND dlg, int *checks) {
     HDC hdc = GetDC(dlg);
     HDC mdc = CreateCompatibleDC(hdc);
@@ -10689,36 +10720,8 @@ static void st_about_divider(FILE *f, HWND dlg, int *checks) {
             }
             SendMessage(dlg, WM_PRINTCLIENT, (WPARAM)mdc, 0);
             {
-                /* The divider's real position, read back from the
-                   rendered pixels - not guessed from a screen. It must be
-                   a light-over-dark two-row groove spanning the FULL
-                   client width (the reference draws it x9..371, below the
-                   logo), so find the widest run of the light-pen colour
-                   and assert it reaches from near the left margin to near
-                   the right one. DETERMINISTIC: client coordinates, no
-                   DPI, no screen grab. */
-                int y, x;
-                int best_w = 0, best_y = 0, best_x0 = 0;
-                for (y = 0; y < cr.bottom; y++) {
-                    int run = 0, run_start = 0;
-                    for (x = 0; x < cr.right; x++) {
-                        COLORREF c = GetPixel(mdc, x, y);
-                        int r = GetRValue(c), g = GetGValue(c), b = GetBValue(c);
-                        int is_light = (r == g && g == b && r >= 150 && r <= 170);
-                        if (is_light) {
-                            if (run == 0) run_start = x;
-                            run++;
-                        } else {
-                            if (run > best_w) {
-                                best_w = run; best_y = y; best_x0 = run_start;
-                            }
-                            run = 0;
-                        }
-                    }
-                    if (run > best_w) {
-                        best_w = run; best_y = y; best_x0 = run_start;
-                    }
-                }
+                int best_w, best_y, best_x0;
+                st_about_scan_divider(mdc, &cr, &best_w, &best_y, &best_x0);
                 fprintf(f, "  divider: %dpx at y=%d x%d..%d (client %ldx%ld)\n",
                         best_w, best_y, best_x0, best_x0 + best_w,
                         (long)cr.right, (long)cr.bottom);
