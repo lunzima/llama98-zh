@@ -63,7 +63,7 @@
 #include "ops_arm.h"     /* LZ_ARM_ASM_EXTERN */
 
 #if LZ_F32COUNT
-double lz_f32_class[LZ_FC_N][LZ_FCC_N];
+float lz_f32_class[LZ_FC_N][LZ_FCC_N];
 int lz_f32_reached[LZ_FC_N];
 #endif /* LZ_F32COUNT */
 
@@ -81,27 +81,27 @@ const char *lz_f32_count_name(int site) {
     return (site >= 0 && site < LZ_FC_N) ? LZ_FC_NAMES[site] : "?";
 }
 
-double lz_f32_count_get(int site) {
+float lz_f32_count_get(int site) {
 #if LZ_F32COUNT
     int c;
-    double tot;
-    if (site < 0 || site >= LZ_FC_N) return 0.0;
-    tot = 0.0;
+    float tot;
+    if (site < 0 || site >= LZ_FC_N) return 0.0f;
+    tot = 0.0f;
     for (c = 0; c < LZ_FCC_N; c++) tot += lz_f32_class[site][c];
     return tot;
 #else
     (void)site;
-    return -1.0;   /* not "zero work": the build cannot answer */
+    return -1.0f;   /* not "zero work": the build cannot answer */
 #endif /* LZ_F32COUNT */
 }
 
-double lz_f32_class_get(int site, int cls) {
+float lz_f32_class_get(int site, int cls) {
 #if LZ_F32COUNT
-    if (site < 0 || site >= LZ_FC_N || cls < 0 || cls >= LZ_FCC_N) return 0.0;
+    if (site < 0 || site >= LZ_FC_N || cls < 0 || cls >= LZ_FCC_N) return 0.0f;
     return lz_f32_class[site][cls];
 #else
     (void)site; (void)cls;
-    return -1.0;   /* not "zero work": the build cannot answer */
+    return -1.0f;   /* not "zero work": the build cannot answer */
 #endif /* LZ_F32COUNT */
 }
 
@@ -267,7 +267,7 @@ int lz_cpu_has_mmx_probe(void) { g_lz_has_mmx = 0; return 0; }
    not by impression:
 
    What a row kernel executes, every format (src/ops_kernel_dot_mmx.h,
-   Watcom twins in src/ops_kernel_dot.h): movq loads; the unpack -
+   Watcom twins in src/ops_mmx.c): movq loads; the unpack -
    punpcklbw/punpckhbw for q8_0 and q16_0, pand plus psrlw/psrld/psllw
    plus pxor/por for the 4-bit, 6-bit and 2-bit planes; pmaddwd; paddd;
    then psrlq + paddd + movd to fold the pair. Every one is MMX.

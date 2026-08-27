@@ -1,8 +1,8 @@
 /* The SSE2 32-element partial-sum kernels, one per quantized weight
    format, plus the 4-way fold that combines them. Included only by
    src/ops_sse2.c - every function here writes %xmm registers. Gcc twin
-   of src/ops_kernel_dot.h's Watcom #pragma aux SSE2 bodies (compare
-   part32_x16 against lz_dot32_x16_sse2_asm there, etc.) - same algorithm,
+   of the Watcom #pragma aux SSE2 bodies in that same file (compare
+   part32_x16 against lz_dot32_x16_sse2_asm, etc.) - same algorithm,
    different toolchain.
 
    No include guards: included exactly once, same contract as

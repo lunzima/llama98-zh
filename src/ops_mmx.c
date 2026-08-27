@@ -1423,8 +1423,10 @@ void lz_exp_q20_mmx(const int32_t *tab, const int32_t *s,
 /* ---- Q8_0 32/128-element dot products and row kernel, MMX tier -
    in this TU. Algorithm documentation (why the weight side is widened
    via punpcklbw(zero,w), the register-budget accounting for the paired
-   kernel, the emms placement rule) is in src/ops_kernel_dot.h, not
-   reproduced here a second time. */
+   kernel, the emms placement rule) travels WITH these kernels and is
+   immediately below, which is what src/ops_kernel_dot.h's Q8_0 section
+   points at. This comment used to point back at that file, and the
+   pair of them formed a circle around a text that had moved here. */
 #include "ops.h"           /* lz_prefetch_mode/lz_pair_mode - row_q8_mmx_asm
                               needs both, and neither is static, so a
                               real declaration is all that is needed. */

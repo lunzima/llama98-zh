@@ -7,16 +7,20 @@
    (no include guard - same reasoning src/ops_kernel_dot.h gives for why
    splitting a file must not become a codegen change).
 
-   EACH FUNCTION'S WATCOM #pragma aux TWIN STAYS IN src/ops_kernel_dot.h,
-   at the file:line noted per format below - it is unaffected by this
-   split (Watcom compiles no MMX intrinsics and never carries -mmmx) and
-   moving it would only add risk for no benefit. The two are step-for-
-   step the same kernel; that comment lives with the Watcom twin, not
-   duplicated here. */
+   EACH FUNCTION'S WATCOM #pragma aux TWIN LIVES IN src/ops_mmx.c, named
+   per format below - Watcom compiles no MMX intrinsics and never
+   carries -mmmx, so the two halves never meet in one build. The pair is
+   step-for-step the same kernel; that comment lives with the Watcom
+   twin, not duplicated here.
+
+   The twins are referenced BY SYMBOL NAME and not by file:line. They
+   used to carry a line range, which was stale twice over: the bodies
+   had already moved out of src/ops_kernel_dot.h into this file's Watcom
+   counterpart, and scheduling them shifted every line again. A name
+   survives both. */
 
 /* ---- Q8_0: dot32_x16_mmx / dot32_x16_mmx_2 -----------------------------
-   Watcom twins: lz_dot32_x16_asm / lz_dot32_x16_asm_2,
-   src/ops_kernel_dot.h ~264-406. */
+   Watcom twins: lz_dot32_x16_asm / lz_dot32_x16_asm_2, src/ops_mmx.c. */
 int32_t dot32_x16_mmx(const int8_t *w, const int16_t *x) {
     __m64 z = _mm_setzero_si64();
     __m64 w0, w1, w2, w3, x0, s, t;
@@ -122,7 +126,7 @@ void dot128_x16_mmx(const int8_t *w, const int16_t *x, int32_t *out4) {
 }
 
 /* ---- Q16_0: dot32_q16_mmx ----------------------------------------------
-   Watcom twin: lz_dot32_q16_asm, src/ops_kernel_dot.h ~563-597.
+   Watcom twin: lz_dot32_q16_asm, src/ops_mmx.c.
    Dev-build twin: mirrors the asm step for step, eight pmaddwd
    into one accumulator, then fold the high dword into the low one. No
    reassociation - the integer sums are exact, but keeping the shape
@@ -201,7 +205,7 @@ void dot128_q16_mmx(const int16_t *w, const int16_t *x, int32_t *out4) {
 
 /* ---- Q4_1: dot32_q41_mmx / dot32_q41_mmx_2 -----------------------------
    Watcom twins: lz_dot32_q41_asm / lz_dot32_q41_asm_2 (and
-   lz_dot128_q41_asm), src/ops_kernel_dot.h ~893-1122.
+   lz_dot128_q41_asm), src/ops_mmx.c.
    The kernel that matters most: most of the model runs on this path (63
    Q4_1 tensors on the recipe of record). */
 int32_t dot32_q41_mmx(const unsigned char *w, const int16_t *x) {
@@ -314,7 +318,7 @@ void dot128_q41_mmx(const unsigned char *w, const int16_t *x, int32_t *out4) {
 }
 
 /* ---- T2: dot32_t2_mmx ---------------------------------------------------
-   Watcom twin: lz_dot32_t2_asm, src/ops_kernel_dot.h ~1227-1358.
+   Watcom twin: lz_dot32_t2_asm, src/ops_mmx.c.
    One 8-byte load of the plane, eight groups of (punpck against zero,
    align the 2-bit field to the top of the lane, drop the rest, put it
    back with the x256 fold, pmaddwd, accumulate), then a horizontal fold
@@ -430,7 +434,7 @@ void dot128_t2_mmx(const unsigned char *w2, const int16_t *x,
 
 /* ---- Q6_1: dot32_q61_mmx / dot32_q61_mmx_2 ------------------------------
    Watcom twins: lz_dot32_q61_asm / lz_dot32_q61_asm_2 (and
-   lz_dot128_q61_asm), src/ops_kernel_dot.h ~1402-2917.
+   lz_dot128_q61_asm), src/ops_mmx.c.
    Q6_1 carries embed_tokens, in_proj_qkv, in_proj_z, down_proj and
    q/k/v_proj - the largest tensors on the recipe of record - and its
    weight side is 61% of the kernel's ops (against Q4_1's 40% and Q8's

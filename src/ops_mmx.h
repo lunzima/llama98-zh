@@ -331,8 +331,9 @@ void lz_gdn1_x4_asm(const int8_t *rowA, int32_t vd, const int16_t *ctab,
 
 /* ---- 32-element dot products, one pair per quantized weight format ---
    Bodies in src/ops_kernel_dot_mmx.h (included only by ops_mmx.c),
-   adjacent to their Watcom #pragma aux twins in src/ops_kernel_dot.h for
-   comparison - see that file's per-format sections. */
+   whose Watcom #pragma aux twins sit in ops_mmx.c itself - the two
+   halves of each format are in the same translation unit, one behind
+   __WATCOMC__ and one behind !__WATCOMC__, and never both. */
 int32_t dot32_x16_mmx(const int8_t *w, const int16_t *x);
 void dot32_x16_mmx_2(const int8_t *w, const int16_t *xa, const int16_t *xb,
                      int32_t *oa, int32_t *ob);
