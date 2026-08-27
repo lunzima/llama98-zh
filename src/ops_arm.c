@@ -418,22 +418,39 @@ int32_t lz_dot32_q61_arm_asm(const unsigned char *b4, const unsigned char *b2,
    pairs, r8-r11 four live accumulators. coef[0..1] arrive pre-shifted
    from C: two instructions per PAIR against 64 products. */
 #if defined(LZ_ARM_ASM_EXTERN)
+/* BOTH ROW WORDS ARE LOADED UP FRONT, into r6 and r4, rather than both
+   into r6 one after the other. That costs one more clobbered register
+   and NOTHING else - same instruction count, same instructions - and
+   removes every load-use stall in the kernel: armv5telint -a scored the
+   one-register version at 24 stall cycles on arm926ej-s, 16 of them
+   `and` waiting on `ldr`, and this at 8.
+
+   Reusing r6 for the second row forced its load to sit between the two
+   MAC groups, where the `and` that unpacks it is the very next
+   instruction and a load is latency 3. With a register of its own it
+   issues six instructions before its first consumer.
+
+   Worth contrasting with lz_dot32_q16_arm_asm, which also shows stalls
+   no reorder can remove: those are `ldm`, and gcc gives every register
+   of a multi-register transfer the same latency, so the number there is
+   an upper bound. These are `ldr` - one register, one arrival, nothing
+   flattened - so the model means what it says. */
 #define LZ_WSUM_ARM_BLK                                       \
     "ldmia  %[ac], {r8, r9, r10, r11}\n\t"                    \
     "ldr    r6, [%[pa]], #4\n\t"                              \
+    "ldr    r4, [%[pb]], #4\n\t"                              \
     "and    r7, r5, r6, lsl #8\n\t"                           \
     "and    r6, r5, r6\n\t"                                   \
     "smlawb r8,  %[ka], r7, r8\n\t"                           \
     "smlawb r9,  %[ka], r6, r9\n\t"                           \
     "smlawt r10, %[ka], r7, r10\n\t"                          \
     "smlawt r11, %[ka], r6, r11\n\t"                          \
-    "ldr    r6, [%[pb]], #4\n\t"                              \
-    "and    r7, r5, r6, lsl #8\n\t"                           \
-    "and    r6, r5, r6\n\t"                                   \
+    "and    r7, r5, r4, lsl #8\n\t"                           \
+    "and    r4, r5, r4\n\t"                                   \
     "smlawb r8,  %[kb], r7, r8\n\t"                           \
-    "smlawb r9,  %[kb], r6, r9\n\t"                           \
+    "smlawb r9,  %[kb], r4, r9\n\t"                           \
     "smlawt r10, %[kb], r7, r10\n\t"                          \
-    "smlawt r11, %[kb], r6, r11\n\t"                          \
+    "smlawt r11, %[kb], r4, r11\n\t"                          \
     "stmia  %[ac]!, {r8, r9, r10, r11}\n\t"
 
 void lz_wsum_pair_arm_asm(const int8_t *rowA, const int8_t *rowB,
@@ -456,7 +473,8 @@ void lz_wsum_pair_arm_asm(const int8_t *rowA, const int8_t *rowB,
         LZ_WSUM_ARM_BLK LZ_WSUM_ARM_BLK LZ_WSUM_ARM_BLK LZ_WSUM_ARM_BLK
         : [pa] "+r"(pa), [pb] "+r"(pb), [ac] "+r"(ac)
         : [ka] "r"(ka), [kb] "r"(kb)
-        : "r5", "r6", "r7", "r8", "r9", "r10", "r11", "cc", "memory");
+        : "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "cc",
+          "memory");
 }
 #endif /* LZ_ARM_ASM_EXTERN */
 
