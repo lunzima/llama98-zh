@@ -107,17 +107,37 @@ int32_t lz_dot32_q8_arm(const int8_t *restrict w, const int16_t *restrict x) {
    Register map: r3 the 0xff00ff00 mask, r4-r5 eight weights, r6-r7
    four activations, r10/r11 the scaled weight pairs, r12 the second
    accumulator. */
-#define LZ_Q8_ARM_HALF(WR)                                    \
+#define LZ_Q8_ARM_WLOAD "ldmia  %[wp]!, {r4, r5}\n\t"
+#define LZ_Q8_ARM_TAIL  "smlatt r12,   r11, r7, r12\n\t"
+#define LZ_Q8_ARM_HALF_HEAD(WR)                               \
     "ldmia  %[xp]!, {r6, r7}\n\t"                             \
     "and    r10, r3, " WR ", lsl #8\n\t"                      \
     "and    r11, r3, " WR "\n\t"                              \
     "smlabb %[a0], r10, r6, %[a0]\n\t"                        \
     "smlabt r12,   r11, r6, r12\n\t"                          \
-    "smlatb %[a0], r10, r7, %[a0]\n\t"                        \
-    "smlatt r12,   r11, r7, r12\n\t"
+    "smlatb %[a0], r10, r7, %[a0]\n\t"
+#define LZ_Q8_ARM_HALF(WR) LZ_Q8_ARM_HALF_HEAD(WR) LZ_Q8_ARM_TAIL
 
-#define LZ_Q8_ARM_BLK                                         \
-    "ldmia  %[wp]!, {r4, r5}\n\t"                             \
+/* SOFTWARE PIPELINED BY ONE INSTRUCTION, which is why the group macro
+   comes in two shapes instead of one. armv5telint -a scored the
+   straight version at 5 stall cycles on arm926ej-s and named all four:
+   the `ldmia %[wp]!` that starts a group issues immediately after the
+   previous group's last `smlatt`, and an LDM of two registers is
+   latency 4 there against the MAC's 3, so the first `and` of the next
+   group waits.
+
+   The load is therefore hoisted ABOVE that final MAC. It is legal
+   because the MAC reads r11, r7 and r12 while the load writes r4, r5
+   and %[wp]: the weights for group k are fully consumed by the two
+   `and`s at the top of each half, long before the half's last
+   accumulate. Dependence-checked and symbolically verified
+   (arm_sched + arm_equiv); 4 of the 5 cycles.
+
+   The last group has no successor to load for, hence _LAST. */
+#define LZ_Q8_ARM_BLK_PIPE                                    \
+    LZ_Q8_ARM_HALF("r4") LZ_Q8_ARM_HALF_HEAD("r5")            \
+    LZ_Q8_ARM_WLOAD LZ_Q8_ARM_TAIL
+#define LZ_Q8_ARM_BLK_LAST                                    \
     LZ_Q8_ARM_HALF("r4") LZ_Q8_ARM_HALF("r5")
 
 int32_t lz_dot32_q8_arm_asm(const int8_t *w, const int16_t *x) {
@@ -128,8 +148,10 @@ int32_t lz_dot32_q8_arm_asm(const int8_t *w, const int16_t *x) {
         "mov    r3, #0xff00\n\t"
         "orr    r3, r3, r3, lsl #16\n\t"
         "mov    %[a0], #0\n\t"
+        LZ_Q8_ARM_WLOAD                 /* group 0's weights, one early */
         "mov    r12, #0\n\t"
-        LZ_Q8_ARM_BLK LZ_Q8_ARM_BLK LZ_Q8_ARM_BLK LZ_Q8_ARM_BLK
+        LZ_Q8_ARM_BLK_PIPE LZ_Q8_ARM_BLK_PIPE LZ_Q8_ARM_BLK_PIPE
+        LZ_Q8_ARM_BLK_LAST
         "add    %[a0], %[a0], r12\n\t"
         : [a0] "=&r"(a0), [wp] "+r"(wp), [xp] "+r"(xp)
         :
@@ -179,22 +201,30 @@ int32_t lz_dot32_q41_arm(const unsigned char *restrict p,
 
    Register map: r3 the mask, r4 the weight word, r6/r7 activations,
    r10/r11 the scaled code pairs, r12 the second accumulator. */
-#define LZ_Q41_ARM_BLK                                        \
-    "ldr    r4, [%[wp]], #4\n\t"                              \
+/* Pipelined by one instruction, exactly as LZ_Q8_ARM_BLK_PIPE is and
+   for the same reason: the `ldr r4` that opens a group issues right
+   after the previous group's final MAC and nothing covers its latency.
+   Hoisting it above that MAC is legal because the MAC reads r11, r7,
+   r12 while the load writes r4 and %[wp], and r4 is fully consumed by
+   the two `and`s at the top of each half. */
+#define LZ_Q41_ARM_WLOAD "ldr    r4, [%[wp]], #4\n\t"
+#define LZ_Q41_ARM_TAIL  "smlatt r12,   r11, r7, r12\n\t"
+#define LZ_Q41_ARM_BODY                                       \
     "ldmia  %[xp]!, {r6, r7}\n\t"                             \
     "and    r10, r3, r4, lsl #8\n\t"                          \
     "and    r11, r3, r4\n\t"                                  \
     "smlabb %[a0], r10, r6, %[a0]\n\t"                        \
     "smlabt r12,   r11, r6, r12\n\t"                          \
     "smlatb %[a0], r10, r7, %[a0]\n\t"                        \
-    "smlatt r12,   r11, r7, r12\n\t"                          \
+    LZ_Q41_ARM_TAIL                                           \
     "ldmia  %[yp]!, {r6, r7}\n\t"                             \
     "and    r10, r3, r4, lsl #4\n\t"                          \
     "and    r11, r3, r4, lsr #4\n\t"                          \
     "smlabb %[a0], r10, r6, %[a0]\n\t"                        \
     "smlabt r12,   r11, r6, r12\n\t"                          \
-    "smlatb %[a0], r10, r7, %[a0]\n\t"                        \
-    "smlatt r12,   r11, r7, r12\n\t"
+    "smlatb %[a0], r10, r7, %[a0]\n\t"
+#define LZ_Q41_ARM_BLK_PIPE LZ_Q41_ARM_BODY LZ_Q41_ARM_WLOAD LZ_Q41_ARM_TAIL
+#define LZ_Q41_ARM_BLK_LAST LZ_Q41_ARM_BODY LZ_Q41_ARM_TAIL
 
 int32_t lz_dot32_q41_arm_asm(const unsigned char *p, const int16_t *x) {
     const unsigned char *wp = p;
@@ -205,8 +235,10 @@ int32_t lz_dot32_q41_arm_asm(const unsigned char *p, const int16_t *x) {
         "mov    r3, #0xf00\n\t"
         "orr    r3, r3, r3, lsl #16\n\t"
         "mov    %[a0], #0\n\t"
+        LZ_Q41_ARM_WLOAD                /* group 0's weights, one early */
         "mov    r12, #0\n\t"
-        LZ_Q41_ARM_BLK LZ_Q41_ARM_BLK LZ_Q41_ARM_BLK LZ_Q41_ARM_BLK
+        LZ_Q41_ARM_BLK_PIPE LZ_Q41_ARM_BLK_PIPE LZ_Q41_ARM_BLK_PIPE
+        LZ_Q41_ARM_BLK_LAST
         "add    %[a0], %[a0], r12\n\t"
         : [a0] "=&r"(a0), [wp] "+r"(wp), [xp] "+r"(xp), [yp] "+r"(yp)
         :
@@ -285,6 +317,22 @@ int32_t lz_dot32_q61_arm(const unsigned char *restrict b4,
    r12 the second accumulator, and %[w2p] as scratch once the two b2
    words are loaded out of it. */
 #define LZ_Q61_ARM_HALF(BR, CSH0, CSH1, NSH0, NSH1)           \
+    LZ_Q61_ARM_HALF_HEAD(BR, CSH0, CSH1, NSH0, NSH1)          \
+    LZ_Q61_ARM_TAIL
+
+/* One b4 word: 4 low-nibble elements (4m..4m+3) and 4 high-nibble
+   ones (16+4m..16+4m+3). Both take their 2-bit codes from the same b2
+   word - byte index (4m)&7 is the same for the two - at shifts 2*(m>>1)
+   and 4 + 2*(m>>1). */
+/* Pipelined by one instruction, as LZ_Q8_ARM_BLK_PIPE is. The final
+   `smlatt r12, r11, r7, r12` of LZ_Q61_ARM_HALF reads r11, r7 and r12,
+   so the next group's `ldr r4` may issue above it - r4 is consumed by
+   the `and`s inside each half, not by the half's last accumulate.
+   Split out here rather than hidden in the macro because the tail of
+   the second HALF is the instruction being stepped over. */
+#define LZ_Q61_ARM_WLOAD "ldr    r4, [%[wp]], #4\n\t"
+#define LZ_Q61_ARM_TAIL  "smlatt r12,   r11, r7, r12\n\t"
+#define LZ_Q61_ARM_HALF_HEAD(BR, CSH0, CSH1, NSH0, NSH1)      \
     "and    r11, r9,  r4, " NSH0 "\n\t"                       \
     "and    %[w2p], r10, " BR ", " CSH0 "\n\t"                \
     "orr    r11, r11, %[w2p]\n\t"                             \
@@ -293,20 +341,18 @@ int32_t lz_dot32_q61_arm(const unsigned char *restrict b4,
     "and    r11, r9,  r4, " NSH1 "\n\t"                       \
     "and    %[w2p], r10, " BR ", " CSH1 "\n\t"                \
     "orr    r11, r11, %[w2p]\n\t"                             \
-    "smlabt %[a0], r11, r6, %[a0]\n\t"                        \
-    "smlatt r12,   r11, r7, r12\n\t"
-
-/* One b4 word: 4 low-nibble elements (4m..4m+3) and 4 high-nibble
-   ones (16+4m..16+4m+3). Both take their 2-bit codes from the same b2
-   word - byte index (4m)&7 is the same for the two - at shifts 2*(m>>1)
-   and 4 + 2*(m>>1). */
-#define LZ_Q61_ARM_BLK(BR, LSH0, LSH1, HSH0, HSH1)            \
-    "ldr    r4, [%[wp]], #4\n\t"                              \
+    "smlabt %[a0], r11, r6, %[a0]\n\t"
+#define LZ_Q61_ARM_BODY(BR, LSH0, LSH1, HSH0, HSH1)           \
     "ldmia  %[xp]!, {r6, r7}\n\t"                             \
     LZ_Q61_ARM_HALF(BR, LSH0, LSH1, "lsl #8", "lsl #0")       \
     "ldr    r6, [%[xp], #24]\n\t"                             \
     "ldr    r7, [%[xp], #28]\n\t"                             \
-    LZ_Q61_ARM_HALF(BR, HSH0, HSH1, "lsl #4", "lsr #4")
+    LZ_Q61_ARM_HALF_HEAD(BR, HSH0, HSH1, "lsl #4", "lsr #4")
+#define LZ_Q61_ARM_BLK_PIPE(BR, LSH0, LSH1, HSH0, HSH1)       \
+    LZ_Q61_ARM_BODY(BR, LSH0, LSH1, HSH0, HSH1)               \
+    LZ_Q61_ARM_WLOAD LZ_Q61_ARM_TAIL
+#define LZ_Q61_ARM_BLK_LAST(BR, LSH0, LSH1, HSH0, HSH1)       \
+    LZ_Q61_ARM_BODY(BR, LSH0, LSH1, HSH0, HSH1) LZ_Q61_ARM_TAIL
 
 int32_t lz_dot32_q61_arm_asm(const unsigned char *b4, const unsigned char *b2,
                              const int16_t *x) {
@@ -322,14 +368,15 @@ int32_t lz_dot32_q61_arm_asm(const unsigned char *b4, const unsigned char *b2,
         "ldr    r5, [%[w2p]]\n\t"
         "ldr    r8, [%[w2p], #4]\n\t"
         "mov    %[a0], #0\n\t"
+        LZ_Q61_ARM_WLOAD                /* group 0's b4 word, one early */
         "mov    r12, #0\n\t"
         /* m=0 and m=1 sit in sub-plane 0 (codes at bit 0) and 2
            (bit 4); m=2 and m=3 in sub-plane 1 (bit 2) and 3 (bit 6).
            The b2 word alternates because byte (4m)&7 does. */
-        LZ_Q61_ARM_BLK("r5", "lsl #12", "lsl #4", "lsl #8", "lsl #0")
-        LZ_Q61_ARM_BLK("r8", "lsl #12", "lsl #4", "lsl #8", "lsl #0")
-        LZ_Q61_ARM_BLK("r5", "lsl #10", "lsl #2", "lsl #6", "lsr #2")
-        LZ_Q61_ARM_BLK("r8", "lsl #10", "lsl #2", "lsl #6", "lsr #2")
+        LZ_Q61_ARM_BLK_PIPE("r5", "lsl #12", "lsl #4", "lsl #8", "lsl #0")
+        LZ_Q61_ARM_BLK_PIPE("r8", "lsl #12", "lsl #4", "lsl #8", "lsl #0")
+        LZ_Q61_ARM_BLK_PIPE("r5", "lsl #10", "lsl #2", "lsl #6", "lsr #2")
+        LZ_Q61_ARM_BLK_LAST("r8", "lsl #10", "lsl #2", "lsl #6", "lsr #2")
         "add    %[a0], %[a0], r12\n\t"
         : [a0] "=&r"(a0), [wp] "+r"(wp), [xp] "+r"(xp), [w2p] "+r"(w2p)
         :
@@ -750,8 +797,13 @@ int lz_matmul_row_arm_asm(const float *w, const float *x, int n,
         "beq    8f\n\t"
         "sub    %[ng], %[ng], #1\n\t"
         "ldmia  %[ac], {r4, r5, r6, r7, r9, r10, r11, ip}\n\t"
-        "push   {r4, r5, r6, r7, r9, r10, r11, ip}\n\t"
+        /* r8 zeroed between the LDM and the PUSH that consumes it: an
+           eight-register LDM is latency 12 on arm926ej-s and the push
+           reads every one of them, so it interlocks. r8 is not in
+           either list. One cycle, and the only one an adjacent swap
+           can reach in this kernel. */
         "mov    r8, #0\n\t"
+        "push   {r4, r5, r6, r7, r9, r10, r11, ip}\n\t"
         "2:\n\t"
         "ldr    r4, [%[wp]], #4\n\t"
         "ldr    r5, [%[xp]], #4\n\t"
@@ -889,8 +941,13 @@ lz_i64 lz_epi_mac_i16_arm_asm(const int32_t *a, const int16_t *m, int n) {
         "cmp    %[blk], #0\n\t"
         "beq    2f\n\t"
         "1:\n\t"
-        "ldmia  %[ap]!, {r4, r5, r6, r7}\n\t"
+        /* The first multiplier halfword ahead of the four-register LDM:
+           armv5telint -a costed the other order at one extra stall
+           cycle, because `smlal ... r4, r8` waits on the LDM's r4 and
+           the ldrsh in between is what covers it. The two are
+           independent (r8/%[mp] against r4-r7/%[ap]). */
         "ldrsh  r8,  [%[mp]], #2\n\t"
+        "ldmia  %[ap]!, {r4, r5, r6, r7}\n\t"
         "ldrsh  r9,  [%[mp]], #2\n\t"
         "ldrsh  r10, [%[mp]], #2\n\t"
         "smlal  %[lo], %[hi], r4, r8\n\t"
@@ -965,15 +1022,22 @@ void lz_gdn1_x4_arm_asm(const int8_t *rowA, int32_t vd, const int16_t *ctab,
         "cmp    %[k], #0\n\t"
         "beq    3f\n\t"
         "2:\n\t"
+        /* Scheduled for arm926ej-s, not written in dataflow order.
+           armv5telint -a said 6 stall cycles here and named both:
+           `ldr co` moved above `ldrsb b` so the first smlabb is not
+           waiting on a load issued one slot earlier, and `add ra`
+           moved between the two aw MACs, which are a serial
+           accumulator chain (smlabt reads the aw smlabb just wrote).
+           Two cycles, dependence-checked and symbolically verified. */
         "ldrsb  %[a], [%[ra]]\n\t"         /* a = ra[0] */
-        "ldrsb  %[b], [%[ra], %[vd]]\n\t"  /* b = ra[vd] */
         "ldr    %[co], [%[cb]]\n\t"        /* co = ckA | ckB */
+        "ldrsb  %[b], [%[ra], %[vd]]\n\t"  /* b = ra[vd] */
         "smlabb %[au], %[a], %[co], %[au]\n\t" /* au += a*ckA */
         "smlabt %[au], %[b], %[co], %[au]\n\t" /* au += b*ckB */
         "ldr    %[co], [%[cb], #8]\n\t"    /* co = cqA | cqB */
         "smlabb %[aw], %[a], %[co], %[aw]\n\t" /* aw += a*cqA */
-        "smlabt %[aw], %[b], %[co], %[aw]\n\t" /* aw += b*cqB */
         "add    %[ra], %[ra], %[vd], lsl #1\n\t" /* ra += 2*vd */
+        "smlabt %[aw], %[b], %[co], %[aw]\n\t" /* aw += b*cqB */
         "add    %[cb], %[cb], #16\n\t"     /* cb += 8 int16 */
         "subs   %[k], %[k], #1\n\t"
         "bne    2b\n\t"

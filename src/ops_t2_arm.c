@@ -54,8 +54,14 @@ int32_t lz_dot32_t2_arm(const uint8_t *restrict w2, const int16_t *restrict x) {
    Register map: r8/r9 the two packed code words, r10 the 0x00030003
    mask, r4-r7 one plane's 8 activations, r3/r11 extracted code pairs,
    r12 the second accumulator. */
+/* The activation LDM is separate from the plane body so plane 0's copy
+   can be hoisted above the two accumulator inits - a four-register LDM
+   is latency 7 on arm926ej-s and the two `and`s after it do not cover
+   that, which armv5telint -a costed at 2 stall cycles. Planes 2/4/6
+   cannot move: their LDM writes r7 and the preceding plane's last
+   `smlatt` still reads it, a real WAR. */
+#define LZ_T2_ARM_XLOAD "ldmia  %[xp]!, {r4, r5, r6, r7}\n\t"
 #define LZ_T2_ARM_PLANE(SH)                                   \
-    "ldmia  %[xp]!, {r4, r5, r6, r7}\n\t"                     \
     "and    r3,  r10, r8, lsr #" #SH "\n\t"                   \
     "and    r11, r10, r8, lsr #" #SH "+8\n\t"                 \
     "smlabb %[a0], r3,  r4, %[a0]\n\t"                        \
@@ -77,14 +83,15 @@ int32_t lz_dot32_t2_arm_asm(const uint8_t *w2, const int16_t *x) {
         "ldr    r9,  [%[wp], #4]\n\t"
         "mov    r10, #3\n\t"
         "orr    r10, r10, r10, lsl #16\n\t"
+        LZ_T2_ARM_XLOAD                 /* plane 0's activations, early */
         "mov    %[a0], #0\n\t"
         "mov    r12, #0\n\t"
         /* one plane per macro: plane q holds x[8q..8q+7] and its codes
            sit at bit 2q+8j of the packed word */
         LZ_T2_ARM_PLANE(0)
-        LZ_T2_ARM_PLANE(2)
-        LZ_T2_ARM_PLANE(4)
-        LZ_T2_ARM_PLANE(6)
+        LZ_T2_ARM_XLOAD LZ_T2_ARM_PLANE(2)
+        LZ_T2_ARM_XLOAD LZ_T2_ARM_PLANE(4)
+        LZ_T2_ARM_XLOAD LZ_T2_ARM_PLANE(6)
         "add    %[a0], %[a0], r12\n\t"
         "mov    %[a0], %[a0], lsl #8\n\t"   /* the x256 fold, as in C */
         : [a0] "=&r"(a0), [xp] "+r"(xp)
