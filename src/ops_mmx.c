@@ -2008,27 +2008,29 @@ extern void lz_dot32_q41_asm_2(const unsigned char *w, const int16_t *xa,
     "movq      mm7, mm6" \
     "pmaddwd   mm6, [edx]" \
     "pmaddwd   mm7, [ebx]" \
-    "movq      mm6, mm1" \
-    "punpckhbw mm6, mm4" \
     "paddd     mm2, mm6" \
     "paddd     mm3, mm7" \
+    "movq      mm6, mm1" \
+    "punpckhbw mm6, mm4" \
     "movq      mm7, mm6" \
     "pmaddwd   mm6, [edx+8]" \
     "pmaddwd   mm7, [ebx+8]" \
-    "movq      mm6, mm1" \
-    "punpcklbw mm6, mm5" \
     "paddd     mm2, mm6" \
     "paddd     mm3, mm7" \
+    "movq      mm6, mm1" \
+    "punpcklbw mm6, mm5" \
     "movq      mm7, mm6" \
     "pmaddwd   mm6, [edx+32]" \
     "pmaddwd   mm7, [ebx+32]" \
-    "movq      mm6, mm1" \
-    "punpckhbw mm6, mm5" \
     "paddd     mm2, mm6" \
     "paddd     mm3, mm7" \
+    "movq      mm6, mm1" \
+    "punpckhbw mm6, mm5" \
     "movq      mm7, mm6" \
     "pmaddwd   mm6, [edx+40]" \
     "pmaddwd   mm7, [ebx+40]" \
+    "paddd     mm2, mm6" \
+    "paddd     mm3, mm7" \
     "movq      mm4, [eax+8]" \
     "movq      mm5, mm4" \
     "pand      mm4, mm0" \
@@ -2036,29 +2038,27 @@ extern void lz_dot32_q41_asm_2(const unsigned char *w, const int16_t *xa,
     "pand      mm5, mm0" \
     "movq      mm6, mm1" \
     "punpcklbw mm6, mm4" \
-    "paddd     mm2, mm6" \
-    "paddd     mm3, mm7" \
     "movq      mm7, mm6" \
     "pmaddwd   mm6, [edx+16]" \
     "pmaddwd   mm7, [ebx+16]" \
-    "movq      mm6, mm1" \
-    "punpckhbw mm6, mm4" \
     "paddd     mm2, mm6" \
     "paddd     mm3, mm7" \
+    "movq      mm6, mm1" \
+    "punpckhbw mm6, mm4" \
     "movq      mm7, mm6" \
     "pmaddwd   mm6, [edx+24]" \
     "pmaddwd   mm7, [ebx+24]" \
-    "movq      mm6, mm1" \
-    "punpcklbw mm6, mm5" \
     "paddd     mm2, mm6" \
     "paddd     mm3, mm7" \
+    "movq      mm6, mm1" \
+    "punpcklbw mm6, mm5" \
     "movq      mm7, mm6" \
     "pmaddwd   mm6, [edx+48]" \
     "pmaddwd   mm7, [ebx+48]" \
-    "movq      mm6, mm1" \
-    "punpckhbw mm6, mm5" \
     "paddd     mm2, mm6" \
     "paddd     mm3, mm7" \
+    "movq      mm6, mm1" \
+    "punpckhbw mm6, mm5" \
     "movq      mm7, mm6" \
     "pmaddwd   mm6, [edx+56]" \
     "pmaddwd   mm7, [ebx+56]" \
@@ -2932,6 +2932,8 @@ extern void lz_dot32_q61_asm_2(const unsigned char *w4, const unsigned char *w2,
     "movq      mm7, mm6" \
     "pmaddwd   mm6, [ebx+8]" \
     "pmaddwd   mm7, [ecx+8]" \
+    "paddd     mm3, mm6" \
+    "paddd     mm4, mm7" \
     "movq      mm5, [eax]" \
     "psrlw     mm5, 4" \
     "pand      mm5, mm0" \
@@ -2940,8 +2942,6 @@ extern void lz_dot32_q61_asm_2(const unsigned char *w4, const unsigned char *w2,
     "pand      mm6, mm1" \
     "psllw     mm6, 4" \
     "por       mm5, mm6" \
-    "paddd     mm3, mm6" \
-    "paddd     mm4, mm7" \
     "pxor      mm6, mm6" \
     "punpcklbw mm6, mm5" \
     "movq      mm7, mm6" \
@@ -2954,6 +2954,8 @@ extern void lz_dot32_q61_asm_2(const unsigned char *w4, const unsigned char *w2,
     "movq      mm7, mm6" \
     "pmaddwd   mm6, [ebx+40]" \
     "pmaddwd   mm7, [ecx+40]" \
+    "paddd     mm3, mm6" \
+    "paddd     mm4, mm7" \
     "movq      mm5, [eax+8]" \
     "pand      mm5, mm0" \
     "movq      mm6, mm2" \
@@ -2961,8 +2963,6 @@ extern void lz_dot32_q61_asm_2(const unsigned char *w4, const unsigned char *w2,
     "pand      mm6, mm1" \
     "psllw     mm6, 4" \
     "por       mm5, mm6" \
-    "paddd     mm3, mm6" \
-    "paddd     mm4, mm7" \
     "pxor      mm6, mm6" \
     "punpcklbw mm6, mm5" \
     "movq      mm7, mm6" \
@@ -2975,6 +2975,8 @@ extern void lz_dot32_q61_asm_2(const unsigned char *w4, const unsigned char *w2,
     "movq      mm7, mm6" \
     "pmaddwd   mm6, [ebx+24]" \
     "pmaddwd   mm7, [ecx+24]" \
+    "paddd     mm3, mm6" \
+    "paddd     mm4, mm7" \
     "movq      mm5, [eax+8]" \
     "psrlw     mm5, 4" \
     "pand      mm5, mm0" \
@@ -2983,8 +2985,6 @@ extern void lz_dot32_q61_asm_2(const unsigned char *w4, const unsigned char *w2,
     "pand      mm6, mm1" \
     "psllw     mm6, 4" \
     "por       mm5, mm6" \
-    "paddd     mm3, mm6" \
-    "paddd     mm4, mm7" \
     "pxor      mm6, mm6" \
     "punpcklbw mm6, mm5" \
     "movq      mm7, mm6" \
