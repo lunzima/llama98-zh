@@ -88,7 +88,7 @@ typedef enum {
     LZ_ERR_CFG_LAYER_TYPE,     /* unrecognized layer type at %d: %s */
     LZ_ERR_CFG_FIELDS,         /* config key fields missing or invalid */
     LZ_ERR_CFG_HEADS,          /* invalid attention heads: %d / %d */
-    LZ_ERR_CFG_ROTARY,         /* invalid rotary_dim=%d (head_dim=%d, factor=%g) */
+    LZ_ERR_CFG_ROTARY,         /* invalid rotary_dim=%d (head_dim=%d, factor=%d%%) */
     LZ_ERR_CFG_ROPE_SCALING,   /* unsupported rope_scaling type: %s */
     LZ_ERR_CFG_KDA_ACT,        /* kda_gate_activation must be silu, got %s */
     LZ_ERR_CFG_MOE_FIELDS,     /* invalid MoE fields: num_experts=%d top_k=%d first_k_dense_replace=%d */

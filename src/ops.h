@@ -184,9 +184,9 @@ enum { LZ_FCC_MUL, LZ_FCC_ADD, LZ_FCC_DIV, LZ_FCC_CVT, LZ_FCC_CMP,
        LZ_FCC_OTHER, LZ_FCC_N };
 
 #if LZ_F32COUNT
-extern double lz_f32_count[LZ_FC_N];
+extern float lz_f32_count[LZ_FC_N];
 extern int lz_f32_reached[LZ_FC_N];
-extern double lz_f32_class[LZ_FC_N][LZ_FCC_N];
+extern float lz_f32_class[LZ_FC_N][LZ_FCC_N];
 
 /* The comma operator, so both macros stay single expressions and keep
    working in the `if (c) LZ_FC(...);` positions they already sit in. A
@@ -203,24 +203,24 @@ extern double lz_f32_class[LZ_FC_N][LZ_FCC_N];
    missing - and must sum to what LZ_FC would have billed for the same
    code, since lz_f32_count_get() reports their sum. */
 #define LZ_FC(site, ops) (lz_f32_reached[site] = 1, \
-                          lz_f32_class[site][LZ_FCC_OTHER] += (double)(ops))
+                          lz_f32_class[site][LZ_FCC_OTHER] += (float)(ops))
 #define LZ_FCX(site, mul, add, div, cvt, cmp) (lz_f32_reached[site] = 1, \
-    lz_f32_class[site][LZ_FCC_MUL] += (double)(mul), \
-    lz_f32_class[site][LZ_FCC_ADD] += (double)(add), \
-    lz_f32_class[site][LZ_FCC_DIV] += (double)(div), \
-    lz_f32_class[site][LZ_FCC_CVT] += (double)(cvt), \
-    lz_f32_class[site][LZ_FCC_CMP] += (double)(cmp))
+    lz_f32_class[site][LZ_FCC_MUL] += (float)(mul), \
+    lz_f32_class[site][LZ_FCC_ADD] += (float)(add), \
+    lz_f32_class[site][LZ_FCC_DIV] += (float)(div), \
+    lz_f32_class[site][LZ_FCC_CVT] += (float)(cvt), \
+    lz_f32_class[site][LZ_FCC_CMP] += (float)(cmp))
 #else
 #define LZ_FC(site, ops) ((void)0)
 #define LZ_FCX(site, mul, add, div, cvt, cmp) ((void)0)
 #endif
 const char *lz_f32_count_name(int site);
-double lz_f32_count_get(int site);
+float lz_f32_count_get(int site);
 /* Per-class read behind lz_f32_count_get's sum. Bounds-checked at both
    ends for site and cls, same as the accessor above; -1.0 in a
    non-counting build ("this build cannot answer"), 0.0 out of range in
    one that counts. */
-double lz_f32_class_get(int site, int cls);
+float lz_f32_class_get(int site, int cls);
 /* "mul"/"add"/"div"/"cvt"/"cmp"/"other", or "?" out of range. */
 const char *lz_f32_class_name(int cls);
 /* 1 once a site has been billed at least once in this process, else 0.
@@ -549,6 +549,17 @@ extern int lz_float_ref_g;
 const char *lz_float_ref_select(const char *name);
 int lz_float_ref(void);
 
+/* Fast float semantics: "on" | "off" (default off). Round-toward-zero
+   plus flush-to-zero. Not a speed knob on x86 (measured: -0.7%, inside
+   the noise); it is meant to be the reference arm for the ARM soft-float
+   fast path. That pairing is NOT complete yet - MXCSR is global while
+   ARM's LZ_SOFTFP_FAST covers fmul only, and the two do not currently
+   agree byte for byte. See ops_sched.c and lz_softfp.c for the
+   measurement. Read through lz_fastfp(); lz_fpu_float_begin applies. */
+extern int lz_fastfp_g;
+const char *lz_fastfp_select(const char *name);
+int lz_fastfp(void);
+
 /* Token pairing: "on" | "off" | "auto" (= on). Returns the setting in
    effect, or NULL if the name is unknown.
 
@@ -845,6 +856,15 @@ int lz_sig_mode(void);
 #if defined(__i386__) && !defined(__SSE_MATH__) && !defined(__SSE2_MATH__)
 #define LZ_X87_FLOAT_CW 1
 #endif /* x87 float control word */
+
+/* The SSE counterpart, and the mirror image of the test above: where
+   scalar float goes through SSE there IS no x87 control word to set,
+   but there IS an MXCSR - which strict mode leaves alone and fast mode
+   uses for FTZ/DAZ/round-toward-zero. gcc-only: the asm is stmxcsr /
+   ldmxcsr, and Watcom's x86 targets are covered by the x87 arm. */
+#if defined(__GNUC__) && (defined(__SSE_MATH__) || defined(__SSE2_MATH__))
+#define LZ_SSE_FLOAT_CSR 1
+#endif /* SSE float control/status register */
 
 /* The gated norm's sigmoid reads the INTEGER coordinate.
    lz_rmsnorm_gated_out_fixed_int already quantizes the gate to Q15 (qg

@@ -406,14 +406,14 @@ extern lz_i64 lz_debug_vproj_i16;
 #define LZ_PROF_N      7
 
 extern int lz_prof_enable;
-extern double lz_prof_us[LZ_PROF_N];
+extern float lz_prof_us[LZ_PROF_N];
 
 /* 1000.0 (ms -> us) is exact in any float width, so this cannot change
    what these debug counters measure - but `static const double`, not an
    inline literal, keeps every site below on the same footing as
    ops.c's LZ_EXP_LOG2E32 (that comment has the mechanism) rather than
    leaving an unexplained exception in tests/test_excess_precision.py. */
-static const double LZ_US_SCALE = 1000.0;
+static const float LZ_US_SCALE = 1000.0f;
 
 /* The start time is a LOCAL, not a file-static. A file-static would be
    shared across nested phases: the recurrence timer - which nests inside
@@ -428,8 +428,8 @@ static const double LZ_US_SCALE = 1000.0;
    half and an assignment half is the fix, and it has to land in the
    same edit as the six declarations it needs at the call sites: the
    macro alone leaves every _t* undeclared. */
-#define LZ_PROF_DECL(v) double v = 0.0
-#define LZ_PROF_BEG(v) v = lz_prof_enable ? lz_time_ms() : 0.0
+#define LZ_PROF_DECL(v) float v = 0.0f
+#define LZ_PROF_BEG(v) v = lz_prof_enable ? lz_time_ms() : 0.0f
 #define LZ_PROF_END(v, slot) do { if (lz_prof_enable) \
     lz_prof_us[slot] += (lz_time_ms() - (v)) * LZ_US_SCALE; } while (0)
 

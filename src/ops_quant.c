@@ -7,6 +7,14 @@
 #include <float.h>
 #include <math.h>
 #include <stdlib.h>
+
+/* Watcom's C90 math.h has no sqrtf: route to double sqrt there. gcc
+   keeps sqrtf so the ARM build pulls no libgcc double soft-float. */
+#if defined(__WATCOMC__)
+#define LZ_SQRTF(x) ((float)sqrt((double)(x)))
+#else
+#define LZ_SQRTF(x) sqrtf(x)
+#endif /* __WATCOMC__ */
 #include <string.h>
 
 #include "ops.h"
@@ -1733,21 +1741,43 @@ unsigned lz_fpu_float_begin(void) {
 #if defined(__WATCOMC__)
     unsigned save = _control87(0, 0);
     _control87(_PC_24, _MCW_PC);
+    /* x87 has the rounding half of fast mode but no FTZ/DAZ - see
+       lz_fastfp_g's comment for why that gap is measured-harmless. */
+    if (lz_fastfp_g) _control87(_RC_CHOP, _MCW_RC);
     return save;
 #elif defined(LZ_X87_FLOAT_CW)
     unsigned short save = lz_x87_cw_get();
-    lz_x87_cw_set((unsigned short)(save & ~0x0300u));   /* PC=24 */
+    unsigned short cw = (unsigned short)(save & ~0x0300u);   /* PC=24 */
+    if (lz_fastfp_g) cw = (unsigned short)(cw | 0x0C00u);    /* RC=chop */
+    lz_x87_cw_set(cw);
     return save;
+#elif defined(LZ_SSE_FLOAT_CSR)
+    {
+        unsigned csr, save;
+        __asm__ __volatile__("stmxcsr %0" : "=m"(csr));
+        save = csr;
+        if (lz_fastfp_g) {
+            /* bit15 FTZ, bit6 DAZ, bits14:13 RC=11 (toward zero). */
+            csr |= 0x8040u;
+            csr = (csr & ~0x6000u) | 0x6000u;
+            __asm__ __volatile__("ldmxcsr %0" : : "m"(csr));
+        }
+        return save;
+    }
 #else
-    return 0;   /* gcc/SSE already has float semantics */
+    return 0;   /* nothing to set: already float semantics, strict mode */
 #endif /* __WATCOMC__ */
 }
 
 void lz_fpu_float_end(unsigned save) {
 #if defined(__WATCOMC__)
-    _control87(save, _MCW_PC);
+    /* _MCW_RC too, not just _MCW_PC: fast mode set the rounding half and
+       leaving it set would follow the caller out of the region. */
+    _control87(save, _MCW_PC | _MCW_RC);
 #elif defined(LZ_X87_FLOAT_CW)
     lz_x87_cw_set((unsigned short)save);
+#elif defined(LZ_SSE_FLOAT_CSR)
+    if (lz_fastfp_g) __asm__ __volatile__("ldmxcsr %0" : : "m"(save));
 #else
     (void)save;
 #endif /* __WATCOMC__ */
@@ -1806,7 +1836,7 @@ float lz_softplus(float x) {
 
 float lz_rsqrt(float x) {
 #if defined(LZ_EXACT_MATH)
-    return 1.0f / (float)sqrt((double)x);
+    return 1.0f / LZ_SQRTF(x);
 #else
     if (lz_scalar_mode())
         return lz_rsqrt_fixed(x);
@@ -2671,11 +2701,11 @@ void lz_kv4_quantize(const float *x, int n, unsigned char *out, float *scale) {
     int i;
 
     for (i = 0; i < n; i++) n2 += x[i] * x[i];
-    n2 = (float)sqrt((double)n2);
+    n2 = LZ_SQRTF(n2);
     /* sqrt(n) is exact for the power-of-two head dims this path serves;
        the divide has a runtime divisor, so both compilers emit a real
        FDIV rather than one strength-reducing it. */
-    s = n2 / (float)sqrt((double)n);
+    s = n2 / LZ_SQRTF((float)n);
     if (scale) *scale = s;
     inv = (s > LZ_KV4_EPS) ? (1.0f / s) : 0.0f;
 

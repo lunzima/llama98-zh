@@ -393,7 +393,8 @@ int lz_load_config(LZModelConfig *c, const char *path,
     if (c->rotary_dim <= 0 || c->rotary_dim > c->head_dim ||
         c->rotary_dim % 2 != 0) {
         qerr(errbuf, errlen, LZ_ERR_CFG_ROTARY,
-             c->rotary_dim, c->head_dim, (double)c->partial_rotary_factor);
+             c->rotary_dim, c->head_dim,
+             (int)(c->partial_rotary_factor * 100.0f + 0.5f));
         return 1;
     }
     /* After lin_value_dim, which the derivations read. */

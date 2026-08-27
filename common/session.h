@@ -76,7 +76,7 @@ typedef struct {
     /* Last turn's statistics, written by lz_session_job, read after.
      * NOT reset between turns; a new job overwrites them. */
     int n_out, n_prompt_tok, reused;
-    double ms;
+    float ms;
 } LZSession;
 
 void lz_session_init(LZSession *s, LZModel *model, LZTokenizer *tok,
@@ -206,6 +206,6 @@ int lz_session_token_count(LZSession *s, const char *system,
 int   lz_session_last_reused(const LZSession *s);
 int   lz_session_last_n_out(const LZSession *s);
 int   lz_session_last_prompt_tok(const LZSession *s);
-double lz_session_last_ms(const LZSession *s);
+float lz_session_last_ms(const LZSession *s);
 
 #endif

@@ -229,6 +229,41 @@ const char *lz_float_ref_select(const char *name) {
 
 int lz_float_ref(void) { return lz_float_ref_g; }
 
+/* ---- fast float semantics ------------------------------------------- */
+
+/* OFF by default: this changes results, so it is opt-in like every other
+   numeric knob here.
+
+   It is not an x86 speed knob, measured: FTZ/DAZ move the zh fixture's
+   logits by zero bytes and its runtime by -0.7%, inside a 110ms sigma,
+   because x86 scalar float is already one hardware instruction. It
+   exists to be the reference arm for the ARM soft-float fast path.
+
+   THAT PAIRING IS NOT FINISHED. The intent is that this and ARM's
+   LZ_SOFTFP_FAST describe one arithmetic, so fast-mode runs stay
+   byte-comparable the way strict-mode runs already are. Measured on the
+   zh fixture they are not: ARM-fast vs x86-fast differs in 60,173,584 of
+   78,905,344 bytes. MXCSR is GLOBAL - it retimes fadd, fdiv and the SIMD
+   kernels too - while LZ_SOFTFP_FAST currently changes fmul alone. See
+   that switch's comment in lz_softfp.c for what closing the gap needs.
+   Until then this flag has no partner to be compared with.
+
+   x87 (Watcom) can do the rounding half but has no FTZ/DAZ. That gap is
+   harmless here and measured rather than assumed: setting FTZ/DAZ on
+   the SSE build leaves every logit byte unchanged, so denormals never
+   reach a result on this path. */
+int lz_fastfp_g = 0;
+
+const char *lz_fastfp_select(const char *name) {
+    if (!name) return NULL;
+    if (strcmp(name, "on") == 0) lz_fastfp_g = 1;
+    else if (strcmp(name, "off") == 0) lz_fastfp_g = 0;
+    else return NULL;
+    return lz_fastfp_g ? "on" : "off";
+}
+
+int lz_fastfp(void) { return lz_fastfp_g; }
+
 /* ---- GDN recurrence tier: BOTH passes -------------------------------- */
 
 /* Pass 1 resolves from the same knob as pass 2, so the float arm is a
@@ -572,7 +607,13 @@ const char *lz_kernel_tier(void) {
    bit-for-bit, the float arm is where rounding regimes are allowed to
    differ and the tolerance lives. lz_tier_report() reads live state. */
 const char *lz_tier_pins(void) {
-    return "--kernel ref --fixed off --pair off --prefetch none";
+    /* --fastfp is here even though it resolves from a default rather
+       than from AUTO: it changes float SEMANTICS, so a comparison that
+       left it implicit would silently compare a strict run against a
+       fast one if the default ever moved. Pinning it costs one token
+       and removes that failure mode. */
+    return "--kernel ref --fixed off --pair off --prefetch none "
+           "--fastfp off";
 }
 
 /* Every arithmetic row resolves from one global, so they cannot

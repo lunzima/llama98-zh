@@ -1,4 +1,5 @@
 #include <math.h>
+#include "lz_mathf.h"   /* lz_powf/lz_sinf/lz_cosf: float transcendentals, no libm, bit-identical x86/ARM */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -336,7 +337,7 @@ float lz_moe_tau = 1.0f;
    the inner phases here run 24 times per token - the measurement would
    otherwise cost more than some of the things it measures. */
 int lz_prof_enable = 0;
-double lz_prof_us[LZ_PROF_N];
+float lz_prof_us[LZ_PROF_N];
 
 
 
@@ -544,7 +545,7 @@ static int conv_fixed_build(LZRunState *s, const LZModel *m) {
                     w + (size_t)i * c->conv_kernel, c->conv_kernel,
                     s->conv_mw + (base + ch + i) * c->conv_kernel,
                     s->conv_bound);
-                float oscale = (float)ldexp(1.0, -((int)e + LZ_CONV_ES));
+                float oscale = pow2f(-((int)e + LZ_CONV_ES));
                 lz_sig_q15_fold(oscale, &s->conv_sig_k1[base + ch + i],
                                 &s->conv_sig_oscale2[base + ch + i]);
 #if LZ_CONV_SIG_I
@@ -566,7 +567,7 @@ static int conv_fixed_build(LZRunState *s, const LZModel *m) {
        where the loop matched no layer at all - which would leave every
        tap zero and report success. */
     if (!covered_ok || built != c->n_linear_layers) return -1;
-    s->conv_in_scale = (float)ldexp(1.0, LZ_CONV_ES);
+    s->conv_in_scale = pow2f(LZ_CONV_ES);
     return 0;
 }
 #endif /* LZ_CONV_FIXED */
@@ -595,7 +596,7 @@ static int kda_gate_build(LZRunState *s, const LZModel *m) {
     const LZModelConfig *c = &m->config;
     int layer, built = 0;
     int nvk = c->lin_n_v_heads * c->lin_k_head_dim;
-    float sc = (float)ldexp(1.0, LZ_KGATE_ES);
+    float sc = pow2f(LZ_KGATE_ES);
     if (!s->kda_dtb_i16 || nvk <= 0) return 0;
     for (layer = 0; layer < c->n_layers; layer++) {
         const LZLayer *L = &m->layers[layer];
@@ -1102,29 +1103,40 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
        Shared by all layers/heads under the same theta; the half-precision
        frequency formula matches the reference (denominator is
        rotary_dim, not head_dim). */
-    s->rope_cs = (float *)xcalloc((size_t)seq_len * c->rotary_dim,
-                                  sizeof(float), &ok, &s->bytes_alloc);
-    if (ok) {
-        int half = c->rotary_dim >> 1;
-        for (l = 0; l < seq_len; l++) {
-            int i;
-            for (i = 0; i < half; i++) {
-                double freq = pow((double)c->rope_theta,
-                                  -2.0 * (double)i / (double)c->rotary_dim);
-                double ang = (double)l * freq;
-                s->rope_cs[((size_t)l * half + i) * 2]     = (float)cos(ang);
-                s->rope_cs[((size_t)l * half + i) * 2 + 1] = (float)sin(ang);
+    /* RoPE/scale tables must be computed at PC=24 on the x87 targets too
+       (Watcom): lz_mathf's float transcendentals are bit-identical across
+       gcc and ARM only when every float operation rounds to 24 bits, and
+       on a 387 that means the precision control word, not the default
+       64-bit mantissa. gcc's SSE and the ARM soft-float ignore the
+       control word (always 24-bit float), so begin/end is a no-op there. */
+    {
+        unsigned fpu = lz_fpu_float_begin();
+        s->rope_cs = (float *)xcalloc((size_t)seq_len * c->rotary_dim,
+                                      sizeof(float), &ok, &s->bytes_alloc);
+        if (ok) {
+            int half = c->rotary_dim >> 1;
+            for (l = 0; l < seq_len; l++) {
+                int i;
+                for (i = 0; i < half; i++) {
+                    float freq = lz_powf(c->rope_theta,
+                                         -2.0f * (float)i / (float)c->rotary_dim);
+                    float ang = (float)l * freq;
+                    s->rope_cs[((size_t)l * half + i) * 2]     = lz_cosf(ang);
+                    s->rope_cs[((size_t)l * half + i) * 2 + 1] = lz_sinf(ang);
+                }
             }
         }
-    }
-    if (!ok) {
-        if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_STATE_ALLOC);
-        lz_state_free(s);
-        return 1;
-    }
+        if (!ok) {
+            lz_fpu_float_end(fpu);
+            if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_STATE_ALLOC);
+            lz_state_free(s);
+            return 1;
+        }
 
-    s->attn_scale = 1.0f / (float)sqrt((double)c->head_dim);
-    s->ssm_scale  = 1.0f / (float)sqrt((double)c->lin_k_head_dim);
+        s->attn_scale = lz_rsqrt((float)c->head_dim);
+        s->ssm_scale  = lz_rsqrt((float)c->lin_k_head_dim);
+        lz_fpu_float_end(fpu);
+    }
     s->epoch      = 1;          /* 0 is reserved for "never allocated" */
 
     /* Hadamard widths (see forward.h's kv_rot_k comment). K takes the
@@ -1487,7 +1499,7 @@ float *lz_mtp_draft_step(const LZModel *m, LZRunState *s, int next_token, int po
     const LZModelConfig *c = &m->config;
     int dim = c->hidden_size, i;
     unsigned fpu;
-    double t_us0;                              /* debug probe, see part 4 */
+    float t_us0;                              /* debug probe, see part 4 */
 
     if (!m || !m->mtp) return NULL;
     if (next_token < 0 || next_token >= c->vocab_size) return NULL;
@@ -1883,7 +1895,7 @@ float *lz_forward_capture(const LZModel *m, LZRunState *s, int token, int pos) {
     /* s->mtp_chain is unallocated (NULL) when m->mtp is NULL - guard
        rather than let forward_chunk memcpy into it, matching this
        function's own contract ("a no-op ... when m->mtp is NULL"). */
-    double t_us0 = lz_time_ms() * LZ_US_SCALE;  /* debug probe, see part 4 */
+    float t_us0 = lz_time_ms() * LZ_US_SCALE;  /* debug probe, see part 4 */
     float *r = forward_chunk(m, s, &token, 1, pos,
                              m->mtp ? s->mtp_chain : NULL, 0, NULL, 0);
     lz_debug_us_capture += (lz_i64)(lz_time_ms() * LZ_US_SCALE - t_us0);
@@ -1920,7 +1932,7 @@ int lz_forward_verify(const LZModel *m, LZRunState *s,
                       const int *tokens, int n, int pos0) {
     const LZModelConfig *c = &m->config;
     int cap, done = 0;
-    double t_us0 = lz_time_ms() * LZ_US_SCALE;  /* debug probe, see part 4 */
+    float t_us0 = lz_time_ms() * LZ_US_SCALE;  /* debug probe, see part 4 */
 
     if (!tokens || n < 1 || !m->mtp) return 1;
     cap = s->nt_cap;
@@ -2072,7 +2084,7 @@ int lz_mtp_prefill(const LZModel *m, LZRunState *s, const float *h_body_all,
    distinction lz_debug_n_catchup exists to preserve. */
 int lz_mtp_catchup(const LZModel *m, LZRunState *s, const float *h_body_all,
                    const int *next_tokens, int n, int pos0) {
-    double t_us0 = lz_time_ms() * LZ_US_SCALE;
+    float t_us0 = lz_time_ms() * LZ_US_SCALE;
     int r = lz_mtp_prefill(m, s, h_body_all, next_tokens, n, pos0);
     lz_debug_us_catchup += (lz_i64)(lz_time_ms() * LZ_US_SCALE - t_us0);
     lz_debug_n_catchup++;

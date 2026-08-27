@@ -565,7 +565,7 @@ int lz_generate(const LZModel *m, LZTokenizer *t, LZRunState *s,
                 const char *prompt_bytes, int prompt_len,
                 const LZGenOpts *opts,
                 LZTokenSink sink, LZShouldContinue cont, void *ctx,
-                int *out_n_tokens, double *out_elapsed_ms,
+                int *out_n_tokens, float *out_elapsed_ms,
                 char *errbuf, int errlen);
 
 /* Multi-turn resume. start_pos=0 behaves exactly like
@@ -583,7 +583,7 @@ int lz_generate_resume(const LZModel *m, LZTokenizer *t, LZRunState *s,
                        const char *prompt_bytes, int prompt_len,
                        const LZGenOpts *opts,
                        LZTokenSink sink, LZShouldContinue cont, void *ctx,
-                       int *out_n_tokens, double *out_elapsed_ms,
+                       int *out_n_tokens, float *out_elapsed_ms,
                        char *errbuf, int errlen);
 
 /* Same generation loop, ONE more argument: `ins`, filled with what the
@@ -612,7 +612,7 @@ int lz_generate_resume_ex(const LZModel *m, LZTokenizer *t, LZRunState *s,
                           const char *prompt_bytes, int prompt_len,
                           const LZGenOpts *opts,
                           LZTokenSink sink, LZShouldContinue cont, void *ctx,
-                          int *out_n_tokens, double *out_elapsed_ms,
+                          int *out_n_tokens, float *out_elapsed_ms,
                           char *errbuf, int errlen, LZInspect *ins);
 
 /* Everything the three names above pass besides the model, tokenizer and
@@ -640,7 +640,7 @@ typedef struct {
     LZShouldContinue cont;
     void *ctx;
     int *out_n_tokens;
-    double *out_elapsed_ms;
+    float *out_elapsed_ms;
     char *errbuf;
     int errlen;
     LZInspect *ins;

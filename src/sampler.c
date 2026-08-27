@@ -1,4 +1,5 @@
 #include <math.h>
+#include "lz_mathf.h"   /* lz_powf: float, no libm, bit-identical x86/ARM */
 #include <stdlib.h>
 #include <string.h>
 
@@ -504,7 +505,7 @@ static float minp_pow(float minp, float temperature)
 {
     static float k_minp = -1.0f, k_temp = -1.0f, cached = 0.0f;
     if (minp == k_minp && temperature == k_temp) return cached;
-    cached = (float)pow((double)minp, 1.0 / (double)temperature);
+    cached = lz_powf(minp, 1.0f / temperature);
     k_minp = minp;
     k_temp = temperature;
     return cached;

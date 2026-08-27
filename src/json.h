@@ -28,7 +28,7 @@ typedef struct {
     int key_len;
     const char *text;        /* STR content (NUL-terminated) */
     int text_len;
-    double num;              /* NUM value; BOOL uses 0/1 */
+    float num;               /* NUM value; BOOL uses 0/1 */
     int first_child;         /* index of first child of ARR/OBJ, -1 if none */
     int next_sibling;
     int n_children;
@@ -60,8 +60,8 @@ const LZJsonNode *lz_json_next(const LZJson *j, const LZJsonNode *n);
    The caller must pass the default explicitly, so "got 0" and "not present" never conflate. */
 int    lz_json_get_int(const LZJson *j, const LZJsonNode *obj,
                        const char *key, int def);
-double lz_json_get_num(const LZJson *j, const LZJsonNode *obj,
-                       const char *key, double def);
+float lz_json_get_num(const LZJson *j, const LZJsonNode *obj,
+                       const char *key, float def);
 /* Accepts BOOL and NUM alike. Python writes config flags as `true`, so
    reading one with lz_json_get_int silently yields the default - the
    flag is off, the model loads, and only the tensors it gates go

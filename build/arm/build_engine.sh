@@ -54,7 +54,12 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 
 FLAGS="-O2 -std=c99 -Wall -Wextra"
 FLAGS="$FLAGS -march=armv5te -mtune=arm926ej-s -mfloat-abi=soft -DLZ_NO_FPU=1"
-FLAGS="$FLAGS -ffp-contract=off -I$ROOT/src"
+# -fomit-frame-pointer: gcc's ARM default keeps a frame pointer, which is
+# pure overhead in a release build and bloats the soft-float module -- the
+# __aeabi_f* fast paths are compared against libgcc's naked (frame-free)
+# asm, so they must be compiled frame-free too (docs/arm-asm-audit.md's
+# static-instruction-count metric).
+FLAGS="$FLAGS -ffp-contract=off -fomit-frame-pointer -I$ROOT/src"
 
 # Asked for, not restated - see the Makefile's print-% comment. This
 # copy happened to be correct, which is exactly why it is worth
@@ -65,6 +70,14 @@ if [ -z "$ENG" ]; then
     echo "arm: cannot read ENG from $ROOT/Makefile (make -s print-ENG)"
     exit 2
 fi
+# lz_softfp.c is the ARM-only soft-float replacement for libgcc's
+# __aeabi_f* arithmetic/compare/convert and the EABI divmod routines
+# (its body is #if __arm__ && __GNUC__, so it would compile to an empty
+# TU on the x86 gcc and Watcom builds - that is why it is not in the
+# shared ENG list). The ARM cross-build links it explicitly, so its
+# object satisfies the engine's __aeabi_* references before libgcc's
+# archive members are pulled.
+ENG="$ENG lz_softfp"
 
 mkdir -p "$OUT"
 rm -f "$OUT"/*.o "$OUT"/*.log

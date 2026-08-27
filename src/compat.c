@@ -123,7 +123,7 @@ lz_i64 lz_fsize(const char *path) {
 #endif /* _WIN32 && !__WATCOMC__ */
 }
 
-double lz_time_ms(void) {
+float lz_time_ms(void) {
 #ifdef _WIN32
     static int inited = 0;
     static int has_qpc = 0;
@@ -135,10 +135,10 @@ double lz_time_ms(void) {
         inited = 1;
     }
     if (has_qpc && QueryPerformanceCounter(&now)) {
-        return (double)now.QuadPart * 1000.0 / (double)freq.QuadPart;
+        return (float)now.QuadPart * 1000.0f / (float)freq.QuadPart;
     }
     /* Fallback: ~55ms resolution on Win9x; benchmarking needs enough tokens to average out */
-    return (double)GetTickCount();
+    return (float)GetTickCount();
 #elif defined(__DOS__)
     /* clock(), because DOS has neither of the other two. It counts from
        process start rather than from an epoch, which is all any caller
@@ -159,11 +159,11 @@ double lz_time_ms(void) {
        pass's cross-compiler bit-exactness, and a wall clock is not in
        the forward pass and is never compared bit for bit. Same
        exemption gui/main.c's temp_milli conversion claims. */
-    return (double)clock() * 1000.0 / (double)CLOCKS_PER_SEC;
+    return (float)clock() * 1000.0f / (float)CLOCKS_PER_SEC;
 #else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
+    return (float)ts.tv_sec * 1000.0f + (float)ts.tv_nsec / 1e6f;
 #endif /* _WIN32 || __DOS__ */
 }
 

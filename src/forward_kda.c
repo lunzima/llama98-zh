@@ -429,7 +429,7 @@ void forward_kda(const LZModel *m, LZRunState *s,
        before the tk loop so each per-token call passes one struct pointer
        instead of seven scalar pushes - see LZConvParams in ops.h. */
     LZConvParams cp_q, cp_k, cp_v;
-#endif
+#endif /* LZ_CONV_FIXED */
     float scale = s->ssm_scale;
     int hdim = c->hidden_size, kdim = c->lin_key_dim, vdim = c->lin_value_dim;
     int nvk = nv * kd;
@@ -622,7 +622,7 @@ void forward_kda(const LZModel *m, LZRunState *s,
         cp_q.bound = cp_k.bound = cp_v.bound = s->conv_bound;
         cp_q.k = cp_k.k = cp_v.k = c->conv_kernel;
     }
-#endif
+#endif /* LZ_CONV_FIXED */
     for (tk = 0; tk < nt; tk++) {
         int slot_in  = advance_ring ? (ring_base + tk) % ring_depth : ring_base;
         int slot_out = advance_ring ? ring_slot_next(slot_in, ring_depth)

@@ -403,7 +403,7 @@ void lz_conv_build_scales(float *oscale, float *in_scale,
    would need a carry chain per tap. One bound for both is cheaper. */
 int lz_conv_accum_bound(int k) {
     int b = 1;
-    while ((double)k * (double)(b * 2) * (double)(b * 2) <= 2147483647.0)
+    while ((int64_t)k * (b * 2) * (b * 2) <= (int64_t)2147483647)
         b *= 2;
     return b;
 }

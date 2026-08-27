@@ -12,6 +12,7 @@
 */
 #include "lz_int.h"   /* lz_i64/lz_u64 and LZ_PRI64: the 64-bit type and its printf modifier, portably */
 #include <math.h>
+#include "lz_mathf.h"  /* lz_expf/lz_logf: float, no libm double, bit-identical x86/ARM */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,6 +44,124 @@
  * rather than a bare "cannot open file". --tokenizer bypasses this
  * entirely: second-guessing an explicit path would make the override
  * useless for pointing at a short name on purpose. */
+
+/* Watcom's C90 stdlib has no strtof. One macro rather than an #if at
+   each call site: a preprocessor branch around an ASSIGNMENT is what
+   build/ppbrace_gate.sh refuses, and rightly - the indentation stops
+   describing the code. Same shape as ops_quant.c's LZ_SQRTF. */
+#if defined(__WATCOMC__)
+#define LZ_STRTOF(s) ((float)atof(s))
+#else
+#define LZ_STRTOF(s) strtof((s), NULL)
+#endif /* __WATCOMC__ */
+
+/* ---- float formatting without any double conversion -------------------
+   printf's %f/%g promote a float argument to double (C standard default
+   argument promotion), which on the ARM build pulls libgcc's double
+   soft-float. Formatting the float here - with integer and self-provided
+   f32 ops only (f2iz/i2f come from lz_softfp) - keeps every printf
+   vararg in this file an integer or a string, so no __aeabi_d* symbol
+   enters the binary.  Rounding is round-half-up; the CLI only displays
+   these, and a 1-ulp display difference is not a parity issue. */
+
+/* A float's decimal form needs at most 24 significant characters plus
+   sign and exponent, so this is generous. */
+#define LZ_FTOA_BUF 40
+
+static void lz_ftoa_f(char *out, float x, int prec, int force_sign) {
+    char *p = out;
+    int i;
+    if (x != x) { memcpy(out, "nan", 4); return; }
+    if (x > 3.4e38f) { memcpy(out, "inf", 4); return; }
+    if (x < -3.4e38f) { memcpy(out, "-inf", 5); return; }
+    if (x < 0.0f) { *p++ = '-'; x = -x; }
+    else if (force_sign) *p++ = '+';
+    if (x == 0.0f) { *p++ = '0'; *p = 0; return; }
+    {
+        float m = 1.0f, r;
+        long ip, frac;
+        int mi;
+        char tmp[24];
+        int n = 0;
+        for (i = 0; i < prec; i++) m *= 10.0f;
+        /* x*m+0.5 then f2iz: round-half-up to prec decimals. */
+        r = x * m + 0.5f;
+        ip = (long)r;           /* __aeabi_f2lz, ours (saturates, no UB) */
+        mi = (int)m;            /* prec <= 4 here, mi < INT_MAX */
+        frac = ip % mi;
+        if (frac < 0) frac = -frac;
+        ip /= mi;
+        if (ip < 0) ip = -ip;
+        do { tmp[n++] = (char)('0' + ip % 10); ip /= 10; } while (ip);
+        while (n) *p++ = tmp[--n];
+        if (prec) {
+            char fb[16]; int fn = 0;
+            *p++ = '.';
+            do { fb[fn++] = (char)('0' + frac % 10); frac /= 10; } while (frac);
+            while (fn < prec) fb[fn++] = '0';
+            while (fn) *p++ = fb[--fn];
+        }
+    }
+    *p = 0;
+}
+
+static void lz_ftoa_g(char *out, float x, int sig, int force_sign) {
+    char *p = out;
+    int i;
+    if (x != x) { memcpy(out, "nan", 4); return; }
+    if (x > 3.4e38f) { memcpy(out, "inf", 4); return; }
+    if (x < -3.4e38f) { memcpy(out, "-inf", 5); return; }
+    if (x < 0.0f) { *p++ = '-'; x = -x; }
+    else if (force_sign) *p++ = '+';
+    if (x == 0.0f) { *p++ = '0'; *p = 0; return; }
+    {
+        /* Normalise to [1,10) with integer power-of-ten exponent. */
+        int e10 = 0;
+        char dig[24];
+        int nd = 0;
+        while (x >= 10.0f) { x /= 10.0f; e10++; }
+        while (x < 1.0f)   { x *= 10.0f; e10--; }
+        for (i = 0; i < sig; i++) {
+            int d = (int)x;                 /* f2iz */
+            dig[nd++] = (char)('0' + d);
+            x = (x - (float)d) * 10.0f;
+        }
+        /* round the last emitted digit */
+        if ((int)(x + 0.5f) >= 5) {
+            int j = nd - 1;
+            while (j >= 0 && dig[j] == '9') { dig[j] = '0'; j--; }
+            if (j < 0) { memmove(dig + 1, dig, (size_t)nd); dig[0] = '1'; nd++; e10++; }
+            else dig[j]++;
+        }
+        if (e10 >= -4 && e10 < sig) {
+            if (e10 >= 0) {
+                for (i = 0; i <= e10; i++) *p++ = dig[i];
+                if (e10 + 1 < nd) {
+                    *p++ = '.';
+                    for (i = e10 + 1; i < nd; i++) *p++ = dig[i];
+                }
+            } else {
+                *p++ = '0'; *p++ = '.';
+                for (i = -1; i > e10; i--) *p++ = '0';
+                for (i = 0; i < nd; i++) *p++ = dig[i];
+            }
+        } else {
+            *p++ = dig[0];
+            if (nd > 1) { *p++ = '.'; for (i = 1; i < nd; i++) *p++ = dig[i]; }
+            *p++ = 'e';
+            if (e10 < 0) { *p++ = '-'; e10 = -e10; }
+            else *p++ = '+';
+            if (e10 < 10) *p++ = '0';       /* printf's %g pads to 2 */
+            {
+                char eb[8]; int en = 0;
+                do { eb[en++] = (char)('0' + e10 % 10); e10 /= 10; } while (e10);
+                while (en) *p++ = eb[--en];
+            }
+        }
+    }
+    *p = 0;
+}
+
 static const char *tok_path_for(const char *dir, char *buf, int cap,
                                 char *errbuf, int errlen) {
     if (lz_lfn_path(dir, "tokenizer.json", buf, cap, errbuf, errlen) != 0)
@@ -175,7 +294,7 @@ extern int lz_attn_window;
 extern int lz_moe_topk;
 extern float lz_moe_tau;
 extern int lz_prof_enable;
-extern double lz_prof_us[];
+extern float lz_prof_us[];
 
 /* Short help: the options an END USER actually reaches for, nothing else.
    `-h` prints this; `--help` prints the full usage() below. Error paths
@@ -328,6 +447,22 @@ static void usage(void) {
     "                   floating one tier at a time measured worse than\n"
     "                   BOTH ends on six of seven axes, while the two ends\n"
     "                   are indistinguishable from each other.\n"
+    "  --fp-exceptions  Report which IEEE special cases this run actually\n"
+    "                   hit (IE invalid/NaN, DE denormal, ZE div-by-zero,\n"
+    "                   OE overflow, UE underflow, PE inexact), read from\n"
+    "                   the hardware's sticky flags. IE=0 and OE=0 is the\n"
+    "                   precondition for the ARM soft-float fast path\n"
+    "                   dropping its inf/nan and overflow checks - see\n"
+    "                   build/fp_exception_gate.sh.\n"
+    "  --fastfp MODE    on|off (default off). Round toward zero and flush\n"
+    "                   denormals. NOT an x86 speed knob: measured at\n"
+    "                   -0.7%% inside a 110ms sigma, because x86 scalar\n"
+    "                   float is already one hardware instruction. It is\n"
+    "                   meant to be the reference arm for the ARM\n"
+    "                   soft-float fast path - but that pairing is not\n"
+    "                   finished: MXCSR is global while ARM covers fmul\n"
+    "                   only, and fast-mode runs do NOT yet agree across\n"
+    "                   targets. See src/lz_softfp.c for the measurement.\n"
     "  --subn-scale MODE   tok|group (default tok). Width of one INT8\n"
     "                   activation scale on the SubLN o_proj/down_proj input.\n"
     "                   tok is BitNet v2's per-token absmax; group keeps the\n"
@@ -432,8 +567,11 @@ static void print_topk(const float *logits, int n, int k) {
             if (cnt < k) cnt++;
         }
     }
-    for (i = 0; i < cnt; i++)
-        printf("  #%-2d token %-8d logit %+.6f\n", i + 1, idx[i], (double)val[i]);
+    for (i = 0; i < cnt; i++) {
+        char _b[LZ_FTOA_BUF];
+        lz_ftoa_f(_b, val[i], 6, 1);
+        printf("  #%-2d token %-8d logit %s\n", i + 1, idx[i], _b);
+    }
     free(idx);
     free(val);
 }
@@ -504,10 +642,15 @@ static void print_config(const LZModelConfig *c) {
     printf("  linear-attn     key %d x %d / value %d x %d / conv %d\n",
            c->lin_n_k_heads, c->lin_k_head_dim,
            c->lin_n_v_heads, c->lin_v_head_dim, c->conv_kernel);
-    printf("  rope            theta %.0f / partial %.2f -> rotate first %d of head_dim\n",
-           (double)c->rope_theta, (double)c->partial_rotary_factor,
-           c->rotary_dim);
-    printf("  rmsnorm eps     %g\n", (double)c->rms_norm_eps);
+    {
+        char _b0[LZ_FTOA_BUF], _b1[LZ_FTOA_BUF], _b2[LZ_FTOA_BUF];
+        lz_ftoa_f(_b0, c->rope_theta, 0, 0);
+        lz_ftoa_f(_b1, c->partial_rotary_factor, 2, 0);
+        lz_ftoa_g(_b2, c->rms_norm_eps, 6, 0);
+        printf("  rope            theta %s / partial %s -> rotate first %d of head_dim\n",
+               _b0, _b1, c->rotary_dim);
+        printf("  rmsnorm eps     %s\n", _b2);
+    }
     printf("  tie embedding   %s\n",
            c->tie_word_embeddings ? "yes (no separate lm_head)" : "no");
     printf("  layer types     ");
@@ -518,7 +661,7 @@ static void print_config(const LZModelConfig *c) {
 
 /* Streaming tensor stats: f32 direct scan; Q8 dequantize per group. */
 static void tensor_stats_t(const char *name, const LZTensor *t) {
-    double sum = 0.0, sumsq = 0.0, amax = 0.0;
+    float sum = 0.0f, sumsq = 0.0f, amax = 0.0f;
     lz_u64 chk = 0;
     lz_i64 i, n_nan = 0;
     lz_i64 n = t ? t->n : 0;
@@ -526,7 +669,7 @@ static void tensor_stats_t(const char *name, const LZTensor *t) {
     if (t->dtype == 0 && t->f) {
         for (i = 0; i < n; i++) {
             unsigned int u;
-            double v = (double)t->f[i];
+            float v = t->f[i];
             memcpy(&u, &t->f[i], sizeof(u));
             chk += (lz_u64)u * (lz_u64)(i + 1);
             if (!(v == v)) { n_nan++; continue; }
@@ -538,9 +681,9 @@ static void tensor_stats_t(const char *name, const LZTensor *t) {
     } else if (t->dtype == 1 && t->q && t->scale) {
         lz_i64 g, k;
         for (g = 0; g < n / t->gs; g++) {
-            double sv = (double)t->scale[g];
+            float sv = t->scale[g];
             for (k = 0; k < t->gs; k++) {
-                double v = (double)t->q[g * t->gs + k] * sv;
+                float v = (float)t->q[g * t->gs + k] * sv;
                 unsigned int u;
                 float fv = (float)v;
                 memcpy(&u, &fv, sizeof(u));
@@ -556,8 +699,20 @@ static void tensor_stats_t(const char *name, const LZTensor *t) {
         printf("  %-46s (not loaded)\n", name);
         return;
     }
-    printf("  %-46s n=%-10lld chk=%llu sum=%+.17g rms=%.17g absmax=%.17g",
-           name, n, chk, sum, sqrt(sumsq / (double)(n ? n : 1)), amax);
+    {
+        char _b0[LZ_FTOA_BUF], _b1[LZ_FTOA_BUF], _b2[LZ_FTOA_BUF];
+        float _rms;
+#if defined(__WATCOMC__)
+        _rms = (float)sqrt((double)sumsq / (double)(n ? n : 1));
+#else
+        _rms = sqrtf(sumsq / (float)(n ? n : 1));
+#endif /* defined(__WATCOMC__) */
+        lz_ftoa_g(_b0, sum, 9, 1);
+        lz_ftoa_g(_b1, _rms, 9, 0);
+        lz_ftoa_g(_b2, amax, 9, 0);
+        printf("  %-46s n=%-10lld chk=%llu sum=%s rms=%s absmax=%s",
+               name, n, chk, _b0, _b1, _b2);
+    }
     if (n_nan) printf("  !! nan=%lld", n_nan);
     printf("\n");
 }
@@ -799,7 +954,7 @@ static void sink_stdout(const char *bytes, int len, void *ctx) {
 
 static int parse_float(const char *s, float *out) {
     char *end;
-    double v = strtod(s, &end);
+    float v = strtof(s, &end);
     if (end == s || *end) return -1;
     *out = (float)v;
     return 0;
@@ -809,16 +964,25 @@ static int parse_float(const char *s, float *out) {
    paths and must stay identical - a drift here shows two different
    summaries for the same effective settings. One helper, two call sites. */
 static void cli_print_sampling(const LZGenOpts *g) {
-    printf("Sampling       temp %.2f topk %d topp %.2f minp %.2f "
-           "presence %.2f freq %.2f rep %.2f win %d seed %llu\n",
-           (double)g->sample.temperature, g->sample.topk,
-           (double)g->sample.topp, (double)g->sample.minp,
-           (double)g->sample.presence_penalty,
-           (double)g->sample.frequency_penalty,
-           (double)g->sample.repetition_penalty,
-           g->sample.repeat_last_n, g->rng_seed);
-    if (g->sample.think_temp_enabled)
-        printf("DynTemp        think %.2f\n", (double)g->sample.temp_think);
+    {
+        char _b0[LZ_FTOA_BUF], _b1[LZ_FTOA_BUF], _b2[LZ_FTOA_BUF], _b3[LZ_FTOA_BUF], _b4[LZ_FTOA_BUF], _b5[LZ_FTOA_BUF], _b6[LZ_FTOA_BUF];
+        lz_ftoa_f(_b0, g->sample.temperature, 2, 0);
+        lz_ftoa_f(_b1, g->sample.topp, 2, 0);
+        lz_ftoa_f(_b2, g->sample.minp, 2, 0);
+        lz_ftoa_f(_b3, g->sample.presence_penalty, 2, 0);
+        lz_ftoa_f(_b4, g->sample.frequency_penalty, 2, 0);
+        lz_ftoa_f(_b5, g->sample.repetition_penalty, 2, 0);
+        printf("Sampling       temp %s topk %d topp %s minp %s "
+               "presence %s freq %s rep %s win %d seed %llu\n",
+               _b0, g->sample.topk,
+               _b1, _b2,
+               _b3, _b4, _b5,
+               g->sample.repeat_last_n, g->rng_seed);
+        if (g->sample.think_temp_enabled) {
+            lz_ftoa_f(_b6, g->sample.temp_think, 2, 0);
+            printf("DynTemp        think %s\n", _b6);
+        }
+    }
 }
 
 /* Rebuild argv as UTF-8 from the OS's own copy of the command line.
@@ -931,6 +1095,7 @@ int main(int argc, char **argv) {
     FILE *af = NULL;    /* --dump-all-logits stream, fclosed after the loop */
     FILE *tf = NULL;    /* --dump-top5 stream, same lifetime as af */
     int only_check = 0, list_tensors = 0, want_stats = 0, only_layer = -1;
+    int want_fpexc = 0;         /* --fp-exceptions, see the flag's usage */
     int *tokens = NULL, n_tokens = 0, topk = 5;
     int n_gen = 0;                  /* -n new tokens for generation */
     int ctx_limit = LZ_DEFAULT_CTX;
@@ -956,7 +1121,7 @@ int main(int argc, char **argv) {
     LZGenOpts g;
     LZModelConfig *cfg;
     int i, rc = 0;
-    double t0, t1;
+    float t0, t1;
 
     memset(&m, 0, sizeof m);
     memset(&tok, 0, sizeof tok);
@@ -1188,6 +1353,19 @@ int main(int argc, char **argv) {
             return 0;
         }
         else if (strcmp(a, "--stats") == 0)   want_stats = 1;
+        else if (strcmp(a, "--fp-exceptions") == 0) {
+            /* Clears the sticky IEEE exception flags here and reports
+               them at exit, so the line describes THIS run. */
+            want_fpexc = 1;
+#if defined(LZ_SSE_FLOAT_CSR)
+            {
+                unsigned csr;
+                __asm__ __volatile__("stmxcsr %0" : "=m"(csr));
+                csr &= ~0x3Fu;          /* IE DE ZE OE UE PE */
+                __asm__ __volatile__("ldmxcsr %0" : : "m"(csr));
+            }
+#endif /* defined(LZ_SSE_FLOAT_CSR) */
+        }
         else if (strcmp(a, "--layer") == 0 && i + 1 < argc)
             only_layer = atoi(argv[++i]);
         else if (strcmp(a, "--topk") == 0 && i + 1 < argc) {
@@ -1320,7 +1498,7 @@ int main(int argc, char **argv) {
             g.look_raw = 1;
         }
         else if (strcmp(a, "--lookahead-lp") == 0 && i + 1 < argc) {
-            g.look_lp = (float)atof(argv[++i]);
+            g.look_lp = LZ_STRTOF(argv[++i]);
         }
         else if (strcmp(a, "--spec-debug-break-rollback") == 0) {
             /* Test-only: see LZGenOpts.spec_debug_break_rollback
@@ -1450,6 +1628,17 @@ int main(int argc, char **argv) {
                 return 2;
             }
         }
+        else if (strcmp(a, "--fastfp") == 0 && i + 1 < argc) {
+            /* Round-toward-zero + flush-to-zero, the same contract on
+               both targets. Outside the --fixed group table for the same
+               reason --subn-scale is: it changes float SEMANTICS, not
+               which tier runs, so `--fixed off` must not disturb it. */
+            const char *got = lz_fastfp_select(argv[++i]);
+            if (!got) {
+                printf("--fastfp: unknown mode (on|off)\n");
+                return 2;
+            }
+        }
         else if (strcmp(a, "--subn-scale") == 0 && i + 1 < argc) {
             /* Deliberately outside the --fixed group table below: this
                picks a scale LAYOUT, not a float/int tier, so `--fixed
@@ -1523,7 +1712,7 @@ int main(int argc, char **argv) {
                text: a silently clamped temperature would report a number
                in the banner that is not the one that ran, which is the
                shape that keeps catching people out. */
-            float t = (float)atof(argv[++i]);
+            float t = LZ_STRTOF(argv[++i]);
             if (!(t >= LZ_MOE_TAU_MIN && t <= LZ_MOE_TAU_MAX)) {
                 usage();
                 return 2;
@@ -1613,11 +1802,15 @@ int main(int argc, char **argv) {
     printf("\n");
     print_config(cfg);
     printf("\n");
-    printf("Params         %lld (%.1fM) text tower\n",
-           m.n_params, (double)m.n_params / 1e6);
-    if (m.n_params_skipped > 0)
-        printf("Skipped        %lld (%.1fM) non-text (e.g. vision)\n",
-               m.n_params_skipped, (double)m.n_params_skipped / 1e6);
+    {
+        char _b0[LZ_FTOA_BUF], _b1[LZ_FTOA_BUF];
+        lz_ftoa_f(_b0, (float)(m.n_params) / 1e6f, 1, 0);
+        lz_ftoa_f(_b1, (float)(m.n_params_skipped) / 1e6f, 1, 0);
+        printf("Params         %lld (%sM) text tower\n", m.n_params, _b0);
+        if (m.n_params_skipped > 0)
+            printf("Skipped        %lld (%sM) non-text (e.g. vision)\n",
+                   m.n_params_skipped, _b1);
+    }
     /* Two independent facts, both needed: what is COMPILED IN, and which
        of those the CPU picked. A build can be bit-perfect and still be
        running the scalar reference, and no output comparison can show
@@ -1641,7 +1834,11 @@ int main(int argc, char **argv) {
            lz_gdn_p2_impl(), lz_tier_report());
     printf("Kernels        %s built-in, %s selected -> tier %s\n",
            lz_build_paths(), lz_kernel_name(), lz_kernel_tier());
-    printf("Structure OK   %.0f ms\n", t1 - t0);
+    {
+        char _b[LZ_FTOA_BUF];
+        lz_ftoa_f(_b, (float)(t1 - t0), 0, 0);
+        printf("Structure OK   %s ms\n", _b);
+    }
 
     if (list_tensors) {
         printf("\nAll tensors:\n");
@@ -1668,8 +1865,11 @@ int main(int argc, char **argv) {
        what lets a wrong phrasing survive unnoticed; on a quantised one
        it overstates by the compression ratio. `--tensors` reports the
        dtypes actually stored. */
-    printf("\nLoading weights (%.2f GB at 4 bytes/param)...\n",
-           (double)m.n_params * 4.0 / 1e9);
+    {
+        char _b[LZ_FTOA_BUF];
+        lz_ftoa_f(_b, (float)m.n_params * 4.0f / 1e9f, 2, 0);
+        printf("\nLoading weights (%s GB at 4 bytes/param)...\n", _b);
+    }
     t0 = lz_time_ms();
     if (lz_read_weights(&m, err, sizeof(err)) != 0) {
         printf("Failed to load: %s\n", err);
@@ -1685,11 +1885,15 @@ int main(int argc, char **argv) {
            trap on record; saying the clock could not resolve it
            is the honest answer, and lz_common_tokcell guards the same
            way. */
-        double secs = (t1 - t0) / 1000.0;
-        printf("Done           %.2f GB / %.1f s", (double)m.bytes_alloc / 1e9,
-               secs);
-        if (secs > 0.0) printf(" = %.0f MB/s\n",
-                               (double)m.bytes_alloc / 1e6 / secs);
+        char _b0[LZ_FTOA_BUF], _b1[LZ_FTOA_BUF], _b2[LZ_FTOA_BUF];
+        float secs = (t1 - t0) / 1000.0f;
+        lz_ftoa_f(_b0, m.bytes_alloc / 1e9f, 2, 0);
+        lz_ftoa_f(_b1, secs, 1, 0);
+        printf("Done           %s GB / %s s", _b0, _b1);
+        if (secs > 0.0) {
+            lz_ftoa_f(_b2, m.bytes_alloc / 1e6f / secs, 0, 0);
+            printf(" = %s MB/s\n", _b2);
+        }
         else            printf(" (below the clock's resolution)\n");
     }
 
@@ -1749,7 +1953,8 @@ int main(int argc, char **argv) {
            LZ_BATCH_MAX, so lowering or raising nt_cap within that bound
            cannot overrun anything. */
         if (batch_width) st.nt_cap = batch_width;
-        printf("Runtime state  %.1f MB\n", (double)st.bytes_alloc / 1e6);
+        { char _b[LZ_FTOA_BUF]; lz_ftoa_f(_b, st.bytes_alloc / 1e6f, 1, 0);
+          printf("Runtime state  %s MB\n", _b); }
 
         t0 = lz_time_ms();
         for (i = 0; i < n_tokens; i++) {
@@ -1806,15 +2011,16 @@ int main(int argc, char **argv) {
                 if (tf) fwrite(best, sizeof(int32_t), 5, tf);
             }
             if (nll_path && i + 1 < n_tokens) {
-                /* -log softmax(logits)[next]. Accumulated in double on
-                   purpose: this is a MEASUREMENT path, not a shipped
-                   one, and a 32k-term exp sum in float loses digits
-                   exactly where the rare-token buckets live. It never
-                   runs inside the PC=24 region (that closes with
-                   lz_forward), so double is honest here - see the
-                   six clause 3 for why that has to be checked. */
+                /* -log softmax(logits)[next]. All float via lz_mathf:
+                   lz_expf/lz_logf are bit-identical between x86-64 (SSE)
+                   and ARMv5TE (soft-float), so the NLL is bit-identical
+                   across the two builds and the ARM build pulls no
+                   libgcc double soft-float at all.  A float sum drops
+                   exp terms below sum*2^-24, which shifts the NLL of a
+                   rare token by < 2^-19 relative - far below the three
+                   printed decimals, and this is a measurement path. */
                 float mx = logits[0];
-                double sum = 0.0;
+                float sum = 0.0f;
                 int v;
                 if (!nll) {
                     nll = (float *)calloc((size_t)n_tokens - 1, sizeof(float));
@@ -1827,13 +2033,15 @@ int main(int argc, char **argv) {
                 for (v = 1; v < cfg->vocab_size; v++)
                     if (logits[v] > mx) mx = logits[v];
                 for (v = 0; v < cfg->vocab_size; v++)
-                    sum += exp((double)(logits[v] - mx));
-                nll[i] = (float)(log(sum) - (double)(logits[tokens[i + 1]] - mx));
+                    sum += lz_expf(logits[v] - mx);
+                nll[i] = lz_logf(sum) - (logits[tokens[i + 1]] - mx);
             }
         }
         t1 = lz_time_ms();
-        printf("Time           %.2f s, %.3f s/token\n",
-               (t1 - t0) / 1000.0, (t1 - t0) / 1000.0 / n_tokens);
+        { char _b0[LZ_FTOA_BUF], _b1[LZ_FTOA_BUF];
+          lz_ftoa_f(_b0, (float)(t1 - t0) / 1000.0f, 2, 0);
+          lz_ftoa_f(_b1, (float)(t1 - t0) / 1000.0f / (float)n_tokens, 3, 0);
+          printf("Time           %s s, %s s/token\n", _b0, _b1); }
         /* The int16 exits' positive control. Printed unconditionally,
            like the census below and for the same reason: the int and
            float rows are bit-comparable, so an output comparison can
@@ -1873,30 +2081,32 @@ int main(int argc, char **argv) {
            number nobody has. Per token, because the sites scale
            differently with context and the totals hide that. */
         if (lz_f32_count_get(0) >= 0.0) {
-            double tot = 0.0;
+            float tot = 0.0f;
             int site;
             for (site = 0; site < LZ_FC_N; site++)
                 tot += lz_f32_count_get(site);
             printf("f32 operations per token (%d tokens, ctx reached %d):\n",
                    n_tokens, n_tokens);
             for (site = 0; site < LZ_FC_N; site++) {
-                double v = lz_f32_count_get(site);
+                float v = lz_f32_count_get(site);
                 if (v > 0.0 || lz_f32_count_reached(site)) {
                     int cls, printed = 0;
-                    printf("  %-20s %14.0f  %5.1f%%\n",
-                           lz_f32_count_name(site), v / n_tokens,
-                           tot > 0.0 ? 100.0 * v / tot : 0.0);
+                    { char _b0[LZ_FTOA_BUF], _b1[LZ_FTOA_BUF];
+                      lz_ftoa_f(_b0, v / n_tokens, 0, 0);
+                      lz_ftoa_f(_b1, tot > 0.0f ? 100.0f * v / tot : 0.0f, 1, 0);
+                      printf("  %-20s %14s  %5s%%\n",
+                             lz_f32_count_name(site), _b0, _b1); }
                     /* Per-class split, zero classes omitted so an
                        unmigrated site prints one word ("other") instead
                        of six columns of zeros - that word doubles as the
                        migration progress indicator. */
                     for (cls = 0; cls < LZ_FCC_N; cls++) {
-                        double cv = lz_f32_class_get(site, cls);
+                        float cv = lz_f32_class_get(site, cls);
                         if (cv <= 0.0) continue;
                         if (printed) printf(" ");
                         else printf("%39s", "");
-                        printf("%s %.0f", lz_f32_class_name(cls),
-                               cv / n_tokens);
+                        { char _b[LZ_FTOA_BUF]; lz_ftoa_f(_b, cv / n_tokens, 0, 0);
+                          printf("%s %s", lz_f32_class_name(cls), _b); }
                         printed = 1;
                     }
                     if (printed) printf("\n");
@@ -1907,7 +2117,8 @@ int main(int argc, char **argv) {
                            "- (not run)");
                 }
             }
-            printf("  %-20s %14.0f\n", "total", tot / n_tokens);
+            { char _b[LZ_FTOA_BUF]; lz_ftoa_f(_b, tot / n_tokens, 0, 0);
+              printf("  %-20s %14s\n", "total", _b); }
         }
         printf("Top %d logits:\n", topk);
         print_topk(logits, cfg->vocab_size, topk);
@@ -1935,13 +2146,14 @@ int main(int argc, char **argv) {
             if (!f) {
                 printf("Cannot write %s\n", nll_path);
             } else {
-                double tot = 0.0;
+                float tot = 0.0f;
                 int v;
                 fwrite(nll, sizeof(float), (size_t)n_tokens - 1, f);
                 fclose(f);
                 for (v = 0; v < n_tokens - 1; v++) tot += nll[v];
-                printf("Wrote %s (%d f32), mean NLL %.4f\n",
-                       nll_path, n_tokens - 1, tot / (n_tokens - 1));
+                { char _b[LZ_FTOA_BUF]; lz_ftoa_f(_b, tot / (n_tokens - 1), 4, 0);
+                  printf("Wrote %s (%d f32), mean NLL %s\n",
+                         nll_path, n_tokens - 1, _b); }
             }
         }
         if (af) { fclose(af); af = NULL; }
@@ -1962,7 +2174,7 @@ int main(int argc, char **argv) {
            removes both the frame cost and that hazard. */
         static char tpath[1024];
         int n_out = 0;
-        double ms = 0.0;
+        float ms = 0.0f;
 
         if (!tok_path) {
             tok_path = tok_path_for(dir, tpath, (int)sizeof tpath,
@@ -1979,13 +2191,14 @@ int main(int argc, char **argv) {
             goto fail;
         }
         t1 = lz_time_ms();
-        printf("Vocab          %d (%d special), merges %d, loaded %.0f ms\n",
-               lz_tokenizer_vocab_size(&tok), lz_tokenizer_n_special(&tok),
-               lz_tokenizer_n_merges(&tok), t1 - t0);
+        { char _b[LZ_FTOA_BUF]; lz_ftoa_f(_b, (float)(t1 - t0), 0, 0);
+          printf("Vocab          %d (%d special), merges %d, loaded %s ms\n",
+                 lz_tokenizer_vocab_size(&tok), lz_tokenizer_n_special(&tok),
+                 lz_tokenizer_n_merges(&tok), _b); }
 
         if (!no_eos) lz_gen_opts_set_eos(&g, &tok);
         g.max_new_tokens = n_gen > 0 ? n_gen : 128;
-        if (g.rng_seed == 0) g.rng_seed = lz_seed_mix((lz_u64)t1);
+        if (g.rng_seed == 0) g.rng_seed = lz_seed_mix((lz_u64)(long)t1);
 
         /* KV cache only covers prompt + generation; never preallocate the
            full max_position_embeddings. */
@@ -2077,8 +2290,9 @@ int main(int argc, char **argv) {
             printf("Prompt         ");
             console_out(prompt, (int)strlen(prompt));
             console_out("\n", 1);
-            printf("State          %.1f MB (%d slots, prefill batch %d)\n",
-                   (double)st.bytes_alloc / 1e6, seq, st.nt_cap);
+            { char _b[LZ_FTOA_BUF]; lz_ftoa_f(_b, st.bytes_alloc / 1e6f, 1, 0);
+              printf("State          %s MB (%d slots, prefill batch %d)\n",
+                     _b, seq, st.nt_cap); }
             cli_print_sampling(&g);
             printf("Context        %d slots (model max %d; --ctx to change)\n",
                    seq, cfg->seq_len);
@@ -2114,21 +2328,23 @@ int main(int argc, char **argv) {
                    They are reported against their PARENT, which is the
                    only denominator that makes a nested span mean
                    anything. */
-                double tot = 0.0;
+                float tot = 0.0f;
                 int pi;
                 for (pi = 0; pi < LZ_PROF_TOP; pi++) tot += lz_prof_us[pi];
                 printf("[profile: us; top tier %% of instrumented time, "
                        "nested %% of its parent]\n");
                 for (pi = 0; pi < LZ_PROF_N; pi++) {
-                    double den = tot;
+                    float den = tot;
                     if (lz_prof_us[pi] <= 0.0) continue;
                     if (pi == LZ_PROF_REC) den = lz_prof_us[LZ_PROF_LIN];
                     if (pi == LZ_PROF_ACT) den = lz_prof_us[LZ_PROF_FFN];
-                    printf("  %-8s %12.0f  %5.1f%%\n", pn[pi],
-                           lz_prof_us[pi],
-                           den > 0.0 ? 100.0 * lz_prof_us[pi] / den : 0.0);
+                    { char _b0[LZ_FTOA_BUF], _b1[LZ_FTOA_BUF];
+                      lz_ftoa_f(_b0, lz_prof_us[pi], 0, 0);
+                      lz_ftoa_f(_b1, den > 0.0 ? 100.0f * lz_prof_us[pi] / den : 0.0f, 1, 0);
+                      printf("  %-8s %12s  %5s%%\n", pn[pi], _b0, _b1); }
                 }
-                printf("  %-8s %12.0f\n", "TOTAL", tot);
+                { char _b[LZ_FTOA_BUF]; lz_ftoa_f(_b, tot, 0, 0);
+                  printf("  %-8s %12s\n", "TOTAL", _b); }
             }
             printf("[kv-rot: %s, k=%d v=%d, %lld head rotations]\n",
                    lz_kv_rot_enable ? "on" : "off",
@@ -2139,21 +2355,26 @@ int main(int argc, char **argv) {
                    st.attn_sink, st.attn_win, lz_debug_attn_skip);
             printf("[epi: %lld calls on the kernel body]\n",
                    lz_debug_epi_kern);
-            printf("\n[%d tokens, %.1f s, %.3f s/token]\n",
-                   n_out, ms / 1000.0, ms / 1000.0 / (n_out > 0 ? n_out : 1));
+            { char _b0[LZ_FTOA_BUF], _b1[LZ_FTOA_BUF];
+              lz_ftoa_f(_b0, (float)ms / 1000.0f, 1, 0);
+              lz_ftoa_f(_b1, (float)ms / 1000.0f / (float)(n_out > 0 ? n_out : 1), 3, 0);
+              printf("\n[%d tokens, %s s, %s s/token]\n",
+                     n_out, _b0, _b1); }
             if (g.spec_k > 0) {
                 /* alpha = accepted / draft_tokens: the on-policy
                    acceptance rate, measured through the SAME
                    lz_generate_resume path production traffic uses -
                    not a separate harness. See LZGenOpts's own comment
                    for what counts as a draft token. */
-                double alpha = g.out_spec_draft_tokens > 0
-                              ? (double)g.out_spec_accepted / g.out_spec_draft_tokens
+                float alpha = g.out_spec_draft_tokens > 0
+                              ? (float)g.out_spec_accepted / (float)g.out_spec_draft_tokens
                               : 0.0;
-                printf("[spec: %d rounds, %d draft tokens, %d accepted, alpha=%.4f, "
-                      "final mtp_pos=%d, mtp attn rows=%lld]\n",
-                      g.out_spec_rounds, g.out_spec_draft_tokens,
-                      g.out_spec_accepted, alpha, st.mtp_pos, lz_debug_mtp_attn_rows);
+                { char _b[LZ_FTOA_BUF];
+                  lz_ftoa_f(_b, alpha, 4, 0);
+                  printf("[spec: %d rounds, %d draft tokens, %d accepted, alpha=%s, "
+                         "final mtp_pos=%d, mtp attn rows=%lld]\n",
+                         g.out_spec_rounds, g.out_spec_draft_tokens,
+                         g.out_spec_accepted, _b, st.mtp_pos, lz_debug_mtp_attn_rows); }
                 printf("[spec us: capture=%lld draft=%lld verify=%lld"
                       " catchup=%lld (rounds=%d, n_capture=%lld,"
                       " n_catchup=%lld, n_ring_rollback=%lld)]\n",
@@ -2183,7 +2404,7 @@ int main(int argc, char **argv) {
         LZChatBuf cb;
         LZChatMsg msg;
         int n_out = 0;
-        double ms = 0.0;
+        float ms = 0.0f;
 
         static char tpath[1024];
         if (!tok_path) {
@@ -2200,7 +2421,7 @@ int main(int argc, char **argv) {
         }
         if (!no_eos) lz_gen_opts_set_eos(&g, &tok);
         g.max_new_tokens = n_gen > 0 ? n_gen : 128;
-        if (g.rng_seed == 0) g.rng_seed = lz_seed_mix((lz_u64)lz_time_ms());
+        if (g.rng_seed == 0) g.rng_seed = lz_seed_mix((lz_u64)(long)lz_time_ms());
 
         {
             int seq = ctx_limit;
@@ -2267,7 +2488,7 @@ int main(int argc, char **argv) {
         }
         if (!no_eos) lz_gen_opts_set_eos(&g, &tok);
         g.max_new_tokens = n_gen > 0 ? n_gen : 128;
-        if (g.rng_seed == 0) g.rng_seed = lz_seed_mix((lz_u64)lz_time_ms());
+        if (g.rng_seed == 0) g.rng_seed = lz_seed_mix((lz_u64)(long)lz_time_ms());
 
         seq = ctx_limit;
         if (seq > cfg->seq_len) seq = cfg->seq_len;
@@ -2311,7 +2532,7 @@ int main(int argc, char **argv) {
         printf("\n---- interactive chat: type a line, Ctrl-D to quit ----\n");
         for (;;) {
             int n_out, turn_rc, reused, n_prompt_tok;
-            double ms = 0.0;
+            float ms = 0.0f;
             /* Wall clock for the WHOLE turn, prefix preparation included.
                `ms` alone is lz_generate_resume's own span, and with reuse
                on the prefill has already happened inside
@@ -2323,7 +2544,7 @@ int main(int argc, char **argv) {
                the A/B it exists for is worse than no number.
                lz_session_begin (the render) is deliberately NOT timed -
                the span of the job is prefix_prepare + generate. */
-            double turn_ms = 0.0;
+            float turn_ms = 0.0f;
 
             printf("You> "); fflush(stdout);
             if (!fgets(line, sizeof(line), stdin)) { printf("\n"); break; }
@@ -2395,9 +2616,12 @@ int main(int argc, char **argv) {
             ms = lz_session_last_ms(&sess);
             reused = lz_session_last_reused(&sess);
             n_prompt_tok = lz_session_last_prompt_tok(&sess);
-            printf("[%d tokens, %.1f s turn, %.1f s gen, %.3f s/token",
-                   n_out, turn_ms / 1000.0, ms / 1000.0,
-                   ms / 1000.0 / (n_out > 0 ? n_out : 1));
+            { char _b0[LZ_FTOA_BUF], _b1[LZ_FTOA_BUF], _b2[LZ_FTOA_BUF];
+              lz_ftoa_f(_b0, (float)turn_ms / 1000.0f, 1, 0);
+              lz_ftoa_f(_b1, (float)ms / 1000.0f, 1, 0);
+              lz_ftoa_f(_b2, (float)ms / 1000.0f / (float)(n_out > 0 ? n_out : 1), 3, 0);
+              printf("[%d tokens, %s s turn, %s s gen, %s s/token",
+                     n_out, _b0, _b1, _b2); }
             if (reused > 0 && n_prompt_tok > 0)
                 printf(", prompt %d reused %d", n_prompt_tok, reused);
             printf("]\n");
@@ -2422,6 +2646,27 @@ int main(int argc, char **argv) {
 fail:
     rc = 1;
 cleanup:
+    if (want_fpexc) {
+#if defined(LZ_SSE_FLOAT_CSR)
+        unsigned csr;
+        __asm__ __volatile__("stmxcsr %0" : "=m"(csr));
+        /* One line, fixed field order, so a gate can grep it. IE and OE
+           are the two that matter: they are what the ARM soft-float fast
+           path's inf/nan and overflow checks guard, and skipping those
+           checks is only sound while both stay 0. */
+        printf("fp-exceptions: IE=%u DE=%u ZE=%u OE=%u UE=%u PE=%u\n",
+               (csr >> 0) & 1u, (csr >> 1) & 1u, (csr >> 2) & 1u,
+               (csr >> 3) & 1u, (csr >> 4) & 1u, (csr >> 5) & 1u);
+#else
+        /* x87 has fnstsw with the same six flags, and the ARM soft-float
+           has no hardware flags at all. Neither is wired up: the claim
+           this gate defends is about the ARITHMETIC, which is shared, so
+           measuring it on the one target that reports it for free is
+           enough. Printed rather than silent so a script on another
+           target sees "not measured" instead of a missing line. */
+        printf("fp-exceptions: not measured on this target\n");
+#endif /* LZ_SSE_FLOAT_CSR */
+    }
 #if defined(LZ_X87_STACK_GATE)
     /* docs/x87-gcc-reg-stack-leak.md. The check-and-record half lives in
        src/ (ops.h's LZ_X87_STACK_CHECK, called from forward.c/ops.c);

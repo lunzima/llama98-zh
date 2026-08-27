@@ -22,8 +22,10 @@ int lz_fseek64(FILE *f, lz_u64 off);
 lz_i64 lz_fsize(const char *path);
 
 /* Monotonic millisecond timer. GetTickCount on Win98 has only 55ms
-   resolution, so QueryPerformanceCounter is preferred. */
-double lz_time_ms(void);
+   resolution, so QueryPerformanceCounter is preferred. Returns float:
+   the engine is all-float (no double anywhere), and millisecond timing
+   needs far less than float's 24-bit mantissa. */
+float lz_time_ms(void);
 
 /* Derive a full-entropy seed from a weak, possibly-sparse input.
  *

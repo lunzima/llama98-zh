@@ -1,4 +1,5 @@
 #include <math.h>
+#include "lz_mathf.h"   /* lz_expf/lz_logf/lz_powf: float, no libm, bit-identical x86/ARM */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -531,16 +532,15 @@ static void apply_row_penalties_assumed(const LZSampler *samp, const int *draft,
    algorithm lz_sample_argmax_p (sampler.c) uses, and for the same
    reason: the rollout needs a normalizer, not a materialized probability
    vector, and a 32K-wide float array per lookahead step is exactly the
-   allocation that comment refuses. Runs OUTSIDE the PC=24 region
-   (lz_fpu_float_end already ran in forward_chunk), so double is safe
-   here; inside that region a double would read back at 24-bit
-   precision. */
-static double lz_look_lse(const float *l, int n) {
-    double mx = (double)l[0], sum = 0.0;
+   allocation that comment refuses. All float via lz_mathf: the float
+   transcendentals are bit-identical between x86-64 (SSE) and ARMv5TE
+   (soft-float), which libm's exp/log (glibc vs libgcc) are not. */
+static float lz_look_lse(const float *l, int n) {
+    float mx = l[0], sum = 0.0f;
     int i;
-    for (i = 1; i < n; i++) if ((double)l[i] > mx) mx = (double)l[i];
-    for (i = 0; i < n; i++) sum += exp((double)l[i] - mx);
-    return mx + log(sum);
+    for (i = 1; i < n; i++) if (l[i] > mx) mx = l[i];
+    for (i = 0; i < n; i++) sum += lz_expf(l[i] - mx);
+    return mx + lz_logf(sum);
 }
 
 /* Top-`w` logit indices, descending. Insertion sort into a w-wide
@@ -605,7 +605,7 @@ static int lz_look_pick(const LZModel *m, LZRunState *s, LZSampler *samp,
     int w = o->look_width, dmax = o->look_depth;
     int cand[LZ_LOOK_W_MAX];
     int draft[LZ_LOOK_D_MAX];
-    double best = 0.0;
+    float best = 0.0f;
     int best_i = 0, i, d, at;
     int saved_pos = pos;
 
@@ -616,8 +616,8 @@ static int lz_look_pick(const LZModel *m, LZRunState *s, LZSampler *samp,
     if (lz_ckpt_save(ck, s, m, pos, errbuf, errlen) != 0) return -1;
 
     for (i = 0; i < w; i++) {
-        double lse = lz_look_lse(scratch, vocab);
-        double score = (double)scratch[cand[i]] - lse;
+        float lse = lz_look_lse(scratch, vocab);
+        float score = scratch[cand[i]] - lse;
         int len = 1, stop = 0;
         if (i > 0) {
             if (lz_ckpt_restore(ck, s, m, &at, errbuf, errlen) != 0) return -1;
@@ -634,7 +634,7 @@ static int lz_look_pick(const LZModel *m, LZRunState *s, LZSampler *samp,
             if (samp && !o->look_raw)
                 apply_row_penalties_assumed(samp, draft, d, scratch);
             nxt = lz_sample_argmax(scratch, vocab);
-            score += (double)scratch[nxt] - lz_look_lse(scratch, vocab);
+            score += scratch[nxt] - lz_look_lse(scratch, vocab);
             draft[d] = nxt;
             len++;
             if (lz_look_is_eos(o, nxt)) stop = 1;
@@ -645,7 +645,7 @@ static int lz_look_pick(const LZModel *m, LZRunState *s, LZSampler *samp,
            identity; it only separates branches that stopped early on
            EOS, which is the whole case it exists for. */
         if (o->look_lp != 0.0f && len > 1)
-            score /= pow((double)len, (double)o->look_lp);
+            score /= lz_powf((float)len, o->look_lp);
         if (i == 0 || score > best) { best = score; best_i = i; }
     }
     if (lz_ckpt_restore(ck, s, m, &at, errbuf, errlen) != 0) return -1;
@@ -1869,7 +1869,7 @@ int lz_generate_call(const LZModel *m, LZTokenizer *t, LZRunState *s,
     LZShouldContinue cont      = c->cont;
     void *ctx                  = c->ctx;
     int *out_n_tokens          = c->out_n_tokens;
-    double *out_elapsed_ms     = c->out_elapsed_ms;
+    float *out_elapsed_ms     = c->out_elapsed_ms;
     char *errbuf               = c->errbuf;
     int errlen                 = c->errlen;
     LZInspect *ins             = c->ins;
@@ -1881,7 +1881,7 @@ int lz_generate_call(const LZModel *m, LZTokenizer *t, LZRunState *s,
     int sampled;                 /* this step sampled, vs digested a prompt token */
     int max_new;
     int max_pos;                 /* total forward steps cap = prompt digestion + generation */
-    double t_start, t_end;
+    float t_start, t_end;
     int rc = LZ_ERR_INTERNAL;
     /* Stop strings match against generated output BYTE-wise, so a tail
        must be kept. Sized for the longest stop string only; no need to
@@ -2423,7 +2423,7 @@ int lz_generate_resume_ex(const LZModel *m, LZTokenizer *t, LZRunState *s,
                           const char *prompt_bytes, int prompt_len,
                           const LZGenOpts *opts,
                           LZTokenSink sink, LZShouldContinue cont, void *ctx,
-                          int *out_n_tokens, double *out_elapsed_ms,
+                          int *out_n_tokens, float *out_elapsed_ms,
                           char *errbuf, int errlen, LZInspect *ins) {
     LZGenCall c;
     lz_gen_call_init(&c);
@@ -2453,7 +2453,7 @@ int lz_generate_resume(const LZModel *m, LZTokenizer *t, LZRunState *s,
                        const char *prompt_bytes, int prompt_len,
                        const LZGenOpts *opts,
                        LZTokenSink sink, LZShouldContinue cont, void *ctx,
-                       int *out_n_tokens, double *out_elapsed_ms,
+                       int *out_n_tokens, float *out_elapsed_ms,
                        char *errbuf, int errlen) {
     return lz_generate_resume_ex(m, t, s, start_pos, prompt_bytes,
                                  prompt_len, opts, sink, cont, ctx,
@@ -2472,7 +2472,7 @@ int lz_generate(const LZModel *m, LZTokenizer *t, LZRunState *s,
                 const char *prompt_bytes, int prompt_len,
                 const LZGenOpts *opts,
                 LZTokenSink sink, LZShouldContinue cont, void *ctx,
-                int *out_n_tokens, double *out_elapsed_ms,
+                int *out_n_tokens, float *out_elapsed_ms,
                 char *errbuf, int errlen) {
     return lz_generate_resume(m, t, s, 0, prompt_bytes, prompt_len,
                               opts, sink, cont, ctx,

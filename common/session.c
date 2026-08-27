@@ -297,7 +297,7 @@ int lz_session_job(void *ud, const char *system, LZTokenSink sink,
        success. `ran` says whether this pass has already generated. */
     int n_out = 0, rc = LZ_ERR_INTERNAL, ran;
     int start_pos = 0, reused = 0;
-    double ms = 0.0;
+    float ms = 0.0f;
     /* Both generate calls below differ in exactly two things - the start
        position and which slice of the prompt is new - so everything else
        is set once, here, instead of being written out twice. */
@@ -560,6 +560,6 @@ int lz_session_last_prompt_tok(const LZSession *s) {
     return s ? s->n_prompt_tok : 0;
 }
 
-double lz_session_last_ms(const LZSession *s) {
-    return s ? s->ms : 0.0;
+float lz_session_last_ms(const LZSession *s) {
+    return s ? s->ms : 0.0f;
 }
