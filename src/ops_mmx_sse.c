@@ -769,25 +769,25 @@ extern void lz_exp_q20_2_sse_asm(const int32_t *tab, const int32_t *s,
     "movq    mm3, mm6"              \
     "pmaddwd mm3, [ecx+32]"         \
     "pmaddwd mm6, [ecx+24]"         \
+    "movq    mm1, mm7"              \
+    "pmaddwd mm1, [ecx+32]"         \
+    "pmaddwd mm7, [ecx+24]"         \
+    "movq    mm2, mm5"              \
+    "pmaddwd mm2, [ecx+32]"         \
+    "pmaddwd mm5, [ecx+24]"         \
     "pslld   mm6, 15"               \
     "paddd   mm3, mm6"              \
-    "movq    mm6, mm7"              \
-    "pmaddwd mm6, [ecx+32]"         \
-    "pmaddwd mm7, [ecx+24]"         \
     "pslld   mm7, 15"               \
-    "paddd   mm6, mm7"              \
-    "movq    mm7, mm5"              \
-    "pmaddwd mm7, [ecx+32]"         \
-    "pmaddwd mm5, [ecx+24]"         \
+    "paddd   mm1, mm7"              \
     "pslld   mm5, 15"               \
-    "paddd   mm7, mm5"              \
+    "paddd   mm2, mm5"              \
     "psrld   mm3, 10"               \
-    "paddd   mm6, mm3"              \
-    "psrld   mm6, 10"               \
-    "paddd   mm7, [ecx+16]"         \
-    "paddd   mm7, mm6"              \
-    "psrld   mm7, 20"               \
-    "paddd   mm4, mm7"              \
+    "paddd   mm1, mm3"              \
+    "psrld   mm1, 10"               \
+    "paddd   mm2, [ecx+16]"         \
+    "paddd   mm2, mm1"              \
+    "psrld   mm2, 20"               \
+    "paddd   mm4, mm2"              \
     "movq    mm0, [eax]"            \
     "movq    mm1, mm0"              \
     "psrld   mm1, 11"               \
