@@ -1969,7 +1969,7 @@ void lz_quantize_q8(const float *x, int n, int gs, int8_t *q, float *s) {
    the fast/else decision, the MIN_SCALE floor and the stored scale all
    match lz_quantize_q8 bit for bit; only the grouping changes. */
 void lz_quantize_q8_tok(const float *x, int n, int8_t *q, float *s) {
-    int ns = (unsigned)n / 32;
+    int ns = (unsigned)n >> 5;
     int k;
     float inv, sg;
     int fast;
@@ -2000,7 +2000,7 @@ void lz_quantize_q8_tok(const float *x, int n, int8_t *q, float *s) {
    (see its comment), just grouped by the whole row instead of gs. */
 void lz_quantize_q8_tok_int(const int32_t *t, int n, float deq,
                             int8_t *q, float *s) {
-    int ns = (unsigned)n / 32;
+    int ns = (unsigned)n >> 5;
     int k;
     int32_t tam = 0;
     float amax, inv, sg;

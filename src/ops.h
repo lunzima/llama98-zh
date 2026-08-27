@@ -2047,14 +2047,26 @@ void lz_causal_conv1d_step_fixed(float *o, const float *x, const short *xi,
    -(sig_e[c]+15), so the epilogue is one 32x32 product and a shift.
    NULL is the float exit, which is what the wrapper above passes.
    Clamps are counted in lz_conv_o_clamped rather than being silent. */
+/* Loop-invariant fixed-conv geometry, packed so the per-token call passes
+   one struct pointer where Watcom would otherwise push seven memory
+   operands (X86_TUNE_PUSH_MEMORY). Built once by the caller before its
+   token loop; sig_e rides along because it is the same per-channel table
+   as sig_k1, just the integer coordinate's exponent instead of the folded
+   float one. */
+typedef struct LZConvParams {
+    const short *mw;
+    const float *sig_k1;
+    const float *sig_oscale2;
+    float sig_k2;
+    const signed char *sig_e;
+    float in_scale;
+    int bound;
+    int k;
+} LZConvParams;
 void lz_causal_conv1d_step_fixed_o16(float *o, short *oi, int out_es,
                                  const float *x, const short *xi,
                                  const short *sh_in, short *sh_out,
-                                 const short *mw, const float *sig_k1,
-                                 const float *sig_oscale2, float sig_k2,
-                                 const signed char *sig_e,
-                                 float in_scale, int bound,
-                                 int n_ch, int k);
+                                 const LZConvParams *cp, int n_ch);
 /* Non-zero means the int16 exit above hit its bound. LZ_CONVO_ES was
    picked at zero on both measured chains, so any count is a checkpoint
    this exponent was not measured on. */

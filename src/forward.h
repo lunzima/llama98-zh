@@ -14,6 +14,351 @@
    dependencies of its own, and forward.c dereferences it - so including
    it here keeps every consumer from having to remember to. */
 #include "inspect.h"
+#include "compat.h"   /* lz_time_ms, for the LZ_PROF* macros */
+
+/* The reference implementation hardcodes l2norm's eps to 1e-6, which
+   is semantically different from config's rms_norm_eps - they only
+   coincide numerically. Keep them separate so a future config change
+   cannot silently drag this one along. */
+#define LZ_L2NORM_EPS 1e-6f
+
+/* Per-layer intermediate tap hook (in the header so the attn path, now in
+   its own TU, sees it). No-op by default; a dump tool redefines it. */
+#ifndef LZ_TAP
+#define LZ_TAP(tag, li, ptr, n) ((void)0)
+/* Set only when nobody supplied a tap, so a site can ask "is anyone
+   reading intermediates here". An int-pipeline step that stops writing
+   the float buffer a tap points at does not blank that tap - it leaves
+   it reading the PREVIOUS contents, which is a plausible-looking wrong
+   number rather than an obvious zero. Such a step guards on this and
+   keeps the float path for a tap build. */
+#define LZ_TAP_OFF 1
+#endif /* LZ_TAP */
+
+/* ---- attn helpers (src/forward_attn.c), shared with the paths still in
+   forward.c - the four-path split moved them out and left the signatures
+   here. */
+
+/* Walk the cache in time order from T0 to POS, carrying the row index
+   alongside. Once the ring wraps, SLOT is no longer T, so advancing one
+   without the other reads a different token's row - the two fixed
+   kernels index by absolute t and that is exactly why they carry an
+   LZ_ATTN_NORING guard. Every scoring and weighted-sum loop in
+   forward_attn needs this same pair, so it is written once here rather
+   than eight times there. */
+#define LZ_KV_WALK(S, POS, T, SLOT, T0) \
+    for ((T) = (T0), (SLOT) = kv_slot((S), (T0)); (T) <= (POS); \
+         (T)++, (SLOT) = kv_slot_next((S), (SLOT)))
+
+
+
+/* History exponent for the fixed conv tier.
+ *
+ * MEASURED, not chosen (.prof/wconvrange.c, recover_r20, 64 tokens,
+ * 1.18M samples of the real conv inputs): max |x| = 22.3, the top 0.1%
+ * sits at 2^3, and the highest non-empty bucket is 2^4 - one bucket of
+ * outlier headroom, so this is not a long tail that a constant exponent
+ * has to waste range on. The first and second halves of the sequence
+ * agree on the 0.1% bucket, which is the property that matters here:
+ * the history carries values from earlier steps at the same scale, so a
+ * drifting range would need the scale to travel with the state the way
+ * ssm_state_s does for the recurrence.
+ *
+ * 22.3 * 2^9 = 11423, inside the 16384 bound with a bucket to spare.
+ * A value past 32 clips; the probe saw none, and the clamp is silent, so
+ * re-run it on any model whose conv inputs might be scaled differently. */
+#ifndef LZ_CONV_ES
+#define LZ_CONV_ES 9
+#endif /* LZ_CONV_ES */
+
+/* The conv's OUTPUT exponent for the q and k chains (int-pipeline 9.4),
+ * and the knob that turns that exit on. Unlike LZ_CONV_ES this one is
+ * not chosen on headroom alone: the consumer is an L2 normalisation,
+ * which divides each vector by its own length, so a clip is the only
+ * thing a too-large exponent costs and a too-small one costs relative
+ * precision on the QUIETEST vector rather than on the largest.
+ *
+ * .prof/convqk_range.c, kmr20/zh, 603 tokens, 3.7M samples each chain:
+ * max 26.3953 (q) and 13.2716 (k), zero clamps at 2^10 on both. What
+ * that reading does NOT show, and what the probe reports for this
+ * reason, is that the quietest of the 3,618 vectors peaks at 0.278 -
+ * 94.8x below the global max - so it gets 285 int16 levels where the
+ * loudest gets 27,029. That spread vanishes in the normalisation; the
+ * 285 does not. Re-run the probe on any checkpoint before trusting
+ * either number, and read lz_conv_o_clamped after, because the clamp
+ * is silent everywhere else. */
+#ifndef LZ_CONVO_ES
+#define LZ_CONVO_ES 10
+#endif /* LZ_CONVO_ES */
+/* v GETS ITS OWN, and the first version of this did not - it reused
+ * q and k's 10, which is choosing a constant on a distribution nobody
+ * measured. v's max is 4.5376 against q's 26.3953, so 10 left it at
+ * 4,645 of the 32,767 available and threw away 2.8 bits; 12 is the
+ * largest with zero clamps (13 clips 16 samples). Its spread is also
+ * far tighter - the quietest vector peaks 12.4x below the largest,
+ * against q's 94.8x - which is why it can afford the full range. */
+#ifndef LZ_CONVO_V_ES
+#define LZ_CONVO_V_ES 12
+#endif /* LZ_CONVO_V_ES */
+#ifndef LZ_CONVO_I16
+#define LZ_CONVO_I16 1
+#endif /* LZ_CONVO_I16 */
+
+/* The per-channel exponent table's call-site accessor. A macro rather
+   than a plain `s->conv_sig_e + off` because the =0 build never
+   allocates the array, and `NULL + off` is undefined even where nothing
+   dereferences it - the kernel's own parameter is unread in that arm. */
+#if LZ_CONV_SIG_I
+#define LZ_CONV_SIG_E(s, off) ((s)->conv_sig_e + (off))
+#else
+#define LZ_CONV_SIG_E(s, off) ((const signed char *)0)
+#endif /* LZ_CONV_SIG_I */
+
+/* ---- q16_0's four int16 exits (int-pipeline milestone 5) -------------
+ *
+ * Every q16_0 role on this checkpoint - kda_b_proj, moe_gate_w,
+ * kda_f_a_proj, kda_f_b_proj - now leaves lz_matmul_xq_nt_i16 as an
+ * int16 at a fixed exponent instead of a float the consumer immediately
+ * takes apart again. Each pair below is one chain: _I16 turns it off for
+ * a control build, _ES is the exponent, i.e. the number of FRACTIONAL
+ * bits (value == q * 2^-ES), the convention epi_align_i16's target_e
+ * uses.
+ *
+ * The exponents are measured, not chosen, exactly like LZ_CONV_ES above
+ * (.prof/m5range.c on kmr20, both gate corpora, 603/661 tokens). Each is
+ * the LARGEST that clamps nothing, since the clamp is silent:
+ *
+ * Measured max |q| at the shipping ES, from an instrumented build's
+ * pre-clamp counter, 0 clamps everywhere on both corpora. It aggregates
+ * by weight SHAPE, so bvec and the router share a row - they are both
+ * 512x16 gs=512 - and the max in it is the router's (its |x| runs to
+ * 10.2 against bvec's 6.7, .prof/m5range.c):
+ *
+ *   shape             ES     bound     max |q| zh / en    headroom
+ *   512x16  (bvec,
+ *            moe gate) 11    24,576     21,013 / 20,904     1.17x
+ *   512x64  gate_lat   10    32,767     21,288 / 17,963     1.54x
+ *   64x1024 kda_gate    9    32,767     15,624 / 14,295     2.10x
+ *
+ * bvec and the router are the two whose consumer is lz_sigmoid, and
+ * their bound is NOT int16's edge but the sigmoid table's own
+ * (lz_sig_q15_domain, |x| = 12): past it sigmoid_q15 already returns a
+ * constant, so clamping there adds no behaviour rather than adding a
+ * silent one. Their headroom figure is therefore informational; the
+ * other two clamp at a plain int16 edge and theirs is not.
+ *
+ * kda_gate is at 9 rather than the 10 that would have been the largest
+ * non-clamping value, and that is a measurement: ES = 10 leaves 1.05x
+ * of headroom against a SILENT clamp, and paired NLL cannot tell the two
+ * apart (zh t +0.417 at 10 vs -0.131 at 9, en +1.396 vs +0.763, both
+ * arms against the same float control, n = 602/660). Given a tie on
+ * quality, the exponent with twice the headroom is the one to ship.
+ * Re-run .prof/m5range.c on any checkpoint whose gate projection might
+ * be scaled differently. */
+#ifndef LZ_BVEC_I16
+#define LZ_BVEC_I16 1
+#endif /* LZ_BVEC_I16 */
+#ifndef LZ_BVEC_ES
+#define LZ_BVEC_ES 11
+#endif /* LZ_BVEC_ES */
+
+#ifndef LZ_MOEGATE_I16
+#define LZ_MOEGATE_I16 1
+#endif /* LZ_MOEGATE_I16 */
+#ifndef LZ_MOEGATE_ES
+#define LZ_MOEGATE_ES 11
+#endif /* LZ_MOEGATE_ES */
+
+#ifndef LZ_KLAT_I16
+#define LZ_KLAT_I16 1
+#endif /* LZ_KLAT_I16 */
+#ifndef LZ_KLAT_ES
+#define LZ_KLAT_ES 10
+#endif /* LZ_KLAT_ES */
+
+#ifndef LZ_KGATE_I16
+#define LZ_KGATE_I16 1
+#endif /* LZ_KGATE_I16 */
+#ifndef LZ_KGATE_ES
+#define LZ_KGATE_ES 9
+#endif /* LZ_KGATE_ES */
+
+/* The decay gate's two transcendentals in the integer domain, on top of
+   the int16 exit above. LZ_KGATE_I16 delivered `pre` as an integer and
+   then spent nine semantic conversions per element getting from it to
+   gt: one for the sigmoid's float coordinate, three inside
+   sigmoid_q15_t taking that coordinate apart again, one for the Q15
+   descale, and four in lz_exp_fixed (two i2f plus its magic floor and
+   q8_round, neither of which emits a cvt but both of which are a full
+   soft-float add on a machine with no FPU). sigmoid_q15_ti and lz_exp_t
+   take the two folded integer coordinates instead and leave ONE - the
+   int->float on lz_exp_t's own exit, which stands until gt itself stops
+   being a float array.
+
+   0 is the control arm: it keeps the float-coordinate chain, which is
+   also the arm that runs whenever the scalar transcendental tier is off
+   (lz_exp_t is lz_exp_fixed's twin, not lz_exp's) or a fold refuses. */
+#ifndef LZ_KGATE_EXP_I
+#define LZ_KGATE_EXP_I 1
+#endif /* LZ_KGATE_EXP_I */
+
+/* ---- the MoE latent's int16 exit (int-pipeline milestone 6) ----------
+ *
+ * moe_down_proj is the tree's one Q8_0 producer whose consumer is an
+ * activation quantize, so it is the first caller of
+ * epi_fixed_align_i16's Q8_0 half - delivered in batch 1, verified
+ * standalone, and until now reached only by q16_0. Same _I16 / _ES pair
+ * shape as the four chains above and the same conventions.
+ *
+ * MEASURED, both gate corpora on kmr20, instrumented shipping build
+ * (1.23M / 1.35M latent elements): max |x| 9.270 / 10.126, so ES = 11
+ * is the largest that clamps nothing - ES = 12 clamps 75 / 67.
+ *
+ * It ships at 10, one lower, for the reason LZ_KGATE_ES is: 11 leaves
+ * 1.58x of headroom against a SILENT clamp and paired NLL cannot tell
+ * the two apart - zh t -1.190 at 11 vs -0.804 at 10, en +1.552 vs
+ * +1.077, both arms against the same pre-change control, n = 602/660,
+ * with argmax and top-5 agreement swapping which one leads. Given a
+ * tie on quality, the exponent with twice the headroom (3.16x) ships.
+ *
+ * Unlike the four q16_0 chains, this one also has a per-GROUP precision
+ * question, because the consumer is a per-32 activation quantize and a
+ * group whose amax lands near the bottom of int16 would reach int8 with
+ * fewer than 127 levels available. Measured over the same runs: the
+ * SMALLEST 32-element group amax is 0.385 / 0.549, i.e. 394 / 562 at
+ * the shipping ES, 3.1x above the 127 the int8 output needs, and no
+ * group on either corpus falls under 128. So the shared exponent costs
+ * the consumer nothing here; re-measure it on a checkpoint whose latent
+ * might be scaled differently. */
+#ifndef LZ_MLAT_I16
+#define LZ_MLAT_I16 1
+#endif /* LZ_MLAT_I16 */
+
+/* The expert loop's hoisted activation quantize: reuse the previous
+   expert's result when the group size has not changed. A separate axis
+   from LZ_MLAT_I16 because it is a separate saving that happens to have
+   arrived in the same commit - it is worth more than the int16 exit and
+   is value-neutral, while the exit alone is a small regression. Without
+   its own switch neither half's contribution can be rebuilt, which is
+   how "measured -4,224/token" becomes a number nobody can reproduce. */
+#ifndef LZ_MLAT_REUSE
+#define LZ_MLAT_REUSE 1
+#endif /* LZ_MLAT_REUSE */
+#ifndef LZ_MLAT_ES
+#define LZ_MLAT_ES 10
+#endif /* LZ_MLAT_ES */
+
+/* ---- the V projection's int16 exit (int-pipeline milestone 7) --------
+ *
+ * v_proj is the only matmul left in this file whose output goes into an
+ * activation quantize with no float operation in between: the KV cache
+ * write IS its consumer, so lz_quantize_q8_i16 serves it the way it
+ * already serves the MoE latent. Same _I16 / _ES pair, same conventions.
+ * Every other remaining consumer either needs a float by construction (a
+ * residual add, an RMSNorm, RoPE, the logits' softmax, the routed
+ * mixture's float weight) or needs a fixed-point kernel this tree does
+ * not have (the gated norm's gate; the SwiGLU pair got one in milestone
+ * 8, below).
+ *
+ * The exit is refused whenever anything else reads the float row: the
+ * Hadamard rotation (kv_rot_v), the f32 reference plane (--kv f32) and
+ * the 4-bit plane (--kv q4) all take vtt apart element by element. That
+ * is the same set --attn-int already refuses on, for the same reason.
+ *
+ * MEASURED, both gate corpora on kmr20 AND kunmoe-v2-t2-probe (v_proj is
+ * q6_1 on the first and t2 on the second, so both epilogue families are
+ * covered), instrumented build over 308,736 / 338,432 v elements:
+ * max |v| 6.42 / 6.79 (kmr20) and 6.99 / 6.80 (t2-probe), so ES = 12 is
+ * the largest that clamps nothing against the int16 edge.
+ *
+ * It ships at 11, one lower, for the reason LZ_MLAT_ES does: the clamp
+ * is silent, 11 leaves 2.29x of headroom against 12's 1.14x, and paired
+ * NLL cannot tell the two apart. The per-GROUP question the consumer
+ * raises - a 32-element group whose amax lands near the bottom of int16
+ * reaches int8 with fewer than 127 levels - is measured the same way:
+ * the SMALLEST group amax over those runs is 0.4157, i.e. 851 at the
+ * shipping ES, 6.7x above the 127 the int8 cache needs, and no group on
+ * either corpus or either model falls under 128. */
+#ifndef LZ_VPROJ_I16
+#define LZ_VPROJ_I16 1
+#endif /* LZ_VPROJ_I16 */
+#ifndef LZ_VPROJ_ES
+#define LZ_VPROJ_ES 11
+#endif /* LZ_VPROJ_ES */
+
+/* ---- the SwiGLU pair's int16 exits (int-pipeline milestone 8) --------
+ *
+ * silu(p)*g was the largest remaining block of conversions in the
+ * engine: the two producing matmuls each materialize a float
+ * (epi_q41_fixed's `(float)comb * pow2f(target)`, one cvt per element),
+ * lz_sigmoid converts once more to leave sigmoid_q15's table and
+ * sigmoid_q15 itself measures 2.975 converts per call deriving the table
+ * coordinate from a float, and the product then goes back to int through
+ * lz_quantize_q8's SIMD round. lz_swiglu_q15_i16 (src/ops.c) removes all
+ * four: with p and g arriving as int16, sigmoid_q15_i reads p's bits and
+ * the whole chain from the two matmuls to lz_quantize_q8_i16 stays
+ * integer.
+ *
+ * ONE switch for the two MoE sites, not one per site: they are the same
+ * mechanism on the same models, reached by the same helper, and neither
+ * would ever be enabled without the other - what the switch selects is
+ * the saving, and the saving is one. The dense FFN's site is NOT here;
+ * see forward_ffn.
+ *
+ * THREE exponents, all measured (.prof/m8range.c, both gate corpora on
+ * kmr20 AND kunmoe-v2-t2-probe - w1/w3 are q4_1+q6_1 on the first and
+ * q8_0 on the second, so both epilogue families are covered). Largest ES
+ * that clamps NOTHING, per run, worst case across all four:
+ *
+ * PER SITE, because the two sites do not agree and one constant per role
+ * has to take the smaller of them:
+ *
+ *   role              kmr20 zh/en   t2probe zh/en   worst
+ *   routed p  (w1)     12 / 12        12 / 11        11
+ *   shared p  (gate)   12 / 11        12 / 12        11
+ *   routed g  (w3)     14 / 13        13 / 13        13
+ *   shared g  (up)     12 / 12        13 / 13        12
+ *   routed out         13 / 12        11 / 11        11
+ *   shared out         11 / 11        12 / 12        11
+ *
+ * so the shipping p 11 / g 12 / out 11 is each role's worst case exactly,
+ * with none of the three dropped an extra octave the way LZ_KGATE_ES and
+ * LZ_VPROJ_ES were. That is a deliberate difference: a step down costs a
+ * bit on every element of a chain already three roundings deep, and what
+ * replaces the extra octave here is a live probe instead of an argument.
+ * lz_debug_swiglu_pmax/_gmax/_omax carry the post-clamp maxima and the
+ * CLI prints them - a maximum strictly below 32767 is the proof that
+ * nothing clamped, since the clamp inside epi_align_i16 is silent.
+ * Measured over both corpora on both models: 17,377 / 22,582 / 26,691,
+ * i.e. 1.89x / 1.45x / 1.23x of margin. Re-run .prof/m8range.c on any
+ * checkpoint whose FFN might be scaled differently, and read those three
+ * on any run that matters.
+ *
+ * The sigmoid table's own edge is a non-event here and that is measured
+ * too: |p| never reaches 12 on either model or either corpus (0 of
+ * 8,644,608 routed and 0 of 2,469,888 shared elements), so sigmoid_q15_i
+ * runs its interpolation on every element rather than its clamp. Its
+ * domain cap (e <= 27, past which it reconstructs a float) is not
+ * reachable either: ep is a compile-time 11. */
+#ifndef LZ_SWIGLU_I16
+#define LZ_SWIGLU_I16 1
+#endif /* LZ_SWIGLU_I16 */
+#ifndef LZ_SWIGLU_ES_P
+#define LZ_SWIGLU_ES_P 11
+#endif /* LZ_SWIGLU_ES_P */
+#ifndef LZ_SWIGLU_ES_G
+#define LZ_SWIGLU_ES_G 12
+#endif /* LZ_SWIGLU_ES_G */
+#ifndef LZ_SWIGLU_ES_O
+#define LZ_SWIGLU_ES_O 11
+#endif /* LZ_SWIGLU_ES_O */
+/* Debug counters defined in forward.c, read by cli_main.c and by the
+   attn helpers in forward_attn.c. */
+extern lz_i64 lz_debug_attn_skip;
+extern lz_i64 lz_debug_n_kv_rot;
+extern int   lz_debug_mtp_attn_window;
+extern lz_i64 lz_debug_mtp_attn_rows;
+extern lz_i64 lz_debug_vproj_i16;
 
 /* KV cache formats, selectable independently for keys and values
    (--kv / --kv-k / --kv-v). See LZRunState's kfmt field. */
@@ -59,6 +404,34 @@
 #define LZ_PROF_REC    5   /* within LIN  */
 #define LZ_PROF_ACT    6   /* within FFN  */
 #define LZ_PROF_N      7
+
+extern int lz_prof_enable;
+extern double lz_prof_us[LZ_PROF_N];
+
+/* 1000.0 (ms -> us) is exact in any float width, so this cannot change
+   what these debug counters measure - but `static const double`, not an
+   inline literal, keeps every site below on the same footing as
+   ops.c's LZ_EXP_LOG2E32 (that comment has the mechanism) rather than
+   leaving an unexplained exception in tests/test_excess_precision.py. */
+static const double LZ_US_SCALE = 1000.0;
+
+/* The start time is a LOCAL, not a file-static. A file-static would be
+   shared across nested phases: the recurrence timer - which nests inside
+   the linear one - would overwrite the outer start, so `linear` would
+   report only the tail after the last inner call and the total would
+   come out 25%% short. Phases that nest are reported INCLUSIVE, with
+   the inner one also listed on its own. */
+/* Declares AND assigns, so it can only appear where a declaration is
+   legal. Under C89 that is the top of a block, and none of the six call
+   sites is there - Visual C++ 4.0 turns each into an error and gcc only
+   warns, which is why they survived. Splitting it into a declaration
+   half and an assignment half is the fix, and it has to land in the
+   same edit as the six declarations it needs at the call sites: the
+   macro alone leaves every _t* undeclared. */
+#define LZ_PROF_DECL(v) double v = 0.0
+#define LZ_PROF_BEG(v) v = lz_prof_enable ? lz_time_ms() : 0.0
+#define LZ_PROF_END(v, slot) do { if (lz_prof_enable) \
+    lz_prof_us[slot] += (lz_time_ms() - (v)) * LZ_US_SCALE; } while (0)
 
 /* Single-step forward and runtime state for Qwen3.5 (M4.5).
 
@@ -694,6 +1067,55 @@ typedef struct {
        argument. */
     LZInspect *ins;
 } LZRunState;
+
+/* Attn helper signatures (src/forward_attn.c), shared with the paths
+   still in forward.c. Declared here rather than at the top because they
+   take LZRunState, whose typedef sits above. */
+void wsum_q8_row(float *dst, const int8_t *vt, const float *vts, float a, int hd);
+float score_q8_row(const float *qhh, const int8_t *kt, const float *kts, int hd);
+int kv_slot_next(const LZRunState *s, int slot);
+int kv_slot(const LZRunState *s, int t);
+int scale_groups(int n, int gs);
+int ring_slot_next(int slot, int depth);
+void attn_wsum_plane(LZRunState *s, float *dst, const int8_t *vplane,
+                     const float *vs, int hd, int kvd, int kvh, int pos,
+                     int walk_t0, int noring, int dead0, int dead1);
+void rot_head(float *v, int hd, int n);
+void forward_attn(const LZModel *m, LZRunState *s,
+                  const LZLayer *L, int layer, int pos0, int nt);
+/* forward_kda's projection, called from forward_attn's o-projection tail. */
+void kda_i16_proj(LZRunState *s, int may_int, int *wrote_int,
+                  float *of, short *oi,
+                  const float *x, const LZTensor *w,
+                  int in_dim, int out_dim, int nt,
+                  int target_e, int bound);
+/* MoE path (src/forward_moe.c): forward_moe is called from lz_forward; the
+   two router knobs and the latent counters are defined in forward.c. */
+void forward_moe(const LZModel *m, LZRunState *s,
+                 const LZLayer *L, int layer, int nt);
+extern int   lz_moe_topk;
+extern float lz_moe_tau;
+extern lz_i64 lz_debug_mlat_i16;
+extern lz_i64 lz_debug_mlat_quant;
+/* KDA-path counters, read by cli_main.c and written by forward_kda.c. */
+extern lz_i64 lz_debug_bvec_i16;
+extern lz_i64 lz_debug_klat_i16;
+extern lz_i64 lz_debug_kgate_exp_i;
+extern lz_i64 lz_debug_kgate_fold_no;
+extern int   lz_debug_kgate_exp_s;
+extern int   lz_debug_kgate_sig_slo;
+extern int   lz_debug_kgate_sig_shi;
+/* SSM path (src/forward_ssm.c): forward_ssm is called from lz_forward. */
+void forward_ssm(const LZModel *m, LZRunState *s,
+                 const LZLayer *L, int layer, int nt,
+                 int advance_ring, int ring_base);
+/* KDA + dense-FFN paths (src/forward_kda.c), called from lz_forward /
+   lz_mtp_draft_step. */
+void forward_kda(const LZModel *m, LZRunState *s,
+                 const LZLayer *L, int layer, int nt,
+                 int advance_ring, int ring_base);
+void dense_ffn_step(const LZModel *m, LZRunState *s,
+                    const LZLayer *L, int layer, int nt, int idim);
 
 /* Snapshot of the position-carrying RECURRENT state, for reusing a
    conversation prefix across turns instead of re-forwarding it.

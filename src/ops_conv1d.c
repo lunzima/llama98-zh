@@ -158,12 +158,8 @@ static int conv_pow2_exp(float v, int32_t *k) {
 void lz_causal_conv1d_step_fixed_o16(float *o, short *oi, int out_es,
                                  const float *x, const short *xi,
                                  const short *sh_in, short *sh_out,
-                                 const short *mw, const float *sig_k1,
-                                 const float *sig_oscale2, float sig_k2,
-                                 const signed char *sig_e,
-                                 float in_scale, int bound,
-                                 int n_ch, int k) {
-    int hist = k - 1;
+                                 const LZConvParams *cp, int n_ch) {
+    int hist = cp->k - 1;
     int c, j;
 #if defined(LZ_ARM_PRIM_ASM)
     /* Hoisted, not per channel: the tier is fixed for the whole call and
@@ -175,7 +171,7 @@ void lz_causal_conv1d_step_fixed_o16(float *o, short *oi, int out_es,
     /* The folded float coordinate's two factors, unread here and kept in
        the signature for the =0 arm below - the caller builds both tables
        and one build must not need a different call shape from the other. */
-    (void)sig_k1; (void)sig_k2;
+    (void)cp->sig_k1; (void)cp->sig_k2;
     /* Per channel: input multiply (1), lz_i32f (1 cvt), the exit cast
        (1 cvt) and sig_oscale2 multiply (1), and the final product (1) =
        3 mul, 0 add, 2 cvt. The float entry's own three - sig_k1 multiply,
@@ -199,7 +195,7 @@ void lz_causal_conv1d_step_fixed_o16(float *o, short *oi, int out_es,
                (long)n_ch * 2, 0);
     lz_debug_conv_sig_i += n_ch;
 #else
-    (void)sig_e;   /* the integer coordinate's table, unread in this arm */
+    (void)cp->sig_e;   /* the integer coordinate's table, unread in this arm */
     /* Per channel: input multiply (1), lz_i32f (1 cvt), sig_k1 multiply
        + sig_k2 add (the folded entry, 1 mul + 1 add), sigmoid_q15_t's
        own frac-interpolation multiply (1, not itemized here, same
@@ -218,15 +214,15 @@ void lz_causal_conv1d_step_fixed_o16(float *o, short *oi, int out_es,
     for (c = 0; c < n_ch; c++) {
         const short *si = sh_in + (size_t)c * hist;
         short *so = sh_out + (size_t)c * hist;
-        const short *wr = mw + (size_t)c * k;
+        const short *wr = cp->mw + (size_t)c * cp->k;
         int acc = 0, q;
         if (xi) {
             q = xi[c];
         } else {
-            float t = x[c] * in_scale;
+            float t = x[c] * cp->in_scale;
             q = q8_round(t);
-            if (q > bound) q = bound;
-            if (q < -bound) q = -bound;
+            if (q > cp->bound) q = cp->bound;
+            if (q < -cp->bound) q = -cp->bound;
         }
         for (j = 0; j < hist; j++) acc += (int)wr[j] * (int)si[j];
         acc += (int)wr[hist] * q;
@@ -236,7 +232,7 @@ void lz_causal_conv1d_step_fixed_o16(float *o, short *oi, int out_es,
                the exponent lz_sig_q15_fold turned into 2^(4-e) for the
                float entry), so the table index comes out of acc's own
                bits and the coordinate costs nothing. */
-            int32_t s15 = sigmoid_q15_i(acc, sig_e[c]);
+            int32_t s15 = sigmoid_q15_i(acc, cp->sig_e[c]);
             int done = 0;
             /* INT16 EXIT, and there is no float anywhere in it. The
                output is acc * s15 * sig_oscale2[c], and sig_oscale2 is
@@ -257,7 +253,7 @@ void lz_causal_conv1d_step_fixed_o16(float *o, short *oi, int out_es,
                same trap LZ_CONV_ES's own comment names. */
             if (oi) {
                 lz_i64 p = (lz_i64)acc * (lz_i64)s15;
-                lz_i64 r = epi_shr_half(p, (int)sig_e[c] + 15 - out_es);
+                lz_i64 r = epi_shr_half(p, (int)cp->sig_e[c] + 15 - out_es);
                 if (r > 32767)       { r = 32767;  lz_conv_o_clamped++; }
                 else if (r < -32767) { r = -32767; lz_conv_o_clamped++; }
                 oi[c] = (short)r;
@@ -287,7 +283,7 @@ void lz_causal_conv1d_step_fixed_o16(float *o, short *oi, int out_es,
             if (prim) {
                 union { float f; uint32_t u; } ab, pb;
                 int32_t oe;
-                if (conv_pow2_exp(sig_oscale2[c], &oe)) {
+                if (conv_pow2_exp(cp->sig_oscale2[c], &oe)) {
                     ab.f = lz_i32f_arm_asm(acc);
                     if (lz_scale2_arm_asm(ab.u, oe, &pb.u)) {
                         o[c] = pb.f * lz_i32f_arm_asm(s15);
@@ -296,7 +292,7 @@ void lz_causal_conv1d_step_fixed_o16(float *o, short *oi, int out_es,
                 }
             }
 #endif /* LZ_ARM_PRIM_ASM */
-            if (!done) o[c] = (lz_i32f(acc) * sig_oscale2[c]) * (float)s15;
+            if (!done) o[c] = (lz_i32f(acc) * cp->sig_oscale2[c]) * (float)s15;
 #else /* !LZ_CONV_SIG_I */
             int done = 0;
 #if defined(LZ_ARM_PRIM_ASM)
@@ -338,8 +334,8 @@ void lz_causal_conv1d_step_fixed_o16(float *o, short *oi, int out_es,
             if (prim) {
                 union { float f; uint32_t u; } ab, xb, pb;
                 int32_t ke, oe;
-                if (conv_pow2_exp(sig_k1[c], &ke) &&
-                    conv_pow2_exp(sig_oscale2[c], &oe)) {
+                if (conv_pow2_exp(cp->sig_k1[c], &ke) &&
+                    conv_pow2_exp(cp->sig_oscale2[c], &oe)) {
                     ab.f = lz_i32f_arm_asm(acc);
                     if (lz_scale2_arm_asm(ab.u, ke - 4, &xb.u) &&
                         lz_scale2_arm_asm(ab.u, oe, &pb.u)) {
@@ -351,8 +347,8 @@ void lz_causal_conv1d_step_fixed_o16(float *o, short *oi, int out_es,
 #endif /* LZ_ARM_PRIM_ASM */
             if (!done) {
                 float acc_f = lz_i32f(acc);
-                int32_t s15 = sigmoid_q15_t(acc_f * sig_k1[c] + sig_k2);
-                o[c] = (acc_f * sig_oscale2[c]) * (float)s15;
+                int32_t s15 = sigmoid_q15_t(acc_f * cp->sig_k1[c] + cp->sig_k2);
+                o[c] = (acc_f * cp->sig_oscale2[c]) * (float)s15;
             }
 #endif /* LZ_CONV_SIG_I */
         }
@@ -368,9 +364,12 @@ void lz_causal_conv1d_step_fixed(float *o, const float *x, const short *xi,
                                  const signed char *sig_e,
                                  float in_scale, int bound,
                                  int n_ch, int k) {
+    LZConvParams cp;
+    cp.mw = mw; cp.sig_k1 = sig_k1; cp.sig_oscale2 = sig_oscale2;
+    cp.sig_k2 = sig_k2; cp.sig_e = sig_e;
+    cp.in_scale = in_scale; cp.bound = bound; cp.k = k;
     lz_causal_conv1d_step_fixed_o16(o, (short *)0, 0, x, xi, sh_in, sh_out,
-                                    mw, sig_k1, sig_oscale2, sig_k2, sig_e,
-                                    in_scale, bound, n_ch, k);
+                                    &cp, n_ch);
 }
 
 /* Build the per-channel output scale 2^-(ew[c]+es) and the input scale

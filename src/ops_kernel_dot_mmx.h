@@ -361,6 +361,41 @@ int32_t dot32_t2_mmx(const unsigned char *w2, const int16_t *x) {
     return _mm_cvtsi64_si32(acc);
 }
 
+/* Two tokens against one ternary unpack, gcc side only. The C intrinsic
+   _mm_madd_pi16 takes its operands read-only, so the unpacked weight `t`
+   stays live across both tokens' multiplies and needs no copy. Bit-
+   identical to two dot32_t2_mmx calls by construction: the same eight
+   groups per token into that token's own accumulator, no reassociation
+   across the pair. The Watcom twin is NOT written: its pmaddwd destroys
+   the unpack register, so sharing it there costs a movq per group plus
+   two more accumulators than eight %mm hold. */
+void dot32_t2_mmx_2(const unsigned char *w2, const int16_t *xa, const int16_t *xb,
+                    int32_t *oa, int32_t *ob) {
+    __m64 sa = _mm_setzero_si64(), sb = _mm_setzero_si64();
+    __m64 pl  = *(const __m64 *)(const void *)w2;
+    int gi;
+    static const struct { int xoff, hi, sh; } G[8] = {
+        {  0, 0, 0 }, {  4, 1, 0 },
+        {  8, 0, 2 }, { 12, 1, 2 },
+        { 16, 0, 4 }, { 20, 1, 4 },
+        { 24, 0, 6 }, { 28, 1, 6 }
+    };
+    for (gi = 0; gi < 8; gi++) {
+        __m64 z  = _mm_setzero_si64();
+        __m64 t  = G[gi].hi ? _mm_unpackhi_pi8(z, pl)
+                            : _mm_unpacklo_pi8(z, pl);
+        if (6 - G[gi].sh) t = _mm_slli_pi16(t, 6 - G[gi].sh);
+        t = _mm_srli_pi16(t, 14);
+        t = _mm_slli_pi16(t, 8);
+        sa = _mm_add_pi32(sa, _mm_madd_pi16(t, *(const __m64 *)(const void *)(xa + G[gi].xoff)));
+        sb = _mm_add_pi32(sb, _mm_madd_pi16(t, *(const __m64 *)(const void *)(xb + G[gi].xoff)));
+    }
+    sa = _mm_add_pi32(sa, _mm_srli_si64(sa, 32));
+    sb = _mm_add_pi32(sb, _mm_srli_si64(sb, 32));
+    *oa = (int32_t)_mm_cvtsi64_si32(sa);
+    *ob = (int32_t)_mm_cvtsi64_si32(sb);
+}
+
 /* T2 over a 128-element group, MMX tier - the %mm twin of
    dot128_t2_sse2, and it pays for the same reason: the horizontal fold,
    not the unpack.

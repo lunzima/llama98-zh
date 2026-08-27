@@ -907,54 +907,59 @@ static char **utf8_argv(int *argc) {
 #include "cli_argv.h"
 #endif /* _WIN32 || __DOS__ */
 
-/* Shared state for the CLI's four stages, extracted from main() so each
-   stage is a static helper taking this one pointer instead of ~30
-   by-pointer parameters. Single-threaded frontend: one instance, on
-   main()'s own stack (the big per-stage buffers stay static inside their
-   helpers, not here - see those helpers' own comments). */
-typedef struct {
+int main(int argc, char **argv) {
     LZModel m;
     LZTokenizer tok;
-    const char *dir;
-    const char *prompt;
-    const char *tok_path;
-    const char *dump_path;
-    const char *nll_path;
-    const char *all_path;
-    const char *prompt_tok_path;
-    const char *top5_path;
-    int only_check, list_tensors, want_stats, only_layer;
-    int *tokens, n_tokens, topk;
-    int n_gen;                  /* -n new tokens for generation */
-    int ctx_limit;
-    int batch_width;
-    int think, no_eos, interactive, chat;
-    int beep;                   /* --no-beep clears it; see beep.h */
-    int ckpt_on;                /* --no-ckpt turns prefix reuse off (A/B knob) */
+    /* Zeroed up front so the single `cleanup:` tail below can free them
+       from ANY error point, including the ones before lz_open / before
+       lz_tokenizer_load ever ran. lz_free and lz_tokenizer_free are both
+       safe on a zeroed struct (each frees NULL and re-zeroes), so one
+       shared tail suffices for every error point. */
+    /* static, not stack: the target is Win98 and
+       this frame is the base of the CLI stack. Single-threaded, written
+       by the callee before it is read, so one instance is enough. */
+    static char err[1024];
+    const char *dir = NULL;
+    const char *prompt = NULL;
+    const char *tok_path = NULL;
+    const char *dump_path = NULL;
+    const char *nll_path = NULL;
+    const char *all_path = NULL;
+    const char *prompt_tok_path = NULL;
+    const char *top5_path = NULL;
+    float *nll = NULL;
+    FILE *af = NULL;    /* --dump-all-logits stream, fclosed after the loop */
+    FILE *tf = NULL;    /* --dump-top5 stream, same lifetime as af */
+    int only_check = 0, list_tensors = 0, want_stats = 0, only_layer = -1;
+    int *tokens = NULL, n_tokens = 0, topk = 5;
+    int n_gen = 0;                  /* -n new tokens for generation */
+    int ctx_limit = LZ_DEFAULT_CTX;
+    /* 0 = leave lz_state_alloc's default (LZ_BATCH_DEFAULT). A sweep
+       knob, not a tuning suggestion: see LZ_BATCH_MAX in ops.h. */
+    int batch_width = 0;
+    int think = 0, no_eos = 0, interactive = 0, chat = 0;
+    int beep = 1;       /* --no-beep clears it; see beep.h for the sound */
+    /* Which sampling fields the user set EXPLICITLY with a -- flag, as a
+       bit mask. The think preset would otherwise overwrite them: it runs
+       AFTER the parse loop and rewrites the whole sampling block, so a
+       `--think --temp 0.9` today silently becomes 0.6 - the same defect
+       the GUI fixed with manual_temp/manual_topp (common/settings.h).
+       The GUI keeps one flag per preset-following field; the CLI has a
+       WIDER sampling surface (--topk --minp --presence ... each
+       overrides a think-preset value too), so it needs one bit per
+       field rather than one flag for the two the GUI exposes. Same rule,
+       carried to the larger surface: a value the user typed survives the
+       preset, whatever order the flags arrived in. The LZ_MANUAL_* bits
+       themselves live in sampler.h, next to lz_sample_apply_think_preset. */
+    unsigned int manual = 0;
+    int ckpt_on = 1;    /* --no-ckpt turns prefix reuse off (A/B knob) */
     LZGenOpts g;
     LZModelConfig *cfg;
-    int i, rc;
-} CliMain;
+    int i, rc = 0;
+    double t0, t1;
 
-/* What main() should do after a post-parse stage returns: fall through
-   to the next stage, jump to fail (rc = 1), or jump to cleanup (free +
-   exit). */
-enum { CLI_NEXT = 0, CLI_FAIL = 1, CLI_CLEANUP = 2 };
-
-/* The one error buffer, moved out of main() so every stage helper can
-   report into it exactly the way main() did. Still static, still
-   single-threaded, still written by the callee before it is read. */
-static char err[1024];
-
-/* Stage 1: argument parsing. Everything from the CPU-floor check through
-   the post-parse validation and the think preset. Returns -1 on success
-   (main() falls through to model load), or a non-negative process exit
-   code to return immediately - the same values the inline form's many
-   early `return`s carried. argc/argv are taken by value: the argv
-   re-decode below reassigns them locally, and nothing past this stage
-   reads argv again. */
-static int cli_parse_args(CliMain *s, int argc, char **argv) {
-    unsigned int manual = 0;
+    memset(&m, 0, sizeof m);
+    memset(&tok, 0, sizeof tok);
 
     lz_init_stdout();
     lz_attr_mode("auto");
@@ -970,7 +975,7 @@ static int cli_parse_args(CliMain *s, int argc, char **argv) {
         return 1;
     }
 
-    lz_gen_opts_defaults(&s->g);
+    lz_gen_opts_defaults(&g);
 
     /* --console IS PARSED FIRST, before the argv re-decode below and
        before the main loop. It has to be: the re-decode reads
@@ -978,10 +983,10 @@ static int cli_parse_args(CliMain *s, int argc, char **argv) {
        read one pass too late and silently ignored. Scanning the RAW
        argv is safe - the flag and its values are ASCII, which is the
        one thing both code pages agree on. */
-    for (s->i = 1; s->i + 1 < argc; s->i++) {
-        if (strcmp(argv[s->i], "--console") != 0) continue;
-        if (strcmp(argv[s->i + 1], "gbk") == 0)       g_console_gbk = 1;
-        else if (strcmp(argv[s->i + 1], "utf8") == 0) g_console_gbk = 0;
+    for (i = 1; i + 1 < argc; i++) {
+        if (strcmp(argv[i], "--console") != 0) continue;
+        if (strcmp(argv[i + 1], "gbk") == 0)       g_console_gbk = 1;
+        else if (strcmp(argv[i + 1], "utf8") == 0) g_console_gbk = 0;
     }
 
 #if defined(_WIN32) && !defined(__WATCOMC__)
@@ -1027,8 +1032,8 @@ static int cli_parse_args(CliMain *s, int argc, char **argv) {
            lz_gbk_argv_convert's own shape: a command line mixing the
            two encodings is not a thing any single source produces. */
         int all_utf8 = 1;
-        for (s->i = 1; s->i < argc; s->i++)
-            if (!lz_utf8_valid(argv[s->i], (int)strlen(argv[s->i]))) {
+        for (i = 1; i < argc; i++)
+            if (!lz_utf8_valid(argv[i], (int)strlen(argv[i]))) {
                 all_utf8 = 0;
                 break;
             }
@@ -1039,22 +1044,22 @@ static int cli_parse_args(CliMain *s, int argc, char **argv) {
     }
 #endif /* _WIN32 || __DOS__ */
 
-    for (s->i = 1; s->i < argc; s->i++) {
-        const char *a = argv[s->i];
+    for (i = 1; i < argc; i++) {
+        const char *a = argv[i];
         /* Consumed here too, so it is not reported as unknown - the
            value was already read by the pre-scan above. */
-        if (strcmp(a, "--console") == 0 && s->i + 1 < argc) s->i++;
-        else if (strcmp(a, "--color") == 0 && s->i + 1 < argc) {
+        if (strcmp(a, "--console") == 0 && i + 1 < argc) i++;
+        else if (strcmp(a, "--color") == 0 && i + 1 < argc) {
             /* The mode actually in effect is what gets set, not the
                one asked for: "on" where stdout is not a console
                degrades to off. */
-            if (!lz_attr_mode(argv[++s->i])) {
+            if (!lz_attr_mode(argv[++i])) {
                 printf("--color: unknown mode (auto|on|off)\n");
                 return 2;
             }
         }
-        else if (strcmp(a, "--check") == 0)   s->only_check = 1;
-        else if (strcmp(a, "--tensors") == 0) s->list_tensors = 1;
+        else if (strcmp(a, "--check") == 0)   only_check = 1;
+        else if (strcmp(a, "--tensors") == 0) list_tensors = 1;
         else if (strcmp(a, "--pin-tiers") == 0) {
             /* For scripts. Every cross-target or cross-build comparison
                needs all AUTO tiers pinned, and transcribing the list
@@ -1182,30 +1187,30 @@ static int cli_parse_args(CliMain *s, int argc, char **argv) {
             }
             return 0;
         }
-        else if (strcmp(a, "--stats") == 0)   s->want_stats = 1;
-        else if (strcmp(a, "--layer") == 0 && s->i + 1 < argc)
-            s->only_layer = atoi(argv[++s->i]);
-        else if (strcmp(a, "--topk") == 0 && s->i + 1 < argc) {
-            s->topk = atoi(argv[++s->i]);        /* debug candidate count */
-            s->g.sample.topk = s->topk;          /* sampling top_k too */
+        else if (strcmp(a, "--stats") == 0)   want_stats = 1;
+        else if (strcmp(a, "--layer") == 0 && i + 1 < argc)
+            only_layer = atoi(argv[++i]);
+        else if (strcmp(a, "--topk") == 0 && i + 1 < argc) {
+            topk = atoi(argv[++i]);             /* debug candidate count */
+            g.sample.topk = topk;               /* sampling top_k too */
             manual |= LZ_MANUAL_TOPK;
         }
-        else if (strcmp(a, "--dump-logits") == 0 && s->i + 1 < argc)
-            s->dump_path = argv[++s->i];
-        else if (strcmp(a, "--dump-nll") == 0 && s->i + 1 < argc)
-            s->nll_path = argv[++s->i];
-        else if (strcmp(a, "--dump-all-logits") == 0 && s->i + 1 < argc)
-            s->all_path = argv[++s->i];
-        else if (strcmp(a, "--dump-top5") == 0 && s->i + 1 < argc)
-            s->top5_path = argv[++s->i];
-        else if (strcmp(a, "--dump-prompt-tokens") == 0 && s->i + 1 < argc)
-            s->prompt_tok_path = argv[++s->i];
-        else if (strcmp(a, "--tokens-file") == 0 && s->i + 1 < argc) {
+        else if (strcmp(a, "--dump-logits") == 0 && i + 1 < argc)
+            dump_path = argv[++i];
+        else if (strcmp(a, "--dump-nll") == 0 && i + 1 < argc)
+            nll_path = argv[++i];
+        else if (strcmp(a, "--dump-all-logits") == 0 && i + 1 < argc)
+            all_path = argv[++i];
+        else if (strcmp(a, "--dump-top5") == 0 && i + 1 < argc)
+            top5_path = argv[++i];
+        else if (strcmp(a, "--dump-prompt-tokens") == 0 && i + 1 < argc)
+            prompt_tok_path = argv[++i];
+        else if (strcmp(a, "--tokens-file") == 0 && i + 1 < argc) {
             /* A 4k-token id list is ~24 KB of argv, which several shells
                and Win98's command line will not carry. Same parser, the
                text just arrives from a file. */
             size_t tsz = 0;
-            char *tbuf = (char *)lz_read_file(argv[++s->i], &tsz, err, sizeof(err));
+            char *tbuf = (char *)lz_read_file(argv[++i], &tsz, err, sizeof(err));
             char *tstr;
             if (!tbuf) { printf("--tokens-file: %s\n", err); return 2; }
             /* lz_read_file allocates EXACTLY size bytes and does not
@@ -1225,111 +1230,111 @@ static int cli_parse_args(CliMain *s, int argc, char **argv) {
             memcpy(tstr, tbuf, tsz);
             tstr[tsz] = '\0';
             free(tbuf);
-            s->n_tokens = parse_tokens(tstr, &s->tokens);
+            n_tokens = parse_tokens(tstr, &tokens);
             free(tstr);
-            if (s->n_tokens <= 0) { printf("--tokens-file: parse error\n"); return 2; }
+            if (n_tokens <= 0) { printf("--tokens-file: parse error\n"); return 2; }
         }
-        else if (strcmp(a, "--tokens") == 0 && s->i + 1 < argc) {
-            s->n_tokens = parse_tokens(argv[++s->i], &s->tokens);
-            if (s->n_tokens <= 0) {
+        else if (strcmp(a, "--tokens") == 0 && i + 1 < argc) {
+            n_tokens = parse_tokens(argv[++i], &tokens);
+            if (n_tokens <= 0) {
                 printf("--tokens: parse error\n");
                 return 2;
             }
         }
         else if (strcmp(a, "-i") == 0 || strcmp(a, "--interactive") == 0)
-            s->interactive = 1;
+            interactive = 1;
         else if (strcmp(a, "--chat") == 0)
-            s->chat = 1;
-        else if (strcmp(a, "--prompt") == 0 && s->i + 1 < argc) {
-            s->prompt = argv[++s->i];
-            if (s->n_gen == 0) s->n_gen = 128;
+            chat = 1;
+        else if (strcmp(a, "--prompt") == 0 && i + 1 < argc) {
+            prompt = argv[++i];
+            if (n_gen == 0) n_gen = 128;
         }
-        else if (strcmp(a, "-n") == 0 && s->i + 1 < argc) {
-            s->n_gen = atoi(argv[++s->i]);
+        else if (strcmp(a, "-n") == 0 && i + 1 < argc) {
+            n_gen = atoi(argv[++i]);
         }
-        else if (strcmp(a, "--seed") == 0 && s->i + 1 < argc) {
-            s->g.rng_seed = strtoull(argv[++s->i], NULL, 10);
+        else if (strcmp(a, "--seed") == 0 && i + 1 < argc) {
+            g.rng_seed = strtoull(argv[++i], NULL, 10);
         }
-        else if (strcmp(a, "--temp") == 0 && s->i + 1 < argc) {
-            if (parse_float(argv[++s->i], &s->g.sample.temperature) != 0) { printf("--temp: parse error\n"); return 2; }
+        else if (strcmp(a, "--temp") == 0 && i + 1 < argc) {
+            if (parse_float(argv[++i], &g.sample.temperature) != 0) { printf("--temp: parse error\n"); return 2; }
             manual |= LZ_MANUAL_TEMP;
         }
-        else if (strcmp(a, "--think-temp") == 0 && s->i + 1 < argc) {
+        else if (strcmp(a, "--think-temp") == 0 && i + 1 < argc) {
             /* Dynamic temperature: the VALUE and the ENABLE flag
                travel together under one manual bit, so the --think preset
                copy-back cannot overwrite half of a user's explicit choice
                (the value without the enable, or vice versa). */
-            if (parse_float(argv[++s->i], &s->g.sample.temp_think) != 0) { printf("--think-temp: parse error\n"); return 2; }
-            s->g.sample.think_temp_enabled = 1;
+            if (parse_float(argv[++i], &g.sample.temp_think) != 0) { printf("--think-temp: parse error\n"); return 2; }
+            g.sample.think_temp_enabled = 1;
             manual |= LZ_MANUAL_THINK_TEMP;
         }
-        else if (strcmp(a, "--topp") == 0 && s->i + 1 < argc) {
-            if (parse_float(argv[++s->i], &s->g.sample.topp) != 0) { printf("--topp: parse error\n"); return 2; }
+        else if (strcmp(a, "--topp") == 0 && i + 1 < argc) {
+            if (parse_float(argv[++i], &g.sample.topp) != 0) { printf("--topp: parse error\n"); return 2; }
             manual |= LZ_MANUAL_TOPP;
         }
-        else if (strcmp(a, "--minp") == 0 && s->i + 1 < argc) {
+        else if (strcmp(a, "--minp") == 0 && i + 1 < argc) {
             /* llama.cpp units: fraction of the pre-temperature peak,
                converted at sample time by minp^(1/T). This is the
                DEFAULT unit (lz_sample_defaults sets minp_llamacpp). */
-            if (parse_float(argv[++s->i], &s->g.sample.minp) != 0) { printf("--minp: parse error\n"); return 2; }
-            s->g.sample.minp_llamacpp = 1;
+            if (parse_float(argv[++i], &g.sample.minp) != 0) { printf("--minp: parse error\n"); return 2; }
+            g.sample.minp_llamacpp = 1;
             manual |= LZ_MANUAL_MINP;
         }
-        else if (strcmp(a, "--minp-vllm") == 0 && s->i + 1 < argc) {
+        else if (strcmp(a, "--minp-vllm") == 0 && i + 1 < argc) {
             /* Native (vLLM/OpenAI) units: fraction of the POST-temperature
                peak. Same meaning as the endpoint's min_p field. */
-            if (parse_float(argv[++s->i], &s->g.sample.minp) != 0) { printf("--minp-vllm: parse error\n"); return 2; }
-            s->g.sample.minp_llamacpp = 0;
+            if (parse_float(argv[++i], &g.sample.minp) != 0) { printf("--minp-vllm: parse error\n"); return 2; }
+            g.sample.minp_llamacpp = 0;
             manual |= LZ_MANUAL_MINP;
         }
-        else if (strcmp(a, "--presence") == 0 && s->i + 1 < argc) {
-            if (parse_float(argv[++s->i], &s->g.sample.presence_penalty) != 0) { printf("--presence: parse error\n"); return 2; }
+        else if (strcmp(a, "--presence") == 0 && i + 1 < argc) {
+            if (parse_float(argv[++i], &g.sample.presence_penalty) != 0) { printf("--presence: parse error\n"); return 2; }
             manual |= LZ_MANUAL_PRES;
         }
-        else if (strcmp(a, "--frequency") == 0 && s->i + 1 < argc) {
-            if (parse_float(argv[++s->i], &s->g.sample.frequency_penalty) != 0) { printf("--frequency: parse error\n"); return 2; }
+        else if (strcmp(a, "--frequency") == 0 && i + 1 < argc) {
+            if (parse_float(argv[++i], &g.sample.frequency_penalty) != 0) { printf("--frequency: parse error\n"); return 2; }
             manual |= LZ_MANUAL_FREQ;
         }
-        else if (strcmp(a, "--repetition") == 0 && s->i + 1 < argc) {
-            if (parse_float(argv[++s->i], &s->g.sample.repetition_penalty) != 0) { printf("--repetition: parse error\n"); return 2; }
+        else if (strcmp(a, "--repetition") == 0 && i + 1 < argc) {
+            if (parse_float(argv[++i], &g.sample.repetition_penalty) != 0) { printf("--repetition: parse error\n"); return 2; }
             manual |= LZ_MANUAL_REP;
         }
-        else if (strcmp(a, "--repeat-last-n") == 0 && s->i + 1 < argc) {
-            s->g.sample.repeat_last_n = atoi(argv[++s->i]);
+        else if (strcmp(a, "--repeat-last-n") == 0 && i + 1 < argc) {
+            g.sample.repeat_last_n = atoi(argv[++i]);
             manual |= LZ_MANUAL_RLAST;
         }
-        else if (strcmp(a, "--spec") == 0 && s->i + 1 < argc) {
-            s->g.spec_k = atoi(argv[++s->i]);
+        else if (strcmp(a, "--spec") == 0 && i + 1 < argc) {
+            g.spec_k = atoi(argv[++i]);
         }
-        else if (strcmp(a, "--lookahead") == 0 && s->i + 1 < argc) {
+        else if (strcmp(a, "--lookahead") == 0 && i + 1 < argc) {
             /* W:D in one argument, because the two are not independently
                meaningful - a width with no depth is a top-k pick and a
                depth with no width has nothing to compare. Bare "W" means
                W:1, which is the argmax control. */
-            const char *v = argv[++s->i];
+            const char *v = argv[++i];
             const char *c = strchr(v, ':');
-            s->g.look_width = atoi(v);
-            s->g.look_depth = c ? atoi(c + 1) : 1;
+            g.look_width = atoi(v);
+            g.look_depth = c ? atoi(c + 1) : 1;
         }
         else if (strcmp(a, "--lookahead-raw") == 0) {
-            s->g.look_raw = 1;
+            g.look_raw = 1;
         }
-        else if (strcmp(a, "--lookahead-lp") == 0 && s->i + 1 < argc) {
-            s->g.look_lp = (float)atof(argv[++s->i]);
+        else if (strcmp(a, "--lookahead-lp") == 0 && i + 1 < argc) {
+            g.look_lp = (float)atof(argv[++i]);
         }
         else if (strcmp(a, "--spec-debug-break-rollback") == 0) {
             /* Test-only: see LZGenOpts.spec_debug_break_rollback
                (llama_zh.h) - deliberately corrupts conv_state on a
                rejected speculative round. Undocumented in --help on
                purpose (not a flag a normal run should ever pass). */
-            s->g.spec_debug_break_rollback = 1;
+            g.spec_debug_break_rollback = 1;
         }
         else if (strcmp(a, "--spec-debug-skip-prefill") == 0) {
             /* Test-only: see LZGenOpts.spec_debug_skip_prefill
                (llama_zh.h) - same-binary A/B control for whether MTP
                prompt prefill changes anything measurable. Undocumented
                in --help on purpose, same reason as the flag above. */
-            s->g.spec_debug_skip_prefill = 1;
+            g.spec_debug_skip_prefill = 1;
         }
         else if (strcmp(a, "--spec-debug-prefill-pos-only") == 0) {
             /* Test-only: see LZGenOpts.spec_debug_prefill_pos_only
@@ -1337,56 +1342,56 @@ static int cli_parse_args(CliMain *s, int argc, char **argv) {
                prefill control (advance s->mtp_pos, never write the
                MTP's own KV cache). Undocumented in --help on purpose,
                same reason as the two flags above. */
-            s->g.spec_debug_prefill_pos_only = 1;
+            g.spec_debug_prefill_pos_only = 1;
         }
-        else if (strcmp(a, "--spec-debug-prefill-pos-value") == 0 && s->i + 1 < argc) {
+        else if (strcmp(a, "--spec-debug-prefill-pos-value") == 0 && i + 1 < argc) {
             /* Test-only: see LZGenOpts.spec_debug_prefill_pos_value
                (llama_zh.h) - overrides the n_prompt-1 counter jump with
                an explicit value, letting the investigation test a
                starting position larger than any prompt would produce.
                Only takes effect together with --spec-debug-prefill-
                pos-only. Undocumented in --help on purpose. */
-            s->g.spec_debug_prefill_pos_value = atoi(argv[++s->i]);
+            g.spec_debug_prefill_pos_value = atoi(argv[++i]);
         }
-        else if (strcmp(a, "--spec-debug-prefill-coverage") == 0 && s->i + 1 < argc) {
+        else if (strcmp(a, "--spec-debug-prefill-coverage") == 0 && i + 1 < argc) {
             /* Test-only: see LZGenOpts.spec_debug_prefill_coverage
                (llama_zh.h) - only prefill the last N prompt positions
                with real content, leaving the head zero-filled.
                Undocumented in --help on purpose. */
-            s->g.spec_debug_prefill_coverage = atoi(argv[++s->i]);
+            g.spec_debug_prefill_coverage = atoi(argv[++i]);
         }
         else if (strcmp(a, "--spec-debug-skip-catchup") == 0) {
             /* Test-only: see LZGenOpts.spec_debug_skip_catchup
                (llama_zh.h) - same-binary A/B control for whether catch-
                up decode changes alpha measurably. Undocumented in
                --help on purpose, same reason as the flags above. */
-            s->g.spec_debug_skip_catchup = 1;
+            g.spec_debug_skip_catchup = 1;
         }
-        else if (strcmp(a, "--spec-debug-attn-scale") == 0 && s->i + 1 < argc) {
+        else if (strcmp(a, "--spec-debug-attn-scale") == 0 && i + 1 < argc) {
             /* Investigative probe only: see forward.c's own comment on
                lz_debug_mtp_attn_scale. Undocumented in --help on
                purpose, same reason as the flags above. */
-            if (parse_float(argv[++s->i], &lz_debug_mtp_attn_scale) != 0) {
+            if (parse_float(argv[++i], &lz_debug_mtp_attn_scale) != 0) {
                 printf("--spec-debug-attn-scale: parse error\n"); return 2;
             }
         }
-        else if (strcmp(a, "--spec-debug-attn-window") == 0 && s->i + 1 < argc) {
+        else if (strcmp(a, "--spec-debug-attn-window") == 0 && i + 1 < argc) {
             /* Investigative probe only: see forward.c's own comment on
                lz_debug_mtp_attn_window. Undocumented in --help on
                purpose, same reason as the flags above. */
-            lz_debug_mtp_attn_window = atoi(argv[++s->i]);
+            lz_debug_mtp_attn_window = atoi(argv[++i]);
         }
-        else if (strcmp(a, "--p-min") == 0 && s->i + 1 < argc) {
-            if (parse_float(argv[++s->i], &s->g.p_min) != 0) { printf("--p-min: parse error\n"); return 2; }
+        else if (strcmp(a, "--p-min") == 0 && i + 1 < argc) {
+            if (parse_float(argv[++i], &g.p_min) != 0) { printf("--p-min: parse error\n"); return 2; }
         }
-        else if (strcmp(a, "--n-min") == 0 && s->i + 1 < argc) {
-            s->g.n_min = atoi(argv[++s->i]);
+        else if (strcmp(a, "--n-min") == 0 && i + 1 < argc) {
+            g.n_min = atoi(argv[++i]);
         }
-        else if (strcmp(a, "--ctx") == 0 && s->i + 1 < argc) {
-            s->ctx_limit = atoi(argv[++s->i]);
-            if (s->ctx_limit < 16) s->ctx_limit = 16;
+        else if (strcmp(a, "--ctx") == 0 && i + 1 < argc) {
+            ctx_limit = atoi(argv[++i]);
+            if (ctx_limit < 16) ctx_limit = 16;
         }
-        else if (strcmp(a, "--kernel") == 0 && s->i + 1 < argc) {
+        else if (strcmp(a, "--kernel") == 0 && i + 1 < argc) {
             /* The rule puts C / MMX / SSE / SSE2 paths on every
                operator, and the gate for that is a four-way bit-identity
                comparison. A path the CLI cannot select cannot be
@@ -1395,7 +1400,7 @@ static int cli_parse_args(CliMain *s, int argc, char **argv) {
                a tier the build does not compile in falls back to what
                it has (lz_kernel_select), so this never lies about what
                ran: --kernel-name reports the tier in effect. */
-            const char *k = argv[++s->i];
+            const char *k = argv[++i];
             /* arm-c / arm-asm are accepted on EVERY build, not only the
                ARM one. The names are the tier's, not the host's, and a
                binary that rejected them outright would answer "unknown
@@ -1423,12 +1428,12 @@ static int cli_parse_args(CliMain *s, int argc, char **argv) {
                kernel_detect hardcodes MMX for gcc+LZ_USE_MMX), so that
                arm compares mmx against mmx. */
             if (want != LZ_KERNEL_AUTO &&
-                strcmp(argv[s->i], lz_kernel_name()) != 0)
+                strcmp(argv[i], lz_kernel_name()) != 0)
                 printf("[kernel: requested %s, this build has %s - "
-                       "running %s]\n", argv[s->i], lz_build_paths(),
+                       "running %s]\n", argv[i], lz_build_paths(),
                        lz_kernel_tier());
         }
-        else if (strcmp(a, "--fixed") == 0 && s->i + 1 < argc) {
+        else if (strcmp(a, "--fixed") == 0 && i + 1 < argc) {
             /* THE float knob, and the only one. Applied here, in order,
                like every other flag: there is no per-site override left
                that could need to win regardless of position. Why one
@@ -1439,113 +1444,113 @@ static int cli_parse_args(CliMain *s, int argc, char **argv) {
                arithmetic site at once and is the arm for cross-checking
                operator precision against another implementation or
                across rounding regimes. NOT numerics-neutral. */
-            const char *got = lz_float_ref_select(argv[++s->i]);
+            const char *got = lz_float_ref_select(argv[++i]);
             if (!got) {
                 printf("--fixed: unknown mode (off|all)\n");
                 return 2;
             }
         }
-        else if (strcmp(a, "--subn-scale") == 0 && s->i + 1 < argc) {
+        else if (strcmp(a, "--subn-scale") == 0 && i + 1 < argc) {
             /* Deliberately outside the --fixed group table below: this
                picks a scale LAYOUT, not a float/int tier, so `--fixed
                off` must leave it alone. */
-            const char *got = lz_subn_scale_select(argv[++s->i]);
+            const char *got = lz_subn_scale_select(argv[++i]);
             if (!got) {
                 printf("--subn-scale: unknown mode (tok|group)\n");
                 return 2;
             }
         }
-        else if (strcmp(a, "--hadamard") == 0 && s->i + 1 < argc) {
+        else if (strcmp(a, "--hadamard") == 0 && i + 1 < argc) {
             /* Like --subn-scale, deliberately outside the --fixed group
                table: this removes a transform, not a fixed-point tier. */
-            const char *got = lz_hadamard_select(argv[++s->i]);
+            const char *got = lz_hadamard_select(argv[++i]);
             if (!got) {
                 printf("--hadamard: unknown mode (on|off)\n");
                 return 2;
             }
         }
-        else if (strcmp(a, "--pair") == 0 && s->i + 1 < argc) {
+        else if (strcmp(a, "--pair") == 0 && i + 1 < argc) {
             /* Which 32-element kernel the row loops call, not which ISA.
                Exists because pairing and the 128-element group kernel
                optimize different resources and the winner is per
                machine, so it is a knob. Numerics-neutral by contract. */
-            const char *got = lz_pair_select(argv[++s->i]);
+            const char *got = lz_pair_select(argv[++i]);
             if (!got) {
                 printf("--pair: unknown mode (auto|on|off)\n");
                 return 2;
             }
         }
-        else if (strcmp(a, "--batch") == 0 && s->i + 1 < argc) {
+        else if (strcmp(a, "--batch") == 0 && i + 1 < argc) {
             /* Clamped rather than rejected, same as --ctx: the buffers
                are sized for LZ_BATCH_MAX and nothing above it is
                reachable, so asking for more is a sweep script running
                past the end of its range, not a user error. */
-            s->batch_width = atoi(argv[++s->i]);
-            if (s->batch_width < 1) s->batch_width = 1;
-            if (s->batch_width > LZ_BATCH_MAX) s->batch_width = LZ_BATCH_MAX;
+            batch_width = atoi(argv[++i]);
+            if (batch_width < 1) batch_width = 1;
+            if (batch_width > LZ_BATCH_MAX) batch_width = LZ_BATCH_MAX;
         }
         else if (strcmp(a, "--think") == 0) {
-            s->think = 1;
+            think = 1;
         }
-        else if (strcmp(a, "--stop") == 0 && s->i + 1 < argc) {
-            if (s->g.n_stop < LZ_MAX_STOP) s->g.stop[s->g.n_stop++] = argv[++s->i];
+        else if (strcmp(a, "--stop") == 0 && i + 1 < argc) {
+            if (g.n_stop < LZ_MAX_STOP) g.stop[g.n_stop++] = argv[++i];
         }
-        else if (strcmp(a, "--no-eos") == 0) s->no_eos = 1;
-        else if (strcmp(a, "--no-beep") == 0) s->beep = 0;
-        else if (strcmp(a, "--no-ckpt") == 0) s->ckpt_on = 0;
-        else if (strcmp(a, "--kv") == 0 && s->i + 1 < argc) {
-            int f = parse_kvfmt(argv[++s->i]);
+        else if (strcmp(a, "--no-eos") == 0) no_eos = 1;
+        else if (strcmp(a, "--no-beep") == 0) beep = 0;
+        else if (strcmp(a, "--no-ckpt") == 0) ckpt_on = 0;
+        else if (strcmp(a, "--kv") == 0 && i + 1 < argc) {
+            int f = parse_kvfmt(argv[++i]);
             if (f < 0) { usage(); return 2; }
             lz_kv_kfmt = f;
             lz_kv_vfmt = f;
         }
-        else if (strcmp(a, "--kv-k") == 0 && s->i + 1 < argc) {
-            int f = parse_kvfmt(argv[++s->i]);
+        else if (strcmp(a, "--kv-k") == 0 && i + 1 < argc) {
+            int f = parse_kvfmt(argv[++i]);
             if (f < 0) { usage(); return 2; }
             lz_kv_kfmt = f;
         }
-        else if (strcmp(a, "--kv-v") == 0 && s->i + 1 < argc) {
-            int f = parse_kvfmt(argv[++s->i]);
+        else if (strcmp(a, "--kv-v") == 0 && i + 1 < argc) {
+            int f = parse_kvfmt(argv[++i]);
             if (f < 0) { usage(); return 2; }
             lz_kv_vfmt = f;
         }
         else if (strcmp(a, "--profile") == 0) { lz_prof_enable = 1; }
-        else if (strcmp(a, "--moe-topk") == 0 && s->i + 1 < argc) {
-            lz_moe_topk = atoi(argv[++s->i]);
+        else if (strcmp(a, "--moe-topk") == 0 && i + 1 < argc) {
+            lz_moe_topk = atoi(argv[++i]);
         }
-        else if (strcmp(a, "--moe-tau") == 0 && s->i + 1 < argc) {
+        else if (strcmp(a, "--moe-tau") == 0 && i + 1 < argc) {
             /* Refused rather than clamped, and the range is in the usage
                text: a silently clamped temperature would report a number
                in the banner that is not the one that ran, which is the
                shape that keeps catching people out. */
-            float t = (float)atof(argv[++s->i]);
+            float t = (float)atof(argv[++i]);
             if (!(t >= LZ_MOE_TAU_MIN && t <= LZ_MOE_TAU_MAX)) {
                 usage();
                 return 2;
             }
             lz_moe_tau = t;
         }
-        else if (strcmp(a, "--attn-sink") == 0 && s->i + 1 < argc) {
+        else if (strcmp(a, "--attn-sink") == 0 && i + 1 < argc) {
             /* -1 encodes "explicitly none", which is a comparison arm;
                0 means "unset" and lets the window supply a default. */
-            int v = atoi(argv[++s->i]);
+            int v = atoi(argv[++i]);
             lz_attn_sink = (v == 0) ? -1 : v;
         }
-        else if (strcmp(a, "--attn-window") == 0 && s->i + 1 < argc) {
-            lz_attn_window = atoi(argv[++s->i]);
+        else if (strcmp(a, "--attn-window") == 0 && i + 1 < argc) {
+            lz_attn_window = atoi(argv[++i]);
         }
         /* --kv-rot-v and --qjl-dim are not offered. The V-side width
            stays at its swept value of 64 internally (forward.c's own
            comment carries the sweep and the asymmetry that explains it);
            the sketch width has nothing left to serve without q4r2. */
-        else if (strcmp(a, "--kv-rot") == 0 && s->i + 1 < argc) {
-            const char *m = argv[++s->i];
+        else if (strcmp(a, "--kv-rot") == 0 && i + 1 < argc) {
+            const char *m = argv[++i];
             if (strcmp(m, "on") == 0)       lz_kv_rot_enable = 1;
             else if (strcmp(m, "off") == 0) lz_kv_rot_enable = 0;
             else { usage(); return 2; }
         }
-        else if (strcmp(a, "--prefetch") == 0 && s->i + 1 < argc) {
-            const char *m = argv[++s->i];
+        else if (strcmp(a, "--prefetch") == 0 && i + 1 < argc) {
+            const char *m = argv[++i];
             /* Print what was ACTUALLY selected, not what was asked for:
                nta/3dnow are downgraded on a CPU that lacks them, and a
                benchmark labelled with the wrong tier is worse than no
@@ -1554,8 +1559,8 @@ static int cli_parse_args(CliMain *s, int argc, char **argv) {
             if (!got) { usage(); return 2; }
             printf("Prefetch       %s (requested %s)\n", got, m);
         }
-        else if (strcmp(a, "--tokenizer") == 0 && s->i + 1 < argc)
-            s->tok_path = argv[++s->i];
+        else if (strcmp(a, "--tokenizer") == 0 && i + 1 < argc)
+            tok_path = argv[++i];
         else if (strcmp(a, "-h") == 0) {
             usage_short();
             return 0;
@@ -1566,63 +1571,53 @@ static int cli_parse_args(CliMain *s, int argc, char **argv) {
             printf("Unknown option: %s\n\n", a);
             usage();
             return 2;
-        } else s->dir = a;
+        } else dir = a;
     }
-    if (!s->dir) {
+    if (!dir) {
         usage();
         return 2;
     }
-    if (s->interactive && s->prompt) {
+    if (interactive && prompt) {
         printf("--interactive and --prompt are mutually exclusive\n");
         return 2;
     }
-    if (s->interactive && s->chat) {
+    if (interactive && chat) {
         printf("--interactive and --chat are mutually exclusive\n");
         return 2;
     }
-    if (s->chat && !s->prompt) {
+    if (chat && !prompt) {
         printf("--chat needs --prompt (single-turn chat render)\n");
         return 2;
     }
-    if (s->think) {
+    if (think) {
         /* The think preset, but ONLY where the user did not set a value.
            The whole "snapshot the preset, copy back the fields the user
            claimed" rule lives in lz_sample_apply_think_preset (sampler.c),
            shared with the GUI - the `manual` mask above is the CLI's
            wider surface carried to that one function. */
-        lz_sample_apply_think_preset(&s->g.sample, manual);
+        lz_sample_apply_think_preset(&g.sample, manual);
     }
-
-    return -1;
-}
-
-/* Stage 2: model load. lz_open + the banner + weight load + optional
-   tensor stats. Returns CLI_FAIL (main() jumps to fail), CLI_CLEANUP
-   (--check: free + exit) or CLI_NEXT (fall through to the dump stage). */
-static int cli_load_model(CliMain *s) {
-    int i;
-    double t0, t1;
 
     t0 = lz_time_ms();
-    if (lz_open(&s->m, s->dir, err, sizeof(err)) != 0) {
+    if (lz_open(&m, dir, err, sizeof(err)) != 0) {
         printf("Failed to load: %s\n", err);
-        return CLI_FAIL;
+        goto fail;
     }
     t1 = lz_time_ms();
-    s->cfg = &s->m.config;
+    cfg = &m.config;
 
-    printf("Model dir      %s\n", s->dir);
-    printf("Tensor prefix  %s\n", s->m.prefix[0] ? s->m.prefix : "(none)");
+    printf("Model dir      %s\n", dir);
+    printf("Tensor prefix  %s\n", m.prefix[0] ? m.prefix : "(none)");
     printf("safetensors    %lld bytes, %d tensors, data at %llu\n",
-           s->m.st.file_size, s->m.st.n_tensors, s->m.st.data_start);
+           m.st.file_size, m.st.n_tensors, m.st.data_start);
     printf("\n");
-    print_config(s->cfg);
+    print_config(cfg);
     printf("\n");
     printf("Params         %lld (%.1fM) text tower\n",
-           s->m.n_params, (double)s->m.n_params / 1e6);
-    if (s->m.n_params_skipped > 0)
+           m.n_params, (double)m.n_params / 1e6);
+    if (m.n_params_skipped > 0)
         printf("Skipped        %lld (%.1fM) non-text (e.g. vision)\n",
-               s->m.n_params_skipped, (double)s->m.n_params_skipped / 1e6);
+               m.n_params_skipped, (double)m.n_params_skipped / 1e6);
     /* Two independent facts, both needed: what is COMPILED IN, and which
        of those the CPU picked. A build can be bit-perfect and still be
        running the scalar reference, and no output comparison can show
@@ -1648,10 +1643,10 @@ static int cli_load_model(CliMain *s) {
            lz_build_paths(), lz_kernel_name(), lz_kernel_tier());
     printf("Structure OK   %.0f ms\n", t1 - t0);
 
-    if (s->list_tensors) {
+    if (list_tensors) {
         printf("\nAll tensors:\n");
-        for (i = 0; i < s->m.st.n_tensors; i++) {
-            const LZStTensor *t = &s->m.st.tensors[i];
+        for (i = 0; i < m.st.n_tensors; i++) {
+            const LZStTensor *t = &m.st.tensors[i];
             int d;
             printf("  %-56s %-5s [", t->name, lz_st_dtype_name(t->dtype));
             for (d = 0; d < t->n_dims; d++)
@@ -1660,8 +1655,8 @@ static int cli_load_model(CliMain *s) {
         }
     }
 
-    if (s->only_check) {
-        return CLI_CLEANUP;
+    if (only_check) {
+        goto cleanup;
     }
 
     /* n_params * 4, and the wording says so. Do not phrase this as
@@ -1674,11 +1669,11 @@ static int cli_load_model(CliMain *s) {
        it overstates by the compression ratio. `--tensors` reports the
        dtypes actually stored. */
     printf("\nLoading weights (%.2f GB at 4 bytes/param)...\n",
-           (double)s->m.n_params * 4.0 / 1e9);
+           (double)m.n_params * 4.0 / 1e9);
     t0 = lz_time_ms();
-    if (lz_read_weights(&s->m, err, sizeof(err)) != 0) {
+    if (lz_read_weights(&m, err, sizeof(err)) != 0) {
         printf("Failed to load: %s\n", err);
-        return CLI_FAIL;
+        goto fail;
     }
     t1 = lz_time_ms();
     {
@@ -1691,23 +1686,23 @@ static int cli_load_model(CliMain *s) {
            is the honest answer, and lz_common_tokcell guards the same
            way. */
         double secs = (t1 - t0) / 1000.0;
-        printf("Done           %.2f GB / %.1f s", (double)s->m.bytes_alloc / 1e9,
+        printf("Done           %.2f GB / %.1f s", (double)m.bytes_alloc / 1e9,
                secs);
         if (secs > 0.0) printf(" = %.0f MB/s\n",
-                               (double)s->m.bytes_alloc / 1e6 / secs);
+                               (double)m.bytes_alloc / 1e6 / secs);
         else            printf(" (below the clock's resolution)\n");
     }
 
-    if (s->want_stats) {
+    if (want_stats) {
         printf("\nTensor statistics (for parity with Python):\n");
-        if (s->only_layer < 0) {
-            tensor_stats_t("embed_tokens", &s->m.embed_tokens);
-            tensor_stats_t("norm", &s->m.final_norm);
+        if (only_layer < 0) {
+            tensor_stats_t("embed_tokens", &m.embed_tokens);
+            tensor_stats_t("norm", &m.final_norm);
         }
-        for (i = 0; i < s->cfg->n_layers; i++) {
-            const LZLayer *L = &s->m.layers[i];
+        for (i = 0; i < cfg->n_layers; i++) {
+            const LZLayer *L = &m.layers[i];
             char nm[128];
-            if (s->only_layer >= 0 && i != s->only_layer) continue;
+            if (only_layer >= 0 && i != only_layer) continue;
             printf("--- layer %d  %s ---\n", i, lz_layer_type_name(L->type));
 
 #define ST(field, label) \
@@ -1739,48 +1734,32 @@ static int cli_load_model(CliMain *s) {
         }
     }
 
-    return CLI_NEXT;
-}
-
-/* Stage 3: dump handling. The "--tokens" debug token-level forward loop
-   and its --dump-logits / --dump-all-logits / --dump-top5 / --dump-nll
-   outputs. Returns CLI_NEXT when no token list was requested (fall
-   through to generation), else CLI_FAIL or CLI_CLEANUP like the inline
-   form's own goto fail / goto cleanup. */
-static int cli_run_dump(CliMain *s) {
-    int i;
-    double t0, t1;
-    float *nll = NULL;
-    FILE *af = NULL;    /* --dump-all-logits stream, fclosed after the loop */
-    FILE *tf = NULL;    /* --dump-top5 stream, same lifetime as af */
-
-    if (s->n_tokens <= 0) return CLI_NEXT;
-
-    {
+    /* ---- debug: token-level forward ---- */
+    if (n_tokens > 0) {
         LZRunState st;
         float *logits = NULL;
-        int seq = s->n_tokens + (s->n_gen > 0 ? s->n_gen : 0) + 8;
+        int seq = n_tokens + (n_gen > 0 ? n_gen : 0) + 8;
 
-        printf("\nForward: %d tokens\n", s->n_tokens);
-        if (lz_state_alloc(&st, &s->m, seq, s->g.spec_k, err, sizeof(err)) != 0) {
+        printf("\nForward: %d tokens\n", n_tokens);
+        if (lz_state_alloc(&st, &m, seq, g.spec_k, err, sizeof(err)) != 0) {
             printf("State alloc failed: %s\n", err);
-            return CLI_FAIL;
+            goto fail;
         }
         /* Safe after alloc, never before: the buffers are sized for
            LZ_BATCH_MAX, so lowering or raising nt_cap within that bound
            cannot overrun anything. */
-        if (s->batch_width) st.nt_cap = s->batch_width;
+        if (batch_width) st.nt_cap = batch_width;
         printf("Runtime state  %.1f MB\n", (double)st.bytes_alloc / 1e6);
 
         t0 = lz_time_ms();
-        for (i = 0; i < s->n_tokens; i++) {
-            if (s->tokens[i] < 0 || s->tokens[i] >= s->cfg->vocab_size) {
-                printf("Token %d out of range (vocab %d)\n", s->tokens[i], s->cfg->vocab_size);
+        for (i = 0; i < n_tokens; i++) {
+            if (tokens[i] < 0 || tokens[i] >= cfg->vocab_size) {
+                printf("Token %d out of range (vocab %d)\n", tokens[i], cfg->vocab_size);
                 lz_state_free(&st);
-                return CLI_FAIL;
+                goto fail;
             }
-            logits = lz_forward(&s->m, &st, s->tokens[i], i);
-            if (s->all_path && i + 1 < s->n_tokens) {
+            logits = lz_forward(&m, &st, tokens[i], i);
+            if (all_path && i + 1 < n_tokens) {
                 /* --dump-all-logits: one prediction-logits vector per
                    position that HAS a next token. lz_forward(tokens[i],
                    i) returns the logits predicting token i+1, so entry i
@@ -1795,13 +1774,13 @@ static int cli_run_dump(CliMain *s) {
                    off from what is written, and exactly the off-by-one
                    that would silently mis-align a sec-6.2 harness. */
                 if (!af) {
-                    af = fopen(s->all_path, "wb");
-                    if (!af) { printf("Cannot write %s\n", s->all_path); }
+                    af = fopen(all_path, "wb");
+                    if (!af) { printf("Cannot write %s\n", all_path); }
                 }
                 if (af)
-                    fwrite(logits, sizeof(float), (size_t)s->cfg->vocab_size, af);
+                    fwrite(logits, sizeof(float), (size_t)cfg->vocab_size, af);
             }
-            if (s->top5_path && i + 1 < s->n_tokens) {
+            if (top5_path && i + 1 < n_tokens) {
                 /* The top-5 ids only: 20 bytes a position against
                    --dump-all-logits' 131 KB, which is the difference
                    between measuring agreement over a whole sequence and
@@ -1811,12 +1790,12 @@ static int cli_run_dump(CliMain *s) {
                 int32_t best[5];
                 int r, v;
                 if (!tf) {
-                    tf = fopen(s->top5_path, "wb");
-                    if (!tf) printf("Cannot write %s\n", s->top5_path);
+                    tf = fopen(top5_path, "wb");
+                    if (!tf) printf("Cannot write %s\n", top5_path);
                 }
                 for (r = 0; r < 5; r++) {
                     int bi = -1;
-                    for (v = 0; v < s->cfg->vocab_size; v++) {
+                    for (v = 0; v < cfg->vocab_size; v++) {
                         int seen = 0, u;
                         for (u = 0; u < r; u++) if (best[u] == v) seen = 1;
                         if (seen) continue;
@@ -1826,7 +1805,7 @@ static int cli_run_dump(CliMain *s) {
                 }
                 if (tf) fwrite(best, sizeof(int32_t), 5, tf);
             }
-            if (s->nll_path && i + 1 < s->n_tokens) {
+            if (nll_path && i + 1 < n_tokens) {
                 /* -log softmax(logits)[next]. Accumulated in double on
                    purpose: this is a MEASUREMENT path, not a shipped
                    one, and a 32k-term exp sum in float loses digits
@@ -1838,23 +1817,23 @@ static int cli_run_dump(CliMain *s) {
                 double sum = 0.0;
                 int v;
                 if (!nll) {
-                    nll = (float *)calloc((size_t)s->n_tokens - 1, sizeof(float));
+                    nll = (float *)calloc((size_t)n_tokens - 1, sizeof(float));
                     if (!nll) {
                         printf("NLL alloc failed\n");
                         lz_state_free(&st);
-                        return CLI_FAIL;
+                        goto fail;
                     }
                 }
-                for (v = 1; v < s->cfg->vocab_size; v++)
+                for (v = 1; v < cfg->vocab_size; v++)
                     if (logits[v] > mx) mx = logits[v];
-                for (v = 0; v < s->cfg->vocab_size; v++)
+                for (v = 0; v < cfg->vocab_size; v++)
                     sum += exp((double)(logits[v] - mx));
-                nll[i] = (float)(log(sum) - (double)(logits[s->tokens[i + 1]] - mx));
+                nll[i] = (float)(log(sum) - (double)(logits[tokens[i + 1]] - mx));
             }
         }
         t1 = lz_time_ms();
         printf("Time           %.2f s, %.3f s/token\n",
-               (t1 - t0) / 1000.0, (t1 - t0) / 1000.0 / s->n_tokens);
+               (t1 - t0) / 1000.0, (t1 - t0) / 1000.0 / n_tokens);
         /* The int16 exits' positive control. Printed unconditionally,
            like the census below and for the same reason: the int and
            float rows are bit-comparable, so an output comparison can
@@ -1899,13 +1878,13 @@ static int cli_run_dump(CliMain *s) {
             for (site = 0; site < LZ_FC_N; site++)
                 tot += lz_f32_count_get(site);
             printf("f32 operations per token (%d tokens, ctx reached %d):\n",
-                   s->n_tokens, s->n_tokens);
+                   n_tokens, n_tokens);
             for (site = 0; site < LZ_FC_N; site++) {
                 double v = lz_f32_count_get(site);
                 if (v > 0.0 || lz_f32_count_reached(site)) {
                     int cls, printed = 0;
                     printf("  %-20s %14.0f  %5.1f%%\n",
-                           lz_f32_count_name(site), v / s->n_tokens,
+                           lz_f32_count_name(site), v / n_tokens,
                            tot > 0.0 ? 100.0 * v / tot : 0.0);
                     /* Per-class split, zero classes omitted so an
                        unmigrated site prints one word ("other") instead
@@ -1917,7 +1896,7 @@ static int cli_run_dump(CliMain *s) {
                         if (printed) printf(" ");
                         else printf("%39s", "");
                         printf("%s %.0f", lz_f32_class_name(cls),
-                               cv / s->n_tokens);
+                               cv / n_tokens);
                         printed = 1;
                     }
                     if (printed) printf("\n");
@@ -1928,41 +1907,41 @@ static int cli_run_dump(CliMain *s) {
                            "- (not run)");
                 }
             }
-            printf("  %-20s %14.0f\n", "total", tot / s->n_tokens);
+            printf("  %-20s %14.0f\n", "total", tot / n_tokens);
         }
-        printf("Top %d logits:\n", s->topk);
-        print_topk(logits, s->cfg->vocab_size, s->topk);
+        printf("Top %d logits:\n", topk);
+        print_topk(logits, cfg->vocab_size, topk);
         {
             LZTensor lt;
             memset(&lt, 0, sizeof(lt));
             lt.dtype = 0;
-            lt.n = s->cfg->vocab_size;
+            lt.n = cfg->vocab_size;
             lt.f = logits;
             tensor_stats_t("logits", &lt);
         }
 
-        if (s->dump_path) {
-            FILE *f = fopen(s->dump_path, "wb");
+        if (dump_path) {
+            FILE *f = fopen(dump_path, "wb");
             if (!f) {
-                printf("Cannot write %s\n", s->dump_path);
+                printf("Cannot write %s\n", dump_path);
             } else {
-                fwrite(logits, sizeof(float), (size_t)s->cfg->vocab_size, f);
+                fwrite(logits, sizeof(float), (size_t)cfg->vocab_size, f);
                 fclose(f);
-                printf("Wrote %s (%d f32)\n", s->dump_path, s->cfg->vocab_size);
+                printf("Wrote %s (%d f32)\n", dump_path, cfg->vocab_size);
             }
         }
-        if (s->nll_path && nll) {
-            FILE *f = fopen(s->nll_path, "wb");
+        if (nll_path && nll) {
+            FILE *f = fopen(nll_path, "wb");
             if (!f) {
-                printf("Cannot write %s\n", s->nll_path);
+                printf("Cannot write %s\n", nll_path);
             } else {
                 double tot = 0.0;
                 int v;
-                fwrite(nll, sizeof(float), (size_t)s->n_tokens - 1, f);
+                fwrite(nll, sizeof(float), (size_t)n_tokens - 1, f);
                 fclose(f);
-                for (v = 0; v < s->n_tokens - 1; v++) tot += nll[v];
+                for (v = 0; v < n_tokens - 1; v++) tot += nll[v];
                 printf("Wrote %s (%d f32), mean NLL %.4f\n",
-                       s->nll_path, s->n_tokens - 1, tot / (s->n_tokens - 1));
+                       nll_path, n_tokens - 1, tot / (n_tokens - 1));
             }
         }
         if (af) { fclose(af); af = NULL; }
@@ -1970,21 +1949,11 @@ static int cli_run_dump(CliMain *s) {
         free(nll);
         nll = NULL;
         lz_state_free(&st);
-        return CLI_CLEANUP;
+        goto cleanup;
     }
-}
-
-/* Stage 4: generation. The prompt / single-turn chat / interactive
-   blocks. Returns CLI_FAIL or CLI_CLEANUP exactly where the inline form
-   had goto fail / goto cleanup; when no generation mode was requested it
-   returns CLI_FAIL, matching the inline form's fall-through into the
-   fail: label (rc = 1). */
-static int cli_run_generate(CliMain *s) {
-    int i;
-    double t0, t1;
 
     /* ---- generation: prompt -> sample ---- */
-    if (s->prompt && !s->chat) {
+    if (prompt && !chat) {
         LZRunState st;
         /* static, same grounds as `line` in the interactive block below
            - and one more here: `tok_path = tpath` lets the pointer
@@ -1995,28 +1964,28 @@ static int cli_run_generate(CliMain *s) {
         int n_out = 0;
         double ms = 0.0;
 
-        if (!s->tok_path) {
-            s->tok_path = tok_path_for(s->dir, tpath, (int)sizeof tpath,
-                                       err, sizeof(err));
-            if (!s->tok_path) {
+        if (!tok_path) {
+            tok_path = tok_path_for(dir, tpath, (int)sizeof tpath,
+                                    err, sizeof(err));
+            if (!tok_path) {
                 printf("Tokenizer load failed: %s\n", err);
-                return CLI_FAIL;
+                goto fail;
             }
         }
-        printf("\nTokenizer      %s\n", s->tok_path);
+        printf("\nTokenizer      %s\n", tok_path);
         t0 = lz_time_ms();
-        if (lz_tokenizer_load(&s->tok, s->tok_path, err, sizeof(err)) != 0) {
+        if (lz_tokenizer_load(&tok, tok_path, err, sizeof(err)) != 0) {
             printf("Tokenizer load failed: %s\n", err);
-            return CLI_FAIL;
+            goto fail;
         }
         t1 = lz_time_ms();
         printf("Vocab          %d (%d special), merges %d, loaded %.0f ms\n",
-               lz_tokenizer_vocab_size(&s->tok), lz_tokenizer_n_special(&s->tok),
-               lz_tokenizer_n_merges(&s->tok), t1 - t0);
+               lz_tokenizer_vocab_size(&tok), lz_tokenizer_n_special(&tok),
+               lz_tokenizer_n_merges(&tok), t1 - t0);
 
-        if (!s->no_eos) lz_gen_opts_set_eos(&s->g, &s->tok);
-        s->g.max_new_tokens = s->n_gen > 0 ? s->n_gen : 128;
-        if (s->g.rng_seed == 0) s->g.rng_seed = lz_seed_mix((lz_u64)t1);
+        if (!no_eos) lz_gen_opts_set_eos(&g, &tok);
+        g.max_new_tokens = n_gen > 0 ? n_gen : 128;
+        if (g.rng_seed == 0) g.rng_seed = lz_seed_mix((lz_u64)t1);
 
         /* KV cache only covers prompt + generation; never preallocate the
            full max_position_embeddings. */
@@ -2027,7 +1996,7 @@ static int cli_run_generate(CliMain *s) {
                header) and on Windows it fires every time, because MinGW
                hands main() an ANSI-converted argv, so a UTF-8 prompt from
                the shell arrives as invalid UTF-8 and expands 3x. */
-            int n_prompt = lz_encode(&s->tok, s->prompt, (int)strlen(s->prompt),
+            int n_prompt = lz_encode(&tok, prompt, (int)strlen(prompt),
                                      0, 0, NULL, 0);
             int seq;
 
@@ -2044,42 +2013,42 @@ static int cli_run_generate(CliMain *s) {
                or all-unmappable prompt) - out_cap 0 with a non-NULL out
                is a valid lz_encode call under its own count-only
                convention, so this is not special-cased. */
-            if (s->prompt_tok_path) {
+            if (prompt_tok_path) {
                 int *pids = (int *)malloc((size_t)(n_prompt > 0
                                                     ? n_prompt : 1)
                                           * sizeof(int));
-                int got = pids ? lz_encode(&s->tok, s->prompt, (int)strlen(s->prompt),
+                int got = pids ? lz_encode(&tok, prompt, (int)strlen(prompt),
                                            0, 0, pids, n_prompt) : -1;
                 FILE *pf;
                 if (!pids || got != n_prompt) {
                     printf("--dump-prompt-tokens: re-encode mismatch "
                            "(%d vs %d)\n", got, n_prompt);
                     free(pids);
-                    return CLI_FAIL;
+                    goto fail;
                 }
-                pf = fopen(s->prompt_tok_path, "w");
+                pf = fopen(prompt_tok_path, "w");
                 if (!pf) {
-                    printf("Cannot write %s\n", s->prompt_tok_path);
+                    printf("Cannot write %s\n", prompt_tok_path);
                     free(pids);
-                    return CLI_FAIL;
+                    goto fail;
                 }
                 for (i = 0; i < n_prompt; i++) fprintf(pf, "%d\n", pids[i]);
                 fclose(pf);
                 free(pids);
-                printf("Wrote %s (%d prompt tokens)\n", s->prompt_tok_path,
+                printf("Wrote %s (%d prompt tokens)\n", prompt_tok_path,
                        n_prompt);
-                return CLI_CLEANUP;
+                goto cleanup;
             }
 
             /* context = min(practical limit, model max); -n beyond ctx
                gets truncated with a note */
-            if (s->ctx_limit > s->cfg->seq_len) s->ctx_limit = s->cfg->seq_len;
-            if (n_prompt >= s->ctx_limit) {
+            if (ctx_limit > cfg->seq_len) ctx_limit = cfg->seq_len;
+            if (n_prompt >= ctx_limit) {
                 printf("Prompt encodes to %d tokens, exceeds context limit %d"
-                       " (raise with --ctx)\n", n_prompt, s->ctx_limit);
-                return CLI_FAIL;
+                       " (raise with --ctx)\n", n_prompt, ctx_limit);
+                goto fail;
             }
-            seq = n_prompt + s->g.max_new_tokens + 16;
+            seq = n_prompt + g.max_new_tokens + 16;
             /* Investigative probe accommodation: this formula has no way
                to know about a debug-injected s->mtp_pos jump
                (LZGenOpts.spec_debug_prefill_pos_value), so a large
@@ -2090,41 +2059,41 @@ static int cli_run_generate(CliMain *s) {
                outside the one investigation - see llama_zh.h's own
                comment on it), so this line changes nothing for anyone
                else. */
-            if (s->g.spec_debug_prefill_pos_only && s->g.spec_debug_prefill_pos_value > 0) {
-                int need = s->g.spec_debug_prefill_pos_value + s->g.max_new_tokens + 16;
+            if (g.spec_debug_prefill_pos_only && g.spec_debug_prefill_pos_value > 0) {
+                int need = g.spec_debug_prefill_pos_value + g.max_new_tokens + 16;
                 if (need > seq) seq = need;
             }
-            if (seq > s->ctx_limit) seq = s->ctx_limit;
+            if (seq > ctx_limit) seq = ctx_limit;
             if (seq < 64) seq = 64;
-            if (lz_state_alloc(&st, &s->m, seq, s->g.spec_k, err, sizeof(err)) != 0) {
+            if (lz_state_alloc(&st, &m, seq, g.spec_k, err, sizeof(err)) != 0) {
                 printf("State alloc failed: %s\n", err);
-                return CLI_FAIL;
+                goto fail;
             }
-            if (s->batch_width) st.nt_cap = s->batch_width;
+            if (batch_width) st.nt_cap = batch_width;
             /* Through console_out, not printf. Any line that can carry
                model or user text needs the same treatment; pure ASCII
                labels and numbers do not, and are left alone rather
                than churned. */
             printf("Prompt         ");
-            console_out(s->prompt, (int)strlen(s->prompt));
+            console_out(prompt, (int)strlen(prompt));
             console_out("\n", 1);
             printf("State          %.1f MB (%d slots, prefill batch %d)\n",
                    (double)st.bytes_alloc / 1e6, seq, st.nt_cap);
-            cli_print_sampling(&s->g);
+            cli_print_sampling(&g);
             printf("Context        %d slots (model max %d; --ctx to change)\n",
-                   seq, s->cfg->seq_len);
-            if (s->g.max_new_tokens >= seq - n_prompt)
+                   seq, cfg->seq_len);
+            if (g.max_new_tokens >= seq - n_prompt)
                 printf("Note: -n %d exceeds context headroom, "
                        "generation stops at %d tokens\n",
-                       s->g.max_new_tokens, seq - n_prompt);
+                       g.max_new_tokens, seq - n_prompt);
         }
         printf("\n---- generation start ----\n");
-        s->rc = lz_generate(&s->m, &s->tok, &st, s->prompt, (int)strlen(s->prompt),
-                            &s->g, sink_stdout, NULL, NULL,
-                            &n_out, &ms, err, sizeof(err));
+        rc = lz_generate(&m, &tok, &st, prompt, (int)strlen(prompt),
+                         &g, sink_stdout, NULL, NULL,
+                         &n_out, &ms, err, sizeof(err));
         printf("\n---- generation end ----\n");
-        if (s->beep) lz_beep();
-        if (s->rc != 0) {
+        if (beep) lz_beep();
+        if (rc != 0) {
             printf("Generation failed: %s\n", err);
         } else {
             /* Head-rotations actually performed. Zero here with --kv-rot on
@@ -2172,31 +2141,31 @@ static int cli_run_generate(CliMain *s) {
                    lz_debug_epi_kern);
             printf("\n[%d tokens, %.1f s, %.3f s/token]\n",
                    n_out, ms / 1000.0, ms / 1000.0 / (n_out > 0 ? n_out : 1));
-            if (s->g.spec_k > 0) {
+            if (g.spec_k > 0) {
                 /* alpha = accepted / draft_tokens: the on-policy
                    acceptance rate, measured through the SAME
                    lz_generate_resume path production traffic uses -
                    not a separate harness. See LZGenOpts's own comment
                    for what counts as a draft token. */
-                double alpha = s->g.out_spec_draft_tokens > 0
-                              ? (double)s->g.out_spec_accepted / s->g.out_spec_draft_tokens
+                double alpha = g.out_spec_draft_tokens > 0
+                              ? (double)g.out_spec_accepted / g.out_spec_draft_tokens
                               : 0.0;
                 printf("[spec: %d rounds, %d draft tokens, %d accepted, alpha=%.4f, "
                       "final mtp_pos=%d, mtp attn rows=%lld]\n",
-                      s->g.out_spec_rounds, s->g.out_spec_draft_tokens,
-                      s->g.out_spec_accepted, alpha, st.mtp_pos, lz_debug_mtp_attn_rows);
+                      g.out_spec_rounds, g.out_spec_draft_tokens,
+                      g.out_spec_accepted, alpha, st.mtp_pos, lz_debug_mtp_attn_rows);
                 printf("[spec us: capture=%lld draft=%lld verify=%lld"
                       " catchup=%lld (rounds=%d, n_capture=%lld,"
                       " n_catchup=%lld, n_ring_rollback=%lld)]\n",
                       lz_debug_us_capture, lz_debug_us_draft,
                       lz_debug_us_verify, lz_debug_us_catchup,
-                      s->g.out_spec_rounds,
+                      g.out_spec_rounds,
                       lz_debug_n_capture, lz_debug_n_catchup,
                       lz_debug_n_ring_rollback);
             }
         }
         lz_state_free(&st);
-        return CLI_CLEANUP;
+        goto cleanup;
     }
 
     /* ---- single-turn chat render (--chat) ----
@@ -2209,7 +2178,7 @@ static int cli_run_generate(CliMain *s) {
        path. --chat is that single turn,
        byte-identical to interactive's first turn. --prompt stays the
        continuation probe the numeric tests depend on. */
-    if (s->chat) {
+    if (chat) {
         LZRunState st;
         LZChatBuf cb;
         LZChatMsg msg;
@@ -2217,60 +2186,60 @@ static int cli_run_generate(CliMain *s) {
         double ms = 0.0;
 
         static char tpath[1024];
-        if (!s->tok_path) {
-            s->tok_path = tok_path_for(s->dir, tpath, (int)sizeof tpath,
-                                       err, sizeof(err));
-            if (!s->tok_path) {
+        if (!tok_path) {
+            tok_path = tok_path_for(dir, tpath, (int)sizeof tpath,
+                                    err, sizeof(err));
+            if (!tok_path) {
                 printf("Tokenizer load failed: %s\n", err);
-                return CLI_FAIL;
+                goto fail;
             }
         }
-        if (lz_tokenizer_load(&s->tok, s->tok_path, err, sizeof(err)) != 0) {
+        if (lz_tokenizer_load(&tok, tok_path, err, sizeof(err)) != 0) {
             printf("Tokenizer load failed: %s\n", err);
-            return CLI_FAIL;
+            goto fail;
         }
-        if (!s->no_eos) lz_gen_opts_set_eos(&s->g, &s->tok);
-        s->g.max_new_tokens = s->n_gen > 0 ? s->n_gen : 128;
-        if (s->g.rng_seed == 0) s->g.rng_seed = lz_seed_mix((lz_u64)lz_time_ms());
+        if (!no_eos) lz_gen_opts_set_eos(&g, &tok);
+        g.max_new_tokens = n_gen > 0 ? n_gen : 128;
+        if (g.rng_seed == 0) g.rng_seed = lz_seed_mix((lz_u64)lz_time_ms());
 
         {
-            int seq = s->ctx_limit;
-            if (seq > s->cfg->seq_len) seq = s->cfg->seq_len;
+            int seq = ctx_limit;
+            if (seq > cfg->seq_len) seq = cfg->seq_len;
             if (seq < 256) seq = 256;
-            if (lz_state_alloc(&st, &s->m, seq, s->g.spec_k, err, sizeof(err)) != 0) {
+            if (lz_state_alloc(&st, &m, seq, g.spec_k, err, sizeof(err)) != 0) {
                 printf("State alloc failed: %s\n", err);
-                return CLI_FAIL;
+                goto fail;
             }
-            if (s->batch_width) st.nt_cap = s->batch_width;
+            if (batch_width) st.nt_cap = batch_width;
         }
 
         lz_chat_buf_init(&cb);
         msg.role = LZ_ROLE_USER;
-        msg.content = s->prompt;
+        msg.content = prompt;
         msg.len = -1;
-        if (lz_chat_render(&msg, 1, 1, s->think, &cb, err, sizeof(err)) != 0) {
+        if (lz_chat_render(&msg, 1, 1, think, &cb, err, sizeof(err)) != 0) {
             printf("Render failed: %s\n", err);
             lz_chat_buf_free(&cb);
             lz_state_free(&st);
-            return CLI_FAIL;
+            goto fail;
         }
 
         printf("\n---- chat render (%s thinking) ----\n",
-               s->think ? "on" : "off");
-        s->rc = lz_generate(&s->m, &s->tok, &st, cb.s, cb.len,
-                            &s->g, sink_stdout, NULL, NULL,
-                            &n_out, &ms, err, sizeof(err));
+               think ? "on" : "off");
+        rc = lz_generate(&m, &tok, &st, cb.s, cb.len,
+                         &g, sink_stdout, NULL, NULL,
+                         &n_out, &ms, err, sizeof(err));
         printf("\n---- chat end ----\n");
-        if (s->beep) lz_beep();
-        if (s->rc != 0) printf("Generation failed: %s\n", err);
+        if (beep) lz_beep();
+        if (rc != 0) printf("Generation failed: %s\n", err);
 
         lz_chat_buf_free(&cb);
         lz_state_free(&st);
-        return CLI_CLEANUP;
+        goto cleanup;
     }
 
     /* ---- interactive multi-turn chat ---- */
-    if (s->interactive) {
+    if (interactive) {
         LZRunState st;
         LZSession sess;
         static char tpath[1024];       /* same grounds as `line` below */
@@ -2283,39 +2252,39 @@ static int cli_run_generate(CliMain *s) {
         static char line[8192];
         int seq;
 
-        if (!s->tok_path) {
-            s->tok_path = tok_path_for(s->dir, tpath, (int)sizeof tpath,
-                                       err, sizeof(err));
-            if (!s->tok_path) {
+        if (!tok_path) {
+            tok_path = tok_path_for(dir, tpath, (int)sizeof tpath,
+                                    err, sizeof(err));
+            if (!tok_path) {
                 printf("Tokenizer load failed: %s\n", err);
-                return CLI_FAIL;
+                goto fail;
             }
         }
-        printf("\nTokenizer      %s\n", s->tok_path);
-        if (lz_tokenizer_load(&s->tok, s->tok_path, err, sizeof(err)) != 0) {
+        printf("\nTokenizer      %s\n", tok_path);
+        if (lz_tokenizer_load(&tok, tok_path, err, sizeof(err)) != 0) {
             printf("Tokenizer load failed: %s\n", err);
-            return CLI_FAIL;
+            goto fail;
         }
-        if (!s->no_eos) lz_gen_opts_set_eos(&s->g, &s->tok);
-        s->g.max_new_tokens = s->n_gen > 0 ? s->n_gen : 128;
-        if (s->g.rng_seed == 0) s->g.rng_seed = lz_seed_mix((lz_u64)lz_time_ms());
+        if (!no_eos) lz_gen_opts_set_eos(&g, &tok);
+        g.max_new_tokens = n_gen > 0 ? n_gen : 128;
+        if (g.rng_seed == 0) g.rng_seed = lz_seed_mix((lz_u64)lz_time_ms());
 
-        seq = s->ctx_limit;
-        if (seq > s->cfg->seq_len) seq = s->cfg->seq_len;
+        seq = ctx_limit;
+        if (seq > cfg->seq_len) seq = cfg->seq_len;
         if (seq < 256) seq = 256;
-        if (lz_state_alloc(&st, &s->m, seq, s->g.spec_k, err, sizeof(err)) != 0) {
+        if (lz_state_alloc(&st, &m, seq, g.spec_k, err, sizeof(err)) != 0) {
             printf("State alloc failed: %s\n", err);
-            return CLI_FAIL;
+            goto fail;
         }
-        if (s->batch_width) st.nt_cap = s->batch_width;
+        if (batch_width) st.nt_cap = batch_width;
         printf("Context        %d slots (model max %d, prefill batch %d)\n",
-               seq, s->cfg->seq_len, st.nt_cap);
-        cli_print_sampling(&s->g);
+               seq, cfg->seq_len, st.nt_cap);
+        cli_print_sampling(&g);
         /* The session owns the conversation (history, prompt render,
            prefix cache, reply accumulation, turn trimming); it BORROWS
            the model, tokenizer and run state allocated above, and the
            CLI still frees all three at the end. */
-        lz_session_init(&sess, &s->m, &s->tok, &st, s->think);
+        lz_session_init(&sess, &m, &tok, &st, think);
         /* The CLI's parsed sampling choices (think preset applied with
            the `manual` per-field overrides) live in `g`; copy the whole
            struct so the session generates with the user's numbers.
@@ -2326,7 +2295,7 @@ static int cli_run_generate(CliMain *s) {
            gui/session.c. The core also holds no seed policy:
            g.rng_seed is seeded once above and sess.opts.rng_seed is
            used verbatim per turn. */
-        sess.opts = s->g;
+        sess.opts = g;
         /* Cross-turn prefix reuse: a constant ~53 tokens per turn are
            genuinely new, the rest is re-derivation. --no-ckpt turns it
            off, which is also how the parity gate
@@ -2334,11 +2303,11 @@ static int cli_run_generate(CliMain *s) {
            session's prefill field does NOT default to PREFIX -
            lz_session_init zeroes the struct - so the CLI must set it
            here; gui/main.c sets the same field for the GUI. */
-        if (s->ckpt_on && lz_session_prefix_arm(&sess, &s->m, err, sizeof err) != 0) {
+        if (ckpt_on && lz_session_prefix_arm(&sess, &m, err, sizeof err) != 0) {
             printf("[prefix cache alloc failed: %s - reuse off]\n", err);
-            s->ckpt_on = 0;
+            ckpt_on = 0;
         }
-        sess.prefill = s->ckpt_on ? LZ_PREFILL_PREFIX : LZ_PREFILL_FULL;
+        sess.prefill = ckpt_on ? LZ_PREFILL_PREFIX : LZ_PREFILL_FULL;
         printf("\n---- interactive chat: type a line, Ctrl-D to quit ----\n");
         for (;;) {
             int n_out, turn_rc, reused, n_prompt_tok;
@@ -2412,7 +2381,7 @@ static int cli_run_generate(CliMain *s) {
                    : 0` reads; without this, an interactive generation
                    failure would exit 0 and a wrapper script would see
                    success for a failed turn. */
-                s->rc = turn_rc;
+                rc = turn_rc;
                 break;
             }
             /* The job trims the oldest exchange silently when the window
@@ -2436,7 +2405,7 @@ static int cli_run_generate(CliMain *s) {
                "the turn is over and the prompt is yours", and a reader
                who looks up on hearing it should find the screen already
                settled. This is the turn loop the flag exists for. */
-            if (s->beep) lz_beep();
+            if (beep) lz_beep();
             /* Fold the reply back into history: normalize + push the
                assistant turn, reading the session's authority buffer. */
             if (lz_session_end(&sess, err, sizeof err) != 0) {
@@ -2447,41 +2416,11 @@ static int cli_run_generate(CliMain *s) {
            NOT the borrowed model, tokenizer and run state below. */
         lz_session_free(&sess);
         lz_state_free(&st);
-        return CLI_CLEANUP;
-    }
-
-    return CLI_FAIL;
-}
-
-int main(int argc, char **argv) {
-    CliMain s;
-
-    memset(&s, 0, sizeof s);
-    s.topk = 5;
-    s.ctx_limit = LZ_DEFAULT_CTX;
-    s.beep = 1;       /* --no-beep clears it; see beep.h for the sound */
-    s.ckpt_on = 1;    /* --no-ckpt turns prefix reuse off (A/B knob) */
-    s.only_layer = -1;
-
-    {
-        int pr = cli_parse_args(&s, argc, argv);
-        if (pr >= 0) return pr;
-    }
-    switch (cli_load_model(&s)) {
-    case CLI_FAIL:    goto fail;
-    case CLI_CLEANUP: goto cleanup;
-    }
-    switch (cli_run_dump(&s)) {
-    case CLI_FAIL:    goto fail;
-    case CLI_CLEANUP: goto cleanup;
-    }
-    switch (cli_run_generate(&s)) {
-    case CLI_FAIL:    goto fail;
-    case CLI_CLEANUP: goto cleanup;
+        goto cleanup;
     }
 
 fail:
-    s.rc = 1;
+    rc = 1;
 cleanup:
 #if defined(LZ_X87_STACK_GATE)
     /* docs/x87-gcc-reg-stack-leak.md. The check-and-record half lives in
@@ -2500,14 +2439,14 @@ cleanup:
         }
     }
 #endif /* LZ_X87_STACK_GATE */
-    lz_tokenizer_free(&s.tok);
-    lz_free(&s.m);
-    free(s.tokens);
+    lz_tokenizer_free(&tok);
+    lz_free(&m);
+    free(tokens);
     /* Collapse to 0/1. rc now carries an LZErr code (err.h) so that a
        library caller can map a failure onto an HTTP status without
        parsing the message text - but a PROCESS exit status is a
        different namespace, and letting engine codes leak into it would
        silently change what every wrapper script sees, for no gain: the
        CLI has already printed the message. */
-    return s.rc ? 1 : 0;
+    return rc ? 1 : 0;
 }

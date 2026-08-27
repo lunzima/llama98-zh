@@ -315,15 +315,25 @@ extern void lz_vmax_sse_asm(const float *x, int n4, float *pmax);
     ".686"                              \
     "movss    xmm0, [ebx]"              \
     "shufps   xmm0, xmm0, 0"            \
-    "test     edx, edx"                 \
+    "movaps   xmm2, xmm0"               \
+    "test     edx, 1"                   \
+    "jz       M0"                       \
+    "movups   xmm1, [eax]"              \
+    "maxps    xmm0, xmm1"               \
+    "add      eax, 16"                  \
+    "M0:"                               \
+    "shr      edx, 1"                   \
     "jz       M2"                       \
     "M1:"                               \
     "movups   xmm1, [eax]"              \
     "maxps    xmm0, xmm1"               \
-    "add      eax, 16"                  \
+    "movups   xmm1, [eax+16]"           \
+    "maxps    xmm2, xmm1"               \
+    "add      eax, 32"                  \
     "dec      edx"                      \
     "jnz      M1"                       \
     "M2:"                               \
+    "maxps    xmm0, xmm2"               \
     "movhlps  xmm1, xmm0"               \
     "maxps    xmm0, xmm1"               \
     "movaps   xmm1, xmm0"               \
