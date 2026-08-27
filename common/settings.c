@@ -39,7 +39,10 @@ int lz_common_tokcell(char *out, int cap, int tokens, double elapsed_ms,
     if (tokens < 0) tokens = 0;
     if (elapsed_ms < 1.0) elapsed_ms = 0.0;
     secs = elapsed_ms * 0.001;
-    sprintf(out, fmt, tokens, secs > 0.0 ? tokens / secs : 0.0);
+    /* cap is the caller's buffer bound; snprintf honours it where sprintf
+       would not - the localised fmt (LZ_STR_STATE_TOKCELL) is caller text
+       and a long translation must truncate, not overflow. */
+    snprintf(out, (size_t)cap, fmt, tokens, secs > 0.0 ? tokens / secs : 0.0);
     return 0;
 }
 
