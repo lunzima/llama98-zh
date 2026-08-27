@@ -2288,7 +2288,20 @@ static void gdn_p2_fixed_rows(const int8_t *sq_in, int8_t *sq_out,
            its worst case would overstate every row that has one. */
         LZ_FCX(LZ_FC_RECUR, ng, 2 * ng, 0, 0, 0);
 #ifdef LZ_HAVE_P2_MMX
-        if (p2_tier()) {
+        /* ONE CALL, NOT TWO. This line asked p2_tier() and then passed
+           p2_tier() again as the last argument, and it sits in the
+           per-row loop: build/dispatch_hotness.sh measured 147,457
+           executions of EACH over eight tokens, the second and third
+           hottest tier dispatches in the engine. The function reads a
+           global and cannot be folded by the compiler because it calls
+           lz_kernel_select on its first line.
+
+           Not cached in a static inside p2_tier: --kernel switches tiers
+           at runtime and the suite relies on it, so a cache there would
+           make the second tier of a run silently be the first. */
+        {
+        const int tier = p2_tier();
+        if (tier) {
             gdn_p2_row_simd(row_in,
 #if LZ_GDN_STATE_2PLANE
                             row_lo_in,
@@ -2297,8 +2310,9 @@ static void gdn_p2_fixed_rows(const int8_t *sq_in, int8_t *sq_out,
 #if LZ_GDN_STATE_2PLANE
                             row_lo_out,
 #endif /* LZ_GDN_STATE_2PLANE */
-                            rs_out, ng, p2_tier());
+                            rs_out, ng, tier);
             continue;
+        }
         }
 #endif /* LZ_HAVE_P2_MMX */
         for (gg = 0; gg < ng; gg++) {

@@ -109,6 +109,7 @@
 !/build/div_hotness.sh
 !/build/mul_hotness.sh
 !/build/cov_run.sh
+!/build/dispatch_hotness.sh
 !/build/watcom_flag_parity_gate.sh
 !/build/nest_census.sh
 !/build/nest_census.awk

@@ -1796,6 +1796,30 @@ void lz_matmul_w(float *o, const float *x, const LZTensor *w,
 void lz_matmul(float *o, const float *x, const float *w,
                    int in_dim, int out_dim) {    int i;
     const float *row = w;
+    /* THE TIER TEST IS LOOP-INVARIANT AND WAS BEING REDONE PER ROW.
+       Measured with build/dispatch_hotness.sh: 835,840 executions over
+       eight tokens, 73% of every kernel-tier dispatch in the engine -
+       far more than any other site, and all of it re-deciding something
+       that cannot change inside this loop.
+
+       gcc cannot hoist it. `g_kernel` is a global and the loop body
+       calls lz_matmul_row_sse / lz_matmul_row_arm_asm, so the compiler
+       must assume the call may have written it and reloads it every
+       iteration. Nothing here does write it - no lz_kernel_select on
+       any path below - so the hoist is safe in fact even though it is
+       not provable from the types.
+
+       Note what this is NOT: a change of dispatch mechanism. A
+       function-pointer table would not help here, because the cost is
+       the RELOAD, not the branch; an indirect call per row would be
+       worse than a perfectly-predicted test on a local. */
+#if defined(LZ_MATMUL_F32_SSE_EXTERN)
+    const int use_sse = ((g_kernel == LZ_KERNEL_SSE2
+                          || g_kernel == LZ_KERNEL_SSE) && in_dim >= 8);
+#endif /* LZ_MATMUL_F32_SSE_EXTERN */
+#if defined(LZ_ARM_ASM_EXTERN)
+    const int use_arm = (g_kernel == LZ_KERNEL_ARM_ASM && in_dim >= 8);
+#endif /* LZ_ARM_ASM_EXTERN */
     /* The hottest loop in the whole forward, ~750M MACs per token.
 
        8 independent accumulators here are not for loop unrolling but
@@ -1829,8 +1853,7 @@ void lz_matmul(float *o, const float *x, const float *w,
            No CPUID in the test: lz_kernel_select clamps both of these
            values to what CPUID found, so reaching either one is already
            the answer, and reading CPUID here would only ask it again. */
-        if ((g_kernel == LZ_KERNEL_SSE2 || g_kernel == LZ_KERNEL_SSE) &&
-            in_dim >= 8) {
+        if (use_sse) {
             float acc8[8];
             j = lz_matmul_row_sse(row, x, in_dim, acc8);
             a0 = acc8[0]; a1 = acc8[1]; a2 = acc8[2]; a3 = acc8[3];
@@ -1844,7 +1867,7 @@ void lz_matmul(float *o, const float *x, const float *w,
            On a target with no FPU each of these MACs is two library
            calls; the kernel fuses them and returns where it stopped.
            Selected by tier for the reason the SSE arm gives. */
-        if (g_kernel == LZ_KERNEL_ARM_ASM && in_dim >= 8) {
+        if (use_arm) {
             float acc8[8];
             j = lz_matmul_row_arm_asm(row, x, in_dim, acc8);
             a0 = acc8[0]; a1 = acc8[1]; a2 = acc8[2]; a3 = acc8[3];
