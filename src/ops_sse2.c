@@ -2298,35 +2298,35 @@ extern void lz_dot32_q16_sse2_asm_2(const int16_t *w, const int16_t *xa,
     "movdqu    xmm6, [edx]" \
     "movdqa    xmm7, xmm2" \
     "pmaddwd   xmm7, xmm6" \
-    "paddd     xmm0, xmm7" \
     "movdqu    xmm6, [edx+16]" \
-    "movdqa    xmm7, xmm3" \
-    "pmaddwd   xmm7, xmm6" \
+    "movdqa    xmm1, xmm3" \
     "paddd     xmm0, xmm7" \
+    "pmaddwd   xmm1, xmm6" \
     "movdqu    xmm6, [edx+32]" \
     "movdqa    xmm7, xmm4" \
+    "paddd     xmm0, xmm1" \
     "pmaddwd   xmm7, xmm6" \
-    "paddd     xmm0, xmm7" \
     "movdqu    xmm6, [edx+48]" \
-    "movdqa    xmm7, xmm5" \
-    "pmaddwd   xmm7, xmm6" \
+    "movdqa    xmm1, xmm5" \
     "paddd     xmm0, xmm7" \
+    "pmaddwd   xmm1, xmm6" \
     "movdqu    xmm6, [ebx]" \
     "movdqa    xmm7, xmm2" \
+    "paddd     xmm0, xmm1" \
     "pmaddwd   xmm7, xmm6" \
-    "paddd     xmm1, xmm7" \
     "movdqu    xmm6, [ebx+16]" \
-    "movdqa    xmm7, xmm3" \
-    "pmaddwd   xmm7, xmm6" \
+    "movdqa    xmm0, xmm3" \
     "paddd     xmm1, xmm7" \
+    "pmaddwd   xmm0, xmm6" \
     "movdqu    xmm6, [ebx+32]" \
     "movdqa    xmm7, xmm4" \
+    "paddd     xmm1, xmm0" \
     "pmaddwd   xmm7, xmm6" \
-    "paddd     xmm1, xmm7" \
     "movdqu    xmm6, [ebx+48]" \
-    "movdqa    xmm7, xmm5" \
-    "pmaddwd   xmm7, xmm6" \
+    "movdqa    xmm0, xmm5" \
     "paddd     xmm1, xmm7" \
+    "pmaddwd   xmm0, xmm6" \
+    "paddd     xmm1, xmm0" \
     "movdqa    xmm6, xmm0" \
     "psrldq    xmm6, 8" \
     "paddd     xmm0, xmm6" \
