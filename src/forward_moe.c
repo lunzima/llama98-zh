@@ -59,6 +59,21 @@ static void moe_expert_loop(LZRunState *s, const LZModelConfig *c,
     int inter = c->moe_intermediate_size;
     int ne = c->num_experts;
     int tk, kk, vv;
+    /* Loop-invariant router configuration, packed so the per-token call
+       passes one struct pointer instead of nine arguments (see the
+       LZMoeRouteParams note in ops.h). moe_gate_bias is F32, so
+       lz_t_f32 returns t->f without touching s->wscr and the pointer is
+       stable across the whole token loop. */
+    LZMoeRouteParams rp;
+    rp.li_e = LZ_MOEGATE_ES;
+    rp.bias = lz_t_f32(&L->moe_gate_bias, s->wscr);
+    rp.n_experts = ne;
+    rp.top_k = topk;
+    rp.sigmoid = c->moe_router_sigmoid;
+    rp.renormalize = c->moe_renormalize;
+    rp.tau = lz_moe_tau;
+    rp.idx_out = s->moe_sel_idx;
+    rp.w_out = s->moe_sel_w;
     for (tk = 0; tk < nt; tk++) {
         float *lat_x = s->moe_lat_x + (size_t)tk * latent;
         const short *lat_i = mlat_int ? s->moe_lat_i16 + (size_t)tk * latent
@@ -67,11 +82,8 @@ static void moe_expert_loop(LZRunState *s, const LZModelConfig *c,
         int gs_have = 0;        /* group size moe_lat_q currently holds */
 
         lz_moe_route(s->moe_router_logits + (size_t)tk * ne,
-                    mrt_int ? s->moe_logits_i16 + (size_t)tk * ne : NULL,
-                    LZ_MOEGATE_ES,
-                    lz_t_f32(&L->moe_gate_bias, s->wscr),
-                    ne, topk, c->moe_router_sigmoid, c->moe_renormalize,
-                    lz_moe_tau, s->moe_sel_idx, s->moe_sel_w);
+                     mrt_int ? s->moe_logits_i16 + (size_t)tk * ne : NULL,
+                     &rp);
 
         /* One layer's contribution to the token's union. Guarded, so a
            caller that did not ask for an inspector pays one predictable

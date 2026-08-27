@@ -9,10 +9,22 @@
 #include "ops_quant.h"         /* pow2f */
 #include "ops_kernel_shared.h" /* lz_i32f */
 
-void lz_moe_route(const float *logits, const short *li, int li_e,
-                  const float *bias, int n_experts,
-                  int top_k, int sigmoid, int renormalize, float tau,
-                  int *idx_out, float *w_out) {
+void lz_moe_route(const float *logits, const short *li,
+                  const LZMoeRouteParams *rp) {
+    /* Unpack the loop-invariant fields into locals so the body below is
+       unchanged from the flat-signature version. `rp` is const and no
+       aliasing write reaches it, so each field loads once (base+offset)
+       and the caller pays one struct pointer where it used to push nine
+       arguments. */
+    int li_e = rp->li_e;
+    const float *bias = rp->bias;
+    int n_experts = rp->n_experts;
+    int top_k = rp->top_k;
+    int sigmoid = rp->sigmoid;
+    int renormalize = rp->renormalize;
+    float tau = rp->tau;
+    int *idx_out = rp->idx_out;
+    float *w_out = rp->w_out;
     /* static, not stack: LZ_MAX_EXPERTS is 128, and rule six clause 4
        ("large buffers stay off the stack") is written for a Win98
        target with a small default stack - four 512-byte arrays per

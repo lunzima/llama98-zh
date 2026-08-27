@@ -2127,10 +2127,27 @@ void lz_conv_build_scales(float *oscale, float *in_scale,
    vector first, since neither lz_exp nor a divide by a runtime tau has
    an integer entry to reach. NULL keeps the float input this function
    was written with. */
-void lz_moe_route(const float *logits, const short *li, int li_e,
-                  const float *bias, int n_experts,
-                  int top_k, int sigmoid, int renormalize, float tau,
-                  int *idx_out, float *w_out);
+/* Loop-invariant router configuration, packed so the per-token call
+   passes one struct pointer instead of nine arguments: Watcom's
+   X86_TUNE_PUSH_MEMORY prices the seven that land past its register
+   window as a memory push each, and ARM's AAPCS spills the same seven
+   to the stack and reloads them every token. Built once by the caller
+   before its token loop; only `logits` and `li` vary per token.
+   idx_out/w_out ride along because they are the same fixed slots every
+   token, not per-token destinations. */
+typedef struct LZMoeRouteParams {
+    int li_e;
+    const float *bias;
+    int n_experts;
+    int top_k;
+    int sigmoid;
+    int renormalize;
+    float tau;
+    int *idx_out;
+    float *w_out;
+} LZMoeRouteParams;
+void lz_moe_route(const float *logits, const short *li,
+                  const LZMoeRouteParams *rp);
 
 /* Accepted range for --moe-tau. Wide enough to contain everything that
    was measured (the sharpening half went to 0.25, the flattening half to
