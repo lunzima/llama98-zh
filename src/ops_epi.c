@@ -498,6 +498,7 @@ static int32_t g_epi_zg[LZ_BATCH_MAX][LZ_EPI_MAX_NG];
    what made the first measured candidate 1.88x instead of 32x. */
 void epi_pack_act(const float *xqs, int nb, int nt) {
     int tk, g;
+    const float *xsb;   /* C89: declarations before statements */
     /* One multiply per group plus the amax scan, per token. Counted so
        the census cannot report the fixed tier as free - the work moved,
        it did not vanish, and a site that bills nothing is how the old
@@ -514,7 +515,7 @@ void epi_pack_act(const float *xqs, int nb, int nt) {
        one edit away from being mistaken for a site that bills zero
        because nobody wrote the bill. */
     LZ_FCX(LZ_FC_EPI, 0, 0, 0, 0, 0);
-    const float *xsb = xqs;
+    xsb = xqs;
     for (tk = 0; tk < nt; tk++, xsb += nb) {
         /* The amax scan is q8_amax, not a hand-written loop. It was two
            __aeabi_fcmpXX per group - `xsb[g] < 0.0f` for the sign and

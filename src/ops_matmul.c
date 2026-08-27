@@ -304,6 +304,7 @@ void matmul_q8_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
     int nb = (unsigned)in_dim >> 5;   /* 32-sub-block count */
     const int8_t *wend = w->q + (size_t)w->n;   /* prefetch upper bound */
     lz_rowfn row;
+    const int8_t *wr;   /* C89: declarations before statements */
     /* Same predicate as the float epilogue - see q8_fixed_epi. */
     int fixed_epi = q8_fixed_epi(w, in_dim, nb, nt);
     int want_i16 = (out->oi != NULL) || out->probe;
@@ -356,7 +357,7 @@ void matmul_q8_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
     for (t = 0; t < nt * in_dim; t++) g_xw[t] = (int16_t)xq[t];
     if (fixed_epi) epi_pack_act(xqs, nb, nt);
 
-    const int8_t *wr = w->q;
+    wr = w->q;
     for (i = 0; i < out_dim; i++, wr += in_dim) {
         /* The weight row loads once here and serves all nt tokens; one
            EMMS per row, not per token - MMX and x87 share a register
@@ -428,6 +429,10 @@ void matmul_scalar_ref_one(float *o, const int8_t *xq, const float *xqs,
     /* static not stack: Win98's stack is tight; see the xw/acc32 note in this file. */
     static int32_t accref[LZ_MM_WIDEN_MAX / 32];
     static float   xgref[LZ_MM_WIDEN_MAX / 32];
+    const int8_t *wr;
+    const int16_t *w16;
+    const char *ws;
+    const char *wz;   /* C89: declarations before statements */
 
     if (gs < 32 || (gs % 32) != 0 || (in_dim % gs) != 0) {
         /* degenerate tier (gs < 32, activations share weight groups): Q8_0 only */
@@ -470,11 +475,11 @@ void matmul_scalar_ref_one(float *o, const int8_t *xq, const float *xqs,
         }
     }
 
-    const int8_t *wr = w->q;
-    const int16_t *w16 = (const int16_t *)(const void *)w->q;
-    const char *ws = (const char *)w->scale;
-    const char *wz = (q4 && !t2) ? (const char *)w->zero
-                                 : (const char *)w->scale;
+    wr = w->q;
+    w16 = (const int16_t *)(const void *)w->q;
+    ws = (const char *)w->scale;
+    wz = (q4 && !t2) ? (const char *)w->zero
+                     : (const char *)w->scale;
     for (i = 0; i < out_dim; i++, wr += in_dim, w16 += in_dim,
          ws += (unsigned)ng << 2, wz += (unsigned)ng << 2) {
         const unsigned char *wn = (const unsigned char *)w->q +
@@ -765,11 +770,14 @@ static int q41_fixed_epi(const LZTensor *w, int in_dim, int nb, int nt,
 static void epi_zero_act(const int8_t *xq, const float *xqs, int in_dim,
                          int ng, int r, int nb, int nt) {
     int t, g, s, k;
+    const int8_t *xqt;
+    const float *xst;
+    float *xgt;   /* C89: declarations before statements */
     LZ_FCX(LZ_FC_EPI, (long)nt * ng * r, (long)nt * ng * r, 0,
            (long)nt * ng * r, 0);
-    const int8_t *xqt = xq;
-    const float *xst = xqs;
-    float *xgt = g_xg;
+    xqt = xq;
+    xst = xqs;
+    xgt = g_xg;
     for (t = 0; t < nt; t++, xqt += in_dim, xst += nb, xgt += ng) {
         const float *xsp = xst;
         const int8_t *xqp = xqt;
@@ -796,6 +804,8 @@ void matmul_q41_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
     int fixed_epi = q41_fixed_epi(w, in_dim, nb, nt, r, 0);
     int want_i16 = (out->oi != NULL) || out->probe;
     lz_rowfn row;
+    const char *wd;
+    const char *wm;   /* C89: declarations before statements */
 
     /* After the declarations, not before them: the tier selector has no
        bearing on any initialiser above and the language floor puts
@@ -829,8 +839,8 @@ void matmul_q41_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
         epi_zero_act(xq, xqs, in_dim, ng, r, nb, nt);
     }
 
-    const char *wd = (const char *)w->scale;
-    const char *wm = (const char *)w->zero;
+    wd = (const char *)w->scale;
+    wm = (const char *)w->zero;
     for (i = 0; i < out_dim; i++, wd += (unsigned)ng << 2,
          wm += (unsigned)ng << 2) {
         const unsigned char *wn =
@@ -1117,6 +1127,7 @@ void matmul_t2_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
     int fixed_epi = q41_fixed_epi(w, in_dim, nb, nt, r, 1);
     int want_i16 = (out->oi != NULL) || out->probe;
     lz_rowfn row;
+    const float *wd;   /* C89: declarations before statements */
 
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
     row = lz_row_pick(LZ_ROW_T2);
@@ -1150,7 +1161,7 @@ void matmul_t2_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
         epi_zero_act(xq, xqs, in_dim, ng, r, nb, nt);
     }
 
-    const float *wd = w->scale;
+    wd = w->scale;
     for (i = 0; i < out_dim; i++, wd += ng) {
         const unsigned char *w2 = p2b + (size_t)i * in_dim / 4;
         lz_row_ctx rctx;
@@ -1184,6 +1195,10 @@ void matmul_q61_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
     int fixed_epi = q41_fixed_epi(w, in_dim, nb, nt, r, 0);
     int want_i16 = (out->oi != NULL) || out->probe;
     lz_rowfn row;
+    const char *wd;
+    const char *wm;
+    const unsigned char *wn;
+    const unsigned char *w2;   /* C89: declarations before statements */
 
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
     row = lz_row_pick(LZ_ROW_Q61);
@@ -1211,10 +1226,10 @@ void matmul_q61_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
         epi_zero_act(xq, xqs, in_dim, ng, r, nb, nt);
     }
 
-    const char *wd = (const char *)w->scale;
-    const char *wm = (const char *)w->zero;
-    const unsigned char *wn = p4b;
-    const unsigned char *w2 = p2b;
+    wd = (const char *)w->scale;
+    wm = (const char *)w->zero;
+    wn = p4b;
+    w2 = p2b;
     for (i = 0; i < out_dim; i++, wd += (unsigned)ng << 2,
          wm += (unsigned)ng << 2, wn += in_dim >> 1, w2 += in_dim >> 2) {
         lz_row_ctx rctx;
@@ -1527,6 +1542,7 @@ void matmul_q16_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
        and the fixed one cannot end up on different scalings. */
     int post_e = lz_epi_post_e(w);
     float post = pow2f(post_e);
+    const int16_t *wr;   /* C89: declarations before statements */
 
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
     row = lz_row_pick(LZ_ROW_Q16);
@@ -1562,7 +1578,7 @@ void matmul_q16_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
        what it saves. Same call the Q8_0 path makes. */
     if (fixed_epi) epi_pack_act(xqs, ng, nt);
 
-    const int16_t *wr = wbase;
+    wr = wbase;
     for (i = 0; i < out_dim; i++, wr += in_dim) {
         lz_row_ctx rctx;
         rctx.acc32 = g_acc32;

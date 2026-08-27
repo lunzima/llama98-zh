@@ -50,6 +50,63 @@
 # version of this gate did - throws that coverage away to avoid one
 # known difference.
 #
+# CROSS-COMPILER (gcc vs Watcom) IS REPORTED, NOT ASSERTED, and the
+# reason is measured. gcc's x86-64 build does scalar float in SSE, which
+# rounds every instruction to 24 bits. Watcom emits x87, which stores
+# each STATEMENT back to 24 bits but keeps a whole EXPRESSION on the
+# 80-bit stack - classic double rounding. The two therefore disagree by
+# 1 ulp on ordinary float arithmetic, before any kernel is involved:
+#
+#   volatile float chain of + - * /   SSE 41412422  x87 41412423
+#   lz_sinf(-55.0f)                   SSE 3f7feff6  x87 3f7feff5
+#   lz_logf(6.27778e-26f)             SSE c2681eec  x87 c2681eeb
+#
+# That is NOT a Watcom defect and not a kernel that drifted: the SAME
+# source compiled by gcc with -mfpmath=387 reproduces the Watcom bytes
+# exactly (3f7feff5 / c2681eeb), so the split is the float unit, not the
+# compiler. lz_fpu_float_begin's PC=24 does not close it either - the
+# control word sets the mantissa width, it does not force a store inside
+# an expression.
+#
+# One ulp at the input, amplified through 24 transformer layers, ends up
+# changing almost every logit byte (76.0 of 78.9 MB on the zh fixture),
+# so a byte count here says nothing about severity. The cross-compiler
+# rows print their measurement and do not set FAIL.
+#
+# What DOES stay a hard assert: gcc across all three tiers, Watcom across
+# ref == mmx. Both hold on every run to date and both catch a kernel that
+# drifted from its own scalar reference.
+#
+# Watcom's sse2 tier is reported rather than asserted, and the reason is
+# narrower than "x87 vs SSE". ONE WATCOM BINARY CONTAINS BOTH ROUNDINGS:
+# its scalar code is x87, its mmx twin is integer SIMD (inheriting x87
+# around it), but its sse2 twin issues real mulps/addps/cvtps2dq
+# (src/ops_sse2.c) - SSE rounding inside an x87 binary. Whether that
+# reaches the logits depends on how much of the float result the
+# subsequent quantisation absorbs, and the measurements disagree with
+# each other: one run had watcom sse2 standing apart from watcom ref
+# (gcc-sse2-vs-watcom-sse2 74,958,947 bytes against 75,950,881 for the
+# other two tiers), a later clean rebuild had watcom ref == watcom sse2
+# exactly and all three cross-compiler rows at the same 75,950,881.
+#
+# The second is the trustworthy one - the first ran against a tree whose
+# X86_64_CFLAGS still carried an -mfpmath=387 experiment - but the row is
+# left informational rather than promoted to an assert on one clean run.
+# Every gcc-vs-Watcom pairing is informational for the reason above.
+#
+# BUILDING gcc WITH -mfpmath=387 TO CLOSE THE GAP DOES NOT WORK, and the
+# attempt is on record because it looks like the obvious fix. It does
+# make the gcc scalar path match Watcom - but the SIMD tiers keep
+# emitting real SSE2 instructions, so the SAME binary then disagrees
+# with ITSELF: this gate's `epi` row went from PASS to
+#
+#   FAIL: zh / epi - ref and sse2 differ in 57306064 of 78905344 bytes
+#
+# because ref had become x87 while sse2 stayed SSE. That trades one
+# cross-compiler difference for a new intra-binary one, which is the
+# worse of the two - the hard asserts above are the ones that catch a
+# diverged kernel.
+#
 # Runs on whatever kernels the host offers: if the CPU has no SSE2 the
 # tier selector refuses and the gate SKIPs rather than comparing a tier
 # against itself, which would pass while measuring nothing.
@@ -430,44 +487,68 @@ else
         if [ "$n" -ne 10 ]; then
             echo "  cross-compiler: incomplete ($n/10 runs), nothing compared"
         else
-            # Twin pairs as SHIPPED: gcc intrinsics against wcc386
-            # #pragma aux, per tier, on the default flags.
-            for k in mmx sse2; do
-                if cmp -s "$TMPD/x.gcc.$k.dflt.bin" "$TMPD/x.wat.$k.dflt.bin"; then
-                    echo "PASS: $fx / xcc - gcc $k == watcom $k (intrinsics vs asm)"
-                    PASS=$((PASS + 1))
+            # HARD ASSERT, grouped by FLOAT UNIT rather than by compiler,
+            # because the grouping that matters is which tiers round the
+            # same way - and one Watcom binary contains both.
+            #
+            #   gcc:  scalar is SSE (x86-64 default) and the SIMD tiers
+            #         are SSE2, so all three tiers are one rounding.
+            #   wat:  scalar is x87; the mmx twin is INTEGER SIMD, so it
+            #         inherits x87's rounding for everything around it -
+            #         but the sse2 twin issues real mulps/addps/cvtps2dq
+            #         (src/ops_sse2.c), i.e. SSE rounding inside an x87
+            #         binary. wat ref == wat sse2 is therefore structurally
+            #         unreachable and says nothing about the kernel.
+            #
+            # So gcc gets all three tiers; Watcom gets ref == mmx, which
+            # is the row that still catches a #pragma aux integer kernel
+            # drifting from its own scalar reference.
+            if cmp -s "$TMPD/x.gcc.ref.epi.bin" "$TMPD/x.gcc.mmx.epi.bin" \
+               && cmp -s "$TMPD/x.gcc.ref.epi.bin" "$TMPD/x.gcc.sse2.epi.bin"; then
+                echo "PASS: $fx / xcc - gcc ref == gcc mmx == gcc sse2" \
+                     "(one binary, one rounding, three tiers)"
+                PASS=$((PASS + 1))
+            else
+                echo "FAIL: $fx / xcc - gcc's own tiers are not one value"
+                FAIL=1
+            fi
+            if cmp -s "$TMPD/x.wat.ref.epi.bin" "$TMPD/x.wat.mmx.epi.bin"; then
+                echo "PASS: $fx / xcc - watcom ref == watcom mmx" \
+                     "(x87 scalar vs its integer-SIMD twin)"
+                PASS=$((PASS + 1))
+            else
+                echo "FAIL: $fx / xcc - watcom's x87 tiers are not one value"
+                FAIL=1
+            fi
+            if cmp -s "$TMPD/x.wat.ref.epi.bin" "$TMPD/x.wat.sse2.epi.bin"; then
+                echo "INFO: $fx / xcc - watcom ref == watcom sse2" \
+                     "(x87 and SSE agreed here)"
+            else
+                ND=$(cmp -l "$TMPD/x.wat.ref.epi.bin" \
+                            "$TMPD/x.wat.sse2.epi.bin" | wc -l)
+                NT=$(wc -c < "$TMPD/x.wat.ref.epi.bin")
+                echo "INFO: $fx / xcc - watcom ref vs watcom sse2 differ in" \
+                     "$ND of $NT bytes (known: x87 scalar vs the sse2 twin's" \
+                     "own mulps/addps rounding, same cause as the rows below)"
+            fi
+            # REPORTED, NOT ASSERTED: gcc (SSE, 24-bit every instruction)
+            # against Watcom (x87, 80-bit inside an expression). The
+            # header measures why these cannot match and why the byte
+            # count is not a severity signal. Printed so a change in the
+            # relationship is visible in the log; it does not set FAIL.
+            for k in ref mmx sse2; do
+                if cmp -s "$TMPD/x.gcc.$k.epi.bin" "$TMPD/x.wat.$k.epi.bin"; then
+                    echo "INFO: $fx / xcc - gcc $k == watcom $k" \
+                         "(SSE and x87 agreed here)"
                 else
-                    ND=$(cmp -l "$TMPD/x.gcc.$k.dflt.bin" \
-                                "$TMPD/x.wat.$k.dflt.bin" | wc -l)
-                    echo "FAIL: $fx / xcc - gcc $k and watcom $k differ in $ND bytes"
-                    FAIL=1
+                    ND=$(cmp -l "$TMPD/x.gcc.$k.epi.bin" \
+                                "$TMPD/x.wat.$k.epi.bin" | wc -l)
+                    NT=$(wc -c < "$TMPD/x.gcc.$k.epi.bin")
+                    echo "INFO: $fx / xcc - gcc $k vs watcom $k differ in" \
+                         "$ND of $NT bytes (known: SSE 24-bit vs x87 80-bit," \
+                         "see this script's header)"
                 fi
             done
-            # x87 against SSE scalar: the same C, two float units.
-            if cmp -s "$TMPD/x.gcc.ref.epi.bin" "$TMPD/x.wat.ref.epi.bin"; then
-                echo "PASS: $fx / xcc - gcc ref == watcom ref (SSE scalar vs x87)"
-                PASS=$((PASS + 1))
-            else
-                ND=$(cmp -l "$TMPD/x.gcc.ref.epi.bin" \
-                            "$TMPD/x.wat.ref.epi.bin" | wc -l)
-                echo "FAIL: $fx / xcc - SSE scalar and x87 differ in $ND bytes"
-                FAIL=1
-            fi
-            # And with the epilogue axis off, the six are ONE value.
-            allsame=1
-            for f in "$TMPD"/x.gcc.ref.epi.bin "$TMPD"/x.wat.ref.epi.bin \
-                     "$TMPD"/x.gcc.mmx.epi.bin "$TMPD"/x.wat.mmx.epi.bin \
-                     "$TMPD"/x.gcc.sse2.epi.bin "$TMPD"/x.wat.sse2.epi.bin; do
-                cmp -s "$TMPD/x.gcc.ref.epi.bin" "$f" || allsame=0
-            done
-            if [ "$allsame" = 1 ]; then
-                echo "PASS: $fx / xcc - all six arms (SSE, MMX, x87; two" \
-                     "independent implementations) are one value"
-                PASS=$((PASS + 1))
-            else
-                echo "FAIL: $fx / xcc - the six arms are not one value"
-                FAIL=1
-            fi
         fi
     fi
 fi
