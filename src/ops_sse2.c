@@ -684,60 +684,60 @@ extern void lz_exp_q20_sse2_asm(const int32_t *tab, const int32_t *s,
                                 int32_t *prod, const void *k, int np);
 #pragma aux lz_exp_q20_sse2_asm = \
     ".686"                          \
-    "movdqu    xmm0, [ecx]"           \
-    "movdqu    xmm1, [ecx+16]"        \
-    "movdqu    xmm2, [ecx+32]"        \
-    "movdqu    xmm3, [ecx+48]"        \
-    "expq20loop:"                   \
-    "movdqu    xmm4, [edx]"           \
-    "movdqa    xmm5, xmm4"            \
-    "movdqa    xmm6, xmm4"            \
-    "pmuludq   xmm5, xmm2"            \
-    "psrldq    xmm6, 4"               \
-    "paddq     xmm5, xmm0"            \
-    "pmuludq   xmm6, xmm2"            \
-    "psrlq     xmm5, 20"              \
-    "paddq     xmm6, xmm0"            \
-    "psrlq     xmm6, 20"              \
-    "pslldq    xmm6, 4"               \
-    "por       xmm5, xmm6"            \
-    "movdqa    xmm7, xmm5"            \
-    "movdqa    xmm6, xmm4"            \
-    "psrldq    xmm6, 4"               \
-    "pmuludq   xmm6, xmm6"            \
-    "pmuludq   xmm4, xmm4"            \
-    "pslldq    xmm6, 4"               \
-    "por       xmm4, xmm6"            \
-    "movdqa    xmm5, xmm4"            \
-    "movdqa    xmm6, xmm4"            \
-    "pmuludq   xmm5, xmm3"            \
-    "psrldq    xmm6, 4"               \
-    "paddq     xmm5, xmm1"            \
-    "pmuludq   xmm6, xmm3"            \
-    "psrlq     xmm5, 40"              \
-    "paddq     xmm6, xmm1"            \
-    "psrlq     xmm6, 40"              \
-    "pslldq    xmm6, 4"               \
-    "por       xmm5, xmm6"            \
-    "paddd     xmm7, xmm5"            \
-    "movdqu    xmm4, [eax]"           \
-    "movdqa    xmm5, xmm4"            \
-    "pmuludq   xmm5, xmm7"            \
-    "psrldq    xmm4, 4"               \
-    "paddq     xmm5, xmm0"            \
-    "psrldq    xmm7, 4"               \
-    "psrlq     xmm5, 20"              \
-    "pmuludq   xmm4, xmm7"            \
-    "paddq     xmm4, xmm0"            \
-    "psrlq     xmm4, 20"              \
-    "pslldq    xmm4, 4"               \
-    "por       xmm5, xmm4"            \
-    "movdqu    [ebx], xmm5"           \
-    "add       eax, 16"               \
-    "add       edx, 16"               \
-    "add       ebx, 16"               \
-    "dec       esi"                   \
-    "jnz       expq20loop"            \
+    "movdqu    xmm0, [ecx]" \
+    "movdqu    xmm1, [ecx+16]" \
+    "movdqu    xmm2, [ecx+32]" \
+    "movdqu    xmm3, [ecx+48]" \
+    "expq20loop:" \
+    "movdqu    xmm4, [edx]" \
+    "movdqa    xmm5, xmm4" \
+    "movdqa    xmm6, xmm4" \
+    "pmuludq   xmm5, xmm2" \
+    "psrldq    xmm6, 4" \
+    "pmuludq   xmm6, xmm2" \
+    "paddq     xmm5, xmm0" \
+    "psrlq     xmm5, 20" \
+    "paddq     xmm6, xmm0" \
+    "psrlq     xmm6, 20" \
+    "pslldq    xmm6, 4" \
+    "por       xmm5, xmm6" \
+    "movdqa    xmm7, xmm5" \
+    "movdqa    xmm6, xmm4" \
+    "psrldq    xmm6, 4" \
+    "pmuludq   xmm6, xmm6" \
+    "pmuludq   xmm4, xmm4" \
+    "pslldq    xmm6, 4" \
+    "por       xmm4, xmm6" \
+    "movdqa    xmm5, xmm4" \
+    "movdqa    xmm6, xmm4" \
+    "pmuludq   xmm5, xmm3" \
+    "psrldq    xmm6, 4" \
+    "pmuludq   xmm6, xmm3" \
+    "paddq     xmm5, xmm1" \
+    "psrlq     xmm5, 40" \
+    "paddq     xmm6, xmm1" \
+    "psrlq     xmm6, 40" \
+    "pslldq    xmm6, 4" \
+    "por       xmm5, xmm6" \
+    "paddd     xmm7, xmm5" \
+    "movdqu    xmm4, [eax]" \
+    "movdqa    xmm5, xmm4" \
+    "pmuludq   xmm5, xmm7" \
+    "psrldq    xmm4, 4" \
+    "psrldq    xmm7, 4" \
+    "paddq     xmm5, xmm0" \
+    "psrlq     xmm5, 20" \
+    "pmuludq   xmm4, xmm7" \
+    "paddq     xmm4, xmm0" \
+    "psrlq     xmm4, 20" \
+    "pslldq    xmm4, 4" \
+    "por       xmm5, xmm4" \
+    "movdqu    [ebx], xmm5" \
+    "add       eax, 16" \
+    "add       edx, 16" \
+    "add       ebx, 16" \
+    "dec       esi" \
+    "jnz       expq20loop" \
     __parm [__eax] [__edx] [__ebx] [__ecx] [__esi] \
     __modify [__eax __ebx __ecx __edx __esi];
 
@@ -2664,52 +2664,52 @@ extern lz_i64 lz_epi_mac_i16_sse2_asm(const int32_t *a, const int16_t *m,
                                       int nb);
 #pragma aux lz_epi_mac_i16_sse2_asm =   \
     ".686"                              \
-    "pxor      xmm0, xmm0"              \
-    "pxor      xmm1, xmm1"              \
-    "pxor      xmm2, xmm2"              \
-    "pcmpeqd   xmm3, xmm3"              \
-    "psrld     xmm3, 16"                \
-    "EPIG:"                             \
-    "movdqu    xmm4, [eax]"             \
-    "movq      xmm5, [edx]"             \
-    "punpcklwd xmm5, xmm2"              \
-    "movdqa    xmm6, xmm4"              \
-    "psrld     xmm6, 16"                \
-    "pmaddwd   xmm6, xmm5"              \
-    "movdqa    xmm7, xmm4"              \
-    "pslld     xmm7, 16"                \
-    "psrld     xmm7, 31"                \
-    "pmaddwd   xmm7, xmm5"              \
-    "paddd     xmm6, xmm7"              \
-    "pand      xmm4, xmm3"              \
-    "pmaddwd   xmm4, xmm5"              \
-    "movdqa    xmm7, xmm6"              \
-    "psrad     xmm7, 31"                \
-    "movdqa    xmm5, xmm6"              \
-    "punpckldq xmm6, xmm7"              \
-    "paddq     xmm0, xmm6"              \
-    "punpckhdq xmm5, xmm7"              \
-    "paddq     xmm0, xmm5"              \
-    "movdqa    xmm7, xmm4"              \
-    "psrad     xmm7, 31"                \
-    "movdqa    xmm5, xmm4"              \
-    "punpckldq xmm4, xmm7"              \
-    "paddq     xmm1, xmm4"              \
-    "punpckhdq xmm5, xmm7"              \
-    "paddq     xmm1, xmm5"              \
-    "add       eax, 16"                 \
-    "add       edx, 8"                  \
-    "dec       ecx"                     \
-    "jnz       EPIG"                    \
-    "pshufd    xmm2, xmm0, 0x4E"        \
-    "paddq     xmm0, xmm2"              \
-    "pshufd    xmm2, xmm1, 0x4E"        \
-    "paddq     xmm1, xmm2"              \
-    "psllq     xmm0, 16"                \
-    "paddq     xmm0, xmm1"              \
-    "movd      eax, xmm0"               \
-    "psrlq     xmm0, 32"                \
-    "movd      edx, xmm0"               \
+    "pxor      xmm0, xmm0" \
+    "pxor      xmm1, xmm1" \
+    "pxor      xmm2, xmm2" \
+    "pcmpeqd   xmm3, xmm3" \
+    "psrld     xmm3, 16" \
+    "EPIG:" \
+    "movdqu    xmm4, [eax]" \
+    "movq      xmm5, [edx]" \
+    "punpcklwd xmm5, xmm2" \
+    "movdqa    xmm6, xmm4" \
+    "psrld     xmm6, 16" \
+    "pmaddwd   xmm6, xmm5" \
+    "movdqa    xmm7, xmm4" \
+    "pslld     xmm7, 16" \
+    "psrld     xmm7, 31" \
+    "pmaddwd   xmm7, xmm5" \
+    "pand      xmm4, xmm3" \
+    "pmaddwd   xmm4, xmm5" \
+    "paddd     xmm6, xmm7" \
+    "movdqa    xmm7, xmm6" \
+    "psrad     xmm7, 31" \
+    "movdqa    xmm5, xmm6" \
+    "punpckldq xmm6, xmm7" \
+    "paddq     xmm0, xmm6" \
+    "punpckhdq xmm5, xmm7" \
+    "paddq     xmm0, xmm5" \
+    "movdqa    xmm7, xmm4" \
+    "psrad     xmm7, 31" \
+    "movdqa    xmm5, xmm4" \
+    "punpckldq xmm4, xmm7" \
+    "paddq     xmm1, xmm4" \
+    "punpckhdq xmm5, xmm7" \
+    "paddq     xmm1, xmm5" \
+    "add       eax, 16" \
+    "add       edx, 8" \
+    "dec       ecx" \
+    "jnz       EPIG" \
+    "pshufd    xmm2, xmm0, 0x4E" \
+    "paddq     xmm0, xmm2" \
+    "pshufd    xmm2, xmm1, 0x4E" \
+    "paddq     xmm1, xmm2" \
+    "psllq     xmm0, 16" \
+    "paddq     xmm0, xmm1" \
+    "movd      eax, xmm0" \
+    "psrlq     xmm0, 32" \
+    "movd      edx, xmm0" \
     __parm [__eax] [__edx] [__ecx]      \
     __value [__edx __eax]               \
     __modify [__eax __edx __ecx 8087];

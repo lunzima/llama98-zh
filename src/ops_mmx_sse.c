@@ -740,73 +740,73 @@ extern void lz_exp_q20_2_sse_asm(const int32_t *tab, const int32_t *s,
                                  int32_t *prod, const void *k, int np);
 #pragma aux lz_exp_q20_2_sse_asm = \
     ".686"                          \
-    "expq20sloop:"                  \
-    "pshufw    mm0, [edx], 8"         \
-    "movq      mm1, mm0"              \
-    "pmullw    mm1, [ecx+40]"         \
-    "movq      mm2, mm0"              \
-    "pmulhuw   mm2, [ecx+40]"         \
-    "movq      mm3, mm0"              \
-    "pmullw    mm3, [ecx+48]"         \
-    "movq      mm4, mm0"              \
-    "pmulhuw   mm4, [ecx+48]"         \
-    "punpcklwd mm1, mm2"            \
-    "punpcklwd mm3, mm4"            \
-    "paddd     mm3, [ecx+16]"         \
-    "psrld     mm3, 16"               \
-    "paddd     mm1, mm3"              \
-    "psrld     mm1, 4"                \
-    "movq      mm2, mm0"              \
-    "pmullw    mm2, mm0"              \
-    "pmulhuw   mm0, mm0"              \
-    "punpcklwd mm2, mm0"            \
-    "movq      mm4, mm2"              \
-    "pand      mm4, [ecx]"            \
-    "movq      mm5, mm2"              \
-    "psrld     mm5, 10"               \
-    "pand      mm5, [ecx]"            \
-    "psrld     mm2, 20"               \
-    "movq      mm6, mm4"              \
-    "pmaddwd   mm6, [ecx+32]"         \
-    "pmaddwd   mm4, [ecx+24]"         \
-    "movq      mm3, mm5"              \
-    "pmaddwd   mm3, [ecx+32]"         \
-    "pmaddwd   mm5, [ecx+24]"         \
-    "movq      mm7, mm2"              \
-    "pmaddwd   mm7, [ecx+32]"         \
-    "pmaddwd   mm2, [ecx+24]"         \
-    "pslld     mm4, 15"               \
-    "paddd     mm6, mm4"              \
-    "pslld     mm5, 15"               \
-    "paddd     mm3, mm5"              \
-    "pslld     mm2, 15"               \
-    "paddd     mm7, mm2"              \
-    "psrld     mm6, 10"               \
-    "paddd     mm3, mm6"              \
-    "psrld     mm3, 10"               \
-    "paddd     mm7, [ecx+16]"         \
-    "paddd     mm7, mm3"              \
-    "psrld     mm7, 20"               \
-    "paddd     mm1, mm7"              \
-    "movq      mm0, [eax]"            \
-    "movq      mm3, mm0"              \
-    "psrld     mm3, 11"               \
-    "movq      mm7, mm0"              \
-    "pand      mm7, [ecx+8]"          \
-    "pmaddwd   mm3, mm1"              \
-    "pmaddwd   mm7, mm1"              \
-    "paddd     mm7, [ecx+16]"         \
-    "psrld     mm7, 11"               \
-    "paddd     mm3, mm7"              \
-    "psrld     mm3, 9"                \
-    "paddd     mm0, mm3"              \
-    "movq      [ebx], mm0"            \
-    "add       eax, 8"                \
-    "add       edx, 8"                \
-    "add       ebx, 8"                \
-    "dec       esi"                   \
-    "jnz       expq20sloop"           \
-    "emms"                          \
+    "expq20sloop:" \
+    "pshufw    mm0, [edx], 8" \
+    "movq      mm1, mm0" \
+    "pmullw    mm1, [ecx+40]" \
+    "movq      mm2, mm0" \
+    "pmulhuw   mm2, [ecx+40]" \
+    "movq      mm3, mm0" \
+    "pmullw    mm3, [ecx+48]" \
+    "movq      mm4, mm0" \
+    "pmulhuw   mm4, [ecx+48]" \
+    "punpcklwd mm1, mm2" \
+    "movq      mm2, mm0" \
+    "punpcklwd mm3, mm4" \
+    "paddd     mm3, [ecx+16]" \
+    "psrld     mm3, 16" \
+    "paddd     mm1, mm3" \
+    "psrld     mm1, 4" \
+    "pmullw    mm2, mm0" \
+    "pmulhuw   mm0, mm0" \
+    "punpcklwd mm2, mm0" \
+    "movq      mm4, mm2" \
+    "pand      mm4, [ecx]" \
+    "movq      mm5, mm2" \
+    "psrld     mm5, 10" \
+    "pand      mm5, [ecx]" \
+    "psrld     mm2, 20" \
+    "movq      mm6, mm4" \
+    "pmaddwd   mm6, [ecx+32]" \
+    "pmaddwd   mm4, [ecx+24]" \
+    "movq      mm3, mm5" \
+    "pmaddwd   mm3, [ecx+32]" \
+    "pmaddwd   mm5, [ecx+24]" \
+    "movq      mm7, mm2" \
+    "pmaddwd   mm7, [ecx+32]" \
+    "pmaddwd   mm2, [ecx+24]" \
+    "pslld     mm4, 15" \
+    "paddd     mm6, mm4" \
+    "pslld     mm5, 15" \
+    "paddd     mm3, mm5" \
+    "pslld     mm2, 15" \
+    "paddd     mm7, mm2" \
+    "psrld     mm6, 10" \
+    "paddd     mm3, mm6" \
+    "psrld     mm3, 10" \
+    "paddd     mm7, [ecx+16]" \
+    "paddd     mm7, mm3" \
+    "psrld     mm7, 20" \
+    "paddd     mm1, mm7" \
+    "movq      mm0, [eax]" \
+    "movq      mm3, mm0" \
+    "psrld     mm3, 11" \
+    "movq      mm7, mm0" \
+    "pand      mm7, [ecx+8]" \
+    "pmaddwd   mm3, mm1" \
+    "pmaddwd   mm7, mm1" \
+    "paddd     mm7, [ecx+16]" \
+    "psrld     mm7, 11" \
+    "paddd     mm3, mm7" \
+    "psrld     mm3, 9" \
+    "paddd     mm0, mm3" \
+    "movq      [ebx], mm0" \
+    "add       eax, 8" \
+    "add       edx, 8" \
+    "add       ebx, 8" \
+    "dec       esi" \
+    "jnz       expq20sloop" \
+    "emms" \
     __parm [__eax] [__edx] [__ebx] [__ecx] [__esi] \
     __modify [__eax __ebx __ecx __edx __esi 8087];
 
