@@ -931,7 +931,7 @@ ARM 上是 0。int16 入口就是为了不付这笔钱，而两个构建的 cens
 ### 2.8 V 投影的 int16 出口（milestone 7，候选 #1v），以及重量化那一半根本不省 convert
 
 **状态：已交付。** 把 int16 出口从两个调用者（`kda_conv_proj`、
-`kda_i16_proj`）推到「所有能接的消费者」之后，`forward.c` 的 37 个
+`proj_i16`，当时叫 `kda_i16_proj`）推到「所有能接的消费者」之后，`forward.c` 的 37 个
 matmul 调用点里只多出一个：`v_proj`。它的输出与消费者之间没有任何浮点
 运算——KV cache 的那次 `lz_quantize_q8` 就是消费者——所以
 `lz_quantize_q8_i16` 直接服务它，形状与 §2.7 完全一样。

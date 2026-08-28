@@ -235,7 +235,7 @@ static void subn_norm_q8(LZRunState *s, const LZTensor *nrm,
    unrepresentable: `*wrote_int` starts at 0, nothing but this function
    ever raises it, and adding such a branch is now a compile error at
    the call rather than a silent wrong read at the consumer. */
-void kda_i16_proj(LZRunState *s, int may_int, int *wrote_int,
+void proj_i16(LZRunState *s, int may_int, int *wrote_int,
                          float *of, short *oi,
                          const float *x, const LZTensor *w,
                          int in_dim, int out_dim, int nt,
@@ -461,7 +461,7 @@ void forward_kda(const LZModel *m, LZRunState *s,
        answers this on its own". --fixed off therefore turns both
        off at runtime, which is what makes it a control. */
     /* *_may is the capability, *_int is "the int buffer holds it" and is
-       raised only by kda_i16_proj - see its header for why they are two
+       raised only by proj_i16 - see its header for why they are two
        objects. */
     int bvec_int = 0, lat_int = 0, gate_int = 0;
     int bvec_may = 0, lat_may = 0;
@@ -551,10 +551,10 @@ void forward_kda(const LZModel *m, LZRunState *s,
         for (tk = 0; tk < nt; tk++)
             lz_quantize_q8_tok(s->xb + (size_t)tk * hdim, hdim,
                                s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
-        kda_i16_proj(s, lat_may, &lat_int, s->kda_gate_lat, s->kda_lat_i16,
+        proj_i16(s, lat_may, &lat_int, s->kda_gate_lat, s->kda_lat_i16,
                      s->xb, &L->kda_f_a_proj, hdim, gate_rank, nt,
                      LZ_KLAT_ES, 32767);
-        kda_i16_proj(s, bvec_may, &bvec_int, s->bvec, s->bvec_i16,
+        proj_i16(s, bvec_may, &bvec_int, s->bvec, s->bvec_i16,
                      s->xb, &L->kda_b_proj, hdim, nv, nt,
                      LZ_BVEC_ES, lz_sig_q15_domain(LZ_BVEC_ES));
     } else {
@@ -570,10 +570,10 @@ void forward_kda(const LZModel *m, LZRunState *s,
                   &L->kda_k_proj, hdim, kdim, nt);
     kda_conv_proj(s, &conv_int, s->kda_v, s->kda_v_i16, s->xb,
                   &L->kda_v_proj, hdim, vdim, nt);
-    kda_i16_proj(s, lat_may, &lat_int, s->kda_gate_lat, s->kda_lat_i16,
+    proj_i16(s, lat_may, &lat_int, s->kda_gate_lat, s->kda_lat_i16,
                  s->xb, &L->kda_f_a_proj, hdim, gate_rank, nt,
                  LZ_KLAT_ES, 32767);
-    kda_i16_proj(s, bvec_may, &bvec_int, s->bvec, s->bvec_i16,
+    proj_i16(s, bvec_may, &bvec_int, s->bvec, s->bvec_i16,
                  s->xb, &L->kda_b_proj, hdim, nv, nt,
                  LZ_BVEC_ES, lz_sig_q15_domain(LZ_BVEC_ES));
     lz_matmul_xq_nt(s->zbuf, s->xb, s->xq, s->xqs, &L->kda_g_proj, hdim, vdim, nt);

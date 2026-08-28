@@ -595,7 +595,7 @@ void forward_attn(const LZModel *m, LZRunState *s,
        int wsum; only the MTP window override can split a batch. */
     int attn_int[LZ_BATCH_MAX];
     /* int-pipeline milestone 7. v_may is the capability, v_int is "the
-       int buffer holds it" and is raised only by kda_i16_proj - two
+       int buffer holds it" and is raised only by proj_i16 - two
        objects, for the reason that function's header gives. The SubLN
        branch below never calls it, so v_int stays 0 there and the KV
        write reads the float row it actually got.
@@ -688,7 +688,7 @@ void forward_attn(const LZModel *m, LZRunState *s,
                        s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
     lz_matmul_xq_nt(s->qg, s->xb, s->xq, s->xqs, &L->q_proj, hdim, qgd, nt);
     lz_matmul_xq_nt(s->ktmp, s->xb, s->xq, s->xqs, &L->k_proj, hdim, kvd, nt);
-    kda_i16_proj(s, v_may, &v_int, s->vtmp, s->vtmp_i16,
+    proj_i16(s, v_may, &v_int, s->vtmp, s->vtmp_i16,
                  s->xb, &L->v_proj, hdim, kvd, nt, LZ_VPROJ_ES, 32767);
     }
 

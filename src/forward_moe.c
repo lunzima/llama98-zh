@@ -151,7 +151,7 @@ static void moe_expert_loop(LZRunState *s, const LZModelConfig *c,
 #if LZ_SWIGLU_I16
             /* The int path, when rsw_may said the whole triple can take
                it. Both exits are asked here rather than through a
-               kda_i16_proj-style helper because there is nothing to
+               proj_i16-style helper because there is nothing to
                recover: rsw_may already ran lz_matmul_xq_i16_ok on both
                tensors, and that predicate IS the entry point's own, so a
                refusal below is unreachable. The `&&` is the
@@ -356,7 +356,7 @@ void forward_moe(const LZModel *m, LZRunState *s,
             lz_quantize_q8(s->xb2 + (size_t)tk * hdim, hdim, gsg,
                            s->xq + (size_t)tk * hdim,
                            s->xqs + (size_t)tk * nsg);
-        kda_i16_proj(s, mrt_may, &mrt_int, s->moe_router_logits,
+        proj_i16(s, mrt_may, &mrt_int, s->moe_router_logits,
                      s->moe_logits_i16,
                      s->xb2, &L->moe_gate_w, hdim, ne, nt,
                      LZ_MOEGATE_ES, lz_sig_q15_domain(LZ_MOEGATE_ES));
@@ -375,11 +375,11 @@ void forward_moe(const LZModel *m, LZRunState *s,
         lz_quantize_q8(s->xb + (size_t)tk * hdim, hdim, gsh,
                        s->xq + (size_t)tk * hdim,
                        s->xqs + (size_t)tk * nsh);
-    kda_i16_proj(s, mrt_may, &mrt_int, s->moe_router_logits,
+    proj_i16(s, mrt_may, &mrt_int, s->moe_router_logits,
                  s->moe_logits_i16,
                  s->xb, &L->moe_gate_w, hdim, ne, nt,
                  LZ_MOEGATE_ES, lz_sig_q15_domain(LZ_MOEGATE_ES));
-    kda_i16_proj(s, mlat_may, &mlat_int, s->moe_lat_x, s->moe_lat_i16,
+    proj_i16(s, mlat_may, &mlat_int, s->moe_lat_x, s->moe_lat_i16,
                  s->xb, &L->moe_down_proj, hdim, latent, nt,
                  LZ_MLAT_ES, 32767);
     }
