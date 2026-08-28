@@ -38,11 +38,26 @@
    underflow edges, and the rounding boundaries (round-to-nearest-even,
    the PC=24 precision the engine's x87 arm also enforces).
 
-   LZ_SOFTFP_ASSUME_FINITE (default 0) drops the fast path's overflow and
-   underflow EXPONENT checks - the two branches that decline a result too
-   big or too small to be a normal binary32. It does NOT touch the
-   operand checks: those decline on a zero, subnormal, inf or NaN INPUT,
-   and inputs are not what this switch makes a claim about.
+   LZ_SOFTFP_ASSUME_FINITE (default 0) drops __aeabi_fmul's overflow and
+   underflow EXPONENT check - the branch that declines a result too big
+   or too small to be a normal binary32. It does NOT touch the operand
+   checks: those decline on a zero, subnormal, inf or NaN INPUT, and
+   inputs are not what this switch makes a claim about.
+
+   ONE SITE, NOT ALL THE FAST PATHS, which is narrower than this used to
+   claim. __aeabi_fdiv's range check and the add's (in ops_arm_prim.h's
+   LZ_FADDSUB_P) are unconditional and always have been, so the switch
+   moves fmul alone. Measured whole-function: 50 -> 48 instructions with
+   it on, fadd and fdiv unchanged at 108 and 51.
+
+   THAT IS ALSO WHY IT STAYS OFF BY DEFAULT. Two instructions on one
+   operator is the entire prize, and the price is that an overflowing
+   product stops declining and starts packing a wrong exponent instead -
+   silently, since there is no NaN to notice it by. The evidence for
+   "it never overflows" is two fixtures, and a shipped binary sees
+   neither of them. A decline that costs two instructions and converts
+   a silent wrong answer into a correct slow one is not overhead worth
+   removing; it is the contract.
 
    The claim it does make is narrow and measured: build/fp_exception_gate
    reads x86's sticky MXCSR flags after a real inference run and asserts
