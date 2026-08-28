@@ -622,8 +622,8 @@ float __aeabi_fsub(float a, float b) {
      - The four-way operand guard is ONE predicate chain. ANDS sets Z on
        a zero exponent; ANDNES both skips itself and leaves Z set when
        that already happened; the two TEQNEs test for 255 only if
-       everything before passed. Six instructions where twelve
-       cmp/beq pairs used to stand.
+       everything before passed. Six instructions, against the twelve
+       cmp/beq pairs the straightforward form needs.
      - SBC does the bias and the normalisation at once: the CMP above
        left C clear exactly when the product needed a left shift, and
        `sbc ea, ea, #127` subtracts 127+(1-C), i.e. 128 in that case.
@@ -1077,10 +1077,10 @@ float __aeabi_i2f(int a) {
     /* the engine's verified lz_i32f_arm_asm: CLZ + barrel shifter + cond
        execution, vs the generic sf_norm_round_pack_f32 path it replaces.
 
-       TWO BRANCHES, TWO COSTS, and this comment used to quote only the
-       cheap one as "~14 insns for every int32" - the same mistake the
-       header's "COST, COUNTED THE SAME WAY" note was written about, left
-       behind when that fix went through fadd/fsub/fmul:
+       TWO BRANCHES, TWO COSTS. Quoting only the cheap one - "~14 insns
+       for every int32" - is the mistake the header's "COST, COUNTED THE
+       SAME WAY" note exists to prevent, and it is easy to make here
+       because the cheap branch is the common one:
 
          |v| < 2^24  (clz >= 8)   14   exact, no rounding to do
          |v| >= 2^24 (clz <  8)   22   shifts right, then round-to-even
@@ -1240,16 +1240,15 @@ __attribute__((naked)) int __aeabi_f2iz(float a) {
 /* __aeabi_f2lz: float to signed 64-BIT integer. The `l` in the EABI's
    name is LONG LONG, not long, and getting that wrong is not a matter of
    range - it is a matter of REGISTERS. A 64-bit return comes back in
-   r0:r1; this function used to be declared `long` and forward to
-   __aeabi_f2iz, so it wrote r0 and left r1 holding whatever the caller's
-   last computation had put there. Every result was the right low word
-   with a garbage high word:
+   r0:r1. Declare this `long` and forward it to __aeabi_f2iz and it
+   writes r0 while leaving r1 holding whatever the caller's last
+   computation put there - every result the right low word with a
+   garbage high word:
 
        (lz_i64)2048.0f  ==  -9223372036854773760
 
-   and the old comment's defence - "the engine's f2lz sites are all in
-   range" - was answering the wrong question, since range was never what
-   broke. It went unnoticed because nothing reached it: json.c held its
+   and the tempting defence - "the engine's f2lz sites are all in range"
+   - answers the wrong question, since range is not what breaks. It went unnoticed because nothing reached it: json.c held its
    numbers as double, so safetensors' data_offsets conversion went to
    libgcc's __aeabi_d2lz, which this file does not define. Narrowing that
    field to float pointed every tensor offset straight at this function,
@@ -1305,9 +1304,9 @@ lz_i64 __aeabi_f2lz(float a) {
 }
 
 /* INTEGER DIVISION IS libgcc's, DELIBERATELY, and this note is here
-   because it used to be ours and the reason given was wrong.
+   because the obvious argument for taking it over is wrong.
 
-   The claim was that "pulling one libgcc member drags its neighbours
+   That argument is that "pulling one libgcc member drags its neighbours
    in", so taking __udivsi3 would undo the point of this file. It does
    not. An archive member is pulled only to satisfy an UNDEFINED symbol,
    and every soft-float symbol is already defined by this object, which
@@ -1344,9 +1343,9 @@ lz_i64 __aeabi_f2lz(float a) {
    416KB and the target has 64MB - but it is a trade and not a free
    lunch, so it is recorded rather than left for someone to rediscover.
 
-   ONE BEHAVIOUR DOES CHANGE, and in the right direction: ours returned
-   0/0 for a zero divisor while libgcc traps. x86 traps too, on the
-   hardware instruction, so this makes the two targets agree where they
-   used to differ silently. */
+   ONE BEHAVIOUR DIFFERS, in the right direction: a hand-written divide
+   here returns 0/0 for a zero divisor while libgcc traps. x86 traps
+   too, on the hardware instruction, so taking libgcc's is what makes
+   the two targets agree instead of differing silently. */
 
 #endif /* __arm__ && __GNUC__ */

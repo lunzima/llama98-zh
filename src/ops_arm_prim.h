@@ -578,8 +578,8 @@ static __inline__ int lz_sig_q15_arm_asm(uint32_t ux, const int32_t *tab,
    half an ulp of the large one, so both results round to the large
    one's magnitude - and %[a] still holds it, shifted up by one. libgcc
    takes the same exit at d > 25 (ieee754-sf.S returns the larger
-   operand outright); this used to decline and pay a C-core call for a
-   case an ORR answers. The sticky was being lost here anyway: LSR by a
+   operand outright). Without this exit the asm declines and pays a
+   C-core call for a case an ORR answers. The sticky was being lost here anyway: LSR by a
    register uses only its low BYTE, so `rsb b, t, #32` goes negative
    past d=32 and the sticky test reads a shift-by-248, i.e. zero. It
    never showed up because the answer is the large operand either way. */

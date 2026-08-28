@@ -1026,8 +1026,8 @@ float *lz_t_f32(const LZTensor *t, float *scratch) {
     /* BF16 AHEAD OF THE SCALE GUARD, because it has no scale: it is
        storage, not quantization. The widening is `bits << 16` and the
        result is exactly what the file holds - the same operation the
-       loader used to perform, moved here so the tensor can stay two
-       bytes per element in RAM. Assembled from the two bytes by name
+       loader performs when bf16 storage is off, done here instead so
+       the tensor can stay two bytes per element in RAM. Assembled from the two bytes by name
        rather than by casting to uint16_t*, so it is correct on a
        big-endian host and needs no alignment beyond 2. */
     if (t->dtype == LZ_FMT_BF16) {

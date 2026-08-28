@@ -208,9 +208,9 @@ HOT_GCC_GUI_OBJS        := $(HOT_GCC_GUI_ENG_OBJS) $(HOT_GCC_GUI_COM_OBJS)
 
 # -MMD -MP ON EVERY OBJECT RULE, and it is not a tidiness change.
 #
-# These rules used to depend on the .c alone. A header could change the
+# Depending on the .c alone is not enough. A header can change the
 # LAYOUT of a struct all of them read - LZTensor, LZModel - and make
-# would rebuild nothing, because no .c had changed. The link then put
+# would rebuild nothing, because no .c changed. The link then put
 # objects compiled against two different definitions of the same struct
 # into one binary. That is not a compile error and not a link error; it
 # is a program reading the wrong field offsets, which fails somewhere

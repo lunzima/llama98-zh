@@ -351,8 +351,8 @@ static __inline__ int bf16_addsub_fast_asm(uint32_t ua, uint32_t ub,
    after paying the six-instruction chain and the branch. Testing it here
    answers the shape in three and never reaches the assembly. It costs
    the non-zero traffic one AND and one compare, against the twenty-odd
-   instructions a decline used to cost the zero traffic, which on an
-   accumulator that starts at zero is not a rare case: on f32 this one
+   instructions a decline costs the zero traffic without it - and on an
+   accumulator that starts at zero that is not a rare case: on f32 this one
    shape was 99.8% of every decline measured on the zh fixture.
 
    x*0 is +-0 with the sign XORed and no rounding. inf/NaN partners are
@@ -422,15 +422,15 @@ uint32_t lz_bf16_div(uint32_t a, uint32_t b) {
     /* No fast path: 176 divides per token against 247,932 multiplies and
        74,985 adds, so the assembly would be carried and never repaid.
 
-       BOTH FIGURES HERE USED TO BE WRONG, and in a way worth naming
-       because it is easy to repeat. lz_softfp.c's census is printed as
-       TOTALS OVER A 603-TOKEN RUN (kmr20, zh fixture) - 149,503,180
-       fmul, 45,215,879 fadd, 106,048 fdiv fast plus 613 declined. This
-       comment read the 149.5M as per-token and the 613 as a per-token
-       divide count, when 613 is the whole run's DECLINES. Divide by 603
-       for the per-token numbers above. The ratio it was arguing from was
-       off by about 175x; the conclusion survives at 1:1400 anyway, which
-       is why nobody noticed. */
+       TWO WAYS TO MISREAD THOSE FIGURES, both easy and both made here
+       once. lz_softfp.c's census prints TOTALS OVER A 603-TOKEN RUN
+       (kmr20, zh fixture) - 149,503,180 fmul, 45,215,879 fadd, 106,048
+       fdiv fast plus 613 declined. Take the 149.5M for a per-token
+       count, or the 613 for a per-token divide count when 613 is the
+       whole run's DECLINES, and the ratio is out by about 175x. Divide
+       by 603 for the per-token numbers above. The conclusion holds at
+       1:1400 either way, which is exactly why such an error survives
+       being looked at. */
     return bf16_binop_c(a, b, 3);
 }
 

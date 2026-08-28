@@ -13,11 +13,11 @@
    step-for-step the same kernel; that comment lives with the Watcom
    twin, not duplicated here.
 
-   The twins are referenced BY SYMBOL NAME and not by file:line. They
-   used to carry a line range, which was stale twice over: the bodies
-   had already moved out of src/ops_kernel_dot.h into this file's Watcom
-   counterpart, and scheduling them shifted every line again. A name
-   survives both. */
+   The twins are referenced BY SYMBOL NAME and not by file:line. A line
+   range goes stale two ways here, and both have happened: the bodies
+   move between src/ops_kernel_dot.h and this file's Watcom counterpart,
+   and rescheduling them shifts every line again. A name survives
+   both. */
 
 /* ---- Q8_0: dot32_x16_mmx / dot32_x16_mmx_2 -----------------------------
    Watcom twins: lz_dot32_x16_asm / lz_dot32_x16_asm_2, src/ops_mmx.c. */

@@ -567,8 +567,9 @@ int lz_fastfp(void);
    would not be for any other knob in this file, because of the one
    property the others do not have: it changes nothing. A bf16 is
    the high half of an f32, so the widening is `bits << 16` - the very
-   operation model.c used to perform at load time - and every value the
-   kernels see is identical either way. What changes is that the tensor
+   operation model.c performs at load time when this is off, only
+   deferred to the read - and every value the kernels see is identical
+   either way. What changes is that the tensor
    occupies half as much RAM and costs half as much DDR traffic to read,
    on a part whose bottleneck is DDR.
  *

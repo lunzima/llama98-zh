@@ -14,8 +14,8 @@ void lz_moe_route(const float *logits, const short *li,
     /* Unpack the loop-invariant fields into locals so the body below is
        unchanged from the flat-signature version. `rp` is const and no
        aliasing write reaches it, so each field loads once (base+offset)
-       and the caller pays one struct pointer where it used to push nine
-       arguments. */
+       and the caller pays one struct pointer instead of pushing the
+       nine arguments a flat signature needs. */
     int li_e = rp->li_e;
     const float *bias = rp->bias;
     int n_experts = rp->n_experts;
