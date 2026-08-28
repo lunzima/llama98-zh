@@ -121,6 +121,8 @@
 !/build/aux_parm_arity_gate.sh
 !/build/aux_equiv_gate.sh
 !/build/rmsnorm_probe_stubs.c
+!/build/kernel_probe_census.sh
+!/build/org_census.sh
 
 # Stray compiler/linker intermediates (gcc, Open Watcom), plus the raw
 # dumps probes drop at the repo root when run without a -o path.
