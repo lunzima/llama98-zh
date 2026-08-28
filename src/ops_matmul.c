@@ -1672,7 +1672,9 @@ void lz_matmul_xq(float *o, const float *x, const int8_t *xq,
    an unquantized model computed W.x while a quantized one computed
    W.quant(Hx), silently, from one config. */
 int lz_matmul_xq_reads_float_row(const LZTensor *w) {
-    return !w || w->dtype == LZ_FMT_F32;
+    /* bf16 reads the float row too - it is the f32 arm with a wider
+       load, not a quantized format. */
+    return !w || w->dtype == LZ_FMT_F32 || w->dtype == LZ_FMT_BF16;
 }
 
 void lz_matmul_xq_nt(float *o, const float *x, const int8_t *xq,
@@ -1688,8 +1690,19 @@ void lz_matmul_xq_nt(float *o, const float *x, const int8_t *xq,
     if (lz_matmul_xq_reads_float_row(w)) {
         float *op = o;
         const float *xp = x;
-        for (i = 0; i < nt; i++, op += out_dim, xp += in_dim)
-            lz_matmul(op, xp, w ? w->f : NULL, in_dim, out_dim);
+        /* TWO FORMATS READ A FLOAT ROW, not one. bf16 has no f32 array
+           to point at - the whole point of it is that the tensor stays
+           two bytes per element - so taking w->f here handed lz_matmul a
+           null pointer and the run died in the first matmul. The
+           predicate above says "reads a float row"; it does not say
+           "has ->f", and that distinction is the bug. */
+        for (i = 0; i < nt; i++, op += out_dim, xp += in_dim) {
+            if (w && w->dtype == LZ_FMT_BF16)
+                lz_matmul_bf16(op, xp, (const unsigned char *)w->q,
+                               in_dim, out_dim);
+            else
+                lz_matmul(op, xp, w ? w->f : NULL, in_dim, out_dim);
+        }
         return;
     }
     if (!xq || !xqs || w->gs <= 0 || (in_dim % w->gs) != 0) {
@@ -1719,9 +1732,16 @@ void lz_matmul_xq_nt(float *o, const float *x, const int8_t *xq,
        the interception - route that dtype to matmul_scalar_ref, so the
        tiers differ by the kernel under test and not by which fallback
        they fell through. Such a format lands as a `t` in km_reg. */
-    /* The SIMD fast path currently covers only (Q8_0, gs=32). Other
-       formats/groups go through the scalar reference - correct but
-       slow.
+    /* The SIMD fast path covers all five quantised formats - Q8_0,
+       Q4_1, Q6_1, T2 and Q16_0 - at any group size that is a multiple
+       of 32 dividing in_dim, with the four non-Q8 ones additionally
+       needing in_dim <= LZ_MM_WIDEN_MAX. `gs` is a family, not a set of
+       named sub-types: kmr20 alone carries 64, 128, 256, 512 and 1024.
+       Measured on it (build/tier_reach_gate.sh, eight tokens):
+       matmul_scalar_ref executes ZERO times - every quantised matmul
+       reaches its tiered kernel, gs=1024 and gs=64 included. T2 is 0
+       there because the checkpoint has no T2 tensor, not because it
+       falls back.
 
        This is not a question of "whether asm is worth it" decided by
        measurement. The rule requires every operator to have C /
@@ -1798,6 +1818,16 @@ void lz_matmul_w(float *o, const float *x, const LZTensor *w,
         lz_matmul(o, x, w ? w->f : NULL, in_dim, out_dim);
         return;
     }
+    /* bf16 is stored, not quantized: no activation quantization, no
+       group scale, just a wider-on-read version of the f32 arm above.
+       The in_dim bound is the widening scratch's, the same one every
+       quantized kernel here carries; model.c keeps a tensor past that
+       bound expanded to f32 at load, so this arm is always reachable
+       when the dtype says bf16. */
+    if (w->dtype == LZ_FMT_BF16) {
+        lz_matmul_bf16(o, x, (const unsigned char *)w->q, in_dim, out_dim);
+        return;
+    }
     if (w->gs <= 0 || (in_dim % w->gs) != 0 || !xq || !xqs) {
         /* Defense: normal export guarantees in_dim % gs == 0 (in-row
            grouping). Triggering means a bug - zero the output and
@@ -1811,8 +1841,25 @@ void lz_matmul_w(float *o, const float *x, const LZTensor *w,
     lz_matmul_xq(o, x, xq, xqs, w, in_dim, out_dim);
 }
 
-void lz_matmul(float *o, const float *x, const float *w,
-                   int in_dim, int out_dim) {    int i;
+/* ONE ROW BODY, TWO ROW SOURCES. `w` is a plain f32 matrix; `wb` is the
+   same matrix stored as bf16, two bytes per element. Exactly one is
+   non-NULL. A bf16 row is widened into g_bfrow first and the body below
+   then runs on it unchanged - which is what makes the two paths produce
+   identical bits rather than merely close ones. The alternative, a
+   second loop that widens inside the dot product, would have to
+   reproduce this one's eight-accumulator order exactly and would be a
+   second copy of the trickiest arithmetic in the file.
+ *
+ * The widening is `bits << 16`, the same operation model.c used to
+ * perform at load time, so the numbers reaching the accumulators are
+ * the ones a f32-expanded tensor would have supplied. Assembled from
+ * two bytes by name: correct on a big-endian host, and needs no
+ * alignment past 2. */
+static float g_bfrow[LZ_MM_WIDEN_MAX];
+
+static void matmul_f32_rows(float *o, const float *x, const float *w,
+                            const unsigned char *wb,
+                            int in_dim, int out_dim) {    int i;
     const float *row = w;
     /* THE TIER TEST IS LOOP-INVARIANT AND WAS BEING REDONE PER ROW.
        Measured with build/dispatch_hotness.sh: 835,840 executions over
@@ -1852,11 +1899,21 @@ void lz_matmul(float *o, const float *x, const float *w,
        float differences. Differential tests use tolerances at the
        same order as the reference implementation; this change does not
        break them. */
-    for (i = 0; i < out_dim; i++, row += in_dim) {
+    for (i = 0; i < out_dim; i++, row += (wb ? 0 : in_dim)) {
         float a0 = 0.0f, a1 = 0.0f, a2 = 0.0f, a3 = 0.0f;
         float a4 = 0.0f, a5 = 0.0f, a6 = 0.0f, a7 = 0.0f;
         float sum;
         int j = 0;
+        if (wb) {
+            const unsigned char *p = wb + (size_t)i * in_dim * 2;
+            int k;
+            for (k = 0; k < in_dim; k++) {
+                uint32_t u = ((uint32_t)p[k * 2 + 1] << 24) |
+                             ((uint32_t)p[k * 2] << 16);
+                memcpy(&g_bfrow[k], &u, sizeof(float));
+            }
+            row = g_bfrow;
+        }
 #if defined(LZ_MATMUL_F32_SSE_EXTERN)
         /* The eight accumulators above ARE two SSE vectors - lane k of
            them accumulates exactly the sequence scalar a_k does, in the
@@ -1907,5 +1964,18 @@ void lz_matmul(float *o, const float *x, const float *w,
         for (; j < in_dim; j++) sum += row[j] * x[j];
         o[i] = sum;
     }
+}
+
+void lz_matmul(float *o, const float *x, const float *w,
+               int in_dim, int out_dim) {
+    matmul_f32_rows(o, x, w, NULL, in_dim, out_dim);
+}
+
+/* The bf16 twin. in_dim is bounded by the widening scratch, the same
+   bound every quantized kernel in this file carries; past it the caller
+   falls back, so this never truncates silently. */
+void lz_matmul_bf16(float *o, const float *x, const unsigned char *wb,
+                    int in_dim, int out_dim) {
+    matmul_f32_rows(o, x, NULL, wb, in_dim, out_dim);
 }
 

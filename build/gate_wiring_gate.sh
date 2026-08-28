@@ -97,6 +97,9 @@ changelog_comment_gate.sh  # ratchet over the whole tree, slow
 subn_gate.sh               # needs a model and a long token run
 kv_rot_gate.sh             # needs a model and a long token run
 perf_knob_gate.sh          # needs a model, and measures wall clock
+tier_reach_gate.sh         # a coverage build plus a real generation, and
+                           #   the answer is a property of the CHECKPOINT
+                           #   as much as of the code
 xcheck_gate.sh             # needs a model
 fixed_tier_xcompiler_gate.sh # needs a model and both toolchains
 recur_write_float_arm_gate.sh # needs the ARM cross toolchain

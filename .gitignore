@@ -44,6 +44,8 @@
 !/build/kernel_matrix_gate.sh
 !/build/bare_endif_gate.sh
 !/build/fp_exception_gate.sh
+!/build/bf16_native_gate.sh
+!/build/bf16_native_probe.c
 !/build/fixed_tier_xcompiler_gate.sh
 !/build/norm_int_gate_tokens_zh.txt
 !/build/norm_int_gate_tokens_en.txt
@@ -110,6 +112,7 @@
 !/build/mul_hotness.sh
 !/build/cov_run.sh
 !/build/dispatch_hotness.sh
+!/build/tier_reach_gate.sh
 !/build/watcom_flag_parity_gate.sh
 !/build/nest_census.sh
 !/build/nest_census.awk
