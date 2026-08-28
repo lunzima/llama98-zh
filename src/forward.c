@@ -1019,7 +1019,19 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
         s->xq = (int8_t *)xcalloc((size_t)nt * qcap, 1, &ok, &s->bytes_alloc);
         /* xqs sized for the worst case (in-row gs falling back to 1) */
         s->xqs = (float *)xcalloc((size_t)nt * qcap, sizeof(float), &ok, &s->bytes_alloc);
-        s->wscr = (float *)xcalloc((size_t)qcap, sizeof(float), &ok, &s->bytes_alloc);
+        /* AT LEAST LZ_MM_WIDEN_MAX, so the loader's bf16 rule is sound
+           by construction rather than by inspection. model.c accepts a
+           1-D tensor as bf16 when it is no longer than that constant,
+           and lz_t_f32 widens such a tensor WHOLE into this buffer -
+           two bounds that have to agree, and did only because every
+           1-D tensor in the checkpoints to hand happens to be a norm
+           or a per-head bias and so is already counted in qcap above.
+           A model with a wider one would have overrun this. The cost
+           is at most 16 KB. */
+        {   int wcap = qcap;
+            if (wcap < LZ_MM_WIDEN_MAX) wcap = LZ_MM_WIDEN_MAX;
+            s->wscr = (float *)xcalloc((size_t)wcap, sizeof(float), &ok,
+                                       &s->bytes_alloc); }
         /* SubLN Hadamard scratch: two n-wide int32 halves, n <= qcap. */
         s->fwht_scratch = (int32_t *)xcalloc((size_t)2 * qcap, sizeof(int32_t),
                                              &ok, &s->bytes_alloc);

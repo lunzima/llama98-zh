@@ -79,7 +79,21 @@
  * separate decision, not this format.
  *
  * gs is 0 and scale/zero are NULL, so any code that reaches for a scale
- * must test the dtype first - lz_t_f32 does, ahead of its scale guard. */
+ * must test the dtype first - lz_t_f32 does, ahead of its scale guard.
+ *
+ * NARROWING AN F32 TENSOR INTO THIS FORMAT IS NOT WORTH DOING, and the
+ * reason is structural rather than a measurement that came out badly.
+ * Per 32 elements: F32 128 bytes, BF16 64, Q8_0 36, Q4_1 24, T2 12. A
+ * checkpoint willing to accept a lossy conversion should quantise -
+ * Q8_0 is 1.8x smaller than bf16 AND has hand-written integer kernels,
+ * where bf16 widens back to f32 to compute. The lossy direction is
+ * dominated by an option this engine already has.
+ *
+ * The lossless direction, which is what this format IS, does not
+ * compete with those: it applies to tensors that arrive as bf16, where
+ * quantising would be an ADDITIONAL lossy step. Measured on real
+ * checkpoints, that is nearly all of them - Qwen3.5-0.8B is 1746.9 MB
+ * of BF16 against 0.01 MB of F32, and Qwopus3.5-2B has no F32 at all. */
 
 /* Weight tensor. Row-major (out, in); quantization groups are
    contiguous within a row.

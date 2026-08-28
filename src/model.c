@@ -1164,19 +1164,33 @@ static int visit_read(LZModel *m, const LZStTensor *t, LZTensor *field,
      * conversion (5-bit exponent to 8, subnormal renormalisation), so it
      * would have to be undone on every read rather than being a shift,
      * and it still expands here. */
-    /* TWO-DIMENSIONAL ONLY, and the reason is a consumer's contract
-       rather than anything about bf16.
+    /* TWO-DIMENSIONAL, OR ONE-DIMENSIONAL AND SMALL. The reason is a
+       consumer's contract rather than anything about bf16.
+
+       THE 1-D CASE IS THE ONE THE EXPORTER CARES ABOUT. tools/
+       export_q8.py keeps a tensor at F32 when Q8_0 is not accurate
+       enough for it, and its rule reads: "Non-2D tensors and those with
+       n < 512 are always f32 ... conv1d (unquantizable: 4-wide rows),
+       A_log and dt_bias (feed exp), norms (leverage)". Those are
+       exactly the structures that had no middle option - Q8_0 too
+       coarse, F32 more than they need - and bf16 is that middle. A
+       first version of this guard was 2-D only and therefore served
+       none of them.
      *
      * lz_t_f32() hands back a WHOLE-TENSOR f32 view. For an F32 tensor
      * that is free - it returns t->f and copies nothing - but a bf16
      * tensor has to be widened into the caller's scratch, and that
-     * scratch is one ROW wide (forward.c's s->wscr, sized qcap). The
-     * engine's 1-D and 3-D tensors are exactly the ones read that way:
-     * norms and biases are 1-D, and conv1d weights are 3-D - the
-     * checkpoint measured here has them at [3072, 1, 4], 12,288 elements
-     * against a qcap in the hundreds. Storing those narrow overran
-     * s->wscr and crashed in conv_fixed_build; found by running it, not
-     * by reading it.
+     * scratch is s->wscr, qcap floats. So a tensor read that way may be
+     * narrow only if the WHOLE of it fits, which is what the 1-D clause
+     * checks: qcap starts at hidden_size and only grows, so a norm
+     * (hidden-wide) and A_log/dt_bias (per-head, smaller) all fit.
+     *
+     * 3-D IS STILL EXCLUDED, and conv1d is why. The checkpoint measured
+     * here has it at [3072, 1, 4] - 12,288 elements against a qcap in
+     * the hundreds - and conv_fixed_build reads it whole through
+     * lz_t_f32. Storing it narrow overran s->wscr and crashed there;
+     * found by running it, not by reading it. Serving it needs that
+     * caller to move to lz_t_row_f32, which is a separate change.
      *
      * The 2-D tensors have no such problem: they are weight matrices,
      * reached through lz_matmul_w / lz_matmul_xq_nt, which widen a row
@@ -1190,7 +1204,8 @@ static int visit_read(LZModel *m, const LZStTensor *t, LZTensor *field,
      * every quantized kernel in ops_matmul.c carries. Past it a tensor
      * stays f32, which costs memory and never correctness. */
     if (t->dtype == LZ_DT_BF16 && lz_bf16_store_g &&
-        t->n_dims == 2 && t->shape[1] <= LZ_MM_WIDEN_MAX) {
+        ((t->n_dims == 2 && t->shape[1] <= LZ_MM_WIDEN_MAX) ||
+         (t->n_dims == 1 && t->n_elem <= LZ_MM_WIDEN_MAX))) {
         lz_i64 nb = t->n_elem * (lz_i64)2;
         field->q = (int8_t *)aligned_malloc((size_t)t->n_elem, 2);
         if (!field->q) {
