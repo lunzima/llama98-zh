@@ -105,11 +105,59 @@ inc_for() {
 # read the #else arm of every LZ_HAVE_P2_* block - a different program
 # from the one that ships, and one mixed declaration in ops_gdn.c lived
 # in the gap between the two scans for as long as they disagreed.
+# -D__arm__ FOR THE ARM-GUARDED FILES, or this gate reads 82 lines of a
+# 1291-line file and calls it checked.
+#
+# src/lz_softfp.c wraps everything after its macro block in
+# `#if defined(__arm__) && defined(__GNUC__) && ...`, opened at line 155
+# and not closed until the last line, with no #else. On this host
+# __arm__ is undefined, so the preprocessor threw the whole body away
+# and the gate was parsing the typedefs lz_int.h contributes and nothing
+# else - about 7% of the file, none of it code. Measured by counting
+# preprocessor output both ways: 82 non-blank lines without the define,
+# 1158 with.
+#
+# It was not clean under there. Opening the guard turned up three
+# `static inline` (C99; the GNU spelling that works under -std=c89 is
+# __inline__, which ops_arm_prim.h already uses throughout) - real C89
+# errors that this gate is supposed to catch and could not see. The
+# same blind spot hid two VC++ 4.0 violations found by hand the same
+# day, an `LL` suffix and an `unsigned long long` parameter.
+#
+# gcc defines __GNUC__ itself, so -D__arm__ alone opens the guard. The
+# inline asm inside is never CODEGEN'd here - -fsyntax-only stops before
+# the assembler - so an x86 host can check ARM sources this way; only
+# the parse has to succeed.
+# FOUR FILES, not one. Found by preprocessing every src/*.c both ways and
+# comparing the non-blank line counts - the ratio says at once how much
+# of a file this gate was reading:
+#
+#     lz_softfp.c      82 -> 1158    93% was invisible
+#     ops_arm.c       143 ->  560    74%
+#     lz_bf16.c       171 ->  291    41%
+#     ops_t2_arm.c     96 ->  125    23%
+#
+# Every other file gains only the few lines ops_arm_prim.h contributes
+# through the same define, which is ambient rather than its own body
+# being gated. The three besides lz_softfp.c were already clean when the
+# guard was opened; they are listed anyway, because "clean today" and
+# "checked from now on" are different properties and this gate exists to
+# supply the second one.
+arm_guarded() {
+    case "$1" in
+        src/lz_softfp.c|src/ops_arm.c|src/lz_bf16.c|src/ops_t2_arm.c)
+            return 0 ;;
+        *)  return 1 ;;
+    esac
+}
+
 defs_for() {
+    D="-DLZ_MMX_TU=1 -DLZ_SSE2_TU=1"
+    arm_guarded "$1" && D="$D -D__arm__"
     case "$(basename "$1")" in
         ops_mmx.c|ops_mmx_sse.c|ops_sse2.c)
-            echo "-DLZ_MMX_TU=1 -DLZ_SSE2_TU=1 -mmmx -msse -msse2" ;;
-        *)  echo "-DLZ_MMX_TU=1 -DLZ_SSE2_TU=1" ;;
+            echo "$D -mmmx -msse -msse2" ;;
+        *)  echo "$D" ;;
     esac
 }
 
@@ -241,21 +289,23 @@ fi
 # quirks of its own, and nothing in this tree can run it. Reading this
 # gate as "the MIPS target builds" is the mistake it is written to
 # prevent.
+# THROUGH defs_for, not a second copy of the flags. This loop used to
+# restate -DLZ_MMX_TU/-DLZ_SSE2_TU and the -mmmx/-msse case analysis
+# itself, so the two lists could disagree - and they did the moment
+# defs_for learned -D__arm__ and this one did not, which would have left
+# the compile half of the gate still parsing 82 lines of lz_softfp.c
+# while the pattern half checked the whole thing.
 CFAIL=0
 NC=0
 for f in $CFILES; do
-    case "$(basename "$f")" in
-        ops_mmx.c|ops_mmx_sse.c|ops_sse2.c) isa="-mmmx -msse -msse2" ;;
-        *) isa="" ;;
-    esac
     NC=$((NC + 1))
     n=$(gcc -std=c89 -pedantic -fsyntax-only -Isrc -Icommon -Igui \
-            -DLZ_MMX_TU=1 -DLZ_SSE2_TU=1 $isa "$f" 2>&1 \
+            $(defs_for "$f") "$f" 2>&1 \
         | grep -c " error: ")
     if [ "$n" -gt 0 ]; then
         echo "FAIL: $(basename "$f") - $n C89 compile error(s)"
         gcc -std=c89 -pedantic -fsyntax-only -Isrc -Icommon -Igui \
-            -DLZ_MMX_TU=1 -DLZ_SSE2_TU=1 $isa "$f" 2>&1 \
+            $(defs_for "$f") "$f" 2>&1 \
             | grep -m2 " error: " | sed 's/^/      /'
         CFAIL=$((CFAIL + n))
         FAIL=1

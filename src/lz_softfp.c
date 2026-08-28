@@ -595,7 +595,7 @@ float __aeabi_fsub(float a, float b) {
        carry, which is why a mantissa that rounds up to 2^24 correctly
        becomes the next exponent - and 0x1.fffffep127 correctly becomes
        +inf, since the range test below runs before rounding. */
-static inline int sf_fmul_fast_arm_asm(uint32_t ua, uint32_t ub, uint32_t *out) {
+static __inline__ int sf_fmul_fast_arm_asm(uint32_t ua, uint32_t ub, uint32_t *out) {
     uint32_t ok, s, ea, ma, mb, hi, lo, t;
     __asm__(
         "mov    %[t], #255\n\t"
@@ -682,7 +682,7 @@ float __aeabi_fmul(float a, float b) {
    and on subnormal/overflow results. The setup matches libgcc exactly:
    dividend/divisor = 0x10000000 | (mantissa << 9 >> 4), which the earlier
    bic/orr 24-bit-mantissa version got wrong (100% bit-wrong). */
-static inline int sf_fdiv_fast_arm_asm(uint32_t ua, uint32_t ub, uint32_t *out) {
+static __inline__ int sf_fdiv_fast_arm_asm(uint32_t ua, uint32_t ub, uint32_t *out) {
     uint32_t ok, s, ea, eb, d, q, ip, t;
     __asm__(
         /* The same one predicate chain __aeabi_fmul uses: ANDS sets Z on
@@ -1136,7 +1136,7 @@ __attribute__((naked)) float __aeabi_l2f(lz_i64 a) {
    saturate on |a| >= 2^31, NaN -> 0. Ported structure of libgcc's 23-insn
    __aeabi_f2iz (the constants are IEEE-derived). FALLS THROUGH to the C
    return (no bx lr) so it is safe to inline. ~25 insns. */
-static inline int32_t sf_f2iz_arm_asm(uint32_t u) {
+static __inline__ int32_t sf_f2iz_arm_asm(uint32_t u) {
     int32_t r;
     uint32_t e, m, t;
     __asm__(
