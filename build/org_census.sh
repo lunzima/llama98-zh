@@ -161,6 +161,26 @@ famfiles = collections.defaultdict(collections.Counter)
 for (n, f), p in family.items():
     famfiles[p][os.path.basename(f)] += 1
 
+# SOME FAMILIES ARE NAMED BY SUFFIX, NOT PREFIX, and PLACEMENT read only
+# the prefix. ops_sched.c is the knob TU and its members are named for
+# the operator they control - lz_attn_mode, lz_sig_mode, lz_conv_mode,
+# lz_gdn_mode, lz_epi_mode, lz_bf16_store_select - so the family is the
+# _mode/_select/_tier ending. Measured: 8 of 8 *_select in the tree are
+# in that file, 9 of 11 *_mode, and the only *_sel. Reading the prefix
+# alone reported three members of a fourteen-member family that lives
+# together as the odd ones out, and moving them would have REDUCED the
+# concentration the axis exists to measure.
+suffix = {}
+suffixfiles = collections.defaultdict(collections.Counter)
+for n, f in allnames:
+    if "_" not in n:
+        continue
+    s = n.rsplit("_", 1)[1]
+    if len(s) < 3:
+        continue
+    suffix[(n, f)] = s
+    suffixfiles[s][os.path.basename(f)] += 1
+
 # ---- 1. order: topic re-entries --------------------------------------
 # TWO GROUPINGS, and a file is only disordered if BOTH say so. The kernel
 # files are grouped by weight FORMAT - q8's dot32, dot128 and row
@@ -286,6 +306,28 @@ for (n, f), p in sorted(family.items()):
         # command line, a CLI concern; utf8_extra is gbk.c's own
         # five-line lead-byte predicate. All three share a prefix with
         # another file's family and nothing else.
+        # The SUFFIX family gets a vote. Home under either key is home.
+        s = suffix.get((n, f))
+        if s and suffixfiles[s]:
+            shome, scount = suffixfiles[s].most_common(1)[0]
+            stotal = sum(suffixfiles[s].values())
+            if shome == here and stotal >= 4 and scount * 2 > stotal:
+                soft.append("  %-34s in %-18s   [*_%s lives here: %d/%d]"
+                            % (n, here, s, scount, stotal))
+                continue
+        # A PAIR IS NOT SPLIT. lz_bf16_store is the getter for the knob
+        # lz_bf16_store_select sets, and that one is home here by the
+        # suffix vote above; moving the getter to lz_bf16.c would put a
+        # knob's two halves in two files, which is worse than either
+        # placement the axis was choosing between. A sibling sharing a
+        # LONGER prefix than the family key, in this same file, is that
+        # relationship.
+        sib = [m for (m, g) in family
+               if g == f and m != n and m.startswith(n + "_")]
+        if sib:
+            soft.append("  %-34s in %-18s   [paired with %s, here]"
+                        % (n, here, sorted(sib)[0]))
+            continue
         line = ("  %-34s in %-18s but %d/%d of %s* is in %s"
                 % (n, here, homecount, total, p, home))
         if (n, f) in static_fn:
