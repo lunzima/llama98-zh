@@ -44,32 +44,62 @@ sys.path.insert(0, sys.argv[1])
 import aux_equiv
 old = open(sys.argv[2], encoding="utf-8", errors="replace").read()
 new = open(sys.argv[3], encoding="utf-8", errors="replace").read()
+declared = set(os.environ.get("DECLARED", "").split())
+seen = os.environ.get("SEEN_LOG", "")
 bad = 0
 n = 0
 for name, ok, detail in aux_equiv.compare_files(old, new):
     n += 1
-    if not ok:
-        print("  CHANGED %s (%s): %s" % (name, sys.argv[4], detail))
-        bad += 1
-print("  %s: %d kernel(s) compared, %d changed" % (sys.argv[4], n, bad))
+    if ok:
+        continue
+    if seen:
+        open(seen, "a", encoding="utf-8").write("CHANGED %s \n" % name)
+    if name in declared:
+        print("  changed %s (%s): %s - DECLARED" % (name, sys.argv[4], detail))
+        continue
+    print("  CHANGED %s (%s): %s" % (name, sys.argv[4], detail))
+    bad += 1
+print("  %s: %d kernel(s) compared, %d undeclared change(s)"
+      % (sys.argv[4], n, bad))
 sys.exit(1 if bad else 0)
 PYEOF
 }
 
-if ! git rev-parse --verify -q HEAD~1 >/dev/null 2>&1; then
-    echo "aux_equiv_gate: SKIP - no HEAD~1 to compare against"
+OLD_REV=${OLD_REV:-HEAD~1}
+NEW_REV=${NEW_REV:-HEAD}
+if ! git rev-parse --verify -q "$OLD_REV" >/dev/null 2>&1; then
+    echo "aux_equiv_gate: SKIP - no $OLD_REV to compare against"
     exit 2
 fi
 
-echo "-- HEAD~1 -> HEAD --"
+# A VALUE CHANGE IS SOMETIMES THE POINT - the commit that fixed
+# lz_dot128_t2_asm changed what it computes, which is what fixing it
+# means. So the gate takes a declaration in the commit message:
+#
+#   kernel-value-change: lz_dot128_t2_asm  why, in a clause
+#
+# Declared and changed is a pass. Changed and undeclared is the failure.
+# Declared and unchanged is a warning, not a pass-through: a marker that
+# outlives its commit would quietly whitelist the kernel forever.
+DECLARED=$(git log -1 --format=%B "$NEW_REV" 2>/dev/null |
+           sed -n 's/^[[:space:]]*kernel-value-change:[[:space:]]*\([A-Za-z_][A-Za-z0-9_]*\).*/\1/p')
+[ -n "$DECLARED" ] && echo "-- declared value change(s):" $DECLARED " --"
+
+echo "-- $OLD_REV -> $NEW_REV --"
 rc=0
 compared=0
 for f in $FILES; do
     b=$(basename "$f")
-    git show "HEAD~1:$f" > "$T/old-$b" 2>/dev/null || continue
-    git show "HEAD:$f"   > "$T/new-$b" 2>/dev/null || continue
+    git show "$OLD_REV:$f" > "$T/old-$b" 2>/dev/null || continue
+    git show "$NEW_REV:$f" > "$T/new-$b" 2>/dev/null || continue
     compared=$((compared + 1))
-    compare "$T/old-$b" "$T/new-$b" "$b" || rc=1
+    DECLARED="$DECLARED" SEEN_LOG="$T/seen.log" \
+        compare "$T/old-$b" "$T/new-$b" "$b" || rc=1
+done
+for d in $DECLARED; do
+    grep -q "CHANGED $d " "$T/seen.log" 2>/dev/null || \
+        echo "  warn: '$d' is declared changed but did not change -" \
+             "a stale marker whitelists it for good"
 done
 if [ "$compared" -eq 0 ]; then
     # Not a pass. Zero comparisons prints the same as everything agreeing.
