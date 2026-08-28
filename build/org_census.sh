@@ -64,10 +64,26 @@ FILES = sorted(glob.glob("src/*.c") + glob.glob("gui/*.c") +
                glob.glob("common/*.c"))
 
 order = {}          # file -> [function names, in definition order]
+bodies = {}         # file -> {name: body text}
 for f in FILES:
     t = strip(open(f, encoding="utf-8", errors="replace").read())
-    names = [m.group(1) for m in DEF.finditer(t) if m.group(1) not in KEYWORDS]
+    names, bd = [], {}
+    for m in DEF.finditer(t):
+        n = m.group(1)
+        if n in KEYWORDS:
+            continue
+        i = t.index("{", m.start())
+        depth, j = 0, i
+        while j < len(t):
+            if t[j] == "{": depth += 1
+            elif t[j] == "}":
+                depth -= 1
+                if depth == 0: break
+            j += 1
+        names.append(n)
+        bd[n] = t[i:j]
     order[f] = names
+    bodies[f] = bd
 
 # ---- families ---------------------------------------------------------
 # The longest underscore-delimited prefix a name shares with at least two
@@ -107,24 +123,57 @@ def fmt_key(n):
             return x
     return None
 
-def re_entries(seq):
-    seen, last, c, where = set(), None, 0, []
-    for s in seq:
+def re_entries(seq, names=None, callers=None, pos=None, idx=None):
+    """Count topic resumptions, EXCLUDING local-helper ordering.
+
+    A helper defined immediately before its only caller is good C, not
+    tangle: it is what lets the file have no forward declarations. It
+    reads as a re-entry because the helper's name puts it in a different
+    family - sample_residual between lz_spec_accept and
+    lz_spec_accept_temp, verify_row_argmax before lz_spec_round.
+    Measured over the whole tree, 93 of 103 re-entries are this, and
+    without the filter this axis put generate.c third and would have sent
+    someone to reorder a file that is already ordered.
+
+    So an intervening run is forgiven when every function in it is called
+    only from at or after the point it was introduced."""
+    seen, last, c, where, runstart = set(), None, 0, [], None
+    for k, s in enumerate(seq):
         if s != last:
-            if s in seen:
+            if s in seen and runstart is not None and names is not None:
+                lo = idx[runstart]
+                inter = [names[j] for j in range(lo, idx[k])]
+                local = all(
+                    callers[x] and all(pos[y] >= lo for y in callers[x])
+                    for x in inter if callers.get(x))
+                if not (inter and local):
+                    c += 1
+                    where.append(s)
+            elif s in seen and names is None:
                 c += 1
                 where.append(s)
             seen.add(s)
             last = s
+            runstart = k
     return c, where
 
 print("== ORDER: a topic that resumes after another topic intervened ==")
 rows = []
 for f in FILES:
-    byfam = [s for s in (family.get((n, f)) for n in order[f]) if s]
-    byfmt = [s for s in (fmt_key(n) for n in order[f]) if s]
-    a, wa = re_entries(byfam)
-    b, wb = re_entries(byfmt)
+    names = order[f]
+    pos = {n: i for i, n in enumerate(names)}
+    callers = collections.defaultdict(set)
+    for n in names:
+        for c in re.finditer(r"\b([a-z_]\w*)\s*\(", bodies[f][n]):
+            if c.group(1) in pos:
+                callers[c.group(1)].add(n)
+    fam_pairs = [(i, family.get((n, f)))
+                 for i, n in enumerate(names) if family.get((n, f))]
+    fmt_pairs = [(i, fmt_key(n)) for i, n in enumerate(names) if fmt_key(n)]
+    byfam = [s for _, s in fam_pairs]
+    byfmt = [s for _, s in fmt_pairs]
+    a, wa = re_entries(byfam, names, callers, pos, [i for i, _ in fam_pairs])
+    b, wb = re_entries(byfmt, names, callers, pos, [i for i, _ in fmt_pairs])
     # If the file is sorted under EITHER key it is sorted; report the
     # smaller count, and only when both keys agree there is interleaving.
     if a and (b or len(byfmt) < 3):
