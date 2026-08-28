@@ -62,10 +62,21 @@ W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 . build/cov_run.sh
 cov_run "$W" "$MODEL" 8 || exit 2
 
-# The two dispatch shapes, as they are written in the source. `pick`
-# covers both LZ_DEFINE_PICK's generated functions and lz_row_pick.
+# The dispatch shapes, as they are written in the source. `pick` covers
+# both LZ_DEFINE_PICK's generated functions and lz_row_pick.
+#
+# `cpu` is here because it is the same question asked a different way -
+# "which machine is this" is as invariant as "which tier is this", and
+# it is asked in the same places. It is worth its own row rather than
+# being folded into `branch`: lz_cpu_has_mmx has ALREADY been through
+# this treatment once (it was an extern function called 75,080,736
+# times, now a static inline reading a cached global - see ops_quant.h),
+# so its count answers a different question. A high number here does not
+# mean "hoist it", it means "the inline is not being folded", which is a
+# different problem with a different fix.
 BRANCH_RE='g_kernel[[:space:]]*==|lz_kernel_sel\(\)[[:space:]]*=='
 PICK_RE='_pick\('
+CPU_RE='lz_cpu_has_[a-z0-9_]*\(\)|lz_soft_float_target\(\)'
 
 : > "$W/sites.txt"
 for f in src/*.c src/*.h; do
@@ -77,6 +88,11 @@ for f in src/*.c src/*.h; do
       | grep -vE 'LZ_DEFINE_PICK|static .* _pick|^\s*[0-9]+:\s*/\*' \
       | while IFS=: read -r ln rest; do
         printf '%s\t%s\tpick\n' "$(basename "$f")" "$ln"
+    done >> "$W/sites.txt"
+    grep -nE "$CPU_RE" "$f" 2>/dev/null \
+      | grep -vE 'static int lz_cpu_has|^\s*[0-9]+:\s*\*' \
+      | while IFS=: read -r ln rest; do
+        printf '%s\t%s\tcpu\n' "$(basename "$f")" "$ln"
     done >> "$W/sites.txt"
 done
 
@@ -111,7 +127,7 @@ awk -F'\t' '$4 ~ /^[0-9]+$/ {printf "%12d\t%s\t%s\t%s\n", $4, $2, $3, $1}' \
     done
 
 echo
-for k in branch pick; do
+for k in branch pick cpu; do
     hot=$(awk -F'\t' -v k=$k '$3==k && $4 ~ /^[0-9]+$/ && $4+0>0' "$W/joined.txt" | wc -l)
     cold=$(awk -F'\t' -v k=$k '$3==k && $4=="0"' "$W/joined.txt" | wc -l)
     un=$(awk -F'\t' -v k=$k '$3==k && ($4=="UNATTR"||$4=="NOLINE"||$4=="NOGCOV")' \

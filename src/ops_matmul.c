@@ -305,6 +305,20 @@ void matmul_q8_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
     const int8_t *wend = w->q + (size_t)w->n;   /* prefetch upper bound */
     lz_rowfn row;
     const int8_t *wr;   /* C89: declarations before statements */
+    /* THE EMMS GUARD IS INVARIANT AND WAS ASKED PER ROW. `_mm_empty()`
+       is the caller's duty after a row kernel touches MMX state, and
+       the guard exists because the instruction faults on a machine
+       without MMX - but which machine this is cannot change inside the
+       loop. build/dispatch_hotness.sh, kmr20, eight tokens: 1,000,256
+       executions of lz_cpu_has_mmx's body across the four matmul row
+       loops, the largest single category in the engine once the tier
+       dispatches were hoisted.
+
+       It is already a static inline reading a cached global (ops_quant.h
+       records that it used to be an extern call, 75,080,736 times) -
+       so this is not "make the check cheaper" a second time. It is
+       asking it once instead of once per row. */
+    int emms = lz_cpu_has_mmx();
     /* Same predicate as the float epilogue - see q8_fixed_epi. */
     int fixed_epi = q8_fixed_epi(w, in_dim, nb, nt);
     int want_i16 = (out->oi != NULL) || out->probe;
@@ -373,7 +387,7 @@ void matmul_q8_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
         rctx.pf_end = wend;
         rctx.pf_end2 = NULL;
         row(&rctx);
-        if (lz_cpu_has_mmx()) _mm_empty();
+        if (emms) _mm_empty();
         /* The clamp inside epi_align_i16 has already brought the result
            within +-out->bound, so the narrowing cast cannot lose a bit. */
         if (out->oi) {
@@ -799,6 +813,7 @@ void matmul_q41_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
     int r  = (unsigned)w->gs >> 5;              /* 32 sub-blocks per weight group */
     int ng = in_dim / w->gs;          /* weight-group count */
     int nb = (unsigned)in_dim >> 5;             /* 32-sub-block count */
+    int emms = lz_cpu_has_mmx();   /* invariant; see matmul_q8_impl */
     /* Same predicate as the Q8_0 float epilogue, own copy - see
        q41_fixed_epi's comment. */
     int fixed_epi = q41_fixed_epi(w, in_dim, nb, nt, r, 0);
@@ -860,7 +875,7 @@ void matmul_q41_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
         rctx.pf_end = wend;
         rctx.pf_end2 = NULL;
         row(&rctx);
-        if (lz_cpu_has_mmx()) _mm_empty();
+        if (emms) _mm_empty();
         epi_q41_row(out, i, out_dim, nt, w, ng, r, nb, 0, fixed_epi,
                     xqs, (const float *)wd, (const float *)wm);
     }
@@ -1118,6 +1133,7 @@ void matmul_t2_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
     int nb = (unsigned)in_dim >> 5;
     const unsigned char *p2b = (const unsigned char *)w->q;
     static float g_t2neg[LZ_MM_WIDEN_MAX / 32];
+    int emms = lz_cpu_has_mmx();   /* invariant; see matmul_q8_impl */
     /* Same predicate as matmul_q41_impl - T2 shares epi_q41/epi_q41_fixed
        and reads the same w->scale field the dot/scale term quantizes
        (T2's zero coefficient is a negated COPY of it, g_t2neg below, not
@@ -1178,7 +1194,7 @@ void matmul_t2_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
         rctx.pf_end = NULL;
         rctx.pf_end2 = NULL;
         row(&rctx);
-        if (lz_cpu_has_mmx()) _mm_empty();
+        if (emms) _mm_empty();
         epi_q41_row(out, i, out_dim, nt, w, ng, r, nb, 1, fixed_epi,
                     xqs, (const float *)wd, g_t2neg);
     }
@@ -1191,6 +1207,7 @@ void matmul_q61_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
     int nb = (unsigned)in_dim >> 5;
     const unsigned char *p4b = (const unsigned char *)w->q;
     const unsigned char *p2b = p4b + (size_t)w->n / 2;
+    int emms = lz_cpu_has_mmx();   /* invariant; see matmul_q8_impl */
     /* Same predicate as matmul_q41_impl - see q41_fixed_epi's comment. */
     int fixed_epi = q41_fixed_epi(w, in_dim, nb, nt, r, 0);
     int want_i16 = (out->oi != NULL) || out->probe;
@@ -1243,7 +1260,7 @@ void matmul_q61_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
         rctx.pf_end = p2b;                      /* 4-bit plane ends where 2-bit starts */
         rctx.pf_end2 = p2b + (size_t)w->n / 4;  /* 2-bit plane's own bound */
         row(&rctx);
-        if (lz_cpu_has_mmx()) _mm_empty();
+        if (emms) _mm_empty();
         epi_q41_row(out, i, out_dim, nt, w, ng, r, nb, 0, fixed_epi,
                     xqs, (const float *)wd, (const float *)wm);
     }
@@ -1535,6 +1552,7 @@ void matmul_q16_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
     const int16_t *wend = wbase + (size_t)w->n;   /* prefetch upper bound */
     int t;
     lz_rowfn row;
+    int emms = lz_cpu_has_mmx();   /* invariant; see matmul_q8_impl */
     int fixed_epi = q16_fixed_epi(w, in_dim, ng, nt);
     int want_i16 = (out->oi != NULL) || out->probe;
     /* 1.0: the Q16_0 kernels do not scale by 256 the way the Q8_0 ones
@@ -1591,7 +1609,7 @@ void matmul_q16_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
         rctx.pf_end = wend;
         rctx.pf_end2 = NULL;
         row(&rctx);
-        if (lz_cpu_has_mmx()) _mm_empty();                    /* exit MMX state before x87 */
+        if (emms) _mm_empty();                    /* exit MMX state before x87 */
         /* Term for term the same epilogue as Q8_0's, fixed branch
            included: Q16_0 is symmetric, so it belongs to the
            lz_epi_prep / epi_fixed_raw family and not to epi_q41's - and
