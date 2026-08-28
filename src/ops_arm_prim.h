@@ -529,9 +529,10 @@ static __inline__ int lz_sig_q15_arm_asm(uint32_t ux, const int32_t *tab,
    DECLINES, and each is a case where identity would need a real IEEE
    adder rather than a proof:
      either operand zero, subnormal, inf or NaN   (exponent 0 or 255)
-     exponent difference above 27                 (small is pure sticky)
      P's exponent reaches 255 before rounding
      M underflows to exponent 0
+   An exponent difference above 27 is NOT among them - see the note at
+   the test itself, where it is answered rather than refused.
 
    P rounding UP into exponent 255 is not declined - inf is then the
    correctly rounded answer and the ADC produces it. Only an exponent
@@ -558,89 +559,127 @@ static __inline__ int lz_sig_q15_arm_asm(uint32_t ux, const int32_t *tab,
    same arithmetic needs nine registers and no stack at all. The C left
    outside is the one thing that cannot go in: which of the two results
    is the sum, which the answer only knows from the operand signs. */
+/* THE BODY IS THREE MACROS because there are two callers wanting two
+   different things and only one copy of the arithmetic may exist.
+   lz_faddsub_arm_asm (fwht's butterfly) needs both results. __aeabi_fadd
+   and __aeabi_fsub need exactly ONE - and which one is decided by the
+   sign test in the first two instructions, long before either result is
+   computed, so the other block can be branched over instead of computed
+   and discarded. That was about fifteen instructions thrown away on
+   every scalar add in the engine. lz_fsum_arm_asm below is that caller;
+   it shares HEAD/P/M with the two-result form rather than copying them,
+   which is also what keeps build/dup_body_gate.sh quiet. */
+/* HEAD leaves: %[ok] bit 0 = the signs differ, %[S] = P's sign, %[D] =
+   M's sign, %[e] = the larger exponent, %[mA]/%[mB] = the aligned
+   significands three bits above their final ulp. It jumps to 9f on the
+   shapes this tier declines and to 8f when it has answered outright.
+
+   d > 27 IS AN ANSWER, not a refusal. The small operand is then below
+   half an ulp of the large one, so both results round to the large
+   one's magnitude - and %[a] still holds it, shifted up by one. libgcc
+   takes the same exit at d > 25 (ieee754-sf.S returns the larger
+   operand outright); this used to decline and pay a C-core call for a
+   case an ORR answers. The sticky was being lost here anyway: LSR by a
+   register uses only its low BYTE, so `rsb b, t, #32` goes negative
+   past d=32 and the sticky test reads a shift-by-248, i.e. zero. It
+   never showed up because the answer is the large operand either way. */
+#define LZ_FADDSUB_HEAD                                                  \
+        "eor    %[ok], %[a], %[b]\n\t"                                   \
+        "mov    %[ok], %[ok], lsr #31\n\t"  /* 1 if the signs differ */  \
+        "and    %[S],  %[a], #0x80000000\n\t" /* P's sign is a's */      \
+        "mov    %[a],  %[a], lsl #1\n\t"    /* |a|<<1: exp at 31:24 */   \
+        "mov    %[b],  %[b], lsl #1\n\t"                                 \
+        "sub    %[e],  %[a], #0x01000000\n\t"                            \
+        "cmp    %[e],  #0xFE000000\n\t"                                  \
+        "sublo  %[e],  %[b], #0x01000000\n\t"                            \
+        "cmplo  %[e],  #0xFE000000\n\t"                                  \
+        "bhs    9f\n\t"                     /* 0/subnormal/inf/nan */    \
+        "cmp    %[a],  %[b]\n\t"            /* sign-magnitude order */   \
+        "mov    %[D],  %[S]\n\t"                                         \
+        "eorlo  %[D],  %[D], #0x80000000\n\t" /* M's sign */             \
+        "movlo  %[e],  %[a]\n\t"                                         \
+        "movlo  %[a],  %[b]\n\t"                                         \
+        "movlo  %[b],  %[e]\n\t"                                         \
+        "mov    %[e],  %[a], lsr #24\n\t"   /* larger exponent */        \
+        "mov    %[t],  %[b], lsr #24\n\t"                                \
+        "sub    %[t],  %[e], %[t]\n\t"      /* d */                      \
+        "cmp    %[t],  #27\n\t"                                          \
+        "bls    1f\n\t"                                                  \
+        "mov    %[a],  %[a], lsr #1\n\t"    /* |larger|, sign clear */   \
+        "orr    %[S],  %[S], %[a]\n\t"                                   \
+        "orr    %[D],  %[D], %[a]\n\t"                                   \
+        "b      8f\n\t"                                                  \
+        "1:\n\t"                                                         \
+        "mov    %[mB], %[b], lsl #8\n\t"                                 \
+        "mov    %[mB], %[mB], lsr #6\n\t"                                \
+        "orr    %[mB], %[mB], #0x04000000\n\t"                           \
+        "rsb    %[b],  %[t], #32\n\t"                                    \
+        "mov    %[b],  %[mB], lsl %[b]\n\t" /* d=0 shifts 32, giving 0 */\
+        "mov    %[mB], %[mB], lsr %[t]\n\t"                              \
+        "cmp    %[b],  #0\n\t"                                           \
+        "orrne  %[mB], %[mB], #1\n\t"       /* sticky */                 \
+        "mov    %[mA], %[a], lsl #8\n\t"                                 \
+        "mov    %[mA], %[mA], lsr #6\n\t"                                \
+        "orr    %[mA], %[mA], #0x04000000\n\t"
+
+/* P = |a| + |b|: one carry out at most, folded with its sticky.
+
+   Round and pack in four, the way __aeabi_fmul does it. The three extra
+   bits go to the TOP of a register, so one compare against 2^31 puts
+   the guard bit in C and the exact tie in Z; ADC then rounds up and
+   adds the exponent together, BICEQ is round-half-to-even entire, and a
+   significand that carries to 2^24 walks into the exponent field by
+   itself because the implicit bit is added in rather than masked off.
+   The six-instruction AND/CMP/ADDHI/ANDEQ/ADDEQ form this replaced
+   needed three more to handle that carry.
+
+   Clobbers %[a], %[b] and %[t]; %[e], %[mA] and %[mB] survive, which is
+   what lets M run whether or not P ran before it. */
+#define LZ_FADDSUB_P                                                     \
+        "add    %[t],  %[mA], %[mB]\n\t"                                 \
+        "sub    %[a],  %[e], #1\n\t"                                     \
+        "cmp    %[t],  #0x08000000\n\t"                                  \
+        "movhs  %[b],  %[t], lsr #1\n\t"                                 \
+        "andhs  %[t],  %[t], #1\n\t"                                     \
+        "orrhs  %[t],  %[b], %[t]\n\t"                                   \
+        "addhs  %[a],  %[a], #1\n\t"                                     \
+        "mov    %[b],  %[t], lsl #29\n\t"   /* dropped, left-justified */\
+        "mov    %[t],  %[t], lsr #3\n\t"                                 \
+        "cmp    %[a],  #254\n\t"                                         \
+        "bhs    9f\n\t"                     /* P overflows to inf */     \
+        "orr    %[S],  %[S], %[t]\n\t"                                   \
+        "cmp    %[b],  #0x80000000\n\t"                                  \
+        "adc    %[S],  %[S], %[a], lsl #23\n\t"                          \
+        "biceq  %[S],  %[S], #1\n\t"
+
+/* M = |a| - |b|. CLZ normalises; M cannot overflow, because rounding is
+   monotone and M is below the larger operand, which is representable at
+   this exponent. Reads only %[e], %[mA], %[mB] and %[D]'s sign, so it
+   does not care whether P ran. */
+#define LZ_FADDSUB_M                                                     \
+        "subs   %[t],  %[mA], %[mB]\n\t"                                 \
+        "moveq  %[D],  #0\n\t"              /* exact cancellation: +0 */ \
+        "beq    8f\n\t"                                                  \
+        "clz    %[a],  %[t]\n\t"                                         \
+        "sub    %[a],  %[a], #5\n\t"                                     \
+        "mov    %[t],  %[t], lsl %[a]\n\t"                               \
+        "subs   %[a],  %[e], %[a]\n\t"                                   \
+        "ble    9f\n\t"                     /* M is subnormal */         \
+        "sub    %[a],  %[a], #1\n\t"                                     \
+        "mov    %[b],  %[t], lsl #29\n\t"   /* same round-and-pack */    \
+        "mov    %[t],  %[t], lsr #3\n\t"                                 \
+        "orr    %[D],  %[D], %[t]\n\t"                                   \
+        "cmp    %[b],  #0x80000000\n\t"                                  \
+        "adc    %[D],  %[D], %[a], lsl #23\n\t"                          \
+        "biceq  %[D],  %[D], #1\n\t"
+
 static __inline__ int lz_faddsub_arm_asm(uint32_t ua, uint32_t ub,
                                          uint32_t *psum, uint32_t *pdif) {
     uint32_t ok, S, D, e, mA, mB, t, a = ua, b = ub;
     __asm__(
-        "eor    %[ok], %[a], %[b]\n\t"
-        "mov    %[ok], %[ok], lsr #31\n\t"    /* 1 when the signs differ */
-        "and    %[S],  %[a], #0x80000000\n\t" /* P's sign is always a's */
-        "mov    %[a],  %[a], lsl #1\n\t"      /* |a| << 1: exponent at 31:24 */
-        "mov    %[b],  %[b], lsl #1\n\t"
-        "sub    %[e],  %[a], #0x01000000\n\t"
-        "cmp    %[e],  #0xFE000000\n\t"
-        "sublo  %[e],  %[b], #0x01000000\n\t"
-        "cmplo  %[e],  #0xFE000000\n\t"
-        "bhs    9f\n\t"                       /* 0/subnormal/inf/nan */
-
-        "cmp    %[a],  %[b]\n\t"              /* sign-magnitude order */
-        "mov    %[D],  %[S]\n\t"
-        "eorlo  %[D],  %[D], #0x80000000\n\t" /* M's sign: a's ^ swapped */
-        "movlo  %[e],  %[a]\n\t"
-        "movlo  %[a],  %[b]\n\t"
-        "movlo  %[b],  %[e]\n\t"
-        "mov    %[e],  %[a], lsr #24\n\t"     /* larger exponent */
-        "mov    %[t],  %[b], lsr #24\n\t"
-        "sub    %[t],  %[e], %[t]\n\t"        /* d */
-        "cmp    %[t],  #27\n\t"
-        "bhi    9f\n\t"
-        "mov    %[mB], %[b], lsl #8\n\t"
-        "mov    %[mB], %[mB], lsr #6\n\t"
-        "orr    %[mB], %[mB], #0x04000000\n\t"
-        "rsb    %[b],  %[t], #32\n\t"
-        "mov    %[b],  %[mB], lsl %[b]\n\t"   /* d=0 shifts by 32, giving 0 */
-        "mov    %[mB], %[mB], lsr %[t]\n\t"
-        "cmp    %[b],  #0\n\t"
-        "orrne  %[mB], %[mB], #1\n\t"         /* sticky */
-        "mov    %[mA], %[a], lsl #8\n\t"
-        "mov    %[mA], %[mA], lsr #6\n\t"
-        "orr    %[mA], %[mA], #0x04000000\n\t"
-
-        /* P = |a| + |b|: one carry out at most, folded with its sticky. */
-        "add    %[t],  %[mA], %[mB]\n\t"
-        "sub    %[a],  %[e], #1\n\t"
-        "cmp    %[t],  #0x08000000\n\t"
-        "movhs  %[b],  %[t], lsr #1\n\t"
-        "andhs  %[t],  %[t], #1\n\t"
-        "orrhs  %[t],  %[b], %[t]\n\t"
-        "addhs  %[a],  %[a], #1\n\t"
-        /* Round and pack in four, the way __aeabi_fmul does it. The
-           three extra bits go to the TOP of a register, so one compare
-           against 2^31 puts the guard bit in C and the exact tie in Z;
-           ADC then rounds up and adds the exponent together, BICEQ is
-           round-half-to-even entire, and a significand that carries to
-           2^24 walks into the exponent field by itself because the
-           implicit bit is added in rather than masked off. The
-           six-instruction AND/CMP/ADDHI/ANDEQ/ADDEQ form this replaced
-           needed three more to handle that carry. */
-        "mov    %[b],  %[t], lsl #29\n\t"     /* dropped, left-justified */
-        "mov    %[t],  %[t], lsr #3\n\t"
-        "cmp    %[a],  #254\n\t"
-        "bhs    9f\n\t"                       /* P overflows to inf */
-        "orr    %[S],  %[S], %[t]\n\t"
-        "cmp    %[b],  #0x80000000\n\t"
-        "adc    %[S],  %[S], %[a], lsl #23\n\t"
-        "biceq  %[S],  %[S], #1\n\t"
-
-        /* M = |a| - |b|. CLZ normalises; M cannot overflow, because
-           rounding is monotone and M is below the larger operand,
-           which is representable at this exponent. */
-        "subs   %[t],  %[mA], %[mB]\n\t"
-        "moveq  %[D],  #0\n\t"                /* exact cancellation: +0 */
-        "beq    8f\n\t"
-        "clz    %[a],  %[t]\n\t"
-        "sub    %[a],  %[a], #5\n\t"
-        "mov    %[t],  %[t], lsl %[a]\n\t"
-        "subs   %[a],  %[e], %[a]\n\t"
-        "ble    9f\n\t"                       /* M is subnormal */
-        "sub    %[a],  %[a], #1\n\t"
-        "mov    %[b],  %[t], lsl #29\n\t"     /* same round-and-pack */
-        "mov    %[t],  %[t], lsr #3\n\t"
-        "orr    %[D],  %[D], %[t]\n\t"
-        "cmp    %[b],  #0x80000000\n\t"
-        "adc    %[D],  %[D], %[a], lsl #23\n\t"
-        "biceq  %[D],  %[D], #1\n\t"
-
+        LZ_FADDSUB_HEAD
+        LZ_FADDSUB_P
+        LZ_FADDSUB_M
         "8:\n\t"
         "orr    %[ok], %[ok], #2\n\t"
         "b      7f\n\t"
@@ -655,6 +694,56 @@ static __inline__ int lz_faddsub_arm_asm(uint32_t ua, uint32_t ub,
     if (!ok) return 0;
     if (ok & 1) { *psum = D; *pdif = S; }     /* signs differ */
     else        { *psum = S; *pdif = D; }
+    return 1;
+}
+
+/* The sum alone, for __aeabi_fadd and __aeabi_fsub. Same contract and
+   the same declines as lz_faddsub_arm_asm - it is the same three macros
+   - but it computes ONE of the two results instead of both.
+
+   The choice needs no extra work to discover. a+b is the effective add
+   exactly when the signs agree, and %[ok] bit 0 already says so from
+   HEAD's first two instructions, so a TST and a branch pick the block
+   and the other one is never entered. That is about fifteen
+   instructions off every scalar add and subtract in the engine.
+
+   The d > 27 exit in HEAD still writes BOTH %[S] and %[D] rather than
+   testing which is wanted: one wasted ORR is cheaper than the test, and
+   keeping HEAD identical for both callers is what makes it shareable.
+
+   ALWAYS_INLINE, and it is load-bearing rather than a hint. This body
+   grew past gcc's inline-limit heuristic, which then outlined it and
+   gave both callers a BL - a call and return, plus the register save
+   and restore, wrapped around a leaf whose entire reason for existing
+   is that __aeabi_fadd must not make a call. Measured, that handed back
+   most of what skipping the unused block wins. lz_faddsub_arm_asm above
+   does not need the attribute: fwht is its only caller and gcc inlines
+   it unprompted. */
+static __inline__ __attribute__((always_inline))
+int lz_fsum_arm_asm(uint32_t ua, uint32_t ub,
+                                      uint32_t *psum) {
+    uint32_t ok, S, D, e, mA, mB, t, a = ua, b = ub;
+    __asm__(
+        LZ_FADDSUB_HEAD
+        "tst    %[ok], #1\n\t"
+        "bne    5f\n\t"                       /* signs differ: sum is M */
+        LZ_FADDSUB_P
+        "b      8f\n\t"
+        "5:\n\t"
+        LZ_FADDSUB_M
+        "8:\n\t"
+        "orr    %[ok], %[ok], #2\n\t"
+        "b      7f\n\t"
+        "9:\n\t"
+        "mov    %[ok], #0\n\t"
+        "7:\n\t"
+        : [ok] "=&r"(ok), [S] "=&r"(S), [D] "=&r"(D), [e] "=&r"(e),
+          [mA] "=&r"(mA), [mB] "=&r"(mB), [t] "=&r"(t),
+          [a] "+r"(a), [b] "+r"(b)
+        :
+        : "cc");
+    if (!ok) return 0;
+    *psum = (ok & 1) ? D : S;
     return 1;
 }
 

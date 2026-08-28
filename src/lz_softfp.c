@@ -9,8 +9,28 @@
    directly) and DECLINES to the C core below on the cases the asm does
    not cover (subnormals, inf/NaN, denormal or overflow results). The
    decline-and-fallback rule is ops_arm_prim.h's: the tier owes the C
-   bit-identity and can only ever be slower, never different. The fast
-   paths run ~14-80 instructions per op, down from libgcc's 23-102.
+   bit-identity and can only ever be slower, never different.
+
+   COST, COUNTED THE SAME WAY ON BOTH SIDES, which an earlier version of
+   this line did not do: it put this file's inline-asm BLOCKS against
+   libgcc's WHOLE functions ("~14-80 ... down from libgcc's 23-102"),
+   which flatters the comparison by everything the wrapper costs and by
+   every subnormal-and-NaN path libgcc carries and this file declines.
+   The figures below are entry to return, fast path taken, counted off
+   the disassembly of this file's own object:
+
+       __aeabi_fadd   64   (was 76)
+       __aeabi_fsub   63   (was 75)   one below fadd: the sign flip
+                                      folds into the ADD that unpacks b
+       __aeabi_fmul   33   (was 45)
+       __aeabi_fdiv  122 worst case, 47 when the division is exact and
+                     the quotient loop takes its early exit
+
+   libgcc's corresponding fast paths are 28 for the multiply and about
+   40 for the add - close, and reached the same way, because that is
+   where the multiply's core came from (see sf_fmul_fast_arm_asm). The
+   102 quoted before was its whole __aeabi_fmul. docs/arm-asm-audit.md
+   keeps the per-cell table.
 
    EVERY FUNCTION is verified against libgcc (via qemu-arm-static on the
    arm-linux-gnueabi cross toolchain) on ~40M random bit patterns plus a
@@ -447,15 +467,17 @@ static __attribute__((noinline)) uint32_t sf_div_f32(uint32_t uiA, uint32_t uiB)
 
 float __aeabi_fadd(float a, float b) {
     union { float f; uint32_t u; } ua, ub, r;
-    uint32_t S, D;
+    uint32_t S;
     ua.f = a; ub.f = b;
-    /* fast path (normal operands, expDiff <= 27, normal result): the
-       engine's verified lz_faddsub_arm_asm, ~60 insns vs libgcc's 100.
-       Declines (returns 0) on subnormal/inf/nan operands, expDiff > 27
-       and subnormal results -- the C core below handles those. S is the
-       sum (lz_faddsub already routes the sign-difference case), D the
-       difference; take S unconditionally. */
-    { int took = lz_faddsub_arm_asm(ua.u, ub.u, &S, &D);
+    /* fast path (normal operands, normal result): lz_fsum_arm_asm, the
+       sum-only half of the engine's verified faddsub cell. The
+       two-result form is fwht's; asking it for a sum computed the
+       difference as well and threw it away, about fifteen instructions
+       per call. Declines (returns 0) on subnormal/inf/nan operands and
+       on subnormal results -- the C core below handles those. An
+       exponent difference above 27 is NOT a decline any more; the cell
+       answers it with the larger operand, as libgcc does. */
+    { int took = lz_fsum_arm_asm(ua.u, ub.u, &S);
       SF_BILL(SF_ADD, took);
       if (took) { r.u = S; return r.f; } }
     /* A +-0 operand is 99.8% of every decline measured on the zh fixture
@@ -493,10 +515,10 @@ float __aeabi_fsub(float a, float b) {
     /* a - b == a + (-b): flip b's sign, then the add dispatch's
        sign-difference test routes to add_mags/sub_mags correctly. */
     union { float f; uint32_t u; } ua, ub, r;
-    uint32_t S, D;
+    uint32_t S;
     ua.f = a; ub.f = b;
     ub.u ^= 0x80000000u;
-    { int took = lz_faddsub_arm_asm(ua.u, ub.u, &S, &D);
+    { int took = lz_fsum_arm_asm(ua.u, ub.u, &S);
       SF_BILL(SF_ADD, took);
       if (took) { r.u = S; return r.f; } }
     /* A +-0 operand is 99.8% of every decline measured on the zh fixture
@@ -531,62 +553,81 @@ float __aeabi_fsub(float a, float b) {
     return r.f;
 }
 /* fmul fast path: umull + normalize + round, for normal operands with a
-   normal result. ~30 insns vs libgcc's 102. Declines (0) on zero/
-   subnormal/inf/nan operands and subnormal/inf results. */
+   normal result. 28 instructions; libgcc's ARM __aeabi_fmul spends 28 on
+   the same shape (its 102 is the WHOLE function, subnormals and NaNs
+   included - docs/arm-asm-audit.md records the fast paths separately, and
+   quoting the 102 here once made a 40-instruction version look like a
+   win). Declines (0) on zero/subnormal/inf/nan operands and on
+   subnormal/inf results.
+
+   THE SCALING IS THE WHOLE TRICK, and it is libgcc's (config/arm/
+   ieee754-sf.S), reached here by way of the copy already in this tree at
+   ops_arm.c's LZ_F32MM_PROD. Each significand is placed as a 28-bit
+   quantity - implicit bit at 27, mantissa at 26..4 - so the 56-bit
+   product sits with its leading 1 at bit 55 or 54. UMULL's HIGH word is
+   then the 24-bit result significand ALREADY at bits 23..0, needing no
+   final shift, and its LOW word is already exactly the round-and-sticky
+   field, so `cmp lo, #0x80000000` IS the round-to-nearest-even test: C
+   is the guard bit, Z is the exact tie. The earlier version put the
+   leading 1 at bit 30, which bought nothing and cost a shift to extract
+   the mantissa, a shift to extract round+sticky, and a separate
+   teq/orrne to jam the sticky in.
+
+   Three more foldings, none of them obvious:
+     - The four-way operand guard is ONE predicate chain. ANDS sets Z on
+       a zero exponent; ANDNES both skips itself and leaves Z set when
+       that already happened; the two TEQNEs test for 255 only if
+       everything before passed. Six instructions where twelve
+       cmp/beq pairs used to stand.
+     - SBC does the bias and the normalisation at once: the CMP above
+       left C clear exactly when the product needed a left shift, and
+       `sbc ea, ea, #127` subtracts 127+(1-C), i.e. 128 in that case.
+     - The bias is 127 rather than 128 because the significand ORed into
+       s still HAS its implicit bit, and ADC adding ea<<23 lets that bit
+       carry into the exponent field. The same ADC folds in the rounding
+       carry, which is why a mantissa that rounds up to 2^24 correctly
+       becomes the next exponent - and 0x1.fffffep127 correctly becomes
+       +inf, since the range test below runs before rounding. */
 static inline int sf_fmul_fast_arm_asm(uint32_t ua, uint32_t ub, uint32_t *out) {
-    uint32_t ok, s, ea, eb, ma, mb, hi, lo, t;
+    uint32_t ok, s, ea, ma, mb, hi, lo, t;
     __asm__(
-        "mov    %[ea], %[a], lsr #23\n\t"
-        "and    %[ea], %[ea], #255\n\t"
-        "mov    %[eb], %[b], lsr #23\n\t"
-        "and    %[eb], %[eb], #255\n\t"
-        "cmp    %[ea], #0\n\t"
-        "beq    9f\n\t"                    /* a zero/subnormal */
-        "cmp    %[eb], #0\n\t"
-        "beq    9f\n\t"                    /* b zero/subnormal */
-        "cmp    %[ea], #255\n\t"
-        "beq    9f\n\t"                    /* a inf/nan */
-        "cmp    %[eb], #255\n\t"
-        "beq    9f\n\t"                    /* b inf/nan */
+        "mov    %[t], #255\n\t"
+        "ands   %[ea], %[t], %[a], lsr #23\n\t"  /* Z: a zero/subnormal */
+        "andnes %[hi], %[t], %[b], lsr #23\n\t"  /* Z: b zero/subnormal */
+        "teqne  %[ea], %[t]\n\t"                 /* Z: a inf/nan */
+        "teqne  %[hi], %[t]\n\t"                 /* Z: b inf/nan */
+        "beq    9f\n\t"
+        "add    %[ea], %[ea], %[hi]\n\t"
         "eor    %[s], %[a], %[b]\n\t"
-        "and    %[s], %[s], #0x80000000\n\t"
-        "add    %[ea], %[ea], %[eb]\n\t"
-        "sub    %[ea], %[ea], #127\n\t"    /* expZ */
-        "bic    %[ma], %[a], #0xFF000000\n\t"
-        "orr    %[ma], %[ma], #0x800000\n\t"
-        "bic    %[mb], %[b], #0xFF000000\n\t"
-        "orr    %[mb], %[mb], #0x800000\n\t"
-        "mov    %[ma], %[ma], lsl #7\n\t"
-        "mov    %[mb], %[mb], lsl #8\n\t"
+        "mov    %[t], #0x8000000\n\t"      /* implicit bit, at 27 */
+        "mov    %[ma], %[a], lsl #9\n\t"
+        "orr    %[ma], %[t], %[ma], lsr #5\n\t"
+        "mov    %[mb], %[b], lsl #9\n\t"
+        "orr    %[mb], %[t], %[mb], lsr #5\n\t"
         "umull  %[lo], %[hi], %[ma], %[mb]\n\t"
-#if !LZ_SOFTFP_FAST
-        "teq    %[lo], #0\n\t"
-        "orrne  %[hi], %[hi], #1\n\t"      /* sticky */
-#endif /* !LZ_SOFTFP_FAST */
-        "cmp    %[hi], #0x40000000\n\t"
+        "and    %[s], %[s], #0x80000000\n\t"
+        "cmp    %[hi], #0x800000\n\t"      /* C clear => needs one shift */
         "movcc  %[hi], %[hi], lsl #1\n\t"
-        "subcc  %[ea], %[ea], #1\n\t"      /* normalize: leading 1 at bit 30 */
+        "orrcc  %[hi], %[hi], %[lo], lsr #31\n\t"
+#if !LZ_SOFTFP_FAST
+        "movcc  %[lo], %[lo], lsl #1\n\t"  /* only rounding reads lo */
+#endif /* !LZ_SOFTFP_FAST */
+        "orr    %[s], %[s], %[hi]\n\t"
+        "sbc    %[ea], %[ea], #127\n\t"    /* bias and normalisation */
 #if !LZ_SOFTFP_ASSUME_FINITE
-        "cmp    %[ea], #0\n\t"
-        "blt    9f\n\t"                    /* subnormal result */
-        "cmp    %[ea], #253\n\t"
-        "bhi    9f\n\t"                    /* overflow to inf */
+        /* One unsigned compare for both ends: a subnormal result makes
+           ea negative, which wraps to a huge unsigned. */
+        "cmp    %[ea], #254\n\t"
+        "bhs    9f\n\t"
 #endif /* !LZ_SOFTFP_ASSUME_FINITE */
 #if LZ_SOFTFP_FAST
-        /* Round toward zero: drop the bits instead of examining
-           them. No sticky, no guard compare, no tie-to-even - five
-           instructions less than the RNE tail below. ADD, not ADC:
-           there is no carry to fold in, and the implicit bit still
-           walks into the exponent field by itself. */
-        "mov    %[hi], %[hi], lsr #7\n\t"  /* 24-bit mag at bits 23..0 */
-        "orr    %[s], %[s], %[hi]\n\t"
+        /* Round toward zero: drop the bits instead of examining them.
+           ADD, not ADC - there is no carry to fold in, and the implicit
+           bit still walks into the exponent field by itself. */
         "add    %[s], %[s], %[ea], lsl #23\n\t"
 #else
-        "mov    %[t], %[hi], lsl #25\n\t"  /* round+sticky bits 31..25 */
-        "mov    %[hi], %[hi], lsr #7\n\t"  /* 24-bit mag at bits 23..0 */
-        "orr    %[s], %[s], %[hi]\n\t"
-        "cmp    %[t], #0x80000000\n\t"
-        "adc    %[s], %[s], %[ea], lsl #23\n\t" /* + expZ<<23, round-up in C */
+        "cmp    %[lo], #0x80000000\n\t"    /* C = guard, Z = exact tie */
+        "adc    %[s], %[s], %[ea], lsl #23\n\t"
         "biceq  %[s], %[s], #1\n\t"        /* round-half-to-even */
 #endif /* LZ_SOFTFP_FAST */
         "mov    %[o], #1\n\t"
@@ -594,7 +635,7 @@ static inline int sf_fmul_fast_arm_asm(uint32_t ua, uint32_t ub, uint32_t *out) 
         "9:\n\t"
         "mov    %[o], #0\n\t"
         "8:\n\t"
-        : [o] "=&r"(ok), [s] "=&r"(s), [ea] "=&r"(ea), [eb] "=&r"(eb),
+        : [o] "=&r"(ok), [s] "=&r"(s), [ea] "=&r"(ea),
           [ma] "=&r"(ma), [mb] "=&r"(mb), [hi] "=&r"(hi), [lo] "=&r"(lo),
           [t] "=&r"(t)
         : [a] "r"(ua), [b] "r"(ub)
@@ -637,17 +678,16 @@ float __aeabi_fmul(float a, float b) {
 static inline int sf_fdiv_fast_arm_asm(uint32_t ua, uint32_t ub, uint32_t *out) {
     uint32_t ok, s, ea, eb, d, q, ip, t;
     __asm__(
+        /* The same one predicate chain __aeabi_fmul uses: ANDS sets Z on
+           a zero exponent, ANDNES both skips itself and leaves that Z
+           alone, and the TEQNEs only ask about 255 if everything before
+           passed. Six instructions rather than twelve. */
         "mov    %[t], #255\n\t"
-        "and    %[ea], %[t], %[a], lsr #23\n\t"
-        "and    %[eb], %[t], %[b], lsr #23\n\t"
-        "cmp    %[ea], #0\n\t"
-        "beq    9f\n\t"                    /* a zero/subnormal */
-        "cmp    %[eb], #0\n\t"
-        "beq    9f\n\t"                    /* b zero/subnormal */
-        "cmp    %[ea], #255\n\t"
-        "beq    9f\n\t"                    /* a inf/nan */
-        "cmp    %[eb], #255\n\t"
-        "beq    9f\n\t"                    /* b inf/nan */
+        "ands   %[ea], %[t], %[a], lsr #23\n\t"  /* Z: a zero/subnormal */
+        "andnes %[eb], %[t], %[b], lsr #23\n\t"  /* Z: b zero/subnormal */
+        "teqne  %[ea], %[t]\n\t"                 /* Z: a inf/nan */
+        "teqne  %[eb], %[t]\n\t"                 /* Z: b inf/nan */
+        "beq    9f\n\t"
         "sub    %[ea], %[ea], %[eb]\n\t"   /* expA - expB */
         "eor    %[s], %[a], %[b]\n\t"      /* sign */
         "lsl    %[b], %[b], #9\n\t"
@@ -659,10 +699,10 @@ static inline int sf_fdiv_fast_arm_asm(uint32_t ua, uint32_t ub, uint32_t *out) 
         "cmp    %[d], %[eb]\n\t"
         "lslcc  %[d], %[d], #1\n\t"        /* align: dividend >= divisor */
         "adc    %[ea], %[ea], #125\n\t"    /* expZ = expA-expB+125+carry */
-        "cmp    %[ea], #0\n\t"
-        "blt    9f\n\t"                    /* subnormal result: decline */
-        "cmp    %[ea], #253\n\t"
-        "bhi    9f\n\t"                    /* overflow to inf: decline */
+        /* One unsigned compare for both ends, as in __aeabi_fmul: a
+           subnormal result makes expZ negative, which wraps high. */
+        "cmp    %[ea], #254\n\t"
+        "bhs    9f\n\t"
         "mov    %[ip], #0x800000\n\t"      /* quotient bit 23 */
         "1:\n\t"
         "cmp    %[d], %[eb]\n\t"
@@ -677,8 +717,21 @@ static inline int sf_fdiv_fast_arm_asm(uint32_t ua, uint32_t ub, uint32_t *out) 
         "cmp    %[d], %[eb], lsr #3\n\t"
         "subcs  %[d], %[d], %[eb], lsr #3\n\t"
         "orrcs  %[q], %[q], %[ip], lsr #3\n\t"
-        "lsls   %[d], %[d], #4\n\t"
-        "lsrs   %[ip], %[ip], #4\n\t"
+        /* TWO exits, which is libgcc's shape and the reason its loop is
+           written with MOVNES rather than a second flag-setting shift.
+           The first shift sets Z when the remainder has gone to zero -
+           the division was exact and every quotient bit still to come is
+           a zero already sitting in %[q]. Predicating the second shift
+           on NE both skips it and LEAVES THAT Z ALONE, so the BNE below
+           falls through. An unconditional `lsrs` here (what this used to
+           be) overwrites the flag with the counter's own, and the loop
+           then always runs its full six rounds - about seventy
+           instructions spent on an answer already complete.
+           The remainder cannot shift out of the register: the four
+           conditional subtracts above leave it below %[eb]>>3, so
+           `lsl #4` is zero only when the remainder itself was. */
+        "movs   %[d], %[d], lsl #4\n\t"
+        "movnes %[ip], %[ip], lsr #4\n\t"
         "bne    1b\n\t"
         "cmp    %[d], %[eb]\n\t"           /* remainder vs divisor: rounding */
         "adc    %[q], %[q], %[ea], lsl #23\n\t"
@@ -1094,14 +1147,62 @@ int __aeabi_f2iz(float a) {
     return sf_f2iz_arm_asm(ua.u);
 }
 
-/* __aeabi_f2lz: float to signed long. On ARM EABI "long" is 32-bit, so the
-   in-range truncation behaviour is identical to f2iz; reuse it. The only
-   divergence is out of int32 range, where libgcc wraps (mod 2^32, via a
-   64-bit f2ulz) and this saturates - the engine's only f2lz sites (json
-   shape ints, the kda int16 rounding) are in range, and x86's x87 already
-   differs from libgcc there anyway. */
-long __aeabi_f2lz(float a) {
-    return __aeabi_f2iz(a);
+/* __aeabi_f2lz: float to signed 64-BIT integer. The `l` in the EABI's
+   name is LONG LONG, not long, and getting that wrong is not a matter of
+   range - it is a matter of REGISTERS. A 64-bit return comes back in
+   r0:r1; this function used to be declared `long` and forward to
+   __aeabi_f2iz, so it wrote r0 and left r1 holding whatever the caller's
+   last computation had put there. Every result was the right low word
+   with a garbage high word:
+
+       (lz_i64)2048.0f  ==  -9223372036854773760
+
+   and the old comment's defence - "the engine's f2lz sites are all in
+   range" - was answering the wrong question, since range was never what
+   broke. It went unnoticed because nothing reached it: json.c held its
+   numbers as double, so safetensors' data_offsets conversion went to
+   libgcc's __aeabi_d2lz, which this file does not define. Narrowing that
+   field to float pointed every tensor offset straight at this function,
+   and the loader started rejecting offsets of 0..2048 for being
+   negative.
+
+   Straight shift-and-place, no loop. Below 1.0 (exponent < 127, which
+   also covers zero and the subnormals) the truncation is 0; at or past
+   2^63 it saturates, except for -2^63 exactly, which IS representable.
+   NaN gives 0, matching libgcc and __aeabi_f2iz above.
+
+   OUT OF RANGE THIS DELIBERATELY DIFFERS FROM libgcc, the one place in
+   this file that does, so it is worth being exact about. C leaves a
+   float-to-integer conversion undefined once the value will not fit, and
+   libgcc's __fixsfdi is C rather than the hand-written assembly its
+   f2iz uses - so it simply WRAPS, and 2^64 comes back as -1. That is not
+   a contract, it is an artifact. This saturates instead, which is what
+   the rest of this file's integer conversions do and what a loader
+   validating a length wants. Measured against libgcc: 0 of 3,171,248
+   in-range cases differ, and 1,016,248 of 1,031,758 out-of-range ones
+   do, by construction. IN RANGE IS THE PART THAT IS OWED. */
+lz_i64 __aeabi_f2lz(float a) {
+    union { float f; uint32_t u; } ua;
+    uint32_t e, sig;
+    int sh;
+    lz_i64 r;
+    ua.f = a;
+    e = (ua.u >> 23) & 0xFFu;
+    if (e < 127u) return 0;                  /* |a| < 1, zero, subnormal */
+    sig = (ua.u & 0x7FFFFFu) | 0x800000u;    /* 24-bit significand */
+    sh = (int)e - 127 - 23;                  /* place its low bit */
+    if (sh >= 40) {                          /* 2^63 and above, or inf/NaN */
+        if (e == 0xFFu && (ua.u & 0x7FFFFFu)) return 0;          /* NaN */
+        /* -2^63 is exactly representable and is not an overflow. */
+        if ((ua.u & 0x80000000u) && sh == 40 && sig == 0x800000u)
+            return (lz_i64)(-9223372036854775807LL) - 1;
+        return (ua.u & 0x80000000u)
+                   ? (lz_i64)(-9223372036854775807LL) - 1
+                   : (lz_i64)9223372036854775807LL;
+    }
+    if (sh >= 0) r = (lz_i64)(lz_u64)sig << sh;
+    else         r = (lz_i64)(sig >> (-sh));
+    return (ua.u & 0x80000000u) ? -r : r;
 }
 
 /* ------------------------------------------------------------------ */

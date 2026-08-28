@@ -16,7 +16,16 @@
 # The engine body. net/http/openai are the server and are deliberately
 # NOT here: they are not in the CLI or DOS binary either, and there are
 # no sockets on the target machines.
-ENG := err compat lfn json safetensors model ops ops_kernel ops_rope ops_moe ops_epi ops_quant ops_sched ops_matmul ops_t2_arm ops_arm ops_t2_scalar ops_norm ops_gdn ops_conv1d fwht forward forward_attn forward_moe forward_ssm forward_kda sampler generate lz_mathf \
+# lz_bf16 IS IN THE SHARED LIST, unlike lz_softfp, and the difference is
+# not an oversight. lz_softfp.c is ARM-only by construction - its body is
+# #if __arm__ && __GNUC__ and it exists to replace libgcc routines no
+# other target calls - so build/arm/build_engine.sh appends it alone.
+# lz_bf16.c has a portable C core with an ARM fast path bolted on, and
+# EVERY target is meant to run it: the shipping build has no hardware
+# bf16 anywhere, x86 included, so that one arithmetic serves all of them
+# and an ARM run stays byte-comparable with an x86 one. The compiler's
+# __bf16 appears only in build/bf16_native_probe.c, as a witness.
+ENG := err compat lfn json safetensors model ops ops_kernel ops_rope ops_moe ops_epi ops_quant ops_sched ops_matmul ops_t2_arm ops_arm ops_t2_scalar ops_norm ops_gdn ops_conv1d fwht forward forward_attn forward_moe forward_ssm forward_kda sampler generate lz_mathf lz_bf16 \
        tokenizer unicode chat gbk cpucheck
 SRV := net http openai
 GUI := main layout localized_strings worker modelload session compat40 \
@@ -626,7 +635,7 @@ watcom-gui:
 # nested inside another comment; gcc said so on every build and `check`
 # reported 16 PASS over it. Having a caller somewhere is not the test -
 # being reachable from what people actually run is.
-check: bare-endif-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate dedupe-gate mm-alias-gate c89-floor-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate kernel-matrix-gate
+check: bare-endif-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate softfp-gate dedupe-gate mm-alias-gate c89-floor-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate kernel-matrix-gate
 
 # Zero gcc warnings, asserted rather than printed. The Watcom side has
 # always been counted ("N lines, 0 warnings, 0 errors", per file); this
@@ -780,6 +789,19 @@ f32count-billing-gate:
 .PHONY: fp-exception-gate
 fp-exception-gate:
 	@bash build/fp_exception_gate.sh
+
+# Compiles and runs a probe, so it sits with the other build-and-run
+# gates rather than the source-shape ones. Skips where __bf16 is absent.
+.PHONY: bf16-native-gate
+bf16-native-gate:
+	@bash build/bf16_native_gate.sh
+
+# Every operator src/lz_softfp.c exports, against libgcc's own, under
+# qemu - plus an assertion that none escaped the comparison, which is
+# the half that matters. Skips without the ARM cross toolchain.
+.PHONY: softfp-gate
+softfp-gate:
+	@bash build/arm/softfp_gate.sh
 
 .PHONY: dedupe-gate
 dedupe-gate:
