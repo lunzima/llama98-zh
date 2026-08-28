@@ -879,6 +879,12 @@ bf16-store-gate:
 lz4-model-gate:
 	@bash build/lz4_model_gate.sh "$(MODEL)"
 
+# A third opinion on lz_bf16.c, from PyTorch. ci.sh-only: torch is not
+# a build dependency, and a SKIP in `check` would read as a pass.
+.PHONY: bf16-torch-gate
+bf16-torch-gate:
+	@bash build/bf16_torch_gate.sh
+
 .PHONY: dedupe-gate
 dedupe-gate:
 	@bash build/dedupe_gate.sh

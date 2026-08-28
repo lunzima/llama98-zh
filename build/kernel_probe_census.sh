@@ -1,8 +1,9 @@
 #!/bin/bash
 # Which hand-written kernels has NOTHING ever run?
 #
-# Iron law two says a SIMD kernel is written twice and the two must agree
-# bit for bit. That claim is worth exactly what the check behind it is,
+# A SIMD kernel is written twice - assembly and intrinsics - and the two
+# must agree bit for bit. That claim is worth exactly what the check
+# behind it is,
 # and the checks are scattered across build/*_probe.c, .prof/*_xcheck.c
 # and the end-to-end gates. Nothing added them up, so the answer was
 # reached by remembering - and remembering got it wrong twice in one

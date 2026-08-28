@@ -806,7 +806,17 @@ static int sf_f32_cmp_lt(uint32_t a, uint32_t b) {
 
 /* EABI C-language compare: -1/0/1 like __cmpsf2, with the same NaN
    convention (unordered -> 1). Used by __aeabi_cfcmpeq/cfrcmple, whose
-   EABI contract is to set CPSR flags, not return the relation. */
+   EABI contract is to set CPSR flags, not return the relation.
+
+   NOT WORTH OPTIMISING, and the number rather than the impression says
+   so. An audit proposed marking sf_f32_cmp_lt always_inline to save the
+   BL and return below, at the price of duplicating its ~35-instruction
+   body. Counting BLs in the linked ARM binary: __aeabi_cfcmpeq 0 sites,
+   __aeabi_cfrcmple 0. Nothing in this engine reaches either, so nothing
+   reaches here - gcc emits the value-returning fcmp* family instead
+   (fcmpgt 95 sites, fcmplt 54, fcmpeq 36, fcmple 30, fcmpge 25). The
+   two exist to satisfy the EABI, not because the compiler wants them.
+   `used` is what keeps this one linked at all. */
 static int sf_fcmp_rel(uint32_t a, uint32_t b) __attribute__((used));
 static int sf_fcmp_rel(uint32_t a, uint32_t b) {
     if (sf_f32_is_nan(a) || sf_f32_is_nan(b)) return 1;  /* unordered */
@@ -1055,11 +1065,20 @@ float __aeabi_i2f(int a) {
        libgcc's shared i2f/ui2f/l2f tail is 20 on BOTH branches (it feeds
        the 32-bit value through the 64-bit l2f path with the low word
        zeroed), so this wins the small-magnitude branch by 6 and loses
-       the rounding branch by 2. Which one dominates depends on the
-       magnitude distribution of the engine's int-to-float traffic, which
-       has not been measured - indices and counts are mostly well under
-       2^24, so the cheap branch is probably the common one, but that is
-       an expectation and not a number. */
+       the rounding branch by 2.
+
+       WHICH DOMINATES IS NOW MEASURED, and it is not close: instrumenting
+       this entry and running the zh fixture (kmr20, 8 tokens) counted
+       647,458 conversions with |v| < 2^24 against 68 without - 99.99%
+       take the cheap branch. The average is therefore 22 - 8*0.9999 =
+       14.0 instructions against libgcc's flat 20.
+
+       That reverses an audit's tentative recommendation to adopt
+       libgcc's single-shape tail here: it would trade a 6-instruction
+       win on essentially all traffic for a 2-instruction win on one call
+       in ten thousand. The distribution is not an accident either -
+       every call site is a dimension, an index, a loop bound or a
+       quantised value, and none of those reach 16 million. */
     return lz_i32f_arm_asm(a);
 }
 
@@ -1151,44 +1170,48 @@ __attribute__((naked)) float __aeabi_l2f(lz_i64 a) {
    saturate on |a| >= 2^31, NaN -> 0. Ported structure of libgcc's 23-insn
    __aeabi_f2iz (the constants are IEEE-derived). FALLS THROUGH to the C
    return (no bx lr) so it is safe to inline. ~25 insns. */
-static __inline__ int32_t sf_f2iz_arm_asm(uint32_t u) {
-    int32_t r;
-    uint32_t e, m, t;
-    __asm__(
-        "mov    %[e], %[u], lsl #1\n\t"      /* |u|<<1: exp at 31:24 */
-        "cmp    %[e], #0x7F000000\n\t"
-        "movcc  %[r], #0\n\t"
-        "bcc    9f\n\t"                      /* |a| < 1: 0 */
-        "mov    %[t], #158\n\t"
-        "subs   %[e], %[t], %[e], lsr #24\n\t" /* e = 158 - exp */
-        "bls    2f\n\t"                      /* exp >= 158: overflow/inf/nan */
-        "mov    %[m], %[u], lsl #8\n\t"
-        "orr    %[m], %[m], #0x80000000\n\t" /* sig<<8 | implicit at 31 */
-        "tst    %[u], #0x80000000\n\t"
-        "lsr    %[r], %[m], %[e]\n\t"
-        "rsbne  %[r], %[r], #0\n\t"          /* truncate, negate if negative */
-        "b      9f\n\t"
-        "2:\n\t"                             /* exp in [158, 255] */
-        "cmn    %[e], #97\n\t"               /* e == -97 (exp 255)? */
-        "bne    3f\n\t"
-        "lsls   %[m], %[u], #9\n\t"          /* mantissa bit 31 */
-        "bne    4f\n\t"                      /* NaN: 0 */
-        "3:\n\t"                             /* inf or |a| >= 2^31: saturate */
-        "ands   %[r], %[u], #0x80000000\n\t"
-        "mvneq  %[r], #0x80000000\n\t"       /* INT_MIN / INT_MAX */
-        "b      9f\n\t"
-        "4:\n\t"
-        "mov    %[r], #0\n\t"                /* NaN */
-        "9:\n\t"
-        : [r] "=&r"(r), [e] "=&r"(e), [m] "=&r"(m), [t] "=&r"(t)
-        : [u] "r"(u)
-        : "cc");
-    return r;
-}
+/* NAKED, and in libgcc's own layout, which is worth three instructions
+   on the taken path - 15 down to 12. All three came from the wrapper
+   rather than the algorithm, which was already a faithful port:
 
-int __aeabi_f2iz(float a) {
-    union { float f; uint32_t u; } ua; ua.f = a;
-    return sf_f2iz_arm_asm(ua.u);
+     - gcc bound the inline-asm input to a fresh register and emitted a
+       `mov r3, r0` to get there. A naked function reads r0 directly.
+     - `movcc r, #0` ran on EVERY call, predicated false on all but the
+       |a| < 1 case. libgcc puts the `mov r0, #0` at the branch target,
+       where only that case pays for it.
+     - the arms branched to one shared exit. Each returns where it is
+       now, which a naked function can do and a managed one cannot -
+       `bx lr` from inside a normal function would skip the epilogue.
+
+   Argument in r0 by the soft-float ABI, result in r0. r1-r3 and ip are
+   call-clobbered, so nothing needs saving. */
+__attribute__((naked)) int __aeabi_f2iz(float a) {
+    __asm__(
+        "mov    r1, r0, lsl #1\n\t"
+        "cmp    r1, #0x7F000000\n\t"
+        "bcc    5f\n\t"
+        "mov    r2, #158\n\t"
+        "subs   r1, r2, r1, lsr #24\n\t"
+        "bls    2f\n\t"
+        "mov    r3, r0, lsl #8\n\t"
+        "orr    r3, r3, #0x80000000\n\t"
+        "tst    r0, #0x80000000\n\t"
+        "lsr    r0, r3, r1\n\t"
+        "rsbne  r0, r0, #0\n\t"
+        "bx     lr\n\t"
+        "2:\n\t"
+        "cmn    r1, #97\n\t"
+        "bne    3f\n\t"
+        "lsls   r3, r0, #9\n\t"
+        "bne    5f\n\t"
+        "3:\n\t"
+        "ands   r0, r0, #0x80000000\n\t"
+        "mvneq  r0, #0x80000000\n\t"
+        "bx     lr\n\t"
+        "5:\n\t"
+        "mov    r0, #0\n\t"
+        "bx     lr\n\t"
+    );
 }
 
 /* __aeabi_f2lz: float to signed 64-BIT integer. The `l` in the EABI's

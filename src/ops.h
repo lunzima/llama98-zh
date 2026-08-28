@@ -561,9 +561,11 @@ const char *lz_fastfp_select(const char *name);
 int lz_fastfp(void);
 
 /* bf16 WEIGHT STORAGE: 1 = keep a BF16 tensor at two bytes per element
-   and widen it on read, 0 = expand it to f32 while loading. DEFAULT ON,
-   which is unusual for a knob in this file and is justified by the one
-   property the other knobs do not have: it changes nothing. A bf16 is
+   and widen it on read, 0 = expand it to f32 while loading. DEFAULT ON
+   ON A TARGET WITH NO FPU, off elsewhere - see ops_sched.c for the
+   measurement behind that split. Per-target defaults are safe here and
+   would not be for any other knob in this file, because of the one
+   property the others do not have: it changes nothing. A bf16 is
    the high half of an f32, so the widening is `bits << 16` - the very
    operation model.c used to perform at load time - and every value the
    kernels see is identical either way. What changes is that the tensor

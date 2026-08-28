@@ -535,11 +535,37 @@ static void apply_row_penalties_assumed(const LZSampler *samp, const int *draft,
    allocation that comment refuses. All float via lz_mathf: the float
    transcendentals are bit-identical between x86-64 (SSE) and ARMv5TE
    (soft-float), which libm's exp/log (glibc vs libgcc) are not. */
+/* lz_exp, NOT lz_expf, and the swap is measured rather than assumed.
+   This runs once per VOCABULARY ENTRY per lookahead step - with
+   --lookahead 4:4 that is 32,768 x 16 exponentials a token - and it was
+   calling the musl port while select_topk_exp, two functions away, uses
+   the engine's own dispatcher on the same softmax shape. Nothing
+   explained the difference.
+
+   WHAT IT COSTS IN ACCURACY, over the domain a softmax actually uses
+   (every argument <= 0 after the maximum is subtracted), 90,001 points
+   from 0 to -90: the SUM differs by 7.1e-07 relative, and the log of
+   the sum - which is what this returns - by 7e-10 absolute. The worst
+   single-point relative error is 1.0, at x = -73.5, where one of the
+   two has already flushed to zero and the other has not; those terms
+   are around 1e-32 and contribute nothing to the sum they are in.
+
+   AND WHAT IT COSTS IN OUTPUT: nothing measurable. Generating from a
+   fixed prompt and seed with --lookahead 4:4 produces character-for-
+   character the same text either way. That is the test that matters
+   here, because this value only ever ranks candidates.
+
+   THE NLL LOOP IN cli_main.c IS DELIBERATELY NOT CHANGED, though it has
+   the identical shape and the identical argument. It is a MEASUREMENT
+   path: its output is compared against numbers recorded by earlier
+   runs, and moving it by 7e-10 would silently invalidate that
+   comparison for a speedup on a path that only runs when someone asks
+   for a measurement. Same arithmetic, different job. */
 static float lz_look_lse(const float *l, int n) {
     float mx = l[0], sum = 0.0f;
     int i;
     for (i = 1; i < n; i++) if (l[i] > mx) mx = l[i];
-    for (i = 0; i < n; i++) sum += lz_expf(l[i] - mx);
+    for (i = 0; i < n; i++) sum += lz_exp(l[i] - mx);
     return mx + lz_logf(sum);
 }
 

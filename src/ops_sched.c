@@ -264,12 +264,39 @@ const char *lz_fastfp_select(const char *name) {
 
 int lz_fastfp(void) { return lz_fastfp_g; }
 
-/* DEFAULT ON, unlike every other knob here, because it is the only one
-   that changes no number - see the note in ops.h. Off puts a BF16
-   tensor back on the expand-at-load path, which is what a parity
-   comparison needs when it has to ask whether the storage change was
-   involved. */
+/* DEFAULT ON WHERE THERE IS NO FPU, OFF WHERE THERE IS, and the split is
+   measured rather than assumed. Widening a stored bf16 costs about five
+   integer instructions per element. What that is worth depends entirely
+   on what it is being compared against:
+
+     ARM soft-float   a MAC is __aeabi_fmul (33) + __aeabi_fadd (64),
+                      so the widening is ~5% on top - and the tensor
+                      occupies half the RAM, on a 64MB part whose
+                      bottleneck is DDR. Clearly worth it.
+     x86 with SSE     a MAC is a vector instruction, and the widening
+                      loop is scalar. Measured on cpt100m-frozen, 60
+                      tokens: 12.6 ms/token expanded against 37.5
+                      ms/token widened-on-read. THREE TIMES slower, to
+                      save memory a desktop does not need.
+
+   Loading is faster either way (189 ms against 213 ms for one token,
+   half the bytes read), so this is a forward-pass trade, not a load one.
+
+   PER-TARGET DEFAULTS ARE SAFE HERE, which they would not be for any
+   other knob in this file: the widening is lossless - `bits << 16`, the
+   same value the expand-at-load path produces - so an x86 run with it
+   off and an ARM run with it on still produce identical logits.
+   build/bf16_store_gate.sh asserts exactly that equality, and
+   build/arm/parity_gate.sh compares the two targets. A knob that
+   changed results could not do this.
+
+   Either target can be told otherwise with --bf16-store; the switch is
+   not target-locked, only its default is. */
+#if defined(__arm__) || defined(LZ_NO_FPU)
 int lz_bf16_store_g = 1;
+#else
+int lz_bf16_store_g = 0;
+#endif /* __arm__ || LZ_NO_FPU */
 
 const char *lz_bf16_store_select(const char *name) {
     if (!name) return NULL;
