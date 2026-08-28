@@ -10,7 +10,7 @@
    this whole file's correctness hinges on is not buried in an if. */
 #define LZ_CP_GBK 936
 
-char **lz_gbk_argv_convert(int cp, int argc, char **argv) {
+char **lz_argv_gbk_to_utf8(int cp, int argc, char **argv) {
     char **out;
     int i, j;
 

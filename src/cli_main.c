@@ -456,10 +456,10 @@ static void usage(void) {
     "                   build/fp_exception_gate.sh.\n"
     "  --bf16-store M   on|off (default: on where there is no FPU,\n"
     "                   off where there is - see ops_sched.c). Keeps\n"
-    "                   BF16 tensors at two \n"
-    "                   bytes per element and widen on read, instead of\n"
-    "                   expanding them to f32 while loading. Halves what\n"
-    "                   the weights occupy and what reading them costs in\n"
+    "                   BF16 tensors at two bytes per element and\n"
+    "                   widens on read, instead of expanding them to\n"
+    "                   f32 while loading. Halves what the weights\n"
+    "                   occupy and what reading them costs in\n"
     "                   memory bandwidth. Changes NO number: a bf16 is\n"
     "                   the high half of an f32, so the widening is the\n"
     "                   same shift the loader used to do. `off` exists\n"
@@ -1021,7 +1021,7 @@ static void cli_print_sampling(const LZGenOpts *g) {
    Correct and kept for gcc, which targets real Windows NT here; NOT
    used for Watcom, which is what ships to Win98.
 
-   Watcom: lz_gbk_argv_convert (src/cli_argv.c/.h), gated on
+   Watcom: lz_argv_gbk_to_utf8 (src/cli_argv.c/.h), gated on
    GetACP() == 936, below main(). Narrow argv IS the OS's canonical
    command line down-converted to the current ANSI code page - measured
    directly, not assumed: a one-line argv-dumping probe, built with this
@@ -1182,7 +1182,7 @@ int main(int argc, char **argv) {
     {   /* Same fallback stance as the gcc branch above: NULL (any code
            page other than 936) leaves argv exactly as the CRT built it,
            which is today's long-standing behaviour, not a regression. */
-        char **conv = lz_gbk_argv_convert(GetACP(), argc, argv);
+        char **conv = lz_argv_gbk_to_utf8(GetACP(), argc, argv);
         if (conv) argv = conv;
     }
 #elif defined(__DOS__)
@@ -1200,7 +1200,7 @@ int main(int argc, char **argv) {
            not necessarily set. The
            honest statement is "this build assumes a GBK console on
            DOS", which is what LZ_CONSOLE_GBK_DEFAULT already says and
-           what --console overrides. lz_gbk_argv_convert returns NULL
+           what --console overrides. lz_argv_gbk_to_utf8 returns NULL
            for anything but 936, so this stays a single-code-page path
            by its own contract, not by accident. */
         /* Only when argv is NOT already UTF-8 - see lz_utf8_valid (and
@@ -1210,7 +1210,7 @@ int main(int argc, char **argv) {
            file written by a UTF-8 shell), and the symptom is a model
            that has plainly been handed something other than what was
            typed. All-or-nothing across the whole argv, matching
-           lz_gbk_argv_convert's own shape: a command line mixing the
+           lz_argv_gbk_to_utf8's own shape: a command line mixing the
            two encodings is not a thing any single source produces. */
         int all_utf8 = 1;
         for (i = 1; i < argc; i++)
@@ -1219,7 +1219,7 @@ int main(int argc, char **argv) {
                 break;
             }
         if (g_console_gbk && !all_utf8) {
-            char **conv = lz_gbk_argv_convert(936, argc, argv);
+            char **conv = lz_argv_gbk_to_utf8(936, argc, argv);
             if (conv) argv = conv;
         }
     }

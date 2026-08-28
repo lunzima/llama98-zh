@@ -1,7 +1,20 @@
 #ifndef LZ_CLI_ARGV_H
 #define LZ_CLI_ARGV_H
 
-/* Re-decodes a Windows process's narrow argv as GBK -> UTF-8.
+/* Re-decodes a narrow argv as GBK -> UTF-8.
+ *
+ * NOT "a Windows process's", which this line said and cli_main.c:1084
+ * had already corrected in prose from the DOS side: there is no Win32
+ * in the body, and the DOS arm calls it for the same reason with a
+ * literal 936.
+ *
+ * NAMED lz_argv_*, NOT lz_gbk_*. llama98.def's "3.7.1 GBK transcoding"
+ * section makes lz_gbk_* the DLL's exported transcoder pair -
+ * lz_gbk_from_utf8 and lz_gbk_to_utf8, both in src/gbk.c, which opens
+ * "no OS calls, no allocation". This is an unexported CLI-entry helper
+ * that mallocs and leaks by design; it uses that pair, it is not one of
+ * them. The new name also says the direction, which every other member
+ * of that family does and `_convert` did not.
  *
  * Pure: takes the ANSI code page as a PARAMETER rather than calling
  * GetACP() itself, so it is testable on any machine regardless of that
@@ -21,6 +34,6 @@
  * the rest of cli_main.c's argv handling: the result lives for the life
  * of the process and a pile of `const char *` end up pointing into it.
  */
-char **lz_gbk_argv_convert(int cp, int argc, char **argv);
+char **lz_argv_gbk_to_utf8(int cp, int argc, char **argv);
 
 #endif
