@@ -73,7 +73,18 @@ files = sorted(glob.glob(os.path.join(root, "src", "*.c")) +
 for f in files:
     src, pragmas = parse(f)
     for name, body in pragmas:
-        pm = re.search(r"__parm\s*((?:\[[^\]]*\]\s*)*)", body)
+        # BOTH SPELLINGS, and the modifier words. Watcom accepts `parm`
+        # and `__parm`, optionally followed by `caller`, `routine`,
+        # `nomemory` or `reverse` before the register list. This tree
+        # uses both spellings - 22 of ops_mmx.c's are underscored and all
+        # six of ops_mmx_sse.c's are not - and lz_epi_mac_grp writes
+        # `parm caller [esi] [edi] [ecx]`. Matching only `__parm` plus an
+        # immediate bracket skipped 17 kernels and parsed a further one
+        # as having no registers at all, while the gate printed a count
+        # and passed.
+        pm = re.search(r"(?:__)?parm\s+(?:(?:caller|routine|nomemory|"
+                       r"reverse|loadds|__caller|__routine)\s+)*"
+                       r"((?:\[[^\]]*\]\s*)*)", body)
         if not pm:
             continue
         regs = [r.strip().replace("__", "") for r in
@@ -85,16 +96,28 @@ for f in files:
         seen += 1
         effective = set(regs[:n])
 
+        # ONLY THE INSTRUCTION LITERALS. The __value and __modify clauses
+        # are bracketed too - `value [edx eax]` - and scanning the whole
+        # pragma read that as a memory operand, reporting lz_i64mul32 as
+        # dereferencing edx when its body is the single insn `imul ebx`.
+        text = "\n".join(re.findall(r'"([^"]*)"', body))
+
         # Registers the body writes before any use: a base loaded inside
         # the body is legitimate even though no argument supplies it.
         written = set()
-        for line in body.split("\n"):
-            q = re.search(r'"\s*(\w+)\s+(\w+)\s*,', line)
+        for line in text.split("\n"):
+            q = re.match(r"\s*(\w+)\s+(\w+)\s*,", line)
             if q and q.group(2) in GP and q.group(1) not in ("cmp", "test"):
                 written.add(q.group(2))
+        # The stack frame is always a legitimate base. Watcom passes any
+        # argument past the end of the register list on the stack, so a
+        # body with fewer parm registers than parameters reads the rest
+        # through [esp+N] or [ebp+N] by design - lz_epi_mac_grp takes
+        # four and names three.
+        written |= {"esp", "ebp"}
 
         bases = set()
-        for line in body.split("\n"):
+        for line in text.split("\n"):
             for b in re.findall(r"\[\s*(e[a-z][a-z])", line):
                 bases.add(b)
             # [eax+edx] style: the second register is a base too.
@@ -109,7 +132,10 @@ for f in files:
             print("       %d parm register(s) listed for %d argument(s); "
                   "Watcom ignores the rest" % (len(regs), n))
             fail += 1
-        elif len(regs) != n:
+        elif len(regs) > n:
+            # MORE registers than arguments is the hazard; FEWER is
+            # ordinary stack passing and warning about it would be
+            # permanent noise on a correct kernel.
             print("  warn %s (%s): %d parm register(s) for %d argument(s) "
                   "- inert here, fatal if the spare moves left"
                   % (name, os.path.basename(f), len(regs), n))
@@ -154,5 +180,29 @@ if run_check "$W" > "$W/mut.log" 2>&1; then
     exit 1
 fi
 grep -m1 "FAIL lz_dot32_t2_asm" "$W/mut.log" | sed 's/^/  /'
-echo "aux_parm_arity_gate: PASS (mutation caught)"
+
+# ---- the same defect, in the OTHER spelling --------------------------
+# Watcom takes `parm` as well as `__parm`, and this tree uses both. The
+# first version of this gate matched only the underscored form and so
+# skipped 17 kernels - including every one in ops_mmx_sse.c - while
+# printing a count and passing. One control per spelling, because a
+# regex that stops seeing one of them fails exactly this way again.
+mkdir -p "$W/two/src" && cp src/ops_mmx_sse.c "$W/two/src/" || exit 1
+sed -i 's/parm \[eax\] \[edx\] \[ecx\] \[ebx\]/parm [edi] [eax] [edx] [ecx] [ebx]/' \
+    "$W/two/src/ops_mmx_sse.c"
+if ! grep -q "parm \[edi\] \[eax\]" "$W/two/src/ops_mmx_sse.c"; then
+    echo "aux_parm_arity_gate: FAIL - the bare-parm mutation did not apply;"
+    echo "  that spelling is unproven"
+    exit 1
+fi
+echo "-- mutation (the same, on a bare \`parm\` list) --"
+if run_check "$W/two" > "$W/mut2.log" 2>&1; then
+    cat "$W/mut2.log"
+    echo "aux_parm_arity_gate: FAIL - the gate did not see a bare \`parm\`"
+    echo "  list at all. It is skipping every kernel spelled that way."
+    exit 1
+fi
+grep -m1 "FAIL lz_matmul_row_sse_asm" "$W/mut2.log" | sed 's/^/  /'
+
+echo "aux_parm_arity_gate: PASS (both spellings' mutations caught)"
 exit 0

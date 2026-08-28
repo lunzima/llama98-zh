@@ -37,7 +37,16 @@ static void ref(const float *row, const float *x, int in_dim, float *acc8) {
 }
 
 int main(void) {
-    float row[64], x[64], a1[8], a2[8];
+    /* ALIGNED VIEWS, not bare arrays: the kernel loads row and x with
+       movaps, which faults on a misaligned address. gcc aligns these
+       stack arrays to 16 and hides the requirement; Watcom aligns them
+       to 4, so this probe died on entry and the F32 row kernel had no
+       Watcom-side check at all. Same defect as dot128_x16/q41/q61. */
+    static float buf[4 * (64 + 4)];
+    float *row = (float *)(((size_t)buf + 15) & ~(size_t)15);
+    float *x  = row + 68;
+    float *a1 = x + 68;
+    float *a2 = a1 + 68;
     long bad = 0, n = 0, moved = 0;
     int pass, d;
     static const int dims[] = { 0, 1, 7, 8, 9, 16, 24, 31, 32, 40, 64 };
