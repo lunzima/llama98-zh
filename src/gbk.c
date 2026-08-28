@@ -48,8 +48,11 @@ static void emit(char *out, int cap, int *need, int *wrote, int *full,
     *need += n;
 }
 
-/* How many bytes follow the lead byte c0, or -1 if it cannot lead. */
-static int utf8_extra(unsigned char c0) {
+/* How many bytes follow the lead byte c0, or -1 if it cannot lead.
+   Prefixed for this file: as utf8_extra it read as a member of
+   tokenizer.c's utf8_* family, and it is not one - it is static, five
+   lines, and used once twenty lines below. */
+static int gbk_utf8_extra(unsigned char c0) {
     if (c0 < 0x80) return 0;
     if ((c0 & 0xE0) == 0xC0) return 1;
     if ((c0 & 0xF0) == 0xE0) return 2;
@@ -66,7 +69,7 @@ int lz_gbk_from_utf8(const char *in, int len, char *out, int cap, int *used) {
         unsigned char c0 = b[i];
         unsigned char buf[2];
         uint32_t cp;
-        int extra = utf8_extra(c0);
+        int extra = gbk_utf8_extra(c0);
         int adv = 1, k, ok = 1;
 
         if (extra < 0) {

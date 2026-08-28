@@ -667,7 +667,7 @@ typedef int (*LZVisit)(LZModel *m, const LZStTensor *t, LZTensor *field,
                           void *ctx, char *errbuf, int errlen);
 
 static int m_uses_lz4(const LZModel *m);
-static size_t lz4d_read_void(void *ctx, void *dst, size_t sz);
+static size_t lz4_reader(void *ctx, void *dst, size_t sz);
 
 /* One tensor of the walk: resolve `name` (via the bin desc or the
    safetensors table), check its shape against `dims`, then hand it to
@@ -1242,10 +1242,10 @@ static int visit_read(LZModel *m, const LZStTensor *t, LZTensor *field,
    mul32 says whether this format also requires a multiple of 32 - the
    sub-byte packings fix their sub-blocks at 32 elements (see model.h),
    Q8_0 does not. */
-static size_t lz4d_read_void(void *ctx, void *dst, size_t sz);
+static size_t lz4_reader(void *ctx, void *dst, size_t sz);
 
 static int m_uses_lz4(const LZModel *m) {
-    return m->rd == lz4d_read_void;
+    return m->rd == lz4_reader;
 }
 
 static int read_gs(LZModel *m, uint32_t n, uint32_t *gs, int mul32) {
@@ -1492,8 +1492,14 @@ static size_t file_reader(void *ctx, void *dst, size_t sz) {
 }
 
 /* Reader-shaped adapter for lz4d_read: the LZModel reader signature takes
-   void *ctx; lz4d_read wants a LZ4Stream *. */
-static size_t lz4d_read_void(void *ctx, void *dst, size_t sz) {
+   void *ctx; lz4d_read wants a LZ4Stream *.
+
+   NAMED FOR THIS FILE, not for lz4d. It was lz4d_read_void, which put it
+   in lz4d.c's family - and it is not lz4d's: it is model.c's half of the
+   pair with file_reader above, it is static, and m_uses_lz4 identifies
+   the reader by comparing against its ADDRESS, so it could not move even
+   if the name were right. */
+static size_t lz4_reader(void *ctx, void *dst, size_t sz) {
     return lz4d_read((LZ4Stream *)ctx, dst, sz);
 }
 
@@ -1556,7 +1562,7 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
             m->bin_file = NULL;
             lz = lz4d_open(path, errbuf, errlen);
             if (!lz) return 1;
-            m->rd = lz4d_read_void;
+            m->rd = lz4_reader;
             m->rd_ctx = lz;
         } else {
             rewind(m->bin_file);     /* the 4-byte probe is the header's magic */

@@ -9,7 +9,7 @@
 - `src/lz4d.c` / `src/lz4d.h` - LZ4 frame 解压器 + 流式读取器（~300 行纯 C）
 - `make_lz4.py` - 开发机压缩工具：`model.bin` → `model.bin.lz4`
 - `src/model.c` - 读取器抽象：`LZModel.rd`/`rd_ctx`，`file_reader`（普通文件）
-  与 `lz4d_read_void`（LZ4 流）两个实现。所有 bin 路径读取（config 头、group
+  与 `lz4_reader`（LZ4 流）两个实现。所有 bin 路径读取（config 头、group
   size、张量平面）都走 `m->rd`，所以是否压缩对加载路径不可见。
 
 ## 用法

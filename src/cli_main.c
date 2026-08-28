@@ -454,7 +454,9 @@ static void usage(void) {
     "                   precondition for the ARM soft-float fast path\n"
     "                   dropping its inf/nan and overflow checks - see\n"
     "                   build/fp_exception_gate.sh.\n"
-    "  --bf16-store M   on|off (default ON). Keep BF16 tensors at two\n"
+    "  --bf16-store M   on|off (default: on where there is no FPU,\n"
+    "                   off where there is - see ops_sched.c). Keeps\n"
+    "                   BF16 tensors at two \n"
     "                   bytes per element and widen on read, instead of\n"
     "                   expanding them to f32 while loading. Halves what\n"
     "                   the weights occupy and what reading them costs in\n"
@@ -1041,9 +1043,13 @@ static void cli_print_sampling(const LZGenOpts *g) {
 
    Leaks the conversion by design: it lives as long as the process, and
    freeing it would mean tracking every const char * that points into it. */
+/* PREFIXED win32_ for two reasons. It exists only inside the guard
+   below, which the bare name did not say; and as utf8_argv it read as a
+   member of tokenizer.c's utf8_* family, which it is not - it reads the
+   Win32 command line, a CLI-entry concern, and is static. */
 #if defined(_WIN32) && !defined(__WATCOMC__)
 #include <windows.h>
-static char **utf8_argv(int *argc) {
+static char **win32_utf8_argv(int *argc) {
     LPWSTR *wargv;
     char **out;
     int n = 0, i;
@@ -1169,7 +1175,7 @@ int main(int argc, char **argv) {
            a mangled non-ASCII prompt is worse than ASCII-only, but an
            exit is worse than both. */
         int wargc = 0;
-        char **wargv = utf8_argv(&wargc);
+        char **wargv = win32_utf8_argv(&wargc);
         if (wargv && wargc > 0) { argc = wargc; argv = wargv; }
     }
 #elif defined(_WIN32) && defined(__WATCOMC__)
