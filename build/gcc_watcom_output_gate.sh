@@ -34,7 +34,28 @@ set -u
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 MODEL=${1:-}
-TOKENS=${2:-1,2,3,4,5,6,7,8}
+
+# EIGHT TOKENS WAS THE WRONG DEFAULT, and this file is the place to say
+# so because it shipped with it. src/lz_mathf.c's reduce_large defect
+# (e7b9069) diverged the two toolchains from token 125 on kmr20 and 134
+# on _armgate2, and every run shorter than that reads clean - as does
+# every run shorter than ~150 for the lz_quantize_q8_int defect
+# build/fixed_tier_xcompiler_gate.sh's header is about. A configuration
+# that has never been run long enough to diverge has not been shown
+# identical; it has only not yet been shown different. So the default is
+# the long fixture when it is there, and the second argument still
+# overrides for a quick manual poke.
+TOK_ARG=${2:-}
+LONG_FIXTURE="$ROOT/build/norm_int_gate_tokens_zh.txt"
+if [ -n "$TOK_ARG" ]; then
+    TOK_MODE="--tokens"; TOK_VAL="$TOK_ARG"
+elif [ -f "$LONG_FIXTURE" ]; then
+    TOK_MODE="--tokens-file"; TOK_VAL="$LONG_FIXTURE"
+else
+    TOK_MODE="--tokens"; TOK_VAL="1,2,3,4,5,6,7,8"
+    echo "  note: $LONG_FIXTURE is missing, falling back to 8 tokens -" \
+         "too short to expose a length-dependent divergence" >&2
+fi
 
 GBIN=""
 for c in "$ROOT/llama98.exe" "$ROOT/llama98"; do
@@ -64,7 +85,7 @@ for arm in all off; do
     for side in g w; do
         BIN=$GBIN; [ "$side" = w ] && BIN=$WBIN
         if ! ( cd "$W" && "$BIN" "$MODEL" --kernel ref --fixed "$arm" \
-                --tokens "$TOKENS" --dump-all-logits "$side.$arm.bin" ) \
+                "$TOK_MODE" "$TOK_VAL" --dump-all-logits "$side.$arm.bin" ) \
                 >"$W/$side.$arm.log" 2>&1; then
             echo "gcc_watcom_output_gate: FAIL - the $side run (--fixed $arm)" \
                  "did not finish"

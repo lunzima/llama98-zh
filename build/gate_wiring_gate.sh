@@ -120,21 +120,53 @@ caption_symmetry_gate.sh   # needs the gui build and a screen readback
 # neither is a prerequisite of check - they are precisely the case this
 # half exists to catch, and a mention-grep waves them through. Same
 # substitution the whole gate is about, one level down.
-REACHED=$(make -n check 2>/dev/null | grep -oE '[a-z0-9_]+_gate\.sh' | sort -u)
+#
+# THE DEFAULT GOAL COUNTS TOO, and leaving it out made this half wrong in
+# the accusing direction. native_obj_gate.sh is not a prerequisite of
+# `check`; it is a line in the `llama98` link recipe, so it runs on every
+# native build and `make -n check` never mentions it. Reading only check
+# would report a gate that runs constantly as one that never runs.
+REACHED=$( { make -n check 2>/dev/null; make -n 2>/dev/null; } \
+           | grep -oE '[a-z0-9_]+_gate\.sh' | sort -u)
 
 CIONLY_UNDECLARED=""
+NEVER_RUN=""
 for g in build/*_gate.sh; do
     b=$(basename "$g")
     [ "$b" = "gate_wiring_gate.sh" ] && continue
     case "
 $REACHED" in *"
 $b"*) continue ;; esac                             # reached by make check
-    grep -q "$b" build/ci.sh 2>/dev/null || continue   # already counted above
+    if ! grep -q "$b" build/ci.sh 2>/dev/null; then
+        # THE THIRD CATEGORY, and it used to `continue` past here with
+        # the comment "already counted above" - which was not true of
+        # it. The first half asks only whether the name is MENTIONED in
+        # the Makefile, so a .PHONY target that nothing depends on and
+        # nothing invokes reads as wired; this half then skipped exactly
+        # those, because they are not in ci.sh either. Between the two,
+        # a gate could be reachable, tracked, declared nowhere, and run
+        # by nothing - which is the substitution this whole gate exists
+        # to refuse, reintroduced one level up from where it refuses it.
+        # gcc_watcom_output_gate.sh sat here for two days.
+        NEVER_RUN="$NEVER_RUN $b"
+        FAIL=1
+        continue
+    fi
     case "$CI_ONLY" in
         *"$b"*) ;;
         *) CIONLY_UNDECLARED="$CIONLY_UNDECLARED $b" ;;
     esac
 done
+if [ -n "$NEVER_RUN" ]; then
+    echo "gate_wiring_gate: FAIL - has a Makefile target, but nothing runs it:"
+    for u in $NEVER_RUN; do echo "    $u"; done
+    echo "  Not a prerequisite of \`check\` and not invoked by ci.sh, so"
+    echo "  the only way it ever runs is somebody typing its target by"
+    echo "  hand. Make it a prerequisite of \`check\`, or invoke it from"
+    echo "  ci.sh and declare it in CI_ONLY, or delete it - but a gate"
+    echo "  that never runs is worse than no gate, because the wiring"
+    echo "  census counts it."
+fi
 if [ -n "$CIONLY_UNDECLARED" ]; then
     echo "gate_wiring_gate: FAIL - ci.sh-only and not declared:"
     for u in $CIONLY_UNDECLARED; do echo "    $u"; done

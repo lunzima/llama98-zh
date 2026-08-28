@@ -244,9 +244,33 @@ run_one() {
     return 0
 }
 
-# ---- baseline first, and its failure reported distinctly: every other
-# row below assumes gcc and Watcom already agree on the float path they
-# both fall back to for the axes the row under test does not touch. ----
+# ---- baseline first, and its failure reported distinctly - but NOT as a
+# reason to stop.
+#
+# This block used to `exit 1` on a baseline failure, on the stated
+# grounds that "every tier result below would be uninterpretable". That
+# was true of the TWELVE ISOLATED ROWS, each of which wrapped one tier
+# flag in --fixed off and therefore did rest on the float path being
+# sound. Those rows are gone (see the block below for where they went).
+# What is left is --fixed all and the shipping default, neither of which
+# passes an isolation flag, neither of which touches the float path, and
+# both of which are the only rows here that describe a configuration
+# anyone ships. The barrier was protecting rows that no longer exist by
+# suppressing the two that matter.
+#
+# MEASURED, not reasoned: on 2026-08-28 the baseline was red for days on
+# src/lz_mathf.c's reduce_large defect (fixed in e7b9069), and both
+# shipping rows were byte-identical across the toolchains that entire
+# time - 18,219,008 bytes at 139 tokens, then 78,905,344 and 86,507,520
+# at the full fixtures. Every one of those runs was skipped, and the
+# skip printed as a FAIL that named the float control, so nothing said
+# the shipping configuration was untested. That is the failure mode this
+# tree calls "gate passed is not gate looked", in its other direction: a
+# gate that fails without having asked.
+#
+# A red baseline is still a FAIL and still reported first, because a
+# float-tier divergence is a real defect - it is what named reduce_large.
+# It just no longer decides whether the rest runs.
 BASELINE="--fixed off"
 echo "-- baseline (float control) --"
 run_one "$BASELINE" zh "$TOK_ZH"
@@ -254,9 +278,13 @@ BASE_ZH=$?
 run_one "$BASELINE" en "$TOK_EN"
 BASE_EN=$?
 if [ "$BASE_ZH" -ne 0 ] || [ "$BASE_EN" -ne 0 ]; then
-    echo "fixed_tier_xcompiler_gate: FAIL - BASELINE (float control) diverged;" \
-         "every tier result below would be uninterpretable, not running them"
-    exit 1
+    echo "  NOTE: the float control diverged. The shipping rows below do"
+    echo "  not pass an isolation flag and do not reach the float path,"
+    echo "  so they are still run and still mean what they say - but a"
+    echo "  float-tier divergence is a defect in its own right and this"
+    echo "  gate fails on it. build/mathf_xcompiler_gate.sh narrows the"
+    echo "  most likely cause (lz_mathf, int->float feeding a multiply)"
+    echo "  in seconds instead of the ~40 minutes this run costs."
 fi
 
 # WHERE THE TWELVE ISOLATED ROWS WENT, and how to get attribution back.
@@ -292,6 +320,35 @@ TIERS_ASIS=(
     ""
 )
 for tier in "${TIERS_ASIS[@]}"; do
+    run_one "$tier" zh "$TOK_ZH"
+    run_one "$tier" en "$TOK_EN"
+done
+
+# --kernel ref, and it closes a gap rather than restating a row.
+#
+# THE CHAIN OF ASSERTIONS AND WHERE IT BROKE. Between them, this gate and
+# build/kernel_isa_identity_gate.sh assert:
+#
+#   gcc ref == gcc mmx == gcc sse2      (isa_identity, one binary)
+#   watcom ref == watcom mmx            (isa_identity, one binary)
+#   gcc default == watcom default       (the row above; both are sse2)
+#
+# from which gcc's ref tier is pinned to Watcom's DEFAULT tier - but
+# nothing pins it to Watcom's REF tier, because `watcom ref == watcom
+# sse2` is one of the four cross-rounding rows isa_identity reports as
+# INFO rather than asserting. So the scalar fallback, which is what a
+# machine with no SSE2 actually runs, had no cross-compiler assertion
+# anywhere. One row here supplies it and the transitive closure follows,
+# without touching isa_identity's INFO decision.
+#
+# NOT redundant with the default row above: both sides of that one run
+# the SSE2 kernels, so a divergence that lives in the C scalar code the
+# SIMD path replaces rather than shares - a different accumulation order
+# in a reference loop, an int->float cast the kernels do in registers -
+# is invisible to it. This row is the only place both sides run that C.
+# Costs two more full-fixture runs (~12 minutes); the tier it covers is
+# what a machine without SSE2 executes.
+for tier in "--kernel ref"; do
     run_one "$tier" zh "$TOK_ZH"
     run_one "$tier" en "$TOK_EN"
 done
