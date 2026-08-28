@@ -163,7 +163,7 @@ freshness_sentinel() {
 # ---------------------------------------------------------------------
 # Stage 1: make native (gcc)
 # ---------------------------------------------------------------------
-echo "==== [1/26]make native ===="
+echo "==== [1/28]make native ===="
 NATIVE_EXE="$ROOT/llama98.exe"
 [ -e "$NATIVE_EXE" ] || NATIVE_EXE="$ROOT/llama98"
 LOG=build/ci-native.log
@@ -202,7 +202,7 @@ rm -f "$SENTINEL"
 # Stage 2: make watcom-cli (Open Watcom, the target compiler)
 # ---------------------------------------------------------------------
 echo
-echo "==== [2/26]make watcom-cli ===="
+echo "==== [2/28]make watcom-cli ===="
 WATCOM_EXE="$ROOT/llama98-w.exe"
 WATCOM_OBJDIR="$ROOT/build/watcom/cli"
 LOG=build/ci-watcom-cli.log
@@ -254,7 +254,7 @@ rm -f "$SENTINEL"
 # Stage 3: llama98 <dir> --check on a curated set of KunMoe checkpoints
 # ---------------------------------------------------------------------
 echo
-echo "==== [3/26]model --check sweep ===="
+echo "==== [3/28]model --check sweep ===="
 MODELS_ROOT=${MODELS_ROOT:-/e/LLM/models}
 # Curated, not a blind sweep of every directory under MODELS_ROOT:
 # a usable sweep is a handful of representative checkpoints, and
@@ -301,7 +301,7 @@ fi
 # Stage 4: x86 <-> ARMv5TE parity gate
 # ---------------------------------------------------------------------
 echo
-echo "==== [4/26]ARM parity gate ===="
+echo "==== [4/28]ARM parity gate ===="
 ARM_MODEL="$MODELS_ROOT/kunkun98-pilot-20260806"
 LOG=build/ci-arm.log
 if [ "$native_ok" -ne 1 ]; then
@@ -336,7 +336,7 @@ fi
 # Stage 5: control-switch matrix (every non-default value, gcc + Watcom)
 # ---------------------------------------------------------------------
 echo
-echo "==== [5/26]control-switch matrix ===="
+echo "==== [5/28]control-switch matrix ===="
 LOG=build/ci-switch-matrix.log
 build/switch_matrix_gate.sh >"$LOG" 2>&1
 MATRIX_RC=$?
@@ -364,7 +364,7 @@ esac
 # Stage 6: every fixed-point write tier's gcc<->Watcom bit-identity
 # ---------------------------------------------------------------------
 echo
-echo "==== [6/26]fixed-tier cross-compiler gate ===="
+echo "==== [6/28]fixed-tier cross-compiler gate ===="
 LOG=build/ci-fixed-tier-xcompiler.log
 build/fixed_tier_xcompiler_gate.sh >"$LOG" 2>&1
 NIX_RC=$?
@@ -396,7 +396,7 @@ esac
 # compile-time-off in the same compiler, where it is not.
 # ---------------------------------------------------------------------
 echo
-echo "==== [7/26]recurrence float-arm gate ===="
+echo "==== [7/28]recurrence float-arm gate ===="
 LOG=build/ci-recur-write-float-arm.log
 build/recur_write_float_arm_gate.sh >"$LOG" 2>&1
 NIX_RC=$?
@@ -426,7 +426,7 @@ esac
 # separate delivery decision); none of the three is in ci.sh's stage 2.
 # ---------------------------------------------------------------------
 echo
-echo "==== [8/26]watcom gui/dll/dos targets ===="
+echo "==== [8/28]watcom gui/dll/dos targets ===="
 for t in watcom-gui watcom-dll watcom-dos; do
     case $t in
         watcom-gui) EXE="$ROOT/kunkun98-w.exe" ;;
@@ -463,7 +463,7 @@ done
 # as its only float unit. SKIP when WSL is not usable, never PASS.
 # ---------------------------------------------------------------------
 echo
-echo "==== [9/26]32-bit x87 gcc build (WSL) ===="
+echo "==== [9/28]32-bit x87 gcc build (WSL) ===="
 LOG=build/ci-x87.log
 # WHICH compiler, not whether `gcc` happens to be the one. Ubuntu ships
 # gcc-N-multilib per version, so a box can have working 32-bit support
@@ -526,7 +526,7 @@ fi
 # MIPS cross toolchain is absent, never PASS.
 # ---------------------------------------------------------------------
 echo
-echo "==== [10/26]big-endian parity gate (WSL) ===="
+echo "==== [10/28]big-endian parity gate (WSL) ===="
 LOG=build/ci-endian.log
 if ! command -v wsl >/dev/null 2>&1; then
     echo "SKIP: big-endian parity gate (wsl not installed)"
@@ -570,7 +570,7 @@ fi
 # them the two easiest knobs to break silently.
 # ---------------------------------------------------------------------
 echo
-echo "==== [11/26]performance-knob invariance ===="
+echo "==== [11/28]performance-knob invariance ===="
 LOG=build/ci-perf-knob.log
 build/perf_knob_gate.sh "$ARM_MODEL" >"$LOG" 2>&1
 PK_RC=$?
@@ -612,7 +612,7 @@ esac
 # (build/kv_rot_gate.sh <model>) to cover that side.
 # ---------------------------------------------------------------------
 echo
-echo "==== [12/26]--kv-rot quality gate ===="
+echo "==== [12/28]--kv-rot quality gate ===="
 LOG=build/ci-kv-rot.log
 build/kv_rot_gate.sh "$ARM_MODEL" >"$LOG" 2>&1
 KR_RC=$?
@@ -646,7 +646,7 @@ esac
 # matrix's switches had a standing gate that ran their build.
 # ---------------------------------------------------------------------
 echo
-echo "==== [13/26] int-pipeline control arms ===="
+echo "==== [13/28] int-pipeline control arms ===="
 LOG=build/ci-int-pipeline-arms.log
 build/int_pipeline_arm_gate.sh >"$LOG" 2>&1
 IPA_RC=$?
@@ -680,7 +680,7 @@ esac
 # --kernel-matrix against what its macros actually define.
 # ---------------------------------------------------------------------
 echo
-echo "==== [14/26]kernel coverage matrix ===="
+echo "==== [14/28]kernel coverage matrix ===="
 LOG=build/ci-kernel-matrix.log
 build/kernel_matrix_gate.sh >"$LOG" 2>&1
 KMX_RC=$?
@@ -722,7 +722,7 @@ esac
 # half runs on one fixture.
 # ---------------------------------------------------------------------
 echo
-echo "==== [15/26]kernel ISA identity ===="
+echo "==== [15/28]kernel ISA identity ===="
 LOG=build/ci-kernel-isa.log
 build/kernel_isa_identity_gate.sh >"$LOG" 2>&1
 KID_RC=$?
@@ -762,7 +762,7 @@ esac
 # lands.
 # ---------------------------------------------------------------------
 echo
-echo "==== [16/26]SubLN activation path ===="
+echo "==== [16/28]SubLN activation path ===="
 LOG=build/ci-subn.log
 build/subn_gate.sh >"$LOG" 2>&1
 SUBN_RC=$?
@@ -798,7 +798,7 @@ esac
 # against the CLI's -O3.
 # ---------------------------------------------------------------------
 echo
-echo "==== [17/26]gui/CLI engine flag parity ===="
+echo "==== [17/28]gui/CLI engine flag parity ===="
 LOG=build/ci-flagparity.log
 build/gcc_flag_parity_gate.sh >"$LOG" 2>&1
 FLAGP_RC=$?
@@ -836,7 +836,7 @@ esac
 # criterion that could see it.
 # ---------------------------------------------------------------------
 echo
-echo "==== [18/26]caption bar symmetry ===="
+echo "==== [18/28]caption bar symmetry ===="
 LOG=build/ci-capsym.log
 build/caption_symmetry_gate.sh >"$LOG" 2>&1
 CAPSYM_RC=$?
@@ -872,7 +872,7 @@ esac
 # regression this catches.
 # ---------------------------------------------------------------------
 echo
-echo "==== [19/26]comment phrasing ratchet ===="
+echo "==== [19/28]comment phrasing ratchet ===="
 LOG=build/ci-changelog.log
 build/changelog_comment_gate.sh >"$LOG" 2>&1
 CHLOG_RC=$?
@@ -901,7 +901,7 @@ esac
 # touch them.
 # ---------------------------------------------------------------------
 echo
-echo "==== [20/26]string table order ===="
+echo "==== [20/28]string table order ===="
 LOG=build/ci-strtbl.log
 build/str_table_order_gate.sh >"$LOG" 2>&1
 STRTBL_RC=$?
@@ -930,7 +930,7 @@ esac
 # a wrong number - and every stage above this one runs on x86.
 # ---------------------------------------------------------------------
 echo
-echo "==== [21/26]unaligned access (UBSan, WSL) ===="
+echo "==== [21/28]unaligned access (UBSan, WSL) ===="
 LOG=build/ci-align.log
 build/align_gate.sh >"$LOG" 2>&1
 ALIGN_RC=$?
@@ -960,7 +960,7 @@ esac
 # redden until something had gone badly wrong.
 # ---------------------------------------------------------------------
 echo
-echo "==== [22/26]code size ===="
+echo "==== [22/28]code size ===="
 LOG=build/ci-codesize.log
 build/codesize_gate.sh >"$LOG" 2>&1
 SIZE_RC=$?
@@ -994,7 +994,7 @@ esac
 # to two. No other stage counts the knobs.
 # ---------------------------------------------------------------------
 echo
-echo "==== [23/26]float knob count ===="
+echo "==== [23/28]float knob count ===="
 LOG=build/ci-floatknob.log
 build/float_knob_gate.sh >"$LOG" 2>&1
 FKNOB_RC=$?
@@ -1033,7 +1033,7 @@ esac
 # measuring anything when this stage was written.
 # ---------------------------------------------------------------------
 echo
-echo "==== [24/26]per-operator cross-checks ===="
+echo "==== [24/28]per-operator cross-checks ===="
 LOG=build/ci-xcheck.log
 build/xcheck_gate.sh >"$LOG" 2>&1
 XCHK_RC=$?
@@ -1068,7 +1068,7 @@ esac
 # looked at by hand.
 # ---------------------------------------------------------------------
 echo
-echo "==== [25/26]gcc build warnings ===="
+echo "==== [25/28]gcc build warnings ===="
 LOG=build/ci-gccwarn.log
 build/gcc_warning_gate.sh >"$LOG" 2>&1
 GCCW_RC=$?
@@ -1096,7 +1096,7 @@ esac
 # Stage 26: every quantised matmul reaches a tiered kernel
 # ---------------------------------------------------------------------
 echo
-echo "==== [26/26]tier reach ===="
+echo "==== [26/28]tier reach ===="
 LOG=build/ci-tierreach.log
 build/tier_reach_gate.sh "$MODELS_ROOT/kmr20" >"$LOG" 2>&1
 TIER_RC=$?
@@ -1116,6 +1116,53 @@ case $TIER_RC in
     *)
         echo "FAIL: tier reach"
         note "FAIL  tier reach"
+        FAIL=$((FAIL + 1))
+        ;;
+esac
+
+# ---------------------------------------------------------------------
+# Stage 27: #pragma aux argument registers match what the body reads
+# ---------------------------------------------------------------------
+echo
+echo "==== [27/28]aux parm ===="
+LOG=build/ci-auxparm.log
+build/aux_parm_arity_gate.sh >"$LOG" 2>&1
+APARM_RC=$?
+cat "$LOG"
+if [ $APARM_RC -eq 0 ]; then
+    echo "PASS: aux parm"
+    note "PASS  aux parm"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: aux parm"
+    note "FAIL  aux parm"
+    FAIL=$((FAIL + 1))
+fi
+
+# ---------------------------------------------------------------------
+# Stage 28: the last commit did not change what a kernel computes
+# ---------------------------------------------------------------------
+echo
+echo "==== [28/28]aux equiv ===="
+LOG=build/ci-auxequiv.log
+build/aux_equiv_gate.sh >"$LOG" 2>&1
+AEQ_RC=$?
+cat "$LOG"
+case $AEQ_RC in
+    0)
+        echo "PASS: aux equiv"
+        note "PASS  aux equiv"
+        PASS=$((PASS + 1))
+        ;;
+    2)
+        REASON=$(grep -m1 'SKIP' "$LOG")
+        echo "SKIP: aux equiv ($REASON)"
+        note "SKIP  aux equiv ($REASON)"
+        SKIP=$((SKIP + 1))
+        ;;
+    *)
+        echo "FAIL: aux equiv"
+        note "FAIL  aux equiv"
         FAIL=$((FAIL + 1))
         ;;
 esac

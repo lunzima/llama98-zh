@@ -40,7 +40,7 @@
 # anywhere, so one arithmetic serves all targets and an ARM run stays
 # byte-comparable with an x86 one. The compiler's own __bf16 appears
 # only in build/bf16_native_probe.c, as a witness and never a component.
-ENG := err compat lfn json safetensors model ops ops_kernel ops_rope ops_moe ops_epi ops_quant ops_sched ops_matmul ops_t2_arm ops_arm ops_t2_scalar ops_norm ops_gdn ops_conv1d fwht forward forward_attn forward_moe forward_ssm forward_kda sampler generate lz_mathf lz_bf16 \
+ENG := err compat lfn json safetensors model ops ops_kernel ops_rope ops_moe ops_epi ops_quant ops_sched ops_matmul ops_t2_arm ops_arm ops_t2_scalar ops_norm ops_gdn ops_conv1d fwht forward forward_attn forward_moe forward_ssm forward_kda sampler generate lz_mathf lz_bf16 lz4d \
        tokenizer unicode chat gbk cpucheck
 SRV := net http openai
 GUI := main layout localized_strings worker modelload session compat40 \
@@ -206,32 +206,63 @@ HOT_GCC_GUI_COM_OBJS    := $(addprefix build/gui/,$(addsuffix .o,$(HOT_COM)))
 HOT_GCC_NATIVE_OBJS     := $(HOT_GCC_NATIVE_ENG_OBJS) $(HOT_GCC_NATIVE_COM_OBJS)
 HOT_GCC_GUI_OBJS        := $(HOT_GCC_GUI_ENG_OBJS) $(HOT_GCC_GUI_COM_OBJS)
 
+# -MMD -MP ON EVERY OBJECT RULE, and it is not a tidiness change.
+#
+# These rules used to depend on the .c alone. A header could change the
+# LAYOUT of a struct all of them read - LZTensor, LZModel - and make
+# would rebuild nothing, because no .c had changed. The link then put
+# objects compiled against two different definitions of the same struct
+# into one binary. That is not a compile error and not a link error; it
+# is a program reading the wrong field offsets, which fails somewhere
+# else entirely and looks nothing like a build problem.
+#
+# NOT HYPOTHETICAL - it cost most of 2026-08-28. Adding rd/rd_ctx to
+# LZModel for the compressed-model reader, and a dtype to the tensor
+# format, left the engine loading a model and then dying in the forward
+# pass with a checksum that looked like arithmetic gone wrong. Every
+# diagnosis pointed at the source, because the same files compiled by a
+# single gcc command worked - at -O0, at -O2 and at -Os - so it read
+# like an optimiser or undefined-behaviour bug. It was stale objects,
+# and make was green throughout, correctly believing it had nothing to
+# do. `make clean` did not help either: it did not remove build/native.
+#
+# The -include is a wildcard rather than named files, so a tree with no
+# .d yet builds and generates them as it goes. -MP emits a phony target
+# per header, which keeps make from failing outright when one is
+# renamed or deleted.
+DEPFLAGS := -MMD -MP
+
+# The generated dependencies. Wildcard, so this is a no-op on a tree
+# that has not built yet and picks them up as they appear.
+-include $(wildcard build/native/*.d) $(wildcard build/gui/*.d)
+
+
 build/native/%.o: src/%.c
 	@mkdir -p build/native
-	$(CC) $(X86_64_HOT_CFLAGS) -mmmx -msse -msse2 -c -o $@ $<
+	$(CC) $(X86_64_HOT_CFLAGS) $(DEPFLAGS) -mmmx -msse -msse2 -c -o $@ $<
 
 build/gui/%.o: src/%.c
 	@mkdir -p build/gui
-	$(CC) $(X86_64_HOT_CFLAGS) -mmmx -msse -msse2 -c -o $@ $<
+	$(CC) $(X86_64_HOT_CFLAGS) $(DEPFLAGS) -mmmx -msse -msse2 -c -o $@ $<
 
 # Static-pattern rules (explicit, so they beat the MMX pattern rules
 # above for these files) compile the hot TUs at -O2. They carry no
 # -mmmx/-msse/-msse2: those are for $(ENG_MMX) only.
 $(HOT_GCC_NATIVE_ENG_OBJS): build/native/%.o: src/%.c
 	@mkdir -p build/native
-	$(CC) $(X86_64_HOT_CFLAGS) -c -o $@ $<
+	$(CC) $(X86_64_HOT_CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(HOT_GCC_NATIVE_COM_OBJS): build/native/%.o: common/%.c
 	@mkdir -p build/native
-	$(CC) $(X86_64_HOT_CFLAGS) -Icommon -c -o $@ $<
+	$(CC) $(X86_64_HOT_CFLAGS) $(DEPFLAGS) -Icommon -c -o $@ $<
 
 $(HOT_GCC_GUI_ENG_OBJS): build/gui/%.o: src/%.c
 	@mkdir -p build/gui
-	$(CC) $(X86_64_HOT_CFLAGS) -c -o $@ $<
+	$(CC) $(X86_64_HOT_CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(HOT_GCC_GUI_COM_OBJS): build/gui/%.o: common/%.c
 	@mkdir -p build/gui
-	$(CC) $(X86_64_HOT_CFLAGS) -Icommon -c -o $@ $<
+	$(CC) $(X86_64_HOT_CFLAGS) $(DEPFLAGS) -Icommon -c -o $@ $<
 
 # cli_main.c's -i loop runs on the shared LZSession core (common/session.c),
 # a front-end helper deliberately outside $(ENG) - so this target lists it
@@ -650,7 +681,7 @@ watcom-gui:
 # nested inside another comment; gcc said so on every build and `check`
 # reported 16 PASS over it. Having a caller somewhere is not the test -
 # being reachable from what people actually run is.
-check: bare-endif-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate softfp-gate dedupe-gate mm-alias-gate c89-floor-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate kernel-matrix-gate
+check: bare-endif-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate softfp-gate dedupe-gate mm-alias-gate c89-floor-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate kernel-matrix-gate aux-parm-arity-gate aux-equiv-gate
 
 # Zero gcc warnings, asserted rather than printed. The Watcom side has
 # always been counted ("N lines, 0 warnings, 0 errors", per file); this
@@ -680,6 +711,22 @@ gcc-warning-gate:
 .PHONY: gcc-flag-parity-gate
 gcc-flag-parity-gate:
 	@bash build/gcc_flag_parity_gate.sh
+
+# Watcom passes #pragma aux arguments to the __parm registers LEFT TO
+# RIGHT and ignores the rest, so a spare register at the head of the list
+# shifts every argument and leaves the last one holding whatever the
+# caller left there. In `check` rather than ci.sh-only: it is a text scan
+# of src/, no build and no model.
+.PHONY: aux-parm-arity-gate
+aux-parm-arity-gate:
+	@bash build/aux_parm_arity_gate.sh
+
+# A reorder of a hand-written kernel must not change what it computes.
+# SKIPs without pentiumlint, so it costs nothing where the linter is not
+# checked out; where it is, it is a second or two of symbolic execution.
+.PHONY: aux-equiv-gate
+aux-equiv-gate:
+	@bash build/aux_equiv_gate.sh
 
 # The same question of the pair that ships to the target. Its own file
 # rather than a second half of the one above: that one is named for the
@@ -818,6 +865,20 @@ bf16-native-gate:
 softfp-gate:
 	@bash build/arm/softfp_gate.sh
 
+# --bf16-store on/off must give identical logits AND must have changed
+# something. ci.sh-only rather than in `check`: it needs a model dir
+# with BF16 tensors, which `check` does not have.
+.PHONY: bf16-store-gate
+bf16-store-gate:
+	@bash build/bf16_store_gate.sh "$(MODEL)"
+
+# Compressed model == uncompressed model, and the decompressor round
+# trips byte for byte. ci.sh-only: it needs a model dir with a
+# model.bin, which `check` does not have.
+.PHONY: lz4-model-gate
+lz4-model-gate:
+	@bash build/lz4_model_gate.sh "$(MODEL)"
+
 .PHONY: dedupe-gate
 dedupe-gate:
 	@bash build/dedupe_gate.sh
@@ -874,5 +935,8 @@ clean:
 	rm -f llama98 llama98.exe kunkun98-gui kunkun98-gui.exe \
 	      kunkun98-serve kunkun98-serve.exe \
 	      $(CLI_EXE) $(GUI_EXE) $(DOS_EXE) $(DLL_EXE)
-	rm -rf build/gui build/watcom/cli build/watcom/gui \
+	# build/native WAS MISSING HERE, and that is why the stale-object
+	# failure described at DEPFLAGS survived a `make clean` and read
+	# as a source bug rather than a build one.
+	rm -rf build/native build/gui build/watcom/cli build/watcom/gui \
 	       build/watcom/clidos build/watcom/dll

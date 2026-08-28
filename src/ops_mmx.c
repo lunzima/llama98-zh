@@ -1913,6 +1913,12 @@ void row_q8_mmx_asm(const lz_row_ctx *c) {
    all-+/-127 extreme groups; measured 3.75 ns/32MAC vs x87
    scalar 23.50 ns (6.3x). */
 extern int32_t lz_dot32_q41_asm(const unsigned char *w, const int16_t *x);
+/* w from [eax], x from [ecx] - two registers, and no third. A trailing
+   [__ebx] sat here and was inert, Watcom ignoring registers past the
+   last argument; it is gone because it made "three registers, two
+   parameters" read as this file's house style, and the edit that added
+   it put the same spare at the FRONT of lz_dot32_t2_asm's list, where
+   it is not inert at all. */
 #pragma aux lz_dot32_q41_asm = \
     ".586" \
     "pxor      mm0, mm0" \
@@ -1968,7 +1974,7 @@ extern int32_t lz_dot32_q41_asm(const unsigned char *w, const int16_t *x);
     "psrlq     mm4, 32" \
     "paddd     mm2, mm4" \
     "movd      eax, mm2" \
-    __parm [__eax] [__ecx] [__ebx] \
+    __parm [__eax] [__ecx] \
     __value [__eax] \
     __modify [8087]
 
@@ -2370,6 +2376,16 @@ extern int32_t lz_dot32_t2_asm(const unsigned char *w2,
    BIT-IDENTICAL, not close: the same eight products in a different
    summation grouping, and int32 addition is associative and exact. The
    two accumulators join before the horizontal fold. */
+/* TWO registers for TWO parameters, in the ORDER THE BODY LOADS THEM:
+   w2 from [edx], x from [ecx]. An extra [__eax] once sat at the FRONT of
+   the __parm list, so Watcom passed w2 in eax and x in edx and never
+   wrote ecx - which the body's second instruction dereferences. It read
+   whatever the caller left there: .prof/rowdot_xcheck.c died on ECX=0,
+   and the engine would have summed from a stale address instead.
+   A spare register is harmless at the END of the list (q41 above carried
+   one) and shifts every argument when it is not, which is why the check
+   is on arity and not on "looks like the others" -
+   build/aux_parm_arity_gate.sh. */
 #pragma aux lz_dot32_t2_asm = \
     ".586" \
     "pxor      mm0, mm0" \
@@ -2443,7 +2459,7 @@ extern int32_t lz_dot32_t2_asm(const unsigned char *w2,
     "paddd     mm0, mm3" \
     "movd      eax, mm0" \
     "emms" \
-    __parm [__eax] [__edx] [__ecx] \
+    __parm [__edx] [__ecx] \
     __value [__eax] \
     __modify [8087]
 
@@ -2492,6 +2508,20 @@ int32_t lz_dot32_t2_mmx_w(const unsigned char *w2, const int16_t *x) {
 
    Bit-identical, and not by an appeal to associativity: the products
    reach the accumulator in the order they did before. */
+/* THE TWO `add`s COME BEFORE THE TWO LOADS AT EACH CHUNK BOUNDARY, and
+   that is not a scheduling preference. `movq mm4, [edx]` depends on
+   `add edx, 8` through EDX, which no MMX register records: a pass that
+   tracks mm0-mm7 sees two independent instructions and will happily
+   hoist the load above the increment. It did, once. Chunks 1, 2 and 3
+   then multiplied the PREVIOUS chunk's weights and first activation
+   octet by their own remaining seven, which is a well formed kernel over
+   valid codes returning a plausible number - chunk 0 stayed correct, so
+   a spot check of the first sub-block agreed.
+   build/dot128_t2_probe.c counted 11523 of 49156 values wrong. It is
+   hand-run and nothing in CI calls it, which is how the defect lived in
+   a shipping kernel: no local checkpoint carries a T2 tensor, so the
+   parity gate, the logits comparison and every bit-identity claim passed
+   over it untouched. */
 extern void lz_dot128_t2_asm(const unsigned char *w2,
                              const int16_t *x, int32_t *out4);
 #pragma aux lz_dot128_t2_asm = \
@@ -2562,11 +2592,11 @@ extern void lz_dot128_t2_asm(const unsigned char *w2,
     "movq      mm5, [ecx+56]" \
     "pmaddwd   mm7, mm5" \
     "paddd     mm0, mm6" \
+    "add       ecx, 64" \
+    "add       edx, 8" \
     "movq      mm4, [edx]" \
     "movq      mm5, [ecx]" \
     "paddd     mm0, mm7" \
-    "add       ecx, 64" \
-    "add       edx, 8" \
     "pxor      mm6, mm6" \
     "pxor      mm7, mm7" \
     "punpcklbw mm6, mm4" \
@@ -2627,11 +2657,11 @@ extern void lz_dot128_t2_asm(const unsigned char *w2,
     "movq      mm5, [ecx+56]" \
     "pmaddwd   mm7, mm5" \
     "paddd     mm1, mm6" \
+    "add       ecx, 64" \
+    "add       edx, 8" \
     "movq      mm4, [edx]" \
     "movq      mm5, [ecx]" \
     "paddd     mm1, mm7" \
-    "add       ecx, 64" \
-    "add       edx, 8" \
     "pxor      mm6, mm6" \
     "pxor      mm7, mm7" \
     "punpcklbw mm6, mm4" \
@@ -2692,11 +2722,11 @@ extern void lz_dot128_t2_asm(const unsigned char *w2,
     "movq      mm5, [ecx+56]" \
     "pmaddwd   mm7, mm5" \
     "paddd     mm2, mm6" \
+    "add       ecx, 64" \
+    "add       edx, 8" \
     "movq      mm4, [edx]" \
     "movq      mm5, [ecx]" \
     "paddd     mm2, mm7" \
-    "add       ecx, 64" \
-    "add       edx, 8" \
     "pxor      mm6, mm6" \
     "pxor      mm7, mm7" \
     "punpcklbw mm6, mm4" \

@@ -46,6 +46,8 @@
 !/build/fp_exception_gate.sh
 !/build/bf16_native_gate.sh
 !/build/bf16_native_probe.c
+!/build/bf16_store_gate.sh
+!/build/lz4_model_gate.sh
 !/build/fixed_tier_xcompiler_gate.sh
 !/build/norm_int_gate_tokens_zh.txt
 !/build/norm_int_gate_tokens_en.txt
@@ -116,6 +118,8 @@
 !/build/watcom_flag_parity_gate.sh
 !/build/nest_census.sh
 !/build/nest_census.awk
+!/build/aux_parm_arity_gate.sh
+!/build/aux_equiv_gate.sh
 
 # Stray compiler/linker intermediates (gcc, Open Watcom), plus the raw
 # dumps probes drop at the repo root when run without a -o path.
