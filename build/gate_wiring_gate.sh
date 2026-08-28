@@ -89,6 +89,8 @@ prefetch_parity_gate.sh    # two full Watcom engine builds, and the arms it
                            #   checks are compiled by no other toolchain
 norm_sse_parity_gate.sh    # a full Watcom engine build; the #pragma aux
                            #   twins it compares exist in no gcc build
+i32f_acc_gate.sh           # same, for the two int32->float accumulate
+                           #   tiers - two engine builds per run
 align_gate.sh              # 5489 compiled checks, whole-tree instrumented build
 codesize_gate.sh           # builds three toolchains to compare .text
 native_obj_gate.sh         # pre-link hook, silent by design; ci.sh is where

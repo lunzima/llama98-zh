@@ -32,6 +32,14 @@
 # covered count is an UPPER bound and the uncovered list is the part to
 # act on: those cannot be checked by anything, whatever the probes claim.
 #
+# WHERE IT STANDS: 72 of 74 reached by a Watcom-built probe, 0 reached
+# only on paper, 0 called by nothing. The two left are lz_cpucheck_brand
+# and lz_cpucheck_maxext, which read the CPUID brand string - they have
+# no second implementation to disagree with and no value a reference
+# could predict, so they are the floor rather than a gap. Every kernel
+# that computes something a twin also computes now has a driver that
+# builds both halves and compares them.
+#
 # Exit: 0 always. This is a census, not a gate.
 set -u
 cd "$(dirname "$0")/.."
@@ -123,8 +131,17 @@ for f in SRC:
         # that edge reported a shipping SSE2 dot kernel as unprobed while
         # .prof/rowdot_xcheck.c drives it. Restricted to arguments of an
         # ALL-CAPS macro so it does not turn every mention into an edge.
-        for mm in re.finditer(r"\b[A-Z][A-Z0-9_]{2,}\s*\(([^;]*?)\)", bodytext):
-            for c in re.finditer(r"\b([a-z_]\w*)\b", mm.group(1)):
+        for mm in re.finditer(r"\b([A-Z][A-Z0-9_]{2,})\s*\(([^;]*?)\)",
+                              bodytext):
+            # The MACRO ITSELF is a call edge, not only its arguments.
+            # Recording only the arguments broke the chain
+            # row_q41_sse2_asm -> LZ_Q41_PFSEL -> LZ_PFI_NTA -> lz_pf_nta
+            # at the first hop, because the body scan above matches
+            # `name(` only for a lower-case name - so the three prefetch
+            # pragmas read as reached by nothing while
+            # build/prefetch_parity_probe.c drives all four modes.
+            s.add(mm.group(1))
+            for c in re.finditer(r"\b([a-z_]\w*)\b", mm.group(2)):
                 s.add(c.group(1))
 
 # MACROS ARE CALL EDGES. lz_mmx_empty_local is only ever invoked as
@@ -132,17 +149,26 @@ for f in SRC:
 # LZ_PF_* macros, so a graph built from function bodies alone reports
 # four live kernels as called by nothing - which reads as dead code.
 DEFINE = re.compile(r"^\s*#\s*define\s+([A-Za-z_]\w*)(?:\([^)]*\))?(.*)$", re.M)
-for f in SRC:
-    t = strip(open(f, encoding="utf-8", errors="replace").read())
-    # Rejoin line continuations first: a macro body split over lines
-    # would otherwise lose everything after the backslash.
-    t = t.replace("\\\n", " ")
-    for m in DEFINE.finditer(t):
-        name, repl = m.group(1), m.group(2)
-        s = calls.setdefault(name, set())
-        for c in re.finditer(r"\b([a-z_]\w*)\b", repl):
-            if c.group(1) in kernels or c.group(1) in calls:
-                s.add(c.group(1))
+# TWICE, because a macro can name another macro. LZ_Q41_PFSEL's body
+# names LZ_PFI_NTA, which is itself a #define, and on a single pass
+# LZ_PFI_NTA is not in `calls` yet when PFSEL is read - so the chain
+# probe -> row kernel -> PFSEL -> LZ_PFI_NTA -> lz_pf_nta broke in the
+# middle and the three prefetch pragmas were reported as reached by
+# nothing while build/prefetch_parity_probe.c drives all four modes
+# through them.
+for _pass in (0, 1):
+    for f in SRC:
+        t = strip(open(f, encoding="utf-8", errors="replace").read())
+        # Rejoin line continuations first: a macro body split over lines
+        # would otherwise lose everything after the backslash.
+        t = t.replace("\\\n", " ")
+        for m in DEFINE.finditer(t):
+            name, repl = m.group(1), m.group(2)
+            s = calls.setdefault(name, set())
+            for c in re.finditer(r"\b(\w+)\b", repl):
+                if c.group(1) in kernels or c.group(1) in calls:
+                    if c.group(1) != name:
+                        s.add(c.group(1))
 
 # A kernel named in a dispatch-table initialiser is reachable through
 # whatever consults that table; treat the enclosing file's operators as
