@@ -2139,6 +2139,16 @@ static void gdn_p2_fixed_rows(const int8_t *sq_in, int8_t *sq_out,
     static int16_t dq[LZ_GDN_MAX_VD];
     static float s_dg[LZ_GDN_MAX_VD / 32];
     int ng = vd / 32, kk, gg, vv;
+#ifdef LZ_HAVE_P2_MMX
+    /* Hoisted out of the kk loop below, not merely out of the line that
+       used to call it twice. The tier cannot change inside this
+       function - nothing here calls lz_kernel_select except p2_tier's
+       own first line, and that is a no-op once the tier is resolved -
+       so asking once per CALL rather than once per ROW is the same
+       answer. build/dispatch_hotness.sh: 73,729 executions per line
+       before this, ~500 after. */
+    int p2t;
+#endif /* LZ_HAVE_P2_MMX */
 
     /* delta quantized PER 32-GROUP, not once for the whole vd vector.
        A single scale for the whole delta - the shape gdn_build_table
@@ -2251,6 +2261,9 @@ static void gdn_p2_fixed_rows(const int8_t *sq_in, int8_t *sq_out,
         }
     }
 
+#ifdef LZ_HAVE_P2_MMX
+    p2t = p2_tier();
+#endif /* LZ_HAVE_P2_MMX */
     for (kk = 0; kk < kd; kk++) {
         const int8_t *row_in = sq_in + (size_t)kk * vd;
         int8_t *row_out = sq_out + (size_t)kk * vd;
@@ -2299,9 +2312,7 @@ static void gdn_p2_fixed_rows(const int8_t *sq_in, int8_t *sq_out,
            Not cached in a static inside p2_tier: --kernel switches tiers
            at runtime and the suite relies on it, so a cache there would
            make the second tier of a run silently be the first. */
-        {
-        const int tier = p2_tier();
-        if (tier) {
+        if (p2t) {
             gdn_p2_row_simd(row_in,
 #if LZ_GDN_STATE_2PLANE
                             row_lo_in,
@@ -2310,9 +2321,8 @@ static void gdn_p2_fixed_rows(const int8_t *sq_in, int8_t *sq_out,
 #if LZ_GDN_STATE_2PLANE
                             row_lo_out,
 #endif /* LZ_GDN_STATE_2PLANE */
-                            rs_out, ng, tier);
+                            rs_out, ng, p2t);
             continue;
-        }
         }
 #endif /* LZ_HAVE_P2_MMX */
         for (gg = 0; gg < ng; gg++) {
