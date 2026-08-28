@@ -49,6 +49,14 @@
 #     because they were misfiled. PLACEMENT cannot tell the two apart,
 #     and a per-tier family (lz_dot32_* exists once per ISA) has no one
 #     home for it to compare against.
+#   - A PER-ISA TU, by construction. Names here are
+#     lz_<op>_<format>_<isa>[_asm]: the file stem carries the ISA field
+#     and the family prefix carries the operator field, so ops_arm.c,
+#     ops_sse2.c and ops_mmx.c can never share a token with their own
+#     dominant family however the test is written. Counting declarations
+#     as family spread (above) is what lets the >= 3 files escape fire
+#     for them instead; if a future ops_<isa>.c appears here anyway,
+#     that is the reason, not a defect in the file.
 #   - A VERB PREFIX IS NOT A TOPIC, and a file organised by CONCERN will
 #     spread one noun across several. gui/main.c runs menu, status bar,
 #     layout, text emission, jobs, commands, wndproc, selftest in that
@@ -57,14 +65,27 @@
 #     apply* resuming. Its four hits there are all of that shape.
 #
 # WHERE IT STANDS, so a future reader knows what today's output means:
-# ORDER 6 unexplained across 3 files and 62 explained; PLACEMENT 4 and 3;
-# NAMING 5 and 1. The first version of ORDER reported 103 across 25 files
-# and ranked generate.c third, and every one of those differences was
-# this instrument being wrong rather than the tree changing. Two that
-# stay unexplained on purpose: safetensors.c holds lz_st*, which is an
-# acronym and not the prefix shortening the abbreviation test knows, and
-# lz_softfp.c holds __aeabi*, where nothing in either name says EABI.
-# Both are for the reader to accept, not for this file to wave through.
+# ORDER 6 unexplained across 3 files, PLACEMENT 0, NAMING 2. The first
+# version of ORDER reported 103 across 25 files and ranked generate.c
+# third; every one of those differences was this instrument being wrong
+# rather than the tree changing.
+#
+# ALL SIX NAMING HITS HAVE BEEN JUDGED, one subagent per file, each
+# reading only its own. Five were KEEP and the reasons are now rules
+# above: common/stream.c exports six lz_stream_* and its ten scan_* are
+# static arms of one dispatch chain; forward_kda.c is 950 of 1156 lines
+# KDA and lost the vote only because `kda` was too short to be a family;
+# ops_arm.c is 17-for-17 ARMv5TE; safetensors.c owns lz_st_ exclusively,
+# 7 of 7; lz_softfp.c holds __aeabi_* names the ARM EABI fixes and gcc
+# emits by name, which no filename could ever match. The sixth,
+# cli_argv.c, was RENAME-FUNCTIONS: lz_gbk_argv_convert claims membership
+# in llama98.def's exported GBK transcoding group and is neither
+# exported nor allocation-free.
+#
+# The two that remain are the two that cannot be matched mechanically -
+# an acronym and an externally mandated namespace - and they are left
+# printing rather than suppressed, because a reader accepting them is
+# not the same as this file deciding for them.
 #
 # Exit: 0 always. This is a census.
 set -u
@@ -82,7 +103,21 @@ def strip(s):
 KEYWORDS = set("if for while switch return sizeof do else case defined "
                "static inline void int float double char unsigned signed "
                "const struct union enum typedef extern sizeof".split())
-DEF = re.compile(r"^[A-Za-z_][\w\s\*]*?\b([a-z_]\w*)\s*\([^;{]*\)\s*\{", re.M)
+# `__attribute__((naked))` and friends sit between the type and the name,
+# and \w\s\* cannot cross their parentheses: all nine naked entry points
+# in src/lz_softfp.c were invisible, so a 17-function file was judged on
+# a sample of 7. The alternation is spelled out rather than made general
+# because a permissive prefix here starts matching call statements.
+DEF = re.compile(r"^[A-Za-z_][\w\s\*]*?"
+                 r"(?:__attribute__\s*\(\([^)]*\)\)\s*)?"
+                 r"[\w\s\*]*?\b([a-z_]\w*)\s*\([^;{]*\)\s*\{", re.M)
+# A DECLARATION is family membership too, and only definitions were
+# counted. The x86 twins of lz_dot32_* are #pragma aux externs
+# (src/ops_mmx.c) or intrinsics in ops_kernel_dot_*.h, so the family
+# looked like 8 in ops_arm.c and 1 in ops_sse2.c - which defeated the
+# "a family in >= 3 files says nothing about this file" escape and let
+# ops_arm.c be reported for holding the ARM tier of a per-ISA family.
+DECL = re.compile(r"^[A-Za-z_][\w\s\*]*?\b([a-z_]\w*)\s*\([^;{]*\)\s*;", re.M)
 
 FILES = sorted(glob.glob("src/*.c") + glob.glob("gui/*.c") +
                glob.glob("common/*.c"))
@@ -153,13 +188,43 @@ for n, _ in allnames:
 family = {}
 for n, f in allnames:
     for p in prefixes(n):
-        if count[p] >= 3 and len(p) >= 4:
+        # len >= 3, not >= 4. `kda` has six members, `gdn` twelve and
+        # `epi` nineteen, and all three were invisible as families - so
+        # forward_kda.c, 950 of whose 1156 lines are KDA, was judged to
+        # be a subn_* file 4/7. This is the same off-by-one already fixed
+        # for the stem tokeniser below ("len >= 2, not > 2, so t2 is not
+        # thrown away"), never applied to the family KEY. Not 2: `lz`
+        # would then become everyone's last-resort family.
+        if count[p] >= 3 and len(p) >= 3:
             family[(n, f)] = p
             break
 
 famfiles = collections.defaultdict(collections.Counter)
 for (n, f), p in family.items():
     famfiles[p][os.path.basename(f)] += 1
+
+# DECLARATIONS COUNT TOWARDS A FAMILY'S SPREAD, and only definitions did.
+# A per-ISA family's members are not all C bodies: the x86 twins of
+# lz_dot32_* are `extern` declarations followed by #pragma aux
+# (src/ops_mmx.c) or static inline intrinsics in ops_kernel_dot_*.h, and
+# neither matches DEF. lz_dot32 therefore looked like {ops_arm.c: 8,
+# ops_sse2.c: 1} instead of five files, which defeated the "a family
+# spread over >= 3 files says nothing about THIS file" escape and let
+# ops_arm.c be reported for holding the ARM tier of a per-ISA family.
+# Spread only - a declaration does not make the file its owner, so this
+# does not feed `order`, ORDER or the NAMING counts.
+for f in sorted(glob.glob("src/*.h") + glob.glob("gui/*.h") +
+                glob.glob("common/*.h") + FILES):
+    t = strip(open(f, encoding="utf-8", errors="replace").read())
+    for m in DECL.finditer(t):
+        n = m.group(1)
+        if n in KEYWORDS:
+            continue
+        for p in prefixes(n):
+            if count[p] >= 3 and len(p) >= 3:
+                if os.path.basename(f) not in famfiles[p]:
+                    famfiles[p][os.path.basename(f)] = 0
+                break
 
 # SOME FAMILIES ARE NAMED BY SUFFIX, NOT PREFIX, and PLACEMENT read only
 # the prefix. ops_sched.c is the knob TU and its members are named for
@@ -352,13 +417,23 @@ print("\n== NAMING: the file's name against what it mostly holds ==")
 hits = 0
 soft2 = []
 for f in FILES:
-    fams = collections.Counter(family.get((n, f)) for n in order[f])
+    # EXPORTED FUNCTIONS ONLY. A file's name promises what it OFFERS, and
+    # a static helper is offered to nobody: common/stream.c exports six
+    # lz_stream_* and holds ten static scan_* arms of one dispatch chain,
+    # and counting all sixteen equally reported the file as misnamed for
+    # its own internals. PLACEMENT already excludes statics for the
+    # neighbouring reason; NAMING did not.
+    fams = collections.Counter(family.get((n, f)) for n in order[f]
+                               if (n, f) not in static_fn)
     fams.pop(None, None)
     if not fams:
         continue
     dom, dc = fams.most_common(1)[0]
     tot = sum(fams.values())
-    if dc * 2 < tot:
+    # <=, not <: an exact tie is not a dominant topic. ops_arm.c's 8/16
+    # was a plurality against seven other families, admitted as
+    # "dominant" by a strict comparison.
+    if dc * 2 <= tot:
         continue                      # no dominant topic: nothing to claim
     # A family spread over many files - lz_gui, lz_common - says nothing
     # about THIS file, so a mismatch against it is not evidence. It named
