@@ -300,11 +300,13 @@ for (n, f), p in sorted(family.items()):
         # from another file, so a move would have to make it extern
         # first - which is an argument, not an exemption, and the reader
         # gets to hear it. Each of the three that landed here is
-        # correctly placed on inspection: lz4d_read_void is model.c's
-        # three-line adapter to model.c's own rd pointer and m_uses_lz4
-        # identifies the reader by its ADDRESS; utf8_argv reads the Win32
-        # command line, a CLI concern; utf8_extra is gbk.c's own
-        # five-line lead-byte predicate. All three share a prefix with
+        # correctly placed on inspection. The three that were here have
+        # since been RENAMED rather than moved, which is why they no
+        # longer appear: lz4d_read_void -> lz4_reader (model.c's adapter
+        # to model.c's own rd pointer, identified by ADDRESS in
+        # m_uses_lz4), utf8_argv -> win32_utf8_argv (reads the command
+        # line, a CLI concern), utf8_extra -> gbk_utf8_extra (gbk.c's own
+        # five-line lead-byte predicate). Each had shared a prefix with
         # another file's family and nothing else.
         # The SUFFIX family gets a vote. Home under either key is home.
         s = suffix.get((n, f))
