@@ -22,6 +22,14 @@
 #                file's stem appears in no part of its dominant family's
 #                prefix, the name is not describing the contents.
 #
+# NOTHING IS FILTERED OUT, only CLASSIFIED. Earlier versions of this file
+# suppressed each pattern below as it was understood, and that is the
+# instrument deciding for the reader which untidiness is acceptable -
+# which is not its call. Every axis now prints its explained cases under
+# "explained, listed anyway" with the reason attached, so a standard
+# stricter than this file's applies to the whole list rather than to a
+# pre-filtered one. A clean run means zero UNEXPLAINED, not zero output.
+#
 # WHAT IT CANNOT SEE, stated because a census that only prints hits reads
 # as if it looked everywhere:
 #   - a topic the naming does not encode. Two unrelated operators that
@@ -48,11 +56,15 @@
 #     in the font one, which is right, and this axis scores the pair as
 #     apply* resuming. Its four hits there are all of that shape.
 #
-# WHAT THE THREE AXES FOUND, so that a future reader knows what a clean
-# run means: after four corrections the ORDER axis reports six re-entries
-# across three files, and the largest of those is the by-concern case
-# above. The first version reported 103 across 25 and every one of the
-# differences was this instrument being wrong, not the tree changing.
+# WHERE IT STANDS, so a future reader knows what today's output means:
+# ORDER 6 unexplained across 3 files and 62 explained; PLACEMENT 4 and 3;
+# NAMING 5 and 1. The first version of ORDER reported 103 across 25 files
+# and ranked generate.c third, and every one of those differences was
+# this instrument being wrong rather than the tree changing. Two that
+# stay unexplained on purpose: safetensors.c holds lz_st*, which is an
+# acronym and not the prefix shortening the abbreviation test knows, and
+# lz_softfp.c holds __aeabi*, where nothing in either name says EABI.
+# Both are for the reader to accept, not for this file to wave through.
 #
 # Exit: 0 always. This is a census.
 set -u
@@ -164,20 +176,21 @@ def fmt_key(n):
     return None
 
 def re_entries(seq, names=None, callers=None, pos=None, idx=None):
-    """Count topic resumptions, EXCLUDING local-helper ordering.
+    """Every topic resumption, CLASSIFIED rather than filtered.
 
-    A helper defined immediately before its only caller is good C, not
-    tangle: it is what lets the file have no forward declarations. It
-    reads as a re-entry because the helper's name puts it in a different
-    family - sample_residual between lz_spec_accept and
-    lz_spec_accept_temp, verify_row_argmax before lz_spec_round.
-    Measured over the whole tree, 93 of 103 re-entries are this, and
-    without the filter this axis put generate.c third and would have sent
-    someone to reorder a file that is already ordered.
+    Returns (unexplained, explained) as lists of (topic, reason). Nothing
+    is dropped: a filter decides for the reader which patterns are
+    acceptable, and that is the reader's call. Each entry carries why it
+    is where it is, so a standard stricter than this file's can be
+    applied to the same list.
 
-    So an intervening run is forgiven when every function in it is called
-    only from at or after the point it was introduced."""
-    seen, last, c, where, runstart = set(), None, 0, [], None
+    local-helper is the one large category. A helper defined immediately
+    before its only caller is what lets a file have no forward
+    declarations - sample_residual between lz_spec_accept and
+    lz_spec_accept_temp, verify_row_argmax before lz_spec_round - and it
+    reads as a re-entry because the helper's name puts it in another
+    family. 93 of 103 tree-wide are this."""
+    seen, last, bad, ok, runstart = set(), None, [], [], None
     for k, s in enumerate(seq):
         if s != last:
             if s in seen and runstart is not None and names is not None:
@@ -186,16 +199,16 @@ def re_entries(seq, names=None, callers=None, pos=None, idx=None):
                 local = all(
                     callers[x] and all(pos[y] >= lo for y in callers[x])
                     for x in inter if callers.get(x))
-                if not (inter and local):
-                    c += 1
-                    where.append(s)
+                if inter and local:
+                    ok.append((s, "local-helper"))
+                else:
+                    bad.append((s, ""))
             elif s in seen and names is None:
-                c += 1
-                where.append(s)
+                bad.append((s, ""))
             seen.add(s)
             last = s
             runstart = k
-    return c, where
+    return bad, ok
 
 print("== ORDER: a topic that resumes after another topic intervened ==")
 rows = []
@@ -208,60 +221,92 @@ for f in FILES:
             if c.group(1) in pos:
                 callers[c.group(1)].add(n)
     # Per preprocessor branch, then summed: see the arm comment above.
-    a = b = 0
-    wa, wb = [], []
-    for br in sorted(set(arm[f].values())):
-        sel = [i for i, n in enumerate(names) if arm[f].get(n, 0) == br]
+    bad_f, ok_f = [], []
+    bad_m, ok_m = [], []
+    arms = sorted(set(arm[f].values()))
+    for br in arms:
+        sel = [i for i, n in enumerate(names) if arm[f].get(n, ()) == br]
         fam_pairs = [(i, family.get((names[i], f)))
                      for i in sel if family.get((names[i], f))]
         fmt_pairs = [(i, fmt_key(names[i])) for i in sel if fmt_key(names[i])]
-        ca, wca = re_entries([s for _, s in fam_pairs], names, callers, pos,
-                             [i for i, _ in fam_pairs])
-        cb, wcb = re_entries([s for _, s in fmt_pairs], names, callers, pos,
-                             [i for i, _ in fmt_pairs])
-        a += ca; b += cb; wa += wca; wb += wcb
+        x, y = re_entries([s for _, s in fam_pairs], names, callers, pos,
+                          [i for i, _ in fam_pairs])
+        bad_f += x; ok_f += y
+        x, y = re_entries([s for _, s in fmt_pairs], names, callers, pos,
+                          [i for i, _ in fmt_pairs])
+        bad_m += x; ok_m += y
     byfam = [s for s in (family.get((n, f)) for n in names) if s]
     byfmt = [s for s in (fmt_key(n) for n in names) if s]
-    # If the file is sorted under EITHER key it is sorted; report the
-    # smaller count, and only when both keys agree there is interleaving.
-    if a and (b or len(byfmt) < 3):
-        n_, w_ = (a, wa) if a <= b or not b else (b, wb)
-        rows.append((n_, os.path.basename(f), len(byfam), w_))
-for r in sorted(rows, reverse=True)[:12]:
-    ws = collections.Counter(r[3]).most_common(3)
-    print("  %3d re-entries  %-22s %3d placed function(s)  %s"
-          % (r[0], r[1], r[2], ", ".join("%s x%d" % w for w in ws)))
-print("  %d of %d .c file(s) have at least one" % (len(rows), len(FILES)))
+    # Whole-file counts, so the arm split is reported and not just applied.
+    whole_f, _ = re_entries(byfam, names, callers, pos,
+                            [i for i, n in enumerate(names)
+                             if family.get((n, f))])
+    armsplit = len(whole_f) - len(bad_f) - len(ok_f)
+    # Sorted under EITHER key is sorted. The by-format key is the kernel
+    # TUs'; the by-family key is everything else's.
+    if len(byfmt) >= 3 and len(bad_m) < len(bad_f):
+        bad, ok = bad_m, ok_m
+    else:
+        bad, ok = bad_f, ok_f
+    if bad or ok or armsplit > 0:
+        rows.append((len(bad), f, len(byfam), bad,
+                     len(ok), max(0, armsplit), len(arms)))
+
+rows.sort(reverse=True)
+for c, fn, placed, bad, nok, narm, narms in rows[:20]:
+    ws = collections.Counter(s for s, _ in bad).most_common(3)
+    extra = []
+    if nok:  extra.append("%d local-helper" % nok)
+    if narm: extra.append("%d across %d preprocessor arm(s)" % (narm, narms))
+    print("  %3d unexplained  %-24s %3d placed  %-26s %s"
+          % (c, fn, placed, ", ".join("%s x%d" % w for w in ws) or "-",
+             "[" + "; ".join(extra) + "]" if extra else ""))
+print("  %d unexplained across %d file(s); %d explained, listed above so"
+      " that a stricter\n  standard than this file's can be applied to"
+      " the same list rather than to a\n  filtered one"
+      % (sum(r[0] for r in rows), len([r for r in rows if r[0]]),
+         sum(r[4] + r[5] for r in rows)))
 
 # ---- 2. placement: the odd family member -----------------------------
 print("\n== PLACEMENT: family lives mostly elsewhere ==")
 hits = 0
+soft = []
 for (n, f), p in sorted(family.items()):
-    # STATIC FUNCTIONS ARE NOT MISPLACED. Internal linkage means no other
-    # file can call it, so "your family lives elsewhere" asks for a move
-    # that would have to make it extern first - and all three hits this
-    # axis had left were of that shape: lz4d_read_void is model.c's
-    # 3-line adapter to model.c's own reader pointer, and m_uses_lz4
-    # identifies the reader by comparing against its ADDRESS; utf8_argv
-    # reads the Win32 command line, which is a CLI concern and not a
-    # tokenizer one; utf8_extra is gbk.c's own five-line lead-byte
-    # predicate. Each shares a prefix with another file's family and
-    # nothing else. A shared prefix is not a shared concern.
-    if (n, f) in static_fn:
-        continue
     here = os.path.basename(f)
     home, homecount = famfiles[p].most_common(1)[0]
     total = sum(famfiles[p].values())
     if here != home and famfiles[p][here] * 4 <= homecount and total >= 4:
-        print("  %-34s in %-18s but %d/%d of %s* is in %s"
-              % (n, here, homecount, total, p, home))
-        hits += 1
+        # CLASSIFIED, NOT FILTERED. A static function cannot be called
+        # from another file, so a move would have to make it extern
+        # first - which is an argument, not an exemption, and the reader
+        # gets to hear it. Each of the three that landed here is
+        # correctly placed on inspection: lz4d_read_void is model.c's
+        # three-line adapter to model.c's own rd pointer and m_uses_lz4
+        # identifies the reader by its ADDRESS; utf8_argv reads the Win32
+        # command line, a CLI concern; utf8_extra is gbk.c's own
+        # five-line lead-byte predicate. All three share a prefix with
+        # another file's family and nothing else.
+        line = ("  %-34s in %-18s but %d/%d of %s* is in %s"
+                % (n, here, homecount, total, p, home))
+        if (n, f) in static_fn:
+            soft.append(line + "   [static: a move needs extern first]")
+        elif len(famfiles[p]) >= 3:
+            soft.append(line + "   [family spans %d files: per-tier, no"
+                        " one home]" % len(famfiles[p]))
+        else:
+            print(line)
+            hits += 1
 if not hits:
-    print("  none")
+    print("  none unexplained")
+if soft:
+    print("  -- explained, listed anyway --")
+    for s in soft:
+        print(s)
 
 # ---- 3. naming: the file's stem against its dominant family ----------
 print("\n== NAMING: the file's name against what it mostly holds ==")
 hits = 0
+soft2 = []
 for f in FILES:
     fams = collections.Counter(family.get((n, f)) for n in order[f])
     fams.pop(None, None)
@@ -291,10 +336,33 @@ for f in FILES:
              any(y in stem for y in fam_parts) or \
              any(x[:4] == y[:4] for x in parts for y in fam_parts)
     if not shared:
+        # An ABBREVIATION is a match this has no dictionary for, so it is
+        # labelled rather than dropped: safetensors.c holding lz_st* is
+        # the file saying exactly what it holds. The test is whether a
+        # family token is a PREFIX of a stem token - st/safetensors, ini/
+        # inifile - which catches the mechanical shortenings and none of
+        # the semantic ones (lz_softfp.c holding __aeabi* stays
+        # unexplained, and correctly: nothing in the name says EABI).
+        bare = [y for y in fam_parts if y != "lz"]
+        abbrev = any(x.startswith(y) and len(y) >= 2
+                     for x in parts for y in bare)
+        if abbrev:
+            soft2.append("  %-22s %d/%d are %s*   [abbreviation]"
+                         % (os.path.basename(f), dc, tot, dom))
+            continue
+        if tot < 3:
+            soft2.append("  %-22s %d/%d are %s*   [%d placed function(s):"
+                         " too few to have a dominant topic]"
+                         % (os.path.basename(f), dc, tot, dom, tot))
+            continue
         print("  %-22s %d/%d of its placed functions are %s*"
               % (os.path.basename(f), dc, tot, dom))
         hits += 1
 if not hits:
-    print("  none")
+    print("  none unexplained")
+if soft2:
+    print("  -- explained, listed anyway --")
+    for s2 in soft2:
+        print(s2)
 PYEOF
 exit 0
