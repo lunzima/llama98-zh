@@ -300,8 +300,12 @@ void forward_moe(const LZModel *m, LZRunState *s,
     mlat_may = s->moe_lat_i16 && L->moe_expert_w1 && L->moe_expert_w3 &&
                lz_matmul_xq_i16_ok(&L->moe_down_proj, hdim, nt);
     for (i = 0; mlat_may && i < ne; i++)
+        /* bf16 excluded for the same reason F32 is: the i16 latent
+           path needs a quantized weight with a group scale. */
         if (L->moe_expert_w1[i].dtype == LZ_FMT_F32 ||
-            L->moe_expert_w3[i].dtype == LZ_FMT_F32)
+            L->moe_expert_w3[i].dtype == LZ_FMT_F32 ||
+            L->moe_expert_w1[i].dtype == LZ_FMT_BF16 ||
+            L->moe_expert_w3[i].dtype == LZ_FMT_BF16)
             mlat_may = 0;
 #endif /* LZ_MLAT_I16 */
     if (lz_moe_topk > 0 && lz_moe_topk <= ne)

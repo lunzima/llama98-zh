@@ -207,7 +207,9 @@ lz_i64 epi_shr_half(lz_i64 s, int rs) {
 }
 
 int lz_act_gs(const LZTensor *w, int in_dim) {
-    if (!w || w->dtype == LZ_FMT_F32) return 0;
+    /* bf16 joins F32 here: it carries no group scale, so there is no
+       activation group to follow. */
+    if (!w || w->dtype == LZ_FMT_F32 || w->dtype == LZ_FMT_BF16) return 0;
     if (w->gs >= 32 && (w->gs % 32) == 0 && (in_dim % 32) == 0) return 32;
     return w->gs;                   /* degenerate exported tier: keep old "activation follows weight" */
 }

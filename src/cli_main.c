@@ -454,6 +454,16 @@ static void usage(void) {
     "                   precondition for the ARM soft-float fast path\n"
     "                   dropping its inf/nan and overflow checks - see\n"
     "                   build/fp_exception_gate.sh.\n"
+    "  --bf16-store M   on|off (default ON). Keep BF16 tensors at two\n"
+    "                   bytes per element and widen on read, instead of\n"
+    "                   expanding them to f32 while loading. Halves what\n"
+    "                   the weights occupy and what reading them costs in\n"
+    "                   memory bandwidth. Changes NO number: a bf16 is\n"
+    "                   the high half of an f32, so the widening is the\n"
+    "                   same shift the loader used to do. `off` exists\n"
+    "                   for parity work - it puts both sides back on the\n"
+    "                   old path. Applies to 2-D tensors only; see\n"
+    "                   model.c for why 1-D and 3-D ones stay f32.\n"
     "  --fastfp MODE    on|off (default off). Round toward zero and flush\n"
     "                   denormals. NOT an x86 speed knob: measured at\n"
     "                   -0.7%% inside a 110ms sigma, because x86 scalar\n"
@@ -1639,6 +1649,21 @@ int main(int argc, char **argv) {
                 return 2;
             }
         }
+        else if (strcmp(a, "--bf16-store") == 0 && i + 1 < argc) {
+            /* Storage width for BF16 tensors, not an arithmetic tier -
+               so it sits outside the --fixed group table for the same
+               reason --fastfp and --subn-scale do. It changes no number
+               (a bf16 widened on read is the number the file holds),
+               only how much RAM the weights occupy; `off` exists so a
+               parity comparison can put both sides back on the
+               expand-at-load path and find out whether storage was
+               involved. */
+            const char *got = lz_bf16_store_select(argv[++i]);
+            if (!got) {
+                printf("--bf16-store: unknown mode (on|off)\n");
+                return 2;
+            }
+        }
         else if (strcmp(a, "--subn-scale") == 0 && i + 1 < argc) {
             /* Deliberately outside the --fixed group table below: this
                picks a scale LAYOUT, not a float/int tier, so `--fixed
@@ -1834,6 +1859,23 @@ int main(int argc, char **argv) {
            lz_gdn_p2_impl(), lz_tier_report());
     printf("Kernels        %s built-in, %s selected -> tier %s\n",
            lz_build_paths(), lz_kernel_name(), lz_kernel_tier());
+    /* PRINTED UNCONDITIONALLY, including when it is off and when the
+       model has no BF16 tensor at all. A run whose logits disagree with
+       another run's is the moment this line is read, and by then nobody
+       can re-derive which arm produced the dump - "absent" would be
+       ambiguous between "off" and "an older binary". The count says
+       whether the switch actually did anything on THIS model, which is
+       the second question a mismatch raises and the one a bare on/off
+       cannot answer. */
+    {
+        int nbf = 0, d;
+        for (d = 0; d < m.st.n_tensors; d++)
+            if (m.st.tensors[d].dtype == LZ_DT_BF16) nbf++;
+        printf("bf16 storage   %s (%d BF16 tensor(s) in the file)\n",
+               lz_bf16_store() ? "on - kept at 2 bytes/elem, widened on read"
+                               : "off - expanded to f32 at load",
+               nbf);
+    }
     {
         char _b[LZ_FTOA_BUF];
         lz_ftoa_f(_b, (float)(t1 - t0), 0, 0);

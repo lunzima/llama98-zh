@@ -560,6 +560,30 @@ extern int lz_fastfp_g;
 const char *lz_fastfp_select(const char *name);
 int lz_fastfp(void);
 
+/* bf16 WEIGHT STORAGE: 1 = keep a BF16 tensor at two bytes per element
+   and widen it on read, 0 = expand it to f32 while loading. DEFAULT ON,
+   which is unusual for a knob in this file and is justified by the one
+   property the other knobs do not have: it changes nothing. A bf16 is
+   the high half of an f32, so the widening is `bits << 16` - the very
+   operation model.c used to perform at load time - and every value the
+   kernels see is identical either way. What changes is that the tensor
+   occupies half as much RAM and costs half as much DDR traffic to read,
+   on a part whose bottleneck is DDR.
+ *
+ * It exists as a switch at all so that a parity comparison has
+ * somewhere to stand: if two builds ever disagree, turning this off
+ * puts both back on the expand-at-load path and says whether the
+ * storage change was involved. cli_main prints the state for the same
+ * reason - a run whose logits differ should not leave the reader
+ * guessing which arm produced them.
+ *
+ * NOT a licence to narrow an F32 file into bf16. That would be lossy
+ * and is a different decision; this only declines to WIDEN what is
+ * already bf16. */
+extern int lz_bf16_store_g;
+const char *lz_bf16_store_select(const char *name);
+int lz_bf16_store(void);
+
 /* Token pairing: "on" | "off" | "auto" (= on). Returns the setting in
    effect, or NULL if the name is unknown.
 
@@ -1390,6 +1414,15 @@ int lz_matmul_xq_i16_ok(const LZTensor *w, int in_dim, int nt);
    lz_matmul_w's dtype=0 branch) */
 void lz_matmul(float *o, const float *x, const float *w,
                    int in_dim, int out_dim);
+
+/* The same matmul over a bf16-stored weight matrix: each row is widened
+   into a scratch buffer and then run through the identical row body, so
+   the result is bit-identical to expanding the tensor at load time and
+   calling lz_matmul. wb is two bytes per element, row-major (out, in).
+   in_dim must be <= LZ_MM_WIDEN_MAX; model.c keeps wider tensors as f32
+   so this is guaranteed at the call site. */
+void lz_matmul_bf16(float *o, const float *x, const unsigned char *wb,
+                    int in_dim, int out_dim);
 
 /* Apply partial RoPE in place. v is laid out (n_heads, head_dim);
    each head rotates only its leading rotary_dim dims, the rest stay

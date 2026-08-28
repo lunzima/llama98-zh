@@ -264,6 +264,23 @@ const char *lz_fastfp_select(const char *name) {
 
 int lz_fastfp(void) { return lz_fastfp_g; }
 
+/* DEFAULT ON, unlike every other knob here, because it is the only one
+   that changes no number - see the note in ops.h. Off puts a BF16
+   tensor back on the expand-at-load path, which is what a parity
+   comparison needs when it has to ask whether the storage change was
+   involved. */
+int lz_bf16_store_g = 1;
+
+const char *lz_bf16_store_select(const char *name) {
+    if (!name) return NULL;
+    if (strcmp(name, "on") == 0) lz_bf16_store_g = 1;
+    else if (strcmp(name, "off") == 0) lz_bf16_store_g = 0;
+    else return NULL;
+    return lz_bf16_store_g ? "on" : "off";
+}
+
+int lz_bf16_store(void) { return lz_bf16_store_g; }
+
 /* ---- GDN recurrence tier: BOTH passes -------------------------------- */
 
 /* Pass 1 resolves from the same knob as pass 2, so the float arm is a

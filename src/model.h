@@ -54,6 +54,32 @@
 #define LZ_FMT_Q6_1  3      /* gs 6-bit (4-bit plane + 2-bit plane) + scale + min */
 #define LZ_FMT_Q16_0 4      /* gs int16s + 1 f32 scale (symmetric) */
 #define LZ_FMT_T2    5      /* ternary {-1,0,+1} as 2-bit codes + 1 f32 scale */
+#define LZ_FMT_BF16  6      /* n bf16s in q (read as uint16); no scale, no groups */
+
+/* LZ_FMT_BF16 IS STORAGE, NOT QUANTIZATION, and it is the only format
+   here that loses nothing. A bf16 is the high half of an f32, so
+   widening is `bits << 16` and the result is the very number the file
+   holds - there is no scale to apply, no group to belong to, and no
+   rounding either way.
+ *
+ * WHY IT EXISTS. A BF16 tensor used to be expanded to f32 while loading
+ * (safetensors.c's read path), so a file storing two bytes per parameter
+ * occupied four in RAM. On a 64MB target that is the difference between
+ * a model fitting and not: the checkpoint this was measured against
+ * reports "0.23 GB at 4 bytes/param". Keeping it narrow halves both the
+ * footprint and the DDR traffic of reading it, and DDR is the bottleneck
+ * on a 248MHz part.
+ *
+ * BIT-IDENTICAL TO EXPANDING AT LOAD TIME, which is what makes it safe
+ * to have on by default. The widening is the same `<<16` the loader
+ * performed, only deferred to the point of use; every value the kernels
+ * see is unchanged. That is a different claim from the quantized formats
+ * above, which trade accuracy for size on purpose - this one trades
+ * nothing. Narrowing an F32 file INTO bf16 would be lossy and is a
+ * separate decision, not this format.
+ *
+ * gs is 0 and scale/zero are NULL, so any code that reaches for a scale
+ * must test the dtype first - lz_t_f32 does, ahead of its scale guard. */
 
 /* Weight tensor. Row-major (out, in); quantization groups are
    contiguous within a row.
@@ -448,6 +474,14 @@ typedef struct {
     LZSafetensors st;
     char prefix[64];                /* tensor-name prefix, auto-detected */
     FILE *bin_file;                 /* non-NULL: stream weights from model.bin */
+
+    /* Streaming reader abstraction: every model.bin field/tensor read goes
+       through rd(rd_ctx, dst, sz). Two implementations: file_reader over
+       bin_file, and lz4d_read over a model.bin.lz4 stream (stunt). Returns
+       bytes actually read; the callers treat anything short of `sz` as a
+       read error. */
+    size_t (*rd)(void *ctx, void *dst, size_t sz);
+    void *rd_ctx;
 
     LZTensor embed_tokens;          /* (vocab, hidden) Q8; doubles as lm_head when tied */
     LZTensor final_norm;            /* (hidden) f32 */

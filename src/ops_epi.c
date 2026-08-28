@@ -1023,6 +1023,24 @@ float *lz_t_f32(const LZTensor *t, float *scratch) {
     int g, k;
     if (!t) return NULL;
     if (t->dtype == LZ_FMT_F32) return t->f;
+    /* BF16 AHEAD OF THE SCALE GUARD, because it has no scale: it is
+       storage, not quantization. The widening is `bits << 16` and the
+       result is exactly what the file holds - the same operation the
+       loader used to perform, moved here so the tensor can stay two
+       bytes per element in RAM. Assembled from the two bytes by name
+       rather than by casting to uint16_t*, so it is correct on a
+       big-endian host and needs no alignment beyond 2. */
+    if (t->dtype == LZ_FMT_BF16) {
+        const unsigned char *p = (const unsigned char *)t->q;
+        int i;
+        if (!scratch || !t->q) return NULL;
+        for (i = 0; i < t->n; i++) {
+            uint32_t u = ((uint32_t)p[i * 2 + 1] << 24) |
+                         ((uint32_t)p[i * 2] << 16);
+            memcpy(&scratch[i], &u, sizeof(float));
+        }
+        return scratch;
+    }
     if (!scratch || !t->q || !t->scale) return NULL;
     if (t->dtype == LZ_FMT_Q4_1) {
         /* nibbles: each 32-element sub-block is 16 bytes; byte j's low
@@ -1101,6 +1119,20 @@ void lz_t_row_f32(const LZTensor *t, int row, int dim, float *out) {
     if (!t || !out || dim <= 0) return;
     if (t->dtype == LZ_FMT_F32) {
         if (t->f) memcpy(out, t->f + (size_t)row * dim, (size_t)dim * sizeof(float));
+        return;
+    }
+    /* BF16: same `<<16` widening as lz_t_f32, one row of it. Ahead of
+       the scale/group guard below for the same reason - no scale. */
+    if (t->dtype == LZ_FMT_BF16) {
+        const unsigned char *p;
+        int i;
+        if (!t->q) return;
+        p = (const unsigned char *)t->q + (size_t)row * dim * 2;
+        for (i = 0; i < dim; i++) {
+            uint32_t u = ((uint32_t)p[i * 2 + 1] << 24) |
+                         ((uint32_t)p[i * 2] << 16);
+            memcpy(&out[i], &u, sizeof(float));
+        }
         return;
     }
     if (!t->q || !t->scale || t->gs <= 0) return;
