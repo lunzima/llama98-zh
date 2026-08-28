@@ -2,12 +2,27 @@
  *
  * The kernel computes o[i] = (x[i]*scale) * (w[i]+offset), element-wise,
  * in exactly that order: mulps x*xscale, addps w+offset, then mulps the
- * two. Each float op rounds to 32-bit, so the scalar reference forces the
- * same with volatile intermediates, compiled -fp6 so nothing stays in
- * x87's 80-bit. The interleave under test only swaps the two independent
- * chains' ordering, so the arithmetic - and the rounding - is unchanged.
+ * two. Each float op rounds to 32-bit, and the scalar reference asks for
+ * the same with volatile intermediates.
+ *
+ * THAT REQUEST IS NOT GRANTED BY WATCOM, and the header used to claim
+ * otherwise - "compiled -fp6 so nothing stays in x87's 80-bit". Built by
+ * wcc386 the reference disagrees with the kernel on 109,897 of 1,280,000
+ * values, and -fp6 changes nothing. The kernel is not what differs:
+ * hashing each arm separately, the WATCOM KERNEL and the GCC-COMPILED
+ * REFERENCE are the same 94C2D7F4 over every written lane, and only the
+ * Watcom-compiled reference stands apart. A kernel-versus-reference
+ * count cannot separate those two cases, because switching toolchain
+ * switches both arms; a per-arm hash can.
+ *
+ * So the verdict differs by toolchain, and the probe says which it gave:
+ *   gcc     - the reference is sound, the count is the verdict.
+ *   Watcom  - the reference is x87, the count is REPORTED AND NOT
+ *             FAILED, and the verdict is the kernel hash, which must
+ *             equal the one the gcc build prints.
  */
 #include <stdio.h>
+#include <string.h>
 #include "lz_int.h"
 
 void lz_rmsnorm_out_sse_w(float *o, const float *x, const float *w,
@@ -34,6 +49,8 @@ static void ref(float *o, const float *x, const float *w, int n4,
 int main(void) {
     float o1[64], o2[64], x[64], w[64], k2[2];
     long bad = 0, n = 0, moved = 0;
+    /* Hashed per arm, not just compared: see the header. */
+    unsigned long khash = 2166136261UL, rhash = 2166136261UL;
     int pass, i;
     static const int n4s[] = { 0, 1, 2, 3, 7, 8, 16 };
 
@@ -53,13 +70,33 @@ int main(void) {
                 bad++;
             }
             if (o1[i] != 12345.0f) moved++;
+            /* Written lanes only. The rest hold the sentinel in both
+               arms and would hash equal whatever either arm computed. */
+            if (i < n4 * 4) {
+                unsigned uk, ur;
+                memcpy(&uk, &o1[i], 4); memcpy(&ur, &o2[i], 4);
+                khash ^= uk; khash *= 16777619UL; khash &= 0xFFFFFFFFUL;
+                rhash ^= ur; rhash *= 16777619UL; rhash &= 0xFFFFFFFFUL;
+            }
         }
     }
+    printf("  kernel hash %08lX, reference hash %08lX\n", khash, rhash);
     /* Sensitivity: the kernel writes n4*4 lanes; the rest stay sentinel. */
     if (moved == 0) {
         printf("  no lane moved; the arms agreed on untouched memory\n");
         bad++;
     }
+#ifdef __WATCOMC__
+    /* The reference is x87 here, so a difference against it is not
+       evidence about the kernel. Say what was and was not checked
+       rather than returning a verdict this build cannot support. */
+    printf("rmsnorm_out_probe: %ld value(s), %ld differ from an x87"
+           " reference\n", n, bad);
+    printf("  the kernel is UNCHECKED here except through the hash above:"
+           " it must\n  equal the gcc build's kernel hash.\n");
+    return moved == 0;
+#else
     printf("rmsnorm_out_probe: %ld value(s), %ld mismatch(es)\n", n, bad);
     return bad != 0;
+#endif
 }
