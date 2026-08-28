@@ -1841,7 +1841,25 @@ void lz_matmul_w(float *o, const float *x, const LZTensor *w,
     lz_matmul_xq(o, x, xq, xqs, w, in_dim, out_dim);
 }
 
-/* ONE ROW BODY, TWO ROW SOURCES. `w` is a plain f32 matrix; `wb` is the
+/* NEITHER OF THESE RUNS ON A QUANTISED MODEL, and the number is worth
+   having before anyone optimises them. Instrumenting lz_matmul_xq_nt -
+   the real dispatch point, which lz_matmul_w is not; that one takes 3
+   call sites against its 29 - and running the zh fixture for 8 tokens
+   on the ARM recipe counted:
+
+       f32 0    bf16 0    quantised 728
+
+   So the f32 row leaf below, and the bf16 twin beside it, are for
+   UNQUANTISED models only. That is not a defect: it is exactly the case
+   where bf16 storage matters, since a quantised tensor is already
+   narrower than bf16 and has its own kernels. It does mean that
+   shaving instructions here buys nothing on the shipping recipe, and
+   that an earlier "150 million multiplies per token" framing for this
+   cell was wrong twice over - the census it came from is a 603-token
+   total, and it counts every __aeabi_fmul in the engine rather than
+   this path.
+
+   ONE ROW BODY, TWO ROW SOURCES. `w` is a plain f32 matrix; `wb` is the
    same matrix stored as bf16, two bytes per element. Exactly one is
    non-NULL. A bf16 row is widened into g_bfrow first and the body below
    then runs on it unchanged - which is what makes the two paths produce

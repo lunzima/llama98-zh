@@ -151,6 +151,29 @@
    Leave it at 0 unless that work is finished; --fastfp on the other
    targets is likewise still waiting for it.
 
+   WHAT FINISHING IT WOULD BUY, since "unfinished" has been sitting here
+   without a number. Truncation drops three instructions per result
+   against round-to-nearest-even - the left-justify of the dropped bits,
+   the compare against 2^31, and the BICEQ - and turns the ADC into an
+   ADD. Applied to every operator rather than fmul alone, against the
+   census above:
+
+       fmul  247,932/tok x 33 = 8,181,756    -3 each =   743,796
+       fadd   74,985/tok x 64 = 4,799,040    -3 each =   224,955
+       fdiv      176/tok x122 =    21,472    -3 each =       528
+       total                  13,002,268              =   969,279
+
+   7.5% of the soft-float arithmetic, which is real.
+
+   AND WHY IT STILL DOES NOT PAIR. The x86 side cannot meet it. MXCSR is
+   global: setting RC=truncate retimes every SSE operation in the
+   process, including the SIMD kernels, while ARM's switch covers named
+   routines - measured, the two disagree on 60,173,584 bytes of logits.
+   The bf16 storage switch dodges exactly this problem by being
+   LOSSLESS, which lets its default differ per target without breaking
+   parity; a rounding-mode change has no such escape. Closing this needs
+   x86 to compute in software too, which is a different project.
+
    It does NOT skip the inf/NaN operand checks, and that is not an
    oversight: MXCSR changes rounding and denormal handling only - the
    hardware still produces IEEE inf and NaN - so an ARM path that skipped
