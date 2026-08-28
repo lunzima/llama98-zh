@@ -335,15 +335,40 @@ static lz_i64 lz_epi_mac_grp(const int32_t *a, const int16_t *xq,
 static lz_i64 lz_epi_mac_i16(const int32_t *a, const int16_t *m, int n) {
     lz_i64 s = 0;
     int g;
+    /* BELOW FOUR ELEMENTS THERE IS NO KERNEL TO DISPATCH TO, so do not
+       ask. Both SIMD wrappers compute their block count as `n >> 2` and
+       skip the vector body entirely when it is zero - falling through to
+       a scalar tail that is the same loop as the one at the bottom of
+       this function. For n < 4 the tier tests, the counter and the call
+       are pure overhead in front of code that was going to run anyway.
+
+       This is the engine's single hottest dispatch:
+       build/dispatch_hotness.sh measures 811,008 executions on kmr20
+       over eight tokens, where ng is 2 - i.e. EVERY call took this
+       shape. It is one call site (epi_q41_join) with n = ng, so which
+       side of the threshold it lands on is a property of the model's
+       group count, not of the input.
+
+       Not hoisted the way the tier tests in ops_matmul.c were: this
+       dispatch is the callee's own prologue and its only caller is
+       itself per-row, so hoisting would mean threading a resolved
+       kernel down four levels. Declining to dispatch at all is smaller
+       and strictly better. */
+    if (n < 4) {
+        for (g = 0; g < n; g++) s += (lz_i64)a[g] * (lz_i64)m[g];
+        return s;
+    }
 #if defined(LZ_EPI_SSE2_EXTERN) || defined(LZ_ARM_ASM_EXTERN)
     /* Same lazy guard the other dispatch sites carry: the GUI never
        calls lz_kernel_select, so g_kernel reaches its value here.
 
-       Counted because the identity gate cannot tell whether the kernel
-       ran. Its epi comparison is ref against the tier, and the C loop
-       below produces the same bytes - so a dispatch that never fires
-       passes it exactly as a working one does. The count is what
-       separates "agrees" from "agrees and was reached". */
+       lz_debug_epi_kern counts calls that REACH a kernel body. Its
+       comment used to say the identity gate needs it to tell "agrees"
+       from "agrees and was reached" - no gate reads it; cli_main.c
+       prints it in the run banner and that is the whole consumer. The
+       count is a diagnostic for a person, and the early-out above makes
+       it a more honest one: it no longer counts calls that entered a
+       SIMD wrapper only to take its scalar tail. */
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
 #endif /* LZ_EPI_SSE2_EXTERN || LZ_ARM_ASM_EXTERN */
 #if defined(LZ_EPI_SSE2_EXTERN)
