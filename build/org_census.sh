@@ -41,6 +41,18 @@
 #     because they were misfiled. PLACEMENT cannot tell the two apart,
 #     and a per-tier family (lz_dot32_* exists once per ISA) has no one
 #     home for it to compare against.
+#   - A VERB PREFIX IS NOT A TOPIC, and a file organised by CONCERN will
+#     spread one noun across several. gui/main.c runs menu, status bar,
+#     layout, text emission, jobs, commands, wndproc, selftest in that
+#     order; apply_settings sits in the settings stretch and apply_font
+#     in the font one, which is right, and this axis scores the pair as
+#     apply* resuming. Its four hits there are all of that shape.
+#
+# WHAT THE THREE AXES FOUND, so that a future reader knows what a clean
+# run means: after four corrections the ORDER axis reports six re-entries
+# across three files, and the largest of those is the by-concern case
+# above. The first version reported 103 across 25 and every one of the
+# differences was this instrument being wrong, not the tree changing.
 #
 # Exit: 0 always. This is a census.
 set -u
@@ -65,8 +77,30 @@ FILES = sorted(glob.glob("src/*.c") + glob.glob("gui/*.c") +
 
 order = {}          # file -> [function names, in definition order]
 bodies = {}         # file -> {name: body text}
+arm = {}            # file -> {name: which preprocessor branch it is in}
 for f in FILES:
     t = strip(open(f, encoding="utf-8", errors="replace").read())
+    # PARALLEL ARMS ARE NOT A SEQUENCE. src/ops_mmx.c is
+    # #if defined(__WATCOMC__) ... #else /* gcc: intrinsics */ ... #endif
+    # and each arm walks the same weight formats in the same order, so one
+    # sequence over the whole file sees p2 resume at the bottom and calls
+    # a perfectly ordered file tangled. Two arms of one conditional are
+    # alternative texts; nobody reads them in succession.
+    #
+    # The full nesting PATH, not the depth: that file wraps everything in
+    # #if LZ_MMX_TU, so its __WATCOMC__ conditional sits at depth two and
+    # a depth-one test saw neither arm. Two functions are comparable only
+    # when every conditional open at both of them is on the same branch.
+    armat, stack, nextid = [], [], 0
+    for line in t.split("\n"):
+        s = line.lstrip()
+        if re.match(r"#\s*if", s):
+            stack.append([nextid, 0]); nextid += 1
+        elif re.match(r"#\s*(else|elif)", s) and stack:
+            stack[-1][1] += 1
+        elif re.match(r"#\s*endif", s) and stack:
+            stack.pop()
+        armat.append(tuple(tuple(x) for x in stack))
     names, bd = [], {}
     for m in DEF.finditer(t):
         n = m.group(1)
@@ -82,8 +116,11 @@ for f in FILES:
             j += 1
         names.append(n)
         bd[n] = t[i:j]
+        ln = t[:m.start()].count("\n")
+        arm.setdefault(f, {})[n] = armat[ln] if ln < len(armat) else ()
     order[f] = names
     bodies[f] = bd
+    arm.setdefault(f, {})
 
 # ---- families ---------------------------------------------------------
 # The longest underscore-delimited prefix a name shares with at least two
@@ -167,13 +204,21 @@ for f in FILES:
         for c in re.finditer(r"\b([a-z_]\w*)\s*\(", bodies[f][n]):
             if c.group(1) in pos:
                 callers[c.group(1)].add(n)
-    fam_pairs = [(i, family.get((n, f)))
-                 for i, n in enumerate(names) if family.get((n, f))]
-    fmt_pairs = [(i, fmt_key(n)) for i, n in enumerate(names) if fmt_key(n)]
-    byfam = [s for _, s in fam_pairs]
-    byfmt = [s for _, s in fmt_pairs]
-    a, wa = re_entries(byfam, names, callers, pos, [i for i, _ in fam_pairs])
-    b, wb = re_entries(byfmt, names, callers, pos, [i for i, _ in fmt_pairs])
+    # Per preprocessor branch, then summed: see the arm comment above.
+    a = b = 0
+    wa, wb = [], []
+    for br in sorted(set(arm[f].values())):
+        sel = [i for i, n in enumerate(names) if arm[f].get(n, 0) == br]
+        fam_pairs = [(i, family.get((names[i], f)))
+                     for i in sel if family.get((names[i], f))]
+        fmt_pairs = [(i, fmt_key(names[i])) for i in sel if fmt_key(names[i])]
+        ca, wca = re_entries([s for _, s in fam_pairs], names, callers, pos,
+                             [i for i, _ in fam_pairs])
+        cb, wcb = re_entries([s for _, s in fmt_pairs], names, callers, pos,
+                             [i for i, _ in fmt_pairs])
+        a += ca; b += cb; wa += wca; wb += wcb
+    byfam = [s for s in (family.get((n, f)) for n in names) if s]
+    byfmt = [s for s in (fmt_key(n) for n in names) if s]
     # If the file is sorted under EITHER key it is sorted; report the
     # smaller count, and only when both keys agree there is interleaving.
     if a and (b or len(byfmt) < 3):
