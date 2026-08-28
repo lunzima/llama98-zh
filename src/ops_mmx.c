@@ -92,6 +92,7 @@ extern void lz_gdn1_x4_asm(const int8_t *rowA, int32_t vd,
     "pxor      mm0, mm0" \
     "pxor      mm1, mm1" \
     "pxor      mm2, mm2" \
+    "pxor      mm7, mm7" \
     "test      ecx, ecx" \
     "jz        LZ_GDN1_DONE" \
     "LZ_GDN1_LOOP:" \

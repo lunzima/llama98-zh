@@ -49,6 +49,7 @@
 !/build/bf16_store_gate.sh
 !/build/lz4_model_gate.sh
 !/build/bf16_torch_gate.sh
+!/build/gcc_watcom_output_gate.sh
 !/build/bf16_torch_probe.c
 !/build/bf16_torch_check.py
 !/build/fixed_tier_xcompiler_gate.sh

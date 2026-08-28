@@ -885,6 +885,12 @@ lz4-model-gate:
 bf16-torch-gate:
 	@bash build/bf16_torch_gate.sh
 
+# gcc and Watcom must compute the same logits. ci.sh-only: it needs
+# both builds and a model dir, which `check` does not have.
+.PHONY: gcc-watcom-output-gate
+gcc-watcom-output-gate:
+	@bash build/gcc_watcom_output_gate.sh "$(MODEL)"
+
 .PHONY: dedupe-gate
 dedupe-gate:
 	@bash build/dedupe_gate.sh
