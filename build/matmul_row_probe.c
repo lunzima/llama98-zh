@@ -6,24 +6,23 @@
  * (no cross-lane mixing), so the scalar reference below - same i order,
  * same per-d order - is the same number.
  *
- * WATCOM DOES NOT GIVE THE REFERENCE 32-BIT ROUNDING, and this header
- * used to claim -fp6 did. Built by wcc386 the reference differs from the
- * kernel on 33,820 of 160,000 lanes: zero for in_dim 0/1/7/8/9, which
- * accumulate at most once, and rising with the number of accumulation
- * steps (16 -> 3820, 64 -> 7394), evenly across all eight lanes, at one
- * or two ULP. That is an accumulator carried wider than 32 bits, not a
- * lane or length defect.
+ * THE X87 PRECISION-CONTROL FIELD IS WHAT MAKES THAT TRUE ON WATCOM,
+ * and `volatile` is not enough. Volatile forces the 32-bit STORE; the
+ * operation still runs at the x87 default of a 64-bit mantissa, so each
+ * accumulate rounds twice - 64 bits then 24 - where the kernel's addps
+ * rounds once. Without _control87(PC_24) the reference disagreed with
+ * the kernel on 33,820 of 160,000 lanes: zero for in_dim 0/1/7/8/9,
+ * which accumulate at most once, rising with the number of accumulate
+ * steps (16 -> 3820, 64 -> 7394), even across all eight lanes, one or
+ * two ULP. With PC_24 it is 0, and the header used to blame -fp6, which
+ * is not the knob and changes nothing.
  *
- * THE KERNEL IS NOT WHAT DIFFERS. Hashing each arm alone, the Watcom
- * kernel and the gcc build both produce B470E23B over all 160,000
- * lanes; only the Watcom-compiled reference stands apart. A
- * kernel-versus-reference count cannot tell those apart, because
- * changing toolchain changes both arms at once.
- *
- * So the verdict is toolchain-dependent and the probe says which it
- * gave: under gcc the count is the verdict, under Watcom the count is
- * reported and not failed and the kernel hash is, against the gcc
- * build's.
+ * The per-arm hashes stay, because a kernel-versus-reference count
+ * cannot tell "the kernel differs" from "the reference differs" -
+ * changing toolchain changes both arms at once, and reading "passes
+ * under gcc, fails under Watcom" as a statement about the kernel is how
+ * this was first mis-diagnosed. The kernel hash is a function of the
+ * kernel alone and must be equal in both builds: B470E23B.
  *
  * NOT an accumulate: the gcc twin _mm_setzero_ps()'s and _mm_storeu_ps's,
  * so the reference zeroes acc8 rather than adding to it. The tail beyond
@@ -31,6 +30,9 @@
  */
 #include <stdio.h>
 #include <string.h>
+#ifdef __WATCOMC__
+#include <float.h>      /* _control87 / PC_24 - see the header */
+#endif
 #include "lz_int.h"
 
 int lz_matmul_row_sse(const float *row, const float *x, int in_dim, float *acc8);
@@ -47,10 +49,9 @@ static void ref(const float *row, const float *x, int in_dim, float *acc8) {
     for (d = 0; d < 8; d++) acc8[d] = 0.0f;
     for (i = 0; i < k; i += 8)
         for (d = 0; d < 8; d++) {
-            /* volatile asks for the product to round to 32-bit, matching
-               the kernel's mulps. gcc obliges; Watcom does not carry it
-               through the accumulation, which is what the header is
-               about - do not read this line as a guarantee. */
+            /* volatile rounds the PRODUCT to 32-bit, matching mulps. It
+               does nothing for the accumulate below - see the header:
+               that one needs the x87 precision-control field. */
             volatile float prod = row[i + d] * x[i + d];
             acc8[d] += prod;
         }
@@ -73,6 +74,12 @@ int main(void) {
     int pass, d;
     static const int dims[] = { 0, 1, 7, 8, 9, 16, 24, 31, 32, 40, 64 };
 
+#ifdef __WATCOMC__
+    /* Round every x87 operation to a 24-bit mantissa, so the reference's
+       accumulate rounds once like addps instead of twice. This is the
+       whole reason the probe can be run here at all. */
+    _control87(PC_24, MCW_PC);
+#endif
     for (pass = 0; pass < 20000; pass++) {
         int dim = dims[pass % 11];
         for (d = 0; d < 64; d++) { row[d] = nextf(); x[d] = nextf(); }
@@ -103,17 +110,6 @@ int main(void) {
         bad++;
     }
     printf("  kernel hash %08lX, reference hash %08lX\n", khash, rhash);
-#ifdef __WATCOMC__
-    /* The reference is x87 here, so a difference against it says nothing
-       about the kernel. Report what was and was not checked instead of
-       returning a verdict this build cannot support. */
-    printf("matmul_row_probe: %ld value(s), %ld differ from an x87"
-           " reference\n", n, bad);
-    printf("  the kernel is UNCHECKED here except through the hash above:"
-           " it must\n  equal the gcc build's kernel hash.\n");
-    return moved * 2 < n;
-#else
     printf("matmul_row_probe: %ld value(s), %ld mismatch(es)\n", n, bad);
     return bad != 0;
-#endif
 }

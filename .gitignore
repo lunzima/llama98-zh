@@ -120,6 +120,7 @@
 !/build/nest_census.awk
 !/build/aux_parm_arity_gate.sh
 !/build/aux_equiv_gate.sh
+!/build/rmsnorm_probe_stubs.c
 
 # Stray compiler/linker intermediates (gcc, Open Watcom), plus the raw
 # dumps probes drop at the repo root when run without a -o path.

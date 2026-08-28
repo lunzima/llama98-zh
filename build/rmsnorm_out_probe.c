@@ -5,24 +5,31 @@
  * two. Each float op rounds to 32-bit, and the scalar reference asks for
  * the same with volatile intermediates.
  *
- * THAT REQUEST IS NOT GRANTED BY WATCOM, and the header used to claim
- * otherwise - "compiled -fp6 so nothing stays in x87's 80-bit". Built by
- * wcc386 the reference disagrees with the kernel on 109,897 of 1,280,000
- * values, and -fp6 changes nothing. The kernel is not what differs:
- * hashing each arm separately, the WATCOM KERNEL and the GCC-COMPILED
- * REFERENCE are the same 94C2D7F4 over every written lane, and only the
- * Watcom-compiled reference stands apart. A kernel-versus-reference
- * count cannot separate those two cases, because switching toolchain
- * switches both arms; a per-arm hash can.
+ * VOLATILE IS NOT ENOUGH ON WATCOM. It forces the 32-bit STORE, but the
+ * operation still runs at the x87 default of a 64-bit mantissa, so each
+ * one rounds twice where the kernel's mulps/addps round once. Without
+ * _control87(PC_24) the reference disagreed with the kernel on 109,897
+ * of 1,280,000 values; with it, 0. The header used to blame -fp6, which
+ * is not the knob and changes nothing.
  *
- * So the verdict differs by toolchain, and the probe says which it gave:
- *   gcc     - the reference is sound, the count is the verdict.
- *   Watcom  - the reference is x87, the count is REPORTED AND NOT
- *             FAILED, and the verdict is the kernel hash, which must
- *             equal the one the gcc build prints.
+ * BOTH TWINS RUN HERE. lz_rmsnorm_out_sse_w is Watcom-only - it wraps a
+ * #pragma aux - so a gcc build of this probe used to have no kernel at
+ * all, and the gcc intrinsics twin in src/ops_kernel_norm.h went
+ * unexercised while the probe's name said otherwise.
+ * build/rmsnorm_probe_stubs.c supplies the name on the gcc side from
+ * that twin, so each build tests its own half and the two are compared
+ * through the kernel hash.
+ *
+ * The per-arm hashes stay: a kernel-versus-reference count cannot tell
+ * "the kernel differs" from "the reference differs", because changing
+ * toolchain changes both arms at once. The kernel hash is a function of
+ * the kernel alone and must be equal in both builds: 94C2D7F4.
  */
 #include <stdio.h>
 #include <string.h>
+#ifdef __WATCOMC__
+#include <float.h>      /* _control87 / PC_24 - see the header */
+#endif
 #include "lz_int.h"
 
 void lz_rmsnorm_out_sse_w(float *o, const float *x, const float *w,
@@ -54,6 +61,12 @@ int main(void) {
     int pass, i;
     static const int n4s[] = { 0, 1, 2, 3, 7, 8, 16 };
 
+#ifdef __WATCOMC__
+    /* Round every x87 operation to a 24-bit mantissa, so the reference
+       rounds once per op like the kernel does. This is the whole reason
+       the probe can be run here at all. */
+    _control87(PC_24, MCW_PC);
+#endif
     for (pass = 0; pass < 20000; pass++) {
         int n4 = n4s[pass % 7];
         k2[0] = nextf();
@@ -86,17 +99,6 @@ int main(void) {
         printf("  no lane moved; the arms agreed on untouched memory\n");
         bad++;
     }
-#ifdef __WATCOMC__
-    /* The reference is x87 here, so a difference against it is not
-       evidence about the kernel. Say what was and was not checked
-       rather than returning a verdict this build cannot support. */
-    printf("rmsnorm_out_probe: %ld value(s), %ld differ from an x87"
-           " reference\n", n, bad);
-    printf("  the kernel is UNCHECKED here except through the hash above:"
-           " it must\n  equal the gcc build's kernel hash.\n");
-    return moved == 0;
-#else
     printf("rmsnorm_out_probe: %ld value(s), %ld mismatch(es)\n", n, bad);
     return bad != 0;
-#endif
 }
