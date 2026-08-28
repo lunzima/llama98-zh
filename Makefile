@@ -866,39 +866,57 @@ softfp-gate:
 	@bash build/arm/softfp_gate.sh
 
 # --bf16-store on/off must give identical logits AND must have changed
-# something. ci.sh-only rather than in `check`: it needs a model dir
-# with BF16 tensors, which `check` does not have.
+# SKIP (exit 2) MUST NOT ABORT `check`, and the five recipes below are
+# the ones that can legitimately reach it - four want a model dir and one
+# wants wcc386. make has no notion of a third outcome: an exit 2 stops
+# the whole run at whichever gate got there first, and everything after
+# it never runs. That is the same "a gate that did not run reads as a
+# gate that passed" failure these were just wired in to end, so the
+# recipes convert 2 to 0 and let 1 through unchanged. The gate still
+# PRINTS its SKIP line, which is the part that has to stay visible - a
+# silent pass is what would be wrong, not a reported skip.
+#
+# GATE_OK is one text for all five: five copies of a shell idiom is five
+# chances for one of them to swallow a FAIL, and this tree has that
+# failure mode on record for copied constants already.
+GATE_OK = rc=0; bash $(1) || rc=$$?; if [ "$$rc" = 2 ]; then rc=0; fi; exit $$rc
+
+# something. Needs a model dir with BF16 tensors, which `check` does not
+# have - so in `check` it reports SKIP, and does real work under
+# `make bf16-store-gate MODEL=...` or from ci.sh.
 .PHONY: bf16-store-gate
 bf16-store-gate:
-	@bash build/bf16_store_gate.sh "$(MODEL)"
+	@$(call GATE_OK,build/bf16_store_gate.sh "$(MODEL)")
 
 # Compressed model == uncompressed model, and the decompressor round
-# trips byte for byte. ci.sh-only: it needs a model dir with a
-# model.bin, which `check` does not have.
+# trips byte for byte. Needs a model dir with a model.bin; SKIPs without
+# one. Verified working: 45,816,469 bytes round-tripped and the
+# compressed and uncompressed logits identical over 917,504 bytes.
 .PHONY: lz4-model-gate
 lz4-model-gate:
-	@bash build/lz4_model_gate.sh "$(MODEL)"
+	@$(call GATE_OK,build/lz4_model_gate.sh "$(MODEL)")
 
-# A third opinion on lz_bf16.c, from PyTorch. ci.sh-only: torch is not
-# a build dependency, and a SKIP in `check` would read as a pass.
+# A third opinion on lz_bf16.c, from PyTorch. Needs no model; SKIPs if
+# torch is absent, which is why it is behind GATE_OK too.
 .PHONY: bf16-torch-gate
 bf16-torch-gate:
-	@bash build/bf16_torch_gate.sh
+	@$(call GATE_OK,build/bf16_torch_gate.sh)
 
-# gcc and Watcom must compute the same logits. ci.sh-only: it needs
-# both builds and a model dir, which `check` does not have.
+# gcc and Watcom must compute the same logits. Needs both builds and a
+# model dir; SKIPs without them.
 .PHONY: gcc-watcom-output-gate
 gcc-watcom-output-gate:
-	@bash build/gcc_watcom_output_gate.sh "$(MODEL)"
+	@$(call GATE_OK,build/gcc_watcom_output_gate.sh "$(MODEL)")
 
-# The same question one layer down, and IN `check` rather than ci.sh-only
-# because it needs no model and no engine build - two source files and
-# both compilers. That is the whole point of it: the end-to-end gate saw
-# this class of defect and then declined to run, so the cheap direct
-# check is what keeps the expensive one from being the only asker.
+# The same question one layer down, and cheap enough for `check` because
+# it needs no model and no engine build - two source files and both
+# compilers. That is the whole point of it: the end-to-end gate saw this
+# class of defect and then declined to run, so the cheap direct check is
+# what keeps the expensive one from being the only asker. SKIPs where
+# there is no wcc386.
 .PHONY: mathf-xcompiler-gate
 mathf-xcompiler-gate:
-	@bash build/mathf_xcompiler_gate.sh
+	@$(call GATE_OK,build/mathf_xcompiler_gate.sh)
 
 .PHONY: dedupe-gate
 dedupe-gate:
