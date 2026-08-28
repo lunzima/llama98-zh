@@ -128,6 +128,7 @@
 !/build/vmax_vscale_probe.c
 !/build/prefetch_parity_probe.c
 !/build/prefetch_parity_gate.sh
+!/build/norm_sse_parity_gate.sh
 !/build/kernel_probe_census.sh
 !/build/org_census.sh
 

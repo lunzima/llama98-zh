@@ -49,6 +49,29 @@ def strip(s):
 SRC = sorted(glob.glob("src/*.c") + glob.glob("src/*.h"))
 PROBES = sorted(glob.glob("build/*probe*.c") + glob.glob(".prof/*xcheck*.c"))
 
+# WHICH PROBES ARE BUILT WITH WATCOM, which for a #pragma aux kernel is
+# the only build that contains it at all: gcc compiles no pragma body,
+# so a gcc-only probe "reaches" such a kernel on paper and executes
+# nothing. That is not a hypothetical - lz_gdn1_x4_asm accumulated into
+# an uninitialised mm7 while two probes drove lz_gdn_step straight
+# through it, because both drivers build with $CC and neither has a
+# Watcom arm.
+#
+# A .prof/X_xcheck.c counts if .prof/X_xcheck.sh runs wbuild_xcheck.sh;
+# a build/*_probe.c counts if some gate or driver names it next to
+# wbuild_xcheck.sh. Measured today: 4 of 15 xcheck drivers have that arm.
+WATCOM = set()
+drivers = glob.glob(".prof/*.sh") + glob.glob("build/*.sh")
+for d in drivers:
+    t = open(d, encoding="utf-8", errors="replace").read()
+    if "wbuild_xcheck" not in t:
+        continue
+    stem = os.path.basename(d)[:-3]
+    for p in PROBES:
+        b = os.path.basename(p)[:-2]
+        if b == stem or b in t:
+            WATCOM.add(p)
+
 KEYWORDS = set("if for while switch return sizeof do else case defined "
                "static inline void int float double char unsigned signed "
                "const struct union enum typedef extern".split())
@@ -137,12 +160,28 @@ for f in SRC:
                 calls.setdefault(fn, set()).update(ents)
 
 # ---- seeds: what the probes name -------------------------------------
-seeds = set()
+seeds, wseeds = set(), set()
 for p in PROBES:
     t = strip(open(p, encoding="utf-8", errors="replace").read())
     for m in re.finditer(r"\b([a-z_]\w*)\b", t):
         if m.group(1) not in KEYWORDS:
             seeds.add(m.group(1))
+            if p in WATCOM:
+                wseeds.add(m.group(1))
+
+def closure(start):
+    seen, stack = set(), list(start)
+    while stack:
+        n = stack.pop()
+        if n in seen:
+            continue
+        seen.add(n)
+        for c in calls.get(n, ()):
+            if c not in seen:
+                stack.append(c)
+    return seen
+
+wreach = closure(wseeds)
 
 # ---- closure ----------------------------------------------------------
 reach, stack = set(), [s for s in seeds]
@@ -163,20 +202,32 @@ rows = []
 for k, (f, kind) in sorted(kernels.items()):
     if k not in called_by_something:
         rows.append(("UNCALLED", k, f))
-    elif k in reach:
+    elif k in wreach:
         rows.append(("reached", k, f))
+    elif k in reach:
+        # On paper only. gcc compiles no #pragma aux body, so a probe
+        # that is never built with Watcom executes nothing here.
+        rows.append(("GCCONLY", k, f))
     else:
         rows.append(("GAP", k, f))
 
 cov = [r for r in rows if r[0] == "reached"]
+gcconly = [r for r in rows if r[0] == "GCCONLY"]
 gap = [r for r in rows if r[0] == "GAP"]
 dead = [r for r in rows if r[0] == "UNCALLED"]
 
-print("%d #pragma aux kernel(s) in src/, %d probe source(s)"
-      % (len(rows), len(PROBES)))
-print("  a probe reaches      : %d" % len(cov))
-print("  no probe reaches     : %d" % len(gap))
-print("  nothing calls at all : %d" % len(dead))
+print("%d #pragma aux kernel(s) in src/, %d probe source(s), %d of them"
+      " built with Watcom" % (len(rows), len(PROBES), len(WATCOM)))
+print("  a WATCOM-built probe reaches : %d" % len(cov))
+print("  only a gcc-built one does    : %d" % len(gcconly))
+print("  no probe reaches             : %d" % len(gap))
+print("  nothing calls at all         : %d" % len(dead))
+if gcconly:
+    print("\n-- REACHED ON PAPER ONLY: no Watcom build of any probe runs"
+          " these --")
+    for _, k, f in gcconly:
+        who = sorted(c for c in calls if k in calls[c])[:2]
+        print("  %-32s %-16s via: %s" % (k, f, ", ".join(who) or "(none)"))
 if gap:
     print("\n-- NO PROBE REACHES THESE --")
     for _, k, f in gap:
