@@ -71,7 +71,11 @@ if [ -z "$ENG" ]; then
     exit 2
 fi
 # lz_softfp.c is the ARM-only soft-float replacement for libgcc's
-# __aeabi_f* arithmetic/compare/convert and the EABI divmod routines
+# __aeabi_f* arithmetic, compare and convert routines. NOT the EABI
+# divmod ones, which this line advertised for one change too long: they
+# were removed after measurement (src/lz_softfp.c's closing comment has
+# the numbers - libgcc's CLZ-normalised divide runs 5x-34x fewer
+# instructions), and src/ now contains no __aeabi_*div* at all
 # (its body is #if __arm__ && __GNUC__, so it would compile to an empty
 # TU on the x86 gcc and Watcom builds - that is why it is not in the
 # shared ENG list). The ARM cross-build links it explicitly, so its

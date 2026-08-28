@@ -151,8 +151,16 @@ enum { LZ_LAMP_OFF = 0, LZ_LAMP_READY, LZ_LAMP_BUSY, LZ_LAMP_ERROR,
  * consumer's interval does not depend on how often this fires. */
 #define LZ_UI_TIMER     1
 /* Selftest-only pump watchdog. Its own id so it cannot collide with
-   the display tick above; see st_pump. */
-#define LZ_ST_PUMP_TIMER 99
+   the display tick above; see st_pump.
+
+   NAMED LZ_SELFTEST_, not LZ_ST_. Macros have no internal linkage, and
+   this TU reaches safetensors.h through main.c's modelload.h, so
+   LZ_ST_PUMP_TIMER shared the preprocessor's one flat namespace with
+   LZ_ST_MAX_DIMS - two different meanings of `st`, and the only place
+   where the 43 static st_* selftest functions below leak out of their
+   quarantine. safetensors.h owns the LZ_ST_ prefix and got there
+   first. */
+#define LZ_SELFTEST_PUMP_TIMER 99
 #define LZ_LAMP_BLINK 400        /* ms; WinZip's activity lamp flickered */
 
 /* The display is refreshed on a TIMER, not once per token (user
@@ -298,7 +306,7 @@ static struct {
        two things, so it says the one its label claims. Set at the job's
        start and moved forward when prefill ends, so a turn without
        prefill is measured from the start. */
-    double gen_start_ms;
+    float gen_start_ms;
     int   tok_live;
     /* The repetition penalty's WINDOW, in tokens. Ini-only, deliberately
      * not in LZGuiSettings and not in the settings dialog: it and the
@@ -826,7 +834,7 @@ static int prefill_active(void) {
  * writes and changes nothing below the GUI, so what it exercises is the
  * paint path itself and it needs no model. 0 (default) is off. */
 static int   g_dbg_prefill_ms;
-static double g_dbg_prefill_t0;
+static float g_dbg_prefill_t0;
 
 /* 4.0-era, hidden at the 3.51 floor. Value is fixed by the ABI, same
    argument gui/captionwnd.c makes for the constants it spells out. */
@@ -1534,7 +1542,7 @@ static void append_run(void *ud, const char *gbk, int n, int style) {
            headings do not need three sizes). This checkpoint only ever
            writes "###",
            so the difference between the levels would never appear on
-           screen. gui/stream.c still PARSES the level
+           screen. common/stream.c still PARSES the level
            and still clamps h4-h6 to 3 - that stays gated - the display
            just does not use it beyond heading-or-not.
 
@@ -1592,7 +1600,7 @@ static void append_run(void *ud, const char *gbk, int n, int style) {
        SCF_SELECTION, and the selection is the EMPTY insertion point at
        the end. That confines it to the paragraph being built. It is
        safe to switch back to no-tabs on the run after a table only
-       because the row's own '\n' carried the TABLE bit (gui/stream.c's
+       because the row's own '\n' carried the TABLE bit (common/stream.c's
        line-scoped-bits branch), so by the time a plain run gets here
        the insertion point is already in the NEXT paragraph. Those two
        halves have to be read together; either one alone is wrong.
@@ -1707,7 +1715,7 @@ static void append_run(void *ud, const char *gbk, int n, int style) {
 }
 
 /* Append `len` bytes of UTF-8 as ONE run with an explicit colour, no
- * bold/italic/code, and WITHOUT going through gui/stream.c's Markdown/
+ * bold/italic/code, and WITHOUT going through common/stream.c's Markdown/
  * think scanner - speaker labels, clocks and system lines
  * are UI chrome this program wrote itself, never model output, so
  * there is nothing in them for that scanner to find and no reason to
@@ -1718,7 +1726,7 @@ static void append_run(void *ud, const char *gbk, int n, int style) {
  * and mixing that into the scanner's own state machine would make it
  * responsible for two unrelated things.
  *
- * `utf8` is converted to GBK here exactly the way gui/stream.c's own
+ * `utf8` is converted to GBK here exactly the way common/stream.c's own
  * emit() does for the scanner's runs - same lz_gbk_from_utf8 call,
  * same "clamp after a possible truncation" guard - so this is, in
  * effect, that one call plus a CHARFORMAT set, with the scanner left
@@ -1807,7 +1815,7 @@ static void turn_header(LZStr speaker, COLORREF color, int with_time) {
 }
 
 /* Feed generated UTF-8 to the transcript. Chunk boundaries are
- * arbitrary; gui/stream.c owns the reassembly. */
+ * arbitrary; common/stream.c owns the reassembly. */
 static void transcript_push(const char *utf8, int len) {
     lz_stream_push(&g.stream, utf8, len, append_run, NULL);
 }
@@ -1825,7 +1833,7 @@ static void transcript_end(void) {
  * deal.
  *
  * CHROME, not content: written straight into the control like the
- * speaker label above, NOT pushed through gui/stream.c. These two bytes
+ * speaker label above, NOT pushed through common/stream.c. These two bytes
  * are this program's own layout, not something the model said, and the
  * scanner has no business seeing them - the same argument
  * append_colored_line's own comment already makes for the label and the
@@ -1859,7 +1867,7 @@ static void tokens_flush(void) {
  * With the throttle on they are held for the next tick; with it off
  * (stream_ms = 0) they go straight through, unthrottled. Correctness
  * does not depend on
- * where the boundaries fall - gui/stream.c is chunk-independent by
+ * where the boundaries fall - common/stream.c is chunk-independent by
  * construction - so merging
  * arrivals is free of meaning, only of cost.
  *
@@ -1977,7 +1985,7 @@ static void gui_prefill_progress(int done, int total, void *ctx) {
 /* ---- the window's single periodic tick (see LZ_UI_TIMER) ---- */
 
 static int    g_ui_timer_ms;      /* 0 = not armed */
-static double g_ui_last_flush;
+static float g_ui_last_flush;
 /* Whether the last tick saw a prefill. Belongs to the JOB, so start_job
    clears it with the counters: left over from a previous job it fires
    the prefill->generation transition on the first tick of a turn that
@@ -2033,7 +2041,7 @@ static void set_lamps(void) {
  * with it. On the target that clock moves in ~55 ms steps, which is
  * finer than any deadline here. */
 static void ui_tick(void) {
-    double now = lz_time_ms();
+    float now = lz_time_ms();
 
     /* lz_time_ms is GetTickCount on a target without QPC, and that
        wraps every 49.7 days. Every deadline below is a subtraction, so
@@ -2048,7 +2056,7 @@ static void ui_tick(void) {
     /* 1. Buffered tokens. stream_ms == 0 means the sink pushes straight
           to the control and there is nothing held back to flush. */
     if (g.job_kind == JOB_GENERATE && g.tok_ms > 0 &&
-        now - g_ui_last_flush >= (double)g.tok_ms) {
+        now - g_ui_last_flush >= (float)g.tok_ms) {
         tokens_flush();
         g_ui_last_flush = now;
     }
@@ -2069,17 +2077,17 @@ static void ui_tick(void) {
         if (g.job_kind != JOB_NONE) {
             g_dbg_prefill_t0 = 0.0;
         } else {
-            double dt;
+            float dt;
             if (g_dbg_prefill_t0 <= 0.0) g_dbg_prefill_t0 = now;
             dt = now - g_dbg_prefill_t0;
-            if (dt >= (double)g_dbg_prefill_ms) {
+            if (dt >= (float)g_dbg_prefill_ms) {
                 g_dbg_prefill_t0 = now;   /* loop, so it can be watched
                                              more than once */
                 dt = 0.0;
             }
             g_pf_base  = 0;
             g_pf_total = 1000;
-            g_pf_done  = (int)((dt * 1000.0) / (double)g_dbg_prefill_ms);
+            g_pf_done  = (int)((dt * 1000.0f) / (float)g_dbg_prefill_ms);
             if (g_pf_done >= g_pf_total) g_pf_done = g_pf_total - 1;
         }
     }
@@ -4801,7 +4809,7 @@ static void open_find(HWND hwnd) {
  * range (0x40-0xFE) overlaps its lead-byte range (0x81-0xFE), so only
  * a scan that starts from a KNOWN boundary (the string's own start,
  * since it came from a real decode) can stay synchronised - the same
- * resynchronisation reasoning gui/stream.c's own seq_len() and
+ * resynchronisation reasoning common/stream.c's own seq_len() and
  * gui/mru.c's own ci_eq() already rely on for their own byte walks. */
 static void truncate_gbk_to_width(HWND lb, char *gbk, int max_px) {
     HDC dc;
@@ -4951,7 +4959,7 @@ static void repaint_candidates(const LZInspect *ins) {
            places is already finer than a 14px lamp-sized column can
            usefully show. A literal tab (\t), not spaces - LB_SETTABSTOPS
            above is what the column position actually comes from. */
-        sprintf(row, "%s\t%.4f", gbk, (double)ins->cand_p[i]);
+        sprintf(row, "%s\t%.4f", gbk, ins->cand_p[i]);
         SendMessage(lb, LB_ADDSTRING, 0, (LPARAM)row);
     }
     SendMessage(lb, WM_SETREDRAW, TRUE, 0);
@@ -5833,7 +5841,7 @@ static int st_transcript(FILE *f) {
        source charset rather than the pipeline. */
     static const char CJK[] =
         "<think>\xE6\x80\x9D\xE8\x80\x83</think>\xE5\x9B\x9E\xE7\xAD\x94";
-    /* Same as CJK, tags stripped - the display bytes gui/stream.c is
+    /* Same as CJK, tags stripped - the display bytes common/stream.c is
        expected to actually produce (tags are consumed, not shown - see
        gui/stream.h's own comment). */
     static const char CJK_CONTENT[] =
@@ -5893,7 +5901,7 @@ static int st_transcript(FILE *f) {
     transcript_clear();
 
     /* Inline Markdown reaching the REAL control - the
-       parser's own output is gui/stream.c's job; this is
+       parser's own output is common/stream.c's job; this is
        only proof that append_run's CHARFORMAT wiring actually carries
        what the parser decided into RichEdit, the same relationship
        the think colour checks above have to LZ_COLOR_THINK. */
@@ -5927,7 +5935,7 @@ static int st_transcript(FILE *f) {
     }
 
     /* Block Markdown reaching the real control. Same relationship to
-       gui/stream.c as the inline block above:
+       common/stream.c as the inline block above:
        the parser's own decisions are covered exhaustively elsewhere;
        what can only be checked HERE is
        whether append_run turns those decisions into RichEdit state. */
@@ -5954,7 +5962,7 @@ static int st_transcript(FILE *f) {
         checks++;
         transcript_clear();
 
-        /* One size for every level (user decision). gui/stream.c still
+        /* One size for every level (user decision). common/stream.c still
            parses "###" as level 3 and still
            clamps h4-h6 - so this is
            the assertion that the DISPLAY deliberately ignores the level.
@@ -6836,17 +6844,17 @@ static int st_pump(HWND hwnd, int stop_at_first) {
        is a watchdog whose message the loop below eats itself, so it
        never reaches the window procedure and drives nothing. Reusing
        LZ_UI_TIMER's id here would cancel the real tick. */
-    SetTimer(hwnd, LZ_ST_PUMP_TIMER, 20000, NULL);
+    SetTimer(hwnd, LZ_SELFTEST_PUMP_TIMER, 20000, NULL);
     while (!g.done_seen && GetMessage(&msg, NULL, 0, 0) > 0) {
         if (msg.message == WM_APP_TOKENS && stop_at_first) {
             lz_worker_request_stop();
             stop_at_first = 0;
         }
-        if (msg.message == WM_TIMER && msg.wParam == LZ_ST_PUMP_TIMER) break;
+        if (msg.message == WM_TIMER && msg.wParam == LZ_SELFTEST_PUMP_TIMER) break;
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
-    KillTimer(hwnd, LZ_ST_PUMP_TIMER);
+    KillTimer(hwnd, LZ_SELFTEST_PUMP_TIMER);
     return g.done_seen;
 }
 
@@ -9298,11 +9306,11 @@ static int st_settings_dialog(FILE *f, HINSTANCE inst) {
         if (dp < 0) dp = -dp;
         if (dr < 0) dr = -dr;
         st_check(f, dp < 0.005f, "settings: the top-p box round-trips");
-        if (dp >= 0.005f) fprintf(f, "  got %.3f\n", (double)out.topp);
+        if (dp >= 0.005f) fprintf(f, "  got %.3f\n", out.topp);
         checks++;
         st_check(f, dr < 0.005f,
                  "settings: the repetition penalty box round-trips");
-        if (dr >= 0.005f) fprintf(f, "  got %.3f\n", (double)out.rep);
+        if (dr >= 0.005f) fprintf(f, "  got %.3f\n", out.rep);
         checks++;
     }
     st_check(f, out.max_new == 256,
@@ -9362,8 +9370,8 @@ static int st_settings_dialog(FILE *f, HINSTANCE inst) {
         st_check(f, d < 0.01f,
                  "settings: the temperature round-trips through the box");
         if (d >= 0.01f)
-            fprintf(f, "  in %.3f out %.3f\n", (double)in.temp,
-                    (double)out.temp);
+            fprintf(f, "  in %.3f out %.3f\n", in.temp,
+                    out.temp);
         checks++;
     }
     {
@@ -9372,8 +9380,8 @@ static int st_settings_dialog(FILE *f, HINSTANCE inst) {
         st_check(f, d < 0.01f,
                  "settings: the think-temp round-trips through the box");
         if (d >= 0.01f)
-            fprintf(f, "  in %.3f out %.3f\n", (double)in.think_temp,
-                    (double)out.think_temp);
+            fprintf(f, "  in %.3f out %.3f\n", in.think_temp,
+                    out.think_temp);
         checks++;
     }
 
@@ -9859,8 +9867,8 @@ static int st_sampling(FILE *f) {
         if (!ok)
             fprintf(f, "  temp %.3f topp %.3f (think topp %.3f, "
                        "instruct topp %.3f)\n",
-                    (double)s.temp, (double)s.topp,
-                    (double)think_topp, (double)inst_topp);
+                    s.temp, s.topp,
+                    think_topp, inst_topp);
         checks++;
     }
 
@@ -9936,8 +9944,8 @@ static int st_sampling(FILE *f) {
             fprintf(f, "  temp %.2f topp %.2f thinktemp %.2f rep %.2f "
                        "max_new %d "
                        "ctx %d manual %d/%d/%d\n",
-                    (double)s.temp, (double)s.topp, (double)s.think_temp,
-                    (double)s.rep,
+                    s.temp, s.topp, s.think_temp,
+                    s.rep,
                     s.max_new, s.ctx, s.manual_temp, s.manual_topp,
                     s.manual_think_temp);
         checks++;
@@ -9974,9 +9982,9 @@ static int st_sampling(FILE *f) {
         if (!ok)
             fprintf(f, "  topp %.3f rep %.3f thinktemp %.3f/%d "
                        "max_new %d window %d\n",
-                    (double)g.sess.opts.sample.topp,
-                    (double)g.sess.opts.sample.repetition_penalty,
-                    (double)g.sess.opts.sample.temp_think,
+                    g.sess.opts.sample.topp,
+                    g.sess.opts.sample.repetition_penalty,
+                    g.sess.opts.sample.temp_think,
                     g.sess.opts.sample.think_temp_enabled,
                     g.sess.opts.max_new_tokens,
                     g.sess.opts.sample.repeat_last_n);
@@ -10009,7 +10017,7 @@ static int st_sampling(FILE *f) {
         if (!(g.sess.opts.sample.repetition_penalty > 0.995f &&
               g.sess.opts.sample.repetition_penalty < 1.005f))
             fprintf(f, "  rep %.3f\n",
-                    (double)g.sess.opts.sample.repetition_penalty);
+                    g.sess.opts.sample.repetition_penalty);
         checks++;
 
         g.set = saved;
@@ -12604,8 +12612,8 @@ static int selftest(HINSTANCE inst, const char *path) {
                     g.set.temp >= want + 0.0005f)
                     fprintf(f, "  got manual=%d temp=%f, want manual=%d "
                                "temp~=%f\n", g.set.manual_temp,
-                            (double)g.set.temp, CASES[c].want_manual,
-                            (double)want);
+                            g.set.temp, CASES[c].want_manual,
+                            want);
                 checks++;
                 DestroyWindow(wc);
             }
@@ -12830,7 +12838,7 @@ static void sb_compare_shot(FILE *f, const char *path,
                 }
                 fprintf(f, "  pixel bytes differing: %ld / %ld "
                            "(%.1f%%)\n", diff, n,
-                        n ? (double)diff * 100.0 / (double)n : 0.0);
+                        n ? diff * 100.0f / (float)n : 0.0f);
                 fprintf(f, "  of those, inside the progress cell: "
                            "%ld; drawn by this program: %ld\n",
                         inprog, diff - inprog);
