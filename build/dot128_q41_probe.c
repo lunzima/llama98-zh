@@ -47,7 +47,13 @@ static int nextv(void) {
 }
 
 int main(void) {
-    unsigned char w[64];
+    /* An ALIGNED VIEW, not a bare array: the SSE2 kernel reads the
+       weights with movdqa and faults on a misaligned address. gcc aligns
+       a 64-byte stack array to 16 and hides it; Watcom aligns it to 4,
+       so this probe crashed on entry to the SSE2 kernel and had never
+       compared the group form on the toolchain the assembly is for. */
+    static unsigned char wbuf[64 + 16];
+    unsigned char *w = (unsigned char *)(((size_t)wbuf + 15) & ~(size_t)15);
     int16_t x[128];
     int32_t got[4], want[4], s4[4];
     long bad = 0, n = 0;

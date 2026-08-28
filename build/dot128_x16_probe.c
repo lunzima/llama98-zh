@@ -65,7 +65,14 @@ static int nextv(void) {
 }
 
 int main(void) {
-    int8_t w[128];
+    /* THE WEIGHT BUFFER IS AN ALIGNED VIEW, not a bare array. The SSE2
+       kernel reads it with movdqa, which faults on a misaligned address.
+       gcc aligns a 128-byte stack array to 16 and hides that; Watcom
+       aligns it to 4, so this probe died on entry to the SSE2 kernel and
+       had never once compared the group form against four per-32 calls
+       on the toolchain the assembly exists for. */
+    static int8_t wbuf[128 + 16];
+    int8_t *w = (int8_t *)(((size_t)wbuf + 15) & ~(size_t)15);
     int16_t x[128];
     int32_t got[4], want[4];
     long bad = 0, n = 0, same_pair = 0;
