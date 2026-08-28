@@ -1292,8 +1292,23 @@ static lz_i64 epi_q41_join(const int32_t *accb, const LZTensor *w, int row,
     if (zneg) s_zero = -s_zero;
     target = e_dot > e_zero ? e_dot : e_zero;
     *e_out = target;
-    return epi_shr_half(s_dot, target - e_dot)
-         + epi_shr_half(s_zero, target - e_zero);
+    /* ONE OF THESE TWO SHIFTS IS ALWAYS ZERO, because target is the max
+       of the two exponents - so one term is already aligned and the
+       call can only reach epi_shr_half's `if (rs <= 0) return s;` and
+       come back.
+
+       It was reaching it 811,008 times per eight tokens on kmr20 (half
+       of these two lines' 1,622,016 calls), each one a cross-TU call
+       into a 67-instruction function to return its argument. The branch
+       census reads the same fact from the other end: ops.c:204 scores
+       a 29.7% minority arm over 2,727,936 executions, and 811,008 /
+       2,727,936 is 29.7%.
+
+       Exactly equivalent, not an approximation: `target == e_dot` and
+       `target - e_dot == 0` are the same condition on ints, and that is
+       the condition the guard tests. */
+    return (target == e_dot  ? s_dot  : epi_shr_half(s_dot,  target - e_dot))
+         + (target == e_zero ? s_zero : epi_shr_half(s_zero, target - e_zero));
 }
 
 float epi_q41_fixed(const int32_t *accb, const LZTensor *w, int row,
