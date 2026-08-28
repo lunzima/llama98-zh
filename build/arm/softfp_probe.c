@@ -43,19 +43,24 @@ extern int   __aeabi_fcmplt(float, float);
 extern int   __aeabi_fcmple(float, float);
 extern int   __aeabi_fcmpge(float, float);
 extern int   __aeabi_fcmpgt(float, float);
-extern unsigned __aeabi_uidiv(unsigned, unsigned);
-extern int   __aeabi_idiv(int, int);
-/* __aeabi_uidivmod, __aeabi_idivmod and __aeabi_uldivmod return a PAIR
-   of results in registers and have no C prototype, so they are called
-   from the inline assembly below. THEY CANNOT BE TESTED THROUGH `/` AND
-   `%`, which is what this file tried first: the gate renames our copies
-   so that both implementations can link together, which means an
-   ordinary division in this file binds to LIBGCC's routine. Those three
-   rows were comparing libgcc with itself and would have reported PASS
-   with our versions deleted. __aeabi_cfcmpeq and __aeabi_cfrcmple have
-   the same problem from the other direction - they answer in the ARM
-   condition FLAGS rather than in a register - and are likewise called
-   from assembly that captures CPSR. */
+/* THE INTEGER DIVISION IS NOT TESTED HERE ANY MORE, because it is not
+   ours any more. src/lz_softfp.c used to define __aeabi_uidiv, idiv,
+   uidivmod, idivmod and uldivmod; they were removed once measurement
+   showed libgcc's CLZ-normalised routines run 5x to 34x fewer
+   instructions than the fixed-trip loops here, and that keeping them
+   bought nothing (the reason given for having them - that taking one
+   libgcc member drags its neighbours in - was false; the binary still
+   links zero double soft-float without them). The gate's coverage check
+   reads the exported symbols off the object, so it followed the removal
+   on its own and now reports 17 rather than 22.
+
+   __aeabi_cfcmpeq and __aeabi_cfrcmple answer in the ARM condition
+   FLAGS rather than in a register, so C cannot call them; they are
+   reached from the inline assembly below, which captures CPSR. That
+   detour is not optional - the gate renames our copies so both
+   implementations link together, so anything called the ordinary way
+   would bind to libgcc's and the row would compare libgcc with
+   itself. */
 
 /* ours, after objcopy */
 extern float lzsf_fadd(float, float);
@@ -73,8 +78,6 @@ extern int   lzsf_fcmplt(float, float);
 extern int   lzsf_fcmple(float, float);
 extern int   lzsf_fcmpge(float, float);
 extern int   lzsf_fcmpgt(float, float);
-extern unsigned lzsf_uidiv(unsigned, unsigned);
-extern int   lzsf_idiv(int, int);
 
 #define NOP 24
 static long bad[NOP], n[NOP];
@@ -82,7 +85,7 @@ static const char *opname[NOP] = {
     "fadd", "fsub", "fmul", "fdiv", "addsf3",
     "i2f", "ui2f", "l2f", "f2iz", "f2lz",
     "fcmpeq", "fcmplt", "fcmple", "fcmpge", "fcmpgt",
-    "uidiv", "idiv", "uidivmod", "idivmod", "uldivmod",
+    "-", "-", "-", "-", "-",             /* were the division rows */
     "cfcmpeq", "cfrcmple", "f2lz-oor", "pad"
 };
 /* f2lz OUT OF RANGE is counted apart and never fails the gate. C leaves
@@ -143,34 +146,6 @@ static int f2lz_in_range(uint32_t b) {
         : [o] "=r"(out)                                             \
         : [a] "r"(x), [b] "r"(y)                                    \
         : "r0", "r1", "r2", "r3", "ip", "lr", "cc")
-
-/* The divmods. 32-bit: n in r0, d in r1, quotient back in r0 and
-   remainder in r1. 64-bit: n in r0:r1, d in r2:r3, quotient in r0:r1
-   and remainder in r2:r3. Named register variables rather than
-   hand-written MOVs so gcc places the operands itself and the "+r"
-   constraints tell it all four are written. */
-#define DIVMOD32(fn, N, D, Q, R)                                     \
-    do {                                                             \
-        register uint32_t a0 __asm__("r0") = (N);                    \
-        register uint32_t a1 __asm__("r1") = (D);                    \
-        __asm__ __volatile__("bl " fn                                \
-            : "+r"(a0), "+r"(a1)                                     \
-            : : "r2", "r3", "ip", "lr", "cc", "memory");             \
-        (Q) = a0; (R) = a1;                                          \
-    } while (0)
-
-#define DIVMOD64(fn, N, D, Q, R)                                     \
-    do {                                                             \
-        register uint32_t b0 __asm__("r0") = (uint32_t)(N);          \
-        register uint32_t b1 __asm__("r1") = (uint32_t)((N) >> 32);  \
-        register uint32_t b2 __asm__("r2") = (uint32_t)(D);          \
-        register uint32_t b3 __asm__("r3") = (uint32_t)((D) >> 32);  \
-        __asm__ __volatile__("bl " fn                                \
-            : "+r"(b0), "+r"(b1), "+r"(b2), "+r"(b3)                 \
-            : : "ip", "lr", "cc", "memory");                         \
-        (Q) = ((lz_u64)b1 << 32) | b0;                               \
-        (R) = ((lz_u64)b3 << 32) | b2;                               \
-    } while (0)
 
 static void ck_flags(int op, uint32_t mine, uint32_t theirs) {
     n[op]++;
@@ -254,56 +229,6 @@ int main(void) {
         ckf(6, lzsf_ui2f(ua),           __aeabi_ui2f(ua));
         ckf(7, lzsf_l2f(((lz_i64)(int)ua << 32) | ub),
                __aeabi_l2f(((lz_i64)(int)ua << 32) | ub));
-
-        /* integer division. ub == 0 is skipped: libgcc raises SIGFPE
-           there and this file deliberately returns 0 instead, which is
-           a divergence that cannot be compared by running both. */
-        if (ub) {
-            uint32_t q1, r1, q2, r2;
-            cki(15, (lz_i64)lzsf_uidiv(ua, ub), (lz_i64)__aeabi_uidiv(ua, ub));
-            DIVMOD32("lzsf_uidivmod",    ua, ub, q1, r1);
-            DIVMOD32("__aeabi_uidivmod", ua, ub, q2, r2);
-            n[17]++;
-            if (q1 != q2 || r1 != r2) {
-                bad[17]++;
-                if (bad[17] <= 3)
-                    printf("  uidivmod %u/%u: mine %u,%u  libgcc %u,%u\n",
-                           (unsigned)ua, (unsigned)ub,
-                           (unsigned)q1, (unsigned)r1,
-                           (unsigned)q2, (unsigned)r2);
-            }
-        }
-        /* INT32_MIN / -1 overflows; libgcc traps there and this file does
-           not reproduce that, so it is not a case both can run. */
-        if (ub && !(ua == 0x80000000u && ub == 0xFFFFFFFFu)) {
-            int sa = (int)ua, sb = (int)ub;
-            uint32_t q1, r1, q2, r2;
-            cki(16, (lz_i64)lzsf_idiv(sa, sb), (lz_i64)__aeabi_idiv(sa, sb));
-            DIVMOD32("lzsf_idivmod",    ua, ub, q1, r1);
-            DIVMOD32("__aeabi_idivmod", ua, ub, q2, r2);
-            n[18]++;
-            if (q1 != q2 || r1 != r2) {
-                bad[18]++;
-                if (bad[18] <= 3)
-                    printf("  idivmod %d/%d: mine %d,%d  libgcc %d,%d\n",
-                           sa, sb, (int)q1, (int)r1, (int)q2, (int)r2);
-            }
-        }
-        {
-            lz_u64 nn = ((lz_u64)ua << 32) | ub;
-            lz_u64 dd = (lz_u64)(ub | 1u) | ((lz_u64)(ua & 0xFFu) << 32);
-            lz_u64 q1, r1, q2, r2;
-            DIVMOD64("lzsf_uldivmod",    nn, dd, q1, r1);
-            DIVMOD64("__aeabi_uldivmod", nn, dd, q2, r2);
-            n[19]++;
-            if (q1 != q2 || r1 != r2) {
-                bad[19]++;
-                if (bad[19] <= 3)
-                    printf("  uldivmod: mine %lu,%lu  libgcc %lu,%lu\n",
-                           (unsigned long)q1, (unsigned long)r1,
-                           (unsigned long)q2, (unsigned long)r2);
-            }
-        }
     }
 
     for (t = 0; t < NOP; t++) {

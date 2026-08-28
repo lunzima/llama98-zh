@@ -16,15 +16,30 @@
 # The engine body. net/http/openai are the server and are deliberately
 # NOT here: they are not in the CLI or DOS binary either, and there are
 # no sockets on the target machines.
-# lz_bf16 IS IN THE SHARED LIST, unlike lz_softfp, and the difference is
-# not an oversight. lz_softfp.c is ARM-only by construction - its body is
-# #if __arm__ && __GNUC__ and it exists to replace libgcc routines no
-# other target calls - so build/arm/build_engine.sh appends it alone.
-# lz_bf16.c has a portable C core with an ARM fast path bolted on, and
-# EVERY target is meant to run it: the shipping build has no hardware
-# bf16 anywhere, x86 included, so that one arithmetic serves all of them
-# and an ARM run stays byte-comparable with an x86 one. The compiler's
-# __bf16 appears only in build/bf16_native_probe.c, as a witness.
+# lz_bf16 IS IN THE SHARED LIST, unlike lz_softfp, and it is worth being
+# exact about why, because it is NOT yet earning its place the way the
+# rest of this list does.
+#
+# NOTHING CALLS IT TODAY. grep finds no lz_bf16_* call anywhere in src/
+# outside the file itself; safetensors.c's bf16 loader does its own
+# inline <<16 rather than calling lz_bf16_to_f32. So this is 1,488 bytes
+# of .text in every shipping binary that no code path reaches. That is
+# deliberate but it is a cost, and stating it as "every target runs it"
+# - which this comment did - was wrong.
+#
+# It stays in the list for one concrete reason: being compiled by gcc,
+# Watcom, the ARM cross and the x87/MIPS scripts on every build is what
+# keeps its portability honest continuously, rather than discovering at
+# wiring-up time that it does not survive the C89 floor or Watcom. It
+# has a portable C core with an ARM fast path bolted on, unlike
+# lz_softfp.c, whose body is #if __arm__ && __GNUC__ and which
+# build/arm/build_engine.sh therefore appends alone.
+#
+# WHEN IT IS WIRED UP the design is that every target runs this software
+# implementation, x86 included - the shipping build has no hardware bf16
+# anywhere, so one arithmetic serves all targets and an ARM run stays
+# byte-comparable with an x86 one. The compiler's own __bf16 appears
+# only in build/bf16_native_probe.c, as a witness and never a component.
 ENG := err compat lfn json safetensors model ops ops_kernel ops_rope ops_moe ops_epi ops_quant ops_sched ops_matmul ops_t2_arm ops_arm ops_t2_scalar ops_norm ops_gdn ops_conv1d fwht forward forward_attn forward_moe forward_ssm forward_kda sampler generate lz_mathf lz_bf16 \
        tokenizer unicode chat gbk cpucheck
 SRV := net http openai

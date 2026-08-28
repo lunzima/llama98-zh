@@ -82,11 +82,18 @@
 
    IT EXISTS BECAUSE COUNTING BEAT GUESSING, TWICE. Reading the code says
    every operator's fast path is worth optimising; the measurement said
-   otherwise (kmr20, zh fixture, 603 tokens):
+   otherwise (kmr20, zh fixture).
 
-     fmul  149,503,180 fast   1,298,514 declined   0.861%
-     fadd   45,215,879 fast  13,188,114 declined  22.581%
-     fdiv      106,048 fast         613 declined   0.575%
+   THESE ARE WHOLE-RUN TOTALS OVER 603 TOKENS, not per-token rates, and
+   the per-token column is spelled out because the omission has already
+   caused two wrong numbers elsewhere in this tree - a comment in
+   lz_bf16.c argued from "150 million multiplies per token" and from
+   reading the 613 as a per-token divide count when it is the run's
+   declines. A reader skims the big number, not the header line.
+
+     fmul  149,503,180 fast   1,298,514 declined   0.861%   247,932/tok
+     fadd   45,215,879 fast  13,188,114 declined  22.581%    74,985/tok
+     fdiv      106,048 fast         613 declined   0.575%       176/tok
 
    Effort had gone into shaving 4 instructions off fmul's fast path -
    which its 0.861% decline rate makes nearly free already - while fadd
@@ -1020,16 +1027,38 @@ __attribute__((naked)) int __aeabi_fcmpgt(float a, float b) {
 
 float __aeabi_i2f(int a) {
     /* the engine's verified lz_i32f_arm_asm: CLZ + barrel shifter + cond
-       execution, ~14 insns for every int32 (INT32_MIN included), vs the
-       generic sf_norm_round_pack_f32 path it replaces. */
+       execution, vs the generic sf_norm_round_pack_f32 path it replaces.
+
+       TWO BRANCHES, TWO COSTS, and this comment used to quote only the
+       cheap one as "~14 insns for every int32" - the same mistake the
+       header's "COST, COUNTED THE SAME WAY" note was written about, left
+       behind when that fix went through fadd/fsub/fmul:
+
+         |v| < 2^24  (clz >= 8)   14   exact, no rounding to do
+         |v| >= 2^24 (clz <  8)   22   shifts right, then round-to-even
+
+       libgcc's shared i2f/ui2f/l2f tail is 20 on BOTH branches (it feeds
+       the 32-bit value through the 64-bit l2f path with the low word
+       zeroed), so this wins the small-magnitude branch by 6 and loses
+       the rounding branch by 2. Which one dominates depends on the
+       magnitude distribution of the engine's int-to-float traffic, which
+       has not been measured - indices and counts are mostly well under
+       2^24, so the cheap branch is probably the common one, but that is
+       an expectation and not a number. */
     return lz_i32f_arm_asm(a);
 }
 
 /* i2f's C entry alias; gcc calls __aeabi_i2f directly. */
 float __aeabi_ui2f(unsigned int v) {
     /* unsigned 32 -> float, RNE: lz_i32f_arm_asm's structure without the
-       sign handling (bit 31 is a value bit here). ~14 insns vs libgcc's
-       ui2f stub + l2f tail (~39 dynamic). */
+       sign handling (bit 31 is a value bit here).
+
+       Same two-branch shape as __aeabi_i2f above, and the same
+       correction: this said "~14 insns vs libgcc's ~39 dynamic" while
+       quoting only the exact branch, and libgcc's 39 was its stub plus
+       the l2f tail counted whole. Measured the same way on both sides,
+       11 on the exact branch (|v| < 2^24) and 19 when a right shift and
+       a rounding step are needed, against libgcc's 20 either way. */
     union { float f; uint32_t u; } b;
     uint32_t res, a, n, sh;
     __asm__(
@@ -1181,6 +1210,17 @@ int __aeabi_f2iz(float a) {
    validating a length wants. Measured against libgcc: 0 of 3,171,248
    in-range cases differ, and 1,016,248 of 1,031,758 out-of-range ones
    do, by construction. IN RANGE IS THE PART THAT IS OWED. */
+/* LZ_I64_MAX/MIN rather than a literal with an LL suffix. `LL` is a
+   syntax error on the 1995 compiler this tree keeps a floor for - it
+   spells the suffix i64 and rejects LL outright with "bad suffix on
+   number", taking the whole expression with it - which is why
+   src/lz_int.h supplies LZ_I64_C. MIN is built by negating MAX and
+   stepping one further rather than written out, because the literal
+   9223372036854775808 does not fit a signed 64-bit type and a compiler
+   is entitled to widen it or complain. */
+#define LZ_I64_MAX   LZ_I64_C(9223372036854775807)
+#define LZ_I64_MIN   (-LZ_I64_MAX - 1)
+
 lz_i64 __aeabi_f2lz(float a) {
     union { float f; uint32_t u; } ua;
     uint32_t e, sig;
@@ -1195,157 +1235,57 @@ lz_i64 __aeabi_f2lz(float a) {
         if (e == 0xFFu && (ua.u & 0x7FFFFFu)) return 0;          /* NaN */
         /* -2^63 is exactly representable and is not an overflow. */
         if ((ua.u & 0x80000000u) && sh == 40 && sig == 0x800000u)
-            return (lz_i64)(-9223372036854775807LL) - 1;
-        return (ua.u & 0x80000000u)
-                   ? (lz_i64)(-9223372036854775807LL) - 1
-                   : (lz_i64)9223372036854775807LL;
+            return LZ_I64_MIN;
+        return (ua.u & 0x80000000u) ? LZ_I64_MIN : LZ_I64_MAX;
     }
     if (sh >= 0) r = (lz_i64)(lz_u64)sig << sh;
     else         r = (lz_i64)(sig >> (-sh));
     return (ua.u & 0x80000000u) ? -r : r;
 }
 
-/* ------------------------------------------------------------------ */
-/* integer division (EABI divmod), no libgcc                          */
-/* ------------------------------------------------------------------ */
+/* INTEGER DIVISION IS libgcc's, DELIBERATELY, and this note is here
+   because it used to be ours and the reason given was wrong.
 
-/* __aeabi_uidivmod: unsigned 32/32, returns quotient in r0 and
-   remainder in r1 (the EABI divmod convention). Restoring long division,
-   32 iterations. d == 0 returns 0/0 (the engine never divides by zero;
-   libgcc raises SIGFPE there, which we deliberately do not reproduce). */
-__attribute__((naked)) unsigned __aeabi_uidivmod(unsigned n, unsigned d) {
-    __asm__(
-        "movs   r2, r1\n\t"        /* r2 = d, Z if d == 0 */
-        "beq    2f\n\t"
-        "cmp    r2, #1\n\t"
-        "beq    3f\n\t"            /* d == 1: quot = n, rem = 0 */
-        "mov    r1, #0\n\t"        /* rem */
-        "mov    r3, r0\n\t"        /* r3 = n (shifted in) */
-        "mov    r0, #0\n\t"        /* quot */
-        "mov    ip, #31\n\t"
-        "1:\n\t"
-        "movs   r3, r3, lsl #1\n\t"  /* shift n, C = top bit */
-        "adc    r1, r1, r1\n\t"      /* rem = rem<<1 | C */
-        "cmp    r1, r2\n\t"
-        "subcs  r1, r1, r2\n\t"
-        "adc    r0, r0, r0\n\t"      /* quot = quot<<1 | (rem >= d) */
-        "subs   ip, ip, #1\n\t"
-        "bpl    1b\n\t"
-        "bx     lr\n\t"
-        "2:\n\t"                     /* d == 0 */
-        "mov    r0, #0\n\t"
-        "mov    r1, #0\n\t"
-        "bx     lr\n\t"
-        "3:\n\t"                     /* d == 1 */
-        "mov    r1, #0\n\t"
-        "bx     lr\n\t"
-    );
-}
+   The claim was that "pulling one libgcc member drags its neighbours
+   in", so taking __udivsi3 would undo the point of this file. It does
+   not. An archive member is pulled only to satisfy an UNDEFINED symbol,
+   and every soft-float symbol is already defined by this object, which
+   the link line places first. Measured by building both ways: with the
+   five divmod routines removed the binary still contains ZERO
+   __aeabi_d* / __adddf3 / __muldf3 symbols, and __aeabi_fmul is still
+   this file's (the ANDS/ANDNES/TEQNE guard chain is its signature).
+   Only _udivsi3.o and _udivmoddi4.o come across, and they reference no
+   float routine.
 
-/* __aeabi_uidiv: unsigned 32/32, quotient only. Thin wrapper - uidivmod
-   already leaves the quotient in r0. */
-__attribute__((naked)) unsigned __aeabi_uidiv(unsigned n, unsigned d) {
-    __asm__(
-        "push   {lr}\n\t"
-        "bl     __aeabi_uidivmod\n\t"
-        "pop    {lr}\n\t"
-        "bx     lr\n\t"
-    );
-}
+   Removing them is not neutral, it is a large win. Ours was a
+   fixed-trip restoring loop - 32 iterations for 32/32, 64 for 64/64,
+   regardless of operand size. libgcc's is CLZ-normalised and runs only
+   as many steps as the quotient has bits. Executed instructions under
+   qemu (-one-insn-per-tb, the instrument .prof/arm_div_count.sh uses,
+   loop overhead subtracted):
 
-/* __aeabi_idivmod: signed 32/32 divmod. Takes magnitudes, calls uidivmod,
-   then applies signs: quotient sign = n^d, remainder sign = n. */
-__attribute__((naked)) int __aeabi_idivmod(int n, int d) {
-    __asm__(
-        "mov    r2, r0\n\t"          /* keep n for remainder sign */
-        "eor    r3, r0, r1\n\t"      /* quotient sign bit */
-        "cmp    r0, #0\n\t"
-        "rsblt  r0, r0, #0\n\t"      /* |n| */
-        "cmp    r1, #0\n\t"
-        "rsblt  r1, r1, #0\n\t"      /* |d| */
-        "push   {r2, r3, lr}\n\t"
-        "bl     __aeabi_uidivmod\n\t"
-        "pop    {r2, r3, lr}\n\t"
-        "tst    r3, #0x80000000\n\t"
-        "rsbne  r0, r0, #0\n\t"      /* negate quotient if signs differ */
-        "cmp    r2, #0\n\t"
-        "rsblt  r1, r1, #0\n\t"      /* remainder takes n's sign */
-        "bx     lr\n\t"
-    );
-}
+       shape                      ours   libgcc
+       small quotient (indices)    210       39     5.3x
+       large quotient              180       82     2.2x
+       n < d                       236        7      34x
+       64/64                      1246      145     8.6x
 
-/* __aeabi_idiv: signed 32/32, quotient only. Wrapper over idivmod, which
-   leaves the quotient in r0. */
-__attribute__((naked)) int __aeabi_idiv(int n, int d) {
-    __asm__(
-        "push   {lr}\n\t"
-        "bl     __aeabi_idivmod\n\t"
-        "pop    {lr}\n\t"
-        "bx     lr\n\t"
-    );
-}
+   The engine has 129 integer-divide call sites, all of them index,
+   stride and block arithmetic where the small-quotient row is the
+   normal case. There is no rounding in an integer divide, so both
+   compute the identical quotient and remainder; this is a pure speed
+   change with nothing to verify beyond the link.
 
-/* __aeabi_uldivmod: unsigned 64/64 divmod. n in r0:r1, d in r2:r3;
-   returns quotient in r0:r1 and remainder in r2:r3. 64-iteration
-   restoring long division on (r4:r5 = rem, r6:r7 = quot). d == 0
-   returns 0 (the engine never divides by zero). */
-__attribute__((naked)) void __aeabi_uldivmod(unsigned long long n, unsigned long long d) {
-    __asm__(
-        "cmp    r3, #0\n\t"
-        "cmpeq  r2, #0\n\t"
-        "beq    4f\n\t"              /* d == 0 */
-        /* r4-r8 are callee-saved: the caller's C code keeps live values
-           in them across this call, so preserve them (libgcc's own
-           __udivmoddi4 is C-compiled and does the same). */
-        "push   {r4, r5, r6, r7, r8, lr}\n\t"
-        "mov    r4, #0\n\t"          /* rem_hi */
-        "mov    r5, #0\n\t"          /* rem_lo */
-        "mov    r6, #0\n\t"          /* quot_hi */
-        "mov    r7, #0\n\t"          /* quot_lo */
-        "mov    ip, #63\n\t"
-        "1:\n\t"
-        /* Shift rem (r4:r5) left by 1, inserting n's bit 63 into the
-           bottom.  Explicit register moves + orrcs, NOT an "adc r5,r5,r5;
-           adc r4,r4,r4" carry chain: qemu does not propagate the carry
-           flag through an adc whose destination is also a source (the
-           64-bit chain then fills rem_hi with garbage).  Carry-in on a
-           same-register adc is read correctly, carry-out is not, so the
-           chain is unusable; orrcs reads a flag, never writes one. */
-        "mov    r8, r1, lsr #31\n\t" /* r8 = n bit 63 (0/1) */
-        "lsls   r5, r5, #1\n\t"      /* rem_lo <<= 1; C = old rem_lo bit 31 */
-        "lsl    r4, r4, #1\n\t"      /* rem_hi <<= 1 */
-        "orrcs  r4, r4, #1\n\t"      /* rem_hi |= old rem_lo bit 31 */
-        "orr    r5, r5, r8\n\t"      /* rem_lo |= n bit 63 */
-        "lsl    r1, r1, #1\n\t"
-        "orr    r1, r1, r0, lsr #31\n\t" /* n_hi = (n_hi<<1)|(n_lo>>31) */
-        "lsl    r0, r0, #1\n\t"      /* n_lo <<= 1 */
-        "cmp    r4, r3\n\t"
-        "cmpeq  r5, r2\n\t"          /* C = rem >= d (64-bit) */
-        "movcs  r8, #1\n\t"
-        "movcc  r8, #0\n\t"          /* r8 = (rem >= d) */
-        "cmp    r8, #0\n\t"
-        "beq    2f\n\t"
-        "subs   r5, r5, r2\n\t"
-        "sbc    r4, r4, r3\n\t"      /* rem -= d */
-        "2:\n\t"
-        "adds   r7, r7, r7\n\t"
-        "adc    r6, r6, r6\n\t"      /* quot <<= 1 */
-        "orr    r7, r7, r8\n\t"      /* quot_lo |= (rem >= d) */
-        "subs   ip, ip, #1\n\t"
-        "bpl    1b\n\t"
-        "mov    r0, r7\n\t"          /* quot_lo */
-        "mov    r1, r6\n\t"          /* quot_hi */
-        "mov    r2, r5\n\t"          /* rem_lo */
-        "mov    r3, r4\n\t"          /* rem_hi */
-        "pop    {r4, r5, r6, r7, r8, lr}\n\t"
-        "bx     lr\n\t"
-        "4:\n\t"                     /* d == 0 */
-        "mov    r0, #0\n\t"
-        "mov    r1, #0\n\t"
-        "mov    r2, #0\n\t"
-        "mov    r3, #0\n\t"
-        "bx     lr\n\t"
-    );
-}
+   IT COSTS 828 BYTES of .text (431,658 -> 432,486), because libgcc
+   trades code for speed the other way round: its 32 steps are unrolled
+   into a table entered partway by `addne pc, pc, curbit, lsl #2`, where
+   ours was a loop. That is the right trade here - the data segment is
+   416KB and the target has 64MB - but it is a trade and not a free
+   lunch, so it is recorded rather than left for someone to rediscover.
+
+   ONE BEHAVIOUR DOES CHANGE, and in the right direction: ours returned
+   0/0 for a zero divisor while libgcc traps. x86 traps too, on the
+   hardware instruction, so this makes the two targets agree where they
+   used to differ silently. */
 
 #endif /* __arm__ && __GNUC__ */

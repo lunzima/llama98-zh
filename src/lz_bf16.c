@@ -419,9 +419,18 @@ uint32_t lz_bf16_sub(uint32_t a, uint32_t b) {
 }
 
 uint32_t lz_bf16_div(uint32_t a, uint32_t b) {
-    /* No fast path: 613 divides per token against 150 million multiplies
-       measured on the zh fixture, so the asm would be carried and never
-       repaid. */
+    /* No fast path: 176 divides per token against 247,932 multiplies and
+       74,985 adds, so the assembly would be carried and never repaid.
+
+       BOTH FIGURES HERE USED TO BE WRONG, and in a way worth naming
+       because it is easy to repeat. lz_softfp.c's census is printed as
+       TOTALS OVER A 603-TOKEN RUN (kmr20, zh fixture) - 149,503,180
+       fmul, 45,215,879 fadd, 106,048 fdiv fast plus 613 declined. This
+       comment read the 149.5M as per-token and the 613 as a per-token
+       divide count, when 613 is the whole run's DECLINES. Divide by 603
+       for the per-token numbers above. The ratio it was arguing from was
+       off by about 175x; the conclusion survives at 1:1400 anyway, which
+       is why nobody noticed. */
     return bf16_binop_c(a, b, 3);
 }
 
