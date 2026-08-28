@@ -78,6 +78,7 @@ FILES = sorted(glob.glob("src/*.c") + glob.glob("gui/*.c") +
 order = {}          # file -> [function names, in definition order]
 bodies = {}         # file -> {name: body text}
 arm = {}            # file -> {name: which preprocessor branch it is in}
+static_fn = set()   # (name, file) pairs with internal linkage
 for f in FILES:
     t = strip(open(f, encoding="utf-8", errors="replace").read())
     # PARALLEL ARMS ARE NOT A SEQUENCE. src/ops_mmx.c is
@@ -116,6 +117,8 @@ for f in FILES:
             j += 1
         names.append(n)
         bd[n] = t[i:j]
+        if m.group(0).lstrip().startswith("static"):
+            static_fn.add((n, f))
         ln = t[:m.start()].count("\n")
         arm.setdefault(f, {})[n] = armat[ln] if ln < len(armat) else ()
     order[f] = names
@@ -234,6 +237,18 @@ print("  %d of %d .c file(s) have at least one" % (len(rows), len(FILES)))
 print("\n== PLACEMENT: family lives mostly elsewhere ==")
 hits = 0
 for (n, f), p in sorted(family.items()):
+    # STATIC FUNCTIONS ARE NOT MISPLACED. Internal linkage means no other
+    # file can call it, so "your family lives elsewhere" asks for a move
+    # that would have to make it extern first - and all three hits this
+    # axis had left were of that shape: lz4d_read_void is model.c's
+    # 3-line adapter to model.c's own reader pointer, and m_uses_lz4
+    # identifies the reader by comparing against its ADDRESS; utf8_argv
+    # reads the Win32 command line, which is a CLI concern and not a
+    # tokenizer one; utf8_extra is gbk.c's own five-line lead-byte
+    # predicate. Each shares a prefix with another file's family and
+    # nothing else. A shared prefix is not a shared concern.
+    if (n, f) in static_fn:
+        continue
     here = os.path.basename(f)
     home, homecount = famfiles[p].most_common(1)[0]
     total = sum(famfiles[p].values())
