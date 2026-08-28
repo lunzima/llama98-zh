@@ -632,7 +632,20 @@ reduce_large (uint32_t xi, int *np)
 
   n = (res0 + ((uint64_t)1 << 61)) >> 62;
   res0 -= n << 62;
-  x = (float)(int64_t)res0;
+  /* THROUGH THE BARRIER, and PC=24 is not a substitute for it.  A 387
+     loads this 62-bit integer with `fild`, which is exact and which the
+     precision control word does not touch - so without the barrier the
+     x87 build multiplies the EXACT integer by pi63 and rounds once,
+     while SSE and the ARM soft-float round the integer to float first
+     and then round the product: one rounding against two.  The results
+     differ by 1 ulp on roughly 0.6% of arguments.  That is not
+     academic - forward.c builds the RoPE table from lz_sinf/lz_cosf at
+     every position, so the first argument where the two disagree makes
+     the whole float tier (--fixed off) diverge between gcc and Watcom
+     from that token onward; on kmr20 it is position 125, sin(125).
+     Same class as lz_i32f in ops_kernel_shared.h, which forces the
+     int32 rounding before a multiply for exactly this reason. */
+  x = fp_barrierf ((float)(int64_t)res0);
   *np = (int)n;
   return x * pi63;
 }

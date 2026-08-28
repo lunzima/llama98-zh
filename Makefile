@@ -681,7 +681,7 @@ watcom-gui:
 # nested inside another comment; gcc said so on every build and `check`
 # reported 16 PASS over it. Having a caller somewhere is not the test -
 # being reachable from what people actually run is.
-check: bare-endif-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate softfp-gate dedupe-gate mm-alias-gate c89-floor-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate kernel-matrix-gate aux-parm-arity-gate aux-equiv-gate
+check: bare-endif-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate softfp-gate dedupe-gate mm-alias-gate c89-floor-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate kernel-matrix-gate aux-parm-arity-gate aux-equiv-gate mathf-xcompiler-gate
 
 # Zero gcc warnings, asserted rather than printed. The Watcom side has
 # always been counted ("N lines, 0 warnings, 0 errors", per file); this
@@ -890,6 +890,15 @@ bf16-torch-gate:
 .PHONY: gcc-watcom-output-gate
 gcc-watcom-output-gate:
 	@bash build/gcc_watcom_output_gate.sh "$(MODEL)"
+
+# The same question one layer down, and IN `check` rather than ci.sh-only
+# because it needs no model and no engine build - two source files and
+# both compilers. That is the whole point of it: the end-to-end gate saw
+# this class of defect and then declined to run, so the cheap direct
+# check is what keeps the expensive one from being the only asker.
+.PHONY: mathf-xcompiler-gate
+mathf-xcompiler-gate:
+	@bash build/mathf_xcompiler_gate.sh
 
 .PHONY: dedupe-gate
 dedupe-gate:
