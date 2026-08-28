@@ -45,7 +45,16 @@
 set -u
 cd "$(dirname "$0")/.."
 
-MODEL=${1:-/e/LLM/models/kunkun98-pilot-20260806}
+# THE SAME DEFAULT AS ITS SIBLINGS, and that is not cosmetic.
+# div_hotness.sh, mul_hotness.sh and branch_census.sh all default to
+# kmr20; this one shipped defaulting to the pilot model, and the first
+# thing that happened was a cross-census comparison between a count
+# taken here and a count taken there - two different generations, two
+# different sets of code paths, presented as one ratio. cov_run.sh's own
+# header says it: "A count is only comparable to another count from the
+# same prompt, the same token budget and the same seed." A default that
+# differs from the family's makes that mistake the easy one to make.
+MODEL=${1:-/e/LLM/models/kmr20}
 TOP=${2:-30}
 
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
