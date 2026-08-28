@@ -32,6 +32,16 @@
 # covered count is an UPPER bound and the uncovered list is the part to
 # act on: those cannot be checked by anything, whatever the probes claim.
 #
+# THE ARM HALF ANSWERS THE SAME QUESTION for the other toolchain: a
+# hand-written ARMv5TE kernel is a function whose body holds an __asm__
+# block, no x86 build contains one, and the analogue of "built with
+# Watcom" is "cross-built and run under QEMU". 36 of 36 today. Three
+# edges had to exist before that number meant anything - a macro naming
+# a macro, an ALL-CAPS macro INVOCATION, and a function whose address is
+# taken in a ternary dispatch (`row = cond ? row_q41_arm_asm :
+# row_q41_arm`) - and each was found by a kernel this file wrongly
+# called uncovered, then covered for real rather than by argument.
+#
 # WHERE IT STANDS: 72 of 74 reached by a Watcom-built probe, 0 reached
 # only on paper, 0 called by nothing. The two left are lz_cpucheck_brand
 # and lz_cpucheck_maxext, which read the CPUID brand string - they have
@@ -95,10 +105,19 @@ for f in SRC:
     for m in re.finditer(r"#pragma\s+aux\s+([A-Za-z_]\w*)", t):
         kernels[m.group(1)] = (os.path.basename(f), "pragma")
 
+# THE ARM HALF. A hand-written ARMv5TE kernel is a function whose body
+# contains an __asm__ block, and it has the same property the pragmas
+# do for the opposite toolchain: no x86 build contains one, so an x86
+# probe reaches it on paper and executes nothing. The ARM analogue of
+# "built with Watcom" is "built with the cross-compiler and run under
+# QEMU", which is what build/arm/*.sh and the .prof/arm_* drivers do.
+armk = {}
+
 # ---- call graph -------------------------------------------------------
 # A function definition is a header line followed by a body; take the body
 # by brace balance. Anything that looks like `name(` inside it is a call.
 calls = {}          # caller -> set(callee)
+allbodies = {}      # caller -> its body text, for the address pass
 owner = {}          # function -> file
 DEF = re.compile(r"^[A-Za-z_][\w\s\*]*?\b([a-z_]\w*)\s*\([^;{]*\)\s*\{", re.M)
 for f in SRC:
@@ -116,6 +135,8 @@ for f in SRC:
                 if depth == 0: break
             j += 1
         bodytext = t[i:j]
+        if "__asm__" in bodytext:
+            armk[name] = (os.path.basename(f), "arm-asm")
         owner.setdefault(name, os.path.basename(f))
         s = calls.setdefault(name, set())
         for c in re.finditer(r"\b([a-z_]\w*)\s*\(", bodytext):
@@ -143,6 +164,22 @@ for f in SRC:
             s.add(mm.group(1))
             for c in re.finditer(r"\b([a-z_]\w*)\b", mm.group(2)):
                 s.add(c.group(1))
+        allbodies[name] = bodytext
+
+# TAKING A FUNCTION'S ADDRESS IS A CALL EDGE, and it needs its own pass
+# because the name table is only complete once every file is read. The
+# tier dispatch is `row = (g_kernel == LZ_KERNEL_ARM_ASM)
+# ? row_q41_arm_asm : row_q41_arm;` - a ternary, so the callee is not
+# followed by '(' and neither the call scan nor the macro-argument scan
+# sees it. build/arm/parity_gate.sh runs --kernel ref / arm-c / arm-asm
+# in turn, so those really are executed; without this edge
+# lz_dot32_q16/q41/q61_arm_asm read as reached by no ARM driver at all.
+for caller, bodytext in allbodies.items():
+    s = calls.setdefault(caller, set())
+    for c in re.finditer(r"([a-z_]\w*)(?!\s*\()", bodytext):
+        n = c.group(1)
+        if n != caller and (n in owner or n in kernels or n in armk):
+            s.add(n)
 
 # MACROS ARE CALL EDGES. lz_mmx_empty_local is only ever invoked as
 # _mm_empty(), and the three lz_pf_* prefetch pragmas only through their
@@ -209,6 +246,33 @@ def closure(start):
 
 wreach = closure(wseeds)
 
+# ---- the ARM side -----------------------------------------------------
+# Seeds are every name a driver that cross-compiles for ARM mentions,
+# plus the whole engine entry point when that driver runs a real forward
+# pass: build/arm/parity_gate.sh compares x86 against ARMv5TE over
+# generation, so anything lz_forward reaches is executed there.
+ARMDRV = [d for d in glob.glob(".prof/*.sh") + glob.glob("build/*.sh") +
+          glob.glob("build/arm/*.sh")
+          if re.search(r"arm-linux-gnueabi|qemu-arm",
+                       open(d, encoding="utf-8", errors="replace").read())]
+aseeds = set()
+for d in ARMDRV:
+    t = strip(open(d, encoding="utf-8", errors="replace").read())
+    for m in re.finditer(r"\b([a-z_]\w*)\b", t):
+        aseeds.add(m.group(1))
+    # A driver that builds and RUNS the engine reaches whatever the
+    # forward pass reaches; naming the entry point is what says so.
+    if re.search(r"parity_gate|build_engine|run_qemu", d):
+        aseeds |= {"lz_forward", "lz_generate", "lz_mtp_draft_step"}
+    # A .prof driver's own probe source is where its names live.
+    stem = os.path.basename(d)[:-3]
+    for c in (".prof/%s.c" % stem, "build/%s.c" % stem):
+        if os.path.exists(c):
+            ct = strip(open(c, encoding="utf-8", errors="replace").read())
+            for m in re.finditer(r"\b([a-z_]\w*)\b", ct):
+                aseeds.add(m.group(1))
+areach = closure(aseeds)
+
 # ---- closure ----------------------------------------------------------
 reach, stack = set(), [s for s in seeds]
 while stack:
@@ -263,6 +327,20 @@ if dead:
     print("\n-- called by nothing: unreachable by construction --")
     for _, k, f in dead:
         print("  %-32s %s" % (k, f))
+
+# ---- ARM report -------------------------------------------------------
+acov = sorted(k for k in armk if k in areach)
+agap = sorted(k for k in armk if k not in areach)
+print("\n%d ARM inline-asm kernel(s), %d driver(s) cross-build for ARM"
+      % (len(armk), len(ARMDRV)))
+print("  an ARM-built driver reaches : %d" % len(acov))
+print("  no ARM driver reaches       : %d" % len(agap))
+if agap:
+    print("\n-- NO ARM DRIVER REACHES THESE --")
+    for k in agap:
+        who = sorted(c for c in calls if k in calls[c])[:2]
+        print("  %-32s %-18s via: %s"
+              % (k, armk[k][0], ", ".join(who) or "(none)"))
 if "-v" in sys.argv:
     print("\n-- reached --")
     for _, k, f in cov:
