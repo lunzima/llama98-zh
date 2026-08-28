@@ -216,7 +216,7 @@ HOT_GCC_GUI_OBJS        := $(HOT_GCC_GUI_ENG_OBJS) $(HOT_GCC_GUI_COM_OBJS)
 # is a program reading the wrong field offsets, which fails somewhere
 # else entirely and looks nothing like a build problem.
 #
-# NOT HYPOTHETICAL - it cost most of 2026-08-28. Adding rd/rd_ctx to
+# NOT HYPOTHETICAL - it cost most of a day. Adding rd/rd_ctx to
 # LZModel for the compressed-model reader, and a dtype to the tensor
 # format, left the engine loading a model and then dying in the forward
 # pass with a checksum that looked like arithmetic gone wrong. Every

@@ -2,9 +2,9 @@
 # Did the last commit change what a hand-written kernel COMPUTES?
 #
 # The reorder passes on the #pragma aux bodies are meant to move
-# instructions, not values: iron law two says the assembly tier and its
-# intrinsics twin agree bit for bit, so a reorder that changes a result
-# is a defect however plausible the new number looks.
+# instructions, not values: an assembly tier and its intrinsics twin owe
+# each other bit-identity, so a reorder that changes a result is a defect
+# however plausible the new number looks.
 #
 # WHY THIS EXISTS. lz_dot128_t2_asm was reordered to hide pmaddwd
 # latency and the pass hoisted `movq mm4, [edx]` above the `add edx, 8`

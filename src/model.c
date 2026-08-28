@@ -9,7 +9,9 @@
 #include "err.h"
 #include "lfn.h"
 #include "lz_int.h"   /* lz_i64: the 64-bit type, portably */
+#include "lz4d.h"
 #include "model.h"
+#include "ops.h"   /* lz_bf16_store_g, LZ_MM_WIDEN_MAX */
 
 /* 16-byte aligned malloc/free for the weight buffers (field->f and the
    quantized planes field->q/scale/zero). The SSE1/SSE2 row/dot kernels
@@ -664,6 +666,9 @@ static int check_shape(const LZModelConfig *c, const LZStTensor *t,
 typedef int (*LZVisit)(LZModel *m, const LZStTensor *t, LZTensor *field,
                           void *ctx, char *errbuf, int errlen);
 
+static int m_uses_lz4(const LZModel *m);
+static size_t lz4d_read_void(void *ctx, void *dst, size_t sz);
+
 /* One tensor of the walk: resolve `name` (via the bin desc or the
    safetensors table), check its shape against `dims`, then hand it to
    `visit`. Extracted from model_walk so the obtain/check/visit sequence
@@ -675,7 +680,10 @@ static int model_walk_one(LZModel *m, const char *name, const int *dims,
     const LZModelConfig *c = &m->config;
     const LZStTensor *t;
     LZStTensor desc;            /* bin-path desc; lives for this call so t stays valid */
-    if (m->bin_file) {
+    /* bin-path check is "reader set", not "bin_file non-NULL": the
+       compressed sibling (model.bin.lz4) streams through m->rd with
+       bin_file left NULL, and must take the same desc path. */
+    if (m->bin_file || m_uses_lz4(m)) {
         lz_i64 ne = 1;
         int di;
         memset(&desc, 0, sizeof(desc));
@@ -1021,11 +1029,13 @@ int lz_open(LZModel *m, const char *dir, char *errbuf, int errlen) {
         return 1;
     }
 
-    /* mixed-precision bin preferred: if model.bin exists, load everything
-       at once. Resolved rather than fopen'd directly (src/lfn.h): this
-       probe decides between the bin and safetensors loaders, so a wrong
-       "no" sends the whole load down the other path. */
-    if (lz_lfn_exists(dir, "model.bin"))
+    /* mixed-precision bin preferred: if model.bin (or the compressed
+       sibling model.bin.lz4, the stunt path) exists, load everything at
+       once. Resolved rather than fopen'd directly (src/lfn.h): this probe
+       decides between the bin and safetensors loaders, so a wrong "no"
+       sends the whole load down the other path. lz_open_bin prefers the
+       .lz4 file when both are present. */
+    if (lz_lfn_exists(dir, "model.bin") || lz_lfn_exists(dir, "model.bin.lz4"))
         return lz_open_bin(m, dir, errbuf, errlen);
 
     if (lz_lfn_path(dir, "config.json", path, (int)sizeof path,
@@ -1131,14 +1141,78 @@ static int visit_read(LZModel *m, const LZStTensor *t, LZTensor *field,
                       void *ctx, char *errbuf, int errlen) {
     (void)ctx;
 
-    /* Expanding to f32 needs 4*elem bytes; bf16 raw data is read into
-       the second half and expanded in place, so this buffer doubles as
-       the read buffer - no extra scratch memory. */
     field->dtype = 0;
     field->n = (int)t->n_elem;
     field->gs = 0;
     field->q = NULL;
     field->scale = NULL;
+    field->f = NULL;
+
+    /* A BF16 TENSOR STAYS BF16, which halves what it occupies and what
+       reading it costs in DDR traffic. This path used to expand it to
+       f32 while loading, so a file holding two bytes per parameter took
+       four in RAM - on a 64MB target that is the difference between a
+       model fitting and not.
+     *
+     * Nothing is lost and nothing rounds: a bf16 IS the high half of an
+     * f32, so the widening lz_t_f32 does at the point of use is the
+     * identical `<<16` the loader used to do here, only deferred. Every
+     * value a kernel sees is the same value it saw before, which is why
+     * this needs no switch and no accuracy argument.
+     *
+     * F16 is deliberately NOT included: its widening is a real format
+     * conversion (5-bit exponent to 8, subnormal renormalisation), so it
+     * would have to be undone on every read rather than being a shift,
+     * and it still expands here. */
+    /* TWO-DIMENSIONAL ONLY, and the reason is a consumer's contract
+       rather than anything about bf16.
+     *
+     * lz_t_f32() hands back a WHOLE-TENSOR f32 view. For an F32 tensor
+     * that is free - it returns t->f and copies nothing - but a bf16
+     * tensor has to be widened into the caller's scratch, and that
+     * scratch is one ROW wide (forward.c's s->wscr, sized qcap). The
+     * engine's 1-D and 3-D tensors are exactly the ones read that way:
+     * norms and biases are 1-D, and conv1d weights are 3-D - the
+     * checkpoint measured here has them at [3072, 1, 4], 12,288 elements
+     * against a qcap in the hundreds. Storing those narrow overran
+     * s->wscr and crashed in conv_fixed_build; found by running it, not
+     * by reading it.
+     *
+     * The 2-D tensors have no such problem: they are weight matrices,
+     * reached through lz_matmul_w / lz_matmul_xq_nt, which widen a row
+     * at a time into their own bounded buffer, or through
+     * lz_t_row_f32(), whose output is a row by contract. They are also
+     * where the memory is - 94 of this checkpoint's 161 tensors and
+     * essentially all of its bytes, so excluding the other two shapes
+     * costs almost nothing.
+     *
+     * The second clause is that bounded buffer's own limit, the same one
+     * every quantized kernel in ops_matmul.c carries. Past it a tensor
+     * stays f32, which costs memory and never correctness. */
+    if (t->dtype == LZ_DT_BF16 && lz_bf16_store_g &&
+        t->n_dims == 2 && t->shape[1] <= LZ_MM_WIDEN_MAX) {
+        lz_i64 nb = t->n_elem * (lz_i64)2;
+        field->q = (int8_t *)aligned_malloc((size_t)t->n_elem, 2);
+        if (!field->q) {
+            qerr(errbuf, errlen, LZ_ERR_TENSOR_ALLOC_BYTES, t->name, nb);
+            return 1;
+        }
+        if (lz_st_read_raw(&m->st, t, field->q, errbuf, errlen) != 0) {
+            aligned_free(field->q);
+            field->q = NULL;
+            return 1;
+        }
+        /* safetensors is little-endian by specification; the widening in
+           lz_t_f32 reads the two bytes by name, so no swap is needed
+           here and none would be correct on a big-endian host either. */
+        field->dtype = LZ_FMT_BF16;
+        m->bytes_alloc += nb;
+        return 0;
+    }
+
+    /* Expanding to f32 needs 4*elem bytes; f16 raw data is read into
+       the second half and expanded in place, so this buffer doubles as
+       the read buffer - no extra scratch memory. */
     field->f = (float *)aligned_malloc((size_t)t->n_elem, sizeof(float));
     if (!field->f) {
         qerr(errbuf, errlen, LZ_ERR_TENSOR_ALLOC_BYTES,
@@ -1168,21 +1242,36 @@ static int visit_read(LZModel *m, const LZStTensor *t, LZTensor *field,
    mul32 says whether this format also requires a multiple of 32 - the
    sub-byte packings fix their sub-blocks at 32 elements (see model.h),
    Q8_0 does not. */
-static int read_gs(FILE *f, uint32_t n, uint32_t *gs, int mul32) {
-    if (fread(gs, 4, 1, f) != 1) return 1;
+static size_t lz4d_read_void(void *ctx, void *dst, size_t sz);
+
+static int m_uses_lz4(const LZModel *m) {
+    return m->rd == lz4d_read_void;
+}
+
+static int read_gs(LZModel *m, uint32_t n, uint32_t *gs, int mul32) {
+    if (m->rd(m->rd_ctx, gs, 4) != 4) return 1;
     lz_le32(gs, 1);
     if (*gs == 0 || (n % *gs) != 0) return 1;
     if (mul32 && (*gs % 32) != 0) return 1;
     return 0;
 }
 
-/* bin path: tensors are streamed from the file in model_walk order (dtype 0=f32 / 1=Q8_0) */
+/* Read one tensor's header (dtype byte + LE element count). Shared by the
+   bin path's tensor reads; factored out because every branch repeats it. */
+static int read_tensor_hdr(LZModel *m, uint8_t *dtype, uint32_t *n) {
+    if (m->rd(m->rd_ctx, dtype, 1) != 1 ||
+        m->rd(m->rd_ctx, n, 4) != 4) return 1;
+    return 0;
+}
+
+/* bin path: tensors are streamed from the reader in model_walk order
+   (dtype 0=f32 / 1=Q8_0). All reads go through m->rd, so the same code
+   streams from model.bin (file_reader) or model.bin.lz4 (lz4d_read). */
 static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
                           void *ctx, char *errbuf, int errlen) {
-    FILE *f = (FILE *)ctx;
     uint8_t dtype;
     uint32_t n, gs;
-    (void)m;
+    (void)ctx;
 
     /* Every multi-byte field below - the element count, the group size,
        the f32 planes and the Q16_0 int16 plane - is little-endian in the
@@ -1191,8 +1280,7 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
        packings whose unpackers index bits within a byte, so their bytes
        are already in the only order they have. dtype is one byte.
        lz_le32/lz_le16 are empty on a little-endian build. */
-    if (fread(&dtype, 1, 1, f) != 1 ||
-        fread(&n, 4, 1, f) != 1) {
+    if (read_tensor_hdr(m, &dtype, &n)) {
         qerr(errbuf, errlen, LZ_ERR_TENSOR_READ, t->name);
         return 1;
     }
@@ -1214,7 +1302,8 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
             qerr(errbuf, errlen, LZ_ERR_TENSOR_ALLOC, t->name);
             return 1;
         }
-        if (fread(field->f, sizeof(float), n, f) != n) {
+        if (m->rd(m->rd_ctx, field->f, (size_t)n * sizeof(float))
+                != (size_t)n * sizeof(float)) {
             qerr(errbuf, errlen, LZ_ERR_TENSOR_READ, t->name);
             aligned_free(field->f);
             field->f = NULL;
@@ -1232,7 +1321,7 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
            to 1.01x. */
         field->dtype = LZ_FMT_Q16_0;
         field->f = NULL;
-        if (read_gs(f, n, &gs, 1) != 0) {
+        if (read_gs(m, n, &gs, 1) != 0) {
             qerr(errbuf, errlen, LZ_ERR_TENSOR_GS, t->name);
             return 1;
         }
@@ -1244,8 +1333,9 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
             lz_t_free(field);
             return 1;
         }
-        if (fread(field->q, 1, (size_t)n * 2, f) != (size_t)n * 2 ||
-            fread(field->scale, sizeof(float), n / gs, f) != (size_t)(n / gs)) {
+        if (m->rd(m->rd_ctx, field->q, (size_t)n * 2) != (size_t)n * 2 ||
+            m->rd(m->rd_ctx, field->scale, sizeof(float) * (n / gs))
+                != sizeof(float) * (n / gs)) {
             qerr(errbuf, errlen, LZ_ERR_TENSOR_READ, t->name);
             lz_t_free(field);
             return 1;
@@ -1263,7 +1353,7 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
            first. */
         field->dtype = LZ_FMT_Q6_1;
         field->f = NULL;
-        if (read_gs(f, n, &gs, 1) != 0) {
+        if (read_gs(m, n, &gs, 1) != 0) {
             qerr(errbuf, errlen, LZ_ERR_TENSOR_GS, t->name);
             return 1;
         }
@@ -1276,10 +1366,12 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
             lz_t_free(field);
             return 1;
         }
-        if (fread(field->q, 1, (size_t)n / 2 + (size_t)n / 4, f)
+        if (m->rd(m->rd_ctx, field->q, (size_t)n / 2 + (size_t)n / 4)
                 != (size_t)n / 2 + (size_t)n / 4 ||
-            fread(field->scale, sizeof(float), n / gs, f) != (size_t)(n / gs) ||
-            fread(field->zero, sizeof(float), n / gs, f) != (size_t)(n / gs)) {
+            m->rd(m->rd_ctx, field->scale, sizeof(float) * (n / gs))
+                != sizeof(float) * (n / gs) ||
+            m->rd(m->rd_ctx, field->zero, sizeof(float) * (n / gs))
+                != sizeof(float) * (n / gs)) {
             qerr(errbuf, errlen, LZ_ERR_TENSOR_READ, t->name);
             lz_t_free(field);
             return 1;
@@ -1295,7 +1387,7 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
            instead of a stored min (see model.h). */
         field->dtype = LZ_FMT_T2;
         field->f = NULL;
-        if (read_gs(f, n, &gs, 1) != 0) {
+        if (read_gs(m, n, &gs, 1) != 0) {
             qerr(errbuf, errlen, LZ_ERR_TENSOR_GS, t->name);
             return 1;
         }
@@ -1307,8 +1399,9 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
             lz_t_free(field);
             return 1;
         }
-        if (fread(field->q, 1, (size_t)n / 4, f) != (size_t)n / 4 ||
-            fread(field->scale, sizeof(float), n / gs, f) != (size_t)(n / gs)) {
+        if (m->rd(m->rd_ctx, field->q, (size_t)n / 4) != (size_t)n / 4 ||
+            m->rd(m->rd_ctx, field->scale, sizeof(float) * (n / gs))
+                != sizeof(float) * (n / gs)) {
             qerr(errbuf, errlen, LZ_ERR_TENSOR_READ, t->name);
             lz_t_free(field);
             return 1;
@@ -1322,7 +1415,7 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
            32 elements (see model.h). */
         field->dtype = LZ_FMT_Q4_1;
         field->f = NULL;
-        if (read_gs(f, n, &gs, 1) != 0) {
+        if (read_gs(m, n, &gs, 1) != 0) {
             qerr(errbuf, errlen, LZ_ERR_TENSOR_GS, t->name);
             return 1;
         }
@@ -1335,9 +1428,11 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
             lz_t_free(field);
             return 1;
         }
-        if (fread(field->q, 1, n / 2, f) != n / 2 ||
-            fread(field->scale, sizeof(float), n / gs, f) != n / gs ||
-            fread(field->zero, sizeof(float), n / gs, f) != n / gs) {
+        if (m->rd(m->rd_ctx, field->q, (size_t)n / 2) != (size_t)n / 2 ||
+            m->rd(m->rd_ctx, field->scale, sizeof(float) * (n / gs))
+                != sizeof(float) * (n / gs) ||
+            m->rd(m->rd_ctx, field->zero, sizeof(float) * (n / gs))
+                != sizeof(float) * (n / gs)) {
             qerr(errbuf, errlen, LZ_ERR_TENSOR_READ, t->name);
             lz_t_free(field);
             return 1;
@@ -1349,7 +1444,7 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
     } else if (dtype == LZ_FMT_Q8_0) {
         field->dtype = LZ_FMT_Q8_0;
         field->f = NULL;
-        if (read_gs(f, n, &gs, 0) != 0) {
+        if (read_gs(m, n, &gs, 0) != 0) {
             qerr(errbuf, errlen, LZ_ERR_TENSOR_GS, t->name);
             return 1;
         }
@@ -1364,8 +1459,9 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
             field->scale = NULL;
             return 1;
         }
-        if (fread(field->q, 1, n, f) != n ||
-            fread(field->scale, sizeof(float), n / gs, f) != n / gs) {
+        if (m->rd(m->rd_ctx, field->q, (size_t)n) != (size_t)n ||
+            m->rd(m->rd_ctx, field->scale, sizeof(float) * (n / gs))
+                != sizeof(float) * (n / gs)) {
             qerr(errbuf, errlen, LZ_ERR_TENSOR_READ, t->name);
             aligned_free(field->q);
             aligned_free(field->scale);
@@ -1385,6 +1481,33 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
 /* Load config and all weights in one pass from model.bin */
 static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen);
 
+/* Two reader implementations behind LZModel.rd/rd_ctx:
+   - file_reader over bin_file (plain model.bin),
+   - lz4d_read over a LZ4Stream* (model.bin.lz4, the stunt path).
+   Everything the bin path reads - header fields, group sizes, tensor
+   planes - goes through rd, so whether the file is compressed is
+   invisible below lz_open_bin. */
+static size_t file_reader(void *ctx, void *dst, size_t sz) {
+    return fread(dst, 1, sz, (FILE *)ctx);
+}
+
+/* Reader-shaped adapter for lz4d_read: the LZModel reader signature takes
+   void *ctx; lz4d_read wants a LZ4Stream *. */
+static size_t lz4d_read_void(void *ctx, void *dst, size_t sz) {
+    return lz4d_read((LZ4Stream *)ctx, dst, sz);
+}
+
+static void close_reader(LZModel *m) {
+    if (m_uses_lz4(m)) {
+        lz4d_close((LZ4Stream *)m->rd_ctx);
+    } else if (m->bin_file) {
+        fclose(m->bin_file);
+    }
+    m->bin_file = NULL;
+    m->rd = NULL;
+    m->rd_ctx = NULL;
+}
+
 static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
     char path[512];
     char magic[4];
@@ -1393,14 +1516,53 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
     int i;
     lz_i64 n_params = 0;
 
-    /* lz_open's probe already proved this name opens, so a failure here
-       is a race and keeps LZ_ERR_BIN_OPEN's wording. */
-    if (lz_lfn_path(dir, "model.bin", path, (int)sizeof path,
-                    errbuf, errlen) != 0) return 1;
-    m->bin_file = fopen(path, "rb");
-    if (!m->bin_file) {
-        qerr(errbuf, errlen, LZ_ERR_BIN_OPEN, path);
-        return 1;
+    /* Decide BY MAGIC, not extension: read model.bin's first 4 bytes; an
+       LZ4 frame's magic (04 22 4d 18 LE) means the weight file is itself
+       LZ4-compressed - whatever its name - and is streamed through lz4d.
+       Anything else is rewound and read plain with file_reader. The
+       legacy model.bin.lz4 sibling is still accepted when model.bin is
+       absent (lz_open's probe already proved one of the two opens, so a
+       failure here is a race and keeps LZ_ERR_BIN_OPEN's wording). */
+    {
+        uint8_t probe[4];
+        int is_lz4 = 0;
+        int got = 0;
+        if (lz_lfn_path(dir, "model.bin", path, (int)sizeof path,
+                        errbuf, errlen) == 0) {
+            m->bin_file = fopen(path, "rb");
+            if (!m->bin_file) {
+                qerr(errbuf, errlen, LZ_ERR_BIN_OPEN, path);
+                return 1;
+            }
+            got = (int)fread(probe, 1, 4, m->bin_file) == 4;
+            is_lz4 = got && (uint32_t)((uint32_t)probe[0]
+                                       | ((uint32_t)probe[1] << 8)
+                                       | ((uint32_t)probe[2] << 16)
+                                       | ((uint32_t)probe[3] << 24))
+                           == LZ4D_FRAME_MAGIC;
+        } else if (lz_lfn_path(dir, "model.bin.lz4", path,
+                               (int)sizeof path, errbuf, errlen) == 0) {
+            is_lz4 = 1;          /* legacy sibling: must be a frame */
+        } else {
+            qerr(errbuf, errlen, LZ_ERR_BIN_OPEN, "model.bin(.lz4)");
+            return 1;
+        }
+        if (is_lz4) {
+            /* Declared before the statements, not beside its use: this
+               tree's floor is a 1995 C89 compiler and
+               build/c89_floor_gate.sh holds model.c at zero violations. */
+            LZ4Stream *lz;
+            if (m->bin_file) fclose(m->bin_file);
+            m->bin_file = NULL;
+            lz = lz4d_open(path, errbuf, errlen);
+            if (!lz) return 1;
+            m->rd = lz4d_read_void;
+            m->rd_ctx = lz;
+        } else {
+            rewind(m->bin_file);     /* the 4-byte probe is the header's magic */
+            m->rd = file_reader;
+            m->rd_ctx = m->bin_file;
+        }
     }
 
 /* RDB reads BYTES and leaves them alone; RD reads 32-bit WORDS and
@@ -1416,7 +1578,7 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
    a failure. lz_le32 is empty on a little-endian build, so this is also
    byte-for-byte what it was on every shipping target. */
 #define RDB(ptr, sz) do { \
-    if (fread((ptr), (sz), 1, m->bin_file) != 1) { \
+    if (m->rd(m->rd_ctx, (ptr), (sz)) != (size_t)(sz)) { \
         qerr(errbuf, errlen, LZ_ERR_BIN_CFG_READ); \
         goto fail; \
     } } while (0)
@@ -1575,7 +1737,7 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
 
     if (alloc_mtp(m, errbuf, errlen) != 0) goto fail;
 
-    if (model_walk(m, visit_read_bin, m->bin_file, errbuf, errlen) != 0) {
+    if (model_walk(m, visit_read_bin, NULL, errbuf, errlen) != 0) {
         goto fail;
     }
     for (i = 0; i < c->n_layers; i++) {
@@ -1609,13 +1771,11 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
     m->n_params = n_params;
     m->prefix[0] = '\0';
     m->weights_loaded = 1;
-    fclose(m->bin_file);
-    m->bin_file = NULL;
+    close_reader(m);
     return 0;
 
 fail:
-    fclose(m->bin_file);
-    m->bin_file = NULL;
+    close_reader(m);
     lz_free(m);
     return 1;
 }
@@ -1724,7 +1884,7 @@ void lz_free(LZModel *m) {
         lz_t_free(&m->mtp->pre_fc_norm_embedding);
         free(m->mtp);
     }
-    if (m->bin_file) fclose(m->bin_file);
+    close_reader(m);
     lz_st_close(&m->st);
     memset(m, 0, sizeof(*m));
 }
