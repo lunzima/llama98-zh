@@ -315,8 +315,9 @@ void matmul_q8_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
        dispatches were hoisted.
 
        It is already a static inline reading a cached global (ops_quant.h
-       records that it used to be an extern call, 75,080,736 times) -
-       so this is not "make the check cheaper" a second time. It is
+       carries the measurement behind that: 75,080,736 calls when it was
+       an extern) - so this is not "make the check cheaper" a second
+       time. It is
        asking it once instead of once per row. */
     int emms = lz_cpu_has_mmx();
     /* Same predicate as the float epilogue - see q8_fixed_epi. */

@@ -362,13 +362,13 @@ static lz_i64 lz_epi_mac_i16(const int32_t *a, const int16_t *m, int n) {
     /* Same lazy guard the other dispatch sites carry: the GUI never
        calls lz_kernel_select, so g_kernel reaches its value here.
 
-       lz_debug_epi_kern counts calls that REACH a kernel body. Its
-       comment used to say the identity gate needs it to tell "agrees"
-       from "agrees and was reached" - no gate reads it; cli_main.c
+       lz_debug_epi_kern counts calls that REACH a kernel body. NO GATE
+       READS IT, whatever a reader might assume from a counter that
+       distinguishes "agrees" from "agrees and was reached": cli_main.c
        prints it in the run banner and that is the whole consumer. The
-       count is a diagnostic for a person, and the early-out above makes
-       it a more honest one: it no longer counts calls that entered a
-       SIMD wrapper only to take its scalar tail. */
+       count is a diagnostic for a person, and the early-out above keeps
+       it honest - a call that enters a SIMD wrapper only to take its
+       scalar tail does not reach a kernel body and is not counted. */
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
 #endif /* LZ_EPI_SSE2_EXTERN || LZ_ARM_ASM_EXTERN */
 #if defined(LZ_EPI_SSE2_EXTERN)

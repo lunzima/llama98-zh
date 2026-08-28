@@ -1087,8 +1087,8 @@ void forward_attn(const LZModel *m, LZRunState *s,
    EIGHT call sites in three files, which is why it is not called
    kda_i16_proj any more: forward_kda.c has four, forward_moe.c three
    (the router logits and the latent down-projection) and forward_attn.c
-   one - the v_proj inside the q/k/v triple, not the o-projection tail
-   this line used to claim. It lives in forward_kda.c because that is
+   one - the v_proj inside the q/k/v triple, NOT the o-projection tail.
+   It lives in forward_kda.c because that is
    where it was written; the name no longer says it belongs to KDA,
    because half its callers do not. */
 void proj_i16(LZRunState *s, int may_int, int *wrote_int,

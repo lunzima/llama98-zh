@@ -1,9 +1,9 @@
 #include "lz_int.h"   /* <stdint.h> is not on the language floor */
 #include "ops_arm.h"
 
-/* THE ARMv5TE KERNELS, non-ternary formats - not only the row leaves,
-   which is what this line used to say and what eight of the seventeen
-   functions below are not. The dot32 leaves for Q16_0/Q8_0/Q4_1/Q6_1
+/* THE ARMv5TE KERNELS, non-ternary formats - NOT only the row leaves:
+   eight of the seventeen functions below are not row kernels at all.
+   The dot32 leaves for Q16_0/Q8_0/Q4_1/Q6_1
    come first; after them come the attention pair sum, the Hadamard
    stages, the fixed-point norm, the F32 matmul row, the int16 epilogue
    MAC and the GDN recurrence - lz_wsum_pair_arm_asm says "Not a row

@@ -2140,8 +2140,8 @@ static void gdn_p2_fixed_rows(const int8_t *sq_in, int8_t *sq_out,
     static float s_dg[LZ_GDN_MAX_VD / 32];
     int ng = vd / 32, kk, gg, vv;
 #ifdef LZ_HAVE_P2_MMX
-    /* Hoisted out of the kk loop below, not merely out of the line that
-       used to call it twice. The tier cannot change inside this
+    /* Hoisted out of the kk loop below - the whole loop, not just the
+       one line that calls it twice. The tier cannot change inside this
        function - nothing here calls lz_kernel_select except p2_tier's
        own first line, and that is a no-op once the tier is resolved -
        so asking once per CALL rather than once per ROW is the same
