@@ -85,6 +85,8 @@ done
 # GATES THAT NEED A MODEL, a cross-toolchain build, or minutes of wall
 # clock. `check` is meant to be runnable before every commit.
 CI_ONLY="
+prefetch_parity_gate.sh    # two full Watcom engine builds, and the arms it
+                           #   checks are compiled by no other toolchain
 align_gate.sh              # 5489 compiled checks, whole-tree instrumented build
 codesize_gate.sh           # builds three toolchains to compare .text
 native_obj_gate.sh         # pre-link hook, silent by design; ci.sh is where

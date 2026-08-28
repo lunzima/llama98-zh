@@ -48,6 +48,9 @@
 !/build/bf16_native_probe.c
 !/build/bf16_store_gate.sh
 !/build/lz4_model_gate.sh
+!/build/bf16_torch_gate.sh
+!/build/bf16_torch_probe.c
+!/build/bf16_torch_check.py
 !/build/fixed_tier_xcompiler_gate.sh
 !/build/norm_int_gate_tokens_zh.txt
 !/build/norm_int_gate_tokens_en.txt
@@ -122,6 +125,8 @@
 !/build/aux_equiv_gate.sh
 !/build/norm_sse_probe_stubs.c
 !/build/vmax_vscale_probe.c
+!/build/prefetch_parity_probe.c
+!/build/prefetch_parity_gate.sh
 !/build/kernel_probe_census.sh
 !/build/org_census.sh
 
