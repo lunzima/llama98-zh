@@ -120,7 +120,8 @@
 !/build/nest_census.awk
 !/build/aux_parm_arity_gate.sh
 !/build/aux_equiv_gate.sh
-!/build/rmsnorm_probe_stubs.c
+!/build/norm_sse_probe_stubs.c
+!/build/vmax_vscale_probe.c
 !/build/kernel_probe_census.sh
 !/build/org_census.sh
 

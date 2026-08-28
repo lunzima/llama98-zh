@@ -1,11 +1,17 @@
-/* gcc-side kernel for build/rmsnorm_out_probe.c.
+/* gcc-side kernels for the SSE1 norm helpers' probes.
  *
- * The probe drives lz_rmsnorm_out_sse_w, and that name exists ONLY under
- * Watcom: src/ops_mmx_sse.c defines it as the addressable wrapper around
- * a #pragma aux body. A gcc build of the probe therefore had no kernel
- * to call, and the gcc intrinsics twin - lz_rmsnorm_out_sse in
- * src/ops_kernel_norm.h, which is what every gcc-built binary actually
- * runs - was never exercised by the probe that carries its name.
+ * Named for the family rather than for one probe: it started as
+ * rmsnorm_probe_stubs.c and then had to serve vmax and vscale too, at
+ * which point the file name was describing one of the three things in
+ * it. All three are src/ops_mmx_sse.c's SSE1 norm helpers and all three
+ * need the same shim for the same reason.
+ *
+ * THE REASON. lz_rmsnorm_out_sse_w, lz_vmax_sse_w and lz_vscale_sse_w
+ * exist ONLY under Watcom: src/ops_mmx_sse.c defines each as the
+ * addressable wrapper around a #pragma aux body. A gcc build of a probe
+ * therefore has no kernel to call, and the gcc intrinsics twins in
+ * src/ops_kernel_norm.h - which are what every gcc-built binary actually
+ * runs - go unexercised by the probes that carry their names.
  *
  * This supplies the name from that twin, so each toolchain's build tests
  * its own half against the same scalar reference and the same fixed-seed
@@ -43,6 +49,27 @@ void lz_rmsnorm_out_sse_w(float *o, const float *x, const float *w,
        scalar answer would make the probe compare the reference with
        itself and print a green that means nothing. */
     (void)o; (void)x; (void)w; (void)n4; (void)k2;
+    lz_rmsnorm_out_sse_w_has_no_kernel_in_this_build();
+#endif
+}
+
+void lz_vmax_sse_w(const float *x, int n4, float *pmax);
+void lz_vscale_sse_w(float *x, int n4, const float *pk);
+
+void lz_vmax_sse_w(const float *x, int n4, float *pmax) {
+#if defined(LZ_HAVE_NORM_SSE) || defined(__SSE__) || defined(__SSE2__)
+    lz_vmax_sse(x, n4, pmax);
+#else
+    (void)x; (void)n4; (void)pmax;
+    lz_rmsnorm_out_sse_w_has_no_kernel_in_this_build();
+#endif
+}
+
+void lz_vscale_sse_w(float *x, int n4, const float *pk) {
+#if defined(LZ_HAVE_NORM_SSE) || defined(__SSE__) || defined(__SSE2__)
+    lz_vscale_sse(x, n4, pk);
+#else
+    (void)x; (void)n4; (void)pk;
     lz_rmsnorm_out_sse_w_has_no_kernel_in_this_build();
 #endif
 }
