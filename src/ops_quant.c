@@ -658,6 +658,22 @@ void lz_exp_fixed_run(const float *x, float *out, int n) {
             if (sat[k]) { tv[k] = LZ_EXP_QSCALE; sv[k] = 0; ev[k] = 0; continue; }
             LZ_FCX(LZ_FC_EXP, 3, 3, 0, 1, 0);
             y32 = xv * LZ_EXP_LOG2E32;
+            /* Same floor as the scalar entry's fastfp fix (see
+               lz_exp_fixed): the magic add reads floor(y32-0.5) under
+               RTZ, one below round-half-even for negative y32. The
+               softmax reaches THIS entry (LZ_SOFTMAX_RUN), so the scalar
+               fix alone left the softmax diverging under --fastfp. */
+            if (lz_fastfp()) {
+                union { float f; uint32_t u; } du;
+                du.f = y32 - 0.5f;
+                if (lz_rne_round_bits(du.u, 0, &t)) {
+                    r = y32 - (float)t;
+                    tv[k] = g_exptab[t & 31];
+                    sv[k] = q8_round(r * (float)LZ_EXP_QSCALE) >> 5;
+                    ev[k] = (t >> 5) - LZ_EXP_Q;
+                    continue;
+                }
+            }
             u.f = y32 - 0.5f + 12582912.0f;
             t = (u.i & 0x007FFFFF) - 0x00400000;
             r = y32 - (float)t;
