@@ -681,7 +681,7 @@ watcom-gui:
 # nested inside another comment; gcc said so on every build and `check`
 # reported 16 PASS over it. Having a caller somewhere is not the test -
 # being reachable from what people actually run is.
-check: bare-endif-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate softfp-gate dedupe-gate mm-alias-gate c89-floor-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate kernel-matrix-gate aux-parm-arity-gate aux-equiv-gate mathf-xcompiler-gate bf16-torch-gate bf16-store-gate lz4-model-gate gcc-watcom-output-gate
+check: bare-endif-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate softfp-gate dedupe-gate mm-alias-gate c89-floor-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate kernel-matrix-gate aux-parm-arity-gate aux-equiv-gate mathf-xcompiler-gate bf16-torch-gate bf16-store-gate lz4-model-gate gcc-watcom-output-gate fixture-exists-gate
 
 # Zero gcc warnings, asserted rather than printed. The Watcom side has
 # always been counted ("N lines, 0 warnings, 0 errors", per file); this
@@ -907,6 +907,15 @@ bf16-torch-gate:
 .PHONY: gcc-watcom-output-gate
 gcc-watcom-output-gate:
 	@$(call GATE_OK,build/gcc_watcom_output_gate.sh "$(MODEL)")
+
+# A path naming a model is a claim about the disk, and it rots silently:
+# the gate that wanted it SKIPs, and a skip reads as "not applicable
+# here" rather than "this stopped happening". ci.sh's ARM_MODEL had
+# rotted, so the x86-vs-ARM bit-identity contract was going unchecked
+# with no failure reported.
+.PHONY: fixture-exists-gate
+fixture-exists-gate:
+	@$(call GATE_OK,build/fixture_exists_gate.sh)
 
 # The same question one layer down, and cheap enough for `check` because
 # it needs no model and no engine build - two source files and both

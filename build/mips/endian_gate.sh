@@ -85,7 +85,7 @@ if [ -z "${LZ_ENDIAN_IN_WSL:-}" ] && [ -z "${LZ_MIPS_XTC:-}" ] \
     fi
 fi
 
-MODELS=${MODELS:-"/mnt/e/LLM/models/kunkun98-pilot-20260806 /mnt/e/LLM/models/kunmoe-v2 /mnt/e/LLM/models/_armgate2"}
+MODELS=${MODELS:-"/mnt/e/LLM/models/kmr20 /mnt/e/LLM/models/kunmoe-v2 /mnt/e/LLM/models/_armgate2"}
 TOK=${TOK:-1,2,3,4,5,6,7,8,9,10}
 W=${W:-/tmp/mipsendian}
 KERNELS=${KERNELS:-ref}

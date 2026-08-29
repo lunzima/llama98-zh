@@ -32,7 +32,15 @@
 set -u
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+
+# A DEFAULT MODEL, for the same reason the other model-taking gates now
+# have one: `make check` passes no MODEL, so until this line the only
+# run that ever compressed anything was one somebody typed by hand.
+# _armgate2 has a model.bin and round trips 45,816,469 bytes. Still
+# SKIPs where MODELS_ROOT is not there.
+MODELS_ROOT=${MODELS_ROOT:-/e/LLM/models}
 MODEL=${1:-}
+[ -n "$MODEL" ] || MODEL="$MODELS_ROOT/_armgate2"
 TOKENS=${2:-1,2,3,4,5,6,7,8}
 
 BIN=${BIN:-}

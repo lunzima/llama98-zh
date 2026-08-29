@@ -26,7 +26,22 @@
 set -u
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+
+# A DEFAULT MODEL, AND IT HAD TO BE HUNTED FOR. This gate needs a
+# checkpoint that actually carries BF16 tensors, and for a while nothing
+# ran it because `make check` passes no MODEL and the obvious candidates
+# do not qualify: every L98Z export under models/ is quantised (the
+# exporter's format table stops at T2 and has no BF16 code), and the raw
+# HF safetensors trees mostly fail to load for unrelated reasons - a
+# byte-count mismatch in Qwen3.5-0.8B, a missing embed_tokens in the mtp
+# variant, a missing layer_types in router-bert. cpt100m-frozen loads
+# and holds 121 BF16 tensors, 0.23 GB expanded against 0.12 GB kept
+# narrow, which is what makes the second half of this gate mean
+# anything. If it is not there this SKIPs, as before - but on the tree
+# this was written for it runs.
+MODELS_ROOT=${MODELS_ROOT:-/e/LLM/models}
 MODEL=${1:-}
+[ -n "$MODEL" ] || MODEL="$MODELS_ROOT/cpt100m-frozen"
 TOKENS=${2:-1,2,3,4,5,6,7,8}
 
 BIN=${BIN:-}

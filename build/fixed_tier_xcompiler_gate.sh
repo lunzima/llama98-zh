@@ -87,11 +87,11 @@
 # an explicit `float` value in the same change that retired the
 # hardware predicate, so it no longer needs the special-casing this
 # script used to carry for it). It runs FIRST and is reported as a
-# distinct FAIL if it ever diverges: every other row's meaning depends
-# on gcc and Watcom agreeing on the float path they both fall back to,
-# so a baseline divergence makes the rest of the run uninterpretable and
-# the gate stops there instead of printing more lines that cannot be
-# trusted either way.
+# distinct FAIL if it ever diverges - but it NO LONGER STOPS THE RUN,
+# and the baseline block itself says at length what that used to cost.
+# Short version: the rows whose meaning depended on the float path were
+# the twelve isolated ones, and they are gone; the two that remain pass
+# no isolation flag and never reach it.
 #
 # ISOLATION: every non-baseline, non-group, non-default tier row also
 # passes --fixed off alongside its own tier flag, forcing every OTHER
@@ -143,17 +143,30 @@ fi
 # as those. LZ_NORM_INT_GATE_MODEL overrides the path directly (kept
 # under its original name - the two tiers it was named for are still in
 # here, and nothing outside this script needs to know it grew).
-# COVERAGE GAP - kmr20 carries no T2 tensor (.prof/dtype_probe.c: q8_0
-# 7.1%, q4_1 33.0%, q6_1 59.4%, q16_0 0.5%), so every row below leaves
-# the T2 half of the Q4_1/Q6_1/T2 epilogue family untested. That half is
-# not a copy of the others: T2 has no stored zero plane and reaches the
-# fixed epilogue through its own `zneg` branch, reusing the NEGATED
-# scale plane. Cover it with a second run against a checkpoint that has
-# T2 tensors, e.g.
-#   LZ_NORM_INT_GATE_MODEL=/e/LLM/models/kunmoe-v2-t2-probe bash "$0"
-# (8 T2 tensors, 2.8% of elements - enough that the whole logits dump
-# moves, the rest being q8_0). Not the default because that checkpoint
-# lives outside the repo like kmr20 and one of the two has to be picked.
+# COVERAGE GAP, NOW COVERED ELSEWHERE - kmr20 carries no T2 tensor
+# (.prof/dtype_probe.c: q8_0 7.1%, q4_1 33.0%, q6_1 59.4%, q16_0 0.5%),
+# so every row below leaves the T2 half of the Q4_1/Q6_1/T2 epilogue
+# family untested. That half is not a copy of the others: T2 has no
+# stored zero plane and reaches the fixed epilogue through its own
+# `zneg` branch, reusing the NEGATED scale plane.
+#
+# build/gcc_watcom_output_gate.sh now defaults to $MODELS_ROOT/_t2gate,
+# which is this same checkpoint with 12 tensors moved from q6_1 to t2 -
+# 133,349,376 elements either way, identical q8_0/q4_1/q16_0 counts, T2
+# at 4.7%. Same model, one format swapped, so a divergence there and not
+# here lands on the T2 path instead of on "two different models". That
+# gate is in `make check` and takes ~4 minutes; a second full run here
+# would cost ~50.
+#
+# THE REMEDY THIS PARAGRAPH USED TO GIVE HAD ROTTED: it said to run
+# LZ_NORM_INT_GATE_MODEL=/e/LLM/models/kunmoe-v2-t2-probe, and no such (historical)
+# directory exists any more. An instruction naming a fixture is a claim
+# about the disk and goes stale exactly like a comment naming a
+# function; this one had, silently, and the gap stayed open the whole
+# time because the way to close it did not resolve.
+#
+# The override below still works for a one-off full run against T2:
+#   LZ_NORM_INT_GATE_MODEL=/e/LLM/models/_t2gate bash "$0"
 MODELS_ROOT=${MODELS_ROOT:-/e/LLM/models}
 MODEL=${LZ_NORM_INT_GATE_MODEL:-$MODELS_ROOT/kmr20}
 if [ ! -d "$MODEL" ]; then

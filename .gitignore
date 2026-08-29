@@ -50,6 +50,7 @@
 !/build/lz4_model_gate.sh
 !/build/bf16_torch_gate.sh
 !/build/gcc_watcom_output_gate.sh
+!/build/fixture_exists_gate.sh
 !/build/mathf_xcompiler_gate.sh
 !/build/mathf_xcompiler_probe.c
 !/build/bf16_torch_probe.c

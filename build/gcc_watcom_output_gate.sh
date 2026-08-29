@@ -33,7 +33,30 @@
 set -u
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+
+# A DEFAULT MODEL, because "SKIP - model dir not given" every single run
+# is a gate that has never asked its question. `make check` passes no
+# MODEL, so without this the only invocation that ever did real work was
+# one somebody typed by hand.
+#
+# _t2gate RATHER THAN kmr20, AND THAT CLOSES A RECORDED GAP.
+# build/fixed_tier_xcompiler_gate.sh is pinned to kmr20 and its header
+# says what that leaves out: kmr20 carries no T2 tensor, so the T2 half
+# of the Q4_1/Q6_1/T2 epilogue family - which has no stored zero plane
+# and reaches the fixed epilogue through its own `zneg` branch - was
+# untested by every row of it. _t2gate is the same checkpoint with 12
+# tensors moved from q6_1 to t2 (133,349,376 elements either way, the
+# same q8_0/q4_1/q16_0 counts), so a divergence here and not there is
+# attributable to the T2 path rather than to two different models.
+# Two gates asking the same question of the same checkpoint would be
+# one gate and a copy.
+#
+# Same MODELS_ROOT convention as that script, and still SKIPs where the
+# tree is not there. _armgate2 stays a useful second opinion by
+# argument; it is not the default because it closes nothing.
+MODELS_ROOT=${MODELS_ROOT:-/e/LLM/models}
 MODEL=${1:-}
+[ -n "$MODEL" ] || MODEL="$MODELS_ROOT/_t2gate"
 
 # EIGHT TOKENS WAS THE WRONG DEFAULT, and this file is the place to say
 # so because it shipped with it. src/lz_mathf.c's reduce_large defect

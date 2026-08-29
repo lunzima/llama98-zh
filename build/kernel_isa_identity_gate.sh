@@ -411,14 +411,27 @@ done
 # == x86 ref == every other x86 tier - but only while both gates use the
 # same pin. If either changes its pins, that chain breaks silently.
 #
-# MUTATION-TESTED, and both mutations were surgical - one arm's flags
-# changed, only the assertions fed by that arm went red:
-#   --kv q4 on the gcc ref arm  -> x87-vs-SSE and all-six FAIL,
-#                                  both twin pairs stay green
-#   --kv q4 on the wat sse2 arm -> the sse2 twin pair FAILs alone, the
-#                                  mmx pair, x87 and all-six stay green
-# The six intra-binary rows stayed green through both, which is what
-# says these four assertions are new coverage rather than a restatement.
+# MUTATION-TESTED, one arm's flags changed at a time, so only the
+# assertions fed by that arm may go red. Re-run after the four
+# cross-rounding rows were promoted from INFO to assertions, because an
+# assertion nobody has seen fail is a comment. --kv q4 on one arm:
+#
+#   arm mutated   rows that went red
+#   -----------   ----------------------------------------------------
+#   gcc ref       gcc's own three tiers; gcc ref == watcom ref
+#   wat sse2      watcom ref == watcom sse2; gcc sse2 == watcom sse2
+#   wat mmx       watcom's x87 tiers; gcc mmx == watcom mmx
+#
+# Each of the four newly-armed rows is red in exactly one column and
+# green in the other two, which is the property that says they are
+# independent coverage rather than three views of one comparison. The
+# intra-binary rows stayed green wherever their own arm was untouched.
+#
+# A FLOAT-ONLY DEFECT IS NOT A VALID CONTROL HERE - see the note at the
+# assertions themselves. Reintroducing reduce_large's missing barrier
+# leaves all six green, because these runs are the fixed tier and the
+# quantisation between the RoPE table and the logits eats a 1-ulp table
+# entry. Measured, not assumed.
 WBIN=""
 for c in llama98-w.exe llama98-w; do [ -x "$c" ] && WBIN=$c && break; done
 if [ -z "$WBIN" ] && [ -x /c/WATCOM/binnt64/wcc386.exe ]; then
@@ -487,22 +500,52 @@ else
         if [ "$n" -ne 10 ]; then
             echo "  cross-compiler: incomplete ($n/10 runs), nothing compared"
         else
-            # HARD ASSERT, grouped by FLOAT UNIT rather than by compiler,
-            # because the grouping that matters is which tiers round the
-            # same way - and one Watcom binary contains both.
+            # HARD ASSERT, ALL SIX ROWS - and four of them used to be
+            # INFO on a premise that has since been refuted.
             #
-            #   gcc:  scalar is SSE (x86-64 default) and the SIMD tiers
-            #         are SSE2, so all three tiers are one rounding.
-            #   wat:  scalar is x87; the mmx twin is INTEGER SIMD, so it
-            #         inherits x87's rounding for everything around it -
-            #         but the sse2 twin issues real mulps/addps/cvtps2dq
-            #         (src/ops_sse2.c), i.e. SSE rounding inside an x87
-            #         binary. wat ref == wat sse2 is therefore structurally
-            #         unreachable and says nothing about the kernel.
+            # THE OLD PREMISE, kept here because it reads plausible and
+            # somebody will propose it again: gcc is SSE everywhere
+            # (24-bit at every instruction) while a Watcom binary holds
+            # two float units at once - x87 for scalar, real
+            # mulps/addps/cvtps2dq in the sse2 twin (src/ops_sse2.c) -
+            # so `wat ref == wat sse2` was called structurally
+            # unreachable, and every gcc-against-Watcom row was called an
+            # 80-bit-against-24-bit difference nothing could close. The
+            # cited evidence was lz_sinf(-55.0f): 3f7feff6 under gcc,
+            # 3f7feff5 under Watcom.
             #
-            # So gcc gets all three tiers; Watcom gets ref == mmx, which
-            # is the row that still catches a #pragma aux integer kernel
-            # drifting from its own scalar reference.
+            # THAT MEASUREMENT WAS TAKEN WITHOUT PC=24. The engine runs
+            # every float pass inside lz_fpu_float_begin, which puts the
+            # 387 at a 24-bit mantissa so it rounds where SSE rounds;
+            # under the bracket the engine actually uses, Watcom gives
+            # 3f7feff6 too. The residual that survived the bracket was
+            # ONE defect, not a property of the hardware:
+            # src/lz_mathf.c's reduce_large multiplied an exact int64 by
+            # pi63 on x87 because `fild` is exact whatever the precision
+            # control says (fixed in e7b9069). With that closed, all six
+            # rows below agree on both fixtures, at 603 and 661 tokens.
+            #
+            # So they are assertions now. What PC=24 still does NOT cover
+            # is the 387's 15-bit exponent and int->float conversions
+            # feeding a multiply; if one of these rows goes red again,
+            # that is where to look first, and
+            # build/mathf_xcompiler_gate.sh narrows it in seconds.
+            #
+            # WHAT THESE ROWS STILL CANNOT SEE, measured rather than
+            # assumed: every run here is the FIXED tier, and the fixed
+            # tier absorbed the very defect that motivated arming them.
+            # With reduce_large's barrier removed, kmr20 diverged between
+            # the toolchains from token 125 under --fixed off and stayed
+            # BYTE-IDENTICAL under --fixed all and the shipping default -
+            # the quantisation between the RoPE table and the logits eats
+            # a 1-ulp table entry. So a mutation that reintroduces that
+            # bug leaves all six rows green, and that is not a defect in
+            # them; it is the boundary of what a fixed-tier comparison
+            # can answer. The float side is covered by
+            # build/fixed_tier_xcompiler_gate.sh's --fixed off row and by
+            # build/mathf_xcompiler_gate.sh. Mutation-test these rows
+            # with something the fixed tier carries - a flag on one arm,
+            # or an integer kernel - not with a float-only defect.
             if cmp -s "$TMPD/x.gcc.ref.epi.bin" "$TMPD/x.gcc.mmx.epi.bin" \
                && cmp -s "$TMPD/x.gcc.ref.epi.bin" "$TMPD/x.gcc.sse2.epi.bin"; then
                 echo "PASS: $fx / xcc - gcc ref == gcc mmx == gcc sse2" \
@@ -520,33 +563,39 @@ else
                 echo "FAIL: $fx / xcc - watcom's x87 tiers are not one value"
                 FAIL=1
             fi
+            # x87 SCALAR AGAINST THE SSE2 TWIN INSIDE ONE WATCOM BINARY.
+            # This is the row the old premise called unreachable, and it
+            # is the one that would catch an ops_sse2.c kernel drifting
+            # from the C it replaces on the target toolchain.
             if cmp -s "$TMPD/x.wat.ref.epi.bin" "$TMPD/x.wat.sse2.epi.bin"; then
-                echo "INFO: $fx / xcc - watcom ref == watcom sse2" \
-                     "(x87 and SSE agreed here)"
+                echo "PASS: $fx / xcc - watcom ref == watcom sse2" \
+                     "(x87 scalar vs the sse2 twin, one binary)"
+                PASS=$((PASS + 1))
             else
                 ND=$(cmp -l "$TMPD/x.wat.ref.epi.bin" \
                             "$TMPD/x.wat.sse2.epi.bin" | wc -l)
                 NT=$(wc -c < "$TMPD/x.wat.ref.epi.bin")
-                echo "INFO: $fx / xcc - watcom ref vs watcom sse2 differ in" \
-                     "$ND of $NT bytes (known: x87 scalar vs the sse2 twin's" \
-                     "own mulps/addps rounding, same cause as the rows below)"
+                echo "FAIL: $fx / xcc - watcom ref vs watcom sse2 differ in" \
+                     "$ND of $NT bytes"
+                FAIL=1
             fi
-            # REPORTED, NOT ASSERTED: gcc (SSE, 24-bit every instruction)
-            # against Watcom (x87, 80-bit inside an expression). The
-            # header measures why these cannot match and why the byte
-            # count is not a severity signal. Printed so a change in the
-            # relationship is visible in the log; it does not set FAIL.
+            # gcc AGAINST WATCOM, TIER BY TIER. Byte count is not a
+            # severity signal here: one ulp anywhere upstream reaches
+            # most of the logit vector, so a small defect and a large one
+            # print the same number. What names the cause is WHICH tier
+            # moved - all three means something shared (the C, or a
+            # helper both call), one means that tier's kernel.
             for k in ref mmx sse2; do
                 if cmp -s "$TMPD/x.gcc.$k.epi.bin" "$TMPD/x.wat.$k.epi.bin"; then
-                    echo "INFO: $fx / xcc - gcc $k == watcom $k" \
-                         "(SSE and x87 agreed here)"
+                    echo "PASS: $fx / xcc - gcc $k == watcom $k"
+                    PASS=$((PASS + 1))
                 else
                     ND=$(cmp -l "$TMPD/x.gcc.$k.epi.bin" \
                                 "$TMPD/x.wat.$k.epi.bin" | wc -l)
                     NT=$(wc -c < "$TMPD/x.gcc.$k.epi.bin")
-                    echo "INFO: $fx / xcc - gcc $k vs watcom $k differ in" \
-                         "$ND of $NT bytes (known: SSE 24-bit vs x87 80-bit," \
-                         "see this script's header)"
+                    echo "FAIL: $fx / xcc - gcc $k vs watcom $k differ in" \
+                         "$ND of $NT bytes"
+                    FAIL=1
                 fi
             done
         fi

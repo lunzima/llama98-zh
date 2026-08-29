@@ -267,7 +267,13 @@ MODELS_ROOT=${MODELS_ROOT:-/e/LLM/models}
 # is a fact about those checkpoints' purpose, not an engine regression.
 # Gating CI on them would make it permanently red for reasons unrelated
 # to this engine. Override with CHECK_MODELS="a b c" to test others.
-CHECK_MODELS=${CHECK_MODELS:-"s1v3 kunkun98-pilot-20260806 kunmoe-v2"}
+#
+# kunkun98-pilot-20260806 WAS IN THIS LIST AND IS NOT ON DISK, so the
+# sweep has been running two checkpoints while reading as three. Same
+# name was ARM_MODEL below, where the cost was larger - see there.
+# Replaced with kmr20, which every cross-compiler gate already uses.
+# build/fixture_exists_gate.sh now refuses this class.
+CHECK_MODELS=${CHECK_MODELS:-"s1v3 kmr20 kunmoe-v2"}
 
 if [ "$native_ok" -ne 1 ]; then
     echo "SKIP: model --check sweep (native build failed in stage 1, no binary to run)"
@@ -302,7 +308,17 @@ fi
 # ---------------------------------------------------------------------
 echo
 echo "==== [4/31]ARM parity gate ===="
-ARM_MODEL="$MODELS_ROOT/kunkun98-pilot-20260806"
+# THIS NAMED A CHECKPOINT THAT IS NOT ON DISK, and the consequence was
+# the worst one available: parity_gate.sh SKIPs on a missing model dir,
+# ci.sh counts SKIP as not-a-failure, and so the x86-against-ARM
+# bit-identity contract - the hardest promise this engine makes - was
+# not being checked by CI at all, while the run reported no failure.
+# Nothing distinguishes "the ARM toolchain is absent on this machine",
+# which is a legitimate skip, from "the fixture name rotted", which is
+# not. _armgate2 is on disk and is named for this gate; verified PASS on
+# all four rows (x86 vs ARM identical over 20,840,448 bytes, and arm-c /
+# arm-asm / arm-asm-fixed each identical to ref).
+ARM_MODEL="$MODELS_ROOT/_armgate2"
 LOG=build/ci-arm.log
 if [ "$native_ok" -ne 1 ]; then
     echo "SKIP: ARM parity gate (native build failed in stage 1, nothing to compare ARM against)"
