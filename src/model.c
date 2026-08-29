@@ -13,6 +13,27 @@
 #include "model.h"
 #include "ops.h"   /* lz_bf16_store_g, LZ_MM_WIDEN_MAX */
 
+#if LZ_DBG_LAYER_HASH
+/* Per-layer residual hash for the fast-mode (--fastfp) cross-target
+   divergence hunt. PURE INTEGER over the buffer's bit patterns: no float
+   op, so it cannot change the rounding of the arithmetic it measures.
+   Lives here (a large, cold TU) rather than in forward.c so the compiler
+   cannot inline it into the layer loop and reorder float work around it.
+   -DLZ_DBG_LAYER_HASH=1 is a diagnostic build only; nothing in a normal
+   build references it. */
+void lz_dbg_layer_hash(const char *tag, int li, const void *p, size_t nf) {
+    const unsigned char *b = (const unsigned char *)p;
+    unsigned long long h = 1469598103934665603ull;   /* FNV-1a */
+    size_t i;
+    for (i = 0; i < nf * 4u; i++) {
+        h ^= b[i];
+        h *= 1099511628211ull;
+    }
+    fprintf(stderr, "LHASH %s %d %llu\n", tag, li,
+            (unsigned long long)h);
+}
+#endif /* LZ_DBG_LAYER_HASH */
+
 /* 16-byte aligned malloc/free for the weight buffers (field->f and the
    quantized planes field->q/scale/zero). The SSE1/SSE2 row/dot kernels
    read these with movaps/movdqa after the alignment. field->q is aligned

@@ -285,6 +285,24 @@ static __inline__ int32_t lz_exp_resid_arm_asm(int32_t ms, int32_t t,
                                                int32_t sh) {
     int32_t rq;
     uint32_t p, t1, t2;
+#if LZ_SOFTFP_FAST
+    /* Round toward zero: the residue p is non-negative, so a logical
+       shift IS the truncation q8_round performs under fastfp (the C
+       reference's q8_round now truncates; this RNE stayed behind, and
+       the softmax's exp diverged from x86 on residues whose dropped bits
+       exceeded half). */
+    __asm__(
+        "sub    %[p], %[m], %[t], lsl %[sh]\n\t"
+        "rsbs   %[t1], %[sh], #20\n\t"
+        "movpl  %[q], %[p], lsl %[t1]\n\t"
+        "bpl    1f\n\t"
+        "rsb    %[t1], %[t1], #0\n\t"    /* sh - 20, 1..3 */
+        "mov    %[q], %[p], lsr %[t1]\n\t"
+        "1:\n\t"
+        : [q] "=&r"(rq), [p] "=&r"(p), [t1] "=&r"(t1)
+        : [m] "r"(ms), [t] "r"(t), [sh] "r"(sh)
+        : "cc");
+#else
     __asm__(
         "sub    %[p], %[m], %[t], lsl %[sh]\n\t"
         "rsbs   %[t1], %[sh], #20\n\t"
@@ -303,6 +321,7 @@ static __inline__ int32_t lz_exp_resid_arm_asm(int32_t ms, int32_t t,
         : [q] "=&r"(rq), [p] "=&r"(p), [t1] "=&r"(t1), [t2] "=&r"(t2)
         : [m] "r"(ms), [t] "r"(t), [sh] "r"(sh)
         : "cc");
+#endif /* LZ_SOFTFP_FAST */
     return rq;
 }
 

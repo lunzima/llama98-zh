@@ -159,6 +159,19 @@ LZ_MAYBE_UNUSED static int q8_round(float qv) {
         lz_debug_q8r_decl++;
     }
 #endif /* LZ_Q8R_BITS */
+#if !defined(LZ_ARM_PRIM_ASM) && !LZ_Q8R_BITS
+    /* --fastfp on sets MXCSR to round-toward-zero, but the magic add does
+       not round toward zero there: the sum 1.5*2^23 + qv truncates, and
+       the low-23-bit extraction turns that into FLOOR for negative qv
+       (-3.7 -> -4) while ARM's bit-pattern paths truncate toward zero
+       (-3.7 -> -3). cvtps2dq / the SSE2 norm kernel truncate the same
+       way ARM does, so this entry is the odd one out under fastfp - a
+       hardware artifact of the trick, not the rounding it advertises.
+       (int)qv is a real cvttss2si truncation, bit-identical to the ARM
+       paths over the whole |qv| < 2^22 contract domain (their truncation
+       never reaches the +2^22 decline). */
+    if (lz_fastfp()) return (int)qv;
+#endif /* !LZ_ARM_PRIM_ASM && !LZ_Q8R_BITS */
     t.f = qv + 12582912.0f;                 /* 1.5 * 2^23 */
     return (int)(t.u & 0x007FFFFFu) - 0x00400000;
 }

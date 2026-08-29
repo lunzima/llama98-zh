@@ -658,6 +658,31 @@ void lz_fwht_i32_arm_asm(int32_t *y, const int32_t *x, int n) {
    Register map: r4/r5 the 64-bit accumulator, r6 the float word, r7
    the shift count then the dropped bits, r8 the mantissa, r9 the
    rounded value, r10 = 150 - k, r11 = 32767. */
+#if LZ_SOFTFP_FAST
+/* Round toward zero: the dropped bits are dropped, no round-up and no
+   tie-to-even. Same class of miss as lz_q8_round_pow2_arm_asm was - the
+   norm's sum-of-squares kernel rounds q8_round(x[i]*sc) on the bit
+   pattern, and the magic-add path got the RTZ truncation while this
+   inline kernel kept round-half-to-even. The C reference (norm_ss_fixed)
+   reaches q8_round via lz_q8_round_bits, which now truncates; this must
+   match, or the ARM norm's ss diverges from x86's MXCSR-truncated magic
+   add on every value whose dropped bits exceed half. */
+#define LZ_NORMSS_ARM_BODY(STORE)                             \
+    "ldr    r6, [%[xp]], #4\n\t"                              \
+    "mov    r7, r6, lsl #1\n\t"                               \
+    "mov    r7, r7, lsr #24\n\t"                              \
+    "sub    r7, r10, r7\n\t"                                  \
+    "bic    r8, r6, #0xFF000000\n\t"                          \
+    "orr    r8, r8, #0x800000\n\t"                            \
+    "mov    r9, r8, lsr r7\n\t"                               \
+    "cmp    r9, r11\n\t"                                      \
+    "movgt  r9, r11\n\t"                                      \
+    "cmp    r6, #0\n\t"                                       \
+    "rsbmi  r9, r9, #0\n\t"                                   \
+    STORE                                                     \
+    "smlalbb r4, r5, r9, r9\n\t"                              \
+    "subs   %[cnt], %[cnt], #1\n\t"
+#else
 #define LZ_NORMSS_ARM_BODY(STORE)                             \
     "ldr    r6, [%[xp]], #4\n\t"                              \
     "mov    r7, r6, lsl #1\n\t"                               \
@@ -679,6 +704,7 @@ void lz_fwht_i32_arm_asm(int32_t *y, const int32_t *x, int n) {
     STORE                                                     \
     "smlalbb r4, r5, r9, r9\n\t"                              \
     "subs   %[cnt], %[cnt], #1\n\t"
+#endif /* LZ_SOFTFP_FAST */
 
 void lz_norm_ss_fixed_arm_asm(const float *x, int n, int k, short *qout,
                               lz_i64 *acc) {

@@ -35,6 +35,17 @@
 #define LZ_TAP_OFF 1
 #endif /* LZ_TAP */
 
+/* Per-layer residual hash (see model.c's lz_dbg_layer_hash). Integer-only,
+   a no-op unless -DLZ_DBG_LAYER_HASH=1. Same shape as LZ_TAP so the same
+   sites can carry it; the KDA recurrence is serial-in-t, so the hash must
+   be read at the layer boundary, never inside the recurrence. */
+#if LZ_DBG_LAYER_HASH
+void lz_dbg_layer_hash(const char *tag, int li, const void *p, size_t nf);
+#define LZ_DBGHASH(tag, li, ptr, n) lz_dbg_layer_hash(tag, li, ptr, n)
+#else
+#define LZ_DBGHASH(tag, li, ptr, n) ((void)0)
+#endif /* LZ_DBG_LAYER_HASH */
+
 /* ---- attn helpers (src/forward_attn.c), shared with the paths still in
    forward.c - the four-path split moved them out and left the signatures
    here. */

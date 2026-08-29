@@ -460,6 +460,36 @@ static __inline__ uint32_t lz_f2u(float f) {
    identical, which is a libgcc rewrite, not an ISA cell. The floor and
    residue steps DECLINE (and the C below runs) wherever their integer
    identity is not provable; see the two primitives' comments. */
+
+/* Round-half-even on the bit pattern, UNCONDITIONALLY - the mode-free
+   twin of lz_q8_round_bits, which follows the FPU mode under
+   LZ_SOFTFP_FAST. The exp floor needs this because floor is a
+   mathematical function: the decomposition t = round-half-even(y32-0.5)
+   (= floor(y32) off the exact-integer boundaries) must not move with
+   the FPU rounding mode. Under RTZ (--fastfp on / LZ_SOFTFP_FAST) the
+   magic-add floor reads floor(y32-0.5), which for negative y32 with a
+   small fractional y32-0.5 lands one BELOW the RNE the ARM asm floor
+   makes (-127.5 -> -129 vs -128), and the ARM asm floor DECLINES past
+   |N| > 2^24, falling to this C - so both targets need the mode-free
+   floor in the fallback. Same body as lz_q8_round_bits' RNE arm. */
+LZ_MAYBE_UNUSED static int lz_rne_round_bits(uint32_t u, int k, int32_t *out) {
+    uint32_t m, t;
+    int32_t r;
+    int e = (int)((u >> 23) & 0xFFu) + k;
+    if (e >= 149) return 0;                 /* |v| >= 2^22, or inf/nan */
+    e = 150 - e;                            /* bits to drop, >= 2 */
+    if (e >= 25) { *out = 0; return 1; }    /* |v| < 0.5 */
+    m = (u & 0x00FFFFFFu) | 0x00800000u;
+    r = (int32_t)(m >> e);
+    t = m << (32 - e);
+    if (t > 0x80000000u) r++;
+    else if (t == 0x80000000u) r += (r & 1);  /* half to even */
+    if (u & 0x80000000u) r = -r;
+    if (r == 0x400000) return 0;
+    *out = r;
+    return 1;
+}
+
 float lz_exp_fixed(float x) {
     union { float f; int32_t i; } u;
     float y32, r;
@@ -507,12 +537,41 @@ float lz_exp_fixed(float x) {
     if (!have_floor)
 #endif /* LZ_ARM_PRIM_ASM */
     {
-        u.f = y32 - 0.5f + 12582912.0f;       /* same floor as the float body */
-        t = (u.i & 0x007FFFFF) - 0x00400000;
-        n = t >> 5;
-        idx = t & 31;
-        r = y32 - (float)t;                   /* [0,1) */
-        rq = q8_round(r * (float)LZ_EXP_QSCALE);  /* residual, Q20 */
+        /* The magic-add floor needs round-to-nearest: under RTZ
+           (--fastfp on / LZ_SOFTFP_FAST) the sum truncates and the
+           extraction reads floor(y32-0.5), which for negative y32 lands
+           one BELOW the round-half-even floor (-127.5 -> -129 vs -128) -
+           the softmax's exp diverged. The floor is a MATHEMATICAL
+           function (t = round-half-even(y32-0.5) = floor(y32) off the
+           exact-integer boundaries); it must not move with the FPU
+           rounding mode. The ARM asm floor agrees on RNE but DECLINES
+           past |N| > 2^24 (a value like y32=-127.5 lands just past it)
+           and falls to this C, so BOTH targets take the mode-free RNE
+           path here under fastfp. */
+        union { float f; uint32_t u; } du;
+        du.f = y32 - 0.5f;
+        if (lz_fastfp()) {
+            if (lz_rne_round_bits(du.u, 0, &t)) {
+                n = t >> 5;
+                idx = t & 31;
+                r = y32 - (float)t;
+                rq = q8_round(r * (float)LZ_EXP_QSCALE);
+            } else {
+                du.f = y32 - 0.5f + 12582912.0f;
+                t = (du.u & 0x007FFFFF) - 0x00400000;
+                n = t >> 5;
+                idx = t & 31;
+                r = y32 - (float)t;
+                rq = q8_round(r * (float)LZ_EXP_QSCALE);
+            }
+        } else {
+            du.f = y32 - 0.5f + 12582912.0f;
+            t = (du.u & 0x007FFFFF) - 0x00400000;
+            n = t >> 5;
+            idx = t & 31;
+            r = y32 - (float)t;
+            rq = q8_round(r * (float)LZ_EXP_QSCALE);
+        }
     }
     /* s = r/32 = rq/2^25, so the Q20 Taylor terms are (ln2_q*s)>>20 and
        (ln2sq_q*s*s)>>40; both shifts round half-up. */
@@ -527,11 +586,16 @@ float lz_exp_fixed(float x) {
         if (k >= -126 && k <= 127) {
             union { float f; uint32_t u; } pb;
             pb.f = lz_i32f_arm_asm(prod);     /* == (float)prod, exact here */
-            if (lz_scale2_arm_asm(pb.u, k, &pb.u)) return pb.f;
+            if (lz_scale2_arm_asm(pb.u, k, &pb.u)) {
+                return pb.f;
+            }
         }
     }
 #endif /* LZ_ARM_PRIM_ASM */
-    return (float)prod * pow2f(n - LZ_EXP_Q);
+    {
+        float exp_res = (float)prod * pow2f(n - LZ_EXP_Q);
+        return exp_res;
+    }
 }
 
 /* lz_exp_fixed over a RUN, for the same reason lz_sigmoid_q15_run
@@ -997,8 +1061,15 @@ int32_t sigmoid_q15(float x) {
     int32_t frac, a, b;
     if (!g_sigtab_ready) sig_build();
 #if defined(LZ_ARM_PRIM_ASM)
-    /* After sig_build, never before: the primitive reads the table. */
-    if (g_kernel == LZ_KERNEL_ARM_ASM) {
+    /* After sig_build, never before: the primitive reads the table.
+       NOT under fastfp: the asm rounds the coordinate half-to-even on
+       the integer mantissa, while the C below reads (x - LZ_SIG_LO) *
+       LZ_SIG_STEP with the soft-float add and then truncates - under
+       RTZ (LZ_SOFTFP_FAST) those disagree for inputs whose coordinate
+       lands on a half, and the SwiGLU's sigmoid diverged from x86
+       (probe: ~0.24% of random x differ). The C's soft-float add is
+       RTZ-consistent with x86, so the C path is the fastfp tier. */
+    if (!LZ_SOFTFP_FAST && g_kernel == LZ_KERNEL_ARM_ASM) {
         union { float f; uint32_t u; } bx;
         int32_t r;
         bx.f = x;
