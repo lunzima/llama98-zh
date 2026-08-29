@@ -509,4 +509,88 @@ if ! cmp -s "$ARM_FX_DUMP" "$FXDUMP"; then
     exit 1
 fi
 echo "PASS: ARM fixed tier arm-asm is bit-identical to arm-c (fixed, $ARM_SZ bytes)"
+
+# ---- the fastfp (RTZ) parity row ---------------------------------------
+# x86 --fastfp on (MXCSR RTZ) vs ARM -DLZ_SOFTFP_FAST=1 (soft-float RTZ)
+# is the diagnostic cross-target run, and it is NOT the float arm above:
+# that pins --kernel ref --fixed off, which turns off every fixed tier
+# and never executes an ARM asm kernel. The fastfp fixes this row guards
+# - q8_round's x86 cast, the exp floor/residue, sigmoid_q15's C path,
+# norm_ss_fixed_arm_asm - live in the fixed tiers AND make the DIFFERENT
+# AUTO kernels (x86 sse2, ARM arm-asm) agree under RTZ. That agreement IS
+# the assertion, so the kernel is deliberately NOT pinned here.
+#
+# A SECOND ARM binary is built with LZ_SOFTFP_FAST=1: the strict binary
+# above must stay bit-identical to libgcc, and the soft-float library
+# compiled with RTZ is a different object.
+FAST_ARM_OUT="$ARM_WORK/build-fastfp"
+FAST_ARM_BIN="$FAST_ARM_OUT/llama98-arm"
+if [ "$ARM_BACKEND" = wsl ]; then
+    WSL_FAST_OUT=$(to_wsl_path "$FAST_ARM_OUT")
+    WSL_FAST_BIN=$(to_wsl_path "$FAST_ARM_BIN")
+    FAST_BUILD_LOG="$ARM_WORK/build-fastfp.log"
+    if ! wsl -e bash -lc "cd '$WSL_ROOT' && CC='$CC' OUT='$WSL_FAST_OUT' EXTRA_FLAGS='-DLZ_SOFTFP_FAST=1' bash build/arm/build_engine.sh" >"$FAST_BUILD_LOG" 2>&1; then
+        echo "FAIL: fastfp ARM cross-build under WSL failed, see $FAST_BUILD_LOG" >&2
+        tail -n 20 "$FAST_BUILD_LOG" >&2
+        exit 1
+    fi
+else
+    FAST_BUILD_LOG="$FAST_ARM_OUT.build.log"
+    mkdir -p "$(dirname "$FAST_ARM_OUT")" 2>/dev/null
+    if ! CC="$CC" OUT="$FAST_ARM_OUT" EXTRA_FLAGS="-DLZ_SOFTFP_FAST=1" "$HERE/build_engine.sh" >"$FAST_BUILD_LOG" 2>&1; then
+        echo "FAIL: fastfp ARM cross-build failed, see $FAST_BUILD_LOG" >&2
+        tail -n 20 "$FAST_BUILD_LOG" >&2
+        exit 1
+    fi
+fi
+if [ ! -f "$FAST_ARM_BIN" ]; then
+    echo "FAIL: fastfp ARM build did not produce $FAST_ARM_BIN" >&2
+    tail -n 20 "$FAST_BUILD_LOG" >&2
+    exit 1
+fi
+
+run_arm_fastfp_dump() {
+    local dump="$1"
+    if [ "$ARM_BACKEND" = wsl ]; then
+        local wdump
+        wdump=$(to_wsl_path "$dump")
+        wsl -e bash -lc "cd '$WSL_ROOT' && BIN='$WSL_FAST_BIN' SYSROOT=/usr/arm-linux-gnueabi bash build/arm/run_qemu.sh '$WSL_MODEL' $PINS --fixed all --kernel auto --fastfp on --tokens '$TOKENS' --dump-all-logits '$wdump'"
+    else
+        BIN="$FAST_ARM_BIN" SYSROOT="$SYSROOT" "$HERE/run_qemu.sh" "$MODEL" $PINS --fixed all --kernel auto --fastfp on --tokens "$TOKENS" --dump-all-logits "$dump"
+    fi
+}
+
+X86_FAST_DUMP="$WORK/x86.fastfp.logits"
+ARM_FAST_DUMP="$ARM_WORK/arm.fastfp.logits"
+
+echo "-- fastfp parity: x86 --fastfp on vs ARM LZ_SOFTFP_FAST=1 (AUTO kernels, fixed) --"
+if ! "$X86_BIN" "$MODEL" $PINS --fixed all --kernel auto --fastfp on \
+        --tokens "$TOKENS" --dump-all-logits "$X86_FAST_DUMP" \
+        >"$WORK/x86.fastfp.log" 2>&1; then
+    echo "FAIL: x86 fastfp run failed:" >&2
+    cat "$WORK/x86.fastfp.log" >&2
+    exit 1
+fi
+if ! run_arm_fastfp_dump "$ARM_FAST_DUMP" >"$WORK/arm.fastfp.log" 2>&1; then
+    echo "FAIL: ARM fastfp run failed:" >&2
+    cat "$WORK/arm.fastfp.log" >&2
+    exit 1
+fi
+if [ ! -s "$X86_FAST_DUMP" ] || [ ! -s "$ARM_FAST_DUMP" ]; then
+    echo "FAIL: one or both fastfp dump files are empty or missing" >&2
+    exit 1
+fi
+X86_FAST_SZ=$(wc -c < "$X86_FAST_DUMP")
+ARM_FAST_SZ=$(wc -c < "$ARM_FAST_DUMP")
+if [ "$X86_FAST_SZ" != "$ARM_FAST_SZ" ]; then
+    echo "FAIL: fastfp dump size mismatch - x86 $X86_FAST_SZ bytes, arm $ARM_FAST_SZ bytes" >&2
+    exit 1
+fi
+if ! cmp -s "$X86_FAST_DUMP" "$ARM_FAST_DUMP"; then
+    NDIFF=$(cmp -l "$X86_FAST_DUMP" "$ARM_FAST_DUMP" | wc -l)
+    echo "FAIL: fastfp x86/ARM logits differ - $NDIFF of $X86_FAST_SZ bytes" >&2
+    cmp "$X86_FAST_DUMP" "$ARM_FAST_DUMP" >&2
+    exit 1
+fi
+echo "PASS: fastfp x86/ARM --dump-all-logits are bit-identical ($X86_FAST_SZ bytes)"
 exit 0
