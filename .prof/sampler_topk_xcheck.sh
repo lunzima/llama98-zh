@@ -36,8 +36,14 @@ OLDREV=${1:-HEAD~1}
 O=${O:-/tmp/smtopk}
 CC=${CC:-gcc}
 LIMIT=${LIMIT:-2e-06}
-SRC="sampler ops ops_quant ops_sched ops_norm ops_gdn ops_matmul
-     ops_t2_scalar fwht cpucheck err"
+# lz_mathf carries lz_powf, which sampler.c calls for the temperature
+# curve. Without it the link fails on an undefined reference and this
+# harness reports SKIP - "new arm did not build" - which reads as an
+# environment problem and is a missing name in this list. A SKIP is not
+# a PASS, and a SKIP whose cause is the harness is worse than a FAIL:
+# nobody goes looking.
+SRC="sampler ops ops_kernel ops_epi ops_quant ops_sched ops_norm ops_gdn ops_matmul
+     ops_t2_scalar fwht cpucheck err lz_mathf"
 
 command -v python3 >/dev/null 2>&1 || {
     echo "sampler_topk_xcheck: SKIP - needs python3 for the float compare"

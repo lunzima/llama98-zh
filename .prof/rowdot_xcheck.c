@@ -75,7 +75,15 @@ static int check_table(const char *fmt, const lz_rowfn *tab,
     static unsigned char w4buf[MAXDIM * MAXNT + 16];
     unsigned char *w4 = (unsigned char *)(((size_t)w4buf + 15) & ~(size_t)15);
     static unsigned char w2[MAXDIM * MAXNT];
-    static int16_t xw[MAXDIM * MAXNT];
+    /* xw IS ALIGNED TOO, and the comment above used to say the
+       activations "stay bare" because the kernels read them with movdqu.
+       The per-32 kernels do. The 128-wide GROUP kernels read them with
+       movdqa, and this probe never met one: none of its four sizes was a
+       multiple of 128, so `nb & 3` was never zero and the group arm was
+       unreachable. Adding 128 to DIMS below faulted immediately under
+       Watcom until this buffer was aligned. */
+    static int16_t xwbuf[MAXDIM * MAXNT + 8];
+    int16_t *xw = (int16_t *)(((size_t)xwbuf + 15) & ~(size_t)15);
     static int32_t acc_ref[MAXDIM * MAXNT];
     static int32_t acc[MAXDIM * MAXNT];
     int nb = in_dim / 32;
@@ -102,8 +110,13 @@ static int check_table(const char *fmt, const lz_rowfn *tab,
         rctx.nb = nb;
         rctx.nt = nt;
         rctx.in_dim = in_dim;
-        rctx.pf_end = w2;
-        rctx.pf_end2 = w2 + sizeof w2 / 2;
+        /* THE END OF THE BUFFER THE ROW ACTUALLY READS. ops_matmul.c
+           passes rctx.pf_end = wend, the end of the same wr; pointing it
+           at a different array makes the group kernels' `pf_ < wend`
+           guard a comparison between unrelated objects, and what gets
+           prefetched then depends on where the linker put them. */
+        rctx.pf_end = w4 + MAXDIM * MAXNT;
+        rctx.pf_end2 = w2 + MAXDIM * MAXNT;
         tab[s](&rctx);
         if (first < 0) {
             first = s;
@@ -120,10 +133,19 @@ static int check_table(const char *fmt, const lz_rowfn *tab,
         if (memcmp(acc_ref, acc, (size_t)nb * nt * 4) != 0) {
             printf("  FAIL %s n=%d nt=%d: slot %s differs from %s\n",
                    fmt, in_dim, nt, slot_name(s), slot_name(first));
-            for (i = 0; i < nt; i++)
-                printf("      [%d] %s=%ld  %s=%ld\n", i,
-                       slot_name(first), (long)acc_ref[i],
-                       slot_name(s), (long)acc[i]);
+            /* Every accumulator the memcmp covered, which is nb*nt and
+               not nt. Printing nt of them showed acc[0] and acc[1] -
+               both equal - under a FAIL header, so the report named a
+               disagreement and then displayed agreement. The index is
+               the whole diagnosis here: sub-block 0 passing while 1..3
+               differ is the group-of-four kernel, and 4 differing alone
+               is the tail. */
+            for (i = 0; i < nb * nt; i++)
+                if (acc_ref[i] != acc[i])
+                    printf("      [tok %d, sub-block %d] %s=%ld  %s=%ld\n",
+                           i / nb, i % nb,
+                           slot_name(first), (long)acc_ref[i],
+                           slot_name(s), (long)acc[i]);
             bad = 1;
         }
     }
@@ -134,7 +156,13 @@ static int check_table(const char *fmt, const lz_rowfn *tab,
 int main(void) {
     /* Sizes: two clean multiples of 32 and two that are not, because the
        tail is where a length bug lives. */
-    static const int DIMS[] = { 32, 64, 96, 160 };
+    /* 128 IS NOT DECORATION. The row kernels branch on `(nb & 3) == 0`
+       into a 128-wide group kernel, and 32/64/96/160 give nb 1/2/3/5 -
+       so this probe compared the per-32 arm four times and the group arm
+       never, on every format, for as long as it has existed. That is the
+       arm build/dot128_*_probe.c exists to check in isolation; this is
+       the only thing that drives it through the ROW dispatch. */
+    static const int DIMS[] = { 32, 64, 96, 128, 160 };
     static const struct { const char *n; const lz_rowfn *t; } FMT[] = {
         { "q8_0",  LZ_ROW_Q8  },
         { "q4_1",  LZ_ROW_Q41 },
