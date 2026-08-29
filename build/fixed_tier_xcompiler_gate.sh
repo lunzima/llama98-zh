@@ -158,6 +158,14 @@ fi
 # gate is in `make check` and takes ~4 minutes; a second full run here
 # would cost ~50.
 #
+# THAT ~50-MINUTE RUN HAS BEEN DONE ONCE, so the gap is closed by
+# measurement rather than only by inference from the cheaper gate: all
+# eight rows below PASS on _t2gate - float control, --fixed all, the
+# shipping default and --kernel ref, on both the 603-token zh and
+# 661-token en fixtures, 78,905,344 and 86,507,520 bytes each. Not made
+# the default, because paying 50 minutes of every CI run to re-derive a
+# one-off result is not the same thing as checking something.
+#
 # THE REMEDY THIS PARAGRAPH USED TO GIVE HAD ROTTED: it said to run
 # LZ_NORM_INT_GATE_MODEL=/e/LLM/models/kunmoe-v2-t2-probe, and no such (historical)
 # directory exists any more. An instruction naming a fixture is a claim

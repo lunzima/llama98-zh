@@ -111,6 +111,8 @@ fixed_tier_xcompiler_gate.sh # needs a model and both toolchains
 recur_write_float_arm_gate.sh # needs the ARM cross toolchain
 int_pipeline_arm_gate.sh   # needs the ARM cross toolchain
 caption_symmetry_gate.sh   # needs the gui build and a screen readback
+endian_gate.sh             # needs WSL and the MIPS cross toolchain, and
+                           #   runs the engine big-endian under qemu
 "
 # REACHED, not mentioned. `make -n check` expands the whole prerequisite
 # tree and prints the recipes without running them, so what comes out is
@@ -131,7 +133,7 @@ REACHED=$( { make -n check 2>/dev/null; make -n 2>/dev/null; } \
 
 CIONLY_UNDECLARED=""
 NEVER_RUN=""
-for g in build/*_gate.sh; do
+for g in build/*_gate.sh build/*/*_gate.sh; do
     b=$(basename "$g")
     [ "$b" = "gate_wiring_gate.sh" ] && continue
     case "
@@ -232,12 +234,19 @@ if ! git ls-files --error-unmatch build/ci.sh >/dev/null 2>&1; then
     exit 1
 fi
 
-N=$(ls build/*_gate.sh 2>/dev/null | wc -l)
+# ALL OF THEM, subdirectories included. This counted only
+# build/*_gate.sh, so the census reported 53 while the tree held 56 -
+# and a count that reads as complete is the same lie this gate exists
+# to refuse, told about itself. arm/parity_gate.sh, arm/softfp_gate.sh
+# and mips/endian_gate.sh were wired (the loop above checks that) but
+# never classified: neither the ci.sh-only declaration nor the
+# nothing-runs-it check reached them.
+N=$(ls build/*_gate.sh build/*/*_gate.sh 2>/dev/null | wc -l)
 # Counted, not just asserted: a PASS that does not say how the N split
 # between the two depths is the same shape of silence this half was
 # added to remove.
 NMK=0
-for g in build/*_gate.sh; do
+for g in build/*_gate.sh build/*/*_gate.sh; do
     b=$(basename "$g")
     [ "$b" = "gate_wiring_gate.sh" ] && continue
     case "
