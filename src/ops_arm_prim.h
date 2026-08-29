@@ -33,10 +33,14 @@
 
 /* LZ_SOFTFP_FAST is lz_softfp.c's round-toward-zero switch, but these
    macros also expand in fwht.c and ops_arm.c, so the default must be
-   visible here for the RTZ tails below to read it. The ARM build passes
-   -DLZ_SOFTFP_FAST=1 to every TU when it is on. */
+   visible here for the RTZ tails below to read it. Same default as
+   ops.h; reached before ops.h in some TUs, so it must not disagree. */
 #ifndef LZ_SOFTFP_FAST
+#if defined(LZ_NO_FPU) || defined(__arm__)
+#define LZ_SOFTFP_FAST 1
+#else
 #define LZ_SOFTFP_FAST 0
+#endif
 #endif /* !LZ_SOFTFP_FAST */
 
 /* int32 -> float32, correctly rounded (round-half-to-even), which is

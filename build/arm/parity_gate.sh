@@ -314,10 +314,15 @@ run_arm_dump() {
 }
 
 # ---- cross-build the ARM side -------------------------------------------
+# The STRICT (RNE, bit-identical to libgcc) ARM binary: LZ_SOFTFP_FAST
+# now defaults to 1 on the ARM cross (RTZ is the shipping semantics), and
+# the float/tier/fixed rows below compare the RNE float arithmetic against
+# x86's --fastfp off - so the strict build must be pinned back to 0. The
+# fastfp row builds its own LZ_SOFTFP_FAST=1 binary.
 if [ "$ARM_BACKEND" = wsl ]; then
-    echo "-- cross-building ARM under WSL (CC=$CC) --"
+    echo "-- cross-building ARM under WSL (CC=$CC, strict LZ_SOFTFP_FAST=0) --"
     BUILD_LOG="$ARM_WORK/build.log"
-    if ! wsl -e bash -lc "cd '$WSL_ROOT' && CC='$CC' OUT='$WSL_ARM_OUT' bash build/arm/build_engine.sh" >"$BUILD_LOG" 2>&1; then
+    if ! wsl -e bash -lc "cd '$WSL_ROOT' && CC='$CC' OUT='$WSL_ARM_OUT' EXTRA_FLAGS='-DLZ_SOFTFP_FAST=0' bash build/arm/build_engine.sh" >"$BUILD_LOG" 2>&1; then
         echo "FAIL: ARM cross-build under WSL failed, see $BUILD_LOG" >&2
         tail -n 20 "$BUILD_LOG" >&2
         exit 1
@@ -327,10 +332,10 @@ if [ "$ARM_BACKEND" = wsl ]; then
         exit 1
     fi
 else
-    echo "-- cross-building ARM (CC=$CC) --"
+    echo "-- cross-building ARM (CC=$CC, strict LZ_SOFTFP_FAST=0) --"
     BUILD_LOG="$ARM_OUT.build.log"
     mkdir -p "$(dirname "$ARM_OUT")" 2>/dev/null
-    if ! CC="$CC" OUT="$ARM_OUT" "$HERE/build_engine.sh" >"$BUILD_LOG" 2>&1; then
+    if ! CC="$CC" OUT="$ARM_OUT" EXTRA_FLAGS="-DLZ_SOFTFP_FAST=0" "$HERE/build_engine.sh" >"$BUILD_LOG" 2>&1; then
         echo "FAIL: ARM cross-build failed, see $BUILD_LOG" >&2
         tail -n 20 "$BUILD_LOG" >&2
         exit 1
@@ -512,17 +517,18 @@ echo "PASS: ARM fixed tier arm-asm is bit-identical to arm-c (fixed, $ARM_SZ byt
 
 # ---- the fastfp (RTZ) parity row ---------------------------------------
 # x86 --fastfp on (MXCSR RTZ) vs ARM -DLZ_SOFTFP_FAST=1 (soft-float RTZ)
-# is the diagnostic cross-target run, and it is NOT the float arm above:
-# that pins --kernel ref --fixed off, which turns off every fixed tier
-# and never executes an ARM asm kernel. The fastfp fixes this row guards
-# - q8_round's x86 cast, the exp floor/residue, sigmoid_q15's C path,
-# norm_ss_fixed_arm_asm - live in the fixed tiers AND make the DIFFERENT
-# AUTO kernels (x86 sse2, ARM arm-asm) agree under RTZ. That agreement IS
-# the assertion, so the kernel is deliberately NOT pinned here.
+# is the SHIPPING default run (RTZ is the default float semantics now;
+# the float arm above is the RNE oracle). The fastfp fixes this row
+# guards - q8_round's x86 cast, the exp floor/residue, sigmoid_q15's C
+# path, norm_ss_fixed_arm_asm - live in the fixed tiers AND make the
+# DIFFERENT AUTO kernels (x86 sse2, ARM arm-asm) agree under RTZ. That
+# agreement IS the assertion, so the kernel is deliberately NOT pinned
+# here.
 #
 # A SECOND ARM binary is built with LZ_SOFTFP_FAST=1: the strict binary
-# above must stay bit-identical to libgcc, and the soft-float library
-# compiled with RTZ is a different object.
+# above (used by the float/tier/fixed rows) is pinned to LZ_SOFTFP_FAST=0
+# to stay bit-identical to libgcc; the soft-float compiled with RTZ is a
+# different object.
 FAST_ARM_OUT="$ARM_WORK/build-fastfp"
 FAST_ARM_BIN="$FAST_ARM_OUT/llama98-arm"
 if [ "$ARM_BACKEND" = wsl ]; then

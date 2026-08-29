@@ -79,6 +79,10 @@ fi
 
 FLAGS="-O2 -std=c99 -march=armv5te -mtune=arm926ej-s -mfloat-abi=soft"
 FLAGS="$FLAGS -ffp-contract=off -fomit-frame-pointer -Isrc"
+# STRICT (RNE): this gate compares the soft-float against libgcc, and
+# LZ_SOFTFP_FAST now defaults to 1 on the ARM cross (RTZ is shipping).
+# The RTZ soft-float is verified by parity_gate's fastfp row instead.
+FLAGS="$FLAGS -DLZ_SOFTFP_FAST=0"
 
 # ONE runner call, and the result comes back through a FILE rather than
 # through the pipe. A `nm | awk` written inline has to survive this

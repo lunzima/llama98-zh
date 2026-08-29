@@ -231,8 +231,8 @@ int lz_float_ref(void) { return lz_float_ref_g; }
 
 /* ---- fast float semantics ------------------------------------------- */
 
-/* OFF by default: this changes results, so it is opt-in like every other
-   numeric knob here.
+/* ON by default (RTZ+FTZ is the shipping float semantics; off restores
+   RNE for a diagnostic run).
 
    It is not an x86 speed knob, measured: FTZ/DAZ move the zh fixture's
    logits by zero bytes and its runtime by -0.7%, inside a 110ms sigma,
@@ -255,7 +255,7 @@ int lz_float_ref(void) { return lz_float_ref_g; }
    harmless here and measured rather than assumed: setting FTZ/DAZ on
    the SSE build leaves every logit byte unchanged, so denormals never
    reach a result on this path. */
-int lz_fastfp_g = 0;
+int lz_fastfp_g = 1;   /* default ON: round-toward-zero is the shipping semantics */
 
 const char *lz_fastfp_select(const char *name) {
     if (!name) return NULL;
@@ -265,7 +265,11 @@ const char *lz_fastfp_select(const char *name) {
     return lz_fastfp_g ? "on" : "off";
 }
 
-int lz_fastfp(void) { return lz_fastfp_g; }
+int lz_fastfp(void) {
+    /* On ARM the compile flag ORs in so --fastfp off cannot fight the
+       compile-time RTZ soft-float. Elsewhere LZ_SOFTFP_FAST is 0. */
+    return lz_fastfp_g || LZ_SOFTFP_FAST;
+}
 
 /* DEFAULT ON WHERE THERE IS NO FPU, OFF WHERE THERE IS, and the split is
    measured rather than assumed. Widening a stored bf16 costs about five

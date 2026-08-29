@@ -1,4 +1,7 @@
 #include "lz_int.h"   /* <stdint.h> is not on the language floor */
+#include "ops.h"       /* LZ_SOFTFP_FAST's default - this TU's RTZ tail
+                          reads it and neither lz_int.h nor ops_arm.h
+                          provides it (the command-line -D used to). */
 #include "ops_arm.h"
 
 /* THE ARMv5TE KERNELS, non-ternary formats - NOT only the row leaves:

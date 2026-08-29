@@ -549,13 +549,9 @@ extern int lz_float_ref_g;
 const char *lz_float_ref_select(const char *name);
 int lz_float_ref(void);
 
-/* Fast float semantics: "on" | "off" (default off). Round-toward-zero
-   plus flush-to-zero. Not a speed knob on x86 (measured: -0.7%, inside
-   the noise); it is meant to be the reference arm for the ARM soft-float
-   fast path. That pairing is NOT complete yet - MXCSR is global while
-   ARM's LZ_SOFTFP_FAST covers fmul only, and the two do not currently
-   agree byte for byte. See ops_sched.c and lz_softfp.c for the
-   measurement. Read through lz_fastfp(); lz_fpu_float_begin applies. */
+/* Fast float semantics: "on"|"off" (default on). RTZ+FTZ, the shipping
+   float semantics; x86/ARM byte-identical under it (parity_gate fastfp
+   row). off restores RNE. Read through lz_fastfp(). */
 extern int lz_fastfp_g;
 const char *lz_fastfp_select(const char *name);
 int lz_fastfp(void);
@@ -673,12 +669,15 @@ const char *lz_gdn_p2_impl(void);
 #define LZ_FDIV_RECIP 0
 #endif
 #endif /* LZ_FDIV_RECIP */
-/* LZ_SOFTFP_FAST (lz_softfp.c's round-toward-zero switch) must be
-   visible here because lz_fdiv_recip's RTZ truncation and the ops_quant
-   quantizers read it. Default 0; the fast-parity ARM build passes
-   -DLZ_SOFTFP_FAST=1 to every TU. */
+/* LZ_SOFTFP_FAST: RTZ for the software-float targets, where it is the
+   shipping semantics (x86 --fastfp on is byte-identical). Strict (RNE,
+   =libgcc) builds pin -DLZ_SOFTFP_FAST=0. */
 #ifndef LZ_SOFTFP_FAST
+#if defined(LZ_NO_FPU) || defined(__arm__)
+#define LZ_SOFTFP_FAST 1
+#else
 #define LZ_SOFTFP_FAST 0
+#endif
 #endif /* !LZ_SOFTFP_FAST */
 
 #if LZ_FDIV_RECIP

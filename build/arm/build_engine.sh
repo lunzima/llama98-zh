@@ -54,10 +54,12 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 
 FLAGS="-O2 -std=c99 -Wall -Wextra"
 FLAGS="$FLAGS -march=armv5te -mtune=arm926ej-s -mfloat-abi=soft -DLZ_NO_FPU=1"
-# EXTRA_FLAGS, an env override for one-off builds: the fast-float parity
-# arm passes -DLZ_SOFTFP_FAST=1 (a diagnostic build that must NOT be the
-# default). Appended to every TU, which is what the RTZ tails in
-# ops_arm_prim.h need - they are selected per-TU by the same macro.
+# EXTRA_FLAGS, an env override for one-off builds. LZ_SOFTFP_FAST now
+# DEFAULTS to 1 on the ARM cross (RTZ is the shipping semantics, ops.h),
+# so this build is RTZ unless overridden - the strict (RNE, bit-identical
+# to libgcc) parity and softfp gates pin -DLZ_SOFTFP_FAST=0 here.
+# Appended to every TU, which is what the RTZ tails in ops_arm_prim.h
+# need - they are selected per-TU by the same macro.
 FLAGS="$FLAGS ${EXTRA_FLAGS:-}"
 # -fomit-frame-pointer: gcc's ARM default keeps a frame pointer, which is
 # pure overhead in a release build and bloats the soft-float module -- the

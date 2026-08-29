@@ -160,13 +160,11 @@
        fdiv      176/tok x122 =    21,472    -3 each =       528
        total                  13,002,268              =   969,279
 
-   7.5% of the soft-float arithmetic, which is the real prize of a
-   fast mode at all. Keep it at 0 for shipping; --fastfp on the other
-   targets is the x86 half of the same diagnostic pair.
+   7.5% of the soft-float arithmetic. RTZ is the shipping semantics;
+   the strict (RNE) soft-float is built with -DLZ_SOFTFP_FAST=0.
 */
-/* LZ_SOFTFP_FAST's default lives in ops.h (single authority); an
-   undefined macro reads 0 in `#if`, and the fast-parity build passes
-   -DLZ_SOFTFP_FAST=1, so this TU needs no default of its own. */
+/* LZ_SOFTFP_FAST's default lives in ops.h (single authority); this TU
+   reads it as-is. */
 
 #ifndef LZ_SOFTFP_STATS
 #define LZ_SOFTFP_STATS 0
