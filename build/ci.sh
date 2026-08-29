@@ -88,11 +88,36 @@
 #      .prof/. Every other stage compares whole-engine output; these
 #      compare one operator's implementations against each other, which
 #      is the only way to reach the arms no local checkpoint exercises
+#  25. build/gcc_warning_gate.sh - zero gcc warnings, asserted rather
+#      than printed. The Watcom side has always been counted per file;
+#      this is the same assertion for the toolchain whose warnings only
+#      ever went to the console
 #  26. build/tier_reach_gate.sh - every quantised matmul REACHES its
 #      tiered kernel. A tensor whose (dtype, gs) fails a dispatch guard
 #      takes matmul_scalar_ref and is still correct, so every numeric
 #      stage above passes on it. Only an execution count separates
 #      "agrees" from "agrees and was reached"
+#  27. build/aux_parm_arity_gate.sh - every #pragma aux declaration's
+#      parameter list matches the function it decorates. Watcom takes a
+#      wrong arity silently and passes the wrong register
+#  28. build/aux_equiv_gate.sh - no kernel body's VALUE changes without
+#      the commit message declaring it. A reorder that crosses a
+#      dependence looks like a cleanup in review
+#  29. build/prefetch_parity_gate.sh - the --prefetch arms compute the
+#      same thing. Two full Watcom engine builds, and those arms are
+#      compiled by no other toolchain
+#  30. build/norm_sse_parity_gate.sh - the norm #pragma aux twins against
+#      their C, on the toolchain that has them; a gcc build contains
+#      neither side
+#  31. build/i32f_acc_gate.sh - the two int32->float accumulate tiers
+#      agree, one engine build per arm
+#
+# THIS LIST DOCUMENTED 24 OF 31, and the omission is the kind this tree
+# treats as a defect rather than untidiness: the list is what a reader
+# uses to know what CI covers, and one that stops at 26 (having also
+# skipped 25) under-reports by seven stages while reading as complete.
+# The stage numbering in the code was right the whole time; only the map
+# was short.
 #
 # BEFORE READING A RED: this tree is shared. A run started while another
 # session has a file half-edited reports that session's state as this
