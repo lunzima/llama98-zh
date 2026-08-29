@@ -101,9 +101,18 @@ LZ_MAYBE_UNUSED static int lz_q8_round_bits(uint32_t u, int k, int32_t *out) {
     if (e >= 25) { *out = 0; return 1; }    /* |v| < 0.5 */
     m = (u & 0x00FFFFFFu) | 0x00800000u;    /* mantissa, implicit bit set */
     r = (int32_t)(m >> e);
+#if LZ_SOFTFP_FAST
+    /* Round toward zero: the dropped bits are dropped, no round-up and
+       no tie-to-even. This is the LZ_Q8R_BITS path (ARM's q8_round), and
+       it was missed when the fast-mode pairing landed - the magic-add
+       path got the RTZ truncation but this one kept round-half-to-even,
+       so the ARM quantizer diverged from x86's MXCSR-truncated magic add
+       by one on values whose dropped bits exceeded half. */
+#else
     t = m << (32 - e);                      /* the dropped bits, aligned */
     if (t > 0x80000000u) r++;
     else if (t == 0x80000000u) r += (r & 1);  /* half to even */
+#endif /* LZ_SOFTFP_FAST */
     if (u & 0x80000000u) r = -r;
     if (r == 0x400000) return 0;
     *out = r;

@@ -128,12 +128,21 @@ static __inline__ int lz_q8_round_pow2_arm_asm(uint32_t u, int32_t k,
         "bic    %[m], %[u], #0xFF000000\n\t"
         "orr    %[m], %[m], #0x800000\n\t"
         "mov    %[r], %[m], lsr %[e]\n\t"
+#if LZ_SOFTFP_FAST
+        /* Round toward zero: the dropped bits are dropped, no round-up
+           and no tie-to-even - the LZ_Q8R_BITS/arm-asm rounding path
+           was missed when the fast-mode pairing landed, so ARM's
+           quantizer rounded half-to-even while x86's MXCSR-truncated
+           magic add truncated. One ULP on a value whose dropped bits
+           exceeded half, cascading through every downstream matmul. */
+#else
         "rsb    %[t], %[e], #32\n\t"
         "mov    %[t], %[m], lsl %[t]\n\t"
         "cmp    %[t], #0x80000000\n\t"
         "addhi  %[r], %[r], #1\n\t"
         "andeq  %[t], %[r], #1\n\t"
         "addeq  %[r], %[r], %[t]\n\t"
+#endif /* LZ_SOFTFP_FAST */
         "cmp    %[u], #0\n\t"
         "rsbmi  %[r], %[r], #0\n\t"
         "cmp    %[r], #0x400000\n\t"
