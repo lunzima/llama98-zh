@@ -491,7 +491,6 @@ LZ_MAYBE_UNUSED static int lz_rne_round_bits(uint32_t u, int k, int32_t *out) {
 }
 
 float lz_exp_fixed(float x) {
-    union { float f; int32_t i; } u;
     float y32, r;
     int32_t t, n, idx, rq, s, cq, prod;
 #if defined(LZ_ARM_PRIM_ASM)
