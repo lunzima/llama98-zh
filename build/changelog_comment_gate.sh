@@ -50,10 +50,10 @@ STRICT="used to be|used to |before this task|as before this|previously|formerly"
 LOOSE="no longer|the old |originally"
 PAT="$STRICT"
 
-# Two left, both in files another session holds open. Everything else
+# One left, in a file another session holds open. Everything else
 # is at zero, so this is a ratchet with almost nothing left to ratchet:
 # any new one is a FAIL in the file that gained it.
-BASELINE="forward.c:1 model.c:1"
+BASELINE="forward.c:1"
 
 # WHAT IS SCANNED. src/ was the whole list, which left three sentences
 # standing in gui/ and one in the Makefile that this gate would have

@@ -1471,7 +1471,15 @@ float lz_fdiv_recip(float a, float b) {
     N = (uint64_t)ma << 23;
     rem = N - (uint64_t)Q0 * mb;
     while (rem >= mb) { Q0++; rem -= mb; }
+#if LZ_SOFTFP_FAST
+    /* Round toward zero: the correction loop above already made Q0 the
+       exact floor, so the remainder is dropped rather than examined.
+       x86's hardware division under MXCSR=truncate rounds the same way;
+       the reciprocal's round-half-even here is what broke the fast-mode
+       pairing (RNE made the two agree, RTZ exposed them). */
+#else
     if (rem * 2u > mb || (rem * 2u == mb && (Q0 & 1u))) Q0++;
+#endif /* LZ_SOFTFP_FAST */
     /* Q0 can reach 2^24; adding it to (e-1)<<23 carries into the
        exponent field by itself, the trick lz_i32f_arm_asm also uses. */
     br.u = sg + ((uint32_t)(e - 1) << 23) + Q0;

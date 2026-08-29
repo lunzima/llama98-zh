@@ -123,65 +123,50 @@
    path. Count C-core entries, not primitive declines - the first version
    of this counter sat before the +-0 shortcut and reported no change at
    all after the shortcut was added. */
-/* LZ_SOFTFP_FAST (default 0) trades round-to-nearest-even for round
-   toward zero in the fmul fast path. Measured saving: 5 instructions -
-   sticky extraction (2), the guard-bit compare (1), the round-bit
-   extract (1) and the tie-to-even mask (1). fmul goes 62 -> 57.
+/* LZ_SOFTFP_FAST (default 0) makes the whole soft-float library round
+   toward zero plus flush denormals, matching what x86's --fastfp MXCSR
+   does (RC=truncate, FTZ, DAZ). It is the ARM half of the fast-mode
+   pairing: a fast-mode ARM run must byte-compare with a fast-mode x86
+   run the way the strict pair already does. Before this was completed
+   the switch touched fmul alone, and the two sides disagreed on
+   60,173,584 of 78,905,344 logit bytes - the coverage gap, not a
+   correctness one (see build/arm/fastfp_probe.c for the verification).
 
-   IT DOES NOT YET PAIR WITH --fastfp, and the gap is measured, not
-   suspected. The intent was that --fastfp (MXCSR round-toward-zero plus
-   FTZ/DAZ on x86, _RC_CHOP on x87) and this switch would describe the
-   same arithmetic, keeping a fast-mode ARM run byte-comparable with a
-   fast-mode x86 run the way the strict pair already is. Run against the
-   zh fixture they are NOT:
+   WHAT IT COVERS, named because the old fmul-only wording was the bug:
+   fadd/fsub/fmul/fdiv, the C cores behind all three, the int<->float
+   conversions (i2f/ui2f/l2f), and the faddsub cell in ops_arm_prim.h
+   that fwht.c shares. FTZ flushes subnormal results, DAZ treats
+   subnormal operands as +-0, and overflow CLAMPS to max_normal - the
+   last is the round-toward-zero reading of a result past the top of the
+   range, where round-to-nearest rounds up to inf. The operands keep
+   their IEEE inf/NaN handling: MXCSR changes rounding and denormal
+   handling only, so an ARM path that skipped them could never match.
 
-     ARM fast  vs ARM strict   57,737,364 of 78,905,344 bytes differ
-     x86 fast  vs x86 strict   60,158,216
-     ARM fast  vs x86 fast     60,173,584      <- should have been 0
+   WHAT IT DOES NOT COVER, and cannot: NaN SIGN. x86 hardware produces
+   a negative quiet NaN where this library, verified against libgcc,
+   produces a positive one - 0xffc00000 vs 0x7fc00000 for 0/0. Strict
+   mode REQUIRES the libgcc sign (that is the bit-identity contract),
+   and the fast pair cannot ask for the x86 sign without breaking it.
+   It is unreachable in practice: fp_exception_gate asserts IE=0 over a
+   real run, so no NaN is ever produced, and the probe records the 40
+   directed div-by-zero cases as the one surviving difference.
 
-   The cause is coverage, not correctness. MXCSR is GLOBAL: it retimes
-   every SSE operation in the process, including fadd, fdiv and the SIMD
-   kernels. This switch changes one operator. Closing it means carrying
-   round-toward-zero through faddsub (a primitive fwht.c shares), fdiv,
-   and the C cores behind all three, plus flushing denormals to match
-   FTZ/DAZ - a much larger change than the 5 instructions it buys per
-   multiply.
-
-   So today this is an ARM-only knob whose output pairs with nothing.
-   Leave it at 0 unless that work is finished; --fastfp on the other
-   targets is likewise still waiting for it.
-
-   WHAT FINISHING IT WOULD BUY, since "unfinished" has been sitting here
-   without a number. Truncation drops three instructions per result
-   against round-to-nearest-even - the left-justify of the dropped bits,
-   the compare against 2^31, and the BICEQ - and turns the ADC into an
-   ADD. Applied to every operator rather than fmul alone, against the
-   census above:
+   Truncation against round-to-nearest-even saves, per result, the
+   left-justify of the dropped bits, the compare against 2^31, and the
+   BICEQ, and turns the ADC into an ADD. Against the soft-float census:
 
        fmul  247,932/tok x 33 = 8,181,756    -3 each =   743,796
        fadd   74,985/tok x 64 = 4,799,040    -3 each =   224,955
        fdiv      176/tok x122 =    21,472    -3 each =       528
        total                  13,002,268              =   969,279
 
-   7.5% of the soft-float arithmetic, which is real.
-
-   AND WHY IT STILL DOES NOT PAIR. The x86 side cannot meet it. MXCSR is
-   global: setting RC=truncate retimes every SSE operation in the
-   process, including the SIMD kernels, while ARM's switch covers named
-   routines - measured, the two disagree on 60,173,584 bytes of logits.
-   The bf16 storage switch dodges exactly this problem by being
-   LOSSLESS, which lets its default differ per target without breaking
-   parity; a rounding-mode change has no such escape. Closing this needs
-   x86 to compute in software too, which is a different project.
-
-   It does NOT skip the inf/NaN operand checks, and that is not an
-   oversight: MXCSR changes rounding and denormal handling only - the
-   hardware still produces IEEE inf and NaN - so an ARM path that skipped
-   them could never match the build it is meant to be compared against.
+   7.5% of the soft-float arithmetic, which is the real prize of a
+   fast mode at all. Keep it at 0 for shipping; --fastfp on the other
+   targets is the x86 half of the same diagnostic pair.
 */
-#ifndef LZ_SOFTFP_FAST
-#define LZ_SOFTFP_FAST 0
-#endif /* !LZ_SOFTFP_FAST */
+/* LZ_SOFTFP_FAST's default lives in ops.h (single authority); an
+   undefined macro reads 0 in `#if`, and the fast-parity build passes
+   -DLZ_SOFTFP_FAST=1, so this TU needs no default of its own. */
 
 #ifndef LZ_SOFTFP_STATS
 #define LZ_SOFTFP_STATS 0
@@ -265,6 +250,31 @@ static uint32_t sf_shift_right_jam32(uint32_t a, unsigned dist) {
 static int sf_clz32(uint32_t a) { return a ? __builtin_clz(a) : 32; }
 
 static uint32_t sf_round_pack_f32(int sign, int exp, uint32_t sig) {
+#if LZ_SOFTFP_FAST
+    /* Round toward zero plus flush-denormals, matching what x86's
+       --fastfp MXCSR does (RC=truncate, FTZ, DAZ). Truncation: no
+       roundIncrement and no tie-to-even mask - the dropped bits are
+       dropped. FTZ: a subnormal result (exp reaches 0 with sig left)
+       flushes to +-0 exactly as the hardware does under FTZ. And
+       overflow CLAMPS to max_normal instead of rounding up to inf:
+       round-toward-zero never rounds up, so an inf result can only
+       come from an inf input, which the callers own. The callers
+       normalise sig below 0x80000000, so the only overflow reachable
+       here is exp == 0xFE (the 2^128 binade, above max_normal). */
+    if (0xFD <= (unsigned int)exp) {
+        if (exp < 0) {
+            sig = sf_shift_right_jam32(sig, -exp);
+            exp = 0;
+        } else if (0xFD < exp) {
+            return ((sign ? 0x80000000u : 0) | 0x7F7FFFFFu);   /* clamp */
+        }
+    }
+    sig = sig >> 7;   /* truncate toward zero */
+    if (sig >= 0x1000000u)
+        return ((sign ? 0x80000000u : 0) | 0x7F7FFFFFu);      /* clamp */
+    if (!sig || exp == 0) return ((uint32_t)sign << 31);   /* zero, or FTZ */
+    return ((uint32_t)sign << 31) + ((uint32_t)exp << 23) + sig;
+#else
     uint32_t roundIncrement = 0x40;
     uint32_t roundBits = sig & 0x7F;
     if (0xFD <= (unsigned int)exp) {
@@ -280,6 +290,7 @@ static uint32_t sf_round_pack_f32(int sign, int exp, uint32_t sig) {
     sig &= ~(uint32_t)((roundBits ^ 0x40) == 0);
     if (!sig) exp = 0;
     return ((uint32_t)sign << 31) + ((uint32_t)exp << 23) + sig;
+#endif /* LZ_SOFTFP_FAST */
 }
 
 static uint32_t sf_norm_round_pack_f32(int sign, int exp, uint32_t sig) {
@@ -363,7 +374,14 @@ static uint32_t sf_sub_mags_f32(uint32_t uiA, uint32_t uiB) {
         if (sigDiff < 0) { signZ = !signZ; sigDiff = -sigDiff; }
         shiftDist = sf_clz32((uint32_t)sigDiff) - 8;
         expZ = expA - shiftDist;
+#if LZ_SOFTFP_FAST
+        /* FTZ: an exact difference that lands in the subnormal range
+           (expZ <= 0 with sig nonzero) flushes to +-0, exactly as x86's
+           FTZ flushes a subnormal result regardless of exactness. */
+        if (expZ <= 0) return ((uint32_t)signZ << 31);
+#else
         if (expZ < 0) { shiftDist = expA; expZ = 0; }
+#endif /* LZ_SOFTFP_FAST */
         return ((uint32_t)signZ << 31) + ((uint32_t)expZ << 23)
                + (((uint32_t)sigDiff) << shiftDist);
     } else {
@@ -514,6 +532,15 @@ float __aeabi_fadd(float a, float b) {
     union { float f; uint32_t u; } ua, ub, r;
     uint32_t S;
     ua.f = a; ub.f = b;
+#if LZ_SOFTFP_FAST
+    /* DAZ: a subnormal operand is treated as +-0 (sign preserved),
+       matching x86's MXCSR DAZ. Done before the fast paths: their
+       combined zero/subnormal guard cannot distinguish the two, and
+       under DAZ the subnormal IS a zero, so the zero shortcut below is
+       the right answer. */
+    if ((ua.u & 0x7F800000u) == 0 && (ua.u & 0x007FFFFFu)) ua.u &= 0x80000000u;
+    if ((ub.u & 0x7F800000u) == 0 && (ub.u & 0x007FFFFFu)) ub.u &= 0x80000000u;
+#endif /* LZ_SOFTFP_FAST */
     /* fast path (normal operands, normal result): lz_fsum_arm_asm, the
        sum-only half of the engine's verified faddsub cell. The
        two-result form is fwht's; asking it for a sum computed the
@@ -563,6 +590,12 @@ float __aeabi_fsub(float a, float b) {
     uint32_t S;
     ua.f = a; ub.f = b;
     ub.u ^= 0x80000000u;
+#if LZ_SOFTFP_FAST
+    /* DAZ, as in __aeabi_fadd: subnormal operands are zeros. The sign
+       flip above is preserved either way, so ordering is irrelevant. */
+    if ((ua.u & 0x7F800000u) == 0 && (ua.u & 0x007FFFFFu)) ua.u &= 0x80000000u;
+    if ((ub.u & 0x7F800000u) == 0 && (ub.u & 0x007FFFFFu)) ub.u &= 0x80000000u;
+#endif /* LZ_SOFTFP_FAST */
     { int took = lz_fsum_arm_asm(ua.u, ub.u, &S);
       SF_BILL(SF_ADD, took);
       if (took) { r.u = S; return r.f; } }
@@ -692,6 +725,13 @@ float __aeabi_fmul(float a, float b) {
     union { float f; uint32_t u; } ua, ub, r;
     uint32_t q;
     ua.f = a; ub.f = b;
+#if LZ_SOFTFP_FAST
+    /* DAZ, as in __aeabi_fadd: subnormal operands are zeros. The fmul
+       fast path's operand guard declines on a subnormal, and under DAZ
+       the subnormal is a zero, so the zero shortcut below answers it. */
+    if ((ua.u & 0x7F800000u) == 0 && (ua.u & 0x007FFFFFu)) ua.u &= 0x80000000u;
+    if ((ub.u & 0x7F800000u) == 0 && (ub.u & 0x007FFFFFu)) ub.u &= 0x80000000u;
+#endif /* LZ_SOFTFP_FAST */
     { int took = sf_fmul_fast_arm_asm(ua.u, ub.u, &q);
       SF_BILL(SF_MUL, took);
       if (took) { r.u = q; return r.f; } }
@@ -778,9 +818,17 @@ static __inline__ int sf_fdiv_fast_arm_asm(uint32_t ua, uint32_t ub, uint32_t *o
         "movs   %[d], %[d], lsl #4\n\t"
         "movnes %[ip], %[ip], lsr #4\n\t"
         "bne    1b\n\t"
+#if LZ_SOFTFP_FAST
+        /* Round toward zero: drop the remainder entirely. ADD, not ADC -
+           there is no round-up carry to fold in, matching fmul's RTZ
+           branch. A subnormal result still declines via the range check
+           above, so FTZ lives in the C core. */
+        "add    %[q], %[q], %[ea], lsl #23\n\t"
+#else
         "cmp    %[d], %[eb]\n\t"           /* remainder vs divisor: rounding */
         "adc    %[q], %[q], %[ea], lsl #23\n\t"
         "biceq  %[q], %[q], #1\n\t"        /* round-half-to-even */
+#endif /* LZ_SOFTFP_FAST */
         "mov    %[o], #1\n\t"
         "b      8f\n\t"
         "9:\n\t"
@@ -798,6 +846,14 @@ float __aeabi_fdiv(float a, float b) {
     union { float f; uint32_t u; } ua, ub, r;
     uint32_t q;
     ua.f = a; ub.f = b;
+#if LZ_SOFTFP_FAST
+    /* DAZ, as in __aeabi_fadd: subnormal operands are zeros. The fdiv
+       fast path declines on a subnormal divisor (its restoring division
+       cannot take one), and under DAZ the subnormal is a zero, which
+       the C core's divide-by-zero answer below owns. */
+    if ((ua.u & 0x7F800000u) == 0 && (ua.u & 0x007FFFFFu)) ua.u &= 0x80000000u;
+    if ((ub.u & 0x7F800000u) == 0 && (ub.u & 0x007FFFFFu)) ub.u &= 0x80000000u;
+#endif /* LZ_SOFTFP_FAST */
     { int took = sf_fdiv_fast_arm_asm(ua.u, ub.u, &q);
       SF_BILL(SF_DIV, took);
       if (took) { r.u = q; return r.f; } }
@@ -1130,12 +1186,17 @@ float __aeabi_ui2f(unsigned int v) {
         "bpl    2f\n\t"
         "rsb    %[s], %[n], #8\n\t"      /* 1..8 bits to drop */
         "add    %[r], %[r], %[a], lsr %[s]\n\t"
+#if LZ_SOFTFP_FAST
+        /* Round toward zero, as in lz_i32f_arm_asm: the dropped bits are
+           dropped, matching cvtsi2ss under x86's MXCSR RC=truncate. */
+#else
         "rsb    %[n], %[s], #32\n\t"
         "mov    %[n], %[a], lsl %[n]\n\t"    /* dropped bits, left-justified */
         "cmp    %[n], #0x80000000\n\t"
         "addhi  %[r], %[r], #1\n\t"
         "andeq  %[n], %[r], #1\n\t"
         "addeq  %[r], %[r], %[n]\n\t"
+#endif /* LZ_SOFTFP_FAST */
         "2:\n\t"
         "1:\n\t"
         : [r] "=&r"(res), [a] "=&r"(a), [n] "=&r"(n), [s] "=&r"(sh)
@@ -1171,6 +1232,19 @@ __attribute__((naked)) float __aeabi_l2f(lz_i64 a) {
         "subs   r2, r2, #8\n\t"
         "sub    r3, r3, r2, lsl #23\n\t"     /* for r2<0 this adds */
         "blt    2f\n\t"                      /* shift-right path */
+#if LZ_SOFTFP_FAST
+        /* Round toward zero, as in lz_i32f_arm_asm: the dropped bits are
+           dropped, matching x86's cvtsi2ss under MXCSR RC=truncate. */
+        "add    r3, r3, r1, lsl r2\n\t"
+        "rsb    r2, r2, #32\n\t"
+        "add    r0, r3, r0, lsr r2\n\t"
+        "bx     lr\n\t"
+        "2:\n\t"                             /* r2 < 0 */
+        "add    r2, r2, #32\n\t"
+        "rsb    r2, r2, #32\n\t"
+        "add    r0, r3, r1, lsr r2\n\t"
+        "bx     lr\n\t"
+#else
         "add    r3, r3, r1, lsl r2\n\t"
         "lsl    ip, r0, r2\n\t"
         "rsb    r2, r2, #32\n\t"
@@ -1186,6 +1260,7 @@ __attribute__((naked)) float __aeabi_l2f(lz_i64 a) {
         "adc    r0, r3, r1, lsr r2\n\t"
         "biceq  r0, r0, ip, lsr #31\n\t"
         "bx     lr\n\t"
+#endif /* LZ_SOFTFP_FAST */
     );
 }
 

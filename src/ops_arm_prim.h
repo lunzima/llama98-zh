@@ -31,6 +31,14 @@
 #if defined(__arm__) && defined(__GNUC__)
 #define LZ_ARM_PRIM_ASM 1
 
+/* LZ_SOFTFP_FAST is lz_softfp.c's round-toward-zero switch, but these
+   macros also expand in fwht.c and ops_arm.c, so the default must be
+   visible here for the RTZ tails below to read it. The ARM build passes
+   -DLZ_SOFTFP_FAST=1 to every TU when it is on. */
+#ifndef LZ_SOFTFP_FAST
+#define LZ_SOFTFP_FAST 0
+#endif /* !LZ_SOFTFP_FAST */
+
 /* int32 -> float32, correctly rounded (round-half-to-even), which is
    exactly what ops_kernel_shared.h's lz_i32f computes: its two-part
    split exists to pin down x87-vs-SSE rounding TIMING, and on a machine
@@ -58,12 +66,19 @@ static __inline__ float lz_i32f_arm_asm(int32_t v) {
         "bpl    2f\n\t"
         "rsb    %[s], %[n], #8\n\t"      /* 1..8 bits to drop */
         "add    %[r], %[r], %[a], lsr %[s]\n\t"
+#if LZ_SOFTFP_FAST
+        /* Round toward zero: the dropped bits are dropped, no round-up
+           and no tie-to-even - matching cvtsi2ss under x86's MXCSR
+           RC=truncate. The exact branch above (|v| < 2^24) is unchanged:
+           it has no rounding to do. */
+#else
         "rsb    %[n], %[s], #32\n\t"
         "mov    %[n], %[a], lsl %[n]\n\t"    /* dropped bits, left-justified */
         "cmp    %[n], #0x80000000\n\t"
         "addhi  %[r], %[r], #1\n\t"
         "andeq  %[n], %[r], #1\n\t"
         "addeq  %[r], %[r], %[n]\n\t"
+#endif /* LZ_SOFTFP_FAST */
         "2:\n\t"
         "cmp    %[v], #0\n\t"
         "orrlt  %[r], %[r], #0x80000000\n\t"
@@ -583,6 +598,20 @@ static __inline__ int lz_sig_q15_arm_asm(uint32_t ux, const int32_t *tab,
    register uses only its low BYTE, so `rsb b, t, #32` goes negative
    past d=32 and the sticky test reads a shift-by-248, i.e. zero. It
    never showed up because the answer is the large operand either way. */
+/* The d > 27 tail, chosen at the #define so the RTZ arm can decline.
+   Selected as a separate macro for the same reason LZ_FADDSUB_ROUND
+   is: a #if cannot live inside a macro body. */
+#if LZ_SOFTFP_FAST
+#define LZ_FADDSUB_LARGEDIFF \
+        "b      9f\n\t"   /* RTZ: decline; the C core adds the tiny operand */
+#else
+#define LZ_FADDSUB_LARGEDIFF \
+        "mov    %[a],  %[a], lsr #1\n\t"   /* |larger|, sign clear */    \
+        "orr    %[S],  %[S], %[a]\n\t"                                   \
+        "orr    %[D],  %[D], %[a]\n\t"                                   \
+        "b      8f\n\t"
+#endif /* LZ_SOFTFP_FAST */
+
 #define LZ_FADDSUB_HEAD                                                  \
         "eor    %[ok], %[a], %[b]\n\t"                                   \
         "mov    %[ok], %[ok], lsr #31\n\t"  /* 1 if the signs differ */  \
@@ -605,10 +634,7 @@ static __inline__ int lz_sig_q15_arm_asm(uint32_t ux, const int32_t *tab,
         "sub    %[t],  %[e], %[t]\n\t"      /* d */                      \
         "cmp    %[t],  #27\n\t"                                          \
         "bls    1f\n\t"                                                  \
-        "mov    %[a],  %[a], lsr #1\n\t"    /* |larger|, sign clear */   \
-        "orr    %[S],  %[S], %[a]\n\t"                                   \
-        "orr    %[D],  %[D], %[a]\n\t"                                   \
-        "b      8f\n\t"                                                  \
+        LZ_FADDSUB_LARGEDIFF                                             \
         "1:\n\t"                                                         \
         "mov    %[mB], %[b], lsl #8\n\t"                                 \
         "mov    %[mB], %[mB], lsr #6\n\t"                                \
@@ -635,6 +661,19 @@ static __inline__ int lz_sig_q15_arm_asm(uint32_t ux, const int32_t *tab,
 
    Clobbers %[a], %[b] and %[t]; %[e], %[mA] and %[mB] survive, which is
    what lets M run whether or not P ran before it. */
+/* The round-and-pack tail, shared by P and M. REG is the destination
+   operand name, "S" or "D". Selected at the #define, not inside the
+   asm: a #if cannot live inside a macro body. */
+#if LZ_SOFTFP_FAST
+#define LZ_FADDSUB_ROUND(reg) \
+        "add    %[" #reg "],  %[" #reg "], %[a], lsl #23\n\t"  /* RTZ */
+#else
+#define LZ_FADDSUB_ROUND(reg) \
+        "cmp    %[b],  #0x80000000\n\t"                        \
+        "adc    %[" #reg "],  %[" #reg "], %[a], lsl #23\n\t"  \
+        "biceq  %[" #reg "],  %[" #reg "], #1\n\t"
+#endif /* LZ_SOFTFP_FAST */
+
 #define LZ_FADDSUB_P                                                     \
         "add    %[t],  %[mA], %[mB]\n\t"                                 \
         "sub    %[a],  %[e], #1\n\t"                                     \
@@ -648,9 +687,7 @@ static __inline__ int lz_sig_q15_arm_asm(uint32_t ux, const int32_t *tab,
         "cmp    %[a],  #254\n\t"                                         \
         "bhs    9f\n\t"                     /* P overflows to inf */     \
         "orr    %[S],  %[S], %[t]\n\t"                                   \
-        "cmp    %[b],  #0x80000000\n\t"                                  \
-        "adc    %[S],  %[S], %[a], lsl #23\n\t"                          \
-        "biceq  %[S],  %[S], #1\n\t"
+        LZ_FADDSUB_ROUND(S)
 
 /* M = |a| - |b|. CLZ normalises; M cannot overflow, because rounding is
    monotone and M is below the larger operand, which is representable at
@@ -669,9 +706,7 @@ static __inline__ int lz_sig_q15_arm_asm(uint32_t ux, const int32_t *tab,
         "mov    %[b],  %[t], lsl #29\n\t"   /* same round-and-pack */    \
         "mov    %[t],  %[t], lsr #3\n\t"                                 \
         "orr    %[D],  %[D], %[t]\n\t"                                   \
-        "cmp    %[b],  #0x80000000\n\t"                                  \
-        "adc    %[D],  %[D], %[a], lsl #23\n\t"                          \
-        "biceq  %[D],  %[D], #1\n\t"
+        LZ_FADDSUB_ROUND(D)
 
 static __inline__ int lz_faddsub_arm_asm(uint32_t ua, uint32_t ub,
                                          uint32_t *psum, uint32_t *pdif) {

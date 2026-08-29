@@ -236,17 +236,20 @@ int lz_float_ref(void) { return lz_float_ref_g; }
 
    It is not an x86 speed knob, measured: FTZ/DAZ move the zh fixture's
    logits by zero bytes and its runtime by -0.7%, inside a 110ms sigma,
-   because x86 scalar float is already one hardware instruction. It
-   exists to be the reference arm for the ARM soft-float fast path.
+   because x86 scalar float is already one hardware instruction. It is
+   the x86 half of the fast-mode pairing: on ARM the same arithmetic is
+   LZ_SOFTFP_FAST (round toward zero + flush denormals, compiled in),
+   and the two describe ONE rounding, so a fast-mode ARM run byte-
+   compares with a fast-mode x86 run the way the strict pair already
+   does. See that switch's comment in lz_softfp.c for the coverage and
+   the one surviving difference (NaN sign, unreachable in practice).
 
-   THAT PAIRING IS NOT FINISHED. The intent is that this and ARM's
-   LZ_SOFTFP_FAST describe one arithmetic, so fast-mode runs stay
-   byte-comparable the way strict-mode runs already are. Measured on the
-   zh fixture they are not: ARM-fast vs x86-fast differs in 60,173,584 of
-   78,905,344 bytes. MXCSR is GLOBAL - it retimes fadd, fdiv and the SIMD
-   kernels too - while LZ_SOFTFP_FAST currently changes fmul alone. See
-   that switch's comment in lz_softfp.c for what closing the gap needs.
-   Until then this flag has no partner to be compared with.
+   THE X86 SIDE MUST NOT AUTO-VECTORISE for the comparison to hold:
+   gcc -O2 turns a scalar float reduction into addps/mulps, which
+   reassociates it, and under round-toward-zero reassociation changes
+   the result where round-to-nearest happened to match. The fast-parity
+   build therefore passes -fno-tree-vectorize; the pairing is about the
+   arithmetic, and the ARM side has no SIMD to reassociate with.
 
    x87 (Watcom) can do the rounding half but has no FTZ/DAZ. That gap is
    harmless here and measured rather than assumed: setting FTZ/DAZ on

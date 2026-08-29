@@ -59,8 +59,8 @@ const char *lz_layer_type_name(int t) {
    one already-resolved number and never re-derives.
 
    -1 means the product predates the fields; the two derivations below
-   reproduce what the forward pass used to compute inline, so a legacy
-   model keeps its exact previous behaviour.
+   reproduce the forward pass's own inline computation, so a legacy
+   model keeps its exact behaviour.
 
    An explicit block size that is not a power of two, or does not divide
    the projection's input dim, is a refusal rather than a fallback to 0:
@@ -1149,14 +1149,14 @@ static int visit_read(LZModel *m, const LZStTensor *t, LZTensor *field,
     field->f = NULL;
 
     /* A BF16 TENSOR STAYS BF16, which halves what it occupies and what
-       reading it costs in DDR traffic. This path used to expand it to
-       f32 while loading, so a file holding two bytes per parameter took
-       four in RAM - on a 64MB target that is the difference between a
-       model fitting and not.
+       reading it costs in DDR traffic. Expanding it to f32 while loading
+       would turn a two-bytes-per-parameter file into four bytes in
+       RAM - on a 64MB target that is the difference between a model
+       fitting and not.
      *
      * Nothing is lost and nothing rounds: a bf16 IS the high half of an
      * f32, so the widening lz_t_f32 does at the point of use is the
-     * identical `<<16` the loader used to do here, only deferred. Every
+     * identical `<<16` the loader performs here, only deferred. Every
      * value a kernel sees is the same value it saw before, which is why
      * this needs no switch and no accuracy argument.
      *

@@ -2395,62 +2395,62 @@ extern int32_t lz_dot32_t2_asm(const unsigned char *w2,
     "movq      mm3, [ecx]" \
     "movq      mm4, [ecx+8]" \
     "pxor      mm5, mm5" \
-    "punpcklbw mm5, mm2" \
-    "psllw     mm5, 6" \
-    "psrlw     mm5, 14" \
-    "psllw     mm5, 8" \
-    "pmaddwd   mm5, mm3" \
     "pxor      mm6, mm6" \
+    "punpcklbw mm5, mm2" \
     "punpckhbw mm6, mm2" \
+    "psllw     mm5, 6" \
     "psllw     mm6, 6" \
+    "psrlw     mm5, 14" \
     "psrlw     mm6, 14" \
+    "psllw     mm5, 8" \
     "psllw     mm6, 8" \
+    "pmaddwd   mm5, mm3" \
     "pmaddwd   mm6, mm4" \
     "paddd     mm0, mm5" \
     "movq      mm3, [ecx+16]" \
     "movq      mm4, [ecx+24]" \
     "paddd     mm1, mm6" \
     "pxor      mm5, mm5" \
-    "punpcklbw mm5, mm2" \
-    "psllw     mm5, 4" \
-    "psrlw     mm5, 14" \
-    "psllw     mm5, 8" \
-    "pmaddwd   mm5, mm3" \
     "pxor      mm6, mm6" \
+    "punpcklbw mm5, mm2" \
     "punpckhbw mm6, mm2" \
+    "psllw     mm5, 4" \
     "psllw     mm6, 4" \
+    "psrlw     mm5, 14" \
     "psrlw     mm6, 14" \
+    "psllw     mm5, 8" \
     "psllw     mm6, 8" \
+    "pmaddwd   mm5, mm3" \
     "pmaddwd   mm6, mm4" \
     "paddd     mm0, mm5" \
     "movq      mm3, [ecx+32]" \
     "movq      mm4, [ecx+40]" \
     "paddd     mm1, mm6" \
     "pxor      mm5, mm5" \
-    "punpcklbw mm5, mm2" \
-    "psllw     mm5, 2" \
-    "psrlw     mm5, 14" \
-    "psllw     mm5, 8" \
-    "pmaddwd   mm5, mm3" \
     "pxor      mm6, mm6" \
+    "punpcklbw mm5, mm2" \
     "punpckhbw mm6, mm2" \
+    "psllw     mm5, 2" \
     "psllw     mm6, 2" \
+    "psrlw     mm5, 14" \
     "psrlw     mm6, 14" \
+    "psllw     mm5, 8" \
     "psllw     mm6, 8" \
+    "pmaddwd   mm5, mm3" \
     "pmaddwd   mm6, mm4" \
     "paddd     mm0, mm5" \
     "movq      mm3, [ecx+48]" \
     "movq      mm4, [ecx+56]" \
     "paddd     mm1, mm6" \
     "pxor      mm5, mm5" \
-    "punpcklbw mm5, mm2" \
-    "psrlw     mm5, 14" \
-    "psllw     mm5, 8" \
-    "pmaddwd   mm5, mm3" \
     "pxor      mm6, mm6" \
+    "punpcklbw mm5, mm2" \
     "punpckhbw mm6, mm2" \
+    "psrlw     mm5, 14" \
     "psrlw     mm6, 14" \
+    "psllw     mm5, 8" \
     "psllw     mm6, 8" \
+    "pmaddwd   mm5, mm3" \
     "pmaddwd   mm6, mm4" \
     "paddd     mm0, mm5" \
     "paddd     mm1, mm6" \

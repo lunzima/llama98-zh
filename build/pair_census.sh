@@ -72,9 +72,30 @@
 #
 # EIGHT HAVE BEEN DONE, so the technique is not hypothetical here.
 #
-# lz_dot32_t2_asm was the worst in the file at 75% and is now 7% - the
-# best - by running the low and high nibble of each weight byte side by
-# side on separate scratch into separate accumulators.
+# THE "NOW" NUMBERS ARE AS OF EACH EDIT, NOT AS OF THIS RUN - the
+# latency-oriented reschedule (4f5c80b, aux_sched.py) reordered several
+# of these bodies afterwards, and bd4c1e7 (Q4_1 relocate) re-typed the
+# q41 ones, so the "now X%" claims below read stale against the table.
+# Read the rates off the run output, not the prose. The q41 dot32/dot128
+# sit at 44% now (the claim said 26-27%); they are still interleaved
+# (mm6/mm7 alternate), so the drift is a scheduling state, not the
+# sequential-block bug. The one that drifted furthest was
+# lz_dot32_t2_asm: its two nibble
+# chains ran one whole then the other (sequential blocks, not
+# instruction-interleaved) at 62%, while the claim said 7%. Re-interleaved
+# 2026-08-29 (same register set mm0-mm6, the mm5/mm6 chains alternating
+# instruction by instruction, no arithmetic change) - back to 7%, and
+# bit-identical: dot128_t2_probe 49,156 x 3 tiers 0 mismatches, and the
+# MMX-tier engine logits match gcc's twin exactly.
+#
+# lz_dot32_t2_asm was the worst in the file at 75%; the two-nibble
+# split (low nibble mm5, high nibble mm6, into separate accumulators)
+# brought it to 62%, and instruction-level interleaving of the two
+# chains to 7%. The reschedule had paid the dependency back for latency
+# in the other direction; the re-interleave did not - see 0b197de/d163851,
+# both interleaves reverted for clobbering a live register, neither of
+# which this edit reproduces (no register added, none re-ordered across
+# a live boundary).
 #
 # lz_dot128_t2_asm, 72% -> 14%, needed a different split and the reason
 # is worth keeping. Its four accumulators plus the weight quad plus one
@@ -160,9 +181,10 @@
 # their original order. What changed is the order the streams are
 # VISITED, not the order anything is summed.
 #
-# THE REST ARE NOT DONE: lz_exp_q20_2_mmx_asm at 69%, lz_exp_q20_sse2_asm
-# at 74%, and the q41/q61 group kernels. Each is a real edit needing its
-# own probe re-run on both toolchains.
+# STILL NOT DONE: the q61 group kernels only. The exp pair and the q41
+# group were interleaved after this list was written - the entries below
+# carry the before/after (exp_q20_2_mmx 69%->55%, exp_q20_sse2 74%->43%,
+# q41 both tiers).
 #
 # TWO OF THEM HAVE NO SPARE REGISTER, measured rather than assumed:
 # lz_dot128_q61_asm uses all eight mm and lz_dot128_q61_sse2_asm all
@@ -171,6 +193,24 @@
 # to memory and paying a load per use, which trades register pressure
 # for memory traffic in a direction this project's requirements argue
 # against. Not "hard": a different change from the ones above.
+#
+# THE MASK CANNOT BE ELIMINATED, which is the first thing a reader
+# checks. The 0x03 plane is fully packed: 32 values x 2 bits = 8 bytes,
+# four 2-bit groups per byte, and the kernel's four chunks extract them
+# with psrlw 0 / 4 / 2 / 6. Every bit of the plane is a value, so
+# `w2 << 4` without the 0x03 mask reads the neighbouring group's bits
+# into bits [7:6] of the reconstruction - not zero by construction.
+# Verified from src/ops_mmx.c's shift sequence and the plane sizing in
+# row_q61_mmx_intrin, not assumed.
+#
+# NOR DOES THE dot32 VARIANT HAVE THE SPARE REGISTER, which the "group
+# kernels only" phrasing below understates: lz_dot32_q61_asm reads 64%
+# dependent too, and its live set is also all eight mm (mm1 accumulator,
+# mm2/mm3 the two masks, mm4 the w2 qword, mm5 the w4 qword, mm6/mm7/mm0
+# the reconstruction and the two widen temps). An interleave would need
+# a register to hold one chunk's pmaddwd product while the next chunk
+# reuses the widen temps - mm7 and mm0 are both live through their
+# paddd, so there is none. Same verdict, same evidence, one size down.
 # lz_dot128_q41_asm has mm0 and mm4 free and IS the same edit.
 #
 # THE GENERAL LESSON FROM THE x16 PAIR, since it will come up again:
@@ -225,6 +265,17 @@
 # 2^32, so it is bit-identical; the probe's cross-tier arm holds it
 # against dot32_q16_mmx, 81924 values, 0 mismatches.
 #
+# lz_dot128_q16_sse2_asm, 65% -> 32%, the one q16 gap this census missed:
+# the SSE2 GROUP twin ran its four sub-blocks one whole then the next into
+# a single xmm4 accumulator, while the MMX group twin had already walked
+# them as four concurrent streams. Same edit: four accumulators
+# (xmm4/xmm5/xmm6/xmm7) over four streams, weights movdqa'd and
+# activations taken as pmaddwd memory operands (no separate movdqu, so the
+# body is also shorter), folded at the end. No associativity argument is
+# needed - each stream reaches its own store in its original order - and
+# build/dot128_q16_probe.c holds it against the MMX group kernel and the
+# per-32 oracle, 81924 values, 0 mismatches under Watcom.
+#
 # lz_exp_q20_sse2_asm, 74% -> 43%, the two-lane split a fourth time. Each
 # of the three multiplier stages of the Q20 Taylor computes a LOW lane
 # (pmuludq against the unshifted half) and a HIGH lane (psrldq, pmuludq,
@@ -240,6 +291,16 @@
 # unshifted cq must stay ahead of psrldq xmm1. build/exp_q20_probe.c holds
 # it against lz_exp_fixed's ORIGINAL association, 1,282,566 values,
 # 0 mismatches under Watcom.
+#
+# lz_exp_q20_2_mmx_asm, 69% -> 55%, the paired MMX exp twin of the SSE2
+# one above. The Q20 square term splits into three 16-bit limbs
+# (mm6/mm7/mm5) that ran one whole then the next, each a serial
+# movq/pmaddwd/pmaddwd/pslld/paddd chain; mm0 and mm1 are dead here (mm0
+# is the consumed s, mm1 the consumed s>>1), so the three limbs get
+# disjoint accumulators (mm3/mm0/mm1) and retire side by side. No
+# arithmetic change - each limb still reaches its combine in its original
+# order - and build/exp_q20_probe.c holds it against lz_exp_fixed's
+# ORIGINAL association, 1,282,566 values, 0 mismatches under Watcom.
 #
 # lz_wsum_pair_sse2_asm, 68% -> 8%, three independent changes in one body.
 # The attention pair MAC has four groups; each group sign-extends rowA
@@ -283,6 +344,18 @@
 # and cuts the loop body's dependent pairs from four to two. No arithmetic
 # change; build/rmsnorm_out_probe.c holds it against the scalar C contract
 # compiled -fp6, 1280000 values, 0 mismatches under Watcom.
+#
+# THE SMALL SCANS, checked and found not worth it. lz_vmax_sse_asm (78%)
+# is dominated by its six-instruction horizontal-max fold, not by its
+# loop; a two-accumulator loop interleave DOES break the cross-iteration
+# maxps chain, but that chain is non-adjacent so this adjacent-only
+# metric barely moves (78%->73%) and the out-of-order SSE1 target hides
+# it anyway - the edit stays (it is bit-identical, held by a 132000-value
+# probe) but is not a measured win. lz_amax32_mmx/sse2 (67%/65%) and
+# lz_norm_ss_sse_asm (72%) are all quantization (src/ops_quant.c -
+# q8_amax, q8_group_scale, norm_ss_fixed), so their single-accumulator
+# scans run once at conversion time and never in the inference loop; a
+# dual-issue edit there buys nothing on the in-order target.
 #
 # Named and measured; what this script is for is that the next person
 # does not re-derive which kernels are worth it.

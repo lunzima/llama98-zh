@@ -673,6 +673,14 @@ const char *lz_gdn_p2_impl(void);
 #define LZ_FDIV_RECIP 0
 #endif
 #endif /* LZ_FDIV_RECIP */
+/* LZ_SOFTFP_FAST (lz_softfp.c's round-toward-zero switch) must be
+   visible here because lz_fdiv_recip's RTZ truncation and the ops_quant
+   quantizers read it. Default 0; the fast-parity ARM build passes
+   -DLZ_SOFTFP_FAST=1 to every TU. */
+#ifndef LZ_SOFTFP_FAST
+#define LZ_SOFTFP_FAST 0
+#endif /* !LZ_SOFTFP_FAST */
+
 #if LZ_FDIV_RECIP
 #define LZ_FDIV(a, b) lz_fdiv_recip((a), (b))
 #else

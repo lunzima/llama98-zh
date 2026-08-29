@@ -62,13 +62,13 @@
    holds - there is no scale to apply, no group to belong to, and no
    rounding either way.
  *
- * WHY IT EXISTS. A BF16 tensor used to be expanded to f32 while loading
- * (safetensors.c's read path), so a file storing two bytes per parameter
- * occupied four in RAM. On a 64MB target that is the difference between
- * a model fitting and not: the checkpoint this was measured against
- * reports "0.23 GB at 4 bytes/param". Keeping it narrow halves both the
- * footprint and the DDR traffic of reading it, and DDR is the bottleneck
- * on a 248MHz part.
+ * WHY IT EXISTS. Expanding a BF16 tensor to f32 while loading (the
+ * safetensors.c read path) would turn a file storing two bytes per
+ * parameter into four in RAM. On a 64MB target that is the difference
+ * between a model fitting and not: the checkpoint this was measured
+ * against reports "0.23 GB at 4 bytes/param". Keeping it narrow halves
+ * both the footprint and the DDR traffic of reading it, and DDR is the
+ * bottleneck on a 248MHz part.
  *
  * BIT-IDENTICAL TO EXPANDING AT LOAD TIME, which is what makes it safe
  * to have on by default. The widening is the same `<<16` the loader
