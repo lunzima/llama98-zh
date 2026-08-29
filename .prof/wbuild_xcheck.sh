@@ -31,7 +31,13 @@ P=${1:-}
 # the compiler reported none. Repo-relative keeps both halves honest.
 O=${O:-.prof/_wxc}
 [ -n "$P" ] || { echo "usage: $0 <probe-stem>"; exit 2; }
-[ -f "$R/.prof/$P.c" ] || { echo "no such probe: .prof/$P.c"; exit 2; }
+# build/ as well as .prof/. The group-kernel probes live in build/ and
+# copying one here to run it leaves two files with the same name and no
+# way to tell which is current - the copy was how dot128_t2_probe.c got
+# run at all, and it is not a habit worth keeping.
+PSRC="$R/.prof/$P.c"
+[ -f "$PSRC" ] || PSRC="$R/build/$P.c"
+[ -f "$PSRC" ] || { echo "no such probe: .prof/$P.c or build/$P.c"; exit 2; }
 cd "$R" || exit 2
 
 # LIBNT is spelled out rather than built as "$LIBROOT/nt": on Windows
@@ -58,7 +64,7 @@ BASE="-za99 -otexan -zp4 -DLZ_MMX_TU=1 -DLZ_SSE2_TU=1 -bt=nt -we
 INC="-I$WROOT/h -I$WROOT/h/nt -I$R/src -I$R/common"
 LOW="-4r"
 HIGH="-6r -D__MMX__=1"
-SRC="ops ops_quant ops_sched ops_norm ops_gdn ops_matmul ops_t2_scalar
+SRC="ops ops_kernel ops_epi ops_quant ops_sched ops_norm ops_gdn ops_matmul ops_t2_scalar
      fwht err"
 SRC_HIGH="ops_mmx ops_mmx_sse ops_sse2 cpucheck"
 
@@ -71,7 +77,13 @@ for f in $SRC_HIGH; do
     "$WCC" $BASE $HIGH $INC -fo="$O/$f.obj" "$R/src/$f.c" > "$O/$f.log" 2>&1 \
         || { echo "$P: FAIL - $f.c"; tail -8 "$O/$f.log"; exit 1; }
 done
-"$WCC" $BASE $LOW $INC -fo="$O/probe.obj" "$R/.prof/$P.c" > "$O/probe.log" 2>&1 \
+# PROBE_FLAGS applies to the PROBE TU only, never to the engine. Some
+# probes carry their own scalar reference and state the flags it needs -
+# rmsnorm_out_probe wants -fp6 so its volatile intermediates do not sit
+# in an x87 80-bit register. Building it without them measures the
+# reference's rounding, not the kernel.
+"$WCC" $BASE $LOW ${PROBE_FLAGS:-} $INC -fo="$O/probe.obj" "$PSRC" \
+    > "$O/probe.log" 2>&1 \
     || { echo "$P: FAIL - probe"; tail -8 "$O/probe.log"; exit 1; }
 
 {

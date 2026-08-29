@@ -13,7 +13,7 @@ O=${O:-/tmp/rowdot}
 CC=${CC:-gcc}
 D="-DLZ_MMX_TU=1 -DLZ_SSE2_TU=1"
 F="-O2 -std=c99 -mmmx -msse -msse2 -ffp-contract=off"
-SRC="ops ops_quant ops_sched ops_norm ops_gdn ops_matmul ops_t2_scalar
+SRC="ops ops_kernel ops_epi ops_quant ops_sched ops_norm ops_gdn ops_matmul ops_t2_scalar
      ops_mmx ops_mmx_sse ops_sse2 fwht cpucheck err"
 
 list() { local d=$1; shift; for f in "$@"; do echo "$d/$f.c"; done; }
@@ -83,7 +83,20 @@ if bash "$R/.prof/wbuild_xcheck.sh" rowdot_xcheck > "$O/wat.log" 2>&1 \
     "$R/.prof/_wxc/probe.exe" > "$O/wrun.log" 2>&1
     wrc=$?
     cat "$O/wrun.log"
-    [ $wrc -eq 0 ] || { echo "rowdot_xcheck: FAIL - Watcom tiers differ"; exit 1; }
+    # A nonzero exit is not one answer. The probe reports a mismatch by
+    # printing FAIL and exiting 1; a crash exits nonzero having compared
+    # nothing, and reporting that as "tiers differ" blames the kernels
+    # for a probe that never ran. Distinguish them by the verdict line.
+    if [ $wrc -ne 0 ]; then
+        if grep -q "differs from" "$O/wrun.log"; then
+            echo "rowdot_xcheck: FAIL - Watcom tiers differ"
+        else
+            echo "rowdot_xcheck: FAIL - the Watcom probe did not finish"
+            echo "  (exit $wrc with no comparison printed). The tiers are"
+            echo "  UNCHECKED here, not disagreeing."
+        fi
+        exit 1
+    fi
 else
     echo "-- Open Watcom -- SKIP, probe did not build"
     tail -4 "$O/wat.log"

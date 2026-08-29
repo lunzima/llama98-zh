@@ -28,7 +28,7 @@ set -u
 R=${R:-$(cd "$(dirname "$0")/.." && pwd)}
 O=${O:-/tmp/srx}
 CC=${CC:-gcc}
-SRC="ops ops_quant ops_sched ops_norm ops_gdn ops_matmul ops_t2_scalar
+SRC="ops ops_kernel ops_epi ops_quant ops_sched ops_norm ops_gdn ops_matmul ops_t2_scalar
      fwht cpucheck err"
 X86_EXTRA="ops_mmx ops_mmx_sse ops_sse2"
 ARM_EXTRA="ops_t2_arm ops_arm"

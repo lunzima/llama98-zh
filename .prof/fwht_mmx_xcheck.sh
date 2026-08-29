@@ -26,7 +26,7 @@ O=${O:-/tmp/fwhtmmx}
 CC=${CC:-gcc}
 D="-DLZ_MMX_TU=1 -DLZ_SSE2_TU=1"
 F="-O2 -std=c99 -mmmx -msse -msse2"
-SRC="fwht ops ops_quant ops_sched ops_norm ops_gdn ops_matmul
+SRC="fwht ops ops_kernel ops_epi ops_quant ops_sched ops_norm ops_gdn ops_matmul
      ops_t2_scalar ops_mmx ops_mmx_sse ops_sse2 cpucheck err"
 
 rm -rf "$O"; mkdir -p "$O"

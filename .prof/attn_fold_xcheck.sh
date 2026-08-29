@@ -18,7 +18,7 @@ R=${R:-$(cd "$(dirname "$0")/.." && pwd)}
 O=${O:-/tmp/attnfold}
 CC=${CC:-gcc}
 F="-O2 -std=c99"
-SRC="ops ops_quant ops_sched ops_norm ops_gdn ops_matmul ops_t2_scalar
+SRC="ops ops_kernel ops_epi ops_quant ops_sched ops_norm ops_gdn ops_matmul ops_t2_scalar
      fwht cpucheck err"
 
 mkdir -p "$O"
