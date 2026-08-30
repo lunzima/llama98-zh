@@ -142,9 +142,7 @@ EXPORTS
   lz_prof_us               ; data
   lz_gdn_mode
   lz_gdn_p2_mode
-  lz_gdn_p2_select
   lz_gdn_p2_impl
-  lz_gdn_p2_is_auto
   lz_pair_mode
   lz_pair_select
   lz_kernel_select
