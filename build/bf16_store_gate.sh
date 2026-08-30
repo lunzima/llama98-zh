@@ -62,7 +62,7 @@ fi
 # The work directory sits beside the repo rather than in /tmp for the
 # reason build/arm/parity_gate.sh gives: a Windows binary cannot resolve
 # an MSYS /tmp path, and --dump-all-logits would silently write nowhere.
-W="$(dirname "$ROOT")/.bf16-store-gate-$$"
+W="${LZ_SCRATCH:-$(dirname "$ROOT")/tmp}/.bf16-store-gate-$$"
 mkdir -p "$W" || { echo "bf16_store_gate: FAIL - cannot create $W"; exit 1; }
 trap 'rm -rf "$W"' EXIT
 

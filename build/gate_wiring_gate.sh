@@ -17,9 +17,12 @@
 # the seventh unwired script will look exactly like the first six: green
 # when run by hand, invisible otherwise.
 #
-# WHAT COUNTS AS A CALLER: a mention in the Makefile or in ci.sh. Not a
-# mention in another gate - that would let two unwired gates cite each
-# other. Scripts under build/arm, build/mips and build/x87 are exempt
+# WHAT COUNTS AS A CALLER: a mention in the Makefile, in gates.mk or in
+# ci.sh. Not a mention in another gate - that would let two unwired gates
+# cite each other. gates.mk is where the gate targets live now: the
+# shipped Makefile carries none of them and pulls it in with `-include`,
+# so a gate wired only there is wired. Scripts under build/arm,
+# build/mips and build/x87 are exempt
 # and listed below: they are build helpers their sibling gates invoke,
 # and the sibling gates are themselves checked here.
 #
@@ -51,7 +54,7 @@ UNWIRED=""
 for g in build/*_gate.sh; do
     b=$(basename "$g")
     [ "$b" = "gate_wiring_gate.sh" ] && continue
-    if ! grep -q "$b" Makefile build/ci.sh 2>/dev/null; then
+    if ! grep -q "$b" Makefile gates.mk build/ci.sh 2>/dev/null; then
         UNWIRED="$UNWIRED $b"
         FAIL=1
     fi
@@ -61,7 +64,7 @@ for g in build/arm/*.sh build/mips/*.sh build/x87/*.sh; do
     [ -f "$g" ] || continue
     rel=${g#build/}
     case " $EXEMPT " in *" $rel "*) continue ;; esac
-    if ! grep -q "$rel" Makefile build/ci.sh 2>/dev/null; then
+    if ! grep -q "$rel" Makefile gates.mk build/ci.sh 2>/dev/null; then
         UNWIRED="$UNWIRED $rel"
         FAIL=1
     fi
@@ -182,7 +185,7 @@ fi
 # read as ci.sh-only. If the Makefile grep started matching everything,
 # the list above would go empty and this half would pass by measuring
 # nothing.
-if grep -q "subn_gate.sh" Makefile 2>/dev/null; then
+if grep -q "subn_gate.sh" Makefile gates.mk 2>/dev/null; then
     echo "gate_wiring_gate: FAIL - subn_gate.sh reads as reachable from a"
     echo "  Makefile target, which it is not; the depth split is broken and"
     echo "  its PASS means nothing"
@@ -192,7 +195,7 @@ fi
 # Positive control. If the search stopped matching, every script would
 # look unwired rather than wired - so the control is a name that MUST be
 # found, not one that must not.
-if ! grep -q "kernel_matrix_gate.sh" Makefile build/ci.sh 2>/dev/null; then
+if ! grep -q "kernel_matrix_gate.sh" Makefile gates.mk build/ci.sh 2>/dev/null; then
     echo "gate_wiring_gate: FAIL - kernel_matrix_gate.sh reads as unwired,"
     echo "  which it is not; the search is broken and every PASS this gate"
     echo "  gives is meaningless"
@@ -263,6 +266,6 @@ fi
 [ -n "$UNWIRED" ] || exit 1
 echo "gate_wiring_gate: FAIL - script(s) no target depends on:"
 for u in $UNWIRED; do echo "    $u"; done
-echo "  A gate nothing invokes is a script. Add it to \`check\` in the"
-echo "  Makefile, or to ci.sh, or delete it."
+echo "  A gate nothing invokes is a script. Add it to \`check\` in"
+echo "  gates.mk, or to ci.sh, or delete it."
 exit 1

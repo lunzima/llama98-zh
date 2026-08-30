@@ -20,8 +20,9 @@
  *
  * BUFFER IS MCU-SIZED BY DESIGN: the decompression buffer is 64 KiB
  * (LZ4's smallest standard block), so streaming a model costs ~64 KiB of
- * extra memory no matter how large the model is. The producer is expected
- * to write blocks of at most 64 KiB (the accompanying make_lz4 tool does).
+ * extra memory no matter how large the model is. The producer must write
+ * blocks of at most 64 KiB - BD block max size code 4, which is what a
+ * standard LZ4 frame writer emits when asked for 64 KiB blocks.
  * A larger block is a hard error, not a silent truncation.
  *
  * Byte-level on purpose: no 32-bit word reads, so VC++ 4.0 on MIPS

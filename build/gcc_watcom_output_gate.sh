@@ -99,7 +99,7 @@ fi
 
 # Beside the repo, not /tmp: a Windows binary cannot resolve an MSYS
 # path, and --dump-all-logits would write nowhere and be believed.
-W="$(dirname "$ROOT")/.gcc-watcom-out-$$"
+W="${LZ_SCRATCH:-$(dirname "$ROOT")/tmp}/.gcc-watcom-out-$$"
 mkdir -p "$W" || { echo "gcc_watcom_output_gate: FAIL - cannot create $W"; exit 1; }
 trap 'rm -rf "$W"' EXIT
 

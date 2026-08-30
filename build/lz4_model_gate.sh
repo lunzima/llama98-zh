@@ -59,8 +59,11 @@ command -v "$CC" >/dev/null 2>&1 || {
     echo "lz4_model_gate: SKIP - no $CC to build the round-trip harness" >&2; exit 2; }
 
 # Beside the repo, not /tmp: a Windows binary cannot resolve an MSYS
-# path, and --dump-all-logits would write nowhere and be believed.
-W="$(dirname "$ROOT")/.lz4-model-gate-$$"
+# path, and --dump-all-logits would write nowhere and be believed. Under
+# a scratch DIRECTORY rather than straight beside the repo, which on this
+# machine is the drive root: a killed run leaves its work dir behind, and
+# a dropping in E:\ is one nobody attributes to a gate.
+W="${LZ_SCRATCH:-$(dirname "$ROOT")/tmp}/.lz4-model-gate-$$"
 mkdir -p "$W" || { echo "lz4_model_gate: FAIL - cannot create $W"; exit 1; }
 trap 'rm -rf "$W"' EXIT
 
@@ -68,7 +71,7 @@ cp "$MODEL"/*.json "$W/" 2>/dev/null
 cp "$MODEL/model.bin" "$W/model.bin" || {
     echo "lz4_model_gate: FAIL - cannot copy model.bin"; exit 1; }
 
-if ! "$PY" "$ROOT/make_lz4.py" "$W/model.bin" >"$W/mk.log" 2>&1; then
+if ! "$PY" "$ROOT/build/make_lz4.py" "$W/model.bin" >"$W/mk.log" 2>&1; then
     echo "lz4_model_gate: FAIL - make_lz4.py did not compress"
     tail -n 4 "$W/mk.log" | sed 's/^/      /'
     exit 1

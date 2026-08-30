@@ -13,9 +13,52 @@ machine is amd64/MinGW. Both must produce **bit-identical** output.
 
 **This repository holds the inference engine and the front end. It never holds
 a test suite and it never holds training tools.** Not "does not yet" - never.
-`src/`, `common/`, `gui/`, `build/`, `docs/`, `assets/`, `contrib/` and nothing
+The PUBLIC release tree is `src/`, `common/`, `gui/`, `assets/`, `contrib/`,
+`Makefile`, `README.md`, `LICENSE`, `.gitignore`, `llama98.def` and nothing
 else. Verification is what the `Verify` section below describes: modes of the
 shipped binaries.
+
+**Release rules, decided 2026-08-30:** the internal dev/test/docs
+infrastructure stays LOCAL and is never pushed to `github.com/lunzima/llama98-zh`:
+
+1. **`docs/` is not pushed.** The architecture audits, pipeline breakpoints and
+   design notes are internal working documents.
+2. **`build/` and `.prof/` are not pushed.** The gates, CI scripts, probes and
+   censuses they hold are the engine's test suite - and this file's own Iron
+   law says the repository never holds one. `CLAUDE.md` itself is also not
+   pushed; it is the operating instructions for this working tree.
+
+3. **`gates.mk` is not pushed.** The verification gates live in this
+   local-private Makefile (`make check` and friends), pulled into the shipped
+   `Makefile` by `-include gates.mk` - present here it restores the gates,
+   absent on a public checkout it is a silent no-op. `/gates.mk` is in
+   `.gitignore`; the shipped Makefile keeps only the include line and the
+   `NATIVE_GATE` prerequisite wiring, which are inert without it.
+
+4. **`make_lz4.py` is not pushed.** It writes the `model.bin.lz4` that
+   `src/lz4d.c` streams. A producer of model files is a training-side tool, and
+   the reader shipping here does not make its writer part of the engine.
+
+**What puts files in the root is cwd, and the root is where it matters.** An
+ad-hoc compile run from this directory leaves `.obj` and `.err` beside the
+Makefile; a probe writes its dump to a relative path; a pytest run in the wrong
+tree drops `.pytest_cache`. Six gates did it themselves, with work directories
+at `$(dirname "$ROOT")` - which on this machine is the DRIVE root. A stray
+under `src/` is obviously misplaced and gets noticed; a stray in the ROOT sits
+next to `Makefile` and `README.md` and reads as a top-level project file.
+`make_lz4.py` reached the public remote twice that way, read as "something the
+release has not committed yet" when it was a training-side tool that was never
+on the list above.
+
+`build/root_hygiene_gate.sh` is that list as a predicate, first in `make check`.
+It reads the DIRECTORY, not `git status`: `.pytest_cache` writes a `.gitignore`
+containing `*` inside itself, so it is entirely untracked and entirely
+invisible to git. A new top-level entry gets added to that gate AND to the
+enumeration above, in that order, deliberately - a file needs a reason to join
+the list, not a reason to be kept out of the push.
+
+The local tree keeps all of them for development; the release commits and the
+push exclude them.
 
 The training side - corpus packing, tokenizer and charset construction,
 quantized export, the Python test suite - lives in a **separate repository**,

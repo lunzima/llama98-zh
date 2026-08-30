@@ -272,7 +272,7 @@ fi
 # is outside the repo and the trap removes it regardless of backend.
 WORK=$(mktemp -d)
 if [ "$ARM_BACKEND" = wsl ]; then
-    ARM_WORK="$(dirname "$ROOT")/.parity-gate-wsl-$$"
+    ARM_WORK="${LZ_SCRATCH:-$(dirname "$ROOT")/tmp}/.parity-gate-wsl-$$"
     mkdir -p "$ARM_WORK" || {
         echo "FAIL: could not create $ARM_WORK" >&2
         exit 1

@@ -136,6 +136,12 @@
 !/build/i32f_acc_gate.sh
 !/build/kernel_probe_census.sh
 !/build/org_census.sh
+!/build/root_hygiene_gate.sh
+# The model packer. It lived at the repository ROOT, where an untracked
+# file reads as a top-level project file rather than as tooling - which
+# is how it reached the public remote twice. Its only caller is
+# lz4_model_gate.sh, so it lives beside that caller now.
+!/build/make_lz4.py
 
 # Stray compiler/linker intermediates (gcc, Open Watcom), plus the raw
 # dumps probes drop at the repo root when run without a -o path.

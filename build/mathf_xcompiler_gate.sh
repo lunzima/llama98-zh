@@ -67,7 +67,7 @@ fi
 # Beside the repo, not /tmp: a Windows-hosted wlink resolves neither an
 # MSYS nor a WSL path, and a build that silently wrote nowhere would be
 # read as a pass.
-W="$(dirname "$ROOT")/.mathf-xcc-$$"
+W="${LZ_SCRATCH:-$(dirname "$ROOT")/tmp}/.mathf-xcc-$$"
 mkdir -p "$W" || { echo "mathf_xcompiler_gate: FAIL - cannot create $W"; exit 1; }
 trap 'rm -rf "$W"' EXIT
 

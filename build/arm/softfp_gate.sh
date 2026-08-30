@@ -59,7 +59,7 @@ fi
 # inside WSL while this script reads from the host, and WSL cannot see
 # MSYS's /tmp. A drive-letter path is DrvFs and both can. Beside $ROOT
 # rather than under it so nothing lands in the working tree.
-W="$(dirname "$ROOT")/.softfp-gate-$$"
+W="${LZ_SCRATCH:-$(dirname "$ROOT")/tmp}/.softfp-gate-$$"
 mkdir -p "$W" || { echo "softfp_gate: FAIL - cannot create $W"; exit 1; }
 trap 'rm -rf "$W"' EXIT
 

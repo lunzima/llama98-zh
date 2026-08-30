@@ -9,6 +9,30 @@
 # them. The original tree kept three hand-written copies of the engine
 # list plus a Makefile $(SRC); there is one here.
 
+# BEFORE the include, because an include defines targets and the first
+# target defined is what bare `make` builds. gates.mk starts with
+# `check`, so including it silently turned `make` from "build the engine"
+# into "run the gate suite" - on this tree only, since a public checkout
+# has no gates.mk and never saw it. Stating the goal does not depend on
+# where anything sits in the file.
+.DEFAULT_GOAL := native
+
+# The development gates (`check` and friends) live in gates.mk, which is
+# local-private and NOT shipped. Included with a leading `-`, so a public
+# checkout without the file is unaffected; `make check` simply has no
+# rule there.
+-include gates.mk
+
+# native-gate (defined in gates.mk) guards the gcc native link against
+# stale ELF objects a previous WSL-gcc build left in build/native;
+# MinGW's ld links them into a malformed PE with no error of its own.
+# Active only when gates.mk is present, so the shipped build never sees
+# it.
+NATIVE_GATE :=
+ifneq ($(wildcard gates.mk),)
+NATIVE_GATE := native-gate
+endif
+
 # ----------------------------------------------------------------------
 # Source lists (single point of truth). Bare names, no .c, no directory.
 # ----------------------------------------------------------------------
@@ -32,14 +56,14 @@
 # keeps its portability honest continuously, rather than discovering at
 # wiring-up time that it does not survive the C89 floor or Watcom. It
 # has a portable C core with an ARM fast path bolted on, unlike
-# lz_softfp.c, whose body is #if __arm__ && __GNUC__ and which
-# build/arm/build_engine.sh therefore appends alone.
+# lz_softfp.c, whose body is #if __arm__ && __GNUC__ and is built on
+# ARM targets only.
 #
 # WHEN IT IS WIRED UP the design is that every target runs this software
 # implementation, x86 included - the shipping build has no hardware bf16
 # anywhere, so one arithmetic serves all targets and an ARM run stays
 # byte-comparable with an x86 one. The compiler's own __bf16 appears
-# only in build/bf16_native_probe.c, as a witness and never a component.
+# only in a throwaway probe, as a witness and never a component.
 ENG := err compat lfn json safetensors model ops ops_kernel ops_rope ops_moe ops_epi ops_quant ops_sched ops_matmul ops_t2_arm ops_arm ops_t2_scalar ops_norm ops_gdn ops_conv1d fwht forward forward_attn forward_moe forward_ssm forward_kda sampler generate lz_mathf lz_bf16 lz4d \
        tokenizer unicode chat gbk cpucheck
 SRV := net http openai
@@ -60,9 +84,8 @@ CLI_COM := session stream beep
 # the WHOLE translation unit it is passed to, not just the SSE-touching
 # functions in it - so the plain-MMX functions (ops_mmx.c), the
 # genuinely-SSE1 ones (ops_mmx_sse.c) and the genuinely-SSE2 ones
-# (ops_sse2.c) need different -march there (see
-# build/x87/build_engine.sh, not this Makefile, for where that actually
-# bites - x86-64 has no such distinction, CMOV is baseline, so this
+# (ops_sse2.c) need different -march there (x86-64 has no such
+# distinction, CMOV is baseline, so this
 # Makefile compiles all three the same way regardless). Watcom: they
 # carry #pragma aux bodies needing .586/.686 codegen, and -Nr/-Ns is a
 # ceiling its own per-function directives cannot exceed (task #28's
@@ -142,9 +165,8 @@ X86_64_CFLAGS := -Os -march=x86-64 -mtune=znver3 -std=c99 -Wall -Wextra -Isrc $(
 # long-pipeline branch-prediction optimisation is keyed on alderlake
 # only - generic and znver3 do not carry it (in 16.1 or the newer
 # releases), so a znver3 hot tune would silently drop that. Derived from
-# X86_64_CFLAGS by substitution, so a command-line override -
-# build/int_pipeline_arm_gate.sh passes X86_64_CFLAGS="-O3 ... -D$sw=0"
-# - still reaches every hot TU: an override carries no -Os and no
+# X86_64_CFLAGS by substitution, so a command-line override still
+# reaches every hot TU: an override carries no -Os and no
 # -mtune=znver3, so both substs are no-ops and the override's own -O
 # level, -mtune and -D flow through unchanged.
 X86_64_HOT_CFLAGS := $(subst -Os,-O2,$(subst -mtune=znver3,-mtune=alderlake,$(X86_64_CFLAGS)))
@@ -268,18 +290,15 @@ $(HOT_GCC_GUI_COM_OBJS): build/gui/%.o: common/%.c
 # a front-end helper deliberately outside $(ENG) - so this target lists it
 # explicitly with -Icommon, exactly as the Watcom CLI/DOS builds do.
 #
-# native_obj_gate.sh runs before the link: a Linux/WSL gcc invocation
-# that writes into build/native/ leaves ELF .o files there, and MinGW's
-# ld links them into a malformed PE with no error of its own. The gate
-# checks the file type of whatever is in build/native/*.o right now, so
-# a stale ELF object is a build failure here instead of a bad binary
-# discovered only when someone tries to run it.
-llama98: $(COLD_ENG_SRCS) $(COLD_CLI_COM_SRCS) src/cli_attr.c src/cli_main.c $(HOT_GCC_NATIVE_OBJS) $(ENG_MMX_GCC_NATIVE_OBJS)
-	@bash build/native_obj_gate.sh
+# build/native/ holds whatever a previous toolchain left there; the
+# objects are produced below and named by target, so nothing survives
+# between toolchains in the same tree. Cross-compiling from WSL with
+# MinGW against stale WSL-gcc objects would link a malformed PE; delete
+# build/native before switching toolchains.
+llama98: $(NATIVE_GATE) $(COLD_ENG_SRCS) $(COLD_CLI_COM_SRCS) src/cli_attr.c src/cli_main.c $(HOT_GCC_NATIVE_OBJS) $(ENG_MMX_GCC_NATIVE_OBJS)
 	$(CC) $(X86_64_CFLAGS) -Icommon -o $@ $(COLD_ENG_SRCS) $(COLD_CLI_COM_SRCS) src/cli_attr.c src/cli_main.c $(HOT_GCC_NATIVE_OBJS) $(ENG_MMX_GCC_NATIVE_OBJS) -lm
 
-kunkun98-serve: $(COLD_ENG_SRCS) $(SRV_SRCS) src/server_main.c $(HOT_GCC_NATIVE_ENG_OBJS) $(ENG_MMX_GCC_NATIVE_OBJS)
-	@bash build/native_obj_gate.sh
+kunkun98-serve: $(NATIVE_GATE) $(COLD_ENG_SRCS) $(SRV_SRCS) src/server_main.c $(HOT_GCC_NATIVE_ENG_OBJS) $(ENG_MMX_GCC_NATIVE_OBJS)
 	$(CC) $(X86_64_CFLAGS) -o $@ $(COLD_ENG_SRCS) $(SRV_SRCS) src/server_main.c $(HOT_GCC_NATIVE_ENG_OBJS) $(ENG_MMX_GCC_NATIVE_OBJS) -lm $(HTTP_LIBS)
 
 # Resources (icon / splash / about logo / lamps). windres for gcc; the
@@ -496,7 +515,7 @@ GUI_EXE := kunkun98-w.exe
 DOS_EXE := llama98-dos.exe
 DLL_EXE := llama98.dll
 
-.PHONY: watcom-cli watcom-gui watcom-dos watcom-dll check
+.PHONY: watcom-cli watcom-gui watcom-dos watcom-dll
 
 watcom-cli:
 	@mkdir -p $(CLI_OBJ)
@@ -651,309 +670,6 @@ watcom-gui:
 	"$(WRC)" -q -bt=nt -i="$(WATCOM_ROOT)/h" -i="$(WATCOM_ROOT)/h/nt" -i=. gui/kunkun98.rc "$(GUI_EXE)"
 	@echo "== done: $(GUI_EXE)"
 
-# Build == verify (D1). The DLL build doubles as the correctness gate: a
-# clean link proves the .def export surface matches the engine, and
-# -D__MMX__=1 is baked in so the hand-written assembly cannot silently
-# vanish. DOS is left out of `check` because it needs the extender stub
-# and is a separate delivery decision; run `make watcom-dos` explicitly.
-# bare-endif-gate runs first and needs no build: a source-text invariant
-# caught before either compiler spends time on it. dedupe-gate (task #31)
-# and dead-ifndef-gate run next, also build-free. mm-alias-
-# gate (task #30/#32) runs second, before the real link targets: it
-# compiles its own throwaway ops_sse2.c objects (both toolchains, both
-# LZ_SSE2_GROUP settings) rather than depending on watcom-cli having
-# already produced one, so it does not need to come after it.
-# kernel-matrix-gate is last because it is the slowest (it builds the gcc
-# CLI, the Watcom CLI and, when the cross toolchain is there, the ARM one
-# - the union of three binaries is the whole point, one binary cannot
-# show it). LZ_KM_SKIP_ARM=1 drops the ARM arm for a faster loop; the
-# gate then says which columns went unchecked.
-#
-# c89-floor-gate, comment-hygiene-gate and vc4-limits-gate were written,
-# committed, and then invoked by nothing: not here, not in ci.sh. They
-# passed every time anyone ran them by hand and could not have reddened
-# a build. A gate no target depends on is a script.
-#
-# gcc-warning-gate had a caller - ci.sh - and was still missing HERE,
-# which is a weaker version of the same hole: `check` is the target that
-# gets run, and it asserted the Watcom warning count while letting the
-# gcc one past. Found by a dropped comment terminator that left a `/*`
-# nested inside another comment; gcc said so on every build and `check`
-# reported 16 PASS over it. Having a caller somewhere is not the test -
-# being reachable from what people actually run is.
-check: bare-endif-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate softfp-gate dedupe-gate mm-alias-gate c89-floor-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate kernel-matrix-gate aux-parm-arity-gate aux-equiv-gate mathf-xcompiler-gate bf16-torch-gate bf16-store-gate lz4-model-gate gcc-watcom-output-gate fixture-exists-gate
-
-# Zero gcc warnings, asserted rather than printed. The Watcom side has
-# always been counted ("N lines, 0 warnings, 0 errors", per file); this
-# is the same assertion for the toolchain whose warnings only ever went
-# to the console. Forces a real compile - see the script for why an
-# up-to-date build is the failure mode it has to avoid.
-#
-# MAKEFLAGS IS CLEARED because the gate proves a real compile happened by
-# finding gcc command lines in the sub-make's output, and `make -s check`
-# propagates -s to that sub-make - which suppresses exactly those lines.
-# The gate then reports "ran no compile", a FAIL that says nothing about
-# the tree. It is the gate's own blindness check firing on the harness
-# instead of on the subject.
-.PHONY: gcc-warning-gate
-gcc-warning-gate:
-	@MAKEFLAGS= MFLAGS= bash build/gcc_warning_gate.sh
-
-# The GUI and the CLI compile the engine with the SAME flags - same
-# optimization level, same ISA gating, same operator selection. A GUI
-# built at different settings is a different engine wearing the same
-# version string, and the difference would show up as numbers that
-# disagree with the CLI's on identical input.
-#
-# In `check` rather than ci.sh-only because it is seconds and needs no
-# model: it reads both flag sets and compares them. It had no target at
-# all before - the Makefile named it once, in a comment.
-.PHONY: gcc-flag-parity-gate
-gcc-flag-parity-gate:
-	@bash build/gcc_flag_parity_gate.sh
-
-# Watcom passes #pragma aux arguments to the __parm registers LEFT TO
-# RIGHT and ignores the rest, so a spare register at the head of the list
-# shifts every argument and leaves the last one holding whatever the
-# caller left there. In `check` rather than ci.sh-only: it is a text scan
-# of src/, no build and no model.
-.PHONY: aux-parm-arity-gate
-aux-parm-arity-gate:
-	@bash build/aux_parm_arity_gate.sh
-
-# A reorder of a hand-written kernel must not change what it computes.
-# SKIPs without pentiumlint, so it costs nothing where the linter is not
-# checked out; where it is, it is a second or two of symbolic execution.
-.PHONY: aux-equiv-gate
-aux-equiv-gate:
-	@bash build/aux_equiv_gate.sh
-
-# The same question of the pair that ships to the target. Its own file
-# rather than a second half of the one above: that one is named for the
-# toolchain it checks, and a gcc_ gate that also checked Watcom would be
-# a name to have to explain.
-.PHONY: watcom-flag-parity-gate
-watcom-flag-parity-gate:
-	@bash build/watcom_flag_parity_gate.sh
-
-# Where a fixed random seed is needed it is the same one everywhere. A
-# grep over build/, so it belongs in `check` rather than ci.sh: two
-# harnesses seeded differently produce incomparable numbers that both
-# look reproducible, which is the expensive version of this failure.
-.PHONY: seed-gate
-seed-gate:
-	@bash build/seed_gate.sh
-
-# The GUI's own 421 runtime checks, which nothing ran. They build the
-# real windows and read the real controls back, and two of them had
-# been red since the beep checkbox landed - a duplicated mnemonic and a
-# gap in the Tab chain, both found by a user pressing the key. Depends
-# on the binary so the gate can never be handed a stale one.
-.PHONY: gui-selftest-gate
-gui-selftest-gate: kunkun98-gui
-	@bash build/gui_selftest_gate.sh
-
-# Every source byte is ASCII. VC++ 4.0 and Watcom read source in the
-# host codepage, and on a DBCS host a lead byte swallows the one after
-# it - which is sometimes a comment terminator. A byte test, not a
-# character test: the character-level search for CJK returns a false
-# zero when the locale disagrees with the file.
-.PHONY: ascii-source-gate
-ascii-source-gate:
-	@bash build/ascii_source_gate.sh
-
-# Every hand-written kernel can be reached by a probe. A #pragma aux
-# body has no address, so a kernel with no thin non-static wrapper in
-# its own file cannot be called, compared or timed from anywhere else -
-# and nothing says so, because nothing links against it.
-.PHONY: kernel-reach-gate
-kernel-reach-gate:
-	@bash build/kernel_reach_gate.sh
-
-# Two shared helpers with the same body under different names, which is
-# the duplication dedupe-gate cannot see: that one knows the names it is
-# looking for, this one compares bodies.
-.PHONY: dup-body-gate
-dup-body-gate:
-	@bash build/dup_body_gate.sh
-
-# Every x86 kernel written twice - gcc intrinsics and a Watcom
-# #pragma aux - or registered with a reason for being impossible.
-# twin-pair-gate counts the pairs; gcc-watcom-pair-gate checks the two
-# sides answer for the same set.
-.PHONY: twin-pair-gate
-twin-pair-gate:
-	@bash build/twin_pair_gate.sh
-
-.PHONY: gcc-watcom-pair-gate
-gcc-watcom-pair-gate:
-	@bash build/gcc_watcom_pair_gate.sh
-
-# Every gate has a caller. Six did not, and two of those were the only
-# checks behind standing requirements - see the script's header.
-.PHONY: gate-wiring-gate
-gate-wiring-gate:
-	@bash build/gate_wiring_gate.sh
-
-# The language floor, as a ratchet plus a real -std=c89 compile. See the
-# script's header for what green does and does not mean.
-.PHONY: c89-floor-gate
-c89-floor-gate:
-	@bash build/c89_floor_gate.sh
-
-# Comments say what is true, not when it changed or which rule says so.
-.PHONY: comment-hygiene-gate
-comment-hygiene-gate:
-	@bash build/comment_hygiene_gate.sh
-
-# The translation limits a 1995 compiler may enforce - identifier
-# truncation and string literal length. Not the same question as the
-# floor gate, which asks whether the code is standard C89 at all.
-.PHONY: vc4-limits-gate
-vc4-limits-gate:
-	@bash build/vc4_limits_gate.sh
-
-# The real compiler, on the no-assembly set. Wired only once it was
-# green: a gate that starts red is one people learn to skip.
-.PHONY: vc4-compile-gate
-vc4-compile-gate:
-	@bash build/vc4_compile_gate.sh
-
-# A bare "#endif" (no trailing comment) is a regression the split ops
-# commits already made once - every #endif must say what it closes.
-.PHONY: bare-endif-gate
-bare-endif-gate:
-	@bash build/bare_endif_gate.sh
-
-# A "#ifndef X" whose X is already defined upstream (a header, or a
-# second #ifndef in the same file) is dead code that lies about the default.
-.PHONY: dead-ifndef-gate
-dead-ifndef-gate:
-	@bash build/dead_ifndef_gate.sh
-
-# A brace pair that opens under one #if and closes under another, or an
-# assignment cut in half by one. Every configuration compiles, so the
-# only symptom is text that stops meaning what its indentation says.
-.PHONY: ppbrace-gate
-ppbrace-gate:
-	@bash build/ppbrace_gate.sh
-
-# A `float` function reading an int32_t*/int64_t* accumulator (the
-# dequant-epilogue family's own shape) that never calls LZ_FCX/LZ_FC is
-# invisible to the f32 census - epi_q41's own history. Needs no build,
-# runs in milliseconds, so it sits with the other static gates.
-.PHONY: f32count-billing-gate
-f32count-billing-gate:
-	@bash build/f32count_billing_gate.sh
-
-# Needs a model and a built binary, so it sits with the other
-# inference-running gates rather than the source-shape ones.
-.PHONY: fp-exception-gate
-fp-exception-gate:
-	@bash build/fp_exception_gate.sh
-
-# Compiles and runs a probe, so it sits with the other build-and-run
-# gates rather than the source-shape ones. Skips where __bf16 is absent.
-.PHONY: bf16-native-gate
-bf16-native-gate:
-	@bash build/bf16_native_gate.sh
-
-# Every operator src/lz_softfp.c exports, against libgcc's own, under
-# qemu - plus an assertion that none escaped the comparison, which is
-# the half that matters. Skips without the ARM cross toolchain.
-.PHONY: softfp-gate
-softfp-gate:
-	@bash build/arm/softfp_gate.sh
-
-# --bf16-store on/off must give identical logits AND must have changed
-# SKIP (exit 2) MUST NOT ABORT `check`, and the five recipes below are
-# the ones that can legitimately reach it - four want a model dir and one
-# wants wcc386. make has no notion of a third outcome: an exit 2 stops
-# the whole run at whichever gate got there first, and everything after
-# it never runs. That is the same "a gate that did not run reads as a
-# gate that passed" failure these were just wired in to end, so the
-# recipes convert 2 to 0 and let 1 through unchanged. The gate still
-# PRINTS its SKIP line, which is the part that has to stay visible - a
-# silent pass is what would be wrong, not a reported skip.
-#
-# GATE_OK is one text for all five: five copies of a shell idiom is five
-# chances for one of them to swallow a FAIL, and this tree has that
-# failure mode on record for copied constants already.
-GATE_OK = rc=0; bash $(1) || rc=$$?; if [ "$$rc" = 2 ]; then rc=0; fi; exit $$rc
-
-# something. Needs a model dir with BF16 tensors, which `check` does not
-# have - so in `check` it reports SKIP, and does real work under
-# `make bf16-store-gate MODEL=...` or from ci.sh.
-.PHONY: bf16-store-gate
-bf16-store-gate:
-	@$(call GATE_OK,build/bf16_store_gate.sh "$(MODEL)")
-
-# Compressed model == uncompressed model, and the decompressor round
-# trips byte for byte. Needs a model dir with a model.bin; SKIPs without
-# one. Verified working: 45,816,469 bytes round-tripped and the
-# compressed and uncompressed logits identical over 917,504 bytes.
-.PHONY: lz4-model-gate
-lz4-model-gate:
-	@$(call GATE_OK,build/lz4_model_gate.sh "$(MODEL)")
-
-# A third opinion on lz_bf16.c, from PyTorch. Needs no model; SKIPs if
-# torch is absent, which is why it is behind GATE_OK too.
-.PHONY: bf16-torch-gate
-bf16-torch-gate:
-	@$(call GATE_OK,build/bf16_torch_gate.sh)
-
-# gcc and Watcom must compute the same logits. Needs both builds and a
-# model dir; SKIPs without them.
-.PHONY: gcc-watcom-output-gate
-gcc-watcom-output-gate:
-	@$(call GATE_OK,build/gcc_watcom_output_gate.sh "$(MODEL)")
-
-# A path naming a model is a claim about the disk, and it rots silently:
-# the gate that wanted it SKIPs, and a skip reads as "not applicable
-# here" rather than "this stopped happening". ci.sh's ARM_MODEL had
-# rotted, so the x86-vs-ARM bit-identity contract was going unchecked
-# with no failure reported.
-.PHONY: fixture-exists-gate
-fixture-exists-gate:
-	@$(call GATE_OK,build/fixture_exists_gate.sh)
-
-# The same question one layer down, and cheap enough for `check` because
-# it needs no model and no engine build - two source files and both
-# compilers. That is the whole point of it: the end-to-end gate saw this
-# class of defect and then declined to run, so the cheap direct check is
-# what keeps the expensive one from being the only asker. SKIPs where
-# there is no wcc386.
-.PHONY: mathf-xcompiler-gate
-mathf-xcompiler-gate:
-	@$(call GATE_OK,build/mathf_xcompiler_gate.sh)
-
-.PHONY: dedupe-gate
-dedupe-gate:
-	@bash build/dedupe_gate.sh
-
-.PHONY: mm-alias-gate
-mm-alias-gate:
-	@bash build/mm_alias_gate.sh
-
-# Symmetric ISA-floor gate, Watcom side - reads watcom-cli's objects, so
-# it must run after that target (it does: check lists it last).
-.PHONY: isa-floor-watcom-gate
-isa-floor-watcom-gate:
-	@bash build/isa_floor_watcom_gate.sh
-
-# Every operator carries a path on every tier, asserted rather than
-# assumed: each (format x tier) cell is either implemented or registered
-# with a reason, and the union across build classes covers everything
-# the registry claims. This
-# is the only check that can see a whole kernel path disappear - the
-# numeric gates cannot, because falling back to the scalar reference is
-# bit-identical.
-.PHONY: kernel-matrix-gate
-kernel-matrix-gate:
-	@bash build/kernel_matrix_gate.sh
-
-# Optional single-file DOS packaging (D9). SB.EXE is 16-bit and cannot run
-# on 64-bit Windows; the bind step must run inside DOSBox-X.
 .PHONY: watcom-dos-single
 watcom-dos-single: watcom-dos
 	@echo "Run inside DOSBox-X (mount this dir as C:):"
