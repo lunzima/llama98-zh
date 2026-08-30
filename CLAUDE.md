@@ -57,8 +57,24 @@ invisible to git. A new top-level entry gets added to that gate AND to the
 enumeration above, in that order, deliberately - a file needs a reason to join
 the list, not a reason to be kept out of the push.
 
-The local tree keeps all of them for development; the release commits and the
-push exclude them.
+**The branches carry that split, and `internal` is where work happens.**
+
+| branch | tracks | pushed |
+|---|---|---|
+| `internal` | everything - `build/`, `docs/`, `.prof/`, `gates.mk`, `CLAUDE.md` | never |
+| `main`, `release-0.1.x` | the public subset enumerated above | yes |
+
+Work on `internal`. A release is made by committing the public paths onto
+`release-0.1.x` explicitly (`git commit -- src common gui ...`), never by
+merging `internal` into it - a merge brings the internal tree with it, which is
+the whole failure this arrangement exists to prevent.
+
+The two branches carry DIFFERENT `.gitignore` files, and that is deliberate:
+`internal` re-includes each gate under `build/` by name, `main` excludes all of
+`build/` but `gen_exports.py`. Checking out `main` from `internal` therefore
+DELETES the gates from the working tree - they are tracked on one branch and
+absent on the other. Do not switch branches to inspect the public tree; use
+`git ls-tree main` or a separate worktree.
 
 The training side - corpus packing, tokenizer and charset construction,
 quantized export, the Python test suite - lives in a **separate repository**,
