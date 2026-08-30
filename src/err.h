@@ -88,10 +88,11 @@ typedef enum {
     LZ_ERR_CFG_LAYER_TYPE,     /* unrecognized layer type at %d: %s */
     LZ_ERR_CFG_FIELDS,         /* config key fields missing or invalid */
     LZ_ERR_CFG_HEADS,          /* invalid attention heads: %d / %d */
-    LZ_ERR_CFG_ROTARY,         /* invalid rotary_dim=%d (head_dim=%d, factor=%g) */
+    LZ_ERR_CFG_ROTARY,         /* invalid rotary_dim=%d (head_dim=%d, factor=%d%%) */
     LZ_ERR_CFG_ROPE_SCALING,   /* unsupported rope_scaling type: %s */
     LZ_ERR_CFG_KDA_ACT,        /* kda_gate_activation must be silu, got %s */
     LZ_ERR_CFG_MOE_FIELDS,     /* invalid MoE fields: num_experts=%d top_k=%d first_k_dense_replace=%d */
+    LZ_ERR_CFG_HADAMARD,       /* %s=%d is not a power of two dividing %s=%d */
 
     /* model tensors */
     LZ_ERR_TENSOR_MISSING,     /* missing tensor %s */
@@ -154,6 +155,7 @@ typedef enum {
     LZ_ERR_ST_NBYTES,         /* tensor %s byte count vs shape mismatch */
     LZ_ERR_ST_DATA_SIZE,      /* data section size does not match file */
     LZ_ERR_ST_READ,
+    LZ_ERR_ST_INDEX_SHARDS,   /* index.json names more than one shard */
     LZ_ERR_ST_NULL,
     LZ_ERR_OOM,              /* out of memory */
     LZ_ERR_ST_NULL2,
@@ -196,6 +198,13 @@ typedef enum {
        nothing they can act on. */
     LZ_ERR_CPU_NO_CPUID,       /* no CPUID instruction */
     LZ_ERR_CPU_NO_FPU,         /* no floating-point unit */
+
+    /* The build was compiled for the wrong byte order for the machine it
+       is running on - see lz_endian_ok in compat.h. Its own error rather
+       than a generic one because the fix is a build flag
+       (-DLZ_BIG_ENDIAN=0/1), not anything about the model file the user
+       was pointing at when it fired. */
+    LZ_ERR_ENDIAN_MISMATCH,    /* built for the wrong byte order */
 
     /* Generic failure. Two jobs, and it must stay LAST before
        LZ_ERR_COUNT for the second one:
@@ -244,7 +253,7 @@ int  lz_err_fmt_v(char *buf, int len, LZErr code, va_list ap);
  *
  * Three arities instead of one variadic macro: there is no portable way
  * to spell an EMPTY __VA_ARGS__, and `, ##__VA_ARGS__` is a GNU extension
- * Watcom does not have (iron law two - the Watcom build is not optional).
+ * Watcom does not have, and the Watcom build is not optional.
  */
 #define LZ_ERR_SET(rcvar, buf, len, code) \
     do { (rcvar) = (code); \

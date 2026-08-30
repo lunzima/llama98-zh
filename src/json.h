@@ -5,7 +5,7 @@
 
 /* Minimal JSON DOM parser.
    Why it exists: safetensors headers and Qwen3.5 config.json are both JSON,
-   and M4.5 requires zero Python at engine side, so we parse it in C (spec §13.2).
+   and M4.5 requires zero Python at engine side, so we parse it in C (spec 13.2).
 
    Design constraints:
    - Nodes link by index, not pointer: the nodes array reallocs;
@@ -28,7 +28,7 @@ typedef struct {
     int key_len;
     const char *text;        /* STR content (NUL-terminated) */
     int text_len;
-    double num;              /* NUM value; BOOL uses 0/1 */
+    float num;               /* NUM value; BOOL uses 0/1 */
     int first_child;         /* index of first child of ARR/OBJ, -1 if none */
     int next_sibling;
     int n_children;
@@ -60,8 +60,14 @@ const LZJsonNode *lz_json_next(const LZJson *j, const LZJsonNode *n);
    The caller must pass the default explicitly, so "got 0" and "not present" never conflate. */
 int    lz_json_get_int(const LZJson *j, const LZJsonNode *obj,
                        const char *key, int def);
-double lz_json_get_num(const LZJson *j, const LZJsonNode *obj,
-                       const char *key, double def);
+float lz_json_get_num(const LZJson *j, const LZJsonNode *obj,
+                       const char *key, float def);
+/* Accepts BOOL and NUM alike. Python writes config flags as `true`, so
+   reading one with lz_json_get_int silently yields the default - the
+   flag is off, the model loads, and only the tensors it gates go
+   missing. */
+int    lz_json_get_bool(const LZJson *j, const LZJsonNode *obj,
+                        const char *key, int def);
 /* return STR content if present, else def */
 const char *lz_json_get_str(const LZJson *j, const LZJsonNode *obj,
                             const char *key, const char *def);
@@ -77,8 +83,8 @@ int lz_json_str_eq(const LZJsonNode *n, const char *s);
 
    NO FLOAT OUTPUT, on purpose. Nothing in an OpenAI chat completion
    needs one (`created` is an integer and logprobs are unsupported), and
-   iron law six clause 3 forbids printf-ing floats anywhere the x87 sits
-   in its PC=24 region. Not offering the function is cheaper than
+   printf-ing a float is barred anywhere the x87 sits in its PC=24
+   region. Not offering the function is cheaper than
    remembering where calling it would be safe. */
 typedef struct {
     char *s;

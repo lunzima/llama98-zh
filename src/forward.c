@@ -1,34 +1,22 @@
 #include <math.h>
+#include "lz_mathf.h"   /* lz_powf/lz_sinf/lz_cosf: float transcendentals, no libm, bit-identical x86/ARM */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "forward.h"
-#include "compat.h"    /* lz_time_ms, for the debug probes below only */
+#include "forward.h"     /* includes compat.h for lz_time_ms (LZ_PROF* macros) */
+#include "lz_int.h"    /* lz_i64: the 64-bit type, portably */
 #include "err.h"
 #include "ops.h"
+#include "ops_quant.h"   /* q8_round/q8_amax/pow2f/LZ_Q8_*, lz_rsqrt_float_body */
+#include "fwht.h"        /* lz_fwht_i32, the SubLN Hadamard kernel */
 
-/* The reference implementation hardcodes l2norm's eps to 1e-6, which
-   is semantically different from config's rms_norm_eps - they only
-   coincide numerically. Keep them separate so a future config change
-   cannot silently drag this one along. */
-#define LZ_L2NORM_EPS 1e-6f
 
-/* Per-layer intermediate tap hook for differential testing. No-op by
-   default, zero cost in production; a dump tool defines it before
-   including this file to write intermediates to disk, bisecting which
-   layer/which quantity first diverges.
 
-   Two consumers, and they answer different questions:
-     a dump tool   vs transformers' Qwen3_5 - "is this RIGHT"
-     gcc vs Watcom builds                  - "do the two builds AGREE"
-   Deleting a tap silently shrinks the first one; a REQUIRED_TAGS list
-   makes that fail instead. */
-#ifndef LZ_TAP
-#define LZ_TAP(tag, li, ptr, n) ((void)0)
-#endif
-
-/* Debug-only investigative probe for the team-lead's dilution-vs-position
+/* Per-layer intermediate tap hook for differential testing. The hook (and
+   its LZ_TAP_OFF companion) now live in forward.h so the attn path's own TU
+   sees the same definition; see there for the two-consumer rationale. */
+/* Debug-only investigative probe for the dilution-vs-position
    question on the MTP prefill A/B/C study. Scales the MTP block's own
    attention-branch output before the residual add
    in lz_mtp_draft_step, on EVERY draft step. 1.0f (default) skips the
@@ -40,7 +28,7 @@
    investigation. */
 float lz_debug_mtp_attn_scale = 1.0f;
 
-/* Debug-only investigative probe, part 2 (team-lead's "decoupled"
+/* Debug-only investigative probe, part 2 (the "decoupled"
    experiment - same report as lz_debug_mtp_attn_scale above): when > 0
    and forward_attn's own `layer` argument is the MTP
    sentinel (LZ_MTP_CACHE_LAYER, negative), restrict the MTP's own
@@ -58,12 +46,11 @@ float lz_debug_mtp_attn_scale = 1.0f;
    regardless of this value. */
 int lz_debug_mtp_attn_window = 0;
 
-/* Debug-only investigative probe, part 3 (team-lead's iron-law-three
-   reminder: a wider MTP attention window is zero extra
+/* Debug-only investigative probe, part 3 (reminder: a wider MTP attention window is zero extra
    BYTES/weight loads, but NOT zero ALU - the score and weighted-sum
    loops both scale with however many rows get attended to, same
-   "count bytes but not compute" trap CLAUDE.md's own MTP section
-   already reversed on once). Running total of MTP-only score-loop rows
+   "count bytes but not compute" trap that has reversed a conclusion
+   here before). Running total of MTP-only score-loop rows
    actually scanned (summed as `pos - win_t0 + 1`, once per head, every
    time forward_attn runs with `layer < 0`); body layers never touch
    this. Read directly rather than estimated, so an alpha gain from a
@@ -72,12 +59,12 @@ int lz_debug_mtp_attn_window = 0;
    of skipping lz_mtp_prefill's own forward pass). Zero unless this
    specific investigation reads/resets it; body forward passes are
    provably unaffected since they never increment it. */
-long long lz_debug_mtp_attn_rows = 0;
+lz_i64 lz_debug_mtp_attn_rows = 0;
 
 /* Debug-only investigative probe, part 4. Microseconds spent inside
    each of a speculative round's three pieces.
 
-   WHY A TIMER AND NOT MORE ARITHMETIC: the round's cost was derived
+   Why a timer instead of more arithmetic: the round's cost was derived
    six different ways from byte counts and CLI deltas, and six
    hypotheses about where it goes were each refuted by the next
    measurement (the draft head, lz_matmul_w's "slow path", unquantized
@@ -85,20 +72,20 @@ long long lz_debug_mtp_attn_rows = 0;
    lm_head, the per-round checkpoint). What IS measured: on a Ryzen
    5800X with Qwen3.5-0.8B, a round costs 3.78x one plain forward, of
    which the draft step is 0.32x - exactly what its bytes predict - and
-   VERIFYING TWO TOKENS costs 2.46x, where the same accounting says
+   Verifying two tokens costs 2.46x, where the same accounting says
    ~1.5x. Prefill batches the same trunk at 0.54x per token, so the
    amortization exists and this path is not getting it. That gap is the
    only thing left worth chasing, and it will not be found by dividing
    more totals.
 
-   Integer microseconds, not float seconds: iron law six clause 3 bans
-   %f inside the PC=24 region, and these are read by cli_main.c which
-   may print them; a long long crosses that boundary safely. Zero cost
+   Integer microseconds, not float seconds: %f is barred inside the
+   PC=24 region, and these are read by cli_main.c which
+   may print them; an lz_i64 crosses that boundary safely. Zero cost
    when nothing reads them, and body-only forwards never touch the two
    MTP ones. */
-long long lz_debug_us_verify = 0;
-long long lz_debug_us_draft = 0;
-long long lz_debug_us_capture = 0;
+lz_i64 lz_debug_us_verify = 0;
+lz_i64 lz_debug_us_draft = 0;
+lz_i64 lz_debug_us_capture = 0;
 
 /* Call-count companion to lz_debug_us_capture, for the "capture skipped,
    not just cheap" gate: a removed-but-still-called
@@ -106,11 +93,27 @@ long long lz_debug_us_capture = 0;
    pure timing/output comparison if the removed call happened to be fast
    that run - this counter is what actually distinguishes them, same
    role lz_debug_mtp_attn_rows plays for the attention-window change. */
-long long lz_debug_n_capture = 0;
+lz_i64 lz_debug_n_capture = 0;
+
+/* Positive controls for four more int-pipeline switches. The v_proj /
+   q8_i16 / q8_int / swiglu / conv-sig set already has them and the
+   reason is stated at their print site: the int and float arms are
+   bit-comparable, so an output comparison can never separate "the exit
+   ran" from "the exit was refused". LZ_BVEC_I16, LZ_KLAT_I16,
+   LZ_MLAT_I16 and LZ_MLAT_REUSE were registered in
+   switch_matrix_gate and int_pipeline_arm_gate without one, so both
+   gates proved their arms BUILD and RUN and neither could prove either
+   arm did anything. mlat_quant is the pair for reuse specifically:
+   with it on that number is below mlat's own, and with it off they are
+   equal, which is what a compiled-out guard looks like from outside. */
+lz_i64 lz_debug_bvec_i16 = 0;
+lz_i64 lz_debug_klat_i16 = 0;
+lz_i64 lz_debug_mlat_i16 = 0;
+lz_i64 lz_debug_mlat_quant = 0;
 
 /* Timer + call-count pair for lz_mtp_catchup, same shape as the capture
-   pair above and same reason: team-lead's explicit
-   requirement is a POSITIVE control proving catch-up decode actually
+   pair above and same reason: the explicit requirement is a POSITIVE
+   control proving catch-up decode actually
    ran, not just a plausible-looking diff - "removed" and "still there
    but never called" are indistinguishable without a counter (the
    pos_only dead-code lesson, see lz_debug_mtp_attn_rows's own history).
@@ -118,8 +121,8 @@ long long lz_debug_n_capture = 0;
    both the FFN half and lm_head (lz_mtp_prefill's own comment), so it
    is cheaper per token than even a draft step, let alone a full
    forward. */
-long long lz_debug_us_catchup = 0;
-long long lz_debug_n_catchup = 0;
+lz_i64 lz_debug_us_catchup = 0;
+lz_i64 lz_debug_n_catchup = 0;
 
 /* --kv-rot on|off. Default OFF, and that default is a measurement, not a
    guess: with the current Q8_0 group-32 KV cache the rotation costs PPL
@@ -160,7 +163,7 @@ int lz_kv_rot_enable = 0;
    makes on-vs-off look identical for the wrong reason as easily as the
    right one, so the gate cannot be an output comparison alone - this
    counts head-rotations actually performed. */
-long long lz_debug_n_kv_rot = 0;
+lz_i64 lz_debug_n_kv_rot = 0;
 
 /* Positive control for --batch, same reason as the one above. Batching
    is defined to be bit-identical across widths, so an output comparison
@@ -169,13 +172,13 @@ long long lz_debug_n_kv_rot = 0;
    looked like from the CLI. Counts forward_chunk calls: prefilling n
    tokens at width T must take ceil(n/T) of them, which is a number the
    width cannot fake. */
-long long lz_debug_n_chunks = 0;
+lz_i64 lz_debug_n_chunks = 0;
 
 /* Positive control for skip_logits. Prefilling n tokens at width T must
    run lm_head ONCE, not ceil(n/T) times - and since the skipped chunks'
    logits were never read, output comparison cannot see the difference
    any more than it can see the batch width. */
-long long lz_debug_n_lmhead = 0;
+lz_i64 lz_debug_n_lmhead = 0;
 
 /* Positive control for the sink+window row skip. Counted in the SKIP
    branch, not in the scoring loop: on the default path (no window) the
@@ -184,7 +187,36 @@ long long lz_debug_n_lmhead = 0;
    count it was supposed to achieve. A counter derived from pos and
    attn_win would have been the fake kind - right by construction even
    if the loops still walked every row. */
-long long lz_debug_attn_skip = 0;
+lz_i64 lz_debug_attn_skip = 0;
+
+/* Positive control for the V projection's int16 exit (LZ_VPROJ_I16).
+   Counted at the CONSUMER - inside the branch that hands vtmp_i16 to
+   lz_quantize_q8_i16 - not where the projection wrote it: an exit that
+   was taken and then read from the wrong buffer would still increment a
+   producer-side counter, and the int16 path is bit-comparable to the
+   float one, so the logits cannot tell the two apart on their own.
+   Elements, not calls, so it is the number the conversion arithmetic
+   uses directly. */
+lz_i64 lz_debug_vproj_i16 = 0;
+
+/* Positive control for the decay gate's integer chain (LZ_KGATE_EXP_I),
+   same role and same reason as the counter above: the integer and float
+   chains compute the same function to within the fixed tier's own
+   drift, so no output comparison can tell "the chain ran" from "both
+   folds refused and it silently kept the float one". Elements, so the
+   number is the one the conversion arithmetic multiplies.
+
+   _exp_s and _sig_slo/_sig_shi are the two folds' exponents as actually
+   built from this checkpoint's constants - the derivation says they
+   should be 31 and 29..42, and a value outside that says the fold met a
+   constant the measurement never saw. _fold_no counts refusals: it must
+   be 0 whenever the chain was asked for, and a nonzero there is the one
+   failure mode that otherwise looks exactly like success. */
+lz_i64 lz_debug_kgate_exp_i = 0;
+lz_i64 lz_debug_kgate_fold_no = 0;
+int lz_debug_kgate_exp_s = -1;
+int lz_debug_kgate_sig_slo = 9999;
+int lz_debug_kgate_sig_shi = -9999;
 
 /* --kv f32: keep the KV cache unquantized. Reference arm only, see
    forward.h's kf32 comment for why it has to exist. */
@@ -250,7 +282,8 @@ int lz_kv_rot_v_dim = 0;
    be made deliberately, not a default: 1/4 span costs 2.6%% and 1/8
    costs 5.4%%.
 
-   WE DO NOT DO THE PAPER'S POSITION SHIFT, AND THAT IS LOAD-BEARING.
+   The paper's position shift is deliberately not done here, and that
+   choice is load-bearing.
    The reference caches PRE-RoPE keys and re-applies RoPE to the entire
    cache every step, renumbering positions by cache slot
    (pos_shift/modify_llama.py). Our cache holds POST-RoPE, QUANTIZED
@@ -298,29 +331,118 @@ float lz_moe_tau = 1.0f;
    excludes - so `--spec K` output stays bit-identical to `--spec 0`,
    which is a gate this engine already has and would otherwise break. */
 /* --profile: microseconds per phase of forward_chunk. Accumulators only;
-   cli_main prints them (iron law 1 forbids console output below it).
+   cli_main prints them; nothing below it writes to the console.
 
    Off by default because lz_time_ms() is a syscall-grade clock read and
    the inner phases here run 24 times per token - the measurement would
    otherwise cost more than some of the things it measures. */
 int lz_prof_enable = 0;
-double lz_prof_us[LZ_PROF_N];
+float lz_prof_us[LZ_PROF_N];
 
-/* The start time is a LOCAL, not a file-static. A file-static would be
-   shared across nested phases: the recurrence timer - which nests inside
-   the linear one - would overwrite the outer start, so `linear` would
-   report only the tail after the last inner call and the total would
-   come out 25%% short. Phases that nest are reported INCLUSIVE, with
-   the inner one also listed on its own. */
-#define LZ_PROF_BEG(v) double v = lz_prof_enable ? lz_time_ms() : 0.0
-#define LZ_PROF_END(v, slot) do { if (lz_prof_enable) \
-    lz_prof_us[slot] += (lz_time_ms() - (v)) * 1000.0; } while (0)
 
-static int kv_slot(const LZRunState *s, int t) {
-    if (!s->kv_ring) return t;
-    if (t < s->attn_sink) return t;
-    return s->attn_sink + ((t - s->attn_sink) % s->kv_ring);
-}
+
+/* kv_slot for t+1 given kv_slot for t, without the divide.
+ *
+ * The scoring and accumulation loops walk t contiguously, so the cache
+ * row they read walks with it and wraps at the end of the ring. Calling
+ * kv_slot per iteration spends an integer modulo by a runtime value on
+ * every one - around forty cycles on the in-order cores in the target
+ * family, and not pipelined. This spends a compare and an increment,
+ * and the compare is taken once per ring period, so it is as
+ * predictable as a branch gets.
+ *
+ * One rule for all four cases, checked against kv_slot's three branches:
+ *   ring == 0        slot == t, and sink + ring == sink, which slot + 1
+ *                    equals exactly once (at t + 1 == sink) - where the
+ *                    answer is sink either way
+ *   t + 1 <  sink    below the sink, slot == t, increments
+ *   t + 1 == sink    kv_slot gives sink + 0; slot was sink - 1
+ *   t + 1 >  sink    increments until slot + 1 reaches sink + ring,
+ *                    then restarts at sink
+ * Callers must seed with kv_slot(s, first_t) and advance in the loop's
+ * INCREMENT clause, not its body - the row advances on iterations the
+ * body skips with continue.
+ *
+ * Which path this is on, measured rather than assumed. The loops below
+ * are the FALLBACK. lz_attn_score_q8 and its wsum twin take attn_sink
+ * and kv_ring and do the row arithmetic themselves, and they are
+ * selected whenever LZ_ATTN_NORING holds - which is win_t0 == 0, which
+ * is everything except the MTP's own attention under an investigative
+ * override. Counting kv_slot's modulo over a 120-token generation with
+ * the ring on gives 363 both before and after this change, and 363 is
+ * one per token per attention layer: the KV WRITE. The scoring loops
+ * contributed nothing because they did not run.
+ *
+ * So this helps the arms that do run them - the float reference, and
+ * any head_dim the fixed kernel declines - and is inert on the shipping
+ * path. That is worth having and is not worth describing as a speedup. */
+/* One row of the Q8 weighted sum: dst += a * dequantised(vt).
+ *
+ * The two accumulation arms in forward_attn - the high plane into out,
+ * and the low plane into wsum_lo - had this loop written out
+ * identically. They differ in base pointer, destination and start
+ * position, not in the arithmetic.
+ *
+ * FIVE PARAMETERS, and that is the point. The whole loop does not get
+ * extracted the same way: it would need base, scale, kvd, kvh, hd,
+ * scale factor, att, win_t0, pos and slot - ten or more, on a target
+ * with eight registers, where every parameter is a stack slot and every
+ * use is a load. lz_generate_resume_ex is 58% data movement for exactly
+ * that reason. This takes the piece whose parameter count stays small
+ * and whose cost amortises over hd elements. */
+
+
+/* One row of the Q8 score: q . dequantised(kt), grouped by 32.
+ *
+ * The scoring twin of wsum_q8_row, and the same four-parameter reason.
+ * The high and low planes ran this letter for letter; the accumulation
+ * ORDER is what has to survive, since a float sum reassociated is a
+ * different number, and that is why the group loop comes along rather
+ * than being left at the call sites. */
+
+
+
+
+
+
+/* Stored scale groups for a row of N elements at group width GS. A GS of
+   0 is "one scale for the whole row", which stores none - callers that
+   pass a width straight from lz_act_gs rely on that, since it returns 0
+   for a width this path cannot honour. Written once because ten sites
+   had it inline and a reader had to check each one for the guard. */
+
+
+/* The slot after SLOT in a ring of DEPTH. SLOT is already reduced, so
+   the successor is a compare; recomputing (base + tk + 1) % depth spends
+   a second runtime modulo to reach the same answer. Distinct from
+   kv_slot_next, which walks the KV ring and its attention sink. */
+
+
+
+
+/* One Q8 KV plane's weighted sum: dst = sum_t att[t] * dequant(v[t]).
+ *
+ * WRITTEN ONCE BECAUSE IT WAS WRITTEN TWICE. forward_attn had this body
+ * for the high plane and again, under LZ_KV_2PLANE, for the low one -
+ * the fixed fast path and the scalar walk both duplicated, differing
+ * only in which buffer they write and which plane they read. The second
+ * copy is compiled out of every shipping build, so it was a body nobody
+ * built and nobody ran, kept in step with this one by hand. Now the
+ * plane is an argument and the two callers reach the same code.
+ *
+ * noring IS SEPARATE FROM walk_t0 and the low plane is why. The fixed
+ * kernel cannot express win_t0 - it walks from 0 - so the caller guards
+ * it with LZ_ATTN_NORING. The low plane's scalar walk, though, starts at
+ * a literal 0 rather than at win_t0, so its guard and its start were
+ * already two different values in the original. Preserved rather than
+ * unified: they may well be the same thing, but the path that would
+ * prove it is not in any build that runs here.
+ *
+ * dead0/dead1 are parameters for the same reason the skip is spelled out
+ * instead of using LZ_ATTN_SKIP_DEAD - that macro reads them from the
+ * caller's scope and is #undef'd at the end of forward_attn, so it does
+ * not exist out here. Same behaviour, including the debug counter. */
+
 
 /* --kv q4: 4-bit KV rows, one scale per row per head. Mutually exclusive
    with the f32 arm; cli_main enforces that, and lz_state_alloc makes f32
@@ -340,30 +462,164 @@ static int kv_slot(const LZRunState *s, int t) {
 
    q4r2 buys 0.1 MB for a significant quality loss (paired t = 3.5
    against q8): DOMINATED on both axes, not a trade-off with a regime
-   where it wins. Iron law nine keeps contested knobs because the target
-   MACHINE family flips them; a KV format's quality-per-byte is a
+   where it wins. A contested choice stays a knob because the target
+   MACHINE family flips it; a KV format's quality-per-byte is a
    property of the MODEL and does not flip between a Pentium II and a
    K6-2, so that rule does not reach this case. A dominated option is
    not a knob, it is a trap for whoever reads the list next. */
 
 /* Block-diagonal Hadamard over one head: hd/n independent n-wide
    transforms. n divides hd by construction (lz_state_alloc picks it). */
-static void rot_head(float *v, int hd, int n) {
-    int o;
-    for (o = 0; o < hd; o += n) lz_fwht(v + o, n);
-    lz_debug_n_kv_rot++;
-}
+
 
 /* ------------------------------------------------------------ state allocation */
 
-static void *xcalloc(size_t n, size_t sz, int *ok, long long *acc) {
-    void *p;
+/* 16-byte aligned calloc, so the SSE kernels that read these buffers can
+   use movaps/movdqa (aligned) instead of movups/movdqu. Over-allocates
+   by one pointer plus the pad and stores the ORIGINAL pointer just before
+   the aligned one; xfree hands that back to free(). The SSE1/SSE2 loads
+   in the operators that read these buffers then become aligned loads -
+   the "unaligned loads throughout" note in ops_mmx_sse.c is what this
+   removes. Not every engine buffer goes through here (the tensor slices
+   from model.c do not), so not every _mm_loadu_* is convertible; only the
+   ones whose pointer descends from xcalloc and whose offset is a multiple
+   of 4 floats are. */
+static void *xcalloc(size_t n, size_t sz, int *ok, lz_i64*acc) {
+    char *base, *aligned;
     if (n == 0) return NULL;
-    p = calloc(n, sz);
-    if (!p) { *ok = 0; return NULL; }
-    *acc += (long long)n * (long long)sz;
-    return p;
+    base = (char *)calloc(n * sz + 16 + sizeof(void *), 1);
+    if (!base) { *ok = 0; return NULL; }
+    aligned = base + sizeof(void *);
+    aligned += (size_t)(16 - ((size_t)aligned & 15)) & 15;
+    ((void **)(void *)aligned)[-1] = base;
+    *acc += (lz_i64)n * (lz_i64)sz;
+    return aligned;
 }
+
+static void xfree(void *p) {
+    if (p) free(((void **)p)[-1]);
+}
+
+
+
+
+
+#if LZ_CONV_FIXED
+/* Quantize the conv taps once, laying them out per channel in the same
+   order forward_kda/forward_ssm index the history.
+ *
+ * The offsets are duplicated from those two functions, which is a drift
+ * surface, so the loop asserts that the channels it covered add up to
+ * lin_conv_dim. A layout change then fails here instead of quantizing
+ * the wrong tensor into the right slot. */
+static int conv_fixed_build(LZRunState *s, const LZModel *m) {
+    const LZModelConfig *c = &m->config;
+    int layer, t, covered_ok = 1, built = 0;
+    for (layer = 0; layer < c->n_layers; layer++) {
+        const LZLayer *L;
+        int li;
+        size_t base;
+        if (c->layer_types[layer] == LZ_LT_FULL) continue;
+        L = &m->layers[layer];
+        li = s->cache_idx[layer];
+        base = (size_t)li * c->lin_conv_dim;
+        built++;
+        {
+        size_t ch = 0;
+        const LZTensor *tv[3];
+        int cnt[3], ntv;
+        if (L->kda_q_conv1d.q || L->kda_q_conv1d.f) {
+            tv[0] = &L->kda_q_conv1d; cnt[0] = c->lin_key_dim;
+            tv[1] = &L->kda_k_conv1d; cnt[1] = c->lin_key_dim;
+            tv[2] = &L->kda_v_conv1d; cnt[2] = c->lin_value_dim;
+            ntv = 3;
+        } else {
+            tv[0] = &L->conv1d; cnt[0] = c->lin_conv_dim; ntv = 1;
+        }
+        for (t = 0; t < ntv; t++) {
+            const float *w = lz_t_f32(tv[t], s->wscr);
+            int i;
+            if (!w) return -1;
+            for (i = 0; i < cnt[t]; i++) {
+                signed char e = (signed char)lz_conv_norm_pow2(
+                    w + (size_t)i * c->conv_kernel, c->conv_kernel,
+                    s->conv_mw + (base + ch + i) * c->conv_kernel,
+                    s->conv_bound);
+                float oscale = pow2f(-((int)e + LZ_CONV_ES));
+                lz_sig_q15_fold(oscale, &s->conv_sig_k1[base + ch + i],
+                                &s->conv_sig_oscale2[base + ch + i]);
+#if LZ_CONV_SIG_I
+                /* The same exponent, undivided. Measured 22..39 on both
+                   checkpoints, so it fits signed char with room; a model
+                   whose taps put it outside sigmoid_q15_i's 0..50 is not
+                   refused here - that entry rebuilds a float for such a
+                   channel and only the saving is lost. */
+                s->conv_sig_e[base + ch + i] = (signed char)((int)e + LZ_CONV_ES);
+#endif /* LZ_CONV_SIG_I */
+            }
+            ch += (size_t)cnt[t];
+        }
+        if (ch != (size_t)c->lin_conv_dim) covered_ok = 0;
+        }
+    }
+    /* Two coverage checks, not one: `covered_ok` catches a layer whose
+       tensors do not add up to lin_conv_dim, `built` catches the case
+       where the loop matched no layer at all - which would leave every
+       tap zero and report success. */
+    if (!covered_ok || built != c->n_linear_layers) return -1;
+    s->conv_in_scale = pow2f(LZ_CONV_ES);
+    return 0;
+}
+#endif /* LZ_CONV_FIXED */
+
+#if LZ_KGATE_I16
+/* dt_bias in kda_gate's own integer domain, laid out per linear layer.
+ *
+ * This is what makes the decay gate's `gt[i] + dt_bias[i]` an INTEGER
+ * add once kda_gate arrives as int16: with both terms at 2^-LZ_KGATE_ES
+ * the sum is one too, and the only float work left per channel is the
+ * one multiply and one add that reach sigmoid_q15_t's coordinate. Built
+ * once here rather than per token for the same reason conv_mw is - it
+ * is a function of the weights alone.
+ *
+ * REFUSES rather than clamps. A channel whose |dt_bias| * 2^ES does not
+ * fit int16 gets the whole table rejected and every KDA layer keeps its
+ * float exit; clamping instead would move the decay gate on a checkpoint
+ * nobody measured, silently, which is exactly what LZ_CONV_ES's comment
+ * warns about one tier over. MEASURED on kmr20: max |dt_bias| 13.062,
+ * i.e. 6,688 of 32,767 at ES = 9, 4.9x of headroom.
+ *
+ * Returns 1 on success. A GDN linear layer has no kda_dt_bias at all, so
+ * a model mixing the two refuses here as well - it has no kda_gate to
+ * feed either. */
+static int kda_gate_build(LZRunState *s, const LZModel *m) {
+    const LZModelConfig *c = &m->config;
+    int layer, built = 0;
+    int nvk = c->lin_n_v_heads * c->lin_k_head_dim;
+    float sc = pow2f(LZ_KGATE_ES);
+    if (!s->kda_dtb_i16 || nvk <= 0) return 0;
+    for (layer = 0; layer < c->n_layers; layer++) {
+        const LZLayer *L = &m->layers[layer];
+        const float *db;
+        int li, i;
+        if (c->layer_types[layer] == LZ_LT_FULL) continue;
+        if (L->kda_dt_bias.n == 0) return 0;
+        li = s->cache_idx[layer];
+        db = lz_t_f32(&L->kda_dt_bias, s->wscr);
+        if (!db) return 0;
+        for (i = 0; i < nvk; i++) {
+            /* Half-away-from-zero, the convention epi_align_i16 rounds
+               the other addend with - one domain, one rounding rule. */
+            float v = db[i] * sc;
+            long q = (long)(v >= 0.0f ? v + 0.5f : v - 0.5f);
+            if (q > 32767 || q < -32767) return 0;
+            s->kda_dtb_i16[(size_t)li * nvk + i] = (short)q;
+        }
+        built++;
+    }
+    return built == c->n_linear_layers;
+}
+#endif /* LZ_KGATE_I16 */
 
 int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
                        int spec_k_max, char *errbuf, int errlen) {
@@ -414,10 +670,20 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
     s->qh       = (float *)xcalloc((size_t)nt * c->attn_q_dim, sizeof(float), &ok, &s->bytes_alloc);
     s->att      = (float *)xcalloc((size_t)seq_len, sizeof(float), &ok, &s->bytes_alloc);
 #if (LZ_ATTN_FIXED & 2)
+    /* Allocated whenever the kernel is compiled, not when the tier is
+       selected: lz_float_ref_select can run after this point, and 6 bytes per
+       context slot (196 KB at ctx 32768, counted in bytes_alloc) is a
+       cheaper bargain than a buffer that appears only on some paths. */
     s->wsum_cbuf = (float *)xcalloc((size_t)seq_len, sizeof(float), &ok, &s->bytes_alloc);
     s->wsum_cq   = (int16_t *)xcalloc((size_t)seq_len, sizeof(int16_t), &ok, &s->bytes_alloc);
-#endif
+#endif /* LZ_ATTN_FIXED & 2 */
     s->attn_out = (float *)xcalloc((size_t)nt * c->attn_q_dim, sizeof(float), &ok, &s->bytes_alloc);
+    /* Fixed-tier attention int path (--attn-int): attn_acc holds the exact
+       int64 weighted sum and post-gate values, attn_ss the per-32-group
+       dequant scale. Sized even when the knob is off, same reasoning as
+       wsum_cbuf/wsum_cq: the selector can run after this point. */
+    s->attn_acc = (int64_t *)xcalloc((size_t)nt * c->attn_q_dim, sizeof(int64_t), &ok, &s->bytes_alloc);
+    s->attn_ss  = (float *)xcalloc((size_t)nt * (c->attn_q_dim >> 5), sizeof(float), &ok, &s->bytes_alloc);
     s->ktmp     = (float *)xcalloc((size_t)nt * c->attn_kv_dim, sizeof(float), &ok, &s->bytes_alloc);
     s->vtmp     = (float *)xcalloc((size_t)nt * c->attn_kv_dim, sizeof(float), &ok, &s->bytes_alloc);
     /* KV cache Q8 (group 32, contiguous within a row). +1 layer slot when
@@ -452,7 +718,7 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
            stop there. AUTO stays conservative there by construction
            (window grows with ctx), not by evidence. */
         if (lz_attn_window < 0) {
-            int w = seq_len / 2;
+            int w = seq_len >> 1;
             if (w < LZ_ATTN_WIN_FLOOR) w = LZ_ATTN_WIN_FLOOR;
             /* A window that cannot be reached is not a window. Leaving
                it at 0 keeps the whole eviction path - and the ring, and
@@ -500,7 +766,7 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
                                           &ok, &s->bytes_alloc);
 #if LZ_KV_2PLANE
                 s->kq8_lo = (int8_t *)xcalloc(nrow, 1, &ok, &s->bytes_alloc);
-#endif
+#endif /* LZ_KV_2PLANE */
             } else if (s->kfmt == LZ_KVF_F32) {
                 s->kf32 = (float *)xcalloc(nrow, sizeof(float),
                                            &ok, &s->bytes_alloc);
@@ -516,7 +782,7 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
                                           &ok, &s->bytes_alloc);
 #if LZ_KV_2PLANE
                 s->vq8_lo = (int8_t *)xcalloc(nrow, 1, &ok, &s->bytes_alloc);
-#endif
+#endif /* LZ_KV_2PLANE */
             } else if (s->vfmt == LZ_KVF_F32) {
                 s->vf32 = (float *)xcalloc(nrow, sizeof(float),
                                            &ok, &s->bytes_alloc);
@@ -531,7 +797,7 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
 #if LZ_KV_2PLANE
     s->att_lo  = (float *)xcalloc((size_t)seq_len, sizeof(float), &ok, &s->bytes_alloc);
     s->wsum_lo = (float *)xcalloc((size_t)c->head_dim, sizeof(float), &ok, &s->bytes_alloc);
-#endif
+#endif /* LZ_KV_2PLANE */
 
     s->qkv    = (float *)xcalloc((size_t)nt * c->lin_conv_dim, sizeof(float), &ok, &s->bytes_alloc);
     s->qkv_c  = (float *)xcalloc((size_t)nt * c->lin_conv_dim, sizeof(float), &ok, &s->bytes_alloc);
@@ -539,6 +805,7 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
     s->avec   = (float *)xcalloc((size_t)nt * c->lin_n_v_heads, sizeof(float), &ok, &s->bytes_alloc);
     s->bvec   = (float *)xcalloc((size_t)nt * c->lin_n_v_heads, sizeof(float), &ok, &s->bytes_alloc);
     s->ssm_out= (float *)xcalloc((size_t)nt * c->lin_value_dim, sizeof(float), &ok, &s->bytes_alloc);
+    s->ssm_sig = (int32_t *)xcalloc((size_t)nt * c->lin_value_dim, sizeof(int32_t), &ok, &s->bytes_alloc);
     /* nt-wide, not one head-dim wide - allocated to match the other
        batched buffers; the serial recurrence only ever touches row 0.
        `nt` here is LZ_BATCH_MAX (line 407), the cap, not the current
@@ -618,7 +885,7 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
                                            sizeof(float), &ok, &s->bytes_alloc);
     }
 
-    /* SSM/conv state: one (kd×vd) block per (layer, head), grouped
+    /* SSM/conv state: one (kd*vd) block per (layer, head), grouped
        within rows, times ssm_ring_depth slots - see forward.h's own
        comment on s->ssm_slot/s->ssm_ring_depth for the ring's shape
        and the "zero extra bandwidth, only memory" argument it depends
@@ -645,7 +912,7 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
     s->ssm_state_q8_lo = (int8_t *)xcalloc(
         (size_t)s->ssm_ring_depth * c->n_linear_layers * c->lin_n_v_heads *
         c->lin_k_head_dim * c->lin_v_head_dim, 1, &ok, &s->bytes_alloc);
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
     s->ssm_state_s = (float *)xcalloc(
         (size_t)s->ssm_ring_depth * c->n_linear_layers * c->lin_n_v_heads *
         c->lin_k_head_dim * c->lin_v_head_dim / 32,
@@ -653,6 +920,66 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
     s->conv_state = (float *)xcalloc(
         (size_t)s->ssm_ring_depth * c->n_linear_layers * c->lin_conv_dim *
         (c->conv_kernel - 1), sizeof(float), &ok, &s->bytes_alloc);
+
+    /* Fixed conv tier. Decided ONCE, here, and recorded in s->conv_fixed
+       rather than re-read per token: lz_conv_mode() can be moved by a
+       flag, and a state whose buffers were not allocated must not start
+       taking the fixed branch halfway through a run.
+     *
+     * The history exponent was the one parameter that kept this tier
+     * unwired for a while, and the answer it eventually got is
+     * LZ_CONV_ES: a CONSTANT power of two, measured once from the real
+     * conv input distribution rather than derived per token, because the
+     * history starts at zero and has nothing to derive one from. The
+     * recurrence's answer (a scale that TRAVELS WITH THE STATE,
+     * ssm_state_s / p2_group_scale) would cost a renormalization pass
+     * over the history every time the range moved, which is the cost
+     * this tier exists to avoid. See LZ_CONV_ES for the distribution it
+     * was measured against and for the fact that a value past 32 clips
+     * SILENTLY - re-run that probe on any model whose conv inputs might
+     * be scaled differently. */
+    s->conv_fixed = lz_conv_mode();
+    if (s->conv_fixed) {
+        size_t nch = (size_t)c->n_linear_layers * c->lin_conv_dim;
+        s->conv_bound = lz_conv_accum_bound(c->conv_kernel);
+        s->conv_state_q = (short *)xcalloc(
+            (size_t)s->ssm_ring_depth * nch * (c->conv_kernel - 1),
+            sizeof(short), &ok, &s->bytes_alloc);
+        s->conv_mw = (short *)xcalloc(nch * c->conv_kernel,
+                                      sizeof(short), &ok, &s->bytes_alloc);
+        /* Sized like kda_q/kda_k/kda_v above, in int16. Zero-sized (and
+           so NULL) on a model with no KDA layers, which forward_kda's
+           own predicate then reads as "no int path". */
+        s->kda_q_i16 = (short *)xcalloc((size_t)nt * c->lin_key_dim,
+                                        sizeof(short), &ok, &s->bytes_alloc);
+        s->kda_k_i16 = (short *)xcalloc((size_t)nt * c->lin_key_dim,
+                                        sizeof(short), &ok, &s->bytes_alloc);
+        s->kda_v_i16 = (short *)xcalloc((size_t)nt * c->lin_value_dim,
+                                        sizeof(short), &ok, &s->bytes_alloc);
+#if LZ_CONVO_I16
+        /* The conv's own int16 exit - see forward.h. */
+        s->kda_qc_i16 = (short *)xcalloc((size_t)nt * c->lin_key_dim,
+                                         sizeof(short), &ok, &s->bytes_alloc);
+        s->kda_kc_i16 = (short *)xcalloc((size_t)nt * c->lin_key_dim,
+                                         sizeof(short), &ok, &s->bytes_alloc);
+        s->kda_vc_i16 = (short *)xcalloc((size_t)nt * c->lin_value_dim,
+                                         sizeof(short), &ok, &s->bytes_alloc);
+#endif /* LZ_CONVO_I16 */
+        s->conv_sig_k1 = (float *)xcalloc(nch, sizeof(float), &ok,
+                                          &s->bytes_alloc);
+        s->conv_sig_oscale2 = (float *)xcalloc(nch, sizeof(float), &ok,
+                                               &s->bytes_alloc);
+#if LZ_CONV_SIG_I
+        s->conv_sig_e = (signed char *)xcalloc(nch, sizeof(signed char), &ok,
+                                               &s->bytes_alloc);
+#endif /* LZ_CONV_SIG_I */
+        s->conv_sig_k2 = lz_sig_q15_t_offset();
+        if (!ok) s->conv_fixed = 0;
+        /* conv_fixed_build runs LATER, after cache_idx is filled - it
+           needs the layer -> linear-index map and that is populated
+           further down. Building here would read an all-zero map and
+           quantize every layer's taps into slot 0. */
+    }
     /* s->ssm_slot starts at 0 from this function's own memset(s,0,...)
        above - explicit here only as documentation, matching mtp_pos's
        own "reset to 0" comment; lz_state_reset (below) is the one that
@@ -692,40 +1019,136 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
         s->xq = (int8_t *)xcalloc((size_t)nt * qcap, 1, &ok, &s->bytes_alloc);
         /* xqs sized for the worst case (in-row gs falling back to 1) */
         s->xqs = (float *)xcalloc((size_t)nt * qcap, sizeof(float), &ok, &s->bytes_alloc);
-        s->wscr = (float *)xcalloc((size_t)qcap, sizeof(float), &ok, &s->bytes_alloc);
+        /* AT LEAST LZ_MM_WIDEN_MAX, so the loader's bf16 rule is sound
+           by construction rather than by inspection. model.c accepts a
+           1-D tensor as bf16 when it is no longer than that constant,
+           and lz_t_f32 widens such a tensor WHOLE into this buffer -
+           two bounds that have to agree, and did only because every
+           1-D tensor in the checkpoints to hand happens to be a norm
+           or a per-head bias and so is already counted in qcap above.
+           A model with a wider one would have overrun this. The cost
+           is at most 16 KB. */
+        {   int wcap = qcap;
+            if (wcap < LZ_MM_WIDEN_MAX) wcap = LZ_MM_WIDEN_MAX;
+            s->wscr = (float *)xcalloc((size_t)wcap, sizeof(float), &ok,
+                                       &s->bytes_alloc); }
+        /* SubLN Hadamard scratch: two n-wide int32 halves, n <= qcap. */
+        s->fwht_scratch = (int32_t *)xcalloc((size_t)2 * qcap, sizeof(int32_t),
+                                             &ok, &s->bytes_alloc);
+        /* SubLN plain-norm int output scratch: one n-wide int32 row,
+           n <= qcap - see forward.h's field comment. */
+        s->subn_norm_int = (int32_t *)xcalloc((size_t)qcap, sizeof(int32_t),
+                                              &ok, &s->bytes_alloc);
+        /* ---- q16_0's int16 exits (int-pipeline milestone 5) ----------
+           One buffer per chain, each the int16 twin of the float one it
+           replaces for a token - exactly one of the two is written per
+           call, the shape milestone 3's kda_q_i16 established. All are
+           zero-sized (so NULL) on a model without the producing tensor,
+           and every predicate below reads NULL as "no int path". */
+#if LZ_BVEC_I16
+        s->bvec_i16 = (short *)xcalloc((size_t)nt * c->lin_n_v_heads,
+                                       sizeof(short), &ok, &s->bytes_alloc);
+#endif /* LZ_BVEC_I16 */
+#if LZ_MOEGATE_I16
+        s->moe_logits_i16 = (short *)xcalloc((size_t)nt * c->num_experts,
+                                             sizeof(short), &ok, &s->bytes_alloc);
+#endif /* LZ_MOEGATE_I16 */
+#if LZ_KLAT_I16
+        s->kda_lat_i16 = (short *)xcalloc((size_t)nt * c->kda_gate_rank,
+                                          sizeof(short), &ok, &s->bytes_alloc);
+        /* The widening scratch lz_quantize_q8_int's int32 input needs -
+           one token's worth, since f_b_proj is a per-token matmul. An
+           int-to-int copy, so it bills nothing and adds no rounding. */
+        s->kda_lat_i32 = (int32_t *)xcalloc((size_t)c->kda_gate_rank,
+                                            sizeof(int32_t), &ok, &s->bytes_alloc);
+#endif /* LZ_KLAT_I16 */
+#if LZ_MLAT_I16
+        s->moe_lat_i16 = (short *)xcalloc((size_t)nt * c->moe_latent_dim,
+                                          sizeof(short), &ok, &s->bytes_alloc);
+#endif /* LZ_MLAT_I16 */
+#if LZ_VPROJ_I16
+        /* Sized like s->vtmp, in int16. Zero-sized (and so NULL) on a
+           model with no full-attention layers, which forward_attn's
+           predicate reads as "no int path". */
+        s->vtmp_i16 = (short *)xcalloc((size_t)nt * c->attn_kv_dim,
+                                       sizeof(short), &ok, &s->bytes_alloc);
+#endif /* LZ_VPROJ_I16 */
+#if LZ_SWIGLU_I16
+        /* Sized like moe_h1/moe_h3 - the wider of the routed experts'
+           intermediate and the shared expert's width, since both sites
+           write these. Zero-sized (and so NULL) on a dense model, which
+           forward_moe's predicate reads as "no int path". */
+        {
+            int sw = c->moe_intermediate_size;
+            if (c->moe_shared_width > sw) sw = c->moe_shared_width;
+            s->moe_h1_i16 = (short *)xcalloc((size_t)nt * sw, sizeof(short),
+                                             &ok, &s->bytes_alloc);
+            s->moe_h3_i16 = (short *)xcalloc((size_t)nt * sw, sizeof(short),
+                                             &ok, &s->bytes_alloc);
+        }
+#endif /* LZ_SWIGLU_I16 */
+        /* Under neither LZ_MLAT_I16 nor LZ_MLAT_REUSE: the expert loop's
+           hoisted activation quantize writes here on the float path, the
+           int path, and the reuse control arm alike - what the switches
+           select is whether the quantize is skipped, not where it lands.
+           One token wide (the loop is per token) and the scale array is
+           sized for the worst case, an in-row gs of 1, the same way
+           s->xqs is. */
+        s->moe_lat_q = (int8_t *)xcalloc((size_t)c->moe_latent_dim, 1,
+                                         &ok, &s->bytes_alloc);
+        s->moe_lat_qs = (float *)xcalloc((size_t)c->moe_latent_dim,
+                                         sizeof(float), &ok, &s->bytes_alloc);
+#if LZ_KGATE_I16
+        s->kda_gate_i16 = (short *)xcalloc((size_t)nt * nvk, sizeof(short),
+                                           &ok, &s->bytes_alloc);
+        s->kda_dtb_i16 = (short *)xcalloc(
+            (size_t)c->n_linear_layers * nvk, sizeof(short), &ok,
+            &s->bytes_alloc);
+#endif /* LZ_KGATE_I16 */
     }
     if (!ok) {
         if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_STATE_ALLOC);
         lz_state_free(s);
         return 1;
     }
-    /* RoPE precomputed table: pos × (rotary_dim/2) {cos, sin} pairs.
+    /* RoPE precomputed table: pos * (rotary_dim/2) {cos, sin} pairs.
        Shared by all layers/heads under the same theta; the half-precision
        frequency formula matches the reference (denominator is
        rotary_dim, not head_dim). */
-    s->rope_cs = (float *)xcalloc((size_t)seq_len * c->rotary_dim,
-                                  sizeof(float), &ok, &s->bytes_alloc);
-    if (ok) {
-        int half = c->rotary_dim / 2;
-        for (l = 0; l < seq_len; l++) {
-            int i;
-            for (i = 0; i < half; i++) {
-                double freq = pow((double)c->rope_theta,
-                                  -2.0 * (double)i / (double)c->rotary_dim);
-                double ang = (double)l * freq;
-                s->rope_cs[((size_t)l * half + i) * 2]     = (float)cos(ang);
-                s->rope_cs[((size_t)l * half + i) * 2 + 1] = (float)sin(ang);
+    /* RoPE/scale tables must be computed at PC=24 on the x87 targets too
+       (Watcom): lz_mathf's float transcendentals are bit-identical across
+       gcc and ARM only when every float operation rounds to 24 bits, and
+       on a 387 that means the precision control word, not the default
+       64-bit mantissa. gcc's SSE and the ARM soft-float ignore the
+       control word (always 24-bit float), so begin/end is a no-op there. */
+    {
+        unsigned fpu = lz_fpu_float_begin();
+        s->rope_cs = (float *)xcalloc((size_t)seq_len * c->rotary_dim,
+                                      sizeof(float), &ok, &s->bytes_alloc);
+        if (ok) {
+            int half = c->rotary_dim >> 1;
+            for (l = 0; l < seq_len; l++) {
+                int i;
+                for (i = 0; i < half; i++) {
+                    float freq = lz_powf(c->rope_theta,
+                                         -2.0f * (float)i / (float)c->rotary_dim);
+                    float ang = (float)l * freq;
+                    s->rope_cs[((size_t)l * half + i) * 2]     = lz_cosf(ang);
+                    s->rope_cs[((size_t)l * half + i) * 2 + 1] = lz_sinf(ang);
+                }
             }
         }
-    }
-    if (!ok) {
-        if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_STATE_ALLOC);
-        lz_state_free(s);
-        return 1;
-    }
+        if (!ok) {
+            lz_fpu_float_end(fpu);
+            if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_STATE_ALLOC);
+            lz_state_free(s);
+            return 1;
+        }
 
-    s->attn_scale = 1.0f / (float)sqrt((double)c->head_dim);
-    s->ssm_scale  = 1.0f / (float)sqrt((double)c->lin_k_head_dim);
+        s->attn_scale = lz_rsqrt((float)c->head_dim);
+        s->ssm_scale  = lz_rsqrt((float)c->lin_k_head_dim);
+        lz_fpu_float_end(fpu);
+    }
     s->epoch      = 1;          /* 0 is reserved for "never allocated" */
 
     /* Hadamard widths (see forward.h's kv_rot_k comment). K takes the
@@ -746,45 +1169,72 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
     for (l = 0; l < c->n_layers; l++)
         s->cache_idx[l] = (c->layer_types[l] == LZ_LT_FULL) ? nf++ : nl++;
 
+#if LZ_CONV_FIXED
+    /* After cache_idx, which conv_fixed_build reads. */
+    if (s->conv_fixed && conv_fixed_build(s, m) != 0) s->conv_fixed = 0;
+#endif /* LZ_CONV_FIXED */
+#if LZ_KGATE_I16
+    /* Same ordering reason as conv_fixed_build's: the table is indexed
+       by linear-layer number. A refusal drops the buffer, and
+       forward_kda's predicate reads that NULL as "no int path" - one
+       place decides, one place asks. */
+    if (!kda_gate_build(s, m)) {
+        xfree(s->kda_dtb_i16);  s->kda_dtb_i16 = NULL;
+        xfree(s->kda_gate_i16); s->kda_gate_i16 = NULL;
+    }
+#endif /* LZ_KGATE_I16 */
+
     return 0;
 }
 
 void lz_state_free(LZRunState *s) {
     if (!s) return;
-    free(s->x); free(s->xb); free(s->xb2); free(s->hb); free(s->hb2);
-    free(s->logits);
-    free(s->qg); free(s->qh); free(s->att); free(s->attn_out);
+    xfree(s->x); xfree(s->xb); xfree(s->xb2); xfree(s->hb); xfree(s->hb2);
+    xfree(s->logits);
+    xfree(s->qg); xfree(s->qh); xfree(s->att); xfree(s->attn_out);
+    xfree(s->attn_acc); xfree(s->attn_ss);
 #if (LZ_ATTN_FIXED & 2)
-    free(s->wsum_cbuf); free(s->wsum_cq);
-#endif
-    free(s->ktmp); free(s->vtmp);
-    free(s->kq8); free(s->vq8); free(s->ksq); free(s->vsq);
-    free(s->kf32); free(s->vf32);
-    free(s->k4); free(s->v4); free(s->ks4); free(s->vs4);
+    xfree(s->wsum_cbuf); xfree(s->wsum_cq);
+#endif /* LZ_ATTN_FIXED & 2 */
+    xfree(s->ktmp); xfree(s->vtmp);
+    xfree(s->kq8); xfree(s->vq8); xfree(s->ksq); xfree(s->vsq);
+    xfree(s->kf32); xfree(s->vf32);
+    xfree(s->k4); xfree(s->v4); xfree(s->ks4); xfree(s->vs4);
 #if LZ_KV_2PLANE
-    free(s->kq8_lo); free(s->vq8_lo); free(s->att_lo); free(s->wsum_lo);
-#endif
-    free(s->qkv); free(s->qkv_c); free(s->zbuf); free(s->avec); free(s->bvec);
-    free(s->ssm_out); free(s->qn); free(s->kn);
-    free(s->kda_q); free(s->kda_k); free(s->kda_v);
-    free(s->kda_qc); free(s->kda_kc); free(s->kda_vc);
-    free(s->kda_gate_lat); free(s->kda_gate);
-    free(s->moe_router_logits); free(s->moe_sel_idx); free(s->moe_sel_w);
-    free(s->moe_lat_x); free(s->moe_lat_y);
-    free(s->moe_h1); free(s->moe_h3); free(s->moe_h2); free(s->moe_shared_out);
-    free(s->mtp_x); free(s->mtp_concat); free(s->mtp_emb_raw);
-    free(s->mtp_chain); free(s->mtp_draft_logits); free(s->mtp_logits);
-    free(s->mtp_verify_hidden);
-    free(s->mtp_draft_q);
-    free(s->mtp_target_p);
-    free(s->ssm_state_q8); free(s->ssm_state_s);
+    xfree(s->kq8_lo); xfree(s->vq8_lo); xfree(s->att_lo); xfree(s->wsum_lo);
+#endif /* LZ_KV_2PLANE */
+    xfree(s->qkv); xfree(s->qkv_c); xfree(s->zbuf); xfree(s->avec); xfree(s->bvec);
+    xfree(s->ssm_out); xfree(s->ssm_sig); xfree(s->qn); xfree(s->kn);
+    xfree(s->kda_q); xfree(s->kda_k); xfree(s->kda_v);
+    xfree(s->kda_qc); xfree(s->kda_kc); xfree(s->kda_vc);
+    xfree(s->kda_gate_lat); xfree(s->kda_gate);
+    xfree(s->moe_router_logits); xfree(s->moe_sel_idx); xfree(s->moe_sel_w);
+    xfree(s->moe_lat_x); xfree(s->moe_lat_y);
+    xfree(s->moe_h1); xfree(s->moe_h3); xfree(s->moe_h2); xfree(s->moe_shared_out);
+    xfree(s->mtp_x); xfree(s->mtp_concat); xfree(s->mtp_emb_raw);
+    xfree(s->mtp_chain); xfree(s->mtp_draft_logits); xfree(s->mtp_logits);
+    xfree(s->mtp_verify_hidden);
+    xfree(s->mtp_draft_q);
+    xfree(s->mtp_target_p);
+    xfree(s->ssm_state_q8); xfree(s->ssm_state_s);
 #if LZ_GDN_STATE_2PLANE
-    free(s->ssm_state_q8_lo);
-#endif
-    free(s->conv_state);
-    free(s->xq); free(s->xqs); free(s->wscr);
-    free(s->rope_cs);
-    free(s->cache_idx);
+    xfree(s->ssm_state_q8_lo);
+#endif /* LZ_GDN_STATE_2PLANE */
+    xfree(s->conv_state);
+    xfree(s->conv_state_q); xfree(s->conv_mw);
+    xfree(s->kda_q_i16); xfree(s->kda_k_i16); xfree(s->kda_v_i16);
+    xfree(s->kda_qc_i16); xfree(s->kda_kc_i16); xfree(s->kda_vc_i16);
+    xfree(s->bvec_i16); xfree(s->moe_logits_i16);
+    xfree(s->kda_lat_i16); xfree(s->kda_lat_i32);
+    xfree(s->kda_gate_i16); xfree(s->kda_dtb_i16);
+    xfree(s->moe_lat_i16); xfree(s->moe_lat_q); xfree(s->moe_lat_qs);
+    xfree(s->vtmp_i16);
+    xfree(s->moe_h1_i16); xfree(s->moe_h3_i16);
+    xfree(s->conv_sig_k1); xfree(s->conv_sig_oscale2); xfree(s->conv_sig_e);
+    xfree(s->xq); xfree(s->xqs); xfree(s->wscr); xfree(s->fwht_scratch);
+    xfree(s->subn_norm_int);
+    xfree(s->rope_cs);
+    xfree(s->cache_idx);
     memset(s, 0, sizeof(*s));
 }
 
@@ -814,7 +1264,7 @@ void lz_state_reset(LZRunState *s, const LZModel *m) {
                           c->attn_kv_dim);
     if (s->vq8_lo) memset(s->vq8_lo, 0, (size_t)kv_layers * s->kv_slots *
                           c->attn_kv_dim);
-#endif
+#endif /* LZ_KV_2PLANE */
     if (s->kf32) memset(s->kf32, 0, (size_t)kv_layers * s->kv_slots *
                         c->attn_kv_dim * sizeof(float));
     if (s->vf32) memset(s->vf32, 0, (size_t)kv_layers * s->kv_slots *
@@ -836,10 +1286,16 @@ void lz_state_reset(LZRunState *s, const LZModel *m) {
 #if LZ_GDN_STATE_2PLANE
     memset(s->ssm_state_q8_lo, 0, (size_t)s->ssm_ring_depth * c->n_linear_layers *
            c->lin_n_v_heads * c->lin_k_head_dim * c->lin_v_head_dim);
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
     memset(s->ssm_state_s, 0, (size_t)s->ssm_ring_depth * c->n_linear_layers *
            c->lin_n_v_heads * c->lin_k_head_dim * c->lin_v_head_dim / 32 *
            sizeof(float));
+#if LZ_CONV_FIXED
+    if (s->conv_state_q)
+        memset(s->conv_state_q, 0,
+               (size_t)s->ssm_ring_depth * c->n_linear_layers *
+               c->lin_conv_dim * (c->conv_kernel - 1) * sizeof(short));
+#endif /* LZ_CONV_FIXED */
     memset(s->conv_state, 0, (size_t)s->ssm_ring_depth * c->n_linear_layers *
            c->lin_conv_dim * (c->conv_kernel - 1) * sizeof(float));
     /* The ring's own "which slot is confirmed" index - see forward.h's
@@ -882,13 +1338,21 @@ int lz_ckpt_alloc(LZStateCkpt *ck, const LZModel *m, char *errbuf, int errlen) {
     ck->ssm_q8 = (int8_t *)malloc(n_q8);
 #if LZ_GDN_STATE_2PLANE
     ck->ssm_q8_lo = (int8_t *)malloc(n_q8);
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
     ck->ssm_s = (float *)malloc(n_s * sizeof(float));
     ck->conv  = (float *)malloc(n_conv * sizeof(float));
+#if LZ_CONV_FIXED
+    /* Allocated unconditionally, not on lz_conv_mode(): a checkpoint
+       outlives the flag that was set when it was made, and half the
+       size of the float one is not worth a conditional that can be
+       wrong. */
+    ck->conv_q = (short *)malloc(n_conv * sizeof(short));
+    if (!ck->conv_q) { lz_ckpt_free(ck); if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_OOM); return LZ_ERR_OOM; }
+#endif /* LZ_CONV_FIXED */
     if (!ck->ssm_q8 || !ck->ssm_s || !ck->conv
 #if LZ_GDN_STATE_2PLANE
         || !ck->ssm_q8_lo
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
         ) {
         lz_ckpt_free(ck);
         if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_STATE_ALLOC);
@@ -907,9 +1371,10 @@ void lz_ckpt_free(LZStateCkpt *ck) {
     free(ck->ssm_q8);
 #if LZ_GDN_STATE_2PLANE
     free(ck->ssm_q8_lo);
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
     free(ck->ssm_s);
     free(ck->conv);
+    free(ck->conv_q);
     memset(ck, 0, sizeof(*ck));
 }
 
@@ -943,8 +1408,16 @@ int lz_ckpt_save(LZStateCkpt *ck, const LZRunState *s, const LZModel *m,
     memcpy(ck->ssm_q8, s->ssm_state_q8 + o_q8, n_q8);
 #if LZ_GDN_STATE_2PLANE
     memcpy(ck->ssm_q8_lo, s->ssm_state_q8_lo + o_q8, n_q8);
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
     memcpy(ck->ssm_s, s->ssm_state_s + o_s, n_s * sizeof(float));
+#if LZ_CONV_FIXED
+    /* Whichever history is live. Saving the float one while the fixed
+       tier runs would restore a zero history and read as a subtle
+       quality drift rather than as a broken checkpoint. */
+    if (s->conv_fixed)
+        memcpy(ck->conv_q, s->conv_state_q + o_conv, n_conv * sizeof(short));
+    else
+#endif /* LZ_CONV_FIXED */
     memcpy(ck->conv, s->conv_state + o_conv, n_conv * sizeof(float));
     ck->pos   = pos;
     ck->epoch = s->epoch;
@@ -993,8 +1466,13 @@ int lz_ckpt_restore(const LZStateCkpt *ck, LZRunState *s, const LZModel *m,
     memcpy(s->ssm_state_q8, ck->ssm_q8, n_q8);
 #if LZ_GDN_STATE_2PLANE
     memcpy(s->ssm_state_q8_lo, ck->ssm_q8_lo, n_q8);
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
     memcpy(s->ssm_state_s, ck->ssm_s, n_s * sizeof(float));
+#if LZ_CONV_FIXED
+    if (s->conv_fixed)
+        memcpy(s->conv_state_q, ck->conv_q, n_conv * sizeof(short));
+    else
+#endif /* LZ_CONV_FIXED */
     memcpy(s->conv_state, ck->conv, n_conv * sizeof(float));
     s->ssm_slot = 0;
     if (out_pos) *out_pos = ck->pos;
@@ -1025,1094 +1503,7 @@ int lz_ckpt_restore(const LZStateCkpt *ck, LZRunState *s, const LZModel *m,
    are checked at load time (model.c's model_walk) to have exactly the
    body's attn_qgate_dim/attn_kv_dim/attn_q_dim/head_dim, so nothing here
    needs to special-case its shapes, only which cache slot it writes. */
-static void forward_attn(const LZModel *m, LZRunState *s,
-                         const LZLayer *L, int layer, int pos0, int nt) {
-    const LZModelConfig *c = &m->config;
-    int hd = c->head_dim, nh = c->n_heads, nkv = c->n_kv_heads;
-    int kv_mul = nh / nkv;
-    int ci = (layer >= 0) ? s->cache_idx[layer] : c->n_full_layers;
-    size_t loff = (size_t)ci * s->kv_slots * c->attn_kv_dim;
-    size_t soff = loff / 32;
-    int8_t *kc = s->kq8 ? s->kq8 + loff : NULL;
-    int8_t *vc = s->vq8 ? s->vq8 + loff : NULL;
-    /* Reference-arm slices; NULL unless --kv f32. Same (layer, pos,
-       kv_dim) layout as kq8/vq8 so `loff` indexes both. */
-    float *kf = s->kf32 ? s->kf32 + loff : NULL;
-    float *vf = s->vf32 ? s->vf32 + loff : NULL;
-    /* 4-bit slices: half the bytes, plus one scale per (pos, kv head). */
-    unsigned char *k4 = s->k4 ? s->k4 + loff / 2 : NULL;
-    unsigned char *v4 = s->v4 ? s->v4 + loff / 2 : NULL;
-    float *ks4 = s->ks4 ? s->ks4 + (size_t)ci * s->kv_slots * c->n_kv_heads : NULL;
-    float *vs4 = s->vs4 ? s->vs4 + (size_t)ci * s->kv_slots * c->n_kv_heads : NULL;
-    float *ks = s->ksq ? s->ksq + soff : NULL;
-    float *vs = s->vsq ? s->vsq + soff : NULL;
-#if LZ_KV_2PLANE
-    int8_t *kc_lo = s->kq8_lo ? s->kq8_lo + loff : NULL;
-    int8_t *vc_lo = s->vq8_lo ? s->vq8_lo + loff : NULL;
-#endif
-    /* (H q) . (H k) = kv_rot_k * (q . k) because lz_fwht is the
-       unnormalized Hadamard (see its comment in ops.h). Fold that factor
-       out here rather than normalizing the transform: kv_rot_k is a power
-       of two, so this division is exact and identical on both compilers,
-       whereas a 1/sqrt(n) constant would trip iron law 6. */
-    float scale = s->attn_scale;
-    int hdim = c->hidden_size, kvd = c->attn_kv_dim, qd = c->attn_q_dim;
-    int qgd = c->attn_qgate_dim;
-    int gsa = lz_act_gs(&L->q_proj, hdim);
-    int nsa = (gsa > 0) ? hdim / gsa : 0;
-    int h, d, t, tk;
 
-    if (s->kv_rot_k) scale /= (float)s->kv_rot_k;
-
-    /* Quantize xb once; the q/k/v projections share the same xq/xqs
-       (avoid rescanning activations).
-
-       Under mixed precision q/k/v may have different formats and
-       different weight gs, but sharing one quantization still holds -
-       lz_act_gs only looks at whether in_dim is a multiple of 32, and
-       all three share the same in_dim, so the answer is identical.
-       Asking q_proj once suffices. */
-    for (tk = 0; tk < nt; tk++)
-        lz_quantize_q8(s->xb + (size_t)tk * hdim, hdim, gsa,
-                       s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
-    lz_matmul_q8_nt(s->qg, s->xb, s->xq, s->xqs, &L->q_proj, hdim, qgd, nt);
-    lz_matmul_q8_nt(s->ktmp, s->xb, s->xq, s->xqs, &L->k_proj, hdim, kvd, nt);
-    lz_matmul_q8_nt(s->vtmp, s->xb, s->xq, s->xqs, &L->v_proj, hdim, kvd, nt);
-
-    /* QK-Norm + RoPE + write KV cache. **All cache rows of the batch
-       must be written before scoring**: token t in the batch must see
-       rows 0..t; merging the two loops would read rows not yet written. */
-    for (tk = 0; tk < nt; tk++) {
-        float *qgt = s->qg + (size_t)tk * qgd;
-        float *qht = s->qh + (size_t)tk * qd;
-        float *ktt = s->ktmp + (size_t)tk * kvd;
-        float *vtt = s->vtmp + (size_t)tk * kvd;
-        int pos = pos0 + tk;
-        /* q_proj output is laid out PER HEAD as [q(hd), gate(hd)], not
-           [all q][all gate]. The reference does view(..., n_heads, hd*2)
-           then chunks along the last dim; treating it as two contiguous
-           halves feeds every head misaligned data. */
-        for (h = 0; h < nh; h++)
-            lz_rmsnorm(qht + (size_t)h * hd, qgt + (size_t)h * 2 * hd,
-                       lz_t_f32(&L->q_norm, s->wscr), hd, c->rms_norm_eps);
-        for (h = 0; h < nkv; h++)
-            lz_rmsnorm(ktt + (size_t)h * hd, ktt + (size_t)h * hd,
-                       lz_t_f32(&L->k_norm, s->wscr), hd, c->rms_norm_eps);
-        /* QK-Norm first, then RoPE, only then quantize into the cache -
-           the cache holds the rotated k. head_dim is a multiple of 32,
-           so quantization groups never cross heads. */
-        lz_rope(qht, nh, hd, c->rotary_dim, pos, s->rope_cs);
-        lz_rope(ktt, nkv, hd, c->rotary_dim, pos, s->rope_cs);
-        /* Hadamard AFTER RoPE, on q and k alike - the cache holds rotated
-           k, and a query rotated by the same H still scores against it
-           (rotations preserve dot products). Doing it before RoPE would
-           not: RoPE mixes coordinate i with i+rotary_dim/2, which does
-           not commute with H. V is rotated too, and the attention output
-           is rotated back below. */
-        if (s->kv_rot_k) {
-            for (h = 0; h < nh;  h++) rot_head(qht + (size_t)h * hd, hd, s->kv_rot_k);
-            for (h = 0; h < nkv; h++) rot_head(ktt + (size_t)h * hd, hd, s->kv_rot_k);
-        }
-        if (s->kv_rot_v)
-            for (h = 0; h < nkv; h++) rot_head(vtt + (size_t)h * hd, hd, s->kv_rot_v);
-        /* Q8 writes, per side. Guarded on the pointer rather than on the
-           format so a side whose plane was not allocated can never be
-           written through - that is the shape of the segfault --kv q4
-           already caused once, in lz_state_reset. */
-#if LZ_KV_2PLANE
-        /* hi and the scale come out byte-identical to lz_quantize_q8's -
-           that is lz_gdn_quantize_2p's documented contract - so enabling
-           the low plane cannot perturb the high one. */
-        if (kc) lz_gdn_quantize_2p(ktt, kvd, 32, kc + (size_t)kv_slot(s, pos) * kvd,
-                                   kc_lo + (size_t)kv_slot(s, pos) * kvd,
-                                   ks + (size_t)kv_slot(s, pos) * kvd / 32);
-        if (vc) lz_gdn_quantize_2p(vtt, kvd, 32, vc + (size_t)kv_slot(s, pos) * kvd,
-                                   vc_lo + (size_t)kv_slot(s, pos) * kvd,
-                                   vs + (size_t)kv_slot(s, pos) * kvd / 32);
-#else
-        if (kc) lz_quantize_q8(ktt, kvd, 32, kc + (size_t)kv_slot(s, pos) * kvd,
-                               ks + (size_t)kv_slot(s, pos) * kvd / 32);
-        if (vc) lz_quantize_q8(vtt, kvd, 32, vc + (size_t)kv_slot(s, pos) * kvd,
-                               vs + (size_t)kv_slot(s, pos) * kvd / 32);
-#endif
-        /* Reference arm: the same post-QK-norm, post-RoPE (and, when
-           enabled, post-Hadamard) vectors the Q8 path just quantized,
-           kept exactly. Written alongside rather than instead of the Q8
-           planes so the two differ ONLY in the cache format. */
-        if (kf) memcpy(kf + (size_t)kv_slot(s, pos) * kvd, ktt, (size_t)kvd * sizeof(float));
-        if (vf) memcpy(vf + (size_t)kv_slot(s, pos) * kvd, vtt, (size_t)kvd * sizeof(float));
-        /* Per HEAD, not per row: the norm that gets split off has to be
-           the norm of the vector the attention actually dots against,
-           and that is one head's worth. */
-        if (v4)
-            for (h = 0; h < nkv; h++)
-                lz_kv4_quantize(vtt + (size_t)h * hd, hd,
-                                v4 + (size_t)kv_slot(s, pos) * kvd / 2 + (size_t)h * (hd / 2),
-                                vs4 + (size_t)kv_slot(s, pos) * nkv + h);
-        if (k4) {
-            for (h = 0; h < nkv; h++) {
-                {
-                    unsigned char *kc4 = k4 + (size_t)kv_slot(s, pos) * kvd / 2 +
-                                         (size_t)h * (hd / 2);
-                    float *ksc = ks4 + (size_t)kv_slot(s, pos) * nkv + h;
-                    lz_kv4_quantize(ktt + (size_t)h * hd, hd, kc4, ksc);
-                }
-            }
-        }
-    }
-    /* Post QK-Norm, post RoPE, pre-cache-quantization. These two are the
-       last taps on the attention path that are still exact floats, so
-       they are where a rotary_dim / head interleave / start_pos error has
-       to show up before the KV cache's Q8 noise can hide it. */
-    LZ_TAP("aq", layer, s->qh, qd);
-    LZ_TAP("ak", layer, s->ktmp, kvd);
-
-    for (tk = 0; tk < nt; tk++) {
-        const float *qht = s->qh + (size_t)tk * qd;
-        const float *qgt = s->qg + (size_t)tk * qgd;
-        float *aot = s->attn_out + (size_t)tk * qd;
-        int pos = pos0 + tk;
-        /* win_t0: lz_debug_mtp_attn_window's own comment above - 0
-           (normal) unless this is the MTP's own attention AND the
-           investigative window override is active. */
-        int win_t0 = 0;
-        int dead0, dead1;            /* see LZ_ATTN_DEAD below */
-        if (layer < 0 && lz_debug_mtp_attn_window > 0 &&
-            pos - lz_debug_mtp_attn_window + 1 > win_t0)
-            win_t0 = pos - lz_debug_mtp_attn_window + 1;
-        /* lz_debug_mtp_attn_rows's own comment above - real ALU-cost
-           proxy for the MTP's own attention (score loop runs once per
-           head, (pos-win_t0+1) rows each), not just a byte count. Body
-           layers (layer >= 0) never increment this. */
-        if (layer < 0) lz_debug_mtp_attn_rows += (long long)(pos - win_t0 + 1) * nh;
-
-        /* Positions [dead0, dead1) fall outside sink+window. The mask
-           block further down already sets their att[] to -1e30f, so
-           SCORING them is dead work and their contribution to the value
-           sum is exactly zero - exp(-1e30 - max) underflows to +0.0f and
-           a*0 adds nothing. Skipping them is therefore bit-identical.
-
-           This skip is the compute half of the eviction change. The
-           memory half landed first (kunkun98-pilot at 2048 tokens:
-           4.6 -> 3.0 MB at window 256); the loops kept walking the
-           whole prefix, and the compute half measured nothing (2.173 vs
-           2.123 ms/token of attention, window off vs on).
-
-           dead1 stays 0 when no window is set, so LZ_ATTN_DEAD is false
-           for every t on the default path and this costs one predictable
-           compare per row. */
-        {
-            int d0 = win_t0 > s->attn_sink ? win_t0 : s->attn_sink;
-            dead0 = d0;
-            dead1 = 0;
-            if (s->attn_win > 0) {
-                dead1 = pos + 1 - s->attn_win;
-                if (dead1 < s->attn_sink) dead1 = s->attn_sink;
-            }
-        }
-#define LZ_ATTN_DEAD(t) ((t) >= dead0 && (t) < dead1)
-
-        for (h = 0; h < nh; h++) {
-            const float *qhh = qht + (size_t)h * hd;
-            int kvh = h / kv_mul;
-            float *out = aot + (size_t)h * hd;
-
-            if (k4) {
-                /* score = sum_d q[d] * (scale_t * cents[code]) - the row
-                   scale factors straight out of the sum, so it costs one
-                   multiply per (row, head), not per coordinate. The
-                   codebook is 64 bytes and stays in L1; that is what
-                   makes a table lookup per coordinate affordable here
-                   and would not be with a per-coordinate table. */
-                for (t = win_t0; t <= pos; t++) {
-                    if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
-                    const unsigned char *kt = k4 + (size_t)kv_slot(s, t) * kvd / 2 +
-                                              (size_t)kvh * (hd / 2);
-                    float sum = 0.0f;
-                    for (d = 0; d < hd; d += 2) {
-                        unsigned char pk = kt[d / 2];
-                        sum += qhh[d]     * lz_kv4_cents[pk & 0x0F];
-                        sum += qhh[d + 1] * lz_kv4_cents[pk >> 4];
-                    }
-                    s->att[t] = sum * ks4[(size_t)kv_slot(s, t) * nkv + kvh] * scale;
-                }
-            } else
-            if (kf) {
-                /* Reference scoring: no quantization anywhere on this
-                   path, so any gap between this and the Q8 arm IS the
-                   cache format's cost - which is the whole point of
-                   having the arm. */
-                for (t = win_t0; t <= pos; t++) {
-                    if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
-                    const float *kt = kf + (size_t)kv_slot(s, t) * kvd + (size_t)kvh * hd;
-                    float sum = 0.0f;
-                    for (d = 0; d < hd; d++) sum += qhh[d] * kt[d];
-                    s->att[t] = sum * scale;
-                }
-            } else
-            {
-#if (LZ_ATTN_FIXED & 1)
-            /* The fixed path needs head_dim to be a multiple of 32 and
-               within its static per-head buffers; anything else keeps the
-               float loops rather than being silently truncated. Note both
-               halves take the SAME branch - scoring and weighted sum are
-               independent kernels, but splitting them here would mean two
-               tiers to verify instead of one. */
-            if (hd > 0 && (hd % 32) == 0 && hd <= LZ_ATTN_MAX_HD) {
-                lz_attn_score_q8(s->att, qhh, hd,
-                                 kc + (size_t)kvh * hd,
-                                 ks + (size_t)(kvh * hd) / 32,
-                                 kvd, pos, scale);
-            } else
-#endif
-            for (t = win_t0; t <= pos; t++) {
-                if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
-                /* scoring: q (f32) × k (Q8). float accumulation within
-                   a group, one scale multiply at the group tail
-                   (head_dim is a multiple of 32; saves a per-element
-                   scale multiply). win_t0 is 0 (t starts at 0, as
-                   always) unless the investigative window override
-                   above is active. */
-                const int8_t *kt = kc + (size_t)kv_slot(s, t) * kvd + (size_t)kvh * hd;
-                const float *kts = ks + (size_t)kv_slot(s, t) * kvd / 32 +
-                                   (size_t)(kvh * hd) / 32;
-                float sum = 0.0f;
-                for (d = 0; d < hd; d += 32) {
-                    float acc = 0.0f;
-                    int e;
-                    for (e = 0; e < 32; e++) acc += qhh[d + e] * (float)kt[d + e];
-                    sum += acc * kts[d / 32];
-                }
-                s->att[t] = sum * scale;
-            }
-#if LZ_KV_2PLANE
-            /* Scoring is linear in k, so score(hi + lo/254) = score(hi)
-               + score(lo)/254. This is a SECOND PASS over the same
-               kernels - no new kernel and no second pair of assembly
-               implementations to keep bit-identical (iron law 2).
-               Folded BEFORE softmax: the low plane corrects the logit,
-               not the probability. */
-            {
-                int tt;
-#if (LZ_ATTN_FIXED & 1)
-                if (hd > 0 && (hd % 32) == 0 && hd <= LZ_ATTN_MAX_HD) {
-                    lz_attn_score_q8(s->att_lo, qhh, hd,
-                                     kc_lo + (size_t)kvh * hd,
-                                     ks + (size_t)(kvh * hd) / 32,
-                                     kvd, pos, scale);
-                } else
-#endif
-                for (tt = 0; tt <= pos; tt++) {
-                    const int8_t *kt = kc_lo + (size_t)kv_slot(s, tt) * kvd + (size_t)kvh * hd;
-                    const float *kts = ks + (size_t)kv_slot(s, tt) * kvd / 32 +
-                                       (size_t)(kvh * hd) / 32;
-                    float sum = 0.0f;
-                    for (d = 0; d < hd; d += 32) {
-                        float acc = 0.0f;
-                        int e;
-                        for (e = 0; e < 32; e++)
-                            acc += qhh[d + e] * (float)kt[d + e];
-                        sum += acc * kts[d / 32];
-                    }
-                    s->att_lo[tt] = sum * scale;
-                }
-                for (tt = 0; tt <= pos; tt++)
-                    s->att[tt] += s->att_lo[tt] * (1.0f / LZ_GDN_LO_SCALE);
-            }
-#endif
-            }
-            /* win_t0>0 means s->att[0..win_t0-1] were never scored this
-               call (investigative window override) - softmax only the
-               slice actually filled, [win_t0..pos]. Ordinary case
-               (win_t0==0) is unchanged: lz_softmax(s->att, pos+1). */
-            /* StreamingLLM eviction, as a MASK rather than an eviction
-               (--attn-sink / --attn-window). Keeping the first sink_n
-               positions and the most recent window_w, and masking what
-               falls between, reproduces the attention that a
-               start+recent cache would compute - without touching the
-               cache layout, the hot scoring loops, or any of the four
-               format branches above.
-
-               That ordering is deliberate. The memory saving is the
-               point of the technique, but it is not the RISK: the risk
-               is that a small hybrid model loses too much by forgetting
-               the middle. Measure the quality with an instrument that
-               cannot introduce bugs of its own, and only then pay for
-               the eviction machinery.
-
-               -1e30f rather than -INFINITY: the window always contains
-               `pos`, so at least one entry survives, but a sentinel that
-               cannot produce inf-minus-inf inside lz_softmax is worth
-               more than the exactness of a true infinity. */
-            if (s->attn_win > 0 || s->attn_sink > 0) {
-                int lo = (s->attn_win > 0) ? pos + 1 - s->attn_win : 0;
-                if (lo < s->attn_sink) lo = s->attn_sink;
-                for (t = win_t0 > s->attn_sink ? win_t0 : s->attn_sink;
-                     t < lo; t++)
-                    s->att[t] = -1e30f;
-            }
-            lz_softmax(s->att + win_t0, pos + 1 - win_t0);
-
-            if (v4) {
-                memset(out, 0, (size_t)hd * sizeof(float));
-                for (t = win_t0; t <= pos; t++) {
-                    if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
-                    const unsigned char *vt = v4 + (size_t)kv_slot(s, t) * kvd / 2 +
-                                              (size_t)kvh * (hd / 2);
-                    /* Row scale folded into the attention weight, same
-                       trick as the scoring pass. */
-                    float a = s->att[t] * vs4[(size_t)kv_slot(s, t) * nkv + kvh];
-                    for (d = 0; d < hd; d += 2) {
-                        unsigned char pk = vt[d / 2];
-                        out[d]     += a * lz_kv4_cents[pk & 0x0F];
-                        out[d + 1] += a * lz_kv4_cents[pk >> 4];
-                    }
-                }
-            } else
-            if (vf) {
-                memset(out, 0, (size_t)hd * sizeof(float));
-                for (t = win_t0; t <= pos; t++) {
-                    if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
-                    const float *vt = vf + (size_t)kv_slot(s, t) * kvd + (size_t)kvh * hd;
-                    float a = s->att[t];
-                    for (d = 0; d < hd; d++) out[d] += a * vt[d];
-                }
-            } else
-            {
-#if (LZ_ATTN_FIXED & 2)
-            if (hd > 0 && (hd % 32) == 0 && hd <= LZ_ATTN_MAX_HD) {
-                lz_attn_wsum_q8(out, s->att, hd,
-                                vc + (size_t)kvh * hd,
-                                vs + (size_t)(kvh * hd) / 32,
-                                kvd, pos, s->wsum_cbuf, s->wsum_cq);
-            } else {
-#endif
-            memset(out, 0, (size_t)hd * sizeof(float));
-            for (t = win_t0; t <= pos; t++) {
-                if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
-                const int8_t *vt = vc + (size_t)kv_slot(s, t) * kvd + (size_t)kvh * hd;
-                const float *vts = vs + (size_t)kv_slot(s, t) * kvd / 32 +
-                                   (size_t)(kvh * hd) / 32;
-                float a = s->att[t];
-                for (d = 0; d < hd; d++) out[d] += a * (float)vt[d] * vts[d / 32];
-            }
-#if (LZ_ATTN_FIXED & 2)
-            }
-#endif
-#if LZ_KV_2PLANE
-            /* Same argument as the scoring pass: the weighted sum is
-               linear in v. */
-            {
-#if (LZ_ATTN_FIXED & 2)
-                if (hd > 0 && (hd % 32) == 0 && hd <= LZ_ATTN_MAX_HD) {
-                    lz_attn_wsum_q8(s->wsum_lo, s->att, hd,
-                                    vc_lo + (size_t)kvh * hd,
-                                    vs + (size_t)(kvh * hd) / 32,
-                                    kvd, pos, s->wsum_cbuf, s->wsum_cq);
-                } else {
-#endif
-                memset(s->wsum_lo, 0, (size_t)hd * sizeof(float));
-                for (t = 0; t <= pos; t++) {
-                    if (LZ_ATTN_DEAD(t)) { lz_debug_attn_skip++; continue; }
-                    const int8_t *vt = vc_lo + (size_t)kv_slot(s, t) * kvd + (size_t)kvh * hd;
-                    const float *vts = vs + (size_t)kv_slot(s, t) * kvd / 32 +
-                                       (size_t)(kvh * hd) / 32;
-                    float a = s->att[t];
-                    for (d = 0; d < hd; d++)
-                        s->wsum_lo[d] += a * (float)vt[d] * vts[d / 32];
-                }
-#if (LZ_ATTN_FIXED & 2)
-                }
-#endif
-                for (d = 0; d < hd; d++)
-                    out[d] += s->wsum_lo[d] * (1.0f / LZ_GDN_LO_SCALE);
-            }
-#endif
-            }
-            /* Rotate the attention output back. It is a linear combination
-               of rotated V rows, so H applied once more undoes the
-               rotation up to the factor kv_rot_v that lz_fwht carries
-               (H H = n I). This has to happen BEFORE the output gate
-               below: the gate is elementwise against qgt, which lives in
-               the original basis. */
-            if (s->kv_rot_v) {
-                float invn = 1.0f / (float)s->kv_rot_v;
-                rot_head(out, hd, s->kv_rot_v);
-                for (d = 0; d < hd; d++) out[d] *= invn;
-            }
-        }
-
-        /* output gate: same source as q, take the second half of each head */
-        for (h = 0; h < nh; h++) {
-            const float *gate = qgt + (size_t)h * 2 * hd + hd;
-            float *out = aot + (size_t)h * hd;
-            for (d = 0; d < hd; d++) out[d] *= lz_sigmoid(gate[d]);
-        }
-    }
-#undef LZ_ATTN_DEAD
-    LZ_TAP("ax", layer, s->attn_out, qd);
-
-    /* o_proj input is the attention output (attn_q_dim); quantize once more */
-    {
-        int gso = lz_act_gs(&L->o_proj, qd);
-        int nso = (gso > 0) ? qd / gso : 0;
-        for (tk = 0; tk < nt; tk++)
-            lz_quantize_q8(s->attn_out + (size_t)tk * qd, qd, gso,
-                           s->xq + (size_t)tk * qd, s->xqs + (size_t)tk * nso);
-        lz_matmul_q8_nt(s->xb2, s->attn_out, s->xq, s->xqs, &L->o_proj, qd,
-                        hdim, nt);
-    }
-}
-
-/* ------------------------------------------------ linear_attention block */
-
-/* advance_ring/ring_base (the SSM/conv rollback ring - see forward.h's
-   s->ssm_slot and forward_chunk's own ring_base comment):
-   advance_ring is forward_chunk's all_logits, ring_base is s->ssm_slot
-   as it stood BEFORE this chunk's layer loop started (read once by the
-   caller, not here, so it does not drift as forward_ssm/forward_kda
-   both get called once per LINEAR/KDA layer within the same chunk).
-   advance_ring==0 (ordinary decode/prefill): every token reads and
-   writes ring_base, bit-identical to the pre-ring single-slot version.
-   advance_ring!=0 (a verify batch): token tk reads slot
-   (ring_base+tk)%ring_depth and writes (ring_base+tk+1)%ring_depth -
-   see lz_gdn_step's own header comment (ops.h) for why this costs zero
-   extra bandwidth over the non-ring case, only memory. */
-static void forward_ssm(const LZModel *m, LZRunState *s,
-                        const LZLayer *L, int layer, int nt,
-                        int advance_ring, int ring_base) {
-    const LZModelConfig *c = &m->config;
-    int nk = c->lin_n_k_heads, nv = c->lin_n_v_heads;
-    int kd = c->lin_k_head_dim, vd = c->lin_v_head_dim;
-    int li = s->cache_idx[layer];
-    int ring_depth = s->ssm_ring_depth;
-    size_t q8_slot_stride = (size_t)c->n_linear_layers * nv * kd * vd;
-    size_t s_slot_stride  = q8_slot_stride / 32;
-    size_t conv_slot_stride = (size_t)c->n_linear_layers *
-                              c->lin_conv_dim * (c->conv_kernel - 1);
-    size_t li_off_q8 = (size_t)li * nv * kd * vd;
-    size_t li_off_conv = (size_t)li * c->lin_conv_dim * (c->conv_kernel - 1);
-    float scale = s->ssm_scale;
-    int hdim = c->hidden_size, cdim = c->lin_conv_dim, vdim = c->lin_value_dim;
-    int gsa = lz_act_gs(&L->in_proj_qkv, hdim);
-    int nsa = (gsa > 0) ? hdim / gsa : 0;
-    int h, i, tk;
-
-    /* quantize xb once; the four input projections share it (all in_dim = hidden) */
-    for (tk = 0; tk < nt; tk++)
-        lz_quantize_q8(s->xb + (size_t)tk * hdim, hdim, gsa,
-                       s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
-    lz_matmul_q8_nt(s->qkv, s->xb, s->xq, s->xqs, &L->in_proj_qkv, hdim,
-                    cdim, nt);
-    lz_matmul_q8_nt(s->zbuf, s->xb, s->xq, s->xqs, &L->in_proj_z, hdim,
-                    vdim, nt);
-    lz_matmul_q8_nt(s->avec, s->xb, s->xq, s->xqs, &L->in_proj_a, hdim, nv, nt);
-    lz_matmul_q8_nt(s->bvec, s->xb, s->xq, s->xqs, &L->in_proj_b, hdim, nv, nt);
-
-    /* depthwise causal convolution, SiLU activation */
-    LZ_TAP("sqkv", layer, s->qkv, cdim);
-    LZ_TAP("sz", layer, s->zbuf, vdim);
-    LZ_TAP("sa", layer, s->avec, nv);
-    LZ_TAP("sb", layer, s->bvec, nv);
-    /* The conv advances serially over t: it reads/writes the rolling
-       conv_state history, which is inherently ordered. **Deliberately
-       not batched** - conv weights are only lin_conv_dim×k floats, 0.2%
-       of per-token bytes; the bandwidth saved is not worth the risk of
-       changing reduction order. Ring-aware per this function's
-       own header comment - slot_in==slot_out when !advance_ring. */
-    for (tk = 0; tk < nt; tk++) {
-        int slot_in  = advance_ring ? (ring_base + tk) % ring_depth : ring_base;
-        int slot_out = advance_ring ? (ring_base + tk + 1) % ring_depth : ring_base;
-        lz_causal_conv1d_step(s->qkv_c + (size_t)tk * cdim,
-                              s->qkv + (size_t)tk * cdim,
-                              s->conv_state + (size_t)slot_in * conv_slot_stride + li_off_conv,
-                              s->conv_state + (size_t)slot_out * conv_slot_stride + li_off_conv,
-                              lz_t_f32(&L->conv1d, s->wscr), cdim,
-                              c->conv_kernel);
-    }
-    LZ_TAP("sconv", layer, s->qkv_c, cdim);
-
-    /* Recurrence is organized head-major (fix a head, run T steps), not
-       t-major. One head's state is kd×vd = 4 KB, resident in L1 for T
-       steps - saving (T-1)/T of the per-token 1.33 MB state traffic.
-       Heads are independent and each head is strictly serial in t, so
-       this reordering changes no numbers. */
-    for (h = 0; h < nv; h++) {
-        /* In this model nv == nk, one-to-one; when nv > nk the reference
-           uses repeat_interleave, equivalent to taking key head
-           h * nk / nv. */
-        int kh = (nk == nv) ? h : (h * nk / nv);
-        size_t h_off_q8 = li_off_q8 + (size_t)h * kd * vd;
-        size_t h_off_s  = h_off_q8 / 32;
-        /* exp(A_log[h]) depends on the head only, not the token - hoist
-           it out of the tk loop so it is computed once per head, not once
-           per token per head (the same fix as forward_kda's decay_base). */
-        float a_exp = lz_exp(lz_t_f32(&L->A_log, s->wscr)[h]);
-        float dt_bias_h = lz_t_f32(&L->dt_bias, s->wscr)[h];
-
-        for (tk = 0; tk < nt; tk++) {
-            int slot_in  = advance_ring ? (ring_base + tk) % ring_depth : ring_base;
-            int slot_out = advance_ring ? (ring_base + tk + 1) % ring_depth : ring_base;
-            const int8_t *sq_in  = s->ssm_state_q8 + (size_t)slot_in  * q8_slot_stride + h_off_q8;
-            int8_t       *sq_out = s->ssm_state_q8 + (size_t)slot_out * q8_slot_stride + h_off_q8;
-#if LZ_GDN_STATE_2PLANE
-            const int8_t *sq2_in  = s->ssm_state_q8_lo + (size_t)slot_in  * q8_slot_stride + h_off_q8;
-            int8_t       *sq2_out = s->ssm_state_q8_lo + (size_t)slot_out * q8_slot_stride + h_off_q8;
-#endif
-            const float *ss_in  = s->ssm_state_s + (size_t)slot_in  * s_slot_stride + h_off_s;
-            float       *ss_out = s->ssm_state_s + (size_t)slot_out * s_slot_stride + h_off_s;
-            const float *qp = s->qkv_c + (size_t)tk * cdim;
-            const float *kp = qp + c->lin_key_dim;
-            const float *vp = kp + c->lin_key_dim;
-            const float *v_t = vp + (size_t)h * vd;
-            float *out = s->ssm_out + (size_t)tk * vdim + (size_t)h * vd;
-            float beta, g, gt;
-
-            lz_l2norm(s->qn, qp + (size_t)kh * kd, kd, LZ_L2NORM_EPS);
-            lz_l2norm(s->kn, kp + (size_t)kh * kd, kd, LZ_L2NORM_EPS);
-            for (i = 0; i < kd; i++) s->qn[i] *= scale;
-
-            beta = lz_sigmoid(s->bvec[(size_t)tk * nv + h]);
-            /* A = exp(A_log) > 0 and softplus > 0, so g < 0 and
-               gt = exp(g) lands in (0,1) - a decay factor. If gt >= 1
-               ever comes out, a sign is flipped. */
-            g = -a_exp *
-                lz_softplus(s->avec[(size_t)tk * nv + h] + dt_bias_h);
-            gt = lz_exp(g);
-
-            /* State is read/written in two passes; quantization error
-               decays per step with gt<1 (unlike KV cache, it does not
-               accumulate). Self-consistency is guaranteed by
-               lz_gdn_step: the next token reads the quantized value.
-               sq_in/sq_out (and sq2/ss) differ only during a
-               speculative verify batch - see this function's own
-               signature comment. */
-            LZ_PROF_BEG(_tr);
-            lz_gdn_step(out, sq_in, sq_out,
-#if LZ_GDN_STATE_2PLANE
-                        sq2_in, sq2_out,
-#endif
-                        ss_in, ss_out, s->qn, s->kn, v_t, gt, beta, kd, vd);
-            LZ_PROF_END(_tr, LZ_PROF_REC);
-        }
-    }
-
-    /* This is the plain-weight gated RMSNorm, not the (1+w) kind used
-       by the outer layers */
-    for (tk = 0; tk < nt; tk++)
-        for (h = 0; h < nv; h++)
-            lz_rmsnorm_gated(s->ssm_out + (size_t)tk * vdim + (size_t)h * vd,
-                             s->ssm_out + (size_t)tk * vdim + (size_t)h * vd,
-                             s->zbuf + (size_t)tk * vdim + (size_t)h * vd,
-                             lz_t_f32(&L->ssm_norm, s->wscr), vd,
-                             c->rms_norm_eps);
-
-    LZ_TAP("sgdn", layer, s->ssm_out, vdim);
-    {
-        int gso = lz_act_gs(&L->out_proj, vdim);
-        int nso = (gso > 0) ? vdim / gso : 0;
-        for (tk = 0; tk < nt; tk++)
-            lz_quantize_q8(s->ssm_out + (size_t)tk * vdim, vdim, gso,
-                           s->xq + (size_t)tk * vdim, s->xqs + (size_t)tk * nso);
-        lz_matmul_q8_nt(s->xb2, s->ssm_out, s->xq, s->xqs, &L->out_proj, vdim,
-                        hdim, nt);
-    }
-}
-
-/* ------------------------------------------------------ KDA (LZ_LT_KDA) block */
-
-/* Kimi Delta Attention: same role as forward_ssm's GatedDeltaNet block,
-   generalized to a per-channel decay gate and three independent q/k/v
-   projections (KdaAttention). See ops.h's
-   lz_kda_step for the recurrence derivation - this function does not
-   re-derive it, only wires the projections/conv/gate around it.
-
-   Batches across nt for every projection that reads hidden-space input
-   directly (q/k/v/f_a/b/g projections all share one xb quantization,
-   the same trick forward_ssm/forward_attn use for their own hidden-space
-   projections); f_b_proj and the conv are NOT nt-batched - f_b_proj
-   because its input (kda_gate_lat) is a different width than hidden and
-   needs its own quantization per token, the conv because it is
-   inherently serial in t (same reasoning as forward_ssm's conv). */
-/* advance_ring/ring_base: same contract as forward_ssm's own (see its
-   header comment above) - reused verbatim, not re-derived, since both
-   functions share the SAME ring buffers (ssm_state_q8/_lo/_s,
-   conv_state) and the SAME per-chunk base forward_chunk computes once. */
-static void forward_kda(const LZModel *m, LZRunState *s,
-                        const LZLayer *L, int layer, int nt,
-                        int advance_ring, int ring_base) {
-    const LZModelConfig *c = &m->config;
-    int nk = c->lin_n_k_heads, nv = c->lin_n_v_heads;
-    int kd = c->lin_k_head_dim, vd = c->lin_v_head_dim;
-    int gate_rank = c->kda_gate_rank;
-    int li = s->cache_idx[layer];
-    int ring_depth = s->ssm_ring_depth;
-    size_t q8_slot_stride = (size_t)c->n_linear_layers * nv * kd * vd;
-    size_t s_slot_stride  = q8_slot_stride / 32;
-    size_t conv_slot_stride = (size_t)c->n_linear_layers *
-                              c->lin_conv_dim * (c->conv_kernel - 1);
-    size_t li_off_q8 = (size_t)li * nv * kd * vd;
-    /* Same per-layer conv_state allocation GDN uses (sized by
-       lin_conv_dim regardless of how that width is split), sliced into
-       three independent regions [q | k | v] - matching the concat order
-       kunmoe_modeling.py's own decode path uses for the same reason:
-       three depthwise convs over disjoint channels == one depthwise
-       conv over their concatenation, so the state layout is identical
-       either way. hist/li_off_conv/q_off/k_off/v_off are the pieces a
-       ring-slot base gets added to below - kept as offsets rather than
-       resolved pointers because which slot applies varies per token
-       (advance_ring). */
-    int hist = c->conv_kernel - 1;
-    size_t li_off_conv = (size_t)li * c->lin_conv_dim * hist;
-    size_t q_off = 0;
-    size_t k_off = (size_t)c->lin_key_dim * hist;
-    size_t v_off = (size_t)2 * c->lin_key_dim * hist;
-    float scale = s->ssm_scale;
-    int hdim = c->hidden_size, kdim = c->lin_key_dim, vdim = c->lin_value_dim;
-    int nvk = nv * kd;
-    int gsa = lz_act_gs(&L->kda_q_proj, hdim);
-    int nsa = (gsa > 0) ? hdim / gsa : 0;
-    int h, i, tk;
-
-    /* Six hidden-space projections share one activation quantization,
-       the same trick forward_ssm uses for its four (all have
-       in_dim == hidden_size, so lz_act_gs agrees regardless of format). */
-    for (tk = 0; tk < nt; tk++)
-        lz_quantize_q8(s->xb + (size_t)tk * hdim, hdim, gsa,
-                       s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
-    lz_matmul_q8_nt(s->kda_q, s->xb, s->xq, s->xqs, &L->kda_q_proj, hdim, kdim, nt);
-    lz_matmul_q8_nt(s->kda_k, s->xb, s->xq, s->xqs, &L->kda_k_proj, hdim, kdim, nt);
-    lz_matmul_q8_nt(s->kda_v, s->xb, s->xq, s->xqs, &L->kda_v_proj, hdim, vdim, nt);
-    lz_matmul_q8_nt(s->kda_gate_lat, s->xb, s->xq, s->xqs, &L->kda_f_a_proj,
-                    hdim, gate_rank, nt);
-    lz_matmul_q8_nt(s->bvec, s->xb, s->xq, s->xqs, &L->kda_b_proj, hdim, nv, nt);
-    lz_matmul_q8_nt(s->zbuf, s->xb, s->xq, s->xqs, &L->kda_g_proj, hdim, vdim, nt);
-    LZ_TAP("kq", layer, s->kda_q, kdim);
-    LZ_TAP("kk", layer, s->kda_k, kdim);
-    LZ_TAP("kv", layer, s->kda_v, vdim);
-    LZ_TAP("kfa", layer, s->kda_gate_lat, gate_rank);
-    LZ_TAP("kb", layer, s->bvec, nv);
-    LZ_TAP("kg", layer, s->zbuf, vdim);
-
-    /* Depthwise causal convolution, SiLU activation - three independent
-       calls over disjoint channel ranges of the same per-layer state
-       buffer (q_off/k_off/v_off above), each serial in t like
-       forward_ssm's single conv. Ring-aware per this function's own
-       header comment - slot_in==slot_out when !advance_ring. */
-    for (tk = 0; tk < nt; tk++) {
-        int slot_in  = advance_ring ? (ring_base + tk) % ring_depth : ring_base;
-        int slot_out = advance_ring ? (ring_base + tk + 1) % ring_depth : ring_base;
-        float *base_in  = s->conv_state + (size_t)slot_in  * conv_slot_stride + li_off_conv;
-        float *base_out = s->conv_state + (size_t)slot_out * conv_slot_stride + li_off_conv;
-        lz_causal_conv1d_step(s->kda_qc + (size_t)tk * kdim,
-                              s->kda_q + (size_t)tk * kdim,
-                              base_in + q_off, base_out + q_off,
-                              lz_t_f32(&L->kda_q_conv1d, s->wscr), kdim,
-                              c->conv_kernel);
-        lz_causal_conv1d_step(s->kda_kc + (size_t)tk * kdim,
-                              s->kda_k + (size_t)tk * kdim,
-                              base_in + k_off, base_out + k_off,
-                              lz_t_f32(&L->kda_k_conv1d, s->wscr), kdim,
-                              c->conv_kernel);
-        lz_causal_conv1d_step(s->kda_vc + (size_t)tk * vdim,
-                              s->kda_v + (size_t)tk * vdim,
-                              base_in + v_off, base_out + v_off,
-                              lz_t_f32(&L->kda_v_conv1d, s->wscr), vdim,
-                              c->conv_kernel);
-    }
-    LZ_TAP("kqc", layer, s->kda_qc, kdim);
-    LZ_TAP("kkc", layer, s->kda_kc, kdim);
-    LZ_TAP("kvc", layer, s->kda_vc, vdim);
-
-    /* f_b_proj: kda_gate_rank -> nvk, a DIFFERENT in_dim than hidden, so
-       it needs its own quantization - lz_matmul_w does that internally,
-       one token at a time (same reasoning forward_moe's per-expert
-       matmuls use). */
-    for (tk = 0; tk < nt; tk++)
-        lz_matmul_w(s->kda_gate + (size_t)tk * nvk,
-                   s->kda_gate_lat + (size_t)tk * gate_rank,
-                   &L->kda_f_b_proj, gate_rank, nvk, s->xq, s->xqs);
-
-    /* Turn the pre-activation into the actual per-channel decay factor
-       gt = exp(g). Without a lower bound, g = -exp(A_log[h]) *
-       softplus(pre[h,k] + dt_bias[h,k]). With one (K3's gate_lower_bound),
-       the kernel REPLACES that formula rather than clamping it:
-       g = lower_bound * sigmoid(exp(A_log[h]) * (pre[h,k] + dt_bias[h,k]))
-       (fla.ops.kda.chunk_kda's own docstring / naive_kda_lowerbound_gate;
-       a plain floor on the unbounded formula is a DIFFERENT, wrong
-       function - see KdaAttention.decay).
-       This is that function, not a
-       re-derivation of it - A_log stays PER HEAD (h only), dt_bias is
-       PER CHANNEL (h, k), matching that file's own comment about why
-       widening A_log was tried and reverted. */
-    /* decay_base[h] = exp(A_log[h]) depends on the head ONLY, not on the
-       token. Computed once per head here, then reused across nt tokens.
-       A_log/dt_bias are per-head/per-channel weights, so their
-       dequantization is hoisted out of the tk loop too. decay_base goes
-       into s->wscr: A_log/dt_bias are F32 (lz_t_f32 returns t->f, no
-       write to wscr), so wscr is free here, and it is sized >= nvk >= nv. */
-    const float *a_log_arr = lz_t_f32(&L->kda_A_log, s->wscr);
-    const float *dt_bias_arr = lz_t_f32(&L->kda_dt_bias, s->wscr);
-    {
-        float *decay_base = s->wscr;
-        for (h = 0; h < nv; h++) decay_base[h] = lz_exp(a_log_arr[h]);
-        for (tk = 0; tk < nt; tk++) {
-            float *gt = s->kda_gate + (size_t)tk * nvk;
-            for (h = 0; h < nv; h++) {
-                for (i = 0; i < kd; i++) {
-                    int idx = h * kd + i;
-                    float pre = gt[idx] + dt_bias_arr[idx];
-                    float g;
-                    if (c->kda_has_gate_lower_bound)
-                        g = c->kda_gate_lower_bound * lz_sigmoid(decay_base[h] * pre);
-                    else
-                        g = -decay_base[h] * lz_softplus(pre);
-                    gt[idx] = lz_exp(g);
-                }
-            }
-        }
-    }
-    LZ_TAP("kgate", layer, s->kda_gate, nvk);
-
-    /* Recurrence, head-major like forward_ssm's - same L1-residency
-       argument applies (one head's state is kd*vd, resident for T
-       steps; heads are independent, each strictly serial in t). */
-    for (h = 0; h < nv; h++) {
-        int kh = (nk == nv) ? h : (h * nk / nv);
-        size_t h_off_q8 = li_off_q8 + (size_t)h * kd * vd;
-        size_t h_off_s  = h_off_q8 / 32;
-
-        for (tk = 0; tk < nt; tk++) {
-            int slot_in  = advance_ring ? (ring_base + tk) % ring_depth : ring_base;
-            int slot_out = advance_ring ? (ring_base + tk + 1) % ring_depth : ring_base;
-            const int8_t *sq_in  = s->ssm_state_q8 + (size_t)slot_in  * q8_slot_stride + h_off_q8;
-            int8_t       *sq_out = s->ssm_state_q8 + (size_t)slot_out * q8_slot_stride + h_off_q8;
-#if LZ_GDN_STATE_2PLANE
-            const int8_t *sq2_in  = s->ssm_state_q8_lo + (size_t)slot_in  * q8_slot_stride + h_off_q8;
-            int8_t       *sq2_out = s->ssm_state_q8_lo + (size_t)slot_out * q8_slot_stride + h_off_q8;
-#endif
-            const float *ss_in  = s->ssm_state_s + (size_t)slot_in  * s_slot_stride + h_off_s;
-            float       *ss_out = s->ssm_state_s + (size_t)slot_out * s_slot_stride + h_off_s;
-            const float *qp = s->kda_qc + (size_t)tk * kdim + (size_t)kh * kd;
-            const float *kp = s->kda_kc + (size_t)tk * kdim + (size_t)kh * kd;
-            const float *vp = s->kda_vc + (size_t)tk * vdim + (size_t)h * vd;
-            const float *gv = s->kda_gate + (size_t)tk * nvk + (size_t)h * kd;
-            float *out = s->ssm_out + (size_t)tk * vdim + (size_t)h * vd;
-            float beta;
-
-            lz_l2norm(s->qn, qp, kd, LZ_L2NORM_EPS);
-            lz_l2norm(s->kn, kp, kd, LZ_L2NORM_EPS);
-            for (i = 0; i < kd; i++) s->qn[i] *= scale;
-
-            beta = lz_sigmoid(s->bvec[(size_t)tk * nv + h]);
-            LZ_PROF_BEG(_tr);
-            lz_kda_step(out, sq_in, sq_out,
-#if LZ_GDN_STATE_2PLANE
-                        sq2_in, sq2_out,
-#endif
-                        ss_in, ss_out, s->qn, s->kn, vp, gv, beta, kd, vd);
-            LZ_PROF_END(_tr, LZ_PROF_REC);
-        }
-    }
-
-    /* Raw recurrence output, pre-o_norm - separates "the recurrence is
-       wrong" from "the gating is wrong" the same way GDN's sgdn tap
-       alone cannot; this is what caught a test-fixture bug (v_head_dim
-       not a multiple of 32) that "sgdn" alone would have reported as
-       "everything downstream of KDA is wrong" instead. */
-    LZ_TAP("kraw", layer, s->ssm_out, vdim);
-    /* Same gated RMSNorm as GDN (plain-weight, silu gate) - see
-       kda_o_norm's field comment in model.h for why the activation must
-       stay silu on this engine. */
-    for (tk = 0; tk < nt; tk++)
-        for (h = 0; h < nv; h++)
-            lz_rmsnorm_gated(s->ssm_out + (size_t)tk * vdim + (size_t)h * vd,
-                             s->ssm_out + (size_t)tk * vdim + (size_t)h * vd,
-                             s->zbuf + (size_t)tk * vdim + (size_t)h * vd,
-                             lz_t_f32(&L->kda_o_norm, s->wscr), vd,
-                             c->rms_norm_eps);
-    LZ_TAP("sgdn", layer, s->ssm_out, vdim);
-    {
-        int gso = lz_act_gs(&L->kda_o_proj, vdim);
-        int nso = (gso > 0) ? vdim / gso : 0;
-        for (tk = 0; tk < nt; tk++)
-            lz_quantize_q8(s->ssm_out + (size_t)tk * vdim, vdim, gso,
-                           s->xq + (size_t)tk * vdim, s->xqs + (size_t)tk * nso);
-        lz_matmul_q8_nt(s->xb2, s->ssm_out, s->xq, s->xqs, &L->kda_o_proj, vdim,
-                        hdim, nt);
-    }
-}
-
-/* ------------------------------------------------ latent MoE FFN block */
-
-/* Latent MoE (LatentMoE / KunMoEGate),
-   replacing the dense gate/up/down_proj FFN for layers >=
-   config.first_k_dense_replace (LZLayer.ffn_moe).
-
-   FOUR PHASES, split on the one thing that is per-token: expert
-   SELECTION. The router, the latent down/up projections and the shared
-   expert all read one weight matrix for every token in the chunk, so
-   they batch through lz_matmul_q8_nt exactly like dense_ffn_step. Only
-   the routed experts cannot - two tokens in the same chunk may pick
-   different experts entirely, so there is no shared weight stream.
-
-   WHY NOT GROUP THE TOKENS BY EXPERT, which is what llama.cpp's
-   ggml_compute_forward_mul_mat_id (a per-expert row bucket, no padding)
-   and vLLM/SGLang's moe_align_block_size do: their scale is not ours.
-   SGLang's CPU int8 MoE pads each expert's rows to BLOCK_M = 32 and
-   drops the blocked path below M = 5; llama.cpp's tuning assumes
-   batches in the thousands. LZ_BATCH_MAX is 8, and at 8 tokens over
-   top-2 of 16 experts the expected DISTINCT expert count is
-   16*(1-(15/16)^16) ~ 10.3 of 16 pairs - about a third of the weight
-   streams, ~9% of prefill, in exchange for reordering the float
-   accumulation in the kk loop. llama.cpp's own measurement that
-   prompt-phase routing is flat (decode's is skewed) makes prefill the
-   worst case for it.
-
-   THE SPLIT, measured rather than assumed (iron law 3): ffn(topk) is
-   linear in topk, so sweeping --moe-topk 1/2/4 separates the halves.
-   On an 832-token prompt it fit ffn = 856,505 + 787,201*topk us
-   exactly - at the trained topk=2 the routed experts are 64.8% of the
-   ffn phase and everything batched here is the other 35.2%.
-
-   nt=1 (generation) is unchanged: lz_matmul_q8_nt's t-loop degrades to
-   one iteration, which that function's header states as a hard gate.
-
-   Bit-identity between batched and per-token MoE prefill:
-   verified across E:\LLM\models\kunmoe-v2 (widths
-   1/2/3/4/8, 8 lengths each, plus 6 continuation steps) as well as
-   s1v3 - the batch-parity claim reaches this function directly, not
-   only a dense model that has no MoE and no KDA. It passes: the loop
-   below has no state that carries across tk (xq/xqs are fully
-   overwritten each iteration), so there was nothing FOR batch width to
-   break here - the gap was real for throughput, not for correctness. */
-static void forward_moe(const LZModel *m, LZRunState *s,
-                        const LZLayer *L, int layer, int nt) {
-    const LZModelConfig *c = &m->config;
-    int hdim = c->hidden_size, latent = c->moe_latent_dim;
-    int inter = c->moe_intermediate_size, shared_w = c->moe_shared_width;
-    int ne = c->num_experts, topk = c->num_experts_per_token;
-    /* --moe-topk: route to a different number of experts than the model
-       was exported with. Nothing in this function or lz_moe_route is
-       written for a particular k - the router pads unfillable slots with
-       idx -1 / weight 0, the loop skips them, and moe_renormalize keeps
-       the weights summing to one so the output scale does not move with
-       k. So this is a knob, not a rewrite.
-       What it is NOT is free: the model was TRAINED at its config value,
-       and running off that value is off-distribution. It exists so the
-       question can be measured (iron law 3 wants this kind of parameter
-       swept, not baked), and the scratch buffers are sized from the
-       config, so the override is clamped to them. */
-    if (lz_moe_topk > 0 && lz_moe_topk <= ne)
-        topk = lz_moe_topk;
-    int gsh = lz_act_gs(&L->moe_down_proj, hdim);
-    int nsh = (gsh > 0) ? hdim / gsh : 0;
-    int tk, kk, vv, i;
-    (void)layer;   /* only used inside LZ_TAP, which is a no-op in a normal build */
-
-    /* PHASE 1 - everything that reads xt and does not depend on routing.
-       The router and the latent down-projection are ordinary matmuls:
-       one weight matrix serves every token in the chunk, so they run
-       batched like every other block in this file, instead of streaming
-       the same weights nt times.
-       They also share one activation quantization, the same reasoning
-       forward_attn's q/k/v_proj comment gives. */
-    for (tk = 0; tk < nt; tk++)
-        lz_quantize_q8(s->xb + (size_t)tk * hdim, hdim, gsh,
-                       s->xq + (size_t)tk * hdim,
-                       s->xqs + (size_t)tk * nsh);
-    lz_matmul_q8_nt(s->moe_router_logits, s->xb, s->xq, s->xqs,
-                    &L->moe_gate_w, hdim, ne, nt);
-    lz_matmul_q8_nt(s->moe_lat_x, s->xb, s->xq, s->xqs,
-                    &L->moe_down_proj, hdim, latent, nt);
-    /* Slot 0 is token 0's, so these tap what the per-token version
-       taped under `if (tk == 0)`. */
-    LZ_TAP("mrt", layer, s->moe_router_logits, ne);
-    LZ_TAP("mlat", layer, s->moe_lat_x, latent);
-
-    /* PHASE 2 - the routed experts, and the ONE part that stays per
-       token: which expert a token wants is a property of that token, so
-       there is no shared weight stream to batch over. Grouping the
-       tokens by expert instead was measured and rejected - see the
-       block comment above this function. */
-    for (tk = 0; tk < nt; tk++) {
-        float *lat_x = s->moe_lat_x + (size_t)tk * latent;
-        float *lat_y = s->moe_lat_y + (size_t)tk * latent;
-
-        lz_moe_route(s->moe_router_logits + (size_t)tk * ne,
-                    lz_t_f32(&L->moe_gate_bias, s->wscr),
-                    ne, topk, c->moe_router_sigmoid, c->moe_renormalize,
-                    lz_moe_tau, s->moe_sel_idx, s->moe_sel_w);
-
-        /* One layer's contribution to the token's union. Guarded, so a
-           caller that did not ask for an inspector pays one predictable
-           branch per MoE layer and nothing else - no call, no write. */
-        if (s->ins)
-            lz_moe_hits_add(s->ins->expert_hits, LZ_INSPECT_EXPERT_MAX,
-                            s->moe_sel_idx, topk);
-
-        memset(lat_y, 0, (size_t)latent * sizeof(float));
-        for (kk = 0; kk < topk; kk++) {
-            int ei = s->moe_sel_idx[kk];
-            float ww = s->moe_sel_w[kk];
-            if (ei < 0) continue;               /* topk > n_experts padding */
-            /* KdaExpert.forward: w2(act(w1(x)) * w3(x)) - w1 is the gate,
-               w3 the up projection, w2 the down projection back to latent. */
-            /* w1 and w3 both read lat_x with the same in_dim (latent),
-               so quantize it ONCE and share, instead of letting each
-               lz_matmul_w re-quantize the identical vector. This must be
-               INSIDE the kk loop, not hoisted out: the w2 matmul just
-               below quantizes moe_h1 into the same xq/xqs scratch, so a
-               hoisted quantization would be overwritten before the next
-               expert's w1/w3 read it (a real, silent corruption). The
-               day w1/w3 carry different weight gs this also keeps them
-               reading the SAME quantization, the mixed-precision hazard
-               forward_attn's q/k/v comment names.
-               Slot 0 of the (now nt-wide) scratch throughout: this whole
-               loop is one token's work and phases 1 and 3 are done with
-               their copies by the time it runs. */
-            {
-                int gsl = lz_act_gs(&L->moe_expert_w1[ei], latent);
-                lz_quantize_q8(lat_x, latent, gsl, s->xq, s->xqs);
-            }
-            lz_matmul_q8(s->moe_h1, lat_x, s->xq, s->xqs,
-                        &L->moe_expert_w1[ei], latent, inter);
-            lz_matmul_q8(s->moe_h3, lat_x, s->xq, s->xqs,
-                        &L->moe_expert_w3[ei], latent, inter);
-            for (vv = 0; vv < inter; vv++)
-                s->moe_h1[vv] = lz_silu(s->moe_h1[vv]) * s->moe_h3[vv];
-            lz_matmul_w(s->moe_h2, s->moe_h1, &L->moe_expert_w2[ei],
-                       inter, latent, s->xq, s->xqs);
-            for (vv = 0; vv < latent; vv++)
-                lat_y[vv] += ww * s->moe_h2[vv];
-        }
-        if (c->moe_latent_use_norm)
-            lz_rmsnorm(lat_y, lat_y,
-                      lz_t_f32(&L->moe_latent_norm, s->wscr), latent,
-                      c->rms_norm_eps);
-    }
-    LZ_TAP("mrou", layer, s->moe_lat_y, latent);
-
-    /* PHASE 3 - back out of the latent space. Routing-independent
-       again, so batched. */
-    {
-        int gsu = lz_act_gs(&L->moe_up_proj, latent);
-        int nsu = (gsu > 0) ? latent / gsu : 0;
-        for (tk = 0; tk < nt; tk++)
-            lz_quantize_q8(s->moe_lat_y + (size_t)tk * latent, latent, gsu,
-                           s->xq + (size_t)tk * latent,
-                           s->xqs + (size_t)tk * nsu);
-        lz_matmul_q8_nt(s->xb2, s->moe_lat_y, s->xq, s->xqs,
-                        &L->moe_up_proj, latent, hdim, nt);
-    }
-
-    /* PHASE 4 - the shared expert. _shared in kunmoe_modeling.py: same
-       SwiGLU shape as the dense FFN this block replaces, just at
-       shared_w width and reading hidden-space x directly (no latent).
-       Every token goes through it, so all three of its matmuls batch -
-       this is dense_ffn_step's shape, and it is written the same way. */
-    if (shared_w > 0) {
-        int gss = lz_act_gs(&L->moe_shared_gate, hdim);
-        int nss = (gss > 0) ? hdim / gss : 0;
-        int gsd = lz_act_gs(&L->moe_shared_down, shared_w);
-        int nsd = (gsd > 0) ? shared_w / gsd : 0;
-
-        /* gate and up both read xt with in_dim == hidden_size, so
-           quantize ONCE and share - the same fix, and the same hazard,
-           as the routed experts' w1/w3 above. Re-quantized rather than
-           reusing phase 1's: the shared gate may carry a different
-           activation group size than the down-projection did. */
-        for (tk = 0; tk < nt; tk++)
-            lz_quantize_q8(s->xb + (size_t)tk * hdim, hdim, gss,
-                           s->xq + (size_t)tk * hdim,
-                           s->xqs + (size_t)tk * nss);
-        lz_matmul_q8_nt(s->moe_h1, s->xb, s->xq, s->xqs,
-                        &L->moe_shared_gate, hdim, shared_w, nt);
-        lz_matmul_q8_nt(s->moe_h3, s->xb, s->xq, s->xqs,
-                        &L->moe_shared_up, hdim, shared_w, nt);
-        for (i = 0; i < nt * shared_w; i++)
-            s->moe_h1[i] = lz_silu(s->moe_h1[i]) * s->moe_h3[i];
-        for (tk = 0; tk < nt; tk++)
-            lz_quantize_q8(s->moe_h1 + (size_t)tk * shared_w, shared_w, gsd,
-                           s->xq + (size_t)tk * shared_w,
-                           s->xqs + (size_t)tk * nsd);
-        lz_matmul_q8_nt(s->moe_shared_out, s->moe_h1, s->xq, s->xqs,
-                        &L->moe_shared_down, shared_w, hdim, nt);
-        for (i = 0; i < nt * hdim; i++) s->xb2[i] += s->moe_shared_out[i];
-    }
-    /* No tap for the combined routed+shared output here: forward_chunk's
-       unconditional LZ_TAP("ffn", l, s->xb2, dim) right after this
-       function returns already captures it - same buffer, same point,
-       for both this branch and the dense one, so a second tap here
-       would only double the dump for zero extra signal. */
-}
-
-/* ------------------------------------------------------ dense FFN block */
-
-/* Classic dense SwiGLU FFN (gate/up/down_proj): s->xb (nt x dim) ->
-   s->xb2 (nt x dim), via s->hb/s->hb2 scratch. Extracted out of
-   forward_chunk's per-layer loop so the MTP block's draft step
-   (forward_mtp_draft_step) can share it exactly rather than carry a
-   second, driftable copy - the MTP head's FFN is ALWAYS this dense
-   form, never latent MoE, regardless of what the body does (model.h's
-   LZMtp comment; model.c's model_walk filters MoE specs out of the MTP
-   block for the same reason). `layer` is only for LZ_TAP (a no-op in
-   production); the MTP call site passes LZ_MTP_CACHE_LAYER.
-
-   `idim` is an explicit parameter, NOT read off c->intermediate_size
-   internally: the MTP block's FFN width (c->mtp_intermediate_size) is
-   an independent field (model.h's own comment on why
-   reusing intermediate_size for both would silently couple two
-   unrelated things on a checkpoint like kunmoe-v2). The body call site
-   passes c->intermediate_size, the MTP call site passes
-   c->mtp_intermediate_size - s->hb/s->hb2/s->xq/s->xqs are sized for
-   the larger of the two by lz_state_alloc (see its own comment). */
-static void dense_ffn_step(const LZModel *m, LZRunState *s,
-                           const LZLayer *L, int layer, int nt, int idim) {
-    const LZModelConfig *c = &m->config;
-    int dim = c->hidden_size;
-    int gsg = lz_act_gs(&L->gate_proj, dim);
-    int nsg = (gsg > 0) ? dim / gsg : 0;
-    int gsd = lz_act_gs(&L->down_proj, idim);
-    int nsd = (gsd > 0) ? idim / gsd : 0;
-    int i, tk;
-    (void)layer;   /* only used inside LZ_TAP, which is a no-op in a normal build */
-
-    for (tk = 0; tk < nt; tk++)
-        lz_quantize_q8(s->xb + (size_t)tk * dim, dim, gsg,
-                       s->xq + (size_t)tk * dim, s->xqs + (size_t)tk * nsg);
-    lz_matmul_q8_nt(s->hb, s->xb, s->xq, s->xqs, &L->gate_proj, dim,
-                    idim, nt);
-    lz_matmul_q8_nt(s->hb2, s->xb, s->xq, s->xqs, &L->up_proj, dim,
-                    idim, nt);
-    {
-        /* SwiGLU: one lz_exp per element, scalar. NOT vectorized, and
-           not worth vectorizing - measured at 0.7%% of decode
-           (--profile), because the three matmuls around it dominate the
-           ffn phase and those are already SIMD.
-
-           Do not read "scalar" as "impossible here". This repo already
-           replaces float with integer MMX where it pays and controls the
-           error with a second plane (LZ_GDN_STATE_2PLANE, LZ_KV_2PLANE),
-           and lz_exp is itself a table-plus-polynomial hack rather than
-           libm. The reason this one stays scalar is its SIZE, not its
-           shape. */
-        LZ_PROF_BEG(_ta);
-        for (i = 0; i < nt * idim; i++)
-            s->hb[i] = lz_silu(s->hb[i]) * s->hb2[i];
-        LZ_PROF_END(_ta, LZ_PROF_ACT);
-    }
-    LZ_TAP("fh", layer, s->hb, idim);
-    /* Quantization groups must match the target weight gs: when the
-       intermediate dim is not a multiple of 32 (e.g. 1021) the weight's
-       in-row gs falls back, and xqs tail entries must be filled with
-       the same gs. */
-    for (tk = 0; tk < nt; tk++)
-        lz_quantize_q8(s->hb + (size_t)tk * idim, idim, gsd,
-                       s->xq + (size_t)tk * idim, s->xqs + (size_t)tk * nsd);
-    lz_matmul_q8_nt(s->xb2, s->hb, s->xq, s->xqs, &L->down_proj, idim,
-                    dim, nt);
-}
 
 /* --------------------------------------------------------- MTP draft step */
 
@@ -2120,13 +1511,13 @@ float *lz_mtp_draft_step(const LZModel *m, LZRunState *s, int next_token, int po
     const LZModelConfig *c = &m->config;
     int dim = c->hidden_size, i;
     unsigned fpu;
-    double t_us0;                              /* debug probe, see part 4 */
+    float t_us0;                              /* debug probe, see part 4 */
 
     if (!m || !m->mtp) return NULL;
     if (next_token < 0 || next_token >= c->vocab_size) return NULL;
     if (pos < 0 || pos >= s->seq_len) return NULL;
 
-    t_us0 = lz_time_ms() * 1000.0;
+    t_us0 = lz_time_ms() * LZ_US_SCALE;
     fpu = lz_fpu_float_begin();
 
     /* fc input: concat(pre_fc_norm_embedding(next_token's embedding),
@@ -2180,11 +1571,11 @@ float *lz_mtp_draft_step(const LZModel *m, LZRunState *s, int next_token, int po
        forward_chunk's own lm_head step uses. */
     lz_quantize_q8(s->mtp_chain, dim, lz_act_gs(&m->embed_tokens, dim),
                   s->xq, s->xqs);
-    lz_matmul_q8(s->mtp_draft_logits, s->mtp_chain, s->xq, s->xqs,
+    lz_matmul_xq(s->mtp_draft_logits, s->mtp_chain, s->xq, s->xqs,
                 &m->embed_tokens, dim, c->vocab_size);
 
     lz_fpu_float_end(fpu);
-    lz_debug_us_draft += (long long)(lz_time_ms() * 1000.0 - t_us0);
+    lz_debug_us_draft += (lz_i64)(lz_time_ms() * LZ_US_SCALE - t_us0);
     return s->mtp_draft_logits;
 }
 
@@ -2243,6 +1634,7 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
     const LZModelConfig *c = &m->config;
     int dim = c->hidden_size;
     int l, i, tk;
+    LZ_PROF_DECL(_th);
     int ring_base;               /* see its own comment below, before the layer loop */
     unsigned fpu;
 
@@ -2296,11 +1688,27 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
 
     for (l = 0; l < c->n_layers; l++) {
         const LZLayer *L = &m->layers[l];
+        LZ_PROF_DECL(_tp);
+        LZ_PROF_DECL(_tf);
 
-        for (tk = 0; tk < nt; tk++)
-            lz_rmsnorm(s->xb + (size_t)tk * dim, s->x + (size_t)tk * dim,
-                       lz_t_f32(&L->input_layernorm, s->wscr), dim,
-                       c->rms_norm_eps);
+        /* docs/x87-gcc-reg-stack-leak.md: this is the checkpoint that
+           first showed the x87 stack going dirty and staying dirty
+           across layer boundaries. No-op unless LZ_X87_STACK_GATE. */
+        LZ_X87_STACK_CHECK("layer-entry");
+
+        /* SubLN (config.use_subn): the two pre-layer RMSNorms are
+           deleted and each ternary projection normalizes its own input
+           instead (forward_kda / dense_ffn_step). Ordinary models keep
+           the original norms, bit for bit. The SubLN copy is elementwise
+           so downstream readers of s->xb keep working unchanged. */
+        if (c->use_subn) {
+            for (i = 0; i < nt * dim; i++) s->xb[i] = s->x[i];
+        } else {
+            for (tk = 0; tk < nt; tk++)
+                lz_rmsnorm(s->xb + (size_t)tk * dim, s->x + (size_t)tk * dim,
+                           lz_t_f32(&L->input_layernorm, s->wscr), dim,
+                           c->rms_norm_eps);
+        }
         LZ_TAP("an", l, s->xb, dim);
         LZ_PROF_BEG(_tp);
         if (L->type == LZ_LT_FULL)      forward_attn(m, s, L, l, pos0, nt);
@@ -2311,10 +1719,14 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
         for (i = 0; i < nt * dim; i++) s->x[i] += s->xb2[i];
         LZ_TAP("res", l, s->x, dim);
 
-        for (tk = 0; tk < nt; tk++)
-            lz_rmsnorm(s->xb + (size_t)tk * dim, s->x + (size_t)tk * dim,
-                       lz_t_f32(&L->post_attention_layernorm, s->wscr), dim,
-                       c->rms_norm_eps);
+        if (c->use_subn) {
+            for (i = 0; i < nt * dim; i++) s->xb[i] = s->x[i];
+        } else {
+            for (tk = 0; tk < nt; tk++)
+                lz_rmsnorm(s->xb + (size_t)tk * dim, s->x + (size_t)tk * dim,
+                           lz_t_f32(&L->post_attention_layernorm, s->wscr), dim,
+                           c->rms_norm_eps);
+        }
         LZ_TAP("pn", l, s->xb, dim);
         LZ_PROF_BEG(_tf);
         if (L->ffn_moe) {
@@ -2394,7 +1806,7 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
            normalizing position nt-1 here AND there would run rmsnorm on
            an already-normalized vector a second time. */
         int gse = lz_act_gs(&m->embed_tokens, dim);
-        int nse = (gse > 0) ? dim / gse : 0;
+        int nse = scale_groups(dim, gse);
         for (tk = 0; tk < nt; tk++) {
             float *xt = s->x + (size_t)tk * dim;
             lz_rmsnorm(xt, xt, lz_t_f32(&m->final_norm, s->wscr), dim,
@@ -2402,7 +1814,7 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
             lz_quantize_q8(xt, dim, gse, s->xq + (size_t)tk * dim,
                           s->xqs + (size_t)tk * nse);
         }
-        lz_matmul_q8_nt(logits_out, s->x, s->xq, s->xqs, &m->embed_tokens,
+        lz_matmul_xq_nt(logits_out, s->x, s->xq, s->xqs, &m->embed_tokens,
                        dim, c->vocab_size, nt);
         lz_fpu_float_end(fpu);
         return logits_out;
@@ -2437,15 +1849,49 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
        nt-1 == 0, identical to the original path. */
     {
         float *xl = s->x + (size_t)(nt - 1) * dim;
-        lz_rmsnorm(xl, xl, lz_t_f32(&m->final_norm, s->wscr), dim,
-                   c->rms_norm_eps);
-        LZ_TAP("fnorm", -1, xl, dim);
+        int gse = lz_act_gs(&m->embed_tokens, dim);
+        /* The norms census's smallest consumer, and the shape the other
+           four share: a float vector built by the norm and taken apart
+           again by the very next statement. The int tier writes the Q15
+           product into s->subn_norm_int with its scale out of band and
+           lz_quantize_q8_int folds that into the group scale, so xl is
+           never materialized.
+           This is a TIER, not a refactor - lz_rmsnorm_int's own header
+           says it is not bit-identical to the float pair, the plain
+           norm having no Q15-chain-then-dequant sibling to match. It
+           therefore rides --fixed like every other fixed tier.
+
+           Two guards beyond the tier, both of them things that read a
+           buffer this path stops writing:
+             gse > 0    the weight is quantized, so lz_matmul_xq below
+                        takes xq/xqs. At gse == 0 the weight is F32 and
+                        the matmul reads xl itself, which would still
+                        hold the UN-normalized residual.
+             LZ_TAP_OFF nobody is tapping "fnorm". A tap build keeps the
+                        float path rather than reporting the residual as
+                        if it were the norm. */
+        int use_int = 0;
+#if defined(LZ_TAP_OFF)
+        use_int = lz_norm_int() && lz_norm_can_fixed(dim) &&
+                  gse > 0 && (dim % gse) == 0;
+#endif /* LZ_TAP_OFF */
         /* tie_word_embeddings: output projection reuses the embedding
            directly; there is no standalone lm_head */
-        lz_quantize_q8(xl, dim, lz_act_gs(&m->embed_tokens, dim),
-                       s->xq, s->xqs);
+        if (use_int) {
+            float deq;
+            lz_rmsnorm_int(s->subn_norm_int, xl,
+                           lz_t_f32(&m->final_norm, s->wscr), dim,
+                           c->rms_norm_eps, &deq);
+            lz_quantize_q8_int(s->subn_norm_int, dim, gse, deq,
+                               s->xq, s->xqs);
+        } else {
+            lz_rmsnorm(xl, xl, lz_t_f32(&m->final_norm, s->wscr), dim,
+                       c->rms_norm_eps);
+            LZ_TAP("fnorm", -1, xl, dim);
+            lz_quantize_q8(xl, dim, gse, s->xq, s->xqs);
+        }
         LZ_PROF_BEG(_th);
-        lz_matmul_q8(s->logits, xl, s->xq, s->xqs, &m->embed_tokens, dim,
+        lz_matmul_xq(s->logits, xl, s->xq, s->xqs, &m->embed_tokens, dim,
                      c->vocab_size);
         LZ_PROF_END(_th, LZ_PROF_HEAD);
     }
@@ -2461,10 +1907,10 @@ float *lz_forward_capture(const LZModel *m, LZRunState *s, int token, int pos) {
     /* s->mtp_chain is unallocated (NULL) when m->mtp is NULL - guard
        rather than let forward_chunk memcpy into it, matching this
        function's own contract ("a no-op ... when m->mtp is NULL"). */
-    double t_us0 = lz_time_ms() * 1000.0;      /* debug probe, see part 4 */
+    float t_us0 = lz_time_ms() * LZ_US_SCALE;  /* debug probe, see part 4 */
     float *r = forward_chunk(m, s, &token, 1, pos,
                              m->mtp ? s->mtp_chain : NULL, 0, NULL, 0);
-    lz_debug_us_capture += (long long)(lz_time_ms() * 1000.0 - t_us0);
+    lz_debug_us_capture += (lz_i64)(lz_time_ms() * LZ_US_SCALE - t_us0);
     lz_debug_n_capture++;
     return r;
 }
@@ -2493,11 +1939,12 @@ float *lz_forward_batch(const LZModel *m, LZRunState *s,
     return lg;
 }
 
+
 int lz_forward_verify(const LZModel *m, LZRunState *s,
                       const int *tokens, int n, int pos0) {
     const LZModelConfig *c = &m->config;
     int cap, done = 0;
-    double t_us0 = lz_time_ms() * 1000.0;      /* debug probe, see part 4 */
+    float t_us0 = lz_time_ms() * LZ_US_SCALE;  /* debug probe, see part 4 */
 
     if (!tokens || n < 1 || !m->mtp) return 1;
     cap = s->nt_cap;
@@ -2525,7 +1972,7 @@ int lz_forward_verify(const LZModel *m, LZRunState *s,
             return 1;
         done += k;
     }
-    lz_debug_us_verify += (long long)(lz_time_ms() * 1000.0 - t_us0);
+    lz_debug_us_verify += (lz_i64)(lz_time_ms() * LZ_US_SCALE - t_us0);
     return 0;
 }
 
@@ -2649,9 +2096,9 @@ int lz_mtp_prefill(const LZModel *m, LZRunState *s, const float *h_body_all,
    distinction lz_debug_n_catchup exists to preserve. */
 int lz_mtp_catchup(const LZModel *m, LZRunState *s, const float *h_body_all,
                    const int *next_tokens, int n, int pos0) {
-    double t_us0 = lz_time_ms() * 1000.0;
+    float t_us0 = lz_time_ms() * LZ_US_SCALE;
     int r = lz_mtp_prefill(m, s, h_body_all, next_tokens, n, pos0);
-    lz_debug_us_catchup += (long long)(lz_time_ms() * 1000.0 - t_us0);
+    lz_debug_us_catchup += (lz_i64)(lz_time_ms() * LZ_US_SCALE - t_us0);
     lz_debug_n_catchup++;
     return r;
 }

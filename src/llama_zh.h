@@ -15,6 +15,7 @@
    Forward, sampling and generation are shape-neutral and depend only on
    model.h's config. */
 
+#include "lz_int.h"   /* lz_u64: the 64-bit type, portably */
 #include "model.h"
 #include "forward.h"
 #include "tokenizer.h"
@@ -79,7 +80,7 @@ typedef enum {
 
 typedef struct {
     LZSampleParams sample;      /* sampling & penalties; defaults in sampler.h */
-    unsigned long long rng_seed;
+    lz_u64 rng_seed;
     int   max_new_tokens;       /* <=0 means use the model's seq_len */
 
     /* Termination tokens. The real turn-ender in Qwen's vocab is
@@ -179,7 +180,7 @@ typedef struct {
        see lz_spec_round's own comment and generate.c's
        build_assumed_window.
 
-       DEFAULT INTENTIONALLY DIFFERS FROM llama.cpp's own reference
+       Default intentionally differs from llama.cpp's own reference
        (its common_params_speculative::n_max = 3, i.e. speculative
        decoding ON by default there). This project's own rule from the
        start: MTP defaults OFF, and spec_k == 0 must be bit-identical
@@ -204,7 +205,7 @@ typedef struct {
        and returns one. Deliberately NOT named --beam: a name that
        overclaims gets read as a status.
 
-       *** WHAT THIS IS FOR, AND WHY THE ANSWER IS NOT ASSUMED ***
+       What this is for, and why the answer is not assumed
        The hypothesis under test is that likelihood-maximizing decoding
        makes THIS model's repetition worse, not better. Measured on
        models/kunkun98-recover-r20 at a real looping position, the top
@@ -422,7 +423,7 @@ int lz_spec_accept(const int *draft, const int *targ, int n_draft,
    deliberately model-independent (p, q, u, residual_rng are all
    caller-supplied arrays/values, not read from an LZRunState). */
 int lz_spec_accept_temp(const float *p, const float *q, int x, int vocab,
-                        float u, unsigned long long *residual_rng,
+                        float u, lz_u64 *residual_rng,
                         int *out_accepted);
 
 /* One speculative round: draft k tokens with the MTP head and verify
@@ -564,7 +565,7 @@ int lz_generate(const LZModel *m, LZTokenizer *t, LZRunState *s,
                 const char *prompt_bytes, int prompt_len,
                 const LZGenOpts *opts,
                 LZTokenSink sink, LZShouldContinue cont, void *ctx,
-                int *out_n_tokens, double *out_elapsed_ms,
+                int *out_n_tokens, float *out_elapsed_ms,
                 char *errbuf, int errlen);
 
 /* Multi-turn resume. start_pos=0 behaves exactly like
@@ -582,7 +583,7 @@ int lz_generate_resume(const LZModel *m, LZTokenizer *t, LZRunState *s,
                        const char *prompt_bytes, int prompt_len,
                        const LZGenOpts *opts,
                        LZTokenSink sink, LZShouldContinue cont, void *ctx,
-                       int *out_n_tokens, double *out_elapsed_ms,
+                       int *out_n_tokens, float *out_elapsed_ms,
                        char *errbuf, int errlen);
 
 /* Same generation loop, ONE more argument: `ins`, filled with what the
@@ -611,8 +612,47 @@ int lz_generate_resume_ex(const LZModel *m, LZTokenizer *t, LZRunState *s,
                           const char *prompt_bytes, int prompt_len,
                           const LZGenOpts *opts,
                           LZTokenSink sink, LZShouldContinue cont, void *ctx,
-                          int *out_n_tokens, double *out_elapsed_ms,
+                          int *out_n_tokens, float *out_elapsed_ms,
                           char *errbuf, int errlen, LZInspect *ins);
+
+/* Everything the three names above pass besides the model, tokenizer and
+ * run state. They grew one argument at a time to fifteen; on a target
+ * with eight registers that is fifteen stack slots pushed per call, and
+ * a sixteenth would change every declaration, every wrapper and every
+ * caller again.
+ *
+ * Zero is the old behaviour, for every field, and a new field must keep
+ * that true: callers memset the struct and then set what they mean, so
+ * an addition does not silently change what an existing caller asked
+ * for. lz_gen_call_init does the memset and is the supported way to
+ * start one.
+ *
+ * Field meanings are unchanged - see the three declarations above and
+ * LZGenOpts. `ins` is lz_generate_resume_ex's; NULL is
+ * lz_generate_resume. The struct is BORROWED for the duration of the
+ * call, as are the pointers in it. */
+typedef struct {
+    int start_pos;
+    const char *prompt_bytes;
+    int prompt_len;
+    const LZGenOpts *opts;
+    LZTokenSink sink;
+    LZShouldContinue cont;
+    void *ctx;
+    int *out_n_tokens;
+    float *out_elapsed_ms;
+    char *errbuf;
+    int errlen;
+    LZInspect *ins;
+} LZGenCall;
+
+void lz_gen_call_init(LZGenCall *c);
+
+/* The generation loop itself. lz_generate, lz_generate_resume and
+ * lz_generate_resume_ex are wrappers that fill an LZGenCall and land
+ * here, so there is still exactly one loop. */
+int lz_generate_call(const LZModel *m, LZTokenizer *t, LZRunState *s,
+                     const LZGenCall *c);
 
 /* ---------------------------------------------------- prefix reuse */
 

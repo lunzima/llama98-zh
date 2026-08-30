@@ -28,8 +28,8 @@ static char g_out[LZ_STREAM_RUN_MAX + 16];
 
 /* What "---" turns into: a short run of box-drawing characters, "a
  * string that fits the width without wrapping and without overfilling
- * the line" (the user's own wording, in Chinese, translated here -
- * iron law seven).
+ * the line" (the user's own wording, translated - source comments are
+ * English).
  *
  * U+2500 BOX DRAWINGS LIGHT HORIZONTAL, written in UTF-8 and converted
  * by lz_gbk_from_utf8 like every other substitution here, so the
@@ -95,6 +95,447 @@ static void emit(const char *utf8, int len, int style,
     sink(ud, g_out, n, style);
 }
 
+/* Return convention shared by the per-construct scanners below. Each
+ * scanner receives the scan position and run start by pointer so it can
+ * advance them, and returns one of:
+ *   1  = recognised and consumed: *pi and *prun are the continuation
+ *        point, the caller must `continue` the loop.
+ *   0  = not this construct: *pi and *prun are unchanged, the caller
+ *        keeps scanning from the same position.
+ *  -1  = recognised but waiting for more input: the run up to *pi has
+ *        already been emitted, and the caller must `return *pi` to hold
+ *        the rest. *pi and *prun are left at the hold point. */
+static int scan_blockquote(LZStream *s, const char *b, int n, int final,
+                           int *pi, int *prun, LZStreamSink sink, void *ud) {
+    int i = *pi, run = *prun;
+    (void)n; (void)final;
+    /* Blockquote: every leading '>' on a line, plus one
+       space after them, is consumed; NO style bit and no indent -
+       the quote gets no formatting of its own at all.
+       Only the first '>' is recognised here, at the line start; the
+       block above carries the rest, including across a chunk
+       boundary. */
+    if (!s->fence && b[i] == '>' &&
+        ((i == 0) ? s->at_bol : (b[i - 1] == '\n'))) {
+        emit(b + run, i - run, s->style, sink, ud);
+        s->quote = 1;
+        i += 1;
+        run = i;
+        *pi = i;
+        *prun = run;
+        return 1;
+    }
+    return 0;
+}
+
+static int scan_heading(LZStream *s, const char *b, int n, int final,
+                        int *pi, int *prun, LZStreamSink sink, void *ud) {
+    int i = *pi, run = *prun;
+    /* Heading: "# ".."###### " at a line start. The
+       hashes and the ONE space after them are consumed; the level
+       field stays on to the end of the line and INCLUDING that
+       line's '\n'.
+
+       Including the newline is not tidiness. A RichEdit line takes
+       its height from the tallest character on it, the line-ending
+       character included - leave the '\n' unstyled and a heading is
+       a row of large text crammed into a normal line's leading.
+
+       Up to 7 bytes of look-ahead ("###### "), well inside
+       LZ_STREAM_PEND's 8. */
+    if (!s->fence && b[i] == '#' &&
+        ((i == 0) ? s->at_bol : (b[i - 1] == '\n'))) {
+        int k = 0;
+        while (i + k < n && k < 6 && b[i + k] == '#') k++;
+        if (i + k >= n && k < 6 && !final) {
+            emit(b + run, i - run, s->style, sink, ud);
+            return -1;                   /* "##" may still grow */
+        }
+        if (i + k < n && b[i + k] == ' ') {
+            int lvl = k > 3 ? 3 : k;     /* clamped, see stream.h */
+            emit(b + run, i - run, s->style, sink, ud);
+            s->style = (s->style & ~LZ_STYLE_H_MASK) |
+                       (lvl << LZ_STYLE_H_SHIFT);
+            i += k + 1;
+            run = i;
+            *pi = i;
+            *prun = run;
+            return 1;
+        }
+        if (i + k >= n && !final) {      /* space not here yet */
+            emit(b + run, i - run, s->style, sink, ud);
+            return -1;
+        }
+        /* Not a heading ("#tag"): falls through as ordinary text. */
+    }
+    return 0;
+}
+
+static int scan_table_pipe(LZStream *s, const char *b, int n, int final,
+                           int *pi, int *prun, LZStreamSink sink, void *ud) {
+    int i = *pi, run = *prun;
+    /* Inside a table row: an inner '|' becomes a tab, the row's own
+       closing '|' is consumed. Which one it is takes exactly one
+       byte of look-ahead - a '|' with a line ending or the end of
+       the input after it is the closing one. */
+    if ((s->style & LZ_STYLE_TABLE) && b[i] == '|') {
+        int last;
+        if (i + 1 >= n) {
+            if (!final) {
+                emit(b + run, i - run, s->style, sink, ud);
+                return -1;
+            }
+            last = 1;                    /* nothing follows it at all */
+        } else {
+            last = b[i + 1] == '\n' || b[i + 1] == '\r';
+        }
+        emit(b + run, i - run, s->style, sink, ud);
+        if (!last) emit("\t", 1, s->style, sink, ud);
+        i += 1;
+        run = i;
+        *pi = i;
+        *prun = run;
+        return 1;
+    }
+    return 0;
+}
+
+static int scan_table_row(LZStream *s, const char *b, int n, int final,
+                          int *pi, int *prun, LZStreamSink sink, void *ud) {
+    int i = *pi, run = *prun;
+    /* Table row: a '|' at a line start. The outer pipes
+       go, the inner ones become tabs, and the whole row carries the
+       TABLE bit so gui/main.c can give that paragraph tab stops.
+
+       The "|---|---|" separator row is eaten whole - and recognised
+       from its FIRST cell only, within 6 bytes, rather than by
+       scanning to the end of the line. Scanning to the line end is
+       the obvious reading of "a row of dashes" and it is the same
+       unbounded look-ahead the "---" rule above refuses, for the
+       same reason. Three hyphens are required (after at most one
+       space and one alignment colon) rather than one, so that a
+       real first cell of "-5" is not mistaken for a separator; a
+       cell that genuinely starts "---" is the accepted miss. */
+    if (!s->fence && b[i] == '|' &&
+        ((i == 0) ? s->at_bol : (b[i - 1] == '\n'))) {
+        int j = i + 1;
+        while (j < n && j - i <= 2 && (b[j] == ' ' || b[j] == ':')) j++;
+        if (j + 3 > n && !final) {
+            emit(b + run, i - run, s->style, sink, ud);
+            return -1;                   /* not enough to tell yet */
+        }
+        emit(b + run, i - run, s->style, sink, ud);
+        if (j + 3 <= n && b[j] == '-' && b[j + 1] == '-' &&
+            b[j + 2] == '-') {
+            s->skip_line = 1;            /* the rest of the row goes too */
+        } else {
+            s->style |= LZ_STYLE_TABLE;
+        }
+        i += 1;
+        run = i;
+        *pi = i;
+        *prun = run;
+        return 1;
+    }
+    return 0;
+}
+
+static int scan_hrule(LZStream *s, const char *b, int n, int final,
+                      int *pi, int *prun, LZStreamSink sink, void *ud) {
+    int i = *pi, run = *prun;
+    /* Horizontal rule: EXACTLY three hyphens, with a line ending or
+       the end of the input right after them.
+
+       The three hyphens are REPLACED by a short run of U+2500, they
+       are not eaten - eating the whole line would throw away the
+       paragraph break the model asked for, and leave nothing on
+       screen at all. Only the hyphens are consumed here; the line's
+       own '\n' flows through as ordinary content, which is what
+       keeps the break.
+
+       CommonMark says "three OR MORE", and that is deliberately not
+       what this does. "Or more" means the look-ahead is as long as
+       the run of hyphens, which has no upper bound, while the hold
+       is 8 bytes and lz_stream_push truncates past it (stream.h's
+       `quote` has the same note from the other side). Exactly-three
+       pins the look-ahead at 5 bytes - the three, the byte that
+       proves there is no fourth, and the '\n' of a "\r\n". "----"
+       therefore prints literally: a missed case, chosen over an
+       unbounded hold.
+
+       Checked before the bullet branch below only for reading
+       order; the two cannot both match, since a bullet needs a
+       space where a rule needs a second hyphen. */
+    if (!s->fence && b[i] == '-' &&
+        ((i == 0) ? s->at_bol : (b[i - 1] == '\n'))) {
+        int avail = n - i, k = 0, rule = 0;
+        while (k < avail && k < 4 && b[i + k] == '-') k++;
+        if (k < 3 && k == avail && !final) {
+            emit(b + run, i - run, s->style, sink, ud);
+            return -1;                   /* "-" or "--" may still grow */
+        }
+        if (k == 3) {
+            if (avail == 3) {
+                if (final) rule = 1;     /* end of input ends the line */
+                else {
+                    emit(b + run, i - run, s->style, sink, ud);
+                    return -1;           /* byte 4 decides, not here yet */
+                }
+            } else if (b[i + 3] == '\n') {
+                rule = 1;
+            } else if (b[i + 3] == '\r') {
+                /* Only as part of "\r\n". A bare '\r' is not a
+                   terminator: the close-tag branch consumes "\r\n"
+                   but leaves a bare '\r'
+                   (test_close_tag_bare_cr_is_not_eaten), and at_bol
+                   likewise only ever starts a line after '\n'. A
+                   "---\r" with nothing after it is therefore not a
+                   rule and prints as it arrived. */
+                if (avail >= 5) rule = b[i + 4] == '\n';
+                else if (!final) {
+                    emit(b + run, i - run, s->style, sink, ud);
+                    return -1;
+                }
+            }
+        }
+        if (rule) {
+            emit(b + run, i - run, s->style, sink, ud);
+            emit(RULE_RUN, (int)sizeof RULE_RUN - 1, s->style, sink, ud);
+            i += 3;                      /* the hyphens only */
+            run = i;
+            *pi = i;
+            *prun = run;
+            return 1;
+        }
+        /* Four or more hyphens, or something other than a line
+           ending after three: ordinary text, falls through. */
+    }
+    return 0;
+}
+
+static int scan_bullet(LZStream *s, const char *b, int n, int final,
+                       int *pi, int *prun, LZStreamSink sink, void *ud) {
+    int i = *pi, run = *prun;
+    /* Bullet list: "- ", "* " or "+ " at a line start becomes a
+       BLACK CIRCLE. A TEXT substitution, not a style bit and not an
+       indent - indenting needs PARAFORMAT, and the table's tab
+       stops are the only PARAFORMAT this program sends.
+
+       U+25CF, written in UTF-8 (E2 97 8F) and converted by
+       lz_gbk_from_utf8 like everything else, so the encoding table
+       stays the one authority. Of the obvious alternatives, U+2022
+       BULLET does not exist in GBK at all and comes out "?";
+       U+00B7 MIDDLE DOT is A1A4; U+25CF is A1F1. The codepoints
+       are named rather than shown: this file has to lex correctly
+       under a compiler reading it in a DBCS host codepage, where a
+       lead byte swallows the byte after it.
+
+       Checked before the '*' branch, or "* item" would toggle italic
+       instead. "**bold**" at a line start is unaffected: the second
+       byte is '*', not a space. */
+    if (!s->fence && (b[i] == '-' || b[i] == '*' || b[i] == '+') &&
+        ((i == 0) ? s->at_bol : (b[i - 1] == '\n'))) {
+        if (n - i < 2) {
+            if (!final) {            /* "- " may still be completing */
+                emit(b + run, i - run, s->style, sink, ud);
+                return -1;
+            }
+        } else if (b[i + 1] == ' ') {
+            emit(b + run, i - run, s->style, sink, ud);
+            /* The bit goes on BEFORE the marker is emitted, so the
+               marker itself carries it too: gui/main.c reads it off
+               whichever run reaches the paragraph first, and during
+               streaming that is this one. */
+            s->style |= LZ_STYLE_BULLET;
+            emit("\xE2\x97\x8F ", 4, s->style, sink, ud);
+            i += 2;
+            run = i;
+            *pi = i;
+            *prun = run;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int scan_tag(LZStream *s, const char *b, int n, int final,
+                    int *pi, int *prun, LZStreamSink sink, void *ud) {
+    int i = *pi, run = *prun;
+    if (b[i] == '<') {
+        /* Only the tag that can actually occur here is considered.
+           A stray "</think>" in ordinary text would otherwise turn
+           the entire rest of the reply grey, and a model that emits
+           one is exactly the model this front end is for. */
+        int in_think = (s->style & LZ_STYLE_THINK) != 0;
+        const char *want = in_think ? TAG_CLOSE : TAG_OPEN;
+        int wlen = in_think ? TAG_CLOSE_LEN : TAG_OPEN_LEN;
+        int avail = n - i;
+        int cmp = avail < wlen ? avail : wlen;
+        if (memcmp(b + i, want, (size_t)cmp) == 0) {
+            if (avail >= wlen) {
+                /* Complete tag. The text before it belongs to the
+                   old state and is emitted; the tag's own bytes
+                   are consumed to flip the state and then dropped -
+                   tags are not displayed at all. */
+                emit(b + run, i - run, s->style, sink, ud);
+                s->style ^= LZ_STYLE_THINK;
+                i += wlen;
+                /* The tag's OWN line ending, consumed too, not
+                   just the tag: a model that writes the tag on its
+                   own line - "reasoning\n</think>\n\nanswer" - has
+                   one line-ending that belongs to the TAG, and
+                   deleting only the tag would leave it behind as an
+                   EXTRA blank line no one asked for. Only consumed
+                   when it is genuinely there - "...</think>answer"
+                   (tag not on its own line) leaves `answer`
+                   untouched, byte for byte. An undecidable case
+                   (only a bare \r visible, more input might still
+                   be coming) is deferred to s->after_tag above
+                   rather than guessed. */
+                if (i < n && b[i] == '\n') {
+                    i += 1;
+                } else if (i < n && b[i] == '\r') {
+                    if (i + 1 < n) {
+                        if (b[i + 1] == '\n') i += 2;
+                        /* else: bare \r, not a line ending - left
+                           as ordinary content. */
+                    } else if (!final) {
+                        s->after_tag = 1;
+                        run = i;
+                        *pi = i;
+                        *prun = run;
+                        return -1;   /* the \r itself stays held */
+                    }
+                    /* final && only the \r visible: stands as
+                       ordinary content, nothing left to wait for. */
+                } else if (i == n && !final) {
+                    /* Nothing at all follows the tag in this
+                       buffer yet - the very next byte, whenever it
+                       arrives, is what answers the question. */
+                    s->after_tag = 1;
+                    run = i;
+                    *pi = i;
+                    *prun = run;
+                    return -1;
+                }
+                run = i;
+                *pi = i;
+                *prun = run;
+                return 1;
+            }
+            if (!final) {
+                /* A prefix that could still become a tag. Stop here
+                   and hold from i. */
+                emit(b + run, i - run, s->style, sink, ud);
+                return -1;
+            }
+            /* final: it will never complete, so it is literal text */
+        }
+        /* Not a tag: fall through and treat '<' as a normal byte. */
+    }
+    return 0;
+}
+
+static int scan_asterisk(LZStream *s, const char *b, int n, int final,
+                         int *pi, int *prun, LZStreamSink sink, void *ud) {
+    int i = *pi, run = *prun;
+    if (b[i] == '*' && !s->fence) {   /* a fence is verbatim */
+        /* "**" (bold) is checked before a lone "*" (italic) -
+           otherwise "**x**" would read as two adjacent italic
+           toggles rather than one bold span. Both are consumed,
+           never displayed - no renderer echoes the asterisks in
+           "**bold**". */
+        int avail = n - i;
+        if (avail >= 2) {
+            /* Enough of the chunk is here to know for certain
+               which of the two this is - no ambiguity left. */
+            emit(b + run, i - run, s->style, sink, ud);
+            if (b[i + 1] == '*') { s->style ^= LZ_STYLE_BOLD; i += 2; }
+            else                 { s->style ^= LZ_STYLE_ITALIC; i += 1; }
+            run = i;
+            *pi = i;
+            *prun = run;
+            return 1;
+        }
+        /* Exactly one byte left in this call - it could still turn
+           into "**" once more input arrives. */
+        if (!final) {
+            emit(b + run, i - run, s->style, sink, ud);
+            return -1;
+        }
+        /* final: never confirmed either way. The spec's own "an
+           unclosed marker is plain text" - '*' is common in plain
+           text and in math, so an asterisk nobody ever got to
+           finish deciding about prints literally rather than
+           silently toggling italic on with nothing left to show
+           for it. Falls through to the
+           ordinary-byte path below, exactly like an unfinished
+           <think tag does just above. */
+    }
+    return 0;
+}
+
+static int scan_backtick(LZStream *s, const char *b, int n, int final,
+                         int *pi, int *prun, LZStreamSink sink, void *ud) {
+    int i = *pi, run = *prun;
+    if (b[i] == '`') {
+        /* THREE backticks is a fence, one is inline code, and the
+           difference cannot be told from the first byte - the same
+           chunk-boundary problem '*' has, one byte deeper.
+
+           Two available and not final is still undecided: "``" can
+           become "```". LZ_STREAM_PEND is 8, so holding two is
+           free. */
+        /* A fence is only a fence at a line start. A backtick in
+           the MIDDLE of a line is still decided from one byte with
+           no look-ahead. */
+        int bol = (i == 0) ? s->at_bol : (b[i - 1] == '\n');
+        int avail = n - i;
+        int run3 = bol && avail >= 3 &&
+                   b[i + 1] == '`' && b[i + 2] == '`';
+        if (!run3 && bol && avail < 3 && !final) {
+            emit(b + run, i - run, s->style, sink, ud);
+            return -1;
+        }
+        emit(b + run, i - run, s->style, sink, ud);
+        if (run3) {
+            s->fence = !s->fence;
+            /* BOTH directions eat the rest of their own line, the
+               closing fence included: a code block must not be
+               followed by a blank line nobody asked for, so the ```
+               and its line ending go together. The opening fence
+               eats its info string ("```python") the same way.
+
+               This is the same rule <think>/</think> follows
+               (stream.h: A TAG'S OWN TRAILING NEWLINE IS PART OF
+               THE TAG). A fence line belongs to the marker, so its
+               terminator does too - doing it on one side only is
+               not a policy, it is an asymmetry. */
+            s->skip_line = 1;
+            if (s->fence) s->style |= LZ_STYLE_CODE;
+            else          s->style &= ~LZ_STYLE_CODE;
+            i += 3;
+        } else {
+            /* Inline code, and inside a fence a lone backtick is
+               ordinary text - a fenced block is verbatim. */
+            if (s->fence) {
+                i += 1;
+                run = i - 1;
+                *pi = i;
+                *prun = run;
+                return 1;
+            }
+            s->style ^= LZ_STYLE_CODE;
+            i += 1;
+        }
+        run = i;
+        *pi = i;
+        *prun = run;
+        return 1;
+    }
+    return 0;
+}
+
 /* Returns bytes consumed. Whatever is left is a tail the caller must
  * hold (or, with final != 0, emit literally). */
 static int scan_bytes(LZStream *s, const char *b, int n, int final,
@@ -131,6 +572,7 @@ static int scan_bytes(LZStream *s, const char *b, int n, int final,
     }
 
     while (i < n) {
+        int r;
         /* Checked BEFORE advancing, so the run can overshoot the cap by
            at most one character rather than by a whole one. */
         if (i - run >= LZ_STREAM_RUN_MAX) {
@@ -173,55 +615,12 @@ static int scan_bytes(LZStream *s, const char *b, int n, int final,
             }
             /* Neither: this byte is content, handled below as usual. */
         }
-        /* Blockquote: every leading '>' on a line, plus one
-           space after them, is consumed; NO style bit and no indent -
-           the quote gets no formatting of its own at all.
-           Only the first '>' is recognised here, at the line start; the
-           block above carries the rest, including across a chunk
-           boundary. */
-        if (!s->fence && b[i] == '>' &&
-            ((i == 0) ? s->at_bol : (b[i - 1] == '\n'))) {
-            emit(b + run, i - run, s->style, sink, ud);
-            s->quote = 1;
-            i += 1;
-            run = i;
-            continue;
-        }
-        /* Heading: "# ".."###### " at a line start. The
-           hashes and the ONE space after them are consumed; the level
-           field stays on to the end of the line and INCLUDING that
-           line's '\n'.
-
-           Including the newline is not tidiness. A RichEdit line takes
-           its height from the tallest character on it, the line-ending
-           character included - leave the '\n' unstyled and a heading is
-           a row of large text crammed into a normal line's leading.
-
-           Up to 7 bytes of look-ahead ("###### "), well inside
-           LZ_STREAM_PEND's 8. */
-        if (!s->fence && b[i] == '#' &&
-            ((i == 0) ? s->at_bol : (b[i - 1] == '\n'))) {
-            int k = 0;
-            while (i + k < n && k < 6 && b[i + k] == '#') k++;
-            if (i + k >= n && k < 6 && !final) {
-                emit(b + run, i - run, s->style, sink, ud);
-                return i;                    /* "##" may still grow */
-            }
-            if (i + k < n && b[i + k] == ' ') {
-                int lvl = k > 3 ? 3 : k;     /* clamped, see stream.h */
-                emit(b + run, i - run, s->style, sink, ud);
-                s->style = (s->style & ~LZ_STYLE_H_MASK) |
-                           (lvl << LZ_STYLE_H_SHIFT);
-                i += k + 1;
-                run = i;
-                continue;
-            }
-            if (i + k >= n && !final) {      /* space not here yet */
-                emit(b + run, i - run, s->style, sink, ud);
-                return i;
-            }
-            /* Not a heading ("#tag"): falls through as ordinary text. */
-        }
+        r = scan_blockquote(s, b, n, final, &i, &run, sink, ud);
+        if (r > 0) continue;
+        if (r < 0) return i;
+        r = scan_heading(s, b, n, final, &i, &run, sink, ud);
+        if (r > 0) continue;
+        if (r < 0) return i;
         /* The LINE-SCOPED bits - the heading level and the table row -
            die with their own line ending. Checked after the byte is
            known to be a newline and before it is emitted, so the '\n'
@@ -244,300 +643,27 @@ static int scan_bytes(LZStream *s, const char *b, int n, int final,
             run = i;
             continue;
         }
-        /* Inside a table row: an inner '|' becomes a tab, the row's own
-           closing '|' is consumed. Which one it is takes exactly one
-           byte of look-ahead - a '|' with a line ending or the end of
-           the input after it is the closing one. */
-        if ((s->style & LZ_STYLE_TABLE) && b[i] == '|') {
-            int last;
-            if (i + 1 >= n) {
-                if (!final) {
-                    emit(b + run, i - run, s->style, sink, ud);
-                    return i;
-                }
-                last = 1;                /* nothing follows it at all */
-            } else {
-                last = b[i + 1] == '\n' || b[i + 1] == '\r';
-            }
-            emit(b + run, i - run, s->style, sink, ud);
-            if (!last) emit("\t", 1, s->style, sink, ud);
-            i += 1;
-            run = i;
-            continue;
-        }
-        /* Table row: a '|' at a line start. The outer pipes
-           go, the inner ones become tabs, and the whole row carries the
-           TABLE bit so gui/main.c can give that paragraph tab stops.
-
-           The "|---|---|" separator row is eaten whole - and recognised
-           from its FIRST cell only, within 6 bytes, rather than by
-           scanning to the end of the line. Scanning to the line end is
-           the obvious reading of "a row of dashes" and it is the same
-           unbounded look-ahead the "---" rule above refuses, for the
-           same reason. Three hyphens are required (after at most one
-           space and one alignment colon) rather than one, so that a
-           real first cell of "-5" is not mistaken for a separator; a
-           cell that genuinely starts "---" is the accepted miss. */
-        if (!s->fence && b[i] == '|' &&
-            ((i == 0) ? s->at_bol : (b[i - 1] == '\n'))) {
-            int j = i + 1;
-            while (j < n && j - i <= 2 && (b[j] == ' ' || b[j] == ':')) j++;
-            if (j + 3 > n && !final) {
-                emit(b + run, i - run, s->style, sink, ud);
-                return i;                /* not enough to tell yet */
-            }
-            emit(b + run, i - run, s->style, sink, ud);
-            if (j + 3 <= n && b[j] == '-' && b[j + 1] == '-' &&
-                b[j + 2] == '-') {
-                s->skip_line = 1;        /* the rest of the row goes too */
-            } else {
-                s->style |= LZ_STYLE_TABLE;
-            }
-            i += 1;
-            run = i;
-            continue;
-        }
-        /* Horizontal rule: EXACTLY three hyphens, with a line ending or
-           the end of the input right after them.
-
-           The three hyphens are REPLACED by a short run of U+2500, they
-           are not eaten - eating the whole line would throw away the
-           paragraph break the model asked for, and leave nothing on
-           screen at all. Only the hyphens are consumed here; the line's
-           own '\n' flows through as ordinary content, which is what
-           keeps the break.
-
-           CommonMark says "three OR MORE", and that is deliberately not
-           what this does. "Or more" means the look-ahead is as long as
-           the run of hyphens, which has no upper bound, while the hold
-           is 8 bytes and lz_stream_push truncates past it (stream.h's
-           `quote` has the same note from the other side). Exactly-three
-           pins the look-ahead at 5 bytes - the three, the byte that
-           proves there is no fourth, and the '\n' of a "\r\n". "----"
-           therefore prints literally: a missed case, chosen over an
-           unbounded hold.
-
-           Checked before the bullet branch below only for reading
-           order; the two cannot both match, since a bullet needs a
-           space where a rule needs a second hyphen. */
-        if (!s->fence && b[i] == '-' &&
-            ((i == 0) ? s->at_bol : (b[i - 1] == '\n'))) {
-            int avail = n - i, k = 0, rule = 0;
-            while (k < avail && k < 4 && b[i + k] == '-') k++;
-            if (k < 3 && k == avail && !final) {
-                emit(b + run, i - run, s->style, sink, ud);
-                return i;                    /* "-" or "--" may still grow */
-            }
-            if (k == 3) {
-                if (avail == 3) {
-                    if (final) rule = 1;     /* end of input ends the line */
-                    else {
-                        emit(b + run, i - run, s->style, sink, ud);
-                        return i;            /* byte 4 decides, not here yet */
-                    }
-                } else if (b[i + 3] == '\n') {
-                    rule = 1;
-                } else if (b[i + 3] == '\r') {
-                    /* Only as part of "\r\n". A bare '\r' is not a
-                       terminator: the close-tag branch consumes "\r\n"
-                       but leaves a bare '\r'
-                       (test_close_tag_bare_cr_is_not_eaten), and at_bol
-                       likewise only ever starts a line after '\n'. A
-                       "---\r" with nothing after it is therefore not a
-                       rule and prints as it arrived. */
-                    if (avail >= 5) rule = b[i + 4] == '\n';
-                    else if (!final) {
-                        emit(b + run, i - run, s->style, sink, ud);
-                        return i;
-                    }
-                }
-            }
-            if (rule) {
-                emit(b + run, i - run, s->style, sink, ud);
-                emit(RULE_RUN, (int)sizeof RULE_RUN - 1, s->style, sink, ud);
-                i += 3;                      /* the hyphens only */
-                run = i;
-                continue;
-            }
-            /* Four or more hyphens, or something other than a line
-               ending after three: ordinary text, falls through. */
-        }
-        /* Bullet list: "- ", "* " or "+ " at a line start becomes "● ".
-           A TEXT substitution, not a style bit and not an indent -
-           indenting needs PARAFORMAT, and the table's tab stops are the
-           only PARAFORMAT this program sends.
-
-           U+25CF BLACK CIRCLE, written in UTF-8 (E2 97 8F) and
-           converted by lz_gbk_from_utf8 like everything else, so the
-           encoding table stays the one authority. Of the obvious
-           alternatives, U+2022 "•" does not exist in GBK at all and
-           comes out "?"; U+00B7 "·" is A1A4; U+25CF "●" is A1F1.
-
-           Checked before the '*' branch, or "* item" would toggle italic
-           instead. "**bold**" at a line start is unaffected: the second
-           byte is '*', not a space. */
-        if (!s->fence && (b[i] == '-' || b[i] == '*' || b[i] == '+') &&
-            ((i == 0) ? s->at_bol : (b[i - 1] == '\n'))) {
-            if (n - i < 2) {
-                if (!final) {            /* "- " may still be completing */
-                    emit(b + run, i - run, s->style, sink, ud);
-                    return i;
-                }
-            } else if (b[i + 1] == ' ') {
-                emit(b + run, i - run, s->style, sink, ud);
-                /* The bit goes on BEFORE the marker is emitted, so the
-                   marker itself carries it too: gui/main.c reads it off
-                   whichever run reaches the paragraph first, and during
-                   streaming that is this one. */
-                s->style |= LZ_STYLE_BULLET;
-                emit("\xE2\x97\x8F ", 4, s->style, sink, ud);
-                i += 2;
-                run = i;
-                continue;
-            }
-        }
-        if (b[i] == '<') {
-            /* Only the tag that can actually occur here is considered.
-               A stray "</think>" in ordinary text would otherwise turn
-               the entire rest of the reply grey, and a model that emits
-               one is exactly the model this front end is for. */
-            int in_think = (s->style & LZ_STYLE_THINK) != 0;
-            const char *want = in_think ? TAG_CLOSE : TAG_OPEN;
-            int wlen = in_think ? TAG_CLOSE_LEN : TAG_OPEN_LEN;
-            int avail = n - i;
-            int cmp = avail < wlen ? avail : wlen;
-            if (memcmp(b + i, want, (size_t)cmp) == 0) {
-                if (avail >= wlen) {
-                    /* Complete tag. The text before it belongs to the
-                       old state and is emitted; the tag's own bytes
-                       are consumed to flip the state and then dropped -
-                       tags are not displayed at all. */
-                    emit(b + run, i - run, s->style, sink, ud);
-                    s->style ^= LZ_STYLE_THINK;
-                    i += wlen;
-                    /* The tag's OWN line ending, consumed too, not
-                       just the tag: a model that writes the tag on its
-                       own line - "reasoning\n</think>\n\nanswer" - has
-                       one line-ending that belongs to the TAG, and
-                       deleting only the tag would leave it behind as an
-                       EXTRA blank line no one asked for. Only consumed
-                       when it is genuinely there - "...</think>answer"
-                       (tag not on its own line) leaves `answer`
-                       untouched, byte for byte. An undecidable case
-                       (only a bare \r visible, more input might still
-                       be coming) is deferred to s->after_tag above
-                       rather than guessed. */
-                    if (i < n && b[i] == '\n') {
-                        i += 1;
-                    } else if (i < n && b[i] == '\r') {
-                        if (i + 1 < n) {
-                            if (b[i + 1] == '\n') i += 2;
-                            /* else: bare \r, not a line ending - left
-                               as ordinary content. */
-                        } else if (!final) {
-                            s->after_tag = 1;
-                            run = i;
-                            return i;   /* the \r itself stays held */
-                        }
-                        /* final && only the \r visible: stands as
-                           ordinary content, nothing left to wait for. */
-                    } else if (i == n && !final) {
-                        /* Nothing at all follows the tag in this
-                           buffer yet - the very next byte, whenever it
-                           arrives, is what answers the question. */
-                        s->after_tag = 1;
-                        run = i;
-                        return i;
-                    }
-                    run = i;
-                    continue;
-                }
-                if (!final) {
-                    /* A prefix that could still become a tag. Stop here
-                       and hold from i. */
-                    emit(b + run, i - run, s->style, sink, ud);
-                    return i;
-                }
-                /* final: it will never complete, so it is literal text */
-            }
-            /* Not a tag: fall through and treat '<' as a normal byte. */
-        } else if (b[i] == '*' && !s->fence) {   /* a fence is verbatim */
-            /* "**" (bold) is checked before a lone "*" (italic) -
-               otherwise "**x**" would read as two adjacent italic
-               toggles rather than one bold span. Both are consumed,
-               never displayed - no renderer echoes the asterisks in
-               "**bold**". */
-            int avail = n - i;
-            if (avail >= 2) {
-                /* Enough of the chunk is here to know for certain
-                   which of the two this is - no ambiguity left. */
-                emit(b + run, i - run, s->style, sink, ud);
-                if (b[i + 1] == '*') { s->style ^= LZ_STYLE_BOLD; i += 2; }
-                else                 { s->style ^= LZ_STYLE_ITALIC; i += 1; }
-                run = i;
-                continue;
-            }
-            /* Exactly one byte left in this call - it could still turn
-               into "**" once more input arrives. */
-            if (!final) {
-                emit(b + run, i - run, s->style, sink, ud);
-                return i;
-            }
-            /* final: never confirmed either way. The spec's own "an
-               unclosed marker is plain text" - '*' is common in plain
-               text and in math, so an asterisk nobody ever got to
-               finish deciding about prints literally rather than
-               silently toggling italic on with nothing left to show
-               for it. Falls through to the
-               ordinary-byte path below, exactly like an unfinished
-               <think tag does just above. */
-        } else if (b[i] == '`') {
-            /* THREE backticks is a fence, one is inline code, and the
-               difference cannot be told from the first byte - the same
-               chunk-boundary problem '*' has, one byte deeper.
-
-               Two available and not final is still undecided: "``" can
-               become "```". LZ_STREAM_PEND is 8, so holding two is
-               free. */
-            /* A fence is only a fence at a line start. A backtick in
-               the MIDDLE of a line is still decided from one byte with
-               no look-ahead. */
-            int bol = (i == 0) ? s->at_bol : (b[i - 1] == '\n');
-            int avail = n - i;
-            int run3 = bol && avail >= 3 &&
-                       b[i + 1] == '`' && b[i + 2] == '`';
-            if (!run3 && bol && avail < 3 && !final) {
-                emit(b + run, i - run, s->style, sink, ud);
-                return i;
-            }
-            emit(b + run, i - run, s->style, sink, ud);
-            if (run3) {
-                s->fence = !s->fence;
-                /* BOTH directions eat the rest of their own line, the
-                   closing fence included: a code block must not be
-                   followed by a blank line nobody asked for, so the ```
-                   and its line ending go together. The opening fence
-                   eats its info string ("```python") the same way.
-
-                   This is the same rule <think>/</think> follows
-                   (stream.h: A TAG'S OWN TRAILING NEWLINE IS PART OF
-                   THE TAG). A fence line belongs to the marker, so its
-                   terminator does too - doing it on one side only is
-                   not a policy, it is an asymmetry. */
-                s->skip_line = 1;
-                if (s->fence) s->style |= LZ_STYLE_CODE;
-                else          s->style &= ~LZ_STYLE_CODE;
-                i += 3;
-            } else {
-                /* Inline code, and inside a fence a lone backtick is
-                   ordinary text - a fenced block is verbatim. */
-                if (s->fence) { i += 1; run = i - 1; continue; }
-                s->style ^= LZ_STYLE_CODE;
-                i += 1;
-            }
-            run = i;
-            continue;
-        }
+        r = scan_table_pipe(s, b, n, final, &i, &run, sink, ud);
+        if (r > 0) continue;
+        if (r < 0) return i;
+        r = scan_table_row(s, b, n, final, &i, &run, sink, ud);
+        if (r > 0) continue;
+        if (r < 0) return i;
+        r = scan_hrule(s, b, n, final, &i, &run, sink, ud);
+        if (r > 0) continue;
+        if (r < 0) return i;
+        r = scan_bullet(s, b, n, final, &i, &run, sink, ud);
+        if (r > 0) continue;
+        if (r < 0) return i;
+        r = scan_tag(s, b, n, final, &i, &run, sink, ud);
+        if (r > 0) continue;
+        if (r < 0) return i;
+        r = scan_asterisk(s, b, n, final, &i, &run, sink, ud);
+        if (r > 0) continue;
+        if (r < 0) return i;
+        r = scan_backtick(s, b, n, final, &i, &run, sink, ud);
+        if (r > 0) continue;
+        if (r < 0) return i;
         {
             int L = seq_len((unsigned char)b[i]);
             if (i + L > n) {

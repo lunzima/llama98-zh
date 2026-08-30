@@ -287,7 +287,7 @@ static int jparse_value(LZJsonParser *ps) {
     case 'f':
         if (ps->end - ps->p >= 5 && memcmp(ps->p, "false", 5) == 0) {
             r = jnode_new(ps, LZ_JSON_BOOL);
-            if (r >= 0) ps->j->nodes[r].num = 0.0;
+            if (r >= 0) ps->j->nodes[r].num = 0.0f;
             ps->p += 5;
         } else { jerr(ps, LZ_ERR_JSON_LITERAL); r = -1; }
         break;
@@ -299,14 +299,14 @@ static int jparse_value(LZJsonParser *ps) {
         break;
     default: {
         char *endp = NULL;
-        double v;
+        float v;
         if (*ps->p != '-' && (*ps->p < '0' || *ps->p > '9')) {
             jerr(ps, LZ_ERR_JSON_VALUE);
             ps->depth--;
             return -1;
         }
         /* buf is NUL-terminated overall; strtod cannot overrun */
-        v = strtod(ps->p, &endp);
+        v = strtof(ps->p, &endp);
         if (endp == ps->p) {
             jerr(ps, LZ_ERR_JSON_NUM);
             ps->depth--;
@@ -413,11 +413,19 @@ int lz_json_get_int(const LZJson *j, const LZJsonNode *obj,
     return (int)n->num;
 }
 
-double lz_json_get_num(const LZJson *j, const LZJsonNode *obj,
-                       const char *key, double def) {
+float lz_json_get_num(const LZJson *j, const LZJsonNode *obj,
+                       const char *key, float def) {
     const LZJsonNode *n = lz_json_get(j, obj, key);
     if (!n || n->type != LZ_JSON_NUM) return def;
     return n->num;
+}
+
+int lz_json_get_bool(const LZJson *j, const LZJsonNode *obj,
+                     const char *key, int def) {
+    const LZJsonNode *n = lz_json_get(j, obj, key);
+    if (!n) return def;
+    if (n->type != LZ_JSON_BOOL && n->type != LZ_JSON_NUM) return def;
+    return n->num != 0.0f;
 }
 
 const char *lz_json_get_str(const LZJson *j, const LZJsonNode *obj,

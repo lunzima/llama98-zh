@@ -1,6 +1,7 @@
 #ifndef LZ_SAFETENSORS_H
 #define LZ_SAFETENSORS_H
 
+#include "lz_int.h"   /* lz_i64/lz_u64: the 64-bit type, portably */
 #include <stdio.h>
 
 #include "json.h"
@@ -34,10 +35,10 @@ typedef struct {
     const char *name;               /* points into LZSafetensors::json's buffer */
     int dtype;
     int n_dims;
-    long long shape[LZ_ST_MAX_DIMS];
-    long long n_elem;
-    unsigned long long off_begin;   /* offset relative to data area start */
-    unsigned long long nbytes;
+    lz_i64 shape[LZ_ST_MAX_DIMS];
+    lz_i64 n_elem;
+    lz_u64 off_begin;   /* offset relative to data area start */
+    lz_u64 nbytes;
 } LZStTensor;
 
 typedef struct {
@@ -45,8 +46,8 @@ typedef struct {
     LZJson json;                    /* must outlive: tensor names point into its buffer */
     LZStTensor *tensors;
     int n_tensors;
-    unsigned long long data_start;  /* 8 + header length */
-    long long file_size;
+    lz_u64 data_start;  /* 8 + header length */
+    lz_i64 file_size;
 } LZSafetensors;
 
 /* return 0 on success, non-zero on failure and fill errbuf */
@@ -59,7 +60,7 @@ const LZStTensor *lz_st_find(const LZSafetensors *st, const char *name);
 /* read the tensor and convert to f32. n must equal t->n_elem; dst must hold n floats.
    Supports BF16 / F16 / F32; other dtypes return an error. */
 int lz_st_read_f32(LZSafetensors *st, const LZStTensor *t,
-                   float *dst, long long n, char *errbuf, int errlen);
+                   float *dst, lz_i64 n, char *errbuf, int errlen);
 
 /* read t->nbytes bytes verbatim into dst */
 int lz_st_read_raw(LZSafetensors *st, const LZStTensor *t,

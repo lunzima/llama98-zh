@@ -18,7 +18,7 @@
  * model left with no identity agrees it is Qwen, DeepSeek, Claude and
  * Doubao in turn).
  *
- * This string is UTF-8 with the Chinese hex-escaped, per iron law seven.
+ * UTF-8 with the Chinese hex-escaped, so the source file stays ASCII.
  * Byte-for-byte: render injects it raw, and the jinja template's
  * `{%- else %}` branch carries the same bytes.
  *
@@ -80,6 +80,23 @@ static int put(LZChatBuf *b, const char *s, int n) {
 static int puts_(LZChatBuf *b, const char *s) {
     return put(b, s, (int)strlen(s));
 }
+
+/* puts_ for a string LITERAL, whose length the compiler already knows.
+ *
+ * gcc folds strlen of a literal and Watcom does not: it emits the
+ * classic inline sequence, `not ecx` then `repne scasb`, and counts the
+ * bytes again on every call. Seventeen of those in this translation
+ * unit, for twelve constant strings - plus the register save and
+ * restore around each, which is most of why Watcom emits 85 pushes here
+ * against gcc's 14.
+ *
+ * The empty-literal concatenation is not decoration. `sizeof(x) - 1` on
+ * a `const char *` yields three or seven and the caller silently gets a
+ * truncated string; writing it as "" lit "" means only a literal
+ * compiles at all, so the misuse is a build error rather than a wrong
+ * answer. An array like LZ_SYS_DEFAULT is not a literal and does not go
+ * through here - its one call site spells its sizeof out. */
+#define PUTLIT(b, lit) put((b), (lit), (int)(sizeof("" lit "") - 1))
 
 static int is_space(char c) {
     /* matches Python str.strip()'s default set - jinja's |trim uses it */
@@ -265,9 +282,9 @@ int lz_chat_render(const LZChatMsg *msgs, int n_msgs,
        whose own comment says why - a render path and a front end both
        needing the text must not each carry a copy. */
     if (msgs[0].role != LZ_ROLE_SYSTEM) {
-        if (puts_(out, "<|im_start|>system\n")
-            || puts_(out, LZ_SYS_DEFAULT)
-            || puts_(out, "<|im_end|>\n")) goto oom;
+        if (PUTLIT(out, "<|im_start|>system\n")
+            || put(out, LZ_SYS_DEFAULT, (int)(sizeof LZ_SYS_DEFAULT - 1))
+            || PUTLIT(out, "<|im_end|>\n")) goto oom;
     }
 
     for (i = 0; i < n_msgs; i++) {
@@ -279,32 +296,32 @@ int lz_chat_render(const LZChatMsg *msgs, int n_msgs,
                 LZ_ERR_SET(rc, errbuf, errlen, LZ_ERR_SYSTEM_FIRST);
                 goto fail;
             }
-            if (puts_(out, "<|im_start|>system\n")
+            if (PUTLIT(out, "<|im_start|>system\n")
                 || put(out, ct, ctlen)
-                || puts_(out, "<|im_end|>\n")) goto oom;
+                || PUTLIT(out, "<|im_end|>\n")) goto oom;
 
         } else if (m->role == LZ_ROLE_USER) {
-            if (puts_(out, "<|im_start|>user\n")
+            if (PUTLIT(out, "<|im_start|>user\n")
                 || put(out, ct, ctlen)
-                || puts_(out, "<|im_end|>\n")) goto oom;
+                || PUTLIT(out, "<|im_end|>\n")) goto oom;
 
         } else if (m->role == LZ_ROLE_ASSISTANT) {
             const char *r, *c;
             int rlen, clen;
             split_think(ct, ctlen, &r, &rlen, &c, &clen);
-            if (puts_(out, "<|im_start|>assistant\n")) goto oom;
+            if (PUTLIT(out, "<|im_start|>assistant\n")) goto oom;
             if (i > last_query) {
                 /* the final segment (after the last user) keeps reasoning */
-                if (puts_(out, "<think>\n")
+                if (PUTLIT(out, "<think>\n")
                     || put(out, r, rlen)
-                    || puts_(out, "\n</think>\n\n")) goto oom;
+                    || PUTLIT(out, "\n</think>\n\n")) goto oom;
             }
             /* History turns: reasoning is dropped ENTIRELY, only
                content survives. This is the template's behavior, not a
                simplification - the training side must assemble it the
                same way. */
             if (put(out, c, clen)
-                || puts_(out, "<|im_end|>\n")) goto oom;
+                || PUTLIT(out, "<|im_end|>\n")) goto oom;
 
         } else {
             LZ_ERR_SET1(rc, errbuf, errlen, LZ_ERR_ROLE, (int)m->role);
@@ -313,7 +330,7 @@ int lz_chat_render(const LZChatMsg *msgs, int n_msgs,
     }
 
     if (add_generation_prompt) {
-        if (puts_(out, "<|im_start|>assistant\n")) goto oom;
+        if (PUTLIT(out, "<|im_start|>assistant\n")) goto oom;
         if (puts_(out, lz_chat_gen_prompt_tail(enable_thinking))) goto oom;
     }
     return 0;

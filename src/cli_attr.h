@@ -4,7 +4,7 @@
 /* Console text attributes for the CLI's Markdown styles.
  *
  * CLI-ONLY, outside $(ENG), the way src/cli_argv.c is - console I/O
- * stays inside CLI files and iron law one holds.
+ * stays inside CLI files and the engine library keeps none of it.
  *
  * Per platform, because there is no one mechanism that works on the
  * target family: ANSI escapes need ANSI.SYS on DOS and are not

@@ -60,9 +60,9 @@ typedef struct {
     int       stream;
     int       include_usage;   /* stream_options.include_usage */
     int       max_tokens;
-    int       has_temp;   double temp;
-    int       has_topp;   double topp;
-    int       has_seed;   double seed;
+    int       has_temp;   float temp;
+    int       has_topp;   float topp;
+    int       has_seed;   float seed;
     /* The rest of what the sampler already implements. presence_penalty
        and frequency_penalty are OpenAI-STANDARD and must not be silently
        dropped: openai.h states the policy as "a client asking for
@@ -76,11 +76,11 @@ typedef struct {
        vLLM extension spelling, and both are in Qwen's published defaults
        (top_k 20). Accepting them costs nothing and refusing them would
        be refusing a parameter we implement. */
-    int       has_pres;   double pres;
-    int       has_freq;   double freq;
-    int       has_rep;    double rep;
-    int       has_topk;   double topk;
-    int       has_minp;   double minp;
+    int       has_pres;   float pres;
+    int       has_freq;   float freq;
+    int       has_rep;    float rep;
+    int       has_topk;   float topk;
+    int       has_minp;   float minp;
     const char *stop[LZ_MAX_STOP];
     int       n_stop;
 } LZOaReq;
@@ -186,8 +186,8 @@ static int parse_body(LZJson *j, const char *body, int len, LZOaReq *r,
     {   /* A sentinel that cannot be a legal value, so "absent" and
            "explicitly 0" stay distinguishable - temperature 0 is greedy
            decoding, a thing users ask for on purpose. */
-        double miss = -1e30;
-        double v = lz_json_get_num(j, root, "temperature", miss);
+        float miss = -1e30f;
+        float v = lz_json_get_num(j, root, "temperature", miss);
         if (v != miss) { r->has_temp = 1; r->temp = v; }
         v = lz_json_get_num(j, root, "top_p", miss);
         if (v != miss) { r->has_topp = 1; r->topp = v; }
@@ -432,7 +432,7 @@ static void completions(LZOpenAICtx *c, const LZHttpReq *req, LZHttpResp *rs) {
     /* The state this request runs on. With a pool it is chosen per
        request; without one it is the single shared state. */
     LZRunState *st = c ? c->state : NULL;
-    double ms = 0.0;
+    float ms = 0.0f;
 
     memset(&j, 0, sizeof(j));
     r = (LZOaReq *)malloc(sizeof(*r));
@@ -479,8 +479,11 @@ static void completions(LZOpenAICtx *c, const LZHttpReq *req, LZHttpResp *rs) {
         g.sample.minp_llamacpp = 0;
     }
     /* Deterministic by default: a fixed seed makes a bug reproducible,
-       and a client that wants variety sends one. */
-    g.rng_seed = r->has_seed ? (unsigned long long)r->seed : 20260805ULL;
+       and a client that wants variety sends one. The value is the
+       project's one fixed seed, so a server run and a CLI run started
+       without --seed are comparable. NOT a clock reading: that makes
+       two such runs silently different. */
+    g.rng_seed = r->has_seed ? (lz_u64)r->seed : LZ_U64_C(1145141919);
     {
         int i;
         for (i = 0; i < r->n_stop; i++) g.stop[i] = r->stop[i];

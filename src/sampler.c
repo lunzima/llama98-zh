@@ -1,4 +1,5 @@
 #include <math.h>
+#include "lz_mathf.h"   /* lz_powf: float, no libm, bit-identical x86/ARM */
 #include <stdlib.h>
 #include <string.h>
 
@@ -14,8 +15,8 @@ void lz_sample_defaults(LZSampleParams *p) {
     /* Dynamic temperature: the value kept at the spec's suggested
        number, but the ENABLE FLAG is 0 - the feature is off unless a
        caller explicitly turns it on (CLI: --think-temp). This is what
-       keeps a defaults-built struct on the plain temperature path (iron
-       law two). */
+       keeps a defaults-built struct on the plain temperature path, bit
+       for bit. */
     p->temp_think         = 0.3f;
     p->think_temp_enabled = 0;
     p->topp               = 0.8f;
@@ -107,7 +108,7 @@ void lz_sample_apply_think_preset(LZSampleParams *dst, unsigned manual) {
 }
 
 int lz_sampler_init(LZSampler *s, int vocab_size, const LZSampleParams *p,
-                    unsigned long long seed) {
+                    lz_u64 seed) {
     int cap;
     memset(s, 0, sizeof(*s));
     s->vocab_size = vocab_size;
@@ -116,7 +117,7 @@ int lz_sampler_init(LZSampler *s, int vocab_size, const LZSampleParams *p,
     } else {
         lz_sample_defaults(&s->p);
     }
-    s->rng_state = seed ? seed : 1ULL;
+    s->rng_state = seed ? seed : LZ_U64_C(1);
     s->probindex = (LZProbIndex *)malloc((size_t)vocab_size *
                                          sizeof(LZProbIndex));
     /* Penalty window.
@@ -181,32 +182,59 @@ void lz_sampler_observe(LZSampler *s, int token) {
     if (s->counts[token] < 0xFFFF) s->counts[token]++;
 }
 
-static unsigned int random_u32(unsigned long long *state) {
+static unsigned int random_u32(lz_u64 *state) {
     /* xorshift64* - matches llama2.c so the same seed reproduces */
     *state ^= *state >> 12;
     *state ^= *state << 25;
     *state ^= *state >> 27;
-    return (unsigned int)((*state * 0x2545F4914F6CDD1DULL) >> 32);
+    return (unsigned int)((*state * LZ_U64_C(0x2545F4914F6CDD1D)) >> 32);
 }
 
 /* Not static: lz_sample_temp_q (below) and generate.c's
    lz_spec_accept_temp both need to draw from this SAME PRNG - a
    xorshift64* generator has no state to "share" other than the u64
    itself, so exporting the draw function is simpler and safer than
-   duplicating xorshift64*'s five-line body a second time (this
-   project's own iron law two exists precisely because two independent
-   copies of "the same" arithmetic drift). random_u32 above stays
-   static/private - nothing outside this file needs the raw 32-bit
-   draw, only the [0,1) float lz_sample itself has always used. */
-float lz_random_f32(unsigned long long *state) {
+   duplicating xorshift64*'s five-line body a second time - two
+   independent copies of "the same" arithmetic drift. random_u32 above
+   stays static/private: nothing outside this file needs the raw 32-bit
+   draw, only the [0,1) float lz_sample itself uses. */
+float lz_random_f32(lz_u64 *state) {
     return (float)(random_u32(state) >> 8) / 16777216.0f;
+}
+
+/* THE ORDER-PRESERVING INTEGER KEY, the same one lz_softmax's max scan
+   and lz_attn_wsum_q8's magnitude scan use. xor the sign-extended sign
+   bit into every bit and force the top one: non-negatives land above
+   0x80000000 in increasing order, negatives below it in decreasing
+   order, and an UNSIGNED compare of the keys reproduces the float
+   compare exactly - it is a permutation of the same total order, not an
+   approximation.
+
+   It is here because the two scans below run over the WHOLE VOCABULARY
+   once per sampled token. On a soft-float target each `p[i] > max_p` is
+   a bl __aeabi_fcmpgt, about 30 instructions; the key is three and the
+   compare is one. At 32,768 entries that is the difference between 1.0 M
+   instructions per token and 0.15 M.
+
+   NaN is the one input where the two disagree, and it takes the same
+   disposition the other two scans document: float comparison is false
+   for NaN so a plain loop never selects one, while NaN's key is the
+   largest and these would. A NaN logit means the forward pass is
+   already destroyed. */
+#define LZ_FKEY(u) ((u) ^ (((uint32_t)((int32_t)(u) >> 31)) | 0x80000000u))
+
+static uint32_t fkey(float f) {
+    union { float f; uint32_t u; } b;
+    b.f = f;
+    return LZ_FKEY(b.u);
 }
 
 static int sample_argmax(const float *p, int n) {
     int i, max_i = 0;
-    float max_p = p[0];
+    uint32_t best = fkey(p[0]);
     for (i = 1; i < n; i++) {
-        if (p[i] > max_p) { max_i = i; max_p = p[i]; }
+        uint32_t k = fkey(p[i]);
+        if (k > best) { max_i = i; best = k; }
     }
     return max_i;
 }
@@ -371,23 +399,130 @@ void apply_penalties_assumed(const LZSampleParams *p, float *logits,
  * No qsort: at k=20 / vocab 32768 this is ~32768 comparisons plus a few
  * insertions, while qsort is 32768*log2(32768) ~ 490K comparisons - a
  * 15x difference. */
+/* Same insertion selection, with every float comparison replaced by the
+   integer key above - see fkey. The REJECT test is the one that runs
+   32,768 times per sampled token (once the buffer is full, almost every
+   entry loses it), so `cut` caches the incumbent's key rather than
+   recomputing it per entry; it is refreshed on the only thing that can
+   change it, an insertion. The values stored in buf[] are still the
+   floats, so nothing downstream sees a key. */
 static int select_topk(const float *p, int n, int k, LZProbIndex *buf) {
     int i, j, cnt = 0;
+    uint32_t cut = 0;
     for (i = 0; i < n; i++) {
         float pi = p[i];
-        if (cnt == k && pi <= buf[cnt - 1].prob) continue;
+        uint32_t ki = fkey(pi);
+        if (cnt == k && ki <= cut) continue;
         j = (cnt < k) ? cnt++ : k - 1;
-        while (j > 0 && buf[j - 1].prob < pi) {
+        while (j > 0 && fkey(buf[j - 1].prob) < ki) {
             buf[j] = buf[j - 1];
             j--;
         }
         buf[j].prob = pi;
         buf[j].index = i;
+        if (cnt == k) cut = fkey(buf[k - 1].prob);
     }
     return cnt;
 }
 
-/* Path when top_k is off: coarse threshold filter, then sort; matches llama2.c */
+/* top_k WITHOUT the whole-vocabulary softmax in front of it.
+ *
+ * THE NORMALIZER CANCELS IN EVERY COMPARISON DOWNSTREAM, which is what
+ * makes this legal rather than merely cheaper. With top_k active, every
+ * later step is a ratio inside the candidate set:
+ *   min_p  buf[i].prob < m_eff * buf[0].prob
+ *   top_p  cumulative >= topp * (the CANDIDATE SET's mass, not the
+ *          vocabulary's - see select_candidates' own comment and the
+ *          three-reference derivation it cites)
+ *   draw   r = coin * cumulative, then a running cdf
+ *   ins    buf[i].prob / mass
+ *   target out_p[...] = buf[i].prob / mass
+ * Scale all of buf[] by any positive constant and not one of those
+ * decisions moves. So the 1/Z that lz_softmax divides by is computed
+ * from 32,768 exponentials and then divided back out.
+ *
+ * AND THE SET IS THE SAME SET. exp is strictly increasing, so the k
+ * largest post-softmax probabilities are the k largest logits, in the
+ * same order, and select_topk's comparisons are all `<` between two
+ * transformed values. What it does NOT preserve is a TIE that the
+ * softmax manufactures: two distinct logits far below the max both
+ * round to the same float probability, and there a naive
+ * index-order tie-break picked between entries this one now orders
+ * strictly. Those entries have equal probability by construction, so
+ * the distribution sampled from is the same one - the token drawn from
+ * it can differ, which is why this is a documented value-changing
+ * change and not a bit-identical one.
+ *
+ * buf[] comes back holding UNNORMALIZED exp(l/T - lmax/T), and lmax is
+ * the global maximum because the top-k set always contains the argmax.
+ *
+ * Measured: the full-vocabulary softmax is 32,768 elements per sampled
+ * token at 322 ARM instructions each (.prof/arm_prim_count.sh mode 13),
+ * about 10.5 M - larger than any single row in docs/arm-asm-audit.md,
+ * and absent from that document entirely, which counts only the
+ * attention softmax's 16*T.
+ *
+ * THE TEMPERATURE DIVIDE IS IN HERE FOR THE SAME REASON. Dividing every
+ * logit by the temperature is another 32,768 __aeabi_fmuls per sampled
+ * token, about 1.0 M ARM instructions, and 1/T is POSITIVE - so it is
+ * monotone too and top_k picks the same k entries before it as after.
+ * Scaling only the survivors is bit-identical rather than merely
+ * equivalent: float multiply by a positive constant is monotone
+ * non-decreasing, so max_j fl(l_j*inv) is fl(max_j l_j * inv), which is
+ * the same `lmax` and therefore the same argument to every lz_exp. */
+static int select_topk_exp(const float *l, int n, int k, float inv,
+                           LZProbIndex *buf) {
+    int n0 = select_topk(l, n, k, buf);
+    float lmax;
+    int i;
+    if (n0 <= 0) return n0;
+    for (i = 0; i < n0; i++) buf[i].prob *= inv;   /* temperature, 20 of them */
+    lmax = buf[0].prob;                  /* still a logit at this point */
+    for (i = 0; i < n0; i++) buf[i].prob = lz_exp(buf[i].prob - lmax);
+    return n0;
+}
+
+/* minp^(1/T), memoised on the exact bits of both arguments.
+ *
+ * This is the only libm double call left in the per-token path, and its
+ * two inputs are sampling settings: they change when a caller changes
+ * one, which for a normal generation is never. Recomputing it per token
+ * is the same answer at a double-precision pow's price, on a target
+ * family whose slowest members have no hardware divide behind that pow
+ * at all.
+ *
+ * Keyed by ==, not by a tolerance. A hit returns the value pow returned
+ * for those bits, not a value near it, so memoising cannot move a
+ * sampled token. The sentinels are negative and both real arguments are
+ * guarded positive by the caller, so the first call always misses. A
+ * NaN argument compares unequal to everything including itself and
+ * simply recomputes, which is the behaviour that keeps a NaN from
+ * pinning a stale value in the cache.
+ *
+ * No lock, and none needed: nothing in this tree creates a thread. The
+ * server's slots are sequential. */
+static float minp_pow(float minp, float temperature)
+{
+    static float k_minp = -1.0f, k_temp = -1.0f, cached = 0.0f;
+    if (minp == k_minp && temperature == k_temp) return cached;
+    cached = lz_powf(minp, 1.0f / temperature);
+    k_minp = minp;
+    k_temp = temperature;
+    return cached;
+}
+
+/* Path when top_k is off: coarse threshold filter, then sort; matches llama2.c
+ *
+ * NOT THE SHIPPING PATH, and the qsort below is why that is worth
+ * saying. An indirect call per comparison is poor on an in-order core
+ * with weak prediction, which makes this look like an obvious target -
+ * but lz_sample_defaults sets topk 20, select_candidates takes the
+ * top_k branch whenever 0 < topk < n, and that branch uses select_topk:
+ * an insertion sort into a k-sized array with an early-out that skips
+ * most of the vocabulary, no function pointer anywhere. Confirmed by
+ * running with and without --topk 0 and getting different output.
+ * Optimising here would be spending on a branch the default never
+ * takes. */
 static int select_all(const float *p, int n, float topp, LZProbIndex *buf) {
     int n0 = 0, i;
     const float cutoff = (n > 1) ? (1.0f - topp) / (float)(n - 1) : 0.0f;
@@ -425,16 +560,28 @@ static int select_all(const float *p, int n, float topp, LZProbIndex *buf) {
    index to keep (buf[0..return] survive) or -1 if nothing survived
    (this matches lz_sample's own n0<=0 fallback to argmax - *out_mass
    is left unwritten on this path). */
-static int select_candidates(const LZSampleParams *pr, const float *logits,
+static int select_candidates(const LZSampleParams *pr, float *logits,
                              int n, LZProbIndex *buf, float *out_mass,
                              float temperature) {
     int n0, topk_cut = 0, i, last;
     float cumulative = 0.0f;
 
+    /* `logits` arrives RAW - neither divided by the temperature nor
+       softmaxed, and deliberately so: doing either in the caller spends
+       it on the whole vocabulary. Each branch below does whichever it
+       actually needs, and the top_k branch needs neither over more than
+       k entries. See select_topk_exp. */
     if (pr->topk > 0 && pr->topk < n) {
-        n0 = select_topk(logits, n, pr->topk, buf);
+        n0 = select_topk_exp(logits, n, pr->topk, 1.0f / temperature, buf);
         topk_cut = 1;
     } else {
+        /* select_all's coarse cutoff is (1-topp)/(n-1), a threshold on
+           NORMALIZED probability, and the `mass = 1.0f` below leans on
+           the same thing - so this branch keeps the whole-vocabulary
+           temperature divide and softmax it always had. */
+        float inv = 1.0f / temperature;
+        for (i = 0; i < n; i++) logits[i] *= inv;
+        lz_softmax(logits, n);
         n0 = select_all(logits, n, pr->topp, buf);
     }
     if (n0 <= 0) return -1;
@@ -450,22 +597,21 @@ static int select_candidates(const LZSampleParams *pr, const float *logits,
            llama.cpp units (fraction of the RAW peak) becomes
            minp^(1/T) here - see "min_p units" in sampler.h. Done per
            token rather than at init so it tracks a caller that
-           changes temperature; one pow() against a 32K softmax.
+           changes temperature; memoised in minp_pow, so the steady
+           state costs a float compare rather than a pow.
            Sampling runs OUTSIDE the PC=24 region (lz_fpu_float_end
            already ran in forward_chunk), so libm double is safe here -
-           inside it, pow would return wrong values (iron law 6). */
+           inside it, pow would return wrong values. */
         float m_eff = pr->minp;
         float thresh;
         int m = n0;
         /* `temperature` is the EFFECTIVE temperature for this sample (the
            base value when dynamic temperature is off) - the
            conversion must track the number that actually divided the
-           logits, which is what the comment below already claimed and the
-           pre-feature code got from pr->temperature. Both are the same
-           float when no override is active (iron law two). */
+           logits, not pr->temperature: the two are the same float only
+           when no override is active. */
         if (pr->minp_llamacpp && temperature > 0.0f)
-            m_eff = (float)pow((double)pr->minp,
-                               1.0 / (double)temperature);
+            m_eff = minp_pow(pr->minp, temperature);
         thresh = m_eff * buf[0].prob;
         for (i = 1; i < n0; i++) {
             if (buf[i].prob < thresh) { m = i; break; }
@@ -538,18 +684,17 @@ void lz_target_dist(const LZSampleParams *pr, float *logits, int n,
     int last, i;
     float mass;
 
-    {
-        float inv = 1.0f / pr->temperature;
-        for (i = 0; i < n; i++) logits[i] *= inv;
-    }
-    lz_softmax(logits, n);
-
     if ((pr->topk <= 0 || pr->topk >= n) &&
         (pr->topp <= 0.0f || pr->topp >= 1.0f) && pr->minp <= 0.0f) {
+        float inv = 1.0f / pr->temperature;
+        for (i = 0; i < n; i++) logits[i] *= inv;
         /* No filters: the softmax IS the final distribution already -
            same "nothing to restrict" case lz_sample's own step 3
            short-circuits, just returning the vector instead of a
-           sample drawn from it. */
+           sample drawn from it. This is the one exit that needs every
+           entry normalized, so it is the one that still pays for the
+           whole-vocabulary softmax. */
+        lz_softmax(logits, n);
         memcpy(out_p, logits, (size_t)n * sizeof(float));
         return;
     }
@@ -589,7 +734,7 @@ void lz_target_dist(const LZSampleParams *pr, float *logits, int n,
    apply_penalties_assumed taking a caller-built window instead of
    reaching into a specific LZSampler). */
 int lz_sample_temp_q(float *logits, int n, float temperature,
-                     unsigned long long *rng_state) {
+                     lz_u64 *rng_state) {
     float coin;
     int i;
     float inv = 1.0f / temperature;
@@ -638,10 +783,10 @@ static void inspect_fill_from_buf(LZInspect *ins, const LZProbIndex *buf,
 float lz_sample_eff_temp(const LZSampleParams *p, int in_think) {
     /* Pure number selection, no arithmetic - the "which float divides the
        logits" decision, shared by lz_sample_ex's per-token path and
-       generate.c's round-level speculative override (one rule, iron law
-       two). With the enable flag clear the function returns `temperature`
-       itself, bit for bit, which is what makes dynamic temperature a
-       no-op by default (iron law two). */
+       generate.c's round-level speculative override - one rule, not two
+       copies. With the enable flag clear the function returns
+       `temperature` itself, bit for bit, which is what makes dynamic
+       temperature a no-op by default. */
     if (p->think_temp_enabled && in_think) return p->temp_think;
     return p->temperature;
 }
@@ -690,21 +835,17 @@ int lz_sample_ex(LZSampler *s, float *logits, LZInspect *ins,
      * endpoint rejects them with a 400, but the DLL and CLI are callers
      * as well and this is the one place all three pass through.
      */
-    if (!(temp > LZ_TEMP_FLOOR)) {
+    if (!(temp > LZ_TEMP_FLOOR_F)) {
         int idx = sample_argmax(logits, n);
         if (ins) inspect_fill_single(ins, idx);
         return idx;
     }
-    /* same: every vocab entry divided by one temperature; hoisted to a
-       reciprocal. Without the hoist each sample divides per vocab entry
-       (248320 for the upstream 0.8B model); the reciprocal makes it one
-       divide per sample. */
-    {
-        float inv = 1.0f / temp;
-        for (i = 0; i < n; i++) logits[i] *= inv;
-    }
-    lz_softmax(logits, n);
-
+    /* NO temperature divide here, and that is the point: at this spot
+       it would run over every vocab entry before anything had decided
+       which entries matter. With a filter active it runs on the k
+       survivors inside select_topk_exp instead, which is legal because
+       1/T is positive and therefore monotone. The no-filter exit below
+       does do the whole vector - it returns the whole vector. */
     coin = lz_random_f32(&s->rng_state);
 
     /* 3. none of top_k/top_p/min_p active: sample directly from the
@@ -719,7 +860,16 @@ int lz_sample_ex(LZSampler *s, float *logits, LZInspect *ins,
        nothing has renormalized a subset of it. */
     if ((pr->topk <= 0 || pr->topk >= n) &&
         (pr->topp <= 0.0f || pr->topp >= 1.0f) && pr->minp <= 0.0f) {
-        int idx = sample_mult(logits, n, coin);
+        int idx;
+        float inv = 1.0f / temp;
+        /* The one exit that samples from the WHOLE vector, so the one
+           that still pays for the whole vector: the temperature divide
+           and the softmax both run over every entry here, and nowhere
+           else. Every other path below works inside the candidate set,
+           where the normalizer cancels - see select_topk_exp. */
+        for (i = 0; i < n; i++) logits[i] *= inv;
+        lz_softmax(logits, n);
+        idx = sample_mult(logits, n, coin);
         if (ins) {
             int k = (LZ_INSPECT_CAND_MAX < n) ? LZ_INSPECT_CAND_MAX : n;
             select_topk(logits, n, k, buf);

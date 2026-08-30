@@ -1,6 +1,8 @@
 #ifndef LZ_GUI_SETTINGS_H
 #define LZ_GUI_SETTINGS_H
 
+#include "../src/lz_int.h"   /* lz_u64: the 64-bit type, portably */
+
 /* Thinking mode and temperature, and the coupling between them.
  *
  * Four rules govern the coupling, and they are the kind of small that
@@ -85,7 +87,7 @@ typedef struct {
        same thing it means to the engine (the sampler substitutes 1),
        so a user who types 0 gets a working fixed seed rather than a
        silently random one. */
-    unsigned long long seed;
+    lz_u64 seed;
     /* Requested context window, in tokens, always a multiple of
        LZ_COMMON_CTX_STEP within [MIN, MAX]. This is what the USER asked
        for; what a loaded model's run state was actually allocated with
@@ -94,6 +96,13 @@ typedef struct {
        the question is "how much context is there", the first only when
        the question is "what did the user pick". */
     int   ctx;
+    /* Sound a beep when a reply finishes. ON by default - the machines
+       this targets take long enough per reply that the user goes and
+       does something else, which is the whole reason the setting is
+       here. See common/beep.h for what "beep" is on each platform.
+       The CLI has the same behaviour behind --no-beep, but its flag is
+       its own local: the command line does not read the ini. */
+    int   beep;
 } LZGuiSettings;
 
 /* Context window range. The range exists because a fixed size is the
@@ -227,7 +236,7 @@ float lz_common_scroll_to_rep(int pos);
  * hunting for why the program still behaves oddly. */
 void lz_common_settings_restore(LZGuiSettings *s);
 
-/* Format the "N tok · X tok/s" status cell. Pure arithmetic:
+/* Format the "N tok, X tok/s" status cell. Pure arithmetic:
  * no Win32, so known inputs can be tabled and
  * the formatted rate asserted. `elapsed_ms` is a wall-clock span, in the
  * same seconds-as-the-unit convention cli_main.c uses; anything under
@@ -235,7 +244,7 @@ void lz_common_settings_restore(LZGuiSettings *s);
  * caller-supplied localised format string ("%d" then "%.1f") - it is a
  * parameter rather than read in here so this file stays free of the
  * Win32-dependent string table. Returns 0 on success. */
-int lz_common_tokcell(char *out, int cap, int tokens, double elapsed_ms,
+int lz_common_tokcell(char *out, int cap, int tokens, float elapsed_ms,
                    const char *fmt);
 
 #endif

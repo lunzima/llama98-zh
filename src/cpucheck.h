@@ -38,15 +38,19 @@ int lz_cpu_check_bits(int have_cpuid, unsigned edx1,
 int lz_cpu_check(char *errbuf, int errlen);
 
 /* CPUID leaf 1's EDX, as raw feature bits (bit 23 MMX, bit 25 SSE,
-   bit 26 SSE2). Watcom only: on the gcc build the answer is a compile-time
-   constant, so there is no implementation to call.
+   bit 26 SSE2). One implementation per compiler (Watcom's #pragma aux,
+   gcc's __asm__), same symbol name, so a caller needing the leaf in more
+   than one file - ops.c's kernel_detect(), for which the SSE2 tier is
+   a genuine runtime question on the 32-bit x87 target - does not care
+   which one it links against.
 
-   A real FUNCTION with a __asm block, not #pragma aux. #pragma aux is the
-   inline-code-generation syntax and emits no linkable symbol, so a leaf
-   needed in two files could only be duplicated. This is a normal symbol
-   ops.c calls, and the __asm block's own prologue saves/restores ebx
-   (CPUID clobbers it), which a #pragma aux body has to do by hand. */
-#if defined(__WATCOMC__)
+   Watcom: a real FUNCTION with a __asm block, not #pragma aux.
+   #pragma aux is the inline-code-generation syntax and emits no
+   linkable symbol, so a leaf needed in two files could only be
+   duplicated. This is a normal symbol ops.c calls, and the __asm
+   block's own prologue saves/restores ebx (CPUID clobbers it), which a
+   #pragma aux body has to do by hand. */
+#if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86)
 unsigned lz_cpuid1_edx(void);
 #endif
 

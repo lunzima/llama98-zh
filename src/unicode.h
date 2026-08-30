@@ -1,7 +1,7 @@
 #ifndef LZ_UNICODE_H
 #define LZ_UNICODE_H
 
-#include <stdint.h>
+#include "lz_int.h"   /* <stdint.h> is not on the language floor */
 
 /* Unicode utilities: NFC normalization and character classification.
    Tables generated (Unicode 15.0);
@@ -36,7 +36,7 @@ int lz_utf8_nfc(const char *in, int len, char *out, int outcap);
 int lz_uni_is_letter(uint32_t cp);   /* \p{L} */
 int lz_uni_is_mark(uint32_t cp);     /* \p{M} */
 int lz_uni_is_number(uint32_t cp);   /* \p{N} */
-int lz_uni_is_space(uint32_t cp);    /* Unicode White_Space（Rust regex \s） */
+int lz_uni_is_space(uint32_t cp);    /* Unicode White_Space (Rust regex \s) */
 
 /* canonical combining class (0 = starter) */
 int lz_uni_ccc(uint32_t cp);

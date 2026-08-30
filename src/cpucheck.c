@@ -14,7 +14,7 @@
 
 #if defined(__i386__) || defined(__x86_64__)
 #include <cpuid.h>   /* __get_cpuid - the brand-string leaves */
-#endif
+#endif /* __i386__ || __x86_64__ */
 
 /* CPUID leaf 1, EDX. Only the bits this file names. */
 #define LZ_CPUID1_FPU  (1u << 0)
@@ -87,18 +87,47 @@ static int probe(unsigned *edx1) {
 
 #elif defined(__i386__) || defined(__x86_64__)
 
-static int probe(unsigned *edx1) {
+/* EFLAGS bit 21 (ID) is writable exactly when CPUID exists - the same
+   architecturally defined test as the Watcom branch's
+   lz_eflags_id_toggles() above, ported to gcc inline asm. size_t, not
+   unsigned long: it must match pushf/popf's operand width in whichever
+   mode this TU is compiled for (4 bytes at -m32, 8 at -m64/x86-64) -
+   unsigned long is only 4 bytes in both modes under this project's
+   Windows/MinGW target (LLP64), which would push a 32-bit slot against
+   a 64-bit pushf and corrupt the stack under -m64. */
+static int lz_eflags_id_toggles(void) {
+    size_t f0, f1;
+    __asm__ __volatile__("pushf\n\tpop %0" : "=r"(f0) :: "cc");
+    __asm__ __volatile__(
+        "push %1\n\tpopf\n\tpushf\n\tpop %0"
+        : "=r"(f1) : "r"(f0 ^ (size_t)0x200000) : "cc");
+    __asm__ __volatile__("push %0\n\tpopf" :: "r"(f0) : "cc");
+    return (int)(((f0 ^ f1) >> 21) & 1u);
+}
+
+unsigned lz_cpuid1_edx(void) {
+    /* No EFLAGS.ID test here - by design, matching the Watcom half's
+       shape (lz_cpuid1_edx_asm above is equally raw): the guard belongs
+       to the one caller that decides whether it is safe to use, probe()
+       below, not to this primitive. A second, independent caller that
+       skipped the guard would be the actual bug; the gate exists to
+       catch exactly that, not to duplicate the check here. */
     unsigned a, b, c, d;
-    /* x86-64 always has CPUID and always has an FPU; on 32-bit gcc the
-       __get_cpuid path below still answers honestly. Either way this is
-       the development build, where the interesting case cannot occur -
-       which is exactly why lz_cpu_check_bits is separate. */
     a = b = c = d = 0;
     __asm__ __volatile__("cpuid"
                          : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
                          : "a"(1));
     (void)a; (void)b; (void)c;
-    *edx1 = d;
+    return d;
+}
+
+static int probe(unsigned *edx1) {
+    /* Guarded: on i486/i386 there is no CPUID instruction and this
+       would fault, and the x87 build targets real Socket-7 hardware.
+       Harmless at today's i586 floor (every Socket 7 part has CPUID) -
+       same guard the Watcom branch above already has. */
+    if (!lz_eflags_id_toggles()) { *edx1 = 0; return 0; }
+    *edx1 = lz_cpuid1_edx();
     return 1;
 }
 
@@ -112,7 +141,7 @@ static int probe(unsigned *edx1) {
     return 1;
 }
 
-#endif
+#endif /* __WATCOMC__ || __i386__ || __x86_64__ */
 
 int lz_cpu_check(char *errbuf, int errlen) {
     unsigned edx1 = 0;
@@ -233,7 +262,7 @@ static int cpu_brand_raw(char *out, int cap) {
     return 0;
 }
 
-#endif
+#endif /* __WATCOMC__ || __i386__ || __x86_64__ */
 
 /* The brand string, trimmed. Word 95's System Info had no way to name a
    processor beyond 386/486/Pentium; a modern machine needs its real

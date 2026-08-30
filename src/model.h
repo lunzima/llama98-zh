@@ -1,7 +1,7 @@
 #ifndef LZ_MODEL_H
 #define LZ_MODEL_H
 
-#include <stdint.h>
+#include "lz_int.h"   /* <stdint.h> is not on the language floor */
 #include <stdio.h>
 
 #include "safetensors.h"
@@ -54,6 +54,46 @@
 #define LZ_FMT_Q6_1  3      /* gs 6-bit (4-bit plane + 2-bit plane) + scale + min */
 #define LZ_FMT_Q16_0 4      /* gs int16s + 1 f32 scale (symmetric) */
 #define LZ_FMT_T2    5      /* ternary {-1,0,+1} as 2-bit codes + 1 f32 scale */
+#define LZ_FMT_BF16  6      /* n bf16s in q (read as uint16); no scale, no groups */
+
+/* LZ_FMT_BF16 IS STORAGE, NOT QUANTIZATION, and it is the only format
+   here that loses nothing. A bf16 is the high half of an f32, so
+   widening is `bits << 16` and the result is the very number the file
+   holds - there is no scale to apply, no group to belong to, and no
+   rounding either way.
+ *
+ * WHY IT EXISTS. Expanding a BF16 tensor to f32 while loading (the
+ * safetensors.c read path) would turn a file storing two bytes per
+ * parameter into four in RAM. On a 64MB target that is the difference
+ * between a model fitting and not: the checkpoint this was measured
+ * against reports "0.23 GB at 4 bytes/param". Keeping it narrow halves
+ * both the footprint and the DDR traffic of reading it, and DDR is the
+ * bottleneck on a 248MHz part.
+ *
+ * BIT-IDENTICAL TO EXPANDING AT LOAD TIME, which is what makes it safe
+ * to have on by default. The widening is the same `<<16` the loader
+ * performed, only deferred to the point of use; every value the kernels
+ * see is unchanged. That is a different claim from the quantized formats
+ * above, which trade accuracy for size on purpose - this one trades
+ * nothing. Narrowing an F32 file INTO bf16 would be lossy and is a
+ * separate decision, not this format.
+ *
+ * gs is 0 and scale/zero are NULL, so any code that reaches for a scale
+ * must test the dtype first - lz_t_f32 does, ahead of its scale guard.
+ *
+ * NARROWING AN F32 TENSOR INTO THIS FORMAT IS NOT WORTH DOING, and the
+ * reason is structural rather than a measurement that came out badly.
+ * Per 32 elements: F32 128 bytes, BF16 64, Q8_0 36, Q4_1 24, T2 12. A
+ * checkpoint willing to accept a lossy conversion should quantise -
+ * Q8_0 is 1.8x smaller than bf16 AND has hand-written integer kernels,
+ * where bf16 widens back to f32 to compute. The lossy direction is
+ * dominated by an option this engine already has.
+ *
+ * The lossless direction, which is what this format IS, does not
+ * compete with those: it applies to tensors that arrive as bf16, where
+ * quantising would be an ADDITIONAL lossy step. Measured on real
+ * checkpoints, that is nearly all of them - Qwen3.5-0.8B is 1746.9 MB
+ * of BF16 against 0.01 MB of F32, and Qwopus3.5-2B has no F32 at all. */
 
 /* Weight tensor. Row-major (out, in); quantization groups are
    contiguous within a row.
@@ -78,6 +118,30 @@ typedef struct {
                                Q16_0: n int16s (reinterpret as int16_t) */
     float *scale;           /* quantized: one scale per group, n/gs */
     float *zero;            /* Q4_1/Q6_1: one min per group, n/gs; NULL otherwise */
+    /* Derived plane for the fixed-point dequant epilogue: `scale`
+       requantized to int16 with one shared exponent per output row.
+       Built once by lz_epi_prep(), NULL when the float epilogue runs.
+       It has to be load-time work - quantizing per row inside the
+       forward costs as much float arithmetic as the epilogue it
+       replaces, which is what the first candidate measured. */
+    int16_t     *sq;        /* n/gs int16 */
+    signed char *sexp;      /* one exponent per row */
+    /* Row stride of sq and zq, in int16: in_dim/gs, the group count of
+       one output row. Stored because the epilogue indexes those planes
+       once per output element and the alternative is deriving it there
+       from the kernel's (sub-block count, sub-blocks per group) pair,
+       which is an integer divide a million times a generation. It is
+       not a cached copy of that quotient - it is the stride the planes
+       were actually allocated with, so it is the primary value and the
+       quotient was the derivation. */
+    int          sq_row;
+    /* The same decomposition of the `zero` plane, built by
+       lz_epi_prep_zero(). Q4_1/Q6_1 only: T2 has no stored min - its
+       zero coefficient is -scale, which `sq`/`sexp` above already
+       carry - and Q8_0/Q16_0 have no zero term at all, so both leave
+       these NULL. */
+    int16_t     *zq;        /* n/gs int16 */
+    signed char *zexp;      /* one exponent per row */
 } LZTensor;
 
 /* Q6_1's 2-bit plane layout: every 32 elements take 8 bytes; byte j's
@@ -89,10 +153,10 @@ typedef struct {
    with the two 8-byte loads of the 4-bit plane - the activation side's
    pre-expanded registers are reused as-is, no reshuffling needed.
 
-   Value q = lo + (hi<<4) in [0,63], dequantized w = q·d + m. The dot
-   product splits exactly: dot(q,x) = dot(lo,x) + 16·dot(hi,x), two
+   Value q = lo + (hi<<4) in [0,63], dequantized w = q*d + m. The dot
+   product splits exactly: dot(q,x) = dot(lo,x) + 16*dot(hi,x), two
    int32 accumulators merged afterwards, no precision loss (the hi term
-   is 3·127·32 = 12k, far from the int32 limit). */
+   is 3*127*32 = 12k, far from the int32 limit). */
 
 /* LZ_FMT_T2: ternary {-1,0,+1}, BIT-LAYOUT IDENTICAL TO Q6_1's 2-bit
    plane above - every 32 elements take 8 bytes, byte j's bits 0-1 are
@@ -110,7 +174,7 @@ typedef struct {
    symmetric, so there is no min to carry - but the dot product still
    splits into two terms the way Q4_1's does, and for the same reason:
 
-       Σ w·x = d·Σ(code-1)·x = d·[ Σ code·x  -  Σ x ]
+       sum(w*x) = d*sum((code-1)*x) = d*[ sum(code*x) - sum(x) ]
 
    The second term depends only on activations, so it is hoisted out of
    the row loop into xgref[] and shared by every output row. That is the
@@ -118,7 +182,7 @@ typedef struct {
    `_mm256_sub_epi16(sumi0, ysum)` against the pre-computed y->bsums),
    arrived at independently on both sides.
 
-   WHAT IS NOT COPIED, and why: llama.cpp also ships TQ1_0 at 1.6875
+   What is not copied, and why: llama.cpp also ships TQ1_0 at 1.6875
    bpw, packing 5 elements per byte in base 3 (3^5 = 243 < 256). It is
    the denser format and it is unusable on the ARM926EJ-S target -
    unpacking needs division by 3 and that core has NO hardware divide.
@@ -207,6 +271,23 @@ typedef struct {
     int tie_word_embeddings;
     int attn_output_gate;           /* whether q_proj carries the gate (true in this model) */
     int full_attention_interval;    /* every Nth layer is a full_attention */
+    /* SubLN (BitNet b1.58): delete the two pre-layer norms and give each
+       ternary projection its own input RMSNorm (see the kda_*_norm /
+       gate_norm / up_norm / down_norm fields on LZLayer). Mirrors the
+       training side's config.use_subn. 0 = ordinary pre-layer norms. */
+    int use_subn;
+    /* Block-diagonal Hadamard (online, applied to the SubLN activation
+       just before quantization - never folded into a weight, so nothing
+       in the tensor data records whether it was done). hadamard_o is
+       kda_o_proj's block, hadamard_down is the dense FFN down_proj's.
+       0 = no Hadamard; a positive value is the block size (a power of
+       two dividing that projection's input dim). -1 on the wire means
+       "derive" and exists only for products that predate these fields
+       (bin < v8, config.json without the keys); load time resolves it
+       into a concrete 0-or-block-size, so the forward pass only ever
+       sees the two settled values. */
+    int hadamard_o;
+    int hadamard_down;
     /* config.json "mtp_num_hidden_layers"; 0 when the key is absent,
        which is every model this project has produced except upstream
        Qwen/Qwen3.5-0.8B itself (1, 15 mtp.* tensors, 20,452,864
@@ -275,6 +356,15 @@ typedef struct {
     LZTensor up_proj;                /* (inter, hidden) Q8 */
     LZTensor down_proj;              /* (hidden, inter) Q8 */
 
+    /* SubLN (use_subn=1 only; bound when config.use_subn is set):
+       per-projection input RMSNorm for the classic dense FFN's ternary
+       projections. Each norm is applied to that projection's OWN input in
+       the forward (gate/up_proj: the hidden state; down_proj: the
+       intermediate activation), replacing the two pre-layer norms. */
+    LZTensor gate_norm;              /* (hidden) f32 - gate_proj input RMSNorm */
+    LZTensor up_norm;                /* (hidden) f32 - up_proj input RMSNorm */
+    LZTensor down_norm;              /* (intermediate) f32 - down_proj input RMSNorm */
+
     /* full_attention only */
     LZTensor q_proj;                 /* (attn_qgate_dim, hidden) Q8 */
     LZTensor k_proj;                 /* (attn_kv_dim, hidden) Q8 */
@@ -282,6 +372,16 @@ typedef struct {
     LZTensor o_proj;                 /* (hidden, attn_q_dim) Q8 */
     LZTensor q_norm;                 /* (head_dim) f32 */
     LZTensor k_norm;                 /* (head_dim) f32 */
+
+    /* SubLN (use_subn=1 only): full attention's per-projection INPUT
+       RMSNorms. Distinct from q_norm/k_norm above, which are Qwen3.5's
+       per-head QK norms over head_dim and are present at every use_subn
+       setting. These normalize what the projection reads: the residual
+       for q/k/v, the attention value output for o_proj. */
+    LZTensor attn_q_subn_norm;       /* (hidden) f32 - q_proj input */
+    LZTensor attn_k_subn_norm;       /* (hidden) f32 - k_proj input */
+    LZTensor attn_v_subn_norm;       /* (hidden) f32 - v_proj input */
+    LZTensor attn_o_subn_norm;       /* (attn_q_dim) f32 - o_proj input */
 
     /* linear_attention only */
     LZTensor in_proj_qkv;            /* (lin_conv_dim, hidden) Q8 */
@@ -316,6 +416,19 @@ typedef struct {
     LZTensor kda_o_norm;             /* (lin_v_head_dim) f32 - same role as ssm_norm, silu gate */
     LZTensor kda_o_proj;             /* (hidden, lin_value_dim) Q8 - same role as out_proj */
 
+    /* SubLN (use_subn=1 only; bound when config.use_subn is set):
+       per-projection input RMSNorm for the ternary KDA projections. Each
+       norm is applied to that projection's OWN input in the forward
+       (q/k/v/g: the hidden state; o_proj: the value output, lin_value_dim
+       wide). kda_o_subn_norm is DISTINCT from kda_o_norm above - that one
+       is the gated-silu norm over one value head, this one is o_proj's
+       plain input RMSNorm over the whole lin_value_dim span. */
+    LZTensor kda_q_norm;             /* (hidden) f32 - q_proj input RMSNorm */
+    LZTensor kda_k_norm;             /* (hidden) f32 - k_proj input RMSNorm */
+    LZTensor kda_v_norm;             /* (hidden) f32 - v_proj input RMSNorm */
+    LZTensor kda_g_norm;             /* (hidden) f32 - g_proj input RMSNorm */
+    LZTensor kda_o_subn_norm;        /* (lin_value_dim) f32 - o_proj input RMSNorm */
+
     /* FFN routing. 0 (default) = classic dense gate/up/down_proj above;
        1 = latent MoE below. Resolved once at load time from
        config.num_experts / config.first_k_dense_replace, not recomputed
@@ -335,6 +448,20 @@ typedef struct {
     LZTensor moe_shared_gate;        /* (moe_shared_width, hidden) Q8, only when moe_shared_width > 0 */
     LZTensor moe_shared_up;          /* (moe_shared_width, hidden) Q8 */
     LZTensor moe_shared_down;        /* (hidden, moe_shared_width) Q8 */
+
+    /* SubLN (use_subn=1 only): the latent-MoE block's per-projection
+       input RMSNorms. Under SubLN the block reads the RAW residual - the
+       pre-layer norm is gone - so each projection normalizes its own
+       input. The ROUTER is included on purpose: its logits go through a
+       softmax, so the input magnitude is a temperature, and leaving it
+       bare changes every routing decision rather than merely skipping a
+       normalization. */
+    LZTensor moe_gate_norm;          /* (hidden) f32 - router input */
+    LZTensor moe_down_norm;          /* (hidden) f32 - routed_expert_down_proj input */
+    LZTensor moe_up_norm;            /* (moe_latent_dim) f32 - routed_expert_up_proj input */
+    LZTensor moe_shared_gate_norm;   /* (hidden) f32, only when moe_shared_width > 0 */
+    LZTensor moe_shared_up_norm;     /* (hidden) f32 */
+    LZTensor moe_shared_down_norm;   /* (moe_shared_width) f32 */
     /* Per-expert triplet, config.num_experts entries each, allocated at
        load time (model.c) - NOT part of the fixed LZLayerSpec table
        because the count is a runtime config value, not a compile-time
@@ -361,6 +488,14 @@ typedef struct {
     LZSafetensors st;
     char prefix[64];                /* tensor-name prefix, auto-detected */
     FILE *bin_file;                 /* non-NULL: stream weights from model.bin */
+
+    /* Streaming reader abstraction: every model.bin field/tensor read goes
+       through rd(rd_ctx, dst, sz). Two implementations: file_reader over
+       bin_file, and lz4d_read over a model.bin.lz4 stream (stunt). Returns
+       bytes actually read; the callers treat anything short of `sz` as a
+       read error. */
+    size_t (*rd)(void *ctx, void *dst, size_t sz);
+    void *rd_ctx;
 
     LZTensor embed_tokens;          /* (vocab, hidden) Q8; doubles as lm_head when tied */
     LZTensor final_norm;            /* (hidden) f32 */
@@ -423,15 +558,20 @@ typedef struct {
        agree, and that draft-verify-rollback reproduces a manual
        sequential replay - both are self-consistency checks on RANDOM
        weights, not correctness checks against a trained model's real
-       output; iron law four's distinction between the two). Reads as a
+       output; a consistency check and a correctness check are not the
+       same claim). Reads as a
        weakness list, not a to-do list yet: no real MTP weights exist to
        validate against. */
     LZMtp *mtp;
 
     int weights_loaded;             /* 0 = metadata bound only, weights not read */
-    long long n_params;             /* text-tower parameter count */
-    long long n_params_skipped;     /* dropped parts (vision tower) */
-    long long bytes_alloc;          /* bytes actually allocated */
+    /* lz_i64, not long long. On every toolchain that
+       exists today this IS long long; on Visual C++ 4.0 it is __int64,
+       which is the point. safetensors.h supplies it (included above)
+       and n_elem beside these already uses it. */
+    lz_i64 n_params;                /* text-tower parameter count */
+    lz_i64 n_params_skipped;        /* dropped parts (vision tower) */
+    lz_i64 bytes_alloc;             /* bytes actually allocated */
 } LZModel;
 
 /* Parse config.json. Supports both the multimodal shell (fields under

@@ -11,17 +11,16 @@
    lib386/dos/graph.lib does not link against this build at all: its
    objects pull in _Extender, _ExtenderRealModeSelector and _STACKLOW,
    a runtime this DOS-extender target does not have. (Its symbols are
-   also undecorated where __watcall would want a trailing underscore,
-   which is what the first attempt tripped over - but the runtime
-   mismatch is the one that settles it.)
-   int386 is in the ordinary C library and always links.
-   The per-character interrupt was rejected on cost earlier and that was
-   wrong for THIS workload: generation puts out a few tokens a second,
-   so this path sees tens of characters a second, not a screen refresh.
-   The cost is unmeasurable next to one forward pass. */
+   also undecorated where __watcall would want a trailing underscore -
+   the first thing you hit, but the runtime mismatch is what settles
+   it.) int386 is in the ordinary C library and always links.
+   The per-character interrupt is cheap for THIS workload: generation
+   puts out a few tokens a second, so this path sees tens of characters
+   a second, not a screen refresh. The cost is unmeasurable next to one
+   forward pass. */
 #elif defined(_WIN32)
 #include <windows.h>
-#endif
+#endif /* __DOS__ || _WIN32 */
 
 #include "cli_attr.h"
 #include "stream.h"
@@ -47,7 +46,7 @@ static unsigned char g_dos_attr = 0x07;
  * the attribute in BL. Neither alone does the job, so this is 09h to
  * place the coloured cell followed by an explicit cursor advance -
  * which is also where the newline, the wrap and the scroll have to be
- * handled, since nothing else is doing it any more.
+ * handled, since nothing else does it.
  *
  * Page 0 throughout: this program never switches video pages, and
  * asking BIOS for the active one per character would double the
@@ -96,7 +95,7 @@ static void dos_probe(void) {
  * the attribute in BL. Neither alone does the job, so this is 09h to
  * place the coloured cell followed by an explicit cursor advance -
  * which is also where the newline, the wrap and the scroll have to be
- * handled, since nothing else is doing it any more. */
+ * handled, since nothing else does it. */
 static void dos_putc(char ch) {
     union REGS r;
     int row, col;
@@ -137,7 +136,7 @@ static void dos_putc(char ch) {
     r.h.dh = (unsigned char)row; r.h.dl = (unsigned char)col;
     int386(0x10, &r, &r);
 }
-#endif
+#endif /* __DOS__ */
 static int g_cur = -1;          /* attribute currently set, -1 = unknown */
 
 static int attr_for(int style) {
@@ -166,7 +165,7 @@ static int stdout_is_console(void) {
     return GetConsoleMode(h, &mode) ? 1 : 0;
 #else
     return 0;
-#endif
+#endif /* __DOS__ || _WIN32 */
 }
 
 const char *lz_attr_mode(const char *mode) {
@@ -176,9 +175,9 @@ const char *lz_attr_mode(const char *mode) {
     else if (strcmp(mode, "auto") == 0) g_on = stdout_is_console();
     else return NULL;
     g_cur = -1;
-    /* "on" that could not be honoured reports itself as off. A run
-       labelled with what it asked for rather than what it got is the
-       shape iron law four keeps catching. */
+    /* "on" that could not be honoured reports itself as off: a run
+       labelled with what it asked for rather than what it got reads as
+       evidence for something that never happened. */
     return g_on ? "on" : "off";
 }
 
@@ -196,7 +195,7 @@ static void attr_apply(int style) {
     }
 #else
     (void)a;
-#endif
+#endif /* __DOS__ || _WIN32 */
 }
 
 void lz_attr_write(const char *bytes, int n, int style) {
@@ -212,15 +211,15 @@ void lz_attr_write(const char *bytes, int n, int style) {
        screen, which is worse than not having it at all.
        _outtext wants a NUL-terminated string and the caller's bytes are
        a slice, so they are copied out in bounded chunks rather than
-       terminated in place. Static, not stack: iron law six, and this is
-       the single-threaded CLI. */
+       terminated in place. Static, not stack - the target's stack is
+       small, and this is the single-threaded CLI. */
     {
         int i;
         for (i = 0; i < n; i++) dos_putc(bytes[i]);
     }
 #else
     fwrite(bytes, 1, (size_t)n, stdout);
-#endif
+#endif /* __DOS__ */
 }
 
 void lz_attr_reset(void) {

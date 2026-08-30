@@ -5,7 +5,7 @@
 #include "settings.h"
 #include <stdio.h>      /* sprintf */
 
-/* Format the "N tok · X tok/s" status cell for a turn that is (or just
+/* Format the "N tok, X tok/s" status cell for a turn that is (or just
  * was) generating.
  *
  * Pure arithmetic, so it can be driven with a
@@ -32,14 +32,17 @@
  * - a target that is deliberately free of Win32 and of the string table
  * that depends on it. The format is one constant in gui/main.c's call
  * site, next to the cell buffer. */
-int lz_common_tokcell(char *out, int cap, int tokens, double elapsed_ms,
+int lz_common_tokcell(char *out, int cap, int tokens, float elapsed_ms,
                    const char *fmt) {
-    double secs;
+    float secs;
     if (!out || cap <= 0) return 1;
     if (tokens < 0) tokens = 0;
-    if (elapsed_ms < 1.0) elapsed_ms = 0.0;
-    secs = elapsed_ms * 0.001;
-    sprintf(out, fmt, tokens, secs > 0.0 ? tokens / secs : 0.0);
+    if (elapsed_ms < 1.0f) elapsed_ms = 0.0f;
+    secs = elapsed_ms * 0.001f;
+    /* cap is the caller's buffer bound; snprintf honours it where sprintf
+       would not - the localised fmt (LZ_STR_STATE_TOKCELL) is caller text
+       and a long translation must truncate, not overflow. */
+    snprintf(out, (size_t)cap, fmt, tokens, secs > 0.0f ? (float)tokens / secs : 0.0f);
     return 0;
 }
 
@@ -107,6 +110,7 @@ void lz_common_settings_init(LZGuiSettings *s) {
     s->seed_mode = LZ_COMMON_SEED_RANDOM;             /* see settings.h */
     s->seed = 1;
     s->ctx = LZ_COMMON_CTX_DEFAULT;
+    s->beep = 1;                                      /* see settings.h */
 }
 
 int lz_common_ctx_clamp(int want, int model_cap) {
@@ -229,4 +233,8 @@ void lz_common_settings_restore(LZGuiSettings *s) {
     s->rep = lz_common_settings_default_rep(s->think);
     s->max_new = LZ_COMMON_MAXNEW_UNLIMITED;
     s->ctx = LZ_COMMON_CTX_DEFAULT;
+    /* Restored, not preserved: `think` is a MODE the user is currently
+       in and this function reads it, but the beep is an ordinary
+       default and "restore defaults" means turning it back on. */
+    s->beep = 1;
 }

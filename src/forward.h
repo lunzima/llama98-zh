@@ -14,6 +14,362 @@
    dependencies of its own, and forward.c dereferences it - so including
    it here keeps every consumer from having to remember to. */
 #include "inspect.h"
+#include "compat.h"   /* lz_time_ms, for the LZ_PROF* macros */
+
+/* The reference implementation hardcodes l2norm's eps to 1e-6, which
+   is semantically different from config's rms_norm_eps - they only
+   coincide numerically. Keep them separate so a future config change
+   cannot silently drag this one along. */
+#define LZ_L2NORM_EPS 1e-6f
+
+/* Per-layer intermediate tap hook (in the header so the attn path, now in
+   its own TU, sees it). No-op by default; a dump tool redefines it. */
+#ifndef LZ_TAP
+#define LZ_TAP(tag, li, ptr, n) ((void)0)
+/* Set only when nobody supplied a tap, so a site can ask "is anyone
+   reading intermediates here". An int-pipeline step that stops writing
+   the float buffer a tap points at does not blank that tap - it leaves
+   it reading the PREVIOUS contents, which is a plausible-looking wrong
+   number rather than an obvious zero. Such a step guards on this and
+   keeps the float path for a tap build. */
+#define LZ_TAP_OFF 1
+#endif /* LZ_TAP */
+
+/* Per-layer residual hash (see model.c's lz_dbg_layer_hash). Integer-only,
+   a no-op unless -DLZ_DBG_LAYER_HASH=1. Same shape as LZ_TAP so the same
+   sites can carry it; the KDA recurrence is serial-in-t, so the hash must
+   be read at the layer boundary, never inside the recurrence. */
+#if LZ_DBG_LAYER_HASH
+void lz_dbg_layer_hash(const char *tag, int li, const void *p, size_t nf);
+#define LZ_DBGHASH(tag, li, ptr, n) lz_dbg_layer_hash(tag, li, ptr, n)
+#else
+#define LZ_DBGHASH(tag, li, ptr, n) ((void)0)
+#endif /* LZ_DBG_LAYER_HASH */
+
+/* ---- attn helpers (src/forward_attn.c), shared with the paths still in
+   forward.c - the four-path split moved them out and left the signatures
+   here. */
+
+/* Walk the cache in time order from T0 to POS, carrying the row index
+   alongside. Once the ring wraps, SLOT is no longer T, so advancing one
+   without the other reads a different token's row - the two fixed
+   kernels index by absolute t and that is exactly why they carry an
+   LZ_ATTN_NORING guard. Every scoring and weighted-sum loop in
+   forward_attn needs this same pair, so it is written once here rather
+   than eight times there. */
+#define LZ_KV_WALK(S, POS, T, SLOT, T0) \
+    for ((T) = (T0), (SLOT) = kv_slot((S), (T0)); (T) <= (POS); \
+         (T)++, (SLOT) = kv_slot_next((S), (SLOT)))
+
+
+
+/* History exponent for the fixed conv tier.
+ *
+ * MEASURED, not chosen (.prof/wconvrange.c, recover_r20, 64 tokens,
+ * 1.18M samples of the real conv inputs): max |x| = 22.3, the top 0.1%
+ * sits at 2^3, and the highest non-empty bucket is 2^4 - one bucket of
+ * outlier headroom, so this is not a long tail that a constant exponent
+ * has to waste range on. The first and second halves of the sequence
+ * agree on the 0.1% bucket, which is the property that matters here:
+ * the history carries values from earlier steps at the same scale, so a
+ * drifting range would need the scale to travel with the state the way
+ * ssm_state_s does for the recurrence.
+ *
+ * 22.3 * 2^9 = 11423, inside the 16384 bound with a bucket to spare.
+ * A value past 32 clips; the probe saw none, and the clamp is silent, so
+ * re-run it on any model whose conv inputs might be scaled differently. */
+#ifndef LZ_CONV_ES
+#define LZ_CONV_ES 9
+#endif /* LZ_CONV_ES */
+
+/* The conv's OUTPUT exponent for the q and k chains (int-pipeline 9.4),
+ * and the knob that turns that exit on. Unlike LZ_CONV_ES this one is
+ * not chosen on headroom alone: the consumer is an L2 normalisation,
+ * which divides each vector by its own length, so a clip is the only
+ * thing a too-large exponent costs and a too-small one costs relative
+ * precision on the QUIETEST vector rather than on the largest.
+ *
+ * .prof/convqk_range.c, kmr20/zh, 603 tokens, 3.7M samples each chain:
+ * max 26.3953 (q) and 13.2716 (k), zero clamps at 2^10 on both. What
+ * that reading does NOT show, and what the probe reports for this
+ * reason, is that the quietest of the 3,618 vectors peaks at 0.278 -
+ * 94.8x below the global max - so it gets 285 int16 levels where the
+ * loudest gets 27,029. That spread vanishes in the normalisation; the
+ * 285 does not. Re-run the probe on any checkpoint before trusting
+ * either number, and read lz_conv_o_clamped after, because the clamp
+ * is silent everywhere else. */
+#ifndef LZ_CONVO_ES
+#define LZ_CONVO_ES 10
+#endif /* LZ_CONVO_ES */
+/* v GETS ITS OWN, and the first version of this did not - it reused
+ * q and k's 10, which is choosing a constant on a distribution nobody
+ * measured. v's max is 4.5376 against q's 26.3953, so 10 left it at
+ * 4,645 of the 32,767 available and threw away 2.8 bits; 12 is the
+ * largest with zero clamps (13 clips 16 samples). Its spread is also
+ * far tighter - the quietest vector peaks 12.4x below the largest,
+ * against q's 94.8x - which is why it can afford the full range. */
+#ifndef LZ_CONVO_V_ES
+#define LZ_CONVO_V_ES 12
+#endif /* LZ_CONVO_V_ES */
+#ifndef LZ_CONVO_I16
+#define LZ_CONVO_I16 1
+#endif /* LZ_CONVO_I16 */
+
+/* The per-channel exponent table's call-site accessor. A macro rather
+   than a plain `s->conv_sig_e + off` because the =0 build never
+   allocates the array, and `NULL + off` is undefined even where nothing
+   dereferences it - the kernel's own parameter is unread in that arm. */
+#if LZ_CONV_SIG_I
+#define LZ_CONV_SIG_E(s, off) ((s)->conv_sig_e + (off))
+#else
+#define LZ_CONV_SIG_E(s, off) ((const signed char *)0)
+#endif /* LZ_CONV_SIG_I */
+
+/* ---- q16_0's four int16 exits (int-pipeline milestone 5) -------------
+ *
+ * Every q16_0 role on this checkpoint - kda_b_proj, moe_gate_w,
+ * kda_f_a_proj, kda_f_b_proj - now leaves lz_matmul_xq_nt_i16 as an
+ * int16 at a fixed exponent instead of a float the consumer immediately
+ * takes apart again. Each pair below is one chain: _I16 turns it off for
+ * a control build, _ES is the exponent, i.e. the number of FRACTIONAL
+ * bits (value == q * 2^-ES), the convention epi_align_i16's target_e
+ * uses.
+ *
+ * The exponents are measured, not chosen, exactly like LZ_CONV_ES above
+ * (.prof/m5range.c on kmr20, both gate corpora, 603/661 tokens). Each is
+ * the LARGEST that clamps nothing, since the clamp is silent:
+ *
+ * Measured max |q| at the shipping ES, from an instrumented build's
+ * pre-clamp counter, 0 clamps everywhere on both corpora. It aggregates
+ * by weight SHAPE, so bvec and the router share a row - they are both
+ * 512x16 gs=512 - and the max in it is the router's (its |x| runs to
+ * 10.2 against bvec's 6.7, .prof/m5range.c):
+ *
+ *   shape             ES     bound     max |q| zh / en    headroom
+ *   512x16  (bvec,
+ *            moe gate) 11    24,576     21,013 / 20,904     1.17x
+ *   512x64  gate_lat   10    32,767     21,288 / 17,963     1.54x
+ *   64x1024 kda_gate    9    32,767     15,624 / 14,295     2.10x
+ *
+ * bvec and the router are the two whose consumer is lz_sigmoid, and
+ * their bound is NOT int16's edge but the sigmoid table's own
+ * (lz_sig_q15_domain, |x| = 12): past it sigmoid_q15 already returns a
+ * constant, so clamping there adds no behaviour rather than adding a
+ * silent one. Their headroom figure is therefore informational; the
+ * other two clamp at a plain int16 edge and theirs is not.
+ *
+ * kda_gate is at 9 rather than the 10 that would have been the largest
+ * non-clamping value, and that is a measurement: ES = 10 leaves 1.05x
+ * of headroom against a SILENT clamp, and paired NLL cannot tell the two
+ * apart (zh t +0.417 at 10 vs -0.131 at 9, en +1.396 vs +0.763, both
+ * arms against the same float control, n = 602/660). Given a tie on
+ * quality, the exponent with twice the headroom is the one to ship.
+ * Re-run .prof/m5range.c on any checkpoint whose gate projection might
+ * be scaled differently. */
+#ifndef LZ_BVEC_I16
+#define LZ_BVEC_I16 1
+#endif /* LZ_BVEC_I16 */
+#ifndef LZ_BVEC_ES
+#define LZ_BVEC_ES 11
+#endif /* LZ_BVEC_ES */
+
+#ifndef LZ_MOEGATE_I16
+#define LZ_MOEGATE_I16 1
+#endif /* LZ_MOEGATE_I16 */
+#ifndef LZ_MOEGATE_ES
+#define LZ_MOEGATE_ES 11
+#endif /* LZ_MOEGATE_ES */
+
+#ifndef LZ_KLAT_I16
+#define LZ_KLAT_I16 1
+#endif /* LZ_KLAT_I16 */
+#ifndef LZ_KLAT_ES
+#define LZ_KLAT_ES 10
+#endif /* LZ_KLAT_ES */
+
+#ifndef LZ_KGATE_I16
+#define LZ_KGATE_I16 1
+#endif /* LZ_KGATE_I16 */
+#ifndef LZ_KGATE_ES
+#define LZ_KGATE_ES 9
+#endif /* LZ_KGATE_ES */
+
+/* The decay gate's two transcendentals in the integer domain, on top of
+   the int16 exit above. LZ_KGATE_I16 delivered `pre` as an integer and
+   then spent nine semantic conversions per element getting from it to
+   gt: one for the sigmoid's float coordinate, three inside
+   sigmoid_q15_t taking that coordinate apart again, one for the Q15
+   descale, and four in lz_exp_fixed (two i2f plus its magic floor and
+   q8_round, neither of which emits a cvt but both of which are a full
+   soft-float add on a machine with no FPU). sigmoid_q15_ti and lz_exp_t
+   take the two folded integer coordinates instead and leave ONE - the
+   int->float on lz_exp_t's own exit, which stands until gt itself stops
+   being a float array.
+
+   0 is the control arm: it keeps the float-coordinate chain, which is
+   also the arm that runs whenever the scalar transcendental tier is off
+   (lz_exp_t is lz_exp_fixed's twin, not lz_exp's) or a fold refuses. */
+#ifndef LZ_KGATE_EXP_I
+#define LZ_KGATE_EXP_I 1
+#endif /* LZ_KGATE_EXP_I */
+
+/* ---- the MoE latent's int16 exit (int-pipeline milestone 6) ----------
+ *
+ * moe_down_proj is the tree's one Q8_0 producer whose consumer is an
+ * activation quantize, so it is the first caller of
+ * epi_fixed_align_i16's Q8_0 half - delivered in batch 1, verified
+ * standalone, and until now reached only by q16_0. Same _I16 / _ES pair
+ * shape as the four chains above and the same conventions.
+ *
+ * MEASURED, both gate corpora on kmr20, instrumented shipping build
+ * (1.23M / 1.35M latent elements): max |x| 9.270 / 10.126, so ES = 11
+ * is the largest that clamps nothing - ES = 12 clamps 75 / 67.
+ *
+ * It ships at 10, one lower, for the reason LZ_KGATE_ES is: 11 leaves
+ * 1.58x of headroom against a SILENT clamp and paired NLL cannot tell
+ * the two apart - zh t -1.190 at 11 vs -0.804 at 10, en +1.552 vs
+ * +1.077, both arms against the same pre-change control, n = 602/660,
+ * with argmax and top-5 agreement swapping which one leads. Given a
+ * tie on quality, the exponent with twice the headroom (3.16x) ships.
+ *
+ * Unlike the four q16_0 chains, this one also has a per-GROUP precision
+ * question, because the consumer is a per-32 activation quantize and a
+ * group whose amax lands near the bottom of int16 would reach int8 with
+ * fewer than 127 levels available. Measured over the same runs: the
+ * SMALLEST 32-element group amax is 0.385 / 0.549, i.e. 394 / 562 at
+ * the shipping ES, 3.1x above the 127 the int8 output needs, and no
+ * group on either corpus falls under 128. So the shared exponent costs
+ * the consumer nothing here; re-measure it on a checkpoint whose latent
+ * might be scaled differently. */
+#ifndef LZ_MLAT_I16
+#define LZ_MLAT_I16 1
+#endif /* LZ_MLAT_I16 */
+
+/* The expert loop's hoisted activation quantize: reuse the previous
+   expert's result when the group size has not changed. A separate axis
+   from LZ_MLAT_I16 because it is a separate saving that happens to have
+   arrived in the same commit - it is worth more than the int16 exit and
+   is value-neutral, while the exit alone is a small regression. Without
+   its own switch neither half's contribution can be rebuilt, which is
+   how "measured -4,224/token" becomes a number nobody can reproduce. */
+#ifndef LZ_MLAT_REUSE
+#define LZ_MLAT_REUSE 1
+#endif /* LZ_MLAT_REUSE */
+#ifndef LZ_MLAT_ES
+#define LZ_MLAT_ES 10
+#endif /* LZ_MLAT_ES */
+
+/* ---- the V projection's int16 exit (int-pipeline milestone 7) --------
+ *
+ * v_proj is the only matmul left in this file whose output goes into an
+ * activation quantize with no float operation in between: the KV cache
+ * write IS its consumer, so lz_quantize_q8_i16 serves it the way it
+ * already serves the MoE latent. Same _I16 / _ES pair, same conventions.
+ * Every other remaining consumer either needs a float by construction (a
+ * residual add, an RMSNorm, RoPE, the logits' softmax, the routed
+ * mixture's float weight) or needs a fixed-point kernel this tree does
+ * not have (the gated norm's gate; the SwiGLU pair got one in milestone
+ * 8, below).
+ *
+ * The exit is refused whenever anything else reads the float row: the
+ * Hadamard rotation (kv_rot_v), the f32 reference plane (--kv f32) and
+ * the 4-bit plane (--kv q4) all take vtt apart element by element. That
+ * is the same set --attn-int already refuses on, for the same reason.
+ *
+ * MEASURED, both gate corpora on kmr20 AND kunmoe-v2-t2-probe (v_proj is
+ * q6_1 on the first and t2 on the second, so both epilogue families are
+ * covered), instrumented build over 308,736 / 338,432 v elements:
+ * max |v| 6.42 / 6.79 (kmr20) and 6.99 / 6.80 (t2-probe), so ES = 12 is
+ * the largest that clamps nothing against the int16 edge.
+ *
+ * It ships at 11, one lower, for the reason LZ_MLAT_ES does: the clamp
+ * is silent, 11 leaves 2.29x of headroom against 12's 1.14x, and paired
+ * NLL cannot tell the two apart. The per-GROUP question the consumer
+ * raises - a 32-element group whose amax lands near the bottom of int16
+ * reaches int8 with fewer than 127 levels - is measured the same way:
+ * the SMALLEST group amax over those runs is 0.4157, i.e. 851 at the
+ * shipping ES, 6.7x above the 127 the int8 cache needs, and no group on
+ * either corpus or either model falls under 128. */
+#ifndef LZ_VPROJ_I16
+#define LZ_VPROJ_I16 1
+#endif /* LZ_VPROJ_I16 */
+#ifndef LZ_VPROJ_ES
+#define LZ_VPROJ_ES 11
+#endif /* LZ_VPROJ_ES */
+
+/* ---- the SwiGLU pair's int16 exits (int-pipeline milestone 8) --------
+ *
+ * silu(p)*g was the largest remaining block of conversions in the
+ * engine: the two producing matmuls each materialize a float
+ * (epi_q41_fixed's `(float)comb * pow2f(target)`, one cvt per element),
+ * lz_sigmoid converts once more to leave sigmoid_q15's table and
+ * sigmoid_q15 itself measures 2.975 converts per call deriving the table
+ * coordinate from a float, and the product then goes back to int through
+ * lz_quantize_q8's SIMD round. lz_swiglu_q15_i16 (src/ops.c) removes all
+ * four: with p and g arriving as int16, sigmoid_q15_i reads p's bits and
+ * the whole chain from the two matmuls to lz_quantize_q8_i16 stays
+ * integer.
+ *
+ * ONE switch for the two MoE sites, not one per site: they are the same
+ * mechanism on the same models, reached by the same helper, and neither
+ * would ever be enabled without the other - what the switch selects is
+ * the saving, and the saving is one. The dense FFN's site is NOT here;
+ * see forward_ffn.
+ *
+ * THREE exponents, all measured (.prof/m8range.c, both gate corpora on
+ * kmr20 AND kunmoe-v2-t2-probe - w1/w3 are q4_1+q6_1 on the first and
+ * q8_0 on the second, so both epilogue families are covered). Largest ES
+ * that clamps NOTHING, per run, worst case across all four:
+ *
+ * PER SITE, because the two sites do not agree and one constant per role
+ * has to take the smaller of them:
+ *
+ *   role              kmr20 zh/en   t2probe zh/en   worst
+ *   routed p  (w1)     12 / 12        12 / 11        11
+ *   shared p  (gate)   12 / 11        12 / 12        11
+ *   routed g  (w3)     14 / 13        13 / 13        13
+ *   shared g  (up)     12 / 12        13 / 13        12
+ *   routed out         13 / 12        11 / 11        11
+ *   shared out         11 / 11        12 / 12        11
+ *
+ * so the shipping p 11 / g 12 / out 11 is each role's worst case exactly,
+ * with none of the three dropped an extra octave the way LZ_KGATE_ES and
+ * LZ_VPROJ_ES were. That is a deliberate difference: a step down costs a
+ * bit on every element of a chain already three roundings deep, and what
+ * replaces the extra octave here is a live probe instead of an argument.
+ * lz_debug_swiglu_pmax/_gmax/_omax carry the post-clamp maxima and the
+ * CLI prints them - a maximum strictly below 32767 is the proof that
+ * nothing clamped, since the clamp inside epi_align_i16 is silent.
+ * Measured over both corpora on both models: 17,377 / 22,582 / 26,691,
+ * i.e. 1.89x / 1.45x / 1.23x of margin. Re-run .prof/m8range.c on any
+ * checkpoint whose FFN might be scaled differently, and read those three
+ * on any run that matters.
+ *
+ * The sigmoid table's own edge is a non-event here and that is measured
+ * too: |p| never reaches 12 on either model or either corpus (0 of
+ * 8,644,608 routed and 0 of 2,469,888 shared elements), so sigmoid_q15_i
+ * runs its interpolation on every element rather than its clamp. Its
+ * domain cap (e <= 27, past which it reconstructs a float) is not
+ * reachable either: ep is a compile-time 11. */
+#ifndef LZ_SWIGLU_I16
+#define LZ_SWIGLU_I16 1
+#endif /* LZ_SWIGLU_I16 */
+#ifndef LZ_SWIGLU_ES_P
+#define LZ_SWIGLU_ES_P 11
+#endif /* LZ_SWIGLU_ES_P */
+#ifndef LZ_SWIGLU_ES_G
+#define LZ_SWIGLU_ES_G 12
+#endif /* LZ_SWIGLU_ES_G */
+#ifndef LZ_SWIGLU_ES_O
+#define LZ_SWIGLU_ES_O 11
+#endif /* LZ_SWIGLU_ES_O */
+/* Debug counters defined in forward.c, read by cli_main.c and by the
+   attn helpers in forward_attn.c. */
+extern lz_i64 lz_debug_attn_skip;
+extern lz_i64 lz_debug_n_kv_rot;
+extern int   lz_debug_mtp_attn_window;
+extern lz_i64 lz_debug_mtp_attn_rows;
+extern lz_i64 lz_debug_vproj_i16;
 
 /* KV cache formats, selectable independently for keys and values
    (--kv / --kv-k / --kv-v). See LZRunState's kfmt field. */
@@ -60,6 +416,34 @@
 #define LZ_PROF_ACT    6   /* within FFN  */
 #define LZ_PROF_N      7
 
+extern int lz_prof_enable;
+extern float lz_prof_us[LZ_PROF_N];
+
+/* 1000.0 (ms -> us) is exact in any float width, so this cannot change
+   what these debug counters measure - but `static const double`, not an
+   inline literal, keeps every site below on the same footing as
+   ops.c's LZ_EXP_LOG2E32 (that comment has the mechanism) rather than
+   leaving an unexplained exception in tests/test_excess_precision.py. */
+static const float LZ_US_SCALE = 1000.0f;
+
+/* The start time is a LOCAL, not a file-static. A file-static would be
+   shared across nested phases: the recurrence timer - which nests inside
+   the linear one - would overwrite the outer start, so `linear` would
+   report only the tail after the last inner call and the total would
+   come out 25%% short. Phases that nest are reported INCLUSIVE, with
+   the inner one also listed on its own. */
+/* Declares AND assigns, so it can only appear where a declaration is
+   legal. Under C89 that is the top of a block, and none of the six call
+   sites is there - Visual C++ 4.0 turns each into an error and gcc only
+   warns, which is why they survived. Splitting it into a declaration
+   half and an assignment half is the fix, and it has to land in the
+   same edit as the six declarations it needs at the call sites: the
+   macro alone leaves every _t* undeclared. */
+#define LZ_PROF_DECL(v) float v = 0.0f
+#define LZ_PROF_BEG(v) v = lz_prof_enable ? lz_time_ms() : 0.0f
+#define LZ_PROF_END(v, slot) do { if (lz_prof_enable) \
+    lz_prof_us[slot] += (lz_time_ms() - (v)) * LZ_US_SCALE; } while (0)
+
 /* Single-step forward and runtime state for Qwen3.5 (M4.5).
 
    The hybrid architecture has two independent kinds of state:
@@ -89,6 +473,10 @@ typedef struct {
     int16_t *wsum_cq;           /* (seq_len)     the same, quantized to int16 */
 #endif
     float *attn_out;            /* (attn_q_dim) */
+    int64_t *attn_acc;          /* (attn_q_dim) int-domain weighted sum + output gate
+                                   (fixed-tier attention int path, --attn-int) */
+    float *attn_ss;             /* (attn_q_dim/32) per-32-group dequant scale for
+                                   the same path (sscale = cmax * LZ_Q15_INV) */
     float *ktmp;                /* (attn_kv_dim) k before it enters the cache (post-rotation, quantized) */
     float *vtmp;                /* (attn_kv_dim) same for v */
     /* KV cache Q8: kq8/vq8 hold the rotated k/v (group 32), dequantized at score time.
@@ -123,7 +511,7 @@ typedef struct {
        how much Q8 was losing in the first place: if Q8 already costs
        nothing, no rotation can win, and the comparison was never about
        the rotation. This repo has made exactly that mistake before with a
-       bandwidth ratio whose denominator was unmeasurable (iron law 3).
+       bandwidth ratio whose denominator was unmeasurable.
 
        NULL unless --kv f32; the Q8 path is untouched and stays the
        default, bit for bit. */
@@ -136,7 +524,7 @@ typedef struct {
        1.701, so the split is essentially additive). Spending the same
        bit width on both means overpaying for keys.
 
-       WHICH SIDE IS EXPENSIVE DEPENDS ON THE LANGUAGE. Decomposed with
+       Which side is expensive depends on the language. Decomposed with
        the f32 arm as reference, 1024 tokens, 4-bit on one side at a time:
 
                           K side    V side    joint
@@ -215,10 +603,10 @@ typedef struct {
 
     /* The QJL key sketch and its q4r2 residual form are deliberately
        absent; forward.c's own comment above lz_kv_rot_enable carries the
-       measurement that retired them and the reason iron law nine does
-       not protect them.
+       measurement that retired them, and the reason the keep-both-tiers
+       rule does not protect them.
 
-       ONE OPEN QUESTION SURVIVES THE FORMAT: whether the residual
+       One open question survives the format: whether the residual
        Chinese gap lived in the VALUE reconstruction rather than in key
        scores. Answered on kunkun98-recover-r20, 20,885 positions, f32
        arm as reference:
@@ -238,11 +626,16 @@ typedef struct {
     float *zbuf;                /* (lin_value_dim) - also KDA's g_proj output */
     float *avec, *bvec;         /* (lin_n_v_heads) - bvec also KDA's b_proj output */
     float *ssm_out;             /* (lin_value_dim) - shared by GDN and KDA */
+    int32_t *ssm_sig;           /* (lin_value_dim) Q15 sigmoid of the gated
+                                   norm, written beside the pre-silu product
+                                   in the fixed tier (lz_quantize_q8_silu
+                                   consumes it). int32, not int16: the Q15
+                                   range reaches 32768 at the clamp. */
     float *qn, *kn;             /* (nt_cap, lin_k_head_dim) L2-norm scratch;
                                    the serial recurrence uses row 0 only */
 
     /* LZ_LT_KDA scratch. Separate q/k/v buffers rather than GDN's one
-       fused in_proj_qkv: lz_matmul_q8_nt writes o[t*out_dim+i] with a
+       fused in_proj_qkv: lz_matmul_xq_nt writes o[t*out_dim+i] with a
        FIXED stride, so three independently-shaped projections cannot
        share one nt-major buffer at different offsets without breaking
        that contract (see forward.c's forward_kda). conv_state IS still
@@ -255,7 +648,7 @@ typedef struct {
     float *kda_vc;                /* (nt_cap * lin_value_dim) post-conv, post-activation */
     float *kda_gate_lat;         /* (nt_cap * kda_gate_rank) f_a_proj output */
     float *kda_gate;              /* (nt_cap * lin_n_v_heads * lin_k_head_dim) decay,
-                                      ALREADY EXPONENTIATED (gt = exp(g), same
+                                      already exponentiated (gt = exp(g), same
                                       convention lz_gdn_step's scalar gt uses) */
 
     /* latent MoE scratch (LZLayer.ffn_moe layers only). TWO WIDTHS, and
@@ -263,7 +656,7 @@ typedef struct {
        for every token in the chunk is nt_cap-wide and runs batched,
        what depends on WHICH expert a token picked is one token's worth.
        Only the routed experts are in the second group -
-       lz_matmul_q8_nt's one-weight-load-serves-nt-tokens batching has
+       lz_matmul_xq_nt's one-weight-load-serves-nt-tokens batching has
        nothing to hold onto when two tokens in a chunk want different
        experts. See forward_moe's docstring in forward.c, which also
        records why grouping the tokens by expert was measured and
@@ -387,7 +780,7 @@ typedef struct {
     float *mtp_target_p;       /* vocab */
 
     /* SSM/conv recurrent state, widened into a (ring_depth, ...) ring
-       (user-directed: speculative-decode rollback without a
+       (speculative-decode rollback without a
        checkpoint-restore-and-replay - see generate.c's lz_spec_round,
        and s->ssm_slot below for the mechanism). ring_depth is
        LZ_SPEC_K_MAX+1 when m->mtp != NULL (lz_state_alloc), 1
@@ -404,7 +797,7 @@ typedef struct {
        (unrelated LZStateCkpt, see its own comment below, keeps working
        against ONE slot's worth unchanged).
 
-       WHY THIS COSTS ZERO EXTRA BANDWIDTH, ONLY MEMORY (the argument
+       Why this costs zero extra bandwidth, only memory (the argument
        this whole design depends on - see lz_gdn_step's header comment
        in ops.h for the byte-count proof): every recurrent step here
        ALREADY reads the entire per-head state once and rewrites the
@@ -425,6 +818,121 @@ typedef struct {
 #endif
     float  *ssm_state_s;
     float *conv_state;          /* (n_linear, lin_conv_dim, conv_kernel-1) */
+
+    /* Fixed conv tier (lz_conv_mode()). Allocated only when it is live,
+       and `conv_fixed` says so - a NULL check alone would not, because
+       the tier can be compiled out. Same shape and ring layout as
+       conv_state, int16 instead of float.
+         conv_mw          (n_linear, lin_conv_dim, conv_kernel) taps
+         conv_sig_k1      (n_linear, lin_conv_dim) sigmoid_q15_t's folded
+                           entry factor: oscale * LZ_SIG_STEP
+         conv_sig_oscale2 (n_linear, lin_conv_dim) folded exit factor:
+                           oscale / 32768 (oscale is 2^-(ew+es); neither
+                           array stores oscale itself - it has no other
+                           consumer, see lz_sig_q15_fold)
+         conv_sig_e       (n_linear, lin_conv_dim) the same exponent as an
+                           integer, which is what the epilogue's sigmoid
+                           reads under LZ_CONV_SIG_I
+       All are derived from the model and never change; they live here
+       rather than on LZModel only to keep the loader untouched. */
+    short *conv_state_q;
+    short *conv_mw;
+    /* KDA's q/k/v projections in int16 at LZ_CONV_ES, when the whole
+       triple can take lz_matmul_xq_nt_i16's exit (int-pipeline
+       milestone 3). Same shapes as kda_q/kda_k/kda_v, which stay
+       allocated and carry the same vectors whenever it cannot -
+       exactly one of the two is written per call. Allocated with the
+       rest of the fixed conv tier and NULL without it. */
+    short *kda_q_i16, *kda_k_i16;
+    short *kda_v_i16;
+    /* The CONV's own int16 exit, at LZ_CONVO_ES (int-pipeline 9.4).
+       All three, and v is not the special case the first version of
+       this comment claimed: its consumer does use it in a float
+       expression - `(v - gt*u)*beta` - but so does q's and k's, and
+       the answer is the same one, a convert at the consumer rather
+       than two at the producer. kda_qc/kda_kc/kda_vc stay allocated
+       and hold the same vectors whenever the int exit is off; exactly
+       one of the two is written.
+
+       "EXACTLY ONE IS WRITTEN" IS MEASURED NOW, not asserted. A counter
+       on the float store in lz_causal_conv1d_step_fixed_o16 (the
+       `if (!done)` arm) reads 0 on kmr20 against 11,114,496 int writes,
+       and 16,671,744 against 0 on _armgate2 - one counter, both
+       directions, so the zero means the store did not run rather than
+       the counter not being reached.
+
+       So the float trio is dead memory whenever the int exit fires, and
+       it is kept anyway: 3 x nt x dim floats is 12,288 bytes on kmr20,
+       0.33% of a 3.7 MB run state, while dropping it means allocating
+       on a predicate that is not final until conv_fixed_build runs,
+       several hundred lines after this allocation - and a NULL here is
+       a crash on the fallback path, not a wrong number. Priced and
+       declined, not overlooked.
+
+       Two probes that cannot settle this, recorded so nobody repeats
+       them: poisoning the buffers at allocation (everything here is
+       written before it is read, so the poison never survives to a
+       read - and the control, poisoning a live buffer, came back green
+       too), and nulling the pointers (control also green). Both had no
+       discriminating power. The write counter is the one that does. */
+    short *kda_qc_i16, *kda_kc_i16, *kda_vc_i16;
+    /* q16_0's four int16 exits (int-pipeline milestone 5), same
+       one-of-the-two contract as the three above and the same NULL
+       meaning. Each sits at its chain's LZ_*_ES exponent:
+         bvec_i16        s->bvec        -> lz_sigmoid_i
+         moe_logits_i16  s->moe_router_logits -> lz_moe_route
+         kda_lat_i16     s->kda_gate_lat -> f_b_proj's activation quantize
+         kda_gate_i16    s->kda_gate    -> the decay gate
+       kda_lat_i32 is the widening scratch lz_quantize_q8_int's int32
+       input needs (one token wide); kda_dtb_i16 is dt_bias in
+       kda_gate_i16's own domain, built once by kda_gate_build, and is
+       the field whose NULL says "the gate exit was refused". */
+    short *bvec_i16;
+    short *moe_logits_i16;
+    short *kda_lat_i16;
+    int32_t *kda_lat_i32;
+    short *kda_gate_i16;
+    short *kda_dtb_i16;
+    /* The MoE latent's int16 exit (int-pipeline milestone 6), same
+       one-of-the-two contract: moe_lat_i16 carries what moe_lat_x
+       would have, at LZ_MLAT_ES.
+         moe_lat_i16  s->moe_lat_x -> the routed experts' w1/w3 quantize
+       moe_lat_q/_qs are that quantize's OUTPUT, and they are separate
+       from s->xq/s->xqs because the w2 matmul in the same loop body
+       quantizes moe_h1 into those - one token wide, since the expert
+       loop is per token. They are allocated with (and used by) the
+       float path too: the hoist out of the expert loop is what needs
+       them, not the int exit. */
+    short *moe_lat_i16;
+    int8_t *moe_lat_q;
+    float  *moe_lat_qs;
+    /* The V projection's int16 exit (int-pipeline milestone 7), same
+       one-of-the-two contract: vtmp_i16 carries what vtmp would have,
+       at LZ_VPROJ_ES.
+         vtmp_i16  s->vtmp -> the V cache's activation quantize
+       Only the plain single-plane Q8 cache write can read it; the
+       Hadamard rotation and the f32/q4 reference planes each take the
+       float row apart element by element, so forward_attn refuses the
+       exit when any of them is live. */
+    short *vtmp_i16;
+    /* The SwiGLU pair's int16 exits (int-pipeline milestone 8), same
+       one-of-the-two contract: moe_h1_i16/moe_h3_i16 carry what
+       moe_h1/moe_h3 would have, at LZ_SWIGLU_ES_P / LZ_SWIGLU_ES_G.
+       Unlike the exits above these serve TWO call sites of different
+       widths (the routed experts' w1/w3 at moe_intermediate_size and the
+       shared expert's gate/up at moe_shared_width), so they are sized
+       like moe_h1/moe_h3 themselves - the max of the two, nt_cap wide.
+       lz_swiglu_q15_i16 writes its output back over moe_h1_i16, which is
+       then the activation lz_quantize_q8_i16 reads. */
+    short *moe_h1_i16, *moe_h3_i16;
+    float *conv_sig_k1;
+    float *conv_sig_oscale2;
+    signed char *conv_sig_e;    /* (n_linear, lin_conv_dim) ew[c] + LZ_CONV_ES,
+                                   the integer the two floats above encode */
+    float  conv_sig_k2;         /* lz_sig_q15_t_offset(), same for every channel */
+    float  conv_in_scale;
+    int    conv_bound;
+    int    conv_fixed;
     /* Which ring slot currently holds the CONFIRMED recurrent state.
        Ordinary decode and prefill NEVER advance this (forward_ssm/
        forward_kda pass the same slot as both read and write source,
@@ -458,6 +966,19 @@ typedef struct {
     float  *wscr;               /* weight dequantization scratch (norm/embed rows) */
     int     qcap;               /* xq capacity */
 
+    /* SubLN Hadamard fixed-point scratch (use_subn only): 2*qcap int32.
+       Source half holds the row converted to fixed point, destination
+       half the unnormalized lz_fwht_i32 output (restrict forbids one
+       buffer for both). */
+    int32_t *fwht_scratch;
+
+    /* SubLN plain-norm int output scratch (the norms tier's int output,
+       use_subn only): qcap int32, one token wide. lz_rmsnorm_int writes here,
+       lz_quantize_q8_tok_int reads it immediately after - single-token
+       like fwht_scratch, not nt-wide, since each site's norm+quantize
+       pair for one tk completes before the next tk starts. */
+    int32_t *subn_norm_int;
+
     /* Precomputed RoPE table: (seq_len x rotary_dim/2) {cos, sin} pairs.
        Shared by all layers/heads under the same theta, avoiding a per-token
        per-layer pow/cos/sin (expensive on PII's x87). */
@@ -486,8 +1007,8 @@ typedef struct {
        engine.
 
        These are sizes, not booleans, because the rotation block width is
-       exactly the kind of knob iron law 3 says must be sweepable rather
-       than baked in: it trades mixing quality against nothing on this
+       exactly the kind of knob that has to stay sweepable rather than
+       baked in: it trades mixing quality against nothing on this
        machine (lz_fwht is n*log2(n) adds either way), but that balance is
        a property of the target, not of the algorithm.
 
@@ -531,7 +1052,7 @@ typedef struct {
     float   ssm_scale;          /* 1/sqrt(lin_k_head_dim) */
 
     int *cache_idx;             /* layer index -> index within its class */
-    long long bytes_alloc;
+    lz_i64 bytes_alloc;
 
     /* Bumped by lz_state_alloc and lz_state_reset. A checkpoint records
        it and lz_ckpt_restore refuses a mismatch.
@@ -557,6 +1078,62 @@ typedef struct {
        argument. */
     LZInspect *ins;
 } LZRunState;
+
+/* Attn helper signatures (src/forward_attn.c), shared with the paths
+   still in forward.c. Declared here rather than at the top because they
+   take LZRunState, whose typedef sits above. */
+void wsum_q8_row(float *dst, const int8_t *vt, const float *vts, float a, int hd);
+float score_q8_row(const float *qhh, const int8_t *kt, const float *kts, int hd);
+int kv_slot_next(const LZRunState *s, int slot);
+int kv_slot(const LZRunState *s, int t);
+int scale_groups(int n, int gs);
+int ring_slot_next(int slot, int depth);
+void attn_wsum_plane(LZRunState *s, float *dst, const int8_t *vplane,
+                     const float *vs, int hd, int kvd, int kvh, int pos,
+                     int walk_t0, int noring, int dead0, int dead1);
+void rot_head(float *v, int hd, int n);
+void forward_attn(const LZModel *m, LZRunState *s,
+                  const LZLayer *L, int layer, int pos0, int nt);
+/* One projection with an int16 exit at the consumer's own exponent.
+   EIGHT call sites in three files, which is why it is not called
+   kda_i16_proj any more: forward_kda.c has four, forward_moe.c three
+   (the router logits and the latent down-projection) and forward_attn.c
+   one - the v_proj inside the q/k/v triple, NOT the o-projection tail.
+   It lives in forward_kda.c because that is
+   where it was written; the name no longer says it belongs to KDA,
+   because half its callers do not. */
+void proj_i16(LZRunState *s, int may_int, int *wrote_int,
+                  float *of, short *oi,
+                  const float *x, const LZTensor *w,
+                  int in_dim, int out_dim, int nt,
+                  int target_e, int bound);
+/* MoE path (src/forward_moe.c): forward_moe is called from lz_forward; the
+   two router knobs and the latent counters are defined in forward.c. */
+void forward_moe(const LZModel *m, LZRunState *s,
+                 const LZLayer *L, int layer, int nt);
+extern int   lz_moe_topk;
+extern float lz_moe_tau;
+extern lz_i64 lz_debug_mlat_i16;
+extern lz_i64 lz_debug_mlat_quant;
+/* KDA-path counters, read by cli_main.c and written by forward_kda.c. */
+extern lz_i64 lz_debug_bvec_i16;
+extern lz_i64 lz_debug_klat_i16;
+extern lz_i64 lz_debug_kgate_exp_i;
+extern lz_i64 lz_debug_kgate_fold_no;
+extern int   lz_debug_kgate_exp_s;
+extern int   lz_debug_kgate_sig_slo;
+extern int   lz_debug_kgate_sig_shi;
+/* SSM path (src/forward_ssm.c): forward_ssm is called from lz_forward. */
+void forward_ssm(const LZModel *m, LZRunState *s,
+                 const LZLayer *L, int layer, int nt,
+                 int advance_ring, int ring_base);
+/* KDA + dense-FFN paths (src/forward_kda.c), called from lz_forward /
+   lz_mtp_draft_step. */
+void forward_kda(const LZModel *m, LZRunState *s,
+                 const LZLayer *L, int layer, int nt,
+                 int advance_ring, int ring_base);
+void dense_ffn_step(const LZModel *m, LZRunState *s,
+                    const LZLayer *L, int layer, int nt, int idim);
 
 /* Snapshot of the position-carrying RECURRENT state, for reusing a
    conversation prefix across turns instead of re-forwarding it.
@@ -594,6 +1171,10 @@ typedef struct {
 #endif
     float  *ssm_s;
     float  *conv;
+    /* int16 twin of `conv`, filled instead of it when the fixed conv
+       tier is live. Additive: LZStateCkpt never leaves memory, so there
+       is no stored layout to stay compatible with. */
+    short  *conv_q;
     size_t  n_ssm_q8, n_ssm_s, n_conv;   /* element counts, for a shape check */
     int     pos;                         /* tokens forwarded when taken; -1 = empty */
     unsigned epoch;                      /* the state's epoch at save time */
@@ -626,7 +1207,7 @@ int  lz_ckpt_restore(const LZStateCkpt *ck, LZRunState *s, const LZModel *m,
    clamped up to 1 (never 0) when m->mtp is NULL, since a model with no
    MTP head can never run --spec regardless of what is passed here.
 
-   THIS IS A SIZING HINT, NOT A CONTRACT lz_generate_resume enforces on
+   This is a sizing hint, not a contract lz_generate_resume enforces on
    its own: opts->spec_k must not exceed s->ssm_ring_depth - 1, checked
    there (LZ_ERR_SPEC_K_RANGE) precisely because a k too large for what
    was allocated here would silently alias ring slots via `% ring_depth`
@@ -648,7 +1229,7 @@ void lz_state_reset(LZRunState *s, const LZModel *m);
 float *lz_forward(const LZModel *m, LZRunState *s, int token, int pos);
 
 /* Batched forward (prefill): tokens[0..n) occupy positions pos0..pos0+n-1;
-   returns the LAST token's logits (intermediate logits are not computed —
+   returns the LAST token's logits (intermediate logits are not computed -
    lm_head is the single largest matmul, and nobody needs its intermediate
    results during prefill).
 

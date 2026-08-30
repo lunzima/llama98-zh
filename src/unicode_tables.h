@@ -3,7 +3,7 @@
 #ifndef LZ_UNICODE_TABLES_H
 #define LZ_UNICODE_TABLES_H
 
-#include <stdint.h>
+#include "lz_int.h"   /* <stdint.h> is not on the language floor */
 
 /* range table: alternating [lo, hi] pairs, sorted by lo */
 static const uint32_t LZ_UNI_LETTER[] = {

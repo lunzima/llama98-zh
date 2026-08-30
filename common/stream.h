@@ -1,5 +1,5 @@
-#ifndef LZ_GUI_STREAM_H
-#define LZ_GUI_STREAM_H
+#ifndef LZ_COMMON_STREAM_H
+#define LZ_COMMON_STREAM_H
 
 /* Turns the arbitrary byte runs a generator produces into runs of
  * display bytes tagged with a STYLE MASK: think, and the three inline

@@ -14,7 +14,7 @@
    is no such clock". */
 #if !defined(_WIN32) && !defined(__DOS__) && !defined(_POSIX_C_SOURCE)
 #define _POSIX_C_SOURCE 200809L
-#endif
+#endif /* !_WIN32 && !__DOS__ && !_POSIX_C_SOURCE */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,18 +31,18 @@
    the two properties it means. */
 #if defined(_WIN32) || defined(__DOS__)
 #define LZ_HAVE_SETMODE 1
-#endif
+#endif /* _WIN32 || __DOS__ */
 
 #ifdef _WIN32
 #include <windows.h>
-#endif
+#endif /* _WIN32 */
 #ifdef LZ_HAVE_SETMODE
 #include <fcntl.h>          /* O_BINARY */
 #include <io.h>             /* setmode, fileno */
-#endif
+#endif /* LZ_HAVE_SETMODE */
 #if !defined(_WIN32)
 #include <time.h>
-#endif
+#endif /* !_WIN32 */
 
 void *lz_read_file(const char *path, size_t *out_size,
                    char *errbuf, int errlen) {
@@ -87,7 +87,7 @@ void *lz_read_file(const char *path, size_t *out_size,
     return buf;
 }
 
-int lz_fseek64(FILE *f, unsigned long long off) {
+int lz_fseek64(FILE *f, lz_u64 off) {
 #if defined(_WIN32) && !defined(__WATCOMC__)
     /* MinGW/MSVC both provide _fseeki64. Watcom's C library lacks it; fall back below. */
     return _fseeki64(f, (__int64)off, SEEK_SET) == 0 ? 0 : 1;
@@ -98,12 +98,12 @@ int lz_fseek64(FILE *f, unsigned long long off) {
     /* Fallback: only long is available. Out-of-range must error out
        explicitly, never silently truncate - truncation reads a completely
        wrong tensor, and the symptom is extremely hard to locate. */
-    if (off > 0x7FFFFFFFULL) return 1;
+    if (off > LZ_U64_C(0x7FFFFFFF)) return 1;
     return fseek(f, (long)off, SEEK_SET) == 0 ? 0 : 1;
-#endif
+#endif /* _WIN32 && !__WATCOMC__ || _LARGEFILE_SOURCE || __USE_LARGEFILE64 || (__unix__ && !__WATCOMC__) */
 }
 
-long long lz_fsize(const char *path) {
+lz_i64 lz_fsize(const char *path) {
 #if defined(_WIN32) && !defined(__WATCOMC__)
     FILE *f = fopen(path, "rb");
     __int64 n;
@@ -111,7 +111,7 @@ long long lz_fsize(const char *path) {
     if (_fseeki64(f, 0, SEEK_END) != 0) { fclose(f); return -1; }
     n = _ftelli64(f);
     fclose(f);
-    return (long long)n;
+    return (lz_i64)n;
 #else
     FILE *f = fopen(path, "rb");
     long n;
@@ -119,11 +119,11 @@ long long lz_fsize(const char *path) {
     if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return -1; }
     n = ftell(f);
     fclose(f);
-    return (long long)n;
-#endif
+    return (lz_i64)n;
+#endif /* _WIN32 && !__WATCOMC__ */
 }
 
-double lz_time_ms(void) {
+float lz_time_ms(void) {
 #ifdef _WIN32
     static int inited = 0;
     static int has_qpc = 0;
@@ -135,10 +135,10 @@ double lz_time_ms(void) {
         inited = 1;
     }
     if (has_qpc && QueryPerformanceCounter(&now)) {
-        return (double)now.QuadPart * 1000.0 / (double)freq.QuadPart;
+        return (float)now.QuadPart * 1000.0f / (float)freq.QuadPart;
     }
     /* Fallback: ~55ms resolution on Win9x; benchmarking needs enough tokens to average out */
-    return (double)GetTickCount();
+    return (float)GetTickCount();
 #elif defined(__DOS__)
     /* clock(), because DOS has neither of the other two. It counts from
        process start rather than from an epoch, which is all any caller
@@ -147,24 +147,24 @@ double lz_time_ms(void) {
        THE RESOLUTION IS THE 18.2 Hz BIOS TICK, about 54.9 ms, whatever
        CLOCKS_PER_SEC says: the macro is the UNIT the value is reported
        in, not the rate the counter advances at. Anyone timing on this
-       target must read iron law three's note on exactly this trap - the
-       same one bit the Windows build, where clock()'s quantum is the
+       target has to know this trap - the same one bit the Windows
+       build, where clock()'s quantum is the
        15.6 ms scheduler tick and a 100 ms benchmark round reported
        2.02x and 3.41x for the same binary. Rounds have to be seconds
        long here, and "all the readings are integer multiples of one
        number" is how you recognise that they were not.
 
-       Dividing by a constant is iron law six's rule 1, and this is the
+       Dividing by a float constant is barred, and this is the
        exemption that rule already carries: it protects the forward
        pass's cross-compiler bit-exactness, and a wall clock is not in
        the forward pass and is never compared bit for bit. Same
        exemption gui/main.c's temp_milli conversion claims. */
-    return (double)clock() * 1000.0 / (double)CLOCKS_PER_SEC;
+    return (float)clock() * 1000.0f / (float)CLOCKS_PER_SEC;
 #else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
-#endif
+    return (float)ts.tv_sec * 1000.0f + (float)ts.tv_nsec / 1e6f;
+#endif /* _WIN32 || __DOS__ */
 }
 
 /* time() rather than a platform branch: it is ANSI C, Open Watcom has it,
@@ -202,8 +202,8 @@ void lz_init_stdout(void) {
         setmode(fileno(stdout), O_BINARY);
 #else
     setmode(fileno(stdout), O_BINARY);
-#endif
-#endif
+#endif /* __DOS__ */
+#endif /* LZ_HAVE_SETMODE */
     setvbuf(stdout, NULL, _IONBF, 0);
 }
 
@@ -216,13 +216,13 @@ void lz_init_stdin(void) {
        runtime does it too. Guarded on LZ_HAVE_SETMODE rather than
        _WIN32 for exactly that reason. */
     setmode(fileno(stdin), O_BINARY);
-#endif
+#endif /* LZ_HAVE_SETMODE */
 }
 
-unsigned long long lz_seed_mix(unsigned long long x) {
+lz_u64 lz_seed_mix(lz_u64 x) {
     /* One round of xorshift64* (the same generator sampler.c's
        random_u32 uses), applied as a bijection over the seed. The
-       multiplication constant is the same 0x2545F4914F6CDD1DULL so a
+       multiplication constant is the same LZ_U64_C(0x2545F4914F6CDD1D) so a
        seed that happens to equal a sampler state stays in the same
        family - not a correctness requirement, just the one already
        proven on every target.
@@ -233,9 +233,61 @@ unsigned long long lz_seed_mix(unsigned long long x) {
        seed 1 after the sampler's `seed ? seed : 1`. The constant is
        arbitrary but non-zero and odd. See compat.h for why this must
        stay pure. */
-    x ^= 0x9E3779B97F4A7C15ULL;
+    x ^= LZ_U64_C(0x9E3779B97F4A7C15);
     x ^= x >> 12;
     x ^= x << 25;
     x ^= x >> 27;
-    return x * 0x2545F4914F6CDD1DULL;
+    return x * LZ_U64_C(0x2545F4914F6CDD1D);
+}
+
+/* ---- byte order (see compat.h for the contract) --------------------- */
+
+#if LZ_BIG_ENDIAN
+
+/* Byte-reversal through an unsigned char * rather than through an
+   integer type: the buffers these are handed hold float as often as
+   int32_t, and reading a float's bytes as an integer to shift them is
+   the aliasing violation the rest of this tree avoids with unions. Bytes
+   are bytes under any type. */
+void lz_le32(void *p, size_t n) {
+    unsigned char *b = (unsigned char *)p;
+    size_t i;
+    for (i = 0; i < n; i++, b += 4) {
+        unsigned char t;
+        t = b[0]; b[0] = b[3]; b[3] = t;
+        t = b[1]; b[1] = b[2]; b[2] = t;
+    }
+}
+
+void lz_le16(void *p, size_t n) {
+    unsigned char *b = (unsigned char *)p;
+    size_t i;
+    for (i = 0; i < n; i++, b += 2) {
+        unsigned char t = b[0]; b[0] = b[1]; b[1] = t;
+    }
+}
+
+#else /* !LZ_BIG_ENDIAN */
+
+/* Empty on purpose. A little-endian host needs no conversion, and an
+   empty body is the strongest available statement that these builds are
+   byte-for-byte what they were before byte-order support existed. */
+void lz_le32(void *p, size_t n) { (void)p; (void)n; }
+void lz_le16(void *p, size_t n) { (void)p; (void)n; }
+
+#endif /* LZ_BIG_ENDIAN */
+
+int lz_endian_ok(void) {
+    /* Not a compile-time trick: the whole point is to catch the case
+       where the compile-time answer is WRONG, so the probe has to be
+       something the running machine decides. `volatile` keeps a
+       constant-folding compiler from answering it from the same macro
+       list that may have got it wrong. */
+    volatile unsigned long probe = 1UL;
+    int host_big = (*(const volatile unsigned char *)&probe) == 0;
+#if LZ_BIG_ENDIAN
+    return host_big == 1;
+#else /* !LZ_BIG_ENDIAN */
+    return host_big == 0;
+#endif /* LZ_BIG_ENDIAN */
 }

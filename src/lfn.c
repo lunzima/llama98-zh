@@ -1,9 +1,64 @@
 /* Long-file-name resolution. See lfn.h for what this exists for and why
    the directory is read rather than a short name constructed. */
 
-#include <dirent.h>
 #include <stdio.h>
 #include <string.h>
+
+/* Directory walk, one shape over two platform interfaces.
+ *
+ * dirent.h is POSIX and Visual C++ 4.0 does not have it - the compiler
+ * stops at the include, so this was the one file in the no-assembly set
+ * that would not build for the NT target. MSVC has had _findfirst in
+ * <io.h> since long before 4.0, and it needs no windows.h.
+ *
+ * Three calls rather than an #ifdef around the loop: the matching logic
+ * below is the part that is easy to get wrong, and it should exist once
+ * regardless of which interface hands it the names. */
+#if defined(_MSC_VER)
+#include <io.h>
+typedef struct { long h; struct _finddata_t fd; int first; } lz_dir;
+#else
+#include <dirent.h>
+typedef struct { DIR *d; } lz_dir;
+#endif /* _MSC_VER */
+
+static int dir_open(lz_dir *it, const char *path) {
+#if defined(_MSC_VER)
+    char pat[520];
+    size_t n = strlen(path);
+    if (n + 5 >= sizeof pat) return 0;
+    strcpy(pat, path);
+    /* A trailing separator would double up; the caller passes "." for
+       the current directory, which needs one added. */
+    if (n > 0 && pat[n - 1] != '\\' && pat[n - 1] != '/') strcat(pat, "\\");
+    strcat(pat, "*.*");
+    it->h = _findfirst(pat, &it->fd);
+    it->first = 1;
+    return it->h != -1L;
+#else
+    it->d = opendir(path);
+    return it->d != NULL;
+#endif /* _MSC_VER */
+}
+
+static const char *dir_next(lz_dir *it) {
+#if defined(_MSC_VER)
+    if (it->first) { it->first = 0; return it->fd.name; }
+    if (_findnext(it->h, &it->fd) != 0) return NULL;
+    return it->fd.name;
+#else
+    struct dirent *e = readdir(it->d);
+    return e ? e->d_name : NULL;
+#endif /* _MSC_VER */
+}
+
+static void dir_close(lz_dir *it) {
+#if defined(_MSC_VER)
+    if (it->h != -1L) _findclose(it->h);
+#else
+    if (it->d) closedir(it->d);
+#endif /* _MSC_VER */
+}
 
 #include "err.h"
 #include "lfn.h"
@@ -145,8 +200,8 @@ static int can_open(const char *path) {
 
 int lz_lfn_path(const char *dir, const char *want,
                 char *out, int cap, char *errbuf, int errlen) {
-    DIR *d;
-    struct dirent *e;
+    lz_dir it;
+    const char *nm;
     char found[LZ_LFN_ENTRY];
     int have_exact = 0, n_83 = 0;
     int rc, need;
@@ -169,26 +224,25 @@ int lz_lfn_path(const char *dir, const char *want,
            "not found": from the caller's side the two are the same fact,
            and a second code would add a branch that changes nothing. */
     found[0] = '\0';
-    d = opendir(dir[0] ? dir : ".");
-    if (d) {
-        while ((e = readdir(d)) != NULL) {
-            if (e->d_name[0] == '\0') continue;
-            if ((int)strlen(e->d_name) >= LZ_LFN_ENTRY) continue;
+    if (dir_open(&it, dir[0] ? dir : ".")) {
+        while ((nm = dir_next(&it)) != NULL) {
+            if (nm[0] == '\0') continue;
+            if ((int)strlen(nm) >= LZ_LFN_ENTRY) continue;
             /* An exact hit ignoring case wins outright and stops the
                scan: it is the name that was asked for, so no 8.3
                candidate can be a better answer and the ambiguity count
                below must not be able to veto it. */
-            if (ci_eq_n(e->d_name, want, (int)strlen(want))) {
-                strcpy(found, e->d_name);
+            if (ci_eq_n(nm, want, (int)strlen(want))) {
+                strcpy(found, nm);
                 have_exact = 1;
                 break;
             }
-            if (is_83_of(e->d_name, want)) {
+            if (is_83_of(nm, want)) {
                 n_83++;
-                if (n_83 == 1) strcpy(found, e->d_name);
+                if (n_83 == 1) strcpy(found, nm);
             }
         }
-        closedir(d);
+        dir_close(&it);
     }
 
     if (!have_exact) {

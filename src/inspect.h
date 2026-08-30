@@ -14,7 +14,7 @@
    Numbers only, no strings: turning a token id into text needs the
    tokenizer, and the tokenizer belongs to the caller. Keeping text out
    of here is also what keeps the engine layer free of user-facing
-   strings (iron law one). */
+   strings. */
 typedef struct {
     /* How many of this token's MoE layers chose each expert. Zero means
        "not used by any layer"; the count, not just the fact, because the
