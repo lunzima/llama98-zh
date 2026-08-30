@@ -1,7 +1,7 @@
 #ifndef LZ_LOCALIZED_STRINGS_H
 #define LZ_LOCALIZED_STRINGS_H
 
-/* Every user-visible string the front end draws (iron law 7).
+/* Every user-visible string the front end draws.
  *
  * Bilingual, and laid out exactly like src/err.c: an enum, two parallel
  * arrays indexed by it, one switch. Same shape on purpose - the front
@@ -117,12 +117,13 @@ typedef enum {
     LZ_STR_STATE_PREFILL,
     LZ_STR_STATE_CTX,                 /* status bar part 1: "context 137/2048" */
     /* The state word IS localised ("generating" in English); what stays
-       fixed is the separator and the unit. U+00B7 (MIDDLE DOT) is in
-       the GBK tables (A1A4) and round-trips through gui/gbk.c, so the
-       · is safe - verified by a compile-time probe. The "tok" unit is
-       deliberately never translated: the context cell and the
-       candidate list already use the ASCII "tok", and a unit that
-       changes language would read as two different units. */
+       fixed is the separator and the unit. The separator is a plain
+       ASCII comma in both tables - it was U+00B7 MIDDLE DOT, and this
+       comment still argued for it (GBK A1A4, round-trips through
+       gui/gbk.c) long after the owner asked for dot separators to go.
+       The "tok" unit is deliberately never translated: the context
+       cell and the candidate list already use the ASCII "tok", and a
+       unit that changes language would read as two different units. */
     LZ_STR_STATE_TOKCELL,
 
     /* --- inference inspector --- */
@@ -197,6 +198,12 @@ typedef enum {
     LZ_STR_SYSINFO_CPU,          /* CPU line */
     LZ_STR_SYSINFO_MEM,          /* memory line */
     LZ_STR_SYSINFO_DISK,         /* disk line */
+    /* Operator tier line. The CLI prints the selected tier in its
+       banner and the window had no equivalent, so the one thing a user
+       could not check about "the GUI and the CLI run the same
+       operators" was the half that is decided at run time. Must stay
+       last of the SYSINFO run: aboutdlg.c walks LZ_STR_SYSINFO_OS + i. */
+    LZ_STR_SYSINFO_TIER,         /* kernel tier line */
 
     /* --- settings dialog: think-block dynamic temperature ---
        Appended, not inserted, so the ids above never shift - the same
@@ -212,10 +219,13 @@ typedef enum {
     LZ_STR_ABOUT_LICENSE,
 
     /* --- title bar: the "untitled" chat name ---
-       Shown when the current conversation has no file. The caption module
-       invents no user-visible text (iron law seven); it receives three GBK
+       Shown when the current conversation has no file. The caption
+       module invents no user-visible text; it receives three GBK
        segments, and this is the chat segment when there is no file. */
     LZ_STR_CAPTION_UNTITLED,
+
+    /* --- settings dialog: the reply-finished beep --- */
+    LZ_STR_DLG_BEEP,
 
     LZ_STR_COUNT
 } LZStr;

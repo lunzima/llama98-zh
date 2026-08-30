@@ -120,12 +120,31 @@ static void btn_rect(HWND h, int which, RECT *b)
     RECT wr;
     int bw, bh, right, top;
     GetWindowRect(h, &wr);
-    /* Width asked of the frame: SM_CXSIZE is not the button width on modern
-       frames (this box reports 36, the real buttons are 24), and drawing at
-       36 puts the buttons where they do not hit. The other metrics stay
-       MSO95's, which still mean what they always meant. */
+    /* Width asked of the frame, not of SM_CXSIZE, which is not the button
+       width on modern frames. The other metrics stay MSO95's, which still
+       mean what they always meant.
+       DELIBERATELY NOT WORD 95'S NUMBER. Running Word 95 beside this and
+       measuring both captures gives 34 there against 24 here - but 34 is
+       what a 1995 binary computes from a frame it was never shown, and
+       the owner's decision is that the platform's answer is the right
+       one. Everything else in the strip does match: caption 22 tall,
+       button 18 tall, 2 px above and below, minimise and maximise
+       adjacent, a 2 px gap before close, 2 px to the caption's right
+       edge. That layout came out of the comparison, not out of this
+       file's arithmetic, and it is why the widths being different is a
+       decision rather than an oversight. */
     bw    = lz_caption_button_width(h);
-    bh    = GetSystemMetrics(SM_CYSIZE) - 4;
+    /* Height from the caption's own height, not from SM_CYSIZE. MSO95
+       asks for seventeen different metrics across fifty-four call sites
+       and SM_CYSIZE is not one of them, so a button sized from it is
+       sized by something the original never consulted.
+       The two agree wherever SM_CYCAPTION - SM_CYSIZE == 1, which is
+       what this desktop reports (23 and 22) and why the substitution
+       moves no pixel here. Where they disagree the SM_CYSIZE form
+       leaves the gap below the button a pixel off from the gap above;
+       this form is 2 on both sides by construction, since the bar is
+       CYCAPTION - 1 tall and the button inset 2 from its top. */
+    bh    = GetSystemMetrics(SM_CYCAPTION) - 5;
     top   = GetSystemMetrics(SM_CYFRAME) + 2;
     right = (int)(wr.right - wr.left) - GetSystemMetrics(SM_CXFRAME) - 2;
     if (which == 1)      right -= bw + 2;      /* max */
@@ -230,7 +249,16 @@ static void bar_rect(HWND h, RECT *rc)
     rc->left   = GetSystemMetrics(SM_CXFRAME);
     rc->top    = GetSystemMetrics(SM_CYFRAME);
     rc->right  = (int)(wr.right - wr.left) - GetSystemMetrics(SM_CXFRAME);
-    rc->bottom = rc->top + GetSystemMetrics(SM_CYCAPTION);
+    /* CYCAPTION - 1, which is what MSO95 does. Its caption-rect routine
+       branches on a shell-version flag set at DLL init: the old-shell
+       arm subtracts 2 and adds a system-menu box on the left, the Win95
+       arm subtracts 1 and is flat. This port is the Win95 look, so it
+       is the second arm - same SM_CXFRAME / SM_CYFRAME / SM_CYCAPTION
+       metrics, one pixel shorter.
+       Without it the bar is a pixel taller than the original, and since
+       the buttons sit at a fixed offset from the top, the whole
+       difference lands under them. */
+    rc->bottom = rc->top + GetSystemMetrics(SM_CYCAPTION) - 1;
 }
 
 static void text_rect(HWND h, RECT *rc)

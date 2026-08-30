@@ -1,6 +1,7 @@
 #ifndef LZ_GUI_SESSION_H
 #define LZ_GUI_SESSION_H
 
+#include "../src/lz_int.h"   /* lz_u64: the 64-bit type, portably */
 #include <stddef.h>     /* offsetof, for the layout asserts at the bottom */
 
 #include "chat.h"
@@ -120,8 +121,8 @@ typedef struct {
        only exists to break ties inside one millisecond - see the
        seed_next_turn comment in gui/session.c. */
     int                seed_mode;
-    unsigned long long seed_fixed;
-    unsigned long long seed_turn;
+    lz_u64 seed_fixed;
+    lz_u64 seed_turn;
 
     /* The worker's own callbacks, not written by lz_gui_session_job
        (the core bundles the sink/cont/ctx per call instead) - kept so
@@ -219,7 +220,7 @@ void lz_gui_session_set_system(LZGuiSession *s, const char *utf8);
  * same seed, and on this hardware "two turns in one millisecond" is
  * exactly what a scripted self-test does. */
 void lz_gui_session_set_seed(LZGuiSession *s, int mode,
-                             unsigned long long fixed);
+                             lz_u64 fixed);
 
 /* Push the user turn and render the whole conversation into prompt.
  * Full-history mode: correctness first, resume later. Draws the

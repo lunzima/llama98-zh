@@ -68,7 +68,9 @@ enum {
        temperature, created under the base temperature row. */
     ID_THINK_TEMP_LABEL,
     ID_THINK_TEMP,
-    ID_THINK_TEMP_SCROLL
+    ID_THINK_TEMP_SCROLL,
+    /* 3024 - appended again, same rule. Beep when a reply finishes. */
+    ID_BEEP
 };
 
 /* Fixed geometry: four controls that never resize. The main window's
@@ -90,10 +92,18 @@ enum {
    row-heights instead of one; it is the LAST row so its box does not
    reflow whatever is under it.
    The think-block temperature row sits under the base temperature as
-   one more value_row. 406 tall plus a caption still clears a 640x480
-   screen, which is the floor gui/layout.c targets. */
+   one more value_row.
+
+   The reply-finished beep is a checkbox on its OWN row rather than
+   sharing Think's, which would have cost no height: two checkboxes side
+   by side needs each label to fit in half of DLG_W - 2*PAD, and the
+   labels are localized, so that is a text measurement and not an
+   estimate. 439 is the arithmetic instead: 480 - 439 - a caption and
+   border of about 25 leaves ~16 px on the 640x480 screen gui/layout.c
+   treats as the floor. Another row does NOT fit; the next setting that
+   wants one has to take the measurement. */
 #define DLG_W   330
-#define DLG_H   406
+#define DLG_H   439
 #define PAD     LZ_GUI_DLG_MARGIN
 #define ROW_H     22
 #define BTN_W   LZ_GUI_BTN_W
@@ -123,8 +133,8 @@ void lz_gui_format_temp(float t, char *out, int cap) {
        Unreachable today - lz_common_settings_set_temp rejects an
        out-of-range value before either call site is reached - but a
        function that takes a capacity and does not use it is a trap
-       primed for the next caller, and the guard lives in another file
-       (iron law four, note 10). */
+       primed for the next caller, and the guard that would stop it
+       lives in another file. */
     char tmp[64];
     int n;
     if (!out || cap <= 0) return;
@@ -132,8 +142,8 @@ void lz_gui_format_temp(float t, char *out, int cap) {
        decimal, so two is one more than anyone needs and still short
        enough to read. sprintf of a float is fine here - the x87 control
        word is only narrowed inside the engine's forward pass, on the
-       worker thread (iron law six, third point). */
-    sprintf(tmp, "%.2f", (double)t);
+       worker thread. */
+    sprintf(tmp, "%.2f", t);
     n = (int)strlen(tmp);
     if (n > cap - 1) n = cap - 1;
     memcpy(out, tmp, (size_t)n);
@@ -339,6 +349,9 @@ static void dlg_show(HWND h, const LZGuiSettings *s) {
     c = GetDlgItem(h, ID_THINK);
     if (c) SendMessage(c, BM_SETCHECK,
                        s->think ? BST_CHECKED : BST_UNCHECKED, 0);
+    c = GetDlgItem(h, ID_BEEP);
+    if (c) SendMessage(c, BM_SETCHECK,
+                       s->beep ? BST_CHECKED : BST_UNCHECKED, 0);
 }
 
 static LRESULT CALLBACK dlgproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
@@ -717,6 +730,15 @@ HWND lz_gui_settings_dialog_create(HWND owner, HINSTANCE inst,
        a one-off fix for one pair of controls. See gui/compat40.h's
        lz_ui_untheme for why the function is named for any class. */
     g_untheme.think = lz_ui_untheme(ctl);
+    y += ROW_H;
+
+    child(h, "BUTTON", lz_str_display(LZ_STR_DLG_BEEP),
+          BS_AUTOCHECKBOX | WS_TABSTOP, PAD, y, DLG_W - 2 * PAD, ROW_H,
+          ID_BEEP, inst);
+    ctl = GetDlgItem(h, ID_BEEP);
+    SendMessage(ctl, BM_SETCHECK,
+                set->beep ? BST_CHECKED : BST_UNCHECKED, 0);
+    g_untheme.beep = lz_ui_untheme(ctl);
     y += ROW_H + PAD;
 
     /* The value rows, in visual order - which is also creation
@@ -925,6 +947,8 @@ int lz_gui_settings_dialog_read(HWND dlg, const LZGuiSettings *cur,
     s = *cur;
     s.think = (int)SendMessage(GetDlgItem(dlg, ID_THINK), BM_GETCHECK, 0, 0)
               == BST_CHECKED;
+    s.beep = (int)SendMessage(GetDlgItem(dlg, ID_BEEP), BM_GETCHECK, 0, 0)
+             == BST_CHECKED;
     /* Both preset-following values start from the mode's default with
        their flag clear, and the setters below raise the flag again for
        whichever ones the boxes actually carry a value for. Doing it
@@ -1029,6 +1053,25 @@ int lz_gui_settings_dialog_read(HWND dlg, const LZGuiSettings *cur,
     return LZ_GUI_SET_OK;
 }
 
+/* Which message names the box that refused a value, indexed by the
+   LZ_GUI_SET_* code. A table rather than a chain of ternaries, so
+   adding the seventh setting is one row.
+   Index 0 is LZ_GUI_SET_OK, which cannot reach the lookup; it holds the
+   temperature message so a code this table has not heard of degrades to
+   a real sentence instead of reading past the end.
+   FILE SCOPE, not a static inside the block that uses it: a
+   declaration there follows statements, which C89 forbids and Visual
+   C++ 4.0 rejects. */
+static const int SETTING_MSG[] = {
+    LZ_STR_ERR_BAD_TEMP,    /* LZ_GUI_SET_OK - unreachable */
+    LZ_STR_ERR_BAD_TEMP,
+    LZ_STR_ERR_BAD_CTX,
+    LZ_STR_ERR_BAD_TOPP,
+    LZ_STR_ERR_BAD_REP,
+    LZ_STR_ERR_BAD_MAXNEW,
+    LZ_STR_ERR_BAD_THINK_TEMP
+};
+
 int lz_gui_settings_dialog(HWND owner, HINSTANCE inst, LZGuiSettings *set) {
     HWND h;
     MSG msg;
@@ -1062,6 +1105,7 @@ int lz_gui_settings_dialog(HWND owner, HINSTANCE inst, LZGuiSettings *set) {
 
     if (g_result == 1) {
         int rc = lz_gui_settings_dialog_read(h, set, &edited);
+        int which;
         if (rc == 0) {
             *set = edited;
             if (IsWindow(h)) DestroyWindow(h);
@@ -1069,24 +1113,11 @@ int lz_gui_settings_dialog(HWND owner, HINSTANCE inst, LZGuiSettings *set) {
         }
         /* The value was refused. Say so - naming the box that refused
            rather than defaulting to the temperature - and treat it as a
-           cancel rather than committing half of it.
-           A table rather than a chain of ternaries, indexed by the
-           code, so adding the seventh setting is one row. Index 0 is
-           LZ_GUI_SET_OK, which cannot get here; it holds the
-           temperature message so that a code this table has not heard
-           of degrades to a real sentence instead of reading past the
-           end. */
-        static const int MSG[] = {
-            LZ_STR_ERR_BAD_TEMP,    /* LZ_GUI_SET_OK - unreachable */
-            LZ_STR_ERR_BAD_TEMP,
-            LZ_STR_ERR_BAD_CTX,
-            LZ_STR_ERR_BAD_TOPP,
-            LZ_STR_ERR_BAD_REP,
-            LZ_STR_ERR_BAD_MAXNEW,
-            LZ_STR_ERR_BAD_THINK_TEMP
-        };
-        int which = (rc >= 0 && rc < (int)(sizeof MSG / sizeof MSG[0]))
-                    ? MSG[rc] : LZ_STR_ERR_BAD_TEMP;
+           cancel rather than committing half of it. The table is
+           SETTING_MSG at file scope. */
+        which = (rc >= 0 && rc < (int)(sizeof SETTING_MSG /
+                                       sizeof SETTING_MSG[0]))
+                ? SETTING_MSG[rc] : LZ_STR_ERR_BAD_TEMP;
         MessageBoxA(owner, lz_str_display((LZStr)which),
                     lz_str_display(LZ_STR_ERR_TITLE),
                     MB_ICONEXCLAMATION | MB_OK);

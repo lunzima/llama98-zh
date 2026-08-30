@@ -29,12 +29,14 @@
  * and the icon is the same IDI_APP the main window loads. aboutdlg.h's
  * header comment says why.
  */
+#include "../src/lz_int.h"  /* lz_u64: the 64-bit type, portably */
 #include <stdio.h>       /* snprintf - split_body's line slices */
 #include <string.h>
 
 #include "aboutdlg.h"
 #include "compat40.h"
 #include "cpucheck.h"        /* lz_cpu_brand - the CPU line's model name */
+#include "../src/ops.h"      /* lz_kernel_tier, lz_build_paths - the tier line */
 #include "layout.h"          /* lz_gui_center_rect, LZ_GUI_DLG_* */
 #include "localized_strings.h"
 #include "resource.h"        /* IDI_APP */
@@ -630,9 +632,9 @@ static void sys_disk(char *out, int cap) {
     root[2] = '\\';
     root[3] = '\0';
     if (GetDiskFreeSpaceA(root, &spc, &bps, &freec, &totc)) {
-        unsigned long long bytes = (unsigned long long)totc * spc * bps;
+        lz_u64 bytes = (lz_u64)totc * spc * bps;
         snprintf(out, cap, "%s %llu MB total", root,
-                 (unsigned long long)(bytes / (1024 * 1024)));
+                 (lz_u64)(bytes / (1024 * 1024)));
     } else {
         snprintf(out, cap, "%s ?", root);
     }
@@ -644,7 +646,20 @@ HWND lz_gui_sysinfo_create(HWND owner, HINSTANCE inst) {
     int dx, dy, dw, dh;
     int x, y, w;
     char os[160], cpu[160], mem[160], disk[160];
+    /* The operator tier the engine actually selected. Read through
+       lz_kernel_tier(), the same accessor the CLI banner uses, so the
+       window and the command line cannot disagree about the name: it
+       carries its own `if (!g_kernel) lz_kernel_select(AUTO)`, so
+       asking is also what resolves it. Nothing under gui/ called it
+       before, which left the run-time half of "the GUI and the CLI use
+       the same operators" checkable only by reading the source. */
+    char tier[160];
     char line[320];
+/* One authority for how many SYSINFO lines there are: the measuring
+   loop, the array it walks, the dialog height and the OK button's y all
+   read it. A literal height instead would be correct for whatever line
+   count it was written against and silently wrong for the next one. */
+#define LZ_SYS_LINES 5
 
     if (!sys_register(inst)) return NULL;
 
@@ -656,6 +671,7 @@ HWND lz_gui_sysinfo_create(HWND owner, HINSTANCE inst) {
     sys_cpu(cpu, (int)sizeof cpu);
     sys_mem(mem, (int)sizeof mem);
     sys_disk(disk, (int)sizeof disk);
+    snprintf(tier, sizeof tier, "%s (%s)", lz_kernel_tier(), lz_build_paths());
 
     /* Window width is MEASURED, not fixed. The CPU brand string is the
        widest line (324px for "AMD Ryzen 7 5800X 8-Core Processor, 16
@@ -668,10 +684,11 @@ HWND lz_gui_sysinfo_create(HWND owner, HINSTANCE inst) {
         HDC mdc = GetDC(NULL);
         HGDIOBJ oldf = NULL;
         int maxw = 0, i;
-        char *lines[4];
+        char *lines[LZ_SYS_LINES];
         lines[0] = os; lines[1] = cpu; lines[2] = mem; lines[3] = disk;
+        lines[4] = tier;
         if (mdc) oldf = SelectObject(mdc, lz_ui_font());
-        for (i = 0; i < 4; i++) {
+        for (i = 0; i < LZ_SYS_LINES; i++) {
             snprintf(line, sizeof line, lz_str_display(LZ_STR_SYSINFO_OS + i),
                      lines[i]);
             if (mdc) {
@@ -692,7 +709,13 @@ HWND lz_gui_sysinfo_create(HWND owner, HINSTANCE inst) {
         if (maxw < 280) maxw = 280;
         rc.left = 0; rc.top = 0;
         rc.right = maxw + 2 * LZ_GUI_DLG_MARGIN;
-        rc.bottom = 140;
+        /* Derived from the line count, not a constant. It was 140 for
+           four lines; adding a fifth to a fixed height puts the OK
+           button on top of it. LZ_SYS_LINES is the one place the count
+           lives, and the button position below reads the same
+           expression. */
+        rc.bottom = LZ_SYS_LINES * (18 + 6) + 2 * LZ_GUI_DLG_MARGIN
+                    + LZ_GUI_BTN_H + 6;
         /* The client width, saved before AdjustWindowRect grows the
            rect into a window size - the STATIC lines live in client
            coordinates and want this, not the bordered dw. */
@@ -736,11 +759,16 @@ HWND lz_gui_sysinfo_create(HWND owner, HINSTANCE inst) {
     child(h, inst, "STATIC", line, SS_LEFT, x, y, w, 18, 0);
     y += 18 + 6;
 
+    snprintf(line, sizeof line, lz_str_display(LZ_STR_SYSINFO_TIER), tier);
+    child(h, inst, "STATIC", line, SS_LEFT, x, y, w, 18, 0);
+    y += 18 + 6;
+
     /* OK, bottom-right. */
     child(h, inst, "BUTTON", lz_str_display(LZ_STR_BTN_OK),
           BS_PUSHBUTTON | WS_TABSTOP,
           dw - LZ_GUI_DLG_MARGIN - LZ_GUI_BTN_W,
-          140 - LZ_GUI_DLG_MARGIN - LZ_GUI_BTN_H,
+          LZ_SYS_LINES * (18 + 6) + 2 * LZ_GUI_DLG_MARGIN + LZ_GUI_BTN_H + 6
+              - LZ_GUI_DLG_MARGIN - LZ_GUI_BTN_H,
           LZ_GUI_BTN_W, LZ_GUI_BTN_H, ID_SYS_OK);
 
     return h;

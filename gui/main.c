@@ -35,6 +35,7 @@
 #include "savechat.h"
 #include "session.h"
 #include "settings.h"
+#include "beep.h"     /* lz_beep - the reply-finished sound */
 #include "settingsdlg.h"
 #include "resource.h"
 #include "splash.h"
@@ -150,8 +151,16 @@ enum { LZ_LAMP_OFF = 0, LZ_LAMP_READY, LZ_LAMP_BUSY, LZ_LAMP_ERROR,
  * consumer's interval does not depend on how often this fires. */
 #define LZ_UI_TIMER     1
 /* Selftest-only pump watchdog. Its own id so it cannot collide with
-   the display tick above; see st_pump. */
-#define LZ_ST_PUMP_TIMER 99
+   the display tick above; see st_pump.
+
+   NAMED LZ_SELFTEST_, not LZ_ST_. Macros have no internal linkage, and
+   this TU reaches safetensors.h through main.c's modelload.h, so
+   LZ_ST_PUMP_TIMER shared the preprocessor's one flat namespace with
+   LZ_ST_MAX_DIMS - two different meanings of `st`, and the only place
+   where the 43 static st_* selftest functions below leak out of their
+   quarantine. safetensors.h owns the LZ_ST_ prefix and got there
+   first. */
+#define LZ_SELFTEST_PUMP_TIMER 99
 #define LZ_LAMP_BLINK 400        /* ms; WinZip's activity lamp flickered */
 
 /* The display is refreshed on a TIMER, not once per token (user
@@ -165,12 +174,11 @@ enum { LZ_LAMP_OFF = 0, LZ_LAMP_READY, LZ_LAMP_BUSY, LZ_LAMP_ERROR,
  * where the repaint can cost more than the token did.
  *
  * IT IS A KNOB, not a constant: how long a tick should be depends
- * entirely on the machine, and this project's own iron law nine says a
- * value that is arguable across the target family becomes an option
- * rather than a decision made here. `stream_ms` in kunkun98.ini.
- * ZERO restores the old push-per-token behaviour exactly, which is what
- * makes it a control rather than only a tuning value - the selftest
- * drives both settings. */
+ * entirely on the machine, and a value that is arguable across the
+ * target family becomes an option rather than a decision made here.
+ * `stream_ms` in kunkun98.ini. ZERO restores push-per-token exactly,
+ * which is what makes it a control rather than only a tuning value -
+ * the selftest drives both settings. */
 #define LZ_TOK_MS       100      /* default tick */
 #define LZ_TOK_MS_MAX   2000     /* an ini typo must not freeze the view */
 #define LZ_TOK_BUF      4096
@@ -298,7 +306,7 @@ static struct {
        two things, so it says the one its label claims. Set at the job's
        start and moved forward when prefill ends, so a turn without
        prefill is measured from the start. */
-    double gen_start_ms;
+    float gen_start_ms;
     int   tok_live;
     /* The repetition penalty's WINDOW, in tokens. Ini-only, deliberately
      * not in LZGuiSettings and not in the settings dialog: it and the
@@ -473,6 +481,33 @@ static const LZMenuItem MENU_HELP[] = {
     { 0, 0, 0 }
 };
 
+/* The recent-list block - the deepest nesting in build_menu_bar (menu ->
+   item -> the 0xFFFF placeholder -> the MRU loop -> the '&'-doubling
+   walk). Extracted so the bar loop's depth drops. The trailing separator
+   is the caller's, not this helper's, so the empty-list case omits only
+   the numbered entries, never the separator that leads to Exit. */
+static void menu_append_mru(HMENU m) {
+    if (g.mru.n > 0) {
+        int k;
+        AppendMenuA(m, MF_SEPARATOR, 0, NULL);
+        for (k = 0; k < g.mru.n; k++) {
+            char label[LZ_MRU_LEN + 8];
+            /* "&1 " gives the item its mnemonic; the path's own
+               ampersands must be doubled or the menu eats them and
+               underlines a letter of the directory name. */
+            int p = sprintf(label, "&%d ", k + 1);
+            const char *s = g.mru.item[k];
+            while (*s && p < (int)sizeof label - 2) {
+                if (*s == '&')
+                    label[p++] = '&';
+                label[p++] = *s++;
+            }
+            label[p] = '\0';
+            AppendMenuA(m, MF_STRING | MF_ENABLED, (UINT)(IDM_MRU0 + k), label);
+        }
+    }
+}
+
 static void build_menu_bar(HWND hwnd) {
     static const struct {
         int title;
@@ -499,27 +534,7 @@ static void build_menu_bar(HWND hwnd) {
                    entry here. Nothing is drawn when the list is empty -
                    an "1." with no path is worse than no block - so a
                    fresh install's File menu omits the recent list. */
-                if (BAR[i].items == MENU_FILE && g.mru.n > 0) {
-                    int k;
-                    AppendMenuA(m, MF_SEPARATOR, 0, NULL);
-                    for (k = 0; k < g.mru.n; k++) {
-                        char label[LZ_MRU_LEN + 8];
-                        /* "&1 " gives the item its mnemonic; the path's
-                           own ampersands must be doubled or the menu
-                           eats them and underlines a letter of the
-                           directory name. */
-                        int p = sprintf(label, "&%d ", k + 1);
-                        const char *s = g.mru.item[k];
-                        while (*s && p < (int)sizeof label - 2) {
-                            if (*s == '&')
-                                label[p++] = '&';
-                            label[p++] = *s++;
-                        }
-                        label[p] = '\0';
-                        AppendMenuA(m, MF_STRING | MF_ENABLED,
-                                    (UINT)(IDM_MRU0 + k), label);
-                    }
-                }
+                if (BAR[i].items == MENU_FILE) menu_append_mru(m);
                 AppendMenuA(m, MF_SEPARATOR, 0, NULL);
             } else {
                 /* The language pair carries its own tick. Baked in here
@@ -819,7 +834,7 @@ static int prefill_active(void) {
  * writes and changes nothing below the GUI, so what it exercises is the
  * paint path itself and it needs no model. 0 (default) is off. */
 static int   g_dbg_prefill_ms;
-static double g_dbg_prefill_t0;
+static float g_dbg_prefill_t0;
 
 /* 4.0-era, hidden at the 3.51 floor. Value is fixed by the ABI, same
    argument gui/captionwnd.c makes for the constants it spells out. */
@@ -1121,10 +1136,10 @@ static void set_status(const char *display_utf8) {
        form to the windows. `shown` is the GBK form, so the sidebar
        mirror below (also ANSI/GBK) always gets the converted text,
        never the raw UTF-8 that mojibakes. */
+    const char *shown = status_gbk;
     lz_gbk_from_utf8(display_utf8 ? display_utf8 : "",
                      (int)strlen(display_utf8 ? display_utf8 : ""),
                      status_gbk, (int)sizeof status_gbk, NULL);
-    const char *shown = status_gbk;
     if (!h) return;
     /* The throughput cell, on BOTH strips.
        While a generate job runs, and after it ends until the next turn,
@@ -1527,7 +1542,7 @@ static void append_run(void *ud, const char *gbk, int n, int style) {
            headings do not need three sizes). This checkpoint only ever
            writes "###",
            so the difference between the levels would never appear on
-           screen. gui/stream.c still PARSES the level
+           screen. common/stream.c still PARSES the level
            and still clamps h4-h6 to 3 - that stays gated - the display
            just does not use it beyond heading-or-not.
 
@@ -1585,7 +1600,7 @@ static void append_run(void *ud, const char *gbk, int n, int style) {
        SCF_SELECTION, and the selection is the EMPTY insertion point at
        the end. That confines it to the paragraph being built. It is
        safe to switch back to no-tabs on the run after a table only
-       because the row's own '\n' carried the TABLE bit (gui/stream.c's
+       because the row's own '\n' carried the TABLE bit (common/stream.c's
        line-scoped-bits branch), so by the time a plain run gets here
        the insertion point is already in the NEXT paragraph. Those two
        halves have to be read together; either one alone is wrong.
@@ -1700,7 +1715,7 @@ static void append_run(void *ud, const char *gbk, int n, int style) {
 }
 
 /* Append `len` bytes of UTF-8 as ONE run with an explicit colour, no
- * bold/italic/code, and WITHOUT going through gui/stream.c's Markdown/
+ * bold/italic/code, and WITHOUT going through common/stream.c's Markdown/
  * think scanner - speaker labels, clocks and system lines
  * are UI chrome this program wrote itself, never model output, so
  * there is nothing in them for that scanner to find and no reason to
@@ -1711,7 +1726,7 @@ static void append_run(void *ud, const char *gbk, int n, int style) {
  * and mixing that into the scanner's own state machine would make it
  * responsible for two unrelated things.
  *
- * `utf8` is converted to GBK here exactly the way gui/stream.c's own
+ * `utf8` is converted to GBK here exactly the way common/stream.c's own
  * emit() does for the scanner's runs - same lz_gbk_from_utf8 call,
  * same "clamp after a possible truncation" guard - so this is, in
  * effect, that one call plus a CHARFORMAT set, with the scanner left
@@ -1780,7 +1795,7 @@ static void append_colored_line(const char *utf8, int len, COLORREF color) {
  *
  * `with_time` off is for load_chat_from's replay path: LZChatMsg
  * (src/chat.h) carries no timestamp - the engine layer has no display
- * concerns to begin with (iron law one) - and a message loaded back
+ * concerns to begin with - and a message loaded back
  * from a file was not sent "now", so inventing a clock reading for it
  * would put a fact on screen that is simply not true. A live turn
  * (do_send) always passes 1: GetLocalTime is read fresh, right here,
@@ -1800,7 +1815,7 @@ static void turn_header(LZStr speaker, COLORREF color, int with_time) {
 }
 
 /* Feed generated UTF-8 to the transcript. Chunk boundaries are
- * arbitrary; gui/stream.c owns the reassembly. */
+ * arbitrary; common/stream.c owns the reassembly. */
 static void transcript_push(const char *utf8, int len) {
     lz_stream_push(&g.stream, utf8, len, append_run, NULL);
 }
@@ -1818,7 +1833,7 @@ static void transcript_end(void) {
  * deal.
  *
  * CHROME, not content: written straight into the control like the
- * speaker label above, NOT pushed through gui/stream.c. These two bytes
+ * speaker label above, NOT pushed through common/stream.c. These two bytes
  * are this program's own layout, not something the model said, and the
  * scanner has no business seeing them - the same argument
  * append_colored_line's own comment already makes for the label and the
@@ -1852,7 +1867,7 @@ static void tokens_flush(void) {
  * With the throttle on they are held for the next tick; with it off
  * (stream_ms = 0) they go straight through, unthrottled. Correctness
  * does not depend on
- * where the boundaries fall - gui/stream.c is chunk-independent by
+ * where the boundaries fall - common/stream.c is chunk-independent by
  * construction - so merging
  * arrivals is free of meaning, only of cost.
  *
@@ -1970,7 +1985,7 @@ static void gui_prefill_progress(int done, int total, void *ctx) {
 /* ---- the window's single periodic tick (see LZ_UI_TIMER) ---- */
 
 static int    g_ui_timer_ms;      /* 0 = not armed */
-static double g_ui_last_flush;
+static float g_ui_last_flush;
 /* Whether the last tick saw a prefill. Belongs to the JOB, so start_job
    clears it with the counters: left over from a previous job it fires
    the prefill->generation transition on the first tick of a turn that
@@ -2026,7 +2041,7 @@ static void set_lamps(void) {
  * with it. On the target that clock moves in ~55 ms steps, which is
  * finer than any deadline here. */
 static void ui_tick(void) {
-    double now = lz_time_ms();
+    float now = lz_time_ms();
 
     /* lz_time_ms is GetTickCount on a target without QPC, and that
        wraps every 49.7 days. Every deadline below is a subtraction, so
@@ -2041,7 +2056,7 @@ static void ui_tick(void) {
     /* 1. Buffered tokens. stream_ms == 0 means the sink pushes straight
           to the control and there is nothing held back to flush. */
     if (g.job_kind == JOB_GENERATE && g.tok_ms > 0 &&
-        now - g_ui_last_flush >= (double)g.tok_ms) {
+        now - g_ui_last_flush >= (float)g.tok_ms) {
         tokens_flush();
         g_ui_last_flush = now;
     }
@@ -2062,17 +2077,17 @@ static void ui_tick(void) {
         if (g.job_kind != JOB_NONE) {
             g_dbg_prefill_t0 = 0.0;
         } else {
-            double dt;
+            float dt;
             if (g_dbg_prefill_t0 <= 0.0) g_dbg_prefill_t0 = now;
             dt = now - g_dbg_prefill_t0;
-            if (dt >= (double)g_dbg_prefill_ms) {
+            if (dt >= (float)g_dbg_prefill_ms) {
                 g_dbg_prefill_t0 = now;   /* loop, so it can be watched
                                              more than once */
                 dt = 0.0;
             }
             g_pf_base  = 0;
             g_pf_total = 1000;
-            g_pf_done  = (int)((dt * 1000.0) / (double)g_dbg_prefill_ms);
+            g_pf_done  = (int)((dt * 1000.0f) / (float)g_dbg_prefill_ms);
             if (g_pf_done >= g_pf_total) g_pf_done = g_pf_total - 1;
         }
     }
@@ -2410,6 +2425,7 @@ static void finish_job(HWND hwnd, int rc) {
     prefill_paint_tick();
 
     if (kind == JOB_LOAD) {
+        const char *rest;
         /* What the window IS has changed either way: a failed load
            leaves nothing open, so the resting text has to follow even on
            failure - otherwise the status line still claims a model. */
@@ -2428,8 +2444,8 @@ static void finish_job(HWND hwnd, int rc) {
            now UTF-8 everywhere, and set_status converts to GBK. Using
            lz_str_display here (GBK) would double-convert through
            set_status and turn every Chinese state string into '?'. */
-        const char *rest = lz_str_utf8(ok ? LZ_STR_STATE_READY
-                                          : LZ_STR_STATE_NO_MODEL);
+        rest = lz_str_utf8(ok ? LZ_STR_STATE_READY
+                              : LZ_STR_STATE_NO_MODEL);
         strncpy(g.idle_status, rest, sizeof g.idle_status - 1);
         g.idle_status[sizeof g.idle_status - 1] = '\0';
         /* Unconditional, not "ok": a load that just FAILED still leaves
@@ -2464,6 +2480,7 @@ static void finish_job(HWND hwnd, int rc) {
                would mojibake any model path with a Chinese character in
                it. This is the two-forms trap in localized_strings.h,
                met in the wild. */
+            {
             const char *name = lz_gui_model_name(&g.mdl);
             char nameu[300], line[512];
             lz_gbk_to_utf8(name, (int)strlen(name), nameu, (int)sizeof nameu,
@@ -2494,6 +2511,7 @@ static void finish_job(HWND hwnd, int rc) {
             set_status(g.idle_status);   /* repaint the sidebar too */
             /* The model segment of the title bar changed with the load. */
             push_caption();
+            }
         } else {
             /* A FAILED load still changed what the window is: the job
                unloaded whatever was open before it started reading, so
@@ -2531,6 +2549,12 @@ static void finish_job(HWND hwnd, int rc) {
            looked identical to one that ended on its own. */
         if (g.sess.opts.out_finish == LZ_FINISH_CANCELLED)
             sys_line(LZ_STR_SYS_GEN_STOPPED);
+        /* The reply is finished and the transcript is settled, which is
+           when the sound means what it says. On EVERY ending including
+           a stopped one: the user who walked away wants to know the
+           machine is idle, and "it stopped because you pressed Stop" is
+           already on screen for when they come back. */
+        if (g.set.beep) lz_beep();
     }
 
     /* AFTER the branch: the model lamp's third state is "the last load
@@ -2545,8 +2569,9 @@ static void finish_job(HWND hwnd, int rc) {
        ends reads as hung, not as informative, and the status line must
        return to "ready" once the model finishes. */
     if (rc != 0) {
+        const char *msg;
         g.tok_live = 0;
-        const char *msg = lz_worker_error();
+        msg = lz_worker_error();
         set_status(msg && msg[0] ? msg
                                  : lz_str_display(LZ_STR_ERR_TITLE));
         /* A modal box owned by a window nobody can see has no owner
@@ -2705,30 +2730,36 @@ static void measure_status_h(void) {
  * Glyphs are comctl32's own, chosen for what the era's strip HAS.
  * FILEOPEN, FILESAVE and PROPERTIES are literal. It has no "stop", so
  * that one takes the period's own reading: Internet Explorer's Stop
- * button was an X. FILENEW for clearing is "start a fresh page". */
+ * button was an X. FILENEW for clearing is "start a fresh page".
+ *
+ * IDM_REGEN is the one rollback command that gets a button, because it
+ * is the one a user reaches for repeatedly. LZ_STD_REDOW is comctl32's
+ * own redo arrow, as close as the system strip comes to "do that
+ * again".
+ *
+ * These two are at FILE SCOPE rather than static inside the function:
+ * there they follow the g.no_toolbar early return, and a declaration
+ * after a statement is C99, which Visual C++ 4.0 rejects. */
+static const int TOOLBAR_CMDS[6] = {
+    IDM_OPEN_MODEL, IDM_SAVE_CHAT, IDM_CLEAR, IDM_STOP_GEN,
+    IDM_REGEN, IDM_SETTINGS };
+static const int TOOLBAR_GLYPHS[6] = {
+    LZ_STD_FILEOPEN, LZ_STD_FILESAVE, LZ_STD_FILENEW,
+    LZ_STD_DELETE, LZ_STD_REDOW, LZ_STD_PROPERTIES };
+
 static HWND create_toolbar(HWND hwnd) {
+    const char *labels[6];
     /* See the comment on g.no_toolbar: this is the only way the selftest
        can walk the "comctl32 is absent" path on a machine that has it. */
     if (g.no_toolbar) return NULL;
-    /* IDM_REGEN - the one rollback command that gets
-       a button, because it is the one a user reaches for repeatedly.
-       LZ_STD_REDOW is comctl32's own redo arrow, which is as close as
-       the system strip comes to "do that again". */
-    static const int CMDS[6] = {
-        IDM_OPEN_MODEL, IDM_SAVE_CHAT, IDM_CLEAR, IDM_STOP_GEN,
-        IDM_REGEN, IDM_SETTINGS };
-    static const int GLYPHS[6] = {
-        LZ_STD_FILEOPEN, LZ_STD_FILESAVE, LZ_STD_FILENEW,
-        LZ_STD_DELETE, LZ_STD_REDOW, LZ_STD_PROPERTIES };
-    const char *labels[6];
     labels[0] = lz_str_display(LZ_STR_BTN_OPEN);
     labels[1] = lz_str_display(LZ_STR_BTN_SAVE);
     labels[2] = lz_str_display(LZ_STR_BTN_CLEAR);
     labels[3] = lz_str_display(LZ_STR_BTN_STOP);
     labels[4] = lz_str_display(LZ_STR_BTN_REGEN);
     labels[5] = lz_str_display(LZ_STR_BTN_SETTINGS);
-    return lz_gui_toolbar_create(hwnd, g.inst, CMDS, GLYPHS, labels, 6,
-                                 ID_TOOLBAR);
+    return lz_gui_toolbar_create(hwnd, g.inst, TOOLBAR_CMDS,
+                                 TOOLBAR_GLYPHS, labels, 6, ID_TOOLBAR);
 }
 
 /* kunkun98.ini persistence for the recent list: mru0 is the newest,
@@ -2767,6 +2798,8 @@ static void mru_save(void) {
 }
 
 static int create_children(HWND hwnd) {
+    const char *RICH_CLASS;
+    int i;
     /* BEFORE build_menu_bar, which ends in rollback_sync, which reads
        these. The struct's own zero-init would leave them at 0 - a
        perfectly valid position, the very start of the transcript -
@@ -2792,8 +2825,6 @@ static int create_children(HWND hwnd) {
        own guard below tell "not yet registered" apart from "registered,
        but this isn't it". */
     g_findmsg = RegisterWindowMessageA("commdlg_FindReplace");
-    const char *RICH_CLASS;
-    int i;
 
     /* riched20 is loaded by hand rather than through an import library:
        Watcom has no import lib for it, and a missing DLL must surface as
@@ -3141,8 +3172,11 @@ static int create_children(HWND hwnd) {
        this. The widening on the way out is deliberate and lossless. */
     g.set.seed_mode = lz_ini_get_int("seed_mode", LZ_COMMON_SEED_RANDOM)
                       ? LZ_COMMON_SEED_FIXED : LZ_COMMON_SEED_RANDOM;
-    g.set.seed = (unsigned long long)(unsigned)lz_ini_get_int("seed", 1);
+    g.set.seed = (lz_u64)(unsigned)lz_ini_get_int("seed", 1);
     g.set.think = lz_ini_get_int("think", g.set.think) ? 1 : 0;
+    /* Default 1: a missing key means a user who has never had the
+       setting, and the reply-finished beep is on for them. */
+    g.set.beep = lz_ini_get_int("beep", 1) ? 1 : 0;
     /* Context window. Through the clamp with no model cap - there is no
        model at this point in startup, and the cap is applied again at
        load time where cfg->seq_len is finally knowable. Clamping here
@@ -3166,10 +3200,10 @@ static int create_children(HWND hwnd) {
            rules and an ini a user edited by hand is untrusted input. A
            refused value leaves the mode default in place.
            milli / 1000.0f is FRONT-END code, not inside
-           lz_fpu_float_begin/end and not in src/, so iron law six's
-           rule 1 (never divide by a float constant) does not apply
-           here - that rule protects the engine's cross-compiler
-           bit-exactness, which these lines have no part in.
+           lz_fpu_float_begin/end and not in src/, so the ban on
+           dividing by a float constant does not apply here - it
+           protects the engine's cross-compiler bit-exactness, which
+           these lines have no part in.
 
            THOUSANDTHS because the profile API has no float form
            (gui/inifile.h) and parsing one back would go through the C
@@ -4304,7 +4338,8 @@ static void do_regen(HWND hwnd) {
 
 static void do_edit_last(HWND hwnd) {
     /* Sized off do_send's own input buffer: whatever fits going in has
-       to fit coming back out. static, not stack - iron law six. */
+       to fit coming back out. static, not stack - 144 KB of locals is
+       not something the target's stack holds. */
     static char gbk[49152];
     static char crlf[2 * 49152 + 8];
     const LZChatMsg *m = last_user_msg();
@@ -4774,7 +4809,7 @@ static void open_find(HWND hwnd) {
  * range (0x40-0xFE) overlaps its lead-byte range (0x81-0xFE), so only
  * a scan that starts from a KNOWN boundary (the string's own start,
  * since it came from a real decode) can stay synchronised - the same
- * resynchronisation reasoning gui/stream.c's own seq_len() and
+ * resynchronisation reasoning common/stream.c's own seq_len() and
  * gui/mru.c's own ci_eq() already rely on for their own byte walks. */
 static void truncate_gbk_to_width(HWND lb, char *gbk, int max_px) {
     HDC dc;
@@ -4865,8 +4900,9 @@ static void repaint_lamps(const LZInspect *ins) {
 
 /* Repaint the candidate LISTBOX from one WM_APP_INSPECT frame.
  *
- * Numbers only came across the wire (LZInspect's own design, iron law
- * one) - turning cand_id[i] into text needs the tokenizer, which is
+ * Numbers only came across the wire (LZInspect's own design: the
+ * engine carries no user-facing text) - turning cand_id[i] into text
+ * needs the tokenizer, which is
  * why this lives here and not in gui/worker.c or src/. lz_decode_into
  * is the thread-safe form (its own header comment): the worker thread
  * is running concurrently, sampling and posting the NEXT frame while
@@ -4923,7 +4959,7 @@ static void repaint_candidates(const LZInspect *ins) {
            places is already finer than a 14px lamp-sized column can
            usefully show. A literal tab (\t), not spaces - LB_SETTABSTOPS
            above is what the column position actually comes from. */
-        sprintf(row, "%s\t%.4f", gbk, (double)ins->cand_p[i]);
+        sprintf(row, "%s\t%.4f", gbk, ins->cand_p[i]);
         SendMessage(lb, LB_ADDSTRING, 0, (LPARAM)row);
     }
     SendMessage(lb, WM_SETREDRAW, TRUE, 0);
@@ -5456,6 +5492,7 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             lz_ini_set_int("input_h", g.input_h);
             lz_ini_set_int("lang", lz_str_lang_english());
             lz_ini_set_int("think", g.set.think);
+            lz_ini_set_int("beep", g.set.beep);
             lz_ini_set_int("temp_milli", (int)(g.set.temp * 1000.0f + 0.5f));
             lz_ini_set_int("seed_mode", g.set.seed_mode);
             lz_ini_set_int("seed", (int)(unsigned)g.set.seed);
@@ -5578,8 +5615,8 @@ static int st_clip_open(HWND hwnd) {
    binary produced, and the counterpart is an ordinary file sitting next
    to the report from whenever the other run happened - possibly a build
    ago. A stale one still loads, still has the right dimensions, and
-   still yields a percentage: iron law four's shape exactly, a number
-   that is self-consistent and means nothing.
+   still yields a percentage - a number that is self-consistent and
+   means nothing.
    Timestamps rather than a build stamp because the executable's own
    mtime IS the fact being asked about, and baking __DATE__ into the
    binary to answer it would trade a reproducible build for it.
@@ -5804,7 +5841,7 @@ static int st_transcript(FILE *f) {
        source charset rather than the pipeline. */
     static const char CJK[] =
         "<think>\xE6\x80\x9D\xE8\x80\x83</think>\xE5\x9B\x9E\xE7\xAD\x94";
-    /* Same as CJK, tags stripped - the display bytes gui/stream.c is
+    /* Same as CJK, tags stripped - the display bytes common/stream.c is
        expected to actually produce (tags are consumed, not shown - see
        gui/stream.h's own comment). */
     static const char CJK_CONTENT[] =
@@ -5864,7 +5901,7 @@ static int st_transcript(FILE *f) {
     transcript_clear();
 
     /* Inline Markdown reaching the REAL control - the
-       parser's own output is gui/stream.c's job; this is
+       parser's own output is common/stream.c's job; this is
        only proof that append_run's CHARFORMAT wiring actually carries
        what the parser decided into RichEdit, the same relationship
        the think colour checks above have to LZ_COLOR_THINK. */
@@ -5898,7 +5935,7 @@ static int st_transcript(FILE *f) {
     }
 
     /* Block Markdown reaching the real control. Same relationship to
-       gui/stream.c as the inline block above:
+       common/stream.c as the inline block above:
        the parser's own decisions are covered exhaustively elsewhere;
        what can only be checked HERE is
        whether append_run turns those decisions into RichEdit state. */
@@ -5925,7 +5962,7 @@ static int st_transcript(FILE *f) {
         checks++;
         transcript_clear();
 
-        /* One size for every level (user decision). gui/stream.c still
+        /* One size for every level (user decision). common/stream.c still
            parses "###" as level 3 and still
            clamps h4-h6 - so this is
            the assertion that the DISPLAY deliberately ignores the level.
@@ -5963,7 +6000,7 @@ static int st_transcript(FILE *f) {
            re-run of one turn has to differ from the first run. */
         LZGuiModel empty;
         LZGuiSession ss;
-        unsigned long long a, b;
+        lz_u64 a, b;
         char err[128];
         memset(&empty, 0, sizeof empty);
         lz_gui_session_init(&ss, &empty, 1);
@@ -6027,8 +6064,8 @@ static int st_transcript(FILE *f) {
              "prefill: startup left the live session on prefix reuse");
     checks++;
     {
-        /* The throttle, and BOTH settings of it - iron law nine's "one
-           option plus one gate proving it really changes something".
+        /* The throttle, and BOTH settings of it: one option plus one
+           check proving it really changes something.
            The knob is worth nothing if the only thing checked is that
            the text eventually arrives, which it does either way.
 
@@ -6807,17 +6844,17 @@ static int st_pump(HWND hwnd, int stop_at_first) {
        is a watchdog whose message the loop below eats itself, so it
        never reaches the window procedure and drives nothing. Reusing
        LZ_UI_TIMER's id here would cancel the real tick. */
-    SetTimer(hwnd, LZ_ST_PUMP_TIMER, 20000, NULL);
+    SetTimer(hwnd, LZ_SELFTEST_PUMP_TIMER, 20000, NULL);
     while (!g.done_seen && GetMessage(&msg, NULL, 0, 0) > 0) {
         if (msg.message == WM_APP_TOKENS && stop_at_first) {
             lz_worker_request_stop();
             stop_at_first = 0;
         }
-        if (msg.message == WM_TIMER && msg.wParam == LZ_ST_PUMP_TIMER) break;
+        if (msg.message == WM_TIMER && msg.wParam == LZ_SELFTEST_PUMP_TIMER) break;
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
-    KillTimer(hwnd, LZ_ST_PUMP_TIMER);
+    KillTimer(hwnd, LZ_SELFTEST_PUMP_TIMER);
     return g.done_seen;
 }
 
@@ -7256,7 +7293,7 @@ static int st_worker(FILE *f, HWND hwnd) {
           in the queue; drained, it is the real load job's own failure
           (rc != 0, no old job left to misattribute). */
     {
-        char dir[MAX_PATH], bin[MAX_PATH], cmd[MAX_PATH + 8];
+        char dir[MAX_PATH], bin[MAX_PATH + 16], cmd[MAX_PATH + 8];
         FILE *out;
 
         GetTempPathA((DWORD)sizeof dir, dir);
@@ -7266,7 +7303,7 @@ static int st_worker(FILE *f, HWND hwnd) {
            "%.500s/model.bin") - Win32 accepts both, but the pre-check and
            the selftest must agree on the SAME path or the test only
            passes by the grace of backslash==slash. */
-        sprintf(bin, "%s/model.bin", dir);
+        snprintf(bin, sizeof bin, "%s/model.bin", dir);
         out = fopen(bin, "wb");
         if (out) { fwrite("not a model", 1, 11, out); fclose(out); }
 
@@ -7863,8 +7900,7 @@ static int st_worker(FILE *f, HWND hwnd) {
            The check does NOT re-walk the string with the same lead-
            byte logic truncate_gbk_to_width itself uses - that would
            only prove the function agrees with itself, not that it
-           avoided a split (see this project's own iron law four on
-           exactly that trap). Instead it uses a fact independent of
+           avoided a split. Instead it uses a fact independent of
            the algorithm: every one of the 8 source characters is
            EXACTLY 2 bytes, all identical, so a CORRECT truncation's
            prefix (everything before the appended "...") can only ever
@@ -8349,7 +8385,7 @@ static int st_rollback(FILE *f, HWND hwnd) {
    that is not one. The success path needed a trained model and waited -
    st_real_model below is that wait ending. */
 static int st_model(FILE *f) {
-    char dir[MAX_PATH], bin[MAX_PATH];
+    char dir[MAX_PATH], bin[MAX_PATH + 16];
     LZGuiModel m;
     char err[512];
     FILE *out;
@@ -8364,7 +8400,7 @@ static int st_model(FILE *f) {
     st_check(f, !lz_gui_model_dir_ok(dir),
              "model: a directory with no model.bin is refused"); checks++;
 
-    sprintf(bin, "%s/model.bin", dir);
+    snprintf(bin, sizeof bin, "%s/model.bin", dir);
     out = fopen(bin, "wb");
     if (out) { fwrite("not a model", 1, 11, out); fclose(out); }
     /* ... and accepted once the file is there. Without this the check
@@ -9205,8 +9241,8 @@ static int st_settings_dialog(FILE *f, HINSTANCE inst) {
     lz_common_settings_set_topp(&in, 0.35f);
     lz_common_settings_set_rep(&in, 1.25f);
     lz_common_settings_set_max_new(&in, 256, in.ctx);
-    /* A CUSTOM system prompt, in UTF-8 with Chinese (hex-escaped per
-       iron law seven). The value is NOT the default (empty), so a
+    /* A CUSTOM system prompt, in UTF-8 with the Chinese hex-escaped so
+       this file stays ASCII. The value is NOT the default (empty), so a
        reader that ignores the box entirely would pass. The
        distinguishing pair: non-empty carries this, empty means the
        built-in. */
@@ -9270,11 +9306,11 @@ static int st_settings_dialog(FILE *f, HINSTANCE inst) {
         if (dp < 0) dp = -dp;
         if (dr < 0) dr = -dr;
         st_check(f, dp < 0.005f, "settings: the top-p box round-trips");
-        if (dp >= 0.005f) fprintf(f, "  got %.3f\n", (double)out.topp);
+        if (dp >= 0.005f) fprintf(f, "  got %.3f\n", out.topp);
         checks++;
         st_check(f, dr < 0.005f,
                  "settings: the repetition penalty box round-trips");
-        if (dr >= 0.005f) fprintf(f, "  got %.3f\n", (double)out.rep);
+        if (dr >= 0.005f) fprintf(f, "  got %.3f\n", out.rep);
         checks++;
     }
     st_check(f, out.max_new == 256,
@@ -9334,8 +9370,8 @@ static int st_settings_dialog(FILE *f, HINSTANCE inst) {
         st_check(f, d < 0.01f,
                  "settings: the temperature round-trips through the box");
         if (d >= 0.01f)
-            fprintf(f, "  in %.3f out %.3f\n", (double)in.temp,
-                    (double)out.temp);
+            fprintf(f, "  in %.3f out %.3f\n", in.temp,
+                    out.temp);
         checks++;
     }
     {
@@ -9344,8 +9380,8 @@ static int st_settings_dialog(FILE *f, HINSTANCE inst) {
         st_check(f, d < 0.01f,
                  "settings: the think-temp round-trips through the box");
         if (d >= 0.01f)
-            fprintf(f, "  in %.3f out %.3f\n", (double)in.think_temp,
-                    (double)out.think_temp);
+            fprintf(f, "  in %.3f out %.3f\n", in.think_temp,
+                    out.think_temp);
         checks++;
     }
 
@@ -9371,6 +9407,7 @@ static int st_settings_dialog(FILE *f, HINSTANCE inst) {
            added, provided whoever adds one extends CHAIN - which they
            will notice, because leaving it alone reddens this. */
         static const int CHAIN[] = {
+            3024,         /* beep on finish - the checkbox under think */
             3004, 3003,   /* temperature: slider, box */
             3023, 3022,   /* think-temp: slider, box */
             3013, 3012,   /* top-p */
@@ -9830,8 +9867,8 @@ static int st_sampling(FILE *f) {
         if (!ok)
             fprintf(f, "  temp %.3f topp %.3f (think topp %.3f, "
                        "instruct topp %.3f)\n",
-                    (double)s.temp, (double)s.topp,
-                    (double)think_topp, (double)inst_topp);
+                    s.temp, s.topp,
+                    think_topp, inst_topp);
         checks++;
     }
 
@@ -9907,8 +9944,8 @@ static int st_sampling(FILE *f) {
             fprintf(f, "  temp %.2f topp %.2f thinktemp %.2f rep %.2f "
                        "max_new %d "
                        "ctx %d manual %d/%d/%d\n",
-                    (double)s.temp, (double)s.topp, (double)s.think_temp,
-                    (double)s.rep,
+                    s.temp, s.topp, s.think_temp,
+                    s.rep,
                     s.max_new, s.ctx, s.manual_temp, s.manual_topp,
                     s.manual_think_temp);
         checks++;
@@ -9945,9 +9982,9 @@ static int st_sampling(FILE *f) {
         if (!ok)
             fprintf(f, "  topp %.3f rep %.3f thinktemp %.3f/%d "
                        "max_new %d window %d\n",
-                    (double)g.sess.opts.sample.topp,
-                    (double)g.sess.opts.sample.repetition_penalty,
-                    (double)g.sess.opts.sample.temp_think,
+                    g.sess.opts.sample.topp,
+                    g.sess.opts.sample.repetition_penalty,
+                    g.sess.opts.sample.temp_think,
                     g.sess.opts.sample.think_temp_enabled,
                     g.sess.opts.max_new_tokens,
                     g.sess.opts.sample.repeat_last_n);
@@ -9980,7 +10017,7 @@ static int st_sampling(FILE *f) {
         if (!(g.sess.opts.sample.repetition_penalty > 0.995f &&
               g.sess.opts.sample.repetition_penalty < 1.005f))
             fprintf(f, "  rep %.3f\n",
-                    (double)g.sess.opts.sample.repetition_penalty);
+                    g.sess.opts.sample.repetition_penalty);
         checks++;
 
         g.set = saved;
@@ -10538,6 +10575,182 @@ static int st_settings_scroll(FILE *f, HINSTANCE inst) {
  * window, read it, drive the dismiss messages, assert IsWindow goes
  * false. A window that lingers is a leak that shows up as nothing else
  * in a selftest. */
+/* The four text controls split the SAME LZ_STR_ABOUT_BODY the string
+   table owns: title (first line), version (second line), the credits
+   and the license. The split lives in aboutdlg.c, so each control is
+   checked against the corresponding slice of the live string, not a
+   re-typed copy. Extracted from st_about because it is the deepest
+   block there; `checks` is a pointer so the increments land in
+   st_about's running count. */
+static void st_about_body(FILE *f, HWND dlg, int *checks) {
+    const char *body = lz_str_display(LZ_STR_ABOUT_BODY);
+    const char *nl1 = strchr(body, '\n');
+    const char *nl2 = nl1 ? strchr(nl1 + 1, '\n') : NULL;
+    char want[512];   /* the license string is ~470 bytes, not the
+                         body's ~70 - sized for the longest it holds */
+    HWND b;
+    char got[512];
+    b = GetDlgItem(dlg, 3103 /* ID_ABT_BODY */);
+    got[0] = '\0';
+    if (b) GetWindowTextA(b, got, (int)sizeof got);
+    if (nl1) {
+        int n = (int)(nl1 - body);
+        if (n > (int)sizeof want - 1) n = (int)sizeof want - 1;
+        memcpy(want, body, (size_t)n);
+        want[n] = '\0';
+    } else { lstrcpynA(want, body, (int)sizeof want); }
+    st_check(f, strcmp(got, want) == 0,
+             "about: the title is the body's first line");
+    if (strcmp(got, want) != 0) fprintf(f, "  title [%s] want [%s]\n",
+                                        got, want);
+    (*checks)++;
+
+    /* The title font: it must be a REAL font answering
+       WM_GETFONT, and it must match the UI font's charset (SimSun
+       GB2312 in Chinese, whatever stock face in English) - NOT
+       the FIXEDFONT a title degrades to when its font handle
+       is freed right after WM_SETFONT. Comparing against the LIVE
+       UI font's charset
+       rather than a hardcoded 134 keeps this true across both
+       languages. */
+    {
+        HFONT tf = (HFONT)SendMessage(b, WM_GETFONT, 0, 0);
+        LOGFONTA lf, uf;
+        int ui_charset;
+        if (!tf || !GetObjectA((HGDIOBJ)tf, (int)sizeof lf, &lf)) {
+            st_check(f, 0, "about: the title control answers "
+                     "WM_GETFONT with a real font");
+        } else {
+            ui_charset = DEFAULT_CHARSET;
+            if (lz_ui_font() &&
+                GetObjectA((HGDIOBJ)lz_ui_font(),
+                           (int)sizeof uf, &uf))
+                ui_charset = uf.lfCharSet;
+            st_check(f, lf.lfCharSet == ui_charset ||
+                        lf.lfCharSet == DEFAULT_CHARSET,
+                     "about: the title font matches the UI font's "
+                     "charset, not FIXEDFONT");
+            fprintf(f, "  title charset %d (UI %d)\n", lf.lfCharSet,
+                    ui_charset);
+        }
+        (*checks)++;
+    }
+
+    /* version = second line */
+    b = GetDlgItem(dlg, 3104 /* ID_ABT_VER */);
+    got[0] = '\0';
+    if (b) GetWindowTextA(b, got, (int)sizeof got);
+    if (nl2 && nl1) {
+        int n = (int)(nl2 - nl1 - 1);
+        if (n > (int)sizeof want - 1) n = (int)sizeof want - 1;
+        memcpy(want, nl1 + 1, (size_t)n);
+        want[n] = '\0';
+    } else { want[0] = '\0'; }
+    st_check(f, strcmp(got, want) == 0,
+             "about: the version is the body's second line");
+    if (strcmp(got, want) != 0)
+        fprintf(f, "  version [%s] want [%s]\n", got, want);
+    (*checks)++;
+
+    /* license = LZ_STR_ABOUT_LICENSE, its own string, NOT the
+       body's last line - the multi-line Apache-2.0
+       boilerplate split off from the body when it grew a full
+       copyright notice + Small Fonts rendering. */
+    b = GetDlgItem(dlg, 3106 /* ID_ABT_CRED */);
+    got[0] = '\0';
+    if (b) GetWindowTextA(b, got, (int)sizeof got);
+    lstrcpynA(want, lz_str_display(LZ_STR_ABOUT_LICENSE),
+              (int)sizeof want);
+    st_check(f, strcmp(got, want) == 0,
+             "about: the license line is the license string");
+    if (strcmp(got, want) != 0)
+        fprintf(f, "  license [%s] want [%s]\n", got, want);
+    (*checks)++;
+}
+
+/* The divider is drawn in WM_PAINT/WM_PRINTCLIENT (aboutdlg.c's own
+   comment). Render the window into a memory DC and read the pixels back -
+   this is the DETERMINISTIC way to see where the divider actually landed,
+   unlike a screen grab (DPI scaling) or asking the user. The two-row
+   groove is light (160) over dark (100), the reference's own colours,
+   spanning the text column. */
+/* The divider's real position, read back from the rendered pixels - not
+   guessed from a screen. It must be a light-over-dark two-row groove
+   spanning the FULL client width (the reference draws it x9..371, below
+   the logo), so find the widest run of the light-pen colour. DETERMINISTIC:
+   client coordinates, no DPI, no screen grab. */
+static void st_about_scan_divider(HDC mdc, const RECT *cr,
+                                  int *best_w, int *best_y, int *best_x0) {
+    int y, x;
+    *best_w = 0; *best_y = 0; *best_x0 = 0;
+    for (y = 0; y < cr->bottom; y++) {
+        int run = 0, run_start = 0;
+        for (x = 0; x < cr->right; x++) {
+            COLORREF c = GetPixel(mdc, x, y);
+            int r = GetRValue(c), g = GetGValue(c), b = GetBValue(c);
+            int is_light = (r == g && g == b && r >= 150 && r <= 170);
+            if (is_light) {
+                if (run == 0) run_start = x;
+                run++;
+            } else {
+                if (run > *best_w) {
+                    *best_w = run; *best_y = y; *best_x0 = run_start;
+                }
+                run = 0;
+            }
+        }
+        if (run > *best_w) {
+            *best_w = run; *best_y = y; *best_x0 = run_start;
+        }
+    }
+}
+
+static void st_about_divider(FILE *f, HWND dlg, int *checks) {
+    HDC hdc = GetDC(dlg);
+    HDC mdc = CreateCompatibleDC(hdc);
+    if (mdc) {
+        RECT cr;
+        HBITMAP bmp;
+        GetClientRect(dlg, &cr);
+        bmp = CreateCompatibleBitmap(hdc, cr.right, cr.bottom);
+        if (bmp) {
+            HGDIOBJ old = SelectObject(mdc, bmp);
+            /* WM_PRINTCLIENT paints controls but not the client
+               background, so a fresh bitmap comes out black. Fill the
+               dialog's own background colour first, exactly as
+               WM_ERASEBKGND would. */
+            {
+                HBRUSH br = (HBRUSH)(COLOR_BTNFACE + 1);
+                RECT fill;
+                fill.left = 0; fill.top = 0;
+                fill.right = cr.right; fill.bottom = cr.bottom;
+                FillRect(mdc, &fill, br);
+            }
+            SendMessage(dlg, WM_PRINTCLIENT, (WPARAM)mdc, 0);
+            {
+                int best_w, best_y, best_x0;
+                st_about_scan_divider(mdc, &cr, &best_w, &best_y, &best_x0);
+                fprintf(f, "  divider: %dpx at y=%d x%d..%d (client %ldx%ld)\n",
+                        best_w, best_y, best_x0, best_x0 + best_w,
+                        (long)cr.right, (long)cr.bottom);
+                /* Full-width: from the left margin to the right margin,
+                   within a margin of tolerance. The logo frame's own top
+                   edge is also a light run, but it is narrower (67px) than
+                   the divider (the full width minus two margins), so the
+                   WIDEST run is the divider. */
+                st_check(f, best_w >= cr.right - 2 * LZ_GUI_DLG_MARGIN - 4,
+                         "about: the divider spans the full client "
+                         "width below the logo");
+                (*checks)++;
+            }
+            SelectObject(mdc, old);
+            DeleteObject(bmp);
+        }
+        DeleteDC(mdc);
+    }
+    if (hdc) ReleaseDC(dlg, hdc);
+}
+
 static int st_about(FILE *f, HINSTANCE inst) {
     HWND dlg;
     int checks = 0;
@@ -10579,91 +10792,7 @@ static int st_about(FILE *f, HINSTANCE inst) {
            line. The split lives in aboutdlg.c, so the checks assert
            each control holds the corresponding SLICE of the live
            string, not a re-typed copy. */
-        {
-            const char *body = lz_str_display(LZ_STR_ABOUT_BODY);
-            const char *nl1 = strchr(body, '\n');
-            const char *nl2 = nl1 ? strchr(nl1 + 1, '\n') : NULL;
-            char want[512];   /* the license string is ~470 bytes, not the
-                                 body's ~70 - sized for the longest it holds */
-            HWND b;
-            char got[512];
-            b = GetDlgItem(dlg, 3103 /* ID_ABT_BODY */);
-            got[0] = '\0';
-            if (b) GetWindowTextA(b, got, (int)sizeof got);
-            if (nl1) {
-                int n = (int)(nl1 - body);
-                if (n > (int)sizeof want - 1) n = (int)sizeof want - 1;
-                memcpy(want, body, (size_t)n);
-                want[n] = '\0';
-            } else { lstrcpynA(want, body, (int)sizeof want); }
-            st_check(f, strcmp(got, want) == 0,
-                     "about: the title is the body's first line");
-            if (strcmp(got, want) != 0) fprintf(f, "  title [%s] want [%s]\n",
-                                                got, want);
-            checks++;
-
-            /* The title font: it must be a REAL font answering
-               WM_GETFONT, and it must match the UI font's charset (SimSun
-               GB2312 in Chinese, whatever stock face in English) - NOT
-               the FIXEDFONT a title degrades to when its font handle
-               is freed right after WM_SETFONT. Comparing against the LIVE
-               UI font's charset
-               rather than a hardcoded 134 keeps this true across both
-               languages. */
-            {
-                HFONT tf = (HFONT)SendMessage(b, WM_GETFONT, 0, 0);
-                LOGFONTA lf, uf;
-                int ui_charset;
-                if (!tf || !GetObjectA((HGDIOBJ)tf, (int)sizeof lf, &lf)) {
-                    st_check(f, 0, "about: the title control answers "
-                             "WM_GETFONT with a real font");
-                } else {
-                    ui_charset = DEFAULT_CHARSET;
-                    if (lz_ui_font() &&
-                        GetObjectA((HGDIOBJ)lz_ui_font(),
-                                   (int)sizeof uf, &uf))
-                        ui_charset = uf.lfCharSet;
-                    st_check(f, lf.lfCharSet == ui_charset ||
-                                lf.lfCharSet == DEFAULT_CHARSET,
-                             "about: the title font matches the UI font's "
-                             "charset, not FIXEDFONT");
-                    fprintf(f, "  title charset %d (UI %d)\n", lf.lfCharSet,
-                            ui_charset);
-                }
-                checks++;
-            }
-
-            /* version = second line */
-            b = GetDlgItem(dlg, 3104 /* ID_ABT_VER */);
-            got[0] = '\0';
-            if (b) GetWindowTextA(b, got, (int)sizeof got);
-            if (nl2 && nl1) {
-                int n = (int)(nl2 - nl1 - 1);
-                if (n > (int)sizeof want - 1) n = (int)sizeof want - 1;
-                memcpy(want, nl1 + 1, (size_t)n);
-                want[n] = '\0';
-            } else { want[0] = '\0'; }
-            st_check(f, strcmp(got, want) == 0,
-                     "about: the version is the body's second line");
-            if (strcmp(got, want) != 0)
-                fprintf(f, "  version [%s] want [%s]\n", got, want);
-            checks++;
-
-            /* license = LZ_STR_ABOUT_LICENSE, its own string, NOT the
-               body's last line - the multi-line Apache-2.0
-               boilerplate split off from the body when it grew a full
-               copyright notice + Small Fonts rendering. */
-            b = GetDlgItem(dlg, 3106 /* ID_ABT_CRED */);
-            got[0] = '\0';
-            if (b) GetWindowTextA(b, got, (int)sizeof got);
-            lstrcpynA(want, lz_str_display(LZ_STR_ABOUT_LICENSE),
-                      (int)sizeof want);
-            st_check(f, strcmp(got, want) == 0,
-                     "about: the license line is the license string");
-            if (strcmp(got, want) != 0)
-                fprintf(f, "  license [%s] want [%s]\n", got, want);
-            checks++;
-        }
+        st_about_body(f, dlg, &checks);
     }
 
     /* The OK button carries the table's OK label. */
@@ -10694,87 +10823,7 @@ static int st_about(FILE *f, HINSTANCE inst) {
         checks++;
     }
 
-    /* The divider is drawn in WM_PAINT/WM_PRINTCLIENT (aboutdlg.c's
-       own comment). Render the window into a memory DC and read the
-       pixels back - this is the DETERMINISTIC way to see where the
-       divider actually landed, unlike a screen grab (DPI scaling) or
-       asking the user. The two-row groove is light (160) over dark
-       (100), the reference's own colours, spanning the text column. */
-    {
-        HDC hdc = GetDC(dlg);
-        HDC mdc = CreateCompatibleDC(hdc);
-        if (mdc) {
-            RECT cr;
-            HBITMAP bmp;
-            GetClientRect(dlg, &cr);
-            bmp = CreateCompatibleBitmap(hdc, cr.right, cr.bottom);
-            if (bmp) {
-                HGDIOBJ old = SelectObject(mdc, bmp);
-                /* WM_PRINTCLIENT paints controls but not the client
-                   background, so a fresh bitmap comes out black. Fill
-                   the dialog's own background colour first, exactly as
-                   WM_ERASEBKGND would. */
-                {
-                    HBRUSH br = (HBRUSH)(COLOR_BTNFACE + 1);
-                    RECT fill;
-                    fill.left = 0; fill.top = 0;
-                    fill.right = cr.right; fill.bottom = cr.bottom;
-                    FillRect(mdc, &fill, br);
-                }
-                SendMessage(dlg, WM_PRINTCLIENT, (WPARAM)mdc, 0);
-                {
-                    /* The divider's real position, read back from the
-                       rendered pixels - not guessed from a screen. It
-                       must be a light-over-dark two-row groove spanning
-                       the FULL client width (the reference draws it
-                       x9..371, below the logo), so find the widest run
-                       of the light-pen colour and assert it reaches
-                       from near the left margin to near the right one.
-                       DETERMINISTIC: client coordinates, no DPI, no
-                       screen grab. */
-                    int y, x;
-                    int best_w = 0, best_y = 0, best_x0 = 0;
-                    for (y = 0; y < cr.bottom; y++) {
-                        int run = 0, run_start = 0;
-                        for (x = 0; x < cr.right; x++) {
-                            COLORREF c = GetPixel(mdc, x, y);
-                            int r = GetRValue(c), g = GetGValue(c), b = GetBValue(c);
-                            int is_light = (r == g && g == b && r >= 150 && r <= 170);
-                            if (is_light) {
-                                if (run == 0) run_start = x;
-                                run++;
-                            } else {
-                                if (run > best_w) {
-                                    best_w = run; best_y = y; best_x0 = run_start;
-                                }
-                                run = 0;
-                            }
-                        }
-                        if (run > best_w) {
-                            best_w = run; best_y = y; best_x0 = run_start;
-                        }
-                    }
-                    fprintf(f, "  divider: %dpx at y=%d x%d..%d (client %ldx%ld)\n",
-                            best_w, best_y, best_x0, best_x0 + best_w,
-                            (long)cr.right, (long)cr.bottom);
-                    /* Full-width: from the left margin to the right
-                       margin, within a margin of tolerance. The logo
-                       frame's own top edge is also a light run, but it
-                       is narrower (67px) than the divider (the full
-                       width minus two margins), so the WIDEST run is
-                       the divider. */
-                    st_check(f, best_w >= cr.right - 2 * LZ_GUI_DLG_MARGIN - 4,
-                             "about: the divider spans the full client "
-                             "width below the logo");
-                    checks++;
-                }
-                SelectObject(mdc, old);
-                DeleteObject(bmp);
-            }
-            DeleteDC(mdc);
-        }
-        if (hdc) ReleaseDC(dlg, hdc);
-    }
+    st_about_divider(f, dlg, &checks);
 
     /* Three ways out, one check each: OK, Esc (IDCANCEL via the modal
        loop's IsDialogMessage), and WM_CLOSE. All three must destroy the
@@ -11197,8 +11246,8 @@ static int selftest(HINSTANCE inst, const char *path) {
        assertion of "raw_n == 15" would then fail on a machine where the
        control genuinely holds the CRLF text this check exists to set
        up, for a reason that has nothing to do with what is being
-       tested - worse than an insensitive check, per iron law four: a
-       check that goes red for the wrong reason. What this step actually
+       tested - worse than an insensitive check: one that goes red for
+       the wrong reason. What this step actually
        needs to prove is only that the control holds MORE than what the
        CR-stripped conversion below produces - "some bytes were still in
        there to strip" - and raw_n > un says exactly that without
@@ -11249,6 +11298,26 @@ static int selftest(HINSTANCE inst, const char *path) {
         memset(keys, 0, sizeof keys);
         SetKeyboardState(keys);   /* known baseline: nothing held */
 
+        /* AND VERIFY IT TOOK. SetKeyboardState writes the CALLING
+           thread's table, and Windows resynchronises that table with
+           whichever thread owns the foreground input. A console window
+           appearing while this runs - a compiler, in `make check` -
+           can put Ctrl or Shift back before input_send_key reads it,
+           and then plain Enter correctly does not send. The check
+           reddened exactly once, inside make check, immediately after
+           the recipe that builds this binary, and never in four
+           standalone runs.
+           A disturbed instrument is not a failing subject, so say
+           which one it is rather than reporting the wrong one. */
+        if ((GetKeyState(VK_CONTROL) & 0x8000) ||
+            (GetKeyState(VK_SHIFT) & 0x8000) ||
+            (GetKeyState(VK_MENU) & 0x8000)) {
+            st_skip(f, "enter: the modifier keys",
+                    "SetKeyboardState did not hold - another thread owns "
+                    "the foreground input, so this cannot tell a swallowed "
+                    "Enter from a modified one");
+        } else {
+
         /* Plain Enter still sends - unchanged behaviour, re-proven here
            because input_send_key replaces the inline check this used
            to be, and WM_COMMAND is observed via PeekMessage rather than
@@ -11262,6 +11331,7 @@ static int selftest(HINSTANCE inst, const char *path) {
                  LOWORD(msg.wParam) == ID_SEND;
         st_check(f, posted, "enter: plain Enter still posts Send");
         checks++;
+        }
 
         /* Ctrl+Enter does not send - the ORIGINAL rule, re-proven with
            the same instrument as Shift+Enter below so a regression in
@@ -12370,8 +12440,8 @@ static int selftest(HINSTANCE inst, const char *path) {
        actually moved onto the control under test rather than left to
        whatever the default happens to be.
 
-       Iron law four's second note applies to the clipboard itself: a
-       readback that matches what was just written could just as well be
+       The clipboard needs its own positive control: a readback that
+       matches what was just written could just as well be
        leftover content nobody put there this run, so the FIRST check
        below proves the instrument is connected - a cleared clipboard
        really does read back empty - before either command is trusted to
@@ -12384,8 +12454,8 @@ static int selftest(HINSTANCE inst, const char *path) {
     {
         HWND tr = g.part[LZ_GUI_TRANSCRIPT];
         /* GetTickCount alone is not unique enough to stamp with: it
-           moves in 15.6 ms steps here (iron law three's note at
-           lz_time_ms), and the classic_ui harness runs this twice.
+           moves in 15.6 ms steps here (see lz_time_ms), and the
+           classic_ui harness runs this twice.
            The counter makes the string differ even inside one tick. */
         static int probe_no;
         char unique[64];
@@ -12463,6 +12533,7 @@ static int selftest(HINSTANCE inst, const char *path) {
         {
             DWORD start = 0, end = 0;
             int want = (int)strlen(unique);
+            int ctrl;
             SendMessage(tr, EM_GETSEL, (WPARAM)&start, (LPARAM)&end);
             /* Two invariants: the control holds what was written into
                it, and the selection covers all of that. The end may sit
@@ -12472,7 +12543,7 @@ static int selftest(HINSTANCE inst, const char *path) {
                len+1 on RichEdit 2.0 (a lone CR) and len+2 on 1.0
                (CRLF). An under-selection still fails, and so does any
                real over-selection. */
-            int ctrl = (int)SendMessage(tr, WM_GETTEXTLENGTH, 0, 0);
+            ctrl = (int)SendMessage(tr, WM_GETTEXTLENGTH, 0, 0);
             fprintf(f, "  selall start=%d end=%d want=%d ctrl=%d\n",
                     (int)start, (int)end, want, ctrl);
             st_check(f, ctrl == want,
@@ -12541,8 +12612,8 @@ static int selftest(HINSTANCE inst, const char *path) {
                     g.set.temp >= want + 0.0005f)
                     fprintf(f, "  got manual=%d temp=%f, want manual=%d "
                                "temp~=%f\n", g.set.manual_temp,
-                            (double)g.set.temp, CASES[c].want_manual,
-                            (double)want);
+                            g.set.temp, CASES[c].want_manual,
+                            want);
                 checks++;
                 DestroyWindow(wc);
             }
@@ -12679,6 +12750,105 @@ static int selftest(HINSTANCE inst, const char *path) {
     fclose(f);
     DestroyWindow(hwnd);
     return st_fails ? 1 : 0;
+}
+
+/* The captured strip, written out and compared with the other run's
+   counterpart when it is already there. Only the width is asserted; the
+   pixel difference is reported. Extracted from sb_compare because the
+   two-image comparison is the deepest block there; `checks` is a
+   pointer so the increment lands in sb_compare's count. */
+static void sb_compare_shot(FILE *f, const char *path,
+                            const unsigned char *shot, int cw, int ch,
+                            int classic, int *checks) {
+    static char mine[MAX_PATH + 40], other[MAX_PATH + 40];
+    sprintf(mine,  "%.*s.sb-%s.bmp", MAX_PATH, path,
+            classic ? "classic" : "native");
+    sprintf(other, "%.*s.sb-%s.bmp", MAX_PATH, path,
+            classic ? "native" : "classic");
+    st_check(f, sb_bmp_write(mine, shot, cw, ch),
+             "statusbar: the strip image was written");
+    (*checks)++;
+    fprintf(f, "  strip %s %dx%d cells %d/%d -> %s\n",
+            classic ? "simulated" : "comctl32", cw, ch,
+            g_sb_p0, g_sb_p1, mine);
+    {
+        int ow = 0, oh = 0;
+        unsigned char *ref = sb_bmp_load(other, &ow, &oh);
+        int stale = ref && !st_newer_than_exe(other);
+        static char why[MAX_PATH + 80];
+        if (stale) {
+            free(ref);
+            ref = NULL;
+        }
+        if (!ref) {
+            /* Skipped, not silently dropped: without this the
+               report's check count moved between runs depending
+               on what happened to be lying next to it, which is
+               the one thing a report meant to be diffed must
+               not do. Missing and stale get different words -
+               they need different actions from whoever reads
+               this, and one is a leftover that has to go. */
+            sprintf(why, stale
+                    ? "the counterpart predates this build; run "
+                      "again with classic_ui=%d to replace %.*s"
+                    : "no counterpart yet; run again with "
+                      "classic_ui=%d to produce %.*s",
+                    classic ? 0 : 1, MAX_PATH, other);
+            st_skip(f, "statusbar: both strips span the same width",
+                    why);
+        } else {
+            /* Width must match - both strips span the client
+               area, and a difference there is a layout fault
+               rather than a drawing choice. Everything else is
+               reported. */
+            st_check(f, ow == cw,
+                     "statusbar: both strips span the same width");
+            (*checks)++;
+            if (ow == cw && oh == ch) {
+                /* Split at the progress cell, because a
+                   difference there is NOT the same fact as a
+                   difference anywhere else. Everything on the
+                   strip is drawn by this program on both
+                   paths; the progress cell is not - the
+                   comctl32 build puts a real control there,
+                   and on a host with comctl32 v6 that control
+                   keeps drawing its flat accent-coloured self
+                   whether or not SetWindowTheme succeeded.
+                   There is no v6 on the target, so that part
+                   of the count says something about this
+                   machine and nothing about the port; folding
+                   it into one number makes the number
+                   unreadable, and dropping it would hide a
+                   real difference on a host where the
+                   untheming does work. Report both. */
+                long n = sb_stride(cw) * ch, k, diff = 0, inprog = 0;
+                RECT pc2;
+                int have_pc = sb_prog_rect(ch, &pc2);
+                for (k = 0; k < n; k++) {
+                    if (ref[k] == shot[k]) continue;
+                    diff++;
+                    if (have_pc) {
+                        long row = k / sb_stride(cw);
+                        long x   = (k % sb_stride(cw)) / 3;
+                        /* Rows run bottom-up in a DIB. */
+                        long y   = ch - 1 - row;
+                        if (x >= pc2.left && x < pc2.right &&
+                            y >= pc2.top  && y < pc2.bottom) inprog++;
+                    }
+                }
+                fprintf(f, "  pixel bytes differing: %ld / %ld "
+                           "(%.1f%%)\n", diff, n,
+                        n ? diff * 100.0f / (float)n : 0.0f);
+                fprintf(f, "  of those, inside the progress cell: "
+                           "%ld; drawn by this program: %ld\n",
+                        inprog, diff - inprog);
+            } else {
+                fprintf(f, "  heights differ: %d vs %d - compare "
+                           "the two images by eye\n", ch, oh);
+            }
+            free(ref);
+        }
+    }
 }
 
 static void sb_compare(FILE *f, const char *path, int *checks) {
@@ -12849,95 +13019,7 @@ static void sb_compare(FILE *f, const char *path, int *checks) {
                  "statusbar: the strip renders into a supplied DC");
         (*checks)++;
         if (shot) {
-            static char mine[MAX_PATH + 40], other[MAX_PATH + 40];
-            sprintf(mine,  "%.*s.sb-%s.bmp", MAX_PATH, path,
-                    classic ? "classic" : "native");
-            sprintf(other, "%.*s.sb-%s.bmp", MAX_PATH, path,
-                    classic ? "native" : "classic");
-            st_check(f, sb_bmp_write(mine, shot, cw, ch),
-                     "statusbar: the strip image was written");
-            (*checks)++;
-            fprintf(f, "  strip %s %dx%d cells %d/%d -> %s\n",
-                    classic ? "simulated" : "comctl32", cw, ch,
-                    g_sb_p0, g_sb_p1, mine);
-            {
-                int ow = 0, oh = 0;
-                unsigned char *ref = sb_bmp_load(other, &ow, &oh);
-                int stale = ref && !st_newer_than_exe(other);
-                static char why[MAX_PATH + 80];
-                if (stale) {
-                    free(ref);
-                    ref = NULL;
-                }
-                if (!ref) {
-                    /* Skipped, not silently dropped: without this the
-                       report's check count moved between runs depending
-                       on what happened to be lying next to it, which is
-                       the one thing a report meant to be diffed must
-                       not do. Missing and stale get different words -
-                       they need different actions from whoever reads
-                       this, and one is a leftover that has to go. */
-                    sprintf(why, stale
-                            ? "the counterpart predates this build; run "
-                              "again with classic_ui=%d to replace %.*s"
-                            : "no counterpart yet; run again with "
-                              "classic_ui=%d to produce %.*s",
-                            classic ? 0 : 1, MAX_PATH, other);
-                    st_skip(f, "statusbar: both strips span the same width",
-                            why);
-                } else {
-                    /* Width must match - both strips span the client
-                       area, and a difference there is a layout fault
-                       rather than a drawing choice. Everything else is
-                       reported. */
-                    st_check(f, ow == cw,
-                             "statusbar: both strips span the same width");
-                    (*checks)++;
-                    if (ow == cw && oh == ch) {
-                        /* Split at the progress cell, because a
-                           difference there is NOT the same fact as a
-                           difference anywhere else. Everything on the
-                           strip is drawn by this program on both
-                           paths; the progress cell is not - the
-                           comctl32 build puts a real control there,
-                           and on a host with comctl32 v6 that control
-                           keeps drawing its flat accent-coloured self
-                           whether or not SetWindowTheme succeeded.
-                           There is no v6 on the target, so that part
-                           of the count says something about this
-                           machine and nothing about the port; folding
-                           it into one number makes the number
-                           unreadable, and dropping it would hide a
-                           real difference on a host where the
-                           untheming does work. Report both. */
-                        long n = sb_stride(cw) * ch, k, diff = 0, inprog = 0;
-                        RECT pc2;
-                        int have_pc = sb_prog_rect(ch, &pc2);
-                        for (k = 0; k < n; k++) {
-                            if (ref[k] == shot[k]) continue;
-                            diff++;
-                            if (have_pc) {
-                                long row = k / sb_stride(cw);
-                                long x   = (k % sb_stride(cw)) / 3;
-                                /* Rows run bottom-up in a DIB. */
-                                long y   = ch - 1 - row;
-                                if (x >= pc2.left && x < pc2.right &&
-                                    y >= pc2.top  && y < pc2.bottom) inprog++;
-                            }
-                        }
-                        fprintf(f, "  pixel bytes differing: %ld / %ld "
-                                   "(%.1f%%)\n", diff, n,
-                                n ? (double)diff * 100.0 / (double)n : 0.0);
-                        fprintf(f, "  of those, inside the progress cell: "
-                                   "%ld; drawn by this program: %ld\n",
-                                inprog, diff - inprog);
-                    } else {
-                        fprintf(f, "  heights differ: %d vs %d - compare "
-                                   "the two images by eye\n", ch, oh);
-                    }
-                    free(ref);
-                }
-            }
+            sb_compare_shot(f, path, shot, cw, ch, classic, checks);
             free(shot);
         }
     }
@@ -12945,12 +13027,20 @@ static void sb_compare(FILE *f, const char *path, int *checks) {
 
 /* ------------------------------------------------------------ entry */
 
-static const char *selftest_path(const char *cmdline) {
-    /* Deliberately not CommandLineToArgvW: it lives in shell32 and is a
-       wide entry point, and src/cli_main.c already records that both of
-       those are unverified on Win9x. One flag with one argument does not
-       need an argv parser. */
+/* Returns the report path. Sets *asked when --selftest was on the
+   command line at all, which is a different question from whether it
+   carried a path. Without *asked, `--selftest` with no path returns NULL
+   and falls straight through to launching the window: the flag would
+   exit 0 having checked nothing, and nothing would distinguish that from
+   a clean run.
+
+   Deliberately not CommandLineToArgvW: it lives in shell32 and is a wide
+   entry point, and src/cli_main.c already records that both of those are
+   unverified on Win9x. One flag with one argument does not need an argv
+   parser. */
+static const char *selftest_path(const char *cmdline, int *asked) {
     const char *p = strstr(cmdline, "--selftest");
+    *asked = (p != NULL);
     if (!p) return NULL;
     p += strlen("--selftest");
     while (*p == ' ' || *p == '\t') p++;
@@ -12961,6 +13051,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmdline, int show) {
     MSG msg;
     HWND hwnd;
     const char *st;
+    int st_asked = 0;
 
     (void)prev;
     g.inst = inst;
@@ -13021,8 +13112,19 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmdline, int show) {
         }
     }
 
-    st = selftest_path(cmdline ? cmdline : "");
+    st = selftest_path(cmdline ? cmdline : "", &st_asked);
     if (st) return selftest(inst, st);
+    if (st_asked) {
+        /* Asked for, cannot be done. Exit 2, the code the build scripts
+           already read as SKIP rather than PASS, and say so on stderr -
+           this is a -mwindows binary with no console of its own, so a
+           caller that redirected will see it and one that did not still
+           gets a code that is not zero. Silently launching the window
+           here is what made a mis-typed invocation look like a pass. */
+        fprintf(stderr, "--selftest needs a report path: "
+                        "kunkun98-gui --selftest <file>\n");
+        return 2;
+    }
 
     {
         /* Up before the window is built, down after: on the target that

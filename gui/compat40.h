@@ -236,7 +236,7 @@ int lz_os_major(void);
  * declaration below WINVER 0x0400 despite the export itself
  * predating Win32. See gui/compat40.c's own comment on
  * GetKeyboardLayoutFn for why this is not a hand-declared prototype.
- * Used to save and restore a thread's layout around a deliberate,
+ * Callers save and restore a thread's layout around a deliberate,
  * temporary switch (gui/main.c's find selftest) - never
  * to test a capability, so it has no "is this available" counterpart
  * the way lz_os_major does; a NULL is just "nothing to restore to". */
