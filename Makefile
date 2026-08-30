@@ -9,6 +9,22 @@
 # them. The original tree kept three hand-written copies of the engine
 # list plus a Makefile $(SRC); there is one here.
 
+# The development gates (`check` and friends) live in gates.mk, which is
+# local-private and NOT shipped. Included with a leading `-`, so a public
+# checkout without the file is unaffected; `make check` simply has no
+# rule there.
+-include gates.mk
+
+# native-gate (defined in gates.mk) guards the gcc native link against
+# stale ELF objects a previous WSL-gcc build left in build/native;
+# MinGW's ld links them into a malformed PE with no error of its own.
+# Active only when gates.mk is present, so the shipped build never sees
+# it.
+NATIVE_GATE :=
+ifneq ($(wildcard gates.mk),)
+NATIVE_GATE := native-gate
+endif
+
 # ----------------------------------------------------------------------
 # Source lists (single point of truth). Bare names, no .c, no directory.
 # ----------------------------------------------------------------------
@@ -271,10 +287,10 @@ $(HOT_GCC_GUI_COM_OBJS): build/gui/%.o: common/%.c
 # between toolchains in the same tree. Cross-compiling from WSL with
 # MinGW against stale WSL-gcc objects would link a malformed PE; delete
 # build/native before switching toolchains.
-llama98: $(COLD_ENG_SRCS) $(COLD_CLI_COM_SRCS) src/cli_attr.c src/cli_main.c $(HOT_GCC_NATIVE_OBJS) $(ENG_MMX_GCC_NATIVE_OBJS)
+llama98: $(NATIVE_GATE) $(COLD_ENG_SRCS) $(COLD_CLI_COM_SRCS) src/cli_attr.c src/cli_main.c $(HOT_GCC_NATIVE_OBJS) $(ENG_MMX_GCC_NATIVE_OBJS)
 	$(CC) $(X86_64_CFLAGS) -Icommon -o $@ $(COLD_ENG_SRCS) $(COLD_CLI_COM_SRCS) src/cli_attr.c src/cli_main.c $(HOT_GCC_NATIVE_OBJS) $(ENG_MMX_GCC_NATIVE_OBJS) -lm
 
-kunkun98-serve: $(COLD_ENG_SRCS) $(SRV_SRCS) src/server_main.c $(HOT_GCC_NATIVE_ENG_OBJS) $(ENG_MMX_GCC_NATIVE_OBJS)
+kunkun98-serve: $(NATIVE_GATE) $(COLD_ENG_SRCS) $(SRV_SRCS) src/server_main.c $(HOT_GCC_NATIVE_ENG_OBJS) $(ENG_MMX_GCC_NATIVE_OBJS)
 	$(CC) $(X86_64_CFLAGS) -o $@ $(COLD_ENG_SRCS) $(SRV_SRCS) src/server_main.c $(HOT_GCC_NATIVE_ENG_OBJS) $(ENG_MMX_GCC_NATIVE_OBJS) -lm $(HTTP_LIBS)
 
 # Resources (icon / splash / about logo / lamps). windres for gcc; the

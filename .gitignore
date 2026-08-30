@@ -22,6 +22,17 @@
 # carries README.md and LICENSE only.
 /docs/
 
+# The development gates (`make check` and friends) and the working rules
+# that go with them. Both are local-private; the release tree carries
+# neither.
+/gates.mk
+
+# Model packing belongs to the training side, not the engine. make_lz4.py
+# produces the model.bin.lz4 that src/lz4d.c streams; a producer is not
+# part of an inference engine's release tree, and Iron law zero names
+# what that tree is. It shipped once by mistake and was removed.
+/make_lz4.py
+
 # Claude Code / AI assistant local config (machine-specific, not source).
 # CLAUDE.md is the working rules for the private tree; the release tree
 # carries none of it.
