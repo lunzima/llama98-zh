@@ -325,6 +325,20 @@ retrofit: `openai.c`'s `20260805ULL` is the SERVER's default when a request
 carries no seed, and changing it changes what the server generates, so it is a
 value-changing decision and not a style cleanup.
 
+11. **No 64-bit `double` anywhere; 32-bit `float` is trusted only to PC=24
+    precision.** The engine never uses `double` — not in timing, statistics,
+    config parsing, the RoPE table, or sampling helpers — and the ARM soft-float
+    library implements no `double` symbols at all. The reason is the same
+    bit-identity law as clause 2: x87's PC=24 control word compresses `double`
+    to 24 bits, while ARMv5TE soft-float `double` is a true 53-bit value, so the
+    same `(double)` expression produces different intermediates on the two
+    targets. IEEE 754 `float` round-to-nearest-even is the same on both, which is
+    what makes bit-identity hold. `float` therefore promises only PC=24
+    semantics; anything needing more precision than a 24-bit mantissa is not
+    expressible in this engine. A `double` that reappears (a cast, a `strtod`, a
+    libm `sqrt`/`pow`/`exp`/`log`/`log1p`, a `double` parameter in `llama_zh.h`)
+    is a defect, not a convenience.
+
 Two more, not numbered but enforced everywhere:
 
 - **A new feature turned off must be bit-identical to a build that never had

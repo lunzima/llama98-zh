@@ -143,7 +143,7 @@ void lz_gui_format_temp(float t, char *out, int cap) {
        enough to read. sprintf of a float is fine here - the x87 control
        word is only narrowed inside the engine's forward pass, on the
        worker thread. */
-    sprintf(tmp, "%.2f", (double)t);
+    sprintf(tmp, "%.2f", t);
     n = (int)strlen(tmp);
     if (n > cap - 1) n = cap - 1;
     memcpy(out, tmp, (size_t)n);

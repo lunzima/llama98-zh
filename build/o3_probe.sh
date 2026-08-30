@@ -147,14 +147,14 @@ D="-std=c99 -Isrc -Icommon -ffp-contract=off -DLZ_MMX_TU=1 -DLZ_SSE2_TU=1"
 # check is to read the named function and confirm the operator's
 # arithmetic is what dominates it.
 MAP="
-expfx:src/ops.c:lz_moe_route
-sigq:src/ops.c:lz_swiglu_q15_i16
+expfx:src/ops_moe.c:lz_moe_route
+sigq:src/ops_epi.c:lz_swiglu_q15_i16
 i32f:src/ops_gdn.c:lz_attn_wsum_q8
-q8rnd:src/ops.c:lz_quantize_q8
+q8rnd:src/ops_quant.c:lz_quantize_q8
 nrmss:src/ops_quant.c:norm_ss_fixed
 fwhti:src/fwht.c:lz_fwht_i32
 fwhtf:src/fwht.c:lz_fwht
-f32mm:src/ops.c:lz_matmul
+f32mm:src/ops_matmul.c:lz_matmul
 atdot:src/ops_gdn.c:lz_attn_score_q8
 wsump:src/ops_gdn.c:lz_attn_wsum_q8
 q8_0:src/ops_matmul.c:matmul_q8_impl

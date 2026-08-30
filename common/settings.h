@@ -244,7 +244,7 @@ void lz_common_settings_restore(LZGuiSettings *s);
  * caller-supplied localised format string ("%d" then "%.1f") - it is a
  * parameter rather than read in here so this file stays free of the
  * Win32-dependent string table. Returns 0 on success. */
-int lz_common_tokcell(char *out, int cap, int tokens, double elapsed_ms,
+int lz_common_tokcell(char *out, int cap, int tokens, float elapsed_ms,
                    const char *fmt);
 
 #endif
