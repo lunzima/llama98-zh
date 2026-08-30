@@ -242,3 +242,13 @@ docs/superpowers/
 # Python bytecode
 __pycache__/
 *.pyc
+
+# Temp measurement outputs that accumulate in the working tree (probe
+# runs and cwd slips scatter them; they must never enter a commit).
+/logits_*.bin
+/nll_*.bin
+/w_logits_*.bin
+/tap.bin
+/*.dis
+/llama98_f32count.exe
+/.reasonix/
