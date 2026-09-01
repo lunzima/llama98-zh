@@ -1135,6 +1135,12 @@ void forward_kda(const LZModel *m, LZRunState *s,
 void dense_ffn_step(const LZModel *m, LZRunState *s,
                     const LZLayer *L, int layer, int nt, int idim);
 
+/* Engram: conditional n-gram memory. Global module, called once per
+   chunk after embed_tokens, before the layer loop. Modifies s->x
+   in-place (residual add). Not per-layer: LZEngram lives on LZModel. */
+void forward_engram(const LZModel *m, LZRunState *s,
+                    const int *tokens, int nt, int pos0);
+
 /* Snapshot of the position-carrying RECURRENT state, for reusing a
    conversation prefix across turns instead of re-forwarding it.
 

@@ -64,7 +64,7 @@ endif
 # anywhere, so one arithmetic serves all targets and an ARM run stays
 # byte-comparable with an x86 one. The compiler's own __bf16 appears
 # only in a throwaway probe, as a witness and never a component.
-ENG := err compat lfn json safetensors model ops ops_kernel ops_rope ops_moe ops_epi ops_quant ops_sched ops_matmul ops_t2_arm ops_arm ops_t2_scalar ops_norm ops_gdn ops_conv1d fwht forward forward_attn forward_moe forward_ssm forward_kda sampler generate lz_mathf lz_bf16 lz4d \
+ENG := err compat lfn json safetensors model ops ops_kernel ops_rope ops_moe ops_epi ops_quant ops_sched ops_matmul ops_t2_arm ops_arm ops_t2_scalar ops_norm ops_gdn ops_conv1d fwht forward forward_attn forward_moe forward_ssm forward_kda forward_engram sampler generate lz_mathf lz_bf16 lz4d \
        tokenizer unicode chat gbk cpucheck
 SRV := net http openai
 GUI := main layout localized_strings worker modelload session compat40 \
@@ -206,7 +206,7 @@ ENG_MMX_GCC_GUI_OBJS    := $(addprefix build/gui/,$(addsuffix .o,$(ENG_MMX)))
 # (jparse_*), NOT hot, and is deliberately cold.
 HOT_TU := ops ops_epi ops_matmul ops_quant ops_gdn ops_norm ops_sched \
           ops_conv1d ops_moe ops_rope forward forward_attn forward_kda \
-          forward_moe forward_ssm sampler generate
+          forward_moe forward_ssm forward_engram sampler generate
 HOT_COM := stream
 
 HOT_ENG_SRCS := $(addprefix src/,$(addsuffix .c,$(HOT_TU)))

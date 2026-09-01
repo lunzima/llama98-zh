@@ -587,9 +587,21 @@ static void print_config(const LZModelConfig *c) {
     printf("Model:\n");
     printf("  vocab           %d\n", c->vocab_size);
     printf("  hidden          %d\n", c->hidden_size);
-    printf("  layers          %d (linear %d / full %d, every %dth full)\n",
-           c->n_layers, c->n_linear_layers, c->n_full_layers,
-           c->full_attention_interval);
+    /* Positions, not the stride. full_attention_interval is the upstream
+       generator's value and survives pruning unchanged, so on kunkun-ce
+       it says "every 4th" next to a full count of 2 out of 5 layers -
+       two numbers in one line that cannot both be true. layer_types is
+       what the loader actually uses. */
+    printf("  layers          %d (linear %d / full %d",
+           c->n_layers, c->n_linear_layers, c->n_full_layers);
+    if (c->n_full_layers > 0) {
+        int li, shown = 0;
+        printf(" at ");
+        for (li = 0; li < c->n_layers; li++)
+            if (c->layer_types[li] == LZ_LT_FULL)
+                printf("%s%d", shown++ ? "," : "", li);
+    }
+    printf(")\n");
     printf("  context         %d\n", c->seq_len);
     /* WHICH ffn width is actually in use, not just the dense field.
        model.h's rule: layer li is MoE iff num_experts > 0 &&

@@ -194,6 +194,39 @@ int lz_load_config(LZModelConfig *c, const char *path,
        intermediate_size (kunmoe-v2) needs this to be independent. */
     c->mtp_intermediate_size =
         lz_json_get_int(&j, tc, "mtp_intermediate_size", c->intermediate_size);
+
+    /* Engram (conditional n-gram memory). engram=0 skips everything;
+       derive the structural fields the forward pass reads. */
+    c->engram          = lz_json_get_int(&j, tc, "engram", 0);
+    if (c->engram) {
+        c->engram_ngram    = lz_json_get_int(&j, tc, "engram_ngram", 3);
+        c->engram_n_head   = lz_json_get_int(&j, tc, "engram_n_head", 4);
+        c->engram_dim      = lz_json_get_int(&j, tc, "engram_dim", 64);
+        c->engram_size     = lz_json_get_int(&j, tc, "engram_size", 1 << 22);
+        c->engram_n_orders = c->engram_ngram - 1;
+        c->engram_n_spaces = c->engram_n_orders * c->engram_n_head;
+        c->engram_per_order = c->engram_n_head * c->engram_dim;
+        c->engram_conv_dim  = c->hidden_size;
+        c->engram_conv_kernel   = 4;
+        c->engram_conv_dilation = c->engram_ngram;
+        /* head_space: the Python model uses
+           max(256, hash_budget // (n_spaces * engram_dim)) */
+        c->engram_head_space = c->engram_size / (c->engram_n_spaces * c->engram_dim);
+        if (c->engram_head_space < 256) c->engram_head_space = 256;
+        /* engram_total_rows: sum of the first n_spaces primes downward
+           from head_space.  Computed here so model_walk can use it
+           before alloc_engram runs. */
+        {   int total = 0, found = 0, x = c->engram_head_space;
+            while (found < c->engram_n_spaces) {
+                int is_prime = (x >= 2), d;
+                for (d = 2; is_prime && d * d <= x; d++)
+                    if (x % d == 0) is_prime = 0;
+                if (is_prime) { total += x; found++; }
+                x--;
+            }
+            c->engram_total_rows = total;
+        }
+    }
     c->seq_len = lz_json_get_int(&j, tc, "max_position_embeddings", 0);
     c->rms_norm_eps      = (float)lz_json_get_num(&j, tc, "rms_norm_eps", 1e-6);
     c->full_attention_interval =
@@ -296,11 +329,46 @@ int lz_load_config(LZModelConfig *c, const char *path,
 
     /* rope_theta and partial_rotary_factor live under the nested
        rope_parameters; top-level same-name keys may be absent. Check
-       both. */
+       both.
+
+       A KEY PRESENT IN BOTH PLACES WITH TWO DIFFERENT VALUES IS
+       REFUSED, not resolved. transformers resolves it the other way
+       round - rope_parameters wins there - so any config carrying both
+       trains under one value and infers under the other. Measured on
+       kunkun-ce, whose top level said 0.25 while rope_parameters said
+       1.0: training rotated 64 of 64 dims and this loader rotated 16.
+       Nothing downstream reports that; the model simply has a different
+       positional encoding at inference than the one it learned. The
+       generator's intent (ce_carve.py's DST) was 1.0, so picking either
+       side silently would also have been picking against the intent
+       half the time. */
     c->rope_theta = 10000.0f;
     c->partial_rotary_factor = 1.0f;
     rp = lz_json_get(&j, tc, "rope_parameters");
     if (rp) {
+        const LZJsonNode *n_rp_theta = lz_json_get(&j, rp, "rope_theta");
+        const LZJsonNode *n_rp_prf =
+            lz_json_get(&j, rp, "partial_rotary_factor");
+        const LZJsonNode *n_top_theta = lz_json_get(&j, tc, "rope_theta");
+        const LZJsonNode *n_top_prf =
+            lz_json_get(&j, tc, "partial_rotary_factor");
+        if (n_rp_theta && n_top_theta &&
+            n_rp_theta->num != n_top_theta->num) {
+            qerr(errbuf, errlen, LZ_ERR_CFG_ROPE_CONFLICT,
+                 "rope_theta", (int)n_rp_theta->num, "top-level",
+                 (int)n_top_theta->num);
+            return 1;
+        }
+        if (n_rp_prf && n_top_prf &&
+            n_rp_prf->num != n_top_prf->num) {
+            /* Scaled by 1000 so a fraction survives the integer-only
+               error format; 0.25 reads as 250. */
+            qerr(errbuf, errlen, LZ_ERR_CFG_ROPE_CONFLICT,
+                 "partial_rotary_factor x1000",
+                 (int)(n_rp_prf->num * 1000.0), "top-level",
+                 (int)(n_top_prf->num * 1000.0));
+            return 1;
+        }
         c->rope_theta = (float)lz_json_get_num(&j, rp, "rope_theta",
                                                c->rope_theta);
         c->partial_rotary_factor =
@@ -440,6 +508,9 @@ enum {
     DK_KEY,         /* lin_key_dim: kda_q_proj/kda_k_proj output width */
     DK_GATE_RANK,   /* kda_gate_rank: f_a_proj output / f_b_proj input */
     DK_NVK,         /* lin_n_v_heads * lin_k_head_dim: f_b_proj output, dt_bias */
+    DK_ENGRAM_ROWS, /* engram_total_rows: number of n-gram hash table rows */
+    DK_ENGRAM_DIM,  /* engram_dim: embedding dimension per hash head */
+    DK_ENGRAM_PER_ORDER, /* engram_per_order: n_head * engram_dim, key/value width */
     /* latent MoE */
     DK_NUM_EXPERTS, /* num_experts: router weight rows / bias width */
     DK_LATENT,      /* moe_latent_dim: routed_expert_down/up_proj's latent side */
@@ -654,6 +725,9 @@ static lz_i64 resolve_dim(const LZModelConfig *c, int kind) {
     case DK_SHARED_W:   return c->moe_shared_width;
     case DK_MOE_INTER:  return c->moe_intermediate_size;
     case DK_MTP_INTER:  return c->mtp_intermediate_size;
+    case DK_ENGRAM_ROWS: return c->engram_total_rows;
+    case DK_ENGRAM_DIM:  return c->engram_dim;
+    case DK_ENGRAM_PER_ORDER: return c->engram_per_order;
     default:            return -1;
     }
 }
@@ -870,7 +944,83 @@ static int model_walk(LZModel *m, LZVisit visit, void *ctx,
                                errbuf, errlen) != 0) return 1;
         }
     }
+    /* Engram: global module, same level as MTP in model_walk.
+       Walked last so a checkpoint without engram costs nothing.
+       alloc_engram ran before model_walk (lz_open), so m->engram
+       is non-NULL when config.engram is set. */
+    if (m->engram) {
+        LZEngram *eg = m->engram;
+        int no = c->engram_n_orders;
+        int o;
+        /* Engram tensors are NEW: a safetensors checkpoint may not
+           carry them. alloc_engram already allocated zeroed f32
+           buffers and filled norm with 1.0f. visit_bind overwrites
+           any that the checkpoint ships; model_walk_one errors on
+           missing tensors, so we guard each call with lz_st_find.
+
+           BIN MODE (m->rd != NULL): the bin file is a sequential
+           stream visited in tensor_order's order. Skipping a tensor
+           here desyncs every subsequent read. In bin mode we must
+           visit every tensor unconditionally - export_q8 already
+           wrote them or didn't, and the stream has no names to
+           search. */
+        int bin_mode = (m->rd != NULL);
+        if (bin_mode || lz_st_find(&m->st, "engram_memory.table.weight"))
+            if (model_walk_one(m, "engram_memory.table.weight",
+                               (int[]){DK_ENGRAM_ROWS, DK_ENGRAM_DIM, DK_END},
+                               &eg->table, visit, ctx,
+                               errbuf, errlen)) return 1;
+        for (o = 0; o < no; o++) {
+            snprintf(name, sizeof(name),
+                     "engram_memory.key_proj.%d.weight", o);
+            if (bin_mode || lz_st_find(&m->st, name))
+                if (model_walk_one(m, name,
+                                   (int[]){DK_HIDDEN, DK_ENGRAM_PER_ORDER, DK_END},
+                                   &eg->key_proj[o], visit, ctx,
+                                   errbuf, errlen)) return 1;
+            snprintf(name, sizeof(name),
+                     "engram_memory.value_proj.%d.weight", o);
+            if (bin_mode || lz_st_find(&m->st, name))
+                if (model_walk_one(m, name,
+                                   (int[]){DK_HIDDEN, DK_ENGRAM_PER_ORDER, DK_END},
+                                   &eg->value_proj[o], visit, ctx,
+                                   errbuf, errlen)) return 1;
+        }
+        if (bin_mode || lz_st_find(&m->st, "engram_memory.conv.weight"))
+            if (model_walk_one(m, "engram_memory.conv.weight",
+                               (int[]){DK_HIDDEN, DK_ONE, DK_KERNEL, DK_END},
+                               &eg->conv, visit, ctx,
+                               errbuf, errlen)) return 1;
+        if (bin_mode || lz_st_find(&m->st, "engram_memory.norm.weight"))
+            if (model_walk_one(m, "engram_memory.norm.weight",
+                               (int[]){DK_HIDDEN, DK_END, DK_END},
+                               &eg->norm, visit, ctx,
+                               errbuf, errlen)) return 1;
+    }
     return 0;
+}
+
+/* Engram norm fixup: the random-init checkpoints this engine is being
+   brought up against carry engram_memory.norm.weight as ZEROS
+   (Qwen3_5RMSNorm's own init is ones, but the arm generator loaded a
+   checkpoint whose engram tensors did not exist, so save_pretrained
+   wrote the freshly-initialised zeros back). RMSNorm with gamma=0
+   zeroes its output, which zeroes the gate's query and with it the
+   whole engram contribution - and the PyTorch side of the parity test
+   applies the same fix, so both sides must agree on the repair.
+
+   Runs AFTER model_walk for BOTH visit paths (visit_bind marks claimed
+   without reading; visit_read overwrites the buffer), which is why
+   this lives in lz_read_weights and not in model_walk. */
+static void engram_norm_fixup(LZModel *m) {
+    const LZModelConfig *c = &m->config;
+    LZEngram *eg = m->engram;
+    int k, all_zero = 1;
+    if (!eg) return;
+    for (k = 0; k < c->hidden_size; k++)
+        if (eg->norm.f && eg->norm.f[k] != 0.0f) { all_zero = 0; break; }
+    if (all_zero && eg->norm.f)
+        for (k = 0; k < c->hidden_size; k++) eg->norm.f[k] = 1.0f;
 }
 
 /* --------------------------------------------------------------- binding */
@@ -957,6 +1107,76 @@ static int alloc_mtp(LZModel *m, char *errbuf, int errlen) {
         return 1;
     }
     m->mtp->blk.type = LZ_LT_FULL;
+    return 0;
+}
+
+static int alloc_engram(LZModel *m, char *errbuf, int errlen) {
+    const LZModelConfig *c = &m->config;
+    LZEngram *eg;
+    int no, hdim, edim, o;
+    if (!c->engram) return 0;
+
+    eg = (LZEngram *)calloc(1, sizeof(LZEngram));
+    if (!eg) { qerr(errbuf, errlen, LZ_ERR_LAYERS_ALLOC); return 1; }
+    m->engram = eg;
+
+    no = c->engram_n_orders;
+    hdim = c->hidden_size;
+    edim = c->engram_dim;
+
+    /* Primes, offsets, bases (derived from config, not in checkpoint).
+       lz_load_config already computed engram_total_rows and
+       engram_head_space from engram_size. */
+    eg->primes = (int *)calloc(c->engram_n_spaces, sizeof(int));
+    eg->offsets = (int *)calloc(c->engram_n_spaces, sizeof(int));
+    eg->bases = (lz_i64 *)calloc(no, sizeof(lz_i64));
+    if (!eg->primes || !eg->offsets || !eg->bases) {
+        qerr(errbuf, errlen, LZ_ERR_OOM, "engram primes");
+        return 1;
+    }
+    {   /* primes_down: largest primes <= head_space */
+        int x = c->engram_head_space, found = 0;
+        while (found < c->engram_n_spaces) {
+            int is_prime = (x >= 2), d;
+            for (d = 2; is_prime && d * d <= x; d++)
+                if (x % d == 0) is_prime = 0;
+            if (is_prime) eg->primes[found++] = x;
+            x--;
+        }
+    }
+    {   /* offsets: cumulative start row per space */
+        int total = 0, k;
+        for (k = 0; k < c->engram_n_spaces; k++) {
+            eg->offsets[k] = total;
+            total += eg->primes[k];
+        }
+    }
+    { int o; for (o = 0; o < no; o++)
+        eg->bases[o] = (lz_i64)(2 * ((o + 1) * 7 + 1) + 1);
+    }
+
+    /* Allocate tensors with aligned_malloc (lz_t_free's release path).
+       norm starts at 1.0f, rest zero - training fills them. */
+    eg->table.n = m->config.engram_total_rows * edim;
+    eg->table.f = (float *)aligned_malloc((size_t)eg->table.n, sizeof(float));
+    if (eg->table.f) memset(eg->table.f, 0, (size_t)eg->table.n * sizeof(float));
+    eg->conv.n  = hdim * c->engram_conv_kernel;
+    eg->conv.f  = (float *)aligned_malloc((size_t)eg->conv.n, sizeof(float));
+    if (eg->conv.f) memset(eg->conv.f, 0, (size_t)eg->conv.n * sizeof(float));
+    eg->norm.n  = hdim;
+    eg->norm.f  = (float *)aligned_malloc(hdim, sizeof(float));
+    if (eg->norm.f) { int i; for (i = 0; i < hdim; i++) eg->norm.f[i] = 1.0f; }
+    eg->key_proj   = (LZTensor *)calloc(no, sizeof(LZTensor));
+    eg->value_proj = (LZTensor *)calloc(no, sizeof(LZTensor));
+    for (o = 0; o < no; o++) {
+        int n = c->engram_per_order * hdim;
+        eg->key_proj[o].f   = (float *)aligned_malloc(n, sizeof(float));
+        if (eg->key_proj[o].f) memset(eg->key_proj[o].f, 0, n * sizeof(float));
+        eg->key_proj[o].n   = n;
+        eg->value_proj[o].f = (float *)aligned_malloc(n, sizeof(float));
+        if (eg->value_proj[o].f) memset(eg->value_proj[o].f, 0, n * sizeof(float));
+        eg->value_proj[o].n = n;
+    }
     return 0;
 }
 
@@ -1092,6 +1312,7 @@ int lz_open(LZModel *m, const char *dir, char *errbuf, int errlen) {
     if (setup_layers(m, errbuf, errlen) != 0) goto fail;
 
     if (alloc_mtp(m, errbuf, errlen) != 0) goto fail;
+    if (alloc_engram(m, errbuf, errlen) != 0) goto fail;
 
     bc.claimed = (unsigned char *)calloc((size_t)m->st.n_tensors, 1);
     if (!bc.claimed) {
@@ -1770,6 +1991,58 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
     }
     if (resolve_hadamard(c, errbuf, errlen) != 0) goto fail;
 
+    /* Engram fields live only in config.json, not in the bin header.
+       Try to read them; absence means no engram. */
+    {
+        char cfg_path[1024];
+        if (lz_lfn_path(dir, "config.json", cfg_path, (int)sizeof cfg_path,
+                        NULL, 0) == 0) {
+            size_t cfg_sz = 0;
+            char *cfg_buf = (char *)lz_read_file(cfg_path, &cfg_sz, NULL, 0);
+            if (cfg_buf) {
+                LZJson jcfg;
+                if (lz_json_parse(&jcfg, cfg_buf, cfg_sz, NULL, 0) == 0) {
+                    const LZJsonNode *root = lz_json_root(&jcfg);
+                    const LZJsonNode *tc = NULL;
+                    if (root && root->type == LZ_JSON_OBJ)
+                        tc = root;
+                    if (tc) {
+                        int eg_on = lz_json_get_int(&jcfg, tc, "engram", 0);
+                        if (eg_on) {
+                            c->engram = eg_on;
+                            c->engram_ngram    = lz_json_get_int(&jcfg, tc, "engram_ngram", 3);
+                            c->engram_n_head   = lz_json_get_int(&jcfg, tc, "engram_n_head", 4);
+                            c->engram_dim      = lz_json_get_int(&jcfg, tc, "engram_dim", 64);
+                            c->engram_size     = lz_json_get_int(&jcfg, tc, "engram_size", 1 << 22);
+                            c->engram_n_orders = c->engram_ngram - 1;
+                            c->engram_n_spaces = c->engram_n_orders * c->engram_n_head;
+                            c->engram_per_order = c->engram_n_head * c->engram_dim;
+                            c->engram_conv_dim  = c->hidden_size;
+                            c->engram_conv_kernel   = 4;
+                            c->engram_conv_dilation = c->engram_ngram;
+                            c->engram_head_space =
+                                c->engram_size / (c->engram_n_spaces * c->engram_dim);
+                            if (c->engram_head_space < 256)
+                                c->engram_head_space = 256;
+                            {   int total = 0, found = 0, x = c->engram_head_space;
+                                while (found < c->engram_n_spaces) {
+                                    int is_prime = (x >= 2), d;
+                                    for (d = 2; is_prime && d * d <= x; d++)
+                                        if (x % d == 0) is_prime = 0;
+                                    if (is_prime) { total += x; found++; }
+                                    x--;
+                                }
+                                c->engram_total_rows = total;
+                            }
+                        }
+                    }
+                    lz_json_free(&jcfg);
+                }
+                free(cfg_buf);
+            }
+        }
+    }
+
     m->layers = (LZLayer *)calloc((size_t)c->n_layers, sizeof(LZLayer));
     if (!m->layers) {
         qerr(errbuf, errlen, LZ_ERR_LAYERS_ALLOC);
@@ -1778,6 +2051,7 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
     if (setup_layers(m, errbuf, errlen) != 0) goto fail;
 
     if (alloc_mtp(m, errbuf, errlen) != 0) goto fail;
+    if (alloc_engram(m, errbuf, errlen) != 0) goto fail;
 
     if (model_walk(m, visit_read_bin, NULL, errbuf, errlen) != 0) {
         goto fail;
@@ -1810,6 +2084,14 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
         n_params += m->mtp->fc.n + m->mtp->norm.n +
                     m->mtp->pre_fc_norm_hidden.n + m->mtp->pre_fc_norm_embedding.n;
     }
+    if (m->engram) {
+        LZEngram *eg = m->engram;
+        int o;
+        n_params += eg->table.n + eg->conv.n + eg->norm.n;
+        for (o = 0; o < c->engram_n_orders; o++)
+            n_params += eg->key_proj[o].n + eg->value_proj[o].n;
+    }
+    engram_norm_fixup(m);
     m->n_params = n_params;
     m->prefix[0] = '\0';
     m->weights_loaded = 1;
@@ -1853,6 +2135,7 @@ int lz_read_weights(LZModel *m, char *errbuf, int errlen) {
     }
     if (m->weights_loaded) return 0;
     if (model_walk(m, visit_read, NULL, errbuf, errlen) != 0) return 1;
+    engram_norm_fixup(m);
     m->weights_loaded = 1;
     return 0;
 }
@@ -1925,6 +2208,28 @@ void lz_free(LZModel *m) {
         lz_t_free(&m->mtp->pre_fc_norm_hidden);
         lz_t_free(&m->mtp->pre_fc_norm_embedding);
         free(m->mtp);
+    }
+    if (m->engram) {
+        LZEngram *eg = m->engram;
+        int o;
+        lz_t_free(&eg->table);
+        if (eg->key_proj) {
+            for (o = 0; o < m->config.engram_n_orders; o++)
+                lz_t_free(&eg->key_proj[o]);
+            free(eg->key_proj);
+        }
+        if (eg->value_proj) {
+            for (o = 0; o < m->config.engram_n_orders; o++)
+                lz_t_free(&eg->value_proj[o]);
+            free(eg->value_proj);
+        }
+        lz_t_free(&eg->conv);
+        lz_t_free(&eg->norm);
+        free(eg->primes);
+        free(eg->offsets);
+        free(eg->bases);
+        free(eg);
+        m->engram = NULL;
     }
     close_reader(m);
     lz_st_close(&m->st);

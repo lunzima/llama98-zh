@@ -1671,6 +1671,14 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
                      s->x + (size_t)tk * dim);
     LZ_TAP("emb", -1, s->x, dim);
 
+    /* Engram: conditional n-gram memory, injected after embed_tokens
+       (the hook in kunmoe_modeling.py registers on embed_tokens).
+       Modifies s->x in-place. No-op when config.engram is 0. */
+    if (m->engram) {
+        forward_engram(m, s, tokens, nt, pos0);
+        LZ_TAP("eng", -1, s->x, dim);
+    }
+
     /* Ring base for this CHUNK (the SSM/conv rollback ring - forward.h's
        s->ssm_slot). Read ONCE here, before the layer loop,
        and passed down explicitly rather than having forward_ssm/
