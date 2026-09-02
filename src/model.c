@@ -1042,6 +1042,18 @@ static void engram_norm_fixup(LZModel *m) {
     LZEngram *eg = m->engram;
     int k, all_zero = 1;
     if (!eg) return;
+    /* Only reachable on LZ_FMT_F32: the checkpoints this workaround
+       targets are freshly random-initialized by from_pretrained (see
+       the comment above), which the export pipeline never narrows to
+       BF16 - narrowing is export_q8's job, run against a TRAINED
+       checkpoint, and a trained norm is not all-zero by construction
+       (RMSNorm's own init is ones; zero only happens when
+       from_pretrained materializes a tensor the checkpoint never
+       carried). eg->norm.f is NULL for BF16/quantized dtypes, so the
+       loop below is a silent no-op there rather than a crash - correct
+       for the case that is actually reachable, but worth stating why
+       it is not handled rather than leaving it implicit. */
+    if (eg->norm.dtype != LZ_FMT_F32) return;
     for (k = 0; k < c->hidden_size; k++)
         if (eg->norm.f && eg->norm.f[k] != 0.0f) { all_zero = 0; break; }
     if (all_zero && eg->norm.f)
