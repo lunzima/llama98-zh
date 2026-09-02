@@ -537,25 +537,28 @@ static int conv_fixed_build(LZRunState *s, const LZModel *m) {
             tv[0] = &L->conv1d; cnt[0] = c->lin_conv_dim; ntv = 1;
         }
         for (t = 0; t < ntv; t++) {
-            const float *w = lz_t_f32(tv[t], s->wscr);
             int i;
-            if (!w) return -1;
+            int row_dim = c->conv_kernel;  /* [C,1,K] → row = K elements */
             for (i = 0; i < cnt[t]; i++) {
+                /* Read one row (one channel's K taps) at a time instead of
+                   the whole tensor through lz_t_f32. This lets BF16 conv
+                   tensors stay narrow in RAM: lz_t_f32 would need the
+                   entire [C,1,K] in s->wscr at once (4096+ elements for
+                   a 1024-channel conv), overflowing it; lz_t_row_f32
+                   needs only conv_kernel (=4) floats of scratch. */
+                lz_t_row_f32(tv[t], i, row_dim, s->wscr);
+                {
                 signed char e = (signed char)lz_conv_norm_pow2(
-                    w + (size_t)i * c->conv_kernel, c->conv_kernel,
+                    s->wscr, row_dim,
                     s->conv_mw + (base + ch + i) * c->conv_kernel,
                     s->conv_bound);
                 float oscale = pow2f(-((int)e + LZ_CONV_ES));
                 lz_sig_q15_fold(oscale, &s->conv_sig_k1[base + ch + i],
                                 &s->conv_sig_oscale2[base + ch + i]);
 #if LZ_CONV_SIG_I
-                /* The same exponent, undivided. Measured 22..39 on both
-                   checkpoints, so it fits signed char with room; a model
-                   whose taps put it outside sigmoid_q15_i's 0..50 is not
-                   refused here - that entry rebuilds a float for such a
-                   channel and only the saving is lost. */
                 s->conv_sig_e[base + ch + i] = (signed char)((int)e + LZ_CONV_ES);
 #endif /* LZ_CONV_SIG_I */
+                }
             }
             ch += (size_t)cnt[t];
         }
@@ -1032,6 +1035,31 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
             if (wcap < LZ_MM_WIDEN_MAX) wcap = LZ_MM_WIDEN_MAX;
             s->wscr = (float *)xcalloc((size_t)wcap, sizeof(float), &ok,
                                        &s->bytes_alloc); }
+        /* Engram's own scratch (see forward.h's field comment for why
+           it cannot borrow s->wscr). Sized for the widest layout
+           forward_engram.c uses: hidx (nt*ns ints) + value/qnorm/key
+           (3*nt*dim floats) + a shared tail sized for the wider of
+           eo+val (nt*po + nt*dim) and conv_out (nt*dim) - the tail is
+           reused sequentially, never concurrently with the block ahead
+           of it, so only the larger of the two needs counting.
+           int and float are both 4 bytes here, so the two element
+           counts add directly; +64 covers BOTH the alignment pad
+           forward_engram.c inserts between hidx and the float region
+           (up to 15 bytes) and xcalloc's own base-pointer/16-byte-align
+           header (up to sizeof(void*)+15 more) - a tight +16 margin
+           left exactly 1 byte of slack computed by hand, which is the
+           kind of number that survives one config change and not the
+           next. Rounding up to a clean 64 costs nothing measurable at
+           this size. */
+        if (m->engram) {
+            int ns = c->engram_n_spaces, dim = c->hidden_size;
+            int po = c->engram_per_order;
+            size_t tail = (size_t)nt * po + (size_t)nt * dim;
+            size_t n_elem = (size_t)nt * ns + (size_t)nt * dim * 3 + tail;
+            s->engram_scratch_bytes = n_elem * sizeof(float) + 64;
+            s->engram_scratch = xcalloc(s->engram_scratch_bytes, 1,
+                                        &ok, &s->bytes_alloc);
+        }
         /* SubLN Hadamard scratch: two n-wide int32 halves, n <= qcap. */
         s->fwht_scratch = (int32_t *)xcalloc((size_t)2 * qcap, sizeof(int32_t),
                                              &ok, &s->bytes_alloc);
@@ -1233,6 +1261,7 @@ void lz_state_free(LZRunState *s) {
     xfree(s->conv_sig_k1); xfree(s->conv_sig_oscale2); xfree(s->conv_sig_e);
     xfree(s->xq); xfree(s->xqs); xfree(s->wscr); xfree(s->fwht_scratch);
     xfree(s->subn_norm_int);
+    xfree(s->engram_scratch);
     xfree(s->rope_cs);
     xfree(s->cache_idx);
     memset(s, 0, sizeof(*s));

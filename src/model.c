@@ -226,6 +226,31 @@ int lz_load_config(LZModelConfig *c, const char *path,
             }
             c->engram_total_rows = total;
         }
+        /* engram_format_ids: kunmoe_modeling.py's EngramMemory zeroes
+           `value` before the conv wherever the whole n-gram window is
+           format tokens (punctuation/template scaffolding), so no
+           gradient reaches those rows during training. Skipping the
+           same mask at inference computes a DIFFERENT function than
+           the one that was trained - a non-empty engram contribution
+           at positions training made zero. Built as a bitmap for O(1)
+           membership (mirrors torch.isin) rather than kept as a list. */
+        {
+            const LZJsonNode *fmt = lz_json_get(&j, tc, "engram_format_ids");
+            if (fmt && fmt->type == LZ_JSON_ARR && fmt->n_children > 0
+                && c->vocab_size > 0) {
+                size_t nbytes = (size_t)(c->vocab_size + 7) / 8;
+                unsigned char *bm = (unsigned char *)calloc(nbytes, 1);
+                if (bm) {
+                    const LZJsonNode *e;
+                    for (e = lz_json_first(&j, fmt); e; e = lz_json_next(&j, e)) {
+                        int id = (int)e->num;
+                        if (id >= 0 && id < c->vocab_size)
+                            bm[id >> 3] |= (unsigned char)(1u << (id & 7));
+                    }
+                    c->engram_format_bitmap = bm;
+                }
+            }
+        }
     }
     c->seq_len = lz_json_get_int(&j, tc, "max_position_embeddings", 0);
     c->rms_norm_eps      = (float)lz_json_get_num(&j, tc, "rms_norm_eps", 1e-6);
@@ -1406,18 +1431,20 @@ static int visit_read(LZModel *m, const LZStTensor *t, LZTensor *field,
      * conversion (5-bit exponent to 8, subnormal renormalisation), so it
      * would have to be undone on every read rather than being a shift,
      * and it still expands here. */
-    /* TWO-DIMENSIONAL, OR ONE-DIMENSIONAL AND SMALL. The reason is a
-       consumer's contract rather than anything about bf16.
+    /* TWO-DIMENSIONAL, OR ONE-DIMENSIONAL AND SMALL, OR 3-D CONV.
+       The reason is a consumer's contract rather than anything about bf16.
 
        THE 1-D CASE IS THE ONE THE EXPORTER CARES ABOUT. tools/
-       export_q8.py keeps a tensor at F32 when Q8_0 is not accurate
-       enough for it, and its rule reads: "Non-2D tensors and those with
-       n < 512 are always f32 ... conv1d (unquantizable: 4-wide rows),
-       A_log and dt_bias (feed exp), norms (leverage)". Those are
-       exactly the structures that had no middle option - Q8_0 too
-       coarse, F32 more than they need - and bf16 is that middle. A
-       first version of this guard was 2-D only and therefore served
-       none of them.
+       export_q8.py narrows non-2D and small tensors to BF16 (plan()'s
+       FMT_BF16 branch): norms (1D), conv1d (3D, row=4 < MIN_GS=32).
+       bf16 is the middle option between Q8_0 (too coarse for these
+       shapes) and F32 (more than they need). A first version of this
+       guard was 2-D only and therefore served none of them.
+     *
+     * THE 3-D CASE (conv1d [C,1,K]) was added when forward.c's
+     * conv_fixed_build and forward_engram.c's engram conv were changed
+     * to read one row at a time through lz_t_row_f32, so the scratch
+     * bound is conv_kernel (4), not the whole tensor.
      *
      * lz_t_f32() hands back a WHOLE-TENSOR f32 view. For an F32 tensor
      * that is free - it returns t->f and copies nothing - but a bf16
@@ -1444,10 +1471,17 @@ static int visit_read(LZModel *m, const LZStTensor *t, LZTensor *field,
      *
      * The second clause is that bounded buffer's own limit, the same one
      * every quantized kernel in ops_matmul.c carries. Past it a tensor
-     * stays f32, which costs memory and never correctness. */
+     * stays f32, which costs memory and never correctness.
+     *
+     * 3-D (conv1d [C,1,K]) IS NOW INCLUDED: forward.c's
+     * conv_fixed_build and forward_engram.c's engram conv were changed
+     * to read one row at a time through lz_t_row_f32, so the scratch
+     * bound is conv_kernel (4), not the whole tensor. The row-width
+     * check (shape[last_dim] <= LZ_MM_WIDEN_MAX) is what matters. */
     if (t->dtype == LZ_DT_BF16 && lz_bf16_store_g &&
         ((t->n_dims == 2 && t->shape[1] <= LZ_MM_WIDEN_MAX) ||
-         (t->n_dims == 1 && t->n_elem <= LZ_MM_WIDEN_MAX))) {
+         (t->n_dims == 1 && t->n_elem <= LZ_MM_WIDEN_MAX) ||
+         (t->n_dims == 3 && t->shape[2] <= LZ_MM_WIDEN_MAX))) {
         lz_i64 nb = t->n_elem * (lz_i64)2;
         field->q = (int8_t *)aligned_malloc((size_t)t->n_elem, 2);
         if (!field->q) {
@@ -1568,6 +1602,28 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
         }
         lz_le32(field->f, (size_t)n);
         m->bytes_alloc += (lz_i64)n * sizeof(float);
+    } else if (dtype == LZ_FMT_BF16) {
+        /* BF16 from bin:2 bytes per element, no scale, no groups.
+           Same storage as the safetensors bf16 path in visit_read.
+           lz_t_f32/lz_t_row_f32 widen at the point of use. */
+        lz_i64 nb = (lz_i64)n * 2;
+        field->dtype = LZ_FMT_BF16;
+        field->gs = 0;
+        field->f = NULL;
+        field->scale = NULL;
+        field->q = (int8_t *)aligned_malloc((size_t)n, 2);
+        if (!field->q) {
+            qerr(errbuf, errlen, LZ_ERR_TENSOR_ALLOC_BYTES, t->name, nb);
+            return 1;
+        }
+        if (m->rd(m->rd_ctx, field->q, (size_t)n * 2) != (size_t)n * 2) {
+            qerr(errbuf, errlen, LZ_ERR_TENSOR_READ, t->name);
+            aligned_free(field->q);
+            field->q = NULL;
+            return 1;
+        }
+        /* bf16 is bytes - no endian swap needed (same as safetensors path) */
+        m->bytes_alloc += nb;
     } else if (dtype == LZ_FMT_Q16_0) {
         /* int16: n*2 bytes of data + n/gs scales. Used for in_proj_a/b -
            they produce gt, the decay rate multiplied into the SSM state
@@ -2034,6 +2090,30 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
                                 }
                                 c->engram_total_rows = total;
                             }
+                            /* Same format-gating bitmap as lz_load_config's
+                               engram block; see that copy's comment. */
+                            {
+                                const LZJsonNode *fmt =
+                                    lz_json_get(&jcfg, tc, "engram_format_ids");
+                                if (fmt && fmt->type == LZ_JSON_ARR &&
+                                    fmt->n_children > 0 && c->vocab_size > 0) {
+                                    size_t nbytes =
+                                        (size_t)(c->vocab_size + 7) / 8;
+                                    unsigned char *bm =
+                                        (unsigned char *)calloc(nbytes, 1);
+                                    if (bm) {
+                                        const LZJsonNode *e;
+                                        for (e = lz_json_first(&jcfg, fmt); e;
+                                             e = lz_json_next(&jcfg, e)) {
+                                            int id = (int)e->num;
+                                            if (id >= 0 && id < c->vocab_size)
+                                                bm[id >> 3] |=
+                                                    (unsigned char)(1u << (id & 7));
+                                        }
+                                        c->engram_format_bitmap = bm;
+                                    }
+                                }
+                            }
                         }
                     }
                     lz_json_free(&jcfg);
@@ -2231,6 +2311,7 @@ void lz_free(LZModel *m) {
         free(eg);
         m->engram = NULL;
     }
+    free(m->config.engram_format_bitmap);
     close_reader(m);
     lz_st_close(&m->st);
     memset(m, 0, sizeof(*m));

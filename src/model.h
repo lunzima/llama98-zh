@@ -81,19 +81,16 @@
  * gs is 0 and scale/zero are NULL, so any code that reaches for a scale
  * must test the dtype first - lz_t_f32 does, ahead of its scale guard.
  *
- * NARROWING AN F32 TENSOR INTO THIS FORMAT IS NOT WORTH DOING, and the
- * reason is structural rather than a measurement that came out badly.
- * Per 32 elements: F32 128 bytes, BF16 64, Q8_0 36, Q4_1 24, T2 12. A
- * checkpoint willing to accept a lossy conversion should quantise -
- * Q8_0 is 1.8x smaller than bf16 AND has hand-written integer kernels,
- * where bf16 widens back to f32 to compute. The lossy direction is
- * dominated by an option this engine already has.
+ * F32 TENSORS THAT CANNOT BE GROUPED (non-2D, row < MIN_GS=32) are
+ * now narrowed to BF16 at export time (export_q8 plan()'s FMT_BF16
+ * branch). This covers all 1D norms and 3D conv1d tensors.
+ * The loss is sub-0.1% relative on norm weights near 1.0 and conv
+ * weights near 0.02; unmeasured on PPL but structurally negligible.
+ * lz_t_f32/lz_t_row_f32 widen bf16→f32 at the point of use.
  *
- * The lossless direction, which is what this format IS, does not
- * compete with those: it applies to tensors that arrive as bf16, where
- * quantising would be an ADDITIONAL lossy step. Measured on real
- * checkpoints, that is nearly all of them - Qwen3.5-0.8B is 1746.9 MB
- * of BF16 against 0.01 MB of F32, and Qwopus3.5-2B has no F32 at all. */
+ * Q8_0 is 1.8x smaller than bf16 AND has hand-written integer kernels,
+ * where bf16 widens back to f32 to compute. For tensors that CAN be
+ * grouped, Q8_0 dominates. BF16 fills the gap Q8_0 cannot reach. */
 
 /* Weight tensor. Row-major (out, in); quantization groups are
    contiguous within a row.
@@ -368,6 +365,14 @@ typedef struct {
     int engram_total_rows;  /* sum(primes[0..n_spaces-1]) */
     int engram_conv_kernel; /* conv kernel size (default 4) */
     int engram_conv_dilation; /* ngram: conv dilation */
+    /* format_ids as a bitmap, vocab_size bits, one bit per token id.
+       kunmoe_modeling.py's EngramMemory._content_mask does
+       `torch.isin(input_ids, format_ids)`; this is the same
+       membership test, O(1) per token instead of an O(|format_ids|)
+       scan. NULL when engram_format_ids is empty or absent in
+       config.json (same meaning as kunmoe_modeling.py's
+       `if not self._format_ids: return None` - no format gating). */
+    unsigned char *engram_format_bitmap;   /* [(vocab_size+7)/8] bytes */
 } LZModelConfig;
 
 /* Per-layer weight pointers. Only half the fields are valid per layer

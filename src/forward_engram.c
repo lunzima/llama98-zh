@@ -77,6 +77,31 @@ static void engram_dump_idx(const char *stage, const int *data, int n) {
     fprintf(stderr, "[engram] %s first4=[%d, %d, %d, %d]\n",
             stage, data[0], data[1], data[2], data[3]);
 }
+
+static int engram_is_format(const unsigned char *bitmap, int tokid) {
+    return (bitmap[tokid >> 3] >> (tokid & 7)) & 1;
+}
+
+/* kunmoe_modeling.py's EngramMemory._content_mask: value[t] is zeroed
+   (no engram contribution) when EVERY token in the widest window
+   (padded[t..t+ngram-1], ngram tokens wide) is a format token. Padding
+   positions (k<0 here) count as format - torch.nn.functional.pad's
+   `value=True` in the Python source - which is a DIFFERENT pad rule
+   from engram_hash's (that one pads with token id 0, matching the
+   hash's own F.pad default of value=0). The two paddings must not be
+   conflated: a mask that treated padding as "token 0" would ask
+   "is token 0 a format id" instead of "assume format", changing
+   the answer whenever id 0 is not itself a format id. */
+static int engram_is_content(const int *tokens, int t, int ngram,
+                             const unsigned char *bitmap) {
+    int k;
+    for (k = 0; k < ngram; k++) {
+        int idx = t - (ngram - 1) + k;
+        int is_fmt = (idx < 0) ? 1 : engram_is_format(bitmap, tokens[idx]);
+        if (!is_fmt) return 1;   /* one content token is enough */
+    }
+    return 0;   /* every token in the window is format (or padding) */
+}
 void forward_engram(const LZModel *m, LZRunState *s,
                     const int *tokens, int nt, int pos0) {
     const LZModelConfig *c = &m->config;
@@ -90,11 +115,14 @@ void forward_engram(const LZModel *m, LZRunState *s,
     int tk, o, i;
     int dbg = engram_dump_enabled() && pos0 == 0 && nt >= 1;
 
-    /* Scratch layout (wscr is 4 * hidden_size floats, allocated by
-       lz_state_alloc). Three nt*dim blocks fit when nt <= batch_max
-       and hidden_size <= 512; for larger models, fall back to malloc.
-       For now the scratch is enough for KunKun98/CE. */
-    int *hidx = (int *)s->wscr;
+    /* Scratch layout lives in s->engram_scratch, NOT s->wscr - that
+       buffer is one weight row wide (forward.h's field comment) and a
+       BF16 norm's f32 expansion, or nt=8 prefill, both overrun it
+       silently (see forward.h's engram_scratch comment for the two
+       ways this broke before the dedicated buffer existed).
+       lz_state_alloc sizes engram_scratch for nt=LZ_BATCH_MAX, so any
+       nt <= that fits. */
+    int *hidx = (int *)s->engram_scratch;
     size_t hidx_sz = (size_t)nt * ns;
     size_t hidx_bytes = hidx_sz * sizeof(int);
     /* float scratch starts after hidx, aligned to 16 bytes */
@@ -115,10 +143,18 @@ void forward_engram(const LZModel *m, LZRunState *s,
 
     memset(value, 0, (size_t)nt * dim * sizeof(float));
 
-    /* Query = rmsnorm(x) */
+    /* Query = rmsnorm(x). eg->norm's f32 view must NOT reuse `hidx`'s
+       memory (the start of engram_scratch): a BF16 norm tensor makes
+       lz_t_f32 WRITE dim(=512) floats into its scratch buffer, which
+       would overrun hidx (at most LZ_BATCH_MAX*ns ints) and corrupt
+       the very indices the table lookup below still needs to read.
+       `scratch` is unused until the per-order loop begins, so it is a
+       safe destination for this call - it needs only `dim` floats,
+       well within scratch's later size (nt*po or nt*dim, both >= dim
+       for every checkpoint here). */
     for (tk = 0; tk < nt; tk++)
         lz_rmsnorm(qnorm + (size_t)tk * dim, s->x + (size_t)tk * dim,
-                   lz_t_f32(&eg->norm, s->wscr), dim, c->rms_norm_eps);
+                   lz_t_f32(&eg->norm, scratch), dim, c->rms_norm_eps);
     if (dbg) engram_dump("qnorm", qnorm, dim);
 
     for (o = 0; o < no; o++) {
@@ -135,21 +171,46 @@ void forward_engram(const LZModel *m, LZRunState *s,
         }
         if (dbg) { char tag[32]; snprintf(tag, sizeof(tag), "emb_o%d", o); engram_dump(tag, eo, po); }
 
-        /* key = key_proj[o] @ eo */
-        for (tk = 0; tk < nt; tk++)
-            lz_matmul_xq_nt(key + (size_t)tk * dim,
-                            eo + (size_t)tk * po, NULL, NULL,
-                            &eg->key_proj[o],
-                            po, dim, 1);
+        /* Quantize eo into s->xq/s->xqs before either matmul below.
+           lz_matmul_xq_nt's float-row arm (F32/BF16 weights) ignores
+           xq/xqs and reads eo directly, but key_proj/value_proj may be
+           any packed format (the shipping recipe puts them at Q6_1) -
+           those arms return an all-zero row when xq/xqs are NULL
+           (ops_matmul.c's defensive guard: "no silent miscalc" zeros
+           the output rather than reading a null pointer). Every other
+           matmul_xq_nt call site in this codebase quantizes first;
+           this one was the missing case, invisible while key_proj/
+           value_proj stayed F32 (the float-row arm never looks at
+           xq/xqs) and only surfacing once the shipping recipe put them
+           at Q6_1.
+
+           Called with nt=1 per token (matching the loops below, which
+           call lz_matmul_xq_nt once per tk rather than batched), so
+           xq/xqs each hold exactly one token's worth: po int8s and
+           po/gs floats. s->xq/s->xqs are sized nt_cap*qcap and
+           nt_cap*(qcap/32) respectively (forward.c's lz_state_alloc),
+           both >= po for every checkpoint here, so reusing token slot 0
+           on each iteration is safe - forward_engram runs before the
+           layer loop populates them for anything else. */
+        for (tk = 0; tk < nt; tk++) {
+            int gs_key = lz_act_gs(&eg->key_proj[o], po);
+            lz_quantize_q8(eo + (size_t)tk * po, po, gs_key, s->xq, s->xqs);
+            lz_matmul_xq_nt(key + (size_t)tk * dim, eo + (size_t)tk * po,
+                            s->xq, s->xqs, &eg->key_proj[o], po, dim, 1);
+        }
         if (dbg) { char tag[32]; snprintf(tag, sizeof(tag), "key_o%d", o); engram_dump(tag, key, dim); }
 
-        /* val = value_proj[o] @ eo */
+        /* val = value_proj[o] @ eo. Separate quantization: value_proj's
+           gs need not match key_proj's, and the two matmuls are not
+           fused, so there is no reuse to preserve by sharing xq/xqs
+           between them. */
         float *val = scratch + (size_t)nt * po;
-        for (tk = 0; tk < nt; tk++)
-            lz_matmul_xq_nt(val + (size_t)tk * dim,
-                            eo + (size_t)tk * po, NULL, NULL,
-                            &eg->value_proj[o],
-                            po, dim, 1);
+        for (tk = 0; tk < nt; tk++) {
+            int gs_val = lz_act_gs(&eg->value_proj[o], po);
+            lz_quantize_q8(eo + (size_t)tk * po, po, gs_val, s->xq, s->xqs);
+            lz_matmul_xq_nt(val + (size_t)tk * dim, eo + (size_t)tk * po,
+                            s->xq, s->xqs, &eg->value_proj[o], po, dim, 1);
+        }
         if (dbg) { char tag[32]; snprintf(tag, sizeof(tag), "val_o%d", o); engram_dump(tag, val, dim); }
 
         /* SPDA gate per token: s = dot(q, key) / sqrt(d),
@@ -171,6 +232,27 @@ void forward_engram(const LZModel *m, LZRunState *s,
         if (dbg) { char tag[32]; snprintf(tag, sizeof(tag), "value_o%d", o); engram_dump(tag, value, dim); }
     }
 
+    /* Format-content mask, BEFORE the conv - kunmoe_modeling.py zeroes
+       `value` here so no gradient reaches a format-only n-gram row
+       through any path (the conv is a temporal mixer and would
+       otherwise carry a format position's contribution into its
+       neighbours' outputs even after zeroing the final sum instead).
+       Skipping this at inference computes a different function than
+       the one that was trained: a non-zero engram contribution at
+       positions training made exactly zero. c->engram_format_bitmap
+       is NULL when engram_format_ids is empty/absent in config.json -
+       same as kunmoe_modeling.py's `if not self._format_ids`. */
+    if (c->engram_format_bitmap) {
+        for (tk = 0; tk < nt; tk++) {
+            if (!engram_is_content(tokens, tk, c->engram_ngram,
+                                   c->engram_format_bitmap)) {
+                float *v_row = value + (size_t)tk * dim;
+                for (i = 0; i < dim; i++) v_row[i] = 0.0f;
+            }
+        }
+        if (dbg) engram_dump("value_masked", value, dim);
+    }
+
     /* 4. Depthwise dilated conv1d + SiLU.
        PyTorch: Conv1d(padding=(kernel-1)*dilation, dilation=dil), then
        trim to T. Equivalent causal form: out[t] = sum_k
@@ -180,7 +262,6 @@ void forward_engram(const LZModel *m, LZRunState *s,
         int kern = c->engram_conv_kernel;
         int dil = c->engram_conv_dilation;
         float *conv_out = scratch;
-        const float *conv_w = lz_t_f32(&eg->conv, s->wscr);
 
         for (tk = 0; tk < nt; tk++) {
             float *out_row = conv_out + (size_t)tk * dim;
@@ -189,13 +270,22 @@ void forward_engram(const LZModel *m, LZRunState *s,
                value[t - (kern-1-k)*dil]; PyTorch's zero padding makes
                out-of-range taps contribute zero, which the skip below
                reproduces. Weight layout [channel, 1, kernel]:
-               conv_w[c*kern + k]. */
-            for (int k = 0; k < kern; k++) {
-                int src_t = tk - (kern - 1 - k) * dil;
-                if (src_t < 0) continue;
-                const float *src = value + (size_t)src_t * dim;
-                for (i = 0; i < dim; i++)
-                    out_row[i] += src[i] * conv_w[(size_t)i * kern + k];
+               conv_w[c*kern + k].
+
+               Read one channel's K taps at a time through lz_t_row_f32
+               instead of the whole tensor through lz_t_f32. This lets
+               BF16 conv tensors stay narrow in RAM: lz_t_f32 would need
+               the entire [C,1,K] in s->wscr at once (2048 elements for
+               engram's 512-channel conv), overflowing it; lz_t_row_f32
+               needs only kern (=4) floats of scratch. */
+            for (i = 0; i < dim; i++) {
+                /* One channel's K taps into wscr[0..kern-1] */
+                lz_t_row_f32(&eg->conv, i, kern, s->wscr);
+                for (int k = 0; k < kern; k++) {
+                    int src_t = tk - (kern - 1 - k) * dil;
+                    if (src_t < 0) continue;
+                    out_row[i] += value[(size_t)src_t * dim + i] * s->wscr[k];
+                }
             }
             /* SiLU */
             for (i = 0; i < dim; i++)

@@ -966,6 +966,17 @@ typedef struct {
     float  *wscr;               /* weight dequantization scratch (norm/embed rows) */
     int     qcap;               /* xq capacity */
 
+    /* Engram forward's own scratch: hash indices (int) + four nt*dim(-ish)
+       float blocks (value/qnorm/key/scratch). Cannot borrow s->wscr - that
+       buffer is documented as ONE weight row wide, and forward_engram.c
+       once tried to fit hidx plus three nt*dim blocks in it, which
+       overflows the moment nt*hidden_size*3 exceeds wscr's capacity
+       (true at nt=8 on kunmoe-v2's 512-wide hidden state, silently, since
+       s->wscr is its own malloc with no guard neighbor). NULL / 0 when
+       config.engram is 0 - forward_engram is never called then. */
+    void   *engram_scratch;
+    size_t  engram_scratch_bytes;
+
     /* SubLN Hadamard fixed-point scratch (use_subn only): 2*qcap int32.
        Source half holds the row converted to fixed point, destination
        half the unnormalized lz_fwht_i32 output (restrict forbids one
