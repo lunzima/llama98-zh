@@ -1059,6 +1059,19 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
             s->engram_scratch_bytes = n_elem * sizeof(float) + 64;
             s->engram_scratch = xcalloc(s->engram_scratch_bytes, 1,
                                         &ok, &s->bytes_alloc);
+            /* Cross-chunk VALUE history for the depthwise conv - see
+               forward.h's engram_conv_hist comment. Rows needed:
+               (kernel-1)*dilation, each dim wide. */
+            {
+                int rows = (c->engram_conv_kernel - 1) *
+                          c->engram_conv_dilation;
+                if (rows < 0) rows = 0;
+                s->engram_conv_hist_cap = rows;
+                s->engram_conv_hist = rows > 0
+                    ? (float *)xcalloc((size_t)rows * dim, sizeof(float),
+                                       &ok, &s->bytes_alloc)
+                    : NULL;
+            }
         }
         /* SubLN Hadamard scratch: two n-wide int32 halves, n <= qcap. */
         s->fwht_scratch = (int32_t *)xcalloc((size_t)2 * qcap, sizeof(int32_t),
@@ -1262,6 +1275,7 @@ void lz_state_free(LZRunState *s) {
     xfree(s->xq); xfree(s->xqs); xfree(s->wscr); xfree(s->fwht_scratch);
     xfree(s->subn_norm_int);
     xfree(s->engram_scratch);
+    xfree(s->engram_conv_hist);
     xfree(s->rope_cs);
     xfree(s->cache_idx);
     memset(s, 0, sizeof(*s));
@@ -1335,6 +1349,12 @@ void lz_state_reset(LZRunState *s, const LZModel *m) {
        above) is indexed by this, not by the body's absolute position;
        see forward.h's s->mtp_pos comment. */
     s->mtp_pos = 0;
+    /* engram's cross-chunk token history (forward.h's field comment):
+       a reset means "nothing came before", so the leading-entry count
+       goes back to 0, matching engram_hash's own padding rule for a
+       fresh sequence. */
+    s->engram_hist_n = 0;
+    s->engram_conv_hist_n = 0;
     /* Every checkpoint taken before this point is now void: the KV cache
        it relies on (and deliberately does not copy) has just been
        zeroed. See LZStateCkpt in forward.h. */
@@ -1704,8 +1724,33 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
        (the hook in kunmoe_modeling.py registers on embed_tokens).
        Modifies s->x in-place. No-op when config.engram is 0. */
     if (m->engram) {
-        forward_engram(m, s, tokens, nt, pos0);
+        forward_engram(m, s, tokens, nt, pos0, s->engram_hist,
+                      s->engram_hist_n);
         LZ_TAP("eng", -1, s->x, dim);
+        /* Roll this chunk's own tail into the cross-chunk history for
+           the NEXT chunk's hash/mask windows (forward.h's field
+           comment - both read up to engram_ngram-1 tokens before
+           their chunk's first token). Only the trailing min(nt, 31)
+           tokens matter; a chunk at least that wide overwrites the
+           whole history and needs no merge with what came before. */
+        {
+            int keep = (int)(sizeof(s->engram_hist) /
+                             sizeof(s->engram_hist[0]));
+            if (nt >= keep) {
+                memcpy(s->engram_hist, tokens + (nt - keep),
+                      (size_t)keep * sizeof(int));
+                s->engram_hist_n = keep;
+            } else {
+                int old_keep = keep - nt;
+                if (old_keep > s->engram_hist_n) old_keep = s->engram_hist_n;
+                if (old_keep > 0)
+                    memmove(s->engram_hist, s->engram_hist + (s->engram_hist_n - old_keep),
+                           (size_t)old_keep * sizeof(int));
+                memcpy(s->engram_hist + old_keep, tokens,
+                      (size_t)nt * sizeof(int));
+                s->engram_hist_n = old_keep + nt;
+            }
+        }
     }
 
     /* Ring base for this CHUNK (the SSM/conv rollback ring - forward.h's

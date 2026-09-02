@@ -977,6 +977,47 @@ typedef struct {
     void   *engram_scratch;
     size_t  engram_scratch_bytes;
 
+    /* Trailing token history for engram's hash/mask windows, which both
+       read up to (engram_ngram - 1) tokens BEFORE the current chunk's
+       first token. forward_engram's tokens[] argument is only the
+       current chunk (lz_forward_batch slices the prompt into
+       LZ_BATCH_MAX-wide pieces), so without this every chunk boundary
+       reads as "start of sequence" - the hash sees padding zeros and
+       the format mask sees "assume format" where the real history has
+       actual content. Measured with tests/test_batch_parity.c against
+       an engram checkpoint: FAILS at every length past the first
+       chunk width (kq8/vq8/ssm_state all diverge); the same binary
+       against an engram=0 sibling checkpoint passes cleanly, so the
+       divergence is engram-specific, not a KDA/attention batching bug.
+       Fixed size rather than sized from config.engram_ngram: this
+       struct is filled before alloc_engram runs (lz_state_alloc is
+       called by the SAME callers that open the model, not gated on
+       engram being present), and 31 is far past any n-gram order this
+       mechanism would plausibly use (the shipping recipe uses 3).
+       engram_hist_n counts how many of the LEADING entries are valid
+       (0 at a fresh/reset state - see lz_state_reset). */
+    int     engram_hist[31];
+    int     engram_hist_n;
+
+    /* Trailing VALUE history (not tokens) for engram's depthwise conv,
+       which reads up to (engram_conv_kernel-1)*engram_conv_dilation
+       positions of `value` (the gated per-order sum, post-mask, PRE
+       conv) before the current chunk's first token - same cross-chunk
+       gap engram_hist fixes for the hash/mask, one stage later in the
+       pipeline. `value` is a per-token DIM-wide float vector, not a
+       token id, so this cannot reuse engram_hist's int array; sized at
+       load time (engram_conv_hist_cap = (kernel-1)*dilation*dim
+       floats, allocated once alloc_engram has run and c->engram_* is
+       known) rather than fixed like engram_hist, since dim varies by
+       checkpoint and a 31-token-deep, 4096-wide history would be
+       wasteful on every model that does not need it. NULL/0 (both
+       fields) when config.engram is 0. engram_conv_hist_n counts how
+       many of the LEADING rows are valid, same convention as
+       engram_hist_n. */
+    float  *engram_conv_hist;
+    int     engram_conv_hist_cap;   /* rows the buffer holds */
+    int     engram_conv_hist_n;
+
     /* SubLN Hadamard fixed-point scratch (use_subn only): 2*qcap int32.
        Source half holds the row converted to fixed point, destination
        half the unnormalized lz_fwht_i32 output (restrict forbids one
@@ -1148,9 +1189,18 @@ void dense_ffn_step(const LZModel *m, LZRunState *s,
 
 /* Engram: conditional n-gram memory. Global module, called once per
    chunk after embed_tokens, before the layer loop. Modifies s->x
-   in-place (residual add). Not per-layer: LZEngram lives on LZModel. */
+   in-place (residual add). Not per-layer: LZEngram lives on LZModel.
+   hist/hist_n: the trailing history[0..hist_n) tokens that came before
+   tokens[0] in the sequence (s->engram_hist, forward.h's own field
+   comment) - the hash and content-mask windows both read up to
+   engram_ngram-1 tokens before the chunk's first position, and without
+   this a prefill split across multiple chunks reads every boundary as
+   "start of sequence". hist_n may be less than what a window wants
+   (true at the real sequence start); forward_engram treats those
+   positions as padding, same as index<0 within a single chunk. */
 void forward_engram(const LZModel *m, LZRunState *s,
-                    const int *tokens, int nt, int pos0);
+                    const int *tokens, int nt, int pos0,
+                    const int *hist, int hist_n);
 
 /* Snapshot of the position-carrying RECURRENT state, for reusing a
    conversation prefix across turns instead of re-forwarding it.

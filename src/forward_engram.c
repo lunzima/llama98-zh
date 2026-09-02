@@ -25,7 +25,27 @@
    Window width = order = o+2, matching PyTorch's F.pad(ngram-1, 0)
    followed by a sliding window of width `order` starting at each
    position. */
+/* Token at relative index k (k may be negative, reaching before this
+   chunk's tokens[0]): k>=0 reads tokens[k]; k<0 reaches into the
+   cross-chunk history hist[0..hist_n), where k=-1 is the token
+   immediately before tokens[0] (hist[hist_n-1]), k=-2 is
+   hist[hist_n-2], and so on. Past the start of the real sequence
+   (hist_n exhausted, or no history at all - a fresh lz_state_reset)
+   the token is padding, id 0 - matches F.pad's default value=0 in
+   kunmoe_modeling.py's _multi_head_hash, the same rule a single chunk
+   already used for k<0 before cross-chunk history existed. */
+static int engram_tok_at(const int *tokens, const int *hist, int hist_n,
+                         int k) {
+    if (k >= 0) return tokens[k];
+    {
+        int back = -k;                 /* 1, 2, 3, ... tokens before tokens[0] */
+        if (back <= hist_n) return hist[hist_n - back];
+        return 0;                      /* before the real sequence start */
+    }
+}
+
 static void engram_hash(const int *tokens, int nt,
+                        const int *hist, int hist_n,
                         const int *primes, const int *offsets,
                         const lz_i64 *bases,
                         int n_orders, int n_head, int n_spaces,
@@ -41,11 +61,12 @@ static void engram_hash(const int *tokens, int nt,
                 int k;
                 int pad = n_orders;   /* ngram - 1 */
                 /* Window: padded[t .. t+order-1] over the pad-zero-
-                   prefixed array = tokens[t+k-pad] for k=0..order-1,
-                   clamped to 0. For ngram=3: order 2 reads [t-2, t-1],
-                   order 3 reads [t-2, t-1, t]. */
+                   prefixed array = tokens[t+k-pad] for k=0..order-1.
+                   For ngram=3: order 2 reads [t-2, t-1], order 3 reads
+                   [t-2, t-1, t]. Negative indices reach into hist -
+                   see engram_tok_at. */
                 for (k = t - pad; k < t - pad + w; k++) {
-                    int tk = (k < 0) ? 0 : tokens[k];
+                    int tk = engram_tok_at(tokens, hist, hist_n, k);
                     hv = (hv * base + (lz_i64)tk) & ((lz_i64)-1);
                 }
                 out[(size_t)t * n_spaces + sp] =
@@ -85,25 +106,42 @@ static int engram_is_format(const unsigned char *bitmap, int tokid) {
 /* kunmoe_modeling.py's EngramMemory._content_mask: value[t] is zeroed
    (no engram contribution) when EVERY token in the widest window
    (padded[t..t+ngram-1], ngram tokens wide) is a format token. Padding
-   positions (k<0 here) count as format - torch.nn.functional.pad's
-   `value=True` in the Python source - which is a DIFFERENT pad rule
-   from engram_hash's (that one pads with token id 0, matching the
-   hash's own F.pad default of value=0). The two paddings must not be
-   conflated: a mask that treated padding as "token 0" would ask
-   "is token 0 a format id" instead of "assume format", changing
-   the answer whenever id 0 is not itself a format id. */
-static int engram_is_content(const int *tokens, int t, int ngram,
-                             const unsigned char *bitmap) {
+   positions count as format - torch.nn.functional.pad's `value=True`
+   in the Python source - which is a DIFFERENT pad rule from
+   engram_hash's (that one pads with token id 0, matching the hash's
+   own F.pad default of value=0). The two paddings must not be
+   conflated: a mask that treated padding as "token 0" would ask "is
+   token 0 a format id" instead of "assume format", changing the
+   answer whenever id 0 is not itself a format id.
+
+   "Padding" here means before the real sequence start, not before
+   this CHUNK - an index reaching into hist[] is a real prior token
+   (from an earlier chunk of the same prefill) and must get the real
+   is_format(that token) answer, same as engram_hash reads the real
+   token id there rather than 0. Only running past hist_n (nothing
+   recorded that far back - the actual start of the sequence) is
+   padding in the Python sense. */
+static int engram_is_content(const int *tokens, const int *hist, int hist_n,
+                             int t, int ngram, const unsigned char *bitmap) {
     int k;
     for (k = 0; k < ngram; k++) {
         int idx = t - (ngram - 1) + k;
-        int is_fmt = (idx < 0) ? 1 : engram_is_format(bitmap, tokens[idx]);
+        int is_fmt;
+        if (idx >= 0) {
+            is_fmt = engram_is_format(bitmap, tokens[idx]);
+        } else {
+            int back = -idx;
+            is_fmt = (back <= hist_n)
+                    ? engram_is_format(bitmap, hist[hist_n - back])
+                    : 1;   /* before the sequence start: assume format */
+        }
         if (!is_fmt) return 1;   /* one content token is enough */
     }
     return 0;   /* every token in the window is format (or padding) */
 }
 void forward_engram(const LZModel *m, LZRunState *s,
-                    const int *tokens, int nt, int pos0) {
+                    const int *tokens, int nt, int pos0,
+                    const int *hist, int hist_n) {
     const LZModelConfig *c = &m->config;
     const LZEngram *eg = m->engram;
     int dim = c->hidden_size;
@@ -129,7 +167,7 @@ void forward_engram(const LZModel *m, LZRunState *s,
     float *fscr = (float *)(((size_t)hidx + hidx_bytes + 15) & ~(size_t)15);
 
     /* 1. Hash */
-    engram_hash(tokens, nt, eg->primes, eg->offsets, eg->bases,
+    engram_hash(tokens, nt, hist, hist_n, eg->primes, eg->offsets, eg->bases,
                 no, nh, ns, hidx);
     if (dbg) {
         engram_dump_idx("hash", hidx, ns);
@@ -244,7 +282,7 @@ void forward_engram(const LZModel *m, LZRunState *s,
        same as kunmoe_modeling.py's `if not self._format_ids`. */
     if (c->engram_format_bitmap) {
         for (tk = 0; tk < nt; tk++) {
-            if (!engram_is_content(tokens, tk, c->engram_ngram,
+            if (!engram_is_content(tokens, hist, hist_n, tk, c->engram_ngram,
                                    c->engram_format_bitmap)) {
                 float *v_row = value + (size_t)tk * dim;
                 for (i = 0; i < dim; i++) v_row[i] = 0.0f;
@@ -283,8 +321,30 @@ void forward_engram(const LZModel *m, LZRunState *s,
                 lz_t_row_f32(&eg->conv, i, kern, s->wscr);
                 for (int k = 0; k < kern; k++) {
                     int src_t = tk - (kern - 1 - k) * dil;
-                    if (src_t < 0) continue;
-                    out_row[i] += value[(size_t)src_t * dim + i] * s->wscr[k];
+                    float v;
+                    if (src_t >= 0) {
+                        v = value[(size_t)src_t * dim + i];
+                    } else {
+                        /* Before this chunk's first token: reach into
+                           the cross-chunk VALUE history (forward.h's
+                           engram_conv_hist comment) instead of treating
+                           every chunk boundary as sequence start. `back`
+                           counts rows before tk=0 the same way
+                           engram_tok_at's does for the token history;
+                           past what was recorded (real sequence start,
+                           or a fresh lz_state_reset) the contribution is
+                           zero - PyTorch's Conv1d zero-padding, which a
+                           single chunk already relied on for src_t<0. */
+                        int back = -src_t;
+                        if (back <= s->engram_conv_hist_n) {
+                            const float *hrow = s->engram_conv_hist +
+                                (size_t)(s->engram_conv_hist_n - back) * dim;
+                            v = hrow[i];
+                        } else {
+                            v = 0.0f;
+                        }
+                    }
+                    out_row[i] += v * s->wscr[k];
                 }
             }
             /* SiLU */
@@ -304,4 +364,30 @@ void forward_engram(const LZModel *m, LZRunState *s,
     }
     (void)pos0;  /* position not needed; engram is position-agnostic */
     if (dbg) engram_dump("residual_add", s->x, dim);
+
+    /* Roll this chunk's trailing `value` rows into engram_conv_hist for
+       the NEXT chunk's conv taps - same cross-chunk carry engram_hist
+       does for the hash/mask, one stage later (post-gate, pre-conv).
+       cap==0 means the conv needs no history (kernel<=1 or
+       dilation==0); nothing to do then. */
+    if (s->engram_conv_hist && c->engram_conv_kernel > 1) {
+        int cap = s->engram_conv_hist_cap;
+        if (nt >= cap) {
+            memcpy(s->engram_conv_hist, value + (size_t)(nt - cap) * dim,
+                  (size_t)cap * dim * sizeof(float));
+            s->engram_conv_hist_n = cap;
+        } else {
+            int old_keep = cap - nt;
+            if (old_keep > s->engram_conv_hist_n)
+                old_keep = s->engram_conv_hist_n;
+            if (old_keep > 0)
+                memmove(s->engram_conv_hist,
+                       s->engram_conv_hist +
+                           (size_t)(s->engram_conv_hist_n - old_keep) * dim,
+                       (size_t)old_keep * dim * sizeof(float));
+            memcpy(s->engram_conv_hist + (size_t)old_keep * dim, value,
+                  (size_t)nt * dim * sizeof(float));
+            s->engram_conv_hist_n = old_keep + nt;
+        }
+    }
 }
