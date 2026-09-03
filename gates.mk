@@ -41,7 +41,7 @@
 # nested inside another comment; gcc said so on every build and `check`
 # reported 16 PASS over it. Having a caller somewhere is not the test -
 # being reachable from what people actually run is.
-check: root-hygiene-gate bare-endif-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate softfp-gate dedupe-gate mm-alias-gate c89-floor-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate kernel-matrix-gate aux-parm-arity-gate aux-equiv-gate mathf-xcompiler-gate bf16-torch-gate bf16-store-gate lz4-model-gate gcc-watcom-output-gate fixture-exists-gate
+check: root-hygiene-gate bare-endif-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate json-offset-gate softfp-gate dedupe-gate mm-alias-gate c89-floor-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate kernel-matrix-gate aux-parm-arity-gate aux-equiv-gate mathf-xcompiler-gate bf16-torch-gate bf16-store-gate lz4-model-gate gcc-watcom-output-gate fixture-exists-gate
 
 # Zero gcc warnings, asserted rather than printed. The Watcom side has
 # always been counted ("N lines, 0 warnings, 0 errors", per file); this
@@ -227,6 +227,21 @@ fp-exception-gate:
 .PHONY: bf16-native-gate
 bf16-native-gate:
 	@bash build/bf16_native_gate.sh
+
+# LZJsonNode.num must be a double (strtod), not a float (strtof):
+# safetensors data_offsets are byte offsets into real checkpoints,
+# routinely past float32's 24-bit exact-integer mantissa, and
+# src/safetensors.c reads them straight off ->num with no
+# lz_json_get_int in the way. Mutation-tested (turns the fix back into
+# the bug via sed on the current tree, not a git-pinned copy, so the
+# control stays meaningful after this fix is committed), plus a
+# config.json regression (the float->double widening must not change
+# any of the small values lz_load_config reads) and a Watcom
+# compile-only check. No model dir needed - builds its own fixture -
+# so it sits with the other fast, build-and-run gates.
+.PHONY: json-offset-gate
+json-offset-gate:
+	@bash build/json_offset_gate.sh
 
 # Every operator src/lz_softfp.c exports, against libgcc's own, under
 # qemu - plus an assertion that none escaped the comparison, which is

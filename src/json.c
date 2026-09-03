@@ -287,7 +287,7 @@ static int jparse_value(LZJsonParser *ps) {
     case 'f':
         if (ps->end - ps->p >= 5 && memcmp(ps->p, "false", 5) == 0) {
             r = jnode_new(ps, LZ_JSON_BOOL);
-            if (r >= 0) ps->j->nodes[r].num = 0.0f;
+            if (r >= 0) ps->j->nodes[r].num = 0.0;
             ps->p += 5;
         } else { jerr(ps, LZ_ERR_JSON_LITERAL); r = -1; }
         break;
@@ -299,14 +299,17 @@ static int jparse_value(LZJsonParser *ps) {
         break;
     default: {
         char *endp = NULL;
-        float v;
+        double v;
         if (*ps->p != '-' && (*ps->p < '0' || *ps->p > '9')) {
             jerr(ps, LZ_ERR_JSON_VALUE);
             ps->depth--;
             return -1;
         }
-        /* buf is NUL-terminated overall; strtod cannot overrun */
-        v = strtof(ps->p, &endp);
+        /* buf is NUL-terminated overall; strtod cannot overrun.
+           double, not strtof/float: see LZJsonNode.num in json.h -
+           safetensors data_offsets need more than float32's 24-bit
+           exact-integer mantissa. */
+        v = strtod(ps->p, &endp);
         if (endp == ps->p) {
             jerr(ps, LZ_ERR_JSON_NUM);
             ps->depth--;

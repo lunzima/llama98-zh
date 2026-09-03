@@ -134,6 +134,9 @@
 !/build/norm_sse_parity_gate.sh
 !/build/i32f_acc_probe.c
 !/build/i32f_acc_gate.sh
+!/build/json_offset_probe.c
+!/build/json_offset_gate.sh
+!/build/json_config_regress_probe.c
 !/build/kernel_probe_census.sh
 !/build/org_census.sh
 !/build/root_hygiene_gate.sh
