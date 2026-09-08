@@ -90,8 +90,10 @@ static void lz_vscale_sse(float *x, int n4, const float *pk) {
 
 #endif  /* __WATCOMC__ */
 
-/* Dispatch tables, one per helper, same six slots and same pick rule as
-   every other operator here. The gcc and Watcom sides were given the
+/* Dispatch tables, one per helper, same LZ_ROW_N slots and same pick
+   rule as every other operator here. The trailing avx2 slot is
+   unconditionally NULL for the same reason ops_kernel_amax.h's is:
+   LZ_DEFINE_PICK never reads LZ_ROW_AVX2_I. The gcc and Watcom sides were given the
    SAME signatures - constants arrive through a pointer on both - so one
    table can hold either.
  *
@@ -111,11 +113,11 @@ typedef void  (*lz_vmaxfn)(const float *x, int n4, float *pmax);
 typedef void  (*lz_vscalefn)(float *x, int n4, const float *pk);
 
 #if defined(LZ_HAVE_NORM_SSE) && defined(__WATCOMC__)
-#define LZ_NORM_SLOTS(F) NULL, F##_w, F##_w, NULL, F##_w, F##_w
+#define LZ_NORM_SLOTS(F) NULL, F##_w, F##_w, NULL, F##_w, F##_w, NULL
 #elif defined(LZ_HAVE_NORM_SSE)
-#define LZ_NORM_SLOTS(F) NULL, F, F, NULL, NULL, NULL
+#define LZ_NORM_SLOTS(F) NULL, F, F, NULL, NULL, NULL, NULL
 #else
-#define LZ_NORM_SLOTS(F) NULL, NULL, NULL, NULL, NULL, NULL
+#define LZ_NORM_SLOTS(F) NULL, NULL, NULL, NULL, NULL, NULL, NULL
 #endif
 
 static const lz_normoutfn LZ_NORMOUT_TAB[LZ_ROW_N] =

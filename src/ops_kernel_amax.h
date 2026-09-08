@@ -42,8 +42,11 @@
    address taken, so the dispatch table below needs a real function to
    point at. */
 
-/* The dispatch table. Six slots in the LZ_ROW_* order; NULL is a claim
-   with a reason attached, not an omission.
+/* The dispatch table. LZ_ROW_N slots in the LZ_ROW_* order; NULL is a
+   claim with a reason attached, not an omission. The trailing avx2
+   slot is unconditionally NULL: LZ_DEFINE_PICK (ops_kernel_shared.h)
+   never reads LZ_ROW_AVX2_I, only MMX/SSE2, so there is no body for
+   this table to hold there even once AVX2 lands elsewhere.
 
    SSE1 IS EMPTY BY INSTRUCTION SET. Its additions to the MMX integer
    set are pshufw, pinsrw, pextrw, pmovmskb, pmulhuw, pavgb, pavgw,
@@ -77,10 +80,11 @@ static const lz_amaxfn LZ_AMAX_TAB[LZ_ROW_N] = {
 #endif
     NULL,                       /* sse-asm: same instruction-set reason */
 #if defined(LZ_HAVE_AMAX_SSE2) && defined(__WATCOMC__)
-    lz_amax32_sse2_w
+    lz_amax32_sse2_w,
 #else
-    NULL
+    NULL,
 #endif
+    NULL                        /* avx2: see the note above LZ_AMAX_TAB */
 };
 LZ_DEFINE_PICK(lz_amax_pick, lz_amaxfn)
 

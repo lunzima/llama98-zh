@@ -1280,9 +1280,10 @@ int main(int argc, char **argv) {
                machine that has none.
 
                Three blocks. The grid is the human view and keeps its
-               shape (format, six slots, the 128-group column - the ARM
-               pair only on the build that has it, so the header follows
-               the same #if or the table reads wrong). The `cell` lines
+               shape (format, LZ_ROW_N row-kernel slots, the 128-group
+               column - the ARM pair only on the build that has it, so
+               the header follows the same #if or the table reads
+               wrong). The `cell` lines
                are the whole registry, every format x tier including the
                columns this build does not print, because the ARM cells
                have to be readable from an x86 binary or they go
@@ -1306,10 +1307,10 @@ int main(int argc, char **argv) {
             int nwhy = 0;
             memset(whyseen, 0, sizeof whyseen);
 #if defined(__arm__)
-            printf("format mmxI sseI sse2I mmxA sseA sse2A armC armA  g128\n%s",
+            printf("format mmxI sseI sse2I mmxA sseA sse2A avx2I armC armA  g128\n%s",
                    lz_kernel_matrix());
 #else
-            printf("format mmxI sseI sse2I mmxA sseA sse2A  g128\n%s",
+            printf("format mmxI sseI sse2I mmxA sseA sse2A avx2I  g128\n%s",
                    lz_kernel_matrix());
 #endif /* __arm__ */
             printf("legend x=here o=other-build i=impossible t=todo "

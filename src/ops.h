@@ -755,10 +755,10 @@ int lz_conv_norm_pow2(const float *v, int n, short *out, int bound);
    depends on the
    target's float-to-integer cost ratio, and this host answers for
    itself only. */
-/* The kernel coverage matrix: one line per weight format, six characters
-   for the six row-kernel slots (mmx-intrin, sse-intrin, sse2-intrin,
-   mmx-asm, sse-asm, sse2-asm) and one for whether that format has a
-   128-element group kernel in this build.
+/* The kernel coverage matrix: one line per weight format, LZ_ROW_N
+   characters for the LZ_ROW_N row-kernel slots (mmx-intrin, sse-intrin,
+   sse2-intrin, mmx-asm, sse-asm, sse2-asm, avx2-intrin) and one for
+   whether that format has a 128-element group kernel in this build.
 
    It exists because a hand-maintained version of this table claimed
    gcc 128-group kernels for three formats that had none at the time,
@@ -788,8 +788,8 @@ const char *lz_kernel_matrix(void);
  * format": --kernel arm-c/arm-asm has exactly one consumer right now,
  * and when a second operator gets an ARM tier the global enum stops
  * being able to say which one has the assembly. Such an operator joins
- * as LZ_KM_OP - registry only, because the grid's six characters are
- * the six LZ_ROW_* slots. src/ops.c's km_unit is the table. */
+ * as LZ_KM_OP - registry only, because the grid's characters are
+ * exactly the LZ_ROW_* slots. src/ops_kernel.c's km_unit is the table. */
 #define LZ_KM_ROW 0
 #define LZ_KM_OP  1
 

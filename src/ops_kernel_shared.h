@@ -418,7 +418,15 @@ extern void lz_pf_amd(const void *p);
    function-pointer type; it reads g_kernel to decide MMX vs SSE2.
 
    Here so ops_kernel_amax.h, ops_kernel_norm.h and ops_kernel_q8round.h
-   compile in every TU that includes this header. */
+   compile in every TU that includes this header.
+
+   Changing LZ_ROW_N changes the implicit-zero-pad width of every
+   `[LZ_ROW_N]`-sized table AND every hardcoded column constant derived
+   from it elsewhere - src/ops_kernel.c's LZ_KM_COL_ARMC/ARMA/G128/NCOL
+   are the ones that bit back: a stale literal there once silently
+   overlapped this range and made the coverage matrix misread an ARM
+   column as a row-kernel one. Grep for LZ_ROW_N consumers (dispatch
+   table literals, km_reg's per-row column count) before changing it. */
 #define LZ_ROW_MMX_I   0
 #define LZ_ROW_SSE_I   1
 #define LZ_ROW_SSE2_I  2
@@ -428,9 +436,17 @@ extern void lz_pf_amd(const void *p);
 #define LZ_ROW_AVX2_I  6
 #define LZ_ROW_N       7
 
+/* --kernel avx2 has no dedicated body in any of these LZ_DEFINE_PICK
+   tables (LZ_ROW_AVX2_I is always NULL here, unlike lz_row_pick's
+   matmul LZ_ROW_* tables in ops_matmul.c) - this picker still has to
+   prefer SSE2 over MMX for it, the same way lz_row_pick's non-Watcom
+   arm does, or --kernel avx2 would silently downgrade every one of
+   these helpers to MMX on real AVX2 hardware while matmul stays on
+   SSE2. */
 #define LZ_DEFINE_PICK(NAME, TYPE)                                   \
     static TYPE NAME(const TYPE *tab) {                                   \
-        int want_sse2 = (g_kernel == LZ_KERNEL_SSE2);                     \
+        int want_sse2 = (g_kernel == LZ_KERNEL_SSE2 ||                    \
+                          g_kernel == LZ_KERNEL_AVX2);                    \
         TYPE f;                                                           \
         if (!g_kernel) return (TYPE)0;                                    \
         if (g_kernel == LZ_KERNEL_REF) return (TYPE)0;                    \
