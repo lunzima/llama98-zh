@@ -2004,6 +2004,19 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
 #define LZ_LOOK_W_MAX 4
 #define LZ_LOOK_D_MAX 4
 
+/* Prompt lookup decoding (PLD) - generate.c's lz_pld_round. Draft tokens
+   come from a literal n-gram match against the prompt array, not from a
+   trained head, so this is available on any model (no m->mtp needed) -
+   see LZGenOpts.pld_ngram/pld_tokens for the two runtime knobs these
+   ceilings bound. Sizes the query-tail ring and the verify batch (which
+   needs pld_tokens+1 rows, same "+1 for the anchor" shape LZ_SPEC_K_MAX
+   has). Kept separate from LZ_SPEC_K_MAX rather than reusing it: the two
+   mechanisms draft independently (see lz_generate_call's dispatch) and
+   sizing one off the other would make a future change to either
+   ceiling silently resize the other's buffers too. */
+#define LZ_PLD_NGRAM_MAX 8
+#define LZ_PLD_TOKENS_MAX 16
+
 /* The one recurrence body lz_gdn_step / lz_kda_step / lz_kda_step_vi16 all
    forward to. The three wrappers exist so the .prof probes have a stable
    entry point with the narrow signature they were written against; the

@@ -365,6 +365,60 @@ typedef struct {
     int    out_spec_rounds;         /* how many speculative rounds ran */
     int    out_spec_draft_tokens;   /* sum of k over every round */
     int    out_spec_accepted;       /* sum of n_accept over every round */
+
+    /* Prompt lookup decoding (PLD, generate.c lz_pld_round). Zero
+       training cost: the draft is a literal n-gram match against the
+       PROMPT array, not a trained head's prediction, so this works on
+       any model - unlike spec_k above, it never requires m->mtp.
+
+       pld_ngram    how many trailing tokens of the sequence decided so
+                    far (prompt, then generated) form the query n-gram.
+                    0 (default) = PLD off, and OFF MUST BE BIT-IDENTICAL
+                    to this same struct that never set it - same
+                    contract spec_k/look_width already carry. 1..
+                    LZ_PLD_NGRAM_MAX (ops.h) when nonzero; anything else
+                    is refused (LZ_ERR_PLD_NGRAM_RANGE).
+       pld_tokens   how many tokens to draft on a hit (the tokens that
+                    followed the matched occurrence in the prompt). 0
+                    also means off (both knobs must be nonzero to
+                    activate, same "AND" shape lz_generate_call checks
+                    for --lookahead's W:D pair). 1..LZ_PLD_TOKENS_MAX
+                    when nonzero; anything else is refused
+                    (LZ_ERR_PLD_TOKENS_RANGE).
+
+       Dispatch: a round only tries PLD when speculative decoding
+       (spec_k) did not already claim it AND the effective temperature
+       is <= LZ_TEMP_FLOOR (greedy) - lz_pld_round has no temp>0
+       counterpart in this pass (unlike lz_spec_round/lz_spec_round_
+       temp's pair), so a temp>0 step simply falls through to the
+       ordinary per-token sampling path, same as it would with PLD off.
+
+       No LZStateCkpt parameter to plumb through, unlike lz_spec_round's
+       own "no checkpoint, the ring does it for free" note - PLD is the
+       opposite case: with no MTP head, s->ssm_ring_depth is 1
+       (forward.c's state-alloc), so there is no ring to roll back
+       through. lz_generate_call owns one LZStateCkpt for this,
+       allocated only when pld_ngram>0 && pld_tokens>0 - same shape
+       look_active/look_ck already has for lz_look_pick, and the same
+       reasoning: forward.h's own comment on LZStateCkpt notes the ring
+       is "depth 1 anyway without an MTP head", which is precisely why
+       lookahead already uses a checkpoint instead of the ring, and PLD
+       reuses that same answer rather than inventing a second one. */
+    int    pld_ngram;
+    int    pld_tokens;
+
+    /* Accounting, written on every exit when pld_ngram>0 && pld_tokens>0
+       (all four stay 0 otherwise, like out_spec_* above). Rounds and
+       hits are counted separately because a round can run with zero
+       hits (every step falls through to the ordinary per-token path
+       internally) - hit rate is out_pld_hits / out_pld_rounds, draft
+       acceptance is out_pld_accepted / out_pld_draft_tokens, and the
+       two answer different questions (how often the lookup finds
+       anything, vs. how good a match it finds when it does). */
+    int    out_pld_rounds;          /* how many times a PLD lookup ran */
+    int    out_pld_hits;            /* how many of those found an n-gram match */
+    int    out_pld_draft_tokens;    /* sum of drafted tokens over every hit */
+    int    out_pld_accepted;        /* sum of n_accept over every hit */
 } LZGenOpts;
 
 /* Fill in defaults. **Callers must call this BEFORE changing any

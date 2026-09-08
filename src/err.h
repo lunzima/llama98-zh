@@ -67,6 +67,10 @@ typedef enum {
        (generate.c), and lz_generate_resume dispatches temperature>0 to
        lz_spec_round_temp. */
 
+    /* prompt lookup decoding (generate.c lz_pld_round) */
+    LZ_ERR_PLD_NGRAM_RANGE,    /* pld_ngram %d out of range 1..%d */
+    LZ_ERR_PLD_TOKENS_RANGE,   /* pld_tokens %d out of range 1..%d */
+
     /* sockets (net.h) */
     LZ_ERR_NET_INIT,           /* socket stack init failed */
     LZ_ERR_NET_PORT,           /* invalid port %d */

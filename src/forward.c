@@ -2168,6 +2168,40 @@ float *lz_forward_batch_capture(const LZModel *m, LZRunState *s,
     return lg;
 }
 
+/* Batched verify, generalized - forward.h's own comment has the full
+   contract and why lz_forward_verify above cannot serve this caller
+   (its `!m->mtp` gate and its s->mtp_logits destination, allocated only
+   when a head is bound). Shares forward_chunk with lz_forward_verify:
+   same chunking, same all_logits=1 per-position logits, same ring
+   advance - the only difference is the output buffer and the missing
+   m->mtp requirement. */
+int lz_forward_verify_into(const LZModel *m, LZRunState *s,
+                           const int *tokens, int n, int pos0,
+                           float *logits_out) {
+    const LZModelConfig *c = &m->config;
+    int cap, done = 0;
+
+    if (!tokens || n < 1 || !logits_out) return 1;
+    cap = s->nt_cap;
+    if (cap < 1) cap = 1;
+    if (cap > LZ_BATCH_MAX) cap = LZ_BATCH_MAX;
+    while (done < n) {
+        int k = n - done;
+        if (k > cap) k = cap;
+        /* capture_hidden NULL: PLD does not chain a draft head off a
+           captured hidden state (lz_pld_round's draft comes from a
+           prompt n-gram match, not a forward pass), so there is nothing
+           to capture here, unlike lz_forward_verify's own
+           s->mtp_verify_hidden write. skip_logits stays 0 - every
+           position's logits are wanted, same as lz_forward_verify. */
+        if (!forward_chunk(m, s, tokens + done, k, pos0 + done,
+                           NULL, 1, logits_out + (size_t)done * c->vocab_size, 0))
+            return 1;
+        done += k;
+    }
+    return 0;
+}
+
 /* Run the MTP block over n prompt positions purely to populate its own
    KV cache before the first speculative round (forward.h's s->mtp_pos
    comment). h_body_all[i]/next_tokens[i] are position pos0+i's body

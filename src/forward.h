@@ -1375,6 +1375,41 @@ float *lz_forward_batch_capture(const LZModel *m, LZRunState *s,
                                 const int *tokens, int n, int pos0,
                                 float *hidden_out);
 
+/* ---------------------------------------------- prompt lookup decoding */
+
+/* Batched verify, generalized: like lz_forward_verify above (same
+   chunking, same EVERY-position-gets-logits behavior via all_logits=1),
+   but does NOT require m->mtp and writes into a CALLER-supplied buffer
+   (n*vocab_size floats, token-major) instead of s->mtp_logits.
+
+   Exists for generate.c's lz_pld_round (prompt lookup decoding): its
+   draft tokens come from a literal n-gram match against the prompt
+   array, not from a trained head, so it must work on a model with no
+   MTP head bound at all - lz_forward_verify's own hard gate
+   (`!m->mtp -> return 1`) and its s->mtp_logits/s->mtp_verify_hidden
+   destination (allocated only `if (m->mtp)`, forward.c's state-alloc)
+   both rule it out for that caller. This function shares forward_chunk
+   with lz_forward_verify - same math, same rounding, same chunking -
+   the only difference is which buffer the per-position logits land in
+   and whether m->mtp is required.
+
+   Does not capture hidden state (PLD does not chain a draft head off
+   one) and does not touch s->ssm_slot's rollback RING beyond whatever
+   forward_chunk's own all_logits=1 path already does unconditionally
+   (advance by nt, same as lz_forward_verify) - a caller on a model with
+   no MTP head has s->ssm_ring_depth==1 (forward.c's state-alloc), so
+   that advance is a same-slot no-op and rollback has to happen the way
+   lz_look_pick's own comment already documents for that situation: an
+   LZStateCkpt save before this call, restore (+ replay of whatever
+   prefix must survive) after, not a ring index assignment.
+
+   Returns 0 on success, nonzero (no errbuf - same convention
+   lz_forward/lz_forward_batch/lz_forward_verify use) on a NULL
+   tokens/logits_out, n<1, or an internal forward_chunk failure. */
+int lz_forward_verify_into(const LZModel *m, LZRunState *s,
+                           const int *tokens, int n, int pos0,
+                           float *logits_out);
+
 /* Run the MTP block over n prompt positions purely to populate its own
    KV cache before the first speculative round - see s->mtp_pos's
    comment above and this function's own comment in forward.c for why a

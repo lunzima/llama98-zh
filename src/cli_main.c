@@ -406,6 +406,12 @@ static void usage(void) {
     "                   (default 0 = never; matches llama.cpp).\n"
     "  --n-min N        Discard the whole draft if fewer than N tokens got\n"
     "                   drafted (default 0 = never; matches llama.cpp).\n"
+    "  --pld-ngram N    Prompt lookup decoding: query n-gram length,\n"
+    "                   1..8 (default 0 = off). No MTP head needed - the\n"
+    "                   draft comes from matching the prompt itself.\n"
+    "  --pld-tokens N   Tokens to draft on a PLD hit, 1..16 (default 0 =\n"
+    "                   off). Both --pld-ngram and --pld-tokens must be\n"
+    "                   nonzero to activate.\n"
     "  --think          Thinking-mode defaults\n"
     "  --stop TEXT      Stop string (repeatable)\n"
     "  --no-eos         Do not stop on EOS\n"
@@ -1600,6 +1606,12 @@ int main(int argc, char **argv) {
         else if (strcmp(a, "--n-min") == 0 && i + 1 < argc) {
             g.n_min = atoi(argv[++i]);
         }
+        else if (strcmp(a, "--pld-ngram") == 0 && i + 1 < argc) {
+            g.pld_ngram = atoi(argv[++i]);
+        }
+        else if (strcmp(a, "--pld-tokens") == 0 && i + 1 < argc) {
+            g.pld_tokens = atoi(argv[++i]);
+        }
         else if (strcmp(a, "--ctx") == 0 && i + 1 < argc) {
             ctx_limit = atoi(argv[++i]);
             if (ctx_limit < 16) ctx_limit = 16;
@@ -2464,6 +2476,26 @@ int main(int argc, char **argv) {
                       g.out_spec_rounds,
                       lz_debug_n_capture, lz_debug_n_catchup,
                       lz_debug_n_ring_rollback);
+            }
+            if (g.pld_ngram > 0 && g.pld_tokens > 0) {
+                /* hit rate = how often the n-gram lookup found anything;
+                   alpha = accepted / draft_tokens, same on-policy
+                   acceptance-rate shape the --spec block above reports -
+                   see LZGenOpts's own comment on why the two answer
+                   different questions. */
+                float hit_rate = g.out_pld_rounds > 0
+                                 ? (float)g.out_pld_hits / (float)g.out_pld_rounds
+                                 : 0.0;
+                float alpha = g.out_pld_draft_tokens > 0
+                              ? (float)g.out_pld_accepted / (float)g.out_pld_draft_tokens
+                              : 0.0;
+                { char _b0[LZ_FTOA_BUF], _b1[LZ_FTOA_BUF];
+                  lz_ftoa_f(_b0, hit_rate, 4, 0);
+                  lz_ftoa_f(_b1, alpha, 4, 0);
+                  printf("[pld: %d rounds, %d hits, hit_rate=%s, "
+                         "%d draft tokens, %d accepted, alpha=%s]\n",
+                         g.out_pld_rounds, g.out_pld_hits, _b0,
+                         g.out_pld_draft_tokens, g.out_pld_accepted, _b1); }
             }
         }
         lz_state_free(&st);
