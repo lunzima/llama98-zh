@@ -24,7 +24,6 @@
 #if defined(LZ_AVX2_TU) && !defined(__WATCOMC__)
 
 #include <immintrin.h>
-#include <stdlib.h>
 #include "ops_avx2.h"
 
 /* 32-element partial sum, one int32 result. w<<8 convention matches
@@ -60,6 +59,19 @@
    SSE2 tier actually relies on. An unaligned load costs nothing extra
    when the pointer happens to be more strictly aligned, so loadu is
    the conservative choice here, not an unverified aligned claim. */
+/* Reduce one __m256i of 8 x int32 partial sums to a single scalar.
+   Shared tail for every part32_*_avx2 below - none of them do a
+   horizontal reduction any other way, so factoring it once here means
+   the reduction sequence can only drift in one place, not four. */
+static int32_t fold8_to_scalar_avx2(__m256i s) {
+    __m128i lo = _mm256_castsi256_si128(s);
+    __m128i hi = _mm256_extracti128_si256(s, 1);
+    __m128i sum = _mm_add_epi32(lo, hi);
+    sum = _mm_add_epi32(sum, _mm_srli_si128(sum, 8));
+    sum = _mm_add_epi32(sum, _mm_srli_si128(sum, 4));
+    return _mm_cvtsi128_si32(sum);
+}
+
 static int32_t part32_x32_avx2(const int8_t *w, const int16_t *x) {
     __m128i wb0 = _mm_loadu_si128((const __m128i *)w);
     __m128i wb1 = _mm_loadu_si128((const __m128i *)(w + 16));
@@ -69,12 +81,7 @@ static int32_t part32_x32_avx2(const int8_t *w, const int16_t *x) {
     __m256i x1 = _mm256_loadu_si256((const __m256i *)(x + 16));
     __m256i s = _mm256_add_epi32(_mm256_madd_epi16(w0, x0),
                                   _mm256_madd_epi16(w1, x1));
-    __m128i lo = _mm256_castsi256_si128(s);
-    __m128i hi = _mm256_extracti128_si256(s, 1);
-    __m128i sum = _mm_add_epi32(lo, hi);
-    sum = _mm_add_epi32(sum, _mm_srli_si128(sum, 8));
-    sum = _mm_add_epi32(sum, _mm_srli_si128(sum, 4));
-    return _mm_cvtsi128_si32(sum);
+    return fold8_to_scalar_avx2(s);
 }
 
 /* ---- Q8 row kernel -------------------------------------------------------
@@ -98,26 +105,151 @@ void row_q8_avx2_intrin(const lz_row_ctx *c) {
     }
 }
 
-/* This tier's next task (2026-09-08 AVX2 kernel-tier plan, training-
-   side repo E:\LLM\llama98-zh) replaces these with real
-   implementations - see the design doc cited in ops_avx2.h. Trivial
-   abort() bodies only so the dispatch-table wiring (which references
-   all four row_*_avx2_intrin names unconditionally once
-   LZ_ROW_AVX2_EXTERN is defined) links; --kernel avx2 must not be
-   selected for Q4_1/Q6_1/Q16_0 workloads until that task lands. This
-   makes any accidental early exercise of these three formats crash
-   loudly rather than silently return wrong numbers. */
+/* Q4_1 32-element partial sum. Nibble layout (model.h, LZ_FMT_Q4_1): a
+   32-element sub-block is 16 bytes; byte j's LOW nibble is element j,
+   its HIGH nibble is element j+16 - same convention part32_q41
+   (src/ops_kernel_dot_sse2.h) decodes, reproduced here bit for bit.
+   There is no zero-point work in this function: LZTensor.zero (the
+   per-group min) is an affine term applied later by the epilogue
+   (ops_matmul.c's epi_q41 family via the hoisted xg[]/zq term), never
+   inside the row kernel - this function's job is only the same raw
+   unsigned-nibble dot product part32_q41 computes, nothing more.
+
+   `lo`/`hi` each hold all 16 elements of their half in one 16-byte
+   register, in order - unlike part32_x32_avx2's two full 32-byte
+   weight loads, a nibble sub-block is only 16 bytes total, so one
+   _mm256_cvtepu8_epi16 per half is enough; no second widen call and
+   no unpacklo/hi_epi8 trap to avoid, since the mask/shift already
+   produced one byte per element in the right order before the widen. */
+static int32_t part32_q41_avx2(const unsigned char *w, const int16_t *x) {
+    const __m128i m0f = _mm_set1_epi8(0x0F);
+    __m128i b  = _mm_loadu_si128((const __m128i *)w);
+    __m128i lo = _mm_and_si128(b, m0f);
+    __m128i hi = _mm_and_si128(_mm_srli_epi16(b, 4), m0f);
+    __m256i lo16 = _mm256_slli_epi16(_mm256_cvtepu8_epi16(lo), 8);
+    __m256i hi16 = _mm256_slli_epi16(_mm256_cvtepu8_epi16(hi), 8);
+    __m256i x0 = _mm256_loadu_si256((const __m256i *)x);
+    __m256i x1 = _mm256_loadu_si256((const __m256i *)(x + 16));
+    __m256i s = _mm256_add_epi32(_mm256_madd_epi16(lo16, x0),
+                                  _mm256_madd_epi16(hi16, x1));
+    return fold8_to_scalar_avx2(s);
+}
+
+/* ---- Q4_1 row kernel ------------------------------------------------
+   No Watcom twin, no pairing - see this file's header comment; each
+   token is processed independently, same as row_q8_avx2_intrin. */
 void row_q41_avx2_intrin(const lz_row_ctx *c) {
-    (void)c;
-    abort();
+    const unsigned char *wn = (const unsigned char *)c->w4;
+    int tk, s;
+    (void)c->w2; (void)c->pf_end; (void)c->pf_end2;
+    {
+        const int16_t *xwt = c->xw;
+        int32_t *acc = c->acc32;
+        for (tk = 0; tk < c->nt; tk++, xwt += c->in_dim, acc += c->nb) {
+            for (s = 0; s < c->nb; s++)
+                acc[s] = part32_q41_avx2(wn + (size_t)s * 16,
+                                          xwt + (size_t)s * 32);
+        }
+    }
 }
+
+/* Q6_1 32-element partial sum: two-plane format, model.h's LZ_FMT_Q6_1.
+   `w4` is the SAME 4-bit-nibble plane as Q4_1 (elements 0-15 in low
+   nibbles, 16-31 in high nibbles); `w2` is a second, independent 2-bit
+   plane, 8 bytes per 32-element sub-block, byte j's bits 0-1/2-3/4-5/6-7
+   holding elements j/j+8/j+16/j+24 respectively. A 6-bit code is
+   q = lo_nibble | (2bit_field << 4); this function reads BOTH c->w4 AND
+   c->w2, unlike every other format in this file, which reads only
+   c->w4 - see row_q61_sse2_intrin (src/ops_sse2.c) for the same
+   two-pointer read on the reference tier.
+
+   Reassembly (m0f/m03 masks, the two shifts-by-2/4/6, `_mm_or_si128`
+   with the nibble) is copied instruction-for-instruction from
+   part32_q61's 128-bit domain, unchanged - that step produces one byte
+   per element, in order, before anything is widened, so it carries no
+   AVX2-specific risk. Only the final byte-to-int16 widen swaps
+   part32_q61's unpacklo/hi_epi8 pair for a single in-order
+   _mm256_cvtepu8_epi16 per half, same as part32_q41_avx2 above. No
+   zero-point work here either, for the same reason as Q4_1: `zero` is
+   an epilogue-side affine term, not part of this raw dot product. */
+static int32_t part32_q61_avx2(const unsigned char *w4,
+                                const unsigned char *w2, const int16_t *x) {
+    const __m128i m0f = _mm_set1_epi8(0x0F);
+    const __m128i m03 = _mm_set1_epi8(0x03);
+    __m128i b  = _mm_loadu_si128((const __m128i *)w4);
+    __m128i t  = _mm_loadl_epi64((const __m128i *)w2);
+    __m128i g0 = _mm_and_si128(t, m03);
+    __m128i g1 = _mm_and_si128(_mm_srli_epi16(t, 2), m03);
+    __m128i g2 = _mm_and_si128(_mm_srli_epi16(t, 4), m03);
+    __m128i g3 = _mm_and_si128(_mm_srli_epi16(t, 6), m03);
+    __m128i lo = _mm_or_si128(_mm_and_si128(b, m0f),
+                              _mm_slli_epi16(_mm_unpacklo_epi64(g0, g1), 4));
+    __m128i hi = _mm_or_si128(_mm_and_si128(_mm_srli_epi16(b, 4), m0f),
+                              _mm_slli_epi16(_mm_unpacklo_epi64(g2, g3), 4));
+    __m256i lo16 = _mm256_slli_epi16(_mm256_cvtepu8_epi16(lo), 8);
+    __m256i hi16 = _mm256_slli_epi16(_mm256_cvtepu8_epi16(hi), 8);
+    __m256i x0 = _mm256_loadu_si256((const __m256i *)x);
+    __m256i x1 = _mm256_loadu_si256((const __m256i *)(x + 16));
+    __m256i s = _mm256_add_epi32(_mm256_madd_epi16(lo16, x0),
+                                  _mm256_madd_epi16(hi16, x1));
+    return fold8_to_scalar_avx2(s);
+}
+
+/* ---- Q6_1 row kernel ------------------------------------------------
+   No Watcom twin, no pairing - see this file's header comment; each
+   token is processed independently, same as row_q8_avx2_intrin. Reads
+   both c->w4 (4-bit plane) and c->w2 (2-bit plane), each advanced at
+   its own stride (16 and 8 bytes per 32-element sub-block). */
 void row_q61_avx2_intrin(const lz_row_ctx *c) {
-    (void)c;
-    abort();
+    const unsigned char *wn = (const unsigned char *)c->w4;
+    const unsigned char *w2 = (const unsigned char *)c->w2;
+    int tk, s;
+    (void)c->pf_end; (void)c->pf_end2;
+    {
+        const int16_t *xwt = c->xw;
+        int32_t *acc = c->acc32;
+        for (tk = 0; tk < c->nt; tk++, xwt += c->in_dim, acc += c->nb) {
+            for (s = 0; s < c->nb; s++)
+                acc[s] = part32_q61_avx2(wn + (size_t)s * 16,
+                                          w2 + (size_t)s * 8,
+                                          xwt + (size_t)s * 32);
+        }
+    }
 }
+
+/* Q16_0 32-element partial sum: weight is already int16 (model.h,
+   LZ_FMT_Q16_0), so there is no unpack step at all - the simplest of
+   the four formats in this file, same conclusion part32_q16's own
+   comment (src/ops_kernel_dot_sse2.h) draws for the SSE2 tier. Two
+   plain 256-bit loads per operand, two pmaddwd, one add, one fold. No
+   x<<8 scale here either: Q16_0's row-end epilogue uses post=1.0, not
+   the 1/256 the other three formats share (see part32_q16's comment). */
+static int32_t part32_q16_avx2(const int16_t *w, const int16_t *x) {
+    __m256i w0 = _mm256_loadu_si256((const __m256i *)w);
+    __m256i w1 = _mm256_loadu_si256((const __m256i *)(w + 16));
+    __m256i x0 = _mm256_loadu_si256((const __m256i *)x);
+    __m256i x1 = _mm256_loadu_si256((const __m256i *)(x + 16));
+    __m256i s = _mm256_add_epi32(_mm256_madd_epi16(w0, x0),
+                                  _mm256_madd_epi16(w1, x1));
+    return fold8_to_scalar_avx2(s);
+}
+
+/* ---- Q16_0 row kernel -------------------------------------------------
+   No Watcom twin, no pairing - see this file's header comment; each
+   token is processed independently, same as row_q8_avx2_intrin. */
 void row_q16_avx2_intrin(const lz_row_ctx *c) {
-    (void)c;
-    abort();
+    const int16_t *wr = (const int16_t *)c->w4;
+    int tk, g;
+    (void)c->w2; (void)c->pf_end; (void)c->pf_end2;
+    {
+        const int16_t *xwt = c->xw;
+        int32_t *acc = c->acc32;
+        for (tk = 0; tk < c->nt; tk++, xwt += c->in_dim, acc += c->nb) {
+            for (g = 0; g < c->nb; g++)
+                acc[g] = part32_q16_avx2(wr + (size_t)g * 32,
+                                          xwt + (size_t)g * 32);
+        }
+    }
 }
 
 #endif /* LZ_AVX2_TU && !__WATCOMC__ */
