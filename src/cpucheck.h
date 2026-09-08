@@ -52,6 +52,9 @@ int lz_cpu_check(char *errbuf, int errlen);
    #pragma aux body has to do by hand. */
 #if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86)
 unsigned lz_cpuid1_edx(void);
+unsigned lz_cpuid1_ecx(void);
+unsigned lz_cpuid7_ebx(void);
+unsigned lz_xgetbv0(void);
 #endif
 
 /* Space-separated feature list for a banner or an about box, e.g.
