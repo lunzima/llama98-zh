@@ -82,14 +82,20 @@ void matmul_scalar_ref(float *o, const int8_t *xq, const float *xqs,
 
 /* ---- lz_row_pick ---- */
 static lz_rowfn lz_row_pick(const lz_rowfn *tab) {
-    int want_sse2 = (lz_kernel_sel() == LZ_KERNEL_SSE2);
+    int sel = lz_kernel_sel();
 #ifdef __WATCOMC__
+    int want_sse2 = (sel == LZ_KERNEL_SSE2);
     lz_rowfn f = tab[want_sse2 ? LZ_ROW_SSE2_A : LZ_ROW_MMX_A];
     return f ? f : tab[LZ_ROW_MMX_A];
 #else
-    lz_rowfn f = tab[want_sse2 ? LZ_ROW_SSE2_I : LZ_ROW_MMX_I];
-    if (f) return f;
-    return tab[LZ_ROW_SSE2_I] ? tab[LZ_ROW_SSE2_I] : tab[LZ_ROW_MMX_I];
+    if (sel == LZ_KERNEL_AVX2 && tab[LZ_ROW_AVX2_I])
+        return tab[LZ_ROW_AVX2_I];
+    {
+        int want_sse2 = (sel == LZ_KERNEL_SSE2 || sel == LZ_KERNEL_AVX2);
+        lz_rowfn f = tab[want_sse2 ? LZ_ROW_SSE2_I : LZ_ROW_MMX_I];
+        if (f) return f;
+        return tab[LZ_ROW_SSE2_I] ? tab[LZ_ROW_SSE2_I] : tab[LZ_ROW_MMX_I];
+    }
 #endif /* __WATCOMC__ */
 }
 
@@ -265,10 +271,15 @@ const lz_rowfn LZ_ROW_Q8[LZ_ROW_N] = {
 #if defined(__WATCOMC__)
     row_q8_mmx_asm,
     NULL,        /* sse-asm: ditto */
-    row_q8_sse2_asm
+    row_q8_sse2_asm,
 #else
-    NULL, NULL, NULL
+    NULL, NULL, NULL,
 #endif /* __WATCOMC__ */
+#if defined(LZ_ROW_AVX2_EXTERN)
+    row_q8_avx2_intrin
+#else
+    NULL         /* avx2: this format not yet ported to AVX2 */
+#endif /* LZ_ROW_AVX2_EXTERN */
 };
 
 /* int8 matmul kernel for gs==32, dispatched by target platform
@@ -722,10 +733,15 @@ const lz_rowfn LZ_ROW_Q41[LZ_ROW_N] = {
 #if defined(__WATCOMC__)
     row_q41_mmx_asm,
     NULL,        /* sse-asm: ditto */
-    row_q41_sse2_asm
+    row_q41_sse2_asm,
 #else
-    NULL, NULL, NULL
+    NULL, NULL, NULL,
 #endif /* __WATCOMC__ */
+#if defined(LZ_ROW_AVX2_EXTERN)
+    row_q41_avx2_intrin
+#else
+    NULL         /* avx2: this format not yet ported to AVX2 */
+#endif /* LZ_ROW_AVX2_EXTERN */
 };
 
 /* Fixed-epi predicate for the Q4_1/Q6_1/T2 dot/scale term (int-pipeline
@@ -989,10 +1005,11 @@ const lz_rowfn LZ_ROW_T2[LZ_ROW_N] = {
 #if defined(__WATCOMC__)
     row_t2_mmx_asm,
     NULL,        /* sse-asm: ditto */
-    row_t2_sse2_asm
+    row_t2_sse2_asm,
 #else
-    NULL, NULL, NULL
+    NULL, NULL, NULL,
 #endif /* __WATCOMC__ */
+    NULL         /* avx2: T2 is out of scope for this tier, see design doc */
 };
 
 /* ---- Q61 guard block ---- */
@@ -1120,10 +1137,15 @@ const lz_rowfn LZ_ROW_Q61[LZ_ROW_N] = {
 #if defined(__WATCOMC__)
     row_q61_mmx_asm,
     NULL,        /* sse-asm: ditto */
-    row_q61_sse2_asm
+    row_q61_sse2_asm,
 #else
-    NULL, NULL, NULL
+    NULL, NULL, NULL,
 #endif /* __WATCOMC__ */
+#if defined(LZ_ROW_AVX2_EXTERN)
+    row_q61_avx2_intrin
+#else
+    NULL         /* avx2: this format not yet ported to AVX2 */
+#endif /* LZ_ROW_AVX2_EXTERN */
 };
 
 /* ---- matmul_t2_impl + matmul_q61_impl ---- */
@@ -1501,10 +1523,15 @@ const lz_rowfn LZ_ROW_Q16[LZ_ROW_N] = {
 #ifdef __WATCOMC__
     row_q16_mmx_asm,
     NULL,        /* sse-asm: ditto */
-    row_q16_sse2_asm
+    row_q16_sse2_asm,
 #else
-    NULL, NULL, NULL
+    NULL, NULL, NULL,
 #endif /* __WATCOMC__ */
+#if defined(LZ_ROW_AVX2_EXTERN)
+    row_q16_avx2_intrin
+#else
+    NULL         /* avx2: this format not yet ported to AVX2 */
+#endif /* LZ_ROW_AVX2_EXTERN */
 };
 
 /* Fixed-epi predicate for Q16_0. Its own function rather than a call to

@@ -425,7 +425,8 @@ extern void lz_pf_amd(const void *p);
 #define LZ_ROW_MMX_A   3
 #define LZ_ROW_SSE_A   4
 #define LZ_ROW_SSE2_A  5
-#define LZ_ROW_N       6
+#define LZ_ROW_AVX2_I  6
+#define LZ_ROW_N       7
 
 #define LZ_DEFINE_PICK(NAME, TYPE)                                   \
     static TYPE NAME(const TYPE *tab) {                                   \
