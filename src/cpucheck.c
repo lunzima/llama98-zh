@@ -149,7 +149,7 @@ unsigned lz_cpuid7_ebx(void) {
 
 /* XGETBV(0) -> XCR0 in edx:eax. Only meaningful once lz_cpuid1_ecx's
    OSXSAVE bit has been confirmed set - executing xgetbv without that
-   is itself a fault on some cores. Encoded as raw bytes (0f 01 d0)
+   is itself a fault (#UD) unconditionally. Encoded as raw bytes (0f 01 d0)
    rather than the _xgetbv intrinsic so this file keeps needing no
    extra -m flag: _xgetbv lives behind <immintrin.h>, which some gcc
    versions gate on -mxsave even though the instruction itself predates
