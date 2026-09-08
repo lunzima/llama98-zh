@@ -464,7 +464,10 @@ void     lz_fpu_float_end(unsigned save);
    Never a member of kernel_detect()'s AUTO cascade: reachable only via
    an explicit --kernel avx2, so a machine that has AVX2 does not
    silently start running it until this tier's bit-identity contract
-   (tests/test_ops.c) has been run enough times to trust. */
+   has been run enough times to trust. That contract is
+   t_kernel_avx2_parity in tests/test_ops.c, which lives in the
+   training-side repo (E:\LLM\llama98-zh) - this engine repo carries no
+   test suite of its own, by design (see rule zero). */
 #define LZ_KERNEL_AVX2 7
 
 /* The ARM column. Two values because the ARM side is two cells, C and
@@ -488,10 +491,13 @@ int lz_kernel_select(int which);
 
 /* Cached CPUID+XGETBV AVX2 check (leaf 1 ECX OSXSAVE, XCR0 bits 1:2,
    leaf 7 EBX AVX2), always 0 on Watcom - see ops_sched.c for the full
-   detection order. Declared here rather than beside lz_cpu_has_sse in
-   ops_sched.h: tests/test_ops.c includes only this header and calls it
-   directly (t_kernel_avx2_parity), the same reason LZ_KERNEL_AVX2 above
-   is declared here and not left to resolve through g_kernel alone. */
+   detection order, and lz_cpu_has_sse (ops_sched.h) for the SSE analog
+   this mirrors. Declared here rather than beside lz_cpu_has_sse in
+   ops_sched.h: t_kernel_avx2_parity (tests/test_ops.c, training-side
+   repo E:\LLM\llama98-zh) calls this directly and that file includes
+   only this header, not ops_sched.h - the same reason LZ_KERNEL_AVX2
+   above is declared here and not left to resolve through g_kernel
+   alone. */
 int lz_cpu_has_avx2(void);
 
 /* Prefetch tier, ORTHOGONAL to the kernel tier - the kernel picks

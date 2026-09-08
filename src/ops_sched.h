@@ -21,7 +21,10 @@ int lz_i32facc_tier(void);
    and by lz_gdn_quantize_2p (ops_gdn.c, module 5). */
 int q8r_have_simd(void);
 
-/* Cached CPUID SSE bit. Non-static: p2_tier (ops.c) reads it. */
+/* Cached CPUID SSE bit. Non-static: p2_tier (ops.c) reads it. See
+   lz_cpu_has_avx2 (ops.h) for the AVX2 analog - declared in ops.h
+   rather than here so that tests/test_ops.c (training-side repo,
+   includes only ops.h) can call it directly. */
 int lz_cpu_has_sse(void);
 
 /* Token pairing flag. Non-static: the row kernels in ops.c read it. */

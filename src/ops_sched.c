@@ -51,11 +51,15 @@ static int g_has_avx2 = -1;
 
 /* OSXSAVE + XGETBV + leaf-7 AVX2, in that order - CPUID reporting AVX2
    is not sufficient by itself; the OS must also have enabled YMM state
-   saving (XCR0 bits 1:2), or executing an AVX2 instruction traps. On
-   Watcom this always returns 0: no Watcom build ever links
-   src/ops_avx2.c, so there is nothing here to detect, and the request
-   path (LZ_KERNEL_AVX2 accepted by the CLI on every build) must still
-   clamp safely rather than claim support. */
+   saving (XCR0 bits 1:2), or executing an AVX2 instruction traps. Leaf
+   1 ECX bit 28 (AVX) is not checked separately: the architecture never
+   sets leaf 7 EBX bit 5 (AVX2) without also setting AVX, since AVX2 is
+   defined as an extension of the AVX instruction set, so testing AVX2
+   alone is already the tighter of the two conditions. On Watcom this
+   always returns 0: no Watcom build ever links src/ops_avx2.c, so
+   there is nothing here to detect, and the request path
+   (LZ_KERNEL_AVX2 accepted by the CLI on every build) must still clamp
+   safely rather than claim support. */
 int lz_cpu_has_avx2(void) {
 #ifdef __WATCOMC__
     return 0;
@@ -63,7 +67,15 @@ int lz_cpu_has_avx2(void) {
     /* Test-only override: lets the "requested avx2, don't have it,
        clamp to `have`" branch in lz_kernel_select be exercised on a
        host that genuinely has AVX2 - otherwise that branch could ship
-       broken and nothing on this dev machine would ever run it. */
+       broken and nothing on this dev machine would ever run it.
+
+       NOT a member of the LZ_<THING>_FORCE_<TIER> family documented
+       above LZ_KERNEL_SSE in ops.h (LZ_Q8R_FORCE_SSE etc., mostly
+       retired) - those forced a specific tier's BODY to run in place
+       of runtime dispatch. This instead forces the CAPABILITY PROBE
+       itself to lie, leaving dispatch and every tier body untouched;
+       it exists to make an unreachable branch reachable, not to bypass
+       one. */
     return 0;
 #else
     unsigned ecx1, xcr0, ebx7;

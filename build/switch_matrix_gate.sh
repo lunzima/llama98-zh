@@ -64,6 +64,9 @@
 #   LZ_Q8_MIN_SCALE     0.0f     #ifndef default 1.0e-30f
 #   LZ_EXACT_MATH       1        defined-style (#if defined)
 #   LZ_CPUID_NOCACHE    1        defined-style (#ifdef)
+#   LZ_FORCE_NO_AVX2    1        defined-style (#ifdef) - test-only
+#      override that makes lz_cpu_has_avx2() report no AVX2 regardless
+#      of CPUID (ops_sched.c)
 #   LZ_KV_2PLANE        1        #ifndef default 0 - two-plane KV cache
 #   LZ_GDN_STATE_F32    1        #ifndef default 0 - debug f32 state probe
 #   LZ_BATCH_MAX        1        #ifndef default 8 - batching off, PAIR (below)
@@ -348,7 +351,7 @@ $dm_with_fwd"
 # execute, =0 reproduces 981,938 exactly.
 # The _ES exponents are calibration constants, not switches, and are
 # excluded for the same reason LZ_CONV_ES is.
-SWITCHES="LZ_GDN_FIXED=0 LZ_GDN_STATE_2PLANE=0 LZ_ATTN_FIXED=0 LZ_CONV_FIXED=0 LZ_NORM_FIXED=0 LZ_EPI_FIXED=0 LZ_SSE2_GROUP=0 LZ_Q8_MIN_SCALE=0.0f LZ_EXACT_MATH=1 LZ_CPUID_NOCACHE=1 LZ_NO_FPU=1 LZ_KV_2PLANE=1 LZ_GDN_STATE_F32=1 LZ_BATCH_MAX=1 LZ_SPEC_K=1 LZ_PF_DIST=0 LZ_BVEC_I16=0 LZ_MOEGATE_I16=0 LZ_KLAT_I16=0 LZ_KGATE_I16=0 LZ_KGATE_EXP_I=0 LZ_MLAT_I16=0 LZ_MLAT_REUSE=0 LZ_VPROJ_I16=0 LZ_Q8I16_INT=0 LZ_Q8INT_INT=0 LZ_SWIGLU_I16=0 LZ_CONV_SIG_I=0 LZ_CONVO_I16=0 LZ_GATE_SIG_I=0 LZ_GATE_QW=0 LZ_SOFTPLUS_POLY=0 LZ_FDIV_RECIP=1 LZ_Q8R_BITS=1"
+SWITCHES="LZ_GDN_FIXED=0 LZ_GDN_STATE_2PLANE=0 LZ_ATTN_FIXED=0 LZ_CONV_FIXED=0 LZ_NORM_FIXED=0 LZ_EPI_FIXED=0 LZ_SSE2_GROUP=0 LZ_Q8_MIN_SCALE=0.0f LZ_EXACT_MATH=1 LZ_CPUID_NOCACHE=1 LZ_FORCE_NO_AVX2=1 LZ_NO_FPU=1 LZ_KV_2PLANE=1 LZ_GDN_STATE_F32=1 LZ_BATCH_MAX=1 LZ_SPEC_K=1 LZ_PF_DIST=0 LZ_BVEC_I16=0 LZ_MOEGATE_I16=0 LZ_KLAT_I16=0 LZ_KGATE_I16=0 LZ_KGATE_EXP_I=0 LZ_MLAT_I16=0 LZ_MLAT_REUSE=0 LZ_VPROJ_I16=0 LZ_Q8I16_INT=0 LZ_Q8INT_INT=0 LZ_SWIGLU_I16=0 LZ_CONV_SIG_I=0 LZ_CONVO_I16=0 LZ_GATE_SIG_I=0 LZ_GATE_QW=0 LZ_SOFTPLUS_POLY=0 LZ_FDIV_RECIP=1 LZ_Q8R_BITS=1"
 
 for entry in $SWITCHES; do
     name="${entry%%=*}"
