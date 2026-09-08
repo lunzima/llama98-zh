@@ -426,7 +426,11 @@ extern void lz_pf_amd(const void *p);
    are the ones that bit back: a stale literal there once silently
    overlapped this range and made the coverage matrix misread an ARM
    column as a row-kernel one. Grep for LZ_ROW_N consumers (dispatch
-   table literals, km_reg's per-row column count) before changing it. */
+   table literals, km_reg's per-row column count) before changing it -
+   but that grep will NOT find build/kernel_matrix_gate.sh's own
+   hardcoded tier list (`for t in ref mmxI sseI ... g128`), which
+   re-encodes the tier names as string literals rather than referencing
+   this macro. Check that file by hand too. */
 #define LZ_ROW_MMX_I   0
 #define LZ_ROW_SSE_I   1
 #define LZ_ROW_SSE2_I  2
