@@ -1590,10 +1590,23 @@ float *lz_mtp_draft_step(const LZModel *m, LZRunState *s, int next_token, int po
     /* One ordinary decoder layer (model.h: "the block is an ordinary
        full_attention layer"), same pre-norm/residual shape forward_chunk
        uses for every body layer, applied to s->mtp_x instead of s->x and
-       to the MTP's own reserved KV cache slot (LZ_MTP_CACHE_LAYER). */
-    lz_rmsnorm(s->xb, s->mtp_x,
-              lz_t_f32(&m->mtp->blk.input_layernorm, s->wscr), dim,
-              c->rms_norm_eps);
+       to the MTP's own reserved KV cache slot (LZ_MTP_CACHE_LAYER).
+
+       SubLN (c->use_subn): same pre-LN deletion forward_chunk's body
+       loop applies to every ordinary layer (that loop's own comment).
+       forward_attn's q/k/v/o SubLN norms and dense_ffn_step's
+       gate/up/down SubLN norms are gated by the SAME c->use_subn flag
+       and read s->xb expecting the RAW residual in that case - applying
+       input_layernorm/post_attention_layernorm here unconditionally
+       would double-normalize (once here, once inside forward_attn /
+       dense_ffn_step) instead of the pre-LN being replaced by them. */
+    if (c->use_subn) {
+        for (i = 0; i < dim; i++) s->xb[i] = s->mtp_x[i];
+    } else {
+        lz_rmsnorm(s->xb, s->mtp_x,
+                  lz_t_f32(&m->mtp->blk.input_layernorm, s->wscr), dim,
+                  c->rms_norm_eps);
+    }
     forward_attn(m, s, &m->mtp->blk, LZ_MTP_CACHE_LAYER, pos, 1);
     if (lz_debug_mtp_attn_scale != 1.0f) {
         /* Investigative probe only - see this file's own comment on
@@ -1602,9 +1615,13 @@ float *lz_mtp_draft_step(const LZModel *m, LZRunState *s, int next_token, int po
     }
     for (i = 0; i < dim; i++) s->mtp_x[i] += s->xb2[i];
 
-    lz_rmsnorm(s->xb, s->mtp_x,
-              lz_t_f32(&m->mtp->blk.post_attention_layernorm, s->wscr), dim,
-              c->rms_norm_eps);
+    if (c->use_subn) {
+        for (i = 0; i < dim; i++) s->xb[i] = s->mtp_x[i];
+    } else {
+        lz_rmsnorm(s->xb, s->mtp_x,
+                  lz_t_f32(&m->mtp->blk.post_attention_layernorm, s->wscr), dim,
+                  c->rms_norm_eps);
+    }
     dense_ffn_step(m, s, &m->mtp->blk, LZ_MTP_CACHE_LAYER, 1, c->mtp_intermediate_size);
     for (i = 0; i < dim; i++) s->mtp_x[i] += s->xb2[i];
 
@@ -2129,7 +2146,7 @@ int lz_mtp_prefill(const LZModel *m, LZRunState *s, const float *h_body_all,
     fpu = lz_fpu_float_begin();
 
     while (done < n) {
-        int k = n - done, tk;
+        int k = n - done, tk, i;
         if (k > cap) k = cap;
 
         for (tk = 0; tk < k; tk++) {
@@ -2149,10 +2166,18 @@ int lz_mtp_prefill(const LZModel *m, LZRunState *s, const float *h_body_all,
                        s->xq, s->xqs);
         }
 
-        for (tk = 0; tk < k; tk++)
-            lz_rmsnorm(s->xb + (size_t)tk * dim, s->mtp_x + (size_t)tk * dim,
-                      lz_t_f32(&m->mtp->blk.input_layernorm, s->wscr), dim,
-                      c->rms_norm_eps);
+        /* SubLN (c->use_subn): same pre-LN deletion as lz_mtp_draft_step
+           above - forward_attn's own q/k/v/o subn norms (gated by the
+           same flag) expect the raw residual, not an already-normalized
+           copy. See lz_mtp_draft_step's comment for the full argument. */
+        if (c->use_subn) {
+            for (i = 0; i < k * dim; i++) s->xb[i] = s->mtp_x[i];
+        } else {
+            for (tk = 0; tk < k; tk++)
+                lz_rmsnorm(s->xb + (size_t)tk * dim, s->mtp_x + (size_t)tk * dim,
+                          lz_t_f32(&m->mtp->blk.input_layernorm, s->wscr), dim,
+                          c->rms_norm_eps);
+        }
         /* The only thing this call needs: forward_attn writes this
            chunk's k/v rows into the MTP's reserved KV cache slot as a
            side effect (LZ_MTP_CACHE_LAYER) - s->xb2, its attention

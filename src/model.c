@@ -907,34 +907,47 @@ static int model_walk(LZModel *m, LZVisit visit, void *ctx,
             { "pre_fc_norm_embedding.weight",  offsetof(LZMtp, pre_fc_norm_embedding),
               { DK_HIDDEN, DK_END, DK_END } }
         };
-        /* The MTP block's own dense FFN, sized by mtp_intermediate_size
-           - separate from LAYER_SPECS' body dense-FFN entries (DK_INTER),
-           even though the suffixes are identical. kunmoe-v2's body
-           intermediate_size is an unrelated placeholder
-           (first_k_dense_replace=0 means no body layer is dense), and
-           reusing that field for the MTP block's width would silently
-           couple two things that must be free to differ - see
-           model.h's mtp_intermediate_size comment for the full
-           argument. Everything else about the block (11 tensors: 2
-           norms + full_attention's 6 + this FFN's 3) still matches a
-           body full_attention layer's shape one for one, which is why
-           only these three specs need to leave the generic reuse
-           loop below. */
-        static const struct { const char *suffix; size_t field; int dims[3]; }
+        /* The MTP block's own dense FFN, sized by mtp_intermediate_size -
+           separate from LAYER_SPECS' body dense-FFN entries, even though
+           the suffixes are identical. kunmoe-v2's body intermediate_size
+           is an unrelated placeholder (first_k_dense_replace=0 means no
+           body layer is dense), and reusing that field for the MTP
+           block's width would silently couple two things that must be
+           free to differ - see model.h's mtp_intermediate_size comment
+           for the full argument. Everything else about the block still
+           matches a body full_attention layer's shape one for one,
+           which is why only this family of four specs needs to leave
+           the generic reuse loop below.
+           down_proj.norm.weight (present field, use_subn only) belongs
+           to this family for the same reason the other three do: LOFF
+           reuses LZLayer's down_norm field, but its width is
+           mtp_intermediate_size, not the body's intermediate_size, so
+           it cannot be picked up by the generic reuse loop either. It
+           used to be silently dropped by that loop's old DK_INTER dim
+           filter (down_norm's LAYER_SPECS entry uses DK_INTER too, and
+           that filter matched on dim kind, not identity), which left
+           L->down_norm a permanent zero LZTensor and crashed
+           dense_ffn_step's SubLN norm on the first --spec MTP token. */
+        static const struct { const char *suffix; size_t field; int dims[3];
+                               LZPresentFn present; }
         MTP_FFN_SPECS[] = {
-            { "mlp.gate_proj.weight", LOFF(gate_proj), { DK_MTP_INTER, DK_HIDDEN, DK_END } },
-            { "mlp.up_proj.weight",   LOFF(up_proj),   { DK_MTP_INTER, DK_HIDDEN, DK_END } },
-            { "mlp.down_proj.weight", LOFF(down_proj), { DK_HIDDEN, DK_MTP_INTER, DK_END } }
+            { "mlp.gate_proj.weight",      LOFF(gate_proj), { DK_MTP_INTER, DK_HIDDEN, DK_END }, NULL },
+            { "mlp.up_proj.weight",        LOFF(up_proj),   { DK_MTP_INTER, DK_HIDDEN, DK_END }, NULL },
+            { "mlp.down_proj.weight",      LOFF(down_proj), { DK_HIDDEN, DK_MTP_INTER, DK_END }, NULL },
+            { "mlp.down_proj.norm.weight", LOFF(down_norm), { DK_MTP_INTER, DK_END, DK_END },
+              present_subn }
         };
         int k;
 
-        /* The block reuses LAYER_SPECS for everything EXCEPT the dense
-           FFN (handled by MTP_FFN_SPECS above - identified by
-           referencing DK_INTER, the one dim kind that table's other
-           entries never use). Not a shortcut: every one of the other 8
-           tensors matches a body full_attention layer in shape, which
-           is what makes "reuse the same pruning path" possible on the
-           training side too. */
+        /* The block reuses LAYER_SPECS for everything EXCEPT the four
+           MTP_FFN_SPECS entries above, identified by field offset (NOT
+           by dim kind - DK_INTER also appears on down_norm's LAYER_SPECS
+           entry, which is exactly the false match that used to make this
+           filter connascent with a dim taxonomy it had no business
+           reading; see the MTP_FFN_SPECS comment above). Every other
+           tensor in the block matches a body full_attention layer's
+           shape one for one, which is what makes "reuse the same
+           pruning path" possible on the training side too. */
         for (si = 0; si < N_LAYER_SPECS; si++) {
             const LZLayerSpec *sp = &LAYER_SPECS[si];
             LZTensor *field;
@@ -947,8 +960,9 @@ static int model_walk(LZModel *m, LZVisit visit, void *ctx,
                any kunmoe checkpoint, which does not exist. */
             if (sp->ffn_kind >= 0 && sp->ffn_kind != 0) continue;
             if (sp->present && !sp->present(c)) continue;
-            if (sp->dims[0] == DK_INTER || sp->dims[1] == DK_INTER ||
-                sp->dims[2] == DK_INTER) continue;   /* MTP_FFN_SPECS handles these */
+            if (sp->field == LOFF(gate_proj) || sp->field == LOFF(up_proj) ||
+                sp->field == LOFF(down_proj) || sp->field == LOFF(down_norm))
+                continue;   /* MTP_FFN_SPECS handles these, sized by mtp_intermediate_size */
             snprintf(name, sizeof(name), "mtp.layers.0.%s", sp->suffix);
             field = (LZTensor *)((char *)&m->mtp->blk + sp->field);
             if (model_walk_one(m, name, sp->dims, field, visit, ctx,
@@ -956,6 +970,7 @@ static int model_walk(LZModel *m, LZVisit visit, void *ctx,
         }
         for (k = 0; k < (int)(sizeof(MTP_FFN_SPECS) / sizeof(MTP_FFN_SPECS[0])); k++) {
             LZTensor *field;
+            if (MTP_FFN_SPECS[k].present && !MTP_FFN_SPECS[k].present(c)) continue;
             snprintf(name, sizeof(name), "mtp.layers.0.%s", MTP_FFN_SPECS[k].suffix);
             field = (LZTensor *)((char *)&m->mtp->blk + MTP_FFN_SPECS[k].field);
             if (model_walk_one(m, name, MTP_FFN_SPECS[k].dims, field, visit,
