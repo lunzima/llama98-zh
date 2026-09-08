@@ -26,6 +26,19 @@
 #include <immintrin.h>
 #include "ops_avx2.h"
 
+/* Reduce one __m256i of 8 x int32 partial sums to a single scalar.
+   Shared tail for every part32_*_avx2 below - none of them do a
+   horizontal reduction any other way, so factoring it once here means
+   the reduction sequence can only drift in one place, not four. */
+static int32_t fold8_to_scalar_avx2(__m256i s) {
+    __m128i lo = _mm256_castsi256_si128(s);
+    __m128i hi = _mm256_extracti128_si256(s, 1);
+    __m128i sum = _mm_add_epi32(lo, hi);
+    sum = _mm_add_epi32(sum, _mm_srli_si128(sum, 8));
+    sum = _mm_add_epi32(sum, _mm_srli_si128(sum, 4));
+    return _mm_cvtsi128_si32(sum);
+}
+
 /* 32-element partial sum, one int32 result. w<<8 convention matches
    part32_x16 (src/ops_kernel_dot_sse2.h) exactly - the shared row-end
    epilogue elsewhere divides by the same 256 regardless of which
@@ -59,19 +72,6 @@
    SSE2 tier actually relies on. An unaligned load costs nothing extra
    when the pointer happens to be more strictly aligned, so loadu is
    the conservative choice here, not an unverified aligned claim. */
-/* Reduce one __m256i of 8 x int32 partial sums to a single scalar.
-   Shared tail for every part32_*_avx2 below - none of them do a
-   horizontal reduction any other way, so factoring it once here means
-   the reduction sequence can only drift in one place, not four. */
-static int32_t fold8_to_scalar_avx2(__m256i s) {
-    __m128i lo = _mm256_castsi256_si128(s);
-    __m128i hi = _mm256_extracti128_si256(s, 1);
-    __m128i sum = _mm_add_epi32(lo, hi);
-    sum = _mm_add_epi32(sum, _mm_srli_si128(sum, 8));
-    sum = _mm_add_epi32(sum, _mm_srli_si128(sum, 4));
-    return _mm_cvtsi128_si32(sum);
-}
-
 static int32_t part32_x32_avx2(const int8_t *w, const int16_t *x) {
     __m128i wb0 = _mm_loadu_si128((const __m128i *)w);
     __m128i wb1 = _mm_loadu_si128((const __m128i *)(w + 16));
