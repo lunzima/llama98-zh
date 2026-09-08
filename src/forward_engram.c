@@ -6,7 +6,7 @@
  *
  * The forward:
  *   1. Rolling polynomial hash: [nt, n_spaces] int indices into flat table
- *   2. Per-order: table lookup → key/value proj → SPDA gate → sum
+ *   2. Per-order: table lookup -> key/value proj -> SPDA gate -> sum
  *   3. Depthwise dilated conv1d + SiLU
  *   4. residual += value + silu(conv(value))
  *
@@ -15,6 +15,17 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Watcom's C90 math.h has no sqrtf/fabsf: route to the double forms
+   there. gcc keeps the float forms so the ARM build pulls no libgcc
+   double soft-float. Same shape as ops_quant.c's LZ_SQRTF. */
+#if defined(__WATCOMC__)
+#define LZ_SQRTF(x) ((float)sqrt((double)(x)))
+#define LZ_FABSF(x) ((float)fabs((double)(x)))
+#else
+#define LZ_SQRTF(x) sqrtf(x)
+#define LZ_FABSF(x) fabsf(x)
+#endif /* __WATCOMC__ */
 
 #include "forward.h"
 
@@ -88,7 +99,7 @@ static void engram_dump(const char *stage, const float *data, int n) {
     float rms = 0.0f;
     int i;
     for (i = 0; i < n; i++) rms += data[i] * data[i];
-    rms = sqrtf(rms / (float)n);
+    rms = LZ_SQRTF(rms / (float)n);
     fprintf(stderr, "[engram] %s rms=%.6f  first4=[%.6f, %.6f, %.6f, %.6f]\n",
             stage, rms, data[0], data[1], data[2], data[3]);
 }
@@ -165,6 +176,14 @@ void forward_engram(const LZModel *m, LZRunState *s,
     size_t hidx_bytes = hidx_sz * sizeof(int);
     /* float scratch starts after hidx, aligned to 16 bytes */
     float *fscr = (float *)(((size_t)hidx + hidx_bytes + 15) & ~(size_t)15);
+    /* 2-3 scratch layout, declared here rather than at first use so
+       every declaration in this function precedes every statement -
+       VC++4.0/MIPS's C89 floor (build/c89_floor_gate.sh) rejects mixed
+       declarations and code. */
+    float *value = fscr;                       /* [nt * dim] */
+    float *qnorm = value + (size_t)nt * dim;   /* [nt * dim] */
+    float *key   = qnorm + (size_t)nt * dim;   /* [nt * dim] */
+    float *scratch = key + (size_t)nt * dim;    /* remaining scratch */
 
     /* 1. Hash */
     engram_hash(tokens, nt, hist, hist_n, eg->primes, eg->offsets, eg->bases,
@@ -173,12 +192,7 @@ void forward_engram(const LZModel *m, LZRunState *s,
         engram_dump_idx("hash", hidx, ns);
     }
 
-    /* 2-3. Per-order: table lookup → proj → gate → sum */
-    float *value = fscr;                       /* [nt * dim] */
-    float *qnorm = value + (size_t)nt * dim;   /* [nt * dim] */
-    float *key   = qnorm + (size_t)nt * dim;   /* [nt * dim] */
-    float *scratch = key + (size_t)nt * dim;    /* remaining scratch */
-
+    /* 2-3. Per-order: table lookup -> proj -> gate -> sum */
     memset(value, 0, (size_t)nt * dim * sizeof(float));
 
     /* Query = rmsnorm(x). eg->norm's f32 view must NOT reuse `hidx`'s
@@ -197,6 +211,8 @@ void forward_engram(const LZModel *m, LZRunState *s,
 
     for (o = 0; o < no; o++) {
         float *eo = scratch;  /* [nt * po] scratch for table rows */
+        float *val = scratch + (size_t)nt * po;
+        float inv_sqrt_d = 1.0f / LZ_SQRTF((float)dim);
 
         /* Gather this order's table rows into eo */
         for (tk = 0; tk < nt; tk++) {
@@ -242,7 +258,6 @@ void forward_engram(const LZModel *m, LZRunState *s,
            gs need not match key_proj's, and the two matmuls are not
            fused, so there is no reuse to preserve by sharing xq/xqs
            between them. */
-        float *val = scratch + (size_t)nt * po;
         for (tk = 0; tk < nt; tk++) {
             int gs_val = lz_act_gs(&eg->value_proj[o], po);
             lz_quantize_q8(eo + (size_t)tk * po, po, gs_val, s->xq, s->xqs);
@@ -253,14 +268,14 @@ void forward_engram(const LZModel *m, LZRunState *s,
 
         /* SPDA gate per token: s = dot(q, key) / sqrt(d),
            gate = sigmoid(sqrt(|s|+eps) * sign(s)) */
-        float inv_sqrt_d = 1.0f / sqrtf((float)dim);
         for (tk = 0; tk < nt; tk++) {
             float dot = 0.0f;
+            float s, gate;
             for (i = 0; i < dim; i++)
                 dot += qnorm[(size_t)tk * dim + i] * key[(size_t)tk * dim + i];
-            float s = dot * inv_sqrt_d;
-            float gate = lz_sigmoid(sqrtf(fabsf(s) + 1e-6f)
-                                    * (s >= 0 ? 1.0f : -1.0f));
+            s = dot * inv_sqrt_d;
+            gate = lz_sigmoid(LZ_SQRTF(LZ_FABSF(s) + 1e-6f)
+                              * (s >= 0 ? 1.0f : -1.0f));
             if (dbg && tk == 0)
                 fprintf(stderr, "[engram] gate_o%d s=%.6f gate=%.6f\n",
                         o, s, gate);
@@ -317,9 +332,10 @@ void forward_engram(const LZModel *m, LZRunState *s,
                engram's 512-channel conv), overflowing it; lz_t_row_f32
                needs only kern (=4) floats of scratch. */
             for (i = 0; i < dim; i++) {
+                int k;
                 /* One channel's K taps into wscr[0..kern-1] */
                 lz_t_row_f32(&eg->conv, i, kern, s->wscr);
-                for (int k = 0; k < kern; k++) {
+                for (k = 0; k < kern; k++) {
                     int src_t = tk - (kern - 1 - k) * dil;
                     float v;
                     if (src_t >= 0) {
