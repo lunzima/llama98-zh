@@ -442,7 +442,7 @@ static void usage(void) {
     "                   Alone it can only pick a losing arm; pair --moe-tau.\n"
     "  --moe-tau F      Router temperature, 0.1..10.0 (default 1.0 = off).\n"
     "                   Scales mixing weights; selection stays untempered.\n"
-    "  --kernel TIER    auto|ref|mmx|sse|sse2|arm-c|arm-asm (default\n"
+    "  --kernel TIER    auto|ref|mmx|sse|sse2|avx2|arm-c|arm-asm (default\n"
     "                   auto). x86 picks by CPUID; sse is SSE1, which has\n"
     "                   its own bodies for q8round, the GDN split, exp,\n"
     "                   norm_ss and the float matmul row, and MMX's for\n"
@@ -1635,12 +1635,13 @@ int main(int argc, char **argv) {
                      : strcmp(k, "mmx") == 0     ? LZ_KERNEL_MMX
                      : strcmp(k, "sse") == 0     ? LZ_KERNEL_SSE
                      : strcmp(k, "sse2") == 0    ? LZ_KERNEL_SSE2
+                     : strcmp(k, "avx2") == 0    ? LZ_KERNEL_AVX2
                      : strcmp(k, "arm-c") == 0   ? LZ_KERNEL_ARM
                      : strcmp(k, "arm-asm") == 0 ? LZ_KERNEL_ARM_ASM
                      : strcmp(k, "auto") == 0    ? LZ_KERNEL_AUTO : -1;
             if (want < 0) {
                 printf("--kernel: unknown tier "
-                       "(auto|ref|mmx|sse|sse2|arm-c|arm-asm)\n");
+                       "(auto|ref|mmx|sse|sse2|avx2|arm-c|arm-asm)\n");
                 return 2;
             }
             lz_kernel_select(want);
