@@ -458,6 +458,15 @@ void     lz_fpu_float_end(unsigned save);
    bit-identity, so nothing reports it. */
 #define LZ_KERNEL_SSE  6
 
+/* AVX2, gcc-only (src/ops_avx2.c is never built by Watcom). Value only
+   has to be distinct, same rule as every other tier here - see the
+   comment above this block on why the enum is not in tier order.
+   Never a member of kernel_detect()'s AUTO cascade: reachable only via
+   an explicit --kernel avx2, so a machine that has AVX2 does not
+   silently start running it until this tier's bit-identity contract
+   (tests/test_ops.c) has been run enough times to trust. */
+#define LZ_KERNEL_AVX2 7
+
 /* The ARM column. Two values because the ARM side is two cells, C and
    hand-written asm, and WRONG 1 above is precisely about not letting one
    enum value stand for two code bodies - `--kernel arm-c` and
@@ -476,6 +485,14 @@ void     lz_fpu_float_end(unsigned save);
 #define LZ_KERNEL_ARM     4
 #define LZ_KERNEL_ARM_ASM 5
 int lz_kernel_select(int which);
+
+/* Cached CPUID+XGETBV AVX2 check (leaf 1 ECX OSXSAVE, XCR0 bits 1:2,
+   leaf 7 EBX AVX2), always 0 on Watcom - see ops_sched.c for the full
+   detection order. Declared here rather than beside lz_cpu_has_sse in
+   ops_sched.h: tests/test_ops.c includes only this header and calls it
+   directly (t_kernel_avx2_parity), the same reason LZ_KERNEL_AVX2 above
+   is declared here and not left to resolve through g_kernel alone. */
+int lz_cpu_has_avx2(void);
 
 /* Prefetch tier, ORTHOGONAL to the kernel tier - the kernel picks
    instruction-set width, prefetch picks memory hints. K6-2/K7 have

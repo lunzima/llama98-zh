@@ -46,6 +46,55 @@ int lz_cpu_has_sse(void) {
 
 #endif /* __i386__ || __x86_64__ || _M_IX86 */
 
+#if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86)
+static int g_has_avx2 = -1;
+
+/* OSXSAVE + XGETBV + leaf-7 AVX2, in that order - CPUID reporting AVX2
+   is not sufficient by itself; the OS must also have enabled YMM state
+   saving (XCR0 bits 1:2), or executing an AVX2 instruction traps. On
+   Watcom this always returns 0: no Watcom build ever links
+   src/ops_avx2.c, so there is nothing here to detect, and the request
+   path (LZ_KERNEL_AVX2 accepted by the CLI on every build) must still
+   clamp safely rather than claim support. */
+int lz_cpu_has_avx2(void) {
+#ifdef __WATCOMC__
+    return 0;
+#elif defined(LZ_FORCE_NO_AVX2)
+    /* Test-only override: lets the "requested avx2, don't have it,
+       clamp to `have`" branch in lz_kernel_select be exercised on a
+       host that genuinely has AVX2 - otherwise that branch could ship
+       broken and nothing on this dev machine would ever run it. */
+    return 0;
+#else
+    unsigned ecx1, xcr0, ebx7;
+#ifdef LZ_CPUID_NOCACHE
+    ecx1 = lz_cpuid1_ecx();
+    if (!(ecx1 & (1u << 27))) return 0;
+    xcr0 = lz_xgetbv0();
+    if ((xcr0 & 0x6u) != 0x6u) return 0;
+    ebx7 = lz_cpuid7_ebx();
+    return (ebx7 & (1u << 5)) != 0;
+#else
+    if (g_has_avx2 < 0) {
+        ecx1 = lz_cpuid1_ecx();
+        if (!(ecx1 & (1u << 27))) {
+            g_has_avx2 = 0;
+        } else {
+            xcr0 = lz_xgetbv0();
+            if ((xcr0 & 0x6u) != 0x6u) {
+                g_has_avx2 = 0;
+            } else {
+                ebx7 = lz_cpuid7_ebx();
+                g_has_avx2 = (ebx7 & (1u << 5)) != 0;
+            }
+        }
+    }
+    return g_has_avx2;
+#endif /* LZ_CPUID_NOCACHE */
+#endif /* __WATCOMC__ */
+}
+#endif /* __i386__ || __x86_64__ || _M_IX86 */
+
 /* lz_cpu_has_mmx: non-static, defined in ops.c, declared in ops_quant.h.
    g_has_mmx stays in ops.c (its cache variable). */
 
@@ -576,7 +625,9 @@ int lz_kernel_select(int which) {
            the only way to compare them. Asking UP clamps to what CPUID
            found: sse2 needs SSE2, and sse needs SSE, which an SSE2
            machine also has. */
-        if (which == LZ_KERNEL_SSE2 && have != LZ_KERNEL_SSE2)
+        if (which == LZ_KERNEL_AVX2 && !lz_cpu_has_avx2())
+            which = have;
+        else if (which == LZ_KERNEL_SSE2 && have != LZ_KERNEL_SSE2)
             which = have;
         else if (which == LZ_KERNEL_SSE &&
                  have != LZ_KERNEL_SSE && have != LZ_KERNEL_SSE2)
@@ -596,6 +647,7 @@ const char *lz_kernel_name(void) {
     if (g_kernel == LZ_KERNEL_MMX) return "mmx";
     if (g_kernel == LZ_KERNEL_ARM_ASM) return "arm-asm";
     if (g_kernel == LZ_KERNEL_ARM) return "arm-c";
+    if (g_kernel == LZ_KERNEL_AVX2) return "avx2";
     return "ref";
 }
 
@@ -618,6 +670,7 @@ const char *lz_build_paths(void) {
 const char *lz_kernel_tier(void) {
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
     if (g_kernel == LZ_KERNEL_REF) return "ref";
+    if (g_kernel == LZ_KERNEL_AVX2) return "avx2-intrin";
 #if defined(LZ_T2_ARM_ASM_EXTERN)
     return (g_kernel == LZ_KERNEL_ARM_ASM) ? "arm-asm" : "arm-c";
 #elif defined(__WATCOMC__) || defined(LZ_DOT_MMX_EXTERN)
