@@ -974,6 +974,20 @@ static int model_walk(LZModel *m, LZVisit visit, void *ctx,
        alloc_engram ran before model_walk (lz_open), so m->engram
        is non-NULL when config.engram is set. */
     if (m->engram) {
+        /* Named arrays, not anonymous C99 compound literals: this file's
+           floor is C89/Watcom (see the lz_open_bin LZ4Stream comment
+           above for the same rule applied to declaration placement),
+           and `(int[]){...}` is a C99-only construct wcc386 -za99
+           rejects. EMBED_DIMS/NORM_DIMS above use the same static
+           const array idiom for the same reason. */
+        static const int ENGRAM_TABLE_DIMS[3] =
+            { DK_ENGRAM_ROWS, DK_ENGRAM_DIM, DK_END };
+        static const int ENGRAM_PROJ_DIMS[3] =
+            { DK_HIDDEN, DK_ENGRAM_PER_ORDER, DK_END };
+        static const int ENGRAM_CONV_DIMS[3] =
+            { DK_HIDDEN, DK_ONE, DK_KERNEL };
+        static const int ENGRAM_NORM_DIMS[3] =
+            { DK_HIDDEN, DK_END, DK_END };
         LZEngram *eg = m->engram;
         int no = c->engram_n_orders;
         int o;
@@ -992,7 +1006,7 @@ static int model_walk(LZModel *m, LZVisit visit, void *ctx,
         int bin_mode = (m->rd != NULL);
         if (bin_mode || lz_st_find(&m->st, "engram_memory.table.weight"))
             if (model_walk_one(m, "engram_memory.table.weight",
-                               (int[]){DK_ENGRAM_ROWS, DK_ENGRAM_DIM, DK_END},
+                               ENGRAM_TABLE_DIMS,
                                &eg->table, visit, ctx,
                                errbuf, errlen)) return 1;
         for (o = 0; o < no; o++) {
@@ -1000,25 +1014,25 @@ static int model_walk(LZModel *m, LZVisit visit, void *ctx,
                      "engram_memory.key_proj.%d.weight", o);
             if (bin_mode || lz_st_find(&m->st, name))
                 if (model_walk_one(m, name,
-                                   (int[]){DK_HIDDEN, DK_ENGRAM_PER_ORDER, DK_END},
+                                   ENGRAM_PROJ_DIMS,
                                    &eg->key_proj[o], visit, ctx,
                                    errbuf, errlen)) return 1;
             snprintf(name, sizeof(name),
                      "engram_memory.value_proj.%d.weight", o);
             if (bin_mode || lz_st_find(&m->st, name))
                 if (model_walk_one(m, name,
-                                   (int[]){DK_HIDDEN, DK_ENGRAM_PER_ORDER, DK_END},
+                                   ENGRAM_PROJ_DIMS,
                                    &eg->value_proj[o], visit, ctx,
                                    errbuf, errlen)) return 1;
         }
         if (bin_mode || lz_st_find(&m->st, "engram_memory.conv.weight"))
             if (model_walk_one(m, "engram_memory.conv.weight",
-                               (int[]){DK_HIDDEN, DK_ONE, DK_KERNEL, DK_END},
+                               ENGRAM_CONV_DIMS,
                                &eg->conv, visit, ctx,
                                errbuf, errlen)) return 1;
         if (bin_mode || lz_st_find(&m->st, "engram_memory.norm.weight"))
             if (model_walk_one(m, "engram_memory.norm.weight",
-                               (int[]){DK_HIDDEN, DK_END, DK_END},
+                               ENGRAM_NORM_DIMS,
                                &eg->norm, visit, ctx,
                                errbuf, errlen)) return 1;
     }
