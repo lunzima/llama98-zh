@@ -100,6 +100,15 @@ CLI_COM := session stream beep
 ENG_MMX := ops_mmx ops_mmx_sse ops_sse2
 ENG_MMX_GCC_SRCS := $(addprefix src/,$(addsuffix .c,$(ENG_MMX)))
 
+# ops_avx2.c is gcc-only (no Watcom -mavx2 target exists) and needs its
+# own -mavx2, not $(ENG_MMX)'s -mmmx/-msse/-msse2, so it gets its own
+# variable and its own static-pattern rule below rather than joining
+# $(ENG_MMX). See the AVX2_TU_DEFINE comment near MMX_TU_DEFINE for why
+# every gcc TU, not just this one, still needs -DLZ_AVX2_TU=1.
+ENG_AVX2 := ops_avx2
+ENG_AVX2_GCC_SRCS := $(addprefix src/,$(addsuffix .c,$(ENG_AVX2)))
+AVX2_TU_DEFINE := -DLZ_AVX2_TU=1
+
 # gcc-side full paths.
 ENG_SRCS := $(addprefix src/,$(addsuffix .c,$(ENG)))
 SRV_SRCS := $(addprefix src/,$(addsuffix .c,$(SRV)))
@@ -160,7 +169,7 @@ CFLAGS  ?= -O2 -std=c99 -Wall -Wextra -Isrc $(FP_STRICT) $(MMX_TU_DEFINE) $(SSE2
 # only reorders instructions (size is invariant - see the -O2/-O3 note
 # above), so this is about scheduling the cold plain-C TUs for the CPU
 # that actually runs them, not about .text.
-X86_64_CFLAGS := -Os -march=x86-64 -mtune=znver3 -std=c99 -Wall -Wextra -Isrc $(FP_STRICT) $(MMX_TU_DEFINE) $(SSE2_TU_DEFINE) $(EXTRA_DEFS)
+X86_64_CFLAGS := -Os -march=x86-64 -mtune=znver3 -std=c99 -Wall -Wextra -Isrc $(FP_STRICT) $(MMX_TU_DEFINE) $(SSE2_TU_DEFINE) $(AVX2_TU_DEFINE) $(EXTRA_DEFS)
 # Hot TUs keep -O2 AND swap the tune back to alderlake: gcc's
 # long-pipeline branch-prediction optimisation is keyed on alderlake
 # only - generic and znver3 do not carry it (in 16.1 or the newer
@@ -192,6 +201,12 @@ serve: kunkun98-serve
 # $(ENG_MMX)'s files needs its own compile, and there are now two.
 ENG_MMX_GCC_NATIVE_OBJS := $(addprefix build/native/,$(addsuffix .o,$(ENG_MMX)))
 ENG_MMX_GCC_GUI_OBJS    := $(addprefix build/gui/,$(addsuffix .o,$(ENG_MMX)))
+
+# Same split, one file: $(ENG_AVX2) gets its own native/gui object pair
+# for the same reason $(ENG_MMX) does above - a flag change to one
+# flavour must not link an object built with another's.
+ENG_AVX2_GCC_NATIVE_OBJS := $(addprefix build/native/,$(addsuffix .o,$(ENG_AVX2)))
+ENG_AVX2_GCC_GUI_OBJS    := $(addprefix build/gui/,$(addsuffix .o,$(ENG_AVX2)))
 
 # Per-TU optimisation tier, gcc side (see X86_64_HOT_CFLAGS). HOT_TU are
 # the engine TUs and HOT_COM the common/ TUs the gcov call counts mark
@@ -286,6 +301,25 @@ $(HOT_GCC_GUI_COM_OBJS): build/gui/%.o: common/%.c
 	@mkdir -p build/gui
 	$(CC) $(X86_64_HOT_CFLAGS) $(DEPFLAGS) -Icommon -c -o $@ $<
 
+# $(ENG_AVX2) is not part of $(ENG_MMX): it needs -mavx2, a different ISA
+# floor than $(ENG_MMX)'s -mmmx/-msse/-msse2, so it cannot share that
+# object list or fall through to the generic build/native/%.o pattern
+# rule above (which would give it -mmmx/-msse/-msse2 instead). Its own
+# static-pattern rule, the same technique $(HOT_GCC_*_ENG_OBJS) uses
+# above to beat that same generic rule. Deliberately -mavx2 only, no
+# -mfma: the design keeps AVX2 as an integer/permute tier (widen,
+# horizontal-add, shuffle), not a fused-multiply-add tier, so it stays
+# bit-identical in rounding behaviour to the scalar and SSE2 paths it
+# replaces rather than opening a third source of cross-tier drift
+# alongside the FP_STRICT one already fenced off above.
+$(ENG_AVX2_GCC_NATIVE_OBJS): build/native/%.o: src/%.c
+	@mkdir -p build/native
+	$(CC) $(X86_64_HOT_CFLAGS) $(DEPFLAGS) -mavx2 -c -o $@ $<
+
+$(ENG_AVX2_GCC_GUI_OBJS): build/gui/%.o: src/%.c
+	@mkdir -p build/gui
+	$(CC) $(X86_64_HOT_CFLAGS) $(DEPFLAGS) -mavx2 -c -o $@ $<
+
 # cli_main.c's -i loop runs on the shared LZSession core (common/session.c),
 # a front-end helper deliberately outside $(ENG) - so this target lists it
 # explicitly with -Icommon, exactly as the Watcom CLI/DOS builds do.
@@ -295,11 +329,11 @@ $(HOT_GCC_GUI_COM_OBJS): build/gui/%.o: common/%.c
 # between toolchains in the same tree. Cross-compiling from WSL with
 # MinGW against stale WSL-gcc objects would link a malformed PE; delete
 # build/native before switching toolchains.
-llama98: $(NATIVE_GATE) $(COLD_ENG_SRCS) $(COLD_CLI_COM_SRCS) src/cli_attr.c src/cli_main.c $(HOT_GCC_NATIVE_OBJS) $(ENG_MMX_GCC_NATIVE_OBJS)
-	$(CC) $(X86_64_CFLAGS) -Icommon -o $@ $(COLD_ENG_SRCS) $(COLD_CLI_COM_SRCS) src/cli_attr.c src/cli_main.c $(HOT_GCC_NATIVE_OBJS) $(ENG_MMX_GCC_NATIVE_OBJS) -lm
+llama98: $(NATIVE_GATE) $(COLD_ENG_SRCS) $(COLD_CLI_COM_SRCS) src/cli_attr.c src/cli_main.c $(HOT_GCC_NATIVE_OBJS) $(ENG_MMX_GCC_NATIVE_OBJS) $(ENG_AVX2_GCC_NATIVE_OBJS)
+	$(CC) $(X86_64_CFLAGS) -Icommon -o $@ $(COLD_ENG_SRCS) $(COLD_CLI_COM_SRCS) src/cli_attr.c src/cli_main.c $(HOT_GCC_NATIVE_OBJS) $(ENG_MMX_GCC_NATIVE_OBJS) $(ENG_AVX2_GCC_NATIVE_OBJS) -lm
 
-kunkun98-serve: $(NATIVE_GATE) $(COLD_ENG_SRCS) $(SRV_SRCS) src/server_main.c $(HOT_GCC_NATIVE_ENG_OBJS) $(ENG_MMX_GCC_NATIVE_OBJS)
-	$(CC) $(X86_64_CFLAGS) -o $@ $(COLD_ENG_SRCS) $(SRV_SRCS) src/server_main.c $(HOT_GCC_NATIVE_ENG_OBJS) $(ENG_MMX_GCC_NATIVE_OBJS) -lm $(HTTP_LIBS)
+kunkun98-serve: $(NATIVE_GATE) $(COLD_ENG_SRCS) $(SRV_SRCS) src/server_main.c $(HOT_GCC_NATIVE_ENG_OBJS) $(ENG_MMX_GCC_NATIVE_OBJS) $(ENG_AVX2_GCC_NATIVE_OBJS)
+	$(CC) $(X86_64_CFLAGS) -o $@ $(COLD_ENG_SRCS) $(SRV_SRCS) src/server_main.c $(HOT_GCC_NATIVE_ENG_OBJS) $(ENG_MMX_GCC_NATIVE_OBJS) $(ENG_AVX2_GCC_NATIVE_OBJS) -lm $(HTTP_LIBS)
 
 # Resources (icon / splash / about logo / lamps). windres for gcc; the
 # Watcom build runs wrc instead (see watcom-gui). Both run from the repo
@@ -313,8 +347,8 @@ $(GUI_RES): gui/kunkun98.rc gui/resource.h gui/kunkun98.manifest \
 	@mkdir -p build/gui
 	windres -I. gui/kunkun98.rc -O coff -o $@
 
-kunkun98-gui: $(GUI_SRCS) $(COLD_COM_SRCS) $(COLD_ENG_SRCS) gui/layout.h gui/localized_strings.h $(GUI_RES) $(HOT_GCC_GUI_OBJS) $(ENG_MMX_GCC_GUI_OBJS)
-	$(CC) $(X86_64_CFLAGS) -Igui -Icommon -mwindows -o $@ $(GUI_SRCS) $(COLD_COM_SRCS) $(COLD_ENG_SRCS) $(GUI_RES) $(HOT_GCC_GUI_OBJS) $(ENG_MMX_GCC_GUI_OBJS) \
+kunkun98-gui: $(GUI_SRCS) $(COLD_COM_SRCS) $(COLD_ENG_SRCS) gui/layout.h gui/localized_strings.h $(GUI_RES) $(HOT_GCC_GUI_OBJS) $(ENG_MMX_GCC_GUI_OBJS) $(ENG_AVX2_GCC_GUI_OBJS)
+	$(CC) $(X86_64_CFLAGS) -Igui -Icommon -mwindows -o $@ $(GUI_SRCS) $(COLD_COM_SRCS) $(COLD_ENG_SRCS) $(GUI_RES) $(HOT_GCC_GUI_OBJS) $(ENG_MMX_GCC_GUI_OBJS) $(ENG_AVX2_GCC_GUI_OBJS) \
 	    -lgdi32 -luser32 -lcomdlg32 -lm -Wl,--stack=524288
 
 # ----------------------------------------------------------------------

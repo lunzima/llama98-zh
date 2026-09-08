@@ -789,16 +789,14 @@ static const char km_why_epi_x86[] =
     "on 2^31. Written and measured, then not shipped: 19 instructions an "
     "element against the scalar loop's 8 - slower than pure C, which is "
     "the one exception (regression), not partial relief";
-/* The AVX2 column's three reasons. Q8/Q41/Q61/Q16 share one TODO string
-   because the same plan that added this column also lands their four
-   row_*_avx2_intrin bodies (src/ops_avx2.c) - a real near-term promise,
-   not an open-ended one. T2 and the twelve operator units are NA
-   instead of TODO: neither is on this plan's roadmap at all, so calling
-   them "todo" would claim work nobody has committed to. */
-static const char km_why_row_avx2_todo[] =
-    "not yet ported: this plan's own next task lands row_*_avx2_intrin "
-    "for this format in src/ops_avx2.c (LZ_ROW_AVX2_EXTERN) - the slot "
-    "exists in LZ_ROW_* (LZ_ROW_AVX2_I) and is NULL until then";
+/* The AVX2 column's two reasons. T2 and the twelve operator units are
+   NA instead of present: neither is on this plan's roadmap at all, so
+   calling them "todo" would claim work nobody has committed to. Q8/
+   Q41/Q61/Q16 need no reason string of their own: src/ops_avx2.c's
+   four row_*_avx2_intrin bodies are built into every gcc link target
+   (ENG_AVX2 in the Makefile) and LZ_ROW_AVX2_I's slot is genuinely
+   non-NULL for all four, so their cells are plain KM_H like every
+   other populated column. */
 static const char km_why_t2_avx2[] =
     "T2 (ternary) is excluded from the AVX2 tier by design: it is "
     "kunkun-ce/ARM's format, unrelated to the x86-64-v3 motivation "
@@ -832,10 +830,10 @@ typedef struct { unsigned char have; unsigned char why; const char *text; } LZKm
    the only place the two-dimensional index lives. */
 static const LZKmReg km_reg[LZ_KM_NUNIT * LZ_KM_NCOL] = {
 /*          ref          mmxI              sseI                sse2I             mmxA              sseA                sse2A             avx2I                      armC                 armA                 g128            */
-/* q8_0 */ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_T(km_why_row_avx2_todo), KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128),
-/* q4_1 */ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_T(km_why_row_avx2_todo), KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128),
-/* q6_1 */ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_T(km_why_row_avx2_todo), KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128),
-/* q16_0*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_T(km_why_row_avx2_todo), KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128),
+/* q8_0 */ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_GCC),           KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128),
+/* q4_1 */ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_GCC),           KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128),
+/* q6_1 */ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_GCC),           KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128),
+/* q16_0*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_GCC),           KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128),
 /* t2   */ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_N(km_why_t2_avx2),      KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128),
 /* operator units (LZ_KM_OP): registry only, no grid line. ref is the
    shared C body, which is also what --kernel arm-c runs - so armC is
