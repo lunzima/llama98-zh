@@ -16,6 +16,11 @@
 #include "ops_mmx.h"
 #include "ops_sse.h"
 #include "ops_sse2.h"
+#include "ops_avx2.h"   /* LZ_ROW_AVX2_EXTERN, row_*_avx2_intrin - gcc-only,
+                           mirrors the ops_sse2.h include above. Defined
+                           only when LZ_AVX2_TU is set (-D, Makefile), the
+                           same "build-level macro, not compiler-derived"
+                           contract ops_sse2.h documents for LZ_SSE2_TU. */
 #include "ops_kernel_shared.h"
 #include "ops_quant.h"
 #include "ops_sched.h"
