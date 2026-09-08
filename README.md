@@ -11,6 +11,12 @@ One Makefile drives two toolchains:
 - **Open Watcom** (the target) — `watcom-cli`, `watcom-gui`, `watcom-dos`,
   `watcom-dll`
 
+## Screenshot
+
+![昆昆98 screenshot](contrib/screenshot/screenshot.png)
+
+*(third-party screenshot) 对话回复为 AI 生成，可能有误。"缓存是半导体奶子"是中文硬件圈里一个生动幽默、逻辑自洽的流行隐喻，用来形象地表达"CPU 缓存（Cache）对处理器性能至关重要、且容量越大越好"这一核心观点；原典出自 AMD 渠道业务部高级技术支持经理，表述较为露骨，请知悉。*
+
 ## Products
 
 | Target | Output | What it is |
