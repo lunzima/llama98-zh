@@ -254,6 +254,51 @@ int lz_kv_vfmt = LZ_KVF_Q8;
    on a different model, not because 64 is in doubt. */
 int lz_kv_rot_v_dim = 0;
 
+/* --rope-dynamic-ntk on|off (cli_main.c). Off (default) leaves the RoPE
+   table build below on its original, unconditional theta - bit-
+   identical to the engine before this knob existed. On rescales theta
+   ONCE per table build (not once per position - the effective base is
+   a property of how far this table's positions reach, not of any one
+   position inside it) by the NTK-aware ratio bloc97 described
+   (https://old.reddit.com/r/LocalLLaMA/comments/14lz7j5/), applied only
+   when the caller's requested seq_len exceeds lz_rope_orig_max:
+
+     theta_eff = rope_theta * (seq_len / orig_max) ^ (rotary_dim / (rotary_dim - 2))
+
+   docs/length-extrapolation-research.md S5.5 is why this formula and
+   not YaRN/PI: the other two need the extrapolation target fixed in
+   advance (a microtuned scale factor, or a training-time schedule for
+   a KNOWN longer length), and this project's actual scenario is
+   "config's max_position_embeddings got hacked past what was trained,
+   target unknowable ahead of time" - exactly the case dynamic NTK
+   recomputation was designed for. Below lz_rope_orig_max this is
+   the identity by construction (the multiplier only differs from 1
+   once seq_len/orig_max > 1), so raising --ctx within the trained
+   range changes nothing even with the flag on. */
+int lz_rope_dynamic_ntk = 0;
+
+/* Training length the ratio above scales against. NOT the same number
+   as either shipping model's declared max_position_embeddings (8192 /
+   32768) - confirmed via engine/train_data.py's LONG_SEQ constant and
+   docs/kunkun-ce-params.md S4 ("8192 declared, 1536+5120 actually
+   trained"): both of today's checkpoints were trained with their
+   longest packed stream capped at 5120 tokens, a fact about the
+   CURRENT training pipeline (one shared LONG_SEQ constant), not a
+   value either checkpoint's config.json records. A knob rather than a
+   #define for that reason - a future retrain can change its own
+   long-stream length without a recompile of this engine. */
+float lz_rope_orig_max = 5120.0f;
+
+/* Positive control for --rope-dynamic-ntk, same role as
+   lz_debug_n_kv_rot above: "off" and "on but seq_len <= orig_max" are
+   BOTH bit-identical to the unscaled table (the second one by the
+   formula's own construction, not by the flag being ignored), so an
+   output comparison alone cannot tell "the branch ran and correctly
+   did nothing" from "the branch never ran". Counts frequency pairs
+   (half the rotary width) whose theta was actually rescaled; 0 on any
+   run that never crosses lz_rope_orig_max, on or off. */
+lz_i64 lz_debug_n_rope_ntk = 0;
+
 /* StreamingLLM attention sink + recent window (arXiv:2309.17453,
    github.com/mit-han-lab/streaming-llm). 0 = off, which is the default
    and must stay bit-identical to full attention.
@@ -1168,10 +1213,29 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
                                       sizeof(float), &ok, &s->bytes_alloc);
         if (ok) {
             int half = c->rotary_dim >> 1;
+            /* Dynamic NTK (lz_rope_dynamic_ntk's own comment above):
+               rescale theta once for the whole table, not once per
+               position. Guarded on rotary_dim > 2 because the exponent's
+               denominator is (rotary_dim - 2) - a model with rotary_dim
+               <= 2 has no valid ratio for this formula (undefined, not
+               merely small), so it degrades to "off" rather than
+               computing garbage. Both divisions below are by runtime
+               values (lz_rope_orig_max, rotary_dim - 2), never by a
+               float literal, so both compilers emit a real FDIV/divss
+               here - iron law six clause 1. */
+            float theta_eff = c->rope_theta;
+            if (lz_rope_dynamic_ntk && c->rotary_dim > 2 &&
+                (float)seq_len > lz_rope_orig_max) {
+                float ratio = (float)seq_len / lz_rope_orig_max;
+                float expo  = (float)c->rotary_dim /
+                              (float)(c->rotary_dim - 2);
+                theta_eff = c->rope_theta * lz_powf(ratio, expo);
+                lz_debug_n_rope_ntk += half;
+            }
             for (l = 0; l < seq_len; l++) {
                 int i;
                 for (i = 0; i < half; i++) {
-                    float freq = lz_powf(c->rope_theta,
+                    float freq = lz_powf(theta_eff,
                                          -2.0f * (float)i / (float)c->rotary_dim);
                     float ang = (float)l * freq;
                     s->rope_cs[((size_t)l * half + i) * 2]     = lz_cosf(ang);

@@ -209,6 +209,12 @@ extern lz_i64 lz_debug_n_ring_rollback;
    pre-rotation engine bit for bit. */
 extern int lz_kv_rot_enable;
 extern lz_i64 lz_debug_n_kv_rot;
+/* --rope-dynamic-ntk on|off, forward.c. Off by default; off must
+   reproduce the fixed-theta RoPE table bit for bit. --rope-orig-max
+   sets the length the on-branch's NTK ratio scales against. */
+extern int lz_rope_dynamic_ntk;
+extern float lz_rope_orig_max;
+extern lz_i64 lz_debug_n_rope_ntk;
 /* --batch's positive control, forward.c. Prefilling n tokens at width T
    must take ceil(n/T) chunks; bit-identity alone cannot see the width. */
 extern lz_i64 lz_debug_n_chunks;
@@ -419,6 +425,13 @@ static void usage(void) {
     "                   ctx/2), N=16; W=0 turns eviction off).\n"
     "  --kv-rot MODE    on|off (default OFF). Hadamard-rotate Q/K/V before\n"
     "                   KV quantization.\n"
+    "  --rope-dynamic-ntk MODE  on|off (default OFF). Off reproduces the\n"
+    "                   fixed-theta RoPE table bit for bit. On rescales theta\n"
+    "                   once per --ctx beyond --rope-orig-max (NTK-aware\n"
+    "                   ratio); a no-op when --ctx does not exceed it.\n"
+    "  --rope-orig-max N  Training length --rope-dynamic-ntk's ratio scales\n"
+    "                   against (default 5120; see docs/kunkun-ce-params.md\n"
+    "                   S4 and engine/train_data.py's LONG_SEQ).\n"
     "  --moe-topk N     Route to N experts (default 0 = model's value).\n"
     "                   Alone it can only pick a losing arm; pair --moe-tau.\n"
     "  --moe-tau F      Router temperature, 0.1..10.0 (default 1.0 = off).\n"
@@ -1775,6 +1788,15 @@ int main(int argc, char **argv) {
             else if (strcmp(m, "off") == 0) lz_kv_rot_enable = 0;
             else { usage(); return 2; }
         }
+        else if (strcmp(a, "--rope-dynamic-ntk") == 0 && i + 1 < argc) {
+            const char *m = argv[++i];
+            if (strcmp(m, "on") == 0)       lz_rope_dynamic_ntk = 1;
+            else if (strcmp(m, "off") == 0) lz_rope_dynamic_ntk = 0;
+            else { usage(); return 2; }
+        }
+        else if (strcmp(a, "--rope-orig-max") == 0 && i + 1 < argc) {
+            lz_rope_orig_max = LZ_STRTOF(argv[++i]);
+        }
         else if (strcmp(a, "--prefetch") == 0 && i + 1 < argc) {
             const char *m = argv[++i];
             /* Print what was ACTUALLY selected, not what was asked for:
@@ -2403,6 +2425,11 @@ int main(int argc, char **argv) {
             printf("[kv-rot: %s, k=%d v=%d, %lld head rotations]\n",
                    lz_kv_rot_enable ? "on" : "off",
                    st.kv_rot_k, st.kv_rot_v, lz_debug_n_kv_rot);
+            { char _b[LZ_FTOA_BUF];
+              lz_ftoa_f(_b, lz_rope_orig_max, 0, 0);
+              printf("[rope-ntk: %s, orig_max %s, %lld freq pairs scaled]\n",
+                     lz_rope_dynamic_ntk ? "on" : "off", _b,
+                     lz_debug_n_rope_ntk); }
             printf("[batch: width %d, %lld forward chunks, %lld lm_head]\n",
                    st.nt_cap, lz_debug_n_chunks, lz_debug_n_lmhead);
             printf("[attn: sink %d window %d, %lld evicted rows skipped]\n",
