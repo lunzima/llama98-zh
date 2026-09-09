@@ -1224,6 +1224,20 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
 #endif /* LZ_HAVE_Q8R_SIMD */
                 lz_q8round_2p_group_sse(grp, ho, lw, gs, &inv, &lo_mul, res);
 #else
+#ifdef LZ_HAVE_Q8R_AVX2
+            /* No _mm_empty() on this arm: lz_q8round32_avx2 uses
+               cvtps_epi32/vpminsw/vpmaxsw on XMM/YMM registers and never
+               writes an MMX register, so the x87 tag word the SSE1 arm
+               below has to clear is untouched here. */
+            if (tier == 3) {
+                for (k = 0; k + 31 < gs; k += 32)
+                    lz_q8round32_avx2(grp + k, ho + k, &inv);
+                for (k = 0; k < gs; k++)
+                    res[k] = grp[k] * inv - (float)ho[k];
+                for (k = 0; k + 31 < gs; k += 32)
+                    lz_q8round32_avx2(res + k, lw + k, &lo_mul);
+            } else
+#endif /* LZ_HAVE_Q8R_AVX2 */
 #ifdef LZ_HAVE_Q8R_SIMD
             if (tier == 2) {
                 for (k = 0; k + 31 < gs; k += 32)
@@ -1273,6 +1287,26 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
     }
 }
 #endif /* LZ_GDN_STATE_2PLANE */
+
+/* Test hook: true iff THIS translation unit saw LZ_HAVE_Q8R_AVX2 when it
+   compiled, i.e. iff the #include "ops_avx2.h" near the top of this file
+   reached it. lz_gdn_quantize_2p's tier==3 arm sits inside #ifdef
+   LZ_HAVE_Q8R_AVX2 and is compiled out silently when the include is
+   missing; the tiers owe each other bit-identity, so comparing its
+   output against the SSE2 tier's cannot tell which one ran. It cannot
+   live in ops_avx2.c: there the macro comes from ops_avx2.h under the
+   same guard that wraps that whole TU, so the answer would always be 1.
+   Separate from lz_q8round32_avx2_compiled_in_quant because the two
+   dispatch TUs include the header independently. Declared in ops_gdn.h,
+   outside the LZ_GDN_STATE_2PLANE guard above so the symbol exists in
+   every configuration a test can link. */
+int lz_q8round32_avx2_compiled_in_gdn(void) {
+#if defined(LZ_HAVE_Q8R_AVX2)
+    return 1;
+#else
+    return 0;
+#endif /* LZ_HAVE_Q8R_AVX2 */
+}
 
 #if LZ_GDN_STATE_F32
 #define LZ_GDN_SHADOW_MAX 1024

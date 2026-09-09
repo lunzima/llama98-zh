@@ -1469,6 +1469,23 @@ int q8_amax_picked_avx2(void) {
     return lz_amax_is_avx2(lz_amax_pick(LZ_AMAX_TAB));
 }
 
+/* Test hook: true iff THIS translation unit saw LZ_HAVE_Q8R_AVX2 when it
+   compiled, i.e. iff the #include "ops_avx2.h" near the top of this file
+   reached it. lz_quantize_q8's tier==3 arm sits inside #ifdef
+   LZ_HAVE_Q8R_AVX2 and is compiled out silently when the include is
+   missing; the tiers owe each other bit-identity, so comparing its
+   output against the SSE2 tier's cannot tell which one ran. It cannot
+   live in ops_avx2.c: there the macro comes from ops_avx2.h under the
+   same guard that wraps that whole TU, so the answer would always be 1.
+   Declared in ops_quant.h. */
+int lz_q8round32_avx2_compiled_in_quant(void) {
+#if defined(LZ_HAVE_Q8R_AVX2)
+    return 1;
+#else
+    return 0;
+#endif /* LZ_HAVE_Q8R_AVX2 */
+}
+
 /* Shared constants. `static const float` forces the round once, here,
    avoiding gcc's x87 excess-precision folding at each use site. */
 const float LZ_Q8_MIN_SCALE_F = LZ_Q8_MIN_SCALE;
@@ -2023,8 +2040,8 @@ void lz_quantize_q8(const float *x, int n, int gs, int8_t *q, float *s) {
                    equivalent inside the kernel calls below), not q8_round's
                    magic-number add - billed as mul+cvt, not mul+add, same
                    split lz_gdn_quantize_2p's kernel branches use. Same
-                   count whichever of the two sub-tiers (SSE1+MMX vs SSE2)
-                   or toolchain path below actually runs. */
+                   count whichever of the three sub-tiers (SSE1+MMX,
+                   SSE2, AVX2) or toolchain path below actually runs. */
                 LZ_FCX(LZ_FC_QUANT, gs, 0, 0, gs, 0);
 #if defined(__WATCOMC__)
                 /* One call per GROUP, not per 32-element sub-chunk:
@@ -2041,6 +2058,16 @@ void lz_quantize_q8(const float *x, int n, int gs, int8_t *q, float *s) {
 #endif /* LZ_HAVE_Q8R_SIMD */
                     lz_q8round_group_sse(grp, out, gs, &inv);
 #else
+#ifdef LZ_HAVE_Q8R_AVX2
+                /* No _mm_empty() on this arm: lz_q8round32_avx2 uses
+                   cvtps_epi32/vpminsw/vpmaxsw on XMM/YMM registers and
+                   never writes an MMX register, so the x87 tag word the
+                   SSE1 arm below has to clear is untouched here. */
+                if (tier == 3) {
+                    for (k = 0; k + 31 < gs; k += 32)
+                        lz_q8round32_avx2(grp + k, out + k, &inv);
+                } else
+#endif /* LZ_HAVE_Q8R_AVX2 */
 #ifdef LZ_HAVE_Q8R_SIMD
                 if (tier == 2) {
                     for (k = 0; k + 31 < gs; k += 32)

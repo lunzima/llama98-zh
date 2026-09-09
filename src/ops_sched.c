@@ -13,6 +13,12 @@
 #include "mmx_compat.h"
 #include "ops_mmx.h"
 #include "ops_sse2.h"
+#include "ops_avx2.h"   /* LZ_HAVE_Q8R_AVX2 - without this, lz_q8r_tier's
+                           tier 3 arm is compiled out in THIS TU and
+                           --kernel avx2 silently resolves to the SSE2
+                           tier for both call sites. Empty body on
+                           Watcom/non-AVX2 builds (this header's own
+                           guard), same shape as the SSE2 include above. */
 #include "ops_kernel_shared.h"
 #include "ops_quant.h"  /* lz_cpu_has_mmx (non-static, from module 1) */
 #include "ops_sched.h"
@@ -186,7 +192,8 @@ int q8r_have_simd(void) {
    q8r_have_simd below is a different axis - the Q8 row-kernel tier, not
    the arithmetic one - and keeps its CPUID question. */
 
-/* Q8 rounding: 0 scalar, 1 SSE1 (lz_q8round32_sse), 2 SSE2. The tier is
+/* Q8 rounding: 0 scalar, 1 SSE1 (lz_q8round32_sse), 2 SSE2
+   (lz_q8round32_simd), 3 AVX2 (lz_q8round32_avx2, gcc-only). The tier is
    read from g_kernel, and LZ_Q8R_FORCE_SSE is gone for the same reason
    LZ_I32FACC_FORCE_SSE below is: `--kernel sse` selects the SSE1 body
    at run time, so the compile-time escape was a second way to say it
@@ -199,6 +206,9 @@ int q8r_have_simd(void) {
 int lz_q8r_tier(void) {
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
     if (g_kernel == LZ_KERNEL_REF) return 0;
+#if defined(LZ_HAVE_Q8R_AVX2)
+    if (g_kernel == LZ_KERNEL_AVX2) return 3;
+#endif /* LZ_HAVE_Q8R_AVX2 */
 #if defined(LZ_HAVE_Q8R_SIMD)
     if (g_kernel == LZ_KERNEL_SSE2) return 2;
 #endif /* LZ_HAVE_Q8R_SIMD */

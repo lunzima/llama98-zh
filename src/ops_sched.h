@@ -7,8 +7,9 @@
 #ifndef OPS_SCHED_H
 #define OPS_SCHED_H
 
-/* Q8 rounding tier selector (0=scalar, 1=SSE, 2=SSE2).
-   Called by lz_quantize_q8 (ops.c) and lz_gdn_quantize_2p (ops_gdn.c). */
+/* Q8 rounding tier selector (0=scalar, 1=SSE, 2=SSE2, 3=AVX2).
+   Called by lz_quantize_q8 (ops_quant.c) and lz_gdn_quantize_2p
+   (ops_gdn.c). */
 int lz_q8r_tier(void);
 
 /* Attention wsum's chunk-fold tier (0=scalar, 1=SSE, 2=SSE2).

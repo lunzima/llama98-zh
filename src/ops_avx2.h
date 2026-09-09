@@ -2,7 +2,7 @@
    way src/ops_sse2.h guards LZ_ROW_SSE2_EXTERN: LZ_AVX2_TU is a
    build-level macro (-D, set only when src/ops_avx2.c is part of this
    link), never derived from a predefined compiler macro. AVX2 is
-   gcc-only by design (see the 2026-09-08 design doc) - this file is
+   gcc-only by design (see the AVX2 tier design doc) - this file is
    never included under __WATCOMC__, and there is deliberately no
    *_avx2_asm counterpart to any of these. */
 #ifndef LZ_OPS_AVX2_H
@@ -45,6 +45,15 @@ void lz_p2_mul32_avx2(const int8_t *hi, const int8_t *lo,
 
 #define LZ_HAVE_P2_SPLIT32_AVX2 1
 void lz_p2_split32_avx2(const lz_p2_blk *blk, int8_t *oh, int8_t *ol);
+
+#define LZ_HAVE_Q8R_AVX2 1
+void lz_q8round32_avx2(const float *x, int8_t *o, const float *pinv);
+/* lz_q8round32_avx2_compiled_in_quant/_gdn are declared in
+   src/ops_quant.h and src/ops_gdn.h, not here - this operator has TWO
+   dispatch translation units and each proves its own #include of this
+   header, so neither answer can live in the file that defines the macro
+   unconditionally. */
+
 /* lz_rope_avx2_compiled_in is declared in src/ops.h, not here: its
    definition is unconditional (in src/ops_rope.c) and must have a
    prototype in scope on every build, the way

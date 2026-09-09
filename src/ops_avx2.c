@@ -644,6 +644,33 @@ void lz_p2_split32_avx2(const lz_p2_blk *blk, int8_t *oh, int8_t *ol) {
     _mm256_storeu_si256((__m256i *)(void *)ol, T);
 }
 
+/* ---- Q8 activation rounding, AVX2 tier -------------------------------
+   SSE2 twin: lz_q8round32_simd, src/ops_sse2.c. That kernel
+   processes 32 elements as two 16-wide iterations (b<2); this processes
+   all 32 in one 32-wide pass, so both narrowing packs it chains
+   (packs_epi32 then packs_epi16) need a permute4x64(_,0xD8) fixup - same
+   derivation as GDN split32's two-pack chain, but simpler: one iteration,
+   not two, so there's no o-loop to interact with the permute placement.
+
+   cvtps_epi32 rounds to nearest-even by default MXCSR mode, same as the
+   SSE2 twin's comment states - not an approximation of q8_round's magic
+   add, a second way to spell the identical rule. */
+void lz_q8round32_avx2(const float *x, int8_t *o, const float *pinv) {
+    __m256 vi = _mm256_set1_ps(*pinv);
+    __m256i p127 = _mm256_set1_epi16(127), m127 = _mm256_set1_epi16(-127);
+    __m256i a0 = _mm256_cvtps_epi32(_mm256_mul_ps(_mm256_loadu_ps(x),      vi));
+    __m256i a1 = _mm256_cvtps_epi32(_mm256_mul_ps(_mm256_loadu_ps(x + 8),  vi));
+    __m256i a2 = _mm256_cvtps_epi32(_mm256_mul_ps(_mm256_loadu_ps(x + 16), vi));
+    __m256i a3 = _mm256_cvtps_epi32(_mm256_mul_ps(_mm256_loadu_ps(x + 24), vi));
+    __m256i l = _mm256_permute4x64_epi64(_mm256_packs_epi32(a0, a1), 0xD8);
+    __m256i h = _mm256_permute4x64_epi64(_mm256_packs_epi32(a2, a3), 0xD8);
+    __m256i t;
+    l = _mm256_max_epi16(_mm256_min_epi16(l, p127), m127);
+    h = _mm256_max_epi16(_mm256_min_epi16(h, p127), m127);
+    t = _mm256_permute4x64_epi64(_mm256_packs_epi16(l, h), 0xD8);
+    _mm256_storeu_si256((__m256i *)(void *)o, t);
+}
+
 /* lz_rope_avx2_compiled_in lives in ops_rope.c, not here - see the
    comment on its definition for why. */
 
