@@ -85,11 +85,11 @@ static int32_t part32_x32_avx2(const int8_t *w, const int16_t *x) {
 }
 
 /* ---- Q8 row kernel -------------------------------------------------------
-   No Watcom twin - AVX2 has none, unlike every other tier in this
-   codebase. No pairing either: g_pair (src/ops_sse2.c) is the SSE2
-   tier's two-token, shared-weight-load trick, not implemented here -
-   see this file's header comment. Each token is processed
-   independently. */
+   SSE2 twin: row_q8_sse2_intrin, src/ops_sse2.c. No Watcom twin -
+   AVX2 has none, unlike every other tier in this codebase. No pairing
+   either: g_pair (src/ops_sse2.c) is the SSE2 tier's two-token,
+   shared-weight-load trick, not implemented here - see this file's
+   header comment. Each token is processed independently. */
 void row_q8_avx2_intrin(const lz_row_ctx *c) {
     const int8_t *wr = (const int8_t *)c->w4;
     int tk, g;
@@ -136,8 +136,9 @@ static int32_t part32_q41_avx2(const unsigned char *w, const int16_t *x) {
 }
 
 /* ---- Q4_1 row kernel ------------------------------------------------
-   No Watcom twin, no pairing - see this file's header comment; each
-   token is processed independently, same as row_q8_avx2_intrin. */
+   SSE2 twin: row_q41_sse2_intrin, src/ops_sse2.c. No Watcom twin, no
+   pairing - see this file's header comment; each token is processed
+   independently, same as row_q8_avx2_intrin. */
 void row_q41_avx2_intrin(const lz_row_ctx *c) {
     const unsigned char *wn = (const unsigned char *)c->w4;
     int tk, s;
@@ -196,10 +197,11 @@ static int32_t part32_q61_avx2(const unsigned char *w4,
 }
 
 /* ---- Q6_1 row kernel ------------------------------------------------
-   No Watcom twin, no pairing - see this file's header comment; each
-   token is processed independently, same as row_q8_avx2_intrin. Reads
-   both c->w4 (4-bit plane) and c->w2 (2-bit plane), each advanced at
-   its own stride (16 and 8 bytes per 32-element sub-block). */
+   SSE2 twin: row_q61_sse2_intrin, src/ops_sse2.c. No Watcom twin, no
+   pairing - see this file's header comment; each token is processed
+   independently, same as row_q8_avx2_intrin. Reads both c->w4 (4-bit
+   plane) and c->w2 (2-bit plane), each advanced at its own stride (16
+   and 8 bytes per 32-element sub-block). */
 void row_q61_avx2_intrin(const lz_row_ctx *c) {
     const unsigned char *wn = (const unsigned char *)c->w4;
     const unsigned char *w2 = (const unsigned char *)c->w2;
@@ -235,8 +237,9 @@ static int32_t part32_q16_avx2(const int16_t *w, const int16_t *x) {
 }
 
 /* ---- Q16_0 row kernel -------------------------------------------------
-   No Watcom twin, no pairing - see this file's header comment; each
-   token is processed independently, same as row_q8_avx2_intrin. */
+   SSE2 twin: row_q16_sse2_intrin, src/ops_sse2.c. No Watcom twin, no
+   pairing - see this file's header comment; each token is processed
+   independently, same as row_q8_avx2_intrin. */
 void row_q16_avx2_intrin(const lz_row_ctx *c) {
     const int16_t *wr = (const int16_t *)c->w4;
     int tk, g;
@@ -310,16 +313,29 @@ void lz_rmsnorm_out_avx2(float *o, const float *x, const float *w,
 void lz_vmax_avx2(const float *x, int n4, float *pmax) {
     __m256 acc = _mm256_set1_ps(*pmax);
     int b, n8 = n4 & ~1;
-    union { __m256 m; float f[8]; } o;
     for (b = 0; b < n8; b += 2)
         acc = _mm256_max_ps(acc, _mm256_loadu_ps(x + b * 4));
-    o.m = acc;
     {
-        float m = o.f[0];
+        /* Vector-domain tree, not a union+scalar-loop reduction: the
+           loop shape compiled to a genuine stack spill + 7-iteration
+           scalar read-back (confirmed by disassembly at -O2 -mavx2),
+           unlike lz_amax32_avx2's own tail three functions up and
+           lz_vmax_sse's ternary-tree C twin (ops_kernel_norm.h), both
+           of which gcc keeps entirely in registers. This mirrors
+           Watcom's own lz_vmax_sse_asm (ops_mmx_sse.c): maxps twice,
+           movhlps, shufps twice, one scalar store out - no memory
+           traffic between the first load and the final result. */
+        __m128 lo = _mm256_castps256_ps128(acc);
+        __m128 hi = _mm256_extractf128_ps(acc, 1);
+        __m128 m  = _mm_max_ps(lo, hi);
+        __m128 t  = _mm_movehl_ps(m, m);
         int i;
-        for (i = 1; i < 8; i++) if (o.f[i] > m) m = o.f[i];
-        for (i = n8 * 4; i < n4 * 4; i++) if (x[i] > m) m = x[i];
-        *pmax = m;
+        m = _mm_max_ps(m, t);
+        t = _mm_shuffle_ps(m, m, 1);
+        m = _mm_max_ps(m, t);
+        for (i = n8 * 4; i < n4 * 4; i++)
+            m = _mm_max_ss(m, _mm_load_ss(x + i));
+        _mm_store_ss(pmax, m);
     }
 }
 
