@@ -604,9 +604,10 @@ void lz_p2_mul32_avx2(const int8_t *hi, const int8_t *lo,
    are per-lane and need no fixup.
 
    k128 and kclp come from blk, one broadcast load each, the same source
-   the MMX and SSE2 twins read: this kernel has no constants of its own,
+   the MMX and SSE2 tiers read: this kernel has no constants of its own,
    so a caller that writes different values gets the same arithmetic from
-   every tier. */
+   those tiers. (The SSE1 tier clamps with kmin and a single pmaxsw
+   instead; it reads neither field.) */
 void lz_p2_split32_avx2(const lz_p2_blk *blk, int8_t *oh, int8_t *ol) {
     __m256i rnd  = _mm256_broadcastsi128_si256(
         _mm_load_si128((const __m128i *)(const void *)blk->rnd));
