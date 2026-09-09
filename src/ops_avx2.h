@@ -21,6 +21,12 @@ void row_q16_avx2_intrin(const lz_row_ctx *c);
 #define LZ_HAVE_AMAX_AVX2 1
 unsigned lz_amax32_avx2(const float *x, int n);
 
+#define LZ_HAVE_NORM_AVX2 1
+void lz_rmsnorm_out_avx2(float *o, const float *x, const float *w,
+                         int n4, const float *k2);
+void lz_vmax_avx2(const float *x, int n4, float *pmax);
+void lz_vscale_avx2(float *x, int n4, const float *pk);
+
 #endif /* LZ_AVX2_TU && !__WATCOMC__ */
 
 #endif /* LZ_OPS_AVX2_H */

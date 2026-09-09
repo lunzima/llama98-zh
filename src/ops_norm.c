@@ -15,6 +15,19 @@
 #include "ops_mmx.h"
 #include "ops_sse.h"     /* the three norm _w wrappers LZ_NORM_SLOTS pastes */
 #include "ops_sse2.h"
+#include "ops_avx2.h"    /* LZ_HAVE_NORM_AVX2, lz_rmsnorm_out_avx2/
+                            lz_vmax_avx2/lz_vscale_avx2 - without this,
+                            LZ_NORMOUT_TAB/LZ_VMAX_TAB/LZ_VSCALE_TAB's
+                            trailing slots (ops_kernel_norm.h, included
+                            below) silently compile to NULL in THIS
+                            translation unit even when ops_avx2.c
+                            defines the three functions elsewhere: the
+                            three norm helpers live here, and each
+                            #include "ops_kernel_norm.h" site gets its
+                            own private copy of the tables. Empty body
+                            on Watcom/non-AVX2 builds (this header's own
+                            guard), same shape as the SSE2 include just
+                            above. */
 #include "ops_quant.h"
 #include "ops_sched.h"
 #include "ops_kernel_shared.h"
@@ -908,5 +921,27 @@ void lz_softmax(float *x, int n) {
         }
         for (; i < n; i++) x[i] *= inv;
     }
+}
+
+/* Test hooks: true iff each helper's own dispatch, under whichever
+   kernel is currently selected, resolves its table to the AVX2 body
+   specifically - pointer identity, not a value comparison (see
+   lz_normout_is_avx2/lz_vmax_is_avx2/lz_vscale_is_avx2's own comment,
+   ops_kernel_norm.h, for why a value comparison cannot tell "ran AVX2"
+   from "silently fell back to SSE and got the same right answer").
+   LZ_NORMOUT_TAB/LZ_VMAX_TAB/LZ_VSCALE_TAB and lz_normout_pick/
+   lz_vmax_pick/lz_vscale_pick are static to this TU by design - every
+   #include "ops_kernel_norm.h" site gets its own private copy of the
+   tables - so these are the externally-linked bridges a test outside
+   this file needs to ask the question about THESE copies, the ones
+   lz_rmsnorm/lz_softmax themselves actually dispatch through. */
+int lz_rmsnorm_out_picked_avx2(void) {
+    return lz_normout_is_avx2(lz_normout_pick(LZ_NORMOUT_TAB));
+}
+int lz_vmax_picked_avx2(void) {
+    return lz_vmax_is_avx2(lz_vmax_pick(LZ_VMAX_TAB));
+}
+int lz_vscale_picked_avx2(void) {
+    return lz_vscale_is_avx2(lz_vscale_pick(LZ_VSCALE_TAB));
 }
 

@@ -283,4 +283,55 @@ unsigned lz_amax32_avx2(const float *x, int n) {
     }
 }
 
+/* ---- RMSNorm output loop / softmax max-scan / softmax scale, AVX2 tier -
+   SSE references: src/ops_kernel_norm.h's lz_rmsnorm_out_sse/lz_vmax_sse/
+   lz_vscale_sse. n4 counts groups of 4 floats and is not guaranteed
+   even - each function below processes pairs of groups (8 floats) at a
+   time and falls back to a scalar tail for a possible odd leftover
+   group, rather than mixing in a 128-bit SSE path for four floats. */
+void lz_rmsnorm_out_avx2(float *o, const float *x, const float *w,
+                         int n4, const float *k2) {
+    __m256 vi = _mm256_set1_ps(k2[0]);
+    __m256 one = _mm256_set1_ps(k2[1]);
+    int b, n8 = n4 & ~1;
+    for (b = 0; b < n8; b += 2) {
+        __m256 vx = _mm256_loadu_ps(x + b * 4);
+        __m256 vw = _mm256_loadu_ps(w + b * 4);
+        _mm256_storeu_ps(o + b * 4,
+            _mm256_mul_ps(_mm256_mul_ps(vx, vi), _mm256_add_ps(one, vw)));
+    }
+    if (b < n4) {
+        int i;
+        for (i = b * 4; i < n4 * 4; i++)
+            o[i] = x[i] * k2[0] * (1.0f + w[i]);
+    }
+}
+
+void lz_vmax_avx2(const float *x, int n4, float *pmax) {
+    __m256 acc = _mm256_set1_ps(*pmax);
+    int b, n8 = n4 & ~1;
+    union { __m256 m; float f[8]; } o;
+    for (b = 0; b < n8; b += 2)
+        acc = _mm256_max_ps(acc, _mm256_loadu_ps(x + b * 4));
+    o.m = acc;
+    {
+        float m = o.f[0];
+        int i;
+        for (i = 1; i < 8; i++) if (o.f[i] > m) m = o.f[i];
+        for (i = n8 * 4; i < n4 * 4; i++) if (x[i] > m) m = x[i];
+        *pmax = m;
+    }
+}
+
+void lz_vscale_avx2(float *x, int n4, const float *pk) {
+    __m256 vk = _mm256_set1_ps(*pk);
+    int b, n8 = n4 & ~1;
+    for (b = 0; b < n8; b += 2)
+        _mm256_storeu_ps(x + b * 4, _mm256_mul_ps(_mm256_loadu_ps(x + b * 4), vk));
+    if (b < n4) {
+        int i;
+        for (i = b * 4; i < n4 * 4; i++) x[i] *= *pk;
+    }
+}
+
 #endif /* LZ_AVX2_TU && !__WATCOMC__ */
