@@ -30,6 +30,14 @@
 #include "ops_arm.h"     /* LZ_ARM_ASM_EXTERN, lz_dot32_q8_arm_asm,
                             lz_wsum_pair_arm_asm */
 #include "ops_gdn.h"
+#include "ops_avx2.h"    /* LZ_HAVE_P2_MUL32_AVX2, LZ_HAVE_P2_SPLIT32_AVX2,
+                            lz_p2_mul32_avx2, lz_p2_split32_avx2 - gcc-only,
+                            guarded on LZ_AVX2_TU && !__WATCOMC__ inside the
+                            header itself. Without this include the tier-4
+                            arm of p2_tier and both gcc call sites below
+                            compile out, and --kernel avx2 answers tier 1
+                            (MMX) in silence - the tiers owe each other bit
+                            identity, so nothing in the output would say so. */
 
 
 /* ---- fixed-point attention -------------------------------------------
@@ -1433,7 +1441,7 @@ typedef char lz_p2_needs_lo_scale_256[
 #endif /* LZ_HAVE_P2_SSE2 && !LZ_HAVE_P2_MMX */
 
 #ifdef LZ_HAVE_P2_MMX
-/* 0 scalar, 1 MMX, 2 SSE2. Simpler than lz_q8r_tier for
+/* 0 scalar, 1 MMX, 2 SSE1, 3 SSE2, 4 AVX2. Simpler than lz_q8r_tier for
    one reason: this operator's tiers are pure integer SIMD, so they line
    up exactly with the kernel tier g_kernel already carries - unlike the
    q8 rounding, where a PIII has 64-bit integer SIMD but 128-bit float
@@ -1444,10 +1452,17 @@ typedef char lz_p2_needs_lo_scale_256[
    scalar here is one where kernel_detect already said LZ_KERNEL_REF.
    No FORCE knob: unlike the SSE1 tiers, both of these are selected by
    default on some machine that runs the suite, so both are validated by
-   every run rather than only by a probe. */
+   every run rather than only by a probe.
+
+   Tier 4 is gcc-only and never auto-selected: LZ_KERNEL_AVX2 only
+   reaches here through an explicit --kernel avx2, and the AVX2 bodies
+   exist only when src/ops_avx2.c is in this link. */
 static int p2_tier(void) {
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
     if (g_kernel == LZ_KERNEL_REF) return 0;
+#if defined(LZ_HAVE_P2_MUL32_AVX2) && defined(LZ_HAVE_P2_SPLIT32_AVX2)
+    if (g_kernel == LZ_KERNEL_AVX2) return 4;
+#endif /* LZ_HAVE_P2_MUL32_AVX2 && LZ_HAVE_P2_SPLIT32_AVX2 */
 #ifdef LZ_HAVE_P2_SSE2
     if (g_kernel == LZ_KERNEL_SSE2) return 3;
 #endif /* LZ_HAVE_P2_SSE2 */
@@ -1882,6 +1897,10 @@ static void gdn_p2_row_simd(const int8_t *ph_row,
 #else
         plg = zero_lo;
 #endif /* LZ_GDN_STATE_2PLANE */
+#if defined(LZ_HAVE_P2_MUL32_AVX2)
+        if (tier >= 4) lz_p2_mul32_avx2(ph_row + gg * 32, plg, dq + gg * 32, blk);
+        else
+#endif /* LZ_HAVE_P2_MUL32_AVX2 */
 #ifdef LZ_HAVE_P2_SSE2
         if (tier >= 3) lz_p2_mul32_sse2(ph_row + gg * 32, plg, dq + gg * 32, blk);
         else
@@ -1909,6 +1928,10 @@ static void gdn_p2_row_simd(const int8_t *ph_row,
 #else
             olg = sink_lo;
 #endif /* LZ_GDN_STATE_2PLANE */
+#if defined(LZ_HAVE_P2_SPLIT32_AVX2)
+            if (tier >= 4) lz_p2_split32_avx2(blk, oh_row + gg * 32, olg);
+            else
+#endif /* LZ_HAVE_P2_SPLIT32_AVX2 */
 #ifdef LZ_HAVE_P2_SSE2
             if (tier >= 3) lz_p2_split32_sse2(blk, oh_row + gg * 32, olg);
             else
@@ -1926,7 +1949,9 @@ static void gdn_p2_row_simd(const int8_t *ph_row,
        REGISTER, so tier 2 needs the emms exactly as tier 1 does. Tier 3
        touches xmm and nothing else, so there is no emms to
        clear there, and skipping it is worth a few cycles a row on the
-       P4 - the machine the SSE2 tier is for. */
+       P4 - the machine the SSE2 tier is for. Tier 4 is ymm and __m128i
+       only (no __m64 anywhere in lz_p2_mul32_avx2/lz_p2_split32_avx2),
+       so the same `< 3` excludes it correctly. */
     if (tier < 3) _mm_empty();
 
     /* PHASE 3 - float again. A group the prologue or the epilogue
@@ -1959,6 +1984,9 @@ static void gdn_p2_row_simd(const int8_t *ph_row,
 const char *lz_gdn_p2_impl(void) {
 #if LZ_GDN_FIXED
     if (!lz_gdn_p2_mode()) return "-";
+#if defined(LZ_HAVE_P2_MUL32_AVX2) && defined(LZ_HAVE_P2_SPLIT32_AVX2)
+    if (p2_tier() >= 4) return "avx2-intrin";
+#endif /* LZ_HAVE_P2_MUL32_AVX2 && LZ_HAVE_P2_SPLIT32_AVX2 */
 #if defined(LZ_HAVE_P2_SSE2_ASM)
     if (p2_tier() >= 3) return "sse2-asm";
 #elif defined(LZ_HAVE_P2_SSE2)
