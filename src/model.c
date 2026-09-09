@@ -922,11 +922,11 @@ static int model_walk(LZModel *m, LZVisit visit, void *ctx,
            to this family for the same reason the other three do: LOFF
            reuses LZLayer's down_norm field, but its width is
            mtp_intermediate_size, not the body's intermediate_size, so
-           it cannot be picked up by the generic reuse loop either. It
-           used to be silently dropped by that loop's old DK_INTER dim
-           filter (down_norm's LAYER_SPECS entry uses DK_INTER too, and
-           that filter matched on dim kind, not identity), which left
-           L->down_norm a permanent zero LZTensor and crashed
+           it cannot be picked up by the generic reuse loop either. A
+           DK_INTER dim filter on that loop silently drops it
+           (down_norm's LAYER_SPECS entry uses DK_INTER too, and such a
+           filter matches on dim kind, not identity), which leaves
+           L->down_norm a permanent zero LZTensor and crashes
            dense_ffn_step's SubLN norm on the first --spec MTP token. */
         static const struct { const char *suffix; size_t field; int dims[3];
                                LZPresentFn present; }
@@ -942,10 +942,10 @@ static int model_walk(LZModel *m, LZVisit visit, void *ctx,
         /* The block reuses LAYER_SPECS for everything EXCEPT the four
            MTP_FFN_SPECS entries above, identified by field offset (NOT
            by dim kind - DK_INTER also appears on down_norm's LAYER_SPECS
-           entry, which is exactly the false match that used to make this
-           filter connascent with a dim taxonomy it had no business
-           reading; see the MTP_FFN_SPECS comment above). Every other
-           tensor in the block matches a body full_attention layer's
+           entry, which is exactly the false match that makes a
+           dim-kind filter connascent with a dim taxonomy it has no
+           business reading; see the MTP_FFN_SPECS comment above). Every
+           other tensor in the block matches a body full_attention layer's
            shape one for one, which is what makes "reuse the same
            pruning path" possible on the training side too. */
         for (si = 0; si < N_LAYER_SPECS; si++) {
