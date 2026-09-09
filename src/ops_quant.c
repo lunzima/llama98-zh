@@ -25,6 +25,16 @@
 #include "ops_mmx.h"
 #include "ops_sse.h"
 #include "ops_sse2.h"
+#include "ops_avx2.h"    /* LZ_HAVE_AMAX_AVX2, lz_amax32_avx2 - without this,
+                            LZ_AMAX_TAB's trailing slot (ops_kernel_amax.h,
+                            included below) silently compiles to NULL in
+                            THIS translation unit even when ops_avx2.c
+                            defines the function elsewhere: q8_amax lives
+                            here, and each #include "ops_kernel_amax.h"
+                            site gets its own private copy of the table.
+                            Empty body on Watcom/non-AVX2 builds (this
+                            header's own guard), same shape as the SSE2
+                            include just above. */
 #include "ops_sched.h"   /* lz_cpu_has_sse - norm_ss_fixed's SSE1 arm */
 #include "ops_kernel_shared.h" /* lz_i32f, LZ_ROW_N, LZ_DEFINE_PICK, g_kernel */
 #include "ops_quant.h"
@@ -1442,6 +1452,21 @@ uint32_t q8_amax(const float *grp, int gs) {
         if (a > am) am = a;
     }
     return am;
+}
+
+/* Test hook: true iff q8_amax's own dispatch, under whichever kernel is
+   currently selected, resolves LZ_AMAX_TAB to the AVX2 body specifically
+   - pointer identity, not a value comparison (see lz_amax_is_avx2's own
+   comment, ops_kernel_amax.h, for why a value comparison cannot tell
+   "ran AVX2" from "silently fell back to SSE2 and got the same right
+   answer"). LZ_AMAX_TAB/lz_amax_pick/lz_amax_is_avx2 are static to this
+   TU by design - every #include "ops_kernel_amax.h" site gets its own
+   private copy of the table (ops_mmx.c and ops_sse2.c each have theirs
+   too) - so this is the one externally-linked bridge a test outside
+   this file needs to ask the question about THIS copy, the one q8_amax
+   itself actually dispatches through. */
+int q8_amax_picked_avx2(void) {
+    return lz_amax_is_avx2(lz_amax_pick(LZ_AMAX_TAB));
 }
 
 /* Shared constants. `static const float` forces the round once, here,

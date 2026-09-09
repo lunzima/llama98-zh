@@ -179,6 +179,11 @@ LZ_MAYBE_UNUSED static int q8_round(float qv) {
 /* Per-group absolute-maximum scan (dispatched via amax table). */
 uint32_t q8_amax(const float *grp, int gs);
 
+/* Test hook: true iff q8_amax's dispatch, under the currently selected
+   kernel, resolves to the AVX2 body specifically - pointer identity,
+   not a value comparison. See its definition (ops_quant.c) for why. */
+int q8_amax_picked_avx2(void);
+
 /* Per-group scale and reciprocal. Returns fast flag. */
 int q8_group_scale(const float *grp, int gs, float *sg, float *inv);
 

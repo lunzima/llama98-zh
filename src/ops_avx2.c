@@ -252,4 +252,35 @@ void row_q16_avx2_intrin(const lz_row_ctx *c) {
     }
 }
 
+/* ---- Q8 group-scale amax, AVX2 tier -------------------------------------
+   SSE2 reference: src/ops_sse2.c's lz_amax32_sse2. Bit-pattern integer
+   max is exact and associative (see this file's own top-of-plan
+   licence note) - this does not need to reproduce the SSE2 tree shape,
+   only the correct maximum. */
+unsigned lz_amax32_avx2(const float *x, int n) {
+    __m256i acc = _mm256_setzero_si256();
+    __m256i msk = _mm256_set1_epi32(0x7FFFFFFF);
+    int k;
+    for (k = 0; k + 7 < n; k += 8) {
+        __m256i v = _mm256_and_si256(
+            _mm256_loadu_si256((const __m256i *)(const void *)(x + k)), msk);
+        __m256i gt = _mm256_cmpgt_epi32(v, acc);
+        acc = _mm256_or_si256(_mm256_and_si256(v, gt),
+                              _mm256_andnot_si256(gt, acc));
+    }
+    {
+        __m128i lo = _mm256_castsi256_si128(acc);
+        __m128i hi = _mm256_extracti128_si256(acc, 1);
+        __m128i gt128 = _mm_cmpgt_epi32(hi, lo);
+        __m128i m4 = _mm_or_si128(_mm_and_si128(hi, gt128),
+                                  _mm_andnot_si128(gt128, lo));
+        union { __m128i m; unsigned u[4]; } o;
+        unsigned a, b;
+        o.m = m4;
+        a = o.u[0] > o.u[1] ? o.u[0] : o.u[1];
+        b = o.u[2] > o.u[3] ? o.u[2] : o.u[3];
+        return a > b ? a : b;
+    }
+}
+
 #endif /* LZ_AVX2_TU && !__WATCOMC__ */
