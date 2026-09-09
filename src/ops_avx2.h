@@ -27,6 +27,10 @@ void lz_rmsnorm_out_avx2(float *o, const float *x, const float *w,
 void lz_vmax_avx2(const float *x, int n4, float *pmax);
 void lz_vscale_avx2(float *x, int n4, const float *pk);
 
+#define LZ_HAVE_EPI_AVX2 1
+#define LZ_EPI_AVX2_EXTERN 1
+lz_i64 lz_epi_mac_i16_avx2(const int32_t *a, const int16_t *m, int n);
+
 #endif /* LZ_AVX2_TU && !__WATCOMC__ */
 
 #endif /* LZ_OPS_AVX2_H */

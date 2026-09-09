@@ -87,6 +87,13 @@ void matmul_scalar_ref(float *o, const int8_t *xq, const float *xqs,
    with no `post` concept at all. */
 #define LZ_EPI_POST_NA 64
 int lz_epi_post_e(const LZTensor *w);
+/* Wiring-proof for lz_epi_mac_i16's direct g_kernel==AVX2 branch (ops_epi.c):
+   returns 1 iff LZ_EPI_AVX2_EXTERN was defined when ops_epi.c compiled,
+   0 otherwise. A value-only AVX2-vs-SSE2 comparison cannot distinguish
+   a real AVX2 kernel from a silently-correct SSE2 fallback (the
+   #include ops_avx2.h missing) - callers must check this returns 1
+   before trusting any such comparison. */
+int lz_epi_avx2_compiled_in(void);
 float epi_q8(const int32_t *accb, const float *xsb, const float *ws,
              int ng, int r, float post);
 float epi_q41(const int32_t *accb, const float *xsb, const float *xgb,

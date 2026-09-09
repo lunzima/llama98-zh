@@ -334,4 +334,85 @@ void lz_vscale_avx2(float *x, int n4, const float *pk) {
     }
 }
 
+/* ---- matmul epilogue's int32 x int16 -> int64 MAC, AVX2 tier -----------
+   SSE2 reference: src/ops_sse2.c's lz_epi_mac_i16_sse2 - read that
+   function's comment for the split-multiply technique this widens.
+   Exact integer accumulation (see this file's own top-of-plan licence
+   note) - the accumulator pairing below does not need to match the
+   SSE2 tier's, only sum the same eight exact products somewhere.
+
+   Overflow bound, derived from the actual call site (ops_epi.c:1323,
+   epi_q41_join), not from the row kernels' ~1.3e8 dot-product cap that
+   an earlier draft of this comment cited by mistake - that number
+   belongs to a different accumulator. Here `a` is g_epi_zg[tk]: a sum
+   of up to LZ_EPI_MAX_R (16) products each bounded 133,165,088
+   (ops_epi.c:604-612's own derivation), so |a| <= 16 * 133,165,088 =
+   2,130,641,408 (~2.13e9, deliberately near INT32_MAX by construction;
+   measured max on kmr20 is 76,280,004). With |m| <= 32767 and up to
+   LZ_EPI_MAX_NG (64) terms per call, |sum| <= 64 * 2,130,641,408 *
+   32767 ~= 4.47e15, a ~2064x margin under INT64_MAX (~9.2e18).
+   Processing 8 elements per iteration instead of 4 changes nothing
+   about this: the per-lane arithmetic (ah/als/bb/m32/pa/pl) is
+   unaffected by vector width, only how many lanes run between int64
+   accumulator folds. */
+lz_i64 lz_epi_mac_i16_avx2(const int32_t *a, const int16_t *m, int n) {
+    const __m256i lo16 = _mm256_set1_epi32(0x0000FFFF);
+    const __m256i one  = _mm256_set1_epi32(1);
+    const __m128i zero128 = _mm_setzero_si128();
+    __m128i acc_hi = zero128, acc_als = zero128;
+    lz_i64 t[2], s_hi, s_als;
+    int g = 0;
+
+    for (; g + 7 < n; g += 8) {
+        __m256i av    = _mm256_loadu_si256((const __m256i *)(const void *)(a + g));
+        __m128i mv128 = _mm_loadu_si128((const __m128i *)(const void *)(m + g));
+        /* Zero-extend 8 x int16 to 8 x int32 IN ELEMENT ORDER - the
+           AVX2-safe equivalent of the SSE2 tier's unpacklo_epi16-with-
+           zero, same reason row_q8_avx2_intrin uses cvtepu8_epi16
+           instead of unpacklo/hi_epi8: a raw 256-bit unpack would
+           interleave WITHIN each 128-bit half rather than across the
+           whole register. */
+        __m256i m32 = _mm256_cvtepu16_epi32(mv128);
+        __m256i ah  = _mm256_srli_epi32(av, 16);
+        __m256i als = _mm256_and_si256(av, lo16);
+        __m256i bb  = _mm256_and_si256(_mm256_srli_epi32(av, 15), one);
+        __m256i pa  = _mm256_add_epi32(_mm256_madd_epi16(ah, m32),
+                                       _mm256_madd_epi16(bb, m32));
+        __m256i pl  = _mm256_madd_epi16(als, m32);
+        /* Split to 128-bit halves before sign-extending to int64 with
+           the SAME 128-bit unpacklo/hi sequence the SSE2 tier uses
+           (safe there: no cross-256-bit-lane concern once already
+           split). Which half feeds which accumulator add does not
+           affect the final sum - an exact integer total, any grouping
+           of the same eight products gives the same int64. */
+        {
+            __m128i pa_lo = _mm256_castsi256_si128(pa);
+            __m128i pa_hi = _mm256_extracti128_si256(pa, 1);
+            __m128i pl_lo = _mm256_castsi256_si128(pl);
+            __m128i pl_hi = _mm256_extracti128_si256(pl, 1);
+            acc_hi = _mm_add_epi64(acc_hi,
+                     _mm_unpacklo_epi32(pa_lo, _mm_srai_epi32(pa_lo, 31)));
+            acc_hi = _mm_add_epi64(acc_hi,
+                     _mm_unpackhi_epi32(pa_lo, _mm_srai_epi32(pa_lo, 31)));
+            acc_hi = _mm_add_epi64(acc_hi,
+                     _mm_unpacklo_epi32(pa_hi, _mm_srai_epi32(pa_hi, 31)));
+            acc_hi = _mm_add_epi64(acc_hi,
+                     _mm_unpackhi_epi32(pa_hi, _mm_srai_epi32(pa_hi, 31)));
+            acc_als = _mm_add_epi64(acc_als,
+                     _mm_unpacklo_epi32(pl_lo, _mm_srai_epi32(pl_lo, 31)));
+            acc_als = _mm_add_epi64(acc_als,
+                     _mm_unpackhi_epi32(pl_lo, _mm_srai_epi32(pl_lo, 31)));
+            acc_als = _mm_add_epi64(acc_als,
+                     _mm_unpacklo_epi32(pl_hi, _mm_srai_epi32(pl_hi, 31)));
+            acc_als = _mm_add_epi64(acc_als,
+                     _mm_unpackhi_epi32(pl_hi, _mm_srai_epi32(pl_hi, 31)));
+        }
+    }
+    _mm_storeu_si128((__m128i *)(void *)t, acc_hi);  s_hi  = t[0] + t[1];
+    _mm_storeu_si128((__m128i *)(void *)t, acc_als); s_als = t[0] + t[1];
+    s_hi = (s_hi << 16) + s_als;
+    for (; g < n; g++) s_hi += (lz_i64)a[g] * (lz_i64)m[g];
+    return s_hi;
+}
+
 #endif /* LZ_AVX2_TU && !__WATCOMC__ */
