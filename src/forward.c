@@ -1357,9 +1357,13 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
        Unlike conv_fixed_build's own refusal, there is no cheaper tier
        left to fall back to if THIS fails - the float path is the last
        resort - so a failure here is fatal, the same way the buffer
-       allocations above it are. */
+       allocations above it are. LZ_ERR_CONV_LAYOUT, not
+       LZ_ERR_STATE_ALLOC: conv_f32_build's only failure is its coverage
+       check (a layer's channel counts do not sum to lin_conv_dim), a
+       checkpoint layout problem, not a failed xcalloc - see that code's
+       own comment in err.h. */
     if (!s->conv_fixed && conv_f32_build(s, m) != 0) {
-        if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_STATE_ALLOC);
+        if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_CONV_LAYOUT);
         lz_state_free(s);
         return 1;
     }
