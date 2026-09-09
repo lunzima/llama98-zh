@@ -76,20 +76,20 @@ collect() {
         G|W|A) ;;
         *) bad "$label: unknown build class '$cls'"; return 1 ;;
     esac
-    # The five row-kernel units x ten tiers are PINNED - they are the
+    # The five row-kernel units x eleven tiers are PINNED - they are the
     # grid's shape and the training tree's parser depends on it. The
     # total is a floor, not an equality, because operator units join the
     # registry without touching this gate (src/ops.c's km_unit). Both
     # are here because a loop that stops early shrinks the total AND
     # drops pairs, and every other check would still pass.
-    if [ "$n" -lt 50 ]; then
-        bad "$label: reported $n cells, expected at least 50"
+    if [ "$n" -lt 55 ]; then
+        bad "$label: reported $n cells, expected at least 55"
         return 1
     fi
     grep '^cell ' "$out" | awk '{printf "%s/%s %s %s %s\n", $2, $3, $4, $5, $6}' \
         > "$WORK/$cls.cells"
     for u in q8_0 q4_1 q6_1 q16_0 t2; do
-        for t in ref mmxI sseI sse2I mmxA sseA sse2A armC armA g128; do
+        for t in ref mmxI sseI sse2I mmxA sseA sse2A avx2I armC armA g128; do
             if ! grep -q "^$u/$t " "$WORK/$cls.cells"; then
                 bad "$label: no cell for $u/$t - the registry lost a row kernel"
                 return 1
