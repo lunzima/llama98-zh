@@ -91,7 +91,7 @@ void lz_fwht_i32(int32_t *restrict y, const int32_t *restrict x, int n) {
        every real hadamard_o/hadamard_down this project ships is a
        multiple of 8, smallest observed 256) fall all the way to the
        plain scalar loop at the bottom of this function, same as
-       --kernel avx2 already did for this transform before this task.
+       --kernel avx2 does for this transform.
 
        lz_cpu_has_mmx() stays in the guard: the len==2 stage still runs
        on the hand-written MMX kernel exactly as the SSE2 branch below
