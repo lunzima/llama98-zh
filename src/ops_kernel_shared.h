@@ -454,6 +454,8 @@ extern void lz_pf_amd(const void *p);
         TYPE f;                                                           \
         if (!g_kernel) return (TYPE)0;                                    \
         if (g_kernel == LZ_KERNEL_REF) return (TYPE)0;                    \
+        if (g_kernel == LZ_KERNEL_AVX2 && tab[LZ_ROW_AVX2_I])            \
+            return tab[LZ_ROW_AVX2_I];                                    \
         f = tab[want_sse2 ? LZ_ROW_SSE2_A : LZ_ROW_MMX_A];              \
         if (f) return f;                                                  \
         f = tab[want_sse2 ? LZ_ROW_SSE2_I : LZ_ROW_MMX_I];              \
