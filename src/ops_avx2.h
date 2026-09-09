@@ -34,6 +34,11 @@ lz_i64 lz_epi_mac_i16_avx2(const int32_t *a, const int16_t *m, int n);
 #define LZ_FWHT_AVX2_EXTERN 1
 void lz_fwht_stage_avx2(int32_t *y, int n, int len);
 
+#define LZ_ROPE_AVX2_EXTERN 1
+void lz_rope_avx2(float *v, int n_heads, int head_dim, int rotary_dim,
+                  int pos, const float *cs);
+int lz_rope_avx2_compiled_in(void);
+
 #endif /* LZ_AVX2_TU && !__WATCOMC__ */
 
 #endif /* LZ_OPS_AVX2_H */

@@ -459,4 +459,61 @@ void lz_fwht_stage_avx2(int32_t *y, int n, int len) {
     }
 }
 
+/* ---- RoPE, AVX2 tier -----------------------------------------------------
+   SSE2 twin: lz_rope_sse2, src/ops_sse2.c. Same shape - head outer loop,
+   i inner loop - just 8-wide instead of 4-wide, and the same scalar tail
+   for i + 8 > half. Each (i, h) rotation is an independent IEEE mul/add
+   with no reduction, so this is bit-identical to the scalar path by the
+   same per-element argument every Phase 3 element-wise kernel relies on;
+   only the loop order/width changes.
+
+   _mm256_shuffle_ps operates within each 128-bit half independently, not
+   across the full register: shuffle(lo,hi,0x88) on [c0,s0,c1,s1,c2,s2,c3,s3]
+   / [c4,s4,c5,s5,c6,s6,c7,s7] gives [c0,c1,c4,c5, c2,c3,c6,c7], not the
+   contiguous [c0..c7]. permute4x64_epi64 with 0xD8 (index pattern
+   [0,2,1,3] over the four 64-bit lanes) swaps the middle two chunks back
+   into place; done through an int bitcast since permute4x64 has no float
+   form. */
+void lz_rope_avx2(float *v, int n_heads, int head_dim, int rotary_dim,
+                  int pos, const float *cs) {
+    int half = rotary_dim / 2;
+    int h, i;
+    const float *row = cs + (size_t)pos * half * 2;
+    for (h = 0; h < n_heads; h++) {
+        float *base = v + (size_t)h * head_dim;
+        for (i = 0; i + 8 <= half; i += 8) {
+            __m256 lo = _mm256_loadu_ps(row + i * 2);
+            __m256 hi = _mm256_loadu_ps(row + i * 2 + 8);
+            __m256 cshuf = _mm256_shuffle_ps(lo, hi, 0x88);
+            __m256 sshuf = _mm256_shuffle_ps(lo, hi, 0xDD);
+            __m256 c = _mm256_castsi256_ps(
+                _mm256_permute4x64_epi64(_mm256_castps_si256(cshuf), 0xD8));
+            __m256 s = _mm256_castsi256_ps(
+                _mm256_permute4x64_epi64(_mm256_castps_si256(sshuf), 0xD8));
+            __m256 x0 = _mm256_loadu_ps(base + i);
+            __m256 x1 = _mm256_loadu_ps(base + i + half);
+            __m256 n0 = _mm256_sub_ps(_mm256_mul_ps(x0, c), _mm256_mul_ps(x1, s));
+            __m256 n1 = _mm256_add_ps(_mm256_mul_ps(x1, c), _mm256_mul_ps(x0, s));
+            _mm256_storeu_ps(base + i, n0);
+            _mm256_storeu_ps(base + i + half, n1);
+        }
+        for (; i < half; i++) {
+            float c0 = row[i * 2], s0 = row[i * 2 + 1];
+            float x0 = base[i], x1 = base[i + half];
+            base[i]        = x0 * c0 - x1 * s0;
+            base[i + half] = x1 * c0 + x0 * s0;
+        }
+    }
+}
+
+/* lz_rope_avx2_compiled_in is deliberately NOT defined here: it belongs
+   in the dispatch translation unit (src/ops_rope.c), the same place
+   ops_epi.c's lz_epi_avx2_compiled_in and fwht.c's
+   lz_fwht_avx2_compiled_in live. Defined in this file it could only
+   ever return 1 - LZ_ROPE_AVX2_EXTERN comes from this file's own
+   header under the same LZ_AVX2_TU guard that wraps this whole
+   translation unit - so it would answer nothing. In ops_rope.c the
+   macro is present only if that file's #include "ops_avx2.h" is, which
+   is the question the test asks. */
+
 #endif /* LZ_AVX2_TU && !__WATCOMC__ */
