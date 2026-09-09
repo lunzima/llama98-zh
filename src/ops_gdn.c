@@ -36,8 +36,8 @@
                             header itself. Without this include the tier-4
                             arm of p2_tier and both gcc call sites below
                             compile out, and --kernel avx2 answers tier 1
-                            (MMX) in silence - the tiers owe each other bit
-                            identity, so nothing in the output would say so. */
+                            (MMX) instead - the tiers owe each other bit
+                            identity, so no value changes. */
 
 
 /* ---- fixed-point attention -------------------------------------------
@@ -1881,8 +1881,8 @@ static void gdn_p2_row_simd(const int8_t *ph_row,
         int sh;
         const int8_t *plg;
         /* Every constant replicated across the full 16 bytes. MMX reads
-           the low 8 and SSE2 reads all 16, so one fill serves both -
-           see the block's comment in ops_kernel_p2.h. */
+           the low 8, SSE2 and AVX2 read all 16, so one fill serves all
+           three - see the block's comment in ops_kernel_p2.h. */
         for (j = 0; j < 8; j += 2) {
             blk->mul[j]     = mul[gg][0];
             blk->mul[j + 1] = mul[gg][1];
@@ -1897,10 +1897,10 @@ static void gdn_p2_row_simd(const int8_t *ph_row,
 #else
         plg = zero_lo;
 #endif /* LZ_GDN_STATE_2PLANE */
-#if defined(LZ_HAVE_P2_MUL32_AVX2)
+#if defined(LZ_HAVE_P2_MUL32_AVX2) && defined(LZ_HAVE_P2_SPLIT32_AVX2)
         if (tier >= 4) lz_p2_mul32_avx2(ph_row + gg * 32, plg, dq + gg * 32, blk);
         else
-#endif /* LZ_HAVE_P2_MUL32_AVX2 */
+#endif /* LZ_HAVE_P2_MUL32_AVX2 && LZ_HAVE_P2_SPLIT32_AVX2 */
 #ifdef LZ_HAVE_P2_SSE2
         if (tier >= 3) lz_p2_mul32_sse2(ph_row + gg * 32, plg, dq + gg * 32, blk);
         else
@@ -1918,7 +1918,7 @@ static void gdn_p2_row_simd(const int8_t *ph_row,
         }
         for (j = 0; j < 8; j++) {
             blk->k128[j] = 128;
-            blk->kclp[j] = 32641;   /* MMX/SSE2: psubsw then paddsw */
+            blk->kclp[j] = 32641;   /* MMX/SSE2/AVX2: psubsw then paddsw */
             blk->kmin[j] = -127;    /* SSE1: one pmaxsw does the same */
         }
         {
@@ -1928,10 +1928,10 @@ static void gdn_p2_row_simd(const int8_t *ph_row,
 #else
             olg = sink_lo;
 #endif /* LZ_GDN_STATE_2PLANE */
-#if defined(LZ_HAVE_P2_SPLIT32_AVX2)
+#if defined(LZ_HAVE_P2_MUL32_AVX2) && defined(LZ_HAVE_P2_SPLIT32_AVX2)
             if (tier >= 4) lz_p2_split32_avx2(blk, oh_row + gg * 32, olg);
             else
-#endif /* LZ_HAVE_P2_SPLIT32_AVX2 */
+#endif /* LZ_HAVE_P2_MUL32_AVX2 && LZ_HAVE_P2_SPLIT32_AVX2 */
 #ifdef LZ_HAVE_P2_SSE2
             if (tier >= 3) lz_p2_split32_sse2(blk, oh_row + gg * 32, olg);
             else
