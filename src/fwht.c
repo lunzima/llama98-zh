@@ -16,6 +16,15 @@
 #include "mmx_compat.h"           /* _mm_empty, on both toolchains */
 #include "ops_mmx.h"              /* LZ_FWHT_MMX_EXTERN, lz_fwht_stage_mmx */
 #include "ops_sse2.h"             /* LZ_FWHT_SSE2_EXTERN, lz_fwht_stage_sse2 */
+#include "ops_avx2.h"             /* LZ_FWHT_AVX2_EXTERN, lz_fwht_stage_avx2 -
+                                     gcc-only, guarded on LZ_AVX2_TU &&
+                                     !__WATCOMC__ inside the header itself.
+                                     Without this include the AVX2 arm of
+                                     lz_fwht_i32's dispatch below compiles
+                                     out entirely and --kernel avx2 falls
+                                     through in silence (see the class of
+                                     bug this task's own commit message
+                                     documents for ops_epi.c/lz_epi_mac_i16). */
 #include "ops_quant.h"            /* lz_cpu_has_mmx */
 
 /* ONE OPERATOR, TWO FILES, AND THIS ONE IS NAMED FOR IT. lz_fwht, the
@@ -36,6 +45,23 @@
    the additions themselves. The caller folds the 1/sqrt(n) energy
    factor into the downstream activation-quantization scale, keeping
    this a pure integer kernel for the ARMv5TE target (no FPU, no SIMD). */
+
+/* Wiring-proof, not a value check: a value-only AVX2-vs-SSE2/ref
+   comparison cannot tell a real AVX2 kernel apart from a silently-
+   correct fallback (the #include ops_epi.c would otherwise be missing
+   - ops_avx2.h's own include comment, same class of bug here). This
+   answers "did the AVX2 arm of lz_fwht_i32's dispatch even compile in"
+   before any caller trusts a value comparison downstream. Same shape
+   as ops_epi.c's lz_epi_avx2_compiled_in, but for this file's own
+   direct g_kernel branch rather than that one's. */
+int lz_fwht_avx2_compiled_in(void) {
+#if defined(LZ_FWHT_AVX2_EXTERN)
+    return 1;
+#else
+    return 0;
+#endif
+}
+
 void lz_fwht_i32(int32_t *restrict y, const int32_t *restrict x, int n) {
     int len, i, j;
     int32_t *tmp = y;          /* caller provides output; butterflies in place */
@@ -56,6 +82,36 @@ void lz_fwht_i32(int32_t *restrict y, const int32_t *restrict x, int n) {
     }
 #endif /* LZ_ARM_ASM_EXTERN */
     for (i = 0; i < n; i++) tmp[i] = x[i];
+#if defined(LZ_FWHT_AVX2_EXTERN)
+    /* Checked BEFORE the MMX/SSE/SSE2 block below, as its own top-level
+       g_kernel==AVX2 arm rather than nested inside that block's
+       condition list - an AVX2 request should not silently degrade to
+       whatever that block does, it should take this arm or (below the
+       n>=8/(n&7)==0 floor, which no shipping model geometry produces -
+       every real hadamard_o/hadamard_down this project ships is a
+       multiple of 8, smallest observed 256) fall all the way to the
+       plain scalar loop at the bottom of this function, same as
+       --kernel avx2 already did for this transform before this task.
+
+       lz_cpu_has_mmx() stays in the guard: the len==2 stage still runs
+       on the hand-written MMX kernel exactly as the SSE2 branch below
+       does - AVX2 does not replace that cell, only the len>=4 loop's
+       body. */
+    if (g_kernel == LZ_KERNEL_AVX2 && lz_cpu_has_mmx() &&
+        n >= 8 && (n & 7) == 0) {
+        int i2;
+        for (i2 = 0; i2 < n; i2 += 2) {
+            int32_t u = tmp[i2], v = tmp[i2 + 1];
+            tmp[i2]     = u + v;
+            tmp[i2 + 1] = u - v;
+        }
+        lz_fwht_stage_mmx(tmp, n, 2);
+        for (len = 4; len < n; len <<= 1)
+            lz_fwht_stage_avx2(tmp, n, len);
+        _mm_empty();
+        return;
+    }
+#endif /* LZ_FWHT_AVX2_EXTERN */
 #if defined(LZ_FWHT_MMX_EXTERN)
     /* MMX from the second stage on. The butterfly at stride len pairs
        tmp[i+j] with tmp[i+j+len], so for len >= 2 the two halves are

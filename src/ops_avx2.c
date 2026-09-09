@@ -415,4 +415,32 @@ lz_i64 lz_epi_mac_i16_avx2(const int32_t *a, const int16_t *m, int n) {
     return s_hi;
 }
 
+/* ---- FWHT butterfly stage, AVX2 tier -------------------------------
+   SSE2 reference: src/ops_sse2.c's lz_fwht_stage_sse2. Integer add/sub
+   butterfly, exact by construction (this file's top-of-plan licence
+   note) - no reduction, so widening to 8-at-a-time changes nothing
+   about correctness. len is always a power of two; when it is exactly
+   4 the 8-wide loop below does zero iterations and the whole stage
+   falls through to the 4-wide tail, same shape as the SSE2 tier
+   falling through to MMX at len == 2. */
+void lz_fwht_stage_avx2(int32_t *y, int n, int len) {
+    int i, j;
+    for (i = 0; i < n; i += (len << 1)) {
+        int32_t *a = y + i;
+        int32_t *b = y + i + len;
+        for (j = 0; j + 7 < len; j += 8) {
+            __m256i u = _mm256_loadu_si256((const __m256i *)(const void *)(a + j));
+            __m256i v = _mm256_loadu_si256((const __m256i *)(const void *)(b + j));
+            _mm256_storeu_si256((__m256i *)(void *)(a + j), _mm256_add_epi32(u, v));
+            _mm256_storeu_si256((__m256i *)(void *)(b + j), _mm256_sub_epi32(u, v));
+        }
+        for (; j < len; j += 4) {
+            __m128i u = _mm_loadu_si128((const __m128i *)(const void *)(a + j));
+            __m128i v = _mm_loadu_si128((const __m128i *)(const void *)(b + j));
+            _mm_storeu_si128((__m128i *)(void *)(a + j), _mm_add_epi32(u, v));
+            _mm_storeu_si128((__m128i *)(void *)(b + j), _mm_sub_epi32(u, v));
+        }
+    }
+}
+
 #endif /* LZ_AVX2_TU && !__WATCOMC__ */
