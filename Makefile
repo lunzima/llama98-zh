@@ -483,8 +483,8 @@ WATCOM_BASE := -za99 -otexan -zp4 -DLZ_MMX_TU=1 -DLZ_SSE2_TU=1 $(EXTRA_DEFS)
 # project has not measured.
 NT_CPU_FLAGS := -4r
 DOS_CPU_FLAGS := -3r
-# cpucheck.c only among the ENG files, both targets - plus the ENG_MMX
-# units, which take this set outright. See the comment block above.
+# cpucheck.c and ops_gdn.c, both targets - plus the ENG_MMX units, which
+# take this set outright. See the comment block above.
 # __MMX__ lives here (not WATCOM_BASE) because only the units that may
 # emit MMX should define it: mmx_compat.h's Watcom branch gates the full
 # <mmintrin.h> intrinsics on it, and a non-kernel TU that defined __MMX__
@@ -492,8 +492,19 @@ DOS_CPU_FLAGS := -3r
 # units below reuse this same flag set, so they carry __MMX__ too.
 HIGH_CPU_FLAGS := -6r -D__MMX__=1
 
-# cpucheck.c needs HIGH_CPU_FLAGS; every other ENG file uses the
-# target's ordinary floor.
+# cpucheck.c needs HIGH_CPU_FLAGS for its CPUID probe (a .586-class
+# instruction). ops_gdn.c needs it too, for a different reason: it
+# #includes ops_kernel_p2.h, whose `#if defined(__WATCOMC__) &&
+# defined(__MMX__)` block is the ONLY thing that sets
+# LZ_HAVE_P2_MMX_ASM/SSE_ASM/SSE2_ASM - the flags lz_gdn_p2_impl()'s
+# diagnostic reads to report a real asm-tier name (mmx-asm/sse-asm/
+# sse2-asm) instead of falling through to "-". Without __MMX__ here,
+# ops_gdn.c compiles fine (the #pragma aux BODIES it references live in
+# ops_mmx.c/ops_mmx_sse.c/ops_sse2.c, already always built at this same
+# tier) but can never SEE that they exist, so a production Watcom build
+# genuinely carrying the hand-written assembly still reports "-" for
+# it - the CLI ran the real kernel and lied about which one. Every
+# other ENG file uses the target's ordinary floor.
 #
 # NOT ops.c, which this said for a long time while the case arm below
 # named cpucheck alone. The code was the correct half: src/ops.c's own
@@ -511,7 +522,7 @@ HIGH_CPU_FLAGS := -6r -D__MMX__=1
 # be made inside the loop. One case arm, reused by all four `for f in
 # $(ENG)` loops below, so the exception lives in exactly one place per
 # invocation site instead of drifting across CLI/GUI/DLL/DOS.
-ENG_CPU_CASE = case "$$f" in cpucheck) hi=1 ;; *) hi=0 ;; esac
+ENG_CPU_CASE = case "$$f" in cpucheck|ops_gdn) hi=1 ;; *) hi=0 ;; esac
 
 CLI_FLAGS := $(WATCOM_BASE) $(NT_CPU_FLAGS) -bt=nt $(WINVER_FLAGS)
 CLI_FLAGS_HIGH := $(WATCOM_BASE) $(HIGH_CPU_FLAGS) -bt=nt $(WINVER_FLAGS)
