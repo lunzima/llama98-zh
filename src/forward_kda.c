@@ -424,6 +424,16 @@ void forward_kda(const LZModel *m, LZRunState *s,
     size_t q_off = 0;
     size_t k_off = (size_t)c->lin_key_dim * hist;
     size_t v_off = (size_t)2 * c->lin_key_dim * hist;
+    /* Base offsets into s->conv_w32 (float tier's persistent conv-tap
+       cache, forward.h) - conv_f32_build's layout, and the fixed tier's
+       cb/q_ch/k_ch/v_ch mirror in int16 below: q, then k, then v, each
+       lin_key_dim or lin_value_dim channels wide, conv_kernel floats per
+       channel. NOT hist-scaled like q_off/k_off/v_off above: these index
+       taps, not rolling history. */
+    size_t li_off_w = (size_t)li * c->lin_conv_dim * c->conv_kernel;
+    size_t qw_off = 0;
+    size_t kw_off = (size_t)c->lin_key_dim * c->conv_kernel;
+    size_t vw_off = (size_t)2 * c->lin_key_dim * c->conv_kernel;
 #if LZ_CONV_FIXED
     /* Packed fixed-conv geometry (one per q/k/v channel range), filled
        before the tk loop so each per-token call passes one struct pointer
@@ -669,20 +679,27 @@ void forward_kda(const LZModel *m, LZRunState *s,
         {
         float *base_in  = s->conv_state + (size_t)slot_in  * conv_slot_stride + li_off_conv;
         float *base_out = s->conv_state + (size_t)slot_out * conv_slot_stride + li_off_conv;
+        /* s->conv_w32 + li_off_w + {q,k,v}w_off, not
+           lz_t_f32(&L->kda_*_conv1d, s->wscr): the latter widens the
+           WHOLE tensor into s->wscr on every token, sized for the widest
+           matmul row rather than lin_conv_dim*conv_kernel elements - a
+           narrow (BF16) conv1d tensor overran it and corrupted the heap.
+           conv_f32_build staged all three tensors into s->conv_w32 once,
+           at setup; see that function's and conv_w32's own comments. */
         lz_causal_conv1d_step(s->kda_qc + (size_t)tk * kdim,
                               s->kda_q + (size_t)tk * kdim,
                               base_in + q_off, base_out + q_off,
-                              lz_t_f32(&L->kda_q_conv1d, s->wscr), kdim,
+                              s->conv_w32 + li_off_w + qw_off, kdim,
                               c->conv_kernel);
         lz_causal_conv1d_step(s->kda_kc + (size_t)tk * kdim,
                               s->kda_k + (size_t)tk * kdim,
                               base_in + k_off, base_out + k_off,
-                              lz_t_f32(&L->kda_k_conv1d, s->wscr), kdim,
+                              s->conv_w32 + li_off_w + kw_off, kdim,
                               c->conv_kernel);
         lz_causal_conv1d_step(s->kda_vc + (size_t)tk * vdim,
                               s->kda_v + (size_t)tk * vdim,
                               base_in + v_off, base_out + v_off,
-                              lz_t_f32(&L->kda_v_conv1d, s->wscr), vdim,
+                              s->conv_w32 + li_off_w + vw_off, vdim,
                               c->conv_kernel);
         }
     }

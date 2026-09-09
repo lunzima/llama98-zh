@@ -1518,7 +1518,22 @@ static int visit_read(LZModel *m, const LZStTensor *t, LZTensor *field,
      * conv_fixed_build and forward_engram.c's engram conv were changed
      * to read one row at a time through lz_t_row_f32, so the scratch
      * bound is conv_kernel (4), not the whole tensor. The row-width
-     * check (shape[last_dim] <= LZ_MM_WIDEN_MAX) is what matters. */
+     * check (shape[last_dim] <= LZ_MM_WIDEN_MAX) is what matters.
+     *
+     * THAT LIST WAS INCOMPLETE. conv_fixed_build's row-wise read only
+     * covers the FIXED conv tier; forward_ssm.c and forward_kda.c's own
+     * FLOAT-tier per-token conv step still called lz_t_f32 directly on
+     * L->conv1d / kda_q_conv1d / kda_k_conv1d / kda_v_conv1d - the exact
+     * whole-tensor-into-s->wscr read this guard exists to rule out. A
+     * checkpoint whose float tier actually runs (--fixed off, or any
+     * model whose conv_fixed_build refuses) hit the heap-buffer-overflow
+     * this comment already named above, on the caller it called "a
+     * separate change" - found the same way, by running it. Closed by
+     * forward.c's conv_f32_build, the float tier's un-quantized twin of
+     * conv_fixed_build: it also reads one row at a time through
+     * lz_t_row_f32, into its own persistent buffer (s->conv_w32), so
+     * every reader of a narrow-stored conv1d tensor is row-wise now,
+     * not just the fixed tier's. */
     if (t->dtype == LZ_DT_BF16 && lz_bf16_store_g &&
         ((t->n_dims == 2 && t->shape[1] <= LZ_MM_WIDEN_MAX) ||
          (t->n_dims == 1 && t->n_elem <= LZ_MM_WIDEN_MAX) ||

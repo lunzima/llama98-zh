@@ -818,6 +818,38 @@ typedef struct {
 #endif
     float  *ssm_state_s;
     float *conv_state;          /* (n_linear, lin_conv_dim, conv_kernel-1) */
+    /* Persistent whole-tensor F32 cache of the causal conv taps for the
+       FLOAT tier - conv_mw's un-quantized twin (see that field's comment
+       below for the shape/layout both share: channel-major, conv_kernel
+       floats/shorts per channel). Built once by forward.c's
+       conv_f32_build, at the same point conv_fixed_build builds conv_mw,
+       and read by forward_ssm/forward_kda's float-path conv step instead
+       of widening L->conv1d (or the kda_q/k/v_conv1d triple) fresh every
+       token through lz_t_f32.
+
+       That per-token widening is the bug this buffer fixes: lz_t_f32
+       hands back a WHOLE-TENSOR view, free for an F32 tensor (returns
+       t->f) but staged through the caller's scratch for a narrow (BF16)
+       one - and the caller was s->wscr, sized for the widest matmul ROW,
+       not lin_conv_dim*conv_kernel elements. conv1d is [C,1,K], 12,288
+       elements on kmr20 against a qcap in the hundreds; doing that
+       widening every token overran s->wscr and corrupted the heap past
+       it. See model.c's BF16-narrowing loader-guard comment, which
+       documents the identical fix already done for the FIXED tier's
+       conv_mw - this buffer completes that same migration for the float
+       tier, one tier late.
+
+       Allocated unconditionally (like conv_state above), NOT gated on
+       s->conv_fixed at alloc time: conv_fixed_build's own coverage check
+       can still refuse a checkpoint later in lz_state_alloc and flip
+       s->conv_fixed from 1 to 0, so the float path can end up live even
+       on a model that asked for the fixed tier, and it needs somewhere
+       safe to widen into regardless. Built once s->conv_fixed's value is
+       final (conv_f32_build runs right after conv_fixed_build), and only
+       ever read on the branch where s->conv_fixed is 0 - a build where
+       LZ_CONV_FIXED is compiled to 0 has no other branch at all.
+         conv_w32  (n_linear, lin_conv_dim, conv_kernel) taps, float */
+    float *conv_w32;
 
     /* Fixed conv tier (lz_conv_mode()). Allocated only when it is live,
        and `conv_fixed` says so - a NULL check alone would not, because

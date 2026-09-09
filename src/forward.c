@@ -620,6 +620,65 @@ static int conv_fixed_build(LZRunState *s, const LZModel *m) {
 }
 #endif /* LZ_CONV_FIXED */
 
+/* Build a persistent, whole-tensor F32 cache of the causal conv taps for
+ * the FLOAT tier - see conv_w32's own comment in forward.h for why this
+ * exists and what per-token pattern it replaces. Deliberately NOT inside
+ * an `#if LZ_CONV_FIXED`: in a build where that switch is 0 the float
+ * tier is the only conv path there is, and this still has to run.
+ *
+ * Same per-layer walk, same layer-skip, same tv[]/cnt[] KDA-triple-vs-
+ * single-conv1d branch and the same two coverage checks as
+ * conv_fixed_build above - this is that function's un-quantized twin,
+ * not a new design (the drift argument in conv_fixed_build's own comment
+ * applies here too, which is why the offsets are duplicated rather than
+ * shared: forward_ssm.c/forward_kda.c's own copies of this layout have
+ * to keep agreeing with whichever of the two builders actually ran).
+ *
+ * One real difference: lz_t_row_f32 writes each row straight into its
+ * `out` argument, so there is no separate scratch step here. `out` below
+ * IS the persistent slot - unlike conv_fixed_build, which stages a row
+ * through s->wscr before lz_conv_norm_pow2 quantizes it into conv_mw,
+ * this is a straight copy with nothing to quantize, so the row can land
+ * in its final home directly. */
+static int conv_f32_build(LZRunState *s, const LZModel *m) {
+    const LZModelConfig *c = &m->config;
+    int layer, t, covered_ok = 1, built = 0;
+    for (layer = 0; layer < c->n_layers; layer++) {
+        const LZLayer *L;
+        int li;
+        size_t base;
+        if (c->layer_types[layer] == LZ_LT_FULL) continue;
+        L = &m->layers[layer];
+        li = s->cache_idx[layer];
+        base = (size_t)li * c->lin_conv_dim;
+        built++;
+        {
+        size_t ch = 0;
+        const LZTensor *tv[3];
+        int cnt[3], ntv;
+        if (L->kda_q_conv1d.q || L->kda_q_conv1d.f) {
+            tv[0] = &L->kda_q_conv1d; cnt[0] = c->lin_key_dim;
+            tv[1] = &L->kda_k_conv1d; cnt[1] = c->lin_key_dim;
+            tv[2] = &L->kda_v_conv1d; cnt[2] = c->lin_value_dim;
+            ntv = 3;
+        } else {
+            tv[0] = &L->conv1d; cnt[0] = c->lin_conv_dim; ntv = 1;
+        }
+        for (t = 0; t < ntv; t++) {
+            int i;
+            int row_dim = c->conv_kernel;  /* [C,1,K] -> row = K elements */
+            for (i = 0; i < cnt[t]; i++)
+                lz_t_row_f32(tv[t], i, row_dim,
+                    s->conv_w32 + (base + ch + i) * (size_t)c->conv_kernel);
+            ch += (size_t)cnt[t];
+        }
+        if (ch != (size_t)c->lin_conv_dim) covered_ok = 0;
+        }
+    }
+    if (!covered_ok || built != c->n_linear_layers) return -1;
+    return 0;
+}
+
 #if LZ_KGATE_I16
 /* dt_bias in kda_gate's own integer domain, laid out per linear layer.
  *
@@ -969,6 +1028,18 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
         (size_t)s->ssm_ring_depth * c->n_linear_layers * c->lin_conv_dim *
         (c->conv_kernel - 1), sizeof(float), &ok, &s->bytes_alloc);
 
+    /* Persistent F32 conv-tap cache for the FLOAT tier - see forward.h's
+       conv_w32 field comment. Allocated unconditionally, NOT gated on
+       s->conv_fixed (decided just below): that decision can still be
+       reversed later in this function, once conv_fixed_build's own
+       coverage check runs, and the float path needs somewhere safe to
+       widen into either way. Never ring-sized (unlike conv_state above):
+       this holds weights, not rolling per-token history, exactly like
+       conv_mw below. */
+    s->conv_w32 = (float *)xcalloc(
+        (size_t)c->n_linear_layers * c->lin_conv_dim * c->conv_kernel,
+        sizeof(float), &ok, &s->bytes_alloc);
+
     /* Fixed conv tier. Decided ONCE, here, and recorded in s->conv_fixed
        rather than re-read per token: lz_conv_mode() can be moved by a
        flag, and a state whose buffers were not allocated must not start
@@ -1278,6 +1349,20 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
     /* After cache_idx, which conv_fixed_build reads. */
     if (s->conv_fixed && conv_fixed_build(s, m) != 0) s->conv_fixed = 0;
 #endif /* LZ_CONV_FIXED */
+    /* s->conv_fixed is final now - conv_fixed_build's own refusal, just
+       above, is the last thing that can still flip it. Build the float
+       tier's persistent conv cache exactly when the float tier is the
+       one that will actually run; a build with LZ_CONV_FIXED compiled to
+       0 always takes this branch, since s->conv_fixed is then always 0.
+       Unlike conv_fixed_build's own refusal, there is no cheaper tier
+       left to fall back to if THIS fails - the float path is the last
+       resort - so a failure here is fatal, the same way the buffer
+       allocations above it are. */
+    if (!s->conv_fixed && conv_f32_build(s, m) != 0) {
+        if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_STATE_ALLOC);
+        lz_state_free(s);
+        return 1;
+    }
 #if LZ_KGATE_I16
     /* Same ordering reason as conv_fixed_build's: the table is indexed
        by linear-layer number. A refusal drops the buffer, and
@@ -1325,7 +1410,7 @@ void lz_state_free(LZRunState *s) {
 #if LZ_GDN_STATE_2PLANE
     xfree(s->ssm_state_q8_lo);
 #endif /* LZ_GDN_STATE_2PLANE */
-    xfree(s->conv_state);
+    xfree(s->conv_state); xfree(s->conv_w32);
     xfree(s->conv_state_q); xfree(s->conv_mw);
     xfree(s->kda_q_i16); xfree(s->kda_k_i16); xfree(s->kda_v_i16);
     xfree(s->kda_qc_i16); xfree(s->kda_kc_i16); xfree(s->kda_vc_i16);
