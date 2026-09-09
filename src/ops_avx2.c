@@ -586,6 +586,61 @@ void lz_p2_mul32_avx2(const int8_t *hi, const int8_t *lo,
     }
 }
 
+/* ---- GDN/KDA fixed-point pass 2, split32, AVX2 tier --------------------
+   SSE2 twin: lz_p2_split32_sse2, src/ops_sse2.c. Same algorithm over all
+   32 elements in one pass - four __m256i covering elements 0-7 / 8-15 /
+   16-23 / 24-31 - instead of the twin's two o-iterations of four
+   __m128i.
+
+   Two chained narrowing packs, each needing its own
+   permute4x64_epi64(_, 0xD8) fixup, for the same reason mul32's unpack
+   does: packs_epi32/packs_epi16 interleave 128-bit lanes rather than
+   running across the whole register. Measured element orders off the raw
+   pack results: packs_epi32(A0, A1) gives 16-bit lanes holding
+   {0-3, 8-11, 4-7, 12-15}, and packs_epi16(H0, H1) gives byte lanes
+   holding {0-7, 16-23, 8-15, 24-31}. 0xD8 selects the four 64-bit
+   chunks in the order 0,2,1,3, which restores contiguous element order
+   in both cases. The rounding/shift/clamp steps between the two packs
+   are per-lane and need no fixup.
+
+   k128 and kclp are the production constants - src/ops_mmx.c and
+   src/ops_gdn.c write 128/32641 into every lane before each group - so
+   the set1 operands here are bit-identical to the twin's loads from
+   blk->k128 / blk->kclp. */
+void lz_p2_split32_avx2(const lz_p2_blk *blk, int8_t *oh, int8_t *ol) {
+    __m256i rnd  = _mm256_broadcastsi128_si256(
+        _mm_load_si128((const __m128i *)(const void *)blk->rnd));
+    __m128i cnt  = _mm_load_si128((const __m128i *)(const void *)blk->cnt);
+    __m256i k128 = _mm256_set1_epi16(128);
+    __m256i kclp = _mm256_set1_epi16((short)32641);
+    __m256i A0, A1, A2, A3;
+    __m256i HN0, HN1, H0, H1, L0, L1, T;
+
+    A0 = _mm256_loadu_si256((const __m256i *)(const void *)(blk->a + 0));
+    A1 = _mm256_loadu_si256((const __m256i *)(const void *)(blk->a + 8));
+    A2 = _mm256_loadu_si256((const __m256i *)(const void *)(blk->a + 16));
+    A3 = _mm256_loadu_si256((const __m256i *)(const void *)(blk->a + 24));
+    A0 = _mm256_sra_epi32(_mm256_add_epi32(A0, rnd), cnt);
+    A1 = _mm256_sra_epi32(_mm256_add_epi32(A1, rnd), cnt);
+    A2 = _mm256_sra_epi32(_mm256_add_epi32(A2, rnd), cnt);
+    A3 = _mm256_sra_epi32(_mm256_add_epi32(A3, rnd), cnt);
+
+    HN0 = _mm256_permute4x64_epi64(_mm256_packs_epi32(A0, A1), 0xD8);
+    HN1 = _mm256_permute4x64_epi64(_mm256_packs_epi32(A2, A3), 0xD8);
+
+    H0 = _mm256_srai_epi16(_mm256_add_epi16(HN0, k128), 8);
+    H1 = _mm256_srai_epi16(_mm256_add_epi16(HN1, k128), 8);
+    L0 = _mm256_sub_epi16(HN0, _mm256_slli_epi16(H0, 8));
+    L1 = _mm256_sub_epi16(HN1, _mm256_slli_epi16(H1, 8));
+    L0 = _mm256_adds_epi16(_mm256_subs_epi16(L0, kclp), kclp);  /* max(l, -127) */
+    L1 = _mm256_adds_epi16(_mm256_subs_epi16(L1, kclp), kclp);
+
+    T = _mm256_permute4x64_epi64(_mm256_packs_epi16(H0, H1), 0xD8);
+    _mm256_storeu_si256((__m256i *)(void *)oh, T);
+    T = _mm256_permute4x64_epi64(_mm256_packs_epi16(L0, L1), 0xD8);
+    _mm256_storeu_si256((__m256i *)(void *)ol, T);
+}
+
 /* lz_rope_avx2_compiled_in lives in ops_rope.c, not here - see the
    comment on its definition for why. */
 

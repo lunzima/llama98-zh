@@ -42,6 +42,9 @@ void lz_rope_avx2(float *v, int n_heads, int head_dim, int rotary_dim,
 #define LZ_HAVE_P2_MUL32_AVX2 1
 void lz_p2_mul32_avx2(const int8_t *hi, const int8_t *lo,
                       const int16_t *dq, lz_p2_blk *blk);
+
+#define LZ_HAVE_P2_SPLIT32_AVX2 1
+void lz_p2_split32_avx2(const lz_p2_blk *blk, int8_t *oh, int8_t *ol);
 /* lz_rope_avx2_compiled_in is declared in src/ops.h, not here: its
    definition is unconditional (in src/ops_rope.c) and must have a
    prototype in scope on every build, the way
