@@ -12,6 +12,7 @@
 #define LZ_ROW_AVX2_EXTERN 1
 
 #include "ops_matmul.h"
+#include "ops_p2_blk.h"   /* lz_p2_blk - the pass-2 scratch block */
 
 void row_q8_avx2_intrin(const lz_row_ctx *c);
 void row_q41_avx2_intrin(const lz_row_ctx *c);
@@ -37,6 +38,10 @@ void lz_fwht_stage_avx2(int32_t *y, int n, int len);
 #define LZ_ROPE_AVX2_EXTERN 1
 void lz_rope_avx2(float *v, int n_heads, int head_dim, int rotary_dim,
                   int pos, const float *cs);
+
+#define LZ_HAVE_P2_MUL32_AVX2 1
+void lz_p2_mul32_avx2(const int8_t *hi, const int8_t *lo,
+                      const int16_t *dq, lz_p2_blk *blk);
 /* lz_rope_avx2_compiled_in is declared in src/ops.h, not here: its
    definition is unconditional (in src/ops_rope.c) and must have a
    prototype in scope on every build, the way

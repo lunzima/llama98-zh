@@ -506,6 +506,86 @@ void lz_rope_avx2(float *v, int n_heads, int head_dim, int rotary_dim,
     }
 }
 
+/* ---- GDN/KDA fixed-point pass 2, mul32, AVX2 tier ----------------------
+   SSE2 twin: lz_p2_mul32_sse2, src/ops_sse2.c. Same algorithm, 16
+   elements per iteration instead of 8 (for(q<2) instead of for(q<4)).
+
+   hi/lo sign-extend: cvtepi8_epi16 does in one instruction what the SSE2
+   twin spells out with unpack+shift (dup-and-shift for lo, unpack-with-
+   zero for hi - both pre-AVX2 sign-extend idioms this ISA has a direct
+   instruction for). hw is then shifted left 8 to reproduce "hi * 256";
+   the shift is bit-identical to the multiply because (int8_t)hi[k] is in
+   [-128,127], so *256 is in [-32768,32512], inside int16 with no
+   wraparound - the same bound the SSE2 comment relies on.
+
+   The trap: unpacklo/unpackhi_epi16 read each 128-bit lane
+   independently. H and d hold 16 elements (lane0 = elements 0-7, lane1 =
+   elements 8-15). unpacklo(H,d) interleaves each lane's LOW 4, giving
+   elements {0,1,2,3, 8,9,10,11} - not the contiguous {0..7} the
+   algorithm needs. Measured, not inferred: .prof/p2_iota_avx2.c prints
+   exactly that for an iota H. Fix: permute4x64_epi64(_, 0xD8) on both H
+   and d BEFORE unpacking. 0xD8 reorders the four 64-bit (4-element)
+   chunks [0-3,4-7,8-11,12-15] to [0-3,8-11,4-7,12-15]; after that each
+   lane's low-4/high-4 line up with contiguous elements, so unpacklo/
+   unpackhi after the permute give back {0..7} and {8..15} (same probe,
+   same run). */
+void lz_p2_mul32_avx2(const int8_t *hi, const int8_t *lo,
+                      const int16_t *dq, lz_p2_blk *blk) {
+    __m256i acc1 = _mm256_setzero_si256(), acc2 = _mm256_setzero_si256();
+    __m256i mul  = _mm256_broadcastsi128_si256(
+        _mm_load_si128((const __m128i *)(const void *)blk->mul));
+    __m256i m;
+    int q;
+
+    for (q = 0; q < 2; q++) {
+        __m256i hw, lw, H, d, Hp, dp, p0, p1, s0, s1, a0, a1;
+
+        hw = _mm256_slli_epi16(
+            _mm256_cvtepi8_epi16(_mm_loadu_si128(
+                (const __m128i *)(const void *)(hi + q * 16))), 8);
+        lw = _mm256_cvtepi8_epi16(_mm_loadu_si128(
+            (const __m128i *)(const void *)(lo + q * 16)));
+        H  = _mm256_add_epi16(hw, lw);
+        d  = _mm256_loadu_si256((const __m256i *)(const void *)(dq + q * 16));
+
+        Hp = _mm256_permute4x64_epi64(H, 0xD8);
+        dp = _mm256_permute4x64_epi64(d, 0xD8);
+        p0 = _mm256_madd_epi16(_mm256_unpacklo_epi16(Hp, dp), mul);
+        p1 = _mm256_madd_epi16(_mm256_unpackhi_epi16(Hp, dp), mul);
+        _mm256_storeu_si256((__m256i *)(void *)(blk->a + q * 16),     p0);
+        _mm256_storeu_si256((__m256i *)(void *)(blk->a + q * 16 + 8), p1);
+
+        s0 = _mm256_srai_epi32(p0, 31);
+        a0 = _mm256_sub_epi32(_mm256_xor_si256(p0, s0), s0);   /* |A| */
+        s1 = _mm256_srai_epi32(p1, 31);
+        a1 = _mm256_sub_epi32(_mm256_xor_si256(p1, s1), s1);
+        m    = _mm256_cmpgt_epi32(acc1, a0);
+        acc1 = _mm256_or_si256(_mm256_and_si256(acc1, m), _mm256_andnot_si256(m, a0));
+        m    = _mm256_cmpgt_epi32(acc2, a1);
+        acc2 = _mm256_or_si256(_mm256_and_si256(acc2, m), _mm256_andnot_si256(m, a1));
+    }
+    /* Fold the two 8-lane accumulators down to the 4 lanes the caller
+       reads (blk->amax[4]), the same "different tiers hand back the same
+       shape" contract lz_p2_mul32_sse2's own comment states. Lane j of
+       the result is the max over the eight elements whose index is j mod
+       4, which is exactly the partition the SSE2 twin's final
+       cmpgt-fold leaves behind - the caller maxes the four lanes, so any
+       partition works and this one matches. */
+    {
+        __m128i lo1 = _mm256_castsi256_si128(acc1);
+        __m128i hi1 = _mm256_extracti128_si256(acc1, 1);
+        __m128i lo2 = _mm256_castsi256_si128(acc2);
+        __m128i hi2 = _mm256_extracti128_si256(acc2, 1);
+        __m128i g1  = _mm_or_si128(_mm_and_si128(lo1, _mm_cmpgt_epi32(lo1, hi1)),
+                                   _mm_andnot_si128(_mm_cmpgt_epi32(lo1, hi1), hi1));
+        __m128i g2  = _mm_or_si128(_mm_and_si128(lo2, _mm_cmpgt_epi32(lo2, hi2)),
+                                   _mm_andnot_si128(_mm_cmpgt_epi32(lo2, hi2), hi2));
+        __m128i gg  = _mm_or_si128(_mm_and_si128(g1, _mm_cmpgt_epi32(g1, g2)),
+                                   _mm_andnot_si128(_mm_cmpgt_epi32(g1, g2), g2));
+        _mm_store_si128((__m128i *)(void *)blk->amax, gg);
+    }
+}
+
 /* lz_rope_avx2_compiled_in lives in ops_rope.c, not here - see the
    comment on its definition for why. */
 
