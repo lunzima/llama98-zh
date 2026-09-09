@@ -3152,7 +3152,7 @@ void lz_p2_split32_sse2(const lz_p2_blk *blk, int8_t *oh, int8_t *ol) {
 /* ---- RoPE -----------------------------------------------------------------
    4-wide float RoPE. Each (i, h) pair is an independent IEEE mul/add,
    so per-element results are bit-identical to the scalar path in
-   src/ops.c's lz_rope; only the loop order changes (head outer, i
+   src/ops_rope.c's lz_rope; only the loop order changes (head outer, i
    inner) to stream one head's two rotated halves contiguously. The
    cos/sin row is interleaved [c0,s0,c1,s1,...], so one 8-float load +
    two shuffles give the c and s vectors. half % 4 tail falls back to

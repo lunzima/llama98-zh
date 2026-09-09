@@ -37,7 +37,10 @@ void lz_fwht_stage_avx2(int32_t *y, int n, int len);
 #define LZ_ROPE_AVX2_EXTERN 1
 void lz_rope_avx2(float *v, int n_heads, int head_dim, int rotary_dim,
                   int pos, const float *cs);
-int lz_rope_avx2_compiled_in(void);
+/* lz_rope_avx2_compiled_in is declared in src/ops.h, not here: its
+   definition is unconditional (in src/ops_rope.c) and must have a
+   prototype in scope on every build, the way
+   lz_epi_avx2_compiled_in/lz_fwht_avx2_compiled_in do. */
 
 #endif /* LZ_AVX2_TU && !__WATCOMC__ */
 

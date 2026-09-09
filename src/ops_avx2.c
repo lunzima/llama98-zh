@@ -506,14 +506,7 @@ void lz_rope_avx2(float *v, int n_heads, int head_dim, int rotary_dim,
     }
 }
 
-/* lz_rope_avx2_compiled_in is deliberately NOT defined here: it belongs
-   in the dispatch translation unit (src/ops_rope.c), the same place
-   ops_epi.c's lz_epi_avx2_compiled_in and fwht.c's
-   lz_fwht_avx2_compiled_in live. Defined in this file it could only
-   ever return 1 - LZ_ROPE_AVX2_EXTERN comes from this file's own
-   header under the same LZ_AVX2_TU guard that wraps this whole
-   translation unit - so it would answer nothing. In ops_rope.c the
-   macro is present only if that file's #include "ops_avx2.h" is, which
-   is the question the test asks. */
+/* lz_rope_avx2_compiled_in lives in ops_rope.c, not here - see the
+   comment on its definition for why. */
 
 #endif /* LZ_AVX2_TU && !__WATCOMC__ */

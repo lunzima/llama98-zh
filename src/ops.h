@@ -1465,6 +1465,17 @@ void lz_matmul_bf16(float *o, const float *x, const unsigned char *wb,
 void lz_rope(float *v, int n_heads, int head_dim, int rotary_dim,
              int pos, const float *cs);
 
+/* Wiring-proof for lz_rope's direct g_kernel==AVX2 branch (ops_rope.c):
+   returns 1 iff LZ_ROPE_AVX2_EXTERN was defined when ops_rope.c
+   compiled, 0 otherwise. Declared here, unguarded, for the same reason
+   ops_matmul.h declares lz_epi_avx2_compiled_in and fwht.h declares
+   lz_fwht_avx2_compiled_in that way - the definition is unconditional
+   so the prototype is in scope on every build, Watcom included. A
+   value-only AVX2-vs-SSE2 comparison cannot distinguish a real AVX2
+   kernel from a silently-correct fallback, so callers must check this
+   returns 1 before trusting any such comparison. */
+int lz_rope_avx2_compiled_in(void);
+
 /* In-place fast Walsh-Hadamard transform over n contiguous floats, n a
    power of two. UNNORMALIZED: the matrix entries are +-1, so this is the
    orthonormal Hadamard scaled by sqrt(n), and applying it twice gives

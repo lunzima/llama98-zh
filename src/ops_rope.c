@@ -74,10 +74,10 @@ void lz_rope(float *v, int n_heads, int head_dim, int rotary_dim,
    a silently-correct fallback, because the tiers owe each other
    bit-identity by contract - so the test checks this before trusting
    any such comparison. It has to live in the dispatch translation
-   unit, not in src/ops_avx2.c: there the macro comes from this file's
-   own header under the same guard that wraps the whole TU, so it could
-   only ever answer 1. Here it is defined exactly when this file's
-   #include "ops_avx2.h" is, which is the wiring being proven. */
+   unit, not in src/ops_avx2.c: there the macro comes from ops_avx2.c's
+   own header under the same guard that wraps that whole TU, so it
+   could only ever answer 1. Here it is defined exactly when this
+   file's #include "ops_avx2.h" is, which is the wiring being proven. */
 int lz_rope_avx2_compiled_in(void) {
 #if defined(LZ_ROPE_AVX2_EXTERN)
     return 1;
