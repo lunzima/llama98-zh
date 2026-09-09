@@ -603,16 +603,18 @@ void lz_p2_mul32_avx2(const int8_t *hi, const int8_t *lo,
    in both cases. The rounding/shift/clamp steps between the two packs
    are per-lane and need no fixup.
 
-   k128 and kclp are the production constants - src/ops_mmx.c and
-   src/ops_gdn.c write 128/32641 into every lane before each group - so
-   the set1 operands here are bit-identical to the twin's loads from
-   blk->k128 / blk->kclp. */
+   k128 and kclp come from blk, one broadcast load each, the same source
+   the MMX and SSE2 twins read: this kernel has no constants of its own,
+   so a caller that writes different values gets the same arithmetic from
+   every tier. */
 void lz_p2_split32_avx2(const lz_p2_blk *blk, int8_t *oh, int8_t *ol) {
     __m256i rnd  = _mm256_broadcastsi128_si256(
         _mm_load_si128((const __m128i *)(const void *)blk->rnd));
     __m128i cnt  = _mm_load_si128((const __m128i *)(const void *)blk->cnt);
-    __m256i k128 = _mm256_set1_epi16(128);
-    __m256i kclp = _mm256_set1_epi16((short)32641);
+    __m256i k128 = _mm256_broadcastsi128_si256(
+        _mm_load_si128((const __m128i *)(const void *)blk->k128));
+    __m256i kclp = _mm256_broadcastsi128_si256(
+        _mm_load_si128((const __m128i *)(const void *)blk->kclp));
     __m256i A0, A1, A2, A3;
     __m256i HN0, HN1, H0, H1, L0, L1, T;
 
