@@ -516,13 +516,25 @@ HIGH_CPU_FLAGS := -6r -D__MMX__=1
 # inconsistency", which would define __MMX__ for the one file that
 # documents needing it undefined.
 #
+# ENG_CPU_HIGH is the actual source of truth: a plain space-separated
+# list, queryable with `make -s print-ENG_CPU_HIGH` exactly like $(ENG)/
+# $(ENG_MMX)/$(ENG_AVX2)/$(CLI_COM) already are - build/watcom/
+# build_cli.sh and build_test.sh (Repo B) read it that way rather than
+# hand-copying these two names into their own `if [ "$f" = ... ]` line,
+# which is the "fourth copy" drift build_cli.sh's own header comment
+# warns about for exactly this reason.
+ENG_CPU_HIGH := cpucheck ops_gdn
+empty :=
+space := $(empty) $(empty)
 # A shell `case`, not a Make function: the
 # loop variable ($$f below) is only known when the recipe's shell runs,
 # not at Make's own macro-expansion time, so the per-file choice has to
 # be made inside the loop. One case arm, reused by all four `for f in
 # $(ENG)` loops below, so the exception lives in exactly one place per
-# invocation site instead of drifting across CLI/GUI/DLL/DOS.
-ENG_CPU_CASE = case "$$f" in cpucheck|ops_gdn) hi=1 ;; *) hi=0 ;; esac
+# invocation site instead of drifting across CLI/GUI/DLL/DOS - built
+# from $(ENG_CPU_HIGH) above rather than restating the two names, so
+# THIS copy cannot itself drift from the one external scripts query.
+ENG_CPU_CASE = case "$$f" in $(subst $(space),|,$(ENG_CPU_HIGH))) hi=1 ;; *) hi=0 ;; esac
 
 CLI_FLAGS := $(WATCOM_BASE) $(NT_CPU_FLAGS) -bt=nt $(WINVER_FLAGS)
 CLI_FLAGS_HIGH := $(WATCOM_BASE) $(HIGH_CPU_FLAGS) -bt=nt $(WINVER_FLAGS)
