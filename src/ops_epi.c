@@ -224,7 +224,7 @@ int lz_epi_avx2_compiled_in(void) {
     return 1;
 #else
     return 0;
-#endif
+#endif /* LZ_EPI_AVX2_EXTERN */
 }
 
 #if defined(__WATCOMC__)

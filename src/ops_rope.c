@@ -83,5 +83,5 @@ int lz_rope_avx2_compiled_in(void) {
     return 1;
 #else
     return 0;
-#endif
+#endif /* LZ_ROPE_AVX2_EXTERN */
 }

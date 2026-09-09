@@ -59,7 +59,7 @@ int lz_fwht_avx2_compiled_in(void) {
     return 1;
 #else
     return 0;
-#endif
+#endif /* LZ_FWHT_AVX2_EXTERN */
 }
 
 void lz_fwht_i32(int32_t *restrict y, const int32_t *restrict x, int n) {
