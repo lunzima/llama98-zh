@@ -414,12 +414,12 @@ int lz_cpu_has_mmx_probe(void) { g_lz_has_mmx = 0; return 0; }
    three trailing columns are armC/armA/g128.
 
    ARMC/ARMA/G128/NCOL are all DERIVED from LZ_ROW_N, not hardcoded -
-   a hardcoded ARMC here once silently overlapped the row-kernel range
-   the moment LZ_ROW_N grew (the AVX2 slot, 2026-09-08): km_present()'s
+   a hardcoded ARMC would silently overlap the row-kernel range as soon
+   as LZ_ROW_N grew to include the AVX2 slot: km_present()'s
    `c >= LZ_KM_COL_ROW0 && c < LZ_KM_COL_ROW0 + LZ_ROW_N` range check
-   then caught column 7 (that build's stale LZ_KM_COL_ARMC) as a
-   row-kernel column instead, read it out of the wrong table, and
-   reported a false MISSING-HERE ('!') for every unit on ARM builds.
+   would then catch column 7 (a stale LZ_KM_COL_ARMC) as a row-kernel
+   column instead, read it out of the wrong table, and report a false
+   MISSING-HERE ('!') for every unit on ARM builds.
    Changing LZ_ROW_N again still requires re-checking km_reg's per-row
    column count below - NCOL changing its own value does not grow that
    table's initializers for you; see km_reg's own comment. */
