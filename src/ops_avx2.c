@@ -510,25 +510,25 @@ void lz_rope_avx2(float *v, int n_heads, int head_dim, int rotary_dim,
    SSE2 twin: lz_p2_mul32_sse2, src/ops_sse2.c. Same algorithm, 16
    elements per iteration instead of 8 (for(q<2) instead of for(q<4)).
 
-   hi/lo sign-extend: cvtepi8_epi16 does in one instruction what the SSE2
-   twin spells out with unpack+shift (dup-and-shift for lo, unpack-with-
-   zero for hi - both pre-AVX2 sign-extend idioms this ISA has a direct
-   instruction for). hw is then shifted left 8 to reproduce "hi * 256";
-   the shift is bit-identical to the multiply because (int8_t)hi[k] is in
-   [-128,127], so *256 is in [-32768,32512], inside int16 with no
-   wraparound - the same bound the SSE2 comment relies on.
+   hi/lo sign-extend: cvtepi8_epi16 replaces the twin's two per-half
+   idioms (dup-and-shift for lo; zero-extend-into-the-high-byte for hi),
+   and hw is then shifted left 8 the way the twin's own comment reads
+   "hi * 256" off its unpack. The shift is bit-identical to that multiply
+   because (int8_t)hi[k] is in [-128,127], so *256 is in [-32768,32512],
+   inside int16 with no wraparound - the same bound the SSE2 comment
+   relies on.
 
    The trap: unpacklo/unpackhi_epi16 read each 128-bit lane
    independently. H and d hold 16 elements (lane0 = elements 0-7, lane1 =
    elements 8-15). unpacklo(H,d) interleaves each lane's LOW 4, giving
    elements {0,1,2,3, 8,9,10,11} - not the contiguous {0..7} the
-   algorithm needs. Measured, not inferred: .prof/p2_iota_avx2.c prints
-   exactly that for an iota H. Fix: permute4x64_epi64(_, 0xD8) on both H
-   and d BEFORE unpacking. 0xD8 reorders the four 64-bit (4-element)
-   chunks [0-3,4-7,8-11,12-15] to [0-3,8-11,4-7,12-15]; after that each
-   lane's low-4/high-4 line up with contiguous elements, so unpacklo/
-   unpackhi after the permute give back {0..7} and {8..15} (same probe,
-   same run). */
+   algorithm needs. Measured on an iota-input probe: without the permute
+   unpacklo yields 0 1 2 3 8 9 10 11, with 0xD8 it yields 0 1 2 3 4 5 6
+   7. Fix: permute4x64_epi64(_, 0xD8) on both H and d BEFORE unpacking.
+   0xD8 reorders the four 64-bit (4-element) chunks [0-3,4-7,8-11,12-15]
+   to [0-3,8-11,4-7,12-15]; after that each lane's low-4/high-4 line up
+   with contiguous elements, so unpacklo/unpackhi after the permute give
+   back {0..7} and {8..15} respectively. */
 void lz_p2_mul32_avx2(const int8_t *hi, const int8_t *lo,
                       const int16_t *dq, lz_p2_blk *blk) {
     __m256i acc1 = _mm256_setzero_si256(), acc2 = _mm256_setzero_si256();
