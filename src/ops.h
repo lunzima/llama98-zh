@@ -458,6 +458,18 @@ void     lz_fpu_float_end(unsigned save);
    bit-identity, so nothing reports it. */
 #define LZ_KERNEL_SSE  6
 
+/* AVX2, gcc-only (src/ops_avx2.c is never built by Watcom). Value only
+   has to be distinct, same rule as every other tier here - see the
+   comment above this block on why the enum is not in tier order.
+   Never a member of kernel_detect()'s AUTO cascade: reachable only via
+   an explicit --kernel avx2, so a machine that has AVX2 does not
+   silently start running it until this tier's bit-identity contract
+   has been run enough times to trust. That contract is
+   t_kernel_avx2_parity in tests/test_ops.c, which lives in the
+   training-side repo (E:\LLM\llama98-zh) - this engine repo carries no
+   test suite of its own, by design (see rule zero). */
+#define LZ_KERNEL_AVX2 7
+
 /* The ARM column. Two values because the ARM side is two cells, C and
    hand-written asm, and WRONG 1 above is precisely about not letting one
    enum value stand for two code bodies - `--kernel arm-c` and
@@ -476,6 +488,17 @@ void     lz_fpu_float_end(unsigned save);
 #define LZ_KERNEL_ARM     4
 #define LZ_KERNEL_ARM_ASM 5
 int lz_kernel_select(int which);
+
+/* Cached CPUID+XGETBV AVX2 check (leaf 1 ECX OSXSAVE, XCR0 bits 1:2,
+   leaf 7 EBX AVX2), always 0 on Watcom - see ops_sched.c for the full
+   detection order, and lz_cpu_has_sse (ops_sched.h) for the SSE analog
+   this mirrors. Declared here rather than beside lz_cpu_has_sse in
+   ops_sched.h: t_kernel_avx2_parity (tests/test_ops.c, training-side
+   repo E:\LLM\llama98-zh) calls this directly and that file includes
+   only this header, not ops_sched.h - the same reason LZ_KERNEL_AVX2
+   above is declared here and not left to resolve through g_kernel
+   alone. */
+int lz_cpu_has_avx2(void);
 
 /* Prefetch tier, ORTHOGONAL to the kernel tier - the kernel picks
    instruction-set width, prefetch picks memory hints. K6-2/K7 have
@@ -732,10 +755,10 @@ int lz_conv_norm_pow2(const float *v, int n, short *out, int bound);
    depends on the
    target's float-to-integer cost ratio, and this host answers for
    itself only. */
-/* The kernel coverage matrix: one line per weight format, six characters
-   for the six row-kernel slots (mmx-intrin, sse-intrin, sse2-intrin,
-   mmx-asm, sse-asm, sse2-asm) and one for whether that format has a
-   128-element group kernel in this build.
+/* The kernel coverage matrix: one line per weight format, LZ_ROW_N
+   characters for the LZ_ROW_N row-kernel slots (mmx-intrin, sse-intrin,
+   sse2-intrin, mmx-asm, sse-asm, sse2-asm, avx2-intrin) and one for
+   whether that format has a 128-element group kernel in this build.
 
    It exists because a hand-maintained version of this table claimed
    gcc 128-group kernels for three formats that had none at the time,
@@ -765,8 +788,8 @@ const char *lz_kernel_matrix(void);
  * format": --kernel arm-c/arm-asm has exactly one consumer right now,
  * and when a second operator gets an ARM tier the global enum stops
  * being able to say which one has the assembly. Such an operator joins
- * as LZ_KM_OP - registry only, because the grid's six characters are
- * the six LZ_ROW_* slots. src/ops.c's km_unit is the table. */
+ * as LZ_KM_OP - registry only, because the grid's characters are
+ * exactly the LZ_ROW_* slots. src/ops_kernel.c's km_unit is the table. */
 #define LZ_KM_ROW 0
 #define LZ_KM_OP  1
 
@@ -1442,6 +1465,17 @@ void lz_matmul_bf16(float *o, const float *x, const unsigned char *wb,
 void lz_rope(float *v, int n_heads, int head_dim, int rotary_dim,
              int pos, const float *cs);
 
+/* Wiring-proof for lz_rope's direct g_kernel==AVX2 branch (ops_rope.c):
+   returns 1 iff LZ_ROPE_AVX2_EXTERN was defined when ops_rope.c
+   compiled, 0 otherwise. Declared here, unguarded, for the same reason
+   ops_matmul.h declares lz_epi_avx2_compiled_in and fwht.h declares
+   lz_fwht_avx2_compiled_in that way - the definition is unconditional
+   so the prototype is in scope on every build, Watcom included. A
+   value-only AVX2-vs-SSE2 comparison cannot distinguish a real AVX2
+   kernel from a silently-correct fallback, so callers must check this
+   returns 1 before trusting any such comparison. */
+int lz_rope_avx2_compiled_in(void);
+
 /* In-place fast Walsh-Hadamard transform over n contiguous floats, n a
    power of two. UNNORMALIZED: the matrix entries are +-1, so this is the
    orthonormal Hadamard scaled by sqrt(n), and applying it twice gives
@@ -2003,6 +2037,19 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
    a 20 minute one. */
 #define LZ_LOOK_W_MAX 4
 #define LZ_LOOK_D_MAX 4
+
+/* Prompt lookup decoding (PLD) - generate.c's lz_pld_round. Draft tokens
+   come from a literal n-gram match against the prompt array, not from a
+   trained head, so this is available on any model (no m->mtp needed) -
+   see LZGenOpts.pld_ngram/pld_tokens for the two runtime knobs these
+   ceilings bound. Sizes the query-tail ring and the verify batch (which
+   needs pld_tokens+1 rows, same "+1 for the anchor" shape LZ_SPEC_K_MAX
+   has). Kept separate from LZ_SPEC_K_MAX rather than reusing it: the two
+   mechanisms draft independently (see lz_generate_call's dispatch) and
+   sizing one off the other would make a future change to either
+   ceiling silently resize the other's buffers too. */
+#define LZ_PLD_NGRAM_MAX 8
+#define LZ_PLD_TOKENS_MAX 16
 
 /* The one recurrence body lz_gdn_step / lz_kda_step / lz_kda_step_vi16 all
    forward to. The three wrappers exist so the .prof probes have a stable

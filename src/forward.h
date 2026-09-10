@@ -818,6 +818,38 @@ typedef struct {
 #endif
     float  *ssm_state_s;
     float *conv_state;          /* (n_linear, lin_conv_dim, conv_kernel-1) */
+    /* Persistent whole-tensor F32 cache of the causal conv taps for the
+       FLOAT tier - conv_mw's un-quantized twin (see that field's comment
+       below for the shape/layout both share: channel-major, conv_kernel
+       floats/shorts per channel). Built once by forward.c's
+       conv_f32_build, at the same point conv_fixed_build builds conv_mw,
+       and read by forward_ssm/forward_kda's float-path conv step instead
+       of widening L->conv1d (or the kda_q/k/v_conv1d triple) fresh every
+       token through lz_t_f32.
+
+       That per-token widening is the bug this buffer fixes: lz_t_f32
+       hands back a WHOLE-TENSOR view, free for an F32 tensor (returns
+       t->f) but staged through the caller's scratch for a narrow (BF16)
+       one - and the caller was s->wscr, sized for the widest matmul ROW,
+       not lin_conv_dim*conv_kernel elements. conv1d is [C,1,K], 12,288
+       elements on kmr20 against a qcap in the hundreds; doing that
+       widening every token overran s->wscr and corrupted the heap past
+       it. See model.c's BF16-narrowing loader-guard comment, which
+       documents the identical fix already done for the FIXED tier's
+       conv_mw - this buffer completes that same migration for the float
+       tier, one tier late.
+
+       Allocated unconditionally (like conv_state above), NOT gated on
+       s->conv_fixed at alloc time: conv_fixed_build's own coverage check
+       can still refuse a checkpoint later in lz_state_alloc and flip
+       s->conv_fixed from 1 to 0, so the float path can end up live even
+       on a model that asked for the fixed tier, and it needs somewhere
+       safe to widen into regardless. Built once s->conv_fixed's value is
+       final (conv_f32_build runs right after conv_fixed_build), and only
+       ever read on the branch where s->conv_fixed is 0 - a build where
+       LZ_CONV_FIXED is compiled to 0 has no other branch at all.
+         conv_w32  (n_linear, lin_conv_dim, conv_kernel) taps, float */
+    float *conv_w32;
 
     /* Fixed conv tier (lz_conv_mode()). Allocated only when it is live,
        and `conv_fixed` says so - a NULL check alone would not, because
@@ -965,6 +997,58 @@ typedef struct {
     float  *xqs;                /* per-group scales */
     float  *wscr;               /* weight dequantization scratch (norm/embed rows) */
     int     qcap;               /* xq capacity */
+
+    /* Engram forward's own scratch: hash indices (int) + four nt*dim(-ish)
+       float blocks (value/qnorm/key/scratch). Cannot borrow s->wscr - that
+       buffer is documented as ONE weight row wide, and forward_engram.c
+       once tried to fit hidx plus three nt*dim blocks in it, which
+       overflows the moment nt*hidden_size*3 exceeds wscr's capacity
+       (true at nt=8 on kunmoe-v2's 512-wide hidden state, silently, since
+       s->wscr is its own malloc with no guard neighbor). NULL / 0 when
+       config.engram is 0 - forward_engram is never called then. */
+    void   *engram_scratch;
+    size_t  engram_scratch_bytes;
+
+    /* Trailing token history for engram's hash/mask windows, which both
+       read up to (engram_ngram - 1) tokens BEFORE the current chunk's
+       first token. forward_engram's tokens[] argument is only the
+       current chunk (lz_forward_batch slices the prompt into
+       LZ_BATCH_MAX-wide pieces), so without this every chunk boundary
+       reads as "start of sequence" - the hash sees padding zeros and
+       the format mask sees "assume format" where the real history has
+       actual content. Measured with tests/test_batch_parity.c against
+       an engram checkpoint: FAILS at every length past the first
+       chunk width (kq8/vq8/ssm_state all diverge); the same binary
+       against an engram=0 sibling checkpoint passes cleanly, so the
+       divergence is engram-specific, not a KDA/attention batching bug.
+       Fixed size rather than sized from config.engram_ngram: this
+       struct is filled before alloc_engram runs (lz_state_alloc is
+       called by the SAME callers that open the model, not gated on
+       engram being present), and 31 is far past any n-gram order this
+       mechanism would plausibly use (the shipping recipe uses 3).
+       engram_hist_n counts how many of the LEADING entries are valid
+       (0 at a fresh/reset state - see lz_state_reset). */
+    int     engram_hist[31];
+    int     engram_hist_n;
+
+    /* Trailing VALUE history (not tokens) for engram's depthwise conv,
+       which reads up to (engram_conv_kernel-1)*engram_conv_dilation
+       positions of `value` (the gated per-order sum, post-mask, PRE
+       conv) before the current chunk's first token - same cross-chunk
+       gap engram_hist fixes for the hash/mask, one stage later in the
+       pipeline. `value` is a per-token DIM-wide float vector, not a
+       token id, so this cannot reuse engram_hist's int array; sized at
+       load time (engram_conv_hist_cap = (kernel-1)*dilation*dim
+       floats, allocated once alloc_engram has run and c->engram_* is
+       known) rather than fixed like engram_hist, since dim varies by
+       checkpoint and a 31-token-deep, 4096-wide history would be
+       wasteful on every model that does not need it. NULL/0 (both
+       fields) when config.engram is 0. engram_conv_hist_n counts how
+       many of the LEADING rows are valid, same convention as
+       engram_hist_n. */
+    float  *engram_conv_hist;
+    int     engram_conv_hist_cap;   /* rows the buffer holds */
+    int     engram_conv_hist_n;
 
     /* SubLN Hadamard fixed-point scratch (use_subn only): 2*qcap int32.
        Source half holds the row converted to fixed point, destination
@@ -1134,6 +1218,21 @@ void forward_kda(const LZModel *m, LZRunState *s,
                  int advance_ring, int ring_base);
 void dense_ffn_step(const LZModel *m, LZRunState *s,
                     const LZLayer *L, int layer, int nt, int idim);
+
+/* Engram: conditional n-gram memory. Global module, called once per
+   chunk after embed_tokens, before the layer loop. Modifies s->x
+   in-place (residual add). Not per-layer: LZEngram lives on LZModel.
+   hist/hist_n: the trailing history[0..hist_n) tokens that came before
+   tokens[0] in the sequence (s->engram_hist, forward.h's own field
+   comment) - the hash and content-mask windows both read up to
+   engram_ngram-1 tokens before the chunk's first position, and without
+   this a prefill split across multiple chunks reads every boundary as
+   "start of sequence". hist_n may be less than what a window wants
+   (true at the real sequence start); forward_engram treats those
+   positions as padding, same as index<0 within a single chunk. */
+void forward_engram(const LZModel *m, LZRunState *s,
+                    const int *tokens, int nt, int pos0,
+                    const int *hist, int hist_n);
 
 /* Snapshot of the position-carrying RECURRENT state, for reusing a
    conversation prefix across turns instead of re-forwarding it.
@@ -1307,6 +1406,41 @@ int lz_forward_verify(const LZModel *m, LZRunState *s,
 float *lz_forward_batch_capture(const LZModel *m, LZRunState *s,
                                 const int *tokens, int n, int pos0,
                                 float *hidden_out);
+
+/* ---------------------------------------------- prompt lookup decoding */
+
+/* Batched verify, generalized: like lz_forward_verify above (same
+   chunking, same EVERY-position-gets-logits behavior via all_logits=1),
+   but does NOT require m->mtp and writes into a CALLER-supplied buffer
+   (n*vocab_size floats, token-major) instead of s->mtp_logits.
+
+   Exists for generate.c's lz_pld_round (prompt lookup decoding): its
+   draft tokens come from a literal n-gram match against the prompt
+   array, not from a trained head, so it must work on a model with no
+   MTP head bound at all - lz_forward_verify's own hard gate
+   (`!m->mtp -> return 1`) and its s->mtp_logits/s->mtp_verify_hidden
+   destination (allocated only `if (m->mtp)`, forward.c's state-alloc)
+   both rule it out for that caller. This function shares forward_chunk
+   with lz_forward_verify - same math, same rounding, same chunking -
+   the only difference is which buffer the per-position logits land in
+   and whether m->mtp is required.
+
+   Does not capture hidden state (PLD does not chain a draft head off
+   one) and does not touch s->ssm_slot's rollback RING beyond whatever
+   forward_chunk's own all_logits=1 path already does unconditionally
+   (advance by nt, same as lz_forward_verify) - a caller on a model with
+   no MTP head has s->ssm_ring_depth==1 (forward.c's state-alloc), so
+   that advance is a same-slot no-op and rollback has to happen the way
+   lz_look_pick's own comment already documents for that situation: an
+   LZStateCkpt save before this call, restore (+ replay of whatever
+   prefix must survive) after, not a ring index assignment.
+
+   Returns 0 on success, nonzero (no errbuf - same convention
+   lz_forward/lz_forward_batch/lz_forward_verify use) on a NULL
+   tokens/logits_out, n<1, or an internal forward_chunk failure. */
+int lz_forward_verify_into(const LZModel *m, LZRunState *s,
+                           const int *tokens, int n, int pos0,
+                           float *logits_out);
 
 /* Run the MTP block over n prompt positions purely to populate its own
    KV cache before the first speculative round - see s->mtp_pos's

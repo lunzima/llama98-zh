@@ -254,6 +254,51 @@ int lz_kv_vfmt = LZ_KVF_Q8;
    on a different model, not because 64 is in doubt. */
 int lz_kv_rot_v_dim = 0;
 
+/* --rope-dynamic-ntk on|off (cli_main.c). Off (default) leaves the RoPE
+   table build below on its original, unconditional theta - bit-
+   identical to the engine before this knob existed. On rescales theta
+   ONCE per table build (not once per position - the effective base is
+   a property of how far this table's positions reach, not of any one
+   position inside it) by the NTK-aware ratio bloc97 described
+   (https://old.reddit.com/r/LocalLLaMA/comments/14lz7j5/), applied only
+   when the caller's requested seq_len exceeds lz_rope_orig_max:
+
+     theta_eff = rope_theta * (seq_len / orig_max) ^ (rotary_dim / (rotary_dim - 2))
+
+   docs/length-extrapolation-research.md S5.5 is why this formula and
+   not YaRN/PI: the other two need the extrapolation target fixed in
+   advance (a microtuned scale factor, or a training-time schedule for
+   a KNOWN longer length), and this project's actual scenario is
+   "config's max_position_embeddings got hacked past what was trained,
+   target unknowable ahead of time" - exactly the case dynamic NTK
+   recomputation was designed for. Below lz_rope_orig_max this is
+   the identity by construction (the multiplier only differs from 1
+   once seq_len/orig_max > 1), so raising --ctx within the trained
+   range changes nothing even with the flag on. */
+int lz_rope_dynamic_ntk = 0;
+
+/* Training length the ratio above scales against. NOT the same number
+   as either shipping model's declared max_position_embeddings (8192 /
+   32768) - confirmed via engine/train_data.py's LONG_SEQ constant and
+   docs/kunkun-ce-params.md S4 ("8192 declared, 1536+5120 actually
+   trained"): both of today's checkpoints were trained with their
+   longest packed stream capped at 5120 tokens, a fact about the
+   CURRENT training pipeline (one shared LONG_SEQ constant), not a
+   value either checkpoint's config.json records. A knob rather than a
+   #define for that reason - a future retrain can change its own
+   long-stream length without a recompile of this engine. */
+float lz_rope_orig_max = 5120.0f;
+
+/* Positive control for --rope-dynamic-ntk, same role as
+   lz_debug_n_kv_rot above: "off" and "on but seq_len <= orig_max" are
+   BOTH bit-identical to the unscaled table (the second one by the
+   formula's own construction, not by the flag being ignored), so an
+   output comparison alone cannot tell "the branch ran and correctly
+   did nothing" from "the branch never ran". Counts frequency pairs
+   (half the rotary width) whose theta was actually rescaled; 0 on any
+   run that never crosses lz_rope_orig_max, on or off. */
+lz_i64 lz_debug_n_rope_ntk = 0;
+
 /* StreamingLLM attention sink + recent window (arXiv:2309.17453,
    github.com/mit-han-lab/streaming-llm). 0 = off, which is the default
    and must stay bit-identical to full attention.
@@ -537,25 +582,28 @@ static int conv_fixed_build(LZRunState *s, const LZModel *m) {
             tv[0] = &L->conv1d; cnt[0] = c->lin_conv_dim; ntv = 1;
         }
         for (t = 0; t < ntv; t++) {
-            const float *w = lz_t_f32(tv[t], s->wscr);
             int i;
-            if (!w) return -1;
+            int row_dim = c->conv_kernel;  /* [C,1,K] -> row = K elements */
             for (i = 0; i < cnt[t]; i++) {
+                /* Read one row (one channel's K taps) at a time instead of
+                   the whole tensor through lz_t_f32. This lets BF16 conv
+                   tensors stay narrow in RAM: lz_t_f32 would need the
+                   entire [C,1,K] in s->wscr at once (4096+ elements for
+                   a 1024-channel conv), overflowing it; lz_t_row_f32
+                   needs only conv_kernel (=4) floats of scratch. */
+                lz_t_row_f32(tv[t], i, row_dim, s->wscr);
+                {
                 signed char e = (signed char)lz_conv_norm_pow2(
-                    w + (size_t)i * c->conv_kernel, c->conv_kernel,
+                    s->wscr, row_dim,
                     s->conv_mw + (base + ch + i) * c->conv_kernel,
                     s->conv_bound);
                 float oscale = pow2f(-((int)e + LZ_CONV_ES));
                 lz_sig_q15_fold(oscale, &s->conv_sig_k1[base + ch + i],
                                 &s->conv_sig_oscale2[base + ch + i]);
 #if LZ_CONV_SIG_I
-                /* The same exponent, undivided. Measured 22..39 on both
-                   checkpoints, so it fits signed char with room; a model
-                   whose taps put it outside sigmoid_q15_i's 0..50 is not
-                   refused here - that entry rebuilds a float for such a
-                   channel and only the saving is lost. */
                 s->conv_sig_e[base + ch + i] = (signed char)((int)e + LZ_CONV_ES);
 #endif /* LZ_CONV_SIG_I */
+                }
             }
             ch += (size_t)cnt[t];
         }
@@ -571,6 +619,65 @@ static int conv_fixed_build(LZRunState *s, const LZModel *m) {
     return 0;
 }
 #endif /* LZ_CONV_FIXED */
+
+/* Build a persistent, whole-tensor F32 cache of the causal conv taps for
+ * the FLOAT tier - see conv_w32's own comment in forward.h for why this
+ * exists and what per-token pattern it replaces. Deliberately NOT inside
+ * an `#if LZ_CONV_FIXED`: in a build where that switch is 0 the float
+ * tier is the only conv path there is, and this still has to run.
+ *
+ * Same per-layer walk, same layer-skip, same tv[]/cnt[] KDA-triple-vs-
+ * single-conv1d branch and the same two coverage checks as
+ * conv_fixed_build above - this is that function's un-quantized twin,
+ * not a new design (the drift argument in conv_fixed_build's own comment
+ * applies here too, which is why the offsets are duplicated rather than
+ * shared: forward_ssm.c/forward_kda.c's own copies of this layout have
+ * to keep agreeing with whichever of the two builders actually ran).
+ *
+ * One real difference: lz_t_row_f32 writes each row straight into its
+ * `out` argument, so there is no separate scratch step here. `out` below
+ * IS the persistent slot - unlike conv_fixed_build, which stages a row
+ * through s->wscr before lz_conv_norm_pow2 quantizes it into conv_mw,
+ * this is a straight copy with nothing to quantize, so the row can land
+ * in its final home directly. */
+static int conv_f32_build(LZRunState *s, const LZModel *m) {
+    const LZModelConfig *c = &m->config;
+    int layer, t, covered_ok = 1, built = 0;
+    for (layer = 0; layer < c->n_layers; layer++) {
+        const LZLayer *L;
+        int li;
+        size_t base;
+        if (c->layer_types[layer] == LZ_LT_FULL) continue;
+        L = &m->layers[layer];
+        li = s->cache_idx[layer];
+        base = (size_t)li * c->lin_conv_dim;
+        built++;
+        {
+        size_t ch = 0;
+        const LZTensor *tv[3];
+        int cnt[3], ntv;
+        if (L->kda_q_conv1d.q || L->kda_q_conv1d.f) {
+            tv[0] = &L->kda_q_conv1d; cnt[0] = c->lin_key_dim;
+            tv[1] = &L->kda_k_conv1d; cnt[1] = c->lin_key_dim;
+            tv[2] = &L->kda_v_conv1d; cnt[2] = c->lin_value_dim;
+            ntv = 3;
+        } else {
+            tv[0] = &L->conv1d; cnt[0] = c->lin_conv_dim; ntv = 1;
+        }
+        for (t = 0; t < ntv; t++) {
+            int i;
+            int row_dim = c->conv_kernel;  /* [C,1,K] -> row = K elements */
+            for (i = 0; i < cnt[t]; i++)
+                lz_t_row_f32(tv[t], i, row_dim,
+                    s->conv_w32 + (base + ch + i) * (size_t)c->conv_kernel);
+            ch += (size_t)cnt[t];
+        }
+        if (ch != (size_t)c->lin_conv_dim) covered_ok = 0;
+        }
+    }
+    if (!covered_ok || built != c->n_linear_layers) return -1;
+    return 0;
+}
 
 #if LZ_KGATE_I16
 /* dt_bias in kda_gate's own integer domain, laid out per linear layer.
@@ -921,6 +1028,18 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
         (size_t)s->ssm_ring_depth * c->n_linear_layers * c->lin_conv_dim *
         (c->conv_kernel - 1), sizeof(float), &ok, &s->bytes_alloc);
 
+    /* Persistent F32 conv-tap cache for the FLOAT tier - see forward.h's
+       conv_w32 field comment. Allocated unconditionally, NOT gated on
+       s->conv_fixed (decided just below): that decision can still be
+       reversed later in this function, once conv_fixed_build's own
+       coverage check runs, and the float path needs somewhere safe to
+       widen into either way. Never ring-sized (unlike conv_state above):
+       this holds weights, not rolling per-token history, exactly like
+       conv_mw below. */
+    s->conv_w32 = (float *)xcalloc(
+        (size_t)c->n_linear_layers * c->lin_conv_dim * c->conv_kernel,
+        sizeof(float), &ok, &s->bytes_alloc);
+
     /* Fixed conv tier. Decided ONCE, here, and recorded in s->conv_fixed
        rather than re-read per token: lz_conv_mode() can be moved by a
        flag, and a state whose buffers were not allocated must not start
@@ -1032,6 +1151,44 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
             if (wcap < LZ_MM_WIDEN_MAX) wcap = LZ_MM_WIDEN_MAX;
             s->wscr = (float *)xcalloc((size_t)wcap, sizeof(float), &ok,
                                        &s->bytes_alloc); }
+        /* Engram's own scratch (see forward.h's field comment for why
+           it cannot borrow s->wscr). Sized for the widest layout
+           forward_engram.c uses: hidx (nt*ns ints) + value/qnorm/key
+           (3*nt*dim floats) + a shared tail sized for the wider of
+           eo+val (nt*po + nt*dim) and conv_out (nt*dim) - the tail is
+           reused sequentially, never concurrently with the block ahead
+           of it, so only the larger of the two needs counting.
+           int and float are both 4 bytes here, so the two element
+           counts add directly; +64 covers BOTH the alignment pad
+           forward_engram.c inserts between hidx and the float region
+           (up to 15 bytes) and xcalloc's own base-pointer/16-byte-align
+           header (up to sizeof(void*)+15 more) - a tight +16 margin
+           left exactly 1 byte of slack computed by hand, which is the
+           kind of number that survives one config change and not the
+           next. Rounding up to a clean 64 costs nothing measurable at
+           this size. */
+        if (m->engram) {
+            int ns = c->engram_n_spaces, dim = c->hidden_size;
+            int po = c->engram_per_order;
+            size_t tail = (size_t)nt * po + (size_t)nt * dim;
+            size_t n_elem = (size_t)nt * ns + (size_t)nt * dim * 3 + tail;
+            s->engram_scratch_bytes = n_elem * sizeof(float) + 64;
+            s->engram_scratch = xcalloc(s->engram_scratch_bytes, 1,
+                                        &ok, &s->bytes_alloc);
+            /* Cross-chunk VALUE history for the depthwise conv - see
+               forward.h's engram_conv_hist comment. Rows needed:
+               (kernel-1)*dilation, each dim wide. */
+            {
+                int rows = (c->engram_conv_kernel - 1) *
+                          c->engram_conv_dilation;
+                if (rows < 0) rows = 0;
+                s->engram_conv_hist_cap = rows;
+                s->engram_conv_hist = rows > 0
+                    ? (float *)xcalloc((size_t)rows * dim, sizeof(float),
+                                       &ok, &s->bytes_alloc)
+                    : NULL;
+            }
+        }
         /* SubLN Hadamard scratch: two n-wide int32 halves, n <= qcap. */
         s->fwht_scratch = (int32_t *)xcalloc((size_t)2 * qcap, sizeof(int32_t),
                                              &ok, &s->bytes_alloc);
@@ -1127,10 +1284,30 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
                                       sizeof(float), &ok, &s->bytes_alloc);
         if (ok) {
             int half = c->rotary_dim >> 1;
+            /* Dynamic NTK (lz_rope_dynamic_ntk's own comment above):
+               rescale theta once for the whole table, not once per
+               position. Guarded on rotary_dim > 2 because the exponent's
+               denominator is (rotary_dim - 2) - a model with rotary_dim
+               <= 2 has no valid ratio for this formula (undefined, not
+               merely small), so it degrades to "off" rather than
+               computing garbage. Both divisions below are by runtime
+               values (lz_rope_orig_max, rotary_dim - 2), never by a
+               float literal: a literal divisor is one a compiler may
+               replace with a reciprocal multiply, and the x87 and SSE
+               builds have to emit the same sequence here. */
+            float theta_eff = c->rope_theta;
+            if (lz_rope_dynamic_ntk && c->rotary_dim > 2 &&
+                (float)seq_len > lz_rope_orig_max) {
+                float ratio = (float)seq_len / lz_rope_orig_max;
+                float expo  = (float)c->rotary_dim /
+                              (float)(c->rotary_dim - 2);
+                theta_eff = c->rope_theta * lz_powf(ratio, expo);
+                lz_debug_n_rope_ntk += half;
+            }
             for (l = 0; l < seq_len; l++) {
                 int i;
                 for (i = 0; i < half; i++) {
-                    float freq = lz_powf(c->rope_theta,
+                    float freq = lz_powf(theta_eff,
                                          -2.0f * (float)i / (float)c->rotary_dim);
                     float ang = (float)l * freq;
                     s->rope_cs[((size_t)l * half + i) * 2]     = lz_cosf(ang);
@@ -1173,6 +1350,24 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
     /* After cache_idx, which conv_fixed_build reads. */
     if (s->conv_fixed && conv_fixed_build(s, m) != 0) s->conv_fixed = 0;
 #endif /* LZ_CONV_FIXED */
+    /* s->conv_fixed is final now - conv_fixed_build's own refusal, just
+       above, is the last thing that can still flip it. Build the float
+       tier's persistent conv cache exactly when the float tier is the
+       one that will actually run; a build with LZ_CONV_FIXED compiled to
+       0 always takes this branch, since s->conv_fixed is then always 0.
+       Unlike conv_fixed_build's own refusal, there is no cheaper tier
+       left to fall back to if THIS fails - the float path is the last
+       resort - so a failure here is fatal, the same way the buffer
+       allocations above it are. LZ_ERR_CONV_LAYOUT, not
+       LZ_ERR_STATE_ALLOC: conv_f32_build's only failure is its coverage
+       check (a layer's channel counts do not sum to lin_conv_dim), a
+       checkpoint layout problem, not a failed xcalloc - see that code's
+       own comment in err.h. */
+    if (!s->conv_fixed && conv_f32_build(s, m) != 0) {
+        if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_CONV_LAYOUT);
+        lz_state_free(s);
+        return 1;
+    }
 #if LZ_KGATE_I16
     /* Same ordering reason as conv_fixed_build's: the table is indexed
        by linear-layer number. A refusal drops the buffer, and
@@ -1220,7 +1415,7 @@ void lz_state_free(LZRunState *s) {
 #if LZ_GDN_STATE_2PLANE
     xfree(s->ssm_state_q8_lo);
 #endif /* LZ_GDN_STATE_2PLANE */
-    xfree(s->conv_state);
+    xfree(s->conv_state); xfree(s->conv_w32);
     xfree(s->conv_state_q); xfree(s->conv_mw);
     xfree(s->kda_q_i16); xfree(s->kda_k_i16); xfree(s->kda_v_i16);
     xfree(s->kda_qc_i16); xfree(s->kda_kc_i16); xfree(s->kda_vc_i16);
@@ -1233,6 +1428,8 @@ void lz_state_free(LZRunState *s) {
     xfree(s->conv_sig_k1); xfree(s->conv_sig_oscale2); xfree(s->conv_sig_e);
     xfree(s->xq); xfree(s->xqs); xfree(s->wscr); xfree(s->fwht_scratch);
     xfree(s->subn_norm_int);
+    xfree(s->engram_scratch);
+    xfree(s->engram_conv_hist);
     xfree(s->rope_cs);
     xfree(s->cache_idx);
     memset(s, 0, sizeof(*s));
@@ -1306,6 +1503,12 @@ void lz_state_reset(LZRunState *s, const LZModel *m) {
        above) is indexed by this, not by the body's absolute position;
        see forward.h's s->mtp_pos comment. */
     s->mtp_pos = 0;
+    /* engram's cross-chunk token history (forward.h's field comment):
+       a reset means "nothing came before", so the leading-entry count
+       goes back to 0, matching engram_hash's own padding rule for a
+       fresh sequence. */
+    s->engram_hist_n = 0;
+    s->engram_conv_hist_n = 0;
     /* Every checkpoint taken before this point is now void: the KV cache
        it relies on (and deliberately does not copy) has just been
        zeroed. See LZStateCkpt in forward.h. */
@@ -1541,10 +1744,23 @@ float *lz_mtp_draft_step(const LZModel *m, LZRunState *s, int next_token, int po
     /* One ordinary decoder layer (model.h: "the block is an ordinary
        full_attention layer"), same pre-norm/residual shape forward_chunk
        uses for every body layer, applied to s->mtp_x instead of s->x and
-       to the MTP's own reserved KV cache slot (LZ_MTP_CACHE_LAYER). */
-    lz_rmsnorm(s->xb, s->mtp_x,
-              lz_t_f32(&m->mtp->blk.input_layernorm, s->wscr), dim,
-              c->rms_norm_eps);
+       to the MTP's own reserved KV cache slot (LZ_MTP_CACHE_LAYER).
+
+       SubLN (c->use_subn): same pre-LN deletion forward_chunk's body
+       loop applies to every ordinary layer (that loop's own comment).
+       forward_attn's q/k/v/o SubLN norms and dense_ffn_step's
+       gate/up/down SubLN norms are gated by the SAME c->use_subn flag
+       and read s->xb expecting the RAW residual in that case - applying
+       input_layernorm/post_attention_layernorm here unconditionally
+       would double-normalize (once here, once inside forward_attn /
+       dense_ffn_step) instead of the pre-LN being replaced by them. */
+    if (c->use_subn) {
+        for (i = 0; i < dim; i++) s->xb[i] = s->mtp_x[i];
+    } else {
+        lz_rmsnorm(s->xb, s->mtp_x,
+                  lz_t_f32(&m->mtp->blk.input_layernorm, s->wscr), dim,
+                  c->rms_norm_eps);
+    }
     forward_attn(m, s, &m->mtp->blk, LZ_MTP_CACHE_LAYER, pos, 1);
     if (lz_debug_mtp_attn_scale != 1.0f) {
         /* Investigative probe only - see this file's own comment on
@@ -1553,9 +1769,13 @@ float *lz_mtp_draft_step(const LZModel *m, LZRunState *s, int next_token, int po
     }
     for (i = 0; i < dim; i++) s->mtp_x[i] += s->xb2[i];
 
-    lz_rmsnorm(s->xb, s->mtp_x,
-              lz_t_f32(&m->mtp->blk.post_attention_layernorm, s->wscr), dim,
-              c->rms_norm_eps);
+    if (c->use_subn) {
+        for (i = 0; i < dim; i++) s->xb[i] = s->mtp_x[i];
+    } else {
+        lz_rmsnorm(s->xb, s->mtp_x,
+                  lz_t_f32(&m->mtp->blk.post_attention_layernorm, s->wscr), dim,
+                  c->rms_norm_eps);
+    }
     dense_ffn_step(m, s, &m->mtp->blk, LZ_MTP_CACHE_LAYER, 1, c->mtp_intermediate_size);
     for (i = 0; i < dim; i++) s->mtp_x[i] += s->xb2[i];
 
@@ -1670,6 +1890,39 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
         lz_t_row_f32(&m->embed_tokens, tokens[tk], dim,
                      s->x + (size_t)tk * dim);
     LZ_TAP("emb", -1, s->x, dim);
+
+    /* Engram: conditional n-gram memory, injected after embed_tokens
+       (the hook in kunmoe_modeling.py registers on embed_tokens).
+       Modifies s->x in-place. No-op when config.engram is 0. */
+    if (m->engram) {
+        forward_engram(m, s, tokens, nt, pos0, s->engram_hist,
+                      s->engram_hist_n);
+        LZ_TAP("eng", -1, s->x, dim);
+        /* Roll this chunk's own tail into the cross-chunk history for
+           the NEXT chunk's hash/mask windows (forward.h's field
+           comment - both read up to engram_ngram-1 tokens before
+           their chunk's first token). Only the trailing min(nt, 31)
+           tokens matter; a chunk at least that wide overwrites the
+           whole history and needs no merge with what came before. */
+        {
+            int keep = (int)(sizeof(s->engram_hist) /
+                             sizeof(s->engram_hist[0]));
+            if (nt >= keep) {
+                memcpy(s->engram_hist, tokens + (nt - keep),
+                      (size_t)keep * sizeof(int));
+                s->engram_hist_n = keep;
+            } else {
+                int old_keep = keep - nt;
+                if (old_keep > s->engram_hist_n) old_keep = s->engram_hist_n;
+                if (old_keep > 0)
+                    memmove(s->engram_hist, s->engram_hist + (s->engram_hist_n - old_keep),
+                           (size_t)old_keep * sizeof(int));
+                memcpy(s->engram_hist + old_keep, tokens,
+                      (size_t)nt * sizeof(int));
+                s->engram_hist_n = old_keep + nt;
+            }
+        }
+    }
 
     /* Ring base for this CHUNK (the SSM/conv rollback ring - forward.h's
        s->ssm_slot). Read ONCE here, before the layer loop,
@@ -1807,12 +2060,41 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
            an already-normalized vector a second time. */
         int gse = lz_act_gs(&m->embed_tokens, dim);
         int nse = scale_groups(dim, gse);
+        /* SAME TIER AS THE SINGLE-POSITION HEAD BELOW, and that is a
+           correctness requirement, not symmetry for its own sake.
+           lz_rmsnorm_int is a TIER: its own header says it is not
+           bit-identical to the lz_rmsnorm + lz_quantize_q8 pair. A verify
+           row that took the float pair while ordinary decode took the
+           int one produced DIFFERENT logits for the same position, so
+           --spec K stopped matching --spec 0 as soon as one of those
+           differences crossed an argmax boundary - with penalties at
+           their identity values, on a bare temperature-0 greedy run.
+           The two guards are the block below's, for its reasons: gse > 0
+           because the matmul reads xq/xqs only when the weight is
+           quantized (at gse == 0 it reads s->x, which the int path never
+           normalizes), and LZ_TAP_OFF because a tap build must keep the
+           float path. */
+        int use_int = 0;
+#if defined(LZ_TAP_OFF)
+        use_int = lz_norm_int() && lz_norm_can_fixed(dim) &&
+                  gse > 0 && (dim % gse) == 0;
+#endif /* LZ_TAP_OFF */
         for (tk = 0; tk < nt; tk++) {
             float *xt = s->x + (size_t)tk * dim;
-            lz_rmsnorm(xt, xt, lz_t_f32(&m->final_norm, s->wscr), dim,
-                      c->rms_norm_eps);
-            lz_quantize_q8(xt, dim, gse, s->xq + (size_t)tk * dim,
-                          s->xqs + (size_t)tk * nse);
+            if (use_int) {
+                float deq;
+                lz_rmsnorm_int(s->subn_norm_int, xt,
+                               lz_t_f32(&m->final_norm, s->wscr), dim,
+                               c->rms_norm_eps, &deq);
+                lz_quantize_q8_int(s->subn_norm_int, dim, gse, deq,
+                                   s->xq + (size_t)tk * dim,
+                                   s->xqs + (size_t)tk * nse);
+            } else {
+                lz_rmsnorm(xt, xt, lz_t_f32(&m->final_norm, s->wscr), dim,
+                          c->rms_norm_eps);
+                lz_quantize_q8(xt, dim, gse, s->xq + (size_t)tk * dim,
+                              s->xqs + (size_t)tk * nse);
+            }
         }
         lz_matmul_xq_nt(logits_out, s->x, s->xq, s->xqs, &m->embed_tokens,
                        dim, c->vocab_size, nt);
@@ -2005,6 +2287,40 @@ float *lz_forward_batch_capture(const LZModel *m, LZRunState *s,
     return lg;
 }
 
+/* Batched verify, generalized - forward.h's own comment has the full
+   contract and why lz_forward_verify above cannot serve this caller
+   (its `!m->mtp` gate and its s->mtp_logits destination, allocated only
+   when a head is bound). Shares forward_chunk with lz_forward_verify:
+   same chunking, same all_logits=1 per-position logits, same ring
+   advance - the only difference is the output buffer and the missing
+   m->mtp requirement. */
+int lz_forward_verify_into(const LZModel *m, LZRunState *s,
+                           const int *tokens, int n, int pos0,
+                           float *logits_out) {
+    const LZModelConfig *c = &m->config;
+    int cap, done = 0;
+
+    if (!tokens || n < 1 || !logits_out) return 1;
+    cap = s->nt_cap;
+    if (cap < 1) cap = 1;
+    if (cap > LZ_BATCH_MAX) cap = LZ_BATCH_MAX;
+    while (done < n) {
+        int k = n - done;
+        if (k > cap) k = cap;
+        /* capture_hidden NULL: PLD does not chain a draft head off a
+           captured hidden state (lz_pld_round's draft comes from a
+           prompt n-gram match, not a forward pass), so there is nothing
+           to capture here, unlike lz_forward_verify's own
+           s->mtp_verify_hidden write. skip_logits stays 0 - every
+           position's logits are wanted, same as lz_forward_verify. */
+        if (!forward_chunk(m, s, tokens + done, k, pos0 + done,
+                           NULL, 1, logits_out + (size_t)done * c->vocab_size, 0))
+            return 1;
+        done += k;
+    }
+    return 0;
+}
+
 /* Run the MTP block over n prompt positions purely to populate its own
    KV cache before the first speculative round (forward.h's s->mtp_pos
    comment). h_body_all[i]/next_tokens[i] are position pos0+i's body
@@ -2047,7 +2363,7 @@ int lz_mtp_prefill(const LZModel *m, LZRunState *s, const float *h_body_all,
     fpu = lz_fpu_float_begin();
 
     while (done < n) {
-        int k = n - done, tk;
+        int k = n - done, tk, i;
         if (k > cap) k = cap;
 
         for (tk = 0; tk < k; tk++) {
@@ -2067,10 +2383,18 @@ int lz_mtp_prefill(const LZModel *m, LZRunState *s, const float *h_body_all,
                        s->xq, s->xqs);
         }
 
-        for (tk = 0; tk < k; tk++)
-            lz_rmsnorm(s->xb + (size_t)tk * dim, s->mtp_x + (size_t)tk * dim,
-                      lz_t_f32(&m->mtp->blk.input_layernorm, s->wscr), dim,
-                      c->rms_norm_eps);
+        /* SubLN (c->use_subn): same pre-LN deletion as lz_mtp_draft_step
+           above - forward_attn's own q/k/v/o subn norms (gated by the
+           same flag) expect the raw residual, not an already-normalized
+           copy. See lz_mtp_draft_step's comment for the full argument. */
+        if (c->use_subn) {
+            for (i = 0; i < k * dim; i++) s->xb[i] = s->mtp_x[i];
+        } else {
+            for (tk = 0; tk < k; tk++)
+                lz_rmsnorm(s->xb + (size_t)tk * dim, s->mtp_x + (size_t)tk * dim,
+                          lz_t_f32(&m->mtp->blk.input_layernorm, s->wscr), dim,
+                          c->rms_norm_eps);
+        }
         /* The only thing this call needs: forward_attn writes this
            chunk's k/v rows into the MTP's reserved KV cache slot as a
            side effect (LZ_MTP_CACHE_LAYER) - s->xb2, its attention

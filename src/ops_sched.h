@@ -7,8 +7,9 @@
 #ifndef OPS_SCHED_H
 #define OPS_SCHED_H
 
-/* Q8 rounding tier selector (0=scalar, 1=SSE, 2=SSE2).
-   Called by lz_quantize_q8 (ops.c) and lz_gdn_quantize_2p (ops_gdn.c). */
+/* Q8 rounding tier selector (0=scalar, 1=SSE, 2=SSE2, 3=AVX2).
+   Called by lz_quantize_q8 (ops_quant.c) and lz_gdn_quantize_2p
+   (ops_gdn.c). */
 int lz_q8r_tier(void);
 
 /* Attention wsum's chunk-fold tier (0=scalar, 1=SSE, 2=SSE2).
@@ -21,7 +22,10 @@ int lz_i32facc_tier(void);
    and by lz_gdn_quantize_2p (ops_gdn.c, module 5). */
 int q8r_have_simd(void);
 
-/* Cached CPUID SSE bit. Non-static: p2_tier (ops.c) reads it. */
+/* Cached CPUID SSE bit. Non-static: p2_tier (ops.c) reads it. See
+   lz_cpu_has_avx2 (ops.h) for the AVX2 analog - declared in ops.h
+   rather than here so that tests/test_ops.c (training-side repo,
+   includes only ops.h) can call it directly. */
 int lz_cpu_has_sse(void);
 
 /* Token pairing flag. Non-static: the row kernels in ops.c read it. */

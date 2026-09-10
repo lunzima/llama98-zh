@@ -9,6 +9,14 @@
 # them. The original tree kept three hand-written copies of the engine
 # list plus a Makefile $(SRC); there is one here.
 
+# BEFORE the include, because an include defines targets and the first
+# target defined is what bare `make` builds. gates.mk starts with
+# `check`, so including it silently turned `make` from "build the engine"
+# into "run the gate suite" - on this tree only, since a public checkout
+# has no gates.mk and never saw it. Stating the goal does not depend on
+# where anything sits in the file.
+.DEFAULT_GOAL := native
+
 # The development gates (`check` and friends) live in gates.mk, which is
 # local-private and NOT shipped. Included with a leading `-`, so a public
 # checkout without the file is unaffected; `make check` simply has no
@@ -56,7 +64,7 @@ endif
 # anywhere, so one arithmetic serves all targets and an ARM run stays
 # byte-comparable with an x86 one. The compiler's own __bf16 appears
 # only in a throwaway probe, as a witness and never a component.
-ENG := err compat lfn json safetensors model ops ops_kernel ops_rope ops_moe ops_epi ops_quant ops_sched ops_matmul ops_t2_arm ops_arm ops_t2_scalar ops_norm ops_gdn ops_conv1d fwht forward forward_attn forward_moe forward_ssm forward_kda sampler generate lz_mathf lz_bf16 lz4d \
+ENG := err compat lfn json safetensors model ops ops_kernel ops_rope ops_moe ops_epi ops_quant ops_sched ops_matmul ops_t2_arm ops_arm ops_t2_scalar ops_norm ops_gdn ops_conv1d fwht forward forward_attn forward_moe forward_ssm forward_kda forward_engram sampler generate lz_mathf lz_bf16 lz4d \
        tokenizer unicode chat gbk cpucheck
 SRV := net http openai
 GUI := main layout localized_strings worker modelload session compat40 \
@@ -91,6 +99,15 @@ CLI_COM := session stream beep
 # none of the instructions. See src/ops_mmx.h and src/ops_sse2.h.
 ENG_MMX := ops_mmx ops_mmx_sse ops_sse2
 ENG_MMX_GCC_SRCS := $(addprefix src/,$(addsuffix .c,$(ENG_MMX)))
+
+# ops_avx2.c is gcc-only (no Watcom -mavx2 target exists) and needs its
+# own -mavx2, not $(ENG_MMX)'s -mmmx/-msse/-msse2, so it gets its own
+# variable and its own static-pattern rule below rather than joining
+# $(ENG_MMX). See the AVX2_TU_DEFINE comment near MMX_TU_DEFINE for why
+# every gcc TU, not just this one, still needs -DLZ_AVX2_TU=1.
+ENG_AVX2 := ops_avx2
+ENG_AVX2_GCC_SRCS := $(addprefix src/,$(addsuffix .c,$(ENG_AVX2)))
+AVX2_TU_DEFINE := -DLZ_AVX2_TU=1
 
 # gcc-side full paths.
 ENG_SRCS := $(addprefix src/,$(addsuffix .c,$(ENG)))
@@ -152,7 +169,7 @@ CFLAGS  ?= -O2 -std=c99 -Wall -Wextra -Isrc $(FP_STRICT) $(MMX_TU_DEFINE) $(SSE2
 # only reorders instructions (size is invariant - see the -O2/-O3 note
 # above), so this is about scheduling the cold plain-C TUs for the CPU
 # that actually runs them, not about .text.
-X86_64_CFLAGS := -Os -march=x86-64 -mtune=znver3 -std=c99 -Wall -Wextra -Isrc $(FP_STRICT) $(MMX_TU_DEFINE) $(SSE2_TU_DEFINE) $(EXTRA_DEFS)
+X86_64_CFLAGS := -Os -march=x86-64 -mtune=znver3 -std=c99 -Wall -Wextra -Isrc $(FP_STRICT) $(MMX_TU_DEFINE) $(SSE2_TU_DEFINE) $(AVX2_TU_DEFINE) $(EXTRA_DEFS)
 # Hot TUs keep -O2 AND swap the tune back to alderlake: gcc's
 # long-pipeline branch-prediction optimisation is keyed on alderlake
 # only - generic and znver3 do not carry it (in 16.1 or the newer
@@ -185,6 +202,12 @@ serve: kunkun98-serve
 ENG_MMX_GCC_NATIVE_OBJS := $(addprefix build/native/,$(addsuffix .o,$(ENG_MMX)))
 ENG_MMX_GCC_GUI_OBJS    := $(addprefix build/gui/,$(addsuffix .o,$(ENG_MMX)))
 
+# Same split, one file: $(ENG_AVX2) gets its own native/gui object pair
+# for the same reason $(ENG_MMX) does above - a flag change to one
+# flavour must not link an object built with another's.
+ENG_AVX2_GCC_NATIVE_OBJS := $(addprefix build/native/,$(addsuffix .o,$(ENG_AVX2)))
+ENG_AVX2_GCC_GUI_OBJS    := $(addprefix build/gui/,$(addsuffix .o,$(ENG_AVX2)))
+
 # Per-TU optimisation tier, gcc side (see X86_64_HOT_CFLAGS). HOT_TU are
 # the engine TUs and HOT_COM the common/ TUs the gcov call counts mark
 # hot; they compile separately at -O2. Everything else is cold and keeps
@@ -198,7 +221,7 @@ ENG_MMX_GCC_GUI_OBJS    := $(addprefix build/gui/,$(addsuffix .o,$(ENG_MMX)))
 # (jparse_*), NOT hot, and is deliberately cold.
 HOT_TU := ops ops_epi ops_matmul ops_quant ops_gdn ops_norm ops_sched \
           ops_conv1d ops_moe ops_rope forward forward_attn forward_kda \
-          forward_moe forward_ssm sampler generate
+          forward_moe forward_ssm forward_engram sampler generate
 HOT_COM := stream
 
 HOT_ENG_SRCS := $(addprefix src/,$(addsuffix .c,$(HOT_TU)))
@@ -278,6 +301,34 @@ $(HOT_GCC_GUI_COM_OBJS): build/gui/%.o: common/%.c
 	@mkdir -p build/gui
 	$(CC) $(X86_64_HOT_CFLAGS) $(DEPFLAGS) -Icommon -c -o $@ $<
 
+# $(ENG_AVX2) is not part of $(ENG_MMX): it needs -mavx2, a different ISA
+# floor than $(ENG_MMX)'s -mmmx/-msse/-msse2, so it cannot share that
+# object list or fall through to the generic build/native/%.o pattern
+# rule above (which would give it -mmmx/-msse/-msse2 instead). Its own
+# static-pattern rule, the same technique $(HOT_GCC_*_ENG_OBJS) uses
+# above to beat that same generic rule. Deliberately -mavx2 only, no
+# -mfma: the design keeps AVX2 as an integer/permute tier (widen,
+# horizontal-add, shuffle), not a fused-multiply-add tier, so it stays
+# bit-identical in rounding behaviour to the scalar and SSE2 paths it
+# replaces rather than opening a third source of cross-tier drift
+# alongside the FP_STRICT one already fenced off above.
+#
+# NO -mpreferred-stack-boundary HERE, and the measurement is why: this
+# MinGW build answers "'-mpreferred-stack-boundary=5' is not between 3
+# and 4", so 16 bytes is the most this toolchain will align the stack
+# to. A __m256i is a 32-byte-aligned TYPE, so gcc stores one to a stack
+# slot with vmovdqa - and a four-__m256i call shape needs a 32-byte
+# temporary, which then lands on a 16-aligned slot and takes #GP. The
+# fix is in the source, not here: the vector helpers are macros in
+# src/ops_avx2.c so nothing crosses a call boundary as an aggregate.
+$(ENG_AVX2_GCC_NATIVE_OBJS): build/native/%.o: src/%.c
+	@mkdir -p build/native
+	$(CC) $(X86_64_HOT_CFLAGS) $(DEPFLAGS) -mavx2 -c -o $@ $<
+
+$(ENG_AVX2_GCC_GUI_OBJS): build/gui/%.o: src/%.c
+	@mkdir -p build/gui
+	$(CC) $(X86_64_HOT_CFLAGS) $(DEPFLAGS) -mavx2 -c -o $@ $<
+
 # cli_main.c's -i loop runs on the shared LZSession core (common/session.c),
 # a front-end helper deliberately outside $(ENG) - so this target lists it
 # explicitly with -Icommon, exactly as the Watcom CLI/DOS builds do.
@@ -287,11 +338,11 @@ $(HOT_GCC_GUI_COM_OBJS): build/gui/%.o: common/%.c
 # between toolchains in the same tree. Cross-compiling from WSL with
 # MinGW against stale WSL-gcc objects would link a malformed PE; delete
 # build/native before switching toolchains.
-llama98: $(NATIVE_GATE) $(COLD_ENG_SRCS) $(COLD_CLI_COM_SRCS) src/cli_attr.c src/cli_main.c $(HOT_GCC_NATIVE_OBJS) $(ENG_MMX_GCC_NATIVE_OBJS)
-	$(CC) $(X86_64_CFLAGS) -Icommon -o $@ $(COLD_ENG_SRCS) $(COLD_CLI_COM_SRCS) src/cli_attr.c src/cli_main.c $(HOT_GCC_NATIVE_OBJS) $(ENG_MMX_GCC_NATIVE_OBJS) -lm
+llama98: $(NATIVE_GATE) $(COLD_ENG_SRCS) $(COLD_CLI_COM_SRCS) src/cli_attr.c src/cli_main.c $(HOT_GCC_NATIVE_OBJS) $(ENG_MMX_GCC_NATIVE_OBJS) $(ENG_AVX2_GCC_NATIVE_OBJS)
+	$(CC) $(X86_64_CFLAGS) -Icommon -o $@ $(COLD_ENG_SRCS) $(COLD_CLI_COM_SRCS) src/cli_attr.c src/cli_main.c $(HOT_GCC_NATIVE_OBJS) $(ENG_MMX_GCC_NATIVE_OBJS) $(ENG_AVX2_GCC_NATIVE_OBJS) -lm
 
-kunkun98-serve: $(NATIVE_GATE) $(COLD_ENG_SRCS) $(SRV_SRCS) src/server_main.c $(HOT_GCC_NATIVE_ENG_OBJS) $(ENG_MMX_GCC_NATIVE_OBJS)
-	$(CC) $(X86_64_CFLAGS) -o $@ $(COLD_ENG_SRCS) $(SRV_SRCS) src/server_main.c $(HOT_GCC_NATIVE_ENG_OBJS) $(ENG_MMX_GCC_NATIVE_OBJS) -lm $(HTTP_LIBS)
+kunkun98-serve: $(NATIVE_GATE) $(COLD_ENG_SRCS) $(SRV_SRCS) src/server_main.c $(HOT_GCC_NATIVE_ENG_OBJS) $(ENG_MMX_GCC_NATIVE_OBJS) $(ENG_AVX2_GCC_NATIVE_OBJS)
+	$(CC) $(X86_64_CFLAGS) -o $@ $(COLD_ENG_SRCS) $(SRV_SRCS) src/server_main.c $(HOT_GCC_NATIVE_ENG_OBJS) $(ENG_MMX_GCC_NATIVE_OBJS) $(ENG_AVX2_GCC_NATIVE_OBJS) -lm $(HTTP_LIBS)
 
 # Resources (icon / splash / about logo / lamps). windres for gcc; the
 # Watcom build runs wrc instead (see watcom-gui). Both run from the repo
@@ -305,8 +356,8 @@ $(GUI_RES): gui/kunkun98.rc gui/resource.h gui/kunkun98.manifest \
 	@mkdir -p build/gui
 	windres -I. gui/kunkun98.rc -O coff -o $@
 
-kunkun98-gui: $(GUI_SRCS) $(COLD_COM_SRCS) $(COLD_ENG_SRCS) gui/layout.h gui/localized_strings.h $(GUI_RES) $(HOT_GCC_GUI_OBJS) $(ENG_MMX_GCC_GUI_OBJS)
-	$(CC) $(X86_64_CFLAGS) -Igui -Icommon -mwindows -o $@ $(GUI_SRCS) $(COLD_COM_SRCS) $(COLD_ENG_SRCS) $(GUI_RES) $(HOT_GCC_GUI_OBJS) $(ENG_MMX_GCC_GUI_OBJS) \
+kunkun98-gui: $(GUI_SRCS) $(COLD_COM_SRCS) $(COLD_ENG_SRCS) gui/layout.h gui/localized_strings.h $(GUI_RES) $(HOT_GCC_GUI_OBJS) $(ENG_MMX_GCC_GUI_OBJS) $(ENG_AVX2_GCC_GUI_OBJS)
+	$(CC) $(X86_64_CFLAGS) -Igui -Icommon -mwindows -o $@ $(GUI_SRCS) $(COLD_COM_SRCS) $(COLD_ENG_SRCS) $(GUI_RES) $(HOT_GCC_GUI_OBJS) $(ENG_MMX_GCC_GUI_OBJS) $(ENG_AVX2_GCC_GUI_OBJS) \
 	    -lgdi32 -luser32 -lcomdlg32 -lm -Wl,--stack=524288
 
 # ----------------------------------------------------------------------
@@ -441,8 +492,8 @@ WATCOM_BASE := -za99 -otexan -zp4 -DLZ_MMX_TU=1 -DLZ_SSE2_TU=1 $(EXTRA_DEFS)
 # project has not measured.
 NT_CPU_FLAGS := -4r
 DOS_CPU_FLAGS := -3r
-# cpucheck.c only among the ENG files, both targets - plus the ENG_MMX
-# units, which take this set outright. See the comment block above.
+# cpucheck.c and ops_gdn.c, both targets - plus the ENG_MMX units, which
+# take this set outright. See the comment block above.
 # __MMX__ lives here (not WATCOM_BASE) because only the units that may
 # emit MMX should define it: mmx_compat.h's Watcom branch gates the full
 # <mmintrin.h> intrinsics on it, and a non-kernel TU that defined __MMX__
@@ -450,8 +501,19 @@ DOS_CPU_FLAGS := -3r
 # units below reuse this same flag set, so they carry __MMX__ too.
 HIGH_CPU_FLAGS := -6r -D__MMX__=1
 
-# cpucheck.c needs HIGH_CPU_FLAGS; every other ENG file uses the
-# target's ordinary floor.
+# cpucheck.c needs HIGH_CPU_FLAGS for its CPUID probe (a .586-class
+# instruction). ops_gdn.c needs it too, for a different reason: it
+# #includes ops_kernel_p2.h, whose `#if defined(__WATCOMC__) &&
+# defined(__MMX__)` block is the ONLY thing that sets
+# LZ_HAVE_P2_MMX_ASM/SSE_ASM/SSE2_ASM - the flags lz_gdn_p2_impl()'s
+# diagnostic reads to report a real asm-tier name (mmx-asm/sse-asm/
+# sse2-asm) instead of falling through to "-". Without __MMX__ here,
+# ops_gdn.c compiles fine (the #pragma aux BODIES it references live in
+# ops_mmx.c/ops_mmx_sse.c/ops_sse2.c, already always built at this same
+# tier) but can never SEE that they exist, so a production Watcom build
+# genuinely carrying the hand-written assembly still reports "-" for
+# it - the CLI ran the real kernel and lied about which one. Every
+# other ENG file uses the target's ordinary floor.
 #
 # NOT ops.c, which this said for a long time while the case arm below
 # named cpucheck alone. The code was the correct half: src/ops.c's own
@@ -463,13 +525,25 @@ HIGH_CPU_FLAGS := -6r -D__MMX__=1
 # inconsistency", which would define __MMX__ for the one file that
 # documents needing it undefined.
 #
+# ENG_CPU_HIGH is the actual source of truth: a plain space-separated
+# list, queryable with `make -s print-ENG_CPU_HIGH` exactly like $(ENG)/
+# $(ENG_MMX)/$(ENG_AVX2)/$(CLI_COM) already are - build/watcom/
+# build_cli.sh and build_test.sh (Repo B) read it that way rather than
+# hand-copying these two names into their own `if [ "$f" = ... ]` line,
+# which is the "fourth copy" drift build_cli.sh's own header comment
+# warns about for exactly this reason.
+ENG_CPU_HIGH := cpucheck ops_gdn
+empty :=
+space := $(empty) $(empty)
 # A shell `case`, not a Make function: the
 # loop variable ($$f below) is only known when the recipe's shell runs,
 # not at Make's own macro-expansion time, so the per-file choice has to
 # be made inside the loop. One case arm, reused by all four `for f in
 # $(ENG)` loops below, so the exception lives in exactly one place per
-# invocation site instead of drifting across CLI/GUI/DLL/DOS.
-ENG_CPU_CASE = case "$$f" in cpucheck) hi=1 ;; *) hi=0 ;; esac
+# invocation site instead of drifting across CLI/GUI/DLL/DOS - built
+# from $(ENG_CPU_HIGH) above rather than restating the two names, so
+# THIS copy cannot itself drift from the one external scripts query.
+ENG_CPU_CASE = case "$$f" in $(subst $(space),|,$(ENG_CPU_HIGH))) hi=1 ;; *) hi=0 ;; esac
 
 CLI_FLAGS := $(WATCOM_BASE) $(NT_CPU_FLAGS) -bt=nt $(WINVER_FLAGS)
 CLI_FLAGS_HIGH := $(WATCOM_BASE) $(HIGH_CPU_FLAGS) -bt=nt $(WINVER_FLAGS)

@@ -209,6 +209,12 @@ extern lz_i64 lz_debug_n_ring_rollback;
    pre-rotation engine bit for bit. */
 extern int lz_kv_rot_enable;
 extern lz_i64 lz_debug_n_kv_rot;
+/* --rope-dynamic-ntk on|off, forward.c. Off by default; off must
+   reproduce the fixed-theta RoPE table bit for bit. --rope-orig-max
+   sets the length the on-branch's NTK ratio scales against. */
+extern int lz_rope_dynamic_ntk;
+extern float lz_rope_orig_max;
+extern lz_i64 lz_debug_n_rope_ntk;
 /* --batch's positive control, forward.c. Prefilling n tokens at width T
    must take ceil(n/T) chunks; bit-identity alone cannot see the width. */
 extern lz_i64 lz_debug_n_chunks;
@@ -400,6 +406,12 @@ static void usage(void) {
     "                   (default 0 = never; matches llama.cpp).\n"
     "  --n-min N        Discard the whole draft if fewer than N tokens got\n"
     "                   drafted (default 0 = never; matches llama.cpp).\n"
+    "  --pld-ngram N    Prompt lookup decoding: query n-gram length,\n"
+    "                   1..8 (default 0 = off). No MTP head needed - the\n"
+    "                   draft comes from matching the prompt itself.\n"
+    "  --pld-tokens N   Tokens to draft on a PLD hit, 1..16 (default 0 =\n"
+    "                   off). Both --pld-ngram and --pld-tokens must be\n"
+    "                   nonzero to activate.\n"
     "  --think          Thinking-mode defaults\n"
     "  --stop TEXT      Stop string (repeatable)\n"
     "  --no-eos         Do not stop on EOS\n"
@@ -419,11 +431,18 @@ static void usage(void) {
     "                   ctx/2), N=16; W=0 turns eviction off).\n"
     "  --kv-rot MODE    on|off (default OFF). Hadamard-rotate Q/K/V before\n"
     "                   KV quantization.\n"
+    "  --rope-dynamic-ntk MODE  on|off (default OFF). Off reproduces the\n"
+    "                   fixed-theta RoPE table bit for bit. On rescales theta\n"
+    "                   once per --ctx beyond --rope-orig-max (NTK-aware\n"
+    "                   ratio); a no-op when --ctx does not exceed it.\n"
+    "  --rope-orig-max N  Training length --rope-dynamic-ntk's ratio scales\n"
+    "                   against (default 5120; see docs/kunkun-ce-params.md\n"
+    "                   S4 and engine/train_data.py's LONG_SEQ).\n"
     "  --moe-topk N     Route to N experts (default 0 = model's value).\n"
     "                   Alone it can only pick a losing arm; pair --moe-tau.\n"
     "  --moe-tau F      Router temperature, 0.1..10.0 (default 1.0 = off).\n"
     "                   Scales mixing weights; selection stays untempered.\n"
-    "  --kernel TIER    auto|ref|mmx|sse|sse2|arm-c|arm-asm (default\n"
+    "  --kernel TIER    auto|ref|mmx|sse|sse2|avx2|arm-c|arm-asm (default\n"
     "                   auto). x86 picks by CPUID; sse is SSE1, which has\n"
     "                   its own bodies for q8round, the GDN split, exp,\n"
     "                   norm_ss and the float matmul row, and MMX's for\n"
@@ -587,9 +606,21 @@ static void print_config(const LZModelConfig *c) {
     printf("Model:\n");
     printf("  vocab           %d\n", c->vocab_size);
     printf("  hidden          %d\n", c->hidden_size);
-    printf("  layers          %d (linear %d / full %d, every %dth full)\n",
-           c->n_layers, c->n_linear_layers, c->n_full_layers,
-           c->full_attention_interval);
+    /* Positions, not the stride. full_attention_interval is the upstream
+       generator's value and survives pruning unchanged, so on kunkun-ce
+       it says "every 4th" next to a full count of 2 out of 5 layers -
+       two numbers in one line that cannot both be true. layer_types is
+       what the loader actually uses. */
+    printf("  layers          %d (linear %d / full %d",
+           c->n_layers, c->n_linear_layers, c->n_full_layers);
+    if (c->n_full_layers > 0) {
+        int li, shown = 0;
+        printf(" at ");
+        for (li = 0; li < c->n_layers; li++)
+            if (c->layer_types[li] == LZ_LT_FULL)
+                printf("%s%d", shown++ ? "," : "", li);
+    }
+    printf(")\n");
     printf("  context         %d\n", c->seq_len);
     /* WHICH ffn width is actually in use, not just the dense field.
        model.h's rule: layer li is MoE iff num_experts > 0 &&
@@ -1249,9 +1280,10 @@ int main(int argc, char **argv) {
                machine that has none.
 
                Three blocks. The grid is the human view and keeps its
-               shape (format, six slots, the 128-group column - the ARM
-               pair only on the build that has it, so the header follows
-               the same #if or the table reads wrong). The `cell` lines
+               shape (format, LZ_ROW_N row-kernel slots, the 128-group
+               column - the ARM pair only on the build that has it, so
+               the header follows the same #if or the table reads
+               wrong). The `cell` lines
                are the whole registry, every format x tier including the
                columns this build does not print, because the ARM cells
                have to be readable from an x86 binary or they go
@@ -1275,10 +1307,10 @@ int main(int argc, char **argv) {
             int nwhy = 0;
             memset(whyseen, 0, sizeof whyseen);
 #if defined(__arm__)
-            printf("format mmxI sseI sse2I mmxA sseA sse2A armC armA  g128\n%s",
+            printf("format mmxI sseI sse2I mmxA sseA sse2A avx2I armC armA  g128\n%s",
                    lz_kernel_matrix());
 #else
-            printf("format mmxI sseI sse2I mmxA sseA sse2A  g128\n%s",
+            printf("format mmxI sseI sse2I mmxA sseA sse2A avx2I  g128\n%s",
                    lz_kernel_matrix());
 #endif /* __arm__ */
             printf("legend x=here o=other-build i=impossible t=todo "
@@ -1575,6 +1607,12 @@ int main(int argc, char **argv) {
         else if (strcmp(a, "--n-min") == 0 && i + 1 < argc) {
             g.n_min = atoi(argv[++i]);
         }
+        else if (strcmp(a, "--pld-ngram") == 0 && i + 1 < argc) {
+            g.pld_ngram = atoi(argv[++i]);
+        }
+        else if (strcmp(a, "--pld-tokens") == 0 && i + 1 < argc) {
+            g.pld_tokens = atoi(argv[++i]);
+        }
         else if (strcmp(a, "--ctx") == 0 && i + 1 < argc) {
             ctx_limit = atoi(argv[++i]);
             if (ctx_limit < 16) ctx_limit = 16;
@@ -1598,12 +1636,13 @@ int main(int argc, char **argv) {
                      : strcmp(k, "mmx") == 0     ? LZ_KERNEL_MMX
                      : strcmp(k, "sse") == 0     ? LZ_KERNEL_SSE
                      : strcmp(k, "sse2") == 0    ? LZ_KERNEL_SSE2
+                     : strcmp(k, "avx2") == 0    ? LZ_KERNEL_AVX2
                      : strcmp(k, "arm-c") == 0   ? LZ_KERNEL_ARM
                      : strcmp(k, "arm-asm") == 0 ? LZ_KERNEL_ARM_ASM
                      : strcmp(k, "auto") == 0    ? LZ_KERNEL_AUTO : -1;
             if (want < 0) {
                 printf("--kernel: unknown tier "
-                       "(auto|ref|mmx|sse|sse2|arm-c|arm-asm)\n");
+                       "(auto|ref|mmx|sse|sse2|avx2|arm-c|arm-asm)\n");
                 return 2;
             }
             lz_kernel_select(want);
@@ -1762,6 +1801,15 @@ int main(int argc, char **argv) {
             if (strcmp(m, "on") == 0)       lz_kv_rot_enable = 1;
             else if (strcmp(m, "off") == 0) lz_kv_rot_enable = 0;
             else { usage(); return 2; }
+        }
+        else if (strcmp(a, "--rope-dynamic-ntk") == 0 && i + 1 < argc) {
+            const char *m = argv[++i];
+            if (strcmp(m, "on") == 0)       lz_rope_dynamic_ntk = 1;
+            else if (strcmp(m, "off") == 0) lz_rope_dynamic_ntk = 0;
+            else { usage(); return 2; }
+        }
+        else if (strcmp(a, "--rope-orig-max") == 0 && i + 1 < argc) {
+            lz_rope_orig_max = LZ_STRTOF(argv[++i]);
         }
         else if (strcmp(a, "--prefetch") == 0 && i + 1 < argc) {
             const char *m = argv[++i];
@@ -2391,6 +2439,11 @@ int main(int argc, char **argv) {
             printf("[kv-rot: %s, k=%d v=%d, %lld head rotations]\n",
                    lz_kv_rot_enable ? "on" : "off",
                    st.kv_rot_k, st.kv_rot_v, lz_debug_n_kv_rot);
+            { char _b[LZ_FTOA_BUF];
+              lz_ftoa_f(_b, lz_rope_orig_max, 0, 0);
+              printf("[rope-ntk: %s, orig_max %s, %lld freq pairs scaled]\n",
+                     lz_rope_dynamic_ntk ? "on" : "off", _b,
+                     lz_debug_n_rope_ntk); }
             printf("[batch: width %d, %lld forward chunks, %lld lm_head]\n",
                    st.nt_cap, lz_debug_n_chunks, lz_debug_n_lmhead);
             printf("[attn: sink %d window %d, %lld evicted rows skipped]\n",
@@ -2425,6 +2478,26 @@ int main(int argc, char **argv) {
                       g.out_spec_rounds,
                       lz_debug_n_capture, lz_debug_n_catchup,
                       lz_debug_n_ring_rollback);
+            }
+            if (g.pld_ngram > 0 && g.pld_tokens > 0) {
+                /* hit rate = how often the n-gram lookup found anything;
+                   alpha = accepted / draft_tokens, same on-policy
+                   acceptance-rate shape the --spec block above reports -
+                   see LZGenOpts's own comment on why the two answer
+                   different questions. */
+                float hit_rate = g.out_pld_rounds > 0
+                                 ? (float)g.out_pld_hits / (float)g.out_pld_rounds
+                                 : 0.0;
+                float alpha = g.out_pld_draft_tokens > 0
+                              ? (float)g.out_pld_accepted / (float)g.out_pld_draft_tokens
+                              : 0.0;
+                { char _b0[LZ_FTOA_BUF], _b1[LZ_FTOA_BUF];
+                  lz_ftoa_f(_b0, hit_rate, 4, 0);
+                  lz_ftoa_f(_b1, alpha, 4, 0);
+                  printf("[pld: %d rounds, %d hits, hit_rate=%s, "
+                         "%d draft tokens, %d accepted, alpha=%s]\n",
+                         g.out_pld_rounds, g.out_pld_hits, _b0,
+                         g.out_pld_draft_tokens, g.out_pld_accepted, _b1); }
             }
         }
         lz_state_free(&st);

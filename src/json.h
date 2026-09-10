@@ -28,7 +28,14 @@ typedef struct {
     int key_len;
     const char *text;        /* STR content (NUL-terminated) */
     int text_len;
-    float num;               /* NUM value; BOOL uses 0/1 */
+    double num;               /* NUM value; BOOL uses 0/1. double, not
+                                 float: safetensors data_offsets are byte
+                                 offsets into real checkpoints, routinely
+                                 past 2^24 (float32's exact-integer
+                                 limit), and a float here rounds them to
+                                 the nearest representable multiple with
+                                 no error signal - the offset just comes
+                                 out silently wrong. */
     int first_child;         /* index of first child of ARR/OBJ, -1 if none */
     int next_sibling;
     int n_children;

@@ -13,6 +13,14 @@
 #include "mmx_compat.h"
 #include "ops_mmx.h"
 #include "ops_sse2.h"
+#include "ops_avx2.h"   /* LZ_HAVE_Q8R_AVX2 - without this, lz_q8r_tier's
+                           tier 3 arm is compiled out in THIS TU and
+                           --kernel avx2 resolves to tier 0 (the scalar
+                           path) for both call sites: LZ_KERNEL_AVX2
+                           matches neither the SSE2 nor the SSE1 check
+                           below. Empty body on Watcom/non-AVX2 builds
+                           (this header's own guard), same shape as the
+                           SSE2 include above. */
 #include "ops_kernel_shared.h"
 #include "ops_quant.h"  /* lz_cpu_has_mmx (non-static, from module 1) */
 #include "ops_sched.h"
@@ -44,6 +52,67 @@ int lz_cpu_has_sse(void) {
 #endif /* LZ_CPUID_NOCACHE */
 }
 
+#endif /* __i386__ || __x86_64__ || _M_IX86 */
+
+#if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86)
+static int g_has_avx2 = -1;
+
+/* OSXSAVE + XGETBV + leaf-7 AVX2, in that order - CPUID reporting AVX2
+   is not sufficient by itself; the OS must also have enabled YMM state
+   saving (XCR0 bits 1:2), or executing an AVX2 instruction traps. Leaf
+   1 ECX bit 28 (AVX) is not checked separately: the architecture never
+   sets leaf 7 EBX bit 5 (AVX2) without also setting AVX, since AVX2 is
+   defined as an extension of the AVX instruction set, so testing AVX2
+   alone is already the tighter of the two conditions. On Watcom this
+   always returns 0: no Watcom build ever links src/ops_avx2.c, so
+   there is nothing here to detect, and the request path
+   (LZ_KERNEL_AVX2 accepted by the CLI on every build) must still clamp
+   safely rather than claim support. */
+int lz_cpu_has_avx2(void) {
+#ifdef __WATCOMC__
+    return 0;
+#elif defined(LZ_FORCE_NO_AVX2)
+    /* Test-only override: lets the "requested avx2, don't have it,
+       clamp to `have`" branch in lz_kernel_select be exercised on a
+       host that genuinely has AVX2 - otherwise that branch could ship
+       broken and nothing on this dev machine would ever run it.
+
+       NOT a member of the LZ_<THING>_FORCE_<TIER> family documented
+       above LZ_KERNEL_SSE in ops.h (LZ_Q8R_FORCE_SSE etc., mostly
+       retired) - those forced a specific tier's BODY to run in place
+       of runtime dispatch. This instead forces the CAPABILITY PROBE
+       itself to lie, leaving dispatch and every tier body untouched;
+       it exists to make an unreachable branch reachable, not to bypass
+       one. */
+    return 0;
+#else
+    unsigned ecx1, xcr0, ebx7;
+#ifdef LZ_CPUID_NOCACHE
+    ecx1 = lz_cpuid1_ecx();
+    if (!(ecx1 & (1u << 27))) return 0;
+    xcr0 = lz_xgetbv0();
+    if ((xcr0 & 0x6u) != 0x6u) return 0;
+    ebx7 = lz_cpuid7_ebx();
+    return (ebx7 & (1u << 5)) != 0;
+#else
+    if (g_has_avx2 < 0) {
+        ecx1 = lz_cpuid1_ecx();
+        if (!(ecx1 & (1u << 27))) {
+            g_has_avx2 = 0;
+        } else {
+            xcr0 = lz_xgetbv0();
+            if ((xcr0 & 0x6u) != 0x6u) {
+                g_has_avx2 = 0;
+            } else {
+                ebx7 = lz_cpuid7_ebx();
+                g_has_avx2 = (ebx7 & (1u << 5)) != 0;
+            }
+        }
+    }
+    return g_has_avx2;
+#endif /* LZ_CPUID_NOCACHE */
+#endif /* __WATCOMC__ */
+}
 #endif /* __i386__ || __x86_64__ || _M_IX86 */
 
 /* lz_cpu_has_mmx: non-static, defined in ops.c, declared in ops_quant.h.
@@ -125,7 +194,8 @@ int q8r_have_simd(void) {
    q8r_have_simd below is a different axis - the Q8 row-kernel tier, not
    the arithmetic one - and keeps its CPUID question. */
 
-/* Q8 rounding: 0 scalar, 1 SSE1 (lz_q8round32_sse), 2 SSE2. The tier is
+/* Q8 rounding: 0 scalar, 1 SSE1 (lz_q8round32_sse), 2 SSE2
+   (lz_q8round32_simd), 3 AVX2 (lz_q8round32_avx2, gcc-only). The tier is
    read from g_kernel, and LZ_Q8R_FORCE_SSE is gone for the same reason
    LZ_I32FACC_FORCE_SSE below is: `--kernel sse` selects the SSE1 body
    at run time, so the compile-time escape was a second way to say it
@@ -138,6 +208,9 @@ int q8r_have_simd(void) {
 int lz_q8r_tier(void) {
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
     if (g_kernel == LZ_KERNEL_REF) return 0;
+#if defined(LZ_HAVE_Q8R_AVX2)
+    if (g_kernel == LZ_KERNEL_AVX2) return 3;
+#endif /* LZ_HAVE_Q8R_AVX2 */
 #if defined(LZ_HAVE_Q8R_SIMD)
     if (g_kernel == LZ_KERNEL_SSE2) return 2;
 #endif /* LZ_HAVE_Q8R_SIMD */
@@ -151,19 +224,26 @@ int lz_q8r_tier(void) {
 }
 #endif /* LZ_HAVE_Q8R_SIMD || LZ_HAVE_Q8R_SSE */
 
-/* Attention wsum's chunk fold: 0 scalar, 1 SSE1, 2 SSE2. Same shape as
-   lz_q8r_tier above and for the same reason - the two tiers here are a
-   scalar convert (cvtsi2ss, SSE1) and a packed one (cvtdq2ps, SSE2).
+/* Attention wsum's chunk fold: 0 scalar, 1 SSE1, 2 SSE2, 3 AVX2. Same
+   shape as lz_q8r_tier above and for the same reason - the tiers here
+   are a scalar convert (cvtsi2ss, SSE1), a packed four-wide one
+   (cvtdq2ps, SSE2) and a packed eight-wide one (vcvtdq2ps, AVX2), all
+   of them the same correctly rounded conversion (see
+   ops_kernel_shared.h's LZ_I32F_ACC32 note).
 
    LZ_I32FACC_FORCE_SSE is gone. It existed because the SSE1 cell was
    unreachable on any machine with SSE2 - every machine that runs this
    suite - and a path that cannot be selected cannot be validated. That
    is what `--kernel sse` is, so the compile-time escape was a second
    way to say it and the two could disagree. */
-#if defined(LZ_HAVE_I32FACC_SSE2) || defined(LZ_HAVE_I32FACC_SSE)
+#if defined(LZ_HAVE_I32FACC_SSE2) || defined(LZ_HAVE_I32FACC_SSE) || \
+    defined(LZ_HAVE_I32FACC_AVX2)
 int lz_i32facc_tier(void) {
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
     if (g_kernel == LZ_KERNEL_REF) return 0;
+#if defined(LZ_HAVE_I32FACC_AVX2)
+    if (g_kernel == LZ_KERNEL_AVX2) return 3;
+#endif /* LZ_HAVE_I32FACC_AVX2 */
 #if defined(LZ_HAVE_I32FACC_SSE2)
     if (g_kernel == LZ_KERNEL_SSE2) return 2;
 #endif /* LZ_HAVE_I32FACC_SSE2 */
@@ -532,6 +612,13 @@ static int kernel_detect(void) {
     if (edx & (1u << 23)) return LZ_KERNEL_MMX;
     return LZ_KERNEL_REF;
 #elif defined(LZ_ROW_SSE2_EXTERN)
+#if LZ_HAVE_AVX2_TU
+    /* The gcc ceiling, above SSE2. Two answers, because the kernels can
+       be absent from a link the CPU would run them in: the machine's
+       (lz_cpu_has_avx2) and the build's (LZ_HAVE_AVX2_TU) - the same
+       pair lz_kernel_select clamps an explicit --kernel avx2 against. */
+    if (lz_cpu_has_avx2()) return LZ_KERNEL_AVX2;
+#endif /* LZ_HAVE_AVX2_TU */
     if (lz_cpuid1_edx() & (1u << 26)) return LZ_KERNEL_SSE2;
     if (lz_cpu_has_sse()) return LZ_KERNEL_SSE;
 #if defined(LZ_DOT_MMX_EXTERN)
@@ -575,11 +662,24 @@ int lz_kernel_select(int which) {
            and running the SSE1 tier on a machine that also has SSE2 is
            the only way to compare them. Asking UP clamps to what CPUID
            found: sse2 needs SSE2, and sse needs SSE, which an SSE2
-           machine also has. */
-        if (which == LZ_KERNEL_SSE2 && have != LZ_KERNEL_SSE2)
+           machine also has.
+           Each test names the CAPABILITY its tier needs rather than
+           comparing against `have`: have is the best of four now, so
+           `have == LZ_KERNEL_SSE2` would promote an explicit
+           --kernel sse2 to avx2 on exactly the machines that have it,
+           and the four-way bit-identity comparison would spend its run
+           comparing one tier against itself.
+           AVX2 asks two questions, the machine's and the link's: a tier
+           with no bodies falls back per site - table pickers to SSE2,
+           the inline tests to MMX, the fixed-point tiers to C - so one
+           run would mix three implementations under one tier name. The
+           CLI reports the fallback. */
+        if (which == LZ_KERNEL_AVX2 &&
+            (!lz_cpu_has_avx2() || !LZ_HAVE_AVX2_TU))
             which = have;
-        else if (which == LZ_KERNEL_SSE &&
-                 have != LZ_KERNEL_SSE && have != LZ_KERNEL_SSE2)
+        else if (which == LZ_KERNEL_SSE2 && !(lz_cpuid1_edx() & (1u << 26)))
+            which = have;
+        else if (which == LZ_KERNEL_SSE && !(lz_cpuid1_edx() & (1u << 25)))
             which = have;
         g_kernel = which;
 #else
@@ -596,6 +696,7 @@ const char *lz_kernel_name(void) {
     if (g_kernel == LZ_KERNEL_MMX) return "mmx";
     if (g_kernel == LZ_KERNEL_ARM_ASM) return "arm-asm";
     if (g_kernel == LZ_KERNEL_ARM) return "arm-c";
+    if (g_kernel == LZ_KERNEL_AVX2) return "avx2";
     return "ref";
 }
 
@@ -605,11 +706,23 @@ const char *lz_build_paths(void) {
 #elif defined(__WATCOMC__)
     return "mmx-asm+sse2-asm";
 #elif defined(LZ_DOT_MMX_EXTERN) && defined(LZ_ROW_SSE2_EXTERN)
+#if LZ_HAVE_AVX2_TU
+    return "mmx-intrin+sse2-intrin+avx2-intrin";
+#else
     return "mmx-intrin+sse2-intrin";
+#endif /* LZ_HAVE_AVX2_TU */
 #elif defined(LZ_DOT_MMX_EXTERN)
+#if LZ_HAVE_AVX2_TU
+    return "mmx-intrin+avx2-intrin";
+#else
     return "mmx-intrin";
+#endif /* LZ_HAVE_AVX2_TU */
 #elif defined(LZ_ROW_SSE2_EXTERN)
+#if LZ_HAVE_AVX2_TU
+    return "sse2-intrin+avx2-intrin";
+#else
     return "sse2-intrin";
+#endif /* LZ_HAVE_AVX2_TU */
 #else
     return "scalar";
 #endif /* __WATCOMC__ */
@@ -618,6 +731,7 @@ const char *lz_build_paths(void) {
 const char *lz_kernel_tier(void) {
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
     if (g_kernel == LZ_KERNEL_REF) return "ref";
+    if (g_kernel == LZ_KERNEL_AVX2) return "avx2-intrin";
 #if defined(LZ_T2_ARM_ASM_EXTERN)
     return (g_kernel == LZ_KERNEL_ARM_ASM) ? "arm-asm" : "arm-c";
 #elif defined(__WATCOMC__) || defined(LZ_DOT_MMX_EXTERN)

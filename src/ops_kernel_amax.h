@@ -42,8 +42,12 @@
    address taken, so the dispatch table below needs a real function to
    point at. */
 
-/* The dispatch table. Six slots in the LZ_ROW_* order; NULL is a claim
-   with a reason attached, not an omission.
+/* The dispatch table. LZ_ROW_N slots in the LZ_ROW_* order; NULL is a
+   claim with a reason attached, not an omission. The trailing avx2
+   slot holds lz_amax32_avx2 (src/ops_avx2.c) whenever this build's
+   AVX2 tier exists: LZ_DEFINE_PICK (ops_kernel_shared.h) reads
+   LZ_ROW_AVX2_I first, ahead of the MMX/SSE2 chain, when g_kernel ==
+   LZ_KERNEL_AVX2.
 
    SSE1 IS EMPTY BY INSTRUCTION SET. Its additions to the MMX integer
    set are pshufw, pinsrw, pextrw, pmovmskb, pmulhuw, pavgb, pavgw,
@@ -77,7 +81,12 @@ static const lz_amaxfn LZ_AMAX_TAB[LZ_ROW_N] = {
 #endif
     NULL,                       /* sse-asm: same instruction-set reason */
 #if defined(LZ_HAVE_AMAX_SSE2) && defined(__WATCOMC__)
-    lz_amax32_sse2_w
+    lz_amax32_sse2_w,
+#else
+    NULL,
+#endif
+#if defined(LZ_HAVE_AMAX_AVX2)
+    lz_amax32_avx2
 #else
     NULL
 #endif
@@ -92,11 +101,38 @@ static int lz_amax_is_mmx(lz_amaxfn f) {
                       f == LZ_AMAX_TAB[LZ_ROW_MMX_A]);
 }
 
+/* Whether the picked kernel is the AVX2 body specifically - pointer
+   identity, not "produced the right number". A bit-identity comparison
+   against a scalar/SSE2 reference cannot tell "ran AVX2" from "silently
+   fell back to SSE2, which computes the same value by construction" -
+   this predicate exists so a caller can ask the question a value
+   comparison structurally cannot answer (see q8_amax_picked_avx2,
+   ops_quant.c, the one non-static bridge that lets a test outside this
+   TU call it, since LZ_AMAX_TAB/lz_amax_pick stay static here). */
+static int lz_amax_is_avx2(lz_amaxfn f) {
+    return f != 0 && f == LZ_AMAX_TAB[LZ_ROW_AVX2_I];
+}
+
 /* How many elements the picked kernel consumes per step: two lanes for
-   MMX, four for SSE2. The operator needs it to know where its scalar
-   tail begins, and asking the table beats a second copy of the tier
-   test at the call site. */
+   MMX, four for SSE2, eight for AVX2. The operator needs it to know
+   where its scalar tail begins, and asking the table beats a second
+   copy of the tier test at the call site.
+
+   The AVX2 case has to be checked explicitly, not folded into the
+   "not MMX" default the other two shared: that default was only ever
+   true because SSE2 and MMX+SSE2/MMX-asm all happened to consume
+   exactly four elements per step, an invariant AVX2 breaks (it
+   consumes eight, with no tail of its own - see lz_amax32_avx2's
+   header comment). Left unfixed, q8_amax's caller-side tail
+   computation (`gs & ~(lanes - 1)`) would believe an eight-wide AVX2
+   call had covered a range it stopped four elements short of - for
+   gs in 4 mod 8 including gs==4, believe it covered the range
+   entirely, silently returning 0 for real data. gs==4 is not
+   theoretical: src/forward.c calls q8_amax with n=c->conv_kernel==4
+   for every conv1d row, so an inaccurate lanes count here would
+   zero every depthwise conv1d weight under --kernel avx2. */
 static int lz_amax_lanes(lz_amaxfn f) {
     if (!f) return 0;
+    if (f == LZ_AMAX_TAB[LZ_ROW_AVX2_I]) return 8;
     return lz_amax_is_mmx(f) ? 2 : 4;
 }

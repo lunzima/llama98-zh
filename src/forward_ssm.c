@@ -36,6 +36,12 @@ void forward_ssm(const LZModel *m, LZRunState *s,
                               c->lin_conv_dim * (c->conv_kernel - 1);
     size_t li_off_q8 = (size_t)li * nv * kd * vd;
     size_t li_off_conv = (size_t)li * c->lin_conv_dim * (c->conv_kernel - 1);
+    /* Base offset into s->conv_w32 (float tier's persistent conv-tap
+       cache, forward.h) for this layer - same channel-major layout
+       conv_f32_build and the fixed tier's `cb` (below, s->conv_mw) use.
+       NOT hist-scaled like li_off_conv above: this indexes taps
+       (conv_kernel per channel), not rolling history (conv_kernel-1). */
+    size_t li_off_w = (size_t)li * c->lin_conv_dim * c->conv_kernel;
     float scale = s->ssm_scale;
     int hdim = c->hidden_size, cdim = c->lin_conv_dim, vdim = c->lin_value_dim;
     int gsa = lz_act_gs(&L->in_proj_qkv, hdim);
@@ -97,11 +103,18 @@ void forward_ssm(const LZModel *m, LZRunState *s,
             continue;
         }
 #endif /* LZ_CONV_FIXED */
+        /* s->conv_w32 + li_off_w, not lz_t_f32(&L->conv1d, s->wscr): the
+           latter widens the WHOLE tensor into s->wscr on every token,
+           which is sized for the widest matmul row, not
+           lin_conv_dim*conv_kernel elements - a narrow (BF16) conv1d
+           tensor overran it and corrupted the heap. conv_f32_build
+           already staged the whole tensor into s->conv_w32 once, at
+           setup; see that function's and conv_w32's own comments. */
         lz_causal_conv1d_step(s->qkv_c + (size_t)tk * cdim,
                               s->qkv + (size_t)tk * cdim,
                               s->conv_state + (size_t)slot_in * conv_slot_stride + li_off_conv,
                               s->conv_state + (size_t)slot_out * conv_slot_stride + li_off_conv,
-                              lz_t_f32(&L->conv1d, s->wscr), cdim,
+                              s->conv_w32 + li_off_w, cdim,
                               c->conv_kernel);
     }
     LZ_TAP("sconv", layer, s->qkv_c, cdim);

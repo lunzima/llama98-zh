@@ -121,6 +121,48 @@ unsigned lz_cpuid1_edx(void) {
     return d;
 }
 
+/* Leaf 1 ECX: OSXSAVE (bit 27) and AVX (bit 28). Same raw-asm shape as
+   lz_cpuid1_edx - no EFLAGS.ID guard here either, by the same design:
+   that belongs to the one caller deciding whether it is safe to probe,
+   not to this primitive. */
+unsigned lz_cpuid1_ecx(void) {
+    unsigned a, b, c, d;
+    a = b = c = d = 0;
+    __asm__ __volatile__("cpuid"
+                         : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
+                         : "a"(1));
+    (void)a; (void)b; (void)d;
+    return c;
+}
+
+/* Leaf 7, sub-leaf 0, EBX: AVX2 is bit 5. ecx must be 0 on input to
+   select sub-leaf 0 - leaf 7 is sub-leaved, unlike leaf 1. */
+unsigned lz_cpuid7_ebx(void) {
+    unsigned a, b, c, d;
+    a = b = c = d = 0;
+    __asm__ __volatile__("cpuid"
+                         : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
+                         : "a"(7), "c"(0));
+    (void)a; (void)c; (void)d;
+    return b;
+}
+
+/* XGETBV(0) -> XCR0 in edx:eax. Only meaningful once lz_cpuid1_ecx's
+   OSXSAVE bit has been confirmed set - executing xgetbv without that
+   is itself a fault (#UD) unconditionally. Encoded as raw bytes (0f 01 d0)
+   rather than the _xgetbv intrinsic so this file keeps needing no
+   extra -m flag: _xgetbv lives behind <immintrin.h>, which some gcc
+   versions gate on -mxsave even though the instruction itself predates
+   AVX2 and needs no such flag to assemble. */
+unsigned lz_xgetbv0(void) {
+    unsigned eax, edx;
+    __asm__ __volatile__(".byte 0x0f, 0x01, 0xd0"
+                         : "=a"(eax), "=d"(edx)
+                         : "c"(0));
+    (void)edx;
+    return eax;
+}
+
 static int probe(unsigned *edx1) {
     /* Guarded: on i486/i386 there is no CPUID instruction and this
        would fault, and the x87 build targets real Socket-7 hardware.

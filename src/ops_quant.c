@@ -25,6 +25,16 @@
 #include "ops_mmx.h"
 #include "ops_sse.h"
 #include "ops_sse2.h"
+#include "ops_avx2.h"    /* LZ_HAVE_AMAX_AVX2, lz_amax32_avx2 - without this,
+                            LZ_AMAX_TAB's trailing slot (ops_kernel_amax.h,
+                            included below) silently compiles to NULL in
+                            THIS translation unit even when ops_avx2.c
+                            defines the function elsewhere: q8_amax lives
+                            here, and each #include "ops_kernel_amax.h"
+                            site gets its own private copy of the table.
+                            Empty body on Watcom/non-AVX2 builds (this
+                            header's own guard), same shape as the SSE2
+                            include just above. */
 #include "ops_sched.h"   /* lz_cpu_has_sse - norm_ss_fixed's SSE1 arm */
 #include "ops_kernel_shared.h" /* lz_i32f, LZ_ROW_N, LZ_DEFINE_PICK, g_kernel */
 #include "ops_quant.h"
@@ -681,6 +691,13 @@ void lz_exp_fixed_run(const float *x, float *out, int n) {
             sv[k] = q8_round(r * (float)LZ_EXP_QSCALE) >> 5;
             ev[k] = (t >> 5) - LZ_EXP_Q;
         }
+#if defined(LZ_HAVE_EXP_Q20_AVX2)
+        /* AVX2 first: eight lanes against SSE2's four. Tested on
+           g_kernel alone, like the SSE2 test below it. */
+        if (g_kernel == LZ_KERNEL_AVX2)
+            lz_exp_q20_avx2(tv, sv, pv, m);
+        else
+#endif /* LZ_HAVE_EXP_Q20_AVX2 */
 #if defined(LZ_HAVE_EXP_Q20_SIMD)
         /* SSE2 first: four lanes against MMX's two, and it owes no
            emms. Below it the MMX cell, which a machine without SSE2
@@ -1155,6 +1172,15 @@ void lz_sigmoid_q15_run(const float *x, int32_t *out, int n) {
             tb[k] = g_sigtab[idx + 1];
             tf[k] = sat[k] ? 0 : (int32_t)((t - (float)idx) * 32768.0f);
         }
+#if defined(LZ_HAVE_LERP_Q15_AVX2)
+        /* AVX2 first: eight lanes against SSE2's four per instruction.
+           Tested on g_kernel alone, like the SSE2 test below it - a
+           CPUID test here would be a second answer to a question
+           lz_kernel_select has already settled. */
+        if (g_kernel == LZ_KERNEL_AVX2)
+            lz_lerp_q15_avx2(ta, tb, tf, out + i, m);
+        else
+#endif /* LZ_HAVE_LERP_Q15_AVX2 */
 #if defined(LZ_HAVE_LERP_Q15_SIMD)
         /* SSE2 first: eight lanes against MMX's four, and it owes no
            emms. Below it the MMX cell, which a machine without SSE2
@@ -1444,6 +1470,38 @@ uint32_t q8_amax(const float *grp, int gs) {
     return am;
 }
 
+/* Test hook: true iff q8_amax's own dispatch, under whichever kernel is
+   currently selected, resolves LZ_AMAX_TAB to the AVX2 body specifically
+   - pointer identity, not a value comparison (see lz_amax_is_avx2's own
+   comment, ops_kernel_amax.h, for why a value comparison cannot tell
+   "ran AVX2" from "silently fell back to SSE2 and got the same right
+   answer"). LZ_AMAX_TAB/lz_amax_pick/lz_amax_is_avx2 are static to this
+   TU by design - every #include "ops_kernel_amax.h" site gets its own
+   private copy of the table (ops_mmx.c and ops_sse2.c each have theirs
+   too) - so this is the one externally-linked bridge a test outside
+   this file needs to ask the question about THIS copy, the one q8_amax
+   itself actually dispatches through. */
+int q8_amax_picked_avx2(void) {
+    return lz_amax_is_avx2(lz_amax_pick(LZ_AMAX_TAB));
+}
+
+/* Test hook: true iff THIS translation unit saw LZ_HAVE_Q8R_AVX2 when it
+   compiled, i.e. iff the #include "ops_avx2.h" near the top of this file
+   reached it. lz_quantize_q8's tier==3 arm sits inside #ifdef
+   LZ_HAVE_Q8R_AVX2 and is compiled out silently when the include is
+   missing; the tiers owe each other bit-identity, so comparing its
+   output against the SSE2 tier's cannot tell which one ran. It cannot
+   live in ops_avx2.c: there the macro comes from ops_avx2.h under the
+   same guard that wraps that whole TU, so the answer would always be 1.
+   Declared in ops_quant.h. */
+int lz_q8round32_avx2_compiled_in_quant(void) {
+#if defined(LZ_HAVE_Q8R_AVX2)
+    return 1;
+#else
+    return 0;
+#endif /* LZ_HAVE_Q8R_AVX2 */
+}
+
 /* Shared constants. `static const float` forces the round once, here,
    avoiding gcc's x87 excess-precision folding at each use site. */
 const float LZ_Q8_MIN_SCALE_F = LZ_Q8_MIN_SCALE;
@@ -1672,6 +1730,18 @@ float norm_ss_fixed(const float *x, int n, short *qout, int *eout) {
 #endif /* LZ_ARM_ASM_EXTERN */
     sc = pow2f(e);
     i = 0;
+#if defined(LZ_HAVE_NORM_SS_AVX2)
+    /* The AVX2 tier, ABOVE the SSE2 one so a machine with both takes the
+       wider kernel - the same ordering the SSE1 branch below observes
+       from the other side. Selected by tier, not CPUID, for the reason
+       every other branch here gives. Whole groups of 16; the tail runs
+       in C, so `i` continues rather than restarting. */
+    if (g_kernel == LZ_KERNEL_AVX2 && n >= 16) {
+        lz_i64 sacc = 0;
+        i = lz_norm_ss_avx2(x, n, sc, qout, &sacc);
+        acc = sacc;
+    }
+#endif /* LZ_HAVE_NORM_SS_AVX2 */
 #if defined(LZ_NORM_SS_SSE2_EXTERN)
     /* SELECTED BY TIER, like every other kernel here: --kernel ref and
        mmx must reach the C loop below or the arm this is compared
@@ -1833,11 +1903,28 @@ extern void lz_x87_cw_set(unsigned short cw);
 
 unsigned lz_fpu_float_begin(void) {
 #if defined(__WATCOMC__)
-    unsigned save = _control87(0, 0);
+    unsigned save = _control87(0, 0) & 0xFFFFu;
     _control87(_PC_24, _MCW_PC);
     /* x87 has the rounding half of fast mode but no FTZ/DAZ - see
        lz_fastfp_g's comment for why that gap is measured-harmless. */
-    if (lz_fastfp_g) _control87(_RC_CHOP, _MCW_RC);
+    if (lz_fastfp_g) {
+        _control87(_RC_CHOP, _MCW_RC);
+        /* MXCSR IS A SECOND REGISTER, and the SSE2 kernels round by it
+           (cvtps2dq reads its RC field), so the chopped 387 above is not
+           enough on its own: left at reset, MXCSR rounds to nearest while
+           every C path here truncates under fast mode - (int)qv in
+           q8_round, the magic add through a chopped 387. RC only: the
+           FTZ/DAZ bits have no 387 counterpart, and setting them would
+           put the SIMD arms a hair off the scalar ones rather than on
+           them. Guarded on SSE, below which MXCSR does not exist; the
+           saved value rides in the upper half of the return, and a zero
+           there means it was never touched. */
+        if (lz_cpu_has_sse()) {
+            unsigned csr = lz_mxcsr_get();
+            lz_mxcsr_set((csr & ~0x6000u) | 0x6000u);   /* RC = chop */
+            save |= csr << 16;
+        }
+    }
     return save;
 #elif defined(LZ_X87_FLOAT_CW)
     unsigned short save = lz_x87_cw_get();
@@ -1866,8 +1953,11 @@ unsigned lz_fpu_float_begin(void) {
 void lz_fpu_float_end(unsigned save) {
 #if defined(__WATCOMC__)
     /* _MCW_RC too, not just _MCW_PC: fast mode set the rounding half and
-       leaving it set would follow the caller out of the region. */
-    _control87(save, _MCW_PC | _MCW_RC);
+       leaving it set would follow the caller out of the region. MXCSR as
+       well, when lz_fpu_float_begin packed one - it is where the upper
+       half's zero comes from. */
+    if (save >> 16) lz_mxcsr_set((save >> 16) & 0xFFFFu);
+    _control87(save & 0xFFFFu, _MCW_PC | _MCW_RC);
 #elif defined(LZ_X87_FLOAT_CW)
     lz_x87_cw_set((unsigned short)save);
 #elif defined(LZ_SSE_FLOAT_CSR)
@@ -1965,6 +2055,18 @@ float lz_exp(float x) {
    (.prof/arm_div_count.sh), while the census counts both as 1. */
 #define LZ_Q8_INV_SAFE 1.0e-30f
 
+/* Counts group executions of lz_quantize_q8's AVX2 arm. Defined
+   unconditionally, so the symbol exists in a build with no AVX2 arm too
+   and zero is the true answer there - a reader never has to know which
+   build produced the value. The reason a counter is needed at all is
+   that no byte-identity gate can answer it: the tiers owe each other
+   bit-identity, so an arm compiled out and fallen through to SSE1
+   produces the same bytes as the AVX2 arm and the comparison stays
+   green. lz_quantize_q8's AVX2 arm increments it once per group, before
+   its sub-chunk loop. tests/test_ops.c asserts it advances under
+   --kernel avx2 and stands still under --kernel sse2. */
+long lz_debug_q8r_avx2_quant = 0;
+
 void lz_quantize_q8(const float *x, int n, int gs, int8_t *q, float *s) {
     int g, k;
 #if defined(LZ_HAVE_Q8R_SIMD) || defined(LZ_HAVE_Q8R_SSE)
@@ -1998,8 +2100,8 @@ void lz_quantize_q8(const float *x, int n, int gs, int8_t *q, float *s) {
                    equivalent inside the kernel calls below), not q8_round's
                    magic-number add - billed as mul+cvt, not mul+add, same
                    split lz_gdn_quantize_2p's kernel branches use. Same
-                   count whichever of the two sub-tiers (SSE1+MMX vs SSE2)
-                   or toolchain path below actually runs. */
+                   count whichever of the three sub-tiers (SSE1+MMX,
+                   SSE2, AVX2) or toolchain path below actually runs. */
                 LZ_FCX(LZ_FC_QUANT, gs, 0, 0, gs, 0);
 #if defined(__WATCOMC__)
                 /* One call per GROUP, not per 32-element sub-chunk:
@@ -2016,6 +2118,17 @@ void lz_quantize_q8(const float *x, int n, int gs, int8_t *q, float *s) {
 #endif /* LZ_HAVE_Q8R_SIMD */
                     lz_q8round_group_sse(grp, out, gs, &inv);
 #else
+#ifdef LZ_HAVE_Q8R_AVX2
+                /* No _mm_empty() on this arm: lz_q8round32_avx2 uses
+                   cvtps_epi32/vpminsw/vpmaxsw on XMM/YMM registers and
+                   never writes an MMX register, so the x87 tag word the
+                   SSE1 arm below has to clear is untouched here. */
+                if (tier == 3) {
+                    lz_debug_q8r_avx2_quant++;
+                    for (k = 0; k + 31 < gs; k += 32)
+                        lz_q8round32_avx2(grp + k, out + k, &inv);
+                } else
+#endif /* LZ_HAVE_Q8R_AVX2 */
 #ifdef LZ_HAVE_Q8R_SIMD
                 if (tier == 2) {
                     for (k = 0; k + 31 < gs; k += 32)

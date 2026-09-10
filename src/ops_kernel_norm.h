@@ -90,10 +90,14 @@ static void lz_vscale_sse(float *x, int n4, const float *pk) {
 
 #endif  /* __WATCOMC__ */
 
-/* Dispatch tables, one per helper, same six slots and same pick rule as
-   every other operator here. The gcc and Watcom sides were given the
-   SAME signatures - constants arrive through a pointer on both - so one
-   table can hold either.
+/* Dispatch tables, one per helper, same LZ_ROW_N slots and same pick
+   rule as every other operator here. The trailing avx2 slot holds
+   lz_rmsnorm_out_avx2/lz_vmax_avx2/lz_vscale_avx2 (src/ops_avx2.c)
+   whenever this build's AVX2 tier exists: LZ_DEFINE_PICK
+   (ops_kernel_shared.h) reads LZ_ROW_AVX2_I first, ahead of the
+   MMX/SSE2 chain, when g_kernel == LZ_KERNEL_AVX2. The gcc and Watcom
+   sides were given the SAME signatures - constants arrive through a
+   pointer on both - so one table can hold either.
  *
  * MMX IS EMPTY BY INSTRUCTION SET for all three: MMX has no
  * floating-point operations at all. That is the same reason
@@ -111,20 +115,45 @@ typedef void  (*lz_vmaxfn)(const float *x, int n4, float *pmax);
 typedef void  (*lz_vscalefn)(float *x, int n4, const float *pk);
 
 #if defined(LZ_HAVE_NORM_SSE) && defined(__WATCOMC__)
-#define LZ_NORM_SLOTS(F) NULL, F##_w, F##_w, NULL, F##_w, F##_w
+#define LZ_NORM_SLOTS(F, FAVX2) NULL, F##_w, F##_w, NULL, F##_w, F##_w, NULL
+#elif defined(LZ_HAVE_NORM_SSE) && defined(LZ_HAVE_NORM_AVX2)
+#define LZ_NORM_SLOTS(F, FAVX2) NULL, F, F, NULL, NULL, NULL, FAVX2
 #elif defined(LZ_HAVE_NORM_SSE)
-#define LZ_NORM_SLOTS(F) NULL, F, F, NULL, NULL, NULL
+#define LZ_NORM_SLOTS(F, FAVX2) NULL, F, F, NULL, NULL, NULL, NULL
 #else
-#define LZ_NORM_SLOTS(F) NULL, NULL, NULL, NULL, NULL, NULL
+#define LZ_NORM_SLOTS(F, FAVX2) NULL, NULL, NULL, NULL, NULL, NULL, NULL
 #endif
 
 static const lz_normoutfn LZ_NORMOUT_TAB[LZ_ROW_N] =
-    { LZ_NORM_SLOTS(lz_rmsnorm_out_sse) };
+    { LZ_NORM_SLOTS(lz_rmsnorm_out_sse, lz_rmsnorm_out_avx2) };
 static const lz_vmaxfn LZ_VMAX_TAB[LZ_ROW_N] =
-    { LZ_NORM_SLOTS(lz_vmax_sse) };
+    { LZ_NORM_SLOTS(lz_vmax_sse, lz_vmax_avx2) };
 static const lz_vscalefn LZ_VSCALE_TAB[LZ_ROW_N] =
-    { LZ_NORM_SLOTS(lz_vscale_sse) };
+    { LZ_NORM_SLOTS(lz_vscale_sse, lz_vscale_avx2) };
 
 LZ_DEFINE_PICK(lz_normout_pick, lz_normoutfn)
 LZ_DEFINE_PICK(lz_vmax_pick,    lz_vmaxfn)
 LZ_DEFINE_PICK(lz_vscale_pick,  lz_vscalefn)
+
+/* Whether the picked kernel is the AVX2 body specifically - pointer
+   identity, not "produced the right number". Same reasoning as
+   lz_amax_is_avx2 (ops_kernel_amax.h): a bit-identity comparison
+   against a scalar/SSE reference cannot tell "ran AVX2" from "silently
+   fell back to SSE, which computes the same value by construction"
+   (each of these three is element-wise or an exact reduction, so SSE
+   and AVX2 agree by construction, not by luck) - these predicates
+   exist so a caller can ask the question a value comparison
+   structurally cannot answer. See lz_rmsnorm_out_picked_avx2/
+   lz_vmax_picked_avx2/lz_vscale_picked_avx2 (ops_norm.c), the
+   externally-linked bridges that let a test outside this TU call them,
+   since LZ_NORMOUT_TAB/LZ_VMAX_TAB/LZ_VSCALE_TAB and the three pick
+   functions above stay static here. */
+static int lz_normout_is_avx2(lz_normoutfn f) {
+    return f != 0 && f == LZ_NORMOUT_TAB[LZ_ROW_AVX2_I];
+}
+static int lz_vmax_is_avx2(lz_vmaxfn f) {
+    return f != 0 && f == LZ_VMAX_TAB[LZ_ROW_AVX2_I];
+}
+static int lz_vscale_is_avx2(lz_vscalefn f) {
+    return f != 0 && f == LZ_VSCALE_TAB[LZ_ROW_AVX2_I];
+}

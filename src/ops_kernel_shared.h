@@ -191,7 +191,22 @@ LZ_MAYBE_UNUSED static float lz_i32f(int32_t v) {
  * own comment above records the split form agreeing with the correctly
  * rounded conversion on 87,108,878 values, and cvtdq2ps/cvtsi2ss are
  * that conversion. */
-#if defined(LZ_HAVE_I32FACC_SSE2) && defined(LZ_HAVE_I32FACC_SSE)
+#if defined(LZ_HAVE_I32FACC_AVX2)
+/* The gcc/AVX2 build carries all three cells (AVX2 implies SSE2, and
+   ops_sched.c's tier function is written to the same assumption), so
+   this is the same ladder with one rung on top. A build without the
+   AVX2 cell falls through to the chain below, which is why this is a
+   separate branch and not an `lz_tr_ >= 3` line added to it: the
+   symbol would not exist there. */
+#define LZ_I32F_ACC32(accf, acc32, dv) do { \
+        int lz_tr_ = lz_i32facc_tier(); \
+        if (lz_tr_ >= 3)      lz_i32f_acc32_avx2((accf), (acc32)); \
+        else if (lz_tr_ >= 2) lz_i32f_acc32_simd((accf), (acc32)); \
+        else if (lz_tr_ >= 1) lz_i32f_acc32_sse((accf), (acc32)); \
+        else for ((dv) = 0; (dv) < 32; (dv)++) \
+                 (accf)[dv] += lz_i32f((acc32)[dv]); \
+    } while (0)
+#elif defined(LZ_HAVE_I32FACC_SSE2) && defined(LZ_HAVE_I32FACC_SSE)
 #define LZ_I32F_ACC32(accf, acc32, dv) do { \
         int lz_tr_ = lz_i32facc_tier(); \
         if (lz_tr_ >= 2)      lz_i32f_acc32_simd((accf), (acc32)); \
@@ -312,6 +327,26 @@ LZ_MAYBE_UNUSED static int p2_shift_of(int32_t amax) {
 #define LZ_PF_DIST 4                    /* look ahead this many 32-byte cache lines */
 #endif
 
+/* 32-byte alignment, for the arrays the AVX2 tier reads or writes 32
+   bytes at a time. SAME REASONING AS ops_matmul.c's LZ_XW_ALIGN, one
+   width up: gcc happens to give most arrays more alignment than their
+   type promises, and "happens to" is not a contract. What this buys is
+   that a 32-byte load never straddles a 64-byte cache line - a SPLIT
+   load, which costs extra on several AVX2-capable cores - which is a
+   property of the ADDRESS, not of the instruction encoding: vmovdqu on
+   a 32-byte-aligned address never splits, so the load form stays
+   unaligned and nothing gains a fault it could die on.
+
+   gcc only. Watcom has no __attribute__ and its 32-bit static/malloc
+   alignment is 8; the AVX2 tier is never built there, so nothing is
+   lost - and every Watcom kernel keeps the unaligned form it already
+   has. */
+#if defined(__GNUC__)
+#define LZ_ALIGN32 __attribute__((aligned(32)))
+#else
+#define LZ_ALIGN32
+#endif /* __GNUC__ */
+
 /* The four prefetch-tier values lz_prefetch_mode() (src/ops.c, real
    extern linkage - unaffected by this move) returns. Kernel tier picks
    instruction-set width; this picks the memory hint - orthogonal, per
@@ -418,21 +453,44 @@ extern void lz_pf_amd(const void *p);
    function-pointer type; it reads g_kernel to decide MMX vs SSE2.
 
    Here so ops_kernel_amax.h, ops_kernel_norm.h and ops_kernel_q8round.h
-   compile in every TU that includes this header. */
+   compile in every TU that includes this header.
+
+   Changing LZ_ROW_N changes the implicit-zero-pad width of every
+   `[LZ_ROW_N]`-sized table AND every hardcoded column constant derived
+   from it elsewhere - src/ops_kernel.c's LZ_KM_COL_ARMC/ARMA/G128/NCOL
+   are the ones that bit back: a stale literal there once silently
+   overlapped this range and made the coverage matrix misread an ARM
+   column as a row-kernel one. Grep for LZ_ROW_N consumers (dispatch
+   table literals, km_reg's per-row column count) before changing it -
+   but that grep will NOT find build/kernel_matrix_gate.sh's own
+   hardcoded tier list (`for t in ref mmxI sseI ... g128`), which
+   re-encodes the tier names as string literals rather than referencing
+   this macro. Check that file by hand too. */
 #define LZ_ROW_MMX_I   0
 #define LZ_ROW_SSE_I   1
 #define LZ_ROW_SSE2_I  2
 #define LZ_ROW_MMX_A   3
 #define LZ_ROW_SSE_A   4
 #define LZ_ROW_SSE2_A  5
-#define LZ_ROW_N       6
+#define LZ_ROW_AVX2_I  6
+#define LZ_ROW_N       7
 
+/* --kernel avx2 has no dedicated body in any of these LZ_DEFINE_PICK
+   tables (LZ_ROW_AVX2_I is always NULL here, unlike lz_row_pick's
+   matmul LZ_ROW_* tables in ops_matmul.c) - this picker still has to
+   prefer SSE2 over MMX for it, the same way lz_row_pick's non-Watcom
+   arm does, or --kernel avx2 would silently downgrade every one of
+   these helpers to MMX on real AVX2 hardware while matmul stays on
+   SSE2. */
 #define LZ_DEFINE_PICK(NAME, TYPE)                                   \
     static TYPE NAME(const TYPE *tab) {                                   \
-        int want_sse2 = (g_kernel == LZ_KERNEL_SSE2);                     \
+        int want_sse2 = (g_kernel == LZ_KERNEL_SSE2 ||                    \
+                          g_kernel == LZ_KERNEL_AVX2);                    \
         TYPE f;                                                           \
         if (!g_kernel) return (TYPE)0;                                    \
         if (g_kernel == LZ_KERNEL_REF) return (TYPE)0;                    \
+        if (g_kernel == LZ_KERNEL_AVX2 && tab[LZ_ROW_AVX2_I])            \
+            return tab[LZ_ROW_AVX2_I];                                    \
         f = tab[want_sse2 ? LZ_ROW_SSE2_A : LZ_ROW_MMX_A];              \
         if (f) return f;                                                  \
         f = tab[want_sse2 ? LZ_ROW_SSE2_I : LZ_ROW_MMX_I];              \

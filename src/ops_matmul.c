@@ -16,6 +16,11 @@
 #include "ops_mmx.h"
 #include "ops_sse.h"
 #include "ops_sse2.h"
+#include "ops_avx2.h"   /* LZ_ROW_AVX2_EXTERN, row_*_avx2_intrin - gcc-only,
+                           mirrors the ops_sse2.h include above. Defined
+                           only when LZ_AVX2_TU is set (-D, Makefile), the
+                           same "build-level macro, not compiler-derived"
+                           contract ops_sse2.h documents for LZ_SSE2_TU. */
 #include "ops_kernel_shared.h"
 #include "ops_quant.h"
 #include "ops_sched.h"
@@ -54,13 +59,21 @@
    nothing, which is exactly the gap that made the ARM LDM note
    necessary in the first place.
 
+   THIRTY-TWO, NOT SIXTEEN: the AVX2 row kernels read this array 32
+   bytes at a time, and a 16-aligned base puts every ODD 32-element group
+   at 16 mod 32, so a 256-bit load would cross a 32-byte boundary on half
+   of them. The offset argument above carries over - every group pointer
+   is g_xw plus a multiple of 64 bytes, in_dim being a multiple of 32 by
+   the dispatch guards - so one declaration covers all of them, not the
+   even half. Still a superset of what SSE1/SSE2 need.
+
    Watcom has no __attribute__ and its 32-bit malloc/static alignment is
    8, so the aligned SSE2 form cannot be switched on there off the back
    of this - the declaration is what the gcc twins can rely on, and the
    Watcom twins keep their unaligned loads until their own probe says
    otherwise. */
 #if defined(__GNUC__)
-#define LZ_XW_ALIGN __attribute__((aligned(16)))
+#define LZ_XW_ALIGN __attribute__((aligned(32)))
 #else
 #define LZ_XW_ALIGN
 #endif /* __GNUC__ */
@@ -82,14 +95,31 @@ void matmul_scalar_ref(float *o, const int8_t *xq, const float *xqs,
 
 /* ---- lz_row_pick ---- */
 static lz_rowfn lz_row_pick(const lz_rowfn *tab) {
-    int want_sse2 = (lz_kernel_sel() == LZ_KERNEL_SSE2);
+    int sel = lz_kernel_sel();
 #ifdef __WATCOMC__
+    /* Deliberately NOT `sel == LZ_KERNEL_SSE2 || sel == LZ_KERNEL_AVX2`
+       like the non-Watcom arm below: AVX2 is gcc-only (src/ops_avx2.c is
+       never built by Watcom), so LZ_KERNEL_AVX2 can never reach this arm
+       and this formula must stay exactly what it always was. If a future
+       edit ever makes the two formulas diverge for a different reason,
+       update both - they diverge here on purpose, not by omission. */
+    int want_sse2 = (sel == LZ_KERNEL_SSE2);
     lz_rowfn f = tab[want_sse2 ? LZ_ROW_SSE2_A : LZ_ROW_MMX_A];
     return f ? f : tab[LZ_ROW_MMX_A];
 #else
-    lz_rowfn f = tab[want_sse2 ? LZ_ROW_SSE2_I : LZ_ROW_MMX_I];
-    if (f) return f;
-    return tab[LZ_ROW_SSE2_I] ? tab[LZ_ROW_SSE2_I] : tab[LZ_ROW_MMX_I];
+    if (sel == LZ_KERNEL_AVX2 && tab[LZ_ROW_AVX2_I])
+        return tab[LZ_ROW_AVX2_I];
+    {
+        /* AVX2 requested but this format's LZ_ROW_AVX2_I slot is NULL
+           (a link with no AVX2 TU at all): fall back to
+           SSE2 rather than MMX - a CPU with AVX2 always has SSE2, so
+           this is a strictly better fallback than what an unrecognized
+           `sel` would otherwise reach. */
+        int want_sse2 = (sel == LZ_KERNEL_SSE2 || sel == LZ_KERNEL_AVX2);
+        lz_rowfn f = tab[want_sse2 ? LZ_ROW_SSE2_I : LZ_ROW_MMX_I];
+        if (f) return f;
+        return tab[LZ_ROW_SSE2_I] ? tab[LZ_ROW_SSE2_I] : tab[LZ_ROW_MMX_I];
+    }
 #endif /* __WATCOMC__ */
 }
 
@@ -211,7 +241,8 @@ static void row_q8_mmx_intrin(const lz_row_ctx *c) {
 
 #if defined(__arm__)
 /* The two ARM tiers, picked in matmul_q8_impl rather than from the
-   table below - those six slots are x86 slots. Leaves in
+   table below - those LZ_ROW_N slots are all x86 slots (AVX2 included).
+   Leaves in
    src/ops_arm.c; the w4 pointer is the int8 weight row, the same slot
    row_q8_mmx_intrin reads. No pairing: g_pair's two-token kernels are
    an x86 register-budget trick, and there is no ARM twin to select. */
@@ -265,10 +296,15 @@ const lz_rowfn LZ_ROW_Q8[LZ_ROW_N] = {
 #if defined(__WATCOMC__)
     row_q8_mmx_asm,
     NULL,        /* sse-asm: ditto */
-    row_q8_sse2_asm
+    row_q8_sse2_asm,
 #else
-    NULL, NULL, NULL
+    NULL, NULL, NULL,
 #endif /* __WATCOMC__ */
+#if defined(LZ_ROW_AVX2_EXTERN)
+    row_q8_avx2_intrin
+#else
+    NULL         /* avx2: no AVX2 TU in this link (see LZ_ROW_AVX2_EXTERN) */
+#endif /* LZ_ROW_AVX2_EXTERN */
 };
 
 /* int8 matmul kernel for gs==32, dispatched by target platform
@@ -722,10 +758,15 @@ const lz_rowfn LZ_ROW_Q41[LZ_ROW_N] = {
 #if defined(__WATCOMC__)
     row_q41_mmx_asm,
     NULL,        /* sse-asm: ditto */
-    row_q41_sse2_asm
+    row_q41_sse2_asm,
 #else
-    NULL, NULL, NULL
+    NULL, NULL, NULL,
 #endif /* __WATCOMC__ */
+#if defined(LZ_ROW_AVX2_EXTERN)
+    row_q41_avx2_intrin
+#else
+    NULL         /* avx2: no AVX2 TU in this link (see LZ_ROW_AVX2_EXTERN) */
+#endif /* LZ_ROW_AVX2_EXTERN */
 };
 
 /* Fixed-epi predicate for the Q4_1/Q6_1/T2 dot/scale term (int-pipeline
@@ -930,9 +971,9 @@ static void row_t2_mmx_intrin(const lz_row_ctx *c) {
 #endif /* LZ_DOT_MMX_EXTERN */
 
 #if defined(__arm__)
-/* ARMv5TE row kernel for the ternary tier. All six LZ_ROW_T2 slots are
-   x86 SIMD (MMX/SSE2 or Watcom #pragma aux) and compile to NULL on the
-   ARM cross-build, so without this override the tier would fall back to
+/* ARMv5TE row kernel for the ternary tier. Every LZ_ROW_T2 slot is
+   x86 SIMD (MMX/SSE2, Watcom #pragma aux, or AVX2) and compiles to NULL
+   on the ARM cross-build, so without this override the tier would fall back to
    matmul_scalar_ref on every call. leaf = lz_dot32_t2_arm (src/ops_t2_arm.c),
    same 256*sum(code*x) contract as lz_dot32_t2_scalar; the w4 pointer is
    the 2-bit plane (8 bytes per 32-wide block), matching the w4 slot that
@@ -989,10 +1030,15 @@ const lz_rowfn LZ_ROW_T2[LZ_ROW_N] = {
 #if defined(__WATCOMC__)
     row_t2_mmx_asm,
     NULL,        /* sse-asm: ditto */
-    row_t2_sse2_asm
+    row_t2_sse2_asm,
 #else
-    NULL, NULL, NULL
+    NULL, NULL, NULL,
 #endif /* __WATCOMC__ */
+#if defined(LZ_ROW_AVX2_EXTERN)
+    row_t2_avx2_intrin
+#else
+    NULL         /* avx2: no AVX2 TU in this link */
+#endif /* LZ_ROW_AVX2_EXTERN */
 };
 
 /* ---- Q61 guard block ---- */
@@ -1120,10 +1166,15 @@ const lz_rowfn LZ_ROW_Q61[LZ_ROW_N] = {
 #if defined(__WATCOMC__)
     row_q61_mmx_asm,
     NULL,        /* sse-asm: ditto */
-    row_q61_sse2_asm
+    row_q61_sse2_asm,
 #else
-    NULL, NULL, NULL
+    NULL, NULL, NULL,
 #endif /* __WATCOMC__ */
+#if defined(LZ_ROW_AVX2_EXTERN)
+    row_q61_avx2_intrin
+#else
+    NULL         /* avx2: no AVX2 TU in this link (see LZ_ROW_AVX2_EXTERN) */
+#endif /* LZ_ROW_AVX2_EXTERN */
 };
 
 /* ---- matmul_t2_impl + matmul_q61_impl ---- */
@@ -1443,7 +1494,7 @@ static void row_q16_mmx_intrin(const lz_row_ctx *c) {
    row_q8_sse2_intrin above. Declared in src/ops_sse2.h. */
 
 #if defined(__arm__)
-/* The two ARM tiers. All six LZ_ROW_Q16 slots are x86 SIMD and NULL on
+/* The two ARM tiers. Every LZ_ROW_Q16 slot is x86 SIMD and NULL on
    this build, so matmul_q16_impl picks between these directly, the way
    matmul_t2_impl does - one enum value per code body, so
    lz_kernel_name() can answer which one ran. Leaves in src/ops_arm.c;
@@ -1501,10 +1552,15 @@ const lz_rowfn LZ_ROW_Q16[LZ_ROW_N] = {
 #ifdef __WATCOMC__
     row_q16_mmx_asm,
     NULL,        /* sse-asm: ditto */
-    row_q16_sse2_asm
+    row_q16_sse2_asm,
 #else
-    NULL, NULL, NULL
+    NULL, NULL, NULL,
 #endif /* __WATCOMC__ */
+#if defined(LZ_ROW_AVX2_EXTERN)
+    row_q16_avx2_intrin
+#else
+    NULL         /* avx2: no AVX2 TU in this link (see LZ_ROW_AVX2_EXTERN) */
+#endif /* LZ_ROW_AVX2_EXTERN */
 };
 
 /* Fixed-epi predicate for Q16_0. Its own function rather than a call to
@@ -1567,7 +1623,7 @@ void matmul_q16_impl(LZMatOut *out, const int8_t *xq, const float *xqs,
     row = lz_row_pick(LZ_ROW_Q16);
 #if defined(__arm__)
     /* Picked here rather than from the table, same as matmul_t2_impl:
-       those six slots are x86 slots. LZ_KERNEL_REF never reaches this
+       those LZ_ROW_N slots are all x86 slots. LZ_KERNEL_REF never reaches this
        function - lz_matmul_xq_nt sends it to matmul_scalar_ref first. */
 #if defined(LZ_ARM_ASM_EXTERN)
     row = (g_kernel == LZ_KERNEL_ARM_ASM) ? row_q16_arm_asm : row_q16_arm;
@@ -1897,6 +1953,10 @@ static void matmul_f32_rows(float *o, const float *x, const float *w,
        function-pointer table would not help here, because the cost is
        the RELOAD, not the branch; an indirect call per row would be
        worse than a perfectly-predicted test on a local. */
+#if defined(LZ_MATMUL_F32_AVX2_EXTERN)
+    /* Hoisted for the reason the SSE test below gives, one tier up. */
+    const int use_avx2 = (g_kernel == LZ_KERNEL_AVX2 && in_dim >= 8);
+#endif /* LZ_MATMUL_F32_AVX2_EXTERN */
 #if defined(LZ_MATMUL_F32_SSE_EXTERN)
     const int use_sse = ((g_kernel == LZ_KERNEL_SSE2
                           || g_kernel == LZ_KERNEL_SSE) && in_dim >= 8);
@@ -1933,6 +1993,21 @@ static void matmul_f32_rows(float *o, const float *x, const float *w,
             }
             row = g_bfrow;
         }
+#if defined(LZ_MATMUL_F32_AVX2_EXTERN)
+        /* ONE 256-bit accumulator is the eight scalars above, lane k
+           accumulating exactly scalar a_k's sequence - the SSE arm's
+           argument, one tier up, so no re-association is introduced and
+           no tolerance is owed. Placed before the SSE arm rather than
+           folded into it: g_kernel == LZ_KERNEL_AVX2 matches neither
+           SSE1 nor SSE2, so the two tests are disjoint and the second
+           simply does not fire. */
+        if (use_avx2) {
+            float acc8[8];
+            j = lz_matmul_row_avx2(row, x, in_dim, acc8);
+            a0 = acc8[0]; a1 = acc8[1]; a2 = acc8[2]; a3 = acc8[3];
+            a4 = acc8[4]; a5 = acc8[5]; a6 = acc8[6]; a7 = acc8[7];
+        }
+#endif /* LZ_MATMUL_F32_AVX2_EXTERN */
 #if defined(LZ_MATMUL_F32_SSE_EXTERN)
         /* The eight accumulators above ARE two SSE vectors - lane k of
            them accumulates exactly the sequence scalar a_k does, in the

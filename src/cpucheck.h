@@ -52,6 +52,9 @@ int lz_cpu_check(char *errbuf, int errlen);
    #pragma aux body has to do by hand. */
 #if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86)
 unsigned lz_cpuid1_edx(void);
+unsigned lz_cpuid1_ecx(void);   /* leaf 1 ECX: OSXSAVE bit 27, AVX bit 28 */
+unsigned lz_cpuid7_ebx(void);   /* leaf 7 sub-leaf 0 EBX: AVX2 bit 5 */
+unsigned lz_xgetbv0(void);      /* XGETBV(0) -> XCR0 low 32 bits (eax) */
 #endif
 
 /* Space-separated feature list for a banner or an about box, e.g.

@@ -27,6 +27,16 @@ typedef enum {
     LZ_ERR_READ_SHORT,         /* short read: got %lu / %ld bytes */
     LZ_ERR_NULL_ARG,           /* null argument */
     LZ_ERR_STATE_ALLOC,        /* runtime state allocation failed */
+    /* conv_f32_build's (forward.c) coverage check: a linear/KDA layer's
+       conv1d (or kda_q/k/v_conv1d triple) channel counts do not sum to
+       lin_conv_dim. A checkpoint layout problem, not an allocation
+       failure - kept out of LZ_ERR_STATE_ALLOC so a report of this code
+       does not send a reader chasing memory pressure that was never the
+       cause. conv_fixed_build has the identical check but, unlike this
+       one, a cheaper tier to fall back to on failure (float), so it
+       never raises anything - this code only ever fires from the float
+       path, the last resort. */
+    LZ_ERR_CONV_LAYOUT,        /* conv1d tap layout does not cover lin_conv_dim */
     LZ_ERR_LAYERS_ALLOC,       /* layer array allocation failed */
     LZ_ERR_CLAIM_ALLOC,        /* claim table allocation failed */
     LZ_ERR_SEQ_LEN,            /* seq_len must be positive */
@@ -67,6 +77,10 @@ typedef enum {
        (generate.c), and lz_generate_resume dispatches temperature>0 to
        lz_spec_round_temp. */
 
+    /* prompt lookup decoding (generate.c lz_pld_round) */
+    LZ_ERR_PLD_NGRAM_RANGE,    /* pld_ngram %d out of range 1..%d */
+    LZ_ERR_PLD_TOKENS_RANGE,   /* pld_tokens %d out of range 1..%d */
+
     /* sockets (net.h) */
     LZ_ERR_NET_INIT,           /* socket stack init failed */
     LZ_ERR_NET_PORT,           /* invalid port %d */
@@ -93,6 +107,7 @@ typedef enum {
     LZ_ERR_CFG_KDA_ACT,        /* kda_gate_activation must be silu, got %s */
     LZ_ERR_CFG_MOE_FIELDS,     /* invalid MoE fields: num_experts=%d top_k=%d first_k_dense_replace=%d */
     LZ_ERR_CFG_HADAMARD,       /* %s=%d is not a power of two dividing %s=%d */
+    LZ_ERR_CFG_ROPE_CONFLICT,  /* rope_parameters %s=%d disagrees with %s=%d */
 
     /* model tensors */
     LZ_ERR_TENSOR_MISSING,     /* missing tensor %s */

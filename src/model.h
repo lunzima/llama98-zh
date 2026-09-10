@@ -81,19 +81,16 @@
  * gs is 0 and scale/zero are NULL, so any code that reaches for a scale
  * must test the dtype first - lz_t_f32 does, ahead of its scale guard.
  *
- * NARROWING AN F32 TENSOR INTO THIS FORMAT IS NOT WORTH DOING, and the
- * reason is structural rather than a measurement that came out badly.
- * Per 32 elements: F32 128 bytes, BF16 64, Q8_0 36, Q4_1 24, T2 12. A
- * checkpoint willing to accept a lossy conversion should quantise -
- * Q8_0 is 1.8x smaller than bf16 AND has hand-written integer kernels,
- * where bf16 widens back to f32 to compute. The lossy direction is
- * dominated by an option this engine already has.
+ * F32 TENSORS THAT CANNOT BE GROUPED (non-2D, row < MIN_GS=32) are
+ * now narrowed to BF16 at export time (export_q8 plan()'s FMT_BF16
+ * branch). This covers all 1D norms and 3D conv1d tensors.
+ * The loss is sub-0.1% relative on norm weights near 1.0 and conv
+ * weights near 0.02; unmeasured on PPL but structurally negligible.
+ * lz_t_f32/lz_t_row_f32 widen bf16->f32 at the point of use.
  *
- * The lossless direction, which is what this format IS, does not
- * compete with those: it applies to tensors that arrive as bf16, where
- * quantising would be an ADDITIONAL lossy step. Measured on real
- * checkpoints, that is nearly all of them - Qwen3.5-0.8B is 1746.9 MB
- * of BF16 against 0.01 MB of F32, and Qwopus3.5-2B has no F32 at all. */
+ * Q8_0 is 1.8x smaller than bf16 AND has hand-written integer kernels,
+ * where bf16 widens back to f32 to compute. For tensors that CAN be
+ * grouped, Q8_0 dominates. BF16 fills the gap Q8_0 cannot reach. */
 
 /* Weight tensor. Row-major (out, in); quantization groups are
    contiguous within a row.
@@ -270,7 +267,14 @@ typedef struct {
     float rms_norm_eps;
     int tie_word_embeddings;
     int attn_output_gate;           /* whether q_proj carries the gate (true in this model) */
-    int full_attention_interval;    /* every Nth layer is a full_attention */
+    /* Carried and printed, NOT consulted. layer_types decides which
+       layers are full attention, one entry per layer (model.c reads it
+       and refuses to load without it). This field is the upstream
+       generator's stride and stops describing the model once layers are
+       pruned: kunkun-ce is 5 layers with layer_types
+       [linear, linear, full, linear, full] while this still reads 4,
+       which would place the single full layer at index 3. */
+    int full_attention_interval;
     /* SubLN (BitNet b1.58): delete the two pre-layer norms and give each
        ternary projection its own input RMSNorm (see the kda_*_norm /
        gate_norm / up_norm / down_norm fields on LZLayer). Mirrors the
@@ -342,6 +346,33 @@ typedef struct {
     int lin_value_dim;      /* lin_n_v_heads * lin_v_head_dim */
     int lin_conv_dim;       /* lin_key_dim * 2 + lin_value_dim */
     int rotary_dim;         /* head_dim * partial_rotary_factor; only these leading dims rotate */
+
+    /* Engram (conditional n-gram memory). 0 = no engram module.
+       The fields mirror KunMoeConfig's engram_* keys; n_orders,
+       n_spaces, head_space, per_order, conv_dim, total_rows and
+       primes/offsets are derived at load time. */
+    int engram;             /* 0 off / 1 on */
+    int engram_ngram;       /* max n-gram order (default 3 -> orders {2,3}) */
+    int engram_n_head;      /* hash heads per order */
+    int engram_dim;         /* embedding dimension per head */
+    int engram_size;        /* hash_budget: total table rows (engram_size in config) */
+    /* Derived at load time (model.c), never stored in checkpoint: */
+    int engram_n_orders;    /* ngram - 1 */
+    int engram_n_spaces;    /* n_orders * n_head */
+    int engram_head_space;  /* max(256, hash_budget // (n_spaces * engram_dim)) */
+    int engram_per_order;   /* n_head * engram_dim: key/value proj input width */
+    int engram_conv_dim;    /* hidden_size: depthwise conv channels */
+    int engram_total_rows;  /* sum(primes[0..n_spaces-1]) */
+    int engram_conv_kernel; /* conv kernel size (default 4) */
+    int engram_conv_dilation; /* ngram: conv dilation */
+    /* format_ids as a bitmap, vocab_size bits, one bit per token id.
+       kunmoe_modeling.py's EngramMemory._content_mask does
+       `torch.isin(input_ids, format_ids)`; this is the same
+       membership test, O(1) per token instead of an O(|format_ids|)
+       scan. NULL when engram_format_ids is empty or absent in
+       config.json (same meaning as kunmoe_modeling.py's
+       `if not self._format_ids: return None` - no format gating). */
+    unsigned char *engram_format_bitmap;   /* [(vocab_size+7)/8] bytes */
 } LZModelConfig;
 
 /* Per-layer weight pointers. Only half the fields are valid per layer
@@ -483,6 +514,32 @@ typedef struct {
     LZTensor pre_fc_norm_embedding;  /* (hidden) - on the next token's embedding */
 } LZMtp;
 
+/* Engram: conditional n-gram memory. Global module (not per-layer),
+   injected after embed_tokens, before the layer loop. Tensors are
+   allocated at load time by model.c from config.engram_* fields.
+
+   Tensors and their PyTorch names (kunmoe_modeling.py):
+     table      enggram_memory.table        (total_rows, engram_dim) Q8
+     key_proj   enggram_memory.key_proj[o]   (hidden, per_order) Q8, x n_orders
+     value_proj enggram_memory.value_proj[o] (hidden, per_order) Q8, x n_orders
+     conv       enggram_memory.conv         (hidden, 1, kernel) f32, depthwise
+     norm       enggram_memory.norm         (hidden) f32
+
+   Derived arrays (primes, offsets) live on the struct, not in the
+   checkpoint: they are functions of config, same as KDA's primes. */
+typedef struct {
+    LZTensor table;          /* (total_rows, engram_dim) Q8 */
+    LZTensor *key_proj;      /* [n_orders] (hidden, per_order) Q8 */
+    LZTensor *value_proj;    /* [n_orders] (hidden, per_order) Q8 */
+    LZTensor conv;           /* (hidden, 1, conv_kernel) f32, depthwise */
+    LZTensor norm;           /* (hidden) f32 */
+    /* Derived, allocated at load time: */
+    int *primes;             /* [n_spaces] */
+    int *offsets;            /* [n_spaces] cumulative row offsets */
+    /* Per-order rolling hash bases: base[o] = 2*((o+1)*7+1)+1 */
+    lz_i64 *bases;           /* [n_orders] */
+} LZEngram;
+
 typedef struct {
     LZModelConfig config;
     LZSafetensors st;
@@ -563,6 +620,10 @@ typedef struct {
        weakness list, not a to-do list yet: no real MTP weights exist to
        validate against. */
     LZMtp *mtp;
+
+    /* Engram conditional n-gram memory, or NULL when config.engram is 0.
+       Global module: injected after embed_tokens, before the layer loop. */
+    LZEngram *engram;
 
     int weights_loaded;             /* 0 = metadata bound only, weights not read */
     /* lz_i64, not long long. On every toolchain that

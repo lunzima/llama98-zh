@@ -31,6 +31,12 @@
 #include "ops_sse2.h"   /* declarations for src/ops_sse2.c's functions - the
                            %xmm-touching kernels are defined there. Same
                            LZ_SSE2_TU/__SSE2__ contract, one ISA tier up. */
+#include "ops_avx2.h"   /* LZ_EPI_AVX2_EXTERN, lz_epi_mac_i16_avx2 - gcc-only,
+                           guarded on LZ_AVX2_TU && !__WATCOMC__ inside the
+                           header itself. Without this include the AVX2 arm
+                           of lz_epi_mac_i16's dispatch below compiles out
+                           entirely and --kernel avx2 falls through to SSE2
+                           in silence - see this task's own commit message. */
 #include "ops_kernel_shared.h" /* lz_i32f, LZ_WSUM_CHUNK, LZ_SLOT_NEXT,
                            gdn_tail_row, p2_shift_of - shared with the
                            suffixed TUs; included this early because lz_i32f's
@@ -205,6 +211,22 @@ void lz_epi_prep_zero(LZTensor *w, int in_dim) {
    line above. */
 lz_i64 lz_debug_epi_kern = 0;
 
+/* Wiring-proof, not a value check: a value-only AVX2-vs-SSE2 comparison
+   cannot tell a real AVX2 kernel apart from a silently-correct SSE2
+   fallback (the #include ops_epi.c would otherwise be missing -
+   ops_avx2.h's own include comment). This answers "did the AVX2 arm of
+   lz_epi_mac_i16's dispatch even compile in" before any caller trusts a
+   value comparison downstream. Same shape as Task 3's lz_*_is_avx2
+   predicates, but a compiled-in check rather than a pointer-identity
+   one - this dispatch has no table to read a pointer out of. */
+int lz_epi_avx2_compiled_in(void) {
+#if defined(LZ_EPI_AVX2_EXTERN)
+    return 1;
+#else
+    return 0;
+#endif /* LZ_EPI_AVX2_EXTERN */
+}
+
 #if defined(__WATCOMC__)
 /* int16-multiplier twin, for a caller whose m plane is int16 and who
    would otherwise widen it into a scratch buffer first. epi_q41_join
@@ -358,7 +380,7 @@ static lz_i64 lz_epi_mac_i16(const int32_t *a, const int16_t *m, int n) {
         for (g = 0; g < n; g++) s += (lz_i64)a[g] * (lz_i64)m[g];
         return s;
     }
-#if defined(LZ_EPI_SSE2_EXTERN) || defined(LZ_ARM_ASM_EXTERN)
+#if defined(LZ_EPI_SSE2_EXTERN) || defined(LZ_ARM_ASM_EXTERN) || defined(LZ_EPI_AVX2_EXTERN)
     /* Same lazy guard the other dispatch sites carry: the GUI never
        calls lz_kernel_select, so g_kernel reaches its value here.
 
@@ -370,7 +392,13 @@ static lz_i64 lz_epi_mac_i16(const int32_t *a, const int16_t *m, int n) {
        it honest - a call that enters a SIMD wrapper only to take its
        scalar tail does not reach a kernel body and is not counted. */
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
-#endif /* LZ_EPI_SSE2_EXTERN || LZ_ARM_ASM_EXTERN */
+#endif /* LZ_EPI_SSE2_EXTERN || LZ_ARM_ASM_EXTERN || LZ_EPI_AVX2_EXTERN */
+#if defined(LZ_EPI_AVX2_EXTERN)
+    if (g_kernel == LZ_KERNEL_AVX2) {
+        lz_debug_epi_kern++;
+        return lz_epi_mac_i16_avx2(a, m, n);
+    }
+#endif /* LZ_EPI_AVX2_EXTERN */
 #if defined(LZ_EPI_SSE2_EXTERN)
     if (g_kernel == LZ_KERNEL_SSE2) {
         lz_debug_epi_kern++;

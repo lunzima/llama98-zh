@@ -1879,6 +1879,299 @@ static int lz_gen_step_emit(int next, int sampled,
     return 0;
 }
 
+/* ---------------------------------------------- prompt lookup decoding */
+
+/* Trailing-token ring for PLD's own query n-gram: the last
+   LZ_PLD_NGRAM_MAX tokens of the sequence DECIDED so far (prompt, then
+   generated), most recent last. Seeded from the prompt's own tail
+   before lz_generate_call's main loop starts - most of the prompt is
+   digested through the batched prefill BEFORE that loop ever runs, so
+   the ring cannot rely on being fed one token at a time the way it is
+   for everything after - then pushed to by lz_generate_pld_round alone
+   (both its miss branch, which is the ordinary per-token step, and its
+   hit branch's own accepted/pending tokens), never by the outer loop
+   directly. This is deliberate: a round can decide MORE than one token
+   (that is the entire point of drafting), so "one outer iteration, one
+   push" - which is what the ordinary per-token path alone would need -
+   is the wrong unit here.
+
+   NOT updated by lz_generate_spec_round (MTP): the two mechanisms are
+   mutually exclusive per round (lz_generate_call's own dispatch tries
+   spec first), and a build that runs --spec and --pld together will
+   have PLD's n-gram queries fall behind by whatever a spec round
+   advanced - a known, accepted v1 scope limit, not an oversight (see
+   LZGenOpts.pld_ngram's own comment). */
+typedef struct {
+    int buf[LZ_PLD_NGRAM_MAX];
+    int n;
+} lz_pld_tail_t;
+
+static void lz_pld_tail_push(lz_pld_tail_t *tail, int tok) {
+    if (tail->n < LZ_PLD_NGRAM_MAX) {
+        tail->buf[tail->n++] = tok;
+    } else {
+        memmove(tail->buf, tail->buf + 1,
+               (size_t)(LZ_PLD_NGRAM_MAX - 1) * sizeof(int));
+        tail->buf[LZ_PLD_NGRAM_MAX - 1] = tok;
+    }
+}
+
+/* Seed from the prompt's own tail, oldest first - the same order
+   lz_pld_tail_push would have produced had it been called once per
+   prompt token. Caller passes the FULL prompt (all n_prompt tokens,
+   see lz_generate_call): lz_generate_pld_round's own query always reads
+   the ring's LAST entry as `first` == *token (its own module comment),
+   and never pushes `first` itself (only what comes AFTER it - the
+   ordinary step's `next`, or a hit's out[]) - so the ring must already
+   hold the prompt's own final token, prompt_tokens[n_prompt-1], as its
+   last entry before the very first PLD-eligible round ever runs. */
+static void lz_pld_tail_seed(lz_pld_tail_t *tail, const int *prompt_tokens, int n) {
+    int i, start = n > LZ_PLD_NGRAM_MAX ? n - LZ_PLD_NGRAM_MAX : 0;
+    tail->n = 0;
+    for (i = start; i < n; i++) lz_pld_tail_push(tail, prompt_tokens[i]);
+}
+
+/* Search prompt_tokens[0..n_prompt) for the MOST RECENT (rightmost)
+   occurrence of ngram[0..ngram_len) - the same locality bias the
+   reference implementation this technique is named after uses
+   (find_candidate_pred_tokens in HF's prompt-lookup-decoding: it scans
+   candidate start indices from high to low and returns the first hit).
+   Returns the prompt index one past the match (where a draft
+   continuation starts reading), or -1 if ngram does not occur anywhere.
+
+   No special case for the query n-gram matching only its own literal
+   tail position (j + ngram_len == n_prompt, which happens by
+   construction on the very first PLD-eligible round of a short prompt,
+   before generation has diverged from it): that match returns an empty
+   continuation (n_prompt - (j+ngram_len) == 0), and the caller already
+   treats an empty continuation as a miss, so it self-resolves without
+   this function needing to know why. */
+static int lz_pld_find(const int *prompt_tokens, int n_prompt,
+                       const int *ngram, int ngram_len) {
+    int j;
+    if (ngram_len <= 0 || n_prompt < ngram_len) return -1;
+    for (j = n_prompt - ngram_len; j >= 0; j--) {
+        int i, match = 1;
+        for (i = 0; i < ngram_len; i++) {
+            if (prompt_tokens[j + i] != ngram[i]) { match = 0; break; }
+        }
+        if (match) return j + ngram_len;
+    }
+    return -1;
+}
+
+/* One PLD round. `first`/`first_pos` (read from *token / *pos, the loop's
+   own "decided but not yet forwarded" pair - see lz_gen_step_emit's own
+   comment) is the token this round starts from; unlike lz_spec_round's
+   `anchor`, it is included in the verify batch itself (verify_tokens[0])
+   rather than forwarded separately first - PLD has no draft head to
+   seed with a hidden state, so there is no reason to split "forward the
+   pending token" from "verify the draft" into two steps the way MTP's
+   chain requires.
+
+   Miss (no n-gram match, or the match's own continuation runs off the
+   end of the prompt with nothing left to draft): falls back to exactly
+   the ordinary single-token step (the same three helpers - lz_gen_
+   step_logits/lz_gen_step_sample/lz_gen_step_emit - lz_generate_call's
+   own non-speculative path uses, called here instead of duplicated).
+   This function therefore ALWAYS advances generation by at least one
+   token.
+
+   Hit: verify_tokens = [first, draft[0..nd-1]], forwarded as ONE batch
+   via lz_forward_verify_into (forward.h - the m->mtp-free generalization
+   of lz_forward_verify), argmax'd row by row exactly like lz_spec_round
+   does (verify_row_argmax, shared with it - same penalty-window
+   handling), and lz_spec_accept (llama_zh.h, model-independent, taken
+   unchanged) decides how many draft tokens are accepted. Greedy only -
+   the caller only reaches this function when the effective temperature
+   is <= LZ_TEMP_FLOOR (see lz_generate_call's own dispatch); there is
+   no lz_pld_round_temp in this pass (LZGenOpts.pld_ngram's own comment
+   says why a temp>0 step simply skips PLD instead).
+
+   Rollback, on a hit whose accepted prefix ends up shorter than what
+   verify unconditionally forwarded (a real rejection, OR generation
+   ending mid-round on EOS/stop before every accepted token gets
+   emitted - both collapse to the same "keep < nd" condition below):
+   unlike lz_spec_round, there is no SSM/conv rollback RING to point an
+   index at - with no MTP head, s->ssm_ring_depth is 1 (forward.c's
+   state-alloc) - so ck (an LZStateCkpt owned by the caller, same shape
+   look_ck already has for lz_look_pick) is saved before the verify
+   batch and, when needed, restored and the surviving prefix (first +
+   out[0..keep-1]) is replayed token by token. This is the SAME answer
+   forward.h's own LZStateCkpt comment already gives for "the ring is
+   depth 1 anyway without an MTP head" (quoting LZGenOpts.look_width's
+   own comment) - PLD reuses it rather than inventing a second one.
+   The KV cache itself is never restored (LZStateCkpt does not carry
+   it - see its own comment) and does not need to be: exactly like the
+   body's own KV rollback (lz_spec_round's module comment), a row that
+   ends up outside the surviving prefix is simply never read again,
+   since *pos never advances past it, and gets overwritten whenever a
+   later round actually reaches that absolute position.
+
+   out[] needs LZ_PLD_TOKENS_MAX+1 slots at the call site's own storage
+   (draft[]/targ[] LZ_PLD_TOKENS_MAX each) - all three are this
+   function's own locals, not the caller's, so nothing needs sizing
+   there.
+
+   Returns 1 (continue the outer loop), 0 (generation ended, *out_finish/
+   *stop_hit already set), or a NEGATIVE LZErr code on failure (errbuf
+   filled), same three-way convention lz_generate_spec_round's own
+   sround return already uses. */
+static int lz_generate_pld_round(
+    const LZModel *m, LZRunState *s, LZTokenizer *t, const LZGenOpts *opts,
+    LZShouldContinue cont, void *ctx, LZInspect *ins,
+    int start_pos, int n_prompt, const int *prompt_tokens,
+    int ngram_size, int max_draft,
+    char *errbuf, int errlen,
+    LZSampler *sampler, lz_stopf_t *sf, lz_emit_t *em, LZThinkTrack *tr,
+    lz_pld_tail_t *tail, LZStateCkpt *ck, float *pld_logits,
+    int *finish, int *n_rec,
+    int *pld_hits, int *pld_draft_tokens, int *pld_accepted,
+    int *generated, int *token, int *pos, int *stop_hit) {
+    int rc = LZ_ERR_INTERNAL;
+    int first = *token, first_pos = *pos;
+    int nd = -1, j_end, i;
+    int draft[LZ_PLD_TOKENS_MAX];
+    int targ[LZ_PLD_TOKENS_MAX];
+    int out[LZ_PLD_TOKENS_MAX + 1];
+    int n_accept, bonus, vocab = m->config.vocab_size;
+    int keep, ei, stopped = 0;
+
+    if (tail->n >= ngram_size) {
+        j_end = lz_pld_find(prompt_tokens, n_prompt,
+                            tail->buf + (tail->n - ngram_size), ngram_size);
+        if (j_end >= 0) {
+            nd = max_draft;
+            if (nd > n_prompt - j_end) nd = n_prompt - j_end;
+            if (nd > LZ_PLD_TOKENS_MAX) nd = LZ_PLD_TOKENS_MAX;
+            if (nd <= 0) nd = -1;
+            else for (i = 0; i < nd; i++) draft[i] = prompt_tokens[j_end + i];
+        }
+    }
+
+    if (nd < 0) {
+        /* Miss: the ordinary per-token step, verbatim (same helpers,
+           same call shape lz_generate_call's own non-speculative
+           branch uses - look_ck/look_scr/look_active are hardwired off
+           here because the caller only reaches this function when
+           look_active is already false, see lz_generate_call's own
+           dispatch). */
+        float *logits = lz_gen_step_logits(m, s, first, first_pos);
+        int next, sampled;
+        if (!logits) {
+            LZ_ERR_SET(rc, errbuf, errlen, LZ_ERR_FORWARD);
+            return -rc;
+        }
+        if (lz_gen_step_sample(m, s, sampler, opts, ins, NULL, NULL, 0,
+                               logits, first_pos, prompt_tokens, start_pos,
+                               n_prompt, tr, errbuf, errlen,
+                               &next, &sampled, generated) < 0) {
+            LZ_ERR_SET(rc, errbuf, errlen, LZ_ERR_FORWARD);
+            return -rc;
+        }
+        if (lz_gen_step_emit(next, sampled, opts, t, sf, em, cont, ctx,
+                             token, pos, start_pos, n_prompt, n_rec,
+                             finish, tr, stop_hit)) {
+            return 0;
+        }
+        lz_pld_tail_push(tail, *token);
+        return 1;
+    }
+
+    (*pld_hits)++;
+    *pld_draft_tokens += nd;
+
+    if (lz_ckpt_save(ck, s, m, first_pos, errbuf, errlen) != 0) {
+        LZ_ERR_SET(rc, errbuf, errlen, LZ_ERR_FORWARD);
+        return -rc;
+    }
+    {
+        int verify_tokens[LZ_PLD_TOKENS_MAX + 1];
+        verify_tokens[0] = first;
+        for (i = 0; i < nd; i++) verify_tokens[i + 1] = draft[i];
+        if (lz_forward_verify_into(m, s, verify_tokens, nd + 1, first_pos,
+                                   pld_logits) != 0) {
+            LZ_ERR_SET(rc, errbuf, errlen, LZ_ERR_FORWARD);
+            return -rc;
+        }
+    }
+    for (i = 0; i < nd; i++)
+        targ[i] = verify_row_argmax(sampler, draft, i,
+                                    pld_logits + (size_t)i * vocab, vocab);
+    bonus = verify_row_argmax(sampler, draft, nd,
+                              pld_logits + (size_t)nd * vocab, vocab);
+    n_accept = lz_spec_accept(draft, targ, nd, bonus, out);
+    *pld_accepted += n_accept;
+
+    /* Emit the accepted prefix plus the correction/bonus row past it -
+       identical shape to lz_generate_spec_round's own emission loop
+       (gen_emit_token, EOS/stop-string/cont() all shared with it via
+       that one function so the two mechanisms cannot drift on what
+       "one token" means for bookkeeping). keep tracks how many of
+       out[]'s entries are ACTUALLY FORWARDED already: out[0..n_accept-1]
+       were (verify_tokens[i+1]=draft[i] was a real forward input);
+       out[n_accept] never was (it is the row PAST the last input token,
+       purely an output - lz_spec_accept's own contract). A stop firing
+       at ei < n_accept therefore still leaves out[ei] itself forwarded
+       (keep=ei+1); a stop at ei==n_accept leaves keep at n_accept
+       unchanged, since that row was never forwarded to begin with. */
+    keep = n_accept;
+    for (ei = 0; ei <= n_accept; ei++) {
+        /* Penalty history: must be updated with the REAL emitted token
+           before this round's own next row (or a later round) computes
+           its own assumed window off samp->ring - see lz_generate_
+           spec_round's own identical call, same position (before gen_
+           emit_token). Missing this does not change WHICH token gets
+           accepted (that is decided already, above) but does change
+           every SUBSEQUENT sampling decision once any penalty is
+           non-identity, silently - repetition_penalty specifically
+           stops discouraging a repeated phrase the moment a round
+           forgets to record it. */
+        lz_sampler_observe(sampler, out[ei]);
+        (*generated)++;
+        if (gen_emit_token(out[ei], 1, opts, t, sf, em, cont, ctx,
+                           first_pos + ei + 1, start_pos, n_prompt,
+                           n_rec, finish, tr)) {
+            keep = (ei < n_accept) ? ei + 1 : n_accept;
+            stopped = 1;
+            *stop_hit = sf->matched;
+            break;
+        }
+    }
+    for (i = 0; i < keep; i++) lz_pld_tail_push(tail, out[i]);
+    if (!stopped) lz_pld_tail_push(tail, out[keep]);
+
+    if (keep < nd) {
+        /* verify forwarded the FULL nd+1-token batch unconditionally
+           (forward_chunk's own all_logits=1 path has no way to stop
+           partway through a chunk once it starts); only `first` plus
+           out[0..keep-1] should actually remain forwarded. Restore to
+           before the batch, then replay exactly that surviving prefix -
+           see this function's own module comment for why there is no
+           cheaper option available without an MTP head. */
+        int restored_pos;
+        if (lz_ckpt_restore(ck, s, m, &restored_pos, errbuf, errlen) != 0) {
+            LZ_ERR_SET(rc, errbuf, errlen, LZ_ERR_FORWARD);
+            return -rc;
+        }
+        if (!lz_forward(m, s, first, first_pos)) {
+            LZ_ERR_SET(rc, errbuf, errlen, LZ_ERR_FORWARD);
+            return -rc;
+        }
+        for (i = 0; i < keep; i++) {
+            if (!lz_forward(m, s, out[i], first_pos + i + 1)) {
+                LZ_ERR_SET(rc, errbuf, errlen, LZ_ERR_FORWARD);
+                return -rc;
+            }
+        }
+    }
+
+    *pos = first_pos + keep + 1;
+    if (stopped) return 0;
+    *token = out[keep];
+    return 1;
+}
+
 int lz_generate_call(const LZModel *m, LZTokenizer *t, LZRunState *s,
                      const LZGenCall *c) {
     /* The twelve call fields, back under the names the loop below uses.
@@ -1949,6 +2242,22 @@ int lz_generate_call(const LZModel *m, LZTokenizer *t, LZRunState *s,
        (lz_mtp_draft_step's own chaining clobbers s->mtp_chain even on a
        discarded draft, so a stale leftover value cannot be trusted). */
     int have_seed = 0;
+    /* Prompt lookup decoding (PLD). pld_active is opts->pld_ngram>0 &&
+       opts->pld_tokens>0, same "own flag, not a comparison at every
+       call site" reasoning spec_active has. Unlike spec_active, this
+       DOES need an LZStateCkpt (pld_ck) - see lz_generate_pld_round's
+       own module comment for why PLD cannot reuse the SSM/conv ring
+       spec_active's own rollback depends on. pld_logits is the verify
+       batch's own scratch (LZ_PLD_TOKENS_MAX+1 rows of vocab_size
+       floats) - heap, not stack, same reasoning look_scr has just
+       below. All three, like look_ck/look_scr, are zero/NULL so the
+       `done:` cleanup is safe on every early goto, including ones
+       before the allocation below. */
+    int pld_active = 0;
+    LZStateCkpt pld_ck = {0};
+    float *pld_logits = NULL;
+    lz_pld_tail_t pld_tail;
+    int pld_rounds = 0, pld_hits = 0, pld_draft_tokens = 0, pld_accepted = 0;
     /* Dynamic temperature: the think-block tracker, see its init below. */
     LZThinkTrack tr;
 
@@ -2058,6 +2367,30 @@ int lz_generate_call(const LZModel *m, LZTokenizer *t, LZRunState *s,
            penalties_assumed) instead, so --spec K stays bit-identical
            to --spec 0 under the caller's own requested settings rather
            than needing them at their identity values. */
+    }
+
+    /* Prompt lookup decoding preconditions - same "fail before any work
+       happens" shape as spec_active's own block above. No m->mtp check:
+       that is the entire point of this mechanism (LZGenOpts.pld_ngram's
+       own comment). */
+    pld_active = opts->pld_ngram > 0 && opts->pld_tokens > 0;
+    if (pld_active) {
+        if (opts->pld_ngram > LZ_PLD_NGRAM_MAX) {
+            LZ_ERR_SET2(rc, errbuf, errlen, LZ_ERR_PLD_NGRAM_RANGE,
+                       opts->pld_ngram, LZ_PLD_NGRAM_MAX);
+            goto done;
+        }
+        if (opts->pld_tokens > LZ_PLD_TOKENS_MAX) {
+            LZ_ERR_SET2(rc, errbuf, errlen, LZ_ERR_PLD_TOKENS_RANGE,
+                       opts->pld_tokens, LZ_PLD_TOKENS_MAX);
+            goto done;
+        }
+        if (lz_ckpt_alloc(&pld_ck, m, errbuf, errlen) != 0) {
+            rc = LZ_ERR_ALLOC; goto done;
+        }
+        pld_logits = (float *)malloc((size_t)(LZ_PLD_TOKENS_MAX + 1) *
+                                     (size_t)m->config.vocab_size * sizeof(float));
+        if (!pld_logits) { LZ_ERR_SET(rc, errbuf, errlen, LZ_ERR_ALLOC); goto done; }
     }
 
     /* Count first, then allocate exactly: tokenizer.h's "tokens <= bytes"
@@ -2340,6 +2673,12 @@ int lz_generate_call(const LZModel *m, LZTokenizer *t, LZRunState *s,
         token = prompt_tokens[0];
     }
 
+    /* Seed PLD's own query-tail ring from the full prompt (see
+       lz_pld_tail_seed's own comment for why "full", not n_prompt-1) -
+       once, here, after `token` is set but before any round can read
+       it. */
+    if (pld_active) lz_pld_tail_seed(&pld_tail, prompt_tokens, n_prompt);
+
     while (pos < max_pos - 1) {
         /* Speculative round: only past prompt digestion (the draft head
            itself never runs during prefill, only its KV cache gets
@@ -2372,6 +2711,38 @@ int lz_generate_call(const LZModel *m, LZTokenizer *t, LZRunState *s,
                 &generated, &token, &pos, &stop_hit);
             if (sround < 0) { rc = -sround; goto done; }
             if (sround == 0) break;
+            continue;
+        }
+
+        /* Prompt lookup decoding: only past prompt digestion (same
+           precondition spec's own round_k check above has), only
+           greedy (temp>0 has no lz_pld_round_temp counterpart - see
+           LZGenOpts.pld_ngram's own comment), and only when spec_active
+           did not already claim this round (the `if (round_k > 0)`
+           block above always `continue`s, so reaching here means it
+           did not fire) and lookahead is not active (lz_generate_pld_
+           round's own miss-branch hardwires look_ck/look_scr/
+           look_active off - see its own comment - so this dispatch
+           must not hand it a round where the caller actually wanted
+           lookahead). max_draft is clamped to the same budget spec's
+           own round_k is, shifted for PLD's own "first occupies pos
+           itself" convention (lz_generate_pld_round's own module
+           comment) rather than spec's "anchor occupies pos+1" one. */
+        if (pld_active && !look_active && pos >= start_pos + n_prompt - 1 &&
+            lz_sample_eff_temp(&sampler.p, tr.in_think) <= LZ_TEMP_FLOOR_F) {
+            int max_draft = opts->pld_tokens;
+            int budget = max_pos - 2 - pos;
+            int pround;
+            if (max_draft > budget) max_draft = budget;
+            pld_rounds++;
+            pround = lz_generate_pld_round(
+                m, s, t, opts, cont, ctx, ins, start_pos, n_prompt, prompt_tokens,
+                opts->pld_ngram, max_draft, errbuf, errlen,
+                &sampler, &sf, &em, &tr, &pld_tail, &pld_ck, pld_logits,
+                &finish, &n_rec, &pld_hits, &pld_draft_tokens, &pld_accepted,
+                &generated, &token, &pos, &stop_hit);
+            if (pround < 0) { rc = -pround; goto done; }
+            if (pround == 0) break;
             continue;
         }
 
@@ -2412,6 +2783,8 @@ int lz_generate_call(const LZModel *m, LZTokenizer *t, LZRunState *s,
 done:
     lz_ckpt_free(&look_ck);
     free(look_scr);
+    lz_ckpt_free(&pld_ck);
+    free(pld_logits);
     /* Set on EVERY exit, including the error gotos above: a caller that
        reuses one LZGenOpts across turns would otherwise read the
        PREVIOUS call's count after a failure. opts is const by signature,
@@ -2423,6 +2796,10 @@ done:
         ((LZGenOpts *)opts)->out_spec_rounds = spec_rounds;
         ((LZGenOpts *)opts)->out_spec_draft_tokens = spec_draft_tokens;
         ((LZGenOpts *)opts)->out_spec_accepted = spec_accepted;
+        ((LZGenOpts *)opts)->out_pld_rounds = pld_rounds;
+        ((LZGenOpts *)opts)->out_pld_hits = pld_hits;
+        ((LZGenOpts *)opts)->out_pld_draft_tokens = pld_draft_tokens;
+        ((LZGenOpts *)opts)->out_pld_accepted = pld_accepted;
     }
     free(prompt_tokens);
     lz_sampler_free(&sampler);
