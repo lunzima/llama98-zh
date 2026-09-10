@@ -11890,19 +11890,34 @@ static int selftest(HINSTANCE inst, const char *path) {
                 need, r[LZ_GUI_TOOLBAR].h);
     }
 
-    /* Proof the check above can actually go red, the same way
-       measure_status_h's own big-font block (further down) proves
-       itself against LZ_GUI_STATUS_H: a synthetic, obviously-oversized
-       font forced onto the toolbar with WM_SETFONT directly, bypassing
-       lz_ui_font()/apply_font entirely, so this does not depend on
+    /* Proof the check above can actually go red, guarded the way
+       measure_status_h's own big-font block (further down) guards its
+       version of the same question: a synthetic, obviously-oversized
+       font is forced onto the toolbar with WM_SETFONT directly,
+       bypassing lz_ui_font()/apply_font, so this does not depend on
        this host's two languages resolving to different fonts (they do
-       not - see apply_language's own font-collapse note). If
-       TB_GETMAXSIZE genuinely reflects the control's real font (the
-       thing "toolbar: the layout is tall enough for its buttons"
-       relies on), an obviously oversized font must make it report more
-       than the layout reserves - the SAME comparison the check above
-       makes, on data engineered to fail it, which is what "the check
-       can go red" actually means rather than an assumption. */
+       not - see apply_language's own font-collapse note).
+
+       ONLY WHERE THE CONTROL LISTENS TO FONTS, because on this host it
+       does not do so reliably. Measured on the themed comctl32 v6 a
+       manifest build always gets: 45 before the font change and 45
+       after, with or without an explicit TB_AUTOSIZE in between, on
+       most runs - and 50 on others, from the same source and the same
+       synthetic font. A control whose answer moves with the font is a
+       control where the comparison the check above makes can be
+       applied to data engineered to fail it; where the answer did not
+       move, asserting `>` would fail for a property of the library or
+       of that run rather than of this file. The unthemed v5 is the one
+       that reliably substitutes its own font-derived answer.
+
+       The guard's own hazard, the same one the status bar's block
+       records: "did the font move it" is answered through the function
+       under test, so a lz_gui_toolbar_needed_height that ignored its
+       control entirely would read as "this comctl32 does not vary" and
+       leave the check vacuously green. What would still catch that is
+       the unguarded comparison above it - "the layout is tall enough
+       for its buttons" - which reads the real control but cannot fail
+       unless the need exceeds the reservation. */
     {
         HWND tb = g.part[LZ_GUI_TOOLBAR];
         HFONT big = CreateFontA(-60, 0, 0, 0, FW_NORMAL, 0, 0, 0,
@@ -11910,18 +11925,21 @@ static int selftest(HINSTANCE inst, const char *path) {
                                 CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY,
                                 DEFAULT_PITCH | FF_DONTCARE, NULL);
         LZRect r[LZ_GUI_PART_COUNT];
-        int need_big = 0;
+        int need = lz_gui_toolbar_needed_height(tb);
+        int need_big = need;
 
         lz_gui_layout(640, 480, 0, g.status_h, side_panel_mode(), r);
         if (big && tb) {
             SendMessage(tb, WM_SETFONT, (WPARAM)big, MAKELPARAM(TRUE, 0));
             need_big = lz_gui_toolbar_needed_height(tb);
         }
-        st_check(f, !big || !tb || need_big > r[LZ_GUI_TOOLBAR].h,
+        st_check(f, big != NULL &&
+                 (need_big == need || need_big > r[LZ_GUI_TOOLBAR].h),
                  "toolbar: an artificially oversized font makes the "
                  "layout's reserved height genuinely too small");
-        if (big && tb) fprintf(f, "  oversized font needs %d, layout "
-                               "gives %d\n", need_big, r[LZ_GUI_TOOLBAR].h);
+        if (big && tb) fprintf(f, "  plain font needs %d, oversized %d, "
+                               "layout gives %d\n", need, need_big,
+                               r[LZ_GUI_TOOLBAR].h);
         checks++;
 
         /* Real font back before anything else in this file reads the
