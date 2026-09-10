@@ -44,12 +44,17 @@ int main(int argc, char **argv) {
     static const int NS[] = { 8, 9, 15, 16, 31, 64, 127, 512, 1000, 4096 };
     uint32_t h = 2166136261u;
     int ni, pat, i, useq;
+    unsigned fpusave;
     if (argc > 1) {
         int t = LZ_KERNEL_REF;
         if (argv[1][0] == 'm') t = LZ_KERNEL_MMX;
         else if (argv[1][0] == 's') t = LZ_KERNEL_SSE2;
         lz_kernel_select(t);
     }
+    /* The float mode is part of what is compared: the kernel rounds by
+       MXCSR's RC field, the C body by lz_fastfp(). Outside the bracket
+       this measures two different rules. */
+    fpusave = lz_fpu_float_begin();
     for (ni = 0; ni < (int)(sizeof(NS) / sizeof(NS[0])); ni++) {
         int n = NS[ni];
         for (pat = 0; pat < 5; pat++) {

@@ -178,6 +178,16 @@ void row_q61_sse2_asm(const lz_row_ctx *c);
    (LZ_ROW_Q16, src/ops.c). */
 void row_q16_sse2_asm(const lz_row_ctx *c);
 
+/* MXCSR, for the float-mode bracket in src/ops_quant.c. The 387's
+   control word is not the register these kernels round by: cvtps2dq
+   reads MXCSR's RC field, so the bracket that chops the 387 for
+   --fastfp has to chop MXCSR with it. Callers own the guard - MXCSR
+   comes with SSE and does not exist below it.
+   Watcom-only, because the gcc bracket already writes MXCSR
+   (lz_fpu_float_begin's LZ_SSE_FLOAT_CSR arm). */
+unsigned lz_mxcsr_get(void);
+void lz_mxcsr_set(unsigned csr);
+
 #else /* gcc: intrinsics */
 
 /* ---- matmul row kernels, one per quantized weight format -------------

@@ -1903,11 +1903,28 @@ extern void lz_x87_cw_set(unsigned short cw);
 
 unsigned lz_fpu_float_begin(void) {
 #if defined(__WATCOMC__)
-    unsigned save = _control87(0, 0);
+    unsigned save = _control87(0, 0) & 0xFFFFu;
     _control87(_PC_24, _MCW_PC);
     /* x87 has the rounding half of fast mode but no FTZ/DAZ - see
        lz_fastfp_g's comment for why that gap is measured-harmless. */
-    if (lz_fastfp_g) _control87(_RC_CHOP, _MCW_RC);
+    if (lz_fastfp_g) {
+        _control87(_RC_CHOP, _MCW_RC);
+        /* MXCSR IS A SECOND REGISTER, and the SSE2 kernels round by it
+           (cvtps2dq reads its RC field), so the chopped 387 above is not
+           enough on its own: left at reset, MXCSR rounds to nearest while
+           every C path here truncates under fast mode - (int)qv in
+           q8_round, the magic add through a chopped 387. RC only: the
+           FTZ/DAZ bits have no 387 counterpart, and setting them would
+           put the SIMD arms a hair off the scalar ones rather than on
+           them. Guarded on SSE, below which MXCSR does not exist; the
+           saved value rides in the upper half of the return, and a zero
+           there means it was never touched. */
+        if (lz_cpu_has_sse()) {
+            unsigned csr = lz_mxcsr_get();
+            lz_mxcsr_set((csr & ~0x6000u) | 0x6000u);   /* RC = chop */
+            save |= csr << 16;
+        }
+    }
     return save;
 #elif defined(LZ_X87_FLOAT_CW)
     unsigned short save = lz_x87_cw_get();
@@ -1936,8 +1953,11 @@ unsigned lz_fpu_float_begin(void) {
 void lz_fpu_float_end(unsigned save) {
 #if defined(__WATCOMC__)
     /* _MCW_RC too, not just _MCW_PC: fast mode set the rounding half and
-       leaving it set would follow the caller out of the region. */
-    _control87(save, _MCW_PC | _MCW_RC);
+       leaving it set would follow the caller out of the region. MXCSR as
+       well, when lz_fpu_float_begin packed one - it is where the upper
+       half's zero comes from. */
+    if (save >> 16) lz_mxcsr_set((save >> 16) & 0xFFFFu);
+    _control87(save & 0xFFFFu, _MCW_PC | _MCW_RC);
 #elif defined(LZ_X87_FLOAT_CW)
     lz_x87_cw_set((unsigned short)save);
 #elif defined(LZ_SSE_FLOAT_CSR)

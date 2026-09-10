@@ -405,6 +405,22 @@ unsigned lz_amax32_sse2_w(const float *x, int n) {
     return lz_amax32_sse2_asm(x, n);
 }
 
+/* ---- MXCSR, for src/ops_quant.c's float-mode bracket ------------------
+   Why the bracket needs it is in ops_sse2.h. Inline asm rather than
+   _mm_getcsr/_mm_setcsr: this TU is compiled -6r precisely so these
+   encodings are legal here, and the gcc half of this file is the
+   intrinsics one. The caller owns the SSE check - MXCSR does not exist
+   below it. */
+unsigned lz_mxcsr_get(void) {
+    unsigned v;
+    __asm { stmxcsr v }
+    return v;
+}
+
+void lz_mxcsr_set(unsigned csr) {
+    __asm { ldmxcsr csr }
+}
+
 /* ---- norm_ss_fixed's element loop, SSE2 Watcom twin.
    gcc twin: lz_norm_ss_sse2, the intrinsics body below - read that one
    for why cvtps2dq IS q8_round, why packssdw is the upper clamp, and
@@ -3389,10 +3405,12 @@ void lz_q8round32_simd(const float *x, int8_t *o, const float *pinv) {
    Three steps, one instruction each, which is why this cell is worth
    filling and the scalar leaves next to it are not:
      x[i] * sc          mulps
-     q8_round           cvtps2dq - round-to-nearest-even is the DEFAULT
-                        MXCSR mode, and that is q8_round's own rule, so
-                        the magic add is not being approximated here,
-                        it is being spelled a second way
+     q8_round           cvtps2dq, which rounds by MXCSR's RC field:
+                        lz_fpu_float_begin sets that field to agree with
+                        lz_fastfp(), whose rule for this body is
+                        `(int)qv` under fast mode. A bracket that left
+                        MXCSR at reset would have the two rounding
+                        differently - see lz_fpu_float_begin
      v * v accumulated  pmaddwd, which is exactly a pairwise sum of
                         products and therefore exactly this loop's
                         accumulate
