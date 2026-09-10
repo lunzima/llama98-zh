@@ -602,6 +602,69 @@ else
     fi
 fi
 
+# ---------------------------------------------------------------------
+# THE DEFAULT IS THE TIER THE BANNER NAMES, on both compilers.
+#
+# Every row above pins --kernel at BOTH ends, which leaves the auto ladder
+# (kernel_detect) as the one part of the tier selector no gate ran - and
+# it is the arm every ordinary run takes. The tier is read from the
+# banner rather than assumed, because that line prints lz_kernel_name(),
+# the same spelling --kernel accepts: `--kernel <that>` is the request the
+# default resolved to, and a binary whose default is not the tier it
+# reports is the failure. Plausible, too - the ladder, the clamps and the
+# name table are three separate lists.
+#
+# Not counted in $PASS, which counts fixture x flagset rows, the same way
+# the cross-compiler block above is not.
+for cc in gcc wat; do
+    b=$RBIN
+    [ "$cc" = wat ] && b="./$WBIN"
+    if [ -z "$b" ] || [ ! -x "$b" ]; then
+        echo "SKIP: auto / $cc - its binary was not built"
+        continue
+    fi
+    for fx in zh en; do
+        TOK="build/norm_int_gate_tokens_$fx.txt"
+        [ -f "$TOK" ] || continue
+        if ! "$b" "$MODEL" --tokens-file "$TOK" \
+                --dump-all-logits "$TMPD/auto.$cc.$fx.bin" \
+                >"$TMPD/auto.$cc.$fx.log" 2>&1; then
+            echo "FAIL: auto / $cc / $fx did not run"
+            tail -n 3 "$TMPD/auto.$cc.$fx.log" | sed 's/^/      /'
+            FAIL=1
+            continue
+        fi
+        TN=$(sed -n 's/.*built-in, \([a-z0-9-]*\) selected.*/\1/p' \
+             "$TMPD/auto.$cc.$fx.log" | head -1)
+        if [ -z "$TN" ]; then
+            echo "SKIP: auto / $cc / $fx - no 'selected' line in its banner"
+            continue
+        fi
+        if ! "$b" "$MODEL" --tokens-file "$TOK" --kernel "$TN" \
+                --dump-all-logits "$TMPD/autok.$cc.$fx.bin" \
+                >"$TMPD/autok.$cc.$fx.log" 2>&1; then
+            echo "FAIL: auto / $cc / $fx - --kernel $TN did not run"
+            tail -n 3 "$TMPD/autok.$cc.$fx.log" | sed 's/^/      /'
+            FAIL=1
+            continue
+        fi
+        ASZ=$(wc -c <"$TMPD/auto.$cc.$fx.bin")
+        if [ "$ASZ" -eq 0 ]; then
+            echo "FAIL: auto / $cc / $fx - empty dump"
+            FAIL=1
+            continue
+        fi
+        if cmp -s "$TMPD/auto.$cc.$fx.bin" "$TMPD/autok.$cc.$fx.bin"; then
+            echo "PASS: $fx / auto / $cc - default == --kernel $TN ($ASZ bytes)"
+        else
+            ND=$(cmp -l "$TMPD/auto.$cc.$fx.bin" "$TMPD/autok.$cc.$fx.bin" 2>/dev/null | wc -l)
+            echo "FAIL: auto / $cc / $fx - the default and --kernel $TN" \
+                 "differ in $ND of $ASZ bytes"
+            FAIL=1
+        fi
+    done
+done
+
 echo "kernel_isa_identity_gate: $PASS fixture x flagset combination(s) identical"
 # FAIL is checked FIRST. An earlier order asked "did anything pass?"
 # before "did anything fail?", so a run where BOTH fixtures diverged

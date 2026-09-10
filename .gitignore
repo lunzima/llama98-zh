@@ -38,6 +38,7 @@
 !/build/int_pipeline_arm_gate.sh
 !/build/mm_alias_gate.sh
 !/build/isa_floor_watcom_gate.sh
+!/build/isa_floor_avx2_gate.sh
 !/build/switch_matrix_gate.sh
 !/build/switch_matrix_probe.c
 !/build/dead_ifndef_gate.sh

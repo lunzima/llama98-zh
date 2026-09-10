@@ -41,7 +41,7 @@
 # nested inside another comment; gcc said so on every build and `check`
 # reported 16 PASS over it. Having a caller somewhere is not the test -
 # being reachable from what people actually run is.
-check: root-hygiene-gate bare-endif-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate json-offset-gate softfp-gate dedupe-gate mm-alias-gate c89-floor-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate kernel-matrix-gate aux-parm-arity-gate aux-equiv-gate mathf-xcompiler-gate bf16-torch-gate bf16-store-gate lz4-model-gate gcc-watcom-output-gate fixture-exists-gate
+check: root-hygiene-gate bare-endif-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate json-offset-gate softfp-gate dedupe-gate mm-alias-gate c89-floor-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate isa-floor-avx2-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate kernel-matrix-gate aux-parm-arity-gate aux-equiv-gate mathf-xcompiler-gate bf16-torch-gate bf16-store-gate lz4-model-gate gcc-watcom-output-gate fixture-exists-gate
 
 # Zero gcc warnings, asserted rather than printed. The Watcom side has
 # always been counted ("N lines, 0 warnings, 0 errors", per file); this
@@ -112,6 +112,17 @@ seed-gate:
 .PHONY: gui-selftest-gate
 gui-selftest-gate: kunkun98-gui
 	@bash build/gui_selftest_gate.sh
+
+# The AVX2 tier's ISA floor, from its own object rather than its flags.
+# The tier is auto-selected by kernel_detect on any machine whose CPUID
+# passes lz_cpu_has_avx2, so an instruction outside that set is a #GP on a
+# machine the selector called capable - and every numeric gate is blind to
+# it, since all tiers are required to agree bit for bit. Depends on
+# kunkun98-gui for build/gui/ops_avx2.o, the same dependency
+# gui-selftest-gate has.
+.PHONY: isa-floor-avx2-gate
+isa-floor-avx2-gate: kunkun98-gui
+	@bash build/isa_floor_avx2_gate.sh
 
 # Every source byte is ASCII. VC++ 4.0 and Watcom read source in the
 # host codepage, and on a DBCS host a lead byte swallows the one after
