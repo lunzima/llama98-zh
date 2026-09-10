@@ -48,7 +48,6 @@
 !/build/fp_exception_gate.sh
 !/build/bf16_native_gate.sh
 !/build/bf16_native_probe.c
-!/build/bf16_store_gate.sh
 !/build/lz4_model_gate.sh
 !/build/bf16_torch_gate.sh
 !/build/gcc_watcom_output_gate.sh
