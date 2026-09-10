@@ -612,6 +612,13 @@ static int kernel_detect(void) {
     if (edx & (1u << 23)) return LZ_KERNEL_MMX;
     return LZ_KERNEL_REF;
 #elif defined(LZ_ROW_SSE2_EXTERN)
+#if LZ_HAVE_AVX2_TU
+    /* The gcc ceiling, above SSE2. Two answers, because the kernels can
+       be absent from a link the CPU would run them in: the machine's
+       (lz_cpu_has_avx2) and the build's (LZ_HAVE_AVX2_TU) - the same
+       pair lz_kernel_select clamps an explicit --kernel avx2 against. */
+    if (lz_cpu_has_avx2()) return LZ_KERNEL_AVX2;
+#endif /* LZ_HAVE_AVX2_TU */
     if (lz_cpuid1_edx() & (1u << 26)) return LZ_KERNEL_SSE2;
     if (lz_cpu_has_sse()) return LZ_KERNEL_SSE;
 #if defined(LZ_DOT_MMX_EXTERN)
@@ -655,21 +662,24 @@ int lz_kernel_select(int which) {
            and running the SSE1 tier on a machine that also has SSE2 is
            the only way to compare them. Asking UP clamps to what CPUID
            found: sse2 needs SSE2, and sse needs SSE, which an SSE2
-           machine also has. */
-        /* Two questions, not one: lz_cpu_has_avx2() is about the
-           MACHINE, and a build can lack the kernels while the machine has
-           the instructions (ops_avx2.h's LZ_HAVE_AVX2_TU). A tier with no
-           bodies falls back per site - table pickers to SSE2, the inline
-           tests to MMX, the fixed-point tiers to C - so one run would mix
-           three implementations under one tier name. Clamp to `have`, as
-           the CPU-side test does; the CLI reports the fallback. */
+           machine also has.
+           Each test names the CAPABILITY its tier needs rather than
+           comparing against `have`: have is the best of four now, so
+           `have == LZ_KERNEL_SSE2` would promote an explicit
+           --kernel sse2 to avx2 on exactly the machines that have it,
+           and the four-way bit-identity comparison would spend its run
+           comparing one tier against itself.
+           AVX2 asks two questions, the machine's and the link's: a tier
+           with no bodies falls back per site - table pickers to SSE2,
+           the inline tests to MMX, the fixed-point tiers to C - so one
+           run would mix three implementations under one tier name. The
+           CLI reports the fallback. */
         if (which == LZ_KERNEL_AVX2 &&
             (!lz_cpu_has_avx2() || !LZ_HAVE_AVX2_TU))
             which = have;
-        else if (which == LZ_KERNEL_SSE2 && have != LZ_KERNEL_SSE2)
+        else if (which == LZ_KERNEL_SSE2 && !(lz_cpuid1_edx() & (1u << 26)))
             which = have;
-        else if (which == LZ_KERNEL_SSE &&
-                 have != LZ_KERNEL_SSE && have != LZ_KERNEL_SSE2)
+        else if (which == LZ_KERNEL_SSE && !(lz_cpuid1_edx() & (1u << 25)))
             which = have;
         g_kernel = which;
 #else
@@ -696,11 +706,23 @@ const char *lz_build_paths(void) {
 #elif defined(__WATCOMC__)
     return "mmx-asm+sse2-asm";
 #elif defined(LZ_DOT_MMX_EXTERN) && defined(LZ_ROW_SSE2_EXTERN)
+#if LZ_HAVE_AVX2_TU
+    return "mmx-intrin+sse2-intrin+avx2-intrin";
+#else
     return "mmx-intrin+sse2-intrin";
+#endif /* LZ_HAVE_AVX2_TU */
 #elif defined(LZ_DOT_MMX_EXTERN)
+#if LZ_HAVE_AVX2_TU
+    return "mmx-intrin+avx2-intrin";
+#else
     return "mmx-intrin";
+#endif /* LZ_HAVE_AVX2_TU */
 #elif defined(LZ_ROW_SSE2_EXTERN)
+#if LZ_HAVE_AVX2_TU
+    return "sse2-intrin+avx2-intrin";
+#else
     return "sse2-intrin";
+#endif /* LZ_HAVE_AVX2_TU */
 #else
     return "scalar";
 #endif /* __WATCOMC__ */

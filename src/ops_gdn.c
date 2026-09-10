@@ -1539,9 +1539,10 @@ typedef char lz_p2_needs_lo_scale_256[
    default on some machine that runs the suite, so both are validated by
    every run rather than only by a probe.
 
-   Tier 4 is gcc-only and never auto-selected: LZ_KERNEL_AVX2 only
-   reaches here through an explicit --kernel avx2, and the AVX2 bodies
-   exist only when src/ops_avx2.c is in this link. */
+   Tier 4 is gcc-only and needs two answers to run at all: the CPU's
+   (lz_cpu_has_avx2, which kernel_detect asks) and the link's
+   (LZ_HAVE_AVX2_TU - the AVX2 bodies exist only when src/ops_avx2.c is
+   in it). An explicit --kernel avx2 clamps against the same pair. */
 static int p2_tier(void) {
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
     if (g_kernel == LZ_KERNEL_REF) return 0;
