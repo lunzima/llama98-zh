@@ -604,11 +604,17 @@ else
 fi
 
 # ---------------------------------------------------------------------
-# Stage 11: the two PERFORMANCE-only knobs. Every other knob in this
+# Stage 11: the PERFORMANCE-only knobs. Every other knob in this
 # engine is a tier, and a tier that moves the numbers is doing its job -
 # which is why the tier gates cannot say anything about --pair and
 # --prefetch, whose entire contract is that they move NOTHING. That made
 # them the two easiest knobs to break silently.
+#
+# --ced belongs to the same class and is the most dangerous of the three,
+# because unlike --pair and --prefetch it cannot move the output even
+# when it is broken: a knob wired to nothing also produces identical
+# numbers. Its gate carries a skip counter and two mutants for that
+# reason; see build/ced_gate.sh's header.
 # ---------------------------------------------------------------------
 echo
 echo "==== [11/31]performance-knob invariance ===="
@@ -631,6 +637,31 @@ case $PK_RC in
     *)
         echo "FAIL: performance-knob invariance"
         note "FAIL  performance-knob invariance"
+        FAIL=$((FAIL + 1))
+        ;;
+esac
+
+# --ced, same class, own script: it needs a git tree (to rebuild the
+# previous source for the off-vs-HEAD arm) and three engine builds for
+# its mutants, neither of which fits perf_knob_gate.sh.
+echo
+echo "==== [11b/31]--ced invariance ===="
+LOG=build/ci-ced.log
+build/ced_gate.sh "$ARM_MODEL" >"$LOG" 2>&1
+CED_RC=$?
+cat "$LOG"
+case $CED_RC in
+    0)
+        note "PASS  --ced invariance"
+        PASS=$((PASS + 1))
+        ;;
+    2)
+        REASON=$(grep -m1 'ced_gate: SKIP' "$LOG")
+        note "SKIP  --ced invariance ($REASON)"
+        SKIP=$((SKIP + 1))
+        ;;
+    *)
+        note "FAIL  --ced invariance"
         FAIL=$((FAIL + 1))
         ;;
 esac

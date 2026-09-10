@@ -189,6 +189,16 @@ lz_i64 lz_debug_n_lmhead = 0;
    if the loops still walked every row. */
 lz_i64 lz_debug_attn_skip = 0;
 
+/* Positive control for --ced. Counted at the SKIP ITSELF, in
+   forward_chunk's layer loop, because the whole claim of that knob is
+   that its output is unchanged: identical logits are exactly what a
+   --ced that never fired also produces, so the comparison on its own is
+   a signal that is always on. This counter is the other half - a run of
+   --ced on whose logits match AND whose count is zero did not skip
+   anything, and the gate fails it there rather than recording a
+   speedup nothing performed. */
+lz_i64 lz_debug_ced_skipped = 0;
+
 /* Positive control for the V projection's int16 exit (LZ_VPROJ_I16).
    Counted at the CONSUMER - inside the branch that hands vtmp_i16 to
    lz_quantize_q8_i16 - not where the projection wrote it: an exit that
@@ -350,6 +360,37 @@ int lz_attn_sink = 0;
    there and LZ_ATTN_WIN_FLOOR. `--attn-window 0` still turns eviction
    off completely, which the measuring arms depend on. */
 int lz_attn_window = -1;
+
+/* --ced: causal encoder/decoder split. 0 = off.
+   ON, the layer that ends the stack does not run over the prefix in
+   lz_forward_batch: its K/V for every position is written by
+   forward_attn_kv_only (its own k_proj/v_proj applied to the encoder's
+   exit hidden, which is also that layer's own input, so no new tensors
+   and no approximation), while its queries, attention, output
+   projection and FFN run for the final chunk only. The last position's
+   logits and the whole KV cache therefore come out BYTE-IDENTICAL to
+   the unmodified path - which is the gate, and the reason this is a
+   scheduling knob rather than a precision trade.
+
+   lz_forward_batch is the only entry that may run it. lz_forward_verify
+   and lz_forward_batch_capture want every position's output, so they
+   pass 0 and say so at their call sites.
+
+   Only the final chunk's logits are ever observed by lz_forward_batch
+   (see skip_logits there), which is what makes the saving free. */
+int lz_ced = 0;
+
+/* --dump-prefill: write the logits lz_forward_batch returns, once per
+   call, so the LAST write of a run is the post-prefill row.
+
+   --dump-logits cannot serve this. It belongs to the --tokens path,
+   which forwards one token at a time through lz_forward - and that path
+   has no prefix to skip, so CED cannot apply to it at all: every
+   position's output is the thing being asked for. The two observables
+   were therefore mutually exclusive until this existed, which left the
+   batch path with no exact output to compare. */
+const char *lz_dump_prefill_path = NULL;
+lz_i64 lz_debug_prefill_dumps = 0;
 
 /* --moe-topk: route to N experts instead of the exported
    num_experts_per_token. See forward_moe for why this is a knob and
@@ -749,6 +790,19 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
     int nt = LZ_BATCH_MAX;
 
     memset(s, 0, sizeof(*s));
+    /* --ced, REFUSED rather than ignored when it cannot apply. The guard
+       that skips the layer sits inside the full-attention branch in
+       forward_chunk, so on a stack whose last layer is linear attention
+       it could never fire, the run would come out unchanged, and the
+       flag would read as a speedup that nothing performed. m->layers is
+       valid here - lz_state_alloc takes a loaded model. */
+    if (lz_ced) {
+        if (m->layers[c->n_layers - 1].type != LZ_LT_FULL) {
+            if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_CED_LAST_LAYER);
+            return 1;
+        }
+        s->ced = 1;
+    }
     if (seq_len <= 0) {
         if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_SEQ_LEN);
         return 1;
@@ -1850,7 +1904,7 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
                             const int *tokens, int nt, int pos0,
                             float *capture_hidden,
                             int all_logits, float *logits_out,
-                            int skip_logits) {
+                            int skip_logits, int ced_skip_last) {
     const LZModelConfig *c = &m->config;
     int dim = c->hidden_size;
     int l, i, tk;
@@ -1964,7 +2018,26 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
         }
         LZ_TAP("an", l, s->xb, dim);
         LZ_PROF_BEG(_tp);
-        if (L->type == LZ_LT_FULL)      forward_attn(m, s, L, l, pos0, nt);
+        if (L->type == LZ_LT_FULL) {
+            /* --ced, on a chunk whose outputs nobody reads (see
+               ced_skip_last). The last layer's K/V over these positions
+               is the one thing the run keeps; everything else it would
+               have computed here is not observed by any caller, because
+               lz_forward_batch returns only the final chunk's logits.
+
+               The `continue` is the whole point and is not tidiness: it
+               skips the residual add AND the FFN as well as the
+               attention, so this layer contributes nothing to s->x at
+               these positions - which is correct, since s->x for them is
+               not read again. s->xb2 is left holding whatever the
+               previous layer put there and no reader follows. */
+            if (ced_skip_last && l == c->n_layers - 1) {
+                lz_debug_ced_skipped += nt;
+                forward_attn_kv_only(m, s, L, l, pos0, nt);
+                continue;
+            }
+            forward_attn(m, s, L, l, pos0, nt);
+        }
         else if (L->type == LZ_LT_KDA)  forward_kda(m, s, L, l, nt, all_logits, ring_base);
         else                             forward_ssm(m, s, L, l, nt, all_logits, ring_base);
         LZ_PROF_END(_tp, L->type == LZ_LT_FULL ? LZ_PROF_ATTN : LZ_PROF_LIN);
@@ -2182,7 +2255,7 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
 }
 
 float *lz_forward(const LZModel *m, LZRunState *s, int token, int pos) {
-    return forward_chunk(m, s, &token, 1, pos, NULL, 0, NULL, 0);
+    return forward_chunk(m, s, &token, 1, pos, NULL, 0, NULL, 0, 0);
 }
 
 float *lz_forward_capture(const LZModel *m, LZRunState *s, int token, int pos) {
@@ -2191,7 +2264,7 @@ float *lz_forward_capture(const LZModel *m, LZRunState *s, int token, int pos) {
        function's own contract ("a no-op ... when m->mtp is NULL"). */
     float t_us0 = lz_time_ms() * LZ_US_SCALE;  /* debug probe, see part 4 */
     float *r = forward_chunk(m, s, &token, 1, pos,
-                             m->mtp ? s->mtp_chain : NULL, 0, NULL, 0);
+                             m->mtp ? s->mtp_chain : NULL, 0, NULL, 0, 0);
     lz_debug_us_capture += (lz_i64)(lz_time_ms() * LZ_US_SCALE - t_us0);
     lz_debug_n_capture++;
     return r;
@@ -2213,10 +2286,28 @@ float *lz_forward_batch(const LZModel *m, LZRunState *s,
            overwritten every iteration and only the last one is returned
            - so every earlier chunk skips the vocabulary projection. See
            skip_logits in forward_chunk. */
+        /* --ced's ONLY entry. lz_forward_batch observes the final chunk's
+           logits and nothing else - that is what skip_logits already
+           encodes - so the earlier chunks' outputs of the last layer are
+           unobserved and the layer can write its K/V and stop. Every
+           other forward_chunk caller wants more than that (verify wants
+           every position's logits, capture wants every position's
+           hidden), so they pass 0 and CED stays out of them. */
         lg = forward_chunk(m, s, tokens + done, k, pos0 + done, NULL, 0, NULL,
-                           done + k < n);
+                           done + k < n, s->ced && (done + k < n));
         if (!lg) return NULL;
         done += k;
+    }
+    /* Written after the whole loop, so a sliced prefill leaves the LAST
+       slice's row - which is the post-prefill row, the only one any
+       caller observes. */
+    if (lg && lz_dump_prefill_path) {
+        FILE *f = fopen(lz_dump_prefill_path, "wb");
+        if (f) {
+            fwrite(lg, sizeof(float), (size_t)m->config.vocab_size, f);
+            fclose(f);
+        }
+        lz_debug_prefill_dumps++;
     }
     return lg;
 }
@@ -2250,7 +2341,7 @@ int lz_forward_verify(const LZModel *m, LZRunState *s,
            which is the opposite of the prefill case. */
         if (!forward_chunk(m, s, tokens + done, k, pos0 + done,
                            s->mtp_verify_hidden + (size_t)done * c->hidden_size,
-                           1, s->mtp_logits + (size_t)done * c->vocab_size, 0))
+                           1, s->mtp_logits + (size_t)done * c->vocab_size, 0, 0))
             return 1;
         done += k;
     }
@@ -2280,7 +2371,7 @@ float *lz_forward_batch_capture(const LZModel *m, LZRunState *s,
         if (k > cap) k = cap;
         lg = forward_chunk(m, s, tokens + done, k, pos0 + done,
                            hidden_out + (size_t)done * dim, 0, NULL,
-                           done + k < n);
+                           done + k < n, 0);
         if (!lg) return NULL;
         done += k;
     }
@@ -2314,7 +2405,7 @@ int lz_forward_verify_into(const LZModel *m, LZRunState *s,
            s->mtp_verify_hidden write. skip_logits stays 0 - every
            position's logits are wanted, same as lz_forward_verify. */
         if (!forward_chunk(m, s, tokens + done, k, pos0 + done,
-                           NULL, 1, logits_out + (size_t)done * c->vocab_size, 0))
+                           NULL, 1, logits_out + (size_t)done * c->vocab_size, 0, 0))
             return 1;
         done += k;
     }

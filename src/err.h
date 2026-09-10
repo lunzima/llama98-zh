@@ -221,6 +221,15 @@ typedef enum {
        was pointing at when it fired. */
     LZ_ERR_ENDIAN_MISMATCH,    /* built for the wrong byte order */
 
+    /* --ced was asked for on a model whose LAST layer is not full
+       attention. CED keeps exactly one thing across the prefix: the
+       decoder layer's own K/V, computed from the encoder's exit hidden.
+       A linear-attention last layer has no such K/V, so the flag would
+       have nothing to keep - and the guard that would skip the layer
+       sits inside the full-attention branch, where it can never fire.
+       That is a silent no-op, not a cheaper run, so it refuses. */
+    LZ_ERR_CED_LAST_LAYER,     /* --ced needs the last layer to be full attention */
+
     /* Generic failure. Two jobs, and it must stay LAST before
        LZ_ERR_COUNT for the second one:
        1. the initial value of a return code that every failure path is

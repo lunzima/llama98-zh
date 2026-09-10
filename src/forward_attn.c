@@ -551,8 +551,16 @@ static void attn_score_loop(LZRunState *s, const LZModelConfig *c,
    are checked at load time (model.c's model_walk) to have exactly the
    body's attn_qgate_dim/attn_kv_dim/attn_q_dim/head_dim, so nothing here
    needs to special-case its shapes, only which cache slot it writes. */
-void forward_attn(const LZModel *m, LZRunState *s,
-                         const LZLayer *L, int layer, int pos0, int nt) {
+/* The whole attention block, with one switch. `kv_only` stops after the
+   cache write and skips everything the Q side feeds: q_proj, QK-Norm and
+   RoPE on q, the Hadamard on q, and then the scoring and o_projection.
+   The two exported names at the end of this file are thin wrappers
+   rather than a second copy of this body, because a copy that drifted
+   would change the cache BYTES silently - the k/v path below is shared
+   verbatim - and the --ced gate would go red with nothing to point at. */
+static void attn_impl(const LZModel *m, LZRunState *s,
+                         const LZLayer *L, int layer, int pos0, int nt,
+                         int kv_only) {
     const LZModelConfig *c = &m->config;
     int hd = c->head_dim, nh = c->n_heads, nkv = c->n_kv_heads;
     int kv_mul = nh / nkv;
@@ -669,7 +677,10 @@ void forward_attn(const LZModel *m, LZRunState *s,
         p[1].out = s->ktmp; p[1].od = kvd;
         p[2].nrm = &L->attn_v_subn_norm; p[2].w = &L->v_proj;
         p[2].out = s->vtmp; p[2].od = kvd;
-        for (pi = 0; pi < 3; pi++) {
+        /* kv_only starts at p[1], not p[0]: q_proj's output reaches k and
+           v through nothing, and s->xq/xqs are re-quantized per projection
+           here anyway, so dropping q cannot perturb either. */
+        for (pi = kv_only ? 1 : 0; pi < 3; pi++) {
             for (tk = 0; tk < nt; tk++)
                 lz_rmsnorm(s->xb2 + (size_t)tk * hdim,
                            s->xb + (size_t)tk * hdim,
@@ -686,7 +697,11 @@ void forward_attn(const LZModel *m, LZRunState *s,
     for (tk = 0; tk < nt; tk++)
         lz_quantize_q8(s->xb + (size_t)tk * hdim, hdim, gsa,
                        s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
-    lz_matmul_xq_nt(s->qg, s->xb, s->xq, s->xqs, &L->q_proj, hdim, qgd, nt);
+    /* One shared xq/xqs serves all three projections, so skipping q here
+       leaves k and v quantized from exactly the same bytes they would
+       have been quantized from with q present. */
+    if (!kv_only)
+        lz_matmul_xq_nt(s->qg, s->xb, s->xq, s->xqs, &L->q_proj, hdim, qgd, nt);
     lz_matmul_xq_nt(s->ktmp, s->xb, s->xq, s->xqs, &L->k_proj, hdim, kvd, nt);
     proj_i16(s, v_may, &v_int, s->vtmp, s->vtmp_i16,
                  s->xb, &L->v_proj, hdim, kvd, nt, LZ_VPROJ_ES, 32767);
@@ -716,7 +731,7 @@ void forward_attn(const LZModel *m, LZRunState *s,
            [all q][all gate]. The reference does view(..., n_heads, hd*2)
            then chunks along the last dim; treating it as two contiguous
            halves feeds every head misaligned data. */
-        {
+        if (!kv_only) {
             const float *q_norm_w = lz_t_f32(&L->q_norm, s->wscr);
             for (h = 0; h < nh; h++)
                 lz_rmsnorm(qht + (size_t)h * hd, qgt + (size_t)h * 2 * hd,
@@ -731,7 +746,7 @@ void forward_attn(const LZModel *m, LZRunState *s,
         /* QK-Norm first, then RoPE, only then quantize into the cache -
            the cache holds the rotated k. head_dim is a multiple of 32,
            so quantization groups never cross heads. */
-        lz_rope(qht, nh, hd, c->rotary_dim, pos, s->rope_cs);
+        if (!kv_only) lz_rope(qht, nh, hd, c->rotary_dim, pos, s->rope_cs);
         lz_rope(ktt, nkv, hd, c->rotary_dim, pos, s->rope_cs);
         /* Hadamard AFTER RoPE, on q and k alike - the cache holds rotated
            k, and a query rotated by the same H still scores against it
@@ -740,7 +755,8 @@ void forward_attn(const LZModel *m, LZRunState *s,
            not commute with H. V is rotated too, and the attention output
            is rotated back below. */
         if (s->kv_rot_k) {
-            for (h = 0; h < nh;  h++) rot_head(qht + (size_t)h * hd, hd, s->kv_rot_k);
+            if (!kv_only)
+                for (h = 0; h < nh;  h++) rot_head(qht + (size_t)h * hd, hd, s->kv_rot_k);
             for (h = 0; h < nkv; h++) rot_head(ktt + (size_t)h * hd, hd, s->kv_rot_k);
         }
         if (s->kv_rot_v)
@@ -803,6 +819,10 @@ void forward_attn(const LZModel *m, LZRunState *s,
             }
         }
     }
+    /* kv_only ends here, and it ends BEFORE the taps on purpose: s->qh
+       holds the previous chunk's queries, so tapping it here would
+       report a stale tensor as if it belonged to this call. */
+    if (kv_only) return;
     /* Post QK-Norm, post RoPE, pre-cache-quantization. These two are the
        last taps on the attention path that are still exact floats, so
        they are where a rotary_dim / head interleave / start_pos error has
@@ -848,5 +868,22 @@ void forward_attn(const LZModel *m, LZRunState *s,
     }
     lz_matmul_xq_nt(s->xb2, s->attn_out, s->xq, s->xqs, &L->o_proj, qd,
                     hdim, nt);
+}
+
+/* The two entry points. Both are one call into the body above, so the
+   k/v path -- projection, QK-Norm, RoPE, Hadamard, quantize, write --
+   exists once and cannot drift between them. That matters more here
+   than an ordinary DRY argument would: the --ced gate asserts that the
+   KV cache under --ced on is byte-identical to the one under --ced off,
+   and a second copy of this code that drifted would turn that gate red
+   with nothing in the failure to say which of the two was wrong. */
+void forward_attn(const LZModel *m, LZRunState *s,
+                  const LZLayer *L, int layer, int pos0, int nt) {
+    attn_impl(m, s, L, layer, pos0, nt, 0);
+}
+
+void forward_attn_kv_only(const LZModel *m, LZRunState *s,
+                          const LZLayer *L, int layer, int pos0, int nt) {
+    attn_impl(m, s, L, layer, pos0, nt, 1);
 }
 

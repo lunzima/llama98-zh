@@ -292,6 +292,21 @@ bf16-store-gate:
 lz4-model-gate:
 	@$(call GATE_OK,build/lz4_model_gate.sh "$(MODEL)")
 
+# --ced must not move the numbers, and the skip must actually happen.
+# Needs a model dir and the native build; SKIPs without either.
+#
+# It is in `check` rather than ci.sh-only because the part that costs
+# nothing - the two arms, the counter, and the comparison - needs no
+# toolchain, and because the expensive half is what makes it worth
+# having: it rebuilds the PREVIOUS source from git and compares the off
+# arm against it, then builds two mutants and requires both to go red.
+# A gate for a knob whose whole claim is "the output does not change" is
+# the one kind that cannot be trusted on its own, since a knob wired to
+# nothing also produces an unchanged output.
+.PHONY: ced-gate
+ced-gate:
+	@$(call GATE_OK,build/ced_gate.sh "$(MODEL)")
+
 # A third opinion on lz_bf16.c, from PyTorch. Needs no model; SKIPs if
 # torch is absent, which is why it is behind GATE_OK too.
 .PHONY: bf16-torch-gate

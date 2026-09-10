@@ -102,6 +102,10 @@ kernel_isa_identity_gate.sh # disassembles both toolchains' objects
 switch_matrix_gate.sh      # builds the knob matrix, many configurations
 float_knob_gate.sh         # instrumented build plus two planted axes
 str_table_order_gate.sh    # needs a model to walk the string tables
+ced_gate.sh                # four engine builds: the off and on arms, plus a
+                           #   mutant each for the skip and for the final-chunk
+                           #   condition, plus the previous source rebuilt from
+                           #   git for the off-vs-HEAD arm
 changelog_comment_gate.sh  # ratchet over the whole tree, slow
 subn_gate.sh               # needs a model and a long token run
 kv_rot_gate.sh             # needs a model and a long token run

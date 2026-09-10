@@ -224,6 +224,9 @@ extern lz_i64 lz_debug_n_lmhead;
 /* sink+window's row-skip positive control, forward.c. Zero when no
    window is set; non-zero only if evicted rows were really skipped. */
 extern lz_i64 lz_debug_attn_skip;
+extern lz_i64 lz_debug_ced_skipped;
+extern const char *lz_dump_prefill_path;
+extern lz_i64 lz_debug_prefill_dumps;
 /* Whether the epi dispatch left the C loop for this build's vector
    body. The identity gate cannot answer that: it compares ref against
    the tier and both produce the same bytes, so it passes whether the
@@ -297,6 +300,7 @@ extern int lz_kv_kfmt;
 extern int lz_kv_vfmt;
 extern int lz_attn_sink;
 extern int lz_attn_window;
+extern int lz_ced;
 extern int lz_moe_topk;
 extern float lz_moe_tau;
 extern int lz_prof_enable;
@@ -365,6 +369,10 @@ static void usage(void) {
     "                   of 131 KB: top-5 ids ((n_tokens-1) x 5 int32).\n"
     "  --dump-prompt-tokens F  Write the encoded prompt's token ids instead\n"
     "                   of generating (cross-build argv/encoding probe).\n"
+    "  --dump-prefill F  Write the logits the batched PREFILL returned (f32,\n"
+    "                   vocab). --dump-logits cannot: it belongs to the\n"
+    "                   --tokens path, which forwards one token at a time\n"
+    "                   and so has no prefix for --ced to skip.\n"
     "  --tokens-file F  Read --tokens list from a file (long sequences)\n"
     "  --topk N         Show top-N candidates (default 5)\n"
     "\n"
@@ -429,6 +437,12 @@ static void usage(void) {
     "  --attn-sink N    StreamingLLM eviction: keep the first N positions.\n"
     "  --attn-window W  ... and the most recent W (default AUTO = max(1024,\n"
     "                   ctx/2), N=16; W=0 turns eviction off).\n"
+    "  --ced on|off     Causal encoder/decoder split (default off). On, the\n"
+    "                   LAST layer skips the prefix in prefill: its K/V is\n"
+    "                   still written for every position, from the encoder's\n"
+    "                   exit hidden, but its attention and FFN run for the\n"
+    "                   final chunk only. Logits and KV come out identical\n"
+    "                   to off; needs the last layer to be full attention.\n"
     "  --kv-rot MODE    on|off (default OFF). Hadamard-rotate Q/K/V before\n"
     "                   KV quantization.\n"
     "  --rope-dynamic-ntk MODE  on|off (default OFF). Off reproduces the\n"
@@ -1425,6 +1439,8 @@ int main(int argc, char **argv) {
             top5_path = argv[++i];
         else if (strcmp(a, "--dump-prompt-tokens") == 0 && i + 1 < argc)
             prompt_tok_path = argv[++i];
+        else if (strcmp(a, "--dump-prefill") == 0 && i + 1 < argc)
+            lz_dump_prefill_path = argv[++i];
         else if (strcmp(a, "--tokens-file") == 0 && i + 1 < argc) {
             /* A 4k-token id list is ~24 KB of argv, which several shells
                and Win98's command line will not carry. Same parser, the
@@ -1791,6 +1807,15 @@ int main(int argc, char **argv) {
         }
         else if (strcmp(a, "--attn-window") == 0 && i + 1 < argc) {
             lz_attn_window = atoi(argv[++i]);
+        }
+        else if (strcmp(a, "--ced") == 0 && i + 1 < argc) {
+            const char *m = argv[++i];
+            if (strcmp(m, "on") == 0)       lz_ced = 1;
+            else if (strcmp(m, "off") == 0) lz_ced = 0;
+            else {
+                fprintf(stderr, "llama98: --ced takes on|off, not '%s'\n", m);
+                return 2;
+            }
         }
         /* --kv-rot-v and --qjl-dim are not offered. The V-side width
            stays at its swept value of 64 internally (forward.c's own
@@ -2229,6 +2254,15 @@ int main(int argc, char **argv) {
                 fwrite(logits, sizeof(float), (size_t)cfg->vocab_size, f);
                 fclose(f);
                 printf("Wrote %s (%d f32)\n", dump_path, cfg->vocab_size);
+                /* Printed here as well as in the generation summary,
+                   because the two arms of --ced produce IDENTICAL logits
+                   by construction - that is the claim being gated - so
+                   this counter is the only evidence that the arm did
+                   anything at all. A gate that compared only the dumps
+                   would be green on an engine where --ced was wired to
+                   nothing. */
+                printf("[ced: %s, %lld prefill positions skipped]\n",
+                       st.ced ? "on" : "off", lz_debug_ced_skipped);
             }
         }
         if (nll_path && nll) {
@@ -2448,6 +2482,15 @@ int main(int argc, char **argv) {
                    st.nt_cap, lz_debug_n_chunks, lz_debug_n_lmhead);
             printf("[attn: sink %d window %d, %lld evicted rows skipped]\n",
                    st.attn_sink, st.attn_win, lz_debug_attn_skip);
+            /* Printed for both arms on purpose: under --ced off this must
+               read 0, and under --ced on it must not - the logits are
+               identical either way, so this is the only line that says
+               the skip happened at all. */
+            printf("[ced: %s, %lld prefill positions skipped]\n",
+                   st.ced ? "on" : "off", lz_debug_ced_skipped);
+            if (lz_dump_prefill_path)
+                printf("[dump-prefill: %lld write(s) to %s]\n",
+                       lz_debug_prefill_dumps, lz_dump_prefill_path);
             printf("[epi: %lld calls on the kernel body]\n",
                    lz_debug_epi_kern);
             { char _b0[LZ_FTOA_BUF], _b1[LZ_FTOA_BUF];

@@ -366,6 +366,12 @@ void lz_dbg_layer_hash(const char *tag, int li, const void *p, size_t nf);
 /* Debug counters defined in forward.c, read by cli_main.c and by the
    attn helpers in forward_attn.c. */
 extern lz_i64 lz_debug_attn_skip;
+extern lz_i64 lz_debug_ced_skipped;
+/* --dump-prefill's target and its own count, so a write that failed
+   (unwritable path) is visible as dumps == 0 rather than as a gate that
+   compares two files nobody wrote. */
+extern const char *lz_dump_prefill_path;
+extern lz_i64 lz_debug_prefill_dumps;
 extern lz_i64 lz_debug_n_kv_rot;
 extern int   lz_debug_mtp_attn_window;
 extern lz_i64 lz_debug_mtp_attn_rows;
@@ -1131,6 +1137,13 @@ typedef struct {
        recent attn_win, mask the middle. 0/0 = ordinary full attention.
        See forward.c for why this lands as a mask before the eviction. */
     int     attn_sink, attn_win;
+    /* --ced: the layer that owns the last position's K/V is kept and the
+       rest of the decoder half is not run over the prefix. 0 = off, and
+       off must be the UNMODIFIED code path - the guard in forward_chunk
+       is skipped entirely rather than taken. Set by lz_state_alloc, and
+       only when the model's last layer is full attention; see
+       LZ_ERR_CED_LAST_LAYER for why anything else refuses. */
+    int     ced;
     int     kv_ring;            /* ring modulus (window + spec guard), 0 = off */
     int     kv_slots;           /* allocated cache depth: seq_len, or sink+ring */
     float   ssm_scale;          /* 1/sqrt(lin_k_head_dim) */
@@ -1178,6 +1191,21 @@ void attn_wsum_plane(LZRunState *s, float *dst, const int8_t *vplane,
 void rot_head(float *v, int hd, int n);
 void forward_attn(const LZModel *m, LZRunState *s,
                   const LZLayer *L, int layer, int pos0, int nt);
+/* The KV half of forward_attn and nothing else: the q/k/v projections
+   minus q, the per-token QK-Norm / RoPE / Hadamard on k and v, and the
+   cache write. No attention, no output projection, no residual, no FFN.
+
+   It exists for --ced, where the decoder layer's own K/V over the whole
+   prefix is kept but its output is needed at one position only. The
+   cache rows it writes are bit-identical to forward_attn's, which is
+   what makes the gate a bitwise one rather than a tolerance: the same
+   xq/xqs from the same xb go through the same lz_matmul_xq_nt calls and
+   the same quantizer. q is dropped, and that is safe for exactly that
+   reason - q_proj's output reaches k and v through nothing.
+
+   The caller must have prepared s->xb for these positions already. */
+void forward_attn_kv_only(const LZModel *m, LZRunState *s,
+                          const LZLayer *L, int layer, int pos0, int nt);
 /* One projection with an int16 exit at the consumer's own exponent.
    EIGHT call sites in three files, which is why it is not called
    kda_i16_proj any more: forward_kda.c has four, forward_moe.c three
