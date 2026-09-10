@@ -44,6 +44,15 @@
                                 stays "linear_attention" either way; this
                                 code is what the string maps to. */
 
+/* ffn_activation codes (config.json's "ffn_activation" string, text_config
+   or top level). NONE is every model this engine has ever loaded; the
+   other two are the training side's engine/kunmoe_modeling.py
+   situ_glu/swiglu_clamp, added here with no shipping checkpoint yet -
+   see lz_ffn_gate_up (forward.h) and model.h's ffn_activation field. */
+#define LZ_FFN_ACT_NONE         0
+#define LZ_FFN_ACT_SITU         1   /* Kimi K3 SiTU-GLU, section 2.3.2 Eq. 12 */
+#define LZ_FFN_ACT_GPTOSS_CLAMP 2   /* GPT-OSS/DeepSeek-V4.1 clamped SwiGLU */
+
 /* Weight format codes. Carried per tensor; mixed precision is simply
    different tensors having different codes. Adding a format needs: a
    code here, a dispatch branch in ops.c, and a name in export_q8.py's
@@ -265,6 +274,20 @@ typedef struct {
 
     int intermediate_size;
     float rms_norm_eps;
+    /* ffn_activation (KunMoeConfig): replaces every FFN's act(gate)*up -
+       dense CE (dense_ffn_step) and MoE (forward_moe's routed and shared
+       experts) alike - with a two-tensor gated activation. LZ_FFN_ACT_NONE
+       leaves lz_silu(gate)*up exactly as it is today, which is every
+       model this engine has ever loaded; the other two values are ISA-gap
+       work with no shipping checkpoint yet (mirrors the training side's
+       situ_glu/swiglu_clamp, neither of which any trained checkpoint uses
+       as of this field's addition). See lz_ffn_gate_up (forward.h). */
+    int ffn_activation;                 /* LZ_FFN_ACT_* */
+    float activation_situ_beta;         /* Kimi K3 SiTU-GLU beta1 (4.0) */
+    int   ffn_has_situ_linear_beta;     /* config field present (not None) */
+    float activation_situ_linear_beta;  /* Kimi K3 SiTU-GLU beta2 (25.0) */
+    float swiglu_clamp_limit;           /* GPT-OSS/V4.1 clamp threshold (10.0) */
+    float swiglu_clamp_alpha;           /* sigmoid-GELU approx constant (1.702) */
     int tie_word_embeddings;
     int attn_output_gate;           /* whether q_proj carries the gate (true in this model) */
     /* Carried and printed, NOT consulted. layer_types decides which

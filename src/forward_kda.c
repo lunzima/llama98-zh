@@ -1002,6 +1002,28 @@ void forward_kda(const LZModel *m, LZRunState *s,
    passes c->intermediate_size, the MTP call site passes
    c->mtp_intermediate_size - s->hb/s->hb2/s->xq/s->xqs are sized for
    the larger of the two by lz_state_alloc (see its own comment). */
+void lz_ffn_gate_up(float *gate, const float *up, int n,
+                    const LZModelConfig *c) {
+    int i;
+    switch (c->ffn_activation) {
+    case LZ_FFN_ACT_SITU:
+        for (i = 0; i < n; i++)
+            gate[i] = lz_situ_glu(gate[i], up[i], c->activation_situ_beta,
+                                  c->activation_situ_linear_beta,
+                                  c->ffn_has_situ_linear_beta);
+        break;
+    case LZ_FFN_ACT_GPTOSS_CLAMP:
+        for (i = 0; i < n; i++)
+            gate[i] = lz_swiglu_clamp(gate[i], up[i], c->swiglu_clamp_limit,
+                                      c->swiglu_clamp_alpha);
+        break;
+    default:
+        for (i = 0; i < n; i++)
+            gate[i] = lz_silu(gate[i]) * up[i];
+        break;
+    }
+}
+
 void dense_ffn_step(const LZModel *m, LZRunState *s,
                            const LZLayer *L, int layer, int nt, int idim) {
     const LZModelConfig *c = &m->config;
@@ -1011,7 +1033,7 @@ void dense_ffn_step(const LZModel *m, LZRunState *s,
     int nsg = scale_groups(dim, gsg);
     int gsd = lz_act_gs(&L->down_proj, idim);
     int nsd = scale_groups(idim, gsd);
-    int i, tk;
+    int tk;
     LZ_PROF_DECL(_ta);
     (void)layer;   /* only used inside LZ_TAP, which is a no-op in a normal build */
 
@@ -1097,10 +1119,14 @@ void dense_ffn_step(const LZModel *m, LZRunState *s,
            error with a second plane (LZ_GDN_STATE_2PLANE, LZ_KV_2PLANE),
            and lz_exp is itself a table-plus-polynomial hack rather than
            libm. The reason this one stays scalar is its SIZE, not its
-           shape. */
+           shape.
+
+           lz_ffn_gate_up dispatches on c->ffn_activation instead of the
+           lz_silu(..)*up line being inlined here directly - every model
+           this engine has ever loaded is LZ_FFN_ACT_NONE, which takes
+           the exact branch that used to be the whole loop body. */
         LZ_PROF_BEG(_ta);
-        for (i = 0; i < nt * idim; i++)
-            s->hb[i] = lz_silu(s->hb[i]) * s->hb2[i];
+        lz_ffn_gate_up(s->hb, s->hb2, nt * idim, c);
         LZ_PROF_END(_ta, LZ_PROF_ACT);
     }
     LZ_TAP("fh", layer, s->hb, idim);

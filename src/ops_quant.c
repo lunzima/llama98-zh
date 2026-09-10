@@ -1864,6 +1864,81 @@ float lz_silu(float x) {
     return x * lz_sigmoid(x);
 }
 
+float lz_tanh(float x) {
+    /* tanh(x) = 2*sigmoid(2x) - 1. Reuses lz_sigmoid's own overflow-safe
+       branching (one lz_exp either way) instead of a second exp() pair -
+       lz_softplus does the same trick against lz_exp rather than
+       re-deriving its own table. */
+    LZ_FCX(LZ_FC_FFN_ACT, 2, 1, 0, 0, 0);
+    return 2.0f * lz_sigmoid(2.0f * x) - 1.0f;
+}
+
+/* Kimi K3's SiTU-GLU (report section 2.3.2, Eq. 12; training-side
+   engine/kunmoe_modeling.py's situ_glu, checked there against
+   moonshotai/Kimi-K3's own SituAndMul class). gate/up already split, the
+   same accommodation situ_glu makes for SituAndMul's single concatenated
+   argument - this engine's dense_ffn_step and forward_moe already hold
+   gate/up as two separate buffers (lz_matmul_xq_nt into s->hb / s->hb2,
+   or s->moe_h1 / s->moe_h3), so there is no fused tensor to split here.
+
+   has_linear_beta mirrors KunMoeConfig's linear_beta=None: 0 leaves up
+   UNBOUNDED (the exact situ_glu(gate, up, beta, None) branch), not
+   linear_beta=0 - a caller that meant "bounded to +-0" would divide by
+   zero instead, which is why this is a separate flag and not a sentinel
+   value smuggled into linear_beta itself.
+
+   NO SIMD VARIANT, and rule eight's "structurally absent" case, not a
+   skipped one: this is two lz_tanh + one lz_sigmoid, i.e. up to three
+   lz_exp calls per element, and every one of MMX/SSE/SSE2's instruction
+   sets is integer-or-plain-float ALU ops with no transcendental support
+   - the same fact that already keeps lz_silu, lz_sigmoid and lz_softplus
+   scalar-only. Cost is size, not shape, exactly as dense_ffn_step's
+   SwiGLU loop comment already argues for lz_silu - and this site is
+   presently UNREACHED by every shipping checkpoint (LZ_FFN_ACT_NONE),
+   so there is nothing yet to profile a vector width against. */
+float lz_situ_glu(float gate, float up, float beta, float linear_beta,
+                  int has_linear_beta) {
+    float situ_a;
+    /* gate/beta (div), beta*tanh(..) and (..)*sigmoid(gate) (2 mul) -
+       lz_tanh/lz_sigmoid bill their own internals, same convention as
+       lz_silu billing only the outer x*sigmoid(x) multiply. */
+    LZ_FCX(LZ_FC_FFN_ACT, 2, 0, 1, 0, 0);
+    situ_a = beta * lz_tanh(gate / beta) * lz_sigmoid(gate);
+    if (has_linear_beta) {
+        LZ_FCX(LZ_FC_FFN_ACT, 1, 0, 1, 0, 0);  /* up/linear_beta, linear_beta*tanh(..) */
+        up = linear_beta * lz_tanh(up / linear_beta);
+    }
+    LZ_FCX(LZ_FC_FFN_ACT, 1, 0, 0, 0, 0);  /* situ_a * up */
+    return situ_a * up;
+}
+
+/* GPT-OSS's clamped SwiGLU (transformers models/gpt_oss/
+   modeling_gpt_oss.py, GptOssExperts._apply_gate), which DeepSeek-V4.1's
+   report cites as its own MoE activation (section 2.1, "OpenAI, 2025").
+   Matches training-side engine/kunmoe_modeling.py's swiglu_clamp,
+   checked there against the reference class. gate is clamped ONE-SIDED
+   (max only, no floor); up is clamped BOTH sides; up carries a `+1`
+   offset so up=0 reproduces glu unchanged rather than zeroing the
+   output - dropping any one of these three would not look wrong, it
+   would look like a scale/init problem (see the training-side
+   docstring's "THREE THINGS" list, reproduced there in full).
+
+   NO SIMD VARIANT: same rule-eight argument as lz_situ_glu above - one
+   lz_exp-backed lz_sigmoid per element and no shipping checkpoint
+   reaches this site yet. */
+float lz_swiglu_clamp(float gate, float up, float limit, float alpha) {
+    float glu;
+    /* 3 cmp (gate>limit, up>limit, up<-limit); gate*alpha and
+       gate*sigmoid(..) (2 mul) plus up+1 (1 add) and (up+1)*glu (1 mul) -
+       3 mul, 1 add total. lz_sigmoid bills its own internals. */
+    LZ_FCX(LZ_FC_FFN_ACT, 3, 1, 0, 0, 3);
+    if (gate > limit) gate = limit;
+    if (up > limit) up = limit;
+    if (up < -limit) up = -limit;
+    glu = gate * lz_sigmoid(gate * alpha);
+    return (up + 1.0f) * glu;
+}
+
 /* ---- x87 precision control (meaningful only on Watcom/Win98) ----
 
    x87 by default leaves intermediates in 80-bit registers, so the same

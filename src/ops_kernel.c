@@ -77,7 +77,7 @@ int lz_f32_reached[LZ_FC_N];
 static const char *const LZ_FC_NAMES[LZ_FC_N] = {
     "dequant epilogue", "attention scoring", "attention wsum",
     "softmax", "exp", "sigmoid", "softplus", "conv1d", "norms", "rsqrt",
-    "recurrence write", "quantize"
+    "recurrence write", "quantize", "ffn activation"
 };
 
 static const char *const LZ_FCC_NAMES[LZ_FCC_N] = {

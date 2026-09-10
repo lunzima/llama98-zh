@@ -1247,6 +1247,18 @@ void forward_kda(const LZModel *m, LZRunState *s,
 void dense_ffn_step(const LZModel *m, LZRunState *s,
                     const LZLayer *L, int layer, int nt, int idim);
 
+/* gate[0..n) = ffn_gate_up(gate[i], up[i]) in place, dispatching on
+   c->ffn_activation - the ONE place dense_ffn_step and forward_moe's
+   routed/shared expert paths compute the FFN's gated intermediate, so
+   ffn_activation reaches all three by construction (mirrors the
+   training side's ffn_gate_up, engine/kunmoe_modeling.py). up is read,
+   not written. LZ_FFN_ACT_NONE (every shipping model) takes the
+   lz_silu(gate)*up branch that was already inline at all three call
+   sites before this existed. Defined in forward_kda.c, next to
+   dense_ffn_step's own SwiGLU loop. */
+void lz_ffn_gate_up(float *gate, const float *up, int n,
+                    const LZModelConfig *c);
+
 /* Engram: conditional n-gram memory. Global module, called once per
    chunk after embed_tokens, before the layer loop. Modifies s->x
    in-place (residual add). Not per-layer: LZEngram lives on LZModel.

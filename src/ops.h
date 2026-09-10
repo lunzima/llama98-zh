@@ -165,6 +165,11 @@ enum {
        attention score and recurrence write-back); everywhere else a
        quantize that moved or disappeared was invisible to the census. */
     LZ_FC_QUANT,
+    /* lz_situ_glu / lz_swiglu_clamp: no shipping checkpoint reaches this
+       site (LZ_FFN_ACT_NONE is every model this engine has ever loaded),
+       so unlike every row above it this one reads zero for a real
+       reason, not a missing billing site. */
+    LZ_FC_FFN_ACT,
     LZ_FC_N
 };
 
@@ -308,6 +313,18 @@ float lz_sigmoid(float x);
    so callers ask lz_sig_mode() before choosing the int exit at all. */
 float lz_sigmoid_i(int32_t v, int e);
 float lz_silu(float x);
+float lz_tanh(float x);
+
+/* lz_situ_glu / lz_swiglu_clamp: the FFN's act(gate)*up replaced with a
+   two-tensor gated activation. LZ_FFN_ACT_NONE (every shipping model)
+   never calls either - see lz_ffn_gate_up (forward.h), the one place
+   dense_ffn_step and forward_moe dispatch on model.h's ffn_activation.
+   NO SIMD VARIANT: see the rule-eight note at each definition
+   (ops_quant.c) - transcendental-bound scalar ops, same category as
+   lz_silu/lz_sigmoid/lz_softplus above. */
+float lz_situ_glu(float gate, float up, float beta, float linear_beta,
+                  int has_linear_beta);
+float lz_swiglu_clamp(float gate, float up, float limit, float alpha);
 
 /* log(1+e^x). A table+poly float body (lz_softplus_poly, ops_quant.c),
    under the same lz_scalar_mode() tier as lz_exp - it was the one

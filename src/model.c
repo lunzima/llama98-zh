@@ -136,6 +136,49 @@ static int resolve_hadamard(LZModelConfig *c, char *errbuf, int errlen) {
     return 0;
 }
 
+/* ffn_activation and its per-mechanism params. Shared between
+   lz_load_config (config.json is the primary source) and lz_open_bin's
+   config.json sidecar read (Engram-style: the bin header has no field
+   for this, so a .bin-loaded model reads it straight from the sidecar
+   the same way it reads engram_*) so the two loading paths cannot
+   drift out of parsing the same key two different ways. */
+static int parse_ffn_activation(LZJson *j, const LZJsonNode *tc,
+                                LZModelConfig *c, char *errbuf, int errlen) {
+    const char *fa = lz_json_get_str(j, tc, "ffn_activation", "");
+    if (fa[0] == '\0' || strcmp(fa, "none") == 0) {
+        c->ffn_activation = LZ_FFN_ACT_NONE;
+    } else if (strcmp(fa, "situ") == 0) {
+        c->ffn_activation = LZ_FFN_ACT_SITU;
+    } else if (strcmp(fa, "gptoss_clamp") == 0) {
+        c->ffn_activation = LZ_FFN_ACT_GPTOSS_CLAMP;
+    } else {
+        /* Mirrors KunMoeConfig.__init__'s own ValueError - found there
+           first (a typo'd value fell through silently and ran
+           hidden_act's activation with no error, see that constructor's
+           comment) and refused here for the same reason: a checkpoint
+           carrying a name the engine does not recognize must not
+           silently fall back to lz_silu*up. */
+        qerr(errbuf, errlen, LZ_ERR_CFG_FFN_ACT, fa);
+        return 1;
+    }
+    c->activation_situ_beta =
+        (float)lz_json_get_num(j, tc, "activation_situ_beta", 4.0);
+    {
+        /* linear_beta's None (unbounded up) is a real, exercised branch
+           on the training side (situ_glu's own default) - read the node
+           directly, same reasoning as kda_gate_lower_bound. */
+        const LZJsonNode *n = lz_json_get(j, tc, "activation_situ_linear_beta");
+        c->ffn_has_situ_linear_beta = (n && n->type == LZ_JSON_NUM);
+        c->activation_situ_linear_beta =
+            c->ffn_has_situ_linear_beta ? (float)n->num : 0.0f;
+    }
+    c->swiglu_clamp_limit =
+        (float)lz_json_get_num(j, tc, "swiglu_clamp_limit", 10.0);
+    c->swiglu_clamp_alpha =
+        (float)lz_json_get_num(j, tc, "swiglu_clamp_alpha", 1.702);
+    return 0;
+}
+
 int lz_load_config(LZModelConfig *c, const char *path,
                        char *errbuf, int errlen) {
     char *buf;
@@ -258,6 +301,15 @@ int lz_load_config(LZModelConfig *c, const char *path,
     c->rms_norm_eps      = (float)lz_json_get_num(&j, tc, "rms_norm_eps", 1e-6);
     c->full_attention_interval =
         lz_json_get_int(&j, tc, "full_attention_interval", 0);
+
+    /* "" (key absent) and "none" both mean LZ_FFN_ACT_NONE inside
+       parse_ffn_activation - stock upstream and every model this
+       project has produced omit the key entirely, so "absent" cannot be
+       the refusal case an unrecognized name gets. */
+    if (parse_ffn_activation(&j, tc, c, errbuf, errlen) != 0) {
+        lz_json_free(&j);
+        return 1;
+    }
 
     {
         const LZJsonNode *n = lz_json_get(&j, tc, "tie_word_embeddings");
@@ -2173,6 +2225,19 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
                                 }
                             }
                         }
+                    }
+                    /* ffn_activation: same sidecar-only field as engram
+                       above, not a header field. Unlike engram's fields
+                       this one has a real "invalid value" case
+                       (parse_ffn_activation refuses an unrecognized
+                       name), so a failure here must reach the caller
+                       instead of the engram block's "absent means off" -
+                       free what this scope allocated before goto fail,
+                       since the normal exit below is skipped. */
+                    if (parse_ffn_activation(&jcfg, tc, c, errbuf, errlen) != 0) {
+                        lz_json_free(&jcfg);
+                        free(cfg_buf);
+                        goto fail;
                     }
                     lz_json_free(&jcfg);
                 }

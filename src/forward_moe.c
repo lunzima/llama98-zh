@@ -187,8 +187,7 @@ static void moe_expert_loop(LZRunState *s, const LZModelConfig *c,
                         &L->moe_expert_w1[ei], latent, inter);
             lz_matmul_xq(s->moe_h3, lat_x, s->moe_lat_q, s->moe_lat_qs,
                         &L->moe_expert_w3[ei], latent, inter);
-            for (vv = 0; vv < inter; vv++)
-                s->moe_h1[vv] = lz_silu(s->moe_h1[vv]) * s->moe_h3[vv];
+            lz_ffn_gate_up(s->moe_h1, s->moe_h3, inter, c);
             lz_matmul_w(s->moe_h2, s->moe_h1, &L->moe_expert_w2[ei],
                        inter, latent, s->xq, s->xqs);
             }   /* the float SwiGLU */
@@ -314,14 +313,22 @@ void forward_moe(const LZModel *m, LZRunState *s,
     nsh = scale_groups(hdim, gsh);
 
 #if LZ_SWIGLU_I16
-    rsw_may = s->moe_h1_i16 && s->moe_h3_i16 && !c->use_subn &&
+    /* lz_swiglu_q15_i16 knows only lz_silu(gate)*up - the same reason
+       KunMoeExperts.pick_backend refuses unsloth's triton/grouped_mm
+       backends under a non-default ffn_activation (training side,
+       kunmoe_modeling.py). ffn_activation != NONE routes both experts
+       through the float branch below unconditionally, same as if the
+       int16 producers were never available. */
+    rsw_may = c->ffn_activation == LZ_FFN_ACT_NONE &&
+              s->moe_h1_i16 && s->moe_h3_i16 && !c->use_subn &&
               L->moe_expert_w1 && L->moe_expert_w3 && L->moe_expert_w2;
     for (i = 0; rsw_may && i < ne; i++)
         if (!lz_matmul_xq_i16_ok(&L->moe_expert_w1[i], latent, 1) ||
             !lz_matmul_xq_i16_ok(&L->moe_expert_w3[i], latent, 1) ||
             lz_matmul_xq_reads_float_row(&L->moe_expert_w2[i]))
             rsw_may = 0;
-    ssw_may = s->moe_h1_i16 && s->moe_h3_i16 && !c->use_subn && shared_w > 0 &&
+    ssw_may = c->ffn_activation == LZ_FFN_ACT_NONE &&
+              s->moe_h1_i16 && s->moe_h3_i16 && !c->use_subn && shared_w > 0 &&
               lz_matmul_xq_i16_ok(&L->moe_shared_gate, hdim, nt) &&
               lz_matmul_xq_i16_ok(&L->moe_shared_up, hdim, nt) &&
               !lz_matmul_xq_reads_float_row(&L->moe_shared_down);
@@ -504,8 +511,7 @@ void forward_moe(const LZModel *m, LZRunState *s,
                               nt * shared_w, LZ_SWIGLU_ES_P, LZ_SWIGLU_ES_G,
                               LZ_SWIGLU_ES_O);
         } else {
-        for (i = 0; i < nt * shared_w; i++)
-            s->moe_h1[i] = lz_silu(s->moe_h1[i]) * s->moe_h3[i];
+        lz_ffn_gate_up(s->moe_h1, s->moe_h3, nt * shared_w, c);
         if (c->use_subn) {
             for (tk = 0; tk < nt; tk++)
                 lz_rmsnorm(s->moe_h1 + (size_t)tk * shared_w,
