@@ -36,11 +36,16 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 # A DEFAULT MODEL, for the same reason the other model-taking gates now
 # have one: `make check` passes no MODEL, so until this line the only
 # run that ever compressed anything was one somebody typed by hand.
-# _armgate2 has a model.bin and round trips 45,816,469 bytes. Still
-# SKIPs where MODELS_ROOT is not there.
+# _armgate3 has a model.bin and round trips 58,629,648 bytes. It replaced
+# _armgate2 (45,816,469) on 2026-09-10 because that model and the whole
+# training chain behind it are gone; see docs/dsv41-optimization-menu.md
+# section 6. This gate is indifferent to which model it is - it needs a
+# model.bin, a round trip and an engine that can load it - which is why it
+# only had to have the size updated. Still SKIPs where MODELS_ROOT is not
+# there.
 MODELS_ROOT=${MODELS_ROOT:-/e/LLM/models}
 MODEL=${1:-}
-[ -n "$MODEL" ] || MODEL="$MODELS_ROOT/_armgate2"
+[ -n "$MODEL" ] || MODEL="$MODELS_ROOT/_armgate3"
 TOKENS=${2:-1,2,3,4,5,6,7,8}
 
 BIN=${BIN:-}

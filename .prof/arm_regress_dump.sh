@@ -34,7 +34,14 @@ Q=${Q:-qemu-arm-static}
 SYSROOT=${SYSROOT:-/usr/arm-linux-gnueabi}
 CC=${CC:-arm-linux-gnueabi-gcc-14}
 TOK=${TOK:-1,2,3,4,5,6,7,8,9,10}
-MODELS=${MODELS:-"/mnt/e/LLM/models/kunkun98-pilot-20260806 /mnt/e/LLM/models/kunmoe-v2 /mnt/e/LLM/models/_armgate2"}
+# This list was three models and TWO OF THEM ARE GONE: _armgate2 (see
+# docs/dsv41-optimization-menu.md section 6) and kunkun98-pilot-20260806,
+# the checkpoint _armgate2 was exported from - the whole training chain
+# that produced it is gone too. Both are replaced by _armgate3 where a
+# replacement exists; kunkun98-pilot-20260806 has none, because nothing
+# on disk is a 12-layer GDN at that geometry. So the list is shorter than
+# it was and the gap is not filled by anything.
+MODELS=${MODELS:-"/mnt/e/LLM/models/_armgate3 /mnt/e/LLM/models/kunmoe-v2"}
 W=${W:-/tmp/armreg}
 
 rm -rf "$W"; mkdir -p "$W"

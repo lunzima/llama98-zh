@@ -42,10 +42,14 @@
 # say otherwise: lz_softplus runs only under forward_ssm, and kmr20 is
 # KDA with a gate lower bound, so on it the =0 arm proves linkage and
 # nothing else. Point the gate at a GDN checkpoint to exercise it -
-# LZ_NORM_INT_GATE_MODEL=/e/LLM/models/_armgate2 - which is how the arm
-# was checked when it landed. Recorded here rather than defaulted,
-# because every other arm's numbers are on kmr20 and moving the default
-# would silently re-baseline all twelve.
+# LZ_NORM_INT_GATE_MODEL=/e/LLM/models/_armgate3 - which is how the arm
+# was checked, though on the PREVIOUS GDN fixture (_armgate2, gone; see
+# docs/dsv41-optimization-menu.md section 6). _armgate3 covers the same
+# path - it is GDN with a dense FFN - so the instruction still points
+# somewhere real; whether the numbers reproduce on it has not been run.
+# Recorded here rather than defaulted, because every other arm's numbers
+# are on kmr20 and moving the default would silently re-baseline all
+# twelve.
 #
 # gcc only. Watcom cross-compiler identity is fixed_tier_xcompiler_gate's
 # subject and it exercises the shipping default, not these arms; adding

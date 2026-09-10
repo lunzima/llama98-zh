@@ -343,7 +343,23 @@ echo "==== [4/31]ARM parity gate ===="
 # not. _armgate2 is on disk and is named for this gate; verified PASS on
 # all four rows (x86 vs ARM identical over 20,840,448 bytes, and arm-c /
 # arm-asm / arm-asm-fixed each identical to ref).
-ARM_MODEL="$MODELS_ROOT/_armgate2"
+#
+# THOSE FOUR ROWS WERE VERIFIED ON THE PREVIOUS FIXTURE, _armgate2, and
+# that model is gone - it is not restorable, see
+# docs/dsv41-optimization-menu.md section 6. _armgate3 replaces it: a
+# DIFFERENT model (8 layers, 8 heads / 2 KV, dense FFN 3584, from
+# kunmoe-v2-dense) chosen because it preserves what _armgate2 uniquely
+# covered - forward_ssm (GDN) and the dense FFN - which kmr20 does not,
+# being KDA and MoE. It exports with all four formats and its 160-token
+# logits dump is the same 20,840,448 bytes, because the vocabulary is the
+# same 32768.
+#
+# THE ROWS HAVE NOT BEEN RE-RUN ON IT. The byte counts above still
+# describe the dump size and nothing else; whether arm-c, arm-asm and
+# arm-asm-fixed are still identical to ref ON THIS MODEL is unknown until
+# someone runs it with the ARM toolchain. Say so when reporting it, or
+# run it first.
+ARM_MODEL="$MODELS_ROOT/_armgate3"
 LOG=build/ci-arm.log
 if [ "$native_ok" -ne 1 ]; then
     echo "SKIP: ARM parity gate (native build failed in stage 1, nothing to compare ARM against)"

@@ -30,7 +30,13 @@ REF=${2:?directory holding <model>.<kernel>.cur.bin}
 Q=${Q:-qemu-arm-static}
 SYSROOT=${SYSROOT:-/usr/arm-linux-gnueabi}
 CC=${CC:-arm-linux-gnueabi-gcc-14}
-MODEL=${MODEL:-/mnt/e/LLM/models/_armgate2}
+# _armgate3 replaced _armgate2 on 2026-09-10 (that model and its whole
+# training chain are gone - docs/dsv41-optimization-menu.md section 6).
+# The tier claims this script checks are per-KERNEL, so what has to hold
+# is that the fixture still carries the kernels being broken: _armgate3
+# is GDN with a dense FFN, the same family, which kmr20 (KDA + MoE) is
+# not. Its token ids are a plain 1..10 ramp, same as before.
+MODEL=${MODEL:-/mnt/e/LLM/models/_armgate3}
 TOK=${TOK:-1,2,3,4,5,6,7,8,9,10}
 W=${W:-/tmp/armproof}
 NAME=$(basename "$MODEL")
