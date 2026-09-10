@@ -425,6 +425,54 @@ static void paint(HWND h, int active)
     }
     if (buf[0]) TextOutA(dc, x, y, buf, (int)strlen(buf));
 
+    /* The client surface, painted once per caption pass. gui/main.c
+       leaves it to the system's WM_ERASEBKGND, which is enough on XP
+       and not on Vista and later: the caption above is drawn across a
+       WS_VISIBLE toggle (lz_caption_plan), DWM rebuilds a window's
+       surface when it is hidden and shown again, and what the client
+       area shows then is the raw surface - white - with no erase queued
+       behind it.
+       COLOR_BTNFACE, never a literal: the class brush, the toolbar
+       above and the strip below all take their face from that one
+       system value.
+       Visible children are clipped out because a child paints into
+       THIS window's surface and this runs after the controls have
+       painted - a fill over one leaves it blank until something
+       invalidates it. The dock groove two pixels under the toolbar is
+       not a child, so the fill does cover it; the RedrawWindow puts the
+       window's own paint and the children back on top of the fill in
+       the normal order. ALLCHILDREN because a rebuilt surface takes the
+       children's pixels with it, and no RDW_FRAME so the caption cannot
+       be re-entered. */
+    {
+        HDC cdc = GetDC(h);
+        if (cdc) {
+            RECT cr;
+            HWND c;
+            int sv = SaveDC(cdc);
+            HBRUSH bg = CreateSolidBrush(GetSysColor(COLOR_BTNFACE));
+
+            GetClientRect(h, &cr);
+            for (c = GetWindow(h, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT)) {
+                RECT r;
+                if (!IsWindowVisible(c)) continue;
+                GetWindowRect(c, &r);
+                MapWindowPoints(NULL, h, (POINT *)&r, 2);
+                ExcludeClipRect(cdc, (int)r.left, (int)r.top,
+                                (int)r.right, (int)r.bottom);
+            }
+            if (bg) {
+                FillRect(cdc, &cr, bg);
+                DeleteObject(bg);
+            }
+            RestoreDC(cdc, sv);
+            ReleaseDC(h, cdc);
+        }
+    }
+
+    RedrawWindow(h, NULL, NULL,
+                 RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW | RDW_ALLCHILDREN);
+
     SelectObject(dc, oldf);
     ReleaseDC(h, dc);
 }
