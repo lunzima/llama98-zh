@@ -10,7 +10,7 @@
 # model packer, sat there untracked and was read as "something the
 # release has not committed yet"; it reached the public remote twice
 # before anyone asked why a model-producing tool was in an inference
-# engine. The list below is what CLAUDE.md's Iron law zero enumerates,
+# engine. The list below is the public-release tree CLAUDE.md keeps,
 # plus the local-private entries and the build products.
 #
 # WHAT PUTS THINGS HERE is not carelessness with `mv`. It is cwd: an
@@ -30,8 +30,8 @@ set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT" || { echo "root_hygiene_gate: FAIL - cannot cd to $ROOT"; exit 1; }
 
-# The public release tree, per CLAUDE.md Iron law zero. A name is added
-# here only when it is decided that the entry SHIPS - not when it
+# The public release tree, per CLAUDE.md's own enumeration. A name is
+# added here only when it is decided that the entry SHIPS - not when it
 # appears.
 SHIPPED="
 .gitignore
@@ -90,8 +90,8 @@ if [ -n "$STRAY" ]; then
     echo "Each is one of three things. A DROPPING (an .obj, .err, a cache"
     echo "directory) - delete it. A file that belongs somewhere else - move"
     echo "it to the directory whose code reads it. A new top-level entry"
-    echo "that genuinely ships - add it to SHIPPED here AND to Iron law"
-    echo "zero in CLAUDE.md, in that order, deliberately."
+    echo "that genuinely ships - add it to SHIPPED here AND to the same"
+    echo "list in CLAUDE.md, in that order, deliberately."
     exit 1
 fi
 
