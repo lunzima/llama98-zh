@@ -72,7 +72,7 @@ count() { sed -n 's/.*\[ced: [a-z]*, \([0-9]*\) prefill positions skipped\].*/\1
 # arm TAG CEDFLAG [BINARY] - run one prefill and write $W/TAG.pf
 arm() {
     local tag="$1" mode="$2" bin=${3:-$BIN}
-    "$bin" "$MODEL" --prompt "$PROMPT" -n 1 --seed 1 \
+    "$bin" "$MODEL" --prompt "$PROMPT" -n 1 --seed 1145141919 \
         --dump-prefill "$W/$tag.pf" --ced "$mode" >"$W/$tag.log" 2>&1 || {
         echo "  FAIL: '$tag' exited non-zero"; tail -3 "$W/$tag.log"; return 1; }
     [ -s "$W/$tag.pf" ] || { echo "  FAIL: '$tag' wrote no prefill logits"; return 1; }
