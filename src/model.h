@@ -86,7 +86,7 @@
  * branch). This covers all 1D norms and 3D conv1d tensors.
  * The loss is sub-0.1% relative on norm weights near 1.0 and conv
  * weights near 0.02; unmeasured on PPL but structurally negligible.
- * lz_t_f32/lz_t_row_f32 widen bf16→f32 at the point of use.
+ * lz_t_f32/lz_t_row_f32 widen bf16->f32 at the point of use.
  *
  * Q8_0 is 1.8x smaller than bf16 AND has hand-written integer kernels,
  * where bf16 widens back to f32 to compute. For tensors that CAN be

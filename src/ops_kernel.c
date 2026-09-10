@@ -825,7 +825,7 @@ static const char km_why_no_avx2_tu[] =
     "kernels and a normal gcc build has them; this one was compiled "
     "without them deliberately (the ISA-floor gate builds that way)";
 #define KM_AVX2 KM_N(km_why_no_avx2_tu)
-#endif
+#endif /* __WATCOMC__ || __arm__ || LZ_HAVE_AVX2_TU */
 #define KM_ALL (LZ_KMB_GCC | LZ_KMB_WAT | LZ_KMB_ARM)
 
 /* ref is the one DECLARED-present column with no per-format variation:

@@ -583,7 +583,7 @@ static int conv_fixed_build(LZRunState *s, const LZModel *m) {
         }
         for (t = 0; t < ntv; t++) {
             int i;
-            int row_dim = c->conv_kernel;  /* [C,1,K] → row = K elements */
+            int row_dim = c->conv_kernel;  /* [C,1,K] -> row = K elements */
             for (i = 0; i < cnt[t]; i++) {
                 /* Read one row (one channel's K taps) at a time instead of
                    the whole tensor through lz_t_f32. This lets BF16 conv

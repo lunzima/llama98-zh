@@ -191,7 +191,7 @@ static void part128_q8_avx2(const int8_t *w, const int16_t *x,
    there. */
 #ifndef LZ_AVX2_G4
 #define LZ_AVX2_G4 1
-#endif
+#endif /* LZ_AVX2_G4 */
 
 /* ---- Q8 row kernel -------------------------------------------------------
    SSE2 twin: row_q8_sse2_intrin, src/ops_sse2.c. No Watcom twin -
