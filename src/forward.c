@@ -1292,8 +1292,9 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
                merely small), so it degrades to "off" rather than
                computing garbage. Both divisions below are by runtime
                values (lz_rope_orig_max, rotary_dim - 2), never by a
-               float literal, so both compilers emit a real FDIV/divss
-               here - iron law six clause 1. */
+               float literal: a literal divisor is one a compiler may
+               replace with a reciprocal multiply, and the x87 and SSE
+               builds have to emit the same sequence here. */
             float theta_eff = c->rope_theta;
             if (lz_rope_dynamic_ntk && c->rotary_dim > 2 &&
                 (float)seq_len > lz_rope_orig_max) {
@@ -2059,12 +2060,41 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
            an already-normalized vector a second time. */
         int gse = lz_act_gs(&m->embed_tokens, dim);
         int nse = scale_groups(dim, gse);
+        /* SAME TIER AS THE SINGLE-POSITION HEAD BELOW, and that is a
+           correctness requirement, not symmetry for its own sake.
+           lz_rmsnorm_int is a TIER: its own header says it is not
+           bit-identical to the lz_rmsnorm + lz_quantize_q8 pair. A verify
+           row that took the float pair while ordinary decode took the
+           int one produced DIFFERENT logits for the same position, so
+           --spec K stopped matching --spec 0 as soon as one of those
+           differences crossed an argmax boundary - with penalties at
+           their identity values, on a bare temperature-0 greedy run.
+           The two guards are the block below's, for its reasons: gse > 0
+           because the matmul reads xq/xqs only when the weight is
+           quantized (at gse == 0 it reads s->x, which the int path never
+           normalizes), and LZ_TAP_OFF because a tap build must keep the
+           float path. */
+        int use_int = 0;
+#if defined(LZ_TAP_OFF)
+        use_int = lz_norm_int() && lz_norm_can_fixed(dim) &&
+                  gse > 0 && (dim % gse) == 0;
+#endif /* LZ_TAP_OFF */
         for (tk = 0; tk < nt; tk++) {
             float *xt = s->x + (size_t)tk * dim;
-            lz_rmsnorm(xt, xt, lz_t_f32(&m->final_norm, s->wscr), dim,
-                      c->rms_norm_eps);
-            lz_quantize_q8(xt, dim, gse, s->xq + (size_t)tk * dim,
-                          s->xqs + (size_t)tk * nse);
+            if (use_int) {
+                float deq;
+                lz_rmsnorm_int(s->subn_norm_int, xt,
+                               lz_t_f32(&m->final_norm, s->wscr), dim,
+                               c->rms_norm_eps, &deq);
+                lz_quantize_q8_int(s->subn_norm_int, dim, gse, deq,
+                                   s->xq + (size_t)tk * dim,
+                                   s->xqs + (size_t)tk * nse);
+            } else {
+                lz_rmsnorm(xt, xt, lz_t_f32(&m->final_norm, s->wscr), dim,
+                          c->rms_norm_eps);
+                lz_quantize_q8(xt, dim, gse, s->xq + (size_t)tk * dim,
+                              s->xqs + (size_t)tk * nse);
+            }
         }
         lz_matmul_xq_nt(logits_out, s->x, s->xq, s->xqs, &m->embed_tokens,
                        dim, c->vocab_size, nt);

@@ -23,6 +23,20 @@
 #include "ops_sse.h"     /* lz_i32f_acc32_sse - LZ_I32F_ACC32's SSE1 arm.
                             Between the two, like the ISA ladder itself. */
 #include "ops_sse2.h"
+#include "ops_avx2.h"    /* LZ_HAVE_P2_MUL32_AVX2, LZ_HAVE_P2_SPLIT32_AVX2,
+                            lz_p2_mul32_avx2, lz_p2_split32_avx2,
+                            LZ_ATTN_AVX2_EXTERN, LZ_HAVE_I32FACC_AVX2 -
+                            gcc-only, guarded on LZ_AVX2_TU && !__WATCOMC__
+                            inside the header itself. Without this include
+                            the tier-4 arm of p2_tier and both gcc call
+                            sites below compile out, and --kernel avx2
+                            answers tier 1 (MMX) instead - the tiers owe
+                            each other bit identity, so no value changes.
+                            BEFORE ops_kernel_shared.h, not after it:
+                            LZ_I32F_ACC32 is defined at the point that
+                            header is processed, and the AVX2 rung has to
+                            exist by then or the macro is the three-tier
+                            one for the whole TU. */
 #include "ops_quant.h"
 #include "ops_sched.h"
 #include "ops_kernel_shared.h"
@@ -30,14 +44,6 @@
 #include "ops_arm.h"     /* LZ_ARM_ASM_EXTERN, lz_dot32_q8_arm_asm,
                             lz_wsum_pair_arm_asm */
 #include "ops_gdn.h"
-#include "ops_avx2.h"    /* LZ_HAVE_P2_MUL32_AVX2, LZ_HAVE_P2_SPLIT32_AVX2,
-                            lz_p2_mul32_avx2, lz_p2_split32_avx2 - gcc-only,
-                            guarded on LZ_AVX2_TU && !__WATCOMC__ inside the
-                            header itself. Without this include the tier-4
-                            arm of p2_tier and both gcc call sites below
-                            compile out, and --kernel avx2 answers tier 1
-                            (MMX) instead - the tiers owe each other bit
-                            identity, so no value changes. */
 
 
 /* ---- fixed-point attention -------------------------------------------
@@ -98,7 +104,7 @@
 #elif defined(LZ_WSUM_MMX_EXTERN)
 /* lz_wsum_pair_mmx's body lives in src/ops_mmx.c now - it writes %mm
    registers. Declared in src/ops_mmx.h, already visible here. */
-#if defined(LZ_ATTN_SSE2_EXTERN)
+#if defined(LZ_ATTN_SSE2_EXTERN) || defined(LZ_ATTN_AVX2_EXTERN)
 /* The x86 tier split, and the shape is the ARM one twelve lines down,
    for the same reason: this runs once per ROW PAIR, so an indirect call
    would be paid T/2 times per group while this test folds into a branch
@@ -115,10 +121,21 @@
    arm kernel_isa_identity_gate compares against. */
 static void lz_wsum_pair_x86(const int8_t *rowA, const int8_t *rowB,
                              const int16_t *coef, int32_t *acc32) {
+#if defined(LZ_ATTN_AVX2_EXTERN)
+    /* Tested FIRST and on g_kernel alone, like the SSE2 test below: the
+       tiers are mutually exclusive, and a CPUID test here would be a
+       second answer to a question lz_kernel_select has already settled. */
+    if (g_kernel == LZ_KERNEL_AVX2) {
+        lz_wsum_pair_avx2(rowA, rowB, coef, acc32);
+        return;
+    }
+#endif /* LZ_ATTN_AVX2_EXTERN */
+#if defined(LZ_ATTN_SSE2_EXTERN)
     if (g_kernel == LZ_KERNEL_SSE2) {
         lz_wsum_pair_sse2(rowA, rowB, coef, acc32);
         return;
     }
+#endif /* LZ_ATTN_SSE2_EXTERN */
     lz_wsum_pair_mmx(rowA, rowB, coef, acc32);
 }
 #define LZ_WSUM_PAIR(ra, rb, co, ac) lz_wsum_pair_x86(ra, rb, co, ac)
@@ -194,9 +211,18 @@ static int32_t dot32_x16_attn_arm(const int8_t *w, const int16_t *x) {
    arm is a REUSE of the matmul's own SSE2 Q8 leaf, exactly as the ARM
    arm above reuses q8_0's - and it owes identity for the same reason,
    the x256 fold distributing over the sum in int32. */
-#if defined(LZ_ATTN_SSE2_EXTERN)
+#if defined(LZ_ATTN_SSE2_EXTERN) || defined(LZ_ATTN_AVX2_EXTERN)
 static int32_t dot32_x16_attn_x86(const int8_t *w, const int16_t *x) {
+#if defined(LZ_ATTN_AVX2_EXTERN)
+    /* Tested first, on g_kernel alone, like the SSE2 arm below. atdot's
+       AVX2 cell is the matmul's own Q8 leaf reused - the same
+       relationship the SSE2 and ARM arms have to it - so this adds a
+       call, not a second body. */
+    if (g_kernel == LZ_KERNEL_AVX2) return lz_dot32_x16_avx2(w, x);
+#endif /* LZ_ATTN_AVX2_EXTERN */
+#if defined(LZ_ATTN_SSE2_EXTERN)
     if (g_kernel == LZ_KERNEL_SSE2) return lz_dot32_x16_sse2(w, x);
+#endif /* LZ_ATTN_SSE2_EXTERN */
     return dot32_x16_mmx(w, x);
 }
 #define LZ_ATTN_DOT32(w, x) dot32_x16_attn_x86(w, x)
@@ -205,21 +231,25 @@ static int32_t dot32_x16_attn_x86(const int8_t *w, const int16_t *x) {
 #endif /* LZ_ATTN_SSE2_EXTERN */
 #endif /* !__WATCOMC__ && !LZ_DOT_MMX_EXTERN */
 
-/* Empty everywhere but the ARM cross-build: Watcom never sees __arm__
-   and has no __attribute__, same shape as matmul's LZ_XW_ALIGN. */
-#if defined(LZ_ARM_ASM_EXTERN)
-#define LZ_ATTN_QW_ALIGN __attribute__((aligned(4)))
+/* THIRTY-TWO on gcc, empty on Watcom, as matmul's LZ_XW_ALIGN. Two
+   tiers read this array more strictly than any declaration said: the gcc
+   SSE2 dot loads it with _mm_load_si128, which faults below 16, and the
+   AVX2 dot 32 bytes at a time. int16_t promises two bytes, so a 128-byte
+   static array is only incidentally aligned. The ARM cross-build is gcc,
+   so this covers both; Watcom has no __attribute__. */
+#if defined(__GNUC__)
+#define LZ_ATTN_QW_ALIGN __attribute__((aligned(32)))
 #else
 #define LZ_ATTN_QW_ALIGN
-#endif /* LZ_ARM_ASM_EXTERN */
+#endif /* __GNUC__ */
 
 void lz_attn_score_q8(float *att, const float *qhh, int hd,
                       const int8_t *kc, const float *ks, int kvd,
                       int pos, float scale, int sink, int ring) {
-    /* static, not stack (Win98 has a small stack). qw carries the same aligned(4)
-       as matmul's g_xw and for the same reason: the hand-written leaf
-       reads it with LDM, and int16_t promises two bytes, so whatever
-       alignment gcc happens to give the array is not the contract. */
+    /* static, not stack (Win98 has a small stack). qw's alignment is
+       declared above rather than inherited: int16_t promises two bytes,
+       the hand-written ARM leaf reads it with LDM, and both SIMD tiers
+       read it wider still. */
     static int8_t  qq[LZ_ATTN_MAX_HD];
     static float   qs[LZ_ATTN_MAX_HD / 32];
     static int16_t qw[LZ_ATTN_MAX_HD] LZ_ATTN_QW_ALIGN;
@@ -370,7 +400,9 @@ void lz_attn_wsum_q8(float *out, const float *att, int hd,
            (long)ng * 32L * ((T + LZ_WSUM_CHUNK - 1) / LZ_WSUM_CHUNK),
            0);
     for (g = 0; g < ng; g++) {
-        int32_t acc32[32];
+        int32_t acc32[32] LZ_ALIGN32;   /* 32-byte: the AVX2 wsum
+                                        pair kernel reads and writes it 8
+                                        lanes at a time */
         float accf[32];
         float cmax = 0.0f, inv;
         int t, d, t0;
@@ -572,7 +604,9 @@ void lz_attn_wsum_q8_int(int64_t *acc, float *sscale, const float *att,
         lz_wsum_group_mmx_int(vc, kvd, g, sink, ring, cq, T, acc64);
 #else
         {
-        int32_t acc32[32];
+        int32_t acc32[32] LZ_ALIGN32;   /* 32-byte: the AVX2 wsum
+                                        pair kernel reads and writes it 8
+                                        lanes at a time */
         for (d = 0; d < 32; d++) acc64[d] = 0;
         slot = 0;                       /* second walk, same t order */
         for (t0 = 0; t0 < T; t0 += LZ_WSUM_CHUNK) {
@@ -1156,7 +1190,11 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
        Exists because "the dispatch condition looks right" is not an
        answer to "which one ran" - the same distinction that let a whole
        tier of hand-written assembly stay out of the Watcom build for
-       months. */
+       months.
+       THREE buckets, so the clamp below folds tier 3 (AVX2) into the
+       third one, the SSE2 bucket: a probe reading these counts cannot
+       separate AVX2 from SSE2. lz_debug_q8r_avx2_gdn is the counter that
+       can, and it is not gated on this macro. */
     extern long lz_q8r_hits[3];
     lz_q8r_hits[tier < 0 ? 0 : (tier > 2 ? 2 : tier)]++;
 #endif /* LZ_Q8R_COUNT */
@@ -1230,6 +1268,7 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
                writes an MMX register, so the x87 tag word the SSE1 arm
                below has to clear is untouched here. */
             if (tier == 3) {
+                lz_debug_q8r_avx2_gdn++;
                 for (k = 0; k + 31 < gs; k += 32)
                     lz_q8round32_avx2(grp + k, ho + k, &inv);
                 for (k = 0; k < gs; k++)
@@ -1287,6 +1326,18 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
     }
 }
 #endif /* LZ_GDN_STATE_2PLANE */
+
+/* Counts group executions of lz_gdn_quantize_2p's AVX2 arm. Defined
+   unconditionally, so the symbol exists in a build with no AVX2 arm (and
+   in one without the two-plane quantizer at all) too, where zero is the
+   true answer. The reason a counter is needed is that no byte-identity
+   gate can answer it: the tiers owe each other bit-identity, so an arm
+   compiled out and fallen through to SSE1 produces the same bytes as
+   the AVX2 arm and the comparison stays green. The arm increments it
+   once per group, before the high plane's sub-chunk loop.
+   tests/test_ops.c asserts it advances under --kernel avx2 and stands
+   still under --kernel sse2. */
+long lz_debug_q8r_avx2_gdn = 0;
 
 /* Test hook: true iff THIS translation unit saw LZ_HAVE_Q8R_AVX2 when it
    compiled, i.e. iff the #include "ops_avx2.h" near the top of this file

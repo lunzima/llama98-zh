@@ -43,6 +43,13 @@
 #include "ops_sse2.h"   /* declarations for src/ops_sse2.c's functions - the
                            %xmm-touching kernels are defined there. Same
                            LZ_SSE2_TU/__SSE2__ contract, one ISA tier up. */
+#include "ops_avx2.h"   /* the LZ_HAVE_* and LZ_*_AVX2_EXTERN macros
+                           km_op_present reads to fill the avx2I column for
+                           operator units. Without this include every
+                           operator unit's AVX2 cell reads absent in a build
+                           that has the kernels - the exact under-report this
+                           file's registry is supposed to prevent. Empty on
+                           Watcom/non-AVX2 builds. */
 #include "ops_kernel_shared.h" /* lz_i32f, LZ_WSUM_CHUNK, LZ_SLOT_NEXT,
                            gdn_tail_row, p2_shift_of - shared with the
                            suffixed TUs; included this early because lz_i32f's
@@ -789,30 +796,36 @@ static const char km_why_epi_x86[] =
     "on 2^31. Written and measured, then not shipped: 19 instructions an "
     "element against the scalar loop's 8 - slower than pure C, which is "
     "the one exception (regression), not partial relief";
-/* The AVX2 column's two reasons. T2 and the twelve operator units are
-   NA instead of present: neither is on this plan's roadmap at all, so
-   calling them "todo" would claim work nobody has committed to. Q8/
-   Q41/Q61/Q16 need no reason string of their own: src/ops_avx2.c's
-   four row_*_avx2_intrin bodies are built into every gcc link target
-   (ENG_AVX2 in the Makefile) and LZ_ROW_AVX2_I's slot is genuinely
-   non-NULL for all four, so their cells are plain KM_H like every
-   other populated column. */
-static const char km_why_t2_avx2[] =
-    "T2 (ternary) is excluded from the AVX2 tier by design: it is "
-    "kunkun-ce/ARM's format, unrelated to the x86-64-v3 motivation "
-    "(modern amd64 hosts) - LZ_ROW_T2's AVX2 slot is a permanent NULL, "
-    "not a not-yet-written one";
-static const char km_why_op_avx2[] =
-    "the AVX2 tier's first batch covers only the five matmul row-kernel "
-    "formats (LZ_ROW_*); this operator has no LZ_ROW_* table of its "
-    "own, so it has no AVX2 slot yet - a later MoE/full-hot-TU AVX2 "
-    "batch, not this one, is where it would be added";
 typedef struct { unsigned char have; unsigned char why; const char *text; } LZKmReg;
 #define KM_H(mask) { (unsigned char)(mask), 0, (const char *)0 }
 #define KM_I(text) { 0, LZ_KM_IMPOSSIBLE, (text) }
 #define KM_T(text) { 0, LZ_KM_TODO, (text) }
 #define KM_D(text) { 0, LZ_KM_DECLINED, (text) }
 #define KM_N(text) { 0, LZ_KM_NA, (text) }
+
+/* The AVX2 column's cell, not plain KM_H(LZ_KMB_GCC) like the other gcc
+   cells: LZ_AVX2_TU and the link do not have to travel together (see
+   ops_avx2.h's LZ_HAVE_AVX2_TU), and in a build without them
+   km_op_present answers "absent" for all seventeen cells - a registry
+   still claiming the gcc class would print '!' for each and
+   `--kernel-matrix` would exit non-zero about a binary that simply has no
+   AVX2 tier. Watcom and ARM never had these cells and keep reporting
+   them as living elsewhere.
+
+   A VALUE test: `defined(LZ_HAVE_AVX2_TU)` is true even where it is 0. */
+#if defined(__WATCOMC__) || defined(__arm__) || LZ_HAVE_AVX2_TU
+#define KM_AVX2 KM_H(LZ_KMB_GCC)
+#else
+/* The reason string lives INSIDE the branch that uses it: declared
+   outside, a normal build would carry an unused static const char[] and
+   -Wunused-const-variable says so. */
+static const char km_why_no_avx2_tu[] =
+    "this binary has no AVX2 translation unit - LZ_AVX2_TU is unset, so "
+    "src/ops_avx2.c is not in the link. The gcc CLASS carries these "
+    "kernels and a normal gcc build has them; this one was compiled "
+    "without them deliberately (the ISA-floor gate builds that way)";
+#define KM_AVX2 KM_N(km_why_no_avx2_tu)
+#endif
 #define KM_ALL (LZ_KMB_GCC | LZ_KMB_WAT | LZ_KMB_ARM)
 
 /* ref is the one DECLARED-present column with no per-format variation:
@@ -830,17 +843,17 @@ typedef struct { unsigned char have; unsigned char why; const char *text; } LZKm
    the only place the two-dimensional index lives. */
 static const LZKmReg km_reg[LZ_KM_NUNIT * LZ_KM_NCOL] = {
 /*          ref          mmxI              sseI                sse2I             mmxA              sseA                sse2A             avx2I                      armC                 armA                 g128            */
-/* q8_0 */ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_GCC),           KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128),
-/* q4_1 */ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_GCC),           KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128),
-/* q6_1 */ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_GCC),           KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128),
-/* q16_0*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_GCC),           KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128),
-/* t2   */ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_N(km_why_t2_avx2),      KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128),
+/* q8_0 */ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_AVX2,           KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128),
+/* q4_1 */ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_AVX2,           KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128),
+/* q6_1 */ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_AVX2,           KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128),
+/* q16_0*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_AVX2,           KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128),
+/* t2   */ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_AVX2,      KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_ARM),    KM_H(LZ_KMB_G128),
 /* operator units (LZ_KM_OP): registry only, no grid line. ref is the
    shared C body, which is also what --kernel arm-c runs - so armC is
    present on ARM for the same reason ref is present everywhere. */
-/* i32f */ KM_H(KM_ALL), KM_I(km_why_i32f_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_I(km_why_i32f_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_N(km_why_op_avx2), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_i32f_g128),
-/* q8rnd*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_N(km_why_op_avx2), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_q8rnd_g128),
-/* expfx*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_N(km_why_op_avx2), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_op_g128),
+/* i32f */ KM_H(KM_ALL), KM_I(km_why_i32f_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_I(km_why_i32f_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_AVX2, KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_i32f_g128),
+/* q8rnd*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_AVX2, KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_q8rnd_g128),
+/* expfx*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_AVX2, KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_op_g128),
 /* The two attention MAC units DO have x86 kernels, and they are
    macro-selected rather than table-selected, so km_op_present answers
    for them. atdot's assembly is q8_0's leaf, reused rather than copied
@@ -850,16 +863,16 @@ static const LZKmReg km_reg[LZ_KM_NUNIT * LZ_KM_NCOL] = {
    with no tier test, so no SSE2 twin was selectable. Gate:
    .prof/attn_sse2_xcheck.sh (kernel against kernel against C) plus
    build/kernel_isa_identity_gate.sh (whether the dispatch reaches it). */
-/* atdot*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_N(km_why_op_avx2), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_attn_g128),
-/* wsump*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_N(km_why_op_avx2), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_attn_g128),
-/* sigq */ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sigq_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sigq_sse1), KM_H(LZ_KMB_WAT), KM_N(km_why_op_avx2), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_op_g128),
-/* nrmss*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_N(km_why_op_avx2), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_nrmss_g128),
+/* atdot*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_AVX2, KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_attn_g128),
+/* wsump*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sse1), KM_H(LZ_KMB_WAT), KM_AVX2, KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_attn_g128),
+/* sigq */ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_sigq_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_sigq_sse1), KM_H(LZ_KMB_WAT), KM_AVX2, KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_op_g128),
+/* nrmss*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_AVX2, KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_nrmss_g128),
 /* Registering these two rows is what makes a gate able to tell "no
    assembly" from "no such operator": without them src/fwht.c could be
    deleted and not a single cell would change. */
-/* fwhti*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_fwhti_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_fwhti_sse1), KM_H(LZ_KMB_WAT), KM_N(km_why_op_avx2), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM),       KM_N(km_why_fwht_g128),
-/* fwhtf*/ KM_H(KM_ALL), KM_I(km_why_fwhtf_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_I(km_why_fwhtf_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_N(km_why_op_avx2), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM),          KM_N(km_why_fwht_g128),
-/* f32mm*/ KM_H(KM_ALL), KM_I(km_why_f32mm_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_I(km_why_f32mm_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_N(km_why_op_avx2), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM),        KM_N(km_why_f32mm_g128),
+/* fwhti*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_I(km_why_fwhti_sse1), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_I(km_why_fwhti_sse1), KM_H(LZ_KMB_WAT), KM_AVX2, KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM),       KM_N(km_why_fwht_g128),
+/* fwhtf*/ KM_H(KM_ALL), KM_I(km_why_fwhtf_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_I(km_why_fwhtf_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_AVX2, KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM),          KM_N(km_why_fwht_g128),
+/* f32mm*/ KM_H(KM_ALL), KM_I(km_why_f32mm_mmx), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_I(km_why_f32mm_mmx), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_AVX2, KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM),        KM_N(km_why_f32mm_g128),
 /* recur's SSE1 cell is NOT km_why_sse1. That string fills the SSE1
    column for every weight-format row above and copying it down is the
    reflex; lz_p2_rows_sse (ops_mmx_sse.c) exists, and a false absent is
@@ -867,8 +880,8 @@ static const LZKmReg km_reg[LZ_KM_NUNIT * LZ_KM_NCOL] = {
    Watcom SSE columns stay with the gcc class: LZ_P2_SSE_EXTERN and
    LZ_P2_SSE2_EXTERN are what km_op_present can key off, and the SSE2
    one is declared under !__WATCOMC__. */
-/* recur*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_N(km_why_op_avx2), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_op_g128),
-/* epi  */ KM_H(KM_ALL), KM_D(km_why_epi_x86), KM_D(km_why_epi_x86), KM_H(LZ_KMB_GCC), KM_D(km_why_epi_x86), KM_D(km_why_epi_x86), KM_H(LZ_KMB_WAT), KM_N(km_why_op_avx2), KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_op_g128)
+/* recur*/ KM_H(KM_ALL), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_GCC), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_H(LZ_KMB_WAT), KM_AVX2, KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_op_g128),
+/* epi  */ KM_H(KM_ALL), KM_D(km_why_epi_x86), KM_D(km_why_epi_x86), KM_H(LZ_KMB_GCC), KM_D(km_why_epi_x86), KM_D(km_why_epi_x86), KM_H(LZ_KMB_WAT), KM_AVX2, KM_H(LZ_KMB_ARM), KM_H(LZ_KMB_ARM), KM_N(km_why_op_g128)
 };
 
 #if defined(__WATCOMC__)
@@ -1187,6 +1200,58 @@ static int km_op_present(int f, int c) {
          c == LZ_KM_COL_ROW0 + LZ_ROW_SSE2_I)) return 1;
 #endif /* __WATCOMC__ */
 #endif /* LZ_FWHT_F32_SSE_EXTERN */
+    /* The AVX2 column of the operator units that carry a kernel. ONE
+       slot, LZ_ROW_AVX2_I, for every unit and every build class: AVX2
+       has no Watcom assembly counterpart (src/ops_avx2.c is never built
+       by Watcom), so unlike the MMX/SSE entries above there is no
+       class split to make. Each test is the macro the dispatch itself
+       tests, so a registration cannot outlive its kernel - which is why
+       this block exists at all rather than the cells being flipped in
+       km_reg and left declared: a declared cell that no longer matches
+       its kernel is what km_status prints as '!'. */
+    if (c == LZ_KM_COL_ROW0 + LZ_ROW_AVX2_I) {
+#if defined(LZ_HAVE_Q8R_AVX2)
+        if (f == LZ_KM_UNIT_Q8RND) return 1;
+#endif /* LZ_HAVE_Q8R_AVX2 */
+#if defined(LZ_HAVE_NORM_SS_AVX2)
+        /* NRMSS is norm_ss_fixed (km_why_nrmss_g128), so this cell is
+           that operator's kernel. Not LZ_HAVE_NORM_AVX2, which guards
+           lz_rmsnorm_out_avx2 / lz_vmax_avx2 / lz_vscale_avx2 - other
+           operators, other call sites, and no row in km_unit. Those three
+           are in the same position as lz_amax32_avx2 and lz_rope_avx2:
+           AVX2 kernels the matrix does not show. */
+        if (f == LZ_KM_UNIT_NRMSS) return 1;
+#endif /* LZ_HAVE_NORM_SS_AVX2 */
+#if defined(LZ_FWHT_AVX2_EXTERN)
+        if (f == LZ_KM_UNIT_FWHTI) return 1;
+#endif /* LZ_FWHT_AVX2_EXTERN */
+#if defined(LZ_FWHT_F32_AVX2_EXTERN)
+        if (f == LZ_KM_UNIT_FWHTF) return 1;
+#endif /* LZ_FWHT_F32_AVX2_EXTERN */
+#if defined(LZ_EPI_AVX2_EXTERN)
+        if (f == LZ_KM_UNIT_EPI) return 1;
+#endif /* LZ_EPI_AVX2_EXTERN */
+#if defined(LZ_HAVE_P2_MUL32_AVX2) && defined(LZ_HAVE_P2_SPLIT32_AVX2)
+        if (f == LZ_KM_UNIT_RECUR) return 1;
+#endif /* LZ_HAVE_P2_*_AVX2 */
+#if defined(LZ_ATTN_AVX2_EXTERN)
+        if (f == LZ_KM_UNIT_WSUMP) return 1;
+        if (f == LZ_KM_UNIT_ATDOT) return 1;
+#endif /* LZ_ATTN_AVX2_EXTERN */
+#if defined(LZ_HAVE_I32FACC_AVX2)
+        if (f == LZ_KM_UNIT_I32F) return 1;
+#endif /* LZ_HAVE_I32FACC_AVX2 */
+#if defined(LZ_HAVE_LERP_Q15_AVX2)
+        if (f == LZ_KM_UNIT_SIGQ) return 1;
+#endif /* LZ_HAVE_LERP_Q15_AVX2 */
+#if defined(LZ_HAVE_EXP_Q20_AVX2)
+        if (f == LZ_KM_UNIT_EXPFX) return 1;
+#endif /* LZ_HAVE_EXP_Q20_AVX2 */
+#if defined(LZ_MATMUL_F32_AVX2_EXTERN)
+        if (f == LZ_KM_UNIT_F32MM) return 1;
+#endif /* LZ_MATMUL_F32_AVX2_EXTERN */
+    }
+
     if (f != LZ_KM_UNIT_ATDOT && f != LZ_KM_UNIT_WSUMP) return 0;
 #if defined(LZ_ATTN_SSE2_EXTERN)
     /* Both attention MACs at the SSE2 tier. Defined for BOTH toolchains
@@ -1210,6 +1275,7 @@ static int km_op_present(int f, int c) {
 #if defined(LZ_WSUM_MMX_EXTERN)
     if (f == LZ_KM_UNIT_WSUMP && c == LZ_KM_COL_ROW0 + LZ_ROW_MMX_I) return 1;
 #endif /* LZ_WSUM_MMX_EXTERN */
+
     (void)c;
     return 0;
 }

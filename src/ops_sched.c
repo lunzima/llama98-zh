@@ -15,10 +15,12 @@
 #include "ops_sse2.h"
 #include "ops_avx2.h"   /* LZ_HAVE_Q8R_AVX2 - without this, lz_q8r_tier's
                            tier 3 arm is compiled out in THIS TU and
-                           --kernel avx2 silently resolves to the SSE2
-                           tier for both call sites. Empty body on
-                           Watcom/non-AVX2 builds (this header's own
-                           guard), same shape as the SSE2 include above. */
+                           --kernel avx2 resolves to tier 0 (the scalar
+                           path) for both call sites: LZ_KERNEL_AVX2
+                           matches neither the SSE2 nor the SSE1 check
+                           below. Empty body on Watcom/non-AVX2 builds
+                           (this header's own guard), same shape as the
+                           SSE2 include above. */
 #include "ops_kernel_shared.h"
 #include "ops_quant.h"  /* lz_cpu_has_mmx (non-static, from module 1) */
 #include "ops_sched.h"
@@ -222,19 +224,26 @@ int lz_q8r_tier(void) {
 }
 #endif /* LZ_HAVE_Q8R_SIMD || LZ_HAVE_Q8R_SSE */
 
-/* Attention wsum's chunk fold: 0 scalar, 1 SSE1, 2 SSE2. Same shape as
-   lz_q8r_tier above and for the same reason - the two tiers here are a
-   scalar convert (cvtsi2ss, SSE1) and a packed one (cvtdq2ps, SSE2).
+/* Attention wsum's chunk fold: 0 scalar, 1 SSE1, 2 SSE2, 3 AVX2. Same
+   shape as lz_q8r_tier above and for the same reason - the tiers here
+   are a scalar convert (cvtsi2ss, SSE1), a packed four-wide one
+   (cvtdq2ps, SSE2) and a packed eight-wide one (vcvtdq2ps, AVX2), all
+   of them the same correctly rounded conversion (see
+   ops_kernel_shared.h's LZ_I32F_ACC32 note).
 
    LZ_I32FACC_FORCE_SSE is gone. It existed because the SSE1 cell was
    unreachable on any machine with SSE2 - every machine that runs this
    suite - and a path that cannot be selected cannot be validated. That
    is what `--kernel sse` is, so the compile-time escape was a second
    way to say it and the two could disagree. */
-#if defined(LZ_HAVE_I32FACC_SSE2) || defined(LZ_HAVE_I32FACC_SSE)
+#if defined(LZ_HAVE_I32FACC_SSE2) || defined(LZ_HAVE_I32FACC_SSE) || \
+    defined(LZ_HAVE_I32FACC_AVX2)
 int lz_i32facc_tier(void) {
     if (!g_kernel) lz_kernel_select(LZ_KERNEL_AUTO);
     if (g_kernel == LZ_KERNEL_REF) return 0;
+#if defined(LZ_HAVE_I32FACC_AVX2)
+    if (g_kernel == LZ_KERNEL_AVX2) return 3;
+#endif /* LZ_HAVE_I32FACC_AVX2 */
 #if defined(LZ_HAVE_I32FACC_SSE2)
     if (g_kernel == LZ_KERNEL_SSE2) return 2;
 #endif /* LZ_HAVE_I32FACC_SSE2 */
@@ -647,7 +656,15 @@ int lz_kernel_select(int which) {
            the only way to compare them. Asking UP clamps to what CPUID
            found: sse2 needs SSE2, and sse needs SSE, which an SSE2
            machine also has. */
-        if (which == LZ_KERNEL_AVX2 && !lz_cpu_has_avx2())
+        /* Two questions, not one: lz_cpu_has_avx2() is about the
+           MACHINE, and a build can lack the kernels while the machine has
+           the instructions (ops_avx2.h's LZ_HAVE_AVX2_TU). A tier with no
+           bodies falls back per site - table pickers to SSE2, the inline
+           tests to MMX, the fixed-point tiers to C - so one run would mix
+           three implementations under one tier name. Clamp to `have`, as
+           the CPU-side test does; the CLI reports the fallback. */
+        if (which == LZ_KERNEL_AVX2 &&
+            (!lz_cpu_has_avx2() || !LZ_HAVE_AVX2_TU))
             which = have;
         else if (which == LZ_KERNEL_SSE2 && have != LZ_KERNEL_SSE2)
             which = have;

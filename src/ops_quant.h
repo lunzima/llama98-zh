@@ -194,6 +194,12 @@ int q8_amax_picked_avx2(void);
    can go missing alone. */
 int lz_q8round32_avx2_compiled_in_quant(void);
 
+/* Counts group executions of lz_quantize_q8's AVX2 arm. The compiled_in
+   hook above answers "is the arm in this build"; this answers "did it
+   run", which no output comparison can, because the tiers are
+   bit-identical by contract. Defined in ops_quant.c unconditionally. */
+extern long lz_debug_q8r_avx2_quant;
+
 /* Per-group scale and reciprocal. Returns fast flag. */
 int q8_group_scale(const float *grp, int gs, float *sg, float *inv);
 

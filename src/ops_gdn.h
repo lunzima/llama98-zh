@@ -17,4 +17,11 @@
    missing alone. */
 int lz_q8round32_avx2_compiled_in_gdn(void);
 
+/* Counts group executions of lz_gdn_quantize_2p's AVX2 arm. The
+   compiled_in hook above answers "is the arm in this build"; this
+   answers "did it run", which no output comparison can, because the
+   tiers are bit-identical by contract. Defined in ops_gdn.c
+   unconditionally. */
+extern long lz_debug_q8r_avx2_gdn;
+
 #endif /* OPS_GDN_H */

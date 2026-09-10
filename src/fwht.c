@@ -202,6 +202,27 @@ void lz_fwht(float *v, int n) {
        this is bit-identical between wcc386 and gcc without any of the
        care the multiply-by-reciprocal paths demand. */
     int len, i, j;
+#if defined(LZ_FWHT_F32_AVX2_EXTERN)
+    /* AVX2 from len 8 on. The 8-wide body's inner loop consumes whole
+       8-element blocks, so len 1..4 stay in the C loop below (same
+       shape as the SSE1 branch's len 1..2), and n >= 16 with n a
+       multiple of 16 is what makes the LAST stage (len == n/2) a whole
+       number of those blocks. */
+    if (g_kernel == LZ_KERNEL_AVX2 && n >= 16 && (n & 15) == 0) {
+        for (len = 1; len < 8 && len < n; len <<= 1) {
+            for (i = 0; i < n; i += (len << 1)) {
+                for (j = 0; j < len; j++) {
+                    float a = v[i + j];
+                    float b = v[i + j + len];
+                    v[i + j]       = a + b;
+                    v[i + j + len] = a - b;
+                }
+            }
+        }
+        for (len = 8; len < n; len <<= 1) lz_fwht_stage_f32_avx2(v, n, len);
+        return;
+    }
+#endif /* LZ_FWHT_F32_AVX2_EXTERN */
 #if defined(LZ_FWHT_F32_SSE_EXTERN)
     /* SSE1 from the third stage on. The butterfly at stride len pairs
        v[i+j] with v[i+j+len], so for len >= 4 both halves are whole

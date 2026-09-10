@@ -691,6 +691,13 @@ void lz_exp_fixed_run(const float *x, float *out, int n) {
             sv[k] = q8_round(r * (float)LZ_EXP_QSCALE) >> 5;
             ev[k] = (t >> 5) - LZ_EXP_Q;
         }
+#if defined(LZ_HAVE_EXP_Q20_AVX2)
+        /* AVX2 first: eight lanes against SSE2's four. Tested on
+           g_kernel alone, like the SSE2 test below it. */
+        if (g_kernel == LZ_KERNEL_AVX2)
+            lz_exp_q20_avx2(tv, sv, pv, m);
+        else
+#endif /* LZ_HAVE_EXP_Q20_AVX2 */
 #if defined(LZ_HAVE_EXP_Q20_SIMD)
         /* SSE2 first: four lanes against MMX's two, and it owes no
            emms. Below it the MMX cell, which a machine without SSE2
@@ -1165,6 +1172,15 @@ void lz_sigmoid_q15_run(const float *x, int32_t *out, int n) {
             tb[k] = g_sigtab[idx + 1];
             tf[k] = sat[k] ? 0 : (int32_t)((t - (float)idx) * 32768.0f);
         }
+#if defined(LZ_HAVE_LERP_Q15_AVX2)
+        /* AVX2 first: eight lanes against SSE2's four per instruction.
+           Tested on g_kernel alone, like the SSE2 test below it - a
+           CPUID test here would be a second answer to a question
+           lz_kernel_select has already settled. */
+        if (g_kernel == LZ_KERNEL_AVX2)
+            lz_lerp_q15_avx2(ta, tb, tf, out + i, m);
+        else
+#endif /* LZ_HAVE_LERP_Q15_AVX2 */
 #if defined(LZ_HAVE_LERP_Q15_SIMD)
         /* SSE2 first: eight lanes against MMX's four, and it owes no
            emms. Below it the MMX cell, which a machine without SSE2
@@ -1714,6 +1730,18 @@ float norm_ss_fixed(const float *x, int n, short *qout, int *eout) {
 #endif /* LZ_ARM_ASM_EXTERN */
     sc = pow2f(e);
     i = 0;
+#if defined(LZ_HAVE_NORM_SS_AVX2)
+    /* The AVX2 tier, ABOVE the SSE2 one so a machine with both takes the
+       wider kernel - the same ordering the SSE1 branch below observes
+       from the other side. Selected by tier, not CPUID, for the reason
+       every other branch here gives. Whole groups of 16; the tail runs
+       in C, so `i` continues rather than restarting. */
+    if (g_kernel == LZ_KERNEL_AVX2 && n >= 16) {
+        lz_i64 sacc = 0;
+        i = lz_norm_ss_avx2(x, n, sc, qout, &sacc);
+        acc = sacc;
+    }
+#endif /* LZ_HAVE_NORM_SS_AVX2 */
 #if defined(LZ_NORM_SS_SSE2_EXTERN)
     /* SELECTED BY TIER, like every other kernel here: --kernel ref and
        mmx must reach the C loop below or the arm this is compared
@@ -2007,6 +2035,18 @@ float lz_exp(float x) {
    (.prof/arm_div_count.sh), while the census counts both as 1. */
 #define LZ_Q8_INV_SAFE 1.0e-30f
 
+/* Counts group executions of lz_quantize_q8's AVX2 arm. Defined
+   unconditionally, so the symbol exists in a build with no AVX2 arm too
+   and zero is the true answer there - a reader never has to know which
+   build produced the value. The reason a counter is needed at all is
+   that no byte-identity gate can answer it: the tiers owe each other
+   bit-identity, so an arm compiled out and fallen through to SSE1
+   produces the same bytes as the AVX2 arm and the comparison stays
+   green. lz_quantize_q8's AVX2 arm increments it once per group, before
+   its sub-chunk loop. tests/test_ops.c asserts it advances under
+   --kernel avx2 and stands still under --kernel sse2. */
+long lz_debug_q8r_avx2_quant = 0;
+
 void lz_quantize_q8(const float *x, int n, int gs, int8_t *q, float *s) {
     int g, k;
 #if defined(LZ_HAVE_Q8R_SIMD) || defined(LZ_HAVE_Q8R_SSE)
@@ -2064,6 +2104,7 @@ void lz_quantize_q8(const float *x, int n, int gs, int8_t *q, float *s) {
                    never writes an MMX register, so the x87 tag word the
                    SSE1 arm below has to clear is untouched here. */
                 if (tier == 3) {
+                    lz_debug_q8r_avx2_quant++;
                     for (k = 0; k + 31 < gs; k += 32)
                         lz_q8round32_avx2(grp + k, out + k, &inv);
                 } else

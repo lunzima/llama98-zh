@@ -34,22 +34,24 @@ void lz_dbg_layer_hash(const char *tag, int li, const void *p, size_t nf) {
 }
 #endif /* LZ_DBG_LAYER_HASH */
 
-/* 16-byte aligned malloc/free for the weight buffers (field->f and the
-   quantized planes field->q/scale/zero). The SSE1/SSE2 row/dot kernels
-   read these with movaps/movdqa after the alignment. field->q is aligned
-   uniformly so the Q8/Q4_1/Q16 formats - whose 32-element group is 32,
-   16 or 64 bytes, all 16-byte multiples - become aligned loads; the
-   Q6_1 2-bit plane and Q2 have an 8-byte group stride, so their loads
-   stay movdqu even over the aligned base (16-aligned is still only
-   8-aligned every other group). Over-allocates by one pointer plus the
-   pad and stores the ORIGINAL pointer just before the aligned one, the
-   same shape as forward.c's xcalloc/xfree. */
+/* 32-byte aligned malloc/free for the weight buffers (field->f and the
+   quantized planes field->q/scale/zero). The SSE1/SSE2 row kernels read
+   these with movaps/movdqa and the AVX2 tier with 256-bit loads. Q8 and
+   Q16 - 32- and 64-byte groups - become aligned 256-bit loads and Q4_1's
+   16-byte group an aligned 128-bit one; Q6_1's two planes and T2 keep
+   8-byte groups and stay unaligned. Sixteen would leave every odd Q8
+   group at 16 mod 32, so it is strictly weaker and nothing depended on
+   exactly sixteen.
+
+   Over-allocates by one pointer plus the pad and stores the ORIGINAL
+   pointer just before the aligned one, the same shape as forward.c's
+   xcalloc/xfree. */
 static void *aligned_malloc(size_t n, size_t sz) {
-    char *base = (char *)malloc(n * sz + 16 + sizeof(void *));
+    char *base = (char *)malloc(n * sz + 32 + sizeof(void *));
     char *aligned;
     if (!base) return NULL;
     aligned = base + sizeof(void *);
-    aligned += (size_t)(16 - ((size_t)aligned & 15)) & 15;
+    aligned += (size_t)(32 - ((size_t)aligned & 31)) & 31;
     ((void **)(void *)aligned)[-1] = base;
     return aligned;
 }

@@ -312,6 +312,15 @@ $(HOT_GCC_GUI_COM_OBJS): build/gui/%.o: common/%.c
 # bit-identical in rounding behaviour to the scalar and SSE2 paths it
 # replaces rather than opening a third source of cross-tier drift
 # alongside the FP_STRICT one already fenced off above.
+#
+# NO -mpreferred-stack-boundary HERE, and the measurement is why: this
+# MinGW build answers "'-mpreferred-stack-boundary=5' is not between 3
+# and 4", so 16 bytes is the most this toolchain will align the stack
+# to. A __m256i is a 32-byte-aligned TYPE, so gcc stores one to a stack
+# slot with vmovdqa - and a four-__m256i call shape needs a 32-byte
+# temporary, which then lands on a 16-aligned slot and takes #GP. The
+# fix is in the source, not here: the vector helpers are macros in
+# src/ops_avx2.c so nothing crosses a call boundary as an aggregate.
 $(ENG_AVX2_GCC_NATIVE_OBJS): build/native/%.o: src/%.c
 	@mkdir -p build/native
 	$(CC) $(X86_64_HOT_CFLAGS) $(DEPFLAGS) -mavx2 -c -o $@ $<

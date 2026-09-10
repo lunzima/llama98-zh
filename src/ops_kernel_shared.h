@@ -191,7 +191,22 @@ LZ_MAYBE_UNUSED static float lz_i32f(int32_t v) {
  * own comment above records the split form agreeing with the correctly
  * rounded conversion on 87,108,878 values, and cvtdq2ps/cvtsi2ss are
  * that conversion. */
-#if defined(LZ_HAVE_I32FACC_SSE2) && defined(LZ_HAVE_I32FACC_SSE)
+#if defined(LZ_HAVE_I32FACC_AVX2)
+/* The gcc/AVX2 build carries all three cells (AVX2 implies SSE2, and
+   ops_sched.c's tier function is written to the same assumption), so
+   this is the same ladder with one rung on top. A build without the
+   AVX2 cell falls through to the chain below, which is why this is a
+   separate branch and not an `lz_tr_ >= 3` line added to it: the
+   symbol would not exist there. */
+#define LZ_I32F_ACC32(accf, acc32, dv) do { \
+        int lz_tr_ = lz_i32facc_tier(); \
+        if (lz_tr_ >= 3)      lz_i32f_acc32_avx2((accf), (acc32)); \
+        else if (lz_tr_ >= 2) lz_i32f_acc32_simd((accf), (acc32)); \
+        else if (lz_tr_ >= 1) lz_i32f_acc32_sse((accf), (acc32)); \
+        else for ((dv) = 0; (dv) < 32; (dv)++) \
+                 (accf)[dv] += lz_i32f((acc32)[dv]); \
+    } while (0)
+#elif defined(LZ_HAVE_I32FACC_SSE2) && defined(LZ_HAVE_I32FACC_SSE)
 #define LZ_I32F_ACC32(accf, acc32, dv) do { \
         int lz_tr_ = lz_i32facc_tier(); \
         if (lz_tr_ >= 2)      lz_i32f_acc32_simd((accf), (acc32)); \
@@ -311,6 +326,26 @@ LZ_MAYBE_UNUSED static int p2_shift_of(int32_t amax) {
 #ifndef LZ_PF_DIST
 #define LZ_PF_DIST 4                    /* look ahead this many 32-byte cache lines */
 #endif
+
+/* 32-byte alignment, for the arrays the AVX2 tier reads or writes 32
+   bytes at a time. SAME REASONING AS ops_matmul.c's LZ_XW_ALIGN, one
+   width up: gcc happens to give most arrays more alignment than their
+   type promises, and "happens to" is not a contract. What this buys is
+   that a 32-byte load never straddles a 64-byte cache line - a SPLIT
+   load, which costs extra on several AVX2-capable cores - which is a
+   property of the ADDRESS, not of the instruction encoding: vmovdqu on
+   a 32-byte-aligned address never splits, so the load form stays
+   unaligned and nothing gains a fault it could die on.
+
+   gcc only. Watcom has no __attribute__ and its 32-bit static/malloc
+   alignment is 8; the AVX2 tier is never built there, so nothing is
+   lost - and every Watcom kernel keeps the unaligned form it already
+   has. */
+#if defined(__GNUC__)
+#define LZ_ALIGN32 __attribute__((aligned(32)))
+#else
+#define LZ_ALIGN32
+#endif /* __GNUC__ */
 
 /* The four prefetch-tier values lz_prefetch_mode() (src/ops.c, real
    extern linkage - unaffected by this move) returns. Kernel tier picks

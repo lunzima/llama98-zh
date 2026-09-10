@@ -56,9 +56,13 @@
                            here rather than at a caller that does not
                            exist. */
 #include "ops_sched.h"         /* lz_i32facc_tier - LZ_I32F_ACC32 calls it.
-                           Both ISA headers come first: that macro picks
-                           its arm from the LZ_HAVE_I32FACC_* they
-                           define. */
+                           All three ISA headers come first: that macro
+                           picks its arm from the LZ_HAVE_I32FACC_* they
+                           define, and it is defined at the point
+                           ops_kernel_shared.h is processed. */
+#include "ops_avx2.h"          /* LZ_HAVE_I32FACC_AVX2 - the fold's fourth
+                           rung. Empty on Watcom/non-AVX2 builds, so this
+                           line costs those targets nothing. */
 #include "ops_kernel_shared.h" /* lz_i32f, LZ_WSUM_CHUNK, LZ_SLOT_NEXT,
                            gdn_tail_row, p2_shift_of - shared with
                            ops.c and the other suffixed TUs, one
@@ -363,6 +367,10 @@ static void wsum_pair_tier(const int8_t *rowA, const int8_t *rowB,
    keeps the call count O(ng) instead of O(T). */
 void lz_wsum_group_mmx(const int8_t *vc, int kvd, int g, int sink, int ring,
                        const int16_t *cq, int T, float *accf) {
+    /* No LZ_ALIGN32: everything below the __WATCOMC__ guard is
+       Watcom-only, the macro expands empty there, and the body this
+       array feeds is lz_wsum_pair_asm rather than the gcc-only
+       lz_wsum_pair_avx2. */
     int32_t acc32[32];
     int d, t0, slot = 0;
 
@@ -413,6 +421,10 @@ void lz_wsum_group_mmx(const int8_t *vc, int kvd, int g, int sink, int ring,
    builds. */
 void lz_wsum_group_mmx_int(const int8_t *vc, int kvd, int g, int sink, int ring,
                            const int16_t *cq, int T, int64_t *acc64) {
+    /* No LZ_ALIGN32: everything below the __WATCOMC__ guard is
+       Watcom-only, the macro expands empty there, and the body this
+       array feeds is lz_wsum_pair_asm rather than the gcc-only
+       lz_wsum_pair_avx2. */
     int32_t acc32[32];
     int d, t0, slot = 0;
 
