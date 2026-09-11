@@ -5,7 +5,7 @@
    reports through errbuf.
 
    Usage: kunkun98-serve <model-dir> [--port N] [--ctx N] [--think]
-                                     [--no-ckpt] [--name NAME]
+                                     [--no-ckpt] [--name NAME] [--spec K]
 
    Listens on 127.0.0.1 only. Put a reverse proxy in front of it for
    anything else - it speaks plain HTTP and authenticates nobody. */
@@ -29,7 +29,9 @@ static void usage(void) {
            "  --think      thinking-mode defaults\n"
            "  --no-ckpt    disable cross-request prefix reuse\n"
            "  --name NAME  model id reported by /v1/models\n"
-           "  --requests N serve N requests then exit (testing)\n");
+           "  --requests N serve N requests then exit (testing)\n"
+           "  --spec K     speculative decoding draft width (default 0,"
+           " off; requires an MTP head)\n");
 }
 
 int main(int argc, char **argv) {
@@ -43,7 +45,7 @@ int main(int argc, char **argv) {
     const char *dir = NULL, *name = "kunkun98";
     char tokpath[1024];
     int port = 8080, want_ctx = 2048, think = 0, ckpt = 1, max_req = -1;
-    int slots = 1, have_pool = 0;
+    int slots = 1, have_pool = 0, spec_k = 0;
     int i, served = 0, have_pc = 0, rc = 1;
 
     lz_init_stdout();
@@ -57,6 +59,7 @@ int main(int argc, char **argv) {
         else if (strcmp(a, "--slots") == 0 && i + 1 < argc) slots = atoi(argv[++i]);
         else if (strcmp(a, "--name") == 0 && i + 1 < argc) name = argv[++i];
         else if (strcmp(a, "--requests") == 0 && i + 1 < argc) max_req = atoi(argv[++i]);
+        else if (strcmp(a, "--spec") == 0 && i + 1 < argc) spec_k = atoi(argv[++i]);
         else { usage(); return 2; }
     }
     if (!dir) { usage(); return 2; }
@@ -77,10 +80,7 @@ int main(int argc, char **argv) {
     }
     if (want_ctx > m.config.seq_len) want_ctx = m.config.seq_len;
     if (want_ctx < 256) want_ctx = 256;
-    /* 0: this server does not wire --spec yet - see generate.c's own
-       lz_pool_alloc comment on the same point (forward.h's spec_k_max
-       comment). */
-    if (lz_state_alloc(&st, &m, want_ctx, 0, err, sizeof(err)) != 0) {
+    if (lz_state_alloc(&st, &m, want_ctx, spec_k, err, sizeof(err)) != 0) {
         printf("state: %s\n", err);
         lz_tokenizer_free(&tok); lz_free(&m); return 1;
     }
@@ -88,7 +88,7 @@ int main(int argc, char **argv) {
        work, but it would spend a second LZRunState (st, above) for
        nothing. Above 1, the pool owns every state and `st` goes unused. */
     if (ckpt && slots > 1) {
-        if (lz_pool_init(&pool, &m, slots, want_ctx, err, sizeof(err)) == 0) {
+        if (lz_pool_init(&pool, &m, slots, want_ctx, spec_k, err, sizeof(err)) == 0) {
             have_pool = 1;
         } else {
             printf("slots: %s (falling back to 1)\n", err);
@@ -106,6 +106,7 @@ int main(int argc, char **argv) {
     ctx.model_name = name;
     ctx.enable_thinking = think;
     ctx.max_new_default = 512;
+    ctx.spec_k = spec_k;
 
     if (lz_net_init(err, sizeof(err)) != 0) {
         printf("net: %s\n", err); goto cleanup;
@@ -118,8 +119,9 @@ int main(int argc, char **argv) {
         goto cleanup;
     }
     printf("kunkun98-serve on http://127.0.0.1:%d  model=%s ctx=%d "
-           "prefix-reuse=%s slots=%d\n", port, name, want_ctx,
-           (have_pc || have_pool) ? "on" : "off", have_pool ? slots : 1);
+           "prefix-reuse=%s slots=%d spec=%d\n", port, name, want_ctx,
+           (have_pc || have_pool) ? "on" : "off", have_pool ? slots : 1,
+           spec_k);
     printf("ready\n");
     fflush(stdout);
 

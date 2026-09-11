@@ -3081,7 +3081,7 @@ void lz_prefix_stats(const LZPrefixCache *pc, long *calls, long *hits,
 /* ---------------------------------------------------------- session pool */
 
 int lz_pool_init(LZSessionPool *p, const LZModel *m, int n_slots,
-                 int seq_len, char *errbuf, int errlen) {
+                 int seq_len, int spec_k_max, char *errbuf, int errlen) {
     int i;
 
     if (!p || !m) {
@@ -3101,11 +3101,12 @@ int lz_pool_init(LZSessionPool *p, const LZModel *m, int n_slots,
        request has moved an allocation failure from startup into the
        middle of serving. Fail here or not at all. */
     for (i = 0; i < n_slots; i++) {
-        /* 0: the HTTP path this pool serves does not wire --spec yet
-           (server_main.c never sets LZGenOpts.spec_k) - sizing the ring
-           for it here would be memory nobody can reach. Revisit if that
-           changes (forward.h's spec_k_max comment). */
-        if (lz_state_alloc(&p->slot[i].st, m, seq_len, 0, errbuf, errlen) != 0 ||
+        /* spec_k_max: the caller's sizing hint, same parameter
+           lz_state_alloc has always taken - server_main.c's --spec now
+           threads a real value through here instead of the hardcoded 0
+           this comment used to explain (forward.h's spec_k_max
+           comment). */
+        if (lz_state_alloc(&p->slot[i].st, m, seq_len, spec_k_max, errbuf, errlen) != 0 ||
             lz_prefix_init(&p->slot[i].pc, m, errbuf, errlen) != LZ_ERR_OK) {
             p->n = i;               /* free what did come up */
             lz_pool_free(p);

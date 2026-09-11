@@ -857,7 +857,7 @@ typedef struct {
 } LZSessionPool;
 
 int  lz_pool_init(LZSessionPool *p, const LZModel *m, int n_slots,
-                  int seq_len, char *errbuf, int errlen);
+                  int seq_len, int spec_k_max, char *errbuf, int errlen);
 void lz_pool_free(LZSessionPool *p);
 
 /* Pick the best slot for `render` and prepare it. Same contract as
