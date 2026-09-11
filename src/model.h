@@ -346,18 +346,25 @@ typedef struct {
     float rope_theta;
     float partial_rotary_factor;    /* 0.25 in this model */
 
-    /* rope_parameters.rope_scaling (Qwen3.5 config field; absent = 0).
-       type 0 none / 1 linear / 2 yarn (NTK-aware YaRN interpolation).
+    /* rope_parameters.rope_type (Qwen3.5/transformers config field,
+       flat - a sibling of rope_theta inside rope_parameters, not
+       nested under a "rope_scaling" sub-object; absent = "default" = 0).
+       type 0 default / 1 linear / 2 yarn (NTK-aware YaRN interpolation).
        factor is the interpolation factor (e.g. 8 for 4096 -> 32768);
        orig_max is original_max_position_embeddings (yarn only);
        beta_fast/beta_slow are yarn's correction-range bounds
-       (HF defaults 32.0 / 1.0). The per-position cos/sin table in
+       (HF defaults 32.0 / 1.0). attn_factor is yarn's post-scale on
+       cos/sin (HF's `attention_factor`); 0 means absent, in which case
+       forward.c derives the standard single-mscale default rather than
+       reading a DeepSeek-style mscale/mscale_all_dim pair, which this
+       project does not parse. The per-position cos/sin table in
        forward.c applies these when it builds rope_cs. */
     int   rope_scaling_type;
     float rope_scaling_factor;
     float rope_scaling_orig_max;
     float rope_scaling_beta_fast;
     float rope_scaling_beta_slow;
+    float rope_scaling_attn_factor;
 
     /* Derived quantities: stored explicitly instead of recomputed
        everywhere. Recomputed-on-the-fly code

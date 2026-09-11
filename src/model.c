@@ -459,43 +459,78 @@ int lz_load_config(LZModelConfig *c, const char *path,
         (float)lz_json_get_num(&j, tc, "partial_rotary_factor",
                                c->partial_rotary_factor);
 
-    /* rope_parameters.rope_scaling: {type: linear|yarn|none,
-       factor, original_max_position_embeddings, beta_fast, beta_slow}.
-       Defaults: no scaling. rope_scaling_type stays 0 unless the key
-       exists AND names a supported type - an unsupported type name is
-       refused, not silently read as "no scaling". */
+    /* rope_parameters.rope_type: none/default/linear/yarn, plus
+       factor, original_max_position_embeddings, beta_fast, beta_slow,
+       attention_factor - all FLAT siblings of rope_theta inside
+       rope_parameters, not nested under a "rope_scaling" sub-object.
+       There is no such sub-object in what this project's own training
+       side ever writes: checked against KunMoeConfig.to_dict() and
+       every live config.json under E:/LLM/models, rope_parameters is
+       {rope_theta, partial_rotary_factor, rope_type, and - only when
+       non-default - factor/original_max_position_embeddings/
+       beta_fast/beta_slow}. A prior version of this parser read
+       rope_parameters.rope_scaling.type, matching an older nested
+       transformers convention this project's config.json never
+       actually produced - every field below was silently unreachable
+       against every real config on disk, and rope_scaling_type stayed
+       0 regardless of what rope_type said; the RoPE table this loader
+       feeds never applied any of it either (see forward.c's rope_cs
+       fill). Defaults: no scaling. rope_scaling_type stays 0 unless
+       the key exists AND names a supported type - an unsupported type
+       name is refused, not silently read as "no scaling". */
     c->rope_scaling_type = 0;
     c->rope_scaling_factor = 1.0f;
     c->rope_scaling_orig_max = 0.0f;
     c->rope_scaling_beta_fast = 32.0f;
     c->rope_scaling_beta_slow = 1.0f;
+    c->rope_scaling_attn_factor = 0.0f;   /* 0 = absent, forward.c derives it */
     if (rp) {
-        const LZJsonNode *rs = lz_json_get(&j, rp, "rope_scaling");
-        if (rs) {
-            const LZJsonNode *ty = lz_json_get(&j, rs, "type");
-            const char *s = ty && ty->type == LZ_JSON_STR ? ty->text : NULL;            int t = 0;
-            if (s && strcmp(s, "linear") == 0) t = 1;
-            else if (s && strcmp(s, "yarn") == 0) t = 2;
-            else if (s && strcmp(s, "none") != 0 && strcmp(s, "null") != 0) {
-                qerr(errbuf, errlen, LZ_ERR_CFG_ROPE_SCALING, s ? s : "?");
-                lz_json_free(&j);
-                return 1;
-            }
-            c->rope_scaling_type = t;
-            c->rope_scaling_factor =
-                (float)lz_json_get_num(&j, rs, "factor",
-                                       c->rope_scaling_factor);
-            c->rope_scaling_orig_max =
-                (float)lz_json_get_num(&j, rs,
-                                       "original_max_position_embeddings",
-                                       c->rope_scaling_orig_max);
-            c->rope_scaling_beta_fast =
-                (float)lz_json_get_num(&j, rs, "beta_fast",
-                                       c->rope_scaling_beta_fast);
-            c->rope_scaling_beta_slow =
-                (float)lz_json_get_num(&j, rs, "beta_slow",
-                                       c->rope_scaling_beta_slow);
+        const LZJsonNode *ty = lz_json_get(&j, rp, "rope_type");
+        const char *s = ty && ty->type == LZ_JSON_STR ? ty->text : NULL;
+        const LZJsonNode *n_factor = lz_json_get(&j, rp, "factor");
+        const LZJsonNode *n_orig_max =
+            lz_json_get(&j, rp, "original_max_position_embeddings");
+        int t = 0;
+        if (s && strcmp(s, "linear") == 0) t = 1;
+        else if (s && strcmp(s, "yarn") == 0) t = 2;
+        else if (s && strcmp(s, "default") != 0 && strcmp(s, "none") != 0 &&
+                 strcmp(s, "null") != 0) {
+            qerr(errbuf, errlen, LZ_ERR_CFG_ROPE_SCALING, s ? s : "?");
+            lz_json_free(&j);
+            return 1;
         }
+        /* yarn's correction range divides by log(orig_max / ...) and by
+           log(base) - an absent orig_max (sentinel 0) or a factor left
+           at the "no scaling" sentinel (1.0) would compute a division
+           by an effectively-undefined range rather than a refusal.
+           Required explicit, same posture as LZ_ERR_CFG_MOE_FIELDS:
+           silently deriving factor from max_position_embeddings /
+           original_max_position_embeddings (as transformers does when
+           factor is omitted) is a second code path this project does
+           not carry, not a default worth guessing at. */
+        if ((t == 2 && (!n_factor || !n_orig_max)) || (t == 1 && !n_factor)) {
+            qerr(errbuf, errlen, LZ_ERR_CFG_ROPE_YARN_FIELDS,
+                 (int)((n_factor ? n_factor->num : 0.0) * 1000.0),
+                 (int)(n_orig_max ? n_orig_max->num : 0.0));
+            lz_json_free(&j);
+            return 1;
+        }
+        c->rope_scaling_type = t;
+        c->rope_scaling_factor =
+            (float)lz_json_get_num(&j, rp, "factor", c->rope_scaling_factor);
+        c->rope_scaling_orig_max =
+            (float)lz_json_get_num(&j, rp,
+                                   "original_max_position_embeddings",
+                                   c->rope_scaling_orig_max);
+        c->rope_scaling_beta_fast =
+            (float)lz_json_get_num(&j, rp, "beta_fast",
+                                   c->rope_scaling_beta_fast);
+        c->rope_scaling_beta_slow =
+            (float)lz_json_get_num(&j, rp, "beta_slow",
+                                   c->rope_scaling_beta_slow);
+        c->rope_scaling_attn_factor =
+            (float)lz_json_get_num(&j, rp, "attention_factor",
+                                   c->rope_scaling_attn_factor);
     }
 
     /* layer_types decides per-layer SSM vs attention; without it loading is impossible */

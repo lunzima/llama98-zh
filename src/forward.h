@@ -1379,6 +1379,11 @@ int  lz_ckpt_restore(const LZStateCkpt *ck, LZRunState *s, const LZModel *m,
 int  lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
                         int spec_k_max, char *errbuf, int errlen);
 void lz_state_free(LZRunState *s);
+/* Exported so it can be exercised (and cross-checked against a
+   reference) without building a whole model - see its own doc comment
+   in forward.c. lz_state_alloc's only caller besides tests. */
+void lz_rope_build_table(float *rope_cs, int seq_len,
+                         const LZModelConfig *c);
 /* Clear KV cache, SSM recurrent state and conv history; call before a new generation */
 void lz_state_reset(LZRunState *s, const LZModel *m);
 

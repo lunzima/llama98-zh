@@ -108,6 +108,7 @@ typedef enum {
     LZ_ERR_CFG_MOE_FIELDS,     /* invalid MoE fields: num_experts=%d top_k=%d first_k_dense_replace=%d */
     LZ_ERR_CFG_HADAMARD,       /* %s=%d is not a power of two dividing %s=%d */
     LZ_ERR_CFG_ROPE_CONFLICT,  /* rope_parameters %s=%d disagrees with %s=%d */
+    LZ_ERR_CFG_ROPE_YARN_FIELDS, /* rope_type=yarn needs factor and original_max_position_embeddings, got factor x1000=%d orig_max=%d */
     LZ_ERR_CFG_FFN_ACT,        /* ffn_activation is not one of none/situ/gptoss_clamp, got %s */
 
     /* model tensors */
