@@ -1571,27 +1571,37 @@ void lz_state_reset(LZRunState *s, const LZModel *m) {
 
 /* ------------------------------------------------ recurrent checkpoint */
 
-/* Element counts of the three buffers a checkpoint copies. Derived here
-   once so save, restore and alloc cannot disagree about the shapes -
-   they did not have to, and that is exactly how one of them ends up
-   copying a stale size after a config field changes. */
+/* Element counts of the buffers a checkpoint copies. Derived here once
+   so save, restore and alloc cannot disagree about the shapes - they
+   did not have to, and that is exactly how one of them ends up copying
+   a stale size after a config field changes. n_engram_conv mirrors the
+   row*dim sizing forward.c's alloc_engram block uses for
+   s->engram_conv_hist, and is 0 when config.engram is 0 (same
+   condition that block itself gates on). */
 static void ckpt_sizes(const LZModelConfig *c, size_t *n_q8, size_t *n_s,
-                       size_t *n_conv) {
+                       size_t *n_conv, size_t *n_engram_conv) {
     *n_q8   = (size_t)c->n_linear_layers * c->lin_n_v_heads *
               c->lin_k_head_dim * c->lin_v_head_dim;
     *n_s    = *n_q8 / 32;
     *n_conv = (size_t)c->n_linear_layers * c->lin_conv_dim *
               (c->conv_kernel - 1);
+    if (c->engram) {
+        int rows = (c->engram_conv_kernel - 1) * c->engram_conv_dilation;
+        if (rows < 0) rows = 0;
+        *n_engram_conv = (size_t)rows * (size_t)c->hidden_size;
+    } else {
+        *n_engram_conv = 0;
+    }
 }
 
 int lz_ckpt_alloc(LZStateCkpt *ck, const LZModel *m, char *errbuf, int errlen) {
-    size_t n_q8, n_s, n_conv;
+    size_t n_q8, n_s, n_conv, n_engram_conv;
     if (!ck || !m) {
         if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_NULL_ARG);
         return LZ_ERR_NULL_ARG;
     }
     memset(ck, 0, sizeof(*ck));
-    ckpt_sizes(&m->config, &n_q8, &n_s, &n_conv);
+    ckpt_sizes(&m->config, &n_q8, &n_s, &n_conv, &n_engram_conv);
     ck->ssm_q8 = (int8_t *)malloc(n_q8);
 #if LZ_GDN_STATE_2PLANE
     ck->ssm_q8_lo = (int8_t *)malloc(n_q8);
@@ -1606,10 +1616,15 @@ int lz_ckpt_alloc(LZStateCkpt *ck, const LZModel *m, char *errbuf, int errlen) {
     ck->conv_q = (short *)malloc(n_conv * sizeof(short));
     if (!ck->conv_q) { lz_ckpt_free(ck); if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_OOM); return LZ_ERR_OOM; }
 #endif /* LZ_CONV_FIXED */
+    /* NULL (not malloc(0)) when config.engram is 0, same convention as
+       s->engram_conv_hist itself. */
+    ck->engram_conv_hist = n_engram_conv > 0
+        ? (float *)malloc(n_engram_conv * sizeof(float)) : NULL;
     if (!ck->ssm_q8 || !ck->ssm_s || !ck->conv
 #if LZ_GDN_STATE_2PLANE
         || !ck->ssm_q8_lo
 #endif /* LZ_GDN_STATE_2PLANE */
+        || (n_engram_conv > 0 && !ck->engram_conv_hist)
         ) {
         lz_ckpt_free(ck);
         if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_STATE_ALLOC);
@@ -1618,6 +1633,7 @@ int lz_ckpt_alloc(LZStateCkpt *ck, const LZModel *m, char *errbuf, int errlen) {
     ck->n_ssm_q8 = n_q8;
     ck->n_ssm_s  = n_s;
     ck->n_conv   = n_conv;
+    ck->n_engram_conv = n_engram_conv;
     ck->pos      = -1;          /* empty until a save */
     ck->epoch    = 0;
     return LZ_ERR_OK;
@@ -1632,19 +1648,21 @@ void lz_ckpt_free(LZStateCkpt *ck) {
     free(ck->ssm_s);
     free(ck->conv);
     free(ck->conv_q);
+    free(ck->engram_conv_hist);
     memset(ck, 0, sizeof(*ck));
 }
 
 int lz_ckpt_save(LZStateCkpt *ck, const LZRunState *s, const LZModel *m,
                  int pos, char *errbuf, int errlen) {
-    size_t n_q8, n_s, n_conv;
+    size_t n_q8, n_s, n_conv, n_engram_conv;
     size_t o_q8, o_s, o_conv;   /* byte offset of s's OWN active ring slot */
     if (!ck || !s || !m || pos < 0 || !ck->ssm_q8) {
         if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_NULL_ARG);
         return LZ_ERR_NULL_ARG;
     }
-    ckpt_sizes(&m->config, &n_q8, &n_s, &n_conv);
-    if (n_q8 != ck->n_ssm_q8 || n_s != ck->n_ssm_s || n_conv != ck->n_conv) {
+    ckpt_sizes(&m->config, &n_q8, &n_s, &n_conv, &n_engram_conv);
+    if (n_q8 != ck->n_ssm_q8 || n_s != ck->n_ssm_s || n_conv != ck->n_conv ||
+        n_engram_conv != ck->n_engram_conv) {
         if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_CKPT_SHAPE);
         return LZ_ERR_CKPT_SHAPE;
     }
@@ -1676,6 +1694,16 @@ int lz_ckpt_save(LZStateCkpt *ck, const LZRunState *s, const LZModel *m,
     else
 #endif /* LZ_CONV_FIXED */
     memcpy(ck->conv, s->conv_state + o_conv, n_conv * sizeof(float));
+    /* Engram cross-chunk history - forward.h's engram_hist/
+       engram_conv_hist field comments. Not ring-indexed (there is only
+       one copy on s, unlike ssm/conv above): a speculative round's own
+       rollback ring never touches these fields. */
+    memcpy(ck->engram_hist, s->engram_hist, sizeof(ck->engram_hist));
+    ck->engram_hist_n = s->engram_hist_n;
+    if (n_engram_conv > 0)
+        memcpy(ck->engram_conv_hist, s->engram_conv_hist,
+              n_engram_conv * sizeof(float));
+    ck->engram_conv_hist_n = s->engram_conv_hist_n;
     ck->pos   = pos;
     ck->epoch = s->epoch;
     return LZ_ERR_OK;
@@ -1683,7 +1711,7 @@ int lz_ckpt_save(LZStateCkpt *ck, const LZRunState *s, const LZModel *m,
 
 int lz_ckpt_restore(const LZStateCkpt *ck, LZRunState *s, const LZModel *m,
                     int *out_pos, char *errbuf, int errlen) {
-    size_t n_q8, n_s, n_conv;
+    size_t n_q8, n_s, n_conv, n_engram_conv;
     if (!ck || !s || !m || !ck->ssm_q8) {
         if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_NULL_ARG);
         return LZ_ERR_NULL_ARG;
@@ -1701,9 +1729,9 @@ int lz_ckpt_restore(const LZStateCkpt *ck, LZRunState *s, const LZModel *m,
         if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_CKPT_STALE);
         return LZ_ERR_CKPT_STALE;
     }
-    ckpt_sizes(&m->config, &n_q8, &n_s, &n_conv);
+    ckpt_sizes(&m->config, &n_q8, &n_s, &n_conv, &n_engram_conv);
     if (n_q8 != ck->n_ssm_q8 || n_s != ck->n_ssm_s || n_conv != ck->n_conv ||
-        ck->pos >= s->seq_len) {
+        n_engram_conv != ck->n_engram_conv || ck->pos >= s->seq_len) {
         if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_CKPT_SHAPE);
         return LZ_ERR_CKPT_SHAPE;
     }
@@ -1731,6 +1759,12 @@ int lz_ckpt_restore(const LZStateCkpt *ck, LZRunState *s, const LZModel *m,
     else
 #endif /* LZ_CONV_FIXED */
     memcpy(s->conv_state, ck->conv, n_conv * sizeof(float));
+    memcpy(s->engram_hist, ck->engram_hist, sizeof(s->engram_hist));
+    s->engram_hist_n = ck->engram_hist_n;
+    if (n_engram_conv > 0)
+        memcpy(s->engram_conv_hist, ck->engram_conv_hist,
+              n_engram_conv * sizeof(float));
+    s->engram_conv_hist_n = ck->engram_conv_hist_n;
     s->ssm_slot = 0;
     if (out_pos) *out_pos = ck->pos;
     return LZ_ERR_OK;

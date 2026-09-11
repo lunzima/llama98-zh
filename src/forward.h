@@ -1284,7 +1284,16 @@ void forward_engram(const LZModel *m, LZRunState *s,
    What is here, and what is deliberately not:
 
      ssm_state_q8 (+ _lo), ssm_state_s, conv_state   copied - 1.51 MB
-     kq8 / vq8 / ksq / vsq (the KV cache)            NOT copied
+     engram_hist, engram_conv_hist                   copied
+     kq8 / vq8 / ksq / vsq (the KV cache)             NOT copied
+
+   engram_hist/engram_conv_hist are cross-chunk recurrent state read by
+   forward_engram on every call (forward.h's own field comments), same
+   category as conv_state - a save that skips them and a perturbing
+   forward call in between leaves the restored state with the
+   PERTURBED history, not the saved one, since nothing ever writes it
+   back. Both are no-ops (stay zeroed) when config.engram is 0, so
+   copying them costs nothing on non-Engram models.
 
    The KV cache is append-only and indexed by absolute position, so
    rewinding to position P and forwarding different tokens simply
@@ -1315,6 +1324,16 @@ typedef struct {
        is no stored layout to stay compatible with. */
     short  *conv_q;
     size_t  n_ssm_q8, n_ssm_s, n_conv;   /* element counts, for a shape check */
+    /* Engram cross-chunk history - see forward.h's engram_hist and
+       engram_conv_hist field comments on LZRunState. engram_hist is
+       fixed-size like its source field; engram_conv_hist is malloc'd
+       to n_engram_conv floats (0 when config.engram is 0), matching
+       the row*dim sizing forward.c's alloc_engram block uses. */
+    int     engram_hist[31];
+    int     engram_hist_n;
+    float  *engram_conv_hist;
+    size_t  n_engram_conv;               /* element count, for a shape check */
+    int     engram_conv_hist_n;
     int     pos;                         /* tokens forwarded when taken; -1 = empty */
     unsigned epoch;                      /* the state's epoch at save time */
 } LZStateCkpt;
