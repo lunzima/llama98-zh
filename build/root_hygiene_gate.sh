@@ -49,7 +49,9 @@ src
 
 # Local-private: present in this working tree, excluded from the push.
 # build/ and .prof/ hold the gates and probes; docs/ the design notes;
-# gates.mk the verification targets; CLAUDE.md the working rules.
+# gates.mk the verification targets; CLAUDE.md the working rules;
+# music/ the MIDI, which ships from a repository of its own - see the
+# release rules in CLAUDE.md.
 LOCAL="
 .claude
 .git
@@ -57,6 +59,7 @@ LOCAL="
 CLAUDE.md
 docs
 gates.mk
+music
 "
 
 # Build products the Makefile writes here by design, and the runtime ini

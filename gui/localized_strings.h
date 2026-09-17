@@ -227,6 +227,38 @@ typedef enum {
     /* --- settings dialog: the reply-finished beep --- */
     LZ_STR_DLG_BEEP,
 
+    /* --- the sound window ---
+       Its own window rather than more rows on the settings dialog: the
+       settings there are all about what the MODEL does, and how loud
+       the machine is while it does it is a different question. */
+    LZ_STR_MENU_SOUND,
+    LZ_STR_DLG_SOUND_TITLE,
+    LZ_STR_DLG_MUSIC_ON,
+    LZ_STR_DLG_ENGINE,
+    LZ_STR_DLG_ENGINE_SYS,
+    /* The wavetable row says in the label that it has no bank yet.
+       lz_music_engine_pick falls silently back to system MIDI, so
+       without this the user would select it, hear music, and believe
+       they had compared two engines that were one. */
+    LZ_STR_DLG_ENGINE_WAVE,
+    LZ_STR_DLG_INSTRUMENT,
+    /* ONE string holding the eleven menu rows, semicolon-separated,
+       read with lz_music_list_at - the same splitter the playlist
+       uses. Eleven separate ids would be eleven places for the two
+       languages to fall out of step; as one string the lengths can be
+       compared, which is what tests/test_gui_music.c does. */
+    LZ_STR_DLG_INST_LIST,
+    LZ_STR_DLG_SPEED,
+    LZ_STR_DLG_SPEED_FOLLOW,
+    LZ_STR_DLG_SPEED_FIXED,
+    LZ_STR_DLG_BASE_TPS,
+    LZ_STR_DLG_MUS_VOLUME,
+    LZ_STR_DLG_FINISH,
+    LZ_STR_DLG_FINISH_NONE,
+    LZ_STR_DLG_FINISH_BEEP,
+    LZ_STR_DLG_FINISH_CHIME,
+    LZ_STR_ERR_BAD_BASE,
+
     LZ_STR_COUNT
 } LZStr;
 

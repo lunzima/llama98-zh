@@ -340,6 +340,167 @@ typedef struct {
        model_walk's MTP-block FFN specs (model.c) read this; every other
        DK_INTER site stays body-only. */
     int mtp_intermediate_size;
+    /* config.json "mtp_n_draft"; 1 (the only shape upstream or any
+       checkpoint before this field existed has) when the key is
+       absent. >1 selects
+       LZMtp's five-tensor DSpark shape (main_proj/depth_embed/
+       mask_embed/markov_embed/markov_proj) in place of `fc` - see that
+       struct's own comment. mtp_markov_rank is 0 (meaningless) at
+       mtp_n_draft==1, and at >1 is read directly off markov_embed's own
+       shape at load time rather than duplicated here as a second
+       source of truth for the same number. */
+    int mtp_n_draft;
+    /* config.json "mtp_markov_rank"; meaningless (0) at mtp_n_draft<=1.
+       A real, independently-declared config field rather than something
+       inferred from markov_embed's own tensor shape at load time, same
+       convention every other DK_* dimension in this file follows
+       (declared in config.json, then checked against the tensor that
+       ships) - so a mismatch between what the checkpoint's config
+       claims and what its own weights actually are is a load error,
+       not a silent reshape. engine/mtp_head.py's own __init__ derives
+       this same number from vocab_size when not given explicitly
+       (DSpark's r=256, scaled) - the derivation lives on the training
+       side; this field is just where its RESULT is recorded for the
+       engine to check against. */
+    int mtp_markov_rank;
+
+    /* CED (Causal Encoder-Decoder), DeepSeek-V4.1 report SS2.2/SS3.2.2.
+       config.json "ced_split"/"ced_replay_w" - 0/0 (default) is off and
+       must reproduce a model that never carried these keys bit for bit
+       (same "off means off" contract mtp_n_draft/engram/use_subn all
+       already have).
+
+       ced_split: the encoder/decoder boundary layer index S (layers
+       0..S-1 are the causal encoder, S..n_layers-1 the decoder). This
+       engine's OWN full-attention half of CED (the decoder's global K/V
+       projected from layer S-1's exit hidden, never windowed - Eq. 1)
+       is a SEPARATE, already-shipped mechanism (`--ced`, forward.c's
+       `s->ced`/`ced_skip_last`) that predates this field and does not
+       read it; ced_split here is consumed ONLY by the KDA bounded-
+       replay reset below. The two mechanisms are independent and may
+       be on or off in any combination - see docs/dsv41-optimization-
+       menu.md's E3 section for why one field cannot serve both (the
+       full-attention half never gets windowed at all, only the KDA
+       half does).
+
+       ced_replay_w: the KDA "SWA Bounded Replay" analog (Kunkun has no
+       SWA - see the same doc section for why a KDA layer plays that
+       role here). For KDA layers at index >= ced_split,
+       lz_forward_batch resets the recurrent/conv state to empty at an
+       offset within THAT CALL's own token span (see its own comment
+       for why it is call-relative, not a global prompt position),
+       matching the training-side simulation already shipped
+       (engine/kunmoe_modeling.py's _kda_packing_hook/ced_replay_w - a
+       real, already-trained-against mechanism, not a new invention).
+       .prof/ced_replay_w_probe.py drives that same training-side
+       mechanism directly and isolates the reset's own cost from CED's
+       own (separate, already-accepted) full-attention approximation
+       cost - see docs/dsv41-optimization-menu.md's E3 section for the
+       measured numbers and why the isolation matters. */
+    int ced_split;
+    int ced_replay_w;
+
+    /* S1, attn_kv_share (DeepSeek-V4.1 report SS2.3.1's "Reuse" mode).
+       config.json "attn_kv_share" (a JSON true/false) and the v10
+       model.bin header tail. 0 - the default, and the only value a bin
+       file written before v10 can carry - is off and reproduces a model
+       that never set the key bit for bit.
+
+       THE SOURCE is the FIRST full_attention layer of the stack, the
+       TARGETS are every full_attention layer after it, and fewer than
+       two full-attention layers makes the key a no-op (config.json's own
+       rule, engine/kunmoe_modeling.py's _wire_attn_kv_share).
+
+       The training side hands each target the source attention's
+       k_proj/v_proj/k_norm MODULES, and the input RMSNorms SubLN carries
+       inside them, so save_pretrained emits those five tensors for the
+       source layer only - a target layer's copy is absent from the
+       checkpoint rather than equal to the source's. model_walk therefore
+       skips the five specs on a target layer and apply_kv_share gives it
+       the source layer's LZTensors, which makes them SHARED STORAGE on a
+       target layer: lz_free frees them once, from the source.
+
+       WHAT IS SHARED IS THE WEIGHTS AND THE INPUT. The training side also
+       swaps the INPUT (`_kv_swap_input` feeds the source attention's
+       captured input to the shared projections for a target layer's call
+       too), so a trained target layer's K and V ARE the source layer's
+       own rather than its own hidden state re-projected. forward.c
+       captures the source's attention input into LZRunState.kvshare_x
+       per chunk and hands it to every target layer's k/v projections
+       (forward.h's own comment on that buffer); Q still reads the target
+       layer's own input, because only the two K/V projections are fed
+       the source's in the trained model. */
+    int attn_kv_share;
+
+    /* S4, MLA-style low-rank Q/O (DeepSeek-V4.1 report SS2.1). config.json
+       "mla_q_lora_rank"/"mla_o_lora_rank" - 0/0 (default, matching
+       engine/kunmoe_modeling.py's LowRankLinear/_wire_mla's own None/None
+       default) is off and reproduces a model that never carried these
+       keys bit for bit.
+
+       Global, not per-layer: _wire_mla replaces q_proj/o_proj on EVERY
+       full-attention BODY layer uniformly when set (never the MTP
+       head's own attention, which _wire_mla's loop over
+       self.model.layers never reaches). LZLayer's own mla_q_on/mla_o_on
+       are the per-layer flags setup_layers derives from these two
+       fields for exactly that reason: the MTP block's LZLayer
+       (m->mtp->blk) is calloc'd separately and setup_layers never
+       touches it, so its mla_q_on/mla_o_on stay 0 - reading these two
+       config fields directly in forward_attn.c's attn_impl would get
+       that wrong the one time attn_impl runs against the MTP block
+       (lz_debug_mtp_attn_t1_slow's slow-path call into forward_attn).
+
+       Mutually exclusive with use_subn, same reason kunmoe_modeling.py's
+       _wire_mla asserts against it: LowRankLinear does not compose with
+       either BitLinear or SubLN's per-projection input norm. Refused at
+       load time (LZ_ERR_CFG_MLA_SUBN) rather than silently picking one,
+       same policy as the rope_theta top-level-vs-nested collision
+       check. */
+    int mla_q_lora_rank;
+    int mla_o_lora_rank;
+
+    /* S2, DeepSeek-V4.1 report SS2.3 (CSA2 - Compressed Sparse
+       Attention). config.json "csa2_layers" (a JSON array of layer
+       indices, each of which must be full_attention) - absent/empty is
+       off and reproduces a model that never carried the key bit for
+       bit. Formulas cited and verified against two primary sources
+       (arXiv:2512.02556 indexer, arXiv:2606.19348 compression) - see
+       engine/csa2.py's own module docstring (training-side reference)
+       and docs/dsv41-optimization-menu.md's CSA2 section for the
+       citation trail and the deliberate simplifications this engine
+       side does not reproduce (no cross-layer sharing - S1's
+       attn_kv_share already covers a simpler version of that axis; no
+       layered indexer; no sliding-window branch; no attention-sink
+       integration; no grouped output projection; no composition with
+       S4's shared low-rank latent - unlike the training-side reference,
+       which does support that composition, this engine side always
+       expects its OWN dedicated csa2_w_dq_idx tensor, so a checkpoint
+       trained with S4+CSA2 sharing the latent on the SAME layer is
+       refused by a missing-tensor error here, not silently
+       misinterpreted).
+
+       PER-LAYER, not global like mla_q_lora_rank/mla_o_lora_rank above:
+       csa2_layers may name a SUBSET of the full-attention layers (S1's
+       attn_kv_share, the other CSA2-derived mechanism, is also
+       per-layer for the same reason). csa2_on[] holds which layer
+       indices were named (parsed once at config-load time); LZLayer's
+       own csa2_on flag (setup_layers-derived, same pattern as
+       mla_q_on/mla_o_on) is what forward.c and model_walk actually
+       read - see LZLayer's own comment for why the per-layer flag,
+       not a lookup into this array, is the thing every consumer reads.
+
+       The rest are this project's own sizing (32 indexer heads/head_dim
+       128/top-k 512 are V4.1's numbers for a 40-layer, hidden=5120
+       model) - same posture mla_q_lora_rank's own comment documents,
+       and must match engine/csa2.py's identically-named config fields
+       exactly since a checkpoint's tensor shapes are fixed at export
+       time by whatever those fields were during training. */
+    int csa2_on[LZ_MAX_LAYERS];
+    int csa2_compress_m;
+    int csa2_topk;
+    int csa2_indexer_heads;
+    int csa2_indexer_head_dim;
+    int csa2_indexer_q_lora_rank;
 
     /* RoPE. Note rope_theta hides inside the nested rope_parameters;
        the top level does not expose it. */
@@ -427,12 +588,61 @@ typedef struct {
     LZTensor down_norm;              /* (intermediate) f32 - down_proj input RMSNorm */
 
     /* full_attention only */
-    LZTensor q_proj;                 /* (attn_qgate_dim, hidden) Q8 */
+    LZTensor q_proj;                 /* (attn_qgate_dim, hidden) Q8 - present iff !mla_q_on */
     LZTensor k_proj;                 /* (attn_kv_dim, hidden) Q8 */
     LZTensor v_proj;                 /* (attn_kv_dim, hidden) Q8 */
-    LZTensor o_proj;                 /* (hidden, attn_q_dim) Q8 */
+    LZTensor o_proj;                 /* (hidden, attn_q_dim) Q8 - present iff !mla_o_on */
     LZTensor q_norm;                 /* (head_dim) f32 */
     LZTensor k_norm;                 /* (head_dim) f32 */
+
+    /* S4, MLA low-rank Q/O (model.h's own mla_q_lora_rank/mla_o_lora_rank
+       comment on LZModelConfig). Present iff mla_q_on/mla_o_on - the
+       PER-LAYER flags setup_layers derives from those two global config
+       fields, not the fields themselves (see that comment for why the
+       distinction matters for the MTP block's own LZLayer). q_proj_down
+       (mla_q_lora_rank, hidden) feeds q_proj_up (attn_qgate_dim,
+       mla_q_lora_rank) in place of q_proj; o_proj_down
+       (mla_o_lora_rank, attn_q_dim) feeds o_proj_up (hidden,
+       mla_o_lora_rank) in place of o_proj. Named to match
+       engine/kunmoe_modeling.py's LowRankLinear.down/.up exactly, one
+       level up (q_proj.down/q_proj.up as state-dict keys, q_proj_down/
+       q_proj_up as C fields - a "." is not a legal C identifier
+       character). */
+    LZTensor q_proj_down, q_proj_up;
+    LZTensor o_proj_down, o_proj_up;
+    int mla_q_on, mla_o_on;          /* setup_layers-derived, see above */
+
+    /* S2, CSA2 (model.h's own csa2_on[]/csa2_compress_m comment on
+       LZModelConfig). Present iff csa2_on (setup_layers-derived, same
+       per-layer-flag pattern as mla_q_on/mla_o_on) - replaces this
+       layer's ENTIRE attention forward (forward_csa2.c), not just
+       q_proj/o_proj, so q_proj/k_proj/v_proj/o_proj/q_norm/k_norm above
+       stay bound and ARE still used (forward_csa2 reads the main
+       query through q_proj/q_norm exactly like ordinary full attention;
+       only K/V are replaced by the compressed entries below).
+         csa2_w_kv, csa2_w_gate       (head_dim, hidden) each - main
+                                       compression (Eq 9-12 simplified)
+         csa2_w_kv_idx, csa2_w_gate_idx (csa2_indexer_head_dim, hidden)
+                                       each - indexer key compression,
+                                       same algorithm, own weights
+         csa2_w_weights               (csa2_indexer_heads, hidden) -
+                                       Eq 1's per-head w_{t,h}
+         csa2_w_dq_idx                (csa2_indexer_q_lora_rank, hidden)
+                                       - indexer query down-projection.
+                                       ALWAYS present on this engine side
+                                       (unlike the training-side
+                                       reference, no S4-shared-latent
+                                       composition - see
+                                       LZModelConfig's own comment)
+         csa2_w_uq_idx                (csa2_indexer_heads *
+                                       csa2_indexer_head_dim,
+                                       csa2_indexer_q_lora_rank) -
+                                       indexer query up-projection */
+    LZTensor csa2_w_kv, csa2_w_gate;
+    LZTensor csa2_w_kv_idx, csa2_w_gate_idx;
+    LZTensor csa2_w_weights;
+    LZTensor csa2_w_dq_idx, csa2_w_uq_idx;
+    int csa2_on;                     /* setup_layers-derived, see above */
 
     /* SubLN (use_subn=1 only): full attention's per-projection INPUT
        RMSNorms. Distinct from q_norm/k_norm above, which are Qwen3.5's
@@ -535,13 +745,35 @@ typedef struct {
 
 /* The MTP / "next-N" head. One full_attention block plus four tensors.
    Names below are upstream's (Qwen/Qwen3.5-0.8B); llama.cpp calls the
-   same four eh_proj / shared_head_norm / hnorm / enorm. */
+   same four eh_proj / shared_head_norm / hnorm / enorm.
+
+   fc (config.mtp_n_draft == 1, the only shape upstream ever ships) and
+   the five DSpark tensors below (config.mtp_n_draft > 1) are MUTUALLY
+   EXCLUSIVE, matching engine/mtp_head.py's MtpHead.__init__ exactly -
+   never both bound on the same checkpoint. See engine/mtp_head.py's own
+   __init__ docstring for the DSpark derivation (arXiv:2607.05147) this
+   five-tensor shape implements: main_proj/depth_embed/mask_embed give
+   the K-slot parallel base stage (lz_mtp_draft_batch); markov_embed/
+   markov_proj are the cheap one-token-lookback logit correction
+   (lz_mtp_markov_correct) - two SEPARATE functions because the base
+   stage has no cross-slot dependency and the Markov correction does
+   (needs the PREVIOUS slot's already-decided draft token), so they
+   cannot be one call the way fc's single-slot path is. */
 typedef struct {
     LZLayer  blk;                    /* mtp.layers.0.* - a full_attention layer */
-    LZTensor fc;                     /* mtp.fc (hidden, 2*hidden) */
+    LZTensor fc;                     /* mtp.fc (hidden, 2*hidden) - mtp_n_draft==1 only */
     LZTensor norm;                   /* mtp.norm (hidden) - before the shared head */
     LZTensor pre_fc_norm_hidden;     /* (hidden) - on the body's hidden state */
     LZTensor pre_fc_norm_embedding;  /* (hidden) - on the next token's embedding */
+
+    /* mtp_n_draft > 1 only (DSpark, arXiv:2607.05147). */
+    LZTensor main_proj;              /* mtp.main_proj (hidden, 3*hidden) */
+    LZTensor depth_embed;            /* mtp.depth_embed (mtp_n_draft, hidden) */
+    LZTensor mask_embed;             /* mtp.mask_embed (hidden) - one shared row,
+                                        not a table: every slot i>=1 reads the
+                                        SAME vector, see mtp_head.py's forward */
+    LZTensor markov_embed;           /* mtp.markov_embed (vocab_size, markov_rank) */
+    LZTensor markov_proj;            /* mtp.markov_proj (vocab_size, markov_rank) */
 } LZMtp;
 
 /* Engram: conditional n-gram memory. Global module (not per-layer),
@@ -682,5 +914,15 @@ int lz_read_weights(LZModel *m, char *errbuf, int errlen);
 void lz_free(LZModel *m);
 
 const char *lz_layer_type_name(int t);
+
+/* S1 attn_kv_share's layer rule, from the config alone (the field's own
+   comment above): lz_kv_share_src is the index of the layer whose K/V the
+   others reuse, or -1 when nothing is shared; lz_kv_share_target says
+   whether layer li takes them. Both loaders and forward.c read these, so
+   the rule is written once - the loader for which tensors to expect, the
+   forward pass for whose input reaches a target layer's K/V projections
+   (forward.c's kvshare_x). */
+int lz_kv_share_src(const LZModelConfig *c);
+int lz_kv_share_target(const LZModelConfig *c, int li);
 
 #endif

@@ -225,6 +225,7 @@ extern lz_i64 lz_debug_n_lmhead;
    window is set; non-zero only if evicted rows were really skipped. */
 extern lz_i64 lz_debug_attn_skip;
 extern lz_i64 lz_debug_ced_skipped;
+extern lz_i64 lz_debug_ced_replay_layers;
 extern const char *lz_dump_prefill_path;
 extern lz_i64 lz_debug_prefill_dumps;
 /* Whether the epi dispatch left the C loop for this build's vector
@@ -2488,6 +2489,14 @@ int main(int argc, char **argv) {
                the skip happened at all. */
             printf("[ced: %s, %lld prefill positions skipped]\n",
                    st.ced ? "on" : "off", lz_debug_ced_skipped);
+            /* Same positive-control shape as the ced line above: the
+               reset's whole claim is also "the output does not move
+               beyond what CED's own approximation already costs", so
+               the layer count is the only line that says the reset
+               fired at all. 0 is correct whenever ced_replay_w is 0 or
+               every KDA layer is below ced_split. */
+            printf("[ced-replay: %lld layers reset]\n",
+                   lz_debug_ced_replay_layers);
             if (lz_dump_prefill_path)
                 printf("[dump-prefill: %lld write(s) to %s]\n",
                        lz_debug_prefill_dumps, lz_dump_prefill_path);

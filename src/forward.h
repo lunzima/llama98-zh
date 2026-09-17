@@ -485,6 +485,16 @@ typedef struct {
                                    the same path (sscale = cmax * LZ_Q15_INV) */
     float *ktmp;                /* (attn_kv_dim) k before it enters the cache (post-rotation, quantized) */
     float *vtmp;                /* (attn_kv_dim) same for v */
+    /* S1 attn_kv_share: the SOURCE layer's attention input for the
+       current chunk (nt_cap x hidden, token-major like the buffers
+       above). forward_chunk copies s->xb into it when it runs the source
+       layer and hands it to every target layer's k/v projections,
+       because a trained target layer's K and V ARE the source layer's -
+       not a re-projection of the target's own input (model.h's
+       attn_kv_share comment). Written and read inside ONE forward_chunk
+       call, never across chunks: the source layer always runs before a
+       target layer of the same call. */
+    float *kvshare_x;
     /* KV cache Q8: kq8/vq8 hold the rotated k/v (group 32), dequantized at score time.
        (K group 16 measured no gain.)
        Depth is n_full_layers PLUS ONE when m->mtp != NULL: the MTP
@@ -706,6 +716,23 @@ typedef struct {
     float *mtp_emb_raw;        /* (nt_cap*hidden) raw embedding lookup scratch, pre-norm */
     float *mtp_chain;          /* (hidden) chained "hidden" register, see above - single-token only, prefill never touches it */
     float *mtp_draft_logits;   /* (vocab) one draft step's logits */
+    /* DSpark (arXiv:2607.05147), mtp_n_draft > 1 only - see
+       lz_mtp_draft_batch/lz_mtp_markov_correct in forward.c. ONE slot's
+       worth of concat scratch, reused across the K-slot loop (the loop
+       is sequential in this engine regardless of the slots' logical
+       independence - see lz_mtp_draft_batch's own comment on why a
+       for-loop is a faithful, not a compromised, implementation of
+       "no self-chaining"), so it does not need to be K times as wide
+       the way mtp_concat above is nt_cap times as wide for a genuinely
+       batched prefill. Capped at LZ_SPEC_K_MAX slots, the same existing
+       runtime ceiling on draft depth - mtp_n_draft beyond it is a load-
+       time error (see lz_open), not a silent truncation. */
+    float *mtp_kdraft_concat;      /* (3*hidden) main_proj input, one slot at a time */
+    float *mtp_kdraft_logits;      /* (LZ_SPEC_K_MAX*vocab) base logits, one row per slot */
+    float *mtp_kdraft_correction;  /* (vocab) markov_proj output scratch - kept
+                                      SEPARATE from mtp_kdraft_logits, which
+                                      lz_mtp_markov_correct must add onto,
+                                      not overwrite */
     /* The MTP block's OWN position counter, separate from the body's
        absolute token position - NOT the same number, because
        lz_mtp_prefill (below) only ever covers n_prompt-1 positions
@@ -1163,6 +1190,74 @@ typedef struct {
        crash, no error, just a different answer. */
     unsigned epoch;
 
+    /* S2, CSA2 (model.h's own csa2_on[]/csa2_compress_m comment).
+       Indexed by s->cache_idx[layer] (0..n_full_layers-1), the SAME
+       index the ordinary KV cache planes above use - sized for every
+       full-attention layer even though only some are csa2_on, matching
+       kq8/vq8's own "sized for the class, not for which layers in it
+       actually use this precision tier" convention (see e.g. kf32's own
+       comment). All NULL when no layer has csa2_on (allocated
+       conditionally, checked in forward_csa2.c the same way kf32 is
+       checked in forward_attn.c).
+
+       Sized against s->seq_len (the FULL configured context), not
+       s->kv_slots (which reflects the UNRELATED --attn-sink/--attn-
+       window eviction mechanism - CSA2 is its own, separate sparsity
+       mechanism, top-k over compressed blocks, and mixing it with
+       token-level eviction is not a combination this project defines).
+
+         csa2_pending_{c,z}       (n_full, csa2_compress_m, head_dim)
+                                   raw per-position contributions to the
+                                   CURRENTLY OPEN (not yet finalized)
+                                   compressed block, indexed by
+                                   position % csa2_compress_m
+         csa2_pending_{c,z}_idx   same shape, csa2_indexer_head_dim -
+                                   the indexer key's own open block
+         csa2_comp_ring           (n_full, max_blocks, head_dim) -
+                                   FINALIZED main compressed entries,
+                                   already normed+RoPE'd, ready to
+                                   gather into attention
+         csa2_idx_comp_ring       (n_full, max_blocks,
+                                   csa2_indexer_head_dim) - finalized
+                                   indexer keys, same finalization point
+         csa2_n_blocks            (n_full,) how many entries of the two
+                                   rings above are actually finalized so
+                                   far for that layer - forward_csa2.c's
+                                   own "which blocks may this query see"
+                                   count, NOT max_blocks (most of the
+                                   ring is unwritten future capacity
+                                   until generation reaches it)
+
+       max_blocks = ceil(seq_len / csa2_compress_m), the ring's fixed
+       allocated depth - a flat array sized for the worst case, same
+       convention conv_state/ssm_state_q8 use for their own per-layer
+       recurrent state, not a growable/wrapping ring (CSA2 blocks are
+       never evicted once finalized, unlike the KV ring's spec-rollback
+       ring above). */
+    float *csa2_pending_c, *csa2_pending_z;
+    float *csa2_pending_c_idx, *csa2_pending_z_idx;
+    float *csa2_comp_ring, *csa2_idx_comp_ring;
+    int   *csa2_n_blocks;
+    /* Per-token scratch, one layer/token at a time (forward_csa2.c
+       cannot batch across a chunk's nt tokens the way ordinary
+       attention does - see its own file comment), dedicated rather
+       than sliced out of an existing buffer like s->qg/s->attn_out:
+       indexer_head_dim/indexer_heads/indexer_q_lora_rank are new,
+       independent dimensions with no size relationship to any existing
+       buffer's own width, and borrowing one would be a silent
+       assumption about their relative sizes that a config change could
+       break with no error. Main-path query/gate/output DO reuse
+       s->qg/s->qh/s->attn_out - see forward_csa2.c's own comment. */
+    float *csa2_scores;              /* (max_blocks) */
+    int   *csa2_topk_idx;            /* (topk) */
+    float *csa2_topk_val;            /* (topk) */
+    float *csa2_c_j, *csa2_z_j;      /* (head_dim) */
+    float *csa2_c_j_idx, *csa2_z_j_idx;   /* (csa2_indexer_head_dim) */
+    float *csa2_qidx;                /* (csa2_indexer_heads * csa2_indexer_head_dim) */
+    float *csa2_widx;                /* (csa2_indexer_heads) */
+    float *csa2_cq_idx;              /* (csa2_indexer_q_lora_rank) */
+    float *csa2_attn_probs;          /* (topk) */
+
     /* Where lz_forward writes what it just did, or NULL for "do not
        bother". It rides on the run state rather than on lz_forward's
        parameter list because every caller already threads this struct
@@ -1189,7 +1284,23 @@ void attn_wsum_plane(LZRunState *s, float *dst, const int8_t *vplane,
                      const float *vs, int hd, int kvd, int kvh, int pos,
                      int walk_t0, int noring, int dead0, int dead1);
 void rot_head(float *v, int hd, int n);
+/* Full attention for one chunk. kv_in, when not NULL, is the tensor the
+   K/V projections read instead of this layer's own s->xb - the SOURCE
+   layer's attention input for the same positions, which is what an
+   attn_kv_share target layer's trained K/V are (model.h's attn_kv_share
+   comment; forward.c's kvshare_x holds it). Q keeps reading s->xb: only
+   the two K/V projections are fed the source's input in the trained
+   model. NULL is the ordinary path and must stay bit-identical to a
+   build that never had this parameter. */
 void forward_attn(const LZModel *m, LZRunState *s,
+                  const LZLayer *L, int layer, int pos0, int nt,
+                  const float *kv_in);
+/* S2, CSA2 (src/forward_csa2.c). Dispatched from forward_chunk in place
+   of forward_attn when L->csa2_on - see model.h's LZModelConfig.
+   csa2_on[] comment for the mechanism and forward_csa2.c's own header
+   comment for why this cannot share forward_attn's KV-cache-based
+   design (compressed blocks, not raw per-position K/V). */
+void forward_csa2(const LZModel *m, LZRunState *s,
                   const LZLayer *L, int layer, int pos0, int nt);
 /* The KV half of forward_attn and nothing else: the q/k/v projections
    minus q, the per-token QK-Norm / RoPE / Hadamard on k and v, and the
@@ -1203,9 +1314,13 @@ void forward_attn(const LZModel *m, LZRunState *s,
    the same quantizer. q is dropped, and that is safe for exactly that
    reason - q_proj's output reaches k and v through nothing.
 
-   The caller must have prepared s->xb for these positions already. */
+   The caller must have prepared s->xb for these positions already.
+   kv_in is forward_attn's own parameter and means the same thing here:
+   --ced can run its KV-only write on an attn_kv_share target layer, and
+   that layer's K/V must come from the source's input there too. */
 void forward_attn_kv_only(const LZModel *m, LZRunState *s,
-                          const LZLayer *L, int layer, int pos0, int nt);
+                          const LZLayer *L, int layer, int pos0, int nt,
+                          const float *kv_in);
 /* One projection with an int16 exit at the consumer's own exponent.
    EIGHT call sites in three files, which is why it is not called
    kda_i16_proj any more: forward_kda.c has four, forward_moe.c three
@@ -1437,6 +1552,62 @@ float *lz_forward_capture(const LZModel *m, LZRunState *s, int token, int pos);
    Returns a pointer to s->mtp_draft_logits (vocab entries), or NULL if
    m->mtp is NULL or pos is out of range. */
 float *lz_mtp_draft_step(const LZModel *m, LZRunState *s, int next_token, int pos);
+
+/* Debug-only: see forward.c's own comment next to the definition. */
+extern int lz_debug_mtp_attn_t1_slow;
+
+/* DSpark's T=1 attention shortcut - see forward.c's own extensive
+   comment next to the definition for the full argument (why K is
+   provably irrelevant, and the tier-by-tier V-side coverage). xb-in/
+   xb2-out, same convention forward_attn itself uses. Not static:
+   .prof/mtp_kdraft_check.c calls it directly for the bit-identity
+   comparison against forward_attn. */
+void mtp_attn_t1(const LZModel *m, LZRunState *s, const LZLayer *L);
+
+/* DSpark (arXiv:2607.05147), config.mtp_n_draft > 1 only: K
+   independent draft slots from the SAME anchor h_body, no self-chain.
+   `h_body` is the anchor's raw (pre-final-norm) hidden state - same
+   convention lz_forward_capture already seeds s->mtp_chain with for the
+   n_draft==1 chain's first step. `next_token` is the anchor's own real,
+   known next token (slot 0's input); slots 1..K-1 always read
+   m->mtp->mask_embed instead - see engine/mtp_head.py's MtpHead.forward
+   docstring, this is the fix for the found train/inference gap, not an
+   inference-only shortcut. `k` is this call's actual draft count
+   (<= config.mtp_n_draft, itself <= LZ_SPEC_K_MAX - see alloc_mtp).
+
+   Writes k rows of BASE (pre-Markov) logits into s->mtp_kdraft_logits and
+   returns it, or NULL if m->mtp is NULL, config.mtp_n_draft <= 1, or
+   next_token is out of range. Each slot's own attention runs at
+   position 0 of the MTP's reserved cache slot (LZ_MTP_CACHE_LAYER) -
+   deliberately NOT chained position-by-position the way
+   lz_mtp_draft_step advances `pos`, because each slot is an
+   independent, from-empty-state computation, not a continuation of the
+   previous one; the K slots being processed by a C for-loop rather
+   than genuine hardware parallelism is an implementation detail of
+   this scalar reference, not a reintroduction of the self-chain
+   dependency that made lz_mtp_draft_step's k>=2 path train/inference-
+   mismatched (see docs/dsv41-optimization-menu.md's DSpark section).
+
+   Markov correction is NOT applied here - see lz_mtp_markov_correct,
+   a separate call because it needs the PREVIOUS slot's already-decided
+   draft token, which is a sampling-policy decision this function does
+   not make (that decision is generate.c's - see lz_spec_round_dspark /
+   lz_spec_round_dspark_temp, which wire this into lz_generate's own
+   draft/verify loop). */
+float *lz_mtp_draft_batch(const LZModel *m, LZRunState *s, int next_token,
+                          int k);
+
+/* The DSpark Markov head's one-step lookback correction (Eq. 4-5):
+   adds markov_proj(markov_embed(x_prev)) onto `logits` (vocab entries)
+   IN PLACE. `x_prev` is the real token immediately preceding the
+   position `logits` was computed for - the anchor's own next token for
+   slot 0's correction, or the token DECIDED for slot i-1 (by whatever
+   sampling policy the caller uses) for slot i>=1's. Cheap by
+   construction (one embedding lookup + one small rank projection, no
+   attention, no second transformer pass) - see model.h's LZMtp comment
+   on why this does not compound the way a real self-chain would. */
+void lz_mtp_markov_correct(const LZModel *m, LZRunState *s, int x_prev,
+                           float *logits);
 
 /* Speculative-decode VERIFY pass: like lz_forward_batch (same chunking,
    same bit-identical-to-token-by-token guarantee for the hidden states),

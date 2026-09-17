@@ -41,7 +41,7 @@ TOK=${TOK:-1,2,3,4,5,6,7,8,9,10}
 # replacement exists; kunkun98-pilot-20260806 has none, because nothing
 # on disk is a 12-layer GDN at that geometry. So the list is shorter than
 # it was and the gap is not filled by anything.
-MODELS=${MODELS:-"/mnt/e/LLM/models/_armgate3 /mnt/e/LLM/models/kunmoe-v2"}
+MODELS=${MODELS:-"/mnt/e/LLM/models/_armgate3 /mnt/e/LLM/models/kunkun98"}
 W=${W:-/tmp/armreg}
 
 rm -rf "$W"; mkdir -p "$W"

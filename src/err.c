@@ -76,6 +76,9 @@ static const char *const LZ_ERR_EN[LZ_ERR_COUNT] = {
     /* LZ_ERR_CFG_ROPE_CONFLICT */ "rope_parameters %s=%d disagrees with %s=%d; transformers uses the nested value, so the two must match",
     /* LZ_ERR_CFG_ROPE_YARN_FIELDS */ "rope_type=yarn needs an explicit factor and original_max_position_embeddings; factor x1000=%d orig_max=%d",
     /* LZ_ERR_CFG_FFN_ACT */ "ffn_activation is not one of none/situ/gptoss_clamp, got %s",
+    /* LZ_ERR_CFG_MLA_SUBN */ "mla_q_lora_rank/mla_o_lora_rank is not compatible with use_subn",
+    /* LZ_ERR_CFG_CSA2_LAYER */ "csa2_layers names layer %d, which is not full_attention",
+    /* LZ_ERR_CFG_UNSUPPORTED_ARCH */ "checkpoint is neither Qwen3.5 (GDN) nor KunMoe (KDA) shape; this engine loads only those two generations",
     /* LZ_ERR_TENSOR_MISSING */ "missing tensor %s",
     /* LZ_ERR_TENSOR_DIMS */ "tensor %s dim mismatch: want %d dims, got %d",
     /* LZ_ERR_TENSOR_SHAPE */ "tensor %s dim %d mismatch: want %lld, got %lld",
@@ -176,6 +179,14 @@ static const char *const LZ_ERR_EN[LZ_ERR_COUNT] = {
                             "linear-attention last layer has no such K/V, so "
                             "the run would be unchanged and the flag would "
                             "read as a speedup that never happened.",
+    /* LZ_ERR_MTP_NDRAFT */ "mtp_n_draft is %d, exceeding LZ_SPEC_K_MAX "
+                            "(%d) - the same runtime ceiling on draft "
+                            "depth every other speculative-decode path "
+                            "already respects.",
+    /* LZ_ERR_MTP_MARKOV_RANK */ "mtp_markov_rank is %d, exceeding "
+                            "3*hidden_size (%d) - markov_embed's row is "
+                            "read into a fixed 3*hidden scratch buffer "
+                            "shared with the base draft stage.",
     /* LZ_ERR_INTERNAL */ "internal error"
 };
 
@@ -238,6 +249,9 @@ static const char *const LZ_ERR_ZH[LZ_ERR_COUNT] = {
     /* LZ_ERR_CFG_ROPE_CONFLICT */ "rope_parameters \xe9\x87\x8c\xe7\x9a\x84 %s=%d \xe4\xb8\x8e %s=%d \xe5\x86\xb2\xe7\xaa\x81\xef\xbc\x9btransformers \xe7\x94\xa8\xe5\xb5\x8c\xe5\xa5\x97\xe5\x80\xbc\xef\xbc\x8c\xe4\xb8\xa4\xe8\x80\x85\xe5\xbf\x85\xe9\xa1\xbb\xe4\xb8\x80\xe8\x87\xb4",
     /* LZ_ERR_CFG_ROPE_YARN_FIELDS */ "rope_type=yarn \xe9\x9c\x80\xe8\xa6\x81\xe6\x98\xbe\xe5\xbc\x8f\xe7\xbb\x99\xe5\x87\xba factor \xe4\xb8\x8e original_max_position_embeddings\xef\xbc\x9b" "factor x1000=%d orig_max=%d",
     /* LZ_ERR_CFG_FFN_ACT */ "ffn_activation \xe5\xbf\x85\xe9\xa1\xbb\xe6\x98\xaf none/situ/gptoss_clamp \xe4\xb9\x8b\xe4\xb8\x80\xef\xbc\x8c\xe5\xae\x9e\xe9\x99\x85\xe4\xb8\xba %s",
+    /* LZ_ERR_CFG_MLA_SUBN */ "mla_q_lora_rank/mla_o_lora_rank \xe4\xb8\x8e use_subn \xe4\xb8\x8d\xe5\x85\xbc\xe5\xae\xb9",
+    /* LZ_ERR_CFG_CSA2_LAYER */ "csa2_layers \xe4\xb8\xad\xe7\x9a\x84\xe5\xb1\x82 %d \xe4\xb8\x8d\xe6\x98\xaf full_attention",
+    /* LZ_ERR_CFG_UNSUPPORTED_ARCH */ "\xe8\xbf\x99\xe4\xb8\xaa checkpoint \xe6\x97\xa2\xe4\xb8\x8d\xe6\x98\xaf Qwen3.5\xef\xbc\x88GDN\xef\xbc\x89\xe4\xb9\x9f\xe4\xb8\x8d\xe6\x98\xaf KunMoe\xef\xbc\x88KDA\xef\xbc\x89\xe7\x9a\x84\xe5\xbd\xa2\xe7\x8a\xb6\xef\xbc\x9b\xe6\x9c\xac\xe5\xbc\x95\xe6\x93\x8e\xe5\x8f\xaa\xe5\x8a\xa0\xe8\xbd\xbd\xe8\xbf\x99\xe4\xb8\xa4\xe4\xbb\xa3",
     /* LZ_ERR_TENSOR_MISSING */ "\xe7\xbc\xba\xe5\xb0\x91\xe5\xbc\xa0\xe9\x87\x8f %s",
     /* LZ_ERR_TENSOR_DIMS */ "\xe5\xbc\xa0\xe9\x87\x8f %s \xe7\xbb\xb4\xe6\x95\xb0\xe4\xb8\x8d\xe7\xac\xa6\xef\xbc\x9a\xe6\x9c\x9f\xe6\x9c\x9b %d \xe7\xbb\xb4\xef\xbc\x8c\xe5\xae\x9e\xe9\x99\x85 %d \xe7\xbb\xb4",
     /* LZ_ERR_TENSOR_SHAPE */ "\xe5\xbc\xa0\xe9\x87\x8f %s \xe7\xac\xac %d \xe7\xbb\xb4\xe4\xb8\x8d\xe7\xac\xa6\xef\xbc\x9a\xe6\x9c\x9f\xe6\x9c\x9b %lld\xef\xbc\x8c\xe5\xae\x9e\xe9\x99\x85 %lld",
@@ -333,6 +347,20 @@ static const char *const LZ_ERR_ZH[LZ_ERR_COUNT] = {
                             "\xe7\xbc\x80\xe4\xb8\x8a\xe7\x9a\x84 K/V\xef\xbc\x8c\xe8\x80\x8c\xe7\xba\xbf\xe6\x80\xa7\xe6\xb3\xa8"
                             "\xe6\x84\x8f\xe5\x8a\x9b\xe5\xb1\x82\xe6\xb2\xa1\xe6\x9c\x89\xe8\xbf\x99\xe7\xa7\x8d K/V\xe3\x80\x82"
                             "\xe8\xaf\xb7\xe6\x94\xb9\xe7\x94\xa8 --ced off \xe8\xbf\x90\xe8\xa1\x8c\xe3\x80\x82",
+    /* LZ_ERR_MTP_NDRAFT */ "mtp_n_draft \xe4\xb8\xba %d\xef\xbc\x8c\xe8\xb6\x85"
+                            "\xe5\x87\xba LZ_SPEC_K_MAX\xef\xbc\x88%d\xef\xbc\x89"
+                            "\xe2\x80\x94\xe2\x80\x94\xe6\x8a\x95\xe6\x9c\xba\xe8\xa7"
+                            "\xa3\xe7\xa0\x81\xe8\xbf\x90\xe8\xa1\x8c\xe6\x97\xb6\xe6"
+                            "\xb7\xb1\xe5\xba\xa6\xe4\xb8\x8a\xe9\x99\x90\xe3\x80\x82",
+    /* LZ_ERR_MTP_MARKOV_RANK */ "mtp_markov_rank \xe4\xb8\xba %d\xef\xbc\x8c"
+                            "\xe8\xb6\x85\xe5\x87\xba 3*hidden_size\xef\xbc\x88"
+                            "%d\xef\xbc\x89\xe2\x80\x94\xe2\x80\x94markov_embed "
+                            "\xe7\x9a\x84\xe8\xa1\x8c\xe4\xbc\x9a\xe8\xaf\xbb\xe8"
+                            "\xbf\x9b\xe4\xb8\x8e\xe5\x9f\xba\xe7\xa1\x80\xe8\x8d"
+                            "\x89\xe7\xa8\xbf\xe9\x98\xb6\xe6\xae\xb5\xe5\x85\xb1"
+                            "\xe7\x94\xa8\xe7\x9a\x84\xe5\x9b\xba\xe5\xae\x9a "
+                            "3*hidden \xe6\x9a\x82\xe5\xad\x98\xe7\xbc\x93\xe5"
+                            "\x86\xb2\xe5\x8c\xba\xe3\x80\x82",
     /* LZ_ERR_INTERNAL */ "\xe5\x86\x85\xe9\x83\xa8\xe9\x94\x99\xe8\xaf\xaf"
 };
 

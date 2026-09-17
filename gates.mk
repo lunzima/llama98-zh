@@ -308,6 +308,48 @@ lz4-model-gate:
 ced-gate:
 	@$(call GATE_OK,build/ced_gate.sh "$(MODEL)")
 
+# ced_split/ced_replay_w (E3, the KDA half of CED bounded replay).
+# Unlike ced-gate above, this knob's claim is NOT "output unchanged" -
+# see build/ced_replay_gate.sh's own header for the three-arm shape and
+# why the mutation's discriminator has to be logits, not a layer count.
+# Needs a model dir with a linear_attention layer at or above the
+# 50/50 split; SKIPs without one.
+.PHONY: ced-replay-gate
+ced-replay-gate:
+	@$(call GATE_OK,build/ced_replay_gate.sh "$(MODEL)")
+
+# S4 MLA low-rank Q/O (mla_q_lora_rank/mla_o_lora_rank). Own script's
+# header has the off/on/wrong three-arm shape and why the assertion is
+# argmax+KL against `off`, not cmp -s (chaining two matmuls through an
+# int8 intermediate is a real, expected precision difference, not a
+# regression). Needs a use_subn=0 model dir with a full_attention layer
+# and python3 safetensors/numpy; SKIPs without them.
+.PHONY: mla-gate
+mla-gate:
+	@$(call GATE_OK,build/mla_gate.sh "$(MODEL)")
+
+# S2 CSA2 engine-side scalar reference. Own script's header has the
+# batch4-vs-batch1 (the strongest signal available without a trained
+# checkpoint) and mutation-sensitivity arms. Needs a use_subn=0 model
+# dir with a full_attention layer and python3 safetensors/numpy; SKIPs
+# without them.
+.PHONY: csa2-gate
+csa2-gate:
+	@$(call GATE_OK,build/csa2_gate.sh "$(MODEL)")
+
+# S1 attn_kv_share, both halves: the loader's alias (model.c) and the
+# forward's input swap (forward.c/forward_attn.c). Own script's header has
+# the dup/share, adjacent-pair and collapse arms, the bin v10 arms, and the
+# one thing no arm there can see (a PARTIAL swap - only k_proj or only
+# v_proj fed the source's input - because logits are the only observable
+# this engine has). Needs a model dir this engine can load that holds at
+# least two full_attention layers; SKIPs without one, and says why a
+# checkpoint it cannot load (kunkun98/kunkun-ce, which do set the key) is
+# not a candidate.
+.PHONY: kv-share-gate
+kv-share-gate:
+	@$(call GATE_OK,build/kv_share_gate.sh "$(MODEL)")
+
 # A third opinion on lz_bf16.c, from PyTorch. Needs no model; SKIPs if
 # torch is absent, which is why it is behind GATE_OK too.
 .PHONY: bf16-torch-gate

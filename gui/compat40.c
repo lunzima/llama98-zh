@@ -60,6 +60,10 @@
  * shellapi.h's automatic include - so a file that wants Drag* has to
  * ask for it by name, same as commdlg.h and shlobj.h just above. */
 #include <shellapi.h>
+/* mmsystem.h explicitly: WIN32_LEAN_AND_MEAN (the floor flags set it)
+ * leaves it out of windows.h, and this is the one file that may name
+ * what is in it. */
+#include <mmsystem.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -1055,4 +1059,171 @@ int lz_find_parse(LPARAM lp, int *down, int *match_case,
         return 2;
     }
     return 0;
+}
+
+/* ---- MIDI streaming ----
+ *
+ * See compat40.h for why the whole family is resolved rather than
+ * imported, and for the measurement that put it at the 4.0 level.
+ *
+ * DWORD_PTR is spelled LZ_IPTR_T, for the reason that typedef already
+ * gives: basetsd.h is not reachable at the API floor, and the two
+ * toolchains disagree about the width (four bytes under 32-bit Watcom,
+ * eight under the 64-bit gcc build). Getting it wrong is not a
+ * compile error on either - it is a stdcall frame that does not
+ * match. */
+typedef MMRESULT (WINAPI *MidiStreamOpenFn)(HMIDISTRM *, UINT *, DWORD,
+                                            LZ_IPTR_T, LZ_IPTR_T, DWORD);
+typedef MMRESULT (WINAPI *MidiStreamCloseFn)(HMIDISTRM);
+typedef MMRESULT (WINAPI *MidiStreamPropFn)(HMIDISTRM, LPBYTE, DWORD);
+typedef MMRESULT (WINAPI *MidiStreamOutFn)(HMIDISTRM, LPMIDIHDR, UINT);
+typedef MMRESULT (WINAPI *MidiStreamGoFn)(HMIDISTRM);
+typedef MMRESULT (WINAPI *MidiOutHdrFn)(HMIDIOUT, LPMIDIHDR, UINT);
+typedef MMRESULT (WINAPI *MidiOutResetFn)(HMIDIOUT);
+
+static HMODULE            g_winmm;
+static MidiStreamOpenFn   p_midiStreamOpen;
+static MidiStreamCloseFn  p_midiStreamClose;
+static MidiStreamPropFn   p_midiStreamProperty;
+static MidiStreamOutFn    p_midiStreamOut;
+static MidiStreamGoFn     p_midiStreamRestart;
+static MidiStreamGoFn     p_midiStreamStop;
+static MidiOutHdrFn       p_midiOutPrepareHeader;
+static MidiOutHdrFn       p_midiOutUnprepareHeader;
+static MidiOutResetFn     p_midiOutReset;
+
+static HMIDISTRM g_strm;
+static MIDIHDR   g_hdr[LZ_UI_MIDI_SLOTS];
+static int       g_prepared[LZ_UI_MIDI_SLOTS];
+
+static int midi_resolve(void) {
+    if (p_midiStreamOpen) return 1;
+    if (g_winmm) return 0;          /* tried once, and it was not there */
+    g_winmm = LoadLibraryA("winmm.dll");
+    if (!g_winmm) return 0;
+    p_midiStreamOpen = (MidiStreamOpenFn)LZ_PROC(g_winmm, "midiStreamOpen");
+    p_midiStreamClose = (MidiStreamCloseFn)LZ_PROC(g_winmm, "midiStreamClose");
+    p_midiStreamProperty =
+        (MidiStreamPropFn)LZ_PROC(g_winmm, "midiStreamProperty");
+    p_midiStreamOut = (MidiStreamOutFn)LZ_PROC(g_winmm, "midiStreamOut");
+    p_midiStreamRestart =
+        (MidiStreamGoFn)LZ_PROC(g_winmm, "midiStreamRestart");
+    p_midiStreamStop = (MidiStreamGoFn)LZ_PROC(g_winmm, "midiStreamStop");
+    p_midiOutPrepareHeader =
+        (MidiOutHdrFn)LZ_PROC(g_winmm, "midiOutPrepareHeader");
+    p_midiOutUnprepareHeader =
+        (MidiOutHdrFn)LZ_PROC(g_winmm, "midiOutUnprepareHeader");
+    p_midiOutReset = (MidiOutResetFn)LZ_PROC(g_winmm, "midiOutReset");
+    /* ALL of them or none. A half-resolved family is worse than an
+       absent one: it opens a stream it cannot stop, and the notes hang
+       on after the window is gone. */
+    if (!p_midiStreamOpen || !p_midiStreamClose || !p_midiStreamProperty ||
+        !p_midiStreamOut || !p_midiStreamRestart || !p_midiStreamStop ||
+        !p_midiOutPrepareHeader || !p_midiOutUnprepareHeader ||
+        !p_midiOutReset) {
+        p_midiStreamOpen = NULL;
+        return 0;
+    }
+    return 1;
+}
+
+int lz_ui_midi_open(HWND notify, int division) {
+    UINT dev = MIDI_MAPPER;
+    MIDIPROPTIMEDIV td;
+    if (g_strm) return 1;
+    if (!midi_resolve()) return 0;
+    if (division <= 0) return 0;
+    /* MIDI_MAPPER, not device 0: the mapper is what the user pointed at
+       whatever they want MIDI to come out of, and going straight to
+       device 0 would ignore that choice on every machine that has made
+       one. */
+    if (p_midiStreamOpen(&g_strm, &dev, 1, (LZ_IPTR_T)notify, 0,
+                         CALLBACK_WINDOW) != MMSYSERR_NOERROR) {
+        g_strm = NULL;
+        return 0;
+    }
+    td.cbStruct = sizeof td;
+    td.dwTimeDiv = (DWORD)division;
+    if (p_midiStreamProperty(g_strm, (LPBYTE)&td,
+                             MIDIPROP_SET | MIDIPROP_TIMEDIV)
+        != MMSYSERR_NOERROR) {
+        p_midiStreamClose(g_strm);
+        g_strm = NULL;
+        return 0;
+    }
+    return 1;
+}
+
+int lz_ui_midi_tempo(unsigned long us_qn) {
+    MIDIPROPTEMPO tp;
+    if (!g_strm || us_qn == 0) return 0;
+    tp.cbStruct = sizeof tp;
+    tp.dwTempo = (DWORD)us_qn;
+    return p_midiStreamProperty(g_strm, (LPBYTE)&tp,
+                                MIDIPROP_SET | MIDIPROP_TEMPO)
+           == MMSYSERR_NOERROR;
+}
+
+int lz_ui_midi_send(int slot, const void *events, unsigned long bytes) {
+    MIDIHDR *h;
+    if (!g_strm || !events || bytes == 0) return 0;
+    if (slot < 0 || slot >= LZ_UI_MIDI_SLOTS) return 0;
+    h = &g_hdr[slot];
+    /* A slot that has been round before is re-prepared from scratch:
+       its buffer may be a different length this time, and MHDR_DONE
+       would otherwise still be set - midiStreamOut refuses a header
+       that says it has finished. */
+    if (g_prepared[slot]) {
+        p_midiOutUnprepareHeader((HMIDIOUT)g_strm, h, sizeof *h);
+        g_prepared[slot] = 0;
+    }
+    memset(h, 0, sizeof *h);
+    /* The cast drops const because MIDIHDR has no const form. Nothing
+       here writes through it; the device reads the buffer and sets
+       flags in the HEADER, which is ours. */
+    h->lpData = (LPSTR)events;
+    h->dwBufferLength = bytes;
+    h->dwBytesRecorded = bytes;
+    if (p_midiOutPrepareHeader((HMIDIOUT)g_strm, h, sizeof *h)
+        != MMSYSERR_NOERROR)
+        return 0;
+    g_prepared[slot] = 1;
+    if (p_midiStreamOut(g_strm, h, sizeof *h) != MMSYSERR_NOERROR) {
+        p_midiOutUnprepareHeader((HMIDIOUT)g_strm, h, sizeof *h);
+        g_prepared[slot] = 0;
+        return 0;
+    }
+    return 1;
+}
+
+int lz_ui_midi_go(void) {
+    if (!g_strm) return 0;
+    return p_midiStreamRestart(g_strm) == MMSYSERR_NOERROR;
+}
+
+void lz_ui_midi_stop(void) {
+    int i;
+    if (!g_strm) return;
+    p_midiStreamStop(g_strm);
+    /* Reset AFTER stop and before unprepare: stopping halts the clock
+       but leaves whatever was sounding sounding, and unpreparing a
+       header the device is still reading is refused. A note left on by
+       a stream that was torn down does not stop when the program
+       exits - it stops when something else resets the device, which
+       may be never. */
+    p_midiOutReset((HMIDIOUT)g_strm);
+    for (i = 0; i < LZ_UI_MIDI_SLOTS; i++) {
+        if (!g_prepared[i]) continue;
+        p_midiOutUnprepareHeader((HMIDIOUT)g_strm, &g_hdr[i],
+                                 sizeof g_hdr[i]);
+        g_prepared[i] = 0;
+    }
+}
+
+
+void lz_ui_midi_close(void) {
+    if (!g_strm) return;
+    lz_ui_midi_stop();
+    p_midiStreamClose(g_strm);
+    g_strm = NULL;
 }

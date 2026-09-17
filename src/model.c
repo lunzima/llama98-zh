@@ -11,7 +11,7 @@
 #include "lz_int.h"   /* lz_i64: the 64-bit type, portably */
 #include "lz4d.h"
 #include "model.h"
-#include "ops.h"   /* lz_bf16_store_g, LZ_MM_WIDEN_MAX */
+#include "ops.h"   /* lz_bf16_store_g, LZ_MM_WIDEN_MAX, LZ_SPEC_K_MAX (alloc_mtp's mtp_n_draft bound) */
 
 #if LZ_DBG_LAYER_HASH
 /* Per-layer residual hash for the fast-mode (--fastfp) cross-target
@@ -239,6 +239,34 @@ int lz_load_config(LZModelConfig *c, const char *path,
        intermediate_size (kunmoe-v2) needs this to be independent. */
     c->mtp_intermediate_size =
         lz_json_get_int(&j, tc, "mtp_intermediate_size", c->intermediate_size);
+    /* DSpark (arXiv:2607.05147). 1 = every checkpoint before this
+       field existed and every upstream checkpoint - LZMtp binds `fc`,
+       not the five
+       main_proj/depth_embed/mask_embed/markov_embed/markov_proj
+       tensors. mtp_markov_rank is meaningless (left 0) at
+       mtp_n_draft<=1 and unread in that case. */
+    c->mtp_n_draft       = lz_json_get_int(&j, tc, "mtp_n_draft", 1);
+    c->mtp_markov_rank   = lz_json_get_int(&j, tc, "mtp_markov_rank", 0);
+
+    /* CED bounded replay (model.h's own field comment has the full
+       argument) - 0/0 defaults reproduce a config.json that never
+       carried these keys. */
+    c->ced_split      = lz_json_get_int(&j, tc, "ced_split", 0);
+    c->ced_replay_w   = lz_json_get_int(&j, tc, "ced_replay_w", 0);
+
+    /* S1 attn_kv_share (model.h's own field comment). Read as a BOOL,
+       not with lz_json_get_int: the key is a JSON true/false in every
+       config.json the training side writes, and lz_json_get_int answers
+       its default for a LZ_JSON_BOOL node - the switch would never fire
+       and the target layers' absent k/v tensors would come back as an
+       ordinary missing-tensor error. Same reader use_subn and
+       attn_output_gate use for their own boolean keys. */
+    c->attn_kv_share  = lz_json_get_bool(&j, tc, "attn_kv_share", 0);
+
+    /* S4 MLA low-rank Q/O (model.h's own field comment) - 0/0 defaults
+       reproduce a config.json that never carried these keys. */
+    c->mla_q_lora_rank = lz_json_get_int(&j, tc, "mla_q_lora_rank", 0);
+    c->mla_o_lora_rank = lz_json_get_int(&j, tc, "mla_o_lora_rank", 0);
 
     /* Engram (conditional n-gram memory). engram=0 skips everything;
        derive the structural fields the forward pass reads. */
@@ -321,6 +349,15 @@ int lz_load_config(LZModelConfig *c, const char *path,
         c->attn_output_gate = (n && n->type == LZ_JSON_BOOL && n->num != 0.0);
     }
     c->use_subn = lz_json_get_bool(&j, tc, "use_subn", 0);
+    /* LowRankLinear does not compose with SubLN's per-projection input
+       norm - see model.h's mla_q_lora_rank comment. Refused rather than
+       silently picking one, same posture as the rope_theta top-level-
+       vs-nested collision check above. */
+    if (c->use_subn && (c->mla_q_lora_rank > 0 || c->mla_o_lora_rank > 0)) {
+        qerr(errbuf, errlen, LZ_ERR_CFG_MLA_SUBN);
+        lz_json_free(&j);
+        return 1;
+    }
     /* Block-diagonal Hadamard block sizes. -1 = "derive" (resolved by
        resolve_hadamard below), which is what a config.json written
        before these keys existed gets. */
@@ -572,6 +609,32 @@ int lz_load_config(LZModelConfig *c, const char *path,
             return 1;
         }
     }
+
+    /* S2 CSA2 (model.h's own csa2_on[]/csa2_compress_m comment). Parsed
+       here, not earlier alongside ced_split/mla_q_lora_rank, because
+       validating each named index against layer_types needs that array
+       already filled - the loop just above is what fills it, and `j`
+       (this function's own JSON handle) is freed a few lines down, so
+       this is the only window where both are available at once. */
+    lt = lz_json_get(&j, tc, "csa2_layers");
+    if (lt && lt->type == LZ_JSON_ARR) {
+        for (e = lz_json_first(&j, lt); e; e = lz_json_next(&j, e)) {
+            int idx = (int)e->num;
+            if (idx < 0 || idx >= c->n_layers ||
+                c->layer_types[idx] != LZ_LT_FULL) {
+                qerr(errbuf, errlen, LZ_ERR_CFG_CSA2_LAYER, idx);
+                lz_json_free(&j);
+                return 1;
+            }
+            c->csa2_on[idx] = 1;
+        }
+    }
+    c->csa2_compress_m          = lz_json_get_int(&j, tc, "csa2_compress_m", 2);
+    c->csa2_topk                = lz_json_get_int(&j, tc, "csa2_topk", 64);
+    c->csa2_indexer_heads       = lz_json_get_int(&j, tc, "csa2_indexer_heads", 4);
+    c->csa2_indexer_head_dim    = lz_json_get_int(&j, tc, "csa2_indexer_head_dim", 32);
+    c->csa2_indexer_q_lora_rank = lz_json_get_int(&j, tc, "csa2_indexer_q_lora_rank", 32);
+
     lz_json_free(&j);
 
     /* derived quantities computed once, here */
@@ -618,6 +681,19 @@ enum {
     DK_CONV, DK_VALUE, DK_NVHEADS, DK_VHEADDIM,
     DK_ONE, DK_KERNEL,
     DK_HIDDEN2,     /* 2 * hidden: mtp.fc reads [hidden, embedding] joined */
+    DK_HIDDEN3,     /* 3 * hidden: mtp.main_proj (DSpark, mtp_n_draft > 1) */
+    DK_MTP_NDRAFT,  /* mtp_n_draft: mtp.depth_embed row count */
+    DK_MTP_MARKOV_RANK, /* mtp_markov_rank: markov_embed/markov_proj's rank dim */
+    DK_MLA_Q_RANK,  /* mla_q_lora_rank: q_proj.down output / q_proj.up input */
+    DK_MLA_O_RANK,  /* mla_o_lora_rank: o_proj.down output / o_proj.up input */
+    /* S2 CSA2 (LZLayer's own csa2_w_* comment has the full tensor list;
+       csa2_w_kv/csa2_w_gate's own output dim is DK_HEAD_DIM, reused
+       rather than duplicated - CSA2's compressed entries are exactly
+       head_dim wide, arXiv:2606.19348's own text). */
+    DK_CSA2_IDX_HEAD_DIM,  /* csa2_indexer_head_dim: indexer K/Q per-head width */
+    DK_CSA2_IDX_HEADS,     /* csa2_indexer_heads: csa2_w_weights output width */
+    DK_CSA2_Q_LORA_RANK,   /* csa2_indexer_q_lora_rank: csa2_w_dq_idx output / csa2_w_uq_idx input */
+    DK_CSA2_UQ_OUT,        /* csa2_indexer_heads * csa2_indexer_head_dim: csa2_w_uq_idx output */
     /* KDA (LZ_LT_KDA) */
     DK_KEY,         /* lin_key_dim: kda_q_proj/kda_k_proj output width */
     DK_GATE_RANK,   /* kda_gate_rank: f_a_proj output / f_b_proj input */
@@ -658,6 +734,12 @@ static int present_subn(const LZModelConfig *c) { return c->use_subn; }
 static int present_subn_shared(const LZModelConfig *c) {
     return c->use_subn && c->moe_shared_width > 0;
 }
+static int present_mtp_ndraft1(const LZModelConfig *c) { return c->mtp_n_draft <= 1; }
+static int present_mtp_ndraft_gt1(const LZModelConfig *c) { return c->mtp_n_draft > 1; }
+static int present_mla_q(const LZModelConfig *c) { return c->mla_q_lora_rank > 0; }
+static int present_not_mla_q(const LZModelConfig *c) { return c->mla_q_lora_rank <= 0; }
+static int present_mla_o(const LZModelConfig *c) { return c->mla_o_lora_rank > 0; }
+static int present_not_mla_o(const LZModelConfig *c) { return c->mla_o_lora_rank <= 0; }
 
 static const LZLayerSpec LAYER_SPECS[] = {
     /* shared by every layer kind and every FFN kind */
@@ -684,13 +766,29 @@ static const LZLayerSpec LAYER_SPECS[] = {
 
     /* full_attention only. q_proj is 2x wide; the second half is the gate */
     { "self_attn.q_proj.weight", LZ_LT_FULL, -1, LOFF(q_proj),
-      { DK_ATTN_QGATE, DK_HIDDEN, DK_END }, NULL },
+      { DK_ATTN_QGATE, DK_HIDDEN, DK_END }, present_not_mla_q },
     { "self_attn.k_proj.weight", LZ_LT_FULL, -1, LOFF(k_proj),
       { DK_ATTN_KV, DK_HIDDEN, DK_END }, NULL },
     { "self_attn.v_proj.weight", LZ_LT_FULL, -1, LOFF(v_proj),
       { DK_ATTN_KV, DK_HIDDEN, DK_END }, NULL },
     { "self_attn.o_proj.weight", LZ_LT_FULL, -1, LOFF(o_proj),
-      { DK_HIDDEN, DK_ATTN_Q, DK_END }, NULL },
+      { DK_HIDDEN, DK_ATTN_Q, DK_END }, present_not_mla_o },
+    /* S4 MLA (mla_q_lora_rank/mla_o_lora_rank > 0 only): replaces the two
+       entries above, matching engine/kunmoe_modeling.py's LowRankLinear
+       replacing attn.q_proj/attn.o_proj in place - state-dict keys
+       q_proj.down.weight/q_proj.up.weight (LowRankLinear.down/.up are
+       nn.Linear submodules named that). See model.h's LZLayer comment
+       on q_proj_down/q_proj_up/mla_q_on/mla_o_on for the per-layer
+       flags attn_impl actually reads, and the mutual exclusion with
+       use_subn enforced above (LZ_ERR_CFG_MLA_SUBN). */
+    { "self_attn.q_proj.down.weight", LZ_LT_FULL, -1, LOFF(q_proj_down),
+      { DK_MLA_Q_RANK, DK_HIDDEN, DK_END }, present_mla_q },
+    { "self_attn.q_proj.up.weight", LZ_LT_FULL, -1, LOFF(q_proj_up),
+      { DK_ATTN_QGATE, DK_MLA_Q_RANK, DK_END }, present_mla_q },
+    { "self_attn.o_proj.down.weight", LZ_LT_FULL, -1, LOFF(o_proj_down),
+      { DK_MLA_O_RANK, DK_ATTN_Q, DK_END }, present_mla_o },
+    { "self_attn.o_proj.up.weight", LZ_LT_FULL, -1, LOFF(o_proj_up),
+      { DK_HIDDEN, DK_MLA_O_RANK, DK_END }, present_mla_o },
     { "self_attn.q_norm.weight", LZ_LT_FULL, -1, LOFF(q_norm),
       { DK_HEAD_DIM, DK_END, DK_END }, NULL },
     { "self_attn.k_norm.weight", LZ_LT_FULL, -1, LOFF(k_norm),
@@ -815,6 +913,85 @@ static const LZLayerSpec LAYER_SPECS[] = {
 };
 #define N_LAYER_SPECS ((int)(sizeof(LAYER_SPECS) / sizeof(LAYER_SPECS[0])))
 
+/* ------------------------------------------------------ S1 attn_kv_share */
+
+/* The five tensors a target layer takes from the source layer, as
+   LZLayer offsets: the two k/v projection weights, the per-head k_norm,
+   and the two SubLN input norms that live inside the projection modules.
+   ONE table, read by all four callers below - the walk that must not look
+   for them on a target layer, the alias that copies them, lz_free (they
+   are the source's storage, freed once) and the parameter count (they are
+   one tensor, counted once). Named to match the training side's own list,
+   engine/kunmoe_modeling.py's _SHARED_KV_ATTRS, which is what decides
+   which keys save_pretrained omits. */
+static const size_t KV_SHARE_FIELDS[5] = {
+    LOFF(k_proj), LOFF(v_proj), LOFF(k_norm),
+    LOFF(attn_k_subn_norm), LOFF(attn_v_subn_norm)
+};
+#define N_KV_SHARE_FIELDS ((int)(sizeof(KV_SHARE_FIELDS) / sizeof(KV_SHARE_FIELDS[0])))
+
+static int kv_share_field(size_t field) {
+    int k;
+    for (k = 0; k < N_KV_SHARE_FIELDS; k++)
+        if (KV_SHARE_FIELDS[k] == field) return 1;
+    return 0;
+}
+
+/* Layer index whose K/V the others reuse, or -1 when nothing is shared:
+   attn_kv_share off, or fewer than two full_attention layers (the
+   training side's own "there is nothing to share" case). Derived from
+   the config rather than stored as a per-layer flag, so no second copy
+   of this rule can go stale - m->mtp->blk is not in m->layers and is
+   never a target, which is the same reason its own k_proj stays bound.
+   Public (model.h) because forward.c needs the same answer to know whose
+   input reaches a target layer's K/V projections. */
+int lz_kv_share_src(const LZModelConfig *c) {
+    int i, first = -1, nfull = 0;
+    if (!c->attn_kv_share) return -1;
+    for (i = 0; i < c->n_layers; i++) {
+        if (c->layer_types[i] != LZ_LT_FULL) continue;
+        if (first < 0) first = i;
+        nfull++;
+    }
+    return nfull >= 2 ? first : -1;
+}
+
+/* 1 when layer li takes its k/v from the shared source. */
+int lz_kv_share_target(const LZModelConfig *c, int li) {
+    int src = lz_kv_share_src(c);
+    return src >= 0 && li > src && c->layer_types[li] == LZ_LT_FULL;
+}
+
+/* Give every target layer the source layer's five K/V tensors.
+
+   A STRUCT COPY, not a deep copy: the storage stays the source layer's,
+   which is what the training side's module hand-over means and why
+   lz_free skips these fields on a target layer.
+
+   Runs AFTER the walk that fills the source's LZTensors, and never
+   inside model_walk itself: visit_read/visit_read_bin overwrite the
+   struct (not merely its buffers), so a copy taken while the files are
+   being walked would keep the zeroed placeholder the field starts as.
+   The two loaders therefore call it where their weights land - the bin
+   path reads during lz_open_bin, the safetensors path during
+   lz_read_weights, which then early-returns for a bin-loaded model. */
+static void apply_kv_share(LZModel *m) {
+    const LZModelConfig *c = &m->config;
+    int src = lz_kv_share_src(c);
+    int li, k;
+    if (src < 0) return;
+    for (li = src + 1; li < c->n_layers; li++) {
+        if (!lz_kv_share_target(c, li)) continue;
+        for (k = 0; k < N_KV_SHARE_FIELDS; k++) {
+            LZTensor *dst = (LZTensor *)((char *)&m->layers[li] +
+                                         KV_SHARE_FIELDS[k]);
+            const LZTensor *s = (const LZTensor *)((const char *)&m->layers[src]
+                                                   + KV_SHARE_FIELDS[k]);
+            *dst = *s;
+        }
+    }
+}
+
 static lz_i64 resolve_dim(const LZModelConfig *c, int kind) {
     switch (kind) {
     case DK_HIDDEN:     return c->hidden_size;
@@ -831,6 +1008,15 @@ static lz_i64 resolve_dim(const LZModelConfig *c, int kind) {
     case DK_ONE:        return 1;
     case DK_KERNEL:     return c->conv_kernel;
     case DK_HIDDEN2:    return (lz_i64)c->hidden_size * 2;
+    case DK_HIDDEN3:    return (lz_i64)c->hidden_size * 3;
+    case DK_MTP_NDRAFT: return c->mtp_n_draft;
+    case DK_MTP_MARKOV_RANK: return c->mtp_markov_rank;
+    case DK_MLA_Q_RANK: return c->mla_q_lora_rank;
+    case DK_MLA_O_RANK: return c->mla_o_lora_rank;
+    case DK_CSA2_IDX_HEAD_DIM: return c->csa2_indexer_head_dim;
+    case DK_CSA2_IDX_HEADS:    return c->csa2_indexer_heads;
+    case DK_CSA2_Q_LORA_RANK:  return c->csa2_indexer_q_lora_rank;
+    case DK_CSA2_UQ_OUT:       return (lz_i64)c->csa2_indexer_heads * c->csa2_indexer_head_dim;
     case DK_KEY:        return c->lin_key_dim;
     case DK_GATE_RANK:  return c->kda_gate_rank;
     case DK_NVK:        return (lz_i64)c->lin_n_v_heads * c->lin_k_head_dim;
@@ -943,6 +1129,13 @@ static int model_walk(LZModel *m, LZVisit visit, void *ctx,
             if (sp->layer_type >= 0 && sp->layer_type != L->type) continue;
             if (sp->ffn_kind >= 0 && sp->ffn_kind != L->ffn_moe) continue;
             if (sp->present && !sp->present(c)) continue;
+            /* S1 attn_kv_share: a target layer owns none of the five
+               shared tensors, so their specs name nothing in the
+               checkpoint and the fields stay zeroed here -
+               apply_kv_share fills them from the source afterwards. The
+               bin stream is written in this same walk order, so the skip
+               is also what keeps reader and writer in step. */
+            if (kv_share_field(sp->field) && lz_kv_share_target(c, li)) continue;
 
             snprintf(name, sizeof(name), "%slayers.%d.%s",
                      m->prefix, li, sp->suffix);
@@ -976,6 +1169,45 @@ static int model_walk(LZModel *m, LZVisit visit, void *ctx,
                 }
             }
         }
+
+        /* S2 CSA2. Not in LAYER_SPECS above for the same class of reason
+           the MoE per-expert triplet just above is not: LZPresentFn only
+           sees the config, not which layer is being walked, and
+           csa2_on[] is per-layer (model.h's own comment on why this
+           differs from mla_q_on/mla_o_on, which a plain LZPresentFn CAN
+           express because they are uniform across every full-attention
+           layer). L->csa2_on is setup_layers-derived and already
+           correct here (setup_layers runs before model_walk - see
+           lz_open/lz_open_bin, same ordering the MoE block above
+           depends on). */
+        if (L->csa2_on) {
+            static const struct { const char *suf; size_t field; int dims[3]; }
+            CSA2_SPECS[] = {
+                { "self_attn.csa2_w_kv.weight",       offsetof(LZLayer, csa2_w_kv),
+                  { DK_HEAD_DIM, DK_HIDDEN, DK_END } },
+                { "self_attn.csa2_w_gate.weight",     offsetof(LZLayer, csa2_w_gate),
+                  { DK_HEAD_DIM, DK_HIDDEN, DK_END } },
+                { "self_attn.csa2_w_kv_idx.weight",   offsetof(LZLayer, csa2_w_kv_idx),
+                  { DK_CSA2_IDX_HEAD_DIM, DK_HIDDEN, DK_END } },
+                { "self_attn.csa2_w_gate_idx.weight", offsetof(LZLayer, csa2_w_gate_idx),
+                  { DK_CSA2_IDX_HEAD_DIM, DK_HIDDEN, DK_END } },
+                { "self_attn.csa2_w_weights.weight",  offsetof(LZLayer, csa2_w_weights),
+                  { DK_CSA2_IDX_HEADS, DK_HIDDEN, DK_END } },
+                { "self_attn.csa2_w_dq_idx.weight",   offsetof(LZLayer, csa2_w_dq_idx),
+                  { DK_CSA2_Q_LORA_RANK, DK_HIDDEN, DK_END } },
+                { "self_attn.csa2_w_uq_idx.weight",   offsetof(LZLayer, csa2_w_uq_idx),
+                  { DK_CSA2_UQ_OUT, DK_CSA2_Q_LORA_RANK, DK_END } }
+            };
+            int k;
+            for (k = 0; k < (int)(sizeof(CSA2_SPECS) / sizeof(CSA2_SPECS[0])); k++) {
+                LZTensor *field;
+                snprintf(name, sizeof(name), "%slayers.%d.%s",
+                         m->prefix, li, CSA2_SPECS[k].suf);
+                field = (LZTensor *)((char *)L + CSA2_SPECS[k].field);
+                if (model_walk_one(m, name, CSA2_SPECS[k].dims, field,
+                                   visit, ctx, errbuf, errlen) != 0) return 1;
+            }
+        }
     }
 
     /* MTP head. Walked last so a checkpoint without one costs nothing.
@@ -985,16 +1217,30 @@ static int model_walk(LZModel *m, LZVisit visit, void *ctx,
        `model.language_model.`. That asymmetry is exactly what let 15
        tensors slip past the leak check unnoticed - see lz_open. */
     if (m->mtp) {
-        static const struct { const char *suffix; size_t field; int dims[3]; }
+        static const struct { const char *suffix; size_t field; int dims[3];
+                              LZPresentFn present; }
         MTP_SPECS[] = {
             { "fc.weight",                     offsetof(LZMtp, fc),
-              { DK_HIDDEN, DK_HIDDEN2, DK_END } },
+              { DK_HIDDEN, DK_HIDDEN2, DK_END }, present_mtp_ndraft1 },
             { "norm.weight",                   offsetof(LZMtp, norm),
-              { DK_HIDDEN, DK_END, DK_END } },
+              { DK_HIDDEN, DK_END, DK_END }, NULL },
             { "pre_fc_norm_hidden.weight",     offsetof(LZMtp, pre_fc_norm_hidden),
-              { DK_HIDDEN, DK_END, DK_END } },
+              { DK_HIDDEN, DK_END, DK_END }, NULL },
             { "pre_fc_norm_embedding.weight",  offsetof(LZMtp, pre_fc_norm_embedding),
-              { DK_HIDDEN, DK_END, DK_END } }
+              { DK_HIDDEN, DK_END, DK_END }, NULL },
+            /* mtp_n_draft > 1 only (DSpark, arXiv:2607.05147) -
+               mutually exclusive with fc.weight above, never both bound
+               on the same checkpoint. See LZMtp's own struct comment. */
+            { "main_proj.weight",              offsetof(LZMtp, main_proj),
+              { DK_HIDDEN, DK_HIDDEN3, DK_END }, present_mtp_ndraft_gt1 },
+            { "depth_embed.weight",            offsetof(LZMtp, depth_embed),
+              { DK_MTP_NDRAFT, DK_HIDDEN, DK_END }, present_mtp_ndraft_gt1 },
+            { "mask_embed",                    offsetof(LZMtp, mask_embed),
+              { DK_HIDDEN, DK_END, DK_END }, present_mtp_ndraft_gt1 },
+            { "markov_embed.weight",           offsetof(LZMtp, markov_embed),
+              { DK_VOCAB, DK_MTP_MARKOV_RANK, DK_END }, present_mtp_ndraft_gt1 },
+            { "markov_proj.weight",            offsetof(LZMtp, markov_proj),
+              { DK_VOCAB, DK_MTP_MARKOV_RANK, DK_END }, present_mtp_ndraft_gt1 }
         };
         /* The MTP block's own dense FFN, sized by mtp_intermediate_size -
            separate from LAYER_SPECS' body dense-FFN entries, even though
@@ -1067,6 +1313,7 @@ static int model_walk(LZModel *m, LZVisit visit, void *ctx,
         }
         for (k = 0; k < (int)(sizeof(MTP_SPECS) / sizeof(MTP_SPECS[0])); k++) {
             LZTensor *field;
+            if (MTP_SPECS[k].present && !MTP_SPECS[k].present(c)) continue;
             snprintf(name, sizeof(name), "mtp.%s", MTP_SPECS[k].suffix);
             field = (LZTensor *)((char *)m->mtp + MTP_SPECS[k].field);
             if (model_walk_one(m, name, MTP_SPECS[k].dims, field, visit, ctx,
@@ -1229,6 +1476,22 @@ static int setup_layers(LZModel *m, char *errbuf, int errlen) {
         LZLayer *L = &m->layers[i];
         L->type = c->layer_types[i];
         L->ffn_moe = (c->num_experts > 0 && i >= c->first_k_dense_replace) ? 1 : 0;
+        /* S4 MLA (model.h's own comment on both LZModelConfig's fields
+           and LZLayer's q_proj_down/mla_q_on): PER-LAYER flags derived
+           here, in the loop that only ever touches m->layers, so
+           m->mtp->blk - a separate LZLayer, calloc'd by alloc_mtp and
+           never passed through this loop - keeps mla_q_on/mla_o_on at
+           its calloc default of 0 regardless of these two global config
+           fields. attn_impl (forward_attn.c) reads L->mla_q_on/mla_o_on,
+           never c->mla_q_lora_rank/mla_o_lora_rank directly, for exactly
+           that reason. */
+        L->mla_q_on = c->mla_q_lora_rank > 0;
+        L->mla_o_on = c->mla_o_lora_rank > 0;
+        /* S2 CSA2: per-layer, unlike mla_q_on/mla_o_on above - csa2_on[]
+           may name a SUBSET of the full-attention layers (model.h's own
+           csa2_on[] comment). Same "only m->layers is touched, m->mtp->
+           blk never is" safety this mirrors from mla_q_on/mla_o_on. */
+        L->csa2_on = c->csa2_on[i];
         if (L->ffn_moe) {
             L->moe_expert_w1 = (LZTensor *)calloc((size_t)c->num_experts, sizeof(LZTensor));
             L->moe_expert_w2 = (LZTensor *)calloc((size_t)c->num_experts, sizeof(LZTensor));
@@ -1254,6 +1517,22 @@ static int alloc_mtp(LZModel *m, char *errbuf, int errlen) {
     if (m->config.mtp_n_layers <= 0) return 0;
     if (m->config.mtp_n_layers > 1) {
         qerr(errbuf, errlen, LZ_ERR_MTP_LAYERS, m->config.mtp_n_layers);
+        return 1;
+    }
+    if (m->config.mtp_n_draft > LZ_SPEC_K_MAX) {
+        qerr(errbuf, errlen, LZ_ERR_MTP_NDRAFT, m->config.mtp_n_draft,
+             LZ_SPEC_K_MAX);
+        return 1;
+    }
+    /* lz_mtp_markov_correct reads markov_embed's row into
+       mtp_kdraft_concat, a fixed 3*hidden_size scratch buffer it shares
+       with lz_mtp_draft_batch's base stage - see forward.c's own
+       comment on embed_row. Only reachable with mtp_n_draft>1 (the
+       markov head only exists in that tier). */
+    if (m->config.mtp_n_draft > 1 &&
+        m->config.mtp_markov_rank > 3 * m->config.hidden_size) {
+        qerr(errbuf, errlen, LZ_ERR_MTP_MARKOV_RANK,
+             m->config.mtp_markov_rank, 3 * m->config.hidden_size);
         return 1;
     }
     m->mtp = (LZMtp *)calloc(1, sizeof(LZMtp));
@@ -2070,7 +2349,7 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
        know the shape of (RD would then desync into tensor data and fail
        some unrelated way downstream, which is not a diagnosis). */
     if (ver != 1 && ver != 2 && ver != 3 && ver != 4 && ver != 5 &&
-        ver != 6 && ver != 7 && ver != 8) {
+        ver != 6 && ver != 7 && ver != 8 && ver != 9 && ver != 10) {
         qerr(errbuf, errlen, LZ_ERR_BIN_VERSION, ver);
         goto fail;
     }
@@ -2175,6 +2454,24 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
     } else {
         c->hadamard_o = -1;
         c->hadamard_down = -1;
+    }
+    /* v9 header tail: S4 MLA low-rank Q/O ranks. Absent (ver < 9) leaves
+       both at 0 from lz_open's memset(m, 0, ...) - the same "off" default
+       lz_load_config uses for a config.json without these keys, so the
+       two loading paths cannot disagree (model.h's own field comment). */
+    if (ver >= 9) {
+        RD(&c->mla_q_lora_rank, 4);
+        RD(&c->mla_o_lora_rank, 4);
+    }
+    /* v10 header tail: S1 attn_kv_share. Absent (ver < 10) leaves it at 0
+       from lz_open's memset(m, 0, ...) - the same "off" default
+       lz_load_config uses for a config.json without the key, so the two
+       loading paths cannot disagree. Unlike v5-v9 this one word is not
+       self-describing: the exporter bumps the version whenever the
+       checkpoint sets the key, so a v10 file whose word is 0 is a model
+       that shares nothing. */
+    if (ver >= 10) {
+        RD(&c->attn_kv_share, 4);
     }
 #undef RD
 #undef RDB
@@ -2294,12 +2591,21 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
     if (model_walk(m, visit_read_bin, NULL, errbuf, errlen) != 0) {
         goto fail;
     }
+    /* The bin path reads weights here, during open, so this is where the
+       shared k/v tensors exist to be handed out (lz_read_weights is an
+       early return for a bin-loaded model). */
+    apply_kv_share(m);
     for (i = 0; i < c->n_layers; i++) {
         int si;
         const LZLayer *L = &m->layers[i];
         for (si = 0; si < N_LAYER_SPECS; si++) {
             const LZLayerSpec *sp = &LAYER_SPECS[si];
             if (sp->layer_type >= 0 && sp->layer_type != L->type) continue;
+            /* The five shared tensors are one tensor each, counted on the
+               source layer: a target layer's fields are that same storage
+               after apply_kv_share. Same predicate the safetensors path's
+               visit_bind counts with (it sees one claimed tensor). */
+            if (kv_share_field(sp->field) && lz_kv_share_target(c, i)) continue;
             n_params += ((LZTensor *)((char *)L + sp->field))->n;
         }
         if (L->ffn_moe) {
@@ -2373,6 +2679,10 @@ int lz_read_weights(LZModel *m, char *errbuf, int errlen) {
     }
     if (m->weights_loaded) return 0;
     if (model_walk(m, visit_read, NULL, errbuf, errlen) != 0) return 1;
+    /* After the walk, not in lz_open's bind pass: visit_read lands the
+       source layer's LZTensors here, and a target layer's five fields are
+       copies of them (model.h's attn_kv_share comment). */
+    apply_kv_share(m);
     engram_norm_fixup(m);
     m->weights_loaded = 1;
     return 0;
@@ -2391,6 +2701,12 @@ void lz_free(LZModel *m) {
                 const LZLayerSpec *sp = &LAYER_SPECS[si];
                 LZTensor *field;
                 if (sp->layer_type >= 0 && sp->layer_type != L->type) continue;
+                /* S1 attn_kv_share: on a target layer these five fields are
+                   the source layer's storage (apply_kv_share copied the
+                   struct), so freeing them here would free it a second
+                   time. Freed once, by the source layer's own pass. */
+                if (kv_share_field(sp->field) &&
+                    lz_kv_share_target(&m->config, li)) continue;
                 field = (LZTensor *)((char *)L + sp->field);
                 lz_t_free(field);
             }

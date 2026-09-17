@@ -245,6 +245,61 @@ HKL lz_kbd_layout_get(void);
 /* 1 when the 4.0 window furniture is available. */
 int lz_os_has_40(void);
 
+/* ---- MIDI streaming ----
+ *
+ * MEASURED with this project's own floor flags (2026-09-14, Open
+ * Watcom 2.0): at WINVER 0x0351 a probe calling midiStreamOpen does
+ * not compile at all - MIDIHDR, MIDIEVENT and every MIDIPROP_ are
+ * undeclared, so it is not only the entry point that is hidden. At
+ * 0x0400 the same probe compiles clean and links against Watcom's
+ * NT4-era winmm import library.
+ *
+ * So it belongs here for this file's two reasons: only this file
+ * compiles at the 4.0 declaration level, and only this file may
+ * resolve an entry point at run time. winmm.dll is on every Windows
+ * since 3.1, but midiStreamOpen is not an export of the 3.51 one.
+ *
+ * The caller passes RAW DWORDS - a MIDIEVENT is three of them (delta,
+ * stream id, event) - so gui/midiplay.c never names a structure it
+ * cannot see at the floor. */
+
+/* `notify` gets LZ_UI_MM_MOM_DONE when a buffer finishes. 0 is an
+ * ordinary answer on 3.51 and on a machine with no MIDI device. */
+int lz_ui_midi_open(HWND notify, int division);
+
+/* ---- buffers ----
+ *
+ * MEASURED on this machine: a stream buffer of 5461 MIDIEVENTs (65532
+ * bytes) is accepted and one of 6000 (72000) is refused, so the
+ * documented 64 KB limit is enforced and not advisory. A piece longer
+ * than that has to go in CHUNKS, which is why these take a slot: the
+ * caller keeps two in flight, so the device always has the next one
+ * before it needs it and there is no seam between them.
+ *
+ * Nothing is copied. The caller's buffer for a slot must stay put
+ * until that slot completes or the stream is stopped. */
+#define LZ_UI_MIDI_SLOTS 2
+
+/* Hand slot `slot` to the device. */
+int lz_ui_midi_send(int slot, const void *events, unsigned long bytes);
+
+/* Start, or resume after everything queued has played. */
+int lz_ui_midi_go(void);
+
+/* The whole speed knob - common/smf.h says why one number is enough
+ * even for a piece with a tempo map. */
+int lz_ui_midi_tempo(unsigned long us_qn);
+
+/* Stop, silence every channel, release the buffer. */
+void lz_ui_midi_stop(void);
+
+
+void lz_ui_midi_close(void);
+
+/* MM_MOM_DONE, spelled out because mmsystem.h is not included outside
+ * gui/compat40.c. */
+#define LZ_UI_MM_MOM_DONE 0x3C9
+
 /* ---- forced downgrade, for looking at the 3.51 path on a host ----
  *
  * Makes every APPEARANCE capability here answer the way NT 3.51 does, on

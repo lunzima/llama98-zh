@@ -39,6 +39,25 @@ infrastructure stays LOCAL and is never pushed to `github.com/lunzima/llama98-zh
    `src/lz4d.c` streams. A producer of model files is a training-side tool, and
    the reader shipping here does not make its writer part of the engine.
 
+5. **`music/` is not pushed.** The front end plays MIDI from a directory of
+   that name beside the executable while a reply generates; the MIDI itself is
+   arrangements with their own sources and their own provenance, and it ships
+   from a repository of its own - **parlour-midi**, where the pieces are under
+   `music/` and the cues under `sfx/`. The same argument as `make_lz4.py`: a
+   player in here does not make the material it plays part of the engine.
+
+   Nothing breaks without it. `music_scan` finds an absent directory and the
+   turn is silent, and the finish chime is BUILT IN (`common/chime.c`, 139
+   bytes) precisely so the one sound the program owes a user who walked away
+   never depends on a file at all.
+
+   **The music is CC BY 4.0 and this tree is Apache-2.0**, which is why the
+   chime carries an attribution comment: those 139 bytes are the one piece of
+   that music living inside this licence, and CC BY asks for the credit. It is
+   also why the music is not share-alike - a BY-SA grant on the chime would
+   reach into a tree it has no business binding. Anything else brought over
+   from that repository arrives under the same terms and needs the same line.
+
 **What puts files in the root is cwd, and the root is where it matters.** An
 ad-hoc compile run from this directory leaves `.obj` and `.err` beside the
 Makefile; a probe writes its dump to a relative path; a pytest run in the wrong

@@ -95,7 +95,7 @@ fi
 # 2 of its 3 entries, not 3. Left in so the reader knows it was meant to
 # be there; remove it or fix the checkpoint, but do not read the list
 # length as the coverage.
-MODELS=${MODELS:-"/mnt/e/LLM/models/kmr20 /mnt/e/LLM/models/kunmoe-v2 /mnt/e/LLM/models/_armgate3"}
+MODELS=${MODELS:-"/mnt/e/LLM/models/kmr20 /mnt/e/LLM/models/kunkun98 /mnt/e/LLM/models/_armgate3"}
 TOK=${TOK:-1,2,3,4,5,6,7,8,9,10}
 W=${W:-/tmp/mipsendian}
 KERNELS=${KERNELS:-ref}

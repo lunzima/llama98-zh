@@ -106,6 +106,12 @@ ced_gate.sh                # four engine builds: the off and on arms, plus a
                            #   mutant each for the skip and for the final-chunk
                            #   condition, plus the previous source rebuilt from
                            #   git for the off-vs-HEAD arm
+ced_replay_gate.sh         # a model dir copied three times plus a mutant
+                           #   engine build
+mla_gate.sh                # needs python3 numpy+safetensors and rewrites a
+                           #   ~500MB model.safetensors three times
+csa2_gate.sh                # needs python3 numpy+safetensors and rewrites a
+                           #   model.safetensors twice
 changelog_comment_gate.sh  # ratchet over the whole tree, slow
 subn_gate.sh               # needs a model and a long token run
 kv_rot_gate.sh             # needs a model and a long token run

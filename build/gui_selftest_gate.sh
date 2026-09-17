@@ -1,7 +1,7 @@
 #!/bin/bash
 # Run the GUI's own selftest, and treat its verdict as a gate.
 #
-# WHY THIS EXISTS. gui/main.c carries 421 runtime checks - it builds the
+# WHY THIS EXISTS. gui/main.c carries 432 runtime checks - it builds the
 # real windows, presses the real keys and reads the real controls back.
 # Nothing ran it. It was reachable only by typing
 # `kunkun98-gui --selftest <path>` by hand, so its result was whatever
@@ -64,7 +64,9 @@ if [ -n "$STALE" ]; then
     exit 1
 fi
 
-FLOOR=421          # ratchet: raise when checks are added, never lower
+FLOOR=432          # ratchet: raise when checks are added, never lower
+                   # 421 -> 432 when the sound window's read-back joined
+                   # st_music_dialog (2026-09-14)
 SKIP_CEIL=1        # the statusbar strip comparison needs a second run
 
 REPORT=build/gui_selftest.txt

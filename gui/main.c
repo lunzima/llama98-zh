@@ -36,6 +36,9 @@
 #include "session.h"
 #include "settings.h"
 #include "beep.h"     /* lz_beep - the reply-finished sound */
+#include "music.h"    /* the rules behind the generation-phase music */
+#include "midiplay.h" /* and the player that carries them out */
+#include "musicdlg.h" /* the sound window */
 #include "settingsdlg.h"
 #include "resource.h"
 #include "splash.h"
@@ -290,6 +293,13 @@ static struct {
     char tok_buf[LZ_TOK_BUF];
     int  tok_n;
     int  tok_ms;
+    /* The sound window's settings, and the ratio last handed to the
+       player. The cached ratio is what makes the throttled tick free
+       to call lz_midi_ratio on every fire: the player compares it too,
+       but keeping it here means the whole arithmetic is skipped rather
+       than just the property write. */
+    LZMusicSettings mus;
+    int  mus_ratio;
     /* Spec 3.1: how many tokens THIS turn's generation has produced.
        Accumulated in tokens_arrived (every emitted token reaches it
        once), so it is authoritative over the running time even when the
@@ -471,6 +481,7 @@ static const LZMenuItem MENU_MODEL[] = {
    looked like, and this is a setting. */
 static const LZMenuItem MENU_SETTINGS_POPUP[] = {
     { IDM_SETTINGS,   LZ_STR_MENU_SETTINGS,   1 },
+    { IDM_SOUND,      LZ_STR_MENU_SOUND,      1 },
     LZ_MENU_SEP,
     { IDM_LANG_ZH,    LZ_STR_MENU_LANG_ZH,    1 },
     { IDM_LANG_EN,    LZ_STR_MENU_LANG_EN,    1 },
@@ -1982,6 +1993,13 @@ static void gui_prefill_progress(int done, int total, void *ctx) {
     if (g.main) PostMessage(g.main, WM_APP_PREFILL, 0, 0);
 }
 
+/* The music, declared here and defined beside finish_job with the rest
+ * of it. Forward rather than moved: the four functions belong together
+ * and beside the one that ends a turn, but two of their callers - the
+ * periodic tick and start_job - come first in the file. */
+static void music_start(HWND hwnd);
+static void music_follow(void);
+
 /* ---- the window's single periodic tick (see LZ_UI_TIMER) ---- */
 
 static int    g_ui_timer_ms;      /* 0 = not armed */
@@ -2108,6 +2126,11 @@ static void ui_tick(void) {
     prefill_paint_tick();
     if (g.job_kind == JOB_GENERATE && !prefill_active())
         set_status(lz_str_utf8(LZ_STR_STATE_GENERATING));
+
+    /* 6. The music's tempo, from the same two numbers step 5 just put
+          on the status bar. Cheap: it returns at once unless the
+          ratio actually moved. */
+    music_follow();
 }
 
 /* (Re)load the lamp artwork and repaint the pair.
@@ -2327,6 +2350,11 @@ static int start_job(HWND hwnd, LZWorkerJob job, void *ud, int kind) {
     if (kind == JOB_GENERATE) {
         g.tok_gen = 0;
         g.gen_start_ms = lz_time_ms();
+        /* The music starts with the JOB, prefill and all. Waiting for
+           the first token would leave the longest silence of the turn
+           - the one the user is most likely to read as "nothing is
+           happening" - as the only part with no sound. */
+        music_start(hwnd);
     }
     set_status(lz_str_utf8(kind == JOB_LOAD ? LZ_STR_STATE_LOADING
                                                : LZ_STR_STATE_GENERATING));
@@ -2381,6 +2409,201 @@ static void start_model_load(HWND hwnd, const char *dir) {
    because finish_job (immediately below) is the only caller and comes
    first in the file. */
 static void side_panel_sync(HWND hwnd);
+
+/* ---- background music ----
+ *
+ * The rules are in common/music.c and the device is in gui/midiplay.c;
+ * what is here is the part that needs this program's own directory and
+ * this program's own ini.
+ *
+ * NOTHING below reports a failure. A missing directory, an empty one,
+ * a file that is not a MIDI file, a machine with no MIDI device: all of
+ * them end in silence, which is what the user gets anyway, and none of
+ * them is worth a message box in front of a reply they are waiting for.
+ */
+#define LZ_MUSIC_MAX_FILES 64
+#define LZ_MUSIC_NAME_MAX  64
+
+static char g_music_dir[MAX_PATH];
+
+/* The music directory, beside the executable - gui/inifile.h's reason
+ * for the ini being there applies unchanged: it is the only place that
+ * exists on every target, and the deliverable is often a directory
+ * somebody copied onto a machine. */
+static const char *music_dir(void) {
+    if (!g_music_dir[0]) {
+        char mod[MAX_PATH];
+        int n = (int)GetModuleFileNameA(NULL, mod, (DWORD)sizeof mod);
+        if (n <= 0 || n >= (int)sizeof mod) return "";
+        while (n > 0 && mod[n - 1] != '\\' && mod[n - 1] != '/') n--;
+        mod[n] = '\0';
+        if (n + (int)strlen(LZ_MUSIC_DIR) >= (int)sizeof g_music_dir)
+            return "";
+        strcpy(g_music_dir, mod);
+        strcat(g_music_dir, LZ_MUSIC_DIR);
+    }
+    return g_music_dir;
+}
+
+/* Every playable file in it, sorted. Sorted because FindFirstFile
+ * hands them over in the order the filesystem holds them - creation
+ * order on FAT - so without this the rotation would depend on which
+ * order the files were copied in, and would change when one was
+ * replaced. */
+static int music_scan(char names[][LZ_MUSIC_NAME_MAX], int max) {
+    WIN32_FIND_DATAA fd;
+    HANDLE hf;
+    char pat[MAX_PATH];
+    int n = 0, i, j;
+    const char *dir = music_dir();
+    if (!*dir) return 0;
+    if (strlen(dir) + 6 >= sizeof pat) return 0;
+    strcpy(pat, dir);
+    strcat(pat, "\\*.mid");
+    hf = FindFirstFileA(pat, &fd);
+    if (hf == INVALID_HANDLE_VALUE) return 0;
+    do {
+        if (n >= max) break;
+        /* The rule is in common/music.c, not here: it is what excludes
+           the chime, and it is gated there. */
+        if (!lz_music_is_loop_file(fd.cFileName)) continue;
+        if (strlen(fd.cFileName) >= LZ_MUSIC_NAME_MAX) continue;
+        strcpy(names[n], fd.cFileName);
+        n++;
+    } while (FindNextFileA(hf, &fd));
+    FindClose(hf);
+    for (i = 1; i < n; i++) {
+        char k[LZ_MUSIC_NAME_MAX];
+        strcpy(k, names[i]);
+        for (j = i - 1; j >= 0 && strcmp(names[j], k) > 0; j--)
+            strcpy(names[j + 1], names[j]);
+        strcpy(names[j + 1], k);
+    }
+    return n;
+}
+
+/* Join the music directory and a name, unless the name is already a
+ * path. 1 on success. */
+static int music_path(char *out, int cap, const char *name) {
+    const char *dir;
+    if (!name || !*name) return 0;
+    if (strchr(name, '\\') || strchr(name, '/') ||
+        (name[0] && name[1] == ':')) {
+        if ((int)strlen(name) >= cap) return 0;
+        strcpy(out, name);
+        return 1;
+    }
+    dir = music_dir();
+    if (!*dir) return 0;
+    if ((int)(strlen(dir) + 1 + strlen(name)) >= cap) return 0;
+    strcpy(out, dir);
+    strcat(out, "\\");
+    strcat(out, name);
+    return 1;
+}
+
+/* The next piece to play. The ini's own list wins when it has one - a
+ * user who wrote a list wrote it to leave something out - and the
+ * directory is what answers otherwise. */
+static int music_next(char *out, int cap) {
+    static int cursor;
+    static char names[LZ_MUSIC_MAX_FILES][LZ_MUSIC_NAME_MAX];
+    char list[1024], one[MAX_PATH];
+    int n, idx;
+
+    lz_ini_get_str("music_list", list, (int)sizeof list, "");
+    n = lz_music_list_count(list);
+    if (n > 0) {
+        idx = lz_music_next(n, &cursor);
+        if (idx < 0) return 0;
+        if (!lz_music_list_at(list, idx, one, (int)sizeof one)) return 0;
+        return music_path(out, cap, one);
+    }
+    n = music_scan(names, LZ_MUSIC_MAX_FILES);
+    if (n <= 0) return 0;
+    idx = lz_music_next(n, &cursor);
+    if (idx < 0) return 0;
+    return music_path(out, cap, names[idx]);
+}
+
+/* 1 when the chosen engine can actually play. The wavetable answers 0
+ * until its bank format is finished, so this is where the silent
+ * fall-back to system MIDI happens - the sound window is what tells
+ * the user, by greying the row and saying so in its label. */
+static int music_engine_ready(HWND hwnd) {
+    int pick = lz_music_engine_pick(g.mus.engine,
+                                    lz_midi_system_ok(hwnd),
+                                    lz_midi_wave_ok());
+    return pick >= 0;
+}
+
+/* Start whatever is next, at 1x. Called when a generate job starts. */
+static void music_start(HWND hwnd) {
+    char path[MAX_PATH];
+    if (!g.mus.on) return;
+    if (!music_engine_ready(hwnd)) return;
+    if (!music_next(path, (int)sizeof path)) return;
+    /* 1x to begin with, not the last turn's ratio: nothing has been
+       measured yet this turn, and lz_music_ratio_milli answers 1x for
+       exactly that state. Carrying the previous turn's speed over
+       would open every reply at the speed of the one before it. */
+    g.mus_ratio = LZ_MUSIC_RATIO_ONE;
+    lz_midi_start(path, 1, g.mus.instrument, g.mus.volume, g.mus_ratio);
+}
+
+/* Move the tempo to match how fast the reply is coming. Called from
+ * the throttled tick, which already recomputes the rate for the status
+ * bar - this reads the same two numbers rather than a second clock. */
+static void music_follow(void) {
+    int target, r;
+    if (!lz_midi_busy()) return;
+    /* gen_start_ms, not the job's start: prefill produces no tokens,
+       so measuring from before it would report a rate climbing out of
+       nothing for the first seconds of every turn. It is also the
+       denominator the throughput cell uses, so the two agree. */
+    target = lz_music_target(g.tok_gen,
+                             (int)(lz_time_ms() - g.gen_start_ms),
+                             g.mus.base_tps_milli, g.mus.speed);
+    /* Towards it, not onto it. The step is the tick's own period, so
+       the speed of the change is in real time and does not depend on
+       what stream_ms happens to be set to. */
+    r = lz_music_ratio_step(g.mus_ratio, target, ui_tick_ms());
+    if (r == g.mus_ratio) return;
+    g.mus_ratio = r;
+    lz_midi_ratio(r);
+}
+
+/* The reply has landed: stop the music, take a baseline if this turn
+ * was the first long enough one, and make whatever noise the user
+ * asked for. */
+static void music_finish(HWND hwnd) {
+    int elapsed = (int)(lz_time_ms() - g.gen_start_ms);
+    int fin;
+    lz_midi_halt();
+    /* The baseline BEFORE the chime, so a first turn that earns one
+       has it written before anything can go wrong with the sound. */
+    if (lz_music_should_calibrate(g.mus.base_tps_milli, g.tok_gen,
+                                  elapsed))
+        g.mus.base_tps_milli = lz_music_tps_milli(g.tok_gen, elapsed);
+    /* Silence needs no device. Asking music_engine_ready first would
+       OPEN one - and opening a MIDI device to decide not to make a
+       sound is a wait, and on some machines an exclusive claim, in
+       exchange for nothing. */
+    if (g.mus.finish == LZ_MUSIC_FINISH_NONE) return;
+    fin = lz_music_finish_effective(g.mus.finish, music_engine_ready(hwnd));
+    if (fin == LZ_MUSIC_FINISH_BEEP) {
+        lz_beep();
+    } else if (fin == LZ_MUSIC_FINISH_CHIME) {
+        /* Built in, so there is no file to be missing. At the volume
+           the music was at: a chime twice as loud as the music it
+           interrupts is a fright. The beep covers what is left - no
+           device, no winmm, the 3.51 floor - because the user asked to
+           be told the reply had landed, and silence is the one answer
+           that does not tell them. */
+        if (!lz_midi_start_chime(g.mus.instrument, g.mus.volume))
+            lz_beep();
+    }
+}
 
 static void finish_job(HWND hwnd, int rc) {
     int kind = g.job_kind;
@@ -2554,7 +2777,12 @@ static void finish_job(HWND hwnd, int rc) {
            a stopped one: the user who walked away wants to know the
            machine is idle, and "it stopped because you pressed Stop" is
            already on screen for when they come back. */
-        if (g.set.beep) lz_beep();
+        /* The music stops, a baseline may be taken, and whatever the
+           sound window asked for is heard. The old `beep` setting
+           still reaches this through lz_music_finish_from_beep at
+           startup, so a user who never opens the sound window keeps
+           exactly the behaviour they had. */
+        music_finish(hwnd);
     }
 
     /* AFTER the branch: the model lamp's third state is "the last load
@@ -3177,6 +3405,26 @@ static int create_children(HWND hwnd) {
     /* Default 1: a missing key means a user who has never had the
        setting, and the reply-finished beep is on for them. */
     g.set.beep = lz_ini_get_int("beep", 1) ? 1 : 0;
+    /* The sound settings. `music_finish` is read with a default of -1
+       so that "the key is missing" can be told from "the key says
+       nothing": a missing one means an ini written before the sound
+       window existed, and lz_music_finish_from_beep carries that
+       user's old answer over rather than inventing one. A user who had
+       the beep OFF stays silent - see that function's own comment for
+       why the reverse is never done. */
+    lz_music_defaults(&g.mus);
+    g.mus.on = lz_ini_get_int("music", g.mus.on) ? 1 : 0;
+    g.mus.speed = lz_ini_get_int("music_speed", g.mus.speed);
+    g.mus.engine = lz_ini_get_int("music_engine", g.mus.engine);
+    g.mus.volume = lz_ini_get_int("music_vol", g.mus.volume);
+    g.mus.instrument = lz_ini_get_int("music_inst", g.mus.instrument);
+    g.mus.base_tps_milli = lz_ini_get_int("music_base_tps_milli", 0);
+    {
+        int fin = lz_ini_get_int("music_finish", -1);
+        g.mus.finish = (fin < 0) ? lz_music_finish_from_beep(g.set.beep)
+                                 : fin;
+    }
+    lz_music_clamp(&g.mus);
     /* Context window. Through the clamp with no model cap - there is no
        model at this point in startup, and the cap is applied again at
        load time where cfg->seq_len is finally knowable. Clamping here
@@ -5158,6 +5406,14 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (wp == LZ_UI_TIMER) { ui_tick(); return 0; }
         break;
 
+    /* A stream buffer finished: loop the music, or let the chime end.
+       The player owns the decision; this only routes the message,
+       which arrives here because midiStreamOpen was given
+       CALLBACK_WINDOW. */
+    case LZ_UI_MM_MOM_DONE:
+        lz_midi_buffer_done();
+        return 0;
+
     /* ---- splitter ---- */
     case WM_SETCURSOR:
         if ((HWND)wp == hwnd) {
@@ -5366,6 +5622,21 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case IDM_DEL_LAST:
             rollback_last(hwnd, 0);
             return 0;
+        case IDM_SOUND:
+            /* No join-drain around it, unlike IDM_SETTINGS: nothing
+               here is read by the worker. The dialog pumps messages,
+               so a generation carries on behind it. */
+            if (lz_gui_music_dialog(hwnd, g.inst, &g.mus)) {
+                /* The music STOPS, whatever changed. Nothing can be
+                   altered under a piece already queued - the buffer
+                   carries the volume and the patch at tick 0 - and
+                   restarting it mid-phrase is heard as the music
+                   jumping backwards. The next turn starts with the new
+                   settings, read from one place. */
+                lz_midi_settings_changed();
+            }
+            return 0;
+
         case IDM_SETTINGS: {
             /* Captured BEFORE the dialog, because the dialog writes
                straight into g.set and there is then nothing left to
@@ -5493,6 +5764,17 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             lz_ini_set_int("lang", lz_str_lang_english());
             lz_ini_set_int("think", g.set.think);
             lz_ini_set_int("beep", g.set.beep);
+            /* The sound settings. music_finish is written
+               UNCONDITIONALLY from here on, which is what stops the
+               beep-key migration running a second time and overwriting
+               a choice the user made in the sound window. */
+            lz_ini_set_int("music", g.mus.on);
+            lz_ini_set_int("music_speed", g.mus.speed);
+            lz_ini_set_int("music_engine", g.mus.engine);
+            lz_ini_set_int("music_vol", g.mus.volume);
+            lz_ini_set_int("music_inst", g.mus.instrument);
+            lz_ini_set_int("music_finish", g.mus.finish);
+            lz_ini_set_int("music_base_tps_milli", g.mus.base_tps_milli);
             lz_ini_set_int("temp_milli", (int)(g.set.temp * 1000.0f + 0.5f));
             lz_ini_set_int("seed_mode", g.set.seed_mode);
             lz_ini_set_int("seed", (int)(unsigned)g.set.seed);
@@ -5519,6 +5801,13 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             lz_ini_set_str("system", g.set.system);
             mru_save();
         }
+        /* Before DestroyWindow, not in WM_DESTROY: the stream was
+           opened with CALLBACK_WINDOW pointing at this window, so a
+           buffer still queued when the window goes would post to a
+           handle that no longer exists. Stopping here also silences
+           anything still sounding - a note left on by a torn-down
+           stream does not stop when the process does. */
+        lz_midi_shutdown();
         DestroyWindow(hwnd);
         return 0;
 
@@ -9215,6 +9504,92 @@ static int st_save(FILE *f) {
    has to accept it. A formatter and a parser that disagree produce a
    dialog which refuses the value it just offered - and the only way to
    find that out is to open it. */
+/* The sound window's read-back, the same create-without-loop split
+ * st_settings_dialog uses: build it, read it, destroy it, so the modal
+ * loop is the only part with no gate.
+ *
+ * EVERY value fed in is one the field's own default is NOT - 0 is not
+ * the default `on`, FIXED is not FOLLOW, 46 is not as-written, 33 is
+ * not 80, BEEP is not CHIME. A control that is never written and never
+ * read would otherwise round-trip its default and pass.
+ *
+ * Controls are addressed by NUMBER because this file cannot see
+ * gui/musicdlg.c's private enum - the same reason, and the same
+ * hazard, as the settings dialog's 3001.. block:
+ *
+ *     3101 ON          3103 ENG_SYS   3104 ENG_WAVE   3106 INST
+ *     3108 SPD_FOLLOW  3109 SPD_FIXED 3111 BASE       3114 VOL       */
+static int st_music_dialog(FILE *f, HINSTANCE inst) {
+    LZMusicSettings in, out;
+    HWND dlg;
+    int checks = 0;
+
+    lz_music_defaults(&in);
+    in.on = 0;
+    in.speed = LZ_MUSIC_FIXED;
+    in.engine = LZ_MUSIC_ENGINE_WAVE;
+    in.finish = LZ_MUSIC_FINISH_BEEP;
+    in.instrument = 46;          /* orchestral harp: menu row 8 */
+    in.volume = 33;
+    in.base_tps_milli = 4200;    /* shows as "4.20" */
+
+    dlg = lz_gui_music_dialog_create(NULL, inst, &in);
+    st_check(f, dlg != NULL, "sound: the window is created"); checks++;
+    if (!dlg) return checks;
+
+    st_check(f, lz_gui_music_dialog_read(dlg, &out) == LZ_GUI_MUSIC_OK,
+             "sound: what the window shows, the window accepts");
+    checks++;
+    st_check(f, out.on == 0, "sound: the play checkbox round-trips");
+    checks++;
+    st_check(f, out.speed == LZ_MUSIC_FIXED,
+             "sound: the tempo mode round-trips"); checks++;
+    /* The wavetable row is DISABLED while it has no bank, and a
+       disabled control still has to carry the value it was given: the
+       setting comes from the ini, and a row that cannot hold it would
+       silently move every such user back to system MIDI. */
+    st_check(f, out.engine == LZ_MUSIC_ENGINE_WAVE,
+             "sound: a disabled engine row still round-trips its value");
+    checks++;
+    st_check(f, out.finish == LZ_MUSIC_FINISH_BEEP,
+             "sound: the finish sound round-trips"); checks++;
+    st_check(f, out.volume == 33, "sound: the volume box round-trips");
+    if (out.volume != 33) fprintf(f, "  got %d\n", out.volume);
+    checks++;
+    /* The instrument goes out as a MENU ROW and comes back as a GM
+       PROGRAM, so this is the one field where the two halves could
+       disagree by an off-by-one and still look plausible. */
+    st_check(f, out.instrument == 46,
+             "sound: the instrument round-trips as a program, not a row");
+    if (out.instrument != 46) fprintf(f, "  got %d\n", out.instrument);
+    checks++;
+    st_check(f, out.base_tps_milli == 4200,
+             "sound: the baseline survives being shown as text");
+    if (out.base_tps_milli != 4200)
+        fprintf(f, "  got %d\n", out.base_tps_milli);
+    checks++;
+
+    /* A REFUSAL, and what it must leave behind. A dialog that reported
+       a bad field after writing half of itself would have changed the
+       settings the user was told were rejected. */
+    SetWindowTextA(GetDlgItem(dlg, 3111), "4.2x");
+    out.volume = 0x5EED;
+    st_check(f, lz_gui_music_dialog_read(dlg, &out) != LZ_GUI_MUSIC_OK &&
+                out.volume == 0x5EED,
+             "sound: a baseline it cannot read is refused, and nothing "
+             "is written");
+    checks++;
+    /* And an empty box is refused too - not read as zero, which would
+       be a baseline meaning "never calibrated" arrived at by typing. */
+    SetWindowTextA(GetDlgItem(dlg, 3111), "");
+    st_check(f, lz_gui_music_dialog_read(dlg, &out) != LZ_GUI_MUSIC_OK,
+             "sound: an empty baseline box is refused, not read as 0");
+    checks++;
+
+    DestroyWindow(dlg);
+    return checks;
+}
+
 static int st_settings_dialog(FILE *f, HINSTANCE inst) {
     LZGuiSettings in, out;
     HWND dlg;
@@ -11056,6 +11431,18 @@ static int selftest(HINSTANCE inst, const char *path) {
     hwnd = create_main(inst, 640, 480);
     if (!hwnd) { fprintf(f, "FAIL create_main\n"); fclose(f); return 1; }
 
+    /* NO SOUND FROM A SELFTEST. music_start would open the MIDI device
+       and play, and the notifications it posts land in the same queue
+       the worker checks drain and count - measured: with the music on,
+       the inspect-frame check went red. A run that makes a noise is
+       also one nobody can do twice in a room with other people in it.
+       st_music_dialog builds the sound window itself and needs no
+       device, so nothing below loses coverage by this. The finish
+       sound goes too: music_finish opens the device to decide what to
+       play, and every scripted job here ends. */
+    g.mus.on = 0;
+    g.mus.finish = LZ_MUSIC_FINISH_NONE;
+
     /* LZ_GUI_SPLIT is a band of the parent's background that the window
        hit-tests, not a control - checked below by comparing g.split
        against the layout instead. LZ_GUI_SIDE_LAMPS/SIDE_CAND
@@ -12194,6 +12581,7 @@ static int selftest(HINSTANCE inst, const char *path) {
     checks += st_ctx_window(f);
     checks += st_ctx_commit(f, hwnd);
     checks += st_settings_dialog(f, inst);
+    checks += st_music_dialog(f, inst);
     checks += st_settings_scroll(f, inst);
     checks += st_about(f, inst);
 

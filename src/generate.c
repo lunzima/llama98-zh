@@ -993,6 +993,147 @@ int lz_spec_round(const LZModel *m, LZRunState *s,
     return n_accept + 1;
 }
 
+/* DSpark (arXiv:2607.05147) speculative round - see llama_zh.h's own
+   contract comment for why this is a separate function, not a branch
+   inside lz_spec_round, and for what does NOT apply here (s->mtp_pos,
+   catch-up decode). */
+int lz_spec_round_dspark(const LZModel *m, LZRunState *s,
+                         int anchor, int anchor_pos, int k,
+                         float p_min, int n_min, const LZSampler *samp,
+                         int debug_break_rollback,
+                         int *out, int *out_n_accept, int *out_new_pos,
+                         int *out_k_eff, char *errbuf, int errlen) {
+    int draft[LZ_SPEC_K_MAX];
+    int verify_tokens[LZ_SPEC_K_MAX + 1];
+    int targ[LZ_SPEC_K_MAX];
+    int vocab, n_accept, i, rc, k_eff;
+    int bonus;
+    int base_slot;
+    float *base_logits;
+
+    if (!m || !s || !out || !out_n_accept || !out_new_pos || !out_k_eff) {
+        LZ_ERR_SET(rc, errbuf, errlen, LZ_ERR_NULL_ARG);
+        return -rc;
+    }
+    if (!m->mtp) {
+        LZ_ERR_SET(rc, errbuf, errlen, LZ_ERR_SPEC_NO_HEAD);
+        return -rc;
+    }
+    if (k < 1 || k > LZ_SPEC_K_MAX) {
+        LZ_ERR_SET2(rc, errbuf, errlen, LZ_ERR_SPEC_K_RANGE, k, LZ_SPEC_K_MAX);
+        return -rc;
+    }
+    /* See lz_spec_round's own identical check for the ring-aliasing
+       argument - unchanged here, the body's SSM/conv ring is the same
+       mechanism regardless of which draft head produced the batch. */
+    if (k > s->ssm_ring_depth - 1) {
+        LZ_ERR_SET2(rc, errbuf, errlen, LZ_ERR_SPEC_K_RANGE, k, s->ssm_ring_depth - 1);
+        return -rc;
+    }
+    /* Third capacity lz_spec_round does not have: the trained head's
+       own slot count. Refused, not clamped - same posture as the two
+       checks above (silently drafting fewer than requested would be a
+       silent behavior change - see llama_zh.h's own comment). */
+    if (k > m->config.mtp_n_draft) {
+        LZ_ERR_SET2(rc, errbuf, errlen, LZ_ERR_SPEC_K_RANGE, k, m->config.mtp_n_draft);
+        return -rc;
+    }
+    vocab = m->config.vocab_size;
+
+    /* One call computes all k slots' BASE logits from the SAME anchor
+       hidden state (s->mtp_chain, already seeded by the caller - same
+       precondition lz_spec_round's own draft loop has). Unlike that
+       loop, this is not incremental: a p_min cutoff below truncates how
+       many of the k computed slots get TRUSTED, not how many get
+       computed - lz_mtp_draft_batch's own contract is "all k slots,
+       independently, from one anchor", and a reference tier that
+       stopped early would defeat the entire point of measuring it as
+       the parallel operation it represents (see that function's own
+       comment on the for-loop being faithful, not a compromise). */
+    base_logits = lz_mtp_draft_batch(m, s, anchor, k);
+    if (!base_logits) {
+        LZ_ERR_SET(rc, errbuf, errlen, LZ_ERR_FORWARD);
+        return -rc;
+    }
+
+    k_eff = 0;
+    for (i = 0; i < k; i++) {
+        /* x_prev: the anchor's own real next token for slot 0's
+           correction, or the token DECIDED for slot i-1 for slot i>=1's
+           - llama_zh.h's own comment on why this is the trained head's
+           output, not optional post-processing. */
+        int x_prev = (i == 0) ? anchor : draft[i - 1];
+        float *row = base_logits + (size_t)i * vocab;
+        float p1;
+        int idx;
+        lz_mtp_markov_correct(m, s, x_prev, row);
+        idx = lz_argmax_p1(row, vocab, &p1);
+        if (p1 < p_min) break;   /* same order lz_spec_round's own loop uses */
+        draft[i] = idx;
+        k_eff = i + 1;
+    }
+
+    if (k_eff < n_min) {
+        /* Discard - same contract as lz_spec_round's own discard path.
+           Nothing here needs undoing: lz_mtp_draft_batch never touches
+           s->mtp_chain (verified - .prof/mtp_kdraft_check.c) and writes
+           no state that survives past its own return, so unlike
+           lz_spec_round's discard comment there is no "chaining
+           clobbered s->mtp_chain" caveat for the caller to track. */
+        out[0] = anchor;
+        *out_n_accept = 0;
+        *out_new_pos = anchor_pos;
+        *out_k_eff = k_eff;
+        return 0;
+    }
+
+    base_slot = s->ssm_slot;
+
+    verify_tokens[0] = anchor;
+    for (i = 0; i < k_eff; i++) verify_tokens[i + 1] = draft[i];
+    if (lz_forward_verify(m, s, verify_tokens, k_eff + 1, anchor_pos + 1) != 0) {
+        LZ_ERR_SET(rc, errbuf, errlen, LZ_ERR_FORWARD);
+        return -rc;
+    }
+    for (i = 0; i < k_eff; i++) {
+        targ[i] = verify_row_argmax(samp, draft, i,
+                                    s->mtp_logits + (size_t)i * vocab, vocab);
+    }
+    bonus = verify_row_argmax(samp, draft, k_eff,
+                              s->mtp_logits + (size_t)k_eff * vocab, vocab);
+
+    n_accept = lz_spec_accept(draft, targ, k_eff, bonus, out);
+
+    if (n_accept < k_eff) {
+        /* Rollback - identical mechanism to lz_spec_round's own, see
+           that function's module comment for the full derivation (the
+           body's SSM/conv ring does not know or care which draft head
+           produced the rejected tail). */
+        lz_debug_n_ring_rollback++;
+        if (!debug_break_rollback) {
+            s->ssm_slot = (base_slot + n_accept + 1) % s->ssm_ring_depth;
+        }
+    }
+
+    /* Reseed s->mtp_chain for the caller's next round - identical to
+       lz_spec_round's own tail (same row, same reasoning: row n_accept
+       is causally unaffected by any later, possibly-rejected row). No
+       s->mtp_pos advance and no catch-up decode - see this function's
+       own header comment for why neither applies to a head with no
+       persistent per-round KV history. */
+    {
+        int dim = m->config.hidden_size;
+        memcpy(s->mtp_chain, s->mtp_verify_hidden + (size_t)n_accept * dim,
+              (size_t)dim * sizeof(float));
+    }
+
+    *out_n_accept = n_accept;
+    *out_new_pos = anchor_pos + 1 + n_accept;
+    *out_k_eff = k_eff;
+
+    return n_accept + 1;
+}
+
 /* Sample one token from a FULL, already-normalized probability vector
    (temp>0 phase 2's own "bonus" token: the row past the
    last accepted draft has no draft counterpart to accept/reject
@@ -1231,6 +1372,135 @@ int lz_spec_round_temp(const LZModel *m, LZRunState *s,
     }
 
     s->mtp_pos += n_accept;
+
+    return n_accept + 1;
+}
+
+/* DSpark temp>0 round - see llama_zh.h's own contract comment. Mirrors
+   lz_spec_round_dspark's relationship to lz_spec_round exactly the way
+   this file's own lz_spec_round_temp mirrors lz_spec_round. */
+int lz_spec_round_dspark_temp(const LZModel *m, LZRunState *s,
+                              int anchor, int anchor_pos, int k,
+                              float p_min, int n_min, LZSampler *samp,
+                              int debug_break_rollback,
+                              int *out, int *out_n_accept, int *out_new_pos,
+                              int *out_k_eff, char *errbuf, int errlen) {
+    int draft[LZ_SPEC_K_MAX];
+    int vocab, n_accept, i, rc, k_eff;
+    int base_slot;
+    float *base_logits;
+
+    if (!m || !s || !samp || !out || !out_n_accept || !out_new_pos || !out_k_eff) {
+        LZ_ERR_SET(rc, errbuf, errlen, LZ_ERR_NULL_ARG);
+        return -rc;
+    }
+    if (!m->mtp) {
+        LZ_ERR_SET(rc, errbuf, errlen, LZ_ERR_SPEC_NO_HEAD);
+        return -rc;
+    }
+    if (k < 1 || k > LZ_SPEC_K_MAX) {
+        LZ_ERR_SET2(rc, errbuf, errlen, LZ_ERR_SPEC_K_RANGE, k, LZ_SPEC_K_MAX);
+        return -rc;
+    }
+    if (k > s->ssm_ring_depth - 1) {
+        LZ_ERR_SET2(rc, errbuf, errlen, LZ_ERR_SPEC_K_RANGE, k, s->ssm_ring_depth - 1);
+        return -rc;
+    }
+    if (k > m->config.mtp_n_draft) {
+        LZ_ERR_SET2(rc, errbuf, errlen, LZ_ERR_SPEC_K_RANGE, k, m->config.mtp_n_draft);
+        return -rc;
+    }
+    vocab = m->config.vocab_size;
+
+    /* One call, all k slots' base logits - see lz_spec_round_dspark's
+       own identical comment for why this is not incremental the way
+       lz_spec_round_temp's chained loop is. */
+    base_logits = lz_mtp_draft_batch(m, s, anchor, k);
+    if (!base_logits) {
+        LZ_ERR_SET(rc, errbuf, errlen, LZ_ERR_FORWARD);
+        return -rc;
+    }
+
+    k_eff = 0;
+    for (i = 0; i < k; i++) {
+        int x_prev = (i == 0) ? anchor : draft[i - 1];
+        float *row = base_logits + (size_t)i * vocab;
+        int idx;
+        lz_mtp_markov_correct(m, s, x_prev, row);
+        idx = lz_sample_temp_q(row, vocab, samp->p.temperature, &samp->rng_state);
+        if (row[idx] < p_min) break;
+        draft[i] = idx;
+        memcpy(s->mtp_draft_q + (size_t)i * vocab, row, (size_t)vocab * sizeof(float));
+        k_eff = i + 1;
+    }
+
+    if (k_eff < n_min) {
+        /* Discard - see lz_spec_round_dspark's own comment: nothing to
+           undo, lz_mtp_draft_batch never touches s->mtp_chain. */
+        out[0] = anchor;
+        *out_n_accept = 0;
+        *out_new_pos = anchor_pos;
+        *out_k_eff = k_eff;
+        return 0;
+    }
+
+    base_slot = s->ssm_slot;
+
+    {
+        int verify_tokens[LZ_SPEC_K_MAX + 1];
+        verify_tokens[0] = anchor;
+        for (i = 0; i < k_eff; i++) verify_tokens[i + 1] = draft[i];
+        if (lz_forward_verify(m, s, verify_tokens, k_eff + 1, anchor_pos + 1) != 0) {
+            LZ_ERR_SET(rc, errbuf, errlen, LZ_ERR_FORWARD);
+            return -rc;
+        }
+    }
+
+    /* Per-row coupled accept/residual-resample - identical to
+       lz_spec_round_temp's own loop, unaffected by which draft head
+       produced draft[]/s->mtp_draft_q. */
+    n_accept = k_eff;
+    for (i = 0; i < k_eff; i++) {
+        float *row = s->mtp_logits + (size_t)i * vocab;
+        float u;
+        int accepted, tok;
+        apply_row_penalties_assumed(samp, draft, i, row);
+        lz_target_dist(&samp->p, row, vocab, samp->probindex, s->mtp_target_p);
+        u = lz_random_f32(&samp->rng_state);
+        tok = lz_spec_accept_temp(s->mtp_target_p, s->mtp_draft_q + (size_t)i * vocab,
+                                  draft[i], vocab, u, &samp->rng_state, &accepted);
+        out[i] = tok;
+        if (!accepted) { n_accept = i; break; }
+    }
+    if (n_accept == k_eff) {
+        float *row = s->mtp_logits + (size_t)k_eff * vocab;
+        apply_row_penalties_assumed(samp, draft, k_eff, row);
+        lz_target_dist(&samp->p, row, vocab, samp->probindex, s->mtp_target_p);
+        out[k_eff] = sample_from_dist(s->mtp_target_p, vocab, &samp->rng_state);
+    }
+
+    if (n_accept < k_eff) {
+        /* Ring rollback - identical mechanism, see lz_spec_round's
+           module comment for the full derivation. */
+        lz_debug_n_ring_rollback++;
+        if (!debug_break_rollback) {
+            s->ssm_slot = (base_slot + n_accept + 1) % s->ssm_ring_depth;
+        }
+    }
+
+    /* Reseed s->mtp_chain - identical to lz_spec_round_dspark's own
+       tail. No s->mtp_pos advance and no catch-up decode - see
+       lz_spec_round_dspark's own header comment for why neither
+       applies to a head with no persistent per-round KV history. */
+    {
+        int dim = m->config.hidden_size;
+        memcpy(s->mtp_chain, s->mtp_verify_hidden + (size_t)n_accept * dim,
+              (size_t)dim * sizeof(float));
+    }
+
+    *out_n_accept = n_accept;
+    *out_new_pos = anchor_pos + 1 + n_accept;
+    *out_k_eff = k_eff;
 
     return n_accept + 1;
 }
@@ -1645,8 +1915,36 @@ static int lz_generate_spec_round(
        verify distributions agree with the per-token path on the
        same effective temperature. With dynamic temperature off,
        eff_temp IS sampler.p.temperature and the swap is a
-       same-value no-op. */
-    {
+       same-value no-op.
+
+       DSpark (config.mtp_n_draft > 1) dispatches FIRST, ahead of the
+       temperature check, into its OWN pair of functions
+       (lz_spec_round_dspark / lz_spec_round_dspark_temp) - never into
+       either n_draft==1 function, which would run lz_mtp_draft_step
+       against an LZMtp that never bound `fc` (mutually exclusive with
+       the DSpark tensors, model.h's own LZMtp comment). Same
+       temperature swap-and-restore lz_spec_round_temp's own call below
+       uses, for the same reason (lz_sample_temp_q/lz_target_dist read
+       sampler.p.temperature). */
+    if (m->config.mtp_n_draft > 1) {
+        float eff_temp = lz_sample_eff_temp(&sampler->p, tr->in_think);
+        if (eff_temp > LZ_TEMP_FLOOR_F) {
+            float saved = sampler->p.temperature;
+            sampler->p.temperature = eff_temp;
+            n_emit = lz_spec_round_dspark_temp(m, s, anchor, anchor_pos, round_k,
+                                               opts->p_min, opts->n_min, sampler,
+                                               opts->spec_debug_break_rollback,
+                                               round_out, &n_accept, &new_pos, &k_eff,
+                                               errbuf, errlen);
+            sampler->p.temperature = saved;
+        } else {
+            n_emit = lz_spec_round_dspark(m, s, anchor, anchor_pos, round_k,
+                                          opts->p_min, opts->n_min, sampler,
+                                          opts->spec_debug_break_rollback,
+                                          round_out, &n_accept, &new_pos, &k_eff,
+                                          errbuf, errlen);
+        }
+    } else {
         float eff_temp = lz_sample_eff_temp(&sampler->p,
                                             tr->in_think);
         if (eff_temp > LZ_TEMP_FLOOR_F) {
@@ -1759,8 +2057,15 @@ static int lz_generate_spec_round(
                    s->mtp_pos's advance to begin with, again 0
                    shortfall, and this whole `if` is false for
                    ei==n_accept since n_accept < n_accept-1 is
-                   never true). */
-                s->mtp_pos -= (n_accept - ei - 1);
+                   never true).
+
+                   DSpark (config.mtp_n_draft > 1) never advanced
+                   s->mtp_pos in the first place - lz_spec_round_dspark
+                   has no such counter (llama_zh.h's own comment on why)
+                   - so there is nothing to give back here; the
+                   correction below would otherwise walk it negative. */
+                if (m->config.mtp_n_draft <= 1)
+                    s->mtp_pos -= (n_accept - ei - 1);
             }
             stopped = 1;
             *stop_hit = sf->matched;
@@ -2354,13 +2659,29 @@ int lz_generate_call(const LZModel *m, LZTokenizer *t, LZRunState *s,
                        opts->spec_k, s->ssm_ring_depth - 1);
             goto done;
         }
+        /* DSpark (config.mtp_n_draft > 1): a third capacity, the
+           trained head's own slot count - lz_spec_round_dspark's own
+           identical check (llama_zh.h's own comment on why this is
+           refused, not clamped), repeated here for the same "fail
+           before any work happens" reason every other bound in this
+           block already gets checked up front. */
+        if (m->config.mtp_n_draft > 1 && opts->spec_k > m->config.mtp_n_draft) {
+            LZ_ERR_SET2(rc, errbuf, errlen, LZ_ERR_SPEC_K_RANGE,
+                       opts->spec_k, m->config.mtp_n_draft);
+            goto done;
+        }
         /* The call site below DISPATCHES on temperature instead of
            refusing it: temp<=LZ_TEMP_FLOOR calls lz_spec_round
            (unchanged, phase 1's own bit-identity gate keeps covering it
            structurally), temp>LZ_TEMP_FLOOR calls lz_spec_round_temp
-           (generate.c) instead. No precondition check is needed here
-           for that alone: both functions accept any temperature value,
-           they just differ in which one lz_generate_resume calls. */
+           (generate.c) instead; DSpark (config.mtp_n_draft > 1) gets
+           the same dispatch into its own lz_spec_round_dspark /
+           lz_spec_round_dspark_temp pair. No precondition check is
+           needed here for that alone: every one of the four functions
+           accepts any temperature value, they just differ in which one
+           lz_generate_resume calls, and only lz_sample_eff_temp
+           (think-block override) knows the EFFECTIVE temperature a
+           given round will actually use. */
         /* Penalties are NOT refused: verify applies them to each row
            via an assumed penalty window (lz_spec_round's own &sampler
            argument below, generate.c's build_assumed_window/apply_

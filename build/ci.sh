@@ -682,6 +682,83 @@ case $CED_RC in
         ;;
 esac
 
+# ced_split/ced_replay_w (E3): NOT an invariance claim like the two
+# above - a fired reset is supposed to move the prefill logits, so this
+# gate's arms and its mutation both compare logits between two ON
+# configurations, never against an unmodified baseline alone. Own
+# script for the same reason as --ced: a mutant engine build per run.
+echo
+echo "==== [11c/31]--ced-replay-w invariance ===="
+LOG=build/ci-ced-replay.log
+build/ced_replay_gate.sh "$ARM_MODEL" >"$LOG" 2>&1
+CEDR_RC=$?
+cat "$LOG"
+case $CEDR_RC in
+    0)
+        note "PASS  --ced-replay-w invariance"
+        PASS=$((PASS + 1))
+        ;;
+    2)
+        REASON=$(grep -m1 'ced_replay_gate: SKIP' "$LOG")
+        note "SKIP  --ced-replay-w invariance ($REASON)"
+        SKIP=$((SKIP + 1))
+        ;;
+    *)
+        note "FAIL  --ced-replay-w invariance"
+        FAIL=$((FAIL + 1))
+        ;;
+esac
+
+# S4 MLA low-rank Q/O: own script for the same reason as the two above -
+# it builds three synthetic model dirs (safetensors surgery, needs
+# python3 numpy+safetensors) rather than reusing ARM_MODEL as-is.
+echo
+echo "==== [11d/31]MLA low-rank Q/O ===="
+LOG=build/ci-mla.log
+build/mla_gate.sh "$ARM_MODEL" >"$LOG" 2>&1
+MLA_RC=$?
+cat "$LOG"
+case $MLA_RC in
+    0)
+        note "PASS  MLA low-rank Q/O"
+        PASS=$((PASS + 1))
+        ;;
+    2)
+        REASON=$(grep -m1 'mla_gate: SKIP' "$LOG")
+        note "SKIP  MLA low-rank Q/O ($REASON)"
+        SKIP=$((SKIP + 1))
+        ;;
+    *)
+        note "FAIL  MLA low-rank Q/O"
+        FAIL=$((FAIL + 1))
+        ;;
+esac
+
+# S2 CSA2 engine-side scalar reference: own script for the same reason
+# as MLA/ced_replay above - synthetic model dirs, python3 numpy+
+# safetensors.
+echo
+echo "==== [11e/31]CSA2 engine scalar reference ===="
+LOG=build/ci-csa2.log
+build/csa2_gate.sh "$ARM_MODEL" >"$LOG" 2>&1
+CSA2_RC=$?
+cat "$LOG"
+case $CSA2_RC in
+    0)
+        note "PASS  CSA2 engine scalar reference"
+        PASS=$((PASS + 1))
+        ;;
+    2)
+        REASON=$(grep -m1 'csa2_gate: SKIP' "$LOG")
+        note "SKIP  CSA2 engine scalar reference ($REASON)"
+        SKIP=$((SKIP + 1))
+        ;;
+    *)
+        note "FAIL  CSA2 engine scalar reference"
+        FAIL=$((FAIL + 1))
+        ;;
+esac
+
 # ---------------------------------------------------------------------
 # Stage 12: --kv-rot, the one output-changing knob that had no gate. Not
 # invariance (stage 11's assertion) - a QUALITY claim with a number:

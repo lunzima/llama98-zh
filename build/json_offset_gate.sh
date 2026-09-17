@@ -112,7 +112,7 @@ fi
 # 2^24 exactness boundary. Compares the fixed and mutant builds' full
 # lz_load_config() output, via the REAL src/model.c, on a real
 # config.json.
-CFG="${LZ_JSON_GATE_CONFIG:-/e/LLM/models/kunmoe-v2/config.json}"
+CFG="${LZ_JSON_GATE_CONFIG:-/e/LLM/models/kunkun98/config.json}"
 echo ""
 if [ ! -f "$CFG" ]; then
     echo "json_offset_gate: config.json regression SKIPPED - $CFG not found" \

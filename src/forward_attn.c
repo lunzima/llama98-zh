@@ -560,8 +560,16 @@ static void attn_score_loop(LZRunState *s, const LZModelConfig *c,
    verbatim - and the --ced gate would go red with nothing to point at. */
 static void attn_impl(const LZModel *m, LZRunState *s,
                          const LZLayer *L, int layer, int pos0, int nt,
-                         int kv_only) {
+                         int kv_only, const float *kv_in) {
     const LZModelConfig *c = &m->config;
+    /* The tensor the K/V projections read. kv_in is non-NULL only on an
+       attn_kv_share target layer, where the trained K/V are the SOURCE
+       layer's, computed from the source attention's own input - see
+       forward.h's forward_attn comment. Q never reads it: in the trained
+       model only the two K/V projections are fed the source's input.
+       Every read of this is a deliberate one; s->xb stays the input for
+       q, o_proj and the attention itself. */
+    const float *kvx = kv_in ? kv_in : s->xb;
     int hd = c->head_dim, nh = c->n_heads, nkv = c->n_kv_heads;
     int kv_mul = nh / nkv;
     float rms_eps = c->rms_norm_eps;
@@ -594,9 +602,18 @@ static void attn_impl(const LZModel *m, LZRunState *s,
     float scale = s->attn_scale;
     int hdim = c->hidden_size, kvd = c->attn_kv_dim, qd = c->attn_q_dim;
     int qgd = c->attn_qgate_dim;
-    int gsa = lz_act_gs(&L->q_proj, hdim);
+    /* S4 MLA (L->mla_q_on/mla_o_on - model.h's own comment on why these
+       per-layer flags, not c->mla_q_lora_rank/mla_o_lora_rank directly,
+       are what attn_impl reads): the FIRST matmul in either chain is
+       what determines the activation group size the shared xq/xqs
+       quantization below has to match, same reasoning as the plain
+       q_proj/o_proj case - it is q_proj_down/o_proj_down that reads
+       hdim/qd-wide input when the chain is active, not q_proj/o_proj
+       (which carry no weight at all in that case - present_not_mla_q/
+       present_not_mla_o left them unbound). */
+    int gsa = lz_act_gs(L->mla_q_on ? &L->q_proj_down : &L->q_proj, hdim);
     int nsa = scale_groups(hdim, gsa);
-    int gso = lz_act_gs(&L->o_proj, qd);
+    int gso = lz_act_gs(L->mla_o_on ? &L->o_proj_down : &L->o_proj, qd);
     int nso = scale_groups(qd, gso);
     /* Per-token flag for the fixed-tier attention int path (--attn-int).
        The quantize step after the tk loop must know which tokens took the
@@ -668,22 +685,23 @@ static void attn_impl(const LZModel *m, LZRunState *s,
            Plain norm + quantize on every tier: the norms tier's int
            shortcut (used by the KDA block) is an optimization, and the
            three inputs here differ whether or not it is on. */
-        struct { const LZTensor *nrm; const LZTensor *w; float *out; int od; }
+        struct { const LZTensor *nrm; const LZTensor *w; float *out; int od;
+                 const float *in; }
             p[3];
         int pi;
         p[0].nrm = &L->attn_q_subn_norm; p[0].w = &L->q_proj;
-        p[0].out = s->qg;   p[0].od = qgd;
+        p[0].out = s->qg;   p[0].od = qgd;   p[0].in = s->xb;
         p[1].nrm = &L->attn_k_subn_norm; p[1].w = &L->k_proj;
-        p[1].out = s->ktmp; p[1].od = kvd;
+        p[1].out = s->ktmp; p[1].od = kvd;   p[1].in = kvx;
         p[2].nrm = &L->attn_v_subn_norm; p[2].w = &L->v_proj;
-        p[2].out = s->vtmp; p[2].od = kvd;
+        p[2].out = s->vtmp; p[2].od = kvd;   p[2].in = kvx;
         /* kv_only starts at p[1], not p[0]: q_proj's output reaches k and
            v through nothing, and s->xq/xqs are re-quantized per projection
            here anyway, so dropping q cannot perturb either. */
         for (pi = kv_only ? 1 : 0; pi < 3; pi++) {
             for (tk = 0; tk < nt; tk++)
                 lz_rmsnorm(s->xb2 + (size_t)tk * hdim,
-                           s->xb + (size_t)tk * hdim,
+                           p[pi].in + (size_t)tk * hdim,
                            lz_t_f32(p[pi].nrm, s->wscr), hdim,
                            rms_eps);
             for (tk = 0; tk < nt; tk++)
@@ -695,16 +713,58 @@ static void attn_impl(const LZModel *m, LZRunState *s,
         }
     } else {
     for (tk = 0; tk < nt; tk++)
-        lz_quantize_q8(s->xb + (size_t)tk * hdim, hdim, gsa,
+        lz_quantize_q8(kvx + (size_t)tk * hdim, hdim, gsa,
                        s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
     /* One shared xq/xqs serves all three projections, so skipping q here
        leaves k and v quantized from exactly the same bytes they would
-       have been quantized from with q present. */
-    if (!kv_only)
-        lz_matmul_xq_nt(s->qg, s->xb, s->xq, s->xqs, &L->q_proj, hdim, qgd, nt);
-    lz_matmul_xq_nt(s->ktmp, s->xb, s->xq, s->xqs, &L->k_proj, hdim, kvd, nt);
+       have been quantized from with q present.
+
+       AN ATTN_KV_SHARE TARGET IS THE ONE CASE WHERE THAT SHARING CANNOT
+       HOLD: its k/v rows are the source layer's input and its q rows are
+       its own, so q re-quantizes s->xb at the head of the !kv_only block
+       below. One extra pass, and no row's value changes - lz_quantize_q8
+       quantizes each row from that row alone, so which call it sits in is
+       not observable.
+
+       k/v run BEFORE q here (the plain-q_proj arm has no ordering
+       requirement, since all three only ever READ the shared xq/xqs)
+       because the MLA arm below OVERWRITES xq/xqs with q_proj_down's
+       own output partway through - k/v must be done reading the
+       hdim-wide shared quantization by the time that happens. */
+    lz_matmul_xq_nt(s->ktmp, kvx, s->xq, s->xqs, &L->k_proj, hdim, kvd, nt);
     proj_i16(s, v_may, &v_int, s->vtmp, s->vtmp_i16,
-                 s->xb, &L->v_proj, hdim, kvd, nt, LZ_VPROJ_ES, 32767);
+                 kvx, &L->v_proj, hdim, kvd, nt, LZ_VPROJ_ES, 32767);
+    if (!kv_only) {
+        if (kvx != s->xb) {
+            for (tk = 0; tk < nt; tk++)
+                lz_quantize_q8(s->xb + (size_t)tk * hdim, hdim, gsa,
+                               s->xq + (size_t)tk * hdim,
+                               s->xqs + (size_t)tk * nsa);
+        }
+        if (L->mla_q_on) {
+            /* q_proj_down(x) -> s->xb2 (dead scratch here - the only
+               other user in this function is the SubLN branch above,
+               mutually exclusive with MLA), requantize, q_proj_up ->
+               s->qg. Two matmuls chained through a real intermediate
+               buffer, not an alias of xq/xqs's own source - see this
+               function's o_proj twin below for why aliasing dst with
+               the float row a matmul might still read is unsafe. */
+            int qr = c->mla_q_lora_rank;
+            int gsa2 = lz_act_gs(&L->q_proj_up, qr);
+            int nsa2 = scale_groups(qr, gsa2);
+            lz_matmul_xq_nt(s->xb2, s->xb, s->xq, s->xqs, &L->q_proj_down,
+                            hdim, qr, nt);
+            for (tk = 0; tk < nt; tk++)
+                lz_quantize_q8(s->xb2 + (size_t)tk * qr, qr, gsa2,
+                               s->xq + (size_t)tk * qr,
+                               s->xqs + (size_t)tk * nsa2);
+            lz_matmul_xq_nt(s->qg, s->xb2, s->xq, s->xqs, &L->q_proj_up,
+                            qr, qgd, nt);
+        } else {
+            lz_matmul_xq_nt(s->qg, s->xb, s->xq, s->xqs, &L->q_proj, hdim,
+                            qgd, nt);
+        }
+    }
     }
 
     /* QK-Norm + RoPE + write KV cache. **All cache rows of the batch
@@ -866,8 +926,33 @@ static void attn_impl(const LZModel *m, LZRunState *s,
                            s->xq + (size_t)tk * qd, s->xqs + (size_t)tk * nso);
         }
     }
-    lz_matmul_xq_nt(s->xb2, s->attn_out, s->xq, s->xqs, &L->o_proj, qd,
-                    hdim, nt);
+    if (L->mla_o_on) {
+        /* o_proj_down(attn_out) -> s->qg (dead scratch here: q/k/v are
+           long since consumed into the KV cache and s->attn_score_loop
+           does not touch s->qg - see this function's own comment on
+           where qg/qh/ktmp/vtmp go dead), requantize, o_proj_up ->
+           s->xb2 (the block's own residual output, unchanged
+           destination). NOT s->attn_out for the intermediate: it is
+           the "float row" argument this same call passes for the
+           F32-weight tier's benefit, and that tier reads it alongside
+           writing the destination - aliasing src and dst of DIFFERENT
+           widths here would read already-overwritten elements on any
+           weight this engine has ever loaded that takes that tier. */
+        int orank = c->mla_o_lora_rank;
+        int gso2 = lz_act_gs(&L->o_proj_up, orank);
+        int nso2 = scale_groups(orank, gso2);
+        lz_matmul_xq_nt(s->qg, s->attn_out, s->xq, s->xqs, &L->o_proj_down,
+                        qd, orank, nt);
+        for (tk = 0; tk < nt; tk++)
+            lz_quantize_q8(s->qg + (size_t)tk * orank, orank, gso2,
+                           s->xq + (size_t)tk * orank,
+                           s->xqs + (size_t)tk * nso2);
+        lz_matmul_xq_nt(s->xb2, s->qg, s->xq, s->xqs, &L->o_proj_up, orank,
+                        hdim, nt);
+    } else {
+        lz_matmul_xq_nt(s->xb2, s->attn_out, s->xq, s->xqs, &L->o_proj, qd,
+                        hdim, nt);
+    }
 }
 
 /* The two entry points. Both are one call into the body above, so the
@@ -878,12 +963,14 @@ static void attn_impl(const LZModel *m, LZRunState *s,
    and a second copy of this code that drifted would turn that gate red
    with nothing in the failure to say which of the two was wrong. */
 void forward_attn(const LZModel *m, LZRunState *s,
-                  const LZLayer *L, int layer, int pos0, int nt) {
-    attn_impl(m, s, L, layer, pos0, nt, 0);
+                  const LZLayer *L, int layer, int pos0, int nt,
+                  const float *kv_in) {
+    attn_impl(m, s, L, layer, pos0, nt, 0, kv_in);
 }
 
 void forward_attn_kv_only(const LZModel *m, LZRunState *s,
-                          const LZLayer *L, int layer, int pos0, int nt) {
-    attn_impl(m, s, L, layer, pos0, nt, 1);
+                          const LZLayer *L, int layer, int pos0, int nt,
+                          const float *kv_in) {
+    attn_impl(m, s, L, layer, pos0, nt, 1, kv_in);
 }
 

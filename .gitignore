@@ -31,6 +31,10 @@
 !/build/x87/
 !/build/ci.sh
 !/build/ced_gate.sh
+!/build/ced_replay_gate.sh
+!/build/mla_gate.sh
+!/build/csa2_gate.sh
+!/build/kv_share_gate.sh
 !/build/dedupe_gate.sh
 !/build/dup_body_gate.sh
 !/build/c89_floor_gate.sh

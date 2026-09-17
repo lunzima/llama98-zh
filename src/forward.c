@@ -199,6 +199,15 @@ lz_i64 lz_debug_attn_skip = 0;
    speedup nothing performed. */
 lz_i64 lz_debug_ced_skipped = 0;
 
+/* Positive control for CED bounded replay's reset (lz_ced_replay_reset,
+   below), same shape as lz_debug_ced_skipped above and for the same
+   reason: a reset that fires zero times leaves the state untouched,
+   which reads identically to "the knob is off" from the logits alone.
+   Counted once per LAYER the loop actually resets (not once per call),
+   so it also catches a ced_split boundary that resolves to zero
+   qualifying layers. */
+lz_i64 lz_debug_ced_replay_layers = 0;
+
 /* Positive control for the V projection's int16 exit (LZ_VPROJ_I16).
    Counted at the CONSUMER - inside the branch that hands vtmp_i16 to
    lz_quantize_q8_i16 - not where the projection wrote it: an exit that
@@ -787,9 +796,9 @@ static float lz_rope_ceilf(float x) {
 }
 
 /* YaRN's "number of rotations at dimension boundary" inverse.
-   Reference: transformers modeling_rope_utils.py, find_correction_dim
-   (fetched 2026-09-11) - same name and shape, not renamed, so the two
-   can be read side by side. num_rotations is beta_fast/beta_slow; dim
+   Reference: transformers modeling_rope_utils.py, find_correction_dim -
+   same name and shape, not renamed, so the two can be read side by
+   side. num_rotations is beta_fast/beta_slow; dim
    is rotary_dim, not half of it. Both divisions are by runtime values
    (rule six #1: a literal divisor is not the same instruction on x87
    vs SSE - num_rotations/base/max_pos are all config-derived floats,
@@ -866,9 +875,9 @@ void lz_rope_build_table(float *rope_cs, int seq_len, const LZModelConfig *c) {
            a post-scale on the final cos/sin (HF's "attention_factor"/
            mscale). Reference: transformers modeling_rope_utils.py,
            _compute_yarn_parameters + Qwen3_5TextRotaryEmbedding.
-           forward's `cos = emb.cos() * attention_scaling` (fetched
-           2026-09-11). Verified against it bit-for-bit at dynamic NTK
-           off (.prof/wrope_yarn.c, not part of this file). */
+           forward's `cos = emb.cos() * attention_scaling`. Verified
+           against it bit-for-bit at dynamic NTK off (.prof/wrope_yarn.c,
+           not part of this file). */
         float low, high, attn_scale;
         lz_rope_find_correction_range(
             c->rope_scaling_beta_fast, c->rope_scaling_beta_slow,
@@ -982,6 +991,11 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
     s->x       = (float *)xcalloc((size_t)nt * c->hidden_size, sizeof(float), &ok, &s->bytes_alloc);
     s->xb      = (float *)xcalloc((size_t)nt * c->hidden_size, sizeof(float), &ok, &s->bytes_alloc);
     s->xb2     = (float *)xcalloc((size_t)nt * c->hidden_size, sizeof(float), &ok, &s->bytes_alloc);
+    /* S1 attn_kv_share: the source layer's attention input for this
+       chunk (forward.h's own kvshare_x comment). One buffer for the whole
+       stack, not one per target: every target layer of a model reads the
+       SAME source. */
+    s->kvshare_x = (float *)xcalloc((size_t)nt * c->hidden_size, sizeof(float), &ok, &s->bytes_alloc);
     /* Sized for the LARGER of the body's dense-FFN width and the MTP
        block's own (dense_ffn_step's shared scratch, forward.c) - the
        two are independent fields (model.h's mtp_intermediate_size
@@ -1201,6 +1215,14 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
         s->mtp_emb_raw = (float *)xcalloc((size_t)nt * c->hidden_size, sizeof(float), &ok, &s->bytes_alloc);
         s->mtp_chain = (float *)xcalloc((size_t)c->hidden_size, sizeof(float), &ok, &s->bytes_alloc);
         s->mtp_draft_logits = (float *)xcalloc((size_t)c->vocab_size, sizeof(float), &ok, &s->bytes_alloc);
+        if (c->mtp_n_draft > 1) {
+            s->mtp_kdraft_concat = (float *)xcalloc((size_t)3 * c->hidden_size,
+                                                sizeof(float), &ok, &s->bytes_alloc);
+            s->mtp_kdraft_logits = (float *)xcalloc((size_t)LZ_SPEC_K_MAX * c->vocab_size,
+                                                sizeof(float), &ok, &s->bytes_alloc);
+            s->mtp_kdraft_correction = (float *)xcalloc((size_t)c->vocab_size,
+                                                    sizeof(float), &ok, &s->bytes_alloc);
+        }
         s->mtp_logits = (float *)xcalloc((size_t)(LZ_SPEC_K_MAX + 1) * c->vocab_size,
                                          sizeof(float), &ok, &s->bytes_alloc);
         s->mtp_verify_hidden = (float *)xcalloc((size_t)(LZ_SPEC_K_MAX + 1) * c->hidden_size,
@@ -1250,6 +1272,50 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
     s->conv_state = (float *)xcalloc(
         (size_t)s->ssm_ring_depth * c->n_linear_layers * c->lin_conv_dim *
         (c->conv_kernel - 1), sizeof(float), &ok, &s->bytes_alloc);
+
+    /* S2 CSA2 (forward.h's own csa2_pending_c/csa2_comp_ring comment).
+       Allocated only when at least one layer is csa2_on - unlike
+       conv_state/ssm_state_q8 just above, which every KDA/GDN model
+       needs, CSA2 is rare enough (S4's own mla_q_lora_rank precedent)
+       that a model without it should not pay for a ring nobody reads.
+       Sized against s->seq_len, not s->kv_slots - see forward.h's own
+       comment on why. */
+    {
+        int any_csa2 = 0, li2;
+        for (li2 = 0; li2 < c->n_layers; li2++)
+            if (m->layers[li2].csa2_on) { any_csa2 = 1; break; }
+        if (any_csa2) {
+            int cm = c->csa2_compress_m > 0 ? c->csa2_compress_m : 1;
+            int max_blocks = (seq_len + cm - 1) / cm;
+            size_t nf = (size_t)c->n_full_layers;
+            s->csa2_pending_c = (float *)xcalloc(
+                nf * cm * c->head_dim, sizeof(float), &ok, &s->bytes_alloc);
+            s->csa2_pending_z = (float *)xcalloc(
+                nf * cm * c->head_dim, sizeof(float), &ok, &s->bytes_alloc);
+            s->csa2_pending_c_idx = (float *)xcalloc(
+                nf * cm * c->csa2_indexer_head_dim, sizeof(float), &ok, &s->bytes_alloc);
+            s->csa2_pending_z_idx = (float *)xcalloc(
+                nf * cm * c->csa2_indexer_head_dim, sizeof(float), &ok, &s->bytes_alloc);
+            s->csa2_comp_ring = (float *)xcalloc(
+                nf * (size_t)max_blocks * c->head_dim, sizeof(float), &ok, &s->bytes_alloc);
+            s->csa2_idx_comp_ring = (float *)xcalloc(
+                nf * (size_t)max_blocks * c->csa2_indexer_head_dim, sizeof(float),
+                &ok, &s->bytes_alloc);
+            s->csa2_n_blocks = (int *)xcalloc(nf, sizeof(int), &ok, &s->bytes_alloc);
+            s->csa2_scores = (float *)xcalloc((size_t)max_blocks, sizeof(float), &ok, &s->bytes_alloc);
+            s->csa2_topk_idx = (int *)xcalloc((size_t)c->csa2_topk, sizeof(int), &ok, &s->bytes_alloc);
+            s->csa2_topk_val = (float *)xcalloc((size_t)c->csa2_topk, sizeof(float), &ok, &s->bytes_alloc);
+            s->csa2_c_j = (float *)xcalloc((size_t)c->head_dim, sizeof(float), &ok, &s->bytes_alloc);
+            s->csa2_z_j = (float *)xcalloc((size_t)c->head_dim, sizeof(float), &ok, &s->bytes_alloc);
+            s->csa2_c_j_idx = (float *)xcalloc((size_t)c->csa2_indexer_head_dim, sizeof(float), &ok, &s->bytes_alloc);
+            s->csa2_z_j_idx = (float *)xcalloc((size_t)c->csa2_indexer_head_dim, sizeof(float), &ok, &s->bytes_alloc);
+            s->csa2_qidx = (float *)xcalloc(
+                (size_t)c->csa2_indexer_heads * c->csa2_indexer_head_dim, sizeof(float), &ok, &s->bytes_alloc);
+            s->csa2_widx = (float *)xcalloc((size_t)c->csa2_indexer_heads, sizeof(float), &ok, &s->bytes_alloc);
+            s->csa2_cq_idx = (float *)xcalloc((size_t)c->csa2_indexer_q_lora_rank, sizeof(float), &ok, &s->bytes_alloc);
+            s->csa2_attn_probs = (float *)xcalloc((size_t)c->csa2_topk, sizeof(float), &ok, &s->bytes_alloc);
+        }
+    }
 
     /* Persistent F32 conv-tap cache for the FLOAT tier - see forward.h's
        conv_w32 field comment. Allocated unconditionally, NOT gated on
@@ -1357,6 +1423,15 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
            above, not assumed to be bounded by anything else here. */
         if (m->mtp && 2 * c->hidden_size > qcap) qcap = 2 * c->hidden_size;
         if (m->mtp && c->mtp_intermediate_size > qcap) qcap = c->mtp_intermediate_size;
+        /* DSpark (mtp_n_draft > 1): main_proj reads 3*hidden_size
+           (lz_mtp_draft_batch quantizes s->mtp_kdraft_concat through the
+           same scratch); markov_proj reads mtp_markov_rank, always far
+           smaller than hidden_size in practice but checked anyway
+           rather than assumed. */
+        if (m->mtp && c->mtp_n_draft > 1 && 3 * c->hidden_size > qcap)
+            qcap = 3 * c->hidden_size;
+        if (m->mtp && c->mtp_n_draft > 1 && c->mtp_markov_rank > qcap)
+            qcap = c->mtp_markov_rank;
         s->qcap = qcap;
         s->xq = (int8_t *)xcalloc((size_t)nt * qcap, 1, &ok, &s->bytes_alloc);
         /* xqs sized for the worst case (in-row gs falling back to 1) */
@@ -1576,7 +1651,7 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
 
 void lz_state_free(LZRunState *s) {
     if (!s) return;
-    xfree(s->x); xfree(s->xb); xfree(s->xb2); xfree(s->hb); xfree(s->hb2);
+    xfree(s->x); xfree(s->xb); xfree(s->xb2); xfree(s->kvshare_x); xfree(s->hb); xfree(s->hb2);
     xfree(s->logits);
     xfree(s->qg); xfree(s->qh); xfree(s->att); xfree(s->attn_out);
     xfree(s->attn_acc); xfree(s->attn_ss);
@@ -1608,6 +1683,15 @@ void lz_state_free(LZRunState *s) {
     xfree(s->ssm_state_q8_lo);
 #endif /* LZ_GDN_STATE_2PLANE */
     xfree(s->conv_state); xfree(s->conv_w32);
+    xfree(s->csa2_pending_c); xfree(s->csa2_pending_z);
+    xfree(s->csa2_pending_c_idx); xfree(s->csa2_pending_z_idx);
+    xfree(s->csa2_comp_ring); xfree(s->csa2_idx_comp_ring);
+    xfree(s->csa2_n_blocks);
+    xfree(s->csa2_scores); xfree(s->csa2_topk_idx); xfree(s->csa2_topk_val);
+    xfree(s->csa2_c_j); xfree(s->csa2_z_j);
+    xfree(s->csa2_c_j_idx); xfree(s->csa2_z_j_idx);
+    xfree(s->csa2_qidx); xfree(s->csa2_widx); xfree(s->csa2_cq_idx);
+    xfree(s->csa2_attn_probs);
     xfree(s->conv_state_q); xfree(s->conv_mw);
     xfree(s->kda_q_i16); xfree(s->kda_k_i16); xfree(s->kda_v_i16);
     xfree(s->kda_qc_i16); xfree(s->kda_kc_i16); xfree(s->kda_vc_i16);
@@ -1687,6 +1771,28 @@ void lz_state_reset(LZRunState *s, const LZModel *m) {
 #endif /* LZ_CONV_FIXED */
     memset(s->conv_state, 0, (size_t)s->ssm_ring_depth * c->n_linear_layers *
            c->lin_conv_dim * (c->conv_kernel - 1) * sizeof(float));
+    /* S2 CSA2 - guarded on the pointer, not on any csa2_on flag, same
+       reasoning kq8/vq8's own guard comment gives: allocation already
+       decided whether this model has anything to zero. Finalized-block
+       counts go back to 0 exactly like ssm_slot/mtp_pos below - a reset
+       discards every compressed entry the same way it discards the KV
+       cache and the recurrent state. */
+    if (s->csa2_comp_ring) {
+        int cm = c->csa2_compress_m > 0 ? c->csa2_compress_m : 1;
+        int max_blocks = (s->seq_len + cm - 1) / cm;
+        size_t nf = (size_t)c->n_full_layers;
+        memset(s->csa2_pending_c, 0, nf * cm * c->head_dim * sizeof(float));
+        memset(s->csa2_pending_z, 0, nf * cm * c->head_dim * sizeof(float));
+        memset(s->csa2_pending_c_idx, 0,
+               nf * cm * c->csa2_indexer_head_dim * sizeof(float));
+        memset(s->csa2_pending_z_idx, 0,
+               nf * cm * c->csa2_indexer_head_dim * sizeof(float));
+        memset(s->csa2_comp_ring, 0,
+               nf * (size_t)max_blocks * c->head_dim * sizeof(float));
+        memset(s->csa2_idx_comp_ring, 0,
+               nf * (size_t)max_blocks * c->csa2_indexer_head_dim * sizeof(float));
+        memset(s->csa2_n_blocks, 0, nf * sizeof(int));
+    }
     /* The ring's own "which slot is confirmed" index - see forward.h's
        s->ssm_slot comment. Every recurrent index resets to 0 here,
        same as mtp_pos right below. */
@@ -1987,7 +2093,9 @@ float *lz_mtp_draft_step(const LZModel *m, LZRunState *s, int next_token, int po
                   lz_t_f32(&m->mtp->blk.input_layernorm, s->wscr), dim,
                   c->rms_norm_eps);
     }
-    forward_attn(m, s, &m->mtp->blk, LZ_MTP_CACHE_LAYER, pos, 1);
+    /* kv_in is NULL: the MTP block is not in m->layers, so it is never an
+       attn_kv_share target (model.h's comment on the rule). */
+    forward_attn(m, s, &m->mtp->blk, LZ_MTP_CACHE_LAYER, pos, 1, NULL);
     if (lz_debug_mtp_attn_scale != 1.0f) {
         /* Investigative probe only - see this file's own comment on
            lz_debug_mtp_attn_scale above. */
@@ -2023,6 +2131,379 @@ float *lz_mtp_draft_step(const LZModel *m, LZRunState *s, int next_token, int po
     lz_fpu_float_end(fpu);
     lz_debug_us_draft += (lz_i64)(lz_time_ms() * LZ_US_SCALE - t_us0);
     return s->mtp_draft_logits;
+}
+
+/* Debug-only: force lz_mtp_draft_batch's per-slot attention through the
+   ordinary forward_attn (full Q/K/RoPE/score/softmax) instead of
+   mtp_attn_t1's shortcut below, for a same-binary, same-weights A/B
+   comparison (.prof/mtp_kdraft_check.c) - the two must always agree bit
+   for bit; this control exists to keep proving that continuously, not
+   to offer a slower alternative. Same shape as lz_debug_mtp_attn_scale
+   above. NEVER set outside such a test. */
+int lz_debug_mtp_attn_t1_slow = 0;
+
+/* T=1, no-history attention for one DSpark draft slot (LZ_MTP_CACHE_LAYER,
+   position 0 - lz_mtp_draft_batch's own contract, below). Same xb-in/
+   xb2-out convention forward_attn itself uses, so the call site swaps
+   one function for the other and nothing else changes.
+
+   WHY THIS IS SAFE, not an approximation: with no prior cache entry,
+   softmax over the single score at position 0 is 1.0 for ANY finite
+   score (softmax of a length-1 vector is the identity), regardless of
+   what K/Q/RoPE/Hadamard would have produced it - verified numerically
+   against the PyTorch reference (Qwen3_5DecoderLayer at T=1 reduces to
+   o_proj(v_proj(x) * sigmoid(gate)) with Q/K/RoPE contributing nothing
+   but the gate value, max abs diff 0.0 over a random tiny fixture) and
+   checked structurally here too: LZ_KV_WALK(s, 0, t, rslot, 0) always
+   iterates t=0 exactly once (forward.h), and the eviction mask's own
+   range collapses to empty at pos=0 for every attn_sink/attn_win
+   setting (dead0==dead1==attn_sink there), so position 0 can never be
+   evicted either. K itself is therefore provably irrelevant to the
+   result - not merely unread by this shortcut, structurally unable to
+   change it - which is why k_proj, q_norm, k_norm, RoPE, the K-side
+   Hadamard, the K cache write and the whole score/softmax pass are all
+   simply absent below rather than computed and discarded.
+
+   FULL TIER COVERAGE, not the default configuration only: every V
+   storage format attn_impl (forward_attn.c) supports - plain Q8
+   (attn_wsum_plane), the fixed-tier int64 accumulator
+   (lz_attn_wsum_q8_int, which is this engine's DEFAULT per --fixed
+   all), Q8 2-plane (LZ_KV_2PLANE), 4-bit (v4) and the float reference
+   arm (vf) - plus the optional Hadamard V-rotation (kv_rot_v). Reached
+   by calling the SAME primitives attn_impl/attn_score_loop call for
+   each tier (attn_wsum_plane, lz_attn_wsum_q8_int, lz_gdn_quantize_2p,
+   lz_kv4_quantize, rot_head, lz_quantize_q8_int64), not by re-deriving
+   any tier's arithmetic a second time - the only genuinely new code
+   here is which one to reach and computing Q (for the gate only) and V
+   in the first place, never K.
+
+   NOT reproduced: the vtmp_i16 v-projection fast path (LZ_VPROJ_I16's
+   v_may/v_int) - documented as an exact, cheaper route to the same
+   quantize result (forward_attn.c's own comment on v_int), so always
+   taking the plain float v_proj -> lz_quantize_q8 route here reaches
+   the identical output by construction, just not via that shortcut's
+   own faster input. kv_only is not a parameter: this function always
+   computes the full o_proj output, which is all lz_mtp_draft_batch's
+   caller ever wants.
+
+   deliberately NOT static: .prof/mtp_kdraft_check.c calls it directly
+   for the tier-by-tier bit-identity comparison against forward_attn. */
+void mtp_attn_t1(const LZModel *m, LZRunState *s, const LZLayer *L) {
+    const LZModelConfig *c = &m->config;
+    int hd = c->head_dim, nh = c->n_heads, nkv = c->n_kv_heads;
+    int kv_mul = nh / nkv;
+    int hdim = c->hidden_size, kvd = c->attn_kv_dim, qd = c->attn_q_dim;
+    int qgd = c->attn_qgate_dim;
+    float rms_eps = c->rms_norm_eps;
+    int ci = c->n_full_layers;         /* the MTP's own reserved slot */
+    size_t loff = (size_t)ci * s->kv_slots * kvd;
+    size_t soff = loff / 32;
+    int8_t *vc = s->vq8 ? s->vq8 + loff : NULL;
+    float  *vf = s->vf32 ? s->vf32 + loff : NULL;
+    unsigned char *v4 = s->v4 ? s->v4 + loff / 2 : NULL;
+    float *vs4 = s->vs4 ? s->vs4 + (size_t)ci * s->kv_slots * nkv : NULL;
+    float *vs  = s->vsq ? s->vsq + soff : NULL;
+#if LZ_KV_2PLANE
+    int8_t *vc_lo = s->vq8_lo ? s->vq8_lo + loff : NULL;
+#endif /* LZ_KV_2PLANE */
+    /* No nsa/nso here (attn_impl's own scale_groups() results): both are
+       only needed to stride xqs across nt>1 tokens, and every quantize/
+       matmul call below is nt=1, so lz_quantize_q8/lz_matmul_xq_nt's own
+       internal (in_dim/gs) grouping is all either one needs. */
+    int gsa = lz_act_gs(&L->q_proj, hdim);
+    int gso = lz_act_gs(&L->o_proj, qd);
+    int wslot = kv_slot(s, 0);
+    int use_int;
+    int h, d;
+
+    /* Q (gate only) and V, sharing one activation quantization the same
+       way attn_impl's non-SubLN branch shares it across q/k/v: all three
+       read the same in_dim, so lz_act_gs and the quantized xb are
+       identical for each. SubLN instead gives q and v their own
+       norm/quantize/matmul, same shape as attn_impl's p[0]/p[2]
+       (p[1] - k_proj - has no counterpart here at all). */
+    if (c->use_subn) {
+        lz_rmsnorm(s->xb2, s->xb, lz_t_f32(&L->attn_q_subn_norm, s->wscr),
+                  hdim, rms_eps);
+        lz_quantize_q8(s->xb2, hdim, gsa, s->xq, s->xqs);
+        lz_matmul_xq_nt(s->qg, s->xb2, s->xq, s->xqs, &L->q_proj, hdim, qgd, 1);
+        lz_rmsnorm(s->xb2, s->xb, lz_t_f32(&L->attn_v_subn_norm, s->wscr),
+                  hdim, rms_eps);
+        lz_quantize_q8(s->xb2, hdim, gsa, s->xq, s->xqs);
+        lz_matmul_xq_nt(s->vtmp, s->xb2, s->xq, s->xqs, &L->v_proj, hdim, kvd, 1);
+    } else {
+        lz_quantize_q8(s->xb, hdim, gsa, s->xq, s->xqs);
+        lz_matmul_xq_nt(s->qg, s->xb, s->xq, s->xqs, &L->q_proj, hdim, qgd, 1);
+        lz_matmul_xq_nt(s->vtmp, s->xb, s->xq, s->xqs, &L->v_proj, hdim, kvd, 1);
+    }
+
+    if (s->kv_rot_v)
+        for (h = 0; h < nkv; h++) rot_head(s->vtmp + (size_t)h * hd, hd, s->kv_rot_v);
+
+    /* Write V into whichever plane is allocated - same calls, same
+       group width, same wslot attn_impl's own K/V write loop uses. */
+#if LZ_KV_2PLANE
+    if (vc) lz_gdn_quantize_2p(s->vtmp, kvd, 32, vc + (size_t)wslot * kvd,
+                               vc_lo + (size_t)wslot * kvd,
+                               vs + (size_t)wslot * kvd / 32, -1);
+#else
+    if (vc) lz_quantize_q8(s->vtmp, kvd, 32, vc + (size_t)wslot * kvd,
+                           vs + (size_t)wslot * kvd / 32);
+#endif /* LZ_KV_2PLANE */
+    if (vf) memcpy(vf + (size_t)wslot * kvd, s->vtmp, (size_t)kvd * sizeof(float));
+    if (v4)
+        for (h = 0; h < nkv; h++)
+            lz_kv4_quantize(s->vtmp + (size_t)h * hd, hd,
+                            v4 + (size_t)wslot * kvd / 2 + (size_t)h * (hd >> 1),
+                            vs4 + (size_t)wslot * nkv + h);
+
+    /* softmax of the single score at position 0 is exactly 1.0 - see
+       this function's own header comment. */
+    s->att[0] = 1.0f;
+
+    /* Same predicate attn_score_loop uses to pick the int64 accumulator,
+       minus the LZ_ATTN_NORING/hd-range/window terms that are always
+       true here (nt=1, no window override reaches the MTP's own T=1
+       slots) and minus s->kv_rot_v's own check (already excluded by
+       construction: kv_rot_v!=0 falls through to the v4/vf-shaped float
+       arm below the same way attn_impl's OWN predicate excludes it). */
+#if (LZ_ATTN_FIXED & 2)
+    use_int = lz_attn_int() && (lz_attn_mode() & 2) && s->wsum_cbuf &&
+              !c->use_subn && hd > 0 && (hd % 32) == 0 &&
+              hd <= LZ_ATTN_MAX_HD && s->kv_rot_v == 0 && gso == 32 &&
+              !v4 && !vf && !LZ_KV_2PLANE;
+#else
+    use_int = 0;
+#endif /* LZ_ATTN_FIXED & 2 */
+
+    for (h = 0; h < nh; h++) {
+        int kvh = h / kv_mul;
+        const float *gate = s->qg + (size_t)h * 2 * hd + hd;
+        float *out = s->attn_out + (size_t)h * hd;
+
+        if (v4) {
+            const unsigned char *vt = v4 + (size_t)wslot * kvd / 2 +
+                                      (size_t)kvh * (hd >> 1);
+            float a = vs4[(size_t)wslot * nkv + kvh];   /* att[0]==1.0 */
+            for (d = 0; d < hd; d += 2) {
+                unsigned char pk = vt[d >> 1];
+                out[d]     = a * lz_kv4_cents[pk & 0x0F];
+                out[d + 1] = a * lz_kv4_cents[pk >> 4];
+            }
+        } else if (vf) {
+            const float *vt = vf + (size_t)wslot * kvd + (size_t)kvh * hd;
+            for (d = 0; d < hd; d++) out[d] = vt[d];
+        } else if (use_int) {
+            lz_attn_wsum_q8_int(s->attn_acc + (size_t)h * hd,
+                                s->attn_ss + (size_t)(h * hd) / 32,
+                                s->att, hd, vc + (size_t)kvh * hd,
+                                vs + (size_t)(kvh * hd) / 32, kvd, 0,
+                                s->wsum_cbuf, s->wsum_cq, s->attn_sink,
+                                s->kv_ring);
+        } else {
+            attn_wsum_plane(s, out, vc, vs, hd, kvd, kvh, 0, 0,
+                            1, 0, 0);
+#if LZ_KV_2PLANE
+            attn_wsum_plane(s, s->wsum_lo, vc_lo, vs, hd, kvd, kvh, 0, 0,
+                            1, 0, 0);
+            for (d = 0; d < hd; d++)
+                out[d] += s->wsum_lo[d] * (1.0f / LZ_GDN_LO_SCALE);
+#endif /* LZ_KV_2PLANE */
+        }
+
+        if (s->kv_rot_v && !use_int) {
+            rot_head(out, hd, s->kv_rot_v);
+            for (d = 0; d < hd; d++) out[d] *= 1.0f / (float)s->kv_rot_v;
+        }
+
+        /* Output gate - see attn_score_loop's own comment on the int/
+           float split. use_int already excludes kv_rot_v/v4/vf above,
+           so this else-branch's "out" is always what those three arms
+           (which never set use_int) or the plain float arm produced. */
+        if (use_int) {
+            int sig_fixed = lz_sig_mode();
+            int64_t *ac = s->attn_acc + (size_t)h * hd;
+            if (sig_fixed) {
+                int32_t s15[64];
+                int base;
+                for (base = 0; base < hd; base += 64) {
+                    int mrun = hd - base;
+                    if (mrun > 64) mrun = 64;
+                    lz_sigmoid_q15_run(gate + base, s15, mrun);
+                    for (d = 0; d < mrun; d++)
+                        ac[base + d] = (ac[base + d] * (int64_t)s15[d]) >> 15;
+                }
+            } else {
+                for (d = 0; d < hd; d++) {
+                    int32_t s15 = (int32_t)(lz_sigmoid(gate[d]) * 32768.0f);
+                    ac[d] = (ac[d] * (int64_t)s15) >> 15;
+                }
+            }
+        } else {
+            for (d = 0; d < hd; d++) out[d] *= lz_sigmoid(gate[d]);
+        }
+    }
+
+    if (c->use_subn) {
+        lz_rmsnorm(s->attn_out, s->attn_out,
+                  lz_t_f32(&L->attn_o_subn_norm, s->wscr), qd, rms_eps);
+    }
+    if (use_int) {
+        int g;
+        for (g = 0; g < (qd >> 5); g++)
+            lz_quantize_q8_int64(s->attn_acc + g * 32, 32, 32,
+                                 s->attn_ss[g], s->xq + g * 32,
+                                 s->xqs + g);
+    } else {
+        lz_quantize_q8(s->attn_out, qd, gso, s->xq, s->xqs);
+    }
+    lz_matmul_xq_nt(s->xb2, s->attn_out, s->xq, s->xqs, &L->o_proj, qd, hdim, 1);
+}
+
+/* DSpark (arXiv:2607.05147). See forward.h's own comment on the
+   two-function split (base stage here, Markov correction separate) and
+   on why a for-loop over k slots is a faithful scalar-reference
+   implementation of "no self-chain", not a compromise of it.
+
+   Wired into lz_generate/--spec via generate.c's lz_spec_round_dspark /
+   lz_spec_round_dspark_temp. Each slot's attention runs through
+   mtp_attn_t1 above (the verified T=1 shortcut) unless
+   lz_debug_mtp_attn_t1_slow forces the ordinary forward_attn path for
+   comparison. */
+float *lz_mtp_draft_batch(const LZModel *m, LZRunState *s, int next_token,
+                          int k) {
+    const LZModelConfig *c = &m->config;
+    int dim = c->hidden_size, i, slot;
+    unsigned fpu;
+
+    if (!m || !m->mtp) return NULL;
+    if (c->mtp_n_draft <= 1) return NULL;
+    if (next_token < 0 || next_token >= c->vocab_size) return NULL;
+    if (k <= 0 || k > c->mtp_n_draft) return NULL;
+
+    fpu = lz_fpu_float_begin();
+
+    /* pre_fc_norm_hidden(h_body) is the SAME for every slot (the anchor
+       hidden state is shared, not re-derived per slot - this sharing,
+       not a batched matmul, is what "one forward" means here) -
+       computed once into the concat buffer's low third and left alone
+       across the loop below. */
+    lz_rmsnorm(s->mtp_kdraft_concat, s->mtp_chain,
+              lz_t_f32(&m->mtp->pre_fc_norm_hidden, s->wscr), dim,
+              c->rms_norm_eps);
+
+    for (slot = 0; slot < k; slot++) {
+        float *logits_row = s->mtp_kdraft_logits + (size_t)slot * c->vocab_size;
+
+        /* Middle third: slot 0 gets the anchor's real, known next
+           token; every slot >=1 gets the SAME shared mask_embed row -
+           never a real token, at train or inference alike (see
+           engine/mtp_head.py's MtpHead.forward docstring - this is the
+           fix, not a shortcut). */
+        if (slot == 0) {
+            lz_t_row_f32(&m->embed_tokens, next_token, dim, s->mtp_emb_raw);
+        } else {
+            for (i = 0; i < dim; i++)
+                s->mtp_emb_raw[i] = lz_t_f32(&m->mtp->mask_embed, s->wscr)[i];
+        }
+        lz_rmsnorm(s->mtp_kdraft_concat + dim, s->mtp_emb_raw,
+                  lz_t_f32(&m->mtp->pre_fc_norm_embedding, s->wscr), dim,
+                  c->rms_norm_eps);
+
+        /* High third: this slot's own depth row - the only per-slot
+           signal once slot 0's real-token privilege is spent. */
+        lz_t_row_f32(&m->mtp->depth_embed, slot, dim,
+                    s->mtp_kdraft_concat + 2 * dim);
+
+        lz_matmul_w(s->mtp_x, s->mtp_kdraft_concat, &m->mtp->main_proj,
+                   3 * dim, dim, s->xq, s->xqs);
+
+        /* One ordinary decoder layer, position 0 of the MTP's OWN
+           reserved cache slot - EVERY slot, not advancing. This is not
+           an approximation: at T=1 with no prior cache entry, causal
+           self-attention's softmax collapses to a single weight of
+           1.0 regardless of Q/K/RoPE (softmax of one score is always
+           1), so writing each slot's fresh K/V over the same position-0
+           entry and reading it straight back is exactly the T=1
+           computation, not a reuse-by-coincidence - verified numerically
+           against the PyTorch reference (Qwen3_5DecoderLayer at T=1
+           reduces to o_proj(v_proj(x) * sigmoid(gate)) with Q/K/RoPE
+           contributing nothing but the gate value, max abs diff 0.0
+           over a random tiny fixture). mtp_attn_t1 (above) exploits
+           this directly; lz_debug_mtp_attn_t1_slow forces the ordinary
+           forward_attn call instead, for the bit-identity comparison
+           .prof/mtp_kdraft_check.c runs between the two. */
+        if (c->use_subn) {
+            for (i = 0; i < dim; i++) s->xb[i] = s->mtp_x[i];
+        } else {
+            lz_rmsnorm(s->xb, s->mtp_x,
+                      lz_t_f32(&m->mtp->blk.input_layernorm, s->wscr), dim,
+                      c->rms_norm_eps);
+        }
+        if (lz_debug_mtp_attn_t1_slow)
+            forward_attn(m, s, &m->mtp->blk, LZ_MTP_CACHE_LAYER, 0, 1, NULL);
+        else
+            mtp_attn_t1(m, s, &m->mtp->blk);
+        for (i = 0; i < dim; i++) s->mtp_x[i] += s->xb2[i];
+
+        if (c->use_subn) {
+            for (i = 0; i < dim; i++) s->xb[i] = s->mtp_x[i];
+        } else {
+            lz_rmsnorm(s->xb, s->mtp_x,
+                      lz_t_f32(&m->mtp->blk.post_attention_layernorm, s->wscr),
+                      dim, c->rms_norm_eps);
+        }
+        dense_ffn_step(m, s, &m->mtp->blk, LZ_MTP_CACHE_LAYER, 1,
+                       c->mtp_intermediate_size);
+        for (i = 0; i < dim; i++) s->mtp_x[i] += s->xb2[i];
+
+        /* Exit norm + lm_head, into this slot's own logits row - unlike
+           lz_mtp_draft_step, nothing here feeds a NEXT call: there is
+           no next call, every slot is independent. Reuses
+           s->mtp_emb_raw as exit-norm scratch, NOT s->mtp_chain - that
+           register belongs to the n_draft==1 chain (lz_mtp_draft_step's
+           own contract, forward.h), and this function must leave it
+           exactly as the caller seeded it (the anchor's own hidden
+           state) rather than clobbering it with a mid-loop value that
+           does not survive past this call anyway. mtp_emb_raw's own
+           content (this slot's embed row) has already been fully
+           consumed into mtp_kdraft_concat above, so reusing it here writes
+           over nothing still needed. */
+        lz_rmsnorm(s->mtp_emb_raw, s->mtp_x,
+                  lz_t_f32(&m->mtp->norm, s->wscr), dim, c->rms_norm_eps);
+        lz_quantize_q8(s->mtp_emb_raw, dim, lz_act_gs(&m->embed_tokens, dim),
+                      s->xq, s->xqs);
+        lz_matmul_xq(logits_row, s->mtp_emb_raw, s->xq, s->xqs,
+                    &m->embed_tokens, dim, c->vocab_size);
+    }
+
+    lz_fpu_float_end(fpu);
+    return s->mtp_kdraft_logits;
+}
+
+/* See forward.h's own comment. */
+void lz_mtp_markov_correct(const LZModel *m, LZRunState *s, int x_prev,
+                           float *logits) {
+    const LZModelConfig *c = &m->config;
+    int rank = c->mtp_markov_rank, v;
+    unsigned fpu;
+    /* mtp_kdraft_concat is (3*hidden) floats - always >= (rank), since rank
+       is a small fraction of vocab_size (DSpark's own r=256 scaled) and
+       hidden_size dominates markov_rank in every shape this project has
+       built. Reused rather than a fourth buffer purely for a (rank)-
+       sized row: mtp_kdraft_concat's OWN content is dead by the time this
+       function runs (lz_mtp_draft_batch's loop has already finished). */
+    float *embed_row = s->mtp_kdraft_concat;
+
+    if (!m || !m->mtp || c->mtp_n_draft <= 1) return;
+    if (x_prev < 0 || x_prev >= c->vocab_size) return;
+
+    fpu = lz_fpu_float_begin();
+    lz_t_row_f32(&m->mtp->markov_embed, x_prev, rank, embed_row);
+    lz_matmul_w(s->mtp_kdraft_correction, embed_row, &m->mtp->markov_proj,
+               rank, c->vocab_size, s->xq, s->xqs);
+    for (v = 0; v < c->vocab_size; v++) logits[v] += s->mtp_kdraft_correction[v];
+    lz_fpu_float_end(fpu);
 }
 
 /* ---------------------------------------------------------------- main body */
@@ -2080,6 +2561,13 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
     const LZModelConfig *c = &m->config;
     int dim = c->hidden_size;
     int l, i, tk;
+    /* S1 attn_kv_share: the layer whose attention input every target
+       layer's K/V projections read, or -1 (model.h's own comment on the
+       rule; lz_kv_share_target is the other half). ksrc is resolved once
+       per chunk - the config is fixed - and kv_in is the per-layer
+       pointer the layer loop hands to forward_attn. */
+    int ksrc = lz_kv_share_src(c);
+    const float *kv_in;
     LZ_PROF_DECL(_th);
     int ring_base;               /* see its own comment below, before the layer loop */
     unsigned fpu;
@@ -2189,8 +2677,38 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
                            c->rms_norm_eps);
         }
         LZ_TAP("an", l, s->xb, dim);
+        /* S1 attn_kv_share. Captured HERE, at the layer's attention
+           entry: this is exactly the tensor the training side's capture
+           hook records off the source attention module, so the shared
+           k_proj/v_proj reproduce the source's own K/V rather than a
+           re-projection of the target's input (model.h's attn_kv_share
+           comment). Done for the source whatever its attention kind is -
+           a csa2_on source layer keeps no per-position K/V of its own,
+           which is the case this exists for. One copy per chunk, and
+           only on a model that has a source at all. */
+        kv_in = NULL;
+        if (L->type == LZ_LT_FULL) {
+            if (l == ksrc) {
+                memcpy(s->kvshare_x, s->xb,
+                       (size_t)nt * dim * sizeof(float));
+            } else if (lz_kv_share_target(c, l)) {
+                kv_in = s->kvshare_x;
+            }
+        }
         LZ_PROF_BEG(_tp);
         if (L->type == LZ_LT_FULL) {
+            /* S2 CSA2 takes over this layer's ENTIRE attention forward -
+               see model.h's LZModelConfig.csa2_on[] comment. Checked
+               first and unconditionally: --ced's kv_only optimization
+               below is forward_attn_kv_only's own KV-cache-shaped
+               trick, and CSA2 has no such cache (compressed blocks, not
+               per-position K/V) - composing the two is out of scope for
+               this pass (forward_csa2.c's own header comment), so a
+               csa2_on layer never takes the ced_skip_last branch even
+               when it happens to be the model's last layer. */
+            if (L->csa2_on) {
+                forward_csa2(m, s, L, l, pos0, nt);
+            } else
             /* --ced, on a chunk whose outputs nobody reads (see
                ced_skip_last). The last layer's K/V over these positions
                is the one thing the run keeps; everything else it would
@@ -2205,10 +2723,11 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
                previous layer put there and no reader follows. */
             if (ced_skip_last && l == c->n_layers - 1) {
                 lz_debug_ced_skipped += nt;
-                forward_attn_kv_only(m, s, L, l, pos0, nt);
+                forward_attn_kv_only(m, s, L, l, pos0, nt, kv_in);
                 continue;
+            } else {
+                forward_attn(m, s, L, l, pos0, nt, kv_in);
             }
-            forward_attn(m, s, L, l, pos0, nt);
         }
         else if (L->type == LZ_LT_KDA)  forward_kda(m, s, L, l, nt, all_logits, ring_base);
         else                             forward_ssm(m, s, L, l, nt, all_logits, ring_base);
@@ -2442,10 +2961,79 @@ float *lz_forward_capture(const LZModel *m, LZRunState *s, int token, int pos) {
     return r;
 }
 
+/* CED bounded replay's reset half (model.h's ced_split/ced_replay_w
+   comment) - zeroes the KDA recurrent/conv state for every linear-
+   attention layer at or above ced_split, at ring slot s->ssm_slot, so
+   the chunk about to run sees a state indistinguishable from a fresh
+   sequence start there. Matches the training-side simulation
+   (engine/kunmoe_modeling.py's _kda_packing_hook) inserting a packing
+   boundary at the same absolute offset: position ids keep counting up,
+   only the recurrence's own carried state is discarded.
+
+   Zeroes the raw ring-buffer bytes every KDA precision tier (float,
+   fixed-int16, SubLN, 2-plane) reads its incoming state from, rather
+   than threading a reset branch through forward_kda's per-tier
+   dispatch - the same q8_slot_stride/conv_slot_stride/li_off_* address
+   arithmetic forward_kda's own header comment derives, kept in sync by
+   being the same formulas, not re-derived independently. */
+static void lz_ced_replay_reset(const LZModel *m, LZRunState *s) {
+    const LZModelConfig *c = &m->config;
+    int l;
+    int slot = s->ssm_slot;
+    int nv = c->lin_n_v_heads, kd = c->lin_k_head_dim, vd = c->lin_v_head_dim;
+    int hist = c->conv_kernel - 1;
+    size_t q8_slot_stride = (size_t)c->n_linear_layers * nv * kd * vd;
+    size_t s_slot_stride  = q8_slot_stride / 32;
+    size_t conv_slot_stride = (size_t)c->n_linear_layers *
+                              c->lin_conv_dim * hist;
+
+    for (l = 0; l < c->n_layers; l++) {
+        int li;
+        size_t li_off_q8, li_off_s, li_off_conv;
+        if (c->layer_types[l] != LZ_LT_KDA || l < c->ced_split) continue;
+        lz_debug_ced_replay_layers++;
+        li = s->cache_idx[l];
+        li_off_q8 = (size_t)li * nv * kd * vd;
+        li_off_s = li_off_q8 / 32;
+        li_off_conv = (size_t)li * c->lin_conv_dim * hist;
+        memset(s->ssm_state_q8 + (size_t)slot * q8_slot_stride + li_off_q8,
+               0, (size_t)nv * kd * vd);
+#if LZ_GDN_STATE_2PLANE
+        memset(s->ssm_state_q8_lo + (size_t)slot * q8_slot_stride + li_off_q8,
+               0, (size_t)nv * kd * vd);
+#endif
+        memset(s->ssm_state_s + (size_t)slot * s_slot_stride + li_off_s,
+               0, (size_t)nv * kd * vd / 32 * sizeof(float));
+#if LZ_CONV_FIXED
+        if (s->conv_state_q)
+            memset(s->conv_state_q + (size_t)slot * conv_slot_stride + li_off_conv,
+                   0, (size_t)c->lin_conv_dim * hist * sizeof(short));
+#endif
+        memset(s->conv_state + (size_t)slot * conv_slot_stride + li_off_conv,
+               0, (size_t)c->lin_conv_dim * hist * sizeof(float));
+    }
+}
+
 float *lz_forward_batch(const LZModel *m, LZRunState *s,
                         const int *tokens, int n, int pos0) {
+    const LZModelConfig *c = &m->config;
     float *lg = NULL;
     int cap, done = 0;
+    /* Reset boundary, an offset within THIS call's own n tokens (not an
+       absolute/cumulative position) - matching what the training-side
+       probe actually measured (.prof/ced_replay_w_probe.py): one
+       forward call over a T-token sequence, boundary at T-W within it.
+       This is exactly the prompt-prefill case (pos0==0, n==the whole
+       prompt). A pos0>0 call (new turns appended after cached context)
+       has no training-side analog to validate against - there is no
+       incremental-cache concept in the packing-boundary simulation at
+       all - so it gets the same call-relative rule for lack of a
+       measured alternative, not because it has been shown correct.
+       -1 means off (window disabled or window >= this call's own
+       length, matching the training hook's own T>W guard exactly - see
+       ced_replay_w_probe.py's W=N control). */
+    int replay_boundary = (c->ced_replay_w > 0 && n > c->ced_replay_w) ?
+                          n - c->ced_replay_w : -1;
 
     if (!tokens || n < 1) return NULL;
     cap = s->nt_cap;
@@ -2464,7 +3052,26 @@ float *lz_forward_batch(const LZModel *m, LZRunState *s,
            unobserved and the layer can write its K/V and stop. Every
            other forward_chunk caller wants more than that (verify wants
            every position's logits, capture wants every position's
-           hidden), so they pass 0 and CED stays out of them. */
+           hidden), so they pass 0 and CED stays out of them.
+
+           ced_replay_w is scoped to THIS entry point for the same
+           reason: the report's own bounded-replay mechanism is a
+           PROMPT PREFILL optimization ("only prefills the last win
+           tokens of the prompt"), not a general per-call hook - verify/
+           capture batches below process short, already-generated
+           continuations, not prompt prefill, so they intentionally do
+           not carry this check. */
+        if (replay_boundary >= 0) {
+            /* Force a chunk boundary exactly at the reset point rather
+               than resetting mid-chunk: forward_kda has no per-token
+               reset hook, and none is needed - splitting the chunk here
+               reuses the ring's existing "read ring_base once per
+               forward_chunk call" contract instead of adding one. */
+            if (done < replay_boundary && done + k > replay_boundary)
+                k = replay_boundary - done;
+            else if (done == replay_boundary)
+                lz_ced_replay_reset(m, s);
+        }
         lg = forward_chunk(m, s, tokens + done, k, pos0 + done, NULL, 0, NULL,
                            done + k < n, s->ced && (done + k < n));
         if (!lg) return NULL;
@@ -2663,7 +3270,7 @@ int lz_mtp_prefill(const LZModel *m, LZRunState *s, const float *h_body_all,
            side effect (LZ_MTP_CACHE_LAYER) - s->xb2, its attention
            OUTPUT, is never read below. See this function's own comment
            above for why the FFN half is skipped. */
-        forward_attn(m, s, &m->mtp->blk, LZ_MTP_CACHE_LAYER, pos0 + done, k);
+        forward_attn(m, s, &m->mtp->blk, LZ_MTP_CACHE_LAYER, pos0 + done, k, NULL);
 
         done += k;
     }

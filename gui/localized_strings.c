@@ -227,7 +227,45 @@ static const char *const LZ_STR_EN[LZ_STR_COUNT] = {
     /* Mnemonic F, not the P of "Bee&p": temperature already holds P
        (see the set at LZ_STR_DLG_TEMP_CAP), and this checkbox is the
        newcomer. */
-    /* LZ_STR_DLG_BEEP */ "Beep when a reply &finishes"
+    /* LZ_STR_DLG_BEEP */ "Beep when a reply &finishes",
+
+    /* --- the sound window ---
+       Mnemonics, and why each: U for Sound (S is Settings, and O is
+       Open), P play, Y system, W wavetable, I instrument, F follow,
+       X fixed (C is Cancel and F is taken), B baseline, V volume,
+       N nothing, E system beep, M chime (C is Cancel). */
+    /* LZ_STR_MENU_SOUND */ "So&und...",
+    /* LZ_STR_DLG_SOUND_TITLE */ "Sound",
+    /* LZ_STR_DLG_MUSIC_ON */ "&Play music while generating",
+    /* LZ_STR_DLG_ENGINE */ "Engine",
+    /* LZ_STR_DLG_ENGINE_SYS */ "S&ystem MIDI",
+    /* LZ_STR_DLG_ENGINE_WAVE */ "Software &wavetable (no bank yet)",
+    /* LZ_STR_DLG_INSTRUMENT */ "&Instrument",
+    /* The eleven menu rows. The ten after the first are the programs
+       the wavetable bank carries, in the order of
+       lz_music_instrument[] - the two are compared in
+       tests/test_gui_music.c, because a list that drifts out of step
+       with that table selects the wrong patch silently. */
+    /* Program 25 is "Acoustic Guitar (steel)" and NOT a steel guitar:
+       in English that names a lap or pedal steel, which is a different
+       instrument and not in this bank. 81 is "Lead 2 (sawtooth)", and
+       "saw lead" is a studio abbreviation rather than a name. */
+    /* LZ_STR_DLG_INST_LIST */
+        "As the piece is written;acoustic grand piano;electric piano;"
+        "harpsichord;clavinet;marimba;drawbar organ;"
+        "acoustic guitar (steel);orchestral harp;square lead;"
+        "sawtooth lead",
+    /* LZ_STR_DLG_SPEED */ "Tempo",
+    /* LZ_STR_DLG_SPEED_FOLLOW */ "&Follow the token rate",
+    /* LZ_STR_DLG_SPEED_FIXED */ "Fi&xed",
+    /* LZ_STR_DLG_BASE_TPS */ "&Baseline tok/s = 1x",
+    /* LZ_STR_DLG_MUS_VOLUME */ "&Volume",
+    /* LZ_STR_DLG_FINISH */ "When a reply finishes",
+    /* LZ_STR_DLG_FINISH_NONE */ "&Nothing",
+    /* LZ_STR_DLG_FINISH_BEEP */ "System b&eep",
+    /* LZ_STR_DLG_FINISH_CHIME */ "Chi&me",
+    /* LZ_STR_ERR_BAD_BASE */
+        "The baseline must be a number of tokens a second"
 };
 
 static const char *const LZ_STR_ZH[LZ_STR_COUNT] = {
@@ -395,7 +433,60 @@ static const char *const LZ_STR_ZH[LZ_STR_COUNT] = {
         /* U+56DE U+590D U+5B8C U+6210 U+540E U+63D0 U+793A U+97F3
            "hui fu wan cheng hou ti shi yin" */
         "\xe5\x9b\x9e\xe5\xa4\x8d\xe5\xae\x8c\xe6\x88\x90\xe5\x90\x8e"
-        "\xe6\x8f\x90\xe7\xa4\xba\xe9\x9f\xb3(&F)"
+        "\xe6\x8f\x90\xe7\xa4\xba\xe9\x9f\xb3(&F)",
+
+    /* --- the sound window ---
+       Same mnemonics as the English table, in parens per the ZH
+       convention. */
+    /* LZ_STR_MENU_SOUND */ "\xe9\x9f\xb3\xe6\x95\x88" "(&U)...",
+    /* LZ_STR_DLG_SOUND_TITLE */ "\xe9\x9f\xb3\xe6\x95\x88",
+    /* LZ_STR_DLG_MUSIC_ON */
+        "\xe7\x94\x9f\xe6\x88\x90\xe6\x97\xb6\xe6\x92\xad\xe6\x94\xbe\xe9\x9f\xb3\xe4\xb9\x90"
+        "(&P)",
+    /* LZ_STR_DLG_ENGINE */
+        "\xe6\x92\xad\xe6\x94\xbe\xe5\xbc\x95\xe6\x93\x8e",
+    /* LZ_STR_DLG_ENGINE_SYS */ "\xe7\xb3\xbb\xe7\xbb\x9f" " MIDI(&Y)",
+    /* LZ_STR_DLG_ENGINE_WAVE */
+        "\xe8\xbd\xaf\xe6\xb3\xa2\xe8\xa1\xa8" "("
+        "\xe5\xb0\x9a\xe6\x97\xa0\xe9\x9f\xb3\xe8\x89\xb2\xe5\xba\x93"
+        ")(&W)",
+    /* LZ_STR_DLG_INSTRUMENT */ "\xe4\xb9\x90\xe5\x99\xa8" "(&I)",
+    /* 7 is the clavinet, whose family name in the Chinese GM table is
+       the clavichord's; the literal "struck-string keyboard" names the
+       family and not the instrument. 46 is just the harp - "orchestral
+       harp" back-translated is a phrase nobody says. 81 parallels 80,
+       so both carry the wave. */
+    /* LZ_STR_DLG_INST_LIST */
+        "\xe6\x8c\x89\xe6\x9b\xb2\xe7\x9b\xae\xe5\x8e\x9f\xe6\xa0\xb7"
+        ";" "\xe5\xa4\xa7\xe9\x92\xa2\xe7\x90\xb4" ";"
+        "\xe7\x94\xb5\xe9\x92\xa2\xe7\x90\xb4" ";"
+        "\xe7\xbe\xbd\xe7\xae\xa1\xe9\x94\xae\xe7\x90\xb4" ";"
+        "\xe5\x87\xbb\xe5\xbc\xa6\xe5\x8f\xa4\xe9\x92\xa2\xe7\x90\xb4"
+        ";" "\xe9\xa9\xac\xe6\x9e\x97\xe5\xb7\xb4" ";"
+        "\xe6\x8b\x89\xe6\x9d\x86\xe9\xa3\x8e\xe7\x90\xb4" ";"
+        "\xe9\x92\xa2\xe5\xbc\xa6\xe5\x90\x89\xe4\xbb\x96" ";"
+        "\xe7\xab\x96\xe7\x90\xb4" ";"
+        "\xe6\x96\xb9\xe6\xb3\xa2\xe4\xb8\xbb\xe9\x9f\xb3" ";"
+        "\xe9\x94\xaf\xe9\xbd\xbf\xe6\xb3\xa2\xe4\xb8\xbb\xe9\x9f\xb3",
+    /* LZ_STR_DLG_SPEED */ "\xe9\x80\x9f\xe5\xba\xa6",
+    /* LZ_STR_DLG_SPEED_FOLLOW */
+        "\xe8\xb7\x9f\xe9\x9a\x8f\xe7\x94\x9f\xe6\x88\x90\xe9\x80\x9f\xe5\xba\xa6"
+        "(&F)",
+    /* LZ_STR_DLG_SPEED_FIXED */ "\xe5\x9b\xba\xe5\xae\x9a" "(&X)",
+    /* LZ_STR_DLG_BASE_TPS */
+        "\xe5\x9f\xba\xe5\x87\x86" " tok/s = 1x(&B)",
+    /* LZ_STR_DLG_MUS_VOLUME */ "\xe9\x9f\xb3\xe9\x87\x8f" "(&V)",
+    /* LZ_STR_DLG_FINISH */
+        "\xe5\x9b\x9e\xe5\xa4\x8d\xe5\xae\x8c\xe6\x88\x90\xe6\x97\xb6",
+    /* LZ_STR_DLG_FINISH_NONE */
+        "\xe4\xb8\x8d\xe5\x87\xba\xe5\xa3\xb0" "(&N)",
+    /* LZ_STR_DLG_FINISH_BEEP */
+        "\xe7\xb3\xbb\xe7\xbb\x9f\xe8\x9c\x82\xe9\xb8\xa3" "(&E)",
+    /* LZ_STR_DLG_FINISH_CHIME */
+        "\xe6\x8f\x90\xe7\xa4\xba\xe9\x9f\xb3" "(&M)",
+    /* LZ_STR_ERR_BAD_BASE */
+        "\xe5\x9f\xba\xe5\x87\x86\xe9\x80\x9f\xe5\xba\xa6\xe5\xbf\x85\xe9\xa1\xbb\xe6\x98\xaf\xe6\xaf\x8f\xe7\xa7\x92"
+        " token " "\xe6\x95\xb0"
 };
 
 /* Static, not stack: the target's default stack is small enough that a

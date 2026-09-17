@@ -73,9 +73,10 @@ typedef enum {
     LZ_ERR_LOOK_W_RANGE,       /* lookahead width %d out of range 1..%d */
     LZ_ERR_LOOK_D_RANGE,       /* lookahead depth %d out of range 1..%d */
     /* No error codes for non-identity penalties or temperature>0 on the
-       speculative path: verify applies penalties via an assumed window
-       (generate.c), and lz_generate_resume dispatches temperature>0 to
-       lz_spec_round_temp. */
+       speculative path, DSpark (config.mtp_n_draft > 1) included: verify
+       applies penalties via an assumed window (generate.c), and
+       lz_generate_resume dispatches temperature>0 to lz_spec_round_temp
+       or, on a DSpark model, lz_spec_round_dspark_temp. */
 
     /* prompt lookup decoding (generate.c lz_pld_round) */
     LZ_ERR_PLD_NGRAM_RANGE,    /* pld_ngram %d out of range 1..%d */
@@ -110,6 +111,9 @@ typedef enum {
     LZ_ERR_CFG_ROPE_CONFLICT,  /* rope_parameters %s=%d disagrees with %s=%d */
     LZ_ERR_CFG_ROPE_YARN_FIELDS, /* rope_type=yarn needs factor and original_max_position_embeddings, got factor x1000=%d orig_max=%d */
     LZ_ERR_CFG_FFN_ACT,        /* ffn_activation is not one of none/situ/gptoss_clamp, got %s */
+    LZ_ERR_CFG_MLA_SUBN,       /* mla_q_lora_rank/mla_o_lora_rank is not compatible with use_subn */
+    LZ_ERR_CFG_CSA2_LAYER,     /* csa2_layers names layer %d, which is not full_attention */
+    LZ_ERR_CFG_UNSUPPORTED_ARCH, /* checkpoint is neither GDN (Qwen3.5) nor KDA (KunMoe) shape */
 
     /* model tensors */
     LZ_ERR_TENSOR_MISSING,     /* missing tensor %s */
@@ -231,6 +235,19 @@ typedef enum {
        sits inside the full-attention branch, where it can never fire.
        That is a silent no-op, not a cheaper run, so it refuses. */
     LZ_ERR_CED_LAST_LAYER,     /* --ced needs the last layer to be full attention */
+
+    /* mtp_n_draft above LZ_SPEC_K_MAX (ops.h) - the runtime ceiling on
+       draft depth everywhere else in this engine, not a new bound
+       invented for DSpark support. */
+    LZ_ERR_MTP_NDRAFT,         /* mtp_n_draft %d exceeds LZ_SPEC_K_MAX %d */
+
+    /* mtp_markov_rank above 3*hidden_size. lz_mtp_markov_correct reads
+       markov_embed's row into mtp_kdraft_concat, a fixed 3*hidden
+       scratch buffer it shares with lz_mtp_draft_batch's base stage
+       (that buffer's content is dead by the time the correction runs -
+       forward.c's own comment on embed_row) - a rank past that size
+       would overflow it. */
+    LZ_ERR_MTP_MARKOV_RANK,   /* mtp_markov_rank %d exceeds 3*hidden_size %d */
 
     /* Generic failure. Two jobs, and it must stay LAST before
        LZ_ERR_COUNT for the second one:
