@@ -1556,6 +1556,12 @@ float *lz_mtp_draft_step(const LZModel *m, LZRunState *s, int next_token, int po
 /* Debug-only: see forward.c's own comment next to the definition. */
 extern int lz_debug_mtp_attn_t1_slow;
 
+/* Debug-only: see forward.c's own comment next to each definition. */
+extern float lz_debug_mtp_attn_scale;
+extern lz_i64 lz_debug_us_draft;
+extern lz_i64 lz_debug_us_catchup;
+extern lz_i64 lz_debug_n_catchup;
+
 /* DSpark's T=1 attention shortcut - see forward.c's own extensive
    comment next to the definition for the full argument (why K is
    provably irrelevant, and the tier-by-tier V-side coverage). xb-in/
