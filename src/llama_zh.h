@@ -3,11 +3,14 @@
 
 /* llama98 engine public API.
    Model construction supports two families. The Qwen3.5/3.6 one
-   (qwen3_5_text): GatedDeltaNet linear attention alternating with gated
-   full attention + SiLU-gated FFN + RMSNorm. And the KunMoe variant
-   (model_type "kunmoe"): KDA linear attention with per-channel decay,
-   and/or a latent MoE FFN - see model.h, which has carried the fields
-   for it since bin v4.
+   (model_type "qwen3_5_text"): GatedDeltaNet linear attention alternating
+   with gated full attention + SiLU-gated FFN + RMSNorm. And the KunMoe
+   variant (model_type "kunmoe"): KDA linear attention with per-channel
+   decay, and/or a latent MoE FFN - see model.h, which has carried the
+   fields for it since bin v4.
+   Those model_type strings are the export side's labels. The engine tells
+   the two apart by the checkpoint's own linear-layer tensor names, not by
+   them - see arch_probe in model.c.
    KunMoe support is verified rather than assumed: the export tool
    takes model_type=kunmoe through its is_kunmoe branch, the resulting
    v4 bin passes `llama98 --check`, and greedy decoding produces fluent

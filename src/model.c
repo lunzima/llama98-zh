@@ -179,6 +179,133 @@ static int parse_ffn_activation(LZJson *j, const LZJsonNode *tc,
     return 0;
 }
 
+static int st_path_from_index(const char *dir, char *out, int outlen,
+                              char *errbuf, int errlen);
+
+/* The one place that decides which file holds the weights: model.safetensors
+   when it is there, otherwise the single shard a
+   model.safetensors.index.json names (st_path_from_index has that case).
+   Returns 0 and fills out, or non-zero with errbuf set.
+
+   ONE resolver for both callers, because lz_open loads from what this
+   returns and the architecture probe below reads that same file's header.
+   Two resolvers could pick two files, and then the verdict would be about
+   a checkpoint nobody is loading. */
+static int st_resolve(const char *dir, char *out, int outlen,
+                      char *errbuf, int errlen) {
+    int ir;
+    if (lz_lfn_exists(dir, "model.safetensors"))
+        return lz_lfn_path(dir, "model.safetensors", out, outlen,
+                           errbuf, errlen) != 0;
+    ir = st_path_from_index(dir, out, outlen, errbuf, errlen);
+    if (ir < 0) return 1;
+    if (ir == 1) return 0;
+    return lz_lfn_path(dir, "model.safetensors", out, outlen,
+                       errbuf, errlen) != 0;
+}
+
+/* The directory a config.json path lives in, WITH its trailing separator
+   kept. Keeping it is what gets the root right: "C:" names the current
+   directory of drive C while "C:/" names the root, the distinction
+   lfn.c's join() draws for itself. Both separators occur here -
+   lz_lfn_path builds '/', and the user's own directory argument is passed
+   through untouched. */
+static void cfg_dir_of(const char *cfg_path, char *out, int cap) {
+    int n = (int)strlen(cfg_path);
+    int i;
+    for (i = n - 1; i >= 0; i--)
+        if (cfg_path[i] == '/' || cfg_path[i] == '\\') break;
+    i++;                                    /* keep the separator itself */
+    if (i > cap - 1) i = cap - 1;
+    memcpy(out, cfg_path, (size_t)i);
+    out[i] = '\0';
+}
+
+/* Which generation this checkpoint is, decided from what its linear layers
+   are NAMED rather than from what its model_type says.
+
+   GDN (Qwen3.5) writes `linear_attn.in_proj_qkv.weight`; KDA (KunMoe)
+   writes `linear_attn.q_proj.weight` / `linear_attn.f_a_proj.weight`. The
+   two sets are disjoint in every checkpoint on disk, and the tensor set is
+   also the thing the loader has to bind - a model_type disagreeing with
+   its own tensors would only move the failure later, to a missing-tensor
+   error that no longer says which generation was expected.
+
+   Both names carry the `linear_attn.` anchor: a full-attention layer's own
+   `self_attn.q_proj.weight` shares the suffix and would otherwise answer
+   for an architecture it does not belong to.
+
+   Reads the header's MEMBER NAMES and nothing else, rather than going
+   through lz_st_open. lz_st_open builds the whole tensor table, so its
+   success also depends on the data_offsets validating against the file
+   size - and those are JSON numbers. The verdict would then be "no
+   verdict" for a checkpoint whose names state their generation plainly,
+   whenever an unrelated offset fails to round-trip. Names are strings;
+   the question is about names.
+
+   Returns 1 KDA, 0 GDN, -1 neither (a checkpoint carrying both name sets
+   is not either generation), -2 the header could not be read. -2 is
+   deliberately not a verdict: the loader that owns that file reports it
+   by name, and "neither generation" would be a claim about a file nobody
+   read. */
+static int arch_probe(const char *cfg_path) {
+    unsigned char lenbuf[8];
+    lz_i64 fsz;
+    lz_u64 hdr_len = 0;
+    char *hdr;
+    FILE *fp;
+    LZJson j;
+    const LZJsonNode *root, *m;
+    char dir[512], stp[512];
+    int i, seen_kda = 0, seen_gdn = 0;
+
+    cfg_dir_of(cfg_path, dir, (int)sizeof dir);
+    if (st_resolve(dir, stp, (int)sizeof stp, NULL, 0) != 0) return -2;
+
+    /* The safetensors envelope, same shape src/safetensors.c reads: an
+       eight-byte little-endian header length, then that many bytes of
+       JSON. The length is assembled byte by byte, and the bound is
+       written as a subtraction, so neither host byte order nor a
+       wrapped addition can turn a malformed header into a large malloc. */
+    fsz = lz_fsize(stp);
+    if (fsz < 8) return -2;
+    fp = fopen(stp, "rb");
+    if (!fp) return -2;
+    if (fread(lenbuf, 1, 8, fp) != 8) { fclose(fp); return -2; }
+    for (i = 7; i >= 0; i--) hdr_len = (hdr_len << 8) | (lz_u64)lenbuf[i];
+    if (hdr_len == 0 || hdr_len > (lz_u64)fsz - LZ_U64_C(8)) {
+        fclose(fp);
+        return -2;
+    }
+    hdr = (char *)malloc((size_t)hdr_len);
+    if (!hdr) { fclose(fp); return -2; }
+    if (fread(hdr, 1, (size_t)hdr_len, fp) != (size_t)hdr_len) {
+        free(hdr);
+        fclose(fp);
+        return -2;
+    }
+    fclose(fp);
+    if (lz_json_parse(&j, hdr, (size_t)hdr_len, NULL, 0) != 0) {
+        free(hdr);
+        return -2;
+    }
+    free(hdr);   /* lz_json_parse copies: the names below point into that */
+
+    root = lz_json_root(&j);
+    if (root && root->type == LZ_JSON_OBJ) {
+        for (m = lz_json_first(&j, root); m; m = lz_json_next(&j, m)) {
+            const char *n = m->key;
+            if (!n || strcmp(n, "__metadata__") == 0) continue;
+            if (strstr(n, "linear_attn.in_proj_qkv.weight")) seen_gdn = 1;
+            else if (strstr(n, "linear_attn.q_proj.weight") ||
+                     strstr(n, "linear_attn.f_a_proj.weight")) seen_kda = 1;
+        }
+    }
+    lz_json_free(&j);
+    if (seen_kda == seen_gdn) return -1;
+    return seen_kda;
+}
+
 int lz_load_config(LZModelConfig *c, const char *path,
                        char *errbuf, int errlen) {
     char *buf;
@@ -208,16 +335,28 @@ int lz_load_config(LZModelConfig *c, const char *path,
     tc = lz_json_get(&j, root, "text_config");
     if (!tc) tc = root;
 
-    /* KunMoe (KDA + latent MoE) detection.
-       Its config.json layer_types entries stay the plain
-       "linear_attention"/"full_attention" strings - see that file's
-       docstring, it keeps the Qwen3.5 skeleton deliberately - so
-       model_type is what tells the loader a "linear_attention" layer
-       means LZ_LT_KDA rather than LZ_LT_LINEAR (GDN). */
+    /* GDN vs KDA, decided by the checkpoint's own linear-layer tensor
+       names - see arch_probe. The config's layer_types entries stay the
+       plain "linear_attention"/"full_attention" strings in both
+       generations (kunmoe_modeling.py keeps the Qwen3.5 skeleton
+       deliberately), so the string cannot say which of the two an entry
+       means. This engine loads those two generations and nothing else; a
+       checkpoint that is neither is refused here rather than half-bound
+       against one of their specs. */
     {
-        const LZJsonNode *mt = lz_json_get(&j, tc, "model_type");
-        if (!mt) mt = lz_json_get(&j, root, "model_type");
-        is_kunmoe = lz_json_str_eq(mt, "kunmoe");
+        int arch = arch_probe(path);
+        if (arch == -2) {
+            /* The weights could not be opened. is_kunmoe only selects
+               which spec the layers are bound against, and the weight
+               load that follows reports the unreadable file by name. */
+            is_kunmoe = 0;
+        } else if (arch < 0) {
+            qerr(errbuf, errlen, LZ_ERR_CFG_UNSUPPORTED_ARCH);
+            lz_json_free(&j);
+            return 1;
+        } else {
+            is_kunmoe = (arch == 1);
+        }
     }
 
     c->vocab_size        = lz_json_get_int(&j, tc, "vocab_size", 0);
@@ -1718,21 +1857,10 @@ int lz_open(LZModel *m, const char *dir, char *errbuf, int errlen) {
     if (lz_load_config(&m->config, path, errbuf, errlen) != 0) return 1;
 
     /* model.safetensors first, then the shard index. Tried in this order
-       so an export carrying both keeps the behaviour it already had. */
-    if (lz_lfn_exists(dir, "model.safetensors")) {
-        if (lz_lfn_path(dir, "model.safetensors", path, (int)sizeof path,
-                        errbuf, errlen) != 0) return 1;
-    } else {
-        int ir = st_path_from_index(dir, path, (int)sizeof path,
-                                    errbuf, errlen);
-        if (ir < 0) return 1;
-        if (ir == 0) {
-            /* No index either: report the file the user expected to
-               have, which is still model.safetensors. */
-            if (lz_lfn_path(dir, "model.safetensors", path,
-                            (int)sizeof path, errbuf, errlen) != 0) return 1;
-        }
-    }
+       so an export carrying both keeps the behaviour it already had. The
+       resolver is st_resolve's, shared with the architecture probe inside
+       lz_load_config, so the file probed and the file loaded are one. */
+    if (st_resolve(dir, path, (int)sizeof path, errbuf, errlen) != 0) return 1;
     if (lz_st_open(&m->st, path, errbuf, errlen) != 0) return 1;
 
     if (detect_prefix(m, errbuf, errlen) != 0) goto fail;

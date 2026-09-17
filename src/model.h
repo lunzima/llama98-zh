@@ -37,12 +37,12 @@
 #define LZ_LT_LINEAR 0      /* GatedDeltaNet */
 #define LZ_LT_FULL   1      /* gated self-attention */
 #define LZ_LT_KDA    2      /* Kimi Delta Attention: per-channel decay,
-                                separate q/k/v/g projections. Selected when
-                                config.json's top-level (or text_config's)
-                                model_type is "kunmoe" - see
-                                lz_load_config. The JSON layer_types string
-                                stays "linear_attention" either way; this
-                                code is what the string maps to. */
+                                separate q/k/v/g projections. Selected from
+                                the checkpoint's own linear-layer tensor
+                                names, not from any string in config.json -
+                                see arch_probe in model.c. The JSON
+                                layer_types string stays "linear_attention"
+                                either way; this code is what it maps to. */
 
 /* ffn_activation codes (config.json's "ffn_activation" string, text_config
    or top level). NONE is every model this engine has ever loaded; the
