@@ -339,7 +339,8 @@ csa2-gate:
 
 # S1 attn_kv_share, both halves: the loader's alias (model.c) and the
 # forward's input swap (forward.c/forward_attn.c). Own script's header has
-# the dup/share, adjacent-pair and collapse arms, the bin v10 arms, and the
+# the dup/share, adjacent-pair and collapse arms, the bin arms (the
+# attn_kv_share word off/on, and the same stream behind a v4 header), and the
 # one thing no arm there can see (a PARTIAL swap - only k_proj or only
 # v_proj fed the source's input - because logits are the only observable
 # this engine has). Needs a model dir this engine can load that holds at

@@ -55,26 +55,43 @@
 #                     because nothing was removed. This is the arm that
 #                     makes the set a measurement of the SWITCH rather
 #                     than of the fixture.
-#   bin               model.bin's v10 tail is one more <i after v9's two,
-#                     so a file whose header gains that word must parse
-#                     its tensor stream exactly as before: an earlier
-#                     version's file rebuilt as v10 with the word set to 0
-#                     must produce identical logits to the file it came
-#                     from. A reader that does not consume the word, or
-#                     consumes it twice, desyncs here, and it desyncs on
-#                     the FIRST tensor - which is why this arm is the one
-#                     that pins the header parse. The same extension with
-#                     the word set to 1 must FAIL: the stream still
-#                     carries the tensors a sharing model does not store,
-#                     so the walk and the file disagree - and the writer
-#                     that sets the word owes it to drop them. On a file
-#                     that is ALREADY v10 (an exported artifact) the pair
+#   bin               attn_kv_share is the word that decides WHICH layers
+#                     share K/V, and it is no longer the last word of the
+#                     header: 131 words follow it (attn_sink_learned,
+#                     gated_residual, ced_split, csa2_on[128]). So the
+#                     flip below lands on that word by offset and not on
+#                     the file's last one - a flip that lands on
+#                     csa2_on[127] is caught by the reader's layer_types
+#                     padding check before the walk reaches any layer, and
+#                     a refusal that names no layer is not the finding
+#                     this arm is after. A file whose header gains the
+#                     whole tail must parse its tensor stream exactly as
+#                     before: an earlier version's file rebuilt with the
+#                     word set to 0 must produce identical logits to the
+#                     file it came from. A reader that does not consume the
+#                     tail, or consumes it twice, desyncs here, and it
+#                     desyncs on the FIRST tensor - which is why this arm
+#                     is the one that pins the header parse. The same
+#                     rebuild with the word set to 1 must FAIL: the stream
+#                     still carries the tensors a sharing model does not
+#                     store, so the walk and the file disagree - and the
+#                     writer that sets the word owes it to drop them. On a
+#                     file already written in the CURRENT layout the pair
 #                     turns around: it must load, and the same file with
-#                     the word forced to 0 must be refused at the target
-#                     layer. Both refusals are checked against that
-#                     layer's name, not merely against a non-zero exit - a
-#                     header-parse bug also exits non-zero, and the two
-#                     are not the same finding.
+#                     the word flipped is refused at the target layer.
+#                     Both refusals are
+#                     checked against that layer's name, not merely
+#                     against a non-zero exit - a header-parse bug also
+#                     exits non-zero, and the two are not the same finding.
+#
+#                     The target version is 5 because that is the one
+#                     layout the exporter writes. What this arm is about
+#                     is that the tail is CONSUMED correctly, not which
+#                     number the word carries - which is why it does not
+#                     take the number from export_q8: a gate that read it
+#                     from the writer would go green on any version the
+#                     writer and reader agreed on and would say nothing
+#                     about the layout being right.
 #
 # WHAT WOULD FOOL IT
 #
@@ -386,19 +403,25 @@ PY
 fi
 
 # ------------------------------------------------------------------ model.bin
-# Two shapes, one pair of arms. A file written before this version gains the
-# v10 tail here, at the value the reader defaults every earlier version's
-# absent tail to - except the two the reader validates or derives from:
-# rope_scaling (whose "off" values are type 0 with a positive factor and the
-# stock YaRN bounds) and the Hadamard block sizes (-1 = derive, which 0 is
-# not). A file that is ALREADY v10 carries the tail itself, so the arms
-# become: load it as it is, and refuse it with the tail word forced to 0 -
-# the same switch the exporter set, moved by hand.
+# Two shapes, one pair of arms. A v4 file (the published generation) carries
+# the base header and the KDA/MoE tail and stops; the current layout, v5, is
+# that same tail followed by every later field. So a v4 file gains the rest
+# of the header here, at the values the reader defaults an absent tail to -
+# except the two the reader validates or derives from: rope_scaling (whose
+# "off" values are type 0 with a positive factor and the stock YaRN bounds)
+# and the Hadamard block sizes (-1 = derive, which 0 is not). A file already
+# written in the current layout carries the whole header itself, so the arms
+# become: load it as it is, and refuse it with attn_kv_share flipped - the
+# same switch the exporter set, moved by hand. That word is not the last one
+# (131 words follow it), so both the flip and the staleness check address it
+# through KV_OFF: a flip written as "the last word" still produces a refusal,
+# which is exactly why the assertion names the layer rather than the exit code.
 #
 #   bin_ok    loads, and its logits are identical to the untouched file's
-#             (vacuous when the file is already v10 and is that file; what
-#             the arm asserts there is that a shipped v10 artifact runs).
-#   bin_bad   refused. Either the tail word was set on a stream that still
+#             (vacuous when the file is already in the current layout and is
+#             that file; what the arm asserts there is that a shipped
+#             artifact of this layout runs).
+#   bin_bad   refused. Either attn_kv_share was set on a stream that still
 #             carries the tensors a sharing model does not store, or the
 #             word was cleared on a stream that does not carry them.
 if [ "$HAVE_BIN" = 1 ]; then
@@ -407,28 +430,51 @@ import os, shutil, struct, sys
 
 model_dir, w = sys.argv[1], sys.argv[2]
 MAX_LAYERS = 128
+CUR_VER = 5
 SKIP_FILES = ("model.safetensors", "model.bin", "model.bin.lz4")
 
 def header_len(ver):
-    words = 28 + MAX_LAYERS          # fixed fields + layer_types
-    if ver >= 4: words += 13         # KDA gate + latent MoE
-    if ver >= 5: words += 2          # MTP head
-    if ver >= 6: words += 5          # rope_scaling
-    if ver >= 7: words += 1          # use_subn
-    if ver >= 8: words += 2          # hadamard blocks
-    if ver >= 9: words += 2          # MLA ranks
-    if ver >= 10: words += 1         # attn_kv_share
+    """Bytes of the header. Two shapes are readable: v4, the published
+    generation, and the current layout. The number below is the layout
+    the engine reads - base, then the 13-word KDA/MoE tail, then 2 MTP +
+    5 rope_scaling + 1 use_subn + 2 Hadamard + 2 MLA + 1 attn_kv_share,
+    then the 131-word group appended to that tail (attn_sink_learned,
+    gated_residual, ced_split, csa2_on[128]) - 313 words in all, and the
+    group is added as 3 + MAX_LAYERS because attn_kv_share is already the
+    last 1 in the list above. Counting it twice is a whole word of offset,
+    which lands the flip and the staleness check on the wrong field - and
+    the file still parses, so nothing else here notices. The count is
+    written out rather than imported from export_q8 on purpose: importing
+    it would make this arm agree with the writer by construction and stop
+    it noticing a layout the READER has wrong."""
+    words = 28 + MAX_LAYERS           # fixed fields + layer_types
+    if ver == 4:
+        words += 13                   # KDA gate + latent MoE, and nothing after
+    else:
+        words += 13 + 2 + 5 + 1 + 2 + 2 + 1 + 3 + MAX_LAYERS
     return 8 + 4 * words
 
 def tails_below(ver):
+    """The words a v4 header lacks, in the order src/model.c reads them."""
     out = b""
-    if ver < 4: out += struct.pack("<13i", *([0] * 13))
-    if ver < 5: out += struct.pack("<2i", 0, 0)
-    if ver < 6: out += struct.pack("<5i", 0, 0x3f800000, 0, 0x42000000, 0x3f800000)
-    if ver < 7: out += struct.pack("<i", 0)
-    if ver < 8: out += struct.pack("<2i", -1, -1)
-    if ver < 9: out += struct.pack("<2i", 0, 0)
+    if ver < 5:
+        out += struct.pack("<2i", 0, 0)          # MTP head
+        out += struct.pack("<5i", 0, 0x3f800000, 0, 0x42000000, 0x3f800000)
+        out += struct.pack("<i", 0)              # use_subn
+        out += struct.pack("<2i", -1, -1)        # Hadamard blocks: -1 = derive
+        out += struct.pack("<2i", 0, 0)          # MLA ranks
     return out
+
+def appended_tail(kv_share):
+    """attn_kv_share plus the 131-word group appended to v5's tail, every
+    word of that group at the "off" value a v4 header restores it to.
+    One producer for both arms: written out twice by hand, the two are one
+    edit away from disagreeing about how many zero words the group holds,
+    and the arms would then differ in their tensor stream's alignment
+    rather than in the switch under test."""
+    return (struct.pack("<i", kv_share)
+            + struct.pack("<3i", 0, 0, 0)        # sink / GR / ced_split
+            + b"\0" * (4 * MAX_LAYERS))          # csa2_on[]
 
 def emit(tag, blob):
     out = os.path.join(w, tag)
@@ -442,34 +488,92 @@ def emit(tag, blob):
 
 b = open(os.path.join(model_dir, "model.bin"), "rb").read()
 ver = struct.unpack("<I", b[4:8])[0]
+def word_at(off): return struct.unpack("<i", b[off:off + 4])[0]
 # layer_types sits right after the 28 fixed words; LZ_LT_FULL is 1.
 lt = struct.unpack("<%di" % MAX_LAYERS, b[120:120 + 4 * MAX_LAYERS])
 full = [i for i, t in enumerate(lt) if t == 1]
 
-if ver >= 10:
+if len(full) < 2:
+    print("SKIP: this file has %d full_attention layer(s) - nothing is shared"
+          % len(full))
+    sys.exit(2)
+if ver == CUR_VER:
     hl = header_len(ver)
-    word = struct.unpack("<i", b[hl - 4:hl])[0]
-    if word == 0:
-        print("SKIP: this file is v%d with attn_kv_share=0 - nothing is shared" % ver)
-        sys.exit(2)
-    if len(full) < 2:
-        print("SKIP: this file has %d full_attention layer(s) - nothing is shared"
-              % len(full))
-        sys.exit(2)
+    # attn_kv_share: the header word the switch itself is. Counted back
+    # from the end of the header rather than forward from layer_types, so
+    # the one place that knows how many words follow it is this one.
+    KV_OFF = hl - 4 * (1 + 3 + MAX_LAYERS)
+    word = word_at(KV_OFF)
     emit("bin_ok", b)
-    emit("bin_bad", b[:hl - 4] + struct.pack("<i", 0) + b[hl:])
-    print("v%d file already carries the tail word 1 - control is the same file"
-          " with 0" % ver)
-else:
-    if len(full) < 2:
-        print("SKIP: this file has %d full_attention layer(s)" % len(full))
-        sys.exit(2)
+    emit("bin_bad", b[:KV_OFF] + struct.pack("<i", 0 if word else 1)
+                   + b[KV_OFF + 4:])
+    print("v%d file already carries the whole header (attn_kv_share %d) - the"
+          " pair is that file, and the same file with the word flipped"
+          % (ver, word))
+
+    # bin_ok above is the untouched file, so on its own it asserts only
+    # "a shipped artifact runs" - vacuous as a HEADER-PARSE test. The
+    # other direction is available and is not vacuous: cut the same
+    # header back to the v4 shape and the reader must produce the same
+    # model, because the fields v4 cannot carry are exactly the ones
+    # whose absent-value defaults reproduce what v5 states. That is
+    # checked rather than assumed, below - the arm is emitted only when
+    # every such field already holds its derived default, and the shell
+    # treats its absence as a SKIP it prints, not as a pass. The group
+    # appended to v5's tail is part of "every such field": a sink / GR /
+    # ced_split / csa2_on the file switched ON is a field v4 cannot carry,
+    # so cutting the header back would silently compare two models.
+    tail0 = 8 + (28 + MAX_LAYERS) * 4        # first word after layer_types
+    # attn_kv_share has two independent addresses: 25 words past
+    # layer_types, and KV_OFF counted back from the header's end. An edit
+    # that moves one and not the other is a silent word of offset - the
+    # file still parses and the arms then test the wrong field.
+    assert KV_OFF == tail0 + 25 * 4, (KV_OFF, tail0 + 25 * 4)
+    assert len(appended_tail(0)) == 4 * (1 + 3 + MAX_LAYERS)
+    vdim = word_at(8 + 25 * 4)               # lin_value_dim
+    idim = word_at(8 + 7 * 4)                # intermediate_size
+    oblk = 0 if (vdim < 2 or (vdim & (vdim - 1))) else vdim
+    dblk = 512
+    while dblk > 1 and idim % dblk:
+        dblk >>= 1
+    if dblk == 1: dblk = 0
+    stale = []
+    if word_at(tail0 + 13 * 4) != 0: stale.append("mtp_n_layers")
+    if word_at(tail0 + 15 * 4) != 0: stale.append("rope_scaling_type")
+    if word_at(tail0 + 20 * 4) != 0: stale.append("use_subn")
+    if word_at(tail0 + 21 * 4) != oblk: stale.append("hadamard_o")
+    if word_at(tail0 + 22 * 4) != dblk: stale.append("hadamard_down")
+    if word_at(tail0 + 23 * 4) != 0: stale.append("mla_q_lora_rank")
+    if word_at(tail0 + 24 * 4) != 0: stale.append("mla_o_lora_rank")
+    if word_at(KV_OFF) != 0: stale.append("attn_kv_share")
+    if word_at(KV_OFF + 4) != 0: stale.append("attn_sink_learned")
+    if word_at(KV_OFF + 8) != 0: stale.append("gated_residual")
+    if word_at(KV_OFF + 12) != 0: stale.append("ced_split")
+    if any(word_at(KV_OFF + 16 + 4 * i) for i in range(MAX_LAYERS)):
+        stale.append("csa2_on")
+    if stale:
+        print("SKIP bin_v4: v4's absent-value defaults do not reproduce this"
+              " header (%s), so cutting it back to v4 would change the model"
+              " for a reason that is not the parser" % ", ".join(stale))
+    else:
+        emit("bin_v4", b[:4] + struct.pack("<I", 4) + b[8:header_len(4)] + b[hl:])
+        print("bin_v4: the same header cut back to the v4 shape (%d -> %d bytes)"
+              % (hl, header_len(4)))
+elif ver == 4:
     hl = header_len(ver)
-    emit("bin_ok", b[:4] + struct.pack("<I", 10) + b[8:hl]
-                  + tails_below(ver) + struct.pack("<i", 0) + b[hl:])
-    emit("bin_bad", b[:4] + struct.pack("<I", 10) + b[8:hl]
-                   + tails_below(ver) + struct.pack("<i", 1) + b[hl:])
-    print("rebuilt model.bin v%d -> v10 with the tail word 0 and 1" % ver)
+    emit("bin_ok", b[:4] + struct.pack("<I", CUR_VER) + b[8:hl]
+                  + tails_below(ver) + appended_tail(0) + b[hl:])
+    emit("bin_bad", b[:4] + struct.pack("<I", CUR_VER) + b[8:hl]
+                   + tails_below(ver) + appended_tail(1) + b[hl:])
+    print("rebuilt model.bin v%d -> v%d with attn_kv_share 0 and 1"
+          % (ver, CUR_VER))
+    print("bin_v4: not built - the input already IS v4, so bin_ok above (the"
+          " same stream behind the current header) is the same claim read the"
+          " other way round")
+else:
+    print("SKIP: this build reads v4 and v%d, not v%d - rebuild the fixture"
+          % (CUR_VER, ver))
+    sys.exit(2)
 
 # The refusal has to LAND ON THE TARGET LAYER, which is the whole
 # observable: the walk skips that layer's shared specs, so the stream
@@ -526,6 +630,33 @@ PY
         else
             echo "  bin_bad: refused at the target layer on"
             echo "    $(tail -1 "$W/bin_bad.log")"
+        fi
+        # The v4 rebuild, when the fixture builder could make one. The
+        # SAME tensor stream behind the frozen published header must load
+        # to the same model - that is what "v4 is still readable, and
+        # still reads what it always read" means, and nothing else here
+        # checks it. Absent means the builder declined (it prints why),
+        # and a SKIP that is not printed is the failure this arm exists
+        # to avoid.
+        if [ -d "$W/bin_v4" ]; then
+            if ! bdump "$W/bin_v4" "$W/bin_v4.pf" "$W/bin_v4.log"; then
+                echo "  FAIL: bin_v4 (the same stream behind a v4 header)"
+                echo "        did not load:"
+                tail -2 "$W/bin_v4.log" | sed 's/^/    /'
+                FAILED=1
+            elif [ "$FAILED" = 0 ] && [ -s "$W/bin_base.pf" ] && \
+                 ! cmp -s "$W/bin_base.pf" "$W/bin_v4.pf"; then
+                echo "  FAIL: bin_v4 loaded but produced different logits -"
+                echo "        the v4 header parse no longer agrees with the"
+                echo "        current one on fields the two shapes share"
+                FAILED=1
+            else
+                echo "  bin_v4: the same stream behind a v4 header loads"
+                echo "    bitwise identically"
+            fi
+        else
+            echo "  SKIP  bin_v4                 (no v4 rebuild for this fixture;"
+            echo "        the fixture builder printed the reason above)"
         fi
     fi
 fi

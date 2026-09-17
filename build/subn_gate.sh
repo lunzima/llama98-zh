@@ -63,28 +63,43 @@ W="${TMPDIR:-/tmp}/subn_gate.$$"
 # overridable; every one SKIPs loudly if absent.
 #
 # HOW TO PRODUCE SUBN_MODEL (it is a build artifact, not a checkpoint):
-#   python3 tools/export_q8.py <models>/kunkun-ce /tmp/subn_ce_q8.bin
+#   python3 tools/export_q8.py <models>/kunkun-ce.bak-pre-arch-switches-20260917 \
+#           /tmp/subn_ce_q8.bin
 #   mkdir -p <models>/_subn_gate_q8
 #   cp /tmp/subn_ce_q8.bin <models>/_subn_gate_q8/model.bin
-#   cp <models>/kunkun-ce/tokenizer.json <models>/_subn_gate_q8/
+#   cp <models>/kunkun-ce.bak-pre-arch-switches-20260917/tokenizer.json \
+#           <models>/_subn_gate_q8/
 # tools/export_q8.py lives in the TRAINING tree (see CLAUDE.md on the
 # two trees), which is why this is a recipe here and not a build rule.
 #
-# WHICH CHECKPOINT, and why this was recorded as a resource block for so
-# long: the exporter's use_subn tensor list includes the ATTENTION
-# projection norms (self_attn.q_proj.norm.weight and its three
-# siblings), and most of the trained SubLN checkpoints predate that
-# field - _smoke_mhc0, _abl_mhc*, ce-abl-mhc* all carry only the KDA and
-# MLP norms and fail export with a KeyError on exactly that name. That
-# got generalised to "no SubLN checkpoint exports". kunkun-ce DOES (it
-# was migrated; its model.safetensors.bak-before-attn-subn is the
-# migration's own leftover) and exports clean. Measured 2026-08-23.
+# WHICH CHECKPOINT. Not `kunkun-ce` itself, for two independent reasons,
+# and both are worth knowing before someone "fixes" this back:
+#   - it no longer LOADS in this engine. It gained gr_attn.*/self_attn.sinks/
+#     csa2_w_* on 2026-09-17 and src/ has no spec for the first two, so
+#     `--check` refuses it. SUBN_F32_MODEL below is the same checkpoint
+#     for exactly that reason.
+#   - it has since been re-carved to 5 layers. The fixture this recipe
+#     used to name was 6, so re-running the old recipe against today's
+#     kunkun-ce cannot reproduce it even once the engine can load it.
+# The two facts make the pre-switch backup the only surviving checkpoint
+# that both loads and carries use_subn with hadamard_o > 1.
+#
+# WHICH CHECKPOINT, on the SubLN side: the exporter's use_subn tensor
+# list includes the ATTENTION projection norms
+# (self_attn.q_proj.norm.weight and its three siblings), and most of the
+# trained SubLN checkpoints predate that field - _smoke_mhc0, _abl_mhc*,
+# ce-abl-mhc* all carry only the KDA and MLP norms and fail export with a
+# KeyError on exactly that name. That got generalised to "no SubLN
+# checkpoint exports". kunkun-ce DOES (it was migrated; its
+# model.safetensors.bak-before-attn-subn is the migration's own leftover)
+# and exports clean. Measured 2026-08-23.
 MODELS_ROOT="${MODELS_ROOT:-/e/LLM/models}"
 # QUANTIZED bin, use_subn + hadamard_o > 1 - see the recipe above.
 SUBN_MODEL="${SUBN_MODEL:-$MODELS_ROOT/_subn_gate_q8}"
 # The same weights UNQUANTIZED. Not "a similar model": float-rotates and
-# quantized-rotates are only comparable if the shape is the same one.
-SUBN_F32_MODEL="${SUBN_F32_MODEL:-$MODELS_ROOT/kunkun-ce}"
+# quantized-rotates are only comparable if the shape is the same one, and
+# this is the same directory SUBN_MODEL is exported from.
+SUBN_F32_MODEL="${SUBN_F32_MODEL:-$MODELS_ROOT/kunkun-ce.bak-pre-arch-switches-20260917}"
 # Any model WITHOUT use_subn. kmr20 is the one every other gate here uses.
 PLAIN_MODEL="${PLAIN_MODEL:-$MODELS_ROOT/kmr20}"
 # The token ids MUST be inside the subn model's vocab, which is 6144
@@ -142,15 +157,10 @@ if [ "$r1" -ne 0 ] && [ "$r2" -ne 0 ] && [ "$r3" -ne 0 ] && [ "$r4" -ne 0 ]; the
     grep -m1 'Failed to load' "$W/def.bin.log" | sed 's/^/             /'
     rm -rf "$W"
     echo "subn_gate: SKIP - the subn model is unloadable by this build"
-    echo "  KNOWN CAUSE at the time of writing, and it is the ENGINE side,"
-    echo "  not the model: a use_subn export carries the per-projection"
-    echo "  input norms (mlp.gate_proj.norm.weight and its siblings) and"
-    echo "  the tensor spec list does not claim them yet, so the loader"
-    echo "  matches the next spec positionally and reports an elem-count"
-    echo "  mismatch on mlp.gate_proj.weight (want 1048576, file 512 - the"
-    echo "  512 IS the norm). The five assertions below were verified on a"
-    echo "  build carrying that loader work uncommitted; this gate turns"
-    echo "  green on its own the moment it lands."
+    echo "  Two causes, and they are different work: SUBN_MODEL is a stale"
+    echo "  build artifact (rebuild it with the recipe at the top), or this"
+    echo "  engine refuses the bin header version it was exported with. The"
+    echo "  first line above says which."
     exit 2
 fi
 for pair in "1 default" "2 tok" "3 group" "4 hadamard-off"; do
