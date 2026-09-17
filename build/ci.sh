@@ -759,6 +759,32 @@ case $CSA2_RC in
         ;;
 esac
 
+# S1 attn_kv_share: own script for the same reason as MLA/CSA2 above -
+# it BUILDS its fixture from ARM_MODEL's weights rather than using it
+# as-is, since no checkpoint here that this engine can load carries the
+# key. Needs python3 safetensors+numpy for the safetensors arms.
+echo
+echo "==== [11f/31]attn_kv_share ===="
+LOG=build/ci-kv-share.log
+build/kv_share_gate.sh "$ARM_MODEL" >"$LOG" 2>&1
+KVS_RC=$?
+cat "$LOG"
+case $KVS_RC in
+    0)
+        note "PASS  attn_kv_share"
+        PASS=$((PASS + 1))
+        ;;
+    2)
+        REASON=$(grep -m1 'kv_share_gate: SKIP' "$LOG")
+        note "SKIP  attn_kv_share ($REASON)"
+        SKIP=$((SKIP + 1))
+        ;;
+    *)
+        note "FAIL  attn_kv_share"
+        FAIL=$((FAIL + 1))
+        ;;
+esac
+
 # ---------------------------------------------------------------------
 # Stage 12: --kv-rot, the one output-changing knob that had no gate. Not
 # invariance (stage 11's assertion) - a QUALITY claim with a number:

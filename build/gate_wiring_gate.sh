@@ -112,6 +112,10 @@ mla_gate.sh                # needs python3 numpy+safetensors and rewrites a
                            #   ~500MB model.safetensors three times
 csa2_gate.sh                # needs python3 numpy+safetensors and rewrites a
                            #   model.safetensors twice
+kv_share_gate.sh           # builds its own fixture out of the given
+                           #   checkpoint's weights, needs python3
+                           #   numpy+safetensors, and skips on every
+                           #   checkpoint here that this engine can load
 changelog_comment_gate.sh  # ratchet over the whole tree, slow
 subn_gate.sh               # needs a model and a long token run
 kv_rot_gate.sh             # needs a model and a long token run
