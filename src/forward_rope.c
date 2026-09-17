@@ -113,8 +113,8 @@ void lz_rope_build_table(float *rope_cs, int seq_len, const LZModelConfig *c) {
            mscale). Reference: transformers modeling_rope_utils.py,
            _compute_yarn_parameters + Qwen3_5TextRotaryEmbedding.
            forward's `cos = emb.cos() * attention_scaling`. Verified
-           against it bit-for-bit at dynamic NTK off (.prof/wrope_yarn.c,
-           not part of this file). */
+           against it bit-for-bit at dynamic NTK off by a one-off probe
+           that is not in the tree (wrope_yarn.c, under gitignored .prof/). */
         float low, high, attn_scale;
         lz_rope_find_correction_range(
             c->rope_scaling_beta_fast, c->rope_scaling_beta_slow,
