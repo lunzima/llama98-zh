@@ -1022,7 +1022,7 @@ typedef struct {
        duplication that pattern would create is exactly the kind of
        thing that silently drifts after a config field changes - this
        project has hit that shape of bug before (see ckpt_sizes's own
-       comment in forward.c, added for the identical reason on
+       comment in forward_ckpt.c, added for the identical reason on
        LZStateCkpt's shapes). Never 0. */
     int     ssm_ring_depth;
 
