@@ -600,7 +600,7 @@ int lz_spec_round_temp(const LZModel *m, LZRunState *s,
 
    Structurally simpler than lz_spec_round, for a reason worth stating
    up front: lz_mtp_draft_batch's k slots are each an independent,
-   from-the-anchor-hidden-state computation (forward.c's own comment on
+   from-the-anchor-hidden-state computation (forward_mtp.c's own comment on
    why this is not a self-chain), so none of lz_spec_round's MTP-KV-
    history machinery applies here - there is no s->mtp_pos to advance
    or roll back (every round starts over from s->mtp_chain alone, the

@@ -196,7 +196,7 @@ extern lz_i64 lz_debug_us_capture;
    are indistinguishable without this. */
 extern lz_i64 lz_debug_n_capture;
 /* Part 6: timer + call-count pair for catch-up decode - see
-   forward.c's own comment on lz_mtp_catchup for why it is a separate
+   forward_mtp.c's own comment on lz_mtp_catchup for why it is a separate
    entry point from lz_mtp_prefill. */
 extern lz_i64 lz_debug_us_catchup;
 extern lz_i64 lz_debug_n_catchup;

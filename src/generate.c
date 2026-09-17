@@ -2881,7 +2881,7 @@ int lz_generate_call(const LZModel *m, LZTokenizer *t, LZRunState *s,
             /* next_tokens[i] = the actual prompt token that followed
                body position start_pos+i, i.e. prompt_tokens[i+1] - the
                MTP's ground-truth "next token" input (lz_mtp_prefill's
-               own comment, forward.c). pos0 = s->mtp_pos (NOT a
+               own comment, forward_mtp.c). pos0 = s->mtp_pos (NOT a
                hardcoded 0): the MTP's own position numbering
                accumulates across the whole session (mtp_pos's own
                comment), so a resumed multi-turn generation must

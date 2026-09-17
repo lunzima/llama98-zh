@@ -690,7 +690,7 @@ typedef struct {
        when m->mtp != NULL - see lz_state_alloc). The KV cache the MTP
        block's own attention uses is NOT a separate buffer: it is one
        more slot appended to kq8/vq8/ksq/vsq above (index n_full_layers,
-       via forward_attn's cache-layer sentinel in forward.c) - it needs
+       via forward_attn's cache-layer sentinel in forward_mtp.c) - it needs
        no rollback of its own (see lz_spec_round's docstring in
        generate.c: dangling rows from a rejected draft are simply
        overwritten by the next round at higher positions, same
@@ -703,7 +703,7 @@ typedef struct {
        lz_forward_capture's own comment below - for the first step, then
        replaced each step with that step's own post-norm output, matching
        upstream's own recursion - see lz_mtp_draft_step's comment in
-       forward.c).
+       forward_mtp.c).
 
        mtp_x/mtp_concat/mtp_emb_raw are sized nt_cap wide (not just one
        token), even though lz_mtp_draft_step's chained per-step usage
@@ -717,7 +717,7 @@ typedef struct {
     float *mtp_chain;          /* (hidden) chained "hidden" register, see above - single-token only, prefill never touches it */
     float *mtp_draft_logits;   /* (vocab) one draft step's logits */
     /* DSpark (arXiv:2607.05147), mtp_n_draft > 1 only - see
-       lz_mtp_draft_batch/lz_mtp_markov_correct in forward.c. ONE slot's
+       lz_mtp_draft_batch/lz_mtp_markov_correct in forward_mtp.c. ONE slot's
        worth of concat scratch, reused across the K-slot loop (the loop
        is sequential in this engine regardless of the slots' logical
        independence - see lz_mtp_draft_batch's own comment on why a
@@ -746,7 +746,7 @@ typedef struct {
        either (same rollback argument as the body's SSM/conv checkpoint,
        just satisfied by not advancing this counter past accepted steps,
        not by copying anything - see lz_spec_round). Owned entirely by
-       the caller (generate.c): forward.c only reads it as a plain
+       the caller (generate.c): forward_mtp.c only reads it as a plain
        position argument to lz_mtp_draft_step/lz_mtp_prefill, never
        advances it itself. Reset to 0 by lz_state_reset, like every
        other recurrent index.
@@ -758,7 +758,7 @@ typedef struct {
        runs the MTP block over the body's
        already-computed prefill hidden states purely to populate this
        KV cache before the first round; see its own comment
-       (forward.c) and lz_generate_resume's prefill call site. */
+       (forward_mtp.c) and lz_generate_resume's prefill call site. */
     int mtp_pos;
     /* Verify-pass logits: EVERY position of the (k+1)-token verify batch,
        not just the last - lz_forward_batch skips intermediate logits on
@@ -1542,7 +1542,7 @@ float *lz_forward_capture(const LZModel *m, LZRunState *s, int token, int pos);
 /* One MTP draft step. Reads s->mtp_chain as the "hidden" input (seeded by
    lz_forward_capture for the first step of a round; OVERWRITTEN by this
    call with this step's own post-norm output, which is exactly upstream's
-   own chaining rule - see forward.c). next_token's embedding is the
+   own chaining rule - see forward_mtp.c). next_token's embedding is the
    step's "next token" input (the just-produced anchor/draft token).
    pos is this step's position in the MTP block's OWN numbering (see
    s->mtp_pos above) - NOT the body's absolute token position - used for
@@ -1562,7 +1562,7 @@ extern lz_i64 lz_debug_us_draft;
 extern lz_i64 lz_debug_us_catchup;
 extern lz_i64 lz_debug_n_catchup;
 
-/* DSpark's T=1 attention shortcut - see forward.c's own extensive
+/* DSpark's T=1 attention shortcut - see forward_mtp.c's own extensive
    comment next to the definition for the full argument (why K is
    provably irrelevant, and the tier-by-tier V-side coverage). xb-in/
    xb2-out, same convention forward_attn itself uses. Not static:
@@ -1685,14 +1685,14 @@ int lz_forward_verify_into(const LZModel *m, LZRunState *s,
 
 /* Run the MTP block over n prompt positions purely to populate its own
    KV cache before the first speculative round - see s->mtp_pos's
-   comment above and this function's own comment in forward.c for why a
+   comment above and this function's own comment in forward_mtp.c for why a
    fresh generation would otherwise start every round blind. h_body_all[i] is
    the body's post-final-norm hidden at position pos0+i
    (lz_forward_batch_capture's own output); next_tokens[i] is the
    actual prompt token
    that followed position pos0+i (the MTP's ground-truth "next token"
    input, same role lz_mtp_draft_step's next_token argument plays for
-   one chained step). Output logits are never computed - see forward.c;
+   one chained step). Output logits are never computed - see forward_mtp.c;
    this call's only observable effect is the KV cache rows forward_attn
    writes as a side effect. Returns 0 on success, nonzero (no errbuf -
    same convention lz_forward_batch/lz_forward_verify use) on a NULL/

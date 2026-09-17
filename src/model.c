@@ -1526,7 +1526,7 @@ static int alloc_mtp(LZModel *m, char *errbuf, int errlen) {
     }
     /* lz_mtp_markov_correct reads markov_embed's row into
        mtp_kdraft_concat, a fixed 3*hidden_size scratch buffer it shares
-       with lz_mtp_draft_batch's base stage - see forward.c's own
+       with lz_mtp_draft_batch's base stage - see forward_mtp.c's own
        comment on embed_row. Only reachable with mtp_n_draft>1 (the
        markov head only exists in that tier). */
     if (m->config.mtp_n_draft > 1 &&

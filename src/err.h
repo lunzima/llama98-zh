@@ -245,7 +245,7 @@ typedef enum {
        markov_embed's row into mtp_kdraft_concat, a fixed 3*hidden
        scratch buffer it shares with lz_mtp_draft_batch's base stage
        (that buffer's content is dead by the time the correction runs -
-       forward.c's own comment on embed_row) - a rank past that size
+       forward_mtp.c's own comment on embed_row) - a rank past that size
        would overflow it. */
     LZ_ERR_MTP_MARKOV_RANK,   /* mtp_markov_rank %d exceeds 3*hidden_size %d */
 

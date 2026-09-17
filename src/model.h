@@ -824,7 +824,7 @@ typedef struct {
        (every model this project has produced so far - real trained MTP
        weights do not exist yet either).
 
-       Inference: forward.c's
+       Inference: forward_mtp.c's
        lz_mtp_draft_step runs one draft step, lz_forward_verify batches
        the target model's own check of k drafted tokens, and
        generate.c's lz_spec_round ties draft -> verify -> accept/reject
