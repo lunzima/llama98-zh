@@ -814,6 +814,35 @@ case $ASINK_RC in
         ;;
 esac
 
+# gated_residual. Own script for the same reason as the sink gate just
+# above - it BUILDS its fixtures from a checkpoint's weights (the key and
+# the tensors are what is under test), needs python3 numpy+safetensors,
+# and builds five more engines (the pre-change one from git plus four
+# mutants). Pointed at kunkun98 and kunkun-ce, the only two checkpoints
+# that set the key: ARM_MODEL does not, so the gate would SKIP there and
+# the GR path would be checked by nothing.
+echo
+echo "==== [11h/31]gated residual ===="
+LOG=build/ci-gr.log
+build/gr_gate.sh "$MODELS_ROOT/kunkun98" "$MODELS_ROOT/kunkun-ce" >"$LOG" 2>&1
+GR_RC=$?
+cat "$LOG"
+case $GR_RC in
+    0)
+        note "PASS  gated residual"
+        PASS=$((PASS + 1))
+        ;;
+    2)
+        REASON=$(grep -m1 'gr_gate: SKIP' "$LOG")
+        note "SKIP  gated residual ($REASON)"
+        SKIP=$((SKIP + 1))
+        ;;
+    *)
+        note "FAIL  gated residual"
+        FAIL=$((FAIL + 1))
+        ;;
+esac
+
 # ---------------------------------------------------------------------
 # Stage 12: --kv-rot, the one output-changing knob that had no gate. Not
 # invariance (stage 11's assertion) - a QUALITY claim with a number:

@@ -121,6 +121,10 @@ attn_sink_learned_gate.sh  # builds its own fixtures from a checkpoint's
                            #   model.safetensors), needs python3
                            #   numpy+safetensors, and builds two mutant
                            #   engines
+gr_gate.sh                 # three copies of a ~550MB model.safetensors,
+                           #   needs python3 numpy+safetensors, builds the
+                           #   pre-change engine from git and four more
+                           #   mutant engines
 changelog_comment_gate.sh  # ratchet over the whole tree, slow
 subn_gate.sh               # needs a model and a long token run
 kv_rot_gate.sh             # needs a model and a long token run
