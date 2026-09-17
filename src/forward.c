@@ -979,18 +979,26 @@ static void chunk_logits_last(const LZModel *m, LZRunState *s,
    Training-side reference for all four functions below:
    engine/kunmoe_modeling.py's GatedResidual4 and GrDecoderLayer.forward. */
 
-/* gr_first: the embedding, dim wide, becomes nr IDENTICAL branches.
-   In place, and token by token DESCENDING: a token's destination region is
-   nr times its source region and starts at the same address, so an
-   ascending pass would overwrite tokens 1..nr-1's input before expanding
-   them. Branch 0 needs no copy - it is already where it belongs. */
+/* gr_first: the embedding, dim wide, becomes nr IDENTICAL branches, each
+   token's stream moving from [tk*dim, tk*dim+dim) to
+   [tk*nr*dim, (tk+1)*nr*dim).
+
+   In place, and token by token DESCENDING. A token's destination region is
+   nr times its source region and starts at or after it, so an ascending
+   pass would overwrite tokens 1..nr-1's input before expanding them. EVERY
+   branch is copied, branch 0 included: only token 0's source is already at
+   its destination, and assuming otherwise left the other tokens' branch 0
+   holding the previous token's embedding - caught by this engine's own
+   gr_gate.sh `batch` arm, which exists for exactly this shape. */
 static void gr_expand(LZRunState *s, int nt, int nr, int dim) {
     int tk, b;
     for (tk = nt - 1; tk >= 0; tk--) {
         const float *src = s->x + (size_t)tk * dim;
         float *dst = s->x + (size_t)tk * nr * dim;
-        for (b = nr - 1; b >= 1; b--)
-            memcpy(dst + (size_t)b * dim, src, (size_t)dim * sizeof(float));
+        /* memmove, not memcpy: token 0's destination IS its source, and
+           memcpy's contract excludes overlap even when the two are equal. */
+        for (b = nr - 1; b >= 0; b--)
+            memmove(dst + (size_t)b * dim, src, (size_t)dim * sizeof(float));
     }
 }
 
