@@ -2465,19 +2465,47 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
         goto fail;
     }
     RD(&ver, 4);
-    /* v1 = f32/Q8_0 only; v2 onward may carry Q4_1 etc; v4 adds the KDA
-       + latent MoE header fields below; v5 adds one more field (the MTP
-       head's mtp_n_layers) on top of v4's tail - a checkpoint with an
-       MTP head is therefore always >= v5 even when it carries no
-       KDA/MoE (the v4 tail is still present, just zeroed). The exporter
-       only bumps the version when a feature that needs it is actually
-       used, so a legacy pure-Q8 GDN/dense file stays v1, byte for byte -
-       and, symmetrically, an older reader given a newer file must be
-       refused rather than silently reading past a header it does not
-       know the shape of (RD would then desync into tensor data and fail
-       some unrelated way downstream, which is not a diagnosis). */
-    if (ver != 1 && ver != 2 && ver != 3 && ver != 4 && ver != 5 &&
-        ver != 6 && ver != 7 && ver != 8 && ver != 9 && ver != 10) {
+    /* Two header shapes are read, and only two.
+
+       v5 is the one layout this tree writes (tools/export_q8.py's
+       BIN_VERSION): the base header, then every field any version ever
+       added, written unconditionally, in the order it was added. The
+       ORDER is the whole contract - neither side has a length prefix or
+       a field tag, so a field moved across the boundary of a group is
+       read back as a plausible wrong number rather than as a parse
+       failure, and only a byte-level comparison of the two sequences
+       finds it.
+
+         base     magic "L98Z", ver, 28 fixed words, layer_types[128]
+         tail (13) kda_gate_rank, kda_has_gate_lower_bound,
+                   kda_gate_lower_bound, num_experts,
+                   num_experts_per_token, num_shared_experts,
+                   moe_intermediate_size, moe_latent_dim,
+                   first_k_dense_replace, moe_renormalize,
+                   moe_router_sigmoid, moe_latent_use_norm,
+                   moe_shared_width
+         tail  (2) mtp_n_layers, mtp_intermediate_size
+         tail  (5) rope_scaling_type, rope_scaling_factor,
+                   rope_scaling_orig_max, rope_scaling_beta_fast,
+                   rope_scaling_beta_slow
+         tail  (1) use_subn
+         tail  (2) hadamard_o, hadamard_down
+         tail  (2) mla_q_lora_rank, mla_o_lora_rank
+         tail  (1) attn_kv_share
+         appended (131) attn_sink_learned, gated_residual, ced_split,
+                   csa2_on[128]
+
+       v4 is the published generation - github.com/lunzima/kunkun98-models
+       ships a MODEL/model.bin of exactly this shape - so it is FROZEN
+       here rather than retired with the rest of the ladder. It carries
+       the 13-word tail and stops; the fields after it keep the defaults
+       at the bottom of this function.
+
+       Every other version is refused. They differ from v5 only in which
+       tails they carry, and a shape nothing writes any more is a shape
+       nothing exercises: reading it would be a compatibility branch no
+       gate can reach. */
+    if (ver != 4 && ver != 5) {
         qerr(errbuf, errlen, LZ_ERR_BIN_VERSION, ver);
         goto fail;
     }
@@ -2502,57 +2530,61 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
             goto fail;
         }
     }
-    /* v4 header tail: KDA gate + latent MoE. Absent (ver < 4) leaves every
-       one of these at 0/0.0f from lz_open's memset(m, 0, ...) - the same
-       "no KDA, no MoE" defaults lz_load_config uses for a non-kunmoe
-       config.json, so the two loading paths cannot disagree. */
-    if (ver >= 4) {
-        RD(&c->kda_gate_rank, 4);
-        RD(&c->kda_has_gate_lower_bound, 4);
-        RD(&c->kda_gate_lower_bound, 4);
-        RD(&c->num_experts, 4);
-        RD(&c->num_experts_per_token, 4);
-        RD(&c->num_shared_experts, 4);
-        RD(&c->moe_intermediate_size, 4);
-        RD(&c->moe_latent_dim, 4);
-        RD(&c->first_k_dense_replace, 4);
-        RD(&c->moe_renormalize, 4);
-        RD(&c->moe_router_sigmoid, 4);
-        RD(&c->moe_latent_use_norm, 4);
-        RD(&c->moe_shared_width, 4);
-        if (c->num_experts < 0 || c->num_experts > LZ_MAX_EXPERTS ||
-            c->num_experts_per_token < 0 ||
-            c->num_experts_per_token > c->num_experts ||
-            c->first_k_dense_replace < 0) {
-            qerr(errbuf, errlen, LZ_ERR_BIN_CFG);
-            goto fail;
-        }
+    /* The KDA gate + latent MoE tail. Both shapes carry it, and read it
+       the same way, so it sits outside the branch below. */
+    RD(&c->kda_gate_rank, 4);
+    RD(&c->kda_has_gate_lower_bound, 4);
+    RD(&c->kda_gate_lower_bound, 4);
+    RD(&c->num_experts, 4);
+    RD(&c->num_experts_per_token, 4);
+    RD(&c->num_shared_experts, 4);
+    RD(&c->moe_intermediate_size, 4);
+    RD(&c->moe_latent_dim, 4);
+    RD(&c->first_k_dense_replace, 4);
+    RD(&c->moe_renormalize, 4);
+    RD(&c->moe_router_sigmoid, 4);
+    RD(&c->moe_latent_use_norm, 4);
+    RD(&c->moe_shared_width, 4);
+    if (c->num_experts < 0 || c->num_experts > LZ_MAX_EXPERTS ||
+        c->num_experts_per_token < 0 ||
+        c->num_experts_per_token > c->num_experts ||
+        c->first_k_dense_replace < 0) {
+        qerr(errbuf, errlen, LZ_ERR_BIN_CFG);
+        goto fail;
     }
-    /* v5 header tail: the MTP head's layer count and its FFN width.
-       Absent (ver < 5) leaves mtp_n_layers at 0 from lz_open's
-       memset(m, 0, ...) before this function is reached - "no MTP
-       head", the same default the safetensors path's lz_load_config
-       uses for a config.json without mtp_num_hidden_layers.
-       mtp_intermediate_size has no such "absent key" fallback here -
-       the bin format has no field tagging, so export_q8.py always
-       writes both when it writes either (see write_config); it is only
-       ever read below when mtp_n_layers > 0 too. */
-    if (ver >= 5) {
+    if (ver == 5) {
+        /* The rest of the v5 layout, in order and unconditionally. */
         RD(&c->mtp_n_layers, 4);
         RD(&c->mtp_intermediate_size, 4);
-    }
-    /* v6 header tail: rope_scaling. Absent (ver < 6) leaves the five
-       fields at the memset defaults - which are exactly the
-       "no scaling" defaults lz_load_config uses when rope_parameters
-       has no rope_scaling key (type 0, factor 1, orig_max 0,
-       beta_fast 32, beta_slow 1), so the two loading paths cannot
-       disagree. */
-    if (ver >= 6) {
         RD(&c->rope_scaling_type, 4);
         RD(&c->rope_scaling_factor, 4);
         RD(&c->rope_scaling_orig_max, 4);
         RD(&c->rope_scaling_beta_fast, 4);
         RD(&c->rope_scaling_beta_slow, 4);
+        RD(&c->use_subn, 4);
+        RD(&c->hadamard_o, 4);
+        RD(&c->hadamard_down, 4);
+        RD(&c->mla_q_lora_rank, 4);
+        RD(&c->mla_o_lora_rank, 4);
+        RD(&c->attn_kv_share, 4);
+        /* GR / learned attention sink / CSA2. Appended to the v5 tail
+           rather than gated behind a version word of its own: v5 is "the
+           base header plus every field any version added, written
+           unconditionally, in the order it was added", so a group
+           appended here stays self-describing. tools/export_q8.py's
+           write_config writes this exact sequence and is the other half
+           of the contract - nothing on either side carries a length
+           prefix or a field tag. */
+        RD(&c->attn_sink_learned, 4);
+        RD(&c->gated_residual, 4);
+        RD(&c->ced_split, 4);
+        RD(c->csa2_on, LZ_MAX_LAYERS * 4);
+        for (i = 0; i < LZ_MAX_LAYERS; i++) {
+            if (i >= c->n_layers && c->csa2_on[i] != 0) {
+                qerr(errbuf, errlen, LZ_ERR_BIN_PAD);
+                goto fail;
+            }
+        }
         if (c->rope_scaling_type < 0 || c->rope_scaling_type > 2 ||
             !(c->rope_scaling_factor > 0.0f) ||
             c->rope_scaling_beta_fast <= 0.0f ||
@@ -2560,46 +2592,19 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
             qerr(errbuf, errlen, LZ_ERR_BIN_CFG);
             goto fail;
         }
-    }
-    /* v7 header tail: use_subn (SubLN). Absent (ver < 7) leaves it at 0
-       from lz_open's memset(m, 0, ...) before this function is reached -
-       the same "ordinary pre-layer norms" default lz_load_config uses for
-       a config.json without a use_subn key, so the two loading paths
-       cannot disagree. The exporter bumps to v7 only when a checkpoint
-       actually sets use_subn, so legacy bins stay v6 byte for byte. */
-    if (ver >= 7) {
-        RD(&c->use_subn, 4);
-    }
-    /* v8 header tail: the two block-diagonal Hadamard block sizes. Unlike
-       every tail above, absent (ver < 8) must NOT keep lz_open's
-       memset(m, 0, ...) value: 0 is the legal, meaningful "no Hadamard"
-       setting, and a v7 SubLN product DOES apply one. Set the sentinel
-       explicitly so resolve_hadamard derives what those products were
-       built with. */
-    if (ver >= 8) {
-        RD(&c->hadamard_o, 4);
-        RD(&c->hadamard_down, 4);
     } else {
+        /* v4 stops after the tail above, so everything else keeps
+           lz_open's memset(m, 0, ...) value - the same "off" defaults
+           lz_load_config uses for a config.json without the key, so the
+           two loading paths cannot disagree.
+
+           hadamard_* is the exception, and the reason it needs one: 0 is
+           a legal, meaningful "no Hadamard" block size, while an absent
+           field means "this product predates the field, derive it from
+           the dimensions". 0 cannot say that, so the sentinel -1 does -
+           resolve_hadamard reads it as such. */
         c->hadamard_o = -1;
         c->hadamard_down = -1;
-    }
-    /* v9 header tail: S4 MLA low-rank Q/O ranks. Absent (ver < 9) leaves
-       both at 0 from lz_open's memset(m, 0, ...) - the same "off" default
-       lz_load_config uses for a config.json without these keys, so the
-       two loading paths cannot disagree (model.h's own field comment). */
-    if (ver >= 9) {
-        RD(&c->mla_q_lora_rank, 4);
-        RD(&c->mla_o_lora_rank, 4);
-    }
-    /* v10 header tail: S1 attn_kv_share. Absent (ver < 10) leaves it at 0
-       from lz_open's memset(m, 0, ...) - the same "off" default
-       lz_load_config uses for a config.json without the key, so the two
-       loading paths cannot disagree. Unlike v5-v9 this one word is not
-       self-describing: the exporter bumps the version whenever the
-       checkpoint sets the key, so a v10 file whose word is 0 is a model
-       that shares nothing. */
-    if (ver >= 10) {
-        RD(&c->attn_kv_share, 4);
     }
 #undef RD
 #undef RDB

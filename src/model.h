@@ -502,6 +502,35 @@ typedef struct {
     int csa2_indexer_head_dim;
     int csa2_indexer_q_lora_rank;
 
+    /* Learned per-head attention sink (GptOss-style; the training
+       side's _wire_attn_sink/_sink_eager_attention_forward). config.json
+       "attn_sink" is a JSON true/false, read as a BOOL like
+       attn_kv_share below - lz_json_get_int answers its default for a
+       LZ_JSON_BOOL node and the switch would never fire. 0 is off and
+       reproduces a model that never carried the key bit for bit.
+
+       Named "_learned" because LZRunState already has an `attn_sink`:
+       StreamingLLM's keep-the-first-N-prefix window (forward.h), an
+       unrelated mechanism that shares neither the field nor the
+       arithmetic.
+
+       Only full_attention layers get one, and _wire_attn_sink skips the
+       csa2_layers (CSA2 has no sink integration), so LZLayer derives its
+       own per-layer flag rather than reading this - same pattern as
+       csa2_on below. */
+    int attn_sink_learned;
+
+    /* GR (gated residual), the branch count nr. 0 is off and reproduces
+       a model that never carried the key bit for bit. 1 is not a
+       configuration: GatedResidual4 raises below nr=2, because the
+       training side has no single-stream GR - the control arm is the
+       switch off, not a degenerate nr=1.
+
+       Its span endpoint is ced_split above: GR covers layers
+       [0, ced_split) and nothing else, because the CED boundary has to
+       see an already-collapsed [B,S,D] stream. */
+    int gated_residual;
+
     /* RoPE. Note rope_theta hides inside the nested rope_parameters;
        the top level does not expose it. */
     float rope_theta;
