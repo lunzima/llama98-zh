@@ -268,7 +268,14 @@ static void alloc_attn_buffers(LZRunState *s, const LZModelConfig *c,
     int ok = 1;
     s->qg       = (float *)xcalloc((size_t)nt * c->attn_qgate_dim, sizeof(float), &ok, &s->bytes_alloc);
     s->qh       = (float *)xcalloc((size_t)nt * c->attn_q_dim, sizeof(float), &ok, &s->bytes_alloc);
-    s->att      = (float *)xcalloc((size_t)seq_len, sizeof(float), &ok, &s->bytes_alloc);
+    /* seq_len + 1, not seq_len: the learned attention sink writes one
+       extra logit column at index pos+1 (forward_attn.c), and pos reaches
+       seq_len-1 (forward.c rejects pos0 + tk >= s->seq_len), so a
+       seq_len-sized buffer would be written one element past its end on
+       the last position. The softmax that consumes the column is sized
+       off the same +1. wsum_cbuf/wsum_cq below stay seq_len-sized: they
+       hold one weight per real position and never see the sink column. */
+    s->att      = (float *)xcalloc((size_t)seq_len + 1, sizeof(float), &ok, &s->bytes_alloc);
 #if (LZ_ATTN_FIXED & 2)
     /* Allocated whenever the kernel is compiled, not when the tier is
        selected: lz_float_ref_select can run after this point, and 6 bytes per

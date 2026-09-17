@@ -402,6 +402,17 @@ int lz_load_config(LZModelConfig *c, const char *path,
        attn_output_gate use for their own boolean keys. */
     c->attn_kv_share  = lz_json_get_bool(&j, tc, "attn_kv_share", 0);
 
+    /* Learned attention sink (model.h's own attn_sink_learned comment).
+       A BOOL for the same reason attn_kv_share just above is one, and
+       the .bin path reads the same switch out of the v5 tail
+       (attn_sink_learned) - the two loaders have to agree on it or the
+       same checkpoint is two different models depending on which file
+       format it was written in. attn_sink_init is a float and has no
+       header field at all; model.h's comment on it says what that
+       costs. */
+    c->attn_sink_learned = lz_json_get_bool(&j, tc, "attn_sink", 0);
+    c->attn_sink_init    = (float)lz_json_get_num(&j, tc, "attn_sink_init", 0.0);
+
     /* S4 MLA low-rank Q/O (model.h's own field comment) - 0/0 defaults
        reproduce a config.json that never carried these keys. */
     c->mla_q_lora_rank = lz_json_get_int(&j, tc, "mla_q_lora_rank", 0);
@@ -817,6 +828,10 @@ enum {
     DK_END = 0,
     DK_HIDDEN, DK_INTER, DK_VOCAB,
     DK_ATTN_QGATE, DK_ATTN_KV, DK_ATTN_Q, DK_HEAD_DIM,
+    /* n_heads: the width of a per-head vector. NOT DK_NVHEADS below,
+       which is lin_n_v_heads - the linear-attention side's head count is
+       an independent config field. */
+    DK_ATTN_HEADS,
     DK_CONV, DK_VALUE, DK_NVHEADS, DK_VHEADDIM,
     DK_ONE, DK_KERNEL,
     DK_HIDDEN2,     /* 2 * hidden: mtp.fc reads [hidden, embedding] joined */
@@ -1140,6 +1155,7 @@ static lz_i64 resolve_dim(const LZModelConfig *c, int kind) {
     case DK_ATTN_KV:    return c->attn_kv_dim;
     case DK_ATTN_Q:     return c->attn_q_dim;
     case DK_HEAD_DIM:   return c->head_dim;
+    case DK_ATTN_HEADS: return c->n_heads;
     case DK_CONV:       return c->lin_conv_dim;
     case DK_VALUE:      return c->lin_value_dim;
     case DK_NVHEADS:    return c->lin_n_v_heads;
@@ -1346,6 +1362,25 @@ static int model_walk(LZModel *m, LZVisit visit, void *ctx,
                 if (model_walk_one(m, name, CSA2_SPECS[k].dims, field,
                                    visit, ctx, errbuf, errlen) != 0) return 1;
             }
+        }
+
+        /* Learned attention sink - one (n_heads) vector per layer the
+           switch reaches. Not in LAYER_SPECS above, for exactly the
+           reason the CSA2 block just above is not: LZPresentFn sees only
+           the config, and attn_sink_on is per-layer (setup_layers skips
+           the csa2_layers). Walked AFTER CSA2, which fixes this tensor's
+           position in the .bin stream - the exporter's tensor_order has
+           to place it here too, since a .bin carries no names.
+
+           Key is "self_attn.sinks", not "...sinks.weight": the training
+           side registers it as a bare nn.Parameter, so that is the name
+           the checkpoint has. */
+        if (L->attn_sink_on) {
+            static const int SINK_DIMS[3] = { DK_ATTN_HEADS, DK_END, DK_END };
+            snprintf(name, sizeof(name), "%slayers.%d.self_attn.sinks",
+                     m->prefix, li);
+            if (model_walk_one(m, name, SINK_DIMS, &L->attn_sinks,
+                               visit, ctx, errbuf, errlen) != 0) return 1;
         }
     }
 
@@ -1631,6 +1666,15 @@ static int setup_layers(LZModel *m, char *errbuf, int errlen) {
            csa2_on[] comment). Same "only m->layers is touched, m->mtp->
            blk never is" safety this mirrors from mla_q_on/mla_o_on. */
         L->csa2_on = c->csa2_on[i];
+        /* Learned attention sink: three conditions, and all three are the
+           training side's _wire_attn_sink rule - the global switch, a
+           full-attention layer (a linear-attention layer has no
+           self_attn to hang a sink on), and not one the csa2_layers
+           turned into CSA2 (that writes its own .forward, so a sink
+           bound there would be created and never read). Same
+           "only m->layers is touched" safety as the two flags above. */
+        L->attn_sink_on = c->attn_sink_learned &&
+                          L->type == LZ_LT_FULL && !L->csa2_on;
         if (L->ffn_moe) {
             L->moe_expert_w1 = (LZTensor *)calloc((size_t)c->num_experts, sizeof(LZTensor));
             L->moe_expert_w2 = (LZTensor *)calloc((size_t)c->num_experts, sizeof(LZTensor));

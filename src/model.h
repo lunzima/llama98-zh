@@ -520,6 +520,23 @@ typedef struct {
        csa2_on below. */
     int attn_sink_learned;
 
+    /* config.json "attn_sink_init": the constant the training side fills
+       the sinks parameter with at construction (_wire_attn_sink). The
+       forward never reads it - what the model computes with is the
+       trained tensor, which arrives in the checkpoint. Carried so the
+       engine's copy of the config is the checkpoint's, not a subset of
+       it, and so a diagnostic can say what "untrained" looks like for
+       the switch: kunkun98's sinks are still exactly this value on every
+       head, which is why its sink column carries no softmax mass.
+
+       NOT in the .bin header: Task 1's v5 tail carries attn_sink_learned
+       only, so the bin path leaves this field at lz_open's memset zero
+       while the config.json path reads the checkpoint's value. Nothing
+       reads the field, which is the only reason that divergence is
+       invisible; whoever makes it load-bearing has to close it first,
+       either by growing the header or by dropping the field. */
+    float attn_sink_init;
+
     /* GR (gated residual), the branch count nr. 0 is off and reproduces
        a model that never carried the key bit for bit. 1 is not a
        configuration: GatedResidual4 raises below nr=2, because the
@@ -682,6 +699,24 @@ typedef struct {
     LZTensor attn_k_subn_norm;       /* (hidden) f32 - k_proj input */
     LZTensor attn_v_subn_norm;       /* (hidden) f32 - v_proj input */
     LZTensor attn_o_subn_norm;       /* (attn_q_dim) f32 - o_proj input */
+
+    /* Learned per-head attention sink (LZModelConfig's own
+       attn_sink_learned comment has the mechanism and the training-side
+       reference). (n_heads) - one logit per head, broadcast over every
+       query position, concatenated to the logits BEFORE softmax and
+       dropped AFTER it.
+
+       attn_sink_on is setup_layers-derived and is the flag the forward
+       reads, never c->attn_sink_learned - same per-layer pattern as
+       csa2_on below, and for the same reason: _wire_attn_sink skips the
+       csa2_layers, so the two full-attention layers of a shipping stack
+       need not agree. It also gates whether model_walk claims this
+       tensor at all, so a layer with the flag clear must not carry one -
+       the leak check rejects a checkpoint whose file does.
+       (m->mtp->blk never passes through setup_layers, so the MTP block's
+       own copy of this field stays at its calloc 0.) */
+    LZTensor attn_sinks;
+    int attn_sink_on;
 
     /* linear_attention only */
     LZTensor in_proj_qkv;            /* (lin_conv_dim, hidden) Q8 */

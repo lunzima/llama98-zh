@@ -129,6 +129,80 @@ void rot_head(float *v, int hd, int n) {
     for (o = 0; o < hd; o += n) lz_fwht(v + o, n);
     lz_debug_n_kv_rot++;
 }
+
+/* Element i of a tensor, widened to f32, WITHOUT widening the whole
+   tensor. The one caller is the learned attention sink read
+   (attn_score_loop): n_heads reads per token per layer, out of a
+   (n_heads) tensor that has to be materialised somewhere. The obvious
+   somewhere is lz_t_f32's scratch - but that is s->wscr, sized in units
+   of the model's width (forward.h: "one weight row"), and nothing makes
+   n_heads fit inside one weight row. Reading per element costs a few
+   compares and touches no buffer at all.
+
+   The format dispatch is lz_t_f32's own (ops_epi.c), reduced to one
+   index; that function is the authority on what each format's bytes
+   mean, and a format added there has to be added here. The group
+   arithmetic mirrors it exactly, including that every quantised format
+   walks a group as 32-element sub-blocks: i>>5 counts sub-blocks, i&31
+   the position within one. */
+static float attn_sink_at(const LZTensor *t, int i) {
+    int g, sub;
+    if (!t || i < 0 || i >= t->n) return 0.0f;
+    if (t->dtype == LZ_FMT_F32) return t->f ? t->f[i] : 0.0f;
+    if (!t->q) return 0.0f;
+    /* BF16 is storage, not quantization: `bits << 16`, assembled by byte
+       so it stays correct on a big-endian host, exactly as lz_t_f32
+       does it. Ahead of the scale guard because it has no scale. */
+    if (t->dtype == LZ_FMT_BF16) {
+        const unsigned char *p = (const unsigned char *)t->q;
+        uint32_t u = ((uint32_t)p[i * 2 + 1] << 24) |
+                     ((uint32_t)p[i * 2] << 16);
+        float v;
+        memcpy(&v, &u, sizeof(float));
+        return v;
+    }
+    if (!t->scale || t->gs <= 0) return 0.0f;
+    g = i / t->gs;
+    sub = i & 31;
+    if (t->dtype == LZ_FMT_Q8_0)
+        return (float)t->q[i] * t->scale[g];
+    if (t->dtype == LZ_FMT_Q16_0) {
+        const int16_t *p = (const int16_t *)(const void *)t->q;
+        return (float)p[i] * t->scale[g];
+    }
+    if (!t->zero) return 0.0f;
+    if (t->dtype == LZ_FMT_Q4_1) {
+        /* 32 elements per 16 bytes: byte j's low nibble is element j,
+           its high nibble is element j+16. */
+        const unsigned char *b = (const unsigned char *)t->q +
+                                 (size_t)(i >> 5) * 16;
+        int c = (sub < 16) ? (b[sub] & 15) : (b[sub - 16] >> 4);
+        return (float)c * t->scale[g] + t->zero[g];
+    }
+    if (t->dtype == LZ_FMT_Q6_1) {
+        /* 4-bit plane (16 bytes) + 2-bit plane (8 bytes), both at the
+           start of the SAME 32-element sub-block. Groupings are aligned:
+           4-bit side k<16 low nibble / k>=16 high nibble; 2-bit side
+           byte k&7 holds the (k>>3)-th bit pair. */
+        const unsigned char *p4 = (const unsigned char *)t->q;
+        const unsigned char *p2 = p4 + (size_t)t->n / 2;
+        const unsigned char *b4 = p4 + (size_t)(i >> 5) * 16;
+        const unsigned char *b2 = p2 + (size_t)(i >> 5) * 8;
+        int lo = (sub < 16) ? (b4[sub] & 15) : (b4[sub - 16] >> 4);
+        int hi = (b2[sub & 7] >> (2 * (sub >> 3))) & 3;
+        return (float)(lo + (hi << 4)) * t->scale[g] + t->zero[g];
+    }
+    if (t->dtype == LZ_FMT_T2) {
+        /* One 2-bit plane, Q6_1's addressing, code-1 in {-1,0,+1} and no
+           min term - a code of 1 is exactly 0.0f for every group. */
+        const unsigned char *b2 = (const unsigned char *)t->q +
+                                  (size_t)(i >> 5) * 8;
+        return (float)(((b2[sub & 7] >> (2 * (sub >> 3))) & 3) - 1) *
+               t->scale[g];
+    }
+    return 0.0f;
+}
+
 static void attn_score_loop(LZRunState *s, const LZModelConfig *c,
                             int *attn_int,
                             const float *ks4, const float *vs4,
@@ -139,7 +213,7 @@ static void attn_score_loop(LZRunState *s, const LZModelConfig *c,
 #if LZ_KV_2PLANE
                             const int8_t *kc_lo, const int8_t *vc_lo,
 #endif /* LZ_KV_2PLANE */
-                            int layer, int pos0, int nt,
+                            int layer, const LZTensor *sink, int pos0, int nt,
                             int qd, int qgd, int hd, int nh, int nkv,
                             int kv_mul, int kvd, int gso, float scale) {
     int h, d, t, tk;
@@ -407,7 +481,35 @@ static void attn_score_loop(LZRunState *s, const LZModelConfig *c,
                      t < lo; t++)
                     s->att[t] = -1e30f;
             }
-            lz_softmax(s->att + win_t0, pos + 1 - win_t0);
+            /* Learned per-head attention sink (GptOssAttention's eager
+               path; engine/kunmoe_modeling.py's
+               _sink_eager_attention_forward is the training-side
+               reference, and this is that expression, not a paraphrase
+               of the report's prose).
+
+               One extra logit column, concatenated BEFORE softmax and
+               dropped AFTER: the training side computes
+               softmax(cat([attn_weights * scaling, sinks]))
+               and then slices probs[..., :-1] off. The engine's s->att
+               already holds the SCALED logits, and the sink logit is
+               appended UNSCALED - scaling never touches it, which is
+               the whole reason the column is concatenated rather than
+               added to a position. The slice is reproduced by simply
+               not reading s->att[pos + 1] afterwards, so the surviving
+               weights sum to 1 - p_sink and are deliberately NOT
+               renormalised: the two sides agree bit for bit only if
+               neither one renormalises.
+
+               lz_softmax scans for its own max over the range it is
+               given, so the training side's `combined - max` (there for
+               BF16/FP16 overflow safety) is reproduced by including the
+               sink column in that range - nothing extra is needed here.
+
+               Inside the head loop because s->att is scored per head and
+               overwritten by the next one; the eviction mask above never
+               writes index pos+1 (its upper bound is pos). */
+            if (sink) s->att[pos + 1] = attn_sink_at(sink, h);
+            lz_softmax(s->att + win_t0, pos + 1 - win_t0 + (sink ? 1 : 0));
 
             if (v4) {
                 memset(out, 0, (size_t)hd * sizeof(float));
@@ -894,7 +996,8 @@ static void attn_impl(const LZModel *m, LZRunState *s,
 #if LZ_KV_2PLANE
                     kc_lo, vc_lo,
 #endif /* LZ_KV_2PLANE */
-                    layer, pos0, nt, qd, qgd, hd, nh, nkv, kv_mul, kvd, gso,
+                    layer, L->attn_sink_on ? &L->attn_sinks : NULL,
+                    pos0, nt, qd, qgd, hd, nh, nkv, kv_mul, kvd, gso,
                     scale);
     LZ_TAP("ax", layer, s->attn_out, qd);
 
