@@ -2578,10 +2578,45 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
         RD(&c->attn_sink_learned, 4);
         RD(&c->gated_residual, 4);
         RD(&c->ced_split, 4);
+        /* Range-check the three scalars before anything downstream turns
+           one into a shape: GR sizes the residual stream and its own
+           weight rows at nr*d and takes its span from ced_split, and the
+           sink flag decides which layers allocate a sinks tensor. Out of
+           range they are allocation sizes, and nothing further down
+           re-checks them. Reported by field name - the padding check
+           below is about csa2_on and would send a reader to the wrong
+           array.
+
+           gated_residual: 0 is off, and 1 is refused rather than
+           tolerated - training's GatedResidual4 raises below nr=2, there
+           is no single-stream GR, and the control arm is the flag off
+           rather than a degenerate nr=1. The upper bound is a guard on a
+           file-supplied word, not an architecture limit (training bounds
+           nr from below only); 64 is 16x the only branch count ever
+           trained and keeps the widened stream nr*d at 32768 floats for
+           this project's d=512.
+
+           ced_split: the CED boundary is a layer index, so [0, n_layers]
+           is its whole domain. _wire_gr reads 0 < ced_split < n_layers as
+           "active" and anything else as "span the whole stack", so a
+           garbage word would otherwise behave like a legal one. */
+        if (c->attn_sink_learned != 0 && c->attn_sink_learned != 1) {
+            qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE, "attn_sink_learned");
+            goto fail;
+        }
+        if (c->gated_residual != 0 &&
+            (c->gated_residual < 2 || c->gated_residual > 64)) {
+            qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE, "gated_residual");
+            goto fail;
+        }
+        if (c->ced_split < 0 || c->ced_split > c->n_layers) {
+            qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE, "ced_split");
+            goto fail;
+        }
         RD(c->csa2_on, LZ_MAX_LAYERS * 4);
         for (i = 0; i < LZ_MAX_LAYERS; i++) {
             if (i >= c->n_layers && c->csa2_on[i] != 0) {
-                qerr(errbuf, errlen, LZ_ERR_BIN_PAD);
+                qerr(errbuf, errlen, LZ_ERR_BIN_CSA2_PAD);
                 goto fail;
             }
         }

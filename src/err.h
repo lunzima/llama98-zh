@@ -136,6 +136,8 @@ typedef enum {
     LZ_ERR_BIN_MAGIC,          /* not a model.bin (bad magic) */
     LZ_ERR_BIN_VERSION,        /* unsupported model.bin version %u */
     LZ_ERR_BIN_PAD,            /* nonzero layer_types padding */
+    LZ_ERR_BIN_CSA2_PAD,       /* nonzero csa2_on padding */
+    LZ_ERR_BIN_FIELD_RANGE,    /* model.bin header field %s out of range */
     LZ_ERR_BIN_CFG,            /* model.bin config invalid */
 
     /* tokenizer */
