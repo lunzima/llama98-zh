@@ -476,8 +476,20 @@ typedef struct {
 
     /* Buffers marked (dim) are actually allocated nt_cap x dim, token-major:
        token t's slice lives at buf + t*dim. Decoding uses only the t=0
-       slice, identical to the pre-batch behavior. */
-    float *x, *xb, *xb2;        /* (hidden) */
+       slice, identical to the pre-batch behavior.
+
+       s->x is the exception: on a GR model (config.gated_residual) it is
+       allocated nt_cap * nr * hidden and its per-token stride is
+       `L->gr_on ? nr*hidden : hidden`. GR's branches ride inside this one
+       tensor, exactly as they do on the training side (GrDecoderLayer's
+       docstring): gr_first expands the embedding into nr equal branches at
+       the top of the loop and gr_last averages them back into the FIRST
+       nt*hidden elements, so every reader outside the loop (final norm,
+       lm_head, the capture path, engram) still sees [nt, hidden] and needs
+       no change. s->xb and s->xb2 are ALWAYS hidden wide - they are the
+       sublayer's input and output, and that is why GR can be confined to
+       the loop. */
+    float *x, *xb, *xb2;        /* (hidden; x is nr*hidden under GR) */
     float *hb, *hb2;            /* (intermediate) */
     float *logits;              /* (vocab) only the LAST token's, not scaled by nt */
 
@@ -1052,6 +1064,30 @@ typedef struct {
        config.engram is 0 - forward_engram is never called then. */
     void   *engram_scratch;
     size_t  engram_scratch_bytes;
+
+    /* GR forward's own scratch, one block carved into the four views
+       below (forward_state.c's alloc_gr_scratch owns the offsets).
+       Dedicated rather than pooled into xq/wscr/qcap for the reason
+       engram_scratch's comment above gives, one size up: the read gate's
+       inputs are nt*nr*hidden wide, which is nr times the widest
+       activation any other site quantizes, and s->wscr is a single
+       weight ROW. Two of the four blocks (rhat, s) outlive the read -
+       the write gate reads the Rhat the read computed, it does not
+       recompute it from the updated streams (GatedResidual4.write reads
+       self._rhat) - so they cannot be folded into the sublayer call's
+       own temporaries.
+         rhat  (nt*nr*dim) the branch-normalised read input
+         g     (nt*nr*dim) the read gate, per branch per element
+         h     (nt*r)      W_d's output, SiLU'd in place
+         s     (nt*nr)     the per-branch scalar write gates
+       NULL / 0 when config.gated_residual is 0 - lz_gr_read is never
+       called then. */
+    void   *gr_scratch;
+    size_t  gr_scratch_bytes;
+    float  *gr_rhat;
+    float  *gr_g;
+    float  *gr_h;
+    float  *gr_s;
 
     /* Trailing token history for engram's hash/mask windows, which both
        read up to (engram_ngram - 1) tokens BEFORE the current chunk's

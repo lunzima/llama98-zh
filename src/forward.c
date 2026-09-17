@@ -625,6 +625,7 @@ void lz_state_free(LZRunState *s) {
     xfree(s->subn_norm_int);
     xfree(s->engram_scratch);
     xfree(s->engram_conv_hist);
+    xfree(s->gr_scratch);
     xfree(s->rope_cs);
     xfree(s->cache_idx);
     memset(s, 0, sizeof(*s));
@@ -966,6 +967,160 @@ static void chunk_logits_last(const LZModel *m, LZRunState *s,
     LZ_PROF_END(_th, LZ_PROF_HEAD);
 }
 
+/* ------------------------------------------------------- gated residual */
+
+/* GR's branches ride inside s->x (forward.h's own comment on that buffer).
+   Branch-MAJOR: within one token's slice, branch i occupies
+   [i*dim, (i+1)*dim). That is the layout the training side has on both
+   sides of its own `flatten`: `expand`+`flatten` on the way in and
+   `unflatten(-1, (nr, D))` on the way out produce the same order, so this
+   is not a choice this port made.
+
+   Training-side reference for all four functions below:
+   engine/kunmoe_modeling.py's GatedResidual4 and GrDecoderLayer.forward. */
+
+/* gr_first: the embedding, dim wide, becomes nr IDENTICAL branches.
+   In place, and token by token DESCENDING: a token's destination region is
+   nr times its source region and starts at the same address, so an
+   ascending pass would overwrite tokens 1..nr-1's input before expanding
+   them. Branch 0 needs no copy - it is already where it belongs. */
+static void gr_expand(LZRunState *s, int nt, int nr, int dim) {
+    int tk, b;
+    for (tk = nt - 1; tk >= 0; tk--) {
+        const float *src = s->x + (size_t)tk * dim;
+        float *dst = s->x + (size_t)tk * nr * dim;
+        for (b = nr - 1; b >= 1; b--)
+            memcpy(dst + (size_t)b * dim, src, (size_t)dim * sizeof(float));
+    }
+}
+
+/* Sum nr rows of `dim` floats in place, pairwise: leaves combine two at a
+   time and the survivors halve each pass.
+
+   THE ORDER IS NOT A PREFERENCE. The training side's own neutralised arm
+   (`g` and `s` forced to 1, read normalisation removed) reproduces its
+   GR-off arm BIT FOR BIT - measured there, 0 of 32768 logits bytes differ.
+   That can only hold if summing the nr IDENTICAL branches gr_first
+   produced is exact, and a running total is not: with v the shared value,
+   `2v + v` rounds generically, so three of the four branches already miss.
+   Pairwise gives `(v+v) + (v+v)` = `4v`, which is exact.
+
+   Measured here the same way: with a running total the same arm differed
+   from GR-off by 1-cos 1.2e-7, i.e. above the exact-reproduction the
+   training side achieves. */
+static void gr_tree_sum(float *a, int nr, int dim) {
+    int step, b, i;
+    for (step = 1; step < nr; step *= 2)
+        for (b = 0; b + step < nr; b += 2 * step)
+            for (i = 0; i < dim; i++)
+                a[(size_t)b * dim + i] += a[(size_t)(b + step) * dim + i];
+}
+
+/* gr_last: the branch mean, back into the FIRST dim elements of the same
+   token's slice - the [B,S,D] the rest of the stack expects (the next
+   layer, CED's capture hook, the final norm, lm_head). MEAN, not sum:
+   GatedResidual4.collapse is `streams.mean(dim=-2)`.
+
+   Leaves are combined with the same pairwise tree as the read sum, and for
+   the same measured reason (gr_tree_sum's comment). It runs in place on
+   s->x: only rows at or after the destination are touched, and every row
+   it reads has already been read by the pass that wrote it. */
+static void gr_collapse(LZRunState *s, int nt, int nr, int dim) {
+    int tk, i;
+    for (tk = 0; tk < nt; tk++) {
+        float *dst = s->x + (size_t)tk * dim;
+        float *base = s->x + (size_t)tk * nr * dim;
+        gr_tree_sum(base, nr, dim);
+        for (i = 0; i < dim; i++) dst[i] = base[i] / (float)nr;
+    }
+}
+
+/* The read gate: fills s->xb (the sublayer's input) and stashes the two
+   things the write gate needs - Rhat in s->gr_rhat and the write gate
+   s in s->gr_s. Reused for the attention sublayer and then for the MLP
+   one, which is why the stash lives in the run state rather than on this
+   stack frame.
+
+   THIS NORM RUNS UNCONDITIONALLY, INCLUDING ON A SubLN BODY, and that is
+   the one thing about this port that is easy to get backwards. The
+   training side's `_NoPreLN` forward is the IDENTITY - under SubLN the
+   block has no pre-normalisation at all, the normalisation moved into
+   each projection - so `use_subn` is not a reason to skip this: it is the
+   reason there would otherwise be NO normalisation here at all. SubLN
+   normalises what each projection READS; GR's read normalises the
+   residual BEFORE the gate, and forward_attn/forward_kda keep applying
+   their own per-projection norms underneath. Both, not one or the other.
+
+   An all-zero `norms.<b>.weight` is unit gain, not a broken tensor:
+   lz_rmsnorm's parameterisation is (1 + w). */
+static void gr_read(const LZModel *m, LZRunState *s, const LZTensor *norms,
+                    const LZTensor *wd, const LZTensor *wu,
+                    const LZTensor *ww, int nt, int nr, int dim) {
+    const LZModelConfig *c = &m->config;
+    int flat = nr * dim;
+    int r = dim / 8 > 0 ? dim / 8 : 1;   /* max(1, d/8): GatedResidual4.__init__ */
+    float nrf = (float)nr;
+    int tk, b, i;
+
+    for (tk = 0; tk < nt; tk++) {
+        const float *R  = s->x + (size_t)tk * flat;
+        float *RH = s->gr_rhat + (size_t)tk * flat;
+        float *G  = s->gr_g + (size_t)tk * flat;
+        float *h  = s->gr_h + (size_t)tk * r;
+        float *sg = s->gr_s + (size_t)tk * nr;
+        float *xb = s->xb + (size_t)tk * dim;
+
+        for (b = 0; b < nr; b++)
+            lz_rmsnorm(RH + (size_t)b * dim, R + (size_t)b * dim,
+                       lz_t_f32(&norms[b], s->wscr), dim, c->rms_norm_eps);
+
+        /* G = unvec(sigmoid(W_u SiLU((1/n_r) W_d vec(Rhat)))) - Eq. 31/32. The
+           divisor is a runtime float (a divisor that is not a compile-time
+           constant is the same instruction on both compilers), which is
+           also what the training side's `/ self.nr` rounds like. */
+        lz_matmul_w(h, RH, wd, flat, r, s->xq, s->xqs);
+        for (i = 0; i < r; i++) {
+            float t = h[i] / nrf;
+            h[i] = lz_silu(t);
+        }
+        lz_matmul_w(G, h, wu, r, flat, s->xq, s->xqs);
+        for (i = 0; i < flat; i++) G[i] = lz_sigmoid(G[i]);
+
+        /* s = 2*sigmoid((1/n_r) W_w vec(Rhat)) - Eq. 33. Computed HERE, from
+           the Rhat this call just produced, and read back by gr_write: the
+           training side's write reads the Rhat its read stored
+           (self._rhat), it does not re-derive one from the already-updated
+           streams. */
+        lz_matmul_w(sg, RH, ww, flat, nr, s->xq, s->xqs);
+        for (i = 0; i < nr; i++) sg[i] = 2.0f * lz_sigmoid(sg[i] / nrf);
+
+        /* x = (1/n_r) * sum_i (G_i * Rhat_i). The branch sum is a pairwise
+           TREE, not a running total - see gr_tree_sum's own comment for why
+           the order is load-bearing rather than a preference. The product
+           goes back into G, which nothing reads afterwards. */
+        for (i = 0; i < flat; i++) G[i] *= RH[i];
+        gr_tree_sum(G, nr, dim);
+        for (i = 0; i < dim; i++) xb[i] = G[i] / nrf;
+    }
+}
+
+/* The write gate: R'_i = R_i + s_i*y, one scalar per branch. s->xb2 is
+   dim wide and s->x is nr*dim wide, so this is not an elementwise add -
+   each branch gets the SAME sublayer output scaled by its own gate. */
+static void gr_write(LZRunState *s, int nt, int nr, int dim) {
+    int tk, b, i;
+    for (tk = 0; tk < nt; tk++) {
+        float *R = s->x + (size_t)tk * nr * dim;
+        const float *y = s->xb2 + (size_t)tk * dim;
+        const float *sg = s->gr_s + (size_t)tk * nr;
+        for (b = 0; b < nr; b++) {
+            float *Rb = R + (size_t)b * dim;
+            float sb = sg[b];
+            for (i = 0; i < dim; i++) Rb[i] += sb * y[i];
+        }
+    }
+}
+
 static float *forward_chunk(const LZModel *m, LZRunState *s,
                             const int *tokens, int nt, int pos0,
                             float *capture_hidden,
@@ -974,6 +1129,10 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
     const LZModelConfig *c = &m->config;
     int dim = c->hidden_size;
     int l, i, tk;
+    /* GR's branch count, 0 when the switch is off. Read once here; every
+       per-layer decision below goes through L->gr_on/gr_first/gr_last,
+       which setup_layers derived from this field and ced_split. */
+    int nr = c->gated_residual;
     /* S1 attn_kv_share: the layer whose attention input every target
        layer's K/V projections read, or -1 (model.h's own comment on the
        rule; lz_kv_share_target is the other half). ksrc is resolved once
@@ -1075,12 +1234,29 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
            across layer boundaries. No-op unless LZ_X87_STACK_GATE. */
         LZ_X87_STACK_CHECK("layer-entry");
 
+        /* gr_first: the embedding (dim wide) becomes nr identical
+           branches, in place - GrDecoderLayer.forward's own
+           `gr_attn.expand(hidden_states)`. Done at the TOP of the layer so
+           the read gate below, the SubLN copy and every other reader of
+           s->x in this iteration already see the widened stream. */
+        if (L->gr_first) gr_expand(s, nt, nr, dim);
+
         /* SubLN (config.use_subn): the two pre-layer RMSNorms are
            deleted and each ternary projection normalizes its own input
            instead (forward_kda / dense_ffn_step). Ordinary models keep
            the original norms, bit for bit. The SubLN copy is elementwise
-           so downstream readers of s->xb keep working unchanged. */
-        if (c->use_subn) {
+           so downstream readers of s->xb keep working unchanged.
+
+           GR's read REPLACES this step rather than stacking on it (the
+           training side's GrDecoderLayer does not call
+           input_layernorm either), and it does its own normalisation
+           whatever use_subn says - gr_read's own comment has that
+           argument. Note it is added to the per-projection norms inside
+           forward_attn/forward_kda, not instead of them. */
+        if (L->gr_on) {
+            gr_read(m, s, L->gr_attn_norms, &L->gr_attn_wd, &L->gr_attn_wu,
+                    &L->gr_attn_ww, nt, nr, dim);
+        } else if (c->use_subn) {
             for (i = 0; i < nt * dim; i++) s->xb[i] = s->x[i];
         } else {
             for (tk = 0; tk < nt; tk++)
@@ -1145,10 +1321,17 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
         else                             forward_ssm(m, s, L, l, nt, all_logits, ring_base);
         LZ_PROF_END(_tp, L->type == LZ_LT_FULL ? LZ_PROF_ATTN : LZ_PROF_LIN);
         LZ_TAP("blk", l, s->xb2, dim);
-        for (i = 0; i < nt * dim; i++) s->x[i] += s->xb2[i];
-        LZ_TAP("res", l, s->x, dim);
+        if (L->gr_on) {
+            gr_write(s, nt, nr, dim);
+        } else {
+            for (i = 0; i < nt * dim; i++) s->x[i] += s->xb2[i];
+        }
+        LZ_TAP("res", l, s->x, L->gr_on ? nr * dim : dim);
 
-        if (c->use_subn) {
+        if (L->gr_on) {
+            gr_read(m, s, L->gr_mlp_norms, &L->gr_mlp_wd, &L->gr_mlp_wu,
+                    &L->gr_mlp_ww, nt, nr, dim);
+        } else if (c->use_subn) {
             for (i = 0; i < nt * dim; i++) s->xb[i] = s->x[i];
         } else {
             for (tk = 0; tk < nt; tk++)
@@ -1165,8 +1348,22 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
         }
         LZ_PROF_END(_tf, LZ_PROF_FFN);
         LZ_TAP("ffn", l, s->xb2, dim);
-        for (i = 0; i < nt * dim; i++) s->x[i] += s->xb2[i];
-        LZ_TAP("out", l, s->x, dim);
+        if (L->gr_on) {
+            gr_write(s, nt, nr, dim);
+        } else {
+            for (i = 0; i < nt * dim; i++) s->x[i] += s->xb2[i];
+        }
+        LZ_TAP("out", l, s->x, L->gr_on ? nr * dim : dim);
+
+        /* gr_last: collapse back to [B,S,D] BEFORE the next iteration
+           touches s->x. The layer this fires on is the CED boundary on a
+           split stack (lz_gr_span), so both the next layer's attention
+           and CED's own capture hook - which reads a plain [B,S,D] off
+           this layer - see the shape they expect. Note it fires at the
+           END of this layer and not at the top of the next: the boundary
+           layer's OWN sublayers run on the widened stream, which is why
+           this cannot be a `gr_first`-style step in the loop head. */
+        if (L->gr_last) gr_collapse(s, nt, nr, dim);
     }
     /* Advance the ring ONCE for this whole chunk, after every layer has
        used ring_base - ordinary decode/prefill (all_logits==0) never

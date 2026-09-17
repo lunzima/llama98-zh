@@ -541,7 +541,12 @@ typedef struct {
        a model that never carried the key bit for bit. 1 is not a
        configuration: GatedResidual4 raises below nr=2, because the
        training side has no single-stream GR - the control arm is the
-       switch off, not a degenerate nr=1.
+       switch off, not a degenerate nr=1. Both loaders therefore read
+       this as "0, or >= 2" - lz_load_config from config.json
+       "gated_residual", lz_open_bin from the v5 tail (range-checked
+       there, LZ_ERR_BIN_FIELD_RANGE) - and setup_layers derives the
+       per-layer LZLayer.gr_on flag from the field, never a second copy
+       of the rule.
 
        Its span endpoint is ced_split above: GR covers layers
        [0, ced_split) and nothing else, because the CED boundary has to
@@ -805,6 +810,44 @@ typedef struct {
     LZTensor *moe_expert_w1;         /* [num_experts] (moe_intermediate_size, moe_latent_dim) */
     LZTensor *moe_expert_w2;         /* [num_experts] (moe_latent_dim, moe_intermediate_size) */
     LZTensor *moe_expert_w3;         /* [num_experts] (moe_intermediate_size, moe_latent_dim) */
+
+    /* GR (gated residual, LZModelConfig's own gated_residual comment has
+       the mechanism and the span rule). One block per SUBLAYER - the
+       attention and the MLP each get their own read/write gates, which is
+       what the training side's two `GatedResidual4` attributes on a
+       GrDecoderLayer are.
+
+       names, shapes (nr = gated_residual, r = max(1, hidden/8),
+       flat = nr * hidden):
+         gr_attn.norms.<b>.weight  (hidden)     - branch b's read RMSNorm
+         gr_attn.wd.weight         (r, flat)    - Eq. 31 W_d
+         gr_attn.wu.weight         (flat, r)    - Eq. 31 W_u
+         gr_attn.ww.weight         (nr, flat)   - Eq. 33 W_w
+       and the same four again under gr_mlp. The `.weight` suffixes and the
+       grouping match the checkpoint's own state-dict keys exactly, because
+       they ARE those keys: the training side registers wd/wu/ww as
+       nn.Linear and norms as an nn.ModuleList, so save_pretrained emits
+       `<half>.norms.<b>.weight` then `<half>.wd/wu/ww.weight` in that
+       order.
+
+       gr_attn_norms/gr_mlp_norms are LZTensor ARRAYS allocated by
+       setup_layers, the same posture as moe_expert_w1 above: the count nr
+       is a runtime config value that no fixed offsetof table can index.
+       Both are NULL on a layer with gr_on clear.
+
+       gr_on is setup_layers-derived and is the flag the forward and
+       model_walk read, never c->gated_residual - same per-layer pattern as
+       csa2_on above, and for the same reason: GR covers only the encoder
+       half [0, ced_split), so a stack's layers do not agree.
+       (m->mtp->blk never passes through setup_layers, so the MTP block's
+       own copies of these three flags stay at their calloc 0.) */
+    LZTensor gr_attn_wd, gr_attn_wu, gr_attn_ww;
+    LZTensor gr_mlp_wd, gr_mlp_wu, gr_mlp_ww;
+    LZTensor *gr_attn_norms;         /* [gated_residual] (hidden) f32 */
+    LZTensor *gr_mlp_norms;          /* [gated_residual] (hidden) f32 */
+    int gr_on;                       /* layer carries GR branches at all */
+    int gr_first;                    /* expands [B,S,D] into nr branches */
+    int gr_last;                     /* collapses back to [B,S,D] (mean) */
 } LZLayer;
 
 /* The MTP / "next-N" head. One full_attention block plus four tensors.

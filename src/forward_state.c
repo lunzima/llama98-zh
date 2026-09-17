@@ -238,7 +238,15 @@ static int kda_gate_build(LZRunState *s, const LZModel *m) {
 static void alloc_core_buffers(LZRunState *s, const LZModel *m,
                                const LZModelConfig *c, int nt, int *okp) {
     int ok = 1;
-    s->x       = (float *)xcalloc((size_t)nt * c->hidden_size, sizeof(float), &ok, &s->bytes_alloc);
+    /* s->x carries GR's nr branches when the switch is on - see forward.h's
+       own comment on it for why this is the one buffer whose stride moves.
+       Sized for the widest the stream ever gets (nr*hidden, between
+       gr_first and gr_last); xb/xb2 stay hidden wide throughout. */
+    {
+        int xw = c->gated_residual >= 2 ? c->gated_residual : 1;
+        s->x = (float *)xcalloc((size_t)nt * xw * c->hidden_size,
+                                sizeof(float), &ok, &s->bytes_alloc);
+    }
     s->xb      = (float *)xcalloc((size_t)nt * c->hidden_size, sizeof(float), &ok, &s->bytes_alloc);
     s->xb2     = (float *)xcalloc((size_t)nt * c->hidden_size, sizeof(float), &ok, &s->bytes_alloc);
     /* S1 attn_kv_share: the source layer's attention input for this
@@ -751,6 +759,22 @@ static void alloc_quant_scratch(LZRunState *s, const LZModel *m,
             qcap = 3 * c->hidden_size;
         if (m->mtp && c->mtp_n_draft > 1 && c->mtp_markov_rank > qcap)
             qcap = c->mtp_markov_rank;
+        /* GR's W_d and W_w read the whole flattened branch stream
+           (nr*hidden), which is nr times wider than any single width
+           above - on a GR model that is the widest thing this scratch
+           ever quantizes, by construction. lz_gr_read passes s->xq/s->xqs
+           to lz_matmul_w exactly like every other site here, and xq is
+           indexed by in_dim, so the value has to fit an int. A gr_flat
+           past INT_MAX is already an s->x this process allocated
+           (alloc_core_buffers ran first and asked for nt*gr_flat*4 bytes),
+           so the honest answer is to fail the allocation rather than size
+           this buffer short and overrun it. No shipped checkpoint is
+           within a factor of 10^5 of this. */
+        if (c->gated_residual >= 2) {
+            lz_i64 gr_flat = (lz_i64)c->gated_residual * c->hidden_size;
+            if (gr_flat > 0x7FFFFFFF) { *okp = 0; return; }
+            if ((int)gr_flat > qcap) qcap = (int)gr_flat;
+        }
         s->qcap = qcap;
         s->xq = (int8_t *)xcalloc((size_t)nt * qcap, 1, &ok, &s->bytes_alloc);
         /* xqs sized for the worst case (in-row gs falling back to 1) */
@@ -818,9 +842,41 @@ static void alloc_engram_scratch(LZRunState *s, const LZModel *m,
     if (!ok) *okp = 0;
 }
 
+/* GR's own scratch: one block carved into the four views forward.h
+   declares. Dedicated rather than pooled into xq/wscr/qcap for the reason
+   engram_scratch's own comment gives - the widest block here is
+   nt*nr*hidden, nr times the activation width any other site quantizes,
+   and s->wscr is a single weight ROW.
+
+   The two rhat/g blocks are sized nt*flat each rather than nt*flat and
+   nt*r: the read gate's input IS the flattened branch stream, so its
+   matmul input and the gate it produces are the same width. Everything
+   below is counted off flat, so a change to nr or hidden moves all four
+   views together - the failure mode a hand-summed capacity has is the
+   silent overrun forward.h's engram note records. */
+static void alloc_gr_scratch(LZRunState *s, const LZModelConfig *c,
+                             int nt, int *okp) {
+    int ok = 1;
+    if (c->gated_residual >= 2) {
+        int nr = c->gated_residual;
+        int flat = nr * c->hidden_size;
+        int r = c->hidden_size / 8 > 0 ? c->hidden_size / 8 : 1;
+        size_t n_elem = (size_t)nt * 2 * flat + (size_t)nt * r + (size_t)nt * nr;
+        s->gr_scratch_bytes = n_elem * sizeof(float);
+        s->gr_scratch = xcalloc(s->gr_scratch_bytes, 1, &ok, &s->bytes_alloc);
+        if (ok) {
+            float *p = (float *)s->gr_scratch;
+            s->gr_rhat = p;                      p += (size_t)nt * flat;
+            s->gr_g    = p;                      p += (size_t)nt * flat;
+            s->gr_h    = p;                      p += (size_t)nt * r;
+            s->gr_s    = p;
+        }
+    }
+    if (!ok) *okp = 0;
+}
+
 /* SubLN scratch: the Hadamard pair and the plain-norm int row, both
-   sized by the Q8 capacity the caller passes. */
-static void alloc_subn_scratch(LZRunState *s, int qcap, int *okp) {
+   sized by the Q8 capacity the caller passes. */static void alloc_subn_scratch(LZRunState *s, int qcap, int *okp) {
     int ok = 1;
     /* SubLN Hadamard scratch: two n-wide int32 halves, n <= qcap. */
     s->fwht_scratch = (int32_t *)xcalloc((size_t)2 * qcap, sizeof(int32_t),
@@ -975,6 +1031,7 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
 
     alloc_quant_scratch(s, m, c, nt, &ok);
     alloc_engram_scratch(s, m, c, nt, &ok);
+    alloc_gr_scratch(s, c, nt, &ok);
     alloc_subn_scratch(s, s->qcap, &ok);
     alloc_i16_exits(s, c, nt, &ok);
     if (!ok) {

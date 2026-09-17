@@ -433,6 +433,20 @@ int lz_load_config(LZModelConfig *c, const char *path,
     c->attn_sink_learned = lz_json_get_bool(&j, tc, "attn_sink", 0);
     c->attn_sink_init    = (float)lz_json_get_num(&j, tc, "attn_sink_init", 0.0);
 
+    /* GR (model.h's own gated_residual comment). An int, not a BOOL: the
+       key is the branch count. This reader is the config.json half of the
+       same switch lz_open_bin takes out of the v5 tail - the two loaders
+       have to agree on it or one checkpoint is two different models
+       depending on which file format it was written in, which is exactly
+       the divergence setup_layers' gr_on would turn from invisible into a
+       different forward pass. No range check here: the bin path's
+       LZ_ERR_BIN_FIELD_RANGE and this reader both feed the same
+       `>= 2` test in setup_layers, so a config.json asking for nr=1 gets
+       no branches and no specs - and a checkpoint that carries gr_*
+       tensors is then refused by the unclaimed-tensor check rather than
+       quietly run without them. */
+    c->gated_residual = lz_json_get_int(&j, tc, "gated_residual", 0);
+
     /* S4 MLA low-rank Q/O (model.h's own field comment) - 0/0 defaults
        reproduce a config.json that never carried these keys. */
     c->mla_q_lora_rank = lz_json_get_int(&j, tc, "mla_q_lora_rank", 0);
@@ -880,6 +894,13 @@ enum {
     DK_LATENT,      /* moe_latent_dim: routed_expert_down/up_proj's latent side */
     DK_SHARED_W,    /* moe_shared_width: shared expert inner width */
     DK_MOE_INTER,   /* moe_intermediate_size: per-expert w1/w2/w3 inner width */
+    /* GR (LZLayer's own gr_attn / gr_mlp comment has the tensor list).
+       DK_GR_FLAT is nr*hidden, the flattened branch stream every GR
+       projection reads or writes - it is why the three are separate
+       kinds rather than shares of DK_HIDDEN. */
+    DK_GR_NR,       /* gated_residual: branch count, one norm per branch */
+    DK_GR_RANK,     /* max(1, hidden/8): W_d's output / W_u's input */
+    DK_GR_FLAT,     /* gated_residual * hidden: the flattened stream width */
     /* MTP head only (model_walk's separate MTP_FFN_SPECS, not
        LAYER_SPECS - see that table's own comment) */
     DK_MTP_INTER    /* mtp_intermediate_size: MTP block's own dense FFN width */
@@ -1200,6 +1221,12 @@ static lz_i64 resolve_dim(const LZModelConfig *c, int kind) {
     case DK_SHARED_W:   return c->moe_shared_width;
     case DK_MOE_INTER:  return c->moe_intermediate_size;
     case DK_MTP_INTER:  return c->mtp_intermediate_size;
+    case DK_GR_NR:      return c->gated_residual;
+    /* max(1, hidden/8), not hidden/8: GatedResidual4.__init__ is
+       `self.r = max(1, dim // 8)`, so a hidden smaller than 8 gets rank 1
+       rather than rank 0. */
+    case DK_GR_RANK:    return c->hidden_size / 8 > 0 ? c->hidden_size / 8 : 1;
+    case DK_GR_FLAT:    return (lz_i64)c->gated_residual * c->hidden_size;
     case DK_ENGRAM_ROWS: return c->engram_total_rows;
     case DK_ENGRAM_DIM:  return c->engram_dim;
     case DK_ENGRAM_PER_ORDER: return c->engram_per_order;
@@ -1401,6 +1428,56 @@ static int model_walk(LZModel *m, LZVisit visit, void *ctx,
                      m->prefix, li);
             if (model_walk_one(m, name, SINK_DIMS, &L->attn_sinks,
                                visit, ctx, errbuf, errlen) != 0) return 1;
+        }
+
+        /* GR. Not in LAYER_SPECS above for both of the reasons the two
+           blocks above are not: gr_on is per-layer (only the encoder half,
+           LZLayer's own comment), and the branch norms are an array whose
+           count nr is a runtime value while wd/wu/ww exist only on a
+           gr_on layer. Walked AFTER the sink block, which fixes the GR
+           family's position in the .bin stream - a .bin carries no names,
+           so the exporter's tensor_order has to place it here too.
+
+           The order WITHIN a layer is the checkpoint's own state-dict
+           order, because the suffixes are literally its keys
+           (GrDecoderLayer.gn_attn/gn_mlp are GatedResidual4 modules whose
+           ModuleList `norms` was registered before wd/wu/ww): the four
+           norms, then wd, wu, ww, then the same again for the MLP half. */
+        if (L->gr_on) {
+            static const char *GR_HALF[2] = { "gr_attn.", "gr_mlp." };
+            static const size_t GR_NORMS[2] = {
+                offsetof(LZLayer, gr_attn_norms),
+                offsetof(LZLayer, gr_mlp_norms)
+            };
+            static const size_t GR_W[2][3] = {
+                { offsetof(LZLayer, gr_attn_wd), offsetof(LZLayer, gr_attn_wu),
+                  offsetof(LZLayer, gr_attn_ww) },
+                { offsetof(LZLayer, gr_mlp_wd),  offsetof(LZLayer, gr_mlp_wu),
+                  offsetof(LZLayer, gr_mlp_ww) }
+            };
+            static const char *GR_W_SUF[3] = { "wd.weight", "wu.weight", "ww.weight" };
+            static const int GR_W_DIMS[3][3] = {
+                { DK_GR_RANK, DK_GR_FLAT, DK_END },
+                { DK_GR_FLAT, DK_GR_RANK, DK_END },
+                { DK_GR_NR,   DK_GR_FLAT, DK_END }
+            };
+            int h, b, k;
+            for (h = 0; h < 2; h++) {
+                LZTensor *norms = *(LZTensor **)((char *)L + GR_NORMS[h]);
+                for (b = 0; b < c->gated_residual; b++) {
+                    snprintf(name, sizeof(name), "%slayers.%d.%snorms.%d.weight",
+                             m->prefix, li, GR_HALF[h], b);
+                    if (model_walk_one(m, name, NORM_DIMS, &norms[b],
+                                       visit, ctx, errbuf, errlen) != 0) return 1;
+                }
+                for (k = 0; k < 3; k++) {
+                    snprintf(name, sizeof(name), "%slayers.%d.%s%s",
+                             m->prefix, li, GR_HALF[h], GR_W_SUF[k]);
+                    if (model_walk_one(m, name, GR_W_DIMS[k],
+                                       (LZTensor *)((char *)L + GR_W[h][k]),
+                                       visit, ctx, errbuf, errlen) != 0) return 1;
+                }
+            }
         }
     }
 
@@ -1658,6 +1735,20 @@ static int detect_prefix(LZModel *m, char *errbuf, int errlen) {    static const
     return 1;
 }
 
+/* How many layers GR covers, from the top: the training side's own rule
+   (engine/kunmoe_modeling.py's _wire_gr), `span = ced_split if
+   0 < ced_split < n_layers else n_layers`. GR is scoped to the ENCODER
+   half because CED's capture hook reads the split boundary's OUTPUT
+   expecting a plain [B,S,D] stream - so the boundary layer is an early
+   `gr_last`, collapsing exactly what the true last layer would. A
+   ced_split with no decoder half (>= n_layers) is NOT a boundary, which
+   is why the middle clause exists rather than a bare `ced_split ?`. */
+static int lz_gr_span(const LZModelConfig *c) {
+    int n = c->n_layers;
+    if (c->ced_split > 0 && c->ced_split < n) return c->ced_split;
+    return n;
+}
+
 /* Set each layer's attention type and FFN routing, and allocate the
    per-expert tensor arrays MoE layers need. Shared by lz_open (safetensors)
    and lz_open_bin so the two paths cannot disagree about which layers are
@@ -1695,6 +1786,30 @@ static int setup_layers(LZModel *m, char *errbuf, int errlen) {
            "only m->layers is touched" safety as the two flags above. */
         L->attn_sink_on = c->attn_sink_learned &&
                           L->type == LZ_LT_FULL && !L->csa2_on;
+        /* GR: three flags, all from the one span rule above. `>= 2` rather
+           than `> 0` is the training side's own contract (GatedResidual4
+           raises below nr=2, there is no single-stream GR); a config.json
+           that asks for nr=1 therefore gets no branches AND no specs, so
+           a checkpoint that does carry gr_* tensors is refused by the
+           leak check rather than silently run without them. Same
+           "per-layer flags derived here, m->mtp->blk never passes through
+           this loop" safety as the three flags above. */
+        L->gr_on = c->gated_residual >= 2 && i < lz_gr_span(c);
+        L->gr_first = L->gr_on && i == 0;
+        L->gr_last  = L->gr_on && i == lz_gr_span(c) - 1;
+        if (L->gr_on) {
+            /* One norm per branch, so an ARRAY whose count is a runtime
+               config value - the same reason moe_expert_w1 above is one.
+               Checked separately rather than with one guard: a failure on
+               the second calloc leaves the first non-NULL, and lz_free
+               indexes both. */
+            L->gr_attn_norms = (LZTensor *)calloc((size_t)c->gated_residual, sizeof(LZTensor));
+            L->gr_mlp_norms  = (LZTensor *)calloc((size_t)c->gated_residual, sizeof(LZTensor));
+            if (!L->gr_attn_norms || !L->gr_mlp_norms) {
+                qerr(errbuf, errlen, LZ_ERR_LAYERS_ALLOC);
+                return 1;
+            }
+        }
         if (L->ffn_moe) {
             L->moe_expert_w1 = (LZTensor *)calloc((size_t)c->num_experts, sizeof(LZTensor));
             L->moe_expert_w2 = (LZTensor *)calloc((size_t)c->num_experts, sizeof(LZTensor));
@@ -2874,6 +2989,13 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
                 n_params += L->moe_expert_w1[e].n + L->moe_expert_w2[e].n +
                             L->moe_expert_w3[e].n;
         }
+        /* GR: the six weights are in the walk above, the two branch-norm
+           arrays are not (model_walk's GR block). */
+        if (L->gr_on) {
+            int b;
+            for (b = 0; b < c->gated_residual; b++)
+                n_params += L->gr_attn_norms[b].n + L->gr_mlp_norms[b].n;
+        }
     }
     n_params += m->embed_tokens.n + m->final_norm.n;
     if (m->mtp) {
@@ -2995,6 +3117,23 @@ void lz_free(LZModel *m) {
             free(L->moe_expert_w1);
             free(L->moe_expert_w2);
             free(L->moe_expert_w3);
+            /* GR's branch-norm arrays, same "not in LAYER_SPECS" story as
+               the expert triplets above - and the six weight tensors
+               themselves ARE in the walk, so they are NOT freed here. See
+               model_walk's GR block. Both arrays are checked before
+               indexing for the reason that comment gives. */
+            if (L->gr_attn_norms) {
+                int b;
+                for (b = 0; b < m->config.gated_residual; b++)
+                    lz_t_free(&L->gr_attn_norms[b]);
+            }
+            if (L->gr_mlp_norms) {
+                int b;
+                for (b = 0; b < m->config.gated_residual; b++)
+                    lz_t_free(&L->gr_mlp_norms[b]);
+            }
+            free(L->gr_attn_norms);
+            free(L->gr_mlp_norms);
         }
         free(m->layers);
     }
