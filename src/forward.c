@@ -973,7 +973,8 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
        forward_chunk, so on a stack whose last layer is linear attention
        it could never fire, the run would come out unchanged, and the
        flag would read as a speedup that nothing performed. m->layers is
-       valid here - lz_state_alloc takes a loaded model. */
+       valid here - lz_state_alloc takes a loaded model - and the CSA2
+       scan below requires the same of every layer, unconditionally. */
     if (lz_ced) {
         if (m->layers[c->n_layers - 1].type != LZ_LT_FULL) {
             if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_CED_LAST_LAYER);
@@ -1279,7 +1280,12 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
        needs, CSA2 is rare enough (S4's own mla_q_lora_rank precedent)
        that a model without it should not pay for a ring nobody reads.
        Sized against s->seq_len, not s->kv_slots - see forward.h's own
-       comment on why. */
+       comment on why.
+
+       This scan reads m->layers[li2].csa2_on for EVERY layer, so the
+       whole array must be valid before lz_state_alloc is called. It is
+       not conditional on any flag - unlike the --ced guard above, which
+       reads one layer only when a run-time switch asks it to. */
     {
         int any_csa2 = 0, li2;
         for (li2 = 0; li2 < c->n_layers; li2++)
