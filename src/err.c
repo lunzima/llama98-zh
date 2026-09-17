@@ -189,6 +189,7 @@ static const char *const LZ_ERR_EN[LZ_ERR_COUNT] = {
                             "3*hidden_size (%d) - markov_embed's row is "
                             "read into a fixed 3*hidden scratch buffer "
                             "shared with the base draft stage.",
+    /* LZ_ERR_OOM_ALLOC */ "out of memory allocating %s",
     /* LZ_ERR_INTERNAL */ "internal error"
 };
 
@@ -365,6 +366,9 @@ static const char *const LZ_ERR_ZH[LZ_ERR_COUNT] = {
                             "\xe7\x94\xa8\xe7\x9a\x84\xe5\x9b\xba\xe5\xae\x9a "
                             "3*hidden \xe6\x9a\x82\xe5\xad\x98\xe7\xbc\x93\xe5"
                             "\x86\xb2\xe5\x8c\xba\xe3\x80\x82",
+    /* LZ_ERR_OOM_ALLOC */ "\xe5\x86\x85\xe5\xad\x98\xe4\xb8\x8d\xe8\xb6\xb3"
+                            "\xef\xbc\x8c\xe6\x97\xa0\xe6\xb3\x95\xe5\x88\x86"
+                            "\xe9\x85\x8d %s",
     /* LZ_ERR_INTERNAL */ "\xe5\x86\x85\xe9\x83\xa8\xe9\x94\x99\xe8\xaf\xaf"
 };
 

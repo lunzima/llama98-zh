@@ -88,37 +88,74 @@ static void engram_hash(const int *tokens, int nt,
 }
 
 /* DEBUG: dump engine-side engram intermediates for parity check.
-   Prints only for the first token (pos0=0, nt=1) to keep output small;
-   ENGRAM_DUMP=1 in the environment turns it on.
+   Written to the BINARY file named by ENGRAM_DUMP; nothing is written
+   when it is unset or empty. Only the first token (pos0=0, nt=1) is
+   dumped, to keep the file small.
+
+   A file rather than stderr, for two reasons. The engine has no
+   console: every message it has for a user goes through a caller's
+   errbuf. And this runs inside lz_fpu_float_begin/lz_fpu_float_end,
+   where the C runtime's %f would format a double already rounded to 24
+   bits - a wrong number rather than a short one. Raw bit patterns
+   carry out exactly what the engine produced.
+
+   Record: tag length (int), tag bytes (no NUL), element count (int),
+   then that many elements - float for engram_dump, int for
+   engram_dump_idx.
 
    ABSENT FROM THE SHIPPING BUILD. The whole block is behind
-   LZ_ENGRAM_DEBUG, and without it the calls below expand to nothing, so
-   no fprintf/stderr reference survives into a normal build. A diagnostic
-   that is merely switched off at runtime is still a diagnostic that
-   ships. */
+   LZ_ENGRAM_DEBUG, and without it the calls below expand to nothing,
+   so no file is opened and no dump code survives into a normal build.
+   A diagnostic that is merely switched off at runtime is still a
+   diagnostic that ships. */
 #ifdef LZ_ENGRAM_DEBUG
+static FILE *engram_dump_file(void) {
+    static FILE *fp;
+    static int tried;
+    if (!tried) {
+        const char *p = getenv("ENGRAM_DUMP");
+        tried = 1;
+        if (p && p[0]) fp = fopen(p, "wb");
+    }
+    return fp;
+}
+
 static int engram_dump_enabled(void) {
-    const char *v = getenv("ENGRAM_DUMP");
-    return v && v[0] == '1';
+    return engram_dump_file() != NULL;
+}
+
+static void engram_dump_hdr(FILE *fp, const char *stage, int n) {
+    int taglen = (int)strlen(stage);
+    fwrite(&taglen, sizeof(taglen), 1, fp);
+    fwrite(stage, 1, (size_t)taglen, fp);
+    fwrite(&n, sizeof(n), 1, fp);
 }
 
 static void engram_dump(const char *stage, const float *data, int n) {
-    float rms = 0.0f;
-    int i;
-    for (i = 0; i < n; i++) rms += data[i] * data[i];
-    rms = LZ_SQRTF(rms / (float)n);
-    fprintf(stderr, "[engram] %s rms=%.6f  first4=[%.6f, %.6f, %.6f, %.6f]\n",
-            stage, rms, data[0], data[1], data[2], data[3]);
+    FILE *fp = engram_dump_file();
+    if (!fp) return;
+    engram_dump_hdr(fp, stage, n);
+    fwrite(data, sizeof(float), (size_t)n, fp);
+    fflush(fp);
 }
 
 static void engram_dump_idx(const char *stage, const int *data, int n) {
-    (void)n;
-    fprintf(stderr, "[engram] %s first4=[%d, %d, %d, %d]\n",
-            stage, data[0], data[1], data[2], data[3]);
+    FILE *fp = engram_dump_file();
+    if (!fp) return;
+    engram_dump_hdr(fp, stage, n);
+    fwrite(data, sizeof(int), (size_t)n, fp);
+    fflush(fp);
 }
 
 static void engram_dump_gate(int o, float s, float gate) {
-    fprintf(stderr, "[engram] gate_o%d s=%.6f gate=%.6f\n", o, s, gate);
+    char stage[32];
+    FILE *fp = engram_dump_file();
+    if (!fp) return;
+    snprintf(stage, sizeof(stage), "gate_o%d", o);
+    engram_dump_hdr(fp, stage, 2);
+    fwrite(&s, sizeof(s), 1, fp);
+    fwrite(&gate, sizeof(gate), 1, fp);
+    fflush(fp);
 }
 #else
 #define engram_dump_enabled()           0

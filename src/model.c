@@ -20,17 +20,37 @@
    Lives here (a large, cold TU) rather than in forward.c so the compiler
    cannot inline it into the layer loop and reorder float work around it.
    -DLZ_DBG_LAYER_HASH=1 is a diagnostic build only; nothing in a normal
-   build references it. */
+   build references it.
+
+   The lines go to the file named by LHASH_FILE, one per layer visit -
+   the engine has no console, and a divergence hunt compares two target
+   builds by diffing two files. Nothing is written when the variable is
+   unset or empty, so a build that defines the macro still dumps
+   nothing until it is asked to. */
 void lz_dbg_layer_hash(const char *tag, int li, const void *p, size_t nf) {
+    static FILE *fp;
+    static int tried;
     const unsigned char *b = (const unsigned char *)p;
     unsigned long long h = 1469598103934665603ull;   /* FNV-1a */
-    size_t i;
+    size_t i, m;
+    char line[96];
+    int n;
     for (i = 0; i < nf * 4u; i++) {
         h ^= b[i];
         h *= 1099511628211ull;
     }
-    fprintf(stderr, "LHASH %s %d %llu\n", tag, li,
-            (unsigned long long)h);
+    if (!tried) {
+        const char *path = getenv("LHASH_FILE");
+        tried = 1;
+        if (path && path[0]) fp = fopen(path, "w");
+    }
+    if (!fp) return;
+    n = snprintf(line, sizeof line, "LHASH %s %d %llu\n", tag, li, h);
+    if (n <= 0) return;
+    m = (size_t)n;
+    if (m > sizeof line - 1) m = sizeof line - 1;
+    fwrite(line, 1, m, fp);
+    fflush(fp);
 }
 #endif /* LZ_DBG_LAYER_HASH */
 
@@ -1748,7 +1768,7 @@ static int alloc_engram(LZModel *m, char *errbuf, int errlen) {
     eg->offsets = (int *)calloc(c->engram_n_spaces, sizeof(int));
     eg->bases = (lz_i64 *)calloc(no, sizeof(lz_i64));
     if (!eg->primes || !eg->offsets || !eg->bases) {
-        qerr(errbuf, errlen, LZ_ERR_OOM, "engram primes");
+        qerr(errbuf, errlen, LZ_ERR_OOM_ALLOC, "engram primes");
         return 1;
     }
     {   /* primes_down: largest primes <= head_space */

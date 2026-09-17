@@ -1123,8 +1123,8 @@ void dense_ffn_step(const LZModel *m, LZRunState *s,
 
            lz_ffn_gate_up dispatches on c->ffn_activation instead of the
            lz_silu(..)*up line being inlined here directly - every model
-           this engine has ever loaded is LZ_FFN_ACT_NONE, which takes
-           the exact branch that used to be the whole loop body. */
+           this engine has ever loaded is LZ_FFN_ACT_NONE, whose arm in
+           that dispatcher is exactly that expression and nothing else. */
         LZ_PROF_BEG(_ta);
         lz_ffn_gate_up(s->hb, s->hb2, nt * idim, c);
         LZ_PROF_END(_ta, LZ_PROF_ACT);

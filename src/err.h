@@ -251,6 +251,13 @@ typedef enum {
        would overflow it. */
     LZ_ERR_MTP_MARKOV_RANK,   /* mtp_markov_rank %d exceeds 3*hidden_size %d */
 
+    /* An allocation failed and the call site can name it. LZ_ERR_OOM
+       stays for sites that have nothing to add; this one exists so a
+       report says WHICH allocation ran out, because on this target the
+       difference between "the model does not fit" and "one scratch
+       buffer did not" is the whole diagnosis. */
+    LZ_ERR_OOM_ALLOC,          /* out of memory allocating %s */
+
     /* Generic failure. Two jobs, and it must stay LAST before
        LZ_ERR_COUNT for the second one:
        1. the initial value of a return code that every failure path is

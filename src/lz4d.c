@@ -281,48 +281,42 @@ void lz4d_close(LZ4Stream *s) {
 /* ------------------------------------------------------------------ */
 /* Standalone round-trip test (LZ4D_TEST).                            */
 /* ------------------------------------------------------------------ */
-/* WHY A main() AND fprintf ARE ALLOWED HERE, when no other file in src/
-   prints anything outside cli_main.c: the same reason lz_softfp.c's
-   LZ_SOFTFP_STATS block gives - it is behind a macro no shipping build
-   defines, so it does not breach src/'s console ban for a build nobody
-   ships. Nothing links it: LZ4D_TEST is passed by hand.
+/* WHY A main() IS HERE, when the only other ones in src/ belong to the
+   front ends: this is the only DIRECT check the decompressor has. The
+   engine's own runs compare logits, which would hide a decompressor
+   that was wrong in a way the arithmetic then smoothed over.
+   build/lz4_model_gate.sh compiles and runs exactly this, so the check
+   has a home that is not a comment. Nothing links it: LZ4D_TEST is
+   passed by hand.
 
        gcc -O2 -std=c99 -Isrc -DLZ4D_TEST -o lz4t src/lz4d.c
        ./lz4t MODEL/model.bin.lz4 out.bin && cmp MODEL/model.bin out.bin
 
-   That round trip is the only direct check the decompressor has - the
-   engine's own runs compare logits, which would hide a decompressor
-   that was wrong in a way the arithmetic then smoothed over. Measured
-   on _armgate2: 45,816,469 bytes, cmp clean.
-
-   build/lz4_model_gate.sh runs exactly this, so the check has a home
-   that is not a comment. */
+   IT REPORTS THROUGH ITS EXIT CODE, not the console, like the rest of
+   src/: 0 the round trip completed, 2 wrong argument count, 3 the
+   input did not open, 4 the output did not open, 5 the stream reported
+   an error. The reason still reaches a caller that wants it -
+   lz4d_open fills the errbuf it is handed - it is simply not printed. */
 #ifdef LZ4D_TEST
 int main(int argc, char **argv) {
     LZ4Stream *s;
     static uint8_t out[1 << 20];
     FILE *f;
-    long sz;
     size_t got;
     char eb[128];
 
-    if (argc != 3) {
-        fprintf(stderr, "usage: %s in.lz4 out.bin\n", argv[0]);
-        return 2;
-    }
+    if (argc != 3) return 2;
     s = lz4d_open(argv[1], eb, sizeof eb);
-    if (!s) { fprintf(stderr, "open failed: %s\n", eb); return 1; }
+    if (!s) return 3;
     f = fopen(argv[2], "wb");
-    if (!f) return 1;
+    if (!f) return 4;
     for (;;) {
         got = lz4d_read(s, out, sizeof out);
         if (got == 0) break;
         fwrite(out, 1, got, f);
         if (got < sizeof out) break;
     }
-    if (lz4d_error(s)) { fprintf(stderr, "stream error\n"); return 1; }
-    sz = ftell(f);
-    fprintf(stderr, "wrote %ld bytes, eof=%d\n", sz, lz4d_eof(s));
+    if (lz4d_error(s)) { fclose(f); lz4d_close(s); return 5; }
     fclose(f);
     lz4d_close(s);
     return 0;

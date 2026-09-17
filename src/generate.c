@@ -708,9 +708,9 @@ int lz_spec_round(const LZModel *m, LZRunState *s,
     /* LZ_ERR_SET*(rc, errbuf, errlen, LZ_ERR_XXX) rather than a bare
        lz_err_fmt(errbuf, errlen, rc) call - the error convention wants
        the THIRD ARGUMENT to be a literal LZ_ERR_* enum at the call site,
-       not a variable that merely happens to hold one; tools_check_
-       err_full.py / test_err_localization.py enforce this so a future
-       `snprintf(errbuf, len, some_int)`-shaped mistake cannot hide
+       not a variable that merely happens to hold one; the error
+       localization tests read the call sites as text and enforce it, so
+       a `snprintf(errbuf, len, some_int)`-shaped mistake cannot hide
        behind "it looked like the others". */
     if (!m || !s || !out || !out_n_accept || !out_new_pos || !out_k_eff) {
         LZ_ERR_SET(rc, errbuf, errlen, LZ_ERR_NULL_ARG);
@@ -3423,10 +3423,9 @@ int lz_pool_init(LZSessionPool *p, const LZModel *m, int n_slots,
        middle of serving. Fail here or not at all. */
     for (i = 0; i < n_slots; i++) {
         /* spec_k_max: the caller's sizing hint, same parameter
-           lz_state_alloc has always taken - server_main.c's --spec now
-           threads a real value through here instead of the hardcoded 0
-           this comment used to explain (forward.h's spec_k_max
-           comment). */
+           lz_state_alloc has always taken - server_main.c's --spec is
+           what supplies it, and forward.h's spec_k_max comment is where
+           that parameter is defined. */
         if (lz_state_alloc(&p->slot[i].st, m, seq_len, spec_k_max, errbuf, errlen) != 0 ||
             lz_prefix_init(&p->slot[i].pc, m, errbuf, errlen) != LZ_ERR_OK) {
             p->n = i;               /* free what did come up */
