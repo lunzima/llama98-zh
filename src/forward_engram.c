@@ -93,10 +93,9 @@ static void engram_hash(const int *tokens, int nt,
 
    ABSENT FROM THE SHIPPING BUILD. The whole block is behind
    LZ_ENGRAM_DEBUG, and without it the calls below expand to nothing, so
-   no fprintf/stderr reference survives into a normal build. The engine
-   layer's console ban has no runtime escape hatch (CLAUDE.md rule 1):
-   a diagnostic that is merely switched off at runtime is still a
-   diagnostic that ships. */
+   no fprintf/stderr reference survives into a normal build. A diagnostic
+   that is merely switched off at runtime is still a diagnostic that
+   ships. */
 #ifdef LZ_ENGRAM_DEBUG
 static int engram_dump_enabled(void) {
     const char *v = getenv("ENGRAM_DUMP");
