@@ -734,7 +734,7 @@ const char *lz_gdn_p2_impl(void);
    NOT bit-identical, and the integer entry is the MORE accurate of the
    two: every measured channel sits at e >= 22, far past the e <= 19
    band where sigmoid_q15's `x + 12` is still exact.
-   In the header for LZ_CONV_FIXED's reason - forward.c builds the
+   In the header for LZ_CONV_FIXED's reason - forward_state.c builds the
    exponent table this reads, so both files must see the same value. */
 #ifndef LZ_CONV_SIG_I
 #define LZ_CONV_SIG_I 1

@@ -7,7 +7,7 @@
    The MTP block is not one of m->layers[], so it owns the reserved KV cache
    slot LZ_MTP_CACHE_LAYER names below; the scratch it reads (mtp_x,
    mtp_concat, mtp_emb_raw, mtp_chain, mtp_kdraft_*, mtp_pos) is allocated
-   once in forward.c's lz_state_alloc and documented field by field in
+   once in forward_state.c's lz_state_alloc and documented field by field in
    forward.h. lz_debug_mtp_attn_t1_slow's definition deliberately stayed in
    forward.c, beside the comment forward.h points at for it. */
 

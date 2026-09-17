@@ -27,7 +27,7 @@ typedef enum {
     LZ_ERR_READ_SHORT,         /* short read: got %lu / %ld bytes */
     LZ_ERR_NULL_ARG,           /* null argument */
     LZ_ERR_STATE_ALLOC,        /* runtime state allocation failed */
-    /* conv_f32_build's (forward.c) coverage check: a linear/KDA layer's
+    /* conv_f32_build's (forward_state.c) coverage check: a linear/KDA layer's
        conv1d (or kda_q/k/v_conv1d triple) channel counts do not sum to
        lin_conv_dim. A checkpoint layout problem, not an allocation
        failure - kept out of LZ_ERR_STATE_ALLOC so a report of this code

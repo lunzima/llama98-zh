@@ -260,7 +260,7 @@ void forward_engram(const LZModel *m, LZRunState *s,
            call lz_matmul_xq_nt once per tk rather than batched), so
            xq/xqs each hold exactly one token's worth: po int8s and
            po/gs floats. s->xq/s->xqs are sized nt_cap*qcap and
-           nt_cap*(qcap/32) respectively (forward.c's lz_state_alloc),
+           nt_cap*(qcap/32) respectively (forward_state.c's lz_state_alloc),
            both >= po for every checkpoint here, so reusing token slot 0
            on each iteration is safe - forward_engram runs before the
            layer loop populates them for anything else. */

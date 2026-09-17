@@ -2025,7 +2025,7 @@ static int visit_read(LZModel *m, const LZStTensor *t, LZTensor *field,
      * model whose conv_fixed_build refuses) hit the heap-buffer-overflow
      * this comment already named above, on the caller it called "a
      * separate change" - found the same way, by running it. Closed by
-     * forward.c's conv_f32_build, the float tier's un-quantized twin of
+     * forward_state.c's conv_f32_build, the float tier's un-quantized twin of
      * conv_fixed_build: it also reads one row at a time through
      * lz_t_row_f32, into its own persistent buffer (s->conv_w32), so
      * every reader of a narrow-stored conv1d tensor is row-wise now,

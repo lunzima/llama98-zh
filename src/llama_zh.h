@@ -399,7 +399,7 @@ typedef struct {
        No LZStateCkpt parameter to plumb through, unlike lz_spec_round's
        own "no checkpoint, the ring does it for free" note - PLD is the
        opposite case: with no MTP head, s->ssm_ring_depth is 1
-       (forward.c's state-alloc), so there is no ring to roll back
+       (forward_state.c's state-alloc), so there is no ring to roll back
        through. lz_generate_call owns one LZStateCkpt for this,
        allocated only when pld_ngram>0 && pld_tokens>0 - same shape
        look_active/look_ck already has for lz_look_pick, and the same

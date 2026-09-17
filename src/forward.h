@@ -378,6 +378,16 @@ extern int   lz_debug_mtp_attn_window;
 extern lz_i64 lz_debug_mtp_attn_rows;
 extern lz_i64 lz_debug_vproj_i16;
 
+/* Run-time knobs, all defined in forward.c and all read by
+   lz_state_alloc (forward_state.c) among other callers. */
+extern int   lz_kv_kfmt;
+extern int   lz_kv_vfmt;
+extern int   lz_attn_sink;
+extern int   lz_attn_window;
+extern int   lz_ced;
+extern int   lz_kv_rot_enable;
+extern int   lz_kv_rot_v_dim;
+
 /* KV cache formats, selectable independently for keys and values
    (--kv / --kv-k / --kv-v). See LZRunState's kfmt field. */
 #define LZ_KVF_Q8    0   /* int8, one absmax scale per 32 elements */
@@ -1495,6 +1505,9 @@ int  lz_ckpt_restore(const LZStateCkpt *ck, LZRunState *s, const LZModel *m,
 int  lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
                         int spec_k_max, char *errbuf, int errlen);
 void lz_state_free(LZRunState *s);
+/* The aligned-free half of forward_state.c's xcalloc/xfree pair. Shared:
+   lz_state_free, above, frees the same buffers. */
+void xfree(void *p);
 /* lz_rope_build_table's two runtime inputs, both defined in forward.c:
    --rope-dynamic-ntk's on/off and --rope-orig-max. */
 extern int   lz_rope_dynamic_ntk;
@@ -1665,7 +1678,7 @@ float *lz_forward_batch_capture(const LZModel *m, LZRunState *s,
    array, not from a trained head, so it must work on a model with no
    MTP head bound at all - lz_forward_verify's own hard gate
    (`!m->mtp -> return 1`) and its s->mtp_logits/s->mtp_verify_hidden
-   destination (allocated only `if (m->mtp)`, forward.c's state-alloc)
+   destination (allocated only `if (m->mtp)`, forward_state.c's state-alloc)
    both rule it out for that caller. This function shares forward_chunk
    with lz_forward_verify - same math, same rounding, same chunking -
    the only difference is which buffer the per-position logits land in
@@ -1675,7 +1688,7 @@ float *lz_forward_batch_capture(const LZModel *m, LZRunState *s,
    one) and does not touch s->ssm_slot's rollback RING beyond whatever
    forward_chunk's own all_logits=1 path already does unconditionally
    (advance by nt, same as lz_forward_verify) - a caller on a model with
-   no MTP head has s->ssm_ring_depth==1 (forward.c's state-alloc), so
+   no MTP head has s->ssm_ring_depth==1 (forward_state.c's state-alloc), so
    that advance is a same-slot no-op and rollback has to happen the way
    lz_look_pick's own comment already documents for that situation: an
    LZStateCkpt save before this call, restore (+ replay of whatever

@@ -403,7 +403,7 @@ void lz_conv_build_scales(float *oscale, float *in_scale,
    would need a carry chain per tap. One bound for both is cheaper. */
 int lz_conv_accum_bound(int k) {
     int b = 1;
-    /* k <= 0: the caller (forward.c's lz_state_alloc) reads config.conv_kernel
+    /* k <= 0: the caller (forward_state.c's lz_state_alloc) reads config.conv_kernel
        unconditionally, even on a model with n_linear_layers == 0, where that
        field is never written and defaults to 0 - the returned bound is then
        multiplied by n_linear_layers-scaled sizes that are already zero, so
