@@ -214,9 +214,9 @@ int lz_music_next(int count, int *cursor);
  *
  * Stopping a stream makes the device hand the queued buffer back, and
  * the notification for it can arrive AFTER the next piece has started.
- * Taken at face value it stops the piece that replaced it - measured
- * 2026-09-14: the chime was started, the music's leftover notification
- * arrived, and the chime was silenced before it sounded.
+ * Taken at face value it stops the piece that replaced it - measured:
+ * the chime was started, the music's leftover notification arrived, and
+ * the chime was silenced before it sounded.
  *
  * So the two are counted. `pending` is what the device still owes the
  * current playback; `stale` is what it owes a playback that is over. */

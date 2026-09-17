@@ -247,9 +247,8 @@ int lz_os_has_40(void);
 
 /* ---- MIDI streaming ----
  *
- * MEASURED with this project's own floor flags (2026-09-14, Open
- * Watcom 2.0): at WINVER 0x0351 a probe calling midiStreamOpen does
- * not compile at all - MIDIHDR, MIDIEVENT and every MIDIPROP_ are
+ * MEASURED with this project's own floor flags (Open Watcom 2.0): at
+ * WINVER 0x0351 a probe calling midiStreamOpen does not compile at all - MIDIHDR, MIDIEVENT and every MIDIPROP_ are
  * undeclared, so it is not only the entry point that is hidden. At
  * 0x0400 the same probe compiles clean and links against Watcom's
  * NT4-era winmm import library.

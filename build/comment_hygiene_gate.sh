@@ -122,7 +122,7 @@ for f in $SCAN; do
     if [ "$n" -gt "$exp" ]; then
         echo "FAIL: $b - $h hash(es), $d date(s), $z CJK, $r rulebook cite(s) (baseline $exp)"
         grep -nohE "\b[0-9a-f]{7,8}\b|20[0-9]{2}-[0-9]{2}-[0-9]{2}" "$f" 2>/dev/null \
-            | grep -vE "^[0-9]+$" | head -4 | sed 's/^/        /'
+            | grep -vE "^[0-9]+:[0-9]+$" | head -4 | sed 's/^/        /'
         FAIL=1
     fi
 done
