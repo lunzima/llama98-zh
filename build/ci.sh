@@ -785,6 +785,35 @@ case $KVS_RC in
         ;;
 esac
 
+# attn_sink (learned per-head attention sink). Own script for the same
+# reason as MLA/CSA2/kv_share above - it BUILDS its fixtures from a
+# checkpoint's weights, because the key and the tensor are what is under
+# test, and it needs python3 numpy+safetensors. It is pointed at
+# kunkun98 rather than ARM_MODEL on purpose: ARM_MODEL does not set the
+# key, so the gate would SKIP there and the sink path would be checked by
+# nothing. Also builds two mutants (one per half of the wiring).
+echo
+echo "==== [11g/31]attn_sink (learned) ===="
+LOG=build/ci-attn-sink.log
+build/attn_sink_learned_gate.sh "$MODELS_ROOT/kunkun98" >"$LOG" 2>&1
+ASINK_RC=$?
+cat "$LOG"
+case $ASINK_RC in
+    0)
+        note "PASS  attn_sink (learned)"
+        PASS=$((PASS + 1))
+        ;;
+    2)
+        REASON=$(grep -m1 'attn_sink_learned_gate: SKIP' "$LOG")
+        note "SKIP  attn_sink (learned) ($REASON)"
+        SKIP=$((SKIP + 1))
+        ;;
+    *)
+        note "FAIL  attn_sink (learned)"
+        FAIL=$((FAIL + 1))
+        ;;
+esac
+
 # ---------------------------------------------------------------------
 # Stage 12: --kv-rot, the one output-changing knob that had no gate. Not
 # invariance (stage 11's assertion) - a QUALITY claim with a number:

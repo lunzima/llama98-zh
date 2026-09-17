@@ -116,6 +116,11 @@ kv_share_gate.sh           # builds its own fixture out of the given
                            #   checkpoint's weights, needs python3
                            #   numpy+safetensors, and skips on every
                            #   checkpoint here that this engine can load
+attn_sink_learned_gate.sh  # builds its own fixtures from a checkpoint's
+                           #   weights (four copies of a ~550MB
+                           #   model.safetensors), needs python3
+                           #   numpy+safetensors, and builds two mutant
+                           #   engines
 changelog_comment_gate.sh  # ratchet over the whole tree, slow
 subn_gate.sh               # needs a model and a long token run
 kv_rot_gate.sh             # needs a model and a long token run
