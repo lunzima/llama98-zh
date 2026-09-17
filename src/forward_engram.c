@@ -88,8 +88,16 @@ static void engram_hash(const int *tokens, int nt,
 }
 
 /* DEBUG: dump engine-side engram intermediates for parity check.
-   Prints only for the first token (pos0=0, nt=1) to keep output small.
-   Set ENGRAM_DUMP=1 in environment to enable. */
+   Prints only for the first token (pos0=0, nt=1) to keep output small;
+   ENGRAM_DUMP=1 in the environment turns it on.
+
+   ABSENT FROM THE SHIPPING BUILD. The whole block is behind
+   LZ_ENGRAM_DEBUG, and without it the calls below expand to nothing, so
+   no fprintf/stderr reference survives into a normal build. The engine
+   layer's console ban has no runtime escape hatch (CLAUDE.md rule 1):
+   a diagnostic that is merely switched off at runtime is still a
+   diagnostic that ships. */
+#ifdef LZ_ENGRAM_DEBUG
 static int engram_dump_enabled(void) {
     const char *v = getenv("ENGRAM_DUMP");
     return v && v[0] == '1';
@@ -109,6 +117,16 @@ static void engram_dump_idx(const char *stage, const int *data, int n) {
     fprintf(stderr, "[engram] %s first4=[%d, %d, %d, %d]\n",
             stage, data[0], data[1], data[2], data[3]);
 }
+
+static void engram_dump_gate(int o, float s, float gate) {
+    fprintf(stderr, "[engram] gate_o%d s=%.6f gate=%.6f\n", o, s, gate);
+}
+#else
+#define engram_dump_enabled()           0
+#define engram_dump(stage, data, n)     ((void)0)
+#define engram_dump_idx(stage, data, n) ((void)0)
+#define engram_dump_gate(o, s, gate)    ((void)0)
+#endif
 
 static int engram_is_format(const unsigned char *bitmap, int tokid) {
     return (bitmap[tokid >> 3] >> (tokid & 7)) & 1;
@@ -277,8 +295,7 @@ void forward_engram(const LZModel *m, LZRunState *s,
             gate = lz_sigmoid(LZ_SQRTF(LZ_FABSF(s) + 1e-6f)
                               * (s >= 0 ? 1.0f : -1.0f));
             if (dbg && tk == 0)
-                fprintf(stderr, "[engram] gate_o%d s=%.6f gate=%.6f\n",
-                        o, s, gate);
+                engram_dump_gate(o, s, gate);
             for (i = 0; i < dim; i++)
                 value[(size_t)tk * dim + i] += gate * val[(size_t)tk * dim + i];
         }
