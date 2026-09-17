@@ -145,6 +145,7 @@
 !/build/kernel_probe_census.sh
 !/build/org_census.sh
 !/build/root_hygiene_gate.sh
+!/build/arch_allowlist_gate.sh
 # The model packer. It lived at the repository ROOT, where an untracked
 # file reads as a top-level project file rather than as tooling - which
 # is how it reached the public remote twice. Its only caller is

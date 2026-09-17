@@ -41,7 +41,7 @@
 # nested inside another comment; gcc said so on every build and `check`
 # reported 16 PASS over it. Having a caller somewhere is not the test -
 # being reachable from what people actually run is.
-check: root-hygiene-gate bare-endif-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate json-offset-gate softfp-gate dedupe-gate mm-alias-gate c89-floor-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate isa-floor-avx2-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate kernel-matrix-gate aux-parm-arity-gate aux-equiv-gate mathf-xcompiler-gate bf16-torch-gate lz4-model-gate gcc-watcom-output-gate fixture-exists-gate
+check: root-hygiene-gate bare-endif-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate json-offset-gate softfp-gate dedupe-gate mm-alias-gate c89-floor-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate isa-floor-avx2-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate arch-allowlist-gate kernel-matrix-gate aux-parm-arity-gate aux-equiv-gate mathf-xcompiler-gate bf16-torch-gate lz4-model-gate gcc-watcom-output-gate fixture-exists-gate
 
 # Zero gcc warnings, asserted rather than printed. The Watcom side has
 # always been counted ("N lines, 0 warnings, 0 errors", per file); this
@@ -349,6 +349,17 @@ csa2-gate:
 .PHONY: kv-share-gate
 kv-share-gate:
 	@$(call GATE_OK,build/kv_share_gate.sh "$(MODEL)")
+
+# The two-generation allowlist: Qwen3.5 (GDN) and KunMoe (KDA) load, any
+# other checkpoint shape is refused by name. Own script's header has the
+# four arm shapes (control, three differently-shaped refusals, the
+# message table, and a mutant engine built from a copy of src/) and why
+# the exit code is not the criterion. Needs four fixture dirs under
+# $(MODELS_ROOT), default E:/LLM/models, and one mutant engine build;
+# SKIPs without them.
+.PHONY: arch-allowlist-gate
+arch-allowlist-gate:
+	@$(call GATE_OK,build/arch_allowlist_gate.sh "$(MODELS_ROOT)")
 
 # A third opinion on lz_bf16.c, from PyTorch. Needs no model; SKIPs if
 # torch is absent, which is why it is behind GATE_OK too.
