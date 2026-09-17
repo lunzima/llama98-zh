@@ -2615,6 +2615,34 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
         qerr(errbuf, errlen, LZ_ERR_BIN_CFG);
         goto fail;
     }
+
+    /* Which generation this file is, decided from the layer_types[] words
+       the header carries: 0 (LZ_LT_LINEAR) is GDN's linear attention, 2
+       (LZ_LT_KDA) is KDA's, and 1 (gated full attention) belongs to both.
+       A header with neither 0 nor 2 is a pure full-attention checkpoint,
+       which is neither of the two generations this engine loads, and is
+       refused here rather than half-bound against the GDN spec whose
+       linear tensors it does not have.
+
+       This is the bin path's half of the allowlist lz_load_config applies
+       to safetensors (arch_probe there, from tensor names). The bin
+       header is the only identity a .bin checkpoint carries - the
+       config.json beside it is optional and read for engram and
+       ffn_activation alone - so without this the allowlist does not reach
+       a .bin model at all. */
+    {
+        int seen_gdn = 0, seen_kda = 0, unknown = 0;
+        for (i = 0; i < c->n_layers; i++) {
+            if (c->layer_types[i] == LZ_LT_KDA) seen_kda = 1;
+            else if (c->layer_types[i] == LZ_LT_LINEAR) seen_gdn = 1;
+            else if (c->layer_types[i] != LZ_LT_FULL) unknown = 1;
+        }
+        if (unknown || (!seen_gdn && !seen_kda)) {
+            qerr(errbuf, errlen, LZ_ERR_CFG_UNSUPPORTED_ARCH);
+            goto fail;
+        }
+    }
+
     if (resolve_hadamard(c, errbuf, errlen) != 0) goto fail;
 
     /* Engram fields live only in config.json, not in the bin header.
