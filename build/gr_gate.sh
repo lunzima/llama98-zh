@@ -364,26 +364,127 @@ fi
 
 # ---- mutations -------------------------------------------------------
 MUTBIN=
-# mutant TAG FILE PROBE [-z] -e EXPR ... : each on a private copy of src/,
-# never the live tree, and each verified to have actually matched (the
-# probe must survive) before it is trusted - a sed that silently found
-# nothing would build the unmutated engine and this gate would report a
-# green mutation.
+# Escape a LITERAL string into a BRE pattern, and into a sed replacement.
+# Mutations are written as literal before/after text, never as sed syntax:
+# the escaping lives here, once, instead of in every call site's quoting.
+#
+# Three things the escaper has to do, each of which cost a defect when it
+# did not (found by E:\LLM\gr_parity\mutcheck.sh, which runs these same
+# helpers over every mutation's pairs in seconds):
+#   - BRE metacharacters, so a literal '.' or '*' is not a wildcard;
+#   - '/' , because it is the s/// delimiter - the write-gate pattern
+#     contains "2.0f * lz_sigmoid(sg[i] / nrf)" and an unescaped one ends
+#     the command with "unknown option to `s'";
+#   - newlines, which a sed SCRIPT cannot carry: they become the two
+#     characters \n. sed still needs -z for that to match across a line
+#     break, so -z pairs with this.
+# Order is escape-then-unfold: unfolding first would insert backslashes
+# that the escape pass would then double.
+bre_of() {
+    printf '%s' "$1" | sed 's/[][\\.*^$/]/\\&/g' \
+        | sed -e ':a' -e 'N' -e '$!ba' -e 's/\n/\\n/g'
+}
+rep_of() {
+    printf '%s' "$1" | sed 's/[\\&/]/\\&/g' \
+        | sed -e ':a' -e 'N' -e '$!ba' -e 's/\n/\\n/g'
+}
+# Occurrences of a LITERAL string in a file, newlines and all.
+#
+# Neither grep -c nor grep -F can be trusted here, and both were measured:
+#   - grep -c counts LINES, not occurrences;
+#   - grep -F with a pattern containing a newline is not a multi-line
+#     match. Measured: for a file holding "aaa","bbb","ccc", the two-line
+#     pattern "aaa\nzzz" is reported as PRESENT whenever its second half
+#     matches - which is exactly the M3 pattern, whose second half
+#     ("            gr_read(m, s, L->gr_attn_norms,") is already in the
+#     file. A verification built on it would have reported a substitution
+#     that never happened as ok.
+# So both sides have their newlines folded to \001 first, which makes a
+# multi-line literal an ordinary single-line one, and -o|wc -l counts
+# occurrences rather than lines.
+count_of() {
+    local pat n
+    pat=$(printf '%s' "$1" | tr '\n' '\001')
+    n=$(tr '\n' '\001' < "$2" | grep -oF -- "$pat" | wc -l)
+    echo "${n:-0}"
+}
+
+# mutant TAG FILE [-z] PAT REP [PAT REP ...]
+#
+# Each substitution is verified BY COUNT, and EVERY pair is verified - not
+# just one per mutant. Both of those are corrections to the first version,
+# which took a single hand-written probe string:
+#
+#   (a) `sed -i` exits 0 whether or not it matched anything. A probe that
+#       simply asks "is the replacement text present now?" is the only
+#       thing standing between a silent no-op sed and a mutant that is
+#       really the unmutated engine - which then reads as a red arm for
+#       any criterion the mutation was supposed to break.
+#   (b) with four substitutions and one probe, the other three could fail
+#       silently. That is not hypothetical: this mutant M2's single probe
+#       covered only its own pair, so if the three shared read/write-gate
+#       substitutions had not applied, M2's binary would have been plain
+#       GR-on - which also differs from GR-off - and the arm would have
+#       printed "red as it should be" for entirely the wrong reason.
+#
+# The check is the conservation identity of a substitution, per pair:
+#
+#     count_after(PAT) == 0
+#     count_after(REP) == count_before(REP) + count_before(PAT)
+#
+# Nothing was left behind, and every occurrence of PAT became exactly one
+# occurrence of REP. COUNTING rather than "is it present" is what catches
+# "changed the wrong place": if PAT also occurs somewhere the mutation did
+# not intend, count_after(PAT) is not 0; if REP was already in the file,
+# the conservation sum is off. A `grep -qF` on the whole file cannot see
+# either, because it only answers "does this text appear".
 mutant() {
-    local tag="$1" file="$2" probe="$3"; shift 3
+    local tag="$1" file="$2"; shift 2
     local d="$W/$tag" zflag=()
+    local pairs=() args=() i pat rep
     MUTBIN=""
+    if [ "${1:-}" = "-z" ]; then zflag=(-z); shift; fi
+    while [ "$#" -ge 2 ]; do pairs+=("$1" "$2"); shift 2; done
+    if [ "$#" -ne 0 ]; then
+        echo "  FAIL: mutation '$tag' got an odd number of PAT/REP arguments"
+        return 1
+    fi
+    if [ "${#pairs[@]}" -eq 0 ]; then
+        echo "  FAIL: mutation '$tag' has no PAT/REP pair"
+        return 1
+    fi
     mkdir -p "$d"
     cp -r "$ROOT/src" "$ROOT/common" "$d/"
     cp "$ROOT/Makefile" "$d/Makefile"
-    if [ "$1" = "-z" ]; then zflag=(-z); shift; fi
-    local args=()
-    while [ "$#" -gt 0 ]; do args+=(-e "$1"); shift; done
+    i=0
+    while [ "$i" -lt "${#pairs[@]}" ]; do
+        pat=${pairs[$i]}; rep=${pairs[$((i + 1))]}
+        args+=(-e "s/$(bre_of "$pat")/$(rep_of "$rep")/")
+        eval "BEF_REP_$i=$(count_of "$rep" "$d/$file")"
+        i=$((i + 2))
+    done
     sed -i "${zflag[@]}" "${args[@]}" "$d/$file"
-    if ! grep -qF "$probe" "$d/$file"; then
-        echo "  FAIL: mutation '$tag' did not match $file - this gate no longer matches the source"
-        return 1
-    fi
+    i=0
+    while [ "$i" -lt "${#pairs[@]}" ]; do
+        pat=${pairs[$i]}; rep=${pairs[$((i + 1))]}
+        eval "bef_rep=\$BEF_REP_$i"
+        aft_pat=$(count_of "$pat" "$d/$file")
+        aft_rep=$(count_of "$rep" "$d/$file")
+        if [ "$aft_pat" -ne 0 ]; then
+            echo "  FAIL: mutation '$tag' left $aft_pat occurrence(s) of"
+            echo "    $(printf '%.70s' "$pat")"
+            echo "    - the substitution did not take, or that text occurs"
+            echo "    somewhere this mutation did not mean to change"
+            return 1
+        fi
+        if [ "$aft_rep" -ne "$((bef_rep + 1))" ]; then
+            echo "  FAIL: mutation '$tag' produced $aft_rep occurrence(s) of its"
+            echo "    replacement, expected $((bef_rep + 1)) (was $bef_rep)"
+            return 1
+        fi
+        i=$((i + 2))
+    done
+    echo "  mutation '$tag': $(( ${#pairs[@]} / 2 )) substitution(s), each verified by count"
     if ! ( cd "$d" && make native ) >"$d/build.log" 2>&1; then
         echo "  FAIL: mutant '$tag' failed to build"; tail -5 "$d/build.log"
         return 1
@@ -392,17 +493,21 @@ mutant() {
     return 0
 }
 
-# The three substitutions that neutralise the read and write gates. Shared
-# by the `raw` arm and by M2, which is only observable as arithmetic once
-# the gates are out of the way.
-RAW_READ='s/lz_t_f32(&norms\[b\], s->wscr), dim, c->rms_norm_eps);/lz_t_f32(\&norms[b], s->wscr), dim, c->rms_norm_eps), memcpy(RH + (size_t)b * dim, R + (size_t)b * dim, (size_t)dim * sizeof(float));/'
-RAW_G='s/for (i = 0; i < flat; i++) G\[i\] = lz_sigmoid(G\[i\]);/for (i = 0; i < flat; i++) G[i] = 1.0f;/'
-RAW_S='s/for (i = 0; i < nr; i++) sg\[i\] = 2.0f \* lz_sigmoid(sg\[i\] \/ nrf);/for (i = 0; i < nr; i++) sg[i] = 1.0f;/'
+# The three substitutions that neutralise the read and write gates. LITERAL
+# before/after text - mutant() escapes it into sed itself - shared by the
+# `raw` arm and by M2, which is only observable as arithmetic once the gates
+# are out of the way.
+RAW_READ_P='lz_t_f32(&norms[b], s->wscr), dim, c->rms_norm_eps);'
+RAW_READ_R='lz_t_f32(&norms[b], s->wscr), dim, c->rms_norm_eps), memcpy(RH + (size_t)b * dim, R + (size_t)b * dim, (size_t)dim * sizeof(float));'
+RAW_G_P='for (i = 0; i < flat; i++) G[i] = lz_sigmoid(G[i]);'
+RAW_G_R='for (i = 0; i < flat; i++) G[i] = 1.0f;'
+RAW_S_P='for (i = 0; i < nr; i++) sg[i] = 2.0f * lz_sigmoid(sg[i] / nrf);'
+RAW_S_R='for (i = 0; i < nr; i++) sg[i] = 1.0f;'
 
 run "$BIN" on "$MODEL" || exit 1
 
-if mutant raw src/forward.c 'memcpy(RH + (size_t)b * dim, R + (size_t)b * dim' \
-        "$RAW_READ" "$RAW_G" "$RAW_S"; then
+if mutant raw src/forward.c \
+        "$RAW_READ_P" "$RAW_READ_R" "$RAW_G_P" "$RAW_G_R" "$RAW_S_P" "$RAW_S_R"; then
     run "$MUTBIN" raw "$MODEL" || exit 1
     if cmp -s "$W/raw.pf" "$W/off_head.pf"; then
         echo "  raw  gate-neutralised GR-on == GR-off BITWISE (the arithmetic identity holds)"
@@ -417,8 +522,9 @@ else
 fi
 
 # M1: the derivation never fires, so the tensors are never claimed.
-if mutant m1 src/model.c 'L->gr_on = 0 && c->gated_residual' \
-        's/L->gr_on = c->gated_residual >= 2 \&\& i < lz_gr_span(c)/L->gr_on = 0 \&\& c->gated_residual >= 2 \&\& i < lz_gr_span(c)/'; then
+if mutant m1 src/model.c \
+        'L->gr_on = c->gated_residual >= 2 && i < lz_gr_span(c)' \
+        'L->gr_on = 0 && c->gated_residual >= 2 && i < lz_gr_span(c)'; then
     if "$MUTBIN" "$MODEL" --check >"$W/m1.chk" 2>&1; then
         echo "  FAIL: mutation M1 (gr_on pinned to 0) still accepted the checkpoint"
         FAILED=1
@@ -429,10 +535,15 @@ else
     FAILED=1
 fi
 
-# M2: mean becomes sum in gr_last's collapse. Only the raw identity sees it.
-if mutant m2 src/forward.c 'dst[i] = base[i];' \
-        "$RAW_READ" "$RAW_G" "$RAW_S" \
-        's/for (i = 0; i < dim; i++) dst\[i\] = base\[i\] \/ (float)nr;/for (i = 0; i < dim; i++) dst[i] = base[i];/'; then
+# M2: mean becomes sum in gr_last's collapse. Only the raw identity sees it -
+# note this mutant carries four substitutions and ALL FOUR are count-verified,
+# which is the correction (b) in mutant()'s comment: the first version
+# verified only this pair and would have reported a red arm for a binary whose
+# gate-neutralisation had silently not applied.
+if mutant m2 src/forward.c \
+        "$RAW_READ_P" "$RAW_READ_R" "$RAW_G_P" "$RAW_G_R" "$RAW_S_P" "$RAW_S_R" \
+        'for (i = 0; i < dim; i++) dst[i] = base[i] / (float)nr;' \
+        'for (i = 0; i < dim; i++) dst[i] = base[i];'; then
     run "$MUTBIN" m2 "$MODEL" || exit 1
     if cmp -s "$W/m2.pf" "$W/off_head.pf"; then
         echo "  FAIL: mutation M2 (gr_last collapses with sum, not mean) was not"
@@ -446,10 +557,16 @@ else
 fi
 
 # M3: the read gate is skipped under SubLN. That removes the read gate
-# entirely, so perturbing W_u cannot move anything. -z: the substitution
-# spans a line break.
-if mutant m3 src/forward.c 'L->gr_on && !c->use_subn' -z \
-        's/if (L->gr_on) {\n            gr_read(m, s, L->gr_attn_norms,/if (L->gr_on \&\& !c->use_subn) {\n            gr_read(m, s, L->gr_attn_norms,/;s/if (L->gr_on) {\n            gr_read(m, s, L->gr_mlp_norms,/if (L->gr_on \&\& !c->use_subn) {\n            gr_read(m, s, L->gr_mlp_norms,/'; then
+# entirely, so perturbing W_u cannot move anything. -z: both substitutions
+# span a line break, so the "lines" the counter and sed work on are the
+# whole file. Both halves of the read gate are listed, so both are verified.
+if mutant m3 src/forward.c -z \
+        'if (L->gr_on) {
+            gr_read(m, s, L->gr_attn_norms,' 'if (L->gr_on && !c->use_subn) {
+            gr_read(m, s, L->gr_attn_norms,' \
+        'if (L->gr_on) {
+            gr_read(m, s, L->gr_mlp_norms,' 'if (L->gr_on && !c->use_subn) {
+            gr_read(m, s, L->gr_mlp_norms,'; then
     "$MUTBIN" "$MODEL" --prompt "$PROMPT" -n "$NGEN" --temp 0 \
         --seed 1145141919 --dump-prefill "$W/m3_on.pf" >/dev/null 2>&1
     "$MUTBIN" "$W/pert" --prompt "$PROMPT" -n "$NGEN" --temp 0 \
@@ -468,8 +585,8 @@ fi
 
 # M4: gr_expand stops copying branch 0. Correct for token 0, wrong for every
 # later token - the exact defect the batch arm was added for.
-if mutant m4 src/forward.c 'for (b = nr - 1; b >= 1; b--)' \
-        's/for (b = nr - 1; b >= 0; b--)/for (b = nr - 1; b >= 1; b--)/'; then
+if mutant m4 src/forward.c \
+        'for (b = nr - 1; b >= 0; b--)' 'for (b = nr - 1; b >= 1; b--)'; then
     "$MUTBIN" "$MODEL" --prompt "$PROMPT" -n 1 --temp 0 --batch 4 \
         --dump-prefill "$W/m4.pf" >/dev/null 2>&1
     if cmp -s "$W/m4.pf" "$W/b4.pf"; then
