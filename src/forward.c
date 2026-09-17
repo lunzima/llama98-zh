@@ -806,6 +806,166 @@ int lz_debug_mtp_attn_t1_slow = 0;
                        advancement (or vice versa), this coupling must
                        be split into two real parameters - flagged here
                        so that split is not a surprise. */
+/* POST-final-norm hidden of EVERY token in this chunk - the MTP
+   draft head's "hidden" input, for its first step
+   (lz_forward_capture), a prompt prefill (lz_forward_batch_capture
+   / lz_mtp_prefill), or a verify batch's per-position seed
+   (lz_forward_verify -> s->mtp_verify_hidden). All three MTP hidden
+   sources reach the block through this one parameter, so this is
+   the single place the stage is decided.
+
+   The input is POST-FINAL-NORM (an RMSNorm of s->x), not a raw
+   memcpy. Feeding the draft head an already-normed vector is not
+   "double-norming": an RMSNorm applied to an already-normed vector
+   is a learned rescale with its own weight, and that is what the
+   architecture specifies:
+
+     vLLM (training-side reference): Qwen3NextModel.forward applies
+       self.norm and RETURNS the normed value
+       (refsrc/vllm/vllm/model_executor/models/qwen3_next.py:709-712);
+       Qwen3NextForCausalLM.forward passes it through (:824-836);
+       the runner hands exactly that to the drafter
+       (v1/worker/gpu_model_runner.py:5199). The per-model override
+       hook that could change this - get_mtp_target_hidden_states -
+       is implemented ONLY by deepseek_v4, not by this family, so
+       Qwen3-Next takes the plain post-norm path (:5182).
+     llama.cpp: h_nextn is captured AFTER model.output_norm and is
+       the same tensor that feeds the real logits
+       (refsrc/llama.cpp/src/models/qwen35.cpp:209-213).
+
+   llama.cpp's own generic field comment says "hidden state before
+   final output norm" (src/llama-graph.h:903) and CONTRADICTS its
+   own Qwen3.5 graph. It is not wrong, it is about a different
+   architecture - DeepSeek V4's MTP genuinely wants the pre-hc_head
+   residual (gpu_model_runner.py:5176-5178). Which stage feeds the
+   draft head is a PER-ARCHITECTURE choice; this family takes the
+   post-norm path.
+
+   Normalizes into capture_hidden rather than in place, because
+   s->x still has to reach the two output paths below unnormalized:
+   the all_logits path norms every position itself and the ordinary
+   path norms only the last, and either would double-apply if this
+   had already touched s->x. TrunkCapture must
+   stay on the same stage - a train/serve split here is invisible to
+   every bit-identity gate (MTP only affects DRAFT quality; the
+   target model decides the output either way) and shows up only as
+   a depressed acceptance rate. */
+static void chunk_capture_hidden(const LZModel *m, LZRunState *s,
+                                 const LZModelConfig *c, float *capture_hidden,
+                                 int nt, int dim) {
+    int tk;
+    for (tk = 0; tk < nt; tk++)
+        lz_rmsnorm(capture_hidden + (size_t)tk * dim,
+                   s->x + (size_t)tk * dim,
+                   lz_t_f32(&m->final_norm, s->wscr), dim,
+                   c->rms_norm_eps);
+}
+
+/* EVERY position's logits (the speculative-verify shape), into the
+   caller's buffer.
+
+   SAME TIER AS THE SINGLE-POSITION HEAD (chunk_logits_last), and that is a
+   correctness requirement, not symmetry for its own sake.
+   lz_rmsnorm_int is a TIER: its own header says it is not
+   bit-identical to the lz_rmsnorm + lz_quantize_q8 pair. A verify
+   row that took the float pair while ordinary decode took the
+   int one produced DIFFERENT logits for the same position, so
+   --spec K stopped matching --spec 0 as soon as one of those
+   differences crossed an argmax boundary - with penalties at
+   their identity values, on a bare temperature-0 greedy run.
+   The two guards are chunk_logits_last's, for its reasons: gse > 0
+   because the matmul reads xq/xqs only when the weight is
+   quantized (at gse == 0 it reads s->x, which the int path never
+   normalizes), and LZ_TAP_OFF because a tap build must keep the
+   float path. */
+static void chunk_logits_all(const LZModel *m, LZRunState *s,
+                             const LZModelConfig *c, float *logits_out,
+                             int nt, int dim) {
+    int gse = lz_act_gs(&m->embed_tokens, dim);
+    int nse = scale_groups(dim, gse);
+    int use_int = 0;
+    int tk;
+#if defined(LZ_TAP_OFF)
+    use_int = lz_norm_int() && lz_norm_can_fixed(dim) &&
+              gse > 0 && (dim % gse) == 0;
+#endif /* LZ_TAP_OFF */
+    for (tk = 0; tk < nt; tk++) {
+        float *xt = s->x + (size_t)tk * dim;
+        if (use_int) {
+            float deq;
+            lz_rmsnorm_int(s->subn_norm_int, xt,
+                           lz_t_f32(&m->final_norm, s->wscr), dim,
+                           c->rms_norm_eps, &deq);
+            lz_quantize_q8_int(s->subn_norm_int, dim, gse, deq,
+                               s->xq + (size_t)tk * dim,
+                               s->xqs + (size_t)tk * nse);
+        } else {
+            lz_rmsnorm(xt, xt, lz_t_f32(&m->final_norm, s->wscr), dim,
+                      c->rms_norm_eps);
+            lz_quantize_q8(xt, dim, gse, s->xq + (size_t)tk * dim,
+                          s->xqs + (size_t)tk * nse);
+        }
+    }
+    lz_matmul_xq_nt(logits_out, s->x, s->xq, s->xqs, &m->embed_tokens,
+                   dim, c->vocab_size, nt);
+}
+
+/* lm_head only computes the LAST token. It is the single largest
+   matmul (32768 vocab rows), and prefill's intermediate logits are
+   wanted by nobody - computing the whole batch would pay the
+   forward's most expensive step nt-1 times for nothing. At nt=1,
+   nt-1 == 0, identical to the original path. */
+static void chunk_logits_last(const LZModel *m, LZRunState *s,
+                              const LZModelConfig *c, int nt, int dim) {
+    LZ_PROF_DECL(_th);
+    float *xl = s->x + (size_t)(nt - 1) * dim;
+    int gse = lz_act_gs(&m->embed_tokens, dim);
+    /* The norms census's smallest consumer, and the shape the other
+       four share: a float vector built by the norm and taken apart
+       again by the very next statement. The int tier writes the Q15
+       product into s->subn_norm_int with its scale out of band and
+       lz_quantize_q8_int folds that into the group scale, so xl is
+       never materialized.
+       This is a TIER, not a refactor - lz_rmsnorm_int's own header
+       says it is not bit-identical to the float pair, the plain
+       norm having no Q15-chain-then-dequant sibling to match. It
+       therefore rides --fixed like every other fixed tier.
+
+       Two guards beyond the tier, both of them things that read a
+       buffer this path stops writing:
+         gse > 0    the weight is quantized, so lz_matmul_xq below
+                    takes xq/xqs. At gse == 0 the weight is F32 and
+                    the matmul reads xl itself, which would still
+                    hold the UN-normalized residual.
+         LZ_TAP_OFF nobody is tapping "fnorm". A tap build keeps the
+                    float path rather than reporting the residual as
+                    if it were the norm. */
+    int use_int = 0;
+#if defined(LZ_TAP_OFF)
+    use_int = lz_norm_int() && lz_norm_can_fixed(dim) &&
+              gse > 0 && (dim % gse) == 0;
+#endif /* LZ_TAP_OFF */
+    /* tie_word_embeddings: output projection reuses the embedding
+       directly; there is no standalone lm_head */
+    if (use_int) {
+        float deq;
+        lz_rmsnorm_int(s->subn_norm_int, xl,
+                       lz_t_f32(&m->final_norm, s->wscr), dim,
+                       c->rms_norm_eps, &deq);
+        lz_quantize_q8_int(s->subn_norm_int, dim, gse, deq,
+                           s->xq, s->xqs);
+    } else {
+        lz_rmsnorm(xl, xl, lz_t_f32(&m->final_norm, s->wscr), dim,
+                   c->rms_norm_eps);
+        LZ_TAP("fnorm", -1, xl, dim);
+        lz_quantize_q8(xl, dim, gse, s->xq, s->xqs);
+    }
+    LZ_PROF_BEG(_th);
+    lz_matmul_xq(s->logits, xl, s->xq, s->xqs, &m->embed_tokens, dim,
+                 c->vocab_size);
+    LZ_PROF_END(_th, LZ_PROF_HEAD);
+}
+
 static float *forward_chunk(const LZModel *m, LZRunState *s,
                             const int *tokens, int nt, int pos0,
                             float *capture_hidden,
@@ -821,7 +981,6 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
        pointer the layer loop hands to forward_attn. */
     int ksrc = lz_kv_share_src(c);
     const float *kv_in;
-    LZ_PROF_DECL(_th);
     int ring_base;               /* see its own comment below, before the layer loop */
     unsigned fpu;
 
@@ -1017,56 +1176,8 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
     if (all_logits)
         s->ssm_slot = (ring_base + nt) % s->ssm_ring_depth;
 
-    /* POST-final-norm hidden of EVERY token in this chunk - the MTP
-       draft head's "hidden" input, for its first step
-       (lz_forward_capture), a prompt prefill (lz_forward_batch_capture
-       / lz_mtp_prefill), or a verify batch's per-position seed
-       (lz_forward_verify -> s->mtp_verify_hidden). All three MTP hidden
-       sources reach the block through this one parameter, so this is
-       the single place the stage is decided.
-
-       The input is POST-FINAL-NORM (an RMSNorm of s->x), not a raw
-       memcpy. Feeding the draft head an already-normed vector is not
-       "double-norming": an RMSNorm applied to an already-normed vector
-       is a learned rescale with its own weight, and that is what the
-       architecture specifies:
-
-         vLLM (training-side reference): Qwen3NextModel.forward applies
-           self.norm and RETURNS the normed value
-           (refsrc/vllm/vllm/model_executor/models/qwen3_next.py:709-712);
-           Qwen3NextForCausalLM.forward passes it through (:824-836);
-           the runner hands exactly that to the drafter
-           (v1/worker/gpu_model_runner.py:5199). The per-model override
-           hook that could change this - get_mtp_target_hidden_states -
-           is implemented ONLY by deepseek_v4, not by this family, so
-           Qwen3-Next takes the plain post-norm path (:5182).
-         llama.cpp: h_nextn is captured AFTER model.output_norm and is
-           the same tensor that feeds the real logits
-           (refsrc/llama.cpp/src/models/qwen35.cpp:209-213).
-
-       llama.cpp's own generic field comment says "hidden state before
-       final output norm" (src/llama-graph.h:903) and CONTRADICTS its
-       own Qwen3.5 graph. It is not wrong, it is about a different
-       architecture - DeepSeek V4's MTP genuinely wants the pre-hc_head
-       residual (gpu_model_runner.py:5176-5178). Which stage feeds the
-       draft head is a PER-ARCHITECTURE choice; this family takes the
-       post-norm path.
-
-       Normalizes into capture_hidden rather than in place, because
-       s->x still has to reach the two output paths below unnormalized:
-       the all_logits path norms every position itself and the ordinary
-       path norms only the last, and either would double-apply if this
-       had already touched s->x. TrunkCapture must
-       stay on the same stage - a train/serve split here is invisible to
-       every bit-identity gate (MTP only affects DRAFT quality; the
-       target model decides the output either way) and shows up only as
-       a depressed acceptance rate. */
     if (capture_hidden) {
-        for (tk = 0; tk < nt; tk++)
-            lz_rmsnorm(capture_hidden + (size_t)tk * dim,
-                       s->x + (size_t)tk * dim,
-                       lz_t_f32(&m->final_norm, s->wscr), dim,
-                       c->rms_norm_eps);
+        chunk_capture_hidden(m, s, c, capture_hidden, nt, dim);
     }
 
     if (all_logits) {
@@ -1075,46 +1186,7 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
            own comment above. Mutually exclusive with the block below:
            normalizing position nt-1 here AND there would run rmsnorm on
            an already-normalized vector a second time. */
-        int gse = lz_act_gs(&m->embed_tokens, dim);
-        int nse = scale_groups(dim, gse);
-        /* SAME TIER AS THE SINGLE-POSITION HEAD BELOW, and that is a
-           correctness requirement, not symmetry for its own sake.
-           lz_rmsnorm_int is a TIER: its own header says it is not
-           bit-identical to the lz_rmsnorm + lz_quantize_q8 pair. A verify
-           row that took the float pair while ordinary decode took the
-           int one produced DIFFERENT logits for the same position, so
-           --spec K stopped matching --spec 0 as soon as one of those
-           differences crossed an argmax boundary - with penalties at
-           their identity values, on a bare temperature-0 greedy run.
-           The two guards are the block below's, for its reasons: gse > 0
-           because the matmul reads xq/xqs only when the weight is
-           quantized (at gse == 0 it reads s->x, which the int path never
-           normalizes), and LZ_TAP_OFF because a tap build must keep the
-           float path. */
-        int use_int = 0;
-#if defined(LZ_TAP_OFF)
-        use_int = lz_norm_int() && lz_norm_can_fixed(dim) &&
-                  gse > 0 && (dim % gse) == 0;
-#endif /* LZ_TAP_OFF */
-        for (tk = 0; tk < nt; tk++) {
-            float *xt = s->x + (size_t)tk * dim;
-            if (use_int) {
-                float deq;
-                lz_rmsnorm_int(s->subn_norm_int, xt,
-                               lz_t_f32(&m->final_norm, s->wscr), dim,
-                               c->rms_norm_eps, &deq);
-                lz_quantize_q8_int(s->subn_norm_int, dim, gse, deq,
-                                   s->xq + (size_t)tk * dim,
-                                   s->xqs + (size_t)tk * nse);
-            } else {
-                lz_rmsnorm(xt, xt, lz_t_f32(&m->final_norm, s->wscr), dim,
-                          c->rms_norm_eps);
-                lz_quantize_q8(xt, dim, gse, s->xq + (size_t)tk * dim,
-                              s->xqs + (size_t)tk * nse);
-            }
-        }
-        lz_matmul_xq_nt(logits_out, s->x, s->xq, s->xqs, &m->embed_tokens,
-                       dim, c->vocab_size, nt);
+        chunk_logits_all(m, s, c, logits_out, nt, dim);
         lz_fpu_float_end(fpu);
         return logits_out;
     }
@@ -1141,59 +1213,7 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
     }
     lz_debug_n_lmhead++;         /* positive control, see its definition */
 
-    /* lm_head only computes the LAST token. It is the single largest
-       matmul (32768 vocab rows), and prefill's intermediate logits are
-       wanted by nobody - computing the whole batch would pay the
-       forward's most expensive step nt-1 times for nothing. At nt=1,
-       nt-1 == 0, identical to the original path. */
-    {
-        float *xl = s->x + (size_t)(nt - 1) * dim;
-        int gse = lz_act_gs(&m->embed_tokens, dim);
-        /* The norms census's smallest consumer, and the shape the other
-           four share: a float vector built by the norm and taken apart
-           again by the very next statement. The int tier writes the Q15
-           product into s->subn_norm_int with its scale out of band and
-           lz_quantize_q8_int folds that into the group scale, so xl is
-           never materialized.
-           This is a TIER, not a refactor - lz_rmsnorm_int's own header
-           says it is not bit-identical to the float pair, the plain
-           norm having no Q15-chain-then-dequant sibling to match. It
-           therefore rides --fixed like every other fixed tier.
-
-           Two guards beyond the tier, both of them things that read a
-           buffer this path stops writing:
-             gse > 0    the weight is quantized, so lz_matmul_xq below
-                        takes xq/xqs. At gse == 0 the weight is F32 and
-                        the matmul reads xl itself, which would still
-                        hold the UN-normalized residual.
-             LZ_TAP_OFF nobody is tapping "fnorm". A tap build keeps the
-                        float path rather than reporting the residual as
-                        if it were the norm. */
-        int use_int = 0;
-#if defined(LZ_TAP_OFF)
-        use_int = lz_norm_int() && lz_norm_can_fixed(dim) &&
-                  gse > 0 && (dim % gse) == 0;
-#endif /* LZ_TAP_OFF */
-        /* tie_word_embeddings: output projection reuses the embedding
-           directly; there is no standalone lm_head */
-        if (use_int) {
-            float deq;
-            lz_rmsnorm_int(s->subn_norm_int, xl,
-                           lz_t_f32(&m->final_norm, s->wscr), dim,
-                           c->rms_norm_eps, &deq);
-            lz_quantize_q8_int(s->subn_norm_int, dim, gse, deq,
-                               s->xq, s->xqs);
-        } else {
-            lz_rmsnorm(xl, xl, lz_t_f32(&m->final_norm, s->wscr), dim,
-                       c->rms_norm_eps);
-            LZ_TAP("fnorm", -1, xl, dim);
-            lz_quantize_q8(xl, dim, gse, s->xq, s->xqs);
-        }
-        LZ_PROF_BEG(_th);
-        lz_matmul_xq(s->logits, xl, s->xq, s->xqs, &m->embed_tokens, dim,
-                     c->vocab_size);
-        LZ_PROF_END(_th, LZ_PROF_HEAD);
-    }
+    chunk_logits_last(m, s, c, nt, dim);
     lz_fpu_float_end(fpu);
     return s->logits;
 }
