@@ -511,7 +511,7 @@ int lz_load_config(LZModelConfig *c, const char *path,
        actually produced - every field below was silently unreachable
        against every real config on disk, and rope_scaling_type stayed
        0 regardless of what rope_type said; the RoPE table this loader
-       feeds never applied any of it either (see forward.c's rope_cs
+       feeds never applied any of it either (see forward_rope.c's rope_cs
        fill). Defaults: no scaling. rope_scaling_type stays 0 unless
        the key exists AND names a supported type - an unsupported type
        name is refused, not silently read as "no scaling". */

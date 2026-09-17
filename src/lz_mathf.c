@@ -639,7 +639,7 @@ reduce_large (uint32_t xi, int *np)
      while SSE and the ARM soft-float round the integer to float first
      and then round the product: one rounding against two.  The results
      differ by 1 ulp on roughly 0.6% of arguments.  That is not
-     academic - forward.c builds the RoPE table from lz_sinf/lz_cosf at
+     academic - forward_rope.c builds the RoPE table from lz_sinf/lz_cosf at
      every position, so the first argument where the two disagree makes
      the whole float tier (--fixed off) diverge between gcc and Watcom
      from that token onward; on kmr20 it is position 125, sin(125).

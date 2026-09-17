@@ -516,10 +516,10 @@ typedef struct {
        beta_fast/beta_slow are yarn's correction-range bounds
        (HF defaults 32.0 / 1.0). attn_factor is yarn's post-scale on
        cos/sin (HF's `attention_factor`); 0 means absent, in which case
-       forward.c derives the standard single-mscale default rather than
+       forward_rope.c derives the standard single-mscale default rather than
        reading a DeepSeek-style mscale/mscale_all_dim pair, which this
        project does not parse. The per-position cos/sin table in
-       forward.c applies these when it builds rope_cs. */
+       forward_rope.c applies these when it builds rope_cs. */
     int   rope_scaling_type;
     float rope_scaling_factor;
     float rope_scaling_orig_max;

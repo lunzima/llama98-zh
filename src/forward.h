@@ -373,6 +373,7 @@ extern lz_i64 lz_debug_ced_skipped;
 extern const char *lz_dump_prefill_path;
 extern lz_i64 lz_debug_prefill_dumps;
 extern lz_i64 lz_debug_n_kv_rot;
+extern lz_i64 lz_debug_n_rope_ntk;
 extern int   lz_debug_mtp_attn_window;
 extern lz_i64 lz_debug_mtp_attn_rows;
 extern lz_i64 lz_debug_vproj_i16;
@@ -1494,9 +1495,13 @@ int  lz_ckpt_restore(const LZStateCkpt *ck, LZRunState *s, const LZModel *m,
 int  lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
                         int spec_k_max, char *errbuf, int errlen);
 void lz_state_free(LZRunState *s);
+/* lz_rope_build_table's two runtime inputs, both defined in forward.c:
+   --rope-dynamic-ntk's on/off and --rope-orig-max. */
+extern int   lz_rope_dynamic_ntk;
+extern float lz_rope_orig_max;
 /* Exported so it can be exercised (and cross-checked against a
    reference) without building a whole model - see its own doc comment
-   in forward.c. lz_state_alloc's only caller besides tests. */
+   in forward_rope.c. lz_state_alloc's only caller besides tests. */
 void lz_rope_build_table(float *rope_cs, int seq_len,
                          const LZModelConfig *c);
 /* Clear KV cache, SSM recurrent state and conv history; call before a new generation */
