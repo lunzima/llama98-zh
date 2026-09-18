@@ -105,6 +105,26 @@
 #              future prompt change that makes +0.05 stop moving the text
 #              is this arm telling the truth rather than a defect.
 #
+#   npert      The checkpoint with layers.0.gr_attn.norms.1.weight offset by
+#              +0.5. A SEPARATE arm from `sens`, not a replacement for it:
+#              `sens` covers "gr_attn.wu is read into the computation",
+#              `npert` covers "the read norm is read BY INDEX", and the
+#              loader's shape check covers neither.
+#
+#              THE TENSOR PERTURBED IS norms.1, NOT norms.0, AND THAT IS THE
+#              WHOLE POINT. All 32 gr_*norms* tensors on this checkpoint are
+#              exactly 0, and under (1+w) that makes all four branch norms
+#              the same identity function - so a mutant where every branch
+#              reads norms[0] is BIT FOR BIT identical to the correct engine
+#              (measured: cmp passes on --dump-all-logits). Nothing else in
+#              this gate, and no end-to-end comparison, can see it. Moving
+#              norms.1 is what gives the claim a consequence: an engine that
+#              reads only norms[0] cannot reproduce this fixture. Measured
+#              prefill md5: factory e8cd82af9e40, +0.5 on norms.1
+#              827d90cf212f (correct engine), e8cd82af9e40 (norms[0]
+#              mutant). `norms.0` would have been the wrong choice - it is
+#              the one index a norms[0]-only implementation does read.
+#
 # MUTATIONS, each aimed at a different arm, because the halves fail
 # independently:
 #
@@ -122,6 +142,14 @@
 #      only normalisation in front of the gate. Caught by `sens`: with the
 #      read gone the read gate is never computed, so perturbing W_u cannot
 #      move anything.
+#   M4  gr_expand stops copying branch 0 - correct for token 0 and wrong for
+#      every later token, which batch width 1 can never see. Caught by
+#      `batch`.
+#   M5  every branch reads norms[0]. Caught by `npert`, and by NOTHING ELSE:
+#      on this checkpoint the mutant's logits are bit for bit identical to
+#      the correct engine's, because all 32 gr_*norms* tensors are exactly 0
+#      and (1+w) makes all four branch norms the same identity. That is the
+#      shape of a degenerate subject - see the plan's A/B/C classification.
 #
 # Exit: 0 pass, 1 fail, 2 skip (no binary / no model dir / no python3 with
 # numpy+safetensors / no git revision to build `pre` from).
@@ -131,6 +159,7 @@ MODEL=${1:-}
 MODEL2=${2:-}
 PROMPT="人工智能的发展历史可以追溯到二十世纪五十年代，当时的科学家们开始思考机器是否能够模拟人类的思维过程。"
 PERT_DELTA=0.05
+NORM_DELTA=0.5
 NGEN=16
 
 BIN=$ROOT/llama98.exe
@@ -152,10 +181,12 @@ FAILED=0
 # One python pass writes all three, because the decision they share (which
 # tensors are GR, which key turns it on) has to be made once or it drifts
 # between arms.
-python3 - "$MODEL" "$W" "$PERT_DELTA" <<'PY'
+python3 - "$MODEL" "$W" "$PERT_DELTA" "$NORM_DELTA" <<'PY'
 import json, os, shutil, sys
 
-model_dir, w, pert = sys.argv[1], sys.argv[2], float(sys.argv[3])
+model_dir, w, pert, norm_delta = (sys.argv[1], sys.argv[2],
+                                  float(sys.argv[3]), float(sys.argv[4]))
+NORM_TENSOR = "model.layers.0.gr_attn.norms.1.weight"
 
 def bail(msg):
     print("SKIP: " + msg)
@@ -187,6 +218,11 @@ span = ced if 0 < ced < n else n
 print("  fixture: nr=%d, layers [0,%d), %d gr_* tensor(s), %d parameter(s)"
       % (nr, span, len(gr_names), sum(int(tensors[k].size) for k in gr_names)))
 print("  fixture: perturbation -> model.layers.0.gr_attn.wu.weight +%g" % pert)
+print("  fixture: perturbation -> %s +%g" % (NORM_TENSOR, norm_delta))
+if NORM_TENSOR not in tensors:
+    print("FAIL: '%s' carries no %s, so the npert arm would perturb nothing"
+          " and read green for that reason" % (model_dir, NORM_TENSOR))
+    sys.exit(1)
 
 SKIP_FILES = ("model.safetensors", "model.bin", "model.bin.lz4")
 
@@ -199,7 +235,13 @@ def scaffold(out):
         if os.path.isfile(src):
             shutil.copyfile(src, os.path.join(out, name))
 
-def emit(tag, keep_gr, perturb, drop_key):
+def emit(tag, keep_gr, drop_key, *perturbs):
+    """One fixture dir. `perturbs` are (tensor-name, offset) pairs - a tensor
+    named here is offset by that amount, every other tensor is copied
+    through unchanged. A MAP rather than one hardcoded tensor name: the two
+    perturbation arms move different tensors, and a second arm that
+    silently perturbed the first arm's tensor would be indistinguishable
+    from one whose criterion cannot fire."""
     out = os.path.join(w, tag)
     scaffold(out)
     c = json.loads(json.dumps(cfg))
@@ -207,20 +249,22 @@ def emit(tag, keep_gr, perturb, drop_key):
         ctc = c.get("text_config") or c
         ctc.pop("gated_residual", None)
     json.dump(c, open(os.path.join(out, "config.json"), "w", encoding="utf-8"))
+    pert_of = dict(perturbs)
     tt = {}
     for k, v in tensors.items():
         if not keep_gr and (".gr_attn." in k or ".gr_mlp." in k):
             continue
-        if perturb and k == "model.layers.0.gr_attn.wu.weight":
-            v = v.astype(np.float32) + np.float32(pert)
+        if k in pert_of:
+            v = v.astype(np.float32) + np.float32(pert_of[k])
         tt[k] = v
     save_file(tt, os.path.join(out, "model.safetensors"))
 
 # off: never carried the switch. keyonly: the key says off, the file says
-# otherwise. pert: the switch on, one gate tensor moved.
-emit("off", keep_gr=False, perturb=False, drop_key=True)
-emit("keyonly", keep_gr=True, perturb=False, drop_key=True)
-emit("pert", keep_gr=True, perturb=True, drop_key=False)
+# otherwise. pert / npert: the switch on, one tensor moved each.
+emit("off", False, True)
+emit("keyonly", True, True)
+emit("pert", True, False, ("model.layers.0.gr_attn.wu.weight", pert))
+emit("npert", True, False, (NORM_TENSOR, norm_delta))
 PY
 PYRC=$?
 [ "$PYRC" -eq 2 ] && exit 2
@@ -346,6 +390,31 @@ if cmp -s "$W/on.txt" "$W/pert.txt"; then
     FAILED=1
 else
     echo "  sens (+$PERT_DELTA): greedy continuation differs from on"
+fi
+
+# npert. The four branch norms are SEPARATE tensors, and "each branch has
+# its own" is a structural claim about the read - but on this checkpoint
+# every gr_*norms* tensor is exactly 0, and (1+w) makes all four the same
+# identity, so the INDEX is unobservable: a norms[i]->norms[0] mutant is
+# bit-for-bit identical to the correct engine here (measured). Perturbing
+# norms.1 (rather than norms.0) is what makes the claim testable: an
+# implementation that reads only norms[0] cannot see this tensor move.
+# A SEPARATE arm from `sens`, not a replacement for it - `sens` covers
+# "gr_attn.wu is read into the computation", which the loader's shape
+# check does not.
+run "$BIN" npert "$W/npert" || exit 1
+if cmp -s "$W/on.pf" "$W/npert.pf"; then
+    echo "  FAIL: perturbing layers.0.gr_attn.norms.1.weight by +$NORM_DELTA changed"
+    echo "    nothing - the per-branch read norm is not being read BY INDEX"
+    FAILED=1
+else
+    echo "  npert (norms.1 +$NORM_DELTA): prefill logits differ from on (the branch norm is read by index)"
+fi
+if cmp -s "$W/on.txt" "$W/npert.txt"; then
+    echo "  FAIL: npert (+$NORM_DELTA) generated the same $NGEN tokens as on"
+    FAILED=1
+else
+    echo "  npert (+$NORM_DELTA): greedy continuation differs from on"
 fi
 
 # batch parity - see this file's header. Width 1 is batching off, 4 is
@@ -595,6 +664,27 @@ if mutant m4 src/forward.c \
         FAILED=1
     else
         echo "  mutation M4 (gr_expand skips branch 0): red as it should be - the batch arm is watching the stride"
+    fi
+else
+    FAILED=1
+fi
+
+# M5: every branch reads norms[0]. Invisible everywhere except `npert` -
+# measured: on the shipped checkpoint this mutant's logits are BIT FOR BIT
+# identical to the correct engine's, because all 32 norms are zero and
+# (1+w) makes all four the identity. The criterion is therefore not "the
+# output changed" but "the npert perturbation still reached the output":
+# under M5 perturbing norms.1 cannot do anything, so the M5 run on `npert`
+# reproduces `on` exactly.
+if mutant m5 src/forward.c \
+        'lz_t_f32(&norms[b], s->wscr)' 'lz_t_f32(&norms[0], s->wscr)'; then
+    run "$MUTBIN" m5 "$W/npert" || exit 1
+    if cmp -s "$W/m5.pf" "$W/on.pf"; then
+        echo "  mutation M5 (every branch reads norms[0]): red as it should be - the npert perturbation never reaches the output"
+    else
+        echo "  FAIL: mutation M5 (every branch reads norms[0]) was not caught;"
+        echo "    the npert arm is not watching the norm's index"
+        FAILED=1
     fi
 else
     FAILED=1
