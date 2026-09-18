@@ -113,6 +113,7 @@ typedef enum {
     LZ_ERR_CFG_FFN_ACT,        /* ffn_activation is not one of none/situ/gptoss_clamp, got %s */
     LZ_ERR_CFG_MLA_SUBN,       /* mla_q_lora_rank/mla_o_lora_rank is not compatible with use_subn */
     LZ_ERR_CFG_CSA2_LAYER,     /* csa2_layers names layer %d, which is not full_attention */
+    LZ_ERR_CFG_CED_KV,         /* ced_kv is not one of off/proj, got %s */
     LZ_ERR_CFG_UNSUPPORTED_ARCH, /* checkpoint is neither GDN (Qwen3.5) nor KDA (KunMoe) shape */
     LZ_ERR_CFG_ATTN_GATE,      /* attn_output_gate must be true: the forward reads the gate half of every attention head unconditionally */
     LZ_ERR_CFG_ROPE_KEY,       /* unsupported rope_parameters key: %s */

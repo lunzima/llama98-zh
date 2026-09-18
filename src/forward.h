@@ -520,6 +520,18 @@ typedef struct {
        call, never across chunks: the source layer always runs before a
        target layer of the same call. */
     float *kvshare_x;
+    /* CED "proj" (model.h's ced_kv comment): the encoder's own exit
+       hidden h_S for the current chunk (nt_cap x hidden, token-major
+       like kvshare_x above), captured once when layer ced_split runs
+       and read by every decoder-region full-attention layer's K/V
+       projections after - each with its own, independently-trained
+       k_proj/v_proj, unlike kvshare_x's aliased-weight targets.
+       Needs no cross-chunk persistence, unlike kvshare_x: encoder and
+       decoder layers are the lower/upper half of ONE causal stack
+       processed in a single forward_chunk call, so every decoder-
+       region layer reads it within the SAME call that produced it.
+       NULL when ced_kv is off. */
+    float *ced_hs;
     /* KV cache Q8: kq8/vq8 hold the rotated k/v (group 32), dequantized at score time.
        (K group 16 measured no gain.)
        Depth is n_full_layers PLUS ONE when m->mtp != NULL: the MTP
@@ -1366,9 +1378,15 @@ void forward_attn(const LZModel *m, LZRunState *s,
    of forward_attn when L->csa2_on - see model.h's LZModelConfig.
    csa2_on[] comment for the mechanism and forward_csa2.c's own header
    comment for why this cannot share forward_attn's KV-cache-based
-   design (compressed blocks, not raw per-position K/V). */
+   design (compressed blocks, not raw per-position K/V).
+   kv_in means the same thing here as forward_attn's own parameter
+   (this comment block, above): non-NULL only when this layer is in
+   CED's decoder region and ced_kv=proj, in which case its main-KV and
+   indexer-K compression inputs read kv_in instead of s->xb. Q's own
+   input (step 1 of forward_csa2.c) is unaffected either way. */
 void forward_csa2(const LZModel *m, LZRunState *s,
-                  const LZLayer *L, int layer, int pos0, int nt);
+                  const LZLayer *L, int layer, int pos0, int nt,
+                  const float *kv_in);
 /* The KV half of forward_attn and nothing else: the q/k/v projections
    minus q, the per-token QK-Norm / RoPE / Hadamard on k and v, and the
    cache write. No attention, no output projection, no residual, no FFN.

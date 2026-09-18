@@ -436,6 +436,26 @@ int lz_load_config(LZModelConfig *c, const char *path,
     c->ced_split      = lz_json_get_int(&j, tc, "ced_split", 0);
     c->ced_replay_w   = lz_json_get_int(&j, tc, "ced_replay_w", 0);
 
+    /* ced_kv (model.h's own field comment). A string, not a bool - it
+       has three possible values on the training side (off/proj/reuse)
+       and this engine implements only two of them. */
+    {
+        const char *ck = lz_json_get_str(&j, tc, "ced_kv", "off");
+        if (strcmp(ck, "off") == 0) {
+            c->ced_kv = 0;
+        } else if (strcmp(ck, "proj") == 0) {
+            c->ced_kv = 1;
+        } else {
+            /* Covers "reuse" and any typo'd value alike - same posture
+               kda_gate_activation/ffn_activation take on a name the
+               engine does not recognize, rather than silently falling
+               back to off. */
+            qerr(errbuf, errlen, LZ_ERR_CFG_CED_KV, ck);
+            lz_json_free(&j);
+            return 1;
+        }
+    }
+
     /* S1 attn_kv_share (model.h's own field comment). Read as a BOOL,
        not with lz_json_get_int: the key is a JSON true/false in every
        config.json the training side writes, and lz_json_get_int answers
@@ -1216,6 +1236,14 @@ int lz_kv_share_target(const LZModelConfig *c, int li) {
     if (c->ced_split > 0 && c->ced_split < c->n_layers && li >= c->ced_split)
         return 0;
     return 1;
+}
+
+/* model.h's own comment on this function has the contract. ced_split
+   == 0 or == n_layers is not a decoder-region boundary (the same "CED
+   on" test lz_kv_share_target and lz_gr_span use above), so ced_kv has
+   nothing to substitute even when the config turns it on. */
+int lz_ced_kv_target(const LZModelConfig *c, int li) {
+    return c->ced_kv && c->ced_split > 0 && c->ced_split < c->n_layers && li >= c->ced_split;
 }
 
 /* Give every target layer the source layer's five K/V tensors.
@@ -2820,6 +2848,7 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
         RD(&c->attn_sink_learned, 4);
         RD(&c->gated_residual, 4);
         RD(&c->ced_split, 4);
+        RD(&c->ced_kv, 4);
         /* Range-check the three scalars before anything downstream turns
            one into a shape: GR sizes the residual stream and its own
            weight rows at nr*d and takes its span from ced_split, and the
@@ -2853,6 +2882,15 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
         }
         if (c->ced_split < 0 || c->ced_split > c->n_layers) {
             qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE, "ced_split");
+            goto fail;
+        }
+        /* ced_kv is an enum (0=off, 1=proj) written by the exporter,
+           not a free-form scalar - "reuse" has no engine-side
+           implementation (model.h's own field comment) and never
+           reaches a header word, so any value past 1 is a garbage
+           word rather than a legal-but-unimplemented one. */
+        if (c->ced_kv != 0 && c->ced_kv != 1) {
+            qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE, "ced_kv");
             goto fail;
         }
         RD(c->csa2_on, LZ_MAX_LAYERS * 4);

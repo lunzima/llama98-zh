@@ -570,7 +570,7 @@ float lz_prof_us[LZ_PROF_N];
 
 void lz_state_free(LZRunState *s) {
     if (!s) return;
-    xfree(s->x); xfree(s->xb); xfree(s->xb2); xfree(s->kvshare_x); xfree(s->hb); xfree(s->hb2);
+    xfree(s->x); xfree(s->xb); xfree(s->xb2); xfree(s->kvshare_x); xfree(s->ced_hs); xfree(s->hb); xfree(s->hb2);
     xfree(s->logits);
     xfree(s->qg); xfree(s->qh); xfree(s->att); xfree(s->attn_out);
     xfree(s->attn_acc); xfree(s->attn_ss);
@@ -1274,17 +1274,43 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
                            c->rms_norm_eps);
         }
         LZ_TAP("an", l, s->xb, dim);
-        /* S1 attn_kv_share. Captured HERE, at the layer's attention
-           entry: this is exactly the tensor the training side's capture
-           hook records off the source attention module, so the shared
-           k_proj/v_proj reproduce the source's own K/V rather than a
-           re-projection of the target's input (model.h's attn_kv_share
-           comment). Done for the source whatever its attention kind is -
-           a csa2_on source layer keeps no per-position K/V of its own,
-           which is the case this exists for. One copy per chunk, and
-           only on a model that has a source at all. */
+        /* CED "proj" (model.h's ced_kv comment). Captured HERE, at
+           layer ced_split's own attention entry: GR's span ends at
+           ced_split (model.h's gated_residual comment), so this is
+           already the collapsed [B,S,D] stream Eq(1) expects, and
+           under use_subn s->xb is an unnormalized copy of s->x here -
+           the raw "exit hidden" every later decoder layer's own
+           k/v SubLN norm then applies to independently. One copy per
+           chunk; a no-op capture-then-read for layer ced_split itself
+           (kv_in ends up equal to its own s->xb), which is correct -
+           Eq(1)'s substitution only changes anything for the decoder
+           layers AFTER the one whose own input already is h_S.
+           lz_ced_kv_target(c, c->ced_split) doubles as "is CED active
+           at all", since it is li >= ced_split evaluated at li ==
+           ced_split - true whenever ced_kv is on and ced_split
+           describes a real boundary (model.h's own comment on that
+           function). */
+        if (l == c->ced_split && lz_ced_kv_target(c, l)) {
+            memcpy(s->ced_hs, s->xb, (size_t)nt * dim * sizeof(float));
+        }
         kv_in = NULL;
-        if (L->type == LZ_LT_FULL) {
+        if (lz_ced_kv_target(c, l) && L->type == LZ_LT_FULL) {
+            /* CED wins outright in the decoder region. No arbitration
+               needed against attn_kv_share below: lz_kv_share_target
+               already refuses to claim a layer here (its own comment,
+               same ced_split test). */
+            kv_in = s->ced_hs;
+        } else if (L->type == LZ_LT_FULL) {
+            /* S1 attn_kv_share. Captured HERE, at the layer's attention
+               entry: this is exactly the tensor the training side's
+               capture hook records off the source attention module, so
+               the shared k_proj/v_proj reproduce the source's own K/V
+               rather than a re-projection of the target's input
+               (model.h's attn_kv_share comment). Done for the source
+               whatever its attention kind is - a csa2_on source layer
+               keeps no per-position K/V of its own, which is the case
+               this exists for. One copy per chunk, and only on a model
+               that has a source at all. */
             if (l == ksrc) {
                 memcpy(s->kvshare_x, s->xb,
                        (size_t)nt * dim * sizeof(float));
@@ -1304,7 +1330,7 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
                csa2_on layer never takes the ced_skip_last branch even
                when it happens to be the model's last layer. */
             if (L->csa2_on) {
-                forward_csa2(m, s, L, l, pos0, nt);
+                forward_csa2(m, s, L, l, pos0, nt, kv_in);
             } else
             /* --ced, on a chunk whose outputs nobody reads (see
                ced_skip_last). The last layer's K/V over these positions

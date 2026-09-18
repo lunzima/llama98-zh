@@ -44,7 +44,7 @@
        rollback (--spec) is therefore not yet correct on a csa2_on
        layer and is out of scope for this pass, same as SIMD. */
 void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
-                  int layer, int pos0, int nt) {
+                  int layer, int pos0, int nt, const float *kv_in) {
     const LZModelConfig *c = &m->config;
     int hd = c->head_dim, nh = c->n_heads;
     int hdim = c->hidden_size;
@@ -81,6 +81,17 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
         int off = pos % cm;
         int blk = pos / cm;
         const float *h = s->xb + (size_t)tk * hdim;
+        /* CED "proj" (model.h's ced_kv comment): this layer's own
+           main-KV and indexer-K compression inputs (step 2 below) read
+           the encoder's frozen exit hidden instead of this position's
+           own s->xb, when forward.c's kv_in resolution put this layer
+           in CED's decoder region - every csa2_on layer takes the
+           substitution whenever kv_in is non-NULL, since this function
+           is only ever called for csa2_on layers to begin with; a
+           future per-layer CSA2 mode distinction may need this
+           narrowed further once one exists. Step 1's query above stays
+           on h - only the compression content moves. */
+        const float *kvh = kv_in ? kv_in + (size_t)tk * hdim : h;
         int n_vis = s->csa2_n_blocks[ci];
         int k_eff;
         int hh;
@@ -120,11 +131,11 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
            that is still open (csa2_compress's per-token half - the
            softmax/weighted-sum half only runs once the block closes,
            step 6 below). */
-        lz_matmul_w(s->csa2_c_j, h, &L->csa2_w_kv, hdim, hd, s->xq, s->xqs);
+        lz_matmul_w(s->csa2_c_j, kvh, &L->csa2_w_kv, hdim, hd, s->xq, s->xqs);
         lz_matmul_w(s->csa2_z_j, h, &L->csa2_w_gate, hdim, hd, s->xq, s->xqs);
         memcpy(pend_c + (size_t)off * hd, s->csa2_c_j, (size_t)hd * sizeof(float));
         memcpy(pend_z + (size_t)off * hd, s->csa2_z_j, (size_t)hd * sizeof(float));
-        lz_matmul_w(s->csa2_c_j_idx, h, &L->csa2_w_kv_idx, hdim, idx_hd, s->xq, s->xqs);
+        lz_matmul_w(s->csa2_c_j_idx, kvh, &L->csa2_w_kv_idx, hdim, idx_hd, s->xq, s->xqs);
         lz_matmul_w(s->csa2_z_j_idx, h, &L->csa2_w_gate_idx, hdim, idx_hd, s->xq, s->xqs);
         memcpy(pend_c_idx + (size_t)off * idx_hd, s->csa2_c_j_idx, (size_t)idx_hd * sizeof(float));
         memcpy(pend_z_idx + (size_t)off * idx_hd, s->csa2_z_j_idx, (size_t)idx_hd * sizeof(float));

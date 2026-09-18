@@ -260,6 +260,14 @@ static void alloc_core_buffers(LZRunState *s, const LZModel *m,
        stack, not one per target: every target layer of a model reads the
        SAME source. */
     s->kvshare_x = (float *)xcalloc((size_t)nt * c->hidden_size, sizeof(float), &ok, &s->bytes_alloc);
+    /* CED "proj" (model.h's ced_kv comment, forward.h's ced_hs
+       comment). Allocated only when the config actually turns the
+       mechanism on, unlike kvshare_x above - forward.c's resolution
+       never reads this pointer when ced_kv is off. */
+    s->ced_hs = c->ced_kv
+        ? (float *)xcalloc((size_t)nt * c->hidden_size, sizeof(float),
+                           &ok, &s->bytes_alloc)
+        : NULL;
     /* Sized for the LARGER of the body's dense-FFN width and the MTP
        block's own (dense_ffn_step's shared scratch, forward.c) - the
        two are independent fields (model.h's mtp_intermediate_size

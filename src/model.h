@@ -400,6 +400,28 @@ typedef struct {
     int ced_split;
     int ced_replay_w;
 
+    /* ced_kv: the OTHER half of report Sec2.2 Eq(1) - whether a
+       decoder-region full-attention layer's K/V projections read h_S
+       (the encoder's own exit hidden state, captured once per chunk at
+       layer ced_split) instead of that layer's own current s->xb.
+       config.json "ced_kv": "off" (default, 0) reproduces a
+       config.json that never carried the key; "proj" (1) turns the
+       substitution on while every decoder layer keeps its own,
+       independently-trained k_proj/v_proj (forward.c's kv_in
+       resolution, forward.h's s->ced_hs - the same "capture one
+       layer's s->xb, feed it to other layers' K/V input" shape
+       attn_kv_share already uses, with a different source rule).
+
+       "reuse" (DeepSeek-V4.1's OTHER CED arm - decoder layers sharing
+       the SOURCE layer's k_proj/v_proj Parameter objects outright,
+       the same aliasing attn_kv_share already does, rather than
+       sharing only the projection's input) has no engine-side
+       implementation and is refused at load (LZ_ERR_CFG_CED_KV)
+       rather than silently treated as off - a checkpoint that says
+       "reuse" and gets "off" would run and produce confidently wrong
+       numbers with no error. */
+    int ced_kv;
+
     /* S1, attn_kv_share (DeepSeek-V4.1 report SS2.3.1's "Reuse" mode).
        config.json "attn_kv_share" (a JSON true/false) and the v10
        model.bin header tail. 0 - the default, and the only value a bin
@@ -1031,5 +1053,16 @@ const char *lz_layer_type_name(int t);
    (forward.c's kvshare_x). */
 int lz_kv_share_src(const LZModelConfig *c);
 int lz_kv_share_target(const LZModelConfig *c, int li);
+
+/* ced_kv's layer rule (model.h's own field comment above): 1 when
+   layer li is in CED's decoder region and its K/V projections should
+   read h_S (forward.c's s->ced_hs) instead of its own s->xb. True for
+   ced_split itself (a no-op there, model.c's comment on the caller
+   side has the argument) through n_layers-1. False whenever ced_kv is
+   off or ced_split does not describe a real boundary (0 or n_layers -
+   the same domain lz_kv_share_target and lz_gr_span already use), so
+   forward.c's `li == c->ced_split` capture test can reuse this same
+   function rather than repeating the "is CED active" condition. */
+int lz_ced_kv_target(const LZModelConfig *c, int li);
 
 #endif
