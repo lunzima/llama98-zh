@@ -2671,8 +2671,10 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
          tail  (2) hadamard_o, hadamard_down
          tail  (2) mla_q_lora_rank, mla_o_lora_rank
          tail  (1) attn_kv_share
-         appended (131) attn_sink_learned, gated_residual, ced_split,
-                   csa2_on[128]
+         appended (137) attn_sink_learned, gated_residual, ced_split,
+                   csa2_on[128], ced_replay_w, csa2_compress_m,
+                   csa2_topk, csa2_indexer_heads, csa2_indexer_head_dim,
+                   csa2_indexer_q_lora_rank
 
        v4 is the published generation - github.com/lunzima/kunkun98-models
        ships a MODEL/model.bin of exactly this shape - so it is FROZEN
@@ -2798,6 +2800,79 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
                 qerr(errbuf, errlen, LZ_ERR_BIN_CSA2_PAD);
                 goto fail;
             }
+        }
+        RD(&c->ced_replay_w, 4);
+        RD(&c->csa2_compress_m, 4);
+        RD(&c->csa2_topk, 4);
+        RD(&c->csa2_indexer_heads, 4);
+        RD(&c->csa2_indexer_head_dim, 4);
+        RD(&c->csa2_indexer_q_lora_rank, 4);
+        /* CSA2 geometry and CED replay. All six are config.json fields
+           with no other route into this loader, so before these RD()
+           calls the bin path ran the whole CSA2 mechanism on zeros: the
+           three indexer words ARE tensor shapes (csa2_w_kv_idx and
+           friends resolved to 0 elements, so the first CSA2 tensor with
+           an indexer dim died with "want 0, file 16384"), csa2_compress_m
+           sized buffers at the fallback 1 in forward_state.c while
+           forward_csa2.c divided by the raw value, and csa2_topk is the
+           top-k selection's own buffer length.
+
+           Every bound is >= 1 because 0 is not a legal value for any of
+           them and the failure mode of accepting it is a SYMBOLIC one,
+           not a loud one: 0 elements of shape, 0 bytes of buffer, or a
+           division by zero. Refusing them here is what keeps "a garbage
+           word behaves like a legal one" from being true.
+
+           csa2_compress_m is additionally capped at seq_len. Past that
+           the arithmetic is unchanged - ceil(seq_len/cm) is 1 either way,
+           so cm > seq_len compresses exactly as much as cm == seq_len,
+           i.e. nothing - while the four csa2_pending_* buffers each grow
+           as n_full_layers * cm * dim. The cap costs no legitimate
+           config and bounds those four allocations by n_full * seq_len.
+
+           csa2_topk is NOT bounded by csa2_compress_m: the two are in
+           different units (blocks vs positions) and forward_csa2.c
+           already clamps the selection with
+           `k_eff = topk < n_vis ? topk : n_vis`, so a topk larger than
+           the block count reads nothing out of range. A topk large
+           enough to exhaust memory is loud through xcalloc, not silent.
+
+           The three indexer words size tensors, so a value that
+           disagrees with the checkpoint is already caught by the tensor
+           stream's own elem-count check; >= 1 is only here to keep 0
+           from producing a shapeless tensor that the count check would
+           then report as a mismatch far from its cause.
+
+           ced_replay_w is >= 0 rather than >= 1 because 0 IS the legal
+           setting - it is what every checkpoint in this tree carries and
+           it means "no bounded replay". Only a negative word is refused.
+           Its own consumer, lz_forward_batch's replay_boundary, reads
+           `ced_replay_w > 0` and treats anything else as off, so a
+           negative value would otherwise be a legal-looking "off". */
+        if (c->ced_replay_w < 0) {
+            qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE, "ced_replay_w");
+            goto fail;
+        }
+        if (c->csa2_compress_m < 1 || c->csa2_compress_m > c->seq_len) {
+            qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE, "csa2_compress_m");
+            goto fail;
+        }
+        if (c->csa2_topk < 1) {
+            qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE, "csa2_topk");
+            goto fail;
+        }
+        if (c->csa2_indexer_heads < 1) {
+            qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE, "csa2_indexer_heads");
+            goto fail;
+        }
+        if (c->csa2_indexer_head_dim < 1) {
+            qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE, "csa2_indexer_head_dim");
+            goto fail;
+        }
+        if (c->csa2_indexer_q_lora_rank < 1) {
+            qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE,
+                 "csa2_indexer_q_lora_rank");
+            goto fail;
         }
         if (c->rope_scaling_type < 0 || c->rope_scaling_type > 2 ||
             !(c->rope_scaling_factor > 0.0f) ||

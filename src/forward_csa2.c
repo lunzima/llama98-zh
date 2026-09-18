@@ -49,7 +49,15 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
     int hd = c->head_dim, nh = c->n_heads;
     int hdim = c->hidden_size;
     int qgd = c->attn_qgate_dim, qd = c->attn_q_dim;
-    int cm = c->csa2_compress_m;
+    /* cm is the divisor of max_blocks and of pos % cm below, and the
+       multiplier of every pend_* offset into buffers that
+       forward_state.c sizes with `cm > 0 ? cm : 1`. Read raw, a cm of 0
+       therefore divides by zero here while the allocation next door
+       assumed 1 - two different values for one quantity. Same guard as
+       forward.c's reset and forward_state.c's allocator; lz_open_bin
+       also refuses cm < 1, so this is the third line rather than the
+       only one. */
+    int cm = c->csa2_compress_m > 0 ? c->csa2_compress_m : 1;
     int n_idx_heads = c->csa2_indexer_heads;
     int idx_hd = c->csa2_indexer_head_dim;
     int idx_r = c->csa2_indexer_q_lora_rank;
