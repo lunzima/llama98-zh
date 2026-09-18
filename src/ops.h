@@ -1786,7 +1786,7 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
                         int8_t *hi, int8_t *lo, float *s, int fc_site);
 #endif
 
-/* Dequant weight of a low plane: value ~= (hi + lo/254) * s.
+/* Dequant weight of a low plane: value ~= (hi + lo/256) * s.
 
    256, not 254, and the choice is worth its paragraph because 254
    looked like the obviously right number.
