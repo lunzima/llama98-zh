@@ -1184,16 +1184,19 @@ const char *lz_build_paths(void);
    Full rationale at the definition in ops.c. */
 const char *lz_kernel_tier(void);
 
-/* Q8_0 activation quantization: q[i] = round_half_even(x[i]/s[i/gs]), s
-   being the group's absmax/127 (all-zero group scale=1.0). q needs n
-   bytes, s n/gs f32s. */
+/* Q8_0 activation quantization: q[i] = clamp(RTZ(x[i]*inv), -127, 127),
+   inv = 127/amax. Toward zero is the shipping float mode's rule - the
+   scalar arms take `(int)qv`, the SIMD arms cvtps2dq under the MXCSR
+   chop lz_fpu_float_begin sets; with lz_fastfp() off both are the magic
+   add's round-half-even instead. s[i/gs] is the group's absmax/127
+   (all-zero group scale=1.0). q needs n bytes, s n/gs f32s. */
 void lz_quantize_q8(const float *x, int n, int gs, int8_t *q, float *s);
 
 /* Per-token absmax INT8 activation quantize (SubLN path). ONE scale for
    the whole n-wide row - the training side's activation_quant_absmax
    (gamma = max|x| over the token, dequant scale = gamma/127) - stored in
    every n/32 xqs slot so the matmul's per-32 xqs read stays consistent
-   with lz_act_gs. q/s semantics match lz_quantize_q8: round-half-even,
+   with lz_act_gs. q/s semantics match lz_quantize_q8: RTZ,
    clamp [-127,127], all-zero row scale 1.0. n must be a multiple of 32. */
 void lz_quantize_q8_tok(const float *x, int n, int8_t *q, float *s);
 

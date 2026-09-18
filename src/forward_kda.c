@@ -38,8 +38,8 @@
    gw is used, one xqs slot is still written per 32 elements, which is
    what the matmul reads.
 
-   q/s semantics match lz_quantize_q8 (round-half-even, clamp
-   [-127,127], all-zero group scale 1.0). */
+   q/s semantics match lz_quantize_q8 (RTZ, clamp [-127,127], all-zero
+   group scale 1.0). */
 static void subn_fwht_quant(const float *x, int n, int blk, int gw,
                             int8_t *q, float *s, int32_t *fscr) {
     union { float f; uint32_t u; } b;
