@@ -29,12 +29,32 @@
 #              `head` must PASS.
 #
 #   off        The same weights with the KEY absent and the gr_* tensors
-#              REMOVED - a checkpoint that never carried GR. It must load,
-#              AND its logits must be BITWISE IDENTICAL between `pre` and
-#              `head`. That is the whole "off means off" contract: with the
-#              switch clear, every line this task added is dead, and the
-#              cheapest way to say that is that the binary before the change
-#              and the binary after it agree on every byte.
+#              REMOVED - a checkpoint that never carried GR. It must load.
+#              The arm is then ONE ENGINE RUN TWICE: a `keyclear` mutant
+#              (gr_first/gr_last read as false and the four `if (L->gr_on)`
+#              guards read as 0, loader untouched so the tensors stay
+#              claimed) on this checkpoint, and that same mutant on the
+#              checkpoint as shipped, whose config says GR is on. "The key
+#              is clear" and "the tensors do not exist" must name the same
+#              run, BIT FOR BIT.
+#
+#              COMPARING `pre` AGAINST `head` ON THE GR-OFF CHECKPOINT IS A
+#              DIFFERENT CLAIM, AND NOT THIS ARM'S: it makes "no commit
+#              between the GR commit and HEAD may move a number" an assertion
+#              of this gate, while the GR-off checkpoint still runs kunkun98's
+#              KDA and csa2 layers - so a numerically correct fix to THOSE
+#              layers reddens that comparison while saying nothing about GR.
+#              Those two binaries carry exactly one claim between them, and it
+#              is the loading arm below: `pre` must refuse the checkpoint
+#              naming a gr_* tensor, `head` must load it.
+#
+#              Not a second copy of `raw`: raw neutralises the GATES and
+#              keeps GR running, so it measures arithmetic. This arm takes
+#              GR out of the run, so what it measures is that nothing GR
+#              added sits OUTSIDE the key - an unguarded gr_expand at the
+#              top of the layer, or a dropped `if (L->gr_on)` around
+#              gr_write. Measured: dropping the gr_first guard alone, and
+#              nothing else, turns this arm red.
 #
 #   keyonly    The same weights with the KEY absent but the tensors KEPT.
 #              Must be REFUSED. Without this arm the `off` arm would also be
@@ -71,39 +91,54 @@
 #              accident.
 #
 #   sens       The checkpoint with layers.0.gr_attn.wu.weight offset by
-#              +0.05. BOTH its prefill logits and its greedy continuation
+#              +4.0. BOTH its prefill logits and its greedy continuation
 #              must differ from `on`'s. The offset comes from a measured
 #              curve, not from taste, and the two criteria do not have the
 #              same shape - which is the whole reason for measuring:
 #
-#                offset   prefill logits   greedy text
-#                1e-6     DIFF             DIFF
-#                1e-5     DIFF             DIFF
-#                1e-4     DIFF             DIFF
-#                0.001    DIFF             DIFF
-#                0.01     DIFF             SAME
-#                0.05     DIFF             DIFF
-#                0.2      DIFF             SAME
-#                1.0      DIFF             DIFF
+#                offset  offset/std  max|dlogit|  prefill  greedy text
+#                1e-5      0.00014      0.279       DIFF     SAME
+#                1e-4      0.0014       3.10        DIFF     SAME
+#                0.01      0.14         0.160       DIFF     SAME
+#                0.05      0.69         3.16        DIFF     SAME
+#                0.2       2.8          0.364       DIFF     SAME
+#                2.0       28           0.849       DIFF     SAME
+#                2.3       32           0.556       DIFF     DIFF  band opens
+#                4.0       55           0.905       DIFF     DIFF  <- picked
+#                5.5       76           0.937       DIFF     DIFF  band closes
+#                6.0       83           0.971       DIFF     SAME
+#                8.0       111          0.973       DIFF     DIFF  (trailing char only)
 #
-#              The LOGIT criterion is the tight and monotone one: this
-#              checkpoint's GR gates are not inert the way its sinks are
-#              (Task 2 lost a round to the opposite case - kunkun98's sinks
-#              sit at their init value, so every offset below +20 was
-#              exactly zero and "a small perturbation must move the text"
-#              could not fail there). It fires at 1e-6, i.e. 1e-5 of the
-#              tensor's own std.
+#              offset/std is against the tensor's own std (0.0722; max|w|
+#              is 0.125), max|dlogit| against --dump-prefill's bytes, on
+#              kunkun98 with this file's own prompt and seed.
+#
+#              THE LOGIT CRITERION IS THE TIGHT ONE and it carries the arm:
+#              it fires at 1e-5, i.e. 1e-4 of the tensor's own std, whatever
+#              the text does. This checkpoint's GR gates are not inert the
+#              way its sinks are - Task 2 lost a round to the opposite case,
+#              where kunkun98's sinks sit at their init value and every
+#              offset below +20 was exactly zero in float32, so "a small
+#              perturbation must move the text" could not fail there.
 #
 #              THE TEXT CRITERION IS DISCRETE AND NOT MONOTONE, and the
-#              table above is the evidence: 0.01 and 0.2 leave the 16-token
-#              continuation unchanged while both their neighbours move it.
-#              A greedy continuation is a chain of argmaxes, so a
-#              perturbation either moves the first one or does not, and a
-#              moved one can walk back onto the same tokens. +0.05 is
-#              picked from this table as a value where it does fire; the
-#              assertion's weight is still carried by the logits, and a
-#              future prompt change that makes +0.05 stop moving the text
-#              is this arm telling the truth rather than a defect.
+#              curve is the evidence: SAME at every offset up to 2.1, DIFF
+#              throughout 2.3..5.5, SAME again at 6.0, and at 8.0 DIFF by
+#              one trailing character. A greedy continuation is a chain of
+#              argmaxes, so a perturbation either moves the first one or
+#              does not, and a moved one can walk back onto the same
+#              tokens. +4.0 is picked as the MIDDLE OF THE MEASURED FLIP
+#              BAND [2.3, 5.5] - 1.7 above its lower edge, 1.5 below its
+#              upper - and not as a value that once happened to pass.
+#
+#              The response is bounded: max|dlogit| stays under ~1.2 right
+#              across the flip band, and at every offset inside it the
+#              continuation diverges around character 26 of 48 rather than
+#              at its first token. That is why 0.05 moves the logits by up
+#              to 3.16 and the text not at all, and why this threshold comes
+#              off the curve rather than off a smaller, more comfortable
+#              number. A future prompt change that makes +4.0 stop moving
+#              the text is this arm telling the truth rather than a defect.
 #
 #   npert      The checkpoint with layers.0.gr_attn.norms.1.weight offset by
 #              +0.5. A SEPARATE arm from `sens`, not a replacement for it:
@@ -131,7 +166,10 @@
 #   M1  setup_layers' gr_on derivation pinned to 0. The load must fail: the
 #      gr_* tensors go unclaimed. This is the arm that catches "the flag is
 #      never set", and it is also `pre`'s failure mode reproduced without
-#      needing an old revision to exist.
+#      needing an old revision to exist. Every arm that needs the shipped
+#      checkpoint to LOAD reddens under it, the `off` arm's keyclear mutant
+#      included - that mutant's guards are all downstream of this derivation,
+#      which is why it leaves the loader alone.
 #   M2  gr_collapse drops the division - mean becomes sum. Caught by `raw`,
 #      which is an identity claim about exactly that arithmetic.
 #   M3  THE ONE THIS TASK IS MOST LIKELY TO GET WRONG: the read gate is
@@ -158,7 +196,7 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 MODEL=${1:-}
 MODEL2=${2:-}
 PROMPT="人工智能的发展历史可以追溯到二十世纪五十年代，当时的科学家们开始思考机器是否能够模拟人类的思维过程。"
-PERT_DELTA=0.05
+PERT_DELTA=4.0
 NORM_DELTA=0.5
 NGEN=16
 
@@ -366,16 +404,10 @@ else
     FAILED=1
 fi
 
-# off is dead: the pre-change binary and this one must agree byte for byte
-run "$PREBIN" off_pre "$W/off" || exit 1
+# The GR-off checkpoint's own logits. Produced HERE because `raw` and M2 are
+# both identities measured against it. This is NOT the off arm - that one is
+# a mutant and lives with the mutations below.
 run "$BIN" off_head "$W/off" || exit 1
-if cmp -s "$W/off_pre.pf" "$W/off_head.pf"; then
-    echo "  off  pre vs head prefill logits BITWISE IDENTICAL (the GR path is dead when the key is clear)"
-else
-    echo "  FAIL: the off arm's prefill logits moved between the pre-change"
-    echo "    engine and this one - a clear key is not leaving this code dead"
-    FAILED=1
-fi
 
 run "$BIN" on "$MODEL" || exit 1
 run "$BIN" pert "$W/pert" || exit 1
@@ -572,6 +604,71 @@ RAW_G_P='for (i = 0; i < flat; i++) G[i] = lz_sigmoid(G[i]);'
 RAW_G_R='for (i = 0; i < flat; i++) G[i] = 1.0f;'
 RAW_S_P='for (i = 0; i < nr; i++) sg[i] = 2.0f * lz_sigmoid(sg[i] / nrf);'
 RAW_S_R='for (i = 0; i < nr; i++) sg[i] = 1.0f;'
+
+# The `keyclear` mutant: the two gr_first/gr_last guards and the four
+# `if (L->gr_on)` guards read as false, and NOTHING ELSE. That is what makes
+# it a probe of the KEY and not of the geometry - with gr_expand and
+# gr_collapse out, s->x stays the contiguous [nt, dim] the GR-off branches
+# already assume (their `for (i = 0; i < nt*dim)` and their `s->x[i] +=
+# s->xb2[i]`), so the two runs below are comparable at all.
+#
+# The LOADER is deliberately untouched. model_walk's gr_on guard is what
+# makes the gr_* tensors claimed, and patching it would give a mutant that
+# accepts the keyless checkpoint - i.e. one that stays green under M1, the
+# single defect this arm is aimed at.
+KEY_EXPAND_P='if (L->gr_first) gr_expand(s, nt, nr, dim);'
+KEY_EXPAND_R='if (0) gr_expand(s, nt, nr, dim);'
+KEY_COLLAPSE_P='if (L->gr_last) gr_collapse(s, nt, nr, dim);'
+KEY_COLLAPSE_R='if (0) gr_collapse(s, nt, nr, dim);'
+KEY_READ_A_P='if (L->gr_on) {
+            gr_read(m, s, L->gr_attn_norms,'
+KEY_READ_A_R='if (0) {
+            gr_read(m, s, L->gr_attn_norms,'
+KEY_READ_M_P='if (L->gr_on) {
+            gr_read(m, s, L->gr_mlp_norms,'
+KEY_READ_M_R='if (0) {
+            gr_read(m, s, L->gr_mlp_norms,'
+KEY_WRITE_A_P='LZ_TAP("blk", l, s->xb2, dim);
+        if (L->gr_on) {
+            gr_write(s, nt, nr, dim);'
+KEY_WRITE_A_R='LZ_TAP("blk", l, s->xb2, dim);
+        if (0) {
+            gr_write(s, nt, nr, dim);'
+KEY_WRITE_M_P='LZ_TAP("ffn", l, s->xb2, dim);
+        if (L->gr_on) {
+            gr_write(s, nt, nr, dim);'
+KEY_WRITE_M_R='LZ_TAP("ffn", l, s->xb2, dim);
+        if (0) {
+            gr_write(s, nt, nr, dim);'
+
+# off: "the key is clear" and "the tensors do not exist" have to name the SAME
+# run. ONE engine (the mutant above), TWO checkpoints - the shipped one, whose
+# config says GR is on, and the GR-off one, whose key and gr_* tensors are
+# both gone. The header says what that buys, and why a `pre`-vs-`head` pair
+# answers a different question.
+#
+# The GR-on side is where the teeth are: if anything GR added sat outside the
+# key - an unguarded gr_expand at the top of the layer, a dropped guard around
+# gr_write - the mutant would still widen the stream there and the two runs
+# would part. Measured: dropping KEY_EXPAND_P alone, and nothing else, turns
+# this arm red.
+if mutant keyclear src/forward.c -z \
+        "$KEY_EXPAND_P" "$KEY_EXPAND_R" "$KEY_COLLAPSE_P" "$KEY_COLLAPSE_R" \
+        "$KEY_READ_A_P" "$KEY_READ_A_R" "$KEY_READ_M_P" "$KEY_READ_M_R" \
+        "$KEY_WRITE_A_P" "$KEY_WRITE_A_R" "$KEY_WRITE_M_P" "$KEY_WRITE_M_R"; then
+    run "$MUTBIN" off_keyoff "$MODEL" || exit 1
+    run "$MUTBIN" off_notens "$W/off" || exit 1
+    if cmp -s "$W/off_keyoff.pf" "$W/off_notens.pf"; then
+        echo "  off  key clear vs tensors absent BITWISE IDENTICAL (one engine, two checkpoints)"
+    else
+        echo "  FAIL: with the key read as clear, the shipped checkpoint and the"
+        echo "    GR-off checkpoint disagree - the key is not the only thing"
+        echo "    deciding whether the code this task added runs"
+        FAILED=1
+    fi
+else
+    FAILED=1
+fi
 
 run "$BIN" on "$MODEL" || exit 1
 
