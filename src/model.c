@@ -118,6 +118,21 @@ static int hadamard_ok(int blk, int dim) {
     return dim > 0 && dim % blk == 0;
 }
 
+/* The forward pass reads the gate half of every attention head
+   unconditionally: forward_attn.c's output gate and forward_csa2.c's
+   both index qg at h * 2 * hd + hd, and forward_mtp.c's draft head does
+   the same. That half only exists when attn_output_gate is set -
+   attn_qgate_dim, and so the s->qg allocation it sizes, is attn_q_dim
+   wide otherwise - so with the key absent or false every one of those
+   reads runs a second time past the end of the buffer. Refusing at load
+   is the fix; running the three forwards ungated is a feature, and
+   forward_csa2.c's header already records that it was not attempted. */
+static int check_attn_gate(const LZModelConfig *c, char *errbuf, int errlen) {
+    if (c->attn_output_gate) return 0;
+    qerr(errbuf, errlen, LZ_ERR_CFG_ATTN_GATE);
+    return 1;
+}
+
 static int resolve_hadamard(LZModelConfig *c, char *errbuf, int errlen) {
     int vdim = c->lin_value_dim;
     int idim = c->intermediate_size;
@@ -760,6 +775,30 @@ int lz_load_config(LZModelConfig *c, const char *path,
         c->rope_scaling_attn_factor =
             (float)lz_json_get_num(&j, rp, "attention_factor",
                                    c->rope_scaling_attn_factor);
+
+        /* Keys transformers reads under rope_parameters that this engine
+           does NOT implement. Ignoring one silently would run a rule the
+           checkpoint was not trained under, and nothing downstream would
+           say so - the posture the rope_theta/partial_rotary_factor
+           conflict check above and the unknown rope_type check below
+           already take. `truncate: false` drops yarn's floor/ceil on the
+           correction range; mscale / mscale_all_dim replace the
+           one-argument get_mscale(factor) with a two-argument ratio. No
+           config.json on this machine carries any of the three. */
+        {
+            static const char *unsupported[] = {
+                "truncate", "mscale", "mscale_all_dim"
+            };
+            int ui;
+            for (ui = 0; ui < 3; ui++) {
+                if (lz_json_get(&j, rp, unsupported[ui])) {
+                    qerr(errbuf, errlen, LZ_ERR_CFG_ROPE_KEY,
+                         unsupported[ui]);
+                    lz_json_free(&j);
+                    return 1;
+                }
+            }
+        }
     }
 
     /* layer_types decides per-layer SSM vs attention; without it loading is impossible */
@@ -858,6 +897,7 @@ int lz_load_config(LZModelConfig *c, const char *path,
         return 1;
     }
     /* After lin_value_dim, which the derivations read. */
+    if (check_attn_gate(c, errbuf, errlen) != 0) return 1;
     if (resolve_hadamard(c, errbuf, errlen) != 0) return 1;
     return 0;
 }
@@ -2944,6 +2984,8 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
             goto fail;
         }
     }
+
+    if (check_attn_gate(c, errbuf, errlen) != 0) goto fail;
 
     if (resolve_hadamard(c, errbuf, errlen) != 0) goto fail;
 
