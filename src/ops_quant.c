@@ -1939,6 +1939,13 @@ float lz_swiglu_clamp(float gate, float up, float limit, float alpha) {
     return (up + 1.0f) * glu;
 }
 
+float lz_spda_gate(float s) {
+    float a = (s < 0.0f) ? -s : s;
+    float r = LZ_SQRTF(a > 1e-6f ? a : 1e-6f);
+    float sg = (s > 0.0f) ? 1.0f : ((s < 0.0f) ? -1.0f : 0.0f);
+    return lz_sigmoid(r * sg);
+}
+
 /* ---- x87 precision control (meaningful only on Watcom/Win98) ----
 
    x87 by default leaves intermediates in 80-bit registers, so the same

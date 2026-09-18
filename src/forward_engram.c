@@ -16,15 +16,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Watcom's C90 math.h has no sqrtf/fabsf: route to the double forms
-   there. gcc keeps the float forms so the ARM build pulls no libgcc
-   double soft-float. Same shape as ops_quant.c's LZ_SQRTF. */
+/* Watcom's C90 math.h has no sqrtf: route to the double form there.
+   gcc keeps the float form so the ARM build pulls no libgcc double
+   soft-float. Same shape as ops_quant.c's LZ_SQRTF. */
 #if defined(__WATCOMC__)
 #define LZ_SQRTF(x) ((float)sqrt((double)(x)))
-#define LZ_FABSF(x) ((float)fabs((double)(x)))
 #else
 #define LZ_SQRTF(x) sqrtf(x)
-#define LZ_FABSF(x) fabsf(x)
 #endif /* __WATCOMC__ */
 
 #include "forward.h"
@@ -320,16 +318,16 @@ void forward_engram(const LZModel *m, LZRunState *s,
         }
         if (dbg) { char tag[32]; snprintf(tag, sizeof(tag), "val_o%d", o); engram_dump(tag, val, dim); }
 
-        /* SPDA gate per token: s = dot(q, key) / sqrt(d),
-           gate = sigmoid(sqrt(|s|+eps) * sign(s)) */
+        /* SPDA gate per token: s = dot(q, key) / sqrt(d), then
+           lz_spda_gate - see its declaration for why the clamp sits
+           inside the sqrt and why sign(0) is 0. */
         for (tk = 0; tk < nt; tk++) {
             float dot = 0.0f;
             float s, gate;
             for (i = 0; i < dim; i++)
                 dot += qnorm[(size_t)tk * dim + i] * key[(size_t)tk * dim + i];
             s = dot * inv_sqrt_d;
-            gate = lz_sigmoid(LZ_SQRTF(LZ_FABSF(s) + 1e-6f)
-                              * (s >= 0 ? 1.0f : -1.0f));
+            gate = lz_spda_gate(s);
             if (dbg && tk == 0)
                 engram_dump_gate(o, s, gate);
             for (i = 0; i < dim; i++)

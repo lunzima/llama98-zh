@@ -326,6 +326,23 @@ float lz_situ_glu(float gate, float up, float beta, float linear_beta,
                   int has_linear_beta);
 float lz_swiglu_clamp(float gate, float up, float limit, float alpha);
 
+/* The SPDA scalar gate's magnitude dampening, for forward_engram's
+   per-token n-gram gate: sigmoid(sqrt(max(|s|, 1e-6)) * sign(s)).
+
+   Two details are load-bearing and both differ from the obvious
+   spelling. The clamp is INSIDE the sqrt - sqrt(|s| + 1e-6) is a
+   different function, 4.14e-4 away in the pre-sigmoid argument at
+   s == 0 and 4.14e-4 at the worst case anywhere. And sign(0) is 0, not
+   +1, so s == 0 gates to exactly 0.5. The three references that define
+   this - Engram's own engram_demo_v1.py, V4.1's model.py, and
+   kunmoe_modeling.py's EngramMemory - all write
+   `x.abs().clamp_min(1e-6).sqrt() * x.sign()`.
+
+   NO SIMD VARIANT: one lz_sigmoid per element, the same rule-eight
+   argument as lz_situ_glu above. Bills no LZ_FC site: forward_engram
+   has none, so this adds none. */
+float lz_spda_gate(float s);
+
 /* log(1+e^x). A table+poly float body (lz_softplus_poly, ops_quant.c),
    under the same lz_scalar_mode() tier as lz_exp - it was the one
    scalar transcendental outside it, because it was a pair of libm
