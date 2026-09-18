@@ -496,7 +496,9 @@ typedef struct {
     /* full_attention scratch */
     float *qg;                  /* (attn_qgate_dim) q and gate interleaved per head */
     float *qh;                  /* (attn_q_dim)  normalized and rotated q */
-    float *att;                 /* (seq_len)     per-head scores (reused per t, not scaled by nt) */
+    float *att;                 /* (seq_len + 1): seq_len scores plus one slot for
+                                   the learned sink column at att[pos+1] (per-head,
+                                   reused per t, not scaled by nt) */
 #if (LZ_ATTN_FIXED & 2)
     float   *wsum_cbuf;         /* (seq_len)     weighted-sum coefficients before quantization */
     int16_t *wsum_cq;           /* (seq_len)     the same, quantized to int16 */
