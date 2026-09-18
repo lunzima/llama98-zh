@@ -90,8 +90,24 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
            hardcoded ([q(hd), gate(hd)] per head in q_proj's output),
            same assumption forward_attn.c's own code already makes -
            see this file's own header comment on why generalizing to
-           attn_output_gate=0 is not attempted here either. */
-        lz_matmul_w(s->qg, h, &L->q_proj, hdim, qgd, s->xq, s->xqs);
+           attn_output_gate=0 is not attempted here either.
+
+           q_proj keeps whatever the wiring put on it, SubLN included:
+           a CSA2 layer is an LZ_LT_FULL layer, so _wire_full_attn_subn
+           runs on it and attn_q_subn_norm is loaded here (model.c's
+           present_subn spec). Under use_subn the pre-LN is gone and
+           s->xb is the RAW residual, so q_proj reads it through that
+           norm - the same norm-then-project forward_attn.c performs for
+           q. s->xb2 is its scratch there too, and it is free here:
+           this token's o_proj output has not been written yet. */
+        if (c->use_subn) {
+            float *qin = s->xb2 + (size_t)tk * hdim;
+            lz_rmsnorm(qin, h, lz_t_f32(&L->attn_q_subn_norm, s->wscr),
+                       hdim, rms_eps);
+            lz_matmul_w(s->qg, qin, &L->q_proj, hdim, qgd, s->xq, s->xqs);
+        } else {
+            lz_matmul_w(s->qg, h, &L->q_proj, hdim, qgd, s->xq, s->xqs);
+        }
         {
             const float *qn = lz_t_f32(&L->q_norm, s->wscr);
             for (hh = 0; hh < nh; hh++)
@@ -207,13 +223,22 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
 
         /* ---- 5. output gate (q_proj's own second half, same
            convention as forward_attn.c) + o_proj -> this layer's
-           residual contribution. */
+           residual contribution.
+
+           o_proj carries its own SubLN wrapper for the same reason
+           q_proj does, over qd elements - the width forward_attn.c
+           normalizes for the same projection. In place: s->attn_out is
+           this token's only copy and is dead once the matmul has read
+           it. */
         for (hh = 0; hh < nh; hh++) {
             const float *gate = s->qg + (size_t)hh * 2 * hd + hd;
             float *outh = s->attn_out + (size_t)hh * hd;
             int d;
             for (d = 0; d < hd; d++) outh[d] *= lz_sigmoid(gate[d]);
         }
+        if (c->use_subn)
+            lz_rmsnorm(s->attn_out, s->attn_out,
+                       lz_t_f32(&L->attn_o_subn_norm, s->wscr), qd, rms_eps);
         lz_matmul_w(s->xb2 + (size_t)tk * hdim, s->attn_out, &L->o_proj,
                    qd, hdim, s->xq, s->xqs);
 
