@@ -122,7 +122,15 @@ static int resolve_hadamard(LZModelConfig *c, char *errbuf, int errlen) {
     int vdim = c->lin_value_dim;
     int idim = c->intermediate_size;
     if (c->hadamard_o == -1) {
-        int oblk = vdim;
+        /* Derived only on the dense path. The training side's _ternarize
+           returns early for num_experts != 0 ("KunMoe keeps fp
+           projections; ternary is CE-only"), so its own default is 0
+           there, and a non-zero block here would rotate an activation
+           those weights never saw - invisible in float, because the float
+           matmul never reads the rotated buffer. hadamard_down has no
+           such condition: _make_dense_ffn_bitlinear still builds a MoE
+           model's dense prefix layers as ternary. */
+        int oblk = c->num_experts == 0 ? vdim : 0;
         if (oblk < 2 || (oblk & (oblk - 1))) oblk = 0;
         c->hadamard_o = oblk;
     } else if (!hadamard_ok(c->hadamard_o, vdim)) {
