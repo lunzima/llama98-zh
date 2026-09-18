@@ -1914,7 +1914,7 @@ float lz_situ_glu(float gate, float up, float beta, float linear_beta,
 
 /* GPT-OSS's clamped SwiGLU (transformers models/gpt_oss/
    modeling_gpt_oss.py, GptOssExperts._apply_gate), which DeepSeek-V4.1's
-   report cites as its own MoE activation (section 2.1, "OpenAI, 2025").
+   report cites as its own MoE activation (section 4.2.1, "OpenAI, 2025").
    Matches training-side engine/kunmoe_modeling.py's swiglu_clamp,
    checked there against the reference class. gate is clamped ONE-SIDED
    (max only, no floor); up is clamped BOTH sides; up carries a `+1`
