@@ -35,9 +35,14 @@ WHAT IS NOT A BORROW, and is skipped on purpose
 
 WHAT IT CANNOT SEE. Each miss is written down rather than papered over:
 
-  * Mutually exclusive arms are the same text to this checker. That is what
-    EXEMPT below exists for, and why an exemption carries the line it was
-    granted for.
+  * A live range narrowed by an arm test is invisible. The range is taken
+    from the assignment to the LAST use in the function, and a use sitting
+    in a different arm still counts, so a borrow landing after this arm's
+    own last use reads as a violation. That is what EXEMPT below exists
+    for, and why an exemption carries the line it was granted for. It is a
+    DIFFERENT class from two borrows in mutually exclusive arms - which
+    this checker also cannot tell apart - and an exemption granted for one
+    is not an argument about the other.
   * Scratches reached through a macro, or recomputed at run time, are
     invisible. This is a text-level check; it supplements reading the call
     site, it does not replace it.
@@ -58,11 +63,14 @@ import sys
 EXEMPT = {
     ("forward_kda.c", "kda_o_norm_w"): (
         898,
-        "The borrow is used at :911 inside `if (c->use_subn)`, and again at "
-        ":955/:968/:980 inside the `else if` ladder that arm excludes. The "
-        "second borrow at :916 is inside the use_subn arm but after :911, so "
-        "the two never overlap at run time. Mutually exclusive arms are one "
-        "block to this checker."),
+        "The two borrows are NOT in mutually exclusive arms: :898 and :916 "
+        "are both inside the same `if (c->use_subn)` block and run in "
+        "order. What makes :916 safe is where this variable's USE range "
+        "ends on that path - its last use there is :911, and the uses at "
+        ":955/:968/:980 that stretch the range to the end of the function "
+        "sit in the `else if` ladder `use_subn` excludes. The checker "
+        "cannot narrow a live range by an arm test, which is the whole of "
+        "what this exemption is granted for."),
 }
 
 
