@@ -56,6 +56,19 @@
 #              gr_write. Measured: dropping the gr_first guard alone, and
 #              nothing else, turns this arm red.
 #
+#              THE ONE STATE IT CANNOT BE ASKED ABOUT, named here so it is a
+#              hole with a fence rather than an unasked question: a
+#              checkpoint whose key is clear while its gr_* tensors are still
+#              in the file. The loader refuses that state - `keyonly` asserts
+#              the refusal - so it has no observable engine run at all, and
+#              "watch the forward's guards on a key-clear checkpoint" is not a
+#              criterion anyone can write. That is definitional, not a missing
+#              arm. What stands in for it is `keyonly`, which carries the
+#              key -> forward-guard link (one writer of L->gr_on, two groups
+#              of readers), plus M6, which exercises the guards against the
+#              config field on the four layers where kunkun98's own span
+#              boundary makes the two disagree.
+#
 #   keyonly    The same weights with the KEY absent but the tensors KEPT.
 #              Must be REFUSED. Without this arm the `off` arm would also be
 #              green on an engine that simply ignores the switch and reads
@@ -212,9 +225,9 @@
 #      pre-norm, SubLN deleted the pre-norm, so there is nothing to do").
 #      It is wrong because SubLN moved the normalisation into each
 #      PROJECTION; the residual stream reaches GR raw, so GR's read is the
-#      only normalisation in front of the gate. Caught by `sens`: with the
-#      read gone the read gate is never computed, so perturbing W_u cannot
-#      move anything.
+#      only normalisation in front of the gate. Caught by BOTH halves of
+#      `sens`: with the read gone the read gate is never computed, so
+#      perturbing W_u cannot move anything at either offset.
 #   M4  gr_expand stops copying branch 0 - correct for token 0 and wrong for
 #      every later token, which batch width 1 can never see. Caught by
 #      `batch`.
@@ -223,6 +236,13 @@
 #      the correct engine's, because all 32 gr_*norms* tensors are exactly 0
 #      and (1+w) makes all four branch norms the same identity. That is the
 #      shape of a degenerate subject - see the plan's A/B/C classification.
+#   M6  the four forward guards read the CONFIG field (c->gated_residual >= 2)
+#      instead of the per-layer flag (L->gr_on). NO ARM NAMES THIS ONE. It is
+#      caught because this gate happens to run kunkun98, whose own span
+#      boundary puts four of its eight layers in the disagreement - and a
+#      condition no criterion watches is a condition whose absence is
+#      invisible, so it is written down here rather than left to the fact
+#      that the run happens to die.
 #
 # Exit: 0 pass, 1 fail, 2 skip (no binary / no model dir / no python3 with
 # numpy+safetensors / no git revision to build `pre` from).
@@ -898,6 +918,67 @@ if mutant m5 src/forward.c \
         echo "  FAIL: mutation M5 (every branch reads norms[0]) was not caught;"
         echo "    the npert arm is not watching the norm's index"
         FAILED=1
+    fi
+else
+    FAILED=1
+fi
+
+# M6: the forward guards read the CONFIG field, not the per-layer flag. The
+# only reason this is observable at all is that the two disagree on kunkun98
+# ITSELF: lz_gr_span gives 4 of its 8 layers (ced_split=4), so layers 4..7
+# carry the key ON in the config and gr_on OFF. Those layers come out of a
+# calloc, so their gr_attn_norms is NULL and gr_read dereferences it; the run
+# dies with SIGSEGV and writes no prefill. Measured: rc=139 with no
+# --dump-prefill output, and the same mutant runs the GR-off checkpoint
+# cleanly (rc=0), where the config field is 0 and the guards are false either
+# way. The NULL dereference is a reading of the two calloc sites; the death
+# and the missing dump are the measurement.
+#
+# THE CONTROL RUNS FIRST. A mutant that cannot run anything would also "die on
+# $MODEL", and crediting that to the guards is exactly how an arm reports a red
+# line for the wrong reason.
+#
+# NOTHING NAMES THIS. It is not a criterion any arm holds - it is that the gate
+# happens to run kunkun98, whose own span boundary puts four layers in the
+# disagreement. That is why M6 is in the mutations list at the top of this file
+# rather than inside an arm's own paragraph.
+if mutant m6 src/forward.c -z \
+        'if (L->gr_on) {
+            gr_read(m, s, L->gr_attn_norms,' 'if (c->gated_residual >= 2) {
+            gr_read(m, s, L->gr_attn_norms,' \
+        'if (L->gr_on) {
+            gr_read(m, s, L->gr_mlp_norms,' 'if (c->gated_residual >= 2) {
+            gr_read(m, s, L->gr_mlp_norms,' \
+        'LZ_TAP("blk", l, s->xb2, dim);
+        if (L->gr_on) {
+            gr_write(s, nt, nr, dim);' 'LZ_TAP("blk", l, s->xb2, dim);
+        if (c->gated_residual >= 2) {
+            gr_write(s, nt, nr, dim);' \
+        'LZ_TAP("ffn", l, s->xb2, dim);
+        if (L->gr_on) {
+            gr_write(s, nt, nr, dim);' 'LZ_TAP("ffn", l, s->xb2, dim);
+        if (c->gated_residual >= 2) {
+            gr_write(s, nt, nr, dim);'; then
+    if "$MUTBIN" "$W/off" --prompt "$PROMPT" -n 1 --temp 0 \
+            --dump-prefill "$W/m6_off.pf" >"$W/m6_off.log" 2>&1; then
+        echo "  mutation M6 control: the mutant still runs the GR-off checkpoint,"
+        echo "    so what it dies of below is the disagreement and not a broken"
+        echo "    binary"
+    else
+        echo "  FAIL: the M6 mutant cannot run the GR-off checkpoint either, so"
+        echo "    its death on $MODEL would say nothing about the guards"
+        FAILED=1
+    fi
+    if "$MUTBIN" "$MODEL" --prompt "$PROMPT" -n 1 --temp 0 \
+            --dump-prefill "$W/m6.pf" >"$W/m6.log" 2>&1; then
+        echo "  FAIL: mutation M6 (forward guards read c->gated_residual) survived"
+        echo "    a run of $MODEL, so nothing here watches the four layers where"
+        echo "    the config field and gr_on disagree"
+        FAILED=1
+    else
+        echo "  mutation M6 (forward guards read c->gated_residual): red as it"
+        echo "    should be - the run does not survive the layers where the"
+        echo "    config field says on and the per-layer flag says off"
     fi
 else
     FAILED=1
