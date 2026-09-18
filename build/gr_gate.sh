@@ -62,6 +62,19 @@
 #              whatever tensors the file happens to hold - the key, not the
 #              file's contents, is what has to decide.
 #
+#              IT ALSO CARRIES THE key -> FORWARD-GUARD LINK, which is not
+#              obvious from where it sits. L->gr_on has exactly ONE writer -
+#              setup_layers, src/model.c's `L->gr_on = c->gated_residual >= 2
+#              && i < lz_gr_span(c)` - and two groups of readers: the LOADER
+#              (model_walk's claim, the branch-norm calloc, n_params) and the
+#              FORWARD (the four `if (L->gr_on)` guards, plus gr_first and
+#              gr_last derived from it at the same spot). A refusal here is
+#              therefore evidence about the forward too: the single writer
+#              produced 0, and the forward reads that same field. Nothing
+#              else in this gate can observe it, because the one state that
+#              would show it directly - key clear with the tensors still in
+#              the file - is exactly the state refused here.
+#
 #   on         The checkpoint as shipped. Must load, and must carry exactly
 #              as many more parameters than `off` as its gr_* tensors hold -
 #              the count is how the gate knows they are CLAIMED and not
@@ -90,55 +103,77 @@
 #              catches that class directly; `raw` caught it first, by
 #              accident.
 #
-#   sens       The checkpoint with layers.0.gr_attn.wu.weight offset by
-#              +4.0. BOTH its prefill logits and its greedy continuation
-#              must differ from `on`'s. The offset comes from a measured
-#              curve, not from taste, and the two criteria do not have the
-#              same shape - which is the whole reason for measuring:
+#   sens       ONE tensor, TWO offsets, because the two criteria have
+#              different shapes and no single number serves both:
+#
+#                PERT_DELTA +1e-4 on layers.0.gr_attn.wu.weight - the TIGHT
+#                criterion. The prefill logits must stop being byte-identical
+#                to `on`'s. This is the instrument that catches an engine
+#                reading W_u lossily, and it is why the arm does not need a
+#                large perturbation to mean anything.
+#
+#                TEXT_DELTA +4.0 on the same tensor - the TEXT criterion.
+#                The greedy continuation must change. Blunter by nature (it
+#                needs the argmax chain pulled apart), and it is here because
+#                it is the criterion a reader can eyeball.
+#
+#              Measured response of this checkpoint to a uniform offset on
+#              that tensor:
 #
 #                offset  offset/std  max|dlogit|  prefill  greedy text
 #                1e-5      0.00014      0.279       DIFF     SAME
-#                1e-4      0.0014       3.10        DIFF     SAME
+#                1e-4      0.0014       3.10        DIFF     SAME   <- tight
 #                0.01      0.14         0.160       DIFF     SAME
 #                0.05      0.69         3.16        DIFF     SAME
 #                0.2       2.8          0.364       DIFF     SAME
 #                2.0       28           0.849       DIFF     SAME
-#                2.3       32           0.556       DIFF     DIFF  band opens
-#                4.0       55           0.905       DIFF     DIFF  <- picked
-#                5.5       76           0.937       DIFF     DIFF  band closes
+#                2.1       29           0.973       DIFF     SAME
+#                2.2       30           0.889       DIFF     DIFF   band opens
+#                2.5       35           0.911       DIFF     DIFF
+#                3.0       42           0.977       DIFF     DIFF
+#                4.0       55           0.905       DIFF     DIFF   <- text
+#                5.0       69           1.194       DIFF     DIFF
+#                5.5       76           0.937       DIFF     DIFF   band closes
 #                6.0       83           0.971       DIFF     SAME
-#                8.0       111          0.973       DIFF     DIFF  (trailing char only)
+#                8.0       111          0.973       DIFF     DIFF   trailing char only
 #
 #              offset/std is against the tensor's own std (0.0722; max|w|
 #              is 0.125), max|dlogit| against --dump-prefill's bytes, on
 #              kunkun98 with this file's own prompt and seed.
 #
-#              THE LOGIT CRITERION IS THE TIGHT ONE and it carries the arm:
-#              it fires at 1e-5, i.e. 1e-4 of the tensor's own std, whatever
-#              the text does. This checkpoint's GR gates are not inert the
-#              way its sinks are - Task 2 lost a round to the opposite case,
-#              where kunkun98's sinks sit at their init value and every
-#              offset below +20 was exactly zero in float32, so "a small
-#              perturbation must move the text" could not fail there.
+#              THE LOGIT CRITERION IS THE TIGHT ONE: it fires at 1e-5, i.e.
+#              1.4e-4 of the tensor's own std. This checkpoint's GR gates are
+#              not inert the way its sinks are - Task 2 lost a round to the
+#              opposite case, where kunkun98's sinks sit at their init value
+#              and every offset below +20 was exactly zero in float32, so "a
+#              small perturbation must move the text" could not fail there.
 #
 #              THE TEXT CRITERION IS DISCRETE AND NOT MONOTONE, and the
 #              curve is the evidence: SAME at every offset up to 2.1, DIFF
-#              throughout 2.3..5.5, SAME again at 6.0, and at 8.0 DIFF by
-#              one trailing character. A greedy continuation is a chain of
-#              argmaxes, so a perturbation either moves the first one or
-#              does not, and a moved one can walk back onto the same
-#              tokens. +4.0 is picked as the MIDDLE OF THE MEASURED FLIP
-#              BAND [2.3, 5.5] - 1.7 above its lower edge, 1.5 below its
-#              upper - and not as a value that once happened to pass.
+#              throughout 2.2..5.5, SAME again at 6.0, and at 8.0 DIFF by one
+#              trailing character. A greedy continuation is a chain of
+#              argmaxes, so a perturbation either moves the first one or does
+#              not, and a moved one can walk back onto the same tokens. +4.0
+#              is the MIDDLE OF THE MEASURED FLIP BAND [2.2, 5.5] - 1.8 above
+#              its lower edge, 1.5 below its upper - and not a value that
+#              once happened to pass.
 #
-#              The response is bounded: max|dlogit| stays under ~1.2 right
-#              across the flip band, and at every offset inside it the
-#              continuation diverges around character 26 of 48 rather than
-#              at its first token. That is why 0.05 moves the logits by up
-#              to 3.16 and the text not at all, and why this threshold comes
-#              off the curve rather than off a smaller, more comfortable
-#              number. A future prompt change that makes +4.0 stop moving
-#              the text is this arm telling the truth rather than a defect.
+#              WHY TWO AND NOT JUST THE LARGE ONE. A constant offset on W_u
+#              is a bounded lever: max|dlogit| stays under ~1.2 right across
+#              the flip band, and at every offset inside it the continuation
+#              diverges around character 26 of 48 rather than at its first
+#              token. The text therefore needs ~55 std to move at all, and an
+#              arm running only at that offset would lose the tight end - an
+#              engine reading W_u at reduced precision, or dropping low
+#              mantissa bits, is plain at +1e-4 and invisible at +4.0. Two
+#              offsets with one criterion each is also the shape the learned
+#              sink gate uses (its sens and text arms).
+#
+#              NEITHER CRITERION IS CARRIED BY THE OTHER, and each one can
+#              fail: M3, the read gate never computed under SubLN, reddens
+#              BOTH, because W_u is then unread at every offset. A future
+#              prompt change that makes +4.0 stop moving the text is this
+#              arm telling the truth rather than a defect.
 #
 #   npert      The checkpoint with layers.0.gr_attn.norms.1.weight offset by
 #              +0.5. A SEPARATE arm from `sens`, not a replacement for it:
@@ -196,12 +231,55 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 MODEL=${1:-}
 MODEL2=${2:-}
 PROMPT="人工智能的发展历史可以追溯到二十世纪五十年代，当时的科学家们开始思考机器是否能够模拟人类的思维过程。"
-PERT_DELTA=4.0
+PERT_DELTA=0.0001
+TEXT_DELTA=4.0
 NORM_DELTA=0.5
 NGEN=16
 
 BIN=$ROOT/llama98.exe
 [ -x "$BIN" ] || { echo "gr_gate: SKIP - no $BIN (run: make native)"; exit 2; }
+
+# $BIN has to be THIS tree's build, and nothing downstream checks that it is.
+# Four arms (raw, M2, M4, M5) compare a mutant compiled from $ROOT/src at gate
+# time against $BIN, and the whole reason that comparison means "one localised
+# edit" rather than "two arbitrary builds" is that both sides come from the
+# same sources. A stale llama98.exe turns those four into old-binary-vs-new-
+# binary, where a difference reads as an engine defect and is really a defect
+# in the measurement.
+#
+# REBUILDING here is not the repair. It would change what this gate costs and
+# silently take on a job `make native` and ci.sh's own first stage already
+# have. What is wanted is to refuse a conclusion from an unexplainable pair.
+#
+# The mutant build also copies $ROOT/common and the Makefile, so the scan
+# covers those too - a change confined to either can split the pair just as
+# well as a change to src/.
+#
+# The count is not decoration: a find that matches nothing leaves SRC_NEWER
+# empty, and an empty freshness check passes everything. The instrument has to
+# say how much it looked at.
+SCANNED=$(find "$ROOT/src" "$ROOT/common" "$ROOT/Makefile" -type f 2>/dev/null \
+          | wc -l | tr -d ' ')
+if [ "$SCANNED" -eq 0 ]; then
+    echo "gr_gate: SKIP - the freshness check scanned no files under $ROOT/src,"
+    echo "  $ROOT/common or $ROOT/Makefile. It cannot tell whether $BIN is this"
+    echo "  tree's build, and an empty check passes anything."
+    exit 2
+fi
+SRC_NEWER=$(find "$ROOT/src" "$ROOT/common" "$ROOT/Makefile" -type f \
+            -newer "$BIN" -print 2>/dev/null | head -3)
+if [ -n "$SRC_NEWER" ]; then
+    echo "gr_gate: FAIL - $BIN is older than:"
+    printf '%s\n' "$SRC_NEWER" | sed 's/^/    /'
+    echo "  so it is not this tree's build. The mutant arms below compile"
+    echo "  these sources at gate time and compare the result against it; a"
+    echo "  stale binary makes that an old-vs-new comparison, and the"
+    echo "  difference would be reported as an engine defect."
+    echo "  Rebuild first: make native"
+    exit 1
+fi
+echo "  freshness: $SCANNED source file(s) under src/, common/ and the"
+echo "    Makefile are all older than $(basename "$BIN")"
 [ -n "$MODEL" ] && [ -d "$MODEL" ] || {
     echo "gr_gate: SKIP - model dir not given or not found: '$MODEL'"; exit 2; }
 [ -f "$MODEL/config.json" ] || {
@@ -219,12 +297,14 @@ FAILED=0
 # One python pass writes all three, because the decision they share (which
 # tensors are GR, which key turns it on) has to be made once or it drifts
 # between arms.
-python3 - "$MODEL" "$W" "$PERT_DELTA" "$NORM_DELTA" <<'PY'
+python3 - "$MODEL" "$W" "$PERT_DELTA" "$TEXT_DELTA" "$NORM_DELTA" <<'PY'
 import json, os, shutil, sys
 
-model_dir, w, pert, norm_delta = (sys.argv[1], sys.argv[2],
-                                  float(sys.argv[3]), float(sys.argv[4]))
+model_dir, w = sys.argv[1], sys.argv[2]
+pert, text_delta, norm_delta = (float(sys.argv[3]), float(sys.argv[4]),
+                                float(sys.argv[5]))
 NORM_TENSOR = "model.layers.0.gr_attn.norms.1.weight"
+WU_TENSOR = "model.layers.0.gr_attn.wu.weight"
 
 def bail(msg):
     print("SKIP: " + msg)
@@ -255,7 +335,8 @@ if not gr_names:
 span = ced if 0 < ced < n else n
 print("  fixture: nr=%d, layers [0,%d), %d gr_* tensor(s), %d parameter(s)"
       % (nr, span, len(gr_names), sum(int(tensors[k].size) for k in gr_names)))
-print("  fixture: perturbation -> model.layers.0.gr_attn.wu.weight +%g" % pert)
+print("  fixture: sharp perturbation -> %s +%g (the logit criterion)" % (WU_TENSOR, pert))
+print("  fixture: coarse perturbation -> %s +%g (the text criterion)" % (WU_TENSOR, text_delta))
 print("  fixture: perturbation -> %s +%g" % (NORM_TENSOR, norm_delta))
 if NORM_TENSOR not in tensors:
     print("FAIL: '%s' carries no %s, so the npert arm would perturb nothing"
@@ -298,10 +379,12 @@ def emit(tag, keep_gr, drop_key, *perturbs):
     save_file(tt, os.path.join(out, "model.safetensors"))
 
 # off: never carried the switch. keyonly: the key says off, the file says
-# otherwise. pert / npert: the switch on, one tensor moved each.
+# otherwise. pert / tpert: the switch on, one tensor moved at each of the two
+# offsets the `sens` arm needs. npert: the read norm moved.
 emit("off", False, True)
 emit("keyonly", True, True)
-emit("pert", True, False, ("model.layers.0.gr_attn.wu.weight", pert))
+emit("pert", True, False, (WU_TENSOR, pert))
+emit("tpert", True, False, (WU_TENSOR, text_delta))
 emit("npert", True, False, (NORM_TENSOR, norm_delta))
 PY
 PYRC=$?
@@ -412,16 +495,20 @@ run "$BIN" off_head "$W/off" || exit 1
 run "$BIN" on "$MODEL" || exit 1
 run "$BIN" pert "$W/pert" || exit 1
 if cmp -s "$W/on.pf" "$W/pert.pf"; then
-    echo "  FAIL: sens (+$PERT_DELTA) prefill logits equal on's - the gate is not reading gr_attn.wu"
+    echo "  FAIL: sens (+$PERT_DELTA) prefill logits equal on's - at an offset"
+    echo "    this small the tensor is read into the logits or it is not read"
+    echo "    at all, and equality says the latter"
     FAILED=1
 else
     echo "  sens (+$PERT_DELTA): prefill logits differ from on (the tensor is read)"
 fi
-if cmp -s "$W/on.txt" "$W/pert.txt"; then
-    echo "  FAIL: sens (+$PERT_DELTA) generated the same $NGEN tokens as on"
+
+run "$BIN" tpert "$W/tpert" || exit 1
+if cmp -s "$W/on.txt" "$W/tpert.txt"; then
+    echo "  FAIL: sens (+$TEXT_DELTA) generated the same $NGEN tokens as on"
     FAILED=1
 else
-    echo "  sens (+$PERT_DELTA): greedy continuation differs from on"
+    echo "  sens (+$TEXT_DELTA): greedy continuation differs from on"
 fi
 
 # npert. The four branch norms are SEPARATE tensors, and "each branch has
@@ -672,6 +759,22 @@ fi
 
 run "$BIN" on "$MODEL" || exit 1
 
+# THE FOUR COMPARISONS BELOW THAT PUT A MUTANT'S OUTPUT NEXT TO $BIN's OWN -
+# this one, M2, M4 and M5 - are safe for exactly one reason: both sides come
+# from the same tree, and the only difference between the two builds is the
+# substitution mutant() just applied. Any other change to the sources moves
+# both sides and cancels.
+#
+# THAT PROPERTY IS NOT FREE, and it is the whole content of this note. A
+# bitwise equality is only as strong as what the two sides differ by. Spanning
+# two COMMITS puts every commit in the range inside the assertion, so it stops
+# being a claim about the mechanism under test and becomes a claim about the
+# whole range - and then any commit touching an unrelated layer moves it.
+# Same tree, one substitution, is the shape to keep. The price is that $BIN
+# has to be this tree's build, which the freshness check at the top enforces.
+#
+# Nothing else in this file compares two builds: sens, npert, batch, off and
+# M3 all run one binary twice.
 if mutant raw src/forward.c \
         "$RAW_READ_P" "$RAW_READ_R" "$RAW_G_P" "$RAW_G_R" "$RAW_S_P" "$RAW_S_R"; then
     run "$MUTBIN" raw "$MODEL" || exit 1
@@ -701,6 +804,7 @@ else
     FAILED=1
 fi
 
+# One of the four same-tree comparisons noted at `raw`.
 # M2: mean becomes sum in gr_last's collapse. Only the raw identity sees it -
 # note this mutant carries four substitutions and ALL FOUR are count-verified,
 # which is the correction (b) in mutant()'s comment: the first version
@@ -723,9 +827,13 @@ else
 fi
 
 # M3: the read gate is skipped under SubLN. That removes the read gate
-# entirely, so perturbing W_u cannot move anything. -z: both substitutions
-# span a line break, so the "lines" the counter and sed work on are the
-# whole file. Both halves of the read gate are listed, so both are verified.
+# entirely, so W_u is unread at EVERY offset - which makes this the mutation
+# that has to redden BOTH halves of `sens`, and the reason neither half is a
+# signal that merely runs: the tight one (+$PERT_DELTA, logits) and the coarse
+# one (+$TEXT_DELTA, text) each have to collapse onto `on` for it to be
+# caught. -z: both substitutions span a line break, so the "lines" the
+# counter and sed work on are the whole file. Both halves of the read gate
+# are listed, so both are verified.
 if mutant m3 src/forward.c -z \
         'if (L->gr_on) {
             gr_read(m, s, L->gr_attn_norms,' 'if (L->gr_on && !c->use_subn) {
@@ -733,22 +841,29 @@ if mutant m3 src/forward.c -z \
         'if (L->gr_on) {
             gr_read(m, s, L->gr_mlp_norms,' 'if (L->gr_on && !c->use_subn) {
             gr_read(m, s, L->gr_mlp_norms,'; then
-    "$MUTBIN" "$MODEL" --prompt "$PROMPT" -n "$NGEN" --temp 0 \
-        --seed 1145141919 --dump-prefill "$W/m3_on.pf" >/dev/null 2>&1
-    "$MUTBIN" "$W/pert" --prompt "$PROMPT" -n "$NGEN" --temp 0 \
-        --seed 1145141919 --dump-prefill "$W/m3_pert.pf" >/dev/null 2>&1
+    run "$MUTBIN" m3_on "$MODEL" || exit 1
+    run "$MUTBIN" m3_pert "$W/pert" || exit 1
+    run "$MUTBIN" m3_tpert "$W/tpert" || exit 1
     if cmp -s "$W/m3_on.pf" "$W/m3_pert.pf"; then
-        echo "  mutation M3 (read gate skipped under use_subn): red as it should be - the sensitivity arm collapses onto on"
+        echo "  mutation M3 (read gate skipped under use_subn): red as it should be - the +$PERT_DELTA logit criterion collapses onto on"
     else
         echo "  FAIL: mutation M3 (read gate skipped under use_subn) was not"
-        echo "    caught; the read gate is not doing the normalisation the"
-        echo "    SubLN body does not do"
+        echo "    caught by the +$PERT_DELTA logit criterion; the read gate is"
+        echo "    not doing the normalisation the SubLN body does not do"
+        FAILED=1
+    fi
+    if cmp -s "$W/m3_on.txt" "$W/m3_tpert.txt"; then
+        echo "  mutation M3 (read gate skipped under use_subn): red as it should be - the +$TEXT_DELTA text criterion collapses onto on"
+    else
+        echo "  FAIL: mutation M3 (read gate skipped under use_subn) was not"
+        echo "    caught by the +$TEXT_DELTA text criterion either"
         FAILED=1
     fi
 else
     FAILED=1
 fi
 
+# One of the four same-tree comparisons noted at `raw`.
 # M4: gr_expand stops copying branch 0. Correct for token 0, wrong for every
 # later token - the exact defect the batch arm was added for.
 if mutant m4 src/forward.c \
@@ -766,6 +881,7 @@ else
     FAILED=1
 fi
 
+# One of the four same-tree comparisons noted at `raw`.
 # M5: every branch reads norms[0]. Invisible everywhere except `npert` -
 # measured: on the shipped checkpoint this mutant's logits are BIT FOR BIT
 # identical to the correct engine's, because all 32 norms are zero and
