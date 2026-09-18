@@ -1199,10 +1199,23 @@ int lz_kv_share_src(const LZModelConfig *c) {
     return nfull >= 2 ? first : -1;
 }
 
-/* 1 when layer li takes its k/v from the shared source. */
+/* 1 when layer li takes its k/v from the shared source. NOT when li
+   is inside CED's decoder region (ced_split > 0 && ced_split < n and
+   li >= ced_split - the same "CED on" test lz_gr_span elsewhere in
+   this file uses): report Sec2.2 Eq(1) is unconditional there, and
+   attn_kv_share (a project-invented generalization of the layer-reuse
+   idea, not an Eq(1) rule) has no basis to override it. The training
+   side's engine/kunmoe_modeling.py applies the same exclusion in
+   _wire_attn_kv_share; that tree and this one share no git history, so
+   its fix does not reach this file by any mechanism except being
+   written again here. */
 int lz_kv_share_target(const LZModelConfig *c, int li) {
     int src = lz_kv_share_src(c);
-    return src >= 0 && li > src && c->layer_types[li] == LZ_LT_FULL;
+    if (src < 0 || li <= src || c->layer_types[li] != LZ_LT_FULL)
+        return 0;
+    if (c->ced_split > 0 && c->ced_split < c->n_layers && li >= c->ced_split)
+        return 0;
+    return 1;
 }
 
 /* Give every target layer the source layer's five K/V tensors.

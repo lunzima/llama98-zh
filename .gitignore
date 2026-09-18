@@ -150,6 +150,8 @@
 !/build/arch_allowlist_gate.sh
 !/build/wscr_borrow_gate.sh
 !/build/wscr_borrow_check.py
+!/build/kv_share_ced_boundary_gate.sh
+!/build/kv_share_ced_boundary_probe.c
 # The model packer. It lived at the repository ROOT, where an untracked
 # file reads as a top-level project file rather than as tooling - which
 # is how it reached the public remote twice. Its only caller is
