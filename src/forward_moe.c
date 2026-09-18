@@ -62,12 +62,16 @@ static void moe_expert_loop(LZRunState *s, const LZModelConfig *c,
     int tk, kk, vv;
     /* Loop-invariant router configuration, packed so the per-token call
        passes one struct pointer instead of nine arguments (see the
-       LZMoeRouteParams note in ops.h). moe_gate_bias is F32, so
-       lz_t_f32 returns t->f without touching s->wscr and the pointer is
-       stable across the whole token loop. */
+       LZMoeRouteParams note in ops.h). moe_gate_bias is dequantized into
+       s->moe_router_bias, NOT into s->wscr: lz_t_f32 returns s->wscr for
+       every format except LZ_FMT_F32, the token loop below borrows that
+       same scratch for the latent norm, and a pointer parked out here
+       would therefore be reading that tensor's bytes from the second
+       token on. moe_router_bias has no other borrower, so the pointer is
+       stable across the whole loop by construction. */
     LZMoeRouteParams rp;
     rp.li_e = LZ_MOEGATE_ES;
-    rp.bias = lz_t_f32(&L->moe_gate_bias, s->wscr);
+    rp.bias = lz_t_f32(&L->moe_gate_bias, s->moe_router_bias);
     rp.n_experts = ne;
     rp.top_k = topk;
     rp.sigmoid = c->moe_router_sigmoid;

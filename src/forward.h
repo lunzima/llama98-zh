@@ -689,6 +689,17 @@ typedef struct {
     float *kda_gate;              /* (nt_cap * lin_n_v_heads * lin_k_head_dim) decay,
                                       already exponentiated (gt = exp(g), same
                                       convention lz_gdn_step's scalar gt uses) */
+    float *kda_decay;             /* (lin_n_v_heads) exp(A_log[h]), per head.
+                                      Its own allocation, not a borrow of
+                                      s->wscr: the decay gate reads BOTH
+                                      A_log and dt_bias out of one
+                                      kda_decay_gate_build call, and
+                                      lz_t_f32 returns s->wscr for every
+                                      format except LZ_FMT_F32 - so two
+                                      live borrows of it are one buffer
+                                      holding whichever tensor was widened
+                                      last. See forward_kda's own comment
+                                      at the materialization. */
 
     /* latent MoE scratch (LZLayer.ffn_moe layers only). TWO WIDTHS, and
        the split is the routing boundary: what one weight matrix serves
@@ -708,6 +719,13 @@ typedef struct {
     float *moe_h1, *moe_h3;       /* (nt_cap * max(moe_intermediate_size, moe_shared_width)) */
     float *moe_h2;                 /* (moe_latent_dim) one expert's w2 output before scaling */
     float *moe_shared_out;        /* (nt_cap * hidden_size) shared expert's down_proj output */
+    float *moe_router_bias;       /* (num_experts) moe_gate_bias, dequantized once
+                                     per layer instead of once per token. Its own
+                                     allocation for the same reason kda_decay has
+                                     one: the token loop below borrows s->wscr for
+                                     the latent norm, so a bias parked in s->wscr
+                                     would be that tensor's bytes from the second
+                                     token on. */
 
     /* MTP draft head scratch (LZ_SPEC_K > 0 at runtime; allocated only
        when m->mtp != NULL - see lz_state_alloc). The KV cache the MTP

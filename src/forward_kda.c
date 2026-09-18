@@ -357,32 +357,31 @@ static void kda_gate_build_int(LZRunState *s, const LZModelConfig *c,
 }
 
 static void kda_decay_gate_build(LZRunState *s, const LZModelConfig *c,
-                                 const float *a_log_arr, const float *dt_bias_arr,
+                                 const float *dt_bias_arr,
                                  int li, int nv, int kd, int nt, int gate_int) {
-    int h;
-    {
-        float *decay_base = s->wscr;
-        for (h = 0; h < nv; h++) decay_base[h] = lz_exp(a_log_arr[h]);
-        /* The int-pipeline form, now kda_gate_build_int (int-pipeline
-           milestone 5). With kda_gate arriving as int16 at
-           2^-LZ_KGATE_ES and dt_bias pre-quantized into that same domain
-           (kda_gate_build), `pre` is an INTEGER add, and the sigmoid is
-           reached through sigmoid_q15_t's folded coordinate the way the
-           fixed conv reaches it:
-             t = pre_i * (decay_base[h] * 2^(4-ES)) + 192
-           reproduces (decay_base[h]*pre - LZ_SIG_LO) * LZ_SIG_STEP with
-           one multiply and one add, because both LZ_SIG_STEP and the
-           offset are exact powers of two applied to an already-computed
-           value (lz_sig_q15_t_offset's own argument). The exit folds the
-           lower bound and the Q15 descale into one constant.
-           Per channel: 3 mul, 1 add, 2 cvt, against the float form's
-           add + multiply here and lz_sigmoid's 3 mul, 1 add, 1 cvt plus
-           the epilogue's convert and multiply. */
-        if (gate_int) {
-            kda_gate_build_int(s, c, decay_base, li, nv, kd, nt);
-        } else {
-            kda_gate_build_float(s, c, decay_base, dt_bias_arr, nv, kd, nt);
-        }
+    /* decay_base = exp(A_log) came in through s->kda_decay, built by the
+       caller while it still held A_log - see the field comment in
+       forward.h for why the two tensors cannot both borrow s->wscr. */
+    const float *decay_base = s->kda_decay;
+    /* The int-pipeline form, now kda_gate_build_int (int-pipeline
+       milestone 5). With kda_gate arriving as int16 at
+       2^-LZ_KGATE_ES and dt_bias pre-quantized into that same domain
+       (kda_gate_build), `pre` is an INTEGER add, and the sigmoid is
+       reached through sigmoid_q15_t's folded coordinate the way the
+       fixed conv reaches it:
+         t = pre_i * (decay_base[h] * 2^(4-ES)) + 192
+       reproduces (decay_base[h]*pre - LZ_SIG_LO) * LZ_SIG_STEP with
+       one multiply and one add, because both LZ_SIG_STEP and the
+       offset are exact powers of two applied to an already-computed
+       value (lz_sig_q15_t_offset's own argument). The exit folds the
+       lower bound and the Q15 descale into one constant.
+       Per channel: 3 mul, 1 add, 2 cvt, against the float form's
+       add + multiply here and lz_sigmoid's 3 mul, 1 add, 1 cvt plus
+       the epilogue's convert and multiply. */
+    if (gate_int) {
+        kda_gate_build_int(s, c, decay_base, li, nv, kd, nt);
+    } else {
+        kda_gate_build_float(s, c, decay_base, dt_bias_arr, nv, kd, nt);
     }
 }
 
@@ -475,10 +474,10 @@ void forward_kda(const LZModel *m, LZRunState *s,
        objects. */
     int bvec_int = 0, lat_int = 0, gate_int = 0;
     int bvec_may = 0, lat_may = 0;
-    /* Assigned far below, where s->wscr is known free. Declared here
-       because C89 wants the declaration ahead of the statements between,
-       and dt_bias_arr outlives the block that would otherwise have held
-       both. */
+    /* Both borrow s->wscr, far below. They are never live at the same
+       time; that call site's own comment has the ordering argument.
+       Declared here because C89 wants the declaration ahead of the
+       statements between. */
     const float *a_log_arr;
     const float *dt_bias_arr;
 #if LZ_BVEC_I16
@@ -790,12 +789,20 @@ void forward_kda(const LZModel *m, LZRunState *s,
     /* decay_base[h] = exp(A_log[h]) depends on the head ONLY, not on the
        token. Computed once per head here, then reused across nt tokens.
        A_log/dt_bias are per-head/per-channel weights, so their
-       dequantization is hoisted out of the tk loop too. decay_base goes
-       into s->wscr: A_log/dt_bias are F32 (lz_t_f32 returns t->f, no
-       write to wscr), so wscr is free here, and it is sized >= nvk >= nv. */
-    a_log_arr   = lz_t_f32(&L->kda_A_log, s->wscr);
+       dequantization is hoisted out of the tk loop too.
+
+       ONE BORROW AT A TIME, which is what the order below buys.
+       lz_t_f32 returns t->f for LZ_FMT_F32 and widens every other format
+       into the scratch it is handed, so a second materialization into
+       s->wscr while the first is still live REPLACES it rather than
+       joining it. No shipped checkpoint carries a single F32 tensor, so
+       the scratch path is the one that always runs. Hence decay_base
+       lives in s->kda_decay (forward.h's field comment) and A_log is out
+       of s->wscr before dt_bias goes in. */
+    a_log_arr = lz_t_f32(&L->kda_A_log, s->wscr);
+    for (h = 0; h < nv; h++) s->kda_decay[h] = lz_exp(a_log_arr[h]);
     dt_bias_arr = lz_t_f32(&L->kda_dt_bias, s->wscr);
-    kda_decay_gate_build(s, c, a_log_arr, dt_bias_arr, li, nv, kd, nt, gate_int);
+    kda_decay_gate_build(s, c, dt_bias_arr, li, nv, kd, nt, gate_int);
     LZ_TAP("kgate", layer, s->kda_gate, nvk);
 
     /* Recurrence, head-major like forward_ssm's - same L1-residency

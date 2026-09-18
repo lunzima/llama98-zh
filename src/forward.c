@@ -592,6 +592,7 @@ void lz_state_free(LZRunState *s) {
     xfree(s->moe_router_logits); xfree(s->moe_sel_idx); xfree(s->moe_sel_w);
     xfree(s->moe_lat_x); xfree(s->moe_lat_y);
     xfree(s->moe_h1); xfree(s->moe_h3); xfree(s->moe_h2); xfree(s->moe_shared_out);
+    xfree(s->moe_router_bias);
     xfree(s->mtp_x); xfree(s->mtp_concat); xfree(s->mtp_emb_raw);
     xfree(s->mtp_chain); xfree(s->mtp_draft_logits); xfree(s->mtp_logits);
     xfree(s->mtp_verify_hidden);
@@ -616,7 +617,7 @@ void lz_state_free(LZRunState *s) {
     xfree(s->kda_qc_i16); xfree(s->kda_kc_i16); xfree(s->kda_vc_i16);
     xfree(s->bvec_i16); xfree(s->moe_logits_i16);
     xfree(s->kda_lat_i16); xfree(s->kda_lat_i32);
-    xfree(s->kda_gate_i16); xfree(s->kda_dtb_i16);
+    xfree(s->kda_gate_i16); xfree(s->kda_dtb_i16); xfree(s->kda_decay);
     xfree(s->moe_lat_i16); xfree(s->moe_lat_q); xfree(s->moe_lat_qs);
     xfree(s->vtmp_i16);
     xfree(s->moe_h1_i16); xfree(s->moe_h3_i16);

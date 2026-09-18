@@ -218,6 +218,12 @@ static int kda_gate_build(LZRunState *s, const LZModel *m) {
         if (c->layer_types[layer] == LZ_LT_FULL) continue;
         if (L->kda_dt_bias.n == 0) return 0;
         li = s->cache_idx[layer];
+        /* The one lz_t_f32 borrow in this function, and it is a borrow of
+           s->wscr whenever dt_bias is packed - i.e. on every shipped
+           checkpoint. db is live from here to the end of the loop body,
+           and that body holds nothing but arithmetic on it, so no second
+           borrow can land inside its stride. build/wscr_borrow_gate.sh
+           is what reports it if one ever does. */
         db = lz_t_f32(&L->kda_dt_bias, s->wscr);
         if (!db) return 0;
         for (i = 0; i < nvk; i++) {
@@ -456,6 +462,11 @@ static void alloc_linear_scratch(LZRunState *s, const LZModelConfig *c,
     s->kda_gate_lat = (float *)xcalloc((size_t)nt * c->kda_gate_rank, sizeof(float), &ok, &s->bytes_alloc);
     s->kda_gate     = (float *)xcalloc((size_t)nt * c->lin_n_v_heads * c->lin_k_head_dim,
                                        sizeof(float), &ok, &s->bytes_alloc);
+    /* Per head, not per channel: A_log is (lin_n_v_heads) and stays that
+       way (forward_kda's own comment on why widening it was tried and
+       reverted). */
+    s->kda_decay    = (float *)xcalloc((size_t)c->lin_n_v_heads, sizeof(float),
+                                       &ok, &s->bytes_alloc);
     if (!ok) *okp = 0;
 }
 
@@ -492,6 +503,11 @@ static void alloc_moe_scratch(LZRunState *s, const LZModelConfig *c,
            written and consumed inside one (token, expert) step. */
         s->moe_h2 = (float *)xcalloc((size_t)c->moe_latent_dim, sizeof(float), &ok, &s->bytes_alloc);
         s->moe_shared_out = (float *)xcalloc((size_t)nt * c->hidden_size, sizeof(float), &ok, &s->bytes_alloc);
+        /* The router bias, out of s->wscr - see its field comment in
+           forward.h. One expert count wide, so one dequantize per layer
+           rather than one per token. */
+        s->moe_router_bias = (float *)xcalloc((size_t)c->num_experts, sizeof(float),
+                                              &ok, &s->bytes_alloc);
     }
     if (!ok) *okp = 0;
 }
