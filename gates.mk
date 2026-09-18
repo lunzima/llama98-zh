@@ -41,7 +41,7 @@
 # nested inside another comment; gcc said so on every build and `check`
 # reported 16 PASS over it. Having a caller somewhere is not the test -
 # being reachable from what people actually run is.
-check: root-hygiene-gate bare-endif-gate wscr-borrow-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate json-offset-gate softfp-gate dedupe-gate mm-alias-gate kv-share-ced-boundary-gate ced-proj-arm-gate c89-floor-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate isa-floor-avx2-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate arch-allowlist-gate kernel-matrix-gate aux-parm-arity-gate aux-equiv-gate mathf-xcompiler-gate bf16-torch-gate lz4-model-gate gcc-watcom-output-gate fixture-exists-gate
+check: root-hygiene-gate bare-endif-gate wscr-borrow-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate json-offset-gate softfp-gate dedupe-gate mm-alias-gate kv-share-ced-boundary-gate ced-proj-arm-gate csa2-modes-config-gate c89-floor-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate isa-floor-avx2-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate arch-allowlist-gate kernel-matrix-gate aux-parm-arity-gate aux-equiv-gate mathf-xcompiler-gate bf16-torch-gate lz4-model-gate gcc-watcom-output-gate fixture-exists-gate
 
 # Zero gcc warnings, asserted rather than printed. The Watcom side has
 # always been counted ("N lines, 0 warnings, 0 errors", per file); this
@@ -382,6 +382,19 @@ kv-share-ced-boundary-gate:
 .PHONY: ced-proj-arm-gate
 ced-proj-arm-gate:
 	@bash build/ced_proj_arm_gate.sh
+
+# csa2_kv_mode/csa2_kv_source (model.h's own csa2_mode[]/csa2_source[]
+# comment): the engine-side schema for report Sec2.3.1's Full/Reindex/
+# Reuse cross-layer KV reuse axis. Own script's header has the 6-layer
+# fixture and the mutation control (the reuse-source-cannot-itself-be-
+# reuse cross-check deleted from a scratch model.c, which must redden
+# case 6 only). No model dir needed - builds its own synthetic
+# config.json files - so it sits with the other fast, build-and-run
+# gates. forward_csa2.c does not read either array yet - a later,
+# separate task's cache_idx aliasing and mode dispatch.
+.PHONY: csa2-modes-config-gate
+csa2-modes-config-gate:
+	@bash build/csa2_modes_config_gate.sh
 
 # The two-generation allowlist: Qwen3.5 (GDN) and KunMoe (KDA) load, any
 # other checkpoint shape is refused by name. Own script's header has the

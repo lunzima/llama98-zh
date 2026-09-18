@@ -1,6 +1,7 @@
 #include <stdarg.h>
 #include <stddef.h>
 #include "lz_int.h"   /* not <stdint.h>: VC++ 4.0 has no such header */
+#include <ctype.h>    /* isdigit: csa2_key_idx's leading-character check */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -220,6 +221,25 @@ static int parse_ffn_activation(LZJson *j, const LZJsonNode *tc,
     c->swiglu_clamp_alpha =
         (float)lz_json_get_num(j, tc, "swiglu_clamp_alpha", 1.702);
     return 0;
+}
+
+/* csa2_kv_mode/csa2_kv_source's member names: a layer index written as a
+   JSON object key, which JSON has no integer form for. -1 on anything
+   that is not ENTIRELY an ASCII digit string in [0, LZ_MAX_LAYERS) -
+   the isdigit check on the leading byte is what actually delivers that,
+   since strtol's own leading-whitespace and leading-sign handling would
+   otherwise accept " 2" or "+2" as if they were "2". The upper bound is
+   checked in `long` before any cast to `int`, so a key many digits long
+   (past LONG_MAX, or merely past int's range) cannot become a small,
+   in-range int by truncation - it becomes -1 like any other malformed
+   key, not a wrapped-around layer index. */
+static int csa2_key_idx(const char *key) {
+    char *end;
+    long v;
+    if (!key || !key[0] || !isdigit((unsigned char)key[0])) return -1;
+    v = strtol(key, &end, 10);
+    if (*end != '\0' || v < 0 || v >= LZ_MAX_LAYERS) return -1;
+    return (int)v;
 }
 
 static int st_path_from_index(const char *dir, char *out, int outlen,
@@ -880,6 +900,120 @@ int lz_load_config(LZModelConfig *c, const char *path,
             c->csa2_on[idx] = 1;
         }
     }
+
+    /* csa2_kv_mode / csa2_kv_source (model.h's own csa2_mode[]/
+       csa2_source[] comment on LZModelConfig). Parsed here, right after
+       csa2_on[] is filled, for the same reason csa2_layers itself is
+       parsed here rather than alongside ced_split/mla_q_lora_rank above:
+       validating an entry needs csa2_on[] already filled.
+
+       c->csa2_mode[] is already LZ_CSA2_FULL (0) for every layer via
+       lz_load_config's own memset(c, 0, ...) at entry - LZ_CSA2_FULL is
+       0 for exactly this reason (model.h's own comment on the code).
+       csa2_source[] needs an explicit fill: -1 is not memset's zero. */
+    for (i = 0; i < LZ_MAX_LAYERS; i++) c->csa2_source[i] = -1;
+
+    /* Both are JSON OBJECTS keyed by the layer index AS A STRING (JSON
+       has no integer keys) - walked the same way lz_json_first/
+       lz_json_next walk an ARR's elements (st_path_from_index's
+       weight_map loop and arch_probe's tensor-name loop, both above in
+       this file, are the existing precedent for objects; this is the
+       first object here keyed by something other than a fixed literal
+       name). Each child node's own ->key is the member name, NUL-
+       terminated (json.h's own LZJsonNode comment) - csa2_key_idx above
+       is what rejects a key that is not ENTIRELY an in-range digit
+       string, rather than silently reading a numeric prefix or letting
+       strtol's own leading-whitespace/sign tolerance through. */
+    lt = lz_json_get(&j, tc, "csa2_kv_mode");
+    if (lt && lt->type == LZ_JSON_OBJ) {
+        for (e = lz_json_first(&j, lt); e; e = lz_json_next(&j, e)) {
+            int idx = csa2_key_idx(e->key);
+            if (idx < 0 || idx >= c->n_layers || !c->csa2_on[idx]) {
+                qerr(errbuf, errlen, LZ_ERR_CFG_CSA2_MODE,
+                     idx, "not a CSA2 layer");
+                lz_json_free(&j);
+                return 1;
+            }
+            if (lz_json_str_eq(e, "full")) {
+                c->csa2_mode[idx] = LZ_CSA2_FULL;
+            } else if (lz_json_str_eq(e, "reindex")) {
+                c->csa2_mode[idx] = LZ_CSA2_REINDEX;
+            } else if (lz_json_str_eq(e, "reuse")) {
+                c->csa2_mode[idx] = LZ_CSA2_REUSE;
+            } else {
+                qerr(errbuf, errlen, LZ_ERR_CFG_CSA2_MODE, idx,
+                     e->type == LZ_JSON_STR && e->text ?
+                     e->text : "(not-a-string)");
+                lz_json_free(&j);
+                return 1;
+            }
+        }
+    }
+    lt = lz_json_get(&j, tc, "csa2_kv_source");
+    if (lt && lt->type == LZ_JSON_OBJ) {
+        for (e = lz_json_first(&j, lt); e; e = lz_json_next(&j, e)) {
+            int idx = csa2_key_idx(e->key);
+            int src;
+            /* idx must already have been resolved to a non-FULL mode by
+               the csa2_kv_mode pass just above - a FULL-mode (explicit
+               or the untouched default) idx getting a source entry is
+               refused here, same as an out-of-range/non-CSA2 idx,
+               because neither can have "a strictly earlier layer this
+               entry aliases" mean anything. Bounds-checked before the
+               csa2_mode[] read: an unresolved idx outside [0, n_layers)
+               would otherwise index past the array. */
+            if (idx < 0 || idx >= c->n_layers ||
+                c->csa2_mode[idx] == LZ_CSA2_FULL) {
+                qerr(errbuf, errlen, LZ_ERR_CFG_CSA2_SOURCE, idx,
+                     "mode is full or was never set to reindex/reuse");
+                lz_json_free(&j);
+                return 1;
+            }
+            /* The value's own type: jnode_new zeroes every new node, so
+               a string/bool/null/array/object entry's ->num reads back
+               0.0 (or 1.0 for `true`) exactly like a legitimate integer
+               0/1 would - e->num alone cannot tell "the layer 0 source"
+               from "this was never a number". Checked before reading
+               ->num for that reason, not after. */
+            if (e->type != LZ_JSON_NUM) {
+                qerr(errbuf, errlen, LZ_ERR_CFG_CSA2_SOURCE, idx,
+                     "source is not a number");
+                lz_json_free(&j);
+                return 1;
+            }
+            src = (int)e->num;
+            if (src < 0 || src >= idx || !c->csa2_on[src]) {
+                qerr(errbuf, errlen, LZ_ERR_CFG_CSA2_SOURCE, idx,
+                     "source is not a strictly earlier CSA2 layer");
+                lz_json_free(&j);
+                return 1;
+            }
+            c->csa2_source[idx] = src;
+        }
+    }
+    /* Cross-checks that need BOTH objects fully parsed: a non-FULL mode
+       with no source (the csa2_kv_source pass above only ever fills a
+       source for an idx it saw; an idx named only in csa2_kv_mode never
+       reaches it), and a REUSE layer chained off another REUSE layer -
+       report Sec2.3.1's Reuse mode aliases a layer that itself holds
+       real K/V, and a REUSE source is never that. */
+    for (i = 0; i < c->n_layers; i++) {
+        if (!c->csa2_on[i] || c->csa2_mode[i] == LZ_CSA2_FULL) continue;
+        if (c->csa2_source[i] < 0) {
+            qerr(errbuf, errlen, LZ_ERR_CFG_CSA2_SOURCE, i,
+                 "csa2_kv_mode names a non-full mode with no csa2_kv_source entry");
+            lz_json_free(&j);
+            return 1;
+        }
+        if (c->csa2_mode[i] == LZ_CSA2_REUSE &&
+            c->csa2_mode[c->csa2_source[i]] == LZ_CSA2_REUSE) {
+            qerr(errbuf, errlen, LZ_ERR_CFG_CSA2_SOURCE, i,
+                 "reuse source is itself reuse mode");
+            lz_json_free(&j);
+            return 1;
+        }
+    }
+
     c->csa2_compress_m          = lz_json_get_int(&j, tc, "csa2_compress_m", 2);
     c->csa2_topk                = lz_json_get_int(&j, tc, "csa2_topk", 64);
     c->csa2_indexer_heads       = lz_json_get_int(&j, tc, "csa2_indexer_heads", 4);
@@ -1866,6 +2000,14 @@ static int setup_layers(LZModel *m, char *errbuf, int errlen) {
            csa2_on[] comment). Same "only m->layers is touched, m->mtp->
            blk never is" safety this mirrors from mla_q_on/mla_o_on. */
         L->csa2_on = c->csa2_on[i];
+        /* Sibling of csa2_on above, same reasoning: the forward reads
+           L->csa2_mode (once a later task wires forward_csa2.c's mode
+           dispatch to it), never c->csa2_mode[] directly, so the MTP
+           block's own LZLayer - calloc'd separately, never touched by
+           this loop - stays at its calloc default LZ_CSA2_FULL (0)
+           regardless of what config.json's csa2_kv_mode says about the
+           body layer index i happens to share with it. */
+        L->csa2_mode = c->csa2_mode[i];
         /* Learned attention sink: three conditions, and all three are the
            training side's _wire_attn_sink rule - the global switch, a
            full-attention layer (a linear-attention layer has no
@@ -2897,6 +3039,51 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
         for (i = 0; i < LZ_MAX_LAYERS; i++) {
             if (i >= c->n_layers && c->csa2_on[i] != 0) {
                 qerr(errbuf, errlen, LZ_ERR_BIN_CSA2_PAD);
+                goto fail;
+            }
+        }
+        /* csa2_mode[]/csa2_source[] (model.h's own field comment on
+           LZModelConfig) - appended to the v5 tail unconditionally, same
+           posture as every other field in this block (ced_kv just
+           above is the most recent precedent): no version word of its
+           own, no length prefix, just the next fixed slot in a header
+           that is "the base layout plus every field any version added,
+           in the order it was added" (this function's own comment,
+           above, at the ver==5 branch). tools/export_q8.py's
+           write_config does not write this pair yet - a separate,
+           later task.
+
+           THE COST, stated rather than left implicit: inserting a field
+           in the MIDDLE of an unconditionally-ordered, untagged tail -
+           rather than appending at the very end - desyncs every field
+           read after it (ced_replay_w onward) for any model.bin whose
+           export predates this commit but already carries every field
+           through csa2_on. Not hypothetical: this machine has real
+           (dev-fixture, non-shipping) v5 bin files in that exact state.
+           Before this commit their header parsed cleanly all the way
+           through and the load failed only much later, at an unrelated
+           tensor-shape mismatch; after it, the load fails during header
+           parsing itself, caught by the padding check just below -
+           correctly refused either way, since RD() has no way to tell
+           misaligned-but-in-range garbage from a legitimate value.
+           (Which specific field a desync trips, absent that padding
+           check, is a fact about one file's incidental byte content,
+           not a property of this change - not worth naming, and not
+           stable across edits to this very function, which is what
+           happened to an earlier draft of this comment.) This is the
+           established, accepted cost of this project's v5 format
+           (every prior addition - csa2_on, attn_sink_learned,
+           gated_residual, ced_replay_w, ced_kv - paid the same price
+           against whatever predated IT), not a new defect this task
+           introduces; the fix for a stale fixture is to re-export it,
+           not to version the header. */
+        RD(c->csa2_mode, LZ_MAX_LAYERS * 4);
+        RD(c->csa2_source, LZ_MAX_LAYERS * 4);
+        for (i = 0; i < LZ_MAX_LAYERS; i++) {
+            if (i >= c->n_layers &&
+                (c->csa2_mode[i] != 0 || c->csa2_source[i] != -1)) {
+                qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE,
+                     c->csa2_mode[i] != 0 ? "csa2_mode" : "csa2_source");
                 goto fail;
             }
         }

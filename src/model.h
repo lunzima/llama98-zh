@@ -53,6 +53,17 @@
 #define LZ_FFN_ACT_SITU         1   /* Kimi K3 SiTU-GLU, section 2.3.2 Eq. 12 */
 #define LZ_FFN_ACT_GPTOSS_CLAMP 2   /* GPT-OSS/DeepSeek-V4.1 clamped SwiGLU */
 
+/* csa2_mode[] codes (config.json's "csa2_kv_mode" object, keyed by string
+   layer index - see LZModelConfig's own csa2_mode/csa2_source comment).
+   Report Sec2.3.1's Full/Reindex/Reuse cross-layer KV axis, mirroring
+   the training side's KunMoeConfig.csa2_kv_mode string values exactly.
+   FULL is 0 so a checkpoint whose config.json never carried either key
+   - the whole domain before this field existed - zero-initializes into
+   the right default without a separate fill loop. */
+#define LZ_CSA2_FULL    0
+#define LZ_CSA2_REINDEX 1
+#define LZ_CSA2_REUSE   2
+
 /* Weight format codes. Carried per tensor; mixed precision is simply
    different tensors having different codes. Adding a format needs: a
    code here, a dispatch branch in ops.c, and a name in export_q8.py's
@@ -524,6 +535,29 @@ typedef struct {
     int csa2_indexer_head_dim;
     int csa2_indexer_q_lora_rank;
 
+    /* Report Sec2.3.1's Full/Reindex/Reuse cross-layer KV reuse axis -
+       the engine-side schema half; forward_csa2.c does not read either
+       array yet (a later task's cache_idx aliasing and mode dispatch),
+       so today every csa2_on layer runs Full regardless of what these
+       hold. Mirrors the training side's KunMoeConfig.csa2_kv_mode /
+       csa2_kv_source (a different repository - engine/csa2.py's three-
+       mode forward already landed there) field for field: config.json
+       objects keyed by STRING layer index (JSON has no integer keys),
+       e.g. csa2_kv_mode: {"2": "reindex"}, csa2_kv_source: {"2": 0}.
+
+       csa2_mode[i] is one of the LZ_CSA2_* codes above, csa2_on[i]
+       whether or not - FULL (the default, need not be named) needs no
+       source; REINDEX/REUSE both name a STRICTLY EARLIER member of
+       csa2_layers in csa2_source[i], and a REUSE layer's source must
+       itself be FULL or REINDEX, never REUSE (chaining a reuse off a
+       reuse has no single layer left holding real K/V to alias).
+       csa2_source[i] is -1 where csa2_mode[i] is FULL, which is every
+       layer's default - see model.c's lz_load_config for the exact
+       validation, which mirrors the training side's own
+       KunMoeConfig.__post_init__ check for this pair. */
+    int csa2_mode[LZ_MAX_LAYERS];
+    int csa2_source[LZ_MAX_LAYERS];
+
     /* Learned per-head attention sink (GptOss-style; the training
        side's _wire_attn_sink/_sink_eager_attention_forward). config.json
        "attn_sink" is a JSON true/false, read as a BOOL like
@@ -716,6 +750,11 @@ typedef struct {
     LZTensor csa2_w_weights;
     LZTensor csa2_w_dq_idx, csa2_w_uq_idx;
     int csa2_on;                     /* setup_layers-derived, see above */
+    int csa2_mode;                   /* setup_layers-derived from
+                                         LZModelConfig.csa2_mode[] above,
+                                         same pattern as csa2_on -
+                                         LZ_CSA2_FULL until a later task's
+                                         forward_csa2.c dispatch reads it */
 
     /* SubLN (use_subn=1 only): full attention's per-projection INPUT
        RMSNorms. Distinct from q_norm/k_norm above, which are Qwen3.5's
