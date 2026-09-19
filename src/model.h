@@ -501,16 +501,32 @@ typedef struct {
        engine/csa2.py's own module docstring (training-side reference)
        and docs/dsv41-optimization-menu.md's CSA2 section for the
        citation trail and the deliberate simplifications this engine
-       side does not reproduce (no cross-layer sharing - S1's
-       attn_kv_share already covers a simpler version of that axis; no
-       layered indexer; no sliding-window branch; no attention-sink
-       integration; no grouped output projection; no composition with
-       S4's shared low-rank latent - unlike the training-side reference,
-       which does support that composition, this engine side always
-       expects its OWN dedicated csa2_w_dq_idx tensor, so a checkpoint
-       trained with S4+CSA2 sharing the latent on the SAME layer is
-       refused by a missing-tensor error here, not silently
-       misinterpreted).
+       side does not reproduce (no layered indexer; no sliding-window
+       branch; no attention-sink integration; no grouped output
+       projection). Cross-layer sharing (report SS2.3.1's Full/Reindex/
+       Reuse modes) DOES land on this side - csa2_mode[]/csa2_source[]
+       below and forward_csa2.c's per-mode dispatch, aliasing a
+       Reindex/Reuse layer's cache_idx onto an earlier layer's ring
+       slot rather than giving it a fresh one.
+
+       S4 composition (the training-side reference's shared low-rank
+       query latent) is refused outright, on every csa2_mode, rather
+       than reproduced - a checkpoint combining mla_q_lora_rank>0 with
+       any csa2_on layer is rejected at load time (LZ_ERR_CFG_CSA2_MLA)
+       on both the JSON and bin paths, not left to fail later on a
+       missing or misaligned tensor.
+
+       KNOWN DEVIATION, not yet fixed: this engine's block-visibility
+       count (forward_csa2.c's n_vis, and engine/csa2.py's own
+       csa2_causal_block_mask on the training side) is ONE BLOCK
+       TIGHTER than the report's own reference implementation - see
+       docs/dsv41-optimization-menu.md SS11 for the exact formulas, the
+       worked example, and why the direction is conservative (no
+       future leakage) but not free (half of every block's queries
+       lose visibility into their own most recent positions at a
+       compress ratio of 2, and a ratio of 1 - the report's own
+       "uncompressed main KV" special case - degenerates to a query
+       that cannot see itself at all).
 
        PER-LAYER, not global like mla_q_lora_rank/mla_o_lora_rank above:
        csa2_layers may name a SUBSET of the full-attention layers (S1's
