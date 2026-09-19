@@ -1106,9 +1106,35 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
         if ((c->head_dim % s->kv_rot_v) != 0) s->kv_rot_v = 64;
     }
 
-    /* full and linear layers are numbered independently */
-    for (l = 0; l < c->n_layers; l++)
-        s->cache_idx[l] = (c->layer_types[l] == LZ_LT_FULL) ? nf++ : nl++;
+    /* full and linear layers are numbered independently. A CSA2 layer
+       in REINDEX/REUSE mode aliases its designated source's cache_idx
+       instead of claiming a fresh one - see model.h's own
+       LZModelConfig.csa2_mode[]/csa2_source[] comment for the mode
+       pair. l runs increasing and csa2_source[l] < l always (config-
+       validated at load), so cache_idx[c->csa2_source[l]] is already
+       resolved by the time this iteration reads it - transitively too,
+       since a chained source's own cache_idx entry was resolved by
+       this SAME rule on its own, earlier turn. No explicit walk is
+       needed. L->csa2_mode, not c->csa2_mode[l] directly - the same
+       per-layer-flag convention csa2_on follows (model.c's setup_layers
+       comment on L->csa2_on), so the MTP block's own separate LZLayer
+       never takes this branch. Every other full-attention layer
+       (csa2_mode == LZ_CSA2_FULL, the calloc default for a layer that
+       is not csa2_on at all) is unaffected and still calls nf++, so
+       nf's final value can end up smaller than c->n_full_layers once
+       any layer aliases - the ring/cache planes sized off
+       n_full_layers just carry a few unused rows, not a bug
+       (forward.h's own csa2_comp_ring comment: sized for the class,
+       not for which layers in it actually use this). */
+    for (l = 0; l < c->n_layers; l++) {
+        if (c->layer_types[l] != LZ_LT_FULL) {
+            s->cache_idx[l] = nl++;
+        } else if (m->layers[l].csa2_mode != LZ_CSA2_FULL) {
+            s->cache_idx[l] = s->cache_idx[c->csa2_source[l]];
+        } else {
+            s->cache_idx[l] = nf++;
+        }
+    }
 
 #if LZ_CONV_FIXED
     /* After cache_idx, which conv_fixed_build reads. */
