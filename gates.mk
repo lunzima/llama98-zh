@@ -41,7 +41,7 @@
 # nested inside another comment; gcc said so on every build and `check`
 # reported 16 PASS over it. Having a caller somewhere is not the test -
 # being reachable from what people actually run is.
-check: root-hygiene-gate bare-endif-gate wscr-borrow-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate json-offset-gate softfp-gate dedupe-gate mm-alias-gate kv-share-ced-boundary-gate ced-proj-arm-gate csa2-modes-config-gate csa2-cache-idx-alias-gate csa2-mode-dispatch-gate smf-lead-gate c89-floor-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate isa-floor-avx2-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate arch-allowlist-gate kernel-matrix-gate aux-parm-arity-gate aux-equiv-gate mathf-xcompiler-gate bf16-torch-gate lz4-model-gate gcc-watcom-output-gate fixture-exists-gate
+check: root-hygiene-gate bare-endif-gate wscr-borrow-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate json-offset-gate softfp-gate dedupe-gate mm-alias-gate kv-share-ced-boundary-gate ced-proj-arm-gate csa2-modes-config-gate csa2-cache-idx-alias-gate csa2-mode-dispatch-gate csa2-mode-export-load-gate csa2-last-writer-bin-gate csa2-reindex-causality-gate smf-lead-gate c89-floor-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate isa-floor-avx2-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate arch-allowlist-gate kernel-matrix-gate aux-parm-arity-gate aux-equiv-gate mathf-xcompiler-gate bf16-torch-gate lz4-model-gate gcc-watcom-output-gate fixture-exists-gate
 
 # Zero gcc warnings, asserted rather than printed. The Watcom side has
 # always been counted ("N lines, 0 warnings, 0 errors", per file); this
@@ -415,21 +415,74 @@ csa2-cache-idx-alias-gate:
 # Full/Reindex/Reuse mode dispatch itself (Part 5 Task 5.4, the last of
 # the three): forward_csa2.c now actually reads L->csa2_mode and skips
 # steps 2/3/6 per the report Sec2.3.1 table, and csa2_topk_idx/
-# csa2_topk_val become per-(ci, token-in-chunk) publish buffers instead
-# of a single transient scratch. Own script's header has the two
-# independent mutation controls - dispatch reverted to the old
-# unconditional six-step body (must redden the Reindex/Reuse-specific
-# checks, crash at check3b, leave check1's Full-only checks untouched),
-# and the publish buffer collapsed back to per-ci-only (must redden
-# specifically the two checks that read it directly, per-token, right
-# after a call - the ones a call's own last-token-only attn_out cannot
-# see through). No model dir needed - builds its own hand-crafted
-# LZModel/LZRunState fixtures with real synthetic weights and calls the
-# real forward_csa2() directly - so it sits with the other fast,
-# build-and-run gates.
+# csa2_topk_n become per-(ci, token-in-chunk) publish buffers instead
+# of a single transient scratch (forward.h's own csa2_topk_n_pub
+# comment has the accurate account of csa2_topk_val, its pre-rename,
+# never-written predecessor, removed along with the rename rather than
+# carried forward unread - not "never existed" the way an earlier
+# version of this comment put it). Own script's header has the full
+# mutation-by-mutation
+# argument (six independent mutations, not two - the review rounds
+# after this task's first landing each added their own). No model dir
+# needed - builds its own hand-crafted LZModel/LZRunState fixtures with
+# real synthetic weights and calls the real forward_csa2() directly -
+# so it sits with the other fast, build-and-run gates. $(call GATE_OK,
+# ...), not bare @bash: this script's own SKIP paths (no C compiler, no
+# python3) exit 2 exactly like csa2-mode-export-load-gate's below, and
+# `make -k check` should treat both the same way rather than one SKIP
+# passing and the (currently unreachable in this dev environment, but
+# not in every environment this Makefile runs in) other failing it.
 .PHONY: csa2-mode-dispatch-gate
 csa2-mode-dispatch-gate:
-	@bash build/csa2_mode_dispatch_gate.sh
+	@$(call GATE_OK,build/csa2_mode_dispatch_gate.sh)
+
+# C1 (fifth review round on this same plan): lz_open_bin called
+# lz_csa2_last_writer_valid before its own n_layers bound check, so a
+# malformed header (n_layers=200, aliasing csa2_mode[135] onto
+# csa2_source[7]) walked a 128-int stack array 108 ints past its end
+# instead of being refused. Also carries I4 (same round): a second real-
+# byte-stream case through the same real lz_open_bin path, for a per-
+# layer csa2_mode corruption well within bounds - the review's own
+# complaint that check_bin_validation (csa2-mode-dispatch-gate above)
+# never exercises the real loader, only a hand-built LZModelConfig.
+# Needs python3 and the training tree at TRAIN_ROOT (default
+# E:/LLM/llama98-zh) to build a real exported fixture, and the shipped
+# llama98(.exe) CLI - SKIPs without any of the three, same posture
+# csa2-mode-export-load-gate already has.
+.PHONY: csa2-last-writer-bin-gate
+csa2-last-writer-bin-gate:
+	@$(call GATE_OK,build/csa2_last_writer_bin_gate.sh)
+
+# C2 (fifth review round): a REINDEX layer's n_vis read the shared/
+# aliased csa2_n_blocks[ci] counter - already at floor(chunk_end/cm) by
+# the time its own call started, since its source's whole call already
+# finished - instead of pos/cm, leaking causal information from later
+# positions of the same chunk into an earlier one's query (REUSE's own
+# n_vis is dead code - own probe's header comment has the reasoning).
+# Own probe's header has the full argument and why it reads s->xb2
+# rather than s->attn_out (attn_out is structurally blind to anything
+# but a chunk's last token). No model dir needed - builds its own hand-
+# crafted LZModel/LZRunState fixture with real synthetic weights and
+# calls the real forward_csa2() directly, same posture as csa2-mode-
+# dispatch-gate above.
+.PHONY: csa2-reindex-causality-gate
+csa2-reindex-causality-gate:
+	@$(call GATE_OK,build/csa2_reindex_causality_gate.sh)
+
+# F11 (code review, third round on the same plan): model_walk's
+# CSA2_SPECS tensor walk was never gated on L->csa2_mode, so a
+# REINDEX/REUSE-mode layer's model.bin - now that the training side's
+# export_q8.py (a different repository) correctly writes only the
+# tensors that mode owns - fails to load at all. Own script's header
+# has the full argument, the mutation (CSA2_SPECS reverted to
+# unconditional), and round 4's addition (a real forward pass through
+# the shipped CLI, not just loading). Needs python3 and the training
+# tree at TRAIN_ROOT (default E:/LLM/llama98-zh) to build its own real
+# exported fixtures - SKIPs without either, same posture build/
+# csa2_modes_config_gate.sh already has for python3 alone.
+.PHONY: csa2-mode-export-load-gate
+csa2-mode-export-load-gate:
+	@$(call GATE_OK,build/csa2_mode_export_load_gate.sh)
 
 # common/smf.c's lead-in trim: lz_smf_open's first-sounding-note scan has
 # to take the MINIMUM tick over every track, not merely the first note

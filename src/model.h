@@ -536,25 +536,41 @@ typedef struct {
     int csa2_indexer_q_lora_rank;
 
     /* Report Sec2.3.1's Full/Reindex/Reuse cross-layer KV reuse axis -
-       the engine-side schema half; forward_csa2.c does not read either
-       array yet (a later task's cache_idx aliasing and mode dispatch),
-       so today every csa2_on layer runs Full regardless of what these
-       hold. Mirrors the training side's KunMoeConfig.csa2_kv_mode /
-       csa2_kv_source (a different repository - engine/csa2.py's three-
-       mode forward already landed there) field for field: config.json
-       objects keyed by STRING layer index (JSON has no integer keys),
-       e.g. csa2_kv_mode: {"2": "reindex"}, csa2_kv_source: {"2": 0}.
+       the engine-side schema half. forward_state.c's cache_idx fill
+       aliases a REINDEX/REUSE layer's own physical slot onto its
+       csa2_source's (a different task from this pair's own parsing),
+       and forward_csa2.c's own mode dispatch is what actually gives
+       FULL/REINDEX/REUSE their three distinct behaviors - see that
+       file's own header comment for the six-step table. Mirrors the
+       training side's KunMoeConfig.csa2_kv_mode / csa2_kv_source (a
+       different repository - engine/csa2.py's three-mode forward
+       landed there first) field for field: config.json objects keyed
+       by STRING layer index (JSON has no integer keys), e.g.
+       csa2_kv_mode: {"2": "reindex"}, csa2_kv_source: {"2": 0}.
 
        csa2_mode[i] is one of the LZ_CSA2_* codes above, csa2_on[i]
        whether or not - FULL (the default, need not be named) needs no
        source; REINDEX/REUSE both name a STRICTLY EARLIER member of
-       csa2_layers in csa2_source[i], and a REUSE layer's source must
-       itself be FULL or REINDEX, never REUSE (chaining a reuse off a
-       reuse has no single layer left holding real K/V to alias).
-       csa2_source[i] is -1 where csa2_mode[i] is FULL, which is every
-       layer's default - see model.c's lz_load_config for the exact
-       validation, which mirrors the training side's own
-       KunMoeConfig.__post_init__ check for this pair. */
+       csa2_layers in csa2_source[i]. That per-layer shape is necessary
+       but not sufficient: the actual requirement is that csa2_source[i]
+       be the CURRENT LAST WRITER of the physical slot it aliases, not
+       merely any strictly-earlier csa2_on layer - lz_csa2_last_writer_
+       valid (model.c) is the whole-config check this needs (its own
+       comment has the concrete counter-example: a REINDEX layer chained
+       off a FULL layer, then a REUSE layer naming that same FULL layer
+       as ITS source too, skipping over the REINDEX layer that actually
+       overwrote the shared slot last). "A REUSE layer's source must
+       itself be FULL or REINDEX, never REUSE" - this project's OLDER,
+       narrower rule - is a special case that check subsumes (a REUSE
+       layer never becomes anyone's last writer, so naming one as a
+       source always fails the same way). csa2_source[i] is -1 where
+       csa2_mode[i] is FULL, which is every layer's default - see
+       model.c's lz_load_config for the exact validation, which mirrors
+       the training side's own KunMoeConfig.__post_init__ check for this
+       pair. Also refused there (and by lz_open_bin's own mirror check):
+       csa2_on[i] together with mla_q_lora_rank > 0 - forward_csa2.c's
+       step 1 always reads q_proj directly and never S4's low-rank
+       q_proj_down/up pair, so the two compose only on paper. */
     int csa2_mode[LZ_MAX_LAYERS];
     int csa2_source[LZ_MAX_LAYERS];
 
@@ -753,8 +769,10 @@ typedef struct {
     int csa2_mode;                   /* setup_layers-derived from
                                          LZModelConfig.csa2_mode[] above,
                                          same pattern as csa2_on -
-                                         LZ_CSA2_FULL until a later task's
-                                         forward_csa2.c dispatch reads it */
+                                         forward_csa2.c's own mode
+                                         dispatch reads this field to
+                                         pick FULL/REINDEX/REUSE's three
+                                         distinct behaviors */
 
     /* SubLN (use_subn=1 only): full attention's per-projection INPUT
        RMSNorms. Distinct from q_norm/k_norm above, which are Qwen3.5's
@@ -1120,5 +1138,30 @@ int lz_ced_kv_target(const LZModelConfig *c, int li);
    all-default, not "internally consistent"), which lz_open_bin's own
    padding loop already applies and this function does not repeat. */
 int lz_csa2_mode_source_valid(const LZModelConfig *c, int li);
+
+/* Whether every csa2_on layer's declared csa2_source is exactly its
+   alias root's CURRENT LAST WRITER, not merely "a strictly earlier,
+   csa2_on, full_attention layer" (lz_csa2_mode_source_valid's own,
+   weaker, per-layer question). Cross-layer - unlike every other
+   predicate on this page, it walks the whole config, in increasing
+   layer order, tracking who most recently wrote each shared physical
+   ci slot - because aliasing runs by PHYSICAL SLOT (forward_state.c's
+   cache_idx fill), and two layers can share one without either being
+   the other's own declared source (a FULL layer and every REINDEX
+   layer chained off it, directly or transitively, all alias the same
+   root). model.c's own comment on this function has the full argument
+   and the concrete example (source=0 valid per-layer, still wrong once
+   an intervening REINDEX layer at the same root has overwritten the
+   slot layer 0 originally wrote).
+
+   REQUIRES every layer to have already passed lz_csa2_mode_source_valid
+   - both callers (lz_load_config, lz_open_bin) apply that check first,
+   over the whole layer range, before this one; this function's own
+   root-finding walk is only guaranteed to terminate under that
+   precondition.
+
+   Returns 1 if the whole config is consistent, 0 with *bad_layer set
+   to the first violating layer otherwise (bad_layer may be NULL). */
+int lz_csa2_last_writer_valid(const LZModelConfig *c, int *bad_layer);
 
 #endif

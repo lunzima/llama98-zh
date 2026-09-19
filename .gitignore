@@ -160,6 +160,11 @@
 !/build/csa2_cache_idx_alias_probe.c
 !/build/csa2_mode_dispatch_gate.sh
 !/build/csa2_mode_dispatch_probe.c
+!/build/csa2_mode_export_load_gate.sh
+!/build/csa2_mode_export_load_probe.c
+!/build/csa2_last_writer_bin_gate.sh
+!/build/csa2_reindex_causality_gate.sh
+!/build/csa2_reindex_causality_probe.c
 !/build/smf_lead_gate.sh
 !/build/smf_lead_probe.c
 !/build/smf_lead_realfile_probe.c

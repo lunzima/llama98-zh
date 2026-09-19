@@ -897,6 +897,28 @@ int lz_load_config(LZModelConfig *c, const char *path,
                 lz_json_free(&j);
                 return 1;
             }
+            /* S4+CSA2 composition (model.h's own csa2_w_dq_idx comment;
+               model_walk's own CSA2_SPECS comment has the mechanism):
+               present_mla_q/present_not_mla_q gate q_proj.weight vs
+               q_proj.down/up.weight PURELY on c->mla_q_lora_rank, for
+               EVERY full_attention layer, csa2_on or not - so a csa2_on
+               layer under S4 never gets q_proj.weight walked at all,
+               while forward_csa2.c's step 1 always reads L->q_proj
+               directly and never L->q_proj_down/up. Refused explicitly,
+               here, rather than left to an accidental missing-tensor
+               error on csa2_w_dq_idx (which only fires for a checkpoint
+               that ALSO reproduces the training side's own composition
+               choice of dropping that tensor - see model_walk's own
+               comment for why that accident cannot be relied on at all
+               on the bin path, which has no name to fail a lookup
+               against). mla_q_lora_rank is parsed once, unconditionally,
+               well before this loop runs (this function's own field
+               order), so it is already final here. */
+            if (c->mla_q_lora_rank > 0) {
+                qerr(errbuf, errlen, LZ_ERR_CFG_CSA2_MLA, idx);
+                lz_json_free(&j);
+                return 1;
+            }
             c->csa2_on[idx] = 1;
         }
     }
@@ -994,9 +1016,16 @@ int lz_load_config(LZModelConfig *c, const char *path,
     /* Cross-checks that need BOTH objects fully parsed: a non-FULL mode
        with no source (the csa2_kv_source pass above only ever fills a
        source for an idx it saw; an idx named only in csa2_kv_mode never
-       reaches it), and a REUSE layer chained off another REUSE layer -
-       report Sec2.3.1's Reuse mode aliases a layer that itself holds
-       real K/V, and a REUSE source is never that. */
+       reaches it), and - once every layer has a source at all -
+       lz_csa2_last_writer_valid's own whole-config question: is each
+       one's declared source actually the CURRENT last writer of the
+       physical slot it aliases, not merely a strictly-earlier csa2_on
+       layer. That single check subsumes the narrower one this loop
+       used to run in its place ("a REUSE layer's source must not
+       itself be REUSE mode" - model.c's own comment on
+       lz_csa2_last_writer_valid has the proof: a REUSE layer never
+       becomes anyone's last writer, so any layer naming one as its own
+       source always fails the same way). */
     for (i = 0; i < c->n_layers; i++) {
         if (!c->csa2_on[i] || c->csa2_mode[i] == LZ_CSA2_FULL) continue;
         if (c->csa2_source[i] < 0) {
@@ -1005,10 +1034,13 @@ int lz_load_config(LZModelConfig *c, const char *path,
             lz_json_free(&j);
             return 1;
         }
-        if (c->csa2_mode[i] == LZ_CSA2_REUSE &&
-            c->csa2_mode[c->csa2_source[i]] == LZ_CSA2_REUSE) {
-            qerr(errbuf, errlen, LZ_ERR_CFG_CSA2_SOURCE, i,
-                 "reuse source is itself reuse mode");
+    }
+    {
+        int bad = -1;
+        if (!lz_csa2_last_writer_valid(c, &bad)) {
+            qerr(errbuf, errlen, LZ_ERR_CFG_CSA2_SOURCE, bad,
+                 "source is not the current last writer of the shared "
+                 "slot it aliases");
             lz_json_free(&j);
             return 1;
         }
@@ -1409,6 +1441,92 @@ int lz_csa2_mode_source_valid(const LZModelConfig *c, int li) {
            c->layer_types[src] == LZ_LT_FULL;
 }
 
+/* model.h's own comment on this function has the contract. Cross-layer,
+   unlike lz_csa2_mode_source_valid above: aliasing runs by shared
+   PHYSICAL SLOT (forward_state.c's cache_idx fill, s->cache_idx[l] =
+   s->cache_idx[c->csa2_source[l]] for a non-FULL mode), not by the
+   declared csa2_source tree alone, and two layers can share the SAME
+   slot without one being the other's own declared source - a FULL
+   layer and every REINDEX layer chained off it (directly or
+   transitively) all alias the one root's slot. forward_csa2.c's own
+   step 3 has each FULL/REINDEX layer OVERWRITE that shared slot with
+   its own fresh Top-K when its call runs (report Sec2.3.1's own
+   header comment on csa2_topk_idx_pub), so by the time a REUSE (or a
+   later REINDEX) layer's own call reads it, what is actually there is
+   whichever csa2_on layer wrote to that root LAST - not necessarily
+   the layer this one's own csa2_source names.
+
+   Concretely: layer 0 FULL, layer 2 REINDEX(source 0), layer 3
+   REUSE(source 0) - NOT source 2. lz_csa2_mode_source_valid alone
+   passes layer 3 (0 is a strictly earlier, csa2_on, full_attention
+   layer), but layer 2's own call already overwrote root 0's slot with
+   layer 2's OWN Top-K before layer 3's call ever runs (forward.c
+   dispatches layers in increasing order) - layer 3 reads layer 2's
+   selection while declaring layer 0 as its source. The two are
+   different questions and this function is what asks the second one.
+
+   Assumes every layer already passed lz_csa2_mode_source_valid -
+   REQUIRED, not merely convenient: this walk trusts csa2_source[i] to
+   be a valid, strictly-earlier, in-bounds index for every non-FULL
+   csa2_on layer it visits (both callers apply that check first, per
+   layer, over the WHOLE range before ever calling this). Root-finding
+   (the while loop below) therefore always terminates: csa2_source[r]
+   is strictly less than r at every step, for as long as csa2_mode[r]
+   is not yet FULL.
+
+   Returns 1 if every layer's declared source is exactly its alias
+   root's current last writer, 0 with *bad_layer set to the first
+   violation otherwise (bad_layer may be NULL). */
+int lz_csa2_last_writer_valid(const LZModelConfig *c, int *bad_layer) {
+    /* static, not a stack array: this project's own convention for
+       buffers of this shape - 128 ints is small on its own, but this
+       function is exactly the one C1 (report Sec2.3.1 mode-dispatch
+       task) found walking an ATTACKER-CONTROLLED n_layers against it
+       before lz_open_bin's own n_layers bound had run; a static array
+       does not remove the need for that bound (the loop below still
+       has to stay inside LZ_MAX_LAYERS, which n_layers's own RD() site
+       now guarantees for every caller), but it does mean an overrun
+       here corrupts a fixed, adjacent-to-nothing-interesting data
+       segment instead of a return address a few hundred bytes past a
+       stack frame - defense in depth, not the fix itself.
+
+       NON-REENTRANT as a consequence, which matters more than the size
+       does: this engine has no threads and no signal handler that
+       could call back into model loading, and the two loops right
+       below always run back to back within one call - the first fully
+       OVERWRITES every element to -1 before the second ever reads any
+       of them, so there is no window where a second call (there is
+       none, but if one were ever added) could observe a partially-
+       written array from this one. Safe for THIS reason, not because
+       the buffer happens to be small. */
+    static int last_writer[LZ_MAX_LAYERS];
+    int i;
+    for (i = 0; i < LZ_MAX_LAYERS; i++) last_writer[i] = -1;
+    for (i = 0; i < c->n_layers; i++) {
+        int r;
+        if (!c->csa2_on[i]) continue;
+        if (c->csa2_mode[i] == LZ_CSA2_FULL) { last_writer[i] = i; continue; }
+        r = c->csa2_source[i];
+        while (c->csa2_mode[r] != LZ_CSA2_FULL) r = c->csa2_source[r];
+        if (c->csa2_source[i] != last_writer[r]) {
+            if (bad_layer) *bad_layer = i;
+            return 0;
+        }
+        if (c->csa2_mode[i] == LZ_CSA2_REINDEX) last_writer[r] = i;
+        /* REUSE writes nothing - forward_csa2.c's own step 3 skips it
+           entirely - so last_writer[r] is untouched, and any LATER
+           layer declaring THIS reuse layer as its own source fails the
+           check above (last_writer[r] can only ever hold a FULL or
+           REINDEX layer's index): a reuse chained off a reuse is a
+           special case of the same violation this function already
+           detects, which is why it replaces rather than joins the
+           narrower "reuse source is itself reuse mode" check this
+           project's own git history carried until this function
+           existed. */
+    }
+    return 1;
+}
+
 /* Give every target layer the source layer's five K/V tensors.
 
    A STRUCT COPY, not a deep copy: the storage stays the source layer's,
@@ -1635,32 +1753,95 @@ static int model_walk(LZModel *m, LZVisit visit, void *ctx,
            lz_open/lz_open_bin, same ordering the MoE block above
            depends on). */
         if (L->csa2_on) {
-            static const struct { const char *suf; size_t field; int dims[3]; }
+#define CSA2_OWN_FULL    1
+#define CSA2_OWN_REINDEX 2
+            /* CSA2_OWN_FULL/CSA2_OWN_REINDEX: which mode(s) actually own
+               a given tensor, carried PER ENTRY rather than inferred
+               from position in the array (an earlier version used a
+               bare `k < 4` against the loop index, which encoded "the
+               first four entries are FULL-only" as an unstated fact
+               about array ORDER - silent and correct only for as long
+               as nobody reorders or inserts a row; this project's own
+               mutation coverage can only flip "does the walk gate on
+               mode at all", never "is the cut at the right index", so a
+               reordering bug would not even fail its own gate). Each
+               row now states its own ownership, so grep or a diff on
+               this table shows the fact directly, and a row inserted
+               anywhere still carries the right bits with it. */
+            static const struct { const char *suf; size_t field; int dims[3]; int own; }
             CSA2_SPECS[] = {
                 { "self_attn.csa2_w_kv.weight",       offsetof(LZLayer, csa2_w_kv),
-                  { DK_HEAD_DIM, DK_HIDDEN, DK_END } },
+                  { DK_HEAD_DIM, DK_HIDDEN, DK_END }, CSA2_OWN_FULL },
                 { "self_attn.csa2_w_gate.weight",     offsetof(LZLayer, csa2_w_gate),
-                  { DK_HEAD_DIM, DK_HIDDEN, DK_END } },
+                  { DK_HEAD_DIM, DK_HIDDEN, DK_END }, CSA2_OWN_FULL },
                 { "self_attn.csa2_w_kv_idx.weight",   offsetof(LZLayer, csa2_w_kv_idx),
-                  { DK_CSA2_IDX_HEAD_DIM, DK_HIDDEN, DK_END } },
+                  { DK_CSA2_IDX_HEAD_DIM, DK_HIDDEN, DK_END }, CSA2_OWN_FULL },
                 { "self_attn.csa2_w_gate_idx.weight", offsetof(LZLayer, csa2_w_gate_idx),
-                  { DK_CSA2_IDX_HEAD_DIM, DK_HIDDEN, DK_END } },
+                  { DK_CSA2_IDX_HEAD_DIM, DK_HIDDEN, DK_END }, CSA2_OWN_FULL },
                 { "self_attn.csa2_w_weights.weight",  offsetof(LZLayer, csa2_w_weights),
-                  { DK_CSA2_IDX_HEADS, DK_HIDDEN, DK_END } },
+                  { DK_CSA2_IDX_HEADS, DK_HIDDEN, DK_END },
+                  CSA2_OWN_FULL | CSA2_OWN_REINDEX },
                 { "self_attn.csa2_w_dq_idx.weight",   offsetof(LZLayer, csa2_w_dq_idx),
-                  { DK_CSA2_Q_LORA_RANK, DK_HIDDEN, DK_END } },
+                  { DK_CSA2_Q_LORA_RANK, DK_HIDDEN, DK_END },
+                  CSA2_OWN_FULL | CSA2_OWN_REINDEX },
                 { "self_attn.csa2_w_uq_idx.weight",   offsetof(LZLayer, csa2_w_uq_idx),
-                  { DK_CSA2_UQ_OUT, DK_CSA2_Q_LORA_RANK, DK_END } }
+                  { DK_CSA2_UQ_OUT, DK_CSA2_Q_LORA_RANK, DK_END },
+                  CSA2_OWN_FULL | CSA2_OWN_REINDEX }
             };
+            /* Which of the seven a layer's csa2_mode actually owns -
+             * forward_csa2.c's own dispatch already reads exactly this
+             * subset (step 2, indices 0-3, is skipped whenever mode !=
+             * FULL; step 3, indices 4-6, is skipped only for REUSE), so
+             * this walk is catching up to code that was already
+             * correct, not the other way around. Mirrors the training
+             * side's engine/csa2.py _wire_csa2 field for field
+             * (export_q8.py's csa2_suffixes_for is the same rule
+             * re-derived on that side - a different repository, no
+             * shared git history, so neither side's fix reaches the
+             * other by any mechanism except being written again):
+             *   FULL    all seven.
+             *   REINDEX only indices 4-6 (weights, dq_idx, uq_idx - the
+             *           indexer QUERY half). Main KV and indexer K
+             *           (0-3) are both reused from csa2_source, never
+             *           recomputed locally - a local copy would be dead
+             *           weight nothing reads.
+             *   REUSE   none - no compression, no indexer at all.
+             * dq_idx (index 5) is NOT further conditioned on S4's
+             * shared low-rank query latent (mla_q_lora_rank > 0) the
+             * way the training side's own csa2_suffixes_for
+             * additionally drops it there: this engine side does not
+             * support that composition on ANY csa2 mode (model.h's own
+             * csa2_w_dq_idx comment) and always expects its own
+             * dedicated tensor regardless of mode. That composition is
+             * refused by lz_load_config's own csa2_layers loop and by
+             * lz_open_bin's own mla_q_lora_rank check (both run well
+             * before this walk ever executes) - NOT by a missing-tensor
+             * error here, whatever an earlier version of this comment
+             * claimed. That claim held for a safetensors checkpoint
+             * that genuinely dropped dq_idx the way the training side
+             * does under the composition (name lookup fails), but never
+             * for the .bin format: its reads are POSITIONAL, with no
+             * name for a missing tensor to fail a lookup against, so a
+             * hand-built or corrupted .bin header naming both fields
+             * would have loaded and run - silently misaligned past this
+             * walk's dq_idx read, not refused - with nothing here to
+             * stop it before the explicit checks named above existed. */
             int k;
-            for (k = 0; k < (int)(sizeof(CSA2_SPECS) / sizeof(CSA2_SPECS[0])); k++) {
-                LZTensor *field;
-                snprintf(name, sizeof(name), "%slayers.%d.%s",
-                         m->prefix, li, CSA2_SPECS[k].suf);
-                field = (LZTensor *)((char *)L + CSA2_SPECS[k].field);
-                if (model_walk_one(m, name, CSA2_SPECS[k].dims, field,
-                                   visit, ctx, errbuf, errlen) != 0) return 1;
+            if (L->csa2_mode != LZ_CSA2_REUSE) {
+                int want = (L->csa2_mode == LZ_CSA2_FULL) ?
+                           CSA2_OWN_FULL : CSA2_OWN_REINDEX;
+                for (k = 0; k < (int)(sizeof(CSA2_SPECS) / sizeof(CSA2_SPECS[0])); k++) {
+                    LZTensor *field;
+                    if (!(CSA2_SPECS[k].own & want)) continue;
+                    snprintf(name, sizeof(name), "%slayers.%d.%s",
+                             m->prefix, li, CSA2_SPECS[k].suf);
+                    field = (LZTensor *)((char *)L + CSA2_SPECS[k].field);
+                    if (model_walk_one(m, name, CSA2_SPECS[k].dims, field,
+                                       visit, ctx, errbuf, errlen) != 0) return 1;
+                }
             }
+#undef CSA2_OWN_FULL
+#undef CSA2_OWN_REINDEX
         }
 
         /* Learned attention sink - one (n_heads) vector per layer the
@@ -2030,11 +2211,12 @@ static int setup_layers(LZModel *m, char *errbuf, int errlen) {
            blk never is" safety this mirrors from mla_q_on/mla_o_on. */
         L->csa2_on = c->csa2_on[i];
         /* Sibling of csa2_on above, same reasoning: the forward reads
-           L->csa2_mode (once a later task wires forward_csa2.c's mode
-           dispatch to it), never c->csa2_mode[] directly, so the MTP
-           block's own LZLayer - calloc'd separately, never touched by
-           this loop - stays at its calloc default LZ_CSA2_FULL (0)
-           regardless of what config.json's csa2_kv_mode says about the
+           L->csa2_mode (forward_csa2.c's own mode dispatch - FULL/
+           REINDEX/REUSE, report Sec2.3.1), never c->csa2_mode[]
+           directly, so the MTP block's own LZLayer - calloc'd
+           separately, never touched by this loop - stays at its calloc
+           default LZ_CSA2_FULL (0) regardless of what config.json's
+           csa2_kv_mode says about the
            body layer index i happens to share with it. */
         L->csa2_mode = c->csa2_mode[i];
         /* Learned attention sink: three conditions, and all three are the
@@ -2951,7 +3133,41 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
         goto fail;
     }
     RD(&c->vocab_size, 4); RD(&c->hidden_size, 4);
-    RD(&c->n_layers, 4);   RD(&c->seq_len, 4);
+    RD(&c->n_layers, 4);
+    /* STRUCTURAL: this is n_layers's OWN bound, checked the instant its
+       RD() lands and before any other statement in this function ever
+       runs - not folded into the "derived quantities self-consistent"
+       block further down (still there, unchanged, as an idempotent
+       second gate - belt and suspenders, not a duplicate to remove).
+       Every one of layer_types[]/csa2_on[]/csa2_mode[]/csa2_source[]/
+       last_writer[] is LZ_MAX_LAYERS wide, and this loader (and
+       lz_csa2_last_writer_valid, which it calls) is FULL of loops
+       shaped `for (i = 0; i < c->n_layers; i++)` reading or writing one
+       of those arrays - each one is safe only because n_layers cannot
+       exceed their width by the time it runs. That used to be true by
+       accident of ordering (whichever loop happened to sit textually
+       after the old, single, late check), not by construction - and
+       twice already (report Sec2.3.1 mode-dispatch task's own C1 and
+       then, one review round later, its own C-NEW-1/C-NEW-2 fixing
+       Minor-item/I3 code) a NEW loop of exactly this shape landed
+       BEFORE that late check, unbounded, because nothing at the point
+       n_layers is first read stops it from being arbitrary. A header
+       with n_layers=0x7FFFFFFF is refused HERE now, before the very
+       first LZ_MAX_LAYERS-wide array is ever indexed by it anywhere
+       in this function - so every loop below this point, present or
+       future, inherits the bound for free instead of by remembering to
+       place itself after line ~3450. The padding loop immediately below
+       (`RD(c->layer_types, ...)` then `for (i = 0; i < LZ_MAX_LAYERS;
+       i++) if (i >= c->n_layers ...)`) was already safe regardless -
+       its own loop bound is LZ_MAX_LAYERS, and it only ever COMPARES
+       against n_layers, never uses it as an index or an upper bound of
+       its own - so it is unaffected by running before or after this
+       check either way. */
+    if (c->n_layers <= 0 || c->n_layers > LZ_MAX_LAYERS) {
+        qerr(errbuf, errlen, LZ_ERR_BIN_CFG);
+        goto fail;
+    }
+    RD(&c->seq_len, 4);
     RD(&c->n_heads, 4);    RD(&c->n_kv_heads, 4);
     RD(&c->head_dim, 4);   RD(&c->intermediate_size, 4);
     RD(&c->lin_n_k_heads, 4); RD(&c->lin_n_v_heads, 4);
@@ -2968,6 +3184,38 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
     for (i = 0; i < LZ_MAX_LAYERS; i++) {
         if (i >= c->n_layers && c->layer_types[i] != 0) {
             qerr(errbuf, errlen, LZ_ERR_BIN_PAD);
+            goto fail;
+        }
+    }
+    /* n_full_layers/n_linear_layers are two more raw header words with
+       no range check of their own - unlike n_layers, nothing above
+       bounds them, and forward_state.c's alloc_csa2_ring trusts
+       n_full_layers as its own `nf` with only lz_csa2_pub_overflows
+       standing between an unvalidated word and xcalloc's arithmetic
+       (that function's own comment has the overflow mechanics; this is
+       the check that keeps its "nf <= LZ_MAX_LAYERS in production"
+       premise actually true on the bin path, rather than merely
+       documented). This loop is itself a `for (i = 0; i < c->n_layers;
+       i++)` reading layer_types[i] - safe here for the structural
+       reason n_layers's own RD() site now states: n_layers was already
+       bounded to [1, LZ_MAX_LAYERS] there, well before this point, not
+       because this loop happens to sit after some other check. LZ_LT_
+       LINEAR and LZ_LT_KDA both count toward n_linear_layers, same as
+       lz_load_config's own layer_types loop above (the JSON path's
+       comment on that loop has the reasoning); an out-of-{0,1,2}
+       layer_types[] entry - not yet refused at this point, the
+       "unknown" check below runs later - falls into the linear side of
+       this count too, which is harmless: this check only needs the two
+       counts to disagree to catch a garbage n_full_layers/n_linear_
+       layers pair, not to itself classify every legal value. */
+    {
+        int nf_count = 0, nl_count = 0;
+        for (i = 0; i < c->n_layers; i++) {
+            if (c->layer_types[i] == LZ_LT_FULL) nf_count++;
+            else nl_count++;
+        }
+        if (c->n_full_layers != nf_count || c->n_linear_layers != nl_count) {
+            qerr(errbuf, errlen, LZ_ERR_BIN_CFG);
             goto fail;
         }
     }
@@ -3071,6 +3319,27 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
                 goto fail;
             }
         }
+        /* S4+CSA2 composition (lz_load_config's own csa2_layers loop has
+           the full mechanism/reasoning - the same rule, checked here
+           because this loader never calls that one). This IS the fix
+           for the "bin-path never actually refuses" gap: unlike the
+           safetensors path, this loader's tensor reads are POSITIONAL,
+           so there is no missing-tensor lookup for a garbage or hand-
+           built header to accidentally fail. mla_q_lora_rank was RD()'d
+           unconditionally above (this function's own field order), so
+           it is already final for every csa2_on[] entry just read.
+           This loop, like the n_full_layers/n_linear_layers one above,
+           is safe for the structural reason n_layers's own RD() site
+           states: bounded to [1, LZ_MAX_LAYERS] there, before this
+           point, not by virtue of this loop's own position. */
+        if (c->mla_q_lora_rank > 0) {
+            for (i = 0; i < c->n_layers; i++) {
+                if (c->csa2_on[i]) {
+                    qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE, "mla_q_lora_rank");
+                    goto fail;
+                }
+            }
+        }
         /* csa2_mode[]/csa2_source[] (model.h's own field comment on
            LZModelConfig) - appended to the v5 tail unconditionally, same
            posture as every other field in this block (ced_kv just
@@ -3079,8 +3348,11 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
            that is "the base layout plus every field any version added,
            in the order it was added" (this function's own comment,
            above, at the ver==5 branch). tools/export_q8.py's
-           write_config does not write this pair yet - a separate,
-           later task.
+           write_config (E:\LLM\llama98-zh, a different repository, no
+           shared git history) writes this pair now; build/csa2_last_
+           writer_bin_gate.sh's own real exports depend on it having
+           done so (the csa2_source[] signature search that locates
+           its fixtures' bytes has nothing to find otherwise).
 
            THE COST, stated rather than left implicit: inserting a field
            in the MIDDLE of an unconditionally-ordered, untagged tail -
@@ -3175,11 +3447,14 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
            the block count reads nothing out of range. A topk large
            enough to exhaust memory is loud through xcalloc, not silent
            - true again only because forward_state.c's alloc_csa2_ring
-           checks lz_csa2_pub_overflows(nf, LZ_BATCH_MAX, csa2_topk)
-           before it ever multiplies the three together: that product,
-           not csa2_topk alone, is what a 32-bit size_t can wrap on,
-           turning what should be a loud calloc failure into a silent,
-           too-small allocation the report Sec2.3.1 mode-dispatch task
+           checks lz_csa2_pub_overflows(nf, LZ_BATCH_MAX, csa2_topk,
+           sizeof(int)) before it ever calls xcalloc: what a 32-bit
+           size_t can wrap on is xcalloc's OWN arithmetic - element
+           count times element size plus its alignment overhead - not
+           csa2_topk alone and not the element count alone either, and
+           an earlier version of this guard that checked only the
+           element count still let a too-small allocation through
+           silently, the report Sec2.3.1 mode-dispatch task
            (csa2_topk_idx_pub/csa2_topk_n_pub) introduced.
 
            The three indexer words size tensors, so a value that
@@ -3252,6 +3527,33 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
         c->rotary_dim <= 0 || c->rotary_dim > c->head_dim ||
         c->rotary_dim % 2 != 0) {
         qerr(errbuf, errlen, LZ_ERR_BIN_CFG);
+        goto fail;
+    }
+
+    /* lz_csa2_last_writer_valid's own whole-config question. Its own
+       loop is `for (i = 0; i < c->n_layers; i++)` against `last_writer[
+       LZ_MAX_LAYERS]` and against csa2_on[]/csa2_mode[]/csa2_source[],
+       each LZ_MAX_LAYERS wide - safe now unconditionally, because
+       n_layers was already bounded to [1, LZ_MAX_LAYERS] the instant
+       its own RD() landed (this function's own comment there has the
+       full argument for WHY the check lives at that read site rather
+       than here or at the "derived quantities" block just above: this
+       call, that block, and every c->n_layers-indexed loop in between
+       used to each depend on remembering that ordering by hand, which
+       is exactly what went wrong twice - report Sec2.3.1 mode-dispatch
+       task's own C1, then, one review round later, C-NEW-1/C-NEW-2).
+       This call's own remaining ordering requirement is unrelated to
+       n_layers: it must run only once every layer has already passed
+       the per-layer csa2_mode/csa2_source loop above (this function's
+       own documented precondition on lz_csa2_last_writer_valid) - a
+       per-layer-valid csa2_source can still name a layer whose own
+       contribution to their SHARED physical slot has already been
+       overwritten by an intervening REINDEX layer at the same root;
+       the per-layer check cannot see that, since it only ever looks at
+       one layer's own fields (model.c's own comment on that function
+       has the concrete example). */
+    if (ver == 5 && !lz_csa2_last_writer_valid(c, NULL)) {
+        qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE, "csa2_source");
         goto fail;
     }
 

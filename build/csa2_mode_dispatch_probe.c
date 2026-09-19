@@ -5,20 +5,44 @@
    of L->csa2_mode; this is the task that makes it actually dispatch.
 
    Built and run by build/csa2_mode_dispatch_gate.sh against the real
-   src/forward_csa2.c/forward_state.c/forward.h (not a transcription),
-   and against two independent mutant copies:
+   src/forward_csa2.c/forward_state.c/model.c/forward.h/model.h (not a
+   transcription), and against SIX independent mutant copies - three
+   from this task's own first landing, three more from a second,
+   independent code-review round that found the first pass could not
+   tell "reads the right physical ci" apart from "reads the only ci
+   that exists" (every original fixture aliased every csa2_on layer to
+   ONE ci) and that two of that round's own new validation predicates
+   had no mutation of their own:
      - "dispatch reverted": every mode always runs the pre-this-task,
        unconditional six-step body (steps 2/3/6 lose their csa2_mode
        guards) - must redden the Reindex/Reuse-specific checks below
        while leaving check1's Full-only checks green.
      - "publish buffer collapsed to per-ci": the (ci, tk) indexing on
-       csa2_topk_idx_pub/csa2_topk_n_pub loses its "+ tk" term, back to
-       a single (topk)-wide slot per ci - must redden specifically the
-       per-token publish check inside check_chain_soft (item 5), since
+       csa2_topk_idx_pub/csa2_topk_n_pub loses its "+ tk" term (inside
+       the per-token loop), back to a single (topk)-wide slot per ci -
+       must redden specifically the per-token publish checks, since
        that is the one thing a per-ci-only buffer cannot get right for
        nt > 1.
-   See that gate script's own header for the exact substitutions and
-   why each is a text mutation rather than a git-ref diff.
+     - "ci term dropped from the publish base pointers": a DIFFERENT
+       pair of lines than the mutation above - pub_idx_base/pub_n_base
+       THEMSELVES, declared once before the per-token loop, lose their
+       own "+ ci * ..." term - must redden specifically check_ci_
+       independence's cross-root read, since every OTHER fixture aliases
+       every csa2_on layer to the same ci and cannot tell this apart
+       from correct behavior.
+     - "lz_csa2_pub_overflows neutered": forward_state.c's own overflow
+       guard always answers "no overflow" - must redden exactly the
+       must-overflow boundary assertion in check_overflow_guard.
+     - "lz_csa2_mode_source_valid's source half neutered": model.c's own
+       per-layer predicate's SOURCE-validity return always answers
+       "valid" - must redden exactly the five bad-source assertions in
+       check_bin_validation, none of the mode-code or control ones.
+     - "lz_csa2_last_writer_valid neutered": model.c's own whole-config
+       predicate's violation check is disabled - must redden exactly
+       the one F9 whole-config assertion.
+   See that gate script's own header for the exact substitutions, the
+   full expected-fallout list per mutant, and why each is a text
+   mutation rather than a git-ref diff.
 
    No config.json, no safetensors: every LZModelConfig/LZLayer field is
    set by hand, the same shape build/csa2_cache_idx_alias_probe.c and
@@ -39,16 +63,16 @@
    tensors, step 2+6, FULL only) and "idx" (the three indexer QUERY
    tensors, step 3, FULL+REINDEX) - so a check can perturb exactly one
    group and attribute an observed change to exactly the step that
-   reads it. A REINDEX layer is given a full "kv" group too (matching
-   what a real checkpoint carries today - model.c's tensor loader does
-   not yet skip csa2_w_kv et al. for a non-FULL layer, a fact this
-   file's own comment on build_layer_reindex records) even though the
-   correct dispatch never reads it, precisely so the "dispatch
-   reverted" mutation above computes something (wrong, and caught) in
-   that branch instead of dereferencing a genuinely absent tensor and
-   crashing before this probe can print anything. build_layer_reuse_
-   strict is the one deliberate exception - see its own comment and
-   check3b's.
+   reads it. A REINDEX layer is given a full "kv" group too even though
+   the correct dispatch never reads it and a REAL checkpoint no longer
+   carries it (model.c's CSA2_SPECS is mode-gated - build/csa2_mode_
+   export_load_gate.sh is the gate that exercises a REINDEX layer's
+   model.bin genuinely missing csa2_w_kv) - this fixture still gives it
+   the tensor anyway, precisely so the "dispatch reverted" mutation
+   above computes something (wrong, and caught) in that branch instead
+   of dereferencing a genuinely absent tensor and crashing before this
+   probe can print anything. build_layer_reuse_strict is the one
+   deliberate exception - see its own comment and check3b's.
 
    csa2_compress_m=1 (every token finalizes its own block immediately)
    and csa2_topk=2 are chosen so a 3-token chunk exercises n_vis=0,1,2
@@ -56,19 +80,26 @@
    trivial-"select everything") Top-K choice as soon as n_vis exceeds
    topk.
 
-   Two code-review addenda, added after the mode-dispatch checks above
-   were first landed and reviewed:
+   Code-review addenda, added in two more rounds after the mode-
+   dispatch checks above first landed and were reviewed:
+
+   ROUND 2 (a Critical overflow hole and two Important gaps):
      - check_overflow_guard: lz_csa2_pub_overflows (forward_state.c)
-       guards the NEW nf * LZ_BATCH_MAX * csa2_topk element count this
-       task's publish buffers introduced - a three-factor product where
-       the old, single-factor csa2_topk-only allocation needed a topk
-       past roughly one billion to wrap a 32-bit size_t, this one wraps
-       past roughly 4.19 million, well inside a plausible (if unusual)
-       config value. Tested with synthetic divisor values derived from
-       size_t's own maximum, not from LZ_MAX_LAYERS/LZ_BATCH_MAX,
+       guards xcalloc's OWN arithmetic (element count times elem_sz
+       plus its +16+sizeof(void*) overhead), not merely the element
+       count nf*LZ_BATCH_MAX*csa2_topk itself - an EARLIER version of
+       this function checked only the element count, which still let a
+       real overflow through (nf=32, batch_max=8, topk=4194304 gives an
+       element count that fits a 32-bit size_t, but that count times
+       sizeof(int) is exactly 2^32, wrapping to 0 one multiplication
+       later, inside xcalloc, where the element-count-only version
+       could not see it). Tested with synthetic divisor values derived
+       from size_t's own maximum, not from LZ_MAX_LAYERS/LZ_BATCH_MAX,
        because the real production dimensions cannot combine with an
        int-range csa2_topk to overflow a 64-bit size_t at all - see the
-       function's own header comment.
+       function's own header comment. Also covers nf==0/batch_max==0
+       (c->n_full_layers is a raw, unvalidated bin header word on the
+       path that calls this).
      - check_bin_validation: lz_csa2_mode_source_valid (model.c) closes
        the gap left when build/csa2_cache_idx_alias_gate.sh's own task
        landed cache_idx aliasing without a bin-format consumer to
@@ -80,10 +111,40 @@
        directly against the predicate (a hand-built LZModelConfig, same
        shape as PART 1 of build/ced_proj_arm_probe.c for lz_ced_kv_target/
        lz_kv_share_target) rather than through a synthetic model.bin
-       file: lz_open_bin calls the same predicate, so there is no
-       separate "real" code path this could diverge from, and hand-
-       encoding the ~1300-byte v5 header byte for byte would be a
-       disproportionate amount of format plumbing for one predicate.
+       file - hand-encoding the ~1300-byte v5 header byte for byte would
+       be a disproportionate amount of format plumbing for one
+       predicate. "lz_open_bin calls the same predicate, so there is no
+       separate real code path this could diverge from" was this
+       comment's own claim once, and it is false: C1 (report Sec2.3.1
+       mode-dispatch task, fifth review round) was a bug in lz_open_bin
+       ITSELF - the ORDER it called lz_csa2_last_writer_valid in,
+       relative to its own n_layers bound check - not in the predicate
+       this file calls directly, and this file's own hand-built-
+       LZModelConfig fixtures could not see it for exactly that reason.
+       build/csa2_last_writer_bin_gate.sh is the gate that goes through
+       the real byte stream and the real lz_open_bin call site.
+     - check2's own third assertion (layer C, reuse sourced from B) and
+       check_ci_independence (a whole new fixture, build_model_indep):
+       the ORIGINAL round-1 checks never ran a REUSE layer whose source
+       is a REINDEX layer whose OWN Top-K selection was perturbed away
+       from the baseline, and never gave two csa2_on layers genuinely
+       DIFFERENT physical ci values - every fixture aliased everything
+       to ci=0, so a bug that stopped distinguishing ci entirely (this
+       file's own mutation 3) was invisible.
+
+   ROUND 3 (an architectural gap the PLAN itself missed, not a bug in
+   this task's own round-2 fix): lz_csa2_mode_source_valid's per-layer
+   question ("is csa2_source[i] a strictly earlier, csa2_on, full_
+   attention layer") is necessary but not sufficient - cross-layer
+   aliasing runs by shared PHYSICAL SLOT, and a layer's declared source
+   can be per-layer-valid while still not being that slot's CURRENT
+   last writer (model.c's own comment on lz_csa2_last_writer_valid has
+   the concrete example: layer 0 FULL, layer 2 REINDEX(source 0), layer
+   3 REUSE(source 0, not 2) - layer 2 already overwrote root 0's slot
+   by the time layer 3 reads it). check_bin_validation's own F9-labeled
+   assertions test this directly, including one that confirms the
+   OLDER, per-layer-only predicate still (wrongly) accepts the same
+   input the new whole-config one correctly refuses.
 
    Exit: 0 all checks pass, 1 a check failed (printed). */
 #include <stdio.h>
@@ -164,15 +225,14 @@ static void fill_xb(LZRunState *s, int nt, int dim, unsigned *st) {
 /* q/o/q_norm (step 1, 4, 5 - every mode) + k_norm and the four main/
    indexer COMPRESSION tensors (step 2, 6 - FULL only) + the three
    indexer QUERY tensors (step 3 - FULL and REINDEX). A REINDEX layer
-   gets the SAME full set - see this file's own header comment on why:
-   the correct dispatch never reads the "kv" group for REINDEX, but a
-   real checkpoint carries it regardless (model.c loads all seven
-   csa2_w_* tensors for every csa2_on layer, mode notwithstanding - a
-   pre-existing, unrelated fact about the loader, not this task's own
-   scope), and giving REINDEX the same tensors here means a dispatch
-   bug that wrongly ran FULL's steps for a REINDEX layer computes a
-   wrong-but-finite answer instead of crashing before it can be caught
-   by value comparison. */
+   gets the SAME full set anyway - see this file's own header comment
+   on why: the correct dispatch never reads the "kv" group for REINDEX,
+   and a real checkpoint no longer carries it either (model.c's
+   CSA2_SPECS is mode-gated now), but giving REINDEX the same tensors
+   HERE, in this hand-built fixture, means a dispatch bug that wrongly
+   ran FULL's steps for a REINDEX layer computes a wrong-but-finite
+   answer instead of crashing before it can be caught by value
+   comparison. */
 static void fill_layer_common(LZLayer *L, unsigned seed_q, unsigned seed_kv, unsigned seed_idx) {
     unsigned stq = seed_q, stkv = seed_kv, stix = seed_idx;
     memset(L, 0, sizeof(*L));
@@ -331,6 +391,48 @@ static void build_model_ced(LZModel *m,
     build_layer_reindex(&m->layers[1], bq, bkv, bix);
 }
 
+/* 3-layer independence fixture, code-review addendum 3: A(FULL) and
+   D(FULL) are BOTH unaliased - each gets its own fresh ci from
+   forward_state.c's cache_idx fill (neither has a csa2_source at all) -
+   and E(REUSE) is sourced from A, NOT D. Every OTHER fixture in this
+   file has every csa2_on layer ultimately aliasing the SAME physical
+   ci (build/csa2_cache_idx_alias_probe.c's own case A shape, reused
+   throughout this file for a reason - it is the shape the cache_idx
+   aliasing task itself needed proving), which means none of them can
+   tell "reads the right ci" apart from "reads whichever ci happens to
+   be the only one that exists". This fixture is the one place two
+   DIFFERENT physical ci values are ever live at once, so it is the
+   only fixture that can catch csa2_topk_idx_pub/csa2_topk_n_pub's own
+   ci-indexing being wrong (as opposed to their tk-indexing, which
+   check5/check_chain_soft already cover) - see check_ci_independence's
+   own comment and build/csa2_mode_dispatch_gate.sh's third mutation. */
+static void build_model_indep(LZModel *m,
+                              unsigned aq, unsigned akv, unsigned aix,
+                              unsigned dq, unsigned dkv, unsigned dix,
+                              unsigned eq, unsigned ekv, unsigned eix) {
+    memset(m, 0, sizeof(*m));
+    init_config_common(&m->config, 3);
+    m->config.csa2_on[0] = 1;
+    m->config.csa2_on[1] = 1;
+    m->config.csa2_on[2] = 1;
+    /* layer 1 (D) is FULL - csa2_source[1] stays -1, init_config_
+       common's own default, and is never read for aliasing regardless.
+       layer 2 (E) is REUSE, sourced from layer 0 (A) - NOT layer 1 (D),
+       the whole point of this fixture. "Soft" E (build_layer_reuse_
+       soft, a full seven-tensor set E never reads under the fixed
+       dispatch), NOT "strict": this fixture is also exercised against
+       mutation 1 (dispatch reverted) by virtue of running in the same
+       probe binary, and a strict E would crash there for the same
+       reason check3b's own strict fixture is deliberately ordered
+       LAST - this one is not, so it must survive that mutation
+       instead of being the thing that crashes under it. */
+    m->config.csa2_source[2] = 0;
+    m->layers = (LZLayer *)calloc(3, sizeof(LZLayer));
+    build_layer_full(&m->layers[0], aq, akv, aix);
+    build_layer_full(&m->layers[1], dq, dkv, dix);
+    build_layer_reuse_soft(&m->layers[2], eq, ekv, eix);
+}
+
 /* ------------------------------------------------------------------ checks */
 
 /* Item 1: Full-mode-only regression. Every currently-shipping checkpoint
@@ -445,8 +547,29 @@ static void check_chain_soft(void) {
     LZRunState s;
     char errbuf[256];
     int tk, k, ci;
-    int a_n[3], b_n[3];
-    int a_idx[3][F_TOPK], b_idx[3][F_TOPK];
+    /* 4 tokens, not 3: with F_CM=1/F_TOPK=2, a 3-token chunk gives the
+       LAST (only one check2/check3a below ever inspect, since attn_out
+       is a single-token scratch overwritten every iteration) token a
+       candidate pool of exactly n_vis==topk==2 - a TRIVIAL selection
+       (both candidates are always taken, regardless of score, so no
+       indexer-weight perturbation can ever change WHICH ones - only
+       their relative softmax weight, and even that can happen to wash
+       out for one particular seed offset). Same trap this project's own
+       check_ci_independence hit once already (round 3): the fix there
+       was the same one applied here - widen nt so the inspected token's
+       own n_vis exceeds topk, restoring a genuine top-2-of-3 selection.
+       This is n_vis's OWN fix (C2) making the previous nt=3 fixture
+       trivial at its last token where it used to be non-trivial: before
+       the fix, layer B's (REINDEX) own n_vis was the shared counter's
+       FINAL value for the whole chunk (3, here) regardless of tk, so
+       tk=2 already had a real 3-candidate pool; after the fix it is
+       pos/cm, so tk=2's own pool is 2 wide (causally correct - tk=2
+       must not see block 2, its own) and only tk=3 sees a 3-wide one.
+       (Layer C, REUSE, has no n_vis of its own either way - its own
+       causal correctness comes entirely from reading whatever B
+       published, per forward_csa2.c's own comment on the n_vis line.) */
+    int a_n[4], b_n[4];
+    int a_idx[4][F_TOPK], b_idx[4][F_TOPK];
     float attn_a[F_QD], attn_b[F_QD], attn_c[F_QD];
     unsigned stx;
     const unsigned AQ = SEED0 + 100, AKV = SEED0 + 101, AIX = SEED0 + 102;
@@ -467,54 +590,66 @@ static void check_chain_soft(void) {
        "(cache_idx aliasing from the prior task still holds)");
 
     stx = XBA;
-    fill_xb(&s, 3, F_DIM, &stx);
-    forward_csa2(&m, &s, &m.layers[0], 0, 0, 3, NULL);
+    fill_xb(&s, 4, F_DIM, &stx);
+    forward_csa2(&m, &s, &m.layers[0], 0, 0, 4, NULL);
     memcpy(attn_a, s.attn_out, sizeof attn_a);
-    for (tk = 0; tk < 3; tk++) {
+    for (tk = 0; tk < 4; tk++) {
         a_n[tk] = s.csa2_topk_n_pub[(size_t)ci * LZ_BATCH_MAX + tk];
         for (k = 0; k < F_TOPK; k++)
             a_idx[tk][k] = s.csa2_topk_idx_pub[((size_t)ci * LZ_BATCH_MAX + tk) * F_TOPK + k];
     }
     (void)a_idx;
-    ok(a_n[0] == 0 && a_n[1] == 1 && a_n[2] == 2,
-       "check_chain: layer A's own published k_eff grows 0,1,2 across the chunk");
+    ok(a_n[0] == 0 && a_n[1] == 1 && a_n[2] == 2 && a_n[3] == F_TOPK,
+       "check_chain: layer A's own published k_eff grows 0,1,2,2(=topk) "
+       "across the chunk");
 
     stx = XBB;
-    fill_xb(&s, 3, F_DIM, &stx);
-    forward_csa2(&m, &s, &m.layers[1], 1, 0, 3, NULL);
+    fill_xb(&s, 4, F_DIM, &stx);
+    forward_csa2(&m, &s, &m.layers[1], 1, 0, 4, NULL);
     memcpy(attn_b, s.attn_out, sizeof attn_b);
-    for (tk = 0; tk < 3; tk++) {
+    for (tk = 0; tk < 4; tk++) {
         b_n[tk] = s.csa2_topk_n_pub[(size_t)ci * LZ_BATCH_MAX + tk];
         for (k = 0; k < F_TOPK; k++)
             b_idx[tk][k] = s.csa2_topk_idx_pub[((size_t)ci * LZ_BATCH_MAX + tk) * F_TOPK + k];
     }
-    /* B's own published k_eff is min(topk, n_vis), NOT n_vis itself -
-       n_vis is checked separately, indirectly, by the very fact that a
-       REAL (non-trivial) 2-of-3 Top-K selection happens at all: with
-       topk=2 and n_vis=0 or 1, k_eff would be 0 or 1, never 2. */
-    ok(b_n[0] == F_TOPK && b_n[1] == F_TOPK && b_n[2] == F_TOPK,
-       "check_chain: layer B (reindex) sees enough of A's already-finalized "
-       "blocks (n_vis >= topk) for every token of its own loop to publish a "
-       "full, non-trivial Top-K (A's whole call already finished before "
-       "B's began, so n_vis is already 3, constant across B's own tokens)");
+    /* B's own published k_eff is min(topk, n_vis), and n_vis is pos/cm
+       (report Sec2.3.1 mode-dispatch task's C2 fix) computed per TOKEN
+       of B's OWN loop - not however many blocks A's already-finished
+       call had left behind by the time B's call started. With F_CM=1
+       every position finalizes its own block immediately, so n_vis(tk)
+       is exactly tk: k_eff must grow 0,1,2,2 across B's own chunk, the
+       same causal shape check_chain's own a_n assertion above requires
+       of A - never a constant borrowed from A's whole, already-
+       finished call (that was the causal leak this replaced: B's own
+       tk=0 read n_vis=4, A's FINAL count for a 4-token chunk, instead
+       of 0 - B's first token could see every block A would ever
+       finalize for this chunk, including ones A had not yet written
+       when B's tk=0 query happened in the causal ordering the chunk is
+       supposed to model). */
+    ok(b_n[0] == 0 && b_n[1] == 1 && b_n[2] == F_TOPK && b_n[3] == F_TOPK,
+       "check_chain: layer B (reindex) sees only STRICTLY EARLIER "
+       "positions' already-finalized blocks - k_eff grows 0,1,2,2 across "
+       "its own chunk exactly like layer A's, not a constant leaked in "
+       "from A's already-finished call");
     ok(!(memcmp(b_idx[0], b_idx[1], sizeof(int) * F_TOPK) == 0 &&
-         memcmp(b_idx[1], b_idx[2], sizeof(int) * F_TOPK) == 0),
-       "check_chain: layer B's own Top-K selection is not identical across "
-       "all three of its own tokens");
+         memcmp(b_idx[1], b_idx[2], sizeof(int) * F_TOPK) == 0 &&
+         memcmp(b_idx[2], b_idx[3], sizeof(int) * F_TOPK) == 0),
+       "check_chain: layer B's own Top-K selection is not identical "
+       "across all four of its own tokens");
 
     stx = XBC;
-    fill_xb(&s, 3, F_DIM, &stx);
-    forward_csa2(&m, &s, &m.layers[2], 2, 0, 3, NULL);
+    fill_xb(&s, 4, F_DIM, &stx);
+    forward_csa2(&m, &s, &m.layers[2], 2, 0, 4, NULL);
     memcpy(attn_c, s.attn_out, sizeof attn_c);
     (void)attn_c;
 
     /* Item 5: the shared ci's published buffer must be untouched by C's
-       own call (Reuse writes nothing) - each of the three tokens' worth
+       own call (Reuse writes nothing) - each of the four tokens' worth
        of B's own distinct selection, captured above before C ever ran,
        must survive intact. */
     {
         int all_match = 1;
-        for (tk = 0; tk < 3; tk++) {
+        for (tk = 0; tk < 4; tk++) {
             if (s.csa2_topk_n_pub[(size_t)ci * LZ_BATCH_MAX + tk] != b_n[tk])
                 all_match = 0;
             for (k = 0; k < F_TOPK; k++)
@@ -522,18 +657,27 @@ static void check_chain_soft(void) {
                     all_match = 0;
         }
         ok(all_match,
-           "check_chain: after layer C's (reuse) call, all three tokens' "
+           "check_chain: after layer C's (reuse) call, all four tokens' "
            "published Top-K selections are still exactly layer B's own");
     }
     lz_state_free(&s);
     free(m.layers);
 
     /* Item 2: perturbing B's own indexer weights changes B's own
-       attn_out; A's is untouched. */
+       attn_out (A's is untouched) AND C's - C (reuse, source B) reads
+       whatever B's own call left in their shared, aliased ci slot, so
+       a fresh selection from B's own perturbed indexer is exactly what
+       C's own subsequent call sees too. Without running C in this same
+       fixture, nothing in this probe ever exercised "reuse attends
+       over a REINDEX source's Top-K" for a case where that Top-K
+       actually differs from the unperturbed baseline - check3a below
+       perturbs A instead, which changes C's INPUT VALUES (the ring
+       content) but never changes WHICH indices get selected for C to
+       read, a different (and weaker) claim. */
     {
         LZModel m2;
         LZRunState s2;
-        float attn_a2[F_QD], attn_b2[F_QD];
+        float attn_a2[F_QD], attn_b2[F_QD], attn_c2[F_QD];
 
         /* +3, not an arbitrary round number: with n_vis=3 and topk=2 there
            are only 3 possible unordered pairs, and a perturbed indexer
@@ -542,20 +686,31 @@ static void check_chain_soft(void) {
            commutative) without that meaning the dispatch is broken.
            Verified empirically against this exact fixture (base picks
            {0,1}, +3 picks {1,2} - a genuinely different set, not a
-           reordering) rather than assumed. */
+           reordering) rather than assumed. n_vis=3 is now B's tk=3 (its
+           LAST token, the one attn_b/attn_out below actually holds),
+           not tk=2 - the C2 fix (pos/cm) makes tk=2's own pool only 2
+           wide (n_vis==topk there is a trivial "take both" - see this
+           function's own array-declaration comment for the full
+           argument), so this fixture widened from 3 tokens to 4
+           specifically to keep a genuinely non-trivial 3-candidate pool
+           on the one token every check below can actually observe. */
         build_model_chain_soft(&m2, AQ, AKV, AIX, BQ, BKV, BIX + 3u, CQ, CKV, CIX);
         if (lz_state_alloc(&s2, &m2, F_SEQLEN, 0, errbuf, sizeof errbuf) != 0) {
             printf("FAIL check2: lz_state_alloc: %s\n", errbuf);
             g_fail = 1;
         } else {
             stx = XBA;
-            fill_xb(&s2, 3, F_DIM, &stx);
-            forward_csa2(&m2, &s2, &m2.layers[0], 0, 0, 3, NULL);
+            fill_xb(&s2, 4, F_DIM, &stx);
+            forward_csa2(&m2, &s2, &m2.layers[0], 0, 0, 4, NULL);
             memcpy(attn_a2, s2.attn_out, sizeof attn_a2);
             stx = XBB;
-            fill_xb(&s2, 3, F_DIM, &stx);
-            forward_csa2(&m2, &s2, &m2.layers[1], 1, 0, 3, NULL);
+            fill_xb(&s2, 4, F_DIM, &stx);
+            forward_csa2(&m2, &s2, &m2.layers[1], 1, 0, 4, NULL);
             memcpy(attn_b2, s2.attn_out, sizeof attn_b2);
+            stx = XBC;
+            fill_xb(&s2, 4, F_DIM, &stx);
+            forward_csa2(&m2, &s2, &m2.layers[2], 2, 0, 4, NULL);
+            memcpy(attn_c2, s2.attn_out, sizeof attn_c2);
 
             ok(memcmp(attn_a2, attn_a, sizeof attn_a) == 0,
                "check2: layer A's own attn_out is untouched by a change to "
@@ -563,6 +718,10 @@ static void check_chain_soft(void) {
             ok(memcmp(attn_b2, attn_b, sizeof attn_b) != 0,
                "check2: perturbing layer B's own indexer weights changes "
                "layer B's own attn_out");
+            ok(memcmp(attn_c2, attn_c, sizeof attn_c) != 0,
+               "check2: perturbing layer B's own indexer weights ALSO "
+               "changes layer C's attn_out (C reads whatever B's own "
+               "call left in their shared ci slot)");
             lz_state_free(&s2);
         }
         free(m2.layers);
@@ -581,15 +740,15 @@ static void check_chain_soft(void) {
             g_fail = 1;
         } else {
             stx = XBA;
-            fill_xb(&s3, 3, F_DIM, &stx);
-            forward_csa2(&m3, &s3, &m3.layers[0], 0, 0, 3, NULL);
+            fill_xb(&s3, 4, F_DIM, &stx);
+            forward_csa2(&m3, &s3, &m3.layers[0], 0, 0, 4, NULL);
             stx = XBB;
-            fill_xb(&s3, 3, F_DIM, &stx);
-            forward_csa2(&m3, &s3, &m3.layers[1], 1, 0, 3, NULL);
+            fill_xb(&s3, 4, F_DIM, &stx);
+            forward_csa2(&m3, &s3, &m3.layers[1], 1, 0, 4, NULL);
             memcpy(attn_b3, s3.attn_out, sizeof attn_b3);
             stx = XBC;
-            fill_xb(&s3, 3, F_DIM, &stx);
-            forward_csa2(&m3, &s3, &m3.layers[2], 2, 0, 3, NULL);
+            fill_xb(&s3, 4, F_DIM, &stx);
+            forward_csa2(&m3, &s3, &m3.layers[2], 2, 0, 4, NULL);
             memcpy(attn_c3, s3.attn_out, sizeof attn_c3);
 
             ok(memcmp(attn_b3, attn_b, sizeof attn_b) != 0,
@@ -609,24 +768,37 @@ static void check_chain_soft(void) {
    chain). With nt==1, tk is always 0 - a per-ci-only publish buffer and
    a per-(ci, tk) one are indistinguishable, so the unbatched, one-
    position-at-a-time run is a correct oracle regardless of this task's
-   own change. If the chunked (nt=3, one call per layer) run's layer C
-   disagrees with it, the persistent per-(ci, tk) addressing is the one
-   thing responsible - nothing else differs between the two runs. This
-   is the check that actually distinguishes a per-(ci, tk) buffer from
-   a per-ci-only one; check_chain_soft's own "buffer untouched by C"
-   check above is necessary but not sufficient for that (it only proves
-   C never WRITES the shared slot, not that each of its own tokens
-   READS the right one). */
+   own change.
+
+   Compares EVERY token's s->xb2 (forward_csa2.c's own step 5 writes
+   `s->xb2 + tk*hdim`, one slot per token, never overwritten again) for
+   layer C, not s->attn_out - an earlier version of this check compared
+   only the chunk's LAST token via attn_out (a single-token scratch
+   overwritten every iteration, so it is the only one a multi-token call
+   leaves inspectable) and was proven, empirically, structurally blind
+   to the publish-buffer-collapse mutation this check exists to catch:
+   collapsing csa2_topk_idx_pub/csa2_topk_n_pub from per-(ci, tk) back to
+   per-ci changes what EARLIER tokens of a batched call read, but the
+   LAST token's own slot is, by construction, always "the last write"
+   under either addressing scheme - the same blindness class report
+   Sec2.3.1 mode-dispatch task's own C2 fix hit in check_chain_soft
+   (widened to 4 tokens for an unrelated but same-shaped reason) and
+   build/csa2_reindex_causality_probe.c was written specifically to
+   avoid from the start. check_chain_soft's own "buffer untouched by C"
+   check is necessary but not sufficient for the same reason: it only
+   proves C never WRITES the shared slot, not that each of its own
+   tokens READS the right one. */
 static void check5_batch_vs_unbatched_chain(void) {
     LZModel m;
     LZRunState s;
     char errbuf[256];
-    float attn_c_batched[F_QD];
+    float xb2_c_batched[3][F_DIM];
     const unsigned AQ = SEED0 + 400, AKV = SEED0 + 401, AIX = SEED0 + 402;
     const unsigned BQ = SEED0 + 403, BKV = SEED0 + 404, BIX = SEED0 + 405;
     const unsigned CQ = SEED0 + 406, CKV = SEED0 + 407, CIX = SEED0 + 408;
     const unsigned XBA = SEED0 + 409, XBB = SEED0 + 410, XBC = SEED0 + 411;
     unsigned stx;
+    int tk;
 
     build_model_chain_soft(&m, AQ, AKV, AIX, BQ, BKV, BIX, CQ, CKV, CIX);
     if (lz_state_alloc(&s, &m, F_SEQLEN, 0, errbuf, sizeof errbuf) != 0) {
@@ -641,16 +813,18 @@ static void check5_batch_vs_unbatched_chain(void) {
     forward_csa2(&m, &s, &m.layers[1], 1, 0, 3, NULL);
     stx = XBC; fill_xb(&s, 3, F_DIM, &stx);
     forward_csa2(&m, &s, &m.layers[2], 2, 0, 3, NULL);
-    memcpy(attn_c_batched, s.attn_out, sizeof attn_c_batched);
+    for (tk = 0; tk < 3; tk++)
+        memcpy(xb2_c_batched[tk], s.xb2 + (size_t)tk * F_DIM,
+               sizeof xb2_c_batched[tk]);
     lz_state_free(&s);
     free(m.layers);
 
     {
         LZModel m2;
         LZRunState s2;
-        float attn_c_unbatched[F_QD];
+        float xb2_c_unbatched[3][F_DIM];
         unsigned stxa = XBA, stxb = XBB, stxc = XBC;
-        int pos;
+        int pos, bad;
 
         build_model_chain_soft(&m2, AQ, AKV, AIX, BQ, BKV, BIX, CQ, CKV, CIX);
         if (lz_state_alloc(&s2, &m2, F_SEQLEN, 0, errbuf, sizeof errbuf) != 0) {
@@ -668,16 +842,138 @@ static void check5_batch_vs_unbatched_chain(void) {
             forward_csa2(&m2, &s2, &m2.layers[1], 1, pos, 1, NULL);
             fill_xb(&s2, 1, F_DIM, &stxc);
             forward_csa2(&m2, &s2, &m2.layers[2], 2, pos, 1, NULL);
+            memcpy(xb2_c_unbatched[pos], s2.xb2, F_DIM * sizeof(float));
         }
-        memcpy(attn_c_unbatched, s2.attn_out, sizeof attn_c_unbatched);
         lz_state_free(&s2);
         free(m2.layers);
 
-        ok(memcmp(attn_c_batched, attn_c_unbatched, sizeof attn_c_batched) == 0,
-           "check5: layer C's (reuse) final attn_out over a 3-token chunk "
-           "processed as one nt=3 call per layer is bit-identical to the "
-           "same 3 positions processed one at a time (nt=1, layer-major "
-           "per position)");
+        bad = 0;
+        for (tk = 0; tk < 3; tk++)
+            if (memcmp(xb2_c_batched[tk], xb2_c_unbatched[tk],
+                       sizeof xb2_c_batched[tk]) != 0)
+                bad = 1;
+        ok(!bad,
+           "check5: layer C's (reuse) o_proj output for EVERY token of a "
+           "3-token chunk processed as one nt=3 call per layer is bit-"
+           "identical to the same 3 positions processed one at a time "
+           "(nt=1, layer-major per position) - not merely the chunk's "
+           "last token");
+    }
+}
+
+/* Code-review addendum 3: two genuinely independent ci values, and a
+   REUSE reader that must see only its OWN declared source's - not the
+   OTHER, unrelated root's - published Top-K. build_model_indep's own
+   comment has the full argument for why no earlier fixture in this
+   file could catch this: every one of them aliases every csa2_on layer
+   to the SAME physical ci, so "reads the right ci" and "reads the only
+   ci that exists" are indistinguishable there. Empirically confirmed
+   sensitive to build/csa2_mode_dispatch_gate.sh's third mutation
+   (dropping the ci term from csa2_topk_idx_pub/csa2_topk_n_pub's own
+   base pointers) - without it, every check in this file passes even
+   with that mutation applied.
+
+   nt=4, NOT the 3 every other fixture in this file uses: this has
+   NOTHING to do with aliasing or with C2 (report Sec2.3.1 mode-
+   dispatch task's own causal-leak fix) - D is a FRESH, unaliased FULL
+   layer, growing its own n_vis via its own step 6 exactly like check1's
+   layer, with no source to leak from either way. The trap is the plain
+   arithmetic of this fixture's own F_CM=1/F_TOPK=2: at nt=3, D's LAST
+   (only one this check inspects, since attn_out is a single-token
+   scratch) token has n_vis==topk==2, where
+   `k_eff = topk < n_vis ? topk : n_vis` selects EVERY visible block
+   regardless of score - a trivial, weight-independent selection this
+   check's own perturbation could never have shown up in, true of ANY
+   csa2 layer at that exact width, aliased or not. nt=4 makes the last
+   token's n_vis (3) exceed topk (2), a genuine, score-dependent 2-of-3
+   choice - this (an earlier draft of this check used nt=3 and passed
+   even against the ci mutation above, for exactly this reason) is why
+   the number is called out here at all. */
+static void check_ci_independence(void) {
+    LZModel m;
+    LZRunState s;
+    char errbuf[256];
+    float attn_e_base[F_QD];
+    int ci_a, ci_d, ci_e;
+    unsigned stx;
+    const int nt = 4;
+    const unsigned AQ = SEED0 + 500, AKV = SEED0 + 501, AIX = SEED0 + 502;
+    const unsigned DQ = SEED0 + 503, DKV = SEED0 + 504, DIX = SEED0 + 505;
+    const unsigned EQ = SEED0 + 506, EKV = SEED0 + 510, EIX = SEED0 + 511;
+    const unsigned XBA = SEED0 + 507, XBD = SEED0 + 508, XBE = SEED0 + 509;
+
+    build_model_indep(&m, AQ, AKV, AIX, DQ, DKV, DIX, EQ, EKV, EIX);
+    if (lz_state_alloc(&s, &m, F_SEQLEN, 0, errbuf, sizeof errbuf) != 0) {
+        printf("FAIL check_ci_independence: lz_state_alloc: %s\n", errbuf);
+        g_fail = 1;
+        free(m.layers);
+        return;
+    }
+    ci_a = s.cache_idx[0];
+    ci_d = s.cache_idx[1];
+    ci_e = s.cache_idx[2];
+    ok(ci_a != ci_d,
+       "check_ci_independence: two independent FULL layers get MUTUALLY "
+       "DISTINCT ci (no accidental aliasing between them)");
+    ok(ci_e == ci_a,
+       "check_ci_independence: the reuse layer's ci is aliased to its own "
+       "declared source (A), not to the unrelated FULL layer (D)");
+
+    stx = XBA; fill_xb(&s, nt, F_DIM, &stx);
+    forward_csa2(&m, &s, &m.layers[0], 0, 0, nt, NULL);
+    stx = XBD; fill_xb(&s, nt, F_DIM, &stx);
+    forward_csa2(&m, &s, &m.layers[1], 1, 0, nt, NULL);
+    stx = XBE; fill_xb(&s, nt, F_DIM, &stx);
+    forward_csa2(&m, &s, &m.layers[2], 2, 0, nt, NULL);
+    memcpy(attn_e_base, s.attn_out, sizeof attn_e_base);
+    lz_state_free(&s);
+    free(m.layers);
+
+    /* Perturb D's own INDEXER weights specifically (the group that
+       controls what D itself publishes in its own step 3) - under
+       correct per-ci addressing this can only ever change D's own
+       physical slot, which E never reads (E's ci aliases A's, not D's).
+       Under the mutation named above, D's step-3 write (still running
+       - the mutation only changes WHERE it lands, not whether it
+       fires) collides with A's own slot, and E ends up reading D's
+       selection instead of A's. */
+    {
+        LZModel m2;
+        LZRunState s2;
+        float attn_e2[F_QD];
+
+        /* +1, not an arbitrary round number: with n_vis=3 and topk=2 at
+           D's own last token there are only 3 possible unordered pairs,
+           and a perturbed indexer can legitimately land back on the
+           SAME pair in a different order (attn_out is then bit-
+           identical - summing two floats is commutative) without that
+           meaning per-ci addressing is broken - check2's own comment
+           has the same argument for layer B. Verified empirically
+           against this exact fixture (base picks {0,1}, +1 picks
+           {1,2} - a genuinely different set, not a reordering). */
+        build_model_indep(&m2, AQ, AKV, AIX, DQ, DKV, DIX + 1u, EQ, EKV, EIX);
+        if (lz_state_alloc(&s2, &m2, F_SEQLEN, 0, errbuf, sizeof errbuf) != 0) {
+            printf("FAIL check_ci_independence (perturbed): lz_state_alloc: %s\n", errbuf);
+            g_fail = 1;
+            free(m2.layers);
+            return;
+        }
+        stx = XBA; fill_xb(&s2, nt, F_DIM, &stx);
+        forward_csa2(&m2, &s2, &m2.layers[0], 0, 0, nt, NULL);
+        stx = XBD; fill_xb(&s2, nt, F_DIM, &stx);
+        forward_csa2(&m2, &s2, &m2.layers[1], 1, 0, nt, NULL);
+        stx = XBE; fill_xb(&s2, nt, F_DIM, &stx);
+        forward_csa2(&m2, &s2, &m2.layers[2], 2, 0, nt, NULL);
+        memcpy(attn_e2, s2.attn_out, sizeof attn_e2);
+        lz_state_free(&s2);
+        free(m2.layers);
+
+        ok(memcmp(attn_e2, attn_e_base, sizeof attn_e_base) == 0,
+           "check_ci_independence: layer E's (reuse, source A) attn_out is "
+           "untouched by a change to layer D's (unrelated, independently-"
+           "aliased) indexer weights - per-ci addressing genuinely "
+           "isolates the two roots, not merely the one this fixture "
+           "happens to read");
     }
 }
 
@@ -843,42 +1139,75 @@ static void check3b_reuse_owns_nothing(void) {
 }
 
 /* Code-review addendum 1: lz_csa2_pub_overflows (forward_state.c),
-   guarding alloc_csa2_ring's nf * LZ_BATCH_MAX * csa2_topk element
-   count against wrapping a 32-bit size_t. This project's own
-   csa2_topk=512/LZ_BATCH_MAX=8/nf-in-single-digits worst case (this
-   file's own header comment) is nowhere near either a 32-bit or a
-   64-bit wrap; the real production dimensions (c->n_full_layers <=
-   LZ_MAX_LAYERS, LZ_BATCH_MAX, and c->csa2_topk as a 32-bit int) can
-   never combine to overflow a 64-bit size_t either, which is exactly
-   why this development host cannot reproduce the bug end to end
-   through lz_state_alloc - only the function's own arithmetic can be
-   driven directly, with synthetic divisor values size_t's own maximum
-   makes possible on ANY width. */
+   guarding xcalloc's OWN arithmetic (element count times elem_sz plus
+   its +16+sizeof(void*) alignment overhead - forward_state.c's own
+   xcalloc comment) against wrapping size_t, not merely the element
+   count nf*batch_max*topk itself. An EARLIER version of this function
+   checked only the element count, which reviewer #2 found still let a
+   real overflow through: nf=32, batch_max=8, topk=4194304 gives an
+   element count (1073741824) that fits a 32-bit size_t, but that count
+   times sizeof(int) is exactly 2^32, wrapping to 0 one multiplication
+   later, inside xcalloc, where the element-count-only version could
+   not see it - the fix folds elem_sz into the same check.
+
+   This project's own csa2_topk=512/LZ_BATCH_MAX=8/nf-in-single-digits
+   worst case (this file's own header comment) is nowhere near either a
+   32-bit or a 64-bit wrap; the real production dimensions
+   (c->n_full_layers <= LZ_MAX_LAYERS, LZ_BATCH_MAX, and c->csa2_topk as
+   a 32-bit int) can never combine to overflow a 64-bit size_t either,
+   which is exactly why this development host cannot reproduce the bug
+   end to end through lz_state_alloc - only the function's own
+   arithmetic can be driven directly, with synthetic nf values large
+   enough to wrap on ANY width. (A prior version of this addendum
+   asserted `!lz_csa2_pub_overflows(LZ_MAX_LAYERS, LZ_BATCH_MAX,
+   INT_MAX, ...)` as a sanity check - true on this 64-bit host, but
+   FALSE on the real 32-bit target this guard exists for, since
+   LZ_MAX_LAYERS*LZ_BATCH_MAX=1024 is large enough there to trip it
+   well before INT_MAX. Removed rather than fixed in place - the
+   D-based checks below are the ones with a platform-independent proof
+   of their own expected answer.) */
 static void check_overflow_guard(void) {
-    /* D = (size_t)-1 / 4 + 1 is just over one quarter of size_t's own
-       range, on whatever width size_t actually is here - so 4*D wraps
-       past size_t's maximum by construction (mod 2^N == 0, whatever N
-       is: (size_t)-1 is 2^N - 1, D = (2^N-1)/4 + 1 = 2^(N-2) exactly
-       for N even, and 4*D = 2^N wraps to 0) while 3*D does not. This is
-       the tightest possible boundary, not just an obviously-safe or
-       obviously-wrapping value. */
-    size_t d = ((size_t)-1) / 4 + 1;
-    ok(lz_csa2_pub_overflows(d, 1, 4),
-       "overflow guard: 4 * (size_t's own max/4 + 1) wraps past size_t's "
-       "maximum - correctly flagged");
-    ok(!lz_csa2_pub_overflows(d, 1, 3),
-       "overflow guard: 3 * (size_t's own max/4 + 1) stays under size_t's "
-       "maximum - correctly NOT flagged (the tightest boundary, one less "
-       "than the wrapping value above)");
-    ok(!lz_csa2_pub_overflows(9, (size_t)LZ_BATCH_MAX, 512),
+    /* cap = ((size_t)-1) - 16 - sizeof(void*), elem_sz folded to 1 so
+       cap IS the exact byte ceiling xcalloc's own n*sz+16+sizeof(void*)
+       must not exceed (forward_state.c's own xcalloc, mirrored here
+       with sizeof(void*) read the same way the real code does, not
+       hardcoded, so this is exact on any width rather than assuming
+       4 or 8). D = cap/4 + 1 is just over one quarter of cap, so with
+       batch_max=1: n*topk = 4*D is PROVABLY > cap for any cap this
+       large (4*floor(cap/4)+4 always exceeds cap, the remainder of a
+       floor division being at most 3) while 3*D = 3*floor(cap/4)+3 is
+       PROVABLY <= cap (the "+3" is negligible against a cap this size,
+       unlike a genuinely tight boundary). Chosen via nf, not topk: an
+       int cannot be made large enough on its own width to approach a
+       64-bit size_t's own maximum, on this host or the real 32-bit
+       target alike - a large nf (this project's own n_full_layers,
+       read raw off an unvalidated bin header - forward_state.c's own
+       comment on lz_csa2_pub_overflows has the full argument) is what
+       actually carries the wrap in both cases. */
+    size_t cap = ((size_t)-1) - 16 - sizeof(void *);
+    size_t d = cap / 4 + 1;
+    ok(lz_csa2_pub_overflows(d, 1, 4, 1),
+       "overflow guard: nf = cap/4+1, topk=4, elem_sz=1 - 4x nf exceeds "
+       "the exact byte ceiling - correctly flagged");
+    ok(!lz_csa2_pub_overflows(d, 1, 3, 1),
+       "overflow guard: the same nf at topk=3 stays under the ceiling - "
+       "correctly NOT flagged");
+    ok(!lz_csa2_pub_overflows(9, (size_t)LZ_BATCH_MAX, 512, sizeof(int)),
        "overflow guard: this project's own worst-case numbers (nf=9, "
-       "batch_max=8, topk=512) do not trip it");
-    ok(!lz_csa2_pub_overflows((size_t)LZ_MAX_LAYERS, (size_t)LZ_BATCH_MAX, 0x7fffffff),
-       "overflow guard: even nf=LZ_MAX_LAYERS with the largest possible "
-       "int topk does not trip it on this host's size_t width - the real "
-       "production dimensions cannot reach the wrap this function guards "
-       "against here, which is exactly why the D-based checks above (not "
-       "this one) are what actually exercise the boundary");
+       "batch_max=8, topk=512, elem_sz=sizeof(int)) do not trip it - "
+       "true on every size_t width, not host-dependent");
+    /* F7: nf==0 (or batch_max==0) must answer "no overflow" without
+       dividing by zero - forward_state.c's own alloc_csa2_ring never
+       calls this with a validated nf (c->n_full_layers is a raw bin
+       header word), so nf==0 alongside a csa2_on layer claiming
+       otherwise is a real, reachable input on that path, not a
+       defensive case for something that cannot happen. */
+    ok(!lz_csa2_pub_overflows(0, (size_t)LZ_BATCH_MAX, 512, sizeof(int)),
+       "overflow guard: nf==0 does not divide by zero and answers "
+       "'no overflow' (xcalloc(0, ...) itself short-circuits before "
+       "ever reaching n*sz)");
+    ok(!lz_csa2_pub_overflows((size_t)LZ_MAX_LAYERS, 0, 512, sizeof(int)),
+       "overflow guard: batch_max==0 likewise does not divide by zero");
 }
 
 /* Code-review addendum 2: lz_csa2_mode_source_valid (model.c), the
@@ -976,6 +1305,39 @@ static void check_bin_validation(void) {
     ok(lz_csa2_mode_source_valid(&c, 1),
        "bin validation: an ordinary non-csa2_on layer (default FULL "
        "mode) is not refused");
+
+    /* Code-review addendum F9 (a plan-level gap, not this task's own
+       bug - model.c's own comment on lz_csa2_last_writer_valid has the
+       full argument): the well-formed chain fixture itself (layer 2
+       REINDEX source=0, layer 3 REUSE source=2) is what
+       lz_csa2_last_writer_valid must ACCEPT - layer 2 becomes root 0's
+       last writer, and layer 3 correctly names layer 2, not layer 0,
+       as its own source. */
+    VALIDATE_SETUP();
+    ok(lz_csa2_last_writer_valid(&c, NULL),
+       "bin validation (F9): the well-formed chain (layer 3's source is "
+       "layer 2, the actual last writer of root 0's slot) passes");
+
+    /* The named violation: layer 3 (REUSE) declares source=0 instead of
+       2. lz_csa2_mode_source_valid alone (the per-layer question) still
+       accepts this - 0 IS a strictly earlier, csa2_on, full_attention
+       layer - which is exactly the gap this addendum closes:
+       lz_csa2_last_writer_valid must refuse it, because by the time
+       layer 3's own call runs, layer 2's call has already overwritten
+       root 0's shared slot with layer 2's OWN Top-K, so layer 3 would
+       actually read layer 2's selection while declaring layer 0. */
+    VALIDATE_SETUP();
+    c.csa2_source[3] = 0;
+    ok(lz_csa2_mode_source_valid(&c, 3),
+       "bin validation (F9): the per-layer predicate ALONE still "
+       "accepts source=0 for layer 3 - demonstrating the gap this "
+       "addendum closes, not just asserting the fix works");
+    {
+        int bad = -1;
+        ok(!lz_csa2_last_writer_valid(&c, &bad) && bad == 3,
+           "bin validation (F9): the whole-config predicate refuses it, "
+           "naming layer 3 as the violation");
+    }
 #undef VALIDATE_SETUP
 }
 
@@ -983,6 +1345,7 @@ int main(void) {
     check1_full_only();
     check_chain_soft();
     check5_batch_vs_unbatched_chain();
+    check_ci_independence();
     check4_ced_gate();
     check3b_reuse_owns_nothing();
     check_overflow_guard();

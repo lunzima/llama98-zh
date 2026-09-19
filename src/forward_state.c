@@ -59,9 +59,51 @@ void xfree(void *p) {
    int-range topk to overflow a 64-bit size_t the way they can a 32-bit
    one. (size_t)-1 rather than a SIZE_MAX macro: this project's C89/
    VC++4.0 floor has no <stdint.h>, and (size_t)-1 is the same value by
-   C89's own unsigned-wraparound guarantee, on every width. */
-int lz_csa2_pub_overflows(size_t nf, size_t batch_max, int topk) {
-    return (size_t)topk > ((size_t)-1) / (nf * batch_max);
+   C89's own unsigned-wraparound guarantee, on every width.
+
+   Guards xcalloc's OWN arithmetic (its comment above: `n*sz+16+
+   sizeof(void*)`), not just the element count nf*batch_max*topk this
+   function's caller passes as xcalloc's `n` - an EARLIER version of
+   this function checked only that product, which is not what can wrap:
+   nf=32, batch_max=8, topk=4194304 gives n=1073741824, comfortably
+   under a 32-bit size_t's own range, but n*sizeof(int) (xcalloc's next
+   step) is exactly 2^32, wrapping to 0 before xcalloc's own +16+8 ever
+   runs - the hole this rewrite closes. elem_sz is a parameter, not a
+   hardcoded sizeof(int), so the same function covers whatever element
+   width a future caller needs without becoming wrong for this one.
+
+   nf==0 or batch_max==0 answers "no overflow" without dividing:
+   xcalloc(0, ...) itself returns NULL before ever reaching its own
+   n*sz (this file's own xcalloc, the `if (n == 0) return NULL;` line),
+   so telling this function's caller to proceed is correct, and it also
+   avoids a division by an unvalidated nf - c->n_full_layers is a raw
+   bin-format header word with no range check of its own by the time
+   alloc_csa2_ring reads it, so nf==0 (paired with a csa2_on layer
+   claiming otherwise) is a real, reachable input, not a defensive
+   nicety for an impossible case. */
+int lz_csa2_pub_overflows(size_t nf, size_t batch_max, int topk, size_t elem_sz) {
+    size_t n, cap;
+    if (nf == 0 || batch_max == 0) return 0;
+    n = nf * batch_max;                 /* <= LZ_MAX_LAYERS * LZ_BATCH_MAX = 1024 in
+                                            production, never overflows any size_t width -
+                                            true because nf is c->n_full_layers, which
+                                            model.c's lz_open_bin now cross-checks against
+                                            layer_types[] (bounded by n_layers <=
+                                            LZ_MAX_LAYERS) before this function's caller
+                                            ever reads it; an earlier version of this
+                                            comment stated the bound without that check
+                                            existing yet, which made the claim true only
+                                            for a well-formed header, not a hostile one -
+                                            elem_sz==0 (the ONE parameter that reaching
+                                            this function does not similarly guarantee
+                                            nonzero, since it is a compile-time constant
+                                            at every current call site, never a header
+                                            field) would still divide by zero below without
+                                            the check just under this comment. */
+    if (elem_sz == 0) return 1;         /* no legal element width is 0; refuse rather
+                                            than divide by it */
+    cap = (((size_t)-1) - 16 - sizeof(void *)) / elem_sz;
+    return (size_t)topk > cap / n;
 }
 
 
@@ -677,17 +719,24 @@ static void alloc_csa2_ring(LZRunState *s, const LZModel *m,
                bytes - under 150 KiB total, and a heap allocation like
                every other csa2_* array here, not a stack one.
 
-               lz_csa2_pub_overflows guards exactly this multiplication
-               (its own comment, and model.c's csa2_topk field comment,
-               have the full argument): nf and LZ_BATCH_MAX are both
-               small, but c->csa2_topk has no upper bound at load time
-               by design, and their PRODUCT - not csa2_topk alone - is
-               what a 32-bit size_t can wrap on before xcalloc/calloc
-               ever see the true size. A wrap here is refused exactly
+               lz_csa2_pub_overflows guards exactly what xcalloc itself
+               is about to compute below (its own comment, and model.c's
+               csa2_topk field comment, have the full argument): nf and
+               LZ_BATCH_MAX are both small, but c->csa2_topk has no
+               upper bound at load time by design, and it is the
+               PRODUCT nf*LZ_BATCH_MAX*csa2_topk*sizeof(int) - not
+               csa2_topk alone, and not the element count alone either
+               - that a 32-bit size_t can wrap on before xcalloc/calloc
+               ever see the true size. sizeof(int) is passed explicitly
+               (matching the xcalloc call right below) rather than
+               assumed: the earlier element-count-only version of this
+               guard reused this same worst-case comment as if checking
+               nf*LZ_BATCH_MAX*csa2_topk not overflowing were the whole
+               story, and it is not. A wrap here is refused exactly
                like any other allocation failure (ok=0), not treated as
                a config error - csa2_topk's own legal range does not
                change. */
-            if (lz_csa2_pub_overflows(nf, (size_t)LZ_BATCH_MAX, c->csa2_topk)) {
+            if (lz_csa2_pub_overflows(nf, (size_t)LZ_BATCH_MAX, c->csa2_topk, sizeof(int))) {
                 ok = 0;
             } else {
                 s->csa2_topk_idx_pub = (int *)xcalloc(

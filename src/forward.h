@@ -1616,20 +1616,30 @@ void lz_state_free(LZRunState *s);
 /* The aligned-free half of forward_state.c's xcalloc/xfree pair. Shared:
    lz_state_free, above, frees the same buffers. */
 void xfree(void *p);
-/* Whether nf * batch_max * topk (alloc_csa2_ring's own csa2_topk_idx_pub/
-   csa2_topk_n_pub element count) would wrap size_t before ever reaching
-   xcalloc, which does no overflow checking of its own (forward_state.c's
-   own xcalloc comment: n*sz+... is a single, unchecked multiplication).
+/* Whether nf * batch_max * topk elements of elem_sz bytes each
+   (alloc_csa2_ring's own csa2_topk_idx_pub/csa2_topk_n_pub sizing)
+   would make xcalloc's OWN arithmetic wrap size_t - not just the
+   element count nf*batch_max*topk itself, but that count times
+   elem_sz plus xcalloc's own +16+sizeof(void*) overhead (forward_
+   state.c's own xcalloc comment has the exact expression this
+   mirrors), since xcalloc does no overflow checking of its own. A
+   version of this function that checked only the element count missed
+   exactly this: nf=32, batch_max=8, topk=4194304 gives an element
+   count (1073741824) that fits a 32-bit size_t comfortably, but that
+   count times sizeof(int) is exactly 2^32, wrapping to 0 one
+   multiplication later, inside xcalloc, where the first version could
+   not see it.
+
    Split out as its own function, not inlined at alloc_csa2_ring's call
-   site, so a probe can drive it with SYNTHETIC nf/batch_max values large
-   enough to wrap on ANY size_t width - the real hazard is 32-bit-size_t-
-   specific (c->n_full_layers <= LZ_MAX_LAYERS and LZ_BATCH_MAX are both
-   small, and c->csa2_topk is a 32-bit int either way, so no in-range
-   call alloc_csa2_ring actually makes can reach a 64-bit size_t's own
-   overflow point - a probe running on this project's 64-bit development
-   host cannot reproduce the exact production scenario end to end, only
-   the arithmetic itself). */
-int lz_csa2_pub_overflows(size_t nf, size_t batch_max, int topk);
+   site, so a probe can drive it with SYNTHETIC nf/batch_max/elem_sz
+   values large enough to wrap on ANY size_t width - the real hazard is
+   32-bit-size_t-specific (c->n_full_layers <= LZ_MAX_LAYERS and
+   LZ_BATCH_MAX are both small, and c->csa2_topk is a 32-bit int either
+   way, so no in-range call alloc_csa2_ring actually makes can reach a
+   64-bit size_t's own overflow point - a probe running on this
+   project's 64-bit development host cannot reproduce the exact
+   production scenario end to end, only the arithmetic itself). */
+int lz_csa2_pub_overflows(size_t nf, size_t batch_max, int topk, size_t elem_sz);
 /* lz_rope_build_table's two runtime inputs, both defined in forward.c:
    --rope-dynamic-ntk's on/off and --rope-orig-max. */
 extern int   lz_rope_dynamic_ntk;

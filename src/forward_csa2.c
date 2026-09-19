@@ -111,7 +111,35 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
         const float *h = s->xb + (size_t)tk * hdim;
         int *tok_idx = pub_idx_base + (size_t)tk * topk;
         int *tok_n = pub_n_base + tk;
-        int n_vis = s->csa2_n_blocks[ci];
+        /* FULL reads its own persisted s->csa2_n_blocks[ci], which step 6
+           below updates to blk+1 the instant THIS SAME call finalizes a
+           block - so at any tk within a batched nt>1 call it already
+           holds exactly pos/cm (the last finalize was for a pos strictly
+           before this one, in this same loop or an earlier call).
+           REINDEX cannot read that: its ci is ALIASED (forward_state.c's
+           cache_idx fill) onto its source's SAME physical slot, and its
+           source's call for this whole chunk already ran to completion,
+           top to bottom, before this call started (forward.c dispatches
+           layers in increasing order) - so by the time THIS loop reaches
+           tk=0, s->csa2_n_blocks[ci] already holds the count as of the
+           SOURCE's last token, not as of this token. Reading it here
+           would leak every block the source finished on LATER tokens of
+           the same chunk into an earlier token's query - the causal
+           violation report Sec2.3.1's "Reindex Mode ... identical
+           positional and causal masking logic" rules out. pos/cm is the
+           same quantity FULL's counter tracks, computed directly instead
+           of through state that only FULL's own step 6 keeps current.
+
+           REUSE's own n_vis, computed the same way here, is DEAD: step 3
+           below skips REUSE entirely (`if (mode != LZ_CSA2_REUSE)`), so
+           this value is never read for it - REUSE's causal correctness
+           comes entirely from whatever its source already published into
+           the shared (ci, tk) slot, not from anything computed in its
+           own call. The ternary does not special-case REUSE separately
+           from REINDEX only because doing so would need a third arm for
+           a value nothing downstream ever uses - not because REUSE's own
+           n_vis means anything. */
+        int n_vis = mode == LZ_CSA2_FULL ? s->csa2_n_blocks[ci] : pos / cm;
         int k_eff;
         int hh;
 
@@ -192,12 +220,18 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
 
         /* ---- 3. indexer query + Eq 1's score, over exactly the
            n_vis blocks finalized by STRICTLY EARLIER positions - n_vis
-           was read above, before step 6 below can finalize THIS
-           position's own block, so a query can never see the block it
+           was computed above as pos/cm (mode-dependent - see that
+           declaration's own comment for why FULL and REINDEX/REUSE
+           cannot share one read), so a query can never see the block it
            is itself inside (this file's own header comment's causality
            argument, engine/csa2.py's csa2_causal_block_mask mirrored
-           without needing an explicit mask tensor: there is simply
-           nothing in the ring past index n_vis-1 yet).
+           without needing an explicit mask tensor). For FULL this also
+           equals "nothing in the ring past index n_vis-1 yet", since
+           its own step 6 is what fills the ring in the first place; for
+           REINDEX the ring already holds every block the source will
+           EVER finalize for this chunk (the source's whole call already
+           ran), so it is n_vis - not the ring's contents - that is the
+           only thing enforcing causality here.
 
            FULL and REINDEX: both compute their OWN fresh query/score/
            selection here, against the shared ring_idx - Reindex reads

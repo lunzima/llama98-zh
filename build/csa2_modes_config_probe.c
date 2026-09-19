@@ -76,6 +76,47 @@ static int load_with(const char *mode_obj, const char *source_obj,
     return rc;
 }
 
+/* Same fixture as load_with, plus an explicit mla_q_lora_rank - I3
+   (report Sec2.3.1 mode-dispatch task, fifth review round): S4+CSA2
+   composition is refused explicitly (model.h's own csa2_w_dq_idx
+   comment has the mechanism - forward_csa2.c's step 1 always reads
+   L->q_proj directly, never S4's low-rank q_proj_down/up pair), not
+   left to an accidental missing-tensor error. A separate function
+   rather than an extra load_with() parameter every one of its dozen
+   existing call sites would otherwise need updating for. */
+static int load_with_mla(int mla_rank, const char *mode_obj,
+                         const char *source_obj, LZModelConfig *c,
+                         char *errbuf, int errlen) {
+    FILE *fp = fopen(TMP_PATH, "wb");
+    int rc;
+    if (!fp) { printf("FAIL - could not write %s\n", TMP_PATH); return -1; }
+    fprintf(fp,
+        "{"
+        "\"vocab_size\":32,"
+        "\"hidden_size\":64,"
+        "\"num_hidden_layers\":6,"
+        "\"num_attention_heads\":2,"
+        "\"num_key_value_heads\":2,"
+        "\"head_dim\":32,"
+        "\"intermediate_size\":64,"
+        "\"attn_output_gate\":true,"
+        "\"mla_q_lora_rank\":%d,"
+        "\"layer_types\":[\"full_attention\",\"linear_attention\","
+                         "\"full_attention\",\"linear_attention\","
+                         "\"full_attention\",\"full_attention\"],"
+        "\"csa2_layers\":[0,2,4,5],"
+        "\"csa2_kv_mode\":%s,"
+        "\"csa2_kv_source\":%s"
+        "}",
+        mla_rank, mode_obj, source_obj);
+    fclose(fp);
+    memset(c, 0, sizeof(*c));
+    errbuf[0] = '\0';
+    rc = lz_load_config(c, TMP_PATH, errbuf, errlen);
+    remove(TMP_PATH);
+    return rc;
+}
+
 int main(void) {
     LZModelConfig c;
     char errbuf[256];
@@ -185,6 +226,45 @@ int main(void) {
     rc = load_with("{\"99999999999999999999\":\"reindex\"}", "{}",
                    &c, errbuf, sizeof errbuf);
     ok(rc != 0, "case 10c: csa2_kv_mode key too large for any layer index is refused");
+
+    /* Case 11 (I3): mla_q_lora_rank > 0 together with ANY csa2_on layer
+       is refused, even at csa2_kv_mode's default (FULL, unnamed) - the
+       composition this engine does not support is layer-level, not
+       mode-level (every mode's step 1 reads L->q_proj the same way). */
+    rc = load_with_mla(16, "{}", "{}", &c, errbuf, sizeof errbuf);
+    ok(rc != 0, "case 11: mla_q_lora_rank>0 with a csa2_on layer (default "
+                "FULL mode) is refused");
+    ok(rc != 0 && strstr(errbuf, "csa2") != NULL,
+       "case 11: refusal names the csa2 layer");
+    /* Control: the same mla_q_lora_rank with NO csa2_on layer at all
+       must load clean - S4 alone, without CSA2, is unrelated to this
+       refusal. csa2_layers must be empty too, or every layer it names
+       becomes csa2_on regardless of csa2_kv_mode/csa2_kv_source. */
+    {
+        FILE *fp = fopen(TMP_PATH, "wb");
+        if (!fp) {
+            printf("FAIL - could not write %s\n", TMP_PATH);
+        } else {
+            fprintf(fp,
+                "{"
+                "\"vocab_size\":32,\"hidden_size\":64,"
+                "\"num_hidden_layers\":6,\"num_attention_heads\":2,"
+                "\"num_key_value_heads\":2,\"head_dim\":32,"
+                "\"intermediate_size\":64,\"attn_output_gate\":true,"
+                "\"mla_q_lora_rank\":16,"
+                "\"layer_types\":[\"full_attention\",\"linear_attention\","
+                                 "\"full_attention\",\"linear_attention\","
+                                 "\"full_attention\",\"full_attention\"]"
+                "}");
+            fclose(fp);
+            memset(&c, 0, sizeof(c));
+            errbuf[0] = '\0';
+            rc = lz_load_config(&c, TMP_PATH, errbuf, sizeof errbuf);
+            remove(TMP_PATH);
+            ok(rc == 0, "case 11: mla_q_lora_rank>0 with NO csa2_on layer "
+                        "at all loads clean (S4 alone is unrelated)");
+        }
+    }
 
     if (g_fail) {
         printf("\ncsa2_modes_config_probe: FAIL\n");
