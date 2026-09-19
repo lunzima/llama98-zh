@@ -160,6 +160,9 @@
 !/build/csa2_cache_idx_alias_probe.c
 !/build/csa2_mode_dispatch_gate.sh
 !/build/csa2_mode_dispatch_probe.c
+!/build/smf_lead_gate.sh
+!/build/smf_lead_probe.c
+!/build/smf_lead_realfile_probe.c
 # The model packer. It lived at the repository ROOT, where an untracked
 # file reads as a top-level project file rather than as tooling - which
 # is how it reached the public remote twice. Its only caller is

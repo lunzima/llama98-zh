@@ -133,9 +133,21 @@ static void track_advance(LZSmfTrack *t, LZSmfTempo *tm, int *ntm,
                  ((unsigned long)(d2 & 0x7F) << 16);
         /* A note-on with velocity ZERO is a note-off in every file that
            uses running status, which is most of them. Taking one as the
-           first sound would trim the lead-in to a release. */
-        if (first_note && *first_note == (unsigned long)-1 &&
-            hi == 0x90 && (d2 & 0x7F) != 0)
+           first sound would trim the lead-in to a release.
+
+           SMALLEST TICK SEEN, not merely the first one seen: the caller
+           runs this across every track in turn, each to completion,
+           rather than merging them by tick the way lz_smf_next does -
+           so the first note-on this ever sees is whichever track sits
+           at the lowest INDEX and has any note at all, not whichever
+           note sounds earliest in the piece. A part written on a later
+           track that leads the piece in - the shape of an intro carried
+           on a channel other than the first - would win the update race
+           against ITS OWN earlier note once some other track had
+           already set *first_note, since the old `== -1` guard only let
+           the value be written once. */
+        if (first_note && hi == 0x90 && (d2 & 0x7F) != 0 &&
+            (*first_note == (unsigned long)-1 || t->tick < *first_note))
             *first_note = t->tick;
         return;
     }

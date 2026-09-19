@@ -41,7 +41,7 @@
 # nested inside another comment; gcc said so on every build and `check`
 # reported 16 PASS over it. Having a caller somewhere is not the test -
 # being reachable from what people actually run is.
-check: root-hygiene-gate bare-endif-gate wscr-borrow-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate json-offset-gate softfp-gate dedupe-gate mm-alias-gate kv-share-ced-boundary-gate ced-proj-arm-gate csa2-modes-config-gate csa2-cache-idx-alias-gate csa2-mode-dispatch-gate c89-floor-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate isa-floor-avx2-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate arch-allowlist-gate kernel-matrix-gate aux-parm-arity-gate aux-equiv-gate mathf-xcompiler-gate bf16-torch-gate lz4-model-gate gcc-watcom-output-gate fixture-exists-gate
+check: root-hygiene-gate bare-endif-gate wscr-borrow-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate json-offset-gate softfp-gate dedupe-gate mm-alias-gate kv-share-ced-boundary-gate ced-proj-arm-gate csa2-modes-config-gate csa2-cache-idx-alias-gate csa2-mode-dispatch-gate smf-lead-gate c89-floor-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate isa-floor-avx2-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate arch-allowlist-gate kernel-matrix-gate aux-parm-arity-gate aux-equiv-gate mathf-xcompiler-gate bf16-torch-gate lz4-model-gate gcc-watcom-output-gate fixture-exists-gate
 
 # Zero gcc warnings, asserted rather than printed. The Watcom side has
 # always been counted ("N lines, 0 warnings, 0 errors", per file); this
@@ -430,6 +430,20 @@ csa2-cache-idx-alias-gate:
 .PHONY: csa2-mode-dispatch-gate
 csa2-mode-dispatch-gate:
 	@bash build/csa2_mode_dispatch_gate.sh
+
+# common/smf.c's lead-in trim: lz_smf_open's first-sounding-note scan has
+# to take the MINIMUM tick over every track, not merely the first note
+# any track happens to report - a part carried on a later track that
+# sounds ahead of an earlier track's own first note used to lose that
+# race, so the piece's whole lead-in trim locked onto the wrong (later)
+# tick and everything before it played as a burst at tick 0 instead of
+# an intro. No model dir needed - a synthetic three-track fixture built
+# by hand in build/smf_lead_probe.c, plus an optional real-file
+# regression against music/gadameiren_arr.mid (SKIPPED when that
+# untracked file is not present).
+.PHONY: smf-lead-gate
+smf-lead-gate:
+	@bash build/smf_lead_gate.sh
 
 # The two-generation allowlist: Qwen3.5 (GDN) and KunMoe (KDA) load, any
 # other checkpoint shape is refused by name. Own script's header has the
