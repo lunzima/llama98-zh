@@ -41,7 +41,7 @@
 # nested inside another comment; gcc said so on every build and `check`
 # reported 16 PASS over it. Having a caller somewhere is not the test -
 # being reachable from what people actually run is.
-check: root-hygiene-gate bare-endif-gate wscr-borrow-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate json-offset-gate softfp-gate dedupe-gate mm-alias-gate kv-share-ced-boundary-gate ced-proj-arm-gate csa2-modes-config-gate csa2-cache-idx-alias-gate c89-floor-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate isa-floor-avx2-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate arch-allowlist-gate kernel-matrix-gate aux-parm-arity-gate aux-equiv-gate mathf-xcompiler-gate bf16-torch-gate lz4-model-gate gcc-watcom-output-gate fixture-exists-gate
+check: root-hygiene-gate bare-endif-gate wscr-borrow-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate json-offset-gate softfp-gate dedupe-gate mm-alias-gate kv-share-ced-boundary-gate ced-proj-arm-gate csa2-modes-config-gate csa2-cache-idx-alias-gate csa2-mode-dispatch-gate c89-floor-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate isa-floor-avx2-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate arch-allowlist-gate kernel-matrix-gate aux-parm-arity-gate aux-equiv-gate mathf-xcompiler-gate bf16-torch-gate lz4-model-gate gcc-watcom-output-gate fixture-exists-gate
 
 # Zero gcc warnings, asserted rather than printed. The Watcom side has
 # always been counted ("N lines, 0 warnings, 0 errors", per file); this
@@ -411,6 +411,25 @@ csa2-modes-config-gate:
 .PHONY: csa2-cache-idx-alias-gate
 csa2-cache-idx-alias-gate:
 	@bash build/csa2_cache_idx_alias_gate.sh
+
+# Full/Reindex/Reuse mode dispatch itself (Part 5 Task 5.4, the last of
+# the three): forward_csa2.c now actually reads L->csa2_mode and skips
+# steps 2/3/6 per the report Sec2.3.1 table, and csa2_topk_idx/
+# csa2_topk_val become per-(ci, token-in-chunk) publish buffers instead
+# of a single transient scratch. Own script's header has the two
+# independent mutation controls - dispatch reverted to the old
+# unconditional six-step body (must redden the Reindex/Reuse-specific
+# checks, crash at check3b, leave check1's Full-only checks untouched),
+# and the publish buffer collapsed back to per-ci-only (must redden
+# specifically the two checks that read it directly, per-token, right
+# after a call - the ones a call's own last-token-only attn_out cannot
+# see through). No model dir needed - builds its own hand-crafted
+# LZModel/LZRunState fixtures with real synthetic weights and calls the
+# real forward_csa2() directly - so it sits with the other fast,
+# build-and-run gates.
+.PHONY: csa2-mode-dispatch-gate
+csa2-mode-dispatch-gate:
+	@bash build/csa2_mode_dispatch_gate.sh
 
 # The two-generation allowlist: Qwen3.5 (GDN) and KunMoe (KDA) load, any
 # other checkpoint shape is refused by name. Own script's header has the

@@ -1380,6 +1380,35 @@ int lz_ced_kv_target(const LZModelConfig *c, int li) {
     return c->ced_kv && c->ced_split > 0 && c->ced_split < c->n_layers && li >= c->ced_split;
 }
 
+/* model.h's own comment on this function has the contract. Mirrors
+   lz_load_config's own csa2_kv_mode/csa2_kv_source cross-checks
+   (csa2_key_idx's callers above), applied here to ONE layer's already-
+   parsed fields rather than to a JSON object's entries, so lz_open_bin
+   can use the identical rule on a raw header word.
+
+   layer_types[src] == LZ_LT_FULL is checked in addition to csa2_on[src]
+   rather than instead of it: csa2_on[] is only ever SET for a
+   full_attention layer on the JSON path (lz_load_config's own
+   csa2_layers loop refuses csa2_on[idx] for a non-full_attention idx
+   before setting it), but the bin path reads csa2_on[] as a raw array
+   with no such cross-check of its own - a source pointing at a
+   csa2_on[]==1-but-actually-linear_attention layer would otherwise
+   alias forward_state.c's cache_idx into the WRONG numbering space
+   (nl, not nf), corrupting both. */
+int lz_csa2_mode_source_valid(const LZModelConfig *c, int li) {
+    int src;
+    if (c->csa2_mode[li] != LZ_CSA2_FULL &&
+        c->csa2_mode[li] != LZ_CSA2_REINDEX &&
+        c->csa2_mode[li] != LZ_CSA2_REUSE) {
+        return 0;
+    }
+    if (c->csa2_mode[li] == LZ_CSA2_FULL) return 1;
+    if (!c->csa2_on[li]) return 0;
+    src = c->csa2_source[li];
+    return src >= 0 && src < li && c->csa2_on[src] &&
+           c->layer_types[src] == LZ_LT_FULL;
+}
+
 /* Give every target layer the source layer's five K/V tensors.
 
    A STRUCT COPY, not a deep copy: the storage stays the source layer's,
@@ -3079,11 +3108,34 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
            not to version the header. */
         RD(c->csa2_mode, LZ_MAX_LAYERS * 4);
         RD(c->csa2_source, LZ_MAX_LAYERS * 4);
+        /* Two different checks for two different regions, not one loop
+           applied uniformly: the padding past n_layers must be all-
+           default (nothing named it, so nothing may have touched it),
+           while an in-range layer's pair must be lz_csa2_mode_source_
+           valid - unlike the padding check, THIS half is new: before
+           it, a layer inside n_layers with a garbage csa2_mode/
+           csa2_source pair was trusted outright, and forward_state.c's
+           cache_idx fill (s->cache_idx[l] = s->cache_idx[c->
+           csa2_source[l]] for a non-FULL mode) reads csa2_source[l] as
+           an array index with no bounds check of its own - a negative
+           sentinel left over from a FULL-mode default paired with a
+           garbage non-zero csa2_mode reads cache_idx[-1] out of bounds,
+           and a source naming a real but wrong-namespace or forward-
+           referenced layer aliases into memory that index was never
+           meant to reach. */
         for (i = 0; i < LZ_MAX_LAYERS; i++) {
-            if (i >= c->n_layers &&
-                (c->csa2_mode[i] != 0 || c->csa2_source[i] != -1)) {
+            if (i >= c->n_layers) {
+                if (c->csa2_mode[i] != 0 || c->csa2_source[i] != -1) {
+                    qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE,
+                         c->csa2_mode[i] != 0 ? "csa2_mode" : "csa2_source");
+                    goto fail;
+                }
+            } else if (!lz_csa2_mode_source_valid(c, i)) {
                 qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE,
-                     c->csa2_mode[i] != 0 ? "csa2_mode" : "csa2_source");
+                     (c->csa2_mode[i] != LZ_CSA2_FULL &&
+                      c->csa2_mode[i] != LZ_CSA2_REINDEX &&
+                      c->csa2_mode[i] != LZ_CSA2_REUSE) ?
+                     "csa2_mode" : "csa2_source");
                 goto fail;
             }
         }
@@ -3121,7 +3173,14 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
            already clamps the selection with
            `k_eff = topk < n_vis ? topk : n_vis`, so a topk larger than
            the block count reads nothing out of range. A topk large
-           enough to exhaust memory is loud through xcalloc, not silent.
+           enough to exhaust memory is loud through xcalloc, not silent
+           - true again only because forward_state.c's alloc_csa2_ring
+           checks lz_csa2_pub_overflows(nf, LZ_BATCH_MAX, csa2_topk)
+           before it ever multiplies the three together: that product,
+           not csa2_topk alone, is what a 32-bit size_t can wrap on,
+           turning what should be a loud calloc failure into a silent,
+           too-small allocation the report Sec2.3.1 mode-dispatch task
+           (csa2_topk_idx_pub/csa2_topk_n_pub) introduced.
 
            The three indexer words size tensors, so a value that
            disagrees with the checkpoint is already caught by the tensor

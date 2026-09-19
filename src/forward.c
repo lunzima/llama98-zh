@@ -607,7 +607,8 @@ void lz_state_free(LZRunState *s) {
     xfree(s->csa2_pending_c_idx); xfree(s->csa2_pending_z_idx);
     xfree(s->csa2_comp_ring); xfree(s->csa2_idx_comp_ring);
     xfree(s->csa2_n_blocks);
-    xfree(s->csa2_scores); xfree(s->csa2_topk_idx); xfree(s->csa2_topk_val);
+    xfree(s->csa2_scores);
+    xfree(s->csa2_topk_idx_pub); xfree(s->csa2_topk_n_pub);
     xfree(s->csa2_c_j); xfree(s->csa2_z_j);
     xfree(s->csa2_c_j_idx); xfree(s->csa2_z_j_idx);
     xfree(s->csa2_qidx); xfree(s->csa2_widx); xfree(s->csa2_cq_idx);

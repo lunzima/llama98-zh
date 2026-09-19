@@ -51,6 +51,19 @@ void xfree(void *p) {
     if (p) free(((void **)p)[-1]);
 }
 
+/* forward.h's own comment on this function has the full argument. Not
+   static, and not inlined at alloc_csa2_ring's own call site below, for
+   the same testability reason lz_rope_build_table is exported - a probe
+   drives it directly with synthetic nf/batch_max values, since the real
+   ones (<= LZ_MAX_LAYERS, LZ_BATCH_MAX) can never combine with an
+   int-range topk to overflow a 64-bit size_t the way they can a 32-bit
+   one. (size_t)-1 rather than a SIZE_MAX macro: this project's C89/
+   VC++4.0 floor has no <stdint.h>, and (size_t)-1 is the same value by
+   C89's own unsigned-wraparound guarantee, on every width. */
+int lz_csa2_pub_overflows(size_t nf, size_t batch_max, int topk) {
+    return (size_t)topk > ((size_t)-1) / (nf * batch_max);
+}
+
 
 
 
@@ -646,8 +659,42 @@ static void alloc_csa2_ring(LZRunState *s, const LZModel *m,
                 &ok, &s->bytes_alloc);
             s->csa2_n_blocks = (int *)xcalloc(nf, sizeof(int), &ok, &s->bytes_alloc);
             s->csa2_scores = (float *)xcalloc((size_t)max_blocks, sizeof(float), &ok, &s->bytes_alloc);
-            s->csa2_topk_idx = (int *)xcalloc((size_t)c->csa2_topk, sizeof(int), &ok, &s->bytes_alloc);
-            s->csa2_topk_val = (float *)xcalloc((size_t)c->csa2_topk, sizeof(float), &ok, &s->bytes_alloc);
+            /* csa2_topk_idx_pub / csa2_topk_n_pub (forward.h's own
+               comment on these two fields): one slot per (ci, token-in-
+               chunk), not the single transient scratch this pair used to
+               be - a REUSE-mode layer's call starts only after its
+               source's ENTIRE chunk-wide call has finished, so it needs
+               every token's selection to have survived, not just the
+               last. LZ_BATCH_MAX, not nt_cap: nt_cap is a runtime
+               default (<= LZ_BATCH_MAX) and this must cover the widest
+               chunk any call this process makes could ever pass, same
+               reasoning s->qg/s->qh/s->attn_out's own LZ_BATCH_MAX-wide
+               sizing already uses elsewhere in this function.
+               Worst case at this project's own numbers (model.h's
+               csa2_on[] comment: top-k 512 for a real config) -
+               topk=512, LZ_BATCH_MAX=8, nf in the single digits (say 9):
+               idx is 9*8*512*4 = 147456 bytes, n_pub is 9*8*4 = 288
+               bytes - under 150 KiB total, and a heap allocation like
+               every other csa2_* array here, not a stack one.
+
+               lz_csa2_pub_overflows guards exactly this multiplication
+               (its own comment, and model.c's csa2_topk field comment,
+               have the full argument): nf and LZ_BATCH_MAX are both
+               small, but c->csa2_topk has no upper bound at load time
+               by design, and their PRODUCT - not csa2_topk alone - is
+               what a 32-bit size_t can wrap on before xcalloc/calloc
+               ever see the true size. A wrap here is refused exactly
+               like any other allocation failure (ok=0), not treated as
+               a config error - csa2_topk's own legal range does not
+               change. */
+            if (lz_csa2_pub_overflows(nf, (size_t)LZ_BATCH_MAX, c->csa2_topk)) {
+                ok = 0;
+            } else {
+                s->csa2_topk_idx_pub = (int *)xcalloc(
+                    nf * (size_t)LZ_BATCH_MAX * c->csa2_topk, sizeof(int), &ok, &s->bytes_alloc);
+                s->csa2_topk_n_pub = (int *)xcalloc(
+                    nf * (size_t)LZ_BATCH_MAX, sizeof(int), &ok, &s->bytes_alloc);
+            }
             s->csa2_c_j = (float *)xcalloc((size_t)c->head_dim, sizeof(float), &ok, &s->bytes_alloc);
             s->csa2_z_j = (float *)xcalloc((size_t)c->head_dim, sizeof(float), &ok, &s->bytes_alloc);
             s->csa2_c_j_idx = (float *)xcalloc((size_t)c->csa2_indexer_head_dim, sizeof(float), &ok, &s->bytes_alloc);

@@ -1104,4 +1104,21 @@ int lz_kv_share_target(const LZModelConfig *c, int li);
    function rather than repeating the "is CED active" condition. */
 int lz_ced_kv_target(const LZModelConfig *c, int li);
 
+/* Whether layer li's csa2_mode/csa2_source are internally consistent -
+   csa2_mode[li] one of the three LZ_CSA2_* codes, and, for a non-FULL
+   mode, csa2_source[li] a strictly earlier layer that is itself
+   csa2_on AND full_attention. The same rule lz_load_config's own
+   csa2_kv_mode/csa2_kv_source cross-checks already apply per JSON
+   entry - extracted here (same shape as lz_kv_share_target/
+   lz_ced_kv_target above: a pure predicate, no errbuf) so lz_open_bin's
+   header validation can apply the identical rule to a raw field
+   instead of trusting it, and so a probe can drive it directly without
+   constructing a whole model.bin.
+
+   li must be < c->n_layers - the padding region past it (still inside
+   the fixed LZ_MAX_LAYERS arrays) is a different check (must be
+   all-default, not "internally consistent"), which lz_open_bin's own
+   padding loop already applies and this function does not repeat. */
+int lz_csa2_mode_source_valid(const LZModelConfig *c, int li);
+
 #endif

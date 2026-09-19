@@ -1328,8 +1328,42 @@ typedef struct {
        break with no error. Main-path query/gate/output DO reuse
        s->qg/s->qh/s->attn_out - see forward_csa2.c's own comment. */
     float *csa2_scores;              /* (max_blocks) */
-    int   *csa2_topk_idx;            /* (topk) */
-    float *csa2_topk_val;            /* (topk) */
+    /* csa2_topk_idx_pub / csa2_topk_n_pub: the Top-K selection a FULL or
+       REINDEX layer publishes for its OWN (aliased or not) ci, one slot
+       PER TOKEN OF THE CURRENT CHUNK - NOT the single transient
+       (topk)-sized scratch this pair used to be. A REUSE-mode layer's
+       own call to forward_csa2 only starts after its (aliased) source's
+       ENTIRE call - covering every token of this chunk - has already
+       finished (forward.c dispatches layer-major: one forward_csa2 call
+       runs a layer's whole nt-token loop before the next layer's call
+       begins), so "the source's Top-K for token tk" has already been
+       overwritten by whatever the source computed for tk+1, tk+2, ...
+       by the time a single-slot scratch would be read - only a slot
+       addressed by tk as well as ci survives long enough.
+       Sized (n_full, LZ_BATCH_MAX, topk) / (n_full, LZ_BATCH_MAX) -
+       LZ_BATCH_MAX, not nt_cap, because the shape must cover the widest
+       chunk any call can ever pass (forward_state.c's alloc_csa2_ring
+       comment has the byte count for a realistic config, and
+       lz_csa2_pub_overflows the reason c->csa2_topk cannot be trusted
+       outright in that product). FULL and REINDEX both write their own
+       fresh per-token selection here (Reindex's ci is aliased to its
+       source's, so its write physically lands in the same slot the
+       source already used, overwriting it - correct, since nothing
+       downstream of THIS layer's own aliasing chain still needs the
+       source's original value once this layer's own has replaced it).
+       REUSE writes neither - it owns none of the seven csa2_w_*
+       tensors (this file's comment on csa2_scores' neighbors above) and
+       has nothing of its own to compute - and simply reads whatever is
+       left for its (aliased ci, tk) at the time its call runs.
+       No accompanying csa2_topk_val_pub: the partial selection sort
+       only ever needs the winning INDEX, never its score, once
+       selection is done - step 4 recomputes the dot product fresh from
+       s->qh against the ring entry instead of trusting a stored score.
+       Its pre-rename predecessor, csa2_topk_val, was never written for
+       the same reason and was removed along with the rename rather
+       than carried forward unread. */
+    int   *csa2_topk_idx_pub;        /* (n_full, LZ_BATCH_MAX, topk) */
+    int   *csa2_topk_n_pub;          /* (n_full, LZ_BATCH_MAX) - this (ci, tk)'s k_eff */
     float *csa2_c_j, *csa2_z_j;      /* (head_dim) */
     float *csa2_c_j_idx, *csa2_z_j_idx;   /* (csa2_indexer_head_dim) */
     float *csa2_qidx;                /* (csa2_indexer_heads * csa2_indexer_head_dim) */
@@ -1582,6 +1616,20 @@ void lz_state_free(LZRunState *s);
 /* The aligned-free half of forward_state.c's xcalloc/xfree pair. Shared:
    lz_state_free, above, frees the same buffers. */
 void xfree(void *p);
+/* Whether nf * batch_max * topk (alloc_csa2_ring's own csa2_topk_idx_pub/
+   csa2_topk_n_pub element count) would wrap size_t before ever reaching
+   xcalloc, which does no overflow checking of its own (forward_state.c's
+   own xcalloc comment: n*sz+... is a single, unchecked multiplication).
+   Split out as its own function, not inlined at alloc_csa2_ring's call
+   site, so a probe can drive it with SYNTHETIC nf/batch_max values large
+   enough to wrap on ANY size_t width - the real hazard is 32-bit-size_t-
+   specific (c->n_full_layers <= LZ_MAX_LAYERS and LZ_BATCH_MAX are both
+   small, and c->csa2_topk is a 32-bit int either way, so no in-range
+   call alloc_csa2_ring actually makes can reach a 64-bit size_t's own
+   overflow point - a probe running on this project's 64-bit development
+   host cannot reproduce the exact production scenario end to end, only
+   the arithmetic itself). */
+int lz_csa2_pub_overflows(size_t nf, size_t batch_max, int topk);
 /* lz_rope_build_table's two runtime inputs, both defined in forward.c:
    --rope-dynamic-ntk's on/off and --rope-orig-max. */
 extern int   lz_rope_dynamic_ntk;
