@@ -98,12 +98,30 @@ enum {
    sharing Think's, which would have cost no height: two checkboxes side
    by side needs each label to fit in half of DLG_W - 2*PAD, and the
    labels are localized, so that is a text measurement and not an
-   estimate. 439 is the arithmetic instead: 480 - 439 - a caption and
-   border of about 25 leaves ~16 px on the 640x480 screen gui/layout.c
-   treats as the floor. Another row does NOT fit; the next setting that
-   wants one has to take the measurement. */
+   estimate. 386 is the arithmetic instead, and it is read top-down, the
+   same order the ten rows above the system prompt are laid out in:
+   PAD to start, then 10 row heights (THINK, BEEP, temperature,
+   think-block temperature, the temperature-cap note, top-p, the
+   repetition penalty, context, max new tokens, the max-new-tokens
+   note) at ROW_H each, plus the gap each of those ten leaves before
+   the next one (PAD after BEEP, then 4/4/6/4/6/4/4/6 - the 6es are the
+   category boundaries the sampling rows already use between
+   themselves) - that reaches y=280, which is where the system prompt
+   row starts. Add its own height (3*ROW_H, the one row that spans
+   three) and the same 6px category-boundary gap before the buttons =
+   352, the button row's top. Add BTN_H(23) and the PAD(11) bottom
+   margin: 386. That leaves 480 - 386 - a caption and border of about
+   25 = ~69 px on the 640x480 screen gui/layout.c treats as the floor.
+   Verify any change to this arithmetic against the real window - e.g.
+   an EnumChildWindows dump of every control's rect - not by re-deriving
+   it on paper a second time: the constant this replaced was itself a
+   paper derivation nobody had re-checked since the context row lost
+   its slider and its note (both gone; see ID_CTX_SCROLL's and the
+   context row's own comments below), and the two rows' worth of height
+   they used to need stayed in DLG_H as dead space under the system
+   prompt box. */
 #define DLG_W   330
-#define DLG_H   439
+#define DLG_H   386
 #define PAD     LZ_GUI_DLG_MARGIN
 #define ROW_H     22
 #define BTN_W   LZ_GUI_BTN_W
@@ -872,8 +890,15 @@ HWND lz_gui_settings_dialog_create(HWND owner, HINSTANCE inst,
            keyboard is a box whose user learns the limit exists. */
         SendMessage(ctl, EM_LIMITTEXT, (WPARAM)LZ_COMMON_SYSTEM_MAX, 0);
         g_untheme.sys = lz_ui_untheme(ctl);
+        /* sh, not ROW_H: this row is 3*ROW_H tall, and nothing below
+           reads y today, but a `y` that stops tracking the real bottom
+           of the row it just advanced past is exactly the kind of gap
+           DLG_H's own comment above had to recover from once already.
+           +6, the same category-boundary gap REP leaves before ctx:
+           the buttons are as distinct a category from the system
+           prompt as ctx is from the sampling rows above it. */
+        y += sh + 6;
     }
-    y += ROW_H + 4;
 
     /* No system-prompt note under the label: it rendered
        truncated/incomplete next to the label and read as a broken
