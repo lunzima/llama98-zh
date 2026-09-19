@@ -114,6 +114,21 @@ int lz_music_should_calibrate(int base_tps_milli, int tokens,
 /* Below this the average is one token's latency, not a rate. */
 #define LZ_MUSIC_FOLLOW_MIN_TOKENS 8
 
+/* Milliseconds after the stream is (re)started before the FIRST live
+ * MIDIPROP_TEMPO write is allowed to land. LZ_MUSIC_FOLLOW_MIN_TOKENS
+ * is low enough (8 tokens) that on a fast model the first real ratio
+ * change can arrive within a second of midiStreamRestart - reported as
+ * dropped notes right at the start of a piece, only when the ratio
+ * actually moves away from 1x (never at a fixed ratio, i.e. never in
+ * plain unthrottled playback). A property write hitting the stream
+ * this soon after it starts is the one thing plain playback never
+ * does, so it is the prime suspect; this constant is the untested
+ * mitigation, not a measured fix - if the symptom survives it, the
+ * suspicion was wrong and this delay should come back out. During the
+ * hold the ratio simply stays at 1x, which is where it already starts
+ * every piece. */
+#define LZ_MUSIC_START_GRACE_MS 700
+
 /* Thousandths a second the ratio may travel. 500 puts a full 1x -> 2x
  * change at two seconds, which reads as the music speeding up rather
  * than as a different recording starting. A CHOICE, not a

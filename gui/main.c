@@ -300,6 +300,11 @@ static struct {
        than just the property write. */
     LZMusicSettings mus;
     int  mus_ratio;
+    /* When music_start last called lz_midi_start successfully - the
+       reference point music_follow holds its first live tempo change
+       back from, by LZ_MUSIC_START_GRACE_MS. See that constant's own
+       comment in common/music.h for why. */
+    float mus_start_ms;
     /* Spec 3.1: how many tokens THIS turn's generation has produced.
        Accumulated in tokens_arrived (every emitted token reaches it
        once), so it is authoritative over the running time even when the
@@ -2548,7 +2553,8 @@ static void music_start(HWND hwnd) {
        exactly that state. Carrying the previous turn's speed over
        would open every reply at the speed of the one before it. */
     g.mus_ratio = LZ_MUSIC_RATIO_ONE;
-    lz_midi_start(path, 1, g.mus.instrument, g.mus.volume, g.mus_ratio);
+    if (lz_midi_start(path, 1, g.mus.instrument, g.mus.volume, g.mus_ratio))
+        g.mus_start_ms = lz_time_ms();
 }
 
 /* Move the tempo to match how fast the reply is coming. Called from
@@ -2557,6 +2563,10 @@ static void music_start(HWND hwnd) {
 static void music_follow(void) {
     int target, r;
     if (!lz_midi_busy()) return;
+    /* Hold the first live tempo write back - see LZ_MUSIC_START_GRACE_MS's
+       own comment in common/music.h. g.mus_ratio is already 1x from
+       music_start, so returning here is a no-op, not a missed update. */
+    if (lz_time_ms() - g.mus_start_ms < LZ_MUSIC_START_GRACE_MS) return;
     /* gen_start_ms, not the job's start: prefill produces no tokens,
        so measuring from before it would report a rate climbing out of
        nothing for the first seconds of every turn. It is also the
