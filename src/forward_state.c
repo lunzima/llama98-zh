@@ -699,7 +699,6 @@ static void alloc_csa2_ring(LZRunState *s, const LZModel *m,
             s->csa2_idx_comp_ring = (float *)xcalloc(
                 nf * (size_t)max_blocks * c->csa2_indexer_head_dim, sizeof(float),
                 &ok, &s->bytes_alloc);
-            s->csa2_n_blocks = (int *)xcalloc(nf, sizeof(int), &ok, &s->bytes_alloc);
             s->csa2_scores = (float *)xcalloc((size_t)max_blocks, sizeof(float), &ok, &s->bytes_alloc);
             /* csa2_topk_idx_pub / csa2_topk_n_pub (forward.h's own
                comment on these two fields): one slot per (ci, token-in-

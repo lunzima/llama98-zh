@@ -1,16 +1,36 @@
 #!/bin/bash
-# C2 (report Sec2.3.1 mode-dispatch task, fifth review round): a
-# REINDEX layer's n_vis leaked causal information from its already-
-# finished source's whole call (REUSE's own n_vis is dead code - see
-# build/csa2_reindex_causality_probe.c's own header comment for why a
-# downstream REUSE layer's OUTPUT still moved anyway). That probe's
-# header comment has the full argument, why it reads s->xb2 rather than
-# s->attn_out, and what changed alongside the fix in build/csa2_mode_
-# dispatch_probe.c.
+# forward_csa2.c's causal block mask - the single n_vis line that says
+# which compressed blocks a query at position pos may score.
+# build/csa2_reindex_causality_probe.c's own header comment has the
+# boundary, the reference it comes from, and why it reads s->xb2 rather
+# than s->attn_out.
 #
-# THE CONTROL is a MUTATION (forward_csa2.c's n_vis line reverted to the
-# pre-fix shared-counter read), not a git-history diff, same reason
-# every other gate on this plan gives.
+# THE CONTROL is TWO MUTATIONS of that line, not a git-history diff,
+# same reason every other gate on this plan gives: a git-ref-pinned
+# "before" copy goes stale the day a fix lands and HEAD catches up to
+# the working tree. The two are the two distinct ways this quantity has
+# been wrong, and the probe's own check list separates them - a mutant
+# whose expected-to-fail lines stay PASS means the probe cannot see that
+# defect; a mutant where any OTHER line changes means the checks are not
+# independent. Both are reported as a gate FAILURE.
+#
+#   MUTATION 1, "chunk-end count": n_vis becomes (pos0 + nt) / cm - the
+#   number of blocks finalized by the END of this chunk, which is
+#   exactly what a counter living in the ring's own shared state hands a
+#   REINDEX layer (its ci is aliased onto a source whose whole call
+#   already finished). Correct at nt=1 by coincidence, leaky at every
+#   wider chunk. Expected fallout: ALL FIVE checks turn FAIL - the two
+#   boundary checks and both ratio-1 checks because the count no longer
+#   tracks pos at all, and check3 because a per-chunk quantity cannot
+#   be batch-invariant.
+#
+#   MUTATION 2, "one block tight": n_vis becomes pos / cm - conservative
+#   (never a future block), so batch invariance survives untouched, but
+#   one block short of the reference at every position and blind to the
+#   query's own block entirely at cm=1. Expected fallout: check1,
+#   check2, check4 and check5 turn FAIL; check3 STAYS PASS, which is
+#   what makes these two mutants different tests rather than two names
+#   for one.
 #
 # The link line is build/csa2_mode_dispatch_gate.sh's own, unchanged:
 # lz_state_alloc's helpers reach ops_quant.c/ops_norm.c/ops_gdn.c/
@@ -34,16 +54,16 @@ command -v python3 >/dev/null 2>&1 || {
 }
 
 W=$(mktemp -d 2>/dev/null || echo /tmp/csa2reindexcausalitygate.$$)
-mkdir -p "$W/fixed" "$W/mut"
+mkdir -p "$W/fixed" "$W/mut1" "$W/mut2"
 trap 'rm -rf "$W"' EXIT
 
-for d in fixed mut; do
+for d in fixed mut1 mut2; do
     cp src/*.c src/*.h "$W/$d/" 2>/dev/null
 done
 
-# Sanity: the line the mutation targets must exist exactly once in the
+# Sanity: the line both mutations target must exist exactly once in the
 # current source, or this gate no longer matches the code it names.
-NEEDLE='    int n_vis = mode == LZ_CSA2_FULL ? s->csa2_n_blocks[ci] : pos / cm;'
+NEEDLE='    int n_vis = (pos + 1) / cm;'
 N=$(grep -Fc "$NEEDLE" "$W/fixed/forward_csa2.c")
 if [ "$N" != "1" ]; then
     echo "csa2_reindex_causality_gate: FAIL - expected exactly 1 occurrence of" \
@@ -52,27 +72,32 @@ if [ "$N" != "1" ]; then
     exit 1
 fi
 
-python3 - "$W/mut/forward_csa2.c" <<'PYEOF' || exit 1
+mutate() {
+    python3 - "$1" "$2" <<'PYEOF' || exit 1
 import sys
-path = sys.argv[1]
+path, new = sys.argv[1], sys.argv[2] + "\n"
+old = "    int n_vis = (pos + 1) / cm;\n"
 with open(path, "r", encoding="utf-8") as f:
     src = f.read()
-old = "    int n_vis = mode == LZ_CSA2_FULL ? s->csa2_n_blocks[ci] : pos / cm;\n"
-new = "    int n_vis = s->csa2_n_blocks[ci];\n"
 if src.count(old) != 1:
     print("csa2_reindex_causality_gate: FAIL - mutation could not find "
           "exactly one copy of the n_vis line", file=sys.stderr)
     sys.exit(1)
-src = src.replace(old, new, 1)
 with open(path, "w", encoding="utf-8") as f:
-    f.write(src)
+    f.write(src.replace(old, new, 1))
 PYEOF
+}
 
-if grep -qF 'mode == LZ_CSA2_FULL ? s->csa2_n_blocks[ci] : pos / cm' "$W/mut/forward_csa2.c"; then
-    echo "csa2_reindex_causality_gate: FAIL - could not mutate forward_csa2.c" \
-         "($W/mut/forward_csa2.c still has the fixed n_vis line)"
-    exit 1
-fi
+mutate "$W/mut1/forward_csa2.c" '    int n_vis = (pos0 + nt) / cm;'
+mutate "$W/mut2/forward_csa2.c" '    int n_vis = pos / cm;'
+
+for d in mut1 mut2; do
+    if grep -qF "$NEEDLE" "$W/$d/forward_csa2.c"; then
+        echo "csa2_reindex_causality_gate: FAIL - could not mutate forward_csa2.c" \
+             "($W/$d/forward_csa2.c still has the fixed n_vis line)"
+        exit 1
+    fi
+done
 
 ENGX="err compat lfn json safetensors model ops ops_kernel ops_rope ops_moe ops_epi ops_quant ops_sched ops_matmul ops_t2_arm ops_arm ops_t2_scalar ops_norm ops_gdn ops_conv1d fwht forward forward_attn forward_moe forward_ssm forward_kda forward_engram forward_csa2 forward_mtp forward_rope forward_ckpt forward_state sampler generate lz_mathf lz_bf16 lz4d tokenizer unicode chat gbk cpucheck"
 ENGX_MMX="ops_mmx ops_mmx_sse ops_sse2"
@@ -115,6 +140,33 @@ build_and_run() {
     return $rc
 }
 
+# The probe's own total ok() call count. Every mutant here runs it to
+# completion (none crashes), so each must account for exactly this many
+# PASS+FAIL lines - a check that stopped running altogether would
+# otherwise be invisible against an expected-FAIL list that never names
+# it.
+PROBE_TOTAL_LINES=5
+
+# check_lines LOGFILE TAG PASS|FAIL LINE...
+check_lines() {
+    local logfile="$1" tag="$2" mode="$3"
+    shift 3
+    local line missing=0
+    for line in "$@"; do
+        grep -qF "$mode $line" "$logfile" || {
+            echo "csa2_reindex_causality_gate: FAIL - $tag did not turn $mode on: $line"
+            missing=1
+        }
+    done
+    return $missing
+}
+
+C1="c2/check1: the REINDEX layer's own k_eff is min(topk, (pos+1)/cm) for every token"
+C2="c2/check2: the FULL layer's own k_eff is min(topk, (pos+1)/cm) -"
+C3="c2/check3: every token's o_proj output is bit-identical between"
+C4="c2/check4: at cm==1 (the report's own uncompressed-main-KV special case,"
+C5="c2/check5: the same at cm==1 for a REINDEX layer,"
+
 RC=0
 
 echo "-- current tree (must PASS) --"
@@ -126,22 +178,58 @@ elif [ "$FIXED_RC" -ne 0 ]; then
     echo "csa2_reindex_causality_gate: FAIL - the current tree did not pass its own probe"
     RC=1
 fi
+if [ "$(grep -c '^PASS\|^FAIL' "$W/fixed/run.log")" != "$PROBE_TOTAL_LINES" ]; then
+    echo "csa2_reindex_causality_gate: FAIL - the current tree did not print all" \
+         "$PROBE_TOTAL_LINES lines the probe is expected to print"
+    RC=1
+fi
 
 echo ""
-echo "-- mutant: n_vis reverted to the shared/aliased counter read --"
-build_and_run "$W/mut" "the mutant (n_vis reverted)"
-MUT_RC=$?
-if [ "$MUT_RC" -eq 2 ]; then
+echo "-- mutant 1: n_vis is the chunk-end count, not this position's --"
+build_and_run "$W/mut1" "mutant 1 (chunk-end count)"
+MUT1_RC=$?
+if [ "$MUT1_RC" -eq 2 ]; then
     exit 1
-elif [ "$MUT_RC" -eq 0 ]; then
-    echo "csa2_reindex_causality_gate: FAIL - the mutant PASSED; the probe cannot see this defect"
+elif [ "$MUT1_RC" -eq 0 ]; then
+    echo "csa2_reindex_causality_gate: FAIL - mutant 1 PASSED; the probe cannot see this defect"
     RC=1
 else
-    if grep -qF "FAIL c2/check1:" "$W/mut/run.log" && grep -qF "FAIL c2/check2:" "$W/mut/run.log"; then
-        echo "-- mutant failed both checks, as expected --"
-    else
-        echo "csa2_reindex_causality_gate: FAIL - the mutant did not fail both checks"
+    missing=0
+    check_lines "$W/mut1/run.log" "mutant 1" "FAIL" "$C1" "$C2" "$C3" "$C4" "$C5" || missing=1
+    if [ "$(grep -c '^PASS\|^FAIL' "$W/mut1/run.log")" != "$PROBE_TOTAL_LINES" ]; then
+        echo "csa2_reindex_causality_gate: FAIL - mutant 1 did not print all" \
+             "$PROBE_TOTAL_LINES lines the probe normally prints"
+        missing=1
+    fi
+    if [ "$missing" -ne 0 ]; then
         RC=1
+    else
+        echo "-- mutant 1 failed every check, as expected --"
+    fi
+fi
+
+echo ""
+echo "-- mutant 2: n_vis one block tighter than the reference --"
+build_and_run "$W/mut2" "mutant 2 (one block tight)"
+MUT2_RC=$?
+if [ "$MUT2_RC" -eq 2 ]; then
+    exit 1
+elif [ "$MUT2_RC" -eq 0 ]; then
+    echo "csa2_reindex_causality_gate: FAIL - mutant 2 PASSED; the probe cannot see this defect"
+    RC=1
+else
+    missing=0
+    check_lines "$W/mut2/run.log" "mutant 2" "FAIL" "$C1" "$C2" "$C4" "$C5" || missing=1
+    check_lines "$W/mut2/run.log" "mutant 2" "PASS" "$C3" || missing=1
+    if [ "$(grep -c '^PASS\|^FAIL' "$W/mut2/run.log")" != "$PROBE_TOTAL_LINES" ]; then
+        echo "csa2_reindex_causality_gate: FAIL - mutant 2 did not print all" \
+             "$PROBE_TOTAL_LINES lines the probe normally prints"
+        missing=1
+    fi
+    if [ "$missing" -ne 0 ]; then
+        RC=1
+    else
+        echo "-- mutant 2 failed exactly the four boundary checks, leaving batch invariance green --"
     fi
 fi
 

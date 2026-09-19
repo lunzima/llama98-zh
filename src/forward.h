@@ -1299,13 +1299,12 @@ typedef struct {
          csa2_idx_comp_ring       (n_full, max_blocks,
                                    csa2_indexer_head_dim) - finalized
                                    indexer keys, same finalization point
-         csa2_n_blocks            (n_full,) how many entries of the two
-                                   rings above are actually finalized so
-                                   far for that layer - forward_csa2.c's
-                                   own "which blocks may this query see"
-                                   count, NOT max_blocks (most of the
-                                   ring is unwritten future capacity
-                                   until generation reaches it)
+
+       Neither ring carries a companion "how many entries are finalized"
+       counter: forward_csa2.c derives that bound from the position it
+       is working on, (pos + 1) / csa2_compress_m, which is the only
+       form a REINDEX layer sharing this state with its source can
+       safely use - see that file's own n_vis comment.
 
        max_blocks = ceil(seq_len / csa2_compress_m), the ring's fixed
        allocated depth - a flat array sized for the worst case, same
@@ -1316,7 +1315,6 @@ typedef struct {
     float *csa2_pending_c, *csa2_pending_z;
     float *csa2_pending_c_idx, *csa2_pending_z_idx;
     float *csa2_comp_ring, *csa2_idx_comp_ring;
-    int   *csa2_n_blocks;
     /* Per-token scratch, one layer/token at a time (forward_csa2.c
        cannot batch across a chunk's nt tokens the way ordinary
        attention does - see its own file comment), dedicated rather
@@ -1357,7 +1355,7 @@ typedef struct {
        left for its (aliased ci, tk) at the time its call runs.
        No accompanying csa2_topk_val_pub: the partial selection sort
        only ever needs the winning INDEX, never its score, once
-       selection is done - step 4 recomputes the dot product fresh from
+       selection is done - step 5 recomputes the dot product fresh from
        s->qh against the ring entry instead of trusting a stored score.
        Its pre-rename predecessor, csa2_topk_val, was never written for
        the same reason and was removed along with the rename rather

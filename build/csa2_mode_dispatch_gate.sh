@@ -27,28 +27,36 @@
 # own - this file's own history is the record of both rounds; it is not
 # rewritten to look like it was designed in one pass, because it was not.
 #
-#   MUTATION 1, "dispatch reverted": the three csa2_mode guards this
-#   task adds (step 2's `if (mode == LZ_CSA2_FULL)`, step 3's
-#   `if (mode != LZ_CSA2_REUSE)`, step 6's `... && mode == LZ_CSA2_FULL`)
-#   are each replaced with an always-true condition, in a scratch copy -
-#   every csa2_on layer runs the pre-this-task, unconditional six-step
-#   body again, regardless of what L->csa2_mode says. Expected fallout,
-#   verified against build/csa2_mode_dispatch_probe.c's ACTUAL current
-#   check list (the exact set below, not a shape assumed from the code
+#   MUTATION 1, "dispatch reverted": the three csa2_mode guards in
+#   forward_csa2.c - step 2's FULL-only `if (mode == LZ_CSA2_FULL)`,
+#   step 3's finalize guard `if (off == cm - 1 && mode ==
+#   LZ_CSA2_FULL)`, and step 4's REUSE-skip `if (mode !=
+#   LZ_CSA2_REUSE)` - are each replaced with an always-true condition,
+#   in a scratch copy. Every csa2_on layer then runs the unconditional
+#   six-step body, regardless of what L->csa2_mode says. Expected
+#   fallout, read off this probe's own filtered OUTPUT under the
+#   mutation (build/csa2_mode_dispatch_probe.c's ACTUAL current check
+#   list - the exact set below, not a shape assumed from the code
 #   alone):
 #     STAY PASS - every Full-only check (1a, 1b), check_chain's cache-
-#       idx-shared and layer-A-own-growth and layer-B-selection-differs
-#       lines, check2's A-untouched line, all three check_ci_
-#       independence lines (A and D are both Full, already unconditional
-#       either way), check4a, and check4b's own published-k_eff line.
-#     TURN FAIL - check_chain's two REINDEX/REUSE-specific lines, both
-#       of check2's B/C-changed lines, both of check3a's lines, check5,
-#       and check4b's attn_out and published-index-set lines - a
-#       REINDEX layer now also runs steps 2/6 with WRONG-but-present
-#       tensors (build_layer_reindex's own comment on why REINDEX is
-#       given a full tensor set), corrupting the shared ring/pending
-#       state its aliased ci shares with its source, and kv_in is read
-#       again for D2.
+#       idx-shared, layer-A-own-growth, layer-B-k_eff-growth and
+#       layer-B-selection-differs lines, check2's A-untouched line and
+#       its B-changed line (B's attn_out still depends on B's OWN
+#       indexer weights under any dispatch, so that line tests the
+#       fixture's sensitivity rather than the dispatch, and rightly
+#       stays green), all three check_ci_independence lines (A and D
+#       are both Full, already unconditional either way), check5,
+#       check4a, and check4b's own published-k_eff line.
+#     TURN FAIL - check_chain's "after layer C's call" line, check2's
+#       C-changed line, both of check3a's lines, and check4b's attn_out
+#       and published-index-set lines - a REINDEX layer now also runs
+#       steps 2/3 with WRONG-but-present tensors (build_layer_reindex's
+#       own comment on why REINDEX is given a full tensor set),
+#       corrupting the shared ring/pending state its aliased ci shares
+#       with its source, and kv_in is read again for D2.
+#       n_vis is NOT among the lines this reaches: it is a direct
+#       per-position (pos + 1) / cm computation, which does not live
+#       inside any of the three conditions patched here.
 #     CRASHES right after check4b's own three lines, before check3b
 #       ever prints anything: check3b's own C layer
 #       (build_layer_reuse_strict) has NO tensors to run FULL's steps
@@ -74,26 +82,22 @@
 #   addressing into it. This targets a narrower, specific claim than
 #   mutation 1: not "does mode dispatch happen at all", but "does the
 #   publish buffer need a per-TOKEN dimension, or would per-ci alone
-#   have sufficed". Expected fallout, verified empirically against this
-#   exact probe rather than assumed (a token's own attn_out is
-#   overwritten by the next token within the same call, so only the
-#   LAST token of any call is ever externally inspectable again - and
-#   the last token's own published slot is, by construction, always
-#   "the last write" under EITHER addressing scheme, which is why
-#   check5's batch-vs-unbatched attn_out comparison, despite being
-#   genuinely useful against mutation 1, turns out to be structurally
-#   blind to this specific one and correctly stays PASS here):
+#   have sufficed". Expected fallout, read off this probe's own run
+#   under the mutation rather than assumed:
 #     - check_chain_soft's two DIRECT publish-buffer reads turn FAIL -
-#       "layer A's own published k_eff grows 0,1,2 across the chunk"
-#       (A's own tk=0/1 writes are overwritten by tk=1/2's, landing all
-#       three in the same physical slot) and "layer B (reindex) sees
-#       enough of A's already-finalized blocks ... for every token of
-#       its own loop" (same collapse, one layer downstream).
+#       "layer A's own published k_eff grows 1,2,2,2(=topk) across the
+#       chunk" (A's own tk=0/1/2 writes all land in the same physical
+#       slot, so only the last one survives) and "layer B (reindex)
+#       k_eff grows 1,2,2,2 across its own chunk" (same collapse, one
+#       layer downstream).
 #     - check1b's own two published-buffer match assertions ALSO turn
 #       FAIL: they are not Reindex/Reuse-specific (check1b is a single
 #       FULL-mode layer), but they specifically compare batched vs
 #       unbatched PUBLISHED CONTENT token for token, which this
 #       mutation breaks even for Full-only.
+#     - check5 turns FAIL too: under per-ci addressing a REUSE layer
+#       reads whichever token wrote that one slot LAST, so a 3-token
+#       nt=3 call and three nt=1 calls no longer agree on every token.
 #     - every other check, including check_ci_independence (a DIFFERENT
 #       collapse - across ci, not across tk within one ci - see mutation
 #       3 below), stays PASS.
@@ -414,15 +418,15 @@ check_lines() {
 
 # The probe's own total ok() call count, unaffected by any mutation
 # that does not crash it outright - matches mutant 2's own
-# STAY_PASS+TURN_FAIL array lengths further down (40 entries combined),
-# verified by direct count when those arrays were last written, not
-# re-derived here since bash arrays are not yet in scope this early in
-# the script. Mutants 3-6 run the probe to completion (never crash) and
-# so must each account for exactly this many PASS+FAIL lines, same
-# reasoning as mutant 2's own total-count assertion; mutant 1 crashes
-# before check3b and declares its own, smaller total instead (its own
-# comment has the count).
-PROBE_TOTAL_LINES=40
+# STAY_PASS+TURN_FAIL array lengths further down (41 entries combined),
+# counted off the control run's own output rather than derived, since
+# bash arrays are not yet in scope this early in the script. Mutants
+# 3-6 run the probe to completion (never crash) and so must each
+# account for exactly this many PASS+FAIL lines, same reasoning as
+# mutant 2's own total-count assertion; mutant 1 crashes before check3b
+# and declares its own, smaller total instead (its own comment has the
+# count).
+PROBE_TOTAL_LINES=41
 
 echo "-- current tree (must PASS) --"
 build_and_run "$W/fixed" "the current (fixed) tree"
@@ -444,36 +448,29 @@ elif [ "$MUT1_RC" -eq 0 ]; then
     echo "csa2_mode_dispatch_gate: FAIL - mutant 1 PASSED; the probe cannot see this defect"
     RC=1
 else
-    # STAY_PASS/TURN_FAIL below are re-verified empirically against this
-    # exact probe after the C2 fix (report Sec2.3.1 mode-dispatch task's
-    # fifth review round), not carried over unread: that fix made a
-    # REINDEX/REUSE layer's own n_vis a direct pos/cm computation (see
-    # forward_csa2.c's own comment on that line), which does not live
-    # inside any of the three `if (mode == ...)` conditions this mutant
-    # patches - so "layer B sees only strictly earlier positions" and
-    # its own k_eff-growth sequence are NOW STRUCTURALLY UNABLE to
-    # detect this mutation (measured, not assumed: both stayed PASS
-    # under the mutated dispatch). check2's own B/C-attn_out-changed
-    # pair and check5's own batch-vs-unbatched line swap sides for the
-    # same underlying reason - the corrupted shared ring state this
-    # mutant produces interacts with the fixed n_vis formula
-    # differently than it did with the old shared-counter read. What
-    # still catches this mutant: the "untouched by C" publish-buffer
-    # check (C now overwrites it, since its own step 3 guard is also
-    # patched), check2/check3a's attn_out-changes assertions, and
-    # check4b's kv_in-independence pair, plus the same check3b crash as
-    # before.
+    # STAY_PASS/TURN_FAIL are this mutation's ACTUAL PASS/FAIL split,
+    # measured against the probe rather than assumed from the code.
+    # The one asymmetry worth naming: the "check_chain: layer B
+    # (reindex) k_eff grows ..." line CANNOT detect this mutation,
+    # because n_vis is a per-position (pos + 1) / cm computation that
+    # does not live inside any of the three `if (mode == ...)`
+    # conditions patched here. What does catch it is the "untouched by
+    # C" publish-buffer line (C overwrites it, since its own guard is
+    # patched too), check2's C-changed line, check3a's pair, and
+    # check4b's kv_in-independence pair - plus the check3b crash below.
     STAY_PASS=(
-        "check1a: first-ever token's published k_eff is 0"
-        "check1a: k_eff==0 token's attn_out is the exact zero vector"
+        "check1a: at cm=2, the first-ever token's published k_eff is 0"
+        "check1a: that k_eff==0 token's attn_out is the exact zero vector"
+        "check1a: at cm=1, the first-ever token sees exactly the one block it just closed - k_eff 1, selecting block 0 (the block holding its own position)"
         "check1b: batch-vs-unbatched - published k_eff matches token for token"
         "check1b: batch-vs-unbatched - published Top-K indices match token for token"
         "check1b: batch-vs-unbatched - last token's attn_out is bit-identical"
         "check_chain: all three layers share the same physical ci (cache_idx aliasing from the prior task still holds)"
-        "check_chain: layer A's own published k_eff grows 0,1,2,2(=topk) across the chunk"
-        "check_chain: layer B (reindex) sees only STRICTLY EARLIER positions' already-finalized blocks - k_eff grows 0,1,2,2 across its own chunk exactly like layer A's, not a constant leaked in from A's already-finished call"
+        "check_chain: layer A's own published k_eff grows 1,2,2,2(=topk) across the chunk"
+        "check_chain: layer B (reindex) k_eff grows 1,2,2,2 across its own chunk - the per-position (pos + 1)/cm bound, exactly like layer A's, not a constant leaked in from A's already-finished call"
         "check_chain: layer B's own Top-K selection is not identical across all four of its own tokens"
         "check2: layer A's own attn_out is untouched by a change to layer B's (unrelated) indexer weights"
+        "check2: perturbing layer B's own indexer weights changes layer B's own attn_out"
         "check5: layer C's (reuse) o_proj output for EVERY token of a 3-token chunk processed as one nt=3 call per layer is bit-identical to the same 3 positions processed one at a time (nt=1, layer-major per position) - not merely the chunk's last token"
         "check_ci_independence: two independent FULL layers get MUTUALLY DISTINCT ci (no accidental aliasing between them)"
         "check_ci_independence: the reuse layer's ci is aliased to its own declared source (A), not to the unrelated FULL layer (D)"
@@ -483,7 +480,6 @@ else
     )
     TURN_FAIL=(
         "check_chain: after layer C's (reuse) call, all four tokens' published Top-K selections are still exactly layer B's own"
-        "check2: perturbing layer B's own indexer weights changes layer B's own attn_out"
         "check2: perturbing layer B's own indexer weights ALSO changes layer C's attn_out (C reads whatever B's own call left in their shared ci slot)"
         "check3a: perturbing layer A's compression weights changes layer B's attn_out"
         "check3a: perturbing layer A's compression weights also changes layer C's attn_out"
@@ -504,11 +500,12 @@ else
              "should have crashed there instead (see this script's own header comment)"
         missing=1
     fi
-    # Total-count assertion (Minor-4, sixth review round), same idiom
-    # mutants 3-6 use: STAY_PASS+TURN_FAIL here is not the probe's full
-    # 40 lines - mutant 1 crashes before check3b ever prints, so its own
-    # declared total (23 lines) is what a line vanishing outright (never
-    # printed as either PASS or FAIL) would be invisible against.
+    # Total-count assertion, same idiom mutants 3-6 use below. Mutant 1
+    # crashes before check3b ever prints, so STAY_PASS+TURN_FAIL here is
+    # not the probe's full line count - the two arrays' own combined
+    # length (24) is the only thing that would notice a line vanishing
+    # outright, i.e. never printed as either PASS or FAIL. It also
+    # re-checks the split: 18 PASS + 6 FAIL is what the crash leaves.
     if [ "$(grep -c '^PASS\|^FAIL' "$W/mut1/run.log")" != "$((${#STAY_PASS[@]} + ${#TURN_FAIL[@]}))" ]; then
         echo "csa2_mode_dispatch_gate: FAIL - mutant 1's own STAY_PASS+TURN_FAIL" \
              "($((${#STAY_PASS[@]} + ${#TURN_FAIL[@]})) lines) does not account for" \
@@ -533,8 +530,9 @@ elif [ "$MUT2_RC" -eq 0 ]; then
     RC=1
 else
     STAY_PASS=(
-        "check1a: first-ever token's published k_eff is 0"
-        "check1a: k_eff==0 token's attn_out is the exact zero vector"
+        "check1a: at cm=2, the first-ever token's published k_eff is 0"
+        "check1a: that k_eff==0 token's attn_out is the exact zero vector"
+        "check1a: at cm=1, the first-ever token sees exactly the one block it just closed - k_eff 1, selecting block 0 (the block holding its own position)"
         "check1b: batch-vs-unbatched - last token's attn_out is bit-identical"
         "check_chain: all three layers share the same physical ci (cache_idx aliasing from the prior task still holds)"
         "check_chain: layer B's own Top-K selection is not identical across all four of its own tokens"
@@ -572,8 +570,8 @@ else
     TURN_FAIL=(
         "check1b: batch-vs-unbatched - published k_eff matches token for token"
         "check1b: batch-vs-unbatched - published Top-K indices match token for token"
-        "check_chain: layer A's own published k_eff grows 0,1,2,2(=topk) across the chunk"
-        "check_chain: layer B (reindex) sees only STRICTLY EARLIER positions' already-finalized blocks - k_eff grows 0,1,2,2 across its own chunk exactly like layer A's, not a constant leaked in from A's already-finished call"
+        "check_chain: layer A's own published k_eff grows 1,2,2,2(=topk) across the chunk"
+        "check_chain: layer B (reindex) k_eff grows 1,2,2,2 across its own chunk - the per-position (pos + 1)/cm bound, exactly like layer A's, not a constant leaked in from A's already-finished call"
         "check5: layer C's (reuse) o_proj output for EVERY token of a 3-token chunk processed as one nt=3 call per layer is bit-identical to the same 3 positions processed one at a time (nt=1, layer-major per position) - not merely the chunk's last token"
     )
     missing=0
@@ -581,12 +579,11 @@ else
     check_lines "$W/mut2/run.log" "mutant 2" "FAIL" "${TURN_FAIL[@]}" || missing=1
     # Total-count assertion, same idiom mutant 3/4/5/6 already use below -
     # STAY_PASS+TURN_FAIL above must be EVERY line the probe can print,
-    # not just the ones this mutation was originally written against.
-    # Missing this let mutant 2's own overflow-guard/bin-validation/F9
-    # lines (16 of the probe's 40 total) go unlisted in EITHER array,
-    # invisible to a FUTURE change that made any of them turn FAIL under
-    # this mutation - they all currently stay PASS (this mutation never
-    # touches model.c), which is why they are all in STAY_PASS now.
+    # not just the ones this mutation is most obviously about. A line
+    # that is in NEITHER array is invisible to a future change that made
+    # it turn FAIL under this mutation, which is why the overflow-guard/
+    # bin-validation/F9 lines are all in STAY_PASS too: this mutation
+    # never touches model.c or forward_state.c, so they all stay PASS.
     TOTAL=$((${#STAY_PASS[@]} + ${#TURN_FAIL[@]}))
     if [ "$(grep -c '^PASS\|^FAIL' "$W/mut2/run.log")" != "$TOTAL" ]; then
         echo "csa2_mode_dispatch_gate: FAIL - mutant 2's own STAY_PASS+TURN_FAIL" \

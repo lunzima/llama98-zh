@@ -34,10 +34,13 @@
    SEPARATE layer's own call for the same token:
      1. main query (q_proj/q_norm/RoPE)       - every mode
      2. own pending-block contribution         - FULL only
-     3. indexer query + Top-K selection        - FULL, REINDEX
-     4. attention over the k_eff selected      - every mode
-     5. output gate + o_proj                   - every mode
-     6. finalize this position's block         - FULL only
+     3. finalize this position's block         - FULL only
+     4. indexer query + Top-K selection        - FULL, REINDEX
+     5. attention over the k_eff selected      - every mode
+     6. output gate + o_proj                   - every mode
+   Finalization sits at 3, ahead of the indexer, because a block is
+   visible to the query standing on its own last token - step 3's own
+   comment and the n_vis declaration's have the argument.
 
    SCALAR REFERENCE: a new mechanism in this engine lands a scalar
    reference first and gets SIMD kernels in a later, separate phase -
@@ -57,9 +60,8 @@
        function always reads L->csa2_w_dq_idx, unlike the training-side
        reference, which reuses q_proj.down when S4 already converted it.
      - Incremental cache checkpoint/restore (LZStateCkpt) - CSA2's own
-       ring state (csa2_pending_c and friends, csa2_comp_ring,
-       csa2_n_blocks) is not included in a checkpoint's saved fields;
-       speculative decode
+       ring state (csa2_pending_c and friends, csa2_comp_ring) is not
+       included in a checkpoint's saved fields; speculative decode
        rollback (--spec) is therefore not yet correct on a csa2_on
        layer and is out of scope for this pass, same as SIMD. */
 void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
@@ -111,35 +113,46 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
         const float *h = s->xb + (size_t)tk * hdim;
         int *tok_idx = pub_idx_base + (size_t)tk * topk;
         int *tok_n = pub_n_base + tk;
-        /* FULL reads its own persisted s->csa2_n_blocks[ci], which step 6
-           below updates to blk+1 the instant THIS SAME call finalizes a
-           block - so at any tk within a batched nt>1 call it already
-           holds exactly pos/cm (the last finalize was for a pos strictly
-           before this one, in this same loop or an earlier call).
-           REINDEX cannot read that: its ci is ALIASED (forward_state.c's
-           cache_idx fill) onto its source's SAME physical slot, and its
-           source's call for this whole chunk already ran to completion,
-           top to bottom, before this call started (forward.c dispatches
-           layers in increasing order) - so by the time THIS loop reaches
-           tk=0, s->csa2_n_blocks[ci] already holds the count as of the
-           SOURCE's last token, not as of this token. Reading it here
-           would leak every block the source finished on LATER tokens of
-           the same chunk into an earlier token's query - the causal
-           violation report Sec2.3.1's "Reindex Mode ... identical
-           positional and causal masking logic" rules out. pos/cm is the
-           same quantity FULL's counter tracks, computed directly instead
-           of through state that only FULL's own step 6 keeps current.
+        /* How many compressed blocks this position may attend to. A
+           block becomes visible once the query has PASSED ITS LAST
+           TOKEN, which for a 0-indexed pos is (pos + 1) / cm: the
+           block containing pos is visible exactly on that block's own
+           last raw position (off == cm - 1) and not one step earlier.
+           That is the reference implementation's own compress_lens -
+           (arange(1, seqlen+1) // ratio) while prefilling, end_pos //
+           ratio while decoding, .prof/dsv41_ref/model.py 564 and 567 in
+           the training tree - and engine/csa2.py's own
+           csa2_causal_block_mask mirrors it there.
 
-           REUSE's own n_vis, computed the same way here, is DEAD: step 3
-           below skips REUSE entirely (`if (mode != LZ_CSA2_REUSE)`), so
-           this value is never read for it - REUSE's causal correctness
-           comes entirely from whatever its source already published into
-           the shared (ci, tk) slot, not from anything computed in its
-           own call. The ternary does not special-case REUSE separately
-           from REINDEX only because doing so would need a third arm for
-           a value nothing downstream ever uses - not because REUSE's own
-           n_vis means anything. */
-        int n_vis = mode == LZ_CSA2_FULL ? s->csa2_n_blocks[ci] : pos / cm;
+           ONE FORMULA, EVERY MODE, which is what step 3's position in
+           this loop buys: finalization runs BEFORE the indexer reads
+           the ring, so wherever n_vis is used, entries 0..n_vis-1 of
+           ring/ring_idx are all written -
+             FULL     wrote the newest of them itself, in step 3 a few
+                      lines down, this same iteration;
+             REINDEX  reads a ring its (aliased - forward_state.c's
+                      cache_idx fill) source's ENTIRE call already
+                      filled for every token of this chunk, since
+                      forward.c dispatches layers in increasing order.
+                      That ring therefore also holds blocks belonging to
+                      LATER positions, and n_vis - not the ring's
+                      contents - is the only thing keeping this query
+                      out of them, which is why it has to be a per-
+                      POSITION formula and never a count carried in
+                      state shared with the source ("Reindex Mode ...
+                      identical positional and causal masking logic",
+                      report Sec2.3.1);
+             REUSE    never reads it at all - step 4 skips REUSE
+                      entirely - and takes its causal correctness from
+                      whatever its source published into the shared
+                      (ci, tk) slot.
+           cm == 1 is the report's own named special case (SS2.3's
+           "uncompressed main KV ... as a special case with a compression
+           ratio of 1", which is what the reference's whole decoder half
+           runs): n_vis is then pos + 1, every block holds exactly one
+           raw position, and this degenerates into ordinary causal
+           attention where a query sees its own position. */
+        int n_vis = (pos + 1) / cm;
         int k_eff;
         int hh;
 
@@ -160,7 +173,7 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
            this token's o_proj output has not been written yet.
 
            Every mode runs this step unchanged - Reindex/Reuse still
-           need their own query to attend with in step 4 below, even
+           need their own query to attend with in step 5 below, even
            when they compute none of their own K/V. */
         if (c->use_subn) {
             float *qin = s->xb2 + (size_t)tk * hdim;
@@ -181,7 +194,7 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
         /* ---- 2. this position's own raw contribution to the block
            that is still open (csa2_compress's per-token half - the
            softmax/weighted-sum half only runs once the block closes,
-           step 6 below).
+           step 3 directly below).
 
            FULL ONLY. A Reindex/Reuse layer's ci is ALIASED to its
            source's (forward_state.c's cache_idx fill) - if it also ran
@@ -218,20 +231,100 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
             memcpy(pend_z_idx + (size_t)off * idx_hd, s->csa2_z_j_idx, (size_t)idx_hd * sizeof(float));
         }
 
-        /* ---- 3. indexer query + Eq 1's score, over exactly the
-           n_vis blocks finalized by STRICTLY EARLIER positions - n_vis
-           was computed above as pos/cm (mode-dependent - see that
-           declaration's own comment for why FULL and REINDEX/REUSE
-           cannot share one read), so a query can never see the block it
-           is itself inside (this file's own header comment's causality
-           argument, engine/csa2.py's csa2_causal_block_mask mirrored
-           without needing an explicit mask tensor). For FULL this also
-           equals "nothing in the ring past index n_vis-1 yet", since
-           its own step 6 is what fills the ring in the first place; for
-           REINDEX the ring already holds every block the source will
-           EVER finalize for this chunk (the source's whole call already
-           ran), so it is n_vis - not the ring's contents - that is the
-           only thing enforcing causality here.
+        /* ---- 3. finalize this position's block if it just completed
+           one (csa2_compress's softmax/weighted-sum half). Main KV
+           gets RMSNorm (k_norm, reused - both are exactly head_dim
+           wide, arXiv:2606.19348 SS2.3.3) + RoPE at the block's nominal
+           position (its own last raw position - engine/csa2.py's
+           csa2_block_positions has the same choice and the same
+           reasoning). Indexer keys get NEITHER, matching
+           engine/csa2.py's own K_idx (Eq 1 does not call for either on
+           the indexer side).
+
+           AHEAD OF THE INDEXER, not after o_proj, and that is what lets
+           n_vis above be one mode-independent formula: on a block's own
+           last token the query already counts that block as visible, so
+           step 4 below has to find ring[blk]/ring_idx[blk] written by
+           the time it scores them. Moving it here is safe because
+           finalization reads only pend_c/pend_z/pend_c_idx/pend_z_idx -
+           this position's own contribution, written by step 2 directly
+           above, plus the preceding cm-1 positions' from earlier
+           iterations of this same loop or an earlier chunk - and
+           produces nothing but ring[blk]/ring_idx[blk], a slot that was
+           unwritten future capacity until now. Nothing it touches is
+           produced by steps 4-6, and nothing it writes was read by them
+           beforehand.
+
+           FULL ONLY, same reasoning as step 2: a Reindex/Reuse layer's
+           aliased ci would double-finalize a block its source is also
+           finalizing - and, since Reindex/Reuse never ran step 2 above,
+           it would finalize from pend_c/pend_z it never wrote for THIS
+           token, corrupting the source's own still-open block with a
+           stale or zero contribution. */
+        if (off == cm - 1 && mode == LZ_CSA2_FULL) {
+            int j, d;
+            /* csa2_c_j/csa2_c_j_idx are dead by now - their only use
+               this iteration was step 2's copy into pend_c/pend_c_idx
+               immediately above - so they double as this block's
+               finalized-sum scratch instead of adding two more
+               allocations sized identically to ones that already
+               exist. */
+            float *sum_c = s->csa2_c_j;
+            float *sum_c_idx = s->csa2_c_j_idx;
+            float maxv, denom;
+            /* main KV: softmax over the cm pending gate logits, per
+               output dim independently (arXiv:2606.19348 Eq 11's
+               Softmax_row is across the m raw positions, for EACH of
+               the c output dims separately - not a single scalar
+               weight per position). */
+            for (d = 0; d < hd; d++) {
+                maxv = pend_z[d];
+                for (j = 1; j < cm; j++)
+                    if (pend_z[(size_t)j * hd + d] > maxv) maxv = pend_z[(size_t)j * hd + d];
+                denom = 0.0f;
+                for (j = 0; j < cm; j++) {
+                    float e = lz_exp(pend_z[(size_t)j * hd + d] - maxv);
+                    pend_z[(size_t)j * hd + d] = e;   /* reuse as the un-normalized weight */
+                    denom += e;
+                }
+                sum_c[d] = 0.0f;
+                for (j = 0; j < cm; j++)
+                    sum_c[d] += (pend_z[(size_t)j * hd + d] / denom) * pend_c[(size_t)j * hd + d];
+            }
+            lz_rmsnorm(ring + (size_t)blk * hd, sum_c,
+                      lz_t_f32(&L->k_norm, s->wscr), hd, rms_eps);
+            lz_rope(ring + (size_t)blk * hd, 1, hd, rotary_dim, pos, s->rope_cs);
+
+            for (d = 0; d < idx_hd; d++) {
+                maxv = pend_z_idx[d];
+                for (j = 1; j < cm; j++)
+                    if (pend_z_idx[(size_t)j * idx_hd + d] > maxv) maxv = pend_z_idx[(size_t)j * idx_hd + d];
+                denom = 0.0f;
+                for (j = 0; j < cm; j++) {
+                    float e = lz_exp(pend_z_idx[(size_t)j * idx_hd + d] - maxv);
+                    pend_z_idx[(size_t)j * idx_hd + d] = e;
+                    denom += e;
+                }
+                sum_c_idx[d] = 0.0f;
+                for (j = 0; j < cm; j++)
+                    sum_c_idx[d] += (pend_z_idx[(size_t)j * idx_hd + d] / denom) * pend_c_idx[(size_t)j * idx_hd + d];
+            }
+            memcpy(ring_idx + (size_t)blk * idx_hd, sum_c_idx, (size_t)idx_hd * sizeof(float));
+        }
+
+        /* ---- 4. indexer query + Eq 1's score, over exactly the
+           n_vis blocks this position may see - n_vis was computed
+           above as (pos + 1) / cm, one formula for every mode (see that
+           declaration's own comment for the boundary and the reference
+           it comes from), so a query CAN see the block it is itself
+           inside, but only from that block's own last raw position
+           onward, and never a block that closes later. Every one of
+           those n_vis entries is present in the ring by now: step 3
+           above just wrote the newest one for FULL, and for REINDEX the
+           ring already holds every block its source will EVER finalize
+           for this chunk - so for REINDEX it is n_vis, not the ring's
+           contents, that is the only thing enforcing causality here.
+           No mask tensor is needed either way; the bound IS the mask.
 
            FULL and REINDEX: both compute their OWN fresh query/score/
            selection here, against the shared ring_idx - Reindex reads
@@ -239,7 +332,7 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
            free (no new state), but the selection itself uses THIS
            layer's own csa2_w_dq_idx/csa2_w_uq_idx/csa2_w_weights, which
            can and does differ from its source's. The result is
-           published into this (ci, tk)'s slot for step 4 below to read
+           published into this (ci, tk)'s slot for step 5 below to read
            - and, for a downstream REUSE layer sourced from THIS one,
            for that layer's own eventual call to read too.
 
@@ -307,19 +400,22 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
             k_eff = *tok_n;
         }
 
-        /* ---- 4. shared-K=V MQA core attention (arXiv:2606.19348
+        /* ---- 5. shared-K=V MQA core attention (arXiv:2606.19348
            Eq 19: each selected compressed entry serves as BOTH key and
            value) over the k_eff selected entries. Zero output when
-           k_eff is 0 (this token's own block is still the very first
-           one open - nothing causal to attend to via CSA2 yet, same
-           "no legitimate contribution" case engine/csa2.py's own
-           nan_to_num sites exist for; here there is simply no NaN to
-           begin with, since the loop below never runs).
+           k_eff is 0, which at cm > 1 is every position before the
+           first block closes - nothing causal to attend to via CSA2
+           yet, the same "no legitimate contribution" case
+           engine/csa2.py's own nan_to_num sites exist for; here there
+           is simply no NaN to begin with, since the loop below never
+           runs. At cm == 1 no position is ever in that case: every
+           position closes its own block in step 3 and then attends to
+           at least that one.
 
            Every mode runs this unchanged, reading tok_idx - for FULL/
-           REINDEX this is what step 3 just wrote a few lines up; for
+           REINDEX this is what step 4 just wrote a few lines up; for
            REUSE it is whatever was already published there, which
-           step 3's else-branch just read k_eff back out of (same
+           step 4's else-branch just read k_eff back out of (same
            pointer, same (ci, tk) slot - no mode branch needed here). */
         if (k_eff > 0) {
             for (hh = 0; hh < nh; hh++) {
@@ -352,7 +448,7 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
             memset(s->attn_out, 0, (size_t)qd * sizeof(float));
         }
 
-        /* ---- 5. output gate (q_proj's own second half, same
+        /* ---- 6. output gate (q_proj's own second half, same
            convention as forward_attn.c) + o_proj -> this layer's
            residual contribution.
 
@@ -376,73 +472,5 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
                        lz_t_f32(&L->attn_o_subn_norm, s->wscr), qd, rms_eps);
         lz_matmul_w(s->xb2 + (size_t)tk * hdim, s->attn_out, &L->o_proj,
                    qd, hdim, s->xq, s->xqs);
-
-        /* ---- 6. finalize this position's block if it just completed
-           one (csa2_compress's softmax/weighted-sum half). Main KV
-           gets RMSNorm (k_norm, reused - both are exactly head_dim
-           wide, arXiv:2606.19348 SS2.3.3) + RoPE at the block's nominal
-           position (its own last raw position - engine/csa2.py's
-           csa2_block_positions has the same choice and the same
-           reasoning). Indexer keys get NEITHER, matching
-           engine/csa2.py's own K_idx (Eq 1 does not call for either on
-           the indexer side).
-
-           FULL ONLY, same reasoning as step 2: a Reindex/Reuse layer's
-           aliased ci would double-finalize a block its source is also
-           finalizing - and, since Reindex/Reuse never ran step 2 above,
-           it would finalize from pend_c/pend_z it never wrote for THIS
-           token, corrupting the source's own still-open block with a
-           stale or zero contribution. */
-        if (off == cm - 1 && mode == LZ_CSA2_FULL) {
-            int j, d;
-            /* csa2_c_j/csa2_c_j_idx are dead by now - their only use
-               this iteration was step 2's copy into pend_c/pend_c_idx
-               above - so they double as this block's finalized-sum
-               scratch instead of adding two more allocations sized
-               identically to ones that already exist. */
-            float *sum_c = s->csa2_c_j;
-            float *sum_c_idx = s->csa2_c_j_idx;
-            float maxv, denom;
-            /* main KV: softmax over the cm pending gate logits, per
-               output dim independently (arXiv:2606.19348 Eq 11's
-               Softmax_row is across the m raw positions, for EACH of
-               the c output dims separately - not a single scalar
-               weight per position). */
-            for (d = 0; d < hd; d++) {
-                maxv = pend_z[d];
-                for (j = 1; j < cm; j++)
-                    if (pend_z[(size_t)j * hd + d] > maxv) maxv = pend_z[(size_t)j * hd + d];
-                denom = 0.0f;
-                for (j = 0; j < cm; j++) {
-                    float e = lz_exp(pend_z[(size_t)j * hd + d] - maxv);
-                    pend_z[(size_t)j * hd + d] = e;   /* reuse as the un-normalized weight */
-                    denom += e;
-                }
-                sum_c[d] = 0.0f;
-                for (j = 0; j < cm; j++)
-                    sum_c[d] += (pend_z[(size_t)j * hd + d] / denom) * pend_c[(size_t)j * hd + d];
-            }
-            lz_rmsnorm(ring + (size_t)blk * hd, sum_c,
-                      lz_t_f32(&L->k_norm, s->wscr), hd, rms_eps);
-            lz_rope(ring + (size_t)blk * hd, 1, hd, rotary_dim, pos, s->rope_cs);
-
-            for (d = 0; d < idx_hd; d++) {
-                maxv = pend_z_idx[d];
-                for (j = 1; j < cm; j++)
-                    if (pend_z_idx[(size_t)j * idx_hd + d] > maxv) maxv = pend_z_idx[(size_t)j * idx_hd + d];
-                denom = 0.0f;
-                for (j = 0; j < cm; j++) {
-                    float e = lz_exp(pend_z_idx[(size_t)j * idx_hd + d] - maxv);
-                    pend_z_idx[(size_t)j * idx_hd + d] = e;
-                    denom += e;
-                }
-                sum_c_idx[d] = 0.0f;
-                for (j = 0; j < cm; j++)
-                    sum_c_idx[d] += (pend_z_idx[(size_t)j * idx_hd + d] / denom) * pend_c_idx[(size_t)j * idx_hd + d];
-            }
-            memcpy(ring_idx + (size_t)blk * idx_hd, sum_c_idx, (size_t)idx_hd * sizeof(float));
-
-            s->csa2_n_blocks[ci] = blk + 1;
-        }
     }
 }

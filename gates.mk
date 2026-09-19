@@ -453,18 +453,24 @@ csa2-mode-dispatch-gate:
 csa2-last-writer-bin-gate:
 	@$(call GATE_OK,build/csa2_last_writer_bin_gate.sh)
 
-# C2 (fifth review round): a REINDEX layer's n_vis read the shared/
-# aliased csa2_n_blocks[ci] counter - already at floor(chunk_end/cm) by
-# the time its own call started, since its source's whole call already
-# finished - instead of pos/cm, leaking causal information from later
-# positions of the same chunk into an earlier one's query (REUSE's own
-# n_vis is dead code - own probe's header comment has the reasoning).
-# Own probe's header has the full argument and why it reads s->xb2
-# rather than s->attn_out (attn_out is structurally blind to anything
-# but a chunk's last token). No model dir needed - builds its own hand-
-# crafted LZModel/LZRunState fixture with real synthetic weights and
-# calls the real forward_csa2() directly, same posture as csa2-mode-
-# dispatch-gate above.
+# forward_csa2.c's causal block-visibility bound - the single
+# `int n_vis = (pos + 1) / cm;` line saying which compressed blocks a
+# query at position pos may score. The bound is the reference
+# implementation's own compress_lens (.prof/dsv41_ref/model.py:564 for
+# prefill, :567 for decode, in the TRAINING tree at E:\LLM\llama98-zh -
+# "a block becomes visible once the query has passed its last token"),
+# which is why it is a per-POSITION formula and never a count carried in
+# shared state: a REINDEX layer's ci is aliased onto a source whose own
+# call already finished, so a counter read from that state hands an
+# early token of the chunk every block its source finalized later.
+# Own script's header has the two mutations of that one line (the
+# chunk-end count, and one block tight) and each one's expected fallout;
+# own probe's header has the boundary and why it reads s->xb2 rather
+# than s->attn_out (attn_out is structurally blind to anything but a
+# chunk's last token). No model dir needed - builds its own hand-crafted
+# LZModel/LZRunState fixture with real synthetic weights and calls the
+# real forward_csa2() directly, same posture as csa2-mode-dispatch-gate
+# above.
 .PHONY: csa2-reindex-causality-gate
 csa2-reindex-causality-gate:
 	@$(call GATE_OK,build/csa2_reindex_causality_gate.sh)

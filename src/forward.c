@@ -606,7 +606,6 @@ void lz_state_free(LZRunState *s) {
     xfree(s->csa2_pending_c); xfree(s->csa2_pending_z);
     xfree(s->csa2_pending_c_idx); xfree(s->csa2_pending_z_idx);
     xfree(s->csa2_comp_ring); xfree(s->csa2_idx_comp_ring);
-    xfree(s->csa2_n_blocks);
     xfree(s->csa2_scores);
     xfree(s->csa2_topk_idx_pub); xfree(s->csa2_topk_n_pub);
     xfree(s->csa2_c_j); xfree(s->csa2_z_j);
@@ -713,7 +712,6 @@ void lz_state_reset(LZRunState *s, const LZModel *m) {
                nf * (size_t)max_blocks * c->head_dim * sizeof(float));
         memset(s->csa2_idx_comp_ring, 0,
                nf * (size_t)max_blocks * c->csa2_indexer_head_dim * sizeof(float));
-        memset(s->csa2_n_blocks, 0, nf * sizeof(int));
     }
     /* The ring's own "which slot is confirmed" index - see forward.h's
        s->ssm_slot comment. Every recurrent index resets to 0 here,

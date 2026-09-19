@@ -14,7 +14,7 @@
    ONE ci) and that two of that round's own new validation predicates
    had no mutation of their own:
      - "dispatch reverted": every mode always runs the pre-this-task,
-       unconditional six-step body (steps 2/3/6 lose their csa2_mode
+       unconditional six-step body (steps 2/3/4 lose their csa2_mode
        guards) - must redden the Reindex/Reuse-specific checks below
        while leaving check1's Full-only checks green.
      - "publish buffer collapsed to per-ci": the (ci, tk) indexing on
@@ -58,10 +58,10 @@
    task adds needs.
 
    Fixture weight tensors are grouped into three independent LCG
-   streams per layer - "q" (q_proj/o_proj/q_norm, step 1+4+5, every
+   streams per layer - "q" (q_proj/o_proj/q_norm, steps 1 and 6, every
    mode owns these), "kv" (k_norm + the four main/indexer COMPRESSION
-   tensors, step 2+6, FULL only) and "idx" (the three indexer QUERY
-   tensors, step 3, FULL+REINDEX) - so a check can perturb exactly one
+   tensors, steps 2 and 3, FULL only) and "idx" (the three indexer
+   QUERY tensors, step 4, FULL+REINDEX) - so a check can perturb exactly one
    group and attribute an observed change to exactly the step that
    reads it. A REINDEX layer is given a full "kv" group too even though
    the correct dispatch never reads it and a REAL checkpoint no longer
@@ -189,6 +189,10 @@ static void ok(int cond, const char *what) {
 #define F_IDXHD   16
 #define F_IDXR    16
 #define F_CM       1
+/* check1a's own second compression ratio - see its comment. Every other
+   fixture here runs at F_CM, where no position is ever left with an
+   empty candidate set. */
+#define F_CM2      2
 #define F_TOPK     2
 
 #define SEED0 1145141919u   /* this project's own fixed synthetic-input seed */
@@ -222,9 +226,9 @@ static void fill_xb(LZRunState *s, int nt, int dim, unsigned *st) {
 
 /* ------------------------------------------------------------ layer fixtures */
 
-/* q/o/q_norm (step 1, 4, 5 - every mode) + k_norm and the four main/
-   indexer COMPRESSION tensors (step 2, 6 - FULL only) + the three
-   indexer QUERY tensors (step 3 - FULL and REINDEX). A REINDEX layer
+/* q/o/q_norm (steps 1 and 6 - every mode) + k_norm and the four main/
+   indexer COMPRESSION tensors (steps 2 and 3 - FULL only) + the three
+   indexer QUERY tensors (step 4 - FULL and REINDEX). A REINDEX layer
    gets the SAME full set anyway - see this file's own header comment
    on why: the correct dispatch never reads the "kv" group for REINDEX,
    and a real checkpoint no longer carries it either (model.c's
@@ -324,10 +328,14 @@ static void init_config_common(LZModelConfig *c, int n_layers) {
     c->csa2_indexer_q_lora_rank = F_IDXR;
 }
 
-/* 1 layer, FULL, csa2_on - check1's Full-only regression fixture. */
-static void build_model_single(LZModel *m, unsigned aq, unsigned akv, unsigned aix) {
+/* 1 layer, FULL, csa2_on - check1's Full-only regression fixture. cm is
+   a parameter here and nowhere else in this file: check1a needs both
+   ratios to reach both sides of the "is this position's own block
+   visible yet" boundary. */
+static void build_model_single(LZModel *m, int cm, unsigned aq, unsigned akv, unsigned aix) {
     memset(m, 0, sizeof(*m));
     init_config_common(&m->config, 1);
+    m->config.csa2_compress_m = cm;
     m->config.csa2_on[0] = 1;
     m->layers = (LZLayer *)calloc(1, sizeof(LZLayer));
     build_layer_full(&m->layers[0], aq, akv, aix);
@@ -445,11 +453,17 @@ static void check1_full_only(void) {
     unsigned stx;
     int ci;
 
-    /* 1a: the very first token this ci ever sees has n_vis==0 - k_eff
-       must be exactly 0 and attn_out the exact zero vector (the
-       existing, already-shipped "no legitimate contribution" case,
-       true regardless of this task's own change). */
-    build_model_single(&m, SEED0 + 1, SEED0 + 2, SEED0 + 3);
+    /* 1a: the empty-candidate-set case - k_eff exactly 0 and attn_out
+       the exact zero vector (the already-shipped "no legitimate
+       contribution" path). AT F_CM2, not this file's own F_CM: a
+       position sees the block it is inside from that block's own last
+       raw token onward, so at ratio 1 every position closes its block
+       in step 3 and then attends to it, and there is no position left
+       anywhere with nothing to attend to. Ratio 2 puts position 0
+       (off 0, block still open) back on the empty side of that
+       boundary, which is the only side this pair of assertions can
+       test. The second arm below takes the other side. */
+    build_model_single(&m, F_CM2, SEED0 + 1, SEED0 + 2, SEED0 + 3);
     if (lz_state_alloc(&s, &m, F_SEQLEN, 0, errbuf, sizeof errbuf) != 0) {
         printf("FAIL check1a: lz_state_alloc: %s\n", errbuf);
         g_fail = 1;
@@ -461,12 +475,36 @@ static void check1_full_only(void) {
     fill_xb(&s, 1, F_DIM, &stx);
     forward_csa2(&m, &s, &m.layers[0], 0, 0, 1, NULL);
     ok(s.csa2_topk_n_pub[(size_t)ci * LZ_BATCH_MAX + 0] == 0,
-       "check1a: first-ever token's published k_eff is 0");
+       "check1a: at cm=2, the first-ever token's published k_eff is 0");
     {
         int d, allz = 1;
         for (d = 0; d < F_QD; d++) if (s.attn_out[d] != 0.0f) allz = 0;
-        ok(allz, "check1a: k_eff==0 token's attn_out is the exact zero vector");
+        ok(allz, "check1a: that k_eff==0 token's attn_out is the exact zero vector");
     }
+    lz_state_free(&s);
+    free(m.layers);
+
+    /* The other side of that boundary, and the ratio the report names
+       as its own special case (an uncompressed main KV, compression
+       ratio 1 - which is also what the whole decoder half of the
+       reference runs): position 0 closes block 0 in step 3 and must
+       then attend to exactly that block. */
+    build_model_single(&m, F_CM, SEED0 + 1, SEED0 + 2, SEED0 + 3);
+    if (lz_state_alloc(&s, &m, F_SEQLEN, 0, errbuf, sizeof errbuf) != 0) {
+        printf("FAIL check1a (cm=1): lz_state_alloc: %s\n", errbuf);
+        g_fail = 1;
+        free(m.layers);
+        return;
+    }
+    ci = s.cache_idx[0];
+    stx = SEED0 + 10;
+    fill_xb(&s, 1, F_DIM, &stx);
+    forward_csa2(&m, &s, &m.layers[0], 0, 0, 1, NULL);
+    ok(s.csa2_topk_n_pub[(size_t)ci * LZ_BATCH_MAX + 0] == 1 &&
+       s.csa2_topk_idx_pub[(size_t)ci * LZ_BATCH_MAX * F_TOPK + 0] == 0,
+       "check1a: at cm=1, the first-ever token sees exactly the one block "
+       "it just closed - k_eff 1, selecting block 0 (the block holding its "
+       "own position)");
     lz_state_free(&s);
     free(m.layers);
 
@@ -485,7 +523,7 @@ static void check1_full_only(void) {
         float attn_last3[F_QD];
         int tk, k;
 
-        build_model_single(&m3, SEED0 + 1, SEED0 + 2, SEED0 + 3);
+        build_model_single(&m3, F_CM, SEED0 + 1, SEED0 + 2, SEED0 + 3);
         if (lz_state_alloc(&s3, &m3, F_SEQLEN, 0, errbuf, sizeof errbuf) != 0) {
             printf("FAIL check1b: lz_state_alloc (batched): %s\n", errbuf);
             g_fail = 1;
@@ -511,7 +549,7 @@ static void check1_full_only(void) {
             unsigned stx1 = SEED0 + 20;
             int match_n = 1, match_idx = 1;
 
-            build_model_single(&m1, SEED0 + 1, SEED0 + 2, SEED0 + 3);
+            build_model_single(&m1, F_CM, SEED0 + 1, SEED0 + 2, SEED0 + 3);
             if (lz_state_alloc(&s1, &m1, F_SEQLEN, 0, errbuf, sizeof errbuf) != 0) {
                 printf("FAIL check1b: lz_state_alloc (unbatched): %s\n", errbuf);
                 g_fail = 1;
@@ -547,27 +585,23 @@ static void check_chain_soft(void) {
     LZRunState s;
     char errbuf[256];
     int tk, k, ci;
-    /* 4 tokens, not 3: with F_CM=1/F_TOPK=2, a 3-token chunk gives the
-       LAST (only one check2/check3a below ever inspect, since attn_out
-       is a single-token scratch overwritten every iteration) token a
-       candidate pool of exactly n_vis==topk==2 - a TRIVIAL selection
-       (both candidates are always taken, regardless of score, so no
-       indexer-weight perturbation can ever change WHICH ones - only
-       their relative softmax weight, and even that can happen to wash
-       out for one particular seed offset). Same trap this project's own
-       check_ci_independence hit once already (round 3): the fix there
-       was the same one applied here - widen nt so the inspected token's
-       own n_vis exceeds topk, restoring a genuine top-2-of-3 selection.
-       This is n_vis's OWN fix (C2) making the previous nt=3 fixture
-       trivial at its last token where it used to be non-trivial: before
-       the fix, layer B's (REINDEX) own n_vis was the shared counter's
-       FINAL value for the whole chunk (3, here) regardless of tk, so
-       tk=2 already had a real 3-candidate pool; after the fix it is
-       pos/cm, so tk=2's own pool is 2 wide (causally correct - tk=2
-       must not see block 2, its own) and only tk=3 sees a 3-wide one.
-       (Layer C, REUSE, has no n_vis of its own either way - its own
-       causal correctness comes entirely from reading whatever B
-       published, per forward_csa2.c's own comment on the n_vis line.) */
+    /* 4 tokens, not 3: at F_CM=1 a position's own visible-block count
+       (forward_csa2.c's n_vis) is (pos + 1) / cm, so within an
+       nt-token chunk the token at tk has a candidate pool of tk + 1.
+       Only the LAST token's attn_out is ever externally inspectable -
+       attn_out is a single-token scratch overwritten every iteration,
+       so check2/check3a below can only ever look at the chunk's final
+       position - and that pool must exceed topk or the selection is
+       TRIVIAL: both candidates are always taken, whatever the scores,
+       so no indexer-weight perturbation can change WHICH ones. nt=4
+       gives the inspected token a 4-wide pool against topk=2, i.e. 6
+       possible unordered pairs; a 3-token chunk would clear topk by a
+       single candidate and leave only 3, which a perturbation is more
+       likely to land back on (see check2's own comment). The same
+       arithmetic is what sets check_ci_independence's own nt=4.
+       (Layer C, REUSE, has no n_vis of its own - its own causal
+       correctness comes entirely from reading whatever B published,
+       per forward_csa2.c's own comment on the n_vis line.) */
     int a_n[4], b_n[4];
     int a_idx[4][F_TOPK], b_idx[4][F_TOPK];
     float attn_a[F_QD], attn_b[F_QD], attn_c[F_QD];
@@ -599,8 +633,8 @@ static void check_chain_soft(void) {
             a_idx[tk][k] = s.csa2_topk_idx_pub[((size_t)ci * LZ_BATCH_MAX + tk) * F_TOPK + k];
     }
     (void)a_idx;
-    ok(a_n[0] == 0 && a_n[1] == 1 && a_n[2] == 2 && a_n[3] == F_TOPK,
-       "check_chain: layer A's own published k_eff grows 0,1,2,2(=topk) "
+    ok(a_n[0] == 1 && a_n[1] == 2 && a_n[2] == F_TOPK && a_n[3] == F_TOPK,
+       "check_chain: layer A's own published k_eff grows 1,2,2,2(=topk) "
        "across the chunk");
 
     stx = XBB;
@@ -612,25 +646,28 @@ static void check_chain_soft(void) {
         for (k = 0; k < F_TOPK; k++)
             b_idx[tk][k] = s.csa2_topk_idx_pub[((size_t)ci * LZ_BATCH_MAX + tk) * F_TOPK + k];
     }
-    /* B's own published k_eff is min(topk, n_vis), and n_vis is pos/cm
-       (report Sec2.3.1 mode-dispatch task's C2 fix) computed per TOKEN
-       of B's OWN loop - not however many blocks A's already-finished
-       call had left behind by the time B's call started. With F_CM=1
-       every position finalizes its own block immediately, so n_vis(tk)
-       is exactly tk: k_eff must grow 0,1,2,2 across B's own chunk, the
-       same causal shape check_chain's own a_n assertion above requires
-       of A - never a constant borrowed from A's whole, already-
-       finished call (that was the causal leak this replaced: B's own
-       tk=0 read n_vis=4, A's FINAL count for a 4-token chunk, instead
-       of 0 - B's first token could see every block A would ever
-       finalize for this chunk, including ones A had not yet written
-       when B's tk=0 query happened in the causal ordering the chunk is
-       supposed to model). */
-    ok(b_n[0] == 0 && b_n[1] == 1 && b_n[2] == F_TOPK && b_n[3] == F_TOPK,
-       "check_chain: layer B (reindex) sees only STRICTLY EARLIER "
-       "positions' already-finalized blocks - k_eff grows 0,1,2,2 across "
-       "its own chunk exactly like layer A's, not a constant leaked in "
-       "from A's already-finished call");
+    /* B's own published k_eff is min(topk, n_vis), and n_vis is the
+       per-POSITION bound (pos + 1) / cm - the reference implementation's
+       own compress_lens (.prof/dsv41_ref/model.py:564, in the TRAINING
+       tree at E:\LLM\llama98-zh; "a block becomes visible once the
+       query has passed its last token") - computed per
+       TOKEN of B's OWN loop, never however many blocks A's already-
+       finished call left behind by the time B's call started. At F_CM=1
+       every position closes its own block in that same iteration, so
+       n_vis(tk) is exactly tk + 1 and k_eff must grow 1,2,2,2 across
+       B's own chunk - the same shape check_chain's own a_n assertion
+       above requires of A, and never the constant 4 that A's completed
+       call leaves in their shared state. That constant is the causal
+       leak this bound rules out: B's tk=0 would read n_vis=4, A's
+       FINAL count for a 4-token chunk, and B's first token would see
+       every block A ever finalizes for the chunk - including ones A
+       had not yet written when B's tk=0 query happens, in the causal
+       ordering the chunk models. */
+    ok(b_n[0] == 1 && b_n[1] == F_TOPK && b_n[2] == F_TOPK && b_n[3] == F_TOPK,
+       "check_chain: layer B (reindex) k_eff grows 1,2,2,2 across its "
+       "own chunk - the per-position (pos + 1)/cm bound, exactly like "
+       "layer A's, not a constant leaked in from A's already-finished "
+       "call");
     ok(!(memcmp(b_idx[0], b_idx[1], sizeof(int) * F_TOPK) == 0 &&
          memcmp(b_idx[1], b_idx[2], sizeof(int) * F_TOPK) == 0 &&
          memcmp(b_idx[2], b_idx[3], sizeof(int) * F_TOPK) == 0),
@@ -679,21 +716,15 @@ static void check_chain_soft(void) {
         LZRunState s2;
         float attn_a2[F_QD], attn_b2[F_QD], attn_c2[F_QD];
 
-        /* +3, not an arbitrary round number: with n_vis=3 and topk=2 there
-           are only 3 possible unordered pairs, and a perturbed indexer
-           can legitimately land back on the SAME pair in a different
-           order (attn_out is then bit-identical - summing two floats is
-           commutative) without that meaning the dispatch is broken.
-           Verified empirically against this exact fixture (base picks
-           {0,1}, +3 picks {1,2} - a genuinely different set, not a
-           reordering) rather than assumed. n_vis=3 is now B's tk=3 (its
-           LAST token, the one attn_b/attn_out below actually holds),
-           not tk=2 - the C2 fix (pos/cm) makes tk=2's own pool only 2
-           wide (n_vis==topk there is a trivial "take both" - see this
-           function's own array-declaration comment for the full
-           argument), so this fixture widened from 3 tokens to 4
-           specifically to keep a genuinely non-trivial 3-candidate pool
-           on the one token every check below can actually observe. */
+        /* +3, not an arbitrary round number: B's last token - the one
+           attn_b/attn_out below actually holds - sees a 4-wide candidate
+           pool at F_CM=1, and the perturbation has to move the SELECTED
+           SET, not merely its order. Selecting the same pair in a
+           different order leaves attn_out bit-identical, since summing
+           two floats is commutative, so an order change is not evidence
+           of anything. Verified empirically against this exact fixture
+           (base picks the set {0,3}, +3 picks {1,2}) rather than
+           assumed. */
         build_model_chain_soft(&m2, AQ, AKV, AIX, BQ, BKV, BIX + 3u, CQ, CKV, CIX);
         if (lz_state_alloc(&s2, &m2, F_SEQLEN, 0, errbuf, sizeof errbuf) != 0) {
             printf("FAIL check2: lz_state_alloc: %s\n", errbuf);
@@ -770,7 +801,7 @@ static void check_chain_soft(void) {
    position-at-a-time run is a correct oracle regardless of this task's
    own change.
 
-   Compares EVERY token's s->xb2 (forward_csa2.c's own step 5 writes
+   Compares EVERY token's s->xb2 (forward_csa2.c's own step 6 writes
    `s->xb2 + tk*hdim`, one slot per token, never overwritten again) for
    layer C, not s->attn_out - an earlier version of this check compared
    only the chunk's LAST token via attn_out (a single-token scratch
@@ -874,21 +905,17 @@ static void check5_batch_vs_unbatched_chain(void) {
    with that mutation applied.
 
    nt=4, NOT the 3 every other fixture in this file uses: this has
-   NOTHING to do with aliasing or with C2 (report Sec2.3.1 mode-
-   dispatch task's own causal-leak fix) - D is a FRESH, unaliased FULL
-   layer, growing its own n_vis via its own step 6 exactly like check1's
-   layer, with no source to leak from either way. The trap is the plain
-   arithmetic of this fixture's own F_CM=1/F_TOPK=2: at nt=3, D's LAST
-   (only one this check inspects, since attn_out is a single-token
-   scratch) token has n_vis==topk==2, where
-   `k_eff = topk < n_vis ? topk : n_vis` selects EVERY visible block
-   regardless of score - a trivial, weight-independent selection this
-   check's own perturbation could never have shown up in, true of ANY
-   csa2 layer at that exact width, aliased or not. nt=4 makes the last
-   token's n_vis (3) exceed topk (2), a genuine, score-dependent 2-of-3
-   choice - this (an earlier draft of this check used nt=3 and passed
-   even against the ci mutation above, for exactly this reason) is why
-   the number is called out here at all. */
+   nothing to do with aliasing - D is a FRESH, unaliased FULL layer
+   with no source to leak from either way. The trap is the plain
+   arithmetic of this fixture's own F_CM=1/F_TOPK=2: a position's
+   visible-block count is (pos + 1) / cm, so the LAST token of an
+   nt-token chunk - the only one this check inspects, since attn_out is
+   a single-token scratch - has an nt-wide candidate pool, and
+   `k_eff = topk < n_vis ? topk : n_vis` takes a genuine, score-
+   dependent 2 of the 4 nt=4 gives it. A pool of exactly topk would
+   select EVERY visible block regardless of score, and this check's own
+   perturbation could never show up in it - true of ANY csa2 layer at
+   that width, aliased or not. */
 static void check_ci_independence(void) {
     LZModel m;
     LZRunState s;
@@ -930,10 +957,10 @@ static void check_ci_independence(void) {
     free(m.layers);
 
     /* Perturb D's own INDEXER weights specifically (the group that
-       controls what D itself publishes in its own step 3) - under
+       controls what D itself publishes in its own step 4) - under
        correct per-ci addressing this can only ever change D's own
        physical slot, which E never reads (E's ci aliases A's, not D's).
-       Under the mutation named above, D's step-3 write (still running
+       Under the mutation named above, D's step-4 write (still running
        - the mutation only changes WHERE it lands, not whether it
        fires) collides with A's own slot, and E ends up reading D's
        selection instead of A's. */
@@ -1038,7 +1065,7 @@ static void check4_ced_gate(void) {
        must be byte-identical whether D2 itself is handed NULL or a
        poisoned non-NULL kv_in. One state, D2 called twice in a row:
        REINDEX writes nothing back into the ring/pending state (only
-       FULL's steps 2/6 do), so replaying it is safe. */
+       FULL's steps 2 and 3 do), so replaying it is safe. */
     {
         LZModel m;
         LZRunState s;
