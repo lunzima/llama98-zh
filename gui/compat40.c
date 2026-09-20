@@ -1061,6 +1061,69 @@ int lz_find_parse(LPARAM lp, int *down, int *match_case,
     return 0;
 }
 
+/* ---- a clock for intervals lz_time_ms cannot resolve ----
+ *
+ * See compat40.h for the measurement. Two things make this one exact:
+ * the counter stays an integer, and the ORIGIN is subtracted before
+ * anything is converted, so the number being scaled is the length of
+ * the interval and not the machine's uptime.
+ *
+ * The conversion is integer throughout. There is no float in it to
+ * lose the low bits of a microsecond, and a divide that truncates is
+ * the right answer here - the caller wants "not 100 ms", and 0.4 us of
+ * truncation is not that.
+ *
+ * Can the multiplication overflow lz_i64? The product is the interval
+ * in microseconds TIMES the counter's frequency, so at a 10 MHz
+ * counter it reaches 9.2e18 - the widest lz_i64 - at about 9e11 us,
+ * which is ten days of CONTINUOUS playback inside one process. lz_i64
+ * rather than long for that reason and not for tidiness: a 32-bit
+ * count would wrap in 72 minutes. */
+static int    g_us_state;   /* 0 not probed, 1 counter, 2 tick */
+static lz_i64 g_us_freq;
+static lz_i64 g_us_org;
+static lz_i64 g_us_last;    /* the last answer, see the frozen case below */
+static DWORD  g_us_tick;
+
+static void us_probe(void) {
+    LARGE_INTEGER f, c;
+    /* The tick counter is what is left if either call is missing or
+       answers nothing: GetTickCount is on every target this front end
+       has ever had, where a performance counter is not (Win32s, and
+       the 3.51 floor's own kernel are the ones to expect it absent
+       from). */
+    g_us_state = 2;
+    g_us_tick = GetTickCount();
+    if (QueryPerformanceFrequency(&f) && f.QuadPart > 0 &&
+        QueryPerformanceCounter(&c)) {
+        g_us_freq = (lz_i64)f.QuadPart;
+        g_us_org  = (lz_i64)c.QuadPart;
+        g_us_state = 1;
+    }
+}
+
+lz_i64 lz_ui_us_now(void) {
+    LARGE_INTEGER c;
+    if (!g_us_state) us_probe();
+    if (g_us_state == 1) {
+        if (QueryPerformanceCounter(&c))
+            g_us_last = ((lz_i64)c.QuadPart - g_us_org) * LZ_I64_C(1000000)
+                        / g_us_freq;
+        /* A counter that answered once and then stops is not something
+           that happens; answering with the tick fallback's origin
+           instead would jump the clock by however long the process has
+           been up, which reads as the thing this clock exists to rule
+           out. Standing still is the honest failure. */
+        return g_us_last;
+    }
+    return (lz_i64)(unsigned long)(GetTickCount() - g_us_tick) * 1000;
+}
+
+int lz_ui_us_fine(void) {
+    if (!g_us_state) us_probe();
+    return g_us_state == 1;
+}
+
 /* ---- MIDI streaming ----
  *
  * See compat40.h for why the whole family is resolved rather than

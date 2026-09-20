@@ -54,20 +54,29 @@ static long           g_img_cap;
  *
  * One line per stream event, and only when the ini named a file for it -
  * see lz_midi_trace_to. OFF is the default and costs one pointer test
- * per event: no file, no formatting, and not even the device call that
- * asks where the stream is.
+ * per event: no file, no formatting, and not even the device calls that
+ * ask where the stream is or what the counter reads.
  *
  * The lines exist to answer one question about a piece that is playing
  * badly: what tempo writes landed, and what the stream was doing when
- * they did. So every line that could bear on it carries the stream's
- * position and the number of buffers the device still owes. */
+ * they did. A tempo line therefore carries the stream's position either
+ * side of the write and the interval between the two samples, and every
+ * line carries the number of buffers the device still owes. */
 
 static FILE *g_trace;
 static char  g_piece[MAX_PATH];  /* the piece the lines below are about */
 static char  g_line[512];
-static char  g_pos[24];
+static char  g_pos0[24];    /* the position before a tempo write */
+static char  g_pos1[24];    /* and after it - two, because one line has both */
+static char  g_us0[24];     /* the tempo the write replaced, or `none` */
 static int   g_sent;        /* chunks handed over since the piece began */
 static int   g_done;        /* and the one the next notification is for */
+/* The tempo microseconds-per-quarter last written, which is the one the
+ * ticks before the next write are worth, and whether any has been: a
+ * zero in us0 would read as a tempo the device was running at, and the
+ * driver's own default is what is in force until the first write. */
+static unsigned long g_tempo_last;
+static int           g_tempo_set;
 
 #define tracing() (g_trace != NULL)
 
@@ -80,13 +89,13 @@ static void trace_line(const char *s) {
     fflush(g_trace);
 }
 
-/* Where the stream is, or the word for "could not be asked". A zero in
-   its place would read as a position the stream really had. */
-static const char *pos_text(void) {
-    unsigned long tick;
-    if (!lz_ui_midi_position(&tick)) return "unavailable";
-    snprintf(g_pos, sizeof g_pos, "%lu", tick);
-    return g_pos;
+/* Where the stream is, into `buf`, or the word for "could not be
+   asked". A zero in its place would read as a position the stream
+   really had, and lz_ui_midi_position's 0 answer is exactly the case
+   that means no such position was obtained. */
+static void pos_text(char *buf, int cap, int got, unsigned long tick) {
+    if (!got) snprintf(buf, (size_t)cap, "unavailable");
+    else      snprintf(buf, (size_t)cap, "%lu", tick);
 }
 
 void lz_midi_trace_to(const char *path) {
@@ -114,17 +123,84 @@ void lz_midi_trace_to(const char *path) {
     fputs("# inflight is what the device still owes. pos=unavailable means "
           "a position that could not be asked for, not a stream at zero.\n",
           g_trace);
+    /* Told here rather than left to be worked out from the lines,
+       because it is the one thing about t that changes what a reader
+       concludes from them, and it is not visible in the numbers. */
+    fputs("# t IS COARSE AND ITS STEP DEPENDS ON UPTIME, so a pair of tempo "
+          "writes sharing one t is not evidence that they\n"
+          "# were simultaneous. lz_time_ms answers a float: with "
+          "QueryPerformanceCounter at 10 MHz and the machine up about\n"
+          "# ten days (t around 9.3e8) its count is already rounded to "
+          "1048576 counts - 104.9 ms - before the divide, and the\n"
+          "# reading then steps in 64 ms. That is most of the ~110 ms "
+          "between two writes. A freshly booted machine resolves far\n"
+          "# finer, so two captures cannot be compared on this column "
+          "either.\n", g_trace);
+    fprintf(g_trace,
+            "# dt_us is the clock that resolves it: microseconds from "
+            "%s, read as t0, pos0, the write, pos1,\n"
+            "# t1, so dt_us = t1 - t0 brackets both position samples. "
+            "us0 is the tempo in force before the write and us the\n"
+            "# one it writes - the tick-to-wall-clock conversion changes "
+            "between the two samples, so the line has to carry both.\n"
+            "# us0=none means no tempo has been written yet, so the "
+            "driver's own default is what was in force; it is not 0.\n"
+            "# A tempo write that moves the stream shows as pos1 > pos0 "
+            "with dt_us far too small to have played the music\n"
+            "# between them; pos1 == pos0 is a write that moved nothing.\n",
+            lz_ui_us_fine() ? "QueryPerformanceCounter, quantum 100 ns"
+                            : "GetTickCount - every dt_us is a whole "
+                              "millisecond, 15.6 ms or 55 ms apart");
     fflush(g_trace);
 }
 
-/* One tempo write: when, how big, where the stream had got to, and how
-   many buffers were out. This is the line the whole trace is for. */
-static void trace_tempo(const char *why, int ratio_milli, unsigned long us,
-                        int ok) {
+/* Write the tempo, and record what the stream did across the write.
+ *
+ * The two position samples straddle the midiStreamProperty call as
+ * closely as the code allows, and the interval between them is two
+ * adjacent calls - not the ~110 ms between one tempo write and the
+ * next. That is the whole point of the bracket: a jump inside the
+ * write is what is being looked for, and the ordinary passage of music
+ * between two writes is not it. dt_us is a counter difference for
+ * exactly that reason; lz_time_ms steps in 64 ms at this uptime, which
+ * is most of the interval being judged.
+ *
+ * The position is asked for AFTER the write as well as before, so the
+ * line says where the stream had got to on each side. Whether the
+ * property call succeeded changes which tempo the ticks are worth, so
+ * us0 carries the one in force before and us the one written. */
+static int tempo_write(const char *why, int ratio_milli, unsigned long us) {
+    unsigned long p0 = 0, p1 = 0;
+    lz_i64 t0 = 0, t1 = 0;
+    int ok, on = tracing();
+    int got0 = 0, got1 = 0;
+
+    if (on) {
+        t0 = lz_ui_us_now();
+        got0 = lz_ui_midi_position(&p0);
+    }
+    ok = lz_ui_midi_tempo(us);
+    if (!on) return ok;
+    got1 = lz_ui_midi_position(&p1);
+    t1 = lz_ui_us_now();
+    pos_text(g_pos0, (int)sizeof g_pos0, got0, p0);
+    pos_text(g_pos1, (int)sizeof g_pos1, got1, p1);
+    if (g_tempo_set) snprintf(g_us0, sizeof g_us0, "%lu", g_tempo_last);
+    else             snprintf(g_us0, sizeof g_us0, "none");
+    /* `pos` keeps meaning what it meant before the bracket existed:
+       where the stream was once the write had been made. */
     snprintf(g_line, sizeof g_line,
-             "tempo why=%s ratio=%d us=%lu ok=%d pos=%s inflight=%d",
-             why, ratio_milli, us, ok, pos_text(), g_pending);
+             "tempo why=%s ratio=%d us=%lu ok=%d pos=%s pos0=%s dt_us=%lu "
+             "us0=%s inflight=%d",
+             why, ratio_milli, us, ok, g_pos1, g_pos0,
+             (unsigned long)(t1 - t0), g_us0, g_pending);
     trace_line(g_line);
+    /* Only a write the device took changes what the ticks are worth. */
+    if (ok) {
+        g_tempo_last = us;
+        g_tempo_set = 1;
+    }
+    return ok;
 }
 
 static void trace_chunk(int slot, int events, unsigned long first,
@@ -269,11 +345,7 @@ static int start_image(const unsigned char *img, long n, int loop,
     /* The tempo BEFORE the notes. Setting it after would play the
        opening at whatever the last piece left behind, which on a turn
        that follows a fast one is a noticeably wrong first bar. */
-    {
-        unsigned long us = tempo_for(ratio_milli);
-        int ok = lz_ui_midi_tempo(us);
-        if (tracing()) trace_tempo("start", ratio_milli, us, ok);
-    }
+    tempo_write("start", ratio_milli, tempo_for(ratio_milli));
 
     g_slot_next = 0;
     g_prev_tick = 0;
@@ -350,11 +422,7 @@ void lz_midi_ratio(int ratio_milli) {
     if (!g_playing) return;
     if (ratio_milli == g_ratio) return;
     g_ratio = ratio_milli;
-    {
-        unsigned long us = tempo_for(ratio_milli);
-        int ok = lz_ui_midi_tempo(us);
-        if (tracing()) trace_tempo("follow", ratio_milli, us, ok);
-    }
+    tempo_write("follow", ratio_milli, tempo_for(ratio_milli));
 }
 
 /* Settings changed while a piece was playing.
@@ -438,6 +506,8 @@ void lz_midi_shutdown(void) {
     g_tried = 0;
     g_pending = 0;
     g_stale = 0;
+    /* The device goes with it, so the tempo written to it goes too. */
+    g_tempo_set = 0;
     free(g_img);
     g_img = NULL;
     g_img_cap = 0;

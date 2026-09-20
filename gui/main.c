@@ -300,6 +300,10 @@ static struct {
        than just the property write. */
     LZMusicSettings mus;
     int  mus_ratio;
+    /* A ratio to hold the player at, in thousandths, or 0 for "let the
+       measured rate move it". Ini-only, and read as a diagnostic rather
+       than a setting - see where it is read in create_children. */
+    int  mus_pin;
     /* Spec 3.1: how many tokens THIS turn's generation has produced.
        Accumulated in tokens_arrived (every emitted token reaches it
        once), so it is authoritative over the running time even when the
@@ -2546,8 +2550,11 @@ static void music_start(HWND hwnd) {
     /* 1x to begin with, not the last turn's ratio: nothing has been
        measured yet this turn, and lz_music_ratio_milli answers 1x for
        exactly that state. Carrying the previous turn's speed over
-       would open every reply at the speed of the one before it. */
-    g.mus_ratio = LZ_MUSIC_RATIO_ONE;
+       would open every reply at the speed of the one before it. A
+       pinned ratio opens the piece there INSTEAD: pinning the follow
+       alone would still leave the first seconds at 1x and then step,
+       which is the movement the pin is set to remove. */
+    g.mus_ratio = g.mus_pin ? g.mus_pin : LZ_MUSIC_RATIO_ONE;
     lz_midi_start(path, 1, g.mus.instrument, g.mus.volume, g.mus_ratio);
 }
 
@@ -2556,6 +2563,11 @@ static void music_start(HWND hwnd) {
  * bar - this reads the same two numbers rather than a second clock. */
 static void music_follow(void) {
     int target, r;
+    /* Pinned: the ratio is not the follow's to move. Nothing is written
+       rather than the value being written again, so a pinned piece has
+       no tempo line between its start and its halt - the trace shows
+       the arm for what it is. */
+    if (g.mus_pin) return;
     if (!lz_midi_busy()) return;
     /* gen_start_ms, not the job's start: prefill produces no tokens,
        so measuring from before it would report a rate climbing out of
@@ -3433,6 +3445,27 @@ static int create_children(HWND hwnd) {
         char trace[MAX_PATH];
         lz_ini_get_str("music_trace", trace, (int)sizeof trace, "");
         lz_midi_trace_to(trace);
+    }
+    /* Hold the playback ratio still, in thousandths, so a file that is
+       playing badly can be asked which of two things is wrong with it:
+       a tempo that MOVES, or the tempo it moves to. Without this the
+       follow is the only way the ratio ever leaves 1x, and a listener
+       cannot tell a drop caused by the slew from one caused by the
+       speed it arrived at - at 2x a dense passage may be more than the
+       synthesiser renders.
+
+       A DIAGNOSTIC, not a setting, and off is 0 or no key at all: the
+       ratio is then whatever the measured rate makes it, exactly as
+       with no such key. A value the player cannot hold - outside the
+       range lz_music_tempo_us answers for - is NOT a pin: clamping it
+       would run the piece at a ratio the ini does not name, which is
+       the one thing this key exists to keep straight. Nothing here
+       writes the key back, so the sound window's OK leaves it as it
+       was found. */
+    {
+        int pin = lz_ini_get_int("music_ratio_milli", 0);
+        g.mus_pin = (pin >= LZ_MUSIC_RATIO_MIN && pin <= LZ_MUSIC_RATIO_MAX)
+                    ? pin : 0;
     }
     /* Context window. Through the clamp with no model cap - there is no
        model at this point in startup, and the cap is applied again at

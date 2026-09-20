@@ -70,8 +70,15 @@ void lz_midi_shutdown(void);
  * it looks exactly like a trace that had nothing to say.
  *
  * OFF costs one test per event: no file, no formatting, and no call to
- * the device either. ON changes nothing about playback - the only calls
- * it adds are the position queries on the lines that need one. */
+ * the device or to the clock either. ON changes nothing about playback.
+ * What it adds is bounded and named: two position queries and two
+ * counter reads around each tempo write - the bracket `pos0`/`pos1`/
+ * `dt_us` on those lines - and one position query on the
+ * `tempo why=start` line every piece opens with. The file's own header
+ * says what a tick is, why a chunk's tick range is comparable with
+ * `pos` only inside one playback, and why the `t` column cannot
+ * separate two events 100 ms apart on a machine that has been up for
+ * days. */
 void lz_midi_trace_to(const char *path);
 
 #endif /* LZ_GUI_MIDIPLAY_H */

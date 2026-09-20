@@ -2,6 +2,7 @@
 #define LZ_GUI_COMPAT40_H
 
 #include <windows.h>
+#include "../src/lz_int.h"   /* lz_i64: microseconds, which outgrow long */
 
 /* Everything the front end does differently on Windows NT 3.51.
  *
@@ -244,6 +245,41 @@ HKL lz_kbd_layout_get(void);
 
 /* 1 when the 4.0 window furniture is available. */
 int lz_os_has_40(void);
+
+/* ---- a clock for intervals lz_time_ms cannot resolve ----
+ *
+ * lz_time_ms is a float, and it converts QueryPerformanceCounter's
+ * count to float BEFORE dividing, so it loses resolution twice over -
+ * once to the count's own mantissa and once to the result's. Both
+ * losses grow with the machine's uptime, because that is what the
+ * numbers are. MEASURED, with the toolchain that builds this file, on
+ * the development host (counter 10 MHz, up about ten and a half days,
+ * reading 926649600 ms): the count is quantised to 1048576 counts =
+ * 104.858 ms, the reading itself steps in 64 ms, and the reading moves
+ * in steps of 64 or 128 ms and never anything finer. The step is
+ * coarser still on a machine up longer, and much finer on one just
+ * booted - a number that varies with uptime is not one a log's reader
+ * can calibrate against.
+ *
+ * Same two clocks, read as a DIFFERENCE: keeping the counter an
+ * integer and subtracting the origin before converting means nothing
+ * is ever rounded at the ~1e12 magnitude, so the quantum is the
+ * counter's own 100 ns. This is what the MIDI trace measures the
+ * interval across a tempo write with.
+ *
+ * Monotone, and its origin is this process's first call, so it is only
+ * ever useful as a difference - which is all anything asks it for. On
+ * a system with no performance counter it falls back to GetTickCount,
+ * and lz_ui_us_fine says which one answered. */
+lz_i64 lz_ui_us_now(void);
+
+/* 1 when lz_ui_us_now is the performance counter, 0 when it is the
+ * millisecond tick counter. A whole number of milliseconds is then all
+ * any interval can be, and the tick itself is coarse on every target
+ * this front end has: 15.6 ms on Windows, 55 ms on Win9x. Asking is
+ * not required - the clock is fixed on the first call, and this only
+ * reports which one it fixed on. */
+int lz_ui_us_fine(void);
 
 /* ---- MIDI streaming ----
  *
