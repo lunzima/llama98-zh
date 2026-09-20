@@ -477,11 +477,28 @@ check_mutated "$W/mut6" model.c "if (c->csa2_source[i] != last_writer[r]) {" "mu
 # block) on the text it had in hand; this re-reads the file from disk and
 # asserts the ordering the name promises, so a mutation that silently did
 # nothing cannot pass for a mutation that worked.
-G7=$(grep -nF '        if (off == cm - 1 && mode == LZ_CSA2_FULL) {' "$W/mut7/forward_csa2.c" | head -1 | cut -d: -f1)
-O7=$(grep -nF 's->attn_out, &L->o_proj,' "$W/mut7/forward_csa2.c" | head -1 | cut -d: -f1)
-if [ -z "$G7" ] || [ -z "$O7" ] || [ "$G7" -le "$O7" ]; then
+#
+# Both anchors are matched as WHOLE LINES (-x) and each is required to
+# occur exactly once. A substring match would let any line merely
+# quoting the o_proj call - a comment, say - satisfy this: its line
+# number would be the smaller of the two and the ordering assert would
+# hold on a file where the block never moved. The uniqueness count is
+# what makes the two line numbers meaningful rather than merely present.
+G7_LINE='        if (off == cm - 1 && mode == LZ_CSA2_FULL) {'
+O7_LINE='        lz_matmul_w(s->xb2 + (size_t)tk * hdim, s->attn_out, &L->o_proj,'
+G7_N=$(grep -cxF "$G7_LINE" "$W/mut7/forward_csa2.c")
+O7_N=$(grep -cxF "$O7_LINE" "$W/mut7/forward_csa2.c")
+if [ "$G7_N" != "1" ] || [ "$O7_N" != "1" ]; then
+    echo "csa2_mode_dispatch_gate: FAIL - mutant 7's own anchors are not each" \
+         "unique in the mutated source (finalize guard ${G7_N}x, o_proj call" \
+         "${O7_N}x) - this arm cannot tell where the block landed"
+    exit 1
+fi
+G7=$(grep -nxF "$G7_LINE" "$W/mut7/forward_csa2.c" | cut -d: -f1)
+O7=$(grep -nxF "$O7_LINE" "$W/mut7/forward_csa2.c" | cut -d: -f1)
+if [ "$G7" -le "$O7" ]; then
     echo "csa2_mode_dispatch_gate: FAIL - mutant 7 left the finalize guard at or" \
-         "ahead of the o_proj call (guard line '${G7:-none}', o_proj line '${O7:-none}')"
+         "ahead of the o_proj call (guard line '$G7', o_proj line '$O7')"
     exit 1
 fi
 
