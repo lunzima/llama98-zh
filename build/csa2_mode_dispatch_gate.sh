@@ -189,16 +189,19 @@
 #       allocation's zeros when step 5 reads it, a one-candidate softmax
 #       over a zero entry weights it 1.0, and the output gate and o_proj
 #       carry that exact zero vector out.
-#     - STAY PASS: every other line the probe prints - the 41 the probe
-#       had before these two assertions and the third new one, check1a's
-#       cm=2 selection line, which is the same shape as its cm=1
-#       counterpart and is blind for the same reason. That is the whole
-#       point of this mutation: a check that compares an attn_out against
-#       another attn_out, or a published k_eff against another published
-#       k_eff, runs BOTH sides under the same reordering and so agrees
-#       with itself whatever the order is. Only an absolute value can see
-#       it, and before these two assertions nothing in this probe looked
-#       at one.
+#     - STAY PASS: every other line the probe prints - 42 of the 44. The
+#       plain ones are the 40 the probe carried before this series added
+#       check1a's four assertions (this gate's own PROBE_TOTAL_LINES was
+#       40 at 978144d and is 44 now; two of those four are the TURN FAIL
+#       pair above, so 40 + these two + those two is the 44). The other
+#       two are named here, check1a's cm=1 and cm=2 selection lines,
+#       which are the same shape as each other and are blind for the
+#       same reason. That is the whole point of this mutation: a check
+#       that compares an attn_out against another attn_out, or a
+#       published k_eff against another published k_eff, runs BOTH sides
+#       under the same reordering and so agrees with itself whatever the
+#       order is. Only an absolute value can see it, and before these
+#       two assertions nothing in this probe looked at one.
 #
 # A mutant where the expected-to-fail lines stay PASS means the probe
 # cannot see that defect at all - reported as a gate FAILURE. A mutant

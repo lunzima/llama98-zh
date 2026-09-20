@@ -6,13 +6,14 @@
 
    Built and run by build/csa2_mode_dispatch_gate.sh against the real
    src/forward_csa2.c/forward_state.c/model.c/forward.h/model.h (not a
-   transcription), and against SIX independent mutant copies - three
+   transcription), and against SEVEN independent mutant copies - three
    from this task's own first landing, three more from a second,
    independent code-review round that found the first pass could not
    tell "reads the right physical ci" apart from "reads the only ci
    that exists" (every original fixture aliased every csa2_on layer to
    ONE ci) and that two of that round's own new validation predicates
-   had no mutation of their own:
+   had no mutation of their own, and a seventh added by the causal-
+   block-visibility fix that followed:
      - "dispatch reverted": every mode always runs the pre-this-task,
        unconditional six-step body (steps 2/3/4 lose their csa2_mode
        guards) - must redden the Reindex/Reuse-specific checks below
@@ -40,6 +41,24 @@
      - "lz_csa2_last_writer_valid neutered": model.c's own whole-config
        predicate's violation check is disabled - must redden exactly
        the one F9 whole-config assertion.
+     - "finalization moved back to the end of the per-token loop": the
+       whole finalize region - `if (off == cm - 1 && mode ==
+       LZ_CSA2_FULL) { ... }` together with the comment introducing it -
+       is cut from between step 2 and the indexer and re-inserted after
+       step 6's o_proj. A move, not a substitution: no guard's text
+       changes, so the other mutants' substitution greps cannot see it.
+       What it covers is WHERE finalization sits, which is what makes
+       n_vis = (pos + 1) / cm usable for every mode at once - ring[blk]
+       has to already hold the block a query is standing on by the time
+       step 5 reads it. Only an ABSOLUTE attention value can see this:
+       the k_eff and selected-index assertions are direct per-position
+       computations the move cannot reach (a one-candidate selection is
+       index 0 whatever the scores are), and any check that compares an
+       attn_out against another attn_out, or a published k_eff against
+       another published k_eff, runs BOTH sides under the same
+       reordering and agrees with itself whichever order is in force.
+       Before the two absolute attn_out assertions check1a now carries,
+       nothing in this probe looked at an absolute value.
    See that gate script's own header for the exact substitutions, the
    full expected-fallout list per mutant, and why each is a text
    mutation rather than a git-ref diff.
@@ -658,7 +677,7 @@ static void check_chain_soft(void) {
        correctness comes entirely from reading whatever B published,
        per forward_csa2.c's own comment on the n_vis line.) */
     int a_n[4], b_n[4];
-    int a_idx[4][F_TOPK], b_idx[4][F_TOPK];
+    int b_idx[4][F_TOPK];
     float attn_a[F_QD], attn_b[F_QD], attn_c[F_QD];
     unsigned stx;
     const unsigned AQ = SEED0 + 100, AKV = SEED0 + 101, AIX = SEED0 + 102;
@@ -682,12 +701,12 @@ static void check_chain_soft(void) {
     fill_xb(&s, 4, F_DIM, &stx);
     forward_csa2(&m, &s, &m.layers[0], 0, 0, 4, NULL);
     memcpy(attn_a, s.attn_out, sizeof attn_a);
-    for (tk = 0; tk < 4; tk++) {
+    /* A's own published INDEX list is not captured: nothing below reads
+       it. What this fixture asserts about A is a_n - its k_eff growth -
+       and the publish buffer's survival across C's call, which is
+       compared against b_idx below. */
+    for (tk = 0; tk < 4; tk++)
         a_n[tk] = s.csa2_topk_n_pub[(size_t)ci * LZ_BATCH_MAX + tk];
-        for (k = 0; k < F_TOPK; k++)
-            a_idx[tk][k] = s.csa2_topk_idx_pub[((size_t)ci * LZ_BATCH_MAX + tk) * F_TOPK + k];
-    }
-    (void)a_idx;
     ok(a_n[0] == 1 && a_n[1] == 2 && a_n[2] == F_TOPK && a_n[3] == F_TOPK,
        "check_chain: layer A's own published k_eff grows 1,2,2,2(=topk) "
        "across the chunk");
@@ -733,7 +752,6 @@ static void check_chain_soft(void) {
     fill_xb(&s, 4, F_DIM, &stx);
     forward_csa2(&m, &s, &m.layers[2], 2, 0, 4, NULL);
     memcpy(attn_c, s.attn_out, sizeof attn_c);
-    (void)attn_c;
 
     /* Item 5: the shared ci's published buffer must be untouched by C's
        own call (Reuse writes nothing) - each of the four tokens' worth

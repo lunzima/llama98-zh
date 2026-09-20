@@ -39,8 +39,11 @@
      5. attention over the k_eff selected      - every mode
      6. output gate + o_proj                   - every mode
    Finalization sits at 3, ahead of the indexer, because a block is
-   visible to the query standing on its own last token - step 3's own
-   comment and the n_vis declaration's have the argument.
+   visible to the query standing on its own last token - the ordering
+   that lets n_vis be one mode-independent formula. Step 3's own
+   comment has that argument in full; the n_vis declaration and step
+   4's comment point back to it rather than restating it, so there is
+   exactly one copy of it to keep true.
 
    SCALAR REFERENCE: a new mechanism in this engine lands a scalar
    reference first and gets SIMD kernels in a later, separate phase -
@@ -124,31 +127,20 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
            the training tree - and engine/csa2.py's own
            csa2_causal_block_mask mirrors it there.
 
-           ONE FORMULA, EVERY MODE, which is what step 3's position in
-           this loop buys: finalization runs BEFORE the indexer reads
-           the ring, so wherever n_vis is used, entries 0..n_vis-1 of
-           ring/ring_idx are all written -
-             FULL     wrote the newest of them itself, in step 3 a few
-                      lines down, this same iteration;
-             REINDEX  reads a ring its (aliased - forward_state.c's
-                      cache_idx fill) source's ENTIRE call already
-                      filled for every token of this chunk, since
-                      forward.c dispatches layers in increasing order.
-                      That ring therefore also holds blocks belonging to
-                      LATER positions, and n_vis - not the ring's
-                      contents - is the only thing keeping this query
-                      out of them, which is why it has to be a per-
-                      POSITION formula and never a count carried in
-                      state shared with the source. Sec2.3.1 defines the
-                      three modes by what each one obtains - they "differ
-                      in how they obtain main KV, indexer K, and Top-K
-                      indices" - and says nothing about masking, so this
-                      bound has to fall out of causality itself rather
-                      than out of a cache the layer only borrows;
-             REUSE    never reads it at all - step 4 skips REUSE
-                      entirely - and takes its causal correctness from
-                      whatever its source published into the shared
-                      (ci, tk) slot.
+           ONE FORMULA, EVERY MODE, and one that has to be derived from
+           the POSITION in every one of them, never counted in state
+           shared with an alias: the ring a REINDEX layer reads also
+           holds blocks belonging to LATER positions (step 3's own
+           comment has the ordering argument, and why the alias root has
+           already run by the time this layer reads - the reason a
+           REINDEX-to-REINDEX chain works too), so for REINDEX the BOUND
+           is the only thing keeping this query out of them, not the
+           ring's contents. Sec2.3.1 defines the three modes by what
+           each one obtains - they "differ in how they obtain main KV,
+           indexer K, and Top-K indices" - and says nothing about
+           masking, so this bound has to fall out of causality itself
+           rather than out of a cache the layer only borrows.
+
            cm == 1 is the report's own named special case (SS2.3's
            "uncompressed main KV ... as a special case with a compression
            ratio of 1", which is what the reference's whole decoder half
@@ -244,19 +236,49 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
            engine/csa2.py's own K_idx (Eq 1 does not call for either on
            the indexer side).
 
-           AHEAD OF THE INDEXER, not after o_proj, and that is what lets
-           n_vis above be one mode-independent formula: on a block's own
-           last token the query already counts that block as visible, so
-           step 4 below has to find ring[blk]/ring_idx[blk] written by
-           the time it scores them. Moving it here is safe because
-           finalization reads only pend_c/pend_z/pend_c_idx/pend_z_idx -
-           this position's own contribution, written by step 2 directly
-           above, plus the preceding cm-1 positions' from earlier
-           iterations of this same loop or an earlier chunk - and
-           produces nothing but ring[blk]/ring_idx[blk], a slot that was
-           unwritten future capacity until now. Nothing it touches is
-           produced by steps 4-6, and nothing it writes was read by them
-           beforehand.
+           THE ORDERING ARGUMENT - AHEAD OF THE INDEXER, not after
+           o_proj. This is where it lives in full; the file header, the
+           n_vis declaration and step 4's comment each point back here
+           rather than restating it, so a future move of this block has
+           exactly one comment to keep true.
+
+           Why it has to be ahead: a block becomes visible to the query
+           standing on its own LAST raw token, so on exactly that token
+           step 4 must find ring[blk]/ring_idx[blk] already written by
+           the time it scores them. With finalization here, EVERY entry
+           n_vis counts is written by the time step 4 reads it - which
+           is what lets one mode-independent formula cover all three
+           modes:
+             FULL     wrote the newest of those entries itself, right
+                      here, this same iteration;
+             REINDEX  reads a ring filled by its alias ROOT's own call,
+                      for every token of this chunk: forward_state.c
+                      aliases this layer's ci onto the root's, and
+                      forward.c dispatches layers in increasing order,
+                      so the root ran strictly earlier. The root is not
+                      necessarily this layer's DIRECT source - model.c's
+                      own lz_csa2_last_writer_valid chains REINDEX
+                      through REINDEX (`last_writer[r] = i` for a
+                      REINDEX source too), and an intermediate REINDEX
+                      source finalizes nothing at all, never running
+                      this step. By the time this layer reads, the ring
+                      therefore also holds blocks belonging to LATER
+                      positions, which is why n_vis has to be a
+                      per-position bound and never a shared counter (the
+                      n_vis declaration's own comment has that half);
+             REUSE    never reads the ring at all - step 4 skips REUSE
+                      entirely - and takes its causal correctness from
+                      whatever its source published into the shared
+                      (ci, tk) slot.
+
+           Moving it here is safe because finalization reads only
+           pend_c/pend_z/pend_c_idx/pend_z_idx - this position's own
+           contribution, written by step 2 directly above, plus the
+           preceding cm-1 positions' from earlier iterations of this
+           same loop or an earlier chunk - and produces nothing but
+           ring[blk]/ring_idx[blk], a slot that was unwritten future
+           capacity until now. Nothing it touches is produced by steps
+           4-6, and nothing it writes was read by them beforehand.
 
            FULL ONLY, same reasoning as step 2: a Reindex/Reuse layer's
            aliased ci would double-finalize a block its source is also
@@ -322,11 +344,11 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
            it comes from), so a query CAN see the block it is itself
            inside, but only from that block's own last raw position
            onward, and never a block that closes later. Every one of
-           those n_vis entries is present in the ring by now: step 3
-           above just wrote the newest one for FULL, and for REINDEX the
-           ring already holds every block its source will EVER finalize
-           for this chunk - so for REINDEX it is n_vis, not the ring's
-           contents, that is the only thing enforcing causality here.
+           those n_vis entries is present in the ring by now for every
+           mode - step 3's own comment has that ordering argument in
+           full, which is what makes the single n_vis formula valid -
+           and for REINDEX it is still n_vis, not the ring's contents,
+           that is the only thing enforcing causality here.
            No mask tensor is needed either way; the bound IS the mask.
 
            FULL and REINDEX: both compute their OWN fresh query/score/
@@ -416,8 +438,8 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
            at least that one.
 
            Every mode runs this unchanged, reading tok_idx - for FULL/
-           REINDEX this is what step 4 just wrote a few lines up; for
-           REUSE it is whatever was already published there, which
+           REINDEX this is what step 4 wrote in this same iteration;
+           for REUSE it is whatever was already published there, which
            step 4's else-branch just read k_eff back out of (same
            pointer, same (ci, tk) slot - no mode branch needed here). */
         if (k_eff > 0) {

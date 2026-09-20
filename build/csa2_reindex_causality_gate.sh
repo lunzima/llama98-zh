@@ -91,13 +91,32 @@ PYEOF
 mutate "$W/mut1/forward_csa2.c" '    int n_vis = (pos0 + nt) / cm;'
 mutate "$W/mut2/forward_csa2.c" '    int n_vis = pos / cm;'
 
-for d in mut1 mut2; do
-    if grep -qF "$NEEDLE" "$W/$d/forward_csa2.c"; then
-        echo "csa2_reindex_causality_gate: FAIL - could not mutate forward_csa2.c" \
-             "($W/$d/forward_csa2.c still has the fixed n_vis line)"
-        exit 1
-    fi
-done
+# A needle that is gone means the mutation took. The three outcomes are
+# kept apart rather than collapsed into `if grep -q`: grep exits 2 when
+# it cannot read the file at all, and `if` reads that as "not found" -
+# i.e. as a successful mutation. The arms below are still caught by the
+# compile step (a genuinely missing source fails the link with rc 2,
+# which they treat as fatal), so this is a self-check reporting a read
+# error as a pass rather than a hole in the gate - but a self-check
+# should fail closed on its own account too, for the reason
+# build/csa2_mode_dispatch_gate.sh's own check_mutated gives.
+check_mutated() {
+    local dir="$1" file="$2" needle="$3" label="$4"
+    local rc
+    grep -qF "$needle" "$dir/$file"
+    rc=$?
+    case $rc in
+    0)  echo "csa2_reindex_causality_gate: FAIL - could not mutate $label" \
+             "($dir/$file still has '$needle')"
+        exit 1 ;;
+    1)  : ;;
+    *)  echo "csa2_reindex_causality_gate: FAIL - could not read $dir/$file to" \
+             "check $label (grep exited $rc)"
+        exit 1 ;;
+    esac
+}
+check_mutated "$W/mut1" forward_csa2.c "$NEEDLE" "mutant 1"
+check_mutated "$W/mut2" forward_csa2.c "$NEEDLE" "mutant 2"
 
 ENGX="err compat lfn json safetensors model ops ops_kernel ops_rope ops_moe ops_epi ops_quant ops_sched ops_matmul ops_t2_arm ops_arm ops_t2_scalar ops_norm ops_gdn ops_conv1d fwht forward forward_attn forward_moe forward_ssm forward_kda forward_engram forward_csa2 forward_mtp forward_rope forward_ckpt forward_state sampler generate lz_mathf lz_bf16 lz4d tokenizer unicode chat gbk cpucheck"
 ENGX_MMX="ops_mmx ops_mmx_sse ops_sse2"
