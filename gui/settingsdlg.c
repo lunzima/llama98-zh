@@ -117,9 +117,8 @@ enum {
    it on paper a second time: the constant this replaced was itself a
    paper derivation nobody had re-checked since the context row lost
    its slider and its note (both gone; see ID_CTX_SCROLL's and the
-   context row's own comments below), and the two rows' worth of height
-   they used to need stayed in DLG_H as dead space under the system
-   prompt box. */
+   context row's own comments below), and DLG_H carries no space for
+   them under the system prompt box. */
 #define DLG_W   330
 #define DLG_H   386
 #define PAD     LZ_GUI_DLG_MARGIN

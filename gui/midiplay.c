@@ -429,8 +429,10 @@ static int image(long n) {
  * and an empty queue.
  *
  * What it costs is the submissions: five a second at the very most,
- * each a prepare, a midiStreamOut and a notification, where a piece
- * used to cost one for the whole of it. The real rate is lower and the
+ * each a prepare, a midiStreamOut and a notification. A piece whose
+ * ratio never moves costs one for the whole of it, so this is the
+ * price of a chunk small enough for a ratio change to land at its
+ * head. The real rate is lower and the
  * paragraph below says why: MEASURED, a 40 s run of the piece this was
  * reported on sends 76 chunks over 10141 ticks, which is two a second.
  *

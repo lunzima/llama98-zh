@@ -1328,8 +1328,8 @@ typedef struct {
     float *csa2_scores;              /* (max_blocks) */
     /* csa2_topk_idx_pub / csa2_topk_n_pub: the Top-K selection a FULL or
        REINDEX layer publishes for its OWN (aliased or not) ci, one slot
-       PER TOKEN OF THE CURRENT CHUNK - NOT the single transient
-       (topk)-sized scratch this pair used to be. A REUSE-mode layer's
+       PER TOKEN OF THE CURRENT CHUNK - not one transient (topk)-sized
+       scratch shared across the whole chunk. A REUSE-mode layer's
        own call to forward_csa2 only starts after its (aliased) source's
        ENTIRE call - covering every token of this chunk - has already
        finished (forward.c dispatches layer-major: one forward_csa2 call

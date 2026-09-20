@@ -1020,8 +1020,8 @@ int lz_load_config(LZModelConfig *c, const char *path,
        lz_csa2_last_writer_valid's own whole-config question: is each
        one's declared source actually the CURRENT last writer of the
        physical slot it aliases, not merely a strictly-earlier csa2_on
-       layer. That single check subsumes the narrower one this loop
-       used to run in its place ("a REUSE layer's source must not
+       layer. That single check subsumes the narrower per-layer one, so
+       this loop does not check it ("a REUSE layer's source must not
        itself be REUSE mode" - model.c's own comment on
        lz_csa2_last_writer_valid has the proof: a REUSE layer never
        becomes anyone's last writer, so any layer naming one as its own
@@ -3144,9 +3144,9 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
        lz_csa2_last_writer_valid, which it calls) is FULL of loops
        shaped `for (i = 0; i < c->n_layers; i++)` reading or writing one
        of those arrays - each one is safe only because n_layers cannot
-       exceed their width by the time it runs. That used to be true by
-       accident of ordering (whichever loop happened to sit textually
-       after the old, single, late check), not by construction - and
+       exceed their width by the time it runs. That holds by
+       construction here, not by an accident of which loop sits
+       textually after the single, late check - and
        twice already (report Sec2.3.1 mode-dispatch task's own C1 and
        then, one review round later, its own C-NEW-1/C-NEW-2 fixing
        Minor-item/I3 code) a NEW loop of exactly this shape landed
@@ -3537,11 +3537,12 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
        n_layers was already bounded to [1, LZ_MAX_LAYERS] the instant
        its own RD() landed (this function's own comment there has the
        full argument for WHY the check lives at that read site rather
-       than here or at the "derived quantities" block just above: this
-       call, that block, and every c->n_layers-indexed loop in between
-       used to each depend on remembering that ordering by hand, which
-       is exactly what went wrong twice - report Sec2.3.1 mode-dispatch
-       task's own C1, then, one review round later, C-NEW-1/C-NEW-2).
+       than here or at the "derived quantities" block just above: with
+       the check anywhere else, this call, that block, and every
+       c->n_layers-indexed loop in between each depend on remembering
+       that ordering by hand, and relying on that is what went wrong
+       twice (report Sec2.3.1 mode-dispatch task's own C1, then, one
+       review round later, C-NEW-1/C-NEW-2).
        This call's own remaining ordering requirement is unrelated to
        n_layers: it must run only once every layer has already passed
        the per-layer csa2_mode/csa2_source loop above (this function's
