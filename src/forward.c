@@ -694,10 +694,9 @@ void lz_state_reset(LZRunState *s, const LZModel *m) {
            c->lin_conv_dim * (c->conv_kernel - 1) * sizeof(float));
     /* S2 CSA2 - guarded on the pointer, not on any csa2_on flag, same
        reasoning kq8/vq8's own guard comment gives: allocation already
-       decided whether this model has anything to zero. Finalized-block
-       counts go back to 0 exactly like ssm_slot/mtp_pos below - a reset
-       discards every compressed entry the same way it discards the KV
-       cache and the recurrent state. */
+       decided whether this model has anything to zero. A reset discards
+       every compressed entry the same way it discards the KV cache and
+       the recurrent state. */
     if (s->csa2_comp_ring) {
         int cm = c->csa2_compress_m > 0 ? c->csa2_compress_m : 1;
         int max_blocks = (s->seq_len + cm - 1) / cm;

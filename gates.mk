@@ -414,7 +414,7 @@ csa2-cache-idx-alias-gate:
 
 # Full/Reindex/Reuse mode dispatch itself (Part 5 Task 5.4, the last of
 # the three): forward_csa2.c now actually reads L->csa2_mode and skips
-# steps 2/3/6 per the report Sec2.3.1 table, and csa2_topk_idx/
+# steps 2/3/4 per the report Sec2.3.1 table, and csa2_topk_idx/
 # csa2_topk_n become per-(ci, token-in-chunk) publish buffers instead
 # of a single transient scratch (forward.h's own csa2_topk_n_pub
 # comment has the accurate account of csa2_topk_val, its pre-rename,
@@ -422,7 +422,7 @@ csa2-cache-idx-alias-gate:
 # carried forward unread - not "never existed" the way an earlier
 # version of this comment put it). Own script's header has the full
 # mutation-by-mutation
-# argument (six independent mutations, not two - the review rounds
+# argument (seven independent mutations, not two - the review rounds
 # after this task's first landing each added their own). No model dir
 # needed - builds its own hand-crafted LZModel/LZRunState fixtures with
 # real synthetic weights and calls the real forward_csa2() directly -
