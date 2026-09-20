@@ -505,6 +505,61 @@ static void check1_full_only(void) {
        "check1a: at cm=1, the first-ever token sees exactly the one block "
        "it just closed - k_eff 1, selecting block 0 (the block holding its "
        "own position)");
+    /* The k_eff assertion above pins WHICH block was selected; this one
+       pins that the selection could actually be attended over. A block
+       writes ring[blk] when it is finalized, so the selection is only
+       worth anything where that write has already happened - step 3 is
+       ahead of the indexer for exactly this reason. With the
+       finalization at the end of the per-token loop instead, ring[0] is
+       still the allocation's own zeros when step 5 reads it, a
+       one-candidate softmax over one all-zero entry weights it 1.0, and
+       the output gate and o_proj carry that exact zero vector out -
+       k_eff would still read 1, which is why the count alone is not
+       evidence that anything was attended. */
+    {
+        int d, allz = 1;
+        for (d = 0; d < F_QD; d++) if (s.attn_out[d] != 0.0f) allz = 0;
+        ok(!allz,
+           "check1a: at cm=1, that same token's attn_out is not the zero "
+           "vector - the block it just closed was already in the ring when "
+           "step 5 read it");
+    }
+    lz_state_free(&s);
+    free(m.layers);
+
+    /* The same boundary one ratio up, and the ratio a config.json that
+       leaves "csa2_compress_m" out gets (model.c's lz_load_config
+       default): at cm=2 a block closes on its own last raw position, so
+       position 1 (off 1, block 0) must already see block 0 in the
+       iteration that closes it. Position 0 is the control one line
+       above - no block has closed yet there, so k_eff is 0 and attn_out
+       IS the zero vector; the difference between the two positions is
+       the whole rule. */
+    build_model_single(&m, F_CM2, SEED0 + 1, SEED0 + 2, SEED0 + 3);
+    if (lz_state_alloc(&s, &m, F_SEQLEN, 0, errbuf, sizeof errbuf) != 0) {
+        printf("FAIL check1a (cm=2, last token): lz_state_alloc: %s\n", errbuf);
+        g_fail = 1;
+        free(m.layers);
+        return;
+    }
+    ci = s.cache_idx[0];
+    stx = SEED0 + 11;
+    fill_xb(&s, 1, F_DIM, &stx);
+    forward_csa2(&m, &s, &m.layers[0], 0, 0, 1, NULL);
+    fill_xb(&s, 1, F_DIM, &stx);
+    forward_csa2(&m, &s, &m.layers[0], 0, 1, 1, NULL);
+    ok(s.csa2_topk_n_pub[(size_t)ci * LZ_BATCH_MAX + 0] == 1 &&
+       s.csa2_topk_idx_pub[(size_t)ci * LZ_BATCH_MAX * F_TOPK + 0] == 0,
+       "check1a: at cm=2, the token that closes block 0 (pos 1) selects it "
+       "- k_eff 1, selecting block 0");
+    {
+        int d, allz = 1;
+        for (d = 0; d < F_QD; d++) if (s.attn_out[d] != 0.0f) allz = 0;
+        ok(!allz,
+           "check1a: ...and its attn_out is not the zero vector - block 0 "
+           "was already final in the ring when step 5 read it, in the same "
+           "iteration that closed it");
+    }
     lz_state_free(&s);
     free(m.layers);
 

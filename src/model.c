@@ -1449,7 +1449,7 @@ int lz_csa2_mode_source_valid(const LZModelConfig *c, int li) {
    slot without one being the other's own declared source - a FULL
    layer and every REINDEX layer chained off it (directly or
    transitively) all alias the one root's slot. forward_csa2.c's own
-   step 3 has each FULL/REINDEX layer OVERWRITE that shared slot with
+   step 4 has each FULL/REINDEX layer OVERWRITE that shared slot with
    its own fresh Top-K when its call runs (report Sec2.3.1's own
    header comment on csa2_topk_idx_pub), so by the time a REUSE (or a
    later REINDEX) layer's own call reads it, what is actually there is
@@ -1513,7 +1513,7 @@ int lz_csa2_last_writer_valid(const LZModelConfig *c, int *bad_layer) {
             return 0;
         }
         if (c->csa2_mode[i] == LZ_CSA2_REINDEX) last_writer[r] = i;
-        /* REUSE writes nothing - forward_csa2.c's own step 3 skips it
+        /* REUSE writes nothing - forward_csa2.c's own step 4 skips it
            entirely - so last_writer[r] is untouched, and any LATER
            layer declaring THIS reuse layer as its own source fails the
            check above (last_writer[r] can only ever hold a FULL or
@@ -1791,7 +1791,7 @@ static int model_walk(LZModel *m, LZVisit visit, void *ctx,
             /* Which of the seven a layer's csa2_mode actually owns -
              * forward_csa2.c's own dispatch already reads exactly this
              * subset (step 2, indices 0-3, is skipped whenever mode !=
-             * FULL; step 3, indices 4-6, is skipped only for REUSE), so
+             * FULL; step 4, indices 4-6, is skipped only for REUSE), so
              * this walk is catching up to code that was already
              * correct, not the other way around. Mirrors the training
              * side's engine/csa2.py _wire_csa2 field for field

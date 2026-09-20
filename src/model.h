@@ -516,18 +516,6 @@ typedef struct {
        on both the JSON and bin paths, not left to fail later on a
        missing or misaligned tensor.
 
-       KNOWN DEVIATION, not yet fixed: this engine's block-visibility
-       count (forward_csa2.c's n_vis, and engine/csa2.py's own
-       csa2_causal_block_mask on the training side) is ONE BLOCK
-       TIGHTER than the report's own reference implementation - see
-       docs/dsv41-optimization-menu.md SS11 for the exact formulas, the
-       worked example, and why the direction is conservative (no
-       future leakage) but not free (half of every block's queries
-       lose visibility into their own most recent positions at a
-       compress ratio of 2, and a ratio of 1 - the report's own
-       "uncompressed main KV" special case - degenerates to a query
-       that cannot see itself at all).
-
        PER-LAYER, not global like mla_q_lora_rank/mla_o_lora_rank above:
        csa2_layers may name a SUBSET of the full-attention layers (S1's
        attn_kv_share, the other CSA2-derived mechanism, is also

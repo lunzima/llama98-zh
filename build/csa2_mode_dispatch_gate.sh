@@ -13,7 +13,7 @@
 # (lz_state_alloc's own helpers span ops_quant.c/ops_norm.c/fwht.c
 # etc.), not just one translation unit.
 #
-# THE CONTROL is SIX INDEPENDENT MUTATIONS, not a git-history diff, same
+# THE CONTROL is SEVEN INDEPENDENT MUTATIONS, not a git-history diff, same
 # reason every other gate on this plan gives: a git-ref-pinned "before"
 # copy goes stale the day this fix lands and HEAD catches up to the
 # working tree. Three were written with the task's own first landing;
@@ -24,8 +24,12 @@
 # ci), and that neither of the two review-added validation predicates
 # (lz_csa2_pub_overflows, lz_csa2_mode_source_valid) nor the later
 # whole-config one (lz_csa2_last_writer_valid) had a mutation of their
-# own - this file's own history is the record of both rounds; it is not
-# rewritten to look like it was designed in one pass, because it was not.
+# own. Mutation 7 below is a move rather than a substitution, and covers
+# what none of the six can: WHERE the finalization step sits in
+# forward_csa2.c's per-token loop, which is what makes n_vis a single
+# mode-independent formula. This file's own history is the record of
+# those rounds; it is not rewritten to look like it was designed in one
+# pass, because it was not.
 #
 #   MUTATION 1, "dispatch reverted": the three csa2_mode guards in
 #   forward_csa2.c - step 2's FULL-only `if (mode == LZ_CSA2_FULL)`,
@@ -86,10 +90,10 @@
 #   under the mutation rather than assumed:
 #     - check_chain_soft's two DIRECT publish-buffer reads turn FAIL -
 #       "layer A's own published k_eff grows 1,2,2,2(=topk) across the
-#       chunk" (A's own tk=0/1/2 writes all land in the same physical
-#       slot, so only the last one survives) and "layer B (reindex)
-#       k_eff grows 1,2,2,2 across its own chunk" (same collapse, one
-#       layer downstream).
+#       chunk" (A's own four tokens, tk=0..3, all publish into the same
+#       physical slot, so only the last one survives) and "layer B
+#       (reindex) k_eff grows 1,2,2,2 across its own chunk" (same
+#       collapse, one layer downstream).
 #     - check1b's own two published-buffer match assertions ALSO turn
 #       FAIL: they are not Reindex/Reuse-specific (check1b is a single
 #       FULL-mode layer), but they specifically compare batched vs
@@ -127,11 +131,12 @@
 #   the function always answers "no overflow", the direction that
 #   actually matters (a false "safe" lets the real bug through; a false
 #   "overflow" would only ever reject a legitimate config). Expected
-#   fallout: ONLY check_overflow_guard's "4 * (size_t's own max/4 + 1)
-#   ... correctly flagged" line turns FAIL (the one assertion that
-#   requires the function to answer "yes, this overflows"); the "stays
-#   under the ceiling" control, the production-worst-case check, and
-#   both nf==0/batch_max==0 short-circuit checks (which never reach the
+#   fallout: ONLY check_overflow_guard's own "nf = cap/4+1, topk=4,
+#   elem_sz=1 - 4x nf exceeds the exact byte ceiling - correctly
+#   flagged" line turns FAIL (the one assertion that requires the
+#   function to answer "yes, this overflows"); the "stays under the
+#   ceiling" control, the production-worst-case check, and both
+#   nf==0/batch_max==0 short-circuit checks (which never reach the
 #   mutated return at all) stay PASS.
 #
 #   MUTATION 5, "lz_csa2_mode_source_valid's source half neutered":
@@ -159,6 +164,41 @@
 #   predicate alone still accepts it" line (a DIFFERENT function,
 #   lz_csa2_mode_source_valid, untouched) both stay PASS, along with
 #   everything else.
+#
+#   MUTATION 7, "finalization moved back to the end of the per-token
+#   loop": forward_csa2.c's whole finalize region - the
+#   `if (off == cm - 1 && mode == LZ_CSA2_FULL) { ... }` block together
+#   with the comment that introduces it - is CUT from between step 2 and
+#   the indexer and re-INSERTED after step 6's o_proj, inside the same
+#   loop. A move, not a substitution: no `if (mode == ...)` guard is
+#   touched, so mutation 1's own fallout list is untouched by it, and no
+#   line's text changes, so mutation 1/2's substitution greps cannot see
+#   it. What it breaks is the one property that makes
+#   `n_vis = (pos + 1) / cm` usable for every mode at once - that
+#   ring[blk]/ring_idx[blk] already hold the block a query is standing on
+#   by the time step 5 reads them. Expected fallout, read off this
+#   probe's own run under the mutation rather than assumed:
+#     - TURN FAIL: exactly check1a's two attn_out assertions - cm=1
+#       position 0, and cm=2 position 1, a block's own last raw token.
+#       Both positions select a single block either way, so `k_eff 1,
+#       selecting block 0` keeps printing PASS at both ratios (n_vis is
+#       a direct per-position computation that no move can reach, and
+#       the one-candidate selection is index 0 whatever the scores are).
+#       What the move changes is the ring CONTENT step 5 reads: with the
+#       finalization at the end of the loop, ring[0] is still the
+#       allocation's zeros when step 5 reads it, a one-candidate softmax
+#       over a zero entry weights it 1.0, and the output gate and o_proj
+#       carry that exact zero vector out.
+#     - STAY PASS: every other line the probe prints - the 41 the probe
+#       had before these two assertions and the third new one, check1a's
+#       cm=2 selection line, which is the same shape as its cm=1
+#       counterpart and is blind for the same reason. That is the whole
+#       point of this mutation: a check that compares an attn_out against
+#       another attn_out, or a published k_eff against another published
+#       k_eff, runs BOTH sides under the same reordering and so agrees
+#       with itself whatever the order is. Only an absolute value can see
+#       it, and before these two assertions nothing in this probe looked
+#       at one.
 #
 # A mutant where the expected-to-fail lines stay PASS means the probe
 # cannot see that defect at all - reported as a gate FAILURE. A mutant
@@ -188,10 +228,10 @@ command -v python3 >/dev/null 2>&1 || {
 }
 
 W=$(mktemp -d 2>/dev/null || echo /tmp/csa2modedispatchgate.$$)
-mkdir -p "$W/fixed" "$W/mut1" "$W/mut2" "$W/mut3" "$W/mut4" "$W/mut5" "$W/mut6"
+mkdir -p "$W/fixed" "$W/mut1" "$W/mut2" "$W/mut3" "$W/mut4" "$W/mut5" "$W/mut6" "$W/mut7"
 trap 'rm -rf "$W"' EXIT
 
-for d in fixed mut1 mut2 mut3 mut4 mut5 mut6; do
+for d in fixed mut1 mut2 mut3 mut4 mut5 mut6 mut7; do
     cp src/*.c src/*.h "$W/$d/" 2>/dev/null
 done
 
@@ -205,6 +245,7 @@ for needle_file in \
     "forward_csa2.c:        int *tok_n = pub_n_base + tk;" \
     "forward_csa2.c:    int *pub_idx_base = s->csa2_topk_idx_pub + (size_t)ci * LZ_BATCH_MAX * topk;" \
     "forward_csa2.c:    int *pub_n_base = s->csa2_topk_n_pub + (size_t)ci * LZ_BATCH_MAX;" \
+    "forward_csa2.c:        lz_matmul_w(s->xb2 + (size_t)tk * hdim, s->attn_out, &L->o_proj," \
     "forward_state.c:    return (size_t)topk > cap / n;"
 do
     file=${needle_file%%:*}
@@ -335,6 +376,84 @@ with open(path, "w", encoding="utf-8") as f:
     f.write(src)
 PYEOF
 
+python3 - "$W/mut7/forward_csa2.c" <<'PYEOF' || exit 1
+import sys
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    before = f.read().splitlines(True)
+
+GUARD = "        if (off == cm - 1 && mode == LZ_CSA2_FULL) {\n"
+OPROJ0 = "        lz_matmul_w(s->xb2 + (size_t)tk * hdim, s->attn_out, &L->o_proj,\n"
+OPROJ1 = "                   qd, hdim, s->xq, s->xqs);\n"
+
+
+def fail(msg):
+    print("csa2_mode_dispatch_gate: FAIL - mutation 7 " + msg, file=sys.stderr)
+    sys.exit(1)
+
+
+def only(lines, needle, what):
+    hits = [i for i, l in enumerate(lines) if l == needle]
+    if len(hits) != 1:
+        fail("expected exactly one %s line in the source, found %d"
+             % (what, len(hits)))
+    return hits[0]
+
+
+guard_i = only(before, GUARD, "finalize guard")
+op0 = only(before, OPROJ0, "step 6 o_proj call")
+if op0 + 1 >= len(before) or before[op0 + 1] != OPROJ1:
+    fail("the o_proj call is not the two-line shape the move anchors on")
+if not guard_i < op0:
+    fail("the finalize guard is not ahead of o_proj in the source to begin with")
+
+# The contiguous block comment directly above the guard is part of the
+# region that moves (a stray step-3 comment left behind would describe a
+# step that no longer runs there).
+cut_start = guard_i
+if before[cut_start - 1].rstrip().endswith("*/"):
+    j = cut_start - 1
+    while not before[j].lstrip().startswith("/*"):
+        j -= 1
+    cut_start = j
+
+# Cut end: the guard's matching close brace, counted on the code itself
+# rather than on a comment or a fixed line offset.
+depth = 0
+k = guard_i
+while True:
+    if k >= len(before):
+        fail("the finalize guard's braces never balance")
+    depth += before[k].count("{") - before[k].count("}")
+    k += 1
+    if depth == 0:
+        break
+cut_end = k
+
+block = before[cut_start:cut_end]
+after = before[:cut_start] + before[cut_end:]
+op0_after = only(after, OPROJ0, "step 6 o_proj call (after the cut)")
+after = after[:op0_after + 2] + block + after[op0_after + 2:]
+
+# The move must be a PURE reordering: same lines, same count, only the
+# two regions swapped. Anything else and this arm is not testing the
+# ordering it claims to.
+if len(after) != len(before):
+    fail("the move changed the line count (%d -> %d)" % (len(before), len(after)))
+if sorted(after) != sorted(before):
+    fail("the move altered line content - it has to be a pure reordering")
+guard_after = only(after, GUARD, "finalize guard (after the move)")
+if guard_after != op0_after + 2 + (guard_i - cut_start):
+    fail("the finalize region did not land directly after the o_proj call")
+if not guard_after > op0_after:
+    fail("the finalize guard is still ahead of the o_proj call")
+
+with open(path, "w", encoding="utf-8") as f:
+    f.writelines(after)
+print("mutation 7 applied: %d lines cut at line %d, re-inserted after line %d"
+      % (len(block), cut_start + 1, op0_after + 2))
+PYEOF
+
 check_mutated() {
     local dir="$1" file="$2" needle="$3" label="$4"
     if grep -qF "$needle" "$dir/$file"; then
@@ -351,6 +470,20 @@ check_mutated "$W/mut3" forward_csa2.c "+ (size_t)ci * LZ_BATCH_MAX;" "mutant 3"
 check_mutated "$W/mut4" forward_state.c "return (size_t)topk > cap / n;" "mutant 4"
 check_mutated "$W/mut5" model.c "c->layer_types[src] == LZ_LT_FULL;" "mutant 5"
 check_mutated "$W/mut6" model.c "if (c->csa2_source[i] != last_writer[r]) {" "mutant 6"
+# Mutant 7's verification lives here rather than in check_mutated above:
+# it is a MOVE, so its needle is never gone - only somewhere else - and
+# "the needle is gone" is the one thing that would be wrong to assert.
+# The python step already asserted purity (same lines, same count, same
+# block) on the text it had in hand; this re-reads the file from disk and
+# asserts the ordering the name promises, so a mutation that silently did
+# nothing cannot pass for a mutation that worked.
+G7=$(grep -nF '        if (off == cm - 1 && mode == LZ_CSA2_FULL) {' "$W/mut7/forward_csa2.c" | head -1 | cut -d: -f1)
+O7=$(grep -nF 's->attn_out, &L->o_proj,' "$W/mut7/forward_csa2.c" | head -1 | cut -d: -f1)
+if [ -z "$G7" ] || [ -z "$O7" ] || [ "$G7" -le "$O7" ]; then
+    echo "csa2_mode_dispatch_gate: FAIL - mutant 7 left the finalize guard at or" \
+         "ahead of the o_proj call (guard line '${G7:-none}', o_proj line '${O7:-none}')"
+    exit 1
+fi
 
 # The whole engine body (Makefile's $(ENG)) plus the MMX/SSE2/AVX2
 # objects every gcc build links unconditionally - same list ced_proj_
@@ -418,15 +551,15 @@ check_lines() {
 
 # The probe's own total ok() call count, unaffected by any mutation
 # that does not crash it outright - matches mutant 2's own
-# STAY_PASS+TURN_FAIL array lengths further down (41 entries combined),
+# STAY_PASS+TURN_FAIL array lengths further down (44 entries combined),
 # counted off the control run's own output rather than derived, since
 # bash arrays are not yet in scope this early in the script. Mutants
-# 3-6 run the probe to completion (never crash) and so must each
+# 3-7 run the probe to completion (never crash) and so must each
 # account for exactly this many PASS+FAIL lines, same reasoning as
 # mutant 2's own total-count assertion; mutant 1 crashes before check3b
 # and declares its own, smaller total instead (its own comment has the
 # count).
-PROBE_TOTAL_LINES=41
+PROBE_TOTAL_LINES=44
 
 echo "-- current tree (must PASS) --"
 build_and_run "$W/fixed" "the current (fixed) tree"
@@ -462,6 +595,9 @@ else
         "check1a: at cm=2, the first-ever token's published k_eff is 0"
         "check1a: that k_eff==0 token's attn_out is the exact zero vector"
         "check1a: at cm=1, the first-ever token sees exactly the one block it just closed - k_eff 1, selecting block 0 (the block holding its own position)"
+        "check1a: at cm=1, that same token's attn_out is not the zero vector - the block it just closed was already in the ring when step 5 read it"
+        "check1a: at cm=2, the token that closes block 0 (pos 1) selects it - k_eff 1, selecting block 0"
+        "check1a: ...and its attn_out is not the zero vector - block 0 was already final in the ring when step 5 read it, in the same iteration that closed it"
         "check1b: batch-vs-unbatched - published k_eff matches token for token"
         "check1b: batch-vs-unbatched - published Top-K indices match token for token"
         "check1b: batch-vs-unbatched - last token's attn_out is bit-identical"
@@ -500,12 +636,12 @@ else
              "should have crashed there instead (see this script's own header comment)"
         missing=1
     fi
-    # Total-count assertion, same idiom mutants 3-6 use below. Mutant 1
+    # Total-count assertion, same idiom mutants 3-7 use below. Mutant 1
     # crashes before check3b ever prints, so STAY_PASS+TURN_FAIL here is
     # not the probe's full line count - the two arrays' own combined
-    # length (24) is the only thing that would notice a line vanishing
+    # length (27) is the only thing that would notice a line vanishing
     # outright, i.e. never printed as either PASS or FAIL. It also
-    # re-checks the split: 18 PASS + 6 FAIL is what the crash leaves.
+    # re-checks the split: 21 PASS + 6 FAIL is what the crash leaves.
     if [ "$(grep -c '^PASS\|^FAIL' "$W/mut1/run.log")" != "$((${#STAY_PASS[@]} + ${#TURN_FAIL[@]}))" ]; then
         echo "csa2_mode_dispatch_gate: FAIL - mutant 1's own STAY_PASS+TURN_FAIL" \
              "($((${#STAY_PASS[@]} + ${#TURN_FAIL[@]})) lines) does not account for" \
@@ -533,6 +669,9 @@ else
         "check1a: at cm=2, the first-ever token's published k_eff is 0"
         "check1a: that k_eff==0 token's attn_out is the exact zero vector"
         "check1a: at cm=1, the first-ever token sees exactly the one block it just closed - k_eff 1, selecting block 0 (the block holding its own position)"
+        "check1a: at cm=1, that same token's attn_out is not the zero vector - the block it just closed was already in the ring when step 5 read it"
+        "check1a: at cm=2, the token that closes block 0 (pos 1) selects it - k_eff 1, selecting block 0"
+        "check1a: ...and its attn_out is not the zero vector - block 0 was already final in the ring when step 5 read it, in the same iteration that closed it"
         "check1b: batch-vs-unbatched - last token's attn_out is bit-identical"
         "check_chain: all three layers share the same physical ci (cache_idx aliasing from the prior task still holds)"
         "check_chain: layer B's own Top-K selection is not identical across all four of its own tokens"
@@ -577,7 +716,7 @@ else
     missing=0
     check_lines "$W/mut2/run.log" "mutant 2" "PASS" "${STAY_PASS[@]}" || missing=1
     check_lines "$W/mut2/run.log" "mutant 2" "FAIL" "${TURN_FAIL[@]}" || missing=1
-    # Total-count assertion, same idiom mutant 3/4/5/6 already use below -
+    # Total-count assertion, same idiom mutants 3 through 7 already use below -
     # STAY_PASS+TURN_FAIL above must be EVERY line the probe can print,
     # not just the ones this mutation is most obviously about. A line
     # that is in NEITHER array is invisible to a future change that made
@@ -707,6 +846,50 @@ else
              "(the F9 whole-config check), or did not print all $PROBE_TOTAL_LINES" \
              "lines the probe normally prints"
         RC=1
+    fi
+fi
+
+echo ""
+echo "-- mutant 7: finalization moved back to the end of the per-token loop --"
+build_and_run "$W/mut7" "mutant 7 (finalization reordered)"
+MUT7_RC=$?
+if [ "$MUT7_RC" -eq 2 ]; then
+    exit 1
+elif [ "$MUT7_RC" -eq 0 ]; then
+    echo "csa2_mode_dispatch_gate: FAIL - mutant 7 PASSED; the probe cannot see this defect"
+    RC=1
+else
+    TURN_FAIL=(
+        "check1a: at cm=1, that same token's attn_out is not the zero vector - the block it just closed was already in the ring when step 5 read it"
+        "check1a: ...and its attn_out is not the zero vector - block 0 was already final in the ring when step 5 read it, in the same iteration that closed it"
+    )
+    # The selection lines stay PASS by construction - n_vis is a direct
+    # per-position computation no reordering reaches, and a one-candidate
+    # selection is index 0 whatever the scores are - so they are named
+    # here rather than left to the count, which cannot tell a line that
+    # stayed green from one that never printed.
+    STAY_PASS=(
+        "check1a: at cm=1, the first-ever token sees exactly the one block it just closed - k_eff 1, selecting block 0 (the block holding its own position)"
+        "check1a: at cm=2, the token that closes block 0 (pos 1) selects it - k_eff 1, selecting block 0"
+    )
+    missing=0
+    check_lines "$W/mut7/run.log" "mutant 7" "FAIL" "${TURN_FAIL[@]}" || missing=1
+    check_lines "$W/mut7/run.log" "mutant 7" "PASS" "${STAY_PASS[@]}" || missing=1
+    if [ "$(grep -c '^FAIL' "$W/mut7/run.log")" != "${#TURN_FAIL[@]}" ]; then
+        echo "csa2_mode_dispatch_gate: FAIL - mutant 7 failed a different number of" \
+             "lines than expected (${#TURN_FAIL[@]}); a reordering that reaches a" \
+             "check no other mutation reaches is exactly what this arm looks for"
+        missing=1
+    fi
+    if [ "$(grep -c '^PASS\|^FAIL' "$W/mut7/run.log")" != "$PROBE_TOTAL_LINES" ]; then
+        echo "csa2_mode_dispatch_gate: FAIL - mutant 7 did not print all" \
+             "$PROBE_TOTAL_LINES lines the probe normally prints"
+        missing=1
+    fi
+    if [ "$missing" -ne 0 ]; then
+        RC=1
+    else
+        echo "-- mutant 7 failed exactly the two absolute-attention-value checks, and no others --"
     fi
 fi
 
