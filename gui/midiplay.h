@@ -42,6 +42,14 @@ void lz_midi_halt(void);
  * cheap enough for every status-bar tick. */
 void lz_midi_ratio(int ratio_milli);
 
+/* A position reading with NO write between the two samples: the
+ * control for what a `tempo` line's bracket shows. Called from the
+ * same place lz_midi_ratio is, on the ticks where the ratio did not
+ * move, so the two arms are sampled at one cadence. It writes nothing
+ * and plays nothing either way - without a trace it returns on its
+ * first test. */
+void lz_midi_probe(void);
+
 /* The sound settings changed while a piece was playing: STOP.
  *
  * Nothing can be changed under a piece that is already queued - the
@@ -73,8 +81,10 @@ void lz_midi_shutdown(void);
  * the device or to the clock either. ON changes nothing about playback.
  * What it adds is bounded and named: two position queries and two
  * counter reads around each tempo write - the bracket `pos0`/`pos1`/
- * `dt_us` on those lines - and one position query on the
- * `tempo why=start` line every piece opens with. The file's own header
+ * `dt_us` on those lines - and the same pair for a `probe` line, the
+ * control reading taken where the ratio did not move, at most one
+ * every LZ_MIDI_PROBE_MIN_US (midiplay.c holds that bound). The
+ * file's own header
  * says what a tick is, why a chunk's tick range is comparable with
  * `pos` only inside one playback, and why the `t` column cannot
  * separate two events 100 ms apart on a machine that has been up for

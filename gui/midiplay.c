@@ -16,6 +16,17 @@
  * megabyte is twice the largest real file seen. */
 #define LZ_MIDI_MAX_FILE  (1024L * 1024L)
 
+/* The shortest interval between two `probe` lines - the control reading
+ * of the stream's position, taken where a tempo write did not happen.
+ *
+ * The tick that calls the follow runs at the stream_ms setting, 100 ms
+ * by default, and a piece whose ratio is ramping writes the tempo on
+ * most of those ticks. A bound a quarter of that leaves several control
+ * samples between two writes, which is what makes the arms comparable,
+ * and keeps the file's growth tied to the write rate rather than to
+ * stream_ms when the user has set that short. */
+#define LZ_MIDI_PROBE_MIN_US  LZ_I64_C(25000)
+
 static int   g_opened;          /* the device is open */
 static int   g_tried;           /* and we have stopped asking */
 static int   g_playing;
@@ -68,6 +79,7 @@ static char  g_piece[MAX_PATH];  /* the piece the lines below are about */
 static char  g_line[512];
 static char  g_pos0[24];    /* the position before a tempo write */
 static char  g_pos1[24];    /* and after it - two, because one line has both */
+static char  g_dpos[24];    /* and the distance between a probe line's pair */
 static char  g_us0[24];     /* the tempo the write replaced, or `none` */
 static int   g_sent;        /* chunks handed over since the piece began */
 static int   g_done;        /* and the one the next notification is for */
@@ -77,6 +89,13 @@ static int   g_done;        /* and the one the next notification is for */
  * driver's own default is what is in force until the first write. */
 static unsigned long g_tempo_last;
 static int           g_tempo_set;
+/* When the last `probe` line was written, and whether one ever has. The
+ * limit is a difference of two readings of the counter the line itself
+ * reports, because lz_time_ms is quantised far more coarsely than a
+ * bound this short - the trace header's `t IS COARSE` paragraph has the
+ * measurement, and it is a reading taken before a bracket either way. */
+static lz_i64        g_probe_last;
+static int           g_probe_set;
 
 #define tracing() (g_trace != NULL)
 
@@ -163,7 +182,44 @@ void lz_midi_trace_to(const char *path) {
             lz_ui_us_fine() ? "QueryPerformanceCounter, quantum 100 ns"
                             : "GetTickCount - every dt_us is a whole "
                               "millisecond, 15.6 ms or 55 ms apart");
+    /* The control arm, and why it is the line that makes the others
+       mean something. Nothing in a tempo line's own numbers separates a
+       write that moved the stream from a device that reports its
+       position on some cadence of its own - both show as an advance
+       across a window too short to have played the music. A window
+       with no write in it is what separates them. */
+    fputs("# probe is the CONTROL for that: the same two position samples "
+          "with NOTHING written between them, taken from the same call\n"
+          "# as the writes and on the ticks where the ratio did not move. "
+          "pos, pos0 and dt_us mean what they mean on a tempo line,\n"
+          "# so one expression reads both arms: an advance that shows up "
+          "on a probe line too is the device's own reporting cadence,\n"
+          "# and one that shows up only across a write is the write moving "
+          "the stream. dpos is pos - pos0, the advance itself.\n", g_trace);
+    fputs("# A probe line is written ONLY while a piece is playing AND the "
+          "device still owes a buffer (inflight > 0): with the stream\n"
+          "# stopped, or with the last chunk played out, a position that "
+          "stands still answers with the state rather than with the\n"
+          "# write. us is the tempo in force - a probe line has one, not "
+          "two, so there is no us0 - and it reads `none` until the\n"
+          "# first write has landed, exactly as us0 does on a tempo line. "
+          "pos=unavailable, or dpos=unavailable, is a reading that\n"
+          "# could not be taken.\n", g_trace);
+    fprintf(g_trace,
+            "# At most one probe line per %lu ms, so several stand between "
+            "two writes while the file's growth stays tied to the\n"
+            "# write rate rather than to the tick rate.\n",
+            (unsigned long)(LZ_MIDI_PROBE_MIN_US / LZ_I64_C(1000)));
     fflush(g_trace);
+}
+
+/* The tempo in force, into `buf`, or the word for "no write has landed
+   yet". A zero in its place would read as a tempo the device was
+   running at, and the driver's own default is what is in force until
+   the first write. */
+static void tempo_text(char *buf, int cap) {
+    if (g_tempo_set) snprintf(buf, (size_t)cap, "%lu", g_tempo_last);
+    else             snprintf(buf, (size_t)cap, "none");
 }
 
 /* Write the tempo, and record what the stream did across the write.
@@ -197,8 +253,7 @@ static int tempo_write(const char *why, int ratio_milli, unsigned long us) {
     t1 = lz_ui_us_now();
     pos_text(g_pos0, (int)sizeof g_pos0, got0, p0);
     pos_text(g_pos1, (int)sizeof g_pos1, got1, p1);
-    if (g_tempo_set) snprintf(g_us0, sizeof g_us0, "%lu", g_tempo_last);
-    else             snprintf(g_us0, sizeof g_us0, "none");
+    tempo_text(g_us0, (int)sizeof g_us0);
     /* `pos` keeps meaning what it meant before the bracket existed:
        where the stream was once the write had been made. */
     snprintf(g_line, sizeof g_line,
@@ -213,6 +268,60 @@ static int tempo_write(const char *why, int ratio_milli, unsigned long us) {
         g_tempo_set = 1;
     }
     return ok;
+}
+
+/* Read the position twice with NOTHING between the samples - the
+ * control arm for what a tempo line's bracket shows.
+ *
+ * The samples are the same two calls in the same order, so pos, pos0
+ * and dt_us mean the same thing on both lines: how far the stream
+ * moved across one immediate pair of reads. That is what makes the
+ * pair answerable at all. A jump across a write and a device that
+ * reports its position on some cadence of its own both show as an
+ * advance over a window far too short to have played the music, and
+ * only a window with no write in it tells them apart - the reading is
+ * taken from the same place the writes are made, on the ticks where
+ * the ratio did not move.
+ *
+ * Written ONLY while a piece is playing and the device still owes a
+ * buffer: stopped, or with the last chunk played out, the stream has a
+ * position that stands still for a reason that has nothing to do with
+ * any write, and a control sample taken there would answer with the
+ * state instead.
+ *
+ * Rate-limited to one line per LZ_MIDI_PROBE_MIN_US, on the same
+ * counter the bracket uses. The read that enforces the limit is the
+ * bracket's own t0, so the bound costs no extra clock call. */
+void lz_midi_probe(void) {
+    unsigned long p0 = 0, p1 = 0;
+    lz_i64 t0, t1;
+    int got0, got1;
+
+    if (!tracing()) return;
+    if (!g_playing || g_pending <= 0) return;
+    t0 = lz_ui_us_now();
+    if (g_probe_set && t0 - g_probe_last < LZ_MIDI_PROBE_MIN_US) return;
+    g_probe_last = t0;
+    g_probe_set = 1;
+
+    got0 = lz_ui_midi_position(&p0);
+    got1 = lz_ui_midi_position(&p1);
+    t1 = lz_ui_us_now();
+    pos_text(g_pos0, (int)sizeof g_pos0, got0, p0);
+    pos_text(g_pos1, (int)sizeof g_pos1, got1, p1);
+    /* The advance the two arms are compared on, and the word for one
+       that could not be worked out - a difference taken across a
+       reading that failed would be a number the stream never had. */
+    if (got0 && got1)
+        snprintf(g_dpos, sizeof g_dpos, "%ld", (long)(p1 - p0));
+    else
+        snprintf(g_dpos, sizeof g_dpos, "unavailable");
+    tempo_text(g_us0, (int)sizeof g_us0);
+    snprintf(g_line, sizeof g_line,
+             "probe pos=%s pos0=%s dpos=%s dt_us=%lu us=%s inflight=%d",
+             g_pos1, g_pos0, g_dpos, (unsigned long)(t1 - t0), g_us0,
+             g_pending);
+    trace_line(g_line);
 }
 
 static void trace_chunk(int slot, int events, unsigned long first,

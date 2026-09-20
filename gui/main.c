@@ -2580,7 +2580,12 @@ static void music_follow(void) {
        the speed of the change is in real time and does not depend on
        what stream_ms happens to be set to. */
     r = lz_music_ratio_step(g.mus_ratio, target, ui_tick_ms());
-    if (r == g.mus_ratio) return;
+    /* A ratio that did not move writes nothing, and that is the one
+       tick a control reading can be taken on: the same two position
+       samples with no write between them, which is what tells a write
+       that moves the stream apart from a device that reports its
+       position on a cadence of its own. See lz_midi_probe. */
+    if (r == g.mus_ratio) { lz_midi_probe(); return; }
     g.mus_ratio = r;
     lz_midi_ratio(r);
 }
