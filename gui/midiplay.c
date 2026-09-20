@@ -99,9 +99,21 @@ static void pos_text(char *buf, int cap, int got, unsigned long tick) {
 }
 
 void lz_midi_trace_to(const char *path) {
+    long have;
     if (g_trace || !path || !*path) return;
-    g_trace = fopen(path, "wb");
+    /* Appended, never truncated: a trace already collected has to
+       survive a later start of the program. One run that opens the
+       same path - a selftest, say - would otherwise leave the header
+       and nothing else, which is indistinguishable from a run in which
+       nothing happened. */
+    g_trace = fopen(path, "ab");
     if (!g_trace) return;
+    fseek(g_trace, 0, SEEK_END);
+    have = ftell(g_trace);
+    if (have > 0) {
+        fputs("# --- new run ---\n", g_trace);
+        return;
+    }
     /* The header, because a reader who takes these ticks for the file's
        own draws the wrong conclusion from every line under it. Written
        a line at a time rather than formatted into one buffer: it is
