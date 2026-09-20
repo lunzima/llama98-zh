@@ -454,12 +454,27 @@ print("mutation 7 applied: %d lines cut at line %d, re-inserted after line %d"
       % (len(block), cut_start + 1, op0_after + 2))
 PYEOF
 
+# A needle that is gone means the mutation took. The three outcomes are
+# kept apart rather than collapsed into `if grep -q`: grep exits 2 when
+# it cannot read the file at all, and `if` reads that as "not found" -
+# i.e. as a successful mutation. The arms below are still caught by the
+# compile step (a missing source fails the link, and every arm treats
+# rc 2 as fatal), so this is a self-check reporting a read error as a
+# pass rather than a hole in the gate - but a self-check should fail
+# closed on its own account too.
 check_mutated() {
     local dir="$1" file="$2" needle="$3" label="$4"
-    if grep -qF "$needle" "$dir/$file"; then
-        echo "csa2_mode_dispatch_gate: FAIL - could not mutate $label ($dir/$file still has $needle)"
-        exit 1
-    fi
+    local rc
+    grep -qF "$needle" "$dir/$file"
+    rc=$?
+    case $rc in
+    0)  echo "csa2_mode_dispatch_gate: FAIL - could not mutate $label ($dir/$file still has $needle)"
+        exit 1 ;;
+    1)  : ;;
+    *)  echo "csa2_mode_dispatch_gate: FAIL - could not read $dir/$file to check $label" \
+             "(grep exited $rc)"
+        exit 1 ;;
+    esac
 }
 check_mutated "$W/mut1" forward_csa2.c "if (mode == LZ_CSA2_FULL) {" "mutant 1"
 check_mutated "$W/mut1" forward_csa2.c "if (mode != LZ_CSA2_REUSE) {" "mutant 1"
