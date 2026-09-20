@@ -3425,6 +3425,15 @@ static int create_children(HWND hwnd) {
                                  : fin;
     }
     lz_music_clamp(&g.mus);
+    /* A trace of the MIDI stream, for a piece that is playing badly.
+       OFF unless this key names a file - see lz_midi_trace_to for what
+       a line says and why off is free. Absolute paths are the useful
+       form; a relative one lands wherever the program was started. */
+    {
+        char trace[MAX_PATH];
+        lz_ini_get_str("music_trace", trace, (int)sizeof trace, "");
+        lz_midi_trace_to(trace);
+    }
     /* Context window. Through the clamp with no model cap - there is no
        model at this point in startup, and the cap is applied again at
        load time where cfg->seq_len is finally knowable. Clamping here

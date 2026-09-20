@@ -60,4 +60,18 @@ void lz_midi_buffer_done(void);
 
 void lz_midi_shutdown(void);
 
+/* ---- a trace of the stream, off unless a file is named for it ----
+ *
+ * One line per stream event - a start, a tempo write, a chunk handed to
+ * the device, a buffer completion, a loop, a halt - written to `path`,
+ * which gui/main.c takes from the ini key `music_trace`. An empty path,
+ * or one that cannot be opened, leaves the trace OFF; a key naming a
+ * file the program cannot write is the one failure nothing reports, so
+ * it looks exactly like a trace that had nothing to say.
+ *
+ * OFF costs one test per event: no file, no formatting, and no call to
+ * the device either. ON changes nothing about playback - the only calls
+ * it adds are the position queries on the lines that need one. */
+void lz_midi_trace_to(const char *path);
+
 #endif /* LZ_GUI_MIDIPLAY_H */

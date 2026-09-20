@@ -1080,6 +1080,7 @@ typedef MMRESULT (WINAPI *MidiStreamOutFn)(HMIDISTRM, LPMIDIHDR, UINT);
 typedef MMRESULT (WINAPI *MidiStreamGoFn)(HMIDISTRM);
 typedef MMRESULT (WINAPI *MidiOutHdrFn)(HMIDIOUT, LPMIDIHDR, UINT);
 typedef MMRESULT (WINAPI *MidiOutResetFn)(HMIDIOUT);
+typedef MMRESULT (WINAPI *MidiStreamPosFn)(HMIDISTRM, LPMMTIME, UINT);
 
 static HMODULE            g_winmm;
 static MidiStreamOpenFn   p_midiStreamOpen;
@@ -1091,6 +1092,7 @@ static MidiStreamGoFn     p_midiStreamStop;
 static MidiOutHdrFn       p_midiOutPrepareHeader;
 static MidiOutHdrFn       p_midiOutUnprepareHeader;
 static MidiOutResetFn     p_midiOutReset;
+static MidiStreamPosFn    p_midiStreamPosition;
 
 static HMIDISTRM g_strm;
 static MIDIHDR   g_hdr[LZ_UI_MIDI_SLOTS];
@@ -1114,6 +1116,12 @@ static int midi_resolve(void) {
     p_midiOutUnprepareHeader =
         (MidiOutHdrFn)LZ_PROC(g_winmm, "midiOutUnprepareHeader");
     p_midiOutReset = (MidiOutResetFn)LZ_PROC(g_winmm, "midiOutReset");
+    /* Resolved ALONE, deliberately outside the all-or-none set below:
+       this one only reports where the stream is, and a system whose
+       winmm cannot say is still a system that plays. Folding it in
+       would turn a missing REPORT into missing sound. */
+    p_midiStreamPosition =
+        (MidiStreamPosFn)LZ_PROC(g_winmm, "midiStreamPosition");
     /* ALL of them or none. A half-resolved family is worse than an
        absent one: it opens a stream it cannot stop, and the notes hang
        on after the window is gone. */
@@ -1162,6 +1170,23 @@ int lz_ui_midi_tempo(unsigned long us_qn) {
     return p_midiStreamProperty(g_strm, (LPBYTE)&tp,
                                 MIDIPROP_SET | MIDIPROP_TEMPO)
            == MMSYSERR_NOERROR;
+}
+
+/* midiStreamPosition, in ticks. See compat40.h for why a failure to ask
+   is a 0 here and not a tick of 0. */
+int lz_ui_midi_position(unsigned long *tick) {
+    MMTIME mt;
+    if (!tick || !g_strm || !p_midiStreamPosition) return 0;
+    memset(&mt, 0, sizeof mt);
+    mt.wType = TIME_TICKS;
+    if (p_midiStreamPosition(g_strm, &mt, sizeof mt) != MMSYSERR_NOERROR)
+        return 0;
+    /* A device that answers in another unit fills in that member and
+       sets wType to it. Reading its number as ticks would be a position
+       in a unit the reader has no way to notice. */
+    if (mt.wType != TIME_TICKS) return 0;
+    *tick = (unsigned long)mt.u.ticks;
+    return 1;
 }
 
 int lz_ui_midi_send(int slot, const void *events, unsigned long bytes) {

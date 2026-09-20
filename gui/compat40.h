@@ -289,6 +289,20 @@ int lz_ui_midi_go(void);
  * even for a piece with a tempo map. */
 int lz_ui_midi_tempo(unsigned long us_qn);
 
+/* Where the stream has got to, in the stream's own ticks (LZ_SMF_DIVISION
+ * per quarter note, the same units common/smf.c emits chunk deltas in).
+ * Returns 1 and fills *tick, or 0 when there is nothing to ask - no
+ * stream open, or a winmm without the export - in which case *tick is
+ * left ALONE. A caller that wants a number has to check the return;
+ * writing a zero in its place would be indistinguishable from a stream
+ * that really is at tick 0.
+ *
+ * The count does not rewind on midiStreamStop and no property rewinds it
+ * (see the note on that in gui/midiplay.c), so it runs on across pieces
+ * and is only comparable with a chunk's own tick range inside one
+ * playback. */
+int lz_ui_midi_position(unsigned long *tick);
+
 /* Stop, silence every channel, release the buffer. */
 void lz_ui_midi_stop(void);
 

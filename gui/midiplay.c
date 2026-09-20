@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "compat.h"     /* lz_time_ms - the stamps on the trace's lines */
 #include "compat40.h"
 #include "music.h"
 #include "smf.h"
@@ -49,6 +50,112 @@ static unsigned long *g_buf[LZ_UI_MIDI_SLOTS];   /* MIDIEVENT triples */
 static unsigned char *g_img;
 static long           g_img_cap;
 
+/* ---- the trace ----
+ *
+ * One line per stream event, and only when the ini named a file for it -
+ * see lz_midi_trace_to. OFF is the default and costs one pointer test
+ * per event: no file, no formatting, and not even the device call that
+ * asks where the stream is.
+ *
+ * The lines exist to answer one question about a piece that is playing
+ * badly: what tempo writes landed, and what the stream was doing when
+ * they did. So every line that could bear on it carries the stream's
+ * position and the number of buffers the device still owes. */
+
+static FILE *g_trace;
+static char  g_piece[MAX_PATH];  /* the piece the lines below are about */
+static char  g_line[512];
+static char  g_pos[24];
+static int   g_sent;        /* chunks handed over since the piece began */
+static int   g_done;        /* and the one the next notification is for */
+
+#define tracing() (g_trace != NULL)
+
+static void trace_line(const char *s) {
+    /* Stamped with the monotone clock gui/main.c already uses, and
+       flushed per line: a trace is read to explain something that has
+       already gone wrong, and a buffered tail would be missing exactly
+       when it is wanted. */
+    fprintf(g_trace, "t=%lu %s\n", (unsigned long)lz_time_ms(), s);
+    fflush(g_trace);
+}
+
+/* Where the stream is, or the word for "could not be asked". A zero in
+   its place would read as a position the stream really had. */
+static const char *pos_text(void) {
+    unsigned long tick;
+    if (!lz_ui_midi_position(&tick)) return "unavailable";
+    snprintf(g_pos, sizeof g_pos, "%lu", tick);
+    return g_pos;
+}
+
+void lz_midi_trace_to(const char *path) {
+    if (g_trace || !path || !*path) return;
+    g_trace = fopen(path, "wb");
+    if (!g_trace) return;
+    /* The header, because a reader who takes these ticks for the file's
+       own draws the wrong conclusion from every line under it. Written
+       a line at a time rather than formatted into one buffer: it is
+       longer than any log line, and a truncated header is worse than
+       none - the part that explains the ticks would be the part cut. */
+    fputs("# kunkun98 MIDI stream trace - one line per stream event, t in "
+          "monotone milliseconds.\n", g_trace);
+    fprintf(g_trace,
+            "# ticks are the stream's own, %d to a quarter note "
+            "(common/smf.h's LZ_SMF_DIVISION).\n", LZ_SMF_DIVISION);
+    fputs("# The piece's own tempo map is folded into the POSITIONS by "
+          "common/smf.c, so a tick here is not a tick of the file\n"
+          "# and its wall-clock length follows the tempo the file wrote.\n",
+          g_trace);
+    fputs("# pos is midiStreamPosition. Stopping does not rewind it, so "
+          "compare pos with a chunk's tick range only within one\n"
+          "# playback. chunk n counts submissions since the piece began, "
+          "in the order the device hands them back.\n", g_trace);
+    fputs("# inflight is what the device still owes. pos=unavailable means "
+          "a position that could not be asked for, not a stream at zero.\n",
+          g_trace);
+    fflush(g_trace);
+}
+
+/* One tempo write: when, how big, where the stream had got to, and how
+   many buffers were out. This is the line the whole trace is for. */
+static void trace_tempo(const char *why, int ratio_milli, unsigned long us,
+                        int ok) {
+    snprintf(g_line, sizeof g_line,
+             "tempo why=%s ratio=%d us=%lu ok=%d pos=%s inflight=%d",
+             why, ratio_milli, us, ok, pos_text(), g_pending);
+    trace_line(g_line);
+}
+
+static void trace_chunk(int slot, int events, unsigned long first,
+                        unsigned long last, int ok) {
+    /* inflight is what it will be once the caller counts this one, and
+       this one only when the device took it. */
+    snprintf(g_line, sizeof g_line,
+             "chunk n=%d slot=%d ticks=%lu..%lu events=%d ok=%d inflight=%d",
+             g_sent, slot, first, last, events, ok,
+             g_pending + (ok ? 1 : 0));
+    trace_line(g_line);
+}
+
+static void trace_go(const char *why, int ok) {
+    snprintf(g_line, sizeof g_line, "go why=%s ok=%d inflight=%d",
+             why, ok, g_pending);
+    trace_line(g_line);
+}
+
+/* `n` is the chunk that finished, or -1 when the notification was not
+   one this playback was owed. */
+static void trace_done(int n, const char *why) {
+    if (why)
+        snprintf(g_line, sizeof g_line, "done why=%s inflight=%d",
+                 why, g_pending);
+    else
+        snprintf(g_line, sizeof g_line, "done n=%d inflight=%d",
+                 n, g_pending);
+    trace_line(g_line);
+}
+
 static int buffers(void) {
     int i, ok = 1;
     if (g_buf[0]) return 1;
@@ -82,11 +189,19 @@ static int image(long n) {
  * from g_prev_tick, so a join is not a gap. Returns 0 when the reader
  * had nothing left. */
 static int send_chunk(int s) {
-    int n = lz_smf_chunk(&g_rd, g_buf[s], LZ_SMF_CHUNK_EVENTS,
-                         &g_prev_tick);
+    int n, ok, on = tracing();
+    unsigned long from = 0;
+
+    /* Read before the reader moves it: the chunk's first event is this
+       many ticks plus its own opening delta. */
+    if (on) from = g_prev_tick;
+    n = lz_smf_chunk(&g_rd, g_buf[s], LZ_SMF_CHUNK_EVENTS, &g_prev_tick);
     if (n < LZ_SMF_CHUNK_EVENTS) g_more = 0;
     if (n <= 0) return 0;
-    return lz_ui_midi_send(s, g_buf[s], (unsigned long)n * 3UL * 4UL);
+    ok = lz_ui_midi_send(s, g_buf[s], (unsigned long)n * 3UL * 4UL);
+    if (on) trace_chunk(s, n, from + g_buf[s][0], g_prev_tick, ok);
+    g_sent++;
+    return ok;
 }
 
 int lz_midi_system_ok(HWND notify) {
@@ -115,7 +230,8 @@ int lz_midi_wave_ok(void) {
 
 /* The common half: an image already in memory, whatever it came from. */
 static int start_image(const unsigned char *img, long n, int loop,
-                       int instrument, int volume, int ratio_milli) {
+                       int instrument, int volume, int ratio_milli,
+                       const char *name) {
     int s;
 
     /* No division check: the reader converts the file's own to
@@ -143,14 +259,27 @@ static int start_image(const unsigned char *img, long n, int loop,
     g_us_qn0 = g_rd.us_qn0;
     g_ratio = ratio_milli;
     g_loop = loop;
+    if (tracing()) {
+        snprintf(g_piece, sizeof g_piece, "%s", name ? name : "?");
+        snprintf(g_line, sizeof g_line,
+                 "start piece=%s ratio=%d us_qn0=%lu loop=%d",
+                 g_piece, ratio_milli, g_us_qn0, loop);
+        trace_line(g_line);
+    }
     /* The tempo BEFORE the notes. Setting it after would play the
        opening at whatever the last piece left behind, which on a turn
        that follows a fast one is a noticeably wrong first bar. */
-    lz_ui_midi_tempo(tempo_for(ratio_milli));
+    {
+        unsigned long us = tempo_for(ratio_milli);
+        int ok = lz_ui_midi_tempo(us);
+        if (tracing()) trace_tempo("start", ratio_milli, us, ok);
+    }
 
     g_slot_next = 0;
     g_prev_tick = 0;
     g_pending = 0;
+    g_sent = 0;
+    g_done = 0;
     g_more = 1;
     /* Fill every slot before starting the clock. One chunk in the
        device and none behind it is a piece that stops at the first
@@ -162,6 +291,7 @@ static int start_image(const unsigned char *img, long n, int loop,
     }
     if (!g_pending) return 0;
     g_playing = lz_ui_midi_go();
+    if (tracing()) trace_go("start", g_playing);
     if (!g_playing) {
         lz_ui_midi_stop();
         g_pending = 0;
@@ -189,17 +319,27 @@ int lz_midi_start(const char *path, int loop, int instrument,
     if ((long)fread(g_img, 1, (size_t)n, f) != n) { fclose(f); return 0; }
     fclose(f);
 
-    return start_image(g_img, n, loop, instrument, volume, ratio_milli);
+    return start_image(g_img, n, loop, instrument, volume, ratio_milli,
+                       path);
 }
 
 int lz_midi_start_chime(int instrument, int volume) {
     if (!g_opened || !buffers()) return 0;
     return start_image(lz_music_chime, lz_music_chime_len, 0,
-                       instrument, volume, LZ_MUSIC_RATIO_ONE);
+                       instrument, volume, LZ_MUSIC_RATIO_ONE,
+                       "(the finish chime)");
 }
 
 void lz_midi_halt(void) {
     if (!g_opened) return;
+    /* Read before the accounting below moves them: these are what the
+       device still owed at the moment it was stopped, which is the
+       number a reader wants - the total after the fold is not. */
+    if (tracing()) {
+        snprintf(g_line, sizeof g_line, "halt inflight=%d stale=%d",
+                 g_pending, g_stale);
+        trace_line(g_line);
+    }
     g_playing = 0;
     g_loop = 0;
     lz_music_drop_pending(&g_pending, &g_stale);
@@ -210,7 +350,11 @@ void lz_midi_ratio(int ratio_milli) {
     if (!g_playing) return;
     if (ratio_milli == g_ratio) return;
     g_ratio = ratio_milli;
-    lz_ui_midi_tempo(tempo_for(ratio_milli));
+    {
+        unsigned long us = tempo_for(ratio_milli);
+        int ok = lz_ui_midi_tempo(us);
+        if (tracing()) trace_tempo("follow", ratio_milli, us, ok);
+    }
 }
 
 /* Settings changed while a piece was playing.
@@ -233,11 +377,21 @@ int lz_midi_busy(void) {
 }
 
 void lz_midi_buffer_done(void) {
-    int slot;
+    int slot, ok;
     /* A leftover from a piece that was stopped. Ignoring it is the
        whole point: acted on, it stops the piece that replaced it. */
-    if (!lz_music_own_done(&g_pending, &g_stale)) return;
-    if (!g_playing) return;
+    if (!lz_music_own_done(&g_pending, &g_stale)) {
+        if (tracing()) trace_done(-1, "stale");
+        return;
+    }
+    if (!g_playing) {
+        if (tracing()) trace_done(-1, "idle");
+        return;
+    }
+    /* The device hands them back in the order they went out, so the one
+       that just finished is the one this counter is on. */
+    if (tracing()) trace_done(g_done, NULL);
+    g_done++;
 
     /* Chunks come back in the order they went out, so the slot that
        just freed is the one furthest ahead of the next to fill. */
@@ -251,6 +405,7 @@ void lz_midi_buffer_done(void) {
             if (g_pending > 0) return;   /* a chunk is still sounding */
             g_playing = 0;
             lz_ui_midi_stop();
+            if (tracing()) trace_line("end why=played inflight=0");
             return;
         }
         /* Back to the start. The delta cursor resets with it, so the
@@ -259,14 +414,20 @@ void lz_midi_buffer_done(void) {
         lz_smf_rewind(&g_rd);
         g_prev_tick = 0;
         g_more = 1;
+        if (tracing()) {
+            snprintf(g_line, sizeof g_line, "loop inflight=%d", g_pending);
+            trace_line(g_line);
+        }
     }
     if (send_chunk(slot)) {
         g_slot_next = (slot + 1) % LZ_UI_MIDI_SLOTS;
         g_pending++;
-        lz_ui_midi_go();
+        ok = lz_ui_midi_go();
+        if (tracing()) trace_go("resume", ok);
     } else if (g_pending <= 0) {
         g_playing = 0;
         lz_ui_midi_stop();
+        if (tracing()) trace_line("end why=stalled inflight=0");
     }
 }
 
@@ -286,5 +447,12 @@ void lz_midi_shutdown(void) {
             free(g_buf[i]);
             g_buf[i] = NULL;
         }
+    }
+    if (g_trace) {
+        /* Nothing writes to it after this point, and a trace whose lines
+           are still in a buffer when the process goes is a trace with
+           the last of the story missing. */
+        fclose(g_trace);
+        g_trace = NULL;
     }
 }
