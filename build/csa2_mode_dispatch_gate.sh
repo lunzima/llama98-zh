@@ -479,11 +479,16 @@ check_mutated "$W/mut6" model.c "if (c->csa2_source[i] != last_writer[r]) {" "mu
 # nothing cannot pass for a mutation that worked.
 #
 # Both anchors are matched as WHOLE LINES (-x) and each is required to
-# occur exactly once. A substring match would let any line merely
-# quoting the o_proj call - a comment, say - satisfy this: its line
-# number would be the smaller of the two and the ordering assert would
-# hold on a file where the block never moved. The uniqueness count is
-# what makes the two line numbers meaningful rather than merely present.
+# occur exactly once, so the two line numbers below are unambiguous.
+#
+# The uniqueness count is not this arm's main protection, though. The
+# python step above already refuses any source whose o_proj call is not
+# the exact two-line shape the move cuts around, and pins the guard's
+# output line number by an equation that implies it lands after o_proj -
+# a source forged to keep this shell test happy is caught there first.
+# What this block adds is a check that reads the file BACK FROM DISK, so
+# a mutation whose write silently did nothing is caught here instead of
+# being reported as a mutation that worked.
 G7_LINE='        if (off == cm - 1 && mode == LZ_CSA2_FULL) {'
 O7_LINE='        lz_matmul_w(s->xb2 + (size_t)tk * hdim, s->attn_out, &L->o_proj,'
 G7_N=$(grep -cxF "$G7_LINE" "$W/mut7/forward_csa2.c")
@@ -496,9 +501,14 @@ if [ "$G7_N" != "1" ] || [ "$O7_N" != "1" ]; then
 fi
 G7=$(grep -nxF "$G7_LINE" "$W/mut7/forward_csa2.c" | cut -d: -f1)
 O7=$(grep -nxF "$O7_LINE" "$W/mut7/forward_csa2.c" | cut -d: -f1)
-if [ "$G7" -le "$O7" ]; then
+# The two -z arms are NOT redundant with the count check above. Under
+# `set -u` an empty G7 makes [ "" -le "5" ] print "integer expression
+# expected" and return 2, which `if` reads as FALSE: the FAIL message
+# below would be skipped and the run would carry on to build and run the
+# probe, reporting a read error as a pass. Fail closed instead.
+if [ -z "$G7" ] || [ -z "$O7" ] || [ "$G7" -le "$O7" ]; then
     echo "csa2_mode_dispatch_gate: FAIL - mutant 7 left the finalize guard at or" \
-         "ahead of the o_proj call (guard line '$G7', o_proj line '$O7')"
+         "ahead of the o_proj call (guard line '${G7:-none}', o_proj line '${O7:-none}')"
     exit 1
 fi
 
