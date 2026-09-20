@@ -1504,14 +1504,14 @@ static void lz_ced_replay_reset(const LZModel *m, LZRunState *s) {
 #if LZ_GDN_STATE_2PLANE
         memset(s->ssm_state_q8_lo + (size_t)slot * q8_slot_stride + li_off_q8,
                0, (size_t)nv * kd * vd);
-#endif
+#endif /* LZ_GDN_STATE_2PLANE */
         memset(s->ssm_state_s + (size_t)slot * s_slot_stride + li_off_s,
                0, (size_t)nv * kd * vd / 32 * sizeof(float));
 #if LZ_CONV_FIXED
         if (s->conv_state_q)
             memset(s->conv_state_q + (size_t)slot * conv_slot_stride + li_off_conv,
                    0, (size_t)c->lin_conv_dim * hist * sizeof(short));
-#endif
+#endif /* LZ_CONV_FIXED */
         memset(s->conv_state + (size_t)slot * conv_slot_stride + li_off_conv,
                0, (size_t)c->lin_conv_dim * hist * sizeof(float));
     }

@@ -160,7 +160,7 @@ static void engram_dump_gate(int o, float s, float gate) {
 #define engram_dump(stage, data, n)     ((void)0)
 #define engram_dump_idx(stage, data, n) ((void)0)
 #define engram_dump_gate(o, s, gate)    ((void)0)
-#endif
+#endif /* LZ_ENGRAM_DEBUG */
 
 static int engram_is_format(const unsigned char *bitmap, int tokid) {
     return (bitmap[tokid >> 3] >> (tokid & 7)) & 1;
