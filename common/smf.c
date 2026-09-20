@@ -230,6 +230,10 @@ void lz_smf_rewind(LZSmfReader *r) {
     if (!r) return;
     tracks_seek(r);
     r->prefix = 0;
+    /* The held event belonged to the pass that just ended, and the
+       loop restarts from tick 0. */
+    r->have_pend = 0;
+    r->spent = 0;
     /* Every cursor holds its first event before the merge starts. */
     for (i = 0; i < r->ntrk; i++)
         track_advance(&r->trk[i], NULL, NULL, NULL);
@@ -299,14 +303,37 @@ int lz_smf_next(LZSmfReader *r, LZSmfEvent *out) {
 int lz_smf_chunk(LZSmfReader *r, unsigned long *out, int max,
                  unsigned long *prev) {
     LZSmfEvent e;
+    unsigned long start;
     int n = 0;
+
     if (!r || !out || !prev || max <= 0) return 0;
-    while (n < max && lz_smf_next(r, &e)) {
+    if (r->have_pend) {
+        e = r->pend;
+        r->have_pend = 0;
+    } else if (!lz_smf_next(r, &e)) {
+        r->spent = 1;
+        return 0;
+    }
+    /* The chunk's own span is measured from its first event, so the
+       bound is on how long the chunk lasts and not on where in the
+       piece it happens to fall. */
+    start = e.tick;
+    for (;;) {
         out[n * 3 + 0] = e.tick - *prev;
         out[n * 3 + 1] = 0;   /* stream id, always 0 here */
         out[n * 3 + 2] = e.msg;
         *prev = e.tick;
         n++;
+        if (n >= max) break;
+        if (!lz_smf_next(r, &e)) {
+            r->spent = 1;
+            break;
+        }
+        if (r->span && e.tick - start > r->span) {
+            r->pend = e;
+            r->have_pend = 1;
+            break;
+        }
     }
     return n;
 }

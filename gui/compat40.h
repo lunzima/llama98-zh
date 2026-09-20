@@ -321,9 +321,22 @@ int lz_ui_midi_send(int slot, const void *events, unsigned long bytes);
 /* Start, or resume after everything queued has played. */
 int lz_ui_midi_go(void);
 
-/* The whole speed knob - common/smf.h says why one number is enough
- * even for a piece with a tempo map. */
-int lz_ui_midi_tempo(unsigned long us_qn);
+/* The type byte of a MIDIEVENT's dwEvent that sets the tempo, with the
+ * new tempo in the low three bytes as microseconds per quarter note:
+ *
+ *     delta = 0, stream id = 0, event = (LZ_UI_MEVT_TEMPO << 24) | us
+ *
+ * Spelled here for the reason the paragraph above gives about the
+ * MIDIPROP_ set: at WINVER 0x0351 mmsystem.h declares no MEVT_ either.
+ * It is a tempo EVENT and not a property because that is how the device
+ * is meant to be told - the property of that name is documented as the
+ * way to RETRIEVE a tempo, and its page says output devices set the
+ * tempo by inserting this event into the stream.
+ *
+ * The parameter is 24 bits, which is exactly the ceiling
+ * common/music.h's LZ_MUSIC_TEMPO_MAX holds lz_music_tempo_us to, so a
+ * value that came from there needs no mask of its own. */
+#define LZ_UI_MEVT_TEMPO 0x01UL
 
 /* Where the stream has got to, in the stream's own ticks (LZ_SMF_DIVISION
  * per quarter note, the same units common/smf.c emits chunk deltas in).

@@ -17,14 +17,15 @@
 #define LZ_MIDI_MAX_FILE  (1024L * 1024L)
 
 /* The shortest interval between two `probe` lines - the control reading
- * of the stream's position, taken where a tempo write did not happen.
+ * of the stream's position, taken where the ratio did not move.
  *
  * The tick that calls the follow runs at the stream_ms setting, 100 ms
- * by default, and a piece whose ratio is ramping writes the tempo on
- * most of those ticks. A bound a quarter of that leaves several control
- * samples between two writes, which is what makes the arms comparable,
- * and keeps the file's growth tied to the write rate rather than to
- * stream_ms when the user has set that short. */
+ * by default, and a piece whose ratio is ramping carries a tempo event
+ * in most of the chunks submitted near it. A bound a quarter of that
+ * leaves several control samples between two tempo lines, which is what
+ * makes the arms comparable, and keeps the file's growth tied to the
+ * submission rate rather than to stream_ms when the user has set that
+ * short. */
 #define LZ_MIDI_PROBE_MIN_US  LZ_I64_C(25000)
 
 static int   g_opened;          /* the device is open */
@@ -37,6 +38,11 @@ static int   g_ratio = LZ_MUSIC_RATIO_ONE;
 static int   g_pending;
 static int   g_stale;
 static unsigned long g_us_qn0 = 500000;
+
+/* The tempo a ratio asks for, from the piece's own opening tempo. In
+ * common/music.c, not here: a gate cannot reach into a translation unit
+ * that needs a MIDI device. */
+#define tempo_for(r) lz_music_tempo_us(g_us_qn0, (r))
 
 /* ---- the piece, in chunks ----
  *
@@ -69,26 +75,31 @@ static long           g_img_cap;
  * ask where the stream is or what the counter reads.
  *
  * The lines exist to answer one question about a piece that is playing
- * badly: what tempo writes landed, and what the stream was doing when
- * they did. A tempo line therefore carries the stream's position either
- * side of the write and the interval between the two samples, and every
- * line carries the number of buffers the device still owes. */
+ * badly: what the stream was doing when the speed of it changed. A
+ * tempo line therefore carries the stream's position either side of the
+ * submission that carried the event, the interval between the two
+ * samples, and the value the event was given; a chunk line carries the
+ * same bracket around a submission with no event in it, which is the
+ * control for the tempo arm; and every line carries the number of
+ * buffers the device still owes. */
 
 static FILE *g_trace;
 static char  g_piece[MAX_PATH];  /* the piece the lines below are about */
 static char  g_line[512];
-static char  g_pos0[24];    /* the position before a tempo write */
+static char  g_pos0[24];    /* the position before a submission */
 static char  g_pos1[24];    /* and after it - two, because one line has both */
-static char  g_dpos[24];    /* and the distance between a probe line's pair */
-static char  g_us0[24];     /* the tempo the write replaced, or `none` */
+static char  g_dpos[24];    /* and the advance between that pair */
+static char  g_us0[24];     /* the tempo before it, or `none` */
 static int   g_sent;        /* chunks handed over since the piece began */
 static int   g_done;        /* and the one the next notification is for */
-/* The tempo microseconds-per-quarter last written, which is the one the
- * ticks before the next write are worth, and whether any has been: a
- * zero in us0 would read as a tempo the device was running at, and the
- * driver's own default is what is in force until the first write. */
-static unsigned long g_tempo_last;
-static int           g_tempo_set;
+/* The tempo the stream is running at: the value the MEVT_TEMPO at the
+ * head of the last chunk handed over carried, and therefore what every
+ * chunk from that one on is played at. ZERO MEANS NONE - no event has
+ * been emitted into this stream - and it cannot be confused with a
+ * tempo, because lz_music_tempo_us never answers one: it clamps at 1.
+ * Cleared when the stream is closed, because the tempo is a property of
+ * the stream and goes with it. */
+static unsigned long g_us_emit;
 /* When the last `probe` line was written, and whether one ever has. The
  * limit is a difference of two readings of the counter the line itself
  * reports, because lz_time_ms is quantised far more coarsely than a
@@ -115,6 +126,23 @@ static void trace_line(const char *s) {
 static void pos_text(char *buf, int cap, int got, unsigned long tick) {
     if (!got) snprintf(buf, (size_t)cap, "unavailable");
     else      snprintf(buf, (size_t)cap, "%lu", tick);
+}
+
+/* The three columns every arm of the trace reports, filled from one
+   pair of samples: where the stream was before the window, where it was
+   after it, and the advance between the two - or the word for an
+   advance that could not be worked out, since a difference taken across
+   a reading that failed is a number the stream never had. One function
+   because every arm's advance has to have been computed the same way
+   for the arms to be comparable. */
+static void bracket_text(int got0, unsigned long p0,
+                         int got1, unsigned long p1) {
+    pos_text(g_pos0, (int)sizeof g_pos0, got0, p0);
+    pos_text(g_pos1, (int)sizeof g_pos1, got1, p1);
+    if (got0 && got1)
+        snprintf(g_dpos, sizeof g_dpos, "%ld", (long)(p1 - p0));
+    else
+        snprintf(g_dpos, sizeof g_dpos, "unavailable");
 }
 
 void lz_midi_trace_to(const char *path) {
@@ -145,149 +173,120 @@ void lz_midi_trace_to(const char *path) {
             "(common/smf.h's LZ_SMF_DIVISION).\n", LZ_SMF_DIVISION);
     fputs("# The piece's own tempo map is folded into the POSITIONS by "
           "common/smf.c, so a tick here is not a tick of the file\n"
-          "# and its wall-clock length follows the tempo the file wrote.\n",
+          "# and its wall-clock length follows the tempo the file wrote. "
+          "The speed ratio is a MEVT_TEMPO at the head of a chunk, so\n"
+          "# the stream runs at one tempo at a time - the value of the last "
+          "one emitted - and every chunk from there on is played at it.\n",
           g_trace);
     fputs("# pos is midiStreamPosition. Stopping does not rewind it, so "
           "compare pos with a chunk's tick range only within one\n"
-          "# playback. chunk n counts submissions since the piece began, "
-          "in the order the device hands them back.\n", g_trace);
+          "# playback. n counts submissions since the piece began, in the "
+          "order the device hands them back; a `chunk` line is a\n"
+          "# submission with no tempo event in it and a `tempo` line is one "
+          "with, so a chunk's number is either kind.\n", g_trace);
     fputs("# inflight is what the device still owes. pos=unavailable means "
           "a position that could not be asked for, not a stream at zero.\n",
           g_trace);
     /* Told here rather than left to be worked out from the lines,
        because it is the one thing about t that changes what a reader
        concludes from them, and it is not visible in the numbers. */
-    fputs("# t IS COARSE AND ITS STEP DEPENDS ON UPTIME, so a pair of tempo "
-          "writes sharing one t is not evidence that they\n"
-          "# were simultaneous. lz_time_ms answers a float: with "
+    fputs("# t IS COARSE AND ITS STEP DEPENDS ON UPTIME, so two lines "
+          "sharing one t is not evidence that the two things they\n"
+          "# report were simultaneous. lz_time_ms answers a float: with "
           "QueryPerformanceCounter at 10 MHz and the machine up about\n"
           "# ten days (t around 9.3e8) its count is already rounded to "
           "1048576 counts - 104.9 ms - before the divide, and the\n"
-          "# reading then steps in 64 ms. That is most of the ~110 ms "
-          "between two writes. A freshly booted machine resolves far\n"
-          "# finer, so two captures cannot be compared on this column "
+          "# reading then steps in 64 ms. That is most of the interval "
+          "between two of these lines. A freshly booted machine resolves\n"
+          "# far finer, so two captures cannot be compared on this column "
           "either.\n", g_trace);
     fprintf(g_trace,
             "# dt_us is the clock that resolves it: microseconds from "
-            "%s, read as t0, pos0, the write, pos1,\n"
+            "%s, read as t0, pos0, the submission, pos1,\n"
             "# t1, so dt_us = t1 - t0 brackets both position samples. "
-            "us0 is the tempo in force before the write and us the\n"
-            "# one it writes - the tick-to-wall-clock conversion changes "
-            "between the two samples, so the line has to carry both.\n"
-            "# us0=none means no tempo has been written yet, so the "
-            "driver's own default is what was in force; it is not 0.\n"
-            "# A tempo write that moves the stream shows as pos1 > pos0 "
-            "with dt_us far too small to have played the music\n"
-            "# between them; pos1 == pos0 is a write that moved nothing.\n",
+            "us0 is the tempo the stream was at before this chunk and us\n"
+            "# the value this chunk's event carries - the music from the "
+            "head of this chunk on is played at us and not at us0, so the\n"
+            "# line has to carry both. us0=none means no event has been "
+            "emitted into this stream yet, so the driver's own default is\n"
+            "# what was in force; it is not 0.\n"
+            "# A submission that moves the stream shows as pos1 > pos0 with "
+            "dt_us far too small to have played the music between\n"
+            "# them; pos1 == pos0 is one that moved nothing.\n",
             lz_ui_us_fine() ? "QueryPerformanceCounter, quantum 100 ns"
                             : "GetTickCount - every dt_us is a whole "
                               "millisecond, 15.6 ms or 55 ms apart");
     /* The control arm, and why it is the line that makes the others
        mean something. Nothing in a tempo line's own numbers separates a
-       write that moved the stream from a device that reports its
+       submission that moved the stream from a device that reports its
        position on some cadence of its own - both show as an advance
-       across a window too short to have played the music. A window
-       with no write in it is what separates them. */
+       across a window too short to have played the music. A window with
+       no submission in it is what separates them, and a submission with
+       no event in it separates the submission from the event. */
     fputs("# probe is the CONTROL for that: the same two position samples "
-          "with NOTHING written between them, taken from the same call\n"
-          "# as the writes and on the ticks where the ratio did not move. "
-          "pos, pos0 and dt_us mean what they mean on a tempo line,\n"
-          "# so one expression reads both arms: an advance that shows up "
-          "on a probe line too is the device's own reporting cadence,\n"
-          "# and one that shows up only across a write is the write moving "
-          "the stream. dpos is pos - pos0, the advance itself.\n", g_trace);
+          "with NOTHING submitted between them, taken from the same call\n"
+          "# the ratio moves are reported from and on the ticks where it "
+          "did not move. pos, pos0 and dt_us mean what they mean on a\n"
+          "# tempo line, so one expression reads all three arms: an advance "
+          "that shows up on a probe line too is the device's own\n"
+          "# reporting cadence, and one that shows up across every "
+          "submission is the submission rather than anything in it.\n"
+          "# chunk is the second control and the reason there are two: it "
+          "is the same call on the same kind of buffer with no tempo event\n"
+          "# in it, so an advance a tempo line shows and a chunk line does "
+          "not belongs to the event. dpos is pos - pos0, the advance\n"
+          "# itself, and every arm carries it.\n", g_trace);
     fputs("# A probe line is written ONLY while a piece is playing AND the "
           "device still owes a buffer (inflight > 0): with the stream\n"
           "# stopped, or with the last chunk played out, a position that "
           "stands still answers with the state rather than with the\n"
-          "# write. us is the tempo in force - a probe line has one, not "
-          "two, so there is no us0 - and it reads `none` until the\n"
-          "# first write has landed, exactly as us0 does on a tempo line. "
-          "pos=unavailable, or dpos=unavailable, is a reading that\n"
-          "# could not be taken.\n", g_trace);
+          "# submission. us is the tempo the last emitted event carried - a "
+          "probe line has one, not two, so there is no us0 - and it\n"
+          "# reads `none` until an event has been emitted, exactly as us0 "
+          "does on a tempo line. The device applies an event when it\n"
+          "# REACHES that chunk, so while one is still queued us is what "
+          "the music will be played at and not yet what is sounding.\n"
+          "# pos=unavailable, or dpos=unavailable, is a reading that could "
+          "not be taken.\n", g_trace);
     fprintf(g_trace,
             "# At most one probe line per %lu ms, so several stand between "
-            "two writes while the file's growth stays tied to the\n"
-            "# write rate rather than to the tick rate.\n",
+            "two tempo lines while the file's growth stays tied to the\n"
+            "# submission rate rather than to the tick rate.\n",
             (unsigned long)(LZ_MIDI_PROBE_MIN_US / LZ_I64_C(1000)));
     fflush(g_trace);
 }
 
-/* The tempo in force, into `buf`, or the word for "no write has landed
-   yet". A zero in its place would read as a tempo the device was
-   running at, and the driver's own default is what is in force until
-   the first write. */
+/* The tempo in force, into `buf`, or the word for "no event has been
+   emitted into this stream yet". A zero in its place would read as a
+   tempo the device was running at, and until the first event reaches it
+   the stream is at the driver's own default of 500000 - a number this
+   player did not set and, on a piece whose own opening tempo is
+   anything else, is not the one the music is about to be played at. */
 static void tempo_text(char *buf, int cap) {
-    if (g_tempo_set) snprintf(buf, (size_t)cap, "%lu", g_tempo_last);
-    else             snprintf(buf, (size_t)cap, "none");
-}
-
-/* Write the tempo, and record what the stream did across the write.
- *
- * The two position samples straddle the midiStreamProperty call as
- * closely as the code allows, and the interval between them is two
- * adjacent calls - not the ~110 ms between one tempo write and the
- * next. That is the whole point of the bracket: a jump inside the
- * write is what is being looked for, and the ordinary passage of music
- * between two writes is not it. dt_us is a counter difference for
- * exactly that reason; lz_time_ms steps in 64 ms at this uptime, which
- * is most of the interval being judged.
- *
- * The position is asked for AFTER the write as well as before, so the
- * line says where the stream had got to on each side. Whether the
- * property call succeeded changes which tempo the ticks are worth, so
- * us0 carries the one in force before and us the one written. */
-static int tempo_write(const char *why, int ratio_milli, unsigned long us) {
-    unsigned long p0 = 0, p1 = 0;
-    lz_i64 t0 = 0, t1 = 0;
-    int ok, on = tracing();
-    int got0 = 0, got1 = 0;
-
-    if (on) {
-        t0 = lz_ui_us_now();
-        got0 = lz_ui_midi_position(&p0);
-    }
-    ok = lz_ui_midi_tempo(us);
-    if (!on) return ok;
-    got1 = lz_ui_midi_position(&p1);
-    t1 = lz_ui_us_now();
-    pos_text(g_pos0, (int)sizeof g_pos0, got0, p0);
-    pos_text(g_pos1, (int)sizeof g_pos1, got1, p1);
-    tempo_text(g_us0, (int)sizeof g_us0);
-    /* `pos` keeps meaning what it meant before the bracket existed:
-       where the stream was once the write had been made. */
-    snprintf(g_line, sizeof g_line,
-             "tempo why=%s ratio=%d us=%lu ok=%d pos=%s pos0=%s dt_us=%lu "
-             "us0=%s inflight=%d",
-             why, ratio_milli, us, ok, g_pos1, g_pos0,
-             (unsigned long)(t1 - t0), g_us0, g_pending);
-    trace_line(g_line);
-    /* Only a write the device took changes what the ticks are worth. */
-    if (ok) {
-        g_tempo_last = us;
-        g_tempo_set = 1;
-    }
-    return ok;
+    if (g_us_emit) snprintf(buf, (size_t)cap, "%lu", g_us_emit);
+    else           snprintf(buf, (size_t)cap, "none");
 }
 
 /* Read the position twice with NOTHING between the samples - the
  * control arm for what a tempo line's bracket shows.
  *
  * The samples are the same two calls in the same order, so pos, pos0
- * and dt_us mean the same thing on both lines: how far the stream
- * moved across one immediate pair of reads. That is what makes the
- * pair answerable at all. A jump across a write and a device that
- * reports its position on some cadence of its own both show as an
+ * and dt_us mean the same thing on every line: how far the stream moved
+ * across one immediate pair of reads. That is what makes the pair
+ * answerable at all. A submission that moves the stream and a device
+ * that reports its position on some cadence of its own both show as an
  * advance over a window far too short to have played the music, and
- * only a window with no write in it tells them apart - the reading is
- * taken from the same place the writes are made, on the ticks where
- * the ratio did not move.
+ * only a window with no submission in it tells them apart - the reading
+ * is taken from the same call site the submissions are made from, on
+ * the ticks where the ratio did not move. A chunk line is the second
+ * control for the same reason: a submission with no event in it
+ * separates the submission from the event.
  *
  * Written ONLY while a piece is playing and the device still owes a
  * buffer: stopped, or with the last chunk played out, the stream has a
  * position that stands still for a reason that has nothing to do with
- * any write, and a control sample taken there would answer with the
- * state instead.
+ * any submission, and a control sample taken there would answer with
+ * the state instead.
  *
  * Rate-limited to one line per LZ_MIDI_PROBE_MIN_US, on the same
  * counter the bracket uses. The read that enforces the limit is the
@@ -307,15 +306,7 @@ void lz_midi_probe(void) {
     got0 = lz_ui_midi_position(&p0);
     got1 = lz_ui_midi_position(&p1);
     t1 = lz_ui_us_now();
-    pos_text(g_pos0, (int)sizeof g_pos0, got0, p0);
-    pos_text(g_pos1, (int)sizeof g_pos1, got1, p1);
-    /* The advance the two arms are compared on, and the word for one
-       that could not be worked out - a difference taken across a
-       reading that failed would be a number the stream never had. */
-    if (got0 && got1)
-        snprintf(g_dpos, sizeof g_dpos, "%ld", (long)(p1 - p0));
-    else
-        snprintf(g_dpos, sizeof g_dpos, "unavailable");
+    bracket_text(got0, p0, got1, p1);
     tempo_text(g_us0, (int)sizeof g_us0);
     snprintf(g_line, sizeof g_line,
              "probe pos=%s pos0=%s dpos=%s dt_us=%lu us=%s inflight=%d",
@@ -324,14 +315,40 @@ void lz_midi_probe(void) {
     trace_line(g_line);
 }
 
+/* `inflight` is what the device will owe once the caller counts this
+   one - and this one only when the device took it. */
+static int inflight_after(int ok) { return g_pending + (ok ? 1 : 0); }
+
+/* A submission that carried no tempo event: the control for the tempo
+   arm, because it is the same call on the same kind of buffer with
+   nothing in it that could re-clock the stream. */
 static void trace_chunk(int slot, int events, unsigned long first,
-                        unsigned long last, int ok) {
-    /* inflight is what it will be once the caller counts this one, and
-       this one only when the device took it. */
+                        unsigned long last, int ok, unsigned long dt_us) {
     snprintf(g_line, sizeof g_line,
-             "chunk n=%d slot=%d ticks=%lu..%lu events=%d ok=%d inflight=%d",
-             g_sent, slot, first, last, events, ok,
-             g_pending + (ok ? 1 : 0));
+             "chunk n=%d slot=%d ticks=%lu..%lu events=%d ok=%d pos=%s "
+             "pos0=%s dpos=%s dt_us=%lu inflight=%d",
+             g_sent, slot, first, last, events, ok, g_pos1, g_pos0, g_dpos,
+             dt_us, inflight_after(ok));
+    trace_line(g_line);
+}
+
+/* A submission that carried a MEVT_TEMPO at the head of it. Everything
+   a chunk line carries is here as well, in the same order, so the two
+   arms differ only in what they say the submission carried - a reader
+   taking a piece's tick ranges off the `chunk` lines alone would be
+   missing exactly the chunks that were re-clocked. us0 is the tempo the
+   stream was at before this one, which reads `none` while no event has
+   been emitted into this stream at all. */
+static void trace_tempo(int opening, int slot, int events,
+                        unsigned long first, unsigned long last,
+                        unsigned long us, int ok, unsigned long dt_us) {
+    snprintf(g_line, sizeof g_line,
+             "tempo why=%s n=%d slot=%d ticks=%lu..%lu events=%d ratio=%d "
+             "us=%lu ok=%d pos=%s pos0=%s dpos=%s dt_us=%lu us0=%s "
+             "inflight=%d",
+             opening ? "start" : "follow", g_sent, slot, first, last, events,
+             g_ratio, us, ok, g_pos1, g_pos0, g_dpos, dt_us, g_us0,
+             inflight_after(ok));
     trace_line(g_line);
 }
 
@@ -382,21 +399,165 @@ static int image(long n) {
     return 1;
 }
 
+/* How long one chunk of music may last, in microseconds at the tempo it
+ * will play at - which is also how quickly a change of speed can be
+ * HEARD.
+ *
+ * The ratio travels as a MEVT_TEMPO at the head of a chunk, so it can
+ * only take effect where a chunk begins. Between the head of a chunk
+ * and the moment it is submitted there is nothing; the wait is on the
+ * other side, in music already handed over - the chunk playing and the
+ * one queued behind it - so the worst case is two chunks and the music
+ * that is committed ahead of any change is one. That is what this
+ * bounds.
+ *
+ * It has to be bounded at all because the 64 KB the device will take
+ * holds a whole piece in one buffer, and this one was measured: the
+ * piece the defect was reported against is 2073 events over 38164
+ * ticks, one chunk for the lot. Fine for a tempo that never moves, and
+ * useless for one that does.
+ *
+ * 200 ms, chosen between the two failures at the ends of it. Longer
+ * chunks make a ramp arrive as a few steps rather than as the change of
+ * speed it is - which is the shape of the complaint this comes from.
+ * Shorter ones leave less music in front of the next submission than
+ * the front end can spend drawing a token, and a device that runs out
+ * between chunks is a gap in the music, which is the other shape of the
+ * same complaint. At two chunks of reaction and one of cushion, 200 ms
+ * samples a ramp - half a unit a second, so two seconds from 1x to 2x -
+ * twenty times, and leaves 200 ms of music standing between the stream
+ * and an empty queue.
+ *
+ * What it costs is the submissions: five a second at the very most,
+ * each a prepare, a midiStreamOut and a notification, where a piece
+ * used to cost one for the whole of it. The real rate is lower and the
+ * paragraph below says why: MEASURED, a 40 s run of the piece this was
+ * reported on sends 76 chunks over 10141 ticks, which is two a second.
+ *
+ * AND IT IS A BOUND ON A CHUNK, NOT ON WHEN A CHANGE IS HEARD. A chunk
+ * also lasts as long as the gap between its own last event and the
+ * first event of the next one, and a single delta cannot be cut in half
+ * without putting an event into the stream that the piece does not
+ * have. A piece with a two-second rest in it therefore has a two-second
+ * chunk, and a change of speed that arrives during that rest waits for
+ * the rest to end. The same measurement: 136 ticks of music per chunk
+ * against the 49 the bound asks for, and 3 of the 74 gaps over 1.2
+ * seconds. So the bound is a floor on how responsive this can be and not
+ * a promise - the noise it makes is a change arriving late, where the
+ * piece has no event of its own.
+ *
+ * THE CONVERSION is into the stream's own ticks, and those are a fixed
+ * number of microseconds each - the fold left the piece at one tempo,
+ * so a tick is the tempo in force divided by LZ_SMF_DIVISION. Taken
+ * from the tempo the chunk will PLAY at rather than from the piece's
+ * base tempo, so a chunk is this long at every ratio: the base-tempo
+ * figure would bound how much music a chunk holds, which is not the
+ * quantity anything here cares about.
+ *
+ * The product is 3.84e7 and a 32-bit unsigned long is the target's, so
+ * it cannot overflow; the quotient is 2 or more for every tempo the
+ * ratio can ask for, because lz_music_tempo_us holds the answer under
+ * LZ_MUSIC_TEMPO_MAX. */
+#define LZ_MIDI_CHUNK_US 200000UL
+
+/* The bound above in the stream's own ticks. Never 0, and that guard is
+ * not decoration: 0 is LZSmfReader.span's own word for "no bound", so a
+ * quotient that came out 0 would quietly put the whole piece back into
+ * one chunk - the mechanism off rather than the chunks short. */
+static unsigned long chunk_span(unsigned long us) {
+    unsigned long t = LZ_MIDI_CHUNK_US * LZ_SMF_DIVISION / us;
+    return t < 1 ? 1 : t;
+}
+
 /* Pull the next chunk into slot `s` and hand it over. Deltas continue
  * from g_prev_tick, so a join is not a gap. Returns 0 when the reader
- * had nothing left. */
+ * had nothing left.
+ *
+ * The chunk carries a MEVT_TEMPO at its head whenever the tempo in
+ * force is not the one the stream is running at. That is the whole
+ * mechanism: a piece whose ratio never moves carries no tempo event at
+ * all, and one whose ratio moves carries exactly one at the head of the
+ * chunk that follows each move - never a run of them, and never one in
+ * the middle of a chunk, where it would re-clock the music on one side
+ * of it differently from the other.
+ *
+ * The tempo goes at the HEAD rather than where the ratio moved because
+ * the events after it have already been read into this buffer: the
+ * chunk is what the stream has to be re-clocked for, so the first
+ * instant it can be is the first instant of the chunk. What the ratio
+ * was doing while the previous chunk played is not reproducible here
+ * and was never in the music anyway - the fold took the file's tempo
+ * out of the event stream and left it as one number. */
 static int send_chunk(int s) {
-    int n, ok, on = tracing();
-    unsigned long from = 0;
+    unsigned long us, p0 = 0, p1 = 0, from = 0, first = 0;
+    lz_i64 t0 = 0, t1 = 0;
+    int n, ok, on = tracing(), got0 = 0, got1 = 0, fresh, head;
 
+    us = tempo_for(g_ratio);
+    /* The first chunk of a piece always carries one, so a piece's
+       opening tempo is WRITTEN rather than inherited. The driver's own
+       default is 500000 us per quarter and the fold makes the stream's
+       absolute tempo load-bearing - the piece this was reported on
+       opens at 769231, so played at the default every note of it would
+       be at the wrong speed - and leaving it out when the last piece
+       happened to end at the same number would make a piece's opening
+       depend on what was played before it. */
+    fresh = (g_sent == 0) || us != g_us_emit;
+    /* One of the buffer's events is the tempo event when there is one:
+       LZ_SMF_CHUNK_EVENTS is a bound on what the device will take, and
+       it counts triples of any kind. */
+    head = fresh ? 3 : 0;
+    g_rd.span = chunk_span(us);
     /* Read before the reader moves it: the chunk's first event is this
        many ticks plus its own opening delta. */
     if (on) from = g_prev_tick;
-    n = lz_smf_chunk(&g_rd, g_buf[s], LZ_SMF_CHUNK_EVENTS, &g_prev_tick);
-    if (n < LZ_SMF_CHUNK_EVENTS) g_more = 0;
+    n = lz_smf_chunk(&g_rd, g_buf[s] + head,
+                     LZ_SMF_CHUNK_EVENTS - (fresh ? 1 : 0), &g_prev_tick);
+    /* A chunk that stopped at its own bound says nothing about whether
+       the piece has more; only the reader knows, and this is how it
+       says so. */
+    if (g_rd.spent) g_more = 0;
     if (n <= 0) return 0;
-    ok = lz_ui_midi_send(s, g_buf[s], (unsigned long)n * 3UL * 4UL);
-    if (on) trace_chunk(s, n, from + g_buf[s][0], g_prev_tick, ok);
+    if (fresh) {
+        /* Three DWORDs like every other event in the buffer: no delta,
+           because it belongs at the instant the chunk begins, and no
+           stream id. compat40.h carries the event word. */
+        g_buf[s][0] = 0;
+        g_buf[s][1] = 0;
+        g_buf[s][2] = (LZ_UI_MEVT_TEMPO << 24) | us;
+    }
+    if (on) {
+        /* Read before the send, while g_us_emit is still the tempo the
+           stream was at: the line reports both, and after this chunk
+           they are the same number. */
+        tempo_text(g_us0, (int)sizeof g_us0);
+        /* Two position samples straddling the submission as closely as
+           the code allows, so the interval between them is two adjacent
+           calls and not the ~110 ms between two of these ticks. A jump
+           inside the submission is what is being looked for; the
+           ordinary passage of music is not it. dt_us is a counter
+           difference for exactly that reason - lz_time_ms steps in 64 ms
+           at this machine's uptime, which is most of the interval being
+           judged. */
+        t0 = lz_ui_us_now();
+        got0 = lz_ui_midi_position(&p0);
+    }
+    ok = lz_ui_midi_send(s, g_buf[s],
+                         (unsigned long)(n + (fresh ? 1 : 0)) * 3UL * 4UL);
+    if (on) {
+        first = from + g_buf[s][head];
+        got1 = lz_ui_midi_position(&p1);
+        t1 = lz_ui_us_now();
+        bracket_text(got0, p0, got1, p1);
+        if (fresh)
+            trace_tempo(g_sent == 0, s, n, first, g_prev_tick, us, ok,
+                        (unsigned long)(t1 - t0));
+        else
+            trace_chunk(s, n, first, g_prev_tick, ok,
+                        (unsigned long)(t1 - t0));
+    }
+    /* Only an event the device took is one it is running at. */
+    if (ok && fresh) g_us_emit = us;
     g_sent++;
     return ok;
 }
@@ -420,10 +581,6 @@ int lz_midi_wave_ok(void) {
        missing, so there is no bank to read. */
     return 0;
 }
-
-/* In common/music.c, not here: a gate cannot reach into a translation
- * unit that needs a MIDI device. */
-#define tempo_for(r) lz_music_tempo_us(g_us_qn0, (r))
 
 /* The common half: an image already in memory, whatever it came from. */
 static int start_image(const unsigned char *img, long n, int loop,
@@ -463,10 +620,13 @@ static int start_image(const unsigned char *img, long n, int loop,
                  g_piece, ratio_milli, g_us_qn0, loop);
         trace_line(g_line);
     }
-    /* The tempo BEFORE the notes. Setting it after would play the
-       opening at whatever the last piece left behind, which on a turn
-       that follows a fast one is a noticeably wrong first bar. */
-    tempo_write("start", ratio_milli, tempo_for(ratio_milli));
+    /* No tempo call before the notes any more: the piece's opening
+       tempo travels as the MEVT_TEMPO at the head of the first chunk,
+       which every piece's first chunk carries because g_sent is rewound
+       to 0 below. It has to be written and cannot be inherited - the
+       previous piece may have left the stream at another tempo, and the
+       fold is only the piece's own speed at the tempo it was opened
+       for. See send_chunk. */
 
     g_slot_next = 0;
     g_prev_tick = 0;
@@ -539,11 +699,13 @@ void lz_midi_halt(void) {
     lz_ui_midi_stop();
 }
 
+/* The speed ratio moved. Nothing is sent from here: the value is
+ * recorded and the next chunk carries it at its head, which is the only
+ * place the stream can be re-clocked at all. How long that takes is the
+ * chunk bound, twice over at the worst - see LZ_MIDI_CHUNK_US. */
 void lz_midi_ratio(int ratio_milli) {
     if (!g_playing) return;
-    if (ratio_milli == g_ratio) return;
     g_ratio = ratio_milli;
-    tempo_write("follow", ratio_milli, tempo_for(ratio_milli));
 }
 
 /* Settings changed while a piece was playing.
@@ -627,8 +789,10 @@ void lz_midi_shutdown(void) {
     g_tried = 0;
     g_pending = 0;
     g_stale = 0;
-    /* The device goes with it, so the tempo written to it goes too. */
-    g_tempo_set = 0;
+    /* The device goes with it, and the tempo is a property of the
+       stream: a stream opened again is at the driver's default and not
+       at whatever was last emitted into the one that closed. */
+    g_us_emit = 0;
     free(g_img);
     g_img = NULL;
     g_img_cap = 0;

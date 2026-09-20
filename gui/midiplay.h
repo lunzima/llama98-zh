@@ -38,14 +38,17 @@ int lz_midi_start_chime(int instrument, int volume);
 /* Stop, and silence anything still sounding. */
 void lz_midi_halt(void);
 
-/* One property write when the number moved, nothing when it did not -
- * cheap enough for every status-bar tick. */
+/* Record a new speed ratio. Nothing is sent from here: the ratio is
+ * carried as a MEVT_TEMPO at the head of the next chunk, which is the
+ * only place the stream can be re-clocked, so the move costs what a
+ * submission costs and this call is a store - cheap enough for every
+ * status-bar tick. */
 void lz_midi_ratio(int ratio_milli);
 
-/* A position reading with NO write between the two samples: the
+/* A position reading with NO submission between the two samples: the
  * control for what a `tempo` line's bracket shows. Called from the
  * same place lz_midi_ratio is, on the ticks where the ratio did not
- * move, so the two arms are sampled at one cadence. It writes nothing
+ * move, so the arms are sampled at one cadence. It writes nothing
  * and plays nothing either way - without a trace it returns on its
  * first test. */
 void lz_midi_probe(void);
@@ -70,8 +73,9 @@ void lz_midi_shutdown(void);
 
 /* ---- a trace of the stream, off unless a file is named for it ----
  *
- * One line per stream event - a start, a tempo write, a chunk handed to
- * the device, a buffer completion, a loop, a halt - written to `path`,
+ * One line per stream event - a start, a chunk handed to the device (a
+ * `tempo` line when it carried a tempo event and a `chunk` line when it
+ * did not), a buffer completion, a loop, a halt - written to `path`,
  * which gui/main.c takes from the ini key `music_trace`. An empty path,
  * or one that cannot be opened, leaves the trace OFF; a key naming a
  * file the program cannot write is the one failure nothing reports, so
@@ -80,10 +84,10 @@ void lz_midi_shutdown(void);
  * OFF costs one test per event: no file, no formatting, and no call to
  * the device or to the clock either. ON changes nothing about playback.
  * What it adds is bounded and named: two position queries and two
- * counter reads around each tempo write - the bracket `pos0`/`pos1`/
- * `dt_us` on those lines - and the same pair for a `probe` line, the
- * control reading taken where the ratio did not move, at most one
- * every LZ_MIDI_PROBE_MIN_US (midiplay.c holds that bound). The
+ * counter reads around each submission - the bracket `pos0`/`pos1`/
+ * `dt_us` every chunk line carries - and the same pair for a `probe`
+ * line, the control reading taken where the ratio did not move, at most
+ * one every LZ_MIDI_PROBE_MIN_US (midiplay.c holds that bound). The
  * file's own header
  * says what a tick is, why a chunk's tick range is comparable with
  * `pos` only inside one playback, and why the `t` column cannot

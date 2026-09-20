@@ -1225,16 +1225,6 @@ int lz_ui_midi_open(HWND notify, int division) {
     return 1;
 }
 
-int lz_ui_midi_tempo(unsigned long us_qn) {
-    MIDIPROPTEMPO tp;
-    if (!g_strm || us_qn == 0) return 0;
-    tp.cbStruct = sizeof tp;
-    tp.dwTempo = (DWORD)us_qn;
-    return p_midiStreamProperty(g_strm, (LPBYTE)&tp,
-                                MIDIPROP_SET | MIDIPROP_TEMPO)
-           == MMSYSERR_NOERROR;
-}
-
 /* midiStreamPosition, in ticks. See compat40.h for why a failure to ask
    is a 0 here and not a tick of 0. */
 int lz_ui_midi_position(unsigned long *tick) {

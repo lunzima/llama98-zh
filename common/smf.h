@@ -20,17 +20,21 @@
  *
  * THE TEMPO TRICK, which is why the file is shaped this way.
  *
- * The caller changes the tempo WHILE the piece plays, and
- * midiStreamOut's only knob for that - MIDIPROP_TEMPO - is one number
- * for the whole stream. The arrangements carry tempo MAPS (six steps
- * in the Fur Elise setting), and putting those in the stream as
- * MEVT_TEMPO would overwrite whatever ratio the caller had just set.
+ * The caller changes the tempo WHILE the piece plays, and the whole of
+ * midiStreamOut's tempo vocabulary is MEVT_TEMPO - the event whose
+ * parameter is microseconds per quarter note. The arrangements carry
+ * tempo MAPS (six steps in the Fur Elise setting), and a map put into
+ * the stream as MEVT_TEMPO events is the SAME event the caller's ratio
+ * is: every step of the map would overwrite the ratio in force, and the
+ * ratio would have to be re-emitted after each one, into a stream that
+ * is being produced one event at a time.
  *
  * So the map is folded into the CLOCK. A delta of d ticks under tempo
  * T_i lasts d*T_i/division us; the same duration under one constant
  * tempo T0 needs d*T_i/T0 ticks. Scale every position that way and one
- * constant tempo reproduces the map exactly, leaving MIDIPROP_TEMPO
- * free for the ratio - one call, no rebuild, no callback, no seam.
+ * constant tempo reproduces the map exactly, which leaves the piece
+ * with ONE tempo for the whole of it - and the caller's ratio is that
+ * one number, emitted into the stream ahead of the chunk it governs.
  *
  * Positions are scaled ABSOLUTELY, so the rounding is one tick per
  * event rather than an error that accumulates over three minutes.
@@ -116,6 +120,22 @@ typedef struct {
     int  instrument;      /* forced GM program, or LZ_MUSIC_AS_WRITTEN */
     int  volume;          /* 0..127, sent as controller 7 */
     int  prefix;          /* how much of the opening prefix has gone */
+    /* The most ticks one chunk may cover, 0 for no bound at all. The
+       caller sets it before each pull, from the tempo that chunk will
+       play at; lz_smf_chunk's own comment says why the reader is where
+       the bound has to be enforced. */
+    unsigned long span;
+    /* An event that was pulled for a chunk with no room left in it,
+       waiting to be the first event of the next one. One event and not
+       a buffer: the reader only goes forwards, so an event that came
+       out to be measured has to be kept rather than put back. */
+    LZSmfEvent pend;
+    int  have_pend;
+    /* 1 once lz_smf_next has answered 0 - the reader has no events
+       left. Cleared by lz_smf_rewind. The caller cannot work this out
+       from a chunk's own return: a chunk that stopped on `span` or on
+       a full buffer says nothing about what was behind it. */
+    int  spent;
     LZSmfTempo tm[LZ_SMF_MAX_TEMPI];
     LZSmfTrack trk[LZ_SMF_MAX_TRACKS];
 } LZSmfReader;
@@ -157,7 +177,17 @@ unsigned long lz_smf_tempo_at(const LZSmfTempo *tm, int n,
  * `*prev` is the tick the last chunk ended on and is updated, which is
  * what makes a join not a gap: the first delta of a chunk is measured
  * from the last event of the one before it, not from zero.
- * lz_smf_rewind and a *prev of 0 together are the loop point. */
+ * lz_smf_rewind and a *prev of 0 together are the loop point.
+ *
+ * `r->span` bounds a chunk by TIME as well as by size: the chunk ends
+ * once the next event is more than `span` ticks past the chunk's own
+ * first one. That bound has to be enforced HERE rather than by the
+ * caller, because an event is only known to be past the bound after it
+ * has been pulled - and there is no way to give it back. One that
+ * crosses is therefore held in the reader and comes out as the first
+ * event of the next chunk; nothing else is held.
+ *
+ * `r->spent` then reports whether there are events left at all. */
 int lz_smf_chunk(LZSmfReader *r, unsigned long *out, int max,
                  unsigned long *prev);
 
