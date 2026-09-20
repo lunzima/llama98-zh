@@ -139,9 +139,12 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
                       contents - is the only thing keeping this query
                       out of them, which is why it has to be a per-
                       POSITION formula and never a count carried in
-                      state shared with the source ("Reindex Mode ...
-                      identical positional and causal masking logic",
-                      report Sec2.3.1);
+                      state shared with the source. Sec2.3.1 defines the
+                      three modes by what each one obtains - they "differ
+                      in how they obtain main KV, indexer K, and Top-K
+                      indices" - and says nothing about masking, so this
+                      bound has to fall out of causality itself rather
+                      than out of a cache the layer only borrows;
              REUSE    never reads it at all - step 4 skips REUSE
                       entirely - and takes its causal correctness from
                       whatever its source published into the shared
