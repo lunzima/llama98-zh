@@ -478,22 +478,25 @@ csa2-last-writer-bin-gate:
 csa2-reindex-causality-gate:
 	@$(call GATE_OK,build/csa2_reindex_causality_gate.sh)
 
-# WHICH dims the indexer key's RoPE rotates - the slice forward_csa2.c
-# hands lz_rope. The V4.1 reference rotates the LAST rd dims of an
+# The indexer key's RoPE - WHICH dims it rotates and WHICH elements it
+# pairs. The V4.1 reference does both its own way: the LAST rd dims of an
 # indexer key (`k[..., -rd:]`, .prof/dsv41_ref/model.py in the TRAINING
-# tree at E:\LLM\llama98-zh), while src/ops_rope.c's lz_rope rotates the
-# FIRST rotary_dim dims of whatever row it is handed, so the call site
-# advances the pointer past the leading indexer_head_dim - rotary_dim
-# dims first. The two slices are the same dims exactly when
-# rotary_dim == indexer_head_dim, which is the identity arm; the main
-# query and main KV keep the leading slice (the host family's own
-# convention, and a divergence from the reference that stays on the
-# books separately). Own script's header has the two mutations - the
-# offset dropped from the indexer K call, and the same offset added to
-# the main KV call - and each one's expected fallout; own probe's header
-# has why it reads the rows out of the csa2 rings rather than calling
-# lz_rope itself, and why the pre-rotation row comes from the same model
-# at position 0. No model dir needed - builds its own hand-crafted
+# tree at E:\LLM\llama98-zh) and ADJACENT elements as one complex number
+# (its apply_rotary_emb is `view_as_complex(x.unflatten(-1, (-1, 2)))`
+# times a complex frequency), while src/ops_rope.c's lz_rope rotates the
+# FIRST rotary_dim dims and pairs base[i] with base[i + rotary_dim/2] -
+# which is what the main query and the main KV entries keep, so the
+# indexer key and the main KV entry beside it are deliberately not in one
+# convention. The two slices are the same dims exactly when
+# rotary_dim == indexer_head_dim, which is the identity arm; the two
+# pairings are the same at no width but rotary_dim == 2, which is
+# degenerate and is not what the criterion rests on. Own script's header
+# has the three mutations - the pairing reverted to the host's, the slice
+# reverted to the leading dims, and both rows through the indexer's own
+# rotation - and each one's expected fallout; own probe's header has why
+# it reads the rows out of the csa2 rings rather than calling lz_rope
+# itself, and why the pre-rotation row comes from the same model at
+# position 0. No model dir needed - builds its own hand-crafted
 # LZModel/LZRunState fixture with real synthetic weights and calls the
 # real forward_csa2() directly, same posture as csa2-reindex-causality-
 # gate above.

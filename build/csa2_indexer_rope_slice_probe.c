@@ -1,40 +1,46 @@
-/* Which dims the indexer key's RoPE rotates: the engine's own
- * forward_csa2() product, not a re-run of the idiom it uses.
+/* Which dims the indexer key's RoPE rotates, and which elements it pairs:
+ * the engine's own forward_csa2() product, not a re-run of the idiom it
+ * uses.
  *
  * The V4.1 reference rotates the LAST rd dims of an indexer key
- * (`.prof/dsv41_ref/model.py`'s `k[..., -rd:]`), while src/ops_rope.c's
- * lz_rope rotates the FIRST rotary_dim dims of whatever row it is handed
- * (base[i] paired with base[i + rotary_dim/2]). src/forward_csa2.c
- * reconciles the two by advancing the pointer past the leading
- * indexer_head_dim - rotary_dim dims before the call, so the trailing
- * ones are the ones that rotate. This probe reads the two rows the
- * engine actually wrote into the indexer ring and asserts that
- * partition; a probe that called lz_rope itself would only re-test the
- * offset it hardcoded.
+ * (`.prof/dsv41_ref/model.py`'s `k[..., -rd:]`) and pairs ADJACENT
+ * elements as one complex number (its apply_rotary_emb is
+ * `view_as_complex(x.float().unflatten(-1, (-1, 2)))` times a complex
+ * frequency). src/ops_rope.c's lz_rope does neither: it rotates the FIRST
+ * rotary_dim dims of whatever row it is handed, and pairs base[i] with
+ * base[i + rotary_dim/2]. src/forward_csa2.c rotates the indexer key with
+ * its own scalar helper for exactly that reason. This probe reads the two
+ * rows the engine actually wrote into the indexer ring and asserts the
+ * slice AND the pairing; a probe that called lz_rope itself would only
+ * re-test an idiom it hardcoded.
  *
  * The pre-rotation row is taken from the SAME model at position 0, where
- * the frequency table's angle is 0 (cos 1, sin 0) and lz_rope is the
- * identity under either slice - so the row at position 1 is compared
- * against the identical latent compressed at a different position, not
- * against a second implementation of the compressor. Both arms feed the
- * same hidden vector through lz_state_alloc's xb, and cm is 1, so the
- * block a position writes is exactly that one token's latent.
+ * the frequency table's angle is 0 (cos 1, sin 0) and any rotation is the
+ * identity - so the row at position 1 is compared against the identical
+ * latent compressed at a different position, not against a second
+ * implementation of the compressor. Both arms feed the same hidden vector
+ * through lz_state_alloc's xb, and cm is 1, so the block a position
+ * writes is exactly that one token's latent.
  *
  * CHECK LIST (each line is one ok() call; the gate script's mutant arms
  * name the fallout per line):
  *   idx/check1  leading idx_hd - rotary_dim dims bit-identical to the
- *               position-0 row (they are the dims the reference leaves
- *               alone). Reddens when the slice is the leading one.
- *   idx/check2  trailing rotary_dim dims equal the frequency table's
- *               rotation of the position-0 row's trailing dims.
- *   idx/check3  control: the trailing dims DID move, so a rotation that
- *               is silently absent cannot satisfy check1+check2.
- *   idx/check4  identity arm: at rotary_dim == indexer_head_dim the
- *               offset is 0 and the WHOLE row rotates - the slice change
- *               has nothing to move when the two widths coincide.
+ *               position-0 row (the dims the reference leaves alone).
+ *   idx/check2  trailing rotary_dim dims equal the reference's
+ *               adjacent-pair rotation of the position-0 row's trailing
+ *               dims. Reddens when either axis moves.
+ *   idx/check3  control: the trailing dims DID move, so a rotation that is
+ *               silently absent cannot satisfy check1+check2.
+ *   idx/check6  control: those dims are NOT the host's half-split rotation
+ *               of them, so check2 is not satisfied by the other pairing.
  *   idx/check5  control on the other call site: the main KV entry still
- *               rotates its LEADING rotary_dim dims only, so the indexer
- *               change did not follow the pointer arithmetic onto it.
+ *               rotates its LEADING rotary_dim dims in the host's
+ *               half-split pairing, so neither change followed the
+ *               pointer arithmetic onto it.
+ *   idx/check4  identity arm: at rotary_dim == indexer_head_dim the two
+ *               slices are the same dims, and the whole row is still the
+ *               reference's rotation - the pairing is what is left to
+ *               distinguish there.
  *
  * Exit: 0 all pass, 1 a check failed. */
 #include <stdio.h>
@@ -166,6 +172,22 @@ static void rot(const float *in, const float *cs_row, int width, int rd,
     }
 }
 
+/* The OTHER pairing, and the one the reference uses: adjacent elements as
+   one complex number, on the trailing rd dims. Same table row, same
+   expression order, a different partition of the slice - so a mismatch
+   between this and `rot` is a pairing difference and nothing else. */
+static void rot_adjacent(const float *in, const float *cs_row, int width,
+                         int rd, float *out) {
+    int half = rd / 2, i, base = width - rd;
+    memcpy(out, in, (size_t)width * sizeof(float));
+    for (i = 0; i < half; i++) {
+        float c = cs_row[i * 2], sn = cs_row[i * 2 + 1];
+        float x0 = in[base + 2 * i], x1 = in[base + 2 * i + 1];
+        out[base + 2 * i]     = x0 * c - x1 * sn;
+        out[base + 2 * i + 1] = x1 * c + x0 * sn;
+    }
+}
+
 /* Position 0 and position 1 of one model, with the SAME hidden vector fed
    at both: rows[0] is the unrotated latent (angle 0), rows[1] is that
    latent rotated at position 1. */
@@ -208,7 +230,7 @@ static int two_positions(LZModel *m, float *idx0, float *idx1, float *kv0,
 
 int main(void) {
     LZModel m;
-    float idx0[F_IDXHD], idx1[F_IDXHD], want[F_IDXHD];
+    float idx0[F_IDXHD], idx1[F_IDXHD], want[F_IDXHD], other[F_IDXHD];
     float kv0[F_HD], kv1[F_HD], kwwant[F_HD], cs1[F_IDXHD];
     int rotary;
 
@@ -217,32 +239,37 @@ int main(void) {
     build(&m, F_RD);
     if (!two_positions(&m, idx0, idx1, kv0, kv1, cs1, &rotary)) return 1;
 
-    rot(idx0, cs1, F_IDXHD, rotary, 1, want);
+    rot_adjacent(idx0, cs1, F_IDXHD, rotary, want);
+    rot(idx0, cs1, F_IDXHD, rotary, 1, other);
     ok(same(idx0, idx1, F_IDXHD - rotary),
        "idx/check1: the indexer key row's leading idx_hd - rotary_dim dims "
        "are bit-identical to the position-0 row's (the slice the reference "
        "does not rotate)");
     ok(same(want + (F_IDXHD - rotary), idx1 + (F_IDXHD - rotary), rotary),
-       "idx/check2: the trailing rotary_dim dims are the frequency table's "
-       "rotation of the position-0 row's trailing dims");
+       "idx/check2: the trailing rotary_dim dims are the reference's "
+       "adjacent-pair rotation of the position-0 row's trailing dims");
     ok(!same(idx0 + (F_IDXHD - rotary), idx1 + (F_IDXHD - rotary), rotary),
        "idx/check3: control - the trailing dims did move between the two "
        "positions, so a rotation that is absent entirely cannot satisfy the "
        "two checks above");
-
+    ok(!same(other + (F_IDXHD - rotary), idx1 + (F_IDXHD - rotary), rotary),
+       "idx/check6: control - the trailing dims are NOT the host's "
+       "half-split rotation of them, so this probe can tell the two "
+       "pairings apart");
     rot(kv0, cs1, F_HD, rotary, 0, kwwant);
     ok(same(kwwant, kv1, F_HD),
        "idx/check5: control - the main KV entry still rotates its LEADING "
-       "rotary_dim dims only (its own call site did not take the offset)");
+       "rotary_dim dims only, in the host's half-split pairing");
 
-    /* ---- arm B: rotary_dim == indexer_head_dim, where the offset is 0
-       and the whole row rotates whichever slice is named ---- */
+    /* ---- arm B: rotary_dim == indexer_head_dim, where the two slices are
+       the same dims and only the pairing is left ---- */
     build(&m, F_IDXHD);
     if (!two_positions(&m, idx0, idx1, kv0, kv1, cs1, &rotary)) return 1;
-    rot(idx0, cs1, F_IDXHD, rotary, 1, want);
+    rot_adjacent(idx0, cs1, F_IDXHD, rotary, want);
     ok(same(want, idx1, F_IDXHD),
        "idx/check4: identity arm - at rotary_dim == indexer_head_dim the "
-       "whole indexer key row rotates (the two slices are the same dims)");
+       "whole indexer key row is the reference's rotation (the two slices "
+       "are the same dims, so only the pairing distinguishes them)");
 
     if (g_fail) {
         printf("csa2_indexer_rope_slice_probe: FAIL\n");

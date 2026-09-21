@@ -90,6 +90,36 @@
    and step 3 leaves the gate logits it reads intact, so the re-forward
    of a block's last position finalizes it from the same data the
    rejected round would have used. */
+
+/* The indexer key's own rotation, and the one place this file does not
+   call lz_rope. The V4.1 reference rotates the TRAILING rotary_dim dims
+   of that row and pairs ADJACENT elements as one complex number - its
+   apply_rotary_emb is `view_as_complex(x.float().unflatten(-1, (-1, 2)))`
+   times a complex frequency (.prof/dsv41_ref/model.py:545). lz_rope does
+   neither: it rotates the LEADING rotary_dim dims, and pairs base[i] with
+   base[i + rotary_dim/2] (src/ops_rope.c), which is the host family's
+   rotate_half and stays the convention of the main query and the main KV
+   entry this same step rotates. The indexer key and the main KV entry
+   next to it are deliberately not in one convention.
+
+   Scalar, like the rest of this file's first landing (header comment's
+   SCALAR REFERENCE paragraph): rd/2 pairs per compressed block, against
+   the projections this same step runs. `cs` is the same (pos, i*2 + 0/1)
+   table lz_rope reads, and entry i is the angle pair i turns by. */
+static void indexer_rope_adjacent(float *row, int width, int rotary_dim,
+                                  int pos, const float *cs) {
+    int half = rotary_dim / 2, base = width - rotary_dim, i;
+    const float *row_cs = cs + (size_t)pos * half * 2;
+    for (i = 0; i < half; i++) {
+        float c = row_cs[i * 2];
+        float sn = row_cs[i * 2 + 1];
+        float x0 = row[base + 2 * i];
+        float x1 = row[base + 2 * i + 1];
+        row[base + 2 * i]     = x0 * c - x1 * sn;
+        row[base + 2 * i + 1] = x1 * c + x0 * sn;
+    }
+}
+
 void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
                   int layer, int pos0, int nt, const float *kv_in) {
     const LZModelConfig *c = &m->config;
@@ -411,30 +441,27 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
                index_head_dim wide, a different norm from the k_norm
                above (head_dim wide, main KV entries only).
 
-               RoPE slicing: the V4.1 reference rotates the LAST rd dims
-               of the indexer key (model.py:545, `k[..., -rd:]`), while
-               lz_rope only ever rotates the FIRST rotary_dim dims of the
-               row it is handed (src/ops_rope.c: base[i] paired with
-               base[i + rotary_dim/2], the rest left alone). The call
-               below therefore advances the pointer by idx_hd -
-               rotary_dim before passing the row, which puts lz_rope's
-               base[i]/base[i + rotary_dim/2] on the row's trailing
-               rotary_dim dims precisely - it indexes the row at
-               base + i and base + half, so an offset added once to the
-               buffer lands identically for every head at stride idx_hd.
-               Those are the same dims as the leading slice exactly when
-               rotary_dim == indexer_head_dim, where the offset is 0. The
-               main KV entry rotated on the next line keeps the leading
-               slice every other rotated tensor in this engine uses.
+               RoPE: the call below goes to indexer_rope_adjacent, not to
+               lz_rope, because the reference differs from lz_rope on two
+               axes at once - it rotates the row's TRAILING rotary_dim
+               dims (`k[..., -rd:]`, model.py:545) and it pairs ADJACENT
+               elements as one complex number, where lz_rope rotates the
+               LEADING rotary_dim dims and pairs base[i] with
+               base[i + rotary_dim/2]. Those slices are the same dims
+               exactly when rotary_dim == indexer_head_dim, and the
+               pairing is never lz_rope's. The main KV entry rotated on
+               the next line keeps the leading slice and that same
+               pairing, like every other rotated tensor in this engine, so
+               these two rows are deliberately not in one convention.
                model.c refuses rotary_dim > csa2_indexer_head_dim
-               (LZ_ERR_CFG_CSA2_IDX_ROTARY), so the offset is never
-               negative. */
+               (LZ_ERR_CFG_CSA2_IDX_ROTARY), so the trailing slice is
+               inside the row and the offset is never negative. */
             lz_matmul_w(sum_c_idx, ring + (size_t)blk * hd, &L->csa2_w_kv_idx,
                         hd, idx_hd, s->xq, s->xqs);
             lz_rmsnorm(ring_idx + (size_t)blk * idx_hd, sum_c_idx,
                       lz_t_f32(&L->csa2_k_norm_idx, s->wscr), idx_hd, rms_eps);
-            lz_rope(ring_idx + (size_t)blk * idx_hd + (idx_hd - rotary_dim), 1,
-                    idx_hd, rotary_dim, pos, s->rope_cs);
+            indexer_rope_adjacent(ring_idx + (size_t)blk * idx_hd, idx_hd,
+                                  rotary_dim, pos, s->rope_cs);
 
             lz_rope(ring + (size_t)blk * hd, 1, hd, rotary_dim, pos, s->rope_cs);
         }
