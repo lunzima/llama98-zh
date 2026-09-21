@@ -92,16 +92,15 @@ CORPORA=${*:-"$ROOT/build/norm_int_gate_tokens_zh.txt $ROOT/build/norm_int_gate_
 # says which way the error has to move, and the two models below are
 # evidence that it does not move the same way on both.
 #
-#   kmr20      helps - measured by the session that landed this direction:
-#                      whole-sequence rms on the q4 arms (matched, vproj
-#                      0/0) over both corpora below, and the numbers are in
-#                      34a23db's message. Same direction the header's
-#                      original arm-matching measurement was taken on.
+#   kmr20      helps - measured by the session that landed this direction,
+#                      on its q4 arms (matched, vproj 0/0), both corpora
+#                      below; the numbers are in that commit's message.
+#                      Same direction the header's original arm-matching
+#                      measurement was taken on.
 #   _armgate3  hurts - measured the same way, on this checkpoint's q4 arms
-#                      (vproj 0/0), both corpora, recorded in the same
-#                      message. ci.sh stage 12 runs on this checkpoint, so
-#                      this is the entry that gives that stage a direction
-#                      to assert.
+#                      (vproj 0/0), both corpora. ci.sh stage 12 runs on
+#                      this checkpoint, so this is the entry that gives
+#                      that stage a direction to assert.
 #
 # A checkpoint that is not listed is REPORTED, not judged: arm() prints
 # the pair it measured and asserts only that the two arms are not one arm
