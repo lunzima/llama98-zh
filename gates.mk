@@ -264,10 +264,13 @@ json-offset-gate:
 
 # Every operator src/lz_softfp.c exports, against libgcc's own, under
 # qemu - plus an assertion that none escaped the comparison, which is
-# the half that matters. Skips without the ARM cross toolchain.
+# the half that matters. Skips without the ARM cross toolchain, so it
+# goes through GATE_OK like every other gate that can reach exit 2: a
+# bare recipe here stopped `make check` at this point and the forty-odd
+# gates after it never ran at all.
 .PHONY: softfp-gate
 softfp-gate:
-	@bash build/arm/softfp_gate.sh
+	@$(call GATE_OK,build/arm/softfp_gate.sh)
 
 # --bf16-store on/off must give identical logits AND must have changed
 # SKIP (exit 2) MUST NOT ABORT `check`, and the five recipes below are
