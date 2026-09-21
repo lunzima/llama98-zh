@@ -628,6 +628,7 @@ void lz_state_free(LZRunState *s) {
     xfree(s->engram_conv_hist);
     xfree(s->gr_scratch);
     xfree(s->rope_cs);
+    xfree(s->rope_cs_inv);
     xfree(s->cache_idx);
     memset(s, 0, sizeof(*s));
 }

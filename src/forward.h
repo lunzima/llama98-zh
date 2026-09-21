@@ -1180,6 +1180,21 @@ typedef struct {
        per-layer pow/cos/sin (expensive on PII's x87). */
     float  *rope_cs;
 
+    /* The same table with every sin negated - the CONJUGATE of rope_cs, and
+       therefore the inverse rotation (R(-a) = R(a)^T = conj of R(a) for a
+       unit complex number; IEEE negation is exact, so this is not an
+       approximation of a conjugate but the conjugate). It exists so the
+       output-side inverse rotation needs no kernel of its own: lz_rope
+       computes `x0*c - x1*s, x1*c + x0*s`, and handing it `(c, -s)` makes
+       that expression R(-a) instead of R(a) on every tier at once - the
+       scalar, SSE2 and AVX2 paths are the same code reading a different
+       table, so they stay bit-identical to each other by construction
+       rather than by three separate sign-flip implementations agreeing.
+       Cost: one more (seq_len x rotary_dim) buffer, one negation pass per
+       state alloc, no transcendentals. See forward_csa2.c's step 5 for the
+       one consumer. */
+    float  *rope_cs_inv;
+
     /* 1/sqrt(dim) for attention and SSM: config-only, computed once at
        alloc instead of per layer per token (FSQRT+FDIV about 110 cycles
        on x87). */
@@ -1740,6 +1755,11 @@ extern float lz_rope_orig_max;
    in forward_rope.c. lz_state_alloc's only caller besides tests. */
 void lz_rope_build_table(float *rope_cs, int seq_len,
                          const LZModelConfig *c);
+/* Fill `dst` with the conjugate of an already-built `src` table (sin
+   negated), which is what makes lz_rope compute the INVERSE rotation -
+   LZRunState's own rope_cs_inv comment has the derivation. Same element
+   count as `src`; `n` is that count, i.e. seq_len * rotary_dim. */
+void lz_rope_conjugate_table(float *dst, const float *src, size_t n);
 /* Clear KV cache, SSM recurrent state and conv history; call before a new generation */
 void lz_state_reset(LZRunState *s, const LZModel *m);
 

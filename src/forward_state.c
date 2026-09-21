@@ -1198,6 +1198,14 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
         s->rope_cs = (float *)xcalloc((size_t)seq_len * c->rotary_dim,
                                       sizeof(float), &ok, &s->bytes_alloc);
         if (ok) lz_rope_build_table(s->rope_cs, seq_len, c);
+        /* The conjugate table - the inverse rotation, for the output side
+           of CSA2's attention. LZRunState's own rope_cs_inv comment has
+           the derivation; it is a negation pass over the table above, not
+           a second table build, so it costs no transcendentals. */
+        s->rope_cs_inv = (float *)xcalloc((size_t)seq_len * c->rotary_dim,
+                                          sizeof(float), &ok, &s->bytes_alloc);
+        if (ok) lz_rope_conjugate_table(s->rope_cs_inv, s->rope_cs,
+                                        (size_t)seq_len * c->rotary_dim);
         if (!ok) {
             lz_fpu_float_end(fpu);
             if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_STATE_ALLOC);

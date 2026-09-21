@@ -37,6 +37,7 @@
      3. finalize this position's block         - FULL only
      4. indexer query + Top-K selection        - FULL, REINDEX
      5. attention over the k_eff selected      - every mode
+     5b. inverse RoPE on that output           - every mode
      6. output gate + o_proj                   - every mode
    Finalization sits at 3, ahead of the indexer, because a block is
    visible to the query standing on its own last token - the ordering
@@ -601,6 +602,37 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
         } else {
             memset(s->attn_out, 0, (size_t)qd * sizeof(float));
         }
+
+        /* ---- 5b. inverse RoPE on the attention output, at the QUERY's
+           own position.
+
+           Step 5's `ent` is the same pointer it scored as a key and then
+           accumulated as a value, and step 3 rotated every ring entry -
+           so this output is a weighted sum of ROTATED values, carrying a
+           rotation into the residual stream.
+
+           The reference un-rotates it: .prof/dsv41_ref/model.py:781
+           `apply_rotary_emb(o[..., -rd:], freqs_cis, True)`, the
+           `inverse=True` conjugating the rotation, with `freqs_cis` that
+           call's own `self.freqs_cis[start_pos:start_pos + seqlen]` -
+           the QUERY's positions. Deliberately NOT the block positions
+           step 3 rotates the keys by: those are two different rotations,
+           and the pair is the point - rotate a value by where it sits,
+           un-rotate by where the query sits, and the residual carries
+           the difference.
+
+           Unconditional, k_eff == 0 included: rotating the zero vector
+           is the zero vector, so both paths agree and no second branch
+           is needed.
+
+           `rope_cs_inv` is the conjugate table (forward.h's own comment
+           on the field derives it), so this is the same lz_rope every
+           other call site uses and each tier gets the inverse without a
+           second implementation of it. Only the first `rotary_dim` dims
+           of each head rotate - this model's convention everywhere
+           (src/ops_rope.c), and the same dims the keys were rotated on,
+           which an inverse has to match or it undoes half a rotation. */
+        lz_rope(s->attn_out, nh, hd, rotary_dim, pos, s->rope_cs_inv);
 
         /* ---- 6. output gate (q_proj's own second half, same
            convention as forward_attn.c) + o_proj -> this layer's

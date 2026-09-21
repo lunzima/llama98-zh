@@ -183,3 +183,29 @@ void lz_rope_build_table(float *rope_cs, int seq_len, const LZModelConfig *c) {
         }
     }
 }
+
+/* The conjugate table: same {cos, sin} layout as lz_rope_build_table's
+   output, every sin negated, cos untouched (cos is even, sin is odd, so
+   this is R(-angle) element for element).
+
+   lz_rope reads a pair as `x0*c - x1*s, x1*c + x0*s`; fed `(c, -s)` that
+   same expression is `x0*c + x1*s, x1*c - x0*s`, which is R(angle)^T -
+   the inverse rotation. Doing it here rather than in the kernels is what
+   keeps the inverse available to every tier (scalar, SSE2, AVX2, and the
+   hand-written Watcom ones) without a second implementation of each: they
+   are the same code reading a different table, so they cannot disagree
+   about what the inverse is.
+
+   Negation is exact in IEEE 754 - the sign bit flips and nothing else -
+   so this is the conjugate, not a rounding of it. A kernel that
+   conjugated internally would compute the identical product.
+
+   `n` is the element count, i.e. seq_len * rotary_dim; the odd-indexed
+   elements are the sines, because the table is stored as {cos, sin}
+   pairs. No transcendental runs here, so unlike lz_rope_build_table this
+   needs no PC=24 region. */
+void lz_rope_conjugate_table(float *dst, const float *src, size_t n) {
+    size_t i;
+    for (i = 0; i < n; i++)
+        dst[i] = (i & 1u) ? -src[i] : src[i];
+}
