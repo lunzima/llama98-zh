@@ -130,6 +130,19 @@ BIN=$ROOT/llama98.exe
 [ -n "$MODEL" ] && [ -d "$MODEL" ] || {
     echo "kv_share_gate: SKIP - model dir not given or not found: '$MODEL'"; exit 2; }
 
+# The bin arms below derive the header's length and every field offset in
+# it from the READER - src/model.c's own RD() run, through the parser the
+# training tree keeps in tests/test_bin_header_tail_order.py. That is a
+# cross-tree dependency, so its absence is reported as a SKIP rather than
+# passed over: a gate that cannot derive the number it cuts a header at
+# must not go on to report on the header it cut.
+TRAIN=${LZ_TRAIN:-E:/LLM/llama98-zh}
+[ -f "$TRAIN/tests/test_bin_header_tail_order.py" ] || {
+    echo "kv_share_gate: SKIP - no training tree at $TRAIN (set LZ_TRAIN)"
+    echo "  the header's length is derived from the reader parser living there"
+    exit 2
+}
+
 HAVE_ST=0
 [ -f "$MODEL/model.safetensors" ] && HAVE_ST=1
 HAVE_BIN=0
@@ -425,37 +438,78 @@ fi
 #             carries the tensors a sharing model does not store, or the
 #             word was cleared on a stream that does not carry them.
 if [ "$HAVE_BIN" = 1 ]; then
-    python3 - "$MODEL" "$W" >"$W/binbuild.log" 2>&1 <<'PY'
+    python3 - "$MODEL" "$W" "$ROOT" "$TRAIN" >"$W/binbuild.log" 2>&1 <<'PY'
 import os, shutil, struct, sys
 
-model_dir, w = sys.argv[1], sys.argv[2]
+model_dir, w, engine_root, train_root = sys.argv[1:5]
 MAX_LAYERS = 128
 CUR_VER = 5
 SKIP_FILES = ("model.safetensors", "model.bin", "model.bin.lz4")
 
+# ------------------------------------------------------------- the reader
+# The header's length and every field offset in this block come from the
+# READER: src/model.c's RD() run, parsed by the training tree's
+# tests/test_bin_header_tail_order.py (the same parser that checks the
+# writer's field sequence against the reader's).
+#
+# They were counted here by hand until 2026-09-21, and this is what that
+# copy was by then: the group appended to v5's tail had grown from the 4
+# fields it described to 14 (a 15th word, ced_kv, and three more
+# LZ_MAX_LAYERS-wide arrays), so this block believed a v5 header was 313
+# words where src/model.c reads 704 - short by 1564 bytes. attn_kv_share
+# still resolved to the right word, because every word that was added sits
+# AFTER it, so the switch arm stayed green; what the number fed was the
+# two arms that cut or rebuild a header to that length, and both would
+# have written a file whose header does not exist. A format counted by
+# hand here is a third copy of it beside the writer and the reader, and
+# its failure mode is not being wrong about the field it is looking at -
+# it is being wrong about every field after the one that moved.
+sys.path.insert(0, train_root)
+sys.path.insert(0, os.path.join(train_root, "tests"))
+try:
+    from test_bin_header_tail_order import reader_fields, _max_layers
+except ImportError as e:
+    print("cannot import the reader parser from %s: %s" % (train_root, e))
+    sys.exit(2)
+READER = reader_fields(engine_root)
+_read_ml = _max_layers(engine_root)
+if _read_ml != MAX_LAYERS:
+    print("src/model.h's LZ_MAX_LAYERS is %d, not %d - this block's arrays"
+          " are the other width" % (_read_ml, MAX_LAYERS))
+    sys.exit(2)
+
+FIELDS = [n for n, _ in READER]
+HEADER_WORDS = sum(x for _, x in READER)
+
+def field_off(name):
+    """Byte offset of a header field, from the reader's own field order."""
+    assert name in FIELDS, "%s is not a field the reader reads" % name
+    return 8 + 4 * sum(x for _, x in READER[:FIELDS.index(name)])
+
 def header_len(ver):
-    """Bytes of the header. Two shapes are readable: v4, the published
-    generation, and the current layout. The number below is the layout
-    the engine reads - base, then the 13-word KDA/MoE tail, then 2 MTP +
-    5 rope_scaling + 1 use_subn + 2 Hadamard + 2 MLA + 1 attn_kv_share,
-    then the 131-word group appended to that tail (attn_sink_learned,
-    gated_residual, ced_split, csa2_on[128]) - 313 words in all, and the
-    group is added as 3 + MAX_LAYERS because attn_kv_share is already the
-    last 1 in the list above. Counting it twice is a whole word of offset,
-    which lands the flip and the staleness check on the wrong field - and
-    the file still parses, so nothing else here notices. The count is
-    written out rather than imported from export_q8 on purpose: importing
-    it would make this arm agree with the writer by construction and stop
-    it noticing a layout the READER has wrong."""
-    words = 28 + MAX_LAYERS           # fixed fields + layer_types
-    if ver == 4:
-        words += 13                   # KDA gate + latent MoE, and nothing after
-    else:
-        words += 13 + 2 + 5 + 1 + 2 + 2 + 1 + 3 + MAX_LAYERS
-    return 8 + 4 * words
+    """Bytes of the header. v5 is the reader's whole RD() run.
+
+    v4 is that run's PREFIX, and the boundary is in the source rather than
+    counted here: src/model.c's version branch `if (ver == 5) {` opens on
+    "The rest of the v5 layout, in order and unconditionally", whose first
+    read is mtp_n_layers - so a v4 header is exactly the words before it.
+    That is also what the version policy above the branch states: v4 "is
+    the published generation - github.com/lunzima/kunkun98-models ships a
+    MODEL/model.bin of exactly this shape - so it is FROZEN here", and it
+    "carries the 13-word tail and stops"."""
+    return field_off("mtp_n_layers") if ver < 5 else 8 + 4 * HEADER_WORDS
+
+def tail_words():
+    """Words from attn_kv_share to the end of the header."""
+    return sum(x for _, x in READER[FIELDS.index("attn_kv_share"):])
 
 def tails_below(ver):
-    """The words a v4 header lacks, in the order src/model.c reads them."""
+    """The words a v4 header lacks, in the order src/model.c reads them:
+    that same version branch, from mtp_n_layers up to (not including)
+    attn_kv_share. The VALUES are hand-written - they are the absent-field
+    defaults, what the reader's v4 path leaves at its memset(0), except
+    the two Hadamard blocks: 0 is a legal block size, so a zero cannot say
+    "this file predates the field", and the -1 sentinel is what does."""
     out = b""
     if ver < 5:
         out += struct.pack("<2i", 0, 0)          # MTP head
@@ -463,18 +517,22 @@ def tails_below(ver):
         out += struct.pack("<i", 0)              # use_subn
         out += struct.pack("<2i", -1, -1)        # Hadamard blocks: -1 = derive
         out += struct.pack("<2i", 0, 0)          # MLA ranks
+        assert len(out) == field_off("attn_kv_share") - header_len(4), (
+            "the bridge is %d bytes, the reader says %d"
+            % (len(out), field_off("attn_kv_share") - header_len(4)))
     return out
 
 def appended_tail(kv_share):
-    """attn_kv_share plus the 131-word group appended to v5's tail, every
-    word of that group at the "off" value a v4 header restores it to.
-    One producer for both arms: written out twice by hand, the two are one
-    edit away from disagreeing about how many zero words the group holds,
-    and the arms would then differ in their tensor stream's alignment
-    rather than in the switch under test."""
+    """attn_kv_share plus every word the reader reads after it, at the
+    "off" value a v4 header restores them to. One producer for both arms:
+    written out twice by hand, the two are one edit away from disagreeing
+    about how many zero words the group holds, and the arms would then
+    differ in their tensor stream's alignment rather than in the switch
+    under test. The WIDTH comes from the reader - this docstring used to
+    name a four-field, 131-word group, which is what the constant beside
+    it still said after the group had grown to 14 fields and 522 words."""
     return (struct.pack("<i", kv_share)
-            + struct.pack("<3i", 0, 0, 0)        # sink / GR / ced_split
-            + b"\0" * (4 * MAX_LAYERS))          # csa2_on[]
+            + b"\0" * (4 * (tail_words() - 1)))
 
 def emit(tag, blob):
     out = os.path.join(w, tag)
@@ -499,10 +557,11 @@ if len(full) < 2:
     sys.exit(2)
 if ver == CUR_VER:
     hl = header_len(ver)
-    # attn_kv_share: the header word the switch itself is. Counted back
-    # from the end of the header rather than forward from layer_types, so
-    # the one place that knows how many words follow it is this one.
-    KV_OFF = hl - 4 * (1 + 3 + MAX_LAYERS)
+    # attn_kv_share: the header word the switch itself is, addressed by the
+    # reader's own field order. It used to be counted back from the end of
+    # the header, which is only the same address as long as the words that
+    # follow it are counted correctly here too.
+    KV_OFF = field_off("attn_kv_share")
     word = word_at(KV_OFF)
     emit("bin_ok", b)
     emit("bin_bad", b[:KV_OFF] + struct.pack("<i", 0 if word else 1)
@@ -519,17 +578,23 @@ if ver == CUR_VER:
     # whose absent-value defaults reproduce what v5 states. That is
     # checked rather than assumed, below - the arm is emitted only when
     # every such field already holds its derived default, and the shell
-    # treats its absence as a SKIP it prints, not as a pass. The group
-    # appended to v5's tail is part of "every such field": a sink / GR /
-    # ced_split / csa2_on the file switched ON is a field v4 cannot carry,
-    # so cutting the header back would silently compare two models.
+    # treats its absence as a SKIP it prints, not as a pass. Every word
+    # the appended group can switch ON is part of "every such field" -
+    # whichever ones it holds today is the reader's list, not one written
+    # out here - because a switch v4 cannot carry, left on, would make
+    # this arm compare two different models and call it a header test.
     tail0 = 8 + (28 + MAX_LAYERS) * 4        # first word after layer_types
     # attn_kv_share has two independent addresses: 25 words past
-    # layer_types, and KV_OFF counted back from the header's end. An edit
-    # that moves one and not the other is a silent word of offset - the
-    # file still parses and the arms then test the wrong field.
+    # layer_types, and the reader's own field order. An edit that moves one
+    # and not the other is a silent word of offset - the file still parses
+    # and the arms then test the wrong field. The same two-address check
+    # for the other end: layer_types' width and the hand count of the
+    # fields before it, against where the reader puts the field after it.
     assert KV_OFF == tail0 + 25 * 4, (KV_OFF, tail0 + 25 * 4)
-    assert len(appended_tail(0)) == 4 * (1 + 3 + MAX_LAYERS)
+    assert tail0 == field_off("kda_gate_rank"), (tail0, field_off("kda_gate_rank"))
+    assert len(tails_below(4)) + len(appended_tail(0)) == hl - header_len(4), (
+        "the v4->v5 bridge is %d bytes, the two header lengths differ by %d"
+        % (len(tails_below(4)) + len(appended_tail(0)), hl - header_len(4)))
     vdim = word_at(8 + 25 * 4)               # lin_value_dim
     idim = word_at(8 + 7 * 4)                # intermediate_size
     oblk = 0 if (vdim < 2 or (vdim & (vdim - 1))) else vdim
@@ -538,19 +603,46 @@ if ver == CUR_VER:
         dblk >>= 1
     if dblk == 1: dblk = 0
     stale = []
-    if word_at(tail0 + 13 * 4) != 0: stale.append("mtp_n_layers")
-    if word_at(tail0 + 15 * 4) != 0: stale.append("rope_scaling_type")
-    if word_at(tail0 + 20 * 4) != 0: stale.append("use_subn")
-    if word_at(tail0 + 21 * 4) != oblk: stale.append("hadamard_o")
-    if word_at(tail0 + 22 * 4) != dblk: stale.append("hadamard_down")
-    if word_at(tail0 + 23 * 4) != 0: stale.append("mla_q_lora_rank")
-    if word_at(tail0 + 24 * 4) != 0: stale.append("mla_o_lora_rank")
-    if word_at(KV_OFF) != 0: stale.append("attn_kv_share")
-    if word_at(KV_OFF + 4) != 0: stale.append("attn_sink_learned")
-    if word_at(KV_OFF + 8) != 0: stale.append("gated_residual")
-    if word_at(KV_OFF + 12) != 0: stale.append("ced_split")
-    if any(word_at(KV_OFF + 16 + 4 * i) for i in range(MAX_LAYERS)):
-        stale.append("csa2_on")
+    # The precondition of the comparison below, as a byte comparison: the
+    # region a v4 header cannot carry must BE what this arm would write for
+    # it. That is the whole condition, so it is checked against the bytes
+    # rather than against a list of the fields someone remembered. This
+    # list is where the staleness above started: it named four fields of
+    # the appended group, and the group has since grown ten more, none of
+    # which it would have noticed switched on. A field is named in the
+    # SKIP line only to say WHERE the difference is.
+    #
+    # The one place bytes and "reproduces the model" differ is the two
+    # Hadamard blocks, and that is the mechanism rather than an exception:
+    # -1 is what a v4 header holds and it means "derive it", so what has to
+    # match is the DERIVED value, not the sentinel. oblk/dblk are that
+    # derivation, and this arm writing -1 while the file holds 1024 is the
+    # arm's own claim being checked, not a difference.
+    def name_at(off):
+        """The reader's name for the field containing byte `off`."""
+        for n, x in READER:
+            if off < field_off(n) + 4 * x:
+                return n
+        return "(past the header)"
+
+    def first_diff(a, x, base):
+        for k in range(0, min(len(a), len(x)), 4):
+            if a[k:k + 4] != x[k:k + 4]:
+                return [name_at(base + k)]
+        return ["(length)"]
+
+    bridge_at = header_len(4)
+    exp_bridge = bytearray(tails_below(4))
+    for n, v in (("hadamard_o", oblk), ("hadamard_down", dblk)):
+        k = field_off(n) - bridge_at
+        exp_bridge[k:k + 4] = struct.pack("<i", v)
+    bridge = b[bridge_at:field_off("attn_kv_share")]
+    if bridge != bytes(exp_bridge):
+        stale += first_diff(bridge, bytes(exp_bridge), bridge_at)
+    group = b[field_off("attn_kv_share"):hl]
+    exp_group = appended_tail(word)
+    if group != exp_group:
+        stale += first_diff(group, exp_group, field_off("attn_kv_share"))
     if stale:
         print("SKIP bin_v4: v4's absent-value defaults do not reproduce this"
               " header (%s), so cutting it back to v4 would change the model"
