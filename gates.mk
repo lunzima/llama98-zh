@@ -41,7 +41,7 @@
 # nested inside another comment; gcc said so on every build and `check`
 # reported 16 PASS over it. Having a caller somewhere is not the test -
 # being reachable from what people actually run is.
-check: root-hygiene-gate bare-endif-gate wscr-borrow-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate json-offset-gate softfp-gate dedupe-gate mm-alias-gate kv-share-ced-boundary-gate ced-proj-arm-gate csa2-modes-config-gate csa2-cache-idx-alias-gate csa2-mode-dispatch-gate csa2-mode-export-load-gate csa2-last-writer-bin-gate csa2-reindex-causality-gate csa2-indexer-rope-slice-gate csa2-out-rope-gate csa2-z-subst-gate smf-lead-gate c89-floor-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate isa-floor-avx2-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate arch-allowlist-gate kernel-matrix-gate aux-parm-arity-gate aux-equiv-gate mathf-xcompiler-gate bf16-torch-gate lz4-model-gate gcc-watcom-output-gate fixture-exists-gate
+check: root-hygiene-gate bare-endif-gate wscr-borrow-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate json-offset-gate softfp-gate dedupe-gate mm-alias-gate kv-share-ced-boundary-gate ced-proj-arm-gate csa2-modes-config-gate csa2-cache-idx-alias-gate csa2-mode-dispatch-gate csa2-mode-export-load-gate csa2-last-writer-bin-gate csa2-reindex-causality-gate csa2-indexer-rope-slice-gate csa2-out-rope-gate csa2-z-subst-gate csa2-compress-m-layers-gate smf-lead-gate c89-floor-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate isa-floor-avx2-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate arch-allowlist-gate kernel-matrix-gate aux-parm-arity-gate aux-equiv-gate mathf-xcompiler-gate bf16-torch-gate lz4-model-gate gcc-watcom-output-gate fixture-exists-gate
 
 # Zero gcc warnings, asserted rather than printed. The Watcom side has
 # always been counted ("N lines, 0 warnings, 0 errors", per file); this
@@ -547,6 +547,34 @@ csa2-out-rope-gate:
 .PHONY: csa2-z-subst-gate
 csa2-z-subst-gate:
 	@$(call GATE_OK,build/csa2_z_subst_gate.sh)
+
+# A-4: the compression ratio is PER LAYER. config.json's
+# csa2_compress_m_layers (an object keyed by layer index; a layer it does
+# not name keeps the csa2_compress_m scalar) is what makes the axis
+# expressible - DeepSeek-V4.1-Flash runs m=2 on its 18 encoder layers and
+# m=1 on its 20 decoder ones, and this engine carried that assignment as
+# one int. The criterion is "two layers, two ratios, both at their own" -
+# NOT "either ratio is better", which needs training and has no trained
+# CSA2 layer here to compare against (docs/model-selection-constraints.md
+# has that boundary and section 7's A-4 entry the landing).
+#
+# The observable is s->csa2_topk_n_pub's per-(ci, token) k_eff =
+# min(topk, n_vis), and n_vis = (pos + 1) / cm - an absolute readout of
+# each layer's own ratio, at an offset no part of this change moves, so
+# the same probe program runs under the failing and the passing arm.
+# check1/check2 move the SCALAR and require that readout to follow: a red
+# check3 beside a green check2 is the missing surface, and a red check2 is
+# a broken fixture. check4 is the load-time refusals; the mutant (every
+# layer consuming layer 0's ratio) must redden check3's two lines and
+# nothing else.
+#
+# In `check` rather than ci.sh-only: gcc and python3 are its whole
+# environment, it needs no model dir, and it runs in about half a minute
+# (two engine bodies, fixed and mutant) - the ci.sh-only list above is for
+# gates that need a model, a Watcom build, or minutes of wall clock.
+.PHONY: csa2-compress-m-layers-gate
+csa2-compress-m-layers-gate:
+	@$(call GATE_OK,build/csa2_compress_m_layers_gate.sh)
 
 # F11 (code review, third round on the same plan): model_walk's
 # CSA2_SPECS tensor walk was never gated on L->csa2_mode, so a
