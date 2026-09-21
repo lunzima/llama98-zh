@@ -34,6 +34,7 @@ cd "$ROOT" || { echo "root_hygiene_gate: FAIL - cannot cd to $ROOT"; exit 1; }
 # added here only when it is decided that the entry SHIPS - not when it
 # appears.
 SHIPPED="
+.gitattributes
 .gitignore
 LICENSE
 Makefile

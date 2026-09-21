@@ -14,7 +14,7 @@ machine is amd64/MinGW. Both must produce **bit-identical** output.
 **This repository holds the inference engine and the front end. It never holds
 a test suite and it never holds training tools.** Not "does not yet" - never.
 The PUBLIC release tree is `src/`, `common/`, `gui/`, `assets/`, `contrib/`,
-`Makefile`, `README.md`, `LICENSE`, `.gitignore`, `llama98.def` and nothing
+`Makefile`, `README.md`, `LICENSE`, `.gitattributes`, `.gitignore`, `llama98.def` and nothing
 else. Verification is what the `Verify` section below describes: modes of the
 shipped binaries.
 
