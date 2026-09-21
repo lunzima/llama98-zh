@@ -159,11 +159,19 @@ done
 #                     stay by requirement.
 #   g_pair            --pair. A performance knob; perf_knob_gate holds
 #                     it to not changing any number.
+#   lz_bf16_store_g   --bf16-store. Listed TWICE on purpose, and the
+#                     duplication is not a typo to tidy up: ops_sched.c
+#                     declares it under `#if`/`#else` (`:383` = 1 for one
+#                     side, `:385` = 0 for the other), and the comparison
+#                     below is over the MATCHED SOURCE TEXT - it does not
+#                     dedupe. Naming it once leaves the gate red with a
+#                     diff that looks like a misspelling.
+#   lz_fastfp_g       --fastfp.
 #   lz_float_ref_g    --fixed. The float axis, and the only one.
 #
 # A fourth of any name reddens. That is the safe direction: a new knob
 # has to be argued for here rather than arriving silently.
-EXPECT_GLOBALS="g_kernel g_pair lz_float_ref_g"
+EXPECT_GLOBALS="g_kernel g_pair lz_bf16_store_g lz_bf16_store_g lz_fastfp_g lz_float_ref_g"
 GOT=$(grep -oE "^(int|unsigned|long|float|double)[a-zA-Z0-9_ ]*\**([a-zA-Z_][a-zA-Z0-9_]*) *=" \
       src/ops_sched.c | grep -oE "[a-zA-Z_][a-zA-Z0-9_]* *=$" | sed 's/ *=$//' | sort | tr '\n' ' ')
 WANT=$(printf '%s\n' $EXPECT_GLOBALS | sort | tr '\n' ' ')
