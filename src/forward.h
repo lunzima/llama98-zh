@@ -1285,11 +1285,16 @@ typedef struct {
        mechanism, top-k over compressed blocks, and mixing it with
        token-level eviction is not a combination this project defines).
 
-         csa2_pending_{c,z}       (n_full, csa2_compress_m, head_dim)
-                                   raw per-position contributions to the
-                                   CURRENTLY OPEN (not yet finalized)
-                                   compressed block, indexed by
-                                   position % csa2_compress_m
+         csa2_pending_{c,z}       (n_full, csa2_compress_m *
+                                   ssm_ring_depth, head_dim)
+                                   raw per-position contributions to a
+                                   compressed block that is not yet
+                                   finalized, indexed by
+                                   position % (csa2_compress_m *
+                                   ssm_ring_depth) - ssm_ring_depth
+                                   banks of csa2_compress_m slabs each,
+                                   bank (block % ssm_ring_depth) holding
+                                   that block's own cm positions
          csa2_pending_{c,z}_idx   same shape, csa2_indexer_head_dim -
                                    the indexer key's own open block
          csa2_comp_ring           (n_full, max_blocks, head_dim) -
@@ -1299,6 +1304,34 @@ typedef struct {
          csa2_idx_comp_ring       (n_full, max_blocks,
                                    csa2_indexer_head_dim) - finalized
                                    indexer keys, same finalization point
+
+       WHY BANKS, AND NOT THE BARE position % csa2_compress_m. Step 3 of
+       forward_csa2.c finalizes a block from all cm of its slabs at once,
+       so every slab a closure reads must still hold its own position's
+       contribution. Plain decoding gets that for free - closures are
+       exactly cm positions apart in one strictly increasing pass, so
+       every slab is rewritten between one closure and the next. A
+       speculative round does not: it forwards k_eff+1 rows and then
+       rolls back to the last accepted position P, so the rows past P are
+       rejected and get forwarded again, while the positions at or before
+       P are never forwarded again. With ONE bank, a rejected row at
+       position q = u + cm writes the same slab as position u, for any u
+       in [c - cm + 1, P] - u and q are cm apart and so sit in different
+       blocks, but they share a slab index. Whenever the rejected tail
+       k_eff - n_accept reaches cm, that overwrites the contribution of a
+       position the rollback never revisits, and the block's next closure
+       - the re-forward of its last position, which is the one that
+       counts - finalizes from a rejected row's data.
+
+       Banks make a block's slabs reachable only by that block's own cm
+       positions, since two positions that share a slab index are cm
+       apart in position and one block apart in block index. The depth
+       needed is set by how far a rejected tail can reach:
+       s->ssm_ring_depth is spec_k_max+1 (clamped) whenever the state can
+       run --spec at all - strictly more banks than the at most
+       spec_k_max positions of rejected tail can span blocks - and 1
+       whenever it cannot (no MTP head, or a caller that declared
+       spec_k_max <= 0), where this is the single bank it always was.
 
        Neither ring carries a companion "how many entries are finalized"
        counter: forward_csa2.c derives that bound from the position it
@@ -1533,9 +1566,19 @@ void forward_engram(const LZModel *m, LZRunState *s,
    out; forward_csa2.c's header used to say so and scope it to --spec
    rollback (its own "NOT SUPPORTED" list). It is not spec-only. Those
    four buffers hold the contribution of each of the csa2_compress_m raw
-   positions belonging to the CURRENTLY OPEN compressed block, indexed by
-   pos % cm, and step 3 of that file reads ALL cm slabs when the block
+   positions belonging to the block that is open at the checkpointed
+   position, and step 3 of that file reads ALL cm slabs when the block
    completes (off == cm - 1).
+
+   ONE BLOCK is what a checkpoint carries, not the whole banked ring
+   (forward.h's own csa2_pending_c comment has the bank layout): those
+   cm slabs live in bank (block % ssm_ring_depth), a bank that differs
+   per run state, so the checkpoint stays a plain n_full * cm * width
+   array and save/restore address the bank the checkpointed POSITION
+   selects - the forward that resumes writes that same block. Nothing
+   else in the banked ring is needed: every block below the open one was
+   already finalized into csa2_comp_ring, which this type does not
+   carry.
 
    Why restore cannot rebuild them: a restore lands on position p and
    the pass forwards p onward, so a block that STRADDLES p (p odd at

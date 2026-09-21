@@ -62,18 +62,20 @@
      - Composition with S4's shared low-rank query latent - this
        function always reads L->csa2_w_dq_idx, unlike the training-side
        reference, which reuses q_proj.down when S4 already converted it.
-     - Incremental cache rollback - the checkpoint primitive WAS missing
-       this and that was a live bug, not a scope note: csa2_pending_c and
-       friends were not among LZStateCkpt's saved fields, and a restore
-       that lands on an odd position (cm 2) leaves step 3 finalizing a
-       block from the PREVIOUS turn's leftover slab for position p-1.
-       Both halves are saved now (LZStateCkpt's own comment has the
-       measurement and the reasoning); the finalized rings stay out
-       because a restore neither rewrites nor reads a stale one. What is
-       still not correct is --spec's own per-round rollback, which does
-       not go through LZStateCkpt at all (it is served by the ssm_slot
-       ring - lz_spec_round's module comment), so it rewinds no CSA2
-       state and remains out of scope for this pass, same as SIMD. */
+
+   Rollback, both kinds, is covered. LZStateCkpt's own comment has the
+   cross-turn half (csa2_pending_c and friends were not among its saved
+   fields, a live bug: a restore landing on an odd position at cm 2 left
+   step 3 finalizing a block from the PREVIOUS turn's leftover slab for
+   position p-1). A speculative round's own rollback rewinds nothing at
+   all and needs to: lz_spec_round re-points s->ssm_slot and lets the
+   next forward overwrite what the rejected rows wrote, which works for
+   CSA2 only because of two properties of the code below - the pending
+   slabs are banked by BLOCK (forward.h's csa2_pending_c comment), so a
+   rejected row cannot reach a slab another block's closure will read,
+   and step 3 leaves the gate logits it reads intact, so the re-forward
+   of a block's last position finalizes it from the same data the
+   rejected round would have used. */
 void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
                   int layer, int pos0, int nt, const float *kv_in) {
     const LZModelConfig *c = &m->config;
@@ -81,8 +83,8 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
     int hdim = c->hidden_size;
     int qgd = c->attn_qgate_dim, qd = c->attn_q_dim;
     /* cm is the divisor of max_blocks and of pos % cm below, and the
-       multiplier of every pend_* offset into buffers that
-       forward_state.c sizes with `cm > 0 ? cm : 1`. Read raw, a cm of 0
+       factor every pend_* offset into buffers that forward_state.c
+       sizes with `cm > 0 ? cm : 1` per bank. Read raw, a cm of 0
        therefore divides by zero here while the allocation next door
        assumed 1 - two different values for one quantity. Same guard as
        forward.c's reset and forward_state.c's allocator; lz_open_bin
@@ -100,10 +102,19 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
     int rotary_dim = c->rotary_dim;
     float scale = 1.0f / (float)sqrt((double)hd);
 
-    float *pend_c = s->csa2_pending_c + (size_t)ci * cm * hd;
-    float *pend_z = s->csa2_pending_z + (size_t)ci * cm * hd;
-    float *pend_c_idx = s->csa2_pending_c_idx + (size_t)ci * cm * idx_hd;
-    float *pend_z_idx = s->csa2_pending_z_idx + (size_t)ci * cm * idx_hd;
+    /* Slabs are indexed by position modulo cm * ring_depth, not modulo
+       cm: ring_depth slots are one bank, each bank holds cm raw
+       positions, and bank (block % ring_depth) is where that block's
+       positions land. forward.h's own csa2_pending_c comment derives
+       why one bank is not enough under --spec; ring_depth is 1 for
+       every state that never runs speculative decoding, where this is
+       position % cm and the stride below is the single bank it always
+       was. */
+    size_t pdepth = (size_t)cm * (size_t)s->ssm_ring_depth;
+    float *pend_c = s->csa2_pending_c + (size_t)ci * pdepth * hd;
+    float *pend_z = s->csa2_pending_z + (size_t)ci * pdepth * hd;
+    float *pend_c_idx = s->csa2_pending_c_idx + (size_t)ci * pdepth * idx_hd;
+    float *pend_z_idx = s->csa2_pending_z_idx + (size_t)ci * pdepth * idx_hd;
     float *ring = s->csa2_comp_ring + (size_t)ci * max_blocks * hd;
     float *ring_idx = s->csa2_idx_comp_ring + (size_t)ci * max_blocks * idx_hd;
     /* This ci's published Top-K base (forward.h's own csa2_topk_idx_pub
@@ -119,6 +130,7 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
     for (tk = 0; tk < nt; tk++) {
         int pos = pos0 + tk;
         int off = pos % cm;
+        int pslot = (int)((size_t)pos % pdepth);
         int blk = pos / cm;
         const float *h = s->xb + (size_t)tk * hdim;
         int *tok_idx = pub_idx_base + (size_t)tk * topk;
@@ -201,7 +213,7 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
            FULL ONLY. A Reindex/Reuse layer's ci is ALIASED to its
            source's (forward_state.c's cache_idx fill) - if it also ran
            this step, it would write a SECOND, conflicting contribution
-           into the exact same pend_c[off]/pend_z[off]/etc. slot its
+           into the exact same pend_c[pslot]/pend_z[pslot]/etc. slot its
            source layer's OWN, separate call to this function (each
            csa2_on layer gets its own top-level call from forward.c's
            per-layer dispatch loop) also writes for the SAME token: a
@@ -225,12 +237,12 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
             const float *kvh = kv_in ? kv_in + (size_t)tk * hdim : h;
             lz_matmul_w(s->csa2_c_j, kvh, &L->csa2_w_kv, hdim, hd, s->xq, s->xqs);
             lz_matmul_w(s->csa2_z_j, h, &L->csa2_w_gate, hdim, hd, s->xq, s->xqs);
-            memcpy(pend_c + (size_t)off * hd, s->csa2_c_j, (size_t)hd * sizeof(float));
-            memcpy(pend_z + (size_t)off * hd, s->csa2_z_j, (size_t)hd * sizeof(float));
+            memcpy(pend_c + (size_t)pslot * hd, s->csa2_c_j, (size_t)hd * sizeof(float));
+            memcpy(pend_z + (size_t)pslot * hd, s->csa2_z_j, (size_t)hd * sizeof(float));
             lz_matmul_w(s->csa2_c_j_idx, kvh, &L->csa2_w_kv_idx, hdim, idx_hd, s->xq, s->xqs);
             lz_matmul_w(s->csa2_z_j_idx, h, &L->csa2_w_gate_idx, hdim, idx_hd, s->xq, s->xqs);
-            memcpy(pend_c_idx + (size_t)off * idx_hd, s->csa2_c_j_idx, (size_t)idx_hd * sizeof(float));
-            memcpy(pend_z_idx + (size_t)off * idx_hd, s->csa2_z_j_idx, (size_t)idx_hd * sizeof(float));
+            memcpy(pend_c_idx + (size_t)pslot * idx_hd, s->csa2_c_j_idx, (size_t)idx_hd * sizeof(float));
+            memcpy(pend_z_idx + (size_t)pslot * idx_hd, s->csa2_z_j_idx, (size_t)idx_hd * sizeof(float));
         }
 
         /* ---- 3. finalize this position's block if it just completed
@@ -295,6 +307,15 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
            stale or zero contribution. */
         if (off == cm - 1 && mode == LZ_CSA2_FULL) {
             int j, d;
+            /* This block's own cm slabs start at the base of its bank,
+               (pslot - off), not at offset 0 of this ci's region: with
+               more than one bank the block that just completed is not
+               the first one. pbase is 0 whenever there is one bank. */
+            int pbase = pslot - off;
+            float *bz = pend_z + (size_t)pbase * hd;
+            float *bc = pend_c + (size_t)pbase * hd;
+            float *bzi = pend_z_idx + (size_t)pbase * idx_hd;
+            float *bci = pend_c_idx + (size_t)pbase * idx_hd;
             /* csa2_c_j/csa2_c_j_idx are dead by now - their only use
                this iteration was step 2's copy into pend_c/pend_c_idx
                immediately above - so they double as this block's
@@ -304,42 +325,48 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
             float *sum_c = s->csa2_c_j;
             float *sum_c_idx = s->csa2_c_j_idx;
             float maxv, denom;
+            /* pend_z/pend_z_idx are READ here, never consumed: a block
+               can be finalized more than once - a speculative round
+               finalizes it from rows that are then rejected, and the
+               re-forward of its last position finalizes it again - and
+               the positions at or before the round's rollback point are
+               never forwarded again. Storing the softmax weights back
+               into pend_z would therefore leave that second finalization
+               reading weights where it expects gate logits. lz_exp is
+               deterministic, so recomputing it in the accumulation pass
+               is bit-identical to the single evaluation it replaces. */
             /* main KV: softmax over the cm pending gate logits, per
                output dim independently (arXiv:2606.19348 Eq 11's
                Softmax_row is across the m raw positions, for EACH of
                the c output dims separately - not a single scalar
                weight per position). */
             for (d = 0; d < hd; d++) {
-                maxv = pend_z[d];
+                maxv = bz[d];
                 for (j = 1; j < cm; j++)
-                    if (pend_z[(size_t)j * hd + d] > maxv) maxv = pend_z[(size_t)j * hd + d];
+                    if (bz[(size_t)j * hd + d] > maxv) maxv = bz[(size_t)j * hd + d];
                 denom = 0.0f;
-                for (j = 0; j < cm; j++) {
-                    float e = lz_exp(pend_z[(size_t)j * hd + d] - maxv);
-                    pend_z[(size_t)j * hd + d] = e;   /* reuse as the un-normalized weight */
-                    denom += e;
-                }
+                for (j = 0; j < cm; j++)
+                    denom += lz_exp(bz[(size_t)j * hd + d] - maxv);
                 sum_c[d] = 0.0f;
                 for (j = 0; j < cm; j++)
-                    sum_c[d] += (pend_z[(size_t)j * hd + d] / denom) * pend_c[(size_t)j * hd + d];
+                    sum_c[d] += (lz_exp(bz[(size_t)j * hd + d] - maxv) / denom)
+                                * bc[(size_t)j * hd + d];
             }
             lz_rmsnorm(ring + (size_t)blk * hd, sum_c,
                       lz_t_f32(&L->k_norm, s->wscr), hd, rms_eps);
             lz_rope(ring + (size_t)blk * hd, 1, hd, rotary_dim, pos, s->rope_cs);
 
             for (d = 0; d < idx_hd; d++) {
-                maxv = pend_z_idx[d];
+                maxv = bzi[d];
                 for (j = 1; j < cm; j++)
-                    if (pend_z_idx[(size_t)j * idx_hd + d] > maxv) maxv = pend_z_idx[(size_t)j * idx_hd + d];
+                    if (bzi[(size_t)j * idx_hd + d] > maxv) maxv = bzi[(size_t)j * idx_hd + d];
                 denom = 0.0f;
-                for (j = 0; j < cm; j++) {
-                    float e = lz_exp(pend_z_idx[(size_t)j * idx_hd + d] - maxv);
-                    pend_z_idx[(size_t)j * idx_hd + d] = e;
-                    denom += e;
-                }
+                for (j = 0; j < cm; j++)
+                    denom += lz_exp(bzi[(size_t)j * idx_hd + d] - maxv);
                 sum_c_idx[d] = 0.0f;
                 for (j = 0; j < cm; j++)
-                    sum_c_idx[d] += (pend_z_idx[(size_t)j * idx_hd + d] / denom) * pend_c_idx[(size_t)j * idx_hd + d];
+                    sum_c_idx[d] += (lz_exp(bzi[(size_t)j * idx_hd + d] - maxv) / denom)
+                                    * bci[(size_t)j * idx_hd + d];
             }
             memcpy(ring_idx + (size_t)blk * idx_hd, sum_c_idx, (size_t)idx_hd * sizeof(float));
         }

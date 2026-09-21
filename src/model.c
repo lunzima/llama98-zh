@@ -3437,8 +3437,10 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
            the arithmetic is unchanged - ceil(seq_len/cm) is 1 either way,
            so cm > seq_len compresses exactly as much as cm == seq_len,
            i.e. nothing - while the four csa2_pending_* buffers each grow
-           as n_full_layers * cm * dim. The cap costs no legitimate
-           config and bounds those four allocations by n_full * seq_len.
+           as n_full_layers * cm * dim * ssm_ring_depth (forward.h's own
+           csa2_pending_c comment has the banks). The cap costs no
+           legitimate config and bounds those four allocations by
+           n_full * seq_len * (LZ_SPEC_K_MAX + 1).
 
            csa2_topk is NOT bounded by csa2_compress_m: the two are in
            different units (blocks vs positions) and forward_csa2.c

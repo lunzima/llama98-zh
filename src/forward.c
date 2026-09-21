@@ -701,12 +701,18 @@ void lz_state_reset(LZRunState *s, const LZModel *m) {
         int cm = c->csa2_compress_m > 0 ? c->csa2_compress_m : 1;
         int max_blocks = (s->seq_len + cm - 1) / cm;
         size_t nf = (size_t)c->n_full_layers;
-        memset(s->csa2_pending_c, 0, nf * cm * c->head_dim * sizeof(float));
-        memset(s->csa2_pending_z, 0, nf * cm * c->head_dim * sizeof(float));
+        /* Same banked depth alloc_csa2_ring used (forward.h's own
+           csa2_pending_c comment) - a reset that zeroed only one bank
+           would leave the rest holding a previous sequence's gate
+           logits, which the next closure of the block that lands there
+           would then finalize from. */
+        size_t pdepth = (size_t)cm * (size_t)s->ssm_ring_depth;
+        memset(s->csa2_pending_c, 0, nf * pdepth * c->head_dim * sizeof(float));
+        memset(s->csa2_pending_z, 0, nf * pdepth * c->head_dim * sizeof(float));
         memset(s->csa2_pending_c_idx, 0,
-               nf * cm * c->csa2_indexer_head_dim * sizeof(float));
+               nf * pdepth * c->csa2_indexer_head_dim * sizeof(float));
         memset(s->csa2_pending_z_idx, 0,
-               nf * cm * c->csa2_indexer_head_dim * sizeof(float));
+               nf * pdepth * c->csa2_indexer_head_dim * sizeof(float));
         memset(s->csa2_comp_ring, 0,
                nf * (size_t)max_blocks * c->head_dim * sizeof(float));
         memset(s->csa2_idx_comp_ring, 0,

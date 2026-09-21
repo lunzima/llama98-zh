@@ -40,14 +40,17 @@ static void ckpt_sizes(const LZModelConfig *c, size_t *n_q8, size_t *n_s,
         *n_engram_conv = 0;
     }
     /* CSA2's open block - forward.h's LZStateCkpt comment has the
-       whole argument for why it is in the checkpoint at all. The
-       predicate and both shapes are forward_state.c's alloc_csa2_ring
-       copied exactly (any csa2_on layer, nf * cm * width, cm floored at
-       1): a checkpoint that sized these differently from the state
-       they are copied in and out of is a memcpy past the end, not an
-       error message. L->csa2_on is c->csa2_on[li] verbatim (model.c's
+       whole argument for why it is in the checkpoint at all, and for
+       why it is ONE block (nf * cm * width, cm floored at 1) rather
+       than the whole banked ring alloc_csa2_ring sizes: save and
+       restore address the bank the checkpointed position selects, so
+       this count does not move with ssm_ring_depth. Predicate is
+       forward_state.c's alloc_csa2_ring copied exactly (any csa2_on
+       layer) - L->csa2_on is c->csa2_on[li] verbatim (model.c's
        setup_layers), so reading the config array here is the same
-       predicate the allocator ran on. */
+       predicate the allocator ran on - and a checkpoint that sized
+       these differently from the state they are copied in and out of is
+       a memcpy past the end, not an error message. */
     {
         int any_csa2 = 0, li;
         for (li = 0; li < c->n_layers; li++)
@@ -204,15 +207,29 @@ int lz_ckpt_save(LZStateCkpt *ck, const LZRunState *s, const LZModel *m,
        has to agree with ckpt_sizes' own; a disagreement is a memcpy of
        a length neither side sized, and it is cheaper to copy nothing
        than to find out at the next reset. */
+    /* CSA2's open compressed block - one block per ci, read out of the
+       BANK the block open at `pos` lives in (forward.h's csa2_pending_c
+       comment has the layout, LZStateCkpt's own the reason a checkpoint
+       carries one block and not the whole banked ring). */
     if (n_csa2_pend > 0 && s->csa2_pending_c) {
-        memcpy(ck->csa2_pend_c, s->csa2_pending_c, n_csa2_pend * sizeof(float));
-        memcpy(ck->csa2_pend_z, s->csa2_pending_z, n_csa2_pend * sizeof(float));
-    }
-    if (n_csa2_pend_idx > 0 && s->csa2_pending_c_idx) {
-        memcpy(ck->csa2_pend_c_idx, s->csa2_pending_c_idx,
-              n_csa2_pend_idx * sizeof(float));
-        memcpy(ck->csa2_pend_z_idx, s->csa2_pending_z_idx,
-              n_csa2_pend_idx * sizeof(float));
+        size_t cm = (size_t)(m->config.csa2_compress_m > 0 ? m->config.csa2_compress_m : 1);
+        size_t depth = (size_t)s->ssm_ring_depth;
+        size_t bank = ((size_t)pos / cm) % depth;
+        size_t hd = (size_t)m->config.head_dim;
+        size_t ihd = (size_t)m->config.csa2_indexer_head_dim;
+        int i;
+        for (i = 0; i < m->config.n_full_layers; i++) {
+            size_t src = ((size_t)i * depth + bank) * cm;
+            size_t dst = (size_t)i * cm;
+            memcpy(ck->csa2_pend_c + dst * hd, s->csa2_pending_c + src * hd,
+                   cm * hd * sizeof(float));
+            memcpy(ck->csa2_pend_z + dst * hd, s->csa2_pending_z + src * hd,
+                   cm * hd * sizeof(float));
+            memcpy(ck->csa2_pend_c_idx + dst * ihd,
+                   s->csa2_pending_c_idx + src * ihd, cm * ihd * sizeof(float));
+            memcpy(ck->csa2_pend_z_idx + dst * ihd,
+                   s->csa2_pending_z_idx + src * ihd, cm * ihd * sizeof(float));
+        }
     }
     ck->pos   = pos;
     ck->epoch = s->epoch;
@@ -278,21 +295,33 @@ int lz_ckpt_restore(const LZStateCkpt *ck, LZRunState *s, const LZModel *m,
         memcpy(s->engram_conv_hist, ck->engram_conv_hist,
               n_engram_conv * sizeof(float));
     s->engram_conv_hist_n = ck->engram_conv_hist_n;
-    /* CSA2's open block, back into the live slabs. The forward that
-       resumes at ck->pos continues from the FIRST raw position of the
-       open block only if that block does not straddle ck->pos; when it
-       does, the slab for position ck->pos - 1 is the one this copy
-       supplies and nothing else can - forward.h's LZStateCkpt comment
-       has the measurement. */
+    /* CSA2's open block, back into the bank the resumed position's block
+       uses - the same bank it was saved from, since ck->pos is the
+       position the pass resumes at and it is that block's slabs that
+       forward needs. The forward that resumes at ck->pos continues from
+       the FIRST raw position of the open block only if that block does
+       not straddle ck->pos; when it does, the slab for position
+       ck->pos - 1 is the one this copy supplies and nothing else can -
+       forward.h's LZStateCkpt comment has the measurement. */
     if (n_csa2_pend > 0 && s->csa2_pending_c) {
-        memcpy(s->csa2_pending_c, ck->csa2_pend_c, n_csa2_pend * sizeof(float));
-        memcpy(s->csa2_pending_z, ck->csa2_pend_z, n_csa2_pend * sizeof(float));
-    }
-    if (n_csa2_pend_idx > 0 && s->csa2_pending_c_idx) {
-        memcpy(s->csa2_pending_c_idx, ck->csa2_pend_c_idx,
-              n_csa2_pend_idx * sizeof(float));
-        memcpy(s->csa2_pending_z_idx, ck->csa2_pend_z_idx,
-              n_csa2_pend_idx * sizeof(float));
+        size_t cm = (size_t)(m->config.csa2_compress_m > 0 ? m->config.csa2_compress_m : 1);
+        size_t depth = (size_t)s->ssm_ring_depth;
+        size_t bank = ((size_t)ck->pos / cm) % depth;
+        size_t hd = (size_t)m->config.head_dim;
+        size_t ihd = (size_t)m->config.csa2_indexer_head_dim;
+        int i;
+        for (i = 0; i < m->config.n_full_layers; i++) {
+            size_t dst = ((size_t)i * depth + bank) * cm;
+            size_t src = (size_t)i * cm;
+            memcpy(s->csa2_pending_c + dst * hd, ck->csa2_pend_c + src * hd,
+                   cm * hd * sizeof(float));
+            memcpy(s->csa2_pending_z + dst * hd, ck->csa2_pend_z + src * hd,
+                   cm * hd * sizeof(float));
+            memcpy(s->csa2_pending_c_idx + dst * ihd,
+                   ck->csa2_pend_c_idx + src * ihd, cm * ihd * sizeof(float));
+            memcpy(s->csa2_pending_z_idx + dst * ihd,
+                   ck->csa2_pend_z_idx + src * ihd, cm * ihd * sizeof(float));
+        }
     }
     s->ssm_slot = 0;
     if (out_pos) *out_pos = ck->pos;

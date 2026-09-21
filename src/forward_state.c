@@ -686,14 +686,23 @@ static void alloc_csa2_ring(LZRunState *s, const LZModel *m,
             int cm = c->csa2_compress_m > 0 ? c->csa2_compress_m : 1;
             int max_blocks = (seq_len + cm - 1) / cm;
             size_t nf = (size_t)c->n_full_layers;
+            /* depth banks of cm slabs each - forward.h's own
+               csa2_pending_c comment derives why the open block's
+               contributions cannot share one bank. depth is
+               s->ssm_ring_depth, set by alloc_recurrent_state, which the
+               caller runs before this function; it is 1 both for a model
+               with no MTP head and for a state whose owner declared it
+               will never run --spec, and 1 makes this allocation and
+               every offset into it exactly what a single bank was. */
+            size_t pdepth = (size_t)cm * (size_t)s->ssm_ring_depth;
             s->csa2_pending_c = (float *)xcalloc(
-                nf * cm * c->head_dim, sizeof(float), &ok, &s->bytes_alloc);
+                nf * pdepth * c->head_dim, sizeof(float), &ok, &s->bytes_alloc);
             s->csa2_pending_z = (float *)xcalloc(
-                nf * cm * c->head_dim, sizeof(float), &ok, &s->bytes_alloc);
+                nf * pdepth * c->head_dim, sizeof(float), &ok, &s->bytes_alloc);
             s->csa2_pending_c_idx = (float *)xcalloc(
-                nf * cm * c->csa2_indexer_head_dim, sizeof(float), &ok, &s->bytes_alloc);
+                nf * pdepth * c->csa2_indexer_head_dim, sizeof(float), &ok, &s->bytes_alloc);
             s->csa2_pending_z_idx = (float *)xcalloc(
-                nf * cm * c->csa2_indexer_head_dim, sizeof(float), &ok, &s->bytes_alloc);
+                nf * pdepth * c->csa2_indexer_head_dim, sizeof(float), &ok, &s->bytes_alloc);
             s->csa2_comp_ring = (float *)xcalloc(
                 nf * (size_t)max_blocks * c->head_dim, sizeof(float), &ok, &s->bytes_alloc);
             s->csa2_idx_comp_ring = (float *)xcalloc(
