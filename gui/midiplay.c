@@ -193,29 +193,31 @@ void lz_midi_trace_to(const char *path) {
     fputs("# t IS COARSE AND ITS STEP DEPENDS ON UPTIME, so two lines "
           "sharing one t is not evidence that the two things they\n"
           "# report were simultaneous. lz_time_ms answers a float: with "
-          "QueryPerformanceCounter at 10 MHz and the machine up about\n"
-          "# ten days (t around 9.3e8) its count is already rounded to "
+          "QueryPerformanceCounter at 10 MHz and the machine up about\n",
+          g_trace);
+    fputs("# ten days (t around 9.3e8) its count is already rounded to "
           "1048576 counts - 104.9 ms - before the divide, and the\n"
           "# reading then steps in 64 ms. That is most of the interval "
-          "between two of these lines. A freshly booted machine resolves\n"
-          "# far finer, so two captures cannot be compared on this column "
+          "between two of these lines. A freshly booted machine resolves\n",
+          g_trace);
+    fputs("# far finer, so two captures cannot be compared on this column "
           "either.\n", g_trace);
-    fprintf(g_trace,
-            "# dt_us is the clock that resolves it: microseconds from "
-            "%s, read as t0, pos0, the submission, pos1,\n"
-            "# t1, so dt_us = t1 - t0 brackets both position samples. "
-            "us0 is the tempo the stream was at before this chunk and us\n"
-            "# the value this chunk's event carries - the music from the "
-            "head of this chunk on is played at us and not at us0, so the\n"
-            "# line has to carry both. us0=none means no event has been "
-            "emitted into this stream yet, so the driver's own default is\n"
-            "# what was in force; it is not 0.\n"
-            "# A submission that moves the stream shows as pos1 > pos0 with "
-            "dt_us far too small to have played the music between\n"
-            "# them; pos1 == pos0 is one that moved nothing.\n",
-            lz_ui_us_fine() ? "QueryPerformanceCounter, quantum 100 ns"
-                            : "GetTickCount - every dt_us is a whole "
-                              "millisecond, 15.6 ms or 55 ms apart");
+    fputs("# dt_us is the clock that resolves it: microseconds from ",
+          g_trace);
+    fputs(lz_ui_us_fine() ? "QueryPerformanceCounter, quantum 100 ns"
+                          : "GetTickCount - every dt_us is a whole "
+                            "millisecond, 15.6 ms or 55 ms apart", g_trace);
+    fputs(", read as t0, pos0, the submission, pos1,\n"
+          "# t1, so dt_us = t1 - t0 brackets both position samples. "
+          "us0 is the tempo the stream was at before this chunk and us\n"
+          "# the value this chunk's event carries - the music from the "
+          "head of this chunk on is played at us and not at us0, so the\n"
+          "# line has to carry both. us0=none means no event has been "
+          "emitted into this stream yet, so the driver's own default is\n"
+          "# what was in force; it is not 0.\n", g_trace);
+    fputs("# A submission that moves the stream shows as pos1 > pos0 with "
+          "dt_us far too small to have played the music between\n"
+          "# them; pos1 == pos0 is one that moved nothing.\n", g_trace);
     /* The control arm, and why it is the line that makes the others
        mean something. Nothing in a tempo line's own numbers separates a
        submission that moved the stream from a device that reports its
@@ -226,12 +228,14 @@ void lz_midi_trace_to(const char *path) {
     fputs("# probe is the CONTROL for that: the same two position samples "
           "with NOTHING submitted between them, taken from the same call\n"
           "# the ratio moves are reported from and on the ticks where it "
-          "did not move. pos, pos0 and dt_us mean what they mean on a\n"
-          "# tempo line, so one expression reads all three arms: an advance "
+          "did not move. pos, pos0 and dt_us mean what they mean on a\n",
+          g_trace);
+    fputs("# tempo line, so one expression reads all three arms: an advance "
           "that shows up on a probe line too is the device's own\n"
           "# reporting cadence, and one that shows up across every "
-          "submission is the submission rather than anything in it.\n"
-          "# chunk is the second control and the reason there are two: it "
+          "submission is the submission rather than anything in it.\n",
+          g_trace);
+    fputs("# chunk is the second control and the reason there are two: it "
           "is the same call on the same kind of buffer with no tempo event\n"
           "# in it, so an advance a tempo line shows and a chunk line does "
           "not belongs to the event. dpos is pos - pos0, the advance\n"
@@ -241,8 +245,9 @@ void lz_midi_trace_to(const char *path) {
           "# stopped, or with the last chunk played out, a position that "
           "stands still answers with the state rather than with the\n"
           "# submission. us is the tempo the last emitted event carried - a "
-          "probe line has one, not two, so there is no us0 - and it\n"
-          "# reads `none` until an event has been emitted, exactly as us0 "
+          "probe line has one, not two, so there is no us0 - and it\n",
+          g_trace);
+    fputs("# reads `none` until an event has been emitted, exactly as us0 "
           "does on a tempo line. The device applies an event when it\n"
           "# REACHES that chunk, so while one is still queued us is what "
           "the music will be played at and not yet what is sounding.\n"
