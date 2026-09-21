@@ -139,7 +139,8 @@ WCC_MMX_BASE="-za99 -otexan -zp4 -D__MMX__=1 -DLZ_MMX_TU=1 -DLZ_SSE2_TU=1 -6r -b
 WCC_INC="-I$WATCOM_ROOT/h -I$WATCOM_ROOT/h/nt -Isrc"
 
 TMPD=$(mktemp -d)
-trap 'rm -rf "$TMPD"' EXIT
+KEEP_TMPD=0
+trap '[ "$KEEP_TMPD" = 1 ] || rm -rf "$TMPD"' EXIT
 
 PASS=0
 FAIL=0
@@ -526,13 +527,11 @@ if [ -n "$LINKSRC" ]; then
             >"$TMPD/allsw.log" 2>&1; then
         echo "PASS: all-at-once link ($NLINK of $NSW switches non-default, one binary)"
     else
-        echo "FAIL: all-at-once link - a switch removed a definition someone still references:"
-        # The SYMBOL, which is the whole content of this failure. ld
-        # writes it with a long toolchain path in front and the phrase
-        # broken across the line, so a grep for 'undefined reference'
-        # catches the wrapped continuation and not the name - this
-        # printed only "collect2.exe: error" and left the reader with a
-        # failure that named nothing.
+        echo "FAIL: all-at-once link - the all-switches build did not compile:"
+        # Two shapes reach here and they are reported separately. The
+        # symbol half: ld writes an undefined reference with a long
+        # toolchain path in front, so a grep for the phrase alone catches
+        # the continuation and not the name.
         SYMS=$(grep -oE "undefined reference to \`[^']+'" "$TMPD/allsw.log" \
                | sed "s/.*\`//;s/'//" | sort -u)
         [ -n "$SYMS" ] || SYMS=$(grep -oE "undefined symbol[: ]+[A-Za-z_][A-Za-z0-9_]*" \
@@ -540,10 +539,23 @@ if [ -n "$LINKSRC" ]; then
         if [ -n "$SYMS" ]; then
             printf '      %s\n' $SYMS
         else
-            echo "      (no symbol in the log - the link failed for some other"
-            echo "       reason; the tail follows)"
-            tail -6 "$TMPD/allsw.log" | sed 's/^/      /'
+            echo "      no undefined symbol - this failed before the link, in the"
+            echo "      compile. The error lines are:"
         fi
+        # THE ERROR LINES, which are this failure's content whenever it is
+        # not a missing symbol. This used to print `tail -6`: on a compile
+        # failure that showed the last six lines whatever they were, and the
+        # failure on record ended with two WARNINGS from a later translation
+        # unit while its three error lines sat above them. The log had them;
+        # the report did not.
+        grep -nE 'error:|error C[0-9]+' "$TMPD/allsw.log" | head -12 | sed 's/^/      /'
+        # And the log is KEPT, with its path printed. The greps above can
+        # only find what their patterns match, and the next reader may need
+        # the part they do not - deleting the evidence is what made this
+        # failure unreadable in the first place. Kept in TMPD rather than a
+        # fixed path under build/ so two runs cannot overwrite each other's.
+        KEEP_TMPD=1
+        echo "      full log kept: $TMPD/allsw.log"
         FAIL=$((FAIL + 1))
     fi
 fi
