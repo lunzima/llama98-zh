@@ -36,16 +36,20 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 # A DEFAULT MODEL, for the same reason the other model-taking gates now
 # have one: `make check` passes no MODEL, so until this line the only
 # run that ever compressed anything was one somebody typed by hand.
-# _armgate3 has a model.bin and round trips 58,629,648 bytes. It replaced
-# _armgate2 (45,816,469) on 2026-09-10 because that model and the whole
-# training chain behind it are gone; see docs/dsv41-optimization-menu.md
-# section 6. This gate is indifferent to which model it is - it needs a
-# model.bin, a round trip and an engine that can load it - which is why it
-# only had to have the size updated. Still SKIPs where MODELS_ROOT is not
-# there.
+# _t2gate, whose model.bin is v4 and round trips 94,787,618 bytes. The
+# model that stood here, _armgate3, carries a v5 bin written 2026-09-17 -
+# before the v5 tail grew two fields on 09-19 - and a v5 file is read as
+# the CURRENT tail, by design (src/model.c's own "base header plus every
+# field any version added, written unconditionally"), so the loader walks
+# past what that file holds and a later field's range check refuses it
+# with "attn_sink_learned out of range". v4 is the frozen shape and still
+# loads. This gate is indifferent to which model it is - it needs a
+# model.bin, a round trip and an engine that can load it - so only the
+# name here and the size above had to change. Still SKIPs where
+# MODELS_ROOT is not there.
 MODELS_ROOT=${MODELS_ROOT:-/e/LLM/models}
 MODEL=${1:-}
-[ -n "$MODEL" ] || MODEL="$MODELS_ROOT/_armgate3"
+[ -n "$MODEL" ] || MODEL="$MODELS_ROOT/_t2gate"
 TOKENS=${2:-1,2,3,4,5,6,7,8}
 
 BIN=${BIN:-}
