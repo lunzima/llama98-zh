@@ -822,41 +822,32 @@ static void check_chain_soft(void) {
     {
         LZModel m2;
         LZRunState s2;
-        float attn_a2[F_QD] = {0}, attn_b2[F_QD] = {0}, attn_c2[F_QD] = {0};
-        unsigned off;
-        int moved = 0;
+        float attn_a2[F_QD], attn_b2[F_QD], attn_c2[F_QD];
 
-        /* WHICH perturbation, and why it is SEARCHED rather than named:
-           B's last token - the one attn_b/attn_out below holds - sees a
-           4-wide candidate pool at F_CM=1 against topk 2, and the
-           perturbation has to move the SELECTED SET, not merely its
-           order: summing two floats is commutative, so the same pair in
-           a different order leaves attn_out bit-identical and is not
-           evidence of anything. But which seed offset lands on a
-           different pair is a property of the fixture's own score
-           margins, not of the wiring this check is about - a named
-           offset is a measurement of those margins, and it goes stale
-           the moment anything upstream of the scores moves. So the
-           offset is searched, and the criterion is that one exists: if
-           none of the eight candidates moves B's attn_out, the second
-           assertion below fails and says so.
+        /* THE PERTURBATION IS DETERMINISTIC AND MAXIMAL: layer B's own
+           indexer scoring weights - Eq 1's per-head w, the tensor the
+           indexer's scores are a weighted sum of - are zeroed, on a model
+           whose every other weight is the base run's. Every score becomes
+           0, so the Top-K is the tie-break order rather than the
+           indexer's ranking: if even that leaves attn_out bit-identical,
+           B's indexer is not reaching this output at all.
 
-           The search signal is attn_out itself, NOT the published Top-K
-           buffer: the publish buffer is what mutants 2 and 3 patch, and a
-           criterion that reads its own decision input through the thing
-           under test goes green or red for the mutation's reason rather
-           than for this claim's. Nothing but the selection can carry B's
-           indexer weights into attn_out here - the ring B reads and its
-           own q do not depend on those weights - so an attn_out that
-           moves is a selection that moved. */
-        for (off = 1; off <= 8; off++) {
-            build_model_chain_soft(&m2, AQ, AKV, AIX, BQ, BKV, BIX + off, CQ, CKV, CIX);
-            if (lz_state_alloc(&s2, &m2, F_SEQLEN, 0, errbuf, sizeof errbuf) != 0) {
-                printf("FAIL check2: lz_state_alloc: %s\n", errbuf);
-                g_fail = 1;
-                free(m2.layers);
-                return;
-            }
+           That is why nothing here searches over perturbations. A random
+           redraw of B's indexer weights moves the selected pair only
+           while this fixture's score margins happen to be small enough,
+           which makes it a measurement of the margins and not of the
+           wiring - and one that goes stale the moment anything upstream
+           of the scores moves. Zeroing has no margin to be on the wrong
+           side of. */
+        build_model_chain_soft(&m2, AQ, AKV, AIX, BQ, BKV, BIX, CQ, CKV, CIX);
+        if (lz_state_alloc(&s2, &m2, F_SEQLEN, 0, errbuf, sizeof errbuf) != 0) {
+            printf("FAIL check2: lz_state_alloc: %s\n", errbuf);
+            g_fail = 1;
+        } else {
+            int zw;
+            for (zw = 0; zw < F_IDXH * F_DIM; zw++)
+                m2.layers[1].csa2_w_weights.f[zw] = 0.0f;
+
             stx = XBA;
             fill_xb(&s2, 4, F_DIM, &stx);
             forward_csa2(&m2, &s2, &m2.layers[0], 0, 0, 4, NULL);
@@ -865,33 +856,24 @@ static void check_chain_soft(void) {
             fill_xb(&s2, 4, F_DIM, &stx);
             forward_csa2(&m2, &s2, &m2.layers[1], 1, 0, 4, NULL);
             memcpy(attn_b2, s2.attn_out, sizeof attn_b2);
-            if (memcmp(attn_b2, attn_b, sizeof attn_b) != 0) {
-                stx = XBC;
-                fill_xb(&s2, 4, F_DIM, &stx);
-                forward_csa2(&m2, &s2, &m2.layers[2], 2, 0, 4, NULL);
-                memcpy(attn_c2, s2.attn_out, sizeof attn_c2);
-                moved = 1;
-            }
-            lz_state_free(&s2);
-            free(m2.layers);
-            if (moved) break;
-        }
+            stx = XBC;
+            fill_xb(&s2, 4, F_DIM, &stx);
+            forward_csa2(&m2, &s2, &m2.layers[2], 2, 0, 4, NULL);
+            memcpy(attn_c2, s2.attn_out, sizeof attn_c2);
 
-        ok(memcmp(attn_a2, attn_a, sizeof attn_a) == 0,
-           "check2: layer A's own attn_out is untouched by a change to "
-           "layer B's (unrelated) indexer weights");
-        ok(moved && memcmp(attn_b2, attn_b, sizeof attn_b) != 0,
-           moved ? "check2: perturbing layer B's own indexer weights changes "
-                   "layer B's own attn_out"
-                 : "check2: perturbing layer B's own indexer weights changes "
-                   "layer B's own attn_out - and no seed offset 1..8 moved it "
-                   "either, so no perturbation of those weights reached B's "
-                   "own Top-K selection, which is the only channel from them "
-                   "to this output");
-        ok(moved && memcmp(attn_c2, attn_c, sizeof attn_c) != 0,
-           "check2: perturbing layer B's own indexer weights ALSO "
-           "changes layer C's attn_out (C reads whatever B's own "
-           "call left in their shared ci slot)");
+            ok(memcmp(attn_a2, attn_a, sizeof attn_a) == 0,
+               "check2: layer A's own attn_out is untouched by a change to "
+               "layer B's (unrelated) indexer weights");
+            ok(memcmp(attn_b2, attn_b, sizeof attn_b) != 0,
+               "check2: perturbing layer B's own indexer weights changes "
+               "layer B's own attn_out");
+            ok(memcmp(attn_c2, attn_c, sizeof attn_c) != 0,
+               "check2: perturbing layer B's own indexer weights ALSO "
+               "changes layer C's attn_out (C reads whatever B's own "
+               "call left in their shared ci slot)");
+            lz_state_free(&s2);
+        }
+        free(m2.layers);
     }
 
     /* Item 3a: perturbing A's compression weights changes BOTH B's and
