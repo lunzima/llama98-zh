@@ -663,7 +663,13 @@ esac
 echo
 echo "==== [11b/31]--ced invariance ===="
 LOG=build/ci-ced.log
-build/ced_gate.sh "$ARM_MODEL" >"$LOG" 2>&1
+# Pointed at kunkun98 rather than ARM_MODEL, for the same reason the sink
+# gate below is (its own note): ARM_MODEL does not carry ced_split, and this
+# gate builds no CED config of its own - it reads whatever config.json the
+# model dir has. On ARM_MODEL every CED arm is therefore inert, which is
+# what "the mutant matched the off arm" beside "off skipped 0, on skipped
+# 16, logits identical" was saying: the path was being checked by nothing.
+build/ced_gate.sh "$MODELS_ROOT/kunkun98" >"$LOG" 2>&1
 CED_RC=$?
 cat "$LOG"
 case $CED_RC in
