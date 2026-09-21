@@ -41,7 +41,7 @@
 # nested inside another comment; gcc said so on every build and `check`
 # reported 16 PASS over it. Having a caller somewhere is not the test -
 # being reachable from what people actually run is.
-check: root-hygiene-gate bare-endif-gate wscr-borrow-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate json-offset-gate softfp-gate dedupe-gate mm-alias-gate kv-share-ced-boundary-gate ced-proj-arm-gate csa2-modes-config-gate csa2-cache-idx-alias-gate csa2-mode-dispatch-gate csa2-mode-export-load-gate csa2-last-writer-bin-gate csa2-reindex-causality-gate csa2-indexer-rope-slice-gate csa2-out-rope-gate csa2-z-subst-gate csa2-compress-m-layers-gate smf-lead-gate c89-floor-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate isa-floor-avx2-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate arch-allowlist-gate kernel-matrix-gate aux-parm-arity-gate aux-equiv-gate mathf-xcompiler-gate bf16-torch-gate lz4-model-gate gcc-watcom-output-gate fixture-exists-gate
+check: root-hygiene-gate bare-endif-gate wscr-borrow-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate json-offset-gate softfp-gate dedupe-gate mm-alias-gate kv-share-ced-boundary-gate ced-proj-arm-gate csa2-modes-config-gate csa2-cache-idx-alias-gate csa2-mode-dispatch-gate csa2-mode-export-load-gate csa2-last-writer-bin-gate csa2-reindex-causality-gate csa2-indexer-rope-slice-gate csa2-out-rope-gate csa2-z-subst-gate csa2-compress-m-layers-gate smf-lead-gate c89-floor-gate pri64-scan-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate isa-floor-avx2-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate arch-allowlist-gate kernel-matrix-gate aux-parm-arity-gate aux-equiv-gate mathf-xcompiler-gate bf16-torch-gate lz4-model-gate gcc-watcom-output-gate fixture-exists-gate
 
 # Zero gcc warnings, asserted rather than printed. The Watcom side has
 # always been counted ("N lines, 0 warnings, 0 errors", per file); this
@@ -575,6 +575,43 @@ csa2-z-subst-gate:
 .PHONY: csa2-compress-m-layers-gate
 csa2-compress-m-layers-gate:
 	@$(call GATE_OK,build/csa2_compress_m_layers_gate.sh)
+
+# The 64-bit printf modifier. lz_int.h names the type (lz_i64) and its
+# modifier (LZ_PRI64) once each. The TYPE half was swept across 213 sites
+# and left no gate behind, so the 214th was hand-written and only the vc4
+# gate caught it (2270867). The FORMAT half had ZERO call sites tree-wide
+# until that same commit, and nothing else can see it: vc4-compile-gate
+# compiles and does not run, and a format string is not type-checked, so
+# err.c carries 30 of these past every build in this tree.
+#
+# The observable is the source text, scanned LEXICALLY. Comments are
+# stripped before matching: err.c's tables put the match in DATA on a line
+# that opens with a comment, err.h's enum puts it in a COMMENT on a line
+# that opens with code - a line-keyed rule gets one of those wrong in each
+# direction, and both wrong answers still run (one hides sites, the other
+# invents them). The scan is a character-level state machine for that
+# reason, and the gate's own header says so for whoever tries to simplify
+# it.
+#
+# The baseline is per file, taken at 2270867 (cli_main 46, err 30,
+# aboutdlg 1, model 1 = 78): it holds the ratchet without asking anyone to
+# clean 78 sites first. It cannot see an exchange WITHIN one file; it does
+# see one ACROSS files, because both counts move. That is the whole of the
+# weakness.
+#
+# The control is a synthetic bare modifier that must be reported - a scan
+# that stopped matching reports zero everywhere and reads as clean. Six
+# mutations were run while writing it: +1 in a baselined file, +3 more,
+# +1 in a file with no baseline, and the pair that is the whole point -  a
+# modifier inside a comment staying green while the same file with it in a
+# string reddens.
+#
+# In `check` rather than ci.sh-only: its whole environment is python3, it
+# needs no model dir, no build and no compiler, and it runs in about 1.6
+# seconds (three runs: 1.70 / 1.58 / 1.63).
+.PHONY: pri64-scan-gate
+pri64-scan-gate:
+	@$(call GATE_OK,build/pri64_scan_gate.sh)
 
 # F11 (code review, third round on the same plan): model_walk's
 # CSA2_SPECS tensor walk was never gated on L->csa2_mode, so a
