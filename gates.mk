@@ -41,7 +41,7 @@
 # nested inside another comment; gcc said so on every build and `check`
 # reported 16 PASS over it. Having a caller somewhere is not the test -
 # being reachable from what people actually run is.
-check: root-hygiene-gate bare-endif-gate wscr-borrow-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate json-offset-gate softfp-gate dedupe-gate mm-alias-gate kv-share-ced-boundary-gate ced-proj-arm-gate csa2-modes-config-gate csa2-cache-idx-alias-gate csa2-mode-dispatch-gate csa2-mode-export-load-gate csa2-last-writer-bin-gate csa2-reindex-causality-gate csa2-indexer-rope-slice-gate csa2-out-rope-gate smf-lead-gate c89-floor-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate isa-floor-avx2-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate arch-allowlist-gate kernel-matrix-gate aux-parm-arity-gate aux-equiv-gate mathf-xcompiler-gate bf16-torch-gate lz4-model-gate gcc-watcom-output-gate fixture-exists-gate
+check: root-hygiene-gate bare-endif-gate wscr-borrow-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate json-offset-gate softfp-gate dedupe-gate mm-alias-gate kv-share-ced-boundary-gate ced-proj-arm-gate csa2-modes-config-gate csa2-cache-idx-alias-gate csa2-mode-dispatch-gate csa2-mode-export-load-gate csa2-last-writer-bin-gate csa2-reindex-causality-gate csa2-indexer-rope-slice-gate csa2-out-rope-gate csa2-z-subst-gate smf-lead-gate c89-floor-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate isa-floor-avx2-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate arch-allowlist-gate kernel-matrix-gate aux-parm-arity-gate aux-equiv-gate mathf-xcompiler-gate bf16-torch-gate lz4-model-gate gcc-watcom-output-gate fixture-exists-gate
 
 # Zero gcc warnings, asserted rather than printed. The Watcom side has
 # always been counted ("N lines, 0 warnings, 0 errors", per file); this
@@ -524,6 +524,29 @@ csa2-indexer-rope-slice-gate:
 .PHONY: csa2-out-rope-gate
 csa2-out-rope-gate:
 	@$(call GATE_OK,build/csa2_out_rope_gate.sh)
+
+# A-2: CED's substitution reaches BOTH of the compressor's inputs. Report
+# Eq(1) projects `C` and `Z` from the same H_{L/2}; .prof/dsv41_ref/
+# model.py's Compressor.forward does `kv, score = self.wkv(x),
+# self.wgate(x)` off one `x`; the training side already did it. The engine
+# fed `Z` this position's own hidden instead.
+#
+# The fixture runs at csa2_compress_m = 2 and that is the point of it: at
+# m == 1 the softmax over a one-position block is 1 whatever the gate
+# logits are, so Z drops out of the pooled entry and the defect is
+# invisible - which is why every other fixture in this tree's gates (all
+# at m == 1) ran straight past it. csa2-mode-dispatch-gate's check4a asks
+# the neighbouring question "does this layer read kv_in at all" and cannot
+# see this one either.
+#
+# Criterion is intrinsic: with kv_in non-NULL the finalized entry must not
+# move when the position's own hidden moves, and must move when kv_in
+# does. The second arm is the control. Mutation is that one line reverted
+# (`kvh` -> `h`), and the gate asserts it reddens the a2 assertion while
+# leaving the setup and control arms green.
+.PHONY: csa2-z-subst-gate
+csa2-z-subst-gate:
+	@$(call GATE_OK,build/csa2_z_subst_gate.sh)
 
 # F11 (code review, third round on the same plan): model_walk's
 # CSA2_SPECS tensor walk was never gated on L->csa2_mode, so a

@@ -165,11 +165,6 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
        ci * ceil(seq_len/cm) blocks. */
     float *pend_c = s->csa2_pending_c + lz_csa2_pend_base(c, ci, s->ssm_ring_depth) * hd;
     float *pend_z = s->csa2_pending_z + lz_csa2_pend_base(c, ci, s->ssm_ring_depth) * hd;
-    /* s->csa2_pending_c_idx/csa2_pending_z_idx have no pointer here:
-       nothing in this function reads or writes them, because the indexer
-       K is projected from the finalized latent and has no per-position
-       half. The buffers and their LZStateCkpt entries still exist
-       (forward.h/forward_state.c/forward_ckpt.c own them). */
     float *ring = s->csa2_comp_ring + lz_csa2_ring_base(c, ci, s->seq_len) * hd;
     float *ring_idx = s->csa2_idx_comp_ring +
                       lz_csa2_ring_base(c, ci, s->seq_len) * idx_hd;
@@ -277,37 +272,45 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
            not merely a wasted computation. */
         if (mode == LZ_CSA2_FULL) {
             /* CED "proj" (model.h's ced_kv comment): this layer's own
-               main-KV compression input reads the encoder's frozen exit
-               hidden instead of this position's own s->xb, when
-               forward.c's kv_in resolution put this layer in CED's
-               decoder region. The indexer K follows that substitution
-               without being named here, because it is a projection of
-               the latent this matmul feeds - the training side's own
-               K_idx does the same (engine/csa2.py builds C_comp from
-               hs_kv, then projects K_idx out of C_comp). Computed HERE,
-               inside the FULL-only branch, rather than once per token
-               above: kv_in is read ONLY by this step, and the training
-               side's own _wire_ced never hooks CED's h_S substitution
-               for a Reindex/Reuse-mode CSA2 layer either (report Sec2.3.1:
-               "the Reindex and Reuse Modes are unchanged" under CED
-               composition) - for those modes this line is not merely
-               unused, it is never even evaluated. Step 1's query above
-               stays on h regardless of mode - only the compression
-               content moves. */
+               main-KV compression reads the encoder's frozen exit hidden
+               instead of this position's own s->xb, when forward.c's
+               kv_in resolution put this layer in CED's decoder region -
+               and that substitution reaches BOTH of the compressor's
+               inputs, `C` and the gate `Z`, not just `C`. Report Eq(1)
+               (SS2.2, PDF p.9) is `C_l = H_{L/2} W^{KV}_l , Z_l =
+               H_{L/2} W^{Z}_l , l > L/2`; .prof/dsv41_ref/model.py's own
+               Compressor.forward says it structurally, `kv, score =
+               self.wkv(x), self.wgate(x)` off one `x`; and the training
+               side already does it (engine/csa2.py builds both from
+               hs_kv). Feeding `Z` this position's own `h` instead would
+               make the compressed entry a mixture of two different
+               hidden states - and it is invisible at compress_m == 1,
+               where the softmax over a single position is 1 whatever the
+               gate logits say, which is why every other fixture in this
+               tree's gates ran at 1 and did not see it.
+               The indexer K follows the same substitution without being
+               named here, because it is a projection of the latent this
+               matmul feeds - the training side's own K_idx does the same
+               (engine/csa2.py builds C_comp from hs_kv, then projects
+               K_idx out of C_comp). Computed HERE, inside the FULL-only
+               branch, rather than once per token above: kv_in is read
+               ONLY by this step, and the training side's own _wire_ced
+               never hooks CED's h_S substitution for a Reindex/Reuse-mode
+               CSA2 layer either (report Sec2.3.1: "the Reindex and Reuse
+               Modes are unchanged" under CED composition) - for those
+               modes this line is not merely unused, it is never even
+               evaluated. Step 1's query above stays on h regardless of
+               mode - only the compression content moves. */
             const float *kvh = kv_in ? kv_in + (size_t)tk * hdim : h;
             lz_matmul_w(s->csa2_c_j, kvh, &L->csa2_w_kv, hdim, hd, s->xq, s->xqs);
-            lz_matmul_w(s->csa2_z_j, h, &L->csa2_w_gate, hdim, hd, s->xq, s->xqs);
+            lz_matmul_w(s->csa2_z_j, kvh, &L->csa2_w_gate, hdim, hd, s->xq, s->xqs);
             memcpy(pend_c + (size_t)pslot * hd, s->csa2_c_j, (size_t)hd * sizeof(float));
             memcpy(pend_z + (size_t)pslot * hd, s->csa2_z_j, (size_t)hd * sizeof(float));
             /* No indexer half here. The indexer K is a projection OF the
                block's finalized latent (step 3), not a second per-token
                compression of hidden, so there is no per-position indexer
-               intermediate for step 3 to weight - the whole
-               csa2_pending_c_idx/csa2_pending_z_idx pair that used to
-               carry one is unreferenced below. csa2_z_j_idx is likewise
-               now written nowhere in this file. The allocations and the
-               LZStateCkpt fields stay (forward_state.c/forward.h/forward_ckpt.c
-               own them); only their readers here are gone. */
+               intermediate for step 3 to weight - step 2 stores the
+               main-KV pair above and nothing else. */
         }
 
         /* ---- 3. finalize this position's block if it just completed
@@ -393,10 +396,9 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
                step 2's copy into pend_c immediately above - so it doubles
                as this block's finalized-sum scratch instead of adding
                another allocation sized identically to one that already
-               exists. csa2_c_j_idx is a different case: step 2 no longer
-               writes it at all (the indexer has no per-token half left
-               to store), so it arrives here free and the indexer
-               projection below lands in it. */
+               exists. csa2_c_j_idx is scratch for this block's indexer
+               projection below, and nothing else in this file touches
+               it. */
             float *sum_c = s->csa2_c_j;
             float *sum_c_idx = s->csa2_c_j_idx;
             float maxv, denom;
