@@ -41,7 +41,7 @@
 # nested inside another comment; gcc said so on every build and `check`
 # reported 16 PASS over it. Having a caller somewhere is not the test -
 # being reachable from what people actually run is.
-check: root-hygiene-gate bare-endif-gate wscr-borrow-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate json-offset-gate softfp-gate dedupe-gate mm-alias-gate kv-share-ced-boundary-gate ced-proj-arm-gate csa2-modes-config-gate csa2-cache-idx-alias-gate csa2-mode-dispatch-gate csa2-mode-export-load-gate csa2-last-writer-bin-gate csa2-reindex-causality-gate smf-lead-gate c89-floor-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate isa-floor-avx2-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate arch-allowlist-gate kernel-matrix-gate aux-parm-arity-gate aux-equiv-gate mathf-xcompiler-gate bf16-torch-gate lz4-model-gate gcc-watcom-output-gate fixture-exists-gate
+check: root-hygiene-gate bare-endif-gate wscr-borrow-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate json-offset-gate softfp-gate dedupe-gate mm-alias-gate kv-share-ced-boundary-gate ced-proj-arm-gate csa2-modes-config-gate csa2-cache-idx-alias-gate csa2-mode-dispatch-gate csa2-mode-export-load-gate csa2-last-writer-bin-gate csa2-reindex-causality-gate csa2-indexer-rope-slice-gate smf-lead-gate c89-floor-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate isa-floor-avx2-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate arch-allowlist-gate kernel-matrix-gate aux-parm-arity-gate aux-equiv-gate mathf-xcompiler-gate bf16-torch-gate lz4-model-gate gcc-watcom-output-gate fixture-exists-gate
 
 # Zero gcc warnings, asserted rather than printed. The Watcom side has
 # always been counted ("N lines, 0 warnings, 0 errors", per file); this
@@ -477,6 +477,29 @@ csa2-last-writer-bin-gate:
 .PHONY: csa2-reindex-causality-gate
 csa2-reindex-causality-gate:
 	@$(call GATE_OK,build/csa2_reindex_causality_gate.sh)
+
+# WHICH dims the indexer key's RoPE rotates - the slice forward_csa2.c
+# hands lz_rope. The V4.1 reference rotates the LAST rd dims of an
+# indexer key (`k[..., -rd:]`, .prof/dsv41_ref/model.py in the TRAINING
+# tree at E:\LLM\llama98-zh), while src/ops_rope.c's lz_rope rotates the
+# FIRST rotary_dim dims of whatever row it is handed, so the call site
+# advances the pointer past the leading indexer_head_dim - rotary_dim
+# dims first. The two slices are the same dims exactly when
+# rotary_dim == indexer_head_dim, which is the identity arm; the main
+# query and main KV keep the leading slice (the host family's own
+# convention, and a divergence from the reference that stays on the
+# books separately). Own script's header has the two mutations - the
+# offset dropped from the indexer K call, and the same offset added to
+# the main KV call - and each one's expected fallout; own probe's header
+# has why it reads the rows out of the csa2 rings rather than calling
+# lz_rope itself, and why the pre-rotation row comes from the same model
+# at position 0. No model dir needed - builds its own hand-crafted
+# LZModel/LZRunState fixture with real synthetic weights and calls the
+# real forward_csa2() directly, same posture as csa2-reindex-causality-
+# gate above.
+.PHONY: csa2-indexer-rope-slice-gate
+csa2-indexer-rope-slice-gate:
+	@$(call GATE_OK,build/csa2_indexer_rope_slice_gate.sh)
 
 # F11 (code review, third round on the same plan): model_walk's
 # CSA2_SPECS tensor walk was never gated on L->csa2_mode, so a

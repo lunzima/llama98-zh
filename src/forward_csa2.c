@@ -389,21 +389,30 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
                index_head_dim wide, a different norm from the k_norm
                above (head_dim wide, main KV entries only).
 
-               RoPE slicing, stated as fact rather than as a choice: the
-               lz_rope call below rotates the FIRST rotary_dim dims of
-               the row it is given (src/ops_rope.c: base[i] paired with
-               base[i + rotary_dim/2], everything past rotary_dim left
-               alone). The V4.1 reference rotates the LAST rd dims of
-               the indexer key instead (model.py:545, `k[..., -rd:]`).
-               Those are the same set of dims exactly when
-               rotary_dim == indexer_head_dim, and two different sets
-               otherwise. This call site passes the row to lz_rope
-               unchanged. */
+               RoPE slicing: the V4.1 reference rotates the LAST rd dims
+               of the indexer key (model.py:545, `k[..., -rd:]`), while
+               lz_rope only ever rotates the FIRST rotary_dim dims of the
+               row it is handed (src/ops_rope.c: base[i] paired with
+               base[i + rotary_dim/2], the rest left alone). The call
+               below therefore advances the pointer by idx_hd -
+               rotary_dim before passing the row, which puts lz_rope's
+               base[i]/base[i + rotary_dim/2] on the row's trailing
+               rotary_dim dims precisely - it indexes the row at
+               base + i and base + half, so an offset added once to the
+               buffer lands identically for every head at stride idx_hd.
+               Those are the same dims as the leading slice exactly when
+               rotary_dim == indexer_head_dim, where the offset is 0. The
+               main KV entry rotated on the next line keeps the leading
+               slice every other rotated tensor in this engine uses.
+               model.c refuses rotary_dim > csa2_indexer_head_dim
+               (LZ_ERR_CFG_CSA2_IDX_ROTARY), so the offset is never
+               negative. */
             lz_matmul_w(sum_c_idx, ring + (size_t)blk * hd, &L->csa2_w_kv_idx,
                         hd, idx_hd, s->xq, s->xqs);
             lz_rmsnorm(ring_idx + (size_t)blk * idx_hd, sum_c_idx,
                       lz_t_f32(&L->csa2_k_norm_idx, s->wscr), idx_hd, rms_eps);
-            lz_rope(ring_idx + (size_t)blk * idx_hd, 1, idx_hd, rotary_dim, pos, s->rope_cs);
+            lz_rope(ring_idx + (size_t)blk * idx_hd + (idx_hd - rotary_dim), 1,
+                    idx_hd, rotary_dim, pos, s->rope_cs);
 
             lz_rope(ring + (size_t)blk * hd, 1, hd, rotary_dim, pos, s->rope_cs);
         }

@@ -34,6 +34,8 @@
 !/build/ced_replay_gate.sh
 !/build/mla_gate.sh
 !/build/csa2_gate.sh
+!/build/csa2_indexer_rope_slice_gate.sh
+!/build/csa2_indexer_rope_slice_probe.c
 !/build/kv_share_gate.sh
 !/build/attn_sink_learned_gate.sh
 !/build/gr_gate.sh
