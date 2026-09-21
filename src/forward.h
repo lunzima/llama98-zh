@@ -1585,9 +1585,11 @@ void forward_engram(const LZModel *m, LZRunState *s,
    back. Both are no-ops (stay zeroed) when config.engram is 0, so
    copying them costs nothing on non-Engram models.
 
-   csa2_pending_* is the SAME category and was the one that got left
-   out; forward_csa2.c's header used to say so and scope it to --spec
-   rollback (its own "NOT SUPPORTED" list). It is not spec-only. Those
+   csa2_pending_* is the SAME category, and it is the half of CSA2
+   easiest to leave out of a snapshot: what puts these four buffers in
+   it is cross-turn prefix reuse (LZPrefixCache), the lookahead pick and
+   the PLD round - all outside --spec, whose own rollback re-points
+   s->ssm_slot instead and reads none of these slabs. Those
    four buffers hold the contribution of each of the raw positions
    belonging to the block that is open at the checkpointed position, and
    step 3 of that file reads ALL cm of its slabs when the block completes
