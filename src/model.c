@@ -1890,7 +1890,7 @@ static int model_walk_one(LZModel *m, const char *name, const int *dims,
     if (!m->bin_file && !m_uses_lz4(m) &&
         csa2_idx_k_from_hidden(c, name, t)) {
         qerr(errbuf, errlen, LZ_ERR_CFG_CSA2_IDX_K, name,
-             (long long)t->shape[1]);
+             (lz_i64)t->shape[1]);
         return 1;
     }
     if (check_shape(c, t, dims, errbuf, errlen) != 0) return 1;
