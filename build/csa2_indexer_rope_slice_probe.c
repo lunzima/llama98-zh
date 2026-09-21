@@ -128,17 +128,18 @@ static void fill_xb(LZRunState *s, unsigned *st) {
 }
 
 /* The row the engine writes compressed block `blk` into, in each of the
-   two rings - the same two expressions forward_csa2.c's own step 3
-   computes them from. */
-static const float *idx_row(const LZModel *m, const LZRunState *s, int ci, int blk) {
-    const float *base = s->csa2_idx_comp_ring +
-        lz_csa2_ring_base(&m->config, ci, s->seq_len) * (size_t)F_IDXHD;
-    return base + (size_t)blk * F_IDXHD;
+   two rings. The fixture has ONE csa2 layer, so cache_idx[0] is 0 and
+   layer 0's ring sits at the head of the arena under every layout
+   forward_state.c allocates: slot 0's own size - `ci * max_blocks` under
+   one compression ratio for the whole model, a prefix sum over the slots
+   before it under per-layer ones - is 0 either way at ci == 0.
+   two_positions() refuses a nonzero ci rather than reading whatever
+   happens to be there, so this cannot go quiet by coincidence. */
+static const float *idx_row(const LZRunState *s, int blk) {
+    return s->csa2_idx_comp_ring + (size_t)blk * F_IDXHD;
 }
-static const float *kv_row(const LZModel *m, const LZRunState *s, int ci, int blk) {
-    const float *base = s->csa2_comp_ring +
-        lz_csa2_ring_base(&m->config, ci, s->seq_len) * (size_t)F_HD;
-    return base + (size_t)blk * F_HD;
+static const float *kv_row(const LZRunState *s, int blk) {
+    return s->csa2_comp_ring + (size_t)blk * F_HD;
 }
 
 static int same(const float *a, const float *b, int n) {
@@ -180,18 +181,24 @@ static int two_positions(LZModel *m, float *idx0, float *idx1, float *kv0,
         return 0;
     }
     ci = s.cache_idx[0];
+    if (ci != 0) {
+        printf("FAIL idx/setup: this fixture's one csa2 layer landed on cache "
+               "slot %d, not 0 - every ring address below assumes slot 0\n", ci);
+        g_fail = 1;
+        return 0;
+    }
     st = SEED0 + 40;
     fill_xb(&s, &st);
     forward_csa2(m, &s, &m->layers[0], 0, 0, 1, NULL);
-    memcpy(idx0, idx_row(m, &s, ci, 0), (size_t)F_IDXHD * sizeof(float));
-    memcpy(kv0, kv_row(m, &s, ci, 0), (size_t)F_HD * sizeof(float));
+    memcpy(idx0, idx_row(&s, 0), (size_t)F_IDXHD * sizeof(float));
+    memcpy(kv0, kv_row(&s, 0), (size_t)F_HD * sizeof(float));
 
     st = SEED0 + 40;                  /* the SAME hidden vector, so block
                                          1's latent is block 0's */
     fill_xb(&s, &st);
     forward_csa2(m, &s, &m->layers[0], 0, 1, 1, NULL);
-    memcpy(idx1, idx_row(m, &s, ci, 1), (size_t)F_IDXHD * sizeof(float));
-    memcpy(kv1, kv_row(m, &s, ci, 1), (size_t)F_HD * sizeof(float));
+    memcpy(idx1, idx_row(&s, 1), (size_t)F_IDXHD * sizeof(float));
+    memcpy(kv1, kv_row(&s, 1), (size_t)F_HD * sizeof(float));
 
     memcpy(cs1, s.rope_cs + (size_t)m->config.rotary_dim, /* pos 1 row */
            (size_t)m->config.rotary_dim * sizeof(float));
