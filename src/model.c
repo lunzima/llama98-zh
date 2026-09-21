@@ -1052,6 +1052,81 @@ int lz_load_config(LZModelConfig *c, const char *path,
     c->csa2_indexer_head_dim    = lz_json_get_int(&j, tc, "csa2_indexer_head_dim", 32);
     c->csa2_indexer_q_lora_rank = lz_json_get_int(&j, tc, "csa2_indexer_q_lora_rank", 32);
 
+    /* csa2_compress_m_layers (model.h's own csa2_compress_m_layer
+       comment on LZModelConfig has the mechanism). Parsed HERE - after
+       the scalar, so an unnamed layer's fallback is already final, and
+       after csa2_kv_mode/csa2_kv_source, because the aliasing check at
+       the end of this block needs both those arrays filled - and before
+       lz_json_free below, the last window where the JSON handle and
+       every field an entry is validated against are live at once.
+
+       Three separate refusals, each a shape that cannot mean anything:
+       a key that does not name a csa2_on layer of this model, a value
+       that is not a number, and a value outside [1, seq_len]. The
+       fourth, at the end, is not a property of one entry: a non-FULL
+       layer reads its source's ring (forward_state.c's cache_idx fill
+       aliases the two), whose block boundaries ARE that slot's ratio, so
+       a ratio of its own would be a second geometry over the same
+       memory. lz_csa2_last_writer_valid above has already established
+       which layer is whose source. */
+    lt = lz_json_get(&j, tc, "csa2_compress_m_layers");
+    if (lt && lt->type == LZ_JSON_OBJ) {
+        for (e = lz_json_first(&j, lt); e; e = lz_json_next(&j, e)) {
+            int idx = csa2_key_idx(e->key);
+            int pv;
+            if (idx < 0 || idx >= c->n_layers || !c->csa2_on[idx]) {
+                qerr(errbuf, errlen, LZ_ERR_CFG_CSA2_COMPRESS_M, idx,
+                     "not a CSA2 layer of this model");
+                lz_json_free(&j);
+                return 1;
+            }
+            /* The value's own type before its value: jnode_new zeroes
+               every node, so a string/bool/null entry's ->num reads back
+               0.0 (or 1.0 for `true`) exactly like a legitimate 0/1
+               would - the same reason csa2_kv_source's own source check
+               tests the type first. */
+            if (e->type != LZ_JSON_NUM) {
+                qerr(errbuf, errlen, LZ_ERR_CFG_CSA2_COMPRESS_M, idx,
+                     "value is not a number");
+                lz_json_free(&j);
+                return 1;
+            }
+            pv = (int)e->num;
+            /* seq_len is optional in config.json (0 = "not stated",
+               lz_json_get_int's own default) and is always present in a
+               bin header, so the upper half of the bound is applied only
+               where there is a seq_len to apply it against - the same
+               conditional lz_open_bin's own csa2_compress_m bound gets
+               for free from the header it reads. */
+            if (pv < 1 || (c->seq_len > 0 && pv > c->seq_len)) {
+                qerr(errbuf, errlen, LZ_ERR_CFG_CSA2_COMPRESS_M, idx,
+                     "value is not in [1, seq_len]");
+                lz_json_free(&j);
+                return 1;
+            }
+            c->csa2_compress_m_layer[idx] = pv;
+        }
+    }
+    if (c->csa2_compress_m < 1 ||
+        (c->seq_len > 0 && c->csa2_compress_m > c->seq_len)) {
+        qerr(errbuf, errlen, LZ_ERR_CFG_CSA2_COMPRESS_M, -1,
+             "the csa2_compress_m scalar is not in [1, seq_len]");
+        lz_json_free(&j);
+        return 1;
+    }
+    for (i = 0; i < c->n_layers; i++) {
+        if (!c->csa2_on[i] || c->csa2_mode[i] == LZ_CSA2_FULL) continue;
+        if (c->csa2_compress_m_layer[i] > 0 &&
+            c->csa2_compress_m_layer[i] !=
+            lz_csa2_cm(c, c->csa2_source[i])) {
+            qerr(errbuf, errlen, LZ_ERR_CFG_CSA2_COMPRESS_M, i,
+                 "value disagrees with the ratio of the layer whose ring "
+                 "this alias reads");
+            lz_json_free(&j);
+            return 1;
+        }
+    }
+
     lz_json_free(&j);
 
     /* derived quantities computed once, here */
@@ -1550,6 +1625,89 @@ int lz_csa2_last_writer_valid(const LZModelConfig *c, int *bad_layer) {
            existed. */
     }
     return 1;
+}
+
+/* ------------------------------------------------------------------
+   Per-layer compression ratio (model.h's own csa2_compress_m_layer
+   comment on LZModelConfig).
+
+   The ratio decides two geometries at once - the pending block's slab
+   count (cm per bank) and the finalized ring's depth (ceil(seq_len/cm))
+   - and both are properties of the PHYSICAL SLOT, not of the layer
+   reading it, because a REINDEX/REUSE layer reads its source's slot
+   through an aliased cache_idx. Hence the three-layer shape below: the
+   layer-level answer (what forward_csa2.c asks about its own layer), the
+   slot-level answer (what the allocator, the reset and the checkpoint
+   ask), and the two prefix sums that turn a slot number into an offset
+   into the flat per-slot arrays. One definition of the layout, five
+   consumers - the alternative, each consumer re-deriving the layout, is
+   how a buffer gets sized by one value and indexed by another.
+   ------------------------------------------------------------------ */
+
+/* One layer's own resolved ratio, always >= 1.
+
+   An aliased layer answers its ROOT's ratio rather than its own entry's:
+   its ring IS the root's ring, so "which ratio does this layer's
+   compression run at" has exactly one right answer there. csa2_source is
+   strictly earlier (validated at both loaders and by
+   lz_csa2_last_writer_valid above), so the walk terminates, and going
+   through the chain rather than jumping to the root keeps this function
+   from needing the root walk lz_csa2_last_writer_valid already does. */
+int lz_csa2_cm(const LZModelConfig *c, int layer) {
+    int m;
+    if (layer >= 0 && layer < c->n_layers) {
+        if (c->csa2_mode[layer] != LZ_CSA2_FULL &&
+            c->csa2_source[layer] >= 0 &&
+            c->csa2_source[layer] < layer)
+            return lz_csa2_cm(c, c->csa2_source[layer]);
+        if (c->csa2_compress_m_layer[layer] > 0)
+            return c->csa2_compress_m_layer[layer];
+    }
+    m = c->csa2_compress_m;
+    return m > 0 ? m : 1;
+}
+
+/* Which layer owns physical slot ci: the (ci+1)-th layer whose type is
+   full_attention and whose mode is FULL, in increasing layer order -
+   forward_state.c's own cache_idx fill, which is the definition this
+   has to agree with. -1 past the last one. */
+static int csa2_slot_owner(const LZModelConfig *c, int ci) {
+    int l, nf = 0;
+    if (ci < 0) return -1;
+    for (l = 0; l < c->n_layers; l++) {
+        if (c->layer_types[l] != LZ_LT_FULL) continue;
+        if (c->csa2_mode[l] != LZ_CSA2_FULL) continue;
+        if (nf == ci) return l;
+        nf++;
+    }
+    return -1;
+}
+
+int lz_csa2_slot_cm(const LZModelConfig *c, int ci) {
+    int owner = csa2_slot_owner(c, ci);
+    return owner < 0 ? 0 : lz_csa2_cm(c, owner);
+}
+
+size_t lz_csa2_pend_base(const LZModelConfig *c, int ci, int depth) {
+    size_t t = 0;
+    int k;
+    if (depth < 1) depth = 1;
+    for (k = 0; k < ci && k < c->n_full_layers; k++) {
+        int ck = lz_csa2_slot_cm(c, k);
+        t += (size_t)(ck > 0 ? ck : 1) * (size_t)depth;
+    }
+    return t;
+}
+
+size_t lz_csa2_ring_base(const LZModelConfig *c, int ci, int seq_len) {
+    size_t t = 0;
+    int k;
+    for (k = 0; k < ci && k < c->n_full_layers; k++) {
+        int ck = lz_csa2_slot_cm(c, k);
+        if (ck < 1) ck = 1;
+        t += (size_t)((seq_len + ck - 1) / ck);
+    }
+    return t;
 }
 
 /* Give every target layer the source layer's five K/V tensors.
@@ -3179,10 +3337,11 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
          tail  (2) hadamard_o, hadamard_down
          tail  (2) mla_q_lora_rank, mla_o_lora_rank
          tail  (1) attn_kv_share
-         appended (137) attn_sink_learned, gated_residual, ced_split,
-                   csa2_on[128], ced_replay_w, csa2_compress_m,
-                   csa2_topk, csa2_indexer_heads, csa2_indexer_head_dim,
-                   csa2_indexer_q_lora_rank
+         appended (522) attn_sink_learned, gated_residual, ced_split,
+                   ced_kv, csa2_on[128], csa2_mode[128], csa2_source[128],
+                   ced_replay_w, csa2_compress_m, csa2_topk,
+                   csa2_indexer_heads, csa2_indexer_head_dim,
+                   csa2_indexer_q_lora_rank, csa2_compress_m_layer[128]
 
        v4 is the published generation - github.com/lunzima/kunkun98-models
        ships a MODEL/model.bin of exactly this shape - so it is FROZEN
@@ -3483,6 +3642,63 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
         RD(&c->csa2_indexer_heads, 4);
         RD(&c->csa2_indexer_head_dim, 4);
         RD(&c->csa2_indexer_q_lora_rank, 4);
+        /* csa2_compress_m_layer[] - the per-layer half of the scalar
+           above, appended after it in the same "every field any version
+           added, in the order it was added" tail (this function's own
+           layout comment). The engine has always read arrays of
+           LZ_MAX_LAYERS words in this header the same way (csa2_on,
+           csa2_mode, csa2_source), and both checks below are that
+           pattern's: the padding past n_layers must be untouched, and
+           an in-range entry must be a value both loaders accept.
+
+           THE COST OF APPENDING, stated where the other appended fields
+           state theirs: a model.bin written before this field existed
+           has no words for it, so the tensor stream's first 512 bytes
+           are read as this array. They are refused here - the padding
+           half of the check fails for any bin whose n_layers is below
+           LZ_MAX_LAYERS, and an in-range entry that is neither 0 nor in
+           [1, seq_len] fails the value half - which is the same
+           "correctly refused, rather than a plausible wrong number
+           silently accepted" position the csa2_mode/csa2_source append
+           took, and for the same reason: RD() cannot tell misaligned-
+           but-in-range garbage from a legitimate value. A stale bin's
+           fix is to re-export it, not to version the header. */
+        RD(c->csa2_compress_m_layer, LZ_MAX_LAYERS * 4);
+        for (i = 0; i < LZ_MAX_LAYERS; i++) {
+            if (i >= c->n_layers) {
+                if (c->csa2_compress_m_layer[i] != 0) {
+                    qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE,
+                         "csa2_compress_m_layer");
+                    goto fail;
+                }
+                continue;
+            }
+            if (c->csa2_compress_m_layer[i] == 0) continue;
+            if (!c->csa2_on[i]) {
+                qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE,
+                     "csa2_compress_m_layer");
+                goto fail;
+            }
+            if (c->csa2_compress_m_layer[i] < 1 ||
+                c->csa2_compress_m_layer[i] > c->seq_len) {
+                qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE,
+                     "csa2_compress_m_layer");
+                goto fail;
+            }
+            /* Same alias rule as lz_load_config's own loop: a non-FULL
+               layer reads its source's ring, whose block boundaries are
+               that ratio, so an entry contradicting it is not a
+               configuration this engine can run. csa2_mode[]/
+               csa2_source[] were read and validated above this point
+               (this function's own field order). */
+            if (c->csa2_mode[i] != LZ_CSA2_FULL &&
+                c->csa2_compress_m_layer[i] !=
+                lz_csa2_cm(c, c->csa2_source[i])) {
+                qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE,
+                     "csa2_compress_m_layer");
+                goto fail;
+            }
+        }
         /* CSA2 geometry and CED replay. All six are config.json fields
            with no other route into this loader, so before these RD()
            calls the bin path ran the whole CSA2 mechanism on zeros: the
@@ -3503,10 +3719,13 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
            the arithmetic is unchanged - ceil(seq_len/cm) is 1 either way,
            so cm > seq_len compresses exactly as much as cm == seq_len,
            i.e. nothing - while the four csa2_pending_* buffers each grow
-           as n_full_layers * cm * dim * ssm_ring_depth (forward.h's own
-           csa2_pending_c comment has the banks). The cap costs no
-           legitimate config and bounds those four allocations by
-           n_full * seq_len * (LZ_SPEC_K_MAX + 1).
+           with the sum of every slot's own cm, times dim, times
+           ssm_ring_depth (forward.h's own csa2_pending_c comment has the
+           banks and model.h's own csa2_compress_m_layer comment the
+           per-slot layout). The cap costs no legitimate config and
+           bounds those four allocations by n_full * seq_len *
+           (LZ_SPEC_K_MAX + 1). csa2_compress_m_layer's own entries carry
+           the identical bound, per layer, for the same reason.
 
            csa2_topk is NOT bounded by csa2_compress_m: the two are in
            different units (blocks vs positions) and forward_csa2.c

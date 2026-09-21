@@ -1285,23 +1285,29 @@ typedef struct {
        mechanism, top-k over compressed blocks, and mixing it with
        token-level eviction is not a combination this project defines).
 
-         csa2_pending_{c,z}       (n_full, csa2_compress_m *
-                                   ssm_ring_depth, head_dim)
-                                   raw per-position contributions to a
-                                   compressed block that is not yet
-                                   finalized, indexed by
-                                   position % (csa2_compress_m *
-                                   ssm_ring_depth) - ssm_ring_depth
-                                   banks of csa2_compress_m slabs each,
-                                   bank (block % ssm_ring_depth) holding
-                                   that block's own cm positions
+         csa2_pending_{c,z}       (n_full, per slot: cm * ssm_ring_depth,
+                                   head_dim) - raw per-position
+                                   contributions to a compressed block
+                                   that is not yet finalized, indexed
+                                   within a slot by position % (cm *
+                                   ssm_ring_depth): ssm_ring_depth banks
+                                   of cm slabs each, bank (block %
+                                   ssm_ring_depth) holding that block's
+                                   own cm positions. cm is that slot's
+                                   OWN ratio (model.h's own
+                                   csa2_compress_m_layer comment), so
+                                   the slots are laid out one after
+                                   another at the prefix sums
+                                   lz_csa2_pend_base returns, not at a
+                                   fixed ci * stride
          csa2_pending_{c,z}_idx   same shape, csa2_indexer_head_dim -
                                    the indexer key's own open block
-         csa2_comp_ring           (n_full, max_blocks, head_dim) -
-                                   FINALIZED main compressed entries,
-                                   already normed+RoPE'd, ready to
-                                   gather into attention
-         csa2_idx_comp_ring       (n_full, max_blocks,
+         csa2_comp_ring           (n_full, per slot: ceil(seq_len/cm),
+                                   head_dim) - FINALIZED main compressed
+                                   entries, already normed+RoPE'd, ready
+                                   to gather into attention; a slot's
+                                   base is lz_csa2_ring_base, in blocks
+         csa2_idx_comp_ring       (n_full, per slot: ceil(seq_len/cm),
                                    csa2_indexer_head_dim) - finalized
                                    indexer keys, same finalization point
 
@@ -1335,16 +1341,19 @@ typedef struct {
 
        Neither ring carries a companion "how many entries are finalized"
        counter: forward_csa2.c derives that bound from the position it
-       is working on, (pos + 1) / csa2_compress_m, which is the only
-       form a REINDEX layer sharing this state with its source can
-       safely use - see that file's own n_vis comment.
+       is working on, (pos + 1) / cm, which is the only form a REINDEX
+       layer sharing this state with its source can safely use - see
+       that file's own n_vis comment.
 
-       max_blocks = ceil(seq_len / csa2_compress_m), the ring's fixed
-       allocated depth - a flat array sized for the worst case, same
-       convention conv_state/ssm_state_q8 use for their own per-layer
-       recurrent state, not a growable/wrapping ring (CSA2 blocks are
-       never evicted once finalized, unlike the KV ring's spec-rollback
-       ring above). */
+       A ring's fixed allocated depth is ceil(seq_len / cm) PER SLOT - a
+       flat array sized for the worst case, same convention
+       conv_state/ssm_state_q8 use for their own per-layer recurrent
+       state, not a growable/wrapping ring (CSA2 blocks are never
+       evicted once finalized, unlike the KV ring's spec-rollback ring
+       above). csa2_scores is the one buffer here sized by the LARGEST
+       of those depths rather than by a slot's own: it is a per-token
+       scratch serving every layer in turn, so it has to cover the
+       shallowest-compressing slot. */
     float *csa2_pending_c, *csa2_pending_z;
     float *csa2_pending_c_idx, *csa2_pending_z_idx;
     float *csa2_comp_ring, *csa2_idx_comp_ring;
@@ -1565,20 +1574,22 @@ void forward_engram(const LZModel *m, LZRunState *s,
    csa2_pending_* is the SAME category and was the one that got left
    out; forward_csa2.c's header used to say so and scope it to --spec
    rollback (its own "NOT SUPPORTED" list). It is not spec-only. Those
-   four buffers hold the contribution of each of the csa2_compress_m raw
-   positions belonging to the block that is open at the checkpointed
-   position, and step 3 of that file reads ALL cm slabs when the block
-   completes (off == cm - 1).
+   four buffers hold the contribution of each of the raw positions
+   belonging to the block that is open at the checkpointed position, and
+   step 3 of that file reads ALL cm of its slabs when the block completes
+   (off == cm - 1) - cm being the slot's own ratio, which is why the four
+   of them are laid out by lz_csa2_pend_base rather than by one stride
+   (model.h's own csa2_compress_m_layer comment).
 
    ONE BLOCK is what a checkpoint carries, not the whole banked ring
    (forward.h's own csa2_pending_c comment has the bank layout): those
    cm slabs live in bank (block % ssm_ring_depth), a bank that differs
-   per run state, so the checkpoint stays a plain n_full * cm * width
-   array and save/restore address the bank the checkpointed POSITION
-   selects - the forward that resumes writes that same block. Nothing
-   else in the banked ring is needed: every block below the open one was
-   already finalized into csa2_comp_ring, which this type does not
-   carry.
+   per run state, so the checkpoint stays a plain per-slot array at
+   depth 1 - lz_csa2_pend_base(..., 1) - and save/restore address the
+   bank the checkpointed POSITION selects - the forward that resumes
+   writes that same block. Nothing else in the banked ring is needed:
+   every block below the open one was already finalized into
+   csa2_comp_ring, which this type does not carry.
 
    Why restore cannot rebuild them: a restore lands on position p and
    the pass forwards p onward, so a block that STRADDLES p (p odd at
@@ -1646,8 +1657,8 @@ typedef struct {
        alloc_csa2_ring, which allocates nothing in that case. */
     float  *csa2_pend_c, *csa2_pend_z;
     float  *csa2_pend_c_idx, *csa2_pend_z_idx;
-    size_t  n_csa2_pend;                 /* c/z: n_full * cm * head_dim */
-    size_t  n_csa2_pend_idx;             /* idx twins: n_full * cm * idx_hd */
+    size_t  n_csa2_pend;                 /* c/z: sum of each slot's cm, times head_dim */
+    size_t  n_csa2_pend_idx;             /* idx twins: same, times idx_hd */
     int     pos;                         /* tokens forwarded when taken; -1 = empty */
     unsigned epoch;                      /* the state's epoch at save time */
 } LZStateCkpt;

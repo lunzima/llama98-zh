@@ -82,20 +82,19 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
     int hd = c->head_dim, nh = c->n_heads;
     int hdim = c->hidden_size;
     int qgd = c->attn_qgate_dim, qd = c->attn_q_dim;
-    /* cm is the divisor of max_blocks and of pos % cm below, and the
-       factor every pend_* offset into buffers that forward_state.c
-       sizes with `cm > 0 ? cm : 1` per bank. Read raw, a cm of 0
-       therefore divides by zero here while the allocation next door
-       assumed 1 - two different values for one quantity. Same guard as
-       forward.c's reset and forward_state.c's allocator; lz_open_bin
-       also refuses cm < 1, so this is the third line rather than the
-       only one. */
-    int cm = c->csa2_compress_m > 0 ? c->csa2_compress_m : 1;
+    /* cm is this layer's OWN compression ratio (model.h's own
+       csa2_compress_m_layer comment on LZModelConfig): the divisor of
+       pos below, the size of one pending block, and - through the two
+       prefix sums this file gets its buffer bases from - the depth of
+       this layer's ring. The resolver floors at 1 itself: lz_open_bin
+       and lz_load_config both refuse a value below 1, and lz_csa2_cm
+       exists so this file, the allocator and the reset cannot each
+       answer that question differently. */
+    int cm = lz_csa2_cm(c, layer);
     int n_idx_heads = c->csa2_indexer_heads;
     int idx_hd = c->csa2_indexer_head_dim;
     int idx_r = c->csa2_indexer_q_lora_rank;
     int ci = s->cache_idx[layer];
-    int max_blocks = (s->seq_len + cm - 1) / cm;
     int topk = c->csa2_topk;
     int mode = L->csa2_mode;
     float rms_eps = c->rms_norm_eps;
@@ -111,15 +110,24 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
        position % cm and the stride below is the single bank it always
        was. */
     size_t pdepth = (size_t)cm * (size_t)s->ssm_ring_depth;
-    float *pend_c = s->csa2_pending_c + (size_t)ci * pdepth * hd;
-    float *pend_z = s->csa2_pending_z + (size_t)ci * pdepth * hd;
+    /* Both bases are PREFIX SUMS over the slots before this one, not
+       ci * per-slot-size: a slot's own size is its owner layer's cm
+       (lz_csa2_pend_base/lz_csa2_ring_base, model.c - the same two
+       functions forward_state.c's allocator, forward.c's reset and
+       forward_ckpt.c's save/restore size and index through). With no
+       per-layer entry every slot's cm is the scalar and these are the
+       single-cm layout again: ci * cm * ring_depth raw positions and
+       ci * ceil(seq_len/cm) blocks. */
+    float *pend_c = s->csa2_pending_c + lz_csa2_pend_base(c, ci, s->ssm_ring_depth) * hd;
+    float *pend_z = s->csa2_pending_z + lz_csa2_pend_base(c, ci, s->ssm_ring_depth) * hd;
     /* s->csa2_pending_c_idx/csa2_pending_z_idx have no pointer here:
        nothing in this function reads or writes them, because the indexer
        K is projected from the finalized latent and has no per-position
        half. The buffers and their LZStateCkpt entries still exist
        (forward.h/forward_state.c/forward_ckpt.c own them). */
-    float *ring = s->csa2_comp_ring + (size_t)ci * max_blocks * hd;
-    float *ring_idx = s->csa2_idx_comp_ring + (size_t)ci * max_blocks * idx_hd;
+    float *ring = s->csa2_comp_ring + lz_csa2_ring_base(c, ci, s->seq_len) * hd;
+    float *ring_idx = s->csa2_idx_comp_ring +
+                      lz_csa2_ring_base(c, ci, s->seq_len) * idx_hd;
     /* This ci's published Top-K base (forward.h's own csa2_topk_idx_pub
        comment): one (topk)-wide slot per token-of-the-current-chunk, so
        a REUSE-mode layer processing token tk later in the dispatch

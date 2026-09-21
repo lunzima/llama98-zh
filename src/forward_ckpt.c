@@ -56,11 +56,16 @@ static void ckpt_sizes(const LZModelConfig *c, size_t *n_q8, size_t *n_s,
         for (li = 0; li < c->n_layers; li++)
             if (c->csa2_on[li]) { any_csa2 = 1; break; }
         if (any_csa2) {
-            int cm = c->csa2_compress_m > 0 ? c->csa2_compress_m : 1;
-            *n_csa2_pend = (size_t)c->n_full_layers * (size_t)cm *
-                           (size_t)c->head_dim;
-            *n_csa2_pend_idx = (size_t)c->n_full_layers * (size_t)cm *
-                               (size_t)c->csa2_indexer_head_dim;
+            /* One block per slot - depth 1, since the pending buffers'
+               own banked depth is the RUNNING state's business and this
+               count is the checkpoint's copy of each slot's open block.
+               lz_csa2_pend_base(c, n_full_layers, 1) is the end of the
+               same prefix sum save/restore index through (model.c), so
+               the two agree per slot by construction rather than by both
+               sides repeating one cm. */
+            size_t blocks = lz_csa2_pend_base(c, c->n_full_layers, 1);
+            *n_csa2_pend = blocks * (size_t)c->head_dim;
+            *n_csa2_pend_idx = blocks * (size_t)c->csa2_indexer_head_dim;
         } else {
             *n_csa2_pend = 0;
             *n_csa2_pend_idx = 0;
@@ -212,23 +217,33 @@ int lz_ckpt_save(LZStateCkpt *ck, const LZRunState *s, const LZModel *m,
        comment has the layout, LZStateCkpt's own the reason a checkpoint
        carries one block and not the whole banked ring). */
     if (n_csa2_pend > 0 && s->csa2_pending_c) {
-        size_t cm = (size_t)(m->config.csa2_compress_m > 0 ? m->config.csa2_compress_m : 1);
         size_t depth = (size_t)s->ssm_ring_depth;
-        size_t bank = ((size_t)pos / cm) % depth;
         size_t hd = (size_t)m->config.head_dim;
         size_t ihd = (size_t)m->config.csa2_indexer_head_dim;
         int i;
         for (i = 0; i < m->config.n_full_layers; i++) {
-            size_t src = ((size_t)i * depth + bank) * cm;
-            size_t dst = (size_t)i * cm;
+            /* Per slot: the ci's own ratio decides both how big its
+               block is and which bank position pos puts it in
+               (lz_csa2_slot_cm/lz_csa2_pend_base, model.c - the layout
+               the allocator and forward_csa2.c use). The checkpoint's
+               copy is one block per slot, so its dst base is the same
+               prefix sum evaluated at depth 1. */
+            int cmi = lz_csa2_slot_cm(&m->config, i);
+            size_t src, dst;
+            if (cmi < 1) cmi = 1;
+            src = lz_csa2_pend_base(&m->config, i, (int)depth) +
+                  (((size_t)pos / (size_t)cmi) % depth) * (size_t)cmi;
+            dst = lz_csa2_pend_base(&m->config, i, 1);
             memcpy(ck->csa2_pend_c + dst * hd, s->csa2_pending_c + src * hd,
-                   cm * hd * sizeof(float));
+                   (size_t)cmi * hd * sizeof(float));
             memcpy(ck->csa2_pend_z + dst * hd, s->csa2_pending_z + src * hd,
-                   cm * hd * sizeof(float));
+                   (size_t)cmi * hd * sizeof(float));
             memcpy(ck->csa2_pend_c_idx + dst * ihd,
-                   s->csa2_pending_c_idx + src * ihd, cm * ihd * sizeof(float));
+                   s->csa2_pending_c_idx + src * ihd,
+                   (size_t)cmi * ihd * sizeof(float));
             memcpy(ck->csa2_pend_z_idx + dst * ihd,
-                   s->csa2_pending_z_idx + src * ihd, cm * ihd * sizeof(float));
+                   s->csa2_pending_z_idx + src * ihd,
+                   (size_t)cmi * ihd * sizeof(float));
         }
     }
     ck->pos   = pos;
@@ -304,23 +319,30 @@ int lz_ckpt_restore(const LZStateCkpt *ck, LZRunState *s, const LZModel *m,
        ck->pos - 1 is the one this copy supplies and nothing else can -
        forward.h's LZStateCkpt comment has the measurement. */
     if (n_csa2_pend > 0 && s->csa2_pending_c) {
-        size_t cm = (size_t)(m->config.csa2_compress_m > 0 ? m->config.csa2_compress_m : 1);
         size_t depth = (size_t)s->ssm_ring_depth;
-        size_t bank = ((size_t)ck->pos / cm) % depth;
         size_t hd = (size_t)m->config.head_dim;
         size_t ihd = (size_t)m->config.csa2_indexer_head_dim;
         int i;
         for (i = 0; i < m->config.n_full_layers; i++) {
-            size_t dst = ((size_t)i * depth + bank) * cm;
-            size_t src = (size_t)i * cm;
+            /* The save side's own layout, read back into the bank the
+               resumed position's block uses - per slot, since each ci
+               carries its own ratio. */
+            int cmi = lz_csa2_slot_cm(&m->config, i);
+            size_t dst, src;
+            if (cmi < 1) cmi = 1;
+            dst = lz_csa2_pend_base(&m->config, i, (int)depth) +
+                  (((size_t)ck->pos / (size_t)cmi) % depth) * (size_t)cmi;
+            src = lz_csa2_pend_base(&m->config, i, 1);
             memcpy(s->csa2_pending_c + dst * hd, ck->csa2_pend_c + src * hd,
-                   cm * hd * sizeof(float));
+                   (size_t)cmi * hd * sizeof(float));
             memcpy(s->csa2_pending_z + dst * hd, ck->csa2_pend_z + src * hd,
-                   cm * hd * sizeof(float));
+                   (size_t)cmi * hd * sizeof(float));
             memcpy(s->csa2_pending_c_idx + dst * ihd,
-                   ck->csa2_pend_c_idx + src * ihd, cm * ihd * sizeof(float));
+                   ck->csa2_pend_c_idx + src * ihd,
+                   (size_t)cmi * ihd * sizeof(float));
             memcpy(s->csa2_pending_z_idx + dst * ihd,
-                   ck->csa2_pend_z_idx + src * ihd, cm * ihd * sizeof(float));
+                   ck->csa2_pend_z_idx + src * ihd,
+                   (size_t)cmi * ihd * sizeof(float));
         }
     }
     s->ssm_slot = 0;

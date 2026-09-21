@@ -683,8 +683,16 @@ static void alloc_csa2_ring(LZRunState *s, const LZModel *m,
         for (li2 = 0; li2 < c->n_layers; li2++)
             if (m->layers[li2].csa2_on) { any_csa2 = 1; break; }
         if (any_csa2) {
-            int cm = c->csa2_compress_m > 0 ? c->csa2_compress_m : 1;
-            int max_blocks = (seq_len + cm - 1) / cm;
+            /* Per slot, not per config: each ci slot's own sizes come
+               from the cm of the layer that owns it (model.h's own
+               csa2_compress_m_layer comment), and the totals below are
+               the prefix sums those bases are built from - pass
+               c->n_full_layers, the number of slots, to get the end
+               offset. max_blocks is the LARGEST of those slot depths,
+               because it sizes forward_csa2.c's per-token score scratch
+               (csa2_scores), which is one buffer serving every layer and
+               so must cover the shallowest-compressing one. */
+            int max_blocks = 0, k;
             size_t nf = (size_t)c->n_full_layers;
             /* depth banks of cm slabs each - forward.h's own
                csa2_pending_c comment derives why the open block's
@@ -694,7 +702,14 @@ static void alloc_csa2_ring(LZRunState *s, const LZModel *m,
                with no MTP head and for a state whose owner declared it
                will never run --spec, and 1 makes this allocation and
                every offset into it exactly what a single bank was. */
-            size_t pdepth = (size_t)cm * (size_t)s->ssm_ring_depth;
+            size_t pdepth = lz_csa2_pend_base(c, c->n_full_layers,
+                                              s->ssm_ring_depth);
+            size_t nblocks = lz_csa2_ring_base(c, c->n_full_layers, seq_len);
+            for (k = 0; k < c->n_full_layers; k++) {
+                int ck = lz_csa2_slot_cm(c, k);
+                int mb = (seq_len + (ck > 0 ? ck : 1) - 1) / (ck > 0 ? ck : 1);
+                if (mb > max_blocks) max_blocks = mb;
+            }
             s->csa2_pending_c = (float *)xcalloc(
                 nf * pdepth * c->head_dim, sizeof(float), &ok, &s->bytes_alloc);
             s->csa2_pending_z = (float *)xcalloc(
@@ -704,9 +719,9 @@ static void alloc_csa2_ring(LZRunState *s, const LZModel *m,
             s->csa2_pending_z_idx = (float *)xcalloc(
                 nf * pdepth * c->csa2_indexer_head_dim, sizeof(float), &ok, &s->bytes_alloc);
             s->csa2_comp_ring = (float *)xcalloc(
-                nf * (size_t)max_blocks * c->head_dim, sizeof(float), &ok, &s->bytes_alloc);
+                nf * nblocks * c->head_dim, sizeof(float), &ok, &s->bytes_alloc);
             s->csa2_idx_comp_ring = (float *)xcalloc(
-                nf * (size_t)max_blocks * c->csa2_indexer_head_dim, sizeof(float),
+                nf * nblocks * c->csa2_indexer_head_dim, sizeof(float),
                 &ok, &s->bytes_alloc);
             s->csa2_scores = (float *)xcalloc((size_t)max_blocks, sizeof(float), &ok, &s->bytes_alloc);
             /* csa2_topk_idx_pub / csa2_topk_n_pub (forward.h's own

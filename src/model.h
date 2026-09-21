@@ -534,6 +534,48 @@ typedef struct {
        time by whatever those fields were during training. */
     int csa2_on[LZ_MAX_LAYERS];
     int csa2_compress_m;
+    /* Per-layer csa2_compress_m: config.json "csa2_compress_m_layers",
+       an OBJECT keyed by the layer index as a string (JSON has no
+       integer keys), same shape as csa2_kv_mode/csa2_kv_source below.
+       0 means "not named" and falls back to the scalar above, so a
+       config without the key is bit-for-bit the model that never
+       carried it.
+
+       WHY PER LAYER. The ratio is a training-time decision, not an
+       inference-time switch (the compressor pools by that ratio and the
+       weights were trained for it), and the axis it has to express is
+       the one DeepSeek-V4.1-Flash itself uses: the report's layer
+       allocation table gives 18 encoder layers m=2 and 20 decoder
+       layers m=1, which is compress-where-input-is-dense and
+       do-not-compress-where-history-has-to-be-located-per-token. A
+       scalar can express either end of that and not the assignment.
+
+       WHAT IT COSTS: the pending-block and finalized-ring buffers
+       (forward.h's own csa2_pending_c/csa2_comp_ring comment) were
+       sized as n_full * cm * depth and n_full * ceil(seq_len/cm) under
+       ONE cm. Each ci slot now has the cm of the layer that owns it,
+       and every consumer walks the slots in order accumulating that
+       slot's own size (lz_csa2_pend_base/lz_csa2_ring_base below). With
+       no per-layer entry every slot's cm is the scalar, the prefix sums
+       are ci * cm * depth and ci * ceil(seq_len/cm) again, and both the
+       layout and the values are exactly what they were.
+
+       AN ALIASED LAYER HAS NO RATIO OF ITS OWN. A REINDEX/REUSE layer
+       owns no slot: forward_state.c aliases its cache_idx onto its
+       source's, so it reads the SAME ring, whose block boundaries are
+       that slot's ratio. lz_csa2_cm therefore answers the alias ROOT's
+       ratio for such a layer (following csa2_source back until a FULL
+       layer), which is what makes "one ratio per shared ring" true by
+       construction rather than by every layer in a chain repeating it
+       correctly - and an entry that contradicts the root's is refused
+       at load time on both paths (LZ_ERR_CFG_CSA2_COMPRESS_M), like
+       every other combination that has no meaning here.
+
+       Values are bounded exactly as the scalar is: >= 1, and <= seq_len
+       (model.c's own comment on the JSON path's bound has the
+       arithmetic - past seq_len the compression is already total and
+       only the allocations grow). */
+    int csa2_compress_m_layer[LZ_MAX_LAYERS];
     int csa2_topk;
     int csa2_indexer_heads;
     int csa2_indexer_head_dim;
@@ -1183,5 +1225,33 @@ int lz_csa2_mode_source_valid(const LZModelConfig *c, int li);
    Returns 1 if the whole config is consistent, 0 with *bad_layer set
    to the first violating layer otherwise (bad_layer may be NULL). */
 int lz_csa2_last_writer_valid(const LZModelConfig *c, int *bad_layer);
+
+/* The resolved compression ratio (always >= 1) of ONE layer: the
+   per-layer entry when csa2_compress_m_layer names it, the scalar
+   otherwise. forward_csa2.c reads its own layer's value here; nothing
+   else has a per-layer question to ask. `layer` outside
+   [0, c->n_layers) answers the scalar, which is what the callers that
+   pass a layer index derived from a raw field want. */
+int lz_csa2_cm(const LZModelConfig *c, int layer);
+
+/* The same quantity for a PHYSICAL SLOT of the CSA2 state (the ci
+   forward_state.c's cache_idx fill hands out: one per FULL-mode layer,
+   claimed in increasing layer order, aliased layers claiming none), so
+   the allocator, the reset, the checkpoint and forward_csa2.c all size
+   and index one slot the same way. 0 when no layer owns the slot.
+
+   The two base functions below return a slot's own starting offset into
+   the state's flat per-slot arrays, in the units those arrays are
+   indexed by - raw positions for the pending buffers (a slot contributes
+   cm * depth of them, `depth` being s->ssm_ring_depth; pass 1 for the
+   checkpoint's one-block-per-slot layout), and finalized BLOCKS for the
+   comp rings (a slot contributes ceil(seq_len/cm) of them; pass the
+   state's own seq_len). Calling either with ci == c->n_full_layers
+   returns the TOTAL, which is what the allocators size against. With no
+   per-layer entry these are ci * cm * depth and ci *
+   ceil(seq_len/cm) - the layout a single scalar always produced. */
+int lz_csa2_slot_cm(const LZModelConfig *c, int ci);
+size_t lz_csa2_pend_base(const LZModelConfig *c, int ci, int depth);
+size_t lz_csa2_ring_base(const LZModelConfig *c, int ci, int seq_len);
 
 #endif
