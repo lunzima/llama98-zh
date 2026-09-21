@@ -65,15 +65,28 @@ SRC=$(ls src/*.c src/*.h gui/*.c gui/*.h common/*.c common/*.h 2>/dev/null \
 
 # path:literals-over-limit. Only non-zero entries.
 #
-#   src/cli_main.c:2  The --help text, 972 and 7348 characters, each
-#                     assembled from adjacent literals. Real, and known:
-#                     a compiler holding to the 509 minimum may truncate
-#                     them, which would silently shorten --help rather
-#                     than fail the build. Recorded rather than split,
-#                     because splitting it into fputs calls is a change
-#                     to the one function whose whole purpose is to be
-#                     read as a block, and nothing in this tree can yet
-#                     confirm VC++ 4.0 actually truncates.
+#   src/cli_main.c:2  The two help texts - usage_short's, ending line
+#                     341, and usage's, ending line 527 - each assembled
+#                     from adjacent literals. Real, and known: a compiler
+#                     holding to the 509 minimum may truncate them, which
+#                     would silently shorten --help rather than fail the
+#                     build. Recorded rather than split, because splitting
+#                     it into fputs calls is a change to the one function
+#                     whose whole purpose is to be read as a block, and
+#                     nothing in this tree can yet confirm VC++ 4.0
+#                     actually truncates.
+#
+#                     WHAT IS RATCHETED HERE IS THE COUNT, NOT THE
+#                     LENGTHS. This comment carried "972 and 7348
+#                     characters" until 2026-09-21; re-measured with this
+#                     file's own awk they are 946 and 10680. The help
+#                     grew by about a third while the numbers stood
+#                     still, because nothing compares them - a literal
+#                     already listed can grow to ANY length in silence,
+#                     and only a THIRD one over 509 in this file turns
+#                     the gate red. The old pair is quoted nowhere else
+#                     in the tree, which is why correcting it here is
+#                     enough.
 STR_BASELINE="src/cli_main.c:2"
 
 # ---- 31-character external identifiers -------------------------------
