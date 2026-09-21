@@ -1517,6 +1517,8 @@ void forward_engram(const LZModel *m, LZRunState *s,
 
      ssm_state_q8 (+ _lo), ssm_state_s, conv_state   copied - 1.51 MB
      engram_hist, engram_conv_hist                   copied
+     csa2_pending_{c,z}(_idx)                        copied, 0 B without CSA2
+     csa2_comp_ring / csa2_idx_comp_ring             NOT copied
      kq8 / vq8 / ksq / vsq (the KV cache)             NOT copied
 
    engram_hist/engram_conv_hist are cross-chunk recurrent state read by
@@ -1526,6 +1528,35 @@ void forward_engram(const LZModel *m, LZRunState *s,
    PERTURBED history, not the saved one, since nothing ever writes it
    back. Both are no-ops (stay zeroed) when config.engram is 0, so
    copying them costs nothing on non-Engram models.
+
+   csa2_pending_* is the SAME category and was the one that got left
+   out; forward_csa2.c's header used to say so and scope it to --spec
+   rollback (its own "NOT SUPPORTED" list). It is not spec-only. Those
+   four buffers hold the contribution of each of the csa2_compress_m raw
+   positions belonging to the CURRENTLY OPEN compressed block, indexed by
+   pos % cm, and step 3 of that file reads ALL cm slabs when the block
+   completes (off == cm - 1).
+
+   Why restore cannot rebuild them: a restore lands on position p and
+   the pass forwards p onward, so a block that STRADDLES p (p odd at
+   cm == 2) needs the slab of position p-1, which this pass never
+   writes. The live slab at that point is whatever the PREVIOUS turn's
+   generation left there - a different position's contribution - so the
+   block is finalized from the wrong data and every query that later
+   attends to it sees a corrupted entry. Measured on the CLI gate
+   (tests/test_cli_ckpt_parity.py, kunkun98 = csa2_layers [3], cm 2):
+   turns 2 and 3 restore at even positions (36 and 74) and are byte-
+   identical to --no-ckpt; turn 4 restores at 113 and is not. Making the
+   first render's prefix length odd moves the divergence to turn 2,
+   which is how the parity - not the position - was identified.
+
+   The finalized rings are still NOT copied: an entry for a block whose
+   last position is below p was written by the still-intact prefix and
+   nothing overwrites it (later passes write blocks >= p/cm), and an
+   entry at or above p is either rewritten by this pass or unreadable -
+   forward_csa2.c bounds a query by n_vis = (pos+1)/cm, so a stale entry
+   for a later block is never read. Copying them would cost 1 MB per
+   csa2 layer at seq_len 2048 for nothing.
 
    The KV cache is append-only and indexed by absolute position, so
    rewinding to position P and forwarding different tokens simply
@@ -1566,6 +1597,14 @@ typedef struct {
     float  *engram_conv_hist;
     size_t  n_engram_conv;               /* element count, for a shape check */
     int     engram_conv_hist_n;
+    /* CSA2's open compressed block - see this struct's own comment on
+       why the finalized rings next to it are not here. All four are
+       NULL/0 when no layer is csa2_on, matching forward_state.c's
+       alloc_csa2_ring, which allocates nothing in that case. */
+    float  *csa2_pend_c, *csa2_pend_z;
+    float  *csa2_pend_c_idx, *csa2_pend_z_idx;
+    size_t  n_csa2_pend;                 /* c/z: n_full * cm * head_dim */
+    size_t  n_csa2_pend_idx;             /* idx twins: n_full * cm * idx_hd */
     int     pos;                         /* tokens forwarded when taken; -1 = empty */
     unsigned epoch;                      /* the state's epoch at save time */
 } LZStateCkpt;

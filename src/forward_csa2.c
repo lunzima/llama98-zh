@@ -62,11 +62,18 @@
      - Composition with S4's shared low-rank query latent - this
        function always reads L->csa2_w_dq_idx, unlike the training-side
        reference, which reuses q_proj.down when S4 already converted it.
-     - Incremental cache checkpoint/restore (LZStateCkpt) - CSA2's own
-       ring state (csa2_pending_c and friends, csa2_comp_ring) is not
-       included in a checkpoint's saved fields; speculative decode
-       rollback (--spec) is therefore not yet correct on a csa2_on
-       layer and is out of scope for this pass, same as SIMD. */
+     - Incremental cache rollback - the checkpoint primitive WAS missing
+       this and that was a live bug, not a scope note: csa2_pending_c and
+       friends were not among LZStateCkpt's saved fields, and a restore
+       that lands on an odd position (cm 2) leaves step 3 finalizing a
+       block from the PREVIOUS turn's leftover slab for position p-1.
+       Both halves are saved now (LZStateCkpt's own comment has the
+       measurement and the reasoning); the finalized rings stay out
+       because a restore neither rewrites nor reads a stale one. What is
+       still not correct is --spec's own per-round rollback, which does
+       not go through LZStateCkpt at all (it is served by the ssm_slot
+       ring - lz_spec_round's module comment), so it rewinds no CSA2
+       state and remains out of scope for this pass, same as SIMD. */
 void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
                   int layer, int pos0, int nt, const float *kv_in) {
     const LZModelConfig *c = &m->config;

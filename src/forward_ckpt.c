@@ -22,9 +22,11 @@
    a stale size after a config field changes. n_engram_conv mirrors the
    row*dim sizing forward.c's alloc_engram block uses for
    s->engram_conv_hist, and is 0 when config.engram is 0 (same
-   condition that block itself gates on). */
+   condition that block itself gates on). The two csa2_* counts mirror
+   forward_state.c's alloc_csa2_ring the same way. */
 static void ckpt_sizes(const LZModelConfig *c, size_t *n_q8, size_t *n_s,
-                       size_t *n_conv, size_t *n_engram_conv) {
+                       size_t *n_conv, size_t *n_engram_conv,
+                       size_t *n_csa2_pend, size_t *n_csa2_pend_idx) {
     *n_q8   = (size_t)c->n_linear_layers * c->lin_n_v_heads *
               c->lin_k_head_dim * c->lin_v_head_dim;
     *n_s    = *n_q8 / 32;
@@ -37,17 +39,42 @@ static void ckpt_sizes(const LZModelConfig *c, size_t *n_q8, size_t *n_s,
     } else {
         *n_engram_conv = 0;
     }
+    /* CSA2's open block - forward.h's LZStateCkpt comment has the
+       whole argument for why it is in the checkpoint at all. The
+       predicate and both shapes are forward_state.c's alloc_csa2_ring
+       copied exactly (any csa2_on layer, nf * cm * width, cm floored at
+       1): a checkpoint that sized these differently from the state
+       they are copied in and out of is a memcpy past the end, not an
+       error message. L->csa2_on is c->csa2_on[li] verbatim (model.c's
+       setup_layers), so reading the config array here is the same
+       predicate the allocator ran on. */
+    {
+        int any_csa2 = 0, li;
+        for (li = 0; li < c->n_layers; li++)
+            if (c->csa2_on[li]) { any_csa2 = 1; break; }
+        if (any_csa2) {
+            int cm = c->csa2_compress_m > 0 ? c->csa2_compress_m : 1;
+            *n_csa2_pend = (size_t)c->n_full_layers * (size_t)cm *
+                           (size_t)c->head_dim;
+            *n_csa2_pend_idx = (size_t)c->n_full_layers * (size_t)cm *
+                               (size_t)c->csa2_indexer_head_dim;
+        } else {
+            *n_csa2_pend = 0;
+            *n_csa2_pend_idx = 0;
+        }
+    }
 }
 
 
 int lz_ckpt_alloc(LZStateCkpt *ck, const LZModel *m, char *errbuf, int errlen) {
-    size_t n_q8, n_s, n_conv, n_engram_conv;
+    size_t n_q8, n_s, n_conv, n_engram_conv, n_csa2_pend, n_csa2_pend_idx;
     if (!ck || !m) {
         if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_NULL_ARG);
         return LZ_ERR_NULL_ARG;
     }
     memset(ck, 0, sizeof(*ck));
-    ckpt_sizes(&m->config, &n_q8, &n_s, &n_conv, &n_engram_conv);
+    ckpt_sizes(&m->config, &n_q8, &n_s, &n_conv, &n_engram_conv,
+               &n_csa2_pend, &n_csa2_pend_idx);
     ck->ssm_q8 = (int8_t *)malloc(n_q8);
 #if LZ_GDN_STATE_2PLANE
     ck->ssm_q8_lo = (int8_t *)malloc(n_q8);
@@ -66,11 +93,21 @@ int lz_ckpt_alloc(LZStateCkpt *ck, const LZModel *m, char *errbuf, int errlen) {
        s->engram_conv_hist itself. */
     ck->engram_conv_hist = n_engram_conv > 0
         ? (float *)malloc(n_engram_conv * sizeof(float)) : NULL;
+    /* Same convention for CSA2's open block: NULL on a model with no
+       csa2_on layer, matching the run state's own pointers. */
+    if (n_csa2_pend > 0) {
+        ck->csa2_pend_c = (float *)malloc(n_csa2_pend * sizeof(float));
+        ck->csa2_pend_z = (float *)malloc(n_csa2_pend * sizeof(float));
+        ck->csa2_pend_c_idx = (float *)malloc(n_csa2_pend_idx * sizeof(float));
+        ck->csa2_pend_z_idx = (float *)malloc(n_csa2_pend_idx * sizeof(float));
+    }
     if (!ck->ssm_q8 || !ck->ssm_s || !ck->conv
 #if LZ_GDN_STATE_2PLANE
         || !ck->ssm_q8_lo
 #endif /* LZ_GDN_STATE_2PLANE */
         || (n_engram_conv > 0 && !ck->engram_conv_hist)
+        || (n_csa2_pend > 0 && (!ck->csa2_pend_c || !ck->csa2_pend_z ||
+                                !ck->csa2_pend_c_idx || !ck->csa2_pend_z_idx))
         ) {
         lz_ckpt_free(ck);
         if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_STATE_ALLOC);
@@ -80,6 +117,8 @@ int lz_ckpt_alloc(LZStateCkpt *ck, const LZModel *m, char *errbuf, int errlen) {
     ck->n_ssm_s  = n_s;
     ck->n_conv   = n_conv;
     ck->n_engram_conv = n_engram_conv;
+    ck->n_csa2_pend = n_csa2_pend;
+    ck->n_csa2_pend_idx = n_csa2_pend_idx;
     ck->pos      = -1;          /* empty until a save */
     ck->epoch    = 0;
     return LZ_ERR_OK;
@@ -95,20 +134,27 @@ void lz_ckpt_free(LZStateCkpt *ck) {
     free(ck->conv);
     free(ck->conv_q);
     free(ck->engram_conv_hist);
+    free(ck->csa2_pend_c);
+    free(ck->csa2_pend_z);
+    free(ck->csa2_pend_c_idx);
+    free(ck->csa2_pend_z_idx);
     memset(ck, 0, sizeof(*ck));
 }
 
 int lz_ckpt_save(LZStateCkpt *ck, const LZRunState *s, const LZModel *m,
                  int pos, char *errbuf, int errlen) {
-    size_t n_q8, n_s, n_conv, n_engram_conv;
+    size_t n_q8, n_s, n_conv, n_engram_conv, n_csa2_pend, n_csa2_pend_idx;
     size_t o_q8, o_s, o_conv;   /* byte offset of s's OWN active ring slot */
     if (!ck || !s || !m || pos < 0 || !ck->ssm_q8) {
         if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_NULL_ARG);
         return LZ_ERR_NULL_ARG;
     }
-    ckpt_sizes(&m->config, &n_q8, &n_s, &n_conv, &n_engram_conv);
+    ckpt_sizes(&m->config, &n_q8, &n_s, &n_conv, &n_engram_conv,
+               &n_csa2_pend, &n_csa2_pend_idx);
     if (n_q8 != ck->n_ssm_q8 || n_s != ck->n_ssm_s || n_conv != ck->n_conv ||
-        n_engram_conv != ck->n_engram_conv) {
+        n_engram_conv != ck->n_engram_conv ||
+        n_csa2_pend != ck->n_csa2_pend ||
+        n_csa2_pend_idx != ck->n_csa2_pend_idx) {
         if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_CKPT_SHAPE);
         return LZ_ERR_CKPT_SHAPE;
     }
@@ -150,6 +196,24 @@ int lz_ckpt_save(LZStateCkpt *ck, const LZRunState *s, const LZModel *m,
         memcpy(ck->engram_conv_hist, s->engram_conv_hist,
               n_engram_conv * sizeof(float));
     ck->engram_conv_hist_n = s->engram_conv_hist_n;
+    /* CSA2's open compressed block. The ring's other half
+       (csa2_comp_ring) deliberately stays out - forward.h's LZStateCkpt
+       comment derives why a restore can leave it alone. Guarded on the
+       source pointers as well as the counts because the run state
+       allocates these only when a layer is csa2_on, on a predicate that
+       has to agree with ckpt_sizes' own; a disagreement is a memcpy of
+       a length neither side sized, and it is cheaper to copy nothing
+       than to find out at the next reset. */
+    if (n_csa2_pend > 0 && s->csa2_pending_c) {
+        memcpy(ck->csa2_pend_c, s->csa2_pending_c, n_csa2_pend * sizeof(float));
+        memcpy(ck->csa2_pend_z, s->csa2_pending_z, n_csa2_pend * sizeof(float));
+    }
+    if (n_csa2_pend_idx > 0 && s->csa2_pending_c_idx) {
+        memcpy(ck->csa2_pend_c_idx, s->csa2_pending_c_idx,
+              n_csa2_pend_idx * sizeof(float));
+        memcpy(ck->csa2_pend_z_idx, s->csa2_pending_z_idx,
+              n_csa2_pend_idx * sizeof(float));
+    }
     ck->pos   = pos;
     ck->epoch = s->epoch;
     return LZ_ERR_OK;
@@ -157,7 +221,7 @@ int lz_ckpt_save(LZStateCkpt *ck, const LZRunState *s, const LZModel *m,
 
 int lz_ckpt_restore(const LZStateCkpt *ck, LZRunState *s, const LZModel *m,
                     int *out_pos, char *errbuf, int errlen) {
-    size_t n_q8, n_s, n_conv, n_engram_conv;
+    size_t n_q8, n_s, n_conv, n_engram_conv, n_csa2_pend, n_csa2_pend_idx;
     if (!ck || !s || !m || !ck->ssm_q8) {
         if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_NULL_ARG);
         return LZ_ERR_NULL_ARG;
@@ -175,9 +239,12 @@ int lz_ckpt_restore(const LZStateCkpt *ck, LZRunState *s, const LZModel *m,
         if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_CKPT_STALE);
         return LZ_ERR_CKPT_STALE;
     }
-    ckpt_sizes(&m->config, &n_q8, &n_s, &n_conv, &n_engram_conv);
+    ckpt_sizes(&m->config, &n_q8, &n_s, &n_conv, &n_engram_conv,
+               &n_csa2_pend, &n_csa2_pend_idx);
     if (n_q8 != ck->n_ssm_q8 || n_s != ck->n_ssm_s || n_conv != ck->n_conv ||
-        n_engram_conv != ck->n_engram_conv || ck->pos >= s->seq_len) {
+        n_engram_conv != ck->n_engram_conv ||
+        n_csa2_pend != ck->n_csa2_pend ||
+        n_csa2_pend_idx != ck->n_csa2_pend_idx || ck->pos >= s->seq_len) {
         if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_CKPT_SHAPE);
         return LZ_ERR_CKPT_SHAPE;
     }
@@ -211,6 +278,22 @@ int lz_ckpt_restore(const LZStateCkpt *ck, LZRunState *s, const LZModel *m,
         memcpy(s->engram_conv_hist, ck->engram_conv_hist,
               n_engram_conv * sizeof(float));
     s->engram_conv_hist_n = ck->engram_conv_hist_n;
+    /* CSA2's open block, back into the live slabs. The forward that
+       resumes at ck->pos continues from the FIRST raw position of the
+       open block only if that block does not straddle ck->pos; when it
+       does, the slab for position ck->pos - 1 is the one this copy
+       supplies and nothing else can - forward.h's LZStateCkpt comment
+       has the measurement. */
+    if (n_csa2_pend > 0 && s->csa2_pending_c) {
+        memcpy(s->csa2_pending_c, ck->csa2_pend_c, n_csa2_pend * sizeof(float));
+        memcpy(s->csa2_pending_z, ck->csa2_pend_z, n_csa2_pend * sizeof(float));
+    }
+    if (n_csa2_pend_idx > 0 && s->csa2_pending_c_idx) {
+        memcpy(s->csa2_pending_c_idx, ck->csa2_pend_c_idx,
+              n_csa2_pend_idx * sizeof(float));
+        memcpy(s->csa2_pending_z_idx, ck->csa2_pend_z_idx,
+              n_csa2_pend_idx * sizeof(float));
+    }
     s->ssm_slot = 0;
     if (out_pos) *out_pos = ck->pos;
     return LZ_ERR_OK;
