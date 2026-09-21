@@ -113,8 +113,11 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
     size_t pdepth = (size_t)cm * (size_t)s->ssm_ring_depth;
     float *pend_c = s->csa2_pending_c + (size_t)ci * pdepth * hd;
     float *pend_z = s->csa2_pending_z + (size_t)ci * pdepth * hd;
-    float *pend_c_idx = s->csa2_pending_c_idx + (size_t)ci * pdepth * idx_hd;
-    float *pend_z_idx = s->csa2_pending_z_idx + (size_t)ci * pdepth * idx_hd;
+    /* s->csa2_pending_c_idx/csa2_pending_z_idx have no pointer here:
+       nothing in this function reads or writes them, because the indexer
+       K is projected from the finalized latent and has no per-position
+       half. The buffers and their LZStateCkpt entries still exist
+       (forward.h/forward_state.c/forward_ckpt.c own them). */
     float *ring = s->csa2_comp_ring + (size_t)ci * max_blocks * hd;
     float *ring_idx = s->csa2_idx_comp_ring + (size_t)ci * max_blocks * idx_hd;
     /* This ci's published Top-K base (forward.h's own csa2_topk_idx_pub
@@ -221,14 +224,18 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
            not merely a wasted computation. */
         if (mode == LZ_CSA2_FULL) {
             /* CED "proj" (model.h's ced_kv comment): this layer's own
-               main-KV and indexer-K compression inputs read the
-               encoder's frozen exit hidden instead of this position's
-               own s->xb, when forward.c's kv_in resolution put this
-               layer in CED's decoder region. Computed HERE, inside the
-               FULL-only branch, rather than once per token above:
-               kv_in is read ONLY by this step, and the training side's
-               own _wire_ced never hooks CED's h_S substitution for a
-               Reindex/Reuse-mode CSA2 layer either (report Sec2.3.1:
+               main-KV compression input reads the encoder's frozen exit
+               hidden instead of this position's own s->xb, when
+               forward.c's kv_in resolution put this layer in CED's
+               decoder region. The indexer K follows that substitution
+               without being named here, because it is a projection of
+               the latent this matmul feeds - the training side's own
+               K_idx does the same (engine/csa2.py builds C_comp from
+               hs_kv, then projects K_idx out of C_comp). Computed HERE,
+               inside the FULL-only branch, rather than once per token
+               above: kv_in is read ONLY by this step, and the training
+               side's own _wire_ced never hooks CED's h_S substitution
+               for a Reindex/Reuse-mode CSA2 layer either (report Sec2.3.1:
                "the Reindex and Reuse Modes are unchanged" under CED
                composition) - for those modes this line is not merely
                unused, it is never even evaluated. Step 1's query above
@@ -239,10 +246,15 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
             lz_matmul_w(s->csa2_z_j, h, &L->csa2_w_gate, hdim, hd, s->xq, s->xqs);
             memcpy(pend_c + (size_t)pslot * hd, s->csa2_c_j, (size_t)hd * sizeof(float));
             memcpy(pend_z + (size_t)pslot * hd, s->csa2_z_j, (size_t)hd * sizeof(float));
-            lz_matmul_w(s->csa2_c_j_idx, kvh, &L->csa2_w_kv_idx, hdim, idx_hd, s->xq, s->xqs);
-            lz_matmul_w(s->csa2_z_j_idx, h, &L->csa2_w_gate_idx, hdim, idx_hd, s->xq, s->xqs);
-            memcpy(pend_c_idx + (size_t)pslot * idx_hd, s->csa2_c_j_idx, (size_t)idx_hd * sizeof(float));
-            memcpy(pend_z_idx + (size_t)pslot * idx_hd, s->csa2_z_j_idx, (size_t)idx_hd * sizeof(float));
+            /* No indexer half here. The indexer K is a projection OF the
+               block's finalized latent (step 3), not a second per-token
+               compression of hidden, so there is no per-position indexer
+               intermediate for step 3 to weight - the whole
+               csa2_pending_c_idx/csa2_pending_z_idx pair that used to
+               carry one is unreferenced below. csa2_z_j_idx is likewise
+               now written nowhere in this file. The allocations and the
+               LZStateCkpt fields stay (forward_state.c/forward.h/forward_ckpt.c
+               own them); only their readers here are gone. */
         }
 
         /* ---- 3. finalize this position's block if it just completed
@@ -251,9 +263,19 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
            wide, arXiv:2606.19348 SS2.3.3) + RoPE at the block's nominal
            position (its own last raw position - engine/csa2.py's
            csa2_block_positions has the same choice and the same
-           reasoning). Indexer keys get NEITHER, matching
-           engine/csa2.py's own K_idx (Eq 1 does not call for either on
-           the indexer side).
+           reasoning). Indexer keys come out of THAT SAME latent, before
+           the RoPE below rotates it in place: k_norm then wk then their
+           own RMSNorm then RoPE - report Sec2.3.1's "CSA2 obtains
+           indexer K by projecting main KV entries, replacing CSA's
+           separate compression path from hidden states", and
+           .prof/dsv41_ref/model.py:544-545's
+           `k = self.k_norm(self.wk(latent))` followed by
+           `apply_rotary_emb(k[..., -rd:], freqs)`. :749's own comment
+           pins the ordering this depends on ("the indexer needs the
+           latent before RoPE, so it runs before the cache is written") -
+           .prof/dsv41_ref/model.py:758 rotates the latent into the
+           cache AFTER the indexer has read it, exactly as the two
+           lz_rope calls below are ordered.
 
            THE ORDERING ARGUMENT - AHEAD OF THE INDEXER, not after
            o_proj. This is where it lives in full; the file header, the
@@ -314,18 +336,18 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
             int pbase = pslot - off;
             float *bz = pend_z + (size_t)pbase * hd;
             float *bc = pend_c + (size_t)pbase * hd;
-            float *bzi = pend_z_idx + (size_t)pbase * idx_hd;
-            float *bci = pend_c_idx + (size_t)pbase * idx_hd;
-            /* csa2_c_j/csa2_c_j_idx are dead by now - their only use
-               this iteration was step 2's copy into pend_c/pend_c_idx
-               immediately above - so they double as this block's
-               finalized-sum scratch instead of adding two more
-               allocations sized identically to ones that already
-               exist. */
+            /* csa2_c_j is dead by now - its only use this iteration was
+               step 2's copy into pend_c immediately above - so it doubles
+               as this block's finalized-sum scratch instead of adding
+               another allocation sized identically to one that already
+               exists. csa2_c_j_idx is a different case: step 2 no longer
+               writes it at all (the indexer has no per-token half left
+               to store), so it arrives here free and the indexer
+               projection below lands in it. */
             float *sum_c = s->csa2_c_j;
             float *sum_c_idx = s->csa2_c_j_idx;
             float maxv, denom;
-            /* pend_z/pend_z_idx are READ here, never consumed: a block
+            /* pend_z is READ here, never consumed: a block
                can be finalized more than once - a speculative round
                finalizes it from rows that are then rejected, and the
                re-forward of its last position finalizes it again - and
@@ -354,21 +376,36 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
             }
             lz_rmsnorm(ring + (size_t)blk * hd, sum_c,
                       lz_t_f32(&L->k_norm, s->wscr), hd, rms_eps);
-            lz_rope(ring + (size_t)blk * hd, 1, hd, rotary_dim, pos, s->rope_cs);
 
-            for (d = 0; d < idx_hd; d++) {
-                maxv = bzi[d];
-                for (j = 1; j < cm; j++)
-                    if (bzi[(size_t)j * idx_hd + d] > maxv) maxv = bzi[(size_t)j * idx_hd + d];
-                denom = 0.0f;
-                for (j = 0; j < cm; j++)
-                    denom += lz_exp(bzi[(size_t)j * idx_hd + d] - maxv);
-                sum_c_idx[d] = 0.0f;
-                for (j = 0; j < cm; j++)
-                    sum_c_idx[d] += (lz_exp(bzi[(size_t)j * idx_hd + d] - maxv) / denom)
-                                    * bci[(size_t)j * idx_hd + d];
-            }
-            memcpy(ring_idx + (size_t)blk * idx_hd, sum_c_idx, (size_t)idx_hd * sizeof(float));
+            /* Indexer K, projected out of the latent the line above just
+               wrote - which is why this sits BETWEEN that lz_rmsnorm and
+               the lz_rope below rather than after it. lz_rope rotates in
+               place, so reading `ring` after it would read the rotated
+               latent, and the reference explicitly hands the indexer the
+               un-rotated one (model.py:749 "the indexer needs the latent
+               before RoPE, so it runs before the cache is written"; its
+               own lz_rope-equivalent, :758, runs after the indexer).
+               wk is head_dim -> index_head_dim and k_norm_idx is
+               index_head_dim wide, a different norm from the k_norm
+               above (head_dim wide, main KV entries only).
+
+               RoPE slicing, stated as fact rather than as a choice: the
+               lz_rope call below rotates the FIRST rotary_dim dims of
+               the row it is given (src/ops_rope.c: base[i] paired with
+               base[i + rotary_dim/2], everything past rotary_dim left
+               alone). The V4.1 reference rotates the LAST rd dims of
+               the indexer key instead (model.py:545, `k[..., -rd:]`).
+               Those are the same set of dims exactly when
+               rotary_dim == indexer_head_dim, and two different sets
+               otherwise. This call site passes the row to lz_rope
+               unchanged. */
+            lz_matmul_w(sum_c_idx, ring + (size_t)blk * hd, &L->csa2_w_kv_idx,
+                        hd, idx_hd, s->xq, s->xqs);
+            lz_rmsnorm(ring_idx + (size_t)blk * idx_hd, sum_c_idx,
+                      lz_t_f32(&L->csa2_k_norm_idx, s->wscr), idx_hd, rms_eps);
+            lz_rope(ring_idx + (size_t)blk * idx_hd, 1, idx_hd, rotary_dim, pos, s->rope_cs);
+
+            lz_rope(ring + (size_t)blk * hd, 1, hd, rotary_dim, pos, s->rope_cs);
         }
 
         /* ---- 4. indexer query + Eq 1's score, over exactly the

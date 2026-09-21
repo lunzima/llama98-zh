@@ -116,6 +116,8 @@ typedef enum {
     LZ_ERR_CFG_CSA2_MODE,      /* csa2_kv_mode entry for layer %d is invalid: %s */
     LZ_ERR_CFG_CSA2_SOURCE,    /* csa2_kv_source entry for layer %d is invalid: %s */
     LZ_ERR_CFG_CSA2_MLA,       /* csa2_on layer %d requires mla_q_lora_rank == 0 (S4 composition unsupported) */
+    LZ_ERR_CFG_CSA2_IDX_K,     /* indexer K reads the compressed latent (head_dim), but tensor %s projects from hidden (in_features %lld) - hidden-state input space checkpoint */
+    LZ_ERR_CFG_CSA2_IDX_ROTARY, /* csa2_on layer %d (FULL): rotary_dim %d exceeds csa2_indexer_head_dim %d, and the rotation writes base[i + rotary_dim/2] inside the indexer key's row */
     LZ_ERR_CFG_CED_KV,         /* ced_kv is not one of off/proj, got %s */
     LZ_ERR_CFG_UNSUPPORTED_ARCH, /* checkpoint is neither GDN (Qwen3.5) nor KDA (KunMoe) shape */
     LZ_ERR_CFG_ATTN_GATE,      /* attn_output_gate must be true: the forward reads the gate half of every attention head unconditionally */

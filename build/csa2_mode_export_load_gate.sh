@@ -180,8 +180,8 @@ def build(tag, csa2_layers, csa2_kv_mode, csa2_kv_source):
     extra = {
         "layers.1.self_attn.csa2_w_kv.weight": [hd, h],
         "layers.1.self_attn.csa2_w_gate.weight": [hd, h],
-        "layers.1.self_attn.csa2_w_kv_idx.weight": [idx_hd, h],
-        "layers.1.self_attn.csa2_w_gate_idx.weight": [idx_hd, h],
+        "layers.1.self_attn.csa2_w_kv_idx.weight": [idx_hd, hd],
+        "layers.1.self_attn.csa2_k_norm_idx.weight": [idx_hd],
         "layers.1.self_attn.csa2_w_weights.weight": [idx_heads, h],
         "layers.1.self_attn.csa2_w_dq_idx.weight": [idx_r, h],
         "layers.1.self_attn.csa2_w_uq_idx.weight": [idx_heads * idx_hd, idx_r],
@@ -197,6 +197,31 @@ def build(tag, csa2_layers, csa2_kv_mode, csa2_kv_source):
 build("control_full", [1], {}, {})
 build("reindex", [1, 2], {2: "reindex"}, {2: 1})
 build("reuse", [1, 2, 3], {2: "reindex", 3: "reuse"}, {2: 1, 3: 2})
+
+# The legacy arm: the SAME checkpoint with the indexer-K projection shaped
+# for the hidden-state input space (in_features = hidden), the geometry
+# every checkpoint exported before CSA2's indexer K moved onto the
+# compressed latent carries. Written with _write_model ONLY, not
+# export_q8.export() - export() is the thing under test's own shape check
+# and refuses this fixture at the source, which would leave the loader's
+# own refusal unexercised.
+legacy = _cfg(csa2_layers=[1], csa2_kv_mode={}, csa2_kv_source={})
+cl = export_q8.resolve_config(legacy)
+hl, hdl = cl["hidden_size"], cl["head_dim"]
+legacy_extra = {
+    "layers.1.self_attn.csa2_w_kv.weight": [hdl, hl],
+    "layers.1.self_attn.csa2_w_gate.weight": [hdl, hl],
+    "layers.1.self_attn.csa2_w_kv_idx.weight": [cl["csa2_indexer_head_dim"], hl],
+    "layers.1.self_attn.csa2_w_gate_idx.weight": [cl["csa2_indexer_head_dim"], hl],
+    "layers.1.self_attn.csa2_w_weights.weight": [cl["csa2_indexer_heads"], hl],
+    "layers.1.self_attn.csa2_w_dq_idx.weight": [cl["csa2_indexer_q_lora_rank"], hl],
+    "layers.1.self_attn.csa2_w_uq_idx.weight":
+        [cl["csa2_indexer_heads"] * cl["csa2_indexer_head_dim"],
+         cl["csa2_indexer_q_lora_rank"]],
+}
+_write_model(pathlib.Path(".") / "legacy_idx_k", legacy, legacy_extra)
+assert hl != hdl, "fixture config has hidden == head_dim; the legacy arm cannot discriminate"
+print("built legacy_idx_k")
 PYEOF
 ) || { echo "csa2_mode_export_load_gate: FAIL - fixture export failed"; exit 1; }
 
@@ -212,6 +237,22 @@ for tag in control_full reindex reuse; do
         *) echo "csa2_mode_export_load_gate: FAIL - fixed tree did not load $tag"; RC=1 ;;
     esac
 done
+
+# The legacy indexer-K geometry must be REFUSED, by name, not loaded and
+# not silently degraded. This is the arm that separates "the shape check
+# happens to reject it" from "the loader knows why": the expected message
+# is LZ_ERR_CFG_CSA2_IDX_K's own text, and the arm fails if the refusal
+# comes from anywhere else (the generic shape/dim/elems errors), because
+# a checkpoint the OLD exporter produced is the one case a user is most
+# likely to hit and least likely to diagnose from a dimension index.
+echo ""
+echo "-- legacy indexer-K geometry (in_features = hidden) must be refused by name --"
+out=$("$W/fixed/probe" "$W/fixtures/legacy_idx_k" 2>&1)
+echo "  legacy_idx_k: $out"
+case "$out" in
+    *"hidden-state input space"*) ;;
+    *) echo "csa2_mode_export_load_gate: FAIL - legacy indexer-K geometry was not refused with LZ_ERR_CFG_CSA2_IDX_K (got: $out)"; RC=1 ;;
+esac
 
 echo ""
 echo "-- mutant tree: CSA2_SPECS walk reverted to unconditional (reindex/reuse must FAIL, control_full must still PASS) --"

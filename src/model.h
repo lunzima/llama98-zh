@@ -749,9 +749,25 @@ typedef struct {
        only K/V are replaced by the compressed entries below).
          csa2_w_kv, csa2_w_gate       (head_dim, hidden) each - main
                                        compression (Eq 9-12 simplified)
-         csa2_w_kv_idx, csa2_w_gate_idx (csa2_indexer_head_dim, hidden)
-                                       each - indexer key compression,
-                                       same algorithm, own weights
+         csa2_w_kv_idx                (csa2_indexer_head_dim, head_dim)
+                                       - indexer key projection. Reads
+                                       the compressed LATENT csa2_w_kv/
+                                       csa2_w_gate produce (normed),
+                                       not hidden - report Sec2.3.1:
+                                       "CSA2 obtains indexer K by
+                                       projecting main KV entries,
+                                       replacing CSA's separate
+                                       compression path from hidden
+                                       states"
+         csa2_k_norm_idx              (csa2_indexer_head_dim) - the
+                                       RMSNorm the indexer keys get
+                                       after that projection. A
+                                       DIFFERENT norm from k_norm above
+                                       (head_dim wide, main KV entries
+                                       only) and from the compressor's
+                                       own: .prof/dsv41_ref/model.py's
+                                       indexer.k_norm,
+                                       RMSNorm(args.index_head_dim)
          csa2_w_weights               (csa2_indexer_heads, hidden) -
                                        Eq 1's per-head w_{t,h}
          csa2_w_dq_idx                (csa2_indexer_q_lora_rank, hidden)
@@ -766,7 +782,7 @@ typedef struct {
                                        csa2_indexer_q_lora_rank) -
                                        indexer query up-projection */
     LZTensor csa2_w_kv, csa2_w_gate;
-    LZTensor csa2_w_kv_idx, csa2_w_gate_idx;
+    LZTensor csa2_w_kv_idx, csa2_k_norm_idx;
     LZTensor csa2_w_weights;
     LZTensor csa2_w_dq_idx, csa2_w_uq_idx;
     int csa2_on;                     /* setup_layers-derived, see above */

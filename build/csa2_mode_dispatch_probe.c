@@ -245,8 +245,11 @@ static void fill_xb(LZRunState *s, int nt, int dim, unsigned *st) {
 
 /* ------------------------------------------------------------ layer fixtures */
 
-/* q/o/q_norm (steps 1 and 6 - every mode) + k_norm and the four main/
-   indexer COMPRESSION tensors (steps 2 and 3 - FULL only) + the three
+/* q/o/q_norm (steps 1 and 6 - every mode) + k_norm and the four
+   main-KV/indexer-K tensors (steps 2 and 3 - FULL only; the indexer
+   half is a projection of the finalized latent plus its own norm, so
+   it is two tensors of different widths - w_kv_idx is
+   (indexer_head_dim, head_dim) and k_norm_idx is 1-D) + the three
    indexer QUERY tensors (step 4 - FULL and REINDEX). A REINDEX layer
    gets the SAME full set anyway - see this file's own header comment
    on why: the correct dispatch never reads the "kv" group for REINDEX,
@@ -267,8 +270,8 @@ static void fill_layer_common(LZLayer *L, unsigned seed_q, unsigned seed_kv, uns
     fill_f(&L->k_norm, F_HD, &stkv);
     fill_f(&L->csa2_w_kv, F_HD * F_DIM, &stkv);
     fill_f(&L->csa2_w_gate, F_HD * F_DIM, &stkv);
-    fill_f(&L->csa2_w_kv_idx, F_IDXHD * F_DIM, &stkv);
-    fill_f(&L->csa2_w_gate_idx, F_IDXHD * F_DIM, &stkv);
+    fill_f(&L->csa2_w_kv_idx, F_IDXHD * F_HD, &stkv);
+    fill_f(&L->csa2_k_norm_idx, F_IDXHD, &stkv);
     fill_f(&L->csa2_w_dq_idx, F_IDXR * F_DIM, &stix);
     fill_f(&L->csa2_w_uq_idx, (F_IDXH * F_IDXHD) * F_IDXR, &stix);
     fill_f(&L->csa2_w_weights, F_IDXH * F_DIM, &stix);
@@ -328,7 +331,13 @@ static void init_config_common(LZModelConfig *c, int n_layers) {
     c->n_kv_heads = F_NH;
     c->head_dim = F_HD;
     c->intermediate_size = F_INTER;
-    c->rotary_dim = F_ROT;
+    /* Rotation width, shared by the main query/KV and the indexer key.
+       It must not exceed csa2_indexer_head_dim (set below): the indexer
+       ring holds rows indexer_head_dim wide, lz_rope writes base[i] and
+       base[i + rotary_dim/2] within each row, and a rotary_dim wider
+       than the row runs off its end into the next row and past the
+       allocation. F_IDXHD is the tighter of the two widths here. */
+    c->rotary_dim = F_IDXHD;
     c->rope_theta = 10000.0f;
     c->rms_norm_eps = 1e-5f;
     c->attn_output_gate = 1;

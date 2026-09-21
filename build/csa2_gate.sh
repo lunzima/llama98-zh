@@ -99,7 +99,18 @@ if (base + "q_proj.weight") not in tensors:
     prefix = ""
     base = prefix + "layers.%d.self_attn." % layer
 
-idx_heads, idx_hd, idx_r, m, topk = 2, 16, 16, 2, 4
+# The indexer key's row is idx_hd wide and forward_csa2.c rotates it with
+# the same lz_rope the main query uses, which writes base[i] and
+# base[i + rotary_dim/2] inside one row. A row narrower than the host
+# model's rotary width is therefore a pairing the loader refuses outright
+# (LZ_ERR_CFG_CSA2_IDX_ROTARY) - and one this fixture must not build,
+# because the synthetic run would be running off the end of every row.
+# idx_hd is raised to the host's own rotary width instead of staying at a
+# fixed 16; the rest of the fixture's shapes follow it.
+_rp = tc.get("rope_parameters") or {}
+rotary = int(tc["head_dim"] * tc.get("partial_rotary_factor",
+                                     _rp.get("partial_rotary_factor", 1.0)))
+idx_heads, idx_hd, idx_r, m, topk = 2, max(16, rotary), 16, 2, 4
 rng = np.random.default_rng(1145141919)
 
 def randw(out_dim, in_dim):
@@ -118,8 +129,12 @@ def build(tag, weights_fn):
     out = dict(tensors)
     out[base + "csa2_w_kv.weight"] = weights_fn("kv", tc["head_dim"], hidden)
     out[base + "csa2_w_gate.weight"] = weights_fn("gate", tc["head_dim"], hidden)
-    out[base + "csa2_w_kv_idx.weight"] = weights_fn("kv_idx", idx_hd, hidden)
-    out[base + "csa2_w_gate_idx.weight"] = weights_fn("gate_idx", idx_hd, hidden)
+    out[base + "csa2_w_kv_idx.weight"] = weights_fn("kv_idx", idx_hd, tc["head_dim"])
+    # 1-D norm, drawn as (idx_hd, 1) so this arm consumes the same number
+    # of draws from the shared RNG stream as every other tensor here -
+    # the "wrong" arm's independence from "on" rests on that stream being
+    # the same shape of draw for both.
+    out[base + "csa2_k_norm_idx.weight"] = weights_fn("k_norm_idx", idx_hd, 1).reshape(-1)
     out[base + "csa2_w_weights.weight"] = weights_fn("weights", idx_heads, hidden)
     out[base + "csa2_w_dq_idx.weight"] = weights_fn("dq_idx", idx_r, hidden)
     out[base + "csa2_w_uq_idx.weight"] = weights_fn("uq_idx", idx_heads * idx_hd, idx_r)

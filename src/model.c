@@ -1082,6 +1082,31 @@ int lz_load_config(LZModelConfig *c, const char *path,
              (int)(c->partial_rotary_factor * 100.0f + 0.5f));
         return 1;
     }
+
+    /* lz_rope writes base[i] and base[i + rotary_dim/2] inside one row
+       (src/ops_rope.c), so a row must be at least rotary_dim wide.
+       head_dim is not the tightest row this model rotates: a FULL-mode
+       CSA2 layer's indexer key is csa2_indexer_head_dim wide, and the
+       rotation forward_csa2.c applies to it is this same lz_rope - so
+       the bound above lets rotary_dim run off the end of that row, into
+       the next block's entry and past the allocation. Refused here
+       rather than silently narrowed, because narrowing it would rotate
+       fewer dims than the caller asked for and report nothing.
+
+       Gated on csa2_on[] and on FULL mode for two separate reasons:
+       only a FULL layer owns an indexer key (REINDEX/REUSE read their
+       source's), and csa2_indexer_head_dim carries a default (32) that
+       every checkpoint gets whether or not it has any CSA2 layer at all.
+       engine/csa2.py's _wire_csa2 refuses the same pairing on the
+       training side. */
+    for (i = 0; i < c->n_layers; i++) {
+        if (!c->csa2_on[i] || c->csa2_mode[i] != LZ_CSA2_FULL) continue;
+        if (c->rotary_dim > c->csa2_indexer_head_dim) {
+            qerr(errbuf, errlen, LZ_ERR_CFG_CSA2_IDX_ROTARY,
+                 i, c->rotary_dim, c->csa2_indexer_head_dim);
+            return 1;
+        }
+    }
     /* After lin_value_dim, which the derivations read. */
     if (check_attn_gate(c, errbuf, errlen) != 0) return 1;
     if (resolve_hadamard(c, errbuf, errlen) != 0) return 1;
@@ -1625,6 +1650,41 @@ static int check_shape(const LZModelConfig *c, const LZStTensor *t,
     return 0;
 }
 
+/* Is this tensor an indexer-K projection shaped for the HIDDEN-state
+   input space?
+
+   CSA2 obtains its indexer K by projecting the layer's own compressed
+   latent - report Sec2.3.1: "CSA2 obtains indexer K by projecting main
+   KV entries, replacing CSA's separate compression path from hidden
+   states" - so csa2_w_kv_idx is (indexer_head_dim, head_dim). A
+   checkpoint built against the earlier hidden-space projection carries
+   it as (indexer_head_dim, hidden) instead: same name, same rank, a
+   different function of a different tensor. Loading that would run the
+   indexer on a projection of the wrong thing and produce confidently
+   wrong Top-K indices with nothing to report it, which is the failure
+   mode LZ_ERR_CFG_CED_KV refuses for "reuse" (model.h's own comment).
+   The generic shape check below already rejects this tensor; what this
+   arm adds is a message that names the cause instead of a dimension
+   index.
+
+   Safetensors only: on the bin path `t` is synthesized from `dims`
+   immediately below, so it cannot disagree with them, and a stale bin is
+   caught by the file's own element count instead.
+
+   The hidden == head_dim guard is what keeps this from firing on a
+   config where the two widths coincide - there the two spaces are
+   indistinguishable by shape, and this arm must not claim one. */
+static int csa2_idx_k_from_hidden(const LZModelConfig *c, const char *name,
+                                  const LZStTensor *t) {
+    lz_i64 hidden, head;
+    if (!strstr(name, "self_attn.csa2_w_kv_idx.weight")) return 0;
+    hidden = resolve_dim(c, DK_HIDDEN);
+    head = resolve_dim(c, DK_HEAD_DIM);
+    return hidden != head && t->n_dims == 2 &&
+           t->shape[0] == resolve_dim(c, DK_CSA2_IDX_HEAD_DIM) &&
+           t->shape[1] == hidden;
+}
+
 /* ------------------------------------------------------------ walk skeleton */
 
 /* Call back once per expected tensor. Shared by bind and read so the
@@ -1668,6 +1728,12 @@ static int model_walk_one(LZModel *m, const char *name, const int *dims,
             qerr(errbuf, errlen, LZ_ERR_TENSOR_MISSING, name);
             return 1;
         }
+    }
+    if (!m->bin_file && !m_uses_lz4(m) &&
+        csa2_idx_k_from_hidden(c, name, t)) {
+        qerr(errbuf, errlen, LZ_ERR_CFG_CSA2_IDX_K, name,
+             (long long)t->shape[1]);
+        return 1;
     }
     if (check_shape(c, t, dims, errbuf, errlen) != 0) return 1;
     if (visit(m, t, field, ctx, errbuf, errlen) != 0) return 1;
@@ -1775,9 +1841,9 @@ static int model_walk(LZModel *m, LZVisit visit, void *ctx,
                 { "self_attn.csa2_w_gate.weight",     offsetof(LZLayer, csa2_w_gate),
                   { DK_HEAD_DIM, DK_HIDDEN, DK_END }, CSA2_OWN_FULL },
                 { "self_attn.csa2_w_kv_idx.weight",   offsetof(LZLayer, csa2_w_kv_idx),
-                  { DK_CSA2_IDX_HEAD_DIM, DK_HIDDEN, DK_END }, CSA2_OWN_FULL },
-                { "self_attn.csa2_w_gate_idx.weight", offsetof(LZLayer, csa2_w_gate_idx),
-                  { DK_CSA2_IDX_HEAD_DIM, DK_HIDDEN, DK_END }, CSA2_OWN_FULL },
+                  { DK_CSA2_IDX_HEAD_DIM, DK_HEAD_DIM, DK_END }, CSA2_OWN_FULL },
+                { "self_attn.csa2_k_norm_idx.weight", offsetof(LZLayer, csa2_k_norm_idx),
+                  { DK_CSA2_IDX_HEAD_DIM, DK_END, DK_END }, CSA2_OWN_FULL },
                 { "self_attn.csa2_w_weights.weight",  offsetof(LZLayer, csa2_w_weights),
                   { DK_CSA2_IDX_HEADS, DK_HIDDEN, DK_END },
                   CSA2_OWN_FULL | CSA2_OWN_REINDEX },
@@ -3530,6 +3596,22 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
         c->rotary_dim % 2 != 0) {
         qerr(errbuf, errlen, LZ_ERR_BIN_CFG);
         goto fail;
+    }
+
+    /* The mirror of lz_load_config's own csa2_indexer_head_dim bound,
+       reported with that path's message so the two loaders name the same
+       defect identically: lz_rope writes base[i + rotary_dim/2] inside a
+       row, and a FULL-mode CSA2 layer's indexer key row is only
+       csa2_indexer_head_dim wide. csa2_on[] and csa2_mode[] are both
+       read above (RD(c->csa2_on, ...) and RD(c->csa2_mode, ...)), and
+       csa2_indexer_head_dim is read above this point too. */
+    for (i = 0; i < c->n_layers; i++) {
+        if (!c->csa2_on[i] || c->csa2_mode[i] != LZ_CSA2_FULL) continue;
+        if (c->rotary_dim > c->csa2_indexer_head_dim) {
+            qerr(errbuf, errlen, LZ_ERR_CFG_CSA2_IDX_ROTARY,
+                 i, c->rotary_dim, c->csa2_indexer_head_dim);
+            goto fail;
+        }
     }
 
     /* lz_csa2_last_writer_valid's own whole-config question. Its own

@@ -153,8 +153,8 @@ idx_hd, idx_heads, idx_r = (c["csa2_indexer_head_dim"], c["csa2_indexer_heads"],
 extra = {
     "layers.1.self_attn.csa2_w_kv.weight":       [hd, h],
     "layers.1.self_attn.csa2_w_gate.weight":     [hd, h],
-    "layers.1.self_attn.csa2_w_kv_idx.weight":   [idx_hd, h],
-    "layers.1.self_attn.csa2_w_gate_idx.weight": [idx_hd, h],
+    "layers.1.self_attn.csa2_w_kv_idx.weight":   [idx_hd, hd],
+    "layers.1.self_attn.csa2_k_norm_idx.weight": [idx_hd],
     "layers.1.self_attn.csa2_w_weights.weight":  [idx_heads, h],
     "layers.1.self_attn.csa2_w_dq_idx.weight":   [idx_r, h],
     "layers.1.self_attn.csa2_w_uq_idx.weight":   [idx_heads*idx_hd, idx_r],
@@ -181,8 +181,8 @@ qgd2, qr2 = c2["attn_qgate_dim"], 32
 extra2 = {
     "layers.1.self_attn.csa2_w_kv.weight":       [c2["head_dim"], h2],
     "layers.1.self_attn.csa2_w_gate.weight":     [c2["head_dim"], h2],
-    "layers.1.self_attn.csa2_w_kv_idx.weight":   [idx_hd2, h2],
-    "layers.1.self_attn.csa2_w_gate_idx.weight": [idx_hd2, h2],
+    "layers.1.self_attn.csa2_w_kv_idx.weight":   [idx_hd2, c2["head_dim"]],
+    "layers.1.self_attn.csa2_k_norm_idx.weight": [idx_hd2],
     "layers.1.self_attn.csa2_w_weights.weight":  [idx_heads2, h2],
     # csa2_w_uq_idx's second dim is csa2_indexer_q_lora_rank - the
     # INDEXER's own down-projection rank, unrelated to mla_q_lora_rank

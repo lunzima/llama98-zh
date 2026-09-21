@@ -107,8 +107,8 @@ static void layer(LZLayer *L, int mode, unsigned q, unsigned kv, unsigned ix) {
     fill(&L->k_norm, F_HD, &b);
     fill(&L->csa2_w_kv, F_HD * F_DIM, &b);
     fill(&L->csa2_w_gate, F_HD * F_DIM, &b);
-    fill(&L->csa2_w_kv_idx, F_IDXHD * F_DIM, &b);
-    fill(&L->csa2_w_gate_idx, F_IDXHD * F_DIM, &b);
+    fill(&L->csa2_w_kv_idx, F_IDXHD * F_HD, &b);
+    fill(&L->csa2_k_norm_idx, F_IDXHD, &b);
     fill(&L->csa2_w_dq_idx, F_IDXR * F_DIM, &c);
     fill(&L->csa2_w_uq_idx, (F_IDXH * F_IDXHD) * F_IDXR, &c);
     fill(&L->csa2_w_weights, F_IDXH * F_DIM, &c);
@@ -125,7 +125,11 @@ static void build(LZModel *m, int cm, int topk) {
     c->vocab_size = 4; c->hidden_size = F_DIM; c->n_layers = 3; c->seq_len = F_SEQ;
     c->n_heads = F_NH; c->n_kv_heads = F_NH; c->head_dim = F_HD;
     c->intermediate_size = F_DIM;
-    c->rotary_dim = 32; c->rope_theta = 10000.0f; c->rms_norm_eps = 1e-5f;
+    /* Rotation width must not exceed csa2_indexer_head_dim (set below) -
+       the indexer ring's rows are indexer_head_dim wide and lz_rope
+       writes base[i + rotary_dim/2], so a wider rotary_dim runs off the
+       row. Same constraint as csa2_mode_dispatch_probe.c's own fixture. */
+    c->rotary_dim = F_IDXHD; c->rope_theta = 10000.0f; c->rms_norm_eps = 1e-5f;
     c->attn_output_gate = 1;
     c->attn_q_dim = F_QD; c->attn_qgate_dim = F_QGD; c->attn_kv_dim = F_DIM;
     c->use_subn = 0;
