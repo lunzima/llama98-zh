@@ -1177,6 +1177,7 @@ int main(int argc, char **argv) {
     LZGenOpts g;
     LZModelConfig *cfg;
     int i, rc = 0;
+    int have_st;        /* m.st holds a table - see its assignment below */
     float t0, t1;
 
     memset(&m, 0, sizeof m);
@@ -1894,10 +1895,23 @@ int main(int argc, char **argv) {
     t1 = lz_time_ms();
     cfg = &m.config;
 
+    /* m.st is the SAFETENSORS table. lz_open_bin never fills it - it reads
+       model.bin positionally, through m.rd, and keeps no name table - so on
+       a bin load every m.st field is zero BY CONSTRUCTION rather than by
+       measurement, and three places below used to print those zeros as if
+       they were readings. The bin DOES carry BF16 (visit_read_bin reads
+       LZ_FMT_BF16), so the zero was not even true of the file. Guarded on
+       this flag each of the three says what it can actually see. */
+    have_st = m.st.n_tensors > 0;
+
     printf("Model dir      %s\n", dir);
     printf("Tensor prefix  %s\n", m.prefix[0] ? m.prefix : "(none)");
-    printf("safetensors    %lld bytes, %d tensors, data at %llu\n",
-           m.st.file_size, m.st.n_tensors, m.st.data_start);
+    if (have_st)
+        printf("safetensors    %lld bytes, %d tensors, data at %llu\n",
+               m.st.file_size, m.st.n_tensors, m.st.data_start);
+    else
+        printf("weights        from model.bin (a bin load has no safetensors "
+               "table to report)\n");
     printf("\n");
     print_config(cfg);
     printf("\n");
@@ -1942,13 +1956,24 @@ int main(int argc, char **argv) {
        the second question a mismatch raises and the one a bare on/off
        cannot answer. */
     {
-        int nbf = 0, d;
-        for (d = 0; d < m.st.n_tensors; d++)
-            if (m.st.tensors[d].dtype == LZ_DT_BF16) nbf++;
-        printf("bf16 storage   %s (%d BF16 tensor(s) in the file)\n",
-               lz_bf16_store() ? "on - kept at 2 bytes/elem, widened on read"
-                               : "off - expanded to f32 at load",
-               nbf);
+        const char *mode = lz_bf16_store()
+            ? "on - kept at 2 bytes/elem, widened on read"
+            : "off - expanded to f32 at load";
+        if (have_st) {
+            int nbf = 0, d;
+            for (d = 0; d < m.st.n_tensors; d++)
+                if (m.st.tensors[d].dtype == LZ_DT_BF16) nbf++;
+            printf("bf16 storage   %s (%d BF16 tensor(s) in the file)\n",
+                   mode, nbf);
+        } else {
+            /* Not "0 in the file": the bin does carry BF16. visit_read_bin
+               reads each tensor's dtype positionally as LZ_FMT_BF16 and
+               widens on use; what does not exist is a table to count them
+               from, so the count is not available rather than zero. */
+            printf("bf16 storage   %s (count not available: this model loads "
+                   "from model.bin, whose tensor types are not indexed)\n",
+                   mode);
+        }
     }
     {
         char _b[LZ_FTOA_BUF];
@@ -1958,6 +1983,12 @@ int main(int argc, char **argv) {
 
     if (list_tensors) {
         printf("\nAll tensors:\n");
+        /* Without the table the loop below would print its heading and then
+           nothing, which reads as "this model has no tensors" - the same
+           zero-as-a-reading this line's neighbours were fixed for. */
+        if (!have_st)
+            printf("  (nothing to list: this model loads from model.bin, "
+                   "whose tensors are read positionally and carry no names)\n");
         for (i = 0; i < m.st.n_tensors; i++) {
             const LZStTensor *t = &m.st.tensors[i];
             int d;
