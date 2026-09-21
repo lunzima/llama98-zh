@@ -102,6 +102,21 @@
    past the topk clamp is not yet enough for the published index SET to
    be a choice rather than a formality.
 
+   ONE INVARIANT FOR ANY ARRAY A FIXTURE HERE ADDS. The question worth
+   asking is not how big the buffer is, but whether the code that INDEXES
+   it derives its bound from this same screen or from somewhere else. A
+   bound written next to the size - same function, a visible literal or a
+   named constant - can still drift, but only by editing this file where
+   both are in view at once. A bound that lives in a CALLEE, where the
+   fixture hands over a pointer and the callee walks it by its own
+   argument, has nothing tying it to the size at all: the two agree by
+   coincidence, and stay agreed until the fixture changes. Exactly one
+   array in this file is of that second kind - check4's poison, sized
+   from F_CED_NT here and indexed by forward_csa2 as `kv_in + tk * hdim`.
+   The rest are the first kind and are deliberately left as literal
+   repetitions: naming their lengths would replace three coincident
+   literals with one constant plus a third copy nothing removed.
+
    Code-review addenda, added in two more rounds after the mode-
    dispatch checks above first landed and were reviewed:
 
@@ -1111,10 +1126,9 @@ static void check4_ced_gate(void) {
        the two together and they agreed only by coincidence, until the
        fixture changed and they did not. Sizes and bounds read from one
        constant (F_CED_NT here, first in the array and again in the nt
-       argument) cannot drift that way. Same family as an
-       indexer_head_dim/rotary_dim pair that does not satisfy
-       `rotary_dim <= indexer_head_dim`, and as an expected-fallout array
-       calibrated against a crash point that has since moved. */
+       argument) cannot drift that way. This file's header has the general
+       form of the invariant, and says which of this file's arrays are of
+       this kind. */
     float poison[F_CED_NT * F_DIM];
     float attn_d1_null[F_QD], attn_d1_poison[F_QD];
     int i;
