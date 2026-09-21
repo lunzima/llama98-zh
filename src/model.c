@@ -3718,12 +3718,12 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
            csa2_compress_m is additionally capped at seq_len. Past that
            the arithmetic is unchanged - ceil(seq_len/cm) is 1 either way,
            so cm > seq_len compresses exactly as much as cm == seq_len,
-           i.e. nothing - while the four csa2_pending_* buffers each grow
+           i.e. nothing - while the two csa2_pending_* buffers each grow
            with the sum of every slot's own cm, times dim, times
            ssm_ring_depth (forward.h's own csa2_pending_c comment has the
            banks and model.h's own csa2_compress_m_layer comment the
            per-slot layout). The cap costs no legitimate config and
-           bounds those four allocations by n_full * seq_len *
+           bounds those two allocations by n_full * seq_len *
            (LZ_SPEC_K_MAX + 1). csa2_compress_m_layer's own entries carry
            the identical bound, per layer, for the same reason.
 

@@ -714,10 +714,6 @@ static void alloc_csa2_ring(LZRunState *s, const LZModel *m,
                 nf * pdepth * c->head_dim, sizeof(float), &ok, &s->bytes_alloc);
             s->csa2_pending_z = (float *)xcalloc(
                 nf * pdepth * c->head_dim, sizeof(float), &ok, &s->bytes_alloc);
-            s->csa2_pending_c_idx = (float *)xcalloc(
-                nf * pdepth * c->csa2_indexer_head_dim, sizeof(float), &ok, &s->bytes_alloc);
-            s->csa2_pending_z_idx = (float *)xcalloc(
-                nf * pdepth * c->csa2_indexer_head_dim, sizeof(float), &ok, &s->bytes_alloc);
             s->csa2_comp_ring = (float *)xcalloc(
                 nf * nblocks * c->head_dim, sizeof(float), &ok, &s->bytes_alloc);
             s->csa2_idx_comp_ring = (float *)xcalloc(
@@ -770,7 +766,6 @@ static void alloc_csa2_ring(LZRunState *s, const LZModel *m,
             s->csa2_c_j = (float *)xcalloc((size_t)c->head_dim, sizeof(float), &ok, &s->bytes_alloc);
             s->csa2_z_j = (float *)xcalloc((size_t)c->head_dim, sizeof(float), &ok, &s->bytes_alloc);
             s->csa2_c_j_idx = (float *)xcalloc((size_t)c->csa2_indexer_head_dim, sizeof(float), &ok, &s->bytes_alloc);
-            s->csa2_z_j_idx = (float *)xcalloc((size_t)c->csa2_indexer_head_dim, sizeof(float), &ok, &s->bytes_alloc);
             s->csa2_qidx = (float *)xcalloc(
                 (size_t)c->csa2_indexer_heads * c->csa2_indexer_head_dim, sizeof(float), &ok, &s->bytes_alloc);
             s->csa2_widx = (float *)xcalloc((size_t)c->csa2_indexer_heads, sizeof(float), &ok, &s->bytes_alloc);

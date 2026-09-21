@@ -1370,7 +1370,6 @@ typedef struct {
        scratch serving every layer in turn, so it has to cover the
        shallowest-compressing slot. */
     float *csa2_pending_c, *csa2_pending_z;
-    float *csa2_pending_c_idx, *csa2_pending_z_idx;
     float *csa2_comp_ring, *csa2_idx_comp_ring;
     /* Per-token scratch, one layer/token at a time (forward_csa2.c
        cannot batch across a chunk's nt tokens the way ordinary
@@ -1420,7 +1419,7 @@ typedef struct {
     int   *csa2_topk_idx_pub;        /* (n_full, LZ_BATCH_MAX, topk) */
     int   *csa2_topk_n_pub;          /* (n_full, LZ_BATCH_MAX) - this (ci, tk)'s k_eff */
     float *csa2_c_j, *csa2_z_j;      /* (head_dim) */
-    float *csa2_c_j_idx, *csa2_z_j_idx;   /* (csa2_indexer_head_dim) */
+    float *csa2_c_j_idx;             /* (csa2_indexer_head_dim) */
     float *csa2_qidx;                /* (csa2_indexer_heads * csa2_indexer_head_dim) */
     float *csa2_widx;                /* (csa2_indexer_heads) */
     float *csa2_cq_idx;              /* (csa2_indexer_q_lora_rank) */
@@ -1667,13 +1666,11 @@ typedef struct {
     size_t  n_engram_conv;               /* element count, for a shape check */
     int     engram_conv_hist_n;
     /* CSA2's open compressed block - see this struct's own comment on
-       why the finalized rings next to it are not here. All four are
-       NULL/0 when no layer is csa2_on, matching forward_state.c's
+       why the finalized rings next to it are not here. Both are NULL/0
+       when no layer is csa2_on, matching forward_state.c's
        alloc_csa2_ring, which allocates nothing in that case. */
     float  *csa2_pend_c, *csa2_pend_z;
-    float  *csa2_pend_c_idx, *csa2_pend_z_idx;
-    size_t  n_csa2_pend;                 /* c/z: sum of each slot's cm, times head_dim */
-    size_t  n_csa2_pend_idx;             /* idx twins: same, times idx_hd */
+    size_t  n_csa2_pend;                 /* sum of each slot's cm, times head_dim */
     int     pos;                         /* tokens forwarded when taken; -1 = empty */
     unsigned epoch;                      /* the state's epoch at save time */
 } LZStateCkpt;

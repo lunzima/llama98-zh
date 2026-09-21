@@ -604,12 +604,11 @@ void lz_state_free(LZRunState *s) {
 #endif /* LZ_GDN_STATE_2PLANE */
     xfree(s->conv_state); xfree(s->conv_w32);
     xfree(s->csa2_pending_c); xfree(s->csa2_pending_z);
-    xfree(s->csa2_pending_c_idx); xfree(s->csa2_pending_z_idx);
     xfree(s->csa2_comp_ring); xfree(s->csa2_idx_comp_ring);
     xfree(s->csa2_scores);
     xfree(s->csa2_topk_idx_pub); xfree(s->csa2_topk_n_pub);
     xfree(s->csa2_c_j); xfree(s->csa2_z_j);
-    xfree(s->csa2_c_j_idx); xfree(s->csa2_z_j_idx);
+    xfree(s->csa2_c_j_idx);
     xfree(s->csa2_qidx); xfree(s->csa2_widx); xfree(s->csa2_cq_idx);
     xfree(s->csa2_attn_probs);
     xfree(s->conv_state_q); xfree(s->conv_mw);
@@ -724,11 +723,6 @@ void lz_state_reset(LZRunState *s, const LZModel *m) {
                    (size_t)cm * (size_t)depth * c->head_dim * sizeof(float));
             memset(s->csa2_pending_z + n, 0,
                    (size_t)cm * (size_t)depth * c->head_dim * sizeof(float));
-            n = lz_csa2_pend_base(c, ci, depth) * c->csa2_indexer_head_dim;
-            memset(s->csa2_pending_c_idx + n, 0,
-                   (size_t)cm * (size_t)depth * c->csa2_indexer_head_dim * sizeof(float));
-            memset(s->csa2_pending_z_idx + n, 0,
-                   (size_t)cm * (size_t)depth * c->csa2_indexer_head_dim * sizeof(float));
             rb = lz_csa2_ring_base(c, ci, s->seq_len);
             memset(s->csa2_comp_ring + rb * c->head_dim, 0,
                    (size_t)((s->seq_len + cm - 1) / cm) * c->head_dim * sizeof(float));

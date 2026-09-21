@@ -22,11 +22,11 @@
    a stale size after a config field changes. n_engram_conv mirrors the
    row*dim sizing forward.c's alloc_engram block uses for
    s->engram_conv_hist, and is 0 when config.engram is 0 (same
-   condition that block itself gates on). The two csa2_* counts mirror
+   condition that block itself gates on). The one csa2_* count mirrors
    forward_state.c's alloc_csa2_ring the same way. */
 static void ckpt_sizes(const LZModelConfig *c, size_t *n_q8, size_t *n_s,
                        size_t *n_conv, size_t *n_engram_conv,
-                       size_t *n_csa2_pend, size_t *n_csa2_pend_idx) {
+                       size_t *n_csa2_pend) {
     *n_q8   = (size_t)c->n_linear_layers * c->lin_n_v_heads *
               c->lin_k_head_dim * c->lin_v_head_dim;
     *n_s    = *n_q8 / 32;
@@ -65,24 +65,22 @@ static void ckpt_sizes(const LZModelConfig *c, size_t *n_q8, size_t *n_s,
                sides repeating one cm. */
             size_t blocks = lz_csa2_pend_base(c, c->n_full_layers, 1);
             *n_csa2_pend = blocks * (size_t)c->head_dim;
-            *n_csa2_pend_idx = blocks * (size_t)c->csa2_indexer_head_dim;
         } else {
             *n_csa2_pend = 0;
-            *n_csa2_pend_idx = 0;
         }
     }
 }
 
 
 int lz_ckpt_alloc(LZStateCkpt *ck, const LZModel *m, char *errbuf, int errlen) {
-    size_t n_q8, n_s, n_conv, n_engram_conv, n_csa2_pend, n_csa2_pend_idx;
+    size_t n_q8, n_s, n_conv, n_engram_conv, n_csa2_pend;
     if (!ck || !m) {
         if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_NULL_ARG);
         return LZ_ERR_NULL_ARG;
     }
     memset(ck, 0, sizeof(*ck));
     ckpt_sizes(&m->config, &n_q8, &n_s, &n_conv, &n_engram_conv,
-               &n_csa2_pend, &n_csa2_pend_idx);
+               &n_csa2_pend);
     ck->ssm_q8 = (int8_t *)malloc(n_q8);
 #if LZ_GDN_STATE_2PLANE
     ck->ssm_q8_lo = (int8_t *)malloc(n_q8);
@@ -106,16 +104,13 @@ int lz_ckpt_alloc(LZStateCkpt *ck, const LZModel *m, char *errbuf, int errlen) {
     if (n_csa2_pend > 0) {
         ck->csa2_pend_c = (float *)malloc(n_csa2_pend * sizeof(float));
         ck->csa2_pend_z = (float *)malloc(n_csa2_pend * sizeof(float));
-        ck->csa2_pend_c_idx = (float *)malloc(n_csa2_pend_idx * sizeof(float));
-        ck->csa2_pend_z_idx = (float *)malloc(n_csa2_pend_idx * sizeof(float));
     }
     if (!ck->ssm_q8 || !ck->ssm_s || !ck->conv
 #if LZ_GDN_STATE_2PLANE
         || !ck->ssm_q8_lo
 #endif /* LZ_GDN_STATE_2PLANE */
         || (n_engram_conv > 0 && !ck->engram_conv_hist)
-        || (n_csa2_pend > 0 && (!ck->csa2_pend_c || !ck->csa2_pend_z ||
-                                !ck->csa2_pend_c_idx || !ck->csa2_pend_z_idx))
+        || (n_csa2_pend > 0 && (!ck->csa2_pend_c || !ck->csa2_pend_z))
         ) {
         lz_ckpt_free(ck);
         if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_STATE_ALLOC);
@@ -126,7 +121,6 @@ int lz_ckpt_alloc(LZStateCkpt *ck, const LZModel *m, char *errbuf, int errlen) {
     ck->n_conv   = n_conv;
     ck->n_engram_conv = n_engram_conv;
     ck->n_csa2_pend = n_csa2_pend;
-    ck->n_csa2_pend_idx = n_csa2_pend_idx;
     ck->pos      = -1;          /* empty until a save */
     ck->epoch    = 0;
     return LZ_ERR_OK;
@@ -144,25 +138,22 @@ void lz_ckpt_free(LZStateCkpt *ck) {
     free(ck->engram_conv_hist);
     free(ck->csa2_pend_c);
     free(ck->csa2_pend_z);
-    free(ck->csa2_pend_c_idx);
-    free(ck->csa2_pend_z_idx);
     memset(ck, 0, sizeof(*ck));
 }
 
 int lz_ckpt_save(LZStateCkpt *ck, const LZRunState *s, const LZModel *m,
                  int pos, char *errbuf, int errlen) {
-    size_t n_q8, n_s, n_conv, n_engram_conv, n_csa2_pend, n_csa2_pend_idx;
+    size_t n_q8, n_s, n_conv, n_engram_conv, n_csa2_pend;
     size_t o_q8, o_s, o_conv;   /* byte offset of s's OWN active ring slot */
     if (!ck || !s || !m || pos < 0 || !ck->ssm_q8) {
         if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_NULL_ARG);
         return LZ_ERR_NULL_ARG;
     }
     ckpt_sizes(&m->config, &n_q8, &n_s, &n_conv, &n_engram_conv,
-               &n_csa2_pend, &n_csa2_pend_idx);
+               &n_csa2_pend);
     if (n_q8 != ck->n_ssm_q8 || n_s != ck->n_ssm_s || n_conv != ck->n_conv ||
         n_engram_conv != ck->n_engram_conv ||
-        n_csa2_pend != ck->n_csa2_pend ||
-        n_csa2_pend_idx != ck->n_csa2_pend_idx) {
+        n_csa2_pend != ck->n_csa2_pend) {
         if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_CKPT_SHAPE);
         return LZ_ERR_CKPT_SHAPE;
     }
@@ -219,7 +210,6 @@ int lz_ckpt_save(LZStateCkpt *ck, const LZRunState *s, const LZModel *m,
     if (n_csa2_pend > 0 && s->csa2_pending_c) {
         size_t depth = (size_t)s->ssm_ring_depth;
         size_t hd = (size_t)m->config.head_dim;
-        size_t ihd = (size_t)m->config.csa2_indexer_head_dim;
         int i;
         for (i = 0; i < m->config.n_full_layers; i++) {
             /* Per slot: the ci's own ratio decides both how big its
@@ -238,12 +228,6 @@ int lz_ckpt_save(LZStateCkpt *ck, const LZRunState *s, const LZModel *m,
                    (size_t)cmi * hd * sizeof(float));
             memcpy(ck->csa2_pend_z + dst * hd, s->csa2_pending_z + src * hd,
                    (size_t)cmi * hd * sizeof(float));
-            memcpy(ck->csa2_pend_c_idx + dst * ihd,
-                   s->csa2_pending_c_idx + src * ihd,
-                   (size_t)cmi * ihd * sizeof(float));
-            memcpy(ck->csa2_pend_z_idx + dst * ihd,
-                   s->csa2_pending_z_idx + src * ihd,
-                   (size_t)cmi * ihd * sizeof(float));
         }
     }
     ck->pos   = pos;
@@ -253,7 +237,7 @@ int lz_ckpt_save(LZStateCkpt *ck, const LZRunState *s, const LZModel *m,
 
 int lz_ckpt_restore(const LZStateCkpt *ck, LZRunState *s, const LZModel *m,
                     int *out_pos, char *errbuf, int errlen) {
-    size_t n_q8, n_s, n_conv, n_engram_conv, n_csa2_pend, n_csa2_pend_idx;
+    size_t n_q8, n_s, n_conv, n_engram_conv, n_csa2_pend;
     if (!ck || !s || !m || !ck->ssm_q8) {
         if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_NULL_ARG);
         return LZ_ERR_NULL_ARG;
@@ -272,11 +256,10 @@ int lz_ckpt_restore(const LZStateCkpt *ck, LZRunState *s, const LZModel *m,
         return LZ_ERR_CKPT_STALE;
     }
     ckpt_sizes(&m->config, &n_q8, &n_s, &n_conv, &n_engram_conv,
-               &n_csa2_pend, &n_csa2_pend_idx);
+               &n_csa2_pend);
     if (n_q8 != ck->n_ssm_q8 || n_s != ck->n_ssm_s || n_conv != ck->n_conv ||
         n_engram_conv != ck->n_engram_conv ||
-        n_csa2_pend != ck->n_csa2_pend ||
-        n_csa2_pend_idx != ck->n_csa2_pend_idx || ck->pos >= s->seq_len) {
+        n_csa2_pend != ck->n_csa2_pend || ck->pos >= s->seq_len) {
         if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_CKPT_SHAPE);
         return LZ_ERR_CKPT_SHAPE;
     }
@@ -321,7 +304,6 @@ int lz_ckpt_restore(const LZStateCkpt *ck, LZRunState *s, const LZModel *m,
     if (n_csa2_pend > 0 && s->csa2_pending_c) {
         size_t depth = (size_t)s->ssm_ring_depth;
         size_t hd = (size_t)m->config.head_dim;
-        size_t ihd = (size_t)m->config.csa2_indexer_head_dim;
         int i;
         for (i = 0; i < m->config.n_full_layers; i++) {
             /* The save side's own layout, read back into the bank the
@@ -337,12 +319,6 @@ int lz_ckpt_restore(const LZStateCkpt *ck, LZRunState *s, const LZModel *m,
                    (size_t)cmi * hd * sizeof(float));
             memcpy(s->csa2_pending_z + dst * hd, ck->csa2_pend_z + src * hd,
                    (size_t)cmi * hd * sizeof(float));
-            memcpy(s->csa2_pending_c_idx + dst * ihd,
-                   ck->csa2_pend_c_idx + src * ihd,
-                   (size_t)cmi * ihd * sizeof(float));
-            memcpy(s->csa2_pending_z_idx + dst * ihd,
-                   ck->csa2_pend_z_idx + src * ihd,
-                   (size_t)cmi * ihd * sizeof(float));
         }
     }
     s->ssm_slot = 0;
