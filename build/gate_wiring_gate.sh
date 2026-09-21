@@ -95,7 +95,6 @@ norm_sse_parity_gate.sh    # a full Watcom engine build; the #pragma aux
 i32f_acc_gate.sh           # same, for the two int32->float accumulate
                            #   tiers - two engine builds per run
 align_gate.sh              # 5489 compiled checks, whole-tree instrumented build
-codesize_gate.sh           # builds three toolchains to compare .text
 native_obj_gate.sh         # pre-link hook, silent by design; ci.sh is where
                            #   it has objects to look at
 kernel_isa_identity_gate.sh # disassembles both toolchains' objects
@@ -140,6 +139,32 @@ caption_symmetry_gate.sh   # needs the gui build and a screen readback
 endian_gate.sh             # needs WSL and the MIPS cross toolchain, and
                            #   runs the engine big-endian under qemu
 "
+# codesize_gate.sh LEFT THIS LIST: it is a prerequisite of `check` now.
+#
+# The line it used to sit on said "builds three toolchains to compare
+# .text", and that is false of the script as it stands. THE CRITERION,
+# stated so a coarse grep cannot reverse it: strip comments and string
+# literals, then count - in CODE POSITION build/codesize_gate.sh invokes
+# make/wcc386/wlink ZERO times. All four raw-grep hits for those words are
+# prose: one comment and three error messages (the SKIP lines that TELL
+# THE READER to run make gui / make native / make llama98, which is how a
+# reader could read them backwards). The only external tools it names in
+# code are size, awk and wc.
+#
+# So it measures two ALREADY-BUILT artifacts - llama98.exe's .text and
+# kunkun98-gui.exe's file bytes - and SKIPs with exit 2 when either is
+# absent, which is why it can sit in `check` behind
+# `codesize-gate: llama98 kunkun98-gui`, the same "depend on the binary so
+# the gate is never handed a stale one" shape gui-selftest-gate uses. Its
+# own header (build/codesize_gate.sh:54-70) says the Watcom artifacts are
+# deliberately NOT measured - kunkun98-w.exe 793,088 against the measured
+# mingw 1,003,685 - because switching to them would need the Watcom
+# binaries present for the gate to run at all. That is the opposite of
+# what the old line here claimed, and the two readings are one word apart.
+#
+# WHAT IT COST TO LEARN: parked here, this gate was run by nobody and
+# .text crossed TEXT_CEIL without anything saying so (228999a^ measured
+# 328,752 against a 327,680 ceiling).
 # REACHED, not mentioned. `make -n check` expands the whole prerequisite
 # tree and prints the recipes without running them, so what comes out is
 # what `make check` would actually invoke. Grepping the Makefile instead

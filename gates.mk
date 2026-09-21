@@ -41,7 +41,7 @@
 # nested inside another comment; gcc said so on every build and `check`
 # reported 16 PASS over it. Having a caller somewhere is not the test -
 # being reachable from what people actually run is.
-check: root-hygiene-gate bare-endif-gate wscr-borrow-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate json-offset-gate softfp-gate dedupe-gate mm-alias-gate kv-share-ced-boundary-gate ced-proj-arm-gate csa2-modes-config-gate csa2-cache-idx-alias-gate csa2-mode-dispatch-gate csa2-mode-export-load-gate csa2-last-writer-bin-gate csa2-reindex-causality-gate csa2-indexer-rope-slice-gate csa2-out-rope-gate csa2-z-subst-gate csa2-compress-m-layers-gate smf-lead-gate c89-floor-gate pri64-scan-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate isa-floor-avx2-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate arch-allowlist-gate kernel-matrix-gate aux-parm-arity-gate aux-equiv-gate mathf-xcompiler-gate bf16-torch-gate lz4-model-gate gcc-watcom-output-gate fixture-exists-gate
+check: root-hygiene-gate bare-endif-gate wscr-borrow-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate json-offset-gate softfp-gate dedupe-gate mm-alias-gate kv-share-ced-boundary-gate ced-proj-arm-gate csa2-modes-config-gate csa2-cache-idx-alias-gate csa2-mode-dispatch-gate csa2-mode-export-load-gate csa2-last-writer-bin-gate csa2-reindex-causality-gate csa2-indexer-rope-slice-gate csa2-out-rope-gate csa2-z-subst-gate csa2-compress-m-layers-gate smf-lead-gate c89-floor-gate pri64-scan-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate codesize-gate isa-floor-avx2-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate arch-allowlist-gate kernel-matrix-gate aux-parm-arity-gate aux-equiv-gate mathf-xcompiler-gate bf16-torch-gate lz4-model-gate gcc-watcom-output-gate fixture-exists-gate
 
 # Zero gcc warnings, asserted rather than printed. The Watcom side has
 # always been counted ("N lines, 0 warnings, 0 errors", per file); this
@@ -112,6 +112,25 @@ seed-gate:
 .PHONY: gui-selftest-gate
 gui-selftest-gate: kunkun98-gui
 	@bash build/gui_selftest_gate.sh
+
+# Two size criteria for the shipping binaries: the GUI fits on a 1.44 MB
+# floppy, and the CLI's .text stays under TEXT_CEIL - the early one, since
+# the floppy criterion sits at 73% and would not redden until something had
+# gone very wrong. It MEASURES; it builds nothing (in code position it
+# invokes make/wcc386/wlink zero times - all four coarse-grep hits for
+# those words are prose), it needs no model and no cross toolchain, and it
+# runs in about a second. Depends on both artifacts for the reason
+# gui-selftest-gate depends on one: a gate handed a stale binary reports a
+# size for a configuration nobody shipped.
+#
+# IN `check` RATHER THAN ci.sh-ONLY, and that relocation is the point of
+# this target: parked in ci.sh it was run by nobody, and .text crossed the
+# ceiling without anything saying so - 228999a^ measured 328,752 against
+# 327,680. The red it now reports in `check` is the debt becoming visible,
+# not a new defect.
+.PHONY: codesize-gate
+codesize-gate: llama98 kunkun98-gui
+	@$(call GATE_OK,build/codesize_gate.sh)
 
 # The AVX2 tier's ISA floor, from its own object rather than its flags.
 # The tier is auto-selected by kernel_detect on any machine whose CPUID
