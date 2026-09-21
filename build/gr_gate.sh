@@ -406,6 +406,24 @@ emit("keyonly", True, True)
 emit("pert", True, False, (WU_TENSOR, pert))
 emit("tpert", True, False, (WU_TENSOR, text_delta))
 emit("npert", True, False, (NORM_TENSOR, norm_delta))
+
+# THE PRE-CHANGE ENGINE'S OWN HALF OF THE PAIR. That engine is built from a
+# revision that predates the indexer-K migration (csa2_w_kv_idx became
+# (indexer_head_dim, head_dim)), so it cannot read the live weights at all -
+# it refuses for THAT, while the arm below asks it to refuse for gr_*. Its
+# copy is therefore this checkpoint as it stood BEFORE the migration, which
+# the migration leaves beside it. Absent that file there is no pair, and the
+# arm says so rather than reading a refusal for the wrong reason as the
+# milestone.
+pre_src = os.path.join(model_dir, "model.safetensors.bak-pre-indexer-v41-20260921")
+if os.path.isfile(pre_src):
+    scaffold(os.path.join(w, "pre_mig"))   # config.json and the rest, not weights
+    save_file(load_file(pre_src), os.path.join(w, "pre_mig", "model.safetensors"))
+    print("  fixture: pre_mig <- %s (pre-migration weights, for the"
+          " pre-change engine)" % os.path.basename(pre_src))
+else:
+    print("  fixture: pre_mig NOT built - no %s beside this checkpoint"
+          % os.path.basename(pre_src))
 PY
 PYRC=$?
 [ "$PYRC" -eq 2 ] && exit 2
@@ -472,16 +490,22 @@ for d in "$MODEL" ${MODEL2:+"$MODEL2"}; do
         echo "  FAIL: $(basename "$d") does not load: $(why "$W/on.chk")"
         exit 1
     fi
-    if "$PREBIN" "$d" --check >"$W/pre.chk" 2>&1; then
-        echo "  FAIL: the pre-change engine ACCEPTED $(basename "$d") - this"
-        echo "    checkpoint has gr_* tensors no spec there claims, so the"
-        echo "    milestone this gate pins did not happen"
+    PREMODEL="$W/pre_mig"
+    if [ ! -d "$PREMODEL" ]; then
+        echo "  FAIL: no pre-migration copy of $(basename "$d") to pair with the"
+        echo "    pre-change engine (see the fixture note above), so the GR gap"
+        echo "    this arm exists to measure is not measured at all"
+        FAILED=1
+    elif "$PREBIN" "$PREMODEL" --check >"$W/pre.chk" 2>&1; then
+        echo "  FAIL: the pre-change engine ACCEPTED the pre-migration copy of"
+        echo "    $(basename "$d") - this checkpoint has gr_* tensors no spec"
+        echo "    there claims, so the milestone this gate pins did not happen"
         FAILED=1
     elif grep -q 'gr_attn\|gr_mlp' "$W/pre.chk"; then
-        echo "  pre  $(basename "$d") refused, naming a gr_* tensor: $(why "$W/pre.chk")"
+        echo "  pre  refused, naming a gr_* tensor: $(why "$W/pre.chk")"
     else
-        echo "  FAIL: the pre-change engine refused $(basename "$d") for some"
-        echo "    OTHER reason, so this pair does not measure the GR gap:"
+        echo "  FAIL: the pre-change engine refused the pre-migration copy for"
+        echo "    some OTHER reason, so this pair does not measure the GR gap:"
         echo "    $(why "$W/pre.chk")"
         FAILED=1
     fi
