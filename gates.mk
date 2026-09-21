@@ -86,7 +86,7 @@ aux-parm-arity-gate:
 # checked out; where it is, it is a second or two of symbolic execution.
 .PHONY: aux-equiv-gate
 aux-equiv-gate:
-	@bash build/aux_equiv_gate.sh
+	@$(call GATE_OK,build/aux_equiv_gate.sh)
 
 # The same question of the pair that ships to the target. Its own file
 # rather than a second half of the one above: that one is named for the
