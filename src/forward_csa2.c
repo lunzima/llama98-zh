@@ -62,6 +62,20 @@
      - Composition with S4's shared low-rank query latent - this
        function always reads L->csa2_w_dq_idx, unlike the training-side
        reference, which reuses q_proj.down when S4 already converted it.
+     - RoPE on the indexer QUERY. The reference rotates it at the query
+       token's own position - .prof/dsv41_ref/model.py:551,
+       `apply_rotary_emb(q[..., -rd:], self.freqs_cis[start_pos:end_pos])`
+       - exactly as it rotates the indexer keys (:545), and .prof/
+       dsv41_ref/model.py is the whole of the available specification
+       (the report gives no formula for the indexer's own rotation, only
+       the one-line mention of a fused FlashMLA kernel at
+       .prof/dsv41_report.txt:969-970). Step 4 below scores the
+       un-rotated s->csa2_qidx against ring_idx; the key half IS
+       rotated (step 3), so the score is position-dependent through the
+       keys alone - a different function from the reference's
+       relative-position one, not an equivalent arrangement of it.
+       engine/csa2.py carries the same entry on the training side, which
+       rotates neither side of the indexer query either.
 
    Rollback, both kinds, is covered. LZStateCkpt's own comment has the
    cross-turn half (csa2_pending_c and friends were not among its saved
