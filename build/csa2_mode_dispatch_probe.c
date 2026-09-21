@@ -1103,7 +1103,18 @@ static void check4_ced_gate(void) {
        `kv_in + tk * hdim` (forward_csa2.c's own kvh), so a buffer sized
        for one arm's chunk length and handed to a longer one walks off
        the end of it. Both arms below read the same prefix, so sizing for
-       the longer one costs the shorter arm nothing. */
+       the longer one costs the shorter arm nothing.
+
+       The general shape, named because it recurs: this buffer's SIZE was
+       set by the fixture while its BOUND was set by a contract - the
+       callee's own kv_in arithmetic - so nothing in this function tied
+       the two together and they agreed only by coincidence, until the
+       fixture changed and they did not. Sizes and bounds read from one
+       constant (F_CED_NT here, first in the array and again in the nt
+       argument) cannot drift that way. Same family as an
+       indexer_head_dim/rotary_dim pair that does not satisfy
+       `rotary_dim <= indexer_head_dim`, and as an expected-fallout array
+       calibrated against a crash point that has since moved. */
     float poison[F_CED_NT * F_DIM];
     float attn_d1_null[F_QD], attn_d1_poison[F_QD];
     int i;
