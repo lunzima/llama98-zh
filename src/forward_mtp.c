@@ -271,12 +271,21 @@ void mtp_attn_t1(const LZModel *m, LZRunState *s, const LZLayer *L) {
             const float *vt = vf + (size_t)wslot * kvd + (size_t)kvh * hd;
             for (d = 0; d < hd; d++) out[d] = vt[d];
         } else if (use_int) {
+            /* Compiled only where the int16 weighted-sum kernel exists.
+               Its declaration (ops.h) and the two LZRunState buffers it
+               reads (forward.h) sit inside this same #if, as does use_int's
+               own assignment above - so without the macro this branch is
+               unreachable but still COMPILED, and its body would name a
+               function and two members that do not exist at that setting.
+               That is what the all-switches build caught. */
+#if (LZ_ATTN_FIXED & 2)
             lz_attn_wsum_q8_int(s->attn_acc + (size_t)h * hd,
                                 s->attn_ss + (size_t)(h * hd) / 32,
                                 s->att, hd, vc + (size_t)kvh * hd,
                                 vs + (size_t)(kvh * hd) / 32, kvd, 0,
                                 s->wsum_cbuf, s->wsum_cq, s->attn_sink,
                                 s->kv_ring);
+#endif /* LZ_ATTN_FIXED & 2 */
         } else {
             attn_wsum_plane(s, out, vc, vs, hd, kvd, kvh, 0, 0,
                             1, 0, 0);
