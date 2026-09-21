@@ -563,8 +563,8 @@ int lz_spec_accept_temp(const float *p, const float *q, int x, int vocab,
    fills it.
 
    No LZStateCkpt parameter - per-round rollback goes through the
-   SSM/conv ring instead of caller-owned checkpoint scratch;
-   LZStateCkpt's only caller is LZPrefixCache. */
+   SSM/conv ring instead of caller-owned checkpoint scratch. One is
+   carried by LZPrefixCache, lz_look_pick and lz_generate_pld_round. */
 int lz_spec_round(const LZModel *m, LZRunState *s,
                   int anchor, int anchor_pos, int k,
                   float p_min, int n_min, const LZSampler *samp,
