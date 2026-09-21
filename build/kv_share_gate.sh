@@ -452,18 +452,15 @@ SKIP_FILES = ("model.safetensors", "model.bin", "model.bin.lz4")
 # tests/test_bin_header_tail_order.py (the same parser that checks the
 # writer's field sequence against the reader's).
 #
-# They were counted here by hand until 2026-09-21, and this is what that
-# copy was by then: the group appended to v5's tail had grown from the 4
-# fields it described to 14 (a 15th word, ced_kv, and three more
-# LZ_MAX_LAYERS-wide arrays), so this block believed a v5 header was 313
-# words where src/model.c reads 704 - short by 1564 bytes. attn_kv_share
-# still resolved to the right word, because every word that was added sits
-# AFTER it, so the switch arm stayed green; what the number fed was the
-# two arms that cut or rebuild a header to that length, and both would
-# have written a file whose header does not exist. A format counted by
-# hand here is a third copy of it beside the writer and the reader, and
-# its failure mode is not being wrong about the field it is looking at -
-# it is being wrong about every field after the one that moved.
+# A format counted by hand here is a third copy of it beside the writer
+# and the reader, and its failure mode is not being wrong about the field
+# it is looking at - it is being wrong about every field after the one
+# that moved. attn_kv_share's own word number depends only on the fields
+# that precede it, so a length error below it cannot show up there, and
+# the two arms that cut or rebuild a header to that length are the only
+# places it does. (A field inserted BEFORE attn_kv_share would redden the
+# switch arm as well: that is the case where this comment is what is
+# wrong, and not the arm.)
 sys.path.insert(0, train_root)
 sys.path.insert(0, os.path.join(train_root, "tests"))
 try:
@@ -528,9 +525,9 @@ def appended_tail(kv_share):
     written out twice by hand, the two are one edit away from disagreeing
     about how many zero words the group holds, and the arms would then
     differ in their tensor stream's alignment rather than in the switch
-    under test. The WIDTH comes from the reader - this docstring used to
-    name a four-field, 131-word group, which is what the constant beside
-    it still said after the group had grown to 14 fields and 522 words."""
+    under test. The width comes from the reader, not from a list of the
+    fields this docstring names: the group's membership is the reader's,
+    and a second copy of it here is a copy that goes stale in silence."""
     return (struct.pack("<i", kv_share)
             + b"\0" * (4 * (tail_words() - 1)))
 
@@ -558,9 +555,10 @@ if len(full) < 2:
 if ver == CUR_VER:
     hl = header_len(ver)
     # attn_kv_share: the header word the switch itself is, addressed by the
-    # reader's own field order. It used to be counted back from the end of
-    # the header, which is only the same address as long as the words that
-    # follow it are counted correctly here too.
+    # reader's own field order. Counting back from the end of the header is
+    # the same address only while the words that follow it are counted
+    # correctly here too; the asserts below hold the two addresses
+    # together, so a field that moves one and not the other reddens here.
     KV_OFF = field_off("attn_kv_share")
     word = word_at(KV_OFF)
     emit("bin_ok", b)
