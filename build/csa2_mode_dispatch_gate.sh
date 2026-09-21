@@ -659,6 +659,16 @@ else
         "check4a: layer D1 (FULL, decoder-region CSA2) still reads kv_in in its own step 2"
         "check4b: ...and so is the published k_eff"
     )
+    # The last entry depends on a property of the probe's own fixture, not
+    # only on forward_csa2.c: D2 has to publish a Top-K set that is a real
+    # CHOICE. At cm=1 a token's n_vis is tk+1, so while n_vis <= topk the
+    # set is every block that token can see and cannot move whatever the
+    # indexer keys say. check4b's chunk therefore runs F_CED_NT tokens and
+    # compares every token's row; shorten that chunk back to 3 and this
+    # entry goes green for a reason that has nothing to do with the
+    # dispatch. Both directions measured - the boundary is one token past
+    # the clamp, and build/csa2_mode_dispatch_probe.c's own check4b
+    # comment has the numbers.
     TURN_FAIL=(
         "check_chain: after layer C's (reuse) call, all four tokens' published Top-K selections are still exactly layer B's own"
         "check2: perturbing layer B's own indexer weights ALSO changes layer C's attn_out (C reads whatever B's own call left in their shared ci slot)"

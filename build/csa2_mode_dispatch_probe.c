@@ -94,10 +94,13 @@
    deliberate exception - see its own comment and check3b's.
 
    csa2_compress_m=1 (every token finalizes its own block immediately)
-   and csa2_topk=2 are chosen so a 3-token chunk exercises n_vis=0,1,2
-   for whichever layer is doing the finalizing, and a real (not
+   and csa2_topk=2 are chosen so a chunk exercises n_vis=0,1,2,... for
+   whichever layer is doing the finalizing, and a real (not
    trivial-"select everything") Top-K choice as soon as n_vis exceeds
-   topk.
+   topk. Most fixtures here run a 3-token chunk; check4b does not, and
+   its own comment and F_CED_NT have the measurement for why - one token
+   past the topk clamp is not yet enough for the published index SET to
+   be a choice rather than a formality.
 
    Code-review addenda, added in two more rounds after the mode-
    dispatch checks above first landed and were reviewed:
@@ -213,6 +216,14 @@ static void ok(int cond, const char *what) {
    empty candidate set. */
 #define F_CM2      2
 #define F_TOPK     2
+/* check4b's chunk length. It has to exceed F_TOPK, and by enough that
+   the published Top-K set is a real choice rather than the whole visible
+   range: at F_CM=1 a token's n_vis is tk+1, so every token before tk ==
+   F_TOPK publishes every block it can see and its set cannot move
+   whatever the indexer keys say. Eight is the first round number past
+   that - check4b's own comment has the measurement that fixes the
+   boundary. */
+#define F_CED_NT   8
 
 #define SEED0 1145141919u   /* this project's own fixed synthetic-input seed */
 
@@ -1088,7 +1099,12 @@ static void check_ci_independence(void) {
 
 /* Item 4: the narrowed CED kv_in gate. */
 static void check4_ced_gate(void) {
-    float poison[3 * F_DIM];
+    /* F_CED_NT tokens' worth, not 3: kv_in is indexed as
+       `kv_in + tk * hdim` (forward_csa2.c's own kvh), so a buffer sized
+       for one arm's chunk length and handed to a longer one walks off
+       the end of it. Both arms below read the same prefix, so sizing for
+       the longer one costs the shorter arm nothing. */
+    float poison[F_CED_NT * F_DIM];
     float attn_d1_null[F_QD], attn_d1_poison[F_QD];
     int i;
     char errbuf[256];
@@ -1099,7 +1115,7 @@ static void check4_ced_gate(void) {
     /* Obviously distinct from any lcg_f() draw (which stays within
        [-0.2, 0.2)) - if a bug read this where it should not, the
        divergence could not be missed. */
-    for (i = 0; i < 3 * F_DIM; i++) poison[i] = 500.0f + (float)i;
+    for (i = 0; i < F_CED_NT * F_DIM; i++) poison[i] = 500.0f + (float)i;
 
     /* 4a: FULL mode still reads kv_in (Task 4's own behaviour, narrowed
        but not removed by this task). Two independent builds, kv_in
@@ -1147,13 +1163,28 @@ static void check4_ced_gate(void) {
        must be byte-identical whether D2 itself is handed NULL or a
        poisoned non-NULL kv_in. One state, D2 called twice in a row:
        REINDEX writes nothing back into the ring/pending state (only
-       FULL's steps 2 and 3 do), so replaying it is safe. */
+       FULL's steps 2 and 3 do), so replaying it is safe.
+
+       F_CED_NT tokens, and every token's published row compared, not
+       just one. The published Top-K set is a RANKING of the n_vis
+       visible blocks, and at F_CM=1 n_vis is tk+1 - so while
+       tk < F_TOPK the set is every block the token can see, and it
+       stays put no matter what the indexer keys do. Only the tokens
+       past that clamp can move at all. Measured against
+       build/csa2_mode_dispatch_gate.sh's first arm ("dispatch reverted
+       to unconditional Full-mode body", the one this check exists to
+       catch): at 3 tokens both arms published the same set for every
+       token, and from tk=3 on - the first token whose n_vis exceeds
+       F_TOPK - every token published a different one. The chunk has to
+       reach past the clamped prefix or this assertion cannot see the
+       mutation it is named for. */
     {
         LZModel m;
         LZRunState s;
         float attn_d2_null[F_QD], attn_d2_poison[F_QD];
-        int idx_null[F_TOPK], idx_poison[F_TOPK];
-        int n_d2_null, n_d2_poison, ci, k;
+        int idx_null[F_CED_NT][F_TOPK], idx_poison[F_CED_NT][F_TOPK];
+        int n_d2_null[F_CED_NT], n_d2_poison[F_CED_NT];
+        int ci, k, tk;
         unsigned stx_d2;
 
         build_model_ced(&m, AQ, AKV, AIX, BQ, BKV, BIX);
@@ -1165,29 +1196,35 @@ static void check4_ced_gate(void) {
         }
         ci = s.cache_idx[0];
         stx = SEED0 + 210;
-        fill_xb(&s, 3, F_DIM, &stx);
-        forward_csa2(&m, &s, &m.layers[0], 0, 0, 3, NULL);
+        fill_xb(&s, F_CED_NT, F_DIM, &stx);
+        forward_csa2(&m, &s, &m.layers[0], 0, 0, F_CED_NT, NULL);
 
         stx_d2 = SEED0 + 220;
-        fill_xb(&s, 3, F_DIM, &stx_d2);
-        forward_csa2(&m, &s, &m.layers[1], 1, 0, 3, NULL);
+        fill_xb(&s, F_CED_NT, F_DIM, &stx_d2);
+        forward_csa2(&m, &s, &m.layers[1], 1, 0, F_CED_NT, NULL);
         memcpy(attn_d2_null, s.attn_out, sizeof attn_d2_null);
-        n_d2_null = s.csa2_topk_n_pub[(size_t)ci * LZ_BATCH_MAX + 2];
-        for (k = 0; k < F_TOPK; k++)
-            idx_null[k] = s.csa2_topk_idx_pub[((size_t)ci * LZ_BATCH_MAX + 2) * F_TOPK + k];
+        for (tk = 0; tk < F_CED_NT; tk++) {
+            n_d2_null[tk] = s.csa2_topk_n_pub[(size_t)ci * LZ_BATCH_MAX + tk];
+            for (k = 0; k < F_TOPK; k++)
+                idx_null[tk][k] =
+                    s.csa2_topk_idx_pub[((size_t)ci * LZ_BATCH_MAX + tk) * F_TOPK + k];
+        }
 
         stx_d2 = SEED0 + 220;
-        fill_xb(&s, 3, F_DIM, &stx_d2);   /* replay D2's own input exactly */
-        forward_csa2(&m, &s, &m.layers[1], 1, 0, 3, poison);
+        fill_xb(&s, F_CED_NT, F_DIM, &stx_d2);   /* replay D2's own input exactly */
+        forward_csa2(&m, &s, &m.layers[1], 1, 0, F_CED_NT, poison);
         memcpy(attn_d2_poison, s.attn_out, sizeof attn_d2_poison);
-        n_d2_poison = s.csa2_topk_n_pub[(size_t)ci * LZ_BATCH_MAX + 2];
-        for (k = 0; k < F_TOPK; k++)
-            idx_poison[k] = s.csa2_topk_idx_pub[((size_t)ci * LZ_BATCH_MAX + 2) * F_TOPK + k];
+        for (tk = 0; tk < F_CED_NT; tk++) {
+            n_d2_poison[tk] = s.csa2_topk_n_pub[(size_t)ci * LZ_BATCH_MAX + tk];
+            for (k = 0; k < F_TOPK; k++)
+                idx_poison[tk][k] =
+                    s.csa2_topk_idx_pub[((size_t)ci * LZ_BATCH_MAX + tk) * F_TOPK + k];
+        }
 
         ok(memcmp(attn_d2_null, attn_d2_poison, sizeof attn_d2_null) == 0,
            "check4b: layer D2 (reindex, decoder-region CSA2) attn_out is "
            "byte-identical whether kv_in is NULL or a poisoned non-NULL");
-        ok(n_d2_null == n_d2_poison,
+        ok(memcmp(n_d2_null, n_d2_poison, sizeof n_d2_null) == 0,
            "check4b: ...and so is the published k_eff");
         ok(memcmp(idx_null, idx_poison, sizeof idx_null) == 0,
            "check4b: ...and so is the published Top-K index set");
