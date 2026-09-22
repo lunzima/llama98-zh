@@ -698,38 +698,25 @@ void lz_state_reset(LZRunState *s, const LZModel *m) {
        every compressed entry the same way it discards the KV cache and
        the recurrent state. */
     if (s->csa2_comp_ring) {
-        /* Per slot: each ci owns the cm of the layer that claimed it
-           (model.h's own csa2_compress_m_layer comment), so the region
-           to zero is that slot's own size at that slot's own base -
-           lz_csa2_pend_base/lz_csa2_ring_base are the same prefix sums
-           forward_state.c allocated through and forward_csa2.c indexes
-           through. One memset per slot instead of two over the whole
-           class, and byte-for-byte the same bytes when no layer carries
-           an entry of its own.
+        /* The WHOLE buffer, not one region per slot: a reset discards
+           every compressed entry and every still-open slab, so the
+           per-slot sizes cancel out of the question entirely - what is
+           zeroed is everything alloc_csa2_ring handed out, which the
+           two prefix sums return the end of when asked for slot
+           c->n_full_layers (model.c's own comment on them). Walking the
+           slots here instead would compute sizes only to zero their sum.
 
            Same banked depth alloc_csa2_ring used (forward.h's own
            csa2_pending_c comment) - a reset that zeroed only one bank
            would leave the rest holding a previous sequence's gate
            logits, which the next closure of the block that lands there
            would then finalize from. */
-        int depth = s->ssm_ring_depth;
-        int ci;
-        for (ci = 0; ci < c->n_full_layers; ci++) {
-            int cm = lz_csa2_slot_cm(c, ci);
-            size_t n, rb;
-            if (cm < 1) cm = 1;
-            n = lz_csa2_pend_base(c, ci, depth) * c->head_dim;
-            memset(s->csa2_pending_c + n, 0,
-                   (size_t)cm * (size_t)depth * c->head_dim * sizeof(float));
-            memset(s->csa2_pending_z + n, 0,
-                   (size_t)cm * (size_t)depth * c->head_dim * sizeof(float));
-            rb = lz_csa2_ring_base(c, ci, s->seq_len);
-            memset(s->csa2_comp_ring + rb * c->head_dim, 0,
-                   (size_t)((s->seq_len + cm - 1) / cm) * c->head_dim * sizeof(float));
-            memset(s->csa2_idx_comp_ring + rb * c->csa2_indexer_head_dim, 0,
-                   (size_t)((s->seq_len + cm - 1) / cm) *
-                   c->csa2_indexer_head_dim * sizeof(float));
-        }
+        size_t npend = lz_csa2_pend_base(c, c->n_full_layers, s->ssm_ring_depth);
+        size_t nring = lz_csa2_ring_base(c, c->n_full_layers, s->seq_len);
+        memset(s->csa2_pending_c, 0, npend * c->head_dim * sizeof(float));
+        memset(s->csa2_pending_z, 0, npend * c->head_dim * sizeof(float));
+        memset(s->csa2_comp_ring, 0, nring * c->head_dim * sizeof(float));
+        memset(s->csa2_idx_comp_ring, 0, nring * c->csa2_indexer_head_dim * sizeof(float));
     }
     /* The ring's own "which slot is confirmed" index - see forward.h's
        s->ssm_slot comment. Every recurrent index resets to 0 here,

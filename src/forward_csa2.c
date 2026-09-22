@@ -165,9 +165,9 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
        ci * ceil(seq_len/cm) blocks. */
     float *pend_c = s->csa2_pending_c + lz_csa2_pend_base(c, ci, s->ssm_ring_depth) * hd;
     float *pend_z = s->csa2_pending_z + lz_csa2_pend_base(c, ci, s->ssm_ring_depth) * hd;
-    float *ring = s->csa2_comp_ring + lz_csa2_ring_base(c, ci, s->seq_len) * hd;
-    float *ring_idx = s->csa2_idx_comp_ring +
-                      lz_csa2_ring_base(c, ci, s->seq_len) * idx_hd;
+    size_t rb = lz_csa2_ring_base(c, ci, s->seq_len);
+    float *ring = s->csa2_comp_ring + rb * hd;
+    float *ring_idx = s->csa2_idx_comp_ring + rb * idx_hd;
     /* This ci's published Top-K base (forward.h's own csa2_topk_idx_pub
        comment): one (topk)-wide slot per token-of-the-current-chunk, so
        a REUSE-mode layer processing token tk later in the dispatch
