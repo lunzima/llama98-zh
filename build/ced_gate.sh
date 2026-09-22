@@ -167,7 +167,7 @@ fi
 # overwrote src/forward_attn.c would be a live-file race with whatever
 # else is reading it.
 mutate() {
-    local tag="$1" sedexpr="$2" target
+    local tag="$1" sedexpr="$2" marker="$3" target
     rm -rf "$W/$tag"; mkdir -p "$W/$tag"
     cp -r "$ROOT/src" "$ROOT/common" "$W/$tag/"
     cp "$ROOT/Makefile" "$W/$tag/Makefile"
@@ -177,10 +177,25 @@ mutate() {
         m1) target="$W/$tag/src/forward_attn.c" ;;
         *)  target="$W/$tag/src/forward.c" ;;
     esac
+    # THE GUARD TESTS THE EFFECT, NOT A PROXY FOR IT. It compared the copy
+    # against the original and called any difference "applied", and sed -i
+    # makes that true even when the pattern matched nothing: it rewrites
+    # the copy's line endings (src/*.c are CRLF in this checkout -
+    # .gitattributes pins only *.sh to LF), so the comparison saw a file
+    # that always differed. A mutation that never happened then built the
+    # unmodified engine, and this gate reported its own blind spot instead
+    # of the cause: "the mutant matched the off arm - this gate is blind
+    # to it", where the truth was that nothing had been changed. Each sed
+    # injection now carries its OWN MARKER and the guard looks for the
+    # marker, so an anchor that stops matching the source reddens here,
+    # by name, and says the green above is unproven. An anchor may be
+    # brittle as long as the guard checks the effect - and the marker has
+    # to be text the source does not already contain, or the probe would
+    # be true before the mutation ran.
     sed -i "$sedexpr" "$target"
-    if cmp -s "$target" "$ROOT/${target#$W/$tag/}"; then
-        echo "  FAIL mutation $tag: the edit did not apply - the gate would be"
-        echo "       green against a mutation that was never made"
+    if ! grep -qF "$marker" "$target"; then
+        echo "  FAIL mutation $tag: the edit did not apply - the pattern no"
+        echo "       longer matches the source, so the green above is unproven"
         FAILED=1; return 1
     fi
     # A MUTATION THAT DOES NOT BUILD IS A FAIL, not a skip. It proves
@@ -202,11 +217,13 @@ mutate() {
 }
 
 # M1: kv_only computes nothing, so the prefix K/V rows are never written.
-mutate m1 's|int kv_only) {|int kv_only) { if (kv_only) return;|'
+# The anchor is the signature's last line, which is where the early return
+# has to go; the marker rides in the injected comment.
+mutate m1 's|int kv_only, const float \*kv_in) {|int kv_only, const float *kv_in) { if (kv_only) return; /*M1*/|' '/*M1*/'
 # M2: the final chunk is skipped as well, so the logits are observed from
 # a layer whose output nobody computed. Note the counter goes UP on this
 # one - a count-only gate would call it healthy.
-mutate m2 's|s->ced \&\& (done + k < n)|s->ced|'
+mutate m2 's|s->ced \&\& (done + k < n)|s->ced /*M2*/|' '/*M2*/'
 
 [ "$FAILED" -eq 0 ] && echo "  ced_gate: PASS" || echo "  ced_gate: FAIL"
 exit $FAILED
