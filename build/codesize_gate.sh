@@ -37,7 +37,11 @@
 #
 # The flag that moved B most was -O3, and it is why the Makefile no
 # longer passes it: 401,616 bytes of .text against -O2's 261,968, for
-# byte-identical output.
+# byte-identical output. Both arms of that pair were one tree, measured
+# together, under one optimisation level - it is a RATIO (-O3 is 1.53x
+# -O2), and that is what the decision rests on. The absolute -O2 figure
+# has since moved: the same uniform -O2 build measures 359,760 today
+# (see the re-baseline note above TEXT_CEIL for the replay command).
 #
 # Exit codes:
 #   0  PASS - both criteria met, margins printed
@@ -71,9 +75,60 @@ CAPACITY=$((2847 * 512))
 # number stops reading as the shipped one.
 SHIP="kunkun98-gui.exe"
 
-# 320 KB. Measured at 261,968 with -O2, so 22% of headroom - room for
-# ordinary growth, well under the 401,616 that -O3 produced.
-TEXT_CEIL=327680
+# 340 KB. Re-measured 2026-09-22 at 330,432 on the artifact this gate
+# actually reads - `make native`'s llama98.exe - so 17,728 bytes (5.4%) of
+# headroom. The four things a number like this owes the next reader:
+#
+# WHICH ARTIFACT, UNDER WHICH FLAGS. llama98.exe as `make native` builds
+# it, which is NOT one optimisation level: Makefile:174 compiles the cold
+# sources at -Os (X86_64_CFLAGS) and Makefile:183 the hot TUs at -O2
+# (X86_64_HOT_CFLAGS), a per-TU split for an 8 KB I-cache. The ceiling
+# derives from THAT measurement, because that is the file $CLI points at.
+#
+# The ceiling it replaces (327,680 = 320 KB) was derived from a UNIFORM
+# -O2 build - "Measured at 261,968 with -O2, so 22% of headroom" - and
+# that is the defect this fixes: the old baseline and the old artifact
+# were not the same configuration. Replaying both numbers today, same
+# source tree (ca02bda):
+#
+#   uniform -O2   (make llama98 X86_64_CFLAGS="-O2 -march=x86-64 \
+#                  -mtune=znver3 -std=c99 -Wall -Wextra -Isrc \
+#                  -ffp-contract=off -DLZ_MMX_TU=1 -DLZ_SSE2_TU=1 \
+#                  -DLZ_AVX2_TU=1")                              359760
+#   shipping      (make native)                                 330432
+#     -> the per-TU -Os tier is worth 29,328 bytes (8.2%) today
+#     -> against the old note's 261,968, the SOURCE has grown 97,792
+#        bytes; the FLAG SPLIT is what keeps the shipping file 29 KB
+#        below a uniform -O2 build of the same source. The old 320 KB
+#        ceiling sat 32 KB BELOW today's uniform -O2 artifact, i.e. it
+#        had long stopped describing any configuration this tree builds.
+#
+# WHY THIS MARGIN. The old 22% was chosen when nothing ran this gate;
+# that cushion was standing in for an alarm. Since 1bad3c3 the gate is a
+# prerequisite of `check`, so it IS the alarm and the margin only has to
+# absorb ordinary growth between re-baselines: 5.4% is about ten times
+# the largest single feature measured this cycle (per-layer compression
+# ratio, +1,600 bytes) and still catches a flag-level mistake (the -O3
+# experiment that produced 401,616).
+#
+# WHY THE OLD BREACH WENT UNSEEN. This gate sat in gate_wiring_gate.sh's
+# ci.sh-only list behind "builds three toolchains to compare .text" - a
+# reason false of the script (in code position it invokes make/wcc386/
+# wlink zero times; it measures two already-built files). Nothing ran it,
+# so .text crossed 327,680 with no line anywhere saying so. 1bad3c3 wired
+# it into `check` and corrected that line; this re-baseline comes after
+# that, not instead of it: the instrument was fixed first, then the
+# number was read.
+#
+# REPLAYING EITHER CEILING: criterion B is `size -A "$CLI" | awk '$1 ==
+# ".text" { print $2; exit }'` on a `make native` build (this gate does
+# exactly that, with a WSL fallback when the host has no GNU size).
+# Criterion A is a FILE-BYTES measurement against a physical constant -
+# CAPACITY above is 2880 sectors of 512 less 33 for the boot sector, two
+# FATs and the root directory - so it needs no re-baselining and has no
+# configuration to drift: it asks whether `make gui`'s kunkun98-gui.exe
+# still fits on one 1.44 MB disk.
+TEXT_CEIL=348160
 CLI=llama98.exe
 [ -f "$CLI" ] || CLI=llama98
 
