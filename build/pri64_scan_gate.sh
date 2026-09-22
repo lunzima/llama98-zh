@@ -86,6 +86,14 @@ for f in files:
         bad = 1
     elif n < exp:
         print("note: %s is at %d, below its baseline of %d - tighten the baseline" % (f, n, exp))
+# The revision the counts above were measured at - not a citation of a
+# source line, and not the kind the comment rule bans: git answers "which
+# commit wrote this table", which is a different question from "which
+# revision were these numbers read off", and the answer to THAT is what
+# moves out of reach as soon as someone tightens a baseline below its
+# count. That string is the only record of it, which is why it stays and
+# why the hash baseline in build/comment_hygiene_gate.sh carries one for
+# this file.
 print("scanned %d file(s); baseline taken at %s" % (len(files), "2270867"))
 sys.exit(bad)
 PY
