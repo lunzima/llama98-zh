@@ -21,8 +21,8 @@
 # rather than near any one of the loops it protects. Every c->n_layers-
 # indexed loop in the rest of this function, present or future,
 # inherits the bound for free; nothing downstream has to remember its
-# own position relative to a check that used to live somewhere else
-# in the file.
+# own position relative to the check, which lives at the read site and
+# stays there.
 #
 # THE TEST VALUE is n_layers=0x7FFFFFFF, not a small-looking overflow
 # like 200: both this round's spec-compliance and code-quality

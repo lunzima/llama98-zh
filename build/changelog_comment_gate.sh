@@ -14,11 +14,10 @@
 # to be here and its arm never fired" stops someone re-adding it; the
 # repair is to rewrite it as a present-tense claim ("a `s == 0` fast
 # path would never fire, because ...") rather than to delete the
-# knowledge. Rewriting all of them at once is a large mechanical edit
-# across files other sessions hold open, so the baseline below is the
-# count at the time this landed and the assertion is only that no file
-# gains one. Lowering a number here is the work; raising one is the
-# regression.
+# knowledge. The baseline below is what lets that be done in batches: one
+# count per file, a note for any entry whose count has fallen below it,
+# and a FAIL for a file that gains one. An empty baseline is the end
+# state, not a missing one.
 #
 # The phrase "the old" also has a legitimate non-historical use - "read
 # the OLD state from sq_in" means the pre-step value, not a previous
@@ -36,8 +35,8 @@ cd "$(dirname "$0")/.."
 #
 # STRICT is unambiguous: "it used to be", "previously", "formerly", "as
 # before this task" have no reading in which they describe the code as
-# it is. They are a ratchet toward zero and the baseline below is what
-# is left.
+# it is. They are a ratchet toward zero, and the baseline below is
+# empty: a new one is a FAIL in the file that gained it.
 #
 # LOOSE catches "no longer", "the old" and "originally", which DO have
 # legitimate present-tense uses and are full of them here - "once they
@@ -50,13 +49,21 @@ STRICT="\bused to be|\bused to |\bbefore this task|\bas before this|\bpreviously
 LOOSE="no longer|the old |originally"
 PAT="$STRICT"
 
-# THE DEBT, per file, keyed by PATH. src/ is at zero but for one file
-# another session holds open. build/ joined the scope later and came in at
-# 38 across seventeen files, which is the whole reason this stopped being
-# "a ratchet with almost nothing left to ratchet" and became a real one:
-# every number below is the count measured when the scope reached that
-# file, and each is a sentence someone can rewrite as a present-tense
-# claim - the note at the bottom asks for exactly that.
+# THE DEBT IS PAID, so this is empty - and it stays keyed by PATH so that
+# the next entry cannot be ambiguous.
+#
+# It held 38 strict matches over seventeen build scripts, counted when the
+# scope reached them, and every one is now a present-tense claim. What the
+# load-bearing ones kept, rather than deleted, is the reason each was
+# load-bearing: kernel_matrix's "a matrix nothing reads catches nothing",
+# move_census's "a run that measures nothing is not a clean run",
+# fixed_tier_xcompiler's "a remedy that names a fixture is a claim about
+# the disk", switch_matrix's "counted, not written down". The rest were
+# narration and lost nothing by going.
+#
+# The two entries that are NOT debt live in comment_hygiene_gate.sh's
+# BBASE instead, where they are counted rather than judged: the Chinese
+# PROMPT= literals, which are strings and not comments.
 #
 # KEYED BY PATH, NOT BASENAME. This table was keyed by basename until the
 # scope reached build/, and the sibling gate states the reason that is
@@ -66,25 +73,7 @@ PAT="$STRICT"
 # (session.c and session.h exist under both src/ and common/), so the
 # collision was latent, not absent, and widening the scope is what would
 # have made it live.
-BASELINE="
-build/arm/parity_gate.sh:3
-build/arm/softfp_gate.sh:1
-build/c89_floor_gate.sh:1
-build/ci.sh:3
-build/comment_hygiene_gate.sh:1
-build/csa2_last_writer_bin_gate.sh:1
-build/csa2_modes_config_gate.sh:1
-build/fixed_tier_xcompiler_gate.sh:8
-build/gate_wiring_gate.sh:2
-build/gcc_flag_parity_gate.sh:1
-build/kernel_isa_identity_gate.sh:6
-build/kernel_matrix_gate.sh:1
-build/move_census.sh:1
-build/o3_probe.sh:1
-build/recur_write_float_arm_gate.sh:2
-build/subn_gate.sh:1
-build/switch_matrix_gate.sh:4
-"
+BASELINE=""
 
 # WHAT IS SCANNED. src/ was the whole list, which left three sentences
 # standing in gui/ and one in the Makefile that this gate would have

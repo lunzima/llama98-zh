@@ -2,9 +2,10 @@
 # Kernel coverage gate: a cell per operator per tier per build class,
 # and an empty one carries a reason.
 #
-# The matrix used to be a thing you could PRINT. Nothing read it, so the
-# one failure it exists to catch stayed invisible: on 2026-08-09 the
-# Watcom build lost every hand-written #pragma aux kernel (no
+# A matrix nothing READS catches nothing, and this one prints well enough
+# to look like a check. Nothing read it, so the one failure it exists to
+# catch stayed invisible: on 2026-08-09 the Watcom build lost every
+# hand-written #pragma aux kernel (no
 # -D__MMX__=1) and every numeric gate stayed green, because a kernel
 # that falls back to the scalar reference is bit-identical to one that
 # does not. A row of dots is what that looks like, and a row of dots is

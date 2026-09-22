@@ -67,11 +67,11 @@ SCAN="Makefile src/*.c src/*.h gui/*.c gui/*.h common/*.c common/*.h"
 #                            excused here rather than by weakening the
 #                            scan, which would also stop catching a
 #                            Chinese COMMENT in those same files.
-#   The two message tables used to be baselined at 138 and 100 CJK
-#   lines. They are 0 now: Visual C++ 4.0 rejects raw UTF-8 in a string
-#   literal, so build/utf8_escape.py rewrote every one as \xNN and the
-#   source is ASCII throughout. The allowance goes with them - left at
-#   138 it would let the whole table come back without a word.
+#   The two message tables carry no CJK lines: Visual C++ 4.0 rejects raw
+#   UTF-8 in a string literal, so build/utf8_escape.py rewrites every one
+#   as \xNN and the source is ASCII throughout. They hold no allowance
+#   either - an allowance would let a whole table come back without a
+#   word, which is the shape this file exists to refuse.
 #
 #   src/forward.c and src/model.c were baselined at 1 each for the
 #   lz_int.h include comment, which was corrected in the working tree

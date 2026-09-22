@@ -57,8 +57,8 @@
 #   LZ_ATTN_FIXED       0        #ifndef default 3
 #   LZ_CONV_FIXED       0        #ifndef default 1
 #   LZ_NORM_FIXED       0        #ifndef default 1 - the fixed norms tier,
-#      an axis of its own. It used to ride on LZ_GDN_FIXED, which made
-#      the recurrence's control arm float the norms too and left the
+#      an axis of its own, separate from LZ_GDN_FIXED: riding on that one
+#      made the recurrence's control arm float the norms too and left the
 #      norms with no control arm at all.
 #   LZ_SSE2_GROUP       0        #ifndef default 1 (guarded code in ops_sse2.c)
 #   LZ_Q8_MIN_SCALE     0.0f     #ifndef default 1.0e-30f
@@ -469,9 +469,9 @@ fi
 # individually by check_one above; what this one link cannot do is hold
 # both at once, and saying so beats a set quietly trimmed to whatever
 # happened to build. Coverage here: 34 of the 35 switches.
-# Counted, not written down. The message below used to say "34 of 35"
-# in a literal, and removing one switch from the list above left the
-# literal describing a list it no longer matched.
+# Counted, not written down: a literal in the message below said "34 of
+# 35" against a list that held 35, and the two drift apart the moment a
+# switch is added or removed - which is why the numbers are computed.
 LINKDEFS=""
 NSW=0
 NLINK=0
@@ -543,8 +543,8 @@ if [ -n "$LINKSRC" ]; then
             echo "      compile. The error lines are:"
         fi
         # THE ERROR LINES, which are this failure's content whenever it is
-        # not a missing symbol. This used to print `tail -6`: on a compile
-        # failure that showed the last six lines whatever they were, and the
+        # not a missing symbol. A `tail -6` here shows the last six lines
+        # whatever they are, and the
         # failure on record ended with two WARNINGS from a later translation
         # unit while its three error lines sat above them. The log had them;
         # the report did not.
@@ -585,7 +585,7 @@ if [ -n "$FORCEUSE" ]; then
     for f in $FORCEUSE; do echo "    $f"; done
     echo "  LZ_*_FORCE_* in a preprocessor conditional means a body is"
     echo "  selectable two ways. Give it a --kernel tier instead, the way"
-    echo "  LZ_KERNEL_SSE replaced the five that used to be here."
+    echo "  LZ_KERNEL_SSE covers these five as a tier."
     FAIL=$((FAIL + 1))
 else
     PASS=$((PASS + 1))

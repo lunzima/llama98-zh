@@ -238,16 +238,17 @@ fi
 # ref is only comparable once the epilogue axis is off, and why dropping
 # it entirely would throw away the coverage it does bring.
 #
-# The BIN column is there for the same row. Turning the epilogue off
-# used to be `--epi-write float`, one of seven per-tier runtime flags;
-# those collapsed into the single --fixed knob, and --fixed off would
-# take conv, norms, sigmoid, recurrence and attention out of the
-# comparison too - which is the coverage this row exists for. So the
+# The BIN column is there for the same row. Turning the epilogue off is
+# a compile switch now (LZ_EPI_FIXED); it was `--epi-write float`, one of
+# seven per-tier runtime flags, and those collapsed into the single
+# --fixed knob - which would take conv, norms, sigmoid, recurrence and
+# attention out of the comparison too, which is the coverage this row
+# exists for. So the
 # axis moved to a COMPILE switch, LZ_EPI_FIXED, and the row runs against
 # a second binary built with it at 0. Measured, not assumed:
 # LZ_EPI_FIXED=0 makes ref and sse2 byte-identical on kmr20/zh, and the
 # ordinary build (the control) leaves them differing - the same pair of
-# results --epi-write float used to give.
+# results the runtime --epi-write float flag gave.
 #
 # Adding a flag set here is the cheap half of covering a new operator end
 # to end; the expensive half (SIMD arm against the same binary's C arm,
@@ -299,15 +300,16 @@ else
     echo "note: could not copy the tree, epi rows will SKIP"
 fi
 
-# sse and ssem are SSE1 as a real tier. It used to be reachable only by
-# CPUID behind g_kernel's back, which is why --kernel mmx measured as
+# sse and ssem are SSE1 as a real tier. Without LZ_KERNEL_SSE it is
+# reachable only by CPUID behind g_kernel's back, which is why
+# --kernel mmx measured as
 # "recurrence impl sse-intrin" before LZ_KERNEL_SSE existed - the mmx row
 # above was comparing SSE1 against SSE2 and calling it MMX. ssem is the
 # comparison the deleted P2 and EXP_Q20 control builds were standing in
 # for; ssef reaches the SSE1 float matmul row, which the fixed default
 # does not.
 #
-# `sse` ALSO CARRIES THE q8-ROUNDING TIER, which used to be a row of its
+# `sse` ALSO CARRIES THE q8-ROUNDING TIER, which was a row of its
 # own fed by an LZ_Q8R_FORCE_SSE=1 control build - a whole second tree
 # and second `make` to reach a body that --kernel sse now selects at run
 # time. lz_q8r_tier reads g_kernel, so sse against sse2 moves it from 1
@@ -471,7 +473,7 @@ else
         n=0
         # Two binaries per compiler now, not two flagsets on one: the
         # `epi` rows turn the epilogue off through LZ_EPI_FIXED, a
-        # compile switch, because the runtime flag they used to use
+        # compile switch, because the runtime flag that drove them
         # (--epi-write float) is gone with the other six per-tier flags.
         # A missing control build SKIPs its rows rather than silently
         # dropping the count check below.
@@ -500,8 +502,8 @@ else
         if [ "$n" -ne 10 ]; then
             echo "  cross-compiler: incomplete ($n/10 runs), nothing compared"
         else
-            # HARD ASSERT, ALL SIX ROWS - and four of them used to be
-            # INFO on a premise that has since been refuted.
+            # HARD ASSERT, ALL SIX ROWS - four of which were INFO on a
+            # premise that has since been refuted.
             #
             # THE OLD PREMISE, kept here because it reads plausible and
             # somebody will propose it again: gcc is SSE everywhere

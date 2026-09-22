@@ -106,9 +106,9 @@
 # impossible cell and has no MAP entry would otherwise just not be
 # probed, and the absence would look like a clean sheet.
 #
-# This text used to say the run covered "every unit the matrix currently
-# calls impossible". It never did: MAP is every unit, impossible or not,
-# and nothing compared the two lists.
+# THE CLAIM HERE IS MAP, every unit, impossible or not - not the narrower
+# "every unit the matrix currently calls impossible". Nothing compares
+# those two lists, so the narrower reading overstates the coverage.
 set -u
 cd "$(dirname "$0")/.."
 

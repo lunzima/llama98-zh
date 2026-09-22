@@ -43,11 +43,10 @@ command -v gcc >/dev/null 2>&1 || { echo "c89_floor_gate: SKIP - no gcc"; exit 2
 #   forward.c:16     48327cc, 75c8adc and neighbours, in forward_attn's
 #                    per-head blocks.
 #
-# matmul_q41_impl's used to be a third: `int i, t;` sat after the
-# kernel-select call. Fixed rather than baselined - the whole
-# declaration block moved above the call and the call became the
-# function's first statement. Safe because nothing in those
-# initialisers reads the tier: q41_fixed_epi asks lz_epi_mode and
+# matmul_q41_impl carries the same property and needs no baseline entry:
+# `int i, t;` sits in the declaration block above the kernel-select call,
+# so the call is the function's first statement. Safe because nothing in
+# those initialisers reads the tier: q41_fixed_epi asks lz_epi_mode and
 # lz_epi_ready, and lz_row_pick - which does read it - still runs
 # after. Verified byte-identical on both fixtures rather than argued.
 #

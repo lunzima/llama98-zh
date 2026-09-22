@@ -26,10 +26,10 @@
 # comment says `int`; the tier the RCA was about is still covered, it
 # is no longer separately selectable.)
 #
-# THIS SCRIPT USED TO ONLY COVER --norm-write int / --attn-write int
-# (the two tiers the RCA above was about). docs/fixed-tier-precision-
-# audit.md then re-ran gcc<->Watcom identity for the other ten tier
-# values, but on tz/te (153-token zh / 211-token en, .prof/tz.bin +
+# THIS SCRIPT COVERS ALL TWELVE TIER VALUES, not only the --norm-write
+# int / --attn-write int pair the RCA above was about.
+# docs/fixed-tier-precision-audit.md ran gcc<->Watcom identity for the
+# other ten, but on tz/te (153-token zh / 211-token en, .prof/tz.bin +
 # te.bin) - the SAME short-input regime that hid the norm-write-int
 # defect in its own original verification. That audit's own table shows
 # why length matters here: 13 of its 14 configs read "identical" at
@@ -70,9 +70,9 @@
 #   --attn-write int      (the original RCA's other tier)
 #   --epi-write fixed
 #   --sig-write fixed
-#   --norm-write fixed     (the original RCA's tier - it used to have a
-#                           separate `int` value, folded into `fixed` by
-#                           2d5e6c1, so this row is now its coverage)
+#   --norm-write fixed     (the original RCA's tier; its separate `int`
+#                           value is folded into `fixed` by 2d5e6c1, so
+#                           this row is that tier's coverage now)
 #   --scalar-fixed fixed
 #   --fixed all
 #   (shipping default, zero flags)
@@ -85,10 +85,10 @@
 # alone just scalar - the baseline row below passes --fixed off, which
 # forces all seven explicitly (recurrence included: --recur-write gained
 # an explicit `float` value in the same change that retired the
-# hardware predicate, so it no longer needs the special-casing this
-# script used to carry for it). It runs FIRST and is reported as a
-# distinct FAIL if it ever diverges - but it NO LONGER STOPS THE RUN,
-# and the baseline block itself says at length what that used to cost.
+# hardware predicate, so it needs no special-casing here). It runs FIRST
+# and is reported as a distinct FAIL if it ever diverges - but it does
+# NOT STOP THE RUN, and the baseline block below says at length what
+# stopping the run cost.
 # Short version: the rows whose meaning depended on the float path were
 # the twelve isolated ones, and they are gone; the two that remain pass
 # no isolation flag and never reach it.
@@ -103,10 +103,10 @@
 # off): it is the one row testing an axis's float path in isolation
 # rather than its fixed path, so the other six need to be FIXED around
 # it, not float - the mirror image of every other row, and the
-# combination "one axis float, six fixed" was never reachable before
-# --recur-write gained an explicit float value (previously every SSE
-# host's auto put all seven on float together, so one-float-among-
-# six-fixed was untested). --fixed all and the shipping default are the
+# combination "one axis float, six fixed" stayed out of reach until
+# --recur-write gained an explicit float value: every SSE host's auto
+# put all seven on float together, so one-float-among-six-fixed was
+# untested. --fixed all and the shipping default are the
 # two configurations that get no isolation flag at all, because "every
 # axis fixed" (however it is spelled - explicitly or via the new
 # unconditional auto) IS what they are testing.
@@ -166,12 +166,12 @@ fi
 # the default, because paying 50 minutes of every CI run to re-derive a
 # one-off result is not the same thing as checking something.
 #
-# THE REMEDY THIS PARAGRAPH USED TO GIVE HAD ROTTED: it said to run
-# LZ_NORM_INT_GATE_MODEL=/e/LLM/models/kunmoe-v2-t2-probe, and no such (historical)
-# directory exists any more. An instruction naming a fixture is a claim
-# about the disk and goes stale exactly like a comment naming a
-# function; this one had, silently, and the gap stayed open the whole
-# time because the way to close it did not resolve.
+# A REMEDY THAT NAMES A FIXTURE IS A CLAIM ABOUT THE DISK, and it rots
+# with nobody touching the paragraph: this one said to run
+# LZ_NORM_INT_GATE_MODEL=/e/LLM/models/kunmoe-v2-t2-probe, and that
+# directory is gone. The instruction went stale exactly like a comment
+# naming a function, silently, and the gap stayed open the whole time
+# because the way to close it did not resolve.
 #
 # The override below still works for a one-off full run against T2:
 #   LZ_NORM_INT_GATE_MODEL=/e/LLM/models/_t2gate bash "$0"
@@ -268,10 +268,11 @@ run_one() {
 # ---- baseline first, and its failure reported distinctly - but NOT as a
 # reason to stop.
 #
-# This block used to `exit 1` on a baseline failure, on the stated
-# grounds that "every tier result below would be uninterpretable". That
-# was true of the TWELVE ISOLATED ROWS, each of which wrapped one tier
-# flag in --fixed off and therefore did rest on the float path being
+# This block exits 1 on a baseline failure. The grounds once given for
+# stopping on every failure - "every tier result below would be
+# uninterpretable" - hold only of the TWELVE ISOLATED ROWS, each of
+# which wrapped one tier flag in --fixed off and therefore did rest on
+# the float path being
 # sound. Those rows are gone (see the block below for where they went).
 # What is left is --fixed all and the shipping default, neither of which
 # passes an isolation flag, neither of which touches the float path, and
@@ -310,8 +311,9 @@ fi
 
 # WHERE THE TWELVE ISOLATED ROWS WENT, and how to get attribution back.
 #
-# This block used to run one row per runtime tier flag, each with
-# --fixed off around it, so a gcc/Watcom divergence named the tier. The
+# This block runs one row per remaining tier VALUE, not one per runtime
+# tier flag - that shape put --fixed off around each flag, which let a
+# gcc/Watcom divergence name the tier. The
 # seven per-tier flags are gone: they could only ever select MIXED
 # settings, mixing measured worse than either end on six of seven axes,
 # and one float knob replaced the lot (ops.h, at lz_float_ref_select).

@@ -3,6 +3,7 @@
 # a workflow would call, and it also runs by hand:
 #
 #   build/ci.sh
+#
 # THIS SCRIPT AND `make check` DO NOT CONTAIN EACH OTHER, so a green in
 # one says nothing about the other. comment_hygiene_gate.sh is a
 # prerequisite of `check` and appears below only in a comment - a grep
@@ -10,7 +11,6 @@
 # `check` are, with codesize_gate.sh the exception, not stages here.
 # "The tree is green" therefore has no single instrument; name the one
 # that ran.
-#
 #
 # Stages, each independently PASS / FAIL / SKIP, none silent:
 #   1. make native             (gcc)
@@ -22,8 +22,8 @@
 #      happens to build" fails here instead of silently diverging
 #   6. build/fixed_tier_xcompiler_gate.sh - gcc/Watcom bit-identity of
 #      BOTH arms of --fixed (all, the shipping engine; off, the float
-#      control) over hundreds of tokens of real text - it used to be 12
-#      per-tier values, which is what the one knob replaced. This is the
+#      control) over hundreds of tokens of real text. The one knob
+#      replaced 12 per-tier values. This is the
 #      case the norms tier's original 8/16-token verification could not see
 #      (lz_quantize_q8_int's double-rounding hazard, see that script's
 #      own header) and that a later audit's 153/211-token re-check of
@@ -73,9 +73,12 @@
 #      two rectangles are computed from metrics rather than from each
 #      other
 #  19. build/changelog_comment_gate.sh - the phrasing half of the
-#      comment rule: no file gains an "it used to be" / "no longer" /
-#      "the old loop". A ratchet, because some of those sentences are
-#      load-bearing and the repair is to restate them, not delete them
+#      comment rule: no file gains a changelog phrase. The STRICT and
+#      LOOSE lists in build/changelog_comment_gate.sh are the authority
+#      for which phrases those are - quoting them here would be a second
+#      copy of the list, and it would drift. A ratchet, because some of
+#      those sentences are load-bearing and the repair is to restate
+#      them, not delete them
 #  20. build/str_table_order_gate.sh - src/err.c and
 #      gui/localized_strings.c list their codes in their enums' order.
 #      Those tables are positional now, because Visual C++ 4.0 cannot
@@ -1538,14 +1541,13 @@ else
     RC=1
 fi
 echo "$VERDICT"
-# The same two lines, to one fixed path, and that path printed. Where a
-# round's verdict landed used to be a property of the runner's command
-# line (`> /tmp/...` one round, `> E:/tmp/...` the next), so "where is
-# this round's CI: PASS" was a question about somebody's memory - the
-# file was on disk, complete, and still not findable. This does not
-# change the per-stage logs (build/ci-*.log); it adds the one line
-# everybody quotes. build/ is gitignored, so this is a local reading
-# rather than an artifact.
+# The same two lines, to one fixed path, and that path printed. A round's
+# verdict landing wherever the runner's command line pointed it
+# (`> /tmp/...` one round, `> E:/tmp/...` the next) made "where is this
+# round's CI: PASS" a question about somebody's memory - the file was on
+# disk, complete, and still not findable. This does not change the
+# per-stage logs (build/ci-*.log); it adds the one line everybody quotes.
+# build/ is gitignored, so this is a local reading rather than an artifact.
 { echo "pass=$PASS fail=$FAIL skip=$SKIP"; echo "$VERDICT"; } > build/ci-summary.txt
 echo "ci.sh: summary also written to build/ci-summary.txt"
 # Criterion: after a full run, build/ci-summary.txt holds the TWO VERDICT

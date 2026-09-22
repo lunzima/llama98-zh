@@ -78,9 +78,9 @@ W="${TMPDIR:-/tmp}/subn_gate.$$"
 #     csa2_w_* on 2026-09-17 and src/ has no spec for the first two, so
 #     `--check` refuses it. SUBN_F32_MODEL below is the same checkpoint
 #     for exactly that reason.
-#   - it has since been re-carved to 5 layers. The fixture this recipe
-#     used to name was 6, so re-running the old recipe against today's
-#     kunkun-ce cannot reproduce it even once the engine can load it.
+#   - it has been re-carved to 5 layers, while the fixture the recipe
+#     below names held 6, so re-running it against today's kunkun-ce
+#     cannot reproduce the original even once the engine can load it.
 # The two facts make the pre-switch backup the only surviving checkpoint
 # that both loads and carries use_subn with hadamard_o > 1.
 #

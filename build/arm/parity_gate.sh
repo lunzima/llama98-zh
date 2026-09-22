@@ -41,10 +41,9 @@
 #   docs/fixed-tier-pipeline-breakpoints.md), so ref and arm-c/arm-asm
 #   diverge on the default on x86 too, not only against an ARM target.
 #   Measured on _armgate2: ref differs from arm-c by default and matches
-#   once the epilogue is off. That used to be `--epi-write float`, one
-#   of seven per-tier runtime flags; they collapsed into --fixed, and
-#   the epilogue's own axis is now the LZ_EPI_FIXED compile switch (see
-#   ops.h and build/kernel_isa_identity_gate.sh, which builds with it at
+#   once the epilogue is off. Turning it off is the LZ_EPI_FIXED compile
+#   switch (see ops.h and build/kernel_isa_identity_gate.sh, which builds
+#   with it at
 #   0 for exactly this row). The epilogue is Q8_0-only on every
 #   platform, so a model without Q8_0 tensors shows no such split. See
 #   docs/arm-asm-audit.md section 1 (written before the tiers'
@@ -199,8 +198,8 @@ fi
 # NOTHING USABLE FOUND: build one, out of tree. On a Windows host the
 # repo's only native binary is llama98.exe, and the block above rejects
 # it here for a good reason - it cannot resolve the /mnt/... paths qemu
-# and this script use. That used to end in SKIP, so the gate reported
-# nothing on the machine where the ARM toolchain actually lives.
+# and this script use - and a SKIP there reports nothing on the machine
+# where the ARM toolchain actually lives.
 #
 # INTO ITS OWN DIRECTORY, never build/native/. That path is shared
 # between a MinGW build and a Linux build of the same tree, and neither
@@ -361,10 +360,10 @@ ARM_DUMP="$ARM_WORK/arm.logits"
 # unpinned run would compare each side's default and tell this gate
 # nothing about the float paths it exists to check.
 #
-# WHAT THIS GATE NO LONGER COVERS, now that the seven per-tier flags
-# collapsed into --fixed: the pin string used to be a MIXED setting, so
-# each run exercised some fixed kernels and some float ones on both
-# targets at once. It is `--fixed off` now, a clean float arm. The fixed
+# WHAT THIS GATE DOES NOT COVER, since the seven per-tier flags collapsed
+# into --fixed: the pin string was a MIXED setting, so each run exercised
+# some fixed kernels and some float ones on both targets at once. It is
+# `--fixed off` now, a clean float arm. The fixed
 # side is not lost - it is integer arithmetic, so x86 and ARM must be
 # byte-identical on it and the shipping-default run in this gate's own
 # rows below is that comparison - but the two are separate rows now

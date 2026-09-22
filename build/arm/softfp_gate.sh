@@ -2,11 +2,11 @@
 # src/lz_softfp.c against libgcc's own soft-float, operator by operator,
 # under qemu-arm-static - AND a check that no operator escaped the test.
 #
-# WHY THE COVERAGE HALF MATTERS MORE THAN THE CASE COUNT. This comparison
-# used to live in a scratch directory outside the tree and to exercise
-# eight of the file's twenty-two exported symbols, while the commit that
-# added it reported "every operator against libgcc's, 0 of 41,016,746
-# random and directed cases differing". __aeabi_f2lz was one of the
+# WHY THE COVERAGE HALF MATTERS MORE THAN THE CASE COUNT. A comparison
+# that covers part of the file can report a perfect case count: one in a
+# scratch directory outside the tree exercised eight of the twenty-two
+# exported symbols while reporting "every operator against libgcc's, 0 of
+# 41,016,746 random and directed cases differing". __aeabi_f2lz was one of the
 # fourteen it never called, and it was broken: declared to return `long`
 # where the EABI name means a 64-bit integer, so it filled r0 and left
 # the high half in r1 as whatever the caller had there. Every conversion

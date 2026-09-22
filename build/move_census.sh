@@ -217,9 +217,11 @@ classify() {
         END { printf "%d %d %d %d\n", t, mv + 0, lea + 0, fp + 0 }'
 }
 
-# A BARE RUN USED TO PRINT THE HEADER AND NOTHING, exit 0 - which reads
-# as "measured, nothing to report" and is really "measured nothing".
-# Same failure o3_probe's SYMBOL-NOT-FOUND arm exists to prevent. The
+# A RUN THAT MEASURES NOTHING IS NOT A CLEAN RUN: printing the header and
+# exiting 0 reads as "measured, nothing to report" and is really
+# "measured nothing" - the same failure o3_probe's SYMBOL-NOT-FOUND arm
+# exists to prevent. So a bare run measures the non-operator set the
+# first look above covers. The
 # default is the non-operator set the first look above covers; the
 # operator files are deliberately not in it, since their movement share
 # is a property of hand-written kernels rather than of the compiler.

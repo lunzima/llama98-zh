@@ -35,8 +35,8 @@
 #   cases 1-5, 7a, 7b, 8, 11   must stay PASS - untouched by this check
 #   case 6 (reuse-of-reuse) must turn FAIL - this is what the check guards
 #
-# MUTANT 2 (I3, fifth review round: this refusal previously had NO gate
-# at all anywhere in the repo - a reviewer had to verify it by hand)
+# MUTANT 2 (I3, fifth review round: the refusal had NO gate anywhere in
+# the repo, so a reviewer verified it by hand)
 # disables lz_load_config's own S4+CSA2 refusal (the `if (c->
 # mla_q_lora_rank > 0)` block in the csa2_layers loop, model.c). Only
 # case 11's own two lines may turn FAIL.

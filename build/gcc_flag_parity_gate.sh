@@ -80,11 +80,11 @@ fi
 # Equality above would not catch this: both targets could agree on -O3
 # and the gate would say PASS. Two separate properties, two checks.
 #
-# EVERY SHIPPING ARTIFACT, not the two this gate compares. The refusal
-# used to read $CLI and $GUI only, which are the pair whose parity is
-# the subject - and kunkun98-serve, the x87 build, the ARM cross build
-# and the MIPS one all ship too and were outside it. They are all -O2
-# today; nothing said they had to stay that way.
+# EVERY SHIPPING ARTIFACT, not just the two this gate compares. The
+# refusal reads $CLI and $GUI - the pair whose parity is the subject -
+# and kunkun98-serve, the x87 build, the ARM cross build and the MIPS one
+# ship too, so it reads those as well. They are all -O2 today; nothing
+# says they have to stay that way.
 #
 # The cross builds are shell scripts rather than make targets, so they
 # are scanned as text. That is weaker than reading a recipe and it is

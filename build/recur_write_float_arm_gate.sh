@@ -202,21 +202,20 @@ check_same "--fixed off vs epilogue compiled out / zh" fo_on_zh fo_eof_zh
 run_dump eof fo_eof_en "$TOK_EN" --fixed off
 check_same "--fixed off vs epilogue compiled out / en" fo_on_en fo_eof_en
 
-# ROWS 5-8 USED TO PAIR EACH -D WITH ITS OWN RUNTIME FLAG - --recur-write
-# float against -DLZ_GDN_FIXED=0, --norm-write float against
-# -DLZ_NORM_FIXED=0 - because "each -D removes exactly the tier it names"
-# needed a runtime arm that named the same tier and nothing else. The
-# seven per-tier flags are gone (ops.h, at lz_float_ref_select), so those
-# pairings are unspellable and, with one knob, redundant: rows 1-4
-# already run --fixed off against both builds. The rows were not
-# deleted, they were SPENT - the two freed slots now run the same
-# argument against the two compile switches that never had a row,
-# LZ_CONV_FIXED and LZ_EPI_FIXED. Four compile switches covered, up from
-# two.
+# ROWS 5-8 CARRY THE PAIRING ARGUMENT TO THE COMPILE SWITCHES. That shape
+# - --recur-write float against -DLZ_GDN_FIXED=0, --norm-write float
+# against -DLZ_NORM_FIXED=0 - needs a runtime arm naming the same tier and
+# nothing else, which "each -D removes exactly the tier it names" required.
+# The seven per-tier flags are gone (ops.h, at lz_float_ref_select), so
+# those pairings are unspellable, and with one knob they are redundant:
+# rows 1-4 already run --fixed off against both builds. The slots run the
+# same argument against the two compile switches that never had a row,
+# LZ_CONV_FIXED and LZ_EPI_FIXED. Four compile switches covered.
 #
 # What the collapse does cost: a per-tier runtime arm was an independent
 # way to reach one tier, so a --fixed off that missed exactly one axis
-# used to be visible as "rows 1-2 pass, rows 5-6 fail". Now the only
+# showed as "rows 1-2 pass, rows 5-6 fail" while such an arm existed. The
+# only
 # instrument for that is the compile switch itself, which is why every
 # switch needs its own row and why adding a switch without adding one
 # here leaves it uncovered.
