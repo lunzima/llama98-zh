@@ -161,6 +161,89 @@ for f in $BSCAN; do
     fi
 done
 
+# ---- THE SAME FOUR PREDICATES THE SCAN LOOP ABOVE APPLIES -------------
+#
+# This scope carried ONE of them (RULECITE) while SCAN carried four, so a
+# commit hash, a date or a Chinese comment in build/ was counted by
+# neither loop: the two loops read like the same thing and were not, and
+# the counts they print make it look as though the whole tree had been
+# checked. `comment_hygiene_gate.sh` stays out of the file list for the
+# reason it always did - it defines these rules, and its own control arm
+# below plants one instance of each form.
+#
+# BBASE IS PER PREDICATE (`path:h:d:z`), NOT A SUM. The SCAN loop adds
+# its four counts into one allowance, and a sum is fungible: a new hash
+# can ride in behind a CJK line that was deleted, the total is unchanged
+# and all four predicates stay green. Four predicates that can cancel
+# each other are not four predicates, so these are compared one by one.
+#
+# THE NUMBERS ARE THE DEBT, measured per file when this loop gained the
+# predicates - a ratchet, not a licence. Every entry is a line someone
+# can remove, and the note printed when a count falls below its baseline
+# is the invitation to remove it. Two entries are NOT debt and are here
+# for a reason written at the site instead: the Chinese PROMPT= literals
+# (this scan cannot tell a string from a comment, the same treatment
+# src/err.c's message tables get above) and the baseline revision printed
+# by build/pri64_scan_gate.sh, which is the identity of a measurement
+# rather than of a source line.
+BBASE="
+build/arm/parity_gate.sh:1:1:0
+build/attn_sink_learned_gate.sh:0:0:1
+build/bare_endif_gate.sh:1:0:0
+build/c89_floor_gate.sh:4:0:0
+build/ced_gate.sh:0:0:1
+build/ced_proj_arm_probe.c:2:0:0
+build/ced_replay_gate.sh:0:0:1
+build/codesize_gate.sh:3:1:0
+build/csa2_gate.sh:0:0:1
+build/csa2_mode_dispatch_gate.sh:1:0:0
+build/csa2_mode_export_load_gate.sh:3:0:0
+build/fixed_tier_xcompiler_gate.sh:4:1:0
+build/gate_wiring_gate.sh:1:0:0
+build/gcc_watcom_output_gate.sh:1:0:0
+build/gr_gate.sh:0:0:1
+build/gui_selftest_gate.sh:0:1:0
+build/kernel_isa_identity_gate.sh:1:0:0
+build/kernel_matrix_gate.sh:0:2:0
+build/kv_share_gate.sh:0:0:1
+build/lz4_model_gate.sh:0:1:0
+build/mips/endian_gate.sh:0:1:0
+build/mla_gate.sh:0:0:1
+build/move_census.sh:0:1:0
+build/pair_census.sh:4:1:0
+build/restore_broken_reorders.py:6:0:0
+build/restore_q61_sse2.py:4:0:0
+build/subn_gate.sh:0:2:0
+build/x87/build_engine.sh:0:1:0
+"
+BZ=0
+BO=0
+for f in $BSCAN; do
+    hb=$(grep -ohE "\b[0-9a-f]{7}\b" "$f" 2>/dev/null \
+         | grep -vE "^[0-9]+$" | wc -l)
+    db=$(grep -ohE "20[0-9]{2}-[0-9]{2}-[0-9]{2}" "$f" 2>/dev/null | wc -l)
+    zb=$(LC_ALL=C grep -c $'[\xe4-\xe9][\x80-\xbf][\x80-\xbf]' "$f" 2>/dev/null)
+    [ -n "$zb" ] || zb=0
+    exp=0:0:0
+    for e in $BBASE; do
+        [ "${e%%:*}" = "$f" ] && exp=$(echo "$e" | cut -d: -f2-)
+    done
+    eh=${exp%%:*}; er=${exp#*:}; ed=${er%%:*}; ez=${er#*:}
+    [ -n "$ez" ] || ez=0
+    if [ "$hb" -gt "$eh" ] || [ "$db" -gt "$ed" ] || [ "$zb" -gt "$ez" ]; then
+        echo "FAIL: $f - $hb hash(es) [base $eh], $db date(s) [base $ed]," \
+             "$zb CJK [base $ez]; say the reason, not the coordinate"
+        grep -nohE "\b[0-9a-f]{7}\b|20[0-9]{2}-[0-9]{2}-[0-9]{2}" "$f" 2>/dev/null \
+            | grep -vE "^[0-9]+$" | head -4 | sed 's/^/        /'
+        BZ=$((BZ + 1))
+        FAIL=1
+    elif [ "$hb" -lt "$eh" ] || [ "$db" -lt "$ed" ] || [ "$zb" -lt "$ez" ]; then
+        BO=$((BO + 1))
+        echo "note: $f is below its baseline in at least one predicate" \
+             "($hb/$db/$zb against $eh/$ed/$ez) - tighten it"
+    fi
+done
+
 # ---- SOURCE-LINE CITATIONS, over the same two scopes ------------------
 #
 # `src/ops.c:1104` in a comment is a fact about a file that keeps being
@@ -235,7 +318,8 @@ if [ "$FAIL" -eq 0 ]; then
     # "$TOTAL over baseline: 0" read as one phrase said "1 over
     # baseline" on a run that passed. Two numbers, named.
     echo "comment_hygiene_gate: PASS ($TOTAL counted, 0 over baseline;"
-    echo "  $(printf '%s\n' $BSCAN | wc -l) build script(s) carry 0 rulebook cite(s))"
+    echo "  $(printf '%s\n' $BSCAN | wc -l) build script(s): 0 rulebook cite(s),"
+    echo "  none over its hash/date/CJK baseline, $BO below it)"
     exit 0
 fi
 echo "comment_hygiene_gate: FAIL"
