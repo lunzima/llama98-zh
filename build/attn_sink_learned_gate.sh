@@ -202,7 +202,19 @@ else:
           % (float(min(v.min() for v in vals)), float(max(v.max() for v in vals))))
 print("  fixture: misplaced arm -> layer %d (csa2_layers)" % csa2[0])
 
-GR_KEYS = ("gated_residual", "ced_split", "ced_replay_w")
+# What the fixture strips from config.json, and WHY each key is here: GR
+# is out of this gate's scope (see the header), so the keys that turn it
+# on and the tensors it needs both go. `ced_split` is NOT a GR key and is
+# not here: it is what decides which layers share K/V (model.c's
+# lz_kv_share_target excludes li >= ced_split), so removing it from the
+# config changes which tensors the walk expects - at ced_split = 4 layer
+# 7 is not a share target, at 0 it is, and the walk then skips that
+# layer's k_proj/v_proj/k_norm while the copied tensor set still has
+# them: "tensor ...layer 7...k_norm.weight unclaimed". Teaching the
+# fixture to delete them instead would mean reproducing lz_kv_share_target's
+# layer rule here - a second copy of the walk's own decision, and a second
+# mechanism inside a fixture whose one variable is the sink.
+GR_KEYS = ("gated_residual", "ced_replay_w")
 SKIP_FILES = ("model.safetensors", "model.bin", "model.bin.lz4")
 flat = np.concatenate([v.reshape(-1) for v in vals])
 
