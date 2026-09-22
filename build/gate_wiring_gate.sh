@@ -172,10 +172,12 @@ caption_symmetry_gate.sh   # needs the gui build and a screen readback
 endian_gate.sh             # needs WSL and the MIPS cross toolchain, and
                            #   runs the engine big-endian under qemu
 "
-# codesize_gate.sh LEFT THIS LIST: it is a prerequisite of `check` now.
+# codesize_gate.sh IS DELIBERATELY ABSENT FROM THIS LIST: it is a
+# prerequisite of `check` now (gates.mk's codesize-gate target).
 #
-# The line it used to sit on said "builds three toolchains to compare
-# .text", and that is false of the script as it stands. THE CRITERION,
+# The reason a list like this one exists is cost, and cost is not a
+# reason to keep it out: "builds three toolchains to compare .text" is
+# false of that script as it stands. THE CRITERION,
 # stated so a coarse grep cannot reverse it: strip comments and string
 # literals, then count - in CODE POSITION build/codesize_gate.sh invokes
 # make/wcc386/wlink ZERO times. All four raw-grep hits for those words are
@@ -196,8 +198,9 @@ endian_gate.sh             # needs WSL and the MIPS cross toolchain, and
 # what the old line here claimed, and the two readings are one word apart.
 #
 # WHAT IT COST TO LEARN: parked here, this gate was run by nobody and
-# .text crossed TEXT_CEIL without anything saying so (228999a^ measured
-# 328,752 against a 327,680 ceiling).
+# .text crossed TEXT_CEIL without anything saying so - the measurement
+# is in build/codesize_gate.sh's own note, next to the ceiling it made
+# too small.
 # REACHED, not mentioned. `make -n check` expands the whole prerequisite
 # tree and prints the recipes without running them, so what comes out is
 # what `make check` would actually invoke. Grepping the Makefile instead
@@ -211,11 +214,10 @@ endian_gate.sh             # needs WSL and the MIPS cross toolchain, and
 # the accusing direction. native_obj_gate.sh is not a prerequisite of
 # `check`; it is a line in the `llama98` link recipe, so it runs on every
 # native build. Reading only check would report a gate that runs constantly
-# as one that never runs - which is why this used to take the union of
-# `make -n check` and `make -n`, on the stated ground that check never
-# mentions such a name.
+# as one that never runs - which is why this takes the union of
+# `make -n check` and `make -n`: check alone never mentions such a name.
 #
-# MEASURED 2026-09-22, and the ground had expired: `make -n` produces
+# MEASURED, and the ground has expired: `make -n` produces
 # exactly one gate name (native_obj_gate.sh) and `make -n check` already
 # contains it, because check expands its build prerequisites. The union and
 # check alone are therefore the same set - `diff` of the two is empty, and
@@ -234,12 +236,13 @@ for g in build/*_gate.sh build/*/*_gate.sh; do
 $REACHED" in *"
 $b"*) continue ;; esac                             # reached by make check
     if ! grep -q "$b" build/ci.sh 2>/dev/null; then
-        # THE THIRD CATEGORY, and it used to `continue` past here with
-        # the comment "already counted above" - which was not true of
-        # it. The first half asks only whether the name is MENTIONED in
-        # the Makefile, so a .PHONY target that nothing depends on and
-        # nothing invokes reads as wired; this half then skipped exactly
-        # those, because they are not in ci.sh either. Between the two,
+        # THE THIRD CATEGORY, and it is reported, not skipped: a
+        # `continue` here would call a name "already counted above",
+        # which is not true of it. The first half asks only whether the
+        # name is MENTIONED in the Makefile, so a .PHONY target that
+        # nothing depends on and nothing invokes reads as wired; this
+        # half would then skip exactly those, because they are not in
+        # ci.sh either. Between the two,
         # a gate could be reachable, tracked, declared nowhere, and run
         # by nothing - which is the substitution this whole gate exists
         # to refuse, reintroduced one level up from where it refuses it.
