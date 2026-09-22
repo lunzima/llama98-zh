@@ -204,10 +204,20 @@ endian_gate.sh             # needs WSL and the MIPS cross toolchain, and
 # THE DEFAULT GOAL COUNTS TOO, and leaving it out made this half wrong in
 # the accusing direction. native_obj_gate.sh is not a prerequisite of
 # `check`; it is a line in the `llama98` link recipe, so it runs on every
-# native build and `make -n check` never mentions it. Reading only check
-# would report a gate that runs constantly as one that never runs.
-REACHED=$( { make -n check 2>/dev/null; make -n 2>/dev/null; } \
-           | grep -oE '[a-z0-9_]+_gate\.sh' | sort -u)
+# native build. Reading only check would report a gate that runs constantly
+# as one that never runs - which is why this used to take the union of
+# `make -n check` and `make -n`, on the stated ground that check never
+# mentions such a name.
+#
+# MEASURED 2026-09-22, and the ground had expired: `make -n` produces
+# exactly one gate name (native_obj_gate.sh) and `make -n check` already
+# contains it, because check expands its build prerequisites. The union and
+# check alone are therefore the same set - `diff` of the two is empty, and
+# both are 54 names here. The half is gone; the concern is not. A gate
+# hooked into a target that check does NOT depend on would still be missed,
+# and this is the place that would have to learn about it.
+REACHED=$(make -n check 2>/dev/null \
+          | grep -oE '[a-z0-9_]+_gate\.sh' | sort -u)
 
 CIONLY_UNDECLARED=""
 NEVER_RUN=""
