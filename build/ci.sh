@@ -1546,8 +1546,9 @@ echo "$VERDICT"
 # (`> /tmp/...` one round, `> E:/tmp/...` the next) made "where is this
 # round's CI: PASS" a question about somebody's memory - the file was on
 # disk, complete, and still not findable. This does not change the
-# per-stage logs (build/ci-*.log); it adds the one line everybody quotes.
-# build/ is gitignored, so this is a local reading rather than an artifact.
+# per-stage logs (build/ci-*.log); it adds the summary line the project
+# quotes, beside the counts. build/ is gitignored, so this is a local
+# reading rather than an artifact.
 { echo "pass=$PASS fail=$FAIL skip=$SKIP"; echo "$VERDICT"; } > build/ci-summary.txt
 echo "ci.sh: summary also written to build/ci-summary.txt"
 # Criterion: after a full run, build/ci-summary.txt holds the TWO VERDICT
