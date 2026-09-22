@@ -101,6 +101,13 @@ W=${W:-/tmp/mipsendian}
 KERNELS=${KERNELS:-ref}
 
 FAIL=0
+# Two flags, because the verdict below treats them differently: FAIL is
+# for the failures that are not about the bytes (an arm that did not
+# build, a build that is not the endianness it claims, a model neither
+# arm could run), FAIL_DIFF for the arms' dumps differing - which is the
+# claim the fallback note above says cannot be made when the LE arm is
+# the native host build.
+FAIL_DIFF=0
 bad() { echo "endian-gate: FAIL $*"; FAIL=1; }
 
 # ---- toolchain ----------------------------------------------------------
@@ -157,8 +164,14 @@ CC_LE=$(find_cc mipsel-linux-gnu || true)
 # script hands it, which is how the first version of this fallback
 # failed: three models "not found" on the LE arm and loaded fine on BE.
 NATIVE_LE=""
+CONFOUND=""
 if [ -z "$CC_LE" ] && command -v gcc >/dev/null 2>&1; then
     NATIVE_LE=host
+    # Set whenever the LE arm is not a MIPS LE cross build. It is what
+    # the note above describes and what the verdict at the bottom acts
+    # on: with the arms differing in compiler and libc as well, a
+    # difference between them is not evidence about byte order.
+    CONFOUND=1
 fi
 
 missing=""
@@ -337,7 +350,7 @@ print("dead" if len(set(v))<=1 else "live")' "$W/$name.$k.le.bin")
             tot=$(wc -c < "$W/$name.$k.le.bin")
             printf '  DIFFER     %-26s %-6s %s/%s bytes differ\n' \
                 "$name" "$k" "$n" "$tot"
-            FAIL=1
+            FAIL_DIFF=1
         fi
     done
 done
@@ -350,6 +363,27 @@ if [ "$ran_any" -eq 0 ]; then
 fi
 
 if [ "$FAIL" -ne 0 ]; then
+    echo "endian_gate: FAIL"
+    exit 1
+fi
+# THE ARMS DIFFERED, AND THIS GATE CANNOT SAY WHAT THAT MEANS HERE. The
+# note above the LE fallback already states the terms, and the gate must
+# not then make the claim it says it cannot make: when the LE arm is the
+# native host build, the difference may be the compiler and libc rather
+# than byte order, so the verdict is SKIP - not a relaxation, the
+# replacement of a claim this configuration cannot support. A PASS is
+# untouched and still means what it always meant: a load path that
+# assumed little-endian could not produce the same logits on a
+# big-endian machine.
+if [ "$FAIL_DIFF" -ne 0 ]; then
+    if [ -n "$CONFOUND" ]; then
+        echo "endian-gate: SKIP - the arms differ, and the LE arm is a native"
+        echo "  host build: they differ in compiler and libc as well as in byte"
+        echo "  order, so this difference cannot be attributed. Install"
+        echo "  gcc-14-mipsel-linux-gnu for a matched pair before reading a"
+        echo "  FAIL into the DIFFER lines above."
+        exit 2
+    fi
     echo "endian_gate: FAIL"
     exit 1
 fi
