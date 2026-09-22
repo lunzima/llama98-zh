@@ -41,7 +41,7 @@
 # nested inside another comment; gcc said so on every build and `check`
 # reported 16 PASS over it. Having a caller somewhere is not the test -
 # being reachable from what people actually run is.
-check: root-hygiene-gate bare-endif-gate wscr-borrow-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate json-offset-gate softfp-gate dedupe-gate mm-alias-gate kv-share-ced-boundary-gate ced-proj-arm-gate csa2-modes-config-gate csa2-cache-idx-alias-gate csa2-mode-dispatch-gate csa2-mode-export-load-gate csa2-last-writer-bin-gate csa2-reindex-causality-gate csa2-indexer-rope-slice-gate csa2-out-rope-gate csa2-z-subst-gate csa2-compress-m-layers-gate smf-lead-gate c89-floor-gate pri64-scan-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate codesize-gate isa-floor-avx2-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate arch-allowlist-gate kernel-matrix-gate aux-parm-arity-gate aux-equiv-gate mathf-xcompiler-gate bf16-torch-gate lz4-model-gate gcc-watcom-output-gate fixture-exists-gate
+check: root-hygiene-gate bare-endif-gate wscr-borrow-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate json-offset-gate softfp-gate dedupe-gate mm-alias-gate kv-share-ced-boundary-gate ced-proj-arm-gate csa2-modes-config-gate csa2-cache-idx-alias-gate csa2-mode-dispatch-gate csa2-mode-export-load-gate csa2-last-writer-bin-gate csa2-reindex-causality-gate csa2-indexer-rope-slice-gate csa2-out-rope-gate csa2-z-subst-gate csa2-compress-m-layers-gate smf-lead-gate c89-floor-gate pri64-scan-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate tree-lock-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate codesize-gate isa-floor-avx2-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate arch-allowlist-gate kernel-matrix-gate aux-parm-arity-gate aux-equiv-gate mathf-xcompiler-gate bf16-torch-gate lz4-model-gate gcc-watcom-output-gate fixture-exists-gate
 
 # Zero gcc warnings, asserted rather than printed. The Watcom side has
 # always been counted ("N lines, 0 warnings, 0 errors", per file); this
@@ -184,6 +184,14 @@ gcc-watcom-pair-gate:
 .PHONY: gate-wiring-gate
 gate-wiring-gate:
 	@bash build/gate_wiring_gate.sh
+
+# The tree lock's own criteria: nine arms plus a census of the entry
+# points that touch a shared path. Seconds, no compiler, no model, and it
+# never touches the shipping lock (it points the lock at a scratch
+# directory), so `check` can run it before every commit like any other.
+.PHONY: tree-lock-gate
+tree-lock-gate:
+	@bash build/tree_lock_gate.sh
 
 # The language floor, as a ratchet plus a real -std=c89 compile. See the
 # script's header for what green does and does not mean.

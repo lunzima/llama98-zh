@@ -38,6 +38,11 @@
 !/build/csa2_indexer_rope_slice_probe.c
 !/build/csa2_compress_m_layers_gate.sh
 !/build/csa2_compress_m_layers_probe.c
+!/build/tree_lock.sh
+!/build/tree_lock_gate.sh
+# build/.tree-lock.d/ is NOT added back: it is the tree lock's runtime
+# state, not an artifact, and it must never be committed. These two
+# neighbouring lines point in opposite directions on purpose.
 !/build/kv_share_gate.sh
 !/build/attn_sink_learned_gate.sh
 !/build/gr_gate.sh
