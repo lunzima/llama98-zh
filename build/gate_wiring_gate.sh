@@ -85,14 +85,24 @@ done
 # only so the next reader does not go looking for them. cov_run.sh is
 # not a census either - it is the coverage build the last two share.
 #
+# NO BACKTICKS, NO DOLLAR SIGNS, NO DOUBLE QUOTES BETWEEN THE DELIMITERS.
+# Everything from CI_ONLY= to the closing quote is ONE DOUBLE-QUOTED
+# STRING: a hash inside it is text rather than a comment, and a backtick or
+# a dollar sign is LIVE - the shell expands it before any of this reaches
+# the case statements below. A stray double quote closes the string early
+# and the list entries that follow become command lines; the gate then
+# reports that as coverage (make check does not run these), which is a
+# parse failure wearing a coverage failure's clothes. Both were hit by one
+# edit that added an entry quoting the word check.
+#
 # GATES THAT NEED A MODEL, a cross-toolchain build, or minutes of wall
-# clock. `check` is meant to be runnable before every commit. Where a reason
-# here was written from a gate's NAME rather than from what it does, the name
-# has been wrong at least twice: the two `*_arm_gate` entries below build
-# CONTROL arms with gcc, in 266 s and 388 s - minutes, which is the real
-# reason they are out. A false reason reads as "cannot be moved" and stops
-# the question (should this be in `check`?) from being asked at all, which is
-# how a gate stays out of the pre-commit run for a reason nobody chose.
+# clock. check is meant to be runnable before every commit. Where a reason
+# here was written from a gate's NAME rather than from what it does, the
+# name has been wrong at least twice: the two *_arm_gate entries below
+# build CONTROL arms with gcc, in 266 s and 388 s - minutes, which is the
+# real reason they are out. A false reason reads as though the gate cannot
+# be moved, and that stops the question (should this be in check?) from
+# being asked at all.
 CI_ONLY="
 prefetch_parity_gate.sh    # two full Watcom engine builds, and the arms it
                            #   checks are compiled by no other toolchain
@@ -101,8 +111,14 @@ norm_sse_parity_gate.sh    # a full Watcom engine build; the #pragma aux
 i32f_acc_gate.sh           # same, for the two int32->float accumulate
                            #   tiers - two engine builds per run
 align_gate.sh              # 5489 compiled checks, whole-tree instrumented build
-native_obj_gate.sh         # pre-link hook, silent by design; ci.sh is where
-                           #   it has objects to look at
+native_obj_gate.sh         # A BUILD HOOK, not a gate step, and the sense of
+                           #   this list that check does not run a name it
+                           #   lists does not apply here: check runs it in
+                           #   the link recipe right
+                           #   before the native link, where a non-zero exit
+                           #   fails that build. Listed so the name ci.sh also
+                           #   invokes as a stage is not read as an undeclared
+                           #   ci-only gate
 kernel_isa_identity_gate.sh # disassembles both toolchains' objects
 switch_matrix_gate.sh      # builds the knob matrix, many configurations
 float_knob_gate.sh         # instrumented build plus two planted axes
@@ -140,8 +156,9 @@ tier_reach_gate.sh         # a coverage build plus a real generation, and
 xcheck_gate.sh             # needs a model
 fixed_tier_xcompiler_gate.sh # needs a model and both toolchains
 recur_write_float_arm_gate.sh # builds and runs six whole engine binaries from
-                           #   one model, gcc only: 266 s measured. "arm" is
-                           #   the float CONTROL arm, not the ARM architecture
+                           #   one model, gcc only: 266 s measured. The arm in
+                           #   this name is the float CONTROL arm, not the ARM
+                           #   architecture
 int_pipeline_arm_gate.sh   # builds and runs fourteen whole engine binaries
                            #   from one model, gcc only: 388 s measured; the
                            #   arms are control arms likewise
