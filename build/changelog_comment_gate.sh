@@ -97,14 +97,6 @@ build/switch_matrix_gate.sh:4
 # the words, not the historical one, and STRICT cannot tell them apart.
 # It was rewritten to "Callers save and restore" rather than exempted,
 # because the ambiguity was in the comment, not in the regex.
-#
-# build/*.sh is DELIBERATELY OUT, and that is a decision rather than an
-# oversight. Several of its matches are load-bearing in a way source
-# comments are not - "ROWS 5-8 USED TO PAIR EACH -D WITH ITS OWN RUNTIME
-# FLAG" is what stops the next reader re-adding seven retired knobs, and
-# this file's own header has to quote the phrases to say what it catches.
-# The count is MEASURED and printed at the end rather than written here,
-# so it cannot go stale into a claim.
 SCAN="src/*.c src/*.h common/*.c common/*.h gui/*.c gui/*.h Makefile
       build/*.sh build/arm/*.sh build/mips/*.sh build/x87/*.sh"
 
