@@ -46,7 +46,7 @@ cd "$(dirname "$0")/.."
 # path. Rewriting those to satisfy a regex would make the comments
 # worse. So LOOSE is counted and printed, never failed on: it is a
 # number to look at, not an assertion.
-STRICT="used to be|used to |before this task|as before this|previously|formerly"
+STRICT="\bused to be|\bused to |\bbefore this task|\bas before this|\bpreviously|\bformerly"
 LOOSE="no longer|the old |originally"
 PAT="$STRICT"
 
