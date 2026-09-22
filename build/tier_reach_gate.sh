@@ -44,7 +44,40 @@ TOKENS=${2:-8}
 
 [ -d "$MODEL" ] || { echo "tier-reach: SKIP - no model at $MODEL"; exit 2; }
 
-W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
+W=$(mktemp -d)
+
+# gcov writes one .gcov per source INTO THE CURRENT DIRECTORY, and this
+# script runs from the repo root because that is what gcov resolves
+# source paths against (build/cov_run.sh's own comment has the same
+# note). They are .gitignore'd, so `git status` stays clean while
+# root_hygiene_gate - which reads the DIRECTORY and exists precisely
+# because "GIT STATUS IS NOT THE TEST" - fails the NEXT `make check` on
+# them. That is a closed loop with nobody in it: this gate is a
+# prerequisite of `check`, so every run of `check` planted the mine that
+# killed the following one.
+#
+# The sweep takes the list from BEFORE the gcov call and removes only
+# what this run added, so a .gcov someone else was reading survives. It
+# runs from the same EXIT trap as the scratch dir, which covers the
+# normal path and every early exit the checks below take.
+GCOV_PRE="$W/gcov_pre.txt"
+ls ./*.gcov 2>/dev/null > "$GCOV_PRE" || :
+sweep_gcov() {
+    local g
+    for g in ./*.gcov; do
+        [ -f "$g" ] || continue
+        grep -qxF "$g" "$GCOV_PRE" || rm -f "$g"
+    done
+}
+on_exit() { sweep_gcov; rm -rf "$W"; }
+trap on_exit EXIT
+# A signal must run the sweep too - being killed between gcov's write and
+# this script's last line would otherwise plant the same mine as a
+# completed run. `exit` here (not a bare return) so the EXIT trap above
+# does the work, rather than this handler continuing the script.
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 . build/cov_run.sh
 cov_run "$W" "$MODEL" "$TOKENS" || exit 2
