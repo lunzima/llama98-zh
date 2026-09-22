@@ -693,10 +693,16 @@ esac
 # gate's arms and its mutation both compare logits between two ON
 # configurations, never against an unmodified baseline alone. Own
 # script for the same reason as --ced: a mutant engine build per run.
+#
+# Pointed at kunkun98 rather than ARM_MODEL, like the --ced stage above
+# and for the same reason: the checkpoint has to carry ced_split for the
+# reset to have layers to fire on. ARM_MODEL does not, so the gate read
+# "off layers=0 on layers=0" and failed on a fixture that could not
+# exercise it - which says nothing about the engine.
 echo
 echo "==== [11c/31]--ced-replay-w invariance ===="
 LOG=build/ci-ced-replay.log
-build/ced_replay_gate.sh "$ARM_MODEL" >"$LOG" 2>&1
+build/ced_replay_gate.sh "$MODELS_ROOT/kunkun98" >"$LOG" 2>&1
 CEDR_RC=$?
 cat "$LOG"
 case $CEDR_RC in
