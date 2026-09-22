@@ -38,6 +38,15 @@
 # `make check` also remains available unlocked - it is the ordinary form,
 # and its per-gate locks still keep two gates from colliding.
 #
+# WHAT IT DOES NOT COVER: editors. Taking the lock says no other RUNNER is
+# in the tree; it says nothing about someone editing a file this run is
+# about to read. An editor does not take the lock and cannot be excluded
+# by one, and the reading comes back looking ordinary either way - so a
+# run that overlapped an edit to a file it reads is a window, not a
+# result, no matter how plausible its output. `comment_hygiene_gate.sh`
+# and this file's own gate both scan build/*.sh, which is where that
+# happens most easily.
+#
 # WHAT IT LOCKS: one claim for the whole tree, not one per directory.
 # The shared things that have been lost to races live in different
 # places - build/native/ and the .gcov files gcov drops in the tree root -
