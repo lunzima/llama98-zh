@@ -168,10 +168,16 @@ done
 #                     diff that looks like a misspelling.
 #   lz_fastfp_g       --fastfp.
 #   lz_float_ref_g    --fixed. The float axis, and the only one.
+#   lz_epi_fixed_g    --epi. NOT a second float axis: it selects no
+#                     arithmetic tier of its own and moves nothing in
+#                     --fixed's group. It floats the dequant epilogue
+#                     alone, which is the one state in which --kernel
+#                     ref and --kernel sse2 do not differ, so the
+#                     identity gate reaches it without a second build.
 #
-# A fourth of any name reddens. That is the safe direction: a new knob
-# has to be argued for here rather than arriving silently.
-EXPECT_GLOBALS="g_kernel g_pair lz_bf16_store_g lz_bf16_store_g lz_fastfp_g lz_float_ref_g"
+# Any name added or removed reddens. That is the safe direction: a new
+# knob has to be argued for here rather than arriving silently.
+EXPECT_GLOBALS="g_kernel g_pair lz_bf16_store_g lz_bf16_store_g lz_fastfp_g lz_float_ref_g lz_epi_fixed_g"
 GOT=$(grep -oE "^(int|unsigned|long|float|double)[a-zA-Z0-9_ ]*\**([a-zA-Z_][a-zA-Z0-9_]*) *=" \
       src/ops_sched.c | grep -oE "[a-zA-Z_][a-zA-Z0-9_]* *=$" | sed 's/ *=$//' | sort | tr '\n' ' ')
 WANT=$(printf '%s\n' $EXPECT_GLOBALS | sort | tr '\n' ' ')

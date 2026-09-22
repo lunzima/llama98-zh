@@ -539,23 +539,36 @@ const char *lz_hadamard_select(const char *name) {
 
 /* ---- epilogue tier --------------------------------------------------- */
 
-/* LZ_EPI_FIXED is the compile switch, the same shape LZ_GDN_FIXED and
-   LZ_CONV_FIXED have. It exists because --kernel ref structurally has
-   no fixed epilogue - lz_matmul_xq_nt routes LZ_KERNEL_REF to
+/* LZ_EPI_FIXED is the BUILD DEFAULT for this row and --epi overrides
+   it at run time, the pairing --fastfp has.
+
+   The row is separate from --fixed because --kernel ref structurally
+   has no fixed epilogue - lz_matmul_xq_nt routes LZ_KERNEL_REF to
    matmul_scalar_ref before any epilogue is selected - so ref and sse2
    differ on the shipping default for that one reason, and
-   build/kernel_isa_identity_gate.sh needs a build where they do not in
+   build/kernel_isa_identity_gate.sh needs a state where they do not in
    order to compare every OTHER fixed kernel against its C reference.
-   A per-site runtime flag would serve that; a whole-engine float switch
-   does not, because floating everything takes conv, norms, sigmoid,
-   recurrence and attention out of the comparison, which is the coverage
-   the row exists for. Hence the compile-time switch here. */
+   --fixed off does not serve that: it takes conv, norms, sigmoid,
+   recurrence and attention out of the comparison along with the
+   epilogue, which is the coverage the row exists for. So this switch
+   is narrower than --fixed and sits outside its group - `--epi off`
+   under `--fixed all` floats the epilogue alone.
+
+   The `&&` order is the group rule, not an optimization: the epilogue
+   feeds int16 planes that only the fixed path reads, so `--fixed off`
+   disables it whatever --epi says, and --epi can only narrow further. */
+int lz_epi_fixed_g = LZ_EPI_FIXED;
+
+const char *lz_epi_fixed_select(const char *name) {
+    if (!name) return NULL;
+    if (strcmp(name, "on") == 0) lz_epi_fixed_g = 1;
+    else if (strcmp(name, "off") == 0) lz_epi_fixed_g = 0;
+    else return NULL;
+    return lz_epi_fixed_g ? "on" : "off";
+}
+
 int lz_epi_mode(void) {
-#if LZ_EPI_FIXED
-    return !lz_float_ref_g;
-#else
-    return 0;
-#endif /* LZ_EPI_FIXED */
+    return lz_epi_fixed_g && !lz_float_ref_g;
 }
 
 /* ---- prefetch selector ----------------------------------------------- */
@@ -791,12 +804,20 @@ const char *lz_tier_report(void) {
     static char buf[512];
     const char *t = lz_float_ref_g ? "float" : "fixed";
     const char *d = lz_float_ref_g ? "" : " (default)";
+    const char *et, *ed;
     int p = 0;
+    /* The epilogue is the one row above that does NOT follow --fixed:
+       --epi narrows it alone, so it prints its own state and names the
+       switch that moved it. Printing `t` here would read "fixed" on a
+       run whose epilogue is floated, which is the state the identity
+       gate's ref-against-sse2 row is built on. */
+    et = lz_epi_mode() ? "fixed" : "float";
+    ed = lz_epi_mode() ? d : (lz_epi_fixed_g ? "" : " (--epi off)");
     p += sprintf(buf + p, "  recurrence   %s%s\n", t, d);
     p += sprintf(buf + p, "  conv1d       %s%s\n", t, d);
     p += sprintf(buf + p, "  attention    %s%s\n",
                  lz_float_ref_g ? "float" : "fixed+int", d);
-    p += sprintf(buf + p, "  epilogue     %s%s\n", t, d);
+    p += sprintf(buf + p, "  epilogue     %s%s\n", et, ed);
     p += sprintf(buf + p, "  sigmoid/silu %s%s\n", t, d);
     p += sprintf(buf + p, "  norms        %s%s\n", t, d);
     p += sprintf(buf + p, "  scalar       %s%s\n", t, d);

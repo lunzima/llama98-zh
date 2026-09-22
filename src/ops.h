@@ -1133,6 +1133,14 @@ const char *lz_hadamard_select(const char *name);
    AUTO asks the same CPUID SSE question the conv and pass-2 tiers ask. */
 int lz_epi_mode(void);
 
+/* --epi on|off. Narrows lz_epi_mode() below the --fixed group rather
+   than moving with it: the two states a caller needs are "the shipping
+   default" and "the epilogue floated while every other fixed kernel
+   stays fixed", and only the second separates ref from sse2 on the axis
+   ops.h's LZ_EPI_FIXED note names. Returns the mode as stored, so a
+   caller can print what it got, or NULL for a name it does not take. */
+const char *lz_epi_fixed_select(const char *name);
+
 /* Build a tensor's int16 scale plane. Idempotent, and a no-op when the
    shape is outside the derived bound - callers do not have to know the
    limit, they check lz_epi_ready() afterwards. */

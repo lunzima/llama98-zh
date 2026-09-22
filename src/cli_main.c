@@ -481,6 +481,19 @@ static void usage(void) {
     "                   floating one tier at a time measured worse than\n"
     "                   BOTH ends on six of seven axes, while the two ends\n"
     "                   are indistinguishable from each other.\n"
+    "  --epi MODE       on|off (default on). The dequant epilogue's own\n"
+    "                   axis and the one exception to the sentence above.\n"
+    "                   It is not a third --fixed setting: off floats\n"
+    "                   that single tier while conv, norms, sigmoid,\n"
+    "                   recurrence and attention stay fixed, which is\n"
+    "                   the state --fixed off cannot produce.\n"
+    "                   --kernel ref reaches matmul_scalar_ref before any\n"
+    "                   epilogue is selected, so ref and the SIMD tiers\n"
+    "                   differ on the shipping default for this one\n"
+    "                   reason; off removes it and nothing else, which\n"
+    "                   is the pair build/kernel_isa_identity_gate.sh\n"
+    "                   compares. Inert under --fixed off, where the\n"
+    "                   epilogue is already floated.\n"
     "  --fp-exceptions  Report which IEEE special cases this run actually\n"
     "                   hit (IE invalid/NaN, DE denormal, ZE div-by-zero,\n"
     "                   OE overflow, UE underflow, PE inexact), read from\n"
@@ -1692,6 +1705,21 @@ int main(int argc, char **argv) {
             const char *got = lz_float_ref_select(argv[++i]);
             if (!got) {
                 printf("--fixed: unknown mode (off|all)\n");
+                return 2;
+            }
+        }
+        else if (strcmp(a, "--epi") == 0 && i + 1 < argc) {
+            /* Outside the --fixed group on purpose, and the one switch
+               that narrows that group rather than joining it: `--fixed
+               off` floats the epilogue along with conv, norms, sigmoid,
+               recurrence and attention, so it cannot produce the state
+               this exists for - the epilogue floated while every other
+               fixed kernel stays fixed. That state is what separates
+               --kernel ref from --kernel sse2 without a second build;
+               see ops_sched.c's lz_epi_mode. */
+            const char *got = lz_epi_fixed_select(argv[++i]);
+            if (!got) {
+                printf("--epi: unknown mode (on|off)\n");
                 return 2;
             }
         }
