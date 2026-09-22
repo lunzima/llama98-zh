@@ -105,7 +105,13 @@ done
 # being asked at all.
 CI_ONLY="
 prefetch_parity_gate.sh    # two full Watcom engine builds, and the arms it
-                           #   checks are compiled by no other toolchain
+                           #   checks are compiled by no other toolchain - the
+                           #   exhaustive argument, so a later reader does not
+                           #   have to take it on faith: LZ_Q41_PFSEL's block
+                           #   sits behind the guard __WATCOMC__ ||
+                           #   LZ_DOT_MMX_EXTERN at src/ops_matmul.c:650, gcc
+                           #   defines neither name, and nothing in this
+                           #   tree's build defines LZ_DOT_MMX_EXTERN
 norm_sse_parity_gate.sh    # a full Watcom engine build; the #pragma aux
                            #   twins it compares exist in no gcc build
 i32f_acc_gate.sh           # same, for the two int32->float accumulate
