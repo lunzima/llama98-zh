@@ -1523,9 +1523,21 @@ done
 echo
 echo "pass=$PASS fail=$FAIL skip=$SKIP"
 if [ "$FAIL" -eq 0 ]; then
-    echo "CI: PASS (skips do not count as failures, but are listed above)"
-    exit 0
+    VERDICT="CI: PASS (skips do not count as failures, but are listed above)"
+    RC=0
 else
-    echo "CI: FAIL"
-    exit 1
+    VERDICT="CI: FAIL"
+    RC=1
 fi
+echo "$VERDICT"
+# The same two lines, to one fixed path, and that path printed. Where a
+# round's verdict landed used to be a property of the runner's command
+# line (`> /tmp/...` one round, `> E:/tmp/...` the next), so "where is
+# this round's CI: PASS" was a question about somebody's memory - the
+# file was on disk, complete, and still not findable. This does not
+# change the per-stage logs (build/ci-*.log); it adds the one line
+# everybody quotes. build/ is gitignored, so this is a local reading
+# rather than an artifact.
+{ echo "pass=$PASS fail=$FAIL skip=$SKIP"; echo "$VERDICT"; } > build/ci-summary.txt
+echo "ci.sh: summary also written to build/ci-summary.txt"
+exit "$RC"
