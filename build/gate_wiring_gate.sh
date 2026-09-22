@@ -86,7 +86,13 @@ done
 # not a census either - it is the coverage build the last two share.
 #
 # GATES THAT NEED A MODEL, a cross-toolchain build, or minutes of wall
-# clock. `check` is meant to be runnable before every commit.
+# clock. `check` is meant to be runnable before every commit. Where a reason
+# here was written from a gate's NAME rather than from what it does, the name
+# has been wrong at least twice: the two `*_arm_gate` entries below build
+# CONTROL arms with gcc, in 266 s and 388 s - minutes, which is the real
+# reason they are out. A false reason reads as "cannot be moved" and stops
+# the question (should this be in `check`?) from being asked at all, which is
+# how a gate stays out of the pre-commit run for a reason nobody chose.
 CI_ONLY="
 prefetch_parity_gate.sh    # two full Watcom engine builds, and the arms it
                            #   checks are compiled by no other toolchain
@@ -133,8 +139,12 @@ tier_reach_gate.sh         # a coverage build plus a real generation, and
                            #   as much as of the code
 xcheck_gate.sh             # needs a model
 fixed_tier_xcompiler_gate.sh # needs a model and both toolchains
-recur_write_float_arm_gate.sh # needs the ARM cross toolchain
-int_pipeline_arm_gate.sh   # needs the ARM cross toolchain
+recur_write_float_arm_gate.sh # builds and runs six whole engine binaries from
+                           #   one model, gcc only: 266 s measured. "arm" is
+                           #   the float CONTROL arm, not the ARM architecture
+int_pipeline_arm_gate.sh   # builds and runs fourteen whole engine binaries
+                           #   from one model, gcc only: 388 s measured; the
+                           #   arms are control arms likewise
 caption_symmetry_gate.sh   # needs the gui build and a screen readback
 endian_gate.sh             # needs WSL and the MIPS cross toolchain, and
                            #   runs the engine big-endian under qemu
