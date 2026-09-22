@@ -1898,10 +1898,11 @@ int main(int argc, char **argv) {
     /* m.st is the SAFETENSORS table. lz_open_bin never fills it - it reads
        model.bin positionally, through m.rd, and keeps no name table - so on
        a bin load every m.st field is zero BY CONSTRUCTION rather than by
-       measurement, and three places below used to print those zeros as if
-       they were readings. The bin DOES carry BF16 (visit_read_bin reads
-       LZ_FMT_BF16), so the zero was not even true of the file. Guarded on
-       this flag each of the three says what it can actually see. */
+       measurement: a site that prints one of those zeros as a reading is
+       printing an absent table, not an empty model. The bin DOES carry BF16
+       (visit_read_bin reads LZ_FMT_BF16), so the zero is not even true of
+       the file. Guarded on this flag, each of the three sites below says
+       what it can actually see. */
     have_st = m.st.n_tensors > 0;
 
     printf("Model dir      %s\n", dir);
