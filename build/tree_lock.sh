@@ -20,6 +20,24 @@
 #   tree_lock.sh release             give it back (only your own)
 #   tree_lock.sh status              who holds it, or that nobody does
 #
+# WHICH FORM A READING NEEDS. One entry point is protected by its own
+# lock (the gates that touch a shared path take it themselves). A ROUND -
+# anything that runs more than one of them, or whose result is a reading
+# someone will quote - needs the outer form, build/with_tree_lock.sh,
+# because between two gates there is otherwise a window for an outside
+# writer to replace what the later stages read:
+#
+#   make locked-check                      a per-commit verification round
+#   with_tree_lock.sh bash build/ci.sh     a full CI round, whose summary
+#                                          line is quoted
+#   with_tree_lock.sh <a census or an      anything whose number goes into
+#                      A/B measurement>     a report
+#
+# NOT needed, deliberately: reading the tree (ls, grep, git status, a log),
+# and the gates that build only in a scratch directory and share nothing.
+# `make check` also remains available unlocked - it is the ordinary form,
+# and its per-gate locks still keep two gates from colliding.
+#
 # WHAT IT LOCKS: one claim for the whole tree, not one per directory.
 # The shared things that have been lost to races live in different
 # places - build/native/ and the .gcov files gcov drops in the tree root -
