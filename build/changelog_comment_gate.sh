@@ -67,7 +67,6 @@ PAT="$STRICT"
 # collision was latent, not absent, and widening the scope is what would
 # have made it live.
 BASELINE="
-src/forward.c:1
 build/arm/parity_gate.sh:3
 build/arm/softfp_gate.sh:1
 build/c89_floor_gate.sh:1
@@ -134,6 +133,14 @@ for f in $SCAN; do
         echo "FAIL: $f - $n changelog phrase(s), baseline $exp"
         grep -nioE "$PAT" "$f" | head -3 | sed 's/^/        /'
         FAIL=1
+    # THREE DIRECTIONS, EACH ONE OBSERVABLE: over the baseline is a FAIL
+    # (that file gained new debt), at it is green (the status quo), under
+    # it is this note. An allowance is for debt that exists, so being
+    # under one means the debt was paid and the entry was forgotten - not
+    # that the file is fine and the number is slack. When this note first
+    # fired it was src/forward.c, the last entry in src/: the sentence had
+    # been rewritten as a present-tense claim and the count went to zero
+    # while the allowance stayed.
     elif [ "$n" -lt "$exp" ]; then
         BELOW=$((BELOW + 1))
         echo "note: $f is at $n, below its baseline of $exp - tighten it"
@@ -156,6 +163,11 @@ fi
 # The loose phrases are COUNTED, not asserted on: "once they can no
 # longer participate" describes a state and "the OLD s->mtp_pos" is the
 # pre-step value. Printed so the number is visible if it starts growing.
+#
+# IT JUMPED 70 -> 146 WHEN THE BUILD SCRIPTS JOINED THE SCOPE, and that is
+# scope rather than prose. The line printed directly under it names
+# $SCAN, so the number and what it covers are read together; this note is
+# here for a reader who sees the 146 on its own and takes it for growth.
 LTOT=0
 for f in $SCAN; do
     n=$(grep -oiE "$LOOSE" "$f" 2>/dev/null | wc -l)
