@@ -3,6 +3,14 @@
 # a workflow would call, and it also runs by hand:
 #
 #   build/ci.sh
+# THIS SCRIPT AND `make check` DO NOT CONTAIN EACH OTHER, so a green in
+# one says nothing about the other. comment_hygiene_gate.sh is a
+# prerequisite of `check` and appears below only in a comment - a grep
+# for its name finds prose, not an invocation. The gates wired into
+# `check` are, with codesize_gate.sh the exception, not stages here.
+# "The tree is green" therefore has no single instrument; name the one
+# that ran.
+#
 #
 # Stages, each independently PASS / FAIL / SKIP, none silent:
 #   1. make native             (gcc)
@@ -1540,4 +1548,9 @@ echo "$VERDICT"
 # rather than an artifact.
 { echo "pass=$PASS fail=$FAIL skip=$SKIP"; echo "$VERDICT"; } > build/ci-summary.txt
 echo "ci.sh: summary also written to build/ci-summary.txt"
+# Criterion: after a full run, build/ci-summary.txt holds the TWO VERDICT
+# LINES this run printed - `pass=... fail=... skip=...` and the CI:
+# PASS/FAIL line. Not "the last two lines of stdout": the line above
+# announcing the path is printed after them, so the file matches stdout's
+# last two lines only by accident of where that announcement sits.
 exit "$RC"
