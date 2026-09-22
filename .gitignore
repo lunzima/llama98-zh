@@ -40,6 +40,7 @@
 !/build/csa2_compress_m_layers_probe.c
 !/build/tree_lock.sh
 !/build/tree_lock_gate.sh
+!/build/with_tree_lock.sh
 # build/.tree-lock.d/ is NOT added back: it is the tree lock's runtime
 # state, not an artifact, and it must never be committed. These two
 # neighbouring lines point in opposite directions on purpose.

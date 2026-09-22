@@ -213,6 +213,39 @@ grep -q '^LOCKDIR=${LZ_TREE_LOCK_DIR:-build/\.tree-lock\.d}$' "$TL" \
     && ok FAIL "A9: this gate created the SHIPPING lock" \
     || ok PASS "A9: this gate left the shipping lock untouched"
 
+# ------------------------------------------------------------------- A11
+# THE OUTER LOCK. Per-gate acquisition stops two gates colliding; it does
+# not stop an outside writer slipping in BETWEEN two gates of a round -
+# and from that point the round is reading a tree its later stages did not
+# start from. So a locked round must refuse an outside acquire for its
+# whole duration, and that is what this arm measures: a wrapper holds the
+# lock, an outside acquire is refused WITH the holder named, and once the
+# round ends the lock is free again.
+reset_lock
+LZ_TREE_LOCK_NAME="A11 round" bash build/with_tree_lock.sh sleep 3 >"$W/a11.round" 2>&1 &
+R11=$!
+# Wait for the ROUND to hold it, not for a fixed second: a sleep here is a
+# race the machine's load decides, and this arm is about the lock, not
+# about how fast the wrapper starts. Measured once: at 1 s the outside
+# acquire beat the wrapper on a loaded machine and the arm went red.
+for _i in $(seq 1 100); do
+    [ -f "$LD/owner" ] && break
+    sleep 0.1
+done
+LZ_TREE_LOCK_NAME=A11outside bash "$TL" acquire >"$W/a11.outside" 2>&1
+rc11=$?
+if [ "$rc11" -eq 2 ] && grep -q "REFUSED" "$W/a11.outside" &&
+   grep -q "A11 round" "$W/a11.outside"; then
+    ok PASS "A11: during a locked round an outside acquire is refused, and names the round"
+else
+    ok FAIL "A11: during a locked round an outside acquire is refused, and names the round (rc=$rc11)"
+fi
+wait "$R11"
+bash "$TL" status >"$W/a11.after" 2>&1
+grep -q "free" "$W/a11.after" \
+    && ok PASS "A11: the wrapper releases when its command ends" \
+    || ok FAIL "A11: the wrapper releases when its command ends"
+
 # ------------------------------------------------------------------ A10
 # THE CLIENT LIST, and this arm is the reason the list is worth having: a
 # lock honoured by some writers reads as mutual exclusion while the

@@ -193,6 +193,16 @@ gate-wiring-gate:
 tree-lock-gate:
 	@bash build/tree_lock_gate.sh
 
+# `check` with the whole round under the tree lock, for a reading someone
+# is going to quote: per-gate acquisition stops two gates colliding, but
+# an outside writer can still slip in between them and leave the later
+# stages reading a tree the earlier ones did not start from. The gates
+# themselves are unchanged - they pass through on the round's token.
+# `check` stays available for the ordinary, unlocked form.
+.PHONY: locked-check
+locked-check:
+	@bash build/with_tree_lock.sh $(MAKE) check
+
 # The language floor, as a ratchet plus a real -std=c89 compile. See the
 # script's header for what green does and does not mean.
 .PHONY: c89-floor-gate
