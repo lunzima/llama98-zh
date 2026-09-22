@@ -50,10 +50,42 @@ STRICT="\bused to be|\bused to |\bbefore this task|\bas before this|\bpreviously
 LOOSE="no longer|the old |originally"
 PAT="$STRICT"
 
-# One left, in a file another session holds open. Everything else
-# is at zero, so this is a ratchet with almost nothing left to ratchet:
-# any new one is a FAIL in the file that gained it.
-BASELINE="forward.c:1"
+# THE DEBT, per file, keyed by PATH. src/ is at zero but for one file
+# another session holds open. build/ joined the scope later and came in at
+# 38 across seventeen files, which is the whole reason this stopped being
+# "a ratchet with almost nothing left to ratchet" and became a real one:
+# every number below is the count measured when the scope reached that
+# file, and each is a sentence someone can rewrite as a present-tense
+# claim - the note at the bottom asks for exactly that.
+#
+# KEYED BY PATH, NOT BASENAME. This table was keyed by basename until the
+# scope reached build/, and the sibling gate states the reason that is
+# wrong in as many words: a basename key lets a future gui/forward.c
+# inherit src/forward.c's allowance - "a table keyed by name hands a
+# newcomer someone else's excuse". The scope already holds two such pairs
+# (session.c and session.h exist under both src/ and common/), so the
+# collision was latent, not absent, and widening the scope is what would
+# have made it live.
+BASELINE="
+src/forward.c:1
+build/arm/parity_gate.sh:3
+build/arm/softfp_gate.sh:1
+build/c89_floor_gate.sh:1
+build/ci.sh:3
+build/comment_hygiene_gate.sh:1
+build/csa2_last_writer_bin_gate.sh:1
+build/csa2_modes_config_gate.sh:1
+build/fixed_tier_xcompiler_gate.sh:8
+build/gate_wiring_gate.sh:2
+build/gcc_flag_parity_gate.sh:1
+build/kernel_isa_identity_gate.sh:6
+build/kernel_matrix_gate.sh:1
+build/move_census.sh:1
+build/o3_probe.sh:1
+build/recur_write_float_arm_gate.sh:2
+build/subn_gate.sh:1
+build/switch_matrix_gate.sh:4
+"
 
 # WHAT IS SCANNED. src/ was the whole list, which left three sentences
 # standing in gui/ and one in the Makefile that this gate would have
@@ -74,15 +106,23 @@ BASELINE="forward.c:1"
 # this file's own header has to quote the phrases to say what it catches.
 # The count is MEASURED and printed at the end rather than written here,
 # so it cannot go stale into a claim.
-SCAN="src/*.c src/*.h common/*.c common/*.h gui/*.c gui/*.h Makefile"
+SCAN="src/*.c src/*.h common/*.c common/*.h gui/*.c gui/*.h Makefile
+      build/*.sh build/arm/*.sh build/mips/*.sh build/x87/*.sh"
 
 FAIL=0
 TOTAL=0
+BELOW=0
 for f in $SCAN; do
-    b=$(basename "$f")
+    # THIS FILE IS EXCLUDED BY NAME, the way comment_hygiene_gate.sh
+    # excludes itself from its build scope. Its header has to quote the
+    # phrases to say which ones it catches, and its control arm below
+    # feeds the patterns their own examples: a scan cannot tell a
+    # quotation from a use. By NAME rather than by pattern, so the
+    # exemption cannot spill onto anything else.
+    [ "$f" = "build/changelog_comment_gate.sh" ] && continue
     exp=0
     for e in $BASELINE; do
-        [ "${e%%:*}" = "$b" ] && exp=${e##*:}
+        [ "${e%%:*}" = "$f" ] && exp=${e##*:}
     done
     # -o, not -c: grep -c counts LINES, so a second phrase appended to a
     # line that already has one is free. Matches is the quantity the
@@ -91,9 +131,12 @@ for f in $SCAN; do
     [ -n "$n" ] || n=0
     TOTAL=$((TOTAL + n))
     if [ "$n" -gt "$exp" ]; then
-        echo "FAIL: $b - $n changelog phrase(s), baseline $exp"
+        echo "FAIL: $f - $n changelog phrase(s), baseline $exp"
         grep -nioE "$PAT" "$f" | head -3 | sed 's/^/        /'
         FAIL=1
+    elif [ "$n" -lt "$exp" ]; then
+        BELOW=$((BELOW + 1))
+        echo "note: $f is at $n, below its baseline of $exp - tighten it"
     fi
 done
 
@@ -119,14 +162,20 @@ for f in $SCAN; do
     LTOT=$((LTOT + n))
 done
 
-# The excluded corner, printed rather than hidden - see the SCAN comment.
-BTOT=$(grep -ohiE "$STRICT" build/*.sh 2>/dev/null | wc -l)
+# WHAT STAYS OUT, named and with its count, rather than left to be
+# discovered. There is no excluded directory any more - the build scripts
+# were the last one and they are in $SCAN above. The one file that stays
+# out is the one that states the rule, and its count is printed here so
+# that its exclusion cannot grow without this line changing.
+SELF=$(grep -oiE "$PAT" build/changelog_comment_gate.sh 2>/dev/null | wc -l)
 
 if [ "$FAIL" -eq 0 ]; then
     echo "changelog_comment_gate: PASS ($TOTAL strict, none above baseline;"
     echo "  $LTOT loose - counted, not asserted, see the header)"
     echo "  scanned: $SCAN"
-    echo "  not scanned: build/*.sh, $BTOT strict match(es) - deliberate"
+    echo "  excluded by name: build/changelog_comment_gate.sh ($SELF strict"
+    echo "    match(es), quoting the phrases it catches)"
+    [ "$BELOW" -eq 0 ] || echo "  $BELOW file(s) below baseline - tighten them"
     exit 0
 fi
 echo "changelog_comment_gate: FAIL"
