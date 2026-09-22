@@ -71,11 +71,21 @@ ROOT=$(pwd)
 # enough and the paths stay in one namespace. LZ_ENDIAN_IN_WSL stops the
 # recursion; an explicit LZ_MIPS_XTC or a toolchain already on PATH skips
 # the hop entirely, so a Linux CI host is unaffected.
+# The names find_cc() below accepts, written once: the probe on EACH side
+# of the boundary has to ask the question the gate itself will ask. The
+# WSL side asked only for the versioned name, and this machine has
+# mips-linux-gnu-gcc 12.4.0 - the unversioned one, and the compiler the
+# gate uses once it is there. So the hop did not fire and the host
+# reported "SKIP - missing: gcc-14-mips-linux-gnu(BE)" for a toolchain
+# that was on the machine. A probe must not report missing a toolchain
+# that it would then use.
+BE_CC_NAMES="mips-linux-gnu-gcc-14 mips-linux-gnu-gcc"
+BE_CC_FIND='for c in '"$BE_CC_NAMES"'; do command -v "$c" >/dev/null 2>&1 && exit 0; done; exit 1'
 if [ -z "${LZ_ENDIAN_IN_WSL:-}" ] && [ -z "${LZ_MIPS_XTC:-}" ] \
-   && ! command -v mips-linux-gnu-gcc-14 >/dev/null 2>&1 \
-   && ! command -v mips-linux-gnu-gcc >/dev/null 2>&1 \
+   && ! sh -c "$BE_CC_FIND" \
    && command -v wsl.exe >/dev/null 2>&1; then
-    if wsl.exe -e bash -lc 'command -v mips-linux-gnu-gcc-14 >/dev/null 2>&1 && command -v qemu-mips-static >/dev/null 2>&1' >/dev/null 2>&1; then
+    if wsl.exe -e bash -lc "$BE_CC_FIND" >/dev/null 2>&1 \
+       && wsl.exe -e bash -lc 'command -v qemu-mips-static >/dev/null 2>&1' >/dev/null 2>&1; then
         case "$ROOT" in
             /[a-z]/*) WROOT="/mnt/$(echo "$ROOT" | cut -c2)/$(echo "$ROOT" | cut -c4-)" ;;
             *)        WROOT="$ROOT" ;;
