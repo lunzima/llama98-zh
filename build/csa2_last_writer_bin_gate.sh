@@ -82,6 +82,8 @@
 # python3, no training tree, no built CLI).
 set -u
 cd "$(dirname "$0")/.." || exit 1
+
+eval "$(LZ_TREE_LOCK_NAME="$(basename "$0")" LZ_TREE_LOCK_WHAT="the last-writer bin gate" bash build/tree_lock.sh acquire --print-env)" || exit 2
 ENG="$(pwd)"
 TRAIN="${1:-E:/LLM/llama98-zh}"
 
@@ -99,7 +101,7 @@ command -v "$CC" >/dev/null 2>&1 || {
          "I3 bin-path mutation arm)"; exit 2; }
 
 W=$(mktemp -d 2>/dev/null || echo /tmp/csa2lastwriterbin.$$)
-trap 'rm -rf "$W"' EXIT
+trap 'bash build/tree_lock.sh release; rm -rf "$W"' EXIT
 
 # Shared by every mutation arm below: cp src/*.c/*.h + common/*.c/*.h
 # into $1 (the caller has already mutated $1/src/model.c before calling

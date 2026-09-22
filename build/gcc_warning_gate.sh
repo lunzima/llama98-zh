@@ -33,12 +33,14 @@
 set -u
 cd "$(dirname "$0")/.."
 
+eval "$(LZ_TREE_LOCK_NAME="$(basename "$0")" LZ_TREE_LOCK_WHAT="the gcc warning gate" bash build/tree_lock.sh acquire --print-env)" || exit 2
+
 command -v gcc >/dev/null 2>&1 || {
     echo "gcc_warning_gate: SKIP - no gcc"; exit 2; }
 
 MAKE=${MAKE:-make}
 TMPD=$(mktemp -d)
-trap 'rm -rf "$TMPD"' EXIT
+trap 'bash build/tree_lock.sh release; rm -rf "$TMPD"' EXIT
 
 FAIL=0
 

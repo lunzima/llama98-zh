@@ -115,6 +115,8 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 
+eval "$(LZ_TREE_LOCK_NAME="$(basename "$0")" LZ_TREE_LOCK_WHAT="the kernel ISA identity check" bash build/tree_lock.sh acquire --print-env)" || exit 2
+
 MODELS_ROOT=${MODELS_ROOT:-/e/LLM/models}
 MODEL=${LZ_NORM_INT_GATE_MODEL:-$MODELS_ROOT/kmr20}
 if [ ! -d "$MODEL" ]; then
@@ -169,7 +171,7 @@ if [ -n "$NEWER" ]; then
 fi
 
 TMPD=$(mktemp -d)
-trap 'rm -rf "$TMPD"' EXIT
+trap 'bash build/tree_lock.sh release; rm -rf "$TMPD"' EXIT
 
 # Prove the two tiers are actually distinct on this host before trusting
 # an "identical" result: a selector that silently resolves both names to

@@ -225,24 +225,15 @@ grep -q '^LOCKDIR=${LZ_TREE_LOCK_DIR:-build/\.tree-lock\.d}$' "$TL" \
 # shares nothing and must not be serialized away.
 SHARED_RE='build/native|build/gui|build/watcom|\./\*\.gcov'
 # <file>: <reason>
+# The fifteen that acquire are not listed here - this table is for the
+# ones that must NOT, each with the reason it is safe without. A name
+# here that starts acquiring is harmless (the census counts it as wired),
+# but a name that STOPS and is still listed would go unnoticed, which is
+# why the two directions are checked differently: wired is counted from
+# the file, declared is read from this table.
 CLIENTS='
-arm/parity_gate.sh: batch 2 - builds the ARM side through WSL into its own directory
-ci.sh: batch 2 - the runner itself takes the lock at the top
-codesize_gate.sh: batch 2 - reads build/native only for its provenance check
-comment_hygiene_gate.sh: batch 2 - names build/gui in a message, builds nothing
-cov_run.sh: batch 2 - LINKS build/native/*.o, and runs gcov in the tree root
-csa2_last_writer_bin_gate.sh: batch 2 - links build/native objects for its mutants
-gcc_warning_gate.sh: batch 2 - rm -rf build/native build/gui, then builds both
-gui_selftest_gate.sh: batch 2 - runs the GUI the build/ objects produced
-int_pipeline_arm_gate.sh: batch 2 - rm -rf build/native, then builds each arm
-isa_floor_avx2_gate.sh: batch 2 - reads build/gui and build/native objects
-isa_floor_watcom_gate.sh: batch 2 - reads the Watcom objects under build/watcom
-kernel_isa_identity_gate.sh: batch 2 - builds and compares the objects of both toolchains
-mm_alias_gate.sh: batch 2 - reads build/watcom objects
-native_obj_gate.sh: batch 2 - checks the format of build/native/*.o
-recur_write_float_arm_gate.sh: batch 2 - builds the two arms under build/native
-switch_matrix_gate.sh: batch 2 - builds the switch matrix under build/
-tier_reach_gate.sh: batch 2 - runs gcov, which writes into the tree root
+arm/parity_gate.sh: runs through WSL, where this lock is not visible; its caller holds it
+cov_run.sh: sourced by its callers - it runs in their shell and must not take one itself
 '
 UNLISTED=""
 WIRED=0

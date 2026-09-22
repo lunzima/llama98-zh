@@ -113,6 +113,8 @@
 set -u
 cd "$(dirname "$0")/.."
 
+eval "$(LZ_TREE_LOCK_NAME="$(basename "$0")" LZ_TREE_LOCK_WHAT="the switch matrix" bash build/tree_lock.sh acquire --print-env)" || exit 2
+
 if ! command -v gcc >/dev/null 2>&1; then
     echo "switch_matrix_gate: ERROR - gcc not found"
     exit 2
@@ -140,7 +142,7 @@ WCC_INC="-I$WATCOM_ROOT/h -I$WATCOM_ROOT/h/nt -Isrc"
 
 TMPD=$(mktemp -d)
 KEEP_TMPD=0
-trap '[ "$KEEP_TMPD" = 1 ] || rm -rf "$TMPD"' EXIT
+trap 'bash build/tree_lock.sh release; [ "$KEEP_TMPD" = 1 ] || rm -rf "$TMPD"' EXIT
 
 PASS=0
 FAIL=0

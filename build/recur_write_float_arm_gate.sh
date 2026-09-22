@@ -52,6 +52,8 @@
 # Exit codes: 0 PASS, 1 FAIL, 2 SKIP (toolchain or model fixture missing)
 set -u
 cd "$(dirname "$0")/.." || exit 1
+
+eval "$(LZ_TREE_LOCK_NAME="$(basename "$0")" LZ_TREE_LOCK_WHAT="the recurrence float arm" bash build/tree_lock.sh acquire --print-env)" || exit 2
 ROOT=$(pwd)
 MAKE=${MAKE:-make}
 
@@ -76,7 +78,7 @@ for f in "$TOK_ZH" "$TOK_EN"; do
 done
 
 WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT
+trap 'bash build/tree_lock.sh release; rm -rf "$WORK"' EXIT
 
 # ---- two builds of the SAME working tree, from make's own recipe --------
 # Every gcc line of `make -Bn llama98`, with build/native/ redirected into

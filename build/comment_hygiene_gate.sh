@@ -37,6 +37,9 @@
 set -u
 cd "$(dirname "$0")/.."
 
+eval "$(LZ_TREE_LOCK_NAME="$(basename "$0")" LZ_TREE_LOCK_WHAT="the comment hygiene ratchet" bash build/tree_lock.sh acquire --print-env)" || exit 2
+trap 'bash build/tree_lock.sh release' EXIT
+
 # TWO SPELLINGS, one predicate. This matched "iron law" only, and six
 # citations in src/ops_mmx.c spelled it "rule 6 item 6" / "rule 6.6" and
 # went straight through - the phrase the rulebook happens to use is not

@@ -59,6 +59,8 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 
+eval "$(LZ_TREE_LOCK_NAME="$(basename "$0")" LZ_TREE_LOCK_WHAT="the int-pipeline arms" bash build/tree_lock.sh acquire --print-env)" || exit 2
+
 ARMS="LZ_BVEC_I16 LZ_MOEGATE_I16 LZ_KLAT_I16 LZ_KGATE_I16 LZ_KGATE_EXP_I
 LZ_MLAT_I16 LZ_MLAT_REUSE LZ_VPROJ_I16 LZ_Q8I16_INT LZ_Q8INT_INT
 LZ_SWIGLU_I16 LZ_CONV_SIG_I LZ_CONVO_I16 LZ_SOFTPLUS_POLY"
@@ -101,7 +103,7 @@ if [ ! -d "$MODEL" ] || [ ! -f "$TOK" ]; then
 fi
 
 TMPD=$(mktemp -d)
-trap 'rm -rf "$TMPD"' EXIT
+trap 'bash build/tree_lock.sh release; rm -rf "$TMPD"' EXIT
 
 FL_BASE="-O3 -march=x86-64 -std=c99 -Wall -Wextra -Isrc -ffp-contract=off"
 FL_BASE="$FL_BASE -DLZ_MMX_TU=1 -DLZ_SSE2_TU=1"

@@ -35,6 +35,9 @@
 set -u
 cd "$(dirname "$0")/.."
 
+eval "$(LZ_TREE_LOCK_NAME="$(basename "$0")" LZ_TREE_LOCK_WHAT="the AVX2 ISA floor" bash build/tree_lock.sh acquire --print-env)" || exit 2
+trap 'bash build/tree_lock.sh release' EXIT
+
 OBJ=${LZ_AVX2_OBJ:-}
 if [ -z "$OBJ" ]; then
     for cand in build/gui/ops_avx2.o build/native/ops_avx2.o; do

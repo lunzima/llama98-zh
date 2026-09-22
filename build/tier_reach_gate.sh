@@ -39,6 +39,8 @@
 set -u
 cd "$(dirname "$0")/.."
 
+eval "$(LZ_TREE_LOCK_NAME="$(basename "$0")" LZ_TREE_LOCK_WHAT="the tier-reach census" bash build/tree_lock.sh acquire --print-env)" || exit 2
+
 MODEL=${1:-/e/LLM/models/kmr20}
 TOKENS=${2:-8}
 
@@ -70,7 +72,9 @@ sweep_gcov() {
     done
 }
 on_exit() { sweep_gcov; rm -rf "$W"; }
-trap on_exit EXIT
+# The lock is released through this same handler rather than through a
+# second `trap ... EXIT`, which would replace this one and lose the sweep.
+trap 'bash build/tree_lock.sh release; on_exit' EXIT
 # A signal must run the sweep too - being killed between gcov's write and
 # this script's last line would otherwise plant the same mine as a
 # completed run. `exit` here (not a bare return) so the EXIT trap above

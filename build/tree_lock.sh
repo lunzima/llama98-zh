@@ -132,11 +132,21 @@ cmd_status() {
 }
 
 cmd_acquire() {
-    local steal=${1:-}
+    # Flags in any order: `acquire --print-env --steal` and
+    # `acquire --steal --print-env` are the same request, and a positional
+    # read would silently treat the first one as neither.
+    local steal="" printenv="" a
+    for a in "$@"; do
+        case "$a" in
+            --steal)     steal=--steal ;;
+            --print-env) printenv=--print-env ;;
+        esac
+    done
     # Re-entrant for the same holder: a runner that holds the lock calls
     # gates that also acquire, and those must not deadlock against it.
     if [ -n "${LZ_TREE_LOCK:-}" ] && [ -f "$OWNERFILE" ] &&
        [ "$(read_field owner)" = "$LZ_TREE_LOCK" ]; then
+        [ "$printenv" = "--print-env" ] && echo "export LZ_TREE_LOCK=$LZ_TREE_LOCK"
         return 0
     fi
     if mkdir "$LOCKDIR" 2>/dev/null; then
@@ -156,12 +166,26 @@ cmd_acquire() {
         } > "$LOCKDIR/owner.tmp"
         mv -f "$LOCKDIR/owner.tmp" "$OWNERFILE"
         export LZ_TREE_LOCK="$(read_field owner)"
-        echo "tree_lock: acquired by ${LZ_TREE_LOCK_NAME:-$0} (token $LZ_TREE_LOCK)"
+        if [ "$printenv" = "--print-env" ]; then
+            echo "export LZ_TREE_LOCK=$LZ_TREE_LOCK"
+        else
+            echo "tree_lock: acquired by ${LZ_TREE_LOCK_NAME:-$0} (token $LZ_TREE_LOCK)"
+        fi
         return 0
     fi
     # Somebody has it. Say who, and in which of the three states.
-    echo "tree_lock: REFUSED - $LOCKDIR exists"
-    describe_holder
+    if [ "$printenv" = "--print-env" ]; then
+        # stdout carries ONLY the export line the caller evals, so every
+        # refusal has to go to stderr: a partial capture would otherwise
+        # be read as an acquisition.
+        {
+          echo "tree_lock: REFUSED - $LOCKDIR exists"
+          describe_holder
+        } >&2
+    else
+        echo "tree_lock: REFUSED - $LOCKDIR exists"
+        describe_holder
+    fi
     if [ "$steal" != "--steal" ]; then
         echo "  If that holder is gone, take it over explicitly:"
         echo "    LZ_TREE_LOCK_NAME=<you> bash $0 acquire --steal"
@@ -199,7 +223,11 @@ cmd_acquire() {
     } > "$LOCKDIR/owner.tmp"
     mv -f "$LOCKDIR/owner.tmp" "$OWNERFILE"
     export LZ_TREE_LOCK="$(read_field owner)"
-    echo "tree_lock: acquired by ${LZ_TREE_LOCK_NAME:-$0} (token $LZ_TREE_LOCK)"
+    if [ "$printenv" = "--print-env" ]; then
+        echo "export LZ_TREE_LOCK=$LZ_TREE_LOCK"
+    else
+        echo "tree_lock: acquired by ${LZ_TREE_LOCK_NAME:-$0} (token $LZ_TREE_LOCK)"
+    fi
     return 0
 }
 
@@ -225,8 +253,8 @@ cmd_release() {
 }
 
 case "${1:-}" in
-    acquire) shift; cmd_acquire "${1:-}" ;;
+    acquire) shift; cmd_acquire "$@" ;;
     release) cmd_release ;;
     status)  cmd_status ;;
-    *) echo "usage: $0 acquire [--steal] | release | status" >&2; exit 4 ;;
+    *) echo "usage: $0 acquire [--steal] [--print-env] | release | status" >&2; exit 4 ;;
 esac

@@ -39,8 +39,10 @@
 set -u
 cd "$(dirname "$0")/.."
 
+eval "$(LZ_TREE_LOCK_NAME="$(basename "$0")" LZ_TREE_LOCK_WHAT="the MMX alias check" bash build/tree_lock.sh acquire --print-env)" || exit 2
+
 TMPD="$(mktemp -d)"
-trap 'rm -rf "$TMPD"' EXIT
+trap 'bash build/tree_lock.sh release; rm -rf "$TMPD"' EXIT
 FAIL=0
 
 if [ -x /c/WATCOM/binnt64/wcc386.exe ]; then
