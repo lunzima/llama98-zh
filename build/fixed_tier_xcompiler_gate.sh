@@ -168,10 +168,16 @@ fi
 #
 # A REMEDY THAT NAMES A FIXTURE IS A CLAIM ABOUT THE DISK, and it rots
 # with nobody touching the paragraph: this one said to run
-# LZ_NORM_INT_GATE_MODEL=/e/LLM/models/kunmoe-v2-t2-probe, and that
-# directory is gone. The instruction went stale exactly like a comment
-# naming a function, silently, and the gap stayed open the whole time
-# because the way to close it did not resolve.
+# LZ_NORM_INT_GATE_MODEL=/e/LLM/models/kunmoe-v2-t2-probe (historical) -
+# a directory that is gone. The instruction went stale exactly like a
+# comment naming a function, silently, and the gap stayed open the whole
+# time because the way to close it did not resolve.
+#
+# THE MARKER IS LOAD-BEARING, not decoration: fixture_exists_gate is a
+# text scanner, so it cannot tell a line that names a fixture to USE from
+# a line that records one being GONE. A sentence about a deleted
+# checkpoint has to say so on the same line as the name, which is what
+# (historical) is for.
 #
 # The override below still works for a one-off full run against T2:
 #   LZ_NORM_INT_GATE_MODEL=/e/LLM/models/_t2gate bash "$0"
