@@ -210,20 +210,21 @@ endian_gate.sh             # needs WSL and the MIPS cross toolchain, and
 # half exists to catch, and a mention-grep waves them through. Same
 # substitution the whole gate is about, one level down.
 #
-# THE DEFAULT GOAL COUNTS TOO, and leaving it out made this half wrong in
-# the accusing direction. native_obj_gate.sh is not a prerequisite of
-# `check`; it is a line in the `llama98` link recipe, so it runs on every
-# native build. Reading only check would report a gate that runs constantly
-# as one that never runs - which is why this takes the union of
-# `make -n check` and `make -n`: check alone never mentions such a name.
+# THE DEFAULT GOAL COUNTS TOO, and the search below reads the EXPANSION,
+# not the file. native_obj_gate.sh is not a prerequisite of `check`; it
+# is a line in the `llama98` link recipe, so it runs on every native
+# build - a mention-grep would call a gate that runs constantly one that
+# never runs.
 #
-# MEASURED, and the ground has expired: `make -n` produces
-# exactly one gate name (native_obj_gate.sh) and `make -n check` already
-# contains it, because check expands its build prerequisites. The union and
-# check alone are therefore the same set - `diff` of the two is empty, and
-# both are 54 names here. The half is gone; the concern is not. A gate
-# hooked into a target that check does NOT depend on would still be missed,
-# and this is the place that would have to learn about it.
+# That name is already in `make -n check`'s output, because expanding
+# check's prerequisites expands the recipes that build, the link recipe
+# included: MEASURED, `make -n` on its own yields exactly one gate name
+# (native_obj_gate.sh) and `make -n check` already contains it, so the
+# union of the two is the same 54 names and `diff` of the two sets is
+# empty. One expansion is therefore what this reads.
+#
+# WHAT THAT WOULD MISS, and the place that would have to learn about it:
+# a gate hooked into a target `check` neither depends on nor builds.
 REACHED=$(make -n check 2>/dev/null \
           | grep -oE '[a-z0-9_]+_gate\.sh' | sort -u)
 
