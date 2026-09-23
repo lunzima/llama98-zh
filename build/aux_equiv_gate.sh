@@ -23,12 +23,20 @@ set -u
 cd "$(dirname "$0")/.."
 
 L=${PENTIUMLINT:-}
-for c in "$L" ../kunkun-linter/pentiumlint /e/kunkun-linter/pentiumlint \
-         /mnt/e/kunkun-linter/pentiumlint; do
+# THE REPO HAS BEEN RENAMED ONCE (kunkun-linter -> potatolint), and while the
+# old name was being searched this gate SKIPped on a machine where the linter
+# was checked out - reading exactly like the intended "not checked out here"
+# skip. So the miss message names the SET it searched: a rename turns it into
+# a visibly wrong list rather than a plausible one.
+for c in "$L" ../potatolint/pentiumlint /e/potatolint/pentiumlint \
+         /mnt/e/potatolint/pentiumlint; do
     [ -n "$c" ] && [ -f "$c/aux_equiv.py" ] && L=$c && break
 done
 if [ -z "$L" ] || [ ! -f "$L/aux_equiv.py" ]; then
-    echo "aux_equiv_gate: SKIP - pentiumlint not found (set PENTIUMLINT)"
+    echo "aux_equiv_gate: SKIP - no pentiumlint checkout. Searched:" \
+         "\$PENTIUMLINT, ../potatolint/pentiumlint, /e/potatolint/pentiumlint," \
+         "/mnt/e/potatolint/pentiumlint (the repo was kunkun-linter until" \
+         "2026-08-26; if it has moved again, this list is what is stale)" >&2
     exit 2
 fi
 
