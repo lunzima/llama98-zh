@@ -39,7 +39,8 @@
 set -u
 cd "$(dirname "$0")/.."
 
-eval "$(LZ_TREE_LOCK_NAME="$(basename "$0")" LZ_TREE_LOCK_WHAT="the MMX alias check" bash build/tree_lock.sh acquire --print-env)" || exit 2
+LZ_ENV=$(LZ_TREE_LOCK_NAME="$(basename "$0")" LZ_TREE_LOCK_WHAT="the MMX alias check" bash build/tree_lock.sh acquire --print-env) || exit 2
+eval "$LZ_ENV"
 
 TMPD="$(mktemp -d)"
 trap 'bash build/tree_lock.sh release; rm -rf "$TMPD"' EXIT

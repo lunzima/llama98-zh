@@ -50,7 +50,8 @@
 set -u
 cd "$(dirname "$0")/.."
 
-eval "$(LZ_TREE_LOCK_NAME="$(basename "$0")" LZ_TREE_LOCK_WHAT="the size ceilings" bash build/tree_lock.sh acquire --print-env)" || exit 2
+LZ_ENV=$(LZ_TREE_LOCK_NAME="$(basename "$0")" LZ_TREE_LOCK_WHAT="the size ceilings" bash build/tree_lock.sh acquire --print-env) || exit 2
+eval "$LZ_ENV"
 trap 'bash build/tree_lock.sh release' EXIT
 
 # A formatted 1.44 MB floppy: 2880 sectors of 512, less 33 for the boot

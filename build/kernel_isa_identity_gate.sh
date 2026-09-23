@@ -115,7 +115,13 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 
-eval "$(LZ_TREE_LOCK_NAME="$(basename "$0")" LZ_TREE_LOCK_WHAT="the kernel ISA identity check" bash build/tree_lock.sh acquire --print-env)" || exit 2
+LZ_ENV=$(LZ_TREE_LOCK_NAME="$(basename "$0")" LZ_TREE_LOCK_WHAT="the kernel ISA identity check" bash build/tree_lock.sh acquire --print-env) || exit 2
+eval "$LZ_ENV"
+
+# Armed before the model, binary and staleness checks below: they exit,
+# and an exit between the acquire and this trap leaves the tree locked.
+TMPD=$(mktemp -d)
+trap 'bash build/tree_lock.sh release; rm -rf "$TMPD"' EXIT
 
 MODELS_ROOT=${MODELS_ROOT:-/e/LLM/models}
 MODEL=${LZ_NORM_INT_GATE_MODEL:-$MODELS_ROOT/kmr20}
@@ -169,9 +175,6 @@ if [ -n "$NEWER" ]; then
     echo "  Run 'make llama98' first."
     exit 2
 fi
-
-TMPD=$(mktemp -d)
-trap 'bash build/tree_lock.sh release; rm -rf "$TMPD"' EXIT
 
 # Prove the two tiers are actually distinct on this host before trusting
 # an "identical" result: a selector that silently resolves both names to

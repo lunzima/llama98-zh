@@ -26,7 +26,8 @@
 set -u
 cd "$(dirname "$0")/.."
 
-eval "$(LZ_TREE_LOCK_NAME="$(basename "$0")" LZ_TREE_LOCK_WHAT="the Watcom ISA floor" bash build/tree_lock.sh acquire --print-env)" || exit 2
+LZ_ENV=$(LZ_TREE_LOCK_NAME="$(basename "$0")" LZ_TREE_LOCK_WHAT="the Watcom ISA floor" bash build/tree_lock.sh acquire --print-env) || exit 2
+eval "$LZ_ENV"
 trap 'bash build/tree_lock.sh release' EXIT
 
 if [ -x /c/WATCOM/binnt64/wdis.exe ]; then

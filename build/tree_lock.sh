@@ -214,28 +214,32 @@ cmd_acquire() {
         describe_holder
     fi
     if [ "$steal" != "--steal" ]; then
-        echo "  If that holder is gone, take it over explicitly:"
-        echo "    LZ_TREE_LOCK_NAME=<you> bash $0 acquire --steal"
+        {
+          echo "  If that holder is gone, take it over explicitly:"
+          echo "    LZ_TREE_LOCK_NAME=<you> bash $0 acquire --steal"
+        } >&2
         return 2
     fi
     local pid state aside
     pid=$(read_field pid) || pid=""
     state=$(probe_pid "$pid")
     if [ "$state" = "alive" ]; then
-        echo "tree_lock: REFUSED - pid $pid is ALIVE; --steal does not take a live holder's lock"
+        echo "tree_lock: REFUSED - pid $pid is ALIVE; --steal does not take a live holder's lock" >&2
         return 2
     fi
     aside="$LOCKDIR.stale.$(date +%s).$$"
     if ! mv "$LOCKDIR" "$aside" 2>/dev/null; then
-        echo "tree_lock: REFUSED - another process took the lock while this one decided to steal"
+        echo "tree_lock: REFUSED - another process took the lock while this one decided to steal" >&2
         return 2
     fi
-    echo "tree_lock: OVERRIDING a lock whose pid is $state - moved to $aside"
-    echo "  overridden holder was:"
-    echo "    $(sed -n 's/^name=//p' "$aside/owner" 2>/dev/null | head -1) pid=$pid"
-    echo "    HEAD=$(sed -n 's/^head=//p' "$aside/owner" 2>/dev/null | head -1) start=$(sed -n 's/^start_iso=//p' "$aside/owner" 2>/dev/null | head -1)"
+    {
+      echo "tree_lock: OVERRIDING a lock whose pid is $state - moved to $aside"
+      echo "  overridden holder was:"
+      echo "    $(sed -n 's/^name=//p' "$aside/owner" 2>/dev/null | head -1) pid=$pid"
+      echo "    HEAD=$(sed -n 's/^head=//p' "$aside/owner" 2>/dev/null | head -1) start=$(sed -n 's/^start_iso=//p' "$aside/owner" 2>/dev/null | head -1)"
+    } >&2
     if ! mkdir "$LOCKDIR" 2>/dev/null; then
-        echo "tree_lock: REFUSED - could not create $LOCKDIR after the move"
+        echo "tree_lock: REFUSED - could not create $LOCKDIR after the move" >&2
         return 2
     fi
     {

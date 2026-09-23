@@ -161,7 +161,8 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 
-eval "$(LZ_TREE_LOCK_NAME="$(basename "$0")" LZ_TREE_LOCK_WHAT="a full CI round" bash build/tree_lock.sh acquire --print-env)" || exit 2
+LZ_ENV=$(LZ_TREE_LOCK_NAME="$(basename "$0")" LZ_TREE_LOCK_WHAT="a full CI round" bash build/tree_lock.sh acquire --print-env) || exit 2
+eval "$LZ_ENV"
 trap 'bash build/tree_lock.sh release' EXIT
 ROOT=$(pwd)
 

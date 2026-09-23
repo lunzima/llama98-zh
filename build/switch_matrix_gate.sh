@@ -113,7 +113,14 @@
 set -u
 cd "$(dirname "$0")/.."
 
-eval "$(LZ_TREE_LOCK_NAME="$(basename "$0")" LZ_TREE_LOCK_WHAT="the switch matrix" bash build/tree_lock.sh acquire --print-env)" || exit 2
+LZ_ENV=$(LZ_TREE_LOCK_NAME="$(basename "$0")" LZ_TREE_LOCK_WHAT="the switch matrix" bash build/tree_lock.sh acquire --print-env) || exit 2
+eval "$LZ_ENV"
+
+# Armed before the toolchain probe below: that probe exits, and an exit
+# between the acquire and this trap leaves the tree locked.
+TMPD=$(mktemp -d)
+KEEP_TMPD=0
+trap 'bash build/tree_lock.sh release; [ "$KEEP_TMPD" = 1 ] || rm -rf "$TMPD"' EXIT
 
 if ! command -v gcc >/dev/null 2>&1; then
     echo "switch_matrix_gate: ERROR - gcc not found"
@@ -139,10 +146,6 @@ WCC_BASE="-za99 -otexan -zp4 -DLZ_MMX_TU=1 -DLZ_SSE2_TU=1 -4r -bt=nt -we -DWIN32
 # ops_sse2.c's own tier (the Makefile's HIGH_CPU_FLAGS: -6r -D__MMX__=1).
 WCC_MMX_BASE="-za99 -otexan -zp4 -D__MMX__=1 -DLZ_MMX_TU=1 -DLZ_SSE2_TU=1 -6r -bt=nt -we -DWIN32_LEAN_AND_MEAN -DWINVER=0x0351 -D_WIN32_WINNT=0x0351"
 WCC_INC="-I$WATCOM_ROOT/h -I$WATCOM_ROOT/h/nt -Isrc"
-
-TMPD=$(mktemp -d)
-KEEP_TMPD=0
-trap 'bash build/tree_lock.sh release; [ "$KEEP_TMPD" = 1 ] || rm -rf "$TMPD"' EXIT
 
 PASS=0
 FAIL=0

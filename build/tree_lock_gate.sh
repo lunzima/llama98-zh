@@ -246,6 +246,50 @@ grep -q "free" "$W/a11.after" \
     && ok PASS "A11: the wrapper releases when its command ends" \
     || ok FAIL "A11: the wrapper releases when its command ends"
 
+# ------------------------------------------------------------------ A12
+# THE CALLER SIDE, in two halves, because "the lock refused" and "the
+# caller stopped" are different statements.
+#
+# Half one is the FORM the callers use. `eval "$(...)"` reports eval's
+# own status: a refusal captures an empty string, eval of it returns 0,
+# and `|| exit 2` never fires - the run proceeds with the lock held by
+# nobody, which is the failure this script exists to prevent wearing the
+# shape of an ordinary start. The capture form is asserted to stop AND
+# the eval form is asserted to run, so the arm carries its own contrast:
+# a predicate that both forms satisfy would measure nothing.
+#
+# Half two is WHICH CHANNEL the refusal's words arrive on. Under
+# --print-env stdout is the line the caller evals, so a refusal puts
+# nothing there; prose on stdout is a partial acquisition read as a
+# whole one. Both refusal paths are checked - the first refusal, and the
+# override, whose report is prose as well.
+reset_lock
+hold_start A12holder; H12=$HOLD_PID
+sleep 1
+LZ_TREE_LOCK_NAME=A12stdout bash "$TL" acquire --print-env >"$W/a12.out" 2>"$W/a12.err"
+rc12s=$?
+ok "$([ "$rc12s" -eq 2 ] && [ ! -s "$W/a12.out" ] && grep -q REFUSED "$W/a12.err" && echo PASS || echo FAIL)" \
+   "A12: a refusal under --print-env writes nothing to stdout"
+( LZ_ENV=$(LZ_TREE_LOCK_NAME=A12capture bash "$TL" acquire --print-env 2>/dev/null) || exit 2
+  echo "RAN" ) >"$W/a12.capture" 2>&1
+rc12c=$?
+( eval "$(LZ_TREE_LOCK_NAME=A12eval bash "$TL" acquire --print-env 2>/dev/null)" || exit 2
+  echo "RAN" ) >"$W/a12.eval" 2>&1
+rc12e=$?
+ok "$([ "$rc12c" -eq 2 ] && ! grep -q RAN "$W/a12.capture" && echo PASS || echo FAIL)" \
+   "A12: a caller that captures the env line first stops on a refusal (rc=$rc12c)"
+ok "$([ "$rc12e" -eq 0 ] && grep -q RAN "$W/a12.eval" && echo PASS || echo FAIL)" \
+   "A12: the eval form is the one that does not stop (rc=$rc12e)"
+kill -9 "$H12" 2>/dev/null; wait "$H12" 2>/dev/null
+sleep 1
+LZ_TREE_LOCK_NAME=A12thief bash "$TL" acquire --steal --print-env >"$W/a12.steal.out" 2>"$W/a12.steal.err"
+if [ $? -eq 0 ] && [ "$(wc -l < "$W/a12.steal.out")" -eq 1 ] &&
+   grep -q '^export LZ_TREE_LOCK=' "$W/a12.steal.out"; then
+    ok PASS "A12: a steal under --print-env puts the export line alone on stdout"
+else
+    ok FAIL "A12: a steal under --print-env puts the export line alone on stdout"
+fi
+
 # ------------------------------------------------------------------ A10
 # THE CLIENT LIST, and this arm is the reason the list is worth having: a
 # lock honoured by some writers reads as mutual exclusion while the

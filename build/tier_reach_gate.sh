@@ -39,12 +39,8 @@
 set -u
 cd "$(dirname "$0")/.."
 
-eval "$(LZ_TREE_LOCK_NAME="$(basename "$0")" LZ_TREE_LOCK_WHAT="the tier-reach census" bash build/tree_lock.sh acquire --print-env)" || exit 2
-
-MODEL=${1:-/e/LLM/models/kmr20}
-TOKENS=${2:-8}
-
-[ -d "$MODEL" ] || { echo "tier-reach: SKIP - no model at $MODEL"; exit 2; }
+LZ_ENV=$(LZ_TREE_LOCK_NAME="$(basename "$0")" LZ_TREE_LOCK_WHAT="the tier-reach census" bash build/tree_lock.sh acquire --print-env) || exit 2
+eval "$LZ_ENV"
 
 W=$(mktemp -d)
 
@@ -74,6 +70,8 @@ sweep_gcov() {
 on_exit() { sweep_gcov; rm -rf "$W"; }
 # The lock is released through this same handler rather than through a
 # second `trap ... EXIT`, which would replace this one and lose the sweep.
+# Armed here, above the model check: that check exits, and an exit between
+# the acquire and this trap leaves the tree locked.
 trap 'bash build/tree_lock.sh release; on_exit' EXIT
 # A signal must run the sweep too - being killed between gcov's write and
 # this script's last line would otherwise plant the same mine as a
@@ -82,6 +80,11 @@ trap 'bash build/tree_lock.sh release; on_exit' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
+
+MODEL=${1:-/e/LLM/models/kmr20}
+TOKENS=${2:-8}
+
+[ -d "$MODEL" ] || { echo "tier-reach: SKIP - no model at $MODEL"; exit 2; }
 
 . build/cov_run.sh
 cov_run "$W" "$MODEL" "$TOKENS" || exit 2

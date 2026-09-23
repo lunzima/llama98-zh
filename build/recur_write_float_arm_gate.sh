@@ -53,9 +53,15 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 
-eval "$(LZ_TREE_LOCK_NAME="$(basename "$0")" LZ_TREE_LOCK_WHAT="the recurrence float arm" bash build/tree_lock.sh acquire --print-env)" || exit 2
+LZ_ENV=$(LZ_TREE_LOCK_NAME="$(basename "$0")" LZ_TREE_LOCK_WHAT="the recurrence float arm" bash build/tree_lock.sh acquire --print-env) || exit 2
+eval "$LZ_ENV"
 ROOT=$(pwd)
 MAKE=${MAKE:-make}
+
+# Armed before the toolchain, model and fixture checks below: they exit,
+# and an exit between the acquire and this trap leaves the tree locked.
+WORK=$(mktemp -d)
+trap 'bash build/tree_lock.sh release; rm -rf "$WORK"' EXIT
 
 if ! command -v gcc >/dev/null 2>&1; then
     echo "recur_write_float_arm_gate: SKIP - gcc not found"
@@ -76,9 +82,6 @@ for f in "$TOK_ZH" "$TOK_EN"; do
         exit 2
     fi
 done
-
-WORK=$(mktemp -d)
-trap 'bash build/tree_lock.sh release; rm -rf "$WORK"' EXIT
 
 # ---- two builds of the SAME working tree, from make's own recipe --------
 # Every gcc line of `make -Bn llama98`, with build/native/ redirected into

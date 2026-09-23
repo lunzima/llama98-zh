@@ -29,9 +29,13 @@ if [ "$#" -eq 0 ]; then
 fi
 
 # --print-env keeps stdout for the eval below; refusals go to stderr.
-eval "$(LZ_TREE_LOCK_NAME="${LZ_TREE_LOCK_NAME:-with_tree_lock.sh: $1}" \
+# The capture and the eval are two steps because `eval "$(...)"` reports
+# eval's own status: a refusal captures an empty string, eval returns 0,
+# and `|| exit 2` never fires.
+LZ_ENV=$(LZ_TREE_LOCK_NAME="${LZ_TREE_LOCK_NAME:-with_tree_lock.sh: $1}" \
         LZ_TREE_LOCK_WHAT="${LZ_TREE_LOCK_WHAT:-$*}" \
-        bash build/tree_lock.sh acquire --print-env)" || exit 2
+        bash build/tree_lock.sh acquire --print-env) || exit 2
+eval "$LZ_ENV"
 trap 'bash build/tree_lock.sh release' EXIT
 
 "$@"

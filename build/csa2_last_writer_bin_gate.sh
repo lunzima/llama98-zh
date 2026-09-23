@@ -83,9 +83,16 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 
-eval "$(LZ_TREE_LOCK_NAME="$(basename "$0")" LZ_TREE_LOCK_WHAT="the last-writer bin gate" bash build/tree_lock.sh acquire --print-env)" || exit 2
+LZ_ENV=$(LZ_TREE_LOCK_NAME="$(basename "$0")" LZ_TREE_LOCK_WHAT="the last-writer bin gate" bash build/tree_lock.sh acquire --print-env) || exit 2
+eval "$LZ_ENV"
 ENG="$(pwd)"
 TRAIN="${1:-E:/LLM/llama98-zh}"
+
+# Armed before the python3, training-tree, binary and compiler checks
+# below: they exit, and an exit between the acquire and this trap leaves
+# the tree locked.
+W=$(mktemp -d 2>/dev/null || echo /tmp/csa2lastwriterbin.$$)
+trap 'bash build/tree_lock.sh release; rm -rf "$W"' EXIT
 
 command -v python3 >/dev/null 2>&1 || {
     echo "csa2_last_writer_bin_gate: SKIP - no python3"; exit 2; }
@@ -99,9 +106,6 @@ command -v "$CC" >/dev/null 2>&1 || CC=gcc
 command -v "$CC" >/dev/null 2>&1 || {
     echo "csa2_last_writer_bin_gate: SKIP - no C compiler (needed for the" \
          "I3 bin-path mutation arm)"; exit 2; }
-
-W=$(mktemp -d 2>/dev/null || echo /tmp/csa2lastwriterbin.$$)
-trap 'bash build/tree_lock.sh release; rm -rf "$W"' EXIT
 
 # Shared by every mutation arm below: cp src/*.c/*.h + common/*.c/*.h
 # into $1 (the caller has already mutated $1/src/model.c before calling
