@@ -727,11 +727,13 @@ void lz_state_reset(LZRunState *s, const LZModel *m) {
            same function the allocation uses; the pending slabs are f32
            whatever it says. Zeroing fewer bytes than were allocated would
            leave a stale closure for the next block to finalize from. */
-        size_t rstride = (size_t)lz_csa2_ring_stride(lz_csa2_ring_fmt);
+        size_t rrow = lz_csa2_ring_rowbytes(lz_csa2_ring_fmt, c->head_dim);
+        size_t rrow_idx = lz_csa2_ring_rowbytes(lz_csa2_ring_fmt,
+                                                c->csa2_indexer_head_dim);
         memset(s->csa2_pending_c, 0, npend * c->head_dim * sizeof(float));
         memset(s->csa2_pending_z, 0, npend * c->head_dim * sizeof(float));
-        memset(s->csa2_comp_ring, 0, nring * c->head_dim * rstride);
-        memset(s->csa2_idx_comp_ring, 0, nring * c->csa2_indexer_head_dim * rstride);
+        memset(s->csa2_comp_ring, 0, nring * rrow);
+        memset(s->csa2_idx_comp_ring, 0, nring * rrow_idx);
     }
     /* The ring's own "which slot is confirmed" index - see forward.h's
        s->ssm_slot comment. Every recurrent index resets to 0 here,

@@ -723,7 +723,11 @@ static void alloc_csa2_ring(LZRunState *s, const LZModel *m,
                so must cover the shallowest-compressing one. */
             int max_blocks = 0, k;
             size_t nf = (size_t)c->n_full_layers;
-            size_t ring_stride = (size_t)lz_csa2_ring_stride(lz_csa2_ring_fmt);
+            /* Row bytes, not element stride: a scaled tier keeps its
+               scales inside the row (forward.h's LZ_CRF_Q8 comment). */
+            size_t ring_row = lz_csa2_ring_rowbytes(lz_csa2_ring_fmt, c->head_dim);
+            size_t ring_row_idx = lz_csa2_ring_rowbytes(lz_csa2_ring_fmt,
+                                                        c->csa2_indexer_head_dim);
             /* depth banks of cm slabs each - forward.h's own
                csa2_pending_c comment derives why the open block's
                contributions cannot share one bank. depth is
@@ -761,11 +765,9 @@ static void alloc_csa2_ring(LZRunState *s, const LZModel *m,
             s->csa2_pending_z = (float *)xcalloc(
                 pdepth * c->head_dim, sizeof(float), &ok, &s->bytes_alloc);
             s->csa2_comp_ring = (float *)xcalloc(
-                nblocks * c->head_dim, (size_t)ring_stride, &ok,
-                &s->bytes_alloc);
+                nblocks, ring_row, &ok, &s->bytes_alloc);
             s->csa2_idx_comp_ring = (float *)xcalloc(
-                nblocks * c->csa2_indexer_head_dim, (size_t)ring_stride,
-                &ok, &s->bytes_alloc);
+                nblocks, ring_row_idx, &ok, &s->bytes_alloc);
             /* f32 whatever the rings hold - lz_csa2_ring_row's contract. */
             s->csa2_row = (float *)xcalloc(
                 (size_t)c->head_dim + c->csa2_indexer_head_dim,

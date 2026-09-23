@@ -435,7 +435,7 @@ static void usage(void) {
     "                   deployment mode.\n"
     "  --kv-k FMT       Override --kv's K format alone (same values).\n"
     "  --kv-v FMT       Override --kv's V format alone (same values).\n"
-    "  --csa2-ring FMT  f32|bf16 (default f32) for the two finalized CSA2\n"
+    "  --csa2-ring FMT  f32|bf16|q8|q16 (default f32) for the two finalized CSA2\n"
     "                   rings. Storage only: every read is widened back to\n"
     "                   f32 before any arithmetic, so bf16 changes what is\n"
     "                   held, not what is computed. f32 is the identity\n"
@@ -561,6 +561,8 @@ static void usage(void) {
 static int parse_csa2_ringfmt(const char *m) {
     if (strcmp(m, "f32") == 0)  return LZ_CRF_F32;
     if (strcmp(m, "bf16") == 0) return LZ_CRF_BF16;
+    if (strcmp(m, "q8") == 0)   return LZ_CRF_Q8;
+    if (strcmp(m, "q16") == 0)  return LZ_CRF_Q16;
     return -1;
 }
 

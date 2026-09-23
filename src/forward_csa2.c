@@ -21,38 +21,113 @@
    than through a uint16_t*, so it needs no alignment beyond 2 and is
    correct on a big-endian host. */
 int lz_csa2_ring_stride(int fmt) {
-    return fmt == LZ_CRF_BF16 ? 2 : (int)sizeof(float);
+    switch (fmt) {
+        case LZ_CRF_BF16: return 2;
+        case LZ_CRF_Q8:   return 1;
+        case LZ_CRF_Q16:  return 2;
+        default:          return (int)sizeof(float);
+    }
 }
 
-const float *lz_csa2_ring_row(const void *ring, size_t base, float *scratch,
+size_t lz_csa2_ring_rowbytes(int fmt, int n) {
+    size_t d = (size_t)n * (size_t)lz_csa2_ring_stride(fmt);
+    if (fmt == LZ_CRF_Q8 || fmt == LZ_CRF_Q16)
+        d += (size_t)((n + LZ_CSA2_RING_GS - 1) / LZ_CSA2_RING_GS) * sizeof(float);
+    return d;
+}
+
+/* One row's bytes: [elements | scales], both at the row's own offset. */
+static size_t ring_row_off(int fmt, int n, size_t row) {
+    return row * lz_csa2_ring_rowbytes(fmt, n);
+}
+
+const float *lz_csa2_ring_row(const void *ring, size_t row, float *scratch,
                               int n, int fmt) {
     int i;
-    const unsigned char *p;
-    if (fmt != LZ_CRF_BF16) return (const float *)ring + base;
-    p = (const unsigned char *)ring + base * 2;
-    for (i = 0; i < n; i++) {
-        uint32_t u = lz_bf16_to_f32((uint32_t)p[i * 2] |
-                                    ((uint32_t)p[i * 2 + 1] << 8));
-        memcpy(&scratch[i], &u, sizeof(float));
+    const unsigned char *p =
+        (const unsigned char *)ring + ring_row_off(fmt, n, row);
+    if (fmt == LZ_CRF_F32) return (const float *)ring + row * (size_t)n;
+    if (fmt == LZ_CRF_BF16) {
+        for (i = 0; i < n; i++) {
+            uint32_t u = lz_bf16_to_f32((uint32_t)p[i * 2] |
+                                        ((uint32_t)p[i * 2 + 1] << 8));
+            memcpy(&scratch[i], &u, sizeof(float));
+        }
+        return scratch;
+    }
+    {
+        const float *s = (const float *)(const void *)(p + (size_t)n *
+                                                       (size_t)lz_csa2_ring_stride(fmt));
+        if (fmt == LZ_CRF_Q8) {
+            const int8_t *q = (const int8_t *)(const void *)p;
+            for (i = 0; i < n; i++) scratch[i] = (float)q[i] * s[i / LZ_CSA2_RING_GS];
+        } else {
+            const int16_t *q = (const int16_t *)(const void *)p;
+            for (i = 0; i < n; i++) scratch[i] = (float)q[i] * s[i / LZ_CSA2_RING_GS];
+        }
     }
     return scratch;
 }
 
-void lz_csa2_ring_put(void *ring, size_t base, const float *src, int n,
-                      int fmt) {
-    int i;
-    unsigned char *p;
-    if (fmt != LZ_CRF_BF16) {
-        memcpy((float *)ring + base, src, (size_t)n * sizeof(float));
+void lz_csa2_ring_put(void *ring, size_t row, const float *src, int n, int fmt) {
+    int i, g;
+    unsigned char *p = (unsigned char *)ring + ring_row_off(fmt, n, row);
+    if (fmt == LZ_CRF_F32) {
+        memcpy((float *)ring + row * (size_t)n, src, (size_t)n * sizeof(float));
         return;
     }
-    p = (unsigned char *)ring + base * 2;
-    for (i = 0; i < n; i++) {
-        uint32_t f, h;
-        memcpy(&f, &src[i], sizeof(float));
-        h = lz_f32_to_bf16(f);
-        p[i * 2]     = (unsigned char)(h & 0xffu);
-        p[i * 2 + 1] = (unsigned char)((h >> 8) & 0xffu);
+    if (fmt == LZ_CRF_BF16) {
+        for (i = 0; i < n; i++) {
+            uint32_t f, h;
+            memcpy(&f, &src[i], sizeof(float));
+            h = lz_f32_to_bf16(f);
+            p[i * 2]     = (unsigned char)(h & 0xffu);
+            p[i * 2 + 1] = (unsigned char)((h >> 8) & 0xffu);
+        }
+        return;
+    }
+    /* The scaled tiers, one group at a time. The scale rule is
+       lz_quantize_q8's own - absmax / the format's positive maximum, and
+       a group whose scale would fall under LZ_Q8_MIN_SCALE written as
+       exact zero - so a ring value is never subnormal and every consumer
+       reads the same dequantization the KV cache's Q8 planes do. The
+       zero-group rule is what makes the round trip's contract total:
+       without it a group of zeros would carry scale 0 and read back NaN. */
+    {
+        float *s = (float *)(void *)(p + (size_t)n *
+                                     (size_t)lz_csa2_ring_stride(fmt));
+        for (g = 0; g < (n + LZ_CSA2_RING_GS - 1) / LZ_CSA2_RING_GS; g++) {
+            int base = g * LZ_CSA2_RING_GS;
+            int cnt = n - base < LZ_CSA2_RING_GS ? n - base : LZ_CSA2_RING_GS;
+            float amax = 0.0f, inv;
+            for (i = 0; i < cnt; i++) {
+                float a = src[base + i] < 0.0f ? -src[base + i] : src[base + i];
+                if (a > amax) amax = a;
+            }
+            if (fmt == LZ_CRF_Q8) inv = 127.0f;
+            else                  inv = 32767.0f;
+            s[g] = amax > 0.0f ? amax / inv : 0.0f;
+            if (s[g] < LZ_Q8_MIN_SCALE) s[g] = 0.0f;
+            if (s[g] == 0.0f) {
+                if (fmt == LZ_CRF_Q8)
+                    memset(p + base, 0, (size_t)cnt);
+                else
+                    memset(p + (size_t)base * 2, 0, (size_t)cnt * 2);
+                continue;
+            }
+            inv = (fmt == LZ_CRF_Q8) ? (1.0f / s[g]) : (1.0f / s[g]);
+            for (i = 0; i < cnt; i++) {
+                float v = src[base + i] * inv;
+                long r = (long)(v < 0.0f ? v - 0.5f : v + 0.5f);
+                if (fmt == LZ_CRF_Q8) {
+                    if (r > 127) r = 127; else if (r < -127) r = -127;
+                    ((int8_t *)(void *)p)[base + i] = (int8_t)r;
+                } else {
+                    if (r > 32767) r = 32767; else if (r < -32767) r = -32767;
+                    ((int16_t *)(void *)p)[base + i] = (int16_t)r;
+                }
+            }
+        }
     }
 }
 
@@ -528,8 +603,8 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
                                   rotary_dim, pos, s->rope_cs);
 
             lz_rope(lat, 1, hd, rotary_dim, pos, s->rope_cs);
-            lz_csa2_ring_put(ring, (size_t)blk * hd, lat, hd, lz_csa2_ring_fmt);
-            lz_csa2_ring_put(ring_idx, (size_t)blk * idx_hd, idxl, idx_hd,
+            lz_csa2_ring_put(ring, (size_t)blk, lat, hd, lz_csa2_ring_fmt);
+            lz_csa2_ring_put(ring_idx, (size_t)blk, idxl, idx_hd,
                              lz_csa2_ring_fmt);
         }
 
@@ -581,7 +656,7 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
                 for (b = 0; b < n_vis; b++) {
                     float score = 0.0f;
                     const float *kv = lz_csa2_ring_row(
-                        ring_idx, (size_t)b * idx_hd, s->csa2_row, idx_hd,
+                        ring_idx, (size_t)b, s->csa2_row, idx_hd,
                         lz_csa2_ring_fmt);
                     for (hh = 0; hh < n_idx_heads; hh++) {
                         const float *qv = s->csa2_qidx + (size_t)hh * idx_hd;
@@ -662,10 +737,11 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
                 for (kk = 0; kk < k_eff; kk++) {
                     /* Same entry is read again in the weighted sum below;
                        at f32 this is the ring's own address both times and
-                       at bf16 it is one conversion per pass, which is what
-                       keeps the two passes reading the same numbers. */
+                       at a narrow format it is one conversion per pass,
+                       which is what keeps the two passes reading the same
+                       numbers. */
                     const float *ent = lz_csa2_ring_row(
-                        ring, (size_t)tok_idx[kk] * hd, s->csa2_row, hd,
+                        ring, (size_t)tok_idx[kk], s->csa2_row, hd,
                         lz_csa2_ring_fmt);
                     float dot = 0.0f;
                     for (d = 0; d < hd; d++) dot += qv[d] * ent[d];
@@ -682,7 +758,7 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
                 for (d = 0; d < hd; d++) outh[d] = 0.0f;
                 for (kk = 0; kk < k_eff; kk++) {
                     const float *ent = lz_csa2_ring_row(
-                        ring, (size_t)tok_idx[kk] * hd, s->csa2_row, hd,
+                        ring, (size_t)tok_idx[kk], s->csa2_row, hd,
                         lz_csa2_ring_fmt);
                     float p = s->csa2_attn_probs[kk] / sum;
                     for (d = 0; d < hd; d++) outh[d] += p * ent[d];

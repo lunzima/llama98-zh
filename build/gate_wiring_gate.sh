@@ -140,10 +140,11 @@ mla_gate.sh                # needs python3 numpy+safetensors and rewrites a
 csa2_gate.sh                # needs python3 numpy+safetensors and rewrites a
                            #   model.safetensors twice
 csa2_ring_fmt_gate.sh      # three whole engine builds per run (the
-                           #   tree, a forced-f32 reference tree, and a
-                           #   gcc-direct probe build), because the f32
-                           #   tier's identity claim is about a build
-                           #   that does not have the branch at all
+                           #   tree, a tree whose tier selector is pinned
+                           #   to f32, and a gcc-direct probe build),
+                           #   because the f32 tier's identity claim is
+                           #   about a build that cannot select a narrow
+                           #   format at all
 csa2_ring_nf_gate.sh       # five whole engine builds per run plus four
                            #   direct gcc probe builds: the fixed tree, one
                            #   mutant per ring group (the gate solves the

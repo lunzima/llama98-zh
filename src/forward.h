@@ -400,10 +400,16 @@ extern int   lz_csa2_ring_fmt;
    csa2_comp_ring or csa2_idx_comp_ring, whose pointer type is float*
    while the bytes under it are whatever the format says - the same
    arrangement model.h's LZ_FMT_BF16 comment gives LZTensor.q. */
-int   lz_csa2_ring_stride(int fmt);
-const float *lz_csa2_ring_row(const void *ring, size_t base, float *scratch,
+int    lz_csa2_ring_stride(int fmt);
+/* Bytes one n-wide row occupies, scales included - what the allocation
+   multiplies by and what the three functions below step with. */
+size_t lz_csa2_ring_rowbytes(int fmt, int n);
+/* `row` is a ROW INDEX, not an element offset: with a scale plane inside
+   the row an element offset would have to be turned into a byte offset by
+   every caller, and one of them would get it wrong. */
+const float *lz_csa2_ring_row(const void *ring, size_t row, float *scratch,
                               int n, int fmt);
-void  lz_csa2_ring_put(void *ring, size_t base, const float *src, int n,
+void  lz_csa2_ring_put(void *ring, size_t row, const float *src, int n,
                        int fmt);
 
 /* KV cache formats, selectable independently for keys and values
@@ -438,6 +444,16 @@ void  lz_csa2_ring_put(void *ring, size_t base, const float *src, int n,
    anything, and one rounding for the whole engine to agree on. */
 #define LZ_CRF_F32  0   /* unquantized; the identity tier */
 #define LZ_CRF_BF16 1   /* two bytes per element, no scale */
+/* The two scaled tiers. Their layout is [elements | scales] WITHIN ONE
+   ROW, not two parallel planes: the rings are addressed by row, so a
+   row-relative scale keeps lz_csa2_ring_row's single offset meaning one
+   thing. One f32 scale per LZ_CSA2_RING_GS elements of a row, the same
+   group the KV cache's own Q8 path uses - a row that is not a multiple
+   of the group pads its last one. */
+#define LZ_CRF_Q8   2   /* one signed byte per element + scales */
+#define LZ_CRF_Q16  3   /* int16 per element + scales */
+
+#define LZ_CSA2_RING_GS 32
 
 /* Default attention sink when a window is requested without one. 16 was
    measurably better than 4 (+5.351%% vs +6.095%% PPL at the same total
