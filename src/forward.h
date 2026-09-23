@@ -534,14 +534,16 @@ typedef struct {
     float *ced_hs;
     /* KV cache Q8: kq8/vq8 hold the rotated k/v (group 32), dequantized at score time.
        (K group 16 measured no gain.)
-       Depth is n_full_layers PLUS ONE when m->mtp != NULL: the MTP
+       Depth is n_dense_kv PLUS ONE when m->mtp != NULL: the MTP
        block's own full_attention layer gets the last slot (index
-       n_full_layers), reusing this same cache rather than a bespoke
-       buffer - see the MTP scratch block below. */
-    int8_t *kq8;                /* (n_full [+1 if m->mtp], seq, attn_kv_dim) */
+       n_dense_kv), reusing this same cache rather than a bespoke
+       buffer - see the MTP scratch block below. n_dense_kv, not
+       n_full_layers: a csa2_on layer owns no plane (see dense_idx's own
+       comment). */
+    int8_t *kq8;                /* (n_dense [+1 if m->mtp], seq, attn_kv_dim) */
     int8_t *vq8;
-    float  *ksq;                /* (n_full, seq, attn_kv_dim/32) */
-    float  *vsq;                /* (n_full, seq, attn_kv_dim/32) */
+    float  *ksq;                /* (n_dense, seq, attn_kv_dim/32) */
+    float  *vsq;                /* (n_dense, seq, attn_kv_dim/32) */
 #if LZ_KV_2PLANE
     /* Low planes; same shape as kq8/vq8, sharing their scales. Value is
        (hi + lo/LZ_GDN_LO_SCALE) * scale. See LZ_KV_2PLANE in ops.h -
@@ -568,7 +570,7 @@ typedef struct {
 
        NULL unless --kv f32; the Q8 path is untouched and stays the
        default, bit for bit. */
-    float  *kf32;               /* (n_full [+1 if m->mtp], seq, attn_kv_dim) */
+    float  *kf32;               /* (n_dense [+1 if m->mtp], seq, attn_kv_dim) */
     float  *vf32;
     /* Cache format, chosen PER SIDE. Not one knob for both, because the
        two sides are not worth the same: decomposed on cci3-hq with the
@@ -649,9 +651,9 @@ typedef struct {
        One scale per (layer, position, kv head) rather than per 32
        elements - see ops.h's lz_kv4_quantize for why that choice and the
        Hadamard rotation only make sense together. */
-    unsigned char *k4;          /* (n_full [+1], seq, attn_kv_dim/2) bytes */
+    unsigned char *k4;          /* (n_dense [+1], seq, attn_kv_dim/2) bytes */
     unsigned char *v4;
-    float  *ks4;                /* (n_full [+1], seq, n_kv_heads) */
+    float  *ks4;                /* (n_dense [+1], seq, n_kv_heads) */
     float  *vs4;
 
     /* The QJL key sketch and its q4r2 residual form are deliberately
@@ -744,7 +746,7 @@ typedef struct {
     /* MTP draft head scratch (LZ_SPEC_K > 0 at runtime; allocated only
        when m->mtp != NULL - see lz_state_alloc). The KV cache the MTP
        block's own attention uses is NOT a separate buffer: it is one
-       more slot appended to kq8/vq8/ksq/vsq above (index n_full_layers,
+       more slot appended to kq8/vq8/ksq/vsq above (index n_dense_kv,
        via forward_attn's cache-layer sentinel in forward_mtp.c) - it needs
        no rollback of its own (see lz_spec_round's docstring in
        generate.c: dangling rows from a rejected draft are simply
@@ -1306,14 +1308,20 @@ typedef struct {
     unsigned epoch;
 
     /* S2, CSA2 (model.h's own csa2_on[]/csa2_compress_m comment).
-       Indexed by s->cache_idx[layer] (0..n_full_layers-1), the SAME
-       index the ordinary KV cache planes above use - sized for every
-       full-attention layer even though only some are csa2_on, matching
-       kq8/vq8's own "sized for the class, not for which layers in it
-       actually use this precision tier" convention (see e.g. kf32's own
-       comment). All NULL when no layer has csa2_on (allocated
-       conditionally, checked in forward_csa2.c the same way kf32 is
-       checked in forward_attn.c).
+       Indexed by s->cache_idx[layer] (0..n_full_layers-1) - the ci
+       space, one slot per FULL-mode layer, sized for every full-attention
+       layer even though only some are csa2_on (matching kq8/vq8's own
+       "sized for the class, not for which layers in it actually use this
+       precision tier" convention, see e.g. kf32's own comment).
+
+       THAT IS NOT THE INDEX OF THE KV PLANES ANY MORE. The planes above
+       are indexed by s->dense_idx[], sized n_dense_kv, because a csa2_on
+       layer owns no per-position K/V and takes no plane. The two agree on
+       every layer that is not csa2_on and diverge on every layer that is,
+       so a reader that indexes kq8 with cache_idx reads another layer's
+       rows. All NULL when no layer has csa2_on (allocated conditionally,
+       checked in forward_csa2.c the same way kf32 is checked in
+       forward_attn.c).
 
        Sized against s->seq_len (the FULL configured context), not
        s->kv_slots (which reflects the UNRELATED --attn-sink/--attn-

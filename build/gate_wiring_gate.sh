@@ -139,6 +139,14 @@ mla_gate.sh                # needs python3 numpy+safetensors and rewrites a
                            #   ~500MB model.safetensors three times
 csa2_gate.sh                # needs python3 numpy+safetensors and rewrites a
                            #   model.safetensors twice
+csa2_dense_kv_gate.sh      # four whole engine builds per run: the current
+                           #   tree, the pre-fix predicate as its reference
+                           #   arm (a mutation, NOT git show HEAD - that
+                           #   version went red the day the fix landed and
+                           #   HEAD caught up), and a mutant each for a
+                           #   dropped live plane and for an off-by-one
+                           #   count. Comparing two binaries means check
+                           #   cannot reuse whatever is in the tree
 kv_share_gate.sh           # builds its own fixture out of the given
                            #   checkpoint's weights, needs python3
                            #   numpy+safetensors, and skips on every

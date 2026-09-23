@@ -1277,10 +1277,12 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
        (csa2_mode == LZ_CSA2_FULL, the calloc default for a layer that
        is not csa2_on at all) is unaffected and still calls nf++, so
        nf's final value can end up smaller than c->n_full_layers once
-       any layer aliases - the ring/cache planes sized off
-       n_full_layers just carry a few unused rows, not a bug
-       (forward.h's own csa2_comp_ring comment: sized for the class,
-       not for which layers in it actually use this). */
+       any layer aliases - the COMPRESSED RINGS sized off n_full_layers
+       just carry a few unused rows, not a bug (forward.h's own
+       csa2_comp_ring comment: sized for the class, not for which layers
+       in it actually use this). The dense planes are a separate count
+       (dense_kv_layers, below) and carry no such slack: they are sized
+       for exactly the layers that own one. */
     /* dense_idx is a SEPARATE numbering from cache_idx, and -1 for every
        layer that owns no plane: linear layers (their recurrent state is
        addressed by cache_idx too, off the same counter), aliased

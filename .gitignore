@@ -168,6 +168,7 @@
 !/build/csa2_modes_config_probe.c
 !/build/csa2_cache_idx_alias_gate.sh
 !/build/csa2_cache_idx_alias_probe.c
+!/build/csa2_dense_kv_gate.sh
 !/build/csa2_mode_dispatch_gate.sh
 !/build/csa2_mode_dispatch_probe.c
 !/build/csa2_mode_export_load_gate.sh
