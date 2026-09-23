@@ -36,6 +36,11 @@ size_t lz_csa2_ring_rowbytes(int fmt, int n) {
     return d;
 }
 
+/* Where a slot's rows begin. The only place a ring pointer is offset. */
+void *lz_csa2_ring_slot(void *ring, int fmt, int n, size_t rb) {
+    return (unsigned char *)ring + rb * lz_csa2_ring_rowbytes(fmt, n);
+}
+
 /* One row's bytes: [elements | scales], both at the row's own offset. */
 static size_t ring_row_off(int fmt, int n, size_t row) {
     return row * lz_csa2_ring_rowbytes(fmt, n);
@@ -300,8 +305,14 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
     float *pend_c = s->csa2_pending_c + lz_csa2_pend_base(c, ci, s->ssm_ring_depth) * hd;
     float *pend_z = s->csa2_pending_z + lz_csa2_pend_base(c, ci, s->ssm_ring_depth) * hd;
     size_t rb = lz_csa2_ring_base(c, ci, s->seq_len);
-    float *ring = s->csa2_comp_ring + rb * hd;
-    float *ring_idx = s->csa2_idx_comp_ring + rb * idx_hd;
+    /* Through the slot helper, not `base + rb * width`: under a narrow
+       tier an element step is not a byte step, and rb is zero on both
+       shipping models today (one csa2 layer, ci 0) - so this is exactly
+       the line that a second csa2 layer turns live. */
+    float *ring = (float *)lz_csa2_ring_slot(s->csa2_comp_ring,
+                                             lz_csa2_ring_fmt, hd, rb);
+    float *ring_idx = (float *)lz_csa2_ring_slot(s->csa2_idx_comp_ring,
+                                                 lz_csa2_ring_fmt, idx_hd, rb);
     /* This ci's published Top-K base (forward.h's own csa2_topk_idx_pub
        comment): one (topk)-wide slot per token-of-the-current-chunk, so
        a REUSE-mode layer processing token tk later in the dispatch

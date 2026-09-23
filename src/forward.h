@@ -406,7 +406,13 @@ int    lz_csa2_ring_stride(int fmt);
 size_t lz_csa2_ring_rowbytes(int fmt, int n);
 /* `row` is a ROW INDEX, not an element offset: with a scale plane inside
    the row an element offset would have to be turned into a byte offset by
-   every caller, and one of them would get it wrong. */
+   every caller, and one of them would get it wrong.
+   lz_csa2_ring_slot is that same argument one level up, for the pointer a
+   SLOT's rows start at: a bare `ring + rb * head_dim` is element
+   arithmetic on a buffer whose elements are one or two bytes under a
+   narrow tier, which puts every slot after the first `rb * (4 - stride)`
+   bytes off. Callers never offset the pointer themselves. */
+void *lz_csa2_ring_slot(void *ring, int fmt, int n, size_t rb);
 const float *lz_csa2_ring_row(const void *ring, size_t row, float *scratch,
                               int n, int fmt);
 void  lz_csa2_ring_put(void *ring, size_t row, const float *src, int n,

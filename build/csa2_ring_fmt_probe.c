@@ -142,6 +142,39 @@ int main(int argc, char **argv) {
         }
     }
 
+    /* TWO SLOTS MUST NOT OVERLAP. This is the rule a bare
+       `base + rb * width` breaks under a narrow tier, and it is the only
+       arm here that can see that class: an out-of-bounds ring read
+       changes the logits exactly as loudly as a correct tier does, so the
+       integration arms in the gate are satisfied either way. rb is 0 on
+       both shipping models (one csa2 layer, ci 0), which is why the rule
+       is checked here rather than on a checkpoint. */
+    for (t = 0; t < 4; t++) {
+        int fmt = tiers[t];
+        size_t rb = lz_csa2_ring_rowbytes(fmt, n);
+        unsigned char *s0 = (unsigned char *)buf;
+        unsigned char *s1 = (unsigned char *)lz_csa2_ring_slot(buf, fmt, n, 1);
+        const float *r;
+        int k, same;
+        if (s1 != s0 + rb) { fail("slot 1 does not start one row-width on", fmt); continue; }
+        memset(buf, 0, sizeof(buf));
+        lz_csa2_ring_put(s0, 0, vals, n, fmt);
+        r = lz_csa2_ring_row(s0, 0, scratch, n, fmt);
+        for (i = 0; i < n; i++) back[i] = r[i];        /* slot 0's row, before slot 1 writes */
+        for (k = 0; k < 2; k++) lz_csa2_ring_put(s1, k, vals + n, n, fmt);
+        /* Writing slot 1 must not have moved slot 0's row. */
+        r = lz_csa2_ring_row(s0, 0, scratch, n, fmt);
+        same = 1;
+        for (i = 0; i < n; i++) if (r[i] != back[i]) { same = 0; break; }
+        if (!same) fail("slot 1's writes moved slot 0's row", fmt);
+        /* And the two slots hold DIFFERENT values - an aliased pair reads
+           the same numbers back from both. */
+        r = lz_csa2_ring_row(s1, 0, scratch, n, fmt);
+        same = 1;
+        for (i = 0; i < n; i++) if (r[i] != back[i]) { same = 0; break; }
+        if (same) fail("the two slots read back the same values", fmt);
+    }
+
     /* A zero row must read back as exact zeros: the scaled tiers write a
        zero scale for a group whose scale would fall under the floor, and
        a reader that multiplied by it would produce NaN. */
