@@ -435,6 +435,11 @@ static void usage(void) {
     "                   deployment mode.\n"
     "  --kv-k FMT       Override --kv's K format alone (same values).\n"
     "  --kv-v FMT       Override --kv's V format alone (same values).\n"
+    "  --csa2-ring FMT  f32|bf16 (default f32) for the two finalized CSA2\n"
+    "                   rings. Storage only: every read is widened back to\n"
+    "                   f32 before any arithmetic, so bf16 changes what is\n"
+    "                   held, not what is computed. f32 is the identity\n"
+    "                   tier; bf16 is a quality tier.\n"
     "  --attn-sink N    StreamingLLM eviction: keep the first N positions.\n"
     "  --attn-window W  ... and the most recent W (default AUTO = max(1024,\n"
     "                   ctx/2), N=16; W=0 turns eviction off).\n"
@@ -551,6 +556,14 @@ static void usage(void) {
    the pair unlinked would make the obvious invocation the broken one. A
    later --kv-rot off still wins, which is what keeps the comparison
    arms reachable. */
+/* --csa2-ring's two tiers. f32 is the identity tier and the default; see
+   forward.h's LZ_CRF_* comment for what the contract between them is. */
+static int parse_csa2_ringfmt(const char *m) {
+    if (strcmp(m, "f32") == 0)  return LZ_CRF_F32;
+    if (strcmp(m, "bf16") == 0) return LZ_CRF_BF16;
+    return -1;
+}
+
 static int parse_kvfmt(const char *m) {
     if (strcmp(m, "q8") == 0)   return LZ_KVF_Q8;
     if (strcmp(m, "f32") == 0)  return LZ_KVF_F32;
@@ -1812,6 +1825,11 @@ int main(int argc, char **argv) {
             int f = parse_kvfmt(argv[++i]);
             if (f < 0) { usage(); return 2; }
             lz_kv_vfmt = f;
+        }
+        else if (strcmp(a, "--csa2-ring") == 0 && i + 1 < argc) {
+            int f = parse_csa2_ringfmt(argv[++i]);
+            if (f < 0) { usage(); return 2; }
+            lz_csa2_ring_fmt = f;
         }
         else if (strcmp(a, "--profile") == 0) { lz_prof_enable = 1; }
         else if (strcmp(a, "--moe-topk") == 0 && i + 1 < argc) {

@@ -946,6 +946,31 @@ case $C2RN_RC in
         ;;
 esac
 
+# S2 CSA2's ring storage format: f32 is the identity tier and bf16 is a
+# quality tier, and the two are asserted differently on purpose. Own
+# script (three engine builds, one of them a forced-f32 reference tree).
+echo
+echo "==== [11l/31]CSA2 ring storage format ===="
+LOG=build/ci-csa2-ring-fmt.log
+build/csa2_ring_fmt_gate.sh >"$LOG" 2>&1
+C2RF_RC=$?
+cat "$LOG"
+case $C2RF_RC in
+    0)
+        note "PASS  CSA2 ring storage format"
+        PASS=$((PASS + 1))
+        ;;
+    2)
+        REASON=$(grep -m1 'SKIP' "$LOG")
+        note "SKIP  CSA2 ring storage format ($REASON)"
+        SKIP=$((SKIP + 1))
+        ;;
+    *)
+        note "FAIL  CSA2 ring storage format"
+        FAIL=$((FAIL + 1))
+        ;;
+esac
+
 # ---------------------------------------------------------------------
 # Stage 12: --kv-rot, the one output-changing knob that had no gate. Not
 # invariance (stage 11's assertion) - a QUALITY claim with a number:

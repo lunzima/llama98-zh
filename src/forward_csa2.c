@@ -3,6 +3,58 @@
 #include "model.h"
 #include "forward.h"
 #include "ops.h"
+#include "lz_bf16.h"   /* the ring's bf16 tier: lz_bf16_to_f32/lz_f32_to_bf16 */
+
+/* ---- the finalized rings' storage format -------------------------------
+   forward.h's LZ_CRF_* comment has the contract: storage only, the three
+   functions below are the only place the format is interpreted, and the
+   f32 tier must stay bit-identical to a build without the knob - which is
+   why lz_csa2_ring_row hands back a POINTER INTO THE RING at f32 and
+   copies nothing at all. A read that memcpy'd even at f32 would be a
+   different program's bit pattern only if it were wrong, but it would be
+   a copy the identity tier does not need, on the hot path, in a file
+   whose whole posture is the scalar reference.
+
+   The byte order is lz_t_f32's own BF16 branch turned around: a bf16
+   lives in the LOW 16 bits of a word, is stored as its low byte first,
+   and is widened by `<< 16`. Assembled from the bytes by name rather
+   than through a uint16_t*, so it needs no alignment beyond 2 and is
+   correct on a big-endian host. */
+int lz_csa2_ring_stride(int fmt) {
+    return fmt == LZ_CRF_BF16 ? 2 : (int)sizeof(float);
+}
+
+const float *lz_csa2_ring_row(const void *ring, size_t base, float *scratch,
+                              int n, int fmt) {
+    int i;
+    const unsigned char *p;
+    if (fmt != LZ_CRF_BF16) return (const float *)ring + base;
+    p = (const unsigned char *)ring + base * 2;
+    for (i = 0; i < n; i++) {
+        uint32_t u = lz_bf16_to_f32((uint32_t)p[i * 2] |
+                                    ((uint32_t)p[i * 2 + 1] << 8));
+        memcpy(&scratch[i], &u, sizeof(float));
+    }
+    return scratch;
+}
+
+void lz_csa2_ring_put(void *ring, size_t base, const float *src, int n,
+                      int fmt) {
+    int i;
+    unsigned char *p;
+    if (fmt != LZ_CRF_BF16) {
+        memcpy((float *)ring + base, src, (size_t)n * sizeof(float));
+        return;
+    }
+    p = (unsigned char *)ring + base * 2;
+    for (i = 0; i < n; i++) {
+        uint32_t f, h;
+        memcpy(&f, &src[i], sizeof(float));
+        h = lz_f32_to_bf16(f);
+        p[i * 2]     = (unsigned char)(h & 0xffu);
+        p[i * 2 + 1] = (unsigned char)((h >> 8) & 0xffu);
+    }
+}
 
 /* S2, DeepSeek-V4.1 report SS2.3 (CSA2 - Compressed Sparse Attention).
    model.h's own LZModelConfig.csa2_on[]/csa2_compress_m comment has the
@@ -429,7 +481,16 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
                     sum_c[d] += (lz_exp(bz[(size_t)j * hd + d] - maxv) / denom)
                                 * bc[(size_t)j * hd + d];
             }
-            lz_rmsnorm(ring + (size_t)blk * hd, sum_c,
+            /* The latent is built in the f32 row and STORED at the end of
+               this block, not written through the ring: the indexer below
+               reads it (before the RoPE), and under a narrow --csa2-ring
+               a write here would round it before the indexer saw it. The
+               ORDER of the operations is unchanged - rmsnorm, indexer,
+               RoPE - and at f32 the bytes that land in the ring are the
+               ones the in-place version produced. */
+            float *lat = s->csa2_row;
+            float *idxl = s->csa2_row + c->head_dim;
+            lz_rmsnorm(lat, sum_c,
                       lz_t_f32(&L->k_norm, s->wscr), hd, rms_eps);
 
             /* Indexer K, projected out of the latent the line above just
@@ -459,14 +520,17 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
                model.c refuses rotary_dim > csa2_indexer_head_dim
                (LZ_ERR_CFG_CSA2_IDX_ROTARY), so the trailing slice is
                inside the row and the offset is never negative. */
-            lz_matmul_w(sum_c_idx, ring + (size_t)blk * hd, &L->csa2_w_kv_idx,
+            lz_matmul_w(sum_c_idx, lat, &L->csa2_w_kv_idx,
                         hd, idx_hd, s->xq, s->xqs);
-            lz_rmsnorm(ring_idx + (size_t)blk * idx_hd, sum_c_idx,
+            lz_rmsnorm(idxl, sum_c_idx,
                       lz_t_f32(&L->csa2_k_norm_idx, s->wscr), idx_hd, rms_eps);
-            indexer_rope_adjacent(ring_idx + (size_t)blk * idx_hd, idx_hd,
+            indexer_rope_adjacent(idxl, idx_hd,
                                   rotary_dim, pos, s->rope_cs);
 
-            lz_rope(ring + (size_t)blk * hd, 1, hd, rotary_dim, pos, s->rope_cs);
+            lz_rope(lat, 1, hd, rotary_dim, pos, s->rope_cs);
+            lz_csa2_ring_put(ring, (size_t)blk * hd, lat, hd, lz_csa2_ring_fmt);
+            lz_csa2_ring_put(ring_idx, (size_t)blk * idx_hd, idxl, idx_hd,
+                             lz_csa2_ring_fmt);
         }
 
         /* ---- 4. indexer query + Eq 1's score, over exactly the
@@ -516,7 +580,9 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
                 lz_matmul_w(s->csa2_widx, h, &L->csa2_w_weights, hdim, n_idx_heads, s->xq, s->xqs);
                 for (b = 0; b < n_vis; b++) {
                     float score = 0.0f;
-                    const float *kv = ring_idx + (size_t)b * idx_hd;
+                    const float *kv = lz_csa2_ring_row(
+                        ring_idx, (size_t)b * idx_hd, s->csa2_row, idx_hd,
+                        lz_csa2_ring_fmt);
                     for (hh = 0; hh < n_idx_heads; hh++) {
                         const float *qv = s->csa2_qidx + (size_t)hh * idx_hd;
                         float dot = 0.0f;
@@ -594,7 +660,13 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
                 float maxv, sum;
                 int kk, d;
                 for (kk = 0; kk < k_eff; kk++) {
-                    const float *ent = ring + (size_t)tok_idx[kk] * hd;
+                    /* Same entry is read again in the weighted sum below;
+                       at f32 this is the ring's own address both times and
+                       at bf16 it is one conversion per pass, which is what
+                       keeps the two passes reading the same numbers. */
+                    const float *ent = lz_csa2_ring_row(
+                        ring, (size_t)tok_idx[kk] * hd, s->csa2_row, hd,
+                        lz_csa2_ring_fmt);
                     float dot = 0.0f;
                     for (d = 0; d < hd; d++) dot += qv[d] * ent[d];
                     s->csa2_attn_probs[kk] = dot * scale;
@@ -609,7 +681,9 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
                 }
                 for (d = 0; d < hd; d++) outh[d] = 0.0f;
                 for (kk = 0; kk < k_eff; kk++) {
-                    const float *ent = ring + (size_t)tok_idx[kk] * hd;
+                    const float *ent = lz_csa2_ring_row(
+                        ring, (size_t)tok_idx[kk] * hd, s->csa2_row, hd,
+                        lz_csa2_ring_fmt);
                     float p = s->csa2_attn_probs[kk] / sum;
                     for (d = 0; d < hd; d++) outh[d] += p * ent[d];
                 }

@@ -387,6 +387,24 @@ extern int   lz_attn_window;
 extern int   lz_ced;
 extern int   lz_kv_rot_enable;
 extern int   lz_kv_rot_v_dim;
+/* --csa2-ring. Read by alloc_csa2_ring (the two ring allocations and the
+   reset's memsets), by lz_csa2_ring_stride/row/put below, and by nothing
+   else - the pending slabs and every scratch are f32 whatever it says. */
+extern int   lz_csa2_ring_fmt;
+
+/* The ring's storage format, in three functions rather than three open
+   spots. The allocation multiplies by the stride, every read goes
+   through lz_csa2_ring_row and every write through lz_csa2_ring_put, so
+   a format cannot be half-added: what the buffer holds and what every
+   consumer assumes it holds come from the same switch. `ring` is
+   csa2_comp_ring or csa2_idx_comp_ring, whose pointer type is float*
+   while the bytes under it are whatever the format says - the same
+   arrangement model.h's LZ_FMT_BF16 comment gives LZTensor.q. */
+int   lz_csa2_ring_stride(int fmt);
+const float *lz_csa2_ring_row(const void *ring, size_t base, float *scratch,
+                              int n, int fmt);
+void  lz_csa2_ring_put(void *ring, size_t base, const float *src, int n,
+                       int fmt);
 
 /* KV cache formats, selectable independently for keys and values
    (--kv / --kv-k / --kv-v). See LZRunState's kfmt field. */
@@ -397,6 +415,29 @@ extern int   lz_kv_rot_v_dim;
    renumbering F32 would silently change what an old --kv value means to
    any caller that still passes an integer. */
 #define LZ_KVF_F32   3   /* unquantized; a measuring arm, not a mode */
+
+/* --csa2-ring f32|bf16: the storage format of the two FINALIZED CSA2
+   rings (csa2_comp_ring / csa2_idx_comp_ring). Those are the two buffers
+   that grow with seq_len and so are the ones the compression ratio is
+   about - the pending slabs (csa2_pending_c/z) are bounded by
+   cm * ssm_ring_depth rather than by seq_len, are a fixed cost, and are
+   not covered here.
+
+   STORAGE ONLY. Every read puts a row back to f32 before any arithmetic
+   touches it, so this changes what is HELD, never what is COMPUTED - the
+   posture --kv f32|q4|q8 already has on the dense planes. f32 IS THE
+   IDENTITY TIER: lz_csa2_ring_row returns a pointer INTO the ring at f32
+   and copies nothing, which is what keeps that tier bit-identical to a
+   build without this knob and as fast. bf16 is a QUALITY tier, not an
+   identity one - it rounds every entry to eight mantissa bits - and the
+   two are asserted differently on purpose (build/csa2_ring_fmt_gate.sh).
+
+   BF16 BEFORE Q8 because model.h's own comment on LZ_FMT_BF16 applies
+   unchanged here: it is storage rather than quantization, so it has no
+   scale plane to allocate and no group size to keep in step with
+   anything, and one rounding for the whole engine to agree on. */
+#define LZ_CRF_F32  0   /* unquantized; the identity tier */
+#define LZ_CRF_BF16 1   /* two bytes per element, no scale */
 
 /* Default attention sink when a window is requested without one. 16 was
    measurably better than 4 (+5.351%% vs +6.095%% PPL at the same total
@@ -1400,6 +1441,14 @@ typedef struct {
        shallowest-compressing slot. */
     float *csa2_pending_c, *csa2_pending_z;
     float *csa2_comp_ring, *csa2_idx_comp_ring;
+    /* One row of f32 working space, head_dim + csa2_indexer_head_dim
+       wide: [0, head_dim) is the main latent being finalized and, later,
+       a dequantized main entry; [head_dim, ...) is the indexer key.
+       Needed because the rings hold whatever --csa2-ring selects while
+       every operator that touches them takes f32 - see
+       lz_csa2_ring_row, which hands back a pointer into the ring itself
+       at f32 and this scratch otherwise. */
+    float *csa2_row;
     /* Per-token scratch, one layer/token at a time (forward_csa2.c
        cannot batch across a chunk's nt tokens the way ordinary
        attention does - see its own file comment), dedicated rather

@@ -242,6 +242,10 @@ int lz_debug_kgate_sig_shi = -9999;
 int lz_kv_kfmt = LZ_KVF_Q8;
 int lz_kv_vfmt = LZ_KVF_Q8;
 
+/* --csa2-ring: the finalized rings' storage format. f32 is the identity
+   tier - see forward.h's LZ_CRF_* comment and lz_csa2_ring_row. */
+int lz_csa2_ring_fmt = LZ_CRF_F32;
+
 /* --kv-ref k|v: keep ONE side unquantized while the other stays on the
    selected format. Decomposition instrument, not a mode.
 
@@ -605,6 +609,7 @@ void lz_state_free(LZRunState *s) {
     xfree(s->conv_state); xfree(s->conv_w32);
     xfree(s->csa2_pending_c); xfree(s->csa2_pending_z);
     xfree(s->csa2_comp_ring); xfree(s->csa2_idx_comp_ring);
+    xfree(s->csa2_row);
     xfree(s->csa2_scores);
     xfree(s->csa2_topk_idx_pub); xfree(s->csa2_topk_n_pub);
     xfree(s->csa2_c_j); xfree(s->csa2_z_j);
@@ -718,10 +723,15 @@ void lz_state_reset(LZRunState *s, const LZModel *m) {
            would then finalize from. */
         size_t npend = lz_csa2_pend_base(c, c->n_full_layers, s->ssm_ring_depth);
         size_t nring = lz_csa2_ring_base(c, c->n_full_layers, s->seq_len);
+        /* The rings' two lines take their stride from --csa2-ring, the
+           same function the allocation uses; the pending slabs are f32
+           whatever it says. Zeroing fewer bytes than were allocated would
+           leave a stale closure for the next block to finalize from. */
+        size_t rstride = (size_t)lz_csa2_ring_stride(lz_csa2_ring_fmt);
         memset(s->csa2_pending_c, 0, npend * c->head_dim * sizeof(float));
         memset(s->csa2_pending_z, 0, npend * c->head_dim * sizeof(float));
-        memset(s->csa2_comp_ring, 0, nring * c->head_dim * sizeof(float));
-        memset(s->csa2_idx_comp_ring, 0, nring * c->csa2_indexer_head_dim * sizeof(float));
+        memset(s->csa2_comp_ring, 0, nring * c->head_dim * rstride);
+        memset(s->csa2_idx_comp_ring, 0, nring * c->csa2_indexer_head_dim * rstride);
     }
     /* The ring's own "which slot is confirmed" index - see forward.h's
        s->ssm_slot comment. Every recurrent index resets to 0 here,
