@@ -302,6 +302,13 @@ fi
 # and it asserts both directions, because a predicate that refuses
 # everyone would satisfy "the nested one is refused" while breaking the
 # holder's own give-it-back.
+#
+# The fixture's own first spelling is worth recording, because it was red
+# at the wrong arm: the holder redirected the acquire's stdout into a
+# file rather than eval'ing the export line, so it held no token at all
+# and the nested release was refused by the TOKEN arm. That refusal reads
+# as this arm failing while what it tests - the opener check - had not
+# been reached.
 reset_lock
 (
     # The holder takes the lock the way the call sites do, capture first:
@@ -328,11 +335,11 @@ rc13n=$?
 rc13r=$?
 ok "$([ "$rc13n" -eq 0 ] && [ ! -s "$W/a13.nested" ] && echo PASS || echo FAIL)" \
    "A13: a nested take inside a held lock still passes through (rc=$rc13n)"
-if [ "$rc13r" -eq 3 ] && [ -d "$LD" ] &&
+if [ "$rc13r" -eq 0 ] && [ ! -s "$W/a13.nestedRelease" ] && [ -d "$LD" ] &&
    [ "$(sed -n 's/^owner=//p' "$LD/owner")" = "$T13" ]; then
-    ok PASS "A13: a nested process cannot release its holder's lock (rc=$rc13r, lock intact)"
+    ok PASS "A13: a nested release gives nothing back, silently, and the holder keeps the lock"
 else
-    ok FAIL "A13: a nested process cannot release its holder's lock (rc=$rc13r)"
+    ok FAIL "A13: a nested release gives nothing back, silently, and the holder keeps the lock (rc=$rc13r)"
 fi
 touch "$W/a13.done"
 wait "$H13"
