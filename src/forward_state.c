@@ -392,8 +392,8 @@ static int layer_owns_dense_kv(const LZModel *m, int l) {
 
 /* How many layers own a dense plane. The planes are sized for this count
    (+1 when an MTP head is bound), not for c->n_full_layers: a csa2_on
-   layer used to be counted here, so the model allocated a plane nothing
-   ever wrote and paid for twice the KV it could use. */
+   layer owns no plane, and counting it allocates one nothing writes -
+   twice the KV the model can use, on the models that have one. */
 static int dense_kv_layers(const LZModel *m) {
     const LZModelConfig *c = &m->config;
     int l, n = 0;
@@ -747,10 +747,10 @@ static void alloc_csa2_ring(LZRunState *s, const LZModel *m,
                per-layer base a consumer computes (lz_csa2_pend_base(c,
                ci, ...) / lz_csa2_ring_base(c, ci, ...) in forward_csa2.c
                and forward_ckpt.c) is an offset INTO it, never a stride
-               across nf copies of it. Multiplying by nf here allocated
-               nf times the ring: half of it - 3,147,776 B for kunkun-ce
-               at seq 8192 and 5,246,976 B for kunkun98, at nf = 2 - was
-               memory nothing could name. lz_state_reset's memsets have
+               across nf copies of it. Multiplying by nf here allocates
+               nf times the ring, and at nf = 2 half of that - 3,147,776 B
+               for kunkun-ce at seq 8192, 5,246,976 B for kunkun98 - is
+               memory nothing can name or index. lz_state_reset's memsets have
                always used the unmultiplied sizes, which is the same
                reading of these two functions.
                nf is NOT dropped from csa2_topk_idx_pub/csa2_topk_n_pub
