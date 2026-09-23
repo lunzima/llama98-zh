@@ -1632,6 +1632,32 @@ esac
 # Summary
 # ---------------------------------------------------------------------
 echo
+# S2 CSA2's indexer training schedule: the flag pair that no run ever
+# passed a non-zero value, and whose first real run reached NaN. Own
+# script because the arms train (two short runs, ~10 minutes) and need a
+# CUDA device - see the gate's own header for what each arm proves.
+echo
+echo "==== [31b/31]CSA2 indexer schedule ===="
+LOG=build/ci-csa2-indexer.log
+build/csa2_indexer_gate.sh >"$LOG" 2>&1
+C2IX_RC=$?
+cat "$LOG"
+case $C2IX_RC in
+    0)
+        note "PASS  CSA2 indexer schedule"
+        PASS=$((PASS + 1))
+        ;;
+    2)
+        REASON=$(grep -m1 'SKIP' "$LOG")
+        note "SKIP  CSA2 indexer schedule ($REASON)"
+        SKIP=$((SKIP + 1))
+        ;;
+    *)
+        note "FAIL  CSA2 indexer schedule"
+        FAIL=$((FAIL + 1))
+        ;;
+esac
+
 echo "==== summary ===="
 for line in "${SUMMARY[@]:-}"; do
     [ -n "$line" ] && echo "$line"

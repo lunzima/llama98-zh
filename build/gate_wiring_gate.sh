@@ -126,6 +126,11 @@ native_obj_gate.sh         # A BUILD HOOK, not a gate step, and the sense of
                            #   invokes as a stage is not read as an undeclared
                            #   ci-only gate
 kernel_isa_identity_gate.sh # disassembles both toolchains' objects
+csa2_indexer_gate.sh       # trains two short arms, so it needs a
+                           #   CUDA device and about ten minutes; the
+                           #   question it answers (does the indexer
+                           #   move at all) only exists on a run that
+                           #   actually optimizes, not on a build
 switch_matrix_gate.sh      # builds the knob matrix, many configurations
 float_knob_gate.sh         # instrumented build plus two planted axes
 str_table_order_gate.sh    # needs a model to walk the string tables
