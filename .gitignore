@@ -307,3 +307,14 @@ __pycache__/
 /*.dis
 /llama98_f32count.exe
 /.reasonix/
+
+# UnsLoth regenerates this on every import and it is bound to the local
+# unsloth version, so committing it only adds a diff that says nothing about
+# this tree. The training tree's .gitignore carries the same line.
+unsloth_compiled_cache/
+
+# Scratch. The tooling's own guardrail names `tmp-wsl/` as where temporary
+# files belong, so every agent's instrumentation lands here - which makes it
+# exactly what a future `git add -A` would sweep up, in a tree whose first
+# rule is never to run one.
+tmp-wsl/
