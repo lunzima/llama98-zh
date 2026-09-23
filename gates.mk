@@ -41,7 +41,7 @@
 # nested inside another comment; gcc said so on every build and `check`
 # reported 16 PASS over it. Having a caller somewhere is not the test -
 # being reachable from what people actually run is.
-check: root-hygiene-gate bare-endif-gate wscr-borrow-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate json-offset-gate softfp-gate dedupe-gate mm-alias-gate kv-share-ced-boundary-gate ced-proj-arm-gate csa2-modes-config-gate csa2-cache-idx-alias-gate csa2-mode-dispatch-gate csa2-mode-export-load-gate csa2-last-writer-bin-gate csa2-reindex-causality-gate csa2-indexer-rope-slice-gate csa2-out-rope-gate csa2-z-subst-gate csa2-compress-m-layers-gate smf-lead-gate c89-floor-gate pri64-scan-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate tree-lock-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate codesize-gate isa-floor-avx2-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate arch-allowlist-gate kernel-matrix-gate aux-parm-arity-gate aux-equiv-gate mathf-xcompiler-gate bf16-torch-gate lz4-model-gate gcc-watcom-output-gate fixture-exists-gate
+check: root-hygiene-gate bare-endif-gate wscr-borrow-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate json-offset-gate softfp-gate dedupe-gate mm-alias-gate kv-share-ced-boundary-gate ced-proj-arm-gate csa2-modes-config-gate csa2-cache-idx-alias-gate csa2-mode-dispatch-gate csa2-mode-export-load-gate csa2-last-writer-bin-gate csa2-reindex-causality-gate csa2-indexer-rope-slice-gate csa2-out-rope-gate csa2-z-subst-gate csa2-compress-m-layers-gate artifact-modeling-gate smf-lead-gate c89-floor-gate pri64-scan-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate tree-lock-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate codesize-gate isa-floor-avx2-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate arch-allowlist-gate kernel-matrix-gate aux-parm-arity-gate aux-equiv-gate mathf-xcompiler-gate bf16-torch-gate lz4-model-gate gcc-watcom-output-gate fixture-exists-gate
 
 # Zero gcc warnings, asserted rather than printed. The Watcom side has
 # always been counted ("N lines, 0 warnings, 0 errors", per file); this
@@ -612,6 +612,30 @@ csa2-z-subst-gate:
 .PHONY: csa2-compress-m-layers-gate
 csa2-compress-m-layers-gate:
 	@$(call GATE_OK,build/csa2_compress_m_layers_gate.sh)
+
+# A model directory loads through trust_remote_code, so the KunMoeConfig
+# that runs is the copy in THAT directory, while engine/csa2.py - the
+# module that wires the layers - is imported from the training tree
+# whichever copy loads. The directory's file is a build product (three
+# producers write it by copying engine/kunmoe_modeling.py), so it goes
+# stale exactly when the engine's moves and the directory is not rebuilt.
+# That is what happened to both shipping artifacts: they carried three
+# config fields and two methods less than the engine, so the first
+# training step raised AttributeError in _wire_csa2 and the csa2 schedule
+# behind that call had never run.
+#
+# It is a gate and not a one-time copy because the same skew returns on
+# the next engine change, silently, and the failure it produces is a
+# load-time AttributeError in a path nobody exercises.
+#
+# In `check` rather than ci.sh-only: python3 and a model directory are
+# its whole environment, it builds nothing, and it runs in about a minute
+# (two imports, one per artifact). It SKIPs, with its own line, when
+# there is no artifact root or no training tree - the ci.sh-only list
+# above is for gates that need a Watcom build or minutes of wall clock.
+.PHONY: artifact-modeling-gate
+artifact-modeling-gate:
+	@$(call GATE_OK,build/artifact_modeling_gate.sh)
 
 # The 64-bit printf modifier. lz_int.h names the type (lz_i64) and its
 # modifier (LZ_PRI64) once each. The TYPE half was swept across 213 sites

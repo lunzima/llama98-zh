@@ -38,6 +38,7 @@
 !/build/csa2_indexer_rope_slice_probe.c
 !/build/csa2_compress_m_layers_gate.sh
 !/build/csa2_compress_m_layers_probe.c
+!/build/artifact_modeling_gate.sh
 !/build/tree_lock.sh
 !/build/tree_lock_gate.sh
 !/build/with_tree_lock.sh
