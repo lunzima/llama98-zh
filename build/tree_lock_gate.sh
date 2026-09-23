@@ -290,6 +290,60 @@ else
     ok FAIL "A12: a steal under --print-env puts the export line alone on stdout"
 fi
 
+# ------------------------------------------------------------------ A13
+# RELEASE BELONGS TO THE OPENER, unlike acquire. Every process the holder
+# starts inherits LZ_TREE_LOCK, so a nested take passes through silently
+# (A5) and the nested process carries the holder's token with it. A
+# release that asked only "is this token current" therefore frees a claim
+# the nested process never opened, and the holder runs on with the lock
+# gone from under it - the shape measured on a gate whose `make` starts
+# the build hooks, where the tree reads free for the whole build. A5
+# covers the acquire half of re-entrancy; this arm is the release half,
+# and it asserts both directions, because a predicate that refuses
+# everyone would satisfy "the nested one is refused" while breaking the
+# holder's own give-it-back.
+reset_lock
+(
+    # The holder takes the lock the way the call sites do, capture first:
+    # a holder that never evals the export line has no token, and its
+    # release is then refused by the token arm rather than by this one.
+    LZ_ENV=$(LZ_TREE_LOCK_NAME=A13outer bash "$TL" acquire --print-env) || exit 2
+    eval "$LZ_ENV"
+    printf '%s\n' "$LZ_ENV" >"$W/a13.outer"
+    # Hold until the nested attempt below is done, rather than for a fixed
+    # second: how long the attempt takes is the machine's business, and a
+    # release that beat it would test nothing.
+    while [ ! -f "$W/a13.done" ]; do sleep 0.1; done
+    bash "$TL" release >"$W/a13.holderRelease" 2>&1
+) &
+H13=$!
+for _i in $(seq 1 100); do
+    [ -f "$LD/owner" ] && break
+    sleep 0.1
+done
+T13=$(sed -n 's/^owner=//p' "$LD/owner")
+( LZ_TREE_LOCK="$T13" LZ_TREE_LOCK_NAME=A13nested bash "$TL" acquire >"$W/a13.nested" 2>&1 )
+rc13n=$?
+( LZ_TREE_LOCK="$T13" bash "$TL" release >"$W/a13.nestedRelease" 2>&1 )
+rc13r=$?
+ok "$([ "$rc13n" -eq 0 ] && [ ! -s "$W/a13.nested" ] && echo PASS || echo FAIL)" \
+   "A13: a nested take inside a held lock still passes through (rc=$rc13n)"
+if [ "$rc13r" -eq 3 ] && [ -d "$LD" ] &&
+   [ "$(sed -n 's/^owner=//p' "$LD/owner")" = "$T13" ]; then
+    ok PASS "A13: a nested process cannot release its holder's lock (rc=$rc13r, lock intact)"
+else
+    ok FAIL "A13: a nested process cannot release its holder's lock (rc=$rc13r)"
+fi
+touch "$W/a13.done"
+wait "$H13"
+if grep -q "released" "$W/a13.holderRelease" &&
+   ! grep -q "REFUSED" "$W/a13.holderRelease" &&
+   [ ! -d "$LD" ]; then
+    ok PASS "A13: the holder's own release still gives the lock back"
+else
+    ok FAIL "A13: the holder's own release still gives the lock back"
+fi
+
 # ------------------------------------------------------------------ A10
 # THE CLIENT LIST, and this arm is the reason the list is worth having: a
 # lock honoured by some writers reads as mutual exclusion while the

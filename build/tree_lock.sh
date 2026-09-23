@@ -70,6 +70,13 @@
 # or short enough to steal a live holder's lock, which is the silent
 # failure this exists to remove. `--steal` prints what it overrides.
 #
+# The directory a steal moves aside is named <LOCKDIR>.stale.<ts>.<pid>
+# and nothing reclaims it: `status` reads the lock's own path, and a
+# claim that is no longer there is not the lock it reports on, so these
+# accumulate where neither this script nor `git status` looks. How many
+# to keep, and who removes the rest, is a question that is open here -
+# this script reclaims none of them.
+#
 # Exit codes: 0 acquired/released/read, 2 refused (someone else holds
 # it), 3 refused (the lock is not yours to release), 4 usage/unusable.
 set -u
@@ -267,7 +274,7 @@ cmd_release() {
         echo "tree_lock: nothing to release (no $LOCKDIR)"
         return 0
     fi
-    local cur
+    local cur opener mine
     cur=$(read_field owner) || cur=""
     if [ -z "${LZ_TREE_LOCK:-}" ] || [ "$cur" != "$LZ_TREE_LOCK" ]; then
         # A holder that was stolen from still has its token, and its late
@@ -276,6 +283,24 @@ cmd_release() {
         echo "tree_lock: REFUSED - not yours to release"
         echo "  this process token: ${LZ_TREE_LOCK:-<none>}"
         echo "  current lock     : ${cur:-<none>}"
+        return 3
+    fi
+    # THE TOKEN IS INHERITED; THE OPENING IS NOT. Every process the holder
+    # starts inherits LZ_TREE_LOCK, so a nested take passes through
+    # silently (that is what makes a runner's own gates re-entrant) and a
+    # nested process carries the same token as the holder. A release that
+    # asked only whether the token is current therefore lets a nested gate
+    # free a claim it never opened: the holder runs on, and the lock is
+    # gone from under it - measured as free for the whole of a gate whose
+    # `make` runs the build hooks. The opener is the shell that asked for
+    # the lock, recorded in the owner file; a release belongs to that
+    # shell, or to a process started with its pid.
+    opener=$(read_field pid) || opener=""
+    mine=${LZ_TREE_LOCK_PID:-$PPID}
+    if [ -z "$opener" ] || [ "$opener" != "$mine" ]; then
+        echo "tree_lock: REFUSED - not the process that took it"
+        echo "  lock opened by pid: ${opener:-<none>}"
+        echo "  this releaser pid : $mine"
         return 3
     fi
     rm -rf "$LOCKDIR"
