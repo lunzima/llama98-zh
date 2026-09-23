@@ -32,6 +32,14 @@ SRC="ops ops_kernel ops_epi ops_quant ops_sched ops_norm ops_gdn ops_matmul ops_
      fwht cpucheck err"
 X86_EXTRA="ops_mmx ops_mmx_sse ops_sse2"
 ARM_EXTRA="ops_t2_arm ops_arm"
+# ARM ONLY, and it is the measurement this probe makes, not a build
+# detail. The arm named "soft-float" is the ENGINE's soft-float: this TU
+# defines __aeabi_f* under LZ_SOFTFP_FAST's round-toward-zero. Left
+# unlinked, the arm calls libgcc's round-to-nearest instead, and the
+# regime difference then reads as six diverged transcendentals - a red
+# whose cause is the source list, on the arm whose name says otherwise.
+# The x86 arm has no such omission to make: it links no soft-float.
+ARM_SOFTFP="lz_softfp"
 
 rm -rf "$O"; mkdir -p "$O"
 MISSING=""
@@ -100,12 +108,12 @@ if [ "$ARM_VIA" = native ] && [ -n "$ACC" ] \
     if $ACC -O2 -std=c99 -static -march=armv5te -mtune=arm926ej-s \
             -mfloat-abi=soft -DLZ_NO_FPU=1 -ffp-contract=off -I"$R/src" \
             -o "$O/arm" "$R/.prof/scalar_regime_xcheck.c" \
-            $(list "$R/src" $SRC $ARM_EXTRA) -lm > "$O/arm.log" 2>&1; then
+            $(list "$R/src" $SRC $ARM_EXTRA $ARM_SOFTFP) -lm > "$O/arm.log" 2>&1; then
         G=$(qemu-arm-static "$O/arm" | norm); arm_ok=1
     fi
 elif [ "$ARM_VIA" = wsl ]; then
     case "$R" in /[a-z]/*) WR="/mnt$R" ;; *) WR="$R" ;; esac
-    SRCLIST=$(list "$R/src" $SRC $ARM_EXTRA | sed "s|$R|$WR|g")
+    SRCLIST=$(list "$R/src" $SRC $ARM_EXTRA $ARM_SOFTFP | sed "s|$R|$WR|g")
     if wsl bash -lc "cd '$WR' && arm-linux-gnueabi-gcc-14 -O2 -std=c99 \
             -static -march=armv5te -mtune=arm926ej-s -mfloat-abi=soft \
             -DLZ_NO_FPU=1 -ffp-contract=off -I'$WR/src' -o /tmp/srx_arm \
