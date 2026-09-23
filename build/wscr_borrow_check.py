@@ -53,8 +53,24 @@ reason about it:
   cannot express, because its model is a variable inside one function and
   this one spans a function boundary with no end.
 
+  THE SCAN IS TEXT-LEVEL AND THE PREPROCESSOR DOES NOT RUN, so an instance
+  under `#if` is reported by the build that compiles it away. That is the
+  point rather than a side effect: src/ops_gdn.c's g_shk store sits under
+  `#if LZ_GDN_STATE_F32`, whose default is 0, and the rule sees it in the
+  DEFAULT build - a claim the gate could not make if it keyed on what the
+  compiler emitted. A latent instance that only a switch-matrix run can
+  reach is exactly the one that would otherwise be added and forgotten.
+
 WHAT IT CANNOT SEE. Each miss is written down rather than papered over:
 
+  * A store THROUGH a pointer - `ps->j->nodes[i].key = k`, where `ps` is a
+    caller's structure and only its name collides with a static's - is not
+    reported. That is the one of the three detector false positives this
+    rule produced on its first run that is not a regex bound but ALIASING,
+    and aliasing is what a text-level check cannot resolve: it can only
+    MISS here, never misreport. The list of stores below is therefore
+    sound in the direction that matters (nothing reported is wrong) and
+    NOT exhaustive (something stored through a pointer is invisible).
   * A borrow stored into a non-`static` object that nonetheless outlives
     the scratch - a field of a heap struct that lives as long as the model,
     say - is not reported. The rule keys on `static` because that is the

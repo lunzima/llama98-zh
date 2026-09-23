@@ -35,13 +35,17 @@
 #
 # WHAT IT DOES NOT COVER: it is a text-level check of src/*.c. A borrow
 # reached through a macro, or a scratch pointer recomputed at run time, is
-# invisible to it. A stored pointer whose declaration carries no `const` on
-# the pointee is not read as a borrow, and a borrowed pointer stored into a
-# non-static object that nonetheless outlives the scratch - a heap struct
-# living as long as the model - is not reported either; the checker's
-# docstring lists both next to its other blind spots. It supplements reading
-# the call site; it does not replace it. There is no runtime arm - the rule
-# is about which pointer is live, which no single execution can observe.
+# invisible to it; so is a store THROUGH a pointer (`ps->j->...`), which is
+# aliasing and therefore something no text-level check can resolve - it can
+# only MISS that, never misreport it. A stored pointer whose declaration
+# carries no `const` on the pointee is not read as a borrow, and a borrowed
+# pointer stored into a non-static object that nonetheless outlives the
+# scratch - a heap struct living as long as the model - is not reported
+# either. The checker's docstring lists all of these next to its other blind
+# spots, and the list of stores it prints is sound (nothing reported is
+# wrong) but not exhaustive. It supplements reading the call site; it does
+# not replace it. There is no runtime arm - the rule is about which pointer
+# is live, which no single execution can observe.
 #
 # Needs no build, no model - runs in well under a second.
 #
