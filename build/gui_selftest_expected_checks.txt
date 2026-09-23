@@ -1,0 +1,225 @@
+# Every check name the GUI selftest is expected to report.
+#
+# WHY A FILE AND NOT A LOOP IN A GATE. This was
+# tests/test_gui_layout.py's test_the_selftest_checks_what_it_claims,
+# 944 lines of it, in the training tree - and the numbers are the
+# point: a report of 400 PASS lines that never looked at the button
+# labels, or that quietly stopped running a third of itself, satisfies
+# every count-based rule. The two gates that run the selftest assert a
+# FLOOR on the count; this is what says the count is made of the right
+# things.
+#
+# One name per line, exact substrings of the report. Blank lines and
+# '#' comments are ignored. Verified against the live selftest when it
+# moved here (2026-09-23): 205 of 205 names still appear.
+#
+# REMOVING A NAME IS A DECISION, NOT A FIX. Each one is a check that
+# once caught something or guards a shipped behaviour - the list is a
+# ratchet, like FLOOR. If a name stops appearing, the check was deleted
+# from gui/main.c or stopped being reached; either way something has to
+# be argued for.
+control exists: transcript
+toolbar: the control exists
+toolbar: the layout is tall enough for its buttons
+toolbar: an artificially oversized font makes the layout's reserved height genuinely too small
+minimum window size matches the layout minimum
+transcript: chunked script arrives intact, tags consumed rather than shown
+transcript: the think region's content is grey
+transcript: text after the block is back to plain
+transcript: byte-at-a-time Chinese matches the codec
+transcript: inline Markdown markers are consumed, not shown
+transcript: **bold** reaches the control as real bold
+transcript: *italic* reaches the control as real italic
+transcript: `code` reaches the control in a monospace face
+transcript: plain text between markers carries neither effect
+transcript: a seeded reply's closing think tag never reaches the display
+transcript: the seeded reply's content is exactly the two halves with the tag removed
+transcript: the seeded reply's FIRST half renders grey
+transcript: the seeded reply's SECOND half renders plain, after the unseen close tag flipped it back
+worker: every byte crossed the thread boundary, in order
+worker: every posted buffer was freed exactly once
+worker: a second start is refused while one runs
+worker: a stopped job leaves a prefix, not a truncation
+worker: the job's return code arrives intact
+model: a directory with no model.bin is refused
+model: the pre-check accepts a directory that has one
+model: nothing is left loaded after a failure
+model: loading a missing directory fails cleanly
+session: the prompt contains the user's UTF-8
+session: generating with no model fails with a message
+session: history keeps the byte the display cannot show
+session: the think block is stripped from history
+session: the second render still contains the first turn
+save: no bare CR survives into the file
+save: the file starts with the header line
+chat: a saved conversation loads back with the same turns
+chat: a file without the header line is refused and changes nothing
+save: an encode too big for the buffer is refused, not silently truncated
+save: a refused save leaves no half-written file behind
+chat: a file bigger than the read buffer is refused, not silently truncated
+settings: what the window shows, the window accepts
+settings: Tab visits every row in visual order - slider, then value box, row by row
+settings: each box's refusal reports that box, not another one
+settings: every slider's thumb sits where its own value says it should
+settings: no two controls in the dialog share a mnemonic, in either language
+sampling: temperature and top-p follow the preset independently - setting one does not freeze the other
+sampling: a penalty of 1.0 is sent explicitly, not left to whatever the preset put there
+system: empty settings prompt -> the built-in identity renders, byte for byte
+system: a custom prompt REPLACES the built-in identity in the render
+system: clearing the custom prompt restores the built-in
+settings: the system prompt box round-trips
+chat: the custom system prompt rides the round-trip into the settings
+settings: the slider is wider than the value box
+settings: every control's untheme call agrees - the dialog is not half classic, half themed
+settings: the scrollbar's untheme call really ran, not just declared
+settings: an over-cap value is refused by the reader
+trim: drops a PAIR, not a lone user turn - a reply with no question in front of it reads as the conversation having started that way
+trim: refuses rather than looping forever
+resource: the splash is 492x283
+resource: the application icon is in the binary
+children: no two share a control id
+children: no zero-sized tab stop
+status: the comctl32 bar carries a sizing grip
+enable: Stop is greyed while nothing is generating
+enable: Send stays live with no model open
+menu: every item carries a mnemonic
+menu: no two items in one menu share a mnemonic
+accel: the accelerator table has exactly the entries gui/kunkun98.rc declares
+lamps: every state bitmap loaded
+lamps: the activity lamp lights while a job runs
+lamps: clear of the status bar's sizing grip
+lamps: inside the status bar's part, not on its border
+input: the smallest box holds three lines of the UI font
+input: the control really is holding CRLF to begin with
+input: a multi-line message reaches the model without CR
+enter: plain Enter still posts Send
+enter: Ctrl+Enter does not send
+enter: Shift+Enter does not send
+enter: a plain Enter's queued WM_CHAR is swallowed, not inserted as a stray newline
+enter: WM_CHAR still reaches the control when a modifier is held, so Ctrl/Shift+Enter can still insert a newline
+language: the Send button follows the switch
+language: the resting status line follows the switch
+language: the tool strip is rebuilt in the new language
+toolbar: the layout is tall enough for its buttons in English too
+language: the menu tick moves to the live language
+language: switching back restores the original text
+floor: WM_CREATE survives create_toolbar returning NULL
+floor: the no-toolbar branch was really taken, not just survived
+ini: an int survives a write and a read
+ini: a path with a space survives a write and a read
+mru: the recent list appears in the File menu
+mru: an ampersand in a path is not eaten by the menu
+edit: the clipboard instrument reads back empty right after EmptyClipboard
+edit: Copy reaches the control that has focus
+edit: Select All selects the whole conversation
+worker: mid-clear setup - a job starts
+worker: mid-clear setup - a token message is queued, undispatched
+worker: clearing mid-generation reaps the interrupted job before IDM_CLEAR returns, not on a later turn of the message loop
+worker: clearing mid-generation does not push the old reply into the new history
+worker: clearing mid-generation leaves no leftover text in the transcript
+worker: mid-load setup - a generate job starts
+worker: mid-load setup - a token message is queued, undispatched
+worker: /load reaps the interrupted generate job before starting the load, so the load job's own failure - not the old job's clean stop - is what st_pump sees first
+worker: Stop ungreys while a generate job is running
+enable: Send ungreys when cmd_enable turns it on
+ini: a write reaches the file's own bytes, not just the in-process profile cache
+ini->settings: a probe window opens
+ini->settings: temp_milli=-1 - negative is skipped, default stands
+ini->settings: temp_milli=-500 - far negative is skipped too
+ini->settings: temp_milli=500 - in range: applied, marked manual
+ini->settings: temp_milli=1000 - exactly the cap: accepted
+ini->settings: temp_milli=1001 - just over the cap: refused, default stands
+ini->settings: temp_milli=2000000 - far over the cap: refused, default stands
+close: a window for the save-side test opens
+close: WM_CLOSE writes temp_milli matching the live temperature (0.5 -> 500)
+drop: WM_CREATE's lz_drop_accept call really ran, not just declared
+theme: the transcript's untheme call really ran, not just declared
+theme: SetWindowTheme reaches the transcript's scrollbar exactly as it reaches the input box's border
+status: the context cell is empty with no model
+status: the context cell counts tokens once a conversation exists
+status: the context cell renders a known token count
+status: create_children's own tail calls update_ctx_cell
+status: finish_job's tail really calls update_ctx_cell
+status: IDM_CLEAR's handler really calls update_ctx_cell
+status: load_chat_from really calls update_ctx_cell
+worker: a scripted load job starts
+worker: the scripted load reports done
+enable: finish_job's ok branch sets the READY idle status after a real load succeeds
+worker: a scripted failing load job starts
+worker: the scripted failing load reports done
+enable: finish_job leaves Send enabled after a load fails too
+worker: a scripted MoE-less load job starts
+worker: the scripted MoE-less load reports done
+panel: num_experts == 0 creates no expert lamps at all
+panel: the candidate list itself still exists with no MoE
+panel: the candidate LISTBOX actually honours LB_SETTABSTOPS (LBS_USETABSTOPS is set)
+worker: a scripted MoE load job starts
+worker: the scripted MoE load reports done
+panel: num_experts > 0 creates all 16 expert lamps
+panel: every expert lamp carries WS_EX_STATICEDGE - the frame the user asked for
+panel: elamp_tier reads 0/1/2/3-or-more layers as off/green/amber/red
+panel: every lamp renders the bitmap its own hit count's tier calls for, independently
+panel: the candidate list moves UP to fill the lamp grid's space when there is no MoE
+panel: a truncated expert mask says how many experts the model actually has, not just 32
+theme: every control this window creates unthemes consistently (transcript, input, send, chicken, name, info, status, candidate list, candidate title, 16 lamps - toolbar excepted, see comment above)
+panel: a short token is left alone by truncation
+panel: an over-wide token is truncated with an ellipsis
+panel: the truncated token (with its ellipsis) does not cross the tab stop
+panel: an over-wide Chinese token is truncated with an ellipsis
+panel: truncating a Chinese token never splits a double-byte character
+transcript: the user turn header is the speaker label, a space, and a HH:MM clock
+transcript: the user turn header renders in the user colour
+transcript: the assistant turn header starts with its own speaker label, distinct from the user's
+transcript: the assistant turn header renders in the assistant colour
+transcript: user and assistant colours are not the same constant
+transcript: with_time off omits the clock entirely, rather than leaving a blank one
+transcript: transcript_line ends its content with a blank line, not just its own line break
+transcript: sys_line_fmt ends with a blank line after it, not just its own CRLF
+transcript: sys_line_fmt renders in the system colour
+transcript: sys_line(id) matches sys_line_fmt's own output byte for byte - the same exit point
+transcript: sys_line(id) also renders in the system colour
+panel: EM_SETBKGNDCOLOR on the transcript really changes what SendMessage reports as "previous" - the mechanism is live on this control
+panel: WM_CTLCOLOREDIT sets the input box's DC background to white
+panel: WM_CTLCOLOREDIT sets the input box's DC text colour explicitly
+panel: WM_CTLCOLOREDIT returns THIS file's own cached white brush, not a stock one from DefWindowProcA's own fallback handling
+real model: do_send's user turn header starts the transcript with the real speaker label
+real model: do_send's user turn header is coloured through the real entry point, not just in turn_header's own direct-call test
+real model: do_send's assistant turn header also reaches the transcript, after the user's
+worker: an inspect-carrying job starts
+worker: inspect setup - a WM_APP_INSPECT is queued, undispatched
+worker: the throttle collapses a fast burst to one WM_APP_INSPECT, not one per token
+worker: the inspect job reports done
+worker: the finishing send delivers the panel's last frame, unconditionally, even though the throttle's own timer had nothing left to say
+worker: the frame the finishing send delivered is the LAST token's, not a stale one
+find: a Chinese substring is located at the right offset
+find: a Chinese substring is found when it was written under a forced English keyboard layout
+find: a string that is not there reports not-found rather than 0
+prefill: lz_prefix_init succeeds on a model whose own sizing reduces to nothing
+prefill: the prefix cache is untouched in full mode
+prefill: prepare's own no-reuse shortcut still reports success
+prefill: the prefix path is actually entered in prefix mode
+scroll: the control exists
+scroll: the range is 0..100 (a fresh SCROLLBAR's own default is 0..0, measured - this is not that default)
+scroll: the initial position and the text box agree with the temperature the dialog opened with (0.50 -> 50, against a fresh SCROLLBAR's own default position of 0, measured)
+scroll: SB_LINERIGHT advances the position by 1
+scroll: SB_LINELEFT retreats the position by 1
+scroll: SB_PAGERIGHT advances the position by 10
+scroll: SB_PAGELEFT retreats the position by 10
+scroll: SB_TOP (Home) jumps to the low end
+scroll: SB_BOTTOM (End) jumps to the high end
+scroll: SB_THUMBTRACK reads the position from HIWORD (not mutation-verified - see the comment above)
+scroll: the text box tracks whatever position a scroll message actually produced
+scroll: the position does not go negative at the low end (not mutation-verified - see the comment above)
+real model: lz_gui_model_ready is true after a real load
+real model: finish_job's ok branch sets the READY idle status after a REAL load, not a scripted one
+real model: the sidebar carries the model's name
+real model: the context cell leaves -1 behind (a real model with an empty conversation reads 0, not absent)
+real model: the directory lands on the recent list
+real model: a rendered turn counts to a real, positive number of tokens - not the hist.n==0 shortcut, a real BPE pass
+font: lz_ui_font() builds SimSun by name and charset for Chinese, not the stock object
+font: WM_SETFONT wiring reaches a real control (the input box) with the real font object, not just two functions agreeing in isolation
+font: lz_richedit_use_font turned IMF_AUTOFONT off on the transcript (RichEdit's own default is on)
+font: measure_status_h reacts to a real font-height change where this comctl32 version varies by font at all
+font: apply_language re-measures g.status_h, not only create_children
+dispatch: WM_COMMAND is rejected for a disabled id
+dispatch: the same id reaches do_send once re-enabled

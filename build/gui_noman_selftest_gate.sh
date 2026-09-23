@@ -159,19 +159,15 @@ if [ "$SKIPS" -gt "$SKIP_CEIL" ]; then
     BAD=1
 fi
 
-# Named, so removing one has to be argued for. The first is the one that
-# caught the unthemed-path bug this gate exists for; the second is the
-# control for it.
-for want in \
-    "settings: no two controls in the dialog share a mnemonic" \
-    "settings: Tab visits every row in visual order"
-do
-    if ! grep -qF "$want" "$REPORT"; then
-        echo "gui_noman_selftest_gate: the check '$want' is gone."
-        echo "  It caught a shipped bug. Deleting it needs a reason."
-        BAD=1
-    fi
-done
+# Every check name the selftest is expected to report - the same 205-name
+# list gui_selftest_gate.sh reads, from the same file, because both
+# binaries run the same gui/main.c. Named, so removing one has to be
+# argued for; a count would let this arm lose a third of itself quietly.
+if ! bash build/gui_selftest_named_checks.sh "$REPORT"; then
+    echo "gui_noman_selftest_gate: names above are missing from the"
+    echo "  unmanifested build's report."
+    BAD=1
+fi
 
 if [ "$RC" -ne 0 ] && [ "$BAD" -eq 0 ]; then
     echo "gui_noman_selftest_gate: FAIL - the report is clean but the"

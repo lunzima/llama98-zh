@@ -127,6 +127,8 @@
 !/build/gcc_warning_gate.sh
 !/build/gui_selftest_gate.sh
 !/build/gui_noman_selftest_gate.sh
+!/build/gui_selftest_named_checks.sh
+!/build/gui_selftest_expected_checks.txt
 !/build/kernel_reach_gate.sh
 !/build/t2_probe_stubs.c
 !/build/dot128_x16_probe.c
