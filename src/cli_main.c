@@ -2129,8 +2129,14 @@ int main(int argc, char **argv) {
            LZ_BATCH_MAX, so lowering or raising nt_cap within that bound
            cannot overrun anything. */
         if (batch_width) st.nt_cap = batch_width;
+        /* The exact byte count rides along with the rounded MB: an
+           allocation this project asserts equality on (build/csa2_dense_kv_
+           gate.sh's plane accounting, at a few tens of KB) is invisible in a
+           %.1f MB reading, and a criterion the print quantum swallows reads
+           the same for a right answer and a 5%-wrong one. */
         { char _b[LZ_FTOA_BUF]; lz_ftoa_f(_b, st.bytes_alloc / 1e6f, 1, 0);
-          printf("Runtime state  %s MB\n", _b); }
+          printf("Runtime state  %s MB (%" LZ_PRI64 "d B)\n", _b,
+                 (lz_i64)st.bytes_alloc); }
 
         t0 = lz_time_ms();
         for (i = 0; i < n_tokens; i++) {
@@ -2476,8 +2482,8 @@ int main(int argc, char **argv) {
             console_out(prompt, (int)strlen(prompt));
             console_out("\n", 1);
             { char _b[LZ_FTOA_BUF]; lz_ftoa_f(_b, st.bytes_alloc / 1e6f, 1, 0);
-              printf("State          %s MB (%d slots, prefill batch %d)\n",
-                     _b, seq, st.nt_cap); }
+              printf("State          %s MB (%" LZ_PRI64 "d B, %d slots, prefill batch %d)\n",
+                     _b, (lz_i64)st.bytes_alloc, seq, st.nt_cap); }
             cli_print_sampling(&g);
             printf("Context        %d slots (model max %d; --ctx to change)\n",
                    seq, cfg->seq_len);

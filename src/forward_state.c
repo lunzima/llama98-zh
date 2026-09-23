@@ -373,6 +373,35 @@ static void alloc_attn_buffers(LZRunState *s, const LZModelConfig *c,
     if (!ok) *okp = 0;
 }
 
+/* Does layer l own a DENSE per-position KV plane? Every full-attention
+   layer except the csa2_on ones: forward.c hands a csa2_on layer's whole
+   attention forward to forward_csa2.c, which stores compressed blocks in
+   csa2_comp_ring/csa2_idx_comp_ring and reads no per-position K/V at all
+   (forward.c's own dispatch comment; forward_csa2.c references neither
+   kq8 nor kf32 anywhere). Such a layer still takes a cache_idx - the
+   compressed rings are addressed by it, and model.c's csa2_slot_owner
+   defines that same numbering - but it must not claim a plane.
+
+   ONE PREDICATE, TWO CALLERS: dense_kv_layers below counts with it and
+   lz_state_alloc's dense_idx fill numbers with it. A second copy of this
+   test is how the allocation and the plane offsets come to disagree, and
+   that disagreement is a heap overrun rather than a wrong number. */
+static int layer_owns_dense_kv(const LZModel *m, int l) {
+    return m->config.layer_types[l] == LZ_LT_FULL && !m->layers[l].csa2_on;
+}
+
+/* How many layers own a dense plane. The planes are sized for this count
+   (+1 when an MTP head is bound), not for c->n_full_layers: a csa2_on
+   layer used to be counted here, so the model allocated a plane nothing
+   ever wrote and paid for twice the KV it could use. */
+static int dense_kv_layers(const LZModel *m) {
+    const LZModelConfig *c = &m->config;
+    int l, n = 0;
+    for (l = 0; l < c->n_layers; l++)
+        if (layer_owns_dense_kv(m, l)) n++;
+    return n;
+}
+
 /* KV-cache ring geometry, then the K/V planes of whichever format each
    side selected. Writes the ring fields (kfmt/vfmt/attn_win/attn_sink/
    kv_ring/kv_slots) as well as the planes. */
@@ -381,11 +410,11 @@ static void alloc_kv_cache(LZRunState *s, const LZModel *m,
     int ok = 1;
     /* KV cache Q8 (group 32, contiguous within a row). +1 layer slot when
        an MTP head is bound: its own full_attention block reuses this
-       cache (index n_full_layers, see forward_attn's sentinel handling)
+       cache (index n_dense_kv, see forward_attn's sentinel handling)
        rather than a separate buffer - same reasoning as everywhere else
        in this engine that a second copy of a KV cache was avoided. */
     {
-        int kv_layers = c->n_full_layers + (m->mtp ? 1 : 0);
+        int kv_layers = s->n_dense_kv + (m->mtp ? 1 : 0);
         s->kfmt = lz_kv_kfmt;
         s->vfmt = lz_kv_vfmt;
         /* Ring sizing, before anything is allocated. kv_slots is what the
@@ -1104,7 +1133,7 @@ static void alloc_i16_exits(LZRunState *s, const LZModelConfig *c,
 int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
                        int spec_k_max, char *errbuf, int errlen) {
     const LZModelConfig *c = &m->config;
-    int ok = 1, l, nf = 0, nl = 0;
+    int ok = 1, l, nf = 0, nl = 0, nd = 0;
     /* Activation buffers are allocated for LZ_BATCH_MAX slices. The
        generation phase only uses slice 0; the rest is wasted - but for
        s1v3 that is ~0.25 MB, well under 1% of the weights under any
@@ -1143,6 +1172,9 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
     s->seq_len = seq_len;
     s->nt_cap = LZ_BATCH_DEFAULT;
 
+    /* Before alloc_kv_cache, which sizes every plane off it. */
+    s->n_dense_kv = dense_kv_layers(m);
+
     alloc_core_buffers(s, m, c, nt, &ok);
 
     alloc_attn_buffers(s, c, seq_len, nt, &ok);
@@ -1166,6 +1198,7 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
        actually has to set it back to 0 on every subsequent reuse. */
 
     s->cache_idx = (int *)xcalloc((size_t)c->n_layers, sizeof(int), &ok, &s->bytes_alloc);
+    s->dense_idx = (int *)xcalloc((size_t)c->n_layers, sizeof(int), &ok, &s->bytes_alloc);
 
     alloc_quant_scratch(s, m, c, nt, &ok);
     alloc_engram_scratch(s, m, c, nt, &ok);
@@ -1248,13 +1281,28 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
        n_full_layers just carry a few unused rows, not a bug
        (forward.h's own csa2_comp_ring comment: sized for the class,
        not for which layers in it actually use this). */
+    /* dense_idx is a SEPARATE numbering from cache_idx, and -1 for every
+       layer that owns no plane: linear layers (their recurrent state is
+       addressed by cache_idx too, off the same counter), aliased
+       REINDEX/REUSE layers, and csa2_on FULL layers. The dense planes are
+       sized for n_dense_kv, so a consumer that indexed them with
+       cache_idx would read another layer's rows. Only attn_impl and
+       mtp_attn_t1 read them, and neither is reached with a -1 layer.
+
+       Kept clear of the loop body on purpose: build/
+       csa2_cache_idx_alias_gate.sh mutates this block as one contiguous
+       piece of text, so a comment inside it would have to be retyped in
+       that gate. */
     for (l = 0; l < c->n_layers; l++) {
+        s->dense_idx[l] = -1;
         if (c->layer_types[l] != LZ_LT_FULL) {
             s->cache_idx[l] = nl++;
         } else if (m->layers[l].csa2_mode != LZ_CSA2_FULL) {
             s->cache_idx[l] = s->cache_idx[c->csa2_source[l]];
         } else {
             s->cache_idx[l] = nf++;
+            if (layer_owns_dense_kv(m, l))
+                s->dense_idx[l] = nd++;
         }
     }
 

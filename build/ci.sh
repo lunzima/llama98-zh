@@ -870,6 +870,31 @@ case $GR_RC in
         ;;
 esac
 
+# S2 CSA2's dense-plane accounting: a csa2_on layer owns no per-position
+# K/V, so it must be charged for no plane. Own script (it builds HEAD and
+# the working tree into scratch dirs) for the same reason as 11e/11f.
+echo
+echo "==== [11i/31]CSA2 dense KV planes ===="
+LOG=build/ci-csa2-dense-kv.log
+build/csa2_dense_kv_gate.sh >"$LOG" 2>&1
+C2DK_RC=$?
+cat "$LOG"
+case $C2DK_RC in
+    0)
+        note "PASS  CSA2 dense KV planes"
+        PASS=$((PASS + 1))
+        ;;
+    2)
+        REASON=$(grep -m1 'SKIP' "$LOG")
+        note "SKIP  CSA2 dense KV planes ($REASON)"
+        SKIP=$((SKIP + 1))
+        ;;
+    *)
+        note "FAIL  CSA2 dense KV planes"
+        FAIL=$((FAIL + 1))
+        ;;
+esac
+
 # ---------------------------------------------------------------------
 # Stage 12: --kv-rot, the one output-changing knob that had no gate. Not
 # invariance (stage 11's assertion) - a QUALITY claim with a number:

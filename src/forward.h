@@ -1269,7 +1269,28 @@ typedef struct {
     int     kv_slots;           /* allocated cache depth: seq_len, or sink+ring */
     float   ssm_scale;          /* 1/sqrt(lin_k_head_dim) */
 
-    int *cache_idx;             /* layer index -> index within its class */
+    int *cache_idx;             /* layer index -> index within its class.
+                                   For a FULL layer this is the index that
+                                   addresses its KEY-VALUE STORAGE, which
+                                   is the dense planes below for every
+                                   layer forward_attn serves and the
+                                   compressed rings for a csa2_on one -
+                                   model.c's csa2_slot_owner defines the
+                                   same numbering from the config side. */
+    int *dense_idx;             /* layer index -> index within the DENSE
+                                   KV planes (kq8/vq8/kf32/k4), or -1 for
+                                   a layer that owns none: a linear layer,
+                                   an aliased REINDEX/REUSE layer, or a
+                                   csa2_on FULL layer (forward_csa2.c
+                                   stores compressed blocks for it and
+                                   never touches a plane). Sized for
+                                   n_dense_kv, not n_full_layers - a
+                                   consumer that used cache_idx here
+                                   would read another layer's rows. */
+    int  n_dense_kv;            /* number of layers that own a dense
+                                   plane; the planes are allocated for
+                                   this (+1 when an MTP head is bound,
+                                   see forward_attn's sentinel) */
     lz_i64 bytes_alloc;
 
     /* Bumped by lz_state_alloc and lz_state_reset. A checkpoint records

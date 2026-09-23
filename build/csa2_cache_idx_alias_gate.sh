@@ -58,16 +58,32 @@ command -v python3 >/dev/null 2>&1 || {
 # its heredoc, so there is exactly one place that has to agree with
 # forward_state.c's actual text, not two.
 NEW_BLOCK='    for (l = 0; l < c->n_layers; l++) {
+        s->dense_idx[l] = -1;
         if (c->layer_types[l] != LZ_LT_FULL) {
             s->cache_idx[l] = nl++;
         } else if (m->layers[l].csa2_mode != LZ_CSA2_FULL) {
             s->cache_idx[l] = s->cache_idx[c->csa2_source[l]];
         } else {
             s->cache_idx[l] = nf++;
+            if (layer_owns_dense_kv(m, l))
+                s->dense_idx[l] = nd++;
         }
     }'
-OLD_BLOCK='    for (l = 0; l < c->n_layers; l++)
-        s->cache_idx[l] = (c->layer_types[l] == LZ_LT_FULL) ? nf++ : nl++;'
+# The mutation is the ALIASING revert and nothing else: the loop keeps the
+# dense-plane numbering (dense_idx/nd) lz_state_alloc now carries, and
+# loses only the REINDEX/REUSE branch, so every FULL layer takes a fresh
+# nf++ again. Keeping the two axes apart is what lets the probe's
+# expectations below stay a statement about aliasing.
+OLD_BLOCK='    for (l = 0; l < c->n_layers; l++) {
+        s->dense_idx[l] = -1;
+        if (c->layer_types[l] != LZ_LT_FULL) {
+            s->cache_idx[l] = nl++;
+        } else {
+            s->cache_idx[l] = nf++;
+            if (layer_owns_dense_kv(m, l))
+                s->dense_idx[l] = nd++;
+        }
+    }'
 export NEW_BLOCK OLD_BLOCK
 
 W=$(mktemp -d 2>/dev/null || echo /tmp/csa2cacheidxaliasgate.$$)

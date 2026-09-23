@@ -629,16 +629,21 @@ void lz_state_free(LZRunState *s) {
     xfree(s->rope_cs);
     xfree(s->rope_cs_inv);
     xfree(s->cache_idx);
+    xfree(s->dense_idx);
     memset(s, 0, sizeof(*s));
 }
 
 void lz_state_reset(LZRunState *s, const LZModel *m) {
     const LZModelConfig *c = &m->config;
-    /* +1 layer slot when an MTP head is bound - see lz_state_alloc's
-       matching comment; must agree or this zeroes only part of the
-       buffer it allocated. */
-    int kv_layers = c->n_full_layers + (m->mtp ? 1 : 0);
+    int kv_layers;
     if (!s) return;
+    /* +1 layer slot when an MTP head is bound - see lz_state_alloc's
+       matching comment; must agree with what was allocated, or this
+       zeroes only part of the buffer it allocated. Read off the state
+       (n_dense_kv), never recomputed from n_full_layers here: a csa2_on
+       layer owns no plane, and a second copy of that count is how the
+       two sides would drift apart. */
+    kv_layers = s->n_dense_kv + (m->mtp ? 1 : 0);
     /* Every one of these is NULL in some cache mode now (q4 and qjl do
        not allocate the Q8 planes; only the f32 arm allocates kf32). An
        unconditional memset here is a segfault that hides from --tokens,

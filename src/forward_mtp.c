@@ -19,11 +19,11 @@
 #include "ops_quant.h"   /* q8_round/q8_amax/pow2f/LZ_Q8_*, lz_rsqrt_float_body */
 
 /* layer sentinel for the MTP block's own attention: it is not one of
-   m->layers[], so it has no entry in s->cache_idx. Its reserved KV cache
-   slot is the one past every real full_attention layer (index
-   n_full_layers - see lz_state_alloc's "+1 layer slot" comment); the
+   m->layers[], so it has no entry in s->cache_idx or s->dense_idx. Its
+   reserved DENSE KV slot is the one past every layer that owns a plane
+   (index n_dense_kv - see lz_state_alloc's "+1 layer slot" comment); the
    sentinel just tells forward_attn to use that slot directly instead of
-   indexing cache_idx[layer]. */
+   indexing dense_idx[layer]. */
 #define LZ_MTP_CACHE_LAYER (-1)
 
 /* --------------------------------------------------------- MTP draft step */
@@ -172,7 +172,10 @@ void mtp_attn_t1(const LZModel *m, LZRunState *s, const LZLayer *L) {
     int hdim = c->hidden_size, kvd = c->attn_kv_dim, qd = c->attn_q_dim;
     int qgd = c->attn_qgate_dim;
     float rms_eps = c->rms_norm_eps;
-    int ci = c->n_full_layers;         /* the MTP's own reserved slot */
+    /* The MTP's own reserved slot, which follows the last DENSE plane -
+       see attn_impl's own comment on why this is n_dense_kv and not
+       n_full_layers. */
+    int ci = s->n_dense_kv;
     size_t loff = (size_t)ci * s->kv_slots * kvd;
     size_t soff = loff / 32;
     int8_t *vc = s->vq8 ? s->vq8 + loff : NULL;

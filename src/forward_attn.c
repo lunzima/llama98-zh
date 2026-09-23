@@ -675,7 +675,14 @@ static void attn_impl(const LZModel *m, LZRunState *s,
     int hd = c->head_dim, nh = c->n_heads, nkv = c->n_kv_heads;
     int kv_mul = nh / nkv;
     float rms_eps = c->rms_norm_eps;
-    int ci = (layer >= 0) ? s->cache_idx[layer] : c->n_full_layers;
+    /* The DENSE planes are indexed by dense_idx, not cache_idx: the two
+       agree for every layer that reaches this function (they diverge only
+       for csa2_on layers, which forward_chunk sends to forward_csa2
+       instead) and are sized differently - n_dense_kv vs n_full_layers -
+       so using cache_idx here would read another layer's rows the moment
+       a model has a csa2_on layer before this one. layer < 0 is the MTP
+       head, whose reserved slot follows the last dense one. */
+    int ci = (layer >= 0) ? s->dense_idx[layer] : s->n_dense_kv;
     size_t loff = (size_t)ci * s->kv_slots * c->attn_kv_dim;
     size_t soff = loff / 32;
     int8_t *kc = s->kq8 ? s->kq8 + loff : NULL;
