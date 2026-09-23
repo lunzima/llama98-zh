@@ -33,7 +33,36 @@ WHAT IS NOT A BORROW, and is skipped on purpose
   * Value copy: `float dt_bias_h = lz_t_f32(...)[h]`. The `*` test below is
     what separates this from a pointer borrow.
 
+THE STORAGE-POINT RULE, which is this rule's unbounded case. The live range
+above is a local variable inside one function, so it ends. A borrow STORED
+INTO A `static` OBJECT ends when the process does, and no call site can
+reason about it:
+
+  A `const T *` assigned into a `static` object is an unbounded live range.
+  It is admissible only with content verification at the point of use, or a
+  line-anchored exemption saying what makes it bounded instead.
+
+  Content verification is the shape that works: the address identifies
+  nothing, but the bytes do, so the consumer compares the whole row before
+  it trusts anything derived from it. What the rule rejects is the
+  pointer-keyed cache - `if (slot[i].w == w) return slot[i].p;` - which is
+  an unbounded identity claim about a pointer that a scratch reuse makes
+  false. src/ops_norm.c's two pools and src/ops_gdn.c's gdn_shadow are the
+  three instances; the checker reports each store and each is exempted by
+  line with its own argument. This is the class the live-range rule above
+  cannot express, because its model is a variable inside one function and
+  this one spans a function boundary with no end.
+
 WHAT IT CANNOT SEE. Each miss is written down rather than papered over:
+
+  * A borrow stored into a non-`static` object that nonetheless outlives
+    the scratch - a field of a heap struct that lives as long as the model,
+    say - is not reported. The rule keys on `static` because that is the
+    only unbounded lifetime a text check can see; the rest needs the reader.
+  * A pointer whose declaration carries no `const` on the pointee is not
+    treated as a borrow. `static float *p = our_own_pool + off;` is owning,
+    not borrowing, and the rule is silent about it - which is also why a
+    non-const borrowed pointer escaping into a static would be missed.
 
   * A live range narrowed by an arm test is invisible. The range is taken
     from the assignment to the LAST use in the function, and a use sitting
@@ -59,6 +88,38 @@ import os
 import re
 import sys
 
+# (file, line) -> why the store at that line is not an unbounded identity
+# claim. Keyed on the LINE, not on a name: move the store and this goes
+# stale, which is reported rather than silently re-matched at the new site.
+STORE_EXEMPT = {
+    ("ops_norm.c", 185): (
+        "The stored w is an ADDRESS USED ONLY AS A PRE-FILTER. What admits "
+        "the table is w_row_same, which compares all n elements of the row "
+        "bit for bit before any value derived from it is consumed; a "
+        "pointer that matches and a row that does not is a miss, not a "
+        "hit. So the unbounded lifetime of this stored pointer carries no "
+        "identity claim - moving the store or reusing the address changes "
+        "nothing observable."),
+    ("ops_norm.c", 401): (
+        "Same as :185: build_qw's slot holds the address as a pre-filter "
+        "and asks w_row_same for the answer. The two pools are keyed on the "
+        "same quantity by the same function, deliberately."),
+    ("ops_gdn.c", 1373): (
+        "KNOWN DEFECT, and this exemption records it rather than clearing "
+        "it. gdn_shadow's lookup is `if (g_shk[i] == sq) return g_shv[i];` "
+        "- a pointer-keyed cache of ring pointers whose addresses are "
+        "reused, which is exactly the shape this rule rejects. It is latent "
+        "rather than live: the whole block sits under #if LZ_GDN_STATE_F32, "
+        "whose default is 0, and reaching it also needs --spec K. The site "
+        "is annotated at its own comment (ops_gdn.c's gdn_shadow header) as "
+        "flagged rather than fixed. Remove this exemption when it is fixed."),
+    ("ops_kernel.c", 1403): (
+        "The stored `where` is a caller-supplied diagnostic string. Its "
+        "pointee is a string literal, whose lifetime is the program's, so "
+        "the unbounded store is the correct lifetime for it - there is no "
+        "scratch to outlive and the value is never consumed as data."),
+}
+
 # (file, variable) -> (line, why)
 EXEMPT = {
     ("forward_kda.c", "kda_o_norm_w"): (
@@ -72,6 +133,134 @@ EXEMPT = {
         "cannot narrow a live range by an arm test, which is the whole of "
         "what this exemption is granted for."),
 }
+
+
+def _decl_end(src, i):
+    """Offset of the `;` closing a declaration started before i, or -1.
+
+    A struct/union/enum body is stepped over as a unit; a `{` that is not
+    one of those ends a function HEAD, which is not a data object and is
+    reported as -2 so the caller can skip it.
+    """
+    d = 0
+    while i < len(src):
+        c = src[i]
+        if c == '{':
+            if src[:i].rstrip().endswith(('struct', 'union', 'enum')):
+                d2 = 0
+                while i < len(src):
+                    if src[i] == '{':
+                        d2 += 1
+                    elif src[i] == '}':
+                        d2 -= 1
+                        if d2 == 0:
+                            break
+                    i += 1
+                i += 1
+                continue
+            return -2
+        if c in '([':
+            d += 1
+        elif c in ')]}':
+            d -= 1
+        elif c == ';' and d == 0:
+            return i
+        elif c == '=' and d == 0:
+            return i
+        i += 1
+    return -1
+
+
+def static_objects(src):
+    """{name: declarator} for every `static` object that can hold a pointer.
+
+    Both scopes: a function-local static has the same process lifetime as a
+    file-scope one, which is the only thing this rule keys on.
+
+    Two exclusions, each paid for by a false positive this rule produced on
+    its first run and each a different shape:
+
+      * A `(` in the declarator is a FUNCTION, not an object. `static int
+        jparse_value(LZJsonParser *ps);` is a prototype, and reading its
+        last identifier declared `ps` - a name every one of json.c's parser
+        functions also has as its parameter - which made two stores through
+        a caller's pointer look like stores into a static.
+      * A declarator with no `*` cannot hold a pointer. `static union {float
+        f; uint32_t u;} b;` and `static int32_t g_epi_zg[..][..];` are
+        scalar storage, and reading `b.f = x` and `g_epi_zg[t][g] = a` as
+        pointer stores made every `const float *x` in the file a borrowed
+        pointer being cached.
+    """
+    out = {}
+    for m in re.finditer(r'\bstatic\b', src):
+        e = _decl_end(src, m.end())
+        if e < 0:
+            continue
+        decl = src[m.end():e]
+        if '(' in decl or '*' not in decl:
+            continue
+        head = re.sub(r'\b(?:struct|union|enum)\b\s*\{[^{}]*\}', ' ', decl)
+        head = re.split(r'[\[=]', head, maxsplit=1)[0]
+        ids = re.findall(r'[A-Za-z_][A-Za-z0-9_]*', head)
+        if ids:
+            out[ids[-1]] = decl
+    return out
+
+
+def const_pointer_names(src):
+    """Names declared `const T *name` anywhere in the unit.
+
+    The pointee's `const` is what makes the pointer a BORROW rather than
+    owned storage, and it is the cut this rule uses. It covers both a
+    parameter (`const float *w`) and a widened local (`const float *q_norm_w
+    = lz_t_f32(...)`), which is the pair a store into a static is reached
+    through.
+    """
+    return set(re.findall(r'\bconst\b[^;,(){}]*?\*\s*([A-Za-z_][A-Za-z0-9_]*)',
+                          src))
+
+
+def collect_stores(src):
+    """[(line, lhs_text, rhs_name, static_name)] for `static[...] = borrow;`.
+
+    Only a bare identifier on the right is reported. A computed pointer -
+    `our_pool + off`, a calloc result - is the store site's own storage or
+    its own allocation, and neither is a borrow of somebody else's scratch.
+    """
+    objs = static_objects(src)
+    consts = const_pointer_names(src)
+    out = []
+    off = lines_of(src)
+    for m in re.finditer(r'[^;{}]*;', src):
+        stmt = m.group(0)
+        if stmt.endswith(';'):
+            stmt = stmt[:-1]
+        eq = None
+        d = 0
+        for k, c in enumerate(stmt):
+            if c in '([{':
+                d += 1
+            elif c in ')]}':
+                d -= 1
+            elif c == '=' and d == 0 and k + 1 < len(stmt) \
+                    and stmt[k + 1] not in '=' \
+                    and (k == 0 or stmt[k - 1] not in '=!<>+-*/%&|^'):
+                eq = k
+                break
+        if eq is None:
+            continue
+        lhs = stmt[:eq].strip()
+        rhs = stmt[eq + 1:].strip()
+        root = re.match(r'[A-Za-z_][A-Za-z0-9_]*', lhs)
+        if not root or root.group(0) not in objs:
+            continue
+        if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', rhs):
+            continue
+        if rhs not in consts:
+            continue
+        out.append((lineno(off, m.start() + eq), ' '.join(lhs.split()),
+                    rhs, root.group(0)))
+    return out
 
 
 def strip(src):
@@ -298,8 +487,22 @@ def check_file(path):
     name = os.path.basename(path)
     calls = collect(src)
     named = [c for c in calls if c['var']]
+    stores = collect_stores(src)
+    storev, store_exempt_n = [], 0
+    for (ln, lhs, rhs, obj) in stores:
+        key = (name, ln)
+        if key in STORE_EXEMPT:
+            store_exempt_n += 1
+            continue
+        storev.append((name, ln, lhs, rhs, obj, ''))
+    found = set(s[0] for s in stores)
+    for key in STORE_EXEMPT:
+        if key[0] == name and key[1] not in found:
+            storev.append((name, key[1], '(no store here)', '', '',
+                           'STALE EXEMPTION: recorded for line %d, but this '
+                           'line stores no borrowed pointer' % key[1]))
     if not calls:
-        return [], 0, 0, 0
+        return [], 0, 0, 0, storev, store_exempt_n, len(stores)
     pairs = brace_pairs(src)
     by_scratch = {}
     for c in calls:
@@ -345,7 +548,8 @@ def check_file(path):
                          % EXEMPT[key][0]))
             continue
         real.append((f, b['line'], b['var'], b['scratch'], b2['line'], why))
-    return real, len(calls), len(named), exempted
+    return real, len(calls), len(named), exempted, storev, store_exempt_n, \
+        len(stores)
 
 
 def main():
@@ -357,12 +561,16 @@ def main():
         return 2
     files = sorted(f for f in os.listdir(srcdir) if f.endswith('.c'))
     allv, total, named, exempt_n = [], 0, 0, 0
+    alls, nstore, store_exempt_n = [], 0, 0
     for f in files:
-        v, n, nn, e = check_file(os.path.join(srcdir, f))
+        v, n, nn, e, sv, se, ns = check_file(os.path.join(srcdir, f))
         allv += v
         total += n
         named += nn
         exempt_n += e
+        alls += sv
+        nstore += ns
+        store_exempt_n += se
     print('wscr_borrow_check: %d scratch borrow(s), %d of them handing a '
           'pointer to a variable, over %d file(s)'
           % (total, named, len(files)))
@@ -372,14 +580,27 @@ def main():
         return 2
     print('                   %d exemption(s) matched their recorded line'
           % exempt_n)
-    if not allv:
+    print('                   %d borrow(s) stored into a static object, '
+          '%d of them exempt' % (nstore, store_exempt_n))
+    if nstore == 0:
+        print('FAIL: not one store into a static object was found - the '
+              'storage-point scan is not seeing the tree it thinks it is')
+        return 2
+    if not allv and not alls:
         print('PASS')
         return 0
     for (f, ln, var, scratch, ln2, why) in sorted(allv):
         print('  %s:%d: %s <- %s is still live when %s is borrowed at :%d (%s)'
               % (f, ln, var, scratch, scratch, ln2, why))
-    print('FAIL: %d borrow(s) outlive a second borrow of the same scratch'
-          % len(allv))
+    for t in sorted(alls):
+        extra = ' ' + t[5] if t[5] else ''
+        print('  %s:%d: %s = %s, stored into the static `%s` - an unbounded '
+              'live range needs content verification at the point of use, '
+              'or a line-anchored exemption.%s'
+              % (t[0], t[1], t[2], t[3], t[4], extra))
+    print('FAIL: %d borrow(s) outlive a second borrow of the same scratch, '
+          '%d store(s) put a borrowed pointer into a static object'
+          % (len(allv), len(alls)))
     return 1
 
 

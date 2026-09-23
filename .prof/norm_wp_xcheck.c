@@ -64,6 +64,7 @@
 #include <string.h>
 
 #include "ops.h"
+#include "model.h"   /* LZTensor: the alias fixture builds real ones */
 
 /* More rows than the pool has slots, so the tail is forced inline. The
    count is deliberately NOT read from LZ_WP_SLOTS: this file must not
@@ -107,6 +108,42 @@ static float wq_reuse[NN], wq_fresh[NN];
 static int32_t iq_reuse[NN], iq_fresh[NN];
 static float dq_reuse, dq_fresh;
 
+/* The scratch the ENGINE hands out. lz_t_f32 returns t->f only for
+   LZ_FMT_F32; every other format is widened or dequantized INTO the
+   caller's scratch and that pointer is what comes back. Two tensors of the
+   same length therefore arrive at lz_rmsnorm as ONE address, which is the
+   case a fixture with one pointer per row cannot produce. TWO FORMATS,
+   because there are two ways to reach the same `return scratch` and one
+   would leave the other unmeasured: BF16 is storage and widens with a
+   shift (no scale), Q8_0 is a real quantization and dequantizes with a
+   per-group scale. */
+static float g_sc1[NN], g_sc2[NN];
+static int8_t g_bf_a[NN * 2], g_bf_b[NN * 2];
+static int8_t g_q8_a[NN], g_q8_b[NN];
+static float g_q8sa[NN / 32];
+static float alias_a[NN], alias_b[NN], alias_ref[NN];
+
+static void bf16_put(int8_t *p, int i, float v) {
+    union { float f; uint32_t u; } bit;
+    bit.f = v;
+    p[i * 2]     = (int8_t)((bit.u >> 16) & 0xFFu);
+    p[i * 2 + 1] = (int8_t)((bit.u >> 24) & 0xFFu);
+}
+
+/* 1 if the second tensor's output is not what its own row gives. The
+   reference is that same row through a SECOND scratch: a different address
+   cannot hit the first one's slot, so its output is the inline arm by
+   construction and nothing here recomputes the norm. */
+static int alias_case(const LZTensor *ta, const LZTensor *tb) {
+    lz_t_f32(ta, g_sc1);
+    lz_rmsnorm(alias_a, xv, g_sc1, NN, 1e-6f);
+    lz_t_f32(tb, g_sc1);                 /* same scratch, a different row */
+    lz_rmsnorm(alias_b, xv, g_sc1, NN, 1e-6f);
+    lz_t_f32(tb, g_sc2);                 /* same row, another scratch */
+    lz_rmsnorm(alias_ref, xv, g_sc2, NN, 1e-6f);
+    return memcmp(alias_b, alias_ref, sizeof alias_b) != 0;
+}
+
 extern long long lz_debug_norm_qw;
 
 int main(int argc, char **argv) {
@@ -143,6 +180,66 @@ int main(int argc, char **argv) {
     for (r = 1; r < NW; r++) {
         memcpy(w_rows[r], w_rows[0], sizeof(w_rows[0]));
         memcpy(wq_rows[r], wq_rows[0], sizeof(wq_rows[0]));
+    }
+
+    /* The engine's OWN borrow, FIRST - before anything fills the pool.
+       The first call below has to FILL a slot for g_sc1: if the pool is
+       already full the lookup misses, both calls take the inline arm, and
+       the fixture is green for a reason that has nothing to do with the
+       key. That is the whole reason this block sits above the 80 rows. */
+    {
+        LZTensor ta, tb;
+        int i2, bad_alias = 0;
+
+        memset(&ta, 0, sizeof ta);
+        memset(&tb, 0, sizeof tb);
+        ta.dtype = LZ_FMT_BF16;
+        ta.n = NN;
+        ta.gs = 0;
+        ta.f = NULL;
+        ta.q = g_bf_a;
+        ta.scale = NULL;
+        tb = ta;
+        tb.q = g_bf_b;
+        /* b agrees with a at both ENDS and differs in between, so a key
+           that samples the row - at either end, or anywhere - is served
+           the wrong table here too. A fixture the weaker key also passes
+           would be evidence about nothing. */
+        for (i2 = 0; i2 < NN; i2++) {
+            int edge = (i2 == 0 || i2 == NN - 1);
+            bf16_put(g_bf_a, i2, w_rows[0][i2]);
+            bf16_put(g_bf_b, i2, edge ? w_rows[0][i2]
+                                      : w_rows[0][i2] * 0.5f + 0.25f);
+        }
+        if (alias_case(&ta, &tb)) bad_alias = 1;
+        printf("norm key: BF16 borrow through one scratch -> %s\n",
+               bad_alias ? "DIFFER" : "same");
+        bad_key |= bad_alias;
+
+        bad_alias = 0;
+        memset(&ta, 0, sizeof ta);
+        ta.dtype = LZ_FMT_Q8_0;
+        ta.n = NN;
+        ta.gs = 32;
+        ta.f = NULL;
+        ta.q = g_q8_a;
+        ta.scale = g_q8sa;
+        tb = ta;
+        tb.q = g_q8_b;            /* ONE scale array: the endpoints of a
+                                     dequantized row are code*scale, and a
+                                     separate scale would move them. */
+        for (i2 = 0; i2 < NN; i2++) {
+            int edge = (i2 == 0 || i2 == NN - 1);
+            g_q8_a[i2] = (int8_t)((i2 * 37) % 255 - 127);
+            g_q8_b[i2] = edge ? g_q8_a[i2]
+                              : (int8_t)((i2 * 11) % 255 - 127) / 2;
+        }
+        for (i2 = 0; i2 < NN / 32; i2++)
+            g_q8sa[i2] = 0.00390625f * (float)(i2 + 1);
+        if (alias_case(&ta, &tb)) bad_alias = 1;
+        printf("norm key: Q8_0 borrow through one scratch -> %s\n",
+               bad_alias ? "DIFFER" : "same");
+        bad_key |= bad_alias;
     }
 
     for (r = 0; r < NW; r++)
