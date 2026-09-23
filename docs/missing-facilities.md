@@ -164,11 +164,13 @@ FMA 分歧、跨编译器探针那类取证。**探针搬过去之后，引擎�
 q8_0（Q16_0 同时查 `gs % 32`）；CE 第一版整条衰减路径因此丢掉 Q16_0，
 而总字节数看起来完全合理。
 
-**已有半个**：`.prof/budget/ce_budget.py` 里写了降级闸门（逐张量比对
-「规则要的」与「plan_one 给的」）。**它不在导出器里**，所以真导出时没人查。
-
-**补什么**：把那段搬进 `export_q8`，与 `check_all_rules_matched` 并列——
-后者查「规则匹配了没有」，前者查「匹配之后生效了没有」，两个问题不同。
+**已补**：`export_q8.check_no_silent_downgrade`（逐张量比对「规则要的」与
+`plan_one` 给的），与 `check_all_rules_matched` 并列——后者查「规则匹配了
+没有」，前者查「匹配之后生效了没有」，两个问题不同。调用点在 main 里，
+闸门 `tests/test_export_downgrade_gate.py`。
+**这条空档最初是记在 `.prof/budget/ce_budget.py` 里的，那个脚本已不存在**
+（同目录的 `ce_sizing.py`、`exact_size.py` 也是）。闸门本身在训练树
+`E:\LLM\llama98-zh`：`tools/export_q8.py` 与 `tests/test_export_downgrade_gate.py`。
 
 ---
 

@@ -169,19 +169,23 @@ first_k_dense_replace 6 = n_layers → 六层全是 dense SwiGLU，无 MoE
 > 而按「层数」单独走的量（每层固定开销的 norm、量化、以及全部 KDA 递推）
 > 按 4/6 或 6/8 缩。两个方向不同，所以不能等比缩放。
 >
-> 盘上的 `E:/LLM/models/kunkun-ce` 与定案**逐项一致**，本文档的计数
-> 因此全部建立在已定的值上，没有一处建立在假设上：
+> 本文档的计数建立在一组**已定的值**上，没有一处建立在假设上：
 > `num_hidden_layers:6`、`intermediate_size:2048`、
 > `layer_types:[L,L,A,L,L,A]`、`first_k_dense_replace:6`、
 > `use_subn:true`、`kda_gate_lower_bound:-5.0`。
 > 后两个字段曾经是本表最大的两处不确定性，现在都不是了；
 > `kda_gate_lower_bound` 定案的经过写在 §3 C6。
 >
-> `.prof/budget/ce_sizing.py` 的数**不能直接引用**：它少算 28,672
-> （正好是 SubLN 每投影 norm，mlp `6×3072` + KDA `4×2560`），
-> 且它第三个位置参数是**注意力 `head_dim`(64)** 而不是 KDA 头宽(32)，
-> 传错不报错。本文档的所有计数都不经它，直接从几何与 `forward.c`
-> 的循环结构数出来。
+> **这组值就是本文档的几何，它不是盘上 `E:/LLM/models/kunkun-ce/config.json`
+> 现在的样子**：那份 config 已改成 5 层 LLALA（`num_hidden_layers:5`、
+> `layer_types:[L,L,A,L,A]`、`first_k_dense_replace:5`，理由见
+> `docs/kunkun-ce-params.md` §1.5）。所以下面按「每层」「每 token」给的量
+> 是**六层几何的数**，引用前先按 5 层重数。
+>
+> `.prof/budget/ce_sizing.py` 已不存在（连同它依赖的 `.prof/budget/exact_size.py`）。
+> 它当年少算 28,672（SubLN 每投影 norm，mlp `6×3072` + KDA `4×2560`），
+> 第三个位置参数还是**注意力 `head_dim`(64)** 而不是 KDA 头宽(32)、传错不报错。
+> 本文档的所有计数都不经它，直接从几何与 `forward.c` 的循环结构数出来。
 
 ---
 
