@@ -144,10 +144,12 @@ csa2_ring_fmt_gate.sh      # three whole engine builds per run (the
                            #   gcc-direct probe build), because the f32
                            #   tier's identity claim is about a build
                            #   that does not have the branch at all
-csa2_ring_nf_gate.sh       # five whole engine builds per run: the fixed
-                           #   tree plus one mutant per ring group, because
-                           #   the gate has to solve the layout out of three
-                           #   isolated mutants rather than read one total
+csa2_ring_nf_gate.sh       # five whole engine builds per run plus four
+                           #   direct gcc probe builds: the fixed tree, one
+                           #   mutant per ring group (the gate solves the
+                           #   layout out of three isolated mutants rather
+                           #   than reading one total), and the nf=1 control
+                           #   fixture compiled against two of those trees
 csa2_f32count_gate.sh      # three whole engine builds per run, all
                            #   gcc-direct because the counting build is not
                            #   a Makefile target at all: the plain engine,

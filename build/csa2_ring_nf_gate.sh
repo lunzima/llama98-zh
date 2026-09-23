@@ -32,10 +32,16 @@
 # models, so a term attributed to the wrong buffer moves the solved value
 # off by that factor.
 #
-# THE FIXTURE MUST HAVE nf >= 2, and the gate says so rather than
-# assuming it: at n_full_layers == 1 the defect is arithmetically absent
-# (nf * total == total) and every arm here would pass on a broken
-# allocator. Both shipping models have nf = 2.
+# THE ARMS NEED nf >= 2: at n_full_layers == 1 the defect is
+# arithmetically absent (nf * total == total) and every arm here would
+# pass on a broken allocator. The gate SKIPs there with that reason, and
+# then MEASURES it - build/csa2_ring_nf_probe.c runs two hand-built
+# fixtures differing in nothing but the layer count and reports what
+# lz_state_alloc allocated for each, on this tree and on the mutant. On
+# the nf = 1 fixture the two must agree; on nf = 2 they must differ by
+# exactly the ring total. Without that arm, "the arms above are measuring
+# the defect" and "the arms above are running on a machine that cannot
+# have it" read the same.
 #
 # The reference arm is a mutation, not `git show HEAD:` - a git-pinned
 # before-copy goes stale the day the fix lands, which is exactly how the
@@ -111,10 +117,10 @@ bytes_of() { state_bytes "$1" "$2" | cut -d' ' -f1; }
 
 # Three mutations. Each one re-adds the nf factor to a DIFFERENT subset,
 # so the three deltas isolate three different terms.
-M_COMP='s/^                nblocks \* c->head_dim, sizeof(float)/                nf * nblocks * c->head_dim, sizeof(float)/'
-M_IDX='s/^                nblocks \* c->csa2_indexer_head_dim, sizeof(float),/                nf * nblocks * c->csa2_indexer_head_dim, sizeof(float),/'
+M_COMP='s/^                nblocks \* c->head_dim, (size_t)ring_stride/                nf * nblocks * c->head_dim, (size_t)ring_stride/'
+M_IDX='s/^                nblocks \* c->csa2_indexer_head_dim, (size_t)ring_stride/                nf * nblocks * c->csa2_indexer_head_dim, (size_t)ring_stride/'
 M_PEND='s/^                pdepth \* c->head_dim, sizeof(float)/                nf * pdepth * c->head_dim, sizeof(float)/g'
-M_ALL='s/^                pdepth \* c->head_dim, sizeof(float)/                nf * pdepth * c->head_dim, sizeof(float)/; s/^                nblocks \* c->head_dim, sizeof(float)/                nf * nblocks * c->head_dim, sizeof(float)/; s/^                nblocks \* c->csa2_indexer_head_dim, sizeof(float),/                nf * nblocks * c->csa2_indexer_head_dim, sizeof(float),/'
+M_ALL='s/^                pdepth \* c->head_dim, sizeof(float)/                nf * pdepth * c->head_dim, sizeof(float)/; s/^                nblocks \* c->head_dim, (size_t)ring_stride/                nf * nblocks * c->head_dim, (size_t)ring_stride/; s/^                nblocks \* c->csa2_indexer_head_dim, (size_t)ring_stride/                nf * nblocks * c->csa2_indexer_head_dim, (size_t)ring_stride/'
 
 check_model() {
     local M="$1" tag="$2" want_nf
@@ -199,6 +205,60 @@ if [ -d "$SECOND" ] && [ "$SECOND" != "$MODEL" ]; then
     if [ "$3" -ge 2 ] && [ "$1" != "$(geom "$MODEL" 32768 | cut -d' ' -f1)" ]; then
         check_model "$SECOND" "second geometry"
     fi
+fi
+
+# ---- the nf = 1 control, MEASURED rather than asserted ----------------
+# The arms above need nf >= 2 and SKIP otherwise, with the reason that the
+# defect is arithmetically absent at nf == 1. That reason is a premise
+# until it is measured: build/csa2_ring_nf_probe.c builds two fixtures
+# differing in nothing but the number of full-attention layers and asks
+# lz_state_alloc for its byte count. On the nf = 1 one, a build that
+# multiplies by nf and one that does not must allocate the SAME bytes -
+# which is what makes "the arms above are measuring the defect" different
+# from "the arms above are running on a machine that cannot have it".
+if [ -e "$ROOT/build/csa2_ring_nf_probe.c" ]; then
+    probe_of() {   # <srcroot> <fixture>
+        # The build dir is keyed on BOTH - the same fixture has to be run
+        # by two different trees, and a cache keyed on the fixture alone
+        # hands the second caller the first tree's binary.
+        local srcdir="$1" fx="$2" s=""
+        local d="$W/probe_$(basename "$srcdir")_$fx"
+        if [ ! -x "$d/p.exe" ]; then
+            mkdir -p "$d"
+            for f in $(cd "$ROOT" && make -s print-ENG); do s="$s $srcdir/src/$f.c"; done
+            for f in $(cd "$ROOT" && make -s print-COM); do s="$s $srcdir/common/$f.c"; done
+            gcc -O2 -std=c99 -I"$srcdir/src" -I"$srcdir/common" -ffp-contract=off \
+                -o "$d/p.exe" $s "$ROOT/build/csa2_ring_nf_probe.c" -lm \
+                > "$d/build.log" 2>&1 || {
+                echo "  FAIL: the probe did not build against $srcdir"
+                tail -3 "$d/build.log"; FAILED=1; return 0; }
+        fi
+        "$d/p.exe" "$fx"
+    }
+    R1=$(probe_of "$W/ref" nf1);   A1=$(probe_of "$W/m_all" nf1)
+    R2=$(probe_of "$W/ref" nf2);   A2=$(probe_of "$W/m_all" nf2)
+    bR1=`printf '%s' "$R1" | sed -n 's/^bytes=\([0-9]*\).*/\1/p'`
+    bA1=`printf '%s' "$A1" | sed -n 's/^bytes=\([0-9]*\).*/\1/p'`
+    bR2=`printf '%s' "$R2" | sed -n 's/^bytes=\([0-9]*\).*/\1/p'`
+    bA2=`printf '%s' "$A2" | sed -n 's/^bytes=\([0-9]*\).*/\1/p'`
+    ring2=`printf '%s' "$R2" | sed -n 's/.* ring=\([0-9]*\).*/\1/p'`
+    if [ -z "$bR1" ] || [ -z "$bA1" ] || [ -z "$bR2" ] || [ -z "$bA2" ]; then
+        echo "  FAIL: the probe printed no byte count"; FAILED=1
+    elif [ "$bA1" != "$bR1" ]; then
+        echo "  FAIL: nf=1 control - multiplying by nf changed the byte count there ($bR1 vs $bA1),"
+        echo "        so the fixtures differ in something other than the layer count"
+        FAILED=1
+    elif [ "$bA2" -le "$bR2" ]; then
+        echo "  FAIL: nf=2 - the mutant did not allocate more ($bR2 vs $bA2)"; FAILED=1
+    elif [ "$(( bA2 - bR2 ))" != "$ring2" ]; then
+        echo "  FAIL: nf=2 - the mutant adds $(( bA2 - bR2 )) B, the rings are $ring2 B"
+        FAILED=1
+    else
+        echo "  control: nf=1 allocates $bR1 B either way; nf=2 changes by $ring2 B, the whole ring"
+        echo "           ($R2 / $A2)"
+    fi
+else
+    echo "  SKIP: no build/csa2_ring_nf_probe.c"
 fi
 
 rm -rf "$W"

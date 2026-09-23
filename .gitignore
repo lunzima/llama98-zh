@@ -171,6 +171,7 @@
 !/build/csa2_dense_kv_gate.sh
 !/build/csa2_f32count_gate.sh
 !/build/csa2_ring_nf_gate.sh
+!/build/csa2_ring_nf_probe.c
 !/build/csa2_ring_fmt_gate.sh
 !/build/csa2_ring_fmt_probe.c
 !/build/csa2_mode_dispatch_gate.sh
