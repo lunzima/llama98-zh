@@ -176,10 +176,17 @@ void lz_csa2_ring_put(void *ring, size_t row, const float *src, int n, int fmt) 
    SCALAR REFERENCE: a new mechanism in this engine lands a scalar
    reference first and gets SIMD kernels in a later, separate phase -
    not started here. Every projection goes through lz_matmul_w, which
-   already dispatches F32 vs quantized weight tensors on its own
-   (model.c's exporter has no writer for this format yet, so every
-   checkpoint that can reach this function today is F32 - see
-   docs/dsv41-optimization-menu.md's CSA2 section), and the indexer
+   already dispatches F32 vs quantized weight tensors on its own, and
+   the dispatch's quantized arms are what this function is FOR - but no
+   checkpoint that reaches it today exercises them. The exporter writes
+   this format (tools/export_q8.py's CSA2_SUFFIXES names the seven
+   tensors and their order IN THE .bin STREAM, which carries no names,
+   so that tuple is the contract), and both shipping checkpoints' csa2
+   tensors are F32 on disk - read off model.safetensors' own headers,
+   seven tensors each. So the arm that runs here is the F32 one, and
+   nothing has run the others: "the dispatch can take a quantized csa2
+   weight" and "one has been through it" are separate claims, and only
+   the first is established. The indexer
    top-k selection is a plain O(k * n_visible) partial selection sort:
    correct, not fast, matching this project's own precedent for a new
    mechanism's first landing (DSpark's synthetic-fixture validation,
