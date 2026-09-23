@@ -895,6 +895,32 @@ case $C2DK_RC in
         ;;
 esac
 
+# S2 CSA2's census billing: the layer the soft-float plan is most likely
+# to be about was the one layer missing from the table that plan is
+# ordered by. Own script (it builds the counting engine gcc-direct, which
+# is no Makefile target) for the same reason as 11e/11i.
+echo
+echo "==== [11j/31]CSA2 f32 census billing ===="
+LOG=build/ci-csa2-f32count.log
+build/csa2_f32count_gate.sh >"$LOG" 2>&1
+C2FC_RC=$?
+cat "$LOG"
+case $C2FC_RC in
+    0)
+        note "PASS  CSA2 f32 census billing"
+        PASS=$((PASS + 1))
+        ;;
+    2)
+        REASON=$(grep -m1 'SKIP' "$LOG")
+        note "SKIP  CSA2 f32 census billing ($REASON)"
+        SKIP=$((SKIP + 1))
+        ;;
+    *)
+        note "FAIL  CSA2 f32 census billing"
+        FAIL=$((FAIL + 1))
+        ;;
+esac
+
 # ---------------------------------------------------------------------
 # Stage 12: --kv-rot, the one output-changing knob that had no gate. Not
 # invariance (stage 11's assertion) - a QUALITY claim with a number:
