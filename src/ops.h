@@ -170,6 +170,25 @@ enum {
        so unlike every row above it this one reads zero for a real
        reason, not a missing billing site. */
     LZ_FC_FFN_ACT,
+    /* CSA2's own three, and they exist because forward_csa2.c had NO
+       billing site at all: a counting build reported the whole
+       compressed-attention layer as free, and a site that is free because
+       nothing bills it reads exactly like one that is free because it
+       does no work. Only this file's own arithmetic is billed - the
+       projections and norms it calls bill themselves, through
+       lz_matmul_w and lz_rmsnorm, as every other layer's do.
+
+       THE SELECTION SCAN'S INTEGER DEDUP IS NOT BILLED, deliberately:
+       tok_idx[u] == b runs k_eff * n_vis / 2 times at the top-k this
+       project ships, it is a 1-2 cycle integer compare, and this table is
+       an f32 census whose other rows are 120-250 cycle soft-float
+       operations on the targets here. Billing it would put the largest
+       single cost of a CSA2 layer into a column that cannot be compared
+       with any other row of the same table. Its own order is written at
+       the loop instead - see forward_csa2.c's selection block. */
+    LZ_FC_CSA2_IDX,
+    LZ_FC_CSA2_SEL,
+    LZ_FC_CSA2_CORE,
     LZ_FC_N
 };
 

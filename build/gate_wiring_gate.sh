@@ -139,6 +139,11 @@ mla_gate.sh                # needs python3 numpy+safetensors and rewrites a
                            #   ~500MB model.safetensors three times
 csa2_gate.sh                # needs python3 numpy+safetensors and rewrites a
                            #   model.safetensors twice
+csa2_f32count_gate.sh      # three whole engine builds per run, all
+                           #   gcc-direct because the counting build is not
+                           #   a Makefile target at all: the plain engine,
+                           #   the same source with -DLZ_F32COUNT=1, and a
+                           #   mutant counting build
 csa2_dense_kv_gate.sh      # four whole engine builds per run: the current
                            #   tree, the pre-fix predicate as its reference
                            #   arm (a mutation, NOT git show HEAD - that

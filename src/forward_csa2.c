@@ -526,6 +526,11 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
                         score += s->csa2_widx[hh] * dot;
                     }
                     s->csa2_scores[b] = score;
+                    /* Per visible block: n_idx_heads dots of idx_hd
+                       mul+add, one ReLU compare per head, and the per-head
+                       weighted accumulate (one mul and one add each). */
+                    LZ_FCX(LZ_FC_CSA2_IDX, n_idx_heads * (idx_hd + 1),
+                           n_idx_heads * (idx_hd + 1), 0, 0, n_idx_heads);
                 }
                 /* Top-k, plain partial selection sort: correct, not fast -
                    see this file's own header comment. tok_idx[i]
@@ -537,10 +542,18 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
                         int best = -1;
                         float best_val = 0.0f;
                         for (b = 0; b < n_vis; b++) {
+                            /* The dedup scan below runs k_eff * n_vis / 2
+                               integer compares at the top-k this project
+                               ships and is the largest single cost of
+                               this layer - and it is NOT billed to any
+                               census site: ops.h's LZ_FC_CSA2_IDX comment
+                               has why an integer compare may not share a
+                               row with soft-float operations. */
                             int used = 0, u;
                             for (u = 0; u < kk; u++)
                                 if (tok_idx[u] == b) { used = 1; break; }
                             if (used) continue;
+                            LZ_FCX(LZ_FC_CSA2_SEL, 0, 0, 0, 0, 1);
                             if (best == -1 || s->csa2_scores[b] > best_val) {
                                 best = b;
                                 best_val = s->csa2_scores[b];
@@ -600,6 +613,12 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
                     float p = s->csa2_attn_probs[kk] / sum;
                     for (d = 0; d < hd; d++) outh[d] += p * ent[d];
                 }
+                /* Per head: k_eff scoring dots of hd mul+add, k_eff - 1
+                   compares for the max, one divide per probability, and
+                   the weighted sum's k_eff * hd mul+add. lz_exp bills
+                   itself at its own site. */
+                LZ_FCX(LZ_FC_CSA2_CORE, 2 * k_eff * hd, 2 * k_eff * hd,
+                       k_eff, 0, k_eff > 0 ? k_eff - 1 : 0);
             }
         } else {
             memset(s->attn_out, 0, (size_t)qd * sizeof(float));
