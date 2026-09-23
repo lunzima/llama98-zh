@@ -41,7 +41,7 @@
 # nested inside another comment; gcc said so on every build and `check`
 # reported 16 PASS over it. Having a caller somewhere is not the test -
 # being reachable from what people actually run is.
-check: root-hygiene-gate bare-endif-gate wscr-borrow-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate json-offset-gate softfp-gate dedupe-gate mm-alias-gate kv-share-ced-boundary-gate ced-proj-arm-gate csa2-modes-config-gate csa2-cache-idx-alias-gate csa2-mode-dispatch-gate csa2-mode-export-load-gate csa2-last-writer-bin-gate csa2-reindex-causality-gate csa2-indexer-rope-slice-gate csa2-out-rope-gate csa2-z-subst-gate csa2-compress-m-layers-gate artifact-modeling-gate smf-lead-gate c89-floor-gate pri64-scan-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate tree-lock-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate codesize-gate isa-floor-avx2-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate arch-allowlist-gate kernel-matrix-gate aux-parm-arity-gate aux-equiv-gate mathf-xcompiler-gate bf16-torch-gate lz4-model-gate gcc-watcom-output-gate fixture-exists-gate
+check: root-hygiene-gate bare-endif-gate wscr-borrow-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate json-offset-gate softfp-gate dedupe-gate mm-alias-gate kv-share-ced-boundary-gate ced-proj-arm-gate csa2-modes-config-gate csa2-cache-idx-alias-gate csa2-mode-dispatch-gate csa2-mode-export-load-gate csa2-last-writer-bin-gate csa2-reindex-causality-gate csa2-indexer-rope-slice-gate csa2-out-rope-gate csa2-z-subst-gate csa2-compress-m-layers-gate artifact-modeling-gate smf-lead-gate c89-floor-gate pri64-scan-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate tree-lock-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate gui-noman-selftest-gate codesize-gate isa-floor-avx2-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate arch-allowlist-gate kernel-matrix-gate aux-parm-arity-gate aux-equiv-gate mathf-xcompiler-gate bf16-torch-gate lz4-model-gate gcc-watcom-output-gate fixture-exists-gate
 
 # Zero gcc warnings, asserted rather than printed. The Watcom side has
 # always been counted ("N lines, 0 warnings, 0 errors", per file); this
@@ -112,6 +112,28 @@ seed-gate:
 .PHONY: gui-selftest-gate
 gui-selftest-gate: kunkun98-gui
 	@bash build/gui_selftest_gate.sh
+
+# The same 432 checks against the UNMANIFESTED build. Not redundant: the
+# manifest asks XP+ to theme the common controls, so the build above runs
+# comctl32 v6 on a modern host and the window drawn is the host's. This
+# one runs the unthemed v5 painting, which is what Windows 98 gets - and
+# a status-bar-height bug sat red here while the manifest build stayed
+# green, because nobody ran this arm by hand.
+#
+# This was test_noman_window_selftest in the training tree, where it
+# built the binary out of that tree's retired src/ and went red on
+# src/RETIRED.h for a reason that had nothing to do with the GUI. The
+# binary comes from here now.
+#
+# Depends on kunkun98-noman for the same reason gui-selftest-gate depends
+# on kunkun98-gui: a gate handed a stale binary reports a verdict for a
+# configuration nobody shipped. The gate itself also refuses to trust the
+# name - it checks that the manifest really is absent from the artefact,
+# so a Makefile whose strip silently stopped matching cannot turn this
+# into a second copy of the gate above that reports PASS.
+.PHONY: gui-noman-selftest-gate
+gui-noman-selftest-gate: kunkun98-noman
+	@bash build/gui_noman_selftest_gate.sh
 
 # Two size criteria for the shipping binaries: the GUI fits on a 1.44 MB
 # floppy, and the CLI's .text stays under TEXT_CEIL - the early one, since

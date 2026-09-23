@@ -126,6 +126,7 @@
 !/build/pair_census.sh
 !/build/gcc_warning_gate.sh
 !/build/gui_selftest_gate.sh
+!/build/gui_noman_selftest_gate.sh
 !/build/kernel_reach_gate.sh
 !/build/t2_probe_stubs.c
 !/build/dot128_x16_probe.c
@@ -219,6 +220,8 @@
 /llama98.dll
 /kunkun98-gui
 /kunkun98-gui.exe
+/kunkun98-noman
+/kunkun98-noman.exe
 /kunkun98-w.exe
 /kunkun98-serve
 /kunkun98-serve.exe
@@ -318,3 +321,7 @@ unsloth_compiled_cache/
 # exactly what a future `git add -A` would sweep up, in a tree whose first
 # rule is never to run one.
 tmp-wsl/
+
+# Generated at build time by the kunkun98-noman rule, from gui/kunkun98.rc
+# with the manifest line stripped. Not a source file.
+/gui/kunkun98-noman.rc

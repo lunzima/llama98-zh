@@ -363,6 +363,42 @@ kunkun98-gui: $(GUI_SRCS) $(COLD_COM_SRCS) $(COLD_ENG_SRCS) gui/layout.h gui/loc
 	$(CC) $(X86_64_CFLAGS) -Igui -Icommon -mwindows -o $@ $(GUI_SRCS) $(COLD_COM_SRCS) $(COLD_ENG_SRCS) $(GUI_RES) $(HOT_GCC_GUI_OBJS) $(ENG_MMX_GCC_GUI_OBJS) $(ENG_AVX2_GCC_GUI_OBJS) \
 	    -lgdi32 -luser32 -lcomdlg32 -lm -Wl,--stack=524288
 
+# The same front end with the application manifest stripped from its
+# resources. Not shipped, and not a review aid: it is the binary
+# build/gui_noman_selftest_gate.sh runs the selftest against. The
+# manifest is what asks XP+ to theme the common controls, so the unthemed
+# comctl32 v5 path is the one Windows 98 itself gets - and a
+# status-bar-height bug sat red in that path while the manifest build
+# stayed green the whole time.
+#
+# THE .rc IS DERIVED, NOT COPIED. A second hand-kept resource list goes
+# stale the next time a resource is added to the shipped one, and the
+# failure is invisible: the "noman" binary would quietly be the manifest
+# one. So the strip is a sed at build time and the recipe CHECKS that it
+# worked - if gui/kunkun98.rc is ever reformatted so the pattern stops
+# matching, this fails instead of building the wrong binary.
+# The derived .rc is written BESIDE the shipped one, not under build/:
+# gui/kunkun98.rc resolves `#include "resource.h"` and its asset paths
+# relative to its own directory, so a copy in build/gui/ fails to
+# preprocess (measured - "resource.h: No such file or directory") and a
+# copy that added -Igui would resolve the includes but not necessarily
+# the assets. Same directory means every relative path behaves exactly
+# as it does for the shipped file.
+GUI_NOMAN_RC  := gui/kunkun98-noman.rc
+GUI_NOMAN_RES := build/gui/kunkun98-noman.res.o
+$(GUI_NOMAN_RES): gui/kunkun98.rc gui/resource.h gui/kunkun98.manifest
+	@mkdir -p build/gui
+	@sed '/^1 24 "gui\/kunkun98\.manifest"$$/d' gui/kunkun98.rc > $(GUI_NOMAN_RC)
+	@if grep -q 'kunkun98\.manifest' $(GUI_NOMAN_RC); then \
+	    echo "$@: the manifest is still in $(GUI_NOMAN_RC) - the strip"; \
+	    echo "  pattern no longer matches gui/kunkun98.rc, so this would"; \
+	    echo "  build the MANIFEST binary and call it noman."; exit 1; fi
+	windres -I. $(GUI_NOMAN_RC) -O coff -o $@
+
+kunkun98-noman: $(GUI_SRCS) $(COLD_COM_SRCS) $(COLD_ENG_SRCS) gui/layout.h gui/localized_strings.h $(GUI_NOMAN_RES) $(HOT_GCC_GUI_OBJS) $(ENG_MMX_GCC_GUI_OBJS) $(ENG_AVX2_GCC_GUI_OBJS)
+	$(CC) $(X86_64_CFLAGS) -Igui -Icommon -mwindows -o $@ $(GUI_SRCS) $(COLD_COM_SRCS) $(COLD_ENG_SRCS) $(GUI_NOMAN_RES) $(HOT_GCC_GUI_OBJS) $(ENG_MMX_GCC_GUI_OBJS) $(ENG_AVX2_GCC_GUI_OBJS) \
+	    -lgdi32 -luser32 -lcomdlg32 -lm -Wl,--stack=524288
+
 # ----------------------------------------------------------------------
 # Open Watcom (target compiler)
 # ----------------------------------------------------------------------
