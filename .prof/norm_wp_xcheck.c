@@ -1,7 +1,9 @@
 /* Cross-check for lz_rmsnorm's cached (1 + w) table, src/ops_norm.c.
  *
- * THE CLAIM. The scalar output loop reads a table of fl(1.0f + w[i])
- * built once per weight pointer instead of adding 1 per element per
+ * THE CLAIM, in two halves.
+ *
+ * (1) THE ARMS AGREE. The scalar output loop reads a table of fl(1.0f +
+ * w[i]) built once per weight ROW instead of adding 1 per element per
  * token. That is bit-identical, not close: the table holds the same
  * value the inline expression computes and float addition is
  * deterministic. On a full pool build_wp returns NULL and the inline
@@ -14,12 +16,25 @@
  * row here holds IDENTICAL weight data, so all NW outputs must be
  * identical to each other; a difference is the two arms disagreeing.
  *
- * WHY THE MUTATION MATTERS MORE THAN THE PASS. A green run is also what
- * a build where build_wp is never called would produce. Break the table
- * (norm_wp_xcheck.sh drops the `+ 1.0f`) and the count of differing rows
- * becomes the number of rows that took the INLINE path - so the
- * mutation does not only prove the check is sensitive, it MEASURES the
- * split and shows the cached arm was really used.
+ * (2) THE KEY IS THE ROW, NOT THE ADDRESS. This is the half a fixture
+ * with one address per tensor cannot see. lz_t_f32 returns t->f for an
+ * F32 tensor but widens every other format into the caller's scratch,
+ * so a checkpoint whose norm weights are stored narrow presents ONE
+ * address for all of them; under a key on the address the second tensor
+ * of a given length is handed the first one's table. The reuse fixtures
+ * below re-present a single address whose row differs ONLY IN THE
+ * MIDDLE, and require the result to match the same row put through a
+ * fresh address. An address key and an endpoint-sample key are both
+ * served the stale table there; only the full row compare is not.
+ *
+ * WHY THE MUTATIONS MATTER MORE THAN THE PASS. A green run is also what
+ * a build where the table is never consulted would produce. The fill
+ * mutation (norm_wp_xcheck.sh drops the `+ 1.0f`) makes the cached rows
+ * compute x*inv*w, so the count of differing rows becomes the number of
+ * rows that took the INLINE path - it does not only prove the check is
+ * sensitive, it MEASURES the split. The key mutations (an endpoint
+ * sample in place of the full compare) must turn the reuse fixture red,
+ * which is what says that fixture was measuring the key.
  *
  * --kernel ref, deliberately: LZ_NORMOUT_TAB's vector cells would take
  * the row before the scalar loop sees it on an x86 build with SSE, and
@@ -76,12 +91,28 @@ static float ideq[NW];
    rows is which build_qw arm served them. */
 static float gv[NN];
 
+/* The reuse fixture, one pair per pool. `reuse` is a row whose ADDRESS
+   already carries a table - it is w_rows[0] / wq_rows[0], filled first
+   above - and `fresh` is an address no call has used, so it cannot hit
+   anything and its result is the inline arm by construction. Both are
+   given the same contents, so any difference between the two outputs is
+   the pool having served the reuse address a table built from the row
+   that was there BEFORE. The perturbation is confined to the middle
+   third: element 0 and n-1 are left equal to the original row, which is
+   what makes an endpoint sample indistinguishable from the full compare
+   except by this fixture. */
+static float w_reuse[NN], w_fresh[NN];
+static float out_reuse[NN], out_fresh[NN];
+static float wq_reuse[NN], wq_fresh[NN];
+static int32_t iq_reuse[NN], iq_fresh[NN];
+static float dq_reuse, dq_fresh;
+
 extern long long lz_debug_norm_qw;
 
 int main(int argc, char **argv) {
     uint32_t st = 0x9E3779B9u;
     int gated = (argc > 1 && argv[1][0] == 'g');
-    int r, i, bad = 0, first = -1;
+    int r, i, bad = 0, bad_key = 0, first = -1;
     lz_kernel_select(LZ_KERNEL_REF);
     for (i = 0; i < NN; i++) {
         st ^= st << 13; st ^= st >> 17; st ^= st << 5;
@@ -137,13 +168,39 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    /* (2) the key, float table. w_rows[0] carries a table built from the
+       row that was in it a moment ago; that ONE address is re-presented
+       with a different row, and the same row is also put through an
+       address no call has used. The fresh address cannot hit anything,
+       so its output is the inline arm by construction - which is the
+       reference, not a second guess at the arithmetic. */
+    for (i = 0; i < NN; i++) w_fresh[i] = w_rows[0][i];
+    for (i = NN / 4; i < NN / 2; i++) w_fresh[i] += 4.0f;
+    memcpy(w_reuse, w_fresh, sizeof w_reuse);
+    memcpy(w_rows[0], w_reuse, sizeof w_reuse);
+    lz_rmsnorm(out_reuse, xv, w_rows[0], NN, 1e-6f);
+    lz_rmsnorm(out_fresh, xv, w_fresh, NN, 1e-6f);
+    if (memcmp(out_reuse, out_fresh, sizeof out_reuse) != 0) {
+        bad_key = 1;
+        for (i = 0; i < NN; i++)
+            if (out_reuse[i] != out_fresh[i]) {
+                printf("  key: one address, two rows, elem %d: %.9g vs "
+                       "%.9g\n", i, (double)out_reuse[i],
+                       (double)out_fresh[i]);
+                break;
+            }
+    }
+    printf("norm (1+w) key: one address, two rows -> %s\n",
+           bad_key ? "DIFFER" : "same");
+
     /* The SAME check for the Q15 table (build_qw, feeding
        lz_rmsnorm_out_fixed_int). That path is not on any call chain this
        model reaches - every site that would take it is inside a SubLN
        branch - so it has no end-to-end gate at all, and the cache it
-       carries is the same pointer-keyed shape with the same
-       cached-vs-inline split. Checking it here costs twenty lines and is
-       the difference between "unused" and "unchecked".
+       carries has the same row-keyed shape and the same cached-vs-inline
+       split, so both halves of the fixture apply to it. Checking it here
+       costs twenty lines and is the difference between "unused" and
+       "unchecked".
 
        Needs the fixed tier: without it lz_rmsnorm_int's float fallback
        skips the Q15 output loop entirely and this would compare that
@@ -192,7 +249,43 @@ int main(int argc, char **argv) {
         printf("  gated cached elements: %lld of %d (%d rows of %d)\n",
                lz_debug_norm_qw, NW * NN,
                (int)(lz_debug_norm_qw / NN), NW);
-    if (bad) { printf("FAIL\n"); return 1; }
+
+    /* (2) the key, Q15 table - the same fixture against build_qw. The
+       gated invocation runs the plain-w table and this one the (1+w)
+       table, so the two invocations cover both add1 values; whichever
+       runs, wq_rows[0] carries a table and the reuse address is its
+       own. Compared on the ints AND on deq, because a stale ew changes
+       the returned scale even where the codes survive. */
+    for (i = 0; i < NN; i++) wq_fresh[i] = wq_rows[0][i];
+    for (i = NN / 4; i < NN / 2; i++) wq_fresh[i] += 4.0f;
+    memcpy(wq_reuse, wq_fresh, sizeof wq_reuse);
+    memcpy(wq_rows[0], wq_reuse, sizeof wq_reuse);
+    if (gated)
+        lz_rmsnorm_gated_int(iq_reuse, xv, gv, wq_rows[0], NN, 1e-6f,
+                             &dq_reuse);
+    else
+        lz_rmsnorm_int(iq_reuse, xv, wq_rows[0], NN, 1e-6f, &dq_reuse);
+    if (gated)
+        lz_rmsnorm_gated_int(iq_fresh, xv, gv, wq_fresh, NN, 1e-6f,
+                             &dq_fresh);
+    else
+        lz_rmsnorm_int(iq_fresh, xv, wq_fresh, NN, 1e-6f, &dq_fresh);
+    {
+        /* Its OWN verdict, not the running one: the float fixture above
+           sets the same flag, and printing that here would label this
+           line with the other fixture's result. */
+        int mem_diff = memcmp(iq_reuse, iq_fresh, sizeof iq_reuse) != 0;
+        int q15_diff = mem_diff || dq_reuse != dq_fresh;
+        if (q15_diff) bad_key = 1;
+        printf("norm Q15 %s key: one address, two rows -> %s"
+               "  [ints %s deq %.9g vs %.9g]\n",
+               gated ? "plain-w (gated)" : "(1+w)",
+               q15_diff ? "DIFFER" : "same",
+               mem_diff ? "DIFFER" : "same",
+               (double)dq_reuse, (double)dq_fresh);
+    }
+
+    if (bad || bad_key) { printf("FAIL\n"); return 1; }
 
     printf("PASS\n");
     return 0;

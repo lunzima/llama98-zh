@@ -69,12 +69,30 @@ static int norm_q15_exp(float x) {
    form, so both live in one build and .prof/norm_wp_xcheck.c compares
    them element by element.
 
-   Keyed on the POINTER, sound for one reason worth stating: lz_t_f32
-   returns t->f unchanged for an F32 tensor, and norm weights are non-2D,
-   so the exporter never quantizes them and the pointer is the tensor's
-   own storage. If that stops being true the key stops matching, the
-   table is rebuilt every call, and the numbers stay right - the failure
-   mode is slow, not wrong.
+   THE KEY IS THE CONTENTS OF w, NOT ITS ADDRESS. lz_t_f32 returns t->f
+   for an F32 tensor, but every other format is widened into the
+   CALLER'S SCRATCH and that scratch is what it returns - and export_q8.py
+   narrows every 1-D tensor, so a checkpoint's norm weights can all arrive
+   at this function as one address (s->wscr). Under a key on the address
+   that is not a cache but a one-entry alias: the second tensor of a
+   given length receives the first one's table, silently. Nothing at this
+   call site can tell the two cases apart, because the tensor identity is
+   already erased by the time lz_rmsnorm is handed `w`.
+
+   So a hit requires all n elements to be bit-equal to the row the table
+   was built from. That is the one test under which the returned table is
+   provably this w's table, and it is exact rather than statistical: a
+   sample of the row - either end, or any stride - admits a wrong table
+   whenever the sampled words happen to agree, and bit patterns in a
+   narrow storage format agree by collision often enough to matter.
+
+   SRC IS AS LONG AS POOL, so each slot costs 2n floats and this pool's
+   static footprint doubles. That memory buys correctness and not speed:
+   without it the verification would have to read w, which is the same
+   traffic the table exists to avoid, so the cache would have no reason
+   to exist at all. A verify miss is not a thrash - the caller's inline
+   arm is correct by construction, and a model whose weights do share one
+   address simply exhausts the pool and runs inline from then on.
 
    Static and single-threaded, a bump allocator with no eviction, for the
    same reason the Q15 pool below is: a model has a fixed set of norm
@@ -87,10 +105,30 @@ static int norm_q15_exp(float x) {
 #define LZ_WP_SLOTS 64
 #endif /* LZ_WP_SLOTS */
 
-static float wp_pool[LZ_WP_POOL];
+static float wp_pool[LZ_WP_POOL];   /* the (1 + w) tables */
+static float wp_src[LZ_WP_POOL];    /* the w each of them was built from */
 static int wp_used = 0;
-static struct { const float *w; int n; float *p; } wp_slot[LZ_WP_SLOTS];
+static struct { const float *w; int n; const float *s; float *p; }
+    wp_slot[LZ_WP_SLOTS];
 static int wp_slots = 0;
+
+/* Whether two weight rows are the same row, bit for bit. Signed zero and
+   NaN compare unequal here where `==` would call the first equal and the
+   second unequal; both answers are sound, because the caller's inline arm
+   is correct either way, and the bit form is the one that states what a
+   table actually depends on. Shared by both pools below - they key on the
+   same quantity, and a second copy of this loop is a second chance for
+   one of them to drift from the other. */
+static int w_row_same(const float *a, const float *b, int n) {
+    union { float f; uint32_t u; } x, y;
+    int i;
+    for (i = 0; i < n; i++) {
+        x.f = a[i];
+        y.f = b[i];
+        if (x.u != y.u) return 0;
+    }
+    return 1;
+}
 
 /* Whether ss_over_n below takes its multiply arm. Also the census
  * predicate: a site that billed the divide flat would report one for
@@ -125,14 +163,24 @@ static float ss_over_n(float ss, int n) {
     return ss / (float)n;
 }
 
+/* The (1 + w) table for w[0..n), or NULL if the pool is full or no slot
+   holds this row. The address is only a pre-filter for the row compare -
+   it decides nothing on its own, and two entries may share it. On a
+   verify miss the caller runs its inline arm; the slot is not overwritten
+   and not evicted, so a model that keeps presenting new rows at one
+   address exhausts the pool and stops using it. */
 static const float *build_wp(const float *w, int n) {
     float *p;
     int i;
     for (i = 0; i < wp_slots; i++)
-        if (wp_slot[i].w == w && wp_slot[i].n == n) return wp_slot[i].p;
+        if (wp_slot[i].w == w && wp_slot[i].n == n &&
+            w_row_same(wp_slot[i].s, w, n))
+            return wp_slot[i].p;
     if (wp_slots >= LZ_WP_SLOTS || wp_used + n > LZ_WP_POOL) return NULL;
     p = wp_pool + wp_used;
     for (i = 0; i < n; i++) p[i] = 1.0f + w[i];
+    for (i = 0; i < n; i++) wp_src[wp_used + i] = w[i];
+    wp_slot[wp_slots].s = wp_src + wp_used;
     wp_used += n;
     wp_slot[wp_slots].w = w;
     wp_slot[wp_slots].n = n;
@@ -259,25 +307,31 @@ int lz_debug_norm_eg_hi = -32768;
    and the loads. The amax scan goes with them: it is compares and
    absolute values, outside the census's convention but not free.
 
-   Keyed on the POINTER, PLUS a two-word content sentinel, and the
-   sentinel is not belt-and-braces. lz_t_f32 returns t->f unchanged for
-   an F32 tensor, which is what every norm weight in every checkpoint
-   here is (.prof/dtype_by_role.c), so the pointer is the tensor's own
-   storage and is stable. But for a QUANTIZED tensor lz_t_f32 dequantizes
-   into the caller's scratch and returns THAT, so two different norm
-   weights of the same length would arrive as the same pointer and a
-   pointer-only key would hand the second one the first one's table -
-   silently wrong, not slow. The sentinel (the bit patterns of w[0] and
-   w[n-1]) catches that for any pair differing at either end; on a
-   mismatch the lookup declines and the caller runs its inline arm, which
-   is correct by construction and does not thrash the pool.
+   THE KEY IS THE CONTENTS OF w, NOT ITS ADDRESS, for the reason
+   build_wp's header gives: lz_t_f32 returns t->f for an F32 tensor but
+   widens every other format into the CALLER'S SCRATCH and returns that,
+   so two different norm weights of the same length can arrive here as
+   one pointer. Under a key on the address the second one is handed the
+   first one's table - silently wrong, not slow. A hit therefore requires
+   all n elements to be bit-equal to the row this table was built from,
+   via w_row_same above. A sample of the row, at either end or anywhere,
+   is not that test: it admits a wrong table whenever the sampled words
+   agree, and the caller's inline arm is correct in every case where the
+   compare declines.
+
+   Source copies cost one float per table entry, so SRC IS AS LONG AS
+   POOL and this pool's static footprint is the int16 tables plus a
+   same-length float array. That memory buys correctness and not speed:
+   a sound key has to read w in full, and the table exists to avoid
+   reading it at all.
 
    Static, single-threaded, like the scratch below. The pool is a bump
    allocator with no eviction: a model has a fixed set of norm weights,
    so it either fits or it does not, and a cache that thrashed would be
-   worse than the miss path. On a full pool build_qw returns NULL and the
-   caller computes inline exactly as before - that path is not dead code,
-   it is what any model past the bound runs. */
+   worse than the miss path. On a full pool, and on any verify miss,
+   build_qw returns NULL and the caller computes inline exactly as before
+   - that path is not dead code, it is what any model past the bound
+   runs. */
 #ifndef LZ_QW_POOL
 #define LZ_QW_POOL 32768        /* int16 entries; CE uses 36 x 512 */
 #endif /* LZ_QW_POOL */
@@ -286,39 +340,36 @@ int lz_debug_norm_eg_hi = -32768;
 #endif /* LZ_QW_SLOTS */
 
 static short qw_pool[LZ_QW_POOL];
+static float qw_src[LZ_QW_POOL];    /* the w each table was built from */
 static int qw_used = 0;
 static struct { const float *w; int n; int add1; int ew;
-                uint32_t k0, k1; short *q; } qw_slot[LZ_QW_SLOTS];
+                const float *s; short *q; } qw_slot[LZ_QW_SLOTS];
 static int qw_slots = 0;
 
-/* The Q15 table for w[0..n), or NULL if the pool is full or the sentinel
-   says this pointer is carrying different data than it did. add1 selects
-   which table: 1 for the Q15 image of 1+w (lz_rmsnorm's chain), 0 for w
-   itself (the gated chain). They are separate slots because they are
-   different tables of the same tensor. *ew_out receives the shared
-   exponent.
+/* The Q15 table for w[0..n), or NULL if the pool is full or no slot
+   holds this row. add1 selects which table: 1 for the Q15 image of 1+w
+   (lz_rmsnorm's chain), 0 for w itself (the gated chain). They are
+   separate slots because they are different tables of the same tensor,
+   each carrying its own source copy of the same w. *ew_out receives the
+   shared exponent.
 
    The build is the SAME arithmetic the inline path ran, in the same
    order, so a cached run and an uncached one agree bit for bit.
-   .prof/norm_wp_xcheck.c asserts that for both tables by driving more
-   distinct weight pointers than the pool has slots, so the two arms run
-   in one process and must agree; its mutation run reports the split.
-   (An earlier version of this comment cited build/norm_qw_gate.sh, which
-   was never written.) */
+   .prof/norm_wp_xcheck.c asserts that for both tables - by driving more
+   distinct weight pointers than the pool has slots so the two arms run
+   in one process and must agree, and by re-presenting one address with
+   different contents so the key itself is compared. */
 static const short *build_qw(const float *w, int n, int add1, int *ew_out) {
     union { float f; uint32_t u; } bit;
     static float wp[LZ_NORM_MAX_N];
-    uint32_t k0, k1;
     float sw;
     short *q;
     int ew, i;
 
-    bit.f = w[0];     k0 = bit.u;
-    bit.f = w[n - 1]; k1 = bit.u;
     for (i = 0; i < qw_slots; i++)
         if (qw_slot[i].w == w && qw_slot[i].n == n &&
-            qw_slot[i].add1 == add1) {
-            if (qw_slot[i].k0 != k0 || qw_slot[i].k1 != k1) return NULL;
+            qw_slot[i].add1 == add1 &&
+            w_row_same(qw_slot[i].s, w, n)) {
             *ew_out = qw_slot[i].ew;
             return qw_slot[i].q;
         }
@@ -344,13 +395,13 @@ static const short *build_qw(const float *w, int n, int add1, int *ew_out) {
             q[i] = (short)v;
         }
     }
+    for (i = 0; i < n; i++) qw_src[qw_used + i] = w[i];
+    qw_slot[qw_slots].s = qw_src + qw_used;
     qw_used += n;
     qw_slot[qw_slots].w = w;
     qw_slot[qw_slots].n = n;
     qw_slot[qw_slots].add1 = add1;
     qw_slot[qw_slots].ew = ew;
-    qw_slot[qw_slots].k0 = k0;
-    qw_slot[qw_slots].k1 = k1;
     qw_slot[qw_slots].q = q;
     qw_slots++;
     *ew_out = ew;
@@ -545,7 +596,8 @@ static void lz_rmsnorm_out_fixed_int(int32_t *t, const short *qx, int ex,
         *deq = pow2f(15 - ex - ew - ei);
         return;
     }
-    /* Pool exhausted. Same numbers, computed per call - see build_qw. */
+    /* Pool exhausted, or no slot holds this row. Same numbers, computed
+       per call - see build_qw. */
     for (i = 0; i < n; i++) wp[i] = 1.0f + w[i];
     bit.u = q8_amax(wp, n); ew = norm_q15_exp(bit.f); sw = pow2f(ew);
     for (i = 0; i < n; i++) {
