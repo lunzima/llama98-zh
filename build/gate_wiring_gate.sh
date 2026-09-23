@@ -139,6 +139,10 @@ mla_gate.sh                # needs python3 numpy+safetensors and rewrites a
                            #   ~500MB model.safetensors three times
 csa2_gate.sh                # needs python3 numpy+safetensors and rewrites a
                            #   model.safetensors twice
+csa2_ring_nf_gate.sh       # five whole engine builds per run: the fixed
+                           #   tree plus one mutant per ring group, because
+                           #   the gate has to solve the layout out of three
+                           #   isolated mutants rather than read one total
 csa2_f32count_gate.sh      # three whole engine builds per run, all
                            #   gcc-direct because the counting build is not
                            #   a Makefile target at all: the plain engine,

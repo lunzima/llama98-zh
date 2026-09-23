@@ -739,14 +739,30 @@ static void alloc_csa2_ring(LZRunState *s, const LZModel *m,
                 int mb = (seq_len + (ck > 0 ? ck : 1) - 1) / (ck > 0 ? ck : 1);
                 if (mb > max_blocks) max_blocks = mb;
             }
+            /* pdepth and nblocks are END OFFSETS - prefix sums over every
+               slot, which is what passing c->n_full_layers to the two
+               size functions asks for (their own comments say so). Each
+               buffer is therefore already the whole model's, and the
+               per-layer base a consumer computes (lz_csa2_pend_base(c,
+               ci, ...) / lz_csa2_ring_base(c, ci, ...) in forward_csa2.c
+               and forward_ckpt.c) is an offset INTO it, never a stride
+               across nf copies of it. Multiplying by nf here allocated
+               nf times the ring: half of it - 3,147,776 B for kunkun-ce
+               at seq 8192 and 5,246,976 B for kunkun98, at nf = 2 - was
+               memory nothing could name. lz_state_reset's memsets have
+               always used the unmultiplied sizes, which is the same
+               reading of these two functions.
+               nf is NOT dropped from csa2_topk_idx_pub/csa2_topk_n_pub
+               below: those really are one slot per (ci, token-in-chunk),
+               indexed by ci. */
             s->csa2_pending_c = (float *)xcalloc(
-                nf * pdepth * c->head_dim, sizeof(float), &ok, &s->bytes_alloc);
+                pdepth * c->head_dim, sizeof(float), &ok, &s->bytes_alloc);
             s->csa2_pending_z = (float *)xcalloc(
-                nf * pdepth * c->head_dim, sizeof(float), &ok, &s->bytes_alloc);
+                pdepth * c->head_dim, sizeof(float), &ok, &s->bytes_alloc);
             s->csa2_comp_ring = (float *)xcalloc(
-                nf * nblocks * c->head_dim, sizeof(float), &ok, &s->bytes_alloc);
+                nblocks * c->head_dim, sizeof(float), &ok, &s->bytes_alloc);
             s->csa2_idx_comp_ring = (float *)xcalloc(
-                nf * nblocks * c->csa2_indexer_head_dim, sizeof(float),
+                nblocks * c->csa2_indexer_head_dim, sizeof(float),
                 &ok, &s->bytes_alloc);
             s->csa2_scores = (float *)xcalloc((size_t)max_blocks, sizeof(float), &ok, &s->bytes_alloc);
             /* csa2_topk_idx_pub / csa2_topk_n_pub (forward.h's own

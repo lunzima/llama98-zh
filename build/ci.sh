@@ -921,6 +921,31 @@ case $C2FC_RC in
         ;;
 esac
 
+# S2 CSA2's ring sizing: four buffers were allocated nf times the prefix
+# sum that already spans every slot. Own script (five engine builds, one
+# per isolated mutant) for the same reason as the rest of the pair.
+echo
+echo "==== [11k/31]CSA2 ring sizing ===="
+LOG=build/ci-csa2-ring-nf.log
+build/csa2_ring_nf_gate.sh >"$LOG" 2>&1
+C2RN_RC=$?
+cat "$LOG"
+case $C2RN_RC in
+    0)
+        note "PASS  CSA2 ring sizing"
+        PASS=$((PASS + 1))
+        ;;
+    2)
+        REASON=$(grep -m1 'SKIP' "$LOG")
+        note "SKIP  CSA2 ring sizing ($REASON)"
+        SKIP=$((SKIP + 1))
+        ;;
+    *)
+        note "FAIL  CSA2 ring sizing"
+        FAIL=$((FAIL + 1))
+        ;;
+esac
+
 # ---------------------------------------------------------------------
 # Stage 12: --kv-rot, the one output-changing knob that had no gate. Not
 # invariance (stage 11's assertion) - a QUALITY claim with a number:
