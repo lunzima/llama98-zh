@@ -289,6 +289,37 @@ LZ_MAYBE_UNUSED static int p2_shift_of(int32_t amax) {
     return sh;
 }
 
+/* Re-round a code to NEAREST and hand back the residual it then leaves.
+
+   q8_round truncates under --fastfp - it has to, to agree with cvtps2dq
+   under the same MXCSR chop - so `x - q8_round(x)` spans a FULL unit.
+   The two-plane split is built for the HALF unit a round-to-nearest code
+   leaves: ops.h states the format as `hi = round(v/s)`, and the fixed
+   pass 2 produces exactly that with `(hn + 128) >> 8`. Handing a full
+   unit to a low plane sized for half of one clamps half its codes away
+   - measured 50.1% of every row's lo, leaving the second plane at 2.80x
+   instead of the 256x this step restores.
+
+   Ties go up, the way `(hn + 128) >> 8` sends them, so the code comes
+   out in the same form that split produces. It lives HERE rather than
+   in ops_quant.h because every two-plane rounding tier reaches it
+   through a different TU - the gcc arms in ops_gdn.c, and
+   lz_q8round_2p_group_sse/_sse2, which compute `res = x - code` in
+   plain C between their two kernel calls. One text, all four callers.
+
+   The bound is guarded inside rather than clamped after: the code is
+   already at its +-127 bound on a SIMD arm's output, and bumping it off
+   would leave `r` describing a code that is not the one stored. */
+LZ_MAYBE_UNUSED static int q8_round_rne(float x, int q, float *r) {
+    *r = x - (float)q;
+    if (*r >= 0.5f) {
+        if (q < 127) { q += 1; *r -= 1.0f; }
+    } else if (*r < -0.5f) {
+        if (q > -127) { q -= 1; *r += 1.0f; }
+    }
+    return q;
+}
+
 /* ---- matmul row-kernel prefetch ---------------------------------------
    Every format's Watcom row function (row_q8_mmx_asm etc., in
    src/ops_mmx.c/ops_sse2.c) issues one of these per 32 (or 128)

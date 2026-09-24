@@ -496,7 +496,7 @@ void lz_q8round_2p_group_sse(const float *grp, int8_t *ho, int8_t *lw,
         lz_q8round32_sse_asm(grp + k, ho + k, pinv);
     _mm_empty();
     for (k = 0; k < gs; k++)
-        res[k] = grp[k] * (*pinv) - (float)ho[k];
+        ho[k] = (int8_t)q8_round_rne(grp[k] * (*pinv), ho[k], &res[k]);
     for (k = 0; k + 31 < gs; k += 32)
         lz_q8round32_sse_asm(res + k, lw + k, plo_mul);
     _mm_empty();

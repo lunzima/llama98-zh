@@ -1159,10 +1159,15 @@ static void gdn_pass1_fixed(const int8_t *sq,
 /* Two-plane quantize of one state row. Deliberately mirrors
    lz_quantize_q8: same integer-domain absmax, same amax*(1/127) scale
    written as a multiply, same q8_round, and the SAME
-   three rounding tiers. `hi` alone therefore matches what
-   lz_quantize_q8 would have written, which makes
-   -DLZ_GDN_STATE_2PLANE=0 vs 1 a clean A/B rather than two unrelated
-   quantizers.
+   three rounding tiers - and then q8_round_rne, which is where the two
+   part company on purpose. q8_round truncates under --fastfp, matching
+   lz_quantize_q8 exactly; the low plane below is sized for the HALF
+   unit a round-to-nearest hi leaves (see LZ_GDN_LO_SCALE), so this
+   re-rounds hi to nearest and hands lo the residual that leaves. hi is
+   therefore NOT bit-identical to lz_quantize_q8's - the form it matches
+   is the fixed pass 2's own split, `(hn + 128) >> 8`. What stays a
+   clean A/B is -DLZ_GDN_STATE_2PLANE=0 vs 1: both arms take this same
+   hi, differing only in whether lo is written.
 
    Both planes go through the vectorized rounding kernel, the low one by
    feeding it the residual with a multiplier of 254 - the kernel computes
@@ -1222,9 +1227,11 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
                 float f = grp[k] / s[g];
                 int h = q8_round(f);
                 int l;
+                float r;
                 if (h >  127) h =  127;
                 if (h < -127) h = -127;
-                l = q8_round((f - (float)h) * LZ_GDN_LO_SCALE);
+                h = q8_round_rne(f, h, &r);
+                l = q8_round(r * LZ_GDN_LO_SCALE);
                 /* +-127, NOT +-128, even though int8 holds -128 and L =
                    256 can produce it. The SIMD rounding kernel clamps at
                    +-127 (pminsw/pmaxsw against 127/-127) and cannot be
@@ -1272,7 +1279,8 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
                 for (k = 0; k + 31 < gs; k += 32)
                     lz_q8round32_avx2(grp + k, ho + k, &inv);
                 for (k = 0; k < gs; k++)
-                    res[k] = grp[k] * inv - (float)ho[k];
+                    ho[k] = (int8_t)q8_round_rne(grp[k] * inv, ho[k],
+                                                 &res[k]);
                 for (k = 0; k + 31 < gs; k += 32)
                     lz_q8round32_avx2(res + k, lw + k, &lo_mul);
             } else
@@ -1282,7 +1290,8 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
                 for (k = 0; k + 31 < gs; k += 32)
                     lz_q8round32_simd(grp + k, ho + k, &inv);
                 for (k = 0; k < gs; k++)
-                    res[k] = grp[k] * inv - (float)ho[k];
+                    ho[k] = (int8_t)q8_round_rne(grp[k] * inv, ho[k],
+                                                 &res[k]);
                 for (k = 0; k + 31 < gs; k += 32)
                     lz_q8round32_simd(res + k, lw + k, &lo_mul);
             } else
@@ -1299,7 +1308,8 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
                    MMX state behind exactly as the MMX one does. */
                 if (lz_cpu_has_mmx()) _mm_empty();
                 for (k = 0; k < gs; k++)
-                    res[k] = grp[k] * inv - (float)ho[k];
+                    ho[k] = (int8_t)q8_round_rne(grp[k] * inv, ho[k],
+                                                 &res[k]);
                 for (k = 0; k + 31 < gs; k += 32)
                     lz_q8round32_sse(res + k, lw + k, &lo_mul);
                 if (lz_cpu_has_mmx()) _mm_empty();
@@ -1315,9 +1325,11 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
             float f = grp[k] * inv;
             int h = q8_round(f);
             int l;
+            float r;
             if (h >  127) h =  127;
             if (h < -127) h = -127;
-            l = q8_round((f - (float)h) * LZ_GDN_LO_SCALE);
+            h = q8_round_rne(f, h, &r);
+            l = q8_round(r * LZ_GDN_LO_SCALE);
             if (l >  127) l =  127;
             if (l < -127) l = -127;
             ho[k] = (int8_t)h;
