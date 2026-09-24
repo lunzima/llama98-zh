@@ -1825,9 +1825,9 @@ void lz_attn_wsum_q8_int(int64_t *acc, float *sscale, const float *att,
 #if LZ_GDN_STATE_2PLANE
 /* State quantizer for the two-plane representation: `hi` and `s` come out
    exactly as lz_quantize_q8 would have written them, `lo` carries the
-   residual at 1/254 weight. Exposed because the scalar reference has
-   to write the same representation the implementation reads - the same
-   reason it already calls
+   residual at 1/LZ_GDN_LO_SCALE weight. Exposed because the scalar
+   reference has to write the same representation the implementation
+   reads - the same reason it already calls
    lz_quantize_q8. `fc_site`: LZ_FC_* site to bill, or -1 for none. */
 void lz_gdn_quantize_2p(const float *x, int n, int gs,
                         int8_t *hi, int8_t *lo, float *s, int fc_site);
@@ -1860,13 +1860,17 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
        no divide. Verified exhaustively that this round-trips every
        (hi, lo) pair in range, |H| <= 32639 < 32767.
      - the step is s/256 rather than s/254. PREDICTED to improve
-       accuracy; MEASURED as a wash (float pass 2 1.78e-05 -> 1.82e-05,
-       integer 4.35e-05 -> 4.27e-05). The finer step is
-       cancelled by clamping: the residual reaches +-128 at L = 256 and
-       the +-127 clamp discards the extremes, which L = 254 never had to
-       do. So the case for 256 rests on the division-free split alone,
-       not on precision - the prediction did not hold and is left here
-       rather than quietly dropped.
+       accuracy; MEASURED as a wash at the time (float pass 2 1.78e-05
+       -> 1.82e-05, integer 4.35e-05 -> 4.27e-05). That measurement
+       took place with hi truncating, which is what the paragraph above
+       says must not happen: a truncated hi leaves a full unit of
+       residual, and the +-127 clamp discarded half of lo's codes at
+       L = 256 (measured 50.1% of every row). With hi round to nearest -
+       which q8_round_rne now enforces, and which this analysis assumes
+       from its first line - the residual is the half unit L = 256 is
+       sized for and the step does what it was predicted to do: the
+       two-plane round-trip runs 256x better than single-plane rather
+       than the 2.8x the truncated regime produced.
      - 1/256 is exact in float where 1/254 is not, so every dequant
        loses a rounding.
 
