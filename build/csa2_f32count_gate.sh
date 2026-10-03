@@ -44,9 +44,19 @@
 # Exit: 0 pass, 1 fail, 2 skip (no gcc, no model, no token list).
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+cd "$ROOT" || exit 1
 MODEL=${1:-E:/LLM/models/kunkun98}
 CONTROL=${2:-E:/LLM/models/kmr20}
+
+# build() links against build/native's prebuilt SIMD objects, which a
+# concurrent make in this tree rewrites in place; holding the tree lock
+# keeps the link from reading one mid-write.
+LZ_ENV=$(LZ_TREE_LOCK_NAME="$(basename "$0")" LZ_TREE_LOCK_WHAT="the csa2 f32-census gate" bash build/tree_lock.sh acquire --print-env) || exit 2
+eval "$LZ_ENV"
+# Armed before the skips below: they exit, and an exit between the
+# acquire and this trap leaves the tree locked.
 W=$(mktemp -d)
+trap 'bash build/tree_lock.sh release; rm -rf "$W"' EXIT
 FAILED=0
 # Long enough that the csa2 layer sees blocks: n_vis is (pos + 1)/cm, so a
 # five-token prompt leaves every site at a handful of executions and a
@@ -181,7 +191,6 @@ else
     FAILED=1
 fi
 
-rm -rf "$W"
 if [ "$FAILED" -eq 0 ]; then
     echo "PASS csa2_f32count_gate"
     exit 0

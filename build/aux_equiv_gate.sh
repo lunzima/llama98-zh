@@ -35,8 +35,8 @@ done
 if [ -z "$L" ] || [ ! -f "$L/aux_equiv.py" ]; then
     echo "aux_equiv_gate: SKIP - no pentiumlint checkout. Searched:" \
          "\$PENTIUMLINT, ../potatolint/pentiumlint, /e/potatolint/pentiumlint," \
-         "/mnt/e/potatolint/pentiumlint (the repo was kunkun-linter until" \
-         "2026-08-26; if it has moved again, this list is what is stale)" >&2
+         "/mnt/e/potatolint/pentiumlint (the repo was once named" \
+         "kunkun-linter; if it has moved again, this list is what is stale)" >&2
     exit 2
 fi
 

@@ -52,7 +52,9 @@ src
 # build/ and .prof/ hold the gates and probes; docs/ the design notes;
 # gates.mk the verification targets; CLAUDE.md the working rules;
 # music/ the MIDI, which ships from a repository of its own - see the
-# release rules in CLAUDE.md.
+# release rules in CLAUDE.md. tmp-wsl/ is the scratch directory the
+# agent temp-file hook redirects writes to instead of %TEMP%, so it is
+# recreated by design; .gitignore carries the same reason.
 LOCAL="
 .claude
 .git
@@ -61,6 +63,7 @@ CLAUDE.md
 docs
 gates.mk
 music
+tmp-wsl
 "
 
 # Build products the Makefile writes here by design, and the runtime ini
@@ -73,11 +76,14 @@ llama98-dos.exe
 llama98.dll
 kunkun98-gui
 kunkun98-gui.exe
+kunkun98-noman
+kunkun98-noman.exe
 kunkun98-w.exe
 kunkun98-serve
 kunkun98-serve.exe
 kunkun98.ini
 kunkun98-gui.ini
+kunkun98-noman.ini
 kunkun98-w.ini
 "
 

@@ -546,6 +546,7 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
                it. */
             float *sum_c = s->csa2_c_j;
             float *sum_c_idx = s->csa2_c_j_idx;
+            float *lat, *idxl;
             float maxv, denom;
             /* pend_z is READ here, never consumed: a block
                can be finalized more than once - a speculative round
@@ -581,8 +582,8 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
                ORDER of the operations is unchanged - rmsnorm, indexer,
                RoPE - and at f32 the bytes that land in the ring are the
                ones the in-place version produced. */
-            float *lat = s->csa2_row;
-            float *idxl = s->csa2_row + c->head_dim;
+            lat = s->csa2_row;
+            idxl = s->csa2_row + c->head_dim;
             lz_rmsnorm(lat, sum_c,
                       lz_t_f32(&L->k_norm, s->wscr), hd, rms_eps);
 

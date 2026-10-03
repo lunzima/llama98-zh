@@ -69,8 +69,6 @@ if [ -n "$STALE" ]; then
 fi
 
 FLOOR=432          # ratchet: raise when checks are added, never lower
-                   # 421 -> 432 when the sound window's read-back joined
-                   # st_music_dialog (2026-09-14)
 SKIP_CEIL=1        # the statusbar strip comparison needs a second run
 
 REPORT=build/gui_selftest.txt
@@ -119,12 +117,9 @@ if [ "$SKIPS" -gt "$SKIP_CEIL" ]; then
 fi
 
 # Every check name the selftest is expected to report, not just the count.
-# The list began as the two checks that were red here (a duplicated
-# mnemonic and a gap in the Tab chain) and is now every name a
-# training-tree test used to assert - 205 of them. It lives in
-# gui_selftest_expected_checks.txt and is read by BOTH gates that run a
-# selftest, because they run the same gui/main.c and one copy is what
-# stays true. Removing a name is a decision, not a fix.
+# The names live in gui_selftest_expected_checks.txt, read by BOTH gates
+# that run a selftest, because they run the same gui/main.c and one copy
+# is what stays true. Removing a name is a decision, not a fix.
 if ! bash build/gui_selftest_named_checks.sh "$REPORT"; then
     echo "gui_selftest_gate: names above are missing from the report."
     BAD=1

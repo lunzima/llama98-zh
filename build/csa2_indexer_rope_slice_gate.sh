@@ -66,9 +66,9 @@ done
 # Sanity: the call and the line each mutation targets must exist exactly
 # once in the current source, or this gate no longer matches the code it
 # names.
-NEEDLE_CALL='indexer_rope_adjacent(ring_idx + (size_t)blk * idx_hd'
+NEEDLE_CALL='indexer_rope_adjacent(idxl, idx_hd,'
 NEEDLE_BASE='    int half = rotary_dim / 2, base = width - rotary_dim, i;'
-NEEDLE_KV='lz_rope(ring + (size_t)blk * hd, 1, hd, rotary_dim, pos, s->rope_cs);'
+NEEDLE_KV='lz_rope(lat, 1, hd, rotary_dim, pos, s->rope_cs);'
 for pair in "call:$NEEDLE_CALL" "base:$NEEDLE_BASE" "kv:$NEEDLE_KV"; do
     label=${pair%%:*}
     needle=${pair#*:}
@@ -96,7 +96,7 @@ OLD = {
 ''',
  'slice': '''    int half = rotary_dim / 2, base = width - rotary_dim, i;
 ''',
- 'kv': '''            lz_rope(ring + (size_t)blk * hd, 1, hd, rotary_dim, pos, s->rope_cs);
+ 'kv': '''            lz_rope(lat, 1, hd, rotary_dim, pos, s->rope_cs);
 ''',
 }
 NEW = {
@@ -107,8 +107,7 @@ NEW = {
 ''',
  'slice': '''    int half = rotary_dim / 2, base = 0, i;
 ''',
- 'kv': '''            indexer_rope_adjacent(ring + (size_t)blk * hd, hd, rotary_dim,
-                                  pos, s->rope_cs);
+ 'kv': '''            indexer_rope_adjacent(lat, hd, rotary_dim, pos, s->rope_cs);
 ''',
 }
 with open(path, 'r', encoding='utf-8') as f:

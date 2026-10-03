@@ -120,16 +120,17 @@ STORE_EXEMPT = {
         "Same as :185: build_qw's slot holds the address as a pre-filter "
         "and asks w_row_same for the answer. The two pools are keyed on the "
         "same quantity by the same function, deliberately."),
-    ("ops_gdn.c", 1373): (
+    ("ops_gdn.c", 1385): (
         "KNOWN DEFECT, and this exemption records it rather than clearing "
         "it. gdn_shadow's lookup is `if (g_shk[i] == sq) return g_shv[i];` "
         "- a pointer-keyed cache of ring pointers whose addresses are "
         "reused, which is exactly the shape this rule rejects. It is latent "
         "rather than live: the whole block sits under #if LZ_GDN_STATE_F32, "
-        "whose default is 0, and reaching it also needs --spec K. The site "
-        "is annotated at its own comment (ops_gdn.c's gdn_shadow header) as "
-        "flagged rather than fixed. Remove this exemption when it is fixed."),
-    ("ops_kernel.c", 1403): (
+        "whose default is 0, and reaching it also needs --spec K. The NOTE "
+        "above its one caller, `gdn_shadow(sq_in, kd * vd)` in the pass-2 "
+        "path, records it as flagged rather than fixed. Remove this "
+        "exemption when it is fixed."),
+    ("ops_kernel.c", 1404): (
         "The stored `where` is a caller-supplied diagnostic string. Its "
         "pointee is a string literal, whose lifetime is the program's, so "
         "the unbounded store is the correct lifetime for it - there is no "

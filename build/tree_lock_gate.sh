@@ -363,7 +363,7 @@ fi
 # shares nothing and must not be serialized away.
 SHARED_RE='build/native|build/gui|build/watcom|\./\*\.gcov'
 # <file>: <reason>
-# The fifteen that acquire are not listed here - this table is for the
+# The ones that acquire are not listed here - this table is for the
 # ones that must NOT, each with the reason it is safe without. A name
 # here that starts acquiring is harmless (the census counts it as wired),
 # but a name that STOPS and is still listed would go unnoticed, which is
