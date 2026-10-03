@@ -1077,20 +1077,27 @@ int lz_norm_can_fixed(int n);
    the (1+w) table cached; `--fixed off` remains the oracle. */
 int lz_norm_int(void);
 
-/* SubLN activation scale granularity: "tok" | "group" (default tok).
-   Selected as `--subn-scale`. Applies ONLY where use_subn is on, to the
-   o_proj / down_proj input - the two projections H-BitLinear covers.
+/* SubLN activation scale granularity: "auto" | "tok" | "group" (default
+   auto). Selected as `--subn-scale`. Applies ONLY where use_subn is on,
+   to every activation quantization on the KDA/FFN SubLN path: the
+   q/k/v/g norm outputs, the raw block input the f_a/b projections share,
+   and the o_proj / down_proj inputs.
 
    tok:   one absmax over the whole row, replicated into every n/32 slot
-          (BitNet v2's per-token scheme).
+          (BitNet v2's per-token scheme, what BitLinear trains with).
    group: the engine's own per-32 grouping (lz_act_gs), kept across the
           Hadamard.
+   auto:  tok for a model whose projections were trained through
+          BitLinear (num_experts == 0), group for every other model.
 
    A value-changing knob, like the conv/attn/epi tiers: the two produce
-   different int8 and different scales. `tok` is bit-identical to the
-   engine before this knob existed. See ops_sched.c for why the Hadamard
-   does not force a row-wide scale. */
-int lz_subn_scale_group(void);
+   different int8 and different scales. See ops_sched.c for the
+   measurement behind auto and why the Hadamard does not force a
+   row-wide scale.
+
+   lz_subn_scale_group(bitlinear) answers for one model: pass whether
+   its SubLN projections are BitLinear-trained. */
+int lz_subn_scale_group(int bitlinear);
 const char *lz_subn_scale_select(const char *name);
 
 /* SubLN block Hadamard: "on" | "off" (default on), `--hadamard`.

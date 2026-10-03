@@ -3,9 +3,16 @@
 # inputs, and --subn-scale is wired, defaulted and scoped.
 #
 # WHAT EACH ASSERTION BUYS
-#   default-is-tok    `--subn-scale tok` must be byte-identical to passing
-#                     nothing. Nothing else in the tree names the default,
-#                     so without this a flip would ship silently.
+#   default-is-tok    On a BitLinear-trained model (num_experts == 0, the
+#                     ternary tower) `--subn-scale tok` must be byte-
+#                     identical to passing nothing: auto keeps the
+#                     quantizer that model was trained with.
+#   moe-default-is-group  On an MoE model with use_subn, passing nothing
+#                     must be byte-identical to `--subn-scale group` and
+#                     differ from tok: auto picked the per-32 scale there.
+#                     The two default assertions are the only place the
+#                     default is named, so without them a flip of either
+#                     side would ship silently.
 #   knob-is-alive     `--subn-scale group` must DIFFER from tok. A flag
 #                     whose two settings agree is not conservative, it is
 #                     unwired - the failure this repo keeps hitting
@@ -102,6 +109,17 @@ SUBN_MODEL="${SUBN_MODEL:-$MODELS_ROOT/_subn_gate_q8}"
 SUBN_F32_MODEL="${SUBN_F32_MODEL:-$MODELS_ROOT/kunkun-ce.bak-pre-arch-switches-20260917}"
 # Any model WITHOUT use_subn. kmr20 is the one every other gate here uses.
 PLAIN_MODEL="${PLAIN_MODEL:-$MODELS_ROOT/kmr20}"
+# A QUANTIZED MoE model with use_subn - kunkun98 at its shipping recipe.
+# A build artifact like SUBN_MODEL, produced in the training tree:
+#   python -m tools.export_q8 <models>/kunkun98 \
+#           <models>/_subn_gate_moe_q8/model.bin \
+#           --recipe "$(python -m tools.quant_recipe --kunmoe)"
+#   cp <models>/kunkun98/{config,tokenizer,tokenizer_config}.json \
+#           <models>/_subn_gate_moe_q8/
+MOE_SUBN_MODEL="${MOE_SUBN_MODEL:-$MODELS_ROOT/_subn_gate_moe_q8}"
+# Its own token file, in its 32,768 vocabulary (same --dump-prompt-tokens
+# recipe as TOKENS below).
+MOE_TOKENS="${MOE_SUBN_TOKENS:-$ROOT/build/subn_gate_tokens_moe.txt}"
 # The token ids MUST be inside the subn model's vocab, which is 6144
 # here and 32768 on kmr20 - so this file is the subn model's, not the
 # other gates'. Produced with:
@@ -123,7 +141,7 @@ mkdir -p "$W" || exit 1
 FAIL=0
 bad() { echo "subn-gate: FAIL $*"; FAIL=1; }
 
-run() {  # run MODEL OUT [extra args...]
+run() {  # run MODEL OUT [extra args...]  (TOKS overrides the token file)
     m=$1; out=$2; shift 2
     # --dump-all-logits, not --dump-logits: three of the assertions below
     # are "these two arms must DIFFER", and the last position alone is one
@@ -137,7 +155,7 @@ run() {  # run MODEL OUT [extra args...]
     # UNVERIFIED AT HEAD, and it cannot be otherwise: this gate SKIPs at
     # HEAD because no use_subn export loads (see the SKIP text below), so
     # leaving the weaker flag in place would have been equally unverified.
-    "$ENG" "$m" --tokens-file "$TOKENS" --dump-all-logits "$out" "$@" >"$out.log" 2>&1
+    "$ENG" "$m" --tokens-file "${TOKS:-$TOKENS}" --dump-all-logits "$out" "$@" >"$out.log" 2>&1
 }
 
 echo "-- subn model (quantized): $SUBN_MODEL --"
@@ -242,6 +260,30 @@ if [ -n "$PLAIN_MODEL" ] && [ -e "$PLAIN_MODEL" ]; then
     # leaves the claim.
 else
     echo "  SKIP  correctly-scoped    (set PLAIN_MODEL to check the scope)"
+fi
+
+if [ -e "$MOE_SUBN_MODEL" ] && [ -f "$MOE_TOKENS" ]; then
+    echo "-- moe subn model (quantized): $MOE_SUBN_MODEL --"
+    TOKS=$MOE_TOKENS
+    run "$MOE_SUBN_MODEL" "$W/m_def.bin";                    m1=$?
+    run "$MOE_SUBN_MODEL" "$W/m_tok.bin" --subn-scale tok;   m2=$?
+    run "$MOE_SUBN_MODEL" "$W/m_grp.bin" --subn-scale group; m3=$?
+    TOKS=
+    if [ "$m1" -ne 0 ] || [ "$m2" -ne 0 ] || [ "$m3" -ne 0 ]; then
+        bad "moe-default-is-group: an arm did not run (rc=$m1/$m2/$m3)"
+    elif ! cmp -s "$W/m_def.bin" "$W/m_grp.bin"; then
+        bad "moe-default-is-group: the default differs from" \
+            "--subn-scale group on an MoE model - auto did not pick group"
+    elif cmp -s "$W/m_def.bin" "$W/m_tok.bin"; then
+        bad "moe-default-is-group: tok and group agree on the MoE model," \
+            "so the default assertion above checked nothing"
+    else
+        n=$(cmp -l "$W/m_def.bin" "$W/m_tok.bin" | wc -l)
+        echo "  PASS  moe-default-is-group ($n/$(wc -c < "$W/m_def.bin") bytes differ from tok)"
+    fi
+else
+    echo "  SKIP  moe-default-is-group (set MOE_SUBN_MODEL / MOE_SUBN_TOKENS -"
+    echo "        the recipe is at the top)"
 fi
 
 rm -rf "$W"

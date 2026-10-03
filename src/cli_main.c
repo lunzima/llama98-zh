@@ -521,10 +521,13 @@ static void usage(void) {
     "  --fastfp MODE    on|off (default on). RTZ+FTZ rounding, the default\n"
     "                   float semantics; x86 and ARM are byte-identical\n"
     "                   under it. off = round-to-nearest (diagnostic).\n"
-    "  --subn-scale MODE   tok|group (default tok). Width of one INT8\n"
-    "                   activation scale on the SubLN o_proj/down_proj input.\n"
+    "  --subn-scale MODE   auto|tok|group (default auto). Width of one INT8\n"
+    "                   activation scale on the KDA/FFN SubLN path (q/k/v/g\n"
+    "                   norms, f_a/b, o_proj and down_proj inputs).\n"
     "                   tok is BitNet v2's per-token absmax; group keeps the\n"
-    "                   engine's own per-32 grouping across the Hadamard.\n"
+    "                   engine's own per-32 grouping across the Hadamard;\n"
+    "                   auto is tok for a BitLinear-trained (ternary, no\n"
+    "                   experts) model and group for every other one.\n"
     "                   Value-changing, and inert unless the model sets\n"
     "                   use_subn. NOT a fixed-point tier: --fixed skips it.\n"
     "  --hadamard MODE     on|off (default on). The SubLN block Hadamard's\n"
@@ -1770,7 +1773,7 @@ int main(int argc, char **argv) {
                off` must leave it alone. */
             const char *got = lz_subn_scale_select(argv[++i]);
             if (!got) {
-                printf("--subn-scale: unknown mode (tok|group)\n");
+                printf("--subn-scale: unknown mode (auto|tok|group)\n");
                 return 2;
             }
         }

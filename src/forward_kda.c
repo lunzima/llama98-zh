@@ -100,9 +100,11 @@ static void subn_fwht_quant(const float *x, int n, int blk, int gw,
    what subn_fwht_quant / lz_quantize_q8_tok already do; gs is the
    site's lz_act_gs, which is 0 when the width is not a multiple of 32.
    Returning 0 for a gs this path cannot honour keeps the fallback in
-   ONE place instead of at each of the four call sites. */
-static int subn_scale_gs(int gs, int n) {
-    if (!lz_subn_scale_group()) return 0;
+   ONE place instead of at each call site. num_experts == 0 is the
+   ternary tower, whose SubLN projections are BitLinear-trained - what
+   --subn-scale auto keys on. */
+static int subn_scale_gs(const LZModelConfig *c, int gs, int n) {
+    if (!lz_subn_scale_group(c->num_experts == 0)) return 0;
     if (gs <= 0 || (gs & 31) != 0 || n < gs || (n % gs) != 0) return 0;
     return gs;
 }
@@ -194,29 +196,43 @@ static void kda_conv_proj(LZRunState *s, int *use_int, float *of, short *oi,
    never reads the float buffer - that is the invariant to check first
    if a caller here ever starts using s->xb2 for something else.
 
-   `use_int` is the caller's, evaluated once for all four: it depends on
-   hdim and gsa, not on which weight is being applied. */
+   `use_int` and `qgw` are the caller's, evaluated once for all four:
+   they depend on hdim and gsa, not on which weight is being applied.
+   qgw is the scale width subn_scale_gs resolved (--subn-scale), 0 for a
+   row-wide scale. */
 static void subn_norm_q8(LZRunState *s, const LZTensor *nrm,
-                         int hdim, int nt, int nsa, float eps, int use_int) {
+                         int hdim, int nt, int nsa, float eps, int use_int,
+                         int qgw) {
     int tk;
     if (use_int) {
         for (tk = 0; tk < nt; tk++) {
             float deq;
             lz_rmsnorm_int(s->subn_norm_int, s->xb + (size_t)tk * hdim,
                            lz_t_f32(nrm, s->wscr), hdim, eps, &deq);
-            lz_quantize_q8_tok_int(s->subn_norm_int, hdim, deq,
+            if (qgw > 0)
+                lz_quantize_q8_int(s->subn_norm_int, hdim, qgw, deq,
                                    s->xq + (size_t)tk * hdim,
                                    s->xqs + (size_t)tk * nsa);
+            else
+                lz_quantize_q8_tok_int(s->subn_norm_int, hdim, deq,
+                                       s->xq + (size_t)tk * hdim,
+                                       s->xqs + (size_t)tk * nsa);
         }
         return;
     }
     for (tk = 0; tk < nt; tk++)
         lz_rmsnorm(s->xb2 + (size_t)tk * hdim, s->xb + (size_t)tk * hdim,
                    lz_t_f32(nrm, s->wscr), hdim, eps);
-    for (tk = 0; tk < nt; tk++)
-        lz_quantize_q8_tok(s->xb2 + (size_t)tk * hdim, hdim,
+    for (tk = 0; tk < nt; tk++) {
+        if (qgw > 0)
+            lz_quantize_q8(s->xb2 + (size_t)tk * hdim, hdim, qgw,
                            s->xq + (size_t)tk * hdim,
                            s->xqs + (size_t)tk * nsa);
+        else
+            lz_quantize_q8_tok(s->xb2 + (size_t)tk * hdim, hdim,
+                               s->xq + (size_t)tk * hdim,
+                               s->xqs + (size_t)tk * nsa);
+    }
 }
 
 /* The same shape for the projections whose consumer is not the conv
@@ -537,29 +553,40 @@ void forward_kda(const LZModel *m, LZRunState *s,
            gsa, and all four share both. */
         int nint = lz_norm_int() && lz_norm_can_fixed(hdim) &&
                    gsa > 0 && nsa * gsa == hdim;
+        int qgw = subn_scale_gs(c, gsa, hdim);
 
-        subn_norm_q8(s, &L->kda_q_norm, hdim, nt, nsa, rms_eps, nint);
+        subn_norm_q8(s, &L->kda_q_norm, hdim, nt, nsa, rms_eps, nint, qgw);
         kda_conv_proj(s, &conv_int, s->kda_q, s->kda_q_i16, s->xb2,
                       &L->kda_q_proj, hdim, kdim, nt);
 
-        subn_norm_q8(s, &L->kda_k_norm, hdim, nt, nsa, rms_eps, nint);
+        subn_norm_q8(s, &L->kda_k_norm, hdim, nt, nsa, rms_eps, nint, qgw);
         kda_conv_proj(s, &conv_int, s->kda_k, s->kda_k_i16, s->xb2,
                       &L->kda_k_proj, hdim, kdim, nt);
 
-        subn_norm_q8(s, &L->kda_v_norm, hdim, nt, nsa, rms_eps, nint);
+        subn_norm_q8(s, &L->kda_v_norm, hdim, nt, nsa, rms_eps, nint, qgw);
         kda_conv_proj(s, &conv_int, s->kda_v, s->kda_v_i16, s->xb2,
                       &L->kda_v_proj, hdim, vdim, nt);
 
-        subn_norm_q8(s, &L->kda_g_norm, hdim, nt, nsa, rms_eps, nint);
+        subn_norm_q8(s, &L->kda_g_norm, hdim, nt, nsa, rms_eps, nint, qgw);
         lz_matmul_xq_nt(s->zbuf, s->xb2, s->xq, s->xqs, &L->kda_g_proj,
                         hdim, vdim, nt);
 
-        /* f_a/b_proj: no SubLN norm field - quantize raw s->xb (the
-           shared-activation-quantization trick still applies to these
-           two). */
-        for (tk = 0; tk < nt; tk++)
-            lz_quantize_q8_tok(s->xb + (size_t)tk * hdim, hdim,
-                               s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
+        /* f_a/b_proj: no SubLN norm field - quantize raw s->xb once for
+           both (the shared-activation-quantization trick), at the same
+           scale width as every other SubLN-path input (--subn-scale): a
+           row-wide scale on an MoE model, whose block input carries
+           outliers, is what put kfa at 1-cos 6.4e-3 on kunkun98 against
+           ~1e-3 for a per-32 scale. */
+        for (tk = 0; tk < nt; tk++) {
+            if (qgw > 0)
+                lz_quantize_q8(s->xb + (size_t)tk * hdim, hdim, qgw,
+                               s->xq + (size_t)tk * hdim,
+                               s->xqs + (size_t)tk * nsa);
+            else
+                lz_quantize_q8_tok(s->xb + (size_t)tk * hdim, hdim,
+                                   s->xq + (size_t)tk * hdim,
+                                   s->xqs + (size_t)tk * nsa);
+        }
         proj_i16(s, lat_may, &lat_int, s->kda_gate_lat, s->kda_lat_i16,
                      s->xb, &L->kda_f_a_proj, hdim, gate_rank, nt,
                      LZ_KLAT_ES, 32767);
@@ -919,7 +946,7 @@ void forward_kda(const LZModel *m, LZRunState *s,
                (model.c resolve_hadamard). 0 = no Hadamard. */
             {
                 int oblk = lz_hadamard_on() ? c->hadamard_o : 0;
-                int qgw = subn_scale_gs(gso, vdim);
+                int qgw = subn_scale_gs(c, gso, vdim);
                 if (oblk > 1) {
                     for (tk = 0; tk < nt; tk++)
                         subn_fwht_quant(s->ssm_out + (size_t)tk * vdim, vdim,
@@ -1160,7 +1187,7 @@ void dense_ffn_step(const LZModel *m, LZRunState *s,
                                            s->xqs + (size_t)tk * nsd);
                 }
             } else {
-                int qgw = subn_scale_gs(gsd, idim);
+                int qgw = subn_scale_gs(c, gsd, idim);
                 for (tk = 0; tk < nt; tk++)
                     lz_rmsnorm(s->hb2 + (size_t)tk * idim, s->hb + (size_t)tk * idim,
                                lz_t_f32(&L->down_norm, s->wscr), idim, rms_eps);

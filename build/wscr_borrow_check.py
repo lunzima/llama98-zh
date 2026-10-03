@@ -139,12 +139,12 @@ STORE_EXEMPT = {
 # (file, variable) -> (line, why)
 EXEMPT = {
     ("forward_kda.c", "kda_o_norm_w"): (
-        898,
-        "The two borrows are NOT in mutually exclusive arms: :898 and :916 "
+        925,
+        "The two borrows are NOT in mutually exclusive arms: :925 and :943 "
         "are both inside the same `if (c->use_subn)` block and run in "
-        "order. What makes :916 safe is where this variable's USE range "
-        "ends on that path - its last use there is :911, and the uses at "
-        ":955/:968/:980 that stretch the range to the end of the function "
+        "order. What makes :943 safe is where this variable's USE range "
+        "ends on that path - its last use there is :938, and the uses at "
+        ":982/:995/:1007 that stretch the range to the end of the function "
         "sit in the `else if` ladder `use_subn` excludes. The checker "
         "cannot narrow a live range by an arm test, which is the whole of "
         "what this exemption is granted for."),
