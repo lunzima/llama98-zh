@@ -606,6 +606,9 @@ void lz_state_free(LZRunState *s) {
 #if LZ_GDN_STATE_2PLANE
     xfree(s->ssm_state_q8_lo);
 #endif /* LZ_GDN_STATE_2PLANE */
+#if LZ_GDN_STATE_F32
+    xfree(s->ssm_state_f32);
+#endif /* LZ_GDN_STATE_F32 */
     xfree(s->conv_state); xfree(s->conv_w32);
     xfree(s->csa2_pending_c); xfree(s->csa2_pending_z);
     xfree(s->csa2_comp_ring); xfree(s->csa2_idx_comp_ring);
@@ -691,6 +694,11 @@ void lz_state_reset(LZRunState *s, const LZModel *m) {
     memset(s->ssm_state_q8_lo, 0, (size_t)s->ssm_ring_depth * c->n_linear_layers *
            c->lin_n_v_heads * c->lin_k_head_dim * c->lin_v_head_dim);
 #endif /* LZ_GDN_STATE_2PLANE */
+#if LZ_GDN_STATE_F32
+    memset(s->ssm_state_f32, 0, (size_t)s->ssm_ring_depth * c->n_linear_layers *
+           c->lin_n_v_heads * c->lin_k_head_dim * c->lin_v_head_dim *
+           sizeof(float));
+#endif /* LZ_GDN_STATE_F32 */
     memset(s->ssm_state_s, 0, (size_t)s->ssm_ring_depth * c->n_linear_layers *
            c->lin_n_v_heads * c->lin_k_head_dim * c->lin_v_head_dim / 32 *
            sizeof(float));
@@ -1528,6 +1536,10 @@ static void lz_ced_replay_reset(const LZModel *m, LZRunState *s) {
         memset(s->ssm_state_q8_lo + (size_t)slot * q8_slot_stride + li_off_q8,
                0, (size_t)nv * kd * vd);
 #endif /* LZ_GDN_STATE_2PLANE */
+#if LZ_GDN_STATE_F32
+        memset(s->ssm_state_f32 + (size_t)slot * q8_slot_stride + li_off_q8,
+               0, (size_t)nv * kd * vd * sizeof(float));
+#endif /* LZ_GDN_STATE_F32 */
         memset(s->ssm_state_s + (size_t)slot * s_slot_stride + li_off_s,
                0, (size_t)nv * kd * vd / 32 * sizeof(float));
 #if LZ_CONV_FIXED

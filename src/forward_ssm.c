@@ -148,6 +148,10 @@ void forward_ssm(const LZModel *m, LZRunState *s,
             const int8_t *sq2_in  = s->ssm_state_q8_lo + (size_t)slot_in  * q8_slot_stride + h_off_q8;
             int8_t       *sq2_out = s->ssm_state_q8_lo + (size_t)slot_out * q8_slot_stride + h_off_q8;
 #endif /* LZ_GDN_STATE_2PLANE */
+#if LZ_GDN_STATE_F32
+            const float *sf_in  = s->ssm_state_f32 + (size_t)slot_in  * q8_slot_stride + h_off_q8;
+            float       *sf_out = s->ssm_state_f32 + (size_t)slot_out * q8_slot_stride + h_off_q8;
+#endif /* LZ_GDN_STATE_F32 */
             const float *ss_in  = s->ssm_state_s + (size_t)slot_in  * s_slot_stride + h_off_s;
             float       *ss_out = s->ssm_state_s + (size_t)slot_out * s_slot_stride + h_off_s;
             const float *qp = s->qkv_c + (size_t)tk * cdim;
@@ -181,6 +185,9 @@ void forward_ssm(const LZModel *m, LZRunState *s,
 #if LZ_GDN_STATE_2PLANE
                         sq2_in, sq2_out,
 #endif /* LZ_GDN_STATE_2PLANE */
+#if LZ_GDN_STATE_F32
+                        sf_in, sf_out,
+#endif /* LZ_GDN_STATE_F32 */
                         ss_in, ss_out, s->qn, s->kn, v_t,
                         (const short *)0, 0.0f, NULL, gt, beta, kd, vd);
             LZ_PROF_END(_tr, LZ_PROF_REC);

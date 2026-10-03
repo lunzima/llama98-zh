@@ -87,10 +87,12 @@ done
 # Every gcc line of `make -Bn llama98`, with build/native/ redirected into
 # $WORK and the extra define appended. Taking the recipe from make rather
 # than restating the source list means a new TU cannot silently drop out of
-# what this gate compiles.
+# what this gate compiles. The optional third argument is a copy of the
+# tree to build instead (row 13's mutant); the recipe is taken and run
+# inside it, so its relative source paths name the copy.
 build_one() {
-    local name="$1" extra="$2" line rc
-    "$MAKE" -Bn llama98 2>/dev/null | grep '^gcc ' > "$WORK/$name.cmds"
+    local name="$1" extra="$2" tree="${3:-$ROOT}" line rc
+    (cd "$tree" && "$MAKE" -Bn llama98 2>/dev/null) | grep '^gcc ' > "$WORK/$name.cmds"
     if [ ! -s "$WORK/$name.cmds" ]; then
         echo "recur_write_float_arm_gate: ERROR - 'make -Bn llama98' produced no gcc lines"
         return 2
@@ -98,7 +100,7 @@ build_one() {
     while IFS= read -r line; do
         line=${line//build\/native\//$WORK/}
         line=${line/ -o llama98 / -o $WORK/$name.exe }
-        eval "$line $extra" >>"$WORK/$name.build.log" 2>&1
+        (cd "$tree" && eval "$line $extra") >>"$WORK/$name.build.log" 2>&1
         rc=$?
         if [ "$rc" -ne 0 ]; then
             echo "recur_write_float_arm_gate: ERROR - build '$name' failed"
@@ -284,6 +286,74 @@ print('%.6f'%(sum(x-y for x,y in zip(a,b))/len(a)))
             FAIL=1
         fi
     done
+fi
+
+echo "-- row 13: the scaffold follows the spec ring --"
+# The exact state is a plane shaped like the int8 one (ops_gdn.c's
+# scaffold comment), and this row is what holds it there. A --spec
+# verify batch reads ring slot i and writes slot i+1, and a rejection
+# rewinds by moving s->ssm_slot; greedy decoding with --spec therefore
+# emits the tokens --spec 0 does, and the scaffold must keep that. kmr20
+# has no MTP head and cannot run --spec, so this row takes a model that
+# has one.
+#
+# The rollback count is the zero control: a run whose drafts were all
+# accepted never rewinds, and its agreement says nothing about the ring.
+# The mutant writes each step's state back into the slot it read, so a
+# verify batch reads slots no step has written - the defect a float
+# state keyed by its read address has.
+SPEC_MODEL=${LZ_SPEC_GATE_MODEL:-$MODELS_ROOT/Qwen3.5-0.8B}
+SPEC_PROMPT="The history of artificial intelligence began in the 1950s, when"
+gen_text() {   # <binary-tag> <out-tag> <spec-k>
+    "$WORK/$1.exe" "$SPEC_MODEL" --prompt "$SPEC_PROMPT" -n 40 --temp 0 \
+        --spec "$3" >"$WORK/$2.log" 2>&1 || {
+        echo "FAIL: row 13 run $2 failed:"; tail -n 8 "$WORK/$2.log"; FAIL=1; return 1; }
+    sed -n '/^---- generation start ----$/,/^---- generation end ----$/p' \
+        "$WORK/$2.log" >"$WORK/$2.gen"
+    if [ "$(wc -l < "$WORK/$2.gen")" -lt 3 ]; then
+        echo "FAIL: row 13 run $2 printed no generation"; FAIL=1; return 1
+    fi
+    return 0
+}
+if [ ! -d "$SPEC_MODEL" ]; then
+    echo "SKIP: row 13 - no MTP model at $SPEC_MODEL (set LZ_SPEC_GATE_MODEL)"
+elif gen_text sf32 sp0 0 && gen_text sf32 sp2 2; then
+    rb=$(sed -n 's/.*n_ring_rollback=\([0-9]*\).*/\1/p' "$WORK/sp2.log")
+    if [ -z "$rb" ] || [ "$rb" -eq 0 ]; then
+        echo "FAIL: row 13 - the --spec 2 run reports ${rb:-no} ring" \
+             "rollbacks, so it never rewound and proves nothing"
+        FAIL=1
+    elif cmp -s "$WORK/sp0.gen" "$WORK/sp2.gen"; then
+        echo "PASS: exact state, --spec 2 vs --spec 0 - same text over" \
+             "$rb ring rollbacks"
+    else
+        echo "FAIL: exact state, --spec 2 vs --spec 0 - the text differs;" \
+             "the float state is not following the ring"
+        FAIL=1
+    fi
+    MT="$WORK/mut_tree"
+    mkdir -p "$MT"
+    cp -r "$ROOT/src" "$ROOT/common" "$ROOT/Makefile" "$MT/"
+    for f in forward_ssm.c forward_kda.c; do
+        sed -i 's/\(\*sf_out = s->ssm_state_f32 + (size_t)\)slot_out/\1slot_in /' \
+            "$MT/src/$f"
+    done
+    if ! grep -q 'sf_out = s->ssm_state_f32 + (size_t)slot_in ' "$MT/src/forward_ssm.c"; then
+        echo "FAIL: row 13 - the mutation site is gone; this row is unproven"
+        FAIL=1
+    elif build_one sf32mut "-DLZ_GDN_STATE_F32=1" "$MT" \
+            && gen_text sf32mut spm2 2; then
+        if cmp -s "$WORK/sp0.gen" "$WORK/spm2.gen"; then
+            echo "FAIL: row 13 mutant (state written back into its read" \
+                 "slot) still matches --spec 0 - this row cannot see the defect"
+            FAIL=1
+        else
+            echo "PASS: row 13 mutant (state written back into its read slot)" \
+                 "- the text differs, as it must"
+        fi
+    else
+        FAIL=1
+    fi
 fi
 
 if [ "$FAIL" -ne 0 ]; then

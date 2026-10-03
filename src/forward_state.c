@@ -680,6 +680,12 @@ static void alloc_recurrent_state(LZRunState *s, const LZModel *m,
         (size_t)s->ssm_ring_depth * c->n_linear_layers * c->lin_n_v_heads *
         c->lin_k_head_dim * c->lin_v_head_dim, 1, &ok, &s->bytes_alloc);
 #endif /* LZ_GDN_STATE_2PLANE */
+#if LZ_GDN_STATE_F32
+    s->ssm_state_f32 = (float *)xcalloc(
+        (size_t)s->ssm_ring_depth * c->n_linear_layers * c->lin_n_v_heads *
+        c->lin_k_head_dim * c->lin_v_head_dim, sizeof(float), &ok,
+        &s->bytes_alloc);
+#endif /* LZ_GDN_STATE_F32 */
     s->ssm_state_s = (float *)xcalloc(
         (size_t)s->ssm_ring_depth * c->n_linear_layers * c->lin_n_v_heads *
         c->lin_k_head_dim * c->lin_v_head_dim / 32,

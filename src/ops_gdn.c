@@ -1138,14 +1138,18 @@ static void gdn_pass1_fixed(const int8_t *sq,
    pass 1's coefficients are quantized at all" is measurable rather than
    argued from amax/127.
 
-   Keyed by the int8 state pointer the caller passes, which is 1:1 with
-   (layer, head), so no signature change and no forward.c change - the
-   scaffolding cannot perturb the shipping path by construction. The
-   linear scan is O(layers*heads) per call and irrelevant at these
-   sizes. */
-#ifndef LZ_GDN_STATE_F32
-#define LZ_GDN_STATE_F32 0
-#endif /* LZ_GDN_STATE_F32 */
+   The float state is a PLANE, s->ssm_state_f32, laid out exactly like
+   ssm_state_q8 (one float per int8 element, same ring slots), and the
+   callers hand lz_recur_step its slot_in/slot_out rows the way they hand
+   it sq_in/sq_out. That is what makes it follow the int8 state through
+   everything the int8 state goes through: a spec verify batch reads
+   slot i and writes slot i+1 and a rejection rewinds by moving
+   s->ssm_slot; a reset, a CED replay and a prefix-cache restore zero or
+   copy the slots. A float state keyed by anything other than the slot
+   address misses some of those - keyed by the int8 pointer, a verify
+   batch read a fresh zero state at every ring step. Everything is under
+   `#if LZ_GDN_STATE_F32` (default 0, ops.h), so the shipping path cannot
+   see it. */
 
 #if LZ_GDN_STATE_2PLANE
 #if LZ_GDN_FIXED >= 2
@@ -1370,22 +1374,6 @@ int lz_q8round32_avx2_compiled_in_gdn(void) {
     return 0;
 #endif /* LZ_HAVE_Q8R_AVX2 */
 }
-
-#if LZ_GDN_STATE_F32
-#define LZ_GDN_SHADOW_MAX 1024
-static const int8_t *g_shk[LZ_GDN_SHADOW_MAX];
-static float *g_shv[LZ_GDN_SHADOW_MAX];
-static int g_shn;
-static float *gdn_shadow(const int8_t *sq, int n) {
-    int i;
-    for (i = 0; i < g_shn; i++) if (g_shk[i] == sq) return g_shv[i];
-    if (g_shn >= LZ_GDN_SHADOW_MAX) return NULL;
-    g_shv[g_shn] = (float *)calloc((size_t)n, sizeof(float));
-    if (!g_shv[g_shn]) return NULL;
-    g_shk[g_shn] = sq;
-    return g_shv[g_shn++];
-}
-#endif /* LZ_GDN_STATE_F32 */
 
 /* ---- SSM recurrence pass 2, fixed point --------------------------------
 
@@ -2501,6 +2489,9 @@ void lz_recur_step(float *out, const int8_t *sq_in, int8_t *sq_out,
 #if LZ_GDN_STATE_2PLANE
                  const int8_t *sq2_in, int8_t *sq2_out,
 #endif /* LZ_GDN_STATE_2PLANE */
+#if LZ_GDN_STATE_F32
+                 const float *sf_in, float *sf_out,
+#endif /* LZ_GDN_STATE_F32 */
                  const float *ss_in, float *ss_out,
                  const float *q, const float *k, const float *v,
                  const short *vi, float vscale,
@@ -2517,63 +2508,52 @@ void lz_recur_step(float *out, const int8_t *sq_in, int8_t *sq_out,
     ng = vd / 32;
 
 #if LZ_GDN_STATE_F32
-    /* NOTE: this shadow is keyed by the READ pointer's own address,
-       1:1 with (layer, head) ONLY when every call for a given head
-       always passes the SAME sq_in - true for ordinary decode (in==out,
-       unchanged) but NOT during a speculative verify batch, where sq_in
-       advances through the ring slot by slot. Enabling LZ_GDN_STATE_F32
-       together with --spec K would silently look up the wrong shadow
-       entry per ring step. Flagged rather than fixed, since fixing it
-       means re-keying the shadow map by (layer,head) instead of by
-       pointer, a change to a scaffold this feature does not otherwise
-       touch. */
-    {
-        float *sf = gdn_shadow(sq_in, kd * vd);
-        if (sf) {
-            /* Same recurrence, exact float state: no quantization anywhere
-               in the loop, so what is left is only float rounding.
+    /* The exact float state, slot_in's rows read and slot_out's written -
+       the same two slots sq_in/sq_out address, so a verify batch and its
+       rollback move this state exactly as they move the int8 one. The
+       update loop is elementwise, so sf_in == sf_out (ordinary decode)
+       is safe in place. */
+    if (sf_in && sf_out) {
+        /* Same recurrence, exact float state: no quantization anywhere
+           in the loop, so what is left is only float rounding.
 
-               gvec IS THE WHOLE DECAY ON A KDA MODEL, where gt is the
-               literal 1.0f - so this block must read gvec and not only
-               gt, which is the GDN family's scalar decay. Reading gt
-               alone makes the "exact float state" arm an UNDECAYED
-               recurrence on every KunMoe checkpoint, worth +1.29 NLL
-               against the shipping default at t=27.9: a scaffold that
-               answers, loudly, about a model this engine does not run.
-               Mirrors the reference float path below exactly - kcw/qcw
-               for the contraction, raw kc for the update, dec for the
-               state scale. */
-            for (vv = 0; vv < vd; vv++) { u[vv] = 0.0f; w[vv] = 0.0f; }
-            for (kk = 0; kk < kd; kk++) {
-                const float *row = sf + (size_t)kk * vd;
-                float kc = k[kk], qc = q[kk];
-                float kcw = gvec ? kc * gvec[kk] : kc;
-                float qcw = gvec ? qc * gvec[kk] : qc;
-                kq += kc * qc;              /* RAW dot, both families */
-                for (vv = 0; vv < vd; vv++) {
-                    u[vv] += row[vv] * kcw;
-                    w[vv] += row[vv] * qcw;
-                }
-            }
-            /* `v` is NULL whenever the caller took the int16 v entry
-               (lz_kda_step_vi16), so this reads it the way the shipping
-               loops below do. It did not, and this scaffold segfaulted
-               on every KunMoe model - a compile switch the switch-matrix
-               gate builds and nothing runs. */
+           gvec IS THE WHOLE DECAY ON A KDA MODEL, where gt is the
+           literal 1.0f - so this block reads gvec and not only gt,
+           which is the GDN family's scalar decay. Reading gt alone makes
+           this arm an UNDECAYED recurrence on every KunMoe checkpoint,
+           +1.29 NLL against the shipping default at t=27.9. Mirrors the
+           reference float path below exactly - kcw/qcw for the
+           contraction, raw kc for the update, dec for the state scale. */
+        for (vv = 0; vv < vd; vv++) { u[vv] = 0.0f; w[vv] = 0.0f; }
+        for (kk = 0; kk < kd; kk++) {
+            const float *row = sf_in + (size_t)kk * vd;
+            float kc = k[kk], qc = q[kk];
+            float kcw = gvec ? kc * gvec[kk] : kc;
+            float qcw = gvec ? qc * gvec[kk] : qc;
+            kq += kc * qc;              /* RAW dot, both families */
             for (vv = 0; vv < vd; vv++) {
-                float vc = vi ? lz_i32f((int32_t)vi[vv]) * vscale : v[vv];
-                u[vv] = (vc - gt * u[vv]) * beta;
-                out[vv] = gt * w[vv] + u[vv] * kq;
+                u[vv] += row[vv] * kcw;
+                w[vv] += row[vv] * qcw;
             }
-            for (kk = 0; kk < kd; kk++) {
-                float *row = sf + (size_t)kk * vd;
-                float kc = k[kk];
-                float dec = gvec ? gvec[kk] : gt;
-                for (vv = 0; vv < vd; vv++)
-                    row[vv] = row[vv] * dec + kc * u[vv];
-            }
-            return;
         }
+        /* `v` is NULL whenever the caller took the int16 v entry
+           (lz_kda_step_vi16), so this reads vi the way the shipping
+           loops below do; reading v[] here dereferences NULL on every
+           KunMoe model. */
+        for (vv = 0; vv < vd; vv++) {
+            float vc = vi ? lz_i32f((int32_t)vi[vv]) * vscale : v[vv];
+            u[vv] = (vc - gt * u[vv]) * beta;
+            out[vv] = gt * w[vv] + u[vv] * kq;
+        }
+        for (kk = 0; kk < kd; kk++) {
+            const float *ri = sf_in + (size_t)kk * vd;
+            float *ro = sf_out + (size_t)kk * vd;
+            float kc = k[kk];
+            float dec = gvec ? gvec[kk] : gt;
+            for (vv = 0; vv < vd; vv++)
+                ro[vv] = ri[vv] * dec + kc * u[vv];
+        }
+        return;
     }
 #endif /* LZ_GDN_STATE_F32 */
 
@@ -2808,6 +2788,9 @@ void lz_gdn_step(float *out, const int8_t *sq_in, int8_t *sq_out,
 #if LZ_GDN_STATE_2PLANE
                   sq2_in, sq2_out,
 #endif /* LZ_GDN_STATE_2PLANE */
+#if LZ_GDN_STATE_F32
+                  (const float *)0, (float *)0,
+#endif /* LZ_GDN_STATE_F32 */
                   ss_in, ss_out, q, k, v, (const short *)0, 0.0f,
                   NULL, gt, beta, kd, vd);
 }
@@ -2828,6 +2811,9 @@ void lz_kda_step(float *out, const int8_t *sq_in, int8_t *sq_out,
 #if LZ_GDN_STATE_2PLANE
                   sq2_in, sq2_out,
 #endif /* LZ_GDN_STATE_2PLANE */
+#if LZ_GDN_STATE_F32
+                  (const float *)0, (float *)0,
+#endif /* LZ_GDN_STATE_F32 */
                   ss_in, ss_out, q, k, v, (const short *)0, 0.0f,
                   gvec, 1.0f, beta, kd, vd);
 }
@@ -2848,6 +2834,9 @@ void lz_kda_step_vi16(float *out, const int8_t *sq_in, int8_t *sq_out,
 #if LZ_GDN_STATE_2PLANE
                   sq2_in, sq2_out,
 #endif /* LZ_GDN_STATE_2PLANE */
+#if LZ_GDN_STATE_F32
+                  (const float *)0, (float *)0,
+#endif /* LZ_GDN_STATE_F32 */
                   ss_in, ss_out, q, k, (const float *)0, vi, vscale,
                   gvec, 1.0f, beta, kd, vd);
 }

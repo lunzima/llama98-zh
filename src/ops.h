@@ -1817,6 +1817,16 @@ void lz_attn_wsum_q8_int(int64_t *acc, float *sscale, const float *att,
 #define LZ_GDN_STATE_2PLANE 1
 #endif
 
+/* Measurement scaffolding, never in a shipping build: an exact float
+   twin of the SSM state, read and written by lz_recur_step in place of
+   the int8 one - see the scaffold's own comment in ops_gdn.c. Defined
+   here rather than there because the twin is a state plane: it adds a
+   field to LZRunState and LZStateCkpt (forward.h) and a parameter pair
+   to lz_recur_step, so every TU that sees those has to agree on it. */
+#ifndef LZ_GDN_STATE_F32
+#define LZ_GDN_STATE_F32 0
+#endif
+
 /* LZ_KV_2PLANE's write path calls lz_gdn_quantize_2p, which this switch
    owns - so the two are coupled and nothing said so. Both at their
    non-default values (KV on, state off) built every TU cleanly and
@@ -2133,10 +2143,16 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
    fill in the wrapper's constants themselves, so the per-head call pays
    the 17-argument push once instead of twice (caller -> wrapper ->
    here). vi/vscale are the int16-v entry, gvec/gt the per-channel vs
-   scalar decay - the three wrappers differ only in which are NULL/1.0f. */
+   scalar decay - the three wrappers differ only in which are NULL/1.0f.
+   sf_in/sf_out exist only under LZ_GDN_STATE_F32: the exact float twin
+   of the same (slot, layer, head) region sq_in/sq_out address. The
+   wrappers pass NULL, which runs the int8 recurrence. */
 void lz_recur_step(float *out, const int8_t *sq_in, int8_t *sq_out,
 #if LZ_GDN_STATE_2PLANE
                    const int8_t *sq2_in, int8_t *sq2_out,
+#endif
+#if LZ_GDN_STATE_F32
+                   const float *sf_in, float *sf_out,
 #endif
                    const float *ss_in, float *ss_out,
                    const float *q, const float *k, const float *v,

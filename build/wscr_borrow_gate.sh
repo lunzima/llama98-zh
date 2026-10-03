@@ -28,10 +28,10 @@
 # `static` OBJECT ends with the process, and that is the shape a
 # pointer-keyed cache is built out of - `if (slot[i].w == w) return
 # slot[i].p;` is an unbounded identity claim about a pointer that a scratch
-# reuse makes false. src/ops_norm.c's two norm-weight pools and
-# src/ops_gdn.c's gdn_shadow are the three instances; each store is
-# reported and each is exempted by LINE with its own argument, so the next
-# one added goes red rather than waiting for a model comparison to notice.
+# reuse makes false. src/ops_norm.c's two norm-weight pools are the
+# instances; each store is reported and each is exempted by LINE with its
+# own argument, so the next one added goes red rather than waiting for a
+# model comparison to notice.
 #
 # WHAT IT DOES NOT COVER: it is a text-level check of src/*.c. A borrow
 # reached through a macro, or a scratch pointer recomputed at run time, is

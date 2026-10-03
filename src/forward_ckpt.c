@@ -85,6 +85,9 @@ int lz_ckpt_alloc(LZStateCkpt *ck, const LZModel *m, char *errbuf, int errlen) {
 #if LZ_GDN_STATE_2PLANE
     ck->ssm_q8_lo = (int8_t *)malloc(n_q8);
 #endif /* LZ_GDN_STATE_2PLANE */
+#if LZ_GDN_STATE_F32
+    ck->ssm_f32 = (float *)malloc(n_q8 * sizeof(float));
+#endif /* LZ_GDN_STATE_F32 */
     ck->ssm_s = (float *)malloc(n_s * sizeof(float));
     ck->conv  = (float *)malloc(n_conv * sizeof(float));
 #if LZ_CONV_FIXED
@@ -109,6 +112,9 @@ int lz_ckpt_alloc(LZStateCkpt *ck, const LZModel *m, char *errbuf, int errlen) {
 #if LZ_GDN_STATE_2PLANE
         || !ck->ssm_q8_lo
 #endif /* LZ_GDN_STATE_2PLANE */
+#if LZ_GDN_STATE_F32
+        || !ck->ssm_f32
+#endif /* LZ_GDN_STATE_F32 */
         || (n_engram_conv > 0 && !ck->engram_conv_hist)
         || (n_csa2_pend > 0 && (!ck->csa2_pend_c || !ck->csa2_pend_z))
         ) {
@@ -132,6 +138,9 @@ void lz_ckpt_free(LZStateCkpt *ck) {
 #if LZ_GDN_STATE_2PLANE
     free(ck->ssm_q8_lo);
 #endif /* LZ_GDN_STATE_2PLANE */
+#if LZ_GDN_STATE_F32
+    free(ck->ssm_f32);
+#endif /* LZ_GDN_STATE_F32 */
     free(ck->ssm_s);
     free(ck->conv);
     free(ck->conv_q);
@@ -175,6 +184,9 @@ int lz_ckpt_save(LZStateCkpt *ck, const LZRunState *s, const LZModel *m,
 #if LZ_GDN_STATE_2PLANE
     memcpy(ck->ssm_q8_lo, s->ssm_state_q8_lo + o_q8, n_q8);
 #endif /* LZ_GDN_STATE_2PLANE */
+#if LZ_GDN_STATE_F32
+    memcpy(ck->ssm_f32, s->ssm_state_f32 + o_q8, n_q8 * sizeof(float));
+#endif /* LZ_GDN_STATE_F32 */
     memcpy(ck->ssm_s, s->ssm_state_s + o_s, n_s * sizeof(float));
 #if LZ_CONV_FIXED
     /* Whichever history is live. Saving the float one while the fixed
@@ -280,6 +292,9 @@ int lz_ckpt_restore(const LZStateCkpt *ck, LZRunState *s, const LZModel *m,
 #if LZ_GDN_STATE_2PLANE
     memcpy(s->ssm_state_q8_lo, ck->ssm_q8_lo, n_q8);
 #endif /* LZ_GDN_STATE_2PLANE */
+#if LZ_GDN_STATE_F32
+    memcpy(s->ssm_state_f32, ck->ssm_f32, n_q8 * sizeof(float));
+#endif /* LZ_GDN_STATE_F32 */
     memcpy(s->ssm_state_s, ck->ssm_s, n_s * sizeof(float));
 #if LZ_CONV_FIXED
     if (s->conv_fixed)

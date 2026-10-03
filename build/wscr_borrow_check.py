@@ -47,19 +47,19 @@ reason about it:
   it trusts anything derived from it. What the rule rejects is the
   pointer-keyed cache - `if (slot[i].w == w) return slot[i].p;` - which is
   an unbounded identity claim about a pointer that a scratch reuse makes
-  false. src/ops_norm.c's two pools and src/ops_gdn.c's gdn_shadow are the
-  three instances; the checker reports each store and each is exempted by
-  line with its own argument. This is the class the live-range rule above
-  cannot express, because its model is a variable inside one function and
-  this one spans a function boundary with no end.
+  false. src/ops_norm.c's two pools are the instances; the checker reports
+  each store and each is exempted by line with its own argument. This is
+  the class the live-range rule above cannot express, because its model is
+  a variable inside one function and this one spans a function boundary
+  with no end.
 
   THE SCAN IS TEXT-LEVEL AND THE PREPROCESSOR DOES NOT RUN, so an instance
   under `#if` is reported by the build that compiles it away. That is the
-  point rather than a side effect: src/ops_gdn.c's g_shk store sits under
-  `#if LZ_GDN_STATE_F32`, whose default is 0, and the rule sees it in the
-  DEFAULT build - a claim the gate could not make if it keyed on what the
-  compiler emitted. A latent instance that only a switch-matrix run can
-  reach is exactly the one that would otherwise be added and forgotten.
+  point rather than a side effect: a store under a switch whose default is
+  off is seen in the DEFAULT build - a claim the gate could not make if it
+  keyed on what the compiler emitted. A latent instance that only a
+  switch-matrix run can reach is exactly the one that would otherwise be
+  added and forgotten.
 
 WHAT IT CANNOT SEE. Each miss is written down rather than papered over:
 
@@ -120,16 +120,6 @@ STORE_EXEMPT = {
         "Same as :185: build_qw's slot holds the address as a pre-filter "
         "and asks w_row_same for the answer. The two pools are keyed on the "
         "same quantity by the same function, deliberately."),
-    ("ops_gdn.c", 1385): (
-        "KNOWN DEFECT, and this exemption records it rather than clearing "
-        "it. gdn_shadow's lookup is `if (g_shk[i] == sq) return g_shv[i];` "
-        "- a pointer-keyed cache of ring pointers whose addresses are "
-        "reused, which is exactly the shape this rule rejects. It is latent "
-        "rather than live: the whole block sits under #if LZ_GDN_STATE_F32, "
-        "whose default is 0, and reaching it also needs --spec K. The NOTE "
-        "above its one caller, `gdn_shadow(sq_in, kd * vd)` in the pass-2 "
-        "path, records it as flagged rather than fixed. Remove this "
-        "exemption when it is fixed."),
     ("ops_kernel.c", 1404): (
         "The stored `where` is a caller-supplied diagnostic string. Its "
         "pointee is a string literal, whose lifetime is the program's, so "
@@ -140,15 +130,16 @@ STORE_EXEMPT = {
 # (file, variable) -> (line, why)
 EXEMPT = {
     ("forward_kda.c", "kda_o_norm_w"): (
-        925,
-        "The two borrows are NOT in mutually exclusive arms: :925 and :943 "
-        "are both inside the same `if (c->use_subn)` block and run in "
-        "order. What makes :943 safe is where this variable's USE range "
-        "ends on that path - its last use there is :938, and the uses at "
-        ":982/:995/:1007 that stretch the range to the end of the function "
-        "sit in the `else if` ladder `use_subn` excludes. The checker "
-        "cannot narrow a live range by an arm test, which is the whole of "
-        "what this exemption is granted for."),
+        935,
+        "The two borrows are NOT in mutually exclusive arms: this one and "
+        "the kda_o_subn_norm borrow after it are both inside the same "
+        "`if (c->use_subn)` block and run in order. What makes the second "
+        "safe is where this variable's USE range ends on that path - its "
+        "last use there is the o_norm call just before the subn borrow, and "
+        "the uses that stretch the range to the end of the function sit in "
+        "the `else if` ladder `use_subn` excludes. The checker cannot "
+        "narrow a live range by an arm test, which is the whole of what "
+        "this exemption is granted for."),
 }
 
 

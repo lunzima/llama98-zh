@@ -969,6 +969,9 @@ typedef struct {
 #if LZ_GDN_STATE_2PLANE
     int8_t *ssm_state_q8_lo;    /* low plane, same shape as ssm_state_q8 */
 #endif
+#if LZ_GDN_STATE_F32
+    float  *ssm_state_f32;      /* exact twin, same shape as ssm_state_q8 */
+#endif
     float  *ssm_state_s;
     float *conv_state;          /* (n_linear, lin_conv_dim, conv_kernel-1) */
     /* Persistent whole-tensor F32 cache of the causal conv taps for the
@@ -1749,6 +1752,9 @@ typedef struct {
     int8_t *ssm_q8;
 #if LZ_GDN_STATE_2PLANE
     int8_t *ssm_q8_lo;
+#endif
+#if LZ_GDN_STATE_F32
+    float  *ssm_f32;
 #endif
     float  *ssm_s;
     float  *conv;
