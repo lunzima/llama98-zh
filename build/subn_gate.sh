@@ -79,17 +79,13 @@ W="${TMPDIR:-/tmp}/subn_gate.$$"
 # tools/export_q8.py lives in the TRAINING tree (see CLAUDE.md on the
 # two trees), which is why this is a recipe here and not a build rule.
 #
-# WHICH CHECKPOINT. Not `kunkun-ce` itself, for two independent reasons,
-# and both are worth knowing before someone "fixes" this back:
-#   - it no longer LOADS in this engine. It gained gr_attn.*/self_attn.sinks/
-#     csa2_w_* on 2026-09-17 and src/ has no spec for the first two, so
-#     `--check` refuses it. SUBN_F32_MODEL below is the same checkpoint
-#     for exactly that reason.
-#   - it has been re-carved to 5 layers, while the fixture the recipe
-#     below names held 6, so re-running it against today's kunkun-ce
-#     cannot reproduce the original even once the engine can load it.
-# The two facts make the pre-switch backup the only surviving checkpoint
-# that both loads and carries use_subn with hadamard_o > 1.
+# WHICH CHECKPOINT. The pre-switch backup, not today's `kunkun-ce`, and
+# worth knowing before someone "fixes" this back: SUBN_MODEL is exported
+# from the backup and SUBN_F32_MODEL below has to be those same weights
+# (see its own comment), while `kunkun-ce` is a later checkpoint with
+# different weights. Both load in this engine and both carry use_subn
+# with hadamard_o > 1; pointing one variable at `kunkun-ce` alone would
+# compare two different models.
 #
 # WHICH CHECKPOINT, on the SubLN side: the exporter's use_subn tensor
 # list includes the ATTENTION projection norms
@@ -99,7 +95,7 @@ W="${TMPDIR:-/tmp}/subn_gate.$$"
 # KeyError on exactly that name. That got generalised to "no SubLN
 # checkpoint exports". kunkun-ce DOES (it was migrated; its
 # model.safetensors.bak-before-attn-subn is the migration's own leftover)
-# and exports clean. Measured 2026-08-23.
+# and exports clean - measured, not assumed.
 MODELS_ROOT="${MODELS_ROOT:-/e/LLM/models}"
 # QUANTIZED bin, use_subn + hadamard_o > 1 - see the recipe above.
 SUBN_MODEL="${SUBN_MODEL:-$MODELS_ROOT/_subn_gate_q8}"

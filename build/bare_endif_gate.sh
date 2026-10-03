@@ -3,8 +3,8 @@
 #
 # Every #endif in the engine sources must carry a trailing comment naming
 # the macro it closes. The annotation is a regression guard, not a style
-# choice: ops.c's 49 bare #endif were annotated once (acef096), and the
-# split into ops_*.c immediately re-introduced bare ones in the moved
+# choice: ops.c's 49 bare #endif were annotated once, and the split
+# into ops_*.c immediately re-introduced bare ones in the moved
 # blocks - a #endif with no comment gives a reader no way to know which
 # #if it closes without re-counting the whole nesting stack, and a
 # re-indent or an inserted block makes the mismatch invisible to a

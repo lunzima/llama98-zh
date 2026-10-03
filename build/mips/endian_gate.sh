@@ -95,16 +95,8 @@ if [ -z "${LZ_ENDIAN_IN_WSL:-}" ] && [ -z "${LZ_MIPS_XTC:-}" ] \
     fi
 fi
 
-# _armgate3 replaced _armgate2 on 2026-09-10: that model and its whole
-# training chain are gone (docs/dsv41-optimization-menu.md section 6).
-#
-# kunmoe-v2 IS STILL LISTED AND CURRENTLY CANNOT LOAD - it reports
-# "tensor model.layers.0.linear_attn.g_proj.norm.weight unclaimed by any
-# spec". A model that cannot load does not fail this gate, it drops out
-# of the comparison silently, so the effective coverage of this list is
-# 2 of its 3 entries, not 3. Left in so the reader knows it was meant to
-# be there; remove it or fix the checkpoint, but do not read the list
-# length as the coverage.
+# _armgate3 stands in for _armgate2: that model and its whole training
+# chain are gone (docs/dsv41-optimization-menu.md section 6).
 MODELS=${MODELS:-"/mnt/e/LLM/models/kmr20 /mnt/e/LLM/models/kunkun98 /mnt/e/LLM/models/_armgate3"}
 TOK=${TOK:-1,2,3,4,5,6,7,8,9,10}
 W=${W:-/tmp/mipsendian}

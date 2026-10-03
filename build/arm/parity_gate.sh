@@ -87,9 +87,9 @@ MODEL=${1:-}
 #
 # Default is now the same fixture, truncated past that threshold.
 # PARITY_NTOK picks the length: 160 crosses the ~150 the sibling names,
-# at roughly seven minutes of QEMU. The whole 603 passes too - run
-# 2026-08-23, bit-identical on all three ARM tiers - and is not the
-# default only because it takes about half an hour.
+# at roughly seven minutes of QEMU. The whole 603 passes too - run in
+# full, bit-identical on all three ARM tiers - and is not the default
+# only because it takes about half an hour.
 TOKFILE=${TOKFILE:-$ROOT/build/norm_int_gate_tokens_zh.txt}
 NTOK=${PARITY_NTOK:-160}
 if [ -z "${2:-}" ] && [ -f "$TOKFILE" ]; then
@@ -466,10 +466,10 @@ done
 # which the float arm turns off. They ARE the shipping default (-fixed
 # all is what every build runs; the float arm exists only for
 # cross-checking). A fixed kernel change therefore needs this round,
-# not an ad-hoc probe - the recur kernel landed 0d10a89 only after a
-# throwaway unit probe caught what the float-only parity gate could not
-# see. The later --fixed all overrides the pins' --fixed off (the CLI
-# applies flags in order).
+# not an ad-hoc probe - the recur kernel landed only after a throwaway
+# unit probe caught what the float-only parity gate could not see. The
+# later --fixed all overrides the pins' --fixed off (the CLI applies
+# flags in order).
 #
 # THE REFERENCE IS arm-c, NOT ref. --kernel ref routes every format to
 # matmul_scalar_ref, whose Step-2 reduction is float regardless of

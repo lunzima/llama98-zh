@@ -79,7 +79,7 @@ CAPACITY=$((2847 * 512))
 # number stops reading as the shipped one.
 SHIP="kunkun98-gui.exe"
 
-# 340 KB. Re-measured 2026-09-22 at 330,432 on the artifact this gate
+# 340 KB, set against 330,432 measured on the artifact this gate
 # actually reads - `make native`'s llama98.exe - so 17,728 bytes (5.4%) of
 # headroom. The four things a number like this owes the next reader:
 #
@@ -92,8 +92,8 @@ SHIP="kunkun98-gui.exe"
 # The ceiling it replaces (327,680 = 320 KB) was derived from a UNIFORM
 # -O2 build - "Measured at 261,968 with -O2, so 22% of headroom" - and
 # that is the defect this fixes: the old baseline and the old artifact
-# were not the same configuration. Replaying both numbers today, same
-# source tree (ca02bda):
+# were not the same configuration. Replaying both numbers on one source
+# tree, the one TEXT_CEIL below was set on:
 #
 #   uniform -O2   (make llama98 X86_64_CFLAGS="-O2 -march=x86-64 \
 #                  -mtune=znver3 -std=c99 -Wall -Wextra -Isrc \
@@ -108,9 +108,9 @@ SHIP="kunkun98-gui.exe"
 #        had long stopped describing any configuration this tree builds.
 #
 # WHY THIS MARGIN. The old 22% was chosen when nothing ran this gate;
-# that cushion was standing in for an alarm. Since 1bad3c3 the gate is a
-# prerequisite of `check`, so it IS the alarm and the margin only has to
-# absorb ordinary growth between re-baselines: 5.4% is about ten times
+# that cushion was standing in for an alarm. The gate is a prerequisite
+# of `check`, so it IS the alarm and the margin only has to absorb
+# ordinary growth between re-baselines: 5.4% is about ten times
 # the largest single feature measured this cycle (per-layer compression
 # ratio, +1,600 bytes) and still catches a flag-level mistake (the -O3
 # experiment that produced 401,616).
@@ -119,9 +119,9 @@ SHIP="kunkun98-gui.exe"
 # ci.sh-only list behind "builds three toolchains to compare .text" - a
 # reason false of the script (in code position it invokes make/wcc386/
 # wlink zero times; it measures two already-built files). Nothing ran it,
-# so .text crossed 327,680 with no line anywhere saying so. 1bad3c3 wired
-# it into `check` and corrected that line; this re-baseline comes after
-# that, not instead of it: the instrument was fixed first, then the
+# so .text crossed 327,680 with no line anywhere saying so. Wiring it
+# into `check` and correcting that line came before the re-baseline
+# above, not instead of it: the instrument was fixed first, then the
 # number was read.
 #
 # REPLAYING EITHER CEILING: criterion B is `size -A "$CLI" | awk '$1 ==

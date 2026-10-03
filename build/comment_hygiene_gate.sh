@@ -138,9 +138,10 @@ done
 # citation then points at the wrong rule silently. That argument does
 # not stop at src/.
 #
-# Only this predicate widens. Commit hashes and dates in a gate header
-# are derivations - "measured at 261,968 with -O2" needs the commit that
-# measured it - and a gate that reddened on those would be switched off.
+# Only this predicate widens at zero. The other three cover build/ too,
+# but against a per-file baseline (BBASE, below): a gate that reddened
+# on every hash and date already in a gate header would be switched off,
+# so the existing ones are debt to pay down and a new one is a failure.
 #
 # THIS FILE IS THE EXEMPTION, and it has to be: naming the phrase is how
 # the check finds it. Nothing else may.
@@ -184,43 +185,26 @@ done
 # THE NUMBERS ARE THE DEBT, measured per file when this loop gained the
 # predicates - a ratchet, not a licence. Every entry is a line someone
 # can remove, and the note printed when a count falls below its baseline
-# is the invitation to remove it. Two entries are NOT debt and are here
-# for a reason written at the site instead: the Chinese PROMPT= literals
-# (this scan cannot tell a string from a comment, the same treatment
-# src/err.c's message tables get above) and the baseline revision printed
-# by build/pri64_scan_gate.sh, which is the identity of a measurement
-# rather than of a source line.
+# is the invitation to remove it. Two kinds of entry are NOT debt and
+# are here for a reason written at the site instead: the Chinese
+# PROMPT=/LINE= literals (this scan cannot tell a string from a comment,
+# the same treatment src/err.c's message tables get above), and the
+# revisions build/restore_*.py restore from, which are their input data.
 BBASE="
-build/arm/parity_gate.sh:1:1:0
 build/attn_sink_learned_gate.sh:0:0:1
-build/bare_endif_gate.sh:1:0:0
-build/c89_floor_gate.sh:4:0:0
 build/ced_gate.sh:0:0:1
-build/ced_proj_arm_probe.c:2:0:0
 build/ced_replay_gate.sh:0:0:1
-build/codesize_gate.sh:3:1:0
 build/csa2_dense_kv_gate.sh:0:0:1
 build/csa2_f32count_gate.sh:0:0:1
 build/csa2_gate.sh:0:0:1
-build/csa2_mode_dispatch_gate.sh:1:0:0
-build/csa2_mode_export_load_gate.sh:3:0:0
+build/csa2_mode_export_load_gate.sh:1:0:0
 build/csa2_ring_fmt_gate.sh:0:0:1
 build/csa2_ring_nf_gate.sh:0:0:1
-build/fixed_tier_xcompiler_gate.sh:4:1:0
-build/gcc_watcom_output_gate.sh:1:0:0
 build/gr_gate.sh:0:0:1
-build/kernel_isa_identity_gate.sh:1:0:0
-build/kernel_matrix_gate.sh:0:2:0
 build/kv_share_gate.sh:0:0:1
-build/lz4_model_gate.sh:0:1:0
-build/mips/endian_gate.sh:0:1:0
 build/mla_gate.sh:0:0:1
-build/move_census.sh:0:1:0
-build/pair_census.sh:4:1:0
 build/restore_broken_reorders.py:6:0:0
 build/restore_q61_sse2.py:4:0:0
-build/subn_gate.sh:0:2:0
-build/x87/build_engine.sh:0:1:0
 "
 BZ=0
 BO=0

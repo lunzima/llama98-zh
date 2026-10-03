@@ -489,7 +489,7 @@ else
             # ONE defect, not a property of the hardware:
             # src/lz_mathf.c's reduce_large multiplied an exact int64 by
             # pi63 on x87 because `fild` is exact whatever the precision
-            # control says (fixed in e7b9069). With that closed, all six
+            # control says (since fixed). With that closed, all six
             # rows below agree on both fixtures, at 603 and 661 tokens.
             #
             # So they are assertions now. What PC=24 still does NOT cover

@@ -6,7 +6,7 @@
 # (Task 5.4) already reads a strict per-mode subset (steps 2/3's own
 # csa2_mode guards), so this was purely a LOADING-time bug: the
 # training side's export_q8.py (a DIFFERENT repository, no shared git
-# history - E:\LLM\llama98-zh, commit efd2d34's csa2_suffixes_for) was
+# history - E:\LLM\llama98-zh, tools/export_q8.py's csa2_suffixes_for) was
 # fixed first, to only WRITE the tensors a REINDEX/REUSE layer actually
 # owns, and that made this engine's own unconditional reader-side
 # assumption visible: a real REINDEX-mode model.bin now fails to load
@@ -54,9 +54,9 @@
 # no CSA2 keys at all and so never reaches forward_csa2.c either way.
 # An EARLIER version of this comment described that comparison as if
 # this script reproduced it on every run; it does not - re-running it
-# would need a checked-out ca1a594 worktree this gate does not build or
-# keep, and the finite-logits check just below is what actually runs
-# here, every time.
+# would need a worktree checked out at that commit, which this gate does
+# not build or keep, and the finite-logits check just below is what
+# actually runs here, every time.
 #
 # Exit: 0 pass, 1 fail, 2 skip (no C compiler, no python3, training
 # tree not found at TRAIN_ROOT). The round-4 forward-pass step SKIPs on

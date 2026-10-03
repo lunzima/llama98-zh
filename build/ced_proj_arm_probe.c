@@ -10,10 +10,10 @@
    hand-built LZModelConfig and direct calls to the real
    lz_ced_kv_target/lz_kv_share_target, no model or forward pass needed.
    It covers the field's off/on/degenerate-ced_split domain and the
-   non-overlap with attn_kv_share's own decoder-region exclusion
-   (9722cf6) - the two predicates must never both claim the same layer,
-   which is why forward.c's kv_in resolution has no arbitration to do
-   between them, only an order.
+   non-overlap with attn_kv_share's own decoder-region exclusion (the
+   one build/kv_share_ced_boundary_gate.sh guards) - the two predicates
+   must never both claim the same layer, which is why forward.c's kv_in
+   resolution has no arbitration to do between them, only an order.
 
    PART 2 is a real, hand-built 3-layer full-attention LZModel (no
    config.json, no safetensors - every tensor is a small deterministic
@@ -120,7 +120,7 @@ static void part1_pure_predicate(void) {
        "ced_split==n_layers: not a decoder boundary, layer 3 is not a target");
 
     /* Row 5: both attn_kv_share and ced_kv=proj set. lz_kv_share_target
-       already refuses any decoder-region layer (the 9722cf6 fix);
+       already refuses any decoder-region layer (its ced_split check);
        lz_ced_kv_target claims that SAME layer. The two must never agree
        on the same layer - forward.c's kv_in resolution checks CED
        first only because CED is the more specific rule, not because

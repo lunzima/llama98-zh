@@ -11,15 +11,15 @@
 # THIS BUILD, LIKE EVERY LOWERED-FLOOR TARGET IN THIS PROJECT (task #28:
 # Watcom-Windows i486, MS-DOS DOS32A i386), ASSUMES A 387 IS PRESENT
 # (386+387, 486DX, or - here - anything Socket-7-class, which always has
-# one). No target in this project is a no-387/soft-float build. That is
-# a decision, not an omission: the user deferred no-387 support until
-# the ARM branch is finished (2026-08-19), so it is a RESERVATION for
-# now - tracked as isa_floor.py's `x87` class (task #26), which stays a
-# reservation rather than an enforced floor for exactly this reason.
-# Do not infer soft-float coverage from the fixed-point arithmetic this
-# engine already ships by default (--fixed all) - it exists for
-# cross-compiler bit-identity and has never been measured against a
-# target with no FPU at all.
+# one). No x86 target is a no-387 build. That is a decision, not an
+# omission: the user deferred no-387 x86 support, so it is a RESERVATION
+# - tracked as the `x87` ladder class of the training tree's
+# tests/isa_floor.py, which stays a reservation rather than an enforced
+# floor for exactly this reason. The project's software-float target is
+# the ARM cross build (build/arm/: -mfloat-abi=soft -DLZ_NO_FPU=1, with
+# src/lz_softfp.c), whose parity gate runs the fixed tiers on that
+# FPU-less core. Do not read that as no-387 x86 coverage: the soft-float
+# routines, their call sites and the codegen there are ARM's.
 #
 # THIS SCRIPT BUILDS AND LINKS. NOTHING RUNS WHAT IT PRODUCES, and the
 # distinction matters because ci.sh's stage around it prints PASS and

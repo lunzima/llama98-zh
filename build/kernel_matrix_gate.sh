@@ -4,13 +4,12 @@
 #
 # A matrix nothing READS catches nothing, and this one prints well enough
 # to look like a check. Nothing read it, so the one failure it exists to
-# catch stayed invisible: on 2026-08-09 the Watcom build lost every
-# hand-written #pragma aux kernel (no
-# -D__MMX__=1) and every numeric gate stayed green, because a kernel
-# that falls back to the scalar reference is bit-identical to one that
-# does not. A row of dots is what that looks like, and a row of dots is
-# also what "nothing to offer here" looks like. This gate is what tells
-# them apart.
+# catch stayed invisible: the Watcom build once lost every hand-written
+# #pragma aux kernel (no -D__MMX__=1) and every numeric gate stayed
+# green, because a kernel that falls back to the scalar reference is
+# bit-identical to one that does not. A row of dots is what that looks
+# like, and a row of dots is also what "nothing to offer here" looks
+# like. This gate is what tells them apart.
 #
 # WHAT IT ASSERTS
 #
@@ -25,7 +24,8 @@
 #                in that class's binary. A SINGLE binary cannot show
 #                this: the assembly columns are empty on gcc and the
 #                intrinsics columns are empty on Watcom, both correctly.
-#                That is exactly why 2026-08-09 went unnoticed.
+#                That is exactly why the lost Watcom kernels went
+#                unnoticed.
 #   the rest     every cell no class carries is 'i' (impossible), 't'
 #                (todo) or 'd' (written, measured, not better) in every
 #                binary, never blank.

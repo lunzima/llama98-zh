@@ -52,18 +52,20 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 # one gate and a copy.
 #
 # Same MODELS_ROOT convention as that script, and still SKIPs where the
-# tree is not there. _armgate2 stays a useful second opinion by
-# argument; it is not the default because it closes nothing.
+# tree is not there. Another model is a second opinion by argument; none
+# is the default because a second model closes nothing this one leaves
+# open.
 MODELS_ROOT=${MODELS_ROOT:-/e/LLM/models}
 MODEL=${1:-}
 [ -n "$MODEL" ] || MODEL="$MODELS_ROOT/_t2gate"
 
 # EIGHT TOKENS WAS THE WRONG DEFAULT, and this file is the place to say
 # so because it shipped with it. src/lz_mathf.c's reduce_large defect
-# (e7b9069) diverged the two toolchains from token 125 on kmr20 and 134
-# on _armgate2, and every run shorter than that reads clean - as does
-# every run shorter than ~150 for the lz_quantize_q8_int defect
-# build/fixed_tier_xcompiler_gate.sh's header is about. A configuration
+# (an exact int64 multiplied by pi63 on x87) diverged the two toolchains
+# from token 125 on kmr20 and 134 on _armgate2, and every run shorter
+# than that reads clean - as does every run shorter than ~150 for the
+# lz_quantize_q8_int defect build/fixed_tier_xcompiler_gate.sh's header
+# is about. A configuration
 # that has never been run long enough to diverge has not been shown
 # identical; it has only not yet been shown different. So the default is
 # the long fixture when it is there, and the second argument still

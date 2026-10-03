@@ -73,9 +73,9 @@
 # EIGHT HAVE BEEN DONE, so the technique is not hypothetical here.
 #
 # THE "NOW" NUMBERS ARE AS OF EACH EDIT, NOT AS OF THIS RUN - the
-# latency-oriented reschedule (4f5c80b, aux_sched.py) reordered several
-# of these bodies afterwards, and bd4c1e7 (Q4_1 relocate) re-typed the
-# q41 ones, so the "now X%" claims below read stale against the table.
+# latency-oriented reschedule (aux_sched.py) reordered several of these
+# bodies afterwards, and the Q4_1 relocate re-typed the q41 ones, so the
+# "now X%" claims below read stale against the table.
 # Read the rates off the run output, not the prose. The q41 dot32/dot128
 # sit at 44% now (the claim said 26-27%); they are still interleaved
 # (mm6/mm7 alternate), so the drift is a scheduling state, not the
@@ -83,7 +83,7 @@
 # lz_dot32_t2_asm: its two nibble
 # chains ran one whole then the other (sequential blocks, not
 # instruction-interleaved) at 62%, while the claim said 7%. Re-interleaved
-# 2026-08-29 (same register set mm0-mm6, the mm5/mm6 chains alternating
+# (same register set mm0-mm6, the mm5/mm6 chains alternating
 # instruction by instruction, no arithmetic change) - back to 7%, and
 # bit-identical: dot128_t2_probe 49,156 x 3 tiers 0 mismatches, and the
 # MMX-tier engine logits match gcc's twin exactly.
@@ -92,10 +92,12 @@
 # split (low nibble mm5, high nibble mm6, into separate accumulators)
 # brought it to 62%, and instruction-level interleaving of the two
 # chains to 7%. The reschedule had paid the dependency back for latency
-# in the other direction; the re-interleave did not - see 0b197de/d163851,
-# both interleaves reverted for clobbering a live register, neither of
-# which this edit reproduces (no register added, none re-ordered across
-# a live boundary).
+# in the other direction; the re-interleave did not. The interleaves
+# reverted for clobbering a live register - the three `_2` reorders and
+# the q61 SSE2 one, each clobber described in
+# build/restore_broken_reorders.py and build/restore_q61_sse2.py - are
+# defects this edit does not reproduce (no register added, none
+# re-ordered across a live boundary).
 #
 # lz_dot128_t2_asm, 72% -> 14%, needed a different split and the reason
 # is worth keeping. Its four accumulators plus the weight quad plus one

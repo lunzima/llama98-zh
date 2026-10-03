@@ -20,11 +20,11 @@
 # probe and on English input, only surfacing past ~150 tokens of real
 # Chinese text.
 #
-# (--norm-write's `int` value is gone since 2d5e6c1, which folded the
-# int output into the fixed tier unconditionally - lz_norm_int() now
-# just returns lz_norm_mode(). The rows below say `fixed` where this
-# comment says `int`; the tier the RCA was about is still covered, it
-# is no longer separately selectable.)
+# (--norm-write has no `int` value: the int output is folded into the
+# fixed tier unconditionally - lz_norm_int() just returns
+# lz_norm_mode(). The rows below say `fixed` where this comment says
+# `int`; the tier the RCA was about is still covered, it is not
+# separately selectable.)
 #
 # THIS SCRIPT COVERS ALL TWELVE TIER VALUES, not only the --norm-write
 # int / --attn-write int pair the RCA above was about.
@@ -70,19 +70,19 @@
 #   --attn-write int      (the original RCA's other tier)
 #   --epi-write fixed
 #   --sig-write fixed
-#   --norm-write fixed     (the original RCA's tier; its separate `int`
-#                           value is folded into `fixed` by 2d5e6c1, so
-#                           this row is that tier's coverage now)
+#   --norm-write fixed     (the original RCA's tier; its `int` output
+#                           is folded into `fixed`, so this row is that
+#                           tier's coverage)
 #   --scalar-fixed fixed
 #   --fixed all
 #   (shipping default, zero flags)
 #
 # BASELINE: the shipping build is fixed-point unconditionally now - none
 # of the seven tiers' `auto` asks hardware any more (ops_sched.c's
-# retirement note on lz_soft_float_target; --scalar-fixed's auto was
-# already this way, commit 508e015, before the other six followed it
-# here). So "pass no flags" is NOT a float baseline for ANY axis, let
-# alone just scalar - the baseline row below passes --fixed off, which
+# retirement note on lz_soft_float_target; --scalar-fixed's auto went
+# this way first, and the other six followed it). So "pass no flags" is
+# NOT a float baseline for ANY axis, let alone just scalar - the
+# baseline row below passes --fixed off, which
 # forces all seven explicitly (recurrence included: --recur-write gained
 # an explicit `float` value in the same change that retired the
 # hardware predicate, so it needs no special-casing here). It runs FIRST
@@ -286,13 +286,14 @@ run_one() {
 # anyone ships. The barrier was protecting rows that no longer exist by
 # suppressing the two that matter.
 #
-# MEASURED, not reasoned: on 2026-08-28 the baseline was red for days on
-# src/lz_mathf.c's reduce_large defect (fixed in e7b9069), and both
-# shipping rows were byte-identical across the toolchains that entire
-# time - 18,219,008 bytes at 139 tokens, then 78,905,344 and 86,507,520
-# at the full fixtures. Every one of those runs was skipped, and the
-# skip printed as a FAIL that named the float control, so nothing said
-# the shipping configuration was untested. That is the failure mode this
+# MEASURED, not reasoned: the baseline was red for days on
+# src/lz_mathf.c's reduce_large defect (an exact int64 multiplied by
+# pi63 on x87, since fixed), and both shipping rows were byte-identical
+# across the toolchains that entire time - 18,219,008 bytes at 139
+# tokens, then 78,905,344 and 86,507,520 at the full fixtures. Every one
+# of those runs was skipped, and the skip printed as a FAIL that named
+# the float control, so nothing said the shipping configuration was
+# untested. That is the failure mode this
 # tree calls "gate passed is not gate looked", in its other direction: a
 # gate that fails without having asked.
 #

@@ -96,7 +96,8 @@
 # these three is the same one that table got - break the file down per
 # function, then put a counter in whatever it names.
 #
-# DONE on 2026-08-20 (build/move_per_function.sh). Top gap functions:
+# The per-function breakdown is DONE (build/move_per_function.sh). Top
+# gap functions:
 #
 #   ops_norm: lz_rmsnorm_gated_out_fixed 250 gcc 36% → watcom 51% (+15)
 #             lz_rmsnorm_int              89 gcc 31% → watcom 42% (+11)

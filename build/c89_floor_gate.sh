@@ -34,28 +34,22 @@ cd "$(dirname "$0")/.."
 command -v gcc >/dev/null 2>&1 || { echo "c89_floor_gate: SKIP - no gcc"; exit 2; }
 
 # file:count. Only files with a non-zero baseline are listed; everything
-# else must stay at zero.
+# else must stay at zero. Every file is at zero, so the list is empty
+# and any violation fails.
 #
-#   ops.c:1          `volatile float tamf` in lz_quantize_q8_int64
-#                    (1718f11). The volatile is load-bearing - it stops
-#                    Watcom fusing the int64 convert into the multiply,
-#                    which costs 1 ULP - so moving it is not free.
-#   forward.c:16     48327cc, 75c8adc and neighbours, in forward_attn's
-#                    per-head blocks.
+# matmul_q41_impl needs no entry: `int i, t;` sits in the declaration
+# block above the kernel-select call, so the call is the function's
+# first statement. Safe because nothing in those initialisers reads the
+# tier: q41_fixed_epi asks lz_epi_mode and lz_epi_ready, and lz_row_pick
+# - which does read it - still runs after. Verified byte-identical on
+# both fixtures rather than argued.
 #
-# matmul_q41_impl carries the same property and needs no baseline entry:
-# `int i, t;` sits in the declaration block above the kernel-select call,
-# so the call is the function's first statement. Safe because nothing in
-# those initialisers reads the tier: q41_fixed_epi asks lz_epi_mode and
-# lz_epi_ready, and lz_row_pick - which does read it - still runs
-# after. Verified byte-identical on both fixtures rather than argued.
-#
-# The rest predate the language floor. They are recorded, not excused:
-# this gate stops the number growing, and each is a one-line reorder
-# for whoever next edits that function. The two violations THIS
-# gate was written after finding - both in ops_gdn.c, both introduced
-# after bc4f1ba landed mid-session - are fixed rather than baselined,
-# which is the difference between debt and a new hole.
+# A violation that predates the language floor gets an entry here: it is
+# recorded, not excused - this gate stops the number growing, and each
+# is a one-line reorder for whoever next edits that function. One
+# introduced after the C89 compiler became a stated target is fixed
+# instead, as the two this gate was written after finding (both in
+# ops_gdn.c) are; that is the difference between debt and a new hole.
 # DESIGNATED INITIALISERS are the third construct, and gcc reports them
 # as a WARNING, so an errors-only check walks straight past them. They
 # were 266 in err.c and 186 in gui/localized_strings.c - the two message

@@ -191,9 +191,9 @@
 #       carry that exact zero vector out.
 #     - STAY PASS: every other line the probe prints - 42 of the 44. The
 #       plain ones are the 40 the probe carried before this series added
-#       check1a's four assertions (this gate's own PROBE_TOTAL_LINES was
-#       40 at 978144d and is 44 now; two of those four are the TURN FAIL
-#       pair above, so 40 + these two + those two is the 44). The other
+#       check1a's four assertions (this gate's own PROBE_TOTAL_LINES is
+#       40 without them and 44 with them; two of those four are the TURN
+#       FAIL pair above, so 40 + these two + those two is the 44). The other
 #       two are named here, check1a's cm=1 and cm=2 selection lines,
 #       which are the same shape as each other and are blind for the
 #       same reason. That is the whole point of this mutation: a check
