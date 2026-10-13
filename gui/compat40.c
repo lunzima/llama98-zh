@@ -1221,9 +1221,14 @@ int lz_ui_midi_open(HWND notify, int division) {
     /* MIDI_MAPPER, not device 0: the mapper is what the user pointed at
        whatever they want MIDI to come out of, and going straight to
        device 0 would ignore that choice on every machine that has made
-       one. */
+       one.
+       A caller with no window has no MM_MOM_DONE to be told by, so it
+       gets CALLBACK_NULL and watches the header's own DONE flag instead
+       (lz_ui_midi_slot_free). The flag is the device's either way; the
+       callback is only how a window finds out. */
     if (p_midiStreamOpen(&g_strm, &dev, 1, (LZ_IPTR_T)notify, 0,
-                         CALLBACK_WINDOW) != MMSYSERR_NOERROR) {
+                         notify ? CALLBACK_WINDOW : CALLBACK_NULL)
+        != MMSYSERR_NOERROR) {
         g_strm = NULL;
         return 0;
     }
@@ -1288,6 +1293,16 @@ int lz_ui_midi_send(int slot, const void *events, unsigned long bytes) {
     return 1;
 }
 
+/* 1 when the buffer in `slot` has come back to us, or was never handed
+   over. A caller with no window is not TOLD a buffer finished, so this
+   is how it asks; the flag it reads is the device's own, the same one
+   the notification is raised from. */
+int lz_ui_midi_slot_free(int slot) {
+    if (!g_strm || slot < 0 || slot >= LZ_UI_MIDI_SLOTS) return 0;
+    if (!g_prepared[slot]) return 1;
+    return (g_hdr[slot].dwFlags & MHDR_DONE) != 0;
+}
+
 int lz_ui_midi_go(void) {
     if (!g_strm) return 0;
     return p_midiStreamRestart(g_strm) == MMSYSERR_NOERROR;
@@ -1345,8 +1360,20 @@ static WaveOutDevFn  p_waveOutClose;
 
 static HWAVEOUT g_wh;
 static WAVEHDR  g_whdr[LZ_WAVE_NBUF];
-static short    g_wbuf[LZ_WAVE_NBUF][LZ_WAVE_FRAMES];
+/* TWO CHANNELS, so a block holds twice as many samples as it does
+   frames. See lz_ui_wave_open for why the device is opened stereo. */
+static short    g_wbuf[LZ_WAVE_NBUF][LZ_WAVE_FRAMES * 2];
 static int      g_wnext;
+/* Which waveOut device to open: -1 is WAVE_MAPPER, the device the user
+   pointed Windows at. A caller that needs a different one - there are
+   five on this machine and the default is not always the one anybody
+   is listening to - says so with lz_ui_wave_device before opening. */
+static int      g_wdev = -1;
+/* THE DEVICE SIGNALS THIS WHEN A BUFFER COMES BACK. Polling the header's
+   own DONE flag instead was what this did first, and a poll asks a
+   question whose answer the driver is not obligated to publish on any
+   particular schedule; an event is the driver saying so. */
+static HANDLE   g_wev;
 
 static int wave_resolve(void) {
     if (p_waveOutOpen) return 1;
@@ -1369,19 +1396,39 @@ static int wave_resolve(void) {
     return 1;
 }
 
+/* Which device the next open uses. -1 is WAVE_MAPPER, which is what
+   this did before there was a way to say otherwise. */
+void lz_ui_wave_device(int dev) { g_wdev = dev; }
+
 int lz_ui_wave_open(long rate) {
     WAVEFORMATEX fmt;
     int i;
     if (g_wh) return 1;
     if (rate <= 0 || !wave_resolve()) return 0;
+    if (g_wev == NULL) {
+        g_wev = CreateEvent(NULL, FALSE, FALSE, NULL);
+        if (g_wev == NULL) return 0;
+    }
     fmt.wFormatTag      = WAVE_FORMAT_PCM;
-    fmt.nChannels       = 1;
+    /* STEREO, not mono, and it is not a preference. Measured on this
+       machine: the same WAV played through this device as MONO carries a
+       steady hiss that it does not carry when the file is played by
+       anything else, and the same bank rendered to a file and played
+       back elsewhere is clean - so the noise is in this path, and the
+       one thing this path does differently from the machine's own
+       synthesiser (which is clean, and which emits stereo) is the
+       channel count. Filling both channels with the same sample is what
+       makes it go away. It is also where this has to end up anyway: the
+       reverb and chorus a DLS asks for are stereo effects, so a mono
+       device could not carry them. */
+    fmt.nChannels       = 2;
     fmt.nSamplesPerSec  = (DWORD)rate;
     fmt.wBitsPerSample  = 16;
     fmt.nBlockAlign     = (WORD)(fmt.nChannels * fmt.wBitsPerSample / 8);
     fmt.nAvgBytesPerSec = fmt.nSamplesPerSec * fmt.nBlockAlign;
     fmt.cbSize          = 0;
-    if (p_waveOutOpen(&g_wh, WAVE_MAPPER, &fmt, 0, 0, CALLBACK_NULL)
+    if (p_waveOutOpen(&g_wh, g_wdev < 0 ? (UINT)WAVE_MAPPER : (UINT)g_wdev,
+                      &fmt, (LZ_IPTR_T)g_wev, 0, CALLBACK_EVENT)
         != MMSYSERR_NOERROR) {
         g_wh = NULL;
         return 0;
@@ -1404,16 +1451,31 @@ int lz_ui_wave_open(long rate) {
 }
 
 int lz_ui_wave_write(const short *pcm, long frames) {
-    long done = 0;
+    long done = 0, i;
     if (!g_wh) return 0;
     while (done < frames) {
         WAVEHDR *h = &g_whdr[g_wnext];
         long n;
-        while (!(h->dwFlags & WHDR_DONE)) Sleep(1);
+        while (!(h->dwFlags & WHDR_DONE)) {
+            /* The device signals the event when a buffer comes back.
+               The header's flag is still what decides, because the
+               event is auto-reset: a signal raised for a DIFFERENT
+               buffer would be consumed here and leave this one
+               waiting. Waiting on both means no busy loop and no
+               missed wake-up. */
+            WaitForSingleObject(g_wev, 50);
+        }
         n = frames - done;
         if (n > LZ_WAVE_FRAMES) n = LZ_WAVE_FRAMES;
-        memcpy(g_wbuf[g_wnext], pcm + done, (size_t)n * sizeof(short));
-        h->dwBufferLength = (DWORD)(n * (long)sizeof(short));
+        /* The caller mixes MONO and the device is opened stereo; the
+           same sample goes to both channels. A DLS's own effects will
+           replace this with a real left and right, and until then the
+           two are the same signal, which is what a mono mix is. */
+        for (i = 0; i < n; i++) {
+            g_wbuf[g_wnext][2 * i]     = pcm[done + i];
+            g_wbuf[g_wnext][2 * i + 1] = pcm[done + i];
+        }
+        h->dwBufferLength = (DWORD)(n * 2L * (long)sizeof(short));
         h->dwFlags &= ~WHDR_DONE;
         if (p_waveOutWrite(g_wh, h, sizeof *h) != MMSYSERR_NOERROR) return 0;
         done += n;
@@ -1441,4 +1503,8 @@ void lz_ui_wave_close(void) {
     }
     p_waveOutClose(g_wh);
     g_wh = NULL;
+    if (g_wev != NULL) {
+        CloseHandle(g_wev);
+        g_wev = NULL;
+    }
 }

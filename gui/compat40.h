@@ -318,6 +318,12 @@ int lz_ui_midi_open(HWND notify, int division);
 /* Hand slot `slot` to the device. */
 int lz_ui_midi_send(int slot, const void *events, unsigned long bytes);
 
+/* 1 when that slot's buffer has come back, or was never handed over. A
+ * caller with no window is not TOLD that a buffer finished - it has no
+ * message queue for MM_MOM_DONE to arrive in - so it asks with this
+ * between sends. A window has the notification and does not need it. */
+int lz_ui_midi_slot_free(int slot);
+
 /* Start, or resume after everything queued has played. */
 int lz_ui_midi_go(void);
 
@@ -382,6 +388,13 @@ void lz_ui_midi_close(void);
 /* Open the PCM device: mono, 16-bit, `rate` frames a second. Returns 1 on
  * success, 0 when there is no device - which is the ordinary answer on a
  * machine with no sound card and not an error. */
+/* Which waveOut device the next lz_ui_wave_open uses, by index as
+ * waveOutGetDevCaps reports them. -1 (the default) is WAVE_MAPPER, the
+ * device the user pointed Windows at; a caller that has to name one -
+ * because the default is not the one anybody is listening to - says so
+ * here, before opening. */
+void lz_ui_wave_device(int dev);
+
 int lz_ui_wave_open(long rate);
 
 /* Hand over `frames` frames. BLOCKS until the card has room for them, so

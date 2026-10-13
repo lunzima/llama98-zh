@@ -6,6 +6,8 @@
  *     --prog N      force every channel onto GM program N
  *     --speed S     musical time per second of wall clock, in thousandths
  *     --wav F       write the rendered audio to F instead of a device
+ *     --sys         play through the machine's own synthesiser, no bank
+ *     --gain N      master trim in percent; 100 is the bank's own level
  *     --list        print what is in the bank and stop
  *
  * A second console front end, beside cli_main.c: the same reader and the
@@ -74,6 +76,7 @@ static unsigned char *g_midimg;  /* outlives the reader, same reason */
  * the piece to play. */
 static FILE *g_wav;
 static long  g_wavn;
+static long  g_gain = 100L; /* master trim, percent; 100 is the bank's own */
 
 static void put16(unsigned char *p, unsigned long v)
 {
@@ -120,6 +123,28 @@ static void wav_head(FILE *f, long rate, long frames)
 /* Hand this block to whoever is listening: the card, or the file. */
 static int dev_write(const short *pcm, long n)
 {
+    static short scaled[PLAY_SEQ_FRAMES];
+    long         i;
+
+    /* A master trim, in percent, for matching another synthesiser's
+       level. The bank's own chain is velocity squared, the region's
+       gain in decibels and the channel volume, and none of THAT is what
+       this is: it is the one number that is not in the file, because
+       what a system synthesiser does with the same events is its own
+       business and is not written down anywhere. Applied here rather
+       than in the mixer so that the sample the mixer works in is the
+       one the bank stores. */
+    if (g_gain != 100L && n <= PLAY_SEQ_FRAMES) {
+        for (i = 0; i < n; i++) {
+            long v = (long)pcm[i] * g_gain / 100L;
+            if (v > 32767L)
+                v = 32767L;
+            if (v < -32768L)
+                v = -32768L;
+            scaled[i] = (short)v;
+        }
+        pcm = scaled;
+    }
     if (g_wav != NULL) {
         if (fwrite(pcm, sizeof(short), (size_t)n, g_wav) != (size_t)n)
             return 0;
@@ -127,6 +152,83 @@ static int dev_write(const short *pcm, long n)
         return 1;
     }
     return lz_ui_wave_write(pcm, n);
+}
+
+/* Play through the machine's own synthesiser: the same reader and the
+ * same events the wavetable path renders, handed to the MIDI mapper as a
+ * stream instead. This is the only way to hear what the SYSTEM engine
+ * makes of a piece, which is what a bank has to be judged against - not
+ * another bank.
+ *
+ * The device is the clock here too, but a stream has no blocking write:
+ * the wait is for a buffer to come back. Two are kept in flight and the
+ * loop blocks on the older one, so the piece is neither cut off at a
+ * chunk boundary nor run ahead of the sound.
+ *
+ * Returns 0 when the piece could not be played at all, 1 once it has. */
+static int play_system(const unsigned char *img, long len, int instrument,
+                       int volume, long speed)
+{
+    static unsigned long ev[LZ_SMF_CHUNK_EVENTS + 3];
+    LZSmfReader    rd;
+    unsigned long  prev = 0, us;
+    lz_i64         want;
+    int            slot = 0, n, sent = 0, started = 0, i;
+
+    if (lz_smf_open(&rd, img, len, instrument, volume) != LZ_SMF_OK) {
+        printf("not a MIDI file this player can read\n");
+        return 0;
+    }
+    if (!lz_ui_midi_open(NULL, LZ_SMF_DIVISION)) {
+        printf("no system MIDI device\n");
+        return 0;
+    }
+    /* smf.c has already folded the file's tempo map into the ticks, so
+       exactly one tempo is left to state: the reference that fold used,
+       divided by the speed in thousandths. The multiply is 64-bit
+       because the reference is a 24-bit field's worth of microseconds
+       and a thousand of those overflows a 32-bit long; the event's own
+       parameter is 24 bits, so it is masked on the way back down. */
+    want = (lz_i64)rd.us_qn0 * LZ_I64_C(1000) / (lz_i64)speed;
+    us = (unsigned long)want & 0xFFFFFFUL;
+
+    for (;;) {
+        while (!lz_ui_midi_slot_free(slot))
+            Sleep(1);
+        /* The FIRST chunk carries the tempo, at the head of it. Every
+           later one carries only events: the map is gone, so the tempo
+           cannot change. */
+        n = lz_smf_chunk(&rd, ev + (sent ? 0 : 3),
+                         LZ_SMF_CHUNK_EVENTS - (sent ? 0 : 1), &prev);
+        if (n == 0)
+            break;
+        if (!sent) {
+            ev[0] = 0UL;
+            ev[1] = 0UL;
+            ev[2] = (LZ_UI_MEVT_TEMPO << 24) | us;
+        }
+        if (!lz_ui_midi_send(slot, ev,
+                             (unsigned long)(n + (sent ? 0 : 1)) * 3UL * 4UL)) {
+            printf("the device refused a chunk\n");
+            break;
+        }
+        if (!started) {
+            lz_ui_midi_go();
+            started = 1;
+        }
+        sent++;
+        slot = (slot + 1) % LZ_UI_MIDI_SLOTS;
+    }
+    /* What is still queued is still playing. Waiting for both slots is
+       waiting for the piece to end, where closing the stream here would
+       cut it off at the last chunk boundary. */
+    if (started) {
+        for (i = 0; i < LZ_UI_MIDI_SLOTS; i++)
+            while (!lz_ui_midi_slot_free(i))
+                Sleep(1);
+    }
+    lz_ui_midi_close();
+    return 1;
 }
 
 static unsigned char *slurp(const char *path, long *len)
@@ -201,7 +303,7 @@ int main(int argc, char **argv)
     const char    *path = NULL, *bankpath = "banks\\kk98.ksb", *wavpath = NULL;
     long           rate = 44100L, limit = 0L, banklen = 0L, imglen = 0;
     long           speed = 1000L; /* thousandths, 1000 is the written tempo */
-    int            i, rc, prog = -1, list = 0;
+    int            i, rc, prog = -1, list = 0, sysmode = 0, dev = -1;
     int            instrument = LZ_MUSIC_AS_WRITTEN, volume = 100;
     KsbBank        bank;
     LZSmfReader    rd;
@@ -220,6 +322,12 @@ int main(int argc, char **argv)
             speed = parse_speed(argv[++i]);
         } else if (!strcmp(argv[i], "--wav") && i + 1 < argc) {
             wavpath = argv[++i];
+        } else if (!strcmp(argv[i], "--sys")) {
+            sysmode = 1;
+        } else if (!strcmp(argv[i], "--gain") && i + 1 < argc) {
+            g_gain = atol(argv[++i]);
+        } else if (!strcmp(argv[i], "--dev") && i + 1 < argc) {
+            dev = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--list")) {
             list = 1;
         } else if (argv[i][0] == '-') {
@@ -233,7 +341,8 @@ int main(int argc, char **argv)
     }
     if (!path && !list) {
         printf("usage: kunkun98-play [--bank F] [--rate N] [--prog N] "
-               "[--speed S] [--wav F] [--list] <file.mid> [seconds]\n");
+               "[--speed S] [--gain N] [--dev N] [--wav F] [--sys] "
+               "[--list] <file.mid> [seconds]\n");
         return 2;
     }
     if (rate < 8000L || rate > 48000L) {
@@ -243,6 +352,30 @@ int main(int argc, char **argv)
     if (speed <= 0L) {
         printf("--speed must be a positive number of thousandths\n");
         return 2;
+    }
+    if (sysmode && wavpath != NULL) {
+        printf("--wav renders the bank's own sampler; it cannot be "
+               "combined with --sys\n");
+        return 2;
+    }
+
+    /* The system engine needs no bank at all - that is the whole point of
+       comparing against it - so this is answered before one is read. */
+    if (sysmode && path != NULL) {
+        g_midimg = slurp(path, &imglen);
+        if (g_midimg == NULL) {
+            printf("cannot open %s\n", path);
+            return 1;
+        }
+        if (instrument == LZ_MUSIC_AS_WRITTEN) {
+            static LZSmfReader scratch;
+            instrument = lz_smf_opening_program(&scratch, g_midimg, imglen);
+        }
+        printf("%s -> system MIDI, program %d, speed %ld/1000\n", path,
+               instrument, speed);
+        play_system(g_midimg, imglen, instrument, volume, speed);
+        free(g_midimg);
+        return 0;
     }
 
     g_bankimg = slurp(bankpath, &banklen);
@@ -322,6 +455,7 @@ int main(int argc, char **argv)
         printf("%s -> %s at %ld Hz, %s, speed %ld/1000\n", path, wavpath,
                rate, bankpath, speed);
     } else {
+        lz_ui_wave_device(dev);
         if (!lz_ui_wave_open(rate)) {
             printf("no sound device at %ld Hz\n", rate);
             return 1;

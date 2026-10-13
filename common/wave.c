@@ -2,6 +2,8 @@
 #include "../src/lz_int.h"
 #include "wave.h"
 #include "fir_table.h"
+#include "pow2_table.h"
+#include "sin_table.h"
 
 #define DRUM_CH      9      /* GM channel 10, one-based */
 #define GAIN_ONE  65536L
@@ -115,6 +117,18 @@ typedef struct {
     long  attack_left, attack_inc, attack_env;
     int   phase;            /* 0 attack, 1 decay/sustain, 2 release */
     int   tick;             /* frames until the next envelope step */
+    /* THE MOD LFO, which is what moves the pitch while a note sounds.
+       The phase is 32 bit and a frame adds lfo_inc to it, so the rate
+       is the top byte of the phase per frame and does not depend on
+       buffer size. lfo_pitch is the DEPTH in cents at full swing - 48
+       on gm.dls's piano, 725 on its leads - and base_step is the step
+       the note would have with no modulation at all, so a depth of
+       zero leaves the pitch exactly where the static parameters put it. */
+    unsigned long lfo_phase;
+    long  lfo_inc;
+    long  lfo_pitch;
+    long  lfo_delay;        /* frames until the LFO starts at all */
+    long  base_step;
     int   ch, note;
     int   held;             /* still down, or held by the pedal */
     /* Voice-stealing order only, not a duration - a plain count, so it
@@ -219,6 +233,36 @@ static long pitch_mantissa(long cents, int *octave)
 /* dB to a 16.16 factor, for the small negative trims a bank carries.
    -6 dB is a half, and the table walks down in whole decibels; the
    bank's values are all whole or half decibels of attenuation. */
+/* 2^(cents/1200) in 16.16, which is what a DLS pitch offset or a DLS
+   time offset IS. The bank states them in cents - 1200 to the octave -
+   and every modulation this file has to apply needs one of them: a
+   vibrato depth is cents of pitch, a key's effect on decay is cents of
+   time, and the mod LFO's own rate is time cents to a frequency.
+
+   Octaves are peeled off by integer division and the remainder is one
+   lookup, so it costs a division and an array read - not a logarithm,
+   which is the thing this file does not have. A quarter of a percent
+   worst case: measured against the exact value, 48 cents comes out
+   1.027451 against 1.028114 and 725 comes out 1.517365 against 1.5201,
+   both of which are under one cent. */
+static long cents_gain(int cents)
+{
+    int oct, rem;
+    long g;
+
+    if (cents <= -12000) return 0L;
+    if (cents >= 12000) return 65536L;
+    oct = cents / 1200;
+    rem = cents - oct * 1200;
+    if (rem < 0) { oct--; rem += 1200; }
+    g = pow2_frac[rem * 256 / 1200];
+    if (oct > 0)
+        g <<= oct;
+    else if (oct < 0)
+        g >>= -oct;
+    return g;
+}
+
 static long db_gain(int db)
 {
     static const long tab[13] = {
@@ -234,7 +278,7 @@ static void start(int ch, int note, int vel)
 {
     KsbZone z;
     Voice *v;
-    long cents, base, step, mant;
+    long cents, base, step, mant, dec, atk;
     int slot, oct;
 
     if (ksb_zone(g_bank, g_ch[ch].program, note, &z) != 0) {
@@ -280,6 +324,28 @@ static void start(int ch, int note, int vel)
     if (step < 1L) step = 1L;
     v->step = step >> 16;
     v->sfrac = (unsigned long)(step & 0xFFFFL);
+    /* THE MOD LFO. Its rate is stated in the same cents the envelope is,
+       so cents_gain turns it into a frequency in 16.16, and an increment
+       is the phase one frame is worth - that frequency times 2^16 over
+       the sample rate. The delay is read the same way into a frame
+       count, and it counts down before the phase starts moving, so a
+       0.33 s delay really is 0.33 s of a note without vibrato in it.
+       A depth of zero leaves the step exactly where the static
+       parameters put it, which is what the leads and the harp ask for
+       by having no modLfo -> pitch connection at all. */
+    v->base_step = step;
+    v->lfo_pitch = z.lfo_pitch_tc;
+    v->lfo_phase = 0UL;
+    v->lfo_inc = 0L;
+    v->lfo_delay = 0L;
+    if (z.lfo_pitch_tc != 0) {
+        long freq = cents_gain(z.lfo_tc);
+        if (freq > 0)
+            v->lfo_inc = (long)(((lz_i64)freq << 16) / (lz_i64)g_rate);
+        v->lfo_delay = (long)((lz_i64)cents_gain(z.lfo_delay_tc)
+                              * (lz_i64)g_rate / 65536L);
+        if (v->lfo_delay < 0L) v->lfo_delay = 0L;
+    }
 
     /* Velocity squared: MIDI velocity is a loudness the player feels,
        not an amplitude, and a linear map makes everything quiet sound
@@ -289,15 +355,44 @@ static void start(int ch, int note, int vel)
 
     v->atten = 0L;
     v->sustain = (long)z.sustain_cb << 16;
-    v->rate_dec = env_rate((long)z.decay_ms, g_rate);
+    /* THE ENVELOPE AS THE REGION MODULATES IT, not as the static
+       parameters alone state it.
+
+       keyNum -> decay appears 235 times on gm.dls and is the reason a
+       low piano note rings while a high one dies: -3979 time cents
+       across the key range is a factor of ten between the two ends of
+       the keyboard. Taking the static decay alone plays every note at
+       one length, which is not what the instrument does - the top of
+       the keyboard reads a tenth of its own decay time.
+
+       velocity -> attack is the same thing on the way in, 27 of them.
+
+       The conversion needs no logarithm: adding cents to a time on one
+       side is multiplying that time on the other, because
+       2^(a+b) = 2^a * 2^b. So one multiply through cents_gain. The
+       sources are note/127 and vel/127 - not bipolar, which is what
+       usTransform says for all seven modulator pairs in this bank. */
+    dec = (long)z.decay_ms;
+    atk = (long)z.attack_ms;
+    if (z.key_decay_tc) {
+        int extra = (int)((long)z.key_decay_tc * note / 127L);
+        dec = dec * cents_gain(extra) >> 16;
+        if (dec < 1L) dec = 1L;
+    }
+    if (z.vel_attack_tc && atk > 0L) {
+        int extra = (int)((long)z.vel_attack_tc * vel / 127L);
+        atk = atk * cents_gain(extra) >> 16;
+        if (atk < 1L) atk = 1L;
+    }
+    v->rate_dec = env_rate(dec, g_rate);
     v->rate_rel = env_rate((long)z.release_ms, g_rate);
     v->tick = ENV_STEP;
-    if (z.attack_ms > 0) {
+    if (atk > 0) {
         v->phase = 0;
         v->attack_env = 0L;
         /* Divided down first: a 65-second attack times 48000 is 3.1e9,
            which a 32-bit long does not hold. */
-        v->attack_left = (long)z.attack_ms * (g_rate / 1000L);
+        v->attack_left = atk * (g_rate / 1000L);
         if (v->attack_left < 1L) v->attack_left = 1L;
         v->attack_inc = GAIN_ONE / (v->attack_left / ENV_STEP + 1L);
     } else {
@@ -469,7 +564,7 @@ static long interp(const Voice *v, long pos, unsigned long frac)
 
 static void mix(long *acc, long frames)
 {
-    long i, s, g, cg, env;
+    long i, s, g, cg, env, vg, eg;
     int j;
     Voice *v;
 
@@ -478,10 +573,35 @@ static void mix(long *acc, long frames)
         v = &g_v[j];
         if (!v->pcm) continue;
         /* Channel volume and expression fold in per block rather than
-           at note-on, so a fader move is heard on notes already down. */
-        cg = (long)g_ch[v->ch].volume * (long)g_ch[v->ch].expression
-             * GAIN_ONE / (127L * 127L);
-        cg >>= 8;
+           at note-on, so a fader move is heard on notes already down.
+           BOTH ARE SQUARED, and that is the standard rather than a
+           taste: the recommended curve for controller 7 is
+           40*log10(cc/127) dB, which is (cc/127) SQUARED as an
+           amplitude, and expression is on the same one. Velocity is
+           squared at note-on for the same reason. A note's level is
+           therefore the square of the product of the three, which is
+           what a system synthesiser playing the same events arrives at
+           - and the level is what has to agree before anything else
+           about the two can be compared. */
+        vg = (long)g_ch[v->ch].volume * (long)g_ch[v->ch].volume;
+        eg = (long)g_ch[v->ch].expression * (long)g_ch[v->ch].expression;
+        /* 16.16 down to the 8.8 that the mix below multiplies in, and
+           then the two 8.8 factors back to one. */
+        cg = (vg * GAIN_ONE / (127L * 127L)) >> 8;
+        eg = (eg * GAIN_ONE / (127L * 127L)) >> 8;
+        cg = (cg * eg) >> 8;
+        /* AND NOT THE MASTER FACTOR. A reference implementation of this
+           same bank - SpessaSynth - multiplies everything it renders by
+           0.6, SPESSASYNTH_GAIN_FACTOR, so that it "does not stay too
+           loud". It was copied here for a while and it was wrong:
+           capturing the two players through the device's own loopback
+           and comparing them shows our signal 21 dB below the system's
+           while our noise floor is 7 dB LOWER, so every "hiss" reported
+           was our signal sitting too close to a fixed floor rather than
+           anything added. 0.6 is a level choice one synthesiser makes,
+           not something in the format, and the thing being matched here
+           is the machine's own synthesiser, which does not make it. */
+        cg = (cg * 65536L) >> 16;
         env = (db_gain_tenths(v->atten >> 16) >> 8) * (v->attack_env >> 8);
         for (i = 0; i < frames; i++) {
             s = interp(v, v->pos, v->frac);
@@ -495,12 +615,40 @@ static void mix(long *acc, long frames)
             v->frac += v->sfrac;
             v->pos += v->step + (long)(v->frac >> 16);
             v->frac &= 0xFFFFUL;
+            /* THE LFO'S PHASE, once a frame. While there is a delay to
+               count it stays at zero and sin_tbl[0] is 0, so the pitch
+               comes out exactly as the static parameters said - which is
+               the same as having no LFO at all. */
+            if (v->lfo_delay > 0) {
+                v->lfo_delay--;
+            } else if (v->lfo_inc != 0) {
+                v->lfo_phase += (unsigned long)v->lfo_inc;
+            }
             if (v->pos >= v->end) {
                 if (v->loop_len <= 0) { v->pcm = 0; break; }
                 do { v->pos -= v->loop_len; } while (v->pos >= v->end);
             }
             if (--v->tick <= 0) {
                 v->tick = ENV_STEP;
+                /* THE PITCH THE LFO ASKS FOR, applied on the envelope's
+                   own step rather than every frame: 32 frames is 1.45 ms
+                   at 22050 and an LFO turning at 0.6 Hz does not travel
+                   enough in that to be heard as a step. The depth is in
+                   cents and the swing is the oscillator scaled to
+                   +-32767, so the result is a cent count that
+                   cents_gain turns into the same kind of multiplier the
+                   envelope times use. The product is 32.32 and needs a
+                   64-bit middle - 65536 for a step of 1.0 times a
+                   2.0 gain is 8.6e9, which a 32-bit long is not. */
+                if (v->lfo_pitch != 0 && v->lfo_inc != 0) {
+                    int sc = (int)((long)v->lfo_pitch
+                                   * (long)sin_tbl[v->lfo_phase >> 24]
+                                   >> 15);
+                    long st = (long)(((lz_i64)v->base_step
+                                      * cents_gain(sc)) >> 16);
+                    v->step = st >> 16;
+                    v->sfrac = (unsigned long)(st & 0xFFFFL);
+                }
                 if (v->phase == 0) {
                     v->attack_env += v->attack_inc;
                     if (v->attack_env >= GAIN_ONE) {

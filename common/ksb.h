@@ -71,6 +71,39 @@ typedef struct {
     int   decay_ms;
     int   release_ms;
     int   sustain_cb;           /* tenths of a dB of attenuation */
+    /* A MODULATION envelope: the same four, on the same units, but
+       targeting whatever the region modulates rather than the volume.
+       gm.dls sets these on every instrument, so an instrument with an
+       empty modulation envelope reads back as decay 0 and attenuation
+       960 - no modulation held - rather than as an invented shape. */
+    int   mattack_ms;
+    int   mdecay_ms;
+    int   mrelease_ms;
+    int   msustain_cb;          /* tenths of a dB of attenuation */
+    /* Where the note sits between the channels, in tenths of a percent:
+       -500 is hard left, 0 centre, 500 hard right. Measured over
+       gm.dls it spans -433..433, so a short covers it. It is inert
+       until the player has a second channel to pan between, which is
+       why it sat unreadable while the record was 16 bytes. */
+    int   pan;
+    /* The mod LFO, both in time cents as the source records them: the
+       frequency is 2^(lfo_tc/1200) Hz and the delay is
+       2^(lfo_delay_tc/1200) seconds. -32768 is the lowest value DLS can
+       hold and reads as an essentially zero delay. */
+    int   lfo_tc;
+    int   lfo_delay_tc;
+    /* The DEPTH each modulator is given, because the depth lives on the
+       connection that carries it and not on either endpoint. Units are
+       the source's own: cents where the target is pitch, decibels where
+       it is gain, and time cents across the source's full range where
+       it is a time. Over gm.dls these are what a bank built by only
+       reading static parameters was missing - modLfo -> pitch alone
+       appears 890 times, and it is the vibrato. */
+    int   lfo_pitch_tc;          /* modLfo -> pitch, cents */
+    int   lfo_gain;              /* modLfo -> gain, dB */
+    int   env_pitch_tc;          /* modEnv -> pitch, cents */
+    int   key_decay_tc;          /* keyNum -> decay, time cents */
+    int   vel_attack_tc;         /* velocity -> attack, time cents */
 } KsbZone;
 
 #define KSB_MAXSAMPLES 512

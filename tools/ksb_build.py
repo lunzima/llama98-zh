@@ -200,13 +200,33 @@ def resample(x, pos, ratio, taps=32, beta=9.0, wrap=None):
     return out * cut
 
 
-# DLS articulation destinations, the four that decide a note's shape.
+# DLS articulation destinations that a STATIC connection (src == control
+# == none) can carry. The four EG1 ones were all this file ever read;
+# modEnv, the mod LFO and pan are static on gm.dls too and were dropped
+# silently, so a bank built from it lacked every slow modulation the
+# sound has.
+#
+# The unit of `scale` for each, from SpessaSynth's conversion of the
+# same chunk (its `shortScale` is `scale >> 16`, which is the same
+# number this file gets by dividing by 65536):
+#
+#   volEnv/modEnv times  time cents, 2^(v/1200) seconds
+#   both sustains        0.1 percent of the level
+#   pan                  0.1 percent, -500..500 is the full span
+#   mod LFO freq/delay   time cents, the same as an envelope time
 DST_EG1 = {0x0206: 'attack', 0x0207: 'decay', 0x0209: 'release',
            0x020A: 'sustain'}
+DST_STATIC = {
+    0x0206: 'attack', 0x0207: 'decay', 0x0209: 'release',
+    0x020A: 'sustain',
+    0x030A: 'mattack', 0x030B: 'mdecay', 0x030D: 'mrelease',
+    0x030E: 'msustain',
+    0x0004: 'pan', 0x0104: 'lfofreq', 0x0105: 'lfodelay',
+}
 
 
 def envelope(d, a, b):
-    """-> (attack ms, decay ms, sustain 0..255, release ms) or None.
+    """-> dict of every STATIC articulator, or None.
 
     WITHOUT THIS EVERY NOTE IS AN ORGAN NOTE. Both banks' pianos loop
     for ever and declare EG1_SUSTAIN = 0% with a decay of twenty to
@@ -244,14 +264,31 @@ def envelope(d, a, b):
         return None
     cb, n = struct.unpack('<II', d[aa:aa + 8])
     got = {}
+    mod = {}
     for i in range(n):
         src, ctl, dst, tr, sc = struct.unpack(
             '<HHHHi', d[aa + cb + i * 12:aa + cb + i * 12 + 12])
-        # Only the unmodulated connection. The others are the same
-        # destination scaled by key number or velocity, and taking one
-        # of those as the value gives a decay that depends on nothing.
-        if src == 0 and ctl == 0 and dst in DST_EG1:
-            got[DST_EG1[dst]] = sc
+        if src == 0 and ctl == 0:
+            # Only the unmodulated connection for the static values. The
+            # others are the same destination scaled by key number or
+            # velocity, and taking one of those as the value gives a
+            # decay that depends on nothing.
+            if dst in DST_STATIC:
+                got[DST_STATIC[dst]] = sc
+        else:
+            # A modulator, kept by its own pair: gm.dls's largest is
+            # modLfo -> pitch, 890 of them, which is the vibrato every
+            # instrument in this bank has and none of them was read.
+            key = (src & 0xFF, dst)
+            mod[key] = mod.get(key, 0) + sc
+
+    def sh(key, default=0):
+        """A modulator's amount, as it stands: cents for pitch, dB for
+        gain, and time cents per full-scale source for a time."""
+        if key not in mod:
+            return default
+        v = int(round(mod[key] / 65536.0))
+        return max(-32768, min(32767, v))
 
     def ms(key, default):
         if key not in got:
@@ -259,14 +296,38 @@ def envelope(d, a, b):
         return int(max(0.0, min(65.0, 2.0 ** (got[key] / 65536.0 / 1200.0)))
                    * 1000.0)
 
-    frac = got.get('sustain', 1000 * 65536) / 65536.0 / 1000.0
-    if frac >= 1.0:
-        sus_cb = 0
-    elif frac <= 0.0:
-        sus_cb = 960
-    else:
-        sus_cb = min(960, int(round(-200.0 * math.log10(frac))))
-    return (ms('attack', 0), ms('decay', 65000), ms('release', 200), sus_cb)
+    def tc(key, default):
+        """A time-cents value kept as time cents, not as milliseconds."""
+        if key not in got:
+            return default
+        v = int(round(got[key] / 65536.0))
+        return max(-32768, min(32767, v))
+
+    def sus(key, default=0):
+        frac = got.get(key, 1000 * 65536) / 65536.0 / 1000.0
+        if frac >= 1.0:
+            return 0
+        if frac <= 0.0:
+            return 960
+        return min(960, int(round(-200.0 * math.log10(frac))))
+
+    return {
+        'attack': ms('attack', 0), 'decay': ms('decay', 65000),
+        'release': ms('release', 200), 'sustain': sus('sustain'),
+        'mattack': ms('mattack', 0), 'mdecay': ms('mdecay', 65000),
+        'mrelease': ms('mrelease', 200), 'msustain': sus('msustain'),
+        'pan': max(-32768, min(32767, int(round(got.get('pan', 0)
+                                                / 65536.0)))),
+        'lfofreq': tc('lfofreq', 0),
+        'lfodelay': tc('lfodelay', -32768),
+        # Modulator amounts, by their own (source, destination) pair.
+        # DLS source ids: modLfo 1, velocity 2, keyNum 3, modEnv 5.
+        'lpitch': sh((0x01, 0x0003)),    # vibrato depth, cents
+        'lgain': sh((0x01, 0x0001)),     # tremolo depth, dB
+        'mpitch': sh((0x05, 0x0003)),    # pitch envelope depth, cents
+        'kdecay': sh((0x03, 0x0207)),    # decay per key, time cents
+        'vatk': sh((0x02, 0x0206)),      # attack per velocity, time cents
+    }
 
 
 def bandwidth(x, rate, frac):
@@ -420,9 +481,6 @@ def main(argv):
                     turns = 1
                     while ll2 * turns < 512:
                         turns += 1
-                    turns = 1
-                    while ll2 * turns < 512:
-                        turns += 1
                     # The span is what gets stored; `ll` stays the
                     # real loop, because that is what the filter
                     # folds its taps into and folding over the
@@ -472,10 +530,26 @@ def main(argv):
             # the same way its wsmp does.
             eg = renv if renv is not None else ienv
             if eg is None:
-                eg = (0, 65000, 200, 0)
+                # No articulation at all: the EG1 four are what was
+                # always written, the rest say there is no modulation.
+                eg = {'attack': 0, 'decay': 65000, 'release': 200,
+                      'sustain': 0, 'mattack': 0, 'mdecay': 65000,
+                      'mrelease': 200, 'msustain': 0, 'pan': 0,
+                      'lfofreq': 0, 'lfodelay': -32768,
+                      'lpitch': 0, 'lgain': 0, 'mpitch': 0,
+                      'kdecay': 0, 'vatk': 0}
+            # THE wsmp's GAIN IS NOT IN DECIBELS. It is in 32-bit relative
+            # gain units of 1/655360 dB, which is a tenth of a decibel as
+            # 16.16 - so the number in the file is a DECIBEL TIMES 655360,
+            # and reading it as a decibel attenuated every sample in this
+            # bank by whatever the low three bytes happened to hold. On
+            # gm.dls that is -4 to -12, i.e. four to twelve decibels of
+            # attenuation that the bank never asked for, on every wave.
+            # The reference reader divides; so does this now.
+            gain_db = int(round(gain / 655360.0))
             regions.append((klo, khi, smap[key], unity,
                             max(-128, min(127, int(round(fine)))),
-                            max(-128, min(127, int(round(gain)))), eg))
+                            max(-128, min(127, gain_db)), eg))
 
     out = bytearray()
     out += MAGIC
@@ -487,8 +561,22 @@ def main(argv):
     for prog, first, n in inst_rows:
         out += struct.pack('<BBH', prog, n, first)
     for klo, khi, si, unity, fine, gain, eg in regions:
+        # REGION RECORD, 30 BYTES. The first eight are what they always
+        # were; the next eight are the volume envelope, as before. What
+        # is new is a modulation envelope, a pan and a mod LFO - all of
+        # which gm.dls carries on every instrument and which a reader
+        # that only kept EG1 dropped without saying so. Every field is
+        # 16 bit because the source values fit: measured over gm.dls,
+        # pan spans -433..433 in 0.1%, the LFO times span -32768..1419
+        # time cents, and no envelope time exceeds 40 s.
         out += struct.pack('<BBHBbbB', klo, khi, si, unity, fine, gain, 0)
-        out += struct.pack('<HHHH', eg[0], eg[1], eg[2], eg[3])
+        out += struct.pack('<HHHH', eg['attack'], eg['decay'],
+                           eg['release'], eg['sustain'])
+        out += struct.pack('<HHHH', eg['mattack'], eg['mdecay'],
+                           eg['mrelease'], eg['msustain'])
+        out += struct.pack('<hhh', eg['pan'], eg['lfofreq'], eg['lfodelay'])
+        out += struct.pack('<hhhhh', eg['lpitch'], eg['lgain'],
+                           eg['mpitch'], eg['kdecay'], eg['vatk'])
     for o, n, ls, ll, rate, cod, spare in samples:
         out += struct.pack('<IIIIHBB', o, n, ls, ll, rate, cod, spare)
     head = len(out)

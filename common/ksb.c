@@ -4,13 +4,22 @@
 
 #define HDR      16
 #define INST_SZ   4
-#define REG_SZ   16
+#define REG_SZ   40
 #define SMP_SZ   20
 
 /* Little-endian, assembled a byte at a time. See the header. */
 static int rd16(const unsigned char *p)
 {
     return (int)p[0] | ((int)p[1] << 8);
+}
+
+/* The same 16 bits as a signed value: pan and the LFO times are signed
+   in the record, and a value like -32768 would otherwise read as an
+   envelope time of 65536 ms. */
+static int rd16s(const unsigned char *p)
+{
+    int v = rd16(p);
+    return (v & 0x8000) ? v - 0x10000 : v;
 }
 
 /* Exactly 32 bits, signed. The `off < 0` and `n < 1` checks below only reject
@@ -303,6 +312,28 @@ int ksb_zone(const KsbBank *b, int program, int note, KsbZone *z)
         z->decay_ms   = rd16(r + 10);
         z->release_ms = rd16(r + 12);
         z->sustain_cb = rd16(r + 14);
+        /* And what the region says about how it MOVES: a modulation
+           envelope, a pan, and a mod LFO. gm.dls carries all three on
+           every instrument; a record that was 16 bytes had room for
+           none of them, so they were read as far as the struct and
+           dropped. 30 bytes now. */
+        z->mattack_ms   = rd16(r + 16);
+        z->mdecay_ms    = rd16(r + 18);
+        z->mrelease_ms  = rd16(r + 20);
+        z->msustain_cb  = rd16(r + 22);
+        z->pan          = rd16s(r + 24);
+        z->lfo_tc       = rd16s(r + 26);
+        z->lfo_delay_tc = rd16s(r + 28);
+        /* The depth of each modulator, kept as the source states it:
+           cents for a pitch depth, decibels for a gain depth, and time
+           cents per full-scale source for a time. gm.dls's largest is
+           modLfo -> pitch at 890 of them, which is a vibrato six
+           semitones wide. */
+        z->lfo_pitch_tc  = rd16s(r + 30);
+        z->lfo_gain      = rd16s(r + 32);
+        z->env_pitch_tc  = rd16s(r + 34);
+        z->key_decay_tc  = rd16s(r + 36);
+        z->vel_attack_tc = rd16s(r + 38);
         return 0;
     }
     return -1;
