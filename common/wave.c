@@ -3,6 +3,7 @@
 #include "wave.h"
 #include "fir_table.h"
 #include "pow2_table.h"
+#include "pan_table.h"
 
 #define DRUM_CH      9      /* GM channel 10, one-based */
 #define GAIN_ONE  65536L
@@ -347,19 +348,28 @@ static long lfo_tri(unsigned long phase)
     return 32768L - 4L * d;                /* -32768 at the ends, + at the top */
 }
 
+/* Where a note sits between the channels: -500 hard left, 0 centre,
+   +500 hard right, the unit being tenths of a percent.
+
+   EQUAL POWER, not a straight ramp. The two halves are the cos and the
+   sin of the same angle, so the power a note carries does not move with
+   it - a centred note comes out at 0.707 of each channel and the sum of
+   the two squares is the whole. The straight form that was here kept
+   the centre at full on both and ramped the far side instead, which
+   moves a centred note's level by up to 6 dB depending only on where a
+   bank happens to put its pan. The reference player does not do that. */
 static void pan_gains(int pan, long *gl, long *gr)
 {
-    long full = GAIN_ONE;
     int  p = pan;
 
     if (p < -500) p = -500;
     if (p > 500) p = 500;
-    if (p >= 0) {
-        *gl = full * (500L - p) / 500L;
-        *gr = full;
-    } else {
-        *gl = full;
-        *gr = full * (500L + p) / 500L;
+    /* -500..500 out to 0..1024, and the table is 8.8, so it is doubled
+       back into the 16.16 the mix multiplies in. */
+    {
+        int i = (p + 500) * (PAN_POINTS - 1) / 1000;
+        *gl = (long)pan_left[i] << 1;
+        *gr = (long)pan_right[i] << 1;
     }
 }
 
