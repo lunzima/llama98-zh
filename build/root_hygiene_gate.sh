@@ -55,15 +55,26 @@ src
 # release rules in CLAUDE.md. tmp-wsl/ is the scratch directory the
 # agent temp-file hook redirects writes to instead of %TEMP%, so it is
 # recreated by design; .gitignore carries the same reason.
+#
+# banks/ is the built sample bank and belongs to the same rule as music/:
+# the front end plays from a directory beside the executable, and the bank
+# is material with a source of its own - 46 MB of DLS, ripped, that a
+# player never carries.
+#
+# tools/ holds the bank's producer and the two DLS readers it needs.
+# Same rule as make_lz4.py: the tree ships a reader, and shipping it does
+# not make its writer part of the engine.
 LOCAL="
 .claude
 .git
 .prof
 CLAUDE.md
+banks
 docs
 gates.mk
 music
 tmp-wsl
+tools
 "
 
 # Build products the Makefile writes here by design, and the runtime ini

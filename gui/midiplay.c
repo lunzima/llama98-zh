@@ -3,11 +3,14 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <process.h>    /* _beginthreadex, which the worker thread uses too */
 
 #include "compat.h"     /* lz_time_ms - the stamps on the trace's lines */
 #include "compat40.h"
 #include "music.h"
 #include "smf.h"
+#include "ksb.h"
+#include "wave.h"
 
 /* The image is allocated to fit the FILE, not to a fixed size - the
  * reader holds cursors into it, so it has to stay resident, and the
@@ -32,7 +35,10 @@ static int   g_opened;          /* the device is open */
 static int   g_tried;           /* and we have stopped asking */
 static int   g_playing;
 static int   g_loop;
-static int   g_ratio = LZ_MUSIC_RATIO_ONE;
+/* Written by the window thread and read by the music thread, which is why
+ * it is volatile: a cache of it in the render loop would hold the whole
+ * piece at the speed the piece started at. */
+static volatile int g_ratio = LZ_MUSIC_RATIO_ONE;
 /* Buffers the device still owes a notification for - see
  * lz_music_own_done for the defect these exist to stop. */
 static int   g_pending;
@@ -582,11 +588,203 @@ int lz_midi_system_ok(HWND notify) {
     return g_opened;
 }
 
-int lz_midi_wave_ok(void) {
-    /* Not unwritten code: the player exists and the bank format
-       carries a codec field. The compressed audio format is what is
-       missing, so there is no bank to read. */
+/* ---- the wavetable engine ----
+ *
+ * The same event stream the system engine sends to a device, rendered
+ * instead. lz_smf_next hands out one channel message at a time with its tick
+ * already scaled and trimmed, so this inherits the tempo fold, the forced
+ * program and the lead trim rather than re-deriving any of them - and the two
+ * engines cannot disagree about the clock, because there is one clock.
+ *
+ * THE DEVICE IS THE CLOCK. lz_ui_wave_write blocks until the card has room,
+ * which is exactly how long the block takes to play, so the loop below never
+ * asks what time it is and never sleeps. A piece renders as fast as it plays
+ * and no faster.
+ *
+ * ONE INSTRUMENT. The bank is expanded for the program in force when the
+ * piece starts and held for the whole of it, which is why AS_WRITTEN is
+ * resolved to the file's opening program before the reader is opened rather
+ * than being passed through.
+ *
+ * The thread owns the reader and the device for the length of the piece. The
+ * window thread only sets g_wstop and moves g_ratio, which is why a ratio
+ * change lands at the next event rather than at the next block. */
+
+#define LZ_WAVE_BLOCK 1024
+/* Beside the executable, like music/ and for the same reason: the
+ * deliverable is often a directory somebody copied onto a machine. */
+#define LZ_WAVE_BANK  "banks\\kk98.ksb"
+
+static int        g_engine = LZ_MUSIC_ENGINE_SYSTEM;
+static KsbBank    g_wbank;
+static short     *g_wpool;        /* the expanded instrument */
+static int        g_wbank_tried;
+static int        g_wbank_open;
+static int        g_wbank_prog = -1;
+static HANDLE     g_wthread;
+static unsigned   g_wtid;
+static volatile LONG g_wstop;
+static LZSmfReader g_wrd;         /* the reader the thread walks */
+static LZSmfReader g_pre;         /* and a scratch one for the pre-read */
+static int         g_wloop;
+static int         g_wrate = 44100;
+
+/* AS_WRITTEN, resolved: the first program change on a channel that is not
+ * the drum kit, or GM program 0 when the file never states one - which is
+ * what the format's own default is. */
+static int opening_program(const unsigned char *img, long n) {
+    LZSmfEvent ev;
+    if (lz_smf_open(&g_pre, img, n, LZ_MUSIC_AS_WRITTEN, 0) != LZ_SMF_OK)
+        return 0;
+    while (lz_smf_next(&g_pre, &ev)) {
+        if ((ev.msg & 0xF0UL) == 0xC0UL && (ev.msg & 0x0FUL) != 9)
+            return (int)((ev.msg >> 8) & 0x7FUL);
+    }
     return 0;
+}
+
+static int wave_bank_path(char *out, int cap) {
+    char mod[MAX_PATH];
+    int  n = (int)GetModuleFileNameA(NULL, mod, (DWORD)sizeof mod);
+    if (n <= 0 || n >= (int)sizeof mod) return 0;
+    while (n > 0 && mod[n - 1] != '\\' && mod[n - 1] != '/') n--;
+    mod[n] = '\0';
+    if (n + (int)strlen(LZ_WAVE_BANK) >= cap) return 0;
+    strcpy(out, mod);
+    strcat(out, LZ_WAVE_BANK);
+    return 1;
+}
+
+/* Read the bank and open it, once. A bank that is not there stays not there
+ * for the life of the process: it is material somebody either installed
+ * beside the executable or did not, and re-reading it every turn would be a
+ * file open per reply to learn the same thing. */
+static int wave_bank_read(void) {
+    char           path[MAX_PATH];
+    FILE          *f;
+    long           n, got;
+    unsigned char *img;
+
+    if (g_wbank_tried) return g_wbank_open;
+    g_wbank_tried = 1;
+    if (!wave_bank_path(path, (int)sizeof path)) return 0;
+    f = fopen(path, "rb");
+    if (!f) return 0;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 0; }
+    n = ftell(f);
+    if (n <= 0 || n > LZ_MIDI_MAX_FILE) { fclose(f); return 0; }
+    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return 0; }
+    img = (unsigned char *)malloc((size_t)n);
+    if (!img) { fclose(f); return 0; }
+    got = (long)fread(img, 1, (size_t)n, f);
+    fclose(f);
+    if (got != n || ksb_open(&g_wbank, img, n) != KSB_OK) {
+        free(img);
+        return 0;
+    }
+    /* The image outlives the bank and is deliberately never freed: every
+       zone points into it, and a bank freed under a playing piece is worse
+       than a bank held for the life of the process. */
+    g_wbank_open = 1;
+    return 1;
+}
+
+/* The pool the instrument is expanded into, sized once for the largest
+ * instrument the bank carries - which is the figure ksb.h says to size by,
+ * and is 171 KiB on the ten-instrument bank against 632 for the whole of
+ * it. */
+static int wave_pool(void) {
+    long frames;
+    if (g_wpool) return 1;
+    frames = ksb_pcm_max_frames(&g_wbank);
+    if (frames <= 0) return 0;
+    g_wpool = (short *)malloc((size_t)frames * sizeof(short));
+    return g_wpool != NULL;
+}
+
+/* us owed, in thousandths of a frame, and the division's remainder carried
+ * across events. */
+static lz_i64 g_wo1000;
+static lz_i64 g_wcarry;
+
+/* Owe this interval's worth of frames.
+ *
+ * frames = ticks * us_qn * rate * ratio / (LZ_SMF_DIVISION * 1e6 * 1000).
+ * The divisions are ordered so nothing overflows: the largest intermediate
+ * is one interval's, about 9e15, against 9.2e18. The REMAINDER IS CARRIED,
+ * not dropped - a thousandth of a frame per event sounds like nothing until
+ * a piece of a hundred thousand events has lost a hundred frames of it. */
+static void wave_owe(unsigned long ticks) {
+    lz_i64 us1000 = (lz_i64)ticks * (lz_i64)g_wrd.us_qn0 * 1000 / (lz_i64)LZ_SMF_DIVISION;
+    lz_i64 num    = us1000 * (lz_i64)g_wrate * (lz_i64)g_ratio + g_wcarry;
+    g_wo1000 += num / LZ_I64_C(1000000000);
+    g_wcarry = num % LZ_I64_C(1000000000);
+}
+
+/* Render and hand over everything owed, in device-sized pieces. 0 when the
+ * device refused, which ends the piece. */
+static int wave_drain(short *buf) {
+    while (g_wo1000 >= 1000) {
+        long n = (long)(g_wo1000 / 1000);
+        if (g_wstop) return 1;
+        if (n > LZ_WAVE_BLOCK) n = LZ_WAVE_BLOCK;
+        wave_render(buf, n);
+        if (!lz_ui_wave_write(buf, n)) return 0;
+        g_wo1000 -= (lz_i64)n * 1000;
+    }
+    return 1;
+}
+
+static unsigned __stdcall wave_main(void *arg) {
+    short         buf[LZ_WAVE_BLOCK];
+    LZSmfEvent    ev;
+    unsigned long prev = 0;
+
+    (void)arg;
+    if (!lz_ui_wave_open((long)g_wrate)) {
+        g_playing = 0;   /* no device: nothing is playing either way */
+        return 0;
+    }
+    g_wo1000 = 0;
+    g_wcarry = 0;
+    for (;;) {
+        if (g_wstop) break;
+        if (!lz_smf_next(&g_wrd, &ev)) {
+            if (!g_wloop) break;
+            lz_smf_rewind(&g_wrd);
+            prev = 0;
+            continue;
+        }
+        wave_owe(ev.tick - prev);
+        prev = ev.tick;
+        if (!wave_drain(buf)) break;
+        wave_message(ev.msg);
+    }
+    /* A second of tail, so the release of the last chord is rendered rather
+       than cut off. What has already been handed over is waited for by the
+       close itself. */
+    if (!g_wstop) {
+        g_wo1000 += (lz_i64)g_wrate * 1000;
+        wave_drain(buf);
+    }
+    lz_ui_wave_close();
+    /* CLEARED HERE AS WELL AS IN lz_midi_halt, and the window thread is what
+       reads it: a piece that runs out on its own would otherwise leave the
+       caller believing one was still going, and never turn the next reply's
+       music on. */
+    g_playing = 0;
+    return 0;
+}
+
+void lz_midi_engine(int engine) {
+    g_engine = engine;
+}
+
+/* 1 when the wavetable can play: a bank beside the executable that opens,
+ * and room for its largest instrument. Both answers are cached, so this is
+ * cheap enough for the dialog to ask every time it is drawn. */
+int lz_midi_wave_ok(void) {
+    return wave_bank_read() && wave_pool();
 }
 
 /* The common half: an image already in memory, whatever it came from. */
@@ -594,6 +792,35 @@ static int start_image(const unsigned char *img, long n, int loop,
                        int instrument, int volume, int ratio_milli,
                        const char *name) {
     int s;
+
+    if (g_engine == LZ_MUSIC_ENGINE_WAVE) {
+        /* AS WRITTEN means the file's OPENING program here, not its own
+           changes. The bank is expanded once, before the first note, so a
+           change part way through would have no second instrument to go to;
+           the system engine follows them and this one cannot. */
+        if (instrument == LZ_MUSIC_AS_WRITTEN)
+            instrument = opening_program(img, n);
+        if (!wave_bank_read() || !wave_pool()) return 0;
+        if (instrument != g_wbank_prog) {
+            if (ksb_unpack(&g_wbank, g_wpool, instrument) != KSB_OK) return 0;
+            g_wbank_prog = instrument;
+        }
+        lz_midi_halt();   /* the previous piece, before either reader moves */
+        if (lz_smf_open(&g_wrd, img, n, instrument, volume) != LZ_SMF_OK)
+            return 0;
+        g_ratio = ratio_milli;
+        if (wave_open(&g_wbank, (long)g_wrate) != 0) return 0;
+        g_wloop = loop;
+        g_wstop = 0;
+        g_wthread = (HANDLE)_beginthreadex(NULL, 256 * 1024, wave_main,
+                                           NULL, 0, &g_wtid);
+        if (!g_wthread) {
+            return 0;
+        }
+        g_playing = 1;
+        if (tracing()) trace_go("start wave", 1);
+        return 1;
+    }
 
     /* No division check: the reader converts the file's own to
        LZ_SMF_DIVISION, which is what the stream was opened with. A
@@ -664,7 +891,11 @@ int lz_midi_start(const char *path, int loop, int instrument,
     FILE *f;
     long n;
 
-    if (!g_opened || !path || !*path) return 0;
+    /* A device is required for the SYSTEM engine alone: the wavetable needs
+       none, and a machine with no MIDI hardware is exactly the machine a
+       software synth exists for. */
+    if ((g_engine != LZ_MUSIC_ENGINE_WAVE && !g_opened) || !path || !*path)
+        return 0;
     if (!buffers()) return 0;
 
     f = fopen(path, "rb");
@@ -684,13 +915,28 @@ int lz_midi_start(const char *path, int loop, int instrument,
 }
 
 int lz_midi_start_chime(int instrument, int volume) {
-    if (!g_opened || !buffers()) return 0;
+    if (g_engine != LZ_MUSIC_ENGINE_WAVE && (!g_opened || !buffers()))
+        return 0;
     return start_image(lz_music_chime, lz_music_chime_len, 0,
                        instrument, volume, LZ_MUSIC_RATIO_ONE,
                        "(the finish chime)");
 }
 
 void lz_midi_halt(void) {
+    /* The wavetable thread FIRST, and whether or not a device was ever
+       opened: it holds the reader and the card, and both are about to be
+       reused. It only checks the flag between blocks, so the join waits for
+       at most one block - the length of the write it is inside. */
+    {
+        HANDLE t = g_wthread;
+        if (t) {
+            InterlockedExchange((LONG *)&g_wstop, 1);
+            WaitForSingleObject(t, INFINITE);
+            CloseHandle(t);
+            g_wthread = NULL;
+        }
+        g_playing = 0;
+    }
     if (!g_opened) return;
     /* Read before the accounting below moves them: these are what the
        device still owed at the moment it was stopped, which is the

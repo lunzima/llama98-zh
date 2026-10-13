@@ -236,10 +236,13 @@ typedef enum {
     LZ_STR_DLG_MUSIC_ON,
     LZ_STR_DLG_ENGINE,
     LZ_STR_DLG_ENGINE_SYS,
-    /* The wavetable row says in the label that it has no bank yet.
-       lz_music_engine_pick falls silently back to system MIDI, so
-       without this the user would select it, hear music, and believe
-       they had compared two engines that were one. */
+    /* The wavetable row names the requirement rather than a state: there
+       is a bank or there is not, and the answer is about the machine.
+       With none beside the executable the row is greyed by musicdlg.c
+       and lz_music_engine_pick falls silently back to system MIDI, so
+       a user can no longer select it, hear music, and believe they had
+       compared two engines that were one - the greying does that now,
+       and the label states what the grey is for. */
     LZ_STR_DLG_ENGINE_WAVE,
     LZ_STR_DLG_INSTRUMENT,
     /* ONE string holding the eleven menu rows, semicolon-separated,

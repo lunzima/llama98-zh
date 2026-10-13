@@ -18,9 +18,16 @@
  * the target takes a noticeable moment over it. */
 int lz_midi_system_ok(HWND notify);
 
-/* 0 until the bank's compressed audio format is finished. Answering
- * honestly is what lets the sound window mark the row. */
+/* 1 when the wavetable can play: a bank beside the executable that opens,
+ * and room for its largest instrument. Answering honestly is what lets the
+ * sound window mark the row. */
 int lz_midi_wave_ok(void);
+
+/* Which engine a piece will be played on, as lz_music_engine_pick answered
+ * it. Set by the caller that decides - the pick is a fact about the settings
+ * and the machine, and the player follows it rather than working it out a
+ * second time. */
+void lz_midi_engine(int engine);
 
 /* Load and start `path`. `loop` replays until stopped; the chime
  * passes 0. `ratio_milli` 1000 is the written tempo.

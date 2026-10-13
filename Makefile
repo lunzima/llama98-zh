@@ -71,7 +71,7 @@ GUI := main layout localized_strings worker modelload session compat40 \
        settingsdlg aboutdlg splash toolbar inifile caption captionwnd \
        midiplay musicdlg
 COM := stream settings command savechat mru chatfile session beep music smf \
-       chime
+       chime wave ksb kac_dec
 # The subset the COMMAND LINE needs - the gui links all of $(COM), the
 # CLI and DOS builds only these. ONE list: each Watcom recipe names
 # these files twice (a compile line and a link line) and the gcc recipe

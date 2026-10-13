@@ -1146,6 +1146,7 @@ typedef MMRESULT (WINAPI *MidiOutResetFn)(HMIDIOUT);
 typedef MMRESULT (WINAPI *MidiStreamPosFn)(HMIDISTRM, LPMMTIME, UINT);
 
 static HMODULE            g_winmm;
+static int                g_winmm_tried;
 static MidiStreamOpenFn   p_midiStreamOpen;
 static MidiStreamCloseFn  p_midiStreamClose;
 static MidiStreamPropFn   p_midiStreamProperty;
@@ -1161,11 +1162,24 @@ static HMIDISTRM g_strm;
 static MIDIHDR   g_hdr[LZ_UI_MIDI_SLOTS];
 static int       g_prepared[LZ_UI_MIDI_SLOTS];
 
+/* winmm.dll, loaded at most once. TWO families of entry point come out of
+   it, and they are resolved INDEPENDENTLY, which is the point: NT 3.51 has
+   waveOut and does not have midiStreamOpen, so a system can have one and not
+   the other. Folding the load into either family's resolution would let the
+   first caller decide for both - and the failure would be silent, because a
+   family that cannot resolve answers "no device" exactly the way a machine
+   with no device does. */
+static HMODULE winmm_load(void) {
+    if (!g_winmm_tried) {
+        g_winmm_tried = 1;
+        g_winmm = LoadLibraryA("winmm.dll");
+    }
+    return g_winmm;
+}
+
 static int midi_resolve(void) {
     if (p_midiStreamOpen) return 1;
-    if (g_winmm) return 0;          /* tried once, and it was not there */
-    g_winmm = LoadLibraryA("winmm.dll");
-    if (!g_winmm) return 0;
+    if (!winmm_load()) return 0;
     p_midiStreamOpen = (MidiStreamOpenFn)LZ_PROC(g_winmm, "midiStreamOpen");
     p_midiStreamClose = (MidiStreamCloseFn)LZ_PROC(g_winmm, "midiStreamClose");
     p_midiStreamProperty =
@@ -1304,4 +1318,127 @@ void lz_ui_midi_close(void) {
     lz_ui_midi_stop();
     p_midiStreamClose(g_strm);
     g_strm = NULL;
+}
+
+/* ---- waveOut ----------------------------------------------------------
+ * See compat40.h's own section for the measurement: the entry points and
+ * every type they need ARE visible at the floor, so what this resolve buys
+ * is not visibility - it is not linking an import library.
+ *
+ * The device is owned here rather than in a file of its own because its
+ * buffers are Win32 objects and this is the file that may carry them. What
+ * to render is policy and is not here. */
+typedef UINT (WINAPI *WaveOutOpenFn)(HWAVEOUT *, UINT, const WAVEFORMATEX *,
+                                     DWORD, DWORD, DWORD);
+typedef UINT (WINAPI *WaveOutHdrFn)(HWAVEOUT, WAVEHDR *, UINT);
+typedef UINT (WINAPI *WaveOutDevFn)(HWAVEOUT);
+
+#define LZ_WAVE_NBUF   4
+#define LZ_WAVE_FRAMES 1024
+
+static WaveOutOpenFn p_waveOutOpen;
+static WaveOutHdrFn  p_waveOutPrepareHeader;
+static WaveOutHdrFn  p_waveOutWrite;
+static WaveOutHdrFn  p_waveOutUnprepareHeader;
+static WaveOutDevFn  p_waveOutReset;
+static WaveOutDevFn  p_waveOutClose;
+
+static HWAVEOUT g_wh;
+static WAVEHDR  g_whdr[LZ_WAVE_NBUF];
+static short    g_wbuf[LZ_WAVE_NBUF][LZ_WAVE_FRAMES];
+static int      g_wnext;
+
+static int wave_resolve(void) {
+    if (p_waveOutOpen) return 1;
+    if (!winmm_load()) return 0;
+    p_waveOutOpen = (WaveOutOpenFn)LZ_PROC(g_winmm, "waveOutOpen");
+    p_waveOutPrepareHeader =
+        (WaveOutHdrFn)LZ_PROC(g_winmm, "waveOutPrepareHeader");
+    p_waveOutWrite = (WaveOutHdrFn)LZ_PROC(g_winmm, "waveOutWrite");
+    p_waveOutUnprepareHeader =
+        (WaveOutHdrFn)LZ_PROC(g_winmm, "waveOutUnprepareHeader");
+    p_waveOutReset = (WaveOutDevFn)LZ_PROC(g_winmm, "waveOutReset");
+    p_waveOutClose = (WaveOutDevFn)LZ_PROC(g_winmm, "waveOutClose");
+    /* ALL of them or none, for the reason the midi family above gives: half
+       of these opens a device it cannot stop. */
+    if (!p_waveOutOpen || !p_waveOutPrepareHeader || !p_waveOutWrite ||
+        !p_waveOutUnprepareHeader || !p_waveOutReset || !p_waveOutClose) {
+        p_waveOutOpen = NULL;
+        return 0;
+    }
+    return 1;
+}
+
+int lz_ui_wave_open(long rate) {
+    WAVEFORMATEX fmt;
+    int i;
+    if (g_wh) return 1;
+    if (rate <= 0 || !wave_resolve()) return 0;
+    fmt.wFormatTag      = WAVE_FORMAT_PCM;
+    fmt.nChannels       = 1;
+    fmt.nSamplesPerSec  = (DWORD)rate;
+    fmt.wBitsPerSample  = 16;
+    fmt.nBlockAlign     = (WORD)(fmt.nChannels * fmt.wBitsPerSample / 8);
+    fmt.nAvgBytesPerSec = fmt.nSamplesPerSec * fmt.nBlockAlign;
+    fmt.cbSize          = 0;
+    if (p_waveOutOpen(&g_wh, WAVE_MAPPER, &fmt, 0, 0, CALLBACK_NULL)
+        != MMSYSERR_NOERROR) {
+        g_wh = NULL;
+        return 0;
+    }
+    for (i = 0; i < LZ_WAVE_NBUF; i++) {
+        memset(&g_whdr[i], 0, sizeof g_whdr[i]);
+        g_whdr[i].lpData = (LPSTR)g_wbuf[i];
+        g_whdr[i].dwBufferLength = sizeof g_wbuf[i];
+        if (p_waveOutPrepareHeader(g_wh, &g_whdr[i], sizeof g_whdr[i])
+            != MMSYSERR_NOERROR) {
+            return 0;
+        }
+        /* Prepared headers start WITHOUT WHDR_DONE, so mark them free:
+           otherwise the first four writes would each wait for a buffer the
+           card was never given. */
+        g_whdr[i].dwFlags |= WHDR_DONE;
+    }
+    g_wnext = 0;
+    return 1;
+}
+
+int lz_ui_wave_write(const short *pcm, long frames) {
+    long done = 0;
+    if (!g_wh) return 0;
+    while (done < frames) {
+        WAVEHDR *h = &g_whdr[g_wnext];
+        long n;
+        while (!(h->dwFlags & WHDR_DONE)) Sleep(1);
+        n = frames - done;
+        if (n > LZ_WAVE_FRAMES) n = LZ_WAVE_FRAMES;
+        memcpy(g_wbuf[g_wnext], pcm + done, (size_t)n * sizeof(short));
+        h->dwBufferLength = (DWORD)(n * (long)sizeof(short));
+        h->dwFlags &= ~WHDR_DONE;
+        if (p_waveOutWrite(g_wh, h, sizeof *h) != MMSYSERR_NOERROR) return 0;
+        done += n;
+        g_wnext = (g_wnext + 1) % LZ_WAVE_NBUF;
+    }
+    return 1;
+}
+
+void lz_ui_wave_close(void) {
+    int i, spin;
+    if (!g_wh) return;
+    /* Let what has been queued finish rather than cutting it off: the tail of
+       the last chord is music too. */
+    for (spin = 0; spin < 5000; spin++) {
+        int busy = 0;
+        for (i = 0; i < LZ_WAVE_NBUF; i++) {
+            if (!(g_whdr[i].dwFlags & WHDR_DONE)) busy = 1;
+        }
+        if (!busy) break;
+        Sleep(1);
+    }
+    p_waveOutReset(g_wh);
+    for (i = 0; i < LZ_WAVE_NBUF; i++) {
+        p_waveOutUnprepareHeader(g_wh, &g_whdr[i], sizeof g_whdr[i]);
+    }
+    p_waveOutClose(g_wh);
+    g_wh = NULL;
 }

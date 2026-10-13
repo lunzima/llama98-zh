@@ -2530,14 +2530,15 @@ static int music_next(char *out, int cap) {
     return music_path(out, cap, names[idx]);
 }
 
-/* 1 when the chosen engine can actually play. The wavetable answers 0
- * until its bank format is finished, so this is where the silent
- * fall-back to system MIDI happens - the sound window is what tells
- * the user, by greying the row and saying so in its label. */
+/* 1 when the chosen engine can actually play. This is where the pick is
+ * made, so it is also where the player is told which one it got: the
+ * fall-back to system MIDI is silent by design, and a player that worked the
+ * choice out for itself would be a second authority on it. */
 static int music_engine_ready(HWND hwnd) {
     int pick = lz_music_engine_pick(g.mus.engine,
                                     lz_midi_system_ok(hwnd),
                                     lz_midi_wave_ok());
+    lz_midi_engine(pick);
     return pick >= 0;
 }
 

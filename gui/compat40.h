@@ -358,6 +358,40 @@ void lz_ui_midi_stop(void);
 
 void lz_ui_midi_close(void);
 
+/* ---- waveOut, the PCM device ----
+ *
+ * MEASURED with this tree's own floor flags (Open Watcom 2.0, WINVER
+ * 0x0351, -we): a probe that opens, prepares, writes, unprepares, resets
+ * and closes compiles with 0 warnings and 0 errors. So UNLIKE the
+ * midiStream set above, nothing about waveOut is hidden at the floor -
+ * mmsystem.h declares the entry points, and WAVEFORMATEX, WAVEHDR,
+ * HWAVEOUT, WAVE_MAPPER, CALLBACK_NULL and WAVE_FORMAT_PCM are all
+ * 3.1-era. The resolve below is therefore not about visibility; it is the
+ * same rule for the other reason, which is not linking an import library.
+ *
+ * The two families are resolved SEPARATELY out of one winmm.dll, and that
+ * separation is load-bearing rather than tidy: NT 3.51 exports waveOut and
+ * does not export midiStreamOpen, so a machine can have exactly one of
+ * them. A caller that asked for the missing one must be told no, and only
+ * about that one.
+ *
+ * The device itself is owned by compat40.c, because its buffers are Win32
+ * objects and this is the file that may carry them. What to render is
+ * policy and lives in the caller. */
+
+/* Open the PCM device: mono, 16-bit, `rate` frames a second. Returns 1 on
+ * success, 0 when there is no device - which is the ordinary answer on a
+ * machine with no sound card and not an error. */
+int lz_ui_wave_open(long rate);
+
+/* Hand over `frames` frames. BLOCKS until the card has room for them, so
+ * the caller is paced by the hardware; see the comment on the write loop
+ * above. Returns 1 on success. */
+int lz_ui_wave_write(const short *pcm, long frames);
+
+/* Lets what has been queued finish, then releases. */
+void lz_ui_wave_close(void);
+
 /* MM_MOM_DONE, spelled out because mmsystem.h is not included outside
  * gui/compat40.c. */
 #define LZ_UI_MM_MOM_DONE 0x3C9

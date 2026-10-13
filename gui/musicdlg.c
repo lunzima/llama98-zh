@@ -236,7 +236,8 @@ HWND lz_gui_music_dialog_create(HWND owner, HINSTANCE inst,
                     w = sz.cx;
             }
             /* The longest radio decides the WINDOW's width the same
-               way: the wavetable row carries its own "no bank yet". */
+               way: the wavetable row is measured too, since its own
+               text is longer than the system MIDI one. */
             {
                 const char *s = lz_str_display(LZ_STR_DLG_ENGINE_WAVE);
                 if (GetTextExtentPoint32A(dc, s, (int)strlen(s), &sz)) {
@@ -266,10 +267,12 @@ HWND lz_gui_music_dialog_create(HWND owner, HINSTANCE inst,
     y += ROW_H;
     ctl = radio(h, LZ_STR_DLG_ENGINE_WAVE, col2, y, dlg_w - col2 - PAD,
                 ID_MUS_ENG_WAVE, 0, inst);
-    /* Greyed while there is no bank, and the LABEL says why. The
-       fall-back in lz_music_engine_pick is silent, so a row that could
-       be chosen and then quietly played on the other engine would
-       leave the user comparing two engines that were one. */
+    /* Greyed when the bank is not there. The label states the
+       requirement, so the grey is the answer to it rather than a dead
+       control nobody can explain; the fall-back in
+       lz_music_engine_pick is silent, so without this a user could
+       select the row, hear music, and believe they had compared two
+       engines that were one. */
     if (ctl && !lz_midi_wave_ok()) EnableWindow(ctl, FALSE);
     set_check(h, ID_MUS_ENG_SYS, set->engine != LZ_MUSIC_ENGINE_WAVE);
     set_check(h, ID_MUS_ENG_WAVE, set->engine == LZ_MUSIC_ENGINE_WAVE);

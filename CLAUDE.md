@@ -58,6 +58,19 @@ infrastructure stays LOCAL and is never pushed to `github.com/lunzima/llama98-zh
    reach into a tree it has no business binding. Anything else brought over
    from that repository arrives under the same terms and needs the same line.
 
+6. **`banks/` and `tools/` are not pushed.** `banks/` holds the built sample
+   bank; it is material, which is item 5's argument, and its source is 46 MB of
+   DLS with its own provenance that no player carries. `tools/` holds that
+   bank's producer and the two DLS readers it needs - `ksb_build.py`,
+   `dls_survey.py`, `dls_play.py` - and is item 4's argument taken to its end:
+   this tree ships `common/ksb.c`, and shipping the reader does not make its
+   writer part of the engine.
+
+   What couples the two is the format alone - the two codec numbers and the
+   version field - and the failure mode for a disagreement is a bank that will
+   not open, which is the good one: caught here, once, rather than by a player
+   reading a sample table as something it is not.
+
 **What puts files in the root is cwd, and the root is where it matters.** An
 ad-hoc compile run from this directory leaves `.obj` and `.err` beside the
 Makefile; a probe writes its dump to a relative path; a pytest run in the wrong

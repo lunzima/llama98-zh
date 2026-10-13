@@ -239,7 +239,7 @@ static const char *const LZ_STR_EN[LZ_STR_COUNT] = {
     /* LZ_STR_DLG_MUSIC_ON */ "&Play music while generating",
     /* LZ_STR_DLG_ENGINE */ "Engine",
     /* LZ_STR_DLG_ENGINE_SYS */ "S&ystem MIDI",
-    /* LZ_STR_DLG_ENGINE_WAVE */ "Software &wavetable (no bank yet)",
+    /* LZ_STR_DLG_ENGINE_WAVE */ "Software &wavetable (needs a bank)",
     /* LZ_STR_DLG_INSTRUMENT */ "&Instrument",
     /* The eleven menu rows. The ten after the first are the programs
        the wavetable bank carries, in the order of
@@ -447,9 +447,7 @@ static const char *const LZ_STR_ZH[LZ_STR_COUNT] = {
         "\xe6\x92\xad\xe6\x94\xbe\xe5\xbc\x95\xe6\x93\x8e",
     /* LZ_STR_DLG_ENGINE_SYS */ "\xe7\xb3\xbb\xe7\xbb\x9f" " MIDI(&Y)",
     /* LZ_STR_DLG_ENGINE_WAVE */
-        "\xe8\xbd\xaf\xe6\xb3\xa2\xe8\xa1\xa8" "("
-        "\xe5\xb0\x9a\xe6\x97\xa0\xe9\x9f\xb3\xe8\x89\xb2\xe5\xba\x93"
-        ")(&W)",
+        "\xe8\xbd\xaf\xe6\xb3\xa2\xe8\xa1\xa8(\xe9\x9c\x80\xe9\x9f\xb3\xe8\x89\xb2\xe5\xba\x93)(&W)",
     /* LZ_STR_DLG_INSTRUMENT */ "\xe4\xb9\x90\xe5\x99\xa8" "(&I)",
     /* 7 is the clavinet, whose family name in the Chinese GM table is
        the clavichord's; the literal "struck-string keyboard" names the
