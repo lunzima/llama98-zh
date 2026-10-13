@@ -2,7 +2,7 @@
  *
  *   kunkun98-play [options] <file.mid> [max seconds]
  *     --bank F      the KSB bank (default banks\kk98.ksb)
- *     --rate N      output rate (default 22050)
+ *     --rate N      output rate (default 44100, the window's own)
  *     --prog N      force every channel onto GM program N
  *     --speed S     musical time per second of wall clock, in thousandths
  *     --wav F       write the rendered audio to F instead of a device
@@ -48,13 +48,13 @@
  *
  * A SMALL block is not a smaller buffer. lz_ui_wave_write waits for the
  * buffer it is about to fill to come free, so a caller that hands over
- * 64 frames at a time - 2.9 ms at 22050 - has all four of the device's
- * buffers covering 11.6 ms of audio, and every one of those 61 thousand
- * calls can wait on the 1 ms granularity of the wait itself. Playing
- * then takes LONGER than the music does, and a buffer that shallow
- * underruns on any hiccup, which is heard as crackle rather than as a
- * tempo error. One block per buffer is what the window's player does and
- * what this one does now. */
+ * 64 frames at a time - under two milliseconds of audio - has all four
+ * of the device's buffers covering a few milliseconds between them, and
+ * every one of those 61 thousand calls can wait on the 1 ms granularity
+ * of the wait itself. Playing then takes LONGER than the music does, and
+ * a buffer that shallow underruns on any hiccup, which is heard as
+ * crackle rather than as a tempo error. One block per buffer is what the
+ * window's player does and what this one does now. */
 #define PLAY_SEQ_FRAMES 1024
 
 /* A piece may run on past its last event looking for voices to die, and stops
@@ -199,7 +199,7 @@ static lz_i64 interval_frames(const LZSmfReader *r, unsigned long ticks, long ra
 int main(int argc, char **argv)
 {
     const char    *path = NULL, *bankpath = "banks\\kk98.ksb", *wavpath = NULL;
-    long           rate = 22050L, limit = 0L, banklen = 0L, imglen = 0;
+    long           rate = 44100L, limit = 0L, banklen = 0L, imglen = 0;
     long           speed = 1000L; /* thousandths, 1000 is the written tempo */
     int            i, rc, prog = -1, list = 0;
     int            instrument = LZ_MUSIC_AS_WRITTEN, volume = 100;
@@ -261,8 +261,8 @@ int main(int argc, char **argv)
         for (i = 0; i < ksb_count(&bank); i++) {
             int  p  = ksb_program(&bank, i);
             long fr = ksb_pcm_frames(&bank, p);
-            printf("  program %-3d  %ld frames expand, %.0f KiB\n", p, fr,
-                   fr * 2.0 / 1024.0);
+            printf("  program %-3d  %ld frames expand, %ld KiB\n", p, fr,
+                   fr / 512);
         }
         return 0;
     }
@@ -301,8 +301,8 @@ int main(int argc, char **argv)
                 printf("%s: %s\n", bankpath, ksb_errstr(rc));
                 return 1;
             }
-            printf("expanded %ld frames (%.0f KiB) for program %d\n", want,
-                   want * 2.0 / 1024.0, prog);
+            printf("expanded %ld frames (%ld KiB) for program %d\n", want,
+                   want / 512, prog);
         } else {
             printf("program %d is stored uncompressed, nothing to expand\n",
                    prog);
