@@ -227,6 +227,10 @@
 /kunkun98-w.exe
 /kunkun98-serve
 /kunkun98-serve.exe
+# The console wavetable player: its own binary, and the same argument as
+# the rest of this block.
+/kunkun98-play
+/kunkun98-play.exe
 
 # wrc/windres resource artifacts
 gui/kunkun98.res

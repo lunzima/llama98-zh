@@ -337,3 +337,18 @@ int lz_smf_chunk(LZSmfReader *r, unsigned long *out, int max,
     }
     return n;
 }
+
+int lz_smf_opening_program(LZSmfReader *scratch, const unsigned char *img,
+                           long size)
+{
+    LZSmfEvent ev;
+    if (!scratch || !img)
+        return 0;
+    if (lz_smf_open(scratch, img, size, LZ_MUSIC_AS_WRITTEN, 0) != LZ_SMF_OK)
+        return 0;
+    while (lz_smf_next(scratch, &ev)) {
+        if ((ev.msg & 0xF0UL) == 0xC0UL && (ev.msg & 0x0FUL) != 9)
+            return (int)((ev.msg >> 8) & 0x7FUL);
+    }
+    return 0;
+}

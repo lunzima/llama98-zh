@@ -347,6 +347,20 @@ llama98: $(NATIVE_GATE) $(COLD_ENG_SRCS) $(COLD_CLI_COM_SRCS) src/cli_attr.c src
 kunkun98-serve: $(NATIVE_GATE) $(COLD_ENG_SRCS) $(SRV_SRCS) src/server_main.c $(HOT_GCC_NATIVE_ENG_OBJS) $(ENG_MMX_GCC_NATIVE_OBJS) $(ENG_AVX2_GCC_NATIVE_OBJS)
 	$(CC) $(X86_64_CFLAGS) -o $@ $(COLD_ENG_SRCS) $(SRV_SRCS) src/server_main.c $(HOT_GCC_NATIVE_ENG_OBJS) $(ENG_MMX_GCC_NATIVE_OBJS) $(ENG_AVX2_GCC_NATIVE_OBJS) -lm $(HTTP_LIBS)
 
+# The console wavetable player: the same reader and sampler the window plays
+# through, with waveOut for a clock. It carries no part of the engine and
+# none of the session core that $(COM) also carries - a player that needed
+# the model linked in would be the wrong shape for one that reads a bank.
+#
+# Only these four. compat40.c comes along because the PCM device is resolved
+# there, next to the only other winmm entry points, and because a file that
+# may carry Win32 objects is where they belong.
+PLAY_COM := smf wave ksb kac_dec
+PLAY_COM_SRCS := $(addprefix common/,$(addsuffix .c,$(PLAY_COM)))
+
+kunkun98-play: $(NATIVE_GATE) $(PLAY_COM_SRCS) gui/compat40.c src/waveplay_main.c
+	$(CC) $(X86_64_CFLAGS) -Icommon -Igui -o $@ $(PLAY_COM_SRCS) gui/compat40.c src/waveplay_main.c -luser32 -lcomdlg32 -lgdi32 -lm
+
 # Resources (icon / splash / about logo / lamps). windres for gcc; the
 # Watcom build runs wrc instead (see watcom-gui). Both run from the repo
 # root, so gui/kunkun98.rc's asset paths are repo-relative.

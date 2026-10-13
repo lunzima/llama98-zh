@@ -167,6 +167,17 @@ void lz_smf_rewind(LZSmfReader *r);
 /* The next event, or 0 when the piece is over. */
 int lz_smf_next(LZSmfReader *r, LZSmfEvent *out);
 
+/* The program this file opens on: its first program change on a channel that
+ * is not the drum kit, or GM program 0 when it never states one - which is the
+ * format's own default.
+ *
+ * An instrument that is decided before the first note needs this, because
+ * AS_WRITTEN is a decision to take the program from the file and the file
+ * states it wherever it feels like, usually at tick 0 and sometimes not at
+ * all. `scratch` is used and left open on `img`; the caller owns it. */
+int lz_smf_opening_program(LZSmfReader *scratch, const unsigned char *img,
+                           long size);
+
 /* The tempo in force at a file tick. Exposed so a gate can ask it. */
 unsigned long lz_smf_tempo_at(const LZSmfTempo *tm, int n,
                               unsigned long tick);

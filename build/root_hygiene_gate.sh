@@ -96,6 +96,8 @@ kunkun98-noman.exe
 kunkun98-w.exe
 kunkun98-serve
 kunkun98-serve.exe
+kunkun98-play
+kunkun98-play.exe
 kunkun98.ini
 kunkun98-gui.ini
 kunkun98-noman.ini

@@ -629,20 +629,6 @@ static LZSmfReader g_pre;         /* and a scratch one for the pre-read */
 static int         g_wloop;
 static int         g_wrate = 44100;
 
-/* AS_WRITTEN, resolved: the first program change on a channel that is not
- * the drum kit, or GM program 0 when the file never states one - which is
- * what the format's own default is. */
-static int opening_program(const unsigned char *img, long n) {
-    LZSmfEvent ev;
-    if (lz_smf_open(&g_pre, img, n, LZ_MUSIC_AS_WRITTEN, 0) != LZ_SMF_OK)
-        return 0;
-    while (lz_smf_next(&g_pre, &ev)) {
-        if ((ev.msg & 0xF0UL) == 0xC0UL && (ev.msg & 0x0FUL) != 9)
-            return (int)((ev.msg >> 8) & 0x7FUL);
-    }
-    return 0;
-}
-
 static int wave_bank_path(char *out, int cap) {
     char mod[MAX_PATH];
     int  n = (int)GetModuleFileNameA(NULL, mod, (DWORD)sizeof mod);
@@ -810,7 +796,7 @@ static int start_image(const unsigned char *img, long n, int loop,
            change part way through would have no second instrument to go to;
            the system engine follows them and this one cannot. */
         if (instrument == LZ_MUSIC_AS_WRITTEN)
-            instrument = opening_program(img, n);
+            instrument = lz_smf_opening_program(&g_pre, img, n);
         if (!wave_bank_read() || !wave_pool()) return 0;
         if (instrument != g_wbank_prog) {
             if (ksb_unpack(&g_wbank, g_wpool, instrument) != KSB_OK) return 0;
