@@ -272,17 +272,6 @@ static long cents_gain(int cents)
     return g;
 }
 
-static long db_gain(int db)
-{
-    static const long tab[13] = {
-        65536, 58409, 52057, 46396, 41350, 36854, 32846,
-        29278, 26090, 23253, 20724, 18471, 16462
-    };
-    if (db >= 0) return GAIN_ONE;
-    if (db <= -12) return tab[12] >> ((-db - 12) / 6);
-    return tab[-db];
-}
-
 /* Where a note sits between the channels: -500 hard left, 0 centre,
    +500 hard right, the unit being tenths of a percent.
 
@@ -417,7 +406,14 @@ static void start(int ch, int note, int vel)
        not an amplitude, and a linear map makes everything quiet sound
        the same. */
     v->gain = (long)vel * (long)vel * GAIN_ONE / (127L * 127L);
-    v->gain = (v->gain >> 8) * (db_gain(z.gain) >> 8);
+    /* THE REGION'S GAIN IS IN TENTHS OF A DECIBEL AND NEGATIVE, being an
+       attenuation, and the table is indexed by an attenuation, so the
+       sign comes off here. A positive value is a boost and the table
+       holds no entry for one - full scale, which is also what the
+       reference player arrives at, since it negates the same value by
+       two and a half and clamps the negative result to zero. */
+    v->gain = (v->gain >> 8)
+              * (db_gain_tenths(z.gain < 0 ? -z.gain : 0) >> 8);
 
     v->atten = 0L;
     v->sustain = (long)z.sustain_cb << 16;

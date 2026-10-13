@@ -584,10 +584,25 @@ def main(argv):
             # gm.dls that is -4 to -12, i.e. four to twelve decibels of
             # attenuation that the bank never asked for, on every wave.
             # The reference reader divides; so does this now.
-            gain_db = int(round(gain / 655360.0))
+            # THE wsmp's GAIN ARRIVES IN DECIBELS ALREADY. The file
+            # carries it in relative-gain units of 1/655360 dB, and
+            # wsmp_of() divides by that on the way out - that division
+            # is the one that matters, and it is the one that used to be
+            # wrong in the other direction: this line divided AGAIN, so
+            # the region's gain was written as zero for every region of
+            # every bank and no sample ever got the trim its own wave
+            # asked for.
+            #
+            # WHAT IS LEFT is to keep tenths of a decibel rather than
+            # whole ones. FF8's values are -6.50, -4.80, -4.30, -2.50,
+            # -2.20, -2.10, and rounding those to whole decibels moved
+            # five waves by half a decibel - half a decibel across a
+            # bank is a balance change. A signed byte holds -12.7 to
+            # +12.7 dB in tenths, which covers both banks.
+            gain_cb = int(round(gain * 10.0))
             regions.append((klo, khi, smap[key], unity,
                             max(-128, min(127, int(round(fine)))),
-                            max(-128, min(127, gain_db)), eg))
+                            max(-127, min(127, gain_cb)), eg))
 
     out = bytearray()
     out += MAGIC

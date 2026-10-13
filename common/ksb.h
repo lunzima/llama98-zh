@@ -59,7 +59,11 @@ typedef struct {
     long  rate;                 /* frames a second, as stored */
     int   unity;                /* the MIDI note it was recorded at */
     int   fine;                 /* cents, added to unity */
-    int   gain;                 /* dB, at most 0 */
+    int   gain;                 /* TENTHS of a dB of attenuation, at most
+                                   0. A positive value is a boost and the
+                                   mixer has no table entry for one: it
+                                   plays at full scale, which is also what
+                                   the reference player does with it. */
     /* The volume envelope, WITHOUT WHICH EVERY NOTE IS AN ORGAN NOTE.
        The banks' pianos loop for ever and put their whole decay in here:
        sustain is nothing and the decay runs for tens of seconds. Times are
