@@ -224,6 +224,17 @@ DST_STATIC = {
     0x0004: 'pan', 0x0104: 'lfofreq', 0x0105: 'lfodelay',
 }
 
+# What a zone with no articulation at all plays as. Every field is
+# present so the merge below is a plain dict update: a list that
+# declares nothing leaves every one of these, and a list that declares
+# one thing overwrites that one key and nothing else.
+ARTIC_DEFAULT = {
+    'attack': 0, 'decay': 65000, 'release': 200, 'sustain': 0,
+    'mattack': 0, 'mdecay': 65000, 'mrelease': 200, 'msustain': 0,
+    'pan': 0, 'lfofreq': 0, 'lfodelay': -32768,
+    'lpitch': 0, 'lgain': 0, 'mpitch': 0, 'kdecay': 0, 'vatk': 0,
+}
+
 
 def envelope(d, a, b):
     """-> dict of every STATIC articulator, or None.
@@ -311,23 +322,37 @@ def envelope(d, a, b):
             return 960
         return min(960, int(round(-200.0 * math.log10(frac))))
 
-    return {
-        'attack': ms('attack', 0), 'decay': ms('decay', 65000),
-        'release': ms('release', 200), 'sustain': sus('sustain'),
-        'mattack': ms('mattack', 0), 'mdecay': ms('mdecay', 65000),
-        'mrelease': ms('mrelease', 200), 'msustain': sus('msustain'),
-        'pan': max(-32768, min(32767, int(round(got.get('pan', 0)
-                                                / 65536.0)))),
-        'lfofreq': tc('lfofreq', 0),
-        'lfodelay': tc('lfodelay', -32768),
-        # Modulator amounts, by their own (source, destination) pair.
-        # DLS source ids: modLfo 1, velocity 2, keyNum 3, modEnv 5.
-        'lpitch': sh((0x01, 0x0003)),    # vibrato depth, cents
-        'lgain': sh((0x01, 0x0001)),     # tremolo depth, dB
-        'mpitch': sh((0x05, 0x0003)),    # pitch envelope depth, cents
-        'kdecay': sh((0x03, 0x0207)),    # decay per key, time cents
-        'vatk': sh((0x02, 0x0206)),      # attack per velocity, time cents
-    }
+    # ONLY WHAT THIS LIST DECLARES. The merge with the instrument's own
+    # articulation happens per destination downstream, so a region that
+    # restates its attack does not take the instrument's pan, LFO or
+    # sustain away with it. Replacing wholesale - which is what this did
+    # - means a region carrying one connection discards everything the
+    # instrument said that it does not itself mention.
+    out = {}
+    for name in ('attack', 'decay', 'release', 'mattack', 'mdecay',
+                 'mrelease'):
+        if name in got:
+            out[name] = ms(name, 0)
+    for name in ('sustain', 'msustain'):
+        if name in got:
+            out[name] = sus(name)
+    if 'pan' in got:
+        out['pan'] = max(-32768, min(32767,
+                                     int(round(got['pan'] / 65536.0))))
+    if 'lfofreq' in got:
+        out['lfofreq'] = tc('lfofreq', 0)
+    if 'lfodelay' in got:
+        out['lfodelay'] = tc('lfodelay', -32768)
+    # A modulator amount, by its own (source, destination) pair. DLS
+    # source ids: modLfo 1, velocity 2, keyNum 3, modEnv 5.
+    for name, key in (('lpitch', (0x01, 0x0003)),   # vibrato, cents
+                      ('lgain', (0x01, 0x0001)),    # tremolo, dB
+                      ('mpitch', (0x05, 0x0003)),   # pitch envelope, cents
+                      ('kdecay', (0x03, 0x0207)),   # decay per key
+                      ('vatk', (0x02, 0x0206))):    # attack per velocity
+        if key in mod:
+            out[name] = sh(key)
+    return out or None
 
 
 def bandwidth(x, rate, frac):
@@ -526,18 +551,19 @@ def main(argv):
                                 this_codec, 0))
                 blobs.append(blob)
                 off += len(blob)
-            # The region's own articulation wins over the instrument's,
-            # the same way its wsmp does.
-            eg = renv if renv is not None else ienv
-            if eg is None:
-                # No articulation at all: the EG1 four are what was
-                # always written, the rest say there is no modulation.
-                eg = {'attack': 0, 'decay': 65000, 'release': 200,
-                      'sustain': 0, 'mattack': 0, 'mdecay': 65000,
-                      'mrelease': 200, 'msustain': 0, 'pan': 0,
-                      'lfofreq': 0, 'lfodelay': -32768,
-                      'lpitch': 0, 'lgain': 0, 'mpitch': 0,
-                      'kdecay': 0, 'vatk': 0}
+            # PER DESTINATION, not wholesale. The region's list covers
+            # only the destinations it declares and the instrument's
+            # covers the rest, so a region that says nothing about the
+            # LFO keeps the instrument's LFO - which is what the
+            # reference player does by hoisting the shared values and
+            # merging zone by zone. Replacing wholesale meant a region
+            # carrying one connection threw away everything the
+            # instrument had said that the region did not restate.
+            eg = dict(ARTIC_DEFAULT)
+            if ienv:
+                eg.update(ienv)
+            if renv:
+                eg.update(renv)
             # THE wsmp's GAIN IS NOT IN DECIBELS. It is in 32-bit relative
             # gain units of 1/655360 dB, which is a tenth of a decibel as
             # 16.16 - so the number in the file is a DECIBEL TIMES 655360,
