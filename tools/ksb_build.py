@@ -65,7 +65,6 @@ A BUILD AT ITS SHIPPING SHAPE:
     python3 ksb_build.py --codec kac -c 12000 <FF8.dls> banks/kk98.ksb \
         0 4 6 7 12 16 25 46 80 81
 """
-import math
 import os
 import struct
 import subprocess
@@ -315,12 +314,25 @@ def envelope(d, a, b):
         return max(-32768, min(32767, v))
 
     def sus(key, default=0):
-        frac = got.get(key, 1000 * 65536) / 65536.0 / 1000.0
-        if frac >= 1.0:
-            return 0
-        if frac <= 0.0:
+        """Sustain the way the reference player converts it: `1000 -
+        value`, where the value is the destination's own 0.1 percent
+        units - so the answer is centibels of attenuation and 1000 is
+        silence.
+
+        This used to be read as a percentage LEVEL and a logarithm taken
+        of that. It is a different curve and not a rounding of this one:
+        the value 968 comes out 2 cB the old way and 32 cB this way, and
+        3 dB of held level is not a quantisation. It is also the form
+        that inverts cleanly, which matters for the modulation envelope
+        where the same number is turned back into a linear level."""
+        if key not in got:
+            return default
+        v = int(round(got[key] / 65536.0))
+        if v <= 0:
             return 960
-        return min(960, int(round(-200.0 * math.log10(frac))))
+        if v >= 1000:
+            return 0
+        return min(960, 1000 - v)
 
     # ONLY WHAT THIS LIST DECLARES. The merge with the instrument's own
     # articulation happens per destination downstream, so a region that
