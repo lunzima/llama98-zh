@@ -3,10 +3,15 @@
 #include "wave.h"
 #include "fir_table.h"
 #include "pow2_table.h"
-#include "sin_table.h"
 
 #define DRUM_CH      9      /* GM channel 10, one-based */
 #define GAIN_ONE  65536L
+
+/* An SF2 absolute-cents frequency, as 16.16. A DLS mod-LFO rate is
+   passed straight to an SF2 generator and that generator counts cents
+   from A440 at 6900, so 8.175799 * 2^(tc/1200) Hz - 8.175799, not 1.
+   535809 is it in 16.16. Measured: gm.dls's -783 cents is 5.201 Hz. */
+#define ABS_CENTS_TO_HZ  535809L
 
 /* THE ENVELOPE IS LINEAR IN DECIBELS and a DLS decay time is the time
    to fall 96 dB - read out of OpenMPT's CDLSBank, which computes
@@ -288,6 +293,21 @@ static long db_gain(int db)
    normalisation would quietly have taken three decibels off the whole
    bank in order to move a note the bank never moves. Centre stays full
    in both; the ramp starts only when a region asks for it. */
+/* The mod LFO's own shape: 1 - 4*|phase - 0.5|, i.e. a triangle that
+   runs -1 to +1 and back. It is what the reference player uses, and a
+   triangle rather than a sine matters only in that the two disagree at
+   every point except the peaks - a bank with a 5 Hz vibrato hears a
+   difference a sine would round off at its turning points.
+
+   `phase` is 32 bit for the whole cycle and the result runs
+   -32768..32768, which the caller scales by the depth. */
+static long lfo_tri(unsigned long phase)
+{
+    long p = (long)(phase >> 17);          /* one cycle as 0..32767 */
+    long d = (p > 16384L) ? (p - 16384L) : (16384L - p);
+    return 32768L - 4L * d;                /* -32768 at the ends, + at the top */
+}
+
 static void pan_gains(int pan, long *gl, long *gr)
 {
     long full = GAIN_ONE;
@@ -365,11 +385,26 @@ static void start(int ch, int note, int vel)
        by having no modLfo -> pitch connection at all. */
     v->base_step = step;
     v->lfo_pitch = z.lfo_pitch_tc;
-    v->lfo_phase = 0UL;
+    /* A QUARTER TURN, not zero. The reference player starts the LFO at
+       phase 0.25 and a triangle reads 0 there, so the note opens in
+       tune and the first thing it does is swing - starting at zero
+       would open it at full depth and then fall. */
+    v->lfo_phase = 0x40000000UL;
     v->lfo_inc = 0L;
     v->lfo_delay = 0L;
     if (z.lfo_pitch_tc != 0) {
+        /* THE RATE IS AN ABSOLUTE PITCH, not a plain ratio. A DLS
+           mod-LFO frequency is passed straight to an SF2 generator,
+           and SF2's frequency generator is in absolute cents where
+           6900 is A440 - so the Hz is 440 * 2^((tc-6900)/1200), which
+           is 8.1758 * 2^(tc/1200) and NOT 2^(tc/1200). Getting that
+           wrong is a factor of 8.18: gm.dls's -783 cents is a 5.2 Hz
+           vibrato, not the 0.63 Hz a plain ratio gives, and that error
+           is the harder kind to catch - counting a period from a pitch
+           trace still returns a self-consistent number, and it is only
+           checked against what the file says that it fails. */
         long freq = cents_gain(z.lfo_tc);
+        freq = (long)(((lz_i64)freq * ABS_CENTS_TO_HZ) >> 16);
         if (freq > 0)
             v->lfo_inc = (long)(((lz_i64)freq << 16) / (lz_i64)g_rate);
         v->lfo_delay = (long)((lz_i64)cents_gain(z.lfo_delay_tc)
@@ -685,8 +720,7 @@ static void mix(long *accL, long *accR, long frames)
                    2.0 gain is 8.6e9, which a 32-bit long is not. */
                 if (v->lfo_pitch != 0 && v->lfo_inc != 0) {
                     int sc = (int)((long)v->lfo_pitch
-                                   * (long)sin_tbl[v->lfo_phase >> 24]
-                                   >> 15);
+                                   * lfo_tri(v->lfo_phase) >> 15);
                     long st = (long)(((lz_i64)v->base_step
                                       * cents_gain(sc)) >> 16);
                     v->step = st >> 16;
