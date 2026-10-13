@@ -485,7 +485,7 @@ static void start(int ch, int note, int vel)
         if (z.vel_attack_tc != 0) {
             long ms = (long)z.mattack_ms
                       * cents_gain((int)((long)z.vel_attack_tc
-                                         * vel / 127L)) >> 16;
+                                         * vel / 128L)) >> 16;
             if (ms < 1L) ms = 1L;
             left = ms * (g_rate / 1000L);
         }
@@ -502,7 +502,7 @@ static void start(int ch, int note, int vel)
            correction applied afterwards. gm.dls carries 29 of them. */
         long dec = (long)z.mdecay_ms;
         if (z.key_decay_tc != 0) {
-            int extra = (int)((long)z.key_decay_tc * note / 127L);
+            int extra = (int)((long)z.key_decay_tc * note / 128L);
             dec = dec * cents_gain(extra) >> 16;
             if (dec < 1L) dec = 1L;
         }
@@ -523,8 +523,11 @@ static void start(int ch, int note, int vel)
 
     /* Velocity squared: MIDI velocity is a loudness the player feels,
        not an amplitude, and a linear map makes everything quiet sound
-       the same. */
-    v->gain = (long)vel * (long)vel * GAIN_ONE / (127L * 127L);
+       the same. OUT OF 128 RATHER THAN 127, which is the scale the
+       modulator's raw source is built on and the one the reference
+       player normalises to; the two differ by 0.14 dB at full velocity,
+       which is below anything audible but is not the same number. */
+    v->gain = (long)vel * (long)vel * GAIN_ONE / (128L * 128L);
     /* THE REGION'S GAIN IS IN TENTHS OF A DECIBEL AND NEGATIVE, being an
        attenuation, and the table is indexed by an attenuation, so the
        sign comes off here. A positive value is a boost and the table
@@ -556,12 +559,12 @@ static void start(int ch, int note, int vel)
     dec = (long)z.decay_ms;
     atk = (long)z.attack_ms;
     if (z.key_decay_tc) {
-        int extra = (int)((long)z.key_decay_tc * note / 127L);
+        int extra = (int)((long)z.key_decay_tc * note / 128L);
         dec = dec * cents_gain(extra) >> 16;
         if (dec < 1L) dec = 1L;
     }
     if (z.vel_attack_tc && atk > 0L) {
-        int extra = (int)((long)z.vel_attack_tc * vel / 127L);
+        int extra = (int)((long)z.vel_attack_tc * vel / 128L);
         atk = atk * cents_gain(extra) >> 16;
         if (atk < 1L) atk = 1L;
     }
@@ -824,8 +827,8 @@ static void mix(long *accL, long *accR, long frames)
         eg = (long)g_ch[v->ch].expression * (long)g_ch[v->ch].expression;
         /* 16.16 down to the 8.8 that the mix below multiplies in, and
            then the two 8.8 factors back to one. */
-        cg = (vg * GAIN_ONE / (127L * 127L)) >> 8;
-        eg = (eg * GAIN_ONE / (127L * 127L)) >> 8;
+        cg = (vg * GAIN_ONE / (128L * 128L)) >> 8;
+        eg = (eg * GAIN_ONE / (128L * 128L)) >> 8;
         cg = (cg * eg) >> 8;
         /* AND THE PAN, region and channel together, on the same
            schedule the volume is: a fader move - and CC10 moves a
