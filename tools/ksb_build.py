@@ -402,11 +402,21 @@ def read_dls(path, want):
             if c2 != b'LIST' or f2 not in (b'rgn ', b'rgn2'):
                 continue
             rh_a, _ = find(d, r_a, r_b, b'rgnh')
-            klo, khi = struct.unpack('<HH', d[rh_a:rh_a + 4])
+            # THE HEADER HAS SIX FIELDS AND ONLY TWO WERE READ. Beyond the
+            # key range it carries the VELOCITY range and the key group:
+            # a bank that splits a key range across two layers by velocity
+            # collapsed onto whichever of them came first, and the
+            # reference player filters on all three. A 0,0 velocity range
+            # means the whole range, which is that reader's own rule and
+            # is what an editor writes when it means "every velocity".
+            klo, khi, vmin, vmax, fus, kgrp = struct.unpack(
+                '<HHHHHH', d[rh_a:rh_a + 12])
+            if vmin == 0 and vmax == 0:
+                vmax = 127
             wl_a, _ = find(d, r_a, r_b, b'wlnk')
             idx = struct.unpack('<I', d[wl_a + 8:wl_a + 12])[0]
             regs.append((klo, khi, idx, wsmp_of(d, r_a, r_b),
-                         envelope(d, r_a, r_b)))
+                         envelope(d, r_a, r_b), vmin, vmax, kgrp))
         insts.append((prog & 0x7F, envelope(d, a, b), regs))
     insts.sort()
     return d, wvpl_a, cues, insts
@@ -480,7 +490,7 @@ def main(argv):
     regions, inst_rows = [], []
     for prog, ienv, regs in insts:
         inst_rows.append((prog, len(regions), len(regs)))
-        for klo, khi, idx, rws, renv in regs:
+        for klo, khi, idx, rws, renv, vmin, vmax, kgrp in regs:
             # THE REGION'S wsmp WINS, loop points included. A region may
             # override the wave's, and in this bank 37 of the 86 do -
             # taking the pitch from the region and the loop from the
@@ -602,7 +612,8 @@ def main(argv):
             gain_cb = int(round(gain * 10.0))
             regions.append((klo, khi, smap[key], unity,
                             max(-128, min(127, int(round(fine)))),
-                            max(-127, min(127, gain_cb)), eg))
+                            max(-127, min(127, gain_cb)), eg,
+                            vmin, vmax, kgrp))
 
     out = bytearray()
     out += MAGIC
@@ -613,15 +624,14 @@ def main(argv):
                        KSB_FORMAT_VERSION, off)
     for prog, first, n in inst_rows:
         out += struct.pack('<BBH', prog, n, first)
-    for klo, khi, si, unity, fine, gain, eg in regions:
-        # REGION RECORD, 30 BYTES. The first eight are what they always
-        # were; the next eight are the volume envelope, as before. What
-        # is new is a modulation envelope, a pan and a mod LFO - all of
-        # which gm.dls carries on every instrument and which a reader
-        # that only kept EG1 dropped without saying so. Every field is
-        # 16 bit because the source values fit: measured over gm.dls,
-        # pan spans -433..433 in 0.1%, the LFO times span -32768..1419
-        # time cents, and no envelope time exceeds 40 s.
+    for klo, khi, si, unity, fine, gain, eg, vmin, vmax, kgrp in regions:
+        # REGION RECORD, 46 BYTES. The first seven are what they always
+        # were, followed by the volume envelope, the modulation envelope,
+        # the pan and LFO, and the five modulator depths - and now the
+        # velocity range and the key group, which the reader was
+        # stopping short of. The key range has to select by velocity as
+        # well as by note or a layer split by velocity picks up whichever
+        # key range it shares.
         out += struct.pack('<BBHBbbB', klo, khi, si, unity, fine, gain, 0)
         out += struct.pack('<HHHH', eg['attack'], eg['decay'],
                            eg['release'], eg['sustain'])
@@ -630,6 +640,7 @@ def main(argv):
         out += struct.pack('<hhh', eg['pan'], eg['lfofreq'], eg['lfodelay'])
         out += struct.pack('<hhhhh', eg['lpitch'], eg['lgain'],
                            eg['mpitch'], eg['kdecay'], eg['vatk'])
+        out += struct.pack('<HHH', vmin, vmax, kgrp)
     for o, n, ls, ll, rate, cod, spare in samples:
         out += struct.pack('<IIIIHBB', o, n, ls, ll, rate, cod, spare)
     head = len(out)

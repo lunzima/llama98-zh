@@ -108,6 +108,13 @@ typedef struct {
     int   env_pitch_tc;          /* modEnv -> pitch, cents */
     int   key_decay_tc;          /* keyNum -> decay, time cents */
     int   vel_attack_tc;         /* velocity -> attack, time cents */
+    /* WHICH NOTES AND HOW HARD, which a key range alone does not
+       answer: a region split by velocity picks up a layer that shares
+       its keys. The reference player filters on all three of these.
+       `key_group` is the exclusive class - notes in one choke each
+       other - and 0 is no group at all. */
+    int   vel_min, vel_max;
+    int   key_group;
 } KsbZone;
 
 #define KSB_MAXSAMPLES 512
@@ -171,7 +178,13 @@ int ksb_program(const KsbBank *b, int i);
  * that program resolved to returns -1 - it does not reach into another
  * instrument, which is what keeps the expansion above bounded by one
  * instrument. */
-int ksb_zone(const KsbBank *b, int program, int note, KsbZone *z);
+/* The region that sounds for this program, note AND velocity. Both
+ * ranges have to match: a bank that splits one key across two layers by
+ * velocity gives up its region here rather than picking either, and the
+ * key group the region carries comes back in the zone for a player that
+ * chokes with it. -1 when no region matches, which is what a velocity
+ * outside every layer and a note outside every key range both say. */
+int ksb_zone(const KsbBank *b, int program, int note, int vel, KsbZone *z);
 
 #define KSB_OK        0
 #define KSB_EMAGIC    1

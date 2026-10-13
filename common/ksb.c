@@ -4,7 +4,7 @@
 
 #define HDR      16
 #define INST_SZ   4
-#define REG_SZ   40
+#define REG_SZ   46
 #define SMP_SZ   20
 
 /* Little-endian, assembled a byte at a time. See the header. */
@@ -273,7 +273,7 @@ int ksb_program(const KsbBank *b, int i)
     return b->img[b->inst_off + (long)i * INST_SZ];
 }
 
-int ksb_zone(const KsbBank *b, int program, int note, KsbZone *z)
+int ksb_zone(const KsbBank *b, int program, int note, int vel, KsbZone *z)
 {
     const unsigned char *n, *r, *s;
     int i, first, count, si;
@@ -286,7 +286,13 @@ int ksb_zone(const KsbBank *b, int program, int note, KsbZone *z)
 
     for (i = 0; i < count; i++) {
         r = b->img + b->region_off + (long)(first + i) * REG_SZ;
+        /* ON BOTH RANGES. A bank that splits a key across two layers by
+           velocity sounds only one of them, and the wrong one is silent
+           under a part that leans soft. The velocity range came out of
+           the header at the same time as the key range; it just was not
+           being read. */
         if (note < r[0] || note > r[1]) continue;
+        if (vel < rd16(r + 40) || vel > rd16(r + 42)) continue;
         si = rd16(r + 2);
         s = b->img + b->sample_off + (long)si * SMP_SZ;
         if (s[18] == KSB_KAC) {
@@ -334,6 +340,9 @@ int ksb_zone(const KsbBank *b, int program, int note, KsbZone *z)
         z->env_pitch_tc  = rd16s(r + 34);
         z->key_decay_tc  = rd16s(r + 36);
         z->vel_attack_tc = rd16s(r + 38);
+        z->vel_min       = rd16(r + 40);
+        z->vel_max       = rd16(r + 42);
+        z->key_group     = rd16(r + 44);
         return 0;
     }
     return -1;

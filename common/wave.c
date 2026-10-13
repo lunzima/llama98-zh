@@ -134,6 +134,29 @@ typedef struct {
     long  lfo_pitch;
     long  lfo_delay;        /* frames until the LFO starts at all */
     long  base_step;
+    /* THE MODULATION ENVELOPE, which drives pitch and is its own thing
+       from the volume envelope beside it. Same four stages, same units
+       it was read in: the level it holds is a 16.16 fraction of the
+       depth, so 0 is the note at rest and 65536 is the depth applied
+       in full. The bank gives it attack 0 and sustain 960 on every
+       instrument that has one, which is "no modulation held". */
+    long  env_pos;          /* 16.16, the level reached */
+    long  env_sus;          /* the level it holds, 16.16 */
+    long  env_att_inc;      /* frames of attack: how far one step rises */
+    long  env_dec_inc;      /* frames of decay: how far one step falls */
+    long  env_rel_inc;      /* frames of release: ditto */
+    int   env_tick;         /* frames until the next step */
+    int   env_phase;        /* 0 attack, 1 decay/sustain, 2 release */
+    /* THE PITCH DEPTH of that envelope, in cents at full level. Only
+       five regions of gm.dls carry a non-zero one, all at 327 - six
+       semitones - and all on the sawtooth lead. */
+    long  env_pitch;
+    /* THE TREMOLO DEPTH, in centibels at full swing, from modLfo -> gain.
+       gm.dls sets it on 7 regions at +1 cB and FF8 on 7 at the same, so
+       it is a small colouring and not a gating effect - but the field is
+       in the record either way, and a player that never reads it cannot
+       play a bank that does set it. */
+    long  lfo_gain;
     /* The two channel gains, as 16.16 and set once per note. They are
        GAIN_ONE when the region's pan is 0, which is every region in
        this bank - the ramp only runs as a note moves off centre. */
@@ -320,7 +343,7 @@ static void start(int ch, int note, int vel)
     long cents, base, step, mant, dec, atk;
     int slot, oct;
 
-    if (ksb_zone(g_bank, g_ch[ch].program, note, &z) != 0) {
+    if (ksb_zone(g_bank, g_ch[ch].program, note, vel, &z) != 0) {
         g_unvoiced++;
         return;
     }
@@ -401,6 +424,71 @@ static void start(int ch, int note, int vel)
         if (v->lfo_delay < 0L) v->lfo_delay = 0L;
     }
     pan_gains(z.pan, &v->gl, &v->gr);
+    v->lfo_gain = z.lfo_gain;
+    /* THE MODULATION ENVELOPE, its own state machine beside the volume
+       one. Its output is a LEVEL - 0 is the note at rest and GAIN_ONE is
+       the pitch depth applied in full - not an attenuation, so the
+       sustain it came back as gets inverted on the way in: 960 cB of
+       attenuation is four percent held, which is what "960" in the
+       record means rather than silence. gm.dls writes attack 0, decay 0
+       and sustain 960 on every instrument that declares one, so the
+       level arrives already in the state it holds and the whole thing
+       contributes four percent of the depth for as long as the note
+       lasts. */
+    v->env_pos = 0L;
+    v->env_tick = ENV_STEP;
+    v->env_att_inc = 0L;
+    v->env_dec_inc = 0L;
+    v->env_rel_inc = 0L;
+    v->env_sus = (1000L - z.msustain_cb) * GAIN_ONE / 1000L;
+    if (v->env_sus < 0L) v->env_sus = 0L;
+    if (v->env_sus > GAIN_ONE) v->env_sus = GAIN_ONE;
+    v->env_pitch = z.env_pitch_tc;
+    if (z.mattack_ms > 0) {
+        long left = (long)z.mattack_ms * (g_rate / 1000L);
+        /* VELOCITY -> modEnv ATTACK. The same addition in time cents the
+           volume envelope's attack takes, and it has to land BEFORE the
+           step size is divided out below - a lengthened attack computed
+           after the fact is an attack nobody lengthens. gm.dls carries
+           8 of these. */
+        if (z.vel_attack_tc != 0) {
+            long ms = (long)z.mattack_ms
+                      * cents_gain((int)((long)z.vel_attack_tc
+                                         * vel / 127L)) >> 16;
+            if (ms < 1L) ms = 1L;
+            left = ms * (g_rate / 1000L);
+        }
+        if (left < 1L) left = 1L;
+        v->env_phase = 0;
+        v->env_att_inc = GAIN_ONE / (left / ENV_STEP + 1L);
+    } else if (z.mdecay_ms > 0) {
+        /* No attack, so the note opens in the decay: the level starts at
+           full and falls to the sustain over the stated time, one
+           division for a step size. keyNum shortens that time up the
+           keyboard the same way it shortens the volume envelope's -
+           -3979 time cents across the key range is a factor of ten -
+           and the result is what the step is worked out from, not a
+           correction applied afterwards. gm.dls carries 29 of them. */
+        long dec = (long)z.mdecay_ms;
+        if (z.key_decay_tc != 0) {
+            int extra = (int)((long)z.key_decay_tc * note / 127L);
+            dec = dec * cents_gain(extra) >> 16;
+            if (dec < 1L) dec = 1L;
+        }
+        {
+            long steps = dec * (g_rate / 1000L) / ENV_STEP;
+            v->env_phase = 1;
+            v->env_pos = GAIN_ONE;
+            if (steps < 1L) steps = 1L;
+            v->env_dec_inc = (GAIN_ONE - v->env_sus) / steps;
+            if (v->env_dec_inc < 1L) v->env_dec_inc = 1L;
+        }
+    } else {
+        /* Nothing was declared, or nothing that moves: the level sits
+           at the sustain for the whole note. */
+        v->env_phase = 1;
+        v->env_pos = v->env_sus;
+    }
 
     /* Velocity squared: MIDI velocity is a loudness the player feels,
        not an amplitude, and a linear map makes everything quiet sound
@@ -624,6 +712,30 @@ static long interp(const Voice *v, long pos, unsigned long frac)
     return acc;
 }
 
+/* WHAT A VOICE IS ATTENUATED BY, in tenths of a decibel: the envelope's
+   own climbing number, with the mod LFO folded on top of it.
+
+   modLfo -> gain is stated in centibels at full swing and the
+   oscillator swings both ways, so the net can come out below zero -
+   and the table underneath has no entry for a boost. Clamping at zero
+   is what "no attenuation" means there, which is the same answer the
+   reference player reaches by clamping its own amount to 0..960.
+
+   Measured on gm.dls, seven regions carry it at 1 cB and FF8's seven at
+   1 cB as well: it is a small colouring of the tone rather than a
+   gating effect, but a reader that skips it cannot play a bank that
+   sets it. */
+static long tremolo_cb(const Voice *v)
+{
+    long cb = v->atten >> 16;
+
+    if (v->lfo_gain != 0 && v->lfo_inc != 0 && v->lfo_delay <= 0) {
+        cb += (long)v->lfo_gain * lfo_tri(v->lfo_phase) >> 15;
+        if (cb < 0L) cb = 0L;
+    }
+    return cb;
+}
+
 static void mix(long *accL, long *accR, long frames)
 {
     long i, s, g, cg, env, vg, eg;
@@ -667,7 +779,7 @@ static void mix(long *accL, long *accR, long frames)
            not something in the format, and the thing being matched here
            is the machine's own synthesiser, which does not make it. */
         cg = (cg * 65536L) >> 16;
-        env = (db_gain_tenths(v->atten >> 16) >> 8) * (v->attack_env >> 8);
+        env = (db_gain_tenths(tremolo_cb(v)) >> 8) * (v->attack_env >> 8);
         for (i = 0; i < frames; i++) {
             s = interp(v, v->pos, v->frac);
             /* Both factors are 16.16 and neither exceeds 1.0, so the
@@ -714,13 +826,55 @@ static void mix(long *accL, long *accR, long frames)
                    envelope times use. The product is 32.32 and needs a
                    64-bit middle - 65536 for a step of 1.0 times a
                    2.0 gain is 8.6e9, which a 32-bit long is not. */
-                if (v->lfo_pitch != 0 && v->lfo_inc != 0) {
-                    int sc = (int)((long)v->lfo_pitch
-                                   * lfo_tri(v->lfo_phase) >> 15);
-                    long st = (long)(((lz_i64)v->base_step
-                                      * cents_gain(sc)) >> 16);
-                    v->step = st >> 16;
-                    v->sfrac = (unsigned long)(st & 0xFFFFL);
+                /* THE MODULATION ENVELOPE STEPS, on the same schedule
+                   the volume envelope does: 32 frames is 1.45 ms at
+                   22050. Its level rises during an attack, falls toward
+                   the sustain it holds, and then holds - and it is the
+                   level, so GAIN_ONE is the depth in full. */
+                if (v->env_tick <= 0) {
+                    v->env_tick = ENV_STEP;
+                    if (v->env_phase == 0) {
+                        v->env_pos += v->env_att_inc;
+                        if (v->env_pos >= GAIN_ONE) {
+                            v->env_pos = GAIN_ONE;
+                            v->env_phase = 1;
+                        }
+                    } else if (v->env_phase == 1) {
+                        if (v->env_pos > v->env_sus) {
+                            v->env_pos -= v->env_dec_inc;
+                            if (v->env_pos < v->env_sus)
+                                v->env_pos = v->env_sus;
+                        }
+                    } else {
+                        if (v->env_pos > 0L) {
+                            v->env_pos -= v->env_rel_inc;
+                            if (v->env_pos < 0L)
+                                v->env_pos = 0L;
+                        }
+                    }
+                }
+
+                /* THE PITCH THE LFO AND THE ENVELOPE ASK FOR, summed in
+                   cents before the one lookup that converts them. A
+                   region that declares neither leaves the step exactly
+                   as the static parameters put it. */
+                {
+                    long cents = 0L;
+                    if (v->lfo_pitch != 0 && v->lfo_inc != 0)
+                        cents += (long)v->lfo_pitch
+                                 * lfo_tri(v->lfo_phase) >> 15;
+                    if (v->env_pitch != 0 && v->env_pos != 0)
+                        cents += (int)((long)v->env_pitch
+                                       * v->env_pos >> 16);
+                    if (cents != 0) {
+                        long st = (long)(((lz_i64)v->base_step
+                                          * cents_gain((int)cents)) >> 16);
+                        v->step = st >> 16;
+                        v->sfrac = (unsigned long)(st & 0xFFFFL);
+                    } else {
+                        v->step = v->base_step >> 16;
+                        v->sfrac = (unsigned long)(v->base_step & 0xFFFFL);
+                    }
                 }
                 if (v->phase == 0) {
                     v->attack_env += v->attack_inc;
@@ -737,7 +891,7 @@ static void mix(long *accL, long *accR, long frames)
                     v->atten += v->rate_rel;
                 }
                 if (v->atten >= (ENV_FLOOR << 16)) { v->pcm = 0; break; }
-                env = (db_gain_tenths(v->atten >> 16) >> 8)
+                env = (db_gain_tenths(tremolo_cb(v)) >> 8)
                       * (v->attack_env >> 8);
             }
         }
