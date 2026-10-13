@@ -157,10 +157,12 @@ typedef struct {
        in the record either way, and a player that never reads it cannot
        play a bank that does set it. */
     long  lfo_gain;
-    /* The two channel gains, as 16.16 and set once per note. They are
-       GAIN_ONE when the region's pan is 0, which is every region in
-       this bank - the ramp only runs as a note moves off centre. */
-    long  gl, gr;
+    /* THE REGION'S PAN, kept rather than the two channel gains it turns
+       into, because the channel's own pan is summed with it when those
+       gains are worked out and that one can move under a held note.
+       Centre is full in both, so a region at pan 0 does not move the
+       level - see pan_gains. */
+    long  region_pan;
     int   ch, note;
     int   held;             /* still down, or held by the pedal */
     /* Voice-stealing order only, not a duration - a plain count, so it
@@ -174,6 +176,21 @@ typedef struct {
     int bend;               /* cents */
     int volume, expression; /* 0..127 */
     int sustain;
+    /* WHAT THE CONTROLLERS THIS FILE DID NOT READ USED TO DO. CC10 is
+       the channel's own pan and it is added to the region's, which is
+       how the reference player sums them; CC1 is the modulation wheel,
+       and the default modulator it drives scales the vibrato depth. */
+    int pan;                /* -500..500, 0 is centre */
+    int wheel;              /* 0..127, 0 is no vibrato added */
+    /* THE PITCH-BEND RANGE THE RPN ASKS FOR, in semitones. The GM default
+       is two and a file that never sends RPN 0 gets that, which is why
+       the default is set rather than left at zero - a zero here would
+       make every pitch bend silent. The RPN number itself and its value
+       are assembled from the two pairs of CCs that carry them, which is
+       all the state this needs to answer RPN 0. */
+    int bend_range;
+    int rpn_msb, rpn_lsb;
+    int data_msb, data_lsb;
 } Chan;
 
 static const KsbBank *g_bank;
@@ -198,6 +215,16 @@ int wave_open(const KsbBank *bank, long rate)
         g_ch[i].volume = 100;
         g_ch[i].expression = 127;
         g_ch[i].sustain = 0;
+        /* Centre pan, no wheel, and the GM default bend range: a file
+           that never sends RPN 0 assumes two semitones. */
+        g_ch[i].pan = 0;
+        g_ch[i].wheel = 0;
+        g_ch[i].bend_range = 2;
+        /* RPN null, which is what a channel is between selections. */
+        g_ch[i].rpn_msb = 127;
+        g_ch[i].rpn_lsb = 127;
+        g_ch[i].data_msb = 0;
+        g_ch[i].data_lsb = 0;
     }
     return 0;
 }
@@ -365,7 +392,11 @@ static void start(int ch, int note, int vel)
     v->pos = 0;
     v->frac = 0UL;
 
-    cents = (long)(note - z.unity) * 100L + z.fine + g_ch[ch].bend;
+    /* THE BEND IS NOT IN HERE. It is applied on every render step so a
+       bend that moves under a held note follows it - what is stored in
+       base_step is the pitch without one, and the vibrato and the pitch
+       envelope are measured from that same figure. */
+    cents = (long)(note - z.unity) * 100L + z.fine;
     mant = pitch_mantissa(cents, &oct);
     /* The stored rate over the output rate, as 16.16. Done unsigned
        because a bank may hold a rate up to 65535 and 65535<<16 is
@@ -423,7 +454,7 @@ static void start(int ch, int note, int vel)
                               * (lz_i64)g_rate / 65536L);
         if (v->lfo_delay < 0L) v->lfo_delay = 0L;
     }
-    pan_gains(z.pan, &v->gl, &v->gr);
+    v->region_pan = z.pan;
     v->lfo_gain = z.lfo_gain;
     /* THE MODULATION ENVELOPE, its own state machine beside the volume
        one. Its output is a LEVEL - 0 is the note at rest and GAIN_ONE is
@@ -594,8 +625,34 @@ static void op_control(int ch, int cc, int val)
 {
     int i;
     switch (cc) {
+    /* THE CONTROLLERS THIS FILE DID NOT USED TO READ, each a default
+       modulator in the reference player: CC1 scales the vibrato depth,
+       CC10 pans the channel and is added to the region's own pan, and
+       CC11/CC7 do what they did before. */
+    case 1:  g_ch[ch].wheel = val; break;
+    case 10:
+        /* 0..127 out to -500..500, which is the unit the region's pan
+           is in: 0 sits at centre and the two add. */
+        g_ch[ch].pan = (val - 64) * 500 / 64;
+        break;
+    case 6:  g_ch[ch].data_lsb = val; break;
     case 7:  g_ch[ch].volume = val; break;
     case 11: g_ch[ch].expression = val; break;
+    case 38:
+        /* THE DATA MSB COMPLETES A DATA ENTRY, so this is where a value
+           is actually known. RPN 0 is pitch bend range: the MSB is
+           semitones and the LSB cents, and only the semitones are kept
+           - a fraction of a semitone in the RANGE is not worth a field,
+           and the bend itself is carried in whole cents. RPN null is
+           127 and is what the channel starts at. */
+        g_ch[ch].data_msb = val;
+        if (g_ch[ch].rpn_msb == 0 && g_ch[ch].rpn_lsb == 0
+            && g_ch[ch].data_msb >= 0 && g_ch[ch].data_msb <= 127) {
+            g_ch[ch].bend_range = g_ch[ch].data_msb;
+        }
+        break;
+    case 100: g_ch[ch].rpn_lsb = val; break;
+    case 101: g_ch[ch].rpn_msb = val; break;
     case 64:
         g_ch[ch].sustain = val >= 64;
         if (!g_ch[ch].sustain) {
@@ -615,11 +672,14 @@ static void op_control(int ch, int cc, int val)
     }
 }
 
-/* A bend of 8192 is centre and the range is the GM default of two
-   semitones, which is what a file assumes when it never sends RPN 0. */
+/* A bend of 8192 is centre. THE RANGE COMES FROM THE RPN, not from the
+   GM default: a file that sends RPN 0 gets the bend it asked for, and a
+   file that never does gets two semitones because that is what the
+   channel opens at. It is applied every render step rather than only at
+   note-on, so a bend that moves under a held note follows. */
 static void op_pitch(int ch, int bend)
 {
-    g_ch[ch].bend = (bend - 8192) * 200 / 8192;
+    g_ch[ch].bend = (bend - 8192) * g_ch[ch].bend_range * 100 / 8192;
 }
 
 
@@ -738,7 +798,7 @@ static long tremolo_cb(const Voice *v)
 
 static void mix(long *accL, long *accR, long frames)
 {
-    long i, s, g, cg, env, vg, eg;
+    long i, s, g, cg, env, vg, eg, gl, gr;
     int j;
     Voice *v;
 
@@ -767,6 +827,10 @@ static void mix(long *accL, long *accR, long frames)
         cg = (vg * GAIN_ONE / (127L * 127L)) >> 8;
         eg = (eg * GAIN_ONE / (127L * 127L)) >> 8;
         cg = (cg * eg) >> 8;
+        /* AND THE PAN, region and channel together, on the same
+           schedule the volume is: a fader move - and CC10 moves a
+           held note's pan - has to be heard on notes already down. */
+        pan_gains(v->region_pan + g_ch[v->ch].pan, &gl, &gr);
         /* AND NOT THE MASTER FACTOR. A reference implementation of this
            same bank - SpessaSynth - multiplies everything it renders by
            0.6, SPESSASYNTH_GAIN_FACTOR, so that it "does not stay too
@@ -795,8 +859,8 @@ static void mix(long *accL, long *accR, long frames)
                gives 8.8 and so does the pan, and their product is the
                16.16 the old single accumulator held: 32767 * 65536 is
                2147418112, still inside a signed long. */
-            accL[i] += (s * ((g >> 8) * (v->gl >> 8))) >> 16;
-            accR[i] += (s * ((g >> 8) * (v->gr >> 8))) >> 16;
+            accL[i] += (s * ((g >> 8) * (gl >> 8))) >> 16;
+            accR[i] += (s * ((g >> 8) * (gr >> 8))) >> 16;
 
             v->frac += v->sfrac;
             v->pos += v->step + (long)(v->frac >> 16);
@@ -866,6 +930,12 @@ static void mix(long *accL, long *accR, long frames)
                     if (v->env_pitch != 0 && v->env_pos != 0)
                         cents += (int)((long)v->env_pitch
                                        * v->env_pos >> 16);
+                    /* AND THE BEND, which is why it was kept out of the
+                       step the note opened with: a bend that moves under
+                       a held note has to be heard to move. The range it
+                       was scaled by is the RPN's, or two semitones when
+                       the file never sends one. */
+                    cents += g_ch[v->ch].bend;
                     if (cents != 0) {
                         long st = (long)(((lz_i64)v->base_step
                                           * cents_gain((int)cents)) >> 16);
