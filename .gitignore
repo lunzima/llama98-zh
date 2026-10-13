@@ -299,6 +299,14 @@ docs/superpowers/
 .prof/
 !/build/move_per_function.sh
 
+# The score and the cues. They have a repository of their own - CLAUDE.md's
+# release rule 5 - so what is here is a CLONE of it, carrying its own .git.
+# Ignored rather than tracked for that reason: this tree is not that one's
+# history, and `git add -A` refuses to embed a gitlink anyway. Build the
+# sample bank and the gates read the directory whatever git thinks of it;
+# `git add music` in a fresh clone is the mistake this line stops.
+/music/
+
 # Python bytecode
 __pycache__/
 *.pyc

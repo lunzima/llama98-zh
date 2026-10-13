@@ -58,18 +58,20 @@ infrastructure stays LOCAL and is never pushed to `github.com/lunzima/llama98-zh
    reach into a tree it has no business binding. Anything else brought over
    from that repository arrives under the same terms and needs the same line.
 
-6. **`banks/` and `tools/` are not pushed.** `banks/` holds the built sample
-   bank; it is material, which is item 5's argument, and its source is 46 MB of
-   DLS with its own provenance that no player carries. `tools/` holds that
-   bank's producer and the two DLS readers it needs - `ksb_build.py`,
-   `dls_survey.py`, `dls_play.py` - and is item 4's argument taken to its end:
-   this tree ships `common/ksb.c`, and shipping the reader does not make its
-   writer part of the engine.
+6. **`tools/` is not pushed.** It holds the bank's producer and the two DLS
+   readers it needs - `ksb_build.py`, `dls_survey.py`, `dls_play.py` - and is
+   the `make_lz4.py` argument taken to its end: this tree ships
+   `common/ksb.c`, and shipping the reader does not make its writer part of
+   the engine.
 
-   What couples the two is the format alone - the two codec numbers and the
-   version field - and the failure mode for a disagreement is a bank that will
-   not open, which is the good one: caught here, once, rather than by a player
-   reading a sample table as something it is not.
+   `banks/` is committed and the distinction is the material. It is BUILT
+   here, from `tools/` over a DLS that is not in this tree, so nothing else
+   carries the built form; `music/` arrives from somewhere else and is
+   therefore a clone. What couples producer and reader is the format
+   alone - the two codec numbers and the version field - and the failure
+   mode for a disagreement is a bank that will not open, which is the good
+   one: caught here, once, rather than by a player reading a sample table
+   as something it is not.
 
 **What puts files in the root is cwd, and the root is where it matters.** An
 ad-hoc compile run from this directory leaves `.obj` and `.err` beside the

@@ -56,10 +56,14 @@ src
 # agent temp-file hook redirects writes to instead of %TEMP%, so it is
 # recreated by design; .gitignore carries the same reason.
 #
-# banks/ is the built sample bank and belongs to the same rule as music/:
-# the front end plays from a directory beside the executable, and the bank
-# is material with a source of its own - 46 MB of DLS, ripped, that a
-# player never carries.
+# banks/ and music/ LOOK alike here and are not the same thing, which is
+# why the .gitignore line is one-sided. music/ is the score and arrives from
+# parlour-midi, a repository of its own, so what sits in this tree is a clone
+# of it carrying another .git, and it is ignored for that. banks/ is built
+# HERE, from tools/ over a DLS that is not in this tree, so nothing else can
+# carry the built form and it is committed. The material outside is the
+# difference: one arrives from somewhere else, the other is what this tree
+# produces.
 #
 # tools/ holds the bank's producer and the two DLS readers it needs.
 # Same rule as make_lz4.py: the tree ships a reader, and shipping it does
