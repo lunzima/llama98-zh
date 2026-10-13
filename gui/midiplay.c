@@ -702,35 +702,47 @@ static int wave_pool(void) {
     return g_wpool != NULL;
 }
 
-/* us owed, in thousandths of a frame, and the division's remainder carried
- * across events. */
-static lz_i64 g_wo1000;
-static lz_i64 g_wcarry;
+/* What the stream owes the device, as microseconds times the output rate: the
+ * NUMERATOR, kept ratio-independent. The conversion happens at the drain, so
+ * an interval owed before a ratio change is still convertible after it and a
+ * change has nothing already owed to rewrite. What the change does touch is
+ * the remainder - under one ratio unit, where one frame is 1000 * ratio of
+ * them, so under a frame. */
+static lz_i64 g_wnum;
 
-/* Owe this interval's worth of frames.
- *
- * frames = ticks * us_qn * rate * ratio / (LZ_SMF_DIVISION * 1e6 * 1000).
- * The divisions are ordered so nothing overflows: the largest intermediate
- * is one interval's, about 9e15, against 9.2e18. The REMAINDER IS CARRIED,
- * not dropped - a thousandth of a frame per event sounds like nothing until
- * a piece of a hundred thousand events has lost a hundred frames of it. */
+/* Owe this interval of the piece: its microseconds, times the rate at which
+ * those microseconds become frames. */
 static void wave_owe(unsigned long ticks) {
-    lz_i64 us1000 = (lz_i64)ticks * (lz_i64)g_wrd.us_qn0 * 1000 / (lz_i64)LZ_SMF_DIVISION;
-    lz_i64 num    = us1000 * (lz_i64)g_wrate * (lz_i64)g_ratio + g_wcarry;
-    g_wo1000 += num / LZ_I64_C(1000000000);
-    g_wcarry = num % LZ_I64_C(1000000000);
+    lz_i64 us = (lz_i64)ticks * (lz_i64)g_wrd.us_qn0 / (lz_i64)LZ_SMF_DIVISION;
+    g_wnum += us * (lz_i64)g_wrate;
 }
 
+/* One frame of output at the ratio in force costs this many numerator units.
+ * frames = us * rate / (1000 * ratio), so a frame is 1000 * ratio of them --
+ * more ratio, more units, and the same ticks come out in FEWER frames. */
+#define WAVE_FRAME_COST (LZ_I64_C(1000) * (lz_i64)g_ratio)
+
 /* Render and hand over everything owed, in device-sized pieces. 0 when the
- * device refused, which ends the piece. */
+ * device refused, which ends the piece.
+ *
+ * THE RATIO DIVIDES, which is the whole of why a higher setting is faster
+ * music rather than slower. It costs more units per frame, so the same
+ * musical ticks arrive in fewer output frames: the notes start and end
+ * sooner, at the pitch they always had. That is lz_music_tempo_us's own
+ * shape -- base x 1000 / ratio, more ratio is less wall time. An earlier
+ * version of this put the ratio on top of the numerator instead, so a
+ * higher setting rendered MORE frames per tick and every piece played
+ * slower than the setting asked for, which is the direction reversed. */
 static int wave_drain(short *buf) {
-    while (g_wo1000 >= 1000) {
-        long n = (long)(g_wo1000 / 1000);
+    lz_i64 cost = WAVE_FRAME_COST;
+    while (g_wnum / cost >= 1) {
+        long n;
         if (g_wstop) return 1;
+        n = (long)(g_wnum / cost);
         if (n > LZ_WAVE_BLOCK) n = LZ_WAVE_BLOCK;
         wave_render(buf, n);
         if (!lz_ui_wave_write(buf, n)) return 0;
-        g_wo1000 -= (lz_i64)n * 1000;
+        g_wnum -= (lz_i64)n * cost;
     }
     return 1;
 }
@@ -745,8 +757,7 @@ static unsigned __stdcall wave_main(void *arg) {
         g_playing = 0;   /* no device: nothing is playing either way */
         return 0;
     }
-    g_wo1000 = 0;
-    g_wcarry = 0;
+    g_wnum = 0;
     for (;;) {
         if (g_wstop) break;
         if (!lz_smf_next(&g_wrd, &ev)) {
@@ -764,7 +775,7 @@ static unsigned __stdcall wave_main(void *arg) {
        than cut off. What has already been handed over is waited for by the
        close itself. */
     if (!g_wstop) {
-        g_wo1000 += (lz_i64)g_wrate * 1000;
+        g_wnum += (lz_i64)g_wrate * WAVE_FRAME_COST;
         wave_drain(buf);
     }
     lz_ui_wave_close();
