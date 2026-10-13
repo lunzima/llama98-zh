@@ -734,7 +734,7 @@ static int wave_drain(short *buf) {
 }
 
 static unsigned __stdcall wave_main(void *arg) {
-    short         buf[LZ_WAVE_BLOCK];
+    short         buf[LZ_WAVE_BLOCK * 2];   /* the mixer emits pairs */
     LZSmfEvent    ev;
     unsigned long prev = 0;
 

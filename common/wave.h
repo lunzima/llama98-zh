@@ -40,8 +40,11 @@ void wave_close(void);
    follows no expression. Returns 0. */
 int  wave_message(unsigned long msg);
 
-/* Mix `frames` mono samples. Always fills the whole buffer, with silence if
-   nothing is sounding. */
+/* Mix `frames` STEREO frames, interleaved left then right, so the buffer
+   takes 2 * frames shorts. Always fills the whole buffer, with silence if
+   nothing is sounding. Stereo because a DLS's pan, reverb and chorus are
+   stereo effects, and the caller rather than the mixer decides the channel
+   count. */
 void wave_render(short *out, long frames);
 
 /* Voices in use, and notes dropped because all of them were. Read at the end

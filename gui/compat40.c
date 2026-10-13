@@ -1451,7 +1451,7 @@ int lz_ui_wave_open(long rate) {
 }
 
 int lz_ui_wave_write(const short *pcm, long frames) {
-    long done = 0, i;
+    long done = 0;
     if (!g_wh) return 0;
     while (done < frames) {
         WAVEHDR *h = &g_whdr[g_wnext];
@@ -1467,14 +1467,12 @@ int lz_ui_wave_write(const short *pcm, long frames) {
         }
         n = frames - done;
         if (n > LZ_WAVE_FRAMES) n = LZ_WAVE_FRAMES;
-        /* The caller mixes MONO and the device is opened stereo; the
-           same sample goes to both channels. A DLS's own effects will
-           replace this with a real left and right, and until then the
-           two are the same signal, which is what a mono mix is. */
-        for (i = 0; i < n; i++) {
-            g_wbuf[g_wnext][2 * i]     = pcm[done + i];
-            g_wbuf[g_wnext][2 * i + 1] = pcm[done + i];
-        }
+        /* The caller now emits an interleaved PAIR, so this copies the
+           pair as it stands. (When the mixer was single channel this
+           duplicated the one sample into both halves - that is gone
+           along with the mono mixer.) */
+        memcpy(g_wbuf[g_wnext], pcm + 2 * done,
+               (size_t)(n * 2) * sizeof(short));
         h->dwBufferLength = (DWORD)(n * 2L * (long)sizeof(short));
         h->dwFlags &= ~WHDR_DONE;
         if (p_waveOutWrite(g_wh, h, sizeof *h) != MMSYSERR_NOERROR) return 0;

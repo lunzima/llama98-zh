@@ -109,7 +109,7 @@ static void wav_head(FILE *f, long rate, long frames)
     memcpy(h + 8, "WAVEfmt ", 8);
     put32(h + 16, 16UL);          /* PCM header size */
     put16(h + 20, 1UL);           /* WAVE_FORMAT_PCM */
-    put16(h + 22, 1UL);           /* mono */
+    put16(h + 22, 2UL);           /* stereo: the mixer emits pairs */
     put32(h + 24, r);
     put32(h + 28, r * 2UL);       /* bytes a second */
     put16(h + 32, 2UL);           /* block align */
@@ -121,21 +121,15 @@ static void wav_head(FILE *f, long rate, long frames)
 }
 
 /* Hand this block to whoever is listening: the card, or the file. */
-static int dev_write(const short *pcm, long n)
+static int dev_write(const short *pcm, long frames)
 {
-    static short scaled[PLAY_SEQ_FRAMES];
-    long         i;
+    static short scaled[PLAY_SEQ_FRAMES * 2];
+    long         i, half = frames * 2;
 
-    /* A master trim, in percent, for matching another synthesiser's
-       level. The bank's own chain is velocity squared, the region's
-       gain in decibels and the channel volume, and none of THAT is what
-       this is: it is the one number that is not in the file, because
-       what a system synthesiser does with the same events is its own
-       business and is not written down anywhere. Applied here rather
-       than in the mixer so that the sample the mixer works in is the
-       one the bank stores. */
-    if (g_gain != 100L && n <= PLAY_SEQ_FRAMES) {
-        for (i = 0; i < n; i++) {
+    /* `frames` counts frames and the sampler emits pairs, so every
+       buffer here is 2*frames samples and a trim runs over all of them. */
+    if (g_gain != 100L && half <= PLAY_SEQ_FRAMES * 2) {
+        for (i = 0; i < half; i++) {
             long v = (long)pcm[i] * g_gain / 100L;
             if (v > 32767L)
                 v = 32767L;
@@ -146,12 +140,12 @@ static int dev_write(const short *pcm, long n)
         pcm = scaled;
     }
     if (g_wav != NULL) {
-        if (fwrite(pcm, sizeof(short), (size_t)n, g_wav) != (size_t)n)
+        if (fwrite(pcm, sizeof(short), (size_t)half, g_wav) != (size_t)half)
             return 0;
-        g_wavn += n;
+        g_wavn += frames;
         return 1;
     }
-    return lz_ui_wave_write(pcm, n);
+    return lz_ui_wave_write(pcm, frames);
 }
 
 /* Play through the machine's own synthesiser: the same reader and the
@@ -473,7 +467,7 @@ int main(int argc, char **argv)
         }
         if (over) {
             /* The last event has gone out; what is left is the release. */
-            static short blk[PLAY_SEQ_FRAMES];
+            static short blk[PLAY_SEQ_FRAMES * 2];
             long         step = PLAY_SEQ_FRAMES;
             if (limit > 0L && frames + step > limit * rate)
                 step = limit * rate - frames;
@@ -493,7 +487,7 @@ int main(int argc, char **argv)
         want = interval_frames(&rd, ev.tick - prev_tick, rate, speed);
         prev_tick = ev.tick;
         while (want > 0) {
-            static short blk[PLAY_SEQ_FRAMES];
+            static short blk[PLAY_SEQ_FRAMES * 2];
             n = PLAY_SEQ_FRAMES;
             if (n > (long)want)
                 n = (long)want;

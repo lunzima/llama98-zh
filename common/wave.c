@@ -129,6 +129,10 @@ typedef struct {
     long  lfo_pitch;
     long  lfo_delay;        /* frames until the LFO starts at all */
     long  base_step;
+    /* The two channel gains, as 16.16 and set once per note. They are
+       GAIN_ONE when the region's pan is 0, which is every region in
+       this bank - the ramp only runs as a note moves off centre. */
+    long  gl, gr;
     int   ch, note;
     int   held;             /* still down, or held by the pedal */
     /* Voice-stealing order only, not a duration - a plain count, so it
@@ -274,6 +278,32 @@ static long db_gain(int db)
     return tab[-db];
 }
 
+/* Where a note sits between the channels: -500 hard left, 0 centre,
+   +500 hard right, the unit being tenths of a percent.
+
+   ONLY THE SIDE A NOTE MOVES TOWARD IS RAMPED. The usual form
+   normalises the pair to sum to 1.0, but that leaves a centred note at
+   0.5 and 0.5 - three decibels below the same note played down one
+   channel - and every region gm.dls carries has a pan of 0, so that
+   normalisation would quietly have taken three decibels off the whole
+   bank in order to move a note the bank never moves. Centre stays full
+   in both; the ramp starts only when a region asks for it. */
+static void pan_gains(int pan, long *gl, long *gr)
+{
+    long full = GAIN_ONE;
+    int  p = pan;
+
+    if (p < -500) p = -500;
+    if (p > 500) p = 500;
+    if (p >= 0) {
+        *gl = full * (500L - p) / 500L;
+        *gr = full;
+    } else {
+        *gl = full;
+        *gr = full * (500L + p) / 500L;
+    }
+}
+
 static void start(int ch, int note, int vel)
 {
     KsbZone z;
@@ -346,6 +376,7 @@ static void start(int ch, int note, int vel)
                               * (lz_i64)g_rate / 65536L);
         if (v->lfo_delay < 0L) v->lfo_delay = 0L;
     }
+    pan_gains(z.pan, &v->gl, &v->gr);
 
     /* Velocity squared: MIDI velocity is a loudness the player feels,
        not an amplitude, and a linear map makes everything quiet sound
@@ -562,13 +593,16 @@ static long interp(const Voice *v, long pos, unsigned long frac)
     return acc;
 }
 
-static void mix(long *acc, long frames)
+static void mix(long *accL, long *accR, long frames)
 {
     long i, s, g, cg, env, vg, eg;
     int j;
     Voice *v;
 
-    for (i = 0; i < frames; i++) acc[i] = 0L;
+    for (i = 0; i < frames; i++) {
+        accL[i] = 0L;
+        accR[i] = 0L;
+    }
     for (j = 0; j < WAVE_VOICES; j++) {
         v = &g_v[j];
         if (!v->pcm) continue;
@@ -610,7 +644,16 @@ static void mix(long *acc, long frames)
                32-bit long: 32767 * 65536 is 2147418112. */
             g = (v->gain >> 8) * cg;
             g = (g >> 8) * (env >> 8);
-            acc[i] += (s * g) >> 16;
+            /* THE SAME VOICE INTO BOTH CHANNELS, each scaled by its own
+               pan gain - which is GAIN_ONE on both sides for every
+               region this bank carries, so a note that is not panned
+               comes out of both channels at the level the single-channel
+               mix gave it and the loudness does not move. Halving g
+               gives 8.8 and so does the pan, and their product is the
+               16.16 the old single accumulator held: 32767 * 65536 is
+               2147418112, still inside a signed long. */
+            accL[i] += (s * ((g >> 8) * (v->gl >> 8))) >> 16;
+            accR[i] += (s * ((g >> 8) * (v->gr >> 8))) >> 16;
 
             v->frac += v->sfrac;
             v->pos += v->step + (long)(v->frac >> 16);
@@ -673,23 +716,34 @@ static void mix(long *acc, long frames)
 
 void wave_render(short *out, long frames)
 {
-    static long acc[WAVE_BLOCK];
+    static long accL[WAVE_BLOCK], accR[WAVE_BLOCK];
     long i, n;
 
+    /* STEREO, interleaved left then right: `frames` FRAMES is 2*frames
+       short samples. A DLS's reverb, chorus and pan are all stereo
+       effects, so the player cannot be a single channel if it is ever
+       to carry them - and it is not the mixer's job to decide where the
+       channel count is, because the same wavetable drives the console
+       player, the window and the file writer. */
     if (!g_bank) {
-        for (i = 0; i < frames; i++) out[i] = 0;
+        for (i = 0; i < frames * 2; i++)
+            out[i] = 0;
         return;
     }
     while (frames > 0) {
         n = frames < WAVE_BLOCK ? frames : WAVE_BLOCK;
-        mix(acc, n);
+        mix(accL, accR, n);
         for (i = 0; i < n; i++) {
-            long s = acc[i];
+            long s = accL[i];
             if (s > 32767L) s = 32767L;
             if (s < -32768L) s = -32768L;
-            out[i] = (short)s;
+            out[2 * i] = (short)s;
+            s = accR[i];
+            if (s > 32767L) s = 32767L;
+            if (s < -32768L) s = -32768L;
+            out[2 * i + 1] = (short)s;
         }
-        out += n;
+        out += 2 * n;
         frames -= n;
     }
 }
