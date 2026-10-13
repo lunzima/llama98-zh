@@ -579,7 +579,16 @@ static void start(int ch, int note, int vel)
         if (atk < 1L) atk = 1L;
     }
     v->rate_dec = env_rate(dec, g_rate);
-    v->rate_rel = env_rate((long)z.release_ms, g_rate);
+    /* RELEASE FLOORS AT 16 MS, which is what -7200 time cents is and
+       what the reference player floors at. Below that a note off is a
+       STEP rather than a ramp: one ENV_STEP is 1.45 ms at 22050, so a
+       release that fits inside one is a jump, and a bank that asks for
+       it was almost certainly asking for a shorter one than it meant. */
+    {
+        long rel = (long)z.release_ms;
+        if (rel < 16L) rel = 16L;
+        v->rate_rel = env_rate(rel, g_rate);
+    }
     v->tick = ENV_STEP;
     if (atk > 0) {
         v->phase = 0;
