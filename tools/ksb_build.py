@@ -65,6 +65,7 @@ A BUILD AT ITS SHIPPING SHAPE:
     python3 ksb_build.py --codec kac -c 12000 <FF8.dls> banks/kk98.ksb \
         0 4 6 7 12 16 25 46 80 81
 """
+import math
 import os
 import struct
 import subprocess
@@ -291,10 +292,16 @@ def envelope(d, a, b):
             # decay that depends on nothing.
             if dst in DST_STATIC:
                 got[DST_STATIC[dst]] = sc
-        else:
-            # A modulator, kept by its own pair: gm.dls's largest is
-            # modLfo -> pitch, 890 of them, which is the vibrato every
-            # instrument in this bank has and none of them was read.
+        elif ctl == 0:
+            # A SECONDARY CONTROL MEANS THE AMOUNT IS NOT A CONSTANT, and
+            # summing these together is how a piano ends up vibrating.
+            # gm.dls declares modLfo -> pitch TWICE on its piano: once
+            # with no control at ONE cent, and once with the modulation
+            # wheel as its control at forty-seven. Adding both makes
+            # forty-eight the depth of every note from the first bar -
+            # and leaves the wheel, whose whole job is to add that
+            # vibrato, with nothing left to add. What is kept here is the
+            # uncontrolled amount.
             key = (src & 0xFF, dst)
             mod[key] = mod.get(key, 0) + sc
 
@@ -320,25 +327,29 @@ def envelope(d, a, b):
         return max(-32768, min(32767, v))
 
     def sus(key, default=0):
-        """Sustain the way the reference player converts it: `1000 -
-        value`, where the value is the destination's own 0.1 percent
-        units - so the answer is centibels of attenuation and 1000 is
-        silence.
+        """Sustain, as an attenuation in centibels.
 
-        This used to be read as a percentage LEVEL and a logarithm taken
-        of that. It is a different curve and not a rounding of this one:
-        the value 968 comes out 2 cB the old way and 32 cB this way, and
-        3 dB of held level is not a quantisation. It is also the form
-        that inverts cleanly, which matters for the modulation envelope
-        where the same number is turned back into a linear level."""
+        THE VALUE IS A LEVEL IN A THOUSANDTHS, not an attenuation, so
+        the decibels taken off are forty times the log of it - and this
+        is where a linear reading of it goes wrong, loudly. The
+        reference player computes `1000 - value` and calls the answer
+        centibels, which its own source notes is right only at the two
+        ends; on FF8, whose pianos hold a value of 250, that is 75 dB of
+        attenuation and the note is gone inside two seconds, where the
+        same value read as a level is 12 dB. OpenMPT - the other reader
+        with twenty years on this exact file - divides the value by
+        1000*512 to get a LINEAR LEVEL, which is the same statement as
+        this logarithm.
+
+        Absent means full, which is what a sustain of 1000 is."""
         if key not in got:
             return default
-        v = int(round(got[key] / 65536.0))
-        if v <= 0:
-            return 960
-        if v >= 1000:
+        frac = got[key] / 65536.0 / 1000.0
+        if frac >= 1.0:
             return 0
-        return min(960, 1000 - v)
+        if frac <= 0.0:
+            return 960
+        return min(960, int(round(-200.0 * math.log10(frac))))
 
     # ONLY WHAT THIS LIST DECLARES. The merge with the instrument's own
     # articulation happens per destination downstream, so a region that

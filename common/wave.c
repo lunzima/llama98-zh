@@ -146,7 +146,6 @@ typedef struct {
     long  env_att_inc;      /* frames of attack: how far one step rises */
     long  env_dec_inc;      /* frames of decay: how far one step falls */
     long  env_rel_inc;      /* frames of release: ditto */
-    int   env_tick;         /* frames until the next step */
     int   env_phase;        /* 0 attack, 1 decay/sustain, 2 release */
     /* THE PITCH DEPTH of that envelope, in cents at full level. Only
        five regions of gm.dls carry a non-zero one, all at 327 - six
@@ -477,7 +476,6 @@ static void start(int ch, int note, int vel)
        contributes four percent of the depth for as long as the note
        lasts. */
     v->env_pos = 0L;
-    v->env_tick = ENV_STEP;
     v->env_att_inc = 0L;
     v->env_dec_inc = 0L;
     v->env_rel_inc = 0L;
@@ -590,7 +588,17 @@ static void start(int ch, int note, int vel)
         v->rate_rel = env_rate(rel, g_rate);
     }
     v->tick = ENV_STEP;
-    if (atk > 0) {
+    /* AN ATTACK OF ZERO IS A JUMP, and BOTH BANKS DECLARE ZERO on every
+       region they carry - so every note in both opened with a step and
+       that step is the click heard in the middle of a piece. The
+       reference player's envelope generator floors an attack at -12000
+       time cents, about a millisecond, and jumps a sub-buffer attack
+       straight to hold; a millisecond here is under one ENV_STEP, which
+       is 1.45 ms at 22050, so flooring it there would still be the same
+       single step. Three milliseconds is two steps, which is the
+       shortest ramp this envelope can actually draw. */
+    if (atk < 3L) atk = 3L;
+    {
         v->phase = 0;
         v->attack_env = 0L;
         /* Divided down first: a 65-second attack times 48000 is 3.1e9,
@@ -598,9 +606,6 @@ static void start(int ch, int note, int vel)
         v->attack_left = atk * (g_rate / 1000L);
         if (v->attack_left < 1L) v->attack_left = 1L;
         v->attack_inc = GAIN_ONE / (v->attack_left / ENV_STEP + 1L);
-    } else {
-        v->phase = 1;
-        v->attack_env = GAIN_ONE;
     }
     v->ch = ch;
     v->note = note;
@@ -912,13 +917,17 @@ static void mix(long *accL, long *accR, long frames)
                    envelope times use. The product is 32.32 and needs a
                    64-bit middle - 65536 for a step of 1.0 times a
                    2.0 gain is 8.6e9, which a 32-bit long is not. */
-                /* THE MODULATION ENVELOPE STEPS, on the same schedule
-                   the volume envelope does: 32 frames is 1.45 ms at
-                   22050. Its level rises during an attack, falls toward
-                   the sustain it holds, and then holds - and it is the
-                   level, so GAIN_ONE is the depth in full. */
-                if (v->env_tick <= 0) {
-                    v->env_tick = ENV_STEP;
+                /* THE MODULATION ENVELOPE STEPS, and it steps HERE for
+                   the reason there is no counter of its own: this block
+                   is already the volume envelope's schedule, once every
+                   ENV_STEP frames. A second counter was given to it and
+                   never decremented, so it never stepped at all - the
+                   level sat wherever it was initialized for the whole
+                   note, which for a bank declaring a decay is the whole
+                   of that decay missing. Its level rises during an
+                   attack, falls toward the sustain it holds and then
+                   holds; GAIN_ONE is the depth applied in full. */
+                {
                     if (v->env_phase == 0) {
                         v->env_pos += v->env_att_inc;
                         if (v->env_pos >= GAIN_ONE) {
