@@ -275,9 +275,15 @@ def envelope(d, a, b):
     cb, n = struct.unpack('<II', d[aa:aa + 8])
     got = {}
     mod = {}
+    # READ AS FAR AS IT FITS. Both n and cbSize come out of the file and
+    # neither is always the 8 this reader assumes, so a block carrying a
+    # different one would otherwise walk off its own chunk and off the
+    # end of the file with it - a traceback, not a rejection.
     for i in range(n):
-        src, ctl, dst, tr, sc = struct.unpack(
-            '<HHHHi', d[aa + cb + i * 12:aa + cb + i * 12 + 12])
+        o = aa + cb + i * 12
+        if o + 12 > len(d):
+            break
+        src, ctl, dst, tr, sc = struct.unpack('<HHHHi', d[o:o + 12])
         if src == 0 and ctl == 0:
             # Only the unmodulated connection for the static values. The
             # others are the same destination scaled by key number or
@@ -390,8 +396,11 @@ def read_dls(path, want):
     for cid, f, a, b in chunks(d, lins[0], lins[1]):
         if cid != b'LIST' or f != b'ins ':
             continue
-        ih_a, _ = find(d, a, b, b'insh')
-        if ih_a is None:
+        ih_a, ih_b = find(d, a, b, b'insh')
+        # An instrument with no header is not an instrument, and one
+        # whose header is too short to hold a bank and a program cannot
+        # be identified at all - say so rather than unpack past the end.
+        if ih_a is None or ih_b - ih_a < 12:
             continue
         _, bank, prog = struct.unpack('<III', d[ih_a:ih_a + 12])
         if prog & 0x80000000 or bank != 0 or (prog & 0x7F) not in want:
@@ -401,19 +410,31 @@ def read_dls(path, want):
         for c2, f2, r_a, r_b in chunks(d, lr_a, lr_b):
             if c2 != b'LIST' or f2 not in (b'rgn ', b'rgn2'):
                 continue
-            rh_a, _ = find(d, r_a, r_b, b'rgnh')
-            # THE HEADER HAS SIX FIELDS AND ONLY TWO WERE READ. Beyond the
-            # key range it carries the VELOCITY range and the key group:
-            # a bank that splits a key range across two layers by velocity
-            # collapsed onto whichever of them came first, and the
-            # reference player filters on all three. A 0,0 velocity range
-            # means the whole range, which is that reader's own rule and
-            # is what an editor writes when it means "every velocity".
-            klo, khi, vmin, vmax, fus, kgrp = struct.unpack(
-                '<HHHHHH', d[rh_a:rh_a + 12])
+            rh_a, rh_b = find(d, r_a, r_b, b'rgnh')
+            # A REGION WITHOUT A HEADER IS NOT A REGION. find() answers
+            # None for a file that carries none, and a header shorter
+            # than the key range carries nothing to play - the reference
+            # reader bounds its own reads the same way. Every field
+            # past the key range is read only when the chunk holds it:
+            # a shorter rgnh is a real shape in files that predate the
+            # velocity split, and unpacking 12 bytes out of a 4-byte
+            # header is a traceback, not a rejection.
+            if rh_a is None or rh_b - rh_a < 4:
+                continue
+            klo, khi = struct.unpack('<HH', d[rh_a:rh_a + 4])
+            vmin = vmax = 0
+            kgrp = 0
+            if rh_b - rh_a >= 12:
+                klo, khi, vmin, vmax, fus, kgrp = struct.unpack(
+                    '<HHHHHH', d[rh_a:rh_a + 12])
             if vmin == 0 and vmax == 0:
                 vmax = 127
-            wl_a, _ = find(d, r_a, r_b, b'wlnk')
+            wl_a, wl_b = find(d, r_a, r_b, b'wlnk')
+            # A region that links no wave plays nothing, and a link too
+            # short to carry a table index says even less. Both are
+            # refused rather than read past their end.
+            if wl_a is None or wl_b - wl_a < 12:
+                continue
             idx = struct.unpack('<I', d[wl_a + 8:wl_a + 12])[0]
             regs.append((klo, khi, idx, wsmp_of(d, r_a, r_b),
                          envelope(d, r_a, r_b), vmin, vmax, kgrp))
