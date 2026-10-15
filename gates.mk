@@ -41,7 +41,7 @@
 # nested inside another comment; gcc said so on every build and `check`
 # reported 16 PASS over it. Having a caller somewhere is not the test -
 # being reachable from what people actually run is.
-check: root-hygiene-gate bare-endif-gate wscr-borrow-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate json-offset-gate softfp-gate dedupe-gate mm-alias-gate kv-share-ced-boundary-gate ced-proj-arm-gate csa2-modes-config-gate csa2-cache-idx-alias-gate csa2-mode-dispatch-gate csa2-mode-export-load-gate csa2-last-writer-bin-gate csa2-reindex-causality-gate csa2-indexer-rope-slice-gate csa2-out-rope-gate csa2-z-subst-gate csa2-compress-m-layers-gate artifact-modeling-gate smf-lead-gate c89-floor-gate pri64-scan-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate tree-lock-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate gui-noman-selftest-gate codesize-gate isa-floor-avx2-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate arch-allowlist-gate kernel-matrix-gate aux-parm-arity-gate aux-equiv-gate mathf-xcompiler-gate bf16-torch-gate lz4-model-gate gcc-watcom-output-gate fixture-exists-gate
+check: root-hygiene-gate bare-endif-gate wscr-borrow-gate dead-ifndef-gate ppbrace-gate f32count-billing-gate fp-exception-gate bf16-native-gate json-offset-gate softfp-gate dedupe-gate mm-alias-gate kv-share-ced-boundary-gate ced-proj-arm-gate csa2-modes-config-gate csa2-cache-idx-alias-gate csa2-mode-dispatch-gate csa2-mode-export-load-gate csa2-last-writer-bin-gate csa2-reindex-causality-gate csa2-indexer-rope-slice-gate csa2-out-rope-gate csa2-z-subst-gate csa2-compress-m-layers-gate artifact-modeling-gate smf-lead-gate c89-floor-gate pri64-scan-gate comment-hygiene-gate ascii-source-gate kernel-reach-gate vc4-limits-gate vc4-compile-gate dup-body-gate twin-pair-gate gcc-watcom-pair-gate gate-wiring-gate tree-lock-gate gcc-warning-gate gcc-flag-parity-gate watcom-flag-parity-gate seed-gate gui-selftest-gate gui-noman-selftest-gate codesize-gate isa-floor-avx2-gate watcom-cli watcom-gui watcom-dll isa-floor-watcom-gate arch-allowlist-gate kernel-matrix-gate aux-parm-arity-gate aux-equiv-gate mathf-xcompiler-gate bf16-torch-gate lz4-model-gate ternary-path-gate gcc-watcom-output-gate fixture-exists-gate
 
 # Zero gcc warnings, asserted rather than printed. The Watcom side has
 # always been counted ("N lines, 0 warnings, 0 errors", per file); this
@@ -362,6 +362,24 @@ GATE_OK = rc=0; bash $(1) || rc=$$?; if [ "$$rc" = 2 ]; then rc=0; fi; exit $$rc
 .PHONY: lz4-model-gate
 lz4-model-gate:
 	@$(call GATE_OK,build/lz4_model_gate.sh "$(MODEL)")
+
+# A dense kunmoe tower's BitLinear weights are an fp32 LATENT in a
+# checkpoint and are ternarized by the training forward and by the
+# exporter; this engine never quantizes a weight, so the safetensors path
+# of that tower runs the un-QAT model. Nothing fails - the number just
+# belongs to a different function, and it was read as a verdict until the
+# mechanism was isolated (kunkun-ce dpo_r2, 8191 tokens: 4.9931 from
+# safetensors against 3.1992 through the bin, and HF with
+# weight_quant_ternary patched to identity reads 5.0044, which is where
+# the 4.99 comes from). cli_main now says which function it is about to
+# compute, and this gate is why it cannot quietly stop saying it.
+# It is in `check` rather than ci.sh-only for the same reason ced-gate is:
+# the arms are cheap and the part that makes them worth having - three
+# mutants, one per clause of the predicate - is the expensive half.
+# Needs the engine built and four model dirs; SKIPs without them.
+.PHONY: ternary-path-gate
+ternary-path-gate:
+	@bash build/ternary_path_gate.sh
 
 # --ced must not move the numbers, and the skip must actually happen.
 # Needs a model dir and the native build; SKIPs without either.

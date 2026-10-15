@@ -2027,6 +2027,26 @@ int main(int argc, char **argv) {
                    mode);
         }
     }
+    /* WHAT THIS RUN IS ABOUT TO COMPUTE, when it is not what the
+       checkpoint name implies. A ternary tower's BitLinear weights are an
+       fp32 LATENT in the file; the training forward ternarizes them
+       (engine/bitlinear.py weight_quant_ternary) and so does the
+       exporter, which is why a model.bin holds T2 codes. This engine
+       never quantizes a weight - it runs whatever the file holds - so
+       the safetensors path runs the same architecture un-ternarized.
+       Measured on kunkun-ce dpo_r2, 8191 tokens: 4.9931 here against
+       3.1992 through the exporter's bin, and that gap is the whole of it
+       (HF with weight_quant_ternary patched to identity reads 5.0044).
+
+       num_experts == 0 is the engine's existing name for this tower - the
+       predicate subn_scale_gs and resolve_hadamard use - and
+       kda_gate_rank > 0 scopes it to kunmoe: a GDN tower is also
+       num_experts == 0 and has no BitLinear anywhere. */
+    if (have_st && cfg->num_experts == 0 && cfg->kda_gate_rank > 0)
+        printf("ternary        OFF - the BitLinear weights are read as the "
+               "fp LATENT this file holds and this engine never quantizes a "
+               "weight, so this is the un-QAT model; export a model.bin to "
+               "run the trained one\n");
     {
         char _b[LZ_FTOA_BUF];
         lz_ftoa_f(_b, (float)(t1 - t0), 0, 0);
