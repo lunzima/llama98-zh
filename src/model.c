@@ -449,8 +449,26 @@ int lz_load_config(LZModelConfig *c, const char *path,
     }
     c->embed_signs_seed = lz_json_get_int(&j, tc, "embed_signs_seed", 0);
     /* Carried for the config copy's completeness; the safetensors path
-       has no group-scale planes, so this word has no consumer here. */
-    c->scale_f16 = lz_json_get_int(&j, tc, "weight_scale_fp16", 0);
+       has no group-scale planes, so this word has no consumer here.
+       THREE STATES, same as the bin's word (spec 4.6.1): the new
+       `weight_scale_layout` key (0/1/2) wins when present, and the old
+       boolean `weight_scale_fp16` is the fallback for checkpoints that
+       predate it. Reading only the old key would silently reset a
+       config that says layout 2 to layout 0 while the bin path read the
+       file's own word - the two loaders would then disagree about the
+       same checkpoint with no error anywhere. */
+    {
+        const LZJsonNode *ln = lz_json_get(&j, tc, "weight_scale_layout");
+        int layout = ln ? lz_json_get_int(&j, tc, "weight_scale_layout", 0)
+                        : lz_json_get_int(&j, tc, "weight_scale_fp16", 0);
+        if (layout < 0 || layout > 2) {
+            qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE,
+                 "weight_scale_layout");
+            lz_json_free(&j);
+            return 1;
+        }
+        c->scale_layout = layout;
+    }
     {
         int loop_repeats = lz_json_get_int(&j, tc, "loop_repeats", 1);
         if (loop_repeats != 1) {
@@ -3019,57 +3037,116 @@ static int read_gs(LZModel *m, uint32_t n, uint32_t *gs, int mul32) {
 /* Read one tensor's group-scale (or min) plane into dst, which is ALWAYS
    an f32 array of ng entries in RAM.
 
-   The only thing that varies is the file's width: bin v6's scale_f16
-   word says the packed formats store their per-group scales as IEEE
-   binary16 (Q4_1/Q6_1's min too), which is half the bytes on disk. The
-   widening happens HERE, at the one door every quantized tensor's scale
-   plane comes through, so t->scale/t->zero keep one representation and
-   no kernel, epilogue, inspect path or dequantizer ever tests the flag.
-   The alternative - an fp16 plane in memory and a branch at each of the
-   ~20 places that read t->scale[], some of them hand-written SIMD that
-   reads the plane as raw bytes - would be both slower and a correctness
-   hazard no test could cover uniformly.
+   Three on-disk layouts, one door. The bin v6 layout word (0/1/2, spec
+   4.6.1) says how the packed formats store their per-group scales
+   (Q4_1/Q6_1's min too):
+     0  f32 per group;
+     1  IEEE binary16 per group;
+     2  per plane: one SIGNED binary16 base per ROW, then one u8
+        multiplier per group (a = base * (u / 255.0)).
+   Layout 2 is PER PLANE, not per tensor: Q4_1/Q6_1's d and min each get
+   their own base plane and their own u8 plane, so this function is
+   called once per plane and only the plane it is asked to read differs.
+   The base is signed because the min plane's row base is its most
+   negative entry (the encoder clamps it to <= 0); the multiplier is
+   always unsigned. d's and t2/q8_0's bases are non-negative, which is a
+   property of those planes, not of the reader.
+   Every layout widens HERE, at the one door every quantized tensor's
+   scale plane comes through, so t->scale/t->zero keep one representation
+   and no kernel, epilogue, inspect path or dequantizer ever tests the
+   word. The alternative - a packed plane in memory and a branch at each
+   of the ~20 places that read t->scale[], some of them hand-written SIMD
+   that reads the plane as raw bytes - would be both slower and a
+   correctness hazard no test could cover uniformly.
 
-   Q16_0 does not come through here in the fp16 case: its scales stay
-   f32 in the file (tools/export_q8.py's read_bin reads them as f32
-   regardless of this word), so its branch calls with scale_f16 forced
-   off - see visit_read_bin.
+   Layout 2's conversion has ONE spelling, the same one the trainer's
+   ternary_grid and the exporter use: `d = base * (m / 255.0)`, the
+   integer turned into a float BEFORE the multiply. `base * m / 255` can
+   differ by 1 ULP, and d is multiplied straight into the code word, so
+   the two orders decode the same file to different weights.
 
-   fp16->f32 is exact, so a v6 file whose scales are f16 and a v5 file
-   carrying the same values widened produce identical planes. */
+   `rows` is the tensor's row count (n / last dim). It is consumed only
+   by layout 2; the caller supplies it rather than the geometry being
+   re-derived at each format branch, and only this function knows how
+   many bytes either plane of layout 2 occupies.
+
+   Q16_0 does not come through here in any packed layout: its scales stay
+   f32 in the file regardless of the word (tools/export_q8.py's read_bin
+   reads them as f32 too), so its branch passes layout 0 - see
+   visit_read_bin. */
 #define LZ_SCALE_CHUNK 128
-static int read_scale_plane(LZModel *m, float *dst, uint32_t ng, int f16) {
+
+/* Widen `count` little-endian binary16 values from the reader into dst
+   as f32. Chunked rather than one scratch plane: the largest group count
+   in this tree is ~1.3M (a hidden-size row at gs=32), and a second
+   4-byte-per-group scratch buffer per tensor read is exactly the RAM the
+   packed scales were meant to save on the 64MB target. Two bytes are
+   assembled by hand (`b[0] | b[1] << 8`) rather than through lz_le16, so
+   the file's little-endian order is honoured without a host-width
+   assumption. fp16->f32 is exact. */
+static int read_f16_plane(LZModel *m, float *dst, uint32_t count) {
+    unsigned char raw[LZ_SCALE_CHUNK * 2];
     size_t nb;
     uint32_t i, k, j;
 
-    if (!f16) {
+    i = 0;
+    while (i < count) {
+        k = count - i;
+        if (k > LZ_SCALE_CHUNK) k = LZ_SCALE_CHUNK;
+        nb = (size_t)k * 2;
+        if (m->rd(m->rd_ctx, raw, nb) != nb) return 1;
+        for (j = 0; j < k; j++) {
+            unsigned int h = (unsigned int)raw[j * 2] |
+                             ((unsigned int)raw[j * 2 + 1] << 8);
+            dst[i + j] = lz_f16_to_f32(h);
+        }
+        i += k;
+    }
+    return 0;
+}
+
+static int read_scale_plane(LZModel *m, float *dst, uint32_t ng, int layout,
+                            uint32_t rows) {
+    size_t nb;
+    uint32_t i, k, j;
+
+    if (layout == 0) {
         nb = (size_t)ng * sizeof(float);
         if (m->rd(m->rd_ctx, dst, nb) != nb) return 1;
         lz_le32(dst, (size_t)ng);
         return 0;
     }
-    /* Chunked rather than one scratch plane: the largest group count in
-       this tree is ~1.3M (a hidden-size row at gs=32), and a second
-       4-byte-per-group scratch buffer per tensor read is exactly the
-       RAM the fp16 scales were meant to save on the 64MB target. Two
-       bytes are assembled by hand (`b[0] | b[1] << 8`) rather than
-       through lz_le16, so the file's little-endian order is honoured
-       without a host-width assumption. */
+    if (layout == 1) return read_f16_plane(m, dst, ng);
+
+    /* layout 2. A row must hold a whole number of groups: the exporter
+       forms the base from max_g s_g over one row's groups, so a group
+       spanning or split across rows has no base to name. */
+    if (rows == 0 || ng == 0 || (ng % rows) != 0) return 1;
     {
-        unsigned char raw[LZ_SCALE_CHUNK * 2];
+        float *base;
+        unsigned char raw[LZ_SCALE_CHUNK];
+        uint32_t gpr = ng / rows;
+
+        base = (float *)malloc((size_t)rows * sizeof(float));
+        if (!base) return 1;
+        if (read_f16_plane(m, base, rows) != 0) {
+            free(base);
+            return 1;
+        }
         i = 0;
         while (i < ng) {
             k = ng - i;
             if (k > LZ_SCALE_CHUNK) k = LZ_SCALE_CHUNK;
-            nb = (size_t)k * 2;
-            if (m->rd(m->rd_ctx, raw, nb) != nb) return 1;
-            for (j = 0; j < k; j++) {
-                unsigned int h = (unsigned int)raw[j * 2] |
-                                 ((unsigned int)raw[j * 2 + 1] << 8);
-                dst[i + j] = lz_f16_to_f32(h);
+            if (m->rd(m->rd_ctx, raw, (size_t)k) != (size_t)k) {
+                free(base);
+                return 1;
             }
+            for (j = 0; j < k; j++)
+                dst[i + j] = base[(i + j) / gpr] *
+                             ((float)raw[j] / 255.0f);
             i += k;
         }
+        free(base);
     }
     return 0;
 }
@@ -3088,7 +3165,7 @@ static int read_tensor_hdr(LZModel *m, uint8_t *dtype, uint32_t *n) {
 static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
                           void *ctx, char *errbuf, int errlen) {
     uint8_t dtype;
-    uint32_t n, gs;
+    uint32_t n, gs, rows = 0;
     (void)ctx;
 
     /* Every multi-byte field below - the element count, the group size,
@@ -3110,6 +3187,14 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
     }
     field->n = (int)n;
     field->zero = NULL;
+    /* Layout 2's per-row base plane needs the tensor's row count, and
+       the bin stores only the element count - so it comes from the
+       shape desc model_walk_one synthesized from the same `dims` the
+       element count was checked against. Last dim is the row width for
+       1D/2D/3D alike (the exporter's own `inn = w.shape[-1]`). Computed
+       once here so no format branch re-derives it. */
+    if (t->n_dims > 0 && t->shape[t->n_dims - 1] > 0)
+        rows = (uint32_t)((lz_i64)n / t->shape[t->n_dims - 1]);
     if (dtype == LZ_FMT_F32) {
         field->dtype = LZ_FMT_F32;
         field->gs = 0;
@@ -3174,12 +3259,13 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
             return 1;
         }
         if (m->rd(m->rd_ctx, field->q, (size_t)n * 2) != (size_t)n * 2 ||
-            /* Q16_0's scales stay f32 even under scale_f16: this format
-               is used for in_proj_a/b, whose scale must hold the decay
-               rate's precision (see this branch's comment above), and
-               tools/export_q8.py's read_bin reads them as f32 whatever
-               that word says. Forced off here so the two sides agree. */
-            read_scale_plane(m, field->scale, n / gs, 0) != 0) {
+            /* Q16_0's scales stay f32 under EVERY scale_layout: this
+               format is used for in_proj_a/b, whose scale must hold the
+               decay rate's precision (see this branch's comment above),
+               and tools/export_q8.py's read_bin reads them as f32
+               whatever that word says. Layout 0 forced here so the two
+               sides agree; `rows` is meaningless at layout 0. */
+            read_scale_plane(m, field->scale, n / gs, 0, 0) != 0) {
             qerr(errbuf, errlen, LZ_ERR_TENSOR_READ, t->name);
             lz_t_free(field);
             return 1;
@@ -3212,9 +3298,9 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
         if (m->rd(m->rd_ctx, field->q, (size_t)n / 2 + (size_t)n / 4)
                 != (size_t)n / 2 + (size_t)n / 4 ||
             read_scale_plane(m, field->scale, n / gs,
-                             m->config.scale_f16) != 0 ||
+                             m->config.scale_layout, rows) != 0 ||
             read_scale_plane(m, field->zero, n / gs,
-                             m->config.scale_f16) != 0) {
+                             m->config.scale_layout, rows) != 0) {
             qerr(errbuf, errlen, LZ_ERR_TENSOR_READ, t->name);
             lz_t_free(field);
             return 1;
@@ -3242,7 +3328,7 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
         }
         if (m->rd(m->rd_ctx, field->q, (size_t)n / 4) != (size_t)n / 4 ||
             read_scale_plane(m, field->scale, n / gs,
-                             m->config.scale_f16) != 0) {
+                             m->config.scale_layout, rows) != 0) {
             qerr(errbuf, errlen, LZ_ERR_TENSOR_READ, t->name);
             lz_t_free(field);
             return 1;
@@ -3270,9 +3356,9 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
         }
         if (m->rd(m->rd_ctx, field->q, (size_t)n / 2) != (size_t)n / 2 ||
             read_scale_plane(m, field->scale, n / gs,
-                             m->config.scale_f16) != 0 ||
+                             m->config.scale_layout, rows) != 0 ||
             read_scale_plane(m, field->zero, n / gs,
-                             m->config.scale_f16) != 0) {
+                             m->config.scale_layout, rows) != 0) {
             qerr(errbuf, errlen, LZ_ERR_TENSOR_READ, t->name);
             lz_t_free(field);
             return 1;
@@ -3299,7 +3385,7 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
         }
         if (m->rd(m->rd_ctx, field->q, (size_t)n) != (size_t)n ||
             read_scale_plane(m, field->scale, n / gs,
-                             m->config.scale_f16) != 0) {
+                             m->config.scale_layout, rows) != 0) {
             qerr(errbuf, errlen, LZ_ERR_TENSOR_READ, t->name);
             aligned_free(field->q);
             aligned_free(field->scale);
@@ -3470,14 +3556,14 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
                    csa2_indexer_q_lora_rank, csa2_compress_m_layer[128]
 
        v6 appends the application table and the rotated-vocabulary /
-       scale-width words, CONDITIONALLY - a model that does not loop, has
+       scale-layout words, CONDITIONALLY - a model that does not loop, has
        no draft head, no rotated vocabulary and f32 scales is completely
        described by v5 and keeps that version word (tools/export_q8.py's
        own "the version follows the content" rule):
 
          v6      (258) exec_len, app_layer[128], app_loop[128],
                    mtp_n_draft, embed_hadamard, embed_signs_seed,
-                   scale_f16
+                   scale_layout
 
        v4 is the published generation - github.com/lunzima/kunkun98-models
        ships a MODEL/model.bin of exactly this shape - so it is FROZEN
@@ -3863,7 +3949,7 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
             RD(&c->mtp_n_draft, 4);
             RD(&c->embed_hadamard, 4);
             RD(&c->embed_signs_seed, 4);
-            RD(&c->scale_f16, 4);
+            RD(&c->scale_layout, 4);
 
             if (c->exec_len < 1 || c->exec_len > LZ_MAX_LAYERS) {
                 qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE, "exec_len");
@@ -3908,8 +3994,9 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
                      c->embed_hadamard);
                 goto fail;
             }
-            if (c->scale_f16 != 0 && c->scale_f16 != 1) {
-                qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE, "scale_f16");
+            if (c->scale_layout < 0 || c->scale_layout > 2) {
+                qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE,
+                     "scale_layout");
                 goto fail;
             }
         }

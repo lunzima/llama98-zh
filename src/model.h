@@ -775,15 +775,18 @@ typedef struct {
     int embed_hadamard;
     int embed_signs_seed;
 
-    /* GROUP SCALES ON DISK ARE fp16 when 1 (packed formats: Q8_0, Q4_1,
-       Q6_1, T2; Q4_1/Q6_1's min too; Q16_0 stays f32). FILE FORMAT
-       ONLY - lz_open_bin's tensor reader widens each plane into the
-       same f32 LZTensor.scale/zero arrays every kernel already reads,
-       so nothing downstream of the loader tests this word. A reader
-       that ignored it would take the scale array at twice the stride
-       and every dequantised weight would be wrong by a smooth factor
-       with nothing reporting. */
-    int scale_f16;
+    /* HOW THE GROUP SCALES OF EVERY PACKED FORMAT ARE STORED ON DISK
+       (Q8_0, Q4_1, Q6_1, T2; Q4_1/Q6_1's min too; Q16_0 excluded - it
+       stays f32 regardless, see its read branch). Three states, one per
+       file (spec 4.6.1): 0 = f32 per group, 1 = fp16 per group, 2 = one
+       fp16 base per ROW plus one u8 multiplier per group, with
+       d = base * (m / 255.0). FILE FORMAT ONLY - lz_open_bin's tensor
+       reader widens each plane into the same f32 LZTensor.scale/zero
+       arrays every kernel already reads, so nothing downstream of the
+       loader tests this word. A reader that ignored it would take the
+       scale array at twice the stride and every dequantised weight
+       would be wrong by a smooth factor with nothing reporting. */
+    int scale_layout;
 } LZModelConfig;
 
 /* Per-layer weight pointers. Only half the fields are valid per layer

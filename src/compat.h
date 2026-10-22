@@ -142,7 +142,7 @@ void lz_le16(void *p, size_t n);
  * only wants the byte-order helpers. The caller masks to 16 bits.
  *
  * Lives here rather than beside one reader because model.c's group-scale
- * planes (bin v6's scale_f16) and safetensors.c's f16 tensors need the
+ * planes (bin v6's scale_layout) and safetensors.c's f16 tensors need the
  * same conversion; safetensors.c still carries its own inline copy, and
  * that copy's subnormal branch is one octave low (see the report on bin
  * v6) - the two are left as they are here so this helper changes no
