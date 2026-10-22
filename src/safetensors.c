@@ -312,30 +312,19 @@ int lz_st_read_f32(LZSafetensors *st, const LZStTensor *t,
             memcpy(&dst[i], &u, sizeof(float));
         }
     } else {
+        /* f16 goes through compat.c's lz_f16_to_f32, the same conversion
+           bin v6's fp16 group-scale planes use. It was an inline copy of
+           that arithmetic until the subnormal branch was found to place
+           the exponent one octave low (127 - 15 - shift instead of
+           127 - 14 - shift), halving every value in [2^-24, 2^-14): an
+           f16 tensor whose entries are that small loaded as half what
+           the file says, with no error and no other symptom. Normal
+           values, zeros, Inf and NaN were already right, which is why
+           nothing noticed. One conversion, one place to be wrong. */
         for (i = 0; i < n; i++) {
             unsigned int h = ((unsigned int)raw[i * 2 + 1] << 8) |
                              (unsigned int)raw[i * 2];
-            unsigned int sign = (h & 0x8000u) << 16;
-            unsigned int exp  = (h >> 10) & 0x1Fu;
-            unsigned int man  =  h & 0x3FFu;
-            unsigned int u;
-            if (exp == 0) {
-                if (man == 0) {
-                    u = sign;                       /* +/-0 */
-                } else {
-                    /* subnormal: shift mantissa left until the top bit
-                       overflows, adjusting the exponent in lockstep */
-                    int shift = 0;
-                    while (!(man & 0x400u)) { man <<= 1; shift++; }
-                    man &= 0x3FFu;
-                    u = sign | ((unsigned int)(127 - 15 - shift) << 23) | (man << 13);
-                }
-            } else if (exp == 0x1Fu) {
-                u = sign | 0x7F800000u | (man << 13);   /* Inf / NaN */
-            } else {
-                u = sign | ((exp + 127u - 15u) << 23) | (man << 13);
-            }
-            memcpy(&dst[i], &u, sizeof(float));
+            dst[i] = lz_f16_to_f32(h);
         }
     }
     return 0;
