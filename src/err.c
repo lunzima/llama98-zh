@@ -204,6 +204,25 @@ static const char *const LZ_ERR_EN[LZ_ERR_COUNT] = {
                             "read into a fixed 3*hidden scratch buffer "
                             "shared with the base draft stage.",
     /* LZ_ERR_OOM_ALLOC */ "out of memory allocating %s",
+    /* LZ_ERR_CFG_EMBED_HADAMARD */ "embed_hadamard is %d, not 0: this engine "
+                            "has no rotated-vocabulary embedding/head, so "
+                            "the stored rows would be read in the wrong "
+                            "basis and every logit would be plausible and "
+                            "wrong",
+    /* LZ_ERR_CFG_ENGRAM_KEYS */ "config.json carries an engram key table "
+                            "(engram_keys) and this engine has no engram key "
+                            "lookup, so the module would contribute zeros",
+    /* LZ_ERR_CFG_LOOP_SCHEDULE */ "exec_len is %d but n_layers is %d: this "
+                            "bin describes a looping tower (the v6 "
+                            "application table) and this engine's layer loop "
+                            "still runs n_layers applications, so the run "
+                            "would be the wrong number of passes and look "
+                            "healthy",
+    /* LZ_ERR_CFG_LOOP_CONFIG */ "config.json has loop_repeats=%d: the v6 "
+                            "application table is derived in Python "
+                            "(engine/loop_schedule.py) and the C side does "
+                            "not derive a second one, so the safetensors "
+                            "path cannot run a looped tower",
     /* LZ_ERR_INTERNAL */ "internal error"
 };
 
@@ -392,6 +411,10 @@ static const char *const LZ_ERR_ZH[LZ_ERR_COUNT] = {
     /* LZ_ERR_OOM_ALLOC */ "\xe5\x86\x85\xe5\xad\x98\xe4\xb8\x8d\xe8\xb6\xb3"
                             "\xef\xbc\x8c\xe6\x97\xa0\xe6\xb3\x95\xe5\x88\x86"
                             "\xe9\x85\x8d %s",
+    /* LZ_ERR_CFG_EMBED_HADAMARD */ "embed_hadamard \xe4\xb8\xba %d\xef\xbc\x88\xe9\x9d\x9e 0\xef\xbc\x89\xef\xbc\x9a\xe6\x9c\xac\xe5\xbc\x95\xe6\x93\x8e\xe4\xb8\x8d\xe6\x94\xaf\xe6\x8c\x81\xe6\x97\x8b\xe8\xbd\xac\xe8\xaf\x8d\xe8\xa1\xa8\xe7\x9a\x84 embedding/head",
+    /* LZ_ERR_CFG_ENGRAM_KEYS */ "config.json \xe5\xb8\xa6\xe6\x9c\x89 engram_keys\xef\xbc\x9a\xe6\x9c\xac\xe5\xbc\x95\xe6\x93\x8e\xe6\xb2\xa1\xe6\x9c\x89 engram \xe9\x94\xae\xe8\xa1\xa8\xe7\x9a\x84\xe6\x9f\xa5\xe8\xa1\xa8\xe5\xae\x9e\xe7\x8e\xb0",
+    /* LZ_ERR_CFG_LOOP_SCHEDULE */ "exec_len \xe4\xb8\xba %d\xef\xbc\x8c\xe4\xb8\x8e n_layers %d \xe4\xb8\x8d\xe7\xad\x89\xef\xbc\x9a\xe6\x9c\xac\xe5\xbc\x95\xe6\x93\x8e\xe5\xb0\x9a\xe6\x9c\xaa\xe6\x89\xa7\xe8\xa1\x8c v6 \xe5\xba\x94\xe7\x94\xa8\xe8\xa1\xa8",
+    /* LZ_ERR_CFG_LOOP_CONFIG */ "config.json \xe7\x9a\x84 loop_repeats \xe4\xb8\xba %d\xef\xbc\x9a" "C \xe4\xbe\xa7\xe4\xb8\x8d\xe9\x87\x8d\xe7\xae\x97 v6 \xe5\xba\x94\xe7\x94\xa8\xe8\xa1\xa8\xef\xbc\x88\xe8\xa7\x84\xe6\xa0\xbc 3.10\xef\xbc\x89\xef\xbc\x8csafetensors \xe8\xb7\xaf\xe5\xbe\x84\xe6\x97\xa0\xe6\xb3\x95\xe6\x89\xa7\xe8\xa1\x8c\xe5\xbe\xaa\xe7\x8e\xaf\xe5\xa1\x94",
     /* LZ_ERR_INTERNAL */ "\xe5\x86\x85\xe9\x83\xa8\xe9\x94\x99\xe8\xaf\xaf"
 };
 

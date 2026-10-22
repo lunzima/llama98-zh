@@ -733,6 +733,57 @@ typedef struct {
        config.json (same meaning as kunmoe_modeling.py's
        `if not self._format_ids: return None` - no format gating). */
     unsigned char *engram_format_bitmap;   /* [(vocab_size+7)/8] bytes */
+
+    /* THE V6 HEADER BLOCK (spec sections 3.1 and 3.10), read from
+       model.bin when its version word is >= 6 and from config.json
+       (engine/loop_schedule.py and the keys below) on the safetensors
+       path.
+
+       exec_len/app_layer[]/app_loop[] are the APPLICATION TABLE: one
+       entry per execution of the layer loop. app_layer[a] is the
+       PHYSICAL layer application `a` runs and app_loop[a] which pass
+       over the block it belongs to (0 = encoder, 1.. = the decoder's
+       passes). A model that does not loop has exec_len == n_layers,
+       app_layer[a] == a and app_loop[a] == 0 - the identity schedule,
+       which is also what both loaders fill in when the fields are
+       absent (v4/v5 files). The table is DERIVED in Python by
+       engine/loop_schedule.py and written verbatim; nothing in C
+       recomputes it (a second derivation is a second opinion about
+       which physical layer each application runs).
+
+       The engine does not yet EXECUTE the table - the layer loop still
+       runs n_layers applications - so both loaders refuse a file whose
+       exec_len differs from n_layers (LZ_ERR_CFG_LOOP_SCHEDULE) rather
+       than run the wrong number of passes silently. The identity
+       schedule is validated and carried so that wiring the loop up
+       later is a consumer change, not a format change. */
+    int exec_len;                       /* applications; n_layers when absent */
+    int app_layer[LZ_MAX_LAYERS];       /* physical layer per application */
+    int app_loop[LZ_MAX_LAYERS];        /* pass index per application */
+
+    /* ROTATED VOCABULARY (engine/bitlinear.py's ternary_embedding /
+       ternary_head). embed_hadamard is the block width of R = H*S
+       applied to each looked-up embedding row (inverse) and to the
+       head's input; embed_signs_seed is the seed of S, the +-1 diagonal
+       (0 = pure Walsh-Hadamard, mix it in). 0/0 is "stored in the
+       primal basis", which is every model before this field.
+
+       CARRIED AND CHECKED, NOT APPLIED: the engine refuses a non-zero
+       embed_hadamard at load (LZ_ERR_CFG_EMBED_HADAMARD) rather than
+       read rotated rows as weights - that failure is a plausible wrong
+       logit, not an error. */
+    int embed_hadamard;
+    int embed_signs_seed;
+
+    /* GROUP SCALES ON DISK ARE fp16 when 1 (packed formats: Q8_0, Q4_1,
+       Q6_1, T2; Q4_1/Q6_1's min too; Q16_0 stays f32). FILE FORMAT
+       ONLY - lz_open_bin's tensor reader widens each plane into the
+       same f32 LZTensor.scale/zero arrays every kernel already reads,
+       so nothing downstream of the loader tests this word. A reader
+       that ignored it would take the scale array at twice the stride
+       and every dequantised weight would be wrong by a smooth factor
+       with nothing reporting. */
+    int scale_f16;
 } LZModelConfig;
 
 /* Per-layer weight pointers. Only half the fields are valid per layer

@@ -133,6 +133,22 @@ void lz_init_stdin(void);
 void lz_le32(void *p, size_t n);
 void lz_le16(void *p, size_t n);
 
+/* Widen one IEEE binary16 bit pattern (as read from a file, already in
+ * HOST order) to binary32. Exact: every binary16 value is representable
+ * in binary32, including subnormals and Inf/NaN.
+ *
+ * Takes `unsigned int` rather than uint16_t so this header does not
+ * depend on stdint.h being pulled in by every translation unit that
+ * only wants the byte-order helpers. The caller masks to 16 bits.
+ *
+ * Lives here rather than beside one reader because model.c's group-scale
+ * planes (bin v6's scale_f16) and safetensors.c's f16 tensors need the
+ * same conversion; safetensors.c still carries its own inline copy, and
+ * that copy's subnormal branch is one octave low (see the report on bin
+ * v6) - the two are left as they are here so this helper changes no
+ * safetensors-loaded model. */
+float lz_f16_to_f32(unsigned int h);
+
 /* Does LZ_BIG_ENDIAN match the machine actually running? 1 yes, 0 no.
  *
  * The macro list above cannot know every compiler, and the failure it

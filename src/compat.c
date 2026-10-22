@@ -18,6 +18,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 
 #include "compat.h"
@@ -276,6 +277,39 @@ void lz_le32(void *p, size_t n) { (void)p; (void)n; }
 void lz_le16(void *p, size_t n) { (void)p; (void)n; }
 
 #endif /* LZ_BIG_ENDIAN */
+
+/* ---- binary16 -> binary32 (see compat.h for the contract) ---------- */
+
+float lz_f16_to_f32(unsigned int h) {
+    unsigned int sign = (h & 0x8000u) << 16;
+    unsigned int exp  = (h >> 10) & 0x1Fu;
+    unsigned int man  = h & 0x3FFu;
+    unsigned int u;
+    float out;
+
+    if (exp == 0) {
+        if (man == 0) {
+            u = sign;                               /* +/-0 */
+        } else {
+            /* Subnormal: shift the mantissa left until the implicit bit
+               is the leading one, and drop the exponent in step. binary16
+               subnormals are man * 2^-24, binary32's exponent field for
+               that is 127 - 14 - shift (NOT 127 - 15 - shift: the
+               subnormal's exponent bias is one below the normal range's
+               -14). */
+            int shift = 0;
+            while (!(man & 0x400u)) { man <<= 1; shift++; }
+            man &= 0x3FFu;
+            u = sign | ((unsigned int)(127 - 14 - shift) << 23) | (man << 13);
+        }
+    } else if (exp == 0x1Fu) {
+        u = sign | 0x7F800000u | (man << 13);       /* Inf / NaN */
+    } else {
+        u = sign | ((exp + 127u - 15u) << 23) | (man << 13);
+    }
+    memcpy(&out, &u, sizeof(float));
+    return out;
+}
 
 int lz_endian_ok(void) {
     /* Not a compile-time trick: the whole point is to catch the case

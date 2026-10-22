@@ -369,6 +369,36 @@ static int arch_probe(const char *cfg_path) {
     return seen_kda;
 }
 
+/* The node config.json's model keys live under: text_config when the
+   multimodal shell wraps them, the root otherwise. Two loaders ask this
+   question (lz_load_config for everything, lz_open_bin for the engram
+   and activation sidecar fields) and both must answer it the same way -
+   a bin whose config.json is wrapped would otherwise skip the engram
+   check entirely and load a model it cannot run. */
+static const LZJsonNode *config_text_node(const LZJson *j,
+                                          const LZJsonNode *root) {
+    const LZJsonNode *tc = lz_json_get(j, root, "text_config");
+    return tc ? tc : root;
+}
+
+/* Does this config carry a non-empty engram KEY TABLE? (Distinct from
+   `engram`, the module switch: the key table is a second, external
+   lookup the model's forward reads rows out of, and this engine has no
+   such lookup.) Read as "present and not an empty/null placeholder",
+   which is the same test tools/export_q8.py refuses on - an empty array
+   or a null is how a config says "no keys" without dropping the key. */
+static int config_has_engram_keys(const LZJson *j, const LZJsonNode *obj) {
+    const LZJsonNode *k;
+    if (!obj) return 0;
+    k = lz_json_get(j, obj, "engram_keys");
+    if (!k) return 0;
+    if (k->type == LZ_JSON_NULL) return 0;
+    if (k->type == LZ_JSON_ARR) return k->n_children > 0;
+    if (k->type == LZ_JSON_STR) return k->text && k->text[0] != '\0';
+    if (k->type == LZ_JSON_BOOL) return k->num != 0;
+    return 1;
+}
+
 int lz_load_config(LZModelConfig *c, const char *path,
                        char *errbuf, int errlen) {
     char *buf;
@@ -395,8 +425,40 @@ int lz_load_config(LZModelConfig *c, const char *path,
         return 1;
     }
     /* The multimodal shell puts text params under text_config; plain-text checkpoints have them at top level */
-    tc = lz_json_get(&j, root, "text_config");
-    if (!tc) tc = root;
+    tc = config_text_node(&j, root);
+
+    /* THE v6 PRODUCTS THIS ENGINE CANNOT RUN, refused before anything is
+       bound. Same three refusals as lz_open_bin's v6 block, from the
+       config.json side: a rotated vocabulary (embed_hadamard) would have
+       its embedding/head rows read in the wrong basis, an engram key
+       table has no lookup here, and a looped tower has no application
+       table on this path at all - the table is derived in Python at
+       export time (spec section 3.10) and C is not allowed a second
+       derivation, so loop_repeats != 1 is refused rather than silently
+       running every layer once. */
+    if (config_has_engram_keys(&j, tc)) {
+        qerr(errbuf, errlen, LZ_ERR_CFG_ENGRAM_KEYS);
+        lz_json_free(&j);
+        return 1;
+    }
+    c->embed_hadamard = lz_json_get_int(&j, tc, "embed_hadamard", 0);
+    if (c->embed_hadamard != 0) {
+        qerr(errbuf, errlen, LZ_ERR_CFG_EMBED_HADAMARD, c->embed_hadamard);
+        lz_json_free(&j);
+        return 1;
+    }
+    c->embed_signs_seed = lz_json_get_int(&j, tc, "embed_signs_seed", 0);
+    /* Carried for the config copy's completeness; the safetensors path
+       has no group-scale planes, so this word has no consumer here. */
+    c->scale_f16 = lz_json_get_int(&j, tc, "weight_scale_fp16", 0);
+    {
+        int loop_repeats = lz_json_get_int(&j, tc, "loop_repeats", 1);
+        if (loop_repeats != 1) {
+            qerr(errbuf, errlen, LZ_ERR_CFG_LOOP_CONFIG, loop_repeats);
+            lz_json_free(&j);
+            return 1;
+        }
+    }
 
     /* GDN vs KDA, decided by the checkpoint's own linear-layer tensor
        names - see arch_probe. The config's layer_types entries stay the
@@ -880,6 +942,16 @@ int lz_load_config(LZModelConfig *c, const char *path,
             return 1;
         }
     }
+
+    /* The identity application table for a config that does not loop
+       (loop_repeats == 1, checked above; every checkpoint before the
+       loop tower). exec_len/app_layer[]/app_loop[] describe applications,
+       not layers, and the bin path carries them verbatim from the v6
+       header - this is the same table for a model whose schedule is the
+       identity, and n_layers is validated by the block just above. */
+    c->exec_len = c->n_layers;
+    for (i = 0; i < LZ_MAX_LAYERS; i++)
+        c->app_layer[i] = (i < c->n_layers) ? i : 0;
 
     /* S2 CSA2 (model.h's own csa2_on[]/csa2_compress_m comment). Parsed
        here, not earlier alongside ced_split/mla_q_lora_rank, because
@@ -2944,6 +3016,64 @@ static int read_gs(LZModel *m, uint32_t n, uint32_t *gs, int mul32) {
     return 0;
 }
 
+/* Read one tensor's group-scale (or min) plane into dst, which is ALWAYS
+   an f32 array of ng entries in RAM.
+
+   The only thing that varies is the file's width: bin v6's scale_f16
+   word says the packed formats store their per-group scales as IEEE
+   binary16 (Q4_1/Q6_1's min too), which is half the bytes on disk. The
+   widening happens HERE, at the one door every quantized tensor's scale
+   plane comes through, so t->scale/t->zero keep one representation and
+   no kernel, epilogue, inspect path or dequantizer ever tests the flag.
+   The alternative - an fp16 plane in memory and a branch at each of the
+   ~20 places that read t->scale[], some of them hand-written SIMD that
+   reads the plane as raw bytes - would be both slower and a correctness
+   hazard no test could cover uniformly.
+
+   Q16_0 does not come through here in the fp16 case: its scales stay
+   f32 in the file (tools/export_q8.py's read_bin reads them as f32
+   regardless of this word), so its branch calls with scale_f16 forced
+   off - see visit_read_bin.
+
+   fp16->f32 is exact, so a v6 file whose scales are f16 and a v5 file
+   carrying the same values widened produce identical planes. */
+#define LZ_SCALE_CHUNK 128
+static int read_scale_plane(LZModel *m, float *dst, uint32_t ng, int f16) {
+    size_t nb;
+    uint32_t i, k, j;
+
+    if (!f16) {
+        nb = (size_t)ng * sizeof(float);
+        if (m->rd(m->rd_ctx, dst, nb) != nb) return 1;
+        lz_le32(dst, (size_t)ng);
+        return 0;
+    }
+    /* Chunked rather than one scratch plane: the largest group count in
+       this tree is ~1.3M (a hidden-size row at gs=32), and a second
+       4-byte-per-group scratch buffer per tensor read is exactly the
+       RAM the fp16 scales were meant to save on the 64MB target. Two
+       bytes are assembled by hand (`b[0] | b[1] << 8`) rather than
+       through lz_le16, so the file's little-endian order is honoured
+       without a host-width assumption. */
+    {
+        unsigned char raw[LZ_SCALE_CHUNK * 2];
+        i = 0;
+        while (i < ng) {
+            k = ng - i;
+            if (k > LZ_SCALE_CHUNK) k = LZ_SCALE_CHUNK;
+            nb = (size_t)k * 2;
+            if (m->rd(m->rd_ctx, raw, nb) != nb) return 1;
+            for (j = 0; j < k; j++) {
+                unsigned int h = (unsigned int)raw[j * 2] |
+                                 ((unsigned int)raw[j * 2 + 1] << 8);
+                dst[i + j] = lz_f16_to_f32(h);
+            }
+            i += k;
+        }
+    }
+    return 0;
+}
+
 /* Read one tensor's header (dtype byte + LE element count). Shared by the
    bin path's tensor reads; factored out because every branch repeats it. */
 static int read_tensor_hdr(LZModel *m, uint8_t *dtype, uint32_t *n) {
@@ -3044,8 +3174,12 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
             return 1;
         }
         if (m->rd(m->rd_ctx, field->q, (size_t)n * 2) != (size_t)n * 2 ||
-            m->rd(m->rd_ctx, field->scale, sizeof(float) * (n / gs))
-                != sizeof(float) * (n / gs)) {
+            /* Q16_0's scales stay f32 even under scale_f16: this format
+               is used for in_proj_a/b, whose scale must hold the decay
+               rate's precision (see this branch's comment above), and
+               tools/export_q8.py's read_bin reads them as f32 whatever
+               that word says. Forced off here so the two sides agree. */
+            read_scale_plane(m, field->scale, n / gs, 0) != 0) {
             qerr(errbuf, errlen, LZ_ERR_TENSOR_READ, t->name);
             lz_t_free(field);
             return 1;
@@ -3054,7 +3188,6 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
            int16 and the kernels read it through an int16_t *, so its
            halves have to be put the right way round here. */
         lz_le16(field->q, (size_t)n);
-        lz_le32(field->scale, (size_t)(n / gs));
         m->bytes_alloc += (lz_i64)n * 2 +
                           (lz_i64)(n / gs) * sizeof(float);
     } else if (dtype == LZ_FMT_Q6_1) {
@@ -3078,16 +3211,14 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
         }
         if (m->rd(m->rd_ctx, field->q, (size_t)n / 2 + (size_t)n / 4)
                 != (size_t)n / 2 + (size_t)n / 4 ||
-            m->rd(m->rd_ctx, field->scale, sizeof(float) * (n / gs))
-                != sizeof(float) * (n / gs) ||
-            m->rd(m->rd_ctx, field->zero, sizeof(float) * (n / gs))
-                != sizeof(float) * (n / gs)) {
+            read_scale_plane(m, field->scale, n / gs,
+                             m->config.scale_f16) != 0 ||
+            read_scale_plane(m, field->zero, n / gs,
+                             m->config.scale_f16) != 0) {
             qerr(errbuf, errlen, LZ_ERR_TENSOR_READ, t->name);
             lz_t_free(field);
             return 1;
         }
-        lz_le32(field->scale, (size_t)(n / gs));
-        lz_le32(field->zero,  (size_t)(n / gs));
         m->bytes_alloc += (lz_i64)n / 2 + (lz_i64)n / 4 +
                           2 * (lz_i64)(n / gs) * sizeof(float);
     } else if (dtype == LZ_FMT_T2) {
@@ -3110,13 +3241,12 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
             return 1;
         }
         if (m->rd(m->rd_ctx, field->q, (size_t)n / 4) != (size_t)n / 4 ||
-            m->rd(m->rd_ctx, field->scale, sizeof(float) * (n / gs))
-                != sizeof(float) * (n / gs)) {
+            read_scale_plane(m, field->scale, n / gs,
+                             m->config.scale_f16) != 0) {
             qerr(errbuf, errlen, LZ_ERR_TENSOR_READ, t->name);
             lz_t_free(field);
             return 1;
         }
-        lz_le32(field->scale, (size_t)(n / gs));
         m->bytes_alloc += (lz_i64)n / 4 +
                           (lz_i64)(n / gs) * sizeof(float);
     } else if (dtype == LZ_FMT_Q4_1) {
@@ -3139,16 +3269,14 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
             return 1;
         }
         if (m->rd(m->rd_ctx, field->q, (size_t)n / 2) != (size_t)n / 2 ||
-            m->rd(m->rd_ctx, field->scale, sizeof(float) * (n / gs))
-                != sizeof(float) * (n / gs) ||
-            m->rd(m->rd_ctx, field->zero, sizeof(float) * (n / gs))
-                != sizeof(float) * (n / gs)) {
+            read_scale_plane(m, field->scale, n / gs,
+                             m->config.scale_f16) != 0 ||
+            read_scale_plane(m, field->zero, n / gs,
+                             m->config.scale_f16) != 0) {
             qerr(errbuf, errlen, LZ_ERR_TENSOR_READ, t->name);
             lz_t_free(field);
             return 1;
         }
-        lz_le32(field->scale, (size_t)(n / gs));
-        lz_le32(field->zero,  (size_t)(n / gs));
         m->bytes_alloc += (lz_i64)n / 2 +
                           2 * (lz_i64)(n / gs) * sizeof(float);
     } else if (dtype == LZ_FMT_Q8_0) {
@@ -3170,8 +3298,8 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
             return 1;
         }
         if (m->rd(m->rd_ctx, field->q, (size_t)n) != (size_t)n ||
-            m->rd(m->rd_ctx, field->scale, sizeof(float) * (n / gs))
-                != sizeof(float) * (n / gs)) {
+            read_scale_plane(m, field->scale, n / gs,
+                             m->config.scale_f16) != 0) {
             qerr(errbuf, errlen, LZ_ERR_TENSOR_READ, t->name);
             aligned_free(field->q);
             aligned_free(field->scale);
@@ -3179,7 +3307,6 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
             field->scale = NULL;
             return 1;
         }
-        lz_le32(field->scale, (size_t)(n / gs));
         m->bytes_alloc += (lz_i64)n + (lz_i64)(n / gs) * sizeof(float);
     } else {
         qerr(errbuf, errlen, LZ_ERR_TENSOR_DTYPE, t->name, dtype);
@@ -3310,16 +3437,15 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
         goto fail;
     }
     RD(&ver, 4);
-    /* Two header shapes are read, and only two.
+    /* Three header shapes are read, and only three.
 
-       v5 is the one layout this tree writes (tools/export_q8.py's
-       BIN_VERSION): the base header, then every field any version ever
-       added, written unconditionally, in the order it was added. The
-       ORDER is the whole contract - neither side has a length prefix or
-       a field tag, so a field moved across the boundary of a group is
-       read back as a plausible wrong number rather than as a parse
-       failure, and only a byte-level comparison of the two sequences
-       finds it.
+       v5 is everything up to csa2_compress_m_layer: the base header, then
+       every field any version ever added, written unconditionally, in
+       the order it was added. The ORDER is the whole contract - neither
+       side has a length prefix or a field tag, so a field moved across
+       the boundary of a group is read back as a plausible wrong number
+       rather than as a parse failure, and only a byte-level comparison
+       of the two sequences finds it.
 
          base     magic "L98Z", ver, 28 fixed words, layer_types[128]
          tail (13) kda_gate_rank, kda_has_gate_lower_bound,
@@ -3343,6 +3469,16 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
                    csa2_indexer_heads, csa2_indexer_head_dim,
                    csa2_indexer_q_lora_rank, csa2_compress_m_layer[128]
 
+       v6 appends the application table and the rotated-vocabulary /
+       scale-width words, CONDITIONALLY - a model that does not loop, has
+       no draft head, no rotated vocabulary and f32 scales is completely
+       described by v5 and keeps that version word (tools/export_q8.py's
+       own "the version follows the content" rule):
+
+         v6      (258) exec_len, app_layer[128], app_loop[128],
+                   mtp_n_draft, embed_hadamard, embed_signs_seed,
+                   scale_f16
+
        v4 is the published generation - github.com/lunzima/kunkun98-models
        ships a MODEL/model.bin of exactly this shape - so it is FROZEN
        here rather than retired with the rest of the ladder. It carries
@@ -3353,7 +3489,7 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
        tails they carry, and a shape nothing writes any more is a shape
        nothing exercises: reading it would be a compatibility branch no
        gate can reach. */
-    if (ver != 4 && ver != 5) {
+    if (ver < 4 || ver > 6) {
         qerr(errbuf, errlen, LZ_ERR_BIN_VERSION, ver);
         goto fail;
     }
@@ -3466,8 +3602,10 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
         qerr(errbuf, errlen, LZ_ERR_BIN_CFG);
         goto fail;
     }
-    if (ver == 5) {
-        /* The rest of the v5 layout, in order and unconditionally. */
+    if (ver >= 5) {
+        /* The rest of the v5 layout, in order and unconditionally. A v6
+           file carries all of it too, followed by the v6 group read
+           further down. */
         RD(&c->mtp_n_layers, 4);
         RD(&c->mtp_intermediate_size, 4);
         RD(&c->rope_scaling_type, 4);
@@ -3699,6 +3837,82 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
                 goto fail;
             }
         }
+        /* THE V6 GROUP, read last because it was appended last. Seven
+           words, 258 in all with the two 128-word tables (tools/
+           export_q8.py's write_config writes this exact sequence under
+           `if ver >= 6`).
+
+           DEFAULTS FOR v4/v5 live below the version branch, not here: a
+           file without these words is completely described by the
+           identity schedule, which is what "does not loop" IS - not an
+           approximation of it.
+
+           THE TABLE IS VALIDATED, NOT EXECUTED. exec_len must equal
+           n_layers or the loader refuses the file
+           (LZ_ERR_CFG_LOOP_SCHEDULE): the layer loop still runs
+           n_layers applications, and running ten where the checkpoint
+           says fifteen is the silent-wrong-answer case the exporter's
+           own version rule exists to prevent. The identity check makes
+           the table itself load-bearing on both paths, so wiring the
+           loop up later is a consumer change rather than a format
+           change. */
+        if (ver >= 6) {
+            RD(&c->exec_len, 4);
+            RD(c->app_layer, LZ_MAX_LAYERS * 4);
+            RD(c->app_loop, LZ_MAX_LAYERS * 4);
+            RD(&c->mtp_n_draft, 4);
+            RD(&c->embed_hadamard, 4);
+            RD(&c->embed_signs_seed, 4);
+            RD(&c->scale_f16, 4);
+
+            if (c->exec_len < 1 || c->exec_len > LZ_MAX_LAYERS) {
+                qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE, "exec_len");
+                goto fail;
+            }
+            for (i = 0; i < LZ_MAX_LAYERS; i++) {
+                if (i >= c->exec_len) {
+                    /* Nothing named an application past the end, so
+                       nothing may have touched it. app_layer[] is 0 for
+                       a real entry too (physical layer 0), which is why
+                       the padding test is on app_loop[] as well - a
+                       non-identity schedule that ran long would show up
+                       in at least one of the two. */
+                    if (c->app_layer[i] != 0 || c->app_loop[i] != 0) {
+                        qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE,
+                             c->app_loop[i] != 0 ? "app_loop" : "app_layer");
+                        goto fail;
+                    }
+                    continue;
+                }
+                if (c->app_layer[i] < 0 || c->app_layer[i] >= c->n_layers) {
+                    qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE, "app_layer");
+                    goto fail;
+                }
+                if (c->app_loop[i] < 0) {
+                    qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE, "app_loop");
+                    goto fail;
+                }
+            }
+            if (c->exec_len != c->n_layers) {
+                qerr(errbuf, errlen, LZ_ERR_CFG_LOOP_SCHEDULE,
+                     c->exec_len, c->n_layers);
+                goto fail;
+            }
+            /* A non-zero embed_hadamard means the embedding/head rows
+               are stored in the rotated basis; this engine has neither
+               the inverse rotation on lookup nor the forward one on the
+               head, and would read them as weights. Refused rather than
+               run, for the reason err.h's own comment gives. */
+            if (c->embed_hadamard != 0) {
+                qerr(errbuf, errlen, LZ_ERR_CFG_EMBED_HADAMARD,
+                     c->embed_hadamard);
+                goto fail;
+            }
+            if (c->scale_f16 != 0 && c->scale_f16 != 1) {
+                qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE, "scale_f16");
+                goto fail;
+            }
+        }
         /* CSA2 geometry and CED replay. All six are config.json fields
            with no other route into this loader, so before these RD()
            calls the bin path ran the whole CSA2 mechanism on zeros: the
@@ -3856,7 +4070,7 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
        the per-layer check cannot see that, since it only ever looks at
        one layer's own fields (model.c's own comment on that function
        has the concrete example). */
-    if (ver == 5 && !lz_csa2_last_writer_valid(c, NULL)) {
+    if (ver >= 5 && !lz_csa2_last_writer_valid(c, NULL)) {
         qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE, "csa2_source");
         goto fail;
     }
@@ -3872,9 +4086,9 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
        This is the bin path's half of the allowlist lz_load_config applies
        to safetensors (arch_probe there, from tensor names). The bin
        header is the only identity a .bin checkpoint carries - the
-       config.json beside it is optional and read for engram and
-       ffn_activation alone - so without this the allowlist does not reach
-       a .bin model at all. */
+       config.json beside it is optional and read for engram, the
+       engram key table and ffn_activation alone - so without this the
+       allowlist does not reach a .bin model at all. */
     {
         int seen_gdn = 0, seen_kda = 0, unknown = 0;
         for (i = 0; i < c->n_layers; i++) {
@@ -3886,6 +4100,21 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
             qerr(errbuf, errlen, LZ_ERR_CFG_UNSUPPORTED_ARCH);
             goto fail;
         }
+    }
+
+    /* v4/v5 have no words for the v6 group, and they do not need any:
+       a file below v6 is the complete description of a model with the
+       identity schedule. Filling it in HERE (rather than in the v4
+       branch alone) keeps the two version branches from each owning a
+       copy of the same default, and keeps `ver < 6` the one predicate
+       both the reader and this fill test. app_loop[] and mtp_n_draft
+       stay at lz_open's memset zero - pass 0 for every layer, no draft
+       head - which is exactly what the v5 path read before these fields
+       existed, so a v5 load is bit-for-bit what it was. */
+    if (ver < 6) {
+        c->exec_len = c->n_layers;
+        for (i = 0; i < LZ_MAX_LAYERS; i++)
+            c->app_layer[i] = (i < c->n_layers) ? i : 0;
     }
 
     if (check_attn_gate(c, errbuf, errlen) != 0) goto fail;
@@ -3906,9 +4135,23 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
                     const LZJsonNode *root = lz_json_root(&jcfg);
                     const LZJsonNode *tc = NULL;
                     if (root && root->type == LZ_JSON_OBJ)
-                        tc = root;
+                        tc = config_text_node(&jcfg, root);
                     if (tc) {
-                        int eg_on = lz_json_get_int(&jcfg, tc, "engram", 0);
+                        int eg_on;
+                        /* An engram KEY TABLE is a second, external
+                           lookup this engine has no implementation of -
+                           the same refusal lz_load_config makes. It is
+                           not a header field, so only config.json can
+                           name it, and a bin whose sidecar carries one
+                           must not load and then run an engram module
+                           that contributes zeros. */
+                        if (config_has_engram_keys(&jcfg, tc)) {
+                            lz_json_free(&jcfg);
+                            free(cfg_buf);
+                            qerr(errbuf, errlen, LZ_ERR_CFG_ENGRAM_KEYS);
+                            goto fail;
+                        }
+                        eg_on = lz_json_get_int(&jcfg, tc, "engram", 0);
                         if (eg_on) {
                             c->engram = eg_on;
                             c->engram_ngram    = lz_json_get_int(&jcfg, tc, "engram_ngram", 3);

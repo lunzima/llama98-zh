@@ -267,6 +267,26 @@ typedef enum {
        buffer did not" is the whole diagnosis. */
     LZ_ERR_OOM_ALLOC,          /* out of memory allocating %s */
 
+    /* The bin v6 header (spec section 3.1) describes two products this
+       engine cannot run yet, and both fail SILENTLY if loaded rather
+       than loudly: the embedding/head rows of a rotated vocabulary are
+       stored in a basis the engine would read as weights, so every
+       logit is plausible and wrong, and an engram key table names rows
+       the engine has no lookup for, so the module contributes zeros.
+       Refused at load time on both paths, by field name. */
+    LZ_ERR_CFG_EMBED_HADAMARD, /* embed_hadamard %d is not 0: rotated-vocabulary embedding/head not implemented */
+    LZ_ERR_CFG_ENGRAM_KEYS,    /* config.json carries engram_keys; this engine has no engram key lookup */
+    /* exec_len != n_layers is a looping tower (engine/loop_schedule.py).
+       The application table is read and validated, but the layer loop
+       still runs n_layers applications, so accepting one would run the
+       wrong number of passes and look healthy. */
+    LZ_ERR_CFG_LOOP_SCHEDULE,  /* exec_len %d != n_layers %d: the v6 application table is not executed yet */
+    /* The safetensors path has no header to read a table out of; the
+       table is derived in Python at export time and the C side is not
+       allowed a second derivation (spec section 3.10), so a config.json
+       that asks for a looped tower is refused there too. */
+    LZ_ERR_CFG_LOOP_CONFIG,    /* config.json loop_repeats=%d: no application table on the safetensors path */
+
     /* Generic failure. Two jobs, and it must stay LAST before
        LZ_ERR_COUNT for the second one:
        1. the initial value of a return code that every failure path is
