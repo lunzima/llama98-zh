@@ -430,12 +430,18 @@ static void usage(void) {
     "                   stderr, so redirecting stdout keeps the output\n"
     "                   clean either way.\n"
     "  --no-ckpt        Disable cross-turn prefix reuse (-i only)\n"
-    "  --kv MODE        q8|q4|f32 (default q8). q4 halves KV bytes and turns\n"
-    "                   rotation on. f32 is the measuring arm, not a\n"
-    "                   deployment mode.\n"
+    "  --kv MODE        auto|q8|q4|f32 (default auto). auto picks by the\n"
+    "                   model: dense planes get K q8 / V q4 with rotation\n"
+    "                   on (the measured arm - 4-bit KV without the\n"
+    "                   rotation costs +6.7%%/+21.4%% PPL, with it\n"
+    "                   +0.6%%/+1.7%%), and a tower with no dense planes\n"
+    "                   is left alone. Naming a format pins both sides.\n"
+    "                   q4 halves KV bytes and turns rotation on. f32 is\n"
+    "                   the measuring arm, not a deployment mode.\n"
     "  --kv-k FMT       Override --kv's K format alone (same values).\n"
     "  --kv-v FMT       Override --kv's V format alone (same values).\n"
-    "  --csa2-ring FMT  f32|bf16|q8|q16 (default f32) for the two finalized CSA2\n"
+    "  --csa2-ring FMT  f32|bf16|q8|q16 (default bf16 under --kv auto) for\n"
+    "                   the two finalized CSA2\n"
     "                   rings. Storage only: every read is widened back to\n"
     "                   f32 before any arithmetic, so bf16 changes what is\n"
     "                   held, not what is computed. f32 is the identity\n"
@@ -1205,6 +1211,8 @@ int main(int argc, char **argv) {
        themselves live in sampler.h, next to lz_sample_apply_think_preset. */
     unsigned int manual = 0;
     int ckpt_on = 1;    /* --no-ckpt turns prefix reuse off (A/B knob) */
+    int kv_auto = 1;    /* --kv unset: pick per model after lz_open */
+    int ring_pinned = 0; /* --csa2-ring given: leave it alone */
     LZGenOpts g;
     LZModelConfig *cfg;
     int i, rc = 0;
@@ -1816,25 +1824,36 @@ int main(int argc, char **argv) {
         else if (strcmp(a, "--no-beep") == 0) beep = 0;
         else if (strcmp(a, "--no-ckpt") == 0) ckpt_on = 0;
         else if (strcmp(a, "--kv") == 0 && i + 1 < argc) {
-            int f = parse_kvfmt(argv[++i]);
-            if (f < 0) { usage(); return 2; }
-            lz_kv_kfmt = f;
-            lz_kv_vfmt = f;
+            /* "auto" is the DEFAULT and picks per model - see the
+               resolution after lz_open. Naming a format pins both sides
+               and turns auto off, so every old command line keeps
+               meaning what it meant. */
+            if (strcmp(argv[i + 1], "auto") == 0) { kv_auto = 1; i++; }
+            else {
+                int f = parse_kvfmt(argv[++i]);
+                if (f < 0) { usage(); return 2; }
+                lz_kv_kfmt = f;
+                lz_kv_vfmt = f;
+                kv_auto = 0;
+            }
         }
         else if (strcmp(a, "--kv-k") == 0 && i + 1 < argc) {
             int f = parse_kvfmt(argv[++i]);
             if (f < 0) { usage(); return 2; }
             lz_kv_kfmt = f;
+            kv_auto = 0;
         }
         else if (strcmp(a, "--kv-v") == 0 && i + 1 < argc) {
             int f = parse_kvfmt(argv[++i]);
             if (f < 0) { usage(); return 2; }
             lz_kv_vfmt = f;
+            kv_auto = 0;
         }
         else if (strcmp(a, "--csa2-ring") == 0 && i + 1 < argc) {
             int f = parse_csa2_ringfmt(argv[++i]);
             if (f < 0) { usage(); return 2; }
             lz_csa2_ring_fmt = f;
+            ring_pinned = 1;
         }
         else if (strcmp(a, "--profile") == 0) { lz_prof_enable = 1; }
         else if (strcmp(a, "--moe-topk") == 0 && i + 1 < argc) {
@@ -1945,6 +1964,58 @@ int main(int argc, char **argv) {
     }
     t1 = lz_time_ms();
     cfg = &m.config;
+
+    /* KV DEFAULT BY MODEL, not by user memory. The two towers do not
+       have the same KV at all: a CSA2 tower has no dense planes
+       (n_dense_kv == 0) and its cache is two compressed rings, while the
+       Qwen3.5 tower's cache is ordinary K/V planes. One --kv default
+       cannot describe both.
+
+         dense planes: q4 on both sides. cli_main.c's own note above
+           parse_kvfmt records the measurement - 4-bit KV WITHOUT the
+           rotation costs +6.7% PPL English / +21.4% Chinese, WITH it
+           +0.6% / +1.7% - and parse_kvfmt turns the rotation on for q4,
+           so this is the measured arm, not a guess.
+         CSA2 rings: bf16. forward.h's LZ_CRF_* note calls bf16 the
+           quality tier (no scale plane, one rounding, half the bytes);
+           f32 stays the identity tier and `--csa2-ring f32` returns to
+           it.
+
+       A named --kv / --kv-k / --kv-v / --csa2-ring pins its side and
+       switches the corresponding default off, so every old command line
+       still means what it meant. The choice is PRINTED: a default that
+       changes silently is the failure this block exists to avoid. */
+    if (kv_auto) {
+        int csa2 = 0, li, dense;
+        for (li = 0; li < cfg->n_layers; li++)
+            if (cfg->csa2_on[li]) csa2++;
+        /* Dense planes are the full-attention layers that are NOT
+           CSA2: n_dense_kv lives on the run state, which is not
+           built yet here, and it is derived from exactly this. */
+        dense = cfg->n_full_layers - csa2;
+        if (dense > 0) {
+            /* q8 both sides, rotation OFF. This is the arm with no
+               measured quality cost. --kv q4 halves the bytes for
+               +0.6%/+1.7% PPL (and turns the rotation on, which is
+               what makes 4-bit viable at all) - a trade a caller
+               should choose, not one a default makes for them.
+               Measured here, rotating the Q8 cache instead costs
+               0.08-0.30% PPL: tests/test_kv_formats.py's own note. */
+            fprintf(stderr,
+                    "kv: auto -> dense K q8 / V q8 (rotation off); "
+                    "%d dense plane(s). --kv q4 halves KV for "
+                    "+0.6%%/+1.7%% PPL\n", dense);
+        } else if (csa2 > 0 && !ring_pinned) {
+            lz_csa2_ring_fmt = LZ_CRF_BF16;
+            fprintf(stderr, "kv: auto -> csa2 ring bf16 (no dense planes)\n");
+        } else {
+            fprintf(stderr, "kv: auto -> unchanged (no dense planes, "
+                            "no CSA2)\n");
+        }
+    } else {
+        fprintf(stderr, "kv: pinned by command line (K %d / V %d, ring %d)\n",
+                lz_kv_kfmt, lz_kv_vfmt, lz_csa2_ring_fmt);
+    }
 
     /* m.st is the SAFETENSORS table. lz_open_bin never fills it - it reads
        model.bin positionally, through m.rd, and keeps no name table - so on
