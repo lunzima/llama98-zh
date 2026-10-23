@@ -13,6 +13,7 @@
 #include "lz4d.h"
 #include "model.h"
 #include "ops.h"   /* lz_bf16_store_g, LZ_MM_WIDEN_MAX, LZ_SPEC_K_MAX (alloc_mtp's mtp_n_draft bound) */
+#include "fwht.h"  /* LZ_EMBED_ROT_ON: the rotated-vocabulary switch, one spelling */
 
 #if LZ_DBG_LAYER_HASH
 /* Per-layer residual hash for the fast-mode (--fastfp) cross-target
@@ -399,6 +400,25 @@ static int config_has_engram_keys(const LZJson *j, const LZJsonNode *obj) {
     return 1;
 }
 
+/* Is this rotated-vocabulary block one the transform can run? block == 0
+   means "no block transform" (the plain vocabulary, or the sign diagonal
+   alone) and is always fine. Otherwise the transform is block-diagonal
+   over the embedding width, so block must divide that width, and
+   lz_fwht requires a power of two - both are what bitlinear.py's
+   _check_hadamard_dim and kunmoe_modeling's own divide check ask for.
+
+   Checked rather than asserted because the failure it prevents is the
+   shape this whole feature exists to avoid: a block that does not divide
+   the width walks past the end of the row inside lz_embed_row_back (the
+   caller has no way to notice), and a block that is not a power of two
+   makes lz_fwht loop past the vector. Both are silent. */
+static int embed_block_bad(int block, int dim) {
+    if (block == 0) return 0;
+    if (block < 1 || (block & (block - 1)) != 0) return 1;
+    if (dim <= 0 || (dim % block) != 0) return 1;
+    return 0;
+}
+
 int lz_load_config(LZModelConfig *c, const char *path,
                        char *errbuf, int errlen) {
     char *buf;
@@ -442,12 +462,15 @@ int lz_load_config(LZModelConfig *c, const char *path,
         return 1;
     }
     c->embed_hadamard = lz_json_get_int(&j, tc, "embed_hadamard", 0);
-    if (c->embed_hadamard != 0) {
-        qerr(errbuf, errlen, LZ_ERR_CFG_EMBED_HADAMARD, c->embed_hadamard);
-        lz_json_free(&j);
-        return 1;
-    }
     c->embed_signs_seed = lz_json_get_int(&j, tc, "embed_signs_seed", 0);
+    /* VALIDATED BELOW, once hidden_size is read: the block has to divide
+       the embedding width (engine/bitlinear.py's _check_hadamard_dim plus
+       kunmoe_modeling's own divide check) and only a ternary-vocabulary
+       checkpoint carries a rotation at all. Refusing here instead of
+       applying something approximate is the point - a block that does not
+       divide the width overruns the row inside lz_embed_row_back, and a
+       rotation the trainer never applied is a plausible wrong logit
+       rather than an error. */
     /* Carried for the config copy's completeness; the safetensors path
        has no group-scale planes, so this word has no consumer here.
        THREE STATES, same as the bin's word (spec 4.6.1): the new
@@ -529,6 +552,27 @@ int lz_load_config(LZModelConfig *c, const char *path,
        mtp_n_draft<=1 and unread in that case. */
     c->mtp_n_draft       = lz_json_get_int(&j, tc, "mtp_n_draft", 1);
     c->mtp_markov_rank   = lz_json_get_int(&j, tc, "mtp_markov_rank", 0);
+
+    /* ROTATED VOCABULARY (spec 1.16, 3.17 item 17), the two rules the
+       training side enforces for itself. The transform is only wired
+       under ternary_embed (kunmoe_modeling's _wire_ternary_embed returns
+       before registering either hook), so a rotation on any other
+       checkpoint would move a matrix whose rows are still in the primal
+       basis - the file loads and every logit is plausible and wrong,
+       which is the failure LZ_ERR_CFG_EMBED_HADAMARD was written for and
+       is still the right answer, just now for this reason rather than
+       for "not implemented". */
+    if (embed_block_bad(c->embed_hadamard, c->hidden_size)) {
+        qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE, "embed_hadamard");
+        lz_json_free(&j);
+        return 1;
+    }
+    if (LZ_EMBED_ROT_ON(c->embed_hadamard, c->embed_signs_seed) &&
+        !lz_json_get_int(&j, tc, "ternary_embed", 0)) {
+        qerr(errbuf, errlen, LZ_ERR_CFG_EMBED_HADAMARD, c->embed_hadamard);
+        lz_json_free(&j);
+        return 1;
+    }
 
     /* CED bounded replay (model.h's own field comment has the full
        argument) - 0/0 defaults reproduce a config.json that never
@@ -3985,13 +4029,20 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
                 goto fail;
             }
             /* A non-zero embed_hadamard means the embedding/head rows
-               are stored in the rotated basis; this engine has neither
-               the inverse rotation on lookup nor the forward one on the
-               head, and would read them as weights. Refused rather than
-               run, for the reason err.h's own comment gives. */
-            if (c->embed_hadamard != 0) {
-                qerr(errbuf, errlen, LZ_ERR_CFG_EMBED_HADAMARD,
-                     c->embed_hadamard);
+               are stored in the rotated basis and this engine applies
+               the pair of transforms on the way (fwht.c). The block is
+               checked against hidden_size, which the header read two
+               lines into the RD() run.
+
+               NOT CHECKED HERE: whether the checkpoint is ternary. The
+               header has no such word - the trainer only wires the
+               rotation under ternary_embed, so tools/export_q8.py
+               refuses a rotation on a non-ternary config at export time
+               (this file's counterpart is the config.json path above,
+               which does have the key). */
+            if (embed_block_bad(c->embed_hadamard, c->hidden_size)) {
+                qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE,
+                     "embed_hadamard");
                 goto fail;
             }
             if (c->scale_layout < 0 || c->scale_layout > 2) {

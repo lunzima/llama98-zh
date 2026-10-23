@@ -915,10 +915,20 @@ static void chunk_logits_all(const LZModel *m, LZRunState *s,
     int gse = lz_act_gs(&m->embed_tokens, dim);
     int nse = scale_groups(dim, gse);
     int use_int = 0;
+    int rot;
     int tk;
+    /* A rotated vocabulary needs the normed FLOAT vector: the rotation
+       happens between the norm and the quantizer, and lz_rmsnorm_int
+       never materializes that vector (it hands the Q15 product and its
+       scale straight to lz_quantize_q8_int). The head therefore takes the
+       float norm whenever there is a rotation to apply - a tier choice,
+       not a refactor, and the reason to say so is exactly the one
+       chunk_logits_last's own guard paragraph gives: two tiers reaching
+       the same logits is not the claim, and here they would not. */
+    rot = LZ_EMBED_ROT_ON(c->embed_hadamard, c->embed_signs_seed);
 #if defined(LZ_TAP_OFF)
     use_int = lz_norm_int() && lz_norm_can_fixed(dim) &&
-              gse > 0 && (dim % gse) == 0;
+              gse > 0 && (dim % gse) == 0 && !rot;
 #endif /* LZ_TAP_OFF */
     for (tk = 0; tk < nt; tk++) {
         float *xt = s->x + (size_t)tk * dim;
@@ -933,6 +943,12 @@ static void chunk_logits_all(const LZModel *m, LZRunState *s,
         } else {
             lz_rmsnorm(xt, xt, lz_t_f32(&m->final_norm, s->wscr), dim,
                       c->rms_norm_eps);
+            /* Head half of the rotation: ternary_head takes the normed
+               hidden, applies the sign diagonal and then H, and it is
+               this vector - not the residual - that the matmul reads
+               (xq/xqs are built from it on the next line). */
+            if (rot) lz_embed_rot_in(xt, dim, c->embed_hadamard,
+                                     c->embed_signs_seed);
             lz_quantize_q8(xt, dim, gse, s->xq + (size_t)tk * dim,
                           s->xqs + (size_t)tk * nse);
         }
@@ -970,11 +986,17 @@ static void chunk_logits_last(const LZModel *m, LZRunState *s,
                     hold the UN-normalized residual.
          LZ_TAP_OFF nobody is tapping "fnorm". A tap build keeps the
                     float path rather than reporting the residual as
-                    if it were the norm. */
+                    if it were the norm.
+
+       A rotated vocabulary is a third guard, and it is the same one
+       chunk_logits_all states: the rotation needs the normed float
+       vector, which lz_rmsnorm_int does not write. The head therefore
+       rides the float norm whenever there is a rotation to apply. */
+    int rot = LZ_EMBED_ROT_ON(c->embed_hadamard, c->embed_signs_seed);
     int use_int = 0;
 #if defined(LZ_TAP_OFF)
     use_int = lz_norm_int() && lz_norm_can_fixed(dim) &&
-              gse > 0 && (dim % gse) == 0;
+              gse > 0 && (dim % gse) == 0 && !rot;
 #endif /* LZ_TAP_OFF */
     /* tie_word_embeddings: output projection reuses the embedding
        directly; there is no standalone lm_head */
@@ -989,6 +1011,13 @@ static void chunk_logits_last(const LZModel *m, LZRunState *s,
         lz_rmsnorm(xl, xl, lz_t_f32(&m->final_norm, s->wscr), dim,
                    c->rms_norm_eps);
         LZ_TAP("fnorm", -1, xl, dim);
+        /* Head half of the rotation, after the tap and before the
+           quantizer: "fnorm" stays the norm the reference taps (the
+           rotation belongs to the head, not to the norm), and the
+           vector the matmul reads - xq/xqs and, at gse == 0, xl itself -
+           is the rotated one, which is what ternary_head computes. */
+        if (rot) lz_embed_rot_in(xl, dim, c->embed_hadamard,
+                                 c->embed_signs_seed);
         lz_quantize_q8(xl, dim, gse, s->xq, s->xqs);
     }
     LZ_PROF_BEG(_th);
@@ -1208,10 +1237,20 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
     fpu = lz_fpu_float_begin();
 
     /* embedding dequantization goes through the unified entry - layout
-       knowledge lives only in ops.c */
-    for (tk = 0; tk < nt; tk++)
-        lz_t_row_f32(&m->embed_tokens, tokens[tk], dim,
-                     s->x + (size_t)tk * dim);
+       knowledge lives only in ops.c. A rotated vocabulary's rows are
+       stored as M = W R^T, so the lookup puts each one back (H, then the
+       sign diagonal) before the layer stack sees it - spec 1.16/3.17.
+       This is BEFORE the engram hook on purpose: kunmoe_modeling
+       registers the rotation on embed_tokens first and engram's hook
+       second, so the memory is added to the rotated row, and reading the
+       two the other way round is a different model that still loads. */
+    for (tk = 0; tk < nt; tk++) {
+        float *xt = s->x + (size_t)tk * dim;
+        lz_t_row_f32(&m->embed_tokens, tokens[tk], dim, xt);
+        if (LZ_EMBED_ROT_ON(c->embed_hadamard, c->embed_signs_seed))
+            lz_embed_row_back(xt, dim, c->embed_hadamard,
+                              c->embed_signs_seed);
+    }
     LZ_TAP("emb", -1, s->x, dim);
 
     /* Engram: conditional n-gram memory, injected after embed_tokens

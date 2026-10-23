@@ -267,14 +267,25 @@ typedef enum {
        buffer did not" is the whole diagnosis. */
     LZ_ERR_OOM_ALLOC,          /* out of memory allocating %s */
 
-    /* The bin v6 header (spec section 3.1) describes two products this
-       engine cannot run yet, and both fail SILENTLY if loaded rather
-       than loudly: the embedding/head rows of a rotated vocabulary are
-       stored in a basis the engine would read as weights, so every
-       logit is plausible and wrong, and an engram key table names rows
-       the engine has no lookup for, so the module contributes zeros.
-       Refused at load time on both paths, by field name. */
-    LZ_ERR_CFG_EMBED_HADAMARD, /* embed_hadamard %d is not 0: rotated-vocabulary embedding/head not implemented */
+    /* The bin v6 header (spec section 3.1) describes one product this
+       engine still cannot run: an engram key table names rows it has no
+       lookup for, so the module contributes zeros, and it fails SILENTLY
+       if loaded rather than loudly. Refused at load time on both paths,
+       by field name.
+
+       The rotated vocabulary that shared this comment is APPLIED now
+       (fwht.c; model.h's own field comment lists the nine sites), so
+       what its error still catches is the config the trainer would not
+       have rotated: both hooks are wired only under ternary_embed
+       (kunmoe_modeling's _wire_ternary_embed returns before registering
+       them otherwise), and a config.json asking for the rotation without
+       that flag holds rows still in the primal basis - running would
+       rotate a matrix the training forward never did, which is a
+       different model and not a parse error. The block itself (a power
+       of two dividing hidden_size) is refused on both paths as
+       LZ_ERR_BIN_FIELD_RANGE, and tools/export_q8.py refuses the
+       ternary pairing the .bin header cannot express. */
+    LZ_ERR_CFG_EMBED_HADAMARD, /* rotation requested on a config without ternary_embed */
     LZ_ERR_CFG_ENGRAM_KEYS,    /* config.json carries engram_keys; this engine has no engram key lookup */
     /* exec_len != n_layers is a looping tower (engine/loop_schedule.py).
        The application table is read and validated, but the layer loop

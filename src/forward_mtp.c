@@ -17,6 +17,7 @@
 #include "lz_int.h"    /* lz_i64: the 64-bit type, portably */
 #include "ops.h"
 #include "ops_quant.h"   /* q8_round/q8_amax/pow2f/LZ_Q8_*, lz_rsqrt_float_body */
+#include "fwht.h"       /* lz_embed_row_back / lz_embed_rot_in (spec 3.17) */
 
 /* layer sentinel for the MTP block's own attention: it is not one of
    m->layers[], so it has no entry in s->cache_idx or s->dense_idx. Its
@@ -50,6 +51,12 @@ float *lz_mtp_draft_step(const LZModel *m, LZRunState *s, int next_token, int po
        output (chained steps) - read here before being overwritten
        below by this step's own result. */
     lz_t_row_f32(&m->embed_tokens, next_token, dim, s->mtp_emb_raw);
+    /* The MTP reads the embedding through the same hook the body does:
+       a rotated vocabulary's row comes back in the primal basis before
+       pre_fc_norm_embedding sees it (spec 1.16/3.17). */
+    if (LZ_EMBED_ROT_ON(c->embed_hadamard, c->embed_signs_seed))
+        lz_embed_row_back(s->mtp_emb_raw, dim, c->embed_hadamard,
+                          c->embed_signs_seed);
     lz_rmsnorm(s->mtp_concat, s->mtp_emb_raw,
               lz_t_f32(&m->mtp->pre_fc_norm_embedding, s->wscr), dim,
               c->rms_norm_eps);
@@ -108,11 +115,28 @@ float *lz_mtp_draft_step(const LZModel *m, LZRunState *s, int next_token, int po
               lz_t_f32(&m->mtp->norm, s->wscr), dim, c->rms_norm_eps);
 
     /* lm_head is the shared embedding - same tie_word_embeddings path
-       forward_chunk's own lm_head step uses. */
-    lz_quantize_q8(s->mtp_chain, dim, lz_act_gs(&m->embed_tokens, dim),
-                  s->xq, s->xqs);
-    lz_matmul_xq(s->mtp_draft_logits, s->mtp_chain, s->xq, s->xqs,
-                &m->embed_tokens, dim, c->vocab_size);
+       forward_chunk's own lm_head step uses.
+
+       A rotated vocabulary rotates the normed hidden before the matmul
+       (ternary_head), but mtp_chain cannot be rotated in place: its own
+       contract (forward.h) says this exact vector is what the NEXT
+       chained step reads back as its hidden input, so the rotation goes
+       into the scratch row this step no longer needs - the one that
+       already fed mtp_concat above - and the matmul reads that. */
+    if (LZ_EMBED_ROT_ON(c->embed_hadamard, c->embed_signs_seed)) {
+        float *xr = s->mtp_emb_raw;
+        for (i = 0; i < dim; i++) xr[i] = s->mtp_chain[i];
+        lz_embed_rot_in(xr, dim, c->embed_hadamard, c->embed_signs_seed);
+        lz_quantize_q8(xr, dim, lz_act_gs(&m->embed_tokens, dim),
+                       s->xq, s->xqs);
+        lz_matmul_xq(s->mtp_draft_logits, xr, s->xq, s->xqs,
+                     &m->embed_tokens, dim, c->vocab_size);
+    } else {
+        lz_quantize_q8(s->mtp_chain, dim, lz_act_gs(&m->embed_tokens, dim),
+                      s->xq, s->xqs);
+        lz_matmul_xq(s->mtp_draft_logits, s->mtp_chain, s->xq, s->xqs,
+                    &m->embed_tokens, dim, c->vocab_size);
+    }
 
     lz_fpu_float_end(fpu);
     lz_debug_us_draft += (lz_i64)(lz_time_ms() * LZ_US_SCALE - t_us0);
@@ -391,6 +415,13 @@ float *lz_mtp_draft_batch(const LZModel *m, LZRunState *s, int next_token,
            fix, not a shortcut). */
         if (slot == 0) {
             lz_t_row_f32(&m->embed_tokens, next_token, dim, s->mtp_emb_raw);
+            /* Real token: same rotated lookup the body does. mask_embed
+               (slot >= 1) is a separate parameter that no hook touches,
+               so it stays as stored - rotating it would make the slots
+               disagree about one term of their own concat. */
+            if (LZ_EMBED_ROT_ON(c->embed_hadamard, c->embed_signs_seed))
+                lz_embed_row_back(s->mtp_emb_raw, dim, c->embed_hadamard,
+                                  c->embed_signs_seed);
         } else {
             for (i = 0; i < dim; i++)
                 s->mtp_emb_raw[i] = lz_t_f32(&m->mtp->mask_embed, s->wscr)[i];
@@ -460,6 +491,11 @@ float *lz_mtp_draft_batch(const LZModel *m, LZRunState *s, int next_token,
            over nothing still needed. */
         lz_rmsnorm(s->mtp_emb_raw, s->mtp_x,
                   lz_t_f32(&m->mtp->norm, s->wscr), dim, c->rms_norm_eps);
+        /* mtp_emb_raw is exit-norm scratch here (its own comment above),
+           so the head's rotation can go in place. */
+        if (LZ_EMBED_ROT_ON(c->embed_hadamard, c->embed_signs_seed))
+            lz_embed_rot_in(s->mtp_emb_raw, dim, c->embed_hadamard,
+                            c->embed_signs_seed);
         lz_quantize_q8(s->mtp_emb_raw, dim, lz_act_gs(&m->embed_tokens, dim),
                       s->xq, s->xqs);
         lz_matmul_xq(logits_row, s->mtp_emb_raw, s->xq, s->xqs,
@@ -548,6 +584,9 @@ int lz_mtp_prefill(const LZModel *m, LZRunState *s, const float *h_body_all,
             float *x_t = s->mtp_x + (size_t)tk * dim;
 
             lz_t_row_f32(&m->embed_tokens, next_tokens[done + tk], dim, emb_t);
+            if (LZ_EMBED_ROT_ON(c->embed_hadamard, c->embed_signs_seed))
+                lz_embed_row_back(emb_t, dim, c->embed_hadamard,
+                                  c->embed_signs_seed);
             lz_rmsnorm(concat_t, emb_t,
                       lz_t_f32(&m->mtp->pre_fc_norm_embedding, s->wscr), dim,
                       c->rms_norm_eps);

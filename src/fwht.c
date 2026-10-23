@@ -294,3 +294,89 @@ void lz_fwht(float *v, int n) {
         }
     }
 }
+
+/* ---- rotated vocabulary (spec 1.16, 3.17 item 17) ---------------------- */
+
+/* 1/sqrt(n) for n a power of two = 2^(-log2(n)/2), built from exact
+   multiplies: 0.5 is exact, so for even log2(n) this is a power of two
+   and costs nothing but the multiply loop; for odd log2(n) it is that
+   power of two times 1/sqrt(2), whose fp32 value is the ONE rounding
+   here. Deliberately not `1.0f / sqrtf(n)` - iron law 6 bans division by
+   a float constant (the two compilers strength-reduce it differently),
+   and a runtime divisor would cost a soft-float divide on ARMv5TE, where
+   the whole point of the Hadamard is that it has none.
+
+   Matches engine/bitlinear.py's `_hadamard_matrix` to within that single
+   rounding: that one builds h by dividing by sqrt(2) once per stage (9
+   stages for n=512), so its entries are nested fp32 roundings of
+   1/sqrt(2) while these are exact integers times one fp32 1/sqrt(2).
+   The two therefore differ by ~1e-6 relative on the transformed vector,
+   and that is what tests/test_embed_rot_parity.py's bound is set from -
+   not a claim of bit identity across the two trees, which iron law two
+   asks only within one. */
+#define LZ_INV_SQRT2 0.70710678118654752440f
+
+static float lz_inv_sqrt_pow2(int n) {
+    float s = 1.0f;
+    int k = 0, h;
+    while ((1 << k) < n) k++;   /* n is a power of two: model.c checked */
+    h = k / 2;
+    while (h-- > 0) s *= 0.5f;
+    if (k & 1) s *= LZ_INV_SQRT2;
+    return s;
+}
+
+/* One orthonormal block transform, in place. */
+static void lz_fwht_ortho(float *v, int n) {
+    float s;
+    int i;
+    if (n <= 1) return;         /* 1x1 is already orthonormal */
+    s = lz_inv_sqrt_pow2(n);
+    lz_fwht(v, n);
+    for (i = 0; i < n; i++) v[i] *= s;
+}
+
+/* The +-1 diagonal S of R = H S / sqrt(n), one entry per COLUMN, from
+   the same mixer bitlinear.py's sign_vector uses - splitmix64's finalizer
+   over (seed + i * golden), mul 0xBF58476D1CE4E5B9 then 0x94D049BB133111EB
+   then the >> 31 step, the top bit giving the sign. It is a seed and not
+   a stored array because the bin header has no variable-length field and
+   config.json would be a second authority for dim words; a seed that is
+   bit-exact here costs ten lines and cannot drift.
+
+   `(lz_i64)seed` sign-extends a negative seed into the 64-bit two's
+   complement that Python's `& mask` produces, so the two agree for
+   negative seeds as well as for the non-negative ones carve writes. */
+static float lz_embed_sign(int seed, int i) {
+    lz_u64 z = (lz_u64)(lz_i64)seed +
+               (lz_u64)(unsigned)i * LZ_U64_C(0x9E3779B97F4A7C15);
+    z = (z ^ (z >> 30)) * LZ_U64_C(0xBF58476D1CE4E5B9);
+    z = (z ^ (z >> 27)) * LZ_U64_C(0x94D049BB133111EB);
+    z ^= z >> 31;
+    return (z >> 63) ? 1.0f : -1.0f;
+}
+
+/* Lookup side: ternary_embedding does block_rotate(e) THEN e * signs. */
+void lz_embed_row_back(float *v, int dim, int block, int signs_seed) {
+    int b, i;
+    if (block > 1) {
+        for (b = 0; b < dim; b += block) lz_fwht_ortho(v + b, block);
+    }
+    if (signs_seed) {
+        for (i = 0; i < dim; i++) v[i] *= lz_embed_sign(signs_seed, i);
+    }
+}
+
+/* Head side: ternary_head does x * signs THEN block_rotate(x). Not the
+   same two orders as above - S H != H S when the diagonal varies inside
+   a block, and swapping them is the shape of bug that loads, generates
+   and is simply a different model. */
+void lz_embed_rot_in(float *v, int dim, int block, int signs_seed) {
+    int b, i;
+    if (signs_seed) {
+        for (i = 0; i < dim; i++) v[i] *= lz_embed_sign(signs_seed, i);
+    }
+    if (block > 1) {
+        for (b = 0; b < dim; b += block) lz_fwht_ortho(v + b, block);
+    }
+}

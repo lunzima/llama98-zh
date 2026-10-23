@@ -763,15 +763,26 @@ typedef struct {
 
     /* ROTATED VOCABULARY (engine/bitlinear.py's ternary_embedding /
        ternary_head). embed_hadamard is the block width of R = H*S
-       applied to each looked-up embedding row (inverse) and to the
-       head's input; embed_signs_seed is the seed of S, the +-1 diagonal
-       (0 = pure Walsh-Hadamard, mix it in). 0/0 is "stored in the
-       primal basis", which is every model before this field.
+       applied to each looked-up embedding row (inverse: H then the
+       diagonal) and to the head's input (forward: the diagonal then H);
+       embed_signs_seed is the seed of S, the +-1 diagonal (0 = pure
+       Walsh-Hadamard, mix it in). 0/0 is "stored in the primal basis",
+       which is every model before this field.
 
-       CARRIED AND CHECKED, NOT APPLIED: the engine refuses a non-zero
-       embed_hadamard at load (LZ_ERR_CFG_EMBED_HADAMARD) rather than
-       read rotated rows as weights - that failure is a plausible wrong
-       logit, not an error. */
+       APPLIED, IN ONE PLACE EACH: lz_embed_row_back runs after every
+       lz_t_row_f32 of embed_tokens (body + the three MTP rows) and
+       lz_embed_rot_in runs on the normed hidden before every head
+       matmul (forward.c's two chunk_logits paths + forward_mtp.c's two).
+       The transform itself and its two orders live in fwht.c, next to
+       the lz_fwht it is built from.
+
+       CHECKED AT LOAD ON BOTH PATHS: the block must divide hidden_size
+       and be a power of two (embed_block_bad), and a config.json that
+       asks for a rotation without ternary_embed is refused - the trainer
+       only wires the rotation under that flag, so applying one anyway
+       would move a matrix still in the primal basis. The .bin carries no
+       ternary_embed word, so tools/export_q8.py refuses that one at
+       export instead. */
     int embed_hadamard;
     int embed_signs_seed;
 
