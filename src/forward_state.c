@@ -652,6 +652,24 @@ static void alloc_recurrent_state(LZRunState *s, const LZModel *m,
                                   const LZModelConfig *c, int spec_k_max,
                                   int *okp) {
     int ok = 1;
+    int a;
+    /* KDA STATE SLOTS ARE PER APPLICATION (spec 3.2): the decoder's
+       second pass restarts its recurrences at zero, so it cannot share
+       the first pass's slot. Numbered in execution order; the identity
+       schedule gives n_linear_apps == n_linear_layers and
+       app_state_idx[a] == a. */
+    s->n_linear_apps = 0;
+    for (a = 0; a < c->exec_len; a++) {
+        int l = c->app_layer[a];
+        if (c->layer_types[l] == LZ_LT_KDA) {
+            s->app_state_idx[a] = s->n_linear_apps++;
+            s->app_slot[l] = s->app_state_idx[a];
+        } else {
+            s->app_state_idx[a] = -1;
+        }
+    }
+    for (a = 0; a < c->n_layers; a++)
+        if (c->layer_types[a] != LZ_LT_KDA) s->app_slot[a] = -1;
     /* SSM/conv state: one (kd*vd) block per (layer, head), grouped
        within rows, times ssm_ring_depth slots - see forward.h's own
        comment on s->ssm_slot/s->ssm_ring_depth for the ring's shape
@@ -673,25 +691,25 @@ static void alloc_recurrent_state(LZRunState *s, const LZModel *m,
         s->ssm_ring_depth = d;
     }
     s->ssm_state_q8 = (int8_t *)xcalloc(
-        (size_t)s->ssm_ring_depth * c->n_linear_layers * c->lin_n_v_heads *
+        (size_t)s->ssm_ring_depth * s->n_linear_apps * c->lin_n_v_heads *
         c->lin_k_head_dim * c->lin_v_head_dim, 1, &ok, &s->bytes_alloc);
 #if LZ_GDN_STATE_2PLANE
     s->ssm_state_q8_lo = (int8_t *)xcalloc(
-        (size_t)s->ssm_ring_depth * c->n_linear_layers * c->lin_n_v_heads *
+        (size_t)s->ssm_ring_depth * s->n_linear_apps * c->lin_n_v_heads *
         c->lin_k_head_dim * c->lin_v_head_dim, 1, &ok, &s->bytes_alloc);
 #endif /* LZ_GDN_STATE_2PLANE */
 #if LZ_GDN_STATE_F32
     s->ssm_state_f32 = (float *)xcalloc(
-        (size_t)s->ssm_ring_depth * c->n_linear_layers * c->lin_n_v_heads *
+        (size_t)s->ssm_ring_depth * s->n_linear_apps * c->lin_n_v_heads *
         c->lin_k_head_dim * c->lin_v_head_dim, sizeof(float), &ok,
         &s->bytes_alloc);
 #endif /* LZ_GDN_STATE_F32 */
     s->ssm_state_s = (float *)xcalloc(
-        (size_t)s->ssm_ring_depth * c->n_linear_layers * c->lin_n_v_heads *
+        (size_t)s->ssm_ring_depth * s->n_linear_apps * c->lin_n_v_heads *
         c->lin_k_head_dim * c->lin_v_head_dim / 32,
         sizeof(float), &ok, &s->bytes_alloc);
     s->conv_state = (float *)xcalloc(
-        (size_t)s->ssm_ring_depth * c->n_linear_layers * c->lin_conv_dim *
+        (size_t)s->ssm_ring_depth * s->n_linear_apps * c->lin_conv_dim *
         (c->conv_kernel - 1), sizeof(float), &ok, &s->bytes_alloc);
     if (!ok) *okp = 0;
 }
@@ -872,9 +890,16 @@ static void alloc_conv_tier(LZRunState *s, const LZModelConfig *c,
     s->conv_fixed = lz_conv_mode();
     if (s->conv_fixed) {
         size_t nch = (size_t)c->n_linear_layers * c->lin_conv_dim;
+        /* THE HISTORY IS PER APPLICATION, the tap weights are per layer:
+           forward_kda indexes conv_state_q with the application's slot
+           (li_off_conv) and conv_mw with the layer's (cache_idx). Sizing
+           the history by n_linear_layers leaves the second pass's slots
+           past the end - a heap overwrite that only the fixed tier has,
+           since the float tier's conv_state is sized by applications. */
+        size_t nch_app = (size_t)s->n_linear_apps * c->lin_conv_dim;
         s->conv_bound = lz_conv_accum_bound(c->conv_kernel);
         s->conv_state_q = (short *)xcalloc(
-            (size_t)s->ssm_ring_depth * nch * (c->conv_kernel - 1),
+            (size_t)s->ssm_ring_depth * nch_app * (c->conv_kernel - 1),
             sizeof(short), &ok, &s->bytes_alloc);
         s->conv_mw = (short *)xcalloc(nch * c->conv_kernel,
                                       sizeof(short), &ok, &s->bytes_alloc);
@@ -1204,6 +1229,18 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
 
     /* Before alloc_kv_cache, which sizes every plane off it. */
     s->n_dense_kv = dense_kv_layers(m);
+    /* A LOOP TOWER WITH DENSE KV CANNOT RUN HERE: the cache slots are per
+       physical layer, so the decoder's second pass would append its own
+       rows where the first pass's already are - a different sequence for
+       every later token, with no error. The v1 towers are CSA2-only
+       (n_dense_kv 0), whose rings are per layer and re-derived from the
+       same H_E on both passes, so the refusal costs them nothing. */
+    if (c->exec_len != c->n_layers && s->n_dense_kv > 0) {
+        if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_CFG_LOOP_KV,
+                               c->exec_len, c->n_layers, s->n_dense_kv);
+        lz_state_free(s);
+        return 1;
+    }
 
     alloc_core_buffers(s, m, c, nt, &ok);
 

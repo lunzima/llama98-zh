@@ -293,7 +293,7 @@ typedef enum {
        The application table is read and validated, but the layer loop
        still runs n_layers applications, so accepting one would run the
        wrong number of passes and look healthy. */
-    LZ_ERR_CFG_LOOP_SCHEDULE,  /* exec_len %d != n_layers %d: the v6 application table is not executed yet */
+    LZ_ERR_CFG_LOOP_KV,        /* loop tower with dense KV planes: needs per-application cache */
     /* The safetensors path has no header to read a table out of; the
        table is derived in Python at export time and the C side is not
        allowed a second derivation (spec section 3.10), so a config.json

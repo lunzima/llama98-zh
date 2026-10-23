@@ -1195,7 +1195,7 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
                             int skip_logits, int ced_skip_last) {
     const LZModelConfig *c = &m->config;
     int dim = c->hidden_size;
-    int l, i, tk;
+    int i, tk, a;
     /* GR's branch count, 0 when the switch is off. Read once here; every
        per-layer decision below goes through L->gr_on/gr_first/gr_last,
        which setup_layers derived from this field and ced_split. */
@@ -1301,10 +1301,19 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
        left in s->ssm_slot. */
     ring_base = s->ssm_slot;
 
-    for (l = 0; l < c->n_layers; l++) {
+    /* THE APPLICATION SCHEDULE (spec 3.1): one pass per entry of the v6
+       table, so a looping tower runs the decoder block twice on the same
+       weights. A non-looping model has exec_len == n_layers and
+       app_layer[a] == a, which is the identity. The KDA state slot is
+       the APPLICATION's (spec 3.2), since the second pass restarts at
+       zero; app_state_idx is -1 for a full-attention application. */
+    for (a = 0; a < c->exec_len; a++) {
+        int l = c->app_layer[a];
         const LZLayer *L = &m->layers[l];
         LZ_PROF_DECL(_tp);
         LZ_PROF_DECL(_tf);
+
+        if (s->app_state_idx[a] >= 0) s->app_slot[l] = s->app_state_idx[a];
 
         /* docs/x87-gcc-reg-stack-leak.md: this is the checkpoint that
            first showed the x87 stack going dirty and staying dirty
@@ -1358,7 +1367,12 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
            ced_split - true whenever ced_kv is on and ced_split
            describes a real boundary (model.h's own comment on that
            function). */
-        if (l == c->ced_split && lz_ced_kv_target(c, l)) {
+        /* H_E is captured at the SPLIT in APPLICATION terms: the
+           decoder's second pass revisits physical layer ced_split, and
+           capturing there would overwrite H_E with the second pass's
+           input - the first pass's decoder layers would then read the
+           wrong tensor with no error. */
+        if (a == c->ced_split && lz_ced_kv_target(c, l)) {
             memcpy(s->ced_hs, s->xb, (size_t)nt * dim * sizeof(float));
         }
         kv_in = NULL;

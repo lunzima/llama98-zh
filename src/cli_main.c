@@ -1188,6 +1188,7 @@ int main(int argc, char **argv) {
     FILE *af = NULL;    /* --dump-all-logits stream, fclosed after the loop */
     FILE *tf = NULL;    /* --dump-top5 stream, same lifetime as af */
     int only_check = 0, list_tensors = 0, want_stats = 0, only_layer = -1;
+    const char *sched_path = NULL;
     int want_fpexc = 0;         /* --fp-exceptions, see the flag's usage */
     int *tokens = NULL, n_tokens = 0, topk = 5;
     int n_gen = 0;                  /* -n new tokens for generation */
@@ -1320,6 +1321,8 @@ int main(int argc, char **argv) {
             }
         }
         else if (strcmp(a, "--check") == 0)   only_check = 1;
+        else if (strcmp(a, "--dump-schedule") == 0 && i + 1 < argc)
+            sched_path = argv[++i];
         else if (strcmp(a, "--tensors") == 0) list_tensors = 1;
         else if (strcmp(a, "--pin-tiers") == 0) {
             /* For scripts. Every cross-target or cross-build comparison
@@ -1958,6 +1961,41 @@ int main(int argc, char **argv) {
     }
 
     t0 = lz_time_ms();
+    /* --dump-schedule ON A CONFIG-ONLY DIRECTORY: the application table is
+       a function of config, and the gate that compares it against
+       engine/loop_schedule.py is stronger when it can vary the geometry
+       without a checkpoint per shape. A directory with weights takes the
+       normal path below and dumps the table it actually loaded. */
+    if (sched_path) {
+        char cpath[1024], stpath[1024], bpath[1024];
+        FILE *probe;
+        int have_w = 0;
+        snprintf(cpath, sizeof(cpath), "%s/config.json", dir);
+        snprintf(stpath, sizeof(stpath), "%s/model.safetensors", dir);
+        snprintf(bpath, sizeof(bpath), "%s/model.bin", dir);
+        if ((probe = fopen(stpath, "rb")) != NULL) { fclose(probe); have_w = 1; }
+        if ((probe = fopen(bpath, "rb")) != NULL) { fclose(probe); have_w = 1; }
+        if (!have_w) {
+            LZModelConfig c;
+            FILE *sf;
+            int n;
+            memset(&c, 0, sizeof(c));
+            if (lz_load_config(&c, cpath, err, sizeof(err)) != 0) {
+                printf("Failed to load: %s\n", err);
+                goto fail;
+            }
+            n = c.exec_len;
+            sf = fopen(sched_path, "wb");
+            if (!sf) { printf("cannot write %s\n", sched_path); goto fail; }
+            fwrite(&n, sizeof(n), 1, sf);
+            fwrite(c.app_layer, sizeof(int), (size_t)n, sf);
+            fwrite(c.app_loop, sizeof(int), (size_t)n, sf);
+            fclose(sf);
+            printf("Wrote %s (exec_len %d)\n", sched_path, n);
+            goto cleanup;
+        }
+    }
+
     if (lz_open(&m, dir, err, sizeof(err)) != 0) {
         printf("Failed to load: %s\n", err);
         goto fail;
@@ -2140,6 +2178,22 @@ int main(int argc, char **argv) {
                 printf("%s%lld", d ? ", " : "", t->shape[d]);
             printf("]  @%llu +%llu\n", t->off_begin, t->nbytes);
         }
+    }
+
+    /* The application table, as the engine resolved it. Measurement only:
+       the training tree's tests compare it against engine/loop_schedule.py
+       for the same config, which is what keeps the C derivation honest
+       (model.c's own comment on it). */
+    if (sched_path) {
+        FILE *sf = fopen(sched_path, "wb");
+        int n = m.config.exec_len;
+        if (!sf) { printf("cannot write %s\n", sched_path); goto fail; }
+        fwrite(&n, sizeof(n), 1, sf);
+        fwrite(m.config.app_layer, sizeof(int), (size_t)n, sf);
+        fwrite(m.config.app_loop, sizeof(int), (size_t)n, sf);
+        fclose(sf);
+        printf("Wrote %s (exec_len %d)\n", sched_path, n);
+        goto cleanup;
     }
 
     if (only_check) {

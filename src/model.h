@@ -759,12 +759,11 @@ typedef struct {
        recomputes it (a second derivation is a second opinion about
        which physical layer each application runs).
 
-       The engine does not yet EXECUTE the table - the layer loop still
-       runs n_layers applications - so both loaders refuse a file whose
-       exec_len differs from n_layers (LZ_ERR_CFG_LOOP_SCHEDULE) rather
-       than run the wrong number of passes silently. The identity
-       schedule is validated and carried so that wiring the loop up
-       later is a consumer change, not a format change. */
+       The layer loop EXECUTES this table (forward.c), and the KDA
+       recurrent state is per application (forward_state.c): the
+       decoder's second pass restarts at zero, so it cannot share the
+       first pass's slot. The identity schedule takes the same path, so
+       a non-looping model is not a special case. */
     int exec_len;                       /* applications; n_layers when absent */
     int app_layer[LZ_MAX_LAYERS];       /* physical layer per application */
     int app_loop[LZ_MAX_LAYERS];        /* pass index per application */

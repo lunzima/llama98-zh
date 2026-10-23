@@ -476,14 +476,6 @@ int lz_load_config(LZModelConfig *c, const char *path,
         }
         c->scale_layout = layout;
     }
-    {
-        int loop_repeats = lz_json_get_int(&j, tc, "loop_repeats", 1);
-        if (loop_repeats != 1) {
-            qerr(errbuf, errlen, LZ_ERR_CFG_LOOP_CONFIG, loop_repeats);
-            lz_json_free(&j);
-            return 1;
-        }
-    }
 
     /* GDN vs KDA, decided by the checkpoint's own linear-layer tensor
        names - see arch_probe. The config's layer_types entries stay the
@@ -562,6 +554,61 @@ int lz_load_config(LZModelConfig *c, const char *path,
        argument) - 0/0 defaults reproduce a config.json that never
        carried these keys. */
     c->ced_split      = lz_json_get_int(&j, tc, "ced_split", 0);
+
+    /* THE APPLICATION TABLE (spec 3.1). The bin path carries one in its
+       v6 header; the safetensors path has no header, so it derives the
+       table here from the same fields engine/loop_schedule.py reads.
+       That is a second implementation of one function, and it is checked
+       against the first: tests/test_loop_schedule_agrees.py runs both
+       over a grid of shapes and compares them element for element. */
+    {
+        int repeats = lz_json_get_int(&j, tc, "loop_repeats", 1);
+        int a = 0, i, k;
+        if (repeats < 1) {
+            qerr(errbuf, errlen, LZ_ERR_CFG_LOOP_CONFIG, repeats);
+            lz_json_free(&j);
+            return 1;
+        }
+        if (repeats == 1) {
+            for (i = 0; i < c->n_layers; i++) {
+                c->app_layer[i] = i;
+                c->app_loop[i] = 0;
+            }
+            c->exec_len = c->n_layers;
+        } else {
+            int start = lz_json_get_int(&j, tc, "loop_block_start", -1);
+            int size = lz_json_get_int(&j, tc, "loop_block_size", -1);
+            int p;
+            /* The split IS the block's start: with start < ced_split the
+               encoder's last layers would run twice before the decoder
+               ever did, and with start > ced_split the decoder's first
+               layers would run once. The block must also reach the last
+               layer, and the whole table must fit LZ_MAX_LAYERS. */
+            if (start < 0 || start != c->ced_split || size <= 0 ||
+                start + size != c->n_layers ||
+                c->n_layers + (repeats - 1) * size > LZ_MAX_LAYERS) {
+                qerr(errbuf, errlen, LZ_ERR_CFG_LOOP_CONFIG, repeats);
+                lz_json_free(&j);
+                return 1;
+            }
+            /* The encoder's own applications first (pass 0), then the
+               block once per pass, numbered from 1 - the same numbering
+               engine/loop_schedule.py produces, which the training
+               forward reads to decide where H_E is captured. */
+            for (i = 0; i < start; i++, a++) {
+                c->app_layer[a] = i;
+                c->app_loop[a] = 0;
+            }
+            for (p = 0; p < repeats; p++) {
+                for (k = 0; k < size; k++, a++) {
+                    c->app_layer[a] = start + k;
+                    c->app_loop[a] = p + 1;
+                }
+            }
+            c->exec_len = a;
+        }
+    }
+
     c->ced_replay_w   = lz_json_get_int(&j, tc, "ced_replay_w", 0);
 
     /* ced_kv (model.h's own field comment). A string, not a bool - it
@@ -989,15 +1036,9 @@ int lz_load_config(LZModelConfig *c, const char *path,
         }
     }
 
-    /* The identity application table for a config that does not loop
-       (loop_repeats == 1, checked above; every checkpoint before the
-       loop tower). exec_len/app_layer[]/app_loop[] describe applications,
-       not layers, and the bin path carries them verbatim from the v6
-       header - this is the same table for a model whose schedule is the
-       identity, and n_layers is validated by the block just above. */
-    c->exec_len = c->n_layers;
-    for (i = 0; i < LZ_MAX_LAYERS; i++)
-        c->app_layer[i] = (i < c->n_layers) ? i : 0;
+    /* The application table is filled by the derivation above (one
+       writer; the identity schedule is its loop_repeats == 1 arm). The
+       bin path reads the same table verbatim from the v6 header. */
 
     /* S2 CSA2 (model.h's own csa2_on[]/csa2_compress_m comment). Parsed
        here, not earlier alongside ced_split/mla_q_lora_rank, because
@@ -2673,7 +2714,7 @@ static int alloc_engram(LZModel *m, const char *dir, char *errbuf,
             qerr(errbuf, errlen, LZ_ERR_CFG_ENGRAM_KEYS, c->engram_keys);
             return 1;
         }
-        sprintf(path, "%s/%s", dir, c->engram_keys);
+        snprintf(path, sizeof(path), "%s/%s", dir, c->engram_keys);
         if (lz_keys_load(path, &eg->keys, &eg->n_keys, errbuf, errlen) != 0)
             return 1;
         eg->key_shift = shift;
@@ -3991,15 +4032,11 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
            identity schedule, which is what "does not loop" IS - not an
            approximation of it.
 
-           THE TABLE IS VALIDATED, NOT EXECUTED. exec_len must equal
-           n_layers or the loader refuses the file
-           (LZ_ERR_CFG_LOOP_SCHEDULE): the layer loop still runs
-           n_layers applications, and running ten where the checkpoint
-           says fifteen is the silent-wrong-answer case the exporter's
-           own version rule exists to prevent. The identity check makes
-           the table itself load-bearing on both paths, so wiring the
-           loop up later is a consumer change rather than a format
-           change. */
+           THE TABLE IS EXECUTED. The layer loop runs exec_len
+           applications in this order (forward.c), and the KDA state is
+           per application because the decoder's second pass restarts its
+           recurrences at zero (forward_state.c). A non-looping file
+           carries the identity schedule, so both shapes take one path. */
         if (ver >= 6) {
             RD(&c->exec_len, 4);
             RD(c->app_layer, LZ_MAX_LAYERS * 4);
@@ -4036,11 +4073,6 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
                     qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE, "app_loop");
                     goto fail;
                 }
-            }
-            if (c->exec_len != c->n_layers) {
-                qerr(errbuf, errlen, LZ_ERR_CFG_LOOP_SCHEDULE,
-                     c->exec_len, c->n_layers);
-                goto fail;
             }
             /* A non-zero embed_hadamard means the embedding/head rows
                are stored in the rotated basis and this engine applies

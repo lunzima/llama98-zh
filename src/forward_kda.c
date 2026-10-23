@@ -417,11 +417,19 @@ void forward_kda(const LZModel *m, LZRunState *s,
        and ARM reloads `ldr [c,#offset]` at each call site unless the
        value is named once here and carried in a register. */
     float rms_eps = c->rms_norm_eps;
-    int li = s->cache_idx[layer];
+    /* TWO INDICES, and they stop coinciding on a loop tower's second
+       pass: `li` addresses the APPLICATION's recurrent state (the second
+       pass has its own, spec 3.2), `wli` addresses the WEIGHT-derived
+       per-layer caches (conv taps, dt_bias, decay tables) that every
+       application of the same physical layer shares. Passing one for the
+       other reads a neighbouring layer's quantized weights and looks
+       like a numerical difference, not an indexing one. */
+    int li = s->app_slot[layer];
+    int wli = s->cache_idx[layer];
     int ring_depth = s->ssm_ring_depth;
-    size_t q8_slot_stride = (size_t)c->n_linear_layers * nv * kd * vd;
+    size_t q8_slot_stride = (size_t)s->n_linear_apps * nv * kd * vd;
     size_t s_slot_stride  = q8_slot_stride / 32;
-    size_t conv_slot_stride = (size_t)c->n_linear_layers *
+    size_t conv_slot_stride = (size_t)s->n_linear_apps *
                               c->lin_conv_dim * (c->conv_kernel - 1);
     size_t li_off_q8 = (size_t)li * nv * kd * vd;
     /* Same per-layer conv_state allocation GDN uses (sized by
@@ -445,7 +453,7 @@ void forward_kda(const LZModel *m, LZRunState *s,
        lin_key_dim or lin_value_dim channels wide, conv_kernel floats per
        channel. NOT hist-scaled like q_off/k_off/v_off above: these index
        taps, not rolling history. */
-    size_t li_off_w = (size_t)li * c->lin_conv_dim * c->conv_kernel;
+    size_t li_off_w = (size_t)wli * c->lin_conv_dim * c->conv_kernel;
     size_t qw_off = 0;
     size_t kw_off = (size_t)c->lin_key_dim * c->conv_kernel;
     size_t vw_off = (size_t)2 * c->lin_key_dim * c->conv_kernel;
@@ -638,7 +646,7 @@ void forward_kda(const LZModel *m, LZRunState *s,
        different things (elements vs channels) and mixing them silently
        reads a neighbouring channel's taps. */
     if (s->conv_fixed) {
-        size_t cb = (size_t)li * c->lin_conv_dim;
+        size_t cb = (size_t)wli * c->lin_conv_dim;
         size_t q_ch = 0, k_ch = (size_t)c->lin_key_dim;
         size_t v_ch = (size_t)2 * c->lin_key_dim;
         cp_q.mw = s->conv_mw + (cb + q_ch) * c->conv_kernel;
@@ -829,7 +837,7 @@ void forward_kda(const LZModel *m, LZRunState *s,
     a_log_arr = lz_t_f32(&L->kda_A_log, s->wscr);
     for (h = 0; h < nv; h++) s->kda_decay[h] = lz_exp(a_log_arr[h]);
     dt_bias_arr = lz_t_f32(&L->kda_dt_bias, s->wscr);
-    kda_decay_gate_build(s, c, dt_bias_arr, li, nv, kd, nt, gate_int);
+    kda_decay_gate_build(s, c, dt_bias_arr, wli, nv, kd, nt, gate_int);
     LZ_TAP("kgate", layer, s->kda_gate, nvk);
 
     /* Recurrence, head-major like forward_ssm's - same L1-residency
