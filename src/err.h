@@ -282,11 +282,13 @@ typedef enum {
        that flag holds rows still in the primal basis - running would
        rotate a matrix the training forward never did, which is a
        different model and not a parse error. The block itself (a power
-       of two dividing hidden_size) is refused on both paths as
-       LZ_ERR_BIN_FIELD_RANGE, and tools/export_q8.py refuses the
+       of two dividing hidden_size) is refused on both paths by the
+       field-range code, and tools/export_q8.py refuses the
        ternary pairing the .bin header cannot express. */
     LZ_ERR_CFG_EMBED_HADAMARD, /* rotation requested on a config without ternary_embed */
-    LZ_ERR_CFG_ENGRAM_KEYS,    /* config.json carries engram_keys; this engine has no engram key lookup */
+    LZ_ERR_CFG_ENGRAM_KEYS,    /* config.json names an engram key table the model directory lacks */
+    LZ_ERR_ENGRAM_KEYS_FILE,   /* the engram key table could not be opened or read */
+    LZ_ERR_ENGRAM_KEYS_FORMAT, /* not a sorted 1-D int64 .npy (wrong dtype, shape, order, or unsorted) */
     /* exec_len != n_layers is a looping tower (engine/loop_schedule.py).
        The application table is read and validated, but the layer loop
        still runs n_layers applications, so accepting one would run the

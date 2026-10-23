@@ -734,6 +734,14 @@ typedef struct {
        `if not self._format_ids: return None` - no format gating). */
     unsigned char *engram_format_bitmap;   /* [(vocab_size+7)/8] bytes */
 
+    /* THE STATIC KEY TABLE's file name, exactly as config.json spells it
+       (spec 1.6). Empty for the hash form. The loader resolves it
+       against the model directory - the table is a sidecar beside the
+       checkpoint, the same file tools/export_q8.py reads, and the bin
+       header cannot name it. A name this long is a malformed config,
+       not a table. */
+    char engram_keys[64];
+
     /* THE V6 HEADER BLOCK (spec sections 3.1 and 3.10), read from
        model.bin when its version word is >= 6 and from config.json
        (engine/loop_schedule.py and the keys below) on the safetensors
@@ -1113,6 +1121,12 @@ typedef struct {
     int *offsets;            /* [n_spaces] cumulative row offsets */
     /* Per-order rolling hash bases: base[o] = 2*((o+1)*7+1)+1 */
     lz_i64 *bases;           /* [n_orders] */
+    /* The static key table (spec 1.6), or NULL for the hash form. Sorted
+       strictly increasing codes; a miss contributes nothing. key_shift is
+       wide enough for the vocabulary: code = (id0 << key_shift) | id1. */
+    lz_i64 *keys;
+    int n_keys;
+    int key_shift;
 } LZEngram;
 
 typedef struct {

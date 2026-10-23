@@ -26,6 +26,7 @@
 #endif /* __WATCOMC__ */
 
 #include "forward.h"
+#include "engram_keys.h"
 
 /* Rolling polynomial hash: h = (h * base + token) & MASK64.
    Per-order bases match kunmoe_modeling.py:
@@ -82,6 +83,29 @@ static void engram_hash(const int *tokens, int nt,
                     (int)((lz_i64)hv % primes[sp]) + offsets[sp];
             }
         }
+    }
+}
+
+/* THE STATIC KEY TABLE's index (spec 1.6): the window is the 2-gram
+   (previous token, this token), and the row is the key's position in the
+   sorted table or -1. A window that reaches before the sequence start
+   has no previous token - it is a miss, not a padded (0, x) lookup:
+   training splits at document boundaries and contributes nothing there,
+   and looking up the padding token's id would otherwise hit a real row
+   whenever (0, x) happens to be a selected 2-gram. */
+static void engram_key_index(const LZEngram *eg, const int *tokens, int nt,
+                             const int *hist, int hist_n,
+                             int *out /* [nt] */) {
+    int t;
+    for (t = 0; t < nt; t++) {
+        int prev, cur;
+        lz_i64 code;
+        if (t > 0) prev = tokens[t - 1];
+        else if (hist_n > 0) prev = hist[hist_n - 1];
+        else { out[t] = -1; continue; }
+        cur = tokens[t];
+        code = ((lz_i64)prev << eg->key_shift) | (lz_i64)cur;
+        out[t] = lz_keys_find(eg->keys, eg->n_keys, code);
     }
 }
 
@@ -237,11 +261,15 @@ void forward_engram(const LZModel *m, LZRunState *s,
     float *key   = qnorm + (size_t)nt * dim;   /* [nt * dim] */
     float *scratch = key + (size_t)nt * dim;    /* remaining scratch */
 
-    /* 1. Hash */
-    engram_hash(tokens, nt, hist, hist_n, eg->primes, eg->offsets, eg->bases,
-                no, nh, ns, hidx);
-    if (dbg) {
-        engram_dump_idx("hash", hidx, ns);
+    /* 1. Index: the static key table's binary search, or the rolling
+       multi-head hash. One space either way; the table has ns == 1. */
+    if (eg->keys) {
+        engram_key_index(eg, tokens, nt, hist, hist_n, hidx);
+        if (dbg) engram_dump_idx("keys", hidx, 1);
+    } else {
+        engram_hash(tokens, nt, hist, hist_n, eg->primes, eg->offsets,
+                    eg->bases, no, nh, ns, hidx);
+        if (dbg) engram_dump_idx("hash", hidx, ns);
     }
 
     /* 2-3. Per-order: table lookup -> proj -> gate -> sum */
@@ -271,8 +299,13 @@ void forward_engram(const LZModel *m, LZRunState *s,
             for (i = 0; i < nh; i++) {
                 int sp = o * nh + i;
                 int idx = hidx[(size_t)tk * ns + sp];
-                lz_t_row_f32(&eg->table, idx, edim,
-                             eo + (size_t)tk * po + (size_t)i * edim);
+                float *dst = eo + (size_t)tk * po + (size_t)i * edim;
+                /* A key that is not in the table contributes nothing -
+                   the row is zero, not some hash slot's contents. */
+                if (idx < 0)
+                    memset(dst, 0, (size_t)edim * sizeof(float));
+                else
+                    lz_t_row_f32(&eg->table, idx, edim, dst);
             }
         }
         if (dbg) { char tag[32]; snprintf(tag, sizeof(tag), "emb_o%d", o); engram_dump(tag, eo, po); }

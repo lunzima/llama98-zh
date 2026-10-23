@@ -301,10 +301,12 @@ void lz_fwht(float *v, int n) {
    multiplies: 0.5 is exact, so for even log2(n) this is a power of two
    and costs nothing but the multiply loop; for odd log2(n) it is that
    power of two times 1/sqrt(2), whose fp32 value is the ONE rounding
-   here. Deliberately not `1.0f / sqrtf(n)` - iron law 6 bans division by
-   a float constant (the two compilers strength-reduce it differently),
-   and a runtime divisor would cost a soft-float divide on ARMv5TE, where
-   the whole point of the Hadamard is that it has none.
+   here. Deliberately not `1.0f / sqrtf(n)`: the two compilers
+   strength-reduce a division by a constant differently (one multiplies
+   by the reciprocal, the other divides), so the same expression rounds
+   to different values; and a runtime divisor would cost a soft-float
+   divide on ARMv5TE, where the whole point of the Hadamard is that it
+   has none.
 
    Matches engine/bitlinear.py's `_hadamard_matrix` to within that single
    rounding: that one builds h by dividing by sqrt(2) once per stage (9
@@ -312,8 +314,8 @@ void lz_fwht(float *v, int n) {
    1/sqrt(2) while these are exact integers times one fp32 1/sqrt(2).
    The two therefore differ by ~1e-6 relative on the transformed vector,
    and that is what tests/test_embed_rot_parity.py's bound is set from -
-   not a claim of bit identity across the two trees, which iron law two
-   asks only within one. */
+   not a claim of bit identity against the Python reference, which no
+   gate makes. */
 #define LZ_INV_SQRT2 0.70710678118654752440f
 
 static float lz_inv_sqrt_pow2(int n) {

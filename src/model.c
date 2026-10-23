@@ -12,6 +12,7 @@
 #include "lz_int.h"   /* lz_i64: the 64-bit type, portably */
 #include "lz4d.h"
 #include "model.h"
+#include "engram_keys.h"
 #include "ops.h"   /* lz_bf16_store_g, LZ_MM_WIDEN_MAX, LZ_SPEC_K_MAX (alloc_mtp's mtp_n_draft bound) */
 #include "fwht.h"  /* LZ_EMBED_ROT_ON: the rotated-vocabulary switch, one spelling */
 
@@ -382,24 +383,6 @@ static const LZJsonNode *config_text_node(const LZJson *j,
     return tc ? tc : root;
 }
 
-/* Does this config carry a non-empty engram KEY TABLE? (Distinct from
-   `engram`, the module switch: the key table is a second, external
-   lookup the model's forward reads rows out of, and this engine has no
-   such lookup.) Read as "present and not an empty/null placeholder",
-   which is the same test tools/export_q8.py refuses on - an empty array
-   or a null is how a config says "no keys" without dropping the key. */
-static int config_has_engram_keys(const LZJson *j, const LZJsonNode *obj) {
-    const LZJsonNode *k;
-    if (!obj) return 0;
-    k = lz_json_get(j, obj, "engram_keys");
-    if (!k) return 0;
-    if (k->type == LZ_JSON_NULL) return 0;
-    if (k->type == LZ_JSON_ARR) return k->n_children > 0;
-    if (k->type == LZ_JSON_STR) return k->text && k->text[0] != '\0';
-    if (k->type == LZ_JSON_BOOL) return k->num != 0;
-    return 1;
-}
-
 /* Is this rotated-vocabulary block one the transform can run? block == 0
    means "no block transform" (the plain vocabulary, or the sign diagonal
    alone) and is always fine. Otherwise the transform is block-diagonal
@@ -447,19 +430,20 @@ int lz_load_config(LZModelConfig *c, const char *path,
     /* The multimodal shell puts text params under text_config; plain-text checkpoints have them at top level */
     tc = config_text_node(&j, root);
 
-    /* THE v6 PRODUCTS THIS ENGINE CANNOT RUN, refused before anything is
-       bound. Same three refusals as lz_open_bin's v6 block, from the
-       config.json side: a rotated vocabulary (embed_hadamard) would have
-       its embedding/head rows read in the wrong basis, an engram key
-       table has no lookup here, and a looped tower has no application
-       table on this path at all - the table is derived in Python at
-       export time (spec section 3.10) and C is not allowed a second
-       derivation, so loop_repeats != 1 is refused rather than silently
-       running every layer once. */
-    if (config_has_engram_keys(&j, tc)) {
-        qerr(errbuf, errlen, LZ_ERR_CFG_ENGRAM_KEYS);
-        lz_json_free(&j);
-        return 1;
+    /* THE STATIC ENGRAM KEY TABLE (spec 1.6): a sidecar file, named here
+       as config.json spells it and resolved against the model directory
+       when the engram is allocated. The name is carried verbatim; one
+       that cannot fit the field is a malformed config, not a table. */
+    {
+        const char *ks = lz_json_get_str(&j, tc, "engram_keys", "");
+        if (ks && ks[0]) {
+            if (strlen(ks) >= sizeof(c->engram_keys)) {
+                qerr(errbuf, errlen, LZ_ERR_CFG_ENGRAM_KEYS, ks);
+                lz_json_free(&j);
+                return 1;
+            }
+            strcpy(c->engram_keys, ks);
+        }
     }
     c->embed_hadamard = lz_json_get_int(&j, tc, "embed_hadamard", 0);
     c->embed_signs_seed = lz_json_get_int(&j, tc, "embed_signs_seed", 0);
@@ -2662,8 +2646,9 @@ static int alloc_mtp(LZModel *m, char *errbuf, int errlen) {
     return 0;
 }
 
-static int alloc_engram(LZModel *m, char *errbuf, int errlen) {
-    const LZModelConfig *c = &m->config;
+static int alloc_engram(LZModel *m, const char *dir, char *errbuf,
+                        int errlen) {
+    LZModelConfig *c = &m->config;
     LZEngram *eg;
     int no, hdim, edim, o;
     if (!c->engram) return 0;
@@ -2672,40 +2657,69 @@ static int alloc_engram(LZModel *m, char *errbuf, int errlen) {
     if (!eg) { qerr(errbuf, errlen, LZ_ERR_LAYERS_ALLOC); return 1; }
     m->engram = eg;
 
-    no = c->engram_n_orders;
+    /* THE STATIC KEY TABLE (spec 1.6) REPLACES THE HASH, so it also
+       decides the shape: one 2-gram order, one space, no head
+       partition, and the row count is the table's own. config.json's
+       engram_ngram/engram_n_head still describe the hash form the table
+       replaces; engine/kunmoe_modeling.py overrides both the same way
+       against the same file. The table names a row per selected 2-gram
+       and a n-gram outside it contributes nothing, which is the
+       property the table exists for. */
+    if (c->engram_keys[0]) {
+        char path[512];
+        int shift = 1, v = c->vocab_size - 1;
+        while (v > 1) { shift++; v >>= 1; }
+        if (strlen(dir) + 1 + strlen(c->engram_keys) >= sizeof(path)) {
+            qerr(errbuf, errlen, LZ_ERR_CFG_ENGRAM_KEYS, c->engram_keys);
+            return 1;
+        }
+        sprintf(path, "%s/%s", dir, c->engram_keys);
+        if (lz_keys_load(path, &eg->keys, &eg->n_keys, errbuf, errlen) != 0)
+            return 1;
+        eg->key_shift = shift;
+        c->engram_ngram = 2;
+        c->engram_n_head = 1;
+        c->engram_n_orders = 1;
+        c->engram_n_spaces = 1;
+        c->engram_per_order = c->engram_dim;
+        c->engram_conv_dilation = 2;
+        c->engram_total_rows = eg->n_keys;
+    } else {
+        /* Primes, offsets, bases (derived from config, not in
+           checkpoint). lz_load_config already computed
+           engram_total_rows and engram_head_space from engram_size. */
+        eg->primes = (int *)calloc(c->engram_n_spaces, sizeof(int));
+        eg->offsets = (int *)calloc(c->engram_n_spaces, sizeof(int));
+        eg->bases = (lz_i64 *)calloc(c->engram_n_orders, sizeof(lz_i64));
+        if (!eg->primes || !eg->offsets || !eg->bases) {
+            qerr(errbuf, errlen, LZ_ERR_OOM_ALLOC, "engram primes");
+            return 1;
+        }
+        {   /* primes_down: largest primes <= head_space */
+            int x = c->engram_head_space, found = 0;
+            while (found < c->engram_n_spaces) {
+                int is_prime = (x >= 2), d;
+                for (d = 2; is_prime && d * d <= x; d++)
+                    if (x % d == 0) is_prime = 0;
+                if (is_prime) eg->primes[found++] = x;
+                x--;
+            }
+        }
+        {   /* offsets: cumulative start row per space */
+            int total = 0, k;
+            for (k = 0; k < c->engram_n_spaces; k++) {
+                eg->offsets[k] = total;
+                total += eg->primes[k];
+            }
+        }
+        { int oo; for (oo = 0; oo < c->engram_n_orders; oo++)
+            eg->bases[oo] = (lz_i64)(2 * ((oo + 1) * 7 + 1) + 1);
+        }
+    }
+
+    no   = c->engram_n_orders;
     hdim = c->hidden_size;
     edim = c->engram_dim;
-
-    /* Primes, offsets, bases (derived from config, not in checkpoint).
-       lz_load_config already computed engram_total_rows and
-       engram_head_space from engram_size. */
-    eg->primes = (int *)calloc(c->engram_n_spaces, sizeof(int));
-    eg->offsets = (int *)calloc(c->engram_n_spaces, sizeof(int));
-    eg->bases = (lz_i64 *)calloc(no, sizeof(lz_i64));
-    if (!eg->primes || !eg->offsets || !eg->bases) {
-        qerr(errbuf, errlen, LZ_ERR_OOM_ALLOC, "engram primes");
-        return 1;
-    }
-    {   /* primes_down: largest primes <= head_space */
-        int x = c->engram_head_space, found = 0;
-        while (found < c->engram_n_spaces) {
-            int is_prime = (x >= 2), d;
-            for (d = 2; is_prime && d * d <= x; d++)
-                if (x % d == 0) is_prime = 0;
-            if (is_prime) eg->primes[found++] = x;
-            x--;
-        }
-    }
-    {   /* offsets: cumulative start row per space */
-        int total = 0, k;
-        for (k = 0; k < c->engram_n_spaces; k++) {
-            eg->offsets[k] = total;
-            total += eg->primes[k];
-        }
-    }
-    { int o; for (o = 0; o < no; o++)
-        eg->bases[o] = (lz_i64)(2 * ((o + 1) * 7 + 1) + 1);
-    }
 
     /* Allocate tensors with aligned_malloc (lz_t_free's release path).
        norm starts at 1.0f, rest zero - training fills them. */
@@ -2853,7 +2867,7 @@ int lz_open(LZModel *m, const char *dir, char *errbuf, int errlen) {
     if (setup_layers(m, errbuf, errlen) != 0) goto fail;
 
     if (alloc_mtp(m, errbuf, errlen) != 0) goto fail;
-    if (alloc_engram(m, errbuf, errlen) != 0) goto fail;
+    if (alloc_engram(m, dir, errbuf, errlen) != 0) goto fail;
 
     bc.claimed = (unsigned char *)calloc((size_t)m->st.n_tensors, 1);
     if (!bc.claimed) {
@@ -4276,18 +4290,23 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
                         tc = config_text_node(&jcfg, root);
                     if (tc) {
                         int eg_on;
-                        /* An engram KEY TABLE is a second, external
-                           lookup this engine has no implementation of -
-                           the same refusal lz_load_config makes. It is
-                           not a header field, so only config.json can
-                           name it, and a bin whose sidecar carries one
-                           must not load and then run an engram module
-                           that contributes zeros. */
-                        if (config_has_engram_keys(&jcfg, tc)) {
-                            lz_json_free(&jcfg);
-                            free(cfg_buf);
-                            qerr(errbuf, errlen, LZ_ERR_CFG_ENGRAM_KEYS);
-                            goto fail;
+                        /* The engram's static key table is not a bin
+                           header field, so only config.json can name
+                           it; it is resolved against the model
+                           directory when the engram is allocated. */
+                        {
+                            const char *ks = lz_json_get_str(&jcfg, tc,
+                                                             "engram_keys", "");
+                            if (ks && ks[0]) {
+                                if (strlen(ks) >= sizeof(c->engram_keys)) {
+                                    lz_json_free(&jcfg);
+                                    free(cfg_buf);
+                                    qerr(errbuf, errlen,
+                                         LZ_ERR_CFG_ENGRAM_KEYS, ks);
+                                    goto fail;
+                                }
+                                strcpy(c->engram_keys, ks);
+                            }
                         }
                         eg_on = lz_json_get_int(&jcfg, tc, "engram", 0);
                         if (eg_on) {
@@ -4370,7 +4389,7 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
     if (setup_layers(m, errbuf, errlen) != 0) goto fail;
 
     if (alloc_mtp(m, errbuf, errlen) != 0) goto fail;
-    if (alloc_engram(m, errbuf, errlen) != 0) goto fail;
+    if (alloc_engram(m, dir, errbuf, errlen) != 0) goto fail;
 
     if (model_walk(m, visit_read_bin, NULL, errbuf, errlen) != 0) {
         goto fail;
@@ -4590,6 +4609,7 @@ void lz_free(LZModel *m) {
         free(eg->primes);
         free(eg->offsets);
         free(eg->bases);
+        free(eg->keys);
         free(eg);
         m->engram = NULL;
     }
