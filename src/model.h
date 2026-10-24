@@ -1262,6 +1262,13 @@ int lz_kv_share_target(const LZModelConfig *c, int li);
    function rather than repeating the "is CED active" condition. */
 int lz_ced_kv_target(const LZModelConfig *c, int li);
 
+/* Number of applications of a linear-attention layer (GDN or KDA) in the
+   execution schedule. Recurrent state is per APPLICATION, not per physical
+   layer (spec 3.2): a loop tower's second pass restarts its recurrences at
+   zero. This is the slot count the state buffers are sized by; it equals
+   n_linear_layers on the identity schedule. */
+int lz_n_linear_apps(const LZModelConfig *c);
+
 /* Whether layer li's csa2_mode/csa2_source are internally consistent -
    csa2_mode[li] one of the three LZ_CSA2_* codes, and, for a non-FULL
    mode, csa2_source[li] a strictly earlier layer that is itself

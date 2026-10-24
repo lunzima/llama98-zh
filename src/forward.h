@@ -1337,15 +1337,16 @@ typedef struct {
     int     kv_slots;           /* allocated cache depth: seq_len, or sink+ring */
     float   ssm_scale;          /* 1/sqrt(lin_k_head_dim) */
 
-    /* THE KDA STATE SLOTS ARE PER APPLICATION (spec 3.2). The decoder's
-       second pass restarts its recurrences at zero, so it cannot share the
-       first pass's slot; `app_state_idx[a]` is application a's slot, and
-       `app_slot[l]` is the slot the physical layer l is using RIGHT NOW -
-       the forward loop sets it before each application, and it equals
-       cache_idx[l] for a schedule that does not loop. -1 for a
-       full-attention application, which owns no recurrent state. */
-    int  n_linear_apps;         /* KDA state slots (12 for the v1 loop) */
-    int  app_state_idx[LZ_MAX_LAYERS];  /* application -> KDA slot or -1 */
+    /* THE LINEAR-ATTENTION STATE SLOTS ARE PER APPLICATION (spec 3.2).
+       The decoder's second pass restarts its recurrences at zero, so it
+       cannot share the first pass's slot; `app_state_idx[a]` is
+       application a's slot, and `app_slot[l]` is the slot the physical
+       layer l is using RIGHT NOW - the forward loop sets it before each
+       application, and it equals cache_idx[l] for a schedule that does
+       not loop. -1 for a full-attention application, which owns no
+       recurrent state. */
+    int  n_linear_apps;         /* GDN+KDA state slots (12 for the v1 loop) */
+    int  app_state_idx[LZ_MAX_LAYERS];  /* application -> state slot or -1 */
     int  app_slot[LZ_MAX_LAYERS];       /* physical layer -> current slot */
 
     int *cache_idx;             /* layer index -> index within its class.

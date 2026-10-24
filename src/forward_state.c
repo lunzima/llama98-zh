@@ -652,24 +652,30 @@ static void alloc_recurrent_state(LZRunState *s, const LZModel *m,
                                   const LZModelConfig *c, int spec_k_max,
                                   int *okp) {
     int ok = 1;
-    int a;
-    /* KDA STATE SLOTS ARE PER APPLICATION (spec 3.2): the decoder's
-       second pass restarts its recurrences at zero, so it cannot share
-       the first pass's slot. Numbered in execution order; the identity
-       schedule gives n_linear_apps == n_linear_layers and
-       app_state_idx[a] == a. */
-    s->n_linear_apps = 0;
+    int a, slot = 0;
+    /* LINEAR-ATTENTION STATE SLOTS ARE PER APPLICATION (spec 3.2): the
+       decoder's second pass restarts its recurrences at zero, so it cannot
+       share the first pass's slot. "Linear" is GDN and KDA alike - both run
+       forward_ssm/forward_kda, both carry ssm_state/conv_state. Numbered in
+       execution order; the identity schedule gives n_linear_apps ==
+       n_linear_layers and app_state_idx[a] == a.
+
+       The COUNT comes from lz_n_linear_apps, the same function the buffers
+       are sized by: counting a second time here (or starting the numbering
+       at that count) sizes the state for one set of slots and fills
+       another, which is invisible until a checkpoint or a reset walks the
+       buffer by its length. */
+    s->n_linear_apps = lz_n_linear_apps(c);
+    for (a = 0; a < c->n_layers; a++) s->app_slot[a] = -1;
     for (a = 0; a < c->exec_len; a++) {
         int l = c->app_layer[a];
-        if (c->layer_types[l] == LZ_LT_KDA) {
-            s->app_state_idx[a] = s->n_linear_apps++;
+        if (c->layer_types[l] != LZ_LT_FULL) {
+            s->app_state_idx[a] = slot++;
             s->app_slot[l] = s->app_state_idx[a];
         } else {
             s->app_state_idx[a] = -1;
         }
     }
-    for (a = 0; a < c->n_layers; a++)
-        if (c->layer_types[a] != LZ_LT_KDA) s->app_slot[a] = -1;
     /* SSM/conv state: one (kd*vd) block per (layer, head), grouped
        within rows, times ssm_ring_depth slots - see forward.h's own
        comment on s->ssm_slot/s->ssm_ring_depth for the ring's shape

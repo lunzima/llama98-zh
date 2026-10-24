@@ -1671,6 +1671,13 @@ int lz_ced_kv_target(const LZModelConfig *c, int li) {
     return c->ced_kv && c->ced_split > 0 && c->ced_split < c->n_layers && li >= c->ced_split;
 }
 
+int lz_n_linear_apps(const LZModelConfig *c) {
+    int a, n = 0;
+    for (a = 0; a < c->exec_len; a++)
+        if (c->layer_types[c->app_layer[a]] != LZ_LT_FULL) n++;
+    return n;
+}
+
 /* model.h's own comment on this function has the contract. Mirrors
    lz_load_config's own csa2_kv_mode/csa2_kv_source cross-checks
    (csa2_key_idx's callers above), applied here to ONE layer's already-

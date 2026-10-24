@@ -688,27 +688,27 @@ void lz_state_reset(LZRunState *s, const LZModel *m) {
        lz_state_alloc and never recomputed here - see that field's own
        comment for why) or this zeroes only part (or past the end) of
        the buffer that was actually allocated. */
-    memset(s->ssm_state_q8, 0, (size_t)s->ssm_ring_depth * c->n_linear_layers *
+    memset(s->ssm_state_q8, 0, (size_t)s->ssm_ring_depth * s->n_linear_apps *
            c->lin_n_v_heads * c->lin_k_head_dim * c->lin_v_head_dim);
 #if LZ_GDN_STATE_2PLANE
-    memset(s->ssm_state_q8_lo, 0, (size_t)s->ssm_ring_depth * c->n_linear_layers *
+    memset(s->ssm_state_q8_lo, 0, (size_t)s->ssm_ring_depth * s->n_linear_apps *
            c->lin_n_v_heads * c->lin_k_head_dim * c->lin_v_head_dim);
 #endif /* LZ_GDN_STATE_2PLANE */
 #if LZ_GDN_STATE_F32
-    memset(s->ssm_state_f32, 0, (size_t)s->ssm_ring_depth * c->n_linear_layers *
+    memset(s->ssm_state_f32, 0, (size_t)s->ssm_ring_depth * s->n_linear_apps *
            c->lin_n_v_heads * c->lin_k_head_dim * c->lin_v_head_dim *
            sizeof(float));
 #endif /* LZ_GDN_STATE_F32 */
-    memset(s->ssm_state_s, 0, (size_t)s->ssm_ring_depth * c->n_linear_layers *
+    memset(s->ssm_state_s, 0, (size_t)s->ssm_ring_depth * s->n_linear_apps *
            c->lin_n_v_heads * c->lin_k_head_dim * c->lin_v_head_dim / 32 *
            sizeof(float));
 #if LZ_CONV_FIXED
     if (s->conv_state_q)
         memset(s->conv_state_q, 0,
-               (size_t)s->ssm_ring_depth * c->n_linear_layers *
+               (size_t)s->ssm_ring_depth * s->n_linear_apps *
                c->lin_conv_dim * (c->conv_kernel - 1) * sizeof(short));
 #endif /* LZ_CONV_FIXED */
-    memset(s->conv_state, 0, (size_t)s->ssm_ring_depth * c->n_linear_layers *
+    memset(s->conv_state, 0, (size_t)s->ssm_ring_depth * s->n_linear_apps *
            c->lin_conv_dim * (c->conv_kernel - 1) * sizeof(float));
     /* S2 CSA2 - guarded on the pointer, not on any csa2_on flag, same
        reasoning kq8/vq8's own guard comment gives: allocation already
@@ -1290,8 +1290,9 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
        s->ssm_slot). Read ONCE here, before the layer loop,
        and passed down explicitly rather than having forward_ssm/
        forward_kda read s->ssm_slot themselves: those two are called
-       once PER LINEAR/KDA LAYER (as many as n_linear_layers times per
-       chunk), and s->ssm_slot must only advance ONCE per chunk's worth
+       once PER LINEAR-ATTENTION APPLICATION (as many as exec_len's
+       linear entries per chunk), and s->ssm_slot must only advance ONCE
+       per chunk's worth
        of nt tokens, not once per layer - so the read-once-here /
        advance-once-after-the-loop split is load-bearing, not tidiness.
        It also makes multi-chunk verify batches (lz_forward_verify's own
@@ -1304,9 +1305,10 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
     /* THE APPLICATION SCHEDULE (spec 3.1): one pass per entry of the v6
        table, so a looping tower runs the decoder block twice on the same
        weights. A non-looping model has exec_len == n_layers and
-       app_layer[a] == a, which is the identity. The KDA state slot is
-       the APPLICATION's (spec 3.2), since the second pass restarts at
-       zero; app_state_idx is -1 for a full-attention application. */
+       app_layer[a] == a, which is the identity. The recurrent-state
+       slot is the APPLICATION's (spec 3.2), since the second pass
+       restarts at zero; app_state_idx is -1 for a full-attention
+       application. */
     for (a = 0; a < c->exec_len; a++) {
         int l = c->app_layer[a];
         const LZLayer *L = &m->layers[l];
@@ -1565,21 +1567,25 @@ float *lz_forward_capture(const LZModel *m, LZRunState *s, int token, int pos) {
    being the same formulas, not re-derived independently. */
 static void lz_ced_replay_reset(const LZModel *m, LZRunState *s) {
     const LZModelConfig *c = &m->config;
-    int l;
+    int a;
     int slot = s->ssm_slot;
     int nv = c->lin_n_v_heads, kd = c->lin_k_head_dim, vd = c->lin_v_head_dim;
     int hist = c->conv_kernel - 1;
-    size_t q8_slot_stride = (size_t)c->n_linear_layers * nv * kd * vd;
+    size_t q8_slot_stride = (size_t)s->n_linear_apps * nv * kd * vd;
     size_t s_slot_stride  = q8_slot_stride / 32;
-    size_t conv_slot_stride = (size_t)c->n_linear_layers *
+    size_t conv_slot_stride = (size_t)s->n_linear_apps *
                               c->lin_conv_dim * hist;
 
-    for (l = 0; l < c->n_layers; l++) {
-        int li;
+    /* By APPLICATION, not by physical layer: recurrent state is addressed
+       by the application's slot (forward_kda's li), and a loop tower runs
+       a layer at or above ced_split twice with two separate states. */
+    for (a = 0; a < c->exec_len; a++) {
+        int l = c->app_layer[a];
+        int li = s->app_state_idx[a];
         size_t li_off_q8, li_off_s, li_off_conv;
-        if (c->layer_types[l] != LZ_LT_KDA || l < c->ced_split) continue;
+        if (li < 0 || c->layer_types[l] != LZ_LT_KDA || l < c->ced_split)
+            continue;
         lz_debug_ced_replay_layers++;
-        li = s->cache_idx[l];
         li_off_q8 = (size_t)li * nv * kd * vd;
         li_off_s = li_off_q8 / 32;
         li_off_conv = (size_t)li * c->lin_conv_dim * hist;

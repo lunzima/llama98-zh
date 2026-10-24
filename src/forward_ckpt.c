@@ -27,10 +27,10 @@
 static void ckpt_sizes(const LZModelConfig *c, size_t *n_q8, size_t *n_s,
                        size_t *n_conv, size_t *n_engram_conv,
                        size_t *n_csa2_pend) {
-    *n_q8   = (size_t)c->n_linear_layers * c->lin_n_v_heads *
+    *n_q8   = (size_t)lz_n_linear_apps(c) * c->lin_n_v_heads *
               c->lin_k_head_dim * c->lin_v_head_dim;
     *n_s    = *n_q8 / 32;
-    *n_conv = (size_t)c->n_linear_layers * c->lin_conv_dim *
+    *n_conv = (size_t)lz_n_linear_apps(c) * c->lin_conv_dim *
               (c->conv_kernel - 1);
     if (c->engram) {
         int rows = (c->engram_conv_kernel - 1) * c->engram_conv_dilation;
