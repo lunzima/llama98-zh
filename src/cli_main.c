@@ -752,46 +752,50 @@ static void print_config(const LZModelConfig *c) {
     printf("  (L=linear, A=full)\n");
 }
 
-/* Streaming tensor stats: f32 direct scan; Q8 dequantize per group. */
+/* Tensor stats for bin/safetensors parity: scan the dequantized f32
+   values. F32 is scanned in place; every other format goes through
+   lz_t_f32 into a one-shot scratch, so the checksum is over the same
+   numbers the forward multiplies - not over codes or scales. */
 static void tensor_stats_t(const char *name, const LZTensor *t) {
     float sum = 0.0f, sumsq = 0.0f, amax = 0.0f;
     lz_u64 chk = 0;
     lz_i64 i, n_nan = 0;
     lz_i64 n = t ? t->n : 0;
+    const float *v = NULL;
+    float *scratch = NULL;
 
-    if (t->dtype == 0 && t->f) {
-        for (i = 0; i < n; i++) {
-            unsigned int u;
-            float v = t->f[i];
-            memcpy(&u, &t->f[i], sizeof(u));
-            chk += (lz_u64)u * (lz_u64)(i + 1);
-            if (!(v == v)) { n_nan++; continue; }
-            sum += v;
-            sumsq += v * v;
-            if (v < 0.0) v = -v;
-            if (v > amax) amax = v;
-        }
-    } else if (t->dtype == 1 && t->q && t->scale) {
-        lz_i64 g, k;
-        for (g = 0; g < n / t->gs; g++) {
-            float sv = t->scale[g];
-            for (k = 0; k < t->gs; k++) {
-                float v = (float)t->q[g * t->gs + k] * sv;
-                unsigned int u;
-                float fv = (float)v;
-                memcpy(&u, &fv, sizeof(u));
-                chk += (lz_u64)u * (lz_u64)(g * t->gs + k + 1);
-                if (!(v == v)) { n_nan++; continue; }
-                sum += v;
-                sumsq += v * v;
-                if (v < 0.0) v = -v;
-                if (v > amax) amax = v;
-            }
-        }
-    } else {
+    if (!t || n <= 0) {
         printf("  %-46s (not loaded)\n", name);
         return;
     }
+    if (t->dtype == LZ_FMT_F32 && t->f) {
+        v = t->f;
+    } else {
+        scratch = (float *)malloc((size_t)n * sizeof(float));
+        if (!scratch) {
+            printf("  %-46s (scratch alloc failed, n=%lld)\n", name, n);
+            return;
+        }
+        v = lz_t_f32(t, scratch);
+        if (!v) {
+            free(scratch);
+            printf("  %-46s (dequant unavailable: dtype=%d)\n", name,
+                   t->dtype);
+            return;
+        }
+    }
+    for (i = 0; i < n; i++) {
+        unsigned int u;
+        float x = v[i];
+        memcpy(&u, &x, sizeof(u));
+        chk += (lz_u64)u * (lz_u64)(i + 1);
+        if (!(x == x)) { n_nan++; continue; }
+        sum += x;
+        sumsq += x * x;
+        if (x < 0.0) x = -x;
+        if (x > amax) amax = x;
+    }
+    free(scratch);
     {
         char _b0[LZ_FTOA_BUF], _b1[LZ_FTOA_BUF], _b2[LZ_FTOA_BUF];
         float _rms;
@@ -2267,12 +2271,19 @@ int main(int argc, char **argv) {
             ST(gate_proj, "mlp.gate_proj.weight");
             ST(up_proj, "mlp.up_proj.weight");
             ST(down_proj, "mlp.down_proj.weight");
+            ST(gate_norm, "mlp.gate_proj.norm.weight");
+            ST(up_norm, "mlp.up_proj.norm.weight");
+            ST(down_norm, "mlp.down_proj.norm.weight");
             ST(q_proj, "self_attn.q_proj.weight");
             ST(k_proj, "self_attn.k_proj.weight");
             ST(v_proj, "self_attn.v_proj.weight");
             ST(o_proj, "self_attn.o_proj.weight");
             ST(q_norm, "self_attn.q_norm.weight");
             ST(k_norm, "self_attn.k_norm.weight");
+            ST(attn_q_subn_norm, "self_attn.q_proj.norm.weight");
+            ST(attn_k_subn_norm, "self_attn.k_proj.norm.weight");
+            ST(attn_v_subn_norm, "self_attn.v_proj.norm.weight");
+            ST(attn_o_subn_norm, "self_attn.o_proj.norm.weight");
             ST(in_proj_qkv, "linear_attn.in_proj_qkv.weight");
             ST(in_proj_z, "linear_attn.in_proj_z.weight");
             ST(in_proj_a, "linear_attn.in_proj_a.weight");
@@ -2282,9 +2293,90 @@ int main(int argc, char **argv) {
             ST(dt_bias, "linear_attn.dt_bias");
             ST(ssm_norm, "linear_attn.norm.weight");
             ST(out_proj, "linear_attn.out_proj.weight");
+            ST(kda_q_proj, "linear_attn.q_proj.weight");
+            ST(kda_k_proj, "linear_attn.k_proj.weight");
+            ST(kda_v_proj, "linear_attn.v_proj.weight");
+            ST(kda_q_conv1d, "linear_attn.q_conv1d.weight");
+            ST(kda_k_conv1d, "linear_attn.k_conv1d.weight");
+            ST(kda_v_conv1d, "linear_attn.v_conv1d.weight");
+            ST(kda_A_log, "linear_attn.A_log");
+            ST(kda_f_a_proj, "linear_attn.f_a_proj.weight");
+            ST(kda_f_b_proj, "linear_attn.f_b_proj.weight");
+            ST(kda_dt_bias, "linear_attn.dt_bias");
+            ST(kda_b_proj, "linear_attn.b_proj.weight");
+            ST(kda_g_proj, "linear_attn.g_proj.weight");
+            ST(kda_o_norm, "linear_attn.o_norm.weight");
+            ST(kda_o_proj, "linear_attn.o_proj.weight");
+            ST(kda_q_norm, "linear_attn.q_proj.norm.weight");
+            ST(kda_k_norm, "linear_attn.k_proj.norm.weight");
+            ST(kda_v_norm, "linear_attn.v_proj.norm.weight");
+            ST(kda_g_norm, "linear_attn.g_proj.norm.weight");
+            ST(kda_o_subn_norm, "linear_attn.o_proj.norm.weight");
+            ST(moe_gate_w, "mlp.gate.weight");
+            ST(moe_gate_bias, "mlp.gate.e_score_correction_bias");
+            ST(moe_down_proj, "mlp.routed_expert_down_proj.weight");
+            ST(moe_up_proj, "mlp.routed_expert_up_proj.weight");
+            ST(moe_latent_norm, "mlp.routed_expert_norm.weight");
+            ST(moe_shared_gate, "mlp.shared_experts.gate_proj.weight");
+            ST(moe_shared_up, "mlp.shared_experts.up_proj.weight");
+            ST(moe_shared_down, "mlp.shared_experts.down_proj.weight");
+            ST(moe_gate_norm, "mlp.gate.norm.weight");
+            ST(moe_down_norm, "mlp.routed_expert_down_proj.norm.weight");
+            ST(moe_up_norm, "mlp.routed_expert_up_proj.norm.weight");
+            ST(moe_shared_gate_norm, "mlp.shared_experts.gate_proj.norm.weight");
+            ST(moe_shared_up_norm, "mlp.shared_experts.up_proj.norm.weight");
+            ST(moe_shared_down_norm, "mlp.shared_experts.down_proj.norm.weight");
+            ST(csa2_w_kv, "self_attn.csa2_w_kv.weight");
+            ST(csa2_w_gate, "self_attn.csa2_w_gate.weight");
+            ST(csa2_w_kv_idx, "self_attn.csa2_w_kv_idx.weight");
+            ST(csa2_k_norm_idx, "self_attn.csa2_k_norm_idx.weight");
+            ST(csa2_w_weights, "self_attn.csa2_w_weights.weight");
+            ST(csa2_w_dq_idx, "self_attn.csa2_w_dq_idx.weight");
+            ST(csa2_w_uq_idx, "self_attn.csa2_w_uq_idx.weight");
+            ST(attn_sinks, "self_attn.sinks");
+            if (cfg->num_experts > 0 && L->moe_expert_w1) {
+                int e;
+                for (e = 0; e < cfg->num_experts; e++) {
+                    snprintf(nm, sizeof(nm),
+                             "mlp.experts.%d.w1.weight", e);
+                    tensor_stats_t(nm, &L->moe_expert_w1[e]);
+                    snprintf(nm, sizeof(nm),
+                             "mlp.experts.%d.w2.weight", e);
+                    tensor_stats_t(nm, &L->moe_expert_w2[e]);
+                    snprintf(nm, sizeof(nm),
+                             "mlp.experts.%d.w3.weight", e);
+                    tensor_stats_t(nm, &L->moe_expert_w3[e]);
+                }
+            }
 #undef ST
         }
+        if (only_layer < 0 && m.engram) {
+            const LZEngram *eg = m.engram;
+            int o;
+            /* Engram is a global module, not a layer tensor. The parser
+               that rebuilds full names from "--- layer N ---" headers
+               would otherwise prefix these with the last layer index. */
+            printf("--- global ---\n");
+            tensor_stats_t("engram_memory.table.weight", &eg->table);
+            tensor_stats_t("engram_memory.conv.weight", &eg->conv);
+            tensor_stats_t("engram_memory.norm.weight", &eg->norm);
+            for (o = 0; o < cfg->engram_n_orders; o++) {
+                char nm2[64];
+                snprintf(nm2, sizeof(nm2),
+                         "engram_memory.key_proj.%d.weight", o);
+                tensor_stats_t(nm2, &eg->key_proj[o]);
+                snprintf(nm2, sizeof(nm2),
+                         "engram_memory.value_proj.%d.weight", o);
+                tensor_stats_t(nm2, &eg->value_proj[o]);
+            }
+        }
     }
+
+    /* --stats alone is a complete request: without this, control falls
+       through every generate/interactive block into `fail:` and the
+       process exits 1 after printing perfectly good statistics. */
+    if (want_stats && n_tokens <= 0 && !prompt && !interactive)
+        goto cleanup;
 
     /* ---- debug: token-level forward ---- */
     if (n_tokens > 0) {
