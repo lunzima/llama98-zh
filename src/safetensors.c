@@ -53,7 +53,8 @@ static int dtype_from_name(const char *s) {
     return LZ_DT_UNKNOWN;
 }
 
-int lz_st_open(LZSafetensors *st, const char *path, char *errbuf, int errlen) {
+static int st_open_common(LZSafetensors *st, const char *path, int meta_only,
+                          char *errbuf, int errlen) {
     unsigned char lenbuf[8];
     lz_u64 hdr_len = 0;
     char *hdr = NULL;
@@ -62,6 +63,7 @@ int lz_st_open(LZSafetensors *st, const char *path, char *errbuf, int errlen) {
     lz_u64 max_end = 0;
 
     memset(st, 0, sizeof(*st));
+    st->meta_only = meta_only;
     if (errbuf && errlen > 0) errbuf[0] = '\0';
 
     st->file_size = lz_fsize(path);
@@ -184,14 +186,15 @@ int lz_st_open(LZSafetensors *st, const char *path, char *errbuf, int errlen) {
         t->nbytes = (lz_u64)(e0 - s0);
 
         /* declared byte count must match shape*dtype, or later reads misalign silently */
-        if (t->nbytes != (lz_u64)t->n_elem *
+        if (!st->meta_only &&
+            t->nbytes != (lz_u64)t->n_elem *
                          (lz_u64)lz_st_dtype_size(t->dtype)) {
             sterr(errbuf, errlen, LZ_ERR_ST_NBYTES,
                   t->name, t->nbytes,
                   t->n_elem * lz_st_dtype_size(t->dtype));
             goto fail;
         }
-        if (st->data_start + (lz_u64)e0 >
+        if (!st->meta_only && st->data_start + (lz_u64)e0 >
             (lz_u64)st->file_size) {
             sterr(errbuf, errlen, LZ_ERR_ST_OVERFLOW, t->name);
             goto fail;
@@ -216,6 +219,15 @@ fail:
     free(hdr);
     lz_st_close(st);
     return 1;
+}
+
+int lz_st_open(LZSafetensors *st, const char *path, char *errbuf, int errlen) {
+    return st_open_common(st, path, 0, errbuf, errlen);
+}
+
+int lz_st_open_meta(LZSafetensors *st, const char *path, char *errbuf,
+                    int errlen) {
+    return st_open_common(st, path, 1, errbuf, errlen);
 }
 
 void lz_st_close(LZSafetensors *st) {

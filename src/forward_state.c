@@ -323,6 +323,13 @@ static void alloc_core_buffers(LZRunState *s, const LZModel *m,
         ? (float *)xcalloc((size_t)nt * c->hidden_size, sizeof(float),
                            &ok, &s->bytes_alloc)
         : NULL;
+    /* The scalar input injection (model.h's loop_input_mix comment,
+       forward.h's emb_hold comment). Same rule as ced_hs just above: a
+       model that does not mix gets NULL and pays nothing. */
+    s->emb_hold = c->loop_input_mix
+        ? (float *)xcalloc((size_t)nt * c->hidden_size, sizeof(float),
+                           &ok, &s->bytes_alloc)
+        : NULL;
     /* Sized for the LARGER of the body's dense-FFN width and the MTP
        block's own (dense_ffn_step's shared scratch, forward.c) - the
        two are independent fields (model.h's mtp_intermediate_size
@@ -382,24 +389,63 @@ static void alloc_attn_buffers(LZRunState *s, const LZModelConfig *c,
    compressed rings are addressed by it, and model.c's csa2_slot_owner
    defines that same numbering - but it must not claim a plane.
 
-   ONE PREDICATE, TWO CALLERS: dense_kv_layers below counts with it and
-   lz_state_alloc's dense_idx fill numbers with it. A second copy of this
-   test is how the allocation and the plane offsets come to disagree, and
-   that disagreement is a heap overrun rather than a wrong number. */
+   ONE PREDICATE, TWO CALLERS: lz_n_dense_kv_apps below counts with it
+   and lz_state_alloc's app_dense_idx fill numbers with it. A second copy
+   of this test is how the allocation and the plane offsets come to
+   disagree, and that disagreement is a heap overrun rather than a wrong
+   number. */
 static int layer_owns_dense_kv(const LZModel *m, int l) {
     return m->config.layer_types[l] == LZ_LT_FULL && !m->layers[l].csa2_on;
 }
 
-/* How many layers own a dense plane. The planes are sized for this count
-   (+1 when an MTP head is bound), not for c->n_full_layers: a csa2_on
-   layer owns no plane, and counting it allocates one nothing writes -
-   twice the KV the model can use, on the models that have one. */
-static int dense_kv_layers(const LZModel *m) {
+/* How many dense planes this model needs: one per dense-KV APPLICATION,
+   not per layer. A looping tower runs the same physical layer more than
+   once and each pass appends its own rows, so the count comes from the
+   application table - lz_n_linear_apps' sibling on the KV side. Counting
+   layers here allocates one plane for a layer that runs twice, and the
+   second pass then reads the first pass's rows: a heap overrun is merely
+   the loud version of that. A csa2_on layer owns no plane (see
+   layer_owns_dense_kv), and a linear layer owns no plane either. */
+int lz_n_dense_kv_apps(const LZModel *m) {
     const LZModelConfig *c = &m->config;
     int l, n = 0;
-    for (l = 0; l < c->n_layers; l++)
+    int a;
+    for (a = 0; a < c->exec_len; a++) {
+        l = c->app_layer[a];
         if (layer_owns_dense_kv(m, l)) n++;
+    }
     return n;
+}
+
+/* CED's local window ring (forward.h's own csa2_local_kv comment): one
+   slot per APPLICATION that carries the window, sized W * 2 * head_dim.
+   Numbered in execution order like lz_n_dense_kv_apps above and for the
+   same reason - the second pass of a looping tower projects its own
+   window from its own input, so a slot per physical layer would let it
+   read the first pass's entries.
+
+   app_local_idx is allocated only when the knob is on, and the ring with
+   it: "ced_local == 0" is the tree without the branch, down to the byte
+   count this state hands out (build/loop_kv_plane_gate.sh asserts what
+   one application costs). */
+static void alloc_ced_local(LZRunState *s, const LZModelConfig *c, int *okp) {
+    int ok = 1, a, slot = 0;
+    if (c->ced_local > 0) {
+        s->app_local_idx = (int *)xcalloc((size_t)c->exec_len, sizeof(int),
+                                          &ok, &s->bytes_alloc);
+        for (a = 0; a < c->exec_len; a++) {
+            int l = c->app_layer[a];
+            s->app_local_idx[a] = lz_ced_local_target(c, l) ? slot++ : -1;
+        }
+    }
+    s->n_local_apps = slot;
+    if (!ok) { *okp = 0; return; }
+    if (slot > 0) {
+        s->csa2_local_kv = (float *)xcalloc(
+            (size_t)slot * (size_t)c->ced_local * 2 * (size_t)c->head_dim,
+            sizeof(float), &ok, &s->bytes_alloc);
+        if (!ok) *okp = 0;
+    }
 }
 
 /* KV-cache ring geometry, then the K/V planes of whichever format each
@@ -853,7 +899,12 @@ static void alloc_csa2_ring(LZRunState *s, const LZModel *m,
                 (size_t)c->csa2_indexer_heads * c->csa2_indexer_head_dim, sizeof(float), &ok, &s->bytes_alloc);
             s->csa2_widx = (float *)xcalloc((size_t)c->csa2_indexer_heads, sizeof(float), &ok, &s->bytes_alloc);
             s->csa2_cq_idx = (float *)xcalloc((size_t)c->csa2_indexer_q_lora_rank, sizeof(float), &ok, &s->bytes_alloc);
-            s->csa2_attn_probs = (float *)xcalloc((size_t)c->csa2_topk, sizeof(float), &ok, &s->bytes_alloc);
+            /* topk columns of selected compressed entries, then the
+               window's up to ced_local columns - one softmax over the
+               concatenation (model.h's own ced_local comment). */
+            s->csa2_attn_probs = (float *)xcalloc(
+                (size_t)c->csa2_topk + (size_t)c->ced_local,
+                sizeof(float), &ok, &s->bytes_alloc);
         }
     }
     if (!ok) *okp = 0;
@@ -1234,18 +1285,52 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
     s->nt_cap = LZ_BATCH_DEFAULT;
 
     /* Before alloc_kv_cache, which sizes every plane off it. */
-    s->n_dense_kv = dense_kv_layers(m);
-    /* A LOOP TOWER WITH DENSE KV CANNOT RUN HERE: the cache slots are per
-       physical layer, so the decoder's second pass would append its own
-       rows where the first pass's already are - a different sequence for
-       every later token, with no error. The v1 towers are CSA2-only
-       (n_dense_kv 0), whose rings are per layer and re-derived from the
-       same H_E on both passes, so the refusal costs them nothing. */
-    if (c->exec_len != c->n_layers && s->n_dense_kv > 0) {
-        if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_CFG_LOOP_KV,
-                               c->exec_len, c->n_layers, s->n_dense_kv);
-        lz_state_free(s);
-        return 1;
+    s->n_dense_kv = lz_n_dense_kv_apps(m);
+    /* A CSA2 LAYER APPLIED MORE THAN ONCE SHARES ONE RING, AND WHETHER
+       THAT IS RIGHT DEPENDS ON WHICH KV BRANCH THE LAYER IS ON.
+
+       DeepSeek-V4.1 report SS2.2 defines CED as two branches. GLOBAL
+       attention: for l > L/2 the KV entries "are NOT derived from their
+       respective hidden states h_l. Instead, they are projected directly
+       from the hidden state of the (L/2)-th layer", K_l = h_{L/2} W^K_l,
+       V_l = h_{L/2} W^V_l (Eq 1). SLIDING-WINDOW attention: "CED
+       maintains the conventional layer-wise computation across all
+       layers ... the local keys and values are derived directly from the
+       current layer's hidden state h_l" - and that branch is why SS3.2.2
+       exists at all (Decoder SWA Bounded Replay).
+
+       By Eq 1 the global entry is a function of h_{L/2} and the layer's
+       own weights and of nothing the pass supplies, so two passes of one
+       layer want the same entries and one store serves both. That is the
+       reference's own statement, not a measurement of this engine.
+       AsymLoop (arXiv:2610.28489) SS3.1 says the same for the same
+       source: "layer-specific Global KV caches, which are reused across
+       all K iterations".
+
+       The other branch is the one that would need a store per execution:
+       an entry derived from the layer's own h_l differs between passes.
+       This engine has no sliding-window branch (model.h's csa2 comment
+       lists it among the deliberate simplifications), so that case is
+       refused below rather than given a per-application ring it would
+       have no reader for. A ced_kv_target layer is on the global branch;
+       one outside it compresses its own s->xb.
+
+       A dense-KV layer is not refused here: its planes are numbered per
+       application below. */
+    {
+        int a, b;
+        for (a = 0; a < c->exec_len; a++) {
+            int l = c->app_layer[a], n = 0;
+            if (!m->layers[l].csa2_on) continue;
+            for (b = 0; b < c->exec_len; b++)
+                if (c->app_layer[b] == l) n++;
+            if (n > 1 && !lz_ced_kv_target(c, l)) {
+                if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_CFG_LOOP_KV,
+                                       l, n, c->exec_len);
+                lz_state_free(s);
+                return 1;
+            }
+        }
     }
 
     alloc_core_buffers(s, m, c, nt, &ok);
@@ -1264,6 +1349,8 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
 
     alloc_csa2_ring(s, m, c, seq_len, &ok);
 
+    alloc_ced_local(s, c, &ok);
+
     alloc_conv_tier(s, c, nt, &ok);
     /* s->ssm_slot starts at 0 from this function's own memset(s,0,...)
        above - explicit here only as documentation, matching mtp_pos's
@@ -1271,7 +1358,11 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
        actually has to set it back to 0 on every subsequent reuse. */
 
     s->cache_idx = (int *)xcalloc((size_t)c->n_layers, sizeof(int), &ok, &s->bytes_alloc);
-    s->dense_idx = (int *)xcalloc((size_t)c->n_layers, sizeof(int), &ok, &s->bytes_alloc);
+    /* Sized by exec_len, the application table's own length: the identity
+       schedule (exec_len == n_layers) allocates exactly what a
+       per-physical-layer array did, so a model that does not loop pays
+       nothing for the loop's mapping. */
+    s->app_dense_idx = (int *)xcalloc((size_t)c->exec_len, sizeof(int), &ok, &s->bytes_alloc);
 
     alloc_quant_scratch(s, m, c, nt, &ok);
     alloc_engram_scratch(s, m, c, nt, &ok);
@@ -1354,30 +1445,43 @@ int lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
        just carry a few unused rows, not a bug (forward.h's own
        csa2_comp_ring comment: sized for the class, not for which layers
        in it actually use this). The dense planes are a separate count
-       (dense_kv_layers, below) and carry no such slack: they are sized
-       for exactly the layers that own one. */
-    /* dense_idx is a SEPARATE numbering from cache_idx, and -1 for every
-       layer that owns no plane: linear layers (their recurrent state is
-       addressed by cache_idx too, off the same counter), aliased
-       REINDEX/REUSE layers, and csa2_on FULL layers. The dense planes are
-       sized for n_dense_kv, so a consumer that indexed them with
-       cache_idx would read another layer's rows. Only attn_impl and
-       mtp_attn_t1 read them, and neither is reached with a -1 layer.
+       (lz_n_dense_kv_apps, above) and carry no such slack: they are
+       sized for exactly the applications that own one. */
+    /* cache_idx is the class numbering the compressed rings are
+       addressed by. It is NOT the dense plane index: a csa2_on layer
+       claims (or aliases) a cache_idx but owns no plane, and a looping
+       tower's second pass owns a plane of its own. app_dense_idx, filled
+       below, is that numbering.
 
        Kept clear of the loop body on purpose: build/
        csa2_cache_idx_alias_gate.sh mutates this block as one contiguous
        piece of text, so a comment inside it would have to be retyped in
        that gate. */
     for (l = 0; l < c->n_layers; l++) {
-        s->dense_idx[l] = -1;
         if (c->layer_types[l] != LZ_LT_FULL) {
             s->cache_idx[l] = nl++;
         } else if (m->layers[l].csa2_mode != LZ_CSA2_FULL) {
             s->cache_idx[l] = s->cache_idx[c->csa2_source[l]];
         } else {
             s->cache_idx[l] = nf++;
-            if (layer_owns_dense_kv(m, l))
-                s->dense_idx[l] = nd++;
+        }
+    }
+    /* dense_slot is the analogue of app_slot on the KV side: the plane
+       the physical layer is using RIGHT NOW, set by the forward loop
+       before each application. -1 for a layer that owns no plane; such
+       a layer is served by forward_csa2/forward_kda/forward_ssm, none of
+       which reads it. Every application that owns a plane gets its own
+       index here, so a layer applied twice reads two disjoint row sets. */
+    for (l = 0; l < c->n_layers; l++) s->dense_slot[l] = -1;
+    /* The same for CED's local window slot (forward.h's own
+       csa2_local_kv comment): the ring is allocated per application by
+       alloc_ced_local, and a layer with no window keeps -1. */
+    for (l = 0; l < c->n_layers; l++) s->local_slot[l] = -1;
+    {
+        int a;
+        for (a = 0; a < c->exec_len; a++) {
+            int al = c->app_layer[a];
+            s->app_dense_idx[a] = layer_owns_dense_kv(m, al) ? nd++ : -1;
         }
     }
 

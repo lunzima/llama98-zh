@@ -256,12 +256,14 @@ void proj_i16(LZRunState *s, int may_int, int *wrote_int,
                          const float *x, const LZTensor *w,
                          int in_dim, int out_dim, int nt,
                          int target_e, int bound) {
+#if defined(LZ_TAP_OFF)
     if (may_int &&
         lz_matmul_xq_nt_i16(oi, s->xq, s->xqs, w, in_dim, out_dim, nt,
                             target_e, bound)) {
         *wrote_int = 1;
         return;
     }
+#endif /* LZ_TAP_OFF */
     *wrote_int = 0;
     lz_matmul_xq_nt(of, x, s->xq, s->xqs, w, in_dim, out_dim, nt);
 }
@@ -535,10 +537,18 @@ void forward_kda(const LZModel *m, LZRunState *s,
        carry an explanation that should not be separated from them. */
 #if LZ_CONV_FIXED
     if (s->conv_fixed && s->kda_q_i16 && s->kda_k_i16 && s->kda_v_i16) {
+#if defined(LZ_TAP_OFF)
         int okq = lz_matmul_xq_i16_ok(&L->kda_q_proj, hdim, nt);
         int okk = lz_matmul_xq_i16_ok(&L->kda_k_proj, hdim, nt);
         int okv = lz_matmul_xq_i16_ok(&L->kda_v_proj, hdim, nt);
         conv_int = okq && okk && okv;
+#else
+        /* The int exit stops writing s->kda_q/k/v, and a tap pointing at
+           those buffers would then read their PREVIOUS contents - a
+           plausible-looking wrong number, not an obvious zero (see
+           forward.h). A tap build keeps the float path the taps read. */
+        conv_int = 0;
+#endif /* LZ_TAP_OFF */
     }
 #if LZ_CONVO_I16 && LZ_CONV_SIG_I
     convo_i16 = s->conv_fixed && s->kda_qc_i16 && s->kda_kc_i16

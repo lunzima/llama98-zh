@@ -285,6 +285,20 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
     int rotary_dim = c->rotary_dim;
     float scale = 1.0f / (float)sqrt((double)hd);
 
+    /* CED's local window (model.h's own LZModelConfig.ced_local comment).
+       lw is 0 for every layer the rule does not name, and the whole
+       branch below is then skipped rather than run on a zero-width
+       window; the state allocator numbers its ring slots with the same
+       predicate, so a named layer always has one. */
+    int lw = lz_ced_local_target(c, layer) ? c->ced_local : 0;
+    float *loc_k = NULL, *loc_v = NULL;
+    if (lw > 0) {
+        size_t lbase = (size_t)s->local_slot[layer] * (size_t)lw * 2 *
+                       (size_t)hd;
+        loc_k = s->csa2_local_kv + lbase;
+        loc_v = loc_k + (size_t)lw * hd;
+    }
+
     /* Slabs are indexed by position modulo cm * ring_depth, not modulo
        cm: ring_depth slots are one bank, each bank holds cm raw
        positions, and bank (block % ring_depth) is where that block's
@@ -365,6 +379,56 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
         int n_vis = (pos + 1) / cm;
         int k_eff;
         int hh;
+        /* Window columns this query may see: positions pos-W+1 .. pos,
+           clamped at 0. The first W-1 queries see fewer, which is the
+           training side's leading-slot mask (csa2_window_idx's `ok`)
+           written as a bound instead of as a mask. The engine forwards
+           one sequence per call, so the `doc` term that side ANDs into
+           that mask has nothing to mask here - the compressed entries
+           carry no document mask on this side either. */
+        int nwin = lw > 0 ? (pos + 1 < lw ? pos + 1 : lw) : 0;
+
+        /* ---- 0. this APPLICATION's own window K/V, projected from
+           s->xb - the layer's own input, never kv_in, which is CED's
+           h_S and feeds the compressor instead. Recomputed every pass:
+           a looping tower's second pass projects its own window from its
+           own input (the loop-tower v2 supplement's KV-storage
+           section), and s->local_slot is that application's ring.
+
+           Both K and V are rotated at the ENTRY's own position, like the
+           compressed entries step 3 rotates. Step 5b un-rotates the
+           attended sum once at the query's position; a value that went
+           in unrotated would carry no rotation for that step to take
+           out.
+
+           Stored before step 1 runs, and read back from the ring in step
+           5 - the ring row IS this position's entry, so no second copy
+           of it is needed. csa2_c_j is the head_dim scratch here and is
+           overwritten by step 2 at the top of the next iteration; the
+           copy into the ring is what survives. */
+        if (lw > 0) {
+            float *kin = s->xb2 + (size_t)tk * hdim;
+            float *row = s->csa2_c_j;
+            int wrow = pos % lw;
+            if (c->use_subn)
+                lz_rmsnorm(kin, h,
+                           lz_t_f32(&L->attn_k_local_subn_norm, s->wscr),
+                           hdim, rms_eps);
+            lz_matmul_w(row, c->use_subn ? kin : h, &L->k_proj_local,
+                        hdim, hd, s->xq, s->xqs);
+            lz_rmsnorm(row, row, lz_t_f32(&L->k_norm_local, s->wscr),
+                       hd, rms_eps);
+            lz_rope(row, 1, hd, rotary_dim, pos, s->rope_cs);
+            memcpy(loc_k + (size_t)wrow * hd, row, (size_t)hd * sizeof(float));
+            if (c->use_subn)
+                lz_rmsnorm(kin, h,
+                           lz_t_f32(&L->attn_v_local_subn_norm, s->wscr),
+                           hdim, rms_eps);
+            lz_matmul_w(row, c->use_subn ? kin : h, &L->v_proj_local,
+                        hdim, hd, s->xq, s->xqs);
+            lz_rope(row, 1, hd, rotary_dim, pos, s->rope_cs);
+            memcpy(loc_v + (size_t)wrow * hd, row, (size_t)hd * sizeof(float));
+        }
 
         /* ---- 1. main query: q_proj/q_norm/RoPE, same as ordinary full
            attention (forward_attn.c's own attn_impl). Gated layout
@@ -742,17 +806,34 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
            position closes its own block in step 3 and then attends to
            at least that one.
 
+           With CED's window on, the column axis is the k_eff compressed
+           entries followed by this query's nwin window positions, and the
+           zero-output case is only the one with neither - which cannot
+           happen once the window is on, since the window always carries
+           the query's own position. That is the reference's shape too:
+           a query before its block closes attends to the window alone.
+
            Every mode runs this unchanged, reading tok_idx - for FULL/
            REINDEX this is what step 4 wrote in this same iteration;
            for REUSE it is whatever was already published there, which
            step 4's else-branch just read k_eff back out of (same
            pointer, same (ci, tk) slot - no mode branch needed here). */
-        if (k_eff > 0) {
+        if (k_eff + nwin > 0) {
+            /* Column axis: the k_eff selected compressed entries first,
+               then the nwin visible window positions in ascending order
+               - the training side's [compressed | window] concatenation
+               (engine/csa2.py's _csa2_attend_selected), one Q, one d_h,
+               one scaling, ONE softmax. Adding the two attended outputs
+               instead would be a different model.
+
+               The window keeps its own values (loc_v), unlike the
+               compressed half where Eq 19's entry is its own value. */
+            if (nwin > 0) lz_debug_csa2_local_slots += nwin;
             for (hh = 0; hh < nh; hh++) {
                 const float *qv = s->qh + (size_t)hh * hd;
                 float *outh = s->attn_out + (size_t)hh * hd;
                 float maxv, sum;
-                int kk, d;
+                int kk, d, ncol = k_eff + nwin;
                 for (kk = 0; kk < k_eff; kk++) {
                     /* Same entry is read again in the weighted sum below;
                        at f32 this is the ring's own address both times and
@@ -766,11 +847,23 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
                     for (d = 0; d < hd; d++) dot += qv[d] * ent[d];
                     s->csa2_attn_probs[kk] = dot * scale;
                 }
+                if (nwin > 0) {
+                    int w;
+                    /* Window order is the training side's: position
+                       ascending, the query's own position last. */
+                    for (w = 0; w < nwin; w++) {
+                        int p = pos - (nwin - 1) + w;
+                        const float *kv = loc_k + (size_t)(p % lw) * hd;
+                        float dot = 0.0f;
+                        for (d = 0; d < hd; d++) dot += qv[d] * kv[d];
+                        s->csa2_attn_probs[k_eff + w] = dot * scale;
+                    }
+                }
                 maxv = s->csa2_attn_probs[0];
-                for (kk = 1; kk < k_eff; kk++)
+                for (kk = 1; kk < ncol; kk++)
                     if (s->csa2_attn_probs[kk] > maxv) maxv = s->csa2_attn_probs[kk];
                 sum = 0.0f;
-                for (kk = 0; kk < k_eff; kk++) {
+                for (kk = 0; kk < ncol; kk++) {
                     s->csa2_attn_probs[kk] = lz_exp(s->csa2_attn_probs[kk] - maxv);
                     sum += s->csa2_attn_probs[kk];
                 }
@@ -782,12 +875,21 @@ void forward_csa2(const LZModel *m, LZRunState *s, const LZLayer *L,
                     float p = s->csa2_attn_probs[kk] / sum;
                     for (d = 0; d < hd; d++) outh[d] += p * ent[d];
                 }
-                /* Per head: k_eff scoring dots of hd mul+add, k_eff - 1
+                if (nwin > 0) {
+                    int w;
+                    for (w = 0; w < nwin; w++) {
+                        int p = pos - (nwin - 1) + w;
+                        const float *vv = loc_v + (size_t)(p % lw) * hd;
+                        float pv = s->csa2_attn_probs[k_eff + w] / sum;
+                        for (d = 0; d < hd; d++) outh[d] += pv * vv[d];
+                    }
+                }
+                /* Per head: ncol scoring dots of hd mul+add, ncol - 1
                    compares for the max, one divide per probability, and
-                   the weighted sum's k_eff * hd mul+add. lz_exp bills
+                   the weighted sum's ncol * hd mul+add. lz_exp bills
                    itself at its own site. */
-                LZ_FCX(LZ_FC_CSA2_CORE, 2 * k_eff * hd, 2 * k_eff * hd,
-                       k_eff, 0, k_eff > 0 ? k_eff - 1 : 0);
+                LZ_FCX(LZ_FC_CSA2_CORE, 2 * ncol * hd, 2 * ncol * hd,
+                       ncol, 0, ncol > 0 ? ncol - 1 : 0);
             }
         } else {
             memset(s->attn_out, 0, (size_t)qd * sizeof(float));

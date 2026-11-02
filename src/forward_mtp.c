@@ -20,11 +20,11 @@
 #include "fwht.h"       /* lz_embed_row_back / lz_embed_rot_in (spec 3.17) */
 
 /* layer sentinel for the MTP block's own attention: it is not one of
-   m->layers[], so it has no entry in s->cache_idx or s->dense_idx. Its
-   reserved DENSE KV slot is the one past every layer that owns a plane
-   (index n_dense_kv - see lz_state_alloc's "+1 layer slot" comment); the
-   sentinel just tells forward_attn to use that slot directly instead of
-   indexing dense_idx[layer]. */
+   m->layers[], so it has no entry in s->cache_idx or s->app_dense_idx.
+   Its reserved DENSE KV slot is the one past every application that owns
+   a plane (index n_dense_kv - see lz_state_alloc's "+1 layer slot"
+   comment); the sentinel just tells forward_attn to use that slot
+   directly instead of reading dense_slot[layer]. */
 #define LZ_MTP_CACHE_LAYER (-1)
 
 /* --------------------------------------------------------- MTP draft step */

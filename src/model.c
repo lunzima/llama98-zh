@@ -247,6 +247,15 @@ static int csa2_key_idx(const char *key) {
 static int st_path_from_index(const char *dir, char *out, int outlen,
                               char *errbuf, int errlen);
 
+/* Defined beside lz_ced_local_target, which it calls; declared here
+   because lz_load_config runs above both. */
+static int ced_local_check(const LZModelConfig *c, char *errbuf, int errlen);
+
+/* Defined beside ced_local_check (the same load-time-rule shape, the
+   same two loaders); declared here for the same reason. */
+static int loop_mix_from_check(const LZModelConfig *c, char *errbuf,
+                               int errlen);
+
 /* The one place that decides which file holds the weights: model.safetensors
    when it is there, otherwise the single shard a
    model.safetensors.index.json names (st_path_from_index has that case).
@@ -578,23 +587,28 @@ int lz_load_config(LZModelConfig *c, const char *path,
         } else {
             int start = lz_json_get_int(&j, tc, "loop_block_start", -1);
             int size = lz_json_get_int(&j, tc, "loop_block_size", -1);
+            int coda = lz_json_get_int(&j, tc, "loop_coda_size", 0);
             int p;
             /* The split IS the block's start: with start < ced_split the
                encoder's last layers would run twice before the decoder
                ever did, and with start > ced_split the decoder's first
-               layers would run once. The block must also reach the last
-               layer, and the whole table must fit LZ_MAX_LAYERS. */
-            if (start < 0 || start != c->ced_split || size <= 0 ||
-                start + size != c->n_layers ||
+               layers would run once. The block and the coda together are
+               the tail; a coda of 0 keeps the older shape where the block
+               runs to the last layer. */
+            if (coda < 0 || start < 0 || start != c->ced_split || size <= 0 ||
+                start + size + coda != c->n_layers ||
                 c->n_layers + (repeats - 1) * size > LZ_MAX_LAYERS) {
                 qerr(errbuf, errlen, LZ_ERR_CFG_LOOP_CONFIG, repeats);
                 lz_json_free(&j);
                 return 1;
             }
-            /* The encoder's own applications first (pass 0), then the
+            /* The prelude's own applications first (pass 0), then the
                block once per pass, numbered from 1 - the same numbering
                engine/loop_schedule.py produces, which the training
-               forward reads to decide where H_E is captured. */
+               forward reads to decide where H_E is captured. The coda
+               runs once after the loop and carries repeats+1, which is
+               not a pass number: a consumer reading the id to tell which
+               pass it is must not mistake it for a third one. */
             for (i = 0; i < start; i++, a++) {
                 c->app_layer[a] = i;
                 c->app_loop[a] = 0;
@@ -604,6 +618,10 @@ int lz_load_config(LZModelConfig *c, const char *path,
                     c->app_layer[a] = start + k;
                     c->app_loop[a] = p + 1;
                 }
+            }
+            for (i = start + size; i < c->n_layers; i++, a++) {
+                c->app_layer[a] = i;
+                c->app_loop[a] = repeats + 1;
             }
             c->exec_len = a;
         }
@@ -630,6 +648,40 @@ int lz_load_config(LZModelConfig *c, const char *path,
             return 1;
         }
     }
+
+    /* ced_local (model.h's own field comment): THE VALUE IS THE WINDOW,
+       so it is read here with the other CED fields. Its layer rule is
+       checked at the end of this function, once csa2_on[]/csa2_mode[]
+       have been parsed - lz_ced_local_target reads both. */
+    c->ced_local      = lz_json_get_int(&j, tc, "ced_local", 0);
+
+    /* loop_input_mix (model.h's own field comment). A string, not a
+       bool: the training side's knob has more values than this engine
+       implements, and a mode it cannot name is a model it would run
+       without the injection - a different model with no error anywhere.
+       The VALUE is a weight (loop_input_mix_a) and is read by
+       model_walk; this word only says to expect it. */
+    {
+        const char *mk = lz_json_get_str(&j, tc, "loop_input_mix", "off");
+        if (strcmp(mk, "off") == 0) {
+            c->loop_input_mix = 0;
+        } else if (strcmp(mk, "scalar") == 0) {
+            c->loop_input_mix = 1;
+        } else {
+            qerr(errbuf, errlen, LZ_ERR_CFG_LOOP_INPUT_MIX, mk);
+            lz_json_free(&j);
+            return 1;
+        }
+    }
+
+    /* loop_input_mix_from (model.h's own field comment). Default 2 =
+       skip the block's first pass, which is every artifact's behaviour
+       before this field existed - a config.json without the key and a
+       v8 bin (which has no word for it) describe the same model. The
+       range rule runs through loop_mix_from_check at this function's
+       tail, beside ced_local_check: one copy for both loaders. */
+    c->loop_input_mix_from = lz_json_get_int(&j, tc,
+                                             "loop_input_mix_from", 2);
 
     /* S1 attn_kv_share (model.h's own field comment). Read as a BOOL,
        not with lz_json_get_int: the key is a JSON true/false in every
@@ -1344,6 +1396,18 @@ int lz_load_config(LZModelConfig *c, const char *path,
     /* After lin_value_dim, which the derivations read. */
     if (check_attn_gate(c, errbuf, errlen) != 0) return 1;
     if (resolve_hadamard(c, errbuf, errlen) != 0) return 1;
+
+    /* ced_local's shape and its layer rule (model.h's own field comment;
+       ced_local_check has the argument for checking rather than
+       trusting the config). Runs here because lz_ced_local_target reads
+       csa2_on[]/csa2_mode[], parsed above. */
+    if (ced_local_check(c, errbuf, errlen) != 0) return 1;
+    /* loop_input_mix_from's range (model.h's own field comment;
+       loop_mix_from_check has the argument for checking it against the
+       pass count rather than trusting the config). Runs here because
+       the application table - which the pass count is read out of - is
+       built above. */
+    if (loop_mix_from_check(c, errbuf, errlen) != 0) return 1;
     return 0;
 }
 
@@ -1671,11 +1735,120 @@ int lz_ced_kv_target(const LZModelConfig *c, int li) {
     return c->ced_kv && c->ced_split > 0 && c->ced_split < c->n_layers && li >= c->ced_split;
 }
 
+/* model.h's own comment on this function has the contract: the decoder
+   region's CSA2 FULL-mode attention layers, i.e. the ones whose entire
+   attention forward is forward_csa2.c's and whose K/V input ced_kv's
+   substitution already redirected. Derived from lz_ced_kv_target rather
+   than repeating the "li >= ced_split" test, so the global and local
+   halves of Eq (1) cannot come to disagree about where the region
+   starts. load refuses ced_local without ced_kv, and refuses a decoder
+   full-attention layer this function does not name, which is what makes
+   "wired" and "named by the config" the same set. */
+int lz_ced_local_target(const LZModelConfig *c, int li) {
+    return c->ced_local > 0 && lz_ced_kv_target(c, li) &&
+           c->csa2_on[li] && c->csa2_mode[li] == LZ_CSA2_FULL;
+}
+
+/* ced_local's whole load-time rule, one copy for both loaders: the
+   window size is bounded by seq_len, it needs the global branch to sit
+   beside, and every decoder-region full-attention layer must be one
+   lz_ced_local_target names.
+
+   seq_len == 0 is "not stated" in config.json and carries no bound to
+   apply - the same reading csa2_compress_m_layers' bound above takes. On
+   the bin path the caller runs this AFTER csa2_compress_m's own bound, so
+   seq_len is already >= 1 there and the bound is the literal
+   0 <= ced_local <= seq_len.
+
+   That last clause is why this is a check and not a comment: the
+   checkpoint carries the window tensors positionally, so a REINDEX/
+   REUSE-mode CSA2 layer or a layer with no compressor at all would have
+   its weights walked into a slot forward_csa2.c never reads - a knob
+   reported on and moving nothing. errbuf/errlen may be NULL for a
+   caller that only wants the verdict. */
+static int ced_local_check(const LZModelConfig *c, char *errbuf, int errlen) {
+    int i, named = 0;
+    if (c->ced_local < 0 || (c->seq_len > 0 && c->ced_local > c->seq_len)) {
+        if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE,
+                               "ced_local");
+        return 1;
+    }
+    if (c->ced_local == 0) return 0;
+    if (!c->ced_kv) {
+        if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_CFG_CED_LOCAL,
+                               c->ced_local, c->ced_split);
+        return 1;
+    }
+    for (i = 0; i < c->n_layers; i++) {
+        if (lz_ced_local_target(c, i)) { named++; continue; }
+        /* Below the split, or not full attention: the rule's domain is
+           "full attention at or past ced_split", so those layers are
+           outside it and own no window either. */
+        if (c->ced_split <= 0 || c->ced_split >= c->n_layers) continue;
+        if (i < c->ced_split || c->layer_types[i] != LZ_LT_FULL) continue;
+        if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_CFG_CED_LOCAL_LAYER,
+                               i, c->ced_split);
+        return 1;
+    }
+    if (!named) {
+        if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_CFG_CED_LOCAL,
+                               c->ced_local, c->ced_split);
+        return 1;
+    }
+    return 0;
+}
+
 int lz_n_linear_apps(const LZModelConfig *c) {
     int a, n = 0;
     for (a = 0; a < c->exec_len; a++)
         if (c->layer_types[c->app_layer[a]] != LZ_LT_FULL) n++;
     return n;
+}
+
+/* The block's pass count, read back out of the application table the
+   forward walks: the split layer runs once per pass with app_loop
+   1..repeats, so the largest pass id on it is the count; an identity
+   schedule carries no pass id above 0 and counts as 1.
+
+   NOT a second derivation of loop_repeats - loop_schedule.py and
+   lz_load_config's own build own that. This is a projection of the
+   RESULTING table, which is what forward.c's injection predicate
+   actually reads, so the range rule below judges the quantity the
+   consumption will see even if a table and a config key ever
+   disagreed. */
+static int lz_loop_pass_count(const LZModelConfig *c) {
+    int a, reps = 1;
+    for (a = 0; a < c->exec_len; a++)
+        if (c->app_layer[a] == c->ced_split && c->app_loop[a] > reps)
+            reps = c->app_loop[a];
+    return reps;
+}
+
+/* loop_input_mix_from's whole load-time rule, one copy for both
+   loaders (the shape ced_local_check takes): with the mix ON, the
+   start pass must name a pass the schedule runs - 1-based, up to the
+   block's pass count. 0 would fire at the encoder exit (loop_id 0),
+   a value past the last pass can never fire and the knob would be
+   reported on while moving nothing.
+
+   The mix being OFF skips the rule entirely: the field is dead config
+   then (forward.c's predicate is gated on emb_hold, which only exists
+   for a mixing model), and every pre-knob artifact carries the default
+   2 with repeats possibly 1 - checking it would refuse them all.
+
+   errbuf/errlen may be NULL for a caller that only wants the verdict. */
+static int loop_mix_from_check(const LZModelConfig *c, char *errbuf,
+                               int errlen) {
+    int reps;
+    if (!c->loop_input_mix) return 0;
+    reps = lz_loop_pass_count(c);
+    if (c->loop_input_mix_from < 1 || c->loop_input_mix_from > reps) {
+        if (errbuf) lz_err_fmt(errbuf, errlen,
+                               LZ_ERR_CFG_LOOP_INPUT_MIX_FROM,
+                               c->loop_input_mix_from, reps);
+        return 1;
+    }
+    return 0;
 }
 
 /* model.h's own comment on this function has the contract. Mirrors
@@ -2106,6 +2279,47 @@ static int model_walk(LZModel *m, LZVisit visit, void *ctx,
                                errbuf, errlen) != 0) return 1;
         }
 
+        /* CED's local branch (LZModelConfig's own ced_local comment).
+           Not a LAYER_SPECS row: LZPresentFn sees only the config, and
+           this family is indexed by LAYER - the same reason the CSA2 and
+           MoE blocks below are not in that table either.
+
+           The position fixes this family's place in the .bin stream:
+           right after this layer's LAYER_SPECS run (SubLN norms
+           included) and ahead of the per-expert triplet, which is
+           tools/export_q8.py's tensor_order. A .bin carries no names, so
+           an exporter and a walker that disagree here read each other's
+           bytes as weights. */
+        if (lz_ced_local_target(c, li)) {
+            static const struct { const char *suf; size_t field;
+                                  int dims[3]; int subn; }
+            CED_LOCAL_SPECS[] = {
+                { "self_attn.k_proj_local.weight", LOFF(k_proj_local),
+                  { DK_HEAD_DIM, DK_HIDDEN, DK_END }, 0 },
+                { "self_attn.v_proj_local.weight", LOFF(v_proj_local),
+                  { DK_HEAD_DIM, DK_HIDDEN, DK_END }, 0 },
+                { "self_attn.k_norm_local.weight", LOFF(k_norm_local),
+                  { DK_HEAD_DIM, DK_END, DK_END }, 0 },
+                { "self_attn.k_proj_local.norm.weight",
+                  LOFF(attn_k_local_subn_norm),
+                  { DK_HIDDEN, DK_END, DK_END }, 1 },
+                { "self_attn.v_proj_local.norm.weight",
+                  LOFF(attn_v_local_subn_norm),
+                  { DK_HIDDEN, DK_END, DK_END }, 1 }
+            };
+            int k;
+            for (k = 0; k < (int)(sizeof(CED_LOCAL_SPECS) /
+                                  sizeof(CED_LOCAL_SPECS[0])); k++) {
+                LZTensor *field;
+                if (CED_LOCAL_SPECS[k].subn && !c->use_subn) continue;
+                snprintf(name, sizeof(name), "%slayers.%d.%s",
+                         m->prefix, li, CED_LOCAL_SPECS[k].suf);
+                field = (LZTensor *)((char *)L + CED_LOCAL_SPECS[k].field);
+                if (model_walk_one(m, name, CED_LOCAL_SPECS[k].dims, field,
+                                   visit, ctx, errbuf, errlen) != 0) return 1;
+            }
+        }
+
         /* Per-expert triplet. Not in LAYER_SPECS above: the count
            (config.num_experts) is a runtime value, not something a
            fixed offsetof table can index. L->moe_expert_w1/w2/w3 are
@@ -2480,6 +2694,25 @@ static int model_walk(LZModel *m, LZVisit visit, void *ctx,
                                ENGRAM_NORM_DIMS,
                                &eg->norm, visit, ctx,
                                errbuf, errlen)) return 1;
+    }
+    /* The scalar input injection's value, walked last so a model without
+       one costs nothing (tools/export_q8.py's tensor_order appends it in
+       the same place). Prefix rule matches bin_key's: under the detected
+       text prefix like every other name here except MTP's and
+       engram_memory's, which sit at the top level.
+
+       NO lz_st_find GUARD, unlike the engram above. The engram's tensors
+       have a default alloc_engram already filled in; this one has none,
+       so a checkpoint that says the mix is on and does not carry the
+       scalar would leave w reading whatever the buffer held - a
+       different model with no error anywhere. Missing is an error, which
+       is what model_walk_one already raises. */
+    if (c->loop_input_mix) {
+        static const int LOOP_MIX_DIMS[3] = { DK_ONE, DK_END, DK_END };
+        snprintf(name, sizeof(name), "%sloop_input_mix_a", m->prefix);
+        if (model_walk_one(m, name, LOOP_MIX_DIMS,
+                           &m->loop_input_mix_a, visit, ctx,
+                           errbuf, errlen)) return 1;
     }
     return 0;
 }
@@ -2865,33 +3098,19 @@ done:
     return rc;
 }
 
-int lz_open(LZModel *m, const char *dir, char *errbuf, int errlen) {
+/* The safetensors loader's open half: config.json, the tensor table, and
+   the claimed/leak check. Reads no weight data (lz_read_weights does that
+   later), which is what lets lz_open also use it as a structural probe of
+   a checkpoint whose weights come from somewhere else.
+
+   Requires a zeroed model; on failure the model is freed. */
+static int lz_open_st(LZModel *m, const char *dir, int meta_only,
+                      char *errbuf, int errlen) {
     char path[512];
     LZBindCtx bc;
     int i;
 
-    memset(m, 0, sizeof(*m));
     memset(&bc, 0, sizeof(bc));
-    if (errbuf && errlen > 0) errbuf[0] = '\0';
-
-    /* Both loaders below convert from the file's little-endian order
-       using LZ_BIG_ENDIAN, so a build that guessed its host's byte order
-       wrong reads every weight reversed and reports nothing. Checked here,
-       at the single door both paths go through, and before any file is
-       touched - the answer does not depend on the model. */
-    if (!lz_endian_ok()) {
-        qerr(errbuf, errlen, LZ_ERR_ENDIAN_MISMATCH);
-        return 1;
-    }
-
-    /* mixed-precision bin preferred: if model.bin (or the compressed
-       sibling model.bin.lz4, the stunt path) exists, load everything at
-       once. Resolved rather than fopen'd directly (src/lfn.h): this probe
-       decides between the bin and safetensors loaders, so a wrong "no"
-       sends the whole load down the other path. lz_open_bin prefers the
-       .lz4 file when both are present. */
-    if (lz_lfn_exists(dir, "model.bin") || lz_lfn_exists(dir, "model.bin.lz4"))
-        return lz_open_bin(m, dir, errbuf, errlen);
 
     if (lz_lfn_path(dir, "config.json", path, (int)sizeof path,
                     errbuf, errlen) != 0) return 1;
@@ -2902,7 +3121,8 @@ int lz_open(LZModel *m, const char *dir, char *errbuf, int errlen) {
        resolver is st_resolve's, shared with the architecture probe inside
        lz_load_config, so the file probed and the file loaded are one. */
     if (st_resolve(dir, path, (int)sizeof path, errbuf, errlen) != 0) return 1;
-    if (lz_st_open(&m->st, path, errbuf, errlen) != 0) return 1;
+    if ((meta_only ? lz_st_open_meta(&m->st, path, errbuf, errlen)
+                   : lz_st_open(&m->st, path, errbuf, errlen)) != 0) return 1;
 
     if (detect_prefix(m, errbuf, errlen) != 0) goto fail;
 
@@ -2978,6 +3198,75 @@ int lz_open(LZModel *m, const char *dir, char *errbuf, int errlen) {
 fail:
     lz_free(m);
     return 1;
+}
+
+/* A model.bin beside a model.safetensors makes the bin loader the one that
+   reads, and that loader is positional: it keeps no names, so a tensor the
+   engine does not know cannot even be seen, while the file that carries
+   the name is never opened. A checkpoint directory is therefore rejected
+   when EITHER weight file describes a model this engine cannot fully
+   claim. Without this, a directory whose safetensors carries an MTP head
+   (or any module missing a spec) loads from its bin with a clean
+   "Structure OK" - the silent acceptance the leak check exists to
+   prevent, reached by shadowing instead of by prefix scope.
+
+   The probe runs with config.json, the description that belongs to the
+   safetensors file, because it asks whether THAT file's names are all
+   understood; the bin header describes the bin. Its model is discarded
+   here and the weights used are still the bin's. A directory with no
+   config.json has no named description to audit and the bin is
+   self-contained, so it is left alone.
+
+   meta_only, because this reads names and shapes and never a weight: a
+   companion that carries its header and no data is a legitimate way to
+   describe shapes, and the byte-count check is about the reads this
+   path does not make. */
+static int audit_st_companion(const char *dir, char *errbuf, int errlen) {
+    /* The probe is a whole model plus a full path: 5,024 bytes of stack
+       frame against the 4,096 the stack audit allows on the target's
+       default stack. Loading is one-shot, so file-scope storage is safe,
+       and the memset gives every call a clean model either way. */
+    static LZModel probe;
+    static char path[512];
+    int rc;
+
+    if (!lz_lfn_exists(dir, "model.safetensors") &&
+        !lz_lfn_exists(dir, "model.safetensors.index.json")) return 0;
+    if (lz_lfn_path(dir, "config.json", path, (int)sizeof path, NULL, 0) != 0)
+        return 0;
+    memset(&probe, 0, sizeof(probe));
+    rc = lz_open_st(&probe, dir, 1, errbuf, errlen);
+    if (rc == 0) lz_free(&probe);
+    return rc;
+}
+
+int lz_open(LZModel *m, const char *dir, char *errbuf, int errlen) {
+    memset(m, 0, sizeof(*m));
+    if (errbuf && errlen > 0) errbuf[0] = '\0';
+
+    /* Both loaders below convert from the file's little-endian order
+       using LZ_BIG_ENDIAN, so a build that guessed its host's byte order
+       wrong reads every weight reversed and reports nothing. Checked here,
+       at the single door both paths go through, and before any file is
+       touched - the answer does not depend on the model. */
+    if (!lz_endian_ok()) {
+        qerr(errbuf, errlen, LZ_ERR_ENDIAN_MISMATCH);
+        return 1;
+    }
+
+    /* mixed-precision bin preferred: if model.bin (or the compressed
+       sibling model.bin.lz4, the stunt path) exists, load everything at
+       once. Resolved rather than fopen'd directly (src/lfn.h): this probe
+       decides between the bin and safetensors loaders, so a wrong "no"
+       sends the whole load down the other path. lz_open_bin prefers the
+       .lz4 file when both are present. A safetensors beside the bin is
+       still audited first (audit_st_companion). */
+    if (lz_lfn_exists(dir, "model.bin") || lz_lfn_exists(dir, "model.bin.lz4")) {
+        if (audit_st_companion(dir, errbuf, errlen) != 0) return 1;
+        return lz_open_bin(m, dir, errbuf, errlen);
+    }
+
+    return lz_open_st(m, dir, 0, errbuf, errlen);
 }
 
 /* --------------------------------------------------------------- reading */
@@ -3211,6 +3500,13 @@ static int read_f16_plane(LZModel *m, float *dst, uint32_t count) {
     return 0;
 }
 
+/* Layout-2's per-group scale decode is compat.c's lz_scale_u8_decode -
+   base * (raw/255) with the quotient and product each rounded to float.
+   The bare expression is not portable across the two toolchains (see
+   that function's comment for the two codegen differences and where
+   they were measured); nothing in this file may inline the arithmetic
+   back. */
+
 static int read_scale_plane(LZModel *m, float *dst, uint32_t ng, int layout,
                             uint32_t rows) {
     size_t nb;
@@ -3248,8 +3544,8 @@ static int read_scale_plane(LZModel *m, float *dst, uint32_t ng, int layout,
                 return 1;
             }
             for (j = 0; j < k; j++)
-                dst[i + j] = base[(i + j) / gpr] *
-                             ((float)raw[j] / 255.0f);
+                dst[i + j] = lz_scale_u8_decode(base[(i + j) / gpr],
+                                                (float)raw[j]);
             i += k;
         }
         free(base);
@@ -3671,6 +3967,15 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
                    mtp_n_draft, embed_hadamard, embed_signs_seed,
                    scale_layout
 
+       v7 appends one word, the scalar input injection's mode
+       (loop_input_mix). v8 appends one more, ced_local. v9 appends
+       loop_input_mix_from, the pass that mode starts mixing at - all
+       three CONDITIONALLY, on the same "the version follows the
+       content" rule: a file without those mechanisms is completely
+       described by the version below it, and a v8 file - which has no
+       word for the start pass - is the complete description of a model
+       that mixes from pass 2.
+
        v4 is the published generation - github.com/lunzima/kunkun98-models
        ships a MODEL/model.bin of exactly this shape - so it is FROZEN
        here rather than retired with the rest of the ladder. It carries
@@ -3681,7 +3986,7 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
        tails they carry, and a shape nothing writes any more is a shape
        nothing exercises: reading it would be a compatibility branch no
        gate can reach. */
-    if (ver < 4 || ver > 6) {
+    if (ver < 4 || ver > 9) {
         qerr(errbuf, errlen, LZ_ERR_BIN_VERSION, ver);
         goto fail;
     }
@@ -4104,6 +4409,52 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
                 goto fail;
             }
         }
+        /* v7 adds one word: the scalar input injection's MODE (model.h's
+           loop_input_mix comment). Conditional on its own version rather
+           than appended to the v6 run because a v6 file is the complete
+           description of a model that does not mix - reading it
+           unconditionally would put this reader four bytes into the
+           tensor stream, where the scale_layout range check above still
+           passes (the word before is usually 0). */
+        if (ver >= 7) {
+            RD(&c->loop_input_mix, 4);
+            if (c->loop_input_mix < 0 || c->loop_input_mix > 1) {
+                qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE,
+                     "loop_input_mix");
+                goto fail;
+            }
+        }
+        /* v8 adds one word: ced_local, the local window's size (model.h's
+           own field comment). Same conditional shape as v7 above, and for
+           the same reason: a v7 file completely describes a model whose
+           attention has one KV branch, and reading a word it does not
+           carry would put this reader four bytes into the tensor stream -
+           where every word is a plausible in-range int and nothing else
+           in this header would notice.
+
+           Shape and layer rule come from ced_local_check, lz_load_config's
+           tail's own function; a .bin's tensors are positional, so a
+           layer the rule does not name is exactly the case where the
+           window weights are read into the walk and never attended to.
+           The call sits BELOW, after csa2_compress_m's bound: that is the
+           check that establishes seq_len >= 1 for any bin that gets this
+           far, which is what makes ced_local <= seq_len here a bound on a
+           positive number rather than on a "not stated" zero. */
+        if (ver >= 8) {
+            RD(&c->ced_local, 4);
+        }
+        /* v9 adds one word: the pass the scalar injection starts mixing
+           at (model.h's loop_input_mix_from comment). Same conditional
+           shape as v7/v8, and for the same reason: a v8 file completely
+           describes a model that mixes from pass 2 - the default set
+           here - so a word it does not carry must not be read. The
+           default is assigned rather than left at the struct's memset
+           zero because 0 is out of the legal range and would refuse
+           every pre-v9 mixing file the moment the check below runs. */
+        c->loop_input_mix_from = 2;
+        if (ver >= 9) {
+            RD(&c->loop_input_mix_from, 4);
+        }
         /* CSA2 geometry and CED replay. All six are config.json fields
            with no other route into this loader, so before these RD()
            calls the bin path ran the whole CSA2 mechanism on zeros: the
@@ -4169,6 +4520,18 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
             qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE, "csa2_compress_m");
             goto fail;
         }
+        /* ced_local's bound and layer rule (model.h's own field comment),
+           after the bound above has established seq_len >= 1: the window
+           cannot be wider than the context it windows, and 0 is the legal
+           "off". Same function as the config.json path's tail. */
+        if (ced_local_check(c, errbuf, errlen) != 0) goto fail;
+        /* loop_input_mix_from's range (model.h's own field comment;
+           same function as the config.json path's tail). The v6 group's
+           application table - which the pass count is read out of - is
+           already in by here (ver >= 7, which is the only way the mix
+           can be on, implies ver >= 6), and for older files the mix is
+           off, so the check short-circuits before touching the table. */
+        if (loop_mix_from_check(c, errbuf, errlen) != 0) goto fail;
         if (c->csa2_topk < 1) {
             qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE, "csa2_topk");
             goto fail;

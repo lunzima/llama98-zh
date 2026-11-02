@@ -120,6 +120,8 @@ typedef enum {
     LZ_ERR_CFG_CSA2_IDX_K,     /* indexer K reads the compressed latent (head_dim), but tensor %s projects from hidden (in_features %" LZ_PRI64 "d) - hidden-state input space checkpoint. The template here is spelled as SOURCE (lz_int.h's LZ_PRI64), not as its expansion: this comment is what a reader copies a format string out of, and copying an expanded %lld would put back the bare modifier err.c's own table rule forbids. */
     LZ_ERR_CFG_CSA2_IDX_ROTARY, /* csa2_on layer %d (FULL): rotary_dim %d exceeds csa2_indexer_head_dim %d, and the rotation writes base[i + rotary_dim/2] inside the indexer key's row */
     LZ_ERR_CFG_CED_KV,         /* ced_kv is not one of off/proj, got %s */
+    LZ_ERR_CFG_CED_LOCAL,      /* ced_local %d is on with ced_kv off or with no decoder-region CSA2 full-mode layer to carry it (ced_split %d) */
+    LZ_ERR_CFG_CED_LOCAL_LAYER, /* layer %d is at or past ced_split %d and full attention, but not a CSA2 full-mode layer, so its ced_local window weights would load and never be read */
     LZ_ERR_CFG_UNSUPPORTED_ARCH, /* checkpoint is neither GDN (Qwen3.5) nor KDA (KunMoe) shape */
     LZ_ERR_CFG_ATTN_GATE,      /* attn_output_gate must be true: the forward reads the gate half of every attention head unconditionally */
     LZ_ERR_CFG_ROPE_KEY,       /* unsupported rope_parameters key: %s */
@@ -289,16 +291,31 @@ typedef enum {
     LZ_ERR_CFG_ENGRAM_KEYS,    /* config.json names an engram key table the model directory lacks */
     LZ_ERR_ENGRAM_KEYS_FILE,   /* the engram key table could not be opened or read */
     LZ_ERR_ENGRAM_KEYS_FORMAT, /* not a sorted 1-D int64 .npy (wrong dtype, shape, order, or unsorted) */
-    /* exec_len != n_layers is a looping tower (engine/loop_schedule.py).
-       The application table is read and validated, but the layer loop
-       still runs n_layers applications, so accepting one would run the
-       wrong number of passes and look healthy. */
-    LZ_ERR_CFG_LOOP_KV,        /* loop tower with dense KV planes: needs per-application cache */
-    /* The safetensors path has no header to read a table out of; the
-       table is derived in Python at export time and the C side is not
-       allowed a second derivation (spec section 3.10), so a config.json
-       that asks for a looped tower is refused there too. */
-    LZ_ERR_CFG_LOOP_CONFIG,    /* config.json loop_repeats=%d: no application table on the safetensors path */
+    /* A CSA2 layer OUTSIDE CED's global branch, run more than once,
+       compresses each pass's own hidden state, so the two passes would
+       lay different entries into the single ring they share (cache_idx
+       is per PHYSICAL layer). A ced_kv_target layer does not take this
+       code: report SS2.2 Eq 1 makes its entry a function of h_{L/2} and
+       the layer's own weights, nothing the pass supplies. Dense-KV
+       planes take neither this code nor a guard: they are numbered per
+       application (forward.h's app_dense_idx). */
+    LZ_ERR_CFG_LOOP_KV,        /* repeated CSA2 layer compresses per pass */
+    /* The loop fields cannot describe a block: loop_repeats < 1, a block
+       that does not start at ced_split, or a block + coda that does not
+       reach the last layer. Raised by model.c's derivation and by the
+       exporter's loop_schedule, which must agree. */
+    LZ_ERR_CFG_LOOP_CONFIG,    /* config.json loop_* fields are inconsistent */
+    /* loop_input_mix names a mode this loader does not implement. The
+       refusal is the posture ced_kv takes on "reuse": a mode the loader
+       cannot name is a model it would run without the injection, which
+       is a different model with no error anywhere. */
+    LZ_ERR_CFG_LOOP_INPUT_MIX, /* loop_input_mix names an unknown mode */
+    /* loop_input_mix_from names a pass the schedule does not run: the
+       mix is on and the start pass is < 1 or past the block's last pass
+       (the pass count read back out of the application table). Raised by
+       the same shared check on both loaders; the exporter refuses the
+       same shapes before writing. */
+    LZ_ERR_CFG_LOOP_INPUT_MIX_FROM, /* mix start pass not in 1..repeats */
 
     /* Generic failure. Two jobs, and it must stay LAST before
        LZ_ERR_COUNT for the second one:

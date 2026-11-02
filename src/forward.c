@@ -199,6 +199,15 @@ lz_i64 lz_debug_attn_skip = 0;
    speedup nothing performed. */
 lz_i64 lz_debug_ced_skipped = 0;
 
+/* Positive control for CED's local window: how many window entries
+   entered forward_csa2.c's key axis, one count per (token, visible
+   window slot). A window that is projected and then never scored reads
+   identically to one that is not there at all from the logits alone;
+   this number separates the two (build/ced_local_gate.sh asserts it
+   equals the analytic slot count, which is derived from the window
+   geometry rather than from this code's own rule). */
+lz_i64 lz_debug_csa2_local_slots = 0;
+
 /* Positive control for CED bounded replay's reset (lz_ced_replay_reset,
    below), same shape as lz_debug_ced_skipped above and for the same
    reason: a reset that fires zero times leaves the state untouched,
@@ -574,7 +583,7 @@ float lz_prof_us[LZ_PROF_N];
 
 void lz_state_free(LZRunState *s) {
     if (!s) return;
-    xfree(s->x); xfree(s->xb); xfree(s->xb2); xfree(s->kvshare_x); xfree(s->ced_hs); xfree(s->hb); xfree(s->hb2);
+    xfree(s->x); xfree(s->xb); xfree(s->xb2); xfree(s->kvshare_x); xfree(s->ced_hs); xfree(s->emb_hold); xfree(s->hb); xfree(s->hb2);
     xfree(s->logits);
     xfree(s->qg); xfree(s->qh); xfree(s->att); xfree(s->attn_out);
     xfree(s->attn_acc); xfree(s->attn_ss);
@@ -619,6 +628,7 @@ void lz_state_free(LZRunState *s) {
     xfree(s->csa2_c_j_idx);
     xfree(s->csa2_qidx); xfree(s->csa2_widx); xfree(s->csa2_cq_idx);
     xfree(s->csa2_attn_probs);
+    xfree(s->csa2_local_kv); xfree(s->app_local_idx);
     xfree(s->conv_state_q); xfree(s->conv_mw);
     xfree(s->kda_q_i16); xfree(s->kda_k_i16); xfree(s->kda_v_i16);
     xfree(s->kda_qc_i16); xfree(s->kda_kc_i16); xfree(s->kda_vc_i16);
@@ -637,7 +647,7 @@ void lz_state_free(LZRunState *s) {
     xfree(s->rope_cs);
     xfree(s->rope_cs_inv);
     xfree(s->cache_idx);
-    xfree(s->dense_idx);
+    xfree(s->app_dense_idx);
     memset(s, 0, sizeof(*s));
 }
 
@@ -743,6 +753,15 @@ void lz_state_reset(LZRunState *s, const LZModel *m) {
         memset(s->csa2_comp_ring, 0, nring * rrow);
         memset(s->csa2_idx_comp_ring, 0, nring * rrow_idx);
     }
+    /* CED's local window ring - guarded on the pointer for the reason
+       the block above gives, and zeroed whole for the same reason: a
+       reset means no position came before, so a slot the next
+       sequence's first W-1 queries mask must read as the zero it was
+       allocated as rather than as the previous turn's rows. */
+    if (s->csa2_local_kv)
+        memset(s->csa2_local_kv, 0,
+               (size_t)s->n_local_apps * (size_t)c->ced_local * 2 *
+               (size_t)c->head_dim * sizeof(float));
     /* The ring's own "which slot is confirmed" index - see forward.h's
        s->ssm_slot comment. Every recurrent index resets to 0 here,
        same as mtp_pos right below. */
@@ -1286,6 +1305,13 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
         }
     }
 
+    /* The scalar input injection (model.h's loop_input_mix comment) holds
+       the token embedding HERE, after the engram hook: that is the tensor
+       the training side calls inputs_embeds, and holding the pre-engram
+       rows would blend a different quantity under a model that has one. */
+    if (s->emb_hold)
+        memcpy(s->emb_hold, s->x, (size_t)nt * dim * sizeof(float));
+
     /* Ring base for this CHUNK (the SSM/conv rollback ring - forward.h's
        s->ssm_slot). Read ONCE here, before the layer loop,
        and passed down explicitly rather than having forward_ssm/
@@ -1306,9 +1332,11 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
        table, so a looping tower runs the decoder block twice on the same
        weights. A non-looping model has exec_len == n_layers and
        app_layer[a] == a, which is the identity. The recurrent-state
-       slot is the APPLICATION's (spec 3.2), since the second pass
-       restarts at zero; app_state_idx is -1 for a full-attention
-       application. */
+       slot and the dense-KV plane are both the APPLICATION's (spec 3.2):
+       the second pass restarts at zero and appends its own rows.
+       app_state_idx is -1 for a full-attention application;
+       app_dense_idx is -1 for an application that owns no dense plane
+       (linear, or csa2_on, whose compressed rings live elsewhere). */
     for (a = 0; a < c->exec_len; a++) {
         int l = c->app_layer[a];
         const LZLayer *L = &m->layers[l];
@@ -1316,6 +1344,72 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
         LZ_PROF_DECL(_tf);
 
         if (s->app_state_idx[a] >= 0) s->app_slot[l] = s->app_state_idx[a];
+        if (s->app_dense_idx[a] >= 0) s->dense_slot[l] = s->app_dense_idx[a];
+        /* CED's local window is the third per-application index, and the
+           same rule as the two above: the pass owns the slot. NULL when
+           the knob is off - forward_state.c allocates it only for a model
+           that has the branch, which is what keeps this state's byte
+           count identical to the tree without it. */
+        if (s->app_local_idx && s->app_local_idx[a] >= 0)
+            s->local_slot[l] = s->app_local_idx[a];
+
+        /* H_E is captured at the SPLIT in APPLICATION terms, and BEFORE
+           the scalar injection below: the training side captures it at
+           the encoder layer's exit (CedTextModel.forward, `li == S - 1
+           and loop_id == 0`), which is the block's input before any
+           mixing. Capturing after the mix would record the blended
+           stream whenever the first pass is itself mixed
+           (loop_input_mix_from == 1), and every decoder layer would
+           then read a boundary the training side never computed. The
+           decoder's second pass revisits physical layer ced_split, so
+           the application index - not the physical layer - is what
+           keeps that pass from overwriting H_E with its own input.
+           lz_ced_kv_target(c, c->ced_split) doubles as "is CED active
+           at all" (model.h's own comment on that function). */
+        if (a == c->ced_split && lz_ced_kv_target(c, l)) {
+            memcpy(s->ced_hs, s->x, (size_t)nt * dim * sizeof(float));
+        }
+
+        /* THE SCALAR INPUT INJECTION (model.h's loop_input_mix comment).
+           z = w*e + (1-w)*h at the entry of every block pass from
+           loop_input_mix_from on. Two conditions, and they exclude
+           different things: app_layer[a] == ced_split is the block's
+           ENTRY, which is what keeps the prelude and the coda out;
+           app_loop[a] >= loop_input_mix_from keeps the passes before
+           the configured start out - default 2 keeps the first pass,
+           whose input is the encoder's output and is already a
+           representation (the training side's CedTextModel.forward
+           makes the same distinction with the same config key).
+
+           e comes from s->emb_hold - the post-engram rows, which is what
+           the training side calls inputs_embeds - and is not re-derived
+           here. w is read once per application rather than cached at
+           load: one BF16 widen and one lz_sigmoid against nt*dim
+           multiply-adds.
+
+           THE PREDICATE IS THE TRAINING SIDE'S. CedTextModel.forward
+           writes it as `li == S and loop_input_mix_from <= loop_id <=
+           repeats`; the upper bound is redundant there only because the
+           block is non-empty (engine/loop_schedule.py refuses a
+           zero-size block, and so does lz_load_config), which is what
+           makes an application on the split layer a block pass - so
+           here the lower bound alone names the same set. Keep the two
+           in step: a geometry that lets this diverge injects on one
+           side only. */
+        if (s->emb_hold && l == c->ced_split &&
+            c->app_loop[a] >= c->loop_input_mix_from) {
+            float mix_a, w, nw;
+            int t, k;
+            lz_t_row_f32(&m->loop_input_mix_a, 0, 1, &mix_a);
+            w = lz_sigmoid(mix_a);
+            nw = 1.0f - w;
+            for (t = 0; t < nt; t++) {
+                const float *e = s->emb_hold + (size_t)t * dim;
+                float *h = s->x + (size_t)t * dim;
+                for (k = 0; k < dim; k++)
+                    h[k] = w * e[k] + nw * h[k];
+            }
+        }
 
         /* docs/x87-gcc-reg-stack-leak.md: this is the checkpoint that
            first showed the x87 stack going dirty and staying dirty
@@ -1353,30 +1447,18 @@ static float *forward_chunk(const LZModel *m, LZRunState *s,
                            c->rms_norm_eps);
         }
         LZ_TAP("an", l, s->xb, dim);
-        /* CED "proj" (model.h's ced_kv comment). Captured HERE, at
-           layer ced_split's own attention entry: GR's span ends at
-           ced_split (model.h's gated_residual comment), so this is
-           already the collapsed [B,S,D] stream Eq(1) expects, and
-           under use_subn s->xb is an unnormalized copy of s->x here -
-           the raw "exit hidden" every later decoder layer's own
-           k/v SubLN norm then applies to independently. One copy per
-           chunk; a no-op capture-then-read for layer ced_split itself
-           (kv_in ends up equal to its own s->xb), which is correct -
-           Eq(1)'s substitution only changes anything for the decoder
-           layers AFTER the one whose own input already is h_S.
-           lz_ced_kv_target(c, c->ced_split) doubles as "is CED active
-           at all", since it is li >= ced_split evaluated at li ==
-           ced_split - true whenever ced_kv is on and ced_split
-           describes a real boundary (model.h's own comment on that
-           function). */
-        /* H_E is captured at the SPLIT in APPLICATION terms: the
-           decoder's second pass revisits physical layer ced_split, and
-           capturing there would overwrite H_E with the second pass's
-           input - the first pass's decoder layers would then read the
-           wrong tensor with no error. */
-        if (a == c->ced_split && lz_ced_kv_target(c, l)) {
-            memcpy(s->ced_hs, s->xb, (size_t)nt * dim * sizeof(float));
-        }
+        /* CED "proj" (model.h's ced_kv comment). The boundary is
+           captured BEFORE the scalar injection (the block above this
+           layer's entry), so by here s->ced_hs already holds the
+           encoder's exit - the raw "exit hidden" every later decoder
+           layer's own k/v SubLN norm then applies to independently.
+           GR's span ends at ced_split (model.h's gated_residual
+           comment), so the stream at the capture point is already the
+           collapsed [B,S,D] Eq(1) expects. A no-op capture-then-read
+           for layer ced_split itself (kv_in ends up equal to its own
+           s->xb), which is correct - Eq(1)'s substitution only changes
+           anything for the decoder layers AFTER the one whose own
+           input already is h_S. */
         kv_in = NULL;
         if (lz_ced_kv_target(c, l) && L->type == LZ_LT_FULL) {
             /* CED wins outright in the decoder region. No arbitration

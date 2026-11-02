@@ -2035,10 +2035,13 @@ int main(int argc, char **argv) {
         int csa2 = 0, li, dense;
         for (li = 0; li < cfg->n_layers; li++)
             if (cfg->csa2_on[li]) csa2++;
-        /* Dense planes are the full-attention layers that are NOT
-           CSA2: n_dense_kv lives on the run state, which is not
-           built yet here, and it is derived from exactly this. */
-        dense = cfg->n_full_layers - csa2;
+        /* Dense planes are counted by the engine's own producer
+           (forward_state.c's lz_n_dense_kv_apps): one per dense-KV
+           APPLICATION, so a looping tower reports the planes it will
+           actually allocate. Recomputing "n_full_layers minus csa2
+           layers" here would count layers, and on a looping tower that
+           is the wrong number by every repeated dense layer. */
+        dense = lz_n_dense_kv_apps(&m);
         if (dense > 0) {
             /* q8 both sides, rotation OFF. This is the arm with no
                measured quality cost. --kv q4 halves the bytes for

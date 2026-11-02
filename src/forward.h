@@ -367,6 +367,11 @@ void lz_dbg_layer_hash(const char *tag, int li, const void *p, size_t nf);
    attn helpers in forward_attn.c. */
 extern lz_i64 lz_debug_attn_skip;
 extern lz_i64 lz_debug_ced_skipped;
+/* Window entries that entered forward_csa2.c's key axis - one count per
+   (token, visible window slot), not per query head. build/ced_local_probe.c
+   reads it to answer "is the window really in the softmax" with a number
+   instead of with "the output moved". */
+extern lz_i64 lz_debug_csa2_local_slots;
 /* --dump-prefill's target and its own count, so a write that failed
    (unwritable path) is visible as dumps == 0 rather than as a gate that
    compares two files nobody wrote. */
@@ -595,14 +600,24 @@ typedef struct {
        region layer reads it within the SAME call that produced it.
        NULL when ced_kv is off. */
     float *ced_hs;
+    /* The scalar input injection (model.h's loop_input_mix comment): the
+       looked-up token embedding for the current chunk, held for the
+       blend at the entry of each repeated pass (nt_cap x hidden,
+       token-major like ced_hs). Captured once per forward_chunk right
+       after the embed step - after the engram hook too, because that is
+       what the training side calls inputs_embeds - and read at most
+       exec_len-1 times within the SAME call. NULL when the mode is off,
+       so a model that does not mix pays nothing. */
+    float *emb_hold;
     /* KV cache Q8: kq8/vq8 hold the rotated k/v (group 32), dequantized at score time.
        (K group 16 measured no gain.)
-       Depth is n_dense_kv PLUS ONE when m->mtp != NULL: the MTP
-       block's own full_attention layer gets the last slot (index
-       n_dense_kv), reusing this same cache rather than a bespoke
-       buffer - see the MTP scratch block below. n_dense_kv, not
-       n_full_layers: a csa2_on layer owns no plane (see dense_idx's own
-       comment). */
+       Depth is n_dense_kv - one plane per dense-KV APPLICATION - PLUS
+       ONE when m->mtp != NULL: the MTP block's own full_attention layer
+       gets the last slot (index n_dense_kv), reusing this same cache
+       rather than a bespoke buffer - see the MTP scratch block below.
+       n_dense_kv, not n_layers or n_full_layers: a csa2_on layer owns no
+       plane, and a looping tower's repeated layer needs one plane per
+       pass (see app_dense_idx's own comment). */
     int8_t *kq8;                /* (n_dense [+1 if m->mtp], seq, attn_kv_dim) */
     int8_t *vq8;
     float  *ksq;                /* (n_dense, seq, attn_kv_dim/32) */
@@ -1351,26 +1366,31 @@ typedef struct {
 
     int *cache_idx;             /* layer index -> index within its class.
                                    For a FULL layer this is the index that
-                                   addresses its KEY-VALUE STORAGE, which
-                                   is the dense planes below for every
-                                   layer forward_attn serves and the
-                                   compressed rings for a csa2_on one -
+                                   addresses its KEY-VALUE STORAGE: the
+                                   compressed rings for a csa2_on layer -
                                    model.c's csa2_slot_owner defines the
-                                   same numbering from the config side. */
-    int *dense_idx;             /* layer index -> index within the DENSE
-                                   KV planes (kq8/vq8/kf32/k4), or -1 for
-                                   a layer that owns none: a linear layer,
-                                   an aliased REINDEX/REUSE layer, or a
-                                   csa2_on FULL layer (forward_csa2.c
-                                   stores compressed blocks for it and
-                                   never touches a plane). Sized for
-                                   n_dense_kv, not n_full_layers - a
-                                   consumer that used cache_idx here
-                                   would read another layer's rows. */
-    int  n_dense_kv;            /* number of layers that own a dense
-                                   plane; the planes are allocated for
-                                   this (+1 when an MTP head is bound,
-                                   see forward_attn's sentinel) */
+                                   same numbering from the config side.
+                                   It is NOT the dense plane index any
+                                   more; those are per application, see
+                                   app_dense_idx below. */
+    /* THE DENSE KV PLANES ARE PER APPLICATION, the same way the recurrent
+       state slots above are: a looping tower's second pass cannot append
+       its rows where the first pass's are. app_dense_idx[a] is
+       application a's plane, or -1 when its layer owns none (a linear
+       layer, or a csa2_on FULL layer, whose compressed blocks live in
+       cache_idx-addressed rings instead). dense_slot[l] is the plane the
+       physical layer l is using RIGHT NOW - the forward loop sets it
+       before each application, and it equals the layer's own ordinal for
+       a schedule that does not loop. Sized for n_dense_kv, not
+       n_layers: a consumer that used cache_idx here would read another
+       layer's rows. */
+    int *app_dense_idx;         /* application -> dense plane, or -1;
+                                   c->exec_len entries */
+    int  dense_slot[LZ_MAX_LAYERS]; /* physical layer -> current plane */
+    int  n_dense_kv;            /* number of dense-KV APPLICATIONS, i.e.
+                                   planes; allocated for this (+1 when an
+                                   MTP head is bound, see forward_attn's
+                                   sentinel) */
     lz_i64 bytes_alloc;
 
     /* Bumped by lz_state_alloc and lz_state_reset. A checkpoint records
@@ -1393,13 +1413,14 @@ typedef struct {
        precision tier" convention, see e.g. kf32's own comment).
 
        THAT IS NOT THE INDEX OF THE KV PLANES ANY MORE. The planes above
-       are indexed by s->dense_idx[], sized n_dense_kv, because a csa2_on
-       layer owns no per-position K/V and takes no plane. The two agree on
-       every layer that is not csa2_on and diverge on every layer that is,
-       so a reader that indexes kq8 with cache_idx reads another layer's
-       rows. All NULL when no layer has csa2_on (allocated conditionally,
-       checked in forward_csa2.c the same way kf32 is checked in
-       forward_attn.c).
+       are indexed by s->app_dense_idx[] (per application), sized
+       n_dense_kv, because a csa2_on layer owns no per-position K/V and
+       takes no plane, and a looping tower's second pass owns its own.
+       The two agree only where every application is its own layer and
+       no csa2 layer sits below, so a reader that indexes kq8 with
+       cache_idx reads another layer's rows. All NULL when no layer has
+       csa2_on (allocated conditionally, checked in forward_csa2.c the
+       same way kf32 is checked in forward_attn.c).
 
        Sized against s->seq_len (the FULL configured context), not
        s->kv_slots (which reflects the UNRELATED --attn-sink/--attn-
@@ -1538,7 +1559,33 @@ typedef struct {
     float *csa2_qidx;                /* (csa2_indexer_heads * csa2_indexer_head_dim) */
     float *csa2_widx;                /* (csa2_indexer_heads) */
     float *csa2_cq_idx;              /* (csa2_indexer_q_lora_rank) */
-    float *csa2_attn_probs;          /* (topk) */
+    /* (topk + ced_local): step 5's column axis is the k_eff selected
+       compressed entries followed by up to W window entries, and the
+       softmax runs over all of them at once (model.h's own ced_local
+       comment). */
+    float *csa2_attn_probs;
+
+    /* CED's local window (model.h's LZModelConfig.ced_local comment).
+       ONE RING PER APPLICATION, for the reason the recurrent state slots
+       are per application: each pass projects its window from its own
+       input, so the second pass of a looping tower must not inherit the
+       first's entries (the loop-tower v2 supplement's KV-storage
+       section). csa2_local_kv holds
+       n_local_apps slots, each 2 * W * head_dim floats - the W rotated
+       keys of the application's most recent positions, then their W
+       rotated values. A position p lands in row p % W of both halves:
+       the window is exactly the last W positions, so the ring and the
+       slot are the same size.
+
+       app_local_idx[a] is application a's slot, or -1 for an application
+       whose layer carries no window; local_slot[l] is the slot physical
+       layer l is using RIGHT NOW, set by forward.c's application loop
+       before the call, and -1 otherwise. Both NULL/-1 everywhere on a
+       model with ced_local == 0, which allocates nothing here. */
+    float *csa2_local_kv;
+    int    n_local_apps;
+    int   *app_local_idx;
+    int    local_slot[LZ_MAX_LAYERS];
 
     /* Where lz_forward writes what it just did, or NULL for "do not
        bother". It rides on the run state rather than on lz_forward's
@@ -1835,6 +1882,11 @@ int  lz_ckpt_restore(const LZStateCkpt *ck, LZRunState *s, const LZModel *m,
    choice. */
 int  lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
                         int spec_k_max, char *errbuf, int errlen);
+/* How many dense KV planes this model allocates: one per dense-KV
+   APPLICATION (a csa2_on layer owns none, and a layer the schedule runs
+   twice owns two). The single producer of that count - lz_state_alloc
+   sizes the planes with it and the CLI's --kv auto report prints it. */
+int  lz_n_dense_kv_apps(const LZModel *m);
 void lz_state_free(LZRunState *s);
 /* The aligned-free half of forward_state.c's xcalloc/xfree pair. Shared:
    lz_state_free, above, frees the same buffers. */

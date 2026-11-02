@@ -58,30 +58,24 @@ command -v python3 >/dev/null 2>&1 || {
 # its heredoc, so there is exactly one place that has to agree with
 # forward_state.c's actual text, not two.
 NEW_BLOCK='    for (l = 0; l < c->n_layers; l++) {
-        s->dense_idx[l] = -1;
         if (c->layer_types[l] != LZ_LT_FULL) {
             s->cache_idx[l] = nl++;
         } else if (m->layers[l].csa2_mode != LZ_CSA2_FULL) {
             s->cache_idx[l] = s->cache_idx[c->csa2_source[l]];
         } else {
             s->cache_idx[l] = nf++;
-            if (layer_owns_dense_kv(m, l))
-                s->dense_idx[l] = nd++;
         }
     }'
-# The mutation is the ALIASING revert and nothing else: the loop keeps the
-# dense-plane numbering (dense_idx/nd) lz_state_alloc now carries, and
-# loses only the REINDEX/REUSE branch, so every FULL layer takes a fresh
-# nf++ again. Keeping the two axes apart is what lets the probe's
-# expectations below stay a statement about aliasing.
+# The mutation is the ALIASING revert and nothing else: the dense-plane
+# numbering is a separate application loop now, outside this block, so
+# the mutation loses only the REINDEX/REUSE branch and every FULL layer
+# takes a fresh nf++ again. Keeping the two axes apart is what lets the
+# probe's expectations below stay a statement about aliasing.
 OLD_BLOCK='    for (l = 0; l < c->n_layers; l++) {
-        s->dense_idx[l] = -1;
         if (c->layer_types[l] != LZ_LT_FULL) {
             s->cache_idx[l] = nl++;
         } else {
             s->cache_idx[l] = nf++;
-            if (layer_owns_dense_kv(m, l))
-                s->dense_idx[l] = nd++;
         }
     }'
 export NEW_BLOCK OLD_BLOCK
@@ -129,7 +123,14 @@ fi
 # comment): lz_state_alloc's helpers reach ops_quant.c/ops_norm.c/
 # ops_gdn.c/fwht.c, whose dispatch code references those symbols
 # unconditionally regardless of which kernel tier is selected.
-ENGX="err compat lfn json safetensors model ops ops_kernel ops_rope ops_moe ops_epi ops_quant ops_sched ops_matmul ops_t2_arm ops_arm ops_t2_scalar ops_norm ops_gdn ops_conv1d fwht forward forward_attn forward_moe forward_ssm forward_kda forward_engram forward_csa2 forward_mtp forward_rope forward_ckpt forward_state sampler generate lz_mathf lz_bf16 lz4d tokenizer unicode chat gbk cpucheck"
+# The engine list comes from the Makefile's own $(ENG): a hand-kept copy
+# of it here went stale the day the engram TUs landed (undefined
+# lz_keys_load at link time), and nothing else in this gate would have
+# noticed.
+ENGX=$(make -s print-ENG) || {
+    echo "csa2_cache_idx_alias_gate: FAIL - make cannot print \$(ENG)"
+    exit 1
+}
 ENGX_MMX="ops_mmx ops_mmx_sse ops_sse2"
 ENGX_AVX2="ops_avx2"
 

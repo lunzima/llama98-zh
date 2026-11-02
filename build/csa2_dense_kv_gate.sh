@@ -31,8 +31,10 @@
 #                 plane budgets (q8 keeps a scale per 32 elements, q4 one
 #                 per kv head, f32 none), so a single q8 number would not
 #                 tell a correct removal from one that deleted the wrong
-#                 plane in the other two. The dense_idx array this tree
-#                 adds cancels here - M1 carries it too.
+#                 plane in the other two. The application->plane array
+#                 this tree adds cancels here - M1 carries it too, and
+#                 on a model that does not loop it is the same length as
+#                 the per-layer array it replaced.
 #   control       a model with no csa2 layer: M1 and this tree agree
 #                 byte for byte and logit for logit, so the change is
 #                 scoped to the models that have one.
@@ -53,10 +55,16 @@
 #
 #   csa2_dense_kv_gate.sh [csa2-model] [control-model]
 #
+# The csa2 model is a NON-LOOPING one on purpose: lz_state_alloc refuses
+# a csa2 layer the application table applies twice (LZ_ERR_CFG_LOOP_KV,
+# its compressed rings being cache_idx-addressed, i.e. per physical
+# layer), so a looping tower whose block carries csa2 never reaches the
+# plane accounting this gate measures.
+#
 # Exit: 0 pass, 1 fail, 2 skip (no python3, no runnable model).
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-MODEL=${1:-E:/LLM/models/kunkun98}
+MODEL=${1:-E:/LLM/models/kunkun-ce-enhance10}
 CONTROL=${2:-E:/LLM/models/kmr20}
 W=$(mktemp -d)
 FAILED=0

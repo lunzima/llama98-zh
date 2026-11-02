@@ -215,6 +215,11 @@ typedef struct {
    caller provides scratch with enough capacity). */
 float *lz_t_f32(const LZTensor *t, float *scratch);
 
+/* Drop every cached f32 view. Call on model unload: the tensors the
+   cache keys on belong to the model, so keeping the table across a
+   load/unload pair would hand out views of freed weights. */
+void lz_t_cache_reset(void);
+
 /* Get row `row` (dim elements) as f32 into out. Used for embedding
    lookups.
 
@@ -432,6 +437,32 @@ typedef struct {
        "reuse" and gets "off" would run and produce confidently wrong
        numbers with no error. */
     int ced_kv;
+
+    /* ced_local: CED's sliding-window local branch, beside ced_kv's
+       global one. THE VALUE IS THE WINDOW SIZE W in tokens; 0 (the
+       default, and the only value a bin written before v8 carries) is
+       off and reproduces a model that never set the key.
+
+       Scope is the decoder region's CSA2 FULL-mode layers
+       (lz_ced_local_target below is the one rule). Query t reads
+       [t-W+1, t] from this APPLICATION's own K/V - projected from
+       s->xb, never from the kv_in the compressor reads - and those
+       entries are concatenated AFTER the selected compressed ones in
+       one softmax with one scaling (report Sec2.3.1; AsymLoop Eq 3 is
+       the same shape with a full-length local set). The indexer never
+       selects among them: they are always visible, and the training
+       side's KL target sees the compressed columns renormalised.
+
+       Per application, not per layer: each pass of a looping tower
+       projects its own window, which is what makes the second pass
+       attend to something the first did not (the loop-tower v2
+       supplement's KV-storage section).
+
+       Requires ced_kv (the window sits beside the global pair, and a
+       config with no global pair has nothing for it to sit beside) and
+       is refused on any layer lz_ced_local_target does not name - both
+       at load, not by silently running without the branch. */
+    int ced_local;
 
     /* S1, attn_kv_share (DeepSeek-V4.1 report SS2.3.1's "Reuse" mode).
        config.json "attn_kv_share" (a JSON true/false) and the v10
@@ -768,6 +799,41 @@ typedef struct {
     int app_layer[LZ_MAX_LAYERS];       /* physical layer per application */
     int app_loop[LZ_MAX_LAYERS];        /* pass index per application */
 
+    /* THE SCALAR INPUT INJECTION (Closing the Loop, arXiv:2610.00673
+       appendix F). At the entry of every block pass after the first, the
+       residual stream is replaced by w*emb + (1-w)*h where emb is the
+       looked-up token embedding and w = sigmoid(a) for one shared
+       learned scalar a, carried as the tensor loop_input_mix_a.
+
+       loop_input_mix is the MODE: 0 off (every model before this
+       field), 1 scalar. The value is a weight and lives in the tensor
+       stream, the same split attn_sink / attn_sink_init follows; this
+       word is what tells the loaders to expect that tensor at all.
+
+       Consumed in ONE place: forward.c's application loop, gated on
+       app_layer[a] == ced_split and app_loop[a] >= loop_input_mix_from.
+       The block's FIRST pass is not mixed when the start pass is 2 (its
+       input is the encoder's output, already a representation) and
+       neither is the prelude or the coda; a start pass of 1 mixes every
+       pass including the first, which is what all eight public
+       implementations do (spec section 5). Which reading is right is
+       unsettled - Closing the Loop's step 0 input is the embedding
+       itself, but its model has no prelude - so the start pass is a
+       config key and the default keeps this engine's historical
+       behaviour. */
+    int loop_input_mix;                 /* 0 off, 1 scalar */
+
+    /* First pass the scalar injection mixes (loop_input_mix's own
+       comment has the two readings). 1-based pass number: 1 is the
+       block's first pass, loop_repeats is its last. Default 2 = the
+       second pass, which is this tree's pre-knob behaviour
+       (app_loop[a] > 1). Range-checked on both loaders against the
+       pass count read back out of the application table
+       (LZ_ERR_CFG_LOOP_INPUT_MIX_FROM); the exporter refuses the same
+       shapes before writing, and a v8 file - which has no word for it
+       - is completely described by the default. */
+    int loop_input_mix_from;            /* first mixed pass; 2 = skip the first */
+
     /* ROTATED VOCABULARY (engine/bitlinear.py's ternary_embedding /
        ternary_head). embed_hadamard is the block width of R = H*S
        applied to each looked-up embedding row (inverse: H then the
@@ -908,6 +974,29 @@ typedef struct {
                                          pick FULL/REINDEX/REUSE's three
                                          distinct behaviors */
 
+    /* CED's local branch (LZModelConfig's own ced_local comment has the
+       mechanism). Present iff lz_ced_local_target names this layer, and
+       only then does model_walk expect them:
+         k_proj_local, v_proj_local   (head_dim, hidden) each - the
+                                      window K/V. ONE head, not
+                                      n_kv_heads: the compressed entries
+                                      they sit beside are a single
+                                      head_dim-wide latent every query
+                                      head reads, and the reference's
+                                      window K/V has that same width
+                                      (.prof/dsv41_ref/model.py's own
+                                      kv_norm projection feeding the
+                                      same sparse_attn as the
+                                      compressor's output)
+         k_norm_local                 (head_dim) - RMSNorm on the local
+                                      keys, after the projection and
+                                      before the rotation
+       The window rows are rotated at their OWN positions, values
+       included: forward_csa2.c un-rotates the attended sum once at the
+       query's position, and an unrotated value mixed into that sum
+       cannot be undone. */
+    LZTensor k_proj_local, v_proj_local, k_norm_local;
+
     /* SubLN (use_subn=1 only): full attention's per-projection INPUT
        RMSNorms. Distinct from q_norm/k_norm above, which are Qwen3.5's
        per-head QK norms over head_dim and are present at every use_subn
@@ -917,6 +1006,12 @@ typedef struct {
     LZTensor attn_k_subn_norm;       /* (hidden) f32 - k_proj input */
     LZTensor attn_v_subn_norm;       /* (hidden) f32 - v_proj input */
     LZTensor attn_o_subn_norm;       /* (attn_q_dim) f32 - o_proj input */
+    /* CED's local projections carry their own input norms for the same
+       reason: they read s->xb, the residual, and the training side's
+       wrapper class mirrors whatever k_proj/v_proj are. Present iff
+       use_subn and the layer carries the local branch. */
+    LZTensor attn_k_local_subn_norm; /* (hidden) f32 - k_proj_local input */
+    LZTensor attn_v_local_subn_norm; /* (hidden) f32 - v_proj_local input */
 
     /* Learned per-head attention sink (LZModelConfig's own
        attn_sink_learned comment has the mechanism and the training-side
@@ -1144,6 +1239,10 @@ typedef struct {
 
     LZTensor embed_tokens;          /* (vocab, hidden) Q8; doubles as lm_head when tied */
     LZTensor final_norm;            /* (hidden) f32 */
+    /* The scalar input injection's value, one element (see
+       config.loop_input_mix). Absent - and never visited by model_walk -
+       when the mode is 0. Read once at load into config-derived w. */
+    LZTensor loop_input_mix_a;      /* (1) bf16 */
     LZLayer *layers;
 
     /* Multi-token-prediction head, or NULL when config.mtp_n_layers is 0
@@ -1261,6 +1360,19 @@ int lz_kv_share_target(const LZModelConfig *c, int li);
    forward.c's `li == c->ced_split` capture test can reuse this same
    function rather than repeating the "is CED active" condition. */
 int lz_ced_kv_target(const LZModelConfig *c, int li);
+
+/* ced_local's layer rule, and the ONE place it is written: which layers
+   carry CED's sliding window. Named layers are the decoder region's
+   CSA2 FULL-mode attention layers - the same region ced_kv's engine-side
+   arm serves, and the only layers whose whole attention forward is
+   forward_csa2.c's (a layer with no compressor of its own has no global
+   branch to put a window beside, and one below ced_split already
+   projects its K/V from its own input). Derived from lz_ced_kv_target
+   rather than restating the li >= ced_split test, so the two branches of
+   Eq (1) cannot come to disagree about where the decoder region starts;
+   load refuses ced_local without ced_kv, which is what makes the two
+   predicates agree on every config that loads. */
+int lz_ced_local_target(const LZModelConfig *c, int li);
 
 /* Number of applications of a linear-attention layer (GDN or KDA) in the
    execution schedule. Recurrent state is per APPLICATION, not per physical
