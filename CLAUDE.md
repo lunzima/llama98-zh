@@ -18,11 +18,12 @@ The PUBLIC release tree is `src/`, `common/`, `gui/`, `assets/`, `contrib/`,
 else. Verification is what the `Verify` section below describes: modes of the
 shipped binaries.
 
-**Release rules, decided 2026-08-30:** the internal dev/test/docs
-infrastructure is not part of the public subset - it never reaches `main` or
-`release-0.1.x`. It does ride `internal` to `github.com/lunzima/llama98-zh`:
+**Release rules, decided 2026-08-30:** `docs/` and `tools/` never leave this
+machine - they are off `internal` before it is pushed, so a clone of the remote
+carries neither. The rest rides `internal` to `github.com/lunzima/llama98-zh`
+without ever reaching `main` or `release-0.1.x`:
 
-1. **`docs/` is not in the public subset.** The architecture audits, pipeline
+1. **`docs/` is not pushed.** The architecture audits, pipeline
    breakpoints and design notes are internal working documents.
 2. **`build/` and `.prof/` are not in the public subset.** The gates, CI
    scripts, probes and censuses they hold are the engine's test suite, and the
@@ -60,7 +61,7 @@ infrastructure is not part of the public subset - it never reaches `main` or
    reach into a tree it has no business binding. Anything else brought over
    from that repository arrives under the same terms and needs the same line.
 
-6. **`tools/` is not in the public subset.** It holds the bank's producer and
+6. **`tools/` is not pushed.** It holds the bank's producer and
    the two DLS readers it needs - `ksb_build.py`, `dls_survey.py`,
    `dls_play.py` - and is the `make_lz4.py` argument taken to its end: this
    tree ships `common/ksb.c`, and shipping the reader does not make its
@@ -97,7 +98,7 @@ the list, not a reason to be kept out of the public subset.
 
 | branch | tracks | pushed |
 |---|---|---|
-| `internal` | everything - `build/`, `docs/`, `.prof/`, `gates.mk`, `CLAUDE.md` | yes |
+| `internal` | everything except `docs/` and `tools/` - `build/`, `.prof/`, `gates.mk`, `CLAUDE.md` | yes |
 | `main`, `release-0.1.x` | the public subset enumerated above | yes |
 
 Work on `internal`. A release is made by committing the public paths onto

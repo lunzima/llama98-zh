@@ -291,9 +291,14 @@ Thumbs.db
 ehthumbs.db
 desktop.ini
 
-# Workflow scratch (design notes, plans). This project keeps its
-# reasoning at the declaration it belongs to, not in a parallel tree.
-docs/superpowers/
+# The design notes and the bank's producer. docs/ never leaves this
+# machine (CLAUDE.md release rule 1) and what it would hold is reasoning
+# at the declaration it belongs to, not a parallel tree. tools/ is rule 6:
+# this tree ships the reader, common/ksb.c, not its writer. Both stay off
+# `internal`, so a clone of the remote carries neither - and ignoring them
+# here is what keeps a later `git add -A` from putting them back.
+/docs/
+/tools/
 
 # Numeric probes (.prof/), moved here from the deprecated training-side
 # tree by user decision; the directory's own README classifies them.
