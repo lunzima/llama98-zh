@@ -9,17 +9,14 @@
  * caller loaded; nothing is copied and nothing is allocated. The caller owns
  * the bytes and must keep them alive as long as the bank is open.
  *
- * ONE INSTRUMENT AT A TIME. A KAC-coded sample is not readable where it
- * lies - it has to be decoded - and decoding the whole bank costs 632 KiB on
- * the ten-instrument bank this ships with. But the front end forces a single
- * GM program on every channel bar the drum kit (common/smf.c), and a program
- * resolves to exactly one instrument: ksb_zone looks in that instrument's
- * zones and gives up rather than crossing into another one. So a piece
- * sounds exactly one instrument, and that is what gets expanded - 13 to
- * 171 KiB, median 46, on the same bank. ksb_unpack takes the program and
- * fills in only what that instrument reaches; every other sample reads as
- * absent, and ksb_zone says so by returning -1, which the synth already
- * counts (midi_wave.c's wave_unvoiced).
+ * EXPANSION IS PER PROGRAM OR WHOLE. A KAC-coded sample is not readable
+ * where it lies - it has to be decoded. ksb_unpack decodes what one program
+ * reaches (13 to 171 KiB, median 46, on the ten-instrument bank this ships
+ * with); ksb_unpack_all decodes every KAC sample, which is what a file with
+ * program changes needs and what costs memory (1.9 MiB for the full GM
+ * bank). ksb_zone looks only in the instrument a program resolves to and
+ * gives up rather than crossing into another one, so the one-program
+ * expansion stays bounded.
  *
  * C89, and BIG-ENDIAN SAFE: every field is assembled byte by byte, so this
  * is the same on NT/MIPS as on x86. Casting into the image would be both
@@ -42,86 +39,168 @@
 #define KSB_PCM 0 /* signed 16-bit little-endian, two bytes a frame */
 #define KSB_KAC 1 /* a KAC image; its own header carries the frame count */
 
-/* The format version this header carries: the third H of KSB1's leading
-   <HHHHI>, between n_sample and the data size. One value, and a bank that
+/* The format version this header carries: the fourth H of KSB1's
+   leading <HHHHI>, between n_sample and the data size. One value, and a bank that
    states another does not open - a version field that is written and never
    consulted states nothing. */
 #define KSB_FORMAT_VERSION 1
 
 /* One key zone. Everything the synth needs to start a note, resolved -
    there is no second lookup once this is in hand. */
+/* THE FIELD ORDER FOLLOWS THE DLS RECORD. A region there is a header
+   (`rgnh`: key and velocity ranges, key group), a wave link (`wlnk`: the
+   table index), a wave sample (`wsmp`: unity, fine tune, gain) and then
+   the articulation's connections, which this reader stores only for the
+   destinations it plays. Keeping the same order here makes a field's
+   meaning findable from either side.
+
+   The sample itself comes between the link and the tuning because the
+   mixer reads it on every frame: pointer, codec, length, loop, rate are
+   the hot half of the zone, and everything from `unity` on is read once
+   when the note starts. */
 typedef struct {
+    /* rgnh: which notes and how hard, and the exclusive class. A region
+       split by velocity picks up a layer that shares its keys, so both
+       ranges are filtered. `key_group` is the DLS key group - notes in
+       one choke each other - and 0 is no group at all. */
+    int   vel_min, vel_max;
+    int   key_group;
+    int   self_non_exclusive;   /* rgnh fusOptions bit 0 */
+    int   region_id;            /* which region, for that flag */
+    /* wlnk and wsmp: the sample and its tuning. */
     const unsigned char *pcm;
     int   codec;
     long  frames;
     long  loop_start;
     long  loop_len;             /* 0 when the sample does not loop */
     long  rate;                 /* frames a second, as stored */
-    int   unity;                /* the MIDI note it was recorded at */
+    /* The note the sample is stored at, and the cents added to it:
+       (note - unity) * 100 + fine. Fine is a SHORT because a DLS
+       region's is: MT32.dls states -1100 on a French horn, and a byte
+       held that by clamping, which played the note 972 cents sharp. */
+    int   unity;
     int   fine;                 /* cents, added to unity */
-    int   gain;                 /* TENTHS of a dB of attenuation, at most
-                                   0. A positive value is a boost and the
-                                   mixer has no table entry for one: it
-                                   plays at full scale, which is also what
-                                   the reference player does with it. */
+    int   gain;                 /* TENTHS OF A DECIBEL, SIGNED: negative
+                                   attenuates, positive boosts. Clamped
+                                   by the mixer at +12 dB on the boost
+                                   side and at the envelope floor on the
+                                   other - see db_gain_of in wave.c,
+                                   which is the authority.
+
+                                   THIS IS AN ENGINE EXTENSION. A DLS
+                                   attenuation is negative and the
+                                   reference player clamps a positive one
+                                   to full scale, so a bank that leans
+                                   on the boost to reach the level an
+                                   arrangement expects will play quiet
+                                   there. It exists so a source 12 dB
+                                   under the reference can still be
+                                   brought to it; past that the program
+                                   is unreachable and the selection
+                                   refuses the source rather than
+                                   promising a gain it cannot write.
+
+                                   The field used to be documented as
+                                   "at most 0" with no table entry for a
+                                   positive value, which described the
+                                   reference player and not this mixer,
+                                   and sent the calibration to clamp at
+                                   a limit the engine does not have. */
+    /* THE STATIC ARTICULATORS, in destination-code order: pan, the mod
+       LFO's rate and delay, EG1's times, then EG2's. */
+    int   pan;                  /* tenths of a percent, -500..500 */
+    int   lfo_tc;               /* 2^(tc/1200) Hz */
+    int   lfo_delay_tc;         /* 2^(tc/1200) seconds */
     /* The volume envelope, WITHOUT WHICH EVERY NOTE IS AN ORGAN NOTE.
        The banks' pianos loop for ever and put their whole decay in here:
-       sustain is nothing and the decay runs for tens of seconds. Times are
-       milliseconds and mean the DLS thing - the time to fall 96 dB, the
-       envelope being linear in decibels - and the sustain is an ATTENUATION
-       in tenths of a decibel, 0 for full and 960 for silence, so the player
-       needs no logarithm. */
+       sustain is nothing and the decay runs for tens of seconds. Times
+       are milliseconds and mean the DLS thing - the time to fall 96 dB,
+       the envelope being linear in decibels - and the sustain is an
+       ATTENUATION in tenths of a decibel, 0 for full and 960 for
+       silence, so the player needs no logarithm. */
     int   attack_ms;
     int   decay_ms;
     int   release_ms;
     int   sustain_cb;           /* tenths of a dB of attenuation */
-    /* A MODULATION envelope: the same four, on the same units, but
-       targeting whatever the region modulates rather than the volume.
-       gm.dls sets these on every instrument, so an instrument with an
-       empty modulation envelope reads back as decay 0 and attenuation
-       960 - no modulation held - rather than as an invented shape. */
+    /* EG2: the same times, but targeting whatever the region modulates
+       rather than the volume. Its sustain is a LEVEL in tenths of a
+       percent - 1000 holds the modulator's depth and 0 holds none of it
+       - not the attenuation the volume envelope carries. */
     int   mattack_ms;
     int   mdecay_ms;
     int   mrelease_ms;
-    int   msustain_cb;          /* tenths of a dB of attenuation */
-    /* Where the note sits between the channels, in tenths of a percent:
-       -500 is hard left, 0 centre, 500 hard right. Measured over
-       gm.dls it spans -433..433, so a short covers it. It is inert
-       until the player has a second channel to pan between, which is
-       why it sat unreadable while the record was 16 bytes. */
-    int   pan;
-    /* The mod LFO, both in time cents as the source records them: the
-       frequency is 2^(lfo_tc/1200) Hz and the delay is
-       2^(lfo_delay_tc/1200) seconds. -32768 is the lowest value DLS can
-       hold and reads as an essentially zero delay. */
-    int   lfo_tc;
-    int   lfo_delay_tc;
-    /* The DEPTH each modulator is given, because the depth lives on the
-       connection that carries it and not on either endpoint. Units are
-       the source's own: cents where the target is pitch, decibels where
-       it is gain, and time cents across the source's full range where
-       it is a time. Over gm.dls these are what a bank built by only
-       reading static parameters was missing - modLfo -> pitch alone
-       appears 890 times, and it is the vibrato. */
-    int   lfo_pitch_tc;          /* modLfo -> pitch, cents */
-    int   lfo_gain;              /* modLfo -> gain, dB */
-    int   env_pitch_tc;          /* modEnv -> pitch, cents */
-    int   key_decay_tc;          /* keyNum -> decay, time cents */
-    int   vel_attack_tc;         /* velocity -> attack, time cents */
-    /* WHICH NOTES AND HOW HARD, which a key range alone does not
-       answer: a region split by velocity picks up a layer that shares
-       its keys. The reference player filters on all three of these.
-       `key_group` is the exclusive class - notes in one choke each
-       other - and 0 is no group at all. */
-    int   vel_min, vel_max;
-    int   key_group;
+    int   msustain_level;       /* tenths of a percent of the depth held */
+    /* THE MODULATOR DEPTHS, grouped by destination. Units are the
+       source's own: cents where the target is pitch, tenths of a
+       decibel where it is gain, and time cents across the source's full
+       range where it is a time. */
+    int   lfo_pitch_tc;         /* modLfo -> pitch, cents */
+    int   wheel_pitch_tc;       /* the same depth, scaled by CC1 */
+    int   env_pitch_tc;         /* modEnv -> pitch, cents */
+    int   key_pitch;            /* keyNum -> pitch, cents at key 128 */
+    int   lfo_gain;             /* modLfo -> gain, centibels */
+    /* Velocity's own attenuation, as the region states it: the value at
+       velocity zero, through `vel_gain_curve` (0 linear, 1 concave).
+       CARRIED, NOT APPLIED - the mixer uses velocity squared, which is
+       what the reference measures (see wave.c). */
+    int   vel_gain_cb;
+    int   vel_gain_curve;
+    /* The two envelopes' source scaling: EG1's decay by key and its
+       attack by velocity, then EG2's. */
+    int   key_decay_tc;
+    int   vel_attack_tc;
+    int   mdecay_key_tc;
+    int   mattack_vel_tc;
+    /* THE ENVELOPES' OPENING STAGES, in milliseconds. A delay holds the
+       envelope at zero - silence for EG1, no modulation for EG2 - and a
+       hold keeps it at its peak before the decay starts. 0 means the
+       stage is absent, which is what a bank that never declares one
+       plays. */
+    int   vdelay_ms;
+    int   vhold_ms;
+    int   mdelay_ms;
+    int   mhold_ms;
+    /* keyNum -> hold, time cents per unit of source. The player scales
+       the hold by 2^(tc * note / 128 / 1200), the same shape the two
+       decay scalings use. */
+    int   vhold_key_tc;
+    int   mhold_key_tc;
+    /* THE VIBRATO LFO, separate from the mod LFO. Its frequency and
+       delay are absolute time cents - 0 is 8.1758 Hz - and the two
+       depths are cents: the free one applied to every note, and the one
+       CC1 scales, both as the DLS states them. */
+    int   vibfreq_tc;
+    int   vibdelay_tc;
+    int   vib_pitch;
+    int   vib_wheel_pitch;
+    /* THE LOW PASS FILTER. The cutoff is in absolute cents, where 13500
+       is open and 1500 the lowest the format states; the resonance is
+       centibels; and the five depths are the cents each source moves the
+       cutoff by, per unit of that source - the modulation envelope's
+       level, velocity, key number, and the two LFO triangles. All zero
+       depths with the cutoff at 13500 and no resonance is the state a
+       bank that states no filter at all resolves to, and the player
+       skips the filter for it. */
+    int   filt_fc;              /* absolute cents, 1500..13500 */
+    int   filt_q;               /* centibels, 0..960 */
+    int   filt_env;             /* modEnv -> cutoff, cents */
+    int   filt_vel;             /* velocity -> cutoff, cents */
+    int   filt_key;             /* keyNum -> cutoff, cents */
+    int   filt_lfo;             /* modLFO -> cutoff, cents */
+    int   filt_vib;             /* vibLFO -> cutoff, cents */
 } KsbZone;
 
-#define KSB_MAXSAMPLES 512
+/* The sample-table arrays below live in the handle, so the bound is a
+   compile-time one. gm.dls alone is 412 samples; merging a second sound
+   set over it is what pushed the limit - gm.dls with the whole FF8 bank
+   laid over it is 605 - and FluidR3's full GM set is 1327, so 2048 is
+   the first power of two that holds it. The handle grows by eight bytes
+   per entry, and every handle in the tree is static except the console
+   player's own. */
+#define KSB_MAXSAMPLES 2048
 
 typedef struct {
     const unsigned char *img;
-    long  size;
     int   n_inst, n_region, n_sample;
     long  inst_off, region_off, sample_off, data_off;
     /* Filled by ksb_unpack; until then pcm is NULL and every pcm_at is -1.
@@ -140,8 +219,8 @@ int ksb_open(KsbBank *b, const unsigned char *image, long size);
 
 /* Frames `program`'s own zones expand to, and twice that in bytes. Cheap:
    headers only, no decoding. A program the bank does not carry resolves
-   through the same fallback ksb_zone uses, so the figure is for the
-   instrument that will actually sound. */
+   through the same fallback the zone lookup uses, so the figure is for
+   the instrument that will actually sound. */
 long ksb_pcm_frames(const KsbBank *b, int program);
 
 /* The largest figure above, over every instrument the bank carries. Size a
@@ -159,32 +238,68 @@ long ksb_pcm_max_frames(const KsbBank *b);
    bank. Returns 0 on success. */
 int ksb_unpack(KsbBank *b, short *pcm, int program);
 
+/* Frames every KAC-coded sample in the bank expands to, for a player that
+ * wants more than one program at a time. Uncompressed samples read in place
+ * and contribute nothing. A bank whose images do not open returns -1. */
+long ksb_pcm_all_frames(const KsbBank *b);
+
+/* Expand every KAC sample in the bank into `pcm`, which must hold
+ * ksb_pcm_all_frames() shorts. Unlike ksb_unpack this keeps all programs
+ * available at once, so program changes select real instruments. */
+int ksb_unpack_all(KsbBank *b, short *pcm);
+
 const char *ksb_errstr(int rc);
 
 /* How many instruments, and the GM program of each. For listing. */
 int ksb_count(const KsbBank *b);
 int ksb_program(const KsbBank *b, int i);
 
-/* Fill `z` for this program and note. Returns 0 if something will sound.
+/* Fill `z` for this patch and note. Returns 0 if something will sound.
+ *
+ * THE PATCH IS A (BANK MSB, BANK LSB, PROGRAM) TRIPLE, the pair being the
+ * DLS bank split the way MIDI names it: bits 0-6 of the DLS bank are CC32
+ * and bits 8-14 are CC0. A DLS file may hold several banks of one program
+ * - FF8.dls holds thirty - and those instruments are reachable only
+ * through this call.
  *
  * THE PROGRAM FALLS BACK, because a bank of ten instruments will be asked
- * for all 128. An exact program wins; failing that the first instrument in
- * the same GM family - program/8, so any of the eight pianos answers for the
- * others - and failing that the lowest numbered instrument in the bank.
- * Silence would be the wrong answer: a general MIDI file with no acoustic
- * bass would lose its whole bass line.
+ * for all 128. An exact triple wins; failing that the bank-0 record of the
+ * same program; failing that the first instrument in the same GM family -
+ * program/8, so any of the eight pianos answers for the others; and
+ * failing that the lowest numbered instrument in bank 0. Silence would be
+ * the wrong answer: a general MIDI file with no acoustic bass would lose
+ * its whole bass line. A file that selects a bank this bank does not carry
+ * lands on the GM set rather than on nothing.
+ *
+ * Program 128 is the percussion kit. MIDI programs stop at 127, so the
+ * drum channel's key map takes a number no melodic program can name. It is
+ * also the one program that does not fall back, and it is stored in bank
+ * 0: a melodic instrument answering MIDI 36 would be a wrong note, which
+ * is harder to miss than a gap.
  *
  * The NOTE does not fall back. A note outside every zone of the instrument
- * that program resolved to returns -1 - it does not reach into another
+ * that the patch resolved to returns -1 - it does not reach into another
  * instrument, which is what keeps the expansion above bounded by one
  * instrument. */
-/* The region that sounds for this program, note AND velocity. Both
- * ranges have to match: a bank that splits one key across two layers by
- * velocity gives up its region here rather than picking either, and the
- * key group the region carries comes back in the zone for a player that
- * chokes with it. -1 when no region matches, which is what a velocity
- * outside every layer and a note outside every key range both say. */
-int ksb_zone(const KsbBank *b, int program, int note, int vel, KsbZone *z);
+/* The regions that sound for this patch, note AND velocity, in file
+ * order. Both ranges have to match. A bank may layer several regions over
+ * one key - a velocity split, a stacked instrument - and each one is a
+ * separate voice in the player, so the reader enumerates them rather than
+ * choosing one.
+ *
+ * ksb_zone_count returns how many regions match. ksb_zone_at fills the
+ * `index`-th of them and returns 1, or 0 when `index` is out of range.
+ * Only regions whose sample is present in the bank's sample table are
+ * part of the sequence: one ksb_unpack has not expanded cannot sound, and
+ * handing it to the mixer would read a buffer that is not there. A bank
+ * where every match is absent therefore counts zero, the same answer a
+ * note outside every key range gets.
+ *
+ * The patch falls back as described above, and the note does not. */
+int ksb_zone_count(const KsbBank *b, int msb, int lsb, int program,
+                   int note, int vel);
+int ksb_zone_at(const KsbBank *b, int msb, int lsb, int program,
+                int note, int vel, int index, KsbZone *z);
 
 #define KSB_OK        0
 #define KSB_EMAGIC    1

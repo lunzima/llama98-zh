@@ -149,6 +149,14 @@ void lz_le16(void *p, size_t n);
  * safetensors-loaded model. */
 float lz_f16_to_f32(unsigned int h);
 
+/* One layout-2 group scale: base * (raw/255) with the quotient rounded
+ * to float before the multiply and the product rounded to float after
+ * it - the two roundings gcc's divss+mulss produce, fixed here so every
+ * toolchain decodes the same plane. model.c's read_scale_plane is the
+ * caller; see compat.c for why the body must live in its own
+ * translation unit. */
+float lz_scale_u8_decode(float base, float raw_f);
+
 /* Does LZ_BIG_ENDIAN match the machine actually running? 1 yes, 0 no.
  *
  * The macro list above cannot know every compiler, and the failure it

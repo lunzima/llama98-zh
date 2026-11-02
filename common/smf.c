@@ -81,54 +81,91 @@ static unsigned long scale_tick(const LZSmfReader *r, unsigned long tick) {
  *
  * `tm`/`ntm` are filled on the first pass and NULL on the second - the
  * map has to be complete before anything is scaled, and a tempo change
- * in track 2 governs events track 1 already produced. */
-static void track_advance(LZSmfTrack *t, LZSmfTempo *tm, int *ntm,
-                          unsigned long *first_note) {
+ * in track 2 governs events track 1 already produced.
+ *
+ * RUNNING STATUS IS ONLY THE CHANNEL STATUS. A status byte 0x80..0xEF
+ * replaces it; meta (0xFF) and sysex (0xF0/0xF7) are decoded as the
+ * events they are and leave it standing, so a channel event after one
+ * of them may still omit its status byte. The stored value is never
+ * 0xFF/0xF0/0xF7, which is what keeps such a data byte from being read
+ * as a two-parameter message under a status that has no parameters.
+ *
+ * Returns 1 when a tempo event did not fit in the map. The caller on
+ * the tempo pass turns that into LZ_SMF_TOO_BIG: a map that lost a
+ * step would move every later event in time, and the reader cannot
+ * represent the file rather than merely choosing not to. */
+static int track_advance(LZSmfTrack *t, LZSmfTempo *tm, int *ntm,
+                         unsigned long *first_note) {
     while (t->live) {
-        int c, hi, d1, d2 = 0, two;
+        int c, hi, d1, d2 = 0, two, st;
         t->tick += vlq(&t->p, t->end);
-        if (t->p >= t->end) { t->live = 0; return; }
+        if (t->p >= t->end) { t->live = 0; return 0; }
         c = *t->p;
-        if (c & 0x80) { t->status = c; t->p++; }
-        /* else: running status, and `status` still holds it. */
-        if (t->status == 0xFF) {
-            int type;
-            unsigned long n;
-            if (t->p >= t->end) { t->live = 0; return; }
-            type = *t->p++;
-            n = vlq(&t->p, t->end);
-            if (n > (unsigned long)(t->end - t->p))
-                n = (unsigned long)(t->end - t->p);
-            if (type == 0x51 && n == 3 && tm && ntm &&
-                *ntm < LZ_SMF_MAX_TEMPI) {
-                tm[*ntm].tick = t->tick;
-                tm[*ntm].us_qn = ((unsigned long)t->p[0] << 16) |
-                                 ((unsigned long)t->p[1] << 8) | t->p[2];
-                /* A zero would divide by zero in the scaling and is not
-                   a tempo any file means. */
-                if (tm[*ntm].us_qn == 0) tm[*ntm].us_qn = 500000;
-                (*ntm)++;
+        if (c & 0x80) {
+            t->p++;
+            if (c == 0xFF) {
+                int type;
+                unsigned long n;
+                if (t->p >= t->end) { t->live = 0; return 0; }
+                type = *t->p++;
+                n = vlq(&t->p, t->end);
+                if (n > (unsigned long)(t->end - t->p))
+                    n = (unsigned long)(t->end - t->p);
+                if (type == 0x51 && n == 3 && tm && ntm) {
+                    unsigned long us = ((unsigned long)t->p[0] << 16) |
+                                       ((unsigned long)t->p[1] << 8) | t->p[2];
+                    /* A zero would divide by zero in the scaling and is
+                       not a tempo any file means. */
+                    if (us == 0) us = 500000;
+                    /* A RESTATED TEMPO IS NOT A STEP. Notation software
+                       writes the value in force on every beat; storing
+                       those spends the map's room on nothing, and the
+                       xqwizard files that overflowed the old cap were
+                       almost all this shape. */
+                    if (!t->have_us || us != t->last_us) {
+                        if (*ntm >= LZ_SMF_MAX_TEMPI) return 1;
+                        tm[*ntm].tick = t->tick;
+                        tm[*ntm].us_qn = us;
+                        (*ntm)++;
+                        t->last_us = us;
+                        t->have_us = 1;
+                    }
+                }
+                t->p += n;
+                continue;
             }
-            t->p += n;
-            continue;
+            if (c == 0xF0 || c == 0xF7) {
+                unsigned long n = vlq(&t->p, t->end);
+                if (n > (unsigned long)(t->end - t->p))
+                    n = (unsigned long)(t->end - t->p);
+                t->p += n;
+                continue;
+            }
+            if (c >= 0xF0) {
+                /* System common and real-time bytes do not occur in a
+                   track and none of them carries running status; skip
+                   the status byte alone. */
+                continue;
+            }
+            /* A channel status, and the only thing running status
+               stores. */
+            t->status = c;
+            st = c;
+        } else {
+            /* Running status, and `status` still holds it - including
+               across a meta or sysex event. */
+            st = t->status;
         }
-        if (t->status == 0xF0 || t->status == 0xF7) {
-            unsigned long n = vlq(&t->p, t->end);
-            if (n > (unsigned long)(t->end - t->p))
-                n = (unsigned long)(t->end - t->p);
-            t->p += n;
-            continue;
-        }
-        hi = t->status & 0xF0;
+        hi = st & 0xF0;
         if (hi < 0x80) { t->p++; continue; }   /* no status yet */
         two = (hi != 0xC0 && hi != 0xD0);
-        if (t->p >= t->end) { t->live = 0; return; }
+        if (t->p >= t->end) { t->live = 0; return 0; }
         d1 = *t->p++;
         if (two) {
-            if (t->p >= t->end) { t->live = 0; return; }
+            if (t->p >= t->end) { t->live = 0; return 0; }
             d2 = *t->p++;
         }
-        t->msg = (unsigned long)t->status |
+        t->msg = (unsigned long)st |
                  ((unsigned long)(d1 & 0x7F) << 8) |
                  ((unsigned long)(d2 & 0x7F) << 16);
         /* A note-on with velocity ZERO is a note-off in every file that
@@ -149,8 +186,44 @@ static void track_advance(LZSmfTrack *t, LZSmfTempo *tm, int *ntm,
         if (first_note && hi == 0x90 && (d2 & 0x7F) != 0 &&
             (*first_note == (unsigned long)-1 || t->tick < *first_note))
             *first_note = t->tick;
-        return;
+        return 0;
     }
+    return 0;
+}
+
+/* The map is collected track by track, and a tempo in track 2 governs
+ * events track 1 produced, so it has to be in TICK order before
+ * lz_smf_tempo_at or scale_tick can walk it. Insertion sort: stable,
+ * which keeps equal ticks in the order they were collected - the lower
+ * track index first - and needs no scratch memory. n is at most
+ * LZ_SMF_MAX_TEMPI. */
+static void tempo_sort(LZSmfTempo *tm, int n) {
+    int i;
+    for (i = 1; i < n; i++) {
+        LZSmfTempo key = tm[i];
+        int j = i - 1;
+        while (j >= 0 && tm[j].tick > key.tick) {
+            tm[j + 1] = tm[j];
+            j--;
+        }
+        tm[j + 1] = key;
+    }
+}
+
+/* The same rule across tracks as within one. The collection pass drops
+   a restatement inside a single track; the sorted map then holds the
+   union of every track's tempos, where a conductor track and a part
+   that both state the tempo leave two entries saying one thing. An
+   entry whose value equals the one already in force is a no-op and is
+   removed. Equal ticks keep the order of collection, so the last value
+   at a tick - the one lz_smf_tempo_at already used - survives. */
+static int tempo_compact(LZSmfTempo *tm, int n) {
+    int i, k = 0;
+    for (i = 0; i < n; i++) {
+        if (k > 0 && tm[i].us_qn == tm[k - 1].us_qn) continue;
+        tm[k++] = tm[i];
+    }
+    return k;
 }
 
 static void tracks_seek(LZSmfReader *r) {
@@ -161,6 +234,8 @@ static void tracks_seek(LZSmfReader *r) {
         r->trk[i].msg = 0;
         r->trk[i].status = 0;
         r->trk[i].live = 1;
+        r->trk[i].last_us = 0;
+        r->trk[i].have_us = 0;
     }
 }
 
@@ -209,8 +284,12 @@ int lz_smf_open(LZSmfReader *r, const unsigned char *img, long size,
     tracks_seek(r);
     for (i = 0; i < r->ntrk; i++) {
         LZSmfTrack *t = &r->trk[i];
-        while (t->live) track_advance(t, r->tm, &r->n_tempi, &first);
+        while (t->live)
+            if (track_advance(t, r->tm, &r->n_tempi, &first))
+                return LZ_SMF_TOO_BIG;
     }
+    tempo_sort(r->tm, r->n_tempi);
+    r->n_tempi = tempo_compact(r->tm, r->n_tempi);
     if (first == (unsigned long)-1) return LZ_SMF_EMPTY;
 
     /* T0 is the OPENING tempo. Any constant reproduces the map; this
@@ -234,9 +313,11 @@ void lz_smf_rewind(LZSmfReader *r) {
        loop restarts from tick 0. */
     r->have_pend = 0;
     r->spent = 0;
-    /* Every cursor holds its first event before the merge starts. */
+    /* Every cursor holds its first event before the merge starts. The
+       map is complete and sorted by now, so a tempo event is decoded
+       but never collected and the overflow answer cannot arise. */
     for (i = 0; i < r->ntrk; i++)
-        track_advance(&r->trk[i], NULL, NULL, NULL);
+        (void)track_advance(&r->trk[i], NULL, NULL, NULL);
 }
 
 /* The opening prefix: controller 7 on all sixteen channels, then the
@@ -296,7 +377,7 @@ int lz_smf_next(LZSmfReader *r, LZSmfEvent *out) {
         (out->msg & 0xF0) == 0xC0 && (out->msg & 0x0F) != 9)
         out->msg = (out->msg & 0xFFUL) |
                    ((unsigned long)(r->instrument & 0x7F) << 8);
-    track_advance(t, NULL, NULL, NULL);
+    (void)track_advance(t, NULL, NULL, NULL);
     return 1;
 }
 

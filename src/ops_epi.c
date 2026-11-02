@@ -1047,10 +1047,68 @@ static int lz_q61_get(const unsigned char *b4, const unsigned char *b2, int k) {
     return lo + (hi << 4);
 }
 
+/* Persistent f32 views of quantized tensors, keyed on the tensor.
+ *
+ * lz_t_f32 used to widen into the CALLER's scratch on every call, which
+ * costs a full dequant per call for a weight that never changes, and is
+ * also the shape of a heap overrun that has already happened: s->wscr is
+ * sized for the widest matmul ROW, not for t->n, so widening a whole
+ * tensor into it (a narrow BF16 conv1d) wrote past the end - see the
+ * conv note in forward_kda.c. A view owned by the cache is sized for the
+ * tensor, so both the repeat work and that overrun class go away.
+ *
+ * Keyed on the tensor pointer, which is stable for the model's lifetime.
+ * The scratch parameter still works as the fallback when the table is
+ * full, so a caller that cannot get a slot sees exactly the old
+ * behaviour rather than NULL. */
+#define LZ_T_CACHE_SLOTS 256
+static struct { const LZTensor *t; float *f; } lz_t_cache[LZ_T_CACHE_SLOTS];
+static int lz_t_cache_n = 0;
+
+static float *lz_t_cache_lookup(const LZTensor *t) {
+    int i;
+    for (i = 0; i < lz_t_cache_n; i++)
+        if (lz_t_cache[i].t == t) return lz_t_cache[i].f;
+    return NULL;
+}
+
+/* Reserve a view for t to be written into. NULL when the table is full
+   or the allocation fails - the caller then falls back to the caller's
+   scratch, which is the behaviour that existed before this cache. */
+static float *lz_t_cache_alloc(const LZTensor *t) {
+    float *f;
+    if (lz_t_cache_n >= LZ_T_CACHE_SLOTS || !t->n) return NULL;
+    f = (float *)calloc((size_t)t->n, sizeof(float));
+    if (!f) return NULL;
+    lz_t_cache[lz_t_cache_n].t = t;
+    lz_t_cache[lz_t_cache_n].f = f;
+    lz_t_cache_n++;
+    return f;
+}
+
+/* Drop every cached view. The tensors themselves belong to the model, so
+   a load/unload pair has to call this or the table would keep handing
+   out views of freed weights. */
+void lz_t_cache_reset(void) {
+    int i;
+    for (i = 0; i < lz_t_cache_n; i++) free(lz_t_cache[i].f);
+    lz_t_cache_n = 0;
+}
+
 float *lz_t_f32(const LZTensor *t, float *scratch) {
     int g, k;
     if (!t) return NULL;
     if (t->dtype == LZ_FMT_F32) return t->f;
+    /* Persistent view first. Rebinding `scratch` keeps every dequant
+       loop below untouched: they write the buffer they are handed, and
+       now that buffer is one sized for t->n and owned here. */
+    {
+        float *view = lz_t_cache_lookup(t);
+        if (view) return view;      /* already widened: no work at all */
+        view = lz_t_cache_alloc(t);
+        if (view) scratch = view;   /* dequant writes the cache slot */
+        else if (!scratch) return NULL;
+    }
     /* BF16 AHEAD OF THE SCALE GUARD, because it has no scale: it is
        storage, not quantization. The widening is `bits << 16` and the
        result is exactly what the file holds - the same operation the

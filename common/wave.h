@@ -15,10 +15,17 @@
  * 1 to 15 ms and the error accumulates into something that sounds like
  * a bad tempo map.
  *
- * The instrument is decided before the first note. The reader forces one
- * GM program on every channel but the drum kit, and this expands exactly
- * one instrument into PCM while the bank is opening, so a mid-piece
- * program change is not something this can answer for.
+ * EXPANSION HAPPENS BEFORE THE FIRST NOTE, one of two ways. With a single
+ * program, the reader forces that program on every channel but the drum
+ * kit and ksb_unpack decodes just its samples, so a mid-piece program
+ * change does not switch instruments. With the whole bank expanded
+ * (ksb_unpack_all), program changes select real instruments.
+ *
+ * BANK SELECT IS PART OF THE PATCH. CC0 and CC32 are kept per channel and
+ * a note-on resolves (MSB, LSB, program) through ksb_zone_at, so a bank
+ * carrying a file's own instruments plays them; a bank that does not carry
+ * the selected pair falls back to its GM set. The drum channel keeps the
+ * program-128 kit in bank 0 and ignores a bank select of its own.
  *
  * C89.
  */
@@ -27,10 +34,20 @@
 
 #include "ksb.h"
 
-#define WAVE_VOICES 32
+/* Voice pool. The mixer walks this many entries every block, so it is a
+ * compile-time size. 192 rather than 128 because a note-on starts one
+ * voice per matching REGION, and a bank that layers velocity splits and
+ * stacked zones spends several voices on one key: on the onestop
+ * arrangement the 128-entry pool dropped 15 notes in the dense
+ * passages, and 192 dropped none. A tighter target can override the
+ * macro when compiling. */
+#ifndef WAVE_VOICES
+#define WAVE_VOICES 192
+#endif
 
-/* `bank` must be expanded (ksb_unpack) and stay alive until wave_close.
- * `rate` is the output rate in frames a second. Returns 0 on success. */
+/* `bank` must be expanded (ksb_unpack or ksb_unpack_all) and stay alive
+ * until wave_close. `rate` is the output rate in frames a second. Returns 0
+ * on success. */
 int  wave_open(const KsbBank *bank, long rate);
 void wave_close(void);
 

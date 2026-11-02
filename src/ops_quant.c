@@ -2355,15 +2355,23 @@ void lz_quantize_q8_tok_int(const int32_t *t, int n, float deq,
     }
     for (k = 0; k < ns; k++) s[k] = sg;
     if (fast) {
-        float inv_elem = (inv == 0.0f) ? 0.0f : 127.0f / (float)tam;
+        /* lz_i32f on tam and on t[k], not bare (float) casts: both are
+           unrestricted int32 and exceed 2^24 on real inputs (the
+           fixed-norm qx*qinv products and the recurrent-state
+           requantization). Above 2^24 the conversion rounds, and an x87
+           fild keeps the exact integer into the divide/multiply where
+           gcc's cvtsi2ss rounds it first - one rounding against two, and
+           q8_round then resolves a tie two different ways. Same rule
+           lz_quantize_q8_int's element loop states. */
+        float inv_elem = (inv == 0.0f) ? 0.0f : 127.0f / lz_i32f(tam);
         for (k = 0; k < n; k++) {
-            int qi = q8_round((float)t[k] * inv_elem);
+            int qi = q8_round(lz_i32f(t[k]) * inv_elem);
             qi = (qi > 127) ? 127 : qi;
             q[k] = (int8_t)((qi < -127) ? -127 : qi);
         }
     } else {
         for (k = 0; k < n; k++) {
-            int qi = q8_round(((float)t[k] * deq) / sg);
+            int qi = q8_round((lz_i32f(t[k]) * deq) / sg);
             qi = (qi > 127) ? 127 : qi;
             q[k] = (int8_t)((qi < -127) ? -127 : qi);
         }
@@ -2574,7 +2582,7 @@ void lz_quantize_q8_int(const int32_t *t, int n, int gs, float deq,
                is the MIN_SCALE/zero-amax path, where the float path
                multiplies by 0 - mirror it (the stored scale is 1.0 and
                every q is 0). */
-            float inv_elem = (inv == 0.0f) ? 0.0f : 127.0f / (float)tam;
+            float inv_elem = (inv == 0.0f) ? 0.0f : 127.0f / lz_i32f(tam);
             /* Common case (inv != 0): inv_elem's own div+cvt, once per
                group, plus per element a cvt (grp[k] to float), a mul
                and q8_round's add. The rare inv==0 path skips inv_elem's

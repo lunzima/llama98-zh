@@ -297,10 +297,11 @@ docs/superpowers/
 
 # Numeric probes (.prof/), moved here from the deprecated training-side
 # tree by user decision; the directory's own README classifies them.
-# EXCLUDED DELIBERATELY, with the consequence understood: they are not
-# in the remote and a fresh clone does not see them. The same pattern
-# applied to tools/kernelgen's generators would be a defect - those are
-# source. This one is a decision.
+# EXCLUDED DELIBERATELY: a fresh clone does not rebuild them. The files
+# already tracked stay tracked - git does not ignore what it already has -
+# so they do ride `internal` to the remote. The same pattern applied to
+# tools/kernelgen's generators would be a defect - those are source. This
+# one is a decision.
 .prof/
 !/build/move_per_function.sh
 

@@ -19,6 +19,14 @@
  * megabyte is twice the largest real file seen. */
 #define LZ_MIDI_MAX_FILE  (1024L * 1024L)
 
+/* THE BANK IS NOT A MIDI FILE AND DOES NOT FIT ITS CAP. The shipped
+ * banks/kk98.ksb is 1,518,279 bytes - the eleven programs it carries
+ * are samples - so the 1 MB refusal above silently turned the Wave
+ * engine off: the bank was present and never opened. Sixteen megabytes
+ * covers a whole GM bank (a pick-all bank measures 9.4 MB) with room
+ * over, and is still a refusal for a file that is not a bank. */
+#define LZ_WAVE_BANK_MAX  (16L * 1024L * 1024L)
+
 /* The shortest interval between two `probe` lines - the control reading
  * of the stream's position, taken where the ratio did not move.
  *
@@ -658,7 +666,7 @@ static int wave_bank_read(void) {
     if (!f) return 0;
     if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 0; }
     n = ftell(f);
-    if (n <= 0 || n > LZ_MIDI_MAX_FILE) { fclose(f); return 0; }
+    if (n <= 0 || n > LZ_WAVE_BANK_MAX) { fclose(f); return 0; }
     if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return 0; }
     img = (unsigned char *)malloc((size_t)n);
     if (!img) { fclose(f); return 0; }

@@ -1401,7 +1401,7 @@ def main():
 # WHAT CHANGES IF level_trim_from_rows MOVES TO level_worst_db. A region gain
 # is one number, so it shifts every duration equally. Calibrating it to the
 # worst duration moves every other duration by (level_worst_db - level_db).
-# Measured on the 2026-10-30 demo (the ten programs in build/tmp/w4_env/):
+# Measured on the 2026-10-30 demo of ten programs:
 # delta median -0.05 dB, min -1.56 (p89, x16), max +0.84 (p28, x16). p89's
 # short notes - the ones the corpus actually plays - would come out 1.56 dB
 # hot while its sustained notes land on gm; p28's would run 0.84 dB quiet.
@@ -1432,7 +1432,7 @@ def main():
 # what moved it).
 #
 # WITNESSES FOR THE DURATION COVERAGE, chosen without looking at any level
-# reading (2026-10-30, build/tmp/w4_env/dur_select.py): ranking the 129
+# reading (2026-10-30): ranking the 129
 # programs by their corpus notes' MEDIAN DURATION from the MIDI alone gives
 # the ten shortest (median 0.031-0.125 s, group median 0.103 s) and the ten
 # longest (0.842-2.000 s, group median 1.112 s). The degradation

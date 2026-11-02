@@ -19,25 +19,27 @@ else. Verification is what the `Verify` section below describes: modes of the
 shipped binaries.
 
 **Release rules, decided 2026-08-30:** the internal dev/test/docs
-infrastructure stays LOCAL and is never pushed to `github.com/lunzima/llama98-zh`:
+infrastructure is not part of the public subset - it never reaches `main` or
+`release-0.1.x`. It does ride `internal` to `github.com/lunzima/llama98-zh`:
 
-1. **`docs/` is not pushed.** The architecture audits, pipeline breakpoints and
-   design notes are internal working documents.
-2. **`build/` and `.prof/` are not pushed.** The gates, CI scripts, probes and
-   censuses they hold are the engine's test suite - and this file's own Iron
-   law says the repository never holds one. `CLAUDE.md` itself is also not
-   pushed; it is the operating instructions for this working tree.
+1. **`docs/` is not in the public subset.** The architecture audits, pipeline
+   breakpoints and design notes are internal working documents.
+2. **`build/` and `.prof/` are not in the public subset.** The gates, CI
+   scripts, probes and censuses they hold are the engine's test suite, and the
+   public release tree carries no gate. `CLAUDE.md` itself is left out of it
+   too; it is the operating instructions for this working tree.
 
-3. **`gates.mk` is not pushed.** The verification gates live in this
-   local-private Makefile (`make check` and friends), pulled into the shipped
-   `Makefile` by `-include gates.mk` - present here it restores the gates,
-   absent on a public checkout it is a silent no-op. `/gates.mk` is in
-   `.gitignore`; the shipped Makefile keeps only the include line and the
-   `NATIVE_GATE` prerequisite wiring, which are inert without it.
+3. **`gates.mk` is not in the public subset.** The verification gates live in
+   this local-private Makefile (`make check` and friends), pulled into the
+   shipped `Makefile` by `-include gates.mk` - present here it restores the
+   gates, absent on a `main` checkout it is a silent no-op. The shipped
+   Makefile keeps only the include line and the `NATIVE_GATE` prerequisite
+   wiring, which are inert without it.
 
-4. **`make_lz4.py` is not pushed.** It writes the `model.bin.lz4` that
-   `src/lz4d.c` streams. A producer of model files is a training-side tool, and
-   the reader shipping here does not make its writer part of the engine.
+4. **`make_lz4.py` is not in the public subset.** It writes the
+   `model.bin.lz4` that `src/lz4d.c` streams. A producer of model files is a
+   training-side tool, and the reader shipping here does not make its writer
+   part of the engine.
 
 5. **`music/` is not pushed.** The front end plays MIDI from a directory of
    that name beside the executable while a reply generates; the MIDI itself is
@@ -58,11 +60,11 @@ infrastructure stays LOCAL and is never pushed to `github.com/lunzima/llama98-zh
    reach into a tree it has no business binding. Anything else brought over
    from that repository arrives under the same terms and needs the same line.
 
-6. **`tools/` is not pushed.** It holds the bank's producer and the two DLS
-   readers it needs - `ksb_build.py`, `dls_survey.py`, `dls_play.py` - and is
-   the `make_lz4.py` argument taken to its end: this tree ships
-   `common/ksb.c`, and shipping the reader does not make its writer part of
-   the engine.
+6. **`tools/` is not in the public subset.** It holds the bank's producer and
+   the two DLS readers it needs - `ksb_build.py`, `dls_survey.py`,
+   `dls_play.py` - and is the `make_lz4.py` argument taken to its end: this
+   tree ships `common/ksb.c`, and shipping the reader does not make its
+   writer part of the engine.
 
    `banks/` is committed and the distinction is the material. It is BUILT
    here, from `tools/` over a DLS that is not in this tree, so nothing else
@@ -89,13 +91,13 @@ It reads the DIRECTORY, not `git status`: `.pytest_cache` writes a `.gitignore`
 containing `*` inside itself, so it is entirely untracked and entirely
 invisible to git. A new top-level entry gets added to that gate AND to the
 enumeration above, in that order, deliberately - a file needs a reason to join
-the list, not a reason to be kept out of the push.
+the list, not a reason to be kept out of the public subset.
 
 **The branches carry that split, and `internal` is where work happens.**
 
 | branch | tracks | pushed |
 |---|---|---|
-| `internal` | everything - `build/`, `docs/`, `.prof/`, `gates.mk`, `CLAUDE.md` | never |
+| `internal` | everything - `build/`, `docs/`, `.prof/`, `gates.mk`, `CLAUDE.md` | yes |
 | `main`, `release-0.1.x` | the public subset enumerated above | yes |
 
 Work on `internal`. A release is made by committing the public paths onto
@@ -457,3 +459,22 @@ Two more, not numbered but enforced everywhere:
   plain ints still yields finite logits (measured cosine 0.34).
 - MTP `fc` input concat order: **embedding in the low half, hidden in the high
   half**.
+
+## Long-running cleanup tasks
+
+These are standing instructions, not one-off items. They apply to every
+change and are never "finished".
+
+- **Delete spaghetti.** Code that exists because an earlier shape was
+  worked around - parallel tables, flags that only one caller sets,
+  functions that walk the same structure twice - gets folded into one
+  authority when it is touched, not left to grow.
+- **Delete AI-slop and stale comments.** A comment that restates the
+  line below it, an essay defending a two-line change, a block that
+  describes a version the code no longer has: all of it goes. What
+  stays is the reason a reader cannot recover from the code - a
+  measured number, a trap, a contract.
+- **No defensive programming without a measured failure.** Do not add
+  a guard, a fallback or a clamp for a case that has not been seen.
+  Every check costs a reader and hides the next bug; the ones that
+  stay name the failure they were written for.

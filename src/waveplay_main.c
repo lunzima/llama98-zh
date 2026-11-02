@@ -37,8 +37,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "compat40.h" /* lz_ui_wave_*: the device, resolved at run time */
-#include "kac.h"
+#include "../gui/compat40.h" /* lz_ui_wave_*: the device, resolved at run time */
 #include "ksb.h"
 #include "lz_int.h"
 #include "music.h"
@@ -92,18 +91,14 @@ static void put32(unsigned char *p, unsigned long v)
     p[3] = (unsigned char)(v >> 24);
 }
 
-/* A 16-bit mono PCM header for `frames` frames. Written twice: once as a
+/* A 16-bit stereo PCM header for `frames` frames. Written twice: once as a
  * placeholder before the audio, and again at the end with the real count,
  * because how long a piece is is not known until it has been rendered. */
 static void wav_head(FILE *f, long rate, long frames)
 {
     unsigned char h[44];
-    unsigned long data = (unsigned long)frames * 2UL;
+    unsigned long data = (unsigned long)frames * 4UL;
     unsigned long r    = (unsigned long)rate;
-    int           i;
-
-    for (i = 0; i < 44; i++)
-        h[i] = 0;
     memcpy(h, "RIFF", 4);
     put32(h + 4, data + 36UL);
     memcpy(h + 8, "WAVEfmt ", 8);
@@ -111,8 +106,8 @@ static void wav_head(FILE *f, long rate, long frames)
     put16(h + 20, 1UL);           /* WAVE_FORMAT_PCM */
     put16(h + 22, 2UL);           /* stereo: the mixer emits pairs */
     put32(h + 24, r);
-    put32(h + 28, r * 2UL);       /* bytes a second */
-    put16(h + 32, 2UL);           /* block align */
+    put32(h + 28, r * 4UL);       /* bytes a second */
+    put16(h + 32, 4UL);           /* block align */
     put16(h + 34, 16UL);          /* bits */
     memcpy(h + 36, "data", 4);
     put32(h + 40, data);
@@ -163,7 +158,12 @@ static int dev_write(const short *pcm, long frames)
 static int play_system(const unsigned char *img, long len, int instrument,
                        int volume, long speed)
 {
-    static unsigned long ev[LZ_SMF_CHUNK_EVENTS + 3];
+    /* THREE WORDS PER EVENT, plus three for the tempo the first
+       chunk carries. The buffer used to be sized at one word per
+       event, which is right only for a piece short enough that the
+       first chunk never fills: a real file walked past the end and
+       crashed the system-MIDI path. */
+    static unsigned long ev[LZ_SMF_CHUNK_EVENTS * 3 + 3];
     LZSmfReader    rd;
     unsigned long  prev = 0, us;
     lz_i64         want;
@@ -299,11 +299,15 @@ int main(int argc, char **argv)
     long           speed = 1000L; /* thousandths, 1000 is the written tempo */
     int            i, rc, prog = -1, list = 0, sysmode = 0, dev = -1;
     int            instrument = LZ_MUSIC_AS_WRITTEN, volume = 100;
+    int            multi = 0;
     KsbBank        bank;
     LZSmfReader    rd;
-    long           frames = 0, tail = 0;
+    long           frames = 0, tail = 0, fill = 0;
     unsigned long  prev_tick = 0;
     int            over = 0;
+    /* The device block being filled, and how much of it is filled; see
+       the loop below for why a block is handed over whole. */
+    static short   acc[PLAY_SEQ_FRAMES * 2];
 
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--bank") && i + 1 < argc) {
@@ -312,6 +316,8 @@ int main(int argc, char **argv)
             rate = atol(argv[++i]);
         } else if (!strcmp(argv[i], "--prog") && i + 1 < argc) {
             instrument = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--multi")) {
+            multi = 1;
         } else if (!strcmp(argv[i], "--speed") && i + 1 < argc) {
             speed = parse_speed(argv[++i]);
         } else if (!strcmp(argv[i], "--wav") && i + 1 < argc) {
@@ -335,8 +341,26 @@ int main(int argc, char **argv)
     }
     if (!path && !list) {
         printf("usage: kunkun98-play [--bank F] [--rate N] [--prog N] "
-               "[--speed S] [--gain N] [--dev N] [--wav F] [--sys] "
+               "[--speed S] [--gain N] [--dev N] [--wav F] [--multi] [--sys] "
                "[--list] <file.mid> [seconds]\n");
+        return 2;
+    }
+    if (multi && instrument != LZ_MUSIC_AS_WRITTEN) {
+        printf("--multi takes every program from the file; it cannot be "
+               "combined with --prog\n");
+        return 2;
+    }
+    /* A MIDI program change carries seven bits, so lz_smf_next writes
+       `instrument & 0x7F` and 128 arrives as program 0, while the
+       non-multi path expands only the program named on the command
+       line. The result is a silent render that exits 0 and reports a
+       full-length WAV: measured 1.02 s of peak 0 with `unvoiced 1`
+       against 1.97 s of sound at --prog 0. Refuse the value instead of
+       masking it. A bank's drum kit sits past 127 and is reached through
+       the drum channel, never through --prog. */
+    if (instrument != LZ_MUSIC_AS_WRITTEN &&
+        (instrument < 0 || instrument > 127)) {
+        printf("--prog must be a GM program, 0..127\n");
         return 2;
     }
     if (rate < 8000L || rate > 48000L) {
@@ -350,6 +374,11 @@ int main(int argc, char **argv)
     if (sysmode && wavpath != NULL) {
         printf("--wav renders the bank's own sampler; it cannot be "
                "combined with --sys\n");
+        return 2;
+    }
+    if (multi && sysmode) {
+        printf("--multi is the bank's own sampler; it cannot be combined "
+               "with --sys\n");
         return 2;
     }
 
@@ -404,7 +433,7 @@ int main(int argc, char **argv)
        the first note. The reader's own forcing then keeps the rest of the
        file on it, so a program change part way through cannot walk the piece
        onto samples that were never decoded. */
-    if (instrument == LZ_MUSIC_AS_WRITTEN) {
+    if (!multi && instrument == LZ_MUSIC_AS_WRITTEN) {
         static LZSmfReader scratch;
         instrument = lz_smf_opening_program(&scratch, g_midimg, imglen);
     }
@@ -414,7 +443,27 @@ int main(int argc, char **argv)
     }
     prog = instrument;
 
-    {
+    if (multi) {
+        long   want = ksb_pcm_all_frames(&bank);
+        short *pcm  = NULL;
+        if (want < 0) {
+            printf("%s: a KAC image does not open\n", bankpath);
+            return 1;
+        }
+        if (want > 0) {
+            pcm = (short *)malloc((size_t)want * sizeof(short));
+            if (pcm == NULL) {
+                printf("out of memory for %ld frames\n", want);
+                return 1;
+            }
+            rc = ksb_unpack_all(&bank, pcm);
+            if (rc != KSB_OK) {
+                printf("%s: %s\n", bankpath, ksb_errstr(rc));
+                return 1;
+            }
+            printf("expanded %ld frames (%ld KiB) for every program\n", want, want / 512);
+        }
+    } else {
         long   want = ksb_pcm_frames(&bank, prog);
         short *pcm  = NULL;
         if (want > 0) {
@@ -466,9 +515,16 @@ int main(int argc, char **argv)
             over = 1;
         }
         if (over) {
-            /* The last event has gone out; what is left is the release. */
+            /* The last event has gone out; what is left is the release.
+               Whatever is in the block goes over first, or the tail and
+               the piece would come out interleaved. */
             static short blk[PLAY_SEQ_FRAMES * 2];
             long         step = PLAY_SEQ_FRAMES;
+            if (fill > 0) {
+                if (!dev_write(acc, fill))
+                    goto stop;
+                fill = 0;
+            }
             if (limit > 0L && frames + step > limit * rate)
                 step = limit * rate - frames;
             if (step <= 0)
@@ -487,25 +543,45 @@ int main(int argc, char **argv)
         want = interval_frames(&rd, ev.tick - prev_tick, rate, speed);
         prev_tick = ev.tick;
         while (want > 0) {
-            static short blk[PLAY_SEQ_FRAMES * 2];
-            n = PLAY_SEQ_FRAMES;
+            /* FILL A WHOLE BLOCK BEFORE HANDING IT OVER.
+             *
+             * A block is one of the device's own buffers, and handing
+             * over a third of one costs a whole buffer anyway: the write
+             * waits for a buffer to come free, fills the frames it was
+             * given, and submits. A piece dense enough to have an event
+             * every few hundred frames therefore leaves the device
+             * holding four nearly EMPTY buffers - a few milliseconds of
+             * audio between them - and every scheduling hiccup drains
+             * them. That is an underrun, and it is heard as a click.
+             *
+             * This decides only WHEN audio is handed over. The events
+             * still go out on their own frame boundaries, because the
+             * frames counted below are the same ones the interval
+             * asked for. */
+            n = PLAY_SEQ_FRAMES - fill;
             if (n > (long)want)
                 n = (long)want;
             if (limit > 0L && frames + n > limit * rate)
                 n = limit * rate - frames;
             if (n <= 0)
                 break;
-            wave_render(blk, n);
-            if (!dev_write(blk, n))
-                goto stop;
+            wave_render(acc + 2 * fill, n);
+            fill += n;
             frames += n;
             want -= n;
+            if (fill >= PLAY_SEQ_FRAMES) {
+                if (!dev_write(acc, fill))
+                    goto stop;
+                fill = 0;
+            }
         }
         wave_message(ev.msg);
         if (limit > 0L && frames >= limit * rate)
             break;
     }
 stop:
+    if (fill > 0)
+        dev_write(acc, fill);
     if (g_wav != NULL) {
         wav_head(g_wav, rate, g_wavn);
         fclose(g_wav);

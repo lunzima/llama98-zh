@@ -74,7 +74,7 @@ static void lz_rope_find_correction_range(float beta_fast, float beta_slow,
    transcendentals are only cross-compiler bit-identical there). */
 void lz_rope_build_table(float *rope_cs, int seq_len, const LZModelConfig *c) {
     int half = c->rotary_dim >> 1;
-    int l;
+    int l, i;
     /* Dynamic NTK: rescale theta once for the whole table, not once
        per position. Guarded on rotary_dim > 2 because the exponent's
        denominator is (rotary_dim - 2) - a model with rotary_dim <= 2
@@ -129,23 +129,28 @@ void lz_rope_build_table(float *rope_cs, int seq_len, const LZModelConfig *c) {
             attn_scale = (c->rope_scaling_factor <= 1.0f) ? 1.0f :
                 0.1f * lz_logf(c->rope_scaling_factor) + 1.0f;
         }
-        for (l = 0; l < seq_len; l++) {
-            int i;
-            for (i = 0; i < half; i++) {
-                float extrap = lz_powf(
-                    theta_eff, -2.0f * (float)i / (float)c->rotary_dim);
-                float interp = extrap / c->rope_scaling_factor;
-                float ramp = ((float)i - low) / (high - low);
-                float ang;
-                if (ramp < 0.0f) ramp = 0.0f;
-                if (ramp > 1.0f) ramp = 1.0f;
-                /* ramp==1 -> pure interpolation (near dim 0, high-
-                   frequency/short-wavelength rotations); ramp==0 ->
-                   pure extrapolation (near dim half-1). Matches
-                   interp*(1-extrap_factor) + extrap*extrap_factor with
-                   extrap_factor = 1-ramp, algebraically the same
-                   expression. */
-                ang = (float)l * (interp * ramp + extrap * (1.0f - ramp));
+        /* i outside, l inside: every frequency is a function of i alone,
+           so building the table l-major costs seq_len times half as many
+           lz_powf calls as the same table needs. Each rope_cs element is
+           still computed from exactly the expression it was before -
+           only the order the independent elements are written in moves,
+           which cannot change any of their values. */
+        for (i = 0; i < half; i++) {
+            float extrap = lz_powf(
+                theta_eff, -2.0f * (float)i / (float)c->rotary_dim);
+            float interp = extrap / c->rope_scaling_factor;
+            float ramp = ((float)i - low) / (high - low);
+            if (ramp < 0.0f) ramp = 0.0f;
+            if (ramp > 1.0f) ramp = 1.0f;
+            /* ramp==1 -> pure interpolation (near dim 0, high-
+               frequency/short-wavelength rotations); ramp==0 ->
+               pure extrapolation (near dim half-1). Matches
+               interp*(1-extrap_factor) + extrap*extrap_factor with
+               extrap_factor = 1-ramp, algebraically the same
+               expression. */
+            float blend = interp * ramp + extrap * (1.0f - ramp);
+            for (l = 0; l < seq_len; l++) {
+                float ang = (float)l * blend;
                 rope_cs[((size_t)l * half + i) * 2] =
                     lz_cosf(ang) * attn_scale;
                 rope_cs[((size_t)l * half + i) * 2 + 1] =
@@ -160,22 +165,21 @@ void lz_rope_build_table(float *rope_cs, int seq_len, const LZModelConfig *c) {
            _compute_linear_scaling_rope_parameters comment on the two
            being equivalent). No post-scale (attention_factor is 1.0
            for this type in the reference). */
-        for (l = 0; l < seq_len; l++) {
-            int i;
-            for (i = 0; i < half; i++) {
-                float freq = lz_powf(
-                    theta_eff, -2.0f * (float)i / (float)c->rotary_dim);
-                float ang = (float)l * (freq / c->rope_scaling_factor);
+        for (i = 0; i < half; i++) {
+            float freq = lz_powf(
+                theta_eff, -2.0f * (float)i / (float)c->rotary_dim);
+            float scaled = freq / c->rope_scaling_factor;
+            for (l = 0; l < seq_len; l++) {
+                float ang = (float)l * scaled;
                 rope_cs[((size_t)l * half + i) * 2]     = lz_cosf(ang);
                 rope_cs[((size_t)l * half + i) * 2 + 1] = lz_sinf(ang);
             }
         }
     } else {
-        for (l = 0; l < seq_len; l++) {
-            int i;
-            for (i = 0; i < half; i++) {
-                float freq = lz_powf(theta_eff,
-                                     -2.0f * (float)i / (float)c->rotary_dim);
+        for (i = 0; i < half; i++) {
+            float freq = lz_powf(theta_eff,
+                                 -2.0f * (float)i / (float)c->rotary_dim);
+            for (l = 0; l < seq_len; l++) {
                 float ang = (float)l * freq;
                 rope_cs[((size_t)l * half + i) * 2]     = lz_cosf(ang);
                 rope_cs[((size_t)l * half + i) * 2 + 1] = lz_sinf(ang);

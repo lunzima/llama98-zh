@@ -311,6 +311,39 @@ float lz_f16_to_f32(unsigned int h) {
     return out;
 }
 
+/* One layout-2 group scale: base * (raw/255), where raw is the stored
+   byte and base the row's f16 base. The rounding points are the
+   contract - the quotient rounds to float, the product rounds to float
+   - and both roundings are forced by the volatile stores below.
+
+   Two things go wrong with the bare expression base * ((float)raw /
+   255.0f), both measured on wcc386 at -otexan against gcc's SSE code:
+   the division by a constant is strength-reduced into a multiply by the
+   reciprocal constant (rounding raw*(1/255) instead of raw/255), and
+   the quotient stays at x87 extended precision so only the product's
+   store rounds. Either one alone moves about half the groups of a
+   scale plane by 1 ULP (50,786 of 98,304 embed scales on kunkun-ce
+   with both), and those scales feed every dequantized weight read.
+
+   The volatile divisor is the runtime-divisor rule ops_quant.c's
+   lz_kv4_quantize states: a literal 255.0f invites the strength
+   reduction back in. The volatile quotient is lz_mathf's fp_barrierf
+   rule - a volatile float store rounds to float on every toolchain.
+
+   THIS FUNCTION LIVES IN ITS OWN TRANSLATION UNIT because of where the
+   barrier once failed: inlined into model.c's chunked decode loop,
+   wcc386 sank the quotient's store out of the loop entirely and kept
+   the quotient in the x87 register across iterations, so the barrier
+   rounded nothing. Neither toolchain here does cross-TU inlining, so
+   keeping the body out of the caller is what makes the stores stand as
+   written; moving it into model.c will silently re-break it. */
+float lz_scale_u8_decode(float base, float raw_f) {
+    volatile float levels = 255.0f;
+    volatile float q = raw_f / levels;
+    volatile float p = base * q;
+    return p;
+}
+
 int lz_endian_ok(void) {
     /* Not a compile-time trick: the whole point is to catch the case
        where the compile-time answer is WRONG, so the probe has to be

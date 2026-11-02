@@ -1,21 +1,11 @@
-/* kac_dec.c -- the KAC decoder.
- *
- * The sample loop calls nothing, divides nothing and branches nowhere
- * except its own back edge; every ternary compiles to a conditional
- * move. Reloading a snapshot costs four kac_sat_w calls per channel.
- *
- * This file reads whole images of known length: it parses the header,
- * holds the file to the length it declares, and then decodes. It does
- * not encode anything and it does not take the data in pieces.
- */
-
+/* kac_dec.c -- the KAC decoder. Files and streams share one engine; the
+ * entry points only supply a view. kacdec_open() adds file-length
+ * validation. The sample loop calls, divides and branches only at its back
+ * edge. */
 #include "kac.h"
 
-/* The slice data covering `samples` samples at a tier whose slice holds `n`:
- * the slice grid rounds up, and one slice is KAC_SLICE_SIZE bytes per channel.
- * A slice is that size at every tier whatever its N, so this one expression is
- * the whole of a chunk's byte extent -- the chunk walk, the closed form for a
- * whole-tier file, the block step and the index bounds all come out of here. */
+/* Bytes of slice data for `samples` at slice length n. Slices are 8 bytes at
+ * every tier, so this is the whole byte extent used by every walk and bound. */
 static uint32_t kacdec_slice_bytes(uint32_t samples, unsigned n, unsigned channels)
 {
     return ((samples + n - 1u) / n) * KAC_SLICE_SIZE * channels;
@@ -31,38 +21,25 @@ static void kacdec_use_tier(kacdec_t *restrict d, unsigned tier)
     d->dqt      = kac_pick_dqt(tier);
 }
 
-/* Point the decoder at the block covering [start, start + len). `slice_off` is
- * the data-area offset of its first slice and `tier` the tier its slices are
- * written for -- the tier comes from the data, a chunked block's from its own
- * byte at slice_off - 1 and a whole-tier one's from the header; `start` and
- * `len` come from the block grid. Called at open, at a block boundary, at a
- * loop wrap and after a seek -- never inside the sample loop. */
-static void kacdec_enter(kacdec_t *restrict d, uint32_t start, uint32_t slice_off, unsigned tier,
-                         uint32_t len)
-{
-    kacdec_use_tier(d, tier);
-    d->blk_start = start;
-    d->blk_len   = len;
-    d->blk_off   = slice_off;
-}
-
-/* One block of a chunked data area, from its tier byte: `start` and `slice_off`
- * as in kacdec_enter, and the block's length as the block grid allows it. The
- * tier byte is not judged here -- every caller has already put it through
- * kacdec_tier_byte, which is what keeps kac_tiers indexed inside its bounds. */
+/* Point the decoder at one block. Only the tier follows from the header; later
+ * blocks carry it in their own byte, already validated by kacdec_tier_byte. */
 static void kacdec_set_block(kacdec_t *restrict d, uint32_t start, uint32_t slice_off)
 {
     uint32_t left = d->total - start;
-    kacdec_enter(d, start, slice_off, (unsigned)d->data[slice_off - 1u],
-                 (left > KAC_CHUNK_SAMPLES) ? KAC_CHUNK_SAMPLES : left);
+    uint32_t blk  = kac_block_for_rate(d->sample_rate);
+    unsigned b    = (unsigned)d->data[slice_off - 1u];
+
+    kacdec_use_tier(d, b & KAC_TIER_MASK);
+    d->ms        = (b & KAC_BLOCK_MS) ? 1 : 0;
+    d->blk_start = start;
+    d->blk_len   = (left > blk) ? blk : left;
+    d->blk_off   = slice_off;
 }
 
-/* An open writes into the handle as it reads, so a candidate it goes on to
- * reject has already changed it. Clearing first is what makes a failed open
- * leave an inert handle rather than half of the previous use: no read
- * produces anything, so a caller can open again without re-initialising. */
+/* Leave a rejected handle inert, so a failed open cannot be half-used. */
 static void kacdec_inert(kacdec_t *restrict d)
 {
+    d->stream    = 0;
     d->data      = NULL;
     d->total     = 0u;
     d->pos       = 0u;
@@ -76,9 +53,7 @@ static void kacdec_inert(kacdec_t *restrict d)
     d->idx_snap  = NULL;
 }
 
-/* The state the decoder starts from: the initial state the preamble carries, or
- * the normative default when it carries none. Every weight of a loaded snapshot
- * passes through kac_sat_w, as the weights of any snapshot do. */
+/* Start from INIT_STATE, or the normative default; weights are saturated. */
 static void kacdec_start(kacdec_t *restrict d)
 {
     if (d->init_snap) {
@@ -102,6 +77,10 @@ static int32_t kacdec_decode(kacdec_t *restrict d, int16_t *restrict out, uint32
     uint32_t       slice, seg, rem;
     unsigned       c, off;
     int            reload = 0;
+    /* T7 leaves four non-payload bits. Reject any set bit, like a reserved
+     * bit. Accumulate instead of testing here so the loop stays branch-free. */
+    uint64_t pad = 0u;
+    uint64_t padmask;
 
     if (!d)
         return KAC_E_ARG;
@@ -112,9 +91,8 @@ static int32_t kacdec_decode(kacdec_t *restrict d, int16_t *restrict out, uint32
     if (loop_en && !(d->flags & KAC_FLAG_LOOP))
         return KAC_E_NOLOOP;
 
-    /* Slice invariant loads hoisted out of the sample loop. A CHUNKED block
-     * boundary reloads them, which is outside that loop; a whole-tier file loads
-     * them once per call. */
+    /* Slice invariant loads hoisted out of the sample loop. A block boundary
+     * reloads them, which is outside that loop. */
     w     = d->w;
     shift = d->shift;
     nch   = (unsigned)d->channels;
@@ -122,27 +100,26 @@ static int32_t kacdec_decode(kacdec_t *restrict d, int16_t *restrict out, uint32
     dqt   = d->dqt;
     base  = d->data + d->blk_off;
 
-    slice = (d->pos - d->blk_start) / n;
-    off   = (d->pos - d->blk_start) % n;
+    slice   = (d->pos - d->blk_start) / n;
+    off     = (d->pos - d->blk_start) % n;
+    padmask = (((uint64_t)1u) << (60u - n * w)) - 1u;
 
     while (done < cnt) {
         uint32_t stop = loop_en ? d->loop_end : d->total;
 
         if (d->pos >= stop) {
             if (!loop_en)
-                return (int32_t)done; /* defensive: deliver what exists */
+                return pad ? KAC_E_DATA : (int32_t)done; /* defensive: deliver what exists */
             kac_snap_load(&d->ch[0], d->loop_snap);
             if (nch == 2)
                 kac_snap_load(&d->ch[1], d->loop_snap + KAC_SNAP_SIZE);
             d->pos = d->loop_start;
-            if (d->chunked)
-                kacdec_set_block(d, d->loop_blk_start, d->loop_blk_off);
+            kacdec_set_block(d, d->loop_blk_start, d->loop_blk_off);
             stop   = d->loop_end;
             reload = 1;
-        } else if (d->chunked && d->pos >= d->blk_start + d->blk_len) {
-            /* Step to the next block: its tier byte is the byte after this
-             * block's slices. The chain was walked at open, so the only thing
-             * this bound is for is a chain that runs past the data area. */
+        } else if (d->pos >= d->blk_start + d->blk_len) {
+            /* Next block starts after this block's slices; its tier byte is
+             * immediately before them. */
             uint32_t next = d->blk_off + kacdec_slice_bytes(d->blk_len, n, nch) + 1u;
             if (next >= d->data_bytes)
                 return KAC_E_DATA;
@@ -150,16 +127,17 @@ static int32_t kacdec_decode(kacdec_t *restrict d, int16_t *restrict out, uint32
             reload = 1;
         }
         if (reload) {
-            /* The prologue's set, less `nch`: the channel count cannot change
-             * under a call, and there is nothing else in either list. */
-            reload = 0;
-            w      = d->w;
-            shift  = d->shift;
-            n      = d->n;
-            dqt    = d->dqt;
-            base   = d->data + d->blk_off;
-            slice  = (d->pos - d->blk_start) / n;
-            off    = (d->pos - d->blk_start) % n;
+            /* Reload the slice invariants after a boundary; keep this list and
+             * the prologue's in sync. */
+            reload  = 0;
+            w       = d->w;
+            shift   = d->shift;
+            n       = d->n;
+            dqt     = d->dqt;
+            base    = d->data + d->blk_off;
+            slice   = (d->pos - d->blk_start) / n;
+            off     = (d->pos - d->blk_start) % n;
+            padmask = (((uint64_t)1u) << (60u - n * w)) - 1u;
         }
         seg = n - off;
         rem = stop - d->pos;
@@ -180,6 +158,9 @@ static int32_t kacdec_decode(kacdec_t *restrict d, int16_t *restrict out, uint32
             int16_t *restrict op        = out + (size_t)done * stride + c;
             unsigned i;
 
+            /* T7 is the only tier whose slice has bits outside the payload; the
+             * mask is zero for the rest, so this costs one AND and one OR. */
+            pad |= v & padmask;
             v <<= 4u + off * w;
             /* Two samples per pass; the tail below handles an odd seg. */
             for (i = 0; i + 1 < seg; i += 2) {
@@ -198,6 +179,19 @@ static int32_t kacdec_decode(kacdec_t *restrict d, int16_t *restrict out, uint32
                 *op = (int16_t)kac_step(ch, row[qr]);
                 op += stride;
             }
+            if (d->ms && c + 1u == nch) {
+                /* Merge once per segment, after both channels are written. The
+                 * clamp is needed; a segment never crosses a block. */
+                uint32_t j;
+                for (j = 0; j < seg; j++) {
+                    /* the two channels of one sample sit next to each other;
+                     * the samples of one channel are `stride` apart */
+                    int16_t *restrict p = out + (size_t)(done + j) * stride;
+                    int32_t m = p[0], s = p[1];
+                    p[0] = (int16_t)kac_clamp16(m + s);
+                    p[1] = (int16_t)kac_clamp16(m - s);
+                }
+            }
         }
         d->pos += seg;
         done += seg;
@@ -207,7 +201,7 @@ static int32_t kacdec_decode(kacdec_t *restrict d, int16_t *restrict out, uint32
             slice++;
         }
     }
-    return (int32_t)done;
+    return pad ? KAC_E_DATA : (int32_t)done;
 }
 
 void kacdec_init(kacdec_t *restrict d)
@@ -245,38 +239,43 @@ void kacdec_set_loop(kacdec_t *restrict d, int enable)
     d->loop_en = enable ? 1 : 0;
 }
 
-/* Whether a tier number is one the format admits -- the range kac_int.h's tier
- * table spans. The header's Tier field and every chunk's tier byte are both
- * held to this. */
+/* Whether a tier number is one the format admits (Section 5.1). The header's
+ * Tier field and every chunk's tier byte are both held to this. */
 static int kacdec_tier_ok(unsigned tier)
 {
     return tier >= (unsigned)KAC_TIER_MIN && tier <= (unsigned)KAC_TIER_MAX;
 }
 
-/* A chunk's tier byte, read and judged in one place: legal by kacdec_tier_ok,
- * and chunk 0's equal to the header's. `*n` comes back as that tier's slice
- * length, which is what every caller needs next -- and taking it from here is
- * what keeps the table indexed only after the range check. Who calls this
- * decides how the refusal is reported, since an open rejects the image and a
- * seek rejects the index entry.
- *
- * `is_chunk0` is what the callers know differently: the chunk walk reads it off
- * the byte's own position. A seek entry is not judged as chunk 0's -- the walk
- * validated the chain when the image was opened. */
+/* Whether the file may carry the coded form at all: two channels to make a pair
+ * of, and a file that declares it (Section 3.1). The header's Tier field and
+ * every chunk's tier byte share this predicate, so a byte that says coded in a
+ * file that declares nothing, or with one channel, is refused. */
+static int kacdec_form_ok(const kacdec_t *restrict d)
+{
+    return d->channels == 2 && (d->flags & KAC_FLAG_MS) != 0u;
+}
+
+/* Validate a chunk's tier byte and return its slice length. Callers decide how
+ * to report failure. `is_chunk0` also requires agreement with the header. */
 static int kacdec_tier_byte(const kacdec_t *restrict d, unsigned b, int is_chunk0,
                             unsigned *restrict n)
 {
-    if (!kacdec_tier_ok(b) || (is_chunk0 && b != (unsigned)d->tier))
+    if ((b & KAC_TIER_SPARE) != 0u || !kacdec_tier_ok(b & KAC_TIER_MASK))
         return KAC_E_TIER;
-    *n = kac_tiers[b - 1u].n;
+    if ((b & KAC_BLOCK_MS) != 0u && !kacdec_form_ok(d))
+        return KAC_E_TIER;
+    /* Chunk 0 and the header state the same thing twice -- the tier and the
+     * channel form -- and the two halves are judged together, so a byte that
+     * agrees on the tier but not on the form is still refused. */
+    if (is_chunk0 &&
+        ((b & KAC_TIER_MASK) != (unsigned)d->tier || ((b & KAC_BLOCK_MS) ? 1 : 0) != d->ms))
+        return KAC_E_TIER;
+    *n = kac_tiers[(b & KAC_TIER_MASK) - 1u].n;
     return KAC_OK;
 }
 
-/* The 36 byte header, decoded and judged: magic, Version, the reserved flag
- * bits, Channels, Tier and SampleRate, with *off coming back at the first byte
- * after them where the snapshots start. The loop fields and the four length
- * fields are decoded here too; what they have to satisfy is checked by the
- * caller, which is the one holding the rest of the image to check it against. */
+/* Decode the common header fields. Length and loop validation belongs to the
+ * caller because file and stream rules differ. */
 static int kacdec_head(kacdec_t *restrict d, const uint8_t *restrict buf, size_t len,
                        size_t *restrict off)
 {
@@ -292,7 +291,8 @@ static int kacdec_head(kacdec_t *restrict d, const uint8_t *restrict buf, size_t
     d->version       = buf[4];
     d->flags         = buf[5];
     d->channels      = buf[6];
-    d->tier          = buf[7];
+    d->tier          = (unsigned)buf[7] & KAC_TIER_MASK;
+    d->ms            = (buf[7] & KAC_BLOCK_MS) ? 1 : 0;
     d->sample_rate   = kac_get32(buf + 8);
     d->total         = kac_get32(buf + 12);
     d->loop_start    = kac_get32(buf + 16);
@@ -305,29 +305,33 @@ static int kacdec_head(kacdec_t *restrict d, const uint8_t *restrict buf, size_t
         return KAC_E_VERSION;
     if (d->flags & KAC_FLAG_RESERVED)
         return KAC_E_FLAGS;
-    if (d->channels != 1 && d->channels != 2)
+    if (d->channels < 1 || d->channels > KAC_MAX_CHANNELS)
         return KAC_E_CHANNEL;
-    if (!kacdec_tier_ok(d->tier))
+    if ((buf[7] & KAC_TIER_SPARE) != 0u || !kacdec_tier_ok(d->tier))
         return KAC_E_TIER;
+    /* The header's Tier field states chunk 0's form, and chunk 0's own byte is
+     * held to the same predicate when the walk reaches it. */
+    if (d->ms && !kacdec_form_ok(d))
+        return KAC_E_FLAGS;
 
-    ti         = (unsigned)d->tier - 1u;
-    d->w       = kac_tiers[ti].w;
-    d->n       = kac_tiers[ti].n;
-    d->shift   = 64u - d->w;
-    d->chunked = (d->flags & KAC_FLAG_CHUNKED) ? 1 : 0;
-    d->dqt     = kac_pick_dqt(d->tier);
-    *off       = KAC_HDR_SIZE;
+    ti       = (unsigned)d->tier - 1u;
+    d->w     = kac_tiers[ti].w;
+    d->n     = kac_tiers[ti].n;
+    d->shift = 64u - d->w;
+    d->dqt   = kac_pick_dqt(d->tier);
+    *off     = KAC_HDR_SIZE;
     return KAC_OK;
 }
 
-/* Everything a file has to state, validated before anything decodes: a file
- * declares its own length and its own loop, and both are held to that. */
-static int open_image(kacdec_t *restrict d, const uint8_t *restrict buf, size_t len)
+/* Validate and open a complete file image. The block walk checks that the tier
+ * bytes and slice lengths land exactly on TotalSamples and DataBytes. */
+static int open_file(kacdec_t *restrict d, const uint8_t *restrict buf, size_t len)
 {
     uint64_t need;
     size_t   off, snap_off;
     int      rc;
 
+    d->stream = 0; /* a handle reused as a file must not still claim a feed */
     rc        = kacdec_head(d, buf, len, &off);
     if (rc != KAC_OK)
         return rc;
@@ -344,35 +348,21 @@ static int open_image(kacdec_t *restrict d, const uint8_t *restrict buf, size_t 
             return KAC_E_LOOP;
     }
 
-    if (!d->chunked) {
-        uint64_t expect = kacdec_slice_bytes(d->total, d->n, d->channels);
-        if ((uint64_t)d->data_bytes != expect)
-            return KAC_E_DATA;
-    }
-
     if (d->flags & KAC_FLAG_SEEK) {
         if (d->index_stride == 0)
             return KAC_E_INDEX;
-        /* Two rules, not one. CHUNKED puts every index point on a block
-         * boundary; the whole-tier rule (>= N and a multiple of N) stands on
-         * its own and is not replaced by this one -- applying the chunked rule
-         * there would refuse legal IndexStride = 5120 files. */
-        if (d->chunked) {
-            if (d->index_stride % KAC_CHUNK_SAMPLES != 0u)
-                return KAC_E_INDEX;
-        } else if (d->index_stride % d->n != 0) {
+        /* KAC_SPEC.md Section 3.1, the IndexStride row: an index point is a block
+         * boundary, so the stride is a multiple of the block length. */
+        if (d->index_stride % kac_block_for_rate(d->sample_rate) != 0u)
             return KAC_E_INDEX;
-        }
         if (d->index_entries != (d->total - 1u) / d->index_stride + 1u)
             return KAC_E_INDEX;
     } else if (d->index_stride != 0 || d->index_entries != 0) {
         return KAC_E_INDEX;
     }
 
-    /* Offsets are accumulated as plain numbers and every pointer into the image
-     * is formed only after the length check below: a file may declare a
-     * DataBytes that reaches far past the end of buf, and forming a pointer
-     * outside the object is undefined behaviour even when it is never read. */
+    /* Compute offsets as numbers and form pointers only after the length check;
+     * forming a pointer past the buffer is undefined even if never read. */
     off += (d->flags & KAC_FLAG_INIT) ? (size_t)d->channels * KAC_SNAP_SIZE : 0u;
     snap_off = off;
     off += (d->flags & KAC_FLAG_LOOP) ? (size_t)d->channels * KAC_SNAP_SIZE : 0u;
@@ -390,18 +380,10 @@ static int open_image(kacdec_t *restrict d, const uint8_t *restrict buf, size_t 
     off += (size_t)d->index_entries * 4u;
     d->idx_snap = (d->flags & KAC_FLAG_SEEK) ? buf + off : NULL;
 
-    /* --- the walk -----------------------------------------------------------
-     * A file states its own length, so the chain is held to it before anything
-     * decodes: the walk below is that check, and block 0 is entered through the
-     * same call the walk uses. */
-    if (d->chunked) {
-        /* With N varying per block there is no closed form, so the check walks
-         * the chunks instead -- reading each tier byte, accumulating that
-         * chunk's sample count and its slice bytes, and requiring the walk to
-         * land exactly on TotalSamples and DataBytes. The length check above
-         * already put the whole data area inside buf, and every read below is
-         * guarded by `tb < data_bytes`, so the walk cannot leave the object; a
-         * truncated file is rejected. */
+    /* Walk the block chain: the tier byte fixes each block's length. The walk
+     * must land exactly on TotalSamples and DataBytes; this also rejects data
+     * with no tier bytes, unless coincidental bytes make both counts agree. */
+    {
         uint32_t cov   = 0u; /* samples covered */
         uint32_t tb    = 0u; /* offset of the current block's tier byte */
         int      first = 1;
@@ -409,12 +391,12 @@ static int open_image(kacdec_t *restrict d, const uint8_t *restrict buf, size_t 
             uint32_t blk = d->total - cov;
             uint32_t slice_off;
             unsigned nn;
-            if (blk > KAC_CHUNK_SAMPLES)
-                blk = KAC_CHUNK_SAMPLES;
+            if (blk > kac_block_for_rate(d->sample_rate))
+                blk = kac_block_for_rate(d->sample_rate);
             if (tb >= d->data_bytes)
                 return KAC_E_DATA;
             if (kacdec_tier_byte(d, (unsigned)d->data[tb], first, &nn) != KAC_OK)
-                return KAC_E_TIER; /* the header's Tier is chunk 0's tier */
+                return KAC_E_TIER; /* Section 3.1: Tier is block 0's tier */
             first     = 0;
             slice_off = tb + 1u;
             tb        = slice_off + kacdec_slice_bytes(blk, nn, d->channels);
@@ -426,11 +408,9 @@ static int open_image(kacdec_t *restrict d, const uint8_t *restrict buf, size_t 
             }
             cov += blk;
         }
-        if (cov != d->total || tb != d->data_bytes)
+        if (tb != d->data_bytes)
             return KAC_E_DATA;
         kacdec_set_block(d, 0u, 1u); /* block 0's tier byte is at data[0] */
-    } else {
-        kacdec_enter(d, 0u, 0u, (unsigned)d->tier, d->total);
     }
 
     kacdec_start(d);
@@ -444,10 +424,111 @@ int kacdec_open(kacdec_t *restrict d, const uint8_t *restrict buf, size_t len)
     int rc;
     if (!d)
         return KAC_E_ARG;
-    rc = open_image(d, buf, len);
+    rc = open_file(d, buf, len);
     if (rc != KAC_OK)
         kacdec_inert(d);
     return rc;
+}
+
+/* Validate and open a stream preamble. */
+static int open_stream(kacdec_t *restrict d, const uint8_t *restrict head, size_t len)
+{
+    size_t off;
+    int    rc;
+
+    rc = kacdec_head(d, head, len, &off);
+    if (rc != KAC_OK)
+        return rc;
+    if (d->flags & KAC_FLAG_SEEK)
+        return KAC_E_FLAGS; /* the index trails the data a stream never reaches */
+    if (d->flags & KAC_FLAG_LOOP)
+        return KAC_E_LOOP; /* wrapping needs a block the decoder has given back */
+    /* A stream states its chunk's sample count in IndexStride and carries no
+     * index entries: that count is what lets a receiver frame the bytes. */
+    if (d->index_stride == 0u || d->index_stride > KAC_CHUNK_SAMPLES)
+        return KAC_E_INDEX;
+    if (d->index_entries != 0u)
+        return KAC_E_INDEX;
+    if ((d->flags & KAC_FLAG_INIT) != 0u &&
+        (uint64_t)len < (uint64_t)off + (uint64_t)d->channels * KAC_SNAP_SIZE)
+        return KAC_E_SIZE;
+
+    /* Drop file length fields; IndexStride was validated as the chunk length.
+     * TotalSamples becomes the running fed-sample count. */
+    d->total         = 0u;
+    d->data_bytes    = 0u;
+    d->index_stride  = 0u;
+    d->index_entries = 0u;
+    d->loop_snap     = NULL;
+    d->idx_off       = NULL;
+    d->idx_snap      = NULL;
+    d->init_snap     = ((d->flags & KAC_FLAG_INIT) != 0u) ? head + off : NULL;
+    d->data          = NULL; /* the first feed supplies it */
+    d->pos           = 0u;
+    d->loop_en       = 0;
+    d->stream        = 1;
+
+    kacdec_start(d);
+    /* The preamble is consumed here; INIT_STATE was loaded into the handle. */
+    d->init_snap = NULL;
+    d->blk_start = 0u;
+    d->blk_len   = 0u;
+    d->blk_off   = 0u;
+    return KAC_OK;
+}
+
+int kacdec_stream_open(kacdec_t *restrict d, const uint8_t *restrict head, size_t len)
+{
+    int rc;
+    if (!d)
+        return KAC_E_ARG;
+    rc = open_stream(d, head, len);
+    if (rc != KAC_OK)
+        kacdec_inert(d);
+    return rc;
+}
+
+int kacdec_stream_feed(kacdec_t *restrict d, const uint8_t *restrict blk, size_t len)
+{
+    uint32_t start, samples, nbytes, limit;
+    unsigned nch, n, nsl, slbytes;
+
+    if (!d || !blk)
+        return KAC_E_ARG;
+    if (!d->stream)
+        return KAC_E_ARG; /* a file is handed over whole, at open */
+    if (d->pos != d->total)
+        return KAC_E_ARG; /* the previous feed is not decoded yet */
+    nch     = (unsigned)d->channels;
+    slbytes = KAC_SLICE_SIZE * nch; /* one slice, every tier, every channel count */
+
+    /* Bound before computing slice count so 32-bit arithmetic is safe. */
+    limit = 1u + (KAC_CHUNK_SAMPLES / kac_narrowest_n()) * slbytes;
+    if (len == 0u || len > (size_t)limit)
+        return KAC_E_SIZE;
+    nbytes = (uint32_t)len;
+    start  = d->total;
+
+    /* Section 3.1 holds here too: the header's Tier is block 0's tier. */
+    if (kacdec_tier_byte(d, (unsigned)blk[0], start == 0u, &n) != KAC_OK)
+        return KAC_E_TIER;
+    if ((nbytes - 1u) % slbytes != 0u)
+        return KAC_E_SIZE;
+    nsl = (nbytes - 1u) / slbytes;
+    /* Every tier's n divides KAC_CHUNK_SAMPLES, so the bound on the slice count
+     * is also the bound on the block length. */
+    if (nsl == 0u || nsl > KAC_CHUNK_SAMPLES / n)
+        return KAC_E_SIZE;
+    samples = nsl * n;
+    if (samples > KAC_MAX_TOTAL - start)
+        return KAC_E_TOTAL;
+    d->data  = blk;
+    d->total = start + samples;
+    /* The same entry the file path takes into block 0: the tier byte at
+     * slice_off - 1 is the one this feed was validated against. */
+    kacdec_set_block(d, start, 1u);
+    /* The block guard cannot fire here: a feed ends exactly at TotalSamples. */
+    return KAC_OK;
 }
 
 int32_t kacdec_read(kacdec_t *restrict d, int16_t *restrict out, uint32_t frames)
@@ -465,7 +546,7 @@ int32_t kacdec_read(kacdec_t *restrict d, int16_t *restrict out, uint32_t frames
 
 int kacdec_seek(kacdec_t *restrict d, uint32_t sample)
 {
-    uint32_t k, sl, expect;
+    uint32_t k, ent, pos, len, nn;
 
     if (!d)
         return KAC_E_ARG;
@@ -476,37 +557,24 @@ int kacdec_seek(kacdec_t *restrict d, uint32_t sample)
     k = sample / d->index_stride;
     if (k >= d->index_entries)
         return KAC_E_INDEX;
-    if (d->chunked) {
-        /* The offset table is necessary here, not redundant: the byte offset
-         * depends on the tier sequence, so there is no closed form to
-         * cross-check the entry against. What can still be checked is that the
-         * entry points at a real block: it must carry a tier byte and the
-         * block's slices must fit inside the data area. */
-        uint32_t ent = kac_get32(d->idx_off + (size_t)k * 4u);
-        uint32_t pos = k * d->index_stride;
-        uint32_t len, nn;
-        if (ent < 1u || ent >= d->data_bytes || pos % KAC_CHUNK_SAMPLES != 0u)
-            return KAC_E_INDEX;
-        /* The entry's byte is a chunk's tier byte, judged the same way. It
-         * cannot fail today -- opening the image walked the whole chain through
-         * this same check -- so what this is here for is the guard: it is what
-         * keeps kac_tiers indexed inside its bounds, and kacdec_set_block below
-         * takes the byte on trust. */
-        if (kacdec_tier_byte(d, (unsigned)d->data[ent - 1u], 0, &nn) != KAC_OK)
-            return KAC_E_INDEX;
-        len = d->total - pos;
-        if (len > KAC_CHUNK_SAMPLES)
-            len = KAC_CHUNK_SAMPLES;
-        if ((uint64_t)ent + (uint64_t)kacdec_slice_bytes(len, nn, d->channels) >
-            (uint64_t)d->data_bytes)
-            return KAC_E_INDEX;
-        kacdec_set_block(d, pos, ent);
-    } else {
-        sl     = (k * d->index_stride) / d->n;
-        expect = sl * KAC_SLICE_SIZE * d->channels;
-        if (kac_get32(d->idx_off + (size_t)k * 4u) != expect)
-            return KAC_E_INDEX;
-    }
+    /* Offsets cannot be derived from sample position (the tier sequence decides
+     * bytes), so validate that the entry points at a real block of matching size. */
+    ent = kac_get32(d->idx_off + (size_t)k * 4u);
+    pos = k * d->index_stride;
+    if (ent < 1u || ent >= d->data_bytes)
+        return KAC_E_INDEX;
+    /* The entry's byte is a tier byte; this also keeps kac_tiers indexed inside
+     * its bounds, since kacdec_set_block trusts the validated tier. */
+    if (kacdec_tier_byte(d, (unsigned)d->data[ent - 1u], 0, &nn) != KAC_OK)
+        return KAC_E_INDEX;
+    len = d->total - pos;
+    if (len > KAC_CHUNK_SAMPLES)
+        len = KAC_CHUNK_SAMPLES;
+    if ((uint64_t)ent + (uint64_t)kacdec_slice_bytes(len, nn, d->channels) >
+        (uint64_t)d->data_bytes)
+        return KAC_E_INDEX;
+    kacdec_set_block(d, pos, ent);
+
     kac_snap_load(&d->ch[0], d->idx_snap + (size_t)k * d->channels * KAC_SNAP_SIZE);
     if (d->channels == 2)
         kac_snap_load(&d->ch[1], d->idx_snap + ((size_t)k * d->channels + 1u) * KAC_SNAP_SIZE);

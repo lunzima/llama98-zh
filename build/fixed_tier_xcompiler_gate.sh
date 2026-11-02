@@ -59,6 +59,14 @@
 # shipping default itself (zero flags) as a distinct invocation shape;
 # nothing missing):
 #
+# The names below are the lz_*_select AXES in ops_sched.c, not command
+# line switches - none of them is accepted by the CLI. The gate drives
+# them through the switches that do exist (--fixed all, --kernel ref,
+# --scalar-fixed), so a reader grepping --help for "norm-write" finds
+# nothing and can conclude the gate is passing flags the CLI ignores.
+# It is not: run_one's exit-code check and its empty-file check would
+# both fire on a run that produced no dump.
+#
 #   (float baseline, control - see below)
 #   --recur-write fixed
 #   --recur-write float        (the newly-reachable inverse isolation -
@@ -210,12 +218,35 @@ if ! "$MAKE" native >"$WORK/gcc.build.log" 2>&1; then
     tail -n 20 "$WORK/gcc.build.log"
     exit 2
 fi
+# make's up-to-date check compares mtimes, so a source restored to an
+# OLDER mtime (git checkout of an earlier revision, cp from a backup)
+# leaves the previous object in place and the build reports success. The
+# gate would then compare two binaries that were not built from the tree
+# it just read - which presents as "the baseline already differs" or as
+# a boundary that moves with how the tree was restored, not with what
+# the code says. Refuse to run in that state rather than report it.
+#
+# One function, both toolchains: the same rule stated twice is the shape
+# that ends up stated once for one of them.
+require_fresh() {
+    local bin="$1" label="$2" newest_src
+    newest_src=$(ls -t "$ROOT"/src/*.c "$ROOT"/src/*.h "$ROOT"/common/*.c 2>/dev/null | head -1)
+    if [ -n "$newest_src" ] && [ "$newest_src" -nt "$bin" ]; then
+        echo "fixed_tier_xcompiler_gate: FAIL stale binary ($label)"
+        echo "  source newer than the build: $newest_src"
+        echo "  make did not rebuild it (its check is per-object mtime);"
+        echo "  rm -rf build/native build/watcom and re-run."
+        exit 2
+    fi
+}
+
 GCC_BIN="$ROOT/llama98.exe"
 [ -x "$GCC_BIN" ] || GCC_BIN="$ROOT/llama98"
 if [ ! -x "$GCC_BIN" ]; then
     echo "fixed_tier_xcompiler_gate: ERROR 'make native' produced no binary"
     exit 2
 fi
+require_fresh "$GCC_BIN" "gcc"
 
 echo "-- Watcom build --"
 if ! "$MAKE" watcom-cli >"$WORK/wat.build.log" 2>&1; then
@@ -228,6 +259,7 @@ if [ ! -f "$WAT_BIN" ]; then
     echo "fixed_tier_xcompiler_gate: ERROR 'make watcom-cli' produced no binary"
     exit 2
 fi
+require_fresh "$WAT_BIN" "watcom"
 
 # ---- run one (tier, corpus) pair on both toolchains, cmp the raw
 # --dump-all-logits bytes. ----------------------------------------------

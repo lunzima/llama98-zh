@@ -884,8 +884,17 @@ void lz_l2norm_i16(float *o, const short *x, int n, int e, float eps) {
     /* (float)acc first, then the power of two: the product of two
        exponent-only factors is exact either way, but splitting them
        keeps the convert on a value whose magnitude the caller can bound
-       from e alone. */
-    ss = (float)acc * pow2f(-2 * e);
+       from e alone.
+
+       acc is a wide integer sum (32767^2 * n reaches 4.4e12), so this
+       convert ROUNDS, and the two toolchains round it at different
+       points: cvtsi2ss rounds on the way into the register, while an
+       x87 fild keeps the exact integer and the multiply below absorbs
+       it into one later rounding. That is one ULP apart, the same
+       hazard lz_quantize_q8_int64's tamf barrier exists for. The
+       volatile store forces the float32 rounding on both, so the
+       multiply below starts from the same value. */
+    { volatile float accf = (float)acc; ss = accf * pow2f(-2 * e); }
     inv = lz_rsqrt(ss + eps);
     m = inv * pow2f(-e);
     for (i = 0; i < n; i++) o[i] = (float)x[i] * m;

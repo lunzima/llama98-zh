@@ -81,7 +81,20 @@
 #define LZ_SMF_CHUNK_EVENTS (LZ_SMF_BUF_MAX / LZ_SMF_EVENT_BYTES)
 #endif
 
-#define LZ_SMF_MAX_TEMPI    64
+/* The tempo map is one flat array and 512 steps is its ceiling. A file
+ * with more is REFUSED with LZ_SMF_TOO_BIG rather than played with a
+ * truncated map: a tempo step that is dropped moves every event after
+ * it in time, which is a piece playing wrong rather than playing less.
+ * The reader cannot represent such a file, so it says so.
+ *
+ * 64 WAS TOO LOW AND REFUSED REAL FILES. A survey of 13 MIDIs from the
+ * xqwizard collection: five carried more tempo events than the old cap
+ * - 79 (Fuer Elise), 156, 233, 501 - and none of them was corrupt. A
+ * tempo event that restates the value already in force changes
+ * nothing, so both collection and the sorted map drop those first
+ * (MARIO1's 501 events carry 10 distinct values), and the cap applies
+ * to what is left. */
+#define LZ_SMF_MAX_TEMPI    512
 
 /* Surveyed: 13 is the most any file here uses. 64 is room for four
  * times that; a file with more has its extra tracks REFUSED rather
@@ -99,6 +112,12 @@ typedef struct {
     unsigned long us_qn;  /* microseconds per quarter note */
 } LZSmfTempo;
 
+/* `tm[]` in LZSmfReader is SORTED BY TICK once lz_smf_open returns -
+ * tempo events arrive track by track and lz_smf_tempo_at, scale_tick
+ * both walk the array as a monotonic map. Steps that share a tick keep
+ * the order they were collected in, which is the lower track index
+ * first. */
+
 /* One track's position. The pending event is DECODED and waiting: the
  * merge has to compare ticks before it knows which track to take
  * from, so each cursor always holds the next event it would give. */
@@ -108,6 +127,11 @@ typedef struct {
     unsigned long msg;
     int status;           /* running status */
     int live;             /* 0 once the track is spent */
+    /* The last tempo THIS TRACK stated, so a restatement of the value
+       already in force is not stored a second time. A file that writes
+       the tempo on every beat is common and says nothing new. */
+    unsigned long last_us;
+    int have_us;
 } LZSmfTrack;
 
 typedef struct {
@@ -178,7 +202,10 @@ int lz_smf_next(LZSmfReader *r, LZSmfEvent *out);
 int lz_smf_opening_program(LZSmfReader *scratch, const unsigned char *img,
                            long size);
 
-/* The tempo in force at a file tick. Exposed so a gate can ask it. */
+/* The tempo in force at a file tick. Exposed so a gate can ask it.
+ * `tm` must be sorted by tick the way lz_smf_open leaves it; the walk
+ * stops at the first step past `tick`, so an unsorted array would
+ * answer with whichever step happened to follow. */
 unsigned long lz_smf_tempo_at(const LZSmfTempo *tm, int n,
                               unsigned long tick);
 
