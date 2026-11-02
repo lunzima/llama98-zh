@@ -3,11 +3,14 @@
 
 /* llama98 engine public API.
    Model construction supports two families. The Qwen3.5/3.6 one
-   (qwen3_5_text): GatedDeltaNet linear attention alternating with gated
-   full attention + SiLU-gated FFN + RMSNorm. And the KunMoe variant
-   (model_type "kunmoe"): KDA linear attention with per-channel decay,
-   and/or a latent MoE FFN - see model.h, which has carried the fields
-   for it since bin v4.
+   (model_type "qwen3_5_text"): GatedDeltaNet linear attention alternating
+   with gated full attention + SiLU-gated FFN + RMSNorm. And the KunMoe
+   variant (model_type "kunmoe"): KDA linear attention with per-channel
+   decay, and/or a latent MoE FFN - see model.h, which has carried the
+   fields for it since bin v4.
+   Those model_type strings are the export side's labels. The engine tells
+   the two apart by the checkpoint's own linear-layer tensor names, not by
+   them - see arch_probe in model.c.
    KunMoe support is verified rather than assumed: the export tool
    takes model_type=kunmoe through its is_kunmoe branch, the resulting
    v4 bin passes `llama98 --check`, and greedy decoding produces fluent
@@ -396,7 +399,7 @@ typedef struct {
        No LZStateCkpt parameter to plumb through, unlike lz_spec_round's
        own "no checkpoint, the ring does it for free" note - PLD is the
        opposite case: with no MTP head, s->ssm_ring_depth is 1
-       (forward.c's state-alloc), so there is no ring to roll back
+       (forward_state.c's state-alloc), so there is no ring to roll back
        through. lz_generate_call owns one LZStateCkpt for this,
        allocated only when pld_ngram>0 && pld_tokens>0 - same shape
        look_active/look_ck already has for lz_look_pick, and the same
@@ -560,8 +563,8 @@ int lz_spec_accept_temp(const float *p, const float *q, int x, int vocab,
    fills it.
 
    No LZStateCkpt parameter - per-round rollback goes through the
-   SSM/conv ring instead of caller-owned checkpoint scratch;
-   LZStateCkpt's only caller is LZPrefixCache. */
+   SSM/conv ring instead of caller-owned checkpoint scratch. One is
+   carried by LZPrefixCache, lz_look_pick and lz_generate_pld_round. */
 int lz_spec_round(const LZModel *m, LZRunState *s,
                   int anchor, int anchor_pos, int k,
                   float p_min, int n_min, const LZSampler *samp,
@@ -588,6 +591,73 @@ int lz_spec_round_temp(const LZModel *m, LZRunState *s,
                        int debug_break_rollback, int debug_skip_catchup,
                        int *out, int *out_n_accept, int *out_new_pos,
                        int *out_k_eff, char *errbuf, int errlen);
+
+/* DSpark (arXiv:2607.05147, config.mtp_n_draft > 1) speculative round -
+   a THIRD sibling, not a branch inside lz_spec_round: the two draft
+   mechanisms share nothing below the verify/accept/rollback layer, and
+   forcing one function to cover both would mean every reader of
+   lz_spec_round's already-dense module comment has to first work out
+   which paragraphs still apply under this config. Greedy only - see
+   lz_spec_round_dspark_temp below for the coupled-sampling (temp>0)
+   analog.
+
+   Structurally simpler than lz_spec_round, for a reason worth stating
+   up front: lz_mtp_draft_batch's k slots are each an independent,
+   from-the-anchor-hidden-state computation (forward_mtp.c's own comment on
+   why this is not a self-chain), so none of lz_spec_round's MTP-KV-
+   history machinery applies here - there is no s->mtp_pos to advance
+   or roll back (every round starts over from s->mtp_chain alone, the
+   same register lz_spec_round already reseeds at its own tail) and
+   therefore no catch-up decode to run (that mechanism exists solely to
+   correct ESTIMATED hidden states an autoregressive chain leaves in a
+   persistent KV cache - DSpark's slots never write one). No
+   debug_skip_catchup parameter for the same reason: there is nothing
+   for it to skip.
+
+   Parameter/return/error conventions otherwise match lz_spec_round
+   exactly (k against LZ_SPEC_K_MAX, s->ssm_ring_depth-1, AND
+   config.mtp_n_draft - all three are hard capacities, refused rather
+   than clamped; p_min, n_min, samp, debug_break_rollback, out, and
+   errbuf are all the same). The one behavioral difference beyond the missing
+   catch-up: each drafted slot's logits get the Markov head's one-step
+   correction (lz_mtp_markov_correct) BEFORE the argmax/p_min test,
+   using the previous slot's own just-decided draft token as x_prev
+   (the anchor's real next token for slot 0) - this is not optional
+   post-processing, it is the trained head's own output distribution,
+   the same way lz_spec_round's argmax already runs on the trained fc
+   head's full output rather than some earlier intermediate. */
+int lz_spec_round_dspark(const LZModel *m, LZRunState *s,
+                         int anchor, int anchor_pos, int k,
+                         float p_min, int n_min, const LZSampler *samp,
+                         int debug_break_rollback,
+                         int *out, int *out_n_accept, int *out_new_pos,
+                         int *out_k_eff, char *errbuf, int errlen);
+
+/* temp>0 DSpark round - the coupled-sampling analog of lz_spec_round_
+   dspark above, mirroring lz_spec_round_temp's own relationship to
+   lz_spec_round exactly (same reason: lz_spec_round_dspark's source
+   stays structurally untouched by anything written for temp>0, and the
+   temperature-independent back half - verify, coupled accept, ring
+   rollback, mtp_chain reseed - is duplicated rather than shared, same
+   trade-off lz_spec_round_temp's own comment already accepts).
+
+   samp REQUIRED and NOT const, p_min compared against q(idx) after
+   lz_sample_temp_q, acceptance via lz_spec_accept_temp, bonus row
+   sampled directly - all identical to lz_spec_round_temp's own
+   contract (llama_zh.h/generate.c). The only difference from THAT
+   function is the same one lz_spec_round_dspark already has over
+   lz_spec_round: one lz_mtp_draft_batch call produces all k slots' base
+   logits up front, each gets lz_mtp_markov_correct'd in slot order
+   (x_prev = anchor for slot 0, the previous slot's own sampled draft
+   token otherwise) before lz_sample_temp_q runs on it, and there is no
+   s->mtp_pos advance or catch-up decode (lz_spec_round_dspark's own
+   header comment explains why neither applies). */
+int lz_spec_round_dspark_temp(const LZModel *m, LZRunState *s,
+                              int anchor, int anchor_pos, int k,
+                              float p_min, int n_min, LZSampler *samp,
+                              int debug_break_rollback,
+                              int *out, int *out_n_accept, int *out_new_pos,
+                              int *out_k_eff, char *errbuf, int errlen);
 
 /* Full generation. prompt is given in bytes (UTF-8); it is encoded to
    tokens and forwarded token by token. Only the post-prompt generation
@@ -857,7 +927,7 @@ typedef struct {
 } LZSessionPool;
 
 int  lz_pool_init(LZSessionPool *p, const LZModel *m, int n_slots,
-                  int seq_len, char *errbuf, int errlen);
+                  int seq_len, int spec_k_max, char *errbuf, int errlen);
 void lz_pool_free(LZSessionPool *p);
 
 /* Pick the best slot for `render` and prepare it. Same contract as

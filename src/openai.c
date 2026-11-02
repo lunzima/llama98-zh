@@ -460,6 +460,7 @@ static void completions(LZOpenAICtx *c, const LZHttpReq *req, LZHttpResp *rs) {
 
     lz_gen_opts_defaults(&g);
     lz_gen_opts_set_eos(&g, c->tok);
+    g.spec_k = c->spec_k;
     g.max_new_tokens = r->max_tokens > 0 ? r->max_tokens : c->max_new_default;
     if (r->has_temp) g.sample.temperature = (float)r->temp;
     if (r->has_topp) g.sample.topp = (float)r->topp;

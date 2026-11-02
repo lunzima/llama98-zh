@@ -60,6 +60,10 @@
  * shellapi.h's automatic include - so a file that wants Drag* has to
  * ask for it by name, same as commdlg.h and shlobj.h just above. */
 #include <shellapi.h>
+/* mmsystem.h explicitly: WIN32_LEAN_AND_MEAN (the floor flags set it)
+ * leaves it out of windows.h, and this is the one file that may name
+ * what is in it. */
+#include <mmsystem.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -1055,4 +1059,450 @@ int lz_find_parse(LPARAM lp, int *down, int *match_case,
         return 2;
     }
     return 0;
+}
+
+/* ---- a clock for intervals lz_time_ms cannot resolve ----
+ *
+ * See compat40.h for the measurement. Two things make this one exact:
+ * the counter stays an integer, and the ORIGIN is subtracted before
+ * anything is converted, so the number being scaled is the length of
+ * the interval and not the machine's uptime.
+ *
+ * The conversion is integer throughout. There is no float in it to
+ * lose the low bits of a microsecond, and a divide that truncates is
+ * the right answer here - the caller wants "not 100 ms", and 0.4 us of
+ * truncation is not that.
+ *
+ * Can the multiplication overflow lz_i64? The product is the interval
+ * in microseconds TIMES the counter's frequency, so at a 10 MHz
+ * counter it reaches 9.2e18 - the widest lz_i64 - at about 9e11 us,
+ * which is ten days of CONTINUOUS playback inside one process. lz_i64
+ * rather than long for that reason and not for tidiness: a 32-bit
+ * count would wrap in 72 minutes. */
+static int    g_us_state;   /* 0 not probed, 1 counter, 2 tick */
+static lz_i64 g_us_freq;
+static lz_i64 g_us_org;
+static lz_i64 g_us_last;    /* the last answer, see the frozen case below */
+static DWORD  g_us_tick;
+
+static void us_probe(void) {
+    LARGE_INTEGER f, c;
+    /* The tick counter is what is left if either call is missing or
+       answers nothing: GetTickCount is on every target this front end
+       has ever had, where a performance counter is not (Win32s, and
+       the 3.51 floor's own kernel are the ones to expect it absent
+       from). */
+    g_us_state = 2;
+    g_us_tick = GetTickCount();
+    if (QueryPerformanceFrequency(&f) && f.QuadPart > 0 &&
+        QueryPerformanceCounter(&c)) {
+        g_us_freq = (lz_i64)f.QuadPart;
+        g_us_org  = (lz_i64)c.QuadPart;
+        g_us_state = 1;
+    }
+}
+
+lz_i64 lz_ui_us_now(void) {
+    LARGE_INTEGER c;
+    if (!g_us_state) us_probe();
+    if (g_us_state == 1) {
+        if (QueryPerformanceCounter(&c))
+            g_us_last = ((lz_i64)c.QuadPart - g_us_org) * LZ_I64_C(1000000)
+                        / g_us_freq;
+        /* A counter that answered once and then stops is not something
+           that happens; answering with the tick fallback's origin
+           instead would jump the clock by however long the process has
+           been up, which reads as the thing this clock exists to rule
+           out. Standing still is the honest failure. */
+        return g_us_last;
+    }
+    return (lz_i64)(unsigned long)(GetTickCount() - g_us_tick) * 1000;
+}
+
+int lz_ui_us_fine(void) {
+    if (!g_us_state) us_probe();
+    return g_us_state == 1;
+}
+
+/* ---- MIDI streaming ----
+ *
+ * See compat40.h for why the whole family is resolved rather than
+ * imported, and for the measurement that put it at the 4.0 level.
+ *
+ * DWORD_PTR is spelled LZ_IPTR_T, for the reason that typedef already
+ * gives: basetsd.h is not reachable at the API floor, and the two
+ * toolchains disagree about the width (four bytes under 32-bit Watcom,
+ * eight under the 64-bit gcc build). Getting it wrong is not a
+ * compile error on either - it is a stdcall frame that does not
+ * match. */
+typedef MMRESULT (WINAPI *MidiStreamOpenFn)(HMIDISTRM *, UINT *, DWORD,
+                                            LZ_IPTR_T, LZ_IPTR_T, DWORD);
+typedef MMRESULT (WINAPI *MidiStreamCloseFn)(HMIDISTRM);
+typedef MMRESULT (WINAPI *MidiStreamPropFn)(HMIDISTRM, LPBYTE, DWORD);
+typedef MMRESULT (WINAPI *MidiStreamOutFn)(HMIDISTRM, LPMIDIHDR, UINT);
+typedef MMRESULT (WINAPI *MidiStreamGoFn)(HMIDISTRM);
+typedef MMRESULT (WINAPI *MidiOutHdrFn)(HMIDIOUT, LPMIDIHDR, UINT);
+typedef MMRESULT (WINAPI *MidiOutResetFn)(HMIDIOUT);
+typedef MMRESULT (WINAPI *MidiStreamPosFn)(HMIDISTRM, LPMMTIME, UINT);
+
+static HMODULE            g_winmm;
+static int                g_winmm_tried;
+static MidiStreamOpenFn   p_midiStreamOpen;
+static MidiStreamCloseFn  p_midiStreamClose;
+static MidiStreamPropFn   p_midiStreamProperty;
+static MidiStreamOutFn    p_midiStreamOut;
+static MidiStreamGoFn     p_midiStreamRestart;
+static MidiStreamGoFn     p_midiStreamStop;
+static MidiOutHdrFn       p_midiOutPrepareHeader;
+static MidiOutHdrFn       p_midiOutUnprepareHeader;
+static MidiOutResetFn     p_midiOutReset;
+static MidiStreamPosFn    p_midiStreamPosition;
+
+static HMIDISTRM g_strm;
+static MIDIHDR   g_hdr[LZ_UI_MIDI_SLOTS];
+static int       g_prepared[LZ_UI_MIDI_SLOTS];
+
+/* winmm.dll, loaded at most once. TWO families of entry point come out of
+   it, and they are resolved INDEPENDENTLY, which is the point: NT 3.51 has
+   waveOut and does not have midiStreamOpen, so a system can have one and not
+   the other. Folding the load into either family's resolution would let the
+   first caller decide for both - and the failure would be silent, because a
+   family that cannot resolve answers "no device" exactly the way a machine
+   with no device does. */
+static HMODULE winmm_load(void) {
+    if (!g_winmm_tried) {
+        g_winmm_tried = 1;
+        g_winmm = LoadLibraryA("winmm.dll");
+    }
+    return g_winmm;
+}
+
+static int midi_resolve(void) {
+    if (p_midiStreamOpen) return 1;
+    if (!winmm_load()) return 0;
+    p_midiStreamOpen = (MidiStreamOpenFn)LZ_PROC(g_winmm, "midiStreamOpen");
+    p_midiStreamClose = (MidiStreamCloseFn)LZ_PROC(g_winmm, "midiStreamClose");
+    p_midiStreamProperty =
+        (MidiStreamPropFn)LZ_PROC(g_winmm, "midiStreamProperty");
+    p_midiStreamOut = (MidiStreamOutFn)LZ_PROC(g_winmm, "midiStreamOut");
+    p_midiStreamRestart =
+        (MidiStreamGoFn)LZ_PROC(g_winmm, "midiStreamRestart");
+    p_midiStreamStop = (MidiStreamGoFn)LZ_PROC(g_winmm, "midiStreamStop");
+    p_midiOutPrepareHeader =
+        (MidiOutHdrFn)LZ_PROC(g_winmm, "midiOutPrepareHeader");
+    p_midiOutUnprepareHeader =
+        (MidiOutHdrFn)LZ_PROC(g_winmm, "midiOutUnprepareHeader");
+    p_midiOutReset = (MidiOutResetFn)LZ_PROC(g_winmm, "midiOutReset");
+    /* Resolved ALONE, deliberately outside the all-or-none set below:
+       this one only reports where the stream is, and a system whose
+       winmm cannot say is still a system that plays. Folding it in
+       would turn a missing REPORT into missing sound. */
+    p_midiStreamPosition =
+        (MidiStreamPosFn)LZ_PROC(g_winmm, "midiStreamPosition");
+    /* ALL of them or none. A half-resolved family is worse than an
+       absent one: it opens a stream it cannot stop, and the notes hang
+       on after the window is gone. */
+    if (!p_midiStreamOpen || !p_midiStreamClose || !p_midiStreamProperty ||
+        !p_midiStreamOut || !p_midiStreamRestart || !p_midiStreamStop ||
+        !p_midiOutPrepareHeader || !p_midiOutUnprepareHeader ||
+        !p_midiOutReset) {
+        p_midiStreamOpen = NULL;
+        return 0;
+    }
+    return 1;
+}
+
+int lz_ui_midi_open(HWND notify, int division) {
+    UINT dev = MIDI_MAPPER;
+    MIDIPROPTIMEDIV td;
+    if (g_strm) return 1;
+    if (!midi_resolve()) return 0;
+    if (division <= 0) return 0;
+    /* MIDI_MAPPER, not device 0: the mapper is what the user pointed at
+       whatever they want MIDI to come out of, and going straight to
+       device 0 would ignore that choice on every machine that has made
+       one.
+       A caller with no window has no MM_MOM_DONE to be told by, so it
+       gets CALLBACK_NULL and watches the header's own DONE flag instead
+       (lz_ui_midi_slot_free). The flag is the device's either way; the
+       callback is only how a window finds out. */
+    if (p_midiStreamOpen(&g_strm, &dev, 1, (LZ_IPTR_T)notify, 0,
+                         notify ? CALLBACK_WINDOW : CALLBACK_NULL)
+        != MMSYSERR_NOERROR) {
+        g_strm = NULL;
+        return 0;
+    }
+    td.cbStruct = sizeof td;
+    td.dwTimeDiv = (DWORD)division;
+    if (p_midiStreamProperty(g_strm, (LPBYTE)&td,
+                             MIDIPROP_SET | MIDIPROP_TIMEDIV)
+        != MMSYSERR_NOERROR) {
+        p_midiStreamClose(g_strm);
+        g_strm = NULL;
+        return 0;
+    }
+    return 1;
+}
+
+/* midiStreamPosition, in ticks. See compat40.h for why a failure to ask
+   is a 0 here and not a tick of 0. */
+int lz_ui_midi_position(unsigned long *tick) {
+    MMTIME mt;
+    if (!tick || !g_strm || !p_midiStreamPosition) return 0;
+    memset(&mt, 0, sizeof mt);
+    mt.wType = TIME_TICKS;
+    if (p_midiStreamPosition(g_strm, &mt, sizeof mt) != MMSYSERR_NOERROR)
+        return 0;
+    /* A device that answers in another unit fills in that member and
+       sets wType to it. Reading its number as ticks would be a position
+       in a unit the reader has no way to notice. */
+    if (mt.wType != TIME_TICKS) return 0;
+    *tick = (unsigned long)mt.u.ticks;
+    return 1;
+}
+
+int lz_ui_midi_send(int slot, const void *events, unsigned long bytes) {
+    MIDIHDR *h;
+    if (!g_strm || !events || bytes == 0) return 0;
+    if (slot < 0 || slot >= LZ_UI_MIDI_SLOTS) return 0;
+    h = &g_hdr[slot];
+    /* A slot that has been round before is re-prepared from scratch:
+       its buffer may be a different length this time, and MHDR_DONE
+       would otherwise still be set - midiStreamOut refuses a header
+       that says it has finished. */
+    if (g_prepared[slot]) {
+        p_midiOutUnprepareHeader((HMIDIOUT)g_strm, h, sizeof *h);
+        g_prepared[slot] = 0;
+    }
+    memset(h, 0, sizeof *h);
+    /* The cast drops const because MIDIHDR has no const form. Nothing
+       here writes through it; the device reads the buffer and sets
+       flags in the HEADER, which is ours. */
+    h->lpData = (LPSTR)events;
+    h->dwBufferLength = bytes;
+    h->dwBytesRecorded = bytes;
+    if (p_midiOutPrepareHeader((HMIDIOUT)g_strm, h, sizeof *h)
+        != MMSYSERR_NOERROR)
+        return 0;
+    g_prepared[slot] = 1;
+    if (p_midiStreamOut(g_strm, h, sizeof *h) != MMSYSERR_NOERROR) {
+        p_midiOutUnprepareHeader((HMIDIOUT)g_strm, h, sizeof *h);
+        g_prepared[slot] = 0;
+        return 0;
+    }
+    return 1;
+}
+
+/* 1 when the buffer in `slot` has come back to us, or was never handed
+   over. A caller with no window is not TOLD a buffer finished, so this
+   is how it asks; the flag it reads is the device's own, the same one
+   the notification is raised from. */
+int lz_ui_midi_slot_free(int slot) {
+    if (!g_strm || slot < 0 || slot >= LZ_UI_MIDI_SLOTS) return 0;
+    if (!g_prepared[slot]) return 1;
+    return (g_hdr[slot].dwFlags & MHDR_DONE) != 0;
+}
+
+int lz_ui_midi_go(void) {
+    if (!g_strm) return 0;
+    return p_midiStreamRestart(g_strm) == MMSYSERR_NOERROR;
+}
+
+void lz_ui_midi_stop(void) {
+    int i;
+    if (!g_strm) return;
+    p_midiStreamStop(g_strm);
+    /* Reset AFTER stop and before unprepare: stopping halts the clock
+       but leaves whatever was sounding sounding, and unpreparing a
+       header the device is still reading is refused. A note left on by
+       a stream that was torn down does not stop when the program
+       exits - it stops when something else resets the device, which
+       may be never. */
+    p_midiOutReset((HMIDIOUT)g_strm);
+    for (i = 0; i < LZ_UI_MIDI_SLOTS; i++) {
+        if (!g_prepared[i]) continue;
+        p_midiOutUnprepareHeader((HMIDIOUT)g_strm, &g_hdr[i],
+                                 sizeof g_hdr[i]);
+        g_prepared[i] = 0;
+    }
+}
+
+
+void lz_ui_midi_close(void) {
+    if (!g_strm) return;
+    lz_ui_midi_stop();
+    p_midiStreamClose(g_strm);
+    g_strm = NULL;
+}
+
+/* ---- waveOut ----------------------------------------------------------
+ * See compat40.h's own section for the measurement: the entry points and
+ * every type they need ARE visible at the floor, so what this resolve buys
+ * is not visibility - it is not linking an import library.
+ *
+ * The device is owned here rather than in a file of its own because its
+ * buffers are Win32 objects and this is the file that may carry them. What
+ * to render is policy and is not here. */
+typedef UINT (WINAPI *WaveOutOpenFn)(HWAVEOUT *, UINT, const WAVEFORMATEX *,
+                                     DWORD, DWORD, DWORD);
+typedef UINT (WINAPI *WaveOutHdrFn)(HWAVEOUT, WAVEHDR *, UINT);
+typedef UINT (WINAPI *WaveOutDevFn)(HWAVEOUT);
+
+#define LZ_WAVE_NBUF   4
+#define LZ_WAVE_FRAMES 1024
+
+static WaveOutOpenFn p_waveOutOpen;
+static WaveOutHdrFn  p_waveOutPrepareHeader;
+static WaveOutHdrFn  p_waveOutWrite;
+static WaveOutHdrFn  p_waveOutUnprepareHeader;
+static WaveOutDevFn  p_waveOutReset;
+static WaveOutDevFn  p_waveOutClose;
+
+static HWAVEOUT g_wh;
+static WAVEHDR  g_whdr[LZ_WAVE_NBUF];
+/* TWO CHANNELS, so a block holds twice as many samples as it does
+   frames. See lz_ui_wave_open for why the device is opened stereo. */
+static short    g_wbuf[LZ_WAVE_NBUF][LZ_WAVE_FRAMES * 2];
+static int      g_wnext;
+/* Which waveOut device to open: -1 is WAVE_MAPPER, the device the user
+   pointed Windows at. A caller that needs a different one - there are
+   five on this machine and the default is not always the one anybody
+   is listening to - says so with lz_ui_wave_device before opening. */
+static int      g_wdev = -1;
+/* THE DEVICE SIGNALS THIS WHEN A BUFFER COMES BACK. Polling the header's
+   own DONE flag instead was what this did first, and a poll asks a
+   question whose answer the driver is not obligated to publish on any
+   particular schedule; an event is the driver saying so. */
+static HANDLE   g_wev;
+
+static int wave_resolve(void) {
+    if (p_waveOutOpen) return 1;
+    if (!winmm_load()) return 0;
+    p_waveOutOpen = (WaveOutOpenFn)LZ_PROC(g_winmm, "waveOutOpen");
+    p_waveOutPrepareHeader =
+        (WaveOutHdrFn)LZ_PROC(g_winmm, "waveOutPrepareHeader");
+    p_waveOutWrite = (WaveOutHdrFn)LZ_PROC(g_winmm, "waveOutWrite");
+    p_waveOutUnprepareHeader =
+        (WaveOutHdrFn)LZ_PROC(g_winmm, "waveOutUnprepareHeader");
+    p_waveOutReset = (WaveOutDevFn)LZ_PROC(g_winmm, "waveOutReset");
+    p_waveOutClose = (WaveOutDevFn)LZ_PROC(g_winmm, "waveOutClose");
+    /* ALL of them or none, for the reason the midi family above gives: half
+       of these opens a device it cannot stop. */
+    if (!p_waveOutOpen || !p_waveOutPrepareHeader || !p_waveOutWrite ||
+        !p_waveOutUnprepareHeader || !p_waveOutReset || !p_waveOutClose) {
+        p_waveOutOpen = NULL;
+        return 0;
+    }
+    return 1;
+}
+
+/* Which device the next open uses. -1 is WAVE_MAPPER, which is what
+   this did before there was a way to say otherwise. */
+void lz_ui_wave_device(int dev) { g_wdev = dev; }
+
+int lz_ui_wave_open(long rate) {
+    WAVEFORMATEX fmt;
+    int i;
+    if (g_wh) return 1;
+    if (rate <= 0 || !wave_resolve()) return 0;
+    if (g_wev == NULL) {
+        g_wev = CreateEvent(NULL, FALSE, FALSE, NULL);
+        if (g_wev == NULL) return 0;
+    }
+    fmt.wFormatTag      = WAVE_FORMAT_PCM;
+    /* STEREO, not mono, and it is not a preference. Measured on this
+       machine: the same WAV played through this device as MONO carries a
+       steady hiss that it does not carry when the file is played by
+       anything else, and the same bank rendered to a file and played
+       back elsewhere is clean - so the noise is in this path, and the
+       one thing this path does differently from the machine's own
+       synthesiser (which is clean, and which emits stereo) is the
+       channel count. Filling both channels with the same sample is what
+       makes it go away. It is also where this has to end up anyway: the
+       reverb and chorus a DLS asks for are stereo effects, so a mono
+       device could not carry them. */
+    fmt.nChannels       = 2;
+    fmt.nSamplesPerSec  = (DWORD)rate;
+    fmt.wBitsPerSample  = 16;
+    fmt.nBlockAlign     = (WORD)(fmt.nChannels * fmt.wBitsPerSample / 8);
+    fmt.nAvgBytesPerSec = fmt.nSamplesPerSec * fmt.nBlockAlign;
+    fmt.cbSize          = 0;
+    if (p_waveOutOpen(&g_wh, g_wdev < 0 ? (UINT)WAVE_MAPPER : (UINT)g_wdev,
+                      &fmt, (LZ_IPTR_T)g_wev, 0, CALLBACK_EVENT)
+        != MMSYSERR_NOERROR) {
+        g_wh = NULL;
+        return 0;
+    }
+    for (i = 0; i < LZ_WAVE_NBUF; i++) {
+        memset(&g_whdr[i], 0, sizeof g_whdr[i]);
+        g_whdr[i].lpData = (LPSTR)g_wbuf[i];
+        g_whdr[i].dwBufferLength = sizeof g_wbuf[i];
+        if (p_waveOutPrepareHeader(g_wh, &g_whdr[i], sizeof g_whdr[i])
+            != MMSYSERR_NOERROR) {
+            return 0;
+        }
+        /* Prepared headers start WITHOUT WHDR_DONE, so mark them free:
+           otherwise the first four writes would each wait for a buffer the
+           card was never given. */
+        g_whdr[i].dwFlags |= WHDR_DONE;
+    }
+    g_wnext = 0;
+    return 1;
+}
+
+int lz_ui_wave_write(const short *pcm, long frames) {
+    long done = 0;
+    if (!g_wh) return 0;
+    while (done < frames) {
+        WAVEHDR *h = &g_whdr[g_wnext];
+        long n;
+        while (!(h->dwFlags & WHDR_DONE)) {
+            /* The device signals the event when a buffer comes back.
+               The header's flag is still what decides, because the
+               event is auto-reset: a signal raised for a DIFFERENT
+               buffer would be consumed here and leave this one
+               waiting. Waiting on both means no busy loop and no
+               missed wake-up. */
+            WaitForSingleObject(g_wev, 50);
+        }
+        n = frames - done;
+        if (n > LZ_WAVE_FRAMES) n = LZ_WAVE_FRAMES;
+        /* The caller now emits an interleaved PAIR, so this copies the
+           pair as it stands. (When the mixer was single channel this
+           duplicated the one sample into both halves - that is gone
+           along with the mono mixer.) */
+        memcpy(g_wbuf[g_wnext], pcm + 2 * done,
+               (size_t)(n * 2) * sizeof(short));
+        h->dwBufferLength = (DWORD)(n * 2L * (long)sizeof(short));
+        h->dwFlags &= ~WHDR_DONE;
+        if (p_waveOutWrite(g_wh, h, sizeof *h) != MMSYSERR_NOERROR) return 0;
+        done += n;
+        g_wnext = (g_wnext + 1) % LZ_WAVE_NBUF;
+    }
+    return 1;
+}
+
+void lz_ui_wave_close(void) {
+    int i, spin;
+    if (!g_wh) return;
+    /* Let what has been queued finish rather than cutting it off: the tail of
+       the last chord is music too. */
+    for (spin = 0; spin < 5000; spin++) {
+        int busy = 0;
+        for (i = 0; i < LZ_WAVE_NBUF; i++) {
+            if (!(g_whdr[i].dwFlags & WHDR_DONE)) busy = 1;
+        }
+        if (!busy) break;
+        Sleep(1);
+    }
+    p_waveOutReset(g_wh);
+    for (i = 0; i < LZ_WAVE_NBUF; i++) {
+        p_waveOutUnprepareHeader(g_wh, &g_whdr[i], sizeof g_whdr[i]);
+    }
+    p_waveOutClose(g_wh);
+    g_wh = NULL;
+    if (g_wev != NULL) {
+        CloseHandle(g_wev);
+        g_wev = NULL;
+    }
 }

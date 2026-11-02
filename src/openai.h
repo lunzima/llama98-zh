@@ -87,6 +87,13 @@ typedef struct {
     const char      *model_name;/* what /v1/models reports */
     int              enable_thinking;
     int              max_new_default;
+    /* Server-wide, from --spec (server_main.c) - not a per-request JSON
+       field (the OpenAI schema this endpoint speaks has no such thing,
+       and one client asking for a bigger k than the ring was allocated
+       for would corrupt another client's state, not just its own; see
+       generate.c's own refusal for exactly this in lz_generate_resume).
+       0 = off, the unchanged behavior from before this field existed. */
+    int              spec_k;
     /* Set when a request is being served; the sink and the cancel
        callback need it. Not a parameter because LZTokenSink's ctx is
        already spoken for. */

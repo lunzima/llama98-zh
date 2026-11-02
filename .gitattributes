@@ -1,0 +1,23 @@
+# Shell scripts are checked out LF on every platform.
+#
+# core.autocrlf is true on the Windows development machine, so git stores
+# LF and checks out CRLF. bash tolerates that under Git Bash and does not
+# under WSL, and build/mips/endian_gate.sh is the one file in this tree
+# that hands itself to WSL - its wsl.exe call re-runs the script from
+# /mnt/e, where the backslash-continued condition at line 74 stops being
+# a continuation:
+#
+#   build/mips/endian_gate.sh: line 75: syntax error near unexpected token `&&'
+#
+# Reproduced with WSL's bash -n, which needs no MIPS toolchain to reach
+# the parse: the gate's own SKIP path runs fine under Git Bash, so the
+# failure only ever shows up after the WSL hand-off has already happened.
+#
+# ONLY .sh IS NAMED HERE, and the scope is a measurement rather than a
+# convention: endian_gate.sh is the only wsl.exe call site in build/,
+# gates.mk and the Makefile (grepped), so .sh is the only file type any
+# WSL path parses. Nothing else in the tree is executed that way, and an
+# eol stated for a type nothing parses that way would be a rule with no
+# measurement behind it. There are no .bat or .cmd files to protect in
+# the other direction.
+*.sh text eol=lf

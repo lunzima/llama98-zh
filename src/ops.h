@@ -165,6 +165,30 @@ enum {
        attention score and recurrence write-back); everywhere else a
        quantize that moved or disappeared was invisible to the census. */
     LZ_FC_QUANT,
+    /* lz_situ_glu / lz_swiglu_clamp: no shipping checkpoint reaches this
+       site (LZ_FFN_ACT_NONE is every model this engine has ever loaded),
+       so unlike every row above it this one reads zero for a real
+       reason, not a missing billing site. */
+    LZ_FC_FFN_ACT,
+    /* CSA2's own three, and they exist because forward_csa2.c had NO
+       billing site at all: a counting build reported the whole
+       compressed-attention layer as free, and a site that is free because
+       nothing bills it reads exactly like one that is free because it
+       does no work. Only this file's own arithmetic is billed - the
+       projections and norms it calls bill themselves, through
+       lz_matmul_w and lz_rmsnorm, as every other layer's do.
+
+       THE SELECTION SCAN'S INTEGER DEDUP IS NOT BILLED, deliberately:
+       tok_idx[u] == b runs k_eff * n_vis / 2 times at the top-k this
+       project ships, it is a 1-2 cycle integer compare, and this table is
+       an f32 census whose other rows are 120-250 cycle soft-float
+       operations on the targets here. Billing it would put the largest
+       single cost of a CSA2 layer into a column that cannot be compared
+       with any other row of the same table. Its own order is written at
+       the loop instead - see forward_csa2.c's selection block. */
+    LZ_FC_CSA2_IDX,
+    LZ_FC_CSA2_SEL,
+    LZ_FC_CSA2_CORE,
     LZ_FC_N
 };
 
@@ -308,6 +332,35 @@ float lz_sigmoid(float x);
    so callers ask lz_sig_mode() before choosing the int exit at all. */
 float lz_sigmoid_i(int32_t v, int e);
 float lz_silu(float x);
+float lz_tanh(float x);
+
+/* lz_situ_glu / lz_swiglu_clamp: the FFN's act(gate)*up replaced with a
+   two-tensor gated activation. LZ_FFN_ACT_NONE (every shipping model)
+   never calls either - see lz_ffn_gate_up (forward.h), the one place
+   dense_ffn_step and forward_moe dispatch on model.h's ffn_activation.
+   NO SIMD VARIANT: see the rule-eight note at each definition
+   (ops_quant.c) - transcendental-bound scalar ops, same category as
+   lz_silu/lz_sigmoid/lz_softplus above. */
+float lz_situ_glu(float gate, float up, float beta, float linear_beta,
+                  int has_linear_beta);
+float lz_swiglu_clamp(float gate, float up, float limit, float alpha);
+
+/* The SPDA scalar gate's magnitude dampening, for forward_engram's
+   per-token n-gram gate: sigmoid(sqrt(max(|s|, 1e-6)) * sign(s)).
+
+   Two details are load-bearing and both differ from the obvious
+   spelling. The clamp is INSIDE the sqrt - sqrt(|s| + 1e-6) is a
+   different function, 4.14e-4 away in the pre-sigmoid argument at
+   s == 0 and 4.14e-4 at the worst case anywhere. And sign(0) is 0, not
+   +1, so s == 0 gates to exactly 0.5. The three references that define
+   this - Engram's own engram_demo_v1.py, V4.1's model.py, and
+   kunmoe_modeling.py's EngramMemory - all write
+   `x.abs().clamp_min(1e-6).sqrt() * x.sign()`.
+
+   NO SIMD VARIANT: one lz_sigmoid per element, the same rule-eight
+   argument as lz_situ_glu above. Bills no LZ_FC site: forward_engram
+   has none, so this adds none. */
+float lz_spda_gate(float s);
 
 /* log(1+e^x). A table+poly float body (lz_softplus_poly, ops_quant.c),
    under the same lz_scalar_mode() tier as lz_exp - it was the one
@@ -717,7 +770,7 @@ const char *lz_gdn_p2_impl(void);
    NOT bit-identical, and the integer entry is the MORE accurate of the
    two: every measured channel sits at e >= 22, far past the e <= 19
    band where sigmoid_q15's `x + 12` is still exact.
-   In the header for LZ_CONV_FIXED's reason - forward.c builds the
+   In the header for LZ_CONV_FIXED's reason - forward_state.c builds the
    exponent table this reads, so both files must see the same value. */
 #ifndef LZ_CONV_SIG_I
 #define LZ_CONV_SIG_I 1
@@ -1024,20 +1077,27 @@ int lz_norm_can_fixed(int n);
    the (1+w) table cached; `--fixed off` remains the oracle. */
 int lz_norm_int(void);
 
-/* SubLN activation scale granularity: "tok" | "group" (default tok).
-   Selected as `--subn-scale`. Applies ONLY where use_subn is on, to the
-   o_proj / down_proj input - the two projections H-BitLinear covers.
+/* SubLN activation scale granularity: "auto" | "tok" | "group" (default
+   auto). Selected as `--subn-scale`. Applies ONLY where use_subn is on,
+   to every activation quantization on the KDA/FFN SubLN path: the
+   q/k/v/g norm outputs, the raw block input the f_a/b projections share,
+   and the o_proj / down_proj inputs.
 
    tok:   one absmax over the whole row, replicated into every n/32 slot
-          (BitNet v2's per-token scheme).
+          (BitNet v2's per-token scheme, what BitLinear trains with).
    group: the engine's own per-32 grouping (lz_act_gs), kept across the
           Hadamard.
+   auto:  tok for a model whose projections were trained through
+          BitLinear (num_experts == 0), group for every other model.
 
    A value-changing knob, like the conv/attn/epi tiers: the two produce
-   different int8 and different scales. `tok` is bit-identical to the
-   engine before this knob existed. See ops_sched.c for why the Hadamard
-   does not force a row-wide scale. */
-int lz_subn_scale_group(void);
+   different int8 and different scales. See ops_sched.c for the
+   measurement behind auto and why the Hadamard does not force a
+   row-wide scale.
+
+   lz_subn_scale_group(bitlinear) answers for one model: pass whether
+   its SubLN projections are BitLinear-trained. */
+int lz_subn_scale_group(int bitlinear);
 const char *lz_subn_scale_select(const char *name);
 
 /* SubLN block Hadamard: "on" | "off" (default on), `--hadamard`.
@@ -1098,6 +1158,14 @@ const char *lz_hadamard_select(const char *name);
 
    AUTO asks the same CPUID SSE question the conv and pass-2 tiers ask. */
 int lz_epi_mode(void);
+
+/* --epi on|off. Narrows lz_epi_mode() below the --fixed group rather
+   than moving with it: the two states a caller needs are "the shipping
+   default" and "the epilogue floated while every other fixed kernel
+   stays fixed", and only the second separates ref from sse2 on the axis
+   ops.h's LZ_EPI_FIXED note names. Returns the mode as stored, so a
+   caller can print what it got, or NULL for a name it does not take. */
+const char *lz_epi_fixed_select(const char *name);
 
 /* Build a tensor's int16 scale plane. Idempotent, and a no-op when the
    shape is outside the derived bound - callers do not have to know the
@@ -1167,16 +1235,19 @@ const char *lz_build_paths(void);
    Full rationale at the definition in ops.c. */
 const char *lz_kernel_tier(void);
 
-/* Q8_0 activation quantization: q[i] = round_half_even(x[i]/s[i/gs]), s
-   being the group's absmax/127 (all-zero group scale=1.0). q needs n
-   bytes, s n/gs f32s. */
+/* Q8_0 activation quantization: q[i] = clamp(RTZ(x[i]*inv), -127, 127),
+   inv = 127/amax. Toward zero is the shipping float mode's rule - the
+   scalar arms take `(int)qv`, the SIMD arms cvtps2dq under the MXCSR
+   chop lz_fpu_float_begin sets; with lz_fastfp() off both are the magic
+   add's round-half-even instead. s[i/gs] is the group's absmax/127
+   (all-zero group scale=1.0). q needs n bytes, s n/gs f32s. */
 void lz_quantize_q8(const float *x, int n, int gs, int8_t *q, float *s);
 
 /* Per-token absmax INT8 activation quantize (SubLN path). ONE scale for
    the whole n-wide row - the training side's activation_quant_absmax
    (gamma = max|x| over the token, dequant scale = gamma/127) - stored in
    every n/32 xqs slot so the matmul's per-32 xqs read stays consistent
-   with lz_act_gs. q/s semantics match lz_quantize_q8: round-half-even,
+   with lz_act_gs. q/s semantics match lz_quantize_q8: RTZ,
    clamp [-127,127], all-zero row scale 1.0. n must be a multiple of 32. */
 void lz_quantize_q8_tok(const float *x, int n, int8_t *q, float *s);
 
@@ -1746,6 +1817,16 @@ void lz_attn_wsum_q8_int(int64_t *acc, float *sscale, const float *att,
 #define LZ_GDN_STATE_2PLANE 1
 #endif
 
+/* Measurement scaffolding, never in a shipping build: an exact float
+   twin of the SSM state, read and written by lz_recur_step in place of
+   the int8 one - see the scaffold's own comment in ops_gdn.c. Defined
+   here rather than there because the twin is a state plane: it adds a
+   field to LZRunState and LZStateCkpt (forward.h) and a parameter pair
+   to lz_recur_step, so every TU that sees those has to agree on it. */
+#ifndef LZ_GDN_STATE_F32
+#define LZ_GDN_STATE_F32 0
+#endif
+
 /* LZ_KV_2PLANE's write path calls lz_gdn_quantize_2p, which this switch
    owns - so the two are coupled and nothing said so. Both at their
    non-default values (KV on, state off) built every TU cleanly and
@@ -1761,15 +1842,15 @@ void lz_attn_wsum_q8_int(int64_t *acc, float *sscale, const float *att,
 #if LZ_GDN_STATE_2PLANE
 /* State quantizer for the two-plane representation: `hi` and `s` come out
    exactly as lz_quantize_q8 would have written them, `lo` carries the
-   residual at 1/254 weight. Exposed because the scalar reference has
-   to write the same representation the implementation reads - the same
-   reason it already calls
+   residual at 1/LZ_GDN_LO_SCALE weight. Exposed because the scalar
+   reference has to write the same representation the implementation
+   reads - the same reason it already calls
    lz_quantize_q8. `fc_site`: LZ_FC_* site to bill, or -1 for none. */
 void lz_gdn_quantize_2p(const float *x, int n, int gs,
                         int8_t *hi, int8_t *lo, float *s, int fc_site);
 #endif
 
-/* Dequant weight of a low plane: value ~= (hi + lo/254) * s.
+/* Dequant weight of a low plane: value ~= (hi + lo/256) * s.
 
    256, not 254, and the choice is worth its paragraph because 254
    looked like the obviously right number.
@@ -1796,13 +1877,17 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
        no divide. Verified exhaustively that this round-trips every
        (hi, lo) pair in range, |H| <= 32639 < 32767.
      - the step is s/256 rather than s/254. PREDICTED to improve
-       accuracy; MEASURED as a wash (float pass 2 1.78e-05 -> 1.82e-05,
-       integer 4.35e-05 -> 4.27e-05). The finer step is
-       cancelled by clamping: the residual reaches +-128 at L = 256 and
-       the +-127 clamp discards the extremes, which L = 254 never had to
-       do. So the case for 256 rests on the division-free split alone,
-       not on precision - the prediction did not hold and is left here
-       rather than quietly dropped.
+       accuracy; MEASURED as a wash at the time (float pass 2 1.78e-05
+       -> 1.82e-05, integer 4.35e-05 -> 4.27e-05). That measurement
+       took place with hi truncating, which is what the paragraph above
+       says must not happen: a truncated hi leaves a full unit of
+       residual, and the +-127 clamp discarded half of lo's codes at
+       L = 256 (measured 50.1% of every row). With hi round to nearest -
+       which q8_round_rne now enforces, and which this analysis assumes
+       from its first line - the residual is the half unit L = 256 is
+       sized for and the step does what it was predicted to do: the
+       two-plane round-trip runs 256x better than single-plane rather
+       than the 2.8x the truncated regime produced.
      - 1/256 is exact in float where 1/254 is not, so every dequant
        loses a rounding.
 
@@ -2058,10 +2143,16 @@ void lz_gdn_quantize_2p(const float *x, int n, int gs,
    fill in the wrapper's constants themselves, so the per-head call pays
    the 17-argument push once instead of twice (caller -> wrapper ->
    here). vi/vscale are the int16-v entry, gvec/gt the per-channel vs
-   scalar decay - the three wrappers differ only in which are NULL/1.0f. */
+   scalar decay - the three wrappers differ only in which are NULL/1.0f.
+   sf_in/sf_out exist only under LZ_GDN_STATE_F32: the exact float twin
+   of the same (slot, layer, head) region sq_in/sq_out address. The
+   wrappers pass NULL, which runs the int8 recurrence. */
 void lz_recur_step(float *out, const int8_t *sq_in, int8_t *sq_out,
 #if LZ_GDN_STATE_2PLANE
                    const int8_t *sq2_in, int8_t *sq2_out,
+#endif
+#if LZ_GDN_STATE_F32
+                   const float *sf_in, float *sf_out,
 #endif
                    const float *ss_in, float *ss_out,
                    const float *q, const float *k, const float *v,

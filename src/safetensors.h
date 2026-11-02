@@ -48,10 +48,21 @@ typedef struct {
     int n_tensors;
     lz_u64 data_start;  /* 8 + header length */
     lz_i64 file_size;
+    int meta_only;      /* header read: names/shapes/dtypes only, the
+                           data area is not required to be present or
+                           self-consistent (see lz_st_open_meta) */
 } LZSafetensors;
 
 /* return 0 on success, non-zero on failure and fill errbuf */
 int  lz_st_open(LZSafetensors *st, const char *path, char *errbuf, int errlen);
+/* Same parse, but the data area is not opened for reading: the declared
+   byte counts need not match the shapes and the offsets need not land
+   inside the file. For a caller that only walks names and shapes - the
+   bin loader's companion audit - a header that carries no data is a
+   legitimate artifact, while for a caller that will read weights it is
+   exactly the silent misalignment the full check exists to stop. */
+int  lz_st_open_meta(LZSafetensors *st, const char *path, char *errbuf,
+                     int errlen);
 void lz_st_close(LZSafetensors *st);
 
 /* find by name; NULL if absent */

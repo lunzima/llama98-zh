@@ -2,6 +2,7 @@
 #define LZ_GUI_COMPAT40_H
 
 #include <windows.h>
+#include "../src/lz_int.h"   /* lz_i64: microseconds, which outgrow long */
 
 /* Everything the front end does differently on Windows NT 3.51.
  *
@@ -244,6 +245,169 @@ HKL lz_kbd_layout_get(void);
 
 /* 1 when the 4.0 window furniture is available. */
 int lz_os_has_40(void);
+
+/* ---- a clock for intervals lz_time_ms cannot resolve ----
+ *
+ * lz_time_ms is a float, and it converts QueryPerformanceCounter's
+ * count to float BEFORE dividing, so it loses resolution twice over -
+ * once to the count's own mantissa and once to the result's. Both
+ * losses grow with the machine's uptime, because that is what the
+ * numbers are. MEASURED, with the toolchain that builds this file, on
+ * the development host (counter 10 MHz, up about ten and a half days,
+ * reading 926649600 ms): the count is quantised to 1048576 counts =
+ * 104.858 ms, the reading itself steps in 64 ms, and the reading moves
+ * in steps of 64 or 128 ms and never anything finer. The step is
+ * coarser still on a machine up longer, and much finer on one just
+ * booted - a number that varies with uptime is not one a log's reader
+ * can calibrate against.
+ *
+ * Same two clocks, read as a DIFFERENCE: keeping the counter an
+ * integer and subtracting the origin before converting means nothing
+ * is ever rounded at the ~1e12 magnitude, so the quantum is the
+ * counter's own 100 ns. This is what the MIDI trace measures the
+ * interval across a tempo write with.
+ *
+ * Monotone, and its origin is this process's first call, so it is only
+ * ever useful as a difference - which is all anything asks it for. On
+ * a system with no performance counter it falls back to GetTickCount,
+ * and lz_ui_us_fine says which one answered. */
+lz_i64 lz_ui_us_now(void);
+
+/* 1 when lz_ui_us_now is the performance counter, 0 when it is the
+ * millisecond tick counter. A whole number of milliseconds is then all
+ * any interval can be, and the tick itself is coarse on every target
+ * this front end has: 15.6 ms on Windows, 55 ms on Win9x. Asking is
+ * not required - the clock is fixed on the first call, and this only
+ * reports which one it fixed on. */
+int lz_ui_us_fine(void);
+
+/* ---- MIDI streaming ----
+ *
+ * MEASURED with this project's own floor flags (Open Watcom 2.0): at
+ * WINVER 0x0351 a probe calling midiStreamOpen does not compile at all - MIDIHDR, MIDIEVENT and every MIDIPROP_ are
+ * undeclared, so it is not only the entry point that is hidden. At
+ * 0x0400 the same probe compiles clean and links against Watcom's
+ * NT4-era winmm import library.
+ *
+ * So it belongs here for this file's two reasons: only this file
+ * compiles at the 4.0 declaration level, and only this file may
+ * resolve an entry point at run time. winmm.dll is on every Windows
+ * since 3.1, but midiStreamOpen is not an export of the 3.51 one.
+ *
+ * The caller passes RAW DWORDS - a MIDIEVENT is three of them (delta,
+ * stream id, event) - so gui/midiplay.c never names a structure it
+ * cannot see at the floor. */
+
+/* `notify` gets LZ_UI_MM_MOM_DONE when a buffer finishes. 0 is an
+ * ordinary answer on 3.51 and on a machine with no MIDI device. */
+int lz_ui_midi_open(HWND notify, int division);
+
+/* ---- buffers ----
+ *
+ * MEASURED on this machine: a stream buffer of 5461 MIDIEVENTs (65532
+ * bytes) is accepted and one of 6000 (72000) is refused, so the
+ * documented 64 KB limit is enforced and not advisory. A piece longer
+ * than that has to go in CHUNKS, which is why these take a slot: the
+ * caller keeps two in flight, so the device always has the next one
+ * before it needs it and there is no seam between them.
+ *
+ * Nothing is copied. The caller's buffer for a slot must stay put
+ * until that slot completes or the stream is stopped. */
+#define LZ_UI_MIDI_SLOTS 2
+
+/* Hand slot `slot` to the device. */
+int lz_ui_midi_send(int slot, const void *events, unsigned long bytes);
+
+/* 1 when that slot's buffer has come back, or was never handed over. A
+ * caller with no window is not TOLD that a buffer finished - it has no
+ * message queue for MM_MOM_DONE to arrive in - so it asks with this
+ * between sends. A window has the notification and does not need it. */
+int lz_ui_midi_slot_free(int slot);
+
+/* Start, or resume after everything queued has played. */
+int lz_ui_midi_go(void);
+
+/* The type byte of a MIDIEVENT's dwEvent that sets the tempo, with the
+ * new tempo in the low three bytes as microseconds per quarter note:
+ *
+ *     delta = 0, stream id = 0, event = (LZ_UI_MEVT_TEMPO << 24) | us
+ *
+ * Spelled here for the reason the paragraph above gives about the
+ * MIDIPROP_ set: at WINVER 0x0351 mmsystem.h declares no MEVT_ either.
+ * It is a tempo EVENT and not a property because that is how the device
+ * is meant to be told - the property of that name is documented as the
+ * way to RETRIEVE a tempo, and its page says output devices set the
+ * tempo by inserting this event into the stream.
+ *
+ * The parameter is 24 bits, which is exactly the ceiling
+ * common/music.h's LZ_MUSIC_TEMPO_MAX holds lz_music_tempo_us to, so a
+ * value that came from there needs no mask of its own. */
+#define LZ_UI_MEVT_TEMPO 0x01UL
+
+/* Where the stream has got to, in the stream's own ticks (LZ_SMF_DIVISION
+ * per quarter note, the same units common/smf.c emits chunk deltas in).
+ * Returns 1 and fills *tick, or 0 when there is nothing to ask - no
+ * stream open, or a winmm without the export - in which case *tick is
+ * left ALONE. A caller that wants a number has to check the return;
+ * writing a zero in its place would be indistinguishable from a stream
+ * that really is at tick 0.
+ *
+ * The count does not rewind on midiStreamStop and no property rewinds it
+ * (see the note on that in gui/midiplay.c), so it runs on across pieces
+ * and is only comparable with a chunk's own tick range inside one
+ * playback. */
+int lz_ui_midi_position(unsigned long *tick);
+
+/* Stop, silence every channel, release the buffer. */
+void lz_ui_midi_stop(void);
+
+
+void lz_ui_midi_close(void);
+
+/* ---- waveOut, the PCM device ----
+ *
+ * MEASURED with this tree's own floor flags (Open Watcom 2.0, WINVER
+ * 0x0351, -we): a probe that opens, prepares, writes, unprepares, resets
+ * and closes compiles with 0 warnings and 0 errors. So UNLIKE the
+ * midiStream set above, nothing about waveOut is hidden at the floor -
+ * mmsystem.h declares the entry points, and WAVEFORMATEX, WAVEHDR,
+ * HWAVEOUT, WAVE_MAPPER, CALLBACK_NULL and WAVE_FORMAT_PCM are all
+ * 3.1-era. The resolve below is therefore not about visibility; it is the
+ * same rule for the other reason, which is not linking an import library.
+ *
+ * The two families are resolved SEPARATELY out of one winmm.dll, and that
+ * separation is load-bearing rather than tidy: NT 3.51 exports waveOut and
+ * does not export midiStreamOpen, so a machine can have exactly one of
+ * them. A caller that asked for the missing one must be told no, and only
+ * about that one.
+ *
+ * The device itself is owned by compat40.c, because its buffers are Win32
+ * objects and this is the file that may carry them. What to render is
+ * policy and lives in the caller. */
+
+/* Open the PCM device: mono, 16-bit, `rate` frames a second. Returns 1 on
+ * success, 0 when there is no device - which is the ordinary answer on a
+ * machine with no sound card and not an error. */
+/* Which waveOut device the next lz_ui_wave_open uses, by index as
+ * waveOutGetDevCaps reports them. -1 (the default) is WAVE_MAPPER, the
+ * device the user pointed Windows at; a caller that has to name one -
+ * because the default is not the one anybody is listening to - says so
+ * here, before opening. */
+void lz_ui_wave_device(int dev);
+
+int lz_ui_wave_open(long rate);
+
+/* Hand over `frames` frames. BLOCKS until the card has room for them, so
+ * the caller is paced by the hardware; see the comment on the write loop
+ * above. Returns 1 on success. */
+int lz_ui_wave_write(const short *pcm, long frames);
+
+/* Lets what has been queued finish, then releases. */
+void lz_ui_wave_close(void);
+
+/* MM_MOM_DONE, spelled out because mmsystem.h is not included outside
+ * gui/compat40.c. */
+#define LZ_UI_MM_MOM_DONE 0x3C9
 
 /* ---- forced downgrade, for looking at the 3.51 path on a host ----
  *

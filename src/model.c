@@ -1,6 +1,7 @@
 #include <stdarg.h>
 #include <stddef.h>
 #include "lz_int.h"   /* not <stdint.h>: VC++ 4.0 has no such header */
+#include <ctype.h>    /* isdigit: csa2_key_idx's leading-character check */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,7 +12,9 @@
 #include "lz_int.h"   /* lz_i64: the 64-bit type, portably */
 #include "lz4d.h"
 #include "model.h"
-#include "ops.h"   /* lz_bf16_store_g, LZ_MM_WIDEN_MAX */
+#include "engram_keys.h"
+#include "ops.h"   /* lz_bf16_store_g, LZ_MM_WIDEN_MAX, LZ_SPEC_K_MAX (alloc_mtp's mtp_n_draft bound) */
+#include "fwht.h"  /* LZ_EMBED_ROT_ON: the rotated-vocabulary switch, one spelling */
 
 #if LZ_DBG_LAYER_HASH
 /* Per-layer residual hash for the fast-mode (--fastfp) cross-target
@@ -20,17 +23,37 @@
    Lives here (a large, cold TU) rather than in forward.c so the compiler
    cannot inline it into the layer loop and reorder float work around it.
    -DLZ_DBG_LAYER_HASH=1 is a diagnostic build only; nothing in a normal
-   build references it. */
+   build references it.
+
+   The lines go to the file named by LHASH_FILE, one per layer visit -
+   the engine has no console, and a divergence hunt compares two target
+   builds by diffing two files. Nothing is written when the variable is
+   unset or empty, so a build that defines the macro still dumps
+   nothing until it is asked to. */
 void lz_dbg_layer_hash(const char *tag, int li, const void *p, size_t nf) {
+    static FILE *fp;
+    static int tried;
     const unsigned char *b = (const unsigned char *)p;
     unsigned long long h = 1469598103934665603ull;   /* FNV-1a */
-    size_t i;
+    size_t i, m;
+    char line[96];
+    int n;
     for (i = 0; i < nf * 4u; i++) {
         h ^= b[i];
         h *= 1099511628211ull;
     }
-    fprintf(stderr, "LHASH %s %d %llu\n", tag, li,
-            (unsigned long long)h);
+    if (!tried) {
+        const char *path = getenv("LHASH_FILE");
+        tried = 1;
+        if (path && path[0]) fp = fopen(path, "w");
+    }
+    if (!fp) return;
+    n = snprintf(line, sizeof line, "LHASH %s %d %llu\n", tag, li, h);
+    if (n <= 0) return;
+    m = (size_t)n;
+    if (m > sizeof line - 1) m = sizeof line - 1;
+    fwrite(line, 1, m, fp);
+    fflush(fp);
 }
 #endif /* LZ_DBG_LAYER_HASH */
 
@@ -98,11 +121,34 @@ static int hadamard_ok(int blk, int dim) {
     return dim > 0 && dim % blk == 0;
 }
 
+/* The forward pass reads the gate half of every attention head
+   unconditionally: forward_attn.c's output gate and forward_csa2.c's
+   both index qg at h * 2 * hd + hd, and forward_mtp.c's draft head does
+   the same. That half only exists when attn_output_gate is set -
+   attn_qgate_dim, and so the s->qg allocation it sizes, is attn_q_dim
+   wide otherwise - so with the key absent or false every one of those
+   reads runs a second time past the end of the buffer. Refusing at load
+   is the fix; running the three forwards ungated is a feature, and
+   forward_csa2.c's header already records that it was not attempted. */
+static int check_attn_gate(const LZModelConfig *c, char *errbuf, int errlen) {
+    if (c->attn_output_gate) return 0;
+    qerr(errbuf, errlen, LZ_ERR_CFG_ATTN_GATE);
+    return 1;
+}
+
 static int resolve_hadamard(LZModelConfig *c, char *errbuf, int errlen) {
     int vdim = c->lin_value_dim;
     int idim = c->intermediate_size;
     if (c->hadamard_o == -1) {
-        int oblk = vdim;
+        /* Derived only on the dense path. The training side's _ternarize
+           returns early for num_experts != 0 ("KunMoe keeps fp
+           projections; ternary is CE-only"), so its own default is 0
+           there, and a non-zero block here would rotate an activation
+           those weights never saw - invisible in float, because the float
+           matmul never reads the rotated buffer. hadamard_down has no
+           such condition: _make_dense_ffn_bitlinear still builds a MoE
+           model's dense prefix layers as ternary. */
+        int oblk = c->num_experts == 0 ? vdim : 0;
         if (oblk < 2 || (oblk & (oblk - 1))) oblk = 0;
         c->hadamard_o = oblk;
     } else if (!hadamard_ok(c->hadamard_o, vdim)) {
@@ -136,6 +182,235 @@ static int resolve_hadamard(LZModelConfig *c, char *errbuf, int errlen) {
     return 0;
 }
 
+/* ffn_activation and its per-mechanism params. Shared between
+   lz_load_config (config.json is the primary source) and lz_open_bin's
+   config.json sidecar read (Engram-style: the bin header has no field
+   for this, so a .bin-loaded model reads it straight from the sidecar
+   the same way it reads engram_*) so the two loading paths cannot
+   drift out of parsing the same key two different ways. */
+static int parse_ffn_activation(LZJson *j, const LZJsonNode *tc,
+                                LZModelConfig *c, char *errbuf, int errlen) {
+    const char *fa = lz_json_get_str(j, tc, "ffn_activation", "");
+    if (fa[0] == '\0' || strcmp(fa, "none") == 0) {
+        c->ffn_activation = LZ_FFN_ACT_NONE;
+    } else if (strcmp(fa, "situ") == 0) {
+        c->ffn_activation = LZ_FFN_ACT_SITU;
+    } else if (strcmp(fa, "gptoss_clamp") == 0) {
+        c->ffn_activation = LZ_FFN_ACT_GPTOSS_CLAMP;
+    } else {
+        /* Mirrors KunMoeConfig.__init__'s own ValueError - found there
+           first (a typo'd value fell through silently and ran
+           hidden_act's activation with no error, see that constructor's
+           comment) and refused here for the same reason: a checkpoint
+           carrying a name the engine does not recognize must not
+           silently fall back to lz_silu*up. */
+        qerr(errbuf, errlen, LZ_ERR_CFG_FFN_ACT, fa);
+        return 1;
+    }
+    c->activation_situ_beta =
+        (float)lz_json_get_num(j, tc, "activation_situ_beta", 4.0);
+    {
+        /* linear_beta's None (unbounded up) is a real, exercised branch
+           on the training side (situ_glu's own default) - read the node
+           directly, same reasoning as kda_gate_lower_bound. */
+        const LZJsonNode *n = lz_json_get(j, tc, "activation_situ_linear_beta");
+        c->ffn_has_situ_linear_beta = (n && n->type == LZ_JSON_NUM);
+        c->activation_situ_linear_beta =
+            c->ffn_has_situ_linear_beta ? (float)n->num : 0.0f;
+    }
+    c->swiglu_clamp_limit =
+        (float)lz_json_get_num(j, tc, "swiglu_clamp_limit", 10.0);
+    c->swiglu_clamp_alpha =
+        (float)lz_json_get_num(j, tc, "swiglu_clamp_alpha", 1.702);
+    return 0;
+}
+
+/* csa2_kv_mode/csa2_kv_source's member names: a layer index written as a
+   JSON object key, which JSON has no integer form for. -1 on anything
+   that is not ENTIRELY an ASCII digit string in [0, LZ_MAX_LAYERS) -
+   the isdigit check on the leading byte is what actually delivers that,
+   since strtol's own leading-whitespace and leading-sign handling would
+   otherwise accept " 2" or "+2" as if they were "2". The upper bound is
+   checked in `long` before any cast to `int`, so a key many digits long
+   (past LONG_MAX, or merely past int's range) cannot become a small,
+   in-range int by truncation - it becomes -1 like any other malformed
+   key, not a wrapped-around layer index. */
+static int csa2_key_idx(const char *key) {
+    char *end;
+    long v;
+    if (!key || !key[0] || !isdigit((unsigned char)key[0])) return -1;
+    v = strtol(key, &end, 10);
+    if (*end != '\0' || v < 0 || v >= LZ_MAX_LAYERS) return -1;
+    return (int)v;
+}
+
+static int st_path_from_index(const char *dir, char *out, int outlen,
+                              char *errbuf, int errlen);
+
+/* Defined beside lz_ced_local_target, which it calls; declared here
+   because lz_load_config runs above both. */
+static int ced_local_check(const LZModelConfig *c, char *errbuf, int errlen);
+
+/* Defined beside ced_local_check (the same load-time-rule shape, the
+   same two loaders); declared here for the same reason. */
+static int loop_mix_from_check(const LZModelConfig *c, char *errbuf,
+                               int errlen);
+
+/* The one place that decides which file holds the weights: model.safetensors
+   when it is there, otherwise the single shard a
+   model.safetensors.index.json names (st_path_from_index has that case).
+   Returns 0 and fills out, or non-zero with errbuf set.
+
+   ONE resolver for both callers, because lz_open loads from what this
+   returns and the architecture probe below reads that same file's header.
+   Two resolvers could pick two files, and then the verdict would be about
+   a checkpoint nobody is loading. */
+static int st_resolve(const char *dir, char *out, int outlen,
+                      char *errbuf, int errlen) {
+    int ir;
+    if (lz_lfn_exists(dir, "model.safetensors"))
+        return lz_lfn_path(dir, "model.safetensors", out, outlen,
+                           errbuf, errlen) != 0;
+    ir = st_path_from_index(dir, out, outlen, errbuf, errlen);
+    if (ir < 0) return 1;
+    if (ir == 1) return 0;
+    return lz_lfn_path(dir, "model.safetensors", out, outlen,
+                       errbuf, errlen) != 0;
+}
+
+/* The directory a config.json path lives in, WITH its trailing separator
+   kept. Keeping it is what gets the root right: "C:" names the current
+   directory of drive C while "C:/" names the root, the distinction
+   lfn.c's join() draws for itself. Both separators occur here -
+   lz_lfn_path builds '/', and the user's own directory argument is passed
+   through untouched. */
+static void cfg_dir_of(const char *cfg_path, char *out, int cap) {
+    int n = (int)strlen(cfg_path);
+    int i;
+    for (i = n - 1; i >= 0; i--)
+        if (cfg_path[i] == '/' || cfg_path[i] == '\\') break;
+    i++;                                    /* keep the separator itself */
+    if (i > cap - 1) i = cap - 1;
+    memcpy(out, cfg_path, (size_t)i);
+    out[i] = '\0';
+}
+
+/* Which generation this checkpoint is, decided from what its linear layers
+   are NAMED rather than from what its model_type says.
+
+   GDN (Qwen3.5) writes `linear_attn.in_proj_qkv.weight`; KDA (KunMoe)
+   writes `linear_attn.q_proj.weight` / `linear_attn.f_a_proj.weight`. The
+   two sets are disjoint in every checkpoint on disk, and the tensor set is
+   also the thing the loader has to bind - a model_type disagreeing with
+   its own tensors would only move the failure later, to a missing-tensor
+   error that no longer says which generation was expected.
+
+   Both names carry the `linear_attn.` anchor: a full-attention layer's own
+   `self_attn.q_proj.weight` shares the suffix and would otherwise answer
+   for an architecture it does not belong to.
+
+   Reads the header's MEMBER NAMES and nothing else, rather than going
+   through lz_st_open. lz_st_open builds the whole tensor table, so its
+   success also depends on the data_offsets validating against the file
+   size - and those are JSON numbers. The verdict would then be "no
+   verdict" for a checkpoint whose names state their generation plainly,
+   whenever an unrelated offset fails to round-trip. Names are strings;
+   the question is about names.
+
+   Returns 1 KDA, 0 GDN, -1 neither (a checkpoint carrying both name sets
+   is not either generation), -2 the header could not be read. -2 is
+   deliberately not a verdict: the loader that owns that file reports it
+   by name, and "neither generation" would be a claim about a file nobody
+   read. */
+static int arch_probe(const char *cfg_path) {
+    unsigned char lenbuf[8];
+    lz_i64 fsz;
+    lz_u64 hdr_len = 0;
+    char *hdr;
+    FILE *fp;
+    LZJson j;
+    const LZJsonNode *root, *m;
+    char dir[512], stp[512];
+    int i, seen_kda = 0, seen_gdn = 0;
+
+    cfg_dir_of(cfg_path, dir, (int)sizeof dir);
+    if (st_resolve(dir, stp, (int)sizeof stp, NULL, 0) != 0) return -2;
+
+    /* The safetensors envelope, same shape src/safetensors.c reads: an
+       eight-byte little-endian header length, then that many bytes of
+       JSON. The length is assembled byte by byte, and the bound is
+       written as a subtraction, so neither host byte order nor a
+       wrapped addition can turn a malformed header into a large malloc. */
+    fsz = lz_fsize(stp);
+    if (fsz < 8) return -2;
+    fp = fopen(stp, "rb");
+    if (!fp) return -2;
+    if (fread(lenbuf, 1, 8, fp) != 8) { fclose(fp); return -2; }
+    for (i = 7; i >= 0; i--) hdr_len = (hdr_len << 8) | (lz_u64)lenbuf[i];
+    if (hdr_len == 0 || hdr_len > (lz_u64)fsz - LZ_U64_C(8)) {
+        fclose(fp);
+        return -2;
+    }
+    hdr = (char *)malloc((size_t)hdr_len);
+    if (!hdr) { fclose(fp); return -2; }
+    if (fread(hdr, 1, (size_t)hdr_len, fp) != (size_t)hdr_len) {
+        free(hdr);
+        fclose(fp);
+        return -2;
+    }
+    fclose(fp);
+    if (lz_json_parse(&j, hdr, (size_t)hdr_len, NULL, 0) != 0) {
+        free(hdr);
+        return -2;
+    }
+    free(hdr);   /* lz_json_parse copies: the names below point into that */
+
+    root = lz_json_root(&j);
+    if (root && root->type == LZ_JSON_OBJ) {
+        for (m = lz_json_first(&j, root); m; m = lz_json_next(&j, m)) {
+            const char *n = m->key;
+            if (!n || strcmp(n, "__metadata__") == 0) continue;
+            if (strstr(n, "linear_attn.in_proj_qkv.weight")) seen_gdn = 1;
+            else if (strstr(n, "linear_attn.q_proj.weight") ||
+                     strstr(n, "linear_attn.f_a_proj.weight")) seen_kda = 1;
+        }
+    }
+    lz_json_free(&j);
+    if (seen_kda == seen_gdn) return -1;
+    return seen_kda;
+}
+
+/* The node config.json's model keys live under: text_config when the
+   multimodal shell wraps them, the root otherwise. Two loaders ask this
+   question (lz_load_config for everything, lz_open_bin for the engram
+   and activation sidecar fields) and both must answer it the same way -
+   a bin whose config.json is wrapped would otherwise skip the engram
+   check entirely and load a model it cannot run. */
+static const LZJsonNode *config_text_node(const LZJson *j,
+                                          const LZJsonNode *root) {
+    const LZJsonNode *tc = lz_json_get(j, root, "text_config");
+    return tc ? tc : root;
+}
+
+/* Is this rotated-vocabulary block one the transform can run? block == 0
+   means "no block transform" (the plain vocabulary, or the sign diagonal
+   alone) and is always fine. Otherwise the transform is block-diagonal
+   over the embedding width, so block must divide that width, and
+   lz_fwht requires a power of two - both are what bitlinear.py's
+   _check_hadamard_dim and kunmoe_modeling's own divide check ask for.
+
+   Checked rather than asserted because the failure it prevents is the
+   shape this whole feature exists to avoid: a block that does not divide
+   the width walks past the end of the row inside lz_embed_row_back (the
+   caller has no way to notice), and a block that is not a power of two
+   makes lz_fwht loop past the vector. Both are silent. */
+static int embed_block_bad(int block, int dim) {
+    if (block == 0) return 0;
+    if (block < 1 || (block & (block - 1)) != 0) return 1;
+    if (dim <= 0 || (dim % block) != 0) return 1;
+    return 0;
+}
+
 int lz_load_config(LZModelConfig *c, const char *path,
                        char *errbuf, int errlen) {
     char *buf;
@@ -162,19 +437,77 @@ int lz_load_config(LZModelConfig *c, const char *path,
         return 1;
     }
     /* The multimodal shell puts text params under text_config; plain-text checkpoints have them at top level */
-    tc = lz_json_get(&j, root, "text_config");
-    if (!tc) tc = root;
+    tc = config_text_node(&j, root);
 
-    /* KunMoe (KDA + latent MoE) detection.
-       Its config.json layer_types entries stay the plain
-       "linear_attention"/"full_attention" strings - see that file's
-       docstring, it keeps the Qwen3.5 skeleton deliberately - so
-       model_type is what tells the loader a "linear_attention" layer
-       means LZ_LT_KDA rather than LZ_LT_LINEAR (GDN). */
+    /* THE STATIC ENGRAM KEY TABLE (spec 1.6): a sidecar file, named here
+       as config.json spells it and resolved against the model directory
+       when the engram is allocated. The name is carried verbatim; one
+       that cannot fit the field is a malformed config, not a table. */
     {
-        const LZJsonNode *mt = lz_json_get(&j, tc, "model_type");
-        if (!mt) mt = lz_json_get(&j, root, "model_type");
-        is_kunmoe = lz_json_str_eq(mt, "kunmoe");
+        const char *ks = lz_json_get_str(&j, tc, "engram_keys", "");
+        if (ks && ks[0]) {
+            if (strlen(ks) >= sizeof(c->engram_keys)) {
+                qerr(errbuf, errlen, LZ_ERR_CFG_ENGRAM_KEYS, ks);
+                lz_json_free(&j);
+                return 1;
+            }
+            strcpy(c->engram_keys, ks);
+        }
+    }
+    c->embed_hadamard = lz_json_get_int(&j, tc, "embed_hadamard", 0);
+    c->embed_signs_seed = lz_json_get_int(&j, tc, "embed_signs_seed", 0);
+    /* VALIDATED BELOW, once hidden_size is read: the block has to divide
+       the embedding width (engine/bitlinear.py's _check_hadamard_dim plus
+       kunmoe_modeling's own divide check) and only a ternary-vocabulary
+       checkpoint carries a rotation at all. Refusing here instead of
+       applying something approximate is the point - a block that does not
+       divide the width overruns the row inside lz_embed_row_back, and a
+       rotation the trainer never applied is a plausible wrong logit
+       rather than an error. */
+    /* Carried for the config copy's completeness; the safetensors path
+       has no group-scale planes, so this word has no consumer here.
+       THREE STATES, same as the bin's word (spec 4.6.1): the new
+       `weight_scale_layout` key (0/1/2) wins when present, and the old
+       boolean `weight_scale_fp16` is the fallback for checkpoints that
+       predate it. Reading only the old key would silently reset a
+       config that says layout 2 to layout 0 while the bin path read the
+       file's own word - the two loaders would then disagree about the
+       same checkpoint with no error anywhere. */
+    {
+        const LZJsonNode *ln = lz_json_get(&j, tc, "weight_scale_layout");
+        int layout = ln ? lz_json_get_int(&j, tc, "weight_scale_layout", 0)
+                        : lz_json_get_int(&j, tc, "weight_scale_fp16", 0);
+        if (layout < 0 || layout > 2) {
+            qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE,
+                 "weight_scale_layout");
+            lz_json_free(&j);
+            return 1;
+        }
+        c->scale_layout = layout;
+    }
+
+    /* GDN vs KDA, decided by the checkpoint's own linear-layer tensor
+       names - see arch_probe. The config's layer_types entries stay the
+       plain "linear_attention"/"full_attention" strings in both
+       generations (kunmoe_modeling.py keeps the Qwen3.5 skeleton
+       deliberately), so the string cannot say which of the two an entry
+       means. This engine loads those two generations and nothing else; a
+       checkpoint that is neither is refused here rather than half-bound
+       against one of their specs. */
+    {
+        int arch = arch_probe(path);
+        if (arch == -2) {
+            /* The weights could not be opened. is_kunmoe only selects
+               which spec the layers are bound against, and the weight
+               load that follows reports the unreadable file by name. */
+            is_kunmoe = 0;
+        } else if (arch < 0) {
+            qerr(errbuf, errlen, LZ_ERR_CFG_UNSUPPORTED_ARCH);
+            lz_json_free(&j);
+            return 1;
+        } else {
+            is_kunmoe = (arch == 1);
+        }
     }
 
     c->vocab_size        = lz_json_get_int(&j, tc, "vocab_size", 0);
@@ -196,6 +529,198 @@ int lz_load_config(LZModelConfig *c, const char *path,
        intermediate_size (kunmoe-v2) needs this to be independent. */
     c->mtp_intermediate_size =
         lz_json_get_int(&j, tc, "mtp_intermediate_size", c->intermediate_size);
+    /* DSpark (arXiv:2607.05147). 1 = every checkpoint before this
+       field existed and every upstream checkpoint - LZMtp binds `fc`,
+       not the five
+       main_proj/depth_embed/mask_embed/markov_embed/markov_proj
+       tensors. mtp_markov_rank is meaningless (left 0) at
+       mtp_n_draft<=1 and unread in that case. */
+    c->mtp_n_draft       = lz_json_get_int(&j, tc, "mtp_n_draft", 1);
+    c->mtp_markov_rank   = lz_json_get_int(&j, tc, "mtp_markov_rank", 0);
+
+    /* ROTATED VOCABULARY (spec 1.16, 3.17 item 17), the two rules the
+       training side enforces for itself. The transform is only wired
+       under ternary_embed (kunmoe_modeling's _wire_ternary_embed returns
+       before registering either hook), so a rotation on any other
+       checkpoint would move a matrix whose rows are still in the primal
+       basis - the file loads and every logit is plausible and wrong,
+       which is the failure LZ_ERR_CFG_EMBED_HADAMARD was written for and
+       is still the right answer, just now for this reason rather than
+       for "not implemented". */
+    if (embed_block_bad(c->embed_hadamard, c->hidden_size)) {
+        qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE, "embed_hadamard");
+        lz_json_free(&j);
+        return 1;
+    }
+    if (LZ_EMBED_ROT_ON(c->embed_hadamard, c->embed_signs_seed) &&
+        !lz_json_get_int(&j, tc, "ternary_embed", 0)) {
+        qerr(errbuf, errlen, LZ_ERR_CFG_EMBED_HADAMARD, c->embed_hadamard);
+        lz_json_free(&j);
+        return 1;
+    }
+
+    /* CED bounded replay (model.h's own field comment has the full
+       argument) - 0/0 defaults reproduce a config.json that never
+       carried these keys. */
+    c->ced_split      = lz_json_get_int(&j, tc, "ced_split", 0);
+
+    /* THE APPLICATION TABLE (spec 3.1). The bin path carries one in its
+       v6 header; the safetensors path has no header, so it derives the
+       table here from the same fields engine/loop_schedule.py reads.
+       That is a second implementation of one function, and it is checked
+       against the first: tests/test_loop_schedule_agrees.py runs both
+       over a grid of shapes and compares them element for element. */
+    {
+        int repeats = lz_json_get_int(&j, tc, "loop_repeats", 1);
+        int a = 0, i, k;
+        if (repeats < 1) {
+            qerr(errbuf, errlen, LZ_ERR_CFG_LOOP_CONFIG, repeats);
+            lz_json_free(&j);
+            return 1;
+        }
+        if (repeats == 1) {
+            for (i = 0; i < c->n_layers; i++) {
+                c->app_layer[i] = i;
+                c->app_loop[i] = 0;
+            }
+            c->exec_len = c->n_layers;
+        } else {
+            int start = lz_json_get_int(&j, tc, "loop_block_start", -1);
+            int size = lz_json_get_int(&j, tc, "loop_block_size", -1);
+            int coda = lz_json_get_int(&j, tc, "loop_coda_size", 0);
+            int p;
+            /* The split IS the block's start: with start < ced_split the
+               encoder's last layers would run twice before the decoder
+               ever did, and with start > ced_split the decoder's first
+               layers would run once. The block and the coda together are
+               the tail; a coda of 0 keeps the older shape where the block
+               runs to the last layer. */
+            if (coda < 0 || start < 0 || start != c->ced_split || size <= 0 ||
+                start + size + coda != c->n_layers ||
+                c->n_layers + (repeats - 1) * size > LZ_MAX_LAYERS) {
+                qerr(errbuf, errlen, LZ_ERR_CFG_LOOP_CONFIG, repeats);
+                lz_json_free(&j);
+                return 1;
+            }
+            /* The prelude's own applications first (pass 0), then the
+               block once per pass, numbered from 1 - the same numbering
+               engine/loop_schedule.py produces, which the training
+               forward reads to decide where H_E is captured. The coda
+               runs once after the loop and carries repeats+1, which is
+               not a pass number: a consumer reading the id to tell which
+               pass it is must not mistake it for a third one. */
+            for (i = 0; i < start; i++, a++) {
+                c->app_layer[a] = i;
+                c->app_loop[a] = 0;
+            }
+            for (p = 0; p < repeats; p++) {
+                for (k = 0; k < size; k++, a++) {
+                    c->app_layer[a] = start + k;
+                    c->app_loop[a] = p + 1;
+                }
+            }
+            for (i = start + size; i < c->n_layers; i++, a++) {
+                c->app_layer[a] = i;
+                c->app_loop[a] = repeats + 1;
+            }
+            c->exec_len = a;
+        }
+    }
+
+    c->ced_replay_w   = lz_json_get_int(&j, tc, "ced_replay_w", 0);
+
+    /* ced_kv (model.h's own field comment). A string, not a bool - it
+       has three possible values on the training side (off/proj/reuse)
+       and this engine implements only two of them. */
+    {
+        const char *ck = lz_json_get_str(&j, tc, "ced_kv", "off");
+        if (strcmp(ck, "off") == 0) {
+            c->ced_kv = 0;
+        } else if (strcmp(ck, "proj") == 0) {
+            c->ced_kv = 1;
+        } else {
+            /* Covers "reuse" and any typo'd value alike - same posture
+               kda_gate_activation/ffn_activation take on a name the
+               engine does not recognize, rather than silently falling
+               back to off. */
+            qerr(errbuf, errlen, LZ_ERR_CFG_CED_KV, ck);
+            lz_json_free(&j);
+            return 1;
+        }
+    }
+
+    /* ced_local (model.h's own field comment): THE VALUE IS THE WINDOW,
+       so it is read here with the other CED fields. Its layer rule is
+       checked at the end of this function, once csa2_on[]/csa2_mode[]
+       have been parsed - lz_ced_local_target reads both. */
+    c->ced_local      = lz_json_get_int(&j, tc, "ced_local", 0);
+
+    /* loop_input_mix (model.h's own field comment). A string, not a
+       bool: the training side's knob has more values than this engine
+       implements, and a mode it cannot name is a model it would run
+       without the injection - a different model with no error anywhere.
+       The VALUE is a weight (loop_input_mix_a) and is read by
+       model_walk; this word only says to expect it. */
+    {
+        const char *mk = lz_json_get_str(&j, tc, "loop_input_mix", "off");
+        if (strcmp(mk, "off") == 0) {
+            c->loop_input_mix = 0;
+        } else if (strcmp(mk, "scalar") == 0) {
+            c->loop_input_mix = 1;
+        } else {
+            qerr(errbuf, errlen, LZ_ERR_CFG_LOOP_INPUT_MIX, mk);
+            lz_json_free(&j);
+            return 1;
+        }
+    }
+
+    /* loop_input_mix_from (model.h's own field comment). Default 2 =
+       skip the block's first pass, which is every artifact's behaviour
+       before this field existed - a config.json without the key and a
+       v8 bin (which has no word for it) describe the same model. The
+       range rule runs through loop_mix_from_check at this function's
+       tail, beside ced_local_check: one copy for both loaders. */
+    c->loop_input_mix_from = lz_json_get_int(&j, tc,
+                                             "loop_input_mix_from", 2);
+
+    /* S1 attn_kv_share (model.h's own field comment). Read as a BOOL,
+       not with lz_json_get_int: the key is a JSON true/false in every
+       config.json the training side writes, and lz_json_get_int answers
+       its default for a LZ_JSON_BOOL node - the switch would never fire
+       and the target layers' absent k/v tensors would come back as an
+       ordinary missing-tensor error. Same reader use_subn and
+       attn_output_gate use for their own boolean keys. */
+    c->attn_kv_share  = lz_json_get_bool(&j, tc, "attn_kv_share", 0);
+
+    /* Learned attention sink (model.h's own attn_sink_learned comment).
+       A BOOL for the same reason attn_kv_share just above is one, and
+       the .bin path reads the same switch out of the v5 tail
+       (attn_sink_learned) - the two loaders have to agree on it or the
+       same checkpoint is two different models depending on which file
+       format it was written in. attn_sink_init is a float and has no
+       header field at all; model.h's comment on it says what that
+       costs. */
+    c->attn_sink_learned = lz_json_get_bool(&j, tc, "attn_sink", 0);
+    c->attn_sink_init    = (float)lz_json_get_num(&j, tc, "attn_sink_init", 0.0);
+
+    /* GR (model.h's own gated_residual comment). An int, not a BOOL: the
+       key is the branch count. This reader is the config.json half of the
+       same switch lz_open_bin takes out of the v5 tail - the two loaders
+       have to agree on it or one checkpoint is two different models
+       depending on which file format it was written in, which is exactly
+       the divergence setup_layers' gr_on would turn from invisible into a
+       different forward pass. No range check here: the bin path's
+       LZ_ERR_BIN_FIELD_RANGE and this reader both feed the same
+       `>= 2` test in setup_layers, so a config.json asking for nr=1 gets
+       no branches and no specs - and a checkpoint that carries gr_*
+       tensors is then refused by the unclaimed-tensor check rather than
+       quietly run without them. */
+    c->gated_residual = lz_json_get_int(&j, tc, "gated_residual", 0);
+
+    /* S4 MLA low-rank Q/O (model.h's own field comment) - 0/0 defaults
+       reproduce a config.json that never carried these keys. */
+    c->mla_q_lora_rank = lz_json_get_int(&j, tc, "mla_q_lora_rank", 0);
+    c->mla_o_lora_rank = lz_json_get_int(&j, tc, "mla_o_lora_rank", 0);
 
     /* Engram (conditional n-gram memory). engram=0 skips everything;
        derive the structural fields the forward pass reads. */
@@ -259,6 +784,15 @@ int lz_load_config(LZModelConfig *c, const char *path,
     c->full_attention_interval =
         lz_json_get_int(&j, tc, "full_attention_interval", 0);
 
+    /* "" (key absent) and "none" both mean LZ_FFN_ACT_NONE inside
+       parse_ffn_activation - stock upstream and every model this
+       project has produced omit the key entirely, so "absent" cannot be
+       the refusal case an unrecognized name gets. */
+    if (parse_ffn_activation(&j, tc, c, errbuf, errlen) != 0) {
+        lz_json_free(&j);
+        return 1;
+    }
+
     {
         const LZJsonNode *n = lz_json_get(&j, tc, "tie_word_embeddings");
         if (!n) n = lz_json_get(&j, root, "tie_word_embeddings");
@@ -269,6 +803,15 @@ int lz_load_config(LZModelConfig *c, const char *path,
         c->attn_output_gate = (n && n->type == LZ_JSON_BOOL && n->num != 0.0);
     }
     c->use_subn = lz_json_get_bool(&j, tc, "use_subn", 0);
+    /* LowRankLinear does not compose with SubLN's per-projection input
+       norm - see model.h's mla_q_lora_rank comment. Refused rather than
+       silently picking one, same posture as the rope_theta top-level-
+       vs-nested collision check above. */
+    if (c->use_subn && (c->mla_q_lora_rank > 0 || c->mla_o_lora_rank > 0)) {
+        qerr(errbuf, errlen, LZ_ERR_CFG_MLA_SUBN);
+        lz_json_free(&j);
+        return 1;
+    }
     /* Block-diagonal Hadamard block sizes. -1 = "derive" (resolved by
        resolve_hadamard below), which is what a config.json written
        before these keys existed gets. */
@@ -407,42 +950,101 @@ int lz_load_config(LZModelConfig *c, const char *path,
         (float)lz_json_get_num(&j, tc, "partial_rotary_factor",
                                c->partial_rotary_factor);
 
-    /* rope_parameters.rope_scaling: {type: linear|yarn|none,
-       factor, original_max_position_embeddings, beta_fast, beta_slow}.
-       Defaults: no scaling. rope_scaling_type stays 0 unless the key
-       exists AND names a supported type - an unsupported type name is
-       refused, not silently read as "no scaling". */
+    /* rope_parameters.rope_type: none/default/linear/yarn, plus
+       factor, original_max_position_embeddings, beta_fast, beta_slow,
+       attention_factor - all FLAT siblings of rope_theta inside
+       rope_parameters, not nested under a "rope_scaling" sub-object.
+       There is no such sub-object in what this project's own training
+       side ever writes: checked against KunMoeConfig.to_dict() and
+       every live config.json under E:/LLM/models, rope_parameters is
+       {rope_theta, partial_rotary_factor, rope_type, and - only when
+       non-default - factor/original_max_position_embeddings/
+       beta_fast/beta_slow}. A prior version of this parser read
+       rope_parameters.rope_scaling.type, matching an older nested
+       transformers convention this project's config.json never
+       actually produced - every field below was silently unreachable
+       against every real config on disk, and rope_scaling_type stayed
+       0 regardless of what rope_type said; the RoPE table this loader
+       feeds never applied any of it either (see forward_rope.c's rope_cs
+       fill). Defaults: no scaling. rope_scaling_type stays 0 unless
+       the key exists AND names a supported type - an unsupported type
+       name is refused, not silently read as "no scaling". */
     c->rope_scaling_type = 0;
     c->rope_scaling_factor = 1.0f;
     c->rope_scaling_orig_max = 0.0f;
     c->rope_scaling_beta_fast = 32.0f;
     c->rope_scaling_beta_slow = 1.0f;
+    c->rope_scaling_attn_factor = 0.0f;   /* 0 = absent, forward.c derives it */
     if (rp) {
-        const LZJsonNode *rs = lz_json_get(&j, rp, "rope_scaling");
-        if (rs) {
-            const LZJsonNode *ty = lz_json_get(&j, rs, "type");
-            const char *s = ty && ty->type == LZ_JSON_STR ? ty->text : NULL;            int t = 0;
-            if (s && strcmp(s, "linear") == 0) t = 1;
-            else if (s && strcmp(s, "yarn") == 0) t = 2;
-            else if (s && strcmp(s, "none") != 0 && strcmp(s, "null") != 0) {
-                qerr(errbuf, errlen, LZ_ERR_CFG_ROPE_SCALING, s ? s : "?");
-                lz_json_free(&j);
-                return 1;
+        const LZJsonNode *ty = lz_json_get(&j, rp, "rope_type");
+        const char *s = ty && ty->type == LZ_JSON_STR ? ty->text : NULL;
+        const LZJsonNode *n_factor = lz_json_get(&j, rp, "factor");
+        const LZJsonNode *n_orig_max =
+            lz_json_get(&j, rp, "original_max_position_embeddings");
+        int t = 0;
+        if (s && strcmp(s, "linear") == 0) t = 1;
+        else if (s && strcmp(s, "yarn") == 0) t = 2;
+        else if (s && strcmp(s, "default") != 0 && strcmp(s, "none") != 0 &&
+                 strcmp(s, "null") != 0) {
+            qerr(errbuf, errlen, LZ_ERR_CFG_ROPE_SCALING, s ? s : "?");
+            lz_json_free(&j);
+            return 1;
+        }
+        /* yarn's correction range divides by log(orig_max / ...) and by
+           log(base) - an absent orig_max (sentinel 0) or a factor left
+           at the "no scaling" sentinel (1.0) would compute a division
+           by an effectively-undefined range rather than a refusal.
+           Required explicit, same posture as LZ_ERR_CFG_MOE_FIELDS:
+           silently deriving factor from max_position_embeddings /
+           original_max_position_embeddings (as transformers does when
+           factor is omitted) is a second code path this project does
+           not carry, not a default worth guessing at. */
+        if ((t == 2 && (!n_factor || !n_orig_max)) || (t == 1 && !n_factor)) {
+            qerr(errbuf, errlen, LZ_ERR_CFG_ROPE_YARN_FIELDS,
+                 (int)((n_factor ? n_factor->num : 0.0) * 1000.0),
+                 (int)(n_orig_max ? n_orig_max->num : 0.0));
+            lz_json_free(&j);
+            return 1;
+        }
+        c->rope_scaling_type = t;
+        c->rope_scaling_factor =
+            (float)lz_json_get_num(&j, rp, "factor", c->rope_scaling_factor);
+        c->rope_scaling_orig_max =
+            (float)lz_json_get_num(&j, rp,
+                                   "original_max_position_embeddings",
+                                   c->rope_scaling_orig_max);
+        c->rope_scaling_beta_fast =
+            (float)lz_json_get_num(&j, rp, "beta_fast",
+                                   c->rope_scaling_beta_fast);
+        c->rope_scaling_beta_slow =
+            (float)lz_json_get_num(&j, rp, "beta_slow",
+                                   c->rope_scaling_beta_slow);
+        c->rope_scaling_attn_factor =
+            (float)lz_json_get_num(&j, rp, "attention_factor",
+                                   c->rope_scaling_attn_factor);
+
+        /* Keys transformers reads under rope_parameters that this engine
+           does NOT implement. Ignoring one silently would run a rule the
+           checkpoint was not trained under, and nothing downstream would
+           say so - the posture the rope_theta/partial_rotary_factor
+           conflict check above and the unknown rope_type check below
+           already take. `truncate: false` drops yarn's floor/ceil on the
+           correction range; mscale / mscale_all_dim replace the
+           one-argument get_mscale(factor) with a two-argument ratio. No
+           config.json on this machine carries any of the three. */
+        {
+            static const char *unsupported[] = {
+                "truncate", "mscale", "mscale_all_dim"
+            };
+            int ui;
+            for (ui = 0; ui < 3; ui++) {
+                if (lz_json_get(&j, rp, unsupported[ui])) {
+                    qerr(errbuf, errlen, LZ_ERR_CFG_ROPE_KEY,
+                         unsupported[ui]);
+                    lz_json_free(&j);
+                    return 1;
+                }
             }
-            c->rope_scaling_type = t;
-            c->rope_scaling_factor =
-                (float)lz_json_get_num(&j, rs, "factor",
-                                       c->rope_scaling_factor);
-            c->rope_scaling_orig_max =
-                (float)lz_json_get_num(&j, rs,
-                                       "original_max_position_embeddings",
-                                       c->rope_scaling_orig_max);
-            c->rope_scaling_beta_fast =
-                (float)lz_json_get_num(&j, rs, "beta_fast",
-                                       c->rope_scaling_beta_fast);
-            c->rope_scaling_beta_slow =
-                (float)lz_json_get_num(&j, rs, "beta_slow",
-                                       c->rope_scaling_beta_slow);
         }
     }
 
@@ -485,6 +1087,257 @@ int lz_load_config(LZModelConfig *c, const char *path,
             return 1;
         }
     }
+
+    /* The application table is filled by the derivation above (one
+       writer; the identity schedule is its loop_repeats == 1 arm). The
+       bin path reads the same table verbatim from the v6 header. */
+
+    /* S2 CSA2 (model.h's own csa2_on[]/csa2_compress_m comment). Parsed
+       here, not earlier alongside ced_split/mla_q_lora_rank, because
+       validating each named index against layer_types needs that array
+       already filled - the loop just above is what fills it, and `j`
+       (this function's own JSON handle) is freed a few lines down, so
+       this is the only window where both are available at once. */
+    lt = lz_json_get(&j, tc, "csa2_layers");
+    if (lt && lt->type == LZ_JSON_ARR) {
+        for (e = lz_json_first(&j, lt); e; e = lz_json_next(&j, e)) {
+            int idx = (int)e->num;
+            if (idx < 0 || idx >= c->n_layers ||
+                c->layer_types[idx] != LZ_LT_FULL) {
+                qerr(errbuf, errlen, LZ_ERR_CFG_CSA2_LAYER, idx);
+                lz_json_free(&j);
+                return 1;
+            }
+            /* S4+CSA2 composition (model.h's own csa2_w_dq_idx comment;
+               model_walk's own CSA2_SPECS comment has the mechanism):
+               present_mla_q/present_not_mla_q gate q_proj.weight vs
+               q_proj.down/up.weight PURELY on c->mla_q_lora_rank, for
+               EVERY full_attention layer, csa2_on or not - so a csa2_on
+               layer under S4 never gets q_proj.weight walked at all,
+               while forward_csa2.c's step 1 always reads L->q_proj
+               directly and never L->q_proj_down/up. Refused explicitly,
+               here, rather than left to an accidental missing-tensor
+               error on csa2_w_dq_idx (which only fires for a checkpoint
+               that ALSO reproduces the training side's own composition
+               choice of dropping that tensor - see model_walk's own
+               comment for why that accident cannot be relied on at all
+               on the bin path, which has no name to fail a lookup
+               against). mla_q_lora_rank is parsed once, unconditionally,
+               well before this loop runs (this function's own field
+               order), so it is already final here. */
+            if (c->mla_q_lora_rank > 0) {
+                qerr(errbuf, errlen, LZ_ERR_CFG_CSA2_MLA, idx);
+                lz_json_free(&j);
+                return 1;
+            }
+            c->csa2_on[idx] = 1;
+        }
+    }
+
+    /* csa2_kv_mode / csa2_kv_source (model.h's own csa2_mode[]/
+       csa2_source[] comment on LZModelConfig). Parsed here, right after
+       csa2_on[] is filled, for the same reason csa2_layers itself is
+       parsed here rather than alongside ced_split/mla_q_lora_rank above:
+       validating an entry needs csa2_on[] already filled.
+
+       c->csa2_mode[] is already LZ_CSA2_FULL (0) for every layer via
+       lz_load_config's own memset(c, 0, ...) at entry - LZ_CSA2_FULL is
+       0 for exactly this reason (model.h's own comment on the code).
+       csa2_source[] needs an explicit fill: -1 is not memset's zero. */
+    for (i = 0; i < LZ_MAX_LAYERS; i++) c->csa2_source[i] = -1;
+
+    /* Both are JSON OBJECTS keyed by the layer index AS A STRING (JSON
+       has no integer keys) - walked the same way lz_json_first/
+       lz_json_next walk an ARR's elements (st_path_from_index's
+       weight_map loop and arch_probe's tensor-name loop, both above in
+       this file, are the existing precedent for objects; this is the
+       first object here keyed by something other than a fixed literal
+       name). Each child node's own ->key is the member name, NUL-
+       terminated (json.h's own LZJsonNode comment) - csa2_key_idx above
+       is what rejects a key that is not ENTIRELY an in-range digit
+       string, rather than silently reading a numeric prefix or letting
+       strtol's own leading-whitespace/sign tolerance through. */
+    lt = lz_json_get(&j, tc, "csa2_kv_mode");
+    if (lt && lt->type == LZ_JSON_OBJ) {
+        for (e = lz_json_first(&j, lt); e; e = lz_json_next(&j, e)) {
+            int idx = csa2_key_idx(e->key);
+            if (idx < 0 || idx >= c->n_layers || !c->csa2_on[idx]) {
+                qerr(errbuf, errlen, LZ_ERR_CFG_CSA2_MODE,
+                     idx, "not a CSA2 layer");
+                lz_json_free(&j);
+                return 1;
+            }
+            if (lz_json_str_eq(e, "full")) {
+                c->csa2_mode[idx] = LZ_CSA2_FULL;
+            } else if (lz_json_str_eq(e, "reindex")) {
+                c->csa2_mode[idx] = LZ_CSA2_REINDEX;
+            } else if (lz_json_str_eq(e, "reuse")) {
+                c->csa2_mode[idx] = LZ_CSA2_REUSE;
+            } else {
+                qerr(errbuf, errlen, LZ_ERR_CFG_CSA2_MODE, idx,
+                     e->type == LZ_JSON_STR && e->text ?
+                     e->text : "(not-a-string)");
+                lz_json_free(&j);
+                return 1;
+            }
+        }
+    }
+    lt = lz_json_get(&j, tc, "csa2_kv_source");
+    if (lt && lt->type == LZ_JSON_OBJ) {
+        for (e = lz_json_first(&j, lt); e; e = lz_json_next(&j, e)) {
+            int idx = csa2_key_idx(e->key);
+            int src;
+            /* idx must already have been resolved to a non-FULL mode by
+               the csa2_kv_mode pass just above - a FULL-mode (explicit
+               or the untouched default) idx getting a source entry is
+               refused here, same as an out-of-range/non-CSA2 idx,
+               because neither can have "a strictly earlier layer this
+               entry aliases" mean anything. Bounds-checked before the
+               csa2_mode[] read: an unresolved idx outside [0, n_layers)
+               would otherwise index past the array. */
+            if (idx < 0 || idx >= c->n_layers ||
+                c->csa2_mode[idx] == LZ_CSA2_FULL) {
+                qerr(errbuf, errlen, LZ_ERR_CFG_CSA2_SOURCE, idx,
+                     "mode is full or was never set to reindex/reuse");
+                lz_json_free(&j);
+                return 1;
+            }
+            /* The value's own type: jnode_new zeroes every new node, so
+               a string/bool/null/array/object entry's ->num reads back
+               0.0 (or 1.0 for `true`) exactly like a legitimate integer
+               0/1 would - e->num alone cannot tell "the layer 0 source"
+               from "this was never a number". Checked before reading
+               ->num for that reason, not after. */
+            if (e->type != LZ_JSON_NUM) {
+                qerr(errbuf, errlen, LZ_ERR_CFG_CSA2_SOURCE, idx,
+                     "source is not a number");
+                lz_json_free(&j);
+                return 1;
+            }
+            src = (int)e->num;
+            if (src < 0 || src >= idx || !c->csa2_on[src]) {
+                qerr(errbuf, errlen, LZ_ERR_CFG_CSA2_SOURCE, idx,
+                     "source is not a strictly earlier CSA2 layer");
+                lz_json_free(&j);
+                return 1;
+            }
+            c->csa2_source[idx] = src;
+        }
+    }
+    /* Cross-checks that need BOTH objects fully parsed: a non-FULL mode
+       with no source (the csa2_kv_source pass above only ever fills a
+       source for an idx it saw; an idx named only in csa2_kv_mode never
+       reaches it), and - once every layer has a source at all -
+       lz_csa2_last_writer_valid's own whole-config question: is each
+       one's declared source actually the CURRENT last writer of the
+       physical slot it aliases, not merely a strictly-earlier csa2_on
+       layer. That single check subsumes the narrower per-layer one, so
+       this loop does not check it ("a REUSE layer's source must not
+       itself be REUSE mode" - model.c's own comment on
+       lz_csa2_last_writer_valid has the proof: a REUSE layer never
+       becomes anyone's last writer, so any layer naming one as its own
+       source always fails the same way). */
+    for (i = 0; i < c->n_layers; i++) {
+        if (!c->csa2_on[i] || c->csa2_mode[i] == LZ_CSA2_FULL) continue;
+        if (c->csa2_source[i] < 0) {
+            qerr(errbuf, errlen, LZ_ERR_CFG_CSA2_SOURCE, i,
+                 "csa2_kv_mode names a non-full mode with no csa2_kv_source entry");
+            lz_json_free(&j);
+            return 1;
+        }
+    }
+    {
+        int bad = -1;
+        if (!lz_csa2_last_writer_valid(c, &bad)) {
+            qerr(errbuf, errlen, LZ_ERR_CFG_CSA2_SOURCE, bad,
+                 "source is not the current last writer of the shared "
+                 "slot it aliases");
+            lz_json_free(&j);
+            return 1;
+        }
+    }
+
+    c->csa2_compress_m          = lz_json_get_int(&j, tc, "csa2_compress_m", 2);
+    c->csa2_topk                = lz_json_get_int(&j, tc, "csa2_topk", 64);
+    c->csa2_indexer_heads       = lz_json_get_int(&j, tc, "csa2_indexer_heads", 4);
+    c->csa2_indexer_head_dim    = lz_json_get_int(&j, tc, "csa2_indexer_head_dim", 32);
+    c->csa2_indexer_q_lora_rank = lz_json_get_int(&j, tc, "csa2_indexer_q_lora_rank", 32);
+
+    /* csa2_compress_m_layers (model.h's own csa2_compress_m_layer
+       comment on LZModelConfig has the mechanism). Parsed HERE - after
+       the scalar, so an unnamed layer's fallback is already final, and
+       after csa2_kv_mode/csa2_kv_source, because the aliasing check at
+       the end of this block needs both those arrays filled - and before
+       lz_json_free below, the last window where the JSON handle and
+       every field an entry is validated against are live at once.
+
+       Three separate refusals, each a shape that cannot mean anything:
+       a key that does not name a csa2_on layer of this model, a value
+       that is not a number, and a value outside [1, seq_len]. The
+       fourth, at the end, is not a property of one entry: a non-FULL
+       layer reads its source's ring (forward_state.c's cache_idx fill
+       aliases the two), whose block boundaries ARE that slot's ratio, so
+       a ratio of its own would be a second geometry over the same
+       memory. lz_csa2_last_writer_valid above has already established
+       which layer is whose source. */
+    lt = lz_json_get(&j, tc, "csa2_compress_m_layers");
+    if (lt && lt->type == LZ_JSON_OBJ) {
+        for (e = lz_json_first(&j, lt); e; e = lz_json_next(&j, e)) {
+            int idx = csa2_key_idx(e->key);
+            int pv;
+            if (idx < 0 || idx >= c->n_layers || !c->csa2_on[idx]) {
+                qerr(errbuf, errlen, LZ_ERR_CFG_CSA2_COMPRESS_M, idx,
+                     "not a CSA2 layer of this model");
+                lz_json_free(&j);
+                return 1;
+            }
+            /* The value's own type before its value: jnode_new zeroes
+               every node, so a string/bool/null entry's ->num reads back
+               0.0 (or 1.0 for `true`) exactly like a legitimate 0/1
+               would - the same reason csa2_kv_source's own source check
+               tests the type first. */
+            if (e->type != LZ_JSON_NUM) {
+                qerr(errbuf, errlen, LZ_ERR_CFG_CSA2_COMPRESS_M, idx,
+                     "value is not a number");
+                lz_json_free(&j);
+                return 1;
+            }
+            pv = (int)e->num;
+            /* seq_len is optional in config.json (0 = "not stated",
+               lz_json_get_int's own default) and is always present in a
+               bin header, so the upper half of the bound is applied only
+               where there is a seq_len to apply it against - the same
+               conditional lz_open_bin's own csa2_compress_m bound gets
+               for free from the header it reads. */
+            if (pv < 1 || (c->seq_len > 0 && pv > c->seq_len)) {
+                qerr(errbuf, errlen, LZ_ERR_CFG_CSA2_COMPRESS_M, idx,
+                     "value is not in [1, seq_len]");
+                lz_json_free(&j);
+                return 1;
+            }
+            c->csa2_compress_m_layer[idx] = pv;
+        }
+    }
+    if (c->csa2_compress_m < 1 ||
+        (c->seq_len > 0 && c->csa2_compress_m > c->seq_len)) {
+        qerr(errbuf, errlen, LZ_ERR_CFG_CSA2_COMPRESS_M, -1,
+             "the csa2_compress_m scalar is not in [1, seq_len]");
+        lz_json_free(&j);
+        return 1;
+    }
+    for (i = 0; i < c->n_layers; i++) {
+        if (!c->csa2_on[i] || c->csa2_mode[i] == LZ_CSA2_FULL) continue;
+        if (c->csa2_compress_m_layer[i] > 0 &&
+            c->csa2_compress_m_layer[i] !=
+            lz_csa2_cm(c, c->csa2_source[i])) {
+            qerr(errbuf, errlen, LZ_ERR_CFG_CSA2_COMPRESS_M, i,
+                 "value disagrees with the ratio of the layer whose ring "
+                 "this alias reads");
+            lz_json_free(&j);
+            return 1;
+        }
+    }
+
     lz_json_free(&j);
 
     /* derived quantities computed once, here */
@@ -515,8 +1368,46 @@ int lz_load_config(LZModelConfig *c, const char *path,
              (int)(c->partial_rotary_factor * 100.0f + 0.5f));
         return 1;
     }
+
+    /* lz_rope writes base[i] and base[i + rotary_dim/2] inside one row
+       (src/ops_rope.c), so a row must be at least rotary_dim wide.
+       head_dim is not the tightest row this model rotates: a FULL-mode
+       CSA2 layer's indexer key is csa2_indexer_head_dim wide, and the
+       rotation forward_csa2.c applies to it is this same lz_rope - so
+       the bound above lets rotary_dim run off the end of that row, into
+       the next block's entry and past the allocation. Refused here
+       rather than silently narrowed, because narrowing it would rotate
+       fewer dims than the caller asked for and report nothing.
+
+       Gated on csa2_on[] and on FULL mode for two separate reasons:
+       only a FULL layer owns an indexer key (REINDEX/REUSE read their
+       source's), and csa2_indexer_head_dim carries a default (32) that
+       every checkpoint gets whether or not it has any CSA2 layer at all.
+       engine/csa2.py's _wire_csa2 refuses the same pairing on the
+       training side. */
+    for (i = 0; i < c->n_layers; i++) {
+        if (!c->csa2_on[i] || c->csa2_mode[i] != LZ_CSA2_FULL) continue;
+        if (c->rotary_dim > c->csa2_indexer_head_dim) {
+            qerr(errbuf, errlen, LZ_ERR_CFG_CSA2_IDX_ROTARY,
+                 i, c->rotary_dim, c->csa2_indexer_head_dim);
+            return 1;
+        }
+    }
     /* After lin_value_dim, which the derivations read. */
+    if (check_attn_gate(c, errbuf, errlen) != 0) return 1;
     if (resolve_hadamard(c, errbuf, errlen) != 0) return 1;
+
+    /* ced_local's shape and its layer rule (model.h's own field comment;
+       ced_local_check has the argument for checking rather than
+       trusting the config). Runs here because lz_ced_local_target reads
+       csa2_on[]/csa2_mode[], parsed above. */
+    if (ced_local_check(c, errbuf, errlen) != 0) return 1;
+    /* loop_input_mix_from's range (model.h's own field comment;
+       loop_mix_from_check has the argument for checking it against the
+       pass count rather than trusting the config). Runs here because
+       the application table - which the pass count is read out of - is
+       built above. */
+    if (loop_mix_from_check(c, errbuf, errlen) != 0) return 1;
     return 0;
 }
 
@@ -528,9 +1419,26 @@ enum {
     DK_END = 0,
     DK_HIDDEN, DK_INTER, DK_VOCAB,
     DK_ATTN_QGATE, DK_ATTN_KV, DK_ATTN_Q, DK_HEAD_DIM,
+    /* n_heads: the width of a per-head vector. NOT DK_NVHEADS below,
+       which is lin_n_v_heads - the linear-attention side's head count is
+       an independent config field. */
+    DK_ATTN_HEADS,
     DK_CONV, DK_VALUE, DK_NVHEADS, DK_VHEADDIM,
     DK_ONE, DK_KERNEL,
     DK_HIDDEN2,     /* 2 * hidden: mtp.fc reads [hidden, embedding] joined */
+    DK_HIDDEN3,     /* 3 * hidden: mtp.main_proj (DSpark, mtp_n_draft > 1) */
+    DK_MTP_NDRAFT,  /* mtp_n_draft: mtp.depth_embed row count */
+    DK_MTP_MARKOV_RANK, /* mtp_markov_rank: markov_embed/markov_proj's rank dim */
+    DK_MLA_Q_RANK,  /* mla_q_lora_rank: q_proj.down output / q_proj.up input */
+    DK_MLA_O_RANK,  /* mla_o_lora_rank: o_proj.down output / o_proj.up input */
+    /* S2 CSA2 (LZLayer's own csa2_w_* comment has the full tensor list;
+       csa2_w_kv/csa2_w_gate's own output dim is DK_HEAD_DIM, reused
+       rather than duplicated - CSA2's compressed entries are exactly
+       head_dim wide, arXiv:2606.19348's own text). */
+    DK_CSA2_IDX_HEAD_DIM,  /* csa2_indexer_head_dim: indexer K/Q per-head width */
+    DK_CSA2_IDX_HEADS,     /* csa2_indexer_heads: csa2_w_weights output width */
+    DK_CSA2_Q_LORA_RANK,   /* csa2_indexer_q_lora_rank: csa2_w_dq_idx output / csa2_w_uq_idx input */
+    DK_CSA2_UQ_OUT,        /* csa2_indexer_heads * csa2_indexer_head_dim: csa2_w_uq_idx output */
     /* KDA (LZ_LT_KDA) */
     DK_KEY,         /* lin_key_dim: kda_q_proj/kda_k_proj output width */
     DK_GATE_RANK,   /* kda_gate_rank: f_a_proj output / f_b_proj input */
@@ -543,6 +1451,13 @@ enum {
     DK_LATENT,      /* moe_latent_dim: routed_expert_down/up_proj's latent side */
     DK_SHARED_W,    /* moe_shared_width: shared expert inner width */
     DK_MOE_INTER,   /* moe_intermediate_size: per-expert w1/w2/w3 inner width */
+    /* GR (LZLayer's own gr_attn / gr_mlp comment has the tensor list).
+       DK_GR_FLAT is nr*hidden, the flattened branch stream every GR
+       projection reads or writes - it is why the three are separate
+       kinds rather than shares of DK_HIDDEN. */
+    DK_GR_NR,       /* gated_residual: branch count, one norm per branch */
+    DK_GR_RANK,     /* max(1, hidden/8): W_d's output / W_u's input */
+    DK_GR_FLAT,     /* gated_residual * hidden: the flattened stream width */
     /* MTP head only (model_walk's separate MTP_FFN_SPECS, not
        LAYER_SPECS - see that table's own comment) */
     DK_MTP_INTER    /* mtp_intermediate_size: MTP block's own dense FFN width */
@@ -571,6 +1486,12 @@ static int present_subn(const LZModelConfig *c) { return c->use_subn; }
 static int present_subn_shared(const LZModelConfig *c) {
     return c->use_subn && c->moe_shared_width > 0;
 }
+static int present_mtp_ndraft1(const LZModelConfig *c) { return c->mtp_n_draft <= 1; }
+static int present_mtp_ndraft_gt1(const LZModelConfig *c) { return c->mtp_n_draft > 1; }
+static int present_mla_q(const LZModelConfig *c) { return c->mla_q_lora_rank > 0; }
+static int present_not_mla_q(const LZModelConfig *c) { return c->mla_q_lora_rank <= 0; }
+static int present_mla_o(const LZModelConfig *c) { return c->mla_o_lora_rank > 0; }
+static int present_not_mla_o(const LZModelConfig *c) { return c->mla_o_lora_rank <= 0; }
 
 static const LZLayerSpec LAYER_SPECS[] = {
     /* shared by every layer kind and every FFN kind */
@@ -597,13 +1518,29 @@ static const LZLayerSpec LAYER_SPECS[] = {
 
     /* full_attention only. q_proj is 2x wide; the second half is the gate */
     { "self_attn.q_proj.weight", LZ_LT_FULL, -1, LOFF(q_proj),
-      { DK_ATTN_QGATE, DK_HIDDEN, DK_END }, NULL },
+      { DK_ATTN_QGATE, DK_HIDDEN, DK_END }, present_not_mla_q },
     { "self_attn.k_proj.weight", LZ_LT_FULL, -1, LOFF(k_proj),
       { DK_ATTN_KV, DK_HIDDEN, DK_END }, NULL },
     { "self_attn.v_proj.weight", LZ_LT_FULL, -1, LOFF(v_proj),
       { DK_ATTN_KV, DK_HIDDEN, DK_END }, NULL },
     { "self_attn.o_proj.weight", LZ_LT_FULL, -1, LOFF(o_proj),
-      { DK_HIDDEN, DK_ATTN_Q, DK_END }, NULL },
+      { DK_HIDDEN, DK_ATTN_Q, DK_END }, present_not_mla_o },
+    /* S4 MLA (mla_q_lora_rank/mla_o_lora_rank > 0 only): replaces the two
+       entries above, matching engine/kunmoe_modeling.py's LowRankLinear
+       replacing attn.q_proj/attn.o_proj in place - state-dict keys
+       q_proj.down.weight/q_proj.up.weight (LowRankLinear.down/.up are
+       nn.Linear submodules named that). See model.h's LZLayer comment
+       on q_proj_down/q_proj_up/mla_q_on/mla_o_on for the per-layer
+       flags attn_impl actually reads, and the mutual exclusion with
+       use_subn enforced above (LZ_ERR_CFG_MLA_SUBN). */
+    { "self_attn.q_proj.down.weight", LZ_LT_FULL, -1, LOFF(q_proj_down),
+      { DK_MLA_Q_RANK, DK_HIDDEN, DK_END }, present_mla_q },
+    { "self_attn.q_proj.up.weight", LZ_LT_FULL, -1, LOFF(q_proj_up),
+      { DK_ATTN_QGATE, DK_MLA_Q_RANK, DK_END }, present_mla_q },
+    { "self_attn.o_proj.down.weight", LZ_LT_FULL, -1, LOFF(o_proj_down),
+      { DK_MLA_O_RANK, DK_ATTN_Q, DK_END }, present_mla_o },
+    { "self_attn.o_proj.up.weight", LZ_LT_FULL, -1, LOFF(o_proj_up),
+      { DK_HIDDEN, DK_MLA_O_RANK, DK_END }, present_mla_o },
     { "self_attn.q_norm.weight", LZ_LT_FULL, -1, LOFF(q_norm),
       { DK_HEAD_DIM, DK_END, DK_END }, NULL },
     { "self_attn.k_norm.weight", LZ_LT_FULL, -1, LOFF(k_norm),
@@ -728,6 +1665,420 @@ static const LZLayerSpec LAYER_SPECS[] = {
 };
 #define N_LAYER_SPECS ((int)(sizeof(LAYER_SPECS) / sizeof(LAYER_SPECS[0])))
 
+/* ------------------------------------------------------ S1 attn_kv_share */
+
+/* The five tensors a target layer takes from the source layer, as
+   LZLayer offsets: the two k/v projection weights, the per-head k_norm,
+   and the two SubLN input norms that live inside the projection modules.
+   ONE table, read by all four callers below - the walk that must not look
+   for them on a target layer, the alias that copies them, lz_free (they
+   are the source's storage, freed once) and the parameter count (they are
+   one tensor, counted once). Named to match the training side's own list,
+   engine/kunmoe_modeling.py's _SHARED_KV_ATTRS, which is what decides
+   which keys save_pretrained omits. */
+static const size_t KV_SHARE_FIELDS[5] = {
+    LOFF(k_proj), LOFF(v_proj), LOFF(k_norm),
+    LOFF(attn_k_subn_norm), LOFF(attn_v_subn_norm)
+};
+#define N_KV_SHARE_FIELDS ((int)(sizeof(KV_SHARE_FIELDS) / sizeof(KV_SHARE_FIELDS[0])))
+
+static int kv_share_field(size_t field) {
+    int k;
+    for (k = 0; k < N_KV_SHARE_FIELDS; k++)
+        if (KV_SHARE_FIELDS[k] == field) return 1;
+    return 0;
+}
+
+/* Layer index whose K/V the others reuse, or -1 when nothing is shared:
+   attn_kv_share off, or fewer than two full_attention layers (the
+   training side's own "there is nothing to share" case). Derived from
+   the config rather than stored as a per-layer flag, so no second copy
+   of this rule can go stale - m->mtp->blk is not in m->layers and is
+   never a target, which is the same reason its own k_proj stays bound.
+   Public (model.h) because forward.c needs the same answer to know whose
+   input reaches a target layer's K/V projections. */
+int lz_kv_share_src(const LZModelConfig *c) {
+    int i, first = -1, nfull = 0;
+    if (!c->attn_kv_share) return -1;
+    for (i = 0; i < c->n_layers; i++) {
+        if (c->layer_types[i] != LZ_LT_FULL) continue;
+        if (first < 0) first = i;
+        nfull++;
+    }
+    return nfull >= 2 ? first : -1;
+}
+
+/* 1 when layer li takes its k/v from the shared source. NOT when li
+   is inside CED's decoder region (ced_split > 0 && ced_split < n and
+   li >= ced_split - the same "CED on" test lz_gr_span elsewhere in
+   this file uses): report Sec2.2 Eq(1) is unconditional there, and
+   attn_kv_share (a project-invented generalization of the layer-reuse
+   idea, not an Eq(1) rule) has no basis to override it. The training
+   side's engine/kunmoe_modeling.py applies the same exclusion in
+   _wire_attn_kv_share; that tree and this one share no git history, so
+   its fix does not reach this file by any mechanism except being
+   written again here. */
+int lz_kv_share_target(const LZModelConfig *c, int li) {
+    int src = lz_kv_share_src(c);
+    if (src < 0 || li <= src || c->layer_types[li] != LZ_LT_FULL)
+        return 0;
+    if (c->ced_split > 0 && c->ced_split < c->n_layers && li >= c->ced_split)
+        return 0;
+    return 1;
+}
+
+/* model.h's own comment on this function has the contract. ced_split
+   == 0 or == n_layers is not a decoder-region boundary (the same "CED
+   on" test lz_kv_share_target and lz_gr_span use above), so ced_kv has
+   nothing to substitute even when the config turns it on. */
+int lz_ced_kv_target(const LZModelConfig *c, int li) {
+    return c->ced_kv && c->ced_split > 0 && c->ced_split < c->n_layers && li >= c->ced_split;
+}
+
+/* model.h's own comment on this function has the contract: the decoder
+   region's CSA2 FULL-mode attention layers, i.e. the ones whose entire
+   attention forward is forward_csa2.c's and whose K/V input ced_kv's
+   substitution already redirected. Derived from lz_ced_kv_target rather
+   than repeating the "li >= ced_split" test, so the global and local
+   halves of Eq (1) cannot come to disagree about where the region
+   starts. load refuses ced_local without ced_kv, and refuses a decoder
+   full-attention layer this function does not name, which is what makes
+   "wired" and "named by the config" the same set. */
+int lz_ced_local_target(const LZModelConfig *c, int li) {
+    return c->ced_local > 0 && lz_ced_kv_target(c, li) &&
+           c->csa2_on[li] && c->csa2_mode[li] == LZ_CSA2_FULL;
+}
+
+/* ced_local's whole load-time rule, one copy for both loaders: the
+   window size is bounded by seq_len, it needs the global branch to sit
+   beside, and every decoder-region full-attention layer must be one
+   lz_ced_local_target names.
+
+   seq_len == 0 is "not stated" in config.json and carries no bound to
+   apply - the same reading csa2_compress_m_layers' bound above takes. On
+   the bin path the caller runs this AFTER csa2_compress_m's own bound, so
+   seq_len is already >= 1 there and the bound is the literal
+   0 <= ced_local <= seq_len.
+
+   That last clause is why this is a check and not a comment: the
+   checkpoint carries the window tensors positionally, so a REINDEX/
+   REUSE-mode CSA2 layer or a layer with no compressor at all would have
+   its weights walked into a slot forward_csa2.c never reads - a knob
+   reported on and moving nothing. errbuf/errlen may be NULL for a
+   caller that only wants the verdict. */
+static int ced_local_check(const LZModelConfig *c, char *errbuf, int errlen) {
+    int i, named = 0;
+    if (c->ced_local < 0 || (c->seq_len > 0 && c->ced_local > c->seq_len)) {
+        if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE,
+                               "ced_local");
+        return 1;
+    }
+    if (c->ced_local == 0) return 0;
+    if (!c->ced_kv) {
+        if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_CFG_CED_LOCAL,
+                               c->ced_local, c->ced_split);
+        return 1;
+    }
+    for (i = 0; i < c->n_layers; i++) {
+        if (lz_ced_local_target(c, i)) { named++; continue; }
+        /* Below the split, or not full attention: the rule's domain is
+           "full attention at or past ced_split", so those layers are
+           outside it and own no window either. */
+        if (c->ced_split <= 0 || c->ced_split >= c->n_layers) continue;
+        if (i < c->ced_split || c->layer_types[i] != LZ_LT_FULL) continue;
+        if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_CFG_CED_LOCAL_LAYER,
+                               i, c->ced_split);
+        return 1;
+    }
+    if (!named) {
+        if (errbuf) lz_err_fmt(errbuf, errlen, LZ_ERR_CFG_CED_LOCAL,
+                               c->ced_local, c->ced_split);
+        return 1;
+    }
+    return 0;
+}
+
+int lz_n_linear_apps(const LZModelConfig *c) {
+    int a, n = 0;
+    for (a = 0; a < c->exec_len; a++)
+        if (c->layer_types[c->app_layer[a]] != LZ_LT_FULL) n++;
+    return n;
+}
+
+/* The block's pass count, read back out of the application table the
+   forward walks: the split layer runs once per pass with app_loop
+   1..repeats, so the largest pass id on it is the count; an identity
+   schedule carries no pass id above 0 and counts as 1.
+
+   NOT a second derivation of loop_repeats - loop_schedule.py and
+   lz_load_config's own build own that. This is a projection of the
+   RESULTING table, which is what forward.c's injection predicate
+   actually reads, so the range rule below judges the quantity the
+   consumption will see even if a table and a config key ever
+   disagreed. */
+static int lz_loop_pass_count(const LZModelConfig *c) {
+    int a, reps = 1;
+    for (a = 0; a < c->exec_len; a++)
+        if (c->app_layer[a] == c->ced_split && c->app_loop[a] > reps)
+            reps = c->app_loop[a];
+    return reps;
+}
+
+/* loop_input_mix_from's whole load-time rule, one copy for both
+   loaders (the shape ced_local_check takes): with the mix ON, the
+   start pass must name a pass the schedule runs - 1-based, up to the
+   block's pass count. 0 would fire at the encoder exit (loop_id 0),
+   a value past the last pass can never fire and the knob would be
+   reported on while moving nothing.
+
+   The mix being OFF skips the rule entirely: the field is dead config
+   then (forward.c's predicate is gated on emb_hold, which only exists
+   for a mixing model), and every pre-knob artifact carries the default
+   2 with repeats possibly 1 - checking it would refuse them all.
+
+   errbuf/errlen may be NULL for a caller that only wants the verdict. */
+static int loop_mix_from_check(const LZModelConfig *c, char *errbuf,
+                               int errlen) {
+    int reps;
+    if (!c->loop_input_mix) return 0;
+    reps = lz_loop_pass_count(c);
+    if (c->loop_input_mix_from < 1 || c->loop_input_mix_from > reps) {
+        if (errbuf) lz_err_fmt(errbuf, errlen,
+                               LZ_ERR_CFG_LOOP_INPUT_MIX_FROM,
+                               c->loop_input_mix_from, reps);
+        return 1;
+    }
+    return 0;
+}
+
+/* model.h's own comment on this function has the contract. Mirrors
+   lz_load_config's own csa2_kv_mode/csa2_kv_source cross-checks
+   (csa2_key_idx's callers above), applied here to ONE layer's already-
+   parsed fields rather than to a JSON object's entries, so lz_open_bin
+   can use the identical rule on a raw header word.
+
+   layer_types[src] == LZ_LT_FULL is checked in addition to csa2_on[src]
+   rather than instead of it: csa2_on[] is only ever SET for a
+   full_attention layer on the JSON path (lz_load_config's own
+   csa2_layers loop refuses csa2_on[idx] for a non-full_attention idx
+   before setting it), but the bin path reads csa2_on[] as a raw array
+   with no such cross-check of its own - a source pointing at a
+   csa2_on[]==1-but-actually-linear_attention layer would otherwise
+   alias forward_state.c's cache_idx into the WRONG numbering space
+   (nl, not nf), corrupting both. */
+int lz_csa2_mode_source_valid(const LZModelConfig *c, int li) {
+    int src;
+    if (c->csa2_mode[li] != LZ_CSA2_FULL &&
+        c->csa2_mode[li] != LZ_CSA2_REINDEX &&
+        c->csa2_mode[li] != LZ_CSA2_REUSE) {
+        return 0;
+    }
+    if (c->csa2_mode[li] == LZ_CSA2_FULL) return 1;
+    if (!c->csa2_on[li]) return 0;
+    src = c->csa2_source[li];
+    return src >= 0 && src < li && c->csa2_on[src] &&
+           c->layer_types[src] == LZ_LT_FULL;
+}
+
+/* model.h's own comment on this function has the contract. Cross-layer,
+   unlike lz_csa2_mode_source_valid above: aliasing runs by shared
+   PHYSICAL SLOT (forward_state.c's cache_idx fill, s->cache_idx[l] =
+   s->cache_idx[c->csa2_source[l]] for a non-FULL mode), not by the
+   declared csa2_source tree alone, and two layers can share the SAME
+   slot without one being the other's own declared source - a FULL
+   layer and every REINDEX layer chained off it (directly or
+   transitively) all alias the one root's slot. forward_csa2.c's own
+   step 4 has each FULL/REINDEX layer OVERWRITE that shared slot with
+   its own fresh Top-K when its call runs (report Sec2.3.1's own
+   header comment on csa2_topk_idx_pub), so by the time a REUSE (or a
+   later REINDEX) layer's own call reads it, what is actually there is
+   whichever csa2_on layer wrote to that root LAST - not necessarily
+   the layer this one's own csa2_source names.
+
+   Concretely: layer 0 FULL, layer 2 REINDEX(source 0), layer 3
+   REUSE(source 0) - NOT source 2. lz_csa2_mode_source_valid alone
+   passes layer 3 (0 is a strictly earlier, csa2_on, full_attention
+   layer), but layer 2's own call already overwrote root 0's slot with
+   layer 2's OWN Top-K before layer 3's call ever runs (forward.c
+   dispatches layers in increasing order) - layer 3 reads layer 2's
+   selection while declaring layer 0 as its source. The two are
+   different questions and this function is what asks the second one.
+
+   Assumes every layer already passed lz_csa2_mode_source_valid -
+   REQUIRED, not merely convenient: this walk trusts csa2_source[i] to
+   be a valid, strictly-earlier, in-bounds index for every non-FULL
+   csa2_on layer it visits (both callers apply that check first, per
+   layer, over the WHOLE range before ever calling this). Root-finding
+   (the while loop below) therefore always terminates: csa2_source[r]
+   is strictly less than r at every step, for as long as csa2_mode[r]
+   is not yet FULL.
+
+   Returns 1 if every layer's declared source is exactly its alias
+   root's current last writer, 0 with *bad_layer set to the first
+   violation otherwise (bad_layer may be NULL). */
+int lz_csa2_last_writer_valid(const LZModelConfig *c, int *bad_layer) {
+    /* static, not a stack array: this project's own convention for
+       buffers of this shape - 128 ints is small on its own, but this
+       function is exactly the one C1 (report Sec2.3.1 mode-dispatch
+       task) found walking an ATTACKER-CONTROLLED n_layers against it
+       before lz_open_bin's own n_layers bound had run; a static array
+       does not remove the need for that bound (the loop below still
+       has to stay inside LZ_MAX_LAYERS, which n_layers's own RD() site
+       now guarantees for every caller), but it does mean an overrun
+       here corrupts a fixed, adjacent-to-nothing-interesting data
+       segment instead of a return address a few hundred bytes past a
+       stack frame - defense in depth, not the fix itself.
+
+       NON-REENTRANT as a consequence, which matters more than the size
+       does: this engine has no threads and no signal handler that
+       could call back into model loading, and the two loops right
+       below always run back to back within one call - the first fully
+       OVERWRITES every element to -1 before the second ever reads any
+       of them, so there is no window where a second call (there is
+       none, but if one were ever added) could observe a partially-
+       written array from this one. Safe for THIS reason, not because
+       the buffer happens to be small. */
+    static int last_writer[LZ_MAX_LAYERS];
+    int i;
+    for (i = 0; i < LZ_MAX_LAYERS; i++) last_writer[i] = -1;
+    for (i = 0; i < c->n_layers; i++) {
+        int r;
+        if (!c->csa2_on[i]) continue;
+        if (c->csa2_mode[i] == LZ_CSA2_FULL) { last_writer[i] = i; continue; }
+        r = c->csa2_source[i];
+        while (c->csa2_mode[r] != LZ_CSA2_FULL) r = c->csa2_source[r];
+        if (c->csa2_source[i] != last_writer[r]) {
+            if (bad_layer) *bad_layer = i;
+            return 0;
+        }
+        if (c->csa2_mode[i] == LZ_CSA2_REINDEX) last_writer[r] = i;
+        /* REUSE writes nothing - forward_csa2.c's own step 4 skips it
+           entirely - so last_writer[r] is untouched, and any LATER
+           layer declaring THIS reuse layer as its own source fails the
+           check above (last_writer[r] can only ever hold a FULL or
+           REINDEX layer's index): a reuse chained off a reuse is a
+           special case of the same violation this function already
+           detects, which is why it replaces rather than joins the
+           narrower "reuse source is itself reuse mode" check this
+           project's own git history carried until this function
+           existed. */
+    }
+    return 1;
+}
+
+/* ------------------------------------------------------------------
+   Per-layer compression ratio (model.h's own csa2_compress_m_layer
+   comment on LZModelConfig).
+
+   The ratio decides two geometries at once - the pending block's slab
+   count (cm per bank) and the finalized ring's depth (ceil(seq_len/cm))
+   - and both are properties of the PHYSICAL SLOT, not of the layer
+   reading it, because a REINDEX/REUSE layer reads its source's slot
+   through an aliased cache_idx. Hence the three-layer shape below: the
+   layer-level answer (what forward_csa2.c asks about its own layer), the
+   slot-level answer (what the allocator, the reset and the checkpoint
+   ask), and the two prefix sums that turn a slot number into an offset
+   into the flat per-slot arrays. One definition of the layout, five
+   consumers - the alternative, each consumer re-deriving the layout, is
+   how a buffer gets sized by one value and indexed by another.
+   ------------------------------------------------------------------ */
+
+/* One layer's own resolved ratio, always >= 1.
+
+   An aliased layer answers its ROOT's ratio rather than its own entry's:
+   its ring IS the root's ring, so "which ratio does this layer's
+   compression run at" has exactly one right answer there. csa2_source is
+   strictly earlier (validated at both loaders and by
+   lz_csa2_last_writer_valid above), so the walk terminates, and going
+   through the chain rather than jumping to the root keeps this function
+   from needing the root walk lz_csa2_last_writer_valid already does. */
+int lz_csa2_cm(const LZModelConfig *c, int layer) {
+    int m;
+    if (layer >= 0 && layer < c->n_layers) {
+        if (c->csa2_mode[layer] != LZ_CSA2_FULL &&
+            c->csa2_source[layer] >= 0 &&
+            c->csa2_source[layer] < layer)
+            return lz_csa2_cm(c, c->csa2_source[layer]);
+        if (c->csa2_compress_m_layer[layer] > 0)
+            return c->csa2_compress_m_layer[layer];
+    }
+    m = c->csa2_compress_m;
+    return m > 0 ? m : 1;
+}
+
+/* Which layer owns physical slot ci: the (ci+1)-th layer whose type is
+   full_attention and whose mode is FULL, in increasing layer order -
+   forward_state.c's own cache_idx fill, which is the definition this
+   has to agree with. -1 past the last one. */
+static int csa2_slot_owner(const LZModelConfig *c, int ci) {
+    int l, nf = 0;
+    if (ci < 0) return -1;
+    for (l = 0; l < c->n_layers; l++) {
+        if (c->layer_types[l] != LZ_LT_FULL) continue;
+        if (c->csa2_mode[l] != LZ_CSA2_FULL) continue;
+        if (nf == ci) return l;
+        nf++;
+    }
+    return -1;
+}
+
+int lz_csa2_slot_cm(const LZModelConfig *c, int ci) {
+    int owner = csa2_slot_owner(c, ci);
+    return owner < 0 ? 0 : lz_csa2_cm(c, owner);
+}
+
+size_t lz_csa2_pend_base(const LZModelConfig *c, int ci, int depth) {
+    size_t t = 0;
+    int k;
+    if (depth < 1) depth = 1;
+    for (k = 0; k < ci && k < c->n_full_layers; k++) {
+        int ck = lz_csa2_slot_cm(c, k);
+        t += (size_t)(ck > 0 ? ck : 1) * (size_t)depth;
+    }
+    return t;
+}
+
+size_t lz_csa2_ring_base(const LZModelConfig *c, int ci, int seq_len) {
+    size_t t = 0;
+    int k;
+    for (k = 0; k < ci && k < c->n_full_layers; k++) {
+        int ck = lz_csa2_slot_cm(c, k);
+        if (ck < 1) ck = 1;
+        t += (size_t)((seq_len + ck - 1) / ck);
+    }
+    return t;
+}
+
+/* Give every target layer the source layer's five K/V tensors.
+
+   A STRUCT COPY, not a deep copy: the storage stays the source layer's,
+   which is what the training side's module hand-over means and why
+   lz_free skips these fields on a target layer.
+
+   Runs AFTER the walk that fills the source's LZTensors, and never
+   inside model_walk itself: visit_read/visit_read_bin overwrite the
+   struct (not merely its buffers), so a copy taken while the files are
+   being walked would keep the zeroed placeholder the field starts as.
+   The two loaders therefore call it where their weights land - the bin
+   path reads during lz_open_bin, the safetensors path during
+   lz_read_weights, which then early-returns for a bin-loaded model. */
+static void apply_kv_share(LZModel *m) {
+    const LZModelConfig *c = &m->config;
+    int src = lz_kv_share_src(c);
+    int li, k;
+    if (src < 0) return;
+    for (li = src + 1; li < c->n_layers; li++) {
+        if (!lz_kv_share_target(c, li)) continue;
+        for (k = 0; k < N_KV_SHARE_FIELDS; k++) {
+            LZTensor *dst = (LZTensor *)((char *)&m->layers[li] +
+                                         KV_SHARE_FIELDS[k]);
+            const LZTensor *s = (const LZTensor *)((const char *)&m->layers[src]
+                                                   + KV_SHARE_FIELDS[k]);
+            *dst = *s;
+        }
+    }
+}
+
 static lz_i64 resolve_dim(const LZModelConfig *c, int kind) {
     switch (kind) {
     case DK_HIDDEN:     return c->hidden_size;
@@ -737,6 +2088,7 @@ static lz_i64 resolve_dim(const LZModelConfig *c, int kind) {
     case DK_ATTN_KV:    return c->attn_kv_dim;
     case DK_ATTN_Q:     return c->attn_q_dim;
     case DK_HEAD_DIM:   return c->head_dim;
+    case DK_ATTN_HEADS: return c->n_heads;
     case DK_CONV:       return c->lin_conv_dim;
     case DK_VALUE:      return c->lin_value_dim;
     case DK_NVHEADS:    return c->lin_n_v_heads;
@@ -744,6 +2096,15 @@ static lz_i64 resolve_dim(const LZModelConfig *c, int kind) {
     case DK_ONE:        return 1;
     case DK_KERNEL:     return c->conv_kernel;
     case DK_HIDDEN2:    return (lz_i64)c->hidden_size * 2;
+    case DK_HIDDEN3:    return (lz_i64)c->hidden_size * 3;
+    case DK_MTP_NDRAFT: return c->mtp_n_draft;
+    case DK_MTP_MARKOV_RANK: return c->mtp_markov_rank;
+    case DK_MLA_Q_RANK: return c->mla_q_lora_rank;
+    case DK_MLA_O_RANK: return c->mla_o_lora_rank;
+    case DK_CSA2_IDX_HEAD_DIM: return c->csa2_indexer_head_dim;
+    case DK_CSA2_IDX_HEADS:    return c->csa2_indexer_heads;
+    case DK_CSA2_Q_LORA_RANK:  return c->csa2_indexer_q_lora_rank;
+    case DK_CSA2_UQ_OUT:       return (lz_i64)c->csa2_indexer_heads * c->csa2_indexer_head_dim;
     case DK_KEY:        return c->lin_key_dim;
     case DK_GATE_RANK:  return c->kda_gate_rank;
     case DK_NVK:        return (lz_i64)c->lin_n_v_heads * c->lin_k_head_dim;
@@ -752,6 +2113,12 @@ static lz_i64 resolve_dim(const LZModelConfig *c, int kind) {
     case DK_SHARED_W:   return c->moe_shared_width;
     case DK_MOE_INTER:  return c->moe_intermediate_size;
     case DK_MTP_INTER:  return c->mtp_intermediate_size;
+    case DK_GR_NR:      return c->gated_residual;
+    /* max(1, hidden/8), not hidden/8: GatedResidual4.__init__ is
+       `self.r = max(1, dim // 8)`, so a hidden smaller than 8 gets rank 1
+       rather than rank 0. */
+    case DK_GR_RANK:    return c->hidden_size / 8 > 0 ? c->hidden_size / 8 : 1;
+    case DK_GR_FLAT:    return (lz_i64)c->gated_residual * c->hidden_size;
     case DK_ENGRAM_ROWS: return c->engram_total_rows;
     case DK_ENGRAM_DIM:  return c->engram_dim;
     case DK_ENGRAM_PER_ORDER: return c->engram_per_order;
@@ -778,6 +2145,41 @@ static int check_shape(const LZModelConfig *c, const LZStTensor *t,
         }
     }
     return 0;
+}
+
+/* Is this tensor an indexer-K projection shaped for the HIDDEN-state
+   input space?
+
+   CSA2 obtains its indexer K by projecting the layer's own compressed
+   latent - report Sec2.3.1: "CSA2 obtains indexer K by projecting main
+   KV entries, replacing CSA's separate compression path from hidden
+   states" - so csa2_w_kv_idx is (indexer_head_dim, head_dim). A
+   checkpoint built against the earlier hidden-space projection carries
+   it as (indexer_head_dim, hidden) instead: same name, same rank, a
+   different function of a different tensor. Loading that would run the
+   indexer on a projection of the wrong thing and produce confidently
+   wrong Top-K indices with nothing to report it, which is the failure
+   mode LZ_ERR_CFG_CED_KV refuses for "reuse" (model.h's own comment).
+   The generic shape check below already rejects this tensor; what this
+   arm adds is a message that names the cause instead of a dimension
+   index.
+
+   Safetensors only: on the bin path `t` is synthesized from `dims`
+   immediately below, so it cannot disagree with them, and a stale bin is
+   caught by the file's own element count instead.
+
+   The hidden == head_dim guard is what keeps this from firing on a
+   config where the two widths coincide - there the two spaces are
+   indistinguishable by shape, and this arm must not claim one. */
+static int csa2_idx_k_from_hidden(const LZModelConfig *c, const char *name,
+                                  const LZStTensor *t) {
+    lz_i64 hidden, head;
+    if (!strstr(name, "self_attn.csa2_w_kv_idx.weight")) return 0;
+    hidden = resolve_dim(c, DK_HIDDEN);
+    head = resolve_dim(c, DK_HEAD_DIM);
+    return hidden != head && t->n_dims == 2 &&
+           t->shape[0] == resolve_dim(c, DK_CSA2_IDX_HEAD_DIM) &&
+           t->shape[1] == hidden;
 }
 
 /* ------------------------------------------------------------ walk skeleton */
@@ -824,6 +2226,12 @@ static int model_walk_one(LZModel *m, const char *name, const int *dims,
             return 1;
         }
     }
+    if (!m->bin_file && !m_uses_lz4(m) &&
+        csa2_idx_k_from_hidden(c, name, t)) {
+        qerr(errbuf, errlen, LZ_ERR_CFG_CSA2_IDX_K, name,
+             (lz_i64)t->shape[1]);
+        return 1;
+    }
     if (check_shape(c, t, dims, errbuf, errlen) != 0) return 1;
     if (visit(m, t, field, ctx, errbuf, errlen) != 0) return 1;
     return 0;
@@ -856,12 +2264,60 @@ static int model_walk(LZModel *m, LZVisit visit, void *ctx,
             if (sp->layer_type >= 0 && sp->layer_type != L->type) continue;
             if (sp->ffn_kind >= 0 && sp->ffn_kind != L->ffn_moe) continue;
             if (sp->present && !sp->present(c)) continue;
+            /* S1 attn_kv_share: a target layer owns none of the five
+               shared tensors, so their specs name nothing in the
+               checkpoint and the fields stay zeroed here -
+               apply_kv_share fills them from the source afterwards. The
+               bin stream is written in this same walk order, so the skip
+               is also what keeps reader and writer in step. */
+            if (kv_share_field(sp->field) && lz_kv_share_target(c, li)) continue;
 
             snprintf(name, sizeof(name), "%slayers.%d.%s",
                      m->prefix, li, sp->suffix);
             field = (LZTensor *)((char *)L + sp->field);
             if (model_walk_one(m, name, sp->dims, field, visit, ctx,
                                errbuf, errlen) != 0) return 1;
+        }
+
+        /* CED's local branch (LZModelConfig's own ced_local comment).
+           Not a LAYER_SPECS row: LZPresentFn sees only the config, and
+           this family is indexed by LAYER - the same reason the CSA2 and
+           MoE blocks below are not in that table either.
+
+           The position fixes this family's place in the .bin stream:
+           right after this layer's LAYER_SPECS run (SubLN norms
+           included) and ahead of the per-expert triplet, which is
+           tools/export_q8.py's tensor_order. A .bin carries no names, so
+           an exporter and a walker that disagree here read each other's
+           bytes as weights. */
+        if (lz_ced_local_target(c, li)) {
+            static const struct { const char *suf; size_t field;
+                                  int dims[3]; int subn; }
+            CED_LOCAL_SPECS[] = {
+                { "self_attn.k_proj_local.weight", LOFF(k_proj_local),
+                  { DK_HEAD_DIM, DK_HIDDEN, DK_END }, 0 },
+                { "self_attn.v_proj_local.weight", LOFF(v_proj_local),
+                  { DK_HEAD_DIM, DK_HIDDEN, DK_END }, 0 },
+                { "self_attn.k_norm_local.weight", LOFF(k_norm_local),
+                  { DK_HEAD_DIM, DK_END, DK_END }, 0 },
+                { "self_attn.k_proj_local.norm.weight",
+                  LOFF(attn_k_local_subn_norm),
+                  { DK_HIDDEN, DK_END, DK_END }, 1 },
+                { "self_attn.v_proj_local.norm.weight",
+                  LOFF(attn_v_local_subn_norm),
+                  { DK_HIDDEN, DK_END, DK_END }, 1 }
+            };
+            int k;
+            for (k = 0; k < (int)(sizeof(CED_LOCAL_SPECS) /
+                                  sizeof(CED_LOCAL_SPECS[0])); k++) {
+                LZTensor *field;
+                if (CED_LOCAL_SPECS[k].subn && !c->use_subn) continue;
+                snprintf(name, sizeof(name), "%slayers.%d.%s",
+                         m->prefix, li, CED_LOCAL_SPECS[k].suf);
+                field = (LZTensor *)((char *)L + CED_LOCAL_SPECS[k].field);
+                if (model_walk_one(m, name, CED_LOCAL_SPECS[k].dims, field,
+                                   visit, ctx, errbuf, errlen) != 0) return 1;
+            }
         }
 
         /* Per-expert triplet. Not in LAYER_SPECS above: the count
@@ -889,6 +2345,177 @@ static int model_walk(LZModel *m, LZVisit visit, void *ctx,
                 }
             }
         }
+
+        /* S2 CSA2. Not in LAYER_SPECS above for the same class of reason
+           the MoE per-expert triplet just above is not: LZPresentFn only
+           sees the config, not which layer is being walked, and
+           csa2_on[] is per-layer (model.h's own comment on why this
+           differs from mla_q_on/mla_o_on, which a plain LZPresentFn CAN
+           express because they are uniform across every full-attention
+           layer). L->csa2_on is setup_layers-derived and already
+           correct here (setup_layers runs before model_walk - see
+           lz_open/lz_open_bin, same ordering the MoE block above
+           depends on). */
+        if (L->csa2_on) {
+#define CSA2_OWN_FULL    1
+#define CSA2_OWN_REINDEX 2
+            /* CSA2_OWN_FULL/CSA2_OWN_REINDEX: which mode(s) actually own
+               a given tensor, carried PER ENTRY rather than inferred
+               from position in the array (an earlier version used a
+               bare `k < 4` against the loop index, which encoded "the
+               first four entries are FULL-only" as an unstated fact
+               about array ORDER - silent and correct only for as long
+               as nobody reorders or inserts a row; this project's own
+               mutation coverage can only flip "does the walk gate on
+               mode at all", never "is the cut at the right index", so a
+               reordering bug would not even fail its own gate). Each
+               row now states its own ownership, so grep or a diff on
+               this table shows the fact directly, and a row inserted
+               anywhere still carries the right bits with it. */
+            static const struct { const char *suf; size_t field; int dims[3]; int own; }
+            CSA2_SPECS[] = {
+                { "self_attn.csa2_w_kv.weight",       offsetof(LZLayer, csa2_w_kv),
+                  { DK_HEAD_DIM, DK_HIDDEN, DK_END }, CSA2_OWN_FULL },
+                { "self_attn.csa2_w_gate.weight",     offsetof(LZLayer, csa2_w_gate),
+                  { DK_HEAD_DIM, DK_HIDDEN, DK_END }, CSA2_OWN_FULL },
+                { "self_attn.csa2_w_kv_idx.weight",   offsetof(LZLayer, csa2_w_kv_idx),
+                  { DK_CSA2_IDX_HEAD_DIM, DK_HEAD_DIM, DK_END }, CSA2_OWN_FULL },
+                { "self_attn.csa2_k_norm_idx.weight", offsetof(LZLayer, csa2_k_norm_idx),
+                  { DK_CSA2_IDX_HEAD_DIM, DK_END, DK_END }, CSA2_OWN_FULL },
+                { "self_attn.csa2_w_weights.weight",  offsetof(LZLayer, csa2_w_weights),
+                  { DK_CSA2_IDX_HEADS, DK_HIDDEN, DK_END },
+                  CSA2_OWN_FULL | CSA2_OWN_REINDEX },
+                { "self_attn.csa2_w_dq_idx.weight",   offsetof(LZLayer, csa2_w_dq_idx),
+                  { DK_CSA2_Q_LORA_RANK, DK_HIDDEN, DK_END },
+                  CSA2_OWN_FULL | CSA2_OWN_REINDEX },
+                { "self_attn.csa2_w_uq_idx.weight",   offsetof(LZLayer, csa2_w_uq_idx),
+                  { DK_CSA2_UQ_OUT, DK_CSA2_Q_LORA_RANK, DK_END },
+                  CSA2_OWN_FULL | CSA2_OWN_REINDEX }
+            };
+            /* Which of the seven a layer's csa2_mode actually owns -
+             * forward_csa2.c's own dispatch already reads exactly this
+             * subset (step 2, indices 0-3, is skipped whenever mode !=
+             * FULL; step 4, indices 4-6, is skipped only for REUSE), so
+             * this walk is catching up to code that was already
+             * correct, not the other way around. Mirrors the training
+             * side's engine/csa2.py _wire_csa2 field for field
+             * (export_q8.py's csa2_suffixes_for is the same rule
+             * re-derived on that side - a different repository, no
+             * shared git history, so neither side's fix reaches the
+             * other by any mechanism except being written again):
+             *   FULL    all seven.
+             *   REINDEX only indices 4-6 (weights, dq_idx, uq_idx - the
+             *           indexer QUERY half). Main KV and indexer K
+             *           (0-3) are both reused from csa2_source, never
+             *           recomputed locally - a local copy would be dead
+             *           weight nothing reads.
+             *   REUSE   none - no compression, no indexer at all.
+             * dq_idx (index 5) is NOT further conditioned on S4's
+             * shared low-rank query latent (mla_q_lora_rank > 0) the
+             * way the training side's own csa2_suffixes_for
+             * additionally drops it there: this engine side does not
+             * support that composition on ANY csa2 mode (model.h's own
+             * csa2_w_dq_idx comment) and always expects its own
+             * dedicated tensor regardless of mode. That composition is
+             * refused by lz_load_config's own csa2_layers loop and by
+             * lz_open_bin's own mla_q_lora_rank check (both run well
+             * before this walk ever executes) - NOT by a missing-tensor
+             * error here, whatever an earlier version of this comment
+             * claimed. That claim held for a safetensors checkpoint
+             * that genuinely dropped dq_idx the way the training side
+             * does under the composition (name lookup fails), but never
+             * for the .bin format: its reads are POSITIONAL, with no
+             * name for a missing tensor to fail a lookup against, so a
+             * hand-built or corrupted .bin header naming both fields
+             * would have loaded and run - silently misaligned past this
+             * walk's dq_idx read, not refused - with nothing here to
+             * stop it before the explicit checks named above existed. */
+            int k;
+            if (L->csa2_mode != LZ_CSA2_REUSE) {
+                int want = (L->csa2_mode == LZ_CSA2_FULL) ?
+                           CSA2_OWN_FULL : CSA2_OWN_REINDEX;
+                for (k = 0; k < (int)(sizeof(CSA2_SPECS) / sizeof(CSA2_SPECS[0])); k++) {
+                    LZTensor *field;
+                    if (!(CSA2_SPECS[k].own & want)) continue;
+                    snprintf(name, sizeof(name), "%slayers.%d.%s",
+                             m->prefix, li, CSA2_SPECS[k].suf);
+                    field = (LZTensor *)((char *)L + CSA2_SPECS[k].field);
+                    if (model_walk_one(m, name, CSA2_SPECS[k].dims, field,
+                                       visit, ctx, errbuf, errlen) != 0) return 1;
+                }
+            }
+#undef CSA2_OWN_FULL
+#undef CSA2_OWN_REINDEX
+        }
+
+        /* Learned attention sink - one (n_heads) vector per layer the
+           switch reaches. Not in LAYER_SPECS above, for exactly the
+           reason the CSA2 block just above is not: LZPresentFn sees only
+           the config, and attn_sink_on is per-layer (setup_layers skips
+           the csa2_layers). Walked AFTER CSA2, which fixes this tensor's
+           position in the .bin stream - the exporter's tensor_order has
+           to place it here too, since a .bin carries no names.
+
+           Key is "self_attn.sinks", not "...sinks.weight": the training
+           side registers it as a bare nn.Parameter, so that is the name
+           the checkpoint has. */
+        if (L->attn_sink_on) {
+            static const int SINK_DIMS[3] = { DK_ATTN_HEADS, DK_END, DK_END };
+            snprintf(name, sizeof(name), "%slayers.%d.self_attn.sinks",
+                     m->prefix, li);
+            if (model_walk_one(m, name, SINK_DIMS, &L->attn_sinks,
+                               visit, ctx, errbuf, errlen) != 0) return 1;
+        }
+
+        /* GR. Not in LAYER_SPECS above for both of the reasons the two
+           blocks above are not: gr_on is per-layer (only the encoder half,
+           LZLayer's own comment), and the branch norms are an array whose
+           count nr is a runtime value while wd/wu/ww exist only on a
+           gr_on layer. Walked AFTER the sink block, which fixes the GR
+           family's position in the .bin stream - a .bin carries no names,
+           so the exporter's tensor_order has to place it here too.
+
+           The order WITHIN a layer is the checkpoint's own state-dict
+           order, because the suffixes are literally its keys
+           (GrDecoderLayer.gn_attn/gn_mlp are GatedResidual4 modules whose
+           ModuleList `norms` was registered before wd/wu/ww): the four
+           norms, then wd, wu, ww, then the same again for the MLP half. */
+        if (L->gr_on) {
+            static const char *GR_HALF[2] = { "gr_attn.", "gr_mlp." };
+            static const size_t GR_NORMS[2] = {
+                offsetof(LZLayer, gr_attn_norms),
+                offsetof(LZLayer, gr_mlp_norms)
+            };
+            static const size_t GR_W[2][3] = {
+                { offsetof(LZLayer, gr_attn_wd), offsetof(LZLayer, gr_attn_wu),
+                  offsetof(LZLayer, gr_attn_ww) },
+                { offsetof(LZLayer, gr_mlp_wd),  offsetof(LZLayer, gr_mlp_wu),
+                  offsetof(LZLayer, gr_mlp_ww) }
+            };
+            static const char *GR_W_SUF[3] = { "wd.weight", "wu.weight", "ww.weight" };
+            static const int GR_W_DIMS[3][3] = {
+                { DK_GR_RANK, DK_GR_FLAT, DK_END },
+                { DK_GR_FLAT, DK_GR_RANK, DK_END },
+                { DK_GR_NR,   DK_GR_FLAT, DK_END }
+            };
+            int h, b, k;
+            for (h = 0; h < 2; h++) {
+                LZTensor *norms = *(LZTensor **)((char *)L + GR_NORMS[h]);
+                for (b = 0; b < c->gated_residual; b++) {
+                    snprintf(name, sizeof(name), "%slayers.%d.%snorms.%d.weight",
+                             m->prefix, li, GR_HALF[h], b);
+                    if (model_walk_one(m, name, NORM_DIMS, &norms[b],
+                                       visit, ctx, errbuf, errlen) != 0) return 1;
+                }
+                for (k = 0; k < 3; k++) {
+                    snprintf(name, sizeof(name), "%slayers.%d.%s%s",
+                             m->prefix, li, GR_HALF[h], GR_W_SUF[k]);
+                    if (model_walk_one(m, name, GR_W_DIMS[k],
+                                       (LZTensor *)((char *)L + GR_W[h][k]),
+                                       visit, ctx, errbuf, errlen) != 0) return 1;
+                }
+            }
+        }
     }
 
     /* MTP head. Walked last so a checkpoint without one costs nothing.
@@ -898,16 +2525,30 @@ static int model_walk(LZModel *m, LZVisit visit, void *ctx,
        `model.language_model.`. That asymmetry is exactly what let 15
        tensors slip past the leak check unnoticed - see lz_open. */
     if (m->mtp) {
-        static const struct { const char *suffix; size_t field; int dims[3]; }
+        static const struct { const char *suffix; size_t field; int dims[3];
+                              LZPresentFn present; }
         MTP_SPECS[] = {
             { "fc.weight",                     offsetof(LZMtp, fc),
-              { DK_HIDDEN, DK_HIDDEN2, DK_END } },
+              { DK_HIDDEN, DK_HIDDEN2, DK_END }, present_mtp_ndraft1 },
             { "norm.weight",                   offsetof(LZMtp, norm),
-              { DK_HIDDEN, DK_END, DK_END } },
+              { DK_HIDDEN, DK_END, DK_END }, NULL },
             { "pre_fc_norm_hidden.weight",     offsetof(LZMtp, pre_fc_norm_hidden),
-              { DK_HIDDEN, DK_END, DK_END } },
+              { DK_HIDDEN, DK_END, DK_END }, NULL },
             { "pre_fc_norm_embedding.weight",  offsetof(LZMtp, pre_fc_norm_embedding),
-              { DK_HIDDEN, DK_END, DK_END } }
+              { DK_HIDDEN, DK_END, DK_END }, NULL },
+            /* mtp_n_draft > 1 only (DSpark, arXiv:2607.05147) -
+               mutually exclusive with fc.weight above, never both bound
+               on the same checkpoint. See LZMtp's own struct comment. */
+            { "main_proj.weight",              offsetof(LZMtp, main_proj),
+              { DK_HIDDEN, DK_HIDDEN3, DK_END }, present_mtp_ndraft_gt1 },
+            { "depth_embed.weight",            offsetof(LZMtp, depth_embed),
+              { DK_MTP_NDRAFT, DK_HIDDEN, DK_END }, present_mtp_ndraft_gt1 },
+            { "mask_embed",                    offsetof(LZMtp, mask_embed),
+              { DK_HIDDEN, DK_END, DK_END }, present_mtp_ndraft_gt1 },
+            { "markov_embed.weight",           offsetof(LZMtp, markov_embed),
+              { DK_VOCAB, DK_MTP_MARKOV_RANK, DK_END }, present_mtp_ndraft_gt1 },
+            { "markov_proj.weight",            offsetof(LZMtp, markov_proj),
+              { DK_VOCAB, DK_MTP_MARKOV_RANK, DK_END }, present_mtp_ndraft_gt1 }
         };
         /* The MTP block's own dense FFN, sized by mtp_intermediate_size -
            separate from LAYER_SPECS' body dense-FFN entries, even though
@@ -980,6 +2621,7 @@ static int model_walk(LZModel *m, LZVisit visit, void *ctx,
         }
         for (k = 0; k < (int)(sizeof(MTP_SPECS) / sizeof(MTP_SPECS[0])); k++) {
             LZTensor *field;
+            if (MTP_SPECS[k].present && !MTP_SPECS[k].present(c)) continue;
             snprintf(name, sizeof(name), "mtp.%s", MTP_SPECS[k].suffix);
             field = (LZTensor *)((char *)m->mtp + MTP_SPECS[k].field);
             if (model_walk_one(m, name, MTP_SPECS[k].dims, field, visit, ctx,
@@ -1052,6 +2694,25 @@ static int model_walk(LZModel *m, LZVisit visit, void *ctx,
                                ENGRAM_NORM_DIMS,
                                &eg->norm, visit, ctx,
                                errbuf, errlen)) return 1;
+    }
+    /* The scalar input injection's value, walked last so a model without
+       one costs nothing (tools/export_q8.py's tensor_order appends it in
+       the same place). Prefix rule matches bin_key's: under the detected
+       text prefix like every other name here except MTP's and
+       engram_memory's, which sit at the top level.
+
+       NO lz_st_find GUARD, unlike the engram above. The engram's tensors
+       have a default alloc_engram already filled in; this one has none,
+       so a checkpoint that says the mix is on and does not carry the
+       scalar would leave w reading whatever the buffer held - a
+       different model with no error anywhere. Missing is an error, which
+       is what model_walk_one already raises. */
+    if (c->loop_input_mix) {
+        static const int LOOP_MIX_DIMS[3] = { DK_ONE, DK_END, DK_END };
+        snprintf(name, sizeof(name), "%sloop_input_mix_a", m->prefix);
+        if (model_walk_one(m, name, LOOP_MIX_DIMS,
+                           &m->loop_input_mix_a, visit, ctx,
+                           errbuf, errlen)) return 1;
     }
     return 0;
 }
@@ -1130,6 +2791,20 @@ static int detect_prefix(LZModel *m, char *errbuf, int errlen) {    static const
     return 1;
 }
 
+/* How many layers GR covers, from the top: the training side's own rule
+   (engine/kunmoe_modeling.py's _wire_gr), `span = ced_split if
+   0 < ced_split < n_layers else n_layers`. GR is scoped to the ENCODER
+   half because CED's capture hook reads the split boundary's OUTPUT
+   expecting a plain [B,S,D] stream - so the boundary layer is an early
+   `gr_last`, collapsing exactly what the true last layer would. A
+   ced_split with no decoder half (>= n_layers) is NOT a boundary, which
+   is why the middle clause exists rather than a bare `ced_split ?`. */
+static int lz_gr_span(const LZModelConfig *c) {
+    int n = c->n_layers;
+    if (c->ced_split > 0 && c->ced_split < n) return c->ced_split;
+    return n;
+}
+
 /* Set each layer's attention type and FFN routing, and allocate the
    per-expert tensor arrays MoE layers need. Shared by lz_open (safetensors)
    and lz_open_bin so the two paths cannot disagree about which layers are
@@ -1142,6 +2817,64 @@ static int setup_layers(LZModel *m, char *errbuf, int errlen) {
         LZLayer *L = &m->layers[i];
         L->type = c->layer_types[i];
         L->ffn_moe = (c->num_experts > 0 && i >= c->first_k_dense_replace) ? 1 : 0;
+        /* S4 MLA (model.h's own comment on both LZModelConfig's fields
+           and LZLayer's q_proj_down/mla_q_on): PER-LAYER flags derived
+           here, in the loop that only ever touches m->layers, so
+           m->mtp->blk - a separate LZLayer, calloc'd by alloc_mtp and
+           never passed through this loop - keeps mla_q_on/mla_o_on at
+           its calloc default of 0 regardless of these two global config
+           fields. attn_impl (forward_attn.c) reads L->mla_q_on/mla_o_on,
+           never c->mla_q_lora_rank/mla_o_lora_rank directly, for exactly
+           that reason. */
+        L->mla_q_on = c->mla_q_lora_rank > 0;
+        L->mla_o_on = c->mla_o_lora_rank > 0;
+        /* S2 CSA2: per-layer, unlike mla_q_on/mla_o_on above - csa2_on[]
+           may name a SUBSET of the full-attention layers (model.h's own
+           csa2_on[] comment). Same "only m->layers is touched, m->mtp->
+           blk never is" safety this mirrors from mla_q_on/mla_o_on. */
+        L->csa2_on = c->csa2_on[i];
+        /* Sibling of csa2_on above, same reasoning: the forward reads
+           L->csa2_mode (forward_csa2.c's own mode dispatch - FULL/
+           REINDEX/REUSE, report Sec2.3.1), never c->csa2_mode[]
+           directly, so the MTP block's own LZLayer - calloc'd
+           separately, never touched by this loop - stays at its calloc
+           default LZ_CSA2_FULL (0) regardless of what config.json's
+           csa2_kv_mode says about the
+           body layer index i happens to share with it. */
+        L->csa2_mode = c->csa2_mode[i];
+        /* Learned attention sink: three conditions, and all three are the
+           training side's _wire_attn_sink rule - the global switch, a
+           full-attention layer (a linear-attention layer has no
+           self_attn to hang a sink on), and not one the csa2_layers
+           turned into CSA2 (that writes its own .forward, so a sink
+           bound there would be created and never read). Same
+           "only m->layers is touched" safety as the two flags above. */
+        L->attn_sink_on = c->attn_sink_learned &&
+                          L->type == LZ_LT_FULL && !L->csa2_on;
+        /* GR: three flags, all from the one span rule above. `>= 2` rather
+           than `> 0` is the training side's own contract (GatedResidual4
+           raises below nr=2, there is no single-stream GR); a config.json
+           that asks for nr=1 therefore gets no branches AND no specs, so
+           a checkpoint that does carry gr_* tensors is refused by the
+           leak check rather than silently run without them. Same
+           "per-layer flags derived here, m->mtp->blk never passes through
+           this loop" safety as the three flags above. */
+        L->gr_on = c->gated_residual >= 2 && i < lz_gr_span(c);
+        L->gr_first = L->gr_on && i == 0;
+        L->gr_last  = L->gr_on && i == lz_gr_span(c) - 1;
+        if (L->gr_on) {
+            /* One norm per branch, so an ARRAY whose count is a runtime
+               config value - the same reason moe_expert_w1 above is one.
+               Checked separately rather than with one guard: a failure on
+               the second calloc leaves the first non-NULL, and lz_free
+               indexes both. */
+            L->gr_attn_norms = (LZTensor *)calloc((size_t)c->gated_residual, sizeof(LZTensor));
+            L->gr_mlp_norms  = (LZTensor *)calloc((size_t)c->gated_residual, sizeof(LZTensor));
+            if (!L->gr_attn_norms || !L->gr_mlp_norms) {
+                qerr(errbuf, errlen, LZ_ERR_LAYERS_ALLOC);
+                return 1;
+            }
+        }
         if (L->ffn_moe) {
             L->moe_expert_w1 = (LZTensor *)calloc((size_t)c->num_experts, sizeof(LZTensor));
             L->moe_expert_w2 = (LZTensor *)calloc((size_t)c->num_experts, sizeof(LZTensor));
@@ -1169,6 +2902,22 @@ static int alloc_mtp(LZModel *m, char *errbuf, int errlen) {
         qerr(errbuf, errlen, LZ_ERR_MTP_LAYERS, m->config.mtp_n_layers);
         return 1;
     }
+    if (m->config.mtp_n_draft > LZ_SPEC_K_MAX) {
+        qerr(errbuf, errlen, LZ_ERR_MTP_NDRAFT, m->config.mtp_n_draft,
+             LZ_SPEC_K_MAX);
+        return 1;
+    }
+    /* lz_mtp_markov_correct reads markov_embed's row into
+       mtp_kdraft_concat, a fixed 3*hidden_size scratch buffer it shares
+       with lz_mtp_draft_batch's base stage - see forward_mtp.c's own
+       comment on embed_row. Only reachable with mtp_n_draft>1 (the
+       markov head only exists in that tier). */
+    if (m->config.mtp_n_draft > 1 &&
+        m->config.mtp_markov_rank > 3 * m->config.hidden_size) {
+        qerr(errbuf, errlen, LZ_ERR_MTP_MARKOV_RANK,
+             m->config.mtp_markov_rank, 3 * m->config.hidden_size);
+        return 1;
+    }
     m->mtp = (LZMtp *)calloc(1, sizeof(LZMtp));
     if (!m->mtp) {
         qerr(errbuf, errlen, LZ_ERR_LAYERS_ALLOC);
@@ -1178,8 +2927,9 @@ static int alloc_mtp(LZModel *m, char *errbuf, int errlen) {
     return 0;
 }
 
-static int alloc_engram(LZModel *m, char *errbuf, int errlen) {
-    const LZModelConfig *c = &m->config;
+static int alloc_engram(LZModel *m, const char *dir, char *errbuf,
+                        int errlen) {
+    LZModelConfig *c = &m->config;
     LZEngram *eg;
     int no, hdim, edim, o;
     if (!c->engram) return 0;
@@ -1188,40 +2938,69 @@ static int alloc_engram(LZModel *m, char *errbuf, int errlen) {
     if (!eg) { qerr(errbuf, errlen, LZ_ERR_LAYERS_ALLOC); return 1; }
     m->engram = eg;
 
-    no = c->engram_n_orders;
+    /* THE STATIC KEY TABLE (spec 1.6) REPLACES THE HASH, so it also
+       decides the shape: one 2-gram order, one space, no head
+       partition, and the row count is the table's own. config.json's
+       engram_ngram/engram_n_head still describe the hash form the table
+       replaces; engine/kunmoe_modeling.py overrides both the same way
+       against the same file. The table names a row per selected 2-gram
+       and a n-gram outside it contributes nothing, which is the
+       property the table exists for. */
+    if (c->engram_keys[0]) {
+        char path[512];
+        int shift = 1, v = c->vocab_size - 1;
+        while (v > 1) { shift++; v >>= 1; }
+        if (strlen(dir) + 1 + strlen(c->engram_keys) >= sizeof(path)) {
+            qerr(errbuf, errlen, LZ_ERR_CFG_ENGRAM_KEYS, c->engram_keys);
+            return 1;
+        }
+        snprintf(path, sizeof(path), "%s/%s", dir, c->engram_keys);
+        if (lz_keys_load(path, &eg->keys, &eg->n_keys, errbuf, errlen) != 0)
+            return 1;
+        eg->key_shift = shift;
+        c->engram_ngram = 2;
+        c->engram_n_head = 1;
+        c->engram_n_orders = 1;
+        c->engram_n_spaces = 1;
+        c->engram_per_order = c->engram_dim;
+        c->engram_conv_dilation = 2;
+        c->engram_total_rows = eg->n_keys;
+    } else {
+        /* Primes, offsets, bases (derived from config, not in
+           checkpoint). lz_load_config already computed
+           engram_total_rows and engram_head_space from engram_size. */
+        eg->primes = (int *)calloc(c->engram_n_spaces, sizeof(int));
+        eg->offsets = (int *)calloc(c->engram_n_spaces, sizeof(int));
+        eg->bases = (lz_i64 *)calloc(c->engram_n_orders, sizeof(lz_i64));
+        if (!eg->primes || !eg->offsets || !eg->bases) {
+            qerr(errbuf, errlen, LZ_ERR_OOM_ALLOC, "engram primes");
+            return 1;
+        }
+        {   /* primes_down: largest primes <= head_space */
+            int x = c->engram_head_space, found = 0;
+            while (found < c->engram_n_spaces) {
+                int is_prime = (x >= 2), d;
+                for (d = 2; is_prime && d * d <= x; d++)
+                    if (x % d == 0) is_prime = 0;
+                if (is_prime) eg->primes[found++] = x;
+                x--;
+            }
+        }
+        {   /* offsets: cumulative start row per space */
+            int total = 0, k;
+            for (k = 0; k < c->engram_n_spaces; k++) {
+                eg->offsets[k] = total;
+                total += eg->primes[k];
+            }
+        }
+        { int oo; for (oo = 0; oo < c->engram_n_orders; oo++)
+            eg->bases[oo] = (lz_i64)(2 * ((oo + 1) * 7 + 1) + 1);
+        }
+    }
+
+    no   = c->engram_n_orders;
     hdim = c->hidden_size;
     edim = c->engram_dim;
-
-    /* Primes, offsets, bases (derived from config, not in checkpoint).
-       lz_load_config already computed engram_total_rows and
-       engram_head_space from engram_size. */
-    eg->primes = (int *)calloc(c->engram_n_spaces, sizeof(int));
-    eg->offsets = (int *)calloc(c->engram_n_spaces, sizeof(int));
-    eg->bases = (lz_i64 *)calloc(no, sizeof(lz_i64));
-    if (!eg->primes || !eg->offsets || !eg->bases) {
-        qerr(errbuf, errlen, LZ_ERR_OOM, "engram primes");
-        return 1;
-    }
-    {   /* primes_down: largest primes <= head_space */
-        int x = c->engram_head_space, found = 0;
-        while (found < c->engram_n_spaces) {
-            int is_prime = (x >= 2), d;
-            for (d = 2; is_prime && d * d <= x; d++)
-                if (x % d == 0) is_prime = 0;
-            if (is_prime) eg->primes[found++] = x;
-            x--;
-        }
-    }
-    {   /* offsets: cumulative start row per space */
-        int total = 0, k;
-        for (k = 0; k < c->engram_n_spaces; k++) {
-            eg->offsets[k] = total;
-            total += eg->primes[k];
-        }
-    }
-    { int o; for (o = 0; o < no; o++)
-        eg->bases[o] = (lz_i64)(2 * ((o + 1) * 7 + 1) + 1);
-    }
 
     /* Allocate tensors with aligned_malloc (lz_t_free's release path).
        norm starts at 1.0f, rest zero - training fills them. */
@@ -1319,55 +3098,31 @@ done:
     return rc;
 }
 
-int lz_open(LZModel *m, const char *dir, char *errbuf, int errlen) {
+/* The safetensors loader's open half: config.json, the tensor table, and
+   the claimed/leak check. Reads no weight data (lz_read_weights does that
+   later), which is what lets lz_open also use it as a structural probe of
+   a checkpoint whose weights come from somewhere else.
+
+   Requires a zeroed model; on failure the model is freed. */
+static int lz_open_st(LZModel *m, const char *dir, int meta_only,
+                      char *errbuf, int errlen) {
     char path[512];
     LZBindCtx bc;
     int i;
 
-    memset(m, 0, sizeof(*m));
     memset(&bc, 0, sizeof(bc));
-    if (errbuf && errlen > 0) errbuf[0] = '\0';
-
-    /* Both loaders below convert from the file's little-endian order
-       using LZ_BIG_ENDIAN, so a build that guessed its host's byte order
-       wrong reads every weight reversed and reports nothing. Checked here,
-       at the single door both paths go through, and before any file is
-       touched - the answer does not depend on the model. */
-    if (!lz_endian_ok()) {
-        qerr(errbuf, errlen, LZ_ERR_ENDIAN_MISMATCH);
-        return 1;
-    }
-
-    /* mixed-precision bin preferred: if model.bin (or the compressed
-       sibling model.bin.lz4, the stunt path) exists, load everything at
-       once. Resolved rather than fopen'd directly (src/lfn.h): this probe
-       decides between the bin and safetensors loaders, so a wrong "no"
-       sends the whole load down the other path. lz_open_bin prefers the
-       .lz4 file when both are present. */
-    if (lz_lfn_exists(dir, "model.bin") || lz_lfn_exists(dir, "model.bin.lz4"))
-        return lz_open_bin(m, dir, errbuf, errlen);
 
     if (lz_lfn_path(dir, "config.json", path, (int)sizeof path,
                     errbuf, errlen) != 0) return 1;
     if (lz_load_config(&m->config, path, errbuf, errlen) != 0) return 1;
 
     /* model.safetensors first, then the shard index. Tried in this order
-       so an export carrying both keeps the behaviour it already had. */
-    if (lz_lfn_exists(dir, "model.safetensors")) {
-        if (lz_lfn_path(dir, "model.safetensors", path, (int)sizeof path,
-                        errbuf, errlen) != 0) return 1;
-    } else {
-        int ir = st_path_from_index(dir, path, (int)sizeof path,
-                                    errbuf, errlen);
-        if (ir < 0) return 1;
-        if (ir == 0) {
-            /* No index either: report the file the user expected to
-               have, which is still model.safetensors. */
-            if (lz_lfn_path(dir, "model.safetensors", path,
-                            (int)sizeof path, errbuf, errlen) != 0) return 1;
-        }
-    }
-    if (lz_st_open(&m->st, path, errbuf, errlen) != 0) return 1;
+       so an export carrying both keeps the behaviour it already had. The
+       resolver is st_resolve's, shared with the architecture probe inside
+       lz_load_config, so the file probed and the file loaded are one. */
+    if (st_resolve(dir, path, (int)sizeof path, errbuf, errlen) != 0) return 1;
+    if ((meta_only ? lz_st_open_meta(&m->st, path, errbuf, errlen)
+                   : lz_st_open(&m->st, path, errbuf, errlen)) != 0) return 1;
 
     if (detect_prefix(m, errbuf, errlen) != 0) goto fail;
 
@@ -1380,7 +3135,7 @@ int lz_open(LZModel *m, const char *dir, char *errbuf, int errlen) {
     if (setup_layers(m, errbuf, errlen) != 0) goto fail;
 
     if (alloc_mtp(m, errbuf, errlen) != 0) goto fail;
-    if (alloc_engram(m, errbuf, errlen) != 0) goto fail;
+    if (alloc_engram(m, dir, errbuf, errlen) != 0) goto fail;
 
     bc.claimed = (unsigned char *)calloc((size_t)m->st.n_tensors, 1);
     if (!bc.claimed) {
@@ -1443,6 +3198,75 @@ int lz_open(LZModel *m, const char *dir, char *errbuf, int errlen) {
 fail:
     lz_free(m);
     return 1;
+}
+
+/* A model.bin beside a model.safetensors makes the bin loader the one that
+   reads, and that loader is positional: it keeps no names, so a tensor the
+   engine does not know cannot even be seen, while the file that carries
+   the name is never opened. A checkpoint directory is therefore rejected
+   when EITHER weight file describes a model this engine cannot fully
+   claim. Without this, a directory whose safetensors carries an MTP head
+   (or any module missing a spec) loads from its bin with a clean
+   "Structure OK" - the silent acceptance the leak check exists to
+   prevent, reached by shadowing instead of by prefix scope.
+
+   The probe runs with config.json, the description that belongs to the
+   safetensors file, because it asks whether THAT file's names are all
+   understood; the bin header describes the bin. Its model is discarded
+   here and the weights used are still the bin's. A directory with no
+   config.json has no named description to audit and the bin is
+   self-contained, so it is left alone.
+
+   meta_only, because this reads names and shapes and never a weight: a
+   companion that carries its header and no data is a legitimate way to
+   describe shapes, and the byte-count check is about the reads this
+   path does not make. */
+static int audit_st_companion(const char *dir, char *errbuf, int errlen) {
+    /* The probe is a whole model plus a full path: 5,024 bytes of stack
+       frame against the 4,096 the stack audit allows on the target's
+       default stack. Loading is one-shot, so file-scope storage is safe,
+       and the memset gives every call a clean model either way. */
+    static LZModel probe;
+    static char path[512];
+    int rc;
+
+    if (!lz_lfn_exists(dir, "model.safetensors") &&
+        !lz_lfn_exists(dir, "model.safetensors.index.json")) return 0;
+    if (lz_lfn_path(dir, "config.json", path, (int)sizeof path, NULL, 0) != 0)
+        return 0;
+    memset(&probe, 0, sizeof(probe));
+    rc = lz_open_st(&probe, dir, 1, errbuf, errlen);
+    if (rc == 0) lz_free(&probe);
+    return rc;
+}
+
+int lz_open(LZModel *m, const char *dir, char *errbuf, int errlen) {
+    memset(m, 0, sizeof(*m));
+    if (errbuf && errlen > 0) errbuf[0] = '\0';
+
+    /* Both loaders below convert from the file's little-endian order
+       using LZ_BIG_ENDIAN, so a build that guessed its host's byte order
+       wrong reads every weight reversed and reports nothing. Checked here,
+       at the single door both paths go through, and before any file is
+       touched - the answer does not depend on the model. */
+    if (!lz_endian_ok()) {
+        qerr(errbuf, errlen, LZ_ERR_ENDIAN_MISMATCH);
+        return 1;
+    }
+
+    /* mixed-precision bin preferred: if model.bin (or the compressed
+       sibling model.bin.lz4, the stunt path) exists, load everything at
+       once. Resolved rather than fopen'd directly (src/lfn.h): this probe
+       decides between the bin and safetensors loaders, so a wrong "no"
+       sends the whole load down the other path. lz_open_bin prefers the
+       .lz4 file when both are present. A safetensors beside the bin is
+       still audited first (audit_st_companion). */
+    if (lz_lfn_exists(dir, "model.bin") || lz_lfn_exists(dir, "model.bin.lz4")) {
+        if (audit_st_companion(dir, errbuf, errlen) != 0) return 1;
+        return lz_open_bin(m, dir, errbuf, errlen);
+    }
+
+    return lz_open_st(m, dir, 0, errbuf, errlen);
 }
 
 /* --------------------------------------------------------------- reading */
@@ -1531,7 +3355,7 @@ static int visit_read(LZModel *m, const LZStTensor *t, LZTensor *field,
      * model whose conv_fixed_build refuses) hit the heap-buffer-overflow
      * this comment already named above, on the caller it called "a
      * separate change" - found the same way, by running it. Closed by
-     * forward.c's conv_f32_build, the float tier's un-quantized twin of
+     * forward_state.c's conv_f32_build, the float tier's un-quantized twin of
      * conv_fixed_build: it also reads one row at a time through
      * lz_t_row_f32, into its own persistent buffer (s->conv_w32), so
      * every reader of a narrow-stored conv1d tensor is row-wise now,
@@ -1605,6 +3429,130 @@ static int read_gs(LZModel *m, uint32_t n, uint32_t *gs, int mul32) {
     return 0;
 }
 
+/* Read one tensor's group-scale (or min) plane into dst, which is ALWAYS
+   an f32 array of ng entries in RAM.
+
+   Three on-disk layouts, one door. The bin v6 layout word (0/1/2, spec
+   4.6.1) says how the packed formats store their per-group scales
+   (Q4_1/Q6_1's min too):
+     0  f32 per group;
+     1  IEEE binary16 per group;
+     2  per plane: one SIGNED binary16 base per ROW, then one u8
+        multiplier per group (a = base * (u / 255.0)).
+   Layout 2 is PER PLANE, not per tensor: Q4_1/Q6_1's d and min each get
+   their own base plane and their own u8 plane, so this function is
+   called once per plane and only the plane it is asked to read differs.
+   The base is signed because the min plane's row base is its most
+   negative entry (the encoder clamps it to <= 0); the multiplier is
+   always unsigned. d's and t2/q8_0's bases are non-negative, which is a
+   property of those planes, not of the reader.
+   Every layout widens HERE, at the one door every quantized tensor's
+   scale plane comes through, so t->scale/t->zero keep one representation
+   and no kernel, epilogue, inspect path or dequantizer ever tests the
+   word. The alternative - a packed plane in memory and a branch at each
+   of the ~20 places that read t->scale[], some of them hand-written SIMD
+   that reads the plane as raw bytes - would be both slower and a
+   correctness hazard no test could cover uniformly.
+
+   Layout 2's conversion has ONE spelling, the same one the trainer's
+   ternary_grid and the exporter use: `d = base * (m / 255.0)`, the
+   integer turned into a float BEFORE the multiply. `base * m / 255` can
+   differ by 1 ULP, and d is multiplied straight into the code word, so
+   the two orders decode the same file to different weights.
+
+   `rows` is the tensor's row count (n / last dim). It is consumed only
+   by layout 2; the caller supplies it rather than the geometry being
+   re-derived at each format branch, and only this function knows how
+   many bytes either plane of layout 2 occupies.
+
+   Q16_0 does not come through here in any packed layout: its scales stay
+   f32 in the file regardless of the word (tools/export_q8.py's read_bin
+   reads them as f32 too), so its branch passes layout 0 - see
+   visit_read_bin. */
+#define LZ_SCALE_CHUNK 128
+
+/* Widen `count` little-endian binary16 values from the reader into dst
+   as f32. Chunked rather than one scratch plane: the largest group count
+   in this tree is ~1.3M (a hidden-size row at gs=32), and a second
+   4-byte-per-group scratch buffer per tensor read is exactly the RAM the
+   packed scales were meant to save on the 64MB target. Two bytes are
+   assembled by hand (`b[0] | b[1] << 8`) rather than through lz_le16, so
+   the file's little-endian order is honoured without a host-width
+   assumption. fp16->f32 is exact. */
+static int read_f16_plane(LZModel *m, float *dst, uint32_t count) {
+    unsigned char raw[LZ_SCALE_CHUNK * 2];
+    size_t nb;
+    uint32_t i, k, j;
+
+    i = 0;
+    while (i < count) {
+        k = count - i;
+        if (k > LZ_SCALE_CHUNK) k = LZ_SCALE_CHUNK;
+        nb = (size_t)k * 2;
+        if (m->rd(m->rd_ctx, raw, nb) != nb) return 1;
+        for (j = 0; j < k; j++) {
+            unsigned int h = (unsigned int)raw[j * 2] |
+                             ((unsigned int)raw[j * 2 + 1] << 8);
+            dst[i + j] = lz_f16_to_f32(h);
+        }
+        i += k;
+    }
+    return 0;
+}
+
+/* Layout-2's per-group scale decode is compat.c's lz_scale_u8_decode -
+   base * (raw/255) with the quotient and product each rounded to float.
+   The bare expression is not portable across the two toolchains (see
+   that function's comment for the two codegen differences and where
+   they were measured); nothing in this file may inline the arithmetic
+   back. */
+
+static int read_scale_plane(LZModel *m, float *dst, uint32_t ng, int layout,
+                            uint32_t rows) {
+    size_t nb;
+    uint32_t i, k, j;
+
+    if (layout == 0) {
+        nb = (size_t)ng * sizeof(float);
+        if (m->rd(m->rd_ctx, dst, nb) != nb) return 1;
+        lz_le32(dst, (size_t)ng);
+        return 0;
+    }
+    if (layout == 1) return read_f16_plane(m, dst, ng);
+
+    /* layout 2. A row must hold a whole number of groups: the exporter
+       forms the base from max_g s_g over one row's groups, so a group
+       spanning or split across rows has no base to name. */
+    if (rows == 0 || ng == 0 || (ng % rows) != 0) return 1;
+    {
+        float *base;
+        unsigned char raw[LZ_SCALE_CHUNK];
+        uint32_t gpr = ng / rows;
+
+        base = (float *)malloc((size_t)rows * sizeof(float));
+        if (!base) return 1;
+        if (read_f16_plane(m, base, rows) != 0) {
+            free(base);
+            return 1;
+        }
+        i = 0;
+        while (i < ng) {
+            k = ng - i;
+            if (k > LZ_SCALE_CHUNK) k = LZ_SCALE_CHUNK;
+            if (m->rd(m->rd_ctx, raw, (size_t)k) != (size_t)k) {
+                free(base);
+                return 1;
+            }
+            for (j = 0; j < k; j++)
+                dst[i + j] = lz_scale_u8_decode(base[(i + j) / gpr],
+                                                (float)raw[j]);
+            i += k;
+        }
+        free(base);
+    }
+    return 0;
+}
+
 /* Read one tensor's header (dtype byte + LE element count). Shared by the
    bin path's tensor reads; factored out because every branch repeats it. */
 static int read_tensor_hdr(LZModel *m, uint8_t *dtype, uint32_t *n) {
@@ -1619,7 +3567,7 @@ static int read_tensor_hdr(LZModel *m, uint8_t *dtype, uint32_t *n) {
 static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
                           void *ctx, char *errbuf, int errlen) {
     uint8_t dtype;
-    uint32_t n, gs;
+    uint32_t n, gs, rows = 0;
     (void)ctx;
 
     /* Every multi-byte field below - the element count, the group size,
@@ -1641,6 +3589,14 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
     }
     field->n = (int)n;
     field->zero = NULL;
+    /* Layout 2's per-row base plane needs the tensor's row count, and
+       the bin stores only the element count - so it comes from the
+       shape desc model_walk_one synthesized from the same `dims` the
+       element count was checked against. Last dim is the row width for
+       1D/2D/3D alike (the exporter's own `inn = w.shape[-1]`). Computed
+       once here so no format branch re-derives it. */
+    if (t->n_dims > 0 && t->shape[t->n_dims - 1] > 0)
+        rows = (uint32_t)((lz_i64)n / t->shape[t->n_dims - 1]);
     if (dtype == LZ_FMT_F32) {
         field->dtype = LZ_FMT_F32;
         field->gs = 0;
@@ -1705,8 +3661,13 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
             return 1;
         }
         if (m->rd(m->rd_ctx, field->q, (size_t)n * 2) != (size_t)n * 2 ||
-            m->rd(m->rd_ctx, field->scale, sizeof(float) * (n / gs))
-                != sizeof(float) * (n / gs)) {
+            /* Q16_0's scales stay f32 under EVERY scale_layout: this
+               format is used for in_proj_a/b, whose scale must hold the
+               decay rate's precision (see this branch's comment above),
+               and tools/export_q8.py's read_bin reads them as f32
+               whatever that word says. Layout 0 forced here so the two
+               sides agree; `rows` is meaningless at layout 0. */
+            read_scale_plane(m, field->scale, n / gs, 0, 0) != 0) {
             qerr(errbuf, errlen, LZ_ERR_TENSOR_READ, t->name);
             lz_t_free(field);
             return 1;
@@ -1715,7 +3676,6 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
            int16 and the kernels read it through an int16_t *, so its
            halves have to be put the right way round here. */
         lz_le16(field->q, (size_t)n);
-        lz_le32(field->scale, (size_t)(n / gs));
         m->bytes_alloc += (lz_i64)n * 2 +
                           (lz_i64)(n / gs) * sizeof(float);
     } else if (dtype == LZ_FMT_Q6_1) {
@@ -1739,16 +3699,14 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
         }
         if (m->rd(m->rd_ctx, field->q, (size_t)n / 2 + (size_t)n / 4)
                 != (size_t)n / 2 + (size_t)n / 4 ||
-            m->rd(m->rd_ctx, field->scale, sizeof(float) * (n / gs))
-                != sizeof(float) * (n / gs) ||
-            m->rd(m->rd_ctx, field->zero, sizeof(float) * (n / gs))
-                != sizeof(float) * (n / gs)) {
+            read_scale_plane(m, field->scale, n / gs,
+                             m->config.scale_layout, rows) != 0 ||
+            read_scale_plane(m, field->zero, n / gs,
+                             m->config.scale_layout, rows) != 0) {
             qerr(errbuf, errlen, LZ_ERR_TENSOR_READ, t->name);
             lz_t_free(field);
             return 1;
         }
-        lz_le32(field->scale, (size_t)(n / gs));
-        lz_le32(field->zero,  (size_t)(n / gs));
         m->bytes_alloc += (lz_i64)n / 2 + (lz_i64)n / 4 +
                           2 * (lz_i64)(n / gs) * sizeof(float);
     } else if (dtype == LZ_FMT_T2) {
@@ -1771,13 +3729,12 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
             return 1;
         }
         if (m->rd(m->rd_ctx, field->q, (size_t)n / 4) != (size_t)n / 4 ||
-            m->rd(m->rd_ctx, field->scale, sizeof(float) * (n / gs))
-                != sizeof(float) * (n / gs)) {
+            read_scale_plane(m, field->scale, n / gs,
+                             m->config.scale_layout, rows) != 0) {
             qerr(errbuf, errlen, LZ_ERR_TENSOR_READ, t->name);
             lz_t_free(field);
             return 1;
         }
-        lz_le32(field->scale, (size_t)(n / gs));
         m->bytes_alloc += (lz_i64)n / 4 +
                           (lz_i64)(n / gs) * sizeof(float);
     } else if (dtype == LZ_FMT_Q4_1) {
@@ -1800,16 +3757,14 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
             return 1;
         }
         if (m->rd(m->rd_ctx, field->q, (size_t)n / 2) != (size_t)n / 2 ||
-            m->rd(m->rd_ctx, field->scale, sizeof(float) * (n / gs))
-                != sizeof(float) * (n / gs) ||
-            m->rd(m->rd_ctx, field->zero, sizeof(float) * (n / gs))
-                != sizeof(float) * (n / gs)) {
+            read_scale_plane(m, field->scale, n / gs,
+                             m->config.scale_layout, rows) != 0 ||
+            read_scale_plane(m, field->zero, n / gs,
+                             m->config.scale_layout, rows) != 0) {
             qerr(errbuf, errlen, LZ_ERR_TENSOR_READ, t->name);
             lz_t_free(field);
             return 1;
         }
-        lz_le32(field->scale, (size_t)(n / gs));
-        lz_le32(field->zero,  (size_t)(n / gs));
         m->bytes_alloc += (lz_i64)n / 2 +
                           2 * (lz_i64)(n / gs) * sizeof(float);
     } else if (dtype == LZ_FMT_Q8_0) {
@@ -1831,8 +3786,8 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
             return 1;
         }
         if (m->rd(m->rd_ctx, field->q, (size_t)n) != (size_t)n ||
-            m->rd(m->rd_ctx, field->scale, sizeof(float) * (n / gs))
-                != sizeof(float) * (n / gs)) {
+            read_scale_plane(m, field->scale, n / gs,
+                             m->config.scale_layout, rows) != 0) {
             qerr(errbuf, errlen, LZ_ERR_TENSOR_READ, t->name);
             aligned_free(field->q);
             aligned_free(field->scale);
@@ -1840,7 +3795,6 @@ static int visit_read_bin(LZModel *m, const LZStTensor *t, LZTensor *field,
             field->scale = NULL;
             return 1;
         }
-        lz_le32(field->scale, (size_t)(n / gs));
         m->bytes_alloc += (lz_i64)n + (lz_i64)(n / gs) * sizeof(float);
     } else {
         qerr(errbuf, errlen, LZ_ERR_TENSOR_DTYPE, t->name, dtype);
@@ -1971,24 +3925,107 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
         goto fail;
     }
     RD(&ver, 4);
-    /* v1 = f32/Q8_0 only; v2 onward may carry Q4_1 etc; v4 adds the KDA
-       + latent MoE header fields below; v5 adds one more field (the MTP
-       head's mtp_n_layers) on top of v4's tail - a checkpoint with an
-       MTP head is therefore always >= v5 even when it carries no
-       KDA/MoE (the v4 tail is still present, just zeroed). The exporter
-       only bumps the version when a feature that needs it is actually
-       used, so a legacy pure-Q8 GDN/dense file stays v1, byte for byte -
-       and, symmetrically, an older reader given a newer file must be
-       refused rather than silently reading past a header it does not
-       know the shape of (RD would then desync into tensor data and fail
-       some unrelated way downstream, which is not a diagnosis). */
-    if (ver != 1 && ver != 2 && ver != 3 && ver != 4 && ver != 5 &&
-        ver != 6 && ver != 7 && ver != 8) {
+    /* Three header shapes are read, and only three.
+
+       v5 is everything up to csa2_compress_m_layer: the base header, then
+       every field any version ever added, written unconditionally, in
+       the order it was added. The ORDER is the whole contract - neither
+       side has a length prefix or a field tag, so a field moved across
+       the boundary of a group is read back as a plausible wrong number
+       rather than as a parse failure, and only a byte-level comparison
+       of the two sequences finds it.
+
+         base     magic "L98Z", ver, 28 fixed words, layer_types[128]
+         tail (13) kda_gate_rank, kda_has_gate_lower_bound,
+                   kda_gate_lower_bound, num_experts,
+                   num_experts_per_token, num_shared_experts,
+                   moe_intermediate_size, moe_latent_dim,
+                   first_k_dense_replace, moe_renormalize,
+                   moe_router_sigmoid, moe_latent_use_norm,
+                   moe_shared_width
+         tail  (2) mtp_n_layers, mtp_intermediate_size
+         tail  (5) rope_scaling_type, rope_scaling_factor,
+                   rope_scaling_orig_max, rope_scaling_beta_fast,
+                   rope_scaling_beta_slow
+         tail  (1) use_subn
+         tail  (2) hadamard_o, hadamard_down
+         tail  (2) mla_q_lora_rank, mla_o_lora_rank
+         tail  (1) attn_kv_share
+         appended (522) attn_sink_learned, gated_residual, ced_split,
+                   ced_kv, csa2_on[128], csa2_mode[128], csa2_source[128],
+                   ced_replay_w, csa2_compress_m, csa2_topk,
+                   csa2_indexer_heads, csa2_indexer_head_dim,
+                   csa2_indexer_q_lora_rank, csa2_compress_m_layer[128]
+
+       v6 appends the application table and the rotated-vocabulary /
+       scale-layout words, CONDITIONALLY - a model that does not loop, has
+       no draft head, no rotated vocabulary and f32 scales is completely
+       described by v5 and keeps that version word (tools/export_q8.py's
+       own "the version follows the content" rule):
+
+         v6      (258) exec_len, app_layer[128], app_loop[128],
+                   mtp_n_draft, embed_hadamard, embed_signs_seed,
+                   scale_layout
+
+       v7 appends one word, the scalar input injection's mode
+       (loop_input_mix). v8 appends one more, ced_local. v9 appends
+       loop_input_mix_from, the pass that mode starts mixing at - all
+       three CONDITIONALLY, on the same "the version follows the
+       content" rule: a file without those mechanisms is completely
+       described by the version below it, and a v8 file - which has no
+       word for the start pass - is the complete description of a model
+       that mixes from pass 2.
+
+       v4 is the published generation - github.com/lunzima/kunkun98-models
+       ships a MODEL/model.bin of exactly this shape - so it is FROZEN
+       here rather than retired with the rest of the ladder. It carries
+       the 13-word tail and stops; the fields after it keep the defaults
+       at the bottom of this function.
+
+       Every other version is refused. They differ from v5 only in which
+       tails they carry, and a shape nothing writes any more is a shape
+       nothing exercises: reading it would be a compatibility branch no
+       gate can reach. */
+    if (ver < 4 || ver > 9) {
         qerr(errbuf, errlen, LZ_ERR_BIN_VERSION, ver);
         goto fail;
     }
     RD(&c->vocab_size, 4); RD(&c->hidden_size, 4);
-    RD(&c->n_layers, 4);   RD(&c->seq_len, 4);
+    RD(&c->n_layers, 4);
+    /* STRUCTURAL: this is n_layers's OWN bound, checked the instant its
+       RD() lands and before any other statement in this function ever
+       runs - not folded into the "derived quantities self-consistent"
+       block further down (still there, unchanged, as an idempotent
+       second gate - belt and suspenders, not a duplicate to remove).
+       Every one of layer_types[]/csa2_on[]/csa2_mode[]/csa2_source[]/
+       last_writer[] is LZ_MAX_LAYERS wide, and this loader (and
+       lz_csa2_last_writer_valid, which it calls) is FULL of loops
+       shaped `for (i = 0; i < c->n_layers; i++)` reading or writing one
+       of those arrays - each one is safe only because n_layers cannot
+       exceed their width by the time it runs. That holds by
+       construction here, not by an accident of which loop sits
+       textually after the single, late check - and
+       twice already (report Sec2.3.1 mode-dispatch task's own C1 and
+       then, one review round later, its own C-NEW-1/C-NEW-2 fixing
+       Minor-item/I3 code) a NEW loop of exactly this shape landed
+       BEFORE that late check, unbounded, because nothing at the point
+       n_layers is first read stops it from being arbitrary. A header
+       with n_layers=0x7FFFFFFF is refused HERE now, before the very
+       first LZ_MAX_LAYERS-wide array is ever indexed by it anywhere
+       in this function - so every loop below this point, present or
+       future, inherits the bound for free instead of by remembering to
+       place itself after line ~3450. The padding loop immediately below
+       (`RD(c->layer_types, ...)` then `for (i = 0; i < LZ_MAX_LAYERS;
+       i++) if (i >= c->n_layers ...)`) was already safe regardless -
+       its own loop bound is LZ_MAX_LAYERS, and it only ever COMPARES
+       against n_layers, never uses it as an index or an upper bound of
+       its own - so it is unaffected by running before or after this
+       check either way. */
+    if (c->n_layers <= 0 || c->n_layers > LZ_MAX_LAYERS) {
+        qerr(errbuf, errlen, LZ_ERR_BIN_CFG);
+        goto fail;
+    }
+    RD(&c->seq_len, 4);
     RD(&c->n_heads, 4);    RD(&c->n_kv_heads, 4);
     RD(&c->head_dim, 4);   RD(&c->intermediate_size, 4);
     RD(&c->lin_n_k_heads, 4); RD(&c->lin_n_v_heads, 4);
@@ -2008,57 +4045,510 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
             goto fail;
         }
     }
-    /* v4 header tail: KDA gate + latent MoE. Absent (ver < 4) leaves every
-       one of these at 0/0.0f from lz_open's memset(m, 0, ...) - the same
-       "no KDA, no MoE" defaults lz_load_config uses for a non-kunmoe
-       config.json, so the two loading paths cannot disagree. */
-    if (ver >= 4) {
-        RD(&c->kda_gate_rank, 4);
-        RD(&c->kda_has_gate_lower_bound, 4);
-        RD(&c->kda_gate_lower_bound, 4);
-        RD(&c->num_experts, 4);
-        RD(&c->num_experts_per_token, 4);
-        RD(&c->num_shared_experts, 4);
-        RD(&c->moe_intermediate_size, 4);
-        RD(&c->moe_latent_dim, 4);
-        RD(&c->first_k_dense_replace, 4);
-        RD(&c->moe_renormalize, 4);
-        RD(&c->moe_router_sigmoid, 4);
-        RD(&c->moe_latent_use_norm, 4);
-        RD(&c->moe_shared_width, 4);
-        if (c->num_experts < 0 || c->num_experts > LZ_MAX_EXPERTS ||
-            c->num_experts_per_token < 0 ||
-            c->num_experts_per_token > c->num_experts ||
-            c->first_k_dense_replace < 0) {
+    /* n_full_layers/n_linear_layers are two more raw header words with
+       no range check of their own - unlike n_layers, nothing above
+       bounds them, and forward_state.c's alloc_csa2_ring trusts
+       n_full_layers as its own `nf` with only lz_csa2_pub_overflows
+       standing between an unvalidated word and xcalloc's arithmetic
+       (that function's own comment has the overflow mechanics; this is
+       the check that keeps its "nf <= LZ_MAX_LAYERS in production"
+       premise actually true on the bin path, rather than merely
+       documented). This loop is itself a `for (i = 0; i < c->n_layers;
+       i++)` reading layer_types[i] - safe here for the structural
+       reason n_layers's own RD() site now states: n_layers was already
+       bounded to [1, LZ_MAX_LAYERS] there, well before this point, not
+       because this loop happens to sit after some other check. LZ_LT_
+       LINEAR and LZ_LT_KDA both count toward n_linear_layers, same as
+       lz_load_config's own layer_types loop above (the JSON path's
+       comment on that loop has the reasoning); an out-of-{0,1,2}
+       layer_types[] entry - not yet refused at this point, the
+       "unknown" check below runs later - falls into the linear side of
+       this count too, which is harmless: this check only needs the two
+       counts to disagree to catch a garbage n_full_layers/n_linear_
+       layers pair, not to itself classify every legal value. */
+    {
+        int nf_count = 0, nl_count = 0;
+        for (i = 0; i < c->n_layers; i++) {
+            if (c->layer_types[i] == LZ_LT_FULL) nf_count++;
+            else nl_count++;
+        }
+        if (c->n_full_layers != nf_count || c->n_linear_layers != nl_count) {
             qerr(errbuf, errlen, LZ_ERR_BIN_CFG);
             goto fail;
         }
     }
-    /* v5 header tail: the MTP head's layer count and its FFN width.
-       Absent (ver < 5) leaves mtp_n_layers at 0 from lz_open's
-       memset(m, 0, ...) before this function is reached - "no MTP
-       head", the same default the safetensors path's lz_load_config
-       uses for a config.json without mtp_num_hidden_layers.
-       mtp_intermediate_size has no such "absent key" fallback here -
-       the bin format has no field tagging, so export_q8.py always
-       writes both when it writes either (see write_config); it is only
-       ever read below when mtp_n_layers > 0 too. */
+    /* The KDA gate + latent MoE tail. Both shapes carry it, and read it
+       the same way, so it sits outside the branch below. */
+    RD(&c->kda_gate_rank, 4);
+    RD(&c->kda_has_gate_lower_bound, 4);
+    RD(&c->kda_gate_lower_bound, 4);
+    RD(&c->num_experts, 4);
+    RD(&c->num_experts_per_token, 4);
+    RD(&c->num_shared_experts, 4);
+    RD(&c->moe_intermediate_size, 4);
+    RD(&c->moe_latent_dim, 4);
+    RD(&c->first_k_dense_replace, 4);
+    RD(&c->moe_renormalize, 4);
+    RD(&c->moe_router_sigmoid, 4);
+    RD(&c->moe_latent_use_norm, 4);
+    RD(&c->moe_shared_width, 4);
+    if (c->num_experts < 0 || c->num_experts > LZ_MAX_EXPERTS ||
+        c->num_experts_per_token < 0 ||
+        c->num_experts_per_token > c->num_experts ||
+        c->first_k_dense_replace < 0) {
+        qerr(errbuf, errlen, LZ_ERR_BIN_CFG);
+        goto fail;
+    }
     if (ver >= 5) {
+        /* The rest of the v5 layout, in order and unconditionally. A v6
+           file carries all of it too, followed by the v6 group read
+           further down. */
         RD(&c->mtp_n_layers, 4);
         RD(&c->mtp_intermediate_size, 4);
-    }
-    /* v6 header tail: rope_scaling. Absent (ver < 6) leaves the five
-       fields at the memset defaults - which are exactly the
-       "no scaling" defaults lz_load_config uses when rope_parameters
-       has no rope_scaling key (type 0, factor 1, orig_max 0,
-       beta_fast 32, beta_slow 1), so the two loading paths cannot
-       disagree. */
-    if (ver >= 6) {
         RD(&c->rope_scaling_type, 4);
         RD(&c->rope_scaling_factor, 4);
         RD(&c->rope_scaling_orig_max, 4);
         RD(&c->rope_scaling_beta_fast, 4);
         RD(&c->rope_scaling_beta_slow, 4);
+        RD(&c->use_subn, 4);
+        RD(&c->hadamard_o, 4);
+        RD(&c->hadamard_down, 4);
+        RD(&c->mla_q_lora_rank, 4);
+        RD(&c->mla_o_lora_rank, 4);
+        RD(&c->attn_kv_share, 4);
+        /* GR / learned attention sink / CSA2. Appended to the v5 tail
+           rather than gated behind a version word of its own: v5 is "the
+           base header plus every field any version added, written
+           unconditionally, in the order it was added", so a group
+           appended here stays self-describing. tools/export_q8.py's
+           write_config writes this exact sequence and is the other half
+           of the contract - nothing on either side carries a length
+           prefix or a field tag. */
+        RD(&c->attn_sink_learned, 4);
+        RD(&c->gated_residual, 4);
+        RD(&c->ced_split, 4);
+        RD(&c->ced_kv, 4);
+        /* Range-check the three scalars before anything downstream turns
+           one into a shape: GR sizes the residual stream and its own
+           weight rows at nr*d and takes its span from ced_split, and the
+           sink flag decides which layers allocate a sinks tensor. Out of
+           range they are allocation sizes, and nothing further down
+           re-checks them. Reported by field name - the padding check
+           below is about csa2_on and would send a reader to the wrong
+           array.
+
+           gated_residual: 0 is off, and 1 is refused rather than
+           tolerated - training's GatedResidual4 raises below nr=2, there
+           is no single-stream GR, and the control arm is the flag off
+           rather than a degenerate nr=1. The upper bound is a guard on a
+           file-supplied word, not an architecture limit (training bounds
+           nr from below only); 64 is 16x the only branch count ever
+           trained and keeps the widened stream nr*d at 32768 floats for
+           this project's d=512.
+
+           ced_split: the CED boundary is a layer index, so [0, n_layers]
+           is its whole domain. _wire_gr reads 0 < ced_split < n_layers as
+           "active" and anything else as "span the whole stack", so a
+           garbage word would otherwise behave like a legal one. */
+        if (c->attn_sink_learned != 0 && c->attn_sink_learned != 1) {
+            qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE, "attn_sink_learned");
+            goto fail;
+        }
+        if (c->gated_residual != 0 &&
+            (c->gated_residual < 2 || c->gated_residual > 64)) {
+            qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE, "gated_residual");
+            goto fail;
+        }
+        if (c->ced_split < 0 || c->ced_split > c->n_layers) {
+            qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE, "ced_split");
+            goto fail;
+        }
+        /* ced_kv is an enum (0=off, 1=proj) written by the exporter,
+           not a free-form scalar - "reuse" has no engine-side
+           implementation (model.h's own field comment) and never
+           reaches a header word, so any value past 1 is a garbage
+           word rather than a legal-but-unimplemented one. */
+        if (c->ced_kv != 0 && c->ced_kv != 1) {
+            qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE, "ced_kv");
+            goto fail;
+        }
+        RD(c->csa2_on, LZ_MAX_LAYERS * 4);
+        for (i = 0; i < LZ_MAX_LAYERS; i++) {
+            if (i >= c->n_layers && c->csa2_on[i] != 0) {
+                qerr(errbuf, errlen, LZ_ERR_BIN_CSA2_PAD);
+                goto fail;
+            }
+        }
+        /* S4+CSA2 composition (lz_load_config's own csa2_layers loop has
+           the full mechanism/reasoning - the same rule, checked here
+           because this loader never calls that one). This IS the fix
+           for the "bin-path never actually refuses" gap: unlike the
+           safetensors path, this loader's tensor reads are POSITIONAL,
+           so there is no missing-tensor lookup for a garbage or hand-
+           built header to accidentally fail. mla_q_lora_rank was RD()'d
+           unconditionally above (this function's own field order), so
+           it is already final for every csa2_on[] entry just read.
+           This loop, like the n_full_layers/n_linear_layers one above,
+           is safe for the structural reason n_layers's own RD() site
+           states: bounded to [1, LZ_MAX_LAYERS] there, before this
+           point, not by virtue of this loop's own position. */
+        if (c->mla_q_lora_rank > 0) {
+            for (i = 0; i < c->n_layers; i++) {
+                if (c->csa2_on[i]) {
+                    qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE, "mla_q_lora_rank");
+                    goto fail;
+                }
+            }
+        }
+        /* csa2_mode[]/csa2_source[] (model.h's own field comment on
+           LZModelConfig) - appended to the v5 tail unconditionally, same
+           posture as every other field in this block (ced_kv just
+           above is the most recent precedent): no version word of its
+           own, no length prefix, just the next fixed slot in a header
+           that is "the base layout plus every field any version added,
+           in the order it was added" (this function's own comment,
+           above, at the ver==5 branch). tools/export_q8.py's
+           write_config (E:\LLM\llama98-zh, a different repository, no
+           shared git history) writes this pair now; build/csa2_last_
+           writer_bin_gate.sh's own real exports depend on it having
+           done so (the csa2_source[] signature search that locates
+           its fixtures' bytes has nothing to find otherwise).
+
+           THE COST, stated rather than left implicit: inserting a field
+           in the MIDDLE of an unconditionally-ordered, untagged tail -
+           rather than appending at the very end - desyncs every field
+           read after it (ced_replay_w onward) for any model.bin whose
+           export predates this commit but already carries every field
+           through csa2_on. Not hypothetical: this machine has real
+           (dev-fixture, non-shipping) v5 bin files in that exact state.
+           Before this commit their header parsed cleanly all the way
+           through and the load failed only much later, at an unrelated
+           tensor-shape mismatch; after it, the load fails during header
+           parsing itself, caught by the padding check just below -
+           correctly refused either way, since RD() has no way to tell
+           misaligned-but-in-range garbage from a legitimate value.
+           (Which specific field a desync trips, absent that padding
+           check, is a fact about one file's incidental byte content,
+           not a property of this change - not worth naming, and not
+           stable across edits to this very function, which is what
+           happened to an earlier draft of this comment.) This is the
+           established, accepted cost of this project's v5 format
+           (every prior addition - csa2_on, attn_sink_learned,
+           gated_residual, ced_replay_w, ced_kv - paid the same price
+           against whatever predated IT), not a new defect this task
+           introduces; the fix for a stale fixture is to re-export it,
+           not to version the header. */
+        RD(c->csa2_mode, LZ_MAX_LAYERS * 4);
+        RD(c->csa2_source, LZ_MAX_LAYERS * 4);
+        /* Two different checks for two different regions, not one loop
+           applied uniformly: the padding past n_layers must be all-
+           default (nothing named it, so nothing may have touched it),
+           while an in-range layer's pair must be lz_csa2_mode_source_
+           valid - unlike the padding check, THIS half is new: before
+           it, a layer inside n_layers with a garbage csa2_mode/
+           csa2_source pair was trusted outright, and forward_state.c's
+           cache_idx fill (s->cache_idx[l] = s->cache_idx[c->
+           csa2_source[l]] for a non-FULL mode) reads csa2_source[l] as
+           an array index with no bounds check of its own - a negative
+           sentinel left over from a FULL-mode default paired with a
+           garbage non-zero csa2_mode reads cache_idx[-1] out of bounds,
+           and a source naming a real but wrong-namespace or forward-
+           referenced layer aliases into memory that index was never
+           meant to reach. */
+        for (i = 0; i < LZ_MAX_LAYERS; i++) {
+            if (i >= c->n_layers) {
+                if (c->csa2_mode[i] != 0 || c->csa2_source[i] != -1) {
+                    qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE,
+                         c->csa2_mode[i] != 0 ? "csa2_mode" : "csa2_source");
+                    goto fail;
+                }
+            } else if (!lz_csa2_mode_source_valid(c, i)) {
+                qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE,
+                     (c->csa2_mode[i] != LZ_CSA2_FULL &&
+                      c->csa2_mode[i] != LZ_CSA2_REINDEX &&
+                      c->csa2_mode[i] != LZ_CSA2_REUSE) ?
+                     "csa2_mode" : "csa2_source");
+                goto fail;
+            }
+        }
+        RD(&c->ced_replay_w, 4);
+        RD(&c->csa2_compress_m, 4);
+        RD(&c->csa2_topk, 4);
+        RD(&c->csa2_indexer_heads, 4);
+        RD(&c->csa2_indexer_head_dim, 4);
+        RD(&c->csa2_indexer_q_lora_rank, 4);
+        /* csa2_compress_m_layer[] - the per-layer half of the scalar
+           above, appended after it in the same "every field any version
+           added, in the order it was added" tail (this function's own
+           layout comment). The engine has always read arrays of
+           LZ_MAX_LAYERS words in this header the same way (csa2_on,
+           csa2_mode, csa2_source), and both checks below are that
+           pattern's: the padding past n_layers must be untouched, and
+           an in-range entry must be a value both loaders accept.
+
+           THE COST OF APPENDING, stated where the other appended fields
+           state theirs: a model.bin written before this field existed
+           has no words for it, so the tensor stream's first 512 bytes
+           are read as this array. They are refused here - the padding
+           half of the check fails for any bin whose n_layers is below
+           LZ_MAX_LAYERS, and an in-range entry that is neither 0 nor in
+           [1, seq_len] fails the value half - which is the same
+           "correctly refused, rather than a plausible wrong number
+           silently accepted" position the csa2_mode/csa2_source append
+           took, and for the same reason: RD() cannot tell misaligned-
+           but-in-range garbage from a legitimate value. A stale bin's
+           fix is to re-export it, not to version the header. */
+        RD(c->csa2_compress_m_layer, LZ_MAX_LAYERS * 4);
+        for (i = 0; i < LZ_MAX_LAYERS; i++) {
+            if (i >= c->n_layers) {
+                if (c->csa2_compress_m_layer[i] != 0) {
+                    qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE,
+                         "csa2_compress_m_layer");
+                    goto fail;
+                }
+                continue;
+            }
+            if (c->csa2_compress_m_layer[i] == 0) continue;
+            if (!c->csa2_on[i]) {
+                qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE,
+                     "csa2_compress_m_layer");
+                goto fail;
+            }
+            if (c->csa2_compress_m_layer[i] < 1 ||
+                c->csa2_compress_m_layer[i] > c->seq_len) {
+                qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE,
+                     "csa2_compress_m_layer");
+                goto fail;
+            }
+            /* Same alias rule as lz_load_config's own loop: a non-FULL
+               layer reads its source's ring, whose block boundaries are
+               that ratio, so an entry contradicting it is not a
+               configuration this engine can run. csa2_mode[]/
+               csa2_source[] were read and validated above this point
+               (this function's own field order). */
+            if (c->csa2_mode[i] != LZ_CSA2_FULL &&
+                c->csa2_compress_m_layer[i] !=
+                lz_csa2_cm(c, c->csa2_source[i])) {
+                qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE,
+                     "csa2_compress_m_layer");
+                goto fail;
+            }
+        }
+        /* THE V6 GROUP, read last because it was appended last. Seven
+           words, 258 in all with the two 128-word tables (tools/
+           export_q8.py's write_config writes this exact sequence under
+           `if ver >= 6`).
+
+           DEFAULTS FOR v4/v5 live below the version branch, not here: a
+           file without these words is completely described by the
+           identity schedule, which is what "does not loop" IS - not an
+           approximation of it.
+
+           THE TABLE IS EXECUTED. The layer loop runs exec_len
+           applications in this order (forward.c), and the KDA state is
+           per application because the decoder's second pass restarts its
+           recurrences at zero (forward_state.c). A non-looping file
+           carries the identity schedule, so both shapes take one path. */
+        if (ver >= 6) {
+            RD(&c->exec_len, 4);
+            RD(c->app_layer, LZ_MAX_LAYERS * 4);
+            RD(c->app_loop, LZ_MAX_LAYERS * 4);
+            RD(&c->mtp_n_draft, 4);
+            RD(&c->embed_hadamard, 4);
+            RD(&c->embed_signs_seed, 4);
+            RD(&c->scale_layout, 4);
+
+            if (c->exec_len < 1 || c->exec_len > LZ_MAX_LAYERS) {
+                qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE, "exec_len");
+                goto fail;
+            }
+            for (i = 0; i < LZ_MAX_LAYERS; i++) {
+                if (i >= c->exec_len) {
+                    /* Nothing named an application past the end, so
+                       nothing may have touched it. app_layer[] is 0 for
+                       a real entry too (physical layer 0), which is why
+                       the padding test is on app_loop[] as well - a
+                       non-identity schedule that ran long would show up
+                       in at least one of the two. */
+                    if (c->app_layer[i] != 0 || c->app_loop[i] != 0) {
+                        qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE,
+                             c->app_loop[i] != 0 ? "app_loop" : "app_layer");
+                        goto fail;
+                    }
+                    continue;
+                }
+                if (c->app_layer[i] < 0 || c->app_layer[i] >= c->n_layers) {
+                    qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE, "app_layer");
+                    goto fail;
+                }
+                if (c->app_loop[i] < 0) {
+                    qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE, "app_loop");
+                    goto fail;
+                }
+            }
+            /* A non-zero embed_hadamard means the embedding/head rows
+               are stored in the rotated basis and this engine applies
+               the pair of transforms on the way (fwht.c). The block is
+               checked against hidden_size, which the header read two
+               lines into the RD() run.
+
+               NOT CHECKED HERE: whether the checkpoint is ternary. The
+               header has no such word - the trainer only wires the
+               rotation under ternary_embed, so tools/export_q8.py
+               refuses a rotation on a non-ternary config at export time
+               (this file's counterpart is the config.json path above,
+               which does have the key). */
+            if (embed_block_bad(c->embed_hadamard, c->hidden_size)) {
+                qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE,
+                     "embed_hadamard");
+                goto fail;
+            }
+            if (c->scale_layout < 0 || c->scale_layout > 2) {
+                qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE,
+                     "scale_layout");
+                goto fail;
+            }
+        }
+        /* v7 adds one word: the scalar input injection's MODE (model.h's
+           loop_input_mix comment). Conditional on its own version rather
+           than appended to the v6 run because a v6 file is the complete
+           description of a model that does not mix - reading it
+           unconditionally would put this reader four bytes into the
+           tensor stream, where the scale_layout range check above still
+           passes (the word before is usually 0). */
+        if (ver >= 7) {
+            RD(&c->loop_input_mix, 4);
+            if (c->loop_input_mix < 0 || c->loop_input_mix > 1) {
+                qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE,
+                     "loop_input_mix");
+                goto fail;
+            }
+        }
+        /* v8 adds one word: ced_local, the local window's size (model.h's
+           own field comment). Same conditional shape as v7 above, and for
+           the same reason: a v7 file completely describes a model whose
+           attention has one KV branch, and reading a word it does not
+           carry would put this reader four bytes into the tensor stream -
+           where every word is a plausible in-range int and nothing else
+           in this header would notice.
+
+           Shape and layer rule come from ced_local_check, lz_load_config's
+           tail's own function; a .bin's tensors are positional, so a
+           layer the rule does not name is exactly the case where the
+           window weights are read into the walk and never attended to.
+           The call sits BELOW, after csa2_compress_m's bound: that is the
+           check that establishes seq_len >= 1 for any bin that gets this
+           far, which is what makes ced_local <= seq_len here a bound on a
+           positive number rather than on a "not stated" zero. */
+        if (ver >= 8) {
+            RD(&c->ced_local, 4);
+        }
+        /* v9 adds one word: the pass the scalar injection starts mixing
+           at (model.h's loop_input_mix_from comment). Same conditional
+           shape as v7/v8, and for the same reason: a v8 file completely
+           describes a model that mixes from pass 2 - the default set
+           here - so a word it does not carry must not be read. The
+           default is assigned rather than left at the struct's memset
+           zero because 0 is out of the legal range and would refuse
+           every pre-v9 mixing file the moment the check below runs. */
+        c->loop_input_mix_from = 2;
+        if (ver >= 9) {
+            RD(&c->loop_input_mix_from, 4);
+        }
+        /* CSA2 geometry and CED replay. All six are config.json fields
+           with no other route into this loader, so before these RD()
+           calls the bin path ran the whole CSA2 mechanism on zeros: the
+           three indexer words ARE tensor shapes (csa2_w_kv_idx and
+           friends resolved to 0 elements, so the first CSA2 tensor with
+           an indexer dim died with "want 0, file 16384"), csa2_compress_m
+           sized buffers at the fallback 1 in forward_state.c while
+           forward_csa2.c divided by the raw value, and csa2_topk is the
+           top-k selection's own buffer length.
+
+           Every bound is >= 1 because 0 is not a legal value for any of
+           them and the failure mode of accepting it is a SYMBOLIC one,
+           not a loud one: 0 elements of shape, 0 bytes of buffer, or a
+           division by zero. Refusing them here is what keeps "a garbage
+           word behaves like a legal one" from being true.
+
+           csa2_compress_m is additionally capped at seq_len. Past that
+           the arithmetic is unchanged - ceil(seq_len/cm) is 1 either way,
+           so cm > seq_len compresses exactly as much as cm == seq_len,
+           i.e. nothing - while the two csa2_pending_* buffers each grow
+           with the sum of every slot's own cm, times dim, times
+           ssm_ring_depth (forward.h's own csa2_pending_c comment has the
+           banks and model.h's own csa2_compress_m_layer comment the
+           per-slot layout). The cap costs no legitimate config and
+           bounds those two allocations by n_full * seq_len *
+           (LZ_SPEC_K_MAX + 1). csa2_compress_m_layer's own entries carry
+           the identical bound, per layer, for the same reason.
+
+           csa2_topk is NOT bounded by csa2_compress_m: the two are in
+           different units (blocks vs positions) and forward_csa2.c
+           already clamps the selection with
+           `k_eff = topk < n_vis ? topk : n_vis`, so a topk larger than
+           the block count reads nothing out of range. A topk large
+           enough to exhaust memory is loud through xcalloc, not silent
+           - true again only because forward_state.c's alloc_csa2_ring
+           checks lz_csa2_pub_overflows(nf, LZ_BATCH_MAX, csa2_topk,
+           sizeof(int)) before it ever calls xcalloc: what a 32-bit
+           size_t can wrap on is xcalloc's OWN arithmetic - element
+           count times element size plus its alignment overhead - not
+           csa2_topk alone and not the element count alone either, and
+           an earlier version of this guard that checked only the
+           element count still let a too-small allocation through
+           silently, the report Sec2.3.1 mode-dispatch task
+           (csa2_topk_idx_pub/csa2_topk_n_pub) introduced.
+
+           The three indexer words size tensors, so a value that
+           disagrees with the checkpoint is already caught by the tensor
+           stream's own elem-count check; >= 1 is only here to keep 0
+           from producing a shapeless tensor that the count check would
+           then report as a mismatch far from its cause.
+
+           ced_replay_w is >= 0 rather than >= 1 because 0 IS the legal
+           setting - it is what every checkpoint in this tree carries and
+           it means "no bounded replay". Only a negative word is refused.
+           Its own consumer, lz_forward_batch's replay_boundary, reads
+           `ced_replay_w > 0` and treats anything else as off, so a
+           negative value would otherwise be a legal-looking "off". */
+        if (c->ced_replay_w < 0) {
+            qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE, "ced_replay_w");
+            goto fail;
+        }
+        if (c->csa2_compress_m < 1 || c->csa2_compress_m > c->seq_len) {
+            qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE, "csa2_compress_m");
+            goto fail;
+        }
+        /* ced_local's bound and layer rule (model.h's own field comment),
+           after the bound above has established seq_len >= 1: the window
+           cannot be wider than the context it windows, and 0 is the legal
+           "off". Same function as the config.json path's tail. */
+        if (ced_local_check(c, errbuf, errlen) != 0) goto fail;
+        /* loop_input_mix_from's range (model.h's own field comment;
+           same function as the config.json path's tail). The v6 group's
+           application table - which the pass count is read out of - is
+           already in by here (ver >= 7, which is the only way the mix
+           can be on, implies ver >= 6), and for older files the mix is
+           off, so the check short-circuits before touching the table. */
+        if (loop_mix_from_check(c, errbuf, errlen) != 0) goto fail;
+        if (c->csa2_topk < 1) {
+            qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE, "csa2_topk");
+            goto fail;
+        }
+        if (c->csa2_indexer_heads < 1) {
+            qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE, "csa2_indexer_heads");
+            goto fail;
+        }
+        if (c->csa2_indexer_head_dim < 1) {
+            qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE, "csa2_indexer_head_dim");
+            goto fail;
+        }
+        if (c->csa2_indexer_q_lora_rank < 1) {
+            qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE,
+                 "csa2_indexer_q_lora_rank");
+            goto fail;
+        }
         if (c->rope_scaling_type < 0 || c->rope_scaling_type > 2 ||
             !(c->rope_scaling_factor > 0.0f) ||
             c->rope_scaling_beta_fast <= 0.0f ||
@@ -2066,26 +4556,17 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
             qerr(errbuf, errlen, LZ_ERR_BIN_CFG);
             goto fail;
         }
-    }
-    /* v7 header tail: use_subn (SubLN). Absent (ver < 7) leaves it at 0
-       from lz_open's memset(m, 0, ...) before this function is reached -
-       the same "ordinary pre-layer norms" default lz_load_config uses for
-       a config.json without a use_subn key, so the two loading paths
-       cannot disagree. The exporter bumps to v7 only when a checkpoint
-       actually sets use_subn, so legacy bins stay v6 byte for byte. */
-    if (ver >= 7) {
-        RD(&c->use_subn, 4);
-    }
-    /* v8 header tail: the two block-diagonal Hadamard block sizes. Unlike
-       every tail above, absent (ver < 8) must NOT keep lz_open's
-       memset(m, 0, ...) value: 0 is the legal, meaningful "no Hadamard"
-       setting, and a v7 SubLN product DOES apply one. Set the sentinel
-       explicitly so resolve_hadamard derives what those products were
-       built with. */
-    if (ver >= 8) {
-        RD(&c->hadamard_o, 4);
-        RD(&c->hadamard_down, 4);
     } else {
+        /* v4 stops after the tail above, so everything else keeps
+           lz_open's memset(m, 0, ...) value - the same "off" defaults
+           lz_load_config uses for a config.json without the key, so the
+           two loading paths cannot disagree.
+
+           hadamard_* is the exception, and the reason it needs one: 0 is
+           a legal, meaningful "no Hadamard" block size, while an absent
+           field means "this product predates the field, derive it from
+           the dimensions". 0 cannot say that, so the sentinel -1 does -
+           resolve_hadamard reads it as such. */
         c->hadamard_o = -1;
         c->hadamard_down = -1;
     }
@@ -2103,6 +4584,95 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
         qerr(errbuf, errlen, LZ_ERR_BIN_CFG);
         goto fail;
     }
+
+    /* The mirror of lz_load_config's own csa2_indexer_head_dim bound,
+       reported with that path's message so the two loaders name the same
+       defect identically: lz_rope writes base[i + rotary_dim/2] inside a
+       row, and a FULL-mode CSA2 layer's indexer key row is only
+       csa2_indexer_head_dim wide. csa2_on[] and csa2_mode[] are both
+       read above (RD(c->csa2_on, ...) and RD(c->csa2_mode, ...)), and
+       csa2_indexer_head_dim is read above this point too. */
+    for (i = 0; i < c->n_layers; i++) {
+        if (!c->csa2_on[i] || c->csa2_mode[i] != LZ_CSA2_FULL) continue;
+        if (c->rotary_dim > c->csa2_indexer_head_dim) {
+            qerr(errbuf, errlen, LZ_ERR_CFG_CSA2_IDX_ROTARY,
+                 i, c->rotary_dim, c->csa2_indexer_head_dim);
+            goto fail;
+        }
+    }
+
+    /* lz_csa2_last_writer_valid's own whole-config question. Its own
+       loop is `for (i = 0; i < c->n_layers; i++)` against `last_writer[
+       LZ_MAX_LAYERS]` and against csa2_on[]/csa2_mode[]/csa2_source[],
+       each LZ_MAX_LAYERS wide - safe now unconditionally, because
+       n_layers was already bounded to [1, LZ_MAX_LAYERS] the instant
+       its own RD() landed (this function's own comment there has the
+       full argument for WHY the check lives at that read site rather
+       than here or at the "derived quantities" block just above: with
+       the check anywhere else, this call, that block, and every
+       c->n_layers-indexed loop in between each depend on remembering
+       that ordering by hand, and relying on that is what went wrong
+       twice (report Sec2.3.1 mode-dispatch task's own C1, then, one
+       review round later, C-NEW-1/C-NEW-2).
+       This call's own remaining ordering requirement is unrelated to
+       n_layers: it must run only once every layer has already passed
+       the per-layer csa2_mode/csa2_source loop above (this function's
+       own documented precondition on lz_csa2_last_writer_valid) - a
+       per-layer-valid csa2_source can still name a layer whose own
+       contribution to their SHARED physical slot has already been
+       overwritten by an intervening REINDEX layer at the same root;
+       the per-layer check cannot see that, since it only ever looks at
+       one layer's own fields (model.c's own comment on that function
+       has the concrete example). */
+    if (ver >= 5 && !lz_csa2_last_writer_valid(c, NULL)) {
+        qerr(errbuf, errlen, LZ_ERR_BIN_FIELD_RANGE, "csa2_source");
+        goto fail;
+    }
+
+    /* Which generation this file is, decided from the layer_types[] words
+       the header carries: 0 (LZ_LT_LINEAR) is GDN's linear attention, 2
+       (LZ_LT_KDA) is KDA's, and 1 (gated full attention) belongs to both.
+       A header with neither 0 nor 2 is a pure full-attention checkpoint,
+       which is neither of the two generations this engine loads, and is
+       refused here rather than half-bound against the GDN spec whose
+       linear tensors it does not have.
+
+       This is the bin path's half of the allowlist lz_load_config applies
+       to safetensors (arch_probe there, from tensor names). The bin
+       header is the only identity a .bin checkpoint carries - the
+       config.json beside it is optional and read for engram, the
+       engram key table and ffn_activation alone - so without this the
+       allowlist does not reach a .bin model at all. */
+    {
+        int seen_gdn = 0, seen_kda = 0, unknown = 0;
+        for (i = 0; i < c->n_layers; i++) {
+            if (c->layer_types[i] == LZ_LT_KDA) seen_kda = 1;
+            else if (c->layer_types[i] == LZ_LT_LINEAR) seen_gdn = 1;
+            else if (c->layer_types[i] != LZ_LT_FULL) unknown = 1;
+        }
+        if (unknown || (!seen_gdn && !seen_kda)) {
+            qerr(errbuf, errlen, LZ_ERR_CFG_UNSUPPORTED_ARCH);
+            goto fail;
+        }
+    }
+
+    /* v4/v5 have no words for the v6 group, and they do not need any:
+       a file below v6 is the complete description of a model with the
+       identity schedule. Filling it in HERE (rather than in the v4
+       branch alone) keeps the two version branches from each owning a
+       copy of the same default, and keeps `ver < 6` the one predicate
+       both the reader and this fill test. app_loop[] and mtp_n_draft
+       stay at lz_open's memset zero - pass 0 for every layer, no draft
+       head - which is exactly what the v5 path read before these fields
+       existed, so a v5 load is bit-for-bit what it was. */
+    if (ver < 6) {
+        c->exec_len = c->n_layers;
+        for (i = 0; i < LZ_MAX_LAYERS; i++)
+            c->app_layer[i] = (i < c->n_layers) ? i : 0;
+    }
+
+    if (check_attn_gate(c, errbuf, errlen) != 0) goto fail;
+
     if (resolve_hadamard(c, errbuf, errlen) != 0) goto fail;
 
     /* Engram fields live only in config.json, not in the bin header.
@@ -2119,9 +4689,28 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
                     const LZJsonNode *root = lz_json_root(&jcfg);
                     const LZJsonNode *tc = NULL;
                     if (root && root->type == LZ_JSON_OBJ)
-                        tc = root;
+                        tc = config_text_node(&jcfg, root);
                     if (tc) {
-                        int eg_on = lz_json_get_int(&jcfg, tc, "engram", 0);
+                        int eg_on;
+                        /* The engram's static key table is not a bin
+                           header field, so only config.json can name
+                           it; it is resolved against the model
+                           directory when the engram is allocated. */
+                        {
+                            const char *ks = lz_json_get_str(&jcfg, tc,
+                                                             "engram_keys", "");
+                            if (ks && ks[0]) {
+                                if (strlen(ks) >= sizeof(c->engram_keys)) {
+                                    lz_json_free(&jcfg);
+                                    free(cfg_buf);
+                                    qerr(errbuf, errlen,
+                                         LZ_ERR_CFG_ENGRAM_KEYS, ks);
+                                    goto fail;
+                                }
+                                strcpy(c->engram_keys, ks);
+                            }
+                        }
+                        eg_on = lz_json_get_int(&jcfg, tc, "engram", 0);
                         if (eg_on) {
                             c->engram = eg_on;
                             c->engram_ngram    = lz_json_get_int(&jcfg, tc, "engram_ngram", 3);
@@ -2174,6 +4763,19 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
                             }
                         }
                     }
+                    /* ffn_activation: same sidecar-only field as engram
+                       above, not a header field. Unlike engram's fields
+                       this one has a real "invalid value" case
+                       (parse_ffn_activation refuses an unrecognized
+                       name), so a failure here must reach the caller
+                       instead of the engram block's "absent means off" -
+                       free what this scope allocated before goto fail,
+                       since the normal exit below is skipped. */
+                    if (parse_ffn_activation(&jcfg, tc, c, errbuf, errlen) != 0) {
+                        lz_json_free(&jcfg);
+                        free(cfg_buf);
+                        goto fail;
+                    }
                     lz_json_free(&jcfg);
                 }
                 free(cfg_buf);
@@ -2189,17 +4791,26 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
     if (setup_layers(m, errbuf, errlen) != 0) goto fail;
 
     if (alloc_mtp(m, errbuf, errlen) != 0) goto fail;
-    if (alloc_engram(m, errbuf, errlen) != 0) goto fail;
+    if (alloc_engram(m, dir, errbuf, errlen) != 0) goto fail;
 
     if (model_walk(m, visit_read_bin, NULL, errbuf, errlen) != 0) {
         goto fail;
     }
+    /* The bin path reads weights here, during open, so this is where the
+       shared k/v tensors exist to be handed out (lz_read_weights is an
+       early return for a bin-loaded model). */
+    apply_kv_share(m);
     for (i = 0; i < c->n_layers; i++) {
         int si;
         const LZLayer *L = &m->layers[i];
         for (si = 0; si < N_LAYER_SPECS; si++) {
             const LZLayerSpec *sp = &LAYER_SPECS[si];
             if (sp->layer_type >= 0 && sp->layer_type != L->type) continue;
+            /* The five shared tensors are one tensor each, counted on the
+               source layer: a target layer's fields are that same storage
+               after apply_kv_share. Same predicate the safetensors path's
+               visit_bind counts with (it sees one claimed tensor). */
+            if (kv_share_field(sp->field) && lz_kv_share_target(c, i)) continue;
             n_params += ((LZTensor *)((char *)L + sp->field))->n;
         }
         if (L->ffn_moe) {
@@ -2207,6 +4818,13 @@ static int lz_open_bin(LZModel *m, const char *dir, char *errbuf, int errlen) {
             for (e = 0; e < c->num_experts; e++)
                 n_params += L->moe_expert_w1[e].n + L->moe_expert_w2[e].n +
                             L->moe_expert_w3[e].n;
+        }
+        /* GR: the six weights are in the walk above, the two branch-norm
+           arrays are not (model_walk's GR block). */
+        if (L->gr_on) {
+            int b;
+            for (b = 0; b < c->gated_residual; b++)
+                n_params += L->gr_attn_norms[b].n + L->gr_mlp_norms[b].n;
         }
     }
     n_params += m->embed_tokens.n + m->final_norm.n;
@@ -2273,6 +4891,10 @@ int lz_read_weights(LZModel *m, char *errbuf, int errlen) {
     }
     if (m->weights_loaded) return 0;
     if (model_walk(m, visit_read, NULL, errbuf, errlen) != 0) return 1;
+    /* After the walk, not in lz_open's bind pass: visit_read lands the
+       source layer's LZTensors here, and a target layer's five fields are
+       copies of them (model.h's attn_kv_share comment). */
+    apply_kv_share(m);
     engram_norm_fixup(m);
     m->weights_loaded = 1;
     return 0;
@@ -2291,6 +4913,12 @@ void lz_free(LZModel *m) {
                 const LZLayerSpec *sp = &LAYER_SPECS[si];
                 LZTensor *field;
                 if (sp->layer_type >= 0 && sp->layer_type != L->type) continue;
+                /* S1 attn_kv_share: on a target layer these five fields are
+                   the source layer's storage (apply_kv_share copied the
+                   struct), so freeing them here would free it a second
+                   time. Freed once, by the source layer's own pass. */
+                if (kv_share_field(sp->field) &&
+                    lz_kv_share_target(&m->config, li)) continue;
                 field = (LZTensor *)((char *)L + sp->field);
                 lz_t_free(field);
             }
@@ -2319,6 +4947,23 @@ void lz_free(LZModel *m) {
             free(L->moe_expert_w1);
             free(L->moe_expert_w2);
             free(L->moe_expert_w3);
+            /* GR's branch-norm arrays, same "not in LAYER_SPECS" story as
+               the expert triplets above - and the six weight tensors
+               themselves ARE in the walk, so they are NOT freed here. See
+               model_walk's GR block. Both arrays are checked before
+               indexing for the reason that comment gives. */
+            if (L->gr_attn_norms) {
+                int b;
+                for (b = 0; b < m->config.gated_residual; b++)
+                    lz_t_free(&L->gr_attn_norms[b]);
+            }
+            if (L->gr_mlp_norms) {
+                int b;
+                for (b = 0; b < m->config.gated_residual; b++)
+                    lz_t_free(&L->gr_mlp_norms[b]);
+            }
+            free(L->gr_attn_norms);
+            free(L->gr_mlp_norms);
         }
         free(m->layers);
     }
@@ -2366,6 +5011,7 @@ void lz_free(LZModel *m) {
         free(eg->primes);
         free(eg->offsets);
         free(eg->bases);
+        free(eg->keys);
         free(eg);
         m->engram = NULL;
     }

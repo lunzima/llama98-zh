@@ -473,19 +473,21 @@ int lz_norm_can_fixed(int n) {
 
 /* ---- SubLN activation scale granularity ------------------------------ */
 
-/* How wide one INT8 activation scale is on the SubLN o_proj/down_proj
-   input. NOT a fixed-point tier: it changes no float/int decision and is
+/* How wide one INT8 activation scale is on the KDA/FFN SubLN path: the
+   q/k/v/g norm outputs, the raw block input the f_a/b projections share,
+   and the o_proj/down_proj inputs. NOT a fixed-point tier: it changes no
+   float/int decision and is
    deliberately absent from cli_main.c's --fixed axes[] table, which
    floats every fixed-point site. Putting it there would make `--fixed
    off` silently change the scale layout too.
 
    `tok` is BitNet v2's per-token absmax: one scale for the whole row,
-   replicated into every n/32 slot. That is where the SubLN path started,
-   because the reference quantizes per token EVERYWHERE - weights per
-   tensor, activations per token - so it had no finer grouping to give
-   up. This engine's native activation granularity is per 32 elements
-   (lz_act_gs), which the non-SubLN path uses, so `tok` hands back a
-   grouping the rest of the engine keeps.
+   replicated into every n/32 slot. It is exactly what the training
+   side's BitLinear rehearses (engine/bitlinear.py
+   activation_quant_absmax: per row, symmetric, toward zero), so it is
+   the right scale for weights trained through BitLinear. This engine's
+   native activation granularity is per 32 elements (lz_act_gs), which
+   the non-SubLN path uses everywhere.
 
    `group` keeps that per-32 grouping across the Hadamard. The transform
    does not require a row-wide scale: the fixed-point FWHT's own scale S
@@ -494,21 +496,36 @@ int lz_norm_can_fixed(int n) {
    quantizing them in 32-wide groups is exact - each group's dequant
    q[i]*s[g] reproduces fscr[i]*inv_S/sqrt(blk) as before.
 
-   A knob rather than a straight replacement: which one wins is measured,
-   not derived, and the two disagree on the wire. */
+   `auto` (the default) picks per model: tok when the projections were
+   trained through BitLinear - num_experts == 0, the ternary tower, where
+   KunMoeConfig ternarizes every SubLN projection - and group otherwise.
+   An MoE model's SubLN projections are plain linears with no rotation
+   (hadamard_o is 0 there), and their o_proj input carries outliers a
+   row-wide scale cannot resolve (max/rms 10-27 measured): on kunkun98's
+   shipping export, 511 teacher-forced tokens against the transformers
+   float reference, group halves the quantization cost of tok (mean KL
+   2.4e-2 vs 4.5e-2, NLL +0.018 vs +0.037 nat/token).
+
+   tok and group stay selectable: which one wins is measured per model,
+   and the two disagree on the wire. */
 #define LZ_SUBN_SCALE_TOK   0
 #define LZ_SUBN_SCALE_GROUP 1
+#define LZ_SUBN_SCALE_AUTO  2
 
-static int g_subn_scale = LZ_SUBN_SCALE_TOK;
+static int g_subn_scale = LZ_SUBN_SCALE_AUTO;
 
-int lz_subn_scale_group(void) { return g_subn_scale == LZ_SUBN_SCALE_GROUP; }
+int lz_subn_scale_group(int bitlinear) {
+    return g_subn_scale == LZ_SUBN_SCALE_GROUP ||
+           (g_subn_scale == LZ_SUBN_SCALE_AUTO && !bitlinear);
+}
 
 const char *lz_subn_scale_select(const char *name) {
     if (!name) return NULL;
-    if (strcmp(name, "tok") == 0) g_subn_scale = LZ_SUBN_SCALE_TOK;
+    if (strcmp(name, "auto") == 0) g_subn_scale = LZ_SUBN_SCALE_AUTO;
+    else if (strcmp(name, "tok") == 0) g_subn_scale = LZ_SUBN_SCALE_TOK;
     else if (strcmp(name, "group") == 0) g_subn_scale = LZ_SUBN_SCALE_GROUP;
     else return NULL;
-    return lz_subn_scale_group() ? "group" : "tok";
+    return name;
 }
 
 /* ---- SubLN Hadamard on/off ------------------------------------------- */
@@ -521,7 +538,7 @@ const char *lz_subn_scale_select(const char *name) {
    and a transform with no control arm cannot be measured or gated: the
    only way to ask "did the rotation happen" was to export a second
    model with the field zeroed. It also makes the f32-vs-quantized
-   agreement checkable without a threshold - see build/subn_scale_gate.sh.
+   agreement checkable without a threshold - see build/subn_gate.sh.
 
    Turning it off on weights TRAINED in the rotated basis produces a
    worse model, not a broken one; that is what a control arm is. */
@@ -539,23 +556,36 @@ const char *lz_hadamard_select(const char *name) {
 
 /* ---- epilogue tier --------------------------------------------------- */
 
-/* LZ_EPI_FIXED is the compile switch, the same shape LZ_GDN_FIXED and
-   LZ_CONV_FIXED have. It exists because --kernel ref structurally has
-   no fixed epilogue - lz_matmul_xq_nt routes LZ_KERNEL_REF to
+/* LZ_EPI_FIXED is the BUILD DEFAULT for this row and --epi overrides
+   it at run time, the pairing --fastfp has.
+
+   The row is separate from --fixed because --kernel ref structurally
+   has no fixed epilogue - lz_matmul_xq_nt routes LZ_KERNEL_REF to
    matmul_scalar_ref before any epilogue is selected - so ref and sse2
    differ on the shipping default for that one reason, and
-   build/kernel_isa_identity_gate.sh needs a build where they do not in
+   build/kernel_isa_identity_gate.sh needs a state where they do not in
    order to compare every OTHER fixed kernel against its C reference.
-   A per-site runtime flag would serve that; a whole-engine float switch
-   does not, because floating everything takes conv, norms, sigmoid,
-   recurrence and attention out of the comparison, which is the coverage
-   the row exists for. Hence the compile-time switch here. */
+   --fixed off does not serve that: it takes conv, norms, sigmoid,
+   recurrence and attention out of the comparison along with the
+   epilogue, which is the coverage the row exists for. So this switch
+   is narrower than --fixed and sits outside its group - `--epi off`
+   under `--fixed all` floats the epilogue alone.
+
+   The `&&` order is the group rule, not an optimization: the epilogue
+   feeds int16 planes that only the fixed path reads, so `--fixed off`
+   disables it whatever --epi says, and --epi can only narrow further. */
+int lz_epi_fixed_g = LZ_EPI_FIXED;
+
+const char *lz_epi_fixed_select(const char *name) {
+    if (!name) return NULL;
+    if (strcmp(name, "on") == 0) lz_epi_fixed_g = 1;
+    else if (strcmp(name, "off") == 0) lz_epi_fixed_g = 0;
+    else return NULL;
+    return lz_epi_fixed_g ? "on" : "off";
+}
+
 int lz_epi_mode(void) {
-#if LZ_EPI_FIXED
-    return !lz_float_ref_g;
-#else
-    return 0;
-#endif /* LZ_EPI_FIXED */
+    return lz_epi_fixed_g && !lz_float_ref_g;
 }
 
 /* ---- prefetch selector ----------------------------------------------- */
@@ -791,12 +821,20 @@ const char *lz_tier_report(void) {
     static char buf[512];
     const char *t = lz_float_ref_g ? "float" : "fixed";
     const char *d = lz_float_ref_g ? "" : " (default)";
+    const char *et, *ed;
     int p = 0;
+    /* The epilogue is the one row above that does NOT follow --fixed:
+       --epi narrows it alone, so it prints its own state and names the
+       switch that moved it. Printing `t` here would read "fixed" on a
+       run whose epilogue is floated, which is the state the identity
+       gate's ref-against-sse2 row is built on. */
+    et = lz_epi_mode() ? "fixed" : "float";
+    ed = lz_epi_mode() ? d : (lz_epi_fixed_g ? "" : " (--epi off)");
     p += sprintf(buf + p, "  recurrence   %s%s\n", t, d);
     p += sprintf(buf + p, "  conv1d       %s%s\n", t, d);
     p += sprintf(buf + p, "  attention    %s%s\n",
                  lz_float_ref_g ? "float" : "fixed+int", d);
-    p += sprintf(buf + p, "  epilogue     %s%s\n", t, d);
+    p += sprintf(buf + p, "  epilogue     %s%s\n", et, ed);
     p += sprintf(buf + p, "  sigmoid/silu %s%s\n", t, d);
     p += sprintf(buf + p, "  norms        %s%s\n", t, d);
     p += sprintf(buf + p, "  scalar       %s%s\n", t, d);

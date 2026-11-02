@@ -38,8 +38,8 @@
    gw is used, one xqs slot is still written per 32 elements, which is
    what the matmul reads.
 
-   q/s semantics match lz_quantize_q8 (round-half-even, clamp
-   [-127,127], all-zero group scale 1.0). */
+   q/s semantics match lz_quantize_q8 (RTZ, clamp [-127,127], all-zero
+   group scale 1.0). */
 static void subn_fwht_quant(const float *x, int n, int blk, int gw,
                             int8_t *q, float *s, int32_t *fscr) {
     union { float f; uint32_t u; } b;
@@ -100,9 +100,11 @@ static void subn_fwht_quant(const float *x, int n, int blk, int gw,
    what subn_fwht_quant / lz_quantize_q8_tok already do; gs is the
    site's lz_act_gs, which is 0 when the width is not a multiple of 32.
    Returning 0 for a gs this path cannot honour keeps the fallback in
-   ONE place instead of at each of the four call sites. */
-static int subn_scale_gs(int gs, int n) {
-    if (!lz_subn_scale_group()) return 0;
+   ONE place instead of at each call site. num_experts == 0 is the
+   ternary tower, whose SubLN projections are BitLinear-trained - what
+   --subn-scale auto keys on. */
+static int subn_scale_gs(const LZModelConfig *c, int gs, int n) {
+    if (!lz_subn_scale_group(c->num_experts == 0)) return 0;
     if (gs <= 0 || (gs & 31) != 0 || n < gs || (n % gs) != 0) return 0;
     return gs;
 }
@@ -194,29 +196,43 @@ static void kda_conv_proj(LZRunState *s, int *use_int, float *of, short *oi,
    never reads the float buffer - that is the invariant to check first
    if a caller here ever starts using s->xb2 for something else.
 
-   `use_int` is the caller's, evaluated once for all four: it depends on
-   hdim and gsa, not on which weight is being applied. */
+   `use_int` and `qgw` are the caller's, evaluated once for all four:
+   they depend on hdim and gsa, not on which weight is being applied.
+   qgw is the scale width subn_scale_gs resolved (--subn-scale), 0 for a
+   row-wide scale. */
 static void subn_norm_q8(LZRunState *s, const LZTensor *nrm,
-                         int hdim, int nt, int nsa, float eps, int use_int) {
+                         int hdim, int nt, int nsa, float eps, int use_int,
+                         int qgw) {
     int tk;
     if (use_int) {
         for (tk = 0; tk < nt; tk++) {
             float deq;
             lz_rmsnorm_int(s->subn_norm_int, s->xb + (size_t)tk * hdim,
                            lz_t_f32(nrm, s->wscr), hdim, eps, &deq);
-            lz_quantize_q8_tok_int(s->subn_norm_int, hdim, deq,
+            if (qgw > 0)
+                lz_quantize_q8_int(s->subn_norm_int, hdim, qgw, deq,
                                    s->xq + (size_t)tk * hdim,
                                    s->xqs + (size_t)tk * nsa);
+            else
+                lz_quantize_q8_tok_int(s->subn_norm_int, hdim, deq,
+                                       s->xq + (size_t)tk * hdim,
+                                       s->xqs + (size_t)tk * nsa);
         }
         return;
     }
     for (tk = 0; tk < nt; tk++)
         lz_rmsnorm(s->xb2 + (size_t)tk * hdim, s->xb + (size_t)tk * hdim,
                    lz_t_f32(nrm, s->wscr), hdim, eps);
-    for (tk = 0; tk < nt; tk++)
-        lz_quantize_q8_tok(s->xb2 + (size_t)tk * hdim, hdim,
+    for (tk = 0; tk < nt; tk++) {
+        if (qgw > 0)
+            lz_quantize_q8(s->xb2 + (size_t)tk * hdim, hdim, qgw,
                            s->xq + (size_t)tk * hdim,
                            s->xqs + (size_t)tk * nsa);
+        else
+            lz_quantize_q8_tok(s->xb2 + (size_t)tk * hdim, hdim,
+                               s->xq + (size_t)tk * hdim,
+                               s->xqs + (size_t)tk * nsa);
+    }
 }
 
 /* The same shape for the projections whose consumer is not the conv
@@ -240,12 +256,14 @@ void proj_i16(LZRunState *s, int may_int, int *wrote_int,
                          const float *x, const LZTensor *w,
                          int in_dim, int out_dim, int nt,
                          int target_e, int bound) {
+#if defined(LZ_TAP_OFF)
     if (may_int &&
         lz_matmul_xq_nt_i16(oi, s->xq, s->xqs, w, in_dim, out_dim, nt,
                             target_e, bound)) {
         *wrote_int = 1;
         return;
     }
+#endif /* LZ_TAP_OFF */
     *wrote_int = 0;
     lz_matmul_xq_nt(of, x, s->xq, s->xqs, w, in_dim, out_dim, nt);
 }
@@ -357,32 +375,31 @@ static void kda_gate_build_int(LZRunState *s, const LZModelConfig *c,
 }
 
 static void kda_decay_gate_build(LZRunState *s, const LZModelConfig *c,
-                                 const float *a_log_arr, const float *dt_bias_arr,
+                                 const float *dt_bias_arr,
                                  int li, int nv, int kd, int nt, int gate_int) {
-    int h;
-    {
-        float *decay_base = s->wscr;
-        for (h = 0; h < nv; h++) decay_base[h] = lz_exp(a_log_arr[h]);
-        /* The int-pipeline form, now kda_gate_build_int (int-pipeline
-           milestone 5). With kda_gate arriving as int16 at
-           2^-LZ_KGATE_ES and dt_bias pre-quantized into that same domain
-           (kda_gate_build), `pre` is an INTEGER add, and the sigmoid is
-           reached through sigmoid_q15_t's folded coordinate the way the
-           fixed conv reaches it:
-             t = pre_i * (decay_base[h] * 2^(4-ES)) + 192
-           reproduces (decay_base[h]*pre - LZ_SIG_LO) * LZ_SIG_STEP with
-           one multiply and one add, because both LZ_SIG_STEP and the
-           offset are exact powers of two applied to an already-computed
-           value (lz_sig_q15_t_offset's own argument). The exit folds the
-           lower bound and the Q15 descale into one constant.
-           Per channel: 3 mul, 1 add, 2 cvt, against the float form's
-           add + multiply here and lz_sigmoid's 3 mul, 1 add, 1 cvt plus
-           the epilogue's convert and multiply. */
-        if (gate_int) {
-            kda_gate_build_int(s, c, decay_base, li, nv, kd, nt);
-        } else {
-            kda_gate_build_float(s, c, decay_base, dt_bias_arr, nv, kd, nt);
-        }
+    /* decay_base = exp(A_log) came in through s->kda_decay, built by the
+       caller while it still held A_log - see the field comment in
+       forward.h for why the two tensors cannot both borrow s->wscr. */
+    const float *decay_base = s->kda_decay;
+    /* The int-pipeline form, now kda_gate_build_int (int-pipeline
+       milestone 5). With kda_gate arriving as int16 at
+       2^-LZ_KGATE_ES and dt_bias pre-quantized into that same domain
+       (kda_gate_build), `pre` is an INTEGER add, and the sigmoid is
+       reached through sigmoid_q15_t's folded coordinate the way the
+       fixed conv reaches it:
+         t = pre_i * (decay_base[h] * 2^(4-ES)) + 192
+       reproduces (decay_base[h]*pre - LZ_SIG_LO) * LZ_SIG_STEP with
+       one multiply and one add, because both LZ_SIG_STEP and the
+       offset are exact powers of two applied to an already-computed
+       value (lz_sig_q15_t_offset's own argument). The exit folds the
+       lower bound and the Q15 descale into one constant.
+       Per channel: 3 mul, 1 add, 2 cvt, against the float form's
+       add + multiply here and lz_sigmoid's 3 mul, 1 add, 1 cvt plus
+       the epilogue's convert and multiply. */
+    if (gate_int) {
+        kda_gate_build_int(s, c, decay_base, li, nv, kd, nt);
+    } else {
+        kda_gate_build_float(s, c, decay_base, dt_bias_arr, nv, kd, nt);
     }
 }
 
@@ -402,11 +419,19 @@ void forward_kda(const LZModel *m, LZRunState *s,
        and ARM reloads `ldr [c,#offset]` at each call site unless the
        value is named once here and carried in a register. */
     float rms_eps = c->rms_norm_eps;
-    int li = s->cache_idx[layer];
+    /* TWO INDICES, and they stop coinciding on a loop tower's second
+       pass: `li` addresses the APPLICATION's recurrent state (the second
+       pass has its own, spec 3.2), `wli` addresses the WEIGHT-derived
+       per-layer caches (conv taps, dt_bias, decay tables) that every
+       application of the same physical layer shares. Passing one for the
+       other reads a neighbouring layer's quantized weights and looks
+       like a numerical difference, not an indexing one. */
+    int li = s->app_slot[layer];
+    int wli = s->cache_idx[layer];
     int ring_depth = s->ssm_ring_depth;
-    size_t q8_slot_stride = (size_t)c->n_linear_layers * nv * kd * vd;
+    size_t q8_slot_stride = (size_t)s->n_linear_apps * nv * kd * vd;
     size_t s_slot_stride  = q8_slot_stride / 32;
-    size_t conv_slot_stride = (size_t)c->n_linear_layers *
+    size_t conv_slot_stride = (size_t)s->n_linear_apps *
                               c->lin_conv_dim * (c->conv_kernel - 1);
     size_t li_off_q8 = (size_t)li * nv * kd * vd;
     /* Same per-layer conv_state allocation GDN uses (sized by
@@ -430,7 +455,7 @@ void forward_kda(const LZModel *m, LZRunState *s,
        lin_key_dim or lin_value_dim channels wide, conv_kernel floats per
        channel. NOT hist-scaled like q_off/k_off/v_off above: these index
        taps, not rolling history. */
-    size_t li_off_w = (size_t)li * c->lin_conv_dim * c->conv_kernel;
+    size_t li_off_w = (size_t)wli * c->lin_conv_dim * c->conv_kernel;
     size_t qw_off = 0;
     size_t kw_off = (size_t)c->lin_key_dim * c->conv_kernel;
     size_t vw_off = (size_t)2 * c->lin_key_dim * c->conv_kernel;
@@ -475,10 +500,10 @@ void forward_kda(const LZModel *m, LZRunState *s,
        objects. */
     int bvec_int = 0, lat_int = 0, gate_int = 0;
     int bvec_may = 0, lat_may = 0;
-    /* Assigned far below, where s->wscr is known free. Declared here
-       because C89 wants the declaration ahead of the statements between,
-       and dt_bias_arr outlives the block that would otherwise have held
-       both. */
+    /* Both borrow s->wscr, far below. They are never live at the same
+       time; that call site's own comment has the ordering argument.
+       Declared here because C89 wants the declaration ahead of the
+       statements between. */
     const float *a_log_arr;
     const float *dt_bias_arr;
 #if LZ_BVEC_I16
@@ -512,10 +537,18 @@ void forward_kda(const LZModel *m, LZRunState *s,
        carry an explanation that should not be separated from them. */
 #if LZ_CONV_FIXED
     if (s->conv_fixed && s->kda_q_i16 && s->kda_k_i16 && s->kda_v_i16) {
+#if defined(LZ_TAP_OFF)
         int okq = lz_matmul_xq_i16_ok(&L->kda_q_proj, hdim, nt);
         int okk = lz_matmul_xq_i16_ok(&L->kda_k_proj, hdim, nt);
         int okv = lz_matmul_xq_i16_ok(&L->kda_v_proj, hdim, nt);
         conv_int = okq && okk && okv;
+#else
+        /* The int exit stops writing s->kda_q/k/v, and a tap pointing at
+           those buffers would then read their PREVIOUS contents - a
+           plausible-looking wrong number, not an obvious zero (see
+           forward.h). A tap build keeps the float path the taps read. */
+        conv_int = 0;
+#endif /* LZ_TAP_OFF */
     }
 #if LZ_CONVO_I16 && LZ_CONV_SIG_I
     convo_i16 = s->conv_fixed && s->kda_qc_i16 && s->kda_kc_i16
@@ -538,29 +571,40 @@ void forward_kda(const LZModel *m, LZRunState *s,
            gsa, and all four share both. */
         int nint = lz_norm_int() && lz_norm_can_fixed(hdim) &&
                    gsa > 0 && nsa * gsa == hdim;
+        int qgw = subn_scale_gs(c, gsa, hdim);
 
-        subn_norm_q8(s, &L->kda_q_norm, hdim, nt, nsa, rms_eps, nint);
+        subn_norm_q8(s, &L->kda_q_norm, hdim, nt, nsa, rms_eps, nint, qgw);
         kda_conv_proj(s, &conv_int, s->kda_q, s->kda_q_i16, s->xb2,
                       &L->kda_q_proj, hdim, kdim, nt);
 
-        subn_norm_q8(s, &L->kda_k_norm, hdim, nt, nsa, rms_eps, nint);
+        subn_norm_q8(s, &L->kda_k_norm, hdim, nt, nsa, rms_eps, nint, qgw);
         kda_conv_proj(s, &conv_int, s->kda_k, s->kda_k_i16, s->xb2,
                       &L->kda_k_proj, hdim, kdim, nt);
 
-        subn_norm_q8(s, &L->kda_v_norm, hdim, nt, nsa, rms_eps, nint);
+        subn_norm_q8(s, &L->kda_v_norm, hdim, nt, nsa, rms_eps, nint, qgw);
         kda_conv_proj(s, &conv_int, s->kda_v, s->kda_v_i16, s->xb2,
                       &L->kda_v_proj, hdim, vdim, nt);
 
-        subn_norm_q8(s, &L->kda_g_norm, hdim, nt, nsa, rms_eps, nint);
+        subn_norm_q8(s, &L->kda_g_norm, hdim, nt, nsa, rms_eps, nint, qgw);
         lz_matmul_xq_nt(s->zbuf, s->xb2, s->xq, s->xqs, &L->kda_g_proj,
                         hdim, vdim, nt);
 
-        /* f_a/b_proj: no SubLN norm field - quantize raw s->xb (the
-           shared-activation-quantization trick still applies to these
-           two). */
-        for (tk = 0; tk < nt; tk++)
-            lz_quantize_q8_tok(s->xb + (size_t)tk * hdim, hdim,
-                               s->xq + (size_t)tk * hdim, s->xqs + (size_t)tk * nsa);
+        /* f_a/b_proj: no SubLN norm field - quantize raw s->xb once for
+           both (the shared-activation-quantization trick), at the same
+           scale width as every other SubLN-path input (--subn-scale): a
+           row-wide scale on an MoE model, whose block input carries
+           outliers, is what put kfa at 1-cos 6.4e-3 on kunkun98 against
+           ~1e-3 for a per-32 scale. */
+        for (tk = 0; tk < nt; tk++) {
+            if (qgw > 0)
+                lz_quantize_q8(s->xb + (size_t)tk * hdim, hdim, qgw,
+                               s->xq + (size_t)tk * hdim,
+                               s->xqs + (size_t)tk * nsa);
+            else
+                lz_quantize_q8_tok(s->xb + (size_t)tk * hdim, hdim,
+                                   s->xq + (size_t)tk * hdim,
+                                   s->xqs + (size_t)tk * nsa);
+        }
         proj_i16(s, lat_may, &lat_int, s->kda_gate_lat, s->kda_lat_i16,
                      s->xb, &L->kda_f_a_proj, hdim, gate_rank, nt,
                      LZ_KLAT_ES, 32767);
@@ -612,7 +656,7 @@ void forward_kda(const LZModel *m, LZRunState *s,
        different things (elements vs channels) and mixing them silently
        reads a neighbouring channel's taps. */
     if (s->conv_fixed) {
-        size_t cb = (size_t)li * c->lin_conv_dim;
+        size_t cb = (size_t)wli * c->lin_conv_dim;
         size_t q_ch = 0, k_ch = (size_t)c->lin_key_dim;
         size_t v_ch = (size_t)2 * c->lin_key_dim;
         cp_q.mw = s->conv_mw + (cb + q_ch) * c->conv_kernel;
@@ -790,12 +834,20 @@ void forward_kda(const LZModel *m, LZRunState *s,
     /* decay_base[h] = exp(A_log[h]) depends on the head ONLY, not on the
        token. Computed once per head here, then reused across nt tokens.
        A_log/dt_bias are per-head/per-channel weights, so their
-       dequantization is hoisted out of the tk loop too. decay_base goes
-       into s->wscr: A_log/dt_bias are F32 (lz_t_f32 returns t->f, no
-       write to wscr), so wscr is free here, and it is sized >= nvk >= nv. */
-    a_log_arr   = lz_t_f32(&L->kda_A_log, s->wscr);
+       dequantization is hoisted out of the tk loop too.
+
+       ONE BORROW AT A TIME, which is what the order below buys.
+       lz_t_f32 returns t->f for LZ_FMT_F32 and widens every other format
+       into the scratch it is handed, so a second materialization into
+       s->wscr while the first is still live REPLACES it rather than
+       joining it. No shipped checkpoint carries a single F32 tensor, so
+       the scratch path is the one that always runs. Hence decay_base
+       lives in s->kda_decay (forward.h's field comment) and A_log is out
+       of s->wscr before dt_bias goes in. */
+    a_log_arr = lz_t_f32(&L->kda_A_log, s->wscr);
+    for (h = 0; h < nv; h++) s->kda_decay[h] = lz_exp(a_log_arr[h]);
     dt_bias_arr = lz_t_f32(&L->kda_dt_bias, s->wscr);
-    kda_decay_gate_build(s, c, a_log_arr, dt_bias_arr, li, nv, kd, nt, gate_int);
+    kda_decay_gate_build(s, c, dt_bias_arr, wli, nv, kd, nt, gate_int);
     LZ_TAP("kgate", layer, s->kda_gate, nvk);
 
     /* Recurrence, head-major like forward_ssm's - same L1-residency
@@ -817,6 +869,10 @@ void forward_kda(const LZModel *m, LZRunState *s,
             const int8_t *sq2_in  = s->ssm_state_q8_lo + (size_t)slot_in  * q8_slot_stride + h_off_q8;
             int8_t       *sq2_out = s->ssm_state_q8_lo + (size_t)slot_out * q8_slot_stride + h_off_q8;
 #endif /* LZ_GDN_STATE_2PLANE */
+#if LZ_GDN_STATE_F32
+            const float *sf_in  = s->ssm_state_f32 + (size_t)slot_in  * q8_slot_stride + h_off_q8;
+            float       *sf_out = s->ssm_state_f32 + (size_t)slot_out * q8_slot_stride + h_off_q8;
+#endif /* LZ_GDN_STATE_F32 */
             const float *ss_in  = s->ssm_state_s + (size_t)slot_in  * s_slot_stride + h_off_s;
             float       *ss_out = s->ssm_state_s + (size_t)slot_out * s_slot_stride + h_off_s;
             const float *qp = s->kda_qc + (size_t)tk * kdim + (size_t)kh * kd;
@@ -858,6 +914,9 @@ void forward_kda(const LZModel *m, LZRunState *s,
 #if LZ_GDN_STATE_2PLANE
                         sq2_in, sq2_out,
 #endif /* LZ_GDN_STATE_2PLANE */
+#if LZ_GDN_STATE_F32
+                        sf_in, sf_out,
+#endif /* LZ_GDN_STATE_F32 */
                         ss_in, ss_out, s->qn, s->kn,
                         (const float *)0,
                         s->kda_vc_i16 + (size_t)tk * vdim + (size_t)h * vd,
@@ -867,6 +926,9 @@ void forward_kda(const LZModel *m, LZRunState *s,
 #if LZ_GDN_STATE_2PLANE
                         sq2_in, sq2_out,
 #endif /* LZ_GDN_STATE_2PLANE */
+#if LZ_GDN_STATE_F32
+                        sf_in, sf_out,
+#endif /* LZ_GDN_STATE_F32 */
                         ss_in, ss_out, s->qn, s->kn, vp,
                         (const short *)0, 0.0f, gv, 1.0f, beta, kd, vd);
             LZ_PROF_END(_tr, LZ_PROF_REC);
@@ -912,7 +974,7 @@ void forward_kda(const LZModel *m, LZRunState *s,
                (model.c resolve_hadamard). 0 = no Hadamard. */
             {
                 int oblk = lz_hadamard_on() ? c->hadamard_o : 0;
-                int qgw = subn_scale_gs(gso, vdim);
+                int qgw = subn_scale_gs(c, gso, vdim);
                 if (oblk > 1) {
                     for (tk = 0; tk < nt; tk++)
                         subn_fwht_quant(s->ssm_out + (size_t)tk * vdim, vdim,
@@ -1002,6 +1064,28 @@ void forward_kda(const LZModel *m, LZRunState *s,
    passes c->intermediate_size, the MTP call site passes
    c->mtp_intermediate_size - s->hb/s->hb2/s->xq/s->xqs are sized for
    the larger of the two by lz_state_alloc (see its own comment). */
+void lz_ffn_gate_up(float *gate, const float *up, int n,
+                    const LZModelConfig *c) {
+    int i;
+    switch (c->ffn_activation) {
+    case LZ_FFN_ACT_SITU:
+        for (i = 0; i < n; i++)
+            gate[i] = lz_situ_glu(gate[i], up[i], c->activation_situ_beta,
+                                  c->activation_situ_linear_beta,
+                                  c->ffn_has_situ_linear_beta);
+        break;
+    case LZ_FFN_ACT_GPTOSS_CLAMP:
+        for (i = 0; i < n; i++)
+            gate[i] = lz_swiglu_clamp(gate[i], up[i], c->swiglu_clamp_limit,
+                                      c->swiglu_clamp_alpha);
+        break;
+    default:
+        for (i = 0; i < n; i++)
+            gate[i] = lz_silu(gate[i]) * up[i];
+        break;
+    }
+}
+
 void dense_ffn_step(const LZModel *m, LZRunState *s,
                            const LZLayer *L, int layer, int nt, int idim) {
     const LZModelConfig *c = &m->config;
@@ -1011,7 +1095,7 @@ void dense_ffn_step(const LZModel *m, LZRunState *s,
     int nsg = scale_groups(dim, gsg);
     int gsd = lz_act_gs(&L->down_proj, idim);
     int nsd = scale_groups(idim, gsd);
-    int i, tk;
+    int tk;
     LZ_PROF_DECL(_ta);
     (void)layer;   /* only used inside LZ_TAP, which is a no-op in a normal build */
 
@@ -1097,10 +1181,14 @@ void dense_ffn_step(const LZModel *m, LZRunState *s,
            error with a second plane (LZ_GDN_STATE_2PLANE, LZ_KV_2PLANE),
            and lz_exp is itself a table-plus-polynomial hack rather than
            libm. The reason this one stays scalar is its SIZE, not its
-           shape. */
+           shape.
+
+           lz_ffn_gate_up dispatches on c->ffn_activation instead of the
+           lz_silu(..)*up line being inlined here directly - every model
+           this engine has ever loaded is LZ_FFN_ACT_NONE, whose arm in
+           that dispatcher is exactly that expression and nothing else. */
         LZ_PROF_BEG(_ta);
-        for (i = 0; i < nt * idim; i++)
-            s->hb[i] = lz_silu(s->hb[i]) * s->hb2[i];
+        lz_ffn_gate_up(s->hb, s->hb2, nt * idim, c);
         LZ_PROF_END(_ta, LZ_PROF_ACT);
     }
     LZ_TAP("fh", layer, s->hb, idim);
@@ -1127,7 +1215,7 @@ void dense_ffn_step(const LZModel *m, LZRunState *s,
                                            s->xqs + (size_t)tk * nsd);
                 }
             } else {
-                int qgw = subn_scale_gs(gsd, idim);
+                int qgw = subn_scale_gs(c, gsd, idim);
                 for (tk = 0; tk < nt; tk++)
                     lz_rmsnorm(s->hb2 + (size_t)tk * idim, s->hb + (size_t)tk * idim,
                                lz_t_f32(&L->down_norm, s->wscr), idim, rms_eps);

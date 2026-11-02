@@ -64,12 +64,14 @@ endif
 # anywhere, so one arithmetic serves all targets and an ARM run stays
 # byte-comparable with an x86 one. The compiler's own __bf16 appears
 # only in a throwaway probe, as a witness and never a component.
-ENG := err compat lfn json safetensors model ops ops_kernel ops_rope ops_moe ops_epi ops_quant ops_sched ops_matmul ops_t2_arm ops_arm ops_t2_scalar ops_norm ops_gdn ops_conv1d fwht forward forward_attn forward_moe forward_ssm forward_kda forward_engram sampler generate lz_mathf lz_bf16 lz4d \
+ENG := err compat lfn json safetensors model ops ops_kernel ops_rope ops_moe ops_epi ops_quant ops_sched ops_matmul ops_t2_arm ops_arm ops_t2_scalar ops_norm ops_gdn ops_conv1d fwht forward forward_attn forward_moe forward_ssm forward_kda forward_engram forward_csa2 forward_mtp forward_rope forward_ckpt forward_state engram_keys sampler generate lz_mathf lz_bf16 lz4d \
        tokenizer unicode chat gbk cpucheck
 SRV := net http openai
 GUI := main layout localized_strings worker modelload session compat40 \
-       settingsdlg aboutdlg splash toolbar inifile caption captionwnd
-COM := stream settings command savechat mru chatfile session beep
+       settingsdlg aboutdlg splash toolbar inifile caption captionwnd \
+       midiplay musicdlg
+COM := stream settings command savechat mru chatfile session beep music smf \
+       chime wave ksb kac_dec
 # The subset the COMMAND LINE needs - the gui links all of $(COM), the
 # CLI and DOS builds only these. ONE list: each Watcom recipe names
 # these files twice (a compile line and a link line) and the gcc recipe
@@ -221,7 +223,8 @@ ENG_AVX2_GCC_GUI_OBJS    := $(addprefix build/gui/,$(addsuffix .o,$(ENG_AVX2)))
 # (jparse_*), NOT hot, and is deliberately cold.
 HOT_TU := ops ops_epi ops_matmul ops_quant ops_gdn ops_norm ops_sched \
           ops_conv1d ops_moe ops_rope forward forward_attn forward_kda \
-          forward_moe forward_ssm forward_engram sampler generate
+          forward_moe forward_ssm forward_engram forward_csa2 forward_mtp \
+          forward_rope forward_ckpt forward_state sampler generate
 HOT_COM := stream
 
 HOT_ENG_SRCS := $(addprefix src/,$(addsuffix .c,$(HOT_TU)))
@@ -344,6 +347,20 @@ llama98: $(NATIVE_GATE) $(COLD_ENG_SRCS) $(COLD_CLI_COM_SRCS) src/cli_attr.c src
 kunkun98-serve: $(NATIVE_GATE) $(COLD_ENG_SRCS) $(SRV_SRCS) src/server_main.c $(HOT_GCC_NATIVE_ENG_OBJS) $(ENG_MMX_GCC_NATIVE_OBJS) $(ENG_AVX2_GCC_NATIVE_OBJS)
 	$(CC) $(X86_64_CFLAGS) -o $@ $(COLD_ENG_SRCS) $(SRV_SRCS) src/server_main.c $(HOT_GCC_NATIVE_ENG_OBJS) $(ENG_MMX_GCC_NATIVE_OBJS) $(ENG_AVX2_GCC_NATIVE_OBJS) -lm $(HTTP_LIBS)
 
+# The console wavetable player: the same reader and sampler the window plays
+# through, with waveOut for a clock. It carries no part of the engine and
+# none of the session core that $(COM) also carries - a player that needed
+# the model linked in would be the wrong shape for one that reads a bank.
+#
+# Only these four. compat40.c comes along because the PCM device is resolved
+# there, next to the only other winmm entry points, and because a file that
+# may carry Win32 objects is where they belong.
+PLAY_COM := smf wave ksb kac_dec
+PLAY_COM_SRCS := $(addprefix common/,$(addsuffix .c,$(PLAY_COM)))
+
+kunkun98-play: $(NATIVE_GATE) $(PLAY_COM_SRCS) gui/compat40.c src/waveplay_main.c
+	$(CC) $(X86_64_CFLAGS) -Icommon -Igui -o $@ $(PLAY_COM_SRCS) gui/compat40.c src/waveplay_main.c -luser32 -lcomdlg32 -lgdi32 -lm
+
 # Resources (icon / splash / about logo / lamps). windres for gcc; the
 # Watcom build runs wrc instead (see watcom-gui). Both run from the repo
 # root, so gui/kunkun98.rc's asset paths are repo-relative.
@@ -358,6 +375,42 @@ $(GUI_RES): gui/kunkun98.rc gui/resource.h gui/kunkun98.manifest \
 
 kunkun98-gui: $(GUI_SRCS) $(COLD_COM_SRCS) $(COLD_ENG_SRCS) gui/layout.h gui/localized_strings.h $(GUI_RES) $(HOT_GCC_GUI_OBJS) $(ENG_MMX_GCC_GUI_OBJS) $(ENG_AVX2_GCC_GUI_OBJS)
 	$(CC) $(X86_64_CFLAGS) -Igui -Icommon -mwindows -o $@ $(GUI_SRCS) $(COLD_COM_SRCS) $(COLD_ENG_SRCS) $(GUI_RES) $(HOT_GCC_GUI_OBJS) $(ENG_MMX_GCC_GUI_OBJS) $(ENG_AVX2_GCC_GUI_OBJS) \
+	    -lgdi32 -luser32 -lcomdlg32 -lm -Wl,--stack=524288
+
+# The same front end with the application manifest stripped from its
+# resources. Not shipped, and not a review aid: it is the binary
+# build/gui_noman_selftest_gate.sh runs the selftest against. The
+# manifest is what asks XP+ to theme the common controls, so the unthemed
+# comctl32 v5 path is the one Windows 98 itself gets - and a
+# status-bar-height bug sat red in that path while the manifest build
+# stayed green the whole time.
+#
+# THE .rc IS DERIVED, NOT COPIED. A second hand-kept resource list goes
+# stale the next time a resource is added to the shipped one, and the
+# failure is invisible: the "noman" binary would quietly be the manifest
+# one. So the strip is a sed at build time and the recipe CHECKS that it
+# worked - if gui/kunkun98.rc is ever reformatted so the pattern stops
+# matching, this fails instead of building the wrong binary.
+# The derived .rc is written BESIDE the shipped one, not under build/:
+# gui/kunkun98.rc resolves `#include "resource.h"` and its asset paths
+# relative to its own directory, so a copy in build/gui/ fails to
+# preprocess (measured - "resource.h: No such file or directory") and a
+# copy that added -Igui would resolve the includes but not necessarily
+# the assets. Same directory means every relative path behaves exactly
+# as it does for the shipped file.
+GUI_NOMAN_RC  := gui/kunkun98-noman.rc
+GUI_NOMAN_RES := build/gui/kunkun98-noman.res.o
+$(GUI_NOMAN_RES): gui/kunkun98.rc gui/resource.h gui/kunkun98.manifest
+	@mkdir -p build/gui
+	@sed '/^1 24 "gui\/kunkun98\.manifest"$$/d' gui/kunkun98.rc > $(GUI_NOMAN_RC)
+	@if grep -q 'kunkun98\.manifest' $(GUI_NOMAN_RC); then \
+	    echo "$@: the manifest is still in $(GUI_NOMAN_RC) - the strip"; \
+	    echo "  pattern no longer matches gui/kunkun98.rc, so this would"; \
+	    echo "  build the MANIFEST binary and call it noman."; exit 1; fi
+	windres -I. $(GUI_NOMAN_RC) -O coff -o $@
+
+kunkun98-noman: $(GUI_SRCS) $(COLD_COM_SRCS) $(COLD_ENG_SRCS) gui/layout.h gui/localized_strings.h $(GUI_NOMAN_RES) $(HOT_GCC_GUI_OBJS) $(ENG_MMX_GCC_GUI_OBJS) $(ENG_AVX2_GCC_GUI_OBJS)
+	$(CC) $(X86_64_CFLAGS) -Igui -Icommon -mwindows -o $@ $(GUI_SRCS) $(COLD_COM_SRCS) $(COLD_ENG_SRCS) $(GUI_NOMAN_RES) $(HOT_GCC_GUI_OBJS) $(ENG_MMX_GCC_GUI_OBJS) $(ENG_AVX2_GCC_GUI_OBJS) \
 	    -lgdi32 -luser32 -lcomdlg32 -lm -Wl,--stack=524288
 
 # ----------------------------------------------------------------------

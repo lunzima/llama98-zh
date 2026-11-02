@@ -496,7 +496,7 @@ void lz_q8round_2p_group_sse(const float *grp, int8_t *ho, int8_t *lw,
         lz_q8round32_sse_asm(grp + k, ho + k, pinv);
     _mm_empty();
     for (k = 0; k < gs; k++)
-        res[k] = grp[k] * (*pinv) - (float)ho[k];
+        ho[k] = (int8_t)q8_round_rne(grp[k] * (*pinv), ho[k], &res[k]);
     for (k = 0; k + 31 < gs; k += 32)
         lz_q8round32_sse_asm(res + k, lw + k, plo_mul);
     _mm_empty();
@@ -663,7 +663,7 @@ void lz_fwht_stage_f32_sse(float *y, int n, int len) {
    additions to the FLOAT side, not the MMX register file that this
    file's other kernels share with x87. The row/x LOADS are movaps (both
    are 16-byte aligned - row is field->f from model.c's aligned_malloc,
-   x is the forward activation from forward.c's xcalloc); the acc8 STORE
+   x is the forward activation from forward_state.c's xcalloc); the acc8 STORE
    stays movups because acc8 is the caller's stack array with no
    16-byte alignment promise. */
 extern int lz_matmul_row_sse_asm(const float *row, const float *x,

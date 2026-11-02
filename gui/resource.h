@@ -104,4 +104,10 @@
 #define IDM_EDIT_LAST  2025
 #define IDM_DEL_LAST   2026
 
+/* The sound window. Under Settings beside the inference settings, and
+ * with no accelerator: gui/kunkun98.rc's own rule is that an
+ * accelerator with no menu text is a secret, and this one has nothing
+ * a user would reach for mid-reply. */
+#define IDM_SOUND      2027
+
 #endif

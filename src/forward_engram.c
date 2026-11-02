@@ -16,18 +16,17 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Watcom's C90 math.h has no sqrtf/fabsf: route to the double forms
-   there. gcc keeps the float forms so the ARM build pulls no libgcc
-   double soft-float. Same shape as ops_quant.c's LZ_SQRTF. */
+/* Watcom's C90 math.h has no sqrtf: route to the double form there.
+   gcc keeps the float form so the ARM build pulls no libgcc double
+   soft-float. Same shape as ops_quant.c's LZ_SQRTF. */
 #if defined(__WATCOMC__)
 #define LZ_SQRTF(x) ((float)sqrt((double)(x)))
-#define LZ_FABSF(x) ((float)fabs((double)(x)))
 #else
 #define LZ_SQRTF(x) sqrtf(x)
-#define LZ_FABSF(x) fabsf(x)
 #endif /* __WATCOMC__ */
 
 #include "forward.h"
+#include "engram_keys.h"
 
 /* Rolling polynomial hash: h = (h * base + token) & MASK64.
    Per-order bases match kunmoe_modeling.py:
@@ -87,28 +86,105 @@ static void engram_hash(const int *tokens, int nt,
     }
 }
 
+/* THE STATIC KEY TABLE's index (spec 1.6): the window is the 2-gram
+   (previous token, this token), and the row is the key's position in the
+   sorted table or -1. A window that reaches before the sequence start
+   has no previous token - it is a miss, not a padded (0, x) lookup:
+   training splits at document boundaries and contributes nothing there,
+   and looking up the padding token's id would otherwise hit a real row
+   whenever (0, x) happens to be a selected 2-gram. */
+static void engram_key_index(const LZEngram *eg, const int *tokens, int nt,
+                             const int *hist, int hist_n,
+                             int *out /* [nt] */) {
+    int t;
+    for (t = 0; t < nt; t++) {
+        int prev, cur;
+        lz_i64 code;
+        if (t > 0) prev = tokens[t - 1];
+        else if (hist_n > 0) prev = hist[hist_n - 1];
+        else { out[t] = -1; continue; }
+        cur = tokens[t];
+        code = ((lz_i64)prev << eg->key_shift) | (lz_i64)cur;
+        out[t] = lz_keys_find(eg->keys, eg->n_keys, code);
+    }
+}
+
 /* DEBUG: dump engine-side engram intermediates for parity check.
-   Prints only for the first token (pos0=0, nt=1) to keep output small.
-   Set ENGRAM_DUMP=1 in environment to enable. */
+   Written to the BINARY file named by ENGRAM_DUMP; nothing is written
+   when it is unset or empty. Only the first token (pos0=0, nt=1) is
+   dumped, to keep the file small.
+
+   A file rather than stderr, for two reasons. The engine has no
+   console: every message it has for a user goes through a caller's
+   errbuf. And this runs inside lz_fpu_float_begin/lz_fpu_float_end,
+   where the C runtime's %f would format a double already rounded to 24
+   bits - a wrong number rather than a short one. Raw bit patterns
+   carry out exactly what the engine produced.
+
+   Record: tag length (int), tag bytes (no NUL), element count (int),
+   then that many elements - float for engram_dump, int for
+   engram_dump_idx.
+
+   ABSENT FROM THE SHIPPING BUILD. The whole block is behind
+   LZ_ENGRAM_DEBUG, and without it the calls below expand to nothing,
+   so no file is opened and no dump code survives into a normal build.
+   A diagnostic that is merely switched off at runtime is still a
+   diagnostic that ships. */
+#ifdef LZ_ENGRAM_DEBUG
+static FILE *engram_dump_file(void) {
+    static FILE *fp;
+    static int tried;
+    if (!tried) {
+        const char *p = getenv("ENGRAM_DUMP");
+        tried = 1;
+        if (p && p[0]) fp = fopen(p, "wb");
+    }
+    return fp;
+}
+
 static int engram_dump_enabled(void) {
-    const char *v = getenv("ENGRAM_DUMP");
-    return v && v[0] == '1';
+    return engram_dump_file() != NULL;
+}
+
+static void engram_dump_hdr(FILE *fp, const char *stage, int n) {
+    int taglen = (int)strlen(stage);
+    fwrite(&taglen, sizeof(taglen), 1, fp);
+    fwrite(stage, 1, (size_t)taglen, fp);
+    fwrite(&n, sizeof(n), 1, fp);
 }
 
 static void engram_dump(const char *stage, const float *data, int n) {
-    float rms = 0.0f;
-    int i;
-    for (i = 0; i < n; i++) rms += data[i] * data[i];
-    rms = LZ_SQRTF(rms / (float)n);
-    fprintf(stderr, "[engram] %s rms=%.6f  first4=[%.6f, %.6f, %.6f, %.6f]\n",
-            stage, rms, data[0], data[1], data[2], data[3]);
+    FILE *fp = engram_dump_file();
+    if (!fp) return;
+    engram_dump_hdr(fp, stage, n);
+    fwrite(data, sizeof(float), (size_t)n, fp);
+    fflush(fp);
 }
 
 static void engram_dump_idx(const char *stage, const int *data, int n) {
-    (void)n;
-    fprintf(stderr, "[engram] %s first4=[%d, %d, %d, %d]\n",
-            stage, data[0], data[1], data[2], data[3]);
+    FILE *fp = engram_dump_file();
+    if (!fp) return;
+    engram_dump_hdr(fp, stage, n);
+    fwrite(data, sizeof(int), (size_t)n, fp);
+    fflush(fp);
 }
+
+static void engram_dump_gate(int o, float s, float gate) {
+    char stage[32];
+    FILE *fp = engram_dump_file();
+    if (!fp) return;
+    snprintf(stage, sizeof(stage), "gate_o%d", o);
+    engram_dump_hdr(fp, stage, 2);
+    fwrite(&s, sizeof(s), 1, fp);
+    fwrite(&gate, sizeof(gate), 1, fp);
+    fflush(fp);
+}
+#else
+#define engram_dump_enabled()           0
+#define engram_dump(stage, data, n)     ((void)0)
+#define engram_dump_idx(stage, data, n) ((void)0)
+#define engram_dump_gate(o, s, gate)    ((void)0)
+#endif /* LZ_ENGRAM_DEBUG */
 
 static int engram_is_format(const unsigned char *bitmap, int tokid) {
     return (bitmap[tokid >> 3] >> (tokid & 7)) & 1;
@@ -185,11 +261,15 @@ void forward_engram(const LZModel *m, LZRunState *s,
     float *key   = qnorm + (size_t)nt * dim;   /* [nt * dim] */
     float *scratch = key + (size_t)nt * dim;    /* remaining scratch */
 
-    /* 1. Hash */
-    engram_hash(tokens, nt, hist, hist_n, eg->primes, eg->offsets, eg->bases,
-                no, nh, ns, hidx);
-    if (dbg) {
-        engram_dump_idx("hash", hidx, ns);
+    /* 1. Index: the static key table's binary search, or the rolling
+       multi-head hash. One space either way; the table has ns == 1. */
+    if (eg->keys) {
+        engram_key_index(eg, tokens, nt, hist, hist_n, hidx);
+        if (dbg) engram_dump_idx("keys", hidx, 1);
+    } else {
+        engram_hash(tokens, nt, hist, hist_n, eg->primes, eg->offsets,
+                    eg->bases, no, nh, ns, hidx);
+        if (dbg) engram_dump_idx("hash", hidx, ns);
     }
 
     /* 2-3. Per-order: table lookup -> proj -> gate -> sum */
@@ -219,8 +299,13 @@ void forward_engram(const LZModel *m, LZRunState *s,
             for (i = 0; i < nh; i++) {
                 int sp = o * nh + i;
                 int idx = hidx[(size_t)tk * ns + sp];
-                lz_t_row_f32(&eg->table, idx, edim,
-                             eo + (size_t)tk * po + (size_t)i * edim);
+                float *dst = eo + (size_t)tk * po + (size_t)i * edim;
+                /* A key that is not in the table contributes nothing -
+                   the row is zero, not some hash slot's contents. */
+                if (idx < 0)
+                    memset(dst, 0, (size_t)edim * sizeof(float));
+                else
+                    lz_t_row_f32(&eg->table, idx, edim, dst);
             }
         }
         if (dbg) { char tag[32]; snprintf(tag, sizeof(tag), "emb_o%d", o); engram_dump(tag, eo, po); }
@@ -242,7 +327,7 @@ void forward_engram(const LZModel *m, LZRunState *s,
            call lz_matmul_xq_nt once per tk rather than batched), so
            xq/xqs each hold exactly one token's worth: po int8s and
            po/gs floats. s->xq/s->xqs are sized nt_cap*qcap and
-           nt_cap*(qcap/32) respectively (forward.c's lz_state_alloc),
+           nt_cap*(qcap/32) respectively (forward_state.c's lz_state_alloc),
            both >= po for every checkpoint here, so reusing token slot 0
            on each iteration is safe - forward_engram runs before the
            layer loop populates them for anything else. */
@@ -266,19 +351,18 @@ void forward_engram(const LZModel *m, LZRunState *s,
         }
         if (dbg) { char tag[32]; snprintf(tag, sizeof(tag), "val_o%d", o); engram_dump(tag, val, dim); }
 
-        /* SPDA gate per token: s = dot(q, key) / sqrt(d),
-           gate = sigmoid(sqrt(|s|+eps) * sign(s)) */
+        /* SPDA gate per token: s = dot(q, key) / sqrt(d), then
+           lz_spda_gate - see its declaration for why the clamp sits
+           inside the sqrt and why sign(0) is 0. */
         for (tk = 0; tk < nt; tk++) {
             float dot = 0.0f;
             float s, gate;
             for (i = 0; i < dim; i++)
                 dot += qnorm[(size_t)tk * dim + i] * key[(size_t)tk * dim + i];
             s = dot * inv_sqrt_d;
-            gate = lz_sigmoid(LZ_SQRTF(LZ_FABSF(s) + 1e-6f)
-                              * (s >= 0 ? 1.0f : -1.0f));
+            gate = lz_spda_gate(s);
             if (dbg && tk == 0)
-                fprintf(stderr, "[engram] gate_o%d s=%.6f gate=%.6f\n",
-                        o, s, gate);
+                engram_dump_gate(o, s, gate);
             for (i = 0; i < dim; i++)
                 value[(size_t)tk * dim + i] += gate * val[(size_t)tk * dim + i];
         }

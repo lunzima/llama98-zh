@@ -366,10 +366,62 @@ void lz_dbg_layer_hash(const char *tag, int li, const void *p, size_t nf);
 /* Debug counters defined in forward.c, read by cli_main.c and by the
    attn helpers in forward_attn.c. */
 extern lz_i64 lz_debug_attn_skip;
+extern lz_i64 lz_debug_ced_skipped;
+/* Window entries that entered forward_csa2.c's key axis - one count per
+   (token, visible window slot), not per query head. build/ced_local_probe.c
+   reads it to answer "is the window really in the softmax" with a number
+   instead of with "the output moved". */
+extern lz_i64 lz_debug_csa2_local_slots;
+/* --dump-prefill's target and its own count, so a write that failed
+   (unwritable path) is visible as dumps == 0 rather than as a gate that
+   compares two files nobody wrote. */
+extern const char *lz_dump_prefill_path;
+extern lz_i64 lz_debug_prefill_dumps;
 extern lz_i64 lz_debug_n_kv_rot;
+extern lz_i64 lz_debug_n_rope_ntk;
 extern int   lz_debug_mtp_attn_window;
 extern lz_i64 lz_debug_mtp_attn_rows;
 extern lz_i64 lz_debug_vproj_i16;
+
+/* Run-time knobs, all defined in forward.c and all read by
+   lz_state_alloc (forward_state.c) among other callers. */
+extern int   lz_kv_kfmt;
+extern int   lz_kv_vfmt;
+extern int   lz_attn_sink;
+extern int   lz_attn_window;
+extern int   lz_ced;
+extern int   lz_kv_rot_enable;
+extern int   lz_kv_rot_v_dim;
+/* --csa2-ring. Read by alloc_csa2_ring (the two ring allocations and the
+   reset's memsets), by lz_csa2_ring_stride/row/put below, and by nothing
+   else - the pending slabs and every scratch are f32 whatever it says. */
+extern int   lz_csa2_ring_fmt;
+
+/* The ring's storage format, in three functions rather than three open
+   spots. The allocation multiplies by the stride, every read goes
+   through lz_csa2_ring_row and every write through lz_csa2_ring_put, so
+   a format cannot be half-added: what the buffer holds and what every
+   consumer assumes it holds come from the same switch. `ring` is
+   csa2_comp_ring or csa2_idx_comp_ring, whose pointer type is float*
+   while the bytes under it are whatever the format says - the same
+   arrangement model.h's LZ_FMT_BF16 comment gives LZTensor.q. */
+int    lz_csa2_ring_stride(int fmt);
+/* Bytes one n-wide row occupies, scales included - what the allocation
+   multiplies by and what the three functions below step with. */
+size_t lz_csa2_ring_rowbytes(int fmt, int n);
+/* `row` is a ROW INDEX, not an element offset: with a scale plane inside
+   the row an element offset would have to be turned into a byte offset by
+   every caller, and one of them would get it wrong.
+   lz_csa2_ring_slot is that same argument one level up, for the pointer a
+   SLOT's rows start at: a bare `ring + rb * head_dim` is element
+   arithmetic on a buffer whose elements are one or two bytes under a
+   narrow tier, which puts every slot after the first `rb * (4 - stride)`
+   bytes off. Callers never offset the pointer themselves. */
+void *lz_csa2_ring_slot(void *ring, int fmt, int n, size_t rb);
+const float *lz_csa2_ring_row(const void *ring, size_t row, float *scratch,
+                              int n, int fmt);
+void  lz_csa2_ring_put(void *ring, size_t row, const float *src, int n,
+                       int fmt);
 
 /* KV cache formats, selectable independently for keys and values
    (--kv / --kv-k / --kv-v). See LZRunState's kfmt field. */
@@ -380,6 +432,39 @@ extern lz_i64 lz_debug_vproj_i16;
    renumbering F32 would silently change what an old --kv value means to
    any caller that still passes an integer. */
 #define LZ_KVF_F32   3   /* unquantized; a measuring arm, not a mode */
+
+/* --csa2-ring f32|bf16: the storage format of the two FINALIZED CSA2
+   rings (csa2_comp_ring / csa2_idx_comp_ring). Those are the two buffers
+   that grow with seq_len and so are the ones the compression ratio is
+   about - the pending slabs (csa2_pending_c/z) are bounded by
+   cm * ssm_ring_depth rather than by seq_len, are a fixed cost, and are
+   not covered here.
+
+   STORAGE ONLY. Every read puts a row back to f32 before any arithmetic
+   touches it, so this changes what is HELD, never what is COMPUTED - the
+   posture --kv f32|q4|q8 already has on the dense planes. f32 IS THE
+   IDENTITY TIER: lz_csa2_ring_row returns a pointer INTO the ring at f32
+   and copies nothing, which is what keeps that tier bit-identical to a
+   build without this knob and as fast. bf16 is a QUALITY tier, not an
+   identity one - it rounds every entry to eight mantissa bits - and the
+   two are asserted differently on purpose (build/csa2_ring_fmt_gate.sh).
+
+   BF16 BEFORE Q8 because model.h's own comment on LZ_FMT_BF16 applies
+   unchanged here: it is storage rather than quantization, so it has no
+   scale plane to allocate and no group size to keep in step with
+   anything, and one rounding for the whole engine to agree on. */
+#define LZ_CRF_F32  0   /* unquantized; the identity tier */
+#define LZ_CRF_BF16 1   /* two bytes per element, no scale */
+/* The two scaled tiers. Their layout is [elements | scales] WITHIN ONE
+   ROW, not two parallel planes: the rings are addressed by row, so a
+   row-relative scale keeps lz_csa2_ring_row's single offset meaning one
+   thing. One f32 scale per LZ_CSA2_RING_GS elements of a row, the same
+   group the KV cache's own Q8 path uses - a row that is not a multiple
+   of the group pads its last one. */
+#define LZ_CRF_Q8   2   /* one signed byte per element + scales */
+#define LZ_CRF_Q16  3   /* int16 per element + scales */
+
+#define LZ_CSA2_RING_GS 32
 
 /* Default attention sink when a window is requested without one. 16 was
    measurably better than 4 (+5.351%% vs +6.095%% PPL at the same total
@@ -459,15 +544,29 @@ typedef struct {
 
     /* Buffers marked (dim) are actually allocated nt_cap x dim, token-major:
        token t's slice lives at buf + t*dim. Decoding uses only the t=0
-       slice, identical to the pre-batch behavior. */
-    float *x, *xb, *xb2;        /* (hidden) */
+       slice, identical to the pre-batch behavior.
+
+       s->x is the exception: on a GR model (config.gated_residual) it is
+       allocated nt_cap * nr * hidden and its per-token stride is
+       `L->gr_on ? nr*hidden : hidden`. GR's branches ride inside this one
+       tensor, exactly as they do on the training side (GrDecoderLayer's
+       docstring): gr_first expands the embedding into nr equal branches at
+       the top of the loop and gr_last averages them back into the FIRST
+       nt*hidden elements, so every reader outside the loop (final norm,
+       lm_head, the capture path, engram) still sees [nt, hidden] and needs
+       no change. s->xb and s->xb2 are ALWAYS hidden wide - they are the
+       sublayer's input and output, and that is why GR can be confined to
+       the loop. */
+    float *x, *xb, *xb2;        /* (hidden; x is nr*hidden under GR) */
     float *hb, *hb2;            /* (intermediate) */
     float *logits;              /* (vocab) only the LAST token's, not scaled by nt */
 
     /* full_attention scratch */
     float *qg;                  /* (attn_qgate_dim) q and gate interleaved per head */
     float *qh;                  /* (attn_q_dim)  normalized and rotated q */
-    float *att;                 /* (seq_len)     per-head scores (reused per t, not scaled by nt) */
+    float *att;                 /* (seq_len + 1): seq_len scores plus one slot for
+                                   the learned sink column at att[pos+1] (per-head,
+                                   reused per t, not scaled by nt) */
 #if (LZ_ATTN_FIXED & 2)
     float   *wsum_cbuf;         /* (seq_len)     weighted-sum coefficients before quantization */
     int16_t *wsum_cq;           /* (seq_len)     the same, quantized to int16 */
@@ -479,16 +578,50 @@ typedef struct {
                                    the same path (sscale = cmax * LZ_Q15_INV) */
     float *ktmp;                /* (attn_kv_dim) k before it enters the cache (post-rotation, quantized) */
     float *vtmp;                /* (attn_kv_dim) same for v */
+    /* S1 attn_kv_share: the SOURCE layer's attention input for the
+       current chunk (nt_cap x hidden, token-major like the buffers
+       above). forward_chunk copies s->xb into it when it runs the source
+       layer and hands it to every target layer's k/v projections,
+       because a trained target layer's K and V ARE the source layer's -
+       not a re-projection of the target's own input (model.h's
+       attn_kv_share comment). Written and read inside ONE forward_chunk
+       call, never across chunks: the source layer always runs before a
+       target layer of the same call. */
+    float *kvshare_x;
+    /* CED "proj" (model.h's ced_kv comment): the encoder's own exit
+       hidden h_S for the current chunk (nt_cap x hidden, token-major
+       like kvshare_x above), captured once when layer ced_split runs
+       and read by every decoder-region full-attention layer's K/V
+       projections after - each with its own, independently-trained
+       k_proj/v_proj, unlike kvshare_x's aliased-weight targets.
+       Needs no cross-chunk persistence, unlike kvshare_x: encoder and
+       decoder layers are the lower/upper half of ONE causal stack
+       processed in a single forward_chunk call, so every decoder-
+       region layer reads it within the SAME call that produced it.
+       NULL when ced_kv is off. */
+    float *ced_hs;
+    /* The scalar input injection (model.h's loop_input_mix comment): the
+       looked-up token embedding for the current chunk, held for the
+       blend at the entry of each repeated pass (nt_cap x hidden,
+       token-major like ced_hs). Captured once per forward_chunk right
+       after the embed step - after the engram hook too, because that is
+       what the training side calls inputs_embeds - and read at most
+       exec_len-1 times within the SAME call. NULL when the mode is off,
+       so a model that does not mix pays nothing. */
+    float *emb_hold;
     /* KV cache Q8: kq8/vq8 hold the rotated k/v (group 32), dequantized at score time.
        (K group 16 measured no gain.)
-       Depth is n_full_layers PLUS ONE when m->mtp != NULL: the MTP
-       block's own full_attention layer gets the last slot (index
-       n_full_layers), reusing this same cache rather than a bespoke
-       buffer - see the MTP scratch block below. */
-    int8_t *kq8;                /* (n_full [+1 if m->mtp], seq, attn_kv_dim) */
+       Depth is n_dense_kv - one plane per dense-KV APPLICATION - PLUS
+       ONE when m->mtp != NULL: the MTP block's own full_attention layer
+       gets the last slot (index n_dense_kv), reusing this same cache
+       rather than a bespoke buffer - see the MTP scratch block below.
+       n_dense_kv, not n_layers or n_full_layers: a csa2_on layer owns no
+       plane, and a looping tower's repeated layer needs one plane per
+       pass (see app_dense_idx's own comment). */
+    int8_t *kq8;                /* (n_dense [+1 if m->mtp], seq, attn_kv_dim) */
     int8_t *vq8;
-    float  *ksq;                /* (n_full, seq, attn_kv_dim/32) */
-    float  *vsq;                /* (n_full, seq, attn_kv_dim/32) */
+    float  *ksq;                /* (n_dense, seq, attn_kv_dim/32) */
+    float  *vsq;                /* (n_dense, seq, attn_kv_dim/32) */
 #if LZ_KV_2PLANE
     /* Low planes; same shape as kq8/vq8, sharing their scales. Value is
        (hi + lo/LZ_GDN_LO_SCALE) * scale. See LZ_KV_2PLANE in ops.h -
@@ -515,7 +648,7 @@ typedef struct {
 
        NULL unless --kv f32; the Q8 path is untouched and stays the
        default, bit for bit. */
-    float  *kf32;               /* (n_full [+1 if m->mtp], seq, attn_kv_dim) */
+    float  *kf32;               /* (n_dense [+1 if m->mtp], seq, attn_kv_dim) */
     float  *vf32;
     /* Cache format, chosen PER SIDE. Not one knob for both, because the
        two sides are not worth the same: decomposed on cci3-hq with the
@@ -596,9 +729,9 @@ typedef struct {
        One scale per (layer, position, kv head) rather than per 32
        elements - see ops.h's lz_kv4_quantize for why that choice and the
        Hadamard rotation only make sense together. */
-    unsigned char *k4;          /* (n_full [+1], seq, attn_kv_dim/2) bytes */
+    unsigned char *k4;          /* (n_dense [+1], seq, attn_kv_dim/2) bytes */
     unsigned char *v4;
-    float  *ks4;                /* (n_full [+1], seq, n_kv_heads) */
+    float  *ks4;                /* (n_dense [+1], seq, n_kv_heads) */
     float  *vs4;
 
     /* The QJL key sketch and its q4r2 residual form are deliberately
@@ -650,6 +783,17 @@ typedef struct {
     float *kda_gate;              /* (nt_cap * lin_n_v_heads * lin_k_head_dim) decay,
                                       already exponentiated (gt = exp(g), same
                                       convention lz_gdn_step's scalar gt uses) */
+    float *kda_decay;             /* (lin_n_v_heads) exp(A_log[h]), per head.
+                                      Its own allocation, not a borrow of
+                                      s->wscr: the decay gate reads BOTH
+                                      A_log and dt_bias out of one
+                                      kda_decay_gate_build call, and
+                                      lz_t_f32 returns s->wscr for every
+                                      format except LZ_FMT_F32 - so two
+                                      live borrows of it are one buffer
+                                      holding whichever tensor was widened
+                                      last. See forward_kda's own comment
+                                      at the materialization. */
 
     /* latent MoE scratch (LZLayer.ffn_moe layers only). TWO WIDTHS, and
        the split is the routing boundary: what one weight matrix serves
@@ -669,12 +813,19 @@ typedef struct {
     float *moe_h1, *moe_h3;       /* (nt_cap * max(moe_intermediate_size, moe_shared_width)) */
     float *moe_h2;                 /* (moe_latent_dim) one expert's w2 output before scaling */
     float *moe_shared_out;        /* (nt_cap * hidden_size) shared expert's down_proj output */
+    float *moe_router_bias;       /* (num_experts) moe_gate_bias, dequantized once
+                                     per layer instead of once per token. Its own
+                                     allocation for the same reason kda_decay has
+                                     one: the token loop below borrows s->wscr for
+                                     the latent norm, so a bias parked in s->wscr
+                                     would be that tensor's bytes from the second
+                                     token on. */
 
     /* MTP draft head scratch (LZ_SPEC_K > 0 at runtime; allocated only
        when m->mtp != NULL - see lz_state_alloc). The KV cache the MTP
        block's own attention uses is NOT a separate buffer: it is one
-       more slot appended to kq8/vq8/ksq/vsq above (index n_full_layers,
-       via forward_attn's cache-layer sentinel in forward.c) - it needs
+       more slot appended to kq8/vq8/ksq/vsq above (index n_dense_kv,
+       via forward_attn's cache-layer sentinel in forward_mtp.c) - it needs
        no rollback of its own (see lz_spec_round's docstring in
        generate.c: dangling rows from a rejected draft are simply
        overwritten by the next round at higher positions, same
@@ -687,7 +838,7 @@ typedef struct {
        lz_forward_capture's own comment below - for the first step, then
        replaced each step with that step's own post-norm output, matching
        upstream's own recursion - see lz_mtp_draft_step's comment in
-       forward.c).
+       forward_mtp.c).
 
        mtp_x/mtp_concat/mtp_emb_raw are sized nt_cap wide (not just one
        token), even though lz_mtp_draft_step's chained per-step usage
@@ -700,6 +851,23 @@ typedef struct {
     float *mtp_emb_raw;        /* (nt_cap*hidden) raw embedding lookup scratch, pre-norm */
     float *mtp_chain;          /* (hidden) chained "hidden" register, see above - single-token only, prefill never touches it */
     float *mtp_draft_logits;   /* (vocab) one draft step's logits */
+    /* DSpark (arXiv:2607.05147), mtp_n_draft > 1 only - see
+       lz_mtp_draft_batch/lz_mtp_markov_correct in forward_mtp.c. ONE slot's
+       worth of concat scratch, reused across the K-slot loop (the loop
+       is sequential in this engine regardless of the slots' logical
+       independence - see lz_mtp_draft_batch's own comment on why a
+       for-loop is a faithful, not a compromised, implementation of
+       "no self-chaining"), so it does not need to be K times as wide
+       the way mtp_concat above is nt_cap times as wide for a genuinely
+       batched prefill. Capped at LZ_SPEC_K_MAX slots, the same existing
+       runtime ceiling on draft depth - mtp_n_draft beyond it is a load-
+       time error (see lz_open), not a silent truncation. */
+    float *mtp_kdraft_concat;      /* (3*hidden) main_proj input, one slot at a time */
+    float *mtp_kdraft_logits;      /* (LZ_SPEC_K_MAX*vocab) base logits, one row per slot */
+    float *mtp_kdraft_correction;  /* (vocab) markov_proj output scratch - kept
+                                      SEPARATE from mtp_kdraft_logits, which
+                                      lz_mtp_markov_correct must add onto,
+                                      not overwrite */
     /* The MTP block's OWN position counter, separate from the body's
        absolute token position - NOT the same number, because
        lz_mtp_prefill (below) only ever covers n_prompt-1 positions
@@ -713,7 +881,7 @@ typedef struct {
        either (same rollback argument as the body's SSM/conv checkpoint,
        just satisfied by not advancing this counter past accepted steps,
        not by copying anything - see lz_spec_round). Owned entirely by
-       the caller (generate.c): forward.c only reads it as a plain
+       the caller (generate.c): forward_mtp.c only reads it as a plain
        position argument to lz_mtp_draft_step/lz_mtp_prefill, never
        advances it itself. Reset to 0 by lz_state_reset, like every
        other recurrent index.
@@ -725,7 +893,7 @@ typedef struct {
        runs the MTP block over the body's
        already-computed prefill hidden states purely to populate this
        KV cache before the first round; see its own comment
-       (forward.c) and lz_generate_resume's prefill call site. */
+       (forward_mtp.c) and lz_generate_resume's prefill call site. */
     int mtp_pos;
     /* Verify-pass logits: EVERY position of the (k+1)-token verify batch,
        not just the last - lz_forward_batch skips intermediate logits on
@@ -815,6 +983,9 @@ typedef struct {
     int8_t *ssm_state_q8;
 #if LZ_GDN_STATE_2PLANE
     int8_t *ssm_state_q8_lo;    /* low plane, same shape as ssm_state_q8 */
+#endif
+#if LZ_GDN_STATE_F32
+    float  *ssm_state_f32;      /* exact twin, same shape as ssm_state_q8 */
 #endif
     float  *ssm_state_s;
     float *conv_state;          /* (n_linear, lin_conv_dim, conv_kernel-1) */
@@ -988,7 +1159,7 @@ typedef struct {
        duplication that pattern would create is exactly the kind of
        thing that silently drifts after a config field changes - this
        project has hit that shape of bug before (see ckpt_sizes's own
-       comment in forward.c, added for the identical reason on
+       comment in forward_ckpt.c, added for the identical reason on
        LZStateCkpt's shapes). Never 0. */
     int     ssm_ring_depth;
 
@@ -1008,6 +1179,30 @@ typedef struct {
        config.engram is 0 - forward_engram is never called then. */
     void   *engram_scratch;
     size_t  engram_scratch_bytes;
+
+    /* GR forward's own scratch, one block carved into the four views
+       below (forward_state.c's alloc_gr_scratch owns the offsets).
+       Dedicated rather than pooled into xq/wscr/qcap for the reason
+       engram_scratch's comment above gives, one size up: the read gate's
+       inputs are nt*nr*hidden wide, which is nr times the widest
+       activation any other site quantizes, and s->wscr is a single
+       weight ROW. Two of the four blocks (rhat, s) outlive the read -
+       the write gate reads the Rhat the read computed, it does not
+       recompute it from the updated streams (GatedResidual4.write reads
+       self._rhat) - so they cannot be folded into the sublayer call's
+       own temporaries.
+         rhat  (nt*nr*dim) the branch-normalised read input
+         g     (nt*nr*dim) the read gate, per branch per element
+         h     (nt*r)      W_d's output, SiLU'd in place
+         s     (nt*nr)     the per-branch scalar write gates
+       NULL / 0 when config.gated_residual is 0 - lz_gr_read is never
+       called then. */
+    void   *gr_scratch;
+    size_t  gr_scratch_bytes;
+    float  *gr_rhat;
+    float  *gr_g;
+    float  *gr_h;
+    float  *gr_s;
 
     /* Trailing token history for engram's hash/mask windows, which both
        read up to (engram_ngram - 1) tokens BEFORE the current chunk's
@@ -1067,6 +1262,21 @@ typedef struct {
        Shared by all layers/heads under the same theta, avoiding a per-token
        per-layer pow/cos/sin (expensive on PII's x87). */
     float  *rope_cs;
+
+    /* The same table with every sin negated - the CONJUGATE of rope_cs, and
+       therefore the inverse rotation (R(-a) = R(a)^T = conj of R(a) for a
+       unit complex number; IEEE negation is exact, so this is not an
+       approximation of a conjugate but the conjugate). It exists so the
+       output-side inverse rotation needs no kernel of its own: lz_rope
+       computes `x0*c - x1*s, x1*c + x0*s`, and handing it `(c, -s)` makes
+       that expression R(-a) instead of R(a) on every tier at once - the
+       scalar, SSE2 and AVX2 paths are the same code reading a different
+       table, so they stay bit-identical to each other by construction
+       rather than by three separate sign-flip implementations agreeing.
+       Cost: one more (seq_len x rotary_dim) buffer, one negation pass per
+       state alloc, no transcendentals. See forward_csa2.c's step 5 for the
+       one consumer. */
+    float  *rope_cs_inv;
 
     /* 1/sqrt(dim) for attention and SSM: config-only, computed once at
        alloc instead of per layer per token (FSQRT+FDIV about 110 cycles
@@ -1131,11 +1341,56 @@ typedef struct {
        recent attn_win, mask the middle. 0/0 = ordinary full attention.
        See forward.c for why this lands as a mask before the eviction. */
     int     attn_sink, attn_win;
+    /* --ced: the layer that owns the last position's K/V is kept and the
+       rest of the decoder half is not run over the prefix. 0 = off, and
+       off must be the UNMODIFIED code path - the guard in forward_chunk
+       is skipped entirely rather than taken. Set by lz_state_alloc, and
+       only when the model's last layer is full attention; see
+       LZ_ERR_CED_LAST_LAYER for why anything else refuses. */
+    int     ced;
     int     kv_ring;            /* ring modulus (window + spec guard), 0 = off */
     int     kv_slots;           /* allocated cache depth: seq_len, or sink+ring */
     float   ssm_scale;          /* 1/sqrt(lin_k_head_dim) */
 
-    int *cache_idx;             /* layer index -> index within its class */
+    /* THE LINEAR-ATTENTION STATE SLOTS ARE PER APPLICATION (spec 3.2).
+       The decoder's second pass restarts its recurrences at zero, so it
+       cannot share the first pass's slot; `app_state_idx[a]` is
+       application a's slot, and `app_slot[l]` is the slot the physical
+       layer l is using RIGHT NOW - the forward loop sets it before each
+       application, and it equals cache_idx[l] for a schedule that does
+       not loop. -1 for a full-attention application, which owns no
+       recurrent state. */
+    int  n_linear_apps;         /* GDN+KDA state slots (12 for the v1 loop) */
+    int  app_state_idx[LZ_MAX_LAYERS];  /* application -> state slot or -1 */
+    int  app_slot[LZ_MAX_LAYERS];       /* physical layer -> current slot */
+
+    int *cache_idx;             /* layer index -> index within its class.
+                                   For a FULL layer this is the index that
+                                   addresses its KEY-VALUE STORAGE: the
+                                   compressed rings for a csa2_on layer -
+                                   model.c's csa2_slot_owner defines the
+                                   same numbering from the config side.
+                                   It is NOT the dense plane index any
+                                   more; those are per application, see
+                                   app_dense_idx below. */
+    /* THE DENSE KV PLANES ARE PER APPLICATION, the same way the recurrent
+       state slots above are: a looping tower's second pass cannot append
+       its rows where the first pass's are. app_dense_idx[a] is
+       application a's plane, or -1 when its layer owns none (a linear
+       layer, or a csa2_on FULL layer, whose compressed blocks live in
+       cache_idx-addressed rings instead). dense_slot[l] is the plane the
+       physical layer l is using RIGHT NOW - the forward loop sets it
+       before each application, and it equals the layer's own ordinal for
+       a schedule that does not loop. Sized for n_dense_kv, not
+       n_layers: a consumer that used cache_idx here would read another
+       layer's rows. */
+    int *app_dense_idx;         /* application -> dense plane, or -1;
+                                   c->exec_len entries */
+    int  dense_slot[LZ_MAX_LAYERS]; /* physical layer -> current plane */
+    int  n_dense_kv;            /* number of dense-KV APPLICATIONS, i.e.
+                                   planes; allocated for this (+1 when an
+                                   MTP head is bound, see forward_attn's
+                                   sentinel) */
     lz_i64 bytes_alloc;
 
     /* Bumped by lz_state_alloc and lz_state_reset. A checkpoint records
@@ -1149,6 +1404,188 @@ typedef struct {
        and generate confidently wrong text, with nothing to see: no
        crash, no error, just a different answer. */
     unsigned epoch;
+
+    /* S2, CSA2 (model.h's own csa2_on[]/csa2_compress_m comment).
+       Indexed by s->cache_idx[layer] (0..n_full_layers-1) - the ci
+       space, one slot per FULL-mode layer, sized for every full-attention
+       layer even though only some are csa2_on (matching kq8/vq8's own
+       "sized for the class, not for which layers in it actually use this
+       precision tier" convention, see e.g. kf32's own comment).
+
+       THAT IS NOT THE INDEX OF THE KV PLANES ANY MORE. The planes above
+       are indexed by s->app_dense_idx[] (per application), sized
+       n_dense_kv, because a csa2_on layer owns no per-position K/V and
+       takes no plane, and a looping tower's second pass owns its own.
+       The two agree only where every application is its own layer and
+       no csa2 layer sits below, so a reader that indexes kq8 with
+       cache_idx reads another layer's rows. All NULL when no layer has
+       csa2_on (allocated conditionally, checked in forward_csa2.c the
+       same way kf32 is checked in forward_attn.c).
+
+       Sized against s->seq_len (the FULL configured context), not
+       s->kv_slots (which reflects the UNRELATED --attn-sink/--attn-
+       window eviction mechanism - CSA2 is its own, separate sparsity
+       mechanism, top-k over compressed blocks, and mixing it with
+       token-level eviction is not a combination this project defines).
+
+         csa2_pending_{c,z}       (n_full, per slot: cm * ssm_ring_depth,
+                                   head_dim) - raw per-position
+                                   contributions to a compressed block
+                                   that is not yet finalized, indexed
+                                   within a slot by position % (cm *
+                                   ssm_ring_depth): ssm_ring_depth banks
+                                   of cm slabs each, bank (block %
+                                   ssm_ring_depth) holding that block's
+                                   own cm positions. cm is that slot's
+                                   OWN ratio (model.h's own
+                                   csa2_compress_m_layer comment), so
+                                   the slots are laid out one after
+                                   another at the prefix sums
+                                   lz_csa2_pend_base returns, not at a
+                                   fixed ci * stride
+         csa2_pending_{c,z}_idx   same shape, csa2_indexer_head_dim -
+                                   the indexer key's own open block
+         csa2_comp_ring           (n_full, per slot: ceil(seq_len/cm),
+                                   head_dim) - FINALIZED main compressed
+                                   entries, already normed+RoPE'd, ready
+                                   to gather into attention; a slot's
+                                   base is lz_csa2_ring_base, in blocks
+         csa2_idx_comp_ring       (n_full, per slot: ceil(seq_len/cm),
+                                   csa2_indexer_head_dim) - finalized
+                                   indexer keys, same finalization point
+
+       WHY BANKS, AND NOT THE BARE position % csa2_compress_m. Step 3 of
+       forward_csa2.c finalizes a block from all cm of its slabs at once,
+       so every slab a closure reads must still hold its own position's
+       contribution. Plain decoding gets that for free - closures are
+       exactly cm positions apart in one strictly increasing pass, so
+       every slab is rewritten between one closure and the next. A
+       speculative round does not: it forwards k_eff+1 rows and then
+       rolls back to the last accepted position P, so the rows past P are
+       rejected and get forwarded again, while the positions at or before
+       P are never forwarded again. With ONE bank, a rejected row at
+       position q = u + cm writes the same slab as position u, for any u
+       in [c - cm + 1, P] - u and q are cm apart and so sit in different
+       blocks, but they share a slab index. Whenever the rejected tail
+       k_eff - n_accept reaches cm, that overwrites the contribution of a
+       position the rollback never revisits, and the block's next closure
+       - the re-forward of its last position, which is the one that
+       counts - finalizes from a rejected row's data.
+
+       Banks make a block's slabs reachable only by that block's own cm
+       positions, since two positions that share a slab index are cm
+       apart in position and one block apart in block index. The depth
+       needed is set by how far a rejected tail can reach:
+       s->ssm_ring_depth is spec_k_max+1 (clamped) whenever the state can
+       run --spec at all - strictly more banks than the at most
+       spec_k_max positions of rejected tail can span blocks - and 1
+       whenever it cannot (no MTP head, or a caller that declared
+       spec_k_max <= 0), where this is the single bank it always was.
+
+       Neither ring carries a companion "how many entries are finalized"
+       counter: forward_csa2.c derives that bound from the position it
+       is working on, (pos + 1) / cm, which is the only form a REINDEX
+       layer sharing this state with its source can safely use - see
+       that file's own n_vis comment.
+
+       A ring's fixed allocated depth is ceil(seq_len / cm) PER SLOT - a
+       flat array sized for the worst case, same convention
+       conv_state/ssm_state_q8 use for their own per-layer recurrent
+       state, not a growable/wrapping ring (CSA2 blocks are never
+       evicted once finalized, unlike the KV ring's spec-rollback ring
+       above). csa2_scores is the one buffer here sized by the LARGEST
+       of those depths rather than by a slot's own: it is a per-token
+       scratch serving every layer in turn, so it has to cover the
+       shallowest-compressing slot. */
+    float *csa2_pending_c, *csa2_pending_z;
+    float *csa2_comp_ring, *csa2_idx_comp_ring;
+    /* One row of f32 working space, head_dim + csa2_indexer_head_dim
+       wide: [0, head_dim) is the main latent being finalized and, later,
+       a dequantized main entry; [head_dim, ...) is the indexer key.
+       Needed because the rings hold whatever --csa2-ring selects while
+       every operator that touches them takes f32 - see
+       lz_csa2_ring_row, which hands back a pointer into the ring itself
+       at f32 and this scratch otherwise. */
+    float *csa2_row;
+    /* Per-token scratch, one layer/token at a time (forward_csa2.c
+       cannot batch across a chunk's nt tokens the way ordinary
+       attention does - see its own file comment), dedicated rather
+       than sliced out of an existing buffer like s->qg/s->attn_out:
+       indexer_head_dim/indexer_heads/indexer_q_lora_rank are new,
+       independent dimensions with no size relationship to any existing
+       buffer's own width, and borrowing one would be a silent
+       assumption about their relative sizes that a config change could
+       break with no error. Main-path query/gate/output DO reuse
+       s->qg/s->qh/s->attn_out - see forward_csa2.c's own comment. */
+    float *csa2_scores;              /* (max_blocks) */
+    /* csa2_topk_idx_pub / csa2_topk_n_pub: the Top-K selection a FULL or
+       REINDEX layer publishes for its OWN (aliased or not) ci, one slot
+       PER TOKEN OF THE CURRENT CHUNK - not one transient (topk)-sized
+       scratch shared across the whole chunk. A REUSE-mode layer's
+       own call to forward_csa2 only starts after its (aliased) source's
+       ENTIRE call - covering every token of this chunk - has already
+       finished (forward.c dispatches layer-major: one forward_csa2 call
+       runs a layer's whole nt-token loop before the next layer's call
+       begins), so "the source's Top-K for token tk" has already been
+       overwritten by whatever the source computed for tk+1, tk+2, ...
+       by the time a single-slot scratch would be read - only a slot
+       addressed by tk as well as ci survives long enough.
+       Sized (n_full, LZ_BATCH_MAX, topk) / (n_full, LZ_BATCH_MAX) -
+       LZ_BATCH_MAX, not nt_cap, because the shape must cover the widest
+       chunk any call can ever pass (forward_state.c's alloc_csa2_ring
+       comment has the byte count for a realistic config, and
+       lz_csa2_pub_overflows the reason c->csa2_topk cannot be trusted
+       outright in that product). FULL and REINDEX both write their own
+       fresh per-token selection here (Reindex's ci is aliased to its
+       source's, so its write physically lands in the same slot the
+       source already used, overwriting it - correct, since nothing
+       downstream of THIS layer's own aliasing chain still needs the
+       source's original value once this layer's own has replaced it).
+       REUSE writes neither - it owns none of the seven csa2_w_*
+       tensors (this file's comment on csa2_scores' neighbors above) and
+       has nothing of its own to compute - and simply reads whatever is
+       left for its (aliased ci, tk) at the time its call runs.
+       No accompanying csa2_topk_val_pub: the partial selection sort
+       only ever needs the winning INDEX, never its score, once
+       selection is done - step 5 recomputes the dot product fresh from
+       s->qh against the ring entry instead of trusting a stored score.
+       Its pre-rename predecessor, csa2_topk_val, was never written for
+       the same reason and was removed along with the rename rather
+       than carried forward unread. */
+    int   *csa2_topk_idx_pub;        /* (n_full, LZ_BATCH_MAX, topk) */
+    int   *csa2_topk_n_pub;          /* (n_full, LZ_BATCH_MAX) - this (ci, tk)'s k_eff */
+    float *csa2_c_j, *csa2_z_j;      /* (head_dim) */
+    float *csa2_c_j_idx;             /* (csa2_indexer_head_dim) */
+    float *csa2_qidx;                /* (csa2_indexer_heads * csa2_indexer_head_dim) */
+    float *csa2_widx;                /* (csa2_indexer_heads) */
+    float *csa2_cq_idx;              /* (csa2_indexer_q_lora_rank) */
+    /* (topk + ced_local): step 5's column axis is the k_eff selected
+       compressed entries followed by up to W window entries, and the
+       softmax runs over all of them at once (model.h's own ced_local
+       comment). */
+    float *csa2_attn_probs;
+
+    /* CED's local window (model.h's LZModelConfig.ced_local comment).
+       ONE RING PER APPLICATION, for the reason the recurrent state slots
+       are per application: each pass projects its window from its own
+       input, so the second pass of a looping tower must not inherit the
+       first's entries (the loop-tower v2 supplement's KV-storage
+       section). csa2_local_kv holds
+       n_local_apps slots, each 2 * W * head_dim floats - the W rotated
+       keys of the application's most recent positions, then their W
+       rotated values. A position p lands in row p % W of both halves:
+       the window is exactly the last W positions, so the ring and the
+       slot are the same size.
+
+       app_local_idx[a] is application a's slot, or -1 for an application
+       whose layer carries no window; local_slot[l] is the slot physical
+       layer l is using RIGHT NOW, set by forward.c's application loop
+       before the call, and -1 otherwise. Both NULL/-1 everywhere on a
+       model with ced_local == 0, which allocates nothing here. */
+    float *csa2_local_kv;
+    int    n_local_apps;
+    int   *app_local_idx;
+    int    local_slot[LZ_MAX_LAYERS];
 
     /* Where lz_forward writes what it just did, or NULL for "do not
        bother". It rides on the run state rather than on lz_forward's
@@ -1176,8 +1613,49 @@ void attn_wsum_plane(LZRunState *s, float *dst, const int8_t *vplane,
                      const float *vs, int hd, int kvd, int kvh, int pos,
                      int walk_t0, int noring, int dead0, int dead1);
 void rot_head(float *v, int hd, int n);
+/* Full attention for one chunk. kv_in, when not NULL, is the tensor the
+   K/V projections read instead of this layer's own s->xb - the SOURCE
+   layer's attention input for the same positions, which is what an
+   attn_kv_share target layer's trained K/V are (model.h's attn_kv_share
+   comment; forward.c's kvshare_x holds it). Q keeps reading s->xb: only
+   the two K/V projections are fed the source's input in the trained
+   model. NULL is the ordinary path and must stay bit-identical to a
+   build that never had this parameter. */
 void forward_attn(const LZModel *m, LZRunState *s,
-                  const LZLayer *L, int layer, int pos0, int nt);
+                  const LZLayer *L, int layer, int pos0, int nt,
+                  const float *kv_in);
+/* S2, CSA2 (src/forward_csa2.c). Dispatched from forward_chunk in place
+   of forward_attn when L->csa2_on - see model.h's LZModelConfig.
+   csa2_on[] comment for the mechanism and forward_csa2.c's own header
+   comment for why this cannot share forward_attn's KV-cache-based
+   design (compressed blocks, not raw per-position K/V).
+   kv_in means the same thing here as forward_attn's own parameter
+   (this comment block, above): non-NULL only when this layer is in
+   CED's decoder region and ced_kv=proj, in which case its main-KV and
+   indexer-K compression inputs read kv_in instead of s->xb. Q's own
+   input (step 1 of forward_csa2.c) is unaffected either way. */
+void forward_csa2(const LZModel *m, LZRunState *s,
+                  const LZLayer *L, int layer, int pos0, int nt,
+                  const float *kv_in);
+/* The KV half of forward_attn and nothing else: the q/k/v projections
+   minus q, the per-token QK-Norm / RoPE / Hadamard on k and v, and the
+   cache write. No attention, no output projection, no residual, no FFN.
+
+   It exists for --ced, where the decoder layer's own K/V over the whole
+   prefix is kept but its output is needed at one position only. The
+   cache rows it writes are bit-identical to forward_attn's, which is
+   what makes the gate a bitwise one rather than a tolerance: the same
+   xq/xqs from the same xb go through the same lz_matmul_xq_nt calls and
+   the same quantizer. q is dropped, and that is safe for exactly that
+   reason - q_proj's output reaches k and v through nothing.
+
+   The caller must have prepared s->xb for these positions already.
+   kv_in is forward_attn's own parameter and means the same thing here:
+   --ced can run its KV-only write on an attn_kv_share target layer, and
+   that layer's K/V must come from the source's input there too. */
+void forward_attn_kv_only(const LZModel *m, LZRunState *s,
+                          const LZLayer *L, int layer, int pos0, int nt,
+                          const float *kv_in);
 /* One projection with an int16 exit at the consumer's own exponent.
    EIGHT call sites in three files, which is why it is not called
    kda_i16_proj any more: forward_kda.c has four, forward_moe.c three
@@ -1219,6 +1697,18 @@ void forward_kda(const LZModel *m, LZRunState *s,
 void dense_ffn_step(const LZModel *m, LZRunState *s,
                     const LZLayer *L, int layer, int nt, int idim);
 
+/* gate[0..n) = ffn_gate_up(gate[i], up[i]) in place, dispatching on
+   c->ffn_activation - the ONE place dense_ffn_step and forward_moe's
+   routed/shared expert paths compute the FFN's gated intermediate, so
+   ffn_activation reaches all three by construction (mirrors the
+   training side's ffn_gate_up, engine/kunmoe_modeling.py). up is read,
+   not written. LZ_FFN_ACT_NONE (every shipping model) takes the
+   lz_silu(gate)*up branch that was already inline at all three call
+   sites before this existed. Defined in forward_kda.c, next to
+   dense_ffn_step's own SwiGLU loop. */
+void lz_ffn_gate_up(float *gate, const float *up, int n,
+                    const LZModelConfig *c);
+
 /* Engram: conditional n-gram memory. Global module, called once per
    chunk after embed_tokens, before the layer loop. Modifies s->x
    in-place (residual add). Not per-layer: LZEngram lives on LZModel.
@@ -1244,7 +1734,61 @@ void forward_engram(const LZModel *m, LZRunState *s,
    What is here, and what is deliberately not:
 
      ssm_state_q8 (+ _lo), ssm_state_s, conv_state   copied - 1.51 MB
-     kq8 / vq8 / ksq / vsq (the KV cache)            NOT copied
+     engram_hist, engram_conv_hist                   copied
+     csa2_pending_{c,z}(_idx)                        copied, 0 B without CSA2
+     csa2_comp_ring / csa2_idx_comp_ring             NOT copied
+     kq8 / vq8 / ksq / vsq (the KV cache)             NOT copied
+
+   engram_hist/engram_conv_hist are cross-chunk recurrent state read by
+   forward_engram on every call (forward.h's own field comments), same
+   category as conv_state - a save that skips them and a perturbing
+   forward call in between leaves the restored state with the
+   PERTURBED history, not the saved one, since nothing ever writes it
+   back. Both are no-ops (stay zeroed) when config.engram is 0, so
+   copying them costs nothing on non-Engram models.
+
+   csa2_pending_* is the SAME category, and it is the half of CSA2
+   easiest to leave out of a snapshot: what puts these four buffers in
+   it is cross-turn prefix reuse (LZPrefixCache), the lookahead pick and
+   the PLD round - all outside --spec, whose own rollback re-points
+   s->ssm_slot instead and reads none of these slabs. Those
+   four buffers hold the contribution of each of the raw positions
+   belonging to the block that is open at the checkpointed position, and
+   step 3 of that file reads ALL cm of its slabs when the block completes
+   (off == cm - 1) - cm being the slot's own ratio, which is why the four
+   of them are laid out by lz_csa2_pend_base rather than by one stride
+   (model.h's own csa2_compress_m_layer comment).
+
+   ONE BLOCK is what a checkpoint carries, not the whole banked ring
+   (forward.h's own csa2_pending_c comment has the bank layout): those
+   cm slabs live in bank (block % ssm_ring_depth), a bank that differs
+   per run state, so the checkpoint stays a plain per-slot array at
+   depth 1 - lz_csa2_pend_base(..., 1) - and save/restore address the
+   bank the checkpointed POSITION selects - the forward that resumes
+   writes that same block. Nothing else in the banked ring is needed:
+   every block below the open one was already finalized into
+   csa2_comp_ring, which this type does not carry.
+
+   Why restore cannot rebuild them: a restore lands on position p and
+   the pass forwards p onward, so a block that STRADDLES p (p odd at
+   cm == 2) needs the slab of position p-1, which this pass never
+   writes. The live slab at that point is whatever the PREVIOUS turn's
+   generation left there - a different position's contribution - so the
+   block is finalized from the wrong data and every query that later
+   attends to it sees a corrupted entry. Measured on the CLI gate
+   (tests/test_cli_ckpt_parity.py, kunkun98 = csa2_layers [3], cm 2):
+   turns 2 and 3 restore at even positions (36 and 74) and are byte-
+   identical to --no-ckpt; turn 4 restores at 113 and is not. Making the
+   first render's prefix length odd moves the divergence to turn 2,
+   which is how the parity - not the position - was identified.
+
+   The finalized rings are still NOT copied: an entry for a block whose
+   last position is below p was written by the still-intact prefix and
+   nothing overwrites it (later passes write blocks >= p/cm), and an
+   entry at or above p is either rewritten by this pass or unreadable -
+   forward_csa2.c bounds a query by n_vis = (pos+1)/cm, so a stale entry
+   for a later block is never read. Copying them would cost 1 MB per
+   csa2 layer at seq_len 2048 for nothing.
 
    The KV cache is append-only and indexed by absolute position, so
    rewinding to position P and forwarding different tokens simply
@@ -1268,6 +1812,9 @@ typedef struct {
 #if LZ_GDN_STATE_2PLANE
     int8_t *ssm_q8_lo;
 #endif
+#if LZ_GDN_STATE_F32
+    float  *ssm_f32;
+#endif
     float  *ssm_s;
     float  *conv;
     /* int16 twin of `conv`, filled instead of it when the fixed conv
@@ -1275,6 +1822,22 @@ typedef struct {
        is no stored layout to stay compatible with. */
     short  *conv_q;
     size_t  n_ssm_q8, n_ssm_s, n_conv;   /* element counts, for a shape check */
+    /* Engram cross-chunk history - see forward.h's engram_hist and
+       engram_conv_hist field comments on LZRunState. engram_hist is
+       fixed-size like its source field; engram_conv_hist is malloc'd
+       to n_engram_conv floats (0 when config.engram is 0), matching
+       the row*dim sizing forward.c's alloc_engram block uses. */
+    int     engram_hist[31];
+    int     engram_hist_n;
+    float  *engram_conv_hist;
+    size_t  n_engram_conv;               /* element count, for a shape check */
+    int     engram_conv_hist_n;
+    /* CSA2's open compressed block - see this struct's own comment on
+       why the finalized rings next to it are not here. Both are NULL/0
+       when no layer is csa2_on, matching forward_state.c's
+       alloc_csa2_ring, which allocates nothing in that case. */
+    float  *csa2_pend_c, *csa2_pend_z;
+    size_t  n_csa2_pend;                 /* sum of each slot's cm, times head_dim */
     int     pos;                         /* tokens forwarded when taken; -1 = empty */
     unsigned epoch;                      /* the state's epoch at save time */
 } LZStateCkpt;
@@ -1319,7 +1882,53 @@ int  lz_ckpt_restore(const LZStateCkpt *ck, LZRunState *s, const LZModel *m,
    choice. */
 int  lz_state_alloc(LZRunState *s, const LZModel *m, int seq_len,
                         int spec_k_max, char *errbuf, int errlen);
+/* How many dense KV planes this model allocates: one per dense-KV
+   APPLICATION (a csa2_on layer owns none, and a layer the schedule runs
+   twice owns two). The single producer of that count - lz_state_alloc
+   sizes the planes with it and the CLI's --kv auto report prints it. */
+int  lz_n_dense_kv_apps(const LZModel *m);
 void lz_state_free(LZRunState *s);
+/* The aligned-free half of forward_state.c's xcalloc/xfree pair. Shared:
+   lz_state_free, above, frees the same buffers. */
+void xfree(void *p);
+/* Whether nf * batch_max * topk elements of elem_sz bytes each
+   (alloc_csa2_ring's own csa2_topk_idx_pub/csa2_topk_n_pub sizing)
+   would make xcalloc's OWN arithmetic wrap size_t - not just the
+   element count nf*batch_max*topk itself, but that count times
+   elem_sz plus xcalloc's own +16+sizeof(void*) overhead (forward_
+   state.c's own xcalloc comment has the exact expression this
+   mirrors), since xcalloc does no overflow checking of its own. A
+   version of this function that checked only the element count missed
+   exactly this: nf=32, batch_max=8, topk=4194304 gives an element
+   count (1073741824) that fits a 32-bit size_t comfortably, but that
+   count times sizeof(int) is exactly 2^32, wrapping to 0 one
+   multiplication later, inside xcalloc, where the first version could
+   not see it.
+
+   Split out as its own function, not inlined at alloc_csa2_ring's call
+   site, so a probe can drive it with SYNTHETIC nf/batch_max/elem_sz
+   values large enough to wrap on ANY size_t width - the real hazard is
+   32-bit-size_t-specific (c->n_full_layers <= LZ_MAX_LAYERS and
+   LZ_BATCH_MAX are both small, and c->csa2_topk is a 32-bit int either
+   way, so no in-range call alloc_csa2_ring actually makes can reach a
+   64-bit size_t's own overflow point - a probe running on this
+   project's 64-bit development host cannot reproduce the exact
+   production scenario end to end, only the arithmetic itself). */
+int lz_csa2_pub_overflows(size_t nf, size_t batch_max, int topk, size_t elem_sz);
+/* lz_rope_build_table's two runtime inputs, both defined in forward.c:
+   --rope-dynamic-ntk's on/off and --rope-orig-max. */
+extern int   lz_rope_dynamic_ntk;
+extern float lz_rope_orig_max;
+/* Exported so it can be exercised (and cross-checked against a
+   reference) without building a whole model - see its own doc comment
+   in forward_rope.c. lz_state_alloc's only caller besides tests. */
+void lz_rope_build_table(float *rope_cs, int seq_len,
+                         const LZModelConfig *c);
+/* Fill `dst` with the conjugate of an already-built `src` table (sin
+   negated), which is what makes lz_rope compute the INVERSE rotation -
+   LZRunState's own rope_cs_inv comment has the derivation. Same element
+   count as `src`; `n` is that count, i.e. seq_len * rotary_dim. */
+void lz_rope_conjugate_table(float *dst, const float *src, size_t n);
 /* Clear KV cache, SSM recurrent state and conv history; call before a new generation */
 void lz_state_reset(LZRunState *s, const LZModel *m);
 
@@ -1363,7 +1972,7 @@ float *lz_forward_capture(const LZModel *m, LZRunState *s, int token, int pos);
 /* One MTP draft step. Reads s->mtp_chain as the "hidden" input (seeded by
    lz_forward_capture for the first step of a round; OVERWRITTEN by this
    call with this step's own post-norm output, which is exactly upstream's
-   own chaining rule - see forward.c). next_token's embedding is the
+   own chaining rule - see forward_mtp.c). next_token's embedding is the
    step's "next token" input (the just-produced anchor/draft token).
    pos is this step's position in the MTP block's OWN numbering (see
    s->mtp_pos above) - NOT the body's absolute token position - used for
@@ -1373,6 +1982,68 @@ float *lz_forward_capture(const LZModel *m, LZRunState *s, int token, int pos);
    Returns a pointer to s->mtp_draft_logits (vocab entries), or NULL if
    m->mtp is NULL or pos is out of range. */
 float *lz_mtp_draft_step(const LZModel *m, LZRunState *s, int next_token, int pos);
+
+/* Debug-only: see forward.c's own comment next to the definition. */
+extern int lz_debug_mtp_attn_t1_slow;
+
+/* Debug-only: see forward.c's own comment next to each definition. */
+extern float lz_debug_mtp_attn_scale;
+extern lz_i64 lz_debug_us_draft;
+extern lz_i64 lz_debug_us_catchup;
+extern lz_i64 lz_debug_n_catchup;
+
+/* DSpark's T=1 attention shortcut - see forward_mtp.c's own extensive
+   comment next to the definition for the full argument (why K is
+   provably irrelevant, and the tier-by-tier V-side coverage). xb-in/
+   xb2-out, same convention forward_attn itself uses. Not static:
+   .prof/mtp_kdraft_check.c calls it directly for the bit-identity
+   comparison against forward_attn. */
+void mtp_attn_t1(const LZModel *m, LZRunState *s, const LZLayer *L);
+
+/* DSpark (arXiv:2607.05147), config.mtp_n_draft > 1 only: K
+   independent draft slots from the SAME anchor h_body, no self-chain.
+   `h_body` is the anchor's raw (pre-final-norm) hidden state - same
+   convention lz_forward_capture already seeds s->mtp_chain with for the
+   n_draft==1 chain's first step. `next_token` is the anchor's own real,
+   known next token (slot 0's input); slots 1..K-1 always read
+   m->mtp->mask_embed instead - see engine/mtp_head.py's MtpHead.forward
+   docstring, this is the fix for the found train/inference gap, not an
+   inference-only shortcut. `k` is this call's actual draft count
+   (<= config.mtp_n_draft, itself <= LZ_SPEC_K_MAX - see alloc_mtp).
+
+   Writes k rows of BASE (pre-Markov) logits into s->mtp_kdraft_logits and
+   returns it, or NULL if m->mtp is NULL, config.mtp_n_draft <= 1, or
+   next_token is out of range. Each slot's own attention runs at
+   position 0 of the MTP's reserved cache slot (LZ_MTP_CACHE_LAYER) -
+   deliberately NOT chained position-by-position the way
+   lz_mtp_draft_step advances `pos`, because each slot is an
+   independent, from-empty-state computation, not a continuation of the
+   previous one; the K slots being processed by a C for-loop rather
+   than genuine hardware parallelism is an implementation detail of
+   this scalar reference, not a reintroduction of the self-chain
+   dependency that made lz_mtp_draft_step's k>=2 path train/inference-
+   mismatched (see docs/dsv41-optimization-menu.md's DSpark section).
+
+   Markov correction is NOT applied here - see lz_mtp_markov_correct,
+   a separate call because it needs the PREVIOUS slot's already-decided
+   draft token, which is a sampling-policy decision this function does
+   not make (that decision is generate.c's - see lz_spec_round_dspark /
+   lz_spec_round_dspark_temp, which wire this into lz_generate's own
+   draft/verify loop). */
+float *lz_mtp_draft_batch(const LZModel *m, LZRunState *s, int next_token,
+                          int k);
+
+/* The DSpark Markov head's one-step lookback correction (Eq. 4-5):
+   adds markov_proj(markov_embed(x_prev)) onto `logits` (vocab entries)
+   IN PLACE. `x_prev` is the real token immediately preceding the
+   position `logits` was computed for - the anchor's own next token for
+   slot 0's correction, or the token DECIDED for slot i-1 (by whatever
+   sampling policy the caller uses) for slot i>=1's. Cheap by
+   construction (one embedding lookup + one small rank projection, no
+   attention, no second transformer pass) - see model.h's LZMtp comment
+   on why this does not compound the way a real self-chain would. */
+void lz_mtp_markov_correct(const LZModel *m, LZRunState *s, int x_prev,
+                           float *logits);
 
 /* Speculative-decode VERIFY pass: like lz_forward_batch (same chunking,
    same bit-identical-to-token-by-token guarantee for the hidden states),
@@ -1419,7 +2090,7 @@ float *lz_forward_batch_capture(const LZModel *m, LZRunState *s,
    array, not from a trained head, so it must work on a model with no
    MTP head bound at all - lz_forward_verify's own hard gate
    (`!m->mtp -> return 1`) and its s->mtp_logits/s->mtp_verify_hidden
-   destination (allocated only `if (m->mtp)`, forward.c's state-alloc)
+   destination (allocated only `if (m->mtp)`, forward_state.c's state-alloc)
    both rule it out for that caller. This function shares forward_chunk
    with lz_forward_verify - same math, same rounding, same chunking -
    the only difference is which buffer the per-position logits land in
@@ -1429,7 +2100,7 @@ float *lz_forward_batch_capture(const LZModel *m, LZRunState *s,
    one) and does not touch s->ssm_slot's rollback RING beyond whatever
    forward_chunk's own all_logits=1 path already does unconditionally
    (advance by nt, same as lz_forward_verify) - a caller on a model with
-   no MTP head has s->ssm_ring_depth==1 (forward.c's state-alloc), so
+   no MTP head has s->ssm_ring_depth==1 (forward_state.c's state-alloc), so
    that advance is a same-slot no-op and rollback has to happen the way
    lz_look_pick's own comment already documents for that situation: an
    LZStateCkpt save before this call, restore (+ replay of whatever
@@ -1444,14 +2115,14 @@ int lz_forward_verify_into(const LZModel *m, LZRunState *s,
 
 /* Run the MTP block over n prompt positions purely to populate its own
    KV cache before the first speculative round - see s->mtp_pos's
-   comment above and this function's own comment in forward.c for why a
+   comment above and this function's own comment in forward_mtp.c for why a
    fresh generation would otherwise start every round blind. h_body_all[i] is
    the body's post-final-norm hidden at position pos0+i
    (lz_forward_batch_capture's own output); next_tokens[i] is the
    actual prompt token
    that followed position pos0+i (the MTP's ground-truth "next token"
    input, same role lz_mtp_draft_step's next_token argument plays for
-   one chained step). Output logits are never computed - see forward.c;
+   one chained step). Output logits are never computed - see forward_mtp.c;
    this call's only observable effect is the KV cache rows forward_attn
    writes as a side effect. Returns 0 on success, nonzero (no errbuf -
    same convention lz_forward_batch/lz_forward_verify use) on a NULL/

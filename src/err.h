@@ -27,7 +27,7 @@ typedef enum {
     LZ_ERR_READ_SHORT,         /* short read: got %lu / %ld bytes */
     LZ_ERR_NULL_ARG,           /* null argument */
     LZ_ERR_STATE_ALLOC,        /* runtime state allocation failed */
-    /* conv_f32_build's (forward.c) coverage check: a linear/KDA layer's
+    /* conv_f32_build's (forward_state.c) coverage check: a linear/KDA layer's
        conv1d (or kda_q/k/v_conv1d triple) channel counts do not sum to
        lin_conv_dim. A checkpoint layout problem, not an allocation
        failure - kept out of LZ_ERR_STATE_ALLOC so a report of this code
@@ -73,9 +73,10 @@ typedef enum {
     LZ_ERR_LOOK_W_RANGE,       /* lookahead width %d out of range 1..%d */
     LZ_ERR_LOOK_D_RANGE,       /* lookahead depth %d out of range 1..%d */
     /* No error codes for non-identity penalties or temperature>0 on the
-       speculative path: verify applies penalties via an assumed window
-       (generate.c), and lz_generate_resume dispatches temperature>0 to
-       lz_spec_round_temp. */
+       speculative path, DSpark (config.mtp_n_draft > 1) included: verify
+       applies penalties via an assumed window (generate.c), and
+       lz_generate_resume dispatches temperature>0 to lz_spec_round_temp
+       or, on a DSpark model, lz_spec_round_dspark_temp. */
 
     /* prompt lookup decoding (generate.c lz_pld_round) */
     LZ_ERR_PLD_NGRAM_RANGE,    /* pld_ngram %d out of range 1..%d */
@@ -108,6 +109,22 @@ typedef enum {
     LZ_ERR_CFG_MOE_FIELDS,     /* invalid MoE fields: num_experts=%d top_k=%d first_k_dense_replace=%d */
     LZ_ERR_CFG_HADAMARD,       /* %s=%d is not a power of two dividing %s=%d */
     LZ_ERR_CFG_ROPE_CONFLICT,  /* rope_parameters %s=%d disagrees with %s=%d */
+    LZ_ERR_CFG_ROPE_YARN_FIELDS, /* rope_type=yarn needs factor and original_max_position_embeddings, got factor x1000=%d orig_max=%d */
+    LZ_ERR_CFG_FFN_ACT,        /* ffn_activation is not one of none/situ/gptoss_clamp, got %s */
+    LZ_ERR_CFG_MLA_SUBN,       /* mla_q_lora_rank/mla_o_lora_rank is not compatible with use_subn */
+    LZ_ERR_CFG_CSA2_LAYER,     /* csa2_layers names layer %d, which is not full_attention */
+    LZ_ERR_CFG_CSA2_MODE,      /* csa2_kv_mode entry for layer %d is invalid: %s */
+    LZ_ERR_CFG_CSA2_SOURCE,    /* csa2_kv_source entry for layer %d is invalid: %s */
+    LZ_ERR_CFG_CSA2_COMPRESS_M, /* csa2_compress_m_layers entry for layer %d is invalid: %s (layer -1 = the csa2_compress_m scalar itself) */
+    LZ_ERR_CFG_CSA2_MLA,       /* csa2_on layer %d requires mla_q_lora_rank == 0 (S4 composition unsupported) */
+    LZ_ERR_CFG_CSA2_IDX_K,     /* indexer K reads the compressed latent (head_dim), but tensor %s projects from hidden (in_features %" LZ_PRI64 "d) - hidden-state input space checkpoint. The template here is spelled as SOURCE (lz_int.h's LZ_PRI64), not as its expansion: this comment is what a reader copies a format string out of, and copying an expanded %lld would put back the bare modifier err.c's own table rule forbids. */
+    LZ_ERR_CFG_CSA2_IDX_ROTARY, /* csa2_on layer %d (FULL): rotary_dim %d exceeds csa2_indexer_head_dim %d, and the rotation writes base[i + rotary_dim/2] inside the indexer key's row */
+    LZ_ERR_CFG_CED_KV,         /* ced_kv is not one of off/proj, got %s */
+    LZ_ERR_CFG_CED_LOCAL,      /* ced_local %d is on with ced_kv off or with no decoder-region CSA2 full-mode layer to carry it (ced_split %d) */
+    LZ_ERR_CFG_CED_LOCAL_LAYER, /* layer %d is at or past ced_split %d and full attention, but not a CSA2 full-mode layer, so its ced_local window weights would load and never be read */
+    LZ_ERR_CFG_UNSUPPORTED_ARCH, /* checkpoint is neither GDN (Qwen3.5) nor KDA (KunMoe) shape */
+    LZ_ERR_CFG_ATTN_GATE,      /* attn_output_gate must be true: the forward reads the gate half of every attention head unconditionally */
+    LZ_ERR_CFG_ROPE_KEY,       /* unsupported rope_parameters key: %s */
 
     /* model tensors */
     LZ_ERR_TENSOR_MISSING,     /* missing tensor %s */
@@ -130,6 +147,8 @@ typedef enum {
     LZ_ERR_BIN_MAGIC,          /* not a model.bin (bad magic) */
     LZ_ERR_BIN_VERSION,        /* unsupported model.bin version %u */
     LZ_ERR_BIN_PAD,            /* nonzero layer_types padding */
+    LZ_ERR_BIN_CSA2_PAD,       /* nonzero csa2_on padding */
+    LZ_ERR_BIN_FIELD_RANGE,    /* model.bin header field %s out of range */
     LZ_ERR_BIN_CFG,            /* model.bin config invalid */
 
     /* tokenizer */
@@ -220,6 +239,83 @@ typedef enum {
        (-DLZ_BIG_ENDIAN=0/1), not anything about the model file the user
        was pointing at when it fired. */
     LZ_ERR_ENDIAN_MISMATCH,    /* built for the wrong byte order */
+
+    /* --ced was asked for on a model whose LAST layer is not full
+       attention. CED keeps exactly one thing across the prefix: the
+       decoder layer's own K/V, computed from the encoder's exit hidden.
+       A linear-attention last layer has no such K/V, so the flag would
+       have nothing to keep - and the guard that would skip the layer
+       sits inside the full-attention branch, where it can never fire.
+       That is a silent no-op, not a cheaper run, so it refuses. */
+    LZ_ERR_CED_LAST_LAYER,     /* --ced needs the last layer to be full attention */
+
+    /* mtp_n_draft above LZ_SPEC_K_MAX (ops.h) - the runtime ceiling on
+       draft depth everywhere else in this engine, not a new bound
+       invented for DSpark support. */
+    LZ_ERR_MTP_NDRAFT,         /* mtp_n_draft %d exceeds LZ_SPEC_K_MAX %d */
+
+    /* mtp_markov_rank above 3*hidden_size. lz_mtp_markov_correct reads
+       markov_embed's row into mtp_kdraft_concat, a fixed 3*hidden
+       scratch buffer it shares with lz_mtp_draft_batch's base stage
+       (that buffer's content is dead by the time the correction runs -
+       forward_mtp.c's own comment on embed_row) - a rank past that size
+       would overflow it. */
+    LZ_ERR_MTP_MARKOV_RANK,   /* mtp_markov_rank %d exceeds 3*hidden_size %d */
+
+    /* An allocation failed and the call site can name it. LZ_ERR_OOM
+       stays for sites that have nothing to add; this one exists so a
+       report says WHICH allocation ran out, because on this target the
+       difference between "the model does not fit" and "one scratch
+       buffer did not" is the whole diagnosis. */
+    LZ_ERR_OOM_ALLOC,          /* out of memory allocating %s */
+
+    /* The bin v6 header (spec section 3.1) describes one product this
+       engine still cannot run: an engram key table names rows it has no
+       lookup for, so the module contributes zeros, and it fails SILENTLY
+       if loaded rather than loudly. Refused at load time on both paths,
+       by field name.
+
+       The rotated vocabulary that shared this comment is APPLIED now
+       (fwht.c; model.h's own field comment lists the nine sites), so
+       what its error still catches is the config the trainer would not
+       have rotated: both hooks are wired only under ternary_embed
+       (kunmoe_modeling's _wire_ternary_embed returns before registering
+       them otherwise), and a config.json asking for the rotation without
+       that flag holds rows still in the primal basis - running would
+       rotate a matrix the training forward never did, which is a
+       different model and not a parse error. The block itself (a power
+       of two dividing hidden_size) is refused on both paths by the
+       field-range code, and tools/export_q8.py refuses the
+       ternary pairing the .bin header cannot express. */
+    LZ_ERR_CFG_EMBED_HADAMARD, /* rotation requested on a config without ternary_embed */
+    LZ_ERR_CFG_ENGRAM_KEYS,    /* config.json names an engram key table the model directory lacks */
+    LZ_ERR_ENGRAM_KEYS_FILE,   /* the engram key table could not be opened or read */
+    LZ_ERR_ENGRAM_KEYS_FORMAT, /* not a sorted 1-D int64 .npy (wrong dtype, shape, order, or unsorted) */
+    /* A CSA2 layer OUTSIDE CED's global branch, run more than once,
+       compresses each pass's own hidden state, so the two passes would
+       lay different entries into the single ring they share (cache_idx
+       is per PHYSICAL layer). A ced_kv_target layer does not take this
+       code: report SS2.2 Eq 1 makes its entry a function of h_{L/2} and
+       the layer's own weights, nothing the pass supplies. Dense-KV
+       planes take neither this code nor a guard: they are numbered per
+       application (forward.h's app_dense_idx). */
+    LZ_ERR_CFG_LOOP_KV,        /* repeated CSA2 layer compresses per pass */
+    /* The loop fields cannot describe a block: loop_repeats < 1, a block
+       that does not start at ced_split, or a block + coda that does not
+       reach the last layer. Raised by model.c's derivation and by the
+       exporter's loop_schedule, which must agree. */
+    LZ_ERR_CFG_LOOP_CONFIG,    /* config.json loop_* fields are inconsistent */
+    /* loop_input_mix names a mode this loader does not implement. The
+       refusal is the posture ced_kv takes on "reuse": a mode the loader
+       cannot name is a model it would run without the injection, which
+       is a different model with no error anywhere. */
+    LZ_ERR_CFG_LOOP_INPUT_MIX, /* loop_input_mix names an unknown mode */
+    /* loop_input_mix_from names a pass the schedule does not run: the
+       mix is on and the start pass is < 1 or past the block's last pass
+       (the pass count read back out of the application table). Raised by
+       the same shared check on both loaders; the exporter refuses the
+       same shapes before writing. */
+    LZ_ERR_CFG_LOOP_INPUT_MIX_FROM, /* mix start pass not in 1..repeats */
 
     /* Generic failure. Two jobs, and it must stay LAST before
        LZ_ERR_COUNT for the second one:

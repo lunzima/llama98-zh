@@ -28,11 +28,15 @@ void forward_ssm(const LZModel *m, LZRunState *s,
     const LZModelConfig *c = &m->config;
     int nk = c->lin_n_k_heads, nv = c->lin_n_v_heads;
     int kd = c->lin_k_head_dim, vd = c->lin_v_head_dim;
-    int li = s->cache_idx[layer];
+    /* li addresses the application's state, wli the layer's
+       weight-derived caches - see forward_kda's note; they differ from a
+       loop tower's second pass on. */
+    int li = s->app_slot[layer];
+    int wli = s->cache_idx[layer];
     int ring_depth = s->ssm_ring_depth;
-    size_t q8_slot_stride = (size_t)c->n_linear_layers * nv * kd * vd;
+    size_t q8_slot_stride = (size_t)s->n_linear_apps * nv * kd * vd;
     size_t s_slot_stride  = q8_slot_stride / 32;
-    size_t conv_slot_stride = (size_t)c->n_linear_layers *
+    size_t conv_slot_stride = (size_t)s->n_linear_apps *
                               c->lin_conv_dim * (c->conv_kernel - 1);
     size_t li_off_q8 = (size_t)li * nv * kd * vd;
     size_t li_off_conv = (size_t)li * c->lin_conv_dim * (c->conv_kernel - 1);
@@ -41,7 +45,7 @@ void forward_ssm(const LZModel *m, LZRunState *s,
        conv_f32_build and the fixed tier's `cb` (below, s->conv_mw) use.
        NOT hist-scaled like li_off_conv above: this indexes taps
        (conv_kernel per channel), not rolling history (conv_kernel-1). */
-    size_t li_off_w = (size_t)li * c->lin_conv_dim * c->conv_kernel;
+    size_t li_off_w = (size_t)wli * c->lin_conv_dim * c->conv_kernel;
     float scale = s->ssm_scale;
     int hdim = c->hidden_size, cdim = c->lin_conv_dim, vdim = c->lin_value_dim;
     int gsa = lz_act_gs(&L->in_proj_qkv, hdim);
@@ -80,7 +84,7 @@ void forward_ssm(const LZModel *m, LZRunState *s,
                covers lin_conv_dim in a single tensor. Wiring only KDA
                would leave a model with SSM layers half on each tier,
                which no banner line would show. */
-            size_t cb = (size_t)li * c->lin_conv_dim;
+            size_t cb = (size_t)wli * c->lin_conv_dim;
             /* No int16 input here (int-pipeline milestone 3 wired only
                KDA's three): the producer is in_proj_qkv, and on every
                checkpoint in this tree that tensor is EITHER absent
@@ -148,6 +152,10 @@ void forward_ssm(const LZModel *m, LZRunState *s,
             const int8_t *sq2_in  = s->ssm_state_q8_lo + (size_t)slot_in  * q8_slot_stride + h_off_q8;
             int8_t       *sq2_out = s->ssm_state_q8_lo + (size_t)slot_out * q8_slot_stride + h_off_q8;
 #endif /* LZ_GDN_STATE_2PLANE */
+#if LZ_GDN_STATE_F32
+            const float *sf_in  = s->ssm_state_f32 + (size_t)slot_in  * q8_slot_stride + h_off_q8;
+            float       *sf_out = s->ssm_state_f32 + (size_t)slot_out * q8_slot_stride + h_off_q8;
+#endif /* LZ_GDN_STATE_F32 */
             const float *ss_in  = s->ssm_state_s + (size_t)slot_in  * s_slot_stride + h_off_s;
             float       *ss_out = s->ssm_state_s + (size_t)slot_out * s_slot_stride + h_off_s;
             const float *qp = s->qkv_c + (size_t)tk * cdim;
@@ -181,6 +189,9 @@ void forward_ssm(const LZModel *m, LZRunState *s,
 #if LZ_GDN_STATE_2PLANE
                         sq2_in, sq2_out,
 #endif /* LZ_GDN_STATE_2PLANE */
+#if LZ_GDN_STATE_F32
+                        sf_in, sf_out,
+#endif /* LZ_GDN_STATE_F32 */
                         ss_in, ss_out, s->qn, s->kn, v_t,
                         (const short *)0, 0.0f, NULL, gt, beta, kd, vd);
             LZ_PROF_END(_tr, LZ_PROF_REC);

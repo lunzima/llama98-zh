@@ -196,7 +196,7 @@ extern lz_i64 lz_debug_us_capture;
    are indistinguishable without this. */
 extern lz_i64 lz_debug_n_capture;
 /* Part 6: timer + call-count pair for catch-up decode - see
-   forward.c's own comment on lz_mtp_catchup for why it is a separate
+   forward_mtp.c's own comment on lz_mtp_catchup for why it is a separate
    entry point from lz_mtp_prefill. */
 extern lz_i64 lz_debug_us_catchup;
 extern lz_i64 lz_debug_n_catchup;
@@ -224,6 +224,10 @@ extern lz_i64 lz_debug_n_lmhead;
 /* sink+window's row-skip positive control, forward.c. Zero when no
    window is set; non-zero only if evicted rows were really skipped. */
 extern lz_i64 lz_debug_attn_skip;
+extern lz_i64 lz_debug_ced_skipped;
+extern lz_i64 lz_debug_ced_replay_layers;
+extern const char *lz_dump_prefill_path;
+extern lz_i64 lz_debug_prefill_dumps;
 /* Whether the epi dispatch left the C loop for this build's vector
    body. The identity gate cannot answer that: it compares ref against
    the tier and both produce the same bytes, so it passes whether the
@@ -297,6 +301,7 @@ extern int lz_kv_kfmt;
 extern int lz_kv_vfmt;
 extern int lz_attn_sink;
 extern int lz_attn_window;
+extern int lz_ced;
 extern int lz_moe_topk;
 extern float lz_moe_tau;
 extern int lz_prof_enable;
@@ -365,6 +370,14 @@ static void usage(void) {
     "                   of 131 KB: top-5 ids ((n_tokens-1) x 5 int32).\n"
     "  --dump-prompt-tokens F  Write the encoded prompt's token ids instead\n"
     "                   of generating (cross-build argv/encoding probe).\n"
+    "  --dump-prefill F  Write the logits the batched PREFILL returned (f32,\n"
+    "                   vocab). --dump-logits cannot: it belongs to the\n"
+    "                   --tokens path, which forwards one token at a time\n"
+    "                   and so has no prefix for --ced to skip.\n"
+    "  --dump-schedule F  Write the application table the engine resolved\n"
+    "                   (exec_len, app_layer[], app_loop[], int32 each);\n"
+    "                   a config-only directory dumps the derived table\n"
+    "                   without loading weights.\n"
     "  --tokens-file F  Read --tokens list from a file (long sequences)\n"
     "  --topk N         Show top-N candidates (default 5)\n"
     "\n"
@@ -421,14 +434,31 @@ static void usage(void) {
     "                   stderr, so redirecting stdout keeps the output\n"
     "                   clean either way.\n"
     "  --no-ckpt        Disable cross-turn prefix reuse (-i only)\n"
-    "  --kv MODE        q8|q4|f32 (default q8). q4 halves KV bytes and turns\n"
-    "                   rotation on. f32 is the measuring arm, not a\n"
-    "                   deployment mode.\n"
+    "  --kv MODE        auto|q8|q4|f32 (default auto). auto picks by the\n"
+    "                   model: dense planes get K q8 / V q4 with rotation\n"
+    "                   on (the measured arm - 4-bit KV without the\n"
+    "                   rotation costs +6.7%%/+21.4%% PPL, with it\n"
+    "                   +0.6%%/+1.7%%), and a tower with no dense planes\n"
+    "                   is left alone. Naming a format pins both sides.\n"
+    "                   q4 halves KV bytes and turns rotation on. f32 is\n"
+    "                   the measuring arm, not a deployment mode.\n"
     "  --kv-k FMT       Override --kv's K format alone (same values).\n"
     "  --kv-v FMT       Override --kv's V format alone (same values).\n"
+    "  --csa2-ring FMT  f32|bf16|q8|q16 (default bf16 under --kv auto) for\n"
+    "                   the two finalized CSA2\n"
+    "                   rings. Storage only: every read is widened back to\n"
+    "                   f32 before any arithmetic, so bf16 changes what is\n"
+    "                   held, not what is computed. f32 is the identity\n"
+    "                   tier; bf16 is a quality tier.\n"
     "  --attn-sink N    StreamingLLM eviction: keep the first N positions.\n"
     "  --attn-window W  ... and the most recent W (default AUTO = max(1024,\n"
     "                   ctx/2), N=16; W=0 turns eviction off).\n"
+    "  --ced on|off     Causal encoder/decoder split (default off). On, the\n"
+    "                   LAST layer skips the prefix in prefill: its K/V is\n"
+    "                   still written for every position, from the encoder's\n"
+    "                   exit hidden, but its attention and FFN run for the\n"
+    "                   final chunk only. Logits and KV come out identical\n"
+    "                   to off; needs the last layer to be full attention.\n"
     "  --kv-rot MODE    on|off (default OFF). Hadamard-rotate Q/K/V before\n"
     "                   KV quantization.\n"
     "  --rope-dynamic-ntk MODE  on|off (default OFF). Off reproduces the\n"
@@ -466,6 +496,19 @@ static void usage(void) {
     "                   floating one tier at a time measured worse than\n"
     "                   BOTH ends on six of seven axes, while the two ends\n"
     "                   are indistinguishable from each other.\n"
+    "  --epi MODE       on|off (default on). The dequant epilogue's own\n"
+    "                   axis and the one exception to the sentence above.\n"
+    "                   It is not a third --fixed setting: off floats\n"
+    "                   that single tier while conv, norms, sigmoid,\n"
+    "                   recurrence and attention stay fixed, which is\n"
+    "                   the state --fixed off cannot produce.\n"
+    "                   --kernel ref reaches matmul_scalar_ref before any\n"
+    "                   epilogue is selected, so ref and the SIMD tiers\n"
+    "                   differ on the shipping default for this one\n"
+    "                   reason; off removes it and nothing else, which\n"
+    "                   is the pair build/kernel_isa_identity_gate.sh\n"
+    "                   compares. Inert under --fixed off, where the\n"
+    "                   epilogue is already floated.\n"
     "  --fp-exceptions  Report which IEEE special cases this run actually\n"
     "                   hit (IE invalid/NaN, DE denormal, ZE div-by-zero,\n"
     "                   OE overflow, UE underflow, PE inexact), read from\n"
@@ -488,10 +531,13 @@ static void usage(void) {
     "  --fastfp MODE    on|off (default on). RTZ+FTZ rounding, the default\n"
     "                   float semantics; x86 and ARM are byte-identical\n"
     "                   under it. off = round-to-nearest (diagnostic).\n"
-    "  --subn-scale MODE   tok|group (default tok). Width of one INT8\n"
-    "                   activation scale on the SubLN o_proj/down_proj input.\n"
+    "  --subn-scale MODE   auto|tok|group (default auto). Width of one INT8\n"
+    "                   activation scale on the KDA/FFN SubLN path (q/k/v/g\n"
+    "                   norms, f_a/b, o_proj and down_proj inputs).\n"
     "                   tok is BitNet v2's per-token absmax; group keeps the\n"
-    "                   engine's own per-32 grouping across the Hadamard.\n"
+    "                   engine's own per-32 grouping across the Hadamard;\n"
+    "                   auto is tok for a BitLinear-trained (ternary, no\n"
+    "                   experts) model and group for every other one.\n"
     "                   Value-changing, and inert unless the model sets\n"
     "                   use_subn. NOT a fixed-point tier: --fixed skips it.\n"
     "  --hadamard MODE     on|off (default on). The SubLN block Hadamard's\n"
@@ -523,6 +569,16 @@ static void usage(void) {
    the pair unlinked would make the obvious invocation the broken one. A
    later --kv-rot off still wins, which is what keeps the comparison
    arms reachable. */
+/* --csa2-ring's two tiers. f32 is the identity tier and the default; see
+   forward.h's LZ_CRF_* comment for what the contract between them is. */
+static int parse_csa2_ringfmt(const char *m) {
+    if (strcmp(m, "f32") == 0)  return LZ_CRF_F32;
+    if (strcmp(m, "bf16") == 0) return LZ_CRF_BF16;
+    if (strcmp(m, "q8") == 0)   return LZ_CRF_Q8;
+    if (strcmp(m, "q16") == 0)  return LZ_CRF_Q16;
+    return -1;
+}
+
 static int parse_kvfmt(const char *m) {
     if (strcmp(m, "q8") == 0)   return LZ_KVF_Q8;
     if (strcmp(m, "f32") == 0)  return LZ_KVF_F32;
@@ -696,46 +752,50 @@ static void print_config(const LZModelConfig *c) {
     printf("  (L=linear, A=full)\n");
 }
 
-/* Streaming tensor stats: f32 direct scan; Q8 dequantize per group. */
+/* Tensor stats for bin/safetensors parity: scan the dequantized f32
+   values. F32 is scanned in place; every other format goes through
+   lz_t_f32 into a one-shot scratch, so the checksum is over the same
+   numbers the forward multiplies - not over codes or scales. */
 static void tensor_stats_t(const char *name, const LZTensor *t) {
     float sum = 0.0f, sumsq = 0.0f, amax = 0.0f;
     lz_u64 chk = 0;
     lz_i64 i, n_nan = 0;
     lz_i64 n = t ? t->n : 0;
+    const float *v = NULL;
+    float *scratch = NULL;
 
-    if (t->dtype == 0 && t->f) {
-        for (i = 0; i < n; i++) {
-            unsigned int u;
-            float v = t->f[i];
-            memcpy(&u, &t->f[i], sizeof(u));
-            chk += (lz_u64)u * (lz_u64)(i + 1);
-            if (!(v == v)) { n_nan++; continue; }
-            sum += v;
-            sumsq += v * v;
-            if (v < 0.0) v = -v;
-            if (v > amax) amax = v;
-        }
-    } else if (t->dtype == 1 && t->q && t->scale) {
-        lz_i64 g, k;
-        for (g = 0; g < n / t->gs; g++) {
-            float sv = t->scale[g];
-            for (k = 0; k < t->gs; k++) {
-                float v = (float)t->q[g * t->gs + k] * sv;
-                unsigned int u;
-                float fv = (float)v;
-                memcpy(&u, &fv, sizeof(u));
-                chk += (lz_u64)u * (lz_u64)(g * t->gs + k + 1);
-                if (!(v == v)) { n_nan++; continue; }
-                sum += v;
-                sumsq += v * v;
-                if (v < 0.0) v = -v;
-                if (v > amax) amax = v;
-            }
-        }
-    } else {
+    if (!t || n <= 0) {
         printf("  %-46s (not loaded)\n", name);
         return;
     }
+    if (t->dtype == LZ_FMT_F32 && t->f) {
+        v = t->f;
+    } else {
+        scratch = (float *)malloc((size_t)n * sizeof(float));
+        if (!scratch) {
+            printf("  %-46s (scratch alloc failed, n=%lld)\n", name, n);
+            return;
+        }
+        v = lz_t_f32(t, scratch);
+        if (!v) {
+            free(scratch);
+            printf("  %-46s (dequant unavailable: dtype=%d)\n", name,
+                   t->dtype);
+            return;
+        }
+    }
+    for (i = 0; i < n; i++) {
+        unsigned int u;
+        float x = v[i];
+        memcpy(&u, &x, sizeof(u));
+        chk += (lz_u64)u * (lz_u64)(i + 1);
+        if (!(x == x)) { n_nan++; continue; }
+        sum += x;
+        sumsq += x * x;
+        if (x < 0.0) x = -x;
+        if (x > amax) amax = x;
+    }
+    free(scratch);
     {
         char _b0[LZ_FTOA_BUF], _b1[LZ_FTOA_BUF], _b2[LZ_FTOA_BUF];
         float _rms;
@@ -1136,6 +1196,7 @@ int main(int argc, char **argv) {
     FILE *af = NULL;    /* --dump-all-logits stream, fclosed after the loop */
     FILE *tf = NULL;    /* --dump-top5 stream, same lifetime as af */
     int only_check = 0, list_tensors = 0, want_stats = 0, only_layer = -1;
+    const char *sched_path = NULL;
     int want_fpexc = 0;         /* --fp-exceptions, see the flag's usage */
     int *tokens = NULL, n_tokens = 0, topk = 5;
     int n_gen = 0;                  /* -n new tokens for generation */
@@ -1159,9 +1220,12 @@ int main(int argc, char **argv) {
        themselves live in sampler.h, next to lz_sample_apply_think_preset. */
     unsigned int manual = 0;
     int ckpt_on = 1;    /* --no-ckpt turns prefix reuse off (A/B knob) */
+    int kv_auto = 1;    /* --kv unset: pick per model after lz_open */
+    int ring_pinned = 0; /* --csa2-ring given: leave it alone */
     LZGenOpts g;
     LZModelConfig *cfg;
     int i, rc = 0;
+    int have_st;        /* m.st holds a table - see its assignment below */
     float t0, t1;
 
     memset(&m, 0, sizeof m);
@@ -1265,6 +1329,8 @@ int main(int argc, char **argv) {
             }
         }
         else if (strcmp(a, "--check") == 0)   only_check = 1;
+        else if (strcmp(a, "--dump-schedule") == 0 && i + 1 < argc)
+            sched_path = argv[++i];
         else if (strcmp(a, "--tensors") == 0) list_tensors = 1;
         else if (strcmp(a, "--pin-tiers") == 0) {
             /* For scripts. Every cross-target or cross-build comparison
@@ -1425,6 +1491,8 @@ int main(int argc, char **argv) {
             top5_path = argv[++i];
         else if (strcmp(a, "--dump-prompt-tokens") == 0 && i + 1 < argc)
             prompt_tok_path = argv[++i];
+        else if (strcmp(a, "--dump-prefill") == 0 && i + 1 < argc)
+            lz_dump_prefill_path = argv[++i];
         else if (strcmp(a, "--tokens-file") == 0 && i + 1 < argc) {
             /* A 4k-token id list is ~24 KB of argv, which several shells
                and Win98's command line will not carry. Same parser, the
@@ -1677,6 +1745,21 @@ int main(int argc, char **argv) {
                 return 2;
             }
         }
+        else if (strcmp(a, "--epi") == 0 && i + 1 < argc) {
+            /* Outside the --fixed group on purpose, and the one switch
+               that narrows that group rather than joining it: `--fixed
+               off` floats the epilogue along with conv, norms, sigmoid,
+               recurrence and attention, so it cannot produce the state
+               this exists for - the epilogue floated while every other
+               fixed kernel stays fixed. That state is what separates
+               --kernel ref from --kernel sse2 without a second build;
+               see ops_sched.c's lz_epi_mode. */
+            const char *got = lz_epi_fixed_select(argv[++i]);
+            if (!got) {
+                printf("--epi: unknown mode (on|off)\n");
+                return 2;
+            }
+        }
         else if (strcmp(a, "--fastfp") == 0 && i + 1 < argc) {
             /* Round-toward-zero + flush-to-zero, the same contract on
                both targets. Outside the --fixed group table for the same
@@ -1709,7 +1792,7 @@ int main(int argc, char **argv) {
                off` must leave it alone. */
             const char *got = lz_subn_scale_select(argv[++i]);
             if (!got) {
-                printf("--subn-scale: unknown mode (tok|group)\n");
+                printf("--subn-scale: unknown mode (auto|tok|group)\n");
                 return 2;
             }
         }
@@ -1752,20 +1835,36 @@ int main(int argc, char **argv) {
         else if (strcmp(a, "--no-beep") == 0) beep = 0;
         else if (strcmp(a, "--no-ckpt") == 0) ckpt_on = 0;
         else if (strcmp(a, "--kv") == 0 && i + 1 < argc) {
-            int f = parse_kvfmt(argv[++i]);
-            if (f < 0) { usage(); return 2; }
-            lz_kv_kfmt = f;
-            lz_kv_vfmt = f;
+            /* "auto" is the DEFAULT and picks per model - see the
+               resolution after lz_open. Naming a format pins both sides
+               and turns auto off, so every old command line keeps
+               meaning what it meant. */
+            if (strcmp(argv[i + 1], "auto") == 0) { kv_auto = 1; i++; }
+            else {
+                int f = parse_kvfmt(argv[++i]);
+                if (f < 0) { usage(); return 2; }
+                lz_kv_kfmt = f;
+                lz_kv_vfmt = f;
+                kv_auto = 0;
+            }
         }
         else if (strcmp(a, "--kv-k") == 0 && i + 1 < argc) {
             int f = parse_kvfmt(argv[++i]);
             if (f < 0) { usage(); return 2; }
             lz_kv_kfmt = f;
+            kv_auto = 0;
         }
         else if (strcmp(a, "--kv-v") == 0 && i + 1 < argc) {
             int f = parse_kvfmt(argv[++i]);
             if (f < 0) { usage(); return 2; }
             lz_kv_vfmt = f;
+            kv_auto = 0;
+        }
+        else if (strcmp(a, "--csa2-ring") == 0 && i + 1 < argc) {
+            int f = parse_csa2_ringfmt(argv[++i]);
+            if (f < 0) { usage(); return 2; }
+            lz_csa2_ring_fmt = f;
+            ring_pinned = 1;
         }
         else if (strcmp(a, "--profile") == 0) { lz_prof_enable = 1; }
         else if (strcmp(a, "--moe-topk") == 0 && i + 1 < argc) {
@@ -1791,6 +1890,15 @@ int main(int argc, char **argv) {
         }
         else if (strcmp(a, "--attn-window") == 0 && i + 1 < argc) {
             lz_attn_window = atoi(argv[++i]);
+        }
+        else if (strcmp(a, "--ced") == 0 && i + 1 < argc) {
+            const char *m = argv[++i];
+            if (strcmp(m, "on") == 0)       lz_ced = 1;
+            else if (strcmp(m, "off") == 0) lz_ced = 0;
+            else {
+                fprintf(stderr, "llama98: --ced takes on|off, not '%s'\n", m);
+                return 2;
+            }
         }
         /* --kv-rot-v and --qjl-dim are not offered. The V-side width
            stays at its swept value of 64 internally (forward.c's own
@@ -1861,6 +1969,41 @@ int main(int argc, char **argv) {
     }
 
     t0 = lz_time_ms();
+    /* --dump-schedule ON A CONFIG-ONLY DIRECTORY: the application table is
+       a function of config, and the gate that compares it against
+       engine/loop_schedule.py is stronger when it can vary the geometry
+       without a checkpoint per shape. A directory with weights takes the
+       normal path below and dumps the table it actually loaded. */
+    if (sched_path) {
+        char cpath[1024], stpath[1024], bpath[1024];
+        FILE *probe;
+        int have_w = 0;
+        snprintf(cpath, sizeof(cpath), "%s/config.json", dir);
+        snprintf(stpath, sizeof(stpath), "%s/model.safetensors", dir);
+        snprintf(bpath, sizeof(bpath), "%s/model.bin", dir);
+        if ((probe = fopen(stpath, "rb")) != NULL) { fclose(probe); have_w = 1; }
+        if ((probe = fopen(bpath, "rb")) != NULL) { fclose(probe); have_w = 1; }
+        if (!have_w) {
+            LZModelConfig c;
+            FILE *sf;
+            int n;
+            memset(&c, 0, sizeof(c));
+            if (lz_load_config(&c, cpath, err, sizeof(err)) != 0) {
+                printf("Failed to load: %s\n", err);
+                goto fail;
+            }
+            n = c.exec_len;
+            sf = fopen(sched_path, "wb");
+            if (!sf) { printf("cannot write %s\n", sched_path); goto fail; }
+            fwrite(&n, sizeof(n), 1, sf);
+            fwrite(c.app_layer, sizeof(int), (size_t)n, sf);
+            fwrite(c.app_loop, sizeof(int), (size_t)n, sf);
+            fclose(sf);
+            printf("Wrote %s (exec_len %d)\n", sched_path, n);
+            goto cleanup;
+        }
+    }
+
     if (lz_open(&m, dir, err, sizeof(err)) != 0) {
         printf("Failed to load: %s\n", err);
         goto fail;
@@ -1868,10 +2011,79 @@ int main(int argc, char **argv) {
     t1 = lz_time_ms();
     cfg = &m.config;
 
+    /* KV DEFAULT BY MODEL, not by user memory. The two towers do not
+       have the same KV at all: a CSA2 tower has no dense planes
+       (n_dense_kv == 0) and its cache is two compressed rings, while the
+       Qwen3.5 tower's cache is ordinary K/V planes. One --kv default
+       cannot describe both.
+
+         dense planes: q4 on both sides. cli_main.c's own note above
+           parse_kvfmt records the measurement - 4-bit KV WITHOUT the
+           rotation costs +6.7% PPL English / +21.4% Chinese, WITH it
+           +0.6% / +1.7% - and parse_kvfmt turns the rotation on for q4,
+           so this is the measured arm, not a guess.
+         CSA2 rings: bf16. forward.h's LZ_CRF_* note calls bf16 the
+           quality tier (no scale plane, one rounding, half the bytes);
+           f32 stays the identity tier and `--csa2-ring f32` returns to
+           it.
+
+       A named --kv / --kv-k / --kv-v / --csa2-ring pins its side and
+       switches the corresponding default off, so every old command line
+       still means what it meant. The choice is PRINTED: a default that
+       changes silently is the failure this block exists to avoid. */
+    if (kv_auto) {
+        int csa2 = 0, li, dense;
+        for (li = 0; li < cfg->n_layers; li++)
+            if (cfg->csa2_on[li]) csa2++;
+        /* Dense planes are counted by the engine's own producer
+           (forward_state.c's lz_n_dense_kv_apps): one per dense-KV
+           APPLICATION, so a looping tower reports the planes it will
+           actually allocate. Recomputing "n_full_layers minus csa2
+           layers" here would count layers, and on a looping tower that
+           is the wrong number by every repeated dense layer. */
+        dense = lz_n_dense_kv_apps(&m);
+        if (dense > 0) {
+            /* q8 both sides, rotation OFF. This is the arm with no
+               measured quality cost. --kv q4 halves the bytes for
+               +0.6%/+1.7% PPL (and turns the rotation on, which is
+               what makes 4-bit viable at all) - a trade a caller
+               should choose, not one a default makes for them.
+               Measured here, rotating the Q8 cache instead costs
+               0.08-0.30% PPL: tests/test_kv_formats.py's own note. */
+            fprintf(stderr,
+                    "kv: auto -> dense K q8 / V q8 (rotation off); "
+                    "%d dense plane(s). --kv q4 halves KV for "
+                    "+0.6%%/+1.7%% PPL\n", dense);
+        } else if (csa2 > 0 && !ring_pinned) {
+            lz_csa2_ring_fmt = LZ_CRF_BF16;
+            fprintf(stderr, "kv: auto -> csa2 ring bf16 (no dense planes)\n");
+        } else {
+            fprintf(stderr, "kv: auto -> unchanged (no dense planes, "
+                            "no CSA2)\n");
+        }
+    } else {
+        fprintf(stderr, "kv: pinned by command line (K %d / V %d, ring %d)\n",
+                lz_kv_kfmt, lz_kv_vfmt, lz_csa2_ring_fmt);
+    }
+
+    /* m.st is the SAFETENSORS table. lz_open_bin never fills it - it reads
+       model.bin positionally, through m.rd, and keeps no name table - so on
+       a bin load every m.st field is zero BY CONSTRUCTION rather than by
+       measurement: a site that prints one of those zeros as a reading is
+       printing an absent table, not an empty model. The bin DOES carry BF16
+       (visit_read_bin reads LZ_FMT_BF16), so the zero is not even true of
+       the file. Guarded on this flag, each of the three sites below says
+       what it can actually see. */
+    have_st = m.st.n_tensors > 0;
+
     printf("Model dir      %s\n", dir);
     printf("Tensor prefix  %s\n", m.prefix[0] ? m.prefix : "(none)");
-    printf("safetensors    %lld bytes, %d tensors, data at %llu\n",
-           m.st.file_size, m.st.n_tensors, m.st.data_start);
+    if (have_st)
+        printf("safetensors    %lld bytes, %d tensors, data at %llu\n",
+               m.st.file_size, m.st.n_tensors, m.st.data_start);
+    else
+        printf("weights        from model.bin (a bin load has no safetensors "
+               "table to report)\n");
     printf("\n");
     print_config(cfg);
     printf("\n");
@@ -1916,14 +2128,45 @@ int main(int argc, char **argv) {
        the second question a mismatch raises and the one a bare on/off
        cannot answer. */
     {
-        int nbf = 0, d;
-        for (d = 0; d < m.st.n_tensors; d++)
-            if (m.st.tensors[d].dtype == LZ_DT_BF16) nbf++;
-        printf("bf16 storage   %s (%d BF16 tensor(s) in the file)\n",
-               lz_bf16_store() ? "on - kept at 2 bytes/elem, widened on read"
-                               : "off - expanded to f32 at load",
-               nbf);
+        const char *mode = lz_bf16_store()
+            ? "on - kept at 2 bytes/elem, widened on read"
+            : "off - expanded to f32 at load";
+        if (have_st) {
+            int nbf = 0, d;
+            for (d = 0; d < m.st.n_tensors; d++)
+                if (m.st.tensors[d].dtype == LZ_DT_BF16) nbf++;
+            printf("bf16 storage   %s (%d BF16 tensor(s) in the file)\n",
+                   mode, nbf);
+        } else {
+            /* Not "0 in the file": the bin does carry BF16. visit_read_bin
+               reads each tensor's dtype positionally as LZ_FMT_BF16 and
+               widens on use; what does not exist is a table to count them
+               from, so the count is not available rather than zero. */
+            printf("bf16 storage   %s (count not available: this model loads "
+                   "from model.bin, whose tensor types are not indexed)\n",
+                   mode);
+        }
     }
+    /* WHAT THIS RUN IS ABOUT TO COMPUTE, when it is not what the
+       checkpoint name implies. A ternary tower's BitLinear weights are an
+       fp32 LATENT in the file; the training forward ternarizes them
+       (engine/bitlinear.py weight_quant_ternary) and so does the
+       exporter, which is why a model.bin holds T2 codes. This engine
+       never quantizes a weight - it runs whatever the file holds - so
+       the safetensors path runs the same architecture un-ternarized.
+       Measured on kunkun-ce dpo_r2, 8191 tokens: 4.9931 here against
+       3.1992 through the exporter's bin, and that gap is the whole of it
+       (HF with weight_quant_ternary patched to identity reads 5.0044).
+
+       num_experts == 0 is the engine's existing name for this tower - the
+       predicate subn_scale_gs and resolve_hadamard use - and
+       kda_gate_rank > 0 scopes it to kunmoe: a GDN tower is also
+       num_experts == 0 and has no BitLinear anywhere. */
+    if (have_st && cfg->num_experts == 0 && cfg->kda_gate_rank > 0)
+        printf("ternary        OFF - the BitLinear weights are read as the "
+               "fp LATENT this file holds and this engine never quantizes a "
+               "weight, so this is the un-QAT model; export a model.bin to "
+               "run the trained one\n");
     {
         char _b[LZ_FTOA_BUF];
         lz_ftoa_f(_b, (float)(t1 - t0), 0, 0);
@@ -1932,6 +2175,12 @@ int main(int argc, char **argv) {
 
     if (list_tensors) {
         printf("\nAll tensors:\n");
+        /* Without the table the loop below would print its heading and then
+           nothing, which reads as "this model has no tensors" - the same
+           zero-as-a-reading this line's neighbours were fixed for. */
+        if (!have_st)
+            printf("  (nothing to list: this model loads from model.bin, "
+                   "whose tensors are read positionally and carry no names)\n");
         for (i = 0; i < m.st.n_tensors; i++) {
             const LZStTensor *t = &m.st.tensors[i];
             int d;
@@ -1940,6 +2189,22 @@ int main(int argc, char **argv) {
                 printf("%s%lld", d ? ", " : "", t->shape[d]);
             printf("]  @%llu +%llu\n", t->off_begin, t->nbytes);
         }
+    }
+
+    /* The application table, as the engine resolved it. Measurement only:
+       the training tree's tests compare it against engine/loop_schedule.py
+       for the same config, which is what keeps the C derivation honest
+       (model.c's own comment on it). */
+    if (sched_path) {
+        FILE *sf = fopen(sched_path, "wb");
+        int n = m.config.exec_len;
+        if (!sf) { printf("cannot write %s\n", sched_path); goto fail; }
+        fwrite(&n, sizeof(n), 1, sf);
+        fwrite(m.config.app_layer, sizeof(int), (size_t)n, sf);
+        fwrite(m.config.app_loop, sizeof(int), (size_t)n, sf);
+        fclose(sf);
+        printf("Wrote %s (exec_len %d)\n", sched_path, n);
+        goto cleanup;
     }
 
     if (only_check) {
@@ -2009,12 +2274,19 @@ int main(int argc, char **argv) {
             ST(gate_proj, "mlp.gate_proj.weight");
             ST(up_proj, "mlp.up_proj.weight");
             ST(down_proj, "mlp.down_proj.weight");
+            ST(gate_norm, "mlp.gate_proj.norm.weight");
+            ST(up_norm, "mlp.up_proj.norm.weight");
+            ST(down_norm, "mlp.down_proj.norm.weight");
             ST(q_proj, "self_attn.q_proj.weight");
             ST(k_proj, "self_attn.k_proj.weight");
             ST(v_proj, "self_attn.v_proj.weight");
             ST(o_proj, "self_attn.o_proj.weight");
             ST(q_norm, "self_attn.q_norm.weight");
             ST(k_norm, "self_attn.k_norm.weight");
+            ST(attn_q_subn_norm, "self_attn.q_proj.norm.weight");
+            ST(attn_k_subn_norm, "self_attn.k_proj.norm.weight");
+            ST(attn_v_subn_norm, "self_attn.v_proj.norm.weight");
+            ST(attn_o_subn_norm, "self_attn.o_proj.norm.weight");
             ST(in_proj_qkv, "linear_attn.in_proj_qkv.weight");
             ST(in_proj_z, "linear_attn.in_proj_z.weight");
             ST(in_proj_a, "linear_attn.in_proj_a.weight");
@@ -2024,9 +2296,90 @@ int main(int argc, char **argv) {
             ST(dt_bias, "linear_attn.dt_bias");
             ST(ssm_norm, "linear_attn.norm.weight");
             ST(out_proj, "linear_attn.out_proj.weight");
+            ST(kda_q_proj, "linear_attn.q_proj.weight");
+            ST(kda_k_proj, "linear_attn.k_proj.weight");
+            ST(kda_v_proj, "linear_attn.v_proj.weight");
+            ST(kda_q_conv1d, "linear_attn.q_conv1d.weight");
+            ST(kda_k_conv1d, "linear_attn.k_conv1d.weight");
+            ST(kda_v_conv1d, "linear_attn.v_conv1d.weight");
+            ST(kda_A_log, "linear_attn.A_log");
+            ST(kda_f_a_proj, "linear_attn.f_a_proj.weight");
+            ST(kda_f_b_proj, "linear_attn.f_b_proj.weight");
+            ST(kda_dt_bias, "linear_attn.dt_bias");
+            ST(kda_b_proj, "linear_attn.b_proj.weight");
+            ST(kda_g_proj, "linear_attn.g_proj.weight");
+            ST(kda_o_norm, "linear_attn.o_norm.weight");
+            ST(kda_o_proj, "linear_attn.o_proj.weight");
+            ST(kda_q_norm, "linear_attn.q_proj.norm.weight");
+            ST(kda_k_norm, "linear_attn.k_proj.norm.weight");
+            ST(kda_v_norm, "linear_attn.v_proj.norm.weight");
+            ST(kda_g_norm, "linear_attn.g_proj.norm.weight");
+            ST(kda_o_subn_norm, "linear_attn.o_proj.norm.weight");
+            ST(moe_gate_w, "mlp.gate.weight");
+            ST(moe_gate_bias, "mlp.gate.e_score_correction_bias");
+            ST(moe_down_proj, "mlp.routed_expert_down_proj.weight");
+            ST(moe_up_proj, "mlp.routed_expert_up_proj.weight");
+            ST(moe_latent_norm, "mlp.routed_expert_norm.weight");
+            ST(moe_shared_gate, "mlp.shared_experts.gate_proj.weight");
+            ST(moe_shared_up, "mlp.shared_experts.up_proj.weight");
+            ST(moe_shared_down, "mlp.shared_experts.down_proj.weight");
+            ST(moe_gate_norm, "mlp.gate.norm.weight");
+            ST(moe_down_norm, "mlp.routed_expert_down_proj.norm.weight");
+            ST(moe_up_norm, "mlp.routed_expert_up_proj.norm.weight");
+            ST(moe_shared_gate_norm, "mlp.shared_experts.gate_proj.norm.weight");
+            ST(moe_shared_up_norm, "mlp.shared_experts.up_proj.norm.weight");
+            ST(moe_shared_down_norm, "mlp.shared_experts.down_proj.norm.weight");
+            ST(csa2_w_kv, "self_attn.csa2_w_kv.weight");
+            ST(csa2_w_gate, "self_attn.csa2_w_gate.weight");
+            ST(csa2_w_kv_idx, "self_attn.csa2_w_kv_idx.weight");
+            ST(csa2_k_norm_idx, "self_attn.csa2_k_norm_idx.weight");
+            ST(csa2_w_weights, "self_attn.csa2_w_weights.weight");
+            ST(csa2_w_dq_idx, "self_attn.csa2_w_dq_idx.weight");
+            ST(csa2_w_uq_idx, "self_attn.csa2_w_uq_idx.weight");
+            ST(attn_sinks, "self_attn.sinks");
+            if (cfg->num_experts > 0 && L->moe_expert_w1) {
+                int e;
+                for (e = 0; e < cfg->num_experts; e++) {
+                    snprintf(nm, sizeof(nm),
+                             "mlp.experts.%d.w1.weight", e);
+                    tensor_stats_t(nm, &L->moe_expert_w1[e]);
+                    snprintf(nm, sizeof(nm),
+                             "mlp.experts.%d.w2.weight", e);
+                    tensor_stats_t(nm, &L->moe_expert_w2[e]);
+                    snprintf(nm, sizeof(nm),
+                             "mlp.experts.%d.w3.weight", e);
+                    tensor_stats_t(nm, &L->moe_expert_w3[e]);
+                }
+            }
 #undef ST
         }
+        if (only_layer < 0 && m.engram) {
+            const LZEngram *eg = m.engram;
+            int o;
+            /* Engram is a global module, not a layer tensor. The parser
+               that rebuilds full names from "--- layer N ---" headers
+               would otherwise prefix these with the last layer index. */
+            printf("--- global ---\n");
+            tensor_stats_t("engram_memory.table.weight", &eg->table);
+            tensor_stats_t("engram_memory.conv.weight", &eg->conv);
+            tensor_stats_t("engram_memory.norm.weight", &eg->norm);
+            for (o = 0; o < cfg->engram_n_orders; o++) {
+                char nm2[64];
+                snprintf(nm2, sizeof(nm2),
+                         "engram_memory.key_proj.%d.weight", o);
+                tensor_stats_t(nm2, &eg->key_proj[o]);
+                snprintf(nm2, sizeof(nm2),
+                         "engram_memory.value_proj.%d.weight", o);
+                tensor_stats_t(nm2, &eg->value_proj[o]);
+            }
+        }
     }
+
+    /* --stats alone is a complete request: without this, control falls
+       through every generate/interactive block into `fail:` and the
+       process exits 1 after printing perfectly good statistics. */
+    if (want_stats && n_tokens <= 0 && !prompt && !interactive)
+        goto cleanup;
 
     /* ---- debug: token-level forward ---- */
     if (n_tokens > 0) {
@@ -2043,8 +2396,14 @@ int main(int argc, char **argv) {
            LZ_BATCH_MAX, so lowering or raising nt_cap within that bound
            cannot overrun anything. */
         if (batch_width) st.nt_cap = batch_width;
+        /* The exact byte count rides along with the rounded MB: an
+           allocation this project asserts equality on (build/csa2_dense_kv_
+           gate.sh's plane accounting, at a few tens of KB) is invisible in a
+           %.1f MB reading, and a criterion the print quantum swallows reads
+           the same for a right answer and a 5%-wrong one. */
         { char _b[LZ_FTOA_BUF]; lz_ftoa_f(_b, st.bytes_alloc / 1e6f, 1, 0);
-          printf("Runtime state  %s MB\n", _b); }
+          printf("Runtime state  %s MB (%" LZ_PRI64 "d B)\n", _b,
+                 (lz_i64)st.bytes_alloc); }
 
         t0 = lz_time_ms();
         for (i = 0; i < n_tokens; i++) {
@@ -2229,6 +2588,15 @@ int main(int argc, char **argv) {
                 fwrite(logits, sizeof(float), (size_t)cfg->vocab_size, f);
                 fclose(f);
                 printf("Wrote %s (%d f32)\n", dump_path, cfg->vocab_size);
+                /* Printed here as well as in the generation summary,
+                   because the two arms of --ced produce IDENTICAL logits
+                   by construction - that is the claim being gated - so
+                   this counter is the only evidence that the arm did
+                   anything at all. A gate that compared only the dumps
+                   would be green on an engine where --ced was wired to
+                   nothing. */
+                printf("[ced: %s, %lld prefill positions skipped]\n",
+                       st.ced ? "on" : "off", lz_debug_ced_skipped);
             }
         }
         if (nll_path && nll) {
@@ -2381,8 +2749,8 @@ int main(int argc, char **argv) {
             console_out(prompt, (int)strlen(prompt));
             console_out("\n", 1);
             { char _b[LZ_FTOA_BUF]; lz_ftoa_f(_b, st.bytes_alloc / 1e6f, 1, 0);
-              printf("State          %s MB (%d slots, prefill batch %d)\n",
-                     _b, seq, st.nt_cap); }
+              printf("State          %s MB (%" LZ_PRI64 "d B, %d slots, prefill batch %d)\n",
+                     _b, (lz_i64)st.bytes_alloc, seq, st.nt_cap); }
             cli_print_sampling(&g);
             printf("Context        %d slots (model max %d; --ctx to change)\n",
                    seq, cfg->seq_len);
@@ -2448,6 +2816,23 @@ int main(int argc, char **argv) {
                    st.nt_cap, lz_debug_n_chunks, lz_debug_n_lmhead);
             printf("[attn: sink %d window %d, %lld evicted rows skipped]\n",
                    st.attn_sink, st.attn_win, lz_debug_attn_skip);
+            /* Printed for both arms on purpose: under --ced off this must
+               read 0, and under --ced on it must not - the logits are
+               identical either way, so this is the only line that says
+               the skip happened at all. */
+            printf("[ced: %s, %lld prefill positions skipped]\n",
+                   st.ced ? "on" : "off", lz_debug_ced_skipped);
+            /* Same positive-control shape as the ced line above: the
+               reset's whole claim is also "the output does not move
+               beyond what CED's own approximation already costs", so
+               the layer count is the only line that says the reset
+               fired at all. 0 is correct whenever ced_replay_w is 0 or
+               every KDA layer is below ced_split. */
+            printf("[ced-replay: %lld layers reset]\n",
+                   lz_debug_ced_replay_layers);
+            if (lz_dump_prefill_path)
+                printf("[dump-prefill: %lld write(s) to %s]\n",
+                       lz_debug_prefill_dumps, lz_dump_prefill_path);
             printf("[epi: %lld calls on the kernel body]\n",
                    lz_debug_epi_kern);
             { char _b0[LZ_FTOA_BUF], _b1[LZ_FTOA_BUF];

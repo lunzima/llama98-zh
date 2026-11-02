@@ -89,11 +89,12 @@
 /* LZ_SOFTFP_STATS (default 0, diagnostic only) counts, per operator, how
    often the fast path is TAKEN versus how often the C core is actually
    ENTERED - and for the latter, which operand shape sent it there.
-   Self-contained via atexit so no caller changes; stderr, which is why
-   it does not breach src/'s console ban for a build nobody ships.
+   Self-contained via atexit so no caller changes; the totals go to the
+   file named by SF_STATS, and nothing is written when it is unset. The
+   engine has no console, and this TU is linked into it.
       OUT=/tmp/x bash build/arm/build_engine.sh   # plus -DLZ_SOFTFP_STATS=1
-      qemu-arm-static -cpu arm926 -L /usr/arm-linux-gnueabi \
-          ./llama98-arm MODEL --tokens-file FIXTURE 2>&1 >/dev/null
+      SF_STATS=/tmp/x/softfp.txt qemu-arm-static -cpu arm926 \
+          -L /usr/arm-linux-gnueabi ./llama98-arm MODEL --tokens-file FIXTURE
 
    IT EXISTS BECAUSE COUNTING BEAT GUESSING, TWICE. Reading the code says
    every operator's fast path is worth optimising; the measurement said
@@ -178,6 +179,7 @@
 #if LZ_SOFTFP_STATS
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 enum { SF_MUL, SF_ADD, SF_DIV, SF_OPS };
 static unsigned long sf_fast[SF_OPS], sf_slow[SF_OPS];
 static const char *const sf_opname[SF_OPS] = { "fmul", "fadd", "fdiv" };
@@ -205,14 +207,33 @@ static void sf_bill_why(int op, uint32_t ua, uint32_t ub) {
         else                        sf_why[op][SFD_RESULT]++;
     }
 }
+static FILE *sf_stats_file(void) {
+    static FILE *fp;
+    static int tried;
+    if (!tried) {
+        const char *p = getenv("SF_STATS");
+        tried = 1;
+        if (p && p[0]) fp = fopen(p, "w");
+    }
+    return fp;
+}
+static void sf_stats_put(const char *line) {
+    FILE *fp = sf_stats_file();
+    if (!fp) return;
+    fwrite(line, 1, strlen(line), fp);
+    fflush(fp);
+}
 static void sf_stats_dump(void) {
+    char line[128];
     int i;
     for (i = 0; i < SF_OPS; i++) {
         unsigned long t = sf_fast[i] + sf_slow[i];
         if (!t) continue;
-        fprintf(stderr, "softfp %s: fast=%lu decline=%lu (%.3f%% declined)\n",
-                sf_opname[i], sf_fast[i], sf_slow[i],
-                100.0 * (double)sf_slow[i] / (double)t);
+        snprintf(line, sizeof line,
+                 "softfp %s: fast=%lu decline=%lu (%.3f%% declined)\n",
+                 sf_opname[i], sf_fast[i], sf_slow[i],
+                 100.0 * (double)sf_slow[i] / (double)t);
+        sf_stats_put(line);
     }
     for (i = 0; i < SF_OPS; i++) {
         unsigned long tw = 0; int j;
@@ -220,9 +241,11 @@ static void sf_stats_dump(void) {
         if (!tw) continue;
         for (j = 0; j < SFD_N; j++) {
             if (!sf_why[i][j]) continue;
-            fprintf(stderr, "  %s C-core: %-26s %10lu  %5.1f%%\n",
-                    sf_opname[i], sf_whyname[j], sf_why[i][j],
-                    100.0 * (double)sf_why[i][j] / (double)tw);
+            snprintf(line, sizeof line,
+                     "  %s C-core: %-26s %10lu  %5.1f%%\n",
+                     sf_opname[i], sf_whyname[j], sf_why[i][j],
+                     100.0 * (double)sf_why[i][j] / (double)tw);
+            sf_stats_put(line);
         }
     }
 }
